@@ -1,0 +1,109 @@
+- id: W1-T2313
+  title: "A LIVE TASK'S design: BODY STILL COMMANDS THE ACT THAT EMPTIED THE SHARED node_modules — the binding-rules header was corrected, but W1-T65 (status: queued) still tells its worker 'Test proofs run after npm ci in that checkout (fresh worktrees have no node_modules)', and a design: body IS rendered into the prompt: correct that one sentence to the symlink reality"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  rationale: |
+    Filed from feedback#fb-1785982194342-bb9d81 (the 2026-08-05 outage: the shared node_modules
+    emptied under two live runs, W1-T361 and W1-T362). THE PLAN-TEXT HALF of that filing, split out
+    of W1-T2312 because `rule15-filing` refuses a task record edit and out-of-plan-scope code in the
+    SAME dispatched PR. See W1-T2312's note for the mechanism; this shard is plan-scope ONLY, which
+    is exactly what keeps `judgeReview`'s `planOnly` carve-out alive for it.
+
+    THE PREMISE IS FALSE AND THE SENTENCE IS AN INSTRUCTION. `linkWorktreeNodeModules`
+    (src/lib/worker.ts) symlinks every worker worktree's `node_modules` to the canonical tree on
+    purpose, and `worktreeAdd` calls it unconditionally — so "fresh worktrees have no node_modules"
+    has been false since that landed. An install whose cwd is the worktree follows the link, and its
+    CLEAR PHASE empties the SHARED tree under every other live run. That is the observed outage
+    pair: shared emptied at 21:54, W1-T362's real directory created at 21:55, W1-T361's still a
+    symlink.
+
+    WHY THIS SENTENCE AND NOT THE HEADER. The `plan/tasks.yaml` BINDING-RULES header carried the
+    same instruction and IS CORRECTED IN THE PR THAT FILES THESE TASKS — that part is already done
+    and is not this task. What is left is the copy inside W1-T65's `design:` body. A header comment
+    is prose in a YAML file; a `design:` body is RENDERED INTO THE WORKER'S PROMPT. W1-T65 is
+    `status: queued` with `attempts: 0`, so the next dispatcher pass hands that sentence to a worker
+    as an instruction. Correcting the header and leaving this is precisely the Law 4 failure
+    CLAUDE.md's own header describes: sharpening wording somewhere that does not bind.
+
+    RE-DERIVE, DO NOT TRUST THE LINE NUMBER. The occurrence sits near plan/tasks.yaml:9073 inside
+    W1-T65's `design:` block at this sha, but find it with
+    `git grep -nEi 'npm (ci|i|install)' -- plan/` rather than seeking to a line. The sweep at filing
+    time found exactly ONE live instructional occurrence; if the re-derivation finds more, correct
+    each, and say so in the report.
+
+    WHAT MUST NOT BE REWRITTEN, NAMED SO THE SWEEP DOES NOT OVERRUN. (a) The withdrawn/retired
+    entries near plan/tasks.yaml:5829 and :5854 QUOTE the old criterion as the history of a
+    retirement — they are records, not instructions, and rewriting them falsifies a gravestone.
+    (b) W1-T151's design (near :11927) prescribes `npm install (npm ci)` on rmd's OWN boot/build
+    path after a lockfile-hash change; that path is the one `SymlinkInstallRefusal` already guards
+    and it is CORRECT as written. (c) The `plan/tasks.d/` shards that mention `npm ci` all discuss
+    CI job timings (W1-T1033, W1-T1060, W1-T452, W1-T499, W1-T1009, W1-T1041) — a GitHub runner has
+    no symlinked node_modules and must install. None of these three classes is in scope.
+  design: |
+    (i) ONE SENTENCE, REPLACED. The last line of W1-T65's `design:` block is the sentence quoted in
+    this task's title — "Test proofs run after npm ci in that checkout (fresh worktrees have no node_modules)."
+    — and it is NOT reproduced unquoted anywhere in this record on purpose: W1-T2314's lock reads
+    every rendered field, and a bare copy here would be indistinguishable from the instruction it
+    forbids. Replace that sentence with text that states the symlink reality and the remedy, and keep
+    the same discipline in the PR body. The two phrases the acceptance proofs
+    grep MUST appear VERBATIM, and EACH MUST SIT ENTIRELY ON ONE LINE of the YAML block — the proof
+    executor greps line-by-line (`grep -arn --`), so a YAML fold falling inside either phrase reads
+    as a zero hit and fails a correct edit. The phrases are:
+
+        Test proofs run with no install step at all
+        node_modules is a symlink to the canonical tree
+
+    A wording that satisfies both, for reference — improve it freely as long as both phrases survive
+    intact on single lines:
+
+        Test proofs run with no install step at all: node_modules is a symlink to the canonical tree
+        (linkWorktreeNodeModules, src/lib/worker.ts), so the deps are already there and an install
+        whose cwd is the worktree would empty the shared tree through that link; genuinely-newer
+        deps come from refreshing the canonical checkout, never from an install inside a worktree.
+
+    (ii) NOTHING ELSE IN W1-T65 CHANGES. Its `acceptance:` block is not touched — not a claim, not a
+    proof, not a reordering. This task edits ONE `design:` sentence, and the whole reason it exists
+    as its own shard is that a plan-scope-only diff keeps `planOnly` true so `criteriaTampered`
+    never fires on it.
+
+    (iii) SCOPE IS `plan/tasks.yaml` AND NOTHING ELSE. Adding any path outside plan scope to this
+    task's `files:` re-creates the `rule15-filing` refusal that forced the split. The regression
+    test that keeps the sentence from coming back is W1-T2314, deliberately not here.
+
+    (iv) WHAT RED->GREEN MEANS FOR A TEXT EDIT (`tdd: strict`, the house default). There is no unit
+    test to fail first; the executable evidence is the two greps in the acceptance block, which
+    return ZERO hits against plan/tasks.yaml at head today and hit after the edit. Paste both,
+    before and after, in the report.
+  acceptance:
+    - claim: "the live task's design body states the symlink reality instead of ordering an install first"
+      proof: "grep: node_modules is a symlink to the canonical tree in plan/tasks.yaml"
+    - claim: "the corrected sentence tells the worker to run proofs with no install step"
+      proof: "grep: Test proofs run with no install step at all in plan/tasks.yaml"
+  risk: low
+  origin: "feedback#fb-1785982194342-bb9d81"
+  plan_refs: ["W1-T65", "W1-T2312", "W1-T2314", "W1-T384", "W1-T151"]
+  files: [plan/tasks.yaml]
+  status: queued
+  attempts: 0
+  note: |
+    PROVENANCE IS W1-T2312'S, UNCHANGED — this is one third of a single filing from
+    feedback#fb-1785982194342-bb9d81, split under `rule15-filing`, not a new finding.
+
+    THIS IS THE SPINE'S HEAD. W1-T2312 (the deny-floor refusal) and W1-T2314 (the regression lock)
+    both carry `depends_on: [W1-T2313]`, for two different reasons that both require this to land
+    first: shipping the refusal while a rendered field still COMMANDS the install would send a
+    contract-obeying worker into a hard refusal it was told to trigger, and the lock test cannot be
+    green until the sentence it forbids is gone. `depends_on: []` here is correct — nothing gates
+    this edit.
+
+    RULE 19 DOES NOT APPLY AND WOULD NOT FIRE. One file, one sentence, and `plan/tasks.yaml` is a
+    discounted data artifact under `DATA_ARTIFACT_CLASSES` — the subsystem count is zero, so there
+    is no span to answer for at `risk: low`.
+
+    SIZED AT $4 BECAUSE THE EXPENSIVE PART IS THE RE-DERIVATION, NOT THE EDIT: one grep across
+    plan/, three named exclusion classes to check the hits against, one sentence rewritten, two
+    greps pasted.

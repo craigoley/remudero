@@ -1,0 +1,126 @@
+- id: W1-T2314
+  title: "NOTHING STOPS THE WORKTREE-INSTALL INSTRUCTION FROM BEING RE-FILED — the sentence that emptied the shared node_modules twice was corrected by hand in a header and by hand in one design: body, and no check reads any rendered plan field for it: lock it with a test that fails on a synthetic record carrying the instruction"
+  repo: remudero
+  depends_on: [W1-T2313]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  rationale: |
+    Filed from feedback#fb-1785982194342-bb9d81 (the 2026-08-05 outage: the shared node_modules
+    emptied under two live runs, W1-T361 and W1-T362). THE LOCK, split out of W1-T2312 alongside
+    W1-T2313 because `rule15-filing` refuses a plan-record edit and out-of-plan-scope code in the
+    SAME dispatched PR. Same provenance, same arc, three shards.
+
+    A HAND CORRECTION IS NOT A GATE, WHICH IS THE WHOLE LESSON OF THIS INCIDENT. The instruction
+    "fresh worktrees have NO node_modules: npm ci in the worktree" was corrected in the
+    `plan/tasks.yaml` binding-rules header in the filing PR, and its last live copy is corrected by
+    W1-T2313. Both are edits to text. CLAUDE.md's own header states the rule those two edits do not
+    satisfy: "a rule stated ONLY here can be violated silently and repeatedly... the fix is to make
+    something refuse it". The tree emptied on 2026-07-29, again on 2026-08-05 and again on
+    2026-08-11 while the operator brief already forbade the act.
+
+    THE RE-INTRODUCTION PATH IS OPEN AND CHEAP. Task records are filed by `rmd triage`, by `rmd
+    plan` and by hand; a `rationale:` or `design:` body is free prose that no check reads. The
+    premise "a fresh worktree has no node_modules" is INTUITIVELY TRUE and was true once, so it is
+    exactly the kind of sentence a filing agent reconstructs from first principles. Nothing today
+    would notice.
+
+    WHY A TEST AND NOT AN EIGHTH LINTER CHECK. `lintTask` grades ONE task record against structural
+    rules and runs changed-tasks-only in CI; the fact to protect is a property of the WHOLE rendered
+    corpus, and it needs to hold for records nobody is currently touching. A suite-level test over
+    the loaded plan asserts it on every run, for every record, with no severity knob to be flipped
+    and no backlog-bricking rollout. If a linter check is later judged the better home, that is a
+    follow-up filing — it is not this task, and this task must not grow into it.
+  design: |
+    (i) THE TEST. `test/plan-contract-no-worktree-install.test.ts` loads the plan the way production
+    does (the real loader over `plan/tasks.yaml` PLUS `plan/tasks.d/` — VERIFY the entry point from
+    source, do not trust this note's spelling, Standing rule 7) and asserts that no RENDERED field
+    of any record instructs a worker to install inside its worktree.
+
+    (ii) RENDERED FIELDS ONLY, AND SAY WHICH IN THE TEST'S OWN COMMENT. The field set is the one
+    that reaches a worker's prompt — `title`, `rationale`, `design`, `acceptance` claims and proofs,
+    and `note` if the prompt renders it; CONFIRM the set against the prompt builder rather than
+    guessing, because a field checked but not rendered is noise and a field rendered but not checked
+    is the hole. A YAML `#` comment is NOT a rendered field and is deliberately out of scope: the
+    binding-rules header is one, and it is governed by review, not by this test.
+
+    (iii) THE PREDICATE MUST SEPARATE AN INSTRUCTION FROM A DISCUSSION, AND THE CORPUS ALREADY
+    CONTAINS BOTH. Matching `npm ci` alone fails instantly against live records that legitimately
+    discuss it: W1-T151's boot/build install on rmd's OWN path (`SymlinkInstallRefusal` guards that
+    one and it must keep working), the CI-timing discussions in W1-T1033, W1-T1060, W1-T452,
+    W1-T499, W1-T1009 and W1-T1041 (a GitHub runner has no symlinked node_modules and MUST install),
+    the retirement gravestones near plan/tasks.yaml:5829 and :5854 that quote the old criterion as
+    history, and W1-T2312's, W1-T2313's and THIS TASK'S OWN bodies, all three of which quote the
+    forbidden sentence in order to forbid it — design (iv) below reproduces it verbatim, so a
+    predicate that flags a quotation flags the very record that carries the lock. That is the
+    W1-T20c self-reference shape, and the answer there was CONTENT SHAPE, never an id allowlist:
+    an id list rots the moment a fourth record quotes the sentence. Two content-shape signals are
+    already built and tested in `src/lib/task-linter.ts`'s headless-fitness check and are the
+    starting point, NOT a specification — READ THEM AND JUDGE, they are named so the work starts
+    from precedent rather than from zero: `isQuoted` (a hit lying wholly inside a `'...'` or
+    `"..."` span is an excerpt under discussion) and `isNegationScoped` (a no/not/never/cannot cue
+    earlier in the same clause inverts the sense). Note that a quotation in a YAML block scalar is
+    line-WRAPPED, so a quoted-span test must run over the field's text with its folds joined or it
+    will see an unterminated quote — that seam is where this predicate will most likely be wrong,
+    so assert it directly. Beyond that, the discriminator is the CO-OCCURRENCE of an installing
+    verb with a WORKTREE referent in the same sentence-ish span, not either term alone. Tune it
+    against the live corpus until it is green on every record named above and red on the synthetic
+    below, and record the shape you chose in the test's own header comment.
+
+    (iv) THE SYNTHETIC POSITIVE IS THE POINT, NOT AN EXTRA, AND IT IS A PAIR. A test that only
+    asserts a clean corpus passes just as well when the predicate is broken, matches nothing, and
+    protects nothing — the vacuous-pass shape this repo keeps re-learning. So assert BOTH halves
+    against the SAME predicate: feed it a synthetic record whose `design:` carries the exact
+    historical sentence as a bare instruction — kept on ONE line, in backticks, so this record does
+    not trip its own lock:
+    `Fresh worktrees have NO node_modules: npm ci in the worktree before typecheck/test`
+    — and assert it is REPORTED; then feed it a second synthetic
+    record carrying that same sentence QUOTED AND NEGATED the way W1-T2312's rationale carries it,
+    and assert it is NOT. A predicate that cannot tell those two apart cannot be green on the live
+    corpus, and finding that out from a fixture is much cheaper than finding it out from a red
+    suite. Both fixtures are constructed in-process; the live plan tree is never written to.
+
+    (v) THE FAILURE MESSAGE IS PART OF THE DELIVERABLE. Whoever trips this is filing a task and will
+    believe the sentence is true. Name the record and field, state that `linkWorktreeNodeModules`
+    (src/lib/worker.ts) symlinks the worktree's node_modules to the canonical tree so the deps are
+    already there, and that an install here empties the shared tree under every live run.
+
+    (vi) SCOPE. This task creates ONE test file and touches nothing else — no plan record, no `src/`
+    module, no hook. Adding `plan/tasks.yaml` to `files:` here would re-create the `rule15-filing`
+    refusal that forced this split; the sentence itself is W1-T2313's to remove, and this task only
+    holds the door shut behind it.
+  acceptance:
+    - claim: "no rendered field of any plan record instructs a worker to install inside its worktree"
+      proof: "unit test: test/plan-contract-no-worktree-install.test.ts"
+    - claim: "a synthetic record carrying the historical instruction is reported by the same predicate"
+      proof: "unit test: test/plan-contract-no-worktree-install.test.ts"
+    - claim: "records that merely discuss a CI install or quote the retired criterion as history stay green"
+      proof: "unit test: test/plan-contract-no-worktree-install.test.ts"
+  risk: medium
+  origin: "feedback#fb-1785982194342-bb9d81"
+  plan_refs: ["W1-T2312", "W1-T2313", "W1-T65", "W1-T151", "W1-T384"]
+  files: [test/plan-contract-no-worktree-install.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    PROVENANCE IS W1-T2312'S, UNCHANGED — one third of a single filing from
+    feedback#fb-1785982194342-bb9d81, split under `rule15-filing`, not a new finding.
+
+    `depends_on: [W1-T2313]` IS NOT DECORATION. Until W1-T2313 removes the sentence from W1-T65's
+    `design:` body, criterion 1 is UNSATISFIABLE: a correct implementation of this test goes red on
+    the live corpus. Dispatching this first would burn a run producing a true failure and then
+    tempt the worker into weakening its own predicate to get green — the exact criteria-softening
+    `remudero-review` exists to refuse. The spine is W1-T2313 -> {W1-T2312, W1-T2314}.
+
+    RULE 19, ANSWERED RATHER THAN WAIVED. One new file, one module id — there is no second
+    subsystem to decompose toward, so `sizingViolation` does not fire at `risk: medium` and raising
+    to high would be noise. The three criteria are three assertions over ONE predicate in ONE file,
+    which is the W1-T4/W1-T3E shape Rule 19 explicitly does not count as span.
+
+    NO CALL-SITE CRITERION IS OWED, AND HERE IS WHY. `callSiteViolations` fires on a task that
+    CREATES a `src/` module reached only by its own tests; this task creates a TEST and no `src/`
+    module at all, so there is no consumer to grep for. The reachability question it exists to ask
+    is answered by construction: `node --test` over `test/` is the caller, and the suite runs in the
+    required check. If the predicate is ever lifted into a `src/lib/` module for a linter check to
+    share, THAT task owes a `grep: <symbol>( in <its caller>` criterion.

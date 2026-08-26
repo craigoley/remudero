@@ -191,6 +191,8 @@ import {
   type PresenceMode, prReferentFromIssueText,} from "./lib/escalate.js";
 import {
   boardPrsRestArgs,
+  checkRunsRestArgs,
+  combinedStatusRestArgs,
   createGhCallPacer,
   fetchOpenPrsRest,
   fetchSinglePrRest,
@@ -199,10 +201,13 @@ import {
   liveStateFromRest,
   mapRestPr,
   paceGhEntry,
+  prStateFromRest,
+  rollupFor,
   singlePrRestArgs,
   type GhApiFetcher,
   type GhCallPacer,
   type RestPullRow,
+  type RestRollupEntry,
 } from "./lib/open-prs-rest.js";
 import { imessageChannel, notify, type NotifyChannel } from "./lib/notify.js";
 import {
@@ -574,8 +579,17 @@ import {
   type CappedOverride,
   type CriterionVerdict,
   type ReviewVerdict,
+  type NameFilterResolution,
 } from "./lib/review.js";
-import { proofQueueAudit, PROOF_QUEUE_AUDIT_CAUSES } from "./lib/proof-queue-audit.js";
+import {
+  proofQueueAudit,
+  PROOF_QUEUE_AUDIT_CAUSES,
+  CREDITED_PROOF_QUEUE_AUDIT_CAUSES,
+  creditedAmendmentVisibility,
+  type CreditedAmendmentFact,
+  type CreditedAmendmentReport,
+  type ProofQueueAuditReport,
+} from "./lib/proof-queue-audit.js";
 import { buildReceipt, resolveReceiptLedgerLines, type ReceiptLedgerRead } from "./lib/receipt.js";
 import { buildDepReviewArmUnreachableEscalation, buildDepReviewEscalation, decideDepReview } from "./lib/dep-review.js";
 import { decideAutoTriage, newFeedbackIdsOldestFirst, readAutoTriageMarker, recordAutoTriageFire, autoTriageMarkerPath, triageLockPath, claimTriageWithLogging, releaseTriageClaimWithLogging, gitTriageClaimReserver, type AutoTriageDecision, type TriageClaimReserver, type TriageClaimResult } from "./lib/auto-triage.js";
@@ -611,6 +625,8 @@ import {
   type BranchFacts,
   readLedgerUnionBounded,
   taskIdFromRunBranch,
+  readMergeCreditedTaskIds,
+  isMergeCreditLine,
 } from "./lib/status.js";
 import {
   DEFAULT_SWEEP_POLICY,
@@ -3698,6 +3714,59 @@ async function ghJsonAsync(args: string[]): Promise<unknown> {
   return JSON.parse(stdout);
 }
 
+// ── W1-T2268: THE LAST GRAPHQL IN THE RUN PATH ───────────────────────────────────────────────
+//
+// Both poll loops below used to spend `gh pr view --json state,statusCheckRollup` /
+// `--json statusCheckRollup` every `everySec` — a GraphQL read whose point cost scales with the
+// head's check count, against a GraphQL budget MEASURED at filing time as `used 10064, limit
+// 10000, remaining 0` — already over. Every other rollup read in the sweep moved to REST
+// (`rollupFromRest`/`rollupFor`, this file's `open-prs-rest.js` import) after the 2026-07-28
+// exhaustion; these two were the last holdouts, on a DIFFERENT budget (the run path, never the
+// sweep's) that was simply never migrated. `rollupFor` composes the two REST reads
+// (`checkRunsRestArgs` + `combinedStatusRestArgs`) into the same shape GraphQL's union reported —
+// including a `remudero-review` commit status, which a check-runs-only read would drop — and is
+// now exported for exactly this: {@link restRollupFor} below points both loops at it.
+//
+// WHY NOT CALL `rollupFor` DIRECTLY WITH A BLOCKING `fetch`. `rollupFor`'s `fetch` parameter is
+// synchronous, and every existing caller (`fetchOpenPrsRest`, `fetchSinglePrRest`) supplies the
+// blocking `ghJson` — widening that would ripple through callers well outside this task's
+// declared `files:`. Reverting these two loops to a blocking read would also UNDO half of
+// W1-T463's fix (see this file's block above `yieldingSleep`): the loops would once again hold
+// the daemon's event loop for the duration of every `gh` call, for the whole of a CI wait. So the
+// REST reads happen for real over `read` — the SAME async, non-blocking seam `ghJsonAsync` already
+// fills — and `rollupFor` is handed a synchronous stand-in that replays the two already-resolved
+// responses in the exact order `rollupFor`'s own body requests them (check-runs, then
+// combined-status — unchanged, tested source). The composed result is byte-identical to calling
+// `rollupFor` with a truly synchronous fetch; only the I/O is non-blocking.
+async function restRollupFor(
+  owner: string,
+  repo: string,
+  sha: string,
+  read: (args: string[]) => Promise<unknown>,
+): Promise<RestRollupEntry[]> {
+  const runs = await read(checkRunsRestArgs(owner, repo, sha));
+  const combined = await read(combinedStatusRestArgs(owner, repo, sha));
+  const resolved: unknown[] = [runs, combined];
+  let next = 0;
+  return rollupFor(owner, repo, sha, () => resolved[next++]);
+}
+
+/**
+ * Resolve `owner`/`repo`/`number` from a poll loop's `prUrl`, or refuse loudly. Mirrors
+ * {@link headShaRestArgs}'s own refusal below: a URL that fails to parse is a broken caller, never
+ * a reason to fall back onto the `gh pr view` GraphQL argv this migration removes.
+ */
+function pollRestTarget(prUrl: string, who: string): { owner: string; repo: string; number: number } {
+  const target = prUrlTarget(prUrl);
+  if (!target) {
+    throw new Error(
+      `${who}: cannot resolve owner/repo/number from ${JSON.stringify(prUrl)} — refusing to fall back ` +
+        "to `gh pr view --json`, whose GraphQL budget exhaustion is the defect this poll was migrated off",
+    );
+  }
+  return target;
+}
+
 /**
  * The two seams the poll loops below take, both defaulted to the real thing. Injectable ONLY so a
  * test can drive the real loop without a network or a six-second wall clock — production supplies
@@ -3722,15 +3791,16 @@ export async function pollToGate(
 ): Promise<GateOutcome> {
   const read = deps.readJson ?? ghJsonAsync;
   const sleep = deps.sleep ?? yieldingSleep;
+  // W1-T2268: REST, never GraphQL — see the block above `restRollupFor`.
+  const { owner, repo, number } = pollRestTarget(prUrl, "pollToGate");
   const readings: (RollupEntry[] | undefined)[] = [];
   for (let i = 0; ; i++) {
-    const v = (await read(["pr", "view", prUrl, "--json", "state,statusCheckRollup"])) as {
-      state: string;
-      statusCheckRollup?: RollupEntry[];
-    };
-    if (v.state === "MERGED") return { merged: true, reason: "checks green" };
-    if (v.state === "CLOSED") return { merged: false, reason: "pr closed" };
-    const roll = v.statusCheckRollup ?? [];
+    const row = (await read(singlePrRestArgs(owner, repo, number))) as RestPullRow;
+    const state = prStateFromRest(row);
+    if (state === "MERGED") return { merged: true, reason: "checks green" };
+    if (state === "CLOSED") return { merged: false, reason: "pr closed" };
+    const sha = mapRestPr(row).headRefOid;
+    const roll = await restRollupFor(owner, repo, sha, read);
     const red = roll.find((c) => isTerminalRed(String(c.conclusion ?? c.state ?? "")));
     if (red) {
       log("pr.checks", { conclusion: "red", check: red.name ?? red.context ?? "unknown" });
@@ -3756,7 +3826,7 @@ export async function pollToGate(
       if (i === 0) log(AWAITING_EXTERNAL_LEDGER_STEP, { waiting_on: "pr" });
     if (i === 0 || i % 5 === 0) {
       log("pr.polling", {
-        state: v.state,
+        state,
         checks: roll.map((c) => `${c.name ?? c.context}:${c.conclusion ?? c.status ?? c.state}`),
       });
     }
@@ -3948,18 +4018,20 @@ async function waitForCiGreen(
 ): Promise<"green" | "red" | "timeout"> {
   const read = deps.readJson ?? ghJsonAsync;
   const sleep = deps.sleep ?? yieldingSleep;
+  // W1-T2268: REST, never GraphQL — see the block above `restRollupFor`.
+  const { owner, repo, number } = pollRestTarget(prUrl, "waitForCiGreen");
   const readings: (RollupEntry[] | undefined)[] = [];
   for (let i = 0; ; i++) {
-    const v = (await read(["pr", "view", prUrl, "--json", "statusCheckRollup"])) as {
-      statusCheckRollup?: RollupEntry[];
-    };
-    const state = ciGateFromRollup(v.statusCheckRollup);
+    const row = (await read(singlePrRestArgs(owner, repo, number))) as RestPullRow;
+    const sha = mapRestPr(row).headRefOid;
+    const roll = await restRollupFor(owner, repo, sha, read);
+    const state = ciGateFromRollup(roll);
     if (state === "red") return "red";
     if (state === "green") return "green";
-    readings.push(v.statusCheckRollup ?? []);
+    readings.push(roll);
     if (readings.length > STALL_WINDOW) readings.shift(); // checkWaitStalled only ever looks at the last STALL_WINDOW
     const stall = checkWaitStalled(readings);
-    const ci = (v.statusCheckRollup ?? []).find((c) => (c.name ?? c.context) === "ci");
+    const ci = roll.find((c) => (c.name ?? c.context) === "ci");
     // W1-T1211: ONCE per wait, on the first poll only — never per iteration. The light pass
     // reads this row to tell a WAITING run (worker turn finished, GitHub is the blocker) from a
     // WORKING one, and the polling row beside it cannot carry that decision because the rotator
@@ -4753,6 +4825,70 @@ export const FIX_MODE_RULES: readonly FixModeRule[] = [
 export function deriveFixMode(evidence: FixEvidence, rules: readonly FixModeRule[] = FIX_MODE_RULES): FixMode {
   const rule = rules.find((r) => r.when(evidence));
   return rule ? rule.mode : "reviewer-unmet";
+}
+
+/**
+ * W1-T2293 (AN INFRASTRUCTURE FAULT HAS NO DISPOSITION EXCEPT BUILD). Every one of
+ * {@link FIX_MODE_RULES}' five rows — and `deriveFixMode`'s own fallback — resolves to a BUILD
+ * mode: correct when an unmet criterion names something wrong with the diff, and actively wrong
+ * when the reviewer never read the PR body at all (`ReportSubstituteCause`, lib/review.ts,
+ * W1-T1100/#2886) — every one of that round's unmet criteria is then the keyword floor withheld
+ * for lack of a real body to check (design (i)/(ii), `judgeCriterion`'s `reportSubstituted`
+ * branch), not a diff fact the next fix worker's edit can resolve (rationale (1)/(2), measured on
+ * PR-2850 and PR-2877, both of which needed no line of code). This is deliberately NOT a sixth
+ * `FIX_MODE_RULES` row (rationale (3)/(8)) — the remedy is a STAND-DOWN, the same disposition
+ * `rung.empty_ci_failures`/`rung.empty_review_evidence` (below, in `runFixRung`) already use for
+ * "this round has nothing a fix worker can act on": no strike spent, a ledgered reason, a named
+ * outcome, never an edit to the PR itself (design notes iv/v/vi).
+ *
+ * STRUCTURAL RECOGNITION ONLY (design note vii): `substituteCause` is the PREVIOUS round's own
+ * `reportSubstituteCause` — the SAME structured fact `runFixRung` already threads into its own
+ * `deps.runReview` call, never a match on any criterion's `reason` prose (which rots the moment
+ * the wording changes, exactly as it did to the string this task's rationale cites). `undefined`
+ * on round 1 (`opts.initialReview` is always a real body fetch computed outside this rung) and on
+ * every round whose evidence never reached a real re-review at all (a ci-log/merge-conflict round
+ * mid-flight). Both `ReportSubstituteCause` kinds stand down — "never-fetched" (the ONLY kind
+ * measured so far, rationale (6)) and "fetch-failed" alike — because either way the review this
+ * round would dispatch against was never judged off the real body, which is the one fact this
+ * predicate exists to act on.
+ *
+ * `unmet` MUST be non-empty — an EMPTY unmet set is the different, already-handled shape
+ * `rung.empty_review_evidence` stands down for beside this guard. `capped` — {@link
+ * ReviewVerdict.capped}, ALREADY computed by `judgeReview` (W1-T185): true only when NOTHING in
+ * the whole review was OBSERVED anywhere (every criterion's `proof_exec` is `not_executable`/
+ * `exec_error`) — MUST be true too: a review with even ONE executed proof (pass or fail) rests on
+ * something besides the withheld keyword floor, so an ordinary in-progress multi-strike fix (a
+ * fresh head each round, the SAME criterion still unmet while real work converges — every sibling
+ * pre-strike guard's own fixture models exactly this, always with `capped: false`) is never
+ * mistaken for the infra-fault shape. Composed with the executed_fail exclusion below (design note
+ * viii, the SAME exclusion {@link FIX_MODE_RULES}'s `body-coverage` row already applies for the
+ * identical reason — a genuine, OBSERVED defect still routes to build): `capped` alone already
+ * implies no criterion anywhere executed_fail (that IS an observation), but the explicit check
+ * keeps this function's own contract legible independent of `capped`'s.
+ *
+ * PURE: no I/O, mirrors {@link fixRungScopeStandDownReason}'s own shape.
+ */
+export function reportSubstituteStandDownReason(
+  unmet: readonly CriterionVerdict[],
+  capped: boolean,
+  substituteCause: import("./lib/review.js").ReportSubstituteCause | undefined,
+): string | undefined {
+  if (!substituteCause) return undefined;
+  if (!capped) return undefined;
+  if (unmet.length === 0) return undefined;
+  if (unmet.some((c) => c.proof_exec === "executed_fail")) return undefined;
+  const who =
+    substituteCause.kind === "never-fetched"
+      ? substituteCause.fixMode
+        ? `the "${substituteCause.fixMode}" fix mode never fetches it`
+        : "this round never fetched it"
+      : "a fetch was attempted and the read failed";
+  return (
+    `the review this round would dispatch against was judged with the PR body NOT READ (${who}) — its ` +
+    `${unmet.length} unmet criteri${unmet.length === 1 ? "on names" : "a name"} an unread body, not a diff ` +
+    `defect the next fix worker could resolve; standing down rather than spending a strike on a fault this ` +
+    `rung cannot fix`
+  );
 }
 
 /**
@@ -6471,6 +6607,12 @@ export async function runFixRung(opts: {
   // {@link branchAuthorshipStandDownReason} documents: round 1 never reads
   // as foreign no matter what the live head is.
   let rungOwnHeadSha: string | undefined;
+  // W1-T2293: the PREVIOUS round's own `reportSubstituteCause` (below, where `deps.runReview` is
+  // called) — `undefined` for `opts.initialReview` (always a real body fetch, computed outside
+  // this rung entirely) and for every round that never reached a real re-review at all. Read at
+  // the TOP of the NEXT round's pre-strike gate by `reportSubstituteStandDownReason`, so a review
+  // this rung itself judged off an unread body never dispatches another strike against it.
+  let lastReportSubstituteCause: import("./lib/review.js").ReportSubstituteCause | undefined;
   // W1-T1284: the (gate identity, worktree snapshot) pair recorded the last time this
   // invocation's pre-strike gate ran — `undefined` on the first round (nothing recorded yet;
   // see {@link unchangedTreeStandDownReason}'s own "first round" contract) and whenever
@@ -7024,6 +7166,28 @@ export async function runFixRung(opts: {
       return { outcome: "stood_down", review, strikes, reason, standDownReason: reason };
     }
 
+    // W1-T2293 SITE — THE INFRASTRUCTURE-FAULT GUARD, BEFORE `strikes++`: unlike the guard just
+    // above, this round HAS evidence (`rawUnmet` is non-empty, PLENTY of it — rationale (8)) but
+    // that evidence is the keyword floor withheld because the PREVIOUS round's own re-review never
+    // read the real PR body (`lastReportSubstituteCause`, set beside `deps.runReview` above). Every
+    // one of {@link FIX_MODE_RULES}' five rows is a BUILD mode, so without this guard `deriveFixMode`
+    // below always lands on `reviewer-unmet` for this shape and asks a worker to edit a diff that
+    // was never judged (design (v): nothing here edits the PR either — it only stands down).
+    // `reportSubstituteStandDownReason` (pure, above) reads the STRUCTURED cause and `review.capped`
+    // (nothing anywhere in this review was ever OBSERVED), never `reason` prose (design note vii),
+    // and refuses whenever ANY criterion carries an OBSERVED `executed_fail`/`executed_pass` — real
+    // evidence about the repo the next fix worker can still act on (design note viii); an ordinary
+    // in-progress multi-strike round (a fresh head each strike, real work converging) is never
+    // `capped`, so it is never caught here.
+    if (currentMergeConflict === undefined && !noReviewYet) {
+      const infraFaultReason = reportSubstituteStandDownReason(rawUnmet, review.capped, lastReportSubstituteCause);
+      if (infraFaultReason) {
+        deps.log("fix.stood_down", { site: "rung.report_substituted", strike: strikes + 1, reason: infraFaultReason });
+        deps.say(`fix rung: standing down before strike ${strikes + 1} — ${infraFaultReason}`);
+        return { outcome: "stood_down", review, strikes, reason: infraFaultReason, standDownReason: infraFaultReason };
+      }
+    }
+
     // W1-T127 (the #212 fixture — PR #212/#213, a spawn-ENOENT/autoupdater-race
     // binary crash that debited a fix-rung strike, and escalated, on a worker that
     // never ran): `attempt` is only a CANDIDATE strike number until `deps.spawn`
@@ -7341,6 +7505,10 @@ export async function runFixRung(opts: {
     // strike stays review-mode from here. W1-T138: this can still flip back
     // to true on a LATER strike if ITS push regresses CI again (see above).
     noReviewYet = false;
+    // W1-T2293: record THIS round's own substitute cause for the NEXT round's pre-strike gate —
+    // `undefined` unless the report actually WAS a substitute (mirrors `reviewReportIsSubstitute`
+    // itself; a throwing/absent `fetchPrBody` in body-coverage mode leaves both true).
+    lastReportSubstituteCause = reviewReportIsSubstitute ? reviewReportSubstituteCause : undefined;
     // W1-T296: this round's OWN push produced the head this review just
     // evaluated — it becomes the reference the NEXT round's pre-strike
     // authorship check compares the live head against (sha lineage).
@@ -14312,6 +14480,227 @@ export function defaultMergeEvidenceLog(cwd: string): { dump: string; ref: strin
  *  network, the same DI shape `LintPlanStatusDeps.readMergeEvidenceLog` already uses. */
 export interface ProofQueueAuditDeps {
   readMergeEvidenceLog?: typeof defaultMergeEvidenceLog;
+  /** W1-T2280: overrides the whole `--credited` resolution — the one seam a test needs to drive
+   *  every branch below without a real ledger/git checkout. */
+  creditedProofVisibility?: typeof creditedProofVisibility;
+}
+
+/** {@link creditedProofVisibility}'s return: what it found over the merge-credited population. */
+export interface CreditedProofVisibilityResult {
+  /** `creditedIds.size` — how many tasks {@link readMergeCreditedTaskIds} named, regardless of
+   *  whether any of them have an offending proof or amendment. */
+  creditedCount: number;
+  proof: ProofQueueAuditReport;
+  amendment: CreditedAmendmentReport;
+}
+
+/**
+ * Every real I/O seam {@link creditedProofVisibility} needs, injectable so a test drives the
+ * whole credited pass over fixtures — no real ledger, git history or checkout. Mirrors
+ * `ProofQueueAuditDeps`'s own "one caller supplies both predicates, bound to a real checkout"
+ * contract (lib/proof-queue-audit.ts's module doc).
+ */
+export interface CreditedProofVisibilityDeps {
+  /** Defaults to `ledgerPathFor(loadConfig())`, fail-open to `undefined` on an unreadable config
+   *  (the same posture `emissionsCommand`'s own `stateDir` resolution already takes) — a credited
+   *  pass over a config-less checkout finds zero credited tasks rather than crashing. */
+  ledgerPath?: string;
+  /** THE READER THE DISPATCHER ALREADY TRUSTS (W1-T2280 note x) — never re-derived by hand. */
+  readMergeCreditedTaskIds?: typeof readMergeCreditedTaskIds;
+  /** Used ONLY to date a credit (earliest `ts` per task id) — the population itself always comes
+   *  from `readMergeCreditedTaskIds` above, never from this union's own matches. */
+  ledgerUnion?: typeof resolveLedgerUnion;
+  pathExists?: (repoRelPath: string) => boolean;
+  resolveNameFilteredCandidates?: (rawName: string) => NameFilterResolution;
+  symbolFoundAt?: (symbol: string, path: string) => boolean;
+  /** Overrides the real git-log read entirely — see {@link defaultCreditedAmendmentEvidence}. */
+  amendedSinceCredit?: (taskId: string, shardPath: string, creditedAtIso: string) => { amended: boolean; followUpFiled: boolean } | undefined;
+  cwd?: string;
+}
+
+/** Every ledger line matching either shape {@link isMergeCreditLine} accepts, pre-filtered by a
+ *  cheap raw-text regex before the expensive `JSON.parse` — mirrors every other
+ *  `resolveLedgerUnion` caller's own narrow-pattern convention (e.g. lib/coverage-improvement.ts's
+ *  `COVERAGE_IMPROVEMENT_LEDGER_PATTERN`). Deliberately broader than exactly-precise (a raw-text
+ *  match on `"verdict":"merged"` also fires on an unrelated field ordering) — precision is
+ *  `isMergeCreditLine` itself, applied after parsing; this pattern only bounds what gets parsed. */
+const CREDIT_TIMESTAMP_PATTERN = /"step":"verdict\.merged"|"verdict":"merged"/;
+
+/**
+ * The EARLIEST `ts` (ISO-8601, lexicographically comparable) each credited task's merge-credit
+ * ledger line carries, across the archive∪live union — never a single-file read (see
+ * `readMergeCreditedTaskIds`'s own arithmetic for why rotation drops credit past 200 rows/step).
+ * `undefined` when the union itself could not be trusted (`resolveLedgerUnion`'s `ok: false`) —
+ * FAIL OPEN: an amendment check with no dated credit to compare against simply never fires
+ * (`creditedAmendmentVisibility`'s `amendedSinceCredit` returns `undefined` for that task).
+ */
+function earliestCreditTimestamps(
+  stateDir: string,
+  ledgerUnion: typeof resolveLedgerUnion,
+): Map<string, string> | undefined {
+  const union = ledgerUnion(stateDir, CREDIT_TIMESTAMP_PATTERN);
+  if (!union.ok) return undefined;
+  const earliest = new Map<string, string>();
+  for (const raw of union.matches) {
+    let obj: Record<string, unknown>;
+    try {
+      obj = JSON.parse(raw) as Record<string, unknown>;
+    } catch {
+      continue; // a torn/corrupt line costs its own timestamp, never the whole read
+    }
+    if (!isMergeCreditLine(obj)) continue;
+    const id = obj.task_id;
+    const ts = obj.ts;
+    if (typeof id !== "string" || typeof ts !== "string") continue;
+    const prev = earliest.get(id);
+    if (prev === undefined || ts < prev) earliest.set(id, ts);
+  }
+  return earliest;
+}
+
+/** A `plan/tasks.d/<id>-<slug>.yaml` shard, relative to `cwd` (the checkout `git log` will run
+ *  in — see {@link defaultCreditedAmendmentEvidence}, never hardcoded to the module's own
+ *  `repoRoot`, which a test's scratch checkout is not) — or `undefined` when `taskId` is declared
+ *  inline in the `plan/tasks.yaml` monolith instead (W1-T2280 note ix: the amendment signal has
+ *  no per-file history to read for those, counted as `unmeasurable`). Reuses `taskRecordPath`
+ *  (lib/plan.ts) — the ONE derivation of "which file holds this task's record" — never a
+ *  re-guessed `plan/tasks.d/<id>-*.yaml` glob. */
+function creditedTaskShardPath(planPath: string, taskId: string, cwd: string): string | undefined {
+  const resolved = taskRecordPath(planPath, taskId);
+  if (resolved === undefined || resolved === planPath) return undefined;
+  return relative(cwd, resolved);
+}
+
+/**
+ * REAL git-log read behind {@link creditedAmendmentVisibility}'s `amendedSinceCredit`: was
+ * `shardPath` touched by a commit reachable from `origin/main` strictly after `creditedAtIso`,
+ * and did that SAME commit also ADD a brand-new `plan/tasks.d/*.yaml` shard other than
+ * `shardPath` itself (the follow-up escape hatch W1-T2217's commit `ecd1ccc0` used, W1-T2280
+ * rationale (11))? Returns `undefined` — FAIL OPEN, never a guessed flag — on a shallow checkout
+ * or any git failure, the same posture `defaultMergeEvidenceLog` already takes.
+ *
+ * TWO PASSES, DELIBERATELY. `git log --name-status -- <path>` FILTERS the printed file list down
+ * to only the pathspec's own matches — it does not name a commit's OTHER changed files, which is
+ * exactly what "a follow-up filed alongside" needs to see. Pass 1 finds the CANDIDATE commit shas
+ * (scoped to `shardPath`, cheap); pass 2 asks each candidate's FULL, unfiltered file list (via
+ * `git show`, no pathspec) whether it also added a different shard.
+ */
+function defaultCreditedAmendmentEvidence(
+  cwd: string,
+  taskId: string,
+  shardPath: string,
+  creditedAtIso: string,
+): { amended: boolean; followUpFiled: boolean } | undefined {
+  try {
+    const shallow = execFileSync("git", ["rev-parse", "--is-shallow-repository"], { cwd, encoding: "utf8" }).trim();
+    if (shallow === "true") return undefined;
+    const shaList = execFileSync(
+      "git",
+      ["log", `--since=${creditedAtIso}`, "--format=%H", "origin/main", "--", shardPath],
+      { cwd, encoding: "utf8", maxBuffer: 1 << 24 },
+    )
+      .split("\n")
+      .map((l) => l.trim())
+      .filter(Boolean);
+    if (shaList.length === 0) return { amended: false, followUpFiled: false };
+    const addedShardRe = /^A\s+(plan\/tasks\.d\/[^/\t]+\.yaml)\s*$/;
+    const followUpFiled = shaList.some((sha) => {
+      const files = execFileSync("git", ["show", "--name-status", "--format=", sha], {
+        cwd,
+        encoding: "utf8",
+        maxBuffer: 1 << 24,
+      });
+      return files.split("\n").some((line) => {
+        const m = addedShardRe.exec(line.trim());
+        return m !== null && m[1] !== shardPath;
+      });
+    });
+    return { amended: true, followUpFiled };
+  } catch {
+    return undefined; // an unreadable/unexpected git state is UNMEASURABLE, never a guess
+  }
+}
+
+/**
+ * W1-T2280: `proofQueueAudit` and `creditedAmendmentVisibility` (lib/proof-queue-audit.ts) over
+ * the MERGE-CREDITED population — never the open+unmerged one `proofQueueAuditCommand`'s default
+ * path already covers. The population itself comes from `readMergeCreditedTaskIds` — the SAME
+ * reader `runCreditBackfill` (lib/sweep.ts) already trusts (note x) — never a second hand-copy of
+ * what a merge credit looks like. PURE ORCHESTRATION: every real read (ledger, git, filesystem)
+ * is a default that a caller can override wholesale via `deps`, so this stays testable without a
+ * real checkout, mirroring `proofQueueAuditCommand`'s own injected-dep contract.
+ */
+export function creditedProofVisibility(
+  planPath: string,
+  plan: Plan,
+  deps: CreditedProofVisibilityDeps = {},
+): CreditedProofVisibilityResult {
+  const cwd = deps.cwd ?? repoRoot;
+  const ledgerPath =
+    deps.ledgerPath ??
+    (() => {
+      try {
+        return ledgerPathFor(loadConfig());
+      } catch {
+        // ABSENT AND UNREADABLE COINCIDE FOR EVERY CONSUMER OF THIS VALUE, so `undefined` erases
+        // nothing here. `loadConfig` throws on a missing or empty config — every CI checkout — and
+        // the only use this verb has for it is locating a ledger. Undefined flows to exactly two
+        // places below: `creditedIds` becomes an empty set and `earliest` is skipped, which is the
+        // same report a host with no ledger produces, rendered honestly as zero credited tasks.
+        // This is a READ-ONLY report (proofQueueAudit exits 0 on its own analysis regardless of
+        // what it names), so no verdict rests on the difference. Same reasoning, same shape, as the
+        // `stateDir` defaults in emissionsCommand and its siblings above.
+        return undefined;
+      }
+    })();
+  const readCredited = deps.readMergeCreditedTaskIds ?? readMergeCreditedTaskIds;
+  const creditedIds = ledgerPath
+    ? readCredited(ledgerPath, { maxRotations: Number.MAX_SAFE_INTEGER }).credited
+    : new Set<string>();
+
+  const creditedTasks = plan.tasks.filter((t) => creditedIds.has(t.id));
+
+  const proof = proofQueueAudit(creditedTasks, {
+    resolveNameFilteredCandidates: deps.resolveNameFilteredCandidates ?? ((rawName) => resolveNameFilteredCandidates(cwd, rawName)),
+    pathExists: deps.pathExists ?? ((rel) => existsSync(join(cwd, rel))),
+    creditedIds,
+    symbolFoundAt:
+      deps.symbolFoundAt ??
+      ((symbol, path) => {
+        try {
+          return readFileSync(join(cwd, path), "utf8").includes(symbol);
+        } catch {
+          // "NOT VISIBLE AT THIS PATH" is the whole question this predicate answers, and an absent
+          // file and an unreadable one answer it identically — the sibling `pathExists` above is
+          // `existsSync`, which is false for both for the same reason. STATED PLAINLY BECAUSE IT IS
+          // a conflation, not an identity: a file that exists but cannot be read would be reported
+          // as "symbol not found". That costs one line in a REPORT that exits 0 regardless of how
+          // many offenders it names, never a gate verdict and never a strike — which is why the
+          // distinction is not carried in the return shape, whose `boolean` every caller reads as
+          // exactly this question.
+          return false;
+        }
+      }),
+  });
+
+  const earliest = ledgerPath ? earliestCreditTimestamps(dirname(ledgerPath), deps.ledgerUnion ?? resolveLedgerUnion) : undefined;
+  const facts: CreditedAmendmentFact[] = creditedTasks.map((t) => ({
+    taskId: t.id,
+    shardPath: creditedTaskShardPath(planPath, t.id, cwd),
+  }));
+  const amendedSinceCredit =
+    deps.amendedSinceCredit ??
+    ((taskId: string, shardPath: string, creditedAtIso: string) =>
+      defaultCreditedAmendmentEvidence(cwd, taskId, shardPath, creditedAtIso));
+  const amendment = creditedAmendmentVisibility(facts, {
+    amendedSinceCredit: (taskId, shardPath) => {
+      const ts = earliest?.get(taskId);
+      if (ts === undefined) return undefined; // no dated credit to compare against — fail open
+      return amendedSinceCredit(taskId, shardPath, ts);
+    },
+  });
+
+  return { creditedCount: creditedIds.size, proof, amendment };
 }
 
 /**
@@ -14339,7 +14728,7 @@ export interface ProofQueueAuditDeps {
  * which is the only place it is wired; nothing in the daemon/CI/arm path calls it.
  */
 export async function proofQueueAuditCommand(rest: string[], deps: ProofQueueAuditDeps = {}): Promise<number> {
-  const badArg = unknownArgError("proof-queue-audit", rest, ["--plan"], []);
+  const badArg = unknownArgError("proof-queue-audit", rest, ["--plan"], ["--credited"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
     return 2;
@@ -14352,6 +14741,43 @@ export async function proofQueueAuditCommand(rest: string[], deps: ProofQueueAud
   } catch (e) {
     console.error(`### rmd proof-queue-audit: ${(e as Error).message}`);
     return 2;
+  }
+
+  // W1-T2280: an ADDITIVE, opt-in second population — the default open+unmerged path below is
+  // completely untouched when `--credited` is absent (note v: byte-identical to before this
+  // task). It is a REPORT, not a gate, same as the default path: exits 0 regardless of counts.
+  if (rest.includes("--credited")) {
+    const result = (deps.creditedProofVisibility ?? creditedProofVisibility)(planPath, plan);
+    console.log(
+      `### rmd proof-queue-audit --credited: ${result.creditedCount} merge-credited task(s), ` +
+        `${result.proof.criterionCount} proof(s) resolved`,
+    );
+    const offendingTaskCount = new Set(result.proof.offenders.map((o) => o.taskId)).size;
+    console.log(`  ${result.proof.offenders.length} unresolvable proof(s) across ${offendingTaskCount} task(s), by cause:`);
+    for (const cause of CREDITED_PROOF_QUEUE_AUDIT_CAUSES) {
+      const ids = result.proof.byCause[cause];
+      console.log(`    ${cause.padEnd(24)} ${String(ids.length).padStart(3)} task(s): ${ids.join(", ") || "(none)"}`);
+    }
+    for (const o of result.proof.offenders) {
+      console.log(`  ✗ ${o.taskId} criterion ${o.criterionIndex + 1} [${o.cause}] proof: "${o.proof.slice(0, 90)}"`);
+    }
+    for (const r of result.proof.relocated) {
+      console.log(
+        `  ↷ ${r.taskId} criterion ${r.criterionIndex + 1} [relocated to ${r.relocatedTo}] proof: "${r.proof.slice(0, 90)}"`,
+      );
+    }
+    console.log(
+      `\n  amendment signal: ${result.amendment.measurable} credited task(s) measurable via their own shard file, ` +
+        `${result.amendment.unmeasurable} unmeasurable (declared inline in plan/tasks.yaml, W1-T2280 note ix) — ` +
+        `${result.amendment.flagged.length} amended after credit with no follow-up filed alongside: ` +
+        `${result.amendment.flagged.join(", ") || "(none)"}`,
+    );
+    console.log(
+      "\nrmd proof-queue-audit --credited is a REPORT, not a gate — no dispatch, CI job or arm decision may " +
+        "consult this verdict (lib/proof-queue-audit.ts); no ledger line is appended and no status moves. " +
+        "Exits 0 unconditionally, regardless of the counts above.",
+    );
+    return 0;
   }
 
   const openIds = plan.tasks.filter(isOpenLintTask).map((t) => t.id);
@@ -17440,7 +17866,11 @@ export function escalateStarvation(
  */
 export function breakerGateFor(
   ledgerPath: string,
-  openHeadBranches: ReadonlyArray<PrRef> | null | undefined,
+  openHeadBranches:
+    | ReadonlyArray<PrRef>
+    | null
+    | undefined
+    | (() => ReadonlyArray<PrRef> | null | undefined),
 ): {
   isIndeterminate: (taskId: string) => boolean;
   isTripped: (taskId: string) => boolean;
@@ -17457,11 +17887,38 @@ export function breakerGateFor(
 } {
   const cache = createDispatchBreakerCache();
   let memo: { taskId: string; detail: DispatchBreakerDetail } | undefined;
+  // W1-T2318: A THUNK IS RESOLVED HERE, ON FIRST READ, NOT BY THE CALLER AT BOOT.
+  //
+  // `listOpenHeadBranches()` costs a full board walk — MEASURED 26 sequential REST calls, 22.2s, of
+  // which the one open page the consumers need took 432ms. Computing it eagerly put that on the
+  // daemon's boot critical path, where it blocked the event loop past
+  // `refreshInstallationToken`'s abort timer. Its VALUE is unchanged; only WHEN it is computed
+  // moves — to the first dispatch decision, which is the first read (`evaluateDispatchBreaker
+  // CorroboratedDetailed` returns before touching the list unless a task's ledger breaker is
+  // already tripped, so for every clear task it is never read at all).
+  //
+  // MEMOISED ON THE FIRST RESOLVE, so this stays the ONE cache per invocation `breakerGateFor`'s
+  // own doc promises — a thunk called twice would be two board walks, which is worse than the
+  // eager version it replaces.
+  //
+  // AN ARRAY, `null` AND `undefined` ALL STILL PASS STRAIGHT THROUGH, byte for byte: every
+  // existing caller and fixture that hands a value keeps today's behaviour, and `null` still means
+  // "read failed" all the way down to `corroboratesForwardProgress`, which answers "unreadable"
+  // and leaves a tripped task tripped. That fail-closed path is NOT touched by this change.
+  let resolvedBranches: ReadonlyArray<PrRef> | null | undefined;
+  let branchesResolved = false;
+  const branchesFor = (): ReadonlyArray<PrRef> | null | undefined => {
+    if (!branchesResolved) {
+      resolvedBranches = typeof openHeadBranches === "function" ? openHeadBranches() : openHeadBranches;
+      branchesResolved = true;
+    }
+    return resolvedBranches;
+  };
   const detailFor = (taskId: string) => {
     if (memo?.taskId !== taskId) {
       memo = {
         taskId,
-        detail: evaluateDispatchBreakerCorroboratedDetailed(ledgerPath, taskId, cache, openHeadBranches),
+        detail: evaluateDispatchBreakerCorroboratedDetailed(ledgerPath, taskId, cache, branchesFor),
       };
     }
     return memo.detail;
@@ -18015,7 +18472,24 @@ async function drainCommand(
   // this is exactly one extra batched call per invocation, never one per task. Resolved AFTER
   // the `--dry-run` early return above (never before it): a preview spawns/reads nothing beyond
   // `refreshMerged`'s own projection, and the breaker is never consulted on that path.
-  const openHeadBranchesForBreaker = githubFactory(owner, repo).listOpenHeadBranches?.();
+  // W1-T2318: DEFERRED, NOT REMOVED. `listOpenHeadBranches()` is a full board walk — MEASURED at
+  // 26 sequential REST calls and 22.2s, of which the single open page its consumers actually read
+  // took 432ms — and computing it HERE put all of it on the boot critical path, synchronously,
+  // before anything needed the result. The closed half of that walk is still built, still shared,
+  // and still correct for `findMergedByTrailer`/`findMergedByTrailerAll`/`findMergedByHeadBranch`
+  // (W1-T377's design, deliberately untouched); it is simply no longer this caller's boot cost.
+  //
+  // MEMOISED HERE TOO, not just inside `breakerGateFor`, because `isFeedbackOpenPr` below reads the
+  // SAME list and must not trigger a second walk.
+  let openHeadBranchesMemo: ReadonlyArray<PrRef> | null | undefined;
+  let openHeadBranchesRead = false;
+  const openHeadBranchesForBreaker = (): ReadonlyArray<PrRef> | null | undefined => {
+    if (!openHeadBranchesRead) {
+      openHeadBranchesMemo = githubFactory(owner, repo).listOpenHeadBranches?.();
+      openHeadBranchesRead = true;
+    }
+    return openHeadBranchesMemo;
+  };
   // W1-T206: see breakerGateFor's doc — ONE cache for this whole `rmd drain` invocation.
   const breakerGate = breakerGateFor(ledgerPath, openHeadBranchesForBreaker);
   // W1-T119: same freshness contract as `isOpenPr` — the SAME projection
@@ -18729,7 +19203,24 @@ export async function daemonCommand(
   // before it — a preview must spawn/read nothing beyond `refreshMerged`'s own projection), and
   // once at boot, like `breakerGateFor`'s own cache immediately below, rather than re-fetched
   // per tick.
-  const openHeadBranchesForBreaker = githubFactory(target.owner, target.repo).listOpenHeadBranches?.();
+  // W1-T2318: DEFERRED, NOT REMOVED. `listOpenHeadBranches()` is a full board walk — MEASURED at
+  // 26 sequential REST calls and 22.2s, of which the single open page its consumers actually read
+  // took 432ms — and computing it HERE put all of it on the boot critical path, synchronously,
+  // before anything needed the result. The closed half of that walk is still built, still shared,
+  // and still correct for `findMergedByTrailer`/`findMergedByTrailerAll`/`findMergedByHeadBranch`
+  // (W1-T377's design, deliberately untouched); it is simply no longer this caller's boot cost.
+  //
+  // MEMOISED HERE TOO, not just inside `breakerGateFor`, because `isFeedbackOpenPr` below reads the
+  // SAME list and must not trigger a second walk.
+  let openHeadBranchesMemo: ReadonlyArray<PrRef> | null | undefined;
+  let openHeadBranchesRead = false;
+  const openHeadBranchesForBreaker = (): ReadonlyArray<PrRef> | null | undefined => {
+    if (!openHeadBranchesRead) {
+      openHeadBranchesMemo = githubFactory(target.owner, target.repo).listOpenHeadBranches?.();
+      openHeadBranchesRead = true;
+    }
+    return openHeadBranchesMemo;
+  };
   // W1-T206: see breakerGateFor's doc — ONE cache for this whole `rmd daemon` invocation.
   const breakerGate = breakerGateFor(ledgerPath, openHeadBranchesForBreaker);
   // W1-T119: same freshness contract as `isOpenPr` — the SAME projection
@@ -19225,7 +19716,7 @@ export async function daemonCommand(
         // `lastProj`-backed read — newest PR wins on a multi-hit, mirroring status.ts's own rung.
         isFeedbackOpenPr: (feedbackId) => {
           const wantTaskId = `TRIAGE-${feedbackId}`;
-          const hit = (openHeadBranchesForBreaker ?? [])
+          const hit = (openHeadBranchesForBreaker() ?? [])
             .filter((pr) => pr.state.toUpperCase() === "OPEN" && taskIdFromRunBranch(pr.headRefName) === wantTaskId)
             .sort((a, b) => b.number - a.number)[0];
           return hit?.number;

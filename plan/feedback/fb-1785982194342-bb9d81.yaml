@@ -32,7 +32,27 @@ raw: "THE SHARED node_modules WAS EMPTIED UNDER TWO LIVE WORKERS AND THE CAUSE
   only that a repair can produce a real directory where a symlink belonged."
 attachments: []
 origin: cli
-status: new
-proposal_pr: null
-summary: null
+status: proposed
+proposal_pr: https://github.com/craigoley/remudero/pull/2960
+summary:
+  headline: Shared code library corrupted — identify root cause and protect
+  what_happened: A shared code library was emptied on Aug 5 during concurrent job
+    execution. A worker likely ran npm install through a symlinked folder,
+    corrupting the shared install; recovery procedures destroyed evidence of
+    whether a worker or the repair itself caused the corruption.
+  decision: Implement write-protection on shared symlinks. Determine through
+    falsifying check analysis whether worker contract enforcement is needed and
+    add if verifiable at invocation time.
+  options:
+    - label: Write-protect symlinks plus add contract enforcement
+      consequence: Prevents both violation and corruption paths; requires
+        cryptographic verification infrastructure at worker invocation time
+    - label: Write-protect symlinks plus redirect worker npm to isolated directories
+      consequence: Eliminates shared library corruption risk entirely via filesystem
+        and environment isolation; adds disk overhead and sandboxing complexity
+    - label: Write-protect symlinks only, defer root-cause investigation
+      consequence: Provides immediate protection against symlink follow-through
+        corruption; does not address unledgered installs or determine whether
+        worker or repair failed
 expansion: null
+answered_by: null
