@@ -20,7 +20,7 @@ import type { Config } from "../src/lib/config.js";
 // task's own rationale (2) already measured moves under a snapshot).
 
 /**
- * The two tests below make a file unreadable with `chmodSync(f, 0o000)` and assert that the
+ * The two tests below make a file unreadable with a mode-zero `chmodSync` and assert that the
  * producer DEGRADES to empty text rather than throwing or counting the content as real. Under
  * uid 0 that premise cannot hold: root bypasses the permission bits and reads the file anyway,
  * so the producer sees the content, the "must never be seen" assertion fires, and the test fails
