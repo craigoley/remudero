@@ -1,0 +1,114 @@
+- id: W1-T2324
+  title: "THE MINT REISSUED A LIVE ID BECAUSE ITS OPEN-PR SURFACE COSTS GRAPHQL AND THE GRAPHQL BUDGET WAS GONE — the ceiling came from three surfaces instead of four, and the missing one was precisely the surface holding the id that had just merged; two shards now carry W1-T2316, and the same data is core-billed over REST for one page and one point"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 30.00
+  files: [src/run-task.ts, scripts/task-id-existence-check.mjs, test/mint-open-pr-surface-is-rest.test.ts]
+  origin: "operator-brief#mint-open-pr-surface-2026-08-26"
+  plan_refs: ["W1-T2315", "W1-T2318", "W1-T2323", "W1-T1066"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-08-26, NOT PREDICTED. `plan/tasks.d/W1-T2316-the-retro-renders-past-its-own-line-
+    scoped-readers.yaml` is on main, merged as #2965 at 14:59:02Z. PR #2970 adds
+    `plan/tasks.d/W1-T2316-a-relocated-line-inherits-its-coverage-debt.yaml`. TWO SHARDS, ONE ID.
+
+    THE CAUSE IS IN THE MINT'S OWN OUTPUT, which said so at the time: "next task id: W1-T2316 (max
+    2315 across tasks.yaml 280, shards 2315, open PRs not enumerated, history 2315) — DEGRADED:
+    open-prs (cannot enumerate open PRs: ... GraphQL: API rate limit already exceeded for user ID
+    4397075)". The ceiling came from THREE surfaces instead of four, and the missing surface is
+    precisely the one holding #2965's id. The mint printed its own degradation honestly and reserved
+    anyway.
+
+    WHY THE BUDGET WAS GONE is already filed and is NOT re-filed here: W1-T2318 (the boot board walk)
+    and W1-T2323 (the index that expires before its own fetch finishes) are why the PAT's buckets are
+    under sustained pressure.
+
+    (Q1) MOVE THE MINT'S OPEN-PR SURFACE OFF GRAPHQL. The call is
+    `["pr", "list", "--repo", ..., "--state", "open", "--limit", "100", "--json", "title,body,headRefName"]`
+    in src/run-task.ts. `gh pr list --json` bills GRAPHQL. THE DISCRIMINATOR IS THE FIELD SET, NOT THE
+    SUBCOMMAND — measured today by refusal testing against an exhausted bucket: `gh pr view --json
+    number` is served over REST while `--json statusCheckRollup` is refused as GraphQL.
+
+    WHAT IT ACTUALLY NEEDS is title, body and headRefName, and REST returns all three on the same
+    rows: `title`, `body` and `head.ref` from
+    `gh api repos/<o>/<r>/pulls?state=open&per_page=100&page=<n>`.
+
+    REUSE `fetchBoardPrsRest`, OR ITS OWN CALL? THE TASK PROPOSES ITS OWN CALL. Reuse buys nothing
+    the mint needs and costs a dependency on the board gateway, whose 15-second TTL guards an 18-22
+    second fetch (W1-T2323) — so the mint would inherit a caching defect it has no stake in, and a
+    cold gateway would make a one-page read cost a 26-call walk. Its own call is one open page,
+    MEASURED at 432 ms and 1 core point. The mint wants the newest open ids, not a board.
+
+    (Q2) WHAT THE MINT SHOULD DO WHEN A SURFACE IS GENUINELY UNAVAILABLE, because REST can fail too.
+    Today it printed DEGRADED and reserved anyway, and that is how a live id was reissued.
+
+    NAMING WHAT REFUSING COSTS, because it is not free: the triage rung would have filed NOTHING
+    during the window, and the fleet files continuously. A MINT THAT REFUSES IS A FLEET THAT STOPS
+    INTAKE, and an intake rung that stops during a budget shortfall is a worse failure than a rare
+    collision.
+
+    SO THE ANSWER IS NOT "REFUSE ON ANY DEGRADED READ". It is: REFUSE ONLY WHEN THE MISSING SURFACE
+    IS THE ONE MOST LIKELY TO HOLD A LIVE ID, AND OPEN-PRs IS EXACTLY THAT SURFACE. The other three
+    are monotone and already-merged — tasks.yaml, the shard set and the git history all describe ids
+    that are settled. Only open PRs hold ids that are claimed but not yet visible anywhere else, and
+    that is the entire population a mint can collide with. A degraded read of a settled surface is a
+    smaller ceiling and a safe one; a degraded read of the open-PR surface removes the only source of
+    the ids most at risk. The asymmetry is the argument, not a preference for caution.
+
+    AND `--reserve` IS THE ONE VERB WHERE THIS BINDS. Printing a degraded id costs nothing a caller
+    cannot re-check; ATOMICALLY CLAIMING one on origin is what makes the collision durable.
+
+    (Q3) WHAT CATCHES IT IF PREVENTION FAILS. `loadPlan` throws on a duplicate id and takes the whole
+    plan with it — and that is W1-T2315's subject: the CI gate resolves through `declaredPlanTaskIds`
+    and keeps exempting bodies while the reviewer's own `loadPlan` refuses. SO A DUPLICATE MERGES
+    INTO A PLAN THE REVIEWER CANNOT LOAD.
+
+    `task-id-existence-check` already runs on every PR and asks whether a CITED id EXISTS. It could
+    also ask whether an ADDED id COLLIDES — with main, or with any other open PR. It already reads
+    the plan and already has a refusal path, so the question is one more comparison, not a new gate.
+
+    THE RETROFIT, MEASURED RATHER THAN ESTIMATED: 861 ids on main; 4 currently-open PRs add a plan
+    id; EXACTLY ONE COLLIDES — #2970 adding W1-T2316, which is already on main — and ZERO collide
+    with another open PR. So the check would newly refuse exactly the one PR that carries the real
+    defect, and nothing else. One true positive, no false positives, on the whole open board.
+
+    (Q4) THE LIVE ONE. #2970 is open and `mergeable_state=blocked`. #2965 IS MERGED, SO IT CANNOT
+    RENAME — the id is spent and the file is on main. #2970 is the side that renames, to a fresh
+    reserved id. Renaming its shard file and its `- id:` line preserves `origin:
+    feedback#fb-1785984602111-18ffd8` verbatim, because provenance lives in the record's own field
+    and not in its filename or its number. THE RENAME IS NOT DONE HERE: this shard files the defect,
+    and the rename is a separate, gated change.
+
+    WHAT MUST NOT CHANGE. THE EIGHT-SURFACE OPERATOR CHECK STAYS — it is what caught this, and no
+    automated mint replaces it. Nothing paces, throttles or sleeps — W1-T1066 records a polling loop
+    that locked the operator out of his repository for ninety minutes. And the fleet keeps filing.
+
+    RISK BAND. `risk: high` is set UP FRONT and is Rule 19's SPAN, not blast radius: `files:` crosses
+    the mint's own verb and a CI gate script.
+  acceptance:
+    - claim: "the mint's open-PR surface is read over a core-billed path rather than a graphql one"
+      proof: "unit test: test/mint-open-pr-surface-is-rest.test.ts"
+    - claim: "the surface still yields title, body and head branch for every open PR"
+      proof: "unit test: test/mint-open-pr-surface-is-rest.test.ts"
+    - claim: "reserve refuses when the open-PR surface specifically is unavailable"
+      proof: "unit test: test/mint-open-pr-surface-is-rest.test.ts"
+    - claim: "reserve still proceeds when only a settled surface is degraded, so intake does not stop"
+      proof: "unit test: test/mint-open-pr-surface-is-rest.test.ts"
+    - claim: "an added id that collides with main is refused by the gate that already runs on every PR"
+      proof: "grep: reservation in scripts/task-id-existence-check.mjs"
+    - claim: "an added id that collides with another open PR is refused the same way"
+      proof: "unit test: test/mint-open-pr-surface-is-rest.test.ts"
+    - claim: "the mint still reads a state-scoped open query rather than the whole board"
+      proof: "grep: state=open in src/run-task.ts"
+    - claim: "the atomic reserve path is still the one that claims on origin"
+      proof: "grep: reserveTaskIdRemote in src/run-task.ts"
+    - claim: "nothing added paces, throttles or sleeps a call"
+      proof: "unit test: test/mint-open-pr-surface-is-rest.test.ts"
+  falsifier: |
+    If test/task-id-existence-check.test.ts already asserts that an added plan id colliding with an
+    id on main is refused, this task is already built and must be closed rather than implemented.
