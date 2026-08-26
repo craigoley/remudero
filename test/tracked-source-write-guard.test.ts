@@ -241,7 +241,7 @@ test("listTrackedTestFiles throws when git ls-files fails, rather than returning
 // guard (`import.meta.url === argv[1]`) and the default-parameter wiring both actually work end to
 // end, not just that `main`'s body does when called directly. ─────────────────────────────────────
 
-async function withExitCode(fn: () => void): Promise<{ exitCode: number | undefined; err: string[]; out: string[] }> {
+async function withExitCode(fn: () => void): Promise<{ exitCode: typeof process.exitCode; err: string[]; out: string[] }> {
   const priorExit = process.exitCode;
   const err: string[] = [];
   const out: string[] = [];
