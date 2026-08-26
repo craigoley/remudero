@@ -320,11 +320,7 @@ function classify(rawExpr, symbolTable, seen = new Set()) {
 
 /** For a mutating call's parsed `args`, the `{ expr, label }` candidates that are actually
  *  WRITTEN/REMOVED — for `cpSync` that is the destination (arg 1) only, per design note (ii); for
- *  `renameSync` both the old (removed) and new (created) path; otherwise arg 0. Exported so the
- *  `default` arm (never reachable through `scanSource`, which only ever calls this with a name
- *  drawn from `MUTATING_CALLS` — every one of which already has its own explicit `case`) can be
- *  driven directly: a defensive fallback that no live call site can exercise is still real code,
- *  and "unreachable through the one caller today" is not the same claim as "untestable". */
+ *  `renameSync` both the old (removed) and new (created) path; otherwise arg 0. */
 export function targetCandidates(name, args) {
   switch (name) {
     case "writeFileSync":
@@ -411,39 +407,34 @@ export function scanRepo(repoRoot) {
   return { violations, filesScanned: files.length };
 }
 
-/**
- * The CLI's whole behaviour, injectable exactly like scripts/clock-sweep.mjs's own `main` (same
- * shape, same reason): every collaborator (`repoRoot`, `scan`, `log`, `error`) carries a real
- * default, so the actual CLI entry point below stays a bare `main()` call, while a test can drive
- * BOTH the clean and the violation-found path in-process -- no subprocess, and no risk that a
- * fixture's outcome leaks into the real `node --test` runner's own `process.exitCode`, because
- * this function returns the exit code rather than assigning it itself. Only the invocation guard
- * below assigns `process.exitCode`, and only when this file is actually run as the CLI.
- */
-export function main({
-  repoRoot = join(dirname(fileURLToPath(import.meta.url)), ".."),
-  scan = scanRepo,
-  log = console.log,
-  error = console.error,
-} = {}) {
-  const { violations, filesScanned } = scan(repoRoot);
+/** The CLI's own logic, factored out from the `import.meta.url` entry guard below so a test can
+ *  call it IN-PROCESS (against a synthetic `repoRoot`) and get real V8 coverage credit for every
+ *  line/branch -- coverage collection (`--experimental-test-coverage`) instruments only the
+ *  CURRENT process's V8 session, never a spawned child's, so a subprocess-only test of this CLI
+ *  entry point (the shape most `scripts/*.mjs` checks in this repo use) would leave every line in
+ *  here permanently unreachable to the coverage-ratchet/diff-coverage gates for a BRAND NEW file
+ *  like this one, whatever the real (spawned) exit code/output looked like. `repoRoot` defaults to
+ *  this module's own real repo root so the entry guard below needs no arguments. */
+export function main(repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..")) {
+  const { violations, filesScanned } = scanRepo(repoRoot);
   if (violations.length > 0) {
-    error("tracked-source-write-check: FAILED -- test(s) write a TRACKED file under src/:");
+    console.error("tracked-source-write-check: FAILED -- test(s) write a TRACKED file under src/:");
     for (const v of violations) {
-      error(`  ${v.file}:${v.line}: ${v.call}(...) -- ${v.label} \`${v.targetExpr}\` resolves under the tracked src/ tree`);
+      console.error(`  ${v.file}:${v.line}: ${v.call}(...) -- ${v.label} \`${v.targetExpr}\` resolves under the tracked src/ tree`);
     }
-    error("");
-    error(
+    console.error("");
+    console.error(
       "A test must mutate a COPY under a temp root (mkdtempSync/tmpdir), never the checked-out " +
         "src/ tree it shares with every concurrent test worker -- see test/ledger-rotation.test.ts's " +
         "W1-T964 check (fixed by #2881) for the exemplar shape.",
     );
-    return 1;
+    process.exitCode = 1;
+    return;
   }
-  log(`tracked-source-write-check: clean -- 0 tracked-src writes across ${filesScanned} tracked test/**/*.ts files.`);
-  return 0;
+  console.log(`tracked-source-write-check: clean -- 0 tracked-src writes across ${filesScanned} tracked test/**/*.ts files.`);
+  process.exitCode = 0;
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
-  process.exitCode = main();
+  main();
 }
