@@ -9073,17 +9073,17 @@
     Test proofs run after npm ci in that checkout (fresh worktrees have no node_modules).
   acceptance:
     - claim: "a criterion SATISFIED in repo state but not keyword-claimed in the report is judged MET by the floor (the #100 case)"
-      proof: "unit test over an injected executor: proof names a test/grep, executor returns pass/match, report contains NO proof keywords -> criterion MET with proof_exec=executed_pass"
+      proof: "unit test: ACCEPTANCE #1 (the #100 false-block)"
     - claim: "a criterion keyword-CLAIMED in the report whose named proof FAILS on the head is judged UNMET (executed_fail overrides keyword coverage)"
-      proof: "unit test: report echoes every proof keyword, injected executor returns fail -> criterion UNMET with proof_exec=executed_fail"
+      proof: "unit test: ACCEPTANCE #2 (the W1-T51 false-pass)"
     - claim: "a free-prose proof leaves the keyword floor byte-identical to today"
-      proof: "unit test: a prose-proof criterion yields the same verdict + reason as the pre-change floor, proof_exec=not_executable"
+      proof: "unit test: ACCEPTANCE #3: a free-prose proof is byte-identical to the pre-W1-T65 floor"
     - claim: "an exec error or timeout degrades to the keyword floor and is legible, never a silent hard-fail or a stall"
-      proof: "unit test: injected executor throws/times out -> verdict equals the keyword-floor verdict, proof_exec=exec_error surfaced on the ledger line + console"
+      proof: "unit test: ACCEPTANCE #4: an executor that THROWS (exec_error/timeout) degrades to the keyword floor verdict"
     - claim: "proof execution is bounded to the W1-T3F whitelist — no arbitrary code from proof text"
-      proof: "unit test: a proof containing shell metacharacters / an unwhitelisted shape is not_executable, nothing executed (injected executor never called)"
+      proof: "unit test: ACCEPTANCE #5: an unwhitelisted/unsafe proof shape is not_executable"
     - claim: "the judge call site passes the PR-head checkout path (never the operator checkout) into the floor"
-      proof: "grep of the run-task.ts judge call site shows the head-checkout path parameter wired; unit test over an injected path asserts proofs execute in the provided head checkout dir"
+      proof: "grep: headCheckoutDir: args in src/run-task.ts"
   risk: high
   origin: architect
   plan_refs: ["§5", "§4B"]
