@@ -648,18 +648,19 @@ function abandonFakeGh(repoDir: string): string {
       'if [[ "$1" == "pr" && "$2" == "view" ]]; then',
       '  if [[ "$5" == "headRefName" ]]; then echo "{\\"headRefName\\":\\"$RUNBRANCH\\"}"; exit 0; fi',
       '  if [[ "$5" == "body" ]]; then echo \'{"body":""}\'; exit 0; fi',
-      '  if [[ "$5" == "statusCheckRollup" ]]; then',
-      '    echo \'{"statusCheckRollup":[{"name":"ci","conclusion":"SUCCESS","status":"COMPLETED"}]}\'',
-      "    exit 0",
-      "  fi",
       "  echo '{}'; exit 0",
       "fi",
       'if [[ "$1" == "pr" ]]; then exit 0; fi',
       // The fix rung reads the PR's LIVE lifecycle state before it works, and stands down on
       // anything but OPEN — an unanswered read resolves UNKNOWN and the rung never spawns.
+      // W1-T2268: `pollToGate`/`waitForCiGreen` now read the SAME `pulls/{n}` endpoint (never
+      // `gh pr view --json statusCheckRollup`), so it carries a `head.sha` too, plus the
+      // composed rollup's own check-runs (CI green on the very first poll) + combined-status.
       'if [[ "$1" == "api" ]]; then',
       '  case "$2" in',
-      '    */pulls/*) echo \'{"number":1044,"state":"open","merged":false,"merged_at":null}\'; exit 0;;',
+      '    */pulls/*) echo \'{"number":1044,"state":"open","merged":false,"merged_at":null,"head":{"sha":"deadbeef"}}\'; exit 0;;',
+      '    */check-runs*) echo \'{"check_runs":[{"name":"ci","status":"completed","conclusion":"success"}]}\'; exit 0;;',
+      '    */status) echo \'{"statuses":[]}\'; exit 0;;',
       '  esac',
       '  echo "{}"; exit 0',
       "fi",

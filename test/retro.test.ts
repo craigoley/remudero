@@ -1322,21 +1322,21 @@ test("evaluateRetroTrigger: merges-since-marker >= N fires reason=merges (below 
   const markerTs = "2026-07-25T00:00:00.000Z"; // 1 day before `now` — well under D=7
   const now = new Date("2026-07-26T00:00:00.000Z");
   const decision = evaluateRetroTrigger(25, markerTs, now);
-  assert.deepEqual(decision, { fire: true, reason: "merges", mergesSinceMarker: 25, daysSinceMarker: 1 });
+  assert.deepEqual(decision, { fire: true, reason: "merges", mergesSinceMarker: 25, daysSinceMarker: 1, followupsPending: 0 });
 });
 
 test("evaluateRetroTrigger: days-since-marker >= D fires reason=days (below the merges threshold)", () => {
   const markerTs = "2026-07-01T00:00:00.000Z"; // 7 days before `now`
   const now = new Date("2026-07-08T00:00:00.000Z");
   const decision = evaluateRetroTrigger(3, markerTs, now); // 3 << 25
-  assert.deepEqual(decision, { fire: true, reason: "days", mergesSinceMarker: 3, daysSinceMarker: 7 });
+  assert.deepEqual(decision, { fire: true, reason: "days", mergesSinceMarker: 3, daysSinceMarker: 7, followupsPending: 0 });
 });
 
 test("evaluateRetroTrigger: below BOTH thresholds — no fire", () => {
   const markerTs = "2026-07-27T00:00:00.000Z"; // 2 days before `now`
   const now = new Date("2026-07-29T00:00:00.000Z");
   const decision = evaluateRetroTrigger(10, markerTs, now); // 10 < 25, 2 < 7
-  assert.deepEqual(decision, { fire: false, mergesSinceMarker: 10, daysSinceMarker: 2 });
+  assert.deepEqual(decision, { fire: false, mergesSinceMarker: 10, daysSinceMarker: 2, followupsPending: 0 });
 });
 
 test("evaluateRetroTrigger: whichever crosses first fires — a days-only crossing still fires even at merges=0", () => {

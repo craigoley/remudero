@@ -28,7 +28,26 @@ raw: "A REFACTOR OF UNTESTED CODE INHERITS ITS COVERAGE DEBT AT THE GATE —
   and this is only a documentation gap about what a refactor costs."
 attachments: []
 origin: cli
-status: new
-proposal_pr: null
-summary: null
+status: proposed
+proposal_pr: https://github.com/craigoley/remudero/pull/2970
+summary:
+  headline: Gate blocks refactoring of already-untested code
+  what_happened: "PR #1399 refactored 10 untested lines in run-task.ts, but the
+    gate rejected it—those lines appeared as additions in the diff despite being
+    already uncovered in main. This structural issue affects any refactor of
+    untested code, discouraging the cleanup the repo should want."
+  decision: Verify the 10 lines were moved rather than new; then authorize a fix
+    via automatic move-detection or pre-existing-debt annotation.
+  options:
+    - label: Implement automatic move-detection in diff-coverage
+      consequence: Prevents false blocks on refactors automatically; feasible if tool
+        can compare code positions at merge base.
+    - label: Establish pre-existing-debt annotation escape
+      consequence: Allows refactoring bypasses with labeled annotations; needs strict
+        audit to prevent routine abuse of gate exception.
+    - label: Keep current behavior, document refactoring cost
+      consequence: Maintains strict coverage enforcement for new code; contradicts
+        code-quality goals and systematically discourages beneficial
+        refactoring.
 expansion: null
+answered_by: null

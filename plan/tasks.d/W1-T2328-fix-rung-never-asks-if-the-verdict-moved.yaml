@@ -1,0 +1,157 @@
+- id: W1-T2328
+  title: "THE FIX RUNG RE-RUNS THE FAILING CHECK AND NEVER ASKS WHETHER THE VERDICT MOVED — an inert fix reads as a completed strike, so the rung spends its second strike discovering what the first could have shown, and with the cap measured at two that is half the budget"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 30.00
+  rationale: |
+    **THE MEASURED INSTANCE, AND WHERE IT ACTUALLY LIVES.** A coverage-ratchet failure named
+    ledger-replay.ts line 174, a catch arm that drops an unparseable ledger line. A lane wrote a
+    fixture feeding a torn line and the falsifier proved it did nothing: the line stayed uncovered.
+    That file is NOT on main. It is carried by the open PR on branch run-W1-T2296-1787761469480,
+    and the count is stated that way rather than as a main-tree fact.
+
+    **THE CAUSE IS A GREP THAT RUNS BEFORE ANY PARSE.** resolveLedgerUnion is called with
+    REPLAY_LEDGER_LINE_PATTERN, so the union is FILTERED before JSON.parse ever sees a line. A
+    malformed line reaches the catch arm only if it ALSO carries the step token the pattern looks
+    for. A truncated line that happens to carry it arrives; one that does not is never a candidate
+    at all. So the fixture was well-formed as a fixture and inert as a falsifier, and nothing in
+    the loop could say so.
+
+    A test that adds coverage to zero lines is indistinguishable from one that works, unless you
+    falsify it. That is the same sentence W1-T2317 makes about instruments, one layer up.
+
+    **THE RUNG-LEVEL DEFECT IS NOT THAT IT FAILS TO RE-READ.** It re-reads every round: the fix
+    rung refreshes currentCiFailures through its fetchCiFailures dep on each pass, a fresh read
+    rather than a cached one. What it never does is COMPARE. The gate key it derives in ci-log mode
+    is the sorted failing check NAMES, so a check that is still failing for exactly the same reason
+    produces an identical key, reads as the same gate, and the rung proceeds to spend the next
+    strike. An inert fix and a partial fix are the same observation to it.
+
+    **THE BUDGET IS THE ARGUMENT, AND IT IS SMALL.** strikeCap is 2 in plan/policy.yaml, lifted
+    from DEFAULT_SWEEP_POLICY. One inert fix costs half of it. This task is NOT justified by a
+    cost premium: W1-T2317's own premium was tested and unsupported, medians of 23 against 24 days
+    across 223 recoverable fixes, and inventing one here would repeat that error. Two strikes is a
+    measured ceiling, and spending one to learn nothing is the whole case.
+  design: |
+    **Q1 - WHAT OUTPUT MEANS, GIVEN THAT THE TEXT CHANNEL IS DEAD ON THIS HOST.**
+
+    logTail cannot be the mechanism. The job log blob is unreachable here and the type already says
+    so in its own vocabulary: logUnavailable carries a named CiLogUnavailableCause, and its doc
+    states that a denied read once behaved exactly as if nothing had failed. A comparison keyed on
+    an always-empty string would report unchanged on every round, which is the worst possible
+    failure for this feature: it would stand the rung down on healthy work.
+
+    output.summary is not a candidate either. It is empty on every Actions check run measured here,
+    and no job step can write it - the field belongs to whoever created the check run.
+
+    That leaves TWO signals, and the proposal uses them in order.
+
+    (a) The CONCLUSION, as a coarse pre-filter only. Failure to success needs no comparison at all;
+    the rung is already done. Failure to failure is precisely the ambiguous case this task exists
+    for, so the conclusion alone can never be the answer.
+
+    (b) The CHECK-RUN ANNOTATION, as the comparison surface. This is now a real option rather than
+    a hoped-for one: W1-T2298 shipped the reader, and the vocabulary is already in the type.
+    tailSource records whether a tail came from the log or from annotations, and it is documented
+    as a fallback used ONLY when the log read came back empty or failed, so a readable log can
+    never be displaced by it. The comparison should read the annotation MESSAGE SET - normalised,
+    order-insensitive - not a raw string diff, because two runs of the same gate can legitimately
+    order their findings differently.
+
+    **AND WHAT HAPPENS WHEN A CHECK PUBLISHES NO ANNOTATION IS ALREADY A NAMED STATE, WHICH IS THE
+    REASON THIS IS SAFE TO BUILD ON.** CiAnnotationFallback is a three-way union: recovered, empty,
+    and failed with a detail. So "this check published nothing" is not silence, it is the empty
+    outcome, and "the fetch itself broke" is failed. The rule follows from that directly: on
+    anything but two comparable annotation sets, the comparison ABSTAINS and the rung strikes
+    normally. Fail toward spending the strike, never toward standing down, because a false stand-
+    down destroys a legitimate strike while a missed detection only costs what today already costs.
+
+    **Q2 - WHAT AN UNCHANGED VERDICT SHOULD COST, AND WHICH EXISTING ARM THIS IS.**
+
+    Not an extra strike. Spending more budget on a rung that already failed to move anything is the
+    defect, not the remedy.
+
+    **IT IS NOT THE UNCHANGED-TREE STAND-DOWN WIDENED, AND THE MEASURED INSTANCE PROVES IT.**
+    unchangedTreeStandDownReason is a PRE-strike gate keyed on worktree CONTENT: it returns a
+    reason only when the current snapshot is byte-identical to the one taken last time the same
+    gate was about to be spent against. In the instance above the tree DID change - a fixture was
+    written - so worktreeSnapshotsEqual is false and that arm returns undefined. It cannot fire on
+    an inert fix, by construction. Widening it would mean giving one predicate two unrelated
+    meanings.
+
+    **THE ARM IT ACTUALLY EXTENDS IS detectReviewFalseBlock, WHICH ALREADY DOES THIS FOR THE OTHER
+    LANE.** That function compares the prior unmet CLAIM SET against the verdict just computed and
+    refuses to spend an ordinary strike, escalating for re-judgment instead. It is verdict
+    comparison, already shipped, already unit-testable, already the rung's own idea. Two
+    differences matter. It lives only in review mode, so the ci-log lane has no analogue at all.
+    And its no-progress signal additionally requires the head sha to be unchanged - reasonable for
+    a reviewer, wrong for a check, because a fix that lands a commit and moves the verdict not at
+    all is exactly the shape this task names. So the ci-log analogue drops that conjunct: for a
+    check, an identical finding set after a landed fix IS the evidence.
+
+    **DISPOSITION: COMPOSE THE TWO EXISTING OUTCOMES RATHER THAN INVENT A THIRD.** Take
+    unchangedTreeStandDownReason's cost - no strike spent - and detectReviewFalseBlock's payload -
+    escalate carrying the evidence. A silent stand-down would leave the next reader to re-derive
+    why the fixture was inert; the evidence is the useful half, and it costs no budget to carry.
+
+    **Q3 - WHAT MUST NOT CHANGE.**
+
+    (i) The two-strike ceiling STAYS AT TWO. A counter that starts counting must not be compensated
+    for by raising the cap - that would trade a diagnosis for the spend it was meant to save.
+
+    (ii) unchangedTreeStandDownReason keeps its exact predicate and its exact reason string, and
+    detectReviewFalseBlock keeps both of its OR'd signals. This adds a sibling; it retunes neither.
+
+    (iii) Nothing paces, throttles or sleeps. W1-T1066 refuses a polling loop at the tool boundary
+    and that refusal is not weakened here: the comparison reads what the round already fetched.
+
+    (iv) A readable log tail stays preferred over annotations, per tailSource's own documented
+    contract, so no existing recogniser changes what it matches.
+
+    (v) The operator gates every merge. Nothing here arms, merges or dispatches on its own.
+  acceptance:
+    - claim: "an inert fix is detected by comparing the failing check's findings before and after, not by re-reading its name"
+      proof: "unit test: test/fix-rung-verdict-unchanged.test.ts"
+    - claim: "a fix that genuinely moved the findings still strikes normally"
+      proof: "unit test: test/fix-rung-verdict-unchanged.test.ts"
+    - claim: "an absent or unreadable annotation makes the comparison abstain and the rung strike, never stand down"
+      proof: "unit test: test/fix-rung-verdict-unchanged.test.ts"
+    - claim: "an unchanged verdict costs no strike and carries the evidence that the fix was inert"
+      proof: "unit test: test/fix-rung-verdict-unchanged.test.ts"
+    - claim: "the strike ceiling is unchanged and no new budget is granted anywhere"
+      proof: "unit test: test/fix-rung-verdict-unchanged.test.ts"
+    - claim: "the unchanged-tree stand-down and the review false-block escape both behave exactly as they do today"
+      proof: "unit test: test/fix-rung-verdict-unchanged.test.ts"
+  files: [src/run-task.ts, test/fix-rung-verdict-unchanged.test.ts]
+  status: queued
+  attempts: 0
+  origin: "oper#fix-rung-verdict-unchanged-2026-08-26"
+  plan_refs: ["W1-T2317", "W1-T2298", "W1-T1066"]
+  note: |
+    RISK BAND IS RULE 19'S SPAN, NOT BLAST RADIUS - AND HERE THE SPAN IS A STEM ARTIFACT. The
+    linter derives concerns from file STEMS, so src/run-task.ts and test/fix-rung-verdict-
+    unchanged.test.ts read as two (run-task, fix-rung-verdict-unchanged) even though the change is
+    one concern: a pure comparison beside detectReviewFalseBlock plus its falsifier. Decomposing
+    would mean either a test with no subject or renaming the test to test/run-task.test.ts, which
+    the house rule forbids for a coverage-load-bearing test because that file crashes at FILE level
+    under coverage instrumentation and would zero this test's own record. Raised to high and
+    recorded rather than worked around.
+
+    NEITHER NEIGHBOUR IS RE-FILED. W1-T2317 owns the negative-reachability ratchet for instruments;
+    this is the same principle one layer up, at the fix rung, and cites it. W1-T2298 shipped the
+    annotation reader this proposal depends on and is cited as the enabling capability, not
+    revisited.
+
+    WHAT WAS NOT MEASURED. Whether a given check publishes annotations at all varies by check, and
+    no census of that was taken. The design does not need one: the absent case is already a named
+    outcome in CiAnnotationFallback and the rule on it is to abstain and strike, so an unmeasured
+    distribution cannot turn into a wrong stand-down.
+
+    THE INSTANCE IS ON AN IN-FLIGHT BRANCH, NOT MAIN. ledger-replay.ts and its pattern constant
+    live on the open run branch named in the rationale. If that PR changes shape before this task
+    is built, the instance is still valid as the thing that was observed, but the line number is
+    not durable and should be re-derived rather than quoted.

@@ -1,0 +1,116 @@
+- id: W1-T2323
+  title: "THE BOARD INDEX EXPIRES BEFORE ITS OWN FETCH FINISHES — the daemon's gateway takes the default 15,000 ms TTL while a full walk costs 18-22 s, so every read after a full walk is already stale; 52 full walks today at 25-26 REST calls each is ~1,040 s of blocked event loop, and it is the ~1% of the token-exchange race that W1-T2318 does not remove"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 35.00
+  files: [src/lib/status.ts, src/run-task.ts, test/board-index-ttl-outlives-its-fetch.test.ts]
+  origin: "operator-brief#board-index-ttl-2026-08-26"
+  plan_refs: ["W1-T2318", "W1-T2319", "W1-T377", "W1-T1066"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-08-26. The daemon builds its gateway as `buildBatchedGithub(o, r, { log })` — no
+    `ttlMs`, so it takes the default 15,000 ms. A full walk takes 18-22 s. THE TTL IS SHORTER THAN
+    THE FETCH IT GUARDS, so the cache is stale before it exists and every read after a full walk is
+    already expired.
+
+    FROM `board_gateway.fetch_bytes`, today: 133 walks — 81 delta at ~2 REST calls and ~2 s each,
+    and 52 FULL at 25-26 calls and 18-22 s each — 1,472 REST calls in total. That is roughly 1,040
+    seconds of blocked event loop, a 1.2 percent duty cycle, and about 8 long blocks an hour.
+
+    THIS IS THE REMAINDER W1-T2318 DOES NOT REMOVE. That task defers the BOOT walk and takes the
+    token-exchange race from 94 percent per first attempt to roughly 1 percent — a large win and not
+    an elimination — because the ~8 an hour that follow are untouched. This task is that remainder.
+    It is NOT W1-T2318 and NOT W1-T2319, and closing any one of the three must not be read as
+    closing another.
+
+    (Q1) THE CONTRACT, AND WHAT IT IS A CONTRACT ABOUT. It is not a contract about speed. It is a
+    contract about WHAT A CACHED BOARD READING IS ALLOWED TO MEAN, and the current one is incoherent
+    rather than merely slow: a TTL measured from request time against a fetch longer than the TTL
+    can never produce a cache hit for the caller that paid for it.
+
+    OPTION A — SIZE THE TTL AGAINST THE MEASURED FETCH. Cheapest to write and the easiest to get
+    wrong. It cannot be a bare number bump: a longer TTL serves STALER BOARD DATA, and the sweep's
+    dispositions read exactly that. WHAT GOES WRONG WITH A TWO-MINUTE-OLD ROLLUP, concretely: a PR
+    whose checks went green ninety seconds ago is still read as red, so the sweep disposes it to the
+    fix rung and spends a strike on a PR that needed nothing; and the inverse, a PR that went red
+    after the read is disposed mergeable and armed. Both are wrong dispositions taken confidently on
+    stale evidence, which is worse than a slow correct one. Any TTL raise must therefore name the
+    disposition population it makes staler and bound it.
+
+    OPTION B — START THE TTL ON COMPLETION RATHER THAN ON REQUEST. This is the one that addresses
+    the stated defect rather than its symptom: with `cache.at` stamped when the walk RETURNS, a
+    15,000 ms TTL means fifteen seconds of usable cache instead of minus three to minus seven. It
+    changes no staleness bound that anyone reasoned about — a caller asking for "at most 15 s old"
+    gets data at most 15 s old, which is what the number always claimed. What it breaks: nothing in
+    the contract, but it does NOT reduce the number of full walks on its own, so it must be measured
+    rather than assumed to fix the duty cycle.
+
+    OPTION C — SEPARATE THE TWO CLOCKS. The open half and the closed half have different staleness
+    requirements: dispositions need fresh OPEN rows, while `findMergedByTrailer` and its siblings
+    read MERGED rows that are, by construction, immutable once merged. A contract that let the
+    merged half live long and the open half stay short would cut full walks without serving a stale
+    disposition. Most work, and the only option that changes the shape of the index rather than its
+    timing.
+
+    THE TASK PROPOSES B AS THE FLOOR — it is the one change that makes the existing number mean what
+    it says — and requires the implementer to MEASURE whether B alone moves the duty cycle before
+    reaching for A or C. Whichever is taken must be recorded with its staleness argument.
+
+    (Q2) THE SECOND VICTIM, CARRIED WITH ITS CONTROL. `DEFAULT_WORKER_QUIET_FLOOR_MS` is 30,000 ms,
+    so an 18-22 s block is 60-73 percent of the watchdog's entire budget. A worker genuinely silent
+    for 12 s, plus an 18 s block during which the daemon cannot observe anything, reaches 30 s — and
+    the worker is declared quiet when it was the SUPERVISOR that was blind. Same shape as the token
+    abort: a timer racing an observation, where a starved loop makes the timer win.
+
+    RECORDED AS A LIVE EXPOSURE THAT HAS NEVER FIRED. Zero quiet-trip rows in any ledger, against a
+    control of 209 `run.start` rows in the live file, so the corpus is real and the absence is
+    meaningful. This is a mechanism with no observed impact and must NOT be inflated into a second
+    incident; it is named here so that a fix which happens to widen the block is caught.
+
+    (Q3) WHAT MUST NOT CHANGE. The closed index STAYS and stays SHARED — `findMergedByTrailer`,
+    `findMergedByTrailerAll` and `findMergedByHeadBranch` all need merged rows, and that is
+    W1-T377's design and it is sound. `BOARD_MAX_PAGES` and `BOARD_FULL_PAGE_SIZE` are NOT tuned to
+    reduce a count. Nothing paces, throttles or sleeps — W1-T1066 records a polling loop that locked
+    the operator out of his repository for ninety minutes.
+
+    CORRECTED ARITHMETIC, CARRIED RATHER THAN THE EARLIER FIGURE. The spend is 1,472 core calls
+    today, NOT the ~600 previously quoted: that figure counted only boot walks and missed the other
+    ~110. And exactly 1 of 853 ledger task ids is tripped (W1-T1279), measured against the SINGLE
+    file the real reader takes — an earlier all-files replication said 2 and was wrong.
+
+    A NOTE ON THIS SHARD'S OWN ID. W1-T2323 was reserved on a DEGRADED mint: the advisory could not
+    enumerate open PRs because `gh pr list` was refused on an exhausted GraphQL bucket, so its
+    ceiling came from three surfaces rather than four. The open-PR title, body and head-branch
+    surfaces were therefore re-verified by hand over a REST enumeration before this file was
+    written.
+
+    RISK BAND. `risk: high` is set UP FRONT and is Rule 19's SPAN, not blast radius: `files:` crosses
+    the board gateway and the daemon's own wiring.
+  acceptance:
+    - claim: "a cached board reading is never older than the TTL claims, measured from when it became available"
+      proof: "unit test: test/board-index-ttl-outlives-its-fetch.test.ts"
+    - claim: "a full walk no longer leaves the cache expired at the moment it returns"
+      proof: "unit test: test/board-index-ttl-outlives-its-fetch.test.ts"
+    - claim: "the chosen option is recorded together with the disposition staleness it accepts"
+      proof: "unit test: test/board-index-ttl-outlives-its-fetch.test.ts"
+    - claim: "the duty cycle is measured after the change rather than assumed to have moved"
+      proof: "unit test: test/board-index-ttl-outlives-its-fetch.test.ts"
+    - claim: "the worker quiet watchdog budget is not widened by whatever is done here"
+      proof: "grep: DEFAULT_WORKER_QUIET_FLOOR_MS in src/run-task.ts"
+    - claim: "the closed index is still built and still shared with the merged-row consumers"
+      proof: "grep: findMergedByTrailer in src/lib/status.ts"
+    - claim: "the page bounds are unchanged, since the count is correct for what the index is for"
+      proof: "grep: BOARD_MAX_PAGES in src/lib/status.ts"
+    - claim: "the daemon still builds its gateway through the one batched constructor"
+      proof: "grep: buildBatchedGithub in src/run-task.ts"
+    - claim: "nothing added paces, throttles or sleeps a call"
+      proof: "unit test: test/board-index-ttl-outlives-its-fetch.test.ts"
+  falsifier: |
+    If test/board-prs-rest.test.ts already asserts that the gateway's cache timestamp is taken on
+    fetch completion rather than on request, this task is already built and must be closed rather
+    than implemented.

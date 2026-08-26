@@ -251,7 +251,16 @@ function followupFakeGh(branch: string): string {
       "if [[ \"$1\" == 'pr' && \"$2\" == 'view' ]]; then",
       `  if [[ "$5" == 'headRefName' ]]; then echo '{"headRefName":"${branch}"}'; exit 0; fi`,
       "  if [[ \"$5\" == 'body' ]]; then echo '{\"body\":\"\"}'; exit 0; fi",
-      "  if [[ \"$5\" == 'statusCheckRollup' ]]; then echo '{\"statusCheckRollup\":[{\"name\":\"ci\",\"conclusion\":\"FAILURE\"}]}'; exit 0; fi",
+      "fi",
+      // W1-T2268: `waitForCiGreen` now reads REST (`gh api …`), never `gh pr view --json
+      // statusCheckRollup`. RED on the composed check-run, on the very first poll — same
+      // "no sleep, no review spawn" shape as before.
+      "if [[ \"$1\" == 'api' ]]; then",
+      "  case \"$2\" in",
+      "    */pulls/*) echo '{\"number\":1,\"state\":\"open\",\"merged\":false,\"merged_at\":null,\"head\":{\"sha\":\"deadbeef\"}}'; exit 0 ;;",
+      "    */check-runs*) echo '{\"check_runs\":[{\"name\":\"ci\",\"status\":\"completed\",\"conclusion\":\"failure\"}]}'; exit 0 ;;",
+      "    */status) echo '{\"statuses\":[]}'; exit 0 ;;",
+      "  esac",
       "fi",
       "if [[ \"$1\" == 'pr' && \"$2\" == 'edit' ]]; then exit 0; fi",
       "exit 1",
@@ -1091,30 +1100,43 @@ function statefulFakeGh(opts: {
     'if (args[0] === "pr" && args[1] === "view") {',
     `  if (field === "headRefName") { process.stdout.write(JSON.stringify({ headRefName: ${JSON.stringify(opts.branch)} })); process.exit(0); }`,
     '  if (field === "body") { process.stdout.write(JSON.stringify({ body: "" })); process.exit(0); }',
-    '  if (field === "statusCheckRollup") {',
-    `    const roll = next("ci", ${JSON.stringify(opts.ciSeq)});`,
-    '    process.stdout.write(JSON.stringify({ statusCheckRollup: roll }));',
-    "    process.exit(0);",
-    "  }",
-    '  if (field === "state,statusCheckRollup") {',
-    `    const v = next("poll", ${JSON.stringify(opts.pollSeq ?? [{ state: "OPEN" }])});`,
-    "    process.stdout.write(JSON.stringify(v));",
-    "    process.exit(0);",
-    "  }",
-    '  if (field === "state") {',
-    `    const v = next("state", ${JSON.stringify(opts.stateSeq ?? ["OPEN"])});`,
-    '    process.stdout.write(JSON.stringify({ state: v }));',
-    "    process.exit(0);",
-    "  }",
     "}",
-    // W1-T511: `ghLiveState` (the fix rung's real, non-injected terminal-state
-    // reader) now goes over REST (`gh api repos/{o}/{r}/pulls/{n}`) rather than
-    // `gh pr view --json state` — same `stateSeq` counter, translated to REST's
-    // `state`+`merged` shape so `prStateFromRest` folds it back to the identical
-    // GraphQL token this stub answered before.
+    // W1-T2268: `waitForCiGreen`/`pollToGate` now read REST (`gh api …`), never `gh pr view
+    // --json statusCheckRollup`/`state,statusCheckRollup`. Both loops' composed-rollup reads
+    // (the outer pre-review gate, every fix-rung strike's own poll, AND `pollToGate`'s own
+    // merge-gate poll) share the SAME `commits/{sha}/check-runs` endpoint a real GitHub would
+    // answer identically regardless of caller — so `ciSeq` drives the first `ciSeq.length`
+    // reads (the pre-review/fix-rung phase) and `pollSeq`'s rollups (if given) drive every read
+    // after that (the pollToGate phase, which chronologically always follows). No test drives
+    // both a multi-strike `ciSeq` AND a `pollSeq` at once, so this ordering is never ambiguous.
+    'if (args[0] === "api" && typeof args[1] === "string" && /^repos\\/[^/]+\\/[^/]+\\/commits\\/[^/]+\\/check-runs/.test(args[1])) {',
+    `  const ciSeq = ${JSON.stringify(opts.ciSeq)};`,
+    `  const pollRollups = ${JSON.stringify((opts.pollSeq ?? []).map((p) => p.statusCheckRollup ?? []))};`,
+    "  const f = counterDir + \"/ci\";",
+    "  let seen = 0;",
+    '  try { seen = parseInt(fs.readFileSync(f, "utf8") || "0", 10); } catch (e) {}',
+    "  fs.writeFileSync(f, String(seen + 1));",
+    "  const roll = seen < ciSeq.length || pollRollups.length === 0",
+    "    ? ciSeq[Math.min(seen, ciSeq.length - 1)]",
+    "    : pollRollups[Math.min(seen - ciSeq.length, pollRollups.length - 1)];",
+    '  process.stdout.write(JSON.stringify({ check_runs: roll.map((c) => ({ name: c.name, status: "completed", conclusion: c.conclusion })) }));',
+    "  process.exit(0);",
+    "}",
+    'if (args[0] === "api" && typeof args[1] === "string" && /^repos\\/[^/]+\\/[^/]+\\/commits\\/[^/]+\\/status/.test(args[1])) {',
+    '  process.stdout.write(JSON.stringify({ statuses: [] }));',
+    "  process.exit(0);",
+    "}",
+    // W1-T511/W1-T2268: `ghLiveState` (the fix rung's terminal-state reader) AND
+    // `pollToGate`/`waitForCiGreen`'s own PR-row read now share this SAME
+    // `repos/{o}/{r}/pulls/{n}` REST endpoint — a real GitHub reports one current state
+    // regardless of which caller asks. `pollSeq`'s states drive it when given (the pollToGate
+    // tests, none of which also drive the fix rung); `stateSeq` drives it otherwise (the fix
+    // rung tests, none of which also reach pollToGate) — never both in the same run.
     'if (args[0] === "api" && typeof args[1] === "string" && /^repos\\/[^/]+\\/[^/]+\\/pulls\\/\\d+$/.test(args[1])) {',
-    `  const v = next("state", ${JSON.stringify(opts.stateSeq ?? ["OPEN"])});`,
-    '  process.stdout.write(JSON.stringify(v === "MERGED" ? { state: "closed", merged: true } : { state: v.toLowerCase(), merged: false }));',
+    `  const pollStates = ${JSON.stringify((opts.pollSeq ?? []).map((p) => p.state))};`,
+    `  const v = pollStates.length > 0 ? next("state", pollStates) : next("state", ${JSON.stringify(opts.stateSeq ?? ["OPEN"])});`,
+    '  const merged = v === "MERGED";',
+    '  process.stdout.write(JSON.stringify({ number: 1, state: merged ? "closed" : v.toLowerCase(), merged, merged_at: merged ? "2026-01-01T00:00:00Z" : null, head: { sha: "deadbeef" } }));',
     "  process.exit(0);",
     "}",
     // W1-T1031: the risk judge's own `changeView` reads a PR's ACTUAL changed-file list over

@@ -39,12 +39,13 @@ test("generateSandboxTask: successive generated subjects are distinct, not drawn
   assert.equal(ids.size, 50, "every generated subject id must be distinct");
 });
 
-test("generateSandboxTask: reaches every shard in the project layer, including the smallest (ci.yaml)", () => {
+test("generateSandboxTask: reaches every shard in the project layer, including the smallest (failures.yaml)", () => {
   const index = realIndex();
   const shardNames = Object.keys(index.files).sort();
-  // Sanity: the corpus really is lopsided (design ii) — ci.yaml really is the smallest.
+  // Sanity: the corpus really is lopsided (design ii) — failures.yaml really is the smallest.
+  // (Was ci.yaml, tied at 6, until PR#2997 added two entries there — 8 now beats the tie.)
   const smallest = shardNames.reduce((a, b) => (index.files[a].entries.length <= index.files[b].entries.length ? a : b));
-  assert.equal(smallest, "ci.yaml");
+  assert.equal(smallest, "failures.yaml");
 
   for (const shard of shardNames) {
     const subject = generateSandboxTask(index, [shard], 0);

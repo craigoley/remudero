@@ -153,6 +153,17 @@ function fakeGh(branch: string, prUrl: string): string {
       "fi",
       "if [[ \"$1\" == 'pr' && \"$2\" == 'edit' ]]; then exit 0; fi",
       `if [[ "$1" == 'api' && "$2" == '--method' && "$3" == 'POST' ]]; then echo '{"html_url":"${prUrl}","number":99}'; exit 0; fi`,
+      // W1-T2268: `pollToGate`/`waitForCiGreen` no longer spend `gh pr view --json state,
+      // statusCheckRollup` (GraphQL) — they read the rollup over REST — so the three argv shapes
+      // below are what production now asks for. Answering them keeps this fixture's ORIGINAL
+      // contract intact -- red CI on the first poll -- rather than changing what the test asserts.
+      "if [[ \"$1\" == 'api' ]]; then",
+      "  case \"$2\" in",
+      "    */check-runs*) echo '{\"check_runs\":[{\"name\":\"ci\",\"status\":\"completed\",\"conclusion\":\"failure\"}]}'; exit 0 ;;",
+      "    */status) echo '{\"state\":\"failure\",\"statuses\":[]}'; exit 0 ;;",
+      `    */pulls/*) echo '{"number":99,"state":"open","merged":false,"head":{"sha":"deadbee","ref":"${branch}"}}'; exit 0 ;;`,
+      "  esac",
+      "fi",
       "exit 1",
       "",
     ].join("\n"),

@@ -3,27 +3,27 @@
   "entries": [
     {
       "heading": "Mission",
-      "line": 71,
+      "line": 73,
       "summary": "A plan-stewarding orchestration harness on top of Claude Code. A durable main agent runs the"
     },
     {
       "heading": "NET STATE",
-      "line": 91,
+      "line": 93,
       "summary": "Derived present-tense capability facts (lane count, cost ceiling, recon cap, ci-gate roster),"
     },
     {
       "heading": "SHIPPED log",
-      "line": 529,
+      "line": 556,
       "summary": "Shipped arcs, keyed by Remudero-Task (Standing rule 13: the proof is a MERGED PR, not prose)."
     },
     {
-      "heading": "Calibration (observed — through RETRO-1787714349337, 2026-08-26)",
-      "line": 1254,
+      "heading": "Calibration (observed — through RETRO-1787749880590, 2026-08-26)",
+      "line": 1211,
       "summary": "The empirical baseline mounts.yaml (W1-T5, shipped #42; risk/class routing since W1-T167/#606) and"
     },
     {
       "heading": "Retro proposals (PROPOSALS ONLY; NOT yet in plan/tasks.yaml)",
-      "line": 1386,
+      "line": 1346,
       "summary": "★ LIVE RANKING (the ONE place open proposals are ordered). `P47 > P40 > P43 > P53 > P54 > P48 >"
     },
     {

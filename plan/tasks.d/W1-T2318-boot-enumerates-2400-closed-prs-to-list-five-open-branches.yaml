@@ -1,0 +1,113 @@
+- id: W1-T2318
+  title: "TO LIST FIVE OPEN BRANCHES THE DAEMON ENUMERATES 2,400 CLOSED PULL REQUESTS, SYNCHRONOUSLY, ON THE EVENT LOOP, AT BOOT, BEFORE ANYTHING NEEDS THE RESULT — 26 REST calls, 22.2 seconds, of which the one page the caller actually asked for took 432 ms; it is the root of a three-defect chain and the boot-time caller pays for an index it never reads"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 35.00
+  files: [src/run-task.ts, src/lib/status.ts, test/boot-board-walk-is-open-only.test.ts]
+  origin: "operator-brief#boot-board-walk-2026-08-26"
+  plan_refs: ["W1-T377", "W1-T2311", "W1-T1066"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-08-26 IN THE DAEMON'S OWN CONTAINER, WITH ITS OWN ENVIRONMENT.
+    `listOpenHeadBranches` is a one-liner over `index`; the cost is `fetchBoardPrsRest`, two
+    paginated loops over
+    gh api repos/craigoley/remudero/pulls?state=<open|closed>&sort=updated&direction=desc&per_page=100&page=<n>
+    bounded by `BOARD_MAX_PAGES` at `BOARD_FULL_PAGE_SIZE`.
+
+    IT IS 26 CALLS, NOT ONE. Open walk: 1 page, 6 rows, 432 ms. Closed walk: 25 pages, 2,400 rows,
+    21,813 ms. Total 22,245 ms. Per page 768-1,026 ms, uniform — no slow request, no stall, nothing
+    waiting. A single slow request and 26 fast ones look identical from outside and have opposite
+    remedies; this is the second. THE OPEN PAGE ALONE RETURNED EVERYTHING THE CALLER ASKED FOR.
+
+    AND THE WALK CANNOT STOP EARLY ON THE PASS THAT MATTERS. It breaks on `reachedKnown`, comparing
+    each row against a known map. At boot the index is cold, that map is empty, nothing matches, and
+    it walks to a short page. The short-circuit that makes this cheap on every later pass is
+    structurally unable to fire on the first one.
+
+    THE THREE-DEFECT CHAIN, ALL MEASURED THE SAME DAY. `daemonCommand` arms
+    `refreshInstallationToken`'s 20-second abort timer 25 lines before this call. The call blocks
+    the loop for 19.8 s. The timer — margin 215 ms — fires the instant the loop frees, and the catch
+    reads `timeoutController.signal.aborted` rather than the error, so it writes "exchange timed
+    out" while the HTTP response that arrived ~19 seconds earlier is discarded unread. 142 of 142
+    exchange failures are first attempts; zero of 198 non-first attempts have ever failed. Because
+    the App token never arrives, the daemon keeps its boot PAT — so THE CALL THAT STARVES THE TOKEN
+    EXCHANGE IS ITSELF BILLED TO THE IDENTITY THE EXCHANGE EXISTS TO REPLACE: bracketed with
+    matching login and reset epoch at both ends, X-Ratelimit-Resource core, login cao825, about 26
+    points per boot times about 24 boots per day, roughly 600 core points daily on the operator's
+    personal token. W1-T2311 files that credential defect; it is DOWNSTREAM of this one and is not
+    re-filed here.
+
+    (Q1) THE SCOPING, AND WHY IT IS A SCOPING DECISION RATHER THAN A PERFORMANCE FIX. Nothing here
+    is slow. 870 ms for a 100-row page is a normal REST round trip, and making it faster is not
+    available. What IS available is not asking for it: the constraint on WHEN this value is needed
+    is measured and narrow on all three axes.
+
+    NOT SYNCHRONOUS BY ITS CONSUMERS. Nothing reads the value during boot. It is synchronous only
+    because `index` goes through `execFileSync`, which is an implementation choice of the gateway,
+    not a requirement of the caller.
+
+    NOT NEEDED AT BOOT. It is computed once at boot and memoised, but the first read is at the first
+    dispatch decision, which the startup logs place 122 to 282 seconds after the drain announcement.
+    The value sits unread for two to five minutes.
+
+    NOT NEEDED COMPLETE. `corroboratesForwardProgress` returns "unreadable" for a null list, which is
+    not "corroborated", so the task stays "tripped". THAT FAIL-CLOSED PATH IS ALREADY SHIPPED AND
+    ALREADY TESTED — this task does not invent a degraded mode, it uses the one that exists.
+
+    So the decision is about WHICH CALLER PAYS FOR WHAT AND WHEN, not about making a call cheaper.
+    That is why it is scoping.
+
+    (Q2) WHAT MUST NOT BE MISREAD AS THE DEFECT. THE CLOSED WALK IS NOT GLOBALLY USELESS.
+    `findMergedByTrailer`, `findMergedByTrailerAll` and `findMergedByHeadBranch` all need merged rows
+    and share this one index. That is W1-T377's design — one batched fetch serving every consumer
+    instead of a per-task call — and it is SOUND. The defect is that the boot-time caller which needs
+    only open branches pays for all of them, synchronously, before anything needs either.
+
+    A PROPOSAL THAT REMOVES OR TRUNCATES THE CLOSED INDEX IS REFUSED BY THIS TASK. It would break
+    three consumers to fix one caller, and it would reintroduce exactly the per-task fetch storm
+    W1-T377 exists to prevent. `BOARD_MAX_PAGES` and `BOARD_FULL_PAGE_SIZE` are likewise not to be
+    tuned down to make a number smaller: the count is correct for what the index is for.
+
+    (Q3) THE CORRECTED CONSUMER PICTURE, BECAUSE THE OBVIOUS ONE IS WRONG. IT DOES NOT FEED WORKTREE
+    PRUNING — `pruneStaleRuns` takes a repo dir, a worktrees root and options, and no branch list at
+    all. The two consumers are `breakerGateFor` and the feedback-open-PR check, BOTH READING ONLY
+    OPEN HEAD BRANCHES. And `evaluateDispatchBreakerDetailed` reads the list ONLY when a task's
+    ledger breaker is already tripped, returning before `corroboratesForwardProgress` otherwise. For
+    every clear task — the overwhelming majority — those 22 seconds produce a value that is computed
+    and never read.
+
+    WHAT MUST NOT CHANGE. Nothing paces, throttles or sleeps a call: W1-T1066 records a polling loop
+    that locked the operator out of his repository for ninety minutes. `EXCHANGE_TIMEOUT_MS` is NOT
+    raised — that converts a fast loud failure into a slow one and leaves the blocking call in place.
+    The fail-closed "unreadable" path STAYS fail-closed. And the signal-aborted-rather-than-error
+    reporting defect is SEPARATE and stays separate: it would hide the next cause even after this one
+    is fixed, so closing this task must not be taken as closing that.
+
+    RISK BAND. `risk: high` is set UP FRONT and is Rule 19's SPAN, not blast radius: `files:` crosses
+    the daemon boot path and the board gateway, which fails sizing at medium however small each hunk
+    is.
+  acceptance:
+    - claim: "the boot-time caller no longer pays for the closed index before anything reads it"
+      proof: "unit test: test/boot-board-walk-is-open-only.test.ts"
+    - claim: "the open-branch consumers still receive open head branches unchanged"
+      proof: "unit test: test/boot-board-walk-is-open-only.test.ts"
+    - claim: "the closed index is still built for the merged-row consumers that share it"
+      proof: "grep: findMergedByTrailer in src/lib/status.ts"
+    - claim: "an absent branch list still leaves a tripped task tripped, fail closed"
+      proof: "grep: corroboratesForwardProgress in src/lib/status.ts"
+    - claim: "the page bounds are unchanged, since the count is correct for what the index is for"
+      proof: "grep: BOARD_MAX_PAGES in src/lib/status.ts"
+    - claim: "nothing added paces, throttles or sleeps a call"
+      proof: "unit test: test/boot-board-walk-is-open-only.test.ts"
+    - claim: "the abort timeout constant is not raised by this task"
+      proof: "unit test: test/boot-board-walk-is-open-only.test.ts"
+    - claim: "the reporting defect is recorded as separate and still open"
+      proof: "unit test: test/boot-board-walk-is-open-only.test.ts"
+  falsifier: |
+    If test/open-prs-rest.test.ts already asserts that the daemon's boot path fetches only open
+    pull requests, this task is already built and must be closed rather than implemented.
