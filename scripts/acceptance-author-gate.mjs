@@ -40,7 +40,7 @@
 // the defect and message (from `acceptanceAuthorTimeCheck`/`acceptanceBlockDiagnostics`, verbatim
 // — design item (ii), W1-T1060) printed to stderr.
 
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { pathToFileURL } from "node:url";
 import { acceptanceAuthorTimeCheck } from "../src/lib/review.ts";
@@ -92,19 +92,49 @@ export function readEventPayload(eventPath) {
 }
 
 /**
- * The gate's own verdict: the bot exemption first, then `acceptanceAuthorTimeCheck` verbatim (no
- * `expectedTaskId` — this job has no plan lookup of its own, the same general-case call shape
- * `rmd check-acceptance` itself uses).
- * @param {{ body: string, authorLogin?: string }} input
+ * Every task id the checked-out plan declares — the set a `Remudero-Task:` trailer must land in for
+ * its exemption to be true (W1-T2297). PURE given `read`/`list`, so both arms are reachable from a
+ * test without a real checkout.
+ *
+ * FAILS OPEN, DELIBERATELY: an unreadable plan returns `undefined`, and `evaluateGate` then passes
+ * NO resolver, which is `acceptanceAuthorTimeCheck`'s pre-existing trust-the-trailer behaviour byte
+ * for byte. A gate that cannot read the plan must not start refusing bodies it used to accept —
+ * that is how a checkout hiccup becomes a fleet-wide outage.
+ *
+ * @param {{ read: (p: string) => string, list: (d: string) => string[] }} io
+ * @returns {Set<string> | undefined}
  */
-export function evaluateGate({ body, authorLogin }) {
+export function declaredPlanTaskIds({ read, list }) {
+  try {
+    let text = read("plan/tasks.yaml");
+    for (const f of list("plan/tasks.d")) {
+      if (f.endsWith(".yaml")) text += "\n" + read(`plan/tasks.d/${f}`);
+    }
+    const ids = new Set();
+    for (const m of text.matchAll(/^\s*-?\s*id:\s*(\S+)\s*$/gm)) ids.add(m[1]);
+    return ids.size > 0 ? ids : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The gate's own verdict: the bot exemption first, then `acceptanceAuthorTimeCheck`.
+ *
+ * W1-T2297: when the checked-out plan is readable, its declared-id set is passed as
+ * `trailerResolves`, so a trailer naming nothing the plan declares no longer exempts the body from
+ * having a judgeable Acceptance block. `planIds` omitted or `undefined` ⇒ no resolver ⇒ the
+ * pre-existing behaviour.
+ * @param {{ body: string, authorLogin?: string, planIds?: Set<string> }} input
+ */
+export function evaluateGate({ body, authorLogin, planIds }) {
   if (authorLogin !== undefined && EXEMPT_BOT_LOGINS.has(authorLogin)) {
     return {
       ok: true,
       message: `author "${authorLogin}" is exempt — the dep-review lane owns arming for these (W1-T1060 rationale (5))`,
     };
   }
-  return acceptanceAuthorTimeCheck(body);
+  return acceptanceAuthorTimeCheck(body, planIds ? { trailerResolves: (id) => planIds.has(id) } : {});
 }
 
 /**
@@ -143,7 +173,13 @@ export function main(argv) {
     return;
   }
 
-  const result = evaluateGate({ body: payload.body, authorLogin: payload.authorLogin });
+  // W1-T2297: read the checked-out plan so a `Remudero-Task:` trailer's exemption is verified
+  // rather than assumed. Unreadable ⇒ `undefined` ⇒ no resolver ⇒ the pre-existing behaviour.
+  const planIds = declaredPlanTaskIds({
+    read: (rel) => readFileSync(rel, "utf8"),
+    list: (dir) => readdirSync(dir),
+  });
+  const result = evaluateGate({ body: payload.body, authorLogin: payload.authorLogin, planIds });
   if (!result.ok) {
     console.error(`acceptance-author-gate: REFUSED (${result.defect}) — ${result.message}`);
     process.exitCode = 1;
