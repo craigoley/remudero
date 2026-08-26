@@ -1,0 +1,142 @@
+- id: W1-T2299
+  title: "A CORRECTED PR BODY CANNOT REACH THE REVIEWER THAT JUDGED THE OLD ONE — the post-review row offers a head only at reviewState none or a stale pending, so a posted failure verdict makes that head permanently unofferable and a body edit that repairs the very input the verdict refused clears nothing; the same file already carries the reasoning for the stuck-pending case"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 45.00
+  files: [src/lib/sweep.ts, src/run-task.ts, test/review-body-edit-reoffer.test.ts]
+  origin: oper#corrected-body-cannot-reach-the-reviewer-2026-08-26
+  plan_refs: ["W1-T913", "W1-T1018", "W1-T1060", "W1-T456", "W1-T351"]
+  status: queued
+  attempts: 0
+  rationale: |
+    RE-DERIVED AT origin/main b1ed96c1 IN A SCRATCH WORKTREE PROVEN EQUAL TO IT. THE LEDGER WAS NOT
+    READ AND NO LEDGER FIGURE APPEARS HERE: resolveLedgerUnion returns archiveCount zero and ok
+    false at both candidate state roots reachable from this container, which is the union's own
+    coverage refusal rather than a count. Source and the GitHub API are the only evidence below.
+
+    (1) THE ROW'S OWN PREDICATE IS THE MECHANISM. The post-review disposition in src/lib/sweep.ts
+    matches only when checks are green, required contexts are readable, and reviewState is either
+    none or a pending that reviewPendingIsStale judges stuck. reviewState is a four-valued field on
+    OpenPrView -- success, failure, pending, none. A posted failure is none of the two the row
+    accepts, so the head is never offered again. Nothing in the predicate reads the PR body at all,
+    which is why editing the body moves nothing.
+
+    (2) THIS IS NOT A DEFECT IN THE REFUSAL. Refusing to re-review an unchanged head is correct and
+    must stay. The defect is narrower: a SUPERSEDED INPUT HAS NO PATH BACK. The verdict judged a
+    body that no longer exists, and the only route to a fresh judgement is a new head.
+
+    (3) THE CODEBASE ALREADY ARGUED THIS CASE FOR THE ADJACENT ONE. The comment on
+    reviewPendingSince states the identical failure shape for pendings, in its own words: the row
+    used to key on reviewState none alone and so would never offer the head again, silently
+    stranding a PR whose owning run died mid-review. W1-T913 fixed that by adding a staleness
+    clock, and reviewPendingIsStale's own doc records the error direction it chose -- an undated
+    read is treated as stale rather than fresh, because re-offering risks no loss while stranding
+    does. That reasoning transfers to a superseded body without modification.
+
+    (4) THE MEASURED INSTANCE, VERIFIED OVER REST RATHER THAN RECALLED. On PR 2891 the combined
+    status for the head 5f6e9720 carries remudero-review at state failure, created 2026-08-26T00:46:19Z,
+    described as a FAIL on an unmet criterion. The PR remained open and its head later moved to a
+    different sha; the body edit between those points produced no re-review. The status was read
+    from the combined-status endpoint, never from check-runs, which is structurally blind to a
+    commit status.
+  note: |
+    ── Q1. THE PROPOSAL, AND WHAT ITS INSTRUMENT CANNOT SEE ────────────────────────────────────
+
+    (i) THE SHAPE. Extend the post-review row with a third admitting arm beside none and
+    stale-pending: a head whose PR body changed AFTER the verdict on that head was posted, by
+    comparing the PR's updated_at against the verdict's created_at. Both timestamps are already
+    available -- the verdict's from the same combined-status read that yields reviewState, the
+    PR's from the object buildOpenPrViews already fetches.
+
+    (ii) WHAT THE COMPARISON CANNOT DISTINGUISH, AS ASKED. A body edited to CORRECT a proof and a
+    body edited to GAME a verdict are identical at the field level. Both are a later updated_at
+    against the same verdict; nothing in the payload separates a repaired pattern from a weakened
+    claim, and no heuristic over the diff of two bodies would separate them either, because the
+    legitimate edit and the evasive one make the same KIND of change to the same field.
+
+    (iii) AND A SECOND IMPRECISION THE BRIEF DID NOT NAME, WHICH THE BUILD MUST NOT DISCOVER LATE.
+    updated_at IS NOT A BODY-EDIT TIMESTAMP. It moves on any PR activity -- a comment, a label, a
+    title edit, a review comment. CHECKED AGAINST THE ACTUAL PAYLOAD: the PR object exposes exactly
+    four time fields, created_at, updated_at, closed_at, merged_at, and NO body-specific one. So the
+    proposed arm admits strictly more than bodies-that-changed, and the honest framing is that it
+    detects ACTIVITY AFTER A VERDICT, not a body edit. Whoever builds this must either say so at the
+    call site or find a narrower signal; silently calling it a body-edit check would be the same
+    class of defect as a count stated without its definition.
+
+    (iv) WHAT MAKES THE COARSENESS TOLERABLE, AND WHAT IT IS NOT. Re-offering does not grant
+    anything: the row's own comment states that the dispatch runs the review lane posting a FRESH
+    verdict and that the prior verdict is NEVER carried forward. So a gaming edit buys a
+    re-judgement, not a pass, and a weakened claim still has to survive the reviewer. That is why
+    admitting too much is survivable. It is NOT a defence against REPEATED editing, which is
+    exactly what Q2 bounds.
+
+    ── Q2. THE BOUND ───────────────────────────────────────────────────────────────────────────
+
+    (v) REUSE THE CAP THAT ALREADY EXISTS; DO NOT MINT A THRESHOLD. SweepPolicy already carries
+    reviewOrphanCap and reviewOrphanBackoffMinutes, W1-T1018's elapsed-time backoff filed under the
+    operator ruling that a review budget was the wrong shape and backoff was the right one, and
+    pendingCeilingMinutes, which reviewPendingIsStale itself reuses rather than tuning a second
+    threshold -- its doc gives that reason explicitly, that one policy row answering both questions
+    keeps them from drifting apart. A body-edit re-offer is the same question a third time. It
+    should share that budget, so one head's total re-reviews are capped across ALL re-offer reasons
+    rather than each reason getting its own allowance. NAME THE POLICY KEYS, NEVER THEIR VALUES:
+    the numbers live in DEFAULT_SWEEP_POLICY and are the operator's to move.
+
+    (vi) WHY UNBOUNDED RE-REVIEW IS WORSE THAN THE CURRENT REFUSAL. A refusal is stable and cheap:
+    the PR sits until a new head arrives, and the operator can see why. An unbounded re-offer is
+    neither. Each one spends a real review lane and a model spawn, the arm is edge-triggered on a
+    timestamp an author controls, and an author who keeps editing keeps re-driving -- so the failure
+    mode is not a stalled PR but a lane that never drains, starving every other PR waiting on the
+    same reviewLanes budget. postReviewPending's idempotent-per-head guard does NOT help here: it
+    makes a redundant PENDING POST a no-op, and reviewPendingIsStale's doc says so in those terms,
+    but a redundant reviewCommand run is a full re-judgement and is not free. A bounded re-offer
+    keeps the recovery while keeping the termination the refusal currently provides for free.
+
+    (vii) THE PRECEDENT THAT BODY-ONLY RE-RUNS ARE A SANCTIONED SHAPE, NOT A NOVEL ONE.
+    .github/workflows/acceptance-author-gate.yml declares types with edited included, and its header
+    states the reason: a hand-opened PR body that fails only because a claim wrapped onto a second
+    line should cost a two-minute correction rather than a fresh head plus a full CI cycle. That
+    gate exists as its own workflow file PRECISELY to make edited reachable, because ci.yml takes
+    the default types and excludes it. CHECKED: ci.yml's only occurrence of a types key is inside a
+    comment saying it has no override, so the exclusion is real and the separate file is the whole
+    mechanism. This task proposes for the reviewer what that gate already does for the author-time
+    check.
+
+    ── Q3. WHAT MUST NOT CHANGE ────────────────────────────────────────────────────────────────
+
+    (viii) THE REVIEWER KEEPS ITS TEETH. It must still be able to FAIL a PR, and still able to
+    downgrade a proof as non-responsive. Re-offering changes WHICH INPUT is judged, never the range
+    of verdicts reachable. A build that made a re-offered head easier to pass would have inverted
+    the task.
+
+    (ix) A NEW HEAD REMAINS THE DESIGNED PATH. This adds a recovery for a superseded input; it does
+    not replace pushing a commit, and the reason line must keep the three admitting causes
+    distinguishable -- never reviewed, orphaned by a push, stuck pending, and now edited after a
+    verdict -- for the same reason the existing row already separates its own two, so an operator
+    reading the ledger can tell them apart at a glance.
+
+    (x) NOTHING RE-OFFERS A HEAD WHOSE BODY DID NOT CHANGE. The arm is strictly additive. A head
+    with a failure verdict and no subsequent activity stays exactly as unofferable as it is today,
+    which is the behaviour item (2) says is correct.
+
+    (xi) RULE 19 BAND. risk high is set up front because files spans two source stems -- the row
+    lives in sweep.ts and the OpenPrView field it would read is populated by buildOpenPrViews in
+    run-task.ts -- and Rule 19 sizes on SPAN. The band is the span reading, not a blast-radius
+    judgement; the change adds one predicate arm and one field.
+  acceptance:
+    - claim: "a head whose PR body changed after its verdict was posted is offered to the post-review lane, and an otherwise identical head with no later change is not offered"
+      proof: "unit test: test/review-body-edit-reoffer.test.ts"
+    - claim: "the re-offer shares the existing review-orphan budget rather than a new threshold, so one head cannot earn unbounded re-reviews across all re-offer reasons combined"
+      proof: "unit test: test/review-body-edit-reoffer.test.ts"
+    - claim: "a head that has exhausted that budget is not offered again even when its body changes once more"
+      proof: "unit test: test/review-body-edit-reoffer.test.ts"
+    - claim: "the disposition reason names editing-after-a-verdict as its own cause, distinct from never-reviewed, orphaned-by-a-push and stuck-pending"
+      proof: "unit test: test/review-body-edit-reoffer.test.ts"
+    - claim: "a re-offered head is judged afresh and no prior verdict is carried forward, so the reviewer can still fail it and still downgrade a non-responsive proof"
+      proof: "unit test: test/review-body-edit-reoffer.test.ts"
+    - claim: "the admitting arm is recorded as detecting activity after a verdict rather than a body edit, because the payload carries no body-specific timestamp"
+      proof: "unit test: test/review-body-edit-reoffer.test.ts"

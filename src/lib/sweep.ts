@@ -261,6 +261,55 @@ export interface CiFailure {
    * read cannot support).
    */
   outsidePrRange?: boolean;
+  /**
+   * WHY this failure's {@link logTail} is empty, when it is empty. The producer's log
+   * read is best-effort and NEVER throws — but until this field existed, every way of failing
+   * collapsed into the SAME `logTail: ""` a genuinely silent check produces, so a worker handed a
+   * denied read behaved exactly as if nothing had failed. Present ONLY when `logTail` is empty and
+   * a cause was observed; ABSENT whenever a tail was actually captured, so `logUnavailable !==
+   * undefined` is a sound test for "the log could not be read" and never fires on a real tail.
+   */
+  logUnavailable?: CiLogUnavailableCause;
+}
+
+/**
+ * The closed set of reasons a failing check's log tail came back empty — a NAMED
+ * outcome rather than an absence. `no-job-id`: the check's `detailsUrl` carried no Actions job id,
+ * so no read was ever attempted. `fetch-failed`: a read WAS attempted and failed, `detail`
+ * carrying the underlying error as observed (a proxy denial, a missing scope, an oversized log)
+ * — never interpreted, never guessed at. `empty-log`: the read SUCCEEDED and the job genuinely
+ * printed nothing, the one case where silence is the honest answer.
+ */
+/**
+ * BACKSTOP on the length of a `fetch-failed` cause's `detail`. Not a primary control: the detail
+ * is an error message from `gh`/Node, which is short in every observed case — the primary control
+ * on prompt size is what the fix prompt renders at all. This exists only so a pathologically long
+ * error string can never dominate a prompt or an escalation body, and is deliberately far above
+ * any real message so that truncating is evidence of something unusual, not routine operation.
+ */
+export const MAX_CI_LOG_FAILURE_DETAIL = 500;
+
+export type CiLogUnavailableCause =
+  | { kind: "no-job-id" }
+  | { kind: "fetch-failed"; detail: string }
+  | { kind: "empty-log" };
+
+/**
+ * One sentence naming why a log tail is missing, for BOTH consumers (the fix prompt in
+ * run-task.ts and this module's own escalation text) — so the two can never drift into
+ * describing the same cause differently. Every branch says plainly that the log could not be
+ * read; none of them can be mistaken for a check that simply printed nothing, except the one
+ * branch that means exactly that.
+ */
+export function describeCiLogUnavailable(cause: CiLogUnavailableCause): string {
+  switch (cause.kind) {
+    case "no-job-id":
+      return "log NOT read: this check reported no Actions job id, so no log fetch was attempted";
+    case "fetch-failed":
+      return `log NOT read: the log fetch was attempted and FAILED (${cause.detail})`;
+    case "empty-log":
+      return "log read successfully, but the job printed no failing output";
+  }
 }
 
 /**
@@ -2176,7 +2225,11 @@ function describeCiFailures(pr: OpenPrView): string {
       const rangeNote = f.outsidePrRange
         ? " — NOT one of this PR's own commits; only present on the base branch"
         : "";
-      return `${f.name} failed on ${sha}${rangeNote}`;
+      // the named-log-outcome change: an escalation that names a check but no reason reads as "it failed and we saw
+      // why"; it is the operator, not the reader, who then discovers the log was never read at
+      // all. Say so in the SAME sentence that names the check, via the one shared renderer.
+      const logNote = f.logUnavailable ? ` — ${describeCiLogUnavailable(f.logUnavailable)}` : "";
+      return `${f.name} failed on ${sha}${rangeNote}${logNote}`;
     })
     .join("; ");
 }

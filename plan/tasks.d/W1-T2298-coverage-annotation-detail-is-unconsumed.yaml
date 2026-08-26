@@ -1,0 +1,142 @@
+- id: W1-T2298
+  title: "THE COVERAGE FAILURE DETAIL IS PUBLISHED AND NOTHING READS IT — the uncovered-line list now lands in a check-run annotation on an endpoint that answers 200, while the CI-failure producer still reaches only for the log blob, degrades to an empty tail, and records no reason; and the one coverage recogniser keys on the AGGREGATE ratchet's wording, so the diff-scoped failure that actually blocks matches nothing"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 30.00
+  rationale: |
+    **THE DATA IS THERE AND UNREAD.** PR 2899 (merge 90952482) made both coverage gates write
+    their uncovered-line list into a check-run annotation. Measured at that merge: a grep for
+    annotations across src/ returns ZERO files, against a control of two files for check_runs on
+    the same tool and corpus. So the producer shipped and no consumer exists.
+
+    **AND THE TRANSPORT ASYMMETRY IS THE WHOLE REASON THE ANNOTATION EXISTS.** Measured on one
+    real failing job id: the annotations endpoint answers 200, while the job-log endpoint 302s to
+    blob storage and the proxied fetch dies at CONNECT with 403. The log path is also sized wrong
+    for the reader that uses it, at roughly 12MB against execFileSync's 1MB default buffer.
+
+    **THE PRODUCER REACHES ONLY FOR THE BLOB, AND SWALLOWS WHY IT FAILED.** fetchCiFailures
+    (W1-T100, src/run-task.ts) maps each failing required check to a name plus a log tail, and it
+    gets that tail by shelling gh run view with the log-failed flag. Its catch arm is bare: the
+    comment says best-effort, degrades to an empty tail, never throws. That contract is right
+    about not throwing and wrong about staying silent, because an empty tail from an unreachable
+    blob is INDISTINGUISHABLE from an empty tail on a check with nothing interesting logged.
+    Nobody downstream can tell which happened, and no ledger line records it.
+
+    **WHICH MAKES THE RECOGNISERS UNFALSIFIABLE RATHER THAN MERELY BLIND.** Every fix class in
+    DEFAULT_FIX_CLASSES matches on that same log tail. When the tail is empty they all report no
+    match, which is exactly what they would report on a healthy PR, so the table cannot be
+    observed to be working or broken from outside. This shard does not claim the tail is empty on
+    the daemon host, which it cannot measure from the authoring container; it claims that the
+    swallow makes the question unanswerable, and that is the defect.
+
+    **THE COVERAGE RECOGNISER KEYS ON THE WRONG STRING, INDEPENDENTLY OF ALL THAT.**
+    COVERAGE_TIER_FIX_CLASS matches the aggregate ratchet's own wording, coverage is below a
+    floor, emitted by scripts/coverage-ratchet.mjs. What blocks the live PR is the DIFF-scoped
+    gate's different sentence, this diff adds source lines with zero covering tests, emitted by
+    scripts/diff-coverage.mjs. Different string, no match, no self-heal. Both strings were read
+    from source at this commit rather than recalled.
+
+    **THE LIVE POPULATION, AND ONE CORRECTION TO THE BRIEF THAT COMMISSIONED THIS.** PR 2828 is
+    open with coverage-ratchet red, and its check run still carries exactly one annotation reading
+    Process completed with exit code 1, because its head was pushed before the merge above landed
+    and the change is not retroactive. PR 2895 is open with a fresh run in flight, started after
+    that merge, so it is the first head that can carry the new detail. The brief also named PR
+    2898; that one is MERGED and green, so it is not part of this population.
+  design: |
+    **Q1 - THE READER, AND WHERE IT BELONGS: INSIDE fetchCiFailures' EXISTING CATCH, NOT BESIDE
+    IT.**
+
+    The reader is a second source for the SAME field the producer already fills. fetchCiFailures
+    already parses a job id out of each check's details url. The load-bearing measurement for this
+    design: on four sampled runs across two PRs, the check-run id is the SAME NUMBER as the job id
+    in that url. So the annotations fetch needs NO new id plumbing and NO new rollup field; it
+    reuses the identifier that function already has in hand.
+
+    Placement: the fallback belongs where the blob read currently gives up, so the ordering is try
+    the log tail first, and on an empty or failed read, fetch the annotations for that same id and
+    use their messages as the tail. That ordering keeps every existing recogniser working
+    unchanged where the log IS readable, and repairs them where it is not, because they all match
+    on the tail and neither cares nor needs to know which source filled it. A reader placed
+    BESIDE fetchCiFailures instead, as a new parallel producer, would need its own field, its own
+    wiring at all four call sites, and its own drift risk against checksStateFromRollup, which is
+    the drift W1-T457 closed by construction and should not be reopened.
+
+    **AND THE SWALLOW MUST GO, SEPARATELY FROM THE FALLBACK.** Whatever the fallback yields, the
+    catch arm must record which source answered and, on a failure, the reason. Without that the
+    new path is as unobservable as the old one, and a later reader would have to re-derive this
+    same finding from scratch. The degrade-to-nothing contract stays: still no throw, still no
+    stranded sweep.
+
+    **Q2 - WHAT THE READER ENABLES, AND WHY IT IS A REPORTER RATHER THAN A REPAIRER.**
+
+    The recogniser it enables is one keyed on the diff-scoped sentence, naming the uncovered lines
+    the annotation now carries. It CANNOT be a fourth row in DEFAULT_FIX_CLASSES, and the reason
+    is structural rather than stylistic. FixClass requires a fixPrNumber whose documented meaning
+    is the merged PR whose fix resolves this class, and the reconciler gates on that number having
+    merged before it will even consult the predicate. All three existing rows are the same shape:
+    a PR failing against a stale checked-out tree that some already-merged PR fixed, cleared by
+    re-driving. A diff-coverage block is not that. Its remedy is a test for a specific line in a
+    specific file, different for every PR, and no merged PR resolves it. Appending a row would
+    mean inventing a number that does not mean what the field says, and a match would dispatch a
+    redrive that re-runs the same gate and fails identically, burning a cycle to learn nothing.
+
+    So the deliverable is a REPORTER: it names the failing check and the uncovered lines on the
+    surface an operator or a later agent already reads, and it dispatches nothing. That is also
+    what Q3 requires below, so the two agree rather than trading off.
+
+    **Q3 - WHAT MUST NOT CHANGE.**
+
+    (i) diff-coverage stays BLOCKING. Nothing here converts a red gate into a warning, and the
+    reporter runs strictly after the gate has already decided.
+
+    (ii) No threshold, no baseline, no exclusion moves. scripts/coverage-baseline.json is not
+    touched, and neither are the tier cuts.
+
+    (iii) A recogniser that cannot name a specific remedy REPORTS and never dispatches a fix
+    worker. This is the rule the FixClass shape already encodes through its required fixPrNumber;
+    the reporter must not route around it.
+
+    (iv) fetchCiFailures keeps its no-throw contract and its existing filter. The dedupe and the
+    shared required-check predicate that W1-T457 aligned with checksStateFromRollup stay exactly
+    as they are: this task adds a second SOURCE for the tail, never a second opinion about which
+    checks are failing.
+
+    (v) The three existing fix classes keep matching what they match today. A log tail that IS
+    readable must still be preferred, so the annotation path can never change a verdict that the
+    log path was already reaching correctly.
+  acceptance:
+    - claim: "the failure detail is read from the annotation source when the log tail cannot be read"
+      proof: "unit test: test/ci-failure-annotations.test.ts"
+    - claim: "a readable log tail is still preferred, so existing recognisers match exactly what they match today"
+      proof: "unit test: test/ci-failure-annotations.test.ts"
+    - claim: "an unreadable failure detail records which source answered and why, instead of degrading silently"
+      proof: "unit test: test/ci-failure-annotations.test.ts"
+    - claim: "the diff-scoped coverage failure is recognised by its own wording and names the uncovered lines"
+      proof: "unit test: test/ci-failure-annotations.test.ts"
+    - claim: "the diff-scoped coverage recogniser reports and dispatches no fix worker"
+      proof: "unit test: test/ci-failure-annotations.test.ts"
+    - claim: "the producer still never throws and still names the same failing checks it names today"
+      proof: "unit test: test/ci-failure-annotations.test.ts"
+  files: [src/run-task.ts, src/lib/sweep.ts, test/ci-failure-annotations.test.ts]
+  status: queued
+  attempts: 0
+  origin: "oper#coverage-annotation-unconsumed-2026-08-26"
+  plan_refs: ["W1-T100", "W1-T457", "W1-T474", "W1-T94", "W1-T123"]
+  note: |
+    RISK BAND IS RULE 19'S SPAN, NOT BLAST RADIUS. The declared files cross the CI-failure PRODUCER
+    (src/run-task.ts) and the recogniser table its output feeds (src/lib/sweep.ts), which fails
+    sizing at risk medium. The change itself is additive and reversible; the band records the span.
+    Decomposing the reader from the recogniser was considered and rejected: a reader with no
+    consumer would ship the same unconsumed-data defect this task exists to close.
+
+    WHAT WAS NOT MEASURED. Whether the log-tail fetch actually fails on the daemon host is not
+    known here and is not claimed either way; the authoring container cannot reach that host. The
+    argument rests only on the swallow making it unanswerable, which is measurable from source.
+
+    THE FIX PR IS CITED, NOT RE-FILED. PR 2899 shipped the producer and is done; nothing here
+    revisits it, and scripts/diff-coverage.mjs and scripts/coverage-ratchet.mjs are deliberately
+    absent from the files list because this task consumes their output rather than changing it.
