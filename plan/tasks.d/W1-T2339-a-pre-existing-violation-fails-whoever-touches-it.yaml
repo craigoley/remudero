@@ -1,0 +1,160 @@
+- id: W1-T2339
+  title: "`lint-plan --base` reports a touched task's WHOLE violation set with no indication of which violations the diff caused, so a one-word prose edit to any of 156 standing-failing tasks fails the PR that made it — 144 of those 156 are the legacy monolith, 62% of it, and the report gives the author nothing to tell a landmine from a defect"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: high
+  origin: "oper#pre-existing-violation-fails-the-toucher-2026-08-26"
+  files: [src/run-task.ts, test/base-lint-attributes-pre-existing-violations.test.ts]
+  rationale: |
+    Filed by reading and by re-running the linter only, from a scratch worktree PROVEN equal to
+    origin/main by sha (8d91efcfa1972a7733914db975a6616f3de2b30d), clone shallow-checked `false`.
+    Every figure below comes from `rmd lint-plan` and from `git` on that tree. NO LEDGER CLAIM IS
+    MADE ANYWHERE IN THIS SHARD, so no union-health caveat is owed.
+
+    (1) THE MECHANISM. `lintPlanCommand` (`src/run-task.ts`) with `--base` restricts itself to tasks
+    the diff CHANGED, then reports each changed task's ENTIRE violation set and exits non-zero if any
+    is blocking. It never asks whether a violation predates the diff. So a task that has been failing
+    on main for weeks fails the first PR that touches it for any reason at all.
+
+    (2) THE DISCRIMINATING PAIR, RE-RUN HERE RATHER THAN CARRIED. A one-word edit to W1-T65's
+    `design:` prose, chosen to be unrelated to anything about proofs — `have` to `carry` — produces:
+
+      1 task(s) checked (1 new/changed vs origin/main) — 1 failing, 4 warning(s)
+
+    with 11 violation lines and one failing id, W1-T65. THE SAME KIND OF EDIT to W1-T279, a task
+    whose criteria are clean, produces `0 failing, 0 warning(s)` and exits 0. So it is not the edit,
+    and it is not the linter failing on everything: it is the touched task's standing violations
+    surfacing on whoever moved a byte inside it. W1-T65's six are 2 `proof-dialect` and 4
+    `proof-resolvability`, all about PROOF text; not one concerns a claim, and not one was introduced
+    by the PR that hit it.
+
+    (3) THE POPULATION, AND ITS SHAPE IS THE SURPRISE. Main's full lint reads `856 task(s) checked
+    (open tasks only) — 170 open failing (167 with a merged implementation, 3 with none), 647
+    warning(s)`. Extracting distinct ids from the failing marker gives **156**, against a control of
+    227 distinct ids under the warning marker, so the extractor sees its corpus.
+
+    SPLIT BY WHERE THEY ARE DECLARED: **144 of the 156 live in `plan/tasks.yaml`, 12 in
+    `plan/tasks.d/` shards.** The monolith declares 234 ids and the shards declare 636. So the
+    failing rate is **62% of the monolith against 1.9% of the shards**. THE LANDMINE FIELD IS THE
+    LEGACY MONOLITH, not the corpus modern filings are written into — which is both why the trap is
+    rare and why it will not clear itself.
+
+    (4) THE COST, MEASURED OVER FOURTEEN DAYS, AND THE ZERO IS CONTROLLED TWICE. Over commits on
+    origin/main since 2026-08-12:
+
+      commits touching plan/            481
+      touching a FAILING task's shard     0     control: the same loop over the WARNED ids finds 39
+      commits touching plan/tasks.yaml    6     they touch 9 distinct records; 0 are in the failing set
+
+    So no merged commit in fourteen days touched one of the 156. Both zeros carry a control that
+    fires on its own surface: the identical shard loop returns 39 commits for the warned population,
+    and 479 commits touch some shard at all; the monolith attribution returns 9 touched records
+    before the failing-set filter is applied.
+
+    (5) AND THE MERGED-ONLY SCAN IS BLIND BY CONSTRUCTION — WHICH IS THE FINDING, NOT A CAVEAT. A
+    pull request that goes red does not merge, so counting MERGED work counts exactly the cases that
+    did not hit this. The scan must be controlled against the known case: running the same
+    per-record attribution against the open PR's head reports the touched record as W1-T65 and
+    confirms it is in the failing set. THE QUERY CAN SEE IT; the merged-window zero is a real
+    absence of merges, not an absence of the trap. The honest rate is ONE ATTEMPT, TODAY, against
+    zero in the preceding fortnight — rare, and expensive when it lands.
+  design: |
+    (i) Q1 — THE POLICY IS (b), THE STATUS QUO, AND THE SHARD ARGUES IT AGAINST BOTH ALTERNATIVES
+    BEFORE ADOPTING IT. (a), reporting a pre-existing violation without failing, stops catching the
+    case where a diff makes an ALREADY-BAD task worse: a proof that was unresolvable and is now also
+    wrong-dialect reads as "pre-existing" at task granularity and passes. (c), failing only on
+    violations the diff introduced, stops catching the case where a diff REMOVES the evidence that
+    made a violation visible rather than fixing the defect — the violation disappears from the head
+    set and the gate reads it as repaired. Both trade a false red for a false green, and this repo
+    refuses that trade by default.
+
+    THE ARGUMENT AGAINST (b), STATED AT ITS STRONGEST: it has already cost one pull request six
+    hours and three board passes, the author had no way to learn from the output that the failure was
+    not theirs, and the 156 are not going to be repaired by the people who trip over them. That
+    argument is about the REPORT, not about the gate — which is what (ii) acts on.
+
+    (ii) WHAT TO BUILD: THE REPORT LEARNS WHOSE VIOLATION IT IS. THE GATE DOES NOT MOVE. Every
+    violation still fails exactly as it does today; the exit code is unchanged for every input. What
+    changes is that `lintPlanCommand`, when given `--base`, also lints the BASE ref and prints, per
+    failing task, how many of its violations the base already had. A PR author sees at once whether
+    they are looking at their own defect or at a task that was already failing.
+
+    A COUNT, NOT A SET DIFF, AND THAT IS THE WHOLE POINT — it dodges (iii)'s identity problem
+    entirely. A count per task is stable under rewording; a violation SET is not. Nothing decides on
+    the comparison, so nothing can be wrong-footed by it.
+
+    THE COST IS ONE MORE LINT PASS. Measured on this tree: a full lint takes about 1 second and a
+    `--base` run about 4. Doubling the analysis is seconds, not minutes, and it happens in CI where
+    the surrounding checks are minutes long.
+
+    (iii) Q3 — IS A DIFF-SCOPED VARIANT EXPRESSIBLE? IT IS BUILDABLE AND IT IS NOT TRUSTWORTHY, AND
+    THE REASON IS IN THE TYPE. `LintViolation` (`src/lib/task-linter.ts`) carries exactly
+    `check`, `severity` and `message`. THERE IS NO STABLE IDENTITY. `message` embeds a truncated
+    claim prefix and truncated proof text, so a repair that reflows a proof's wording without
+    changing its defect yields a different `message` and reads as NEW — the gate would fail a PR for
+    a violation it did not introduce, which is the very failure mode (c) exists to remove.
+
+    THE NEAR-KEY DOES NOT RESCUE IT. The message does embed `criterion N`, so
+    (task id, check, criterion index) is recoverable by parsing prose — but the index is not stable
+    either: inserting one criterion renumbers every criterion below it, so an addition would
+    manufacture a set of false "new" violations across the rest of the task. A trustworthy (c) needs
+    the linter to MINT a stable violation identity at the point of construction, which is a change to
+    every check that emits one. That is a larger task than this one and is NOT proposed here.
+
+    (iv) SCOPE — THIS SHARD REPAIRS NONE OF THE 156. They are a measurement, not a work list. No
+    task record is edited by this task, no proof is rewritten, and no violation is cleared. The
+    number is expected to move on its own as unrelated work lands, and the build must not assert a
+    figure for it.
+  acceptance:
+    - claim: "a base-failing task that a diff merely touches is still reported as failing and still fails the run"
+      proof: "unit test: test/base-lint-attributes-pre-existing-violations.test.ts"
+    - claim: "the report states, per failing task, how many of its violations the base ref already carried"
+      proof: "unit test: test/base-lint-attributes-pre-existing-violations.test.ts"
+    - claim: "a task with no violations on the base and one introduced by the diff is reported with a base count of zero"
+      proof: "unit test: test/base-lint-attributes-pre-existing-violations.test.ts"
+    - claim: "the attribution is a count per task and never a comparison of violation text"
+      proof: "unit test: test/base-lint-attributes-pre-existing-violations.test.ts"
+    - claim: "the exit code is byte-identical to today for a clean diff, a diff introducing a violation, and a diff touching a base-failing task"
+      proof: "unit test: test/base-lint-attributes-pre-existing-violations.test.ts"
+    - claim: "a base ref that cannot be linted degrades to today's output rather than refusing the run"
+      proof: "unit test: test/base-lint-attributes-pre-existing-violations.test.ts"
+    - claim: "no run without the base flag performs a second lint pass"
+      proof: "unit test: test/base-lint-attributes-pre-existing-violations.test.ts"
+  status: queued
+  attempts: 0
+  plan_refs: ["W1-T65", "W1-T279"]
+  note: |
+    WHAT MUST NOT CHANGE.
+
+    NO GATE IS WEAKENED TO CLEAR A BACKLOG. The exit code for every input is unchanged, including the
+    input this shard was filed from: a PR touching a base-failing task still fails. The 156 are a
+    measurement, and this task proposes repairing none of them; a build that clears violations to
+    make a number smaller has answered a different question.
+
+    RULE 21 STAYS, AND ITS CARVE-OUT IS ALREADY OPEN. A merged task's CLAIMS are frozen. `criterionKey`
+    (`src/lib/task-linter.ts`) normalises the CLAIM ALONE, so `criteriaAdded` does not fire on a
+    proof-only repair — which is why a repair of W1-T65's own proofs is available as a separate PR
+    today and needs nothing from this task. This shard neither widens that carve-out nor relies on it.
+
+    NOTHING PACES, THROTTLES OR SLEEPS. The second lint pass is a synchronous read taken once per
+    invocation, on the flag that already resolves a base ref; it adds no timer, no retry cadence and
+    no wait.
+
+    THE OPERATOR GATES EVERY MERGE, and this task changes nothing about that.
+
+    THE FIGURES ARE QUERIES, NOT NUMBERS TO CARRY. 156, 144, 12, 234, 636, 170 and 856 are stamped
+    with the sha they were read at and will move as unrelated work lands. Re-run the linter rather
+    than quoting them; an acceptance criterion asserting any of them would be false within the week,
+    which is why none does.
+
+    RULE 19 BAND. `risk: high` is set UP FRONT for the SPAN of the declared `files:` — one module and
+    its test — and carries no claim about blast radius, which is one command's reporting path.
+
+    THE FORWARD REFERENCE IS DELIBERATE. The declared test file does not exist yet; it is named in
+    `files:` so the pure-path proofs resolve under the forward-reference carve-out and read
+    `not_yet_built` until the build lands. Every proof is pure-path `unit test:`, so this shard
+    carries no `grep:` pattern at all.
