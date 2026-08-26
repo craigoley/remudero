@@ -34,6 +34,7 @@ import type { Plan, Task } from "../src/lib/plan.js";
 import type { GitHub, PrRef } from "../src/lib/status.js";
 import type { TraceGithub } from "../src/lib/trace.js";
 import type { IssueCloser } from "../src/lib/panel-actions.js";
+import { captureFeedback, setFeedbackStatus, type FeedbackExpanderDeps, type FeedbackExpansion } from "../src/lib/feedback.js";
 
 const READ_TOKEN = "ea-read-token";
 const WRITE_TOKEN = "ea-write-token";
@@ -151,6 +152,29 @@ async function errBanner(page: Page): Promise<{ hidden: boolean; text: string }>
     const el = document.getElementById("write-error-banner") as HTMLElement | null;
     return { hidden: el?.hidden !== false, text: el?.textContent ?? "" };
   });
+}
+
+// ── W1-T2301 fixtures: a NEEDS ME row the answer-submit handler will actually preview/file ──
+
+/** Parks a fresh feedback entry at `grilling`, the precondition the Answer form needs to render
+ *  at all (renderNeedsMe / needsMeGrillHtml, serve.ts) -- mirrors
+ *  test/feedback-thread-survives-a-reply.test.ts's own `grillingEntry` helper. */
+function grillingEntry(root: string, raw: string) {
+  const entry = captureFeedback(root, { raw, origin: "cli" });
+  return setFeedbackStatus(root, entry.id, "grilling");
+}
+
+function validExpansionPayload(): FeedbackExpansion {
+  return {
+    claim: "the drain retry banner overlaps the status pill",
+    evidence: "",
+    recon: ["establish whether this reproduces at other viewport widths", "establish which build introduced it"],
+    falsifying_check: "if the overlap does not reproduce on a fresh reload, this is a one-off render glitch",
+  };
+}
+
+function fakeExpandFeedback(payload: unknown): FeedbackExpanderDeps["expand"] {
+  return async () => payload;
 }
 
 // ── 5. a successful write is visibly acknowledged ────────────────────────────────────
@@ -359,7 +383,11 @@ test("the acknowledgement lives in the shared postJson helper so every write con
   // PR #1003 put `.ok` checking in postJson precisely so twelve call sites did not need twelve
   // patches; the acknowledgement rides the same contract. If a future edit moves it out to the
   // call sites, this fails and says why.
-  const helper = /function postJson\(path, body\)[\s\S]*?\n  \}\n/.exec(src);
+  // W1-T2301: postJson gained a third `opts` parameter (an optional `{ suppressAck }`, so ONE
+  // call site -- the answer-submit handler's fail-open leg -- can opt out of the automatic ack
+  // that would otherwise paint the preview's "nothing is filed yet" over a click that is about
+  // to file). The signature grew; the single-place discipline this test locks did not.
+  const helper = /function postJson\(path, body, opts\)[\s\S]*?\n  \}\n/.exec(src);
   assert.ok(helper, "postJson is still a single shared helper");
   assert.match(helper![0], /showWriteAck\(path\)/, "the acknowledgement fires inside the helper");
 
@@ -372,4 +400,158 @@ test("the acknowledgement lives in the shared postJson helper so every write con
   for (const path of new Set(sites)) {
     assert.ok(table![1].includes(`"${path}"`), `${path} has no acknowledgement entry`);
   }
+});
+
+// ── W1-T2301: the banner must acknowledge the OUTCOME, never the ROUTE ───────────────
+//
+// fb-1785969338913-dc3d0f, measured: an operator's Answer click filed TWICE, five seconds apart,
+// and the banner read "Preview generated — nothing is filed yet" both times. WRITE_ACK keyed the
+// preview route's ack text alone; postJson's single ok-path showWriteAck(path) fired it on every
+// 200 from /v1/feedback/preview, including the fail-open leg that files on that SAME click right
+// after. These three tests are the acceptance bar named in
+// plan/tasks.d/W1-T2301-the-banner-denies-the-filing-it-is-making.yaml, each proven against the
+// served shell's own client script with real preview/submit round trips (chromium, real clicks —
+// learnings#probe-must-exercise-the-real-consuming-client: the consuming client here is the
+// operator's own click, not a bare fetch).
+
+test("W1-T2301 acceptance 1: the fail-open leg (one click previews, then files) never leaves the operator with the preview's 'nothing is filed yet' — it ends acknowledging the filing", async () => {
+  const deps = fixtureDeps();
+  // deps.panelGraph.expandFeedback stays unset — production's own fail-open signature (rationale
+  // clause "WHY EVERY PRODUCTION SUBMISSION TAKES THAT LEG"): POST /v1/feedback/preview always
+  // resolves { expansion: null }, and the submit handler files immediately on this SAME click.
+  const parked = grillingEntry(deps.panelGraph.root, "does this want a CLI flag or a config default?");
+
+  await withShell(deps, async (base) => {
+    const page = await openShellWithWrite(base);
+    await reachSection(page, "needs-me");
+    const form = page.locator(`.needs-me-answer[data-reply-to="${parked.id}"]`);
+    await form.locator("input").waitFor();
+    await form.locator("input").fill("a config default, please");
+
+    // Hold the FILING POST open so the interval between the preview's reply and the file's own
+    // reply — the exact interval the false banner used to occupy (task rationale clause (d)) — is
+    // observable. The GET this same path also serves (the periodic feedback-list poll) passes
+    // through untouched, so NEEDS ME keeps refreshing normally underneath.
+    let releaseFile: () => void = () => {};
+    const filePosted = new Promise<void>((resolve) => {
+      releaseFile = resolve;
+    });
+    await page.route("**/v1/feedback", async (route) => {
+      if (route.request().method() !== "POST") {
+        await route.continue();
+        return;
+      }
+      await filePosted;
+      await route.continue();
+    });
+
+    await form.locator(".needs-me-answer-submit").click();
+
+    // Deterministic mid-point: the submit handler sets this button text SYNCHRONOUSLY, in the
+    // same tick it kicks off the (held) filing POST — so this fires exactly once the preview has
+    // resolved (expansion: null) and before the filing POST's own reply can possibly land.
+    await page.waitForFunction(
+      (replyTo) =>
+        document
+          .querySelector(`.needs-me-answer[data-reply-to="${replyTo}"] .needs-me-answer-submit`)
+          ?.textContent?.includes("Filed (no expansion available)"),
+      parked.id,
+    );
+    const mid = await ack(page);
+    assert.doesNotMatch(
+      mid.text,
+      /nothing is filed yet/i,
+      "the preview's ack must never paint while this same click is already filing behind it",
+    );
+
+    releaseFile();
+    await page.waitForFunction(() => document.getElementById("write-ack-banner")?.textContent?.includes("Answer recorded"));
+
+    const final = await ack(page);
+    assert.equal(final.kind, "done");
+    assert.match(final.text, /Answer recorded\./, "the operator is left with an acknowledgement naming the filing");
+    assert.doesNotMatch(final.text, /nothing is filed yet/i);
+    assert.equal((await errBanner(page)).hidden, true, "the filing succeeded — no error banner");
+    await page.close();
+  });
+});
+
+test("W1-T2301 acceptance 2: the armed leg (preview returns an expansion, files nothing) still tells the operator nothing is filed yet and that submitting again confirms", async () => {
+  const deps = fixtureDeps();
+  deps.panelGraph.expandFeedback = fakeExpandFeedback(validExpansionPayload());
+  const parked = grillingEntry(deps.panelGraph.root, "does this want a CLI flag or a config default?");
+
+  await withShell(deps, async (base) => {
+    const page = await openShellWithWrite(base);
+    await reachSection(page, "needs-me");
+    const form = page.locator(`.needs-me-answer[data-reply-to="${parked.id}"]`);
+    await form.locator("input").waitFor();
+    await form.locator("input").fill("a config default, please");
+
+    await form.locator(".needs-me-answer-submit").click(); // click 1: PREVIEWS and ARMS, files nothing
+    await page.waitForFunction(
+      (replyTo) =>
+        (document.querySelector(`.needs-me-answer[data-reply-to="${replyTo}"] .needs-me-answer-submit`) as HTMLElement | null)?.dataset
+          .confirming === "true",
+      parked.id,
+    );
+
+    const a = await ack(page);
+    assert.equal(a.hidden, false, "the preview's own ack is visible once armed");
+    assert.equal(a.kind, "done");
+    assert.match(a.text, /Preview generated — nothing is filed yet\./);
+    assert.match(a.text, /submit again to confirm and file/);
+    assert.equal((await errBanner(page)).hidden, true, "no error banner — the preview succeeded");
+    await page.close();
+  });
+});
+
+test("W1-T2301 acceptance 3: a filing that fails after its preview succeeded leaves the operator with the error, not a stale acknowledgement — and every other write control's ack is untouched", async () => {
+  const deps = fixtureDeps();
+  deps.panelGraph.expandFeedback = fakeExpandFeedback(validExpansionPayload());
+  const parked = grillingEntry(deps.panelGraph.root, "does this want a CLI flag or a config default?");
+
+  await withShell(deps, async (base) => {
+    const page = await openShellWithWrite(base);
+    await reachSection(page, "needs-me");
+    const form = page.locator(`.needs-me-answer[data-reply-to="${parked.id}"]`);
+    await form.locator("input").waitFor();
+    await form.locator("input").fill("a config default, please");
+
+    await form.locator(".needs-me-answer-submit").click(); // click 1: PREVIEWS and ARMS
+    await page.waitForFunction(
+      (replyTo) =>
+        (document.querySelector(`.needs-me-answer[data-reply-to="${replyTo}"] .needs-me-answer-submit`) as HTMLElement | null)?.dataset
+          .confirming === "true",
+      parked.id,
+    );
+    assert.equal((await ack(page)).kind, "done", "sanity: the preview really did succeed before the filing below");
+
+    // click 2: the CONFIRMED filing POST /v1/feedback, made to fail this time.
+    await page.route("**/v1/feedback", (route) =>
+      route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "boom" }) }),
+    );
+    await form.locator(".needs-me-answer-submit").click();
+    await page.waitForFunction(() => document.getElementById("write-error-banner")?.hidden === false);
+
+    const e = await errBanner(page);
+    assert.equal(e.hidden, false, "the failed filing is surfaced");
+    assert.match(e.text, /Write failed/);
+    assert.match(e.text, /500/);
+
+    // design (iv): suppressing the preview's own ack must never create a leg where a failed
+    // filing leaves the operator with nothing at all — clearWriteAck (postJson's unchanged
+    // not-ok arm) still fires, so no stale "nothing is filed yet"/"Answer recorded" survives.
+    const a = await ack(page);
+    assert.equal(a.hidden, true, "no stale acknowledgement survives the failed filing");
+    assert.equal(a.text, "");
+    await page.close();
+  });
+
+  // The second half of the claim: suppressAck is a single, narrow opt-out, not a mechanism that
+  // spread — every OTHER of the dozen-plus postJson call sites still fires the shared ok-path ack
+  // unconditionally, exactly as before this task.
+  const src = readFileSync(new URL("../src/lib/serve.ts", import.meta.url), "utf8");
+  const suppressingCallSites = src.match(/suppressAck:\s*true/g) ?? [];
+  assert.equal(suppressingCallSites.length, 1, "suppressAck must opt out exactly one call site — the fail-open leg's shared preview call");
 });
