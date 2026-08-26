@@ -995,6 +995,20 @@ export interface WhitelistedProof {
    * the existing "grep with no match" class), never a silent pass.
    */
   nameFiltered?: boolean;
+  /**
+   * W1-T2294: true only for `kind==="grep"` compiled by the LEGACY fenced `` `grep ...` ``
+   * shape below (the `GREP_FENCE_RE` branch) rather than the house `grep:` dialect
+   * ({@link parseDialectGrep}). The dialect form always compiles to the fixed `["-arn", "--",
+   * pattern, path]` argv above — BRE, author-unselectable, no `-E` reachable — so it can never
+   * read a pattern under two different regex engines. The legacy shape tokenises everything
+   * after `grep` verbatim as argv (see {@link tokenizeFenced}), so an author's own flags —
+   * including `-E`, switching the engine to POSIX EXTENDED — reach the executor unexamined.
+   * This flag is how a consumer (task-linter.ts's engine-divergence check) tells the two
+   * shapes apart without re-deriving it from `args` alone, which is not reliably recoverable
+   * (a single-flag legacy invocation like `grep -arn -- pat path` has the identical `args`
+   * shape as the dialect form's own compiled argv).
+   */
+  authorSelectedArgv?: boolean;
 }
 
 const TEST_PATH_RE = /\btest\/[\w./-]+\.(?:test|spec)\.[cm]?[jt]sx?\b/;
@@ -1348,7 +1362,7 @@ export function parseWhitelistedProof(proof: string): WhitelistedProof | null {
     if (UNSAFE_FENCE_CHARS_RE.test(fenced)) return null; // shell metacharacters ⇒ refuse, not sanitize
     const tokens = tokenizeFenced(fenced);
     if (tokens[0] !== "grep" || tokens.length < 2) return null;
-    return { kind: "grep", command: "grep", args: tokens.slice(1), label: fenced };
+    return { kind: "grep", command: "grep", args: tokens.slice(1), label: fenced, authorSelectedArgv: true };
   }
   return null;
 }
