@@ -247,6 +247,20 @@ export interface CriterionVerdict {
 }
 
 /** The evidence the JUDGE reads: the PR diff, the implement REPORT, optional LLM verdicts. */
+/**
+ * The two reasons a report can fail to be the PR body, which are NOT the same fact and do not have
+ * the same remedy. `never-fetched` means this code path never asked for the body -- the common
+ * case, and nothing is wrong. `fetch-failed` means it asked and the read failed -- which has never
+ * once been observed here. See {@link ReviewEvidence.reportSubstituteCause}.
+ */
+export type ReportSubstituteCause =
+  /** No fetch was attempted. `fixMode` names the mode that does not read the body, when in hand: a
+   *  reader who sees the mode can act; one told a fetch failed cannot. */
+  | { kind: "never-fetched"; fixMode?: string }
+  /** A fetch was attempted and threw. Distinct from the above BY CONSTRUCTION so the wording can
+   *  stop implying this is what happened. */
+  | { kind: "fetch-failed" };
+
 export interface ReviewEvidence {
   /** The unified PR diff (as `gh pr diff` / `git diff` would produce). */
   diff: string;
@@ -267,6 +281,24 @@ export interface ReviewEvidence {
    * body, exactly as it does today.
    */
   reportIsSubstitute?: boolean;
+  /**
+   * WHY `report` is not the body. The boolean above keeps its single meaning -- THIS IS NOT THE PR
+   * BODY -- and every consumer that refuses to judge a substitute is right to read it that way;
+   * this sibling exists so the REFUSAL TEXT can say which of two very different facts it rests on,
+   * without widening the flag every consumer already reads.
+   *
+   * MEASURED 2026-08-25: the refusal said "substituted after a failed body fetch" on three rows and
+   * no fetch had failed on any of them. `review.body_fetch_error` and `fix.body_fetch_error` both
+   * read ZERO across 27 archives and 258,784 rows -- neither has ever fired on any host. The real
+   * mechanism is that the fix rung fetches the body ONLY in `body-coverage` mode and defaults the
+   * flag true for the other three, so on `ci-log`, `reviewer-unmet` and `merge-conflict` no fetch
+   * is attempted at all. That string cost an operator recon hunting a transient GitHub read failure
+   * and a body-size bound, and refuted both.
+   *
+   * Absent means the message stays silent on the cause rather than guessing one, which is the state
+   * every caller predating this change gets.
+   */
+  reportSubstituteCause?: ReportSubstituteCause;
   /**
    * Optional per-criterion semantic verdicts from the fresh LLM reviewer,
    * index-aligned to the criteria list. `false` FORCES that criterion to fail;
@@ -2344,6 +2376,9 @@ export function judgeCriterion(
    * no clause, leaving today's constant reason text as the whole appended note.
    */
   semanticClause?: string,
+  /** WHY `reportSubstituted` is true -- consulted ONLY for the refusal's wording, never for the
+   *  verdict. See {@link ReviewEvidence.reportSubstituteCause}. */
+  reportSubstituteCause?: ReportSubstituteCause,
 ): CriterionVerdict {
   const base = { claim: criterion.claim, proof: criterion.proof };
 
@@ -2393,10 +2428,22 @@ export function judgeCriterion(
       // substantiates anything. Rest on what proofs actually EXECUTED (below, unaffected) and
       // name the missing body as the reason the floor cannot say more.
       met = false;
-      reason =
-        `proof unmet: PR body unreadable — judged against the worker's own text (substituted after ` +
-        `a failed body fetch), so keyword coverage (${covered.length}/${kws.length} proof keywords) ` +
-        `is withheld as substantiation`;
+      // THE VERDICT IS UNCHANGED -- `met` is false in every branch below, and coverage stays
+      // withheld in EITHER direction (the #2395 fail-open case this rule exists to refuse; the
+      // 6/6-coverage row on 2026-08-25 is the proof it is working). Only the WORDING branches, and
+      // it must not imply a fetch failed: on the measured population the fetch has never failed
+      // once, while "this mode never reads the body" is the common case.
+      const withheld = `so keyword coverage (${covered.length}/${kws.length} proof keywords) is withheld as substantiation`;
+      if (reportSubstituteCause?.kind === "never-fetched") {
+        const who = reportSubstituteCause.fixMode
+          ? `the "${reportSubstituteCause.fixMode}" fix mode does not fetch it`
+          : "this code path does not fetch it";
+        reason = `proof unmet: the PR body was NOT read — ${who}, so this is the worker's own text rather than the body, ${withheld}`;
+      } else if (reportSubstituteCause?.kind === "fetch-failed") {
+        reason = `proof unmet: the PR body was fetched and the read FAILED, so this is the worker's own text rather than the body, ${withheld}`;
+      } else {
+        reason = `proof unmet: this is the worker's own text rather than the PR body (cause not recorded), ${withheld}`;
+      }
     } else if (coverage < MIN_COVERAGE) {
       met = false;
       reason = `proof unmet: report does not substantiate it (matched ${covered.length}/${kws.length} proof keywords)`;
@@ -3646,7 +3693,7 @@ export function judgeReview(
       }
     : undefined;
   const verdicts = criteria.map((c, i) =>
-    judgeCriterion(c, reportTokens, evidence.semantic?.[i], execCtx, evidence.reportIsSubstitute, evidence.semanticClauses?.[i]),
+    judgeCriterion(c, reportTokens, evidence.semantic?.[i], execCtx, evidence.reportIsSubstitute, evidence.semanticClauses?.[i], evidence.reportSubstituteCause),
   );
   const testTheater = detectTestTheater(evidence.diff);
 
