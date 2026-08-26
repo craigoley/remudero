@@ -304,6 +304,20 @@ test("W1-T1048: scanDeclaredPlanIds tolerates an absent tasks file and an absent
   assert.deepEqual([...mod.scanDeclaredPlanIds(root)].sort(), ["W1-T4243", "W1-T4244"]);
 });
 
+test("W1-T2324: scanDeclaredPlanIdOccurrences tolerates an absent tasks file and an absent shard directory", () => {
+  const root = scratch();
+  const byId = mod.scanDeclaredPlanIdOccurrences(root, { planTasksFile: "no-such.yaml", planTasksDir: "no-such.d" });
+  assert.equal(byId.size, 0);
+  // Positive control on the same call shape: a real file and a real shard dir both resolve, and a
+  // path that IS the shard-dir name but is a plain file (ENOTDIR) tolerates the same way.
+  mkdirSync(join(root, "plan"), { recursive: true });
+  writeFileSync(join(root, "plan", "tasks.yaml"), "- id: W1-T4243\n");
+  writeFileSync(join(root, "plan", "tasks.d"), "not a directory\n");
+  const withFileInsteadOfDir = mod.scanDeclaredPlanIdOccurrences(root);
+  assert.deepEqual([...withFileInsteadOfDir.keys()], ["W1-T4243"]);
+  assert.deepEqual(withFileInsteadOfDir.get("W1-T4243"), [{ file: "plan/tasks.yaml", line: 1 }]);
+});
+
 test("W1-T1048: loadBaseline refuses an unreadable file, naming the path", () => {
   assert.throws(
     () => mod.loadBaseline(join(scratch(), "absent.json")),
@@ -416,5 +430,192 @@ test("the placeholder forms are inert against BOTH readers, driven rather than r
   assert.deepEqual(run("+  - id: W1-T88005"), ["88005"], "control: a real declaration IS seen");
   for (const safe of ["+  - id: W1-T<n>", "+  - id: W1-T<id>", "+  - id: W1-TNNNN"]) {
     assert.deepEqual(run(safe), [], `${safe} must declare nothing`);
+  }
+});
+
+// ── W1-T2324 (Q3 half): an ADDED id that already exists on the base is refused BEFORE the merge ──
+//
+// THREE COLLISIONS IN ONE DAY, ALL FROM ONE CAUSE. Each time the mint printed `DEGRADED: open-prs`
+// because `gh pr list` was refused on an exhausted GraphQL bucket, so the ceiling came from three
+// surfaces and the missing one was the only one holding ids that exist but are not yet on main.
+// GIT DOES NOT CATCH IT: two differently-named shards declaring one id merge with no conflict.
+// `lint-plan` catches it only AFTER the merge at exit 2, and `loadPlan` then refuses origin/main.
+//
+// THE PREDICATE IS PER-ID DECLARING FILE, HEAD VS BASE — not a duplicate-at-head scan, and this is
+// the correction that made it work. Every real collision was authored on a branch BEHIND main, so
+// locally each id appeared exactly once: replaying #2993's colliding head, a head-only duplicate
+// scan finds nothing. What separates them is that the base declares the id from a DIFFERENT file.
+//
+// Driven through the real CLI as a subprocess against scratch git repos, never by importing the
+// .mjs — the same convention the tests above use.
+function planRepo(shards: Record<string, string>): string {
+  const dir = mkdtempSync(join(tmpdir(), "t2324-plan-"));
+  const env = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" };
+  execFileSync("git", ["init", "-q", "-b", "main"], { cwd: dir, env });
+  execFileSync("git", ["config", "user.email", "t@example.com"], { cwd: dir, env });
+  execFileSync("git", ["config", "user.name", "t"], { cwd: dir, env });
+  mkdirSync(join(dir, "plan", "tasks.d"), { recursive: true });
+  writeFileSync(join(dir, "plan", "tasks.yaml"), "[]\n");
+  for (const [name, id] of Object.entries(shards)) {
+    writeFileSync(join(dir, "plan", "tasks.d", name), `- id: ${id}\n  title: "t"\n`);
+  }
+  execFileSync("git", ["add", "-A"], { cwd: dir, env });
+  execFileSync("git", ["commit", "-qm", "base"], { cwd: dir, env });
+  return dir;
+}
+function runCheck(cwd: string, base: string) {
+  return spawnSync(process.execPath, [SCRIPT, "--cwd", cwd, "--base", base, "--dir", "src", "--baseline", join(REPO_ROOT, "scripts", "task-id-existence-baseline.json")], {
+    cwd,
+    encoding: "utf8",
+    env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" },
+  });
+}
+
+test("W1-T2324: an id the base declares from a DIFFERENT file is REFUSED, naming both sides", () => {
+  const dir = planRepo({ "W1-T900-original.yaml": "W1-T900" });
+  try {
+    // The branch is BEHIND: it drops main's shard and adds its own carrying the same id — exactly
+    // #2993's shape. Each id appears ONCE in this tree, so a duplicate-at-head scan sees nothing.
+    rmSync(join(dir, "plan", "tasks.d", "W1-T900-original.yaml"));
+    writeFileSync(join(dir, "plan", "tasks.d", "W1-T900-reissued.yaml"), '- id: W1-T900\n  title: "t"\n');
+    const r = runCheck(dir, "main");
+    assert.equal(r.status, 1, `expected a refusal, got ${r.status}: ${r.stderr}`);
+    assert.match(r.stderr, /ALREADY DECLARED/);
+    assert.match(r.stderr, /W1-T900/);
+    assert.match(r.stderr, /W1-T900-original\.yaml/, "names the file the BASE declares it in");
+    assert.match(r.stderr, /W1-T900-reissued\.yaml/, "and the file THIS change declares it in");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T2324 CONTROL: a genuinely new id is SILENT — adding an id is the normal case", () => {
+  const dir = planRepo({ "W1-T900-original.yaml": "W1-T900" });
+  try {
+    writeFileSync(join(dir, "plan", "tasks.d", "W1-T901-new.yaml"), '- id: W1-T901\n  title: "t"\n');
+    const r = runCheck(dir, "main");
+    assert.equal(r.status, 0, `a new id must not be refused: ${r.stderr}`);
+    assert.doesNotMatch(r.stderr, /ALREADY DECLARED/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T2324 CONTROL: a change that only CITES ids and declares nothing new is SILENT", () => {
+  const dir = planRepo({ "W1-T900-original.yaml": "W1-T900" });
+  try {
+    // Citing is the normal case and what this gate already judged; touching a plan file is not
+    // adding an id. A per-file scan reads every `- id:` in a touched file and would refuse here.
+    mkdirSync(join(dir, "src"), { recursive: true });
+    writeFileSync(join(dir, "src", "a.ts"), "// see W1-T900 for why\n");
+    writeFileSync(join(dir, "plan", "tasks.d", "W1-T900-original.yaml"), '- id: W1-T900\n  title: "edited"\n');
+    const r = runCheck(dir, "main");
+    assert.equal(r.status, 0, `citing must stay silent: ${r.stderr}`);
+    assert.doesNotMatch(r.stderr, /ALREADY DECLARED/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T2324: an UNREADABLE base REFUSES rather than passing — the false zero is the whole defect", () => {
+  const dir = planRepo({ "W1-T900-original.yaml": "W1-T900" });
+  try {
+    const r = runCheck(dir, "no-such-ref-xyzzy");
+    assert.equal(r.status, 1, "an unreadable base must not be read as an empty one");
+    assert.match(r.stderr, /could not read declared plan ids at base/);
+    assert.match(r.stderr, /false zero/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T2324 FALSIFIER: a duplicate-at-head scan alone would MISS every real collision", () => {
+  const dir = planRepo({ "W1-T900-original.yaml": "W1-T900" });
+  try {
+    rmSync(join(dir, "plan", "tasks.d", "W1-T900-original.yaml"));
+    writeFileSync(join(dir, "plan", "tasks.d", "W1-T900-reissued.yaml"), '- id: W1-T900\n  title: "t"\n');
+    // The head tree declares W1-T900 exactly ONCE. Anything keyed on head multiplicity is blind.
+    const declared = readFileSync(join(dir, "plan", "tasks.d", "W1-T900-reissued.yaml"), "utf8");
+    assert.equal((declared.match(/^- id: /gm) ?? []).length, 1, "one declaration at head");
+    assert.equal(runCheck(dir, "main").status, 1, "and it is still refused, because the BASE is consulted");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── W1-T2324: the id grammar is `W<n>-T<n>` with an OPTIONAL single-letter suffix, across
+// workstreams. The first cut of the collision check matched `W1-T[0-9]+` anchored at end-of-line,
+// which DROPPED 35 of the plan's 901 declared ids: 21 lettered siblings (W1-T1B, W1-T9a, W1-T12e …)
+// and 14 outside W1 (W2-T1, W3-T3, W12-T1).
+//
+// DROPPED, NOT TRUNCATED — the distinction decides which direction the bug ran. `$` after `[0-9]+`
+// means `- id: W1-T1B` matched NOTHING, so two lettered siblings never collapsed into one id; the
+// gate simply could not SEE them, which is a hole rather than a false alarm. These tests pin both
+// halves: siblings stay distinct, and a real re-issue of a lettered id is still refused.
+
+test("W1-T2324 CONTROL: lettered siblings are DISTINCT ids — adding W1-T1B while W1-T1C exists is SILENT", () => {
+  const dir = planRepo({ "W1-T1C-existing.yaml": "W1-T1C" });
+  try {
+    writeFileSync(join(dir, "plan", "tasks.d", "W1-T1B-new.yaml"), '- id: W1-T1B\n  title: "t"\n');
+    const r = runCheck(dir, "main");
+    assert.equal(r.status, 0, `W1-T1B and W1-T1C are different tasks: ${r.stderr}`);
+    assert.doesNotMatch(r.stderr, /ALREADY DECLARED/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T2324 CONTROL: a lettered id is not confused with its unlettered stem — W1-T1B beside W1-T1 is SILENT", () => {
+  const dir = planRepo({ "W1-T1-stem.yaml": "W1-T1" });
+  try {
+    writeFileSync(join(dir, "plan", "tasks.d", "W1-T1B-suffixed.yaml"), '- id: W1-T1B\n  title: "t"\n');
+    const r = runCheck(dir, "main");
+    assert.equal(r.status, 0, `W1-T1B must not read as W1-T1: ${r.stderr}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T2324: a genuinely RE-ISSUED lettered id is still refused — the grammar widened, the gate did not soften", () => {
+  const dir = planRepo({ "W1-T1B-original.yaml": "W1-T1B" });
+  try {
+    rmSync(join(dir, "plan", "tasks.d", "W1-T1B-original.yaml"));
+    writeFileSync(join(dir, "plan", "tasks.d", "W1-T1B-reissued.yaml"), '- id: W1-T1B\n  title: "t"\n');
+    const r = runCheck(dir, "main");
+    assert.equal(r.status, 1, "a re-issued lettered id must be refused like any other");
+    assert.match(r.stderr, /W1-T1B/);
+    assert.match(r.stderr, /W1-T1B-original\.yaml/, "names the base's file");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T2324: an id outside workstream 1 is seen at all — W3-T3 re-issued is refused", () => {
+  const dir = planRepo({ "W3-T3-original.yaml": "W3-T3" });
+  try {
+    rmSync(join(dir, "plan", "tasks.d", "W3-T3-original.yaml"));
+    writeFileSync(join(dir, "plan", "tasks.d", "W3-T3-reissued.yaml"), '- id: W3-T3\n  title: "t"\n');
+    const r = runCheck(dir, "main");
+    assert.equal(r.status, 1, "W2/W3/W12 ids are declared ids too");
+    assert.match(r.stderr, /W3-T3/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T2324 FALSIFIER: the pre-fix pattern DROPPED these ids rather than truncating them", () => {
+  const preFix = /^\s*-\s*id:\s*(W1-T[0-9]+)\s*$/;
+  // The shipped grammar, mirrored here so this test states it rather than importing a private const.
+  const DECLARED_ID_LINE_RE_FOR_TEST = /^\s*-\s*id:\s*(W[0-9]+-T[0-9]+[A-Za-z]?)\s*$/;
+  for (const line of ["  - id: W1-T1B", "  - id: W1-T9a", "  - id: W3-T3"]) {
+    assert.equal(preFix.exec(line), null, `${line} matched nothing before the fix — dropped, not truncated`);
+  }
+  // ...and matches now, which is what closed the hole.
+  for (const [line, id] of [
+    ["  - id: W1-T1B", "W1-T1B"],
+    ["  - id: W1-T9a", "W1-T9a"],
+    ["  - id: W3-T3", "W3-T3"],
+  ] as const) {
+    assert.equal(DECLARED_ID_LINE_RE_FOR_TEST.exec(line)?.[1], id);
   }
 });

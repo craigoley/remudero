@@ -824,10 +824,16 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # W1-T2324: the collision half compares declared ids against `origin/main` AT CHECK TIME,
+          # so that ref must exist. Without this the base read fails and the gate REFUSES (by
+          # design -- an unreadable base read as an empty one is the false zero that produced every
+          # id collision on 2026-08-26), which would redden every PR rather than none.
+          fetch-depth: 0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
       - name: Install (clean, from lockfile)
         run: npm ci
-      - name: Task-id existence check (every id cited under src/deploy must resolve)
+      - name: Task-id existence check (every cited id resolves; no declared id collides with main)
         run: npm run --silent task-id-existence:check
