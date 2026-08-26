@@ -128,8 +128,12 @@
     machinery for it: a separate reconnaissance measured startup failures at ZERO across this
     repository's entire forty-three day history before this date, against controls of 1,472 failures
     and 32,482 successes in 36,853 runs. So the specific outage is uncommon. **The blindness is
-    not** — ANY run that produces no jobs has this shape, whatever caused it, and the detector earns
-    its cost for making the reading honest rather than for catching that one outage. A shard that
+    not** — a run whose conclusion is terminal while one of its jobs is not has this shape, whatever
+    caused it, and the detector earns its cost for making the reading honest rather than for catching
+    that one outage. CORRECTED 2026-08-26 (W1-T2340): this sentence read "ANY run that produces no
+    jobs has this shape", which the amendment above falsified — #2974's head carried TWENTY-THREE
+    check-runs from four terminal startup-failure runs, so the job list was not empty and a
+    job-count reading sees nothing. A shard that
     argued from the outage would be arguing from a sample of two.
 
     NOT PROPOSED HERE, DELIBERATELY. Whether the arm should push a new head of its own is left open
@@ -137,7 +141,7 @@
     pull request whose checks merely have not started is destructive churn — applies to this case
     too and deserves the operator's ruling rather than a filing's assumption.
   acceptance:
-    - claim: "a head whose runs include one that scheduled no job is reported as stalled rather than pending"
+    - claim: "a job left non-terminal inside a run whose conclusion is terminal is reported as stalled rather than pending"
       proof: "unit test: test/startup-failure-is-not-pending.test.ts"
     - claim: "a head whose runs are all progressing normally keeps the reading it has today"
       proof: "unit test: test/startup-failure-is-not-pending.test.ts"
