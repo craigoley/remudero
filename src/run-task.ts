@@ -641,6 +641,7 @@ import {
   cancelledRequiredCheckNames,
   withoutDownstreamGateFailure,
   checksStateFromRollup,
+  CI_GATE_CHECK_NAME,
   dedupeRollupByLatestAttempt,
   deriveDayCostUsd,
   deriveDisposition,
@@ -22933,6 +22934,14 @@ export function buildSweepEffects(
   // unchanged; a test overrides it with a recorder so the sweep's converging withdrawal (design
   // (iv) of this task's record) is provable without a real mutating `gh` call.
   disarmImpl: (prUrl: string) => DisarmOutcome | void = disarmAutoMerge,
+  // W1-T2300 (design ii) — appended LAST, the same convention every dep above follows.
+  // Injectable async JSON reader for the stale-ci-gate lane's FRESH rollup read: without it,
+  // `readCiGateRollup`/`reaggregateCiGate` below would be unreachable from any offline test
+  // without a real `gh` on PATH — the SAME reason `pollToGate`/`waitForCiGreen`'s own `readJson`
+  // deps param exists (this file, W1-T2268). Default is `ghJsonAsync`, the SAME non-blocking
+  // reader those two poll loops already drive `restRollupFor` through, so production wiring is
+  // unchanged.
+  readJsonImpl: (args: string[]) => Promise<unknown> = ghJsonAsync,
 ): Pick<
   SweepDeps,
   | "arm"
@@ -22948,6 +22957,8 @@ export function buildSweepEffects(
   | "disarmAutoMerge"
   | "requeueCheck"
   | "escalateCancelledCheck"
+  | "readCiGateRollup"
+  | "reaggregateCiGate"
 > {
   const repoDir = repo === resolveOwnerRepo().repo ? repoRoot : join(config.root, "repos", repo);
   const issues = issuesImpl ?? ghIssueGateway(owner, repo);
@@ -23204,6 +23215,77 @@ export function buildSweepEffects(
         },
         { issues, ledgerPath, runId },
       );
+    },
+
+    // W1-T2300 (design ii/iii) — a FRESH REST read of ONE PR's required-check rollup, consulted
+    // by `runSweep` immediately before a blocked-fixable disposition acts — NEVER the `openPrs`
+    // snapshot this whole sweep pass started from (see `SweepDeps.readCiGateRollup`'s own doc,
+    // lib/sweep.ts). `restRollupFor` is the SAME composed check-runs + combined-status read
+    // `pollToGate`/`waitForCiGreen` already drive over this SAME non-blocking `readJsonImpl` seam
+    // (W1-T2268) — no new gateway, no new credential, no GraphQL. A failed read degrades to
+    // `undefined`: `staleCiGateTransition(undefined)` always returns `undefined`, so this lane
+    // simply never fires for this PR on this pass, rather than aborting the whole sweep loop over
+    // one PR's rollup read.
+    readCiGateRollup: async (pr) => {
+      try {
+        return await restRollupFor(owner, repo, pr.headSha, readJsonImpl);
+      } catch (e) {
+        log("sweep.ci_gate_rollup.error", {
+          pr_number: pr.prNumber,
+          head_sha: pr.headSha,
+          error: String((e as Error)?.message ?? e),
+        });
+        return undefined;
+      }
+    },
+
+    // W1-T2300 (design ii/iv) — re-drive `ci-gate`'s OWN check-run job: the SAME per-job Actions
+    // route `requeueCheck` above already uses (`actions/jobs/{job_id}/rerun`, NEVER
+    // `actions/runs/{run_id}/rerun-failed-jobs` — Q3(x) forbids substituting a whole-run re-run,
+    // which would re-spend an already-green sibling job sharing this workflow run). `transition`
+    // (from `staleCiGateTransition`, lib/sweep.ts) carries no job id of its own — that function's
+    // own doc names it "parsed by a future real-gateway producer from ci-gate's OWN check-run
+    // detailsUrl", which is exactly this closure. A SECOND fresh read is taken here (rather than
+    // reusing whatever `readCiGateRollup` returned moments earlier) because this call may run an
+    // observable instant after the one that detected the stale transition, and design (i) already
+    // requires every re-drive decision to compare against the CURRENT state, never a frame from a
+    // moment ago. No job id resolvable (rollup unreadable, or ci-gate's own entry carries no
+    // `detailsUrl`) degrades to a NAMED no-op — never a guessed target, exactly like
+    // `requeueCheck`'s own contract above.
+    reaggregateCiGate: async (pr, transition) => {
+      let jobId: string | undefined;
+      try {
+        const rollup = await restRollupFor(owner, repo, pr.headSha, readJsonImpl);
+        const gate = dedupeRollupByLatestAttempt(rollup).find(
+          (c) => (c.name ?? c.context ?? "") === CI_GATE_CHECK_NAME,
+        );
+        jobId = gate?.detailsUrl?.match(/\/job\/(\d+)/)?.[1];
+      } catch (e) {
+        log("sweep.ci_gate_reaggregate.rollup_error", {
+          pr_number: pr.prNumber,
+          sibling_name: transition.siblingName,
+          error: String((e as Error)?.message ?? e),
+        });
+      }
+      if (!jobId) {
+        log("sweep.ci_gate_reaggregate.no_job_id", { pr_number: pr.prNumber, sibling_name: transition.siblingName });
+        return;
+      }
+      try {
+        ghRunImpl("gh", ["api", "-X", "POST", `repos/${owner}/${repo}/actions/jobs/${jobId}/rerun`]);
+        log("sweep.ci_gate_reaggregate.dispatched", {
+          pr_number: pr.prNumber,
+          job_id: jobId,
+          sibling_name: transition.siblingName,
+          sibling_started_at: transition.siblingStartedAt,
+        });
+      } catch (e) {
+        log("sweep.ci_gate_reaggregate.error", {
+          pr_number: pr.prNumber,
+          job_id: jobId,
+          error: String((e as Error)?.message ?? e),
+        });
+      }
     },
 
     // W1-T78 — the CLARIFICATION-QUESTION rung's real wiring: `question` is
