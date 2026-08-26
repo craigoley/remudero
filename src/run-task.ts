@@ -573,8 +573,17 @@ import {
   type CappedOverride,
   type CriterionVerdict,
   type ReviewVerdict,
+  type NameFilterResolution,
 } from "./lib/review.js";
-import { proofQueueAudit, PROOF_QUEUE_AUDIT_CAUSES } from "./lib/proof-queue-audit.js";
+import {
+  proofQueueAudit,
+  PROOF_QUEUE_AUDIT_CAUSES,
+  CREDITED_PROOF_QUEUE_AUDIT_CAUSES,
+  creditedAmendmentVisibility,
+  type CreditedAmendmentFact,
+  type CreditedAmendmentReport,
+  type ProofQueueAuditReport,
+} from "./lib/proof-queue-audit.js";
 import { buildReceipt, resolveReceiptLedgerLines, type ReceiptLedgerRead } from "./lib/receipt.js";
 import { buildDepReviewArmUnreachableEscalation, buildDepReviewEscalation, decideDepReview } from "./lib/dep-review.js";
 import { decideAutoTriage, newFeedbackIdsOldestFirst, readAutoTriageMarker, recordAutoTriageFire, autoTriageMarkerPath, triageLockPath, claimTriageWithLogging, releaseTriageClaimWithLogging, gitTriageClaimReserver, type AutoTriageDecision, type TriageClaimReserver, type TriageClaimResult } from "./lib/auto-triage.js";
@@ -610,6 +619,8 @@ import {
   type BranchFacts,
   readLedgerUnionBounded,
   taskIdFromRunBranch,
+  readMergeCreditedTaskIds,
+  isMergeCreditLine,
 } from "./lib/status.js";
 import {
   DEFAULT_SWEEP_POLICY,
@@ -14305,6 +14316,202 @@ export function defaultMergeEvidenceLog(cwd: string): { dump: string; ref: strin
  *  network, the same DI shape `LintPlanStatusDeps.readMergeEvidenceLog` already uses. */
 export interface ProofQueueAuditDeps {
   readMergeEvidenceLog?: typeof defaultMergeEvidenceLog;
+  /** W1-T2280: overrides the whole `--credited` resolution — the one seam a test needs to drive
+   *  every branch below without a real ledger/git checkout. */
+  creditedProofVisibility?: typeof creditedProofVisibility;
+}
+
+/** {@link creditedProofVisibility}'s return: what it found over the merge-credited population. */
+export interface CreditedProofVisibilityResult {
+  /** `creditedIds.size` — how many tasks {@link readMergeCreditedTaskIds} named, regardless of
+   *  whether any of them have an offending proof or amendment. */
+  creditedCount: number;
+  proof: ProofQueueAuditReport;
+  amendment: CreditedAmendmentReport;
+}
+
+/**
+ * Every real I/O seam {@link creditedProofVisibility} needs, injectable so a test drives the
+ * whole credited pass over fixtures — no real ledger, git history or checkout. Mirrors
+ * `ProofQueueAuditDeps`'s own "one caller supplies both predicates, bound to a real checkout"
+ * contract (lib/proof-queue-audit.ts's module doc).
+ */
+export interface CreditedProofVisibilityDeps {
+  /** Defaults to `ledgerPathFor(loadConfig())`, fail-open to `undefined` on an unreadable config
+   *  (the same posture `emissionsCommand`'s own `stateDir` resolution already takes) — a credited
+   *  pass over a config-less checkout finds zero credited tasks rather than crashing. */
+  ledgerPath?: string;
+  /** THE READER THE DISPATCHER ALREADY TRUSTS (W1-T2280 note x) — never re-derived by hand. */
+  readMergeCreditedTaskIds?: typeof readMergeCreditedTaskIds;
+  /** Used ONLY to date a credit (earliest `ts` per task id) — the population itself always comes
+   *  from `readMergeCreditedTaskIds` above, never from this union's own matches. */
+  ledgerUnion?: typeof resolveLedgerUnion;
+  pathExists?: (repoRelPath: string) => boolean;
+  resolveNameFilteredCandidates?: (rawName: string) => NameFilterResolution;
+  symbolFoundAt?: (symbol: string, path: string) => boolean;
+  /** Overrides the real git-log read entirely — see {@link defaultCreditedAmendmentEvidence}. */
+  amendedSinceCredit?: (taskId: string, shardPath: string, creditedAtIso: string) => { amended: boolean; followUpFiled: boolean } | undefined;
+  cwd?: string;
+}
+
+/** Every ledger line matching either shape {@link isMergeCreditLine} accepts, pre-filtered by a
+ *  cheap raw-text regex before the expensive `JSON.parse` — mirrors every other
+ *  `resolveLedgerUnion` caller's own narrow-pattern convention (e.g. lib/coverage-improvement.ts's
+ *  `COVERAGE_IMPROVEMENT_LEDGER_PATTERN`). Deliberately broader than exactly-precise (a raw-text
+ *  match on `"verdict":"merged"` also fires on an unrelated field ordering) — precision is
+ *  `isMergeCreditLine` itself, applied after parsing; this pattern only bounds what gets parsed. */
+const CREDIT_TIMESTAMP_PATTERN = /"step":"verdict\.merged"|"verdict":"merged"/;
+
+/**
+ * The EARLIEST `ts` (ISO-8601, lexicographically comparable) each credited task's merge-credit
+ * ledger line carries, across the archive∪live union — never a single-file read (see
+ * `readMergeCreditedTaskIds`'s own arithmetic for why rotation drops credit past 200 rows/step).
+ * `undefined` when the union itself could not be trusted (`resolveLedgerUnion`'s `ok: false`) —
+ * FAIL OPEN: an amendment check with no dated credit to compare against simply never fires
+ * (`creditedAmendmentVisibility`'s `amendedSinceCredit` returns `undefined` for that task).
+ */
+function earliestCreditTimestamps(
+  stateDir: string,
+  ledgerUnion: typeof resolveLedgerUnion,
+): Map<string, string> | undefined {
+  const union = ledgerUnion(stateDir, CREDIT_TIMESTAMP_PATTERN);
+  if (!union.ok) return undefined;
+  const earliest = new Map<string, string>();
+  for (const raw of union.matches) {
+    let obj: Record<string, unknown>;
+    try {
+      obj = JSON.parse(raw) as Record<string, unknown>;
+    } catch {
+      continue; // a torn/corrupt line costs its own timestamp, never the whole read
+    }
+    if (!isMergeCreditLine(obj)) continue;
+    const id = obj.task_id;
+    const ts = obj.ts;
+    if (typeof id !== "string" || typeof ts !== "string") continue;
+    const prev = earliest.get(id);
+    if (prev === undefined || ts < prev) earliest.set(id, ts);
+  }
+  return earliest;
+}
+
+/** A `plan/tasks.d/<id>-<slug>.yaml` shard, repo-relative to `repoRoot` — or `undefined` when
+ *  `taskId` is declared inline in the `plan/tasks.yaml` monolith instead (W1-T2280 note ix: the
+ *  amendment signal has no per-file history to read for those, counted as `unmeasurable`). Reuses
+ *  `taskRecordPath` (lib/plan.ts) — the ONE derivation of "which file holds this task's record" —
+ *  never a re-guessed `plan/tasks.d/<id>-*.yaml` glob. */
+function creditedTaskShardPath(planPath: string, taskId: string): string | undefined {
+  const resolved = taskRecordPath(planPath, taskId);
+  if (resolved === undefined || resolved === planPath) return undefined;
+  return relative(repoRoot, resolved);
+}
+
+/**
+ * REAL git-log read behind {@link creditedAmendmentVisibility}'s `amendedSinceCredit`: was
+ * `shardPath` touched by a commit reachable from `origin/main` strictly after `creditedAtIso`,
+ * and did that SAME commit also ADD a brand-new `plan/tasks.d/*.yaml` shard other than
+ * `shardPath` itself (the follow-up escape hatch W1-T2217's commit `ecd1ccc0` used, W1-T2280
+ * rationale (11))? Returns `undefined` — FAIL OPEN, never a guessed flag — on a shallow checkout
+ * or any git failure, the same posture `defaultMergeEvidenceLog` already takes.
+ */
+function defaultCreditedAmendmentEvidence(
+  cwd: string,
+  taskId: string,
+  shardPath: string,
+  creditedAtIso: string,
+): { amended: boolean; followUpFiled: boolean } | undefined {
+  try {
+    const shallow = execFileSync("git", ["rev-parse", "--is-shallow-repository"], { cwd, encoding: "utf8" }).trim();
+    if (shallow === "true") return undefined;
+    const out = execFileSync(
+      "git",
+      ["log", `--since=${creditedAtIso}`, "--name-status", "--format=%x02%H", "origin/main", "--", shardPath],
+      { cwd, encoding: "utf8", maxBuffer: 1 << 24 },
+    );
+    const trimmed = out.trim();
+    if (!trimmed) return { amended: false, followUpFiled: false };
+    const addedShardRe = /^A\s+(plan\/tasks\.d\/[^/\t]+\.yaml)\s*$/;
+    const followUpFiled = trimmed
+      .split("\x02")
+      .filter(Boolean)
+      .some((block) =>
+        block
+          .split("\n")
+          .slice(1)
+          .some((line) => {
+            const m = addedShardRe.exec(line.trim());
+            return m !== null && m[1] !== shardPath;
+          }),
+      );
+    return { amended: true, followUpFiled };
+  } catch {
+    return undefined; // an unreadable/unexpected git state is UNMEASURABLE, never a guess
+  }
+}
+
+/**
+ * W1-T2280: `proofQueueAudit` and `creditedAmendmentVisibility` (lib/proof-queue-audit.ts) over
+ * the MERGE-CREDITED population — never the open+unmerged one `proofQueueAuditCommand`'s default
+ * path already covers. The population itself comes from `readMergeCreditedTaskIds` — the SAME
+ * reader `runCreditBackfill` (lib/sweep.ts) already trusts (note x) — never a second hand-copy of
+ * what a merge credit looks like. PURE ORCHESTRATION: every real read (ledger, git, filesystem)
+ * is a default that a caller can override wholesale via `deps`, so this stays testable without a
+ * real checkout, mirroring `proofQueueAuditCommand`'s own injected-dep contract.
+ */
+export function creditedProofVisibility(
+  planPath: string,
+  plan: Plan,
+  deps: CreditedProofVisibilityDeps = {},
+): CreditedProofVisibilityResult {
+  const cwd = deps.cwd ?? repoRoot;
+  const ledgerPath =
+    deps.ledgerPath ??
+    (() => {
+      try {
+        return ledgerPathFor(loadConfig());
+      } catch {
+        return undefined;
+      }
+    })();
+  const readCredited = deps.readMergeCreditedTaskIds ?? readMergeCreditedTaskIds;
+  const creditedIds = ledgerPath
+    ? readCredited(ledgerPath, { maxRotations: Number.MAX_SAFE_INTEGER }).credited
+    : new Set<string>();
+
+  const creditedTasks = plan.tasks.filter((t) => creditedIds.has(t.id));
+
+  const proof = proofQueueAudit(creditedTasks, {
+    resolveNameFilteredCandidates: deps.resolveNameFilteredCandidates ?? ((rawName) => resolveNameFilteredCandidates(cwd, rawName)),
+    pathExists: deps.pathExists ?? ((rel) => existsSync(join(cwd, rel))),
+    creditedIds,
+    symbolFoundAt:
+      deps.symbolFoundAt ??
+      ((symbol, path) => {
+        try {
+          return readFileSync(join(cwd, path), "utf8").includes(symbol);
+        } catch {
+          return false;
+        }
+      }),
+  });
+
+  const earliest = ledgerPath ? earliestCreditTimestamps(dirname(ledgerPath), deps.ledgerUnion ?? resolveLedgerUnion) : undefined;
+  const facts: CreditedAmendmentFact[] = creditedTasks.map((t) => ({
+    taskId: t.id,
+    shardPath: creditedTaskShardPath(planPath, t.id),
+  }));
+  const amendedSinceCredit =
+    deps.amendedSinceCredit ??
+    ((taskId: string, shardPath: string, creditedAtIso: string) =>
+      defaultCreditedAmendmentEvidence(cwd, taskId, shardPath, creditedAtIso));
+  const amendment = creditedAmendmentVisibility(facts, {
+    amendedSinceCredit: (taskId, shardPath) => {
+      const ts = earliest?.get(taskId);
+      if (ts === undefined) return undefined; // no dated credit to compare against — fail open
+      return amendedSinceCredit(taskId, shardPath, ts);
+    },
+  });
+
+  return { creditedCount: creditedIds.size, proof, amendment };
 }
 
 /**
@@ -14332,7 +14539,7 @@ export interface ProofQueueAuditDeps {
  * which is the only place it is wired; nothing in the daemon/CI/arm path calls it.
  */
 export async function proofQueueAuditCommand(rest: string[], deps: ProofQueueAuditDeps = {}): Promise<number> {
-  const badArg = unknownArgError("proof-queue-audit", rest, ["--plan"], []);
+  const badArg = unknownArgError("proof-queue-audit", rest, ["--plan"], ["--credited"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
     return 2;
@@ -14345,6 +14552,43 @@ export async function proofQueueAuditCommand(rest: string[], deps: ProofQueueAud
   } catch (e) {
     console.error(`### rmd proof-queue-audit: ${(e as Error).message}`);
     return 2;
+  }
+
+  // W1-T2280: an ADDITIVE, opt-in second population — the default open+unmerged path below is
+  // completely untouched when `--credited` is absent (note v: byte-identical to before this
+  // task). It is a REPORT, not a gate, same as the default path: exits 0 regardless of counts.
+  if (rest.includes("--credited")) {
+    const result = (deps.creditedProofVisibility ?? creditedProofVisibility)(planPath, plan);
+    console.log(
+      `### rmd proof-queue-audit --credited: ${result.creditedCount} merge-credited task(s), ` +
+        `${result.proof.criterionCount} proof(s) resolved`,
+    );
+    const offendingTaskCount = new Set(result.proof.offenders.map((o) => o.taskId)).size;
+    console.log(`  ${result.proof.offenders.length} unresolvable proof(s) across ${offendingTaskCount} task(s), by cause:`);
+    for (const cause of CREDITED_PROOF_QUEUE_AUDIT_CAUSES) {
+      const ids = result.proof.byCause[cause];
+      console.log(`    ${cause.padEnd(24)} ${String(ids.length).padStart(3)} task(s): ${ids.join(", ") || "(none)"}`);
+    }
+    for (const o of result.proof.offenders) {
+      console.log(`  ✗ ${o.taskId} criterion ${o.criterionIndex + 1} [${o.cause}] proof: "${o.proof.slice(0, 90)}"`);
+    }
+    for (const r of result.proof.relocated) {
+      console.log(
+        `  ↷ ${r.taskId} criterion ${r.criterionIndex + 1} [relocated to ${r.relocatedTo}] proof: "${r.proof.slice(0, 90)}"`,
+      );
+    }
+    console.log(
+      `\n  amendment signal: ${result.amendment.measurable} credited task(s) measurable via their own shard file, ` +
+        `${result.amendment.unmeasurable} unmeasurable (declared inline in plan/tasks.yaml, W1-T2280 note ix) — ` +
+        `${result.amendment.flagged.length} amended after credit with no follow-up filed alongside: ` +
+        `${result.amendment.flagged.join(", ") || "(none)"}`,
+    );
+    console.log(
+      "\nrmd proof-queue-audit --credited is a REPORT, not a gate — no dispatch, CI job or arm decision may " +
+        "consult this verdict (lib/proof-queue-audit.ts); no ledger line is appended and no status moves. " +
+        "Exits 0 unconditionally, regardless of the counts above.",
+    );
+    return 0;
   }
 
   const openIds = plan.tasks.filter(isOpenLintTask).map((t) => t.id);
