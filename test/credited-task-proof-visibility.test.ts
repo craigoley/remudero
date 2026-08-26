@@ -381,10 +381,16 @@ test("W1-T2280(8): the input plan's task objects are never mutated — no status
 
 test("W1-T2280(8): the dispatch gate (src/lib/drain.ts) still reads `acceptance` nowhere but a comment", () => {
   const source = readFileSync(join(REPO_ROOT, "src", "lib", "drain.ts"), "utf8");
-  const occurrences = source.match(/acceptance/g) ?? [];
-  assert.equal(occurrences.length, 1, "src/lib/drain.ts is not in this task's files: — it must be untouched");
-  const line = source.split("\n").find((l) => l.includes("acceptance"));
-  assert.match(line ?? "", /\*/, "the one occurrence must sit inside a comment, never a field read");
+  // Strip comments OURSELVES (rather than asserting the raw-text literal directly) so this
+  // assertion can only be satisfied by the REAL absence of an `acceptance` field-read in code --
+  // never by the word merely surviving inside a comment. That distinction is exactly what this
+  // test exists to pin: a real dispatch-gate field read would show up here even though the raw
+  // file also carries one documentary comment mentioning `acceptance` (W1-T2280 note (iv)).
+  const codeOnly = source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+  assert.ok(
+    !codeOnly.includes("acceptance"),
+    "src/lib/drain.ts is not in this task's files: — its dispatch gate must never read `acceptance` as real code, comments aside",
+  );
 });
 
 test("W1-T2280(8): --credited itself declares, in its own output, that it appends no ledger line and moves no status", async () => {
