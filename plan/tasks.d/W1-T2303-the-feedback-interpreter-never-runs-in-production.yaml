@@ -1,0 +1,110 @@
+- id: W1-T2303
+  title: "the feedback interpreter has never run in production — PanelGraphDeps.expandFeedback is assigned nowhere in src/, so the preview route answers expansion: null on every call and EVERY console submission takes the fail-open leg that files on the first click with no read-back at all"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  rationale: |
+    THE RECON feedback#fb-1785969338913-dc3d0f ASKED FOR ENDED HERE. The entry asked whether the
+    preview and the file are the same request and whether the confirmation gates the write. The
+    measured answer is worse than either branch it offered: IN PRODUCTION THE CONFIRMATION NEVER
+    HAPPENS AT ALL, because the interpreter that would produce something to confirm is not wired.
+
+    CALL-SITE CENSUS, MEASURED. `expandFeedback` as an ASSIGNED key returns ZERO across src/. The
+    only hits anywhere are the optional field's declaration and its two uses inside
+    src/lib/panel-graph.ts, plus src/lib/feedback.ts's own doc saying so in terms: "NO PRODUCTION
+    CALLER WIRES THIS YET… undefined in production today means POST /v1/feedback/preview always
+    resolves { expansion: null }". LIVE CONTROL ON THE IDENTICAL QUERY SHAPE, non-zero: the sibling
+    rung IS wired the same way it would be — `summarize: realDecisionSummarizer({ mount:
+    resolveDecisionSummaryMount(mountsTable), cwd, settingsFile, spawn })` in src/run-task.ts. So the
+    zero is a real absence, not a query defect. The serve command's own deps literal in
+    src/run-task.ts builds `panelGraph: { root, planPath, ledgerPath, github, statusGithub,
+    feedbackLand }` — no expander field at all.
+
+    WHAT THAT COSTS, TRACED THROUGH THE CONSOLE'S OWN STATE MACHINE. The preview route returns
+    { expansion: null } when the dep is unset. The console's submit handler treats a null expansion
+    as the FAIL-OPEN leg and FILES on that click. Therefore, for every submission any operator has
+    ever made through the console: one click, one filing, no expansion shown, no confirm ever
+    offered, and the arm leg is unreachable code. W1-T350's design constraint — the operator must SEE
+    and be able to CORRECT the interpreter's expansion BEFORE it files — is unmet for 100% of
+    production submissions, and the whole round trip that task exists for has never executed once.
+    CORROBORATION IN THE CORPUS: both entries the originating feedback measured
+    (fb-1785969044581-c341bd, fb-1785969049475-f40327) carry expansion: null, which is that leg's
+    signature. Re-derive the wider count over plan/feedback at build time rather than trusting a
+    two-entry sample from this shard.
+
+    THE PIECES ARE ALL BUILT AND ONE ASSIGNMENT IS MISSING. src/lib/feedback.ts already exports
+    realFeedbackExpander (the real spawn, mirroring realDecisionSummarizer) AND
+    resolveFeedbackExpansionMount (which delegates to risk-judge.ts's cheapest-tier scanner, so no
+    new mounts.yaml row is needed). Both are unused. W1-T350 named this follow-up explicitly — "a
+    validated, injectable rung ships first; wiring a real default into rmd serve's boot path
+    (mounts.yaml resolution, a rendered worker settings file) is a follow-up once the round trip
+    above is proven" — and NO TASK EXISTS FOR IT: `expandFeedback` and `expander` across plan/ hit
+    only W1-T350's and W1-T2206's own shards.
+  design: |
+    WIRE THE RUNG WHERE ITS SIBLING IS ALREADY WIRED, OR STATE HONESTLY THAT IT CANNOT BE.
+    (i) THE CALL SITE IS THE CLI GLUE THAT ALREADY BUILDS THE SERVE DEPS, and the shape is the one
+    the decision-summary rung already uses: resolveFeedbackExpansionMount over the same mounts table
+    plus realFeedbackExpander. No second model-call idiom, no new mounts row, no new resolver.
+    (ii) THE SERVE PROCESS IS NOT A RUN, AND THIS IS THE ONE THING THAT MUST BE ESTABLISHED RATHER
+    THAN ASSUMED. realFeedbackExpander wants a cwd and a settingsFile, and the precedent takes both
+    from a worker run's freshly-created worktree. `rmd serve` is a long-lived process with no
+    worktree and no rendered worker settings file. Establish FROM SOURCE what cwd and what settings
+    file a serve-hosted spawn must use, and state the choice with its reasoning. IF NO HONEST ANSWER
+    EXISTS, SAY SO AND LEAVE THE FIELD UNSET rather than inventing one: an expander pointed at the
+    wrong tree, or spawned under settings that grant it more than a prompt-only rung needs, is worse
+    than the null it replaces. A shard that lands with that finding and no wiring has done the work.
+    (iii) FAIL-OPEN IS LOAD-BEARING AND DOES NOT MOVE. The route's contract — dep unset, rung throws,
+    rung times out, or the response fails validation, all resolve { expansion: null } with a 200,
+    never a 5xx — is what keeps an operator's submission from depending on a model call. Wiring a
+    real expander must leave every one of those legs exactly as it is, and the tests that pin them
+    must still pass unchanged.
+    (iv) THE COST BECOMES REAL AND MUST BE STATED. One cheap-mount call per console submission,
+    operator-initiated, seconds of latency inside an interactive flow. W1-T350 stated and accepted
+    that price; this is where it starts being paid, so name the resolved mount and the measured
+    per-call cost in the PR body rather than leaving the operator to discover it on a bill.
+    (v) LATENCY MEETS AN ALREADY-BUILT PENDING STATE. W1-T2206 (#2710) shipped the disabled control
+    and the "Expanding your answer…" label for exactly this call, and they have never had a real one
+    to render for.
+    Verify the widened arm window still survives reading a real four-section expansion; if it does
+    not, that is a finding to record, NOT a licence to re-open the confirm step's design here.
+    (vi) NOT IN SCOPE: the expander PROMPT, its few-shot corpus and its four-section validation
+    (W1-T350, shipped and tested); the banner wording on the fail-open leg (W1-T2301); submission
+    idempotency (W1-T2302); the pending/armed/expiry states (W1-T2206, merged); and removing,
+    shortening or skipping the confirm step, which W1-T350's constraint forbids.
+  acceptance:
+    - claim: "the serve command builds its panel-graph dependencies with a real feedback expander resolved from the existing cheapest-tier mount scanner"
+      proof: "grep: expandFeedback in src/run-task.ts"
+    - claim: "a preview served with a wired expander returns the four-section expansion, so the console arms its confirmation instead of filing on that click"
+      proof: "unit test: test/panel-graph.test.ts"
+    - claim: "an expander that throws, times out or returns something unvalidatable still answers 200 with a null expansion so a submission is never blocked on it"
+      proof: "unit test: test/panel-graph.test.ts"
+    - claim: "the serve boot path resolves the expander once and threads it through, and an install that resolves no mount boots unchanged"
+      proof: "unit test: test/serve-command-boot.test.ts"
+  risk: high
+  origin: feedback#fb-1785969338913-dc3d0f
+  plan_refs: ["W1-T350", "W1-T2206", "W1-T348", "§7B"]
+  files: [src/run-task.ts, src/lib/feedback.ts, test/serve-command-boot.test.ts, test/panel-graph.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    verify:auto — the wiring is assertable at boot with an injected spawn
+    (test/serve-command-boot.test.ts already drives the serve command's construction, and
+    test/serve-write-tier-wiring.test.ts is the precedent for asserting a threaded-through dep), and
+    the route's legs assert in-process against
+    a stub expander exactly as W1-T350's own suite does. The real spawn stays untested by unit, like
+    every other real spawn in this tree — that is the existing split, not a gap this shard opens.
+    risk:high, set UP FRONT: four subsystems by the linter's count. The blast radius is one
+    assignment plus whatever design (ii) forces; the SPAN is what trips Rule 19.
+    src/lib/feedback.ts IS DECLARED CONDITIONALLY AND THIS IS THE ENTRY MOST LIKELY TO BE WRONG:
+    realFeedbackExpander and resolveFeedbackExpansionMount already take everything they need as
+    opts, so the wiring may not touch that file at all — it is declared because design (ii)'s
+    cwd/settings question is the one that could force a change there, and an undeclared file is
+    refused at push.
+    budget_usd 45 — the diff is small and the RECON is not: design (ii) is a real question about what
+    a long-lived process may spawn and with what settings, and it must be answered from source.
+    NO depends_on: this is the leg-selection defect, W1-T2301 is what either leg SAYS, W1-T2302 is
+    whether a repeat is recognised. Each lands value alone and none blocks another.
+    ONE CONCERN: whether the interpreter runs at all in production.
