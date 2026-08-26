@@ -10528,10 +10528,14 @@ async function runTask(
     // `change.description`) and `review.headSha` is the SAME head `cappedOverrideFromLedger`
     // read a few statements earlier — the head this candidate change was actually assessed at,
     // not whatever `gh pr view` would report if re-read after the judge returns.
+    // W1-T2284: `description` is the ONLY place `task.title` reaches the judge — it used to
+    // ALSO ride along as `planContext.title` below, the same string under a second label,
+    // which is what let #2853 read as a double confirmation of a defect rather than one
+    // description of one change. `planContext` now carries `taskId`/`taskType` only.
     const riskJudgeInput: RiskJudgeInput = {
       change: { description: `${task.title} — ${prUrl}`, files: task.files },
       gatesState: { review_state: review.state, review_capped: review.capped, ci, arm_decision: armDecision.reason },
-      planContext: { taskId: task.id, title: task.title, taskType: task.type },
+      planContext: { taskId: task.id, taskType: task.type },
       prNumber: prNumberFromRef(prUrl),
       headSha: review.headSha,
     };
