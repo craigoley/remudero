@@ -1,6 +1,6 @@
-import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { classifyPushFailure } from "./task-id-reservation.js";
 
 /**
@@ -408,6 +408,21 @@ export function recordAutoTriageFire(path: string, at: Date, windowMs: number): 
       ? prior.marker.fires.filter((f) => at.getTime() - Date.parse(f) < windowMs && !Number.isNaN(Date.parse(f)))
       : [];
   const marker: AutoTriageMarker = { fires: [...kept, at.toISOString()] };
+  // W1: THE DIRECTORY IS CREATED, NOT ASSUMED — and the failure mode this closes is the expensive
+  // one. A bare write into an absent `state/` throws ENOENT BEFORE the marker lands, and an absent
+  // marker correctly resolves to NO PRIOR FIRE, so the cadence check reads `fire: true` on every
+  // tick forever and each fire pays for a whole re-read. MEASURED on a root without `state/`:
+  // three consecutive ticks, all `fire: true`, no marker on disk, every run throwing.
+  //
+  // FOUR OF THE SEVEN `last-*.json` WRITERS ALREADY DO THIS (`last-seen.ts`, `digest.ts`,
+  // `feedback-docket.ts`'s `writeFeedbackDocketMarker`, `retro.ts`) — one of them,
+  // `recordDigestCadenceFire`, mkdirs and then delegates HERE, which is a caller working around
+  // this very gap. This makes the writer carry the guarantee instead of its callers.
+  //
+  // IT CHANGES NOTHING ELSE. Same path, same contents, same rolling-window argument, and the
+  // read side is untouched: a marker that EXISTS and cannot be parsed still fails closed, while an
+  // ABSENT marker still means no prior fire. That distinction is the point and survives.
+  mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, JSON.stringify(marker, null, 2));
   return marker;
 }
