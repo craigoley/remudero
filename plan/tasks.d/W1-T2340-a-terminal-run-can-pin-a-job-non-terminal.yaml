@@ -1,0 +1,99 @@
+- id: W1-T2340
+  title: "A TERMINAL RUN CAN PIN A JOB NON-TERMINAL, AND A CHECK-RUNS READER CANNOT SEE IT — W1-T2327's criterion 1 was written on a job-count premise that measurement falsified, so this task carries the corrected discriminator: a job whose status is non-terminal inside a run whose conclusion is terminal, joined from the run listing a check-runs read never exposes"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 30.00
+  files: [src/lib/sweep.ts, test/terminal-run-pins-a-job-non-terminal.test.ts]
+  origin: oper#terminal-run-pins-a-job-non-terminal-2026-08-26
+  plan_refs: ["W1-T2327", "W1-T180"]
+  status: queued
+  attempts: 0
+  rationale: |
+    WHY THIS TASK EXISTS AS A SEPARATE RECORD RATHER THAN AS AN EDIT. W1-T2327 is MERGED, and
+    Standing rule 21 makes merged terminal: an amendment does not re-queue the task, the drain skips
+    a merged id outright, and the retro sweep skips a closed one, so a corrected criterion left on
+    W1-T2327 alone would orphan — nothing would ever dispatch it. `postMergeAmendmentViolations`
+    (`src/lib/task-linter.ts`) enforces exactly that and blocks at
+    `added.length > 0 && !ctx.followUpFiled`. THIS SHARD IS THE `followUpFiled` HALF: it carries the
+    corrected criterion so the criterion has a home that will actually be dispatched, which is
+    W1-T180's own stated design for this situation.
+
+    (1) THE PREMISE THAT WAS FALSIFIED, AND HOW. W1-T2327's criterion 1 read "a head whose runs
+    include one that scheduled no job is reported as stalled rather than pending". Measured on
+    #2974's head 7ca8ba51: the FOUR `startup_failure` runs SCHEDULED SIX JOBS between them —
+    Dependency Review twice (success, success), CodeQL twice (cancelled, cancelled),
+    acceptance-author-gate once (success), and Semgrep once, left queued forever. The head therefore
+    carried twenty-three check-runs, three of them green, from runs that had already concluded
+    startup failure. THE JOB LIST WAS NOT EMPTY, so a job-count reading sees nothing and a build
+    satisfying that criterion literally would ship the wrong predicate.
+
+    (2) THE CORRECTED DISCRIMINATOR. A job whose status is NON-TERMINAL inside a run whose
+    conclusion is TERMINAL. Not an absence of jobs — a job pinned non-terminal by a run that has
+    already finished. A reader that consults check-runs and never the RUN's own conclusion cannot
+    tell that from work in flight and waits forever, and the run conclusion is precisely what a
+    check-runs listing never exposes, so the join between the two listings is the whole fix.
+
+    (3) AND IT NEEDS NO THRESHOLD, WHICH IS WHAT MAKES IT CHEAPER THAN THE SHAPE IT REPLACES.
+    W1-T2327's third criterion bounds a run still waiting to begin, because a run that has not
+    started may legitimately be slow. A queued job inside a TERMINAL run is not that: the run will
+    never schedule anything again, so there is nothing to wait for and no bound to tune. The
+    threshold half of W1-T2327 stands on its own for the not-yet-started case; this task does not
+    re-file it and does not need it.
+
+    (4) WHAT W1-T2327 ESTABLISHED THAT STILL HOLDS, CITED RATHER THAN RE-DERIVED. The
+    `startup_failure` conclusion is real and is still the thing that produces this state. GitHub
+    still REFUSES the obvious remedy — re-running such a run returns `403 This workflow run cannot
+    be retried` — so a NEW HEAD remains the only route out, and that was proven twice on 2026-08-26:
+    #2974 went 4 startup failures to 0 and #2971 went 2 to 0, each on a fresh head. The threshold
+    derivation for the not-yet-started case also stands — creation to first job at two seconds
+    minimum, three median, nine worst over ten successful runs — with its own caveat that ten
+    samples fix the order of magnitude and not the number. None of that is re-opened here.
+
+    (5) THE RARITY ARGUMENT IS UNCHANGED AND IS STILL NOT THE ARGUMENT. Startup failures measured
+    ZERO across this repository's first forty-three days, against controls of 1,472 failures and
+    32,482 successes in 36,853 runs. The blindness is what earns the detector its cost, not that one
+    outage — and the corrected discriminator widens the blindness rather than narrowing it, because
+    a terminal run pinning a job non-terminal is reachable by a cancelled or an abandoned run too,
+    not only by a startup failure.
+  note: |
+    SIZING BAND: `risk: high` is set UP FRONT and the band is Rule 19's SPAN — one source module and
+    its test. The change is a join between two listings the sweep already reads.
+
+    THE CRITERION BELOW IS DELIBERATELY WORD-FOR-WORD W1-T2327's CORRECTED CRITERION 1. That is not
+    duplication for its own sake: `followUpCarriesCriteria` matches on `criterionKey`, which is the
+    claim normalised for whitespace and nothing else, so carrying the same claim is what makes
+    `followUpFiled` read true and keeps the amendment from blocking. A reworded claim would not
+    match and the amendment would be refused.
+
+    WHAT MUST NOT CHANGE. Rule 21 stays, and this shard is an argument FOR it rather than around it:
+    the corrected criterion is dispatched from here because a merged task cannot dispatch it. The
+    `403` refusal and the new-head remedy stay as W1-T2327 recorded them. Nothing paces, throttles
+    or sleeps a call — W1-T1066 stands, and a detector that polled a terminal run would be the
+    opposite of this task's point.
+
+    ID PROVENANCE: verified UNUSED across all eight surfaces, anchored on a digit class rather than a
+    shorthand escape, with the OPEN-PR ENUMERATION ITSELF CONTROLLED — a refused REST call returns an
+    empty list and three false zeros, which reissued a live id three times on this date. Surface 1
+    reads 1 as required. Shard filenames 0 of 636, declared ids 0 of 905, open-PR titles 0 of 7
+    (case-sensitive), bodies 0, head branches 0 against a control drawn from a LIVE run-shaped head,
+    merged trailers 0 of 536, merged subjects 0 of 2,357 — each zero with a control firing on its
+    own surface.
+  acceptance:
+    - claim: "a job left non-terminal inside a run whose conclusion is terminal is reported as stalled rather than pending"
+      proof: "unit test: test/terminal-run-pins-a-job-non-terminal.test.ts"
+    - claim: "a run that is terminal with every job terminal keeps the reading it has today"
+      proof: "unit test: test/terminal-run-pins-a-job-non-terminal.test.ts"
+    - claim: "the detection needs no threshold, because a terminal run will never schedule again"
+      proof: "unit test: test/terminal-run-pins-a-job-non-terminal.test.ts"
+    - claim: "a job non-terminal inside a run still in progress is untouched, so work in flight still reads as in flight"
+      proof: "unit test: test/terminal-run-pins-a-job-non-terminal.test.ts"
+    - claim: "the join reads the run listing, since a check-runs read alone cannot expose a run's conclusion"
+      proof: "unit test: test/terminal-run-pins-a-job-non-terminal.test.ts"
+    - claim: "a cancelled or abandoned run pinning a job is caught too, not only a startup failure"
+      proof: "unit test: test/terminal-run-pins-a-job-non-terminal.test.ts"
+    - claim: "nothing added paces, throttles or sleeps a call"
+      proof: "unit test: test/terminal-run-pins-a-job-non-terminal.test.ts"

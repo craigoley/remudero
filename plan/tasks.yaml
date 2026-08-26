@@ -9076,15 +9076,15 @@
     deps come from refreshing the canonical checkout, never from an install inside a worktree.
   acceptance:
     - claim: "a criterion SATISFIED in repo state but not keyword-claimed in the report is judged MET by the floor (the #100 case)"
-      proof: "unit test: test/proof-exec-floor.test.ts::ACCEPTANCE #1 (the #100 false-block)"
+      proof: "unit test: ACCEPTANCE #1 (the #100 false-block)"
     - claim: "a criterion keyword-CLAIMED in the report whose named proof FAILS on the head is judged UNMET (executed_fail overrides keyword coverage)"
-      proof: "unit test: test/proof-exec-floor.test.ts::ACCEPTANCE #2 (the W1-T51 false-pass)"
+      proof: "unit test: ACCEPTANCE #2 (the W1-T51 false-pass)"
     - claim: "a free-prose proof leaves the keyword floor byte-identical to today"
-      proof: "unit test: test/proof-exec-floor.test.ts::ACCEPTANCE #3 (free-prose proof byte-identical to the pre-change floor)"
+      proof: "unit test: ACCEPTANCE #3: a free-prose proof is byte-identical to the pre-W1-T65 floor"
     - claim: "an exec error or timeout degrades to the keyword floor and is legible, never a silent hard-fail or a stall"
-      proof: "unit test: test/proof-exec-floor.test.ts::ACCEPTANCE #4 (exec_error/timeout degrades to the keyword-floor verdict)"
+      proof: "unit test: ACCEPTANCE #4: an executor that THROWS (exec_error/timeout) degrades to the keyword floor verdict"
     - claim: "proof execution is bounded to the W1-T3F whitelist — no arbitrary code from proof text"
-      proof: "unit test: test/proof-exec-floor.test.ts::ACCEPTANCE #5 (an unwhitelisted proof shape is not_executable)"
+      proof: "unit test: ACCEPTANCE #5: an unwhitelisted/unsafe proof shape is not_executable"
     - claim: "the judge call site passes the PR-head checkout path (never the operator checkout) into the floor"
       proof: "grep: headCheckoutDir: args in src/run-task.ts"
   risk: high

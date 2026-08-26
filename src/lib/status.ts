@@ -26,6 +26,7 @@ import type { WorkerState } from "./worker.js";
 import {
   type BoardIssueRest,
   boardPrsRestArgs,
+  type BoardFetchHalf,
   type BoardPrRest,
   combinedStatusRestArgs,
   createGhCallPacer,
@@ -4422,6 +4423,23 @@ export function buildBatchedGithub(
      * `buildSweepHook`'s left both reads unpaced with no gap and no ledger row).
      */
     pacer?: GhCallPacer;
+    /**
+     * W1-T2323 OPTION C — THE MERGED HALF'S OWN CLOCK, separate from `ttlMs`, which now governs
+     * the OPEN half alone.
+     *
+     * DEFAULTS TO `ttlMs`, DELIBERATELY, AND THE DEFAULT IS THE ARGUMENT. The shard's option C
+     * offers "let the merged half live long and the open half stay short" as the way to cut full
+     * walks. MEASURED, that is not where the walks come from: `knownBoardPrs` is per-instance, so
+     * a TTL expiry on a WARM gateway is a DELTA walk (2 requests, 825 ms) while a FULL 26-request
+     * walk comes from a COLD gateway — a fresh `buildBatchedGithub` that has no cache to expire in
+     * the first place. Lengthening this number would therefore buy a handful of cheap deltas and
+     * pay for them by making `findMergedByTrailer` answer from older evidence. THE WIN THIS TASK
+     * SHIPS IS LAZINESS, NOT LENGTH: the merged half is no longer fetched by a consumer that only
+     * wants open rows. The knob exists so the two clocks are genuinely separable — and so a future
+     * caller that has measured a reason can lengthen it explicitly — not because a longer default
+     * was found to be worth its staleness.
+     */
+    mergedTtlMs?: number;
   } = {},
 ): GitHub {
   const ttlMs = opts.ttlMs ?? 15_000;
@@ -4459,8 +4477,32 @@ export function buildBatchedGithub(
   // gateway's memoisation. Flooring it would silently turn "always stale" into "stale after one
   // fetch duration", breaking that idiom for no production benefit — nothing in this process ever
   // constructs a gateway with `ttlMs: 0` outside a test.
-  let lastFetchDurationMs = 0;
-  const effectiveTtlMs = (): number => (ttlMs === 0 ? 0 : Math.max(ttlMs, lastFetchDurationMs));
+  // W1-T2323 OPTION C COMPOSES WITH THE FLOOR: ONE FLOOR PER HALF, NOT ONE PER GATEWAY.
+  //
+  // #2998 shipped a single `lastFetchDurationMs` because there was a single clock. There are now
+  // two, and they cost two wildly different amounts: MEASURED on the live board, the open pass is
+  // 376 ms and the cold merged walk is 18,753 ms. A SHARED floor would let the merged walk's
+  // duration govern the open clock, holding rows that cost under half a second for nineteen
+  // seconds.
+  //
+  // MEASURED, A SHARED FLOOR BEHAVES IDENTICALLY TODAY, and that is exactly why it is not used:
+  // `index()` refreshes the open half BEFORE the merged half, so the open stamp has already aged
+  // by at least the merged walk's duration by the time anything reads it, and the shared floor is
+  // never the binding constraint. That is a coincidence of the current call order, written down
+  // nowhere and true only until the order changes or a half is refreshed on its own. The per-half
+  // form is correct by construction rather than by accident, for the same cost.
+  //
+  // `ttlMs === 0` STAYS EXEMPT, ON BOTH HALVES (#2998's own carve-out, and the split makes it
+  // load-bearing in more places). A zero TTL is the suite's never-cache idiom, and
+  // test/board-prs-rest.test.ts, test/read-failed-not-attempted.test.ts and
+  // test/serve-board-pacer-wiring.test.ts all use it AND all take the split path, since they
+  // inject `opts.exec` rather than `opts.fetchAll`. Flooring a zero would turn "always stale"
+  // into "stale after one fetch duration" for every one of them.
+  const mergedTtlMs = opts.mergedTtlMs ?? ttlMs;
+  let openFetchDurationMs = 0;
+  let mergedFetchDurationMs = 0;
+  const effectiveOpenTtlMs = (): number => (ttlMs === 0 ? 0 : Math.max(ttlMs, openFetchDurationMs));
+  const effectiveMergedTtlMs = (): number => (mergedTtlMs === 0 ? 0 : Math.max(mergedTtlMs, mergedFetchDurationMs));
   // W1-T1005: an explicit `opts.pacer` always wins (design iii); omitted, every gateway built in
   // this process falls back to the SAME module-scoped instance (created once, on whichever
   // gateway needs it first) rather than each discovering the secondary rate limit on its own.
@@ -4471,20 +4513,49 @@ export function buildBatchedGithub(
   // ghGateway's sticky-for-instance-lifetime flag) — this gateway's single batched fetch
   // refreshes on its own `ttlMs` cadence, so a stale failure from an earlier TTL window
   // must not keep shadowing a later fetch that actually succeeded.
-  let lastFetchFailed = false;
-  let lastFetchFailureReason: GhFailureReason | undefined;
+  /**
+   * W1-T2323: PER HALF, because the halves now attempt independently and a single pair of flags
+   * would let the second attempt ERASE the first one's verdict — an open-half outage masked by a
+   * merged-half success is precisely the "GitHub says zero PRs" reading W1-T181 exists to
+   * prevent, arriving by a new route. Each half still resets its OWN verdict on its OWN next
+   * attempt, which is W1-T119's rule applied per channel rather than abandoned.
+   *
+   * `readFailed()` reports their OR, so the gateway is failed while EITHER half's most recent
+   * attempt failed. That is strictly no weaker than the single flag it replaces: on the combined
+   * path both entries are written from the one attempt and the reading is identical.
+   */
+  interface FetchOutcome {
+    failed: boolean;
+    reason: GhFailureReason | undefined;
+  }
+  let openOutcome: FetchOutcome | undefined;
+  let mergedOutcome: FetchOutcome | undefined;
+  let fetchInFlight = false;
+  const lastFetchFailed = (): boolean => (openOutcome?.failed ?? false) || (mergedOutcome?.failed ?? false);
+  const lastFetchFailureReason = (): GhFailureReason | undefined =>
+    (openOutcome?.failed ? openOutcome.reason : undefined) ?? (mergedOutcome?.failed ? mergedOutcome.reason : undefined);
   // W1-T2219: backs `readState()` — `"not_attempted"` until `index()` first runs, `"in_flight"`
   // for the duration of one attempt (observable from a REENTRANT call inside an injected
   // `fetchAll`; the real, synchronous default `run` blocks the whole process, same as
   // everywhere else in this file that notes it), then `"ok"`/`"failed"` mirroring
   // `lastFetchFailed` — but, unlike that flag, never forced into being true by an accessor:
   // only `index()` itself (called by an actual query method, or `warm()`) advances this.
-  let fetchState: GhReadState = "not_attempted";
+  const fetchState = (): GhReadState => {
+    if (fetchInFlight) return "in_flight";
+    if (!openOutcome && !mergedOutcome) return "not_attempted";
+    return lastFetchFailed() ? "failed" : "ok";
+  };
   // W1-T415: set from `fetched.truncated` on every fetch this default `fetchAll` performs — an
   // INJECTED `opts.fetchAll` (every unit-test fixture predating this) bypasses `fetchBoardPrsRest`
   // entirely and so never touches this, leaving it at its initial `false`, the same omitted-⇒-
   // false discipline `readTruncated()`'s optionality already documents.
-  let lastFetchTruncated = false;
+  // W1-T2323: retained PER HALF, because the halves now refresh on independent clocks and a
+  // later untruncated OPEN refresh must not clear a truncation the CLOSED walk is still carrying
+  // (nor the reverse). `readTruncated()` reports their OR — a partial view is a partial view
+  // whichever half was cut short, which is the reading lib/trace.ts's `undecidable` guard wants.
+  let lastOpenTruncated = false;
+  let lastClosedTruncated = false;
+  const lastFetchTruncated = (): boolean => lastOpenTruncated || lastClosedTruncated;
   const run =
     opts.exec ??
     // 3rd fd is `pipe` (W1-T119), not `ignore` — same stderr-capture fix as ghGateway, so this
@@ -4501,6 +4572,11 @@ export function buildBatchedGithub(
   // one on a failed fetch (the W1-T181 pairing below), and reusing that as the delta base would
   // turn one transient failure into a permanent cold re-walk. Untouched on a throw, so a recovery
   // costs 2 requests rather than 8.
+  // W1-T2323: IN SPLIT MODE THIS HOLDS CLOSED ROWS ONLY. The open pass is a COMPLETE read of a
+  // small set and is given NO `known` (see `restFetchHalf`), so nothing but the closed pass ever
+  // writes here and the delta stop test below is comparing like with like. Seeding the open pass
+  // from a shared map would be a correctness bug, not an optimisation: the closed pass used to be
+  // what overwrote a just-merged row's `OPEN` state inside the same call, and it no longer is.
   let knownBoardPrs: Map<number, BoardPrRest> | undefined;
   // W1-T2222: the issue-fetch's OWN cross-refresh row cache, same reasoning and same "untouched
   // on a throw" discipline as `knownBoardPrs` above — an independent map because the PR delta and
@@ -4532,9 +4608,21 @@ export function buildBatchedGithub(
    * every `ttlMs`, exactly as W1-T2217 left it for that case.
    */
   const reviewStateCache = new Map<string, { at: number; state: "success" | "failure" | "pending" | "none" }>();
-  const fetchAll =
-    opts.fetchAll ??
-    (() => {
+  /**
+   * ONE HALF OF THE BOARD, OVER REST — W1-T2323 option C's whole mechanism.
+   *
+   * The body below is byte-for-byte what the single combined fetch always did, parameterised by
+   * WHICH half it walks — but this gateway only ever calls it with `"open"` or `"closed"` (see
+   * `openRows`/`mergedRows` below). A gateway built with an injected `opts.fetchAll` never reaches
+   * this function at all: `bothHalves` below calls `opts.fetchAll` directly, so `"both"` stays a
+   * valid {@link BoardFetchHalf} for `fetchBoardPrsRest`'s own default but is not something this
+   * wrapper is ever asked to walk.
+   *
+   * MEASURED 2026-08-26 on this repo: `"open"` is 1 request, 6 rows, 432 ms. `"closed"` cold is
+   * 25 requests, 2,400 rows, 21,813 ms. Welded together, `listOpenHeadBranches` — the daemon's
+   * only board consumer on the dispatch path — paid 26 requests for the 1 it reads.
+   */
+  const restFetchHalf = (half: BoardFetchHalf): BatchedPr[] => {
       // W1-T265: REST, NOT `gh pr list --state all --json …`. That flag is implemented over
       // GraphQL, and MEASURED on 2026-07-31 it cost 12 GraphQL points and 2,888,862 bytes per
       // call for this repo's 687 PRs. At the 15 s TTL below, one open console tab drove 240
@@ -4552,14 +4640,28 @@ export function buildBatchedGithub(
         bytes += Buffer.byteLength(raw, "utf8");
         return JSON.parse(raw);
       };
-      const fetched = fetchBoardPrsRest(owner, repo, fetchJson, knownBoardPrs);
-      knownBoardPrs = new Map(fetched.rows.map((r) => [r.number, r]));
+      // W1-T2323: THE OPEN HALF IS GIVEN NO `known` AND WRITES NONE. It re-reads `state=open`
+      // completely on every call — 1 page for this repo's 6 open PRs — so the rows it returns ARE
+      // the open set, and a PR that merged since the last call is simply absent from GitHub's
+      // answer rather than resurrected from a cache. Seeding it would be the bug: the closed pass
+      // is what used to overwrite a just-merged row's `OPEN` state inside the same call, and on
+      // this path there is no closed pass to do it.
+      const known = half === "open" ? undefined : knownBoardPrs;
+      const fetched = fetchBoardPrsRest(owner, repo, fetchJson, known, half);
+      if (half !== "open") knownBoardPrs = new Map(fetched.rows.map((r) => [r.number, r]));
       // W1-T415: ledgered below on EVERY successful fetch already; now also RETAINED here so
       // `readTruncated()` can surface it — a truncated view is a SUCCESS (rows) that still hit
       // `BOARD_MAX_PAGES` on the open or closed half, distinct from `lastFetchFailed`, which the
       // catch below sets only on a THROW. Reassigned every successful fetch, exactly like
       // `lastFetchFailed` above, so a later untruncated refresh clears an earlier truncated one.
-      lastFetchTruncated = fetched.truncated;
+      // W1-T2323: recorded against the half that produced it, so `readTruncated()`'s OR keeps a
+      // live truncation from either walk instead of the last one to finish winning outright.
+      // ONLY "open"/"closed" EVER REACH HERE — `bothHalves()` below calls the injected
+      // `opts.fetchAll` directly, never this function, so a THIRD `half === "both"` arm would be
+      // dead code no fixture could ever exercise; coverage-ratchet caught exactly that when it
+      // still existed (W1-T2323 follow-up).
+      if (half === "open") lastOpenTruncated = fetched.truncated;
+      else lastClosedTruncated = fetched.truncated;
       // W1-T181 design (vi): log the payload size on every SUCCESSFUL fetch, so the next
       // approach to whatever ceiling is set above is observable in advance instead of arriving
       // as a silent outage the way tonight's did. `restCalls`/`mode` are W1-T265 additions — the
@@ -4570,9 +4672,22 @@ export function buildBatchedGithub(
         restCalls: fetched.calls,
         mode: fetched.mode,
         truncated: fetched.truncated,
+        // W1-T2323: WHICH HALF, in the ledger, so "did the split actually stop the daemon paying
+        // for the closed walk" is a measurement over `board_gateway.fetch_bytes` rows rather than
+        // a claim. Before this task every row was implicitly `"both"`.
+        half: fetched.half,
       });
       return fetched.rows;
-    });
+  };
+  /**
+   * W1-T2323: TRUE ONLY WHEN THIS GATEWAY OWNS ITS OWN FETCHES. An injected `opts.fetchAll`
+   * returns the WHOLE board in one call and every fixture in this repo counts on it being called
+   * exactly once per refresh, so a gateway built with one keeps the single combined clock it has
+   * always had — calling an injected fetch twice to fill two halves would change what those
+   * fixtures measure without changing anything in production. `opts.exec` gateways (and real
+   * ones) go down the split path and are where the halves are exercised.
+   */
+  const splitHalves = opts.fetchAll === undefined;
 
   // W1-T182: an INDEPENDENT batched fetch/cache pair for escalation issues, deliberately not
   // folded into the PR fetch/cache above — a PR-fetch outage and an issue-fetch outage are
@@ -4666,10 +4781,53 @@ export function buildBatchedGithub(
     /** W1-T377: the OPEN slice of the SAME fetch, for `listOpenHeadBranches`. */
     openNewestFirst: BatchedPr[];
   }
+  /** W1-T2323: one half's rows and the clock that governs THAT half, nothing else. */
+  interface Half {
+    at: number;
+    rows: BatchedPr[];
+  }
+  let openHalf: Half | undefined;
+  let mergedHalf: Half | undefined;
   let cache: Index | undefined;
-  const index = (): Index => {
-    if (!cache || now() - cache.at >= effectiveTtlMs()) {
+  /** The two half-stamps `cache` was last composed from — a union rebuild is needed only when
+   *  one of them moves, so a warm `index()` still costs no map construction at all. */
+  let composedFrom: { open: number; merged: number } | undefined;
+  /**
+   * THE MEMO KEY, AND WHY IT IS NOT A TIMESTAMP.
+   *
+   * This memo was keyed on `openHalf.at` / `mergedHalf.at` — millisecond `Date.now()` readings.
+   * Two refreshes completing inside ONE millisecond made `composedFrom` match and `index()` hand
+   * back the PREVIOUS union. The reachable case is not theoretical: a failed fetch replaces both
+   * halves with empty ones (the W1-T181 pairing), and the very next SUCCESSFUL refresh lands in
+   * the same millisecond often enough that the gateway serves the EMPTY union while reporting
+   * `readFailed() === false` and `readState() === "ok"` — a silent stale read wearing a healthy
+   * label. MEASURED at 8-14 failures per 60 attempts on the real clock.
+   *
+   * A monotonic counter per half cannot collide. It is bumped on every completed refresh of that
+   * half, successful or not, which is exactly the event the union needs to notice.
+   */
+  let openEpoch = 0;
+  let mergedEpoch = 0;
+
+  /**
+   * ONE FETCH ATTEMPT, WITH ALL OF W1-T119/W1-T181/W1-T468/W1-T2219's HANDLING AROUND IT.
+   *
+   * Lifted VERBATIM out of the old `index()` so both halves share exactly one classification,
+   * marking, pacing and logging path — a second copy is how a fail-closed contract rots. The
+   * flags it sets (`lastFetchFailed`/`lastFetchFailureReason`/`fetchState`) keep their existing
+   * meaning of "the most recent attempt", which is now the most recent attempt BY EITHER HALF.
+   * That is deliberately the conservative reading: every `null`-on-failure method below still
+   * returns `null` while either half's last attempt failed, so nothing this task does can make a
+   * caller trust a read it would have distrusted before.
+   */
+  const attemptFetch = (fetch: () => BatchedPr[], channel: "open" | "merged" | "both"): BatchedPr[] => {
+      // #2998's start stamp, moved INTO the one shared attempt — there is no longer a single
+      // `index()` guard to hang it off, and both halves must earn their own floor.
       const fetchStartedAt = now();
+      const record = (outcome: FetchOutcome): void => {
+        if (channel !== "merged") openOutcome = outcome;
+        if (channel !== "open") mergedOutcome = outcome;
+      };
       // W1-T181: the catch lives HERE, wrapping `fetchAll()` itself — not only inside the
       // default `run`-based implementation above — so an INJECTED `fetchAll` (every unit-test
       // fixture, and any future caller-supplied implementation) that throws is classified and
@@ -4681,29 +4839,25 @@ export function buildBatchedGithub(
       // injected `fetchAll` observes "in_flight" rather than whatever the PREVIOUS attempt
       // left behind — the exact discard rationale (2)(b)/(3) names ("the flags still hold the
       // previous attempt's verdict" for as long as a call is in flight).
-      fetchState = "in_flight";
+      fetchInFlight = true;
       try {
         // W1-T468: same shared-pacer guard as `fetchAllIssues` above — one pacer instance across
         // BOTH of this gateway's reads (and run-task.ts's sweep enumeration) is what actually
         // keeps three independently-polite callers from colliding at second zero.
-        all = paceGhEntry(pacer, isGhRateLimitError, fetchAll);
-        lastFetchFailed = false;
-        lastFetchFailureReason = undefined;
-        fetchState = "ok";
-        log("board_gateway.fetch_ok", { prCount: all.length });
+        all = paceGhEntry(pacer, isGhRateLimitError, fetch);
+        record({ failed: false, reason: undefined });
+        log("board_gateway.fetch_ok", { prCount: all.length, channel });
       } catch (err) {
-        lastFetchFailed = true;
         const e = err as NodeJS.ErrnoException & { status?: number | null; stderr?: string | Buffer };
-        lastFetchFailureReason = classifyGhFailure(e?.status, e?.stderr != null ? String(e.stderr) : undefined, e?.code);
-        fetchState = "failed";
+        record({ failed: true, reason: classifyGhFailure(e?.status, e?.stderr != null ? String(e.stderr) : undefined, e?.code) });
         // LOUD (W1-T181 design (ii)/(v)): the pre-fix catch was silent for hours — `lastFetchFailed
         // = true; return []` — with zero serve.log error lines, because ENOBUFS classified
         // "unknown" and nothing ever surfaced it. console.error guarantees this reaches
         // stdout/stderr (and therefore whatever log `rmd serve`'s process is redirected into) even
         // if a caller never wires `opts.log`; the injectable `log` ALSO fires so a caller with a
         // ledger can key an alert off the classified reason without scraping console output.
-        console.error(`board gateway: batched PR fetch failed (${lastFetchFailureReason}): ${e?.message ?? String(err)}`);
-        log("board_gateway.fetch_failed", { reason: lastFetchFailureReason, message: e?.message ?? String(err) });
+        console.error(`board gateway: batched PR fetch failed (${lastFetchFailureReason()}): ${e?.message ?? String(err)}`);
+        log("board_gateway.fetch_failed", { reason: lastFetchFailureReason(), message: e?.message ?? String(err), channel });
         // W1-T181 design (v): a bare [] here is what converted "I could not read GitHub" into
         // "GitHub says there are zero PRs" — every task then silently derived not-merged from an
         // outage that had nothing to do with the repo's actual PRs. The [] below is now always
@@ -4712,18 +4866,159 @@ export function buildBatchedGithub(
         // consults those BEFORE trusting an empty result sees a MARKED failure, never a bare
         // absence — the signal W1-T179's github_unobservable marking is designed to consume.
         all = [];
+      } finally {
+        fetchInFlight = false;
+        // #2998, PER CHANNEL. Recorded on BOTH arms — a failed fetch blocked the loop just as
+        // long as a successful one, so it earns the same floor. `at` stays `now()`:
+        // completion-stamped, unchanged. On the COMBINED path (`channel === "both"`, an injected
+        // `opts.fetchAll`) both halves take the same value, because it really was one refresh.
+        const elapsedMs = Math.max(0, now() - fetchStartedAt);
+        if (channel !== "merged") openFetchDurationMs = elapsedMs;
+        if (channel !== "open") mergedFetchDurationMs = elapsedMs;
       }
-      // Recorded on BOTH arms — a failed fetch blocked the loop just as long as a successful one,
-      // so it earns the same floor. `at` stays `now()`: completion-stamped, unchanged.
-      lastFetchDurationMs = Math.max(0, now() - fetchStartedAt);
+      return all;
+  };
+
+  /**
+   * THE OPEN HALF, ON `ttlMs` — W1-T2323.
+   *
+   * The rows come straight from GitHub's `state=open` query, so this is a COMPLETE answer, never
+   * a cache union: a PR that merged since the last call is absent from it because GitHub does not
+   * return it, not because anything here reasoned about the transition. `listOpenHeadBranches`
+   * therefore reads open rows that are at least as fresh as the ones the combined fetch produced,
+   * for 1 request instead of 26.
+   *
+   * ON A FAILED FETCH THE HALF IS REPLACED WITH AN EMPTY ONE AND STAMPED, exactly as the combined
+   * `cache` always was (the W1-T181 pairing) — the empty result is never handed out unpaired, it
+   * is always read alongside `lastFetchFailed` by the methods below.
+   */
+  const openRows = (): BatchedPr[] => {
+    if (!splitHalves) return bothHalves().open;
+    if (!openHalf || now() - openHalf.at >= effectiveOpenTtlMs()) {
+      const previouslyOpen = openHalf ? new Set(openHalf.rows.map((p) => p.number)) : undefined;
+      const fetched = attemptFetch(() => restFetchHalf("open"), "open");
+      // STORED VERBATIM — these rows ARE GitHub's answer to `state=open`, and re-deciding their
+      // state here would be a second, weaker opinion about a question the query already settled.
+      // The `state === "OPEN"` filter still exists, in exactly the two places it always did: the
+      // union's `openNewestFirst` and `listOpenHeadBranches` below, so both answers are computed
+      // from the same predicate over the same rows as before this task.
+      openHalf = { at: now(), rows: fetched };
+      openEpoch += 1;
+      // W1-T2323: WHAT SEPARATE CLOCKS COST, AND THE ONE LINE THAT PAYS MOST OF IT BACK.
+      //
+      // The cost is real and worth stating plainly: the merged half can now be older than the
+      // open half, so `findMergedByTrailer` and its two siblings can answer "not merged" about a
+      // PR that has in fact merged, for up to `mergedTtlMs`. THE CONSUMER THAT ACTS ON THAT IS
+      // `buildCreditCandidates` (run-task.ts), whose merge credit decides a task's disposition —
+      // not a display. So it is not left to a clock.
+      //
+      // A PR IN THIS REPO ALWAYS MERGES OUT OF THE OPEN SET. The moment a successful open pass
+      // returns without a number the previous one had, that PR left `state=open` — which is the
+      // merge (or close) itself, observed, from data already in hand. Expiring the merged clock
+      // here means the next merged-row read walks and sees it, so the miss window for the case
+      // that actually happens is ZERO rather than `mergedTtlMs`.
+      //
+      // GUARDED ON A SUCCESSFUL FETCH. A failed open pass yields `[]`, and treating that as "every
+      // open PR just merged" would be the W1-T181 hazard wearing a new hat — an outage read as an
+      // event. `lastFetchFailed` is checked, so a failure invalidates nothing.
+      //
+      // WHAT IT DOES NOT COVER, said rather than glossed: a PR that opens AND merges entirely
+      // between two open passes is never seen open, so no drop is observed and it waits out
+      // `mergedTtlMs` — which defaults to `ttlMs`, so that residue is the same 15 s the combined
+      // fetch always had.
+      if (!lastFetchFailed() && previouslyOpen) {
+        const stillOpen = new Set(openHalf.rows.map((p) => p.number));
+        for (const number of previouslyOpen) {
+          if (!stillOpen.has(number)) {
+            mergedHalf = undefined;
+            break;
+          }
+        }
+      }
+    }
+    return openHalf.rows;
+  };
+
+  /**
+   * THE MERGED/CLOSED HALF, ON `mergedTtlMs` — W1-T2323.
+   *
+   * STILL BUILT AND STILL SHARED. `findMergedByTrailer`, `findMergedByTrailerAll` and
+   * `findMergedByHeadBranch` all read merged rows off this one index, which is W1-T377's design
+   * and is sound; nothing here removes or truncates it, and its walk still stops on `reachedKnown`
+   * with `BOARD_MAX_PAGES` and `BOARD_FULL_PAGE_SIZE` exactly as they were. The change is WHEN it
+   * is fetched: lazily, by a consumer that actually needs a merged row, instead of by every
+   * consumer of any row at all.
+   */
+  const mergedRows = (): BatchedPr[] => {
+    if (!splitHalves) return bothHalves().merged;
+    if (!mergedHalf || now() - mergedHalf.at >= effectiveMergedTtlMs()) {
+      const fetched = attemptFetch(() => restFetchHalf("closed"), "merged");
+      // Verbatim, same reasoning as the open half — `mergedNewestFirst`'s `state === "MERGED"`
+      // filter is untouched and is still the only thing that decides merged-ness.
+      mergedHalf = { at: now(), rows: fetched };
+      mergedEpoch += 1;
+    }
+    return mergedHalf.rows;
+  };
+
+  /**
+   * THE COMBINED PATH, for a gateway built with an injected `opts.fetchAll` — ONE call, ONE
+   * clock, filling both halves with the same stamp. This is today's `index()` unchanged, and it
+   * is what every existing unit fixture continues to run, so "the split" is a production and
+   * `opts.exec` behaviour rather than a rewrite of what the suite measures.
+   */
+  const bothHalves = (): { open: BatchedPr[]; merged: BatchedPr[] } => {
+    if (!openHalf || !mergedHalf || now() - openHalf.at >= effectiveOpenTtlMs()) {
+      // `bothHalves` is only ever reached through the two `!splitHalves` guards above, and
+      // `splitHalves` is `opts.fetchAll === undefined` — so `opts.fetchAll` is always set on
+      // every path that lands here. The assertion states that invariant instead of carrying a
+      // `?? restFetchHalf("both")` fallback that could never actually run (the dead branch
+      // coverage-ratchet flagged before this fix).
+      const all = attemptFetch(opts.fetchAll as () => BatchedPr[], "both");
+      const at = now();
+      openHalf = { at, rows: all.filter((p) => p.state === "OPEN") };
+      mergedHalf = { at, rows: all.filter((p) => p.state !== "OPEN") };
+      openEpoch += 1;
+      mergedEpoch += 1;
+    }
+    return { open: openHalf.rows, merged: mergedHalf.rows };
+  };
+
+  /**
+   * THE UNION, for every consumer that needs a row of any state — `prByRef`, `headRefName`,
+   * `prBody`, `autoMergeArmed`, `reviewState`, `warm`, `readTruncated`. Forces BOTH halves, so
+   * none of them changes what it costs or what it sees. Only `listOpenHeadBranches` is routed
+   * away from here, because it is the one method whose answer is a function of the open half
+   * alone — and it is the one the daemon's dispatch path reads.
+   */
+  const index = (): Index => {
+    // W1-T2323: ON THE COMBINED PATH THIS MUST BE ONE CALL, NOT TWO. Asking `openRows()` and then
+    // `mergedRows()` would enter `bothHalves()` twice, and at `ttlMs: 0` — which several fixtures
+    // use deliberately to isolate pacer behaviour from cache freshness — the second entry sees an
+    // already-stale stamp and fetches AGAIN. That doubles the injected fetch count, the pacer's
+    // refusal-retry budget and the ledger rows, none of which this task is entitled to change.
+    const both = splitHalves ? undefined : bothHalves();
+    const open = both ? both.open : openRows();
+    const merged = both ? both.merged : mergedRows();
+    // KEYED ON THE REFRESH COUNTERS, NEVER ON THE STAMPS — see `openEpoch`'s doc above for the
+    // same-millisecond collision that made this memo serve an empty union with a healthy label.
+    const openAt = openEpoch;
+    const mergedAt = mergedEpoch;
+    if (!cache || composedFrom?.open !== openAt || composedFrom?.merged !== mergedAt) {
+      // MERGED LAST, so a row present in both halves (one open pass behind a merge the closed
+      // pass has already picked up) resolves to its TERMINAL state, never the stale open one.
+      const all = [...new Map([...open, ...merged].map((p) => [p.number, p])).values()];
       cache = {
-        at: now(),
+        // The union is only as fresh as its OLDER half — reported honestly rather than as the
+        // newer stamp, which would claim a currency the merged rows do not have.
+        at: Math.min(openHalf?.at ?? 0, mergedHalf?.at ?? 0),
         byUrl: new Map(all.map((p) => [p.url, p])),
         byNum: new Map(all.map((p) => [String(p.number), p])),
         // Higher PR number = more recent; mirrors ghGateway's search "newest first".
         mergedNewestFirst: all.filter((p) => p.state === "MERGED").sort((a, b) => b.number - a.number),
         openNewestFirst: all.filter((p) => p.state === "OPEN").sort((a, b) => b.number - a.number),
       };
+      composedFrom = { open: openAt, merged: mergedAt };
     }
     return cache;
   };
@@ -4751,28 +5046,43 @@ export function buildBatchedGithub(
       // hand — the same `.find` this gateway already ran, widened to `.filter`. null on a fetch
       // failure (→ readFailed()/W1-T119), never [] — the failure/absence distinction.
       const anchored = new RegExp(`^Remudero-Task:\\s*${escapeRegExp(taskId)}\\s*$`, "m");
-      if (lastFetchFailed) return null;
+      if (lastFetchFailed()) return null;
       return index().mergedNewestFirst.filter((p) => anchored.test(p.body ?? "")).map(asRef);
     },
     findMergedByHeadBranch(taskId) {
       // W1-T257: client-side head-ref match from the SAME single fetch — zero extra `gh` calls,
       // and on the STRUCTURED head ref, never the body index. null on a fetch failure (W1-T119).
       const idx = index();
-      return lastFetchFailed ? null : idx.mergedNewestFirst.filter((p) => ownsBranch(p.headRefName, taskId)).map(asRef);
+      return lastFetchFailed() ? null : idx.mergedNewestFirst.filter((p) => ownsBranch(p.headRefName, taskId)).map(asRef);
     },
     listMergedHeadBranches() {
       // W1-T257: every merged PR (with its head ref) from the ONE fetch — projectPlan groups by
       // run-<taskId>-* client-side. null on a fetch failure (→ readFailed()/W1-T119), never [].
       const idx = index();
-      return lastFetchFailed ? null : idx.mergedNewestFirst.map(asRef);
+      return lastFetchFailed() ? null : idx.mergedNewestFirst.map(asRef);
     },
     listOpenHeadBranches() {
-      // W1-T377: ZERO extra `gh`/REST calls — `fetchAll()` already returns `--state all` and the
-      // index merely filtered it to MERGED, so the open rows were always in hand. Same null-on-
-      // failure contract as the merged twin, so a fetch failure defers via W1-T119 instead of
-      // reading as "this task has no open PR".
-      const idx = index();
-      return lastFetchFailed ? null : idx.openNewestFirst.map(asRef);
+      // W1-T377: ZERO extra `gh`/REST calls beyond the one this half costs. Same null-on-failure
+      // contract as the merged twin, so a fetch failure defers via W1-T119 instead of reading as
+      // "this task has no open PR".
+      //
+      // W1-T2323: THE OPEN HALF ONLY — the single behavioural change this task makes to a public
+      // method. MEASURED, a cold gateway answering this used to walk 26 REST requests over 22.2 s
+      // for 6 open rows; it now walks 1 request over 432 ms. The daemon's dispatch breaker
+      // (run-task.ts's `openHeadBranchesForBreaker`, which W1-T2318 already made lazy) is the
+      // consumer that pays that difference, on the boot path, on the event loop.
+      //
+      // THE VALUE IS UNCHANGED, not merely similar: the rows come from GitHub's own `state=open`
+      // query rather than from filtering an all-states fetch, and both answers are "every open PR
+      // in this repo, newest first". `lastFetchFailed` still gates it, and still reflects EITHER
+      // half's last attempt, so this is strictly no less fail-closed than before.
+      const open = openRows();
+      return lastFetchFailed()
+        ? null
+        : open
+            .filter((p) => p.state === "OPEN")
+            .sort((a, b) => b.number - a.number)
+            .map(asRef);
     },
     headRefName(prUrl) {
       return index().byUrl.get(prUrl)?.headRefName;
@@ -4884,13 +5194,13 @@ export function buildBatchedGithub(
     // the honest "not_attempted" reading `readState()` exposes below rather than a forced,
     // blocking fetch pretending to answer about a read nobody has asked for yet.
     readFailed() {
-      return lastFetchFailed;
+      return lastFetchFailed();
     },
     readFailureReason() {
-      return lastFetchFailureReason;
+      return lastFetchFailureReason();
     },
     readState() {
-      return fetchState;
+      return fetchState();
     },
     readTruncated() {
       // Same force-a-fetch-first shape as `readFailed()` used to have (W1-T415, unchanged here
@@ -4898,7 +5208,7 @@ export function buildBatchedGithub(
       // that asks this FIRST (never preceded by any other method call) still reports accurately
       // instead of trivially returning the initial `false`.
       index();
-      return lastFetchTruncated;
+      return lastFetchTruncated();
     },
     issueReadFailed() {
       issueIndex();

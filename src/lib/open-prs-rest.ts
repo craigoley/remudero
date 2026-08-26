@@ -647,6 +647,12 @@ export interface RestPullRow {
   /** The merge timestamp, or `null` when unmerged. Returned by BOTH endpoints, so this — not
    *  {@link RestPullRow.merged} — is what {@link prStateFromRest} decides MERGED on. */
   merged_at?: string | null;
+  /** W1-T2304 wiring: when the PR OPENED. The board-review rung's age arm
+   *  ({@link BOARD_REVIEW_OLDEST_OPEN_AGE_HOURS}) is a function of this and nothing else, and it
+   *  is the arm that qualified on 2026-08-26. Optional so a fixture written before this task
+   *  keeps type-checking; {@link mapRestPr} omits the key entirely when the row lacks it, rather
+   *  than inventing an epoch that would read as an infinitely old PR. */
+  created_at?: string;
   /** `null` on an empty body, where GraphQL reports "". */
   body?: string | null;
   updated_at: string;
@@ -704,6 +710,9 @@ export interface OpenPrRest {
    * which would launder "GitHub did not say" into "definitely not a draft".
    */
   isDraft?: boolean;
+  /** REST's `created_at`, carried for the board-review rung's age arm. Absent on a malformed row
+   *  — a consumer must treat absence as "age unknown", never as age zero or age infinity. */
+  createdAt?: string;
 }
 
 /**
@@ -738,6 +747,8 @@ export function mapRestPr(row: RestPullRow): OpenPrRest {
     // exactly the pre-W1-T528 object and the shape-identity assertion above it stays meaningful
     // (`deepStrictEqual` compares own keys, so an always-present `isDraft: undefined` would not).
     ...(row.draft === undefined ? {} : { isDraft: row.draft }),
+    // Same omitted-rather-than-defaulted discipline as `isDraft` directly above.
+    ...(row.created_at === undefined ? {} : { createdAt: row.created_at }),
   };
 }
 
@@ -986,7 +997,29 @@ export interface BoardFetchResult {
   mode: "full" | "delta";
   /** True if {@link BOARD_MAX_PAGES} stopped the walk — a truncated view, never silent. */
   truncated: boolean;
+  /** Which halves this call actually walked — see {@link BoardFetchHalf}. */
+  half: BoardFetchHalf;
 }
+
+/**
+ * WHICH HALF OF THE BOARD A FETCH WALKS (W1-T2323 option C).
+ *
+ * `"both"` is the DEFAULT and is byte-for-byte the walk this function has always performed: the
+ * HOT open pass followed by the COLD closed pass, sharing one `known` map and one result.
+ *
+ * `"open"` and `"closed"` exist because THE TWO HALVES COST WILDLY DIFFERENT AMOUNTS AND HAVE
+ * DIFFERENT CONSUMERS. MEASURED on this repo 2026-08-26: the open pass is 1 page, 6 rows, 432 ms;
+ * the cold closed pass is 25 pages, 2,400 rows, 21,813 ms. A caller that needs only open head
+ * branches — lib/status.ts's `listOpenHeadBranches`, which the daemon's dispatch breaker reads and
+ * nothing else — paid all 26 requests for the 1 it used, because the halves were welded into one
+ * call behind one clock.
+ *
+ * SPLITTING THE CALL DOES NOT SPLIT THE INDEX. The closed half is still built, still walked with
+ * the same stop test, and still shared by `findMergedByTrailer`, `findMergedByTrailerAll` and
+ * `findMergedByHeadBranch` — W1-T377's design, which is sound and is not what this changes. What
+ * moves is WHEN each half is fetched, never whether.
+ */
+export type BoardFetchHalf = "both" | "open" | "closed";
 
 /**
  * Every PR in the repo, over REST, re-reading only what can have changed.
@@ -1024,16 +1057,23 @@ export function fetchBoardPrsRest(
   repo: string,
   fetch: GhApiFetcher,
   known?: ReadonlyMap<number, BoardPrRest>,
+  half: BoardFetchHalf = "both",
 ): BoardFetchResult {
   const mode: "full" | "delta" = known && known.size > 0 ? "delta" : "full";
   const perPage = mode === "delta" ? BOARD_DELTA_PAGE_SIZE : BOARD_FULL_PAGE_SIZE;
+  // W1-T2323: seeded from `known` exactly as before on every half. For `"open"` the caller passes
+  // NO `known` (see lib/status.ts's `fetchOpenHalf`) because the open pass is a COMPLETE read of a
+  // small set — seeding it would resurrect a PR that merged since the last call as a permanently
+  // OPEN row, since the closed pass that used to overwrite it is no longer part of this call.
   const out = new Map<number, BoardPrRest>(known ?? []);
   let calls = 0;
   let truncated = false;
+  const wantOpen = half !== "closed";
+  const wantClosed = half !== "open";
 
   // HOT half. Paginated properly rather than assuming one page: a repo that ever holds >100 open
   // PRs must not silently drop the tail of them.
-  for (let page = 1; page <= BOARD_MAX_PAGES; page += 1) {
+  for (let page = 1; wantOpen && page <= BOARD_MAX_PAGES; page += 1) {
     const rows = fetch(boardPrsRestArgs(owner, repo, "open", page, perPage)) as RestPullRow[];
     calls += 1;
     for (const row of rows) {
@@ -1044,8 +1084,13 @@ export function fetchBoardPrsRest(
     if (page === BOARD_MAX_PAGES) truncated = true;
   }
 
-  // COLD half.
-  for (let page = 1; page <= BOARD_MAX_PAGES; page += 1) {
+  // COLD half. W1-T2323 LEAVES ITS SHORT-CIRCUIT EXACTLY AS IT IS, and says so rather than
+  // quietly implying otherwise: the walk stops at the first row already held with an identical
+  // `updated_at`, so on a COLD index `known` is empty, nothing matches, and it walks to a short
+  // page — which is why a cold closed pass is 25 pages and not 2. Separating the clocks does not
+  // change that and is not meant to; it changes who pays it and when. A merged-row consumer on a
+  // cold gateway still walks all 25 pages. An open-only consumer now walks none of them.
+  for (let page = 1; wantClosed && page <= BOARD_MAX_PAGES; page += 1) {
     const rows = fetch(boardPrsRestArgs(owner, repo, "closed", page, perPage)) as RestPullRow[];
     calls += 1;
     let reachedKnown = false;
@@ -1061,7 +1106,7 @@ export function fetchBoardPrsRest(
     if (page === BOARD_MAX_PAGES) truncated = true;
   }
 
-  return { rows: [...out.values()], calls, mode, truncated };
+  return { rows: [...out.values()], calls, mode, truncated, half };
 }
 
 /* ────────────────────────────────────────────────────────────────────────────────────────────

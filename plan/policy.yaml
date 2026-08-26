@@ -808,6 +808,35 @@ digestCadence:
     min: 1
     max: 24
 
+# W1-T2304's board-review rung — the rung whose UNIT is the whole open board, not one PR. Its OWN
+# row, deliberately not folded into measurementCadence or digestCadence above, so the three
+# cadences can never drag one another (the rung's own design "Ownership" note).
+#
+# 120 / 6 ARE DERIVED FROM THE BOARD, not copied from a sibling. MEASURED 2026-08-26: the depth
+# trigger was continuously satisfied for 2h26m — #2895 crossed the 8h age bar at 08:55Z and stayed
+# open until 16:20:51Z, with two reds landing inside the same stretch. At a 120m floor that yields
+# TWO reports across it: one when the condition appears, one confirming it persisted. Reporting the
+# same stale board every poll is noise for a condition an operator can only act on hourly. maxPerDay
+# 6 bounds a board that is red all day to twelve hours of coverage at that interval, and caps the
+# cost at six whole-board reads.
+#
+# SAFE ON, like measurementCadence and digestCadence: the rung is READ-ONLY. It writes one report
+# artifact and drafts registry proposals; it does not push, merge, mint or file, and Rule 15 stands.
+boardReview:
+  enabled:
+    value: true
+    origin: "net-new"   # safe (read-only: one report artifact plus registry proposals)
+  minIntervalMinutes:
+    value: 120
+    origin: "net-new"
+    min: 15
+    max: 1440
+  maxPerDay:
+    value: 6
+    origin: "net-new"
+    min: 1
+    max: 24
+
 retro:
   mergesThreshold:
     value: 25

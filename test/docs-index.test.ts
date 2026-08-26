@@ -370,3 +370,78 @@ test("main(): a --dir that does not exist hits the outer catch -- non-zero exit,
   assert.equal(exitCode, 1);
   assert.match(err.join("\n"), /generate-docs-index:/);
 });
+
+// ── W1-T2323-adjacent: a SUMMARY IS NOT A MAINTENANCE BANNER ────────────────────────────────
+//
+// `rmd retro` writes `_MAINTAINED BY \`rmd retro\` — regenerated <ISO>._` into docs/ORIENTATION.md
+// on every run (src/lib/retro.ts), and the first-prose-line heuristic copied that timestamp into
+// the index — so the index went stale on EVERY retro, by construction, and neither retro.ts nor
+// run-task.ts references docs-index at all. The operator's ruling was to stop the index
+// summarising a volatile line rather than to add a freshness guard: fixing the INPUT makes a guard
+// safe afterwards, while adding the guard first moves the breakage onto a lane that did not cause
+// it. These pin the input fix, in both directions.
+
+test("parseDocEntry: a leading wholly-emphasised CALLOUT is skipped, and the next prose line is the summary", () => {
+  const { summary, title } = parseDocEntry(
+    ["# ORIENTATION", "", "_MAINTAINED BY `rmd retro` — regenerated 2026-08-26T13:38:19.806Z._", "", "What this doc is about."].join("\n"),
+  );
+  assert.equal(title, "ORIENTATION");
+  assert.equal(summary, "What this doc is about.", "the banner is machinery, not this doc's first sentence");
+});
+
+test("parseDocEntry: a retro rewriting the callout's timestamp does NOT change the entry — the whole point", () => {
+  const doc = (stamp: string) =>
+    ["# ORIENTATION", "", `_MAINTAINED BY \`rmd retro\` — regenerated ${stamp}._`, "", "A fresh Architect session should orient from THIS doc."].join("\n");
+  const a = parseDocEntry(doc("2026-08-26T13:38:19.806Z"));
+  const b = parseDocEntry(doc("2099-01-02T03:04:05.678Z"));
+  assert.deepEqual(a, b, "two retros a lifetime apart must produce the same index entry");
+});
+
+test("parseDocEntry FALSIFIER: without the skip, the timestamp WOULD land in the summary", () => {
+  // The pre-fix behaviour, stated rather than described: the first prose line after the H1.
+  const lines = ["# ORIENTATION", "", "_MAINTAINED BY `rmd retro` — regenerated 2026-08-26T13:38:19.806Z._", "", "What this doc is about."];
+  const preFix = lines.slice(1).find((l) => l.trim() && !/^#{1,6}\s/.test(l.trim()))!.trim();
+  assert.match(preFix, /2026-08-26T13:38:19/, "the old heuristic picked the volatile line");
+  assert.doesNotMatch(parseDocEntry(lines.join("\n")).summary, /2026-08-26T13:38:19/, "and the fix does not");
+});
+
+test("parseDocEntry CONTROL: a line with emphasis INSIDE it is ordinary prose and is NOT skipped", () => {
+  // 25 of docs/'s 26 first prose lines are this shape; skipping them would empty the index.
+  const { summary } = parseDocEntry(["# ADR", "", "MASTER-PLAN §5 TIER 3: **ADR discipline for IRREVERSIBLE calls.** A short note."].join("\n"));
+  assert.match(summary, /MASTER-PLAN/, "emphasis inside a sentence does not make it a banner");
+});
+
+test("parseDocEntry: a doc whose ONLY prose is a callout gets an empty summary, never machinery", () => {
+  const { summary } = parseDocEntry(["# Generated", "", "_MAINTAINED BY a robot — regenerated 2026-01-01T00:00:00.000Z._", "", "## Next"].join("\n"));
+  assert.equal(summary, "", "an empty summary is honest; a maintenance banner is not");
+});
+
+// ── The real docs/: the committed index is currently fresh ──────────────────────────────────────
+//
+// THE SIBLING SHAPE, AND docs/ WAS THE ONE CORPUS WITHOUT IT. `test/plan-index.test.ts` and
+// `test/capability-snapshot.test.ts` each assert that their COMMITTED artifact matches a fresh
+// regeneration, inside a suite `ci` already runs; this file asserted every fixture case and never
+// the real one, which is exactly why the index drifted silently and W1-T2282's own note below
+// records it going stale on every retro.
+//
+// IN THE EXISTING SUITE, NOT A NEW CI JOB, DELIBERATELY: a path-filtered required check that can go
+// silently absent is a shape this repo avoids, and `npm test` already runs this file on every PR.
+//
+// THE ORDERING MATTERED AND IS NOW SATISFIED. Before the summariser skipped a leading
+// wholly-emphasised callout, `docs/ORIENTATION.md`'s summary WAS the `rmd retro` maintenance banner,
+// timestamp and all, so this guard would have refused every retro PR by construction. MEASURED over
+// the 14-day window before it landed: 34 commits carried an index a fresh regeneration disagreed
+// with, and ALL 34 differed in exactly one entry, `docs/ORIENTATION.md`. Zero differed because a
+// doc's title or first prose line was edited without regenerating — the class this guard exists to
+// catch has a historical rate of zero, and the class it would have fired on is fixed.
+//
+// DEFAULT ARGS, cwd REPO_ROOT — the same reason test/plan-index.test.ts states for its own copy: a
+// `--dir`/`--out` override changes the recorded `dir` label and produces a false STALE unrelated to
+// real drift. Measured while building this: the override form reports STALE on a tree the default
+// form calls OK.
+test("the REAL committed docs/docs-index.json is NOT stale (this is what CI checks on every PR via `npm test`)", () => {
+  const result = spawnSync(process.execPath, [SCRIPT, "--check"], { cwd: REPO_ROOT, encoding: "utf8" });
+  const output = result.stdout + result.stderr;
+  assert.equal(result.status, 0, output);
+  assert.match(output, /OK -- docs\/docs-index\.json matches the current docs/);
+});

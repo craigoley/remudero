@@ -157,10 +157,22 @@ test("the daemon's per-poll sweep issues FAR fewer REST requests on its SECOND p
       `the SECOND pass must cost strictly less than the first (first=${first.length}, second=${second.length})`,
     );
     // THE DELTA'S SIGNATURE, not merely a smaller number: page size drops to BOARD_DELTA_PAGE_SIZE.
+    //
+    // W1-T2323 SPLIT THE HALVES ONTO THEIR OWN CLOCKS, so the signature is now asserted on the
+    // half it was ever about. The CLOSED walk is the one with a `known` stop test and therefore
+    // the one that can be a delta; it still drops to 30. The OPEN pass never had a stop test — it
+    // re-read `state=open` unconditionally before this task and does so now — and it no longer
+    // inherits the closed half's page size, so it stays at 100. THAT IS NOT A LOST DELTA: at 1-30
+    // open PRs it is the same single request either way, and above 30 it is strictly FEWER
+    // requests than the 30-row pages it used to borrow.
+    const closedOf = (pass: string[][]) => pass.filter((a) => /state=closed/.test(a[1] ?? ""));
+    const openOf = (pass: string[][]) => pass.filter((a) => /state=open/.test(a[1] ?? ""));
+    assert.equal(closedOf(second).length, 1, "one closed request on the second pass");
     assert.ok(
-      second.every((a) => /per_page=30/.test(a[1] ?? "")),
-      `the second pass runs at the delta page size, so it is the delta path and not a shorter full walk: ${JSON.stringify(second)}`,
+      closedOf(second).every((a) => /per_page=30/.test(a[1] ?? "")),
+      `the second pass's CLOSED walk runs at the delta page size, so it is the delta path and not a shorter full walk: ${JSON.stringify(second)}`,
     );
+    assert.equal(openOf(second).length, 1, "and the open pass is still one request, not a page walk");
     assert.ok(
       first.some((a) => /per_page=100/.test(a[1] ?? "")),
       "the first pass runs at the FULL page size",
@@ -179,8 +191,22 @@ test("the ledger records the mode flip the request count implies — `full` then
       .filter(Boolean)
       .map((l) => JSON.parse(l) as Record<string, unknown>)
       .filter((l) => l.step === "board_gateway.fetch_bytes")
-      .map((l) => l.mode);
-    assert.deepEqual(modes, ["full", "delta"], `one cold walk, then deltas forever: ${JSON.stringify(modes)}`);
+      .map((l) => [l.half, l.mode] as [unknown, unknown]);
+    // W1-T2323: one row PER HALF now, each naming which half it is — so "one cold walk, then
+    // deltas forever" is asserted on the closed half, which is the half the sentence was ever
+    // about. The open half is a complete read of a small set every time and reports `full` every
+    // time, which is what it has always actually done; before the split it merely borrowed the
+    // closed half's label.
+    assert.deepEqual(
+      modes.filter(([half]) => half === "closed").map(([, mode]) => mode),
+      ["full", "delta"],
+      `one cold CLOSED walk, then deltas forever: ${JSON.stringify(modes)}`,
+    );
+    assert.deepEqual(
+      modes.filter(([half]) => half === "open").map(([, mode]) => mode),
+      ["full", "full"],
+      `the open half is a complete read every pass, and says so: ${JSON.stringify(modes)}`,
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
