@@ -3,7 +3,7 @@
     window closes with a false-positive rate at or under its stated threshold; the criterion is the
     measured number, not a judgement call"
   repo: remudero
-  depends_on: [W1-T322]
+  depends_on: [W1-T322, W1-T1120]
   type: implement
   verify: human
   principles: {tdd: strict}
@@ -19,7 +19,46 @@
     operator act on ledger data the way W1-T277's demonstration dialect was designed to record.
     If the measured rate EXCEEDS the threshold, the honest outcome is: do not flip; file the
     false-positive fixes as their own task and re-measure — record that outcome here rather than
-    forcing the flip."
+    forcing the flip.
+    AMENDED 2026-08-26, RECORD ONLY — nothing below edits a criterion, moves the threshold or
+    re-bases the window; this task still decides nothing and stays verify:human.
+    THE WINDOW IS UNMEASURABLE AS WRITTEN. W1-T322 merged 2026-08-04T13:03 and arm B (100 merged
+    PRs) closed 2026-08-05T22:37 — THIRTY-THREE HOURS — entirely inside the 2026-08-04 to 08-10
+    span W1-T1017 records as rotation-destroyed with its own cannot-restore note. 1,462 PRs have
+    merged past a warn-only floor since.
+    A RE-BASED WINDOW REPRODUCES THE DEFECT RATHER THAN CURING IT. Starting from the durable era
+    (2026-08-18, W1-T1017), arm B closes at 2026-08-19T12:21:47Z — 36.4 hours, against the
+    original 33 — and at the measured rate of about 88 merges a day the 14-day arm can never bind.
+    THE DENOMINATOR IS FLAGGED PRs, NOT MERGED PRs, AND IT IS NARROWER THAN IT LOOKS. The
+    review.unwired_advisory step carries three reason codes, and this floor is only one of them.
+    Since 2026-08-18: scope_violation 113 rows over 87 PRs, inverse_scope 40 over 29, and
+    unwired_export — the SHIPS-UNWIRED floor itself — 14 rows over 10 PRs.
+    THREE CORPORA, THREE ANSWERS, ALL RUNNABLE TODAY. The literal re-based window yields n=1, where
+    no threshold exists at all. The whole durable era on unwired_export yields n=10, where 5% of 10
+    is 0.5 so zero false positives passes and one fails. The whole durable era across all three
+    reason codes yields n=113, the only form in which 5% is representable: five pass, six fail.
+    THE ADOPTION EVIDENCE, WHICH CUTS TOWARD FLIPPING RATHER THAN AGAINST. Of 13 symbols flagged
+    unwired_export since 2026-08-18, 3 are wired in production today and 10 remain test-only, the
+    oldest flagged eight days ago. Two of the three were wired by a lane that went looking for
+    them, not by the ordinary process reacting to the advisory.
+    THE OPEN QUESTION, RECORDED WITHOUT AN ANSWER. Whether a DELIBERATELY test-only export shipped
+    without a marker is a false positive or a true positive with a missing marker is not settled by
+    this criterion's own rule — reached-in-fact, or marker rightly omitted = false positive — and
+    that single ruling probably decides the rate. It is the operator's, and this amendment does not
+    take it.
+    THE TENSION THIS TASK PLACES ON ITS OWN RESOLUTION, NAMED AND NOT RESOLVED. Design says NOT IN
+    SCOPE: changing the scan, the markers, the window, or the threshold — those are W1-T322's
+    contract; renegotiating them is a new filing, not a flip. Every corpus above except the
+    unrunnable original is a re-based window, so resolving this task by measuring one of them may
+    itself require a new filing rather than a flip.
+    THE LINK. W1-T1120 holds the denominator-and-granularity half of this same decision and
+    predicted, before any measurement existed, that the narrow denominator was heading for n around
+    5; measured, it is 1 in the literal re-based window and 10 across the durable era. The two
+    records did not reference each other and nothing depended on either. The depends_on edge added
+    to this task in the same change is what makes them travel together — this direction only,
+    because settling the denominator precedes flipping and the reverse edge would be a cycle.
+    A STALE RECORD NOTED IN PASSING AND NOT FIXED HERE: W1-T322 still reads status queued with
+    attempts 0, having merged 2026-08-04 as #1292. That is a different concern."
   design: |
     (i) Read the advisory lines for the window; adjudicate each flagged PR (reached-in-fact, or
     marker rightly omitted = false positive); compute the rate; record the computation — counts,
