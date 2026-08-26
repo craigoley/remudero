@@ -6137,6 +6137,7 @@ export const INSTRUMENT_SURFACE_EXCLUSIONS: Readonly<Record<string, string>> = {
   "scripts/recovery-drill.mjs": "ops drill script for recovery-drill.yml, not a quality/measurement gate",
   "scripts/generate-capability-snapshot.mjs": "its :check mode is not wired into any CI workflow",
   "scripts/generate-cli-reference.mjs": "its :check mode is not wired into any CI workflow",
+  "scripts/generate-docs-index.mjs": "its :check mode is not wired into any CI workflow",
   "scripts/generate-learnings-index.mjs": "its :check mode is not wired into any CI workflow",
   "scripts/generate-plan-index.mjs": "its :check mode is not wired into any CI workflow",
   // ── verified non-instrument: self-falsifying fixture ──
