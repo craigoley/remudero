@@ -1,27 +1,24 @@
 # ORIENTATION
 
-_MAINTAINED BY `rmd retro` — regenerated 2026-08-26T13:38:19.806Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
+_MAINTAINED BY `rmd retro` — regenerated 2026-08-26T21:40:07.795Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
 
 A fresh Architect session should be able to orient from THIS doc alone plus the plan index —
 not by re-deriving state from the full plan and ledger.
 
 ## Current state
 
-27 run(s) since the last retro marker. Verdicts: {"blocked":1,"blocked_ci":10,"blocked_containment":8,"merged":7,"no_pr":1}.
+18 run(s) since the last retro marker. Verdicts: {"blocked_ci":6,"blocked_containment":8,"merged":4}.
 
 ### Shipped since marker
-- W1-T2274 → https://github.com/craigoley/remudero/pull/2910
-- W1-T2275 → https://github.com/craigoley/remudero/pull/2923 (gate-side merge; run ended blocked)
-- W1-T2281 → https://github.com/craigoley/remudero/pull/2909 (gate-side merge; run ended blocked_ci)
-- W1-T2282 → https://github.com/craigoley/remudero/pull/2911 (gate-side merge; run ended blocked_ci)
-- W1-T2283 → https://github.com/craigoley/remudero/pull/2930
-- W1-T2284 → https://github.com/craigoley/remudero/pull/2941
-- W1-T2286 → https://github.com/craigoley/remudero/pull/2913
-- W1-T2287 → https://github.com/craigoley/remudero/pull/2912
-- W1-T2291 → https://github.com/craigoley/remudero/pull/2921 (gate-side merge; run ended blocked_ci)
-- W1-T2294 → https://github.com/craigoley/remudero/pull/2924 (gate-side merge; run ended blocked_ci)
-- W1-T2301 → https://github.com/craigoley/remudero/pull/2929
-- W1-T2302 → https://github.com/craigoley/remudero/pull/2940
+- W1-T2293 → https://github.com/craigoley/remudero/pull/2979 (gate-side merge; run ended blocked_ci)
+- W1-T2296 → https://github.com/craigoley/remudero/pull/2986 (gate-side merge; run ended blocked_ci)
+- W1-T2297 → https://github.com/craigoley/remudero/pull/2996
+- W1-T2300 → https://github.com/craigoley/remudero/pull/3001 (gate-side merge; run ended blocked_ci)
+- W1-T2310 → https://github.com/craigoley/remudero/pull/2964
+- W1-T2311 → https://github.com/craigoley/remudero/pull/2967 (gate-side merge; run ended blocked_ci)
+- W1-T2316 → https://github.com/craigoley/remudero/pull/2977 (gate-side merge; run ended blocked_ci)
+- W1-T2317 → https://github.com/craigoley/remudero/pull/2987
+- W1-T2325 → https://github.com/craigoley/remudero/pull/2990
 
 ## Next runnable task
 
