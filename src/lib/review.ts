@@ -6962,6 +6962,60 @@ export function unwiredExportAdvisorySection(advisories: readonly UnwiredAdvisor
   );
 }
 
+/**
+ * Render this review's `inverse_scope` advisory — the one {@link inverseScopeUntouchedFiles}
+ * already computed for {@link ReviewVerdict.unwiredAdvisories} — as a PR-comment section, so a
+ * declared path the diff never touched reaches the human gate instead of only the ledger.
+ * `undefined` when the diff touched every path the task declared (or the task declared nothing),
+ * so a clean PR adds nothing to the comment.
+ *
+ * THE THIRD OF THE THREE, BUILT EXACTLY LIKE ITS TWO SIBLINGS. W1-T434 rendered
+ * `scope_violation`; #3021 rendered `unwired_export` for the same reason one code over; this is
+ * `inverse_scope`, invisible on the identical grounds. MEASURED over the 60 most recently merged
+ * PRs, driven through the real {@link unwiredAdvisoriesFor} with production argument shapes:
+ * `scope_violation` 5 (8%), `inverse_scope` 2 (3%), `unwired_export` 1 (2%). A 3% code that no
+ * reader ever sees is the same defect as the 2% one, not a smaller one.
+ *
+ * THE FOURTH CODE IS DELIBERATELY NOT RENDERED. `unresolved_task_scope` measured 0, and not
+ * because it is rare: {@link unresolvedTaskScopeOverlaps} returns empty unless {@link
+ * ReviewEvidence.openTaskDeclaredFiles} is populated, and that field has NO producer anywhere in
+ * `src/` — its only assignments repo-wide are in tests (control: its wired sibling {@link
+ * ReviewEvidence.openTaskIds} is populated at three `src/` sites). A renderer behind an
+ * unpopulated field would be dead code, and whether to wire the producer at all is an open
+ * operator decision, not this formatter's to presume.
+ *
+ * READS THE ADVISORY, NEVER RECOMPUTES IT. The declared-versus-touched comparison has exactly one
+ * home ({@link inverseScopeUntouchedFiles}); this is a formatter over its result, the same
+ * relationship {@link scopeAdvisorySection} has to {@link scopeViolationFiles}. A second walk here
+ * could drift from the one `review.unwired_advisory` reports, and then the PR comment and the
+ * ledger would disagree about the same PR.
+ *
+ * ADVISORY AND NON-BLOCKING. An undertouched scope is not by itself a fault — a task whose
+ * `files:` list was written ahead of the work, or split across more than one PR, looks identical
+ * here. Like both siblings the header says "advisory" in the rendered text. Whether any of this
+ * should BLOCK is W1-T323's open operator adjudication, which carries its own numeric criterion;
+ * this does not preempt it and adds no ledger registration.
+ *
+ * Paths are deduped so a path named by more than one advisory on the same head renders once.
+ */
+export function inverseScopeAdvisorySection(advisories: readonly UnwiredAdvisory[] | undefined): string | undefined {
+  const paths = [
+    ...new Set((advisories ?? []).filter((a) => a.reasonCode === "inverse_scope").flatMap((a) => a.symbols)),
+  ];
+  if (paths.length === 0) return undefined;
+  return (
+    `**Untouched declared scope (advisory — does not affect remudero-review's verdict)**\n\n` +
+    `The task declares ${paths.length === 1 ? "a file" : "files"} this diff never touched. That is ` +
+    `not by itself a fault — a \`files:\` list written ahead of the work, or work split across more ` +
+    `than one PR, looks identical here. It is flagged so the gap is visible at the gate rather than ` +
+    `only in the ledger, and never blocks:\n\n` +
+    `${paths.map((p) => `- \`${p}\``).join("\n")}\n\n` +
+    `If the remaining ${paths.length === 1 ? "path lands" : "paths land"} in a later PR, no action is ` +
+    `needed. If the declaration was wrong, narrow the task's \`files:\` — this is where a scope that ` +
+    `was never actually built shows up, and where a task claims ground it never touched.`
+  );
+}
+
 // ── reviewer_outcome (W1-T63/P10-a — the reviewer stops walling silently) ──
 
 /**

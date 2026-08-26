@@ -99,7 +99,10 @@ test("wiring: runReview computes the unwired section AND pushes it into the comm
   const runReviewSrc = src.slice(start, end);
 
   assert.match(runReviewSrc, /const unwiredSection = unwiredExportAdvisorySection\(/, "runReview must render it");
-  assert.match(runReviewSrc, /if \(hasUnmet \|\| rubricSection \|\| scopeSection \|\| unwiredSection\)/, "…gate on it…");
+  // `\b` not `\)`, the same relaxation this PR's sibling test needed one code earlier: the guard
+  // gains a disjunct every time a reason code earns a renderer. What must be pinned is that
+  // `unwiredSection` GATES the comment, never how many siblings share the gate with it.
+  assert.match(runReviewSrc, /if \(hasUnmet \|\| rubricSection \|\| scopeSection \|\| unwiredSection\b/, "…gate on it…");
   assert.match(runReviewSrc, /if \(unwiredSection\) parts\.push\(unwiredSection\)/, "…and append it to the body");
 
   // INDEPENDENCE: the binding verdict never sees it. Advisory means advisory.
