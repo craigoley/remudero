@@ -1,0 +1,168 @@
+- id: W1-T2316
+  title: "The retro rung fails on how it renders its own text rather than on what it found — both of its consumers read PHYSICAL LINES, and `bodyNeedsAcceptanceRepair` fires only on zero criteria or an empty proof, so a block whose claim wrapped onto a second line parses ONE of five and reads HEALTHY to the one guard that exists to catch exactly that"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 50.00
+  risk: high
+  rationale: |
+    Filed by reading, from a scratch worktree PROVEN equal to origin/main by sha (2fbcf0e1), clone
+    shallow-checked `false`, `node_modules` linked and `tsx` confirmed present before any count was
+    believed. `src/run-task.ts` read via git objects. Cited BY SYMBOL. No suite, no build, no
+    spawning verb, no mint.
+
+    (1) TWO CONSECUTIVE CYCLES, BOTH RENDERING FAILURES, NEITHER A FINDING FAILURE. r29 emitted an
+    acceptance block reading `bullets written: 5, criteria parsed: 1`; r30 re-wrapped a MASTER-PLAN
+    paragraph so a not-shipped qualifier landed on the same physical line as an id the document
+    records as shipped. In both the retro's ANALYSIS was fine and its TYPOGRAPHY was not.
+
+    (2) BOTH CONSUMERS ARE LINE-SCOPED, AND THAT IS THE COMMON CAUSE.
+    `parseAcceptanceBlock` (`src/lib/review.ts`) ends the block at any indented line that is not a
+    fresh `proof:`, so a claim wrapped onto a second line truncates every bullet after it.
+    `notShippedLines` (`scripts/plan-state-claims.mjs`) walks `masterPlanMd.split("\n")` and
+    requires the not-shipped phrase AND the id ON THE SAME LINE — so a reflow can manufacture a
+    contradiction the prose does not contain, and can equally hide one.
+
+    (3) THE EMITTER IS ALREADY CORRECT. `renderAcceptanceBlock` (`src/lib/plan-pr-emitter.ts`)
+    builds `- ${claim} | ${proof}` and joins on newlines: ONE claim per physical line, ONE proof per
+    physical line, by construction. **SO THE REMEDY IS NOT A NEW RENDERER.** What reaches the PR in
+    a retro is an LLM worker's free text, and the emitter is only consulted by the repair path
+    below.
+
+    (4) THE GUARD THAT EXISTS CANNOT SEE TRUNCATION, AND THIS IS THE WHOLE DEFECT.
+    `bodyNeedsAcceptanceRepair` (`src/lib/plan-pr-emitter.ts`) is three lines:
+        const parsed = parseAcceptanceBlock(body);
+        if (parsed.length === 0) return true;
+        return parsed.some((c) => c.proof.trim().length === 0);
+    It fires on ZERO parsed criteria, or on a parsed criterion with an EMPTY proof. r29's block
+    parsed ONE criterion with a non-empty proof, so the predicate returned false, `ensureJudgeableBody`
+    left the body untouched, and four of five criteria shipped invisible to review.
+
+    (5) AND THE DATUM THAT WOULD CATCH IT ALREADY EXISTS, IN A MODULE THIS ONE ALREADY IMPORTS
+    FROM. `acceptanceBlockDiagnostics` (`src/lib/review.ts`) computes `bulletsWritten` — counted
+    with the parser's OWN bullet regex — and `truncatedAtBullet`, the index where the block stopped.
+    MEASURED at 2fbcf0e1: `src/lib/plan-pr-emitter.ts` references `bulletsWritten` or
+    `acceptanceBlockDiagnostics` **ZERO** times, against a control of **13** references to
+    `parseAcceptanceBlock` in the same file — so the query can see symbols there and the zero is a
+    real absence. The repair path resolves criteria and never asks how many were written.
+
+    (6) THE CAP MOVES WITH THE RENDERING, WHICH IS WHY HALF A FIX IS WORSE THAN NONE. All five of
+    r29's proofs were prose, so reflowing alone would have taken the verdict from `no-dialect: 1`
+    to `no-dialect: 5` — the block would parse and then cap. Any remedy that makes the criteria
+    visible must land together with proofs that carry a dialect prefix, or it converts an invisible
+    defect into a visible one and calls that progress.
+
+    (7) THE r30 HALF IS RE-DERIVED, AND THE BRIEF'S FIGURE IS CORRECTED RATHER THAN CARRIED.
+    `plan-state-claims` at origin/main exits **0** (`658 shipped-log id(s) examined, 29
+    not-shipped-phrase-bearing line(s) read, 0 contradiction(s)`), and at the r30 head it ALSO
+    exits **0** (`676 / 32 / 0`) — because that branch's own top commit already re-wrapped the
+    clause, as its subject says in terms. The incident was real and is already remediated on that
+    branch; the "head exits 1" reading describes an EARLIER head. The MECHANISM is unaffected and
+    is what this task is about.
+  design: |
+    (i) Q1 — WHAT THE RUNG CONTROLS WHEN IT RENDERS, AND WHAT CHECKS IT. It writes two artifacts
+    whose readers are both line-scoped: a PR acceptance block, read by `parseAcceptanceBlock`, and
+    MASTER-PLAN prose, read per physical line by `notShippedLines`. **NOTHING THE RUNG EMITS IS
+    CHECKED AGAINST EITHER READER BEFORE THE PR IS OPENED.** The one guard on the path,
+    `bodyNeedsAcceptanceRepair`, runs on the body and cannot express truncation; nothing at all runs
+    the prose reader over a MASTER-PLAN edit before it is pushed. The rung does not know its
+    consumers are line-scoped, and neither does anything upstream of the PR.
+
+    (ii) Q2 — THE REMEDY IS A CHECK ON THE OUTPUT, NOT A NEW EMITTER. `renderAcceptanceBlock`
+    already satisfies both readers; the gap is the predicate that decides whether to use it. Widen
+    `bodyNeedsAcceptanceRepair` to consult the diagnostics it already has available — a body whose
+    `bulletsWritten` exceeds its parsed count, or which reports a `truncatedAtBullet`, needs repair
+    exactly as a zero-criteria body does. That is a few characters of predicate and no new
+    rendering logic.
+
+    (iii) AND THE CHECK CANNOT FIRE ON HAND-WRITTEN PLAN PROSE, WHICH IS THE CONSTRAINT THAT
+    DECIDES THE SHAPE. `bodyNeedsAcceptanceRepair` runs on a PR BODY inside an ACCEPTANCE BLOCK —
+    a structured region whose grammar is already one-bullet-per-line — never on free prose. A
+    reader who wraps a sentence in a shard's rationale is untouched by it. **A GATE THAT REFUSED
+    WRAPPED PROSE WOULD BE REFUSED HERE**, and this task must not propose one: the r30 half is
+    NOT remedied by a new gate, because `plan-state-claims` already runs on hand-written MASTER-PLAN
+    prose as a required check and any rule strong enough to catch a bad reflow would fire on
+    legitimate wrapping. The honest remedy for that half is that the rung run the EXISTING reader
+    over its own edit before opening the PR — an author-time use of a shipped check, adding no new
+    rule to the corpus.
+
+    (iv) THE TWO HALVES MOVE TOGETHER OR NOT AT ALL (rationale 6). A repair that makes truncated
+    criteria visible must also ensure their proofs carry a dialect prefix, or the verdict simply
+    moves from silently-truncated to loudly-capped. Whether that means the repair supplies dialect-
+    prefixed fallbacks or refuses to claim a repair it cannot complete is the implementation's to
+    decide and to state.
+
+    (v) Q3 — WHAT MUST NOT CHANGE.
+      **THE RETRO KEEPS EMITTING PLAN-ONLY PRs THE OPERATOR GATES.** Nothing here changes what the
+      rung is allowed to produce or who merges it.
+      **RULE 15 STANDS AND NOTHING AUTO-FILES.** No mint, no task filed by a machine, no proposal
+      promoted without ratification.
+      **NO GATE IS WEAKENED TO LET A BADLY-RENDERED BODY THROUGH.** The remedy widens what counts as
+      needing repair; it must never widen what counts as judgeable. `parseAcceptanceBlock`'s
+      end-of-block rule is not relaxed, the dialect requirement is not relaxed, and a body that
+      still parses fewer criteria than it writes must not become acceptable.
+      **AND NOTHING PACES, THROTTLES OR SLEEPS A CALL.**
+
+    (vi) ADJACENT AND NOT THIS, CITED RATHER THAN RE-FILED: W1-T2288 fixed the retro TRIGGER — how
+    the rung decides to run at all, by counting merges it reviews rather than only merges with a
+    worker run. This task is about what the rung RENDERS once it has run. Neither supersedes the
+    other and this shard re-files nothing.
+
+    (vii) NOT IN SCOPE, NAMED: `parseAcceptanceBlock`'s end-of-block rule; `NOT_SHIPPED_PHRASE_RE`'s
+    wording; any new lint over hand-written prose; the retro's analysis quality; and the dialect
+    vocabulary itself.
+  acceptance:
+    - claim: "a body writing more bullets than it parses is recognised as needing repair"
+      proof: "unit test: test/acceptance-block-truncation-repair.test.ts"
+    - claim: "a body reporting a truncated bullet is recognised as needing repair"
+      proof: "unit test: test/acceptance-block-truncation-repair.test.ts"
+    - claim: "a body whose bullets all parse is left untouched, so the widened predicate does not repair healthy bodies"
+      proof: "unit test: test/acceptance-block-truncation-repair.test.ts"
+    - claim: "the zero-criteria and empty-proof triggers still fire exactly as before"
+      proof: "unit test: test/acceptance-block-truncation-repair.test.ts"
+    - claim: "a repaired body parses every claim it writes and each proof carries a dialect prefix"
+      proof: "unit test: test/acceptance-block-truncation-repair.test.ts"
+    - claim: "the predicate never inspects free prose outside an acceptance block"
+      proof: "unit test: test/acceptance-block-truncation-repair.test.ts"
+    - claim: "nothing in the widened path relaxes what counts as judgeable"
+      proof: "unit test: test/acceptance-block-truncation-repair.test.ts"
+  files: [src/lib/plan-pr-emitter.ts, test/acceptance-block-truncation-repair.test.ts]
+  status: queued
+  attempts: 0
+  origin: "oper#retro-renders-past-its-own-readers-2026-08-26"
+  plan_refs: ["W1-T2288"]
+  note: |
+    `risk: high` IS RULE 19'S SPAN, NOT BLAST RADIUS. Rule 19 derives a concern from each declared
+    path's stem, so one source module and a test named after neither trip it at `medium`. The change
+    is a widened predicate plus the test that pins it.
+
+    EVERY PROOF PATH IS INSIDE `files:`, CHECKED PROGRAMMATICALLY RATHER THAN BY EYE.
+
+    THE FORWARD REFERENCE IS FALSIFIED WITH A DISCRIMINATING CONTROL NAMING A TEST FILE THAT EXISTS
+    ON MAIN. `rmd check-proof` on the declared path reads `exit: 1`, `hits: 0`, `verdict: fail`; the
+    same verb on `unit test: test/acceptance-block-diagnostics.test.ts` — present at 2fbcf0e1, and
+    the suite that already pins the diagnostics this remedy consults — reads `verdict: pass`. The
+    control was confirmed present by `ls` BEFORE the falsifier was believed.
+
+    ONLY PURE-PATH PROOFS ARE USED. No proof carries a grep pattern, so none can trip the
+    backtick, the space-in-space split, or the bracket-as-character-class hazards; every proof sits
+    inside one physical line, which is also the property this task is about.
+
+    THE ID WAS VERIFIED **UNUSED**, NOT MINE, ACROSS EIGHT SURFACES, MATCHED ANCHORED AS
+    `W1-T2316([^0-9]|$)` with a bracket class and never a backslash-d escape, and the open-PR
+    surfaces matched CASE-SENSITIVELY because canonical-case ids do appear in titles. Remote counts
+    read first: 141 heads, 429 reservation refs.
+      **reservation refs 1** (control 1) — surface one reading ONE rather than zero is what proves
+        this is the right number;
+      shard filenames on main 0 (control 1); declared `- id:` lines on main 0 (control 1); head
+        branches 0 (control 91 run-shaped heads); open-PR titles 0 (control: 1 of 5 open titles
+        carries a canonical-case id) and bodies 0 (control 5); merged `Remudero-Task:` trailers 0
+        (control 1 of 512, drawn from an id whose shard is ON origin/main and therefore merged);
+        merged commit subjects 0 (control 1 of 833, same standard).
+      THE TRAILER CONTROL WAS REPAIRED RATHER THAN REPORTED AS PASSING: the first id tried has no
+      merged trailer at all and read 0, which would have left that zero uncontrolled, so a control
+      that actually fires on that surface replaced it.
+    Every task id written anywhere in this shard resolves to a real declared plan record on
+    origin/main, so no example id here can be mistaken for a mint.
