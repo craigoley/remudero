@@ -84,6 +84,41 @@
     merge, and this task changes what the fleet SAYS about that state, never what the state permits.
     The fix rung keeps its two-strike ceiling, its unchanged-tree stand-down and its escape. And the
     operator gates every merge and every deploy.
+
+    **AMENDMENT 2026-08-26 — Q1's SECOND SHAPE WOULD NOT HAVE FIRED ON ONE OF THE TWO PULL REQUESTS
+    THIS SHARD WAS WRITTEN FROM. NOTHING ABOVE IS WITHDRAWN; THE JOB-COUNT HALF OF THE DISCRIMINATOR
+    IS.** Q1 names two shapes: a run whose conclusion is a startup failure, and a run still queued
+    past a threshold *while having scheduled no job*. The first is correct and stands. The second
+    keys on job count, and job count is not what was wrong.
+
+    MEASURED ON `#2974` AT HEAD `7ca8ba51`, one of the two pull requests above. Seven runs: four
+    concluded startup failure, three concluded failure, **none queued**. And those four startup
+    failures **had scheduled six jobs between them — two, two, one and one**. Dependency Review:
+    success and success. CodeQL: cancelled and cancelled. Acceptance author gate: success. Semgrep:
+    one job, `queued`, and it stayed queued.
+
+    SO THE HEAD CARRIED TWENTY-THREE CHECK-RUNS, THREE OF THEM GREEN, FROM RUNS THAT HAD ALREADY
+    CONCLUDED STARTUP FAILURE. A shape the rationale above does not describe: the runs were terminal
+    and their jobs were not. An earlier board pass read that head as busy and moved on.
+
+    **THE CORRECTED DISCRIMINATOR, TO BE BUILT INSTEAD OF THE JOB-COUNT ONE: a job whose status is
+    non-terminal inside a run whose conclusion is terminal.** Not an absence of jobs — a job pinned
+    non-terminal by a run that has already finished. A reader that consults check-runs and never the
+    RUN's own conclusion cannot tell that from work in flight, and waits forever; and the run
+    conclusion is precisely what a check-runs listing never exposes, so the join is the whole fix.
+    The `note:` below carries the same premise in its own words ("ANY run that produces no jobs has
+    this shape") and is corrected by this paragraph rather than rewritten by it; acceptance criterion
+    1 is likewise built on the job-count reading, and a build satisfying it literally would ship the
+    wrong predicate.
+
+    WHAT THIS AMENDMENT DOES NOT TOUCH. The 403 stands — re-running such a run still returns *this
+    workflow run cannot be retried*, and a new head is still the remedy; that was re-confirmed on
+    this same head, and the merge that supplied the new head cleared it. The threshold derivation
+    stands: creation to first job at two seconds minimum, three median, nine worst over ten
+    successful runs, with its own caveat that ten samples fix the order of magnitude and not the
+    number. The queued-past-a-threshold shape stands as a real one; only the conjunction with an
+    empty job list is wrong, and a queued job inside a TERMINAL run needs no threshold at all,
+    because a terminal run will never schedule anything again.
   note: |
     RULE 19 BAND. `files:` spans the module that owns the disposition vocabulary and a test; the
     sizing check reads a source file and a differently-named test as a span, so `risk: high` is set
