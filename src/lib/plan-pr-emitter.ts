@@ -56,7 +56,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import type { AcceptanceCriterion } from "./plan.js";
-import { parseAcceptanceBlock } from "./review.js";
+import { acceptanceBlockDiagnostics, parseAcceptanceBlock } from "./review.js";
 import { shapeCommitMessage } from "./commit-message.js";
 import type { GhApiFetcher } from "./open-prs-rest.js";
 
@@ -119,13 +119,35 @@ export function renderAcceptanceBlock(criteria: AcceptanceCriterion[]): string {
  * all (the only case the old trigger caught), and **22 parse to a criterion with an empty proof** —
  * every one of them `parsed=1 empty=1`. The missed shape is twice as common as the caught one.
  *
- * AN EMPTY PROOF IS THE WHOLE SIGNAL, DELIBERATELY. "Fewer criteria than were written" would be a
- * stronger check but has no basis at the only production call site: the body there comes from
- * `gh pr view --json body` (an LLM worker's output), so {@link renderAcceptanceBlock} never
- * produced it and no emitter count exists to compare against — `fallbackCriteria` is the block to
- * APPEND, not a record of what was written. Inventing a count would mean guessing at the author's
- * intent from the text, which is what the parser already refuses to do. An empty proof needs no
- * basis: a criterion with nothing to execute is malformed however many were intended.
+ * AN EMPTY PROOF WAS THE WHOLE SIGNAL, AND IT IS NO LONGER ENOUGH (W1-T2316). The paragraph that
+ * stood here argued that "fewer criteria than were written" had NO BASIS, because the body comes
+ * from `gh pr view --json body` and no emitter count exists to compare against. THAT PREMISE WAS
+ * WRONG IN ONE WORD: the count does not come from an emitter, it comes from COUNTING THE BULLETS
+ * THE AUTHOR WROTE, with the parser's own {@link ACCEPTANCE_BULLET_RE}. {@link
+ * acceptanceBlockDiagnostics} (lib/review.ts) has computed exactly that as `bulletsWritten` the
+ * whole time, one module away and already imported here. Nothing is guessed and no author intent
+ * is inferred: two counts over the same text are compared, and they disagree or they do not.
+ *
+ * THE SHAPE THIS ADDS, MEASURED ON r29's OWN BULLETS. A wrap BEFORE the `|` leaves the surviving
+ * criterion with an EMPTY proof, so the old trigger already caught it — reproduced at
+ * `written 5 / parsed 1 / emptyProofs 1`, predicate `true` both before and after. A wrap AFTER the
+ * `|` does not: the first criterion keeps a non-empty proof and every later bullet vanishes —
+ * `written 5 / parsed 1 / emptyProofs 0`, predicate **false** before and **true** after. That
+ * second shape is the r29 incident, and it is the only thing this widening adds.
+ *
+ * `truncatedAtBullet` IS NOT A SECOND CONDITION. It is defined as `parsed.length < bulletsWritten
+ * ? parsed.length + 1 : undefined`, so testing it would be testing this same inequality in 1-based
+ * clothing. One condition, stated once.
+ *
+ * IT CANNOT FIRE ON PROSE. Both counts are taken INSIDE an Acceptance block, a region whose grammar
+ * is already one bullet per physical line; a body with no such header yields `bulletsWritten: 0`
+ * and is decided by the zero-criteria arm exactly as before. Freely-wrapped rationale prose is
+ * never read by this predicate at all.
+ *
+ * RETROFIT, MEASURED BEFORE THE CHANGE over 308 real PR bodies (8 open, 295 merged): flagged today
+ * 108, flagged widened 108, NEWLY flagged 0, and 0 bodies lose a flag they have today. The
+ * widening is a strict superset that is silent on the live corpus — the one body it was built for
+ * had been hand-repaired before it merged.
  *
  * {@link parseAcceptanceBlock} is NOT changed. It must stay permissive — making it throw would fail
  * bodies that merge today (any with trailing prose under the block) and move a hard failure into the
@@ -134,7 +156,11 @@ export function renderAcceptanceBlock(criteria: AcceptanceCriterion[]): string {
 export function bodyNeedsAcceptanceRepair(body: string): boolean {
   const parsed = parseAcceptanceBlock(body);
   if (parsed.length === 0) return true;
-  return parsed.some((c) => c.proof.trim().length === 0);
+  if (parsed.some((c) => c.proof.trim().length === 0)) return true;
+  // W1-T2316: the block says less than its author wrote. `headerFound` is required so this arm can
+  // only ever speak about text inside an Acceptance block, never about a body without one.
+  const d = acceptanceBlockDiagnostics(body);
+  return d.headerFound && d.bulletsWritten > d.criteriaParsed;
 }
 
 /**
@@ -172,7 +198,22 @@ export function ensureJudgeableBody(body: string, fallbackCriteria: AcceptanceCr
     return `${m[1].replace(/\s+$/, "")}${SUPERSEDED_HEADER_SUFFIX}`;
   });
   const trimmed = lines.join("\n").replace(/\s*$/, "");
-  return trimmed.length > 0 ? `${trimmed}\n\n${block}\n` : `${block}\n`;
+  const repaired = trimmed.length > 0 ? `${trimmed}\n\n${block}\n` : `${block}\n`;
+  // W1-T2316 design (iv) — REFUSE TO CLAIM A REPAIR THAT DID NOT LAND. Every caller logs
+  // `acceptance.repaired` (or returns a `repairedBody`) on the strength of this return value, so a
+  // body that still trips the predicate would ship a false claim rather than a defect. The failure
+  // is a CALLER bug — `fallbackCriteria` whose claim or proof carries a newline or an unescaped
+  // separator cannot round-trip through `renderAcceptanceBlock` — and it surfaces here immediately,
+  // the same posture `renderAcceptanceBlock` already takes on an empty list. NOT a widening of what
+  // counts as judgeable: this throws instead of returning an unjudgeable body, never the reverse.
+  if (bodyNeedsAcceptanceRepair(repaired)) {
+    throw new Error(
+      "ensureJudgeableBody: the repaired body still needs repair — the fallback criteria do not " +
+        "round-trip through parseAcceptanceBlock (a claim or proof carrying a newline or a bare `|` " +
+        "is the usual cause). Refusing to return a body a caller would log as repaired.",
+    );
+  }
+  return repaired;
 }
 
 // ── 3. Filing-PR Acceptance auto-authorship ──────────────────────────────────────────────────
