@@ -632,6 +632,7 @@ import {
   renderClarificationQuestion,
   renderSweepSummary,
   REQUIRED_CHECK_FAIL,
+  REQUIRED_CHECK_OK,
   runCreditBackfill,
   runEscalationReconcile,
   runPostFixReverification,
@@ -1370,15 +1371,33 @@ export function syncPlanOrRefuse(
   }
 }
 
-/** Check-run conclusions that mean the gate is RED (fail closed on anything not green). */
-const RED_CONCLUSIONS = new Set([
-  "FAILURE",
-  "CANCELLED",
-  "TIMED_OUT",
-  "ACTION_REQUIRED",
-  "STARTUP_FAILURE",
-  "ERROR",
-]);
+/**
+ * Conclusions that mean "nobody reached a verdict" rather than "a verdict came back bad"
+ * (W1-T1223's own distinction for CANCELLED, `src/lib/sweep.ts`'s `cancelledRequiredCheckNames`
+ * doc) — STALE joins it here for the identical reason (a stale run's result can no longer be
+ * attributed to the head, so it is equally "void" rather than "failed"). Both are members of
+ * `REQUIRED_CHECK_FAIL` (the sweep's own bounded arm-gate folds them into "red", same as it
+ * always has for CANCELLED), but a POLL LOOP must not repeat that fold: `checksStateFromRollup`
+ * is read once per sweep pass and re-derived fresh next time, while a poll loop's read is
+ * TERMINAL — returning a `blocked_ci` verdict here stops polling forever, even though the check
+ * may still be re-run and go green (W1-T2274's #2794 case: a CANCELLED `coverage-ratchet`
+ * attempt superseded 18 minutes later by a SUCCESS the loop never lived to see). Excluded from
+ * {@link isTerminalRed} below so the two poll loops fall through to the ordinary bounded
+ * pending/stall path ({@link checkWaitStalled}, `STALL_WINDOW` unchanged) instead of a false
+ * "required check red" verdict naming a check that never actually ran to a verdict.
+ */
+const NO_VERDICT_CONCLUSIONS = new Set(["CANCELLED", "STALE"]);
+
+/**
+ * Read the SAME red vocabulary `checksStateFromRollup` reads (`REQUIRED_CHECK_FAIL`,
+ * `src/lib/sweep.ts` — W1-T2274 replaces this file's own private, narrower `RED_CONCLUSIONS`
+ * with it), except {@link NO_VERDICT_CONCLUSIONS}: a poll loop must never terminate on a
+ * conclusion that means "no verdict" as if it meant "bad verdict". `state` is expected already
+ * upper-cased the way every real GitHub conclusion enum value is reported.
+ */
+function isTerminalRed(state: string): boolean {
+  return REQUIRED_CHECK_FAIL.has(state) && !NO_VERDICT_CONCLUSIONS.has(state);
+}
 
 interface RollupEntry {
   __typename?: string;
@@ -3705,7 +3724,7 @@ export async function pollToGate(
     if (v.state === "MERGED") return { merged: true, reason: "checks green" };
     if (v.state === "CLOSED") return { merged: false, reason: "pr closed" };
     const roll = v.statusCheckRollup ?? [];
-    const red = roll.find((c) => RED_CONCLUSIONS.has(String(c.conclusion ?? c.state ?? "")));
+    const red = roll.find((c) => isTerminalRed(String(c.conclusion ?? c.state ?? "")));
     if (red) {
       log("pr.checks", { conclusion: "red", check: red.name ?? red.context ?? "unknown" });
       return { merged: false, reason: `required check red: ${red.name ?? red.context ?? "unknown"}` };
@@ -3755,7 +3774,7 @@ export async function pollToGate(
  */
 export function ciGateFromRollup(rollup: RollupEntry[] | undefined): "green" | "red" | "pending" {
   const roll = (rollup ?? []).filter((c) => (c.name ?? c.context) !== REVIEW_CTX);
-  const red = roll.find((c) => RED_CONCLUSIONS.has(String(c.conclusion ?? c.state ?? "")));
+  const red = roll.find((c) => isTerminalRed(String(c.conclusion ?? c.state ?? "")));
   if (red) return "red";
   const ci = roll.find((c) => (c.name ?? c.context) === "ci");
   if (ci && String(ci.conclusion ?? ci.state ?? "") === "SUCCESS") return "green";
@@ -3864,12 +3883,16 @@ export function rollupHasRunningCheck(rollup: RollupEntry[] | undefined): boolea
  *
  * WHAT STILL BOUNDS THE WAIT, since this only ever makes the predicate MORE permissive. Three
  * things, none of them this function: (1) `IN_PROGRESS` is provider-bounded — GitHub cancels an
- * over-running job, and a CANCELLED/TIMED_OUT conclusion is in `RED_CONCLUSIONS`, which both
+ * over-running job, and a TIMED_OUT conclusion is a member of `isTerminalRed`'s set, which both
  * callers short-circuit on before they ever reach this predicate; (2) `ci-gate`'s own
  * `WAIT_CAP_SECONDS` (2400s, `.github/workflows/ci-gate.yml`) fails that required check when a
  * required check never registers, which again surfaces here as RED; (3) this predicate itself,
  * unchanged, for a QUIESCENT rollup — nothing running and nothing changing is still a stall and
  * is still caught. So the exemption is scoped to a state that is transient by construction.
+ * A CANCELLED conclusion is DELIBERATELY NOT one of the three (W1-T2274, {@link
+ * NO_VERDICT_CONCLUSIONS}) — it means no verdict was reached, not that one came back bad, so it
+ * is left to fall through to (3): a check whose latest attempt reads CANCELLED and never moves
+ * again is still caught, on the SAME bound, by the ordinary quiescent-rollup path.
  */
 export function checkWaitStalled(readings: ReadonlyArray<RollupEntry[] | undefined>): {
   stalled: boolean;
@@ -3884,7 +3907,11 @@ export function checkWaitStalled(readings: ReadonlyArray<RollupEntry[] | undefin
   const pending = last
     .filter((c) => {
       const state = String(c.conclusion ?? c.status ?? c.state ?? "");
-      return !RED_CONCLUSIONS.has(state) && state !== "SUCCESS";
+      // W1-T2274: "done" is REQUIRED_CHECK_OK (SUCCESS/SKIPPED/NEUTRAL — the same set
+      // checksStateFromRollup reads), not the literal "SUCCESS" this used to test alone, which
+      // read a cleanly-concluded NEUTRAL or SKIPPED check as still pending forever (#1698's
+      // shape, one file over). A conclusion isTerminalRed already ruled out never reaches here.
+      return !REQUIRED_CHECK_OK.has(state) && !isTerminalRed(state);
     })
     .map((c) => c.name ?? c.context ?? "unknown");
   return { stalled: true, pending };
