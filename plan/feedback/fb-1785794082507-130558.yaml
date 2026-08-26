@@ -28,7 +28,7 @@ raw: "AN UNRESOLVABLE PROOF CERTIFIES NOTHING AND NOTHING NOTICES — residual
   building."
 attachments: []
 origin: cli
-status: proposed
+status: accepted
 proposal_pr: https://github.com/craigoley/remudero/pull/2279
 summary:
   headline: Diagnose proof validation issues in queued tasks

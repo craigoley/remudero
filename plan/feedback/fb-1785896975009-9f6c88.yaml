@@ -35,7 +35,7 @@ raw: "CORRECTION TO fb-1785870873355-d91fc2 — THE SHIPS-UNWIRED FLOOR IS WORKI
   'scanned 0'. That is an observability gap, not a correctness gap."
 attachments: []
 origin: cli
-status: proposed
+status: accepted
 proposal_pr: https://github.com/craigoley/remudero/pull/2464
 summary:
   headline: Floor works; advisory data auto-deletes before W1-T323 reads it

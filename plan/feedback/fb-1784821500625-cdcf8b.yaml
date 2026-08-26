@@ -19,7 +19,7 @@ raw: "DIALECT PROOF TEST-NAME SUBSTRINGS ARE SILENTLY REGEX-ESCAPED — a 'unit
   well-intentioned executable-dialect proof."
 attachments: []
 origin: cli
-status: proposed
+status: accepted
 proposal_pr: https://github.com/craigoley/remudero/pull/1817
 summary:
   headline: Silent test-name proof failures from regex-special characters

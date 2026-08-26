@@ -11,7 +11,7 @@ raw: "FEEDBACK BRIDGE IS EDGE-TRIGGERED ONLY — feedback-landing lands captures
   to edges repeats the escalation-channel mistake."
 attachments: []
 origin: cli
-status: proposed
+status: accepted
 proposal_pr: https://github.com/craigoley/remudero/pull/1923
 summary:
   headline: Feedback bridge ignores pre-existing untracked files
