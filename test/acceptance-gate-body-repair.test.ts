@@ -437,3 +437,87 @@ test("runFixRung (acceptance 6): an unchanged tree still stands the rung down af
   assert.equal(outcome.outcome, "stood_down");
   assert.match(outcome.standDownReason ?? "", /byte-identical/);
 });
+
+test("runFixRung (acceptance 7, fail-open): a live-body fetch that throws is never treated as a repairable defect — no write is attempted, and the round still reaches the ordinary strike", async () => {
+  const failing = fakeReview("failure", []);
+  const passing = fakeReview("success", [], "new-head-sha");
+  const updateCalls: string[] = [];
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+
+  const outcome = await runFixRung({
+    ...fixRungBaseOpts(),
+    strikeCap: 2,
+    initialReview: failing,
+    ciFailures: [AUTHOR_GATE_CI_FAILURE],
+    deps: {
+      spawn: async (args) => {
+        spawnCalls.push(args);
+        return result({ sessionId: "fix-1", text: "fixed whatever else the round evidenced" });
+      },
+      waitForCiGreen: async () => "green",
+      fetchCiFailures: async () => [AUTHOR_GATE_CI_FAILURE],
+      fetchPrBody: async () => {
+        throw new Error("gh api rate-limited");
+      },
+      updatePrBody: async (_prUrl, body) => {
+        updateCalls.push(body);
+      },
+      runReview: async () => passing,
+      push: () => {},
+      issues: fakeIssueStore(),
+      ledgerPath: tmpLedgerPath(),
+      log: (step, extra) => logs.push({ step, extra }),
+      say: () => {},
+      account: (r) => r,
+    },
+  });
+
+  const errorLines = logs.filter((l) => l.step === "fix.body_gate_check_error");
+  assert.equal(errorLines.length, 1, "a throwing fetch is ledgered, never silently swallowed");
+  assert.equal(updateCalls.length, 0, "with no live body, there is nothing to repair");
+  assert.equal(spawnCalls.length, 1, "the ordinary strike still dispatches for whatever else the round evidences");
+  assert.equal(outcome.outcome, "fixed");
+});
+
+test("runFixRung (acceptance 8, fail-open): a body write that throws mid-repair falls through to the ordinary strike instead of blocking the rung", async () => {
+  const failing = fakeReview("failure", []);
+  const passing = fakeReview("success", [], "new-head-sha");
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  let updateAttempts = 0;
+
+  const outcome = await runFixRung({
+    ...fixRungBaseOpts(),
+    strikeCap: 2,
+    initialReview: failing,
+    ciFailures: [AUTHOR_GATE_CI_FAILURE],
+    deps: {
+      spawn: async (args) => {
+        spawnCalls.push(args);
+        return result({ sessionId: "fix-1", text: "fixed whatever else the round evidenced" });
+      },
+      waitForCiGreen: async () => "green",
+      fetchCiFailures: async () => [AUTHOR_GATE_CI_FAILURE],
+      fetchPrBody: async () => NO_HEADER_BODY,
+      updatePrBody: async () => {
+        updateAttempts += 1;
+        throw new Error("gh pr edit failed: 502");
+      },
+      runReview: async () => passing,
+      push: () => {},
+      issues: fakeIssueStore(),
+      ledgerPath: tmpLedgerPath(),
+      log: (step, extra) => logs.push({ step, extra }),
+      say: () => {},
+      account: (r) => r,
+    },
+  });
+
+  const errorLines = logs.filter((l) => l.step === "fix.body_gate_repair_error");
+  assert.equal(errorLines.length, 1, "a throwing write is ledgered, never silently swallowed");
+  assert.equal(errorLines[0].extra?.strike, 1);
+  assert.equal(updateAttempts, 1, "exactly one write is attempted before falling through");
+  assert.equal(spawnCalls.length, 1, "a failed write never blocks the ordinary strike from still running");
+  assert.equal(outcome.outcome, "fixed");
+});
