@@ -591,6 +591,7 @@ import {
   type ProofQueueAuditReport,
 } from "./lib/proof-queue-audit.js";
 import { buildReceipt, resolveReceiptLedgerLines, type ReceiptLedgerRead } from "./lib/receipt.js";
+import { buildReplay, resolveReplayLedgerLines, type ReplayLedgerRead } from "./lib/ledger-replay.js";
 import { buildDepReviewArmUnreachableEscalation, buildDepReviewEscalation, decideDepReview } from "./lib/dep-review.js";
 import { decideAutoTriage, newFeedbackIdsOldestFirst, readAutoTriageMarker, recordAutoTriageFire, autoTriageMarkerPath, triageLockPath, claimTriageWithLogging, releaseTriageClaimWithLogging, gitTriageClaimReserver, type AutoTriageDecision, type TriageClaimReserver, type TriageClaimResult } from "./lib/auto-triage.js";
 import { decideDispatchClaim, releaseDispatchClaim, gitDispatchClaimReserver, dispatchClaimRef, type DispatchClaimReserver } from "./lib/dispatch-claim.js";
@@ -12634,6 +12635,64 @@ export async function receiptCommand(prArg: string, rest: string[] = [], deps: R
   }
   const receipt = buildReceipt(resolved.lines, { taskId, prUrl: view.url ?? prArg });
   console.log(JSON.stringify(receipt, null, 2));
+  return 0;
+}
+
+/**
+ * `rmd replay <since> <until> [--task <id>] [--step <prefix>]` (W1-T2296) — a deterministic,
+ * plain-text narration of a LEDGER WINDOW, printed to stdout. Between two instants, what did the
+ * fleet decide, in what order, and for what recorded reasons — the question every incident
+ * reconstruction in the record has answered by hand (filter a window, join by run/task, order by
+ * timestamp, read the reason fields). Mirrors `receiptCommand`'s wiring: this stays a thin shell
+ * around the pure {@link buildReplay} (src/lib/ledger-replay.ts), never the business logic itself.
+ *
+ * READ-ONLY: no GitHub call, no write, no state mutation — resolves the corpus via
+ * {@link resolveReplayLedgerLines}, the archive∪live UNION (never the live `ledger.ndjson` alone,
+ * which rotation empties), and REFUSES rather than narrating a partial corpus.
+ */
+export interface ReplayCommandOpts {
+  /** Injectable so a test drives both branches against a synthetic state root — same seam
+   *  `ledgerGrepCommand`'s `opts.stateDir` uses. */
+  stateDir?: string;
+  /** Injectable so a test drives the resolved-lines and refused (`ok: false`) paths without a
+   *  real state dir — same seam `receiptCommand`'s `deps.resolveReceiptLedgerLines` uses. */
+  resolveReplayLedgerLines?: (stateDir: string) => ReplayLedgerRead;
+}
+
+export function replayCommand(
+  since: string | undefined,
+  until: string | undefined,
+  rest: string[],
+  opts: ReplayCommandOpts = {},
+): number {
+  const badArg = unknownArgError("replay", rest, ["--task", "--step"], []);
+  if (!since || !until || badArg) {
+    if (badArg) console.error(badArg);
+    console.error(`usage: ${commandSyntax("replay")}\n` + USAGE);
+    return 2;
+  }
+  const taskId = flagValue(rest, "--task");
+  const stepPrefix = flagValue(rest, "--step");
+
+  const stateDir =
+    opts.stateDir ??
+    (() => {
+      try {
+        return join(loadConfig().root, "state");
+      } catch {
+        return undefined;
+      }
+    })();
+  if (stateDir === undefined) {
+    console.error("rmd replay: cannot resolve a state dir — unreadable config");
+    return 1;
+  }
+  const resolved = (opts.resolveReplayLedgerLines ?? resolveReplayLedgerLines)(stateDir);
+  if (!resolved.ok) {
+    console.error(`rmd replay: ${resolved.reason}`);
+    return 1;
+  }
+  console.log(buildReplay(resolved.lines, { since, until, taskId, stepPrefix }));
   return 0;
 }
 
@@ -28256,6 +28315,11 @@ const COMMANDS: readonly CommandSpec[] = [
       "rmd receipt <pr> [--repo <name>]   # W1-T71 (ratifies P17): print a deterministic in-toto-style run receipt assembled purely from ledger ground truth (src/lib/receipt.ts's buildReceipt) for <pr>'s task — resolves the task id from the PR body's Remudero-Task trailer (same extractor `rmd review` uses), refusing rather than guessing when none resolves. Every field with no ledger source for this run prints null with a named reason, never a fabricated value. Sigstore signing + the published schema doc are DEFERRED v2 rungs, not this command's job. READ-ONLY: writes no ledger line, posts nothing.",
   },
   {
+    name: "replay",
+    usage:
+      "rmd replay <since> <until> [--task <id>] [--step <prefix>]   # W1-T2296: a deterministic, plain-text narration of a LEDGER WINDOW — between two ISO-8601 instants, what did the fleet decide, in what order, and for what recorded reasons. Reuses buildReceipt's discipline (src/lib/ledger-replay.ts's buildReplay) over a WINDOW instead of a run: reads the archive∪live UNION (lib/ledger-grep.ts's resolveLedgerUnion, never the live ledger.ndjson alone), filters to [since, until] inclusive, orders by each row's own ts, and renders every row's own outcome/reason fields — a field the row does not carry prints `absent (no \"<field>\" field on this row)`, never a fabricated value. --task narrows to one task id; --step narrows to one step-name prefix (a family, e.g. `automerge.`). A partial ledger corpus (zero archives, or a rotation found and unreadable) is REFUSED, never narrated as a shorter story. READ-ONLY: writes no ledger line, no state file, posts nothing.",
+  },
+  {
     name: "check-proof",
     usage:
       "rmd check-proof <proof> [--allow-full-suite] [--base <ref>]   # run ONE acceptance proof through the REVIEWER'S OWN parser and executor and print what it does: parse kind, resolved candidate file(s), the exact argv, the verdict, exit code and hit count. A `grep:` pattern is a BASIC REGULAR EXPRESSION (`[ * ^ $` are metacharacters) — verifying with `grep -F` is a DIFFERENT matcher and reports a false green (PR #1071). A `unit test:` proof naming a TITLE rather than a test/<file>.test.ts PATH is resolved to its file first; when it resolves to none, the run is REFUSED rather than falling back to the whole-suite glob (--allow-full-suite overrides, time-boxed). --base <ref> (W1-T912, OPTIONAL — omitting it leaves every line and exit code above byte-identical) re-runs the SAME proof against <ref> and prints a `base:`/`discrimination:` line: a proof that ALSO matches at <ref> discriminates nothing and reports `executed_stale`, the reviewer's OWN name for the exact downgrade it applies at review time (W1-T273/W1-T362) — so a local `verdict: pass` that would count for nothing in review is visible before a PR ever opens. Only `grep:` proofs get a base blob materialized (same scope the reviewer itself has); a `unit test:` proof reports NOT COMPARABLE. EXIT CODE IS THE VERDICT: 0 pass, 1 fail (genuinely unmet — overrides the keyword floor), 2 refused (nothing executed — bad usage, an unparseable proof, or an unresolved name run declined), 3 no-match (ran and named nothing — degrades to the keyword floor, NEVER read as fail), 4 exec_error (a timeout/spawn failure/grep-exit-2 — inconclusive, also degrades), 5 executed_stale (--base only — passed on both trees, never read as fail). READ-ONLY: writes no cache, no ledger line, no state file",
@@ -28953,6 +29017,10 @@ export async function main(
   // diff-cov: process-boundary — main() CLI dispatch: process.exit(await receiptCommand(arg, rest.slice(1))) cannot carry a DA hit without forking the process; receiptCommand's own logic — the unknown-arg refusal, the trailer resolution/refusal, and the buildReceipt print path — is unit-tested in test/receipt.test.ts (same irreducible-glue shape as the sibling check-proof/emissions/ledger-grep dispatch cases).
   if (cmd === "receipt" && arg) {
     process.exit(await receiptCommand(arg, rest.slice(1)));
+  }
+  // diff-cov: process-boundary — main() CLI dispatch: process.exit(replayCommand(arg, rest[1], rest.slice(2))) cannot carry a DA hit without forking the process; replayCommand's own logic — arg validation, the resolved/refused union branches, and the buildReplay print path — is unit-tested in test/ledger-replay.test.ts (same irreducible-glue shape as the sibling check-proof/emissions/receipt/ledger-grep dispatch cases).
+  if (cmd === "replay" && arg) {
+    process.exit(replayCommand(arg, rest[1], rest.slice(2)));
   }
   if (cmd === "lint-plan") {
     process.exit(await lintPlanCommand(rest));
