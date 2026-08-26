@@ -1,0 +1,142 @@
+- id: W1-T2344
+  title: "A PER-PROBE SLACK CONSTANT ABSORBS A PER-COMMAND COST, AND THE DERIVED CAP HIDES THE DILUTION — probeTurnBudget's derived half moved 6 to 10 automatically when two commands were added on 2026-08-24, but PROBE_TURN_ALLOWANCE stayed 3, and the containment probe now exhausts its turn budget on 29 percent of dispatches"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 25.00
+  files: [src/lib/containment.ts, test/containment.test.ts]
+  origin: "operator-brief#containment-probe-turns-2026-08-26"
+  plan_refs: ["W1-T2201", "W1-T2238", "W1-T2271", "W1-T1281", "W1-T1066"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-08-26 FROM `containment.probe` LEDGER ROWS, which carry `turns_exhausted`,
+    `num_turns`, `max_turns`, `cost_usd` and `arms_reported` as STRUCTURED FIELDS — counted off the
+    rows, never a log grep, over a union reading 33 archives with the live file read, 0 unread and
+    `ok: true`.
+
+    THE RATE, AND THE ZERO THAT PRECEDES IT.
+
+      2026-08-08 to 08-23   350 probes    0 exhausted     0.0 percent
+      2026-08-24             59 probes   10 exhausted    16.9 percent
+      2026-08-25             56 probes   23 exhausted    41.1 percent
+      2026-08-26             51 probes   15 exhausted    29.4 percent
+
+    THE ZERO IS CONTROLLED: the SAME query that returns none for every day before 08-24 returns 48
+    since 08-24 and 15 today, from the same union. This is not a long-standing flake that nobody
+    counted. It did not exist two days ago.
+
+    THE MECHANISM, DATED TO THE MINUTE. Three commits landed 2026-08-24: `7b5fe300` derived the
+    probe's turn cap from its command count at 11:45Z, `f38f537b` added the token-read command at
+    15:39Z, and `dadc1be2` added the operator-home-read command at 16:45Z. THE FIRST
+    turns-exhausted ROW IN THE LEDGER'S ENTIRE HISTORY IS 17:20:19Z — thirty-five minutes after the
+    sixth command landed.
+
+    WHAT DID AND DID NOT MOVE. `probeTurnBudget` is `probeCommandCount(prompt) + 1 +
+    PROBE_TURN_ALLOWANCE`, which is 6 plus 1 plus 3, so 10. THE DERIVED HALF WORKED EXACTLY AS
+    W1-T2201 DESIGNED: the cap moved 6 to 10 on its own when the two commands arrived, with no edit
+    and no one noticing it needed one. `PROBE_TURN_ALLOWANCE` is 3 and it is PER PROBE, not per
+    command. At three commands it was a full command-count of slack; at six it is half of one. The
+    allowance dilutes as the probe grows, and the derived cap moving smoothly is precisely what
+    hides the dilution — the number went up, so nothing looked wrong.
+
+    IT IS NOT A SPIKE, AND THE DISTRIBUTION SAYS SO. Every one of the 33 exhausted probes that
+    recorded a count reads `num_turns: 11` against `max_turns: 10` — ONE TURN OVER, never five.
+    Succeeding probes run a median of 9 turns out of 10, and 56 percent of them finish within one
+    turn of the cap. `arms_reported` agrees: an exhausted probe reports 5 or 6 arms, a succeeding
+    one reports 9 or 10. The probe is not occasionally misbehaving; it habitually consumes its
+    entire budget, so any single extra turn tips it over.
+
+    AND THE EXTRA TURN IS THE ONE THE ALLOWANCE EXISTS FOR. A failing transcript reads "Both curls
+    produced no output. Let me verify which marker files were created" — VERBATIM the ambiguity
+    `PROBE_TURN_ALLOWANCE`'s own doc names as allowance-turn one, "a command that produced no
+    output, where the outcome is knowable only by checking the marker files". The allowance is
+    being spent on exactly what it was budgeted for. There simply is not enough of it.
+
+    (Q1) THE PROPOSAL, AND THE ARGUMENT AGAINST IT. Make the allowance SCALE with command count
+    rather than sit as a per-probe constant — one named slack turn per command, or some stated
+    function of `probeCommandCount`, so that a seventh command moves the slack the way it already
+    moves the base.
+
+    THIS IS NOT A BUDGET RAISE AND MUST NOT BE MISTAKEN FOR ONE. The cap is already derived and
+    already moved; adding turns as a number would treat the symptom and would be the
+    EXCHANGE_TIMEOUT_MS mistake — converting a fast loud failure into a slow one. The scaling
+    argument is about WHICH QUANTITY the slack is a function of, not about how large it is.
+
+    THE ARGUMENT AGAINST MYSELF, STATED PLAINLY BECAUSE IT IS REAL. A larger allowance means a
+    probe that LEGITIMATELY HANGS — a worker looping, a command that never returns a usable result
+    — hangs LONGER before it fails closed. The fail-closed verdict is what makes an unproven
+    containment safe, and every turn added to the allowance is a turn spent before that safety
+    engages, on every hanging probe, for the sake of the non-hanging ones. A scaling allowance also
+    grows without bound as commands are added, which is the same "nobody noticed the number moved"
+    property that produced this defect in the first place, pointed the other way. Any scaling form
+    must therefore carry its own ceiling and say what that ceiling costs.
+
+    (Q2) THE CHEAPER, NARROWER FIX, AND IT IS THE FIRST TEST OF Q1's DIAGNOSIS. Command 4 — the
+    bundled egress pair — leaves its outcome to MARKER-FILE ARCHAEOLOGY: each request writes a
+    marker only on success, so a run where both requests produce no output is genuinely ambiguous
+    from the transcript alone, and the probe must spend a turn reading the markers back. IF COMMAND
+    4 PRINTED ITS OWN RESULT, that diagnostic turn would not be needed, the median would fall from
+    9, and headroom would be returned WITHOUT TOUCHING ANY BUDGET.
+
+    WOULD THAT ALONE CLEAR THE 29 PERCENT? UNKNOWN, AND THE SHARD REFUSES TO GUESS. Every exhausted
+    probe is exactly one turn over, so removing one reliably-spent turn is arithmetically enough
+    for the population that spends it — but the ledger does not record WHICH turn each probe spent
+    on what, only the total, so the share of exhaustions that pay this particular turn is not
+    derivable from what is already on disk. HOW TO KNOW: land the command-4 change alone, first,
+    and read the same `num_turns` distribution over the following window. If the median moves 9 to
+    8 and the exhaustion rate falls toward zero, the diagnosis holds and the allowance may not need
+    to scale at all. If the median moves and the rate does not, the remaining exhaustions are
+    spending their extra turn on something else, and THAT is what the scaling proposal has to
+    answer for. Doing the narrow fix first is what makes the wider one measurable rather than
+    assumed.
+
+    (Q3) WHAT MUST NOT CHANGE. THE FAIL-CLOSED VERDICT STAYS. An unattempted write is not the same
+    fact as a denied one, and `blocked_containment` on turns-exhausted is CORRECT: it must keep
+    firing, and nothing in this task relaxes it. NO COMMAND IS REMOVED TO SAVE A TURN — each of the
+    six proves something the probe grew to prove, and deleting a proof to afford a turn is trading
+    containment evidence for throughput. AND `PROBE_TURN_ALLOWANCE` IS NOT SIMPLY RAISED AS A
+    NUMBER without the scaling argument above; a nudged constant is how this defect arrives again.
+
+    THE COST, WHICH IS WHAT JUSTIFIES THE TASK. 6.41 US dollars today over 15 exhausted probes, and
+    19.70 US dollars over 48 since 08-24 — the probe spawn alone, with the mount and the preflight
+    underneath it. AND THE REAL MULTIPLIER IS THE RETRY: 46 of 48 exhausted probes are followed by
+    another `run.start` for the same task, 96 percent, against 20 of 118 for succeeding probes, 17
+    percent. A failed probe reliably buys a second full dispatch; a successful one usually ends the
+    task's day. Eleven distinct task ids were hit today, four of them twice.
+
+    THE HONEST NONE. NOTHING CORRELATES. Mount tier cannot discriminate — 165 of 166 probes since
+    08-24 ran on one tier. Host cannot — 163 of 166 on one host. Concurrent runs in flight read a
+    mean of 2.69 at an exhausted probe against 2.48 at a succeeding one. Whether a probe follows a
+    success on the same host inside thirty minutes reads 42 percent for exhausted against 49
+    percent for succeeded. A ledger-gap proxy was deliberately NOT used, because a row terminates a
+    gap and the correlation would confound. THE ONE NON-RANDOM STRUCTURE IS THE TURN DISTRIBUTION
+    ITSELF, which is the finding rather than a missing one.
+
+    RISK BAND. `risk: high` is set UP FRONT and is Rule 19's SPAN, not blast radius: `files:`
+    crosses the containment module that gates every dispatch and its own suite, and the module is
+    the one whose verdict refuses a run.
+  acceptance:
+    - claim: "the probe's slack is a function of how many commands it runs, not a constant that dilutes as commands are added"
+      proof: "unit test: test/containment.test.ts"
+    - claim: "a scaling slack carries a stated ceiling, so it cannot grow unbounded as commands accrue"
+      proof: "unit test: test/containment.test.ts"
+    - claim: "the egress command reports its own outcome rather than leaving it to marker file archaeology"
+      proof: "unit test: test/containment.test.ts"
+    - claim: "the turn cap is still derived from the command count rather than hand picked"
+      proof: "grep: probeCommandCount(prompt) + 1 + PROBE_TURN_ALLOWANCE in src/lib/containment.ts"
+    - claim: "the fail closed verdict for an exhausted probe is still reachable and still refuses"
+      proof: "unit test: test/containment.test.ts"
+    - claim: "all six probe commands are still present, since none may be removed to afford a turn"
+      proof: "unit test: test/containment.test.ts"
+    - claim: "nothing added paces or throttles or sleeps a call"
+      proof: "unit test: test/containment.test.ts"
+  falsifier: |
+    If the `num_turns` distribution over `containment.probe` rows shows a median at or below 7 out
+    of 10 with the exhaustion rate already at zero across a full day, the headroom problem has gone
+    away on its own and this task must be closed rather than implemented — the premise is a probe
+    running at its cap, and a probe with slack to spare is a different situation with a different
+    remedy.
