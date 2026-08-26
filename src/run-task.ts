@@ -21131,51 +21131,51 @@ export function fetchCiFailures(
       logUnavailable = { kind: "fetch-failed", detail };
       logTail = "";
     }
-      // W1-T2298 - THE FALLBACK, PLACED WHERE THE BLOB READ GIVES UP RATHER THAN BESIDE IT. The log
-      // tail stays PREFERRED: this runs only when that read failed or returned nothing, so a readable
-      // log can never be displaced and every existing recogniser keeps matching exactly what it
-      // matched before. On a container lane the blob read is a standing 403 - measured with this
-      // function's own argv - which left every logTail-keyed recogniser scanning an empty string
-      // while the same detail sat unread in a check-run annotation the API serves 200.
-      //
-      // BEST-EFFORT, AND IT NEVER OVERWRITES THE LOG'S OWN NAMED CAUSE. W1-T2291 made `fetch-failed`
-      // and `empty-log` mean something; a fallback that replaced them would take that back. On
-      // success the cause is CLEARED because a tail now exists; on failure the cause stands and the
-      // attempt is recorded beside it.
-      let annotationFallback: CiAnnotationFallback | undefined;
-      if (jobId && logUnavailable !== undefined) {
-        try {
-          const messages = fetchAnnotations(owner, repo, jobId).filter((m) => m.trim() !== "");
-          if (messages.length > 0) {
-            logTail = messages.join("\n").split("\n").slice(-tailLines).join("\n");
-            logUnavailable = undefined;
-            tailSource = "annotations";
-            annotationFallback = { outcome: "recovered" };
-          } else {
-            annotationFallback = { outcome: "empty" };
-          }
-        } catch (err) {
-          let detail = "unknown error";
-          try {
-            const e = err as { code?: unknown; message?: unknown };
-            const code = typeof e?.code === "string" && e.code ? `${e.code}: ` : "";
-            detail = `${code}${typeof e?.message === "string" && e.message ? e.message : String(err)}`.slice(
-              0,
-              MAX_CI_LOG_FAILURE_DETAIL,
-            );
-          } catch {
-            /* keep the placeholder - an outcome is still named, which is the whole point */
-          }
-          annotationFallback = { outcome: "failed", detail };
+    // W1-T2298 - THE FALLBACK, PLACED WHERE THE BLOB READ GIVES UP RATHER THAN BESIDE IT. The log
+    // tail stays PREFERRED: this runs only when that read failed or returned nothing, so a readable
+    // log can never be displaced and every existing recogniser keeps matching exactly what it
+    // matched before. On a container lane the blob read is a standing 403 - measured with this
+    // function's own argv - which left every logTail-keyed recogniser scanning an empty string
+    // while the same detail sat unread in a check-run annotation the API serves 200.
+    //
+    // BEST-EFFORT, AND IT NEVER OVERWRITES THE LOG'S OWN NAMED CAUSE. W1-T2291 made `fetch-failed`
+    // and `empty-log` mean something; a fallback that replaced them would take that back. On
+    // success the cause is CLEARED because a tail now exists; on failure the cause stands and the
+    // attempt is recorded beside it.
+    let annotationFallback: CiAnnotationFallback | undefined;
+    if (jobId && logUnavailable !== undefined) {
+      try {
+        const messages = fetchAnnotations(owner, repo, jobId).filter((m) => m.trim() !== "");
+        if (messages.length > 0) {
+          logTail = messages.join("\n").split("\n").slice(-tailLines).join("\n");
+          logUnavailable = undefined;
+          tailSource = "annotations";
+          annotationFallback = { outcome: "recovered" };
+        } else {
+          annotationFallback = { outcome: "empty" };
         }
+      } catch (err) {
+        let detail = "unknown error";
+        try {
+          const e = err as { code?: unknown; message?: unknown };
+          const code = typeof e?.code === "string" && e.code ? `${e.code}: ` : "";
+          detail = `${code}${typeof e?.message === "string" && e.message ? e.message : String(err)}`.slice(
+            0,
+            MAX_CI_LOG_FAILURE_DETAIL,
+          );
+        } catch {
+          /* keep the placeholder - an outcome is still named, which is the whole point */
+        }
+        annotationFallback = { outcome: "failed", detail };
       }
-      return {
-        name,
-        logTail,
-        ...(logUnavailable === undefined ? {} : { logUnavailable }),
-        ...(tailSource ? { tailSource } : {}),
-        ...(annotationFallback ? { annotationFallback } : {}),
-      };
+    }
+    return {
+      name,
+      logTail,
+      ...(logUnavailable === undefined ? {} : { logUnavailable }),
+      ...(tailSource ? { tailSource } : {}),
+      ...(annotationFallback ? { annotationFallback } : {}),
+    };
   }),
   );
 }
