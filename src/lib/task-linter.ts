@@ -823,8 +823,29 @@ const BRE_WARNING_REMEDY: Readonly<Record<string, string>> = {
 };
 
 /** Characters that become a BRE construct when a backslash precedes them —
- *  grouping and intervals. `\.`-style escapes are NOT here: those are literals. */
-const BRE_CONSTRUCT_AFTER_BACKSLASH: ReadonlyArray<string> = ["(", ")", "{", "}"];
+ *  grouping, intervals, and GNU's optional-quantifier. `\.`-style escapes are NOT
+ *  here: those are literals.
+ *
+ *  MEASURED on GNU grep 3.11 against a file holding `ab` and `a?b`, the same
+ *  discipline {@link SINGLE_LITERAL_CLASS_CHARS} states for its own membership:
+ *  BRE `a\?b` hits BOTH lines (2) — it is a QUANTIFIER, not an escaped literal —
+ *  while BRE `a?b`, BRE `a[?]b` and ERE `a[?]b` each hit one. So the escape an
+ *  author reaches for to make `?` literal is precisely the form that stops being
+ *  literal, and it scored CLEAN here until this entry existed.
+ *
+ *  `?` IS ENGINE-DEPENDENT IN A WAY THE OTHER FOUR ARE NOT, and that is recorded
+ *  rather than smoothed over: `\(`, `\)`, `\{` and `\}` are POSIX BRE constructs
+ *  everywhere, whereas `\?` is a GNU extension. Only GNU grep was available to
+ *  measure from — ugrep and BSD grep are both absent in the container this was
+ *  derived in — so an implementation without the extension would read `\?` as a
+ *  literal `?`. Blocking is still the right call in that case: an author who wants
+ *  a literal `?` has `[?]`, which measured as literal under BOTH engines above, so
+ *  the blocked form is one nobody needs on either.
+ *
+ *  RETROFIT, measured before this became blocking: ZERO `grep:` proofs across the
+ *  whole plan carried `\?`, against a control of seven that carry some other
+ *  backslash — so no existing proof newly fails. This entry is preventive. */
+const BRE_CONSTRUCT_AFTER_BACKSLASH: ReadonlyArray<string> = ["(", ")", "{", "}", "?"];
 
 /**
  * The unescaped BRE metacharacters in `pattern`, split by severity. Walks the
@@ -1117,8 +1138,9 @@ export function proofGrepUnmatchableViolations(task: Task, opts: LintOpts = {}):
 const ERE_ONLY_METACHARS = new Set(["?", "+", "|", "(", ")", "{", "}"]);
 
 /** Characters that OPEN a BRE construct (grouping/interval) when a backslash precedes them —
- *  the same two-character set {@link BRE_CONSTRUCT_AFTER_BACKSLASH} above already walks for
- *  `breMetacharsIn`'s classification. */
+ *  the same {@link BRE_CONSTRUCT_AFTER_BACKSLASH} set above that `breMetacharsIn`'s
+ *  classification already walks. (It read "two-character set" while that set held four;
+ *  naming the set rather than counting it keeps the two from drifting again.) */
 function breEmulatingSource(pattern: string): string {
   let out = "";
   for (let i = 0; i < pattern.length; i++) {
