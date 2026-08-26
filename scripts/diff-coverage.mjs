@@ -22,6 +22,12 @@
 // coverable, and only lines the diff itself added (an already-uncovered pre-existing line is the
 // aggregate ratchet's problem, not a new regression this diff introduced).
 //
+// W1-T2325: a "the diff itself added" line and a PRE-EXISTING line that merely moved during a
+// restructure both show up as a `+`, and only the first of those is actually this diff's problem.
+// computeRelocatedLines (below) recovers the discriminator -- identical text on the diff's own
+// `-` side -- and treats a match as exempt, the same way the process-boundary and type-only
+// carve-outs already are, never a bypass on the genuinely-new case.
+//
 // Usage:
 //   node scripts/diff-coverage.mjs --lcov <path> --diff <path>
 //
