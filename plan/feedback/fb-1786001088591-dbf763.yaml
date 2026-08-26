@@ -28,7 +28,8 @@ raw: "THE CANONICAL CHECKOUT WAS SHALLOW AND NOTHING NOTICED UNTIL #1407 REFUSED
   nothing detected it for that long."
 attachments: []
 origin: cli
-status: new
+status: proposed
 proposal_pr: null
 summary: null
 expansion: null
+answered_by: null
