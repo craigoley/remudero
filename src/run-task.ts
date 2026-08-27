@@ -21776,6 +21776,11 @@ export function readCheckoutDepth(cwd: string): { shallow: boolean; commitCount:
     if (!Number.isFinite(commitCount)) return undefined;
     return { shallow, commitCount };
   } catch {
+    // THE REASON, STATED HERE RATHER THAN ONLY IN THE DOC ABOVE (catch-erasure ratchet, route 4):
+    // both git reads share this ONE try/catch, so a PARTIAL answer — one read succeeding and the
+    // other throwing — is not a usable answer and is treated exactly like a failed read. `undefined`
+    // is "not measured", never a guessed depth, and `judgeCheckoutDepth` refuses on it by name
+    // rather than reporting a horizon nobody observed.
     return undefined;
   }
 }
