@@ -494,6 +494,31 @@ export interface SweepPolicy {
    */
   absentCeilingMinutes: number;
   /**
+   * W1-T2327 — how long a workflow RUN may sit QUEUED (scheduled but never even started)
+   * before {@link stalledRunReason} reports it as stalled rather than merely starting up.
+   * This is the SECOND of that function's two shapes — the first (a job pinned non-terminal
+   * inside a run whose own status is already "completed") needs no threshold at all, because
+   * a completed run will never schedule anything further; this one does, because a run that
+   * was created a second ago and has not yet queued a job is indistinguishable, by state
+   * alone, from one that never will.
+   *
+   * MEASURED (the task's own rationale): run-creation to first-job-start over ten successive
+   * SUCCESSFUL runs on this repo was 2 minimum, 3 median, 9 seconds worst — normal is
+   * SECONDS. The default below (15 minutes) is two orders of magnitude clear of that worst
+   * healthy sample, deliberately: a bound that fires on a healthy run is worse than the
+   * blindness it replaces (the SAME lesson `absentCeilingMinutes`, immediately above, already
+   * paid for — see its own comment at the default). CAVEAT CARRIED FORWARD FROM THE SAMPLE IT
+   * CAME FROM, verbatim: ten runs from one quiet interval fix the ORDER OF MAGNITUDE, not the
+   * number — re-derive over a wider window before retuning this value, and record the sample
+   * it came from beside whatever replaces it.
+   *
+   * NET-NEW, and deliberately NOT sourced from `plan/policy.yaml` — this task's own declared
+   * `files:` is `src/lib/sweep.ts` + one test file only, the same choice
+   * `conceptCoexistenceEnabled`/`mergeConflictAdmissionEnabled` (below) already made: a
+   * hardcoded literal in {@link DEFAULT_SWEEP_POLICY}.
+   */
+  runQueuedCeilingMinutes: number;
+  /**
    * W1-T225 (the 2026-07-21 PRs #477/#484 jam) — the ESCALATION THRESHOLD for the
    * review-orphaned-by-push remedy: once a PR's `priorReviewOrphans` count
    * (prior DISTINCT REVIEWABLE DIFFS — W1-T1018 design (iv); see `priorReviewOrphans`'
@@ -721,6 +746,11 @@ export const DEFAULT_SWEEP_POLICY: SweepPolicy = {
   // 10 minutes: an order of magnitude above the observed push->first-check-registers latency
   // (seconds), and far below the 7h45m #921 sat in its silent loop.
   absentCeilingMinutes: 10,
+  // W1-T2327: 15 minutes — two orders of magnitude above the measured worst healthy
+  // run-creation-to-first-job-start (9s over 10 successful runs), and far below the
+  // tens-of-minutes/hours a genuinely stalled run sits queued. See the field's own doc for
+  // the caveat: ten samples fix the order of magnitude, not this exact number.
+  runQueuedCeilingMinutes: 15,
   reviewOrphanCap: 2,
   // W1-T1018: 2 hours — long enough that a genuine repair (a base fix, a contradiction fix, an
   // operator's own intervention) has real time to land before the lane retries again, short
@@ -1006,6 +1036,22 @@ export interface OpenPrView {
    * own doc.
    */
   cancelledRequiredChecks?: CancelledRequiredCheck[];
+  /**
+   * W1-T2327 — this head's own workflow runs (`actions/runs` filtered by head sha), each
+   * with its jobs' OWN status — the raw input {@link stalledRunReason} reads. `undefined`
+   * when the listing could not be fetched at all (never degrades to `[]`, which would
+   * silently read as "GitHub scheduled nothing" instead of "we could not check") —
+   * {@link stalledRunReason} refuses to report a stall on `undefined`, the same
+   * fail-toward-no-positive-claim direction {@link checksStateFromRollup} takes on an
+   * unreadable required-contexts list.
+   *
+   * NOT YET POPULATED by the real gateway — `run-task.ts`'s `buildOpenPrViews` is outside
+   * this task's declared `files:`, exactly the shape {@link pendingAgeMinutes}'s own doc
+   * describes for `checksPendingSince`: the field and its pure predicate ship now; wiring the
+   * live populate is separate follow-up work, and every existing caller that never sets this
+   * field keeps reading `undefined` and therefore never stalls a head by this row alone.
+   */
+  workflowRuns?: readonly WorkflowRunObservation[];
   /**
    * GitHub's own merge-conflict state, simplified (W1-T106, the #170 DIRTY
    * strand) — see {@link MergeState}'s own doc. `undefined`/`"unknown"` never
@@ -1437,6 +1483,102 @@ export function cancelledRequiredCheckNames(
   return gate
     .filter((c) => (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase() === "CANCELLED")
     .map((c) => c.name ?? c.context ?? "unknown");
+}
+
+/**
+ * W1-T2327 — one workflow run + its jobs' OWN status, structurally — `actions/runs`
+ * filtered by head sha (or `gh run list --json status,conclusion,createdAt,databaseId` plus
+ * each run's own `jobs` listing) reports it. Kept minimal (name ONLY the fields
+ * {@link stalledRunReason} reads), mirroring {@link RollupCheckEntry}'s own contract: this
+ * deterministic core never depends on run-task.ts's richer wiring shape.
+ *
+ * DISTINCT FROM {@link RollupCheckEntry}, DELIBERATELY: the check-runs rollup names WHICH
+ * check ran and how it concluded, but never exposes the RUN's own conclusion — a run whose
+ * conclusion is a startup failure can still leave a job pinned "queued" in the rollup
+ * forever (measured on #2974: four startup-failure runs left six jobs non-terminal between
+ * them), and a reader that consults the rollup alone cannot tell that job's own run has
+ * already finished. This type is the one join that makes that visible — see
+ * {@link stalledRunReason}, its sole consumer.
+ */
+export interface WorkflowRunObservation {
+  /** The run's OWN status — `"queued"` | `"in_progress"` | `"completed"` | ... */
+  status?: string;
+  /** The run's OWN conclusion — populated only once `status` is `"completed"`. */
+  conclusion?: string;
+  /** When this run was created — the clock the queued-past-ceiling shape (below) measures against. */
+  createdAt?: string;
+  /** Each job this run scheduled, with its OWN status — independent of the run's own. */
+  jobs?: ReadonlyArray<{ status?: string }>;
+}
+
+/** Run-level statuses {@link stalledRunReason} treats as the run having concluded — no more
+ *  jobs will ever be scheduled against it, whatever its `conclusion` says. */
+const RUN_TERMINAL_STATUSES = new Set(["completed"]);
+/** Job-level statuses {@link stalledRunReason} treats as that job having reached a final
+ *  state — the Actions API uses the SAME status vocabulary for a run and for its jobs. */
+const JOB_TERMINAL_STATUSES = new Set(["completed"]);
+
+/**
+ * W1-T2327 (AMENDED 2026-08-26 — see the task's own rationale for the full correction)
+ * — names the reason a head's own workflow runs should be read as STALLED rather than
+ * pending, or `undefined` when none of them are. Two shapes, per the corrected discriminator:
+ *
+ *   1. A job whose status is NON-TERMINAL inside a run whose own STATUS is terminal
+ *      (`"completed"`, whatever its CONCLUSION) — THE corrected shape. Not an absence of
+ *      jobs (the ORIGINAL, falsified reading — measured wrong on #2974, which carried
+ *      TWENTY-THREE check-runs from runs that had already concluded): a job PINNED
+ *      non-terminal by a run that has already finished and will never schedule anything
+ *      else. No threshold needed — the run is already done, so there is nothing left to
+ *      time out.
+ *   2. A run still QUEUED (never even started) past {@link SweepPolicy.runQueuedCeilingMinutes}
+ *      — the ORIGINAL threshold shape, corrected only to drop its job-count conjunct (a run
+ *      that has scheduled jobs can still itself be the one sitting queued, and job count was
+ *      never the fact that mattered).
+ *
+ * FAILS TOWARD "NOT STALLED" ON EVERY UNREADABLE INPUT — never invents a stall: `runs`
+ * undefined (the listing could not be fetched at all) returns `undefined` immediately,
+ * before either shape is even considered, and a single run's own missing/unparseable
+ * `status`/`createdAt` falls through to the next run rather than reporting anything for it.
+ * This is the SAME fail-toward-no-positive-claim direction {@link checksStateFromRollup}
+ * takes on an unreadable required-contexts list.
+ *
+ * PURE AND SINGLE-PASS: one loop over `runs`, each job list read once — no fetch, no wait,
+ * no retry, and nothing here schedules a second look. The read this function judges is
+ * whatever the caller already fetched for this sweep pass; a run that only becomes stalled
+ * a minute from now is simply not yet stalled on THIS read, and the next sweep pass (a level
+ * trigger, never a loop of this function's own) judges it fresh.
+ */
+export function stalledRunReason(
+  runs: readonly WorkflowRunObservation[] | undefined,
+  policy: SweepPolicy,
+  now: number,
+): string | undefined {
+  if (runs === undefined) return undefined;
+  for (const run of runs) {
+    const status = (run.status ?? "").toLowerCase();
+    if (RUN_TERMINAL_STATUSES.has(status)) {
+      const stuck = (run.jobs ?? []).find((j) => !JOB_TERMINAL_STATUSES.has((j.status ?? "").toLowerCase()));
+      if (stuck) {
+        return (
+          `a job is still "${stuck.status ?? "unstarted"}" but its own run already concluded ` +
+          `"${run.conclusion ?? "unknown"}" — a completed run schedules nothing further, so that job will never move`
+        );
+      }
+      continue;
+    }
+    if (status === "queued") {
+      const createdAt = run.createdAt === undefined ? Number.NaN : Date.parse(run.createdAt);
+      if (Number.isNaN(createdAt)) continue;
+      const ageMin = (now - createdAt) / 60_000;
+      if (ageMin >= policy.runQueuedCeilingMinutes) {
+        return (
+          `a run has sat queued for ${ageMin.toFixed(1)}m (>= ${policy.runQueuedCeilingMinutes}m ceiling; normal ` +
+          `run-creation-to-first-job-start is seconds) with no job ever scheduled`
+        );
+      }
+    }
+  }
+  return undefined;
 }
 
 /**
@@ -3111,6 +3253,44 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
         `(< ${policy.pendingCeilingMinutes}m ceiling) — a review is already in flight, waiting`
       );
     },
+  },
+  {
+    // W1-T2327 — A HEAD PENDING ONLY BECAUSE A RUN NEVER TRULY STARTED (or one of its jobs
+    // never will again) reads exactly like ordinary in-flight CI to every row above and to
+    // the two datable-pending rows immediately below — `checksState` reads "pending" either
+    // way (a startup failure leaves a PARTIALLY registered rollup, and `checksStateFromRollup`
+    // already reads that as pending, never "none"). Left alone, this head would wait out
+    // `policy.pendingCeilingMinutes` (60m) before the stale-pending row even considered it —
+    // the task's own measured incident is two PRs that sat dead for 2.5+ hours reading
+    // "pending" the entire time. Ordered STRICTLY BEFORE the datable-pending rows so a stalled
+    // head is named on the very pass it becomes detectable, never after waiting out a ceiling
+    // built for ordinary in-flight checks.
+    //
+    // GATED ON `checksState === "pending"` EXPLICITLY, never `"none"`: by construction this row
+    // can therefore never fire on the same input the ABSENT re-push arm requires
+    // (`checksState === "none"`, `absentChecksRepushDecision`'s own first check) — a partially
+    // registered rollup stays pending and that sibling arm, keyed on a different fact, is never
+    // starved of the case it already owns. The same construction keeps this OUT of the
+    // cancelled-check lane: a job that never registered a CANCELLED conclusion carries no
+    // rollup entry {@link cancelledRequiredCheckNames} would ever name, so nothing here can be
+    // misrouted into a re-queue against a job id that was never created.
+    //
+    // TAKES NO ACTION OF ITS OWN (the task's Q2 — re-running a startup failure returns 403
+    // "this workflow run cannot be retried", measured live, and minting a fresh head is a
+    // decision this task explicitly leaves to the operator, never assumed here). Disposition is
+    // the SAME blocked-ambiguous escalate path every other ambiguous block already uses — one
+    // ledger-deduped issue per head (`runSweep`'s own `prior.escalated`, sha-keyed exactly like
+    // every sibling arm), never a second mechanism: the FIRST pass over a stalled head
+    // escalates it, and the disposition/reason this row produces stay IDENTICAL on every later
+    // pass over the SAME unchanged head, which the existing dedup already collapses into
+    // `acted:false` rather than a fresh issue or a retried run. A required check that never
+    // truly ran is still not green, so the mergeable row above can never match it either — the
+    // merge stays blocked exactly as it does today, only the STATED reason changes.
+    disposition: "blocked-ambiguous",
+    when: (pr, policy, _ageDays, now) => pr.checksState === "pending" && stalledRunReason(pr.workflowRuns, policy, now) !== undefined,
+    reason: (pr, policy, _ageDays, now) =>
+      `stalled, not pending — ${stalledRunReason(pr.workflowRuns, policy, now)} — a required check that never ` +
+      `truly ran still blocks the merge; escalating once rather than waiting on something that will not arrive`,
   },
   {
     // WAIT (W1-T114, the 30-issue predicate-storm fix, LIVE INCIDENT
