@@ -1,0 +1,127 @@
+- id: W1-T2387
+  title: "THE TRAILER IS WRITTEN TO THE COMMIT AND READ FROM THE BODY — `appendTaskTrailerToCommit` amends every worker's tip commit automatically while `findMergedByTrailer` searches merged PR BODIES only, so a build whose author never hand-wrote the body line ships uncredited and is re-dispatched until someone notices; 16 merged PRs carry the trailer in the commit and not the body, 9 of them credited nowhere else, and two of those cost ten wasted dispatches in two days"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 25.00
+  files: [src/lib/status.ts, test/trailer-surface-union.test.ts]
+  origin: "operator-brief#trailer-surface-disagreement-2026-08-27"
+  plan_refs: ["W1-T458", "W1-T2370", "W1-T441", "W1-T1012", "W1-T69"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE DEFECT, STATED AS AN ASYMMETRY RATHER THAN AN AUTHORING MISTAKE. Two surfaces can carry a
+    task's `Remudero-Task:` trailer, and they are populated by different agents:
+
+      • THE COMMIT SURFACE IS MACHINE-WRITTEN. `appendTaskTrailerToCommit` (`src/run-task.ts`)
+        amends the worker's own tip commit to add the trailer, idempotently, and is called
+        unconditionally on both PR paths before either can read that tip. No author touches it.
+      • THE BODY SURFACE IS HAND-WRITTEN. Nothing appends it; `renderBody` (plan-pr-emitter.ts)
+        emits it only when a caller passes `taskId`, and an operator brief that says "no trailer"
+        suppresses it.
+
+    AND THE CREDIT READER READS ONLY THE HAND-WRITTEN ONE. `findMergedByTrailer` (`src/lib/status.ts`)
+    is documented in terms — "MEASURED over all 1,172 merged PR BODIES (anchored
+    `^Remudero-Task: <id>$`)" — and `resolveAlreadySatisfied` consults it and nothing else. So the
+    surface the harness fills reliably is invisible to the reader that decides whether a task is
+    done, and the surface a human may forget is authoritative. THAT IS WHY ATTENTIVE AUTHORS STILL
+    LOSE, and why this is not a convention problem: the authors of #2998 and #3000 did not write
+    either trailer — the harness wrote the commit one for them — so there was nothing for them to
+    remember and no signal when the body lacked it.
+
+    MEASURED 2026-08-27 OVER THE WHOLE CORPUS, NOT A SAMPLE. 2,510 closed PRs read over REST, 2,395
+    merged, 2,389 joined to a squash commit on origin/main by its own `(#N)` subject suffix:
+
+      trailer in BOTH surfaces          419
+      trailer in COMMIT ONLY            16     <- this defect
+      trailer in BODY ONLY              423
+      neither                        1,531
+
+    BOTH DIRECTIONS CONTROLLED. The commit-only query finds the two known instances, #2998 and
+    #3000. The body-only query was FIRST CONTROLLED WRONG — #3059 was chosen and reads BOTH, so it
+    proved nothing; re-controlled on #2602, #2526 and #2483, each measured body=1 commit=0.
+
+    THE 16 ARE NOT ALL COSTLY, AND THE HONEST NUMBER IS 9. A commit-only PR costs nothing when some
+    OTHER merged PR body carries the same task's trailer, which is common because the
+    already-satisfied CLOSE path files exactly such a PR. Of the 16, 7 are credited elsewhere
+    (#3025 via #3014, #2877 via #2955, #2707 via #2765, #2527 via #2564, #1527 via #1602, #1278 via
+    #590, #84 via #85) and 9 are credited NOWHERE by body: #3005 (W1-T2326), #3000 and #2998
+    (W1-T2323), #2999 (W1-T2324), #2682 (W1-T2203), #2357 (W1-T1085), #1293 (W1-T314), #468
+    (W1-T199), #292 (W1-T42). Two of those nine already have an in-flight hand repair (#3093 for
+    W1-T2323, #3063 for W1-T2324), leaving SEVEN live today.
+
+    SO THE ANSWER TO "IS IT TWO?" IS NO — IT IS SIXTEEN, NINE COSTLY, AND ACCELERATING. Four of the
+    nine merged on 2026-08-26/27 alone, against five in the preceding six weeks. A gate for two
+    instances is the shape this repo has declined; a defect that produced four instances in two days
+    and ten wasted dispatches (W1-T2318 four before #3059, W1-T2323 six at ~$2 each before #3093) is
+    a different population.
+
+    THE PROPOSAL: TEACH ONE READER A SECOND SURFACE, DO NOT COMPARE THEM. Comparing the surfaces
+    yields a warn that names a discrepancy nobody asked about, on a PR that is otherwise fine, and
+    the discrepancy is not the harm — the missing credit is. Reading both makes the harm impossible.
+    Concretely: `findMergedByTrailer`/`findMergedByTrailerAll` fall back to the merge commit's own
+    trailer when the body carries none. NO NEW FETCH AND NO NEW DATA: the commits are already local,
+    the body index is already read, and `parseTrailerMerges` (`src/lib/autonomy.ts`) already parses
+    exactly this surface with an anchored regex, so the parsing is a lift rather than an invention.
+    It is a UNION, so it can only ever add credit, never withdraw it — the failure mode a comparison
+    would introduce (refusing a merge over bookkeeping) does not exist here.
+
+    WHERE IT LIVES, AND WHERE IT DOES NOT. In the READ path (`src/lib/status.ts`), not the review
+    path and not a merge gate. The review path reads the body and would have to be taught the commit
+    surface anyway; a merge gate would block on bookkeeping. A gate is also the wrong shape for a
+    different reason: the miss is only observable AFTER merge, when a dispatch is spent.
+
+    THE HAZARD THIS MUST NOT WALK INTO, MEASURED. `appendTaskTrailerToCommit` is called at TWO sites
+    and the second passes a RUN ID, not a task id — `appendTaskTrailerToCommit(worktreePath, runId)`
+    (W1-T1012, the Architect path), whose own comment writes `Remudero-Task: <runId>`. A naive union
+    would therefore credit a run id as though it were a task. The fallback must anchor on the task-id
+    grammar and reject anything else, and the test must pin that a run-id-shaped trailer credits
+    nothing.
+
+    WHY THE COMMIT TRAILER EXISTS AT ALL. It is read, just not by the credit path: `parseTrailerMerges`
+    (`src/lib/autonomy.ts`) builds its merge-record corpus from commit bodies, `commitlint` enforces
+    footer FORM on it, and `deriveStatus`'s subject rung reads commit SUBJECTS. So the commit surface
+    has consumers and is not vestigial — it is simply disjoint from the one reader that decides
+    dispatch.
+
+    WHAT IS OWNED ELSEWHERE, AND WHY NEITHER COVERS THIS. W1-T2370 (built, #3083) collapses the
+    unverifiable-vs-refuted distinction and RETRIES a transport failure; every instance here was a
+    CORRECT refusal the gateway answered, which W1-T2370 explicitly does not retry. W1-T458 owns the
+    uncredited-merge advisory, and its `unresolved_task_scope` arm CANNOT FIRE:
+    `ReviewEvidence.openTaskDeclaredFiles` has zero producers under `src/`, so the mechanism is
+    unowned in practice whatever the plan says.
+
+    RISK BAND. `risk: high` is set UP FRONT and is RULE 19'S SPAN, NOT BLAST RADIUS. `lint-plan`
+    reads `files:` as two distinct concerns ("status", "trailer-surface-union") and refuses that at
+    `risk: medium` — measured, not predicted: the first draft of this shard was filed at medium and
+    the gate returned `[sizing] spans 2 distinct subsystems/concerns ... raise to risk:high or
+    decompose`. Decomposing is not available here: the reader and the test that falsifies it are one
+    change, and separating a predicate from its own falsifier is not a real decomposition. The actual
+    blast radius is small and bounded in the other direction — a UNION over an already-read corpus
+    that can only ADD credit, never withdraw it.
+  acceptance:
+    - claim: "a merged PR carrying the trailer only in its commit credits its task"
+      proof: "unit test: test/trailer-surface-union.test.ts"
+    - claim: "a merged PR carrying the trailer only in its body still credits its task, unchanged"
+      proof: "unit test: test/trailer-surface-union.test.ts"
+    - claim: "a run-id-shaped trailer on a commit credits no task"
+      proof: "unit test: test/trailer-surface-union.test.ts"
+    - claim: "the fallback adds no fetch the read path did not already make"
+      proof: "unit test: test/trailer-surface-union.test.ts"
+    - claim: "the body remains the first surface consulted, so today's answers are unchanged where it answers"
+      proof: "unit test: test/trailer-surface-union.test.ts"
+    - claim: "the anchored trailer form is unchanged and still rejects an unanchored line"
+      proof: "grep: Remudero-Task in src/lib/status.ts"
+    - claim: "the merged-row consumers that share the closed index are untouched"
+      proof: "grep: findMergedByTrailer in src/lib/status.ts"
+    - claim: "nothing added paces, throttles or sleeps a call"
+      proof: "unit test: test/trailer-surface-union.test.ts"
+  falsifier: |
+    DELETE the commit-surface fallback and the union test must fail on the commit-only case while
+    the body-only case stays green. If BOTH stay green the test is reading a body it seeded itself
+    and proves nothing. AND the negative arm is load-bearing: seed a commit whose trailer is a RUN
+    id (`Remudero-Task: DAEMON-1787...`) and assert no task is credited — remove the grammar check
+    and that case must go red, or the union has widened credit rather than completed it.
