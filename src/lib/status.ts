@@ -4003,6 +4003,154 @@ export function ghRequiredStatusCheckContexts(owner: string, repo: string, branc
   }
 }
 
+// ── W1-T2387: THE COMMIT-SURFACE FALLBACK ───────────────────────────────────────────────────────
+//
+// THE ASYMMETRY. `appendTaskTrailerToCommit` (run-task.ts) amends a worker's own tip commit with
+// `Remudero-Task: <id>` UNCONDITIONALLY, on both PR paths, before either can read that tip — no
+// author touches it. `renderBody` (plan-pr-emitter.ts) instead only WRITES the trailer into the PR
+// BODY when a caller passes `taskId`, and an operator brief that says "no trailer" suppresses it —
+// hand-written, and skippable. `findMergedByTrailer`/`findMergedByTrailerAll` below read the body
+// ONLY, so a merged PR whose author never hand-wrote the body line ships uncredited and is
+// re-dispatched until someone notices: MEASURED 2026-08-27, 16 merged PRs carry the trailer in the
+// commit and not the body, 9 credited nowhere else, two costing ten wasted dispatches in two days.
+//
+// A UNION, NEVER A COMPARISON. Both implementations below try the body FIRST, unchanged — this is
+// consulted ONLY when the body search genuinely found nothing (not when it failed), so it can only
+// ever ADD a credit the body-only read would have missed, never withdraw or contest one the body
+// already gave. "Today's answers are unchanged where [the body] answers."
+//
+// LOCAL, NOT A FETCH. `git log` reads the ALREADY-CLONED `origin/main` ref off disk — no `gh` call,
+// no REST round-trip, nothing for {@link GhCallPacer} to pace or throttle. Same "local, not a
+// fetch" distinction {@link buildGitLogSupersessionSearch} above already draws, and the SAME
+// record-separated `execFileSync` shape, so this is a lift of established technique, not a new
+// mechanism. Memoized once per lookup instance (below), so N misses in one gateway lifetime cost
+// ONE local `git log`, never N.
+//
+// THE HAZARD THIS MUST NOT WALK INTO. `appendTaskTrailerToCommit`'s SECOND call site (run-task.ts,
+// W1-T1012's Architect path) passes a RUN id, not a task id —
+// `appendTaskTrailerToCommit(worktreePath, runId)`, whose own comment writes
+// `Remudero-Task: <runId>` (shaped `DAEMON-<epochMs>`). A capture-and-trust read (autonomy.ts's own
+// looser `TRAILER_RE`, `(\S+)`) would credit a run id as though it were a task the moment some
+// taskId happened to equal one. {@link TASK_ID_SHAPE_RE} is what actually excludes it — a
+// standalone check on the CAPTURED token, independent of which taskId is being looked up.
+
+/**
+ * Anchored exactly like {@link hasAnchoredTrailer}'s body check (one line, no prefix/suffix noise)
+ * — but CAPTURING the value rather than testing a known one, because this surface must classify an
+ * unknown captured token before it can ever be compared to a specific taskId.
+ */
+const COMMIT_TRAILER_TASK_ID_RE = /^Remudero-Task:\s*(\S+)\s*$/m;
+
+/**
+ * `W<n>-T<n>` or bare `T<n>` — the same task-id vocabulary {@link TASK_ID_RE} (retro.ts) scans free
+ * text for, here anchored to the WHOLE captured token rather than merely containing one. A run id
+ * (`DAEMON-<epochMs>`) has no `-T\d+` suffix and matches neither branch.
+ */
+const TASK_ID_SHAPE_RE = /^(?:[A-Za-z0-9]+-T\d+|T\d+)$/;
+
+/**
+ * The task id a commit's own trailer credits, or `undefined` when the body carries no anchored
+ * trailer OR the captured value is not task-id-shaped (the run-id guard — see this section's own
+ * doc). Falsifier: remove the {@link TASK_ID_SHAPE_RE} check and a `Remudero-Task: DAEMON-<n>`
+ * commit body starts returning `"DAEMON-<n>"` instead of `undefined`.
+ */
+export function commitTrailerTaskId(commitBody: string | undefined | null): string | undefined {
+  const m = COMMIT_TRAILER_TASK_ID_RE.exec(commitBody ?? "");
+  if (!m) return undefined;
+  return TASK_ID_SHAPE_RE.test(m[1]) ? m[1] : undefined;
+}
+
+/** One commit whose own trailer credits a task, joined to the PR it merged via GitHub's own
+ *  `(#N)` squash-subject suffix (MEASURED: 2,389 of 2,395 merged PRs join origin/main this way). */
+export interface CommitTrailerCredit {
+  taskId: string;
+  prNumber: number;
+  sha: string;
+}
+
+/**
+ * Parse a `git log --format="%H%x00%s%x00%b%x1e"`-shaped dump (the SAME record-separated shape
+ * {@link buildGitLogSupersessionSearch} already produces) into every commit that both (a) names
+ * its own merged PR via a trailing `(#N)` subject suffix and (b) carries an anchored,
+ * task-id-shaped `Remudero-Task:` trailer in its body. A commit missing either is silently
+ * excluded — not a malformed record, just not a trailer-bearing squash merge.
+ */
+export function parseCommitTrailerCredits(gitLogDump: string): CommitTrailerCredit[] {
+  const out: CommitTrailerCredit[] = [];
+  for (const record of gitLogDump.split("\x1e")) {
+    const trimmed = record.replace(/^\n+/, "");
+    if (!trimmed.trim()) continue;
+    const [sha, subject, body] = trimmed.split("\x00");
+    if (!sha || subject === undefined) continue;
+    const prNumber = subject.match(/\(#(\d+)\)\s*$/)?.[1];
+    if (!prNumber) continue;
+    const taskId = commitTrailerTaskId(body);
+    if (!taskId) continue;
+    out.push({ taskId, prNumber: Number(prNumber), sha: sha.trim() });
+  }
+  return out;
+}
+
+/** The commit-surface answer for one taskId: the merged PR number origin/main's own commit
+ *  history credits it to, or `undefined` when no such commit exists (never distinguished from a
+ *  failed local read here — a failed `git log` degrades to "the commit surface adds nothing",
+ *  same fail-soft direction {@link hasAnchoredTrailer}'s own absent-body check takes). */
+export interface CommitTrailerLookup {
+  get(taskId: string): number | undefined;
+}
+
+/**
+ * The default for BOTH gateways below when `opts.commitTrailer` is omitted — ABSENT ⇒ SKIP, the
+ * SAME "omitted ⇒ callers behave exactly as before" contract every other optional dependency in
+ * this file already follows (`findMergedByTrailerAll`, `findMergedByHeadBranch`,
+ * `mergedHeadBranches`, …). NOT a real {@link buildCommitTrailerLookup} default, deliberately: a
+ * gateway is scoped to `owner/repo`, but a real local `git log` reads whatever `origin/main`
+ * happens to be in this PROCESS's own working directory — the two agree in production (the daemon
+ * always runs from its own repo checkout) but NEVER agree in a unit fixture built with a
+ * placeholder `owner`/`repo` (every one of ~140 pre-existing fixtures in test/status.test.ts uses
+ * `"o"/"r"`), where a real default would silently start answering from THIS repository's actual
+ * history instead of the fixture's seeded one. Wiring a real {@link buildCommitTrailerLookup} in
+ * is therefore the CALLER's decision (e.g. the production gateway construction site), never this
+ * factory's own default.
+ */
+const NO_COMMIT_TRAILER_LOOKUP: CommitTrailerLookup = { get: () => undefined };
+
+/**
+ * Builds a {@link CommitTrailerLookup} over `git log <ref>`, run and parsed AT MOST ONCE per
+ * instance (memoized on first `get`) — the same one-fetch-amortized-over-N-lookups discipline
+ * {@link buildBatchedGithub}'s own index uses, so this never becomes an O(N) `git log` per task.
+ * `exec` is injectable (mirrors {@link buildGitLogSupersessionSearch}) so this is testable without
+ * a repository; a throwing/omitted `exec` degrades the WHOLE lookup to "nothing found" (every
+ * `get` returns `undefined`) rather than throwing into a caller that never asked for a
+ * commit-surface answer before this task existed.
+ */
+export function buildCommitTrailerLookup(
+  opts: { ref?: string; cwd?: string; exec?: (args: string[]) => string } = {},
+): CommitTrailerLookup {
+  const ref = opts.ref ?? "origin/main";
+  const exec =
+    opts.exec ??
+    ((args: string[]) =>
+      execFileSync("git", args, { encoding: "utf8", cwd: opts.cwd, stdio: ["ignore", "pipe", "pipe"], maxBuffer: 1 << 26 }));
+  let byTaskId: Map<string, number> | undefined;
+  const load = (): Map<string, number> => {
+    if (byTaskId) return byTaskId;
+    byTaskId = new Map();
+    try {
+      const dump = exec(["log", ref, "--format=%H%x00%s%x00%b%x1e"]);
+      // NEWEST FIRST is `git log`'s own order; keep the FIRST credit seen per taskId, mirroring
+      // `findMergedByTrailerAll`'s own "newest first" convention.
+      for (const c of parseCommitTrailerCredits(dump)) {
+        if (!byTaskId.has(c.taskId)) byTaskId.set(c.taskId, c.prNumber);
+      }
+    } catch {
+      // A failed local read degrades to an empty lookup — see this function's own doc.
+    }
+    return byTaskId;
+  };
+  return { get: (taskId) => load().get(taskId) };
+}
+
 // ── Real GitHub gateway (execs `gh`; runs outside the sandbox — TLS only there).
 
 /**
@@ -4017,8 +4165,16 @@ export function ghRequiredStatusCheckContexts(owner: string, repo: string, branc
  * shelling out, so {@link classifyGhFailure} can be exercised deterministically
  * against exactly the exit status + stderr a real failure would carry.
  */
-export function ghGateway(owner: string, repo: string, opts: { exec?: (args: string[]) => string } = {}): GitHub {
+export function ghGateway(
+  owner: string,
+  repo: string,
+  opts: { exec?: (args: string[]) => string; commitTrailer?: CommitTrailerLookup } = {},
+): GitHub {
   const slug = `${owner}/${repo}`;
+  // W1-T2387: the commit-surface fallback (see this file's own section doc above) — OPTIONAL,
+  // ABSENT ⇒ SKIP ({@link NO_COMMIT_TRAILER_LOOKUP}'s own doc). A caller that wants it wires
+  // `opts.commitTrailer: buildCommitTrailerLookup()`.
+  const commitTrailer = opts.commitTrailer ?? NO_COMMIT_TRAILER_LOOKUP;
   // Sticky for this gateway instance's lifetime (W1-T119): once ANY `gh` call fails,
   // every null/[] result derived since is untrustworthy as "absent", not just the one
   // that failed — a single short-lived gateway (created per command invocation) has
@@ -4144,7 +4300,13 @@ export function ghGateway(owner: string, repo: string, opts: { exec?: (args: str
       // Fuzzy (P16 / W1-T69) — callers must re-verify via headRefName + prBody
       // before crediting; this is a first pass, never the authority.
       const list = searchMergedPrs(`"Remudero-Task: ${taskId}" in:body`, 1);
-      return list && list.length > 0 ? list[0] : null;
+      if (list && list.length > 0) return list[0];
+      // W1-T2387: the body search is the FIRST surface consulted, and its answer stands unchanged
+      // whenever it finds something — only a GENUINE miss (list !== null; a failed read stays
+      // null, unchanged) falls through to the commit-surface union below.
+      if (list === null) return null;
+      const prNumber = commitTrailer.get(taskId);
+      return prNumber !== undefined ? { number: prNumber, url: `https://github.com/${slug}/pull/${prNumber}`, state: "MERGED" } : null;
     },
     findMergedByTrailerAll(taskId) {
       // W1-T441: the SAME fuzzy body search, widened past `--limit 1`. Unlike the batched twin
@@ -4152,7 +4314,12 @@ export function ghGateway(owner: string, repo: string, opts: { exec?: (args: str
       // changing what `findMergedByTrailer` returns: existing callers keep the one-hit answer and
       // pay nothing new. TRAILER_ALL_LIMIT bounds it — a task with more than that many merged
       // trailer-bearing PRs has a bigger problem than attribution.
-      return searchMergedPrs(`"Remudero-Task: ${taskId}" in:body`, TRAILER_ALL_LIMIT);
+      const list = searchMergedPrs(`"Remudero-Task: ${taskId}" in:body`, TRAILER_ALL_LIMIT);
+      if (list === null || list.length > 0) return list;
+      // W1-T2387: body search succeeded and found nothing — the commit-surface union (see
+      // `findMergedByTrailer` above for the same guard against masking a failed read).
+      const prNumber = commitTrailer.get(taskId);
+      return prNumber !== undefined ? [{ number: prNumber, url: `https://github.com/${slug}/pull/${prNumber}`, state: "MERGED" }] : [];
     },
     findMergedByHeadBranch(taskId) {
       // Merged PRs whose HEAD BRANCH is `run-<taskId>-*` (W1-T256). `head:` is a
@@ -4440,8 +4607,15 @@ export function buildBatchedGithub(
      * was found to be worth its staleness.
      */
     mergedTtlMs?: number;
+    /**
+     * W1-T2387: the commit-surface fallback (see this file's own section doc above
+     * `ghGateway`) — OPTIONAL, ABSENT ⇒ SKIP ({@link NO_COMMIT_TRAILER_LOOKUP}'s own doc). A
+     * caller that wants it wires `opts.commitTrailer: buildCommitTrailerLookup()`.
+     */
+    commitTrailer?: CommitTrailerLookup;
   } = {},
 ): GitHub {
+  const commitTrailer = opts.commitTrailer ?? NO_COMMIT_TRAILER_LOOKUP;
   const ttlMs = opts.ttlMs ?? 15_000;
   // W1-T2323: A CACHE MUST SERVE FOR AT LEAST AS LONG AS IT COST TO BUILD.
   //
@@ -5038,7 +5212,18 @@ export function buildBatchedGithub(
     findMergedByTrailer(taskId) {
       const anchored = new RegExp(`^Remudero-Task:\\s*${escapeRegExp(taskId)}\\s*$`, "m");
       const hit = index().mergedNewestFirst.find((p) => anchored.test(p.body ?? ""));
-      return hit ? asRef(hit) : null;
+      if (hit) return asRef(hit);
+      // W1-T2387: the body index is the FIRST surface consulted and its answer stands unchanged
+      // whenever it finds something. A failed fetch degrades to `null` exactly as before — never
+      // masked by falling through to the commit-surface union, which would misreport a genuine
+      // outage as a confirmed non-credit.
+      if (lastFetchFailed()) return null;
+      const prNumber = commitTrailer.get(taskId);
+      if (prNumber === undefined) return null;
+      // The credited PR may already be sitting in the SAME batched index (just without an
+      // anchored body match, e.g. a plan-only close PR) — prefer that richer row when present.
+      const known = index().byNum.get(String(prNumber));
+      return known ? asRef(known) : { number: prNumber, url: `https://github.com/${owner}/${repo}/pull/${prNumber}`, state: "MERGED" };
     },
     findMergedByTrailerAll(taskId) {
       // W1-T441: NO ADDITIONAL FETCH. `mergedNewestFirst` already carries every merged PR's body
@@ -5047,7 +5232,13 @@ export function buildBatchedGithub(
       // failure (→ readFailed()/W1-T119), never [] — the failure/absence distinction.
       const anchored = new RegExp(`^Remudero-Task:\\s*${escapeRegExp(taskId)}\\s*$`, "m");
       if (lastFetchFailed()) return null;
-      return index().mergedNewestFirst.filter((p) => anchored.test(p.body ?? "")).map(asRef);
+      const hits = index().mergedNewestFirst.filter((p) => anchored.test(p.body ?? "")).map(asRef);
+      if (hits.length > 0) return hits;
+      // W1-T2387: body index succeeded and found nothing — the commit-surface union.
+      const prNumber = commitTrailer.get(taskId);
+      if (prNumber === undefined) return [];
+      const known = index().byNum.get(String(prNumber));
+      return [known ? asRef(known) : { number: prNumber, url: `https://github.com/${owner}/${repo}/pull/${prNumber}`, state: "MERGED" }];
     },
     findMergedByHeadBranch(taskId) {
       // W1-T257: client-side head-ref match from the SAME single fetch — zero extra `gh` calls,
