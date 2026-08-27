@@ -1,0 +1,168 @@
+- id: W1-T2382
+  title: "THE DISPOSITION COUNTER PROMISES ONCE PER HEAD AND FIRES ONCE PER ROTATION — rotateLedger's PASS 3 collapses every sweep.disposed row for one pr@head to a single line and PREFERS an acted:true row, while the repeat trip's own flag rides on an acted:false one, so both the streak and the escalated marker are destroyed by construction at every rotation"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 25.00
+  files: [src/lib/sweep.ts, test/sweep.test.ts]
+  origin: "operator-brief#once-per-head-fires-twice-2026-08-27"
+  plan_refs: ["W1-T2345", "W1-T2381", "W1-T1262", "W1-T244", "W1-T209", "W1-T2304", "W1-T2379", "W1-T1066"]
+  status: blocked
+  attempts: 0
+  rationale: |
+    THE ID. Eight surfaces swept, each against a control firing on ITS OWN surface, before a byte of
+    this file was written. SURFACE 1 READS 1: `refs/rmd-id/W1-T2382` resolves on origin against a
+    namespace of 495 refs — the check that caught a transposed id this morning, when W1-T3281 read 0
+    there. Shard filenames 0 of 648; declared ids 0 of 903; open-PR titles 0 of 7 read
+    case-sensitively; bodies 0; head refs 0; merged trailers 0 of 738 trailer lines; merged subjects
+    0 of 2,423. Controls: W1-T2381 fires 1 on the ref namespace, W1-T2345 fires 1 on filenames, ids,
+    trailers and titles and 2 on subjects and bodies, the lowercase form of that same id fires 0 on
+    titles, and W1-T2324 fires 1 on head refs from the LIVE `run-W1-T2324-1787823430981` head of
+    open PR #3063. Anchor leak probes printed beside every count and disagree in the right direction
+    on every populated surface: W1-T238 anchored 0 against unanchored 3 on the refs, W1-T234
+    anchored 1 against 7 on filenames, 1 against 7 on declared ids, 1 against 9 on trailers and 2
+    against 9 on subjects, W1-T232 anchored 0 against 1 on head refs.
+
+    (Q1) WHERE THE STREAK RESTARTS, BY SYMBOL. `rotateLedger`'s PASS 3 (`src/lib/ledger.ts`).
+    `repeatDispositionStreaksFromLedger` counts CONSECUTIVE `sweep.disposed` rows sharing a
+    `(disposition, head_sha)` pair, over lines obtained at `runSweep`'s `readLedger(deps.ledgerPath)`
+    — bound one line earlier as `deps.readLedger ?? readLedgerLines`, and `readLedgerLines`'s own doc
+    states it "never resolves rotations and never assembles the archive union". So the fold sees the
+    LIVE FILE ONLY. PASS 3 then groups every `sweep.disposed` line by `pr_number@head_sha` and keeps
+    exactly ONE — "the single ACTED:TRUE line per pr@head ... else the single most recent line for
+    that key" — archiving all the rest. The moment rotation runs, a run of N becomes a run of 1.
+
+    AND THE MARKER IS DESTROYED BY THE SAME PASS, IN A DIRECTED WAY THAT IS WORSE THAN SHEDDING.
+    `escalated` is carried on the `sweep.disposed` row's own `repeat_escalated: true` field, written
+    only on the pass that trips the bound. THAT ROW IS `acted: false` — the trip fires before, and
+    independently of, whatever action the disposition itself takes — while PASS 3 PREFERS the last
+    `acted: true` row for the key. So whenever any acted row exists for that head, the flagged row is
+    the one thrown away. This is not probabilistic shedding; it is a preference that selects against
+    exactly the evidence the guarantee depends on.
+
+    MEASURED ON THE TWO OBSERVED DOUBLE-FIRES, 2026-08-27. Rotation ran at 06:48:35Z, between the
+    first fire (05:50) and the second (08:53). For PR #3025 at head 16c4060db4f2620095595192160f0b70dc783a0a
+    the 06:48 archive holds 233 `sweep.disposed` rows for that one key; the live file now holds ONE.
+    Of the 233, exactly one carries `repeat_escalated: true` — the 05:50:38.027Z trip — and it is
+    `acted: false`, while the same key had 2 `acted: true` rows for PASS 3 to prefer instead. The
+    surviving live row is a later `post-review` line at 10:31:31.718Z carrying no flag at all.
+
+    THE ARITHMETIC MATCHES THE DIAGNOSTIC SHAPE THE BRIEF NAMED. From the 06:48:35Z rotation to the
+    second fire at 08:53:16Z is 124.7 minutes, and the observed derivation cadence for a live key is
+    2.5 to 2.65 minutes per row (44 rows for PR #3039 in the 116.8 minutes since the 11:32 rotation;
+    the 50-row climb itself averages 2.49). Fifty rows at that cadence is 125 minutes. The streak
+    restarted at 1 and took exactly the bound to return, which is why BOTH second fires read exactly
+    50 while the firsts read 188 and 106, and why both landed in the SAME sweep pass at 08:53:16Z.
+
+    THE DAEMON CANDIDATE IS FALSIFIED, NOT MERELY UNCHOSEN. The fold reads a file, so a restart
+    cannot reset it, and the data says so directly: the unbroken run that reached 188 spans
+    2026-08-27T00:43:48Z to 05:50:38Z and contains FOUR `daemon.boot` rows — 01:25:06, 03:15:33,
+    04:22:23 and 05:49:52, the last 46 seconds before the fire — with no reset. A boot did occur at
+    06:45:51, three minutes before the rotation, which is why the candidate is worth naming rather
+    than dismissing; the 4-boot run is what discriminates between the two.
+
+    `sweep.repeat_escalated` IS NOT IN `DECISION_RELEVANT_LEDGER_STEPS`, AND THAT IS A SECOND,
+    SEPARATE CONSEQUENCE — NOT THE CAUSE. The set has 55 members; `sweep.disposed` IS one,
+    `sweep.repeat_escalated` is not. The fold never reads that step, so its absence does not produce
+    the double-fire. What it DOES produce: PASS 1 classifies the trip row as pure noise and archives
+    it at the first rotation, and `buildDigest` reads via `readLedgerLines` — live only — so the
+    digest surface #3085 adds can see a trip for ONE ROTATION INTERVAL and no longer. Median
+    interval over the last eleven rotations is about 4.5 hours (range 3.03 to 5.84, plus one 13-hour
+    outlier). A trip that fires shortly before a rotation is renderable for minutes.
+
+    AND THE CHOICE WAS MADE INVISIBLY, BY THE MECHANISM BUILT TO PREVENT INVISIBLE CHOICES. W1-T1262
+    requires every `readLedgerLines` call site to carry a `ledger-read-intent: live` or
+    `ledger-read-intent: union` comment. Its checker is anchored on
+    `LEDGER_READ_INTENT_CALL_RE = /\breadLedgerLines\s*\(/`, which needs an open paren; `runSweep`
+    passes the function as a VALUE (`deps.readLedger ?? readLedgerLines;`) and then calls it through
+    the alias `readLedger(deps.ledgerPath)`. Neither line matches, `src/lib/sweep.ts` carries zero
+    `ledger-read-intent` markers, and the live-versus-union decision on the sweep's hottest ledger
+    read is therefore undeclared and ungreppable. RECORDED, NOT OWNED — widening that regex is
+    W1-T1262's surface, not this task's.
+
+    (Q2) WHAT IT COSTS, MEASURED BEFORE ANY REMEDY IS PROPOSED. TWO OF EIGHT TRIPS ARE SECOND FIRES,
+    WHICH IS 25 PERCENT AND ALSO n=8; the rate is an observation, not an estimate, and nothing here
+    should be sized off it. The marginal effect of an extra fire is measured directly: the
+    08:53:16Z pass fired three trips and produced THREE `escalation.deduped` rows and ZERO new
+    issues. So one extra fire costs one ledger row plus one comment appended to an already-open
+    issue — and #3087 measured that seven of eight trips reach a dedup comment on an issue titled
+    for an unrelated cause, so the extra fire adds nothing the first fire had not already added.
+    On the digest side the extra fire costs NOTHING: #3085's reader deduplicates on PR number, so a
+    second trip for the same PR renders no second line.
+
+    THE HONEST FRAME IS A RATE, NOT A ONCE, AND THE RATE IS SMALL. Fifty derivations take about 2.1
+    hours and rotation runs about every 4.5, so a head that stays put re-fires roughly once per
+    rotation — call it 5 to 6 times a day. Without the counter at all the same head produced a
+    full-weight derivation every 2.5 minutes, about 543 a day. The guarantee has degraded from
+    "once" to "once per rotation", and that still delivers about 99 percent of the reduction
+    W1-T2345 was built for. THE DEFECT IS REAL AND THE DAMAGE IS ONE REDUNDANT ROW PER ROTATION.
+
+    SO THIS TASK PROPOSES RECORDING, NOT FIXING, AND IS FILED `blocked` FOR THE OPERATOR TO RULE.
+    Every candidate remedy costs more than the defect:
+
+      (A) TEACH PASS 3 TO PREFER A `repeat_escalated: true` ROW. Correct and narrow in behaviour, but
+          it edits `src/lib/ledger.ts`, whose retention doctrine `test/ledger-rotation.test.ts`
+          re-derives from every consumer's source; a rotation change is the highest-blast-radius
+          edit available for a one-row-per-four-hours defect.
+      (B) READ THE UNION IN THE FOLD. `readLedgerUnionBounded` exists, and it is CONTRAINDICATED BY
+          ITS OWN DOC: "Every rung this serves reads the NEWEST row of a step, never a count, so
+          stopping early cannot under-count anything." This fold reads a COUNT — a consecutive run —
+          which is precisely the shape that early exit is documented as not serving. Using it here
+          would under-count silently, and using an unbounded union instead puts an archive walk on
+          the path every open PR takes every tick.
+      (C) CORRECT THE PROMISE. `SweepPolicy.repeatDispositionBound`'s doc and W1-T2345's acceptance
+          both say "exactly once (never again until the head moves)". The cheapest true change is to
+          say once per rotation, name the mechanism, and stop claiming a guarantee the storage layer
+          does not provide. A doc that describes a mechanism with no gate is what rule 13 refuses,
+          so this is a record, NOT a substitute for (A) if the operator rules the guarantee matters.
+
+    NO REMEDY SURFACE IS PRESUMED BY `files:`. `src/lib/ledger.ts` is option (A)'s only surface and
+    is EXCLUDED, because declaring it would presume the remedy before the operator has ruled — the
+    shape W1-T466 already used for exactly this reason. `src/lib/sweep.ts` plus this task's own test
+    stem covers (B) and (C) and nothing else; if (A) is chosen it is a separate filing.
+
+    (Q3) WHAT MUST NOT MOVE. THE BOUND STAYS AT 50 — derived against an 8.2 percent trip rate and
+    independently corroborated by the merge-time distribution's 8 percent slow tail, and nothing
+    measured here touches either figure. THE KEY STAYS `(disposition, head_sha)` AND MUST NOT GAIN
+    THE RENDERED REASON: with the reason text included one run collapses from 191 to 11, because
+    that prose carries a live minute counter that changes every tick while the verdict does not.
+    THE SWEEP KEEPS RE-DERIVING — the counter counts derivations and never replaces one. NOTHING
+    PACES, THROTTLES OR SLEEPS (W1-T1066). And the 60-minute pending ceiling is untouched.
+
+    ALREADY OWNED ELSEWHERE, RECORDED SO THIS DOES NOT RE-FILE IT: the trip's ROUTING — whether it
+    reaches an escalation issue or only the digest — is W1-T2381 (#3087); the digest reader is
+    #3085; the counter's existence, its key and its bound are W1-T2345; the light-sweep tick
+    variance is W1-T2379; PR-age watching is W1-T2304's rung. THIS SHARD OWNS ONLY THE ONCE-PER-HEAD
+    GUARANTEE.
+
+    RISK BAND. `risk: high` is set UP FRONT because the sizing check reads `files:` as spanning two
+    concerns — the `sweep` stem and this task's own test stem — and refuses that at `risk: medium`.
+    Rule 19's SPAN, not blast radius.
+  acceptance:
+    - claim: "a rotation between two passes does not reset the repeat streak for an unchanged head"
+      proof: "unit test: test/sweep.test.ts"
+    - claim: "the once per head marker survives a rotation that keeps an acted true row over the flagged one"
+      proof: "unit test: test/sweep.test.ts"
+    - claim: "a head that genuinely moves still resets the streak and re arms the trip"
+      proof: "unit test: test/sweep.test.ts"
+    - claim: "the bound stays at fifty and the key stays the disposition and the head sha"
+      proof: "unit test: test/sweep.test.ts"
+    - claim: "the rendered reason text is still excluded from the key"
+      proof: "unit test: test/sweep.test.ts"
+    - claim: "the sweep still re derives every pass and nothing added paces or sleeps"
+      proof: "unit test: test/sweep.test.ts"
+  falsifier: |
+    If a fresh window shows no PR escalating twice on one unchanged head — in particular if
+    `sweep.repeat_escalated` rows sharing a `pr_number` and a `head_sha` never appear on both sides
+    of a rotation timestamp — then the reset this task describes is not occurring at the measured
+    rate and the task must be closed rather than implemented. The measurement to re-run is the same
+    one: read every `sweep.repeat_escalated` row over the three-form ledger union with a per-form
+    coverage control, group by PR and head, and compare each pair's timestamps against the mtimes of
+    the dated rotation archives.
+
+    SEPARATELY DECISIVE: if `rotateLedger`'s PASS 3 no longer collapses `sweep.disposed` to one line
+    per `pr@head`, or no longer prefers an `acted: true` row, the mechanism named here is gone and
+    the finding must be re-derived rather than trusted.
