@@ -155,6 +155,33 @@ test("buildDigest with archives that ALL fall before the window still matches th
   }
 });
 
+// ── correctness guard: rotations are CUMULATIVE snapshots (ledger-grep.ts's own doc) — a
+// decision-relevant line survives live across many rotations, so the IDENTICAL raw line can
+// legitimately appear in an archive AND the live file at once. A union that does not dedupe by
+// exact line text double-counts it — this is the failure mode resolveLedgerUnion's own dedup
+// exists to prevent, and collectDigestLedgerLines must inherit that discipline. ─────────────────
+
+test("collectDigestLedgerLines does not double-count a retained verdict line duplicated across an archive and the live file", () => {
+  const dir = tmpStateDir("rmd-digest-rotation-dedup-");
+  try {
+    const mergedLine = { ts: "2026-08-20T01:00:00.000Z", step: "verdict", task_id: "W1-T1", verdict: "merged", cost_usd: 1.5 };
+    // The EXACT same raw line, byte for byte, in an in-window archive AND the live file — this
+    // is what a real rotateLedger snapshot looks like for a still-retained decision-relevant row.
+    writeGzArchive(dir, "2026-08-20T01:30:00.000Z", [mergedLine]);
+    const ledgerPath = writeLive(dir, [mergedLine]);
+    const sinceIso = "2026-08-20T00:00:00.000Z";
+
+    const { lines } = collectDigestLedgerLines(ledgerPath, sinceIso);
+    assert.equal(lines.length, 1, "the duplicated raw line must be counted once, not once per source it appears in");
+
+    const text = buildDigest(ledgerPath, sinceIso);
+    assert.match(text, /merged: W1-T1$/m, "exactly one W1-T1, never W1-T1, W1-T1");
+    assert.match(text, /notional cost: \$1\.50/, "cost_usd must be summed once, not once per duplicate");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ── claim: "an incomplete read is rendered as incomplete and never as a quiet board" ───────────
 
 test("buildDigest names an unreadable in-window archive rather than silently dropping its rows", () => {

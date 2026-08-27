@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { gunzipSync } from "node:zlib";
-import { readLedgerLines, type LedgerFsDeps } from "./status.js";
+import type { LedgerFsDeps } from "./status.js";
 import { ledgerRotationEntries, rotationStampIso } from "./ledger-grep.js";
 import { notify, type NotifyChannel, type NotifyDeps } from "./notify.js";
 import { renderAlertsSummary, type AlertsPollSummary } from "./ops.js";
@@ -33,7 +33,7 @@ import {
  * #1066 shipped a consumer with no producer).
  */
 
-/** One ledger line, loosely typed like {@link readLedgerLines}'s return. */
+/** One ledger line, loosely typed like `readLedgerLines`'s return (status.ts). */
 export type LedgerLine = Record<string, unknown>;
 
 /** Ledger lines with `ts >= sinceIso`, in original (chronological) order. */
@@ -739,11 +739,11 @@ function relevantRotations(names: string[], stateDir: string, sinceIso: string) 
   });
 }
 
-/** The minimal fs surface {@link collectDigestLedgerLines} needs for the archive half of the
- *  union — deliberately injectable (mirrors {@link "./status.js".LedgerTailFsDeps} and
- *  ledger-grep.ts's own `LedgerGrepFsDeps`) so a test can drive "archive present/relevant/
- *  unreadable" without touching this host's real state dir. `ledgerFs`, separately, controls
- *  the LIVE half via {@link readLedgerLines}'s own existing seam. */
+/** The minimal fs surface {@link collectDigestLedgerLines} needs — deliberately injectable
+ *  (mirrors {@link "./status.js".LedgerFsDeps} and ledger-grep.ts's own `LedgerGrepFsDeps`) so a
+ *  test can drive "archive present/relevant/unreadable" without touching this host's real state
+ *  dir. `ledgerFs` reads the live half with the SAME two-method shape `readLedgerLines` (status.ts)
+ *  itself takes, so an existing caller's injected fake keeps working unchanged. */
 export interface DigestLedgerReadDeps {
   readdirSync?: (dir: string) => string[];
   readFileBuffer?: (path: string) => Buffer;
@@ -753,7 +753,8 @@ export interface DigestLedgerReadDeps {
 
 /** What {@link collectDigestLedgerLines} read. */
 export interface DigestLedgerRead {
-  /** Archive rows (chronological, oldest first) followed by every live-file row. */
+  /** Archive rows (chronological, oldest first) followed by every live-file row, deduplicated —
+   *  see this function's own doc for why a duplicate is expected, not a bug to leave in. */
   lines: LedgerLine[];
   /**
    * Every archive whose rotation stamp fell inside `[sinceIso, now]` but could not be opened — a
@@ -769,8 +770,23 @@ export interface DigestLedgerRead {
 /**
  * The digest's OWN bounded rotation union: the live ledger file plus every archive that CAN
  * hold a row at/after `sinceIso` (see {@link relevantRotations}) — never the full corpus, and
- * never the live file alone. Archives are read oldest-first so `lines` preserves the ledger's
- * original chronological order end to end (archives, then the live file's own newer tail).
+ * never the live file alone.
+ *
+ * DEDUPLICATED BY EXACT LINE TEXT, ARCHIVES FIRST THEN LIVE — and this is load-bearing, not
+ * cosmetic. `rotateLedger` (ledger.ts) re-snapshots the CURRENT live file into a fresh archive on
+ * every rotation, and a decision-relevant line (`verdict`, `escalation.issue_opened`, `run.start`
+ * — this module's own three RETAINED steps) survives live across many rotations before it is
+ * ever capped or shed. The IDENTICAL raw line therefore lands in every archive taken while it was
+ * still live, AND in the live file itself right now — exactly the "rotations are cumulative
+ * snapshots" shape ledger-grep.ts's own `resolveLedgerUnion` documents and dedupes for the same
+ * reason. Without this, a union read would double- or triple-count a `verdict: merged` row for
+ * every rotation it survived, inflating `merged`/`blocked`/`escalations`/notional cost — an
+ * over-count in the exact fields an operator trusts most. Dedup is on the RAW TEXT of each line,
+ * never a re-serialized parsed object: `resolveLedgerUnion` made that choice for the same
+ * reason a round-trip through `JSON.stringify(JSON.parse(x))` is not provably byte-identical to
+ * `x`, and this function inherits that same discipline rather than risking a subtler version of
+ * it. Archives are folded in oldest-first so the surviving (first-seen) copy of any duplicate
+ * keeps its true chronological position in `lines`.
  *
  * A read-failure at any layer degrades to LESS coverage, reported via `unreadArchives`, never to
  * a throw: an unreadable state dir behaves exactly like "no rotations exist" (today's answer),
@@ -795,8 +811,15 @@ export function collectDigestLedgerLines(
 
   const readBuf = deps.readFileBuffer ?? ((p: string) => readFileSync(p));
   const gunzip = deps.gunzipSync ?? gunzipSync;
+  const ledgerExists = deps.ledgerFs?.existsSync ?? existsSync;
+  const ledgerRead = deps.ledgerFs?.readFileSync ?? ((p: string, enc: "utf8") => readFileSync(p, enc));
+
+  // Shared across BOTH halves of the union (archives, then live) — see this function's own doc
+  // for why the identical raw line can legitimately appear in more than one of these sources.
+  const seen = new Set<string>();
   const lines: LedgerLine[] = [];
   const unreadArchives: string[] = [];
+
   for (const entry of rotations) {
     let text: string;
     try {
@@ -808,19 +831,36 @@ export function collectDigestLedgerLines(
     }
     for (const raw of text.split("\n")) {
       const l = raw.trim();
-      if (!l) continue;
+      if (!l || seen.has(l)) continue;
+      seen.add(l);
       try {
         lines.push(JSON.parse(l) as LedgerLine);
       } catch {
-        // A torn line costs its own row, never the read — mirrors readLedgerLines' own
-        // per-line discipline (status.ts), just without a second console.error stream: the
-        // live half already logs torn lines, and duplicating that per archive would drown it.
+        // A torn line costs its own row, never the read — mirrors readLedgerUnionBounded's own
+        // archive-half discipline (status.ts): silent, no console.error per rotation, unlike the
+        // live file's own readLedgerLines-style logging just below.
       }
     }
   }
-  // ledger-read-intent: live — the newest half of the union, read last so `lines` keeps
-  // chronological order (archives oldest-first above, the live file's own newer tail last).
-  lines.push(...readLedgerLines(ledgerPath, deps.ledgerFs));
+
+  // ledger-read-intent: live — the newest half of the union, read last so a line already seen in
+  // an archive above is skipped here rather than double-counted (see this function's own doc).
+  if (ledgerExists(ledgerPath)) {
+    for (const raw of ledgerRead(ledgerPath, "utf8").split("\n")) {
+      const l = raw.trim();
+      if (!l || seen.has(l)) continue;
+      seen.add(l);
+      try {
+        lines.push(JSON.parse(l) as LedgerLine);
+      } catch {
+        // Mirrors readLedgerLines' own per-line discipline (status.ts) exactly, including the
+        // operator-visible log — a caller with zero relevant rotations must see IDENTICAL
+        // behaviour to a plain readLedgerLines call, torn-line logging included.
+        console.error(`ledger: dropping unparseable line in ${ledgerPath}: ${l}`);
+      }
+    }
+  }
+
   return { lines, unreadArchives };
 }
 
