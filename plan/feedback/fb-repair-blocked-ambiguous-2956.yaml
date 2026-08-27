@@ -29,9 +29,10 @@ raw: >-
   coverage-ratchet failed on 3283dcd — escalating
 attachments: []
 origin: repair#blocked-ambiguous
-status: new
+status: rejected
 reply_to: null
 proposal_pr: null
 summary: null
 expansion: null
 submission_key: null
+answered_by: null
