@@ -9,6 +9,18 @@
   risk: high
   origin: oper#startup-failure-reads-as-pending-2026-08-26
   files: [src/lib/sweep.ts, test/startup-failure-is-not-pending.test.ts]
+  # RETIRED 2026-08-27 (operator ruling, W1-T1287 / #3037 — recorded in the FIELD, not prose alone,
+  # and never by deleting the shard: deletion would stop this id resolving and promote its trailer to
+  # a body claim). Subject carried by W1-T2340, filed as this task's Rule 21 follow-up by #3010 when
+  # that PR corrected acceptance criterion 1 here — the criterion asserted the false premise that a
+  # head whose runs include one that scheduled no job is stalled. Nothing retired this task at the
+  # time, so BOTH stayed dispatchable and the fleet built both independently (#3039 here, #3043 on
+  # W1-T2340), each touching src/lib/sweep.ts for the same defect and differing only in test
+  # filename. `status: blocked` is what makes the retirement RENDER: deriveRetiredBlockers
+  # (src/lib/status-board.ts) requires `status === "blocked"` AND a `retirement` value, which is why
+  # W1-T2275 was field-retired and stayed invisible at `queued`.
+  status: blocked
+  retirement: retired
   rationale: |
     **THE WHOLE BOARD IS DERIVED FROM CHECK-RUNS, AND A RUN THAT NEVER STARTS PRODUCES NONE.**
     Every row of `DISPOSITION_RULES` reasons over `checksState`, and `checksStateFromRollup` derives
@@ -120,6 +132,14 @@
     empty job list is wrong, and a queued job inside a TERMINAL run needs no threshold at all,
     because a terminal run will never schedule anything again.
   note: |
+    RETIRED — DO NOT BUILD. Its subject is carried by W1-T2340, filed as this task's Rule 21
+    follow-up in #3010, which corrected acceptance criterion 1 below after measuring that the
+    premise was false. Nothing retired this task then, so the plan offered the same defect twice
+    and the fleet built it twice (#3039 against this id, #3043 against W1-T2340). Which of those
+    two pull requests survives is a separate operator decision and is NOT settled here; this
+    amendment only stops the plan handing the work out again. The criteria below are left exactly
+    as merged — Rule 21 guards them, and the corrected criterion lives on W1-T2340.
+
     RULE 19 BAND. `files:` spans the module that owns the disposition vocabulary and a test; the
     sizing check reads a source file and a differently-named test as a span, so `risk: high` is set
     for that SPAN and carries no claim about blast radius, which is one predicate and one row.

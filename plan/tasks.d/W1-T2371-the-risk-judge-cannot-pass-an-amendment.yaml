@@ -1,0 +1,124 @@
+- id: W1-T2371
+  title: "THE RISK JUDGE CANNOT PASS A PLAN-ONLY AMENDMENT, BY CONSTRUCTION — it compares a shard's declared files against the actual diff, and every amendment PR diffs one YAML while the shard it amends declares source, so the mismatch it reports is real and the inference it draws from it is wrong for this whole class"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 45.00
+  files: [src/lib/risk-judge.ts, src/run-task.ts, test/risk-judge-plan-only-amendment.test.ts]
+  origin: oper#judge-cannot-pass-an-amendment-2026-08-27
+  plan_refs: ["W1-T458", "W1-T1268", "W1-T2318", "W1-T2345"]
+  status: queued
+  attempts: 0
+  rationale: |
+    RE-DERIVED IN A SCRATCH WORKTREE PROVEN EQUAL TO origin/main at 25c5cd28. NO LEDGER CLAIM
+    APPEARS HERE: the union is unreadable from this container, so the fifty consecutive
+    dispositions reported on the founding instance are carried as the OPERATOR'S measurement and
+    are not restated as re-derived. Everything below is from source or the GitHub API.
+
+    (1) THE OBSERVATION IS ACCURATE. On the founding PR the judge held auto-merge at high risk,
+    confidence 0.75, and said in its own words that it read the change's description and files
+    alone with no diff. Its reason: the shard names three source paths while the diff is one YAML,
+    which it read as incomplete work or misdeclared scope. Both halves of that reading are true.
+    W1-T2318's shard declares src/run-task.ts, src/lib/status.ts and a test path; the PR changed
+    exactly one file under plan/.
+
+    (2) THE INFERENCE IS WRONG STRUCTURALLY, NOT ON THIS PR. An amendment PR edits the SHARD; it
+    does not do the work the shard declares. So the declared-versus-actual comparison must always
+    mismatch for the entire class. MEASURED over the full merged history: of 776 merged pull
+    requests, 335 carry a chore(plan) subject and 22 are titled as amendments. Of the 21 whose
+    amended task id resolves to a shard on main, ALL 21 have a plan-only diff AND amend a shard
+    declaring source paths -- 21 of 21 match the blocking predicate exactly. The class is not
+    edge-case; it is total.
+
+    (3) AND THE JUDGE READS DESCRIPTION AND FILES ALONE FOR A STATED REASON, WHICH IS WHY THE
+    OBVIOUS FIX IS THE WRONG ONE. Three facts from src/lib/risk-judge.ts, by symbol: the tool
+    allowlist RISK_JUDGE_TOOLS is EMPTY BY CONSTRUCTION, with the comment that everything it needs
+    is baked into the prompt so it has no need and no ability to explore the worktree;
+    resolveRiskJudgeMount picks the CHEAPEST configured tier, which the module's own doc puts at a
+    40,000-token floor; and RISK_JUDGE_CHANGE_VIEW_FILE_CAP bounds the change view to 60 files of
+    one line each so the section stays a small fraction of that floor. The no-diff design is a
+    COST AND CONTEXT BOUND, deliberately chosen. Handing the judge a diff would require granting
+    tools it is designed not to have and a budget the cheapest tier does not carry.
+
+    (4) THE COST IS VISIBLE BUT IS OWNED ELSEWHERE. While the hold stood, the sweep re-dispositioned
+    the same head as mergeable and armable many times over. That unbounded-disposition shape is
+    W1-T2345 and is NOT re-filed here; this shard owns only why the hold was placed.
+  note: |
+    ── Q1. THE DISCRIMINATOR, DERIVED ─────────────────────────────────────────────────────────
+
+    (i) NOT THE SUBJECT PREFIX ALONE. A chore(plan) subject is a string any author can type, and a
+    rule keyed on it would be an EXEMPTION rather than a discriminator -- exactly what must not be
+    built, because it would let a mistyped or careless subject buy a pass on a real scope mismatch.
+
+    (ii) THE SIGNAL IS A CONJUNCTION, AND THE SECOND HALF IS ALREADY IN THE PROMPT. The judge
+    already receives the changed-file list as one bounded line per path. So it can decide, from
+    data it holds today and with no diff, no tools and no extra budget, whether EVERY changed path
+    lies under plan/. The discriminator is: a plan-declaring subject AND a changed-file list that
+    is entirely plan-only. An author can type the subject; an author cannot make a source file
+    appear as a plan path in the file list the judge is handed. That is what makes the pair a
+    discriminator rather than an exemption, and it costs nothing at the cheapest tier.
+
+    (iii) WHAT IT MISSES, STATED PLAINLY. It cannot tell a CORRECT amendment from a WRONG one --
+    an amendment that should never have been written is plan-only too, and this rule would stop
+    flagging it. It does nothing for an amendment filed under a different subject. And it says
+    nothing about whether the amendment's CONTENT is honest, which is Standing rule 21's concern
+    and not the judge's. The claim is narrow: a plan-only diff under a plan-declaring subject is
+    not EVIDENCE OF MISDECLARED SCOPE. It is not evidence the change is good.
+
+    ── Q2. THE RETROFIT, AND WHY IT ARGUES FOR RECORDING ───────────────────────────────────────
+
+    (iv) WOULD HAVE BLOCKED: 21 of 21. ACTUALLY BLOCKED: ONE. The escalation corpus was enumerated
+    to exhaustion -- 3,066 issue-endpoint items, 575 non-PR issues, 37 risk-judge escalations, 37
+    distinct task ids. The intersection of those 37 with the 20 amended task ids is exactly ONE:
+    the founding instance. A first pass over three pages saw only 8 escalations and would have
+    undercounted by more than four times; the count above is the exhaustive one.
+
+    (v) AND THE GAP HAS A MECHANISM, WHICH IS THE PART THAT DECIDES THE VERDICT. Of the 21
+    amendment PRs, exactly ONE was opened on a run-*-<digits> head; the other 20 were hand-filed on
+    plan/ or docs/ branches, which never reach the dispatch path the judge runs on. So the judge's
+    rate on the population it has actually SEEN is one of one. The low absolute count measures
+    EXPOSURE, not accuracy: the fleet has filed exactly one amendment, and the judge blocked it.
+
+    (vi) SO: RECORD, DO NOT BUILD -- FOR NOW, AND THE TRIGGER IS NAMED. One observed block does not
+    justify changing a gate that is otherwise doing its job. What this shard buys is that the next
+    occurrence is recognised in seconds instead of re-derived. THE CONDITION THAT FLIPS IT: a
+    second fleet-dispatched amendment blocked on the same reasoning. At that point the rate is two
+    of two and the discriminator in (ii) is cheap enough to build. Whoever picks this up should
+    re-run the intersection in (iv) before building anything -- if it still returns one id, record
+    the new instance and stop.
+
+    ── Q3. WHAT MUST NOT WEAKEN ───────────────────────────────────────────────────────────────
+
+    (vii) THE HOLD ON GENUINE SCOPE MISMATCH STAYS. A PR whose diff does not match its declared
+    scope is precisely what the judge exists to catch, and W1-T2318's own wasted dispatches came
+    from a PR that declared nothing at all. Narrowing must remove exactly one inference -- that a
+    plan-only diff under a plan-declaring subject implies incomplete work -- and leave every other
+    mismatch judged as it is today.
+
+    (viii) NO EXEMPTION ON A TYPEABLE STRING. Restated as its own line because it is the failure
+    mode a hurried build would reach for first: the subject is a necessary condition, never a
+    sufficient one, and the file-list test must be evaluated independently rather than trusted from
+    the subject.
+
+    (ix) OWNED ELSEWHERE, DELIBERATELY NOT RE-FILED HERE: the uncredited-merge class is W1-T458;
+    the unbounded disposition loop is W1-T2345; the duplicate-dispatch class is W1-T1268. This
+    shard owns ONLY the judge's structural blindness to plan-only amendments. A build that touches
+    the sweep's disposition bound has widened past its brief.
+
+    (x) RULE 19 BAND. risk high is set up front because the file list spans two source stems -- the
+    judge's own module and the call site that assembles its input -- and Rule 19 sizes on SPAN. The
+    band is the span reading, not a blast-radius judgement.
+  acceptance:
+    - claim: "a plan-only diff under a plan-declaring subject is no longer read as evidence of incomplete work or misdeclared scope"
+      proof: "unit test: test/risk-judge-plan-only-amendment.test.ts"
+    - claim: "the narrowing requires BOTH the subject and a changed-file list that is entirely plan-only, so a plan-declaring subject over a diff touching source is judged exactly as it is today"
+      proof: "unit test: test/risk-judge-plan-only-amendment.test.ts"
+    - claim: "a declared-scope mismatch that is not of this shape still holds auto-merge, including a change declaring nothing at all"
+      proof: "unit test: test/risk-judge-plan-only-amendment.test.ts"
+    - claim: "the judge still reads no diff and still carries an empty tool allowlist — the narrowing costs no extra input and no extra budget"
+      proof: "unit test: test/risk-judge-plan-only-amendment.test.ts"
+    - claim: "the changed-file list the narrowing reads is the same bounded view the prompt already carries, never a second enumeration"
+      proof: "unit test: test/risk-judge-plan-only-amendment.test.ts"
