@@ -22,11 +22,13 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { openSiblingBuild, projectPlan } from "../src/lib/status.js";
 import type { GitHub, OpenSiblingBuild, PrRef, StatusProjection } from "../src/lib/status.js";
-import { nextRunnable } from "../src/lib/drain.js";
+import { nextRunnable, runDrain } from "../src/lib/drain.js";
+import type { DrainDeps } from "../src/lib/drain.js";
+import { drainCommand } from "../src/run-task.js";
 import type { Plan, Task } from "../src/lib/plan.js";
 
 const TASK_FILES = ["src/lib/status.ts", "src/lib/drain.ts", "test/open-build-is-not-credit.test.ts"];
@@ -225,4 +227,140 @@ test("acceptance 8: nothing added paces or throttles or sleeps a call", () => {
     globalThis.setInterval = realInterval;
   }
   assert.equal(timers, 0);
+});
+
+// ── THE WIRING (this PR): the two callbacks reach `nextRunnable` from a PRODUCTION caller ──────
+//
+// #3120 shipped the predicate live and SAID SO: `openSiblingBuild` was computed on every
+// `projectPlan` pass and `StatusProjection.openSiblingBuild` populated, while
+// `NextRunnableOpts.openSiblingBuildFor`/`onOpenSiblingBuild` had NO production caller — because
+// `NextRunnableOpts` is populated in `src/run-task.ts`, outside this task's declared `files:`.
+// These cases pin the wiring end to end, so the observation cannot go dark again unnoticed.
+
+test("WIRING: drainCommand passes BOTH callbacks, and they emit one ledger row and one console line", async () => {
+  const ledgerPath = emptyLedger();
+  const planDir = mkdtempSync(join(tmpdir(), "t2397-plan-"));
+  const planPath = join(planDir, "tasks.yaml");
+  writeFileSync(planPath, "[]\n");
+
+  let captured: DrainDeps | undefined;
+  const printed: string[] = [];
+  const realLog = console.log;
+  console.log = (...a: unknown[]) => void printed.push(a.join(" "));
+  try {
+    await drainCommand([], {
+      config: { root: dirname(dirname(ledgerPath)), owner: "acme", repo: "remudero" } as never,
+      planPath,
+      skipGitSync: true,
+      githubFactory: () => ({ findMergedByTrailer: () => null }) as never,
+      notifyChannel: { send: () => true } as never,
+      runDrain: async (_plan: unknown, deps: DrainDeps) => {
+        captured = deps;
+        return { attempted: [], merged: [], costUsd: 0, resumeCommand: "rmd drain", outcome: "idle", detail: "" } as never;
+      },
+    } as never);
+  } finally {
+    console.log = realLog;
+  }
+
+  assert.ok(captured, "runDrain was reached");
+  assert.equal(typeof captured!.openSiblingBuildFor, "function", "the SUPPLIER is passed — this is the line #3120 could not take");
+  assert.equal(typeof captured!.onOpenSiblingBuild, "function", "and the HANDLER is passed");
+
+  // Drive the captured handler exactly as `nextRunnable` would, and read both surfaces back. The
+  // capture is re-installed around the invocation: restoring it in the `finally` above and then
+  // asserting on `printed` was an empty-string comparison, which its own control caught.
+  const sibling = openSiblingBuild("W1-T2397", TASK_FILES, [OPEN_SIBLING], changedFiles)!;
+  printed.length = 0;
+  console.log = (...a: unknown[]) => void printed.push(a.join(" "));
+  try {
+    captured!.onOpenSiblingBuild!(task("W1-T2397"), sibling);
+  } finally {
+    console.log = realLog;
+  }
+  const line = printed.join("\n");
+  assert.notEqual(line, "", "CONTROL: the capture is live — an empty string here would make every match below vacuous");
+  assert.match(line, /W1-T2397/, "the console line names the task");
+  assert.match(line, /#3102/, "and the open sibling PR");
+  assert.match(line, /DISPATCHING ANYWAY/, "and says plainly that it did not refuse");
+});
+
+test("WIRING: the supplier reads `openSiblingBuild` off the projection, NOT `prState` — it can never become isOpenPr", () => {
+  // Q2's invariant, asserted on the SHAPE the supplier reads rather than on prose: a projection
+  // carrying an OPEN sibling but no OPEN state of its own yields a sibling and no in-flight answer.
+  const proj = new Map<string, StatusProjection>([
+    ["W1-T2397", { taskId: "W1-T2397", openSiblingBuild: { prNumber: 3102, prUrl: OPEN_SIBLING.url, overlappingPaths: ["src/lib/status.ts"] } } as unknown as StatusProjection],
+  ]);
+  const openSiblingBuildFor = (id: string) => proj.get(id)?.openSiblingBuild;
+  const isOpenPr = (id: string) => (proj.get(id)?.prState === "OPEN" ? proj.get(id)!.prNumber : undefined);
+  assert.equal(openSiblingBuildFor("W1-T2397")?.prNumber, 3102, "the observation sees it");
+  assert.equal(isOpenPr("W1-T2397"), undefined, "and eligibility does NOT — the two read different fields");
+});
+
+test("WIRING: runDrain forwards both callbacks into nextRunnable's opts, and the dispatch is unchanged", () => {
+  // The forwarding lives at BOTH `skipOpts` construction sites in drain.ts; this pins the contract
+  // the sites implement — opts carrying the pair dispatch exactly what opts without it dispatch.
+  const plan: Plan = { tasks: [task("W1-T2397")], byId: new Map([["W1-T2397", task("W1-T2397")]]) } as unknown as Plan;
+  const seen: string[] = [];
+  const sibling = openSiblingBuild("W1-T2397", TASK_FILES, [OPEN_SIBLING], changedFiles)!;
+  const withObs = nextRunnable(plan, () => false, {
+    openSiblingBuildFor: () => sibling,
+    onOpenSiblingBuild: (t) => void seen.push(t.id),
+  });
+  const without = nextRunnable(plan, () => false, {});
+  assert.equal(withObs?.id, "W1-T2397");
+  assert.equal(without?.id, withObs?.id, "byte-identical dispatch with and without the observation");
+  assert.deepEqual(seen, ["W1-T2397"], "and the handler fired exactly once");
+});
+
+test("WIRING: runDrain itself forwards both callbacks — the observation fires through the REAL dispatch loop", async () => {
+  // FALSIFIER-DRIVEN: driving `nextRunnable` directly does NOT exercise drain.ts's own `skipOpts`
+  // construction, so deleting the forwarding at both sites left every case green. This one runs the
+  // real loop, which is the only thing that pins the forwarding.
+  const one = task("W1-T2397");
+  const plan: Plan = { tasks: [one], byId: new Map([["W1-T2397", one]]) } as unknown as Plan;
+  const sibling = openSiblingBuild("W1-T2397", TASK_FILES, [OPEN_SIBLING], changedFiles)!;
+  const observed: Array<{ id: string; pr: number }> = [];
+  const ran: string[] = [];
+  const merged = new Set<string>();
+  await runDrain(
+    plan,
+    {
+      refreshMerged: () => (id: string) => merged.has(id),
+      openSiblingBuildFor: (id: string) => (id === "W1-T2397" ? sibling : undefined),
+      onOpenSiblingBuild: (t: Task, sib: OpenSiblingBuild) => void observed.push({ id: t.id, pr: sib.prNumber }),
+      runOne: async (id: string) => {
+        ran.push(id);
+        merged.add(id);
+        return { taskId: id, runId: id + "-run", merged: true, costUsd: 0, verdict: "merged" };
+      },
+    } as never,
+    { max: 1 },
+  );
+  assert.deepEqual(ran, ["W1-T2397"], "THE DISPATCH STILL HAPPENED — the observation never refuses");
+  assert.deepEqual(observed, [{ id: "W1-T2397", pr: 3102 }], "and the handler fired exactly once, through the real loop");
+});
+
+test("WIRING: runDrain stays SILENT on the common case — the 101-of-105 shape, through the real loop", async () => {
+  const one = task("W1-T2397");
+  const plan: Plan = { tasks: [one], byId: new Map([["W1-T2397", one]]) } as unknown as Plan;
+  const observed: string[] = [];
+  const ran: string[] = [];
+  const merged = new Set<string>();
+  await runDrain(
+    plan,
+    {
+      refreshMerged: () => (id: string) => merged.has(id),
+      openSiblingBuildFor: () => undefined,
+      onOpenSiblingBuild: (t: Task) => void observed.push(t.id),
+      runOne: async (id: string) => {
+        ran.push(id);
+        merged.add(id);
+        return { taskId: id, runId: id + "-run", merged: true, costUsd: 0, verdict: "merged" };
+      },
+    } as never,
+    { max: 1 },
+  );
+  assert.deepEqual(ran, ["W1-T2397"], "dispatched");
+  assert.deepEqual(observed, [], "and not one row or line — silence is the common case");
 });

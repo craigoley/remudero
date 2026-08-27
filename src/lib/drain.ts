@@ -1370,6 +1370,20 @@ export interface DrainDeps {
    */
   isOpenPr?: OpenPrCheck;
   /**
+   * W1-T2397 — the open-sibling OBSERVATION's two halves, forwarded verbatim to
+   * {@link NextRunnableOpts.openSiblingBuildFor} / {@link NextRunnableOpts.onOpenSiblingBuild};
+   * see those fields' own docs for the contract. Carried on `DrainDeps` for the same reason
+   * `isOpenPr` is: the caller resolves the projection, this module never reads GitHub.
+   *
+   * THEY ARE NOT `isOpenPr` AND MUST NOT BE FOLDED INTO IT. `isOpenPr` decides eligibility;
+   * widening THAT is the refusal W1-T2397 declined on measurement (the naive predicate fired four
+   * times in 72 hours and three of those merged). These two are consulted only after a task has
+   * been chosen and cannot change what is dispatched. Omitted ⇒ no observation, and dispatch is
+   * byte-identical to before they existed.
+   */
+  openSiblingBuildFor?: NextRunnableOpts["openSiblingBuildFor"];
+  onOpenSiblingBuild?: NextRunnableOpts["onOpenSiblingBuild"];
+  /**
    * W1-T177: an OPTIONAL fresh, live re-read of ONE candidate in-flight PR's
    * GitHub state — see {@link NextRunnableOpts.readLiveState}'s doc for the
    * full contract. Optional — omitted, dispatch behaves exactly as before
@@ -1732,6 +1746,10 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
 
     const skipOpts: NextRunnableOpts = {
       isOpenPr: deps.isOpenPr,
+      // W1-T2397: forwarded at BOTH `skipOpts` sites, so the single-lane and multi-lane passes
+      // observe identically — the same reason `observedByTask` is carried at both.
+      openSiblingBuildFor: deps.openSiblingBuildFor,
+      onOpenSiblingBuild: deps.onOpenSiblingBuild,
       // W1-T2286: unused by this single-lane path (`nextRunnable`/`nextCurated` never pack or
       // partition) — carried here only so `NextRunnableOpts` is filled the same way at both
       // `skipOpts` construction sites. See `DrainDeps.observedByTask`'s own doc.
@@ -2089,6 +2107,10 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
 
     const skipOpts: NextRunnableOpts = {
       isOpenPr: deps.isOpenPr,
+      // W1-T2397: forwarded at BOTH `skipOpts` sites, so the single-lane and multi-lane passes
+      // observe identically — the same reason `observedByTask` is carried at both.
+      openSiblingBuildFor: deps.openSiblingBuildFor,
+      onOpenSiblingBuild: deps.onOpenSiblingBuild,
       // W1-T2286: the SAME map handed to `partitionByFileOverlap` below (where this pass calls
       // it directly) — see `DrainDeps.observedByTask`'s own doc for why the pack step and the
       // real partition must never disagree.

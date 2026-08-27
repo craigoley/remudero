@@ -654,6 +654,7 @@ import {
   type GhFailureReason,
   preferImplementingPr,
   type PrRef,
+  type OpenSiblingBuild,
   type StatusProjection,
   planBranchReap,
   type BranchFacts,
@@ -19108,6 +19109,34 @@ async function drainCommand(
     const p = lastProj?.get(id);
     return p?.prState === "OPEN" ? p.prNumber : undefined;
   };
+  // W1-T2397 — THE OBSERVATION'S SUPPLIER, READ OFF THE SAME PROJECTION `isOpenPr` READS.
+  // `projectPlan` already computes `StatusProjection.openSiblingBuild` on every pass (status.ts),
+  // so this costs no read of its own — the same "never a second GitHub read path" contract the
+  // `isOpenPr`/`openPrCount` closures beside it already follow.
+  //
+  // SEPARATE FROM `isOpenPr` ON PURPOSE: a different FIELD of the same projection, consulted at a
+  // different POINT. `isOpenPr` gates eligibility; this is asked only after a task has been
+  // chosen. Folding the two would be the refusal W1-T2397 declined on measurement — the naive
+  // predicate fired four times in 72 hours and THREE OF THOSE MERGED.
+  const openSiblingBuildFor = (id: string): OpenSiblingBuild | undefined => lastProj?.get(id)?.openSiblingBuild;
+  // ONE ROW AND ONE LINE PER DISPATCH, never per candidate: `nextRunnable` consults this after
+  // eligibility has already said yes, so it fires once for the task actually dispatched. Measured:
+  // 101 of 105 dispatches in 72 hours had no open sibling at all, so the common case is silent.
+  // BOTH PRs are named, because the whole value is telling the operator where the other build is.
+  const onOpenSiblingBuild = (task: Task, sibling: OpenSiblingBuild): void => {
+    log("dispatch.open_sibling_build", {
+      task_id: task.id,
+      sibling_pr_number: sibling.prNumber,
+      sibling_pr_url: sibling.prUrl,
+      ...(sibling.headRefName === undefined ? {} : { sibling_head_ref: sibling.headRefName }),
+      overlapping_paths: sibling.overlappingPaths,
+    });
+    console.log(
+      `### drain: ${task.id} already has an OPEN build — PR #${sibling.prNumber} (${sibling.prUrl}) touches ` +
+        `${sibling.overlappingPaths.join(", ")}. DISPATCHING ANYWAY: an open PR is not proof the work is done, ` +
+        "and refusing on one can stall a task indefinitely (W1-T2397).",
+    );
+  };
   // W1-T172: the queue governor's other input (alongside DrainOpts.wipLimit) —
   // OPEN entries in the SAME projection `isOpenPr` just read, never a second
   // GitHub read path. Only consulted by the multi-lane path.
@@ -19216,6 +19245,13 @@ async function drainCommand(
       {
         refreshMerged,
         isOpenPr,
+        // W1-T2397: the two halves of the observation. #3120 shipped the predicate live and said so
+        // — `openSiblingBuild` is computed on every projection pass while
+        // `NextRunnableOpts.openSiblingBuildFor`/`onOpenSiblingBuild` had no production caller,
+        // because `NextRunnableOpts` is populated HERE and this file is outside that task's
+        // declared `files:`. These two lines are that scope decision, taken.
+        openSiblingBuildFor,
+        onOpenSiblingBuild,
         // W1-T916 — THE ARGUMENT W1-T534 DECLARED AND NOTHING PASSED, SUPPLIED HERE AT LAST.
         // `nextRunnable` consumes `opts.hasPushedRunBranch?.(t.id)`; with no supplier that
         // optional call short-circuited to `undefined` on every pass, so the duplicate-dispatch
