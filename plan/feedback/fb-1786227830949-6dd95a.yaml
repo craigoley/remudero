@@ -33,7 +33,8 @@ raw: "AN IMPLEMENT WORKER REPORTED subtype success WITH AN EMPTY DIFF — measur
   the state it was actually in."
 attachments: []
 origin: cli
-status: new
+status: rejected
 proposal_pr: null
 summary: null
 expansion: null
+answered_by: null
