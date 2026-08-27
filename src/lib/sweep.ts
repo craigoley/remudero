@@ -4244,6 +4244,70 @@ export function dispatchFixSpent(outcome: boolean | void): boolean {
   return outcome;
 }
 
+/**
+ * W1-T2379 — THE DETACHED SHAPE `dispatchFix` MAY RETURN, splitting the ONE await this module
+ * controls into its fast half and its slow half (the task's design note (i)(a): "the fix rung's
+ * DISPATCH is fast; its CI WAIT is not"). Before this task, `dispatchFix` returned a single
+ * `Promise` that `runSweep` awaited whole — fine for `rmd sweep`'s own per-poll full sweep (it
+ * has no tighter cadence to protect), but fatal for the restricted light pass a fired-fix's own
+ * CI wait sits INSIDE: `runSweepLightPass`'s `Promise.all` (and, above it, `startInFlightTicker`,
+ * daemon.ts) resolves only once every admitted PR's own call does, so one admitted dispatch whose
+ * evidence resolves in seconds but whose CI wait runs for minutes held the WHOLE tick hostage —
+ * the measured 16m41s gap this task's plan record traces to the second.
+ *
+ * `dispatched` is the fast half: it resolves once the strike is spent (or stood down) and its
+ * own `fix.dispatch` row is written — `runSweep` awaits ONLY this, exactly the same half it
+ * always waited on when `dispatchFix` returned a bare promise (a preflight refusal writes no row
+ * and resolves `dispatched` just as fast). `settled` is the SAME call's eventual conclusion — the
+ * CI wait, the review that follows it, whatever comes after — and `runSweep` NEVER awaits it; see
+ * {@link resolveDispatchFixOutcome}, the one place that distinction is enforced, for how its
+ * eventual rejection is kept from ever surfacing as an unhandled promise rejection.
+ *
+ * OPT-IN, NEVER REQUIRED: a `dispatchFix` with no reason to detach — every fixture that predates
+ * this task, and today's real wiring (`buildSweepEffects`, run-task.ts, unchanged by this task) —
+ * keeps returning a bare `boolean | void | Promise<boolean | void>` and behaves byte-identically
+ * to before. Only a caller that explicitly returns this shape changes what `runSweep` waits for;
+ * adopting it in the real wiring is a separate, later task (see the plan record's own note that
+ * `run-task.ts` sits outside this task's declared `files:`).
+ */
+export interface DetachedDispatchFix {
+  /** Resolves once the strike is spent/stood down and its own ledger row(s) are written. */
+  dispatched: Promise<boolean | void>;
+  /** The SAME call's own eventual settlement (e.g. a CI wait) — never awaited by `runSweep`. */
+  settled: Promise<boolean | void>;
+}
+
+/**
+ * TRUE only for the {@link DetachedDispatchFix} shape. A bare boolean/`void`/`Promise` never
+ * carries a `dispatched` property of its own, so this can never mistake either for the other —
+ * no `instanceof Promise` check is needed to tell them apart.
+ */
+function isDetachedDispatchFix(v: unknown): v is DetachedDispatchFix {
+  return typeof v === "object" && v !== null && "dispatched" in v && "settled" in v;
+}
+
+/**
+ * W1-T2379 — THE ONE PLACE `runSweep` UNWRAPS EITHER SHAPE `deps.dispatchFix` MAY RETURN. A bare
+ * `boolean | void | Promise<boolean | void>` (every pre-existing fixture, and today's real
+ * wiring) is awaited to completion exactly as before this task — this function changes nothing
+ * for that path. A {@link DetachedDispatchFix} is awaited ONLY on its `dispatched` half; its
+ * `settled` half is deliberately left running past this function's own return, with a `.catch`
+ * attached so a later rejection on it can never reach `runSweep` as an unhandled promise
+ * rejection — the design's own "dispatch and record synchronously, wait asynchronously", never
+ * "fire and forget": the row `dispatched` resolves after is written before this function (and so
+ * `runSweep`'s own call site) returns, every time, on either path.
+ */
+async function resolveDispatchFixOutcome(result: ReturnType<SweepDeps["dispatchFix"]>): Promise<boolean | void> {
+  if (isDetachedDispatchFix(result)) {
+    const outcome = await result.dispatched;
+    result.settled.catch(() => {
+      /* deliberately unhandled here — see this function's own doc for why */
+    });
+    return outcome;
+  }
+  return result;
+}
+
 /** Injected effects — the real command wires arm/close/fix/escalate; tests fake them. */
 export interface SweepDeps {
   /**
@@ -4333,11 +4397,16 @@ export interface SweepDeps {
    * widening alone regresses no lane. See {@link SweepAction.spent}'s own doc for the field this
    * feeds and why `acted` itself is never touched by it (design note (i) — a second field, never
    * a redefinition of the first).
+   *
+   * W1-T2379: MAY instead return a {@link DetachedDispatchFix} — its own doc is the complete
+   * contract, including why this is opt-in and never required. `runSweep` unwraps either shape
+   * through the SAME {@link resolveDispatchFixOutcome}, so `spent`'s meaning above is identical
+   * either way.
    */
   dispatchFix: (
     pr: OpenPrView,
     evidence: FixDispatchEvidence,
-  ) => boolean | void | Promise<boolean | void>;
+  ) => boolean | void | Promise<boolean | void> | DetachedDispatchFix;
   /**
    * Escalate a BLOCKED-AMBIGUOUS PR. `question` is the rung's rendered
    * {@link ClarificationQuestion} (W1-T78) — the real wiring logs it to the §2
@@ -5907,11 +5976,18 @@ export async function runSweep(
               // return sets `spent` for `dueRepairFilings` alone to read; `void` (today's real
               // wiring, every pre-existing fake) leaves it `undefined` — no `spent` field is
               // written at all, so no existing ledger row's shape changes.
-              const dispatchOutcome = await deps.dispatchFix(
-                pr,
-                isBlockedCi(pr)
-                  ? { unmetCriteria: [], ciFailures: pr.ciFailures ?? [] }
-                  : { unmetCriteria: pr.unmetCriteria, actionableGateFailures: pr.actionableGateFailures },
+              //
+              // W1-T2379: routed through {@link resolveDispatchFixOutcome} so a `dispatchFix`
+              // that returns a {@link DetachedDispatchFix} only holds this `await` for its fast
+              // "dispatched" half — the CI wait its slow half may carry never delays this pass's
+              // own return. A bare boolean/void/Promise return is awaited exactly as before.
+              const dispatchOutcome = await resolveDispatchFixOutcome(
+                deps.dispatchFix(
+                  pr,
+                  isBlockedCi(pr)
+                    ? { unmetCriteria: [], ciFailures: pr.ciFailures ?? [] }
+                    : { unmetCriteria: pr.unmetCriteria, actionableGateFailures: pr.actionableGateFailures },
+                ),
               );
               if (dispatchOutcome !== undefined) spent = dispatchFixSpent(dispatchOutcome);
               break;
@@ -5941,7 +6017,12 @@ export async function runSweep(
               // W1-T2231: the SAME "conflicted" analogue of blocked-fixable's own capture just
               // above — REPAIR_SURFACE_DISPOSITIONS (below) treats both as dispatch-based repair
               // surfaces, so both must feed `spent` the same way.
-              const conflictedDispatchOutcome = await deps.dispatchFix(pr, { unmetCriteria: [], mergeConflict: pr.mergeConflict });
+              //
+              // W1-T2379: the SAME detach-aware unwrap the blocked-fixable arm above uses — see
+              // `resolveDispatchFixOutcome`'s own doc.
+              const conflictedDispatchOutcome = await resolveDispatchFixOutcome(
+                deps.dispatchFix(pr, { unmetCriteria: [], mergeConflict: pr.mergeConflict }),
+              );
               if (conflictedDispatchOutcome !== undefined) spent = dispatchFixSpent(conflictedDispatchOutcome);
               break;
             }
