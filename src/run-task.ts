@@ -8090,6 +8090,64 @@ export function resolveAlreadySatisfied(
   return { outcome: "refuted", reason: "different_pr", creditedNumber: rival.number };
 }
 
+/**
+ * How many times the ALREADY_SATISFIED verification may be re-READ before the run gives up and falls
+ * to today's behaviour. THREE, DERIVED FROM THE LEDGER RATHER THAN CHOSEN (W1-T2370): across 321
+ * `board_gateway.fetch_failed` rows only 8.1% recovered on the very next fetch, but failures arrive in
+ * RUNS and the run lengths are what a bound can act on — of 25 observed consecutive-failure runs, 8
+ * were length 1, 8 length 2 and 2 length 3, while the tail ran 5, 9, 10, 11, 24, 49, 84 and 99. Three
+ * attempts clear 18 of 25 (72%); the seven they cannot are genuine outages lasting minutes to hours,
+ * where no bound short of unbounded would help.
+ */
+export const ALREADY_SATISFIED_VERIFY_ATTEMPTS = 3;
+
+/**
+ * Re-READ the verification when the gateway could not answer — never re-run the WORK.
+ *
+ * WHY THIS EXISTS AT ALL. {@link resolveAlreadySatisfied}'s own doc explains that an unverifiable read
+ * and a genuine refusal both fall to the same `no_pr` verdict, so "the cost is a forensic label, never
+ * a wrong dispatch decision". THAT IS SOUND FOR CREDITING AND UNSOUND FOR RE-DISPATCHING: `no_pr` is in
+ * `NON_HALTING_VERDICTS` (src/lib/drain.ts), so the drain hands the task straight back and a full build
+ * is spent re-deriving an answer the GATEWAY could not give. Everything a retry needs is already on the
+ * row the caller writes — `claimed_ref` and `claimed_number` sit beside the classified reason — and a
+ * transport timeout is not evidence the task is unbuilt.
+ *
+ * REFUTED IS NEVER RETRIED. The gateway answered and contradicted the worker; nothing about that read
+ * is in doubt, so re-dispatch is the correct outcome and this returns on the first attempt.
+ *
+ * NOTHING PACES, THROTTLES OR SLEEPS BETWEEN ATTEMPTS. W1-T1066 records a polling loop that locked the
+ * operator out of his repository for ninety minutes; three consecutive reads with no wait, or nothing.
+ * This function is deliberately SYNCHRONOUS for that reason — there is no await to hide a delay in.
+ *
+ * AND THE GUARD IS NOT WEAKENED. This changes only how many times the question is ASKED. An
+ * unverifiable claim is still never credited: after the last attempt the caller falls to `no_pr`
+ * exactly as it does today, with the row still saying `unverifiable` rather than `refused`.
+ *
+ * `resolve` and `attempts` are test seams, appended LAST so no positional caller shifts.
+ */
+export function resolveAlreadySatisfiedWithRetry(
+  claim: AlreadySatisfiedClaim,
+  github: GitHub,
+  taskId: string,
+  resolve: (
+    c: AlreadySatisfiedClaim,
+    g: GitHub,
+    t: string,
+  ) => AlreadySatisfiedResolution = resolveAlreadySatisfied,
+  attempts: number = ALREADY_SATISFIED_VERIFY_ATTEMPTS,
+): { resolution: AlreadySatisfiedResolution; attempts: number } {
+  // A bound below one would ask nothing and return no resolution at all, so the first read always
+  // happens; `attempts` bounds the RE-reads, never the question itself.
+  const total = Math.max(1, attempts);
+  let last = resolve(claim, github, taskId);
+  let used = 1;
+  while (last.outcome === "unverifiable" && used < total) {
+    last = resolve(claim, github, taskId);
+    used += 1;
+  }
+  return { resolution: last, attempts: used };
+}
+
 /** The verdict + ledger payload for a terminal-SUCCESS worker whose ALREADY_SATISFIED claim
  *  was VERIFIED (see {@link resolveAlreadySatisfied}) — distinct from both `merged` (this run
  *  opened no PR of its own) and `no_pr` (this is forward progress, not an anomaly). */
@@ -10167,7 +10225,10 @@ async function runTask(
       // an error of its own — it just falls straight through to the unchanged `no_pr` path,
       // exactly as if no claim had been made at all.
       const claim = parseAlreadySatisfied(fullText(impl));
-      const resolution = claim ? resolveAlreadySatisfied(claim, github, taskId) : undefined;
+      // W1-T2370: an UNVERIFIABLE read is re-asked here, between the resolution and the verdict —
+      // never inside the resolver, which stays a pure function over the gateway it is handed.
+      const verify = claim ? resolveAlreadySatisfiedWithRetry(claim, github, taskId) : undefined;
+      const resolution = verify?.resolution;
       const resolved = resolution?.outcome === "verified" ? resolution : undefined;
       if (claim && resolved) {
         const v = alreadySatisfiedVerdict(impl, costUsd, "implement", resolved);
@@ -10191,6 +10252,9 @@ async function runTask(
           claimed_ref: claim.ref,
           claimed_number: prNumberFromRef(claim.ref) ?? null,
           reason: resolution.reason,
+          // W1-T2370: how many gateway READS were spent before giving up, so a later reader can tell
+          // "the bound was exhausted" from "the read failed once" without replaying anything.
+          verify_attempts: verify?.attempts ?? 1,
         });
         say(
           `ALREADY_SATISFIED claim ("${claim.ref}") could NOT be verified — the board gateway read ` +

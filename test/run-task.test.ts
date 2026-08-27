@@ -87,6 +87,10 @@ import { readlineAsk, type GitRunner, materializeOriginShards, escalateCommand, 
   runTask,
   buildOpenPrViews,
   STALL_WINDOW,
+  resolveAlreadySatisfiedWithRetry,
+  ALREADY_SATISFIED_VERIFY_ATTEMPTS,
+  type AlreadySatisfiedClaim,
+  type AlreadySatisfiedResolution,
 } from "../src/run-task.js";
 import { requestStop } from "../src/lib/fleet-control.js";
 import { LaunchdPlistError } from "../src/lib/launchd.js";
@@ -8259,4 +8263,117 @@ test("buildOpenPrViews: an UNREADABLE branch-protection read (gh api fails) sets
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+// ── W1-T2370 — an unverifiable verification is RE-READ, never re-worked ────────────────────────────
+//
+// `AlreadySatisfiedResolution` is a genuine three-state union whose `unverifiable` arm fires in
+// production (one `already_satisfied.unverified` row: a `spawnSync gh` ETIMEDOUT, reason `transport`,
+// on a claim whose PR really was merged). Both that arm and a genuine `refuted` fall to the same
+// `no_pr` verdict, which is in `NON_HALTING_VERDICTS`, so the drain hands the task straight back and a
+// full build is spent re-deriving an answer the GATEWAY could not give. These pin the fix: re-ask the
+// GATEWAY, bounded, and change nothing about what may be CREDITED.
+
+const W2370_TASK = "T-2370";
+const w2370Claim = (ref: string): AlreadySatisfiedClaim => ({ raw: "", ref });
+
+/** Records every call, so "how many reads were spent" is observed rather than inferred. */
+function w2370Resolver(sequence: AlreadySatisfiedResolution[]): {
+  resolve: (c: AlreadySatisfiedClaim, g: GitHub, t: string) => AlreadySatisfiedResolution;
+  calls: Array<{ task: string }>;
+} {
+  const calls: Array<{ task: string }> = [];
+  return {
+    calls,
+    resolve: (_c, _g, t) => {
+      calls.push({ task: t });
+      // Past the end of the script, keep answering with the last entry — a gateway that stays down.
+      return sequence[Math.min(calls.length - 1, sequence.length - 1)]!;
+    },
+  };
+}
+
+const W2370_GATEWAY = {} as GitHub; // never consulted: the resolver seam stands in for it entirely.
+const W2370_UNVERIFIABLE: AlreadySatisfiedResolution = { outcome: "unverifiable", reason: "transport" };
+const W2370_NOT_FOUND: AlreadySatisfiedResolution = { outcome: "refuted", reason: "not_found" };
+const W2370_VERIFIED: AlreadySatisfiedResolution = {
+  outcome: "verified",
+  number: 42,
+  url: "https://github.com/acme/remudero/pull/42",
+};
+
+test("W1-T2370: an unverifiable resolution retries the verification before any verdict is reached", () => {
+  // First read cannot answer, second can — the 8-of-25 length-1 run the bound exists for.
+  const r = w2370Resolver([W2370_UNVERIFIABLE, W2370_VERIFIED]);
+  const out = resolveAlreadySatisfiedWithRetry(w2370Claim("#42"), W2370_GATEWAY, W2370_TASK, r.resolve);
+  assert.equal(r.calls.length, 2, "the verification was re-asked, not accepted on the first failure");
+  assert.equal(out.resolution.outcome, "verified");
+  assert.equal(out.attempts, 2);
+});
+
+test("W1-T2370: a refuted resolution is never retried, because the gateway already answered", () => {
+  const r = w2370Resolver([W2370_NOT_FOUND, W2370_VERIFIED]);
+  const out = resolveAlreadySatisfiedWithRetry(w2370Claim("#42"), W2370_GATEWAY, W2370_TASK, r.resolve);
+  assert.equal(r.calls.length, 1, "a refusal is evidence; re-asking it would be asking a settled question");
+  assert.equal(out.resolution.outcome, "refuted");
+  assert.equal(out.attempts, 1);
+  // And the same holds for a first-attempt VERIFIED: nothing is re-read once an answer exists.
+  const r2 = w2370Resolver([W2370_VERIFIED, W2370_VERIFIED]);
+  resolveAlreadySatisfiedWithRetry(w2370Claim("#42"), W2370_GATEWAY, W2370_TASK, r2.resolve);
+  assert.equal(r2.calls.length, 1);
+});
+
+test("W1-T2370: the retry re-reads the gateway and never re-runs the worker", () => {
+  const r = w2370Resolver([W2370_UNVERIFIABLE]);
+  const out = resolveAlreadySatisfiedWithRetry(w2370Claim("#42"), W2370_GATEWAY, W2370_TASK, r.resolve);
+  // Every attempt is a resolver call carrying the SAME task id — a gateway read. There is no spawn,
+  // no worktree, no worker: the only thing this function can do is ask the question again.
+  assert.equal(r.calls.length, ALREADY_SATISFIED_VERIFY_ATTEMPTS);
+  assert.deepEqual(new Set(r.calls.map((c) => c.task)), new Set([W2370_TASK]));
+  assert.equal(out.attempts, ALREADY_SATISFIED_VERIFY_ATTEMPTS);
+});
+
+test("W1-T2370: after the third failed attempt the outcome is exactly the present one, still unverifiable", () => {
+  const r = w2370Resolver([W2370_UNVERIFIABLE]);
+  const out = resolveAlreadySatisfiedWithRetry(w2370Claim("#42"), W2370_GATEWAY, W2370_TASK, r.resolve);
+  assert.equal(r.calls.length, 3, "bounded — a gateway that stays down is asked three times, never more");
+  assert.equal(out.resolution.outcome, "unverifiable", "the row still says unverifiable, never refused");
+  assert.equal(
+    (out.resolution as { reason: string }).reason,
+    "transport",
+    "the classified reason survives the bound rather than being overwritten by exhaustion",
+  );
+});
+
+test("W1-T2370: an unverified claim is still never credited, so the guard is not weakened", () => {
+  const r = w2370Resolver([W2370_UNVERIFIABLE]);
+  const out = resolveAlreadySatisfiedWithRetry(w2370Claim("#42"), W2370_GATEWAY, W2370_TASK, r.resolve);
+  assert.notEqual(out.resolution.outcome, "verified", "exhausting the bound must never manufacture a credit");
+  // The call site credits ONLY on `verified` — this is the predicate it applies, asserted directly so
+  // a future change to the union cannot quietly widen what counts as credited.
+  const resolved = out.resolution.outcome === "verified" ? out.resolution : undefined;
+  assert.equal(resolved, undefined);
+});
+
+test("W1-T2370: nothing added paces or throttles or sleeps between attempts", () => {
+  // W1-T1066 records a polling loop that locked the operator out of his repository for ninety minutes.
+  // The function is SYNCHRONOUS — there is no await to hide a delay in — and three consecutive reads
+  // against an instant resolver must therefore cost effectively nothing.
+  const r = w2370Resolver([W2370_UNVERIFIABLE]);
+  const started = process.hrtime.bigint();
+  const out = resolveAlreadySatisfiedWithRetry(w2370Claim("#42"), W2370_GATEWAY, W2370_TASK, r.resolve);
+  const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
+  assert.equal(out.attempts, 3);
+  assert.ok(elapsedMs < 50, `three attempts must not pace; took ${elapsedMs.toFixed(3)}ms`);
+  // A returned value, not a thenable: an async signature is where a sleep would live.
+  assert.notEqual(typeof (out as unknown as { then?: unknown }).then, "function");
+});
+
+test("W1-T2370: the bound is derived, and a smaller one still asks the question at least once", () => {
+  const r = w2370Resolver([W2370_UNVERIFIABLE]);
+  // 0 and negative are not "ask nothing" — the first read always happens; the bound limits RE-reads.
+  const out = resolveAlreadySatisfiedWithRetry(w2370Claim("#42"), W2370_GATEWAY, W2370_TASK, r.resolve, 0);
+  assert.equal(r.calls.length, 1);
+  assert.equal(out.attempts, 1);
+  assert.equal(ALREADY_SATISFIED_VERIFY_ATTEMPTS, 3, "N=3 clears 18 of 25 observed failure runs");
 });
