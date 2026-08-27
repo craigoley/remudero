@@ -528,8 +528,14 @@ test("DAEMON WIRING: daemonCommand actually PASSES both callbacks into the deps 
   const home = mkdtempSync(join(tmpdir(), "t2397-daemon-"));
   const root = join(home, "root");
   mkdirSync(join(root, "state"), { recursive: true });
-  mkdirSync(join(home, ".remudero"), { recursive: true });
-  writeFileSync(join(home, ".remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
+  // THE CONFIG MUST SIT WHERE `configPath()` READS IT — `~/.config/remudero/config.json`, not
+  // `~/.remudero/`. With the file ABSENT, `loadConfig` takes its CREATE branch, and creation calls
+  // `resolveClaudeBin()` -> `execFileSync("which", ["claude"])`, which throws on a CI runner that
+  // has no `claude` binary. Writing it at the real path means the READ branch is taken and
+  // `resolveClaudeBin` is never reached at all — the fix is not reaching it, never stubbing the
+  // binary. `test/auto-triage-wiring.test.ts` already uses this exact path for this exact reason.
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
   const planPath = join(home, "tasks.yaml");
   writeFileSync(planPath, "[]\n");
 
