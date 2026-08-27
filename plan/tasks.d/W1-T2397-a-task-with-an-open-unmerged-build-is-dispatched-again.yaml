@@ -1,0 +1,152 @@
+- id: W1-T2397
+  title: "A TASK WITH AN OPEN, UNMERGED BUILD PR IS DISPATCHED AGAIN — every credit path on the dispatch route reads the MERGED corpus, and the one reader that does see open PRs attributes them by the `run-<taskId>-<digits>` head alone, so an operator-briefed build on a `fix/` branch is invisible and the fleet rebuilds it; W1-T2387's #3102 was open when #3109 rebuilt the same two files"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 20.00
+  files: [src/lib/status.ts, src/lib/drain.ts, test/open-build-is-not-credit.test.ts]
+  origin: "operator-brief#open-unmerged-build-is-not-credit-2026-08-27"
+  plan_refs: ["W1-T2387", "W1-T2392", "W1-T256", "W1-T2370", "W1-T177", "W1-T1066"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE ID. Eight surfaces swept, each against a control drawn from THE OPEN SET enumerated first
+    (HTTP 200, an array, 4 rows), and each printed anchored AGAINST unanchored. SURFACE 1 READS 1:
+    `refs/rmd-id/W1-T2397` resolves against a namespace of 510 refs. Shard filenames 0 of 656;
+    declared ids 0 of 911; open-PR titles 0 of 4 read case-sensitively; open-PR bodies 0; open-PR
+    head refs 0; merged trailers 0 of 743 trailer lines; merged subjects 0 of 2,446.
+
+    THE PROBE IS ON A POPULATED BAND, WHICH IS THE PART THAT WENT WRONG BEFORE: `W1-T238` reads
+    anchored 0 against unanchored 10 on the ref namespace, 1 against 7 on filenames and 1 against 7
+    on declared ids; `W1-T234` reads 1 against 9 on merged trailers and 2 against 10 on subjects;
+    `W1-T237` reads 0 against 1 on open titles. Every one discriminates, so the anchor is doing work
+    rather than merely agreeing with itself.
+
+    TWO CONTROLS HAD TO BE RE-TAKEN, AND BOTH ARE RECORDED RATHER THAN QUIETLY REPLACED. On OPEN
+    BODIES the first control was W1-T2387 and it read ZERO — because its build #3102 is still open
+    and carries the id only in prose, which is this shard's own subject wearing the shape of a dead
+    control; re-controlled on W1-T2375 and W1-T2392, each reading 1. On MERGED TRAILERS the same id
+    read zero for the same reason; re-controlled on W1-T2345, reading 1. AND ON OPEN HEAD REFS THERE
+    IS NO LIVE CONTROL AT ALL: the open set holds exactly one `run-` head and it is
+    `run-TRIAGE-fb-…`, so ZERO task-shaped heads exist to fire on. The matcher was controlled
+    against that head and against `run-W1-T2387-1787845578879` (#3109's, live at 16:26Z and now
+    closed), so the zero is a property of the surface today and not of the query.
+
+    ── Q1. THE DISPATCH PATH DOES SEE OPEN PRs, AND THE DATA IS ALREADY FETCHED ────────────────
+
+    THIS IS NOT A MISSING FETCH, SO IT IS CHEAP. `isDispatchEligible` (`src/lib/drain.ts`) already
+    consults `opts.isOpenPr`, which run-task.ts builds as `lastProj?.get(id)?.prState === "OPEN"` —
+    a read off `projectPlan`'s own projection, no second GitHub call. That projection resolves an
+    open PR in `corroborateOpenByBranch` (`src/lib/status.ts`) off
+    `deps.github.listOpenHeadBranches()`, which the batched gateway serves from the OPEN half it
+    already holds. The rows are in hand at dispatch time.
+
+    THE GAP IS ATTRIBUTION BREADTH, NOT DATA. That filter is
+    `pr.state.toUpperCase() === "OPEN" && ownsBranch(pr.headRefName, task.id)`, and `ownsBranch` is
+    `^run-<taskId>-\d+$` — ONE surface. The MERGED side now has three (a body trailer, W1-T256's
+    head-branch path, and W1-T2387's commit-trailer union); the OPEN side has one. So a build whose
+    operator brief said "branch not `run-*`" — which is how #3102 came to sit on
+    `fix/trailer-surface-union` — is structurally invisible to every open-PR reader on the dispatch
+    route, however plainly its title and body name the task.
+
+    ── Q2. THE POPULATION, MEASURED BEFORE ANY REMEDY, AND IT IS ONE ───────────────────────────
+
+    Over 2,533 PRs read via REST, 105 dispatches in the last 72 hours opened a `run-<taskId>-`
+    head. Under a NAIVE predicate — some other PR was open at that moment and NAMED the task id —
+    FOUR of the 105 qualify. THREE OF THOSE FOUR MERGED:
+
+      #3109 -> W1-T2387 while #3102 open    merged: NO   <- the real instance
+      #3059 -> W1-T2318 while #3025 open    merged: YES
+      #2990 -> W1-T2325 while #2989 open    merged: YES
+      #2977 -> W1-T2316 while #2975, #2974 open   merged: YES
+
+    SO THE NAIVE PREDICATE IS NOT A CANDIDATE FOR ANYTHING THAT REFUSES: it would have blocked three
+    PRs that shipped. Their "siblings" were a plan filing (#2989, #2974 — `chore(plan): file …`) and
+    two builds of DIFFERENT tasks that merely mention the id in prose (#3025, #2975). Naming a task
+    is not evidence that a build of it is in flight.
+
+    A STRICTER PREDICATE — the open PR touches at least one path in the dispatched task's own
+    declared `files:` — halves it to TWO, of which ONE STILL MERGED (#2977, while #2975 was editing
+    a file W1-T2316 also declares). So even the sharpest form available reads 1 true positive and 1
+    false positive on a 72-hour window.
+
+    BOTH DIRECTIONS CONTROLLED. The strict query FINDS the known instance (W1-T2387/#3102 -> #3109),
+    and it correctly DROPS #3059 and #2990, the two the naive form got wrong; the other answer is
+    populated too — 101 of the 105 dispatches have no open sibling of any kind.
+
+    THE HONEST READING IS THEREFORE: IT IS ONE. This repo has declined a gate for a single instance
+    eight times, and that precedent is not overturned by a population of one plus a false positive.
+
+    ── Q3. WHAT A REFUSAL WOULD COST IF IT IS WRONG, AND WHY THE REMEDY IS A WARN ──────────────
+
+    AN OPEN PR IS NOT PROOF THE WORK IS DONE. It may be abandoned, red, or wrong, and refusing on
+    one can strand a task for as long as that PR fails to land. The cost is not hypothetical: on the
+    naive predicate it is THREE BLOCKED MERGES out of four firings, measured above.
+
+    AND A BOUNDED FORM DOES NOT RESCUE IT, WHICH IS WHAT THE MERGE-TIME DISTRIBUTION SAYS. Over
+    2,411 merged PRs read today, time-to-merge is median 18 minutes, p75 44, p90 119, p95 255 and
+    p99 864; 19.4 percent exceed an hour, 5.4 percent exceed four, 2.0 percent exceed eight and 0.2
+    percent exceed twenty-four. A staleness threshold has to sit at roughly EIGHT HOURS before it
+    stops firing on ordinary healthy work, and at eight hours a refusal that is right still costs
+    the task eight hours of stall, while one that is wrong costs it eight hours for nothing. #3102
+    itself was 87 minutes old at this measurement — comfortably inside the healthy band, so a
+    refusal keyed on it would have been firing on a live PR that had done nothing wrong.
+
+    SO THE PROPOSAL IS A WARN AND NOTHING ELSE. At dispatch, when an OPEN PR that is not this task's
+    own `run-` branch touches a path in the task's declared `files:`, emit one observation — a
+    ledger row and a console line naming both PRs — and DISPATCH ANYWAY. A warn that is wrong costs
+    one line of output; that asymmetry is the entire argument for building it at a population of
+    one, and the same argument refuses the gate. NOTHING HERE REFUSES A DISPATCH, and a build that
+    turns this into a refusal has answered a different question.
+
+    WHAT THE WARN MUST NOT BECOME. It must not feed `isOpenPr`: widening THAT is what converts an
+    observation into the refusal this shard declines, because `isDispatchEligible` already treats an
+    in-flight PR as a reason to skip. The predicate must therefore live beside the projection rather
+    than inside it, and its output must reach only the log.
+
+    ── WHAT IS OWNED ELSEWHERE, RECORDED SO THIS DOES NOT RE-FILE IT ───────────────────────────
+
+    THE UNCREDITED-MERGE CLASS IS W1-T2392 and the commit union is W1-T2387; both concern a MERGED
+    build that no surface credited. The head-branch path is W1-T256. The unverifiable retry is
+    W1-T2370. NONE OF THEM TOUCHES THE OPEN-AND-UNMERGED CASE — every one reads the merged corpus,
+    and the same-day `W1-T2349 REFUSED: W1-T2349 is already merged (#3054)` shows that corpus is
+    read correctly. THIS SHARD OWNS ONLY THE WINDOW BETWEEN A BUILD OPENING AND ITS MERGE.
+
+    RISK BAND. `risk: high` is set UP FRONT and is RULE 19's SPAN, not blast radius: `files:` crosses
+    two source stems — the projection (`status`) and the dispatch route (`drain`) — plus this task's
+    own test stem, which the sizing check reads as more than one concern and refuses at
+    `risk: medium`. The blast radius is the opposite of the band: one added observation on a path
+    that already runs, feeding nothing that decides anything.
+  acceptance:
+    - claim: "an open build of a task on a branch that is not its own run branch is observed at dispatch"
+      proof: "unit test: test/open-build-is-not-credit.test.ts"
+    - claim: "the observation names both the task and the open PR rather than a bare count"
+      proof: "unit test: test/open-build-is-not-credit.test.ts"
+    - claim: "the dispatch still proceeds, since an open PR is not proof the work is done"
+      proof: "unit test: test/open-build-is-not-credit.test.ts"
+    - claim: "an open PR that merely mentions the task without touching its declared files is not observed"
+      proof: "unit test: test/open-build-is-not-credit.test.ts"
+    - claim: "a plan filing that names the task is not mistaken for a build of it"
+      proof: "unit test: test/open-build-is-not-credit.test.ts"
+    - claim: "the in flight check that already refuses a dispatch is unchanged by this task"
+      proof: "unit test: test/open-build-is-not-credit.test.ts"
+    - claim: "the merged credit paths are untouched, so a merged task still refuses exactly as it does today"
+      proof: "unit test: test/open-build-is-not-credit.test.ts"
+    - claim: "nothing added paces or throttles or sleeps a call"
+      proof: "unit test: test/open-build-is-not-credit.test.ts"
+  falsifier: |
+    Re-run the 72-hour population measurement. If the STRICT predicate — a dispatch opened while
+    another PR was open and touching a path in the dispatched task's own declared `files:` — finds
+    NO instance, the loop this task observes is not occurring and the task must be closed rather
+    than implemented. The measurement is the same one: enumerate every PR over REST with an
+    enumeration control, take every `run-<taskId>-<digits>` head opened in the window, and for each
+    ask which PRs were open at its creation timestamp, intersecting their changed files with the
+    task's declared list. Control both directions: the query must still find W1-T2387/#3102 ->
+    #3109, and must still return the 101 dispatches that have no open sibling at all.
+
+    SEPARATELY DECISIVE: if `ownsBranch` (`src/lib/status.ts`) is no longer the sole attribution
+    used by `corroborateOpenByBranch`, the asymmetry described here has already been closed by
+    something else and this shard must be re-derived rather than trusted.
