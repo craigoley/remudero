@@ -145,6 +145,69 @@
     `orphan-sweep-names-the-third-party`, and that pairing is refused at medium. The blast radius is
     the opposite of the band — the first change is a diagnostic that prints a list already computed,
     and it decides nothing.
+
+    ────────────────────────────────────────────────────────────────────────────────────────
+    ADDED 2026-08-27 — A THIRD MECHANISM FOR THE SAME SYMPTOM, WHICH WOULD SURVIVE THIS
+    SHARD's OWN REMEDY. HYPOTHESIS ONLY: NOT A FINDING, NOT A REMEDY, NOT A SCOPE CHANGE.
+    ────────────────────────────────────────────────────────────────────────────────────────
+
+    (vii) WHY THIS BELONGS ON THIS SHARD RATHER THAN A NEW ONE. IF THE MECHANISM IS A LEDGER READ
+    THAT DOES NOT WAIT, A WIDER LOCK FIXES NOTHING. This task's remedy would ship, the symptom
+    would persist, and it would be the THIRD attempt at the same assertion after #3074's two-file
+    lock. Nothing below changes this task's scope, its `files:` or its remedy; it exists so the
+    build aims at the right mechanism, or knows in advance that it may not have.
+
+    THE OBSERVATION, MEASURED 2026-08-27. #3134 and #3135 are BOTH PLAN-ONLY — one
+    `plan/tasks.d` YAML file each, zero `src/`, zero `test/`. On both heads `ci` SUCCEEDS (626s and
+    720s) while `coverage-ratchet` carries an IDENTICAL failure — `tests 10797 pass 10795 fail 1`
+    on both — at `test/daemon.test.ts:2296`, the W1-T356 wiring assertion: "the real production
+    ledger dep must record the kill", `actual: undefined, expected: true`. A ONE-YAML DIFF CANNOT
+    CAUSE A TEST FAILURE, so neither PR's own content is the cause.
+
+    BASE-CAUSATION IS FALSIFIED TWO INDEPENDENT WAYS, so the merge-ref pinning W1-T1212 records is
+    not the explanation either. STRUCTURALLY: the only commits between the last base on which this
+    assertion passed under coverage and the base these two share are TWO PLAN YAMLS, so no source
+    change exists to blame. EMPIRICALLY: #3133 sits on that SAME base and fails a DIFFERENT test
+    entirely. And `baseCausedCheckName` requires a check to fail on EVERY open PR before it will
+    call a red base-caused; this one is on 2 of 5.
+
+    THE HYPOTHESIS — UNVERIFIED, AND RECORDED AS A HYPOTHESIS RATHER THAN A CONCLUSION. The test
+    establishes that the process died by POLLING — `waitUntilDead`, which loops until
+    `process.kill(pid, 0)` throws ESRCH — and then reads the ledger ONCE, IMMEDIATELY, taking a
+    single `.find` for a `worker_orphan_killed` row over that one read. The death and the ledger
+    append are separate events and only the first is waited for, so the row need not have landed
+    when the read happens. THAT IS A READ-AFTER-POLL RACE WITHIN ONE FIXTURE, NOT A CROSS-FIXTURE
+    COLLISION — a different mechanism from the machine-wide predicate this shard's `files:`
+    addresses, and one a wider lock cannot reach. The assertion that DID hold on both heads is
+    consistent with it: the ESRCH check passed, so the kill itself happened and only the record of
+    it was absent.
+
+    ITS FALSIFIER IS CHEAP, AND IS STATED HERE SO THE BUILD DOES NOT HAVE TO INVENT ONE: make the
+    assertion POLL FOR THE LEDGER ROW the way it already polls for the death, then re-run. If the
+    failure PERSISTS the race is NOT the cause and this hypothesis is dead, which returns the field
+    to this shard's own machine-wide-predicate mechanism. If it CLEARS, a wider lock was never
+    going to fix this symptom and the two mechanisms are genuinely distinct.
+
+    (viii) WHY IT WAS NOT VERIFIED WHERE IT WAS FOUND, AND WHY THAT CONSTRAINS THE BUILD.
+    Reproducing it takes `REAL_SWEEP_LOCK` — the REAL sweep lock, not a fixture's — and spawns and
+    kills real processes. On any host with the daemon live that risks colliding with the fleet's
+    OWN orphan sweep, which is the very subsystem under test. So the observation above was taken
+    from CI logs and the hypothesis was DELIBERATELY left unverified, rather than guessed at from a
+    local run that could have disturbed the fleet. THIS IS A STANDING CONSTRAINT ON WHERE THIS TASK
+    CAN EVER BE TESTED, not a one-off inconvenience: the build inherits it and needs either a host
+    with no live daemon or a lock path the real daemon does not use.
+
+    (ix) THE HARNESS DISAGREEMENT IS EVIDENCE FOR THE ABOVE, NOT A SECOND FINDING. `ci` and
+    `coverage-ratchet` run the IDENTICAL test glob under DIFFERENT harnesses and DISAGREE on these
+    two heads — green on one, `fail 1` on the other, same commit. That disagreement is what makes
+    the observation legible at all, because it isolates the failure to the harness rather than to
+    the diff. THE QUESTION IT RAISES IS ALREADY OWNED: W1-T1041 exists to establish whether one run
+    can serve both and to rule on which harness survives if it cannot. IT IS CITED, NOT RE-FILED,
+    and nothing here proposes an answer to it.
+
+    ⚠ NOTHING FROM (vii) TO (ix) PROPOSES A REMEDY, A CAP CHANGE OR A TEST EDIT. The falsifier in
+    (vii) names an EXPERIMENT the build may run; it is not a change this shard authorises. This
+    task's scope, `files:`, `acceptance:` and remedy are exactly as filed.
   acceptance:
     - claim: "when the wiring assertion fails, the run names the competing process by its command line rather than leaving it to inference"
       proof: "unit test: test/orphan-sweep-names-the-third-party.test.ts"
