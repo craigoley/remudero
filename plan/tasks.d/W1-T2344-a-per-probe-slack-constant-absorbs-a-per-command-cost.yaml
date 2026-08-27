@@ -119,6 +119,59 @@
     RISK BAND. `risk: high` is set UP FRONT and is Rule 19's SPAN, not blast radius: `files:`
     crosses the containment module that gates every dispatch and its own suite, and the module is
     the one whose verdict refuses a run.
+    AMENDED 2026-08-27 AFTER MEASUREMENT: Q1 SHIPPED AND IS INERT, Q2 IS WHAT WORKED.
+
+    THIS SECTION ADDS EVIDENCE AND DECIDES NOTHING ELSE. No criterion changes and no field outside
+    this rationale is touched. NOTHING HERE PROPOSES REVERTING #3030 and nothing here proposes any
+    budget change: that lever is structurally sound and harmless, reverting it is a separate
+    decision for the operator, and the point of this record is only that the lever does not move
+    the outcome.
+
+    WHAT SHIPPED. #3030 merged 2026-08-27T01:54:43Z and replaced the flat `PROBE_TURN_ALLOWANCE =
+    3` with a function of the command count, `Math.min(commandCount, PROBE_TURN_ALLOWANCE_CEILING)`
+    at a ceiling of 8, so the budget at six commands moved from 10 to 13. Its own doc states that
+    the ceiling was "PICKED, NOT MEASURED".
+
+    THE MEASUREMENT THAT KILLS IT. Of 36 exhausted probes recording BOTH `num_turns` and
+    `max_turns`, the over-by distribution is a single value, 1, on all 36 without exception. The
+    pairs are 11 over 10 thirty-five times and 14 over 13 once. THE CAP MOVED FROM 10 TO 13 AND THE
+    NEXT EXHAUSTED PROBE WALKED STRAIGHT INTO 14.
+
+    THAT POPULATION IS CONTROLLED. 15 further exhausted probes carry no `num_turns` under an older
+    schema and 51 probes are exhausted altogether, so 36 of 36 is the whole recorded population
+    rather than a convenient slice of it.
+
+    WHY NO SIMILAR LEVER CAN WORK, WHICH IS THE DURABLE PART OF THIS RECORD. A probe that exhausts
+    is not a probe that ran out of budget. It is a probe that does not terminate, and the
+    fail-closed verdict catches it one turn past whatever wall you set. Raising a wall relocates
+    the catch and never removes the cause, so any later proposal shaped as "give the probe more
+    turns" answers to this distribution first.
+
+    AND WHAT DID WORK, RECORDED SEPARATELY SO THE TWO ARE NEVER CONFLATED. #3016, this shard's Q2,
+    made the egress command print its own outcome rather than leave it to marker archaeology, and
+    the median `num_turns` moved from 10 to 7. Twelve of the twenty probes since read 7 or fewer,
+    against a baseline probability of 0.178 for that reading, a one-sided binomial p of 3.1e-05.
+    IT ALSO FELL WITHIN THE GROUP STILL CAPPED AT 10, before the budget moved at all. A budget
+    raise cannot lower the turns actually spent; it only moves the wall. Q2 removed work, Q1
+    removed nothing.
+
+    THE ATTRIBUTION METHOD, RECORDED BECAUSE IT IS THE ONLY REASON THESE TWO ARE SEPARABLE AT ALL.
+    `ProbeExecResult.maxTurns` is written on every row as an INPUT rather than read back off the
+    envelope (W1-T2238), expressly so that "a historical row stays checkable against the cap it
+    actually ran under even if `PROBE_TURN_ALLOWANCE` moves". The two fixes landed 2 hours and 29
+    minutes apart, and that one field is what allowed the rows to be split by the cap each row ran
+    under instead of by wall-clock alone.
+
+    THE UNSETTLED HALF, STATED PLAINLY RATHER THAN ROUNDED UP. The exhausted RATE reads 1 of 20,
+    which is 5.0 percent. That is significant against the 29.1 percent pooled baseline at a p of
+    0.0096 and NOT significant against the 16.9 percent daily floor at a p of 0.125. The rate is
+    therefore not yet separable from the historical spread, and roughly 50 more probes settle it
+    against a fleet that produces 40 to 60 a day. The median already answered; the rate has not.
+
+    THE RESIDUAL, WHICH IS WHERE THE COST ACTUALLY SITS. The re-dispatch multiplier is UNCHANGED at
+    100 percent, so every exhausted probe is still followed by a full worker run for the same task.
+    Probe spawn is the small half of the bill at 0.47 US dollars across 12.7 hours. The figure that
+    deserves watching is that multiplier and not the spawn.
   acceptance:
     - claim: "the probe's slack is a function of how many commands it runs, not a constant that dilutes as commands are added"
       proof: "unit test: test/containment.test.ts"
