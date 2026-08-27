@@ -6914,6 +6914,54 @@ export function scopeAdvisorySection(advisories: readonly UnwiredAdvisory[] | un
   );
 }
 
+/**
+ * Render this review's `unwired_export` advisory — the one {@link unwiredAdvisoriesFor} already
+ * computed for {@link ReviewVerdict.unwiredAdvisories} — as a PR-comment section, so an export
+ * added with nothing reaching it lands at the human gate instead of only the ledger. `undefined`
+ * when every added export is reachable or carries a marker, so a clean PR adds nothing.
+ *
+ * THE SIBLING OF {@link scopeAdvisorySection}, BUILT THE SAME WAY AND FOR THE SAME REASON. Of the
+ * four {@link UnwiredAdvisory} reason codes only `scope_violation` reached the gate; the other
+ * three were computed, ledgered on `review.unwired_advisory`, and never rendered. MEASURED over
+ * the 60 most recently merged PRs (2026-08-26): 14 added at least one exported symbol, 35 symbols
+ * were examined, and 1 PR — #2952, adding `boardReviewMarkerPath` and `recordBoardReviewFire`
+ * with nothing referencing either — carried an `unwired_export` nobody saw. That is the same
+ * defect W1-T434 fixed for `scope_violation`, one code over.
+ *
+ * READS THE ADVISORY, NEVER RECOMPUTES IT — the reachability walk has exactly one home ({@link
+ * "./reachability.js".scanUnreachedExports}), and this is a formatter over its result, the same
+ * relationship {@link scopeAdvisorySection} has to {@link scopeViolationFiles}. A second walk
+ * here could drift from the one `review.unwired_advisory` reports, and then the PR comment and
+ * the ledger would disagree about the same PR.
+ *
+ * ADVISORY AND NON-BLOCKING, DELIBERATELY. An unreached export is not by itself a fault: a symbol
+ * shipped one PR ahead of its caller is a normal split, which is why the `WIRED-AT`/
+ * `SHIPS-UNWIRED` markers exist and why {@link unwiredAdvisoriesFor} honours them before flagging
+ * anything. Like {@link scopeAdvisorySection} the header says "advisory" in the rendered text, so
+ * no reader mistakes it for a gate. Whether this should ever BLOCK is W1-T323's open operator
+ * adjudication, which carries its own numeric criterion — this renderer does not preempt it, and
+ * adds no row to `DECISION_RELEVANT_LEDGER_STEPS`.
+ *
+ * Symbols are deduped so a symbol named by more than one advisory on the same head renders once.
+ */
+export function unwiredExportAdvisorySection(advisories: readonly UnwiredAdvisory[] | undefined): string | undefined {
+  const symbols = [
+    ...new Set((advisories ?? []).filter((a) => a.reasonCode === "unwired_export").flatMap((a) => a.symbols)),
+  ];
+  if (symbols.length === 0) return undefined;
+  return (
+    `**Unwired exports (advisory — does not affect remudero-review's verdict)**\n\n` +
+    `This diff adds ${symbols.length === 1 ? "an exported symbol" : "exported symbols"} that nothing ` +
+    `in the checkout reaches, with no \`WIRED-AT\` or \`SHIPS-UNWIRED\` marker. That is not by itself a ` +
+    `fault — a symbol shipped one PR ahead of its caller looks identical here. It is flagged so the ` +
+    `gap is visible at the gate rather than only in the ledger, and never blocks:\n\n` +
+    `${symbols.map((s) => `- \`${s}\``).join("\n")}\n\n` +
+    `If the caller lands separately, add a \`SHIPS-UNWIRED: <task-id>\` or \`WIRED-AT: <file>::<symbol>\` ` +
+    `marker to the PR body. If it does not, this is where an export that was never actually wired up ` +
+    `shows up — the half-landed shape that otherwise merges silently.`
+  );
+}
+
 // ── reviewer_outcome (W1-T63/P10-a — the reviewer stops walling silently) ──
 
 /**

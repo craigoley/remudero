@@ -60,6 +60,47 @@
     staying silent on a sibling with callers, and W1-T1017 counts four unwired_export rows. The
     defect is in the CRITERION'S GRANULARITY, not in the scan, the markers, the reason codes or the
     advisory's retention.
+
+    AMENDED 2026-08-26, RECORD ONLY — nothing below edits a criterion, moves a threshold or
+    re-bases a window; this task still decides nothing and stays verify:human.
+
+    THE PREDICTION HELD, AND THE MEASUREMENT IS NOW ON THE RECORD. This shard said before any
+    measurement existed that the narrow denominator was heading for n around 5. Measured
+    2026-08-26 off review.unwired_advisory rows over a union reading 33 archives with the live file
+    read, 0 unread and ok true: the narrow denominator is n=1 in a literal re-based window and n=10
+    across the whole durable era. The granularity concern was correct and is now arithmetic rather
+    than forecast.
+
+    WHICH ROWS ARE THE DENOMINATOR — THE QUESTION THIS SHARD SAID TO SETTLE FIRST — IS MEASURED BUT
+    STILL UNSETTLED. The review.unwired_advisory step carries THREE reason codes and the
+    SHIPS-UNWIRED floor is only one. Since 2026-08-18: scope_violation 113 rows over 87 PRs,
+    inverse_scope 40 over 29, unwired_export 14 over 10. The choice among them IS the choice of n,
+    and therefore of whether 5% is representable at all: n=1 admits no threshold, n=10 makes 5% a
+    zero-tolerance test at 0.5, and only n=113 lets one false positive pass and six fail.
+
+    THE WINDOW IS UNMEASURABLE AS WRITTEN AND A RE-BASED ONE REPRODUCES THE DEFECT. W1-T322 merged
+    2026-08-04T13:03 and arm B closed 2026-08-05T22:37 — 33 hours — entirely inside the 08-04 to
+    08-10 span W1-T1017 records as rotation-destroyed. Re-based to 2026-08-18, arm B closes
+    2026-08-19T12:21:47Z, 36.4 hours, and at about 88 merges a day the 14-day arm can never bind.
+
+    THE ADOPTION EVIDENCE, RECORDED BECAUSE IT BEARS ON THE RULING AND NOT ON THE ARITHMETIC. Of 13
+    symbols flagged unwired_export since 2026-08-18, 3 are wired in production today and 10 remain
+    test-only, the oldest flagged eight days ago; two of the three were wired by a lane that went
+    looking rather than by the ordinary process.
+
+    THE OPEN QUESTION, RECORDED WITHOUT AN ANSWER. Whether a DELIBERATELY test-only export shipped
+    without a marker is a false positive or a true positive with a missing marker is not
+    disambiguated by W1-T323's own rule — reached-in-fact, or marker rightly omitted = false
+    positive — and that single ruling probably decides the rate. It is the operator's to take.
+
+    THE TENSION, NAMED AND NOT RESOLVED. W1-T323's design says NOT IN SCOPE: changing the scan, the
+    markers, the window, or the threshold. Every runnable corpus above except the destroyed
+    original is a re-based window, so measuring one may require a new filing rather than a flip.
+
+    THE LINK. This shard and W1-T323 are one decision in two records that did not reference each
+    other, and nothing depended on either. W1-T323 now carries a depends_on edge to this task —
+    that direction only, because settling the denominator precedes flipping and the reverse edge
+    would be a cycle. This task's own depends_on is deliberately left empty for that reason.
   design: |
     ONE CONCERN: whether W1-T323's flip criterion is decidable at its own sample size. This shard
     is a RECORD AND A PARKED RULING, satisfied by its own text on merge, in the shape W1-T1014 and

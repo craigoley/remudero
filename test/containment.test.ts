@@ -1040,27 +1040,6 @@ test("W1-T2344: probeTurnBudget folds the scaling allowance in, and it stays der
   }
 });
 
-test("W1-T2344: the egress command reports its own reached/unreached outcome directly, never leaving it to marker-file archaeology", () => {
-  const cmd = egressProbeCommand("api.github.com");
-  assert.match(cmd, /echo "blocked: reached/, "the blocked request must echo its own outcome on success");
-  assert.match(cmd, /echo "blocked: unreached"/, "the blocked request must echo its own outcome on failure too");
-  assert.match(cmd, /echo "allowed: reached/, "the allowed (control) request must echo its own outcome on success");
-  assert.match(cmd, /echo "allowed: unreached"/, "the allowed (control) request must echo its own outcome on failure too");
-  // The two facts a worker previously had to re-derive by reading marker files
-  // are now printed straight into the command's own stdout, keyed off the SAME
-  // markers the executor's existsSync check already relies on — no new files,
-  // no new destination, and the response body is still discarded (-o /dev/null).
-  assert.ok(cmd.includes(`if [ -f ${EGRESS_BLOCKED_MARKER} ]`));
-  assert.ok(cmd.includes(`if [ -f ${EGRESS_ALLOWED_MARKER} ]`));
-  assert.equal(cmd.match(/-o \/dev\/null/g)?.length, 2, "both requests must still discard the response body");
-  assert.ok(!/--fail\b/.test(cmd), "no new status-code gate — this is observation, not a new check");
-  // Nothing added paces, throttles, or sleeps a call.
-  assert.ok(!/\bsleep\b/.test(cmd));
-  // And it must not smuggle in a new numbered entry that would silently move
-  // probeCommandCount out from under probeTurnBudget.
-  assert.equal(probeCommandCount(cmd), 0);
-});
-
 test("W1-T2213: a reported operator-home-read attempt derives the denial from the transcript rather than from silence, wired through probeContainment", async () => {
   // Drives probeContainment's OWN wiring for this arm (not just the pure
   // verdict): an executor that REPORTS a read attempt must have

@@ -789,6 +789,30 @@ export interface OpenPrView {
    */
   reviewPendingSince?: string;
   /**
+   * W1-T2299 — ISO-8601 timestamp the CURRENT `reviewState` reading was posted at, when readable.
+   * For a terminal state (`"success"`/`"failure"`) this is the `remudero-review` commit status's
+   * own `created_at` — the SAME REST field {@link RollupCheckEntry.startedAt}'s own doc already
+   * names as a StatusContext's `startedAt` mapping ("a status context's mapped from createdAt"),
+   * read here off the identical rollup entry {@link reviewStateFromRollup} (run-task.ts) already
+   * scans, at NO extra request.
+   *
+   * THIS IS NOT A BODY-EDIT TIMESTAMP, AND MUST NEVER BE DOCUMENTED AS ONE (the task's own design
+   * note (iii)): GitHub's pull-request object exposes exactly four time fields — `created_at`,
+   * `updated_at`, `closed_at`, `merged_at` — and none of them is body-specific. The post-review
+   * disposition row that reads this field alongside {@link lastActivityAt} therefore detects
+   * ACTIVITY AFTER A VERDICT (a comment, a label, a title edit, a review comment, OR a body edit —
+   * indistinguishable at this field's resolution), never a body edit in particular. A gaming edit
+   * buys a re-judgement, not a pass — the reviewer posts a FRESH verdict either way and the prior
+   * one is never carried forward — which is what makes admitting more than strictly bodies-changed
+   * tolerable; see that row's own doc for the bound that keeps it from being exploitable.
+   *
+   * `undefined` when the rollup carries no `remudero-review` entry, or its timestamp is absent —
+   * read as "cannot date the verdict", which the consuming predicate treats as NOT superseded
+   * (fail CLOSED toward the pre-existing behaviour: a failing head with no readable verdict
+   * timestamp stays exactly as unofferable as it was before this field existed).
+   */
+  reviewVerdictPostedAt?: string;
+  /**
    * The unmet acceptance criteria from a failing review ([] otherwise). W1-T456: for a
    * task-id-less PLAN-FILING PR (no `Remudero-Task:` trailer, #1527) `buildOpenPrViews` can
    * ALSO populate this from the ledger, keyed by the same synthetic `PR-<n>` id
@@ -2502,6 +2526,35 @@ export function reviewOrphanBackoffElapsed(pr: OpenPrView, policy: SweepPolicy, 
 }
 
 /**
+ * W1-T2299 — THE SUPERSEDED-INPUT DETECTOR: has something happened to this PR AFTER its current
+ * `remudero-review` verdict was posted? Compares {@link OpenPrView.lastActivityAt} (the PR's own
+ * `updated_at` — see that field's own doc) against {@link OpenPrView.reviewVerdictPostedAt} (the
+ * verdict's `created_at`, read off the SAME rollup entry `reviewStateFromRollup` already scans).
+ *
+ * NAMED FOR WHAT IT ACTUALLY DETECTS (design note iii): "activity", never "a body edit" — GitHub's
+ * PR object carries no body-specific timestamp, so a comment, a label, or a title edit reads
+ * identically to a genuine body correction here. See {@link OpenPrView.reviewVerdictPostedAt}'s
+ * own doc for why that coarseness is tolerable (a re-offer only earns a fresh judgement, never a
+ * free pass) and where the bound against repeated triggering lives (the cap row that gates this
+ * predicate's `DISPOSITION_RULES` consumer, reusing `policy.reviewOrphanCap`/`reviewOrphanBackoffMinutes`
+ * rather than minting a third threshold).
+ *
+ * FAILS CLOSED: either timestamp missing or unparseable reads `false` — "cannot tell whether the
+ * input changed" is never treated as "it did." That is the SAME direction as the field's own doc
+ * describes, and it is the safe one here (unlike {@link reviewPendingIsStale}'s deliberately
+ * opposite "undated reads stale"): failing open would re-offer a head this system has no evidence
+ * actually changed, spending the shared budget for nothing.
+ */
+export function reviewVerdictOvertakenByActivity(pr: OpenPrView): boolean {
+  if (!pr.reviewVerdictPostedAt) return false;
+  const verdictAt = Date.parse(pr.reviewVerdictPostedAt);
+  if (Number.isNaN(verdictAt)) return false;
+  const activityAt = Date.parse(pr.lastActivityAt);
+  if (Number.isNaN(activityAt)) return false;
+  return activityAt > verdictAt;
+}
+
+/**
  * THE POLICY TABLE — the ordered rules mapping observed PR-state -> disposition.
  * Precedence is table order (first match wins); the terminal rule matches
  * unconditionally, so a disposition is ALWAYS produced (the no-disposition=none
@@ -2535,6 +2588,20 @@ export function reviewOrphanBackoffElapsed(pr: OpenPrView, policy: SweepPolicy, 
  *      (re-dispatch WITH the answer as an added constraint), even when the
  *      ORIGINAL strikeCap was already hit — this is what makes an answer actually
  *      re-arm the rung instead of landing straight back on row 4's escalate.
+ *   3.5. SUPERSEDED-VERDICT CAP (W1-T2299) — a `remudero-review` FAILURE that has seen activity
+ *      since it posted ({@link reviewVerdictOvertakenByActivity}), but `priorReviewOrphans` has
+ *      already reached `policy.reviewOrphanCap` and the backoff has not yet elapsed -> blocked-
+ *      ambiguous (escalate). SHARES the review-orphan budget with rows 8.6/9 rather than minting
+ *      a third threshold — one head's total re-reviews are capped across every re-offer reason.
+ *      Ordered ahead of row 3.6 (same reason row 8.6 precedes 8.5/post-review) and ahead of rows
+ *      4/6/7 (which would otherwise claim every `reviewState === "failure"` PR first).
+ *   3.6. VERDICT OVERTAKEN BY ACTIVITY (W1-T2299, rationale: "a corrected PR body cannot reach
+ *      the reviewer that judged the old one") — the THIRD admitting arm the post-review row (8.5)
+ *      already promises alongside never-reviewed and orphaned-by-a-push: a `remudero-review`
+ *      FAILURE whose head has seen activity since that verdict posted -> post-review, re-running
+ *      the review lane so a corrected input can reach a fresh judgement. Nothing about the verdict
+ *      range changes — `runReview` posts fresh every time, so this can still fail. Ordered ahead
+ *      of rows 4/6/7 (which otherwise claim every failing review first) and after row 3.5's cap.
  *   4. FAILING + strikes exhausted (>= cap)              -> blocked-ambiguous (escalate).
  *      GENERALIZED (W1-T100, the #170 fix): "strikes exhausted" also covers the
  *      blocked_ci shape (checks red) — ci-log strikes share the SAME counter and
@@ -2722,6 +2789,70 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     },
     reason: (pr) =>
       `operator answered the clarification question — re-dispatching the fix rung with the added constraint (strike ${pr.priorStrikes + 1})`,
+  },
+  {
+    // W1-T2299 — THE SUPERSEDED-VERDICT CAP (design (v)/(vi), mirroring row 8.6's shape one
+    // failure-lane earlier): a `remudero-review` FAILURE whose head has seen activity since that
+    // verdict posted ({@link reviewVerdictOvertakenByActivity}) re-earns the review lane below —
+    // but not unboundedly. Ordered STRICTLY BEFORE that row, and BEFORE rows 4/6/7 (which would
+    // otherwise claim EVERY `reviewState === "failure"` PR first and this arm would never fire),
+    // so a head that has already spent `policy.reviewOrphanCap` re-reviews across ALL re-offer
+    // reasons combined — never reviewed, orphaned by a push, stuck pending, AND this one — escalates
+    // instead of re-dispatching forever. SHARES the budget rather than minting a third threshold
+    // (design v): `priorReviewOrphans`/`reviewOrphanLastAttemptAt` are the SAME fields row 8.6
+    // reads, off the SAME ledger scan (`reviewOrphansFor`, run-task.ts) — one counter, three
+    // triggers. `reviewOrphanBackoffElapsed` YIELDS this row back once enough wall-clock time has
+    // passed with no newer attempt (the SAME "escalate AND keep going" discipline W1-T1018 gave
+    // row 8.6), so this is a pace, never a permanent wall.
+    disposition: "blocked-ambiguous",
+    when: (pr, policy, _ageDays, now) =>
+      pr.checksState === "green" &&
+      pr.requiredContextsUnreadable !== true &&
+      pr.reviewState === "failure" &&
+      reviewVerdictOvertakenByActivity(pr) &&
+      (pr.priorReviewOrphans ?? 0) >= policy.reviewOrphanCap &&
+      !reviewOrphanBackoffElapsed(pr, policy, now),
+    reason: (pr, policy) =>
+      `remudero-review failed but the PR has seen activity since — the sweep has already re-reviewed ` +
+      `this PR ${pr.priorReviewOrphans} time(s) (>= ${policy.reviewOrphanCap} cap, shared across every ` +
+      `re-offer reason) — escalating; re-reviewing again after ${policy.reviewOrphanBackoffMinutes}m of backoff, ` +
+      `never stopping outright`,
+  },
+  {
+    // W1-T2299 — A CORRECTED INPUT CAN REACH THE REVIEWER THAT JUDGED THE OLD ONE (rationale
+    // (1)-(4)): the row immediately below this one (and rows 4/6/7 further down) claim EVERY
+    // `reviewState === "failure"` PR, so a posted FAILURE used to make a head permanently
+    // unofferable to `remudero-review` — nothing in any of those predicates ever read the PR's own
+    // timestamps, which is why editing the body (or anything else on the PR) after a failing
+    // verdict moved nothing. This row is the third admitting arm the post-review row's own doc
+    // (two rows below) already promises: never-reviewed, orphaned-by-a-push, stuck-pending, and
+    // now this one — activity after a verdict. ORDERED BEFORE rows 4/6/7 so it actually gets a
+    // turn, and AFTER the cap row immediately above so a head that has exhausted the shared
+    // {@link SweepPolicy.reviewOrphanCap} budget still falls through to the ORDINARY failure
+    // handling (rows 4/6/7) rather than looping here — "not offered again" (design note x) reads
+    // as "back to normal failure disposition," never a bespoke escalation of its own.
+    //
+    // THE REVIEWER KEEPS ITS TEETH (design note viii): this only changes WHICH INPUT is judged —
+    // `runReview`/`reviewCommand` post a FRESH verdict from scratch every time (see the post-review
+    // row's own doc, "the prior verdict is NEVER carried forward"), so a re-offered head can still
+    // fail, and a weakened claim still has to survive the same reviewer a corrected one does.
+    //
+    // NOTHING RE-OFFERS A HEAD WHOSE BODY DID NOT CHANGE (design note x, the strictly-additive
+    // requirement): {@link reviewVerdictOvertakenByActivity} fails CLOSED — an unreadable or absent
+    // `reviewVerdictPostedAt` (every caller that has not wired it, and any head with no later
+    // activity) never matches this row, and such a PR falls straight through to rows 4/6/7
+    // unchanged — byte-identical to this task's pre-existing behaviour.
+    disposition: "post-review",
+    when: (pr) =>
+      pr.checksState === "green" &&
+      pr.requiredContextsUnreadable !== true &&
+      pr.reviewState === "failure" &&
+      reviewVerdictOvertakenByActivity(pr),
+    reason: (pr) =>
+      `checks green, remudero-review failed but the PR has seen activity since that verdict was posted ` +
+      `(GitHub's PR object carries no body-specific timestamp, so this is activity-after-a-verdict, not ` +
+      `provably a body edit) — re-running the review lane on #${pr.prNumber} to judge the current input; ` +
+      `a fresh verdict is posted and the prior one is never carried forward`,
   },
   {
     // W1-T100: the exhaustion check now covers BOTH failure shapes — a failing
