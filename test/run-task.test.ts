@@ -86,11 +86,7 @@ import { readlineAsk, type GitRunner, materializeOriginShards, escalateCommand, 
   type AlertFixDispatchDeps,
   runTask,
   buildOpenPrViews,
-  STALL_WINDOW,
-  resolveAlreadySatisfiedWithRetry,
-  ALREADY_SATISFIED_VERIFY_ATTEMPTS,
-  type AlreadySatisfiedClaim,
-  type AlreadySatisfiedResolution,
+  STALL_WINDOW, resolveAlreadySatisfiedWithRetry, ALREADY_SATISFIED_VERIFY_ATTEMPTS, type AlreadySatisfiedClaim, type AlreadySatisfiedResolution,
 } from "../src/run-task.js";
 import { requestStop } from "../src/lib/fleet-control.js";
 import { LaunchdPlistError } from "../src/lib/launchd.js";
