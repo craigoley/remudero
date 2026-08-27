@@ -1,0 +1,143 @@
+- id: W1-T2409
+  title: "THE CONSOLE'S WRITE SURFACE HAS NEVER BEEN USED, AND REACHING IT REQUIRES LEAVING THE CONSOLE — all 15 panel steps, all 6 console literals, the PANEL- run-id prefix and console.ceiling_override_written read ZERO over 319,969 distinct rows of a three-form union, while the serve process wrote 30 rows of its own to the same ledger; the panel's own text says to go and run a shell command before the first click, and ten ratifiable proposals have never been ratified through it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 20.00
+  files: [src/lib/serve.ts, test/console-write-entry.test.ts]
+  origin: "operator-brief#console-write-surface-unused-2026-08-27"
+  plan_refs: ["W1-T202", "W1-T2211", "W1-T2273", "W1-T333", "W1-T371", "W1-T404"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE ID, AND THE ORDINAL READING RECORDED RATHER THAN ASSUMED. Eight surfaces swept, anchored
+    `W1-T2409([^0-9]|$)` with a `[0-9]` class and never `\d`, anchored printed beside unanchored at
+    every surface, every open-surface control drawn from the open set enumerated FIRST (HTTP 200,
+    array, 7 rows). SURFACE 1 READS 1: `refs/rmd-id/W1-T2409` resolves against 522 refs. Shard
+    filenames 0 of 661; declared ids 0 of 916; open-PR titles 0 of 7 CASE-SENSITIVELY (lower-case
+    probe also 0); bodies 0; head refs 0; merged trailers 0 of 749 trailer lines; merged subjects 0
+    of 2,466. EVERY CONTROL FIRES ON ITS OWN SURFACE — W1-T2403 on refs, filenames, declared ids,
+    bodies and subjects; W1-T2398 on merged trailers; W1-T2407 on open titles; and W1-T2332 on head
+    refs from the LIVE `run-W1-T2332-1787860315198` head of open #3133. Probes on a populated band:
+    W1-T240 reads anchored 0 against unanchored 10 on the refs, 0 against 2 on filenames, 1 against 3
+    on declared ids and 2 against 4 on subjects; W1-T233 reads 0 against 1 on head refs. THE BRIEF
+    SAID "THE SECOND RESERVED ID" and the band 2404-2409 is reserved and unfiled throughout, so the
+    ordinal cannot be resolved from the refs alone; W1-T2409 is the header's own number, is
+    reserved, and is unfiled, so it is what this files under. Renumbering is a one-line change.
+
+    ── Q1. WHAT ACTUALLY GUARDS THE CONSOLE, BY SYMBOL — AND THE ANSWER CORRECTS THE FRAMING ───
+
+    IN-PROCESS, THE BEARER TOKEN IS THE ONLY GATE, AND IT IS THE FIRST ONE, NOT THE SECOND.
+    `service.ts` gates every route on {@link ServiceTokens}; `ServiceOptions.identity` is the only
+    other authenticator the process has, and its own doc says it plainly: "Omitted: identity is
+    never consulted, byte-for-byte the pre-W1-T371 behavior." It is ADDITIVE by construction —
+    "identity tried first but purely ADDITIVE, the token the fallback".
+
+    AND ON THIS INSTALL IT IS OMITTED — VERIFIED, NOT ASSUMED. The live config at
+    `~/.config/remudero/config.json` has NO `serve` BLOCK AT ALL, so `serve.identityCapability` is
+    absent, `identityFromConfig` returns `undefined`, and no tailnet-identity gate is wired. (That
+    function also REFUSES at startup if `identityCapability` is set without `trustedProxy`, so a
+    half-configured identity gate cannot silently exist either.)
+
+    SO THE LOGIN THE OPERATOR SEES IS OUTSIDE THE PROCESS. A `cloudflared` tunnel container fronts
+    this host, and whatever it enforces is a Cloudflare-side policy: `serve.ts` neither reads it nor
+    knows it happened. THAT IS THE CORRECTION THIS SHARD RECORDS — the token is not a second gate
+    behind a first *in the application*; the application has exactly one gate, and the first gate is
+    invisible to it. A request arriving at `/v1/*` carries NO authenticated identity the code can
+    see: `req.socket.localAddress` identity headers are honoured only under the opt-in identity
+    config, which is off here.
+
+    WHAT THE TOKENS STILL BUY OVER AN EXTERNAL LOGIN, THEREFORE: everything the process itself
+    enforces. The login answers WHO reached the port; the token is the only thing answering WHETHER
+    THIS REQUEST MAY WRITE.
+
+    ── Q2. THE CAPABILITY SPLIT SURVIVES INDEPENDENTLY OF THE DELIVERY MECHANISM ────────────────
+
+    THE SPLIT IS NOT THE URL. It is two distinct grants — a READ bearer and a WRITE bearer — plus
+    {@link WriteTier} (`low`/`middle`/`high`) ranking a write route's consequence, with
+    `assertWriteTiersComplete` refusing a write-scoped route that declares none. An external login
+    authenticates WHO; it bounds nothing about WHAT. THOSE ARE ORTHOGONAL, so removing the write
+    token because a login exists would delete the only bound on consequence and keep only identity.
+    NOTHING HERE PROPOSES REMOVING A CONTROL, and a build that reads this as licence to collapse
+    read and write has answered a different question.
+
+    THE HAZARD THE SPLIT EXISTS AGAINST, AND THE ONE A CHANGE HERE MUST NOT REOPEN. W1-T2211 found
+    a worker could READ the console's write token: `serviceTokensPath` puts it at
+    `<config.root>/state/service-tokens.json`, under the state root, with no `denyRead` coverage —
+    `containment.ts` carries that read arm to this day. ANY NEW DELIVERY PATH MUST NOT WIDEN THAT: a
+    grant that writes the token to a second place on disk, or into a URL, or into a log, reopens
+    exactly the surface W1-T2211 measured.
+
+    ── Q3. THE MINIMUM CHANGE, AND MOST OF IT IS ALREADY BUILT ─────────────────────────────────
+
+    W1-T202 ALREADY RULED AND ALREADY SHIPPED THE HOLDING HALF. The write token lives CLIENT-SIDE in
+    `sessionStorage`, on XSS grounds, and "never in the URL"; the panel already renders an input for
+    it and starts write affordances DISABLED until one is entered. So the console can already ACCEPT
+    a write token once and hold it for the tab.
+
+    THE DEFECT IS THE OBTAINING, NOT THE HOLDING. The panel's own text is
+    "Read-only — write actions are unavailable. Enter a write token to enable them for this tab. Get
+    one by running: rmd console-url --write", and a second copy of that string sits on the refusal
+    path. An operator who is already authenticated, already looking at a ratifiable proposal, is
+    told to leave and run a shell command. Ten proposals read ratifiable and zero have been ratified
+    through the console; all 15 `panel.*` steps, all 6 `console.*` literals, the `PANEL-` run-id
+    prefix and `console.ceiling_override_written` all read ZERO — RE-MEASURED HERE rather than
+    carried, over the THREE-FORM union (0 `.gz`, 38 dated plain rotations, 1 live file) with a
+    per-form coverage control reading `run.start` at 0 / 7,320 / 203, across 319,969 DISTINCT rows.
+    (The brief's 471,539 is the raw line count before dedup; rotations overlap heavily, so the
+    distinct figure is the one this shard carries.) THE CONTROL FIRES: 30 `serve.*` rows written by
+    the serve process itself appear in the same union, so the query can see rows from that process
+    and the ledger is writable by it. The surface is reachable and simply never used, and W1-T333's
+    audit trail has never had anything to record.
+
+    SO THE MINIMUM IS A ONE-TIME IN-CONSOLE GRANT, NOT A URL PARAMETER AND NOT A REMOVED BOUNDARY.
+    The console already holds; what it lacks is a way to ASK. A URL parameter is refused by W1-T202
+    on its own grounds and by W1-T2211's on-disk hazard. Collapsing read and write is the larger
+    decision Q2 declines. What remains is the narrow one: an authenticated operator can obtain the
+    write grant without leaving the page, once per tab, with the token still never in the URL and
+    never written anywhere new.
+
+    WHAT THIS SHARD DOES NOT DECIDE. It does not choose HOW the grant is asked for — that is the
+    build's, and the operator gates it. It records only that the token MECHANISM is still right and
+    the token ENTRY is not.
+
+    ── WHAT IS OWNED ELSEWHERE, RECORDED SO THIS DOES NOT RE-FILE IT ───────────────────────────
+
+    W1-T2273 owns that every escalation option terminates in a shell command — the same shape one
+    layer out, and not re-filed here. W1-T202 owns client-side token holding and the no-URL rule.
+    W1-T2211 owns the token's on-disk readability. W1-T371/W1-T398 own the optional identity gate.
+    THIS SHARD OWNS ONLY WHETHER THE TOKEN MECHANISM IS STILL THE RIGHT ENTRY.
+
+    RISK BAND. `risk: high` is set UP FRONT and is RULE 19'S SPAN, not blast radius: `files:` crosses
+    the `serve` stem and this task's own test stem, which the sizing check reads as more than one
+    concern and refuses at `risk: medium`. The blast radius is one entry path on a surface that has
+    never been used.
+  acceptance:
+    - claim: "an authenticated operator can obtain the write grant without leaving the console"
+      proof: "unit test: test/console-write-entry.test.ts"
+    - claim: "the write token still never rides the URL"
+      proof: "unit test: test/console-write-entry.test.ts"
+    - claim: "the write token is written to no path it was not already written to"
+      proof: "unit test: test/console-write-entry.test.ts"
+    - claim: "the read and write grants remain distinct and a read grant still cannot write"
+      proof: "unit test: test/console-write-entry.test.ts"
+    - claim: "a write route with no declared tier is still refused"
+      proof: "unit test: test/console-write-entry.test.ts"
+    - claim: "the optional identity gate is unchanged and still omitted by default"
+      proof: "unit test: test/console-write-entry.test.ts"
+    - claim: "nothing added paces or throttles or sleeps a call"
+      proof: "unit test: test/console-write-entry.test.ts"
+  falsifier: |
+    If a fresh three-form union read shows ANY `panel.*` row, any `console.*` literal, any `PANEL-`
+    run id or any `console.ceiling_override_written` row, the write surface has been used and this
+    task must be re-derived rather than trusted — the premise is that it never has. The measurement
+    to re-run is the same one, over the archive-plus-live union with a per-form coverage control,
+    with the SERVE PROCESS'S OWN 31 ROWS as the positive control proving the ledger is writable and
+    the query can see rows written from that process.
+
+    SEPARATELY FALSIFYING: if `serve.identityCapability` is set on the install, the process DOES see
+    an authenticated identity before any route runs, Q1's answer changes, and what the tokens buy
+    must be re-derived against that gate rather than against an external one the code cannot read.
