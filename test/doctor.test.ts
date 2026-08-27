@@ -7,7 +7,11 @@
  * test — which stopped four PRs on the day this was written.
  */
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
+import { readCheckoutDepth } from "../src/run-task.js";
 
 import {
   DOCTOR_USAGE_EXIT,
@@ -937,4 +941,14 @@ test("doctor: a merged verdict row builds the local projection, and a truthy non
   assert.equal(localMergedProjections([{ step: "verdict", merged: true }]).size, 0);
   // and a non-verdict step never contributes
   assert.equal(localMergedProjections([{ step: "run.start", task_id: "W1-T9", merged: true }]).size, 0);
+});
+
+test("W1-T2332: readCheckoutDepth's shared try/catch returns undefined on an unreadable directory — the arm the ratchet's route-4 comment describes", () => {
+  // THE CATCH ARM, DRIVEN. `readCheckoutDepth` runs BOTH git reads inside ONE try/catch, so a
+  // directory git cannot read is the honest way to reach it without a seam: `git rev-parse
+  // --is-shallow-repository` fails and the whole measurement is treated as absent rather than
+  // partially guessed. `undefined` is "not measured" — `judgeCheckoutDepth` refuses on it by name.
+  const missing = join(tmpdir(), `rmd-t2332-absent-${process.pid}`);
+  assert.equal(existsSync(missing), false, "CONTROL: the directory really is absent, so git really will fail");
+  assert.equal(readCheckoutDepth(missing), undefined, "a failed read is undefined, never a guessed depth");
 });
