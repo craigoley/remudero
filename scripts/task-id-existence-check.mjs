@@ -513,7 +513,19 @@ export function evaluateIds(citedHits, declaredIds, reservation, baseline) {
   return results;
 }
 
-function main(argv) {
+/**
+ * EXPORTED for the same reason the thirteen functions above are: this script is a plain `.mjs`
+ * and its own suite covers error/degradation arms by importing them, because a subprocess's
+ * coverage is not the parent run's (test/task-id-existence-check.test.ts says so in as many
+ * words). The open-PR half's wiring below lives HERE rather than in an exported helper, so
+ * without this export those lines are reachable only by a subprocess and therefore uncoverable.
+ *
+ * Behaviour is unchanged: the direct-execution guard at the bottom of this file still decides
+ * whether `main` runs on `node scripts/task-id-existence-check.mjs`, and an importing caller must
+ * invoke it deliberately. It communicates through `process.exitCode`, so an in-process caller is
+ * responsible for saving and restoring that — see the test.
+ */
+export function main(argv) {
   const { values } = parseArgs({
     args: argv,
     options: {
