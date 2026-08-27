@@ -6845,6 +6845,16 @@ export async function runFixRung(opts: {
           // criterion 1). Never recorded against `unmet_count`/any task's own criteria (acceptance
           // criterion 4) — this only ever fixes the body's SHAPE.
           strikes = attempt;
+          // W1-T2306: TAG THIS STRIKE WITH THE VERDICT REGIME IT WAS SPENT UNDER — the SAME
+          // computation the ordinary dispatch below uses (W1-T199), not a bespoke one, so both
+          // `fix.dispatch` writers agree on what "executed" means. Before this, this arm was the
+          // ONLY writer of `fix.dispatch` that omitted `verdict_regime` — an omission read by
+          // `strikeRegimeOf` as "keyword_only" BY CONSTRUCTION (never a decision), which let the
+          // amnesty in `priorStrikesFor` erase every body-repair strike the instant the task's
+          // regime turned "executed", however many were spent (this task's rationale, §1/§2).
+          const verdictRegime: StrikeRegime = review.criteria.some((c) => c.proof_exec !== "not_executable")
+            ? "executed"
+            : "keyword_only";
           deps.log("fix.dispatch", {
             strike: strikes,
             strike_cap: opts.strikeCap,
@@ -6852,6 +6862,7 @@ export async function runFixRung(opts: {
             round: attempt === 1 ? "resume" : "fresh",
             mode: "body-repair",
             defect: repair.defect,
+            verdict_regime: verdictRegime,
           });
           deps.say(
             `fix rung: strike ${strikes}/${opts.strikeCap} — repaired an author-time acceptance-gate ` +
