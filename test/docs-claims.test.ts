@@ -100,6 +100,52 @@ export function checkUnitTestLiteralMatchClaim(claudeMdText: string): { ok: bool
   return { ok: true };
 }
 
+/**
+ * W1-T2334: derive, from the COMMANDS registry (never a hand-written list — the whole point,
+ * mirroring `checkVerbCoverage` above), every verb whose OWN blurb claims read-only-ness
+ * (`READ-ONLY`/`Read-only`, case-insensitive). This is the population `checkCliFreshness`
+ * (src/lib/self-sync.ts) can silently fast-forward `main` in front of before the verb's first
+ * line ever runs — see rationale (1)/(2) of the W1-T2334 task record. A verb added later that
+ * also claims read-only-ness is picked up automatically; nothing here needs redoing.
+ */
+export function readOnlyClaimingVerbs(commands: readonly { name: string; usage: string }[]): string[] {
+  return commands.filter((c) => /read-only/i.test(c.usage)).map((c) => c.name);
+}
+
+/**
+ * The operator-facing guide must state, ONCE and prominently (design (ii) of the task record —
+ * not pasted onto every read-only-claiming row), that the CLI ENTRY POINT — not the verb body —
+ * can fast-forward this checkout's `main` (`git merge --ff-only origin/main`, checkCliFreshness)
+ * before almost any verb dispatches, and must document `RMD_SELF_SYNC_DONE=1` as the idiom that
+ * provably skips it. When the derived population is empty (no COMMANDS entry claims read-only-
+ * ness at all) the check has nothing to guard and trivially holds — see the falsifier below for
+ * proof this check DOES turn RED against the real defect wording.
+ */
+export function checkFastForwardEscapeHatchClaim(
+  operatorGuideText: string,
+  readOnlyVerbNames: readonly string[],
+): { ok: boolean; reason?: string } {
+  if (readOnlyVerbNames.length === 0) return { ok: true };
+  if (!/RMD_SELF_SYNC_DONE/.test(operatorGuideText)) {
+    return {
+      ok: false,
+      reason:
+        "docs/operator-guide.md never documents RMD_SELF_SYNC_DONE=1 as the escape hatch that keeps " +
+        `a verb claiming read-only-ness (${readOnlyVerbNames.join(", ")}) provably read-only, even ` +
+        "though the CLI entry point (checkCliFreshness) can fast-forward main before it runs",
+    };
+  }
+  if (!/ff-only|fast-forward/i.test(operatorGuideText)) {
+    return {
+      ok: false,
+      reason:
+        "docs/operator-guide.md documents RMD_SELF_SYNC_DONE but never states the entry-point " +
+        "condition (git merge --ff-only origin/main) it is the escape hatch for",
+    };
+  }
+  return { ok: true };
+}
+
 // ── The real docs: each check currently holds ────────────────────────────────────────────────
 
 test("docs-claims: README.md does not claim the repo currently contains the WS-0 spike", async () => {
@@ -124,6 +170,22 @@ test("docs-claims: docs/operator-guide.md's command table covers every COMMANDS 
   const guide = await readFile(join(REPO_ROOT, "docs", "operator-guide.md"), "utf8");
   const result = checkVerbCoverage(guide, COMMANDS);
   assert.ok(result.ok, `operator-guide.md is missing verb(s): ${result.missing.join(", ")}`);
+});
+
+test("docs-claims: docs/operator-guide.md names the entry-point fast-forward and documents RMD_SELF_SYNC_DONE=1", async () => {
+  const guide = await readFile(join(REPO_ROOT, "docs", "operator-guide.md"), "utf8");
+  const verbs = readOnlyClaimingVerbs(COMMANDS);
+  const result = checkFastForwardEscapeHatchClaim(guide, verbs);
+  assert.ok(result.ok, result.reason);
+});
+
+test("docs-claims: the fast-forward-escape-hatch check derives its audited verbs from the COMMANDS registry", () => {
+  const verbs = readOnlyClaimingVerbs(COMMANDS);
+  assert.ok(verbs.length > 0, "expected at least one real COMMANDS entry to claim read-only-ness");
+  // Both quoted verbatim in the task record's rationale (3) as the two operator-facing surfaces
+  // that promised read-only-ness while the entry point could still fast-forward ahead of them.
+  assert.ok(verbs.includes("emissions"), "emissions is the generated-surface example the task cites");
+  assert.ok(verbs.includes("check-proof"), "check-proof is the hand-written-guide example the task cites");
 });
 
 test("docs-claims: docs/ci-gate.md is removed, not a one-line probe artifact", () => {
@@ -162,6 +224,35 @@ test("docs-claims falsifier: an operator guide missing a real COMMANDS verb turn
   const result = checkVerbCoverage(guideMissingOne, commands);
   assert.equal(result.ok, false);
   assert.deepEqual(result.missing, ["sweep"]);
+});
+
+test("docs-claims falsifier: readOnlyClaimingVerbs derives from usage text, never a hand-written list", () => {
+  const commands = [
+    { name: "a", usage: "rmd a   # READ-ONLY: does nothing" },
+    { name: "b", usage: "rmd b   # writes a cache file" },
+    { name: "c", usage: "rmd c   # Read-only: writes no ledger line" },
+  ];
+  assert.deepEqual(readOnlyClaimingVerbs(commands), ["a", "c"]);
+});
+
+test("docs-claims falsifier: the CURRENT unqualified wording (RECON R-2334, quoted verbatim at triage) turns the check RED", () => {
+  // Verbatim at triage (rationale (3) of the task record), BEFORE this task's fix: the guide
+  // claims check-proof is read-only about its own body and never mentions the entry-point
+  // fast-forward or its escape hatch anywhere.
+  const preFix =
+    "| `rmd check-proof <proof>` | Run ONE acceptance proof ... Read-only: writes no cache, no " +
+    "ledger line, no state file. |\n" +
+    "Every item below is read-only or near enough, so the failure mode is not damage.\n";
+  const result = checkFastForwardEscapeHatchClaim(preFix, ["check-proof"]);
+  assert.equal(result.ok, false);
+  assert.match(result.reason ?? "", /RMD_SELF_SYNC_DONE/);
+});
+
+test("docs-claims falsifier: RMD_SELF_SYNC_DONE named without the fast-forward condition still turns the check RED", () => {
+  const partial = "Set RMD_SELF_SYNC_DONE=1 to skip the freshness check for some reason.\n";
+  const result = checkFastForwardEscapeHatchClaim(partial, ["check-proof"]);
+  assert.equal(result.ok, false);
+  assert.match(result.reason ?? "", /ff-only|entry-point condition/);
 });
 
 test("docs-claims falsifier: a docs/ci-gate.md probe artifact reappearing turns the ci-gate-doc check RED", () => {

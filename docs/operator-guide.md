@@ -16,6 +16,20 @@ not driving it turn by turn.
 All logic lives in TypeScript; `bin/rmd` is a thin `exec` wrapper into
 `src/run-task.ts`.
 
+**Before almost any verb's own body runs, the CLI entry point can fast-forward this checkout.**
+`checkCliFreshness` (`src/lib/self-sync.ts`) runs ahead of dispatch for every verb except
+`daemon`/`serve` (their own service-freshness gate), `deploy-run` (no gate at all), `sync` (the
+sanctioned unstick verb this gate would otherwise block), and `doctor`/`status` (explicitly
+exempted, W1-T1134) — so a row below that calls a verb "read-only" (`check-proof`, `emissions`,
+and others) is describing that verb's *own body* only. When your checkout is clean, behind
+`origin/main`, on branch `main`, not a linked worktree, and no dirty path overlaps the incoming
+diff, the entry point runs `git merge --ff-only origin/main` and re-execs — before your verb's
+first line. Any other case (a linked worktree, a detached HEAD, a dirty path the merge would also
+write, or a real divergence) refuses instead, with the remedy, and never mutates. **To run any
+verb provably read-only — including from a script — set `RMD_SELF_SYNC_DONE=1` in the
+environment**, e.g. `RMD_SELF_SYNC_DONE=1 rmd check-proof '...'`: this is the exact loop-guard a
+real self-sync re-exec sets on its own child, so it skips the whole check, not even a fetch.
+
 | Command | What it does |
 |---|---|
 | `rmd run-task <task-id>` | Run one `plan/tasks.yaml` entry end to end (see [task-lifecycle.md](task-lifecycle.md)). |
@@ -353,10 +367,14 @@ sits. Workflow placement was simply irrelevant to that half.
 
 ## Where to run a verb, and why the wrong place answers confidently
 
-Every item below is read-only or near enough, so the failure mode is not damage — it is a
-**confident wrong answer**. The pattern is always the same: a tool answered about state it could
-not see, in the same tone it uses when it can. Each was reproduced on `Craigs-Mac-mini` on
-2026-08-22; where a claim did **not** reproduce here, that is said rather than repeated.
+Every item below is read-only or near enough about the state it inspects, so the failure mode is
+not damage — it is a **confident wrong answer**. (The CLI entry point itself is the one exception
+to "read-only": see the fast-forward caveat under [**The commands**](#the-commands-rmd-binrmd)
+above — it can still advance this checkout's `main` before some of the read-only verbs below even
+start, and `RMD_SELF_SYNC_DONE=1` is the idiom that keeps a run provably read-only.) The pattern
+below is always the same: a tool answered about state it could not see, in the same tone it uses
+when it can. Each was reproduced on `Craigs-Mac-mini` on 2026-08-22; where a claim did **not**
+reproduce here, that is said rather than repeated.
 
 - **A gate piped through `head` gives you `head`'s exit code.** `(exit 1) | head -3` leaves `$?` at
   **0** while `${PIPESTATUS[0]}` is **1**. A `diff-coverage` calibration read `EXIT=0` while the

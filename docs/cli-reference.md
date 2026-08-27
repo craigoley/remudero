@@ -81,6 +81,12 @@ usage:
 
 An UNKNOWN command, or an unrecognized argument to a command, prints this usage and exits
 NON-ZERO, spawning nothing — the control surface never falls through to a drain on bad input.
+
+A command's own description above is accurate about what ITS BODY does; the CLI ENTRY POINT
+can still fast-forward this checkout's main first (git merge --ff-only origin/main) on a
+clean, behind, on-main checkout, before almost any command dispatches — see the operator
+guide's verb-table preamble for the exact condition. Set RMD_SELF_SYNC_DONE=1 to run any
+command provably read-only.
 ```
 
 ## Commands
