@@ -24,7 +24,8 @@ raw: >-
   2026-08-22T14:46:46.301Z: superseded-by #2494
 attachments: []
 origin: repair#stale
-status: new
+status: rejected
 proposal_pr: null
 summary: null
 expansion: null
+answered_by: null
