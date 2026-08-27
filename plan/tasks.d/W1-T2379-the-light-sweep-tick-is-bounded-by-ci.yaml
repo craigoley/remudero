@@ -160,3 +160,45 @@
     `files:` so the pure-path proofs resolve under the forward-reference carve-out and read
     `not_yet_built` until the build lands. Every proof is pure-path `unit test:`, so this shard
     carries no `grep:` pattern at all.
+
+    ── MERGE CREDIT, RECORDED AFTER THE FACT (amendment 2026-08-27) ────────────────────────────
+
+    THIS TASK IS BUILT AND MERGED. It shipped as PR #3095, "fix(sweep): stop the light-pass tick
+    waiting on the fix rung's CI wait", merged 2026-08-27T14:39:36Z as commit
+    `0144a66ce0d34dd5c919774b439ebb0de40e8952`.
+
+    CONFIRMED BY SYMBOL AT HEAD, NEVER BY TITLE. All three of the design's own symbols are present
+    on `origin/main` and absent at `0144a66c^`: `SweepDeps.detachFixWait` (`src/lib/sweep.ts`, 0 -> 7
+    references), `drainDetachedSweepActions` (0 -> 4), and `startInFlightTicker`'s `stop()`, which
+    now awaits that drain in `src/lib/daemon.ts` under a comment naming this task. So the build is
+    real and the redispatch below was not.
+
+    NOTHING CREDITED IT, AND ALL THREE CREDIT PATHS WERE VERIFIED EMPTY AGAINST A CONTROL THAT READS
+    ONE. #3095's PR BODY carries zero anchored `Remudero-Task:` lines of any id (control: #3048's
+    body reads 1 under the same query). Its MERGE COMMIT body is one byte long and carries none
+    (control: #3048's merge commit `06c1c5e5` reads 1). And its HEAD BRANCH was
+    `fix/light-pass-tick-not-bounded-by-ci`, which does not match `^run-W1-T2379-[0-9]+$` (control:
+    `run-W1-T2379-1787840674939` does match — that is the redispatch's own branch, which credits
+    nothing because that PR never merged).
+
+    SO THE FLEET DISPATCHED IT AGAIN. #3100, on `run-W1-T2379-1787840674939`, rebuilt work that was
+    already on main and was closed unmerged at 2026-08-27T15:29:35Z. That cycle cost $18.53.
+
+    WHAT THIS AMENDMENT CHANGES AND WHAT IT DOES NOT. `status` is NOT changed and is deliberately
+    left `queued`: it is a guarded field, so moving it would emit exactly one post-merge drift warn,
+    and it buys nothing — `isDispatchEligible` gates on the MERGED SET (`isMerged(t.id)`) and on
+    `status === "blocked"`, neither of which a status edit here would satisfy honestly. No
+    acceptance criterion is touched and `files:` is unchanged. The repair is not in this text at
+    all: it is the amending PR's own head branch (`run-W1-T2379-<epochMs>`) and its anchored
+    `Remudero-Task: W1-T2379` body line, which are exactly the two surfaces the credit paths read.
+
+    WHAT THIS DOES NOT FIX. THIS IS THE FOURTH HAND REPAIR OF THE SAME CLASS — W1-T2318 (#3059,
+    after four wasted dispatches), W1-T2323 (#3093, after six), W1-T2326, and now this one. A hand
+    repair credits ONE task and leaves the mechanism untouched, so the next build whose author does
+    not hand-write a trailer lands in the same place.
+
+    AND W1-T2387's UNION (#3102) DOES NOT COVER THIS ONE. That task teaches `findMergedByTrailer` a
+    second surface — the COMMIT trailer, which `appendTaskTrailerToCommit` writes automatically —
+    and #3095 has no trailer THERE either. A build carrying no trailer on ANY surface and no
+    `run-<taskId>-` head is a THIRD gap, distinct from the one W1-T2387 closes, and it is not filed
+    here.
