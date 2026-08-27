@@ -101,6 +101,23 @@
     other, and nothing depended on either. W1-T323 now carries a depends_on edge to this task —
     that direction only, because settling the denominator precedes flipping and the reverse edge
     would be a cycle. This task's own depends_on is deliberately left empty for that reason.
+    **OPERATOR RULING 2026-08-27 — A DELIBERATELY TEST-ONLY EXPORT SHIPPED WITHOUT A MARKER IS A
+    TRUE POSITIVE WITH A MISSING DECLARATION, NOT A FALSE POSITIVE.**
+
+    The declaration mechanism exists precisely for this case. WIRED_AT_RE (src/lib/review.ts) parses
+    a WIRED-AT marker naming the eventual call site, and the advisory's own guidance offers
+    SHIPS-UNWIRED plus a task id as the alternative. An author who ships an export nothing reaches,
+    and who KNOWS it, has a sanctioned way to say so.
+
+    The instance settles it. resetDefaultGhCallPacerForTest (src/lib/status.ts) carries TEST-ONLY in
+    its own header and states that no production code path calls it. The author knew, and wrote it
+    where the check does not read: src/lib/status.ts carries ZERO WIRED-AT or SHIPS-UNWIRED markers,
+    measured on this tree.
+
+    **THE CONSEQUENCE FOR THIS SHARD'S ARITHMETIC.** Counting such a symbol as a false positive
+    charges the check for an omission by the author. Under the ruling it counts as a true positive,
+    and the denominator this shard is about changes accordingly.
+
   design: |
     ONE CONCERN: whether W1-T323's flip criterion is decidable at its own sample size. This shard
     is a RECORD AND A PARKED RULING, satisfied by its own text on merge, in the shape W1-T1014 and

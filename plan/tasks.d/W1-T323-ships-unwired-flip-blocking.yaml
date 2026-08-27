@@ -71,6 +71,35 @@
     DECISION_RELEVANT_LEDGER_STEPS in the SAME change (the W1-T316(iv)/#977 rotation rule).
     NOT IN SCOPE: changing the scan, the markers, the window, or the threshold — those are
     W1-T322's contract; renegotiating them is a new filing, not a flip.
+    **OPERATOR RULING 2026-08-27 — DO NOT FLIP YET. THIS DEFERS THE DECISION; IT DOES NOT RE-BASE
+    THE WINDOW.** Recorded in this block rather than the rationale above because that field is a
+    QUOTED scalar on a record already merged, and appending prose inside quotes risks an escaping
+    error; design is prose the linter treats identically.
+
+    Under the companion ruling recorded on W1-T1120 — a deliberately test-only export shipped
+    without a marker is a TRUE POSITIVE with a missing declaration — the measured rate exceeds this
+    shard's own 5 percent threshold: the operator measures 10 of 13 flagged symbols since 08-18
+    still test-only, the oldest eight days.
+
+    **BUT THE ADVISORY HAS NEVER BEEN MET, SO THAT RATE IS NOT YET EVIDENCE ABOUT AUTHORS.** The
+    sanctioned escape has been used ZERO times to declare an intentional unwired ship across the
+    whole merged-body history, against a control of 544 Remudero-Task trailers on the same corpus.
+    The naive query misleads and was corrected: grepping the marker names over merged bodies returns
+    NINE lines, and every one is a MENTION of the mechanism — a commit subject building the floor, a
+    body observing that no marker was present — rather than a use of it. Zero uses, nine mentions.
+
+    **AND THE VISIBILITY ONLY JUST CHANGED.** PR 3021 rendered the unwired_export advisory into the
+    PR comment and PR 3027 did the same for inverse_scope, both merged within the last day. Before
+    those, an author could satisfy every gate without ever seeing the advisory that asks for the
+    marker. The flip is re-decided on whether marker usage appears AFTER that change.
+
+    **THE TENSION, NAMED RATHER THAN SMOOTHED.** Deferring because the advisory was invisible sits
+    close to renegotiating the measurement window, and this shard's own out-of-scope clause says
+    renegotiating the window is a NEW FILING, not a flip. The ruling stays on the flip side of that
+    line: the window is NOT re-based, no threshold moves, and the window stands exactly as written.
+    What is deferred is the decision, which this shard's own rationale pre-authorises. No new filing
+    is proposed here; that is a later decision.
+
   acceptance:
     - claim: "the operator confirms the window closed and the adjudicated false-positive rate, and the flip (or the recorded refusal to flip) matches the threshold criterion"
       proof: "demonstration: operator reads the review.unwired_advisory window from the ledger, adjudicates flagged PRs against source, and records the rate and the flip decision in this task's PR"
