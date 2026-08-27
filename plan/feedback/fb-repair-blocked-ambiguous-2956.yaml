@@ -1,0 +1,37 @@
+id: fb-repair-blocked-ambiguous-2956
+ts: 2026-08-27T05:50:38.029Z
+raw: >-
+  SWEEP REPAIR RECURRENCE: the "blocked-ambiguous" surface was repaired for 3
+  distinct PRs between 2026-08-27T00:00:00.000Z and 2026-09-03T00:00:00.000Z
+  (threshold 3, window 7d).
+
+
+  Root cause is UNOBSERVED — this is a recurrence report, not a diagnosis: the
+  sweep classifies and repairs the INSTANCE (each PR below), it does not
+  investigate why the CLASS keeps recurring.
+
+
+  EVIDENCE (read verbatim off each PR's own sweep.disposed ledger row, never
+  invented):
+
+  - PR #3030 (https://github.com/craigoley/remudero/pull/3030) at e9e5b39,
+  2026-08-27T00:10:24.842Z: merge conflict (mergeState dirty) involves a
+  deletion (or no file evidence was captured) — never auto-resolved — files:
+  src/lib/containment.ts (ours -7, theirs -2) — escalating
+
+  - PR #3039 (https://github.com/craigoley/remudero/pull/3039) at ee02fe5,
+  2026-08-27T03:46:33.201Z: fix strikes exhausted (2/2) — ci failed on ee02fe5 —
+  log NOT read: the log fetch was attempted and FAILED (Command failed: gh run
+  view --job 98398867704 --repo craigoley/remudero --log-failed) — escalating
+
+  - PR #3043 (https://github.com/craigoley/remudero/pull/3043) at 3283dcd,
+  2026-08-27T05:50:30.678Z: fix strikes exhausted (3/2) — ci failed on 3283dcd;
+  coverage-ratchet failed on 3283dcd — escalating
+attachments: []
+origin: repair#blocked-ambiguous
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
