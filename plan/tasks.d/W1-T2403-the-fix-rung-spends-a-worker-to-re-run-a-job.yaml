@@ -125,6 +125,52 @@
     the `run-task` fix-rung stem and this task's own test stem, which the sizing check reads as more
     than one concern and refuses at `risk: medium`. The blast radius is one accounting decision on a
     rung that already runs.
+
+    ── Q2 RESOLVED, AND IT IS THE SECOND CAUSE (amendment 2026-08-27) ──────────────────────────
+
+    THE ANSWER IS (ii): CONCLUDED-RUN SEMANTICS ON THE *RUN* ENDPOINT, NOT A PERMISSIONS GAP.
+    `POST .../actions/runs/{id}/rerun` refuses; `POST .../actions/jobs/{id}/rerun` does not. So the
+    fleet HAS a rung that costs no worker at all, and the paragraph above that says a build "must
+    settle Q2 first" is settled here rather than left standing.
+
+    EXERCISED, NOT INFERRED, AND RE-VERIFIED FROM THE ARTEFACTS IT LEFT. The operator ran the
+    single-JOB endpoint against #3089's `coverage-ratchet` job with the fleet's own credential and
+    it returned `rerun requested`. The run's own attempt record confirms it independently: CI run
+    33077620768 on head 5ab07d06 has THREE attempts — attempt 1 started 2026-08-27T13:35:27Z and
+    CANCELLED (the flake), attempt 2 started 15:02:19Z with `coverage-ratchet` running 15:02:23Z to
+    15:20:24Z and SUCCEEDING, and #3089 merged at 15:22:40Z, two minutes and sixteen seconds later.
+    (Attempt 3 started 15:25:43Z, AFTER the merge, and is not what unblocked it — the check-runs
+    endpoint shows only that latest attempt, which is why the attempt record was read instead.)
+
+    THE PERMISSION READING IS CORROBORATION AND IS DELIBERATELY NOT THE PROOF. `gh api
+    repos/craigoley/remudero --jq .permissions` returns
+    `{"admin":true,"maintain":true,"pull":true,"push":true,"triage":true}` BOTH from the operator
+    shell and from INSIDE the `remudero-daemon` container — the same credential the fleet runs on.
+    That field reports a REPOSITORY ROLE, not a fine-grained token's `actions` scope, so on its own
+    it could not have settled this; the exercised call and the attempt record are what do.
+
+    WHAT THIS CHANGES, AND IT IS THE WHOLE FRAME OF (Q1). The remedy is no longer strike accounting
+    on an UNAVOIDABLE worker spawn. The fix rung has a cheaper rung available to it and does not use
+    it: it spawns a worker on the expensive lane, and 11 of 72 commits on fix-touched PRs (15.3
+    percent) are retrigger-shaped, while 4 of the 10 strike-exhausted PRs in that sample carry one —
+    40 percent of exhaustions spent a strike on infrastructure noise. Every one of those had a
+    single-job re-run available instead.
+
+    THE LIMIT, STATED SO A BUILD CANNOT WALK INTO IT: `POST .../actions/runs/{id}/rerun-failed-jobs`
+    MUST NOT BE USED. It re-spends every failed job in the run and re-queues siblings that already
+    passed, which converts a targeted retrigger into a broad one on exactly the lane this task is
+    trying to stop spending. THE SINGLE-JOB ENDPOINT IS THE ONE THAT WAS EXERCISED and the only one
+    this record supports.
+
+    (Q3) IS NOT SUPERSEDED BY THIS AND ITS ANSWER STANDS. A cheap rung removes the WORKER cost; it
+    does not decide whether a retrigger should consume a strike. That question is still open, and
+    the answer above is unchanged: a non-consuming retrigger is safe only if a SEPARATE per-head
+    retrigger counter bounds it — W1-T2345's shape — never a timer, so a permanent flake stops and
+    escalates naming the check while a real defect still spends real strikes.
+
+    NO BUILD IS PROPOSED HERE. This records that Q2 resolved and which way; the remedy is a separate
+    task for the operator to gate. `fixStrikeCap` is untouched in either direction, and nothing
+    paces, throttles or sleeps.
   acceptance:
     - claim: "a retrigger-shaped fix outcome is recorded as such rather than as an ordinary repair"
       proof: "unit test: test/fix-rung-retrigger-accounting.test.ts"
