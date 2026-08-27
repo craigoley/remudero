@@ -86,6 +86,62 @@
     lines of the diff. That is the same filing-time/implement-time asymmetry, handled — and it
     degrades to the keyword floor under its OWN name rather than crediting anything. This task is
     the other half.
+
+    ── AMENDMENT 2026-08-27: THE FIRST-LISTED REMEDY IS NOT MERELY WRONG, IT IS UNAVAILABLE ──────
+
+    THIS SHARD ALREADY RECORDS THAT `proof-scope`'s FIRST-LISTED REMEDY — "add the path to
+    `files:`" — SILENCES THE WARN WITHOUT CHANGING THE PROOF, and that two shards took it and are
+    now `type: implement` tasks scoped to nothing but their own YAML. WHAT WAS NOT KNOWN THEN IS
+    THAT ON THE COMMONEST SHAPE THE REMEDY CANNOT BE TAKEN AT ALL.
+
+    MEASURED 2026-08-27, TWICE, BY TWO INDEPENDENT LANES. On a `verify: auto` task that also
+    declares `src/` and `test/` paths, adding the plan path to `files:` does not silence anything:
+    it trips the `rule15-filing` arm as a HARD BLOCK, whose message is "a dispatched worker gets ONE
+    PR and cannot split it" and whose own stated remedies are to file two tasks or move to
+    `verify: human`. Both lanes hit it on the first attempt and both reverted. NOTE THIS IS A
+    DIFFERENT RULE 15 ARM FROM THE ONE (2) ABOVE ALREADY NAMES: that one is
+    `criterionFieldTampered`, refusing a worker who edits criteria; this one refuses the FILE LIST
+    itself before any worker exists.
+
+    SO THE CHOICE IS NOT BETWEEN A SILENCED WARN AND AN HONEST ONE. It is between an ADVISORY
+    WARNING and a BLOCK, and the advisory's first-listed remedy is the blocked branch. A reader who
+    follows it on a mixed-scope `verify: auto` task does not get a quieter lint; they get a refusal.
+
+    Q1 — BOTH LANES TOOK THE WARNING, AND THAT WAS CORRECT HERE. The advisory states its own failure
+    mode: "if the path is still ABSENT when this is reviewed", the criterion grades `executed_fail`
+    instead of being carved out as `not_yet_built`. THAT CONDITION CANNOT HOLD FOR A PR THAT CREATES
+    THE FILE. On a filing, the shard is an added file in the very diff under review, so a `grep:` at
+    its own path resolves against bytes the PR carries. Both lanes pre-executed every proof before
+    pushing and both reported zero that would execute and fail. The warning was accepted with its
+    reason recorded, which is the honest disposition of an advisory whose named hazard is absent.
+
+    ⚠ Q2 — AND THE ACTIONABLE HALF IS A PROOF-FORM DISTINCTION THAT NOTHING STATES IN ONE PLACE.
+    A PR BODY and a SHARD need OPPOSITE proof forms, and each form fails in the other's context.
+
+      A PR BODY (a filing, no `Remudero-Task:` trailer, criteria read from the body) needs `grep:`
+      against bytes THE PR CARRIES. Its criteria are executed against the head as it stands.
+
+      A SHARD's own `acceptance:` needs the EXACT-PATH `unit test:` form with that path in `files:`.
+      `judgeCriterion`'s forward-reference carve-out (lib/review.ts) requires FOUR conditions
+      together: `whitelisted.kind === "test"`, `!whitelisted.nameFiltered`, the label present in the
+      diff's own shard `files:`, and the file absent on the head. Only then does it set
+      `not_yet_built`.
+
+    TWO FORMS, TWO OPPOSITE FAILURE MODES, AND BOTH WERE OBSERVED ON ONE PR. A `unit test:` proof
+    naming a test TITLE rather than a path is `nameFiltered`, so the carve-out is gated OFF and it
+    grades a no-match. A `grep:` proof at a symbol in a DECLARED-BUT-UNWRITTEN module is not
+    `kind === "test"` at all, so it is never carved out: it executes, finds nothing, and grades
+    `executed_fail`, which overrides keyword coverage. #3140 carried both mistakes at once and sat
+    red for two hours; its posted verdict names one executed-and-failed `grep:` and two title-form
+    proofs marked "test theater, not executed".
+
+    Q3 — NOTHING IS PROPOSED HERE. This shard is a record of a known-wrong remedy; this amendment
+    adds only that the remedy is also UNREACHABLE in the commonest case, and the proof-form
+    distinction that fell out of measuring it. Whether `proof-scope`'s advisory text should change
+    is a different task with different evidence, and is NOT proposed. Nothing here widens Rule 15,
+    edits the advisory, or adds a gate. The task's own `acceptance:`, `files:`, `title:`, `status:`
+    and `risk:` are untouched by this edit.
+
   design: |
     (i) A SELF-PATH GREP BECOMES ITS OWN NAMED VIOLATION, NOT THE GENERIC OUT-OF-SCOPE ONE. The
     two cases have different causes and different remedies, and the whole defect of (5) is that
