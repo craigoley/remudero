@@ -3966,26 +3966,17 @@ function repeatDispositionStreaksFromLedger(lines: ReadonlyArray<Record<string, 
 }
 
 /**
- * The repeat escalation's own `reason` string — deliberately NEVER a re-judgement of the
- * disposition (design Q1/Q3: "nothing here proposes a different verdict"), only a statement that
- * it has stopped moving.
- */
-function repeatEscalationReason(disposition: Disposition, dispositionReason: string, streak: number, bound: number): string {
-  return (
-    `disposition "${disposition}" has repeated ${streak} consecutive time(s) on the SAME head ` +
-    `(>= ${bound} repeat bound) — the sweep's own verdict is unchanged and not in question, only ` +
-    `its unchanging repetition is: ${dispositionReason}`
-  );
-}
-
-/**
- * Render the repeat-bound trip as a {@link ClarificationQuestion} — reusing the SAME shape (and
- * the SAME `deps.escalate()` transport) the blocked-ambiguous rung already uses, per this task's
- * `files:` scope (`src/lib/sweep.ts` + `test/sweep.test.ts` only, so this reaches the existing
- * digest/inbox surface with no new escalation vocabulary and no edit to `escalate.ts`/`digest.ts`/
- * `run-task.ts`). Unlike {@link renderClarificationQuestion}, there is no single unmet criterion
- * to point at — the two resolutions name the two honest outcomes of a verdict that is not itself
- * disputed, only stuck repeating.
+ * Render the repeat-bound trip as a {@link ClarificationQuestion}. Unlike
+ * {@link renderClarificationQuestion}, there is no single unmet criterion to point at — the two
+ * resolutions name the two honest outcomes of a verdict that is not itself disputed, only stuck
+ * repeating.
+ *
+ * W1-T2381: NO PRODUCTION CALLER. It was written to feed `deps.escalate()` from the repeat-bound
+ * trip; that call is gone (W1-T2345 refused the issue surface in terms and the measurement backed
+ * the refusal — see the trip's own comment). The function is RETAINED rather than deleted because
+ * it is exported and pinned by a test, so removing it would delete a passing test for behaviour
+ * nobody has ruled on; its former doc claimed it "reaches the existing digest/inbox surface",
+ * which is no longer true and is corrected here rather than left to read as current.
  */
 export function renderRepeatEscalationQuestion(
   pr: OpenPrView,
@@ -5556,18 +5547,27 @@ export async function runSweep(
     // quiet until the head moves" half of the acceptance criteria.
     if (repeatBoundTripped && !repeatAlreadyEscalated && !deps.dryRun) {
       try {
-        await deps.escalate(
-          pr,
-          repeatEscalationReason(disposition, reason, repeatStreak, policy.repeatDispositionBound),
-          renderRepeatEscalationQuestion(pr, disposition, reason, repeatStreak, policy.repeatDispositionBound),
-        );
+        // W1-T2381: THE LEDGER ROW IS THE WHOLE OUTPUT — no `deps.escalate()` call.
+        //
+        // W1-T2345's own rationale refused the issue surface in terms ("a second queue nobody
+        // drains is not an answer and this task refuses to file one. The escalation surface is
+        // THE DIGEST"), and its build routed the trip to `deps.escalate()` anyway. MEASURED over
+        // the eight trips that produced: ONE `escalation.issue_opened` and SEVEN
+        // `escalation.deduped` comments landing on issues titled for a DIFFERENT cause, because
+        // the dedup key is task+head+cause and never the repeat condition. `escalation.deduped`
+        // has exactly one consumer in `src/` — its own writer — so seven of eight trips reached
+        // no reader at all.
+        //
+        // THE SURFACE IS `digest.ts`, which reads this row directly (#3085) and therefore reaches
+        // 8 in 8. It consumes exactly the three fields written below.
         log("sweep.repeat_escalated", { pr_number: pr.prNumber, disposition, streak: repeatStreak, head_sha: pr.headSha });
         repeatEscalatedNow = true;
       } catch (e) {
-        // W1-T254 per-PR throw containment, mirrored: a throw from the real GH gateway is this
-        // PR's own signal, never the whole pass. `repeatEscalatedNow` stays false, so THIS
-        // attempt is not recorded as having fired — the next pass (streak now one higher) tries
-        // again rather than silently forgetting the notification forever on a transient failure.
+        // W1-T254 per-PR throw containment, KEPT after W1-T2381 removed the escalate call: the
+        // remaining `log` is a real ledger append and can still throw on I/O (ENOSPC, EACCES),
+        // and one PR's failed write must never take the whole pass. `repeatEscalatedNow` stays
+        // false, so THIS attempt is not recorded as having fired — the next pass (streak now one
+        // higher) tries again rather than silently forgetting the notification forever.
         log("sweep.repeat_escalate_failed", { pr_number: pr.prNumber, error: String((e as Error)?.message ?? e) });
       }
     }

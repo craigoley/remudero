@@ -51,6 +51,8 @@ import {
 import { reviewLedgerReasons, type CriterionVerdict, type ReviewVerdict } from "../src/lib/review.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import { appendLedger, type LedgerLine } from "../src/lib/ledger.js";
+// W1-T2381: the trip's surviving surface is the digest, so the end-to-end test renders one.
+import { buildDigest } from "../src/lib/digest.js";
 import { escalate, FLEET_NOTICE_LABEL, NEEDS_HUMAN_LABEL, type IssueGateway, type OpenIssue } from "../src/lib/escalate.js";
 
 // ── fixtures ────────────────────────────────────────────────────────────────
@@ -4096,6 +4098,28 @@ test("W1-T528: the failure classifier separates a conflict from an ordinary erro
 // following) locks the real default at 50, so the low-bound tests and the shipped constant never
 // silently drift apart.
 
+/**
+ * W1-T2381: THE REPEAT BOUND'S OUTPUT IS A LEDGER ROW, NOT AN INJECTED ESCALATION EFFECT.
+ *
+ * These tests used to read `deps.escalated.length` as a proxy for "the bound tripped". That proxy
+ * died with the `deps.escalate()` call W1-T2345's own rationale refused ("a second queue nobody
+ * drains is not an answer"); the row is what `digest.ts` reads (#3085). The counter's behaviour —
+ * bound, (disposition, head_sha) key, head reset, once-per-head — is unchanged and still pinned.
+ *
+ * `fakeDeps` wires no `log`, so `deps.log ?? (() => {})` swallows the row: a test that asserted on
+ * the ledger FILE without wiring one would read 0 and pass for the wrong reason. This collector is
+ * wired explicitly, per test, and shared across that test's passes so streaks accumulate.
+ */
+function tripLog(): { trips: Array<Record<string, unknown>>; log: NonNullable<SweepDeps["log"]> } {
+  const trips: Array<Record<string, unknown>> = [];
+  return {
+    trips,
+    log: (step, extra = {}) => {
+      if (step === "sweep.repeat_escalated") trips.push({ ...(extra as Record<string, unknown>) });
+    },
+  };
+}
+
 test("W1-T2345: the default repeat-disposition bound is 50, per the measured merge-time derivation", () => {
   assert.equal(
     DEFAULT_SWEEP_POLICY.repeatDispositionBound,
@@ -4111,26 +4135,25 @@ test("W1-T2345: a verdict repeated on an unchanged head escalates differently on
   const shared = ledgerPath();
   const target = mergeablePr();
 
-  const first = fakeDeps({ ledgerPath: shared });
+  const t = tripLog();
+
+  const first = fakeDeps({ ledgerPath: shared, log: t.log });
   await runSweep([target], first, REPEAT_BOUND_3);
-  assert.equal(first.escalated.length, 0, "pass 1 of 3 — nowhere near the bound");
+  assert.equal(t.trips.length, 0, "pass 1 of 3 — nowhere near the bound");
 
-  const second = fakeDeps({ ledgerPath: shared });
+  const second = fakeDeps({ ledgerPath: shared, log: t.log });
   await runSweep([target], second, REPEAT_BOUND_3);
-  assert.equal(second.escalated.length, 0, "pass 2 of 3 — still short of the bound");
+  assert.equal(t.trips.length, 0, "pass 2 of 3 — still short of the bound");
 
-  const third = fakeDeps({ ledgerPath: shared });
+  const third = fakeDeps({ ledgerPath: shared, log: t.log });
   await runSweep([target], third, REPEAT_BOUND_3);
-  assert.equal(third.escalated.length, 1, "pass 3 of 3 trips the bound — exactly one escalation");
-  assert.match(
-    third.escalated[0].reason,
-    /disposition "mergeable" has repeated 3 consecutive time\(s\) on the SAME head \(>= 3 repeat bound\)/,
-  );
-  // Reuses the SAME deps.escalate() transport the blocked-ambiguous rung already calls — the
-  // existing digest/inbox surface, with no second escalation vocabulary and no new field on
-  // SweepDeps at all.
-  assert.equal(third.escalated[0].question.prNumber, target.prNumber);
-  assert.equal(third.escalated[0].question.resolutions.length, 2, "exactly two candidate resolutions, like every other clarification");
+  // W1-T2381: the trip's WHOLE output is this row. It opens no issue and calls no escalation effect.
+  assert.equal(t.trips.length, 1, "pass 3 of 3 trips the bound — exactly one ledger row");
+  assert.equal(third.escalated.length, 0, "and NO escalation effect is invoked at all");
+  assert.equal(t.trips[0].pr_number, target.prNumber);
+  assert.equal(t.trips[0].disposition, "mergeable");
+  assert.equal(t.trips[0].streak, 3);
+  assert.equal(t.trips[0].head_sha, target.headSha, "the row carries the head the streak is keyed on");
 });
 
 test("W1-T2345: the bound keys on the verdict and the head, never the rendered reason text", async () => {
@@ -4162,9 +4185,11 @@ test("W1-T2345: the bound keys on the verdict and the head, never the rendered r
     reason: "review success, required checks green — arming auto-merge (attempt 2, still waiting)",
     head_sha: target.headSha,
   });
-  const deps = fakeDeps({ ledgerPath: shared });
+  const t = tripLog();
+  const deps = fakeDeps({ ledgerPath: shared, log: t.log });
   await runSweep([target], deps, REPEAT_BOUND_3);
-  assert.equal(deps.escalated.length, 1, "2 seeded rows + this pass's own = 3 — the bound trips despite 3 distinct reason strings");
+  assert.equal(t.trips.length, 1, "2 seeded rows + this pass's own = 3 — the bound trips despite 3 distinct reason strings");
+  assert.equal(deps.escalated.length, 0, "W1-T2381: and it opens no issue doing so");
 });
 
 test("W1-T2345: the escalation is emitted once per trip and not repeated while the head is unchanged", async () => {
@@ -4187,26 +4212,30 @@ test("W1-T2345: the escalation is emitted once per trip and not repeated while t
 
 test("W1-T2345: a head that moves resets the count, so a PR making progress is never escalated for repetition", async () => {
   const shared = ledgerPath();
+  const t = tripLog();
   const headA = mergeablePr();
   for (let i = 0; i < REPEAT_BOUND_3.repeatDispositionBound - 1; i++) {
-    await runSweep([headA], fakeDeps({ ledgerPath: shared }), REPEAT_BOUND_3);
+    await runSweep([headA], fakeDeps({ ledgerPath: shared, log: t.log }), REPEAT_BOUND_3);
   }
-  const trippedOnA = fakeDeps({ ledgerPath: shared });
+  const trippedOnA = fakeDeps({ ledgerPath: shared, log: t.log });
   await runSweep([headA], trippedOnA, REPEAT_BOUND_3);
-  assert.equal(trippedOnA.escalated.length, 1, "sanity: head A trips the bound on its 3rd pass");
+  assert.equal(t.trips.length, 1, "sanity: head A trips the bound on its 3rd pass");
+  assert.equal(trippedOnA.escalated.length, 0, "W1-T2381: and opens no issue");
 
   // A NEW head — same disposition, but a genuine push landed.
   const headB: OpenPrView = { ...headA, headSha: "bbbb222" };
-  const firstOnB = fakeDeps({ ledgerPath: shared });
+  const firstOnB = fakeDeps({ ledgerPath: shared, log: t.log });
   await runSweep([headB], firstOnB, REPEAT_BOUND_3);
-  assert.equal(firstOnB.escalated.length, 0, "streak resets to 1 on the new head — nowhere near the bound");
+  assert.equal(t.trips.length, 1, "streak resets to 1 on the new head — still just head A's one trip");
 
   // The reset is a restart, never a one-way disablement: head B can trip the SAME bound on its
   // own, given its own 3 consecutive passes.
-  await runSweep([headB], fakeDeps({ ledgerPath: shared }), REPEAT_BOUND_3);
-  const trippedOnB = fakeDeps({ ledgerPath: shared });
+  await runSweep([headB], fakeDeps({ ledgerPath: shared, log: t.log }), REPEAT_BOUND_3);
+  const trippedOnB = fakeDeps({ ledgerPath: shared, log: t.log });
   await runSweep([headB], trippedOnB, REPEAT_BOUND_3);
-  assert.equal(trippedOnB.escalated.length, 1, "head B reaches its OWN 3rd consecutive pass and escalates again");
+  assert.equal(t.trips.length, 2, "head B reaches its OWN 3rd consecutive pass and trips again");
+  assert.equal(t.trips[1].head_sha, headB.headSha, "the second row is keyed on head B, not head A");
+  assert.equal(trippedOnB.escalated.length, 0, "W1-T2381: still no issue — the reset restarts the LEDGER signal");
 });
 
 test("W1-T2345: tripping the bound never changes the derived disposition — the sweep keeps re-deriving fresh every pass", async () => {
@@ -4238,8 +4267,9 @@ test("W1-T2345: a dry run never escalates and leaves no repeat-streak trace", as
 test("W1-T2345: nothing added paces, throttles, or sleeps a call — no timer is ever scheduled", async () => {
   const shared = ledgerPath();
   const target = mergeablePr();
+  const t = tripLog();
   for (let i = 0; i < REPEAT_BOUND_3.repeatDispositionBound - 1; i++) {
-    await runSweep([target], fakeDeps({ ledgerPath: shared }), REPEAT_BOUND_3);
+    await runSweep([target], fakeDeps({ ledgerPath: shared, log: t.log }), REPEAT_BOUND_3);
   }
   const originalSetTimeout = globalThis.setTimeout;
   // Poisoned for the duration of this one trip only, restored unconditionally below — W1-T1066
@@ -4250,12 +4280,70 @@ test("W1-T2345: nothing added paces, throttles, or sleeps a call — no timer is
     throw new Error("runSweep's repeat-escalation must never schedule a timer — nothing paces, throttles, or sleeps a call");
   };
   try {
-    const deps = fakeDeps({ ledgerPath: shared });
+    const deps = fakeDeps({ ledgerPath: shared, log: t.log });
     await runSweep([target], deps, REPEAT_BOUND_3);
-    assert.equal(deps.escalated.length, 1, "the bound still trips correctly with setTimeout poisoned");
+    assert.equal(t.trips.length, 1, "the bound still trips correctly with setTimeout poisoned");
+    assert.equal(deps.escalated.length, 0, "W1-T2381: and still opens no issue");
   } finally {
     globalThis.setTimeout = originalSetTimeout;
   }
+});
+
+// ── W1-T2381: THE TRIP'S SURFACE IS THE DIGEST, AND ONLY THE DIGEST ────────────────────────────
+
+test("W1-T2381: a tripped bound reaches the DIGEST and opens no issue — the surface W1-T2345's design named", async () => {
+  const shared = ledgerPath();
+  const target = mergeablePr();
+  // The REAL wiring: production hands `deps.log` a sink that appends to the ledger, and
+  // `buildDigest` reads that same file. Wiring it here is what makes this end-to-end rather than a
+  // restatement of the collector — the row has to survive the file to be rendered.
+  const log: NonNullable<SweepDeps["log"]> = (step, extra = {}) =>
+    appendLedger(shared, { run_id: "SWEEP", task_id: target.taskId ?? "SWEEP", step, ...(extra as Record<string, unknown>) } as never);
+
+  let deps = fakeDeps({ ledgerPath: shared, log });
+  for (let i = 0; i < REPEAT_BOUND_3.repeatDispositionBound; i++) {
+    deps = fakeDeps({ ledgerPath: shared, log });
+    await runSweep([target], deps, REPEAT_BOUND_3);
+  }
+
+  const digest = buildDigest(shared, "1970-01-01T00:00:00.000Z");
+  assert.match(digest, /stuck \(repeat bound\)/, "the trip is RENDERED in the digest — the surface the shard named");
+  assert.match(digest, new RegExp(String(target.prNumber)), "and it names the PR that is stuck");
+
+  // AND NOTHING WAS ESCALATED. This is the whole point of the task: no issue, no question row.
+  assert.equal(deps.escalated.length, 0, "no escalation effect was invoked on the tripping pass");
+  const opened = readLedgerLines(shared).filter((l) => l.step === "escalation.issue_opened");
+  assert.equal(opened.length, 0, "and no escalation.issue_opened row exists anywhere in the ledger");
+});
+
+test("W1-T2381: a quiet board renders no repeat line at all — an absence, never a placeholder", () => {
+  const shared = ledgerPath();
+  appendLedger(shared, { run_id: "SWEEP", task_id: "SWEEP", step: "run.start" });
+  const digest = buildDigest(shared, "1970-01-01T00:00:00.000Z");
+  assert.ok(!/stuck \(repeat bound\)/.test(digest), "a board with no trip omits the line ENTIRELY");
+  // CONTROL: the assertion above is not vacuous on an unrenderable digest — the digest really rendered.
+  assert.ok(digest.length > 0, "sanity: a digest was produced at all");
+});
+
+test("W1-T2381: a trip on a HEALTHY disposition produces no needs-human traffic", async () => {
+  // Two of the eight measured live trips fired on dispositions that are not blocked at all
+  // (`mergeable`, `post-review`), so the issue route made a healthy PR generate BLOCKED-class,
+  // `needs-human`-labelled traffic asserting a reconciliation that never happened.
+  const shared = ledgerPath();
+  const target = mergeablePr();
+  const t = tripLog();
+  let deps = fakeDeps({ ledgerPath: shared, log: t.log });
+  for (let i = 0; i < REPEAT_BOUND_3.repeatDispositionBound; i++) {
+    deps = fakeDeps({ ledgerPath: shared, log: t.log });
+    await runSweep([target], deps, REPEAT_BOUND_3);
+  }
+  assert.equal(t.trips.length, 1, "sanity: the bound really tripped on a healthy `mergeable` PR");
+  assert.equal(t.trips[0].disposition, "mergeable", "and the row records the healthy disposition honestly");
+  assert.equal(deps.escalated.length, 0, "a healthy PR generates NO needs-human traffic from the repeat bound");
+});
+
+test("W1-T2381: the sixty-minute pending ceiling is untouched by this change", () => {
+  assert.equal(DEFAULT_SWEEP_POLICY.pendingCeilingMinutes, 60, "unchanged — this task owns only where the trip is ROUTED");
 });
 
 test("W1-T2345: renderRepeatEscalationQuestion never re-litigates the verdict, only its repetition", () => {
@@ -4277,21 +4365,26 @@ test("W1-T2345: an ALREADY-escalated blocked-ambiguous PR still trips the repeat
   const shared = ledgerPath();
   const target = strikesExhaustedPr();
 
-  const first = fakeDeps({ ledgerPath: shared });
+  const t = tripLog();
+
+  const first = fakeDeps({ ledgerPath: shared, log: t.log });
   await runSweep([target], first, REPEAT_BOUND_3);
+  // W1-T2381 TOUCHES NOTHING HERE: the blocked-ambiguous rung keeps its OWN escalation.
   assert.equal(first.escalated.length, 1, "pass 1: blocked-ambiguous's own escalation fires (streak 1, nowhere near the bound)");
 
-  const second = fakeDeps({ ledgerPath: shared });
+  const second = fakeDeps({ ledgerPath: shared, log: t.log });
   await runSweep([target], second, REPEAT_BOUND_3);
   assert.equal(second.escalated.length, 0, "pass 2: blocked-ambiguous is deduped (W1-T514) and the repeat streak (2) is still short");
 
-  const third = fakeDeps({ ledgerPath: shared });
+  const third = fakeDeps({ ledgerPath: shared, log: t.log });
   await runSweep([target], third, REPEAT_BOUND_3);
   assert.equal(
-    third.escalated.length,
+    t.trips.length,
     1,
     "pass 3: blocked-ambiguous is STILL deduped, but the repeat counter independently trips — a second, distinct " +
-      "notification, never a silence just because the first escalation already happened",
+      "signal on its OWN surface, never a silence just because the first escalation already happened",
   );
-  assert.match(third.escalated[0].reason, /disposition "blocked-ambiguous" has repeated 3 consecutive time\(s\)/);
+  assert.equal(t.trips[0].disposition, "blocked-ambiguous");
+  assert.equal(t.trips[0].streak, 3);
+  assert.equal(third.escalated.length, 0, "W1-T2381: the repeat trip itself opens no issue — pass 1's was the only one");
 });
