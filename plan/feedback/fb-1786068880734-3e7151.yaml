@@ -30,7 +30,8 @@ raw: "node_modules EMPTIED TWICE IN 24 HOURS AND THE FLEET LOOKS ALIVE WHILE IT
   exists."
 attachments: []
 origin: cli
-status: new
-proposal_pr: null
+status: proposed
+proposal_pr: https://github.com/craigoley/remudero/pull/3036
 summary: null
 expansion: null
+answered_by: null

@@ -1,0 +1,179 @@
+- id: W1-T2349
+  title: "THE BEAT CARRIES DAEMON LIVENESS, THE INSTALL VERDICT, THE RESTART BUDGET AND THREE SHAS — AND NOT ONE FIELD ABOUT THE DEPLOY CYCLE, which went 7h26m overdue with nothing off-host reporting it: `runDeployCycle` logs a `deploy.*` line every tick (even a no-op logs `deploy.skip`), so the recency is one more grep of a ledger scripts/fleet-heartbeat.sh already opens — publish it and let the watcher judge it per host"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 18.00
+  rationale: |
+    Filed from feedback#fb-1786068880734-3e7151 (the SECOND emptying of the shared `node_modules`,
+    2026-08-06 evening). THAT FEEDBACK CARRIED TWO RECON QUESTIONS AND ONLY ONE OF THEM IS STILL
+    OPEN. Grounding first, so nobody re-decides the closed half:
+
+    (1) CLOSED, AND SHIPPED. "Can a health tick assert the presence of `node_modules/.bin/tsx` and
+    escalate, noting that an escalation path written in TypeScript cannot run once it fires?"
+    `scripts/fleet-heartbeat.sh` answers it exactly as the feedback framed it and its header quotes
+    the incident verbatim: it is PLAIN BASH AND GIT by rule, it stats `node_modules/.bin/tsx`,
+    counts `node_modules` with `ls -1A`, and publishes `tsx_present`, `node_modules_entries` and an
+    `rmd_verdict` that says `BROKEN: node_modules is empty — every rmd verb and the launchd
+    supervisor are dead`. `.github/workflows/fleet-heartbeat-watch.yml` reads it OFF the host and
+    delivers through `scripts/needs-human-issue.mjs`. MASTER-PLAN records the family as live
+    ("per-host heartbeat/build-sha publication (T496/#1844)"). The CAUSE half is likewise already
+    filed and must not be re-filed here: W1-T2313 sweeps the instruction that commanded the install,
+    W1-T2314 locks it out of the rendered corpus, W1-T2312 adds the deny-floor refusal.
+
+    (2) STILL OPEN, AND IT IS THIS TASK. "Establish whether the launchd supervisor's death is itself
+    detectable: it went 7h26m overdue with nothing reporting it, and 'the supervisor has not ticked
+    in N minutes' is a cheaper signal than the cause." NOTHING OFF THE HOST CARRIES THAT SIGNAL.
+    Measured over the beat's own payload (`scripts/fleet-heartbeat.sh`, the heredoc): it publishes
+    `daemon_verdict`, `daemon_last_ts`, `daemon_last_step`, `daemon_last_age_s`, `daemon_boot_*`,
+    `rmd_verdict`, `tsx_present`, `node_modules_entries`, `install_head_sha`, `ledger_*`,
+    `disk_free_kb`, `restart_*` and `image_build_sha*` — and NO field derived from the deploy cycle.
+    The watcher's only finding is the beat's own absence.
+
+    (3) THE FEEDBACK'S OWN FALSIFYING CHECK LANDS ON "WHERE THE CHECK LIVES", NOT "WHETHER IT
+    EXISTS" — which is why this is a beat field and not a new sensor. The check ALREADY EXISTS on
+    the host and is correct: W1-T301 shipped it, and `status-board.ts`'s `ServiceLivenessRow`
+    carries `tickAt` / `tickAgeMs` / `tickStep` / `lastExitCode` / `overdueThresholdMs` for
+    `deploy-supervisor`, with `serviceKind()` modelling it as an `interval` service so a healthy
+    one-shot between ticks never renders as "not running". It is reached through `rmd status` —
+    `bin/rmd` execs `node_modules/.bin/tsx`. IN THE STATE THIS FEEDBACK DESCRIBES THAT RENDERER IS
+    ITSELF DEAD, and in the state where only the deploy cycle has stopped nobody thinks to run it.
+    A correct check on a surface that cannot be reached is the whole finding.
+
+    (4) THE SIGNAL NEEDS NO NEW LEDGER STEP, AND THAT IS LOAD-BEARING. `status-board.ts` records
+    the fact and `src/lib/deployer.ts` bears it out: every `rmd deploy-run` cycle logs a `deploy.*`
+    line — `deploy.skip` on a same-head no-op, plus `deploy.kickstart`, `deploy.ok`,
+    `deploy.console_ok` on a real one. So the MAX `ts` over the `deploy.` prefix is an
+    always-advancing signal, exactly as the MAX over `daemon.` already is for `deriveLastPoll` and
+    for this script. RE-DERIVE THAT FROM `runDeployCycle` BEFORE BUILDING (Standing rule 7) and DO
+    NOT ADD AN UNCONDITIONAL LOG CALL TO MANUFACTURE ONE; if the re-derivation shows some tick path
+    that logs nothing at all, say so in the report and publish the honest absent reading rather
+    than inventing a sensor inside an observability task.
+
+    (5) WHY THIS IS CHEAP AND WHY IT IS WORTH A SHARD ANYWAY. One grep of a file the script already
+    opens, one comparison, two payload lines and one branch in the watcher's loop. Against that: a
+    deploy cycle that stops while the daemon keeps polling is INVISIBLE — the fleet dispatches,
+    merges and reviews on code that stops advancing, and every existing instrument reads green.
+    That is the same shape W1-T494 is filed for one rung further down (the daemon running stale code
+    with both published shas agreeing), and this is its cause-side twin: the thing whose job is to
+    advance the install stopped, and nobody is told.
+  design: |
+    (i) ONE PROBE IN `scripts/fleet-heartbeat.sh`, IN THE IDIOM ALREADY THERE. Take the MAX `ts`
+    over lines whose step begins `deploy.`, with the same `grep`/`sed`/`sort | tail -n 1` shape the
+    `daemon.` probe uses — ISO-8601 UTC sorts lexicographically, so that is a true max and never
+    assumes append order. Reuse `epoch_of` and `human_age`. NO new file is opened, NO `jq`, NO
+    network call, and above all NO node and NO tsx: the script's header states that constraint as
+    the one thing it may never trade away, and this task exists BECAUSE of that constraint, so
+    re-opening it here would be self-defeating.
+
+    (ii) THE FIELD NAMES ARE FIXED, BECAUSE CRITERION 4 GREPS ONE OF THEM. Publish
+    `supervisor_verdict` plus the supporting `supervisor_last_ts`, `supervisor_last_step`,
+    `supervisor_last_age_s` and `supervisor_source`, mirroring the `daemon_*` block one-for-one so
+    a reader who has learned one has learned the other. `supervisor_verdict` must be the string
+    criterion 4 finds in the watcher.
+
+    (iii) ABSENT NEVER READS AS HEALTHY, AND NEVER READS AS AGE ZERO. This is the law this repo has
+    corrected repeatedly and which `restart_count` and `image_build_sha` in this same script already
+    obey: a read that did not happen must NOT produce the most reassuring value in the field's
+    range. An unreadable ledger, or a ledger with no `deploy.` line at all, publishes
+    `supervisor_verdict=unknown` with `supervisor_source` carrying the reason, and OMITS
+    `supervisor_last_age_s` rather than writing `0`.
+
+    (iv) A HOST THAT NEVER HAD A DEPLOY CYCLE IS NOT A FINDING — THE SAME NOT-INSTALLED RULE THE
+    WATCHER ALREADY LIVES BY, AND THE PART MOST LIKELY TO BE BUILT WRONG. The container host runs
+    the fleet under docker with no launchd and advances its tree from `deploy/entrypoint.sh`, so its
+    ledger may legitimately carry no `deploy.` line ever. `HEARTBEAT_BRANCHES` already lists more
+    than one host. A watcher that alarms hourly about a machine that has no deploy cycle to begin
+    with is the fastest way to get this whole instrument muted — the workflow's own header says so
+    about absent branches. So: NEVER-PRESENT is SILENT; only a host that HAS `deploy.` evidence and
+    has gone quiet past the window is reported. Decide that per branch, never collapsing to
+    "some host is fine".
+
+    (v) THE THRESHOLD IS DERIVED AND GENEROUS, AND ITS NUMBER IS ARGUED IN THE FILE. The installed
+    unit's `StartInterval` is ~120s and `parseSupervisorStartInterval` (`src/lib/launchd.ts`)
+    already exists to read it rather than restate it — but the BEAT may not shell an `rmd` verb to
+    get it, so either carry a generous constant with the multiple justified in a comment, or read
+    the plist with the same grep-not-a-parser discipline the script uses on `config.json`, and say
+    which you chose and why. Size it GENEROUSLY against an unmeasured population, as
+    `STALE_AFTER_MINUTES: 30` was: the observed failure was 7h26m, so even a very loose bound wins
+    the whole finding, while a tight one manufactures false alarms out of launchd jitter and a
+    deploy cycle that legitimately deferred behind the idle gate (`DEPLOY_IDLE_DEFER_CEILING_MS`,
+    W1-T469/W1-T341 — READ THAT DEFER PATH BEFORE PICKING THE NUMBER; a deferred cycle still logs,
+    but confirm it rather than assume it).
+
+    (vi) THE WATCHER MUST RAISE IT, NOT MERELY CARRY IT. A field nobody reads is the exact defect
+    W1-T494's rationale (3) names — the daemon writes the evidence down and no consumer reads it.
+    So `.github/workflows/fleet-heartbeat-watch.yml` judges `supervisor_verdict` per branch inside
+    the loop it already runs, counts it like `stale`, and names the condition in
+    `heartbeat-report.txt` so the delivered body says WHICH failure fired. KEEP ONE ISSUE THREAD:
+    delivery stays `scripts/needs-human-issue.mjs --source fleet-heartbeat`, whose idempotency rides
+    the `<!-- needs-human:fleet-heartbeat -->` marker; a second source would fork the thread for a
+    condition about the same host. The existing title reads "the machine has stopped reporting",
+    which is WRONG for a fresh beat carrying a stalled deploy cycle — the report body must lead with
+    the condition per branch so the comment is not misread.
+
+    (vii) THE SELF-CHECK GAINS THE NEW DISCRIMINATION, IN THE STEP THAT ALREADY EXISTS. That step's
+    `seed`/`beat` helpers already build a synthetic ledger and assert the three verdicts the script
+    separates. Add the fixtures this field needs — a fresh `deploy.` line, an hours-old one, and a
+    ledger with none — and assert the staleness predicate discriminates at its own boundary in both
+    directions, exactly as the existing `is_stale` self-check does. A watcher that reports health
+    regardless of input reads as coverage that does not exist.
+
+    (viii) OUT OF SCOPE, NAMED SO IT IS NOT RE-DERIVED. The on-host renderer (`src/lib/status.ts`,
+    `src/lib/status-board.ts`, `serviceKind`, `ServiceLivenessRow`) is CORRECT and is not touched —
+    this adds the off-host seam it cannot reach, it does not replace it. No restart policy, no exit
+    code, no plist and no deploy behaviour changes: this task changes only whether the operator is
+    told. The `node_modules`/`tsx` cause is W1-T2312/W1-T2313/W1-T2314's and the stale-pin field is
+    W1-T494's; neither is re-opened here.
+  acceptance:
+    - claim: "a beat seeded with a recent deploy ledger line publishes that tick age off-host"
+      proof: "unit test: test/fleet-heartbeat-supervisor-tick.test.ts"
+    - claim: "a beat seeded with a deploy line older than the window publishes an overdue verdict while the daemon and install fields still read healthy"
+      proof: "unit test: test/fleet-heartbeat-supervisor-tick.test.ts"
+    - claim: "a ledger carrying no deploy line publishes an unknown reading with its reason and omits the age rather than writing zero"
+      proof: "unit test: test/fleet-heartbeat-supervisor-tick.test.ts"
+    - claim: "the watcher reads the published verdict per branch instead of judging only the beat's absence"
+      proof: "grep: supervisor_verdict in .github/workflows/fleet-heartbeat-watch.yml"
+  risk: high
+  origin: "feedback#fb-1786068880734-3e7151"
+  plan_refs: ["W1-T301", "W1-T483", "W1-T494", "W1-T496", "W1-T469", "W1-T2312"]
+  files: [scripts/fleet-heartbeat.sh, .github/workflows/fleet-heartbeat-watch.yml, test/fleet-heartbeat-supervisor-tick.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    `risk: high` IS SET UP FRONT, ON RULE 19 SPAN AND NOT ON BLAST RADIUS — `files:` covers
+    `scripts/`, `.github/` and `test/`, and `sizingViolation` (`src/lib/task-linter.ts`) blocks at
+    >=2 subsystems below `high`. This is the same band and the same argument W1-T483 carries for the
+    same three paths. Nothing here gates a PR, changes a restart policy or blocks a dispatch.
+
+    RULE 25 IS ENGAGED AND IS NOT A SURPRISE. `.github/workflows/` matches `INSTRUMENT_SURFACE`
+    (`src/lib/review.ts`), so `detectInstrumentEntanglement` sees this changeset. It is named here
+    rather than discovered in review. NO `src/` PATH IS DECLARED, deliberately: design (viii) forbids
+    touching the on-host renderer, and declaring an untouched path trips
+    `inverseScopeUntouchedFiles`. `src/run-task.ts` is not declared either — nothing here touches it,
+    and naming a 19,000-line file serialises this task against every other that does (W1-T471).
+
+    THE TEST IS A NEW FILE, FOR W1-T494'S REASON. `test/fleet-heartbeat.test.ts` already carries two
+    DECLARED host-parity divergences (`HOST_PARITY_BASELINE`, `src/lib/host-parity.ts`) over the
+    BSD/GNU `date` split; a new file keeps this task's coverage off that fault line. This shard's own
+    path is NOT in `files:` — adding it converts `proof-scope` warnings into a hard `rule15-filing`
+    violation (measured on W1-T464).
+
+    FILE OVERLAP IS EXPECTED AND IS NOT A DEPENDENCY. W1-T483 and W1-T494 also declare
+    `scripts/fleet-heartbeat.sh`, so `partitionByFileOverlap` will not co-dispatch them with this —
+    that is serialisation, not blocking, and there is no ordering requirement in either direction:
+    this field derives from the `deploy.` prefix, W1-T494's from `daemon.stale_code`, W1-T483's from
+    `docker inspect`. `depends_on: []` is therefore correct. Whichever lands second rebases one
+    heredoc.
+
+    THE PROOFS ARE PURE-PATH FORWARD REFERENCES for the three `unit test:` criteria — the file does
+    not exist yet, and a path parses now where an invented test title would match zero tests forever.
+    Criterion 4 is a `grep:` on purpose: it is the one assertion that the FIELD REACHED A CONSUMER,
+    which is the difference between this task and a field nobody reads.
+
+    EVERY MEASUREMENT ABOVE IS A QUERY, NOT A QUOTED NUMBER. Re-derive the payload's current field
+    list from the heredoc in `scripts/fleet-heartbeat.sh`, the `deploy.*` step names from
+    `runDeployCycle` (`src/lib/deployer.ts`), and the interval from the installed unit — never from
+    this record.
