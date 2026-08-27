@@ -616,9 +616,33 @@ export interface SweepPolicy {
    * W1-T2345 (MEASURED 2026-08-26, `sweep.disposed` ledger rows, 44,603 rows across 1,156 PRs) —
    * THE UNBOUNDED-IDENTICAL-DISPOSITION BOUND: once one PR's (disposition, head_sha) pair — see
    * {@link repeatDispositionStreaksFromLedger}'s own doc for why the KEY excludes the rendered
-   * `reason` text — repeats this many CONSECUTIVE `sweep.disposed` rows, the sweep escalates
-   * exactly once (never again until the head moves) via the SAME `deps.escalate()` the
-   * blocked-ambiguous rung already calls.
+   * `reason` text — repeats this many CONSECUTIVE `sweep.disposed` rows, the sweep escalates via
+   * the SAME `deps.escalate()` the blocked-ambiguous rung already calls.
+   *
+   * W1-T2382 — THE GUARANTEE IS ONCE PER HEAD *PER ROTATION WINDOW*, NOT ONCE PER HEAD. This doc
+   * said "exactly once (never again until the head moves)" and the storage layer does not provide
+   * that. The streak and the `escalated` marker are both folded out of `sweep.disposed` ROWS, and
+   * `rotateLedger`'s PASS 3 collapses every row for one `pr@head` to a single line, PREFERRING the
+   * last `acted: true` row. The trip's `repeat_escalated: true` flag rides an `acted: false` row —
+   * so the evidence is not shed by chance, it is SELECTED AGAINST. After a rotation the fold sees a
+   * fresh run of length 1 and the bound re-arms.
+   *
+   * MEASURED: #3025 escalated at streak 188 and again at EXACTLY 50 three hours later on the
+   * identical head; #3039 at 106 then 50. The seconds land exactly on the bound because the streak
+   * restarted at 1 — rotation at 06:48:35Z, second fire at 08:53:16Z, 124.7 minutes against a
+   * measured 2.49-2.65 min/row and a bound of 50 which is roughly 125 minutes.
+   *
+   * AND THE WINDOW IS BYTE-DRIVEN, NOT CLOCK-DRIVEN. `rotateLedger` fires on a 4 MiB size ceiling,
+   * so the window is SHORTEST EXACTLY WHEN THE FLEET IS BUSIEST — which is when stuck heads
+   * accumulate. There is no interval a reader can quote; only a volume.
+   *
+   * THE COST, MEASURED AND RECORDED SO THIS IS NOT RE-OPENED: roughly 5-6 re-fires per day per
+   * stuck head, against roughly 543 dispositions per day without the counter — about 99% of the
+   * intended reduction is still delivered. One extra fire costs one ledger row plus a comment on an
+   * ALREADY-OPEN issue, and #3085's digest reader dedups by PR number, so it gains nothing from the
+   * repeat. THIS IS A RECORD, NOT A FIX: the remedy would be editing rotation's PASS 3, the
+   * highest-blast-radius edit available for a defect costing one row every four hours, and
+   * `src/lib/ledger.ts` is deliberately outside this task's `files:` — that exclusion IS the ruling.
    *
    * WHY 50, DERIVED AGAINST THE MERGE-TIME POPULATION, NOT PICKED: the measured PR's longest
    * identical-verdict run (keyed this way) was 186, reached at 132 minutes of PR age. Across the
@@ -3899,7 +3923,9 @@ interface RepeatDispositionRun {
   disposition: string;
   /** Consecutive `sweep.disposed` rows ending at (and including) the last one read. */
   streak: number;
-  /** Whether the one-time repeat escalation already fired somewhere inside THIS run. */
+  /** Whether the repeat escalation already fired somewhere inside THIS run, as the SURVIVING rows
+   *  report it. W1-T2382: "this run" is bounded by rotation as well as by the head — see
+   *  {@link SweepPolicy.repeatDispositionBound}'s own doc. */
   escalated: boolean;
 }
 
@@ -3929,7 +3955,16 @@ interface RepeatDispositionRun {
  * — this is the head-move reset the acceptance criteria ask for. `escalated` is carried forward
  * unconditionally once set (a row's own `repeat_escalated: true`, written only on the pass that
  * trips the bound — see `runSweep`'s own call site) for as long as the run continues, so the
- * one-time escalation this fold gates never re-fires while the head stays put.
+ * escalation this fold gates does not re-fire while the head stays put AND THE ROWS IT READS
+ * SURVIVE.
+ *
+ * W1-T2382 — THAT SECOND CLAUSE IS THE WHOLE CAVEAT, AND IT USED TO BE MISSING. This fold reads
+ * `sweep.disposed` rows, and rotation's PASS 3 keeps one row per `pr@head`, preferring the last
+ * `acted: true` one; the flag rides an `acted: false` row, so the marker is SELECTED AGAINST rather
+ * than merely aged out. Post-rotation this fold legitimately sees a run of length 1 and reports
+ * `escalated: false` — it is reading what is there, and the defect is not in this function. See
+ * {@link SweepPolicy.repeatDispositionBound}'s own doc for the measurement, the cost, and why the
+ * remedy is deliberately out of scope.
  *
  * Rows with no numeric `pr_number`, no string `head_sha`, or no string `disposition` are skipped
  * — the same fail-open shape every sibling ledger fold in this module already takes on a
@@ -5537,7 +5572,7 @@ export async function runSweep(
     let repeatEscalatedNow = false;
     // Skipped entirely under --dry-run (a preview must leave no trace — the same rule
     // `finalizeDisposition`'s own `sweep.disposed` write already follows) and whenever a prior
-    // pass already fired this run's one-time escalation (`repeatAlreadyEscalated`) — the "stays
+    // pass already fired this run's escalation (`repeatAlreadyEscalated`) — the "stays
     // quiet until the head moves" half of the acceptance criteria.
     if (repeatBoundTripped && !repeatAlreadyEscalated && !deps.dryRun) {
       try {
