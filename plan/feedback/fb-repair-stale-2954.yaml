@@ -30,7 +30,8 @@ raw: >-
   2026-08-16T01:43:31.080Z: superseded-by #1927
 attachments: []
 origin: repair#stale
-status: new
+status: proposed
 proposal_pr: null
 summary: null
 expansion: null
+answered_by: null

@@ -1,0 +1,173 @@
+- id: W1-T2384
+  title: "EVERY `stale` CLOSE ON THIS SURFACE IS DECIDED BY ARITHMETIC AND RECORDS A BARE NUMBER — the bare-number `superseded-by #N` row fires on `supersededBy != null` with no evidence, both evidence-bearing rows above and below it are inert because `OpenPrView.supersessionVerdict` still has NO PRODUCER, and the detector W1-T920 deferred to `a separate shard` was never filed: so a `repair#stale` recurrence report is unobservable BY CONSTRUCTION"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 55.00
+  risk: high
+  rationale: |
+    FILED FROM `plan/feedback/fb-repair-stale-2954.yaml` BY READING SOURCE IN THIS WORKING TREE. Every
+    file and line cited below was read here; nothing was measured against a live ledger or GitHub, and
+    the counts this shard does NOT have are named as absent rather than guessed (see note).
+
+    (1) THE FEEDBACK'S OWN EVIDENCE IS THE DEFECT, VERBATIM. All five rows the entry quotes off each
+    PR's `sweep.disposed` ledger row read exactly one string: `superseded-by #1690`, `#1797`, `#1813`,
+    `#1887`, `#1927`. That is not the sweep being terse — it is the WHOLE reason the row can produce.
+    `DISPOSITION_RULES` (`src/lib/sweep.ts`) renders it as `reason: (pr) => "superseded-by #" +
+    pr.supersededBy`, a template over one integer. The entry says "root cause is UNOBSERVED"; for this
+    surface that is guaranteed by the row, not by the reporter.
+
+    (2) THE MATCH IS PURE ARITHMETIC AND CARRIES NO POLICY, NO JUDGEMENT AND NO EVIDENCE. The row's
+    `when` is `pr.supersededBy != null && !(policy.conceptCoexistenceEnabled === true &&
+    pr.supersessionVerdict?.status === "unique")`. `supersededBy` is computed in
+    `buildOpenPrViews`/`resolveOpenPrTaskId` (`src/run-task.ts`) as the highest-numbered OTHER open PR
+    crediting the same task — W1-T932's rationale (1) states it in those words and this shard does not
+    re-derive it. So "a peer with a bigger number shares my task id" is the entire finding recorded
+    when the fleet closes someone's pull request.
+
+    (3) BOTH EVIDENCE-BEARING ROWS ARE STRUCTURALLY INERT, AND FOR THE SAME MISSING PIECE. The row
+    ABOVE (W1-T920) already renders exactly what a diagnosis needs — `superseded by #N (task X) —
+    diff: N hunk(s) over N raw line(s) [corpus control]` — and the clause that lets the bare-number row
+    YIELD (W1-T932) reads a positive `"unique"` finding. Both read `pr.supersessionVerdict`, and
+    NOTHING IN THE FLEET EVER SETS IT. `src/lib/producer-completeness.ts` says so in its own allowlist
+    entry: "until that detector wires a producer into buildOpenPrViews, this field is always undefined
+    in the real gateway, so the gated row it feeds never matches in production even with
+    sweep.supersessionDisposal on". `plan/policy.yaml` repeats it: "turning this flag on changes
+    nothing in production until that detector lands."
+
+    (4) THE DETECTOR WAS DEFERRED IN WRITING AND THE SHARD IT WAS DEFERRED TO DOES NOT EXIST. W1-T920's
+    design says under "WHAT MUST NOT BE BUILT": "the detector itself (rationale (1) — a separate
+    shard)". Searched here across `plan/tasks.yaml` and every `plan/tasks.d/*.yaml`: the 20 shards
+    mentioning supersession are W1-T920 (the field + the gated row), W1-T932 (the coexistence yield),
+    W1-T921 (branch preservation on close), W1-T485/W1-T506 (a DIFFERENT, task-level "substance shipped
+    under another trailer" git-log detector, whose subject is `proofGrepTargets` and never
+    `OpenPrView`), and fourteen that merely cite `supersessionVerdict` as a standing producer-less
+    field. NO SHARD OWNS THE PRODUCER. It has been deferred, cited as deferred fourteen times, and
+    never filed.
+
+    (5) THE SIBLING FIELD WAS ALREADY RESCUED THIS EXACT WAY, WHICH IS WHY THE SHAPE IS NOT SPECULATIVE.
+    W1-T984 ("conflict evidence has no producer") wires `mergeConflict` through
+    `hydrateMergeConflictEvidence` in `src/lib/open-prs-rest.ts`, assigned at `buildOpenPrViews`
+    (`src/run-task.ts`), bounded and best-effort, with the allowlist entry removed in the same PR and
+    the consuming row left gated OFF so disposition stays byte-identical. That producer is already
+    called from `buildOpenPrViews` (`src/run-task.ts`, `hydrateMergeConflictEvidence(owner, repo,
+    "main", dirtyPrs, fetch)`) — so the seam, the cap discipline and the fail-undefined direction all
+    exist and are copied here rather than designed.
+
+    (6) THE CANDIDATE SET IS TINY, WHICH IS THE COST ARGUMENT. Evidence is needed only for PRs the
+    arithmetic ALREADY flagged (`supersededBy != null`) — this very feedback entry counts FIVE across a
+    7-day window, and its successor `fb-repair-stale-2955` counts three across the next one. That is
+    the same "fetch only for the small already-identified set" shape `hydrateMergeConflictEvidence`
+    uses for `dirty` PRs.
+
+    (7) WHY THIS IS NOT COVERED BY THE DISPATCH-DEDUP FAMILY, CITED AND NOT RE-FILED. W1-T80 (an OPEN
+    PR means the task is IN-FLIGHT) and W1-T377 (corroborate an open PR by head branch when `pr.opened`
+    never landed, shipped as #1386 per `src/lib/status.ts`) both attack the CREATION of a second PR for
+    one task. This shard attacks neither: it does not touch dispatch, does not touch the arithmetic,
+    and does not claim the five cited pairs were duplicate builds. It makes the CLOSE auditable so that
+    question becomes answerable from the ledger instead of by hand.
+  design: |
+    (i) THE SHAPE: MAKE THE EVIDENCE REAL, LEAVE EVERY DECISION EXACTLY WHERE IT IS. W1-T984's design
+    note (i)/(iv) governs verbatim. Both policy flags stay at their defaults —
+    `supersessionDisposalEnabled` false, `conceptCoexistenceEnabled` false — so with the field
+    populated the DISPOSITION of every PR is byte-for-byte what it is today: row 0 still cannot match,
+    the bare-number row still matches on the arithmetic, and no pull request is closed that would not
+    have been closed anyway. A reviewer must not ask this task to prove a disposition delta.
+
+    (ii) WIRE IT WHERE THE SIBLING WAS WIRED, NOT SOMEWHERE NEW. The producer lives in
+    `src/lib/open-prs-rest.ts` beside `hydrateMergeConflictEvidence`, is called from `buildOpenPrViews`
+    (`src/run-task.ts`) — the same seam W1-T435 used for `pendingAnswer` and W1-T984 for
+    `mergeConflict` — and is scoped to PRs already carrying `supersededBy != null`. Reuse the existing
+    hydration cap rather than inventing a second one. ON ANY FAILURE LEAVE THE FIELD `undefined`, which
+    is byte-identical to today and is the fail-closed direction every consumer already assumes.
+
+    (iii) THE ONE BEHAVIOURAL DELTA IS LEGIBILITY AND IT IS THE DELIVERABLE. The bare-number row's
+    `reason` appends the verdict's evidence WHEN A VERDICT IS PRESENT, and falls back to today's exact
+    `superseded-by #N` string when it is absent, unreadable or malformed. That single change is what
+    turns the next `repair#stale` entry from five copies of one integer into five statements a triage
+    pass can act on. It must never throw: a malformed verdict degrades to the old string rather than
+    aborting a sweep pass over one bad producer, which is the guard row 0's own `reason` already
+    implements and this row must copy.
+
+    (iv) `"indeterminate"` IS A THIRD OUTCOME AND NEVER A FINDING. A read that failed must be recorded
+    as a failed read, never collapsed to "unique" (which would SAVE a PR the arithmetic condemned once
+    someone turns the coexistence flag on) and never to "superseded". W1-T920 design note (iii) already
+    rules this; the producer must honour it at the point of production, not only at the point of use.
+
+    (v) DO NOT TOUCH THE ARITHMETIC. `resolveOpenPrTaskId`'s `supersededBy` computation stays
+    byte-identical — W1-T932 declined to change it for the same reason, and changing what the number
+    MEANS while adding evidence about it would make the evidence untrustworthy on arrival.
+
+    (vi) REMOVE THE ALLOWLIST ENTRY IN THE SAME PR. `src/lib/producer-completeness.ts` states its own
+    rule — "removing a field from this list means wiring it" — and leaving the entry once a producer
+    exists trips `staleAllowlist`, which is the gate's designed failure.
+
+    (vii) OUT OF SCOPE, NAMED SO IT IS NOT RE-FILED HERE. (a) FLIPPING EITHER FLAG — that is a separate
+    call with its own evidence, and this task deliberately ships both off. (b) The DUPLICATE-PR
+    GENERATOR: whether the cited pairs are duplicate builds (the W1-T80/W1-T377 class) or deliberate
+    supersessions is exactly what cannot be decided today, and filing a diagnosis task before the
+    evidence exists would be the guess this shard exists to remove. (c) W1-T506's task-level git-log
+    supersession detector — a different subject (`proofGrepTargets`, the operator queue view) that
+    shares only a word. (d) W1-T921's branch-preservation ruling on close. (e) The other allowlisted
+    unwired fields.
+  acceptance:
+    - claim: "a superseded PR's verdict is captured by a real producer in the module where the sibling field was wired, instead of the field being undefined in every production pass"
+      proof: "grep: supersessionVerdict in src/lib/open-prs-rest.ts"
+    - claim: "the superseded-by close reason names the superseding PR and its evidence rather than a bare number"
+      proof: "unit test: test/sweep-superseded-evidence.test.ts"
+    - claim: "with both policy flags at their defaults every PR's disposition is byte-identical to today even though the verdict is now populated"
+      proof: "unit test: test/sweep-superseded-evidence.test.ts"
+    - claim: "an absent, unreadable or malformed verdict degrades to today's exact reason string and never throws"
+      proof: "unit test: test/sweep-superseded-evidence.test.ts"
+    - claim: "an indeterminate read is recorded as a failed read and never as a unique or superseded finding"
+      proof: "unit test: test/sweep-superseded-evidence.test.ts"
+    - claim: "the evidence fetch is bounded to PRs the arithmetic already flagged and a failed read leaves the field undefined rather than failing the sweep"
+      proof: "unit test: test/open-prs-rest.test.ts"
+    - claim: "supersessionVerdict no longer sits on the producer-completeness allowlist once a producer assigns it"
+      proof: "unit test: test/producer-completeness.test.ts"
+  files: [src/lib/open-prs-rest.ts, src/lib/sweep.ts, src/lib/producer-completeness.ts, src/run-task.ts, test/open-prs-rest.test.ts, test/producer-completeness.test.ts, test/sweep-superseded-evidence.test.ts]
+  status: queued
+  attempts: 0
+  origin: "feedback#fb-repair-stale-2954"
+  plan_refs: ["W1-T920", "W1-T932", "W1-T984", "W1-T905", "W1-T80", "W1-T377", "W1-T921"]
+  note: |
+    `risk: high` IS RULE 19'S SPAN AND IS SET UP FRONT. The declared list crosses the REST producer,
+    the disposition row that renders its evidence, and the completeness gate that fails the build the
+    moment a producer appears — the same three concerns W1-T984 declared and refused to decompose, for
+    the same reason: split them and you land either a producer nobody reads or an allowlist removal
+    with nothing wiring the field, each individually red. BLAST RADIUS IS DELIBERATELY LOW: with both
+    flags off, no disposition moves and no pull request is closed that today survives.
+
+    `files:` DERIVED BY READING THE SYMBOLS, NOT GUESSED. `hydrateMergeConflictEvidence` and the
+    hydration cap live in `src/lib/open-prs-rest.ts`; `buildOpenPrViews` — where a producer is
+    ASSIGNED and where `hydrateMergeConflictEvidence` is already called — is in `src/run-task.ts`;
+    `DISPOSITION_RULES`, `SupersessionVerdict`, `SupersessionStatus` and `DEFAULT_SWEEP_POLICY` are all
+    in `src/lib/sweep.ts`; the allowlist is in `src/lib/producer-completeness.ts`. Each declared source
+    file has its owning suite declared beside it. `src/run-task.ts` IS DECLARED AND ITS SERIALISATION
+    COST IS ACCEPTED IN WRITING (`partitionByFileOverlap`, W1-T471): the assignment cannot happen
+    anywhere else, and W1-T984 paid the same price at the same seam. `plan/policy.yaml` is NOT
+    declared — no default moves, and declaring an untouched file fails `inverseScopeUntouchedFiles`.
+
+    ONE PROOF IS A GREP FOR A SYMBOL THAT DOES NOT EXIST IN THAT FILE YET, WHICH IS THE POINT. It
+    greps text the change ADDS, never text it removes, so it can only go green by a producer genuinely
+    landing in the module where the sibling field was wired — the identical form and identical
+    reasoning W1-T984 used for `mergeConflict` in the same file. Re-derive its zero before building
+    (a `mergeState` count in the same file is the live control).
+
+    THE COUNTS THIS SHARD DOES NOT HAVE ARE NAMED AS ABSENT. It was filed by a triage pass with no
+    shell: no ledger union was resolved, no `git grep -c` was run, and NO CLAIM IS MADE about how often
+    the bare-number row has fired. W1-T932's rationale (5) already records that a 3,413 firing count
+    could not be re-derived and must be treated as UNMEASURED until someone runs it where the daemon
+    writes; that warning stands and is not overwritten here. The only quantities used are the ones the
+    feedback entries carry on their own faces — five PRs in 2026-08-13..08-20 and three in
+    2026-08-20..08-27 (`fb-repair-stale-2955`) — and they are used only to size the candidate set.
+
+    AND ONE CITED PAIR IS KNOWN NOT TO BE A DUPLICATE BUILD, WHICH IS WHY THE DIAGNOSIS IS DEFERRED
+    RATHER THAN ASSUMED. `plan/tasks.d/W1-T449-arm-site-attribution-ledger-line.yaml` records that
+    `8a024d42` — the head the entry cites for PR #1689 — was an ABANDONED DRAFT of that task,
+    superseded 94 minutes later by #1690 deliberately. So at least one of the five closes was correct
+    and intentional, and a shard claiming five duplicate builds would be false on its own evidence.
+    That is precisely the discrimination the missing producer would make, and precisely why design
+    (vii)(b) refuses to file the duplicate-PR diagnosis before it exists.
