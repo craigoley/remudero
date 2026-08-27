@@ -31,7 +31,23 @@ raw: >-
 attachments: []
 origin: repair#stale
 status: proposed
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/3094
+summary:
+  headline: "Stale surface repairs recurring: 5 fixes in 7 days"
+  what_happened: Five instances of a 'stale' surface defect were repaired between
+    August 13–20, exceeding the threshold of 3 in 7 days. Each repair was
+    superseded by a subsequent PR, indicating ongoing churn rather than a
+    permanent fix.
+  decision: Escalate to engineering for root-cause investigation.
+  options:
+    - label: Escalate to engineering
+      consequence: Team investigates why repairs keep being superseded; may uncover
+        automation loops, test flakes, or merge conflicts
+    - label: Monitor and reassess
+      consequence: Sweep continues repairing; recurrence tracked but no investigation;
+        revisit if pattern escalates
+    - label: Increase recurrence threshold
+      consequence: Reduces alert frequency; masks churn pattern but decreases
+        operational noise from this detector
 expansion: null
 answered_by: null
