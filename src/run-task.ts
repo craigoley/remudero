@@ -15448,6 +15448,10 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
           // W1-T2375: the ids behind `followUpFiled`, so the refusal can NAME the follow-up
           // alongside the parent. Already resolved above — no new lookup.
           followUpTaskIds: followUpTasks.map((t) => t.id),
+          // W1-T2375 (extracted from #3091): the TASKS behind that id list, so the refusal names
+          // only the follow-up(s) actually carrying the added criteria rather than every new task
+          // in the PR. Already in scope — no new resolution, no new git read.
+          followUpTasks,
         },
         // impl-DS: only ever populated in --base mode, so the check is silent whole-plan.
         newMonolithIds,
