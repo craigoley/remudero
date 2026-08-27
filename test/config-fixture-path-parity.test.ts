@@ -27,6 +27,17 @@
 // insists on — never stubs the `claude` binary: the "no binary" condition below is produced by
 // removing whatever REAL `claude` executables already sit on PATH, the same measurement method
 // the task's own census used, never by faking one.
+//
+// ACCEPTANCE CLAIM -> TEST, for a reader checking this file against W1-T2414's shard:
+//   1. every fixture writes where configPath resolves  -> "CENSUS: every existing test/ fixture…"
+//   2. the check fails on the legacy .remudero home     -> "the parity check fails when…"
+//   3. the check names the file and the expected path   -> "the check names the offending file…"
+//   4. a fixture seeding no config is never reported     -> "…seeds no config file at all…"
+//   5. the claude lookup failure names the config path  -> "the claude lookup failure names…"
+//   6. the read stays eager, no test stubs the binary   -> "loadConfig's creation branch still…"
+//                                                           (eagerness) + withoutClaudeOnPath's
+//                                                           own before/after real-binary asserts
+//                                                           immediately above it (never stubbed).
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
