@@ -421,6 +421,29 @@ export function sweepOrphanWorkers(deps: OrphanSweepDeps): OrphanSweepReport {
 }
 
 /**
+ * W1-T2407: name the third party BY ITS COMMAND LINE, from data the sweep already computed.
+ *
+ * THE GAP THIS CLOSES (plan/tasks.yaml W1-T2407 design part ii). `sweepOrphanWorkers`'s report
+ * already carries `cmdline` for every process it killed — nothing new is fetched and nothing new
+ * is signalled here. When the wiring assertion in test/{daemon,worker-containment}.test.ts's
+ * "W1-T356 wiring" tests fails because a THIRD fixture's stray was misattributed and killed
+ * instead of the one under test, this turns that failure from "a pid disappeared, cause unknown"
+ * into a printed line naming exactly which process died and what it was running — read straight
+ * off `report.killed`, never re-derived.
+ *
+ * `report.killed.length === 0` still returns an EXPLICIT, non-empty string rather than `""`: a
+ * sweep that killed nothing must be legible as "read and empty", not indistinguishable from a
+ * diagnostic nobody called. Synchronous and pure — no `ps`, no signal, no pacing, no `await`.
+ */
+export function describeOrphanSweepKills(report: Pick<OrphanSweepReport, "killed">): string {
+  if (report.killed.length === 0) return "orphan sweep killed: (none)";
+  const lines = report.killed.map(
+    (k) => `  pid=${k.pid} run_id=${k.run_id} task_id=${k.task_id} cmdline=${k.cmdline}`,
+  );
+  return [`orphan sweep killed ${report.killed.length} process(es):`, ...lines].join("\n");
+}
+
+/**
  * Real-world candidate listing: every live pid + its command line (`ps -eo
  * pid=,command=`). Best-effort — a `ps` failure yields an empty list rather
  * than throwing, so a sweep hiccup costs one skipped cycle, never the
