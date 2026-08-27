@@ -1,0 +1,184 @@
+- id: W1-T2408
+  title: "A SECTION COUNTS FILING AND MERGING AND NEVER ARRIVING — §7 renders `68 of 69 filed tasks merged` and the count is honest, yet four of the merged sixty-eight are measurably not reaching the operator: a shipped env seam nothing supplies, fifteen write steps at zero rows, an inbox that shows ten and has discharged none, and a six-value vocabulary the operator never saw; W1-T2266's four shapes and `producer-completeness` both ask a STATIC corpus whether a mechanism was WIRED, and nothing anywhere asks a RUNNING one whether it ever RAN"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 20.00
+  files: [src/lib/producer-completeness.ts, test/runtime-adoption-is-reported-not-gated.test.ts]
+  origin: "operator-brief#section-counts-filing-not-arriving-2026-08-27"
+  plan_refs: ["W1-T2266", "W1-T322", "W1-T997", "W1-T2273"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE ID. Eight surfaces, anchored `W1-T2408([^0-9]|$)` with a `[0-9]` class and never `\d`,
+    anchored printed beside unanchored at every one. Surface 1 reads 1 of 522 reservation refs.
+    Shard filenames 0 of 661; declared ids 0 of 929; open-PR titles 0 of 7; open-PR bodies 0 of 7;
+    head branches 0 of 7; merged trailers 0 of 749; merged subjects 0 of 2,466.
+
+    THE OPEN SET WAS ENUMERATED FIRST — 7 PRs, every one carrying a non-empty title, a non-empty
+    body and a non-empty head ref — AND EVERY CONTROL WAS DRAWN FROM IT. W1-T2332 (#3133) was
+    chosen because it populates six of the eight bands: 1 on refs, 1 on filenames, 1 on declared
+    ids, 1 on titles, 2 on bodies, and 1 on head branches, where its control is a LIVE open `run-*`
+    head, `run-W1-T2332-1787860315198`, not a synthetic one. Case-sensitivity proved on the title
+    band: the lower-case probe of this id reads 0, while W1-T2332 reads 1 case-insensitively and 1
+    case-sensitively, so the band is neither case-blind nor case-broken.
+
+    ⚠ SURFACES 7 AND 8 ARE MERGED-ONLY AND THE OPEN SET CANNOT POPULATE THEM. This is stated
+    rather than reported as a bare zero. On merged trailers the open-set control W1-T2332 reads 0,
+    and that is CORRECT — its build is open, not merged — so the control that CAN fire is W1-T176
+    at 2 of 749. W1-T176 is itself sourced from the open set: it is cited inside an open PR body,
+    which is the closest the rail can be honoured on a band the open set is structurally unable to
+    reach. On merged subjects the open-set control DOES fire: W1-T2332 reads 1 of 2,466, because
+    its own plan-filing commit merged while its build stayed open.
+
+    THE OPEN SET WAS READ OVER REST, NOT GRAPHQL: the account's GraphQL budget was already
+    exhausted when this filing began, while `gh api user -i` showed 4,349 REST calls remaining.
+    Nothing here paced, slept or polled, and `gh api rate_limit` was never called.
+
+    ── ⚠ THE BRIEF'S FRAMING IS CORRECT AND ONE THING MUST BE PROTECTED FROM THE REMEDY ──────────
+
+    THE §7 COUNT IS NOT WRONG AND MUST NOT BE CHANGED. `computePlanSectionCounts` (lib/panel-graph.ts)
+    was replicated over the same 930 tasks and reproduces §7 exactly at filed 69 / merged 68, and
+    §7B exactly at 55 / 54; the one unmerged §7 member is W1-T314. `planSectionRowHtml` renders the
+    words "filed tasks" and means them, and `computePlanSectionCounts` documents its own falsifier
+    — a task-id, `Pnn` or `WS-n` ref contributes to no section. NOTHING HERE TOUCHES THAT NUMBER.
+    A denominator that told the truth is not the defect; the defect is that no OTHER number exists.
+
+    THE FOUR INSTANCES, EACH WITH THE READING THAT CONVICTS IT:
+      • W1-T997 (#2153) shipped `resolveAccountFilePath` and `ACCOUNT_FILE_PATH_ENV`. The variable
+        `RMD_ACCOUNT_FILE_PATH` is supplied NOWHERE: 0 files under `deploy/` name it, and it is
+        absent from the environment of both live containers. `GET /v1/account-usage` still answers
+        `usageUnknownReason: "unreadable"`. The seam merged; nothing was ever plugged into it.
+      • W1-T2273 (#2885) shipped fifteen `panel.*` write steps. All fifteen read ZERO across the
+        three-form ledger union. CONTROL, on the console's own surface: the same serve process
+        wrote `serve.start` 18, `serve.bind_failed` 6 and `serve.stop` 5 to that exact file, so the
+        zero is a real absence of operator actions and not an unwritable path.
+      • W1-T1257 (#2636) and W1-T1270 (#2664) shipped inbox discharge and an emptiness vocabulary.
+        `GET /v1/inbox` answers `ready: 10`, and `panel.proposal_accepted` and
+        `panel.proposal_rejected` both read zero, so ten proposals are ratifiable and none ever was.
+      • The recon-blackout rec-2 work shipped a six-value `DaemonLivenessReason`, every value
+        present in `LIVENESS_TEXT`. The operator read the PRE-rec-2 fallback string, which is
+        reachable only from a status object carrying no reason at all.
+
+    ── Q1. THE CLASS, AND HOW IT DIFFERS FROM WHAT IS ALREADY OWNED ──────────────────────────────
+
+    THE CLASS IS: A MERGED FEATURE WHOSE LIVE READING IS ZERO. Not unwired, not uncalled, not
+    untested — RUN ZERO TIMES, or SUPPLIED BY NOBODY, on the installation the operator is looking at.
+
+    ⚠ THIS IS W1-T2266'S CLASS AT A DIFFERENT CORPUS, AND THE PROPOSAL IS TO WIDEN THAT LIST RATHER
+    THAN BUILD A RIVAL DETECTOR. W1-T2266 (merged, #2875) names four shapes: symbol with no caller,
+    field with no writer, script with no invoker, gate with no subject. Its own design note (4) says
+    the shapes "differ in where the evidence lives, not merely in what is unadopted", and that three
+    of them "are static and can share a HARNESS though not a query". EVERY ONE OF ITS CORPORA IS
+    STATIC — a checkout, a `package.json`, a workflow file.
+
+    THAT IS EXACTLY WHY IT WOULD PASS ALL FOUR INSTANCES ABOVE. `resolveAccountFilePath` HAS a
+    caller, at `buildServeRoutes`. Every one of the fifteen `panel.*` steps HAS a call site, inside
+    a write-scoped route handler. `daemonLiveReason` HAS a writer, in lib/panel-actions.ts. Shape 1
+    and shape 2 are both satisfied, and the feature still never ran. The question W1-T2266 asks is
+    "is anything wired to it"; the question nobody asks is "did it ever execute".
+
+    `producer-completeness` (lib/producer-completeness.ts) IS THE CLOSEST THING THAT EXISTS, AND
+    IT ALREADY OWNS THE METHOD. Its own header measures that "the `conflicted` disposition occurs
+    ZERO times across 10,757 unique dispositions and 5,739 sweep summaries, against a control of
+    391,589 for the mergeable reason" — a zero reading stated beside a population control, which is
+    precisely the shape this class needs. What it does not own is the SCOPE: it answers that
+    question for `OpenPrView`'s optional fields and for nothing else.
+
+    SO THE METHOD EXISTS, THE LIST EXISTS, AND NEITHER IS POINTED AT A RUNNING SYSTEM. The remedy
+    is a FIFTH SHAPE on W1-T2266's list, carrying `producer-completeness`'s zero-with-control
+    method, over a corpus that is neither a checkout nor a package manifest: the ledger union, the
+    deployed environment, and a live route's own answer. It cannot share W1-T2266's harness — by
+    that task's own note (4), a different corpus means a different query — and saying so is part of
+    the widening, not an argument against it.
+
+    ── ⚠ Q2. THE POPULATION BEYOND §7, MEASURED BEFORE ANYTHING IS PROPOSED ──────────────────────
+
+    FOUR INSTANCES IN ONE SECTION IS AN ANECDOTE, SO THE OTHER SECTIONS WERE SWEPT. Read over the
+    THREE-FORM LEDGER UNION — 0 `.gz` files, 38 rotated, 1 live, 472,067 rows, `ok: true`, with the
+    `.gz` zero controlled by finding no `*.gz` anywhere under `state/` while the same glob reaches a
+    non-`.ndjson` sibling.
+
+    LEDGER STEPS. 540 dotted lower-case literals declared in `src/`, minus file-extension shapes.
+    234 of them have fired at least once. 306 READ ZERO, across 89 distinct prefix families —
+    `daemon` 27, `sweep` 22, `fix` 20, `panel` 15, `deploy` 12, `relay` 12, `drain` 10. §7's four
+    instances are not a local accident; the shape is fleet-wide.
+
+    ENV SEAMS. 9 variable names appear as string literals in `src/`. 4 are supplied everywhere
+    (`GH_TOKEN` is named by 7 files under `deploy/` and present in both containers). 3 are
+    escape hatches whose UNSET state is the correct one — `RMD_ALLOW_LIVE_SPAWN`,
+    `RMD_ALLOW_LIVE_WRITES`, and the re-exec marker `RMD_SELF_SYNC_DONE`. That leaves exactly ONE
+    production seam with no supplier anywhere: `RMD_ACCOUNT_FILE_PATH`.
+
+    ⚠ CONTROL BOTH DIRECTIONS, AND ONE DIRECTION FAILED FIRST. The query MUST find `panel.*` at
+    zero and MUST NOT be trusted to exclude a step that legitimately fires rarely.
+      DIRECTION 1 — FAILED, THEN FIXED, AND THE FAILURE IS THE MOST USEFUL RESULT HERE. The first
+      sweep kept only literals whose PREFIX already appeared somewhere in the ledger, as a cheap way
+      to tell a step name from a config key. That filter reads `panel.*` at 0 — not because the
+      steps fire, but because `panel` has never appeared in the ledger at all, so the entire family
+      was discarded by the very condition that makes it interesting. A detector keyed on "steps I
+      have seen" is structurally blind to a feature that never ran once. Without the prefix filter
+      the same sweep finds all fifteen. ANY BUILD OF THIS MUST ENUMERATE FROM `src/`, NEVER FROM
+      THE LEDGER'S OWN KEY SET.
+      DIRECTION 2 — CONFIRMED, AND IT CANNOT BE FIXED. `daemon.cost_governor` and
+      `daemon.queue_governor` both read 0 and both appear in the 306. By `DispatchGovernorState`'s
+      own doc neither governor ever logs "not deferring", only that it IS deferring, so their zero
+      is the HEALTHY state: no dispatch has been deferred in nineteen days. NOTHING MECHANICAL
+      SEPARATES THEM FROM `panel.*`. Both are a declared step with no rows. The difference lives in
+      a doc comment, and no query can read intent.
+
+    THEREFORE 306 IS AN UPPER BOUND AND IS REPORTED AS ONE. It is not a defect count, it is not a
+    backlog, and a build that presents it as either is wrong. The env-seam half is the decidable
+    half: a production variable read in `src/` and supplied by no deploy artifact and no live
+    container is inert with no healthy reading, and that half is exactly ONE today.
+
+    ── Q3. WHAT A REMEDY COSTS, AND WHAT IS REFUSED ──────────────────────────────────────────────
+
+    ⚠ A GATE IS REFUSED, AND THE MEASUREMENT ABOVE IS WHY. A merged feature with a zero reading may
+    be correct, deferred, or waiting on an operator, and 2 of the 306 are provably healthy on this
+    host today. Refusing merges on that signal would block a section that is 98.6% done on evidence
+    that is 0.7% known-wrong and unknown elsewhere. No `ci-gate` change, no new blocking check, no
+    strike, and nothing that can refuse a dispatch.
+
+    ⚠ AND A PER-SECTION "REACHING" NUMBER IS REFUSED TOO, WHICH THE BRIEF LISTED AS AN HONEST
+    CANDIDATE. It is not honest at this measurement. A row reading "N of 68 reaching" requires
+    deciding, per task, whether its zero is inert or healthy, and Q2's direction-2 control proves
+    that decision cannot be made from the artefacts. Such a row would put a fabricated number
+    beside a true one on the same line. THE SECTION ROW STAYS AS IT IS.
+
+    WHAT IS LEFT IS THE REPORT, AND IT IS THE CHEAP HALF. One pure function beside
+    `producer-completeness`'s existing ones, returning rows — never a verdict — where each row
+    carries the declared thing, its live reading, the corpus that reading came from, and the
+    population control that makes the zero legible. Emitted where the existing measurement cadence
+    already emits; read by a person. The cost is one module, one test file, no route, no gate, no
+    new daemon rung, and no second ledger read: the union it needs is the one the console already
+    tails, widened to the rotated forms it currently ignores.
+
+    ⚠ WHAT THIS IS NOT, RECORDED SO A LATER READER DOES NOT REOPEN IT: the §7 count is not wrong
+    and is not touched; `computePlanSectionCounts` is not modified; `planSectionRowHtml` is not
+    modified; no gate is added or weakened; no test is deleted or skipped; no cap is raised; and
+    nothing here paces, throttles or sleeps. Wiring `RMD_ACCOUNT_FILE_PATH` belongs to W1-T997's own
+    follow-through and is NOT in scope — and would not clear the strip today anyway, because that
+    cache reads 66.5 minutes old against a 30-minute `USAGE_CACHE_MAX_AGE_MS`, so the word would
+    change from `unreadable` to `too-old` and the panel would still say unknown. The live-file-only
+    ledger read behind the console's own `governor unknown` is a separate defect and is not claimed
+    here.
+
+  acceptance:
+    - claim: "A pure report function exists beside producer-completeness's existing ones and returns rows, never a verdict or a boolean."
+      proof: "unit test: test/runtime-adoption-is-reported-not-gated.test.ts"
+    - claim: "Declared things are enumerated from the source corpus and never from the ledger's own observed key set, so a family that has never fired once is still enumerated."
+      proof: "unit test: test/runtime-adoption-is-reported-not-gated.test.ts"
+    - claim: "Every row names the corpus its reading came from, so a ledger zero is distinguishable from an environment zero without reading the code."
+      proof: "unit test: test/runtime-adoption-is-reported-not-gated.test.ts"
+    - claim: "Every row carries a population control beside its reading, so a zero is never printed alone."
+      proof: "unit test: test/runtime-adoption-is-reported-not-gated.test.ts"
+    - claim: "The report carries its own limit as data: it cannot separate an inert zero from a correctly-rare one, and a healthy-governor fixture comes back bearing that marker."
+      proof: "unit test: test/runtime-adoption-is-reported-not-gated.test.ts"
+    - claim: "Nothing may refuse, throw, exit or return a failing status on the report's output, so it can never become a gate."
+      proof: "unit test: test/runtime-adoption-is-reported-not-gated.test.ts"
+    - claim: "The report emits no per-section reaching figure, so nothing it produces can be joined onto the filed-against-merged row that already tells the truth."
+      proof: "unit test: test/runtime-adoption-is-reported-not-gated.test.ts"
