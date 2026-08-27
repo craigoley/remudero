@@ -1,0 +1,138 @@
+- id: W1-T2393
+  title: "THE LEDGER-READ-INTENT GATE JUDGES ONE FILE OF 139 — `ledgerReadIntentViolations` would flag 47 real unmarked `readLedgerLines` call sites across 8 modules, but the test that enforces it feeds only `src/lib/status.ts`, so none of them is ever judged; a second, narrower blind spot hides 12 more behind a value binding the regex cannot match, and the marker the gate collects is documentary by its own type's doc, so neither blind spot has cost a behaviour"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 15.00
+  files: [src/lib/sweep.ts, test/ledger-read-intent.test.ts]
+  origin: "operator-brief#ledger-read-intent-blind-spot-2026-08-27"
+  plan_refs: ["W1-T1262", "W1-T2382", "W1-T2388", "W1-T2345"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE ID. Eight surfaces swept, anchored `W1-T2393([^0-9]|$)` with a `[0-9]` class and never `\d`,
+    anchored printed beside unanchored at each. Surface 1 reads 1 against a namespace of 506 refs.
+    Shard filenames 0 of 654; declared ids 0 of 909; open-PR titles 0 of 4 read CASE-SENSITIVELY
+    (lower-case probe 0); open-PR bodies 0; open-PR head refs 0; merged trailers 0 of 2,407 merged;
+    merged subjects 0 of 2,440. The open-PR enumeration was itself controlled at 4.
+
+    CONTROLS WERE CHOSEN FROM WHAT IS ACTUALLY PRESENT rather than picked and then excused: the open
+    set was enumerated FIRST and each control drawn from it — W1-T2379 fires 1 on titles (#3104) and
+    1 on head branches from the LIVE `run-W1-T2379-1787844672229`, W1-T2245 fires 1 on bodies,
+    W1-T2387 fires 1 on refs/filenames/ids, W1-T2318 fires 1 on merged trailers, W1-T2383 fires 3 on
+    subjects. AND THE ANCHOR WAS PROVED DISCRIMINATING ON A POPULATED BAND, not merely quiet:
+    `W1-T2` reads anchored 1 against unanchored 240, `W1-T23` 1 against 55. A first probe on
+    `W1-T239` read 1 against 1 and proved nothing, because no id extends it; it was replaced rather
+    than reported.
+
+    ── Q1. THE BLIND SPOT, MEASURED — AND IT IS TWO, NOT ONE ─────────────────────────────────────
+
+    THE BRIEF NAMES THE REGEX. THE REGEX IS THE SMALLER HALF. Measured 2026-08-27 by running the
+    real `ledgerReadIntentViolations` in process over a walk of all 139 `.ts` files under `src/`,
+    never by approximating its regex in a shell:
+
+      (i) THE CORPUS BLIND SPOT — THE DOMINANT ONE, AND NOT IN THE BRIEF. The enforcing test
+      (`test/ledger-read-intent.test.ts`) has exactly one property that reads the real tree, and it
+      feeds ONE FILE: `src/lib/status.ts`, the module `readLedgerLines` is defined in. Over that
+      corpus the gate reports 0 violations and the test passes. Over ALL of `src/` the SAME function
+      reports 50 — 47 real code lines and 3 doc-comment lines — across 8 modules. SO 47 UNMARKED
+      CALL SITES ARE FLAGGABLE TODAY AND NONE IS EVER JUDGED, including
+      `src/lib/digest.ts:707`/`:1104`, `src/lib/panel-graph.ts:586`/`:1146`/`:1254`,
+      `src/lib/review.ts:7601`/`:7698`, `src/lib/board.ts:658` and `src/run-task.ts:1861`/`:2576`.
+
+      (ii) THE REGEX BLIND SPOT — REAL, AND NARROWER. `LEDGER_READ_INTENT_CALL_RE` is
+      `/\breadLedgerLines\s*\(/`, so it requires an OPEN PAREN. Twelve sites bind the reader as a
+      VALUE and call it through an alias — `const readLedger = deps.readLedger ?? readLedgerLines;`
+      — in `account-usage.ts`, `alert-lane.ts`, `board.ts`, `daemon-health.ts`, `ops.ts`,
+      `panel-actions.ts`, `serve.ts`, `status.ts` (twice), `sweep.ts` (twice) and `task-card.ts`.
+      The regex cannot match any of them. This is the shape `repeatDispositionStreaksFromLedger`
+      folds over.
+
+    THE SWEEP'S SITE IS INVISIBLE FOR BOTH REASONS AT ONCE, AND THAT IS THE FINDING THAT ORDERS THE
+    FIX: widening the regex alone would still not reach `sweep.ts`, because the enforced corpus
+    never contains it. The corpus is the binding constraint; the regex is downstream of it.
+
+    CONTROLLED IN BOTH DIRECTIONS, because a check reporting no unmarked sites has to be shown able
+    to find one. A seeded bare `readLedgerLines(p)` yields 1 violation naming file and line; the
+    sweep's real two-line shape (`const readLedger = deps.readLedger ?? readLedgerLines;` then
+    `readLedger(ledgerPath)`) yields 0. The query can see an offender and still cannot see this one.
+
+    A NOTE ON HOW THIS WAS MEASURED, BECAUSE THE OBVIOUS METHOD LIES. `git grep -nE
+    '\breadLedgerLines[[:space:]]*\('` over `src/` returns 0 on this tree while a plain `grep -E`
+    over the same captured lines returns 54 — an engine disagreement on the same pattern. Every
+    figure above therefore comes from executing the gate's own exported function against the real
+    file texts, which is the only reading that is by construction the gate's.
+
+    ── Q2. HAS THE BLINDNESS COST ANYTHING? NO — AND THE TYPE'S OWN DOC SAYS WHY ─────────────────
+
+    ASKED DIRECTLY, AS THE BRIEF REQUIRES: would a declared intent at the sweep's fold have surfaced
+    W1-T2382's once-per-head reset earlier? NO. `LedgerReadIntent`'s own doc block states the
+    marker's semantics: "Neither value ever changes what readLedgerLines returns — declaring 'union'
+    on a bare call does not make it read rotations, the call site must actually do that too — this
+    type only makes the caller's CHOICE a visible fact instead of an inferred one".
+
+    THE MARKER IS A DECLARATION, NOT A CHECK. The sweep's fold really does read live-only, so its
+    honest marker is `live` — a TRUE declaration that names the exact property causing W1-T2382 and
+    flags nothing, because nothing compares a declared intent against whether that intent is the
+    RIGHT one for the guarantee the caller is trying to make. A marker at that site on the day
+    W1-T2345 shipped would have read `live`, been correct, and left the once-per-head reset exactly
+    as undiscovered as it was.
+
+    SO THIS SHARD PROPOSES RECORDING, NOT FIXING. The blind spot is real and worth writing down; it
+    has not cost a behaviour, a dispatch or a discovery, and nothing measured here says otherwise.
+
+    ── Q3. WHAT WIDENING THE REGEX WOULD COST, MEASURED ─────────────────────────────────────────
+
+    A pattern that also matched value bindings would match the DEFINITION and every doc comment
+    naming the symbol. Measured on this tree: of the 50 lines the current regex already flags across
+    `src/`, 3 are doc-comment lines — so even the paren-requiring pattern is not clean, and dropping
+    the paren requirement adds 82 more no-paren mentions across 21 files, of which only 12 are real
+    value bindings. THAT IS A FALSE-POSITIVE RATE OF ROUGHLY 6 TO 1 ON THE ADDED POPULATION, against
+    a definition guard (`LEDGER_READ_INTENT_DEFINITION_RE`) that only excludes the one definition
+    line. Widening the regex is the expensive lever and the wrong one.
+
+    THE CHEAP ALTERNATIVE THE BRIEF NAMES, AND ITS HONEST LIMIT. Marking the sweep's site by hand
+    costs one comment and leaves the gate alone. It fixes exactly this instance — and, given Q2, it
+    buys documentation rather than enforcement, because the enforced corpus still does not include
+    `sweep.ts` and the marker still checks nothing. THAT IS THE RECOMMENDED SHAPE ANYWAY: it is
+    truthful, it is one line, and it does not pretend a gate is watching where none is.
+
+    AND THE REAL FIX IS BIGGER THAN THIS SHARD, WHICH IS WHY IT IS NAMED AND NOT PROPOSED: widening
+    the ENFORCED CORPUS from one file to `src/` would require marking 47 sites first, in 8 modules
+    this task does not own. That is a separate task with a separate budget, and filing it is an
+    operator decision rather than something this shard should mint into existence.
+
+    THE SIGNATURE CHANGE IS NOT RE-LITIGATED. W1-T1262 considered and refused option (c) and
+    `readLedgerLines`' own doc block records why; this shard neither revisits nor cites it as open.
+
+    ALREADY OWNED ELSEWHERE: the once-per-head reset is W1-T2382, the digest's live-only read is
+    W1-T2388, and the intent gate itself is W1-T1262. THIS SHARD OWNS ONLY THE GATE'S BLIND SPOT.
+
+    RISK BAND. `risk: high` is set UP FRONT and is RULE 19'S SPAN, NOT BLAST RADIUS: `files:` reads
+    as two distinct concerns, the `sweep` stem and the gate's own test stem, which `lint-plan`
+    refuses at `risk: medium`. The blast radius is one comment on one line plus the test that pins
+    it; no predicate, corpus or regex is changed.
+  acceptance:
+    - claim: "the sweep's value-bound ledger read declares its intent at the call site"
+      proof: "grep: ledger-read-intent in src/lib/sweep.ts"
+    - claim: "the declared intent is the live one the fold actually performs"
+      proof: "unit test: test/ledger-read-intent.test.ts"
+    - claim: "the gate's regex is unchanged by this task"
+      proof: "unit test: test/ledger-read-intent.test.ts"
+    - claim: "the enforced corpus is unchanged by this task"
+      proof: "unit test: test/ledger-read-intent.test.ts"
+    - claim: "nothing added paces or throttles or sleeps a call"
+      proof: "unit test: test/ledger-read-intent.test.ts"
+  falsifier: |
+    If a declared intent at a value-bound call site would in fact have surfaced W1-T2382 — that is,
+    if anything anywhere COMPARES a declared `LedgerReadIntent` against whether the caller's
+    guarantee needs the union — then the marker is not documentary, the blindness has cost a
+    discovery, and this shard must be rewritten as a fix rather than a recording. The check is
+    direct: grep for any consumer of `LedgerReadIntent` other than the source scan that collects it.
+
+    SEPARATELY FALSIFYING: if the enforcing test is found to feed more than `src/lib/status.ts`,
+    then the corpus blind spot recorded as dominant in Q1 does not exist and every count above must
+    be re-derived.
