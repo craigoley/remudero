@@ -233,7 +233,11 @@ test("acceptance 4: the egress command still discards both response bodies", () 
 test("acceptance 5: probeCommandCount still counts exactly six numbered entries, unchanged by this task", () => {
   const prompt = containmentProbePrompt("tokABC");
   assert.equal(probeCommandCount(prompt), 6);
-  assert.equal(probeTurnBudget(prompt), 6 + 1 + PROBE_TURN_ALLOWANCE);
+  // W1-T2344: PROBE_TURN_ALLOWANCE became a function of command count (capped at
+  // a stated ceiling) rather than a flat per-probe constant — see
+  // test/containment.test.ts's own W1-T2344 tests for the scaling/ceiling
+  // behavior itself; this file only needs the derivation to still hold.
+  assert.equal(probeTurnBudget(prompt), 6 + 1 + PROBE_TURN_ALLOWANCE(6));
 });
 
 test("acceptance 5: the egress command itself introduces no new numbered entry", () => {

@@ -8,6 +8,7 @@ import {
   ContainmentError,
   DENY_FLOOR_PROBE_BASENAME,
   PROBE_TURN_ALLOWANCE,
+  PROBE_TURN_ALLOWANCE_CEILING,
   assessContainment,
   classifyUnprovenState,
   containmentProbePrompt,
@@ -63,14 +64,27 @@ test("probeTurnBudget derives the cap from the prompt's own command count, plus 
   assert.ok(commands > 0, "the real prompt must list at least one numbered command");
   assert.equal(
     probeTurnBudget(prompt),
-    commands + 1 + PROBE_TURN_ALLOWANCE,
+    commands + 1 + PROBE_TURN_ALLOWANCE(commands),
     "the budget must equal commands + 1 (report) + the named allowance — no other arithmetic",
   );
 });
 
-test("PROBE_TURN_ALLOWANCE is a named, positive, exported constant — not an inline magic number", () => {
-  assert.equal(typeof PROBE_TURN_ALLOWANCE, "number");
-  assert.ok(PROBE_TURN_ALLOWANCE > 0, "an allowance of zero would leave no slack for any legitimate rework");
+// W1-T2344 superseded this test's original shape: PROBE_TURN_ALLOWANCE was a flat,
+// per-probe constant back when W1-T2201 wrote this file — exactly the design that
+// diluted as commands were added (a per-probe slack constant absorbing a
+// per-command cost) and drove the containment probe's turn-exhaustion rate to 29%.
+// It is now a function of the SAME command count the derived base already moves
+// with, capped at a stated ceiling so it cannot grow unbounded either.
+test("PROBE_TURN_ALLOWANCE is a named, exported function of command count — not a flat magic number, and never negative or zero for a real prompt", () => {
+  assert.equal(typeof PROBE_TURN_ALLOWANCE, "function");
+  assert.ok(PROBE_TURN_ALLOWANCE(1) > 0, "an allowance of zero would leave no slack for any legitimate rework");
+  assert.equal(PROBE_TURN_ALLOWANCE(2), 2, "below the ceiling, the allowance moves one-for-one with command count");
+});
+
+test("PROBE_TURN_ALLOWANCE_CEILING is a named, positive, exported constant that bounds the scaling allowance", () => {
+  assert.equal(typeof PROBE_TURN_ALLOWANCE_CEILING, "number");
+  assert.ok(PROBE_TURN_ALLOWANCE_CEILING > 0);
+  assert.equal(PROBE_TURN_ALLOWANCE(PROBE_TURN_ALLOWANCE_CEILING + 100), PROBE_TURN_ALLOWANCE_CEILING);
 });
 
 test("the source no longer writes the probe's spawn maxTurns as the literal 6", () => {
@@ -117,17 +131,24 @@ test("defaultExecutor spawns the probe worker with the DERIVED cap, not a hardco
 
 // ── Criterion 2: a fifth command raises the cap automatically ───────────────
 
-test("probeTurnBudget grows by exactly one turn per additional command, at any count", () => {
+test("probeTurnBudget derives from the SAME command count for the base and the (now-scaling) allowance, at any count", () => {
+  // W1-T2344: this test's original name ("...grows by exactly one turn per
+  // additional command") pinned the OLD flat-allowance arithmetic. The formula
+  // `commands + 1 + PROBE_TURN_ALLOWANCE(commands)` is what must hold at any
+  // count now — below the ceiling that means TWO turns per additional command
+  // (one from the base, one from the now-scaling allowance); see
+  // containment-turn-budget's own ceiling test below for the saturating case.
   const commandLine = (n: number) => `${n}) touch step-${n}.txt`;
   for (const n of [1, 2, 3, 4, 5, 8]) {
     const prompt = Array.from({ length: n }, (_, i) => commandLine(i + 1)).join("\n");
     assert.equal(probeCommandCount(prompt), n, `a ${n}-command prompt must count ${n} commands`);
-    assert.equal(probeTurnBudget(prompt), n + 1 + PROBE_TURN_ALLOWANCE);
+    assert.equal(probeTurnBudget(prompt), n + 1 + PROBE_TURN_ALLOWANCE(n));
   }
 });
 
-test("appending a FIFTH command underneath the real probe prompt raises the derived cap — the exact bug this task fixes", () => {
+test("appending a FIFTH command underneath the real probe prompt raises the derived cap automatically — the exact bug this task fixes, now via a scaling allowance", () => {
   const fourCommandPrompt = containmentProbePrompt("tok123");
+  const fourCommandCount = probeCommandCount(fourCommandPrompt);
   const fourCommandBudget = probeTurnBudget(fourCommandPrompt);
 
   // Simulate what W1-T1265 did to the 3-command prompt, one command later: add a
@@ -137,11 +158,30 @@ test("appending a FIFTH command underneath the real probe prompt raises the deri
     fourCommandPrompt + "\n5) touch fifth-command-marker.txt   (a new arm added later)";
   const fiveCommandBudget = probeTurnBudget(fiveCommandPrompt);
 
+  // W1-T2344: below the stated ceiling the allowance now moves WITH the base, so
+  // one extra command raises the cap by one turn from the base PLUS one turn
+  // from the (still-scaling) allowance — never silently by less, which is
+  // exactly the dilution this task fixes.
+  const expectedRaise =
+    1 + (PROBE_TURN_ALLOWANCE(fourCommandCount + 1) - PROBE_TURN_ALLOWANCE(fourCommandCount));
   assert.equal(
     fiveCommandBudget,
-    fourCommandBudget + 1,
-    "adding one command underneath must raise the derived cap by exactly one turn — automatically, " +
-      "with no second edit to a separate maxTurns literal",
+    fourCommandBudget + expectedRaise,
+    "adding one command underneath must raise the derived cap automatically — no second edit to a " +
+      "separate maxTurns literal, and (below the ceiling) no dilution of the allowance either",
+  );
+  assert.ok(expectedRaise >= 1, "the cap must never fail to move when a command is added");
+});
+
+test("W1-T2344: once the allowance saturates at its ceiling, an additional command still raises the BASE by one turn — the cap keeps moving, only the allowance stops", () => {
+  const commandLine = (n: number) => `${n}) touch step-${n}.txt`;
+  const atCeiling = Array.from({ length: PROBE_TURN_ALLOWANCE_CEILING }, (_, i) => commandLine(i + 1)).join("\n");
+  const overCeiling =
+    atCeiling + `\n${PROBE_TURN_ALLOWANCE_CEILING + 1}) touch step-over.txt`;
+  assert.equal(
+    probeTurnBudget(overCeiling),
+    probeTurnBudget(atCeiling) + 1,
+    "past the ceiling the allowance has saturated, so the cap still moves by exactly the base's one turn",
   );
 });
 
@@ -317,9 +357,10 @@ test("hooks/deny-floor.sh is unchanged by this task — still matches the tripwi
 
 test("PROBE_TURN_ALLOWANCE's own doc names the deny-floor rework it covers, not just an unexplained number", () => {
   // Find the export statement and read the doc comment immediately preceding it,
-  // so this assertion is pinned to the CONSTANT's own documentation rather than
-  // matching "tripwire" anywhere else in a large file.
-  const marker = "export const PROBE_TURN_ALLOWANCE";
+  // so this assertion is pinned to the FUNCTION's own documentation rather than
+  // matching "tripwire" anywhere else in a large file. W1-T2344 turned this from
+  // an `export const` into an `export function` of command count.
+  const marker = "export function PROBE_TURN_ALLOWANCE";
   const idx = containmentSrc.indexOf(marker);
   assert.ok(idx > -1, "PROBE_TURN_ALLOWANCE must be exported");
   const docStart = containmentSrc.lastIndexOf("/**", idx);

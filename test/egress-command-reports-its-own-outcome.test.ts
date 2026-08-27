@@ -121,12 +121,19 @@ void test("the egress command still makes both requests, at its own timeout, aga
 
 // ── THE BUDGET IS NOT TOUCHED. THIS IS Q2, NOT Q1. ────────────────────────────────────────────
 
-void test("the probe still runs six commands on a ten-turn budget with a three-turn allowance", () => {
+void test("the probe still runs six commands, and the budget stays derived rather than hand-picked", () => {
   const prompt = containmentProbePrompt("tok", "api.github.com");
   assert.equal(probeCommandCount(prompt), 6, "no command added and none removed");
-  assert.equal(probeTurnBudget(prompt), 10, "the derived cap is unmoved");
-  assert.equal(PROBE_TURN_ALLOWANCE, 3, "the per-probe allowance is Q1's subject and is NOT changed here");
-  assert.equal(probeTurnBudget(prompt), probeCommandCount(prompt) + 1 + PROBE_TURN_ALLOWANCE, "still derived, never hand-picked");
+  // W1-T2344 Q1 (this branch) made the allowance a FUNCTION of command count, so the two literals
+  // this test used to carry — a 3-turn allowance and a 10-turn budget — moved by design. What this
+  // test actually claims is untouched and still asserted: Q2 added no command, and the budget stays
+  // DERIVED from the command count rather than hand-picked.
+  assert.equal(PROBE_TURN_ALLOWANCE(probeCommandCount(prompt)), 6, "at six commands, below the ceiling, the allowance tracks one-for-one");
+  assert.equal(
+    probeTurnBudget(prompt),
+    probeCommandCount(prompt) + 1 + PROBE_TURN_ALLOWANCE(probeCommandCount(prompt)),
+    "still derived, never hand-picked",
+  );
 });
 
 void test("every one of the six commands is still in the prompt, since none may be dropped to afford a turn", () => {
