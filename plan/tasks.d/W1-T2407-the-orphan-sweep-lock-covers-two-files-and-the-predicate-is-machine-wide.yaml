@@ -1,0 +1,170 @@
+- id: W1-T2407
+  title: "THE ORPHAN-SWEEP LOCK COVERS TWO FILES AND THE PREDICATE IT GUARDS IS MACHINE-WIDE — sweepOrphanWorkers kills on readMarkers plus isRunActive alone, isRunActive consults the CALLER'S OWN inflight dir, and defaultListCandidates walks every pid on the machine, so a stray from any of the four other spawning fixtures is always read not-active, killed, and ledgered into the wrong ledger; W1-T356's assertion recurred four times the day its two-file lock shipped"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 25.00
+  files: [src/lib/worker-containment.ts, test/orphan-sweep-names-the-third-party.test.ts]
+  origin: "operator-brief#orphan-sweep-lock-scope-2026-08-27"
+  plan_refs: ["W1-T356", "W1-T117", "W1-T176", "W1-T2403"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-08-27 at origin/main 7d7d5cdf, from the Actions API and CI job logs. No ledger
+    claim is made here at all, so the three-form union is not exercised and is not cited.
+
+    (1) THE FIX SHIPPED AND THE DEFECT RECURRED THE SAME DAY. #3074 merged 2026-08-27T11:47:24Z as
+    `fix(test): serialise the two real orphan sweeps that were killing each other's strays`. It
+    reproduced its defect deterministically — each file 20 of 20 alone, the pair 10 of 10 failing at
+    `test/daemon.test.ts:2261` — and it fixed exactly that pair. It recurred FOUR TIMES the same day.
+
+    (2) THE DURATION MODE, SINCE THAT MERGE. 103 `coverage-ratchet` jobs: 97 SINGLE pass with a p50
+    of 761 seconds and a max of 1,398; ONE between; and FIVE in the DOUBLE band at 2,146 to 2,356
+    seconds. Every non-success job sits in the double band except one genuine single-pass failure.
+    The band MOVED UP from the previously recorded 2,056 to 2,117, which is #3064's raise letting the
+    second pass run its full thirty-nine minutes before the cut rather than being severed at
+    thirty-five.
+
+    (3) THE FIRST-ATTEMPT FAILURE, BY NAME FROM THE LOG. `FLAKE-RETRY: first attempt failed —
+    W1-T356 wiring`, whose assertion reads `the real production ledger dep must record the kill`
+    with `actual: undefined, expected: true` — and it is now failing INSIDE `withRealSweepLock`,
+    which is the lock that was supposed to prevent it. ANCESTRY CONTROLLED BOTH WAYS: both failing
+    heads contain #3074's merge commit 47176fb5, and a pre-fix sha correctly reads does-not-contain,
+    so this is a genuine recurrence rather than a stale branch.
+
+    (4) THE SCOPE GAP, MEASURED RATHER THAN ASSUMED. `withRealSweepLock` is defined TWICE — once in
+    each of the two files it serialises — and FOUR OTHER TEST FILES name `REMUDERO_RUN_ID` and
+    `REMUDERO_TASK_ID` and spawn, while holding no lock at all:
+
+      test/worker.test.ts                        82 spawn-shaped lines   holds lock: no
+      test/abandon-reclaims-the-worker.test.ts   46                      holds lock: no
+      test/serve-orphan-teardown.test.ts         19                      holds lock: no
+      test/serve-service-boot.test.ts             3                      holds lock: no
+
+    `node --test` runs FILES concurrently, so any of the four can hold a marked process in the table
+    while the two locked files run their real sweep.
+
+    (5) AND THE PREDICATE IS WHY A FILE LOCK CANNOT SUFFICE, WHICH IS THE ACTUAL FINDING.
+    `sweepOrphanWorkers` kills on `readMarkers(pid)` plus `isRunActive(runId)` and nothing else. It
+    does not care which fixture spawned the process. `isRunActive` consults THE CALLER'S OWN
+    inflight directory, so a stray belonging to another fixture is ALWAYS read as not-active — it is
+    killed and ledgered into a ledger that never owned it. `defaultListCandidates` runs
+    `ps -eo pid=,command=` over EVERY pid on the machine. A lock over a list of files is a guard on
+    the WRONG axis: the predicate's scope is the machine, and enumerating the files that must
+    participate is a discipline that has already failed once, on the day it was written.
+
+    (6) MEMORY IS RULED OUT AND THE CHECK IS RECORDED SO IT IS NOT REDONE. The CI logs carry ZERO
+    hits for JavaScript heap out of memory, FATAL ERROR, Allocation failed, ENOMEM or out of memory.
+    CONTROLLED: the same grep over the same file returns 132 for `coverage-ratchet`, so the log is
+    read and the zeros are real absences. A naive combined pattern reads 49 and would have produced
+    a false memory finding — all 49 are prose, 38 of them a CLI usage banner and the rest the names
+    of PASSING orphan-sweep tests, which are literally about that signal. The two cancelled jobs sit
+    at 2,355 and 2,356 seconds against a 2,340-second cap: they are dying to the clock.
+  design: |
+    (i) Q1 — TWO REMEDY SHAPES, AND THE CHOICE.
+
+      (a) EVERY FIXTURE THAT SPAWNS A MARKED PROCESS HOLDS ONE SHARED LOCK — chosen, with its cost
+          stated rather than minimised. It means ONE definition instead of the two that exist today,
+          extracted where both current holders and the four others can reach it, and four more files
+          opting in. WHAT IT COSTS: the opt-in is a DISCIPLINE, not a structure — a fixture added
+          tomorrow that spawns a marked process and forgets the lock reintroduces this exact defect,
+          and nothing fails when it is forgotten. That is the same shape as the failure being fixed,
+          which is why the criteria below require a CHECK that the set of spawning fixtures and the
+          set of lock holders agree, rather than merely requiring six call sites today.
+
+      (b) THE SWEEP STOPS BEING MACHINE-WIDE IN A TEST — REFUSED, and the refusal is not new.
+          `listCandidates` is the very seam the assertion exists to exercise: #3043 declined to
+          inject it on exactly these grounds, recorded as "the REAL `daemonCommand` is the test's
+          name and its entire content". Injecting a fake process table would make the test pass and
+          stop it proving that the production closure is the one wired, which is the producer and
+          consumer seam this repository has shipped broken three times. A green test that has
+          stopped asserting its subject is worse than a flaky one that still does.
+
+    (ii) Q2 — THE MEASUREMENT NOBODY HAS TAKEN, AND IT SHOULD LAND FIRST.
+
+    WHICH OF THE FOUR IS ACTUALLY CONCURRENT with `test/daemon.test.ts` on a failing run is
+    INFERRED, never observed. The logs name the failing test; they do not name the competing
+    process. The inference is sound — those four are the only files that spawn with both markers —
+    but it is an inference, and a fix aimed at the wrong file would look exactly like #3074 all over
+    again: correct about the mechanism, wrong about the scope, green in reproduction, recurring the
+    same day.
+
+    THE DIAGNOSTIC LANDS FIRST, AND THE EVIDENCE IS ALREADY IN HAND. `OrphanSweepReport.killed`
+    ALREADY carries `cmdline` for every process the sweep terminated, so a run that PRINTS that
+    table when the assertion fails names the third party outright, by its command line, with no new
+    fetch and no new signal.
+
+    ONE CORRECTION TO THE BRIEF THAT PROMPTED THIS, CARRIED SO IT IS NOT INHERITED. The brief says
+    `leftAlone` carries pid and reason and would name the third party. `leftAlone` DOES carry those
+    two fields and NOT `cmdline` — and more to the point the competing stray does not land there at
+    all: it is attributable and inactive, so it is KILLED. It is `killed` that names it, and
+    `killed` is the list that already carries the command line.
+
+    (iii) Q3 — THE PRICE OF DOING NOTHING, STATED HONESTLY IN BOTH DIRECTIONS.
+
+    FIVE OF 103 JOBS IS 4.9 PERCENT, and a rate that low would not on its own justify a task. What
+    justifies it is WHERE they land: every one clusters on a pull request that was then held. Each
+    firing costs `ci-gate` holding fail-closed on a cancelled required check, one fix-rung strike, an
+    empty retrigger commit, and roughly eighty minutes end to end.
+
+    AND THE CONNECTED FIGURE IS THE LARGEST SINGLE ITEM MEASURED. `blocked_ci` is 1,593.44 US
+    dollars, 46.7 percent of 3,409.25 dollars of fleet spend over nineteen days, and 148 of 152
+    blocked-CI tasks later earned merge credit — 97.4 percent. The work was right; CI was not. This
+    task is one named, measured contributor to that line, and it is NOT a claim to be the whole of
+    it.
+
+    (iv) WHAT MUST NOT CHANGE, AND EACH HAS A REASON.
+
+    THE CAP IS NOT RAISED. Thirty-nine minutes is 2,340 seconds, the largest whole minute strictly
+    below `ci-gate`'s `WAIT_CAP_SECONDS` of 2,400, and the measurement is explicit that the binding
+    constraint is the RETRY rather than the ceiling: 97 of 103 jobs finish at a p50 of 761 seconds,
+    and a double pass would cross any ceiling that stays legal. A build that raises it has answered a
+    different question.
+
+    NO TEST IS DELETED OR SKIPPED. The assertion that keeps failing is the one proving the real
+    `daemonCommand` wires the production closure; removing it removes the only check on a seam with
+    three shipped failures behind it.
+
+    `ci-gate` IS NOT WEAKENED. Holding on a cancelled required check is W1-T176 working correctly,
+    and it must keep doing exactly that.
+
+    NOTHING PACES OR SLEEPS. A serialising lock WAITS on a condition and throws at its ceiling; it
+    does not poll faster, and W1-T1066 is why that distinction is written down.
+
+    (v) WHAT IS OWNED ELSEWHERE AND IS NOT RE-FILED HERE. The turn cap is #3064's. The two-file lock
+    is #3074's, and this does not revisit its reasoning — only its scope. The fix rung spending a
+    worker to re-run a job is W1-T2403, filed alongside this one. The SIGKILLed fix workers are a
+    DIFFERENT phenomenon on a different host, and rationale (6) records the check that separates
+    them. THIS TASK OWNS ONLY THE LOCK'S SCOPE.
+
+    (vi) RULE 19 BAND, SET UP FRONT. `risk: high` is the SPAN reading and carries no claim about
+    blast radius: `files:` names two stems as the sizing check counts them, `worker-containment` and
+    `orphan-sweep-names-the-third-party`, and that pairing is refused at medium. The blast radius is
+    the opposite of the band — the first change is a diagnostic that prints a list already computed,
+    and it decides nothing.
+  acceptance:
+    - claim: "when the wiring assertion fails, the run names the competing process by its command line rather than leaving it to inference"
+      proof: "unit test: test/orphan-sweep-names-the-third-party.test.ts"
+    - claim: "the diagnostic reads a list the sweep already computes and adds no new signal and no new fetch"
+      proof: "unit test: test/orphan-sweep-names-the-third-party.test.ts"
+    - claim: "a sweep that terminated nothing prints an empty table rather than being silent, so an absence is distinguishable from an unread one"
+      proof: "unit test: test/orphan-sweep-names-the-third-party.test.ts"
+    - claim: "every fixture that spawns a marked process and every fixture that holds the serialising lock are the same set, checked rather than listed"
+      proof: "unit test: test/orphan-sweep-names-the-third-party.test.ts"
+    - claim: "the candidate enumeration is still the real one, so the assertion still proves the production closure is the wired one"
+      proof: "grep: export function sweepOrphanWorkers in src/lib/worker-containment.ts"
+    - claim: "attribution still precedes every signal, so an unattributable process is reported and never terminated"
+      proof: "unit test: test/orphan-sweep-names-the-third-party.test.ts"
+    - claim: "nothing added paces or throttles or sleeps a call"
+      proof: "unit test: test/orphan-sweep-names-the-third-party.test.ts"
+  falsifier: |
+    If a failing run's own output already names the competing process, then the measurement this
+    task calls for has already been taken and the diagnostic half must be closed rather than built —
+    what would remain is the lock's scope alone. The check is direct: read a CI log for a failing
+    `W1-T356 wiring` attempt and look for a command line belonging to a fixture other than the two
+    that hold the lock. Equally, if the set of spawning fixtures and the set of lock holders are
+    already identical at head, the scope gap has been closed by another change and this task must be
+    closed rather than implemented.
