@@ -162,19 +162,43 @@ function hasSelfCreatedGitSource(source: string): boolean {
 
 interface Exemption {
   file: string;
-  line: number;
+  /**
+   * THE INVOCATION'S OWN TEXT, whitespace-normalised — NOT a line number, and the difference is the
+   * whole of this field's history. It was `line: number`, and a line pin RE-ARMS EVERY TIME THE FILE
+   * GROWS: an unrelated edit that inserts anything above the call moves it, the exemption stops
+   * matching, and the guard reports a NEW VIOLATION for a call nobody touched. Measured 2026-08-27
+   * on #3054, which added 60 lines above this call and moved it 245 -> 287: `--depth` occurrences
+   * read 1 on main and 1 on the branch — nothing was added — and the gate failed anyway.
+   *
+   * CLAUDE.md carries the rule this broke, in as many words: cite symbols, not line numbers. It is
+   * easiest to forget in a test file, which is where it was forgotten.
+   *
+   * WHY THE CALL TEXT AND NOT THE TWO ALTERNATIVES. The enclosing step's `name:` survives growth
+   * too, but it is COARSER than the thing being blessed: a step may contain several git calls, and
+   * blessing by step name would bless all of them — which is exactly the widening design (ii)
+   * refuses. A comment marker beside the call is immune to both, but it edits a second file and an
+   * accidental copy of the marker silently blesses a second call. The call's own text is the
+   * narrowest anchor available: a DIFFERENT `--depth` invocation has different text and is not
+   * exempt, so narrowness is a property of the anchor rather than a promise about it.
+   *
+   * ITS FAILURE MODE IS THE SAFE ONE. Reordering the flags breaks the match and re-arms the guard —
+   * and that is correct, because re-shaping the very call this exemption blesses is precisely when a
+   * human should be asked to re-affirm it. Growth of the file, which is not a decision about this
+   * call, no longer costs anything.
+   */
+  call: string;
   flag: string;
   reason: string;
 }
 
 // The heartbeat watcher runs on a hosted GitHub Actions runner, fetching exactly one named
 // branch ref by name (rationale (3)): there is no host checkout in reach for a hosted runner to
-// shallow, so this is the one legitimate depth-limiting call in scope (a) — named, lined and
+// shallow, so this is the one legitimate depth-limiting call in scope (a) — named, QUOTED and
 // reasoned rather than a silent hole in the pattern.
 const EXEMPTIONS: Exemption[] = [
   {
     file: ".github/workflows/fleet-heartbeat-watch.yml",
-    line: 287,
+    call: 'git fetch --no-tags --depth=1 origin "+refs/heads/${branch}:refs/remotes/origin/${branch}"',
     flag: "--depth",
     reason:
       "hosted GitHub Actions runner, fetching one named branch ref by name, for a heartbeat " +
@@ -189,15 +213,37 @@ function validateExemptions(list: Exemption[]): void {
   for (const e of list) {
     if (!e.reason || !e.reason.trim()) {
       throw new Error(
-        `no-shallowing-of-the-canonical-checkout: exemption for ${e.file}:${e.line} (${e.flag}) ` +
+        `no-shallowing-of-the-canonical-checkout: exemption for ${e.file} (${e.flag}) ` +
           `carries no reason string — an exemption without one is itself a failure of this ratchet`,
+      );
+    }
+    if (!e.call || !e.call.trim()) {
+      throw new Error(
+        `no-shallowing-of-the-canonical-checkout: exemption for ${e.file} (${e.flag}) names no ` +
+          `call text — an exemption must quote the invocation it blesses, never point at a line`,
       );
     }
   }
 }
 
+/** Whitespace-normalised so YAML re-indentation — which moves a call without changing it — cannot
+ *  break the match, while any change to the call's own tokens can. */
+function normalizeCall(text: string): string {
+  return text.trim().replace(/\s+/g, " ");
+}
+
 function isExempt(h: FlagHit, exemptions: Exemption[]): boolean {
-  return exemptions.some((e) => e.file === h.file && e.line === h.line && e.flag === h.flag);
+  return exemptions.some(
+    (e) => e.file === h.file && e.flag === h.flag && normalizeCall(e.call) === normalizeCall(h.snippet),
+  );
+}
+
+/** Every exemption that matched NOTHING in this scan. A stale exemption is a hole nobody is
+ *  watching: it blesses a call that no longer exists, so the table claims cover it does not give.
+ *  The line-pinned form could not report this — a moved call simply failed the scan as a new
+ *  violation, which is the same evidence pointing at the wrong culprit. */
+function unusedExemptions(hits: FlagHit[], exemptions: Exemption[]): Exemption[] {
+  return exemptions.filter((e) => !hits.some((h) => isExempt(h, [e])));
 }
 
 // ──────────────────────────────────── tracked-tree scanning ───────────────────────────────────
@@ -260,6 +306,15 @@ test("no-shallowing-of-the-canonical-checkout: src/, scripts/, deploy/ and .gith
     unexempted,
     [],
     `unexempted depth-limiting git invocation(s) found:\n${unexempted.map(formatHit).join("\n")}`,
+  );
+
+  // A STALE EXEMPTION IS A HOLE NOBODY IS WATCHING, and the line-pinned form could not report one:
+  // when the call moved, the scan failed as a NEW VIOLATION rather than saying "the entry blessing
+  // it no longer matches". Anchoring on the call's text makes the two distinguishable, so assert it.
+  assert.deepEqual(
+    unusedExemptions(hits, EXEMPTIONS).map((e) => `${e.file}: ${e.call}`),
+    [],
+    "every exemption must still bless a real call — an entry matching nothing is a claim of cover it does not give",
   );
 });
 
@@ -356,10 +411,10 @@ test("validateExemptions: the real EXEMPTIONS table is well-formed (every entry 
   assert.ok(EXEMPTIONS.length > 0, "the table is expected to carry at least the heartbeat exemption");
 });
 
-test("validateExemptions: an exemption with no reason (missing, empty, or whitespace-only) fails the scan, naming the file, line and flag", () => {
+test("validateExemptions: an exemption with no reason (missing, empty, or whitespace-only) fails the scan, naming the file and flag", () => {
   for (const badReason of [undefined, "", "   "] as const) {
     const bad: Exemption[] = [
-      { file: ".github/workflows/fixture.yml", line: 7, flag: "--depth", reason: badReason as unknown as string },
+      { file: ".github/workflows/fixture.yml", call: "git fetch --depth=1 origin main", flag: "--depth", reason: badReason as unknown as string },
     ];
     assert.throws(
       () => validateExemptions(bad),
@@ -367,13 +422,23 @@ test("validateExemptions: an exemption with no reason (missing, empty, or whites
         const msg = String((err as Error).message);
         return (
           msg.includes(".github/workflows/fixture.yml") &&
-          msg.includes(":7") &&
           msg.includes("--depth") &&
           /reason/i.test(msg)
         );
       },
-      `validateExemptions must throw and name file/line/flag for reason=${JSON.stringify(badReason)}`,
+      `validateExemptions must throw and name file/flag for reason=${JSON.stringify(badReason)}`,
     );
+  }
+});
+
+test("validateExemptions: an exemption that quotes NO call fails too — the anchor is not optional", () => {
+  // The whole point of the re-anchoring: a table entry that points at nothing is the line pin's
+  // failure mode returning by another door.
+  for (const badCall of [undefined, "", "   "] as const) {
+    const bad: Exemption[] = [
+      { file: ".github/workflows/fixture.yml", call: badCall as unknown as string, flag: "--depth", reason: "a stated reason" },
+    ];
+    assert.throws(() => validateExemptions(bad), /names no call text/);
   }
 });
 
@@ -408,4 +473,74 @@ test("scanForForbiddenFlagHits: a path `git ls-files` lists but the filesystem c
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }
+});
+
+// ── The anchor itself: growth-immune, and still narrow ────────────────────────────────────────
+//
+// #3054 added 60 lines above the exempted call and moved it 245 -> 287. `--depth` occurrences read
+// 1 on main and 1 on the branch — nothing was added — and the line-pinned exemption stopped
+// matching, so the gate reported a NEW VIOLATION for a call nobody had touched. These two tests are
+// the properties that failure asked for: growth must cost nothing, and the anchor must not widen.
+
+/** The real workflow's text, with `pad` lines inserted ABOVE the exempted call — the exact shape of
+ *  an unrelated edit growing the file. */
+function heartbeatWorkflowGrownBy(pad: number): string {
+  const src = readFileSync(join(REPO_ROOT, ".github/workflows/fleet-heartbeat-watch.yml"), "utf8");
+  const idx = src.indexOf("git fetch --no-tags --depth=1");
+  assert.ok(idx > 0, "control: the exempted call must be findable in the real workflow");
+  const before = src.slice(0, idx);
+  const cut = before.lastIndexOf("\n") + 1;
+  return before.slice(0, cut) + "# pad\n".repeat(pad) + before.slice(cut) + src.slice(idx);
+}
+
+test("the exemption survives the file GROWING above the call — the failure that produced this change", () => {
+  const file = ".github/workflows/fleet-heartbeat-watch.yml";
+  const atRest = findForbiddenFlagHits(readFileSync(join(REPO_ROOT, file), "utf8"), file);
+  assert.equal(atRest.length, 1, "control: exactly one --depth hit in the real workflow at rest");
+  assert.ok(isExempt(atRest[0]!, EXEMPTIONS), "control: and it is exempt at rest");
+
+  for (const pad of [1, 42, 60]) {
+    const grown = findForbiddenFlagHits(heartbeatWorkflowGrownBy(pad), file);
+    assert.equal(grown.length, 1, `+${pad} lines: still exactly one hit — nothing was added`);
+    assert.notEqual(grown[0]!.line, atRest[0]!.line, `+${pad} lines: the call HAS moved, so this is a real test`);
+    assert.ok(isExempt(grown[0]!, EXEMPTIONS), `+${pad} lines: the moved call is still exempt`);
+  }
+});
+
+test("NARROWNESS: a SECOND --depth call in the same workflow is still refused", () => {
+  const file = ".github/workflows/fleet-heartbeat-watch.yml";
+  const src = readFileSync(join(REPO_ROOT, file), "utf8");
+  const idx = src.indexOf("git fetch --no-tags --depth=1");
+  const cut = src.lastIndexOf("\n", idx) + 1;
+  // A different depth-limiting call, planted beside the blessed one — the case an anchor keyed on
+  // the enclosing step's name would have blessed by accident.
+  const planted = src.slice(0, cut) + "            git clone --depth=1 https://example.invalid/other.git /tmp/other\n" + src.slice(cut);
+
+  const hits = findForbiddenFlagHits(planted, file);
+  assert.equal(hits.length, 2, "control: the scan sees both calls");
+  const unexempted = hits.filter((h) => !isExempt(h, EXEMPTIONS));
+  assert.equal(unexempted.length, 1, "exactly one is refused — the exemption did not spread to the planted call");
+  assert.match(unexempted[0]!.snippet, /git clone --depth=1 https:\/\/example\.invalid/, "and it is the planted one, not the blessed one");
+});
+
+test("a change to the blessed call's OWN tokens re-arms the guard — the deliberate, wanted failure", () => {
+  const file = ".github/workflows/fleet-heartbeat-watch.yml";
+  const src = readFileSync(join(REPO_ROOT, file), "utf8");
+  // Depth changed 1 -> 5: same call, different tokens. That is a decision about THIS call, so the
+  // exemption must stop covering it until a human re-affirms.
+  const edited = src.replace("git fetch --no-tags --depth=1", "git fetch --no-tags --depth=5");
+  assert.notEqual(edited, src, "control: the edit applied");
+  const hits = findForbiddenFlagHits(edited, file);
+  assert.equal(hits.length, 1);
+  assert.ok(!isExempt(hits[0]!, EXEMPTIONS), "a re-shaped call is not silently covered by the old exemption");
+});
+
+test("re-indentation alone does NOT re-arm it — whitespace is normalised, tokens are not", () => {
+  const file = ".github/workflows/fleet-heartbeat-watch.yml";
+  const src = readFileSync(join(REPO_ROOT, file), "utf8");
+  const reindented = src.replace("            git fetch --no-tags --depth=1", "                git fetch  --no-tags   --depth=1");
+  assert.notEqual(reindented, src, "control: the re-indent applied");
+  const hits = findForbiddenFlagHits(reindented, file);
+  assert.equal(hits.length, 1);
+  assert.ok(isExempt(hits[0]!, EXEMPTIONS), "YAML re-indentation moves a call without changing it");
 });
