@@ -36,7 +36,23 @@ raw: "A UNIT TEST REACHED THE REAL AUTO-MERGE ARM, AND ONLY AN EMPTY CI CONFIG
 attachments: []
 origin: cli
 status: proposed
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/3032
+summary:
+  headline: Audit scope of tests reaching merge machinery defaults
+  what_happened: Unit tests accidentally triggered real auto-merge when verdicts
+    passed, because armAutoMerge was default behavior. Defect was hidden locally
+    by valid config but exposed in CI's empty config.
+  decision: Verify whether defaults allow unsafe reach-through to operator
+    machinery, audit all vulnerable tests, and determine if architecture
+    requires explicit enablement.
+  options:
+    - label: Falsifying check only
+      consequence: If tokens required, defaults safe; if not, full audit needed
+    - label: Audit all tests reaching operator machinery
+      consequence: Finds all vulnerable paths; determines whether defaults should
+        require explicit enablement
+    - label: Refactor defaults to require explicit enablement now
+      consequence: Prevents this bug class but requires updating tests relying on
+        current defaults
 expansion: null
 answered_by: null
