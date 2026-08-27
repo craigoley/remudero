@@ -5201,21 +5201,67 @@ export function renderFixPrompt(opts: {
 }
 
 /**
- * W1-T138 (the #303/#305/#292/#315 fix): render ONE ci-log failure as a
- * single, specific line — the check NAME plus (when the log tail carries one)
- * its own first non-blank line of detail, e.g. `CodeQL — js/incomplete-url-
- * substring-sanitization @ test/worker.test.ts:318 — Incomplete URL substring
- * sanitization`. An escalation that names only the bare check ("CodeQL")
- * leaves the operator to go re-fetch the log by hand; this line is what a
- * `gh run view --log-failed` tail (or an injected test fixture) already
- * carries, verbatim, never re-derived or guessed.
+ * W1-T138 (the #303/#305/#292/#315 fix), reworked by W1-T1279 (the #2624 fix): render ONE
+ * ci-log failure as a single, specific line — the check NAME plus its DIAGNOSTIC line, e.g.
+ * `CodeQL — js/incomplete-url-substring-sanitization @ test/worker.test.ts:318 — Incomplete URL
+ * substring sanitization`. An escalation that names only the bare check ("CodeQL") leaves the
+ * operator to go re-fetch the log by hand; this line is what a `gh run view --log-failed` tail
+ * (or an injected test fixture) already carries, verbatim, never re-derived or guessed.
+ *
+ * W1-T1279's OWN FIX. `f.logTail` is a `gh run view --log-failed` extract: lines shaped
+ * `<job>\t<step>\t<timestamp> <content>`, and the FIRST such line is, BY CONSTRUCTION, the
+ * failing step's own `##[group]Run <cmd>` invocation banner for every `run:` step GitHub
+ * Actions executes — `.find((l) => l.length > 0)` (the old selection) therefore returned the
+ * COMMAND that ran, never the failure it produced (issues/2624's "Failing check(s):" section,
+ * verbatim). This selects the first line, after stripping that prefix, that LOOKS LIKE A
+ * COMPILER/TEST-RUNNER DIAGNOSTIC instead — skipping `##[group]`/`##[endgroup]`/`---`-banner/
+ * bare-timestamp lines along the way. WHEN NOTHING MATCHES that shape, this falls back to
+ * exactly the OLD selection (today's first non-empty line) rather than to nothing — a banner is
+ * a poor summary but an empty one is worse, and the W1-T487 empty-evidence wording
+ * (`renderEscalationEvidence`, below) must keep meaning "there was truly nothing", never
+ * "nothing looked like a diagnostic".
  */
+export const CI_LOG_LINE_PREFIX_RE = /^[^\t\n]*\t[^\t\n]*\t\S+ ?/;
+export const CI_LOG_BANNER_RE = /^(##\[(group|endgroup)\]|-{3,})/;
+export const CI_LOG_BARE_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?$/;
+export const CI_LOG_DIAGNOSTIC_RE = new RegExp(
+  [
+    "error TS\\d+:", // tsc
+    "\\(\\d+,\\d+\\):\\s*(error|warning)", // tsc-shaped `file(line,col): error|warning`
+    ":\\d+:\\d+:?\\s*(error|Error|warning)", // eslint/compiler `file:line:col: error`
+    "^(Error|TypeError|ReferenceError|AssertionError|SyntaxError|RangeError):", // thrown JS errors
+    "^\\s*(✕|✗|FAIL)\\b", // jest/mocha failing-test markers
+    "Expected:|Received:", // jest assertion diff
+  ].join("|"),
+);
+
 function summarizeCiFailure(f: CiFailure): string {
-  const firstLine = (f.logTail ?? "")
-    .split("\n")
-    .map((l) => l.trim())
-    .find((l) => l.length > 0);
+  const rawLines = (f.logTail ?? "").split("\n");
+  const diagnostic = rawLines
+    .map((l) => l.replace(CI_LOG_LINE_PREFIX_RE, "").trim())
+    .find(
+      (l) => l.length > 0 && !CI_LOG_BANNER_RE.test(l) && !CI_LOG_BARE_TIMESTAMP_RE.test(l) && CI_LOG_DIAGNOSTIC_RE.test(l),
+    );
+  if (diagnostic) return `${f.name} — ${diagnostic}`;
+  const firstLine = rawLines.map((l) => l.trim()).find((l) => l.length > 0);
   return firstLine ? `${f.name} — ${firstLine}` : f.name;
+}
+
+/**
+ * W1-T1279 (design note (iii)/(v)) — the exhaustion escalation's TRAJECTORY line: which check
+ * name(s) were red at SOME point during this rung but are absent from the checks still red at
+ * exhaustion. Named explicitly so the escalation can say what earlier strikes REPAIRED, not only
+ * the final outcome — issues/2642 read "checks did not go green" across every strike even though
+ * the branch behind it shows two different real defects, each fixed, before a THIRD, unrelated
+ * check failed. `undefined` when nothing was ever red besides what still is (the ordinary
+ * single-strike exhaustion) — no line renders for that case, so this never lengthens the common
+ * escalation.
+ */
+function renderCiTrajectoryLine(everRedNames: ReadonlySet<string>, stillRedNames: readonly string[]): string | undefined {
+  const stillRed = new Set(stillRedNames);
+  const repaired = [...everRedNames].filter((n) => !stillRed.has(n)).sort();
+  if (repaired.length === 0) return undefined;
+  return `Earlier strike(s) already repaired: ${repaired.join(", ")}.`;
 }
 
 /**
@@ -6758,6 +6804,12 @@ export async function runFixRung(opts: {
   // of targeting the check that is actually still red.
   let noReviewYet = opts.ciFailures !== undefined;
   let currentCiFailures = opts.ciFailures;
+  // W1-T1279: every check name EVER observed red across this rung's strikes — the trajectory
+  // input for the exhaustion escalation's own detail text (renderCiTrajectoryLine, above).
+  // Seeded from round 1's evidence and re-unioned after every refresh below (never cleared), so a
+  // name that drops out later — because some earlier strike repaired it — still shows up here
+  // even though `currentCiFailures` itself has already moved on.
+  const everRedCiCheckNames = new Set<string>((opts.ciFailures ?? []).map((f) => f.name));
   // W1-T106 (the #170 DIRTY strand): mirrors `noReviewYet`/`currentCiFailures`
   // for the merge-conflict mode — a SEPARATE variable (never folded into
   // `noReviewYet`) because a dirty PR carries no ci-log evidence at all; the
@@ -7572,6 +7624,7 @@ export async function runFixRung(opts: {
       if (deps.fetchCiFailures) {
         try {
           currentCiFailures = await deps.fetchCiFailures(opts.prUrl);
+          for (const f of currentCiFailures) everRedCiCheckNames.add(f.name);
         } catch (e) {
           deps.log("fix.ci_failures_fetch_error", { strike: strikes, error: String((e as Error)?.message ?? e) });
         }
@@ -7628,6 +7681,10 @@ export async function runFixRung(opts: {
                 `The blocked_ci FIX RUNG (ci-log mode, W1-T94/W1-T100/W1-T2328) detected a CI-LOG FALSE-BLOCK it ` +
                 `cannot resolve by dispatching more code: ${ciFalseBlockReason}. Failing check(s):\n\n` +
                 renderEscalationEvidence(currentCiFailures ?? [], (f) => `- ${summarizeCiFailure(f)}`, currentCiFailures !== undefined) +
+                (() => {
+                  const trajectory = renderCiTrajectoryLine(everRedCiCheckNames, (currentCiFailures ?? []).map((f) => f.name));
+                  return trajectory ? `\n\n${trajectory}` : "";
+                })() +
                 `\n\nThis strike's push landed a real commit and the check(s) re-ran, but the annotation findings ` +
                 `are byte-identical to what the previous round already observed — a further strike could only ` +
                 `re-discover what this one already showed. Escalating for a HUMAN RE-JUDGMENT after ${strikes} ` +
@@ -7908,7 +7965,11 @@ export async function runFixRung(opts: {
         : noReviewYet
         ? `The blocked_ci FIX RUNG (ci-log mode, W1-T94/W1-T100/W1-T138) dispatched ${strikes} bounded fix worker(s) ` +
           `on ${opts.branch} and required checks are STILL red — no review has run yet. Failing check(s):\n\n` +
-          renderEscalationEvidence(currentCiFailures ?? [], (f) => `- ${summarizeCiFailure(f)}`, currentCiFailures !== undefined)
+          renderEscalationEvidence(currentCiFailures ?? [], (f) => `- ${summarizeCiFailure(f)}`, currentCiFailures !== undefined) +
+          (() => {
+            const trajectory = renderCiTrajectoryLine(everRedCiCheckNames, (currentCiFailures ?? []).map((f) => f.name));
+            return trajectory ? `\n\n${trajectory}` : "";
+          })()
         : `The blocked_review FIX RUNG (W1-T76) dispatched ${strikes} bounded fix worker(s) on ` +
           `${opts.branch} and the review gate is STILL failing. Unmet criteria:\n\n` +
           renderEscalationEvidence(unmet, (c) => `- ${c.claim}\n  reason: ${c.reason}`, review.criteria.length > 0),
