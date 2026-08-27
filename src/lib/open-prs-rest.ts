@@ -1382,7 +1382,14 @@ export function hydrateMergeStates(
  *  keep `workflowRuns: undefined` and disposition exactly as they did before this existed — the
  *  honest degradation, since that was every PR's behaviour until now. Reuses
  *  {@link MERGE_STATE_HYDRATION_CAP}'s value rather than inventing a second ceiling, matching
- *  {@link hydrateMergeConflictEvidence}'s own choice. */
+ *  {@link hydrateMergeConflictEvidence}'s own choice.
+ *
+ *  KIND: BACKSTOP (test/bound-kind-declared.test.ts). It is sized to sit ABOVE the population it
+ *  bounds rather than to shape it: {@link MERGE_STATE_HYDRATION_CAP} is 25 against an all-time
+ *  observed maximum of 23 open PRs, and this cap bounds the SAME population in the SAME pass, so
+ *  it is expected never to bind. That is the discriminator — a PRIMARY CONTROL is a number the
+ *  system is meant to run against, and this one is a number reaching it would mean the open-PR
+ *  count had left every range this repo has ever observed. */
 export const WORKFLOW_RUN_HYDRATION_CAP = MERGE_STATE_HYDRATION_CAP;
 
 /** `gh api` argv listing the workflow runs for ONE head sha. */
