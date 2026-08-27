@@ -1,0 +1,162 @@
+- id: W1-T2379
+  title: "The light sweep's tick is bounded by CI rather than by its poll interval — `startInFlightTicker` awaits `deps.sweepLight()`, `runSweepLightPass` returns `Promise.all` over every open PR, and one admitted fix dispatch then waits on CI inside that await, so the row that fires 34 times an hour fired zero times for sixteen minutes while two green PRs sat unreviewed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  risk: high
+  origin: "oper#light-pass-tick-bounded-by-ci-2026-08-27"
+  files: [src/lib/daemon.ts, src/lib/sweep.ts, test/light-pass-tick-is-not-bounded-by-ci.test.ts]
+  rationale: |
+    Filed by reading and by measuring only, from a scratch worktree PROVEN equal to origin/main by sha
+    (46b443c01e8fb7880772ba8a4f233ef6007fed1b), clone shallow-checked `false`. Source read from that
+    tree; the ledger read READ-ONLY on the fleet host, per form, every zero controlled. No spawning
+    verb, no restart.
+
+    (1) THE MECHANISM, IN THREE LINES OF SOURCE. `startInFlightTicker` (`src/lib/daemon.ts`) loops:
+    `await deps.sleep(pollIntervalMs)`, log `daemon.alive`, then `await deps.sweepLight!()`.
+    `runSweepLightPass` (`src/lib/sweep.ts`) returns `Promise.all(openPrs.map(...))` — so it resolves
+    only when EVERY per-PR action resolves. And `dispatchFix`, the one admitted lane that spends a
+    worker, runs a CI wait. So the interval between two `daemon.alive` rows is
+    `pollIntervalMs + max(action duration)`, and the second term is bounded by GitHub Actions.
+
+    (2) TRACED TO THE SECOND, ON THE OBSERVED PASS. `daemon.alive` at 11:16:48Z; its own
+    `fix.dispatch` (lane `daemon`, W1-T2324) at 11:21:47Z; 31 `ci.polling` rows through the window at
+    a measured p50 cadence of 36s; the NEXT `daemon.alive` at 11:33:29Z. THAT IS A 16m41s TICK, which
+    is 11:16:48 plus the action plus the 60s sleep.
+
+    (3) THE DISTRIBUTION, RE-DERIVED RATHER THAN CARRIED, AND IT AGREES. Over the last 24h of the
+    ledger union: 821 `daemon.alive` rows, gaps min 60s, p50 71s, p90 132s, p99 847s, MAX 4,127s, 9
+    gaps over 600s, and 416 minutes — 29% OF THE SPAN — inside a gap longer than five minutes. Over
+    the whole retained corpus (348.8h, 11,773 rows) the tail is worse: p99 721s, max 47,606s, 130 gaps
+    over 600s, 35% of span inside a gap over 300s.
+
+    THE FLOOR HOLDS EVERYWHERE, WHICH IS THE OTHER HALF OF THE MEASUREMENT. ZERO of 11,772 gaps fall
+    below 60s and the minimum is exactly 60s. Nothing here is polling too fast; the interval is a
+    floor that is never violated and a ceiling that does not exist.
+
+    (4) THE COST, OBSERVED. Two PRs went green at 11:17:56Z and 11:21:48Z and were still unreviewed at
+    11:32Z, when an operator posted both by hand — 14m29s and 10m53s late. The next tick was 11:33:29Z,
+    FORTY-EIGHT SECONDS LATER. The rung was not broken; it was not running.
+
+    (5) AND THE RUNG IS NOT STARVED — SAID PLAINLY SO NOBODY BUILDS THE WRONG FIX. Over the same 24h:
+    125 distinct post-review dispositions across 68 DISTINCT PRs, and 3,347 `sweep.dispose.not_open`
+    declines OF WHICH 3,347 CARRY A REASON — every one. The frequency is fine. THE VARIANCE IS THE
+    DEFECT: a p50 of 71s beside a p99 of 847s is not a slow loop, it is a loop whose period is set by
+    something other than its period.
+  design: |
+    (i) Q1 — THE TICK MUST NOT AWAIT AN ACTION WHOSE DURATION IS SET BY CI. Of the three candidates,
+    THIS SHARD PICKS THE FIRST, and the other two are named with what they break rather than left
+    implied.
+
+      (a) DO NOT AWAIT A POLLING ACTION — chosen. The fix rung's DISPATCH is fast; its CI WAIT is
+          not. Separate them: the light pass dispatches and returns, and whatever waits on CI does so
+          outside the awaited pass. The tick's period returns to `pollIntervalMs` plus API latency.
+          WHAT IT BREAKS, STATED: `runSweep` currently records `acted: true` from this closure's
+          clean return, and `fixRungStalledWithoutNewHead` (W1-T1110) can only re-arm a gate by
+          reading rows the run itself wrote. A detached wait must still write those rows and must
+          still make the strike real BEFORE the pass returns — `fix.dispatch` is what W1-T1127 made
+          load-bearing for the dedup seed. So the split is "dispatch and record synchronously, wait
+          asynchronously", never "fire and forget".
+
+      (b) BOUND WHAT THE LIGHT PASS MAY DISPATCH — REFUSED, and Q2 below is why. It re-narrows
+          W1-T1211's admission, which is a shipped improvement, and it would fix the symptom by
+          removing the capability.
+
+      (c) LET THE TICK PROCEED WHILE AN ACTION IS IN FLIGHT — refused as the larger change. It
+          changes the ticker's own contract: `stop()` awaits the in-flight pass, `runSweep` holds a
+          cross-call mutex, and two overlapping light passes would contend on it — so the concurrency
+          this repo has deliberately serialised would have to be re-argued. It also breaks the
+          property W1-T1272's retrigger relies on, that the ticker's phases run strictly one at a
+          time. It is not wrong; it is a different task with a much larger blast radius.
+
+    NONE OF THE THREE IS A SHORTER INTERVAL, A SECOND TICKER, OR ANY PACING. W1-T1066 records a
+    polling loop that locked an operator out of this repository for ninety minutes, and the 60,000 ms
+    floor is measured intact on all 11,772 gaps. A build that touches the interval has answered a
+    different question and is wrong.
+
+    (ii) Q2 — W1-T1211'S ADMISSION STANDS, AND THAT IS THE POINT RATHER THAN A CONCESSION.
+    `lightPassActionable` admits `blocked-fixable` and `conflicted` only when `fixRungAllowed`, which
+    `runIsAwaitingExternal` sets TRUE only when the task's LATEST RETAINED row is the awaiting-external
+    step. Its own doc records what it fixed: one lock held 41 minutes wrote 347 light passes and ZERO
+    full sweeps while `fix.dispatch` read zero for twenty-one hours. Revoking the admission restores
+    exactly that.
+
+    SO THE CI WAIT BELONGS OUTSIDE THE TICK, NOT THE ADMISSION OUTSIDE THE PASS. The admission decides
+    WHETHER a fix may be dispatched; it says nothing about how long the dispatcher's caller must
+    block. Those are separable, and conflating them is what makes (b) look like a fix. The lane that
+    spends a worker is the one worth admitting; the wait that follows it is the one worth detaching.
+
+    (iii) Q3 — THE SECOND BOUND, NAMED SO IT IS NOT MISTAKEN FOR THIS ONE, AND NOT TOUCHED.
+    `selectReviewAdmission` (W1-T526) admits AT MOST ONE open PR to `post-review` per light pass,
+    oldest-activity-first, wrapping every other candidate's `actionable` to false with the same
+    "deferred to full sweep (light pass)" reason. THAT IS A DELIBERATE SPEND BOUND: `rmd review` is a
+    spawning verb, so N admissions are N spawns.
+
+    IT COMPOUNDS THE VARIANCE AND IS NOT THE DEFECT. Two green PRs need two ticks MINIMUM — which,
+    when a tick is 60s, costs two minutes, and when a tick is 16m41s, costs half an hour. That is the
+    interaction, and it is an argument for fixing the TICK, never for raising the admission. THIS
+    SHARD PROPOSES NO CHANGE TO IT, and a build that raises it has answered a different question.
+
+    (iv) WHAT A TEST CAN ACTUALLY HOLD. The seam is injectable: `deps.sweepLight` and `deps.sleep` are
+    both dependencies of `startInFlightTicker`, and `runSweepLightPass` takes its `deps` and `policy`.
+    So the property — a tick whose action polls does not delay the next tick beyond the interval — is
+    assertable against a fake clock and a fake action, with no daemon, no network and no real CI.
+    THE FALSIFIER IS THE CURRENT BEHAVIOUR: the same test against today's code must fail, or it is
+    asserting something already true.
+  acceptance:
+    - claim: "a light pass whose action polls does not delay the next tick beyond the poll interval"
+      proof: "unit test: test/light-pass-tick-is-not-bounded-by-ci.test.ts"
+    - claim: "the fix rung's strike is recorded before the pass returns, so the dedup seed is unchanged"
+      proof: "unit test: test/light-pass-tick-is-not-bounded-by-ci.test.ts"
+    - claim: "the sixty-second floor is never crossed, on any path this change touches"
+      proof: "unit test: test/light-pass-tick-is-not-bounded-by-ci.test.ts"
+    - claim: "no second ticker is created and no interval is shortened"
+      proof: "unit test: test/light-pass-tick-is-not-bounded-by-ci.test.ts"
+    - claim: "the blocked-fixable admission still fires exactly where it fires today"
+      proof: "unit test: test/light-pass-tick-is-not-bounded-by-ci.test.ts"
+    - claim: "at most one open PR is still admitted to post-review per pass"
+      proof: "unit test: test/light-pass-tick-is-not-bounded-by-ci.test.ts"
+    - claim: "the two-strike fix ceiling is unchanged"
+      proof: "unit test: test/light-pass-tick-is-not-bounded-by-ci.test.ts"
+    - claim: "stopping the ticker still lets work already in flight finish rather than aborting it"
+      proof: "unit test: test/light-pass-tick-is-not-bounded-by-ci.test.ts"
+  status: queued
+  attempts: 0
+  plan_refs: ["W1-T1066", "W1-T1110", "W1-T1127", "W1-T1211", "W1-T1272", "W1-T526"]
+  note: |
+    WHAT MUST NOT CHANGE.
+
+    NOTHING PACES, SLEEPS OR POLLS FASTER. The 60,000 ms poll interval is a floor measured intact on
+    every one of 11,772 recorded gaps, and W1-T1066 records what happened the last time a loop here
+    polled: an operator locked out of his own repository for ninety minutes. No shorter interval, no
+    second ticker, no new timer, no retry cadence. The remedy is to stop the tick WAITING, never to
+    make it come round sooner.
+
+    THE TWO-STRIKE FIX CEILING STAYS. Detaching a wait must not detach the bound that stops the fix
+    rung retrying forever, and a strike must still be spent exactly once per head.
+
+    THE ONE-PER-PASS REVIEW ADMISSION STAYS. `selectReviewAdmission`'s bound is a spend bound over a
+    spawning verb. It is named in design (iii) so it is not mistaken for this defect, and it is not
+    raised, relaxed or made conditional.
+
+    W1-T1211's ADMISSION STAYS. `blocked-fixable` and `conflicted` remain admissible to the light pass
+    under `fixRungAllowed`. A build that re-narrows the light pass has undone a shipped improvement
+    and answered a different question.
+
+    THE OPERATOR GATES EVERY MERGE, and nothing here changes what any disposition is permitted to do
+    — only when the loop that computes them is free to run again.
+
+    THE FIGURES ARE QUERIES, NOT NUMBERS TO CARRY. 821, 71s, 847s, 4,127s, 29%, 125-across-68 and the
+    16m41s trace are stamped with the date and sha they were read at and will move. Re-run them; no
+    acceptance criterion asserts any of them, deliberately.
+
+    RULE 19 BAND. `risk: high` is set UP FRONT for the SPAN of the declared `files:` — two source
+    modules and a test — and carries no claim about blast radius.
+
+    THE FORWARD REFERENCE IS DELIBERATE. The declared test file does not exist yet; it is named in
+    `files:` so the pure-path proofs resolve under the forward-reference carve-out and read
+    `not_yet_built` until the build lands. Every proof is pure-path `unit test:`, so this shard
+    carries no `grep:` pattern at all.
