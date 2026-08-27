@@ -172,6 +172,33 @@
     100 percent, so every exhausted probe is still followed by a full worker run for the same task.
     Probe spawn is the small half of the bill at 0.47 US dollars across 12.7 hours. The figure that
     deserves watching is that multiplier and not the spawn.
+    AMENDED AGAIN 2026-08-27: THE ONE-TURN-OVER SHAPE IS A SIGNATURE, NOT A COINCIDENCE.
+
+    A SECOND INSTANCE OF THE SAME CLASS, ON A DIFFERENT CAP. The recon phase runs under a 20-turn
+    cap. Across the entire ledger corpus there are EIGHT recon exhaustions: 4 recon.done, 3
+    recon.retry and 1 recon.degraded. EVERY ONE OF THE EIGHT RECORDS EXACTLY 21 TURNS, all carrying
+    verdict error_max_turns, against a p99 of 17 turns for recon runs that finish. One turn over,
+    without exception, which is the shape already recorded above for the containment probe at 36 of
+    36.
+
+    THE CONTRAST THAT MAKES IT A SIGNATURE. The implement phase runs under a 400-turn budget and
+    shows NO such pattern at all. Zero of 422 implement runs reached that cap, exactly one got
+    within 20 percent of it, and the p99 sits at 239 turns with 40 percent of headroom still above
+    it. A CAP THAT IS NEVER APPROACHED PRODUCES NO ONE-TURN-OVER POPULATION, AND A CAP THAT CATCHES
+    NON-TERMINATION PRODUCES NOTHING ELSE. The two caps sit on the same fleet, on the same days, and
+    only the ones catching non-termination carry the shape. That is what rules out coincidence.
+
+    THE COST, STATED SO NOBODY ACTS ON IT. A recon exhaustion costs roughly 0.60 US dollars, and
+    eight of them across the whole corpus is roughly 5 US dollars of lifetime spend. THIS IS A
+    RECORD RATHER THAN A DEFECT WORTH FIXING. It is written down because the shape is diagnostic,
+    not because the number is large.
+
+    AND THE LEVER IS THE SAME INERT ONE. RAISING THE RECON CAP WOULD RELOCATE THE WALL EXACTLY AS
+    #3030 RELOCATED THE PROBE WALL, and this record proposes no cap change of any kind, on recon or
+    anywhere else. The probe half of this class is already owned by this same shard directly above
+    and is not re-filed here. What the second instance adds is confidence: a single population can
+    be an artefact of one cap, but two caps on two different phases producing the identical shape,
+    beside a third cap that produces none, is a property of what a turn cap catches.
   acceptance:
     - claim: "the probe's slack is a function of how many commands it runs, not a constant that dilutes as commands are added"
       proof: "unit test: test/containment.test.ts"
