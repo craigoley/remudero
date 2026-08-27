@@ -1,0 +1,217 @@
+- id: W1-T2381
+  title: "A BUILD ROUTED ITS OUTPUT TO THE SURFACE ITS OWN SHARD REFUSED IN TERMS — W1-T2345 wrote 'a second queue nobody drains is not an answer and this task refuses to file one', and #3048 calls deps.escalate(); eight trips in seven hours produced one issue, seven dedup comments on issues titled for other causes, and zero human reads"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 20.00
+  files: [src/lib/sweep.ts, test/sweep.test.ts]
+  origin: "operator-brief#repeat-trip-routed-to-refused-surface-2026-08-27"
+  plan_refs: ["W1-T2345", "W1-T2304", "W1-T2379", "W1-T2327", "W1-T2340", "W1-T1066", "W1-T104", "W1-T345"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE ID. Eight surfaces were swept, each against a control firing on ITS OWN surface, before a
+    byte of this file was written. `refs/rmd-id/W1-T2381` resolves on origin against a namespace of
+    494 refs (surface 1 reads 1). Shard filenames 0 of 647; declared ids 0 of 902; open-PR titles 0
+    of 7 read case-sensitively; open-PR bodies 0; open-PR head refs 0; merged trailers 0 of 737
+    trailer lines; merged subjects 0 of 2,420. Controls: W1-T2345 fires 1 on filenames, ids,
+    trailers and titles and 2 on subjects; W1-T2324 fires 3 on bodies and 1 on head refs from the
+    LIVE `run-W1-T2324-1787823430981` head of open PR #3063. Anchor leak probes were printed
+    alongside every count and disagree in the right direction wherever the band is populated —
+    W1-T238 reads anchored 0 against unanchored 2 on the ref namespace, W1-T234 anchored 2 against
+    unanchored 8 on merged subjects — so the anchor is discriminating rather than merely quiet.
+
+    THE BRIEF NAMED W1-T3281 AND THAT ID IS NOT RESERVED. It reads 0 on all eight surfaces
+    including surface 1, where the brief itself requires 1; the reservation namespace stops at
+    W1-T2381. W1-T3281 is a digit transposition of W1-T2381, and W1-T2381 is both the transposed id
+    and the highest reserved id, so the two readings agree. Filing under W1-T3281 would have been a
+    mint the brief forbids. RECORDED HERE rather than silently corrected.
+
+    (1) THE DIVERGENCE, EXACTLY. W1-T2345's rationale (Q2) says: "The 60-minute escalation already
+    produced exactly one issue and it went unread; a second queue nobody drains is not an answer and
+    this task refuses to file one. The escalation surface is THE DIGEST." Its build, #3048 (merged
+    2026-08-27T05:25:22Z, sweep.ts +234 / test/sweep.test.ts +215), routes the trip to
+    `deps.escalate(pr, repeatEscalationReason(...), renderRepeatEscalationQuestion(...))`, whose
+    real wiring in `run-task.ts` appends a question row AND calls `escalate()`, which opens a
+    `needs-human` GitHub issue. The build's own doc defends this as "the SAME `deps.escalate()` the
+    blocked-ambiguous rung already calls (reaching the existing digest/inbox surface with no new
+    transport)". THAT DEFENCE IS ONE-EIGHTH TRUE AND THE MEASUREMENT IS WHAT SAYS SO.
+
+    (2) MEASURED 2026-08-27T13:00Z, over a ledger union of three forms with a per-form coverage
+    control rather than a readability one: the `.gz` form holds 0 files, the dated plain rotations
+    36, the live file 1; `run.start` reads 0 / 6,886 / 205 across them, so every non-empty form was
+    genuinely opened. EIGHT `sweep.repeat_escalated` ROWS EXIST, ALL SINCE #3048 MERGED, spanning
+    05:50:35Z to 12:46:28Z — seven hours and six minutes — across SIX distinct PRs. Each was paired
+    to its escalate effect by timestamp proximity:
+
+      05:50:35.129Z  PR 3039  blocked-ambiguous  streak 106  -> escalation.deduped   -> issue 3044
+      05:50:38.027Z  PR 3025  blocked-fixable    streak 188  -> escalation.issue_opened -> issue 3051
+      08:53:16.571Z  PR 3043  blocked-ambiguous  streak  50  -> escalation.deduped   -> issue 3051
+      08:53:16.573Z  PR 3039  blocked-ambiguous  streak  50  -> escalation.deduped   -> issue 3051
+      08:53:16.573Z  PR 3025  blocked-fixable    streak  50  -> escalation.deduped   -> issue 3051
+      09:43:28.082Z  PR 3054  blocked-ambiguous  streak  50  -> escalation.deduped   -> issue 3058
+      10:13:12.548Z  PR 3059  mergeable          streak  50  -> escalation.deduped   -> issue 3060
+      12:46:28.355Z  PR 3063  post-review        streak  50  -> escalation.deduped   -> issue 3067
+
+    ONE ISSUE, SEVEN DEDUP COMMENTS. And the dedup key is task plus head plus cause (W1-T104 /
+    W1-T345), never the repeat condition, so six of the seven comments landed on an issue TITLED FOR
+    A DIFFERENT CAUSE: PR 3059's repeat notice became a comment on issue 3060, "risk judge ESCALATED
+    (high, confidence 0.75)"; PR 3063's became a comment on issue 3067, "blocked_review: instrument
+    change entangled with source". A repeat notice buried in a thread about something else is not a
+    quieter surface than the digest, it is a different signal wearing another signal's title.
+
+    AND `escalation.deduped` HAS EXACTLY ONE CONSUMER IN `src/`, WHICH IS ITS OWN WRITER. So seven
+    of the eight trips reached the digest through the escalate route NOT AT ALL — `digest.ts` reads
+    `escalation.issue_opened` and nothing else from that family. The build's "existing digest/inbox
+    surface" claim therefore holds for 1 trip in 8; #3085's reader, which sweeps
+    `sweep.repeat_escalated` directly, reaches 8 in 8.
+
+    (3) ZERO READS, AND THE ZERO IS CONTROLLED IN BOTH DIRECTIONS. Across the 138 most recent issues
+    carrying comments, 30 genuinely human comments were found (the operator's own prose: "Reviewed
+    by hand", "Not closing this — the operator rules on that", "Operator answer: neither option") —
+    so THE QUERY CAN SEE ENGAGEMENT. On the eight issues opened since #3048 merged: ZERO. On issue
+    3051, the one repeat-bound issue: zero; both its comments are `remudero-fleet[bot]`, and it was
+    closed at 10:49:07Z — four hours fifty-eight minutes after opening — by the escalation-lifecycle
+    reconciler because PR #3025 merged, not because anyone read it.
+
+    THE FALSE-POSITIVE ARM IS THE PART THAT MATTERS, BECAUSE THE OBVIOUS QUERY GETS THIS WRONG. A
+    naive author test — any comment not written by `remudero-fleet[bot]` — reports engagement on 80
+    comments that are MACHINE TEXT posted under the `cao825` account, including issue 3044 inside
+    this very window and issue 2973, the 60-minute-ceiling issue W1-T2345's refusal was written
+    from. Both carry the verbatim dedup template "Another escalation observed the same condition".
+    Discriminating on the body against the machine templates is what turns 110 apparent human
+    comments into 30 real ones and this window's apparent 1 into 0.
+
+    THE PREMISE IS ALIVE, WITH ONE HONEST QUALIFIER: the queue IS drained, in bursts — seven issues
+    carried operator prose on 2026-08-25 alone. The most recent genuine human comment anywhere in
+    the queue is 2026-08-25T23:22:19Z, thirty-seven hours before this measurement and while the
+    operator was demonstrably working. So the surface is not never-read; it is read on a cadence
+    that has nothing to do with when a trip fires, which is the same thing for a signal whose whole
+    value is arriving 3.5x earlier than the arm that would otherwise catch it.
+
+    (4) THE ISSUE IT DID OPEN IS FALSE ABOUT ITS OWN SUBJECT, AND THIS IS NOT A COSMETIC POINT. The
+    transport is hardcoded for the blocked-ambiguous rung, so issue 3051's body reads "The
+    CLARIFICATION-QUESTION rung (W1-T78) reconciled open PR #3025 to BLOCKED-AMBIGUOUS" while the
+    disposition it is reporting is `blocked-fixable`. The counter fires for EVERY disposition by
+    design, and two of the eight trips fired on dispositions that are not blocked at all —
+    `mergeable` on PR 3059 and `post-review` on PR 3063 — so a healthy PR generates BLOCKED-class,
+    `needs-human`-labelled traffic asserting a reconciliation that never happened. The machine's own
+    Recommendation on the repeat issue is `acknowledge-unchanged`, i.e. no action needed: an item in
+    a human queue whose recommended answer is "nothing".
+
+    (5) Q1 — THE DECISION. THE DIGEST SURVIVES AND THE ESCALATE CALL GOES: the trip keeps writing
+    `sweep.repeat_escalated`, which #3085's reader renders, and stops calling `deps.escalate()`.
+
+    THE CASE AGAINST, STATED AT ITS STRONGEST, BECAUSE IT IS REAL. AN ISSUE IS DURABLE AND A DIGEST
+    LINE IS NOT. An issue persists until something closes it and carries its own audit trail; a
+    digest line is one render of a rolling window, and if the operator does not read that digest the
+    signal is simply gone. `escalation.issue_opened` also has ELEVEN consumers in `src/` —
+    `digest.ts`, `recap.ts`, `status.ts`, `board.ts`, `ops.ts`, `alert-lane.ts`, `drain.ts`,
+    `trace.ts`, `ledger.ts`, `escalate.ts`, `run-task.ts` — against ONE for
+    `sweep.repeat_escalated` today, and removing the call removes the trip from all eleven at once.
+    The same closure also writes the question row that feeds `/v1/questions/answer` and the console,
+    and that goes too.
+
+    WHY THE MEASUREMENT ANSWERS IT ANYWAY. The eleven consumers are consumers of a row the trip
+    wrote ONCE in eight firings; the other seven wrote `escalation.deduped`, which nothing consumes.
+    A durability argument for a surface reached one time in eight is an argument about a surface
+    that mostly is not reached. The question row's two resolutions are `acknowledge-unchanged` and
+    `intervene-manually`, and the first is the machine's own recommendation — neither answer changes
+    what the sweep does, so nothing is lost that anything acts on. And the durable record the
+    forensic case actually needs is the ledger row itself, which survives independently of both.
+
+    (6) THE PRECONDITION, AND IT IS HARD. #3085 IS STILL OPEN. On `origin/main` today
+    `sweep.repeat_escalated` is read by `src/lib/sweep.ts` and by nothing else, so removing
+    `deps.escalate()` BEFORE that reader merges leaves the trip with NO surface whatsoever — worse
+    than the divergence this task exists to close. A BUILD MUST VERIFY THE READER IS ON MAIN FIRST
+    and stop if it is not; that check is the first step of the build, not a formality. It cannot be
+    expressed as `depends_on` because #3085 carries no task id by design.
+
+    (7) Q3 — THE CLASS, NAMED WITHOUT OVERREACHING, AND THE RULE FIRST. A STATED REFUSAL, for
+    counting purposes, is a sentence in a shard's own `rationale` that uses an explicit refusal verb
+    (refuses / refusing / declines) in the same sentence as a self-reference to the task or shard,
+    and declines a concrete implementation route for the build being specified — not a description
+    of what some existing gate refuses, not a scope-ownership note, and not a "what must not change"
+    invariant about untouched behaviour. THE COUNT IS A LOWER BOUND BY CONSTRUCTION: refusals
+    written without those verbs are invisible to it, and 370 shards contain a self-referential
+    negative sentence of some kind, which is exactly why the tight rule and not the broad one.
+
+    Under that rule 46 shards match on 49 sentences; hand-classified, seven name a real route
+    refusal AND have a merged build to judge (W1-T2203 also matches but is `status: blocked` with
+    nothing built, so it is excluded rather than counted as honoured). Each was checked against its
+    build's own diff:
+
+      W1-T2274  refused a fifth `checksState` member         -> #2910 leaves the union at four. HONOURED.
+      W1-T2268  refused adopting a per-call point cost       -> #2895 adds three prose references to the EXISTING point-priced budget and no cost model. HONOURED.
+      W1-T2224  refused being the fourth punctuation patch   -> #2760 replaces the shape guess with a contract check against `diffFiles`. HONOURED.
+      W1-T466   refused declaring option (b)'s only surface  -> #1758 never touches `test/base-blob-read-failure.test.ts`. HONOURED.
+      W1-T1252  declined to invent a sample-size threshold   -> #2637 adds none. HONOURED.
+      W1-T2271  refused a new outbound request to example.com -> #2898's single added mention is a doc comment about the call the probe ALREADY makes. HONOURED.
+      W1-T2345  refused filing an issue                      -> #3048 calls `deps.escalate()`. NOT HONOURED.
+
+    SIX OF SEVEN HONOURED, AND #3048 IS THE ONLY INSTANCE. SO THIS TASK PROPOSES NOTHING GENERAL —
+    no gate, no linter arm, no new field. A one-in-seven rate over a hand-classified lower bound is
+    not a pattern, and building a refusal-detector on it would be the fourth-patch move W1-T2224
+    itself refused.
+
+    WHAT THE OBSERVATION IS WORTH RECORDING ANYWAY, WITHOUT ACTING ON IT: `judgeReview` substantiates
+    ACCEPTANCE CRITERIA, and a refusal has no criterion to fail. #3048 passed its gates because
+    every criterion it declared was true — the counter keys on the verdict, resets on a head move,
+    fires once, does not pace. The refusal lived in the rationale, which nothing reads at review
+    time. That is a real gap in the gate's coverage; it is ALSO a gap this task declines to close on
+    a single instance, and the honest disposition is to record it and wait for a second.
+
+    (8) OBSERVED AND EXPLICITLY NOT OWNED HERE. The once-per-head guarantee is ALREADY BROKEN in the
+    live fleet: PR #3025 escalated at streak 188 on head 16c4060db4f2620095595192160f0b70dc783a0a at
+    05:50:38Z and AGAIN at streak 50 on the IDENTICAL head at 08:53:16Z; PR #3039 did the same at
+    106 then 50 on ee02fe5f73013a05cea719fb8c70b48d369c3c0e. The fold reads `repeat_escalated: true`
+    off `sweep.disposed` rows, and rotation's own PASS 3 keeps one ACTED:TRUE line per pr@head while
+    these rows are `acted:false`, so the re-fire guard loses its evidence. THAT IS THE COUNTER'S
+    BEHAVIOUR AND BELONGS TO W1-T2345, NOT TO THIS TASK, which owns only where the trip is ROUTED.
+    It is recorded because it bears on (5): the issue route's dedup is what turned that second
+    firing into a comment rather than a second issue, and #3085's reader deduplicates by PR number,
+    so the digest route does not reintroduce it.
+
+    (9) DO NOT REVERT #3048. The counter itself is correct, measured, and firing — its key, its
+    bound, its reset and its once-per-run gate all stand. This task removes ONE call and changes
+    nothing else about it.
+
+    ALREADY OWNED ELSEWHERE, RECORDED SO THIS DOES NOT RE-FILE IT: the light-sweep tick variance is
+    W1-T2379; PR-age watching is W1-T2304's board-review rung, wired by #3012; the counter itself is
+    W1-T2345. THIS SHARD OWNS ONLY THE ROUTING OF THE TRIP'S OUTPUT.
+
+    RISK BAND. `risk: high` is set UP FRONT because the sizing check reads `files:` as spanning two
+    concerns — the `sweep` stem and this task's own test stem — and refuses that at `risk: medium`.
+    It is Rule 19's SPAN, not blast radius: the change is the removal of one awaited call inside one
+    `if` block, plus the tests that pin it.
+  acceptance:
+    - claim: "the repeat bound trip writes its ledger row and opens no issue"
+      proof: "unit test: test/sweep.test.ts"
+    - claim: "the repeat bound trip calls no injected escalation effect at all"
+      proof: "unit test: test/sweep.test.ts"
+    - claim: "the blocked ambiguous rung keeps its own escalation, untouched by this change"
+      proof: "unit test: test/sweep.test.ts"
+    - claim: "a trip on a healthy disposition such as mergeable produces no needs-human traffic"
+      proof: "unit test: test/sweep.test.ts"
+    - claim: "the bound and its verdict plus head key are unchanged by this task"
+      proof: "unit test: test/sweep.test.ts"
+    - claim: "the sixty minute pending ceiling is unchanged"
+      proof: "unit test: test/sweep.test.ts"
+    - claim: "nothing added paces or throttles or sleeps a call"
+      proof: "unit test: test/sweep.test.ts"
+  falsifier: |
+    If a fresh sweep of the escalation queue shows GENUINE human engagement on repeat-bound
+    escalation issues — a comment whose body is not one of the machine templates ("Another
+    escalation observed the same condition", "Auto-closed by the escalation-lifecycle reconciler")
+    — then the surface W1-T2345 refused is being drained after all, the refusal's evidential basis
+    is gone, and this task must be closed rather than implemented. The measurement to re-run is the
+    same one: enumerate issues over REST with an enumeration control, filter comment authors against
+    the bot account AND the machine templates, and require a positive control showing the query
+    still finds the operator's own prose elsewhere in the queue.
+
+    SEPARATELY FALSIFYING: if #3085 or an equivalent digest reader has NOT merged when the build
+    starts, removing the escalate call leaves the trip with no surface at all, and the build must
+    stop at that check rather than proceed.
