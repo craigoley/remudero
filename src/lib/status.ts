@@ -597,6 +597,24 @@ export interface GitHub {
    */
   prBody(prUrl: string): string | undefined;
   /**
+   * W1-T2387 — DOES THE COMMIT SURFACE CARRY THIS TASK'S ANCHORED TRAILER FOR THIS PR?
+   *
+   * The SECOND anchored surface, and the re-verify half of the union {@link findMergedByTrailer}
+   * already searches. Reads the SAME memoised commit index that fallback built — no second `git`
+   * call, no fetch, and still nothing at all when every body carried its trailer.
+   *
+   * IT IS NOT A RELAXATION OF {@link creditsByAnchoredTrailer}. `buildCommitTrailerIndex` extracts
+   * `^Remudero-Task: <id>$` as its own exact, anchored line and refuses every token the run-id
+   * grammar rejects (measured: 170 of 740 commit tokens), so a hit here is the same class of
+   * evidence an anchored BODY line is — held to the same grammar, on a different surface. Every
+   * other W1-T20c property (the head-branch veto, the unreadable-head fail-closed, the non-merged
+   * ownership requirement) is applied to it unchanged.
+   *
+   * FAILS CLOSED: a commit index that could not be built reads FALSE, never "credited". OPTIONAL —
+   * omitted ⇒ the re-verify consults the body alone and behaves exactly as it did before W1-T2387.
+   */
+  creditedByCommitTrailer?(taskId: string, prUrl: string): boolean;
+  /**
    * The PR's changed-file paths (repo-relative), or `undefined` when they cannot be resolved.
    * Backs rung (c)'s PLAN-ONLY refusal (W1-T413): a MERGED, correctly-trailered PR that changed
    * NOTHING outside plan scope filed or re-scoped a task rather than implementing it, and must not
@@ -2640,8 +2658,19 @@ function creditsByAnchoredTrailer(
   head: string | undefined,
   body: string | undefined,
   taskId: string,
+  /**
+   * W1-T2387: does the COMMIT surface carry this task's anchored trailer for this PR? The union
+   * searches two surfaces, so the re-verify must check both or it discards the very candidate the
+   * search just produced — measured on #3005/W1-T2326, where `findMergedByTrailer` returned the
+   * PR and this function then threw it away. Defaults FALSE, so every caller that does not supply
+   * it (and every pre-existing fixture) sees the body-only behaviour byte-for-byte.
+   */
+  commitCredits = false,
 ): boolean {
-  if (!hasAnchoredTrailer(body, taskId)) return false;
+  // W1-T2387: EITHER anchored surface satisfies this, and NOTHING below is relaxed — the branch
+  // veto, the unreadable-head fail-closed and the non-merged ownership check all still apply to a
+  // commit-credited candidate exactly as they do to a body-credited one.
+  if (!hasAnchoredTrailer(body, taskId) && !commitCredits) return false;
   if (state.toUpperCase() !== "MERGED") {
     // Non-merged: unchanged from before the ruling (TRAP 2).
     return ownsBranch(head, taskId);
@@ -3046,7 +3075,10 @@ function derivePrPrecedence(task: Task, deps: DeriveDeps, ledgerLines: Array<Rec
   if (trailerPr && !debunkedTrailerUrls(ledgerLines, task.id).has(trailerPr.url)) {
     const head = deps.github.headRefName(trailerPr.url);
     const body = deps.github.prBody(trailerPr.url);
-    const wouldCredit = creditsByAnchoredTrailer(trailerPr.state, head, body, task.id);
+    // W1-T2387: the union's own second surface, read back from the SAME memoised commit index the
+    // search used. Absent gateway method ⇒ false ⇒ body-only, exactly as before.
+    const commitCredits = deps.github.creditedByCommitTrailer?.(task.id, trailerPr.url) ?? false;
+    const wouldCredit = creditsByAnchoredTrailer(trailerPr.state, head, body, task.id, commitCredits);
     // W1-T1004: the ledger-backed plan-only-FILING refusal — checked BEFORE and INDEPENDENTLY of
     // `ownsOwnRunBranch`, unlike the W1-T413 diff-based refusal below. A filing PR (retro/triage/
     // `rmd plan`) dispatched from this task's OWN `run-<taskId>-*` worktree sits on that task's own
@@ -3104,7 +3136,7 @@ function derivePrPrecedence(task: Task, deps: DeriveDeps, ledgerLines: Array<Rec
       // checked first there, so an unanchored body reports that regardless of branch.
       const reason = planOnlyRefusal
         ? "plan-only-changeset"
-        : !hasAnchoredTrailer(body, task.id)
+        : !hasAnchoredTrailer(body, task.id) && !commitCredits
           ? "trailer-not-anchored"
           : branchClaimsOtherTask(head, task.id)
             ? "branch-claims-other-task"
@@ -4202,6 +4234,9 @@ export function ghGateway(
     if (commitIndex === undefined) commitIndex = (opts.commitTrailerIndex ?? buildCommitTrailerIndex({ slug }))();
     return commitIndex?.get(taskId) ?? [];
   };
+  // W1-T2387: the re-verify half, over the SAME memoised index — never a second `git` call.
+  const commitCreditsFor = (taskId: string, prUrl: string): boolean =>
+    commitTrailerFallback(taskId).some((r) => r.url === prUrl);
   // Sticky for this gateway instance's lifetime (W1-T119): once ANY `gh` call fails,
   // every null/[] result derived since is untrustworthy as "absent", not just the one
   // that failed — a single short-lived gateway (created per command invocation) has
@@ -4397,6 +4432,10 @@ export function ghGateway(
     prBody(prUrl) {
       const row = fetchPrRow(prUrl);
       return row ? mapRestPr(row).body : undefined;
+    },
+    // W1-T2387: the union's second anchored surface, for `creditsByAnchoredTrailer`'s re-verify.
+    creditedByCommitTrailer(taskId, prUrl) {
+      return commitCreditsFor(taskId, prUrl);
     },
     changedFiles(prUrl) {
       // W1-T413. Mirrors `buildBatchedGithub`'s own `changedFiles` below: `/pulls/{n}/files` has
@@ -5232,6 +5271,9 @@ export function buildBatchedGithub(
     }
     return commitIndex?.get(taskId) ?? [];
   };
+  // W1-T2387: the re-verify half, over the SAME memoised index — never a second `git` call.
+  const commitCreditsFor = (taskId: string, prUrl: string): boolean =>
+    commitTrailerFallback(taskId).some((r) => r.url === prUrl);
   const lookup = (ref: string | number): BatchedPr | undefined => {
     const idx = index();
     const s = String(ref);
@@ -5305,6 +5347,10 @@ export function buildBatchedGithub(
     },
     prBody(prUrl) {
       return index().byUrl.get(prUrl)?.body;
+    },
+    // W1-T2387: the union's second anchored surface, for `creditsByAnchoredTrailer`'s re-verify.
+    creditedByCommitTrailer(taskId, prUrl) {
+      return commitCreditsFor(taskId, prUrl);
     },
     changedFiles(prUrl) {
       // W1-T413, AND THE O(N) QUESTION ANSWERED RATHER THAN DODGED. The batched fetch is the REST

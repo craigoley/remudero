@@ -28,8 +28,13 @@ import {
   buildBatchedGithub,
   buildCommitTrailerIndex,
   ghGateway,
+  projectPlan,
   type BatchedPr,
 } from "../src/lib/status.js";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { Plan } from "../src/lib/plan.js";
 
 /** One `git log --format=%H%x00%s%x00%b%x1e` record, exactly as the real reader parses it. */
 function commit(sha: string, subject: string, body: string): string {
@@ -254,4 +259,117 @@ test("W1-T2387: nothing added paces, throttles or sleeps a call", () => {
   for (const banned of ["setTimeout", "setInterval", "sleep", "Atomics.wait", "execSync(\"sleep"]) {
     assert.equal(region.includes(banned), false, `${banned} must not appear on this path (W1-T1066)`);
   }
+});
+
+
+// ── THE RE-VERIFY, END TO END — the half a gateway-level test cannot see ─────────────────────
+//
+// W1-T2387's union widened the SEARCH (`findMergedByTrailer` falls back to the commit index) and,
+// until this, not the RE-VERIFY: `creditsByAnchoredTrailer`'s first line demanded an anchored
+// trailer in the PR BODY, so rung (c) discarded the very candidate the union had just produced.
+// MEASURED on the real #3005/W1-T2326 case through `projectPlan`: `merged=false` with the union
+// both ON and OFF, while `findMergedByTrailer("W1-T2326")` returned #3005 either way.
+//
+// The gateway test above stays and proves a different thing — that the SEARCH finds it. These
+// prove the projection CREDITS it.
+
+const emptyLedger = (): string => {
+  const p = join(mkdtempSync(join(tmpdir(), "t2387-e2e-")), "ledger.ndjson");
+  writeFileSync(p, "");
+  return p;
+};
+const onePlan = (id: string): Plan => ({ tasks: [{ id, title: id, repo: "r", type: "implement", depends_on: [], status: "queued" }] }) as unknown as Plan;
+
+/** #3005's real shape: merged, trailer in the COMMIT only, body naming the task in prose alone. */
+const COMMIT_ONLY_ROW = pr({
+  number: 3005,
+  headRefName: "fix/triage-files-under-the-reserved-id",
+  body: "Builds W1-T2326. No trailer here at all.",
+});
+const COMMIT_ONLY_GIT = () =>
+  buildCommitTrailerIndex({
+    slug: "o/r",
+    exec: fakeGit(commit("aaa", "fix(triage): prompt the worker with the id the lane reserved (#3005)", "Remudero-Task: W1-T2326\n")),
+  });
+
+test("W1-T2387 END TO END: a commit-only trailer now CREDITS through deriveStatus, not merely through the gateway", () => {
+  const gh = buildBatchedGithub("o", "r", { fetchAll: () => [COMMIT_ONLY_ROW], commitTrailerIndex: COMMIT_ONLY_GIT() });
+  const p = projectPlan(onePlan("W1-T2326"), { ledgerPath: emptyLedger(), github: gh }).get("W1-T2326")!;
+  assert.equal(p.merged, true, "the projection credits it — the re-verify accepts the second anchored surface");
+  assert.equal(p.source, "trailer");
+  assert.equal(p.prNumber, 3005);
+});
+
+test("W1-T2387 FALSIFIER: with the commit index EMPTY the same row is NOT credited — the credit really comes from that surface", () => {
+  const gh = buildBatchedGithub("o", "r", { fetchAll: () => [COMMIT_ONLY_ROW], commitTrailerIndex: () => new Map() });
+  const p = projectPlan(onePlan("W1-T2326"), { ledgerPath: emptyLedger(), github: gh }).get("W1-T2326")!;
+  assert.equal(p.merged, false, "no commit evidence, no anchored body trailer, no credit");
+});
+
+test("W1-T2387 + W1-T2392 COMPOSE: a build the union credits stops warning as an uncredited build", () => {
+  // W1-T2392's warning fires only when every credit surface came back empty. The union adds a
+  // reading to one of them, so a build it now credits must go silent — asserted in one place
+  // because the two are only correct together.
+  const gh = buildBatchedGithub("o", "r", { fetchAll: () => [COMMIT_ONLY_ROW], commitTrailerIndex: COMMIT_ONLY_GIT() });
+  const p = projectPlan(onePlan("W1-T2326"), { ledgerPath: emptyLedger(), github: gh }).get("W1-T2326")!;
+  assert.equal(p.merged, true, "credited");
+  assert.equal(p.uncreditedBuild, undefined, "and therefore NOT reported as an uncredited build");
+});
+
+// ── every W1-T20c property, re-asserted against the WIDENED guard ────────────────────────────
+//
+// The commit trailer is a SECOND ANCHORED SURFACE, not a relaxation: it is extracted as its own
+// exact `^Remudero-Task: <id>$` line and held to the same run-id grammar (measured: 174 of 743
+// commit trailer tokens rejected). Every veto below still applies to a commit-credited candidate.
+
+test("W1-T20c PRESERVED: a prefix-sharing id is not credited by a longer id's commit trailer", () => {
+  const gh = buildBatchedGithub("o", "r", {
+    fetchAll: () => [pr({ number: 3000, headRefName: "run-W1-T23230-1", body: "no trailer" })],
+    commitTrailerIndex: buildCommitTrailerIndex({ slug: "o/r", exec: fakeGit(commit("a", "fix(x): y (#3000)", "Remudero-Task: W1-T23230\n")) }),
+  });
+  const p = projectPlan(onePlan("W1-T2323"), { ledgerPath: emptyLedger(), github: gh }).get("W1-T2323")!;
+  assert.equal(p.merged, false, "W1-T2323 must not inherit W1-T23230's commit trailer");
+});
+
+test("W1-T20c PRESERVED: a head branch claiming ANOTHER task still vetoes a commit-credited candidate", () => {
+  const gh = buildBatchedGithub("o", "r", {
+    fetchAll: () => [pr({ number: 3006, headRefName: "run-W1-T9999-1787000000000", body: "no trailer" })],
+    commitTrailerIndex: buildCommitTrailerIndex({ slug: "o/r", exec: fakeGit(commit("a", "fix(x): y (#3006)", "Remudero-Task: W1-T2326\n")) }),
+  });
+  const p = projectPlan(onePlan("W1-T2326"), { ledgerPath: emptyLedger(), github: gh }).get("W1-T2326")!;
+  assert.equal(p.merged, false, "the branch-name veto is untouched by the widening");
+});
+
+/**
+ * THE NON-MERGED ARM IS UNREACHABLE FROM THIS SURFACE, AND THAT IS A PROPERTY RATHER THAN A GAP.
+ * `buildCommitTrailerIndex` reads `git log origin/main`, so a commit it indexes is ON MAIN and the
+ * work IS merged — the index therefore reports `state: "merged"` for every hit. A fixture that
+ * declared such a row OPEN would be asserting a state the surface cannot produce. What must stay
+ * true is that the non-merged arm's ownership requirement is untouched for candidates that DO
+ * reach it, i.e. body-surface hits, which is what this asserts.
+ */
+test("W1-T20c PRESERVED: a NON-merged body-trailer hit still needs its own run branch", () => {
+  const gh = buildBatchedGithub("o", "r", {
+    fetchAll: () => [pr({ number: 3007, state: "OPEN", headRefName: "fix/someone-elses-branch", body: "x\n\nRemudero-Task: W1-T2326\n" })],
+    commitTrailerIndex: () => new Map(),
+  });
+  const p = projectPlan(onePlan("W1-T2326"), { ledgerPath: emptyLedger(), github: gh }).get("W1-T2326")!;
+  assert.equal(p.merged, false, "ownership is still required on the non-merged arm, and the widening did not touch it");
+});
+
+test("W1-T20c PRESERVED: an UNREADABLE head still fails CLOSED for a commit-credited merged candidate", () => {
+  // W1-T119: an absent head ref is a read that FAILED, never a branch carrying no claim. The
+  // widening supplies a second way to satisfy the trailer check and changes nothing here.
+  const gh = buildBatchedGithub("o", "r", {
+    fetchAll: () => [pr({ number: 3009, headRefName: undefined, body: "no trailer" })],
+    commitTrailerIndex: buildCommitTrailerIndex({ slug: "o/r", exec: fakeGit(commit("a", "fix(x): y (#3009)", "Remudero-Task: W1-T2326\n")) }),
+  });
+  const p = projectPlan(onePlan("W1-T2326"), { ledgerPath: emptyLedger(), github: gh }).get("W1-T2326")!;
+  assert.equal(p.merged, false, "unreadable head fails closed, commit evidence or not");
+});
+
+test("W1-T2387: a gateway with no commit surface at all behaves exactly as it did before the union", () => {
+  const gh = buildBatchedGithub("o", "r", { fetchAll: () => [pr({ number: 3008, headRefName: "fix/x", body: "no trailer" })] , commitTrailerIndex: () => null });
+  const p = projectPlan(onePlan("W1-T2326"), { ledgerPath: emptyLedger(), github: gh }).get("W1-T2326")!;
+  assert.equal(p.merged, false, "an unbuildable commit index fails CLOSED — never a credit");
 });
