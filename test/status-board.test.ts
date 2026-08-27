@@ -12,7 +12,7 @@ import { deployAutoPath, deployFailedAlertPath } from "../src/lib/deployer.js";
 import { statusCommand } from "../src/run-task.js";
 import type { Config } from "../src/lib/config.js";
 import { loadPlanFromYaml, type Plan } from "../src/lib/plan.js";
-import { DEFAULT_MAX_TASK_DISPATCHES, type GitHub } from "../src/lib/status.js";
+import { DEFAULT_MAX_TASK_DISPATCHES, type GitHub, type PrRef } from "../src/lib/status.js";
 import type { DraftCache, Proposal } from "../src/lib/inbox.js";
 
 // ── W1-T279: rmd status, half 1 of 2 — ONE read model over LOCAL truth (LIVENESS / LATCHES /
@@ -527,6 +527,132 @@ function writeLedger(lines: Record<string, unknown>[]): string {
   writeFileSync(ledgerPath, lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
   return ledgerPath;
 }
+
+// ── W1-T2392: NEEDS ME renders the uncredited-build warning `deriveStatus` already writes ──────
+//
+// #3108 put `StatusProjection.uncreditedBuild` on the projection and NOTHING read it. These drive
+// the REAL path end to end: a plan, a batched gateway, `projectPlan` building its own prose index,
+// `deriveStatus` setting the field, and the board rendering it — never a hand-built projection.
+//
+// THE SURFACE IS `NEEDS ME`, and the quiet-case discipline is `mergeHeld`'s, verbatim: an EMPTY
+// array (never undefined), so a board with nothing uncredited renders no row at all. Measured at
+// head, 84 of 103 recent builds ARE credited, so quiet is the common case.
+
+const UNCREDITED_PR: PrRef = {
+  number: 3095,
+  url: "https://github.com/craigoley/remudero/pull/3095",
+  state: "MERGED",
+  title: "fix(sweep): stop the light-pass tick waiting on the fix rung's CI wait",
+  headRefName: "fix/light-pass-tick-not-bounded-by-ci",
+  body: "Builds W1-T2379, option (a) of its design: the light pass dispatches and returns.",
+};
+const REPAIR_PR: PrRef = {
+  number: 3019,
+  url: "https://github.com/craigoley/remudero/pull/3019",
+  state: "MERGED",
+  title: "fix(cadence): create the marker directory instead of assuming it",
+  headRefName: "fix/cadence-markers-create-their-directory",
+  body: "The marker write assumed a directory that nothing created.",
+};
+const FILING_PR: PrRef = {
+  number: 3105,
+  url: "https://github.com/craigoley/remudero/pull/3105",
+  state: "MERGED",
+  title: "chore(plan): file the build that merges with no credit on any surface (W1-T2392)",
+  headRefName: "chore/plan-file-w1-t2392",
+  body: "One new plan shard under the reserved id W1-T2392.",
+};
+
+/** Minimal batched gateway, the same shape test/uncredited-build-detection.test.ts drives. */
+function uncreditedGateway(merged: PrRef[], filesByUrl: Record<string, string[] | undefined>): GitHub {
+  const g = {
+    prByRef: () => null,
+    findMergedByTrailer: () => null,
+    headRefName: (url: string) => merged.find((p) => p.url === url)?.headRefName,
+    prBody: (url: string) => merged.find((p) => p.url === url)?.body,
+    listMergedHeadBranches: () => merged,
+    changedFiles: (u: string) => filesByUrl[u],
+  } as unknown as GitHub;
+  return g;
+}
+
+const planWith = (ids: string[]): Plan =>
+  ({ tasks: ids.map((id) => ({ id, title: id, repo: "remudero", type: "implement", depends_on: [], status: "queued" })) }) as unknown as Plan;
+
+const SRC_FILES = ["src/lib/sweep.ts", "test/x.test.ts"];
+
+test("W1-T2392: NEEDS ME renders one row for a BODY-named uncredited build, naming the task, the PR and which surface carried the id", () => {
+  const model = buildStatusBoard(
+    tmpRoot(),
+    writeLedger([ledgerLine({ step: "run.start" })]),
+    baseDeps({ plan: planWith(["W1-T2379"]), github: uncreditedGateway([UNCREDITED_PR], { [UNCREDITED_PR.url]: SRC_FILES }) }),
+  );
+  assert.equal(model.needsMe.uncreditedBuilds.length, 1, "exactly one row");
+  const row = model.needsMe.uncreditedBuilds[0];
+  assert.equal(row.taskId, "W1-T2379");
+  assert.equal(row.prNumber, 3095);
+  assert.equal(row.namedIn, "body", "#3095 names the id in its BODY — a title-only line would send the reader to the wrong half");
+
+  const text = renderStatusBoardText(model);
+  assert.match(text, /── NEEDS ME/);
+  assert.match(text, /uncredited build : W1-T2379/);
+  assert.match(text, /3095/);
+  assert.match(text, /names it in the body/);
+  assert.doesNotMatch(text, /nothing needs you/, "a board with an uncredited build is not quiet");
+
+  // --json projects the SAME model, never a second derivation.
+  assert.equal(JSON.parse(JSON.stringify(model)).needsMe.uncreditedBuilds[0].prNumber, 3095);
+});
+
+test("W1-T2392: NEEDS ME renders nothing for a CREDITED build — the common case (84 of 103) stays quiet", () => {
+  const credited = { ...UNCREDITED_PR, headRefName: "run-W1-T2379-1787844672229" };
+  const model = buildStatusBoard(
+    tmpRoot(),
+    writeLedger([ledgerLine({ step: "run.start" })]),
+    baseDeps({ plan: planWith(["W1-T2379"]), github: uncreditedGateway([credited], { [credited.url]: SRC_FILES }) }),
+  );
+  assert.deepEqual(model.needsMe.uncreditedBuilds, [], "credited by its run-* head — nothing to report");
+  assert.doesNotMatch(renderStatusBoardText(model), /uncredited build/);
+});
+
+test("W1-T2392: NEEDS ME renders nothing for a repair naming NO task", () => {
+  const model = buildStatusBoard(
+    tmpRoot(),
+    writeLedger([ledgerLine({ step: "run.start" })]),
+    baseDeps({ plan: planWith(["W1-T2379"]), github: uncreditedGateway([REPAIR_PR], { [REPAIR_PR.url]: SRC_FILES }) }),
+  );
+  assert.deepEqual(model.needsMe.uncreditedBuilds, [], "a standalone repair names no id — never a missing credit");
+  assert.doesNotMatch(renderStatusBoardText(model), /uncredited build/);
+});
+
+test("W1-T2392: NEEDS ME renders nothing for a PLAN-ONLY filing naming its own id", () => {
+  const model = buildStatusBoard(
+    tmpRoot(),
+    writeLedger([ledgerLine({ step: "run.start" })]),
+    baseDeps({ plan: planWith(["W1-T2392"]), github: uncreditedGateway([FILING_PR], { [FILING_PR.url]: ["plan/tasks.d/W1-T2392-a-build.yaml"] }) }),
+  );
+  assert.deepEqual(model.needsMe.uncreditedBuilds, [], "a filing is not a build — its diff touches no src/ file");
+  assert.doesNotMatch(renderStatusBoardText(model), /uncredited build/);
+});
+
+test("W1-T2392: the warning MOVES NO DISPOSITION — every other board section is deepEqual with and without it", () => {
+  const ledger = writeLedger([ledgerLine({ step: "run.start" })]);
+  const root = tmpRoot();
+  const withWarn = buildStatusBoard(root, ledger, baseDeps({ plan: planWith(["W1-T2379"]), github: uncreditedGateway([UNCREDITED_PR], { [UNCREDITED_PR.url]: SRC_FILES }) }));
+  // The SAME PR with a crediting head — the only difference is whether the warning fires.
+  const credited = { ...UNCREDITED_PR, headRefName: "run-W1-T2379-1787844672229" };
+  const without = buildStatusBoard(root, ledger, baseDeps({ plan: planWith(["W1-T2379"]), github: uncreditedGateway([credited], { [credited.url]: SRC_FILES }) }));
+
+  assert.equal(withWarn.needsMe.uncreditedBuilds.length, 1, "precondition: one side really does warn");
+  assert.deepEqual(without.needsMe.uncreditedBuilds, [], "precondition: the other really does not");
+  for (const k of ["liveness", "latches", "lastCycle", "inbox", "headroom", "cacheHit", "learningsInjection"] as const) {
+    assert.deepEqual(withWarn[k], without[k], `${k} must be byte-identical — this reports, it never moves a disposition`);
+  }
+  const { uncreditedBuilds: _a, ...restWith } = withWarn.needsMe;
+  const { uncreditedBuilds: _b, ...restWithout } = without.needsMe;
+  assert.deepEqual(restWith, restWithout, "every OTHER NEEDS ME row is unchanged too");
+});
+
 
 // ── ACCEPTANCE 1: BLOCKERS BY CLASS — circuit-broken (+ reset ETA) and dispatch.indeterminate
 // (+ gh-window note) render as DISTINCT classes off the EXISTING breaker/ledger signals, never
