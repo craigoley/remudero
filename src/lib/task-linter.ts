@@ -1572,6 +1572,24 @@ export function criteriaAdded(
  * newly introduced by the same changed set — this function does no scoping of
  * its own.
  */
+/**
+ * W1-T2375 (extracted from #3091, which rebuilt the merged #3086 and carried this one increment):
+ * WHICH of the follow-ups filed in this PR actually carry an added criterion — keyed on
+ * {@link criterionKey}, the SAME normalisation {@link followUpCarriesCriteria} decides
+ * `followUpFiled` with, so the message can never name a task the decision did not consider.
+ *
+ * MESSAGE PRECISION ONLY, AND THAT IS THE WHOLE CLAIM. No verdict moves: the refusal below fires
+ * on `added.length > 0 && !escapeAvailable`, and neither term reads this. What it fixes is that
+ * `ctx.followUpTaskIds` is EVERY new task in the PR (run-task.ts passes
+ * `followUpTasks.map((t) => t.id)`), while `followUpFiled` is decided by which of them CARRY the
+ * criteria — so a PR filing one carrying follow-up beside one unrelated new task names both, and
+ * points the reader at a task that carries nothing.
+ */
+function followUpTaskIdsCarrying(added: AcceptanceCriterion[], candidateTasks: Task[]): string[] {
+  const addedKeys = new Set(added.map(criterionKey));
+  return candidateTasks.filter((t) => (t.acceptance ?? []).some((c) => addedKeys.has(criterionKey(c)))).map((t) => t.id);
+}
+
 export function followUpCarriesCriteria(added: AcceptanceCriterion[], candidateTasks: Task[]): boolean {
   if (added.length === 0) return true;
   // EVERY added criterion, not just one. The code here read `candidateTasks.some(t => t.acceptance
@@ -1661,6 +1679,13 @@ export interface PostMergeAmendmentContext {
    *  carrying them needs no new resolution, exactly as W1-T2254's `baseTask` widening did.
    *  Used only to NAME the follow-up in the refusal below; the decision never depends on it. */
   followUpTaskIds?: string[];
+  /** W1-T2375: the follow-up TASKS behind {@link followUpFiled} — the same array the call site
+   *  already builds to compute it, so carrying it needs no new resolution (the widening
+   *  {@link baseTask} and {@link followUpTaskIds} both already made). Supplied ⇒ the refusal names
+   *  only those that actually carry an added criterion ({@link followUpTaskIdsCarrying}); omitted
+   *  ⇒ the message falls back to {@link followUpTaskIds} verbatim, so a caller that wires nothing
+   *  new is byte-identical to before this field existed. The DECISION never reads either. */
+  followUpTasks?: Task[];
   /** This task's WHOLE shard as it existed at the PR's base ref — not just its
    *  `acceptance:` (see {@link baseAcceptance}). W1-T2254: the call site
    *  (run-task.ts's `lintPlanCommand`) already resolves this base-ref task to
@@ -1815,7 +1840,12 @@ export function postMergeAmendmentViolations(task: Task, opts: LintOpts = {}): L
   const dispositionStated = parentDispositionStated(task, ctx.baseTask);
   const escapeAvailable = ctx.followUpFiled && dispositionStated;
   if (added.length > 0 && !escapeAvailable) {
-    const followUps = ctx.followUpTaskIds ?? [];
+    // W1-T2375: prefer the CARRYING subset when the caller supplies the tasks; fall back to the
+    // caller-supplied id list otherwise. A carrying subset that comes back EMPTY (every filed
+    // follow-up is unrelated) falls back too rather than naming nothing — this narrows a message,
+    // it never blanks one.
+    const carrying = ctx.followUpTasks ? followUpTaskIdsCarrying(added, ctx.followUpTasks) : [];
+    const followUps = carrying.length > 0 ? carrying : ctx.followUpTaskIds ?? [];
     const namedFollowUps = followUps.length > 0 ? followUps.join(", ") : "the follow-up filed here";
     violations.push(
       ...added.map((c) => ({

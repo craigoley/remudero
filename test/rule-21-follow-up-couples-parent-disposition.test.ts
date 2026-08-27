@@ -139,3 +139,64 @@ test("W1-T2375: an unresolvable merge status still fails OPEN", () => {
   });
   assert.equal(v.length, 0);
 });
+
+// ── W1-T2375 (extracted from #3091): NAMING THE FOLLOW-UP THAT ACTUALLY CARRIES THE CRITERIA ──
+//
+// MESSAGE PRECISION, NOT A VERDICT CHANGE, and the last case here is what says so. `followUpFiled`
+// is decided by which filed tasks CARRY every added criterion (`followUpCarriesCriteria`), while
+// `followUpTaskIds` is every new task in the PR (run-task.ts passes `followUpTasks.map(t => t.id)`)
+// — so before this, a PR filing one carrying follow-up beside one unrelated new task named BOTH.
+
+/** A new task filed in the same PR that carries NONE of the added criteria — the noise the
+ *  carrying filter removes from the message. */
+const unrelated = task({ id: "W1-T9001", acceptance: [{ claim: "something else entirely", proof: "unit test: test/other.test.ts" }] });
+
+/** {@link ctxFor}, widened with the follow-up TASKS — the field run-task.ts now passes. */
+function ctxWithTasks(parent: Task, followUps: Task[]) {
+  const base = ctxFor(parent, followUps);
+  return { postMergeAmendment: { ...base.postMergeAmendment, followUpTasks: followUps } };
+}
+
+test("W1-T2375: the refusal names ONLY the follow-up carrying the criteria, not every new task in the PR", () => {
+  const parent = task({ id: "W1-T2327", acceptance: AMENDED }); // still status: queued
+  const v = blocking(postMergeAmendmentViolations(parent, ctxWithTasks(parent, [followUp, unrelated])));
+  assert.equal(v.length, 1);
+  assert.match(v[0].message, /W1-T2340/, "the follow-up that carries the amended criterion is named");
+  assert.equal(/W1-T9001/.test(v[0].message), false, "the unrelated new task is NOT named — it carries nothing");
+  assert.match(v[0].message, /W1-T2327/, "and the parent is still named");
+});
+
+test("W1-T2375: with the tasks NOT supplied the message is byte-identical to before this field existed", () => {
+  const parent = task({ id: "W1-T2327", acceptance: AMENDED });
+  const withoutTasks = blocking(postMergeAmendmentViolations(parent, ctxFor(parent, [followUp, unrelated])));
+  assert.equal(withoutTasks.length, 1);
+  assert.match(withoutTasks[0].message, /W1-T2340, W1-T9001/, "the caller-supplied id list, verbatim");
+});
+
+test("W1-T2375: a carrying subset that comes back EMPTY falls back rather than naming nothing", () => {
+  // Reachable only by hand: the real predicate would set `followUpFiled: false` here and take the
+  // other arm entirely. Pinned anyway, because the fallback is what keeps this a NARROWING of the
+  // message rather than a way to blank it.
+  const parent = task({ id: "W1-T2327", acceptance: AMENDED });
+  const ctx = ctxFor(parent, [unrelated]);
+  const forced = {
+    postMergeAmendment: { ...ctx.postMergeAmendment, followUpFiled: true, followUpTasks: [unrelated] },
+  };
+  const v = blocking(postMergeAmendmentViolations(parent, forced));
+  assert.equal(v.length, 1);
+  assert.match(v[0].message, /W1-T9001/, "falls back to the caller's id list rather than emitting an empty name");
+});
+
+test("W1-T2375: naming the carrier changes NO verdict — the same scenarios block identically with and without it", () => {
+  const cases: Array<[string, Task, Task[]]> = [
+    ["unstated disposition", task({ id: "W1-T2327", acceptance: AMENDED }), [followUp, unrelated]],
+    ["parent blocked", task({ id: "W1-T2327", acceptance: AMENDED, status: "blocked" }), [followUp, unrelated]],
+    ["no follow-up filed", task({ id: "W1-T2327", acceptance: AMENDED }), []],
+    ["unrelated task only", task({ id: "W1-T2327", acceptance: AMENDED }), [unrelated]],
+  ];
+  for (const [label, parent, ups] of cases) {
+    const without = blocking(postMergeAmendmentViolations(parent, ctxFor(parent, ups))).length;
+    const with_ = blocking(postMergeAmendmentViolations(parent, ctxWithTasks(parent, ups))).length;
+    assert.equal(with_, without, `${label}: the blocking count must be identical — this is a message change, not a behaviour change`);
+  }
+});
