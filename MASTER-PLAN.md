@@ -1532,7 +1532,7 @@ Architect via a tasks.yaml PR — standing rule 15, never auto-filed.**
 - **★ THE TURN COLUMN BECAME CHECKABLE AND FAILED.** `turns/merge` = **309** (618 ÷ 2) against the same
   gather's SHIPPED lines at **82t and 34t** (= 58), published with **no coverage stamp for the first
   time in seven cycles.** P48's shape inverts; **P40(i)/TASK D owns it, NO MINT.**
-- **★ P55 RESOLVED AGAINST ITSELF, BY DELETION.** The SHIPS-UNWIRED line persisted against a corpus
+- **★ RESOLVED AGAINST ITSELF, BY DELETION — P55.** The SHIPS-UNWIRED line persisted against a corpus
   stripped of the retro's own report of it, so by R32's pre-committed reading **the finding is about
   the SYMBOL and clause (i) is refuted.** The entry is cut to its surviving clause and dropped to rank
   13 — **the first proposal in this file resolved by REMOVING text rather than adding an instrument.**
