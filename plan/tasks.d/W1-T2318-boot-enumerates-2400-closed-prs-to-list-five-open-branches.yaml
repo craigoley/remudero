@@ -91,6 +91,41 @@
     RISK BAND. `risk: high` is set UP FRONT and is Rule 19's SPAN, not blast radius: `files:` crosses
     the daemon boot path and the board gateway, which fails sizing at medium however small each hunk
     is.
+
+    ── AMENDED 2026-08-27: ALREADY SHIPPED, BUT UNCREDITED — WHY A WORKER LANDED HERE AGAIN ──────
+
+    VERIFIED INDEPENDENTLY ON THIS DISPATCH, NOT TAKEN ON RECON'S WORD. Commit `80596b1f`
+    ("perf(daemon): defer the boot board walk to the first read that needs it (W1-T2318)", PR
+    #2972, merged 2026-08-26T16:31:05Z) is already an ancestor of this run's HEAD and matches this
+    shard's design almost verbatim. Re-run on this checkout: `node --test --import tsx
+    test/boot-board-walk-is-open-only.test.ts` passes all 9 assertions. Every acceptance proof
+    below already holds: `findMergedByTrailer` (status.ts:503), `corroboratesForwardProgress`
+    (status.ts:2082) and `BOARD_MAX_PAGES` (status.ts:665) are all present, untouched, exactly as
+    each claim requires. Both `daemonCommand` (run-task.ts:18965-18973) and `drainCommand`
+    (run-task.ts:19696-19704) wire a memoising thunk into `breakerGateFor` (run-task.ts:18346),
+    which resolves it lazily, past the already-tripped guard in
+    `evaluateDispatchBreakerCorroboratedDetailed` — the exact deferred-not-removed shape this
+    shard's rationale calls for. There is no remaining diff for `files:` to carry; reproducing it
+    would be byte-for-byte duplication of already-merged work.
+
+    WHY THIS SHARD STILL READ `status: queued, attempts: 0` AND GOT RE-DISPATCHED. PR #2972's head
+    branch is `fix-boot-board-walk-open-only`, which matches neither
+    `findMergedByHeadBranch`'s anchored `^run-W1-T2318-\d+$` test (`ownsBranch`, status.ts:2242)
+    nor a `Remudero-Task: W1-T2318` trailer — `git log --grep '^Remudero-Task:\s*W1-T2318\s*$' -E`
+    against every local ref returns zero commits, and neither #2972's squashed commit message nor
+    its PR body contains that line. So `isDispatchEligible`'s `isMerged` check (drain.ts:498-503)
+    reads false for this id, and this shard kept re-dispatching a worker onto code that was already
+    correct. This is a credit gap, not a build gap — the same class the project's own `printed-
+    but-uncredited` retro bucket already tracks, just never closed here.
+
+    WHAT THIS AMENDMENT'S OWN PR SUPPLIES, AND WHAT IT DOES NOT. It is filed from branch
+    `run-W1-T2318-1787819701423`, matching the head-ref credit pattern above, and its commit
+    carries the `Remudero-Task: W1-T2318` trailer this task's own output contract requires — once
+    that PR merges, both `findMergedByHeadBranch` and `findMergedByTrailer` should credit this id
+    and `isDispatchEligible` should stop offering it. It carries NO code change: `status`,
+    `acceptance`, `files` and `title` are left untouched, exactly as the W1-T1103/W1-T1261
+    amendment precedent does — a worker records what it found; it does not flip its own task's
+    status or edit its own acceptance criteria.
   acceptance:
     - claim: "the boot-time caller no longer pays for the closed index before anything reads it"
       proof: "unit test: test/boot-board-walk-is-open-only.test.ts"
