@@ -1,0 +1,141 @@
+- id: W1-T2402
+  title: "A SIGNAL-KILLED FIX WORKER IS INDISTINGUISHABLE FROM A FAILED ONE AND COSTS A STRIKE ANYWAY — `sweep.fix.error` carries six fields and none of them is cost, verdict, turns or signal, so a killed worker's spend is invisible and its death is recoverable only by string-matching an SDK message; and because the kill lands AFTER `dispatchStarted`, W1-T1127's rule swallows it and the strike seeds the dedup gate exactly as a real fix failure would"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 20.00
+  files: [src/run-task.ts, test/fix-rung-signal-death.test.ts]
+  origin: "operator-brief#fix-worker-signal-death-2026-08-27"
+  plan_refs: ["W1-T1127", "W1-T2383", "W1-T2388", "W1-T1044"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE ID. Eight surfaces, anchored `W1-T2402([^0-9]|$)` with a `[0-9]` class and never `\d`,
+    anchored beside unanchored at each. Surface 1 reads 1 of 516 refs. Filenames 0 of 659; declared
+    ids 0 of 914; open-PR titles 0 of 2 read CASE-SENSITIVELY (lower-case probe 0); open-PR bodies
+    0; head branches 0 of 92 live heads; merged trailers 0 of 2,426; merged subjects 0 of 2,461.
+    THE OPEN SET WAS ENUMERATED FIRST (2 PRs) and controls drawn from it — W1-T2399 fires 1 on refs,
+    filenames, ids and titles; W1-T2370 fires 1 on bodies; W1-T2397 fires 2 on trailers and 3 on
+    subjects. Surface 6's control comes from the LIVE head namespace (W1-T1, 8 heads) because the
+    open set carries no `run-*` head today — stated, not papered over. Anchor proved discriminating
+    on a POPULATED band: `W1-T2` reads anchored 1 against unanchored 245, `W1-T24` 2 against 11.
+
+    ── ⚠ THE BRIEF'S PREMISE NEEDS ONE CORRECTION, AND IT CHANGES THE REMEDY ─────────────────────
+
+    "SIGKILL ON A WORKER IS THE OOM-KILLER'S SIGNATURE" IS NOT SAFE ON THIS FLEET, BECAUSE THIS REPO
+    SIGKILLS ITS OWN WORKERS FROM AT LEAST THREE PATHS, all in `src/`:
+      • `killProcessGroup` (`src/lib/worker-containment.ts`) takes `signal: NodeJS.Signals =
+        "SIGKILL"` as its DEFAULT — it is the orphan sweep's own killer and the reclaim path's.
+      • `deployer.ts`'s forced deploy: its own doc says "the kickstart SIGKILLs whatever is still
+        running", and again "Deploying into a live daemon costs a SIGKILLed worker".
+      • W1-T1044's wall-clock bound plus `reclaimWorker`, wired at the very `dispatchFix` call site
+        this shard is about.
+    SO A SIGKILL IS AMBIGUOUS BY CONSTRUCTION HERE. Attributing the two observed deaths to memory
+    pressure without a discriminator is the same class of error as counting a step by its bare
+    string: the signal is real, the ATTRIBUTION is unevidenced. That does not weaken the finding —
+    it changes what a fix must record.
+
+    ── Q1. THE RATE IS UNMEASURABLE FROM THIS HOST, AND THE MEASUREMENT IS STATED ANYWAY ─────────
+
+    MEASURED ON THE MINI over the three-form union with a per-form READ control (`.gz` 666 files,
+    plain 6, live 1 — `ledger.*.ndjson*` does NOT match `ledger.ndjson`, so the live file is globbed
+    separately; `run.start` reads 257,438 / 1,314 / 200, so every non-empty form was genuinely
+    opened; 4,374,293 lines): SIXTEEN `sweep.fix.error` rows, anchored on the STEP FIELD, spanning
+    2026-07-18 to 2026-08-12, against a denominator of 323 `fix.done` rows — a 4.7 percent error
+    rate on the fix rung over six weeks.
+
+    NONE OF THE SIXTEEN CARRIES A SIGNAL TERMINATION. Every one is an ordinary error: a missing
+    Claude Code binary (3), a failed `git -C` in a sweep worktree (8), a failed `gh pr view` (3),
+    one ENOSPC, one other. THE TWO SIGNAL DEATHS THE BRIEF CITES — PR 3121 at 19:10:21Z and #3043 at
+    05:41Z — ARE NOT IN THIS CORPUS, because they happened on the container and this host cannot
+    read its ledger. So the rate, the growth and any clustering by host, hour or lane count are
+    UNANSWERABLE HERE and are not guessed. What the mini's window does establish is a genuine
+    BASELINE: over six weeks and 323 fix runs, this failure mode did not occur once on this host,
+    which is itself evidence that it is not a long-standing background rate.
+
+    ── Q2. WHAT A KILLED WORKER COSTS — BOTH HALVES VERIFIED, NEITHER GUESSED ────────────────────
+
+    (a) THE SPEND IS INVISIBLE, AND THIS IS A SECOND INSTANCE OF W1-T2383's CLASS. A
+    `sweep.fix.error` row carries EXACTLY SIX FIELDS, measured as the union of keys across all
+    sixteen rows: `error`, `pr_number`, `run_id`, `step`, `task_id`, `ts`. NO `cost_usd`, NO
+    `total_cost_usd`, NO `verdict`, NO `num_turns`, NO `tokens` — present on 0 of 16. A fix worker
+    that spawned has SPENT, and `sweep.fix.error` is not `fix.done`, so that spend is recorded
+    nowhere. W1-T2383 filed exactly this shape today for the risk judge and the fix cap; this is the
+    same defect on the error path rather than the success path.
+
+    (b) THE STRIKE IS CONSUMED, AND THE DESIGN SAYS SO IN ITS OWN WORDS. At the `dispatchFix` catch
+    (`src/run-task.ts`), W1-T1127's comment reads: "a failure that struck BEFORE the worker ran must
+    propagate ... A failure AFTER the worker ran (`dispatchStarted`) stays swallowed here — that
+    strike is real and must keep seeding the gate exactly as it does today", implemented as
+    `if (!dispatchStarted) throw e;`. A SIGNAL DEATH NECESSARILY LANDS AFTER THE SPAWN, so
+    `dispatchStarted` is true, the throw is swallowed, and the strike seeds the dedup gate. THE RULE
+    IS CORRECT FOR WHAT IT WAS WRITTEN FOR — a worker that ran and failed — and wrong for a worker
+    the HOST killed, because `dispatchStarted` cannot tell those apart. With two strikes available,
+    one memory or deploy event costs the PR half its remedy.
+
+    ── Q3. WHAT CAN ACTUALLY BE DONE FROM INSIDE THE REPO, AND WHETHER IT IS ENOUGH ──────────────
+
+    NOTHING HERE TUNES THE HOST. No swap, no memory limit, no concurrency cap is proposed: none is a
+    code change, and none has been measured. Two candidates are in scope, and the honest answer is
+    that the FIRST IS NECESSARY AND NOT SUFFICIENT while the SECOND CANNOT BE BUILT YET.
+
+    (1) RECORD THE SIGNAL STRUCTURALLY — NECESSARY, AND CHEAP. Today the death is recoverable only
+    by string-matching "terminated by signal SIGKILL" inside the row's free-text `error` field: that
+    literal appears NOWHERE in `src/`, so it is the SDK's own message, and there is no structural
+    `signal` field anywhere on the worker path. Counting a failure mode by substring is precisely
+    the reading this repo has already burned itself on twice — `fallback_push` matching a prose
+    mention, `credential_expired` matching 191 `containment.probe` rows. A `signal` field on the row
+    the rung already writes costs one key and makes the rate readable at all. IT IS NOT SUFFICIENT
+    ON ITS OWN, because of the correction above: the signal does not say WHO sent it, and this
+    fleet's own deploy, orphan-sweep and reclaim paths all send SIGKILL. The row must therefore
+    carry the signal AND the attribution the orchestrator already holds — was a deploy in flight,
+    was the wall-clock bound reached, did `reclaimWorker` fire — all of which are ledgered today and
+    need no new fetch.
+
+    (2) DO NOT CONSUME A STRIKE ON A HOST KILL — RIGHT IN PRINCIPLE, NOT BUILDABLE UNTIL (1) LANDS.
+    The discriminator the code has is `dispatchStarted`, which is true for both a real fix failure
+    and a host kill. Exempting signal deaths from the strike REQUIRES the attribution (1) records;
+    without it the exemption would either be keyed on a substring, or would forgive genuine failures
+    that happen to die by signal for their own reasons. SO (1) IS A PREREQUISITE FOR (2), NOT AN
+    ALTERNATIVE TO IT, AND THIS SHARD SEQUENCES THEM RATHER THAN OFFERING A CHOICE.
+
+    AND THE SPEND FIELD RIDES (1) FOR FREE. The same row is the place the cost belongs, so recording
+    it closes Q2(a) at the same call site with no second change.
+
+    ALREADY OWNED ELSEWHERE, RECORDED SO THIS DOES NOT RE-FILE IT: the digest's own memory bound is
+    W1-T2388, and the fix rung's remedy is the shard filed alongside this one. THIS SHARD OWNS ONLY
+    THE SIGNAL DEATH — how it is recorded and what it costs, never the host's memory and never the
+    rung's repair strategy.
+
+    RISK BAND. `risk: high` is set UP FRONT and is RULE 19'S SPAN, NOT BLAST RADIUS: `files:` reads
+    as two concerns, the `run-task` stem and this task's own test stem, which `lint-plan` refuses at
+    `risk: medium`. The blast radius is one ledger row's field set plus one branch in a catch.
+  acceptance:
+    - claim: "a worker result carrying a signal termination records that signal as its own field rather than only inside a free text message"
+      proof: "unit test: test/fix-rung-signal-death.test.ts"
+    - claim: "a signal-terminated result records what the worker spent, so the cost is not invisible"
+      proof: "unit test: test/fix-rung-signal-death.test.ts"
+    - claim: "an ordinary fix failure keeps consuming its strike exactly as it does today"
+      proof: "unit test: test/fix-rung-signal-death.test.ts"
+    - claim: "a failure that struck before the worker ran still propagates rather than seeding the gate"
+      proof: "unit test: test/fix-rung-signal-death.test.ts"
+    - claim: "the signal alone never decides attribution, since this repo sends the same signal itself"
+      proof: "unit test: test/fix-rung-signal-death.test.ts"
+    - claim: "nothing added paces or throttles or sleeps a call"
+      proof: "unit test: test/fix-rung-signal-death.test.ts"
+  falsifier: |
+    If the container's own ledger shows `sweep.fix.error` rows carrying signal terminations at a
+    steady rate reaching back weeks, then this is a standing background condition rather than a new
+    one and the urgency implied here is wrong — though Q2's two findings, which rest on the ROW
+    SHAPE and on source, would stand unchanged. The measurement to run is the one this host could
+    not: the three-form union of the CONTAINER's `state/ledger*`, anchored on `step ==
+    "sweep.fix.error"`, with a per-form read control and the query shown to find the two instances
+    of 2026-08-27 before any zero is believed.
+
+    SEPARATELY FALSIFYING: if a structural `signal` field already exists anywhere on the worker
+    result path, then (1) is already built and only the strike arm remains. Checked at filing time
+    and absent — `git grep` for a `signal` field on `src/lib/worker.ts`'s result type returns
+    nothing — but it is the first thing a build should re-check.
