@@ -1,0 +1,146 @@
+- id: W1-T2347
+  title: "REACHING THE REAL AUTO-MERGE ARM FROM A TEST IS OPT-OUT RATHER THAN OPT-IN — `deps.arm ?? armAutoMergeDetailed` hands a fixture the production arm whenever it forgets the seam, and the refusal that finally stops it fires at the write leaf, three reads too late: make the arm entry points refuse under the test runner unless a seam was explicitly supplied, changing nothing in any process that is not `node --test`"
+  repo: remudero
+  depends_on: ["W1-T2346"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 55.00
+  risk: high
+  rationale: |
+    READ-ONLY DERIVATION on the triage worktree for fb-1786025201466-7081b2; no suite run, no spawn,
+    no config touched. W1-T2346 is the census and this is the ruling it licenses; the measurements
+    are stated there and CITED here rather than re-taken.
+
+    (1) THE DEFAULT IS THE REAL THING, AND THAT IS THE PROVEN FACT THIS TASK ACTS ON. `src/run-task.ts:2795`
+    is `(deps.arm ?? armAutoMergeDetailed)(ctx.prUrl, ctx.taskId)` with `deps` defaulting to `{}` at
+    2769; `runReview` forwards `{ arm: args.arm }` at 4577 with `arm` optional. Four sibling entry
+    points repeat the shape as `deps: ArmDeps = realArmDeps()` (1943, 1960, 2308, 2391). A fixture
+    that omits the seam is therefore not *unwired* — it is wired to production, silently, and the
+    only signal is whatever the production dep happens to do on that box.
+
+    (2) THE FENCE IS REAL AND IT IS IN THE WRONG PLACE, WHICH IS A DIFFERENT COMPLAINT FROM "THERE IS
+    NO FENCE". `assertLiveWriteAllowed("gh-pr-merge", ...)` opens `armAuto` (1856), `mergeDirect`
+    (1865) and `disableAuto` (1873), so under `NODE_TEST_CONTEXT` the merge itself throws. Nothing
+    here weakens that. But by the time control arrives at those lines, `armAutoMergeDetailed` has
+    already called `deps.headSha(prUrl)` (1971 → `readHeadShaRest`, a live REST read on real
+    credentials) and `deps.ledgerLines()` (1981 → `readLedgerLines(ledgerPathFor(loadConfig()))`,
+    1850). The guard fences the WRITE; the reads that make a test's outcome depend on the box happen
+    before it and are structurally invisible to it — `LiveWriteBoundary`
+    (`src/lib/live-write-guard.ts:86`) names five write verbs and the module's own header says it
+    "checks the CALL, not the DESTINATION".
+
+    (3) SO THE PROPERTY THIS BUYS IS ATTRIBUTION, NOT PREVENTION OF A MERGE. W1-T1206 settled the
+    axis for exactly this family of failures: "A reversible act nobody sees is indistinguishable from
+    an irreversible one for as long as it goes unseen", and detectability beats reversibility. Today
+    a fallen-through fixture fails — when it fails at all — as `SyntaxError: Unexpected end of JSON
+    input` at `JSON.parse` in `loadConfig`, or as `head-unavailable`, or as a green test on a box
+    whose config happens to parse. None of those name the actual fault, which is that the test never
+    supplied an arm seam. The refusal proposed here names it in one line.
+
+    (4) AND THE COST OF THE STATUS QUO IS ALREADY PAID AND DOCUMENTED. Three `runReview` tests
+    red-lined in `ci` and `coverage-ratchet` and cost a full reproduce-the-remote-box investigation —
+    the author emptied this machine's config to recreate CI's condition, matched the failure set
+    exactly (`not ok 1, 2, 3 / ok 4, ok 5`), then restored it byte-identically (72 bytes, re-read and
+    re-checked). That technique is worth copying and is recorded for the implementer; the point here
+    is that it was needed at all, for a fault a one-line refusal would have named.
+  design: |
+    (i) THE MECHANISM: A SEAM REQUIREMENT, GATED ON `isTestRunner()`, NOT A NEW PRODUCTION SWITCH.
+    Add one guard — `requireExplicitArmSeam(...)` — consulted by the arm entry points BEFORE any dep
+    on the default object is invoked. Its predicate is exactly: running under the node test runner
+    (`isTestRunner()` from `src/lib/live-write-guard.ts`, already exported and already presence-tests
+    `NODE_TEST_CONTEXT`) AND no seam was supplied by the caller. In every process that is not
+    `node --test` it returns immediately, so the daemon, the operator CLI and every live arm are
+    byte-identical. THE PRODUCTION DEFAULT IS NOT CHANGED — this is deliberately the narrow form of
+    the feedback's question, and it needs no operator ruling because no production path moves.
+
+    (ii) IT REFUSES BY THROWING, AND THE MESSAGE MUST NAME THE SEAM. `LiveWriteBlockedError`'s own
+    doc is the precedent and the reasoning transfers unchanged: "Thrown at a boundary rather than
+    returning silently: a swallowed refusal would read as 'the effect did not happen for some other
+    reason'". Returning `"skipped"` here would be worse than the status quo — it would make a
+    fallen-through test PASS. The message must state which entry point was reached, that no seam was
+    supplied, and the two ways out of (iv).
+
+    (iii) IT MUST FIRE BEFORE THE FIRST DEP CALL, WHICH IS THE ONLY PLACEMENT THAT BUYS ANYTHING.
+    Ahead of `deps.headSha(prUrl)` (1971) and `deps.ledgerLines()` (1981), not beside the
+    `assertLiveWriteAllowed` calls at 1856/1865/1873 — a guard placed there is the fence that already
+    exists and would leave the live REST read and the config read exactly where they are.
+
+    (iv) TWO WAYS OUT, BOTH EXISTING AND BOTH EXPLICIT. Supply the seam (`{ arm: ... }`, the
+    injectable `disarm`, or a narrowed `ArmDeps`) — which is what the arm/disarm seams exist for, in
+    their own words: "Exists so a unit test can assert the withdrawal is ISSUED rather than mocking
+    gh"; or, for a suite that deliberately drives the real dep against its own containment, wrap that
+    section in `withLiveWritesAllowed` / set `RMD_ALLOW_LIVE_WRITES=1`, the same per-test and
+    per-process opt-outs the live-write guard already defines. NO THIRD ESCAPE HATCH IS ADDED, and no
+    by-name allowlist of suites is introduced — a by-name set fails OPEN the moment a file is added
+    (W1-T1206 rationale 6).
+
+    (v) THE CENSUS IS A HARD PREREQUISITE, WHICH IS WHY `depends_on` IS SET. W1-T2346 produces the
+    population this refusal will red-line. Landing the guard first would turn an unknown number of
+    green suites red simultaneously with no way to attribute them, which is the same
+    unattributable-failure cost this task exists to remove.
+
+    (vi) `armAutoMergeAtOpen` NEEDS AN EXPLICIT RULING FROM THE IMPLEMENTER, RECORDED EITHER WAY. It
+    is the UNGATED arm that consults no verdict, and `test/arm-at-open.test.ts` deliberately drives
+    it with a narrowed `{armAuto, mergeDirect, say}` — i.e. it DOES supply seams and would pass the
+    guard. Whether the requirement also applies to it is a question this design does not pre-answer;
+    state the answer in the PR body with the reason.
+
+    (vii) OUT OF SCOPE, NAMED. Widening `LiveWriteBoundary` to cover reads (a much larger design that
+    would fence every REST read in the tree); W1-T920/W1-T921's `gh-pr-close` ruling, which is not
+    reopened; the three repaired `runReview` tests from the feedback; and any change to what the arm
+    does when a seam IS supplied.
+  acceptance:
+    - claim: "an arm entry point reached under the test runner with no seam supplied refuses instead of running the production dependency"
+      proof: "unit test: test/arm-seam-default-is-opt-in.test.ts"
+    - claim: "the refusal fires before the live head read and before the config and ledger read"
+      proof: "unit test: test/arm-seam-default-is-opt-in.test.ts"
+    - claim: "the refusal throws and its message names the entry point and the seam that was missing"
+      proof: "unit test: test/arm-seam-default-is-opt-in.test.ts"
+    - claim: "supplying the seam reaches the injected arm exactly as it does today"
+      proof: "unit test: test/arm-seam-default-is-opt-in.test.ts"
+    - claim: "a section wrapped in withLiveWritesAllowed still reaches the production default"
+      proof: "unit test: test/arm-seam-default-is-opt-in.test.ts"
+    - claim: "outside the node test runner the guard returns immediately and the production arm path is unchanged"
+      proof: "unit test: test/arm-seam-default-is-opt-in.test.ts"
+    - claim: "the arm entry points consult the seam guard"
+      proof: "grep: requireExplicitArmSeam( in src/run-task.ts"
+  files: [src/run-task.ts, test/arm-seam-default-is-opt-in.test.ts]
+  status: queued
+  attempts: 0
+  origin: feedback#fb-1786025201466-7081b2
+  plan_refs: ["W1-T2346", "W1-T1206", "W1-T1000002", "W1-T230", "W1-T1079"]
+  note: |
+    THE NARROW FORM WAS CHOSEN OVER THE BROAD ONE ON PURPOSE, AND THE BROAD ONE IS RECORDED SO NOBODY
+    THINKS IT WAS MISSED. The feedback asked whether "the default should require an explicit arm seam
+    rather than defaulting to the real one, so reaching it is opt-in". The BROAD reading — make the
+    seam mandatory in every process, production included — reverses a production default and would be
+    an operator ruling. The NARROW reading implemented here gates the requirement on `isTestRunner()`,
+    so production wiring is untouched and only a `node --test` process can ever see the refusal. It
+    delivers the property that was actually asked for (reaching the real arm from a test becomes
+    opt-in) at zero production blast radius. If the broad form is later wanted, this guard is where it
+    would be widened, and that widening is a separate filing.
+
+    `risk: high` IS BLAST RADIUS, NOT RULE 19 — TWO STEMS WOULD NOT HAVE FORCED THE BAND. The subject
+    is the code path that arms auto-merge on real pull requests. A guard placed one line too early, or
+    a predicate that misreads a live daemon as a test runner, disarms the fleet's merge path in
+    production. Claiming Rule 19 compelled the band would be a false claim in the direction that
+    flatters the filing.
+
+    SIX OF SEVEN PROOFS ARE THE PURE-PATH `unit test:` FORM against a file that does not exist on this
+    tree — `not_yet_built` on the filing PR through W1-T456's carve-out, executed once the file lands.
+    The seventh is a `grep:` for text this change ADDS (`requireExplicitArmSeam(`) in a path that
+    exists today, so it MISSES now and HITS after the change; restated positively on purpose, because
+    a grep that must miss after the change reads `executed_fail` and fails the very PR that satisfies
+    it.
+
+    THE ONE FALSIFIER TO RUN FIRST, BEFORE WRITING ANY SOURCE. Confirm on the tree of the day that
+    `armIfVerdictPermits` still has no token — `deps.arm ?? armAutoMergeDetailed` at or near line
+    2795. If some intervening task has already made the seam required, this shard is MOOT and must be
+    closed as such rather than implemented anyway. The whole task rests on that one `??`.
+
+    REPRODUCE THE REMOTE ENVIRONMENT, DO NOT INFER FROM THE STACK TRACE. The feedback's author found
+    the fault by EMPTYING this machine's config to recreate CI's condition, matching CI's failure set
+    exactly, then restoring it byte-identically (72 bytes, re-read and re-verified). If this work needs
+    to see the failure it prevents, that is the technique — and the restore is part of it, not an
+    afterthought.
