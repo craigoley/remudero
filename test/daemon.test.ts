@@ -34,7 +34,7 @@ import { runSweep, DEFAULT_SWEEP_POLICY } from "../src/lib/sweep.js";
 import { pauseDetail, requestPause, requestStop, resumeFleet, stopDetail } from "../src/lib/fleet-control.js";
 import type { MergedSet, OpenPrCheck } from "../src/lib/drain.js";
 import { deriveStatus, type GitHub, type PrRef } from "../src/lib/status.js";
-import { RUN_ID_ENV, TASK_ID_ENV, defaultReadMarkers, isPidAlive, killProcessGroup, spawnDetachedGroup } from "../src/lib/worker-containment.js";
+import { RUN_ID_ENV, TASK_ID_ENV, defaultListCandidates, defaultReadMarkers, isPidAlive, killProcessGroup, spawnDetachedGroup } from "../src/lib/worker-containment.js";
 
 // A small linear-ish plan: A → B → C (chain) + D (independent), all auto.
 const YAML = `
@@ -2234,6 +2234,30 @@ test("W1-T356 wiring: the REAL daemonCommand sets DaemonDeps.sweepOrphans to the
     // defaultReadMarkers test. This is the beat whose expiry produced the observed
     // `killedLine undefined`: unattributed means unkilled means unledgered.
     await waitUntilMarkersVisible(stray.pid);
+    // W1-T356 FLAKE FIX — THE STRAY IS TWO PROCESSES, AND ONLY ONE OF THEM IS EVER LEDGERED.
+    //
+    // MEASURED: `/bin/sh -c "sleep 300"` FORKS rather than execs, so one logical stray is a shell
+    // plus a `sleep` child, and BOTH inherit the marker env. `defaultListCandidates` (`ps -eo
+    // pid=,command=`) therefore offers the sweep TWO candidates carrying this run's markers.
+    // `sweepOrphanWorkers` kills the first one it reaches — `killProcessGroup` takes the whole
+    // group, so the other dies with it — and by the time the loop reaches the second, `ps eww -p
+    // <dead pid>` returns nothing, so `readMarkers` is undefined and it is recorded
+    // `unattributable` with NO ledger line. Exactly ONE `worker_orphan_killed` row exists per
+    // logical stray, and WHICH pid it names is whichever `ps` listed first.
+    //
+    // `ps -eo pid=` sorts by pid, so the shell (spawned first, lower pid) normally wins and the row
+    // names `stray.pid` — which is why this passes 40/40 here, idle and loaded. It fails when that
+    // ordering does not hold, and the recorded CI failure is exactly that shape: the kill assertion
+    // and the ESRCH assertion both PASSED (the stray really died) and only the pid-matched ledger
+    // lookup came back undefined.
+    //
+    // THE ASSERTION IS NOT WEAKENED, it is de-coupled from an artefact. Capturing the marker-
+    // carrying pids BEFORE the sweep lets the ledger lookup accept the row for EITHER member of
+    // this stray's own group while still refusing any row that names a pid this stray never owned.
+    const strayGroupPids = defaultListCandidates()
+      .filter((c) => defaultReadMarkers(c.pid)?.runId === "run-ended-poll-1")
+      .map((c) => c.pid);
+    assert.ok(strayGroupPids.includes(stray.pid), "precondition: the spawned stray is among its own marker-carrying pids");
     const code = await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
       runDaemon: async (_plan, deps): Promise<DaemonSummary> => {
         captured = deps;
@@ -2257,7 +2281,8 @@ test("W1-T356 wiring: the REAL daemonCommand sets DaemonDeps.sweepOrphans to the
     assert.equal(isPidAlive(unrelated.pid), true, "a marker-less process must never be signalled, no matter how suspicious it looks");
 
     const lines = ledgerLines(root);
-    const killedLine = lines.find((l) => l.step === "worker_orphan_killed" && l.pid === stray.pid);
+    // The row must name a pid THIS stray actually owned — never merely "some kill happened".
+    const killedLine = lines.find((l) => l.step === "worker_orphan_killed" && strayGroupPids.includes(Number(l.pid)));
     assert.ok(killedLine, "the real production ledger dep must record the kill");
     assert.equal(killedLine!.run_id, "run-ended-poll-1");
     assert.equal(killedLine!.task_id, "W1-T356-poll-fixture");
