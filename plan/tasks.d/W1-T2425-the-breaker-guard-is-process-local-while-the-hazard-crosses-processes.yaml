@@ -1,0 +1,181 @@
+- id: W1-T2425
+  title: "THE DISPATCH BREAKER'S ANTI-ROTATION GUARD IS PROCESS-LOCAL WHILE THE HAZARD CROSSES PROCESSES — `evaluateDispatchBreakerDetailed` reads the live file by a deliberate, marked choice, and its regression guard compares against `cache.lastCounts`, an in-memory Map `breakerGateFor` rebuilds per invocation; a rotation plus a daemon restart therefore clears a tripped breaker silently, and the row that records the count at trip time is archived because `dispatch.circuit_broken` is a member of NONE of `rotateLedger`'s three retention sets"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 25.00
+  files: [src/lib/ledger.ts, src/lib/status.ts, test/breaker-guard-survives-rotation.test.ts]
+  origin: "operator-brief#breaker-gate-rotates-and-its-guard-cannot-fire-2026-08-27"
+  plan_refs: ["W1-T2423", "W1-T206", "W1-T209", "W1-T244", "W1-T271", "W1-T316", "W1-T2415", "W1-T2344", "W1-T2249"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE ID. Eight surfaces swept at base a064a10d, anchored `W1-T2425([^0-9]|$)` with a `[0-9]`
+    class and never `\d`, every open-surface control drawn from the open set enumerated FIRST over
+    REST (HTTP 200, type array, length 5, page 2 length 0). SURFACE 1 READS 1:
+    `refs/rmd-id/W1-T2425` resolves against 538 refs, and the anchor is proved discriminating on a
+    POPULATED band — `W1-T242` reads anchored 0 against unanchored 6 over that same file. Shard
+    filenames 0 of 668 (control W1-T2415 = 1); declared `- id:` lines 0 of 936 (control = 1);
+    open-PR titles 0 of 5 CASE-SENSITIVELY (control W1-T2423 = 1, lower-case `w1-t2423` = 0);
+    open-PR bodies 0 over 29,727 bytes (control W1-T2423 = 10); head branches 0 of 152 rows across
+    the open set unioned with every remote head (control W1-T2334 = 2). Surfaces 7 and 8 are
+    MERGED-ONLY and their zeros are recorded as coverage rather than evidence for an id that has
+    never merged: trailers 0 of 574 (control W1-T2249 = 1), subjects 0 of 2,488 (control
+    W1-T2415 = 1).
+
+    THE OTHER HALF IS W1-T2423 AND IS NOT RE-FILED HERE. That task owns THE COUNT — that a
+    containment-probe refusal, which gates before the task worker ever runs, is counted as a
+    dispatch that produced nothing. THIS TASK OWNS THE GATE. Each survives the other's repair: the
+    counter would still miscount on a ledger that never rotated, and the gate would still read a
+    rolling window with a perfect count.
+
+    ── Q1. THE READ IS DELIBERATE. THE DEFECT IS THE GUARD'S DURABILITY ─────────────────────────
+
+    (1) THE READ IS A RECORDED DECISION, NOT AN OVERSIGHT, AND IT SAYS WHY.
+    `evaluateDispatchBreakerDetailed` (`src/lib/status.ts`) carries the repo's own greppable
+    marker on the line above its read — `ledger-read-intent: live — the dispatch breaker wants the
+    newest rows only` — and `readLedgerLines`' doc states its contract in terms: THE LIVE FILE
+    ALONE, one path, opened, parsed, returned, nothing else. That marker convention is not
+    decoration: `ledgerReadIntentViolations` enforces that EVERY call site declares live or union,
+    precisely so a reviewer never has to infer the choice from behaviour.
+
+    (2) AND THE REASON HOLDS UP. `dispatchesWithoutNewOwnedPr` counts `run.start` since the last
+    `pr.opened` or merge credit. Over the archive-plus-live union that horizon is the whole
+    history: `run.start` reads 569 distinct over the union against 207 live. A breaker reading all
+    of it would keep counting runs a task made weeks ago and, for any task that has ever gone five
+    runs without a PR, would never clear again. A live read is the right instrument for a
+    RECENCY question. DO NOT WIDEN THE READ.
+
+    (3) SO THE DEFECT IS ELSEWHERE, AND THE CODE ALREADY NAMES IT. The guard exists:
+    `if (priorCount !== undefined && freshCount < priorCount && !hasNewOwnedPr) return
+    "indeterminate"` — a count that regressed with nothing in the ledger to explain it is refused
+    rather than trusted. W1-T206's own wiring comment says what it is for: a ledger read "reading
+    as fewer dispatches than a live process already knows about". THE INTENT IS ON RECORD. What is
+    missing is that `priorCount` comes from `cache.lastCounts`, an in-memory `Map` on the
+    `DispatchBreakerCache` that `breakerGateFor` builds ONE OF PER INVOCATION — and that function's
+    own doc scopes its claim honestly, saying a SAME-PROCESS rotation gets caught as it happens. A
+    cross-process rotation was never claimed and is not covered.
+
+    (4) THE RULING. THE LIVE READ IS CORRECT AND MUST NOT CHANGE; THE GUARD IS CORRECT AND MUST
+    NOT CHANGE; THE GUARD'S MEMORY IS PROCESS-LOCAL WHILE THE HAZARD IT GUARDS AGAINST CROSSES
+    PROCESSES, AND THAT IS THE WHOLE DEFECT.
+
+    (5) THE MEASURED INSTANCE, END TO END. `MAX_RETAINED_LINES_PER_STEP = 200`. A rotation landed
+    at `ledger.2026-08-27T20-18-33-155Z.ndjson`. W1-T1279's two oldest runs — 03:45:18.096Z and
+    05:06:16.849Z — are ABSENT from the live file and PRESENT in the union, so the live file held
+    3. The daemon restarted across the same gap: `DAEMON-1787856970963` last writes at 20:39:33
+    and `DAEMON-1787863181387` first writes at 20:58:35, between the last refusal at 19:46:45 and
+    the dispatch at 20:59:58. A fresh process has an empty `lastCounts`, so `priorCount` was
+    `undefined`, the regression arm was unreachable, `freshCount 3 < 5` read `clear`, and a
+    breaker that had refused every tick for 84 hours dispatched with no line anywhere saying it
+    had been reset.
+
+    ── Q2. THE SYMMETRIC HAZARD, RE-DERIVED WITH ITS OWN CONTROLS ───────────────────────────────
+
+    (6) THE FALSE TRIP IS MECHANICAL AND CURRENTLY UNREALISED. `pr.opened` rotates under the same
+    PASS 4 cap as `run.start` — measured live 207 and 207, union 525 and 569. If a task's
+    `pr.opened` rows left the window while its `run.start` rows survived, `hasNewOwnedPr` would
+    read false and the streak would never reset, tripping a breaker on work that DID produce PRs.
+    RE-DERIVED: 283 tasks have had `pr.opened` rotate out of the live file, and ZERO of them still
+    have a live `run.start`. Controls fired on every side — `pr.opened` union ids 479, live ids
+    196, live `run.start` ids 132 — so the zero is a measurement, not an empty query.
+
+    (7) AND THE REASON IS STRUCTURAL, WHICH IS WHY IT IS SAFE TO SAY SO. Both steps are
+    decision-relevant, both survive PASS 1, and both are bounded by the SAME PASS 4 cap in the
+    SAME rotation pass, so a task's rows leave the window as a cohort rather than one step at a
+    time. THAT LOCKSTEP IS ALSO WHAT MAKES THE FAILURE ONE-DIRECTIONAL: losing both a task's
+    `run.start` and its `pr.opened` lowers the count and never raises it, so rotation can clear a
+    breaker and cannot trip one. This task addresses the direction that has actually happened and
+    claims nothing about the other beyond that it is unrealised today.
+
+    ── Q3. THE CHEAPEST DURABLE GUARD, AND THE EVIDENCE IS ALREADY WRITTEN ──────────────────────
+
+    (8) YES, THE EVIDENCE IS ON DISK — BUT IT LANDS WHERE THE BREAKER DOES NOT LOOK. Every
+    `dispatch.circuit_broken` row carries the count at decision time. MEASURED over 78 distinct
+    rows: `freshCount` present on 78 of 78, `maxDispatches` on 78 of 78, `hasNewOwnedPr` on 78 of
+    78, `priorCount` on 5. That is exactly the triple the regression arm compares. But the step is
+    a member of NONE of `rotateLedger`'s three retention sets — not
+    `DECISION_RELEVANT_LEDGER_STEPS`, not `isHealthOrDeployStep` (only `daemon.boot` and
+    `deploy.*`), not `RENDER_RELEVANT_LEDGER_STEPS` — so PASS 1 archives every one of its lines
+    before PASS 4's cap is ever reached. MEASURED: `dispatch.circuit_broken` reads 0 live against
+    78 over the union, while its own sibling `dispatch.circuit_broken.escalated`, which IS
+    decision-relevant, reads 2 live against 2 union. SAME PREFIX, SAME WRITER, OPPOSITE RETENTION
+    — and that sibling is the positive control proving the live-file query can see this family.
+
+    (9) SO THE MINIMUM CHANGE IS ONE SET ENTRY AND ONE SEED, AND IT IS THE SHAPE THIS REPO ALREADY
+    ENFORCES. Add `dispatch.circuit_broken` to `DECISION_RELEVANT_LEDGER_STEPS` so its rows join
+    the retained core the breaker already reads, bounded by the same PASS 4 cap as every other
+    decision step; then have `createDispatchBreakerCache` seed `lastCounts` from the newest such
+    row per task, so a fresh process starts with the count its predecessor decided on rather than
+    with nothing. `rotateLedger`'s own doc states the standard this meets: THE ACCEPTANCE TEST IS
+    THE BREAKER, NOT THE FILE SIZE.
+
+    (10) AND THE GATE FOR IT ALREADY EXISTS, WHICH IS WHY NO TEST NEEDS EDITING TO ENFORCE IT.
+    `test/ledger-rotation.test.ts` re-derives the expected step set from the ACTUAL SOURCE of every
+    consumer file on every run, and `src/lib/status.ts` is already on that list. The moment the
+    seed reads this step there, the derived-from-consumers assertion fails until the Set entry
+    lands. The build must not weaken or special-case that test; it should watch it go red first.
+
+    (11) WHAT THIS IS NOT. It is NOT a wider read: the seeded row sits in the same live file
+    `readLedgerLines` already returns, and nothing consults an archive. It is NOT a bigger
+    retained core beyond one step under the existing per-step bound. It is NOT a reset: the
+    seed makes the INDETERMINATE arm reachable across a restart, and an indeterminate read already
+    means skip-and-retry rather than dispatch.
+
+    ── WHAT MUST NOT MOVE ──────────────────────────────────────────────────────────────────────
+
+    (12) `MAX_RETAINED_LINES_PER_STEP` STAYS 200. The breaker's read stays LIVE and its marker
+    stays as written. `DEFAULT_MAX_TASK_DISPATCHES` STAYS 5. Nothing auto-resets a breaker,
+    nothing paces, nothing sleeps. The reset rule stays a fresh owned PR or a merge credit, and
+    the lifetime cap (W1-T271/W1-T316) is a separate backstop that is not touched.
+
+    (13) OWNED ELSEWHERE, CITED NOT RE-FILED. W1-T2423 owns the count — that a probe refusal is
+    counted as a dispatch that produced nothing. W1-T2415 owns the missing `DispatchFilterReason`
+    arm that leaves a breaker refusal unnamed on the queue head. W1-T2344 owns the containment
+    probe's turn allowance. W1-T2249 owns the 529 exclusion and its `spawn-transport-failure`
+    symbol. W1-T209/W1-T244 own the rotation design and its retained core, which this task extends
+    by exactly one member rather than reopening. THIS TASK OWNS ONE THING: that the guard against
+    a rotated read cannot survive the restart that makes the read rotate.
+
+    (14) RULE 19 BAND SET FROM SPAN UP FRONT. `risk: high` records the SPAN — `src/lib/ledger.ts`
+    for the retention entry and `src/lib/status.ts` for the seed are two distinct concerns, and at
+    any lower band Rule 19 would block rather than let a `risk` value stand in for a decomposition
+    that was never done. It is independently justified: the symbol being changed decides whether
+    the fleet keeps spending runs on a task that cannot finish.
+  acceptance:
+    - claim: "a tripped breaker stays tripped across a rotation that drops its oldest run rows"
+      proof: "unit test: test/breaker-guard-survives-rotation.test.ts"
+    - claim: "a tripped breaker stays tripped across a process restart with an empty in-memory cache"
+      proof: "unit test: test/breaker-guard-survives-rotation.test.ts"
+    - claim: "the regression arm reports indeterminate rather than clear when the count drops with nothing explaining it"
+      proof: "unit test: test/breaker-guard-survives-rotation.test.ts"
+    - claim: "a genuine reset by a fresh owned pr still clears the streak exactly as it does today"
+      proof: "unit test: test/breaker-guard-survives-rotation.test.ts"
+    - claim: "the breaker still reads the live file and no archive is opened"
+      proof: "unit test: test/breaker-guard-survives-rotation.test.ts"
+    - claim: "the circuit-broken row survives rotation and is bounded by the same per-step cap as every other decision step"
+      proof: "unit test: test/breaker-guard-survives-rotation.test.ts"
+    - claim: "the derived-from-consumers rotation assertion passes with the new reader present"
+      proof: "unit test: test/breaker-guard-survives-rotation.test.ts"
+    - claim: "the retention cap stays two hundred and the dispatch bound stays five"
+      proof: "unit test: test/breaker-guard-survives-rotation.test.ts"
+    - claim: "nothing added resets a breaker or paces or sleeps a call"
+      proof: "unit test: test/breaker-guard-survives-rotation.test.ts"
+  falsifier: |
+    If `dispatch.circuit_broken` is found to read non-zero over the LIVE file at the sha a build
+    starts from, it has already joined a retention set and the premise in (8) is closed — the
+    remedy must then be re-derived against whatever made it durable. The check is one unchained
+    count against the live ledger, with `dispatch.circuit_broken.escalated` at 2 live as the
+    positive control proving the query can see this family.
+
+    SEPARATELY FALSIFYING: if any task is found whose `pr.opened` rows have rotated out while its
+    `run.start` rows survive, the false-trip direction has been realised and (7)'s one-directional
+    claim is void — the remedy must then be argued against both directions rather than one. The
+    controls for that re-run are the three id counts recorded in (6).
+
+    AND IF `breakerGateFor` is ever changed to build ONE cache per PROCESS rather than one per
+    invocation, the seed proposed here is redundant for the restart case and only the rotation
+    case remains — the design must be re-taken against that, not layered on top of it.
