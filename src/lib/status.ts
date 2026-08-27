@@ -4202,23 +4202,74 @@ function readCachedProjections(cachePath: string): Map<string, StatusProjection>
  * throws, so an unreadable protection rule degrades the caller to its
  * pre-fix conservative fallback instead of crashing the sweep.
  */
-export function ghRequiredStatusCheckContexts(owner: string, repo: string, branch = "main"): string[] | undefined {
+/**
+ * W1-T2399 — THE THREE READINGS THAT USED TO COLLAPSE INTO ONE `undefined`.
+ *
+ * {@link ghRequiredStatusCheckContexts} answers `string[] | undefined`, and THREE different facts
+ * arrive as that same `undefined`: protection that genuinely declares no required contexts, a
+ * protection object that declares an empty list, and a read that FAILED OUTRIGHT (no `gh`, an
+ * unprivileged token, a network error, unparseable JSON). The caller then sets one boolean from
+ * it, and by the time the sweep renders an escalation the cause is gone — so a repo-wide read
+ * outage is reported as a claim about the PR's own checks.
+ *
+ * This is the same split W1-T2370 made between `unverifiable` and `refuted` on the review surface:
+ * "could not check" and "checked, and the answer is none" are different facts and must not share
+ * a representation.
+ *
+ * FAIL-SOFT IS UNCHANGED (W1-T176 boundary (ii) is NOT reopened): this still never throws, and a
+ * caller that cannot read protection still treats the gate as unreadable and still escalates. What
+ * changes is only that the reason survives the read.
+ */
+export type RequiredContextsRead =
+  | { kind: "contexts"; contexts: string[] }
+  | { kind: "none" }
+  | { kind: "unreadable"; branch: string; reason: string };
+
+/** W1-T2399: the classified read. {@link ghRequiredStatusCheckContexts} is now a thin wrapper over
+ *  this, so every pre-existing caller keeps its exact signature and behaviour. */
+export function readRequiredStatusCheckContexts(owner: string, repo: string, branch = "main"): RequiredContextsRead {
+  let raw: string;
   try {
-    const raw = execFileSync(
+    raw = execFileSync(
       "gh",
       ["api", `repos/${owner}/${repo}/branches/${branch}/protection/required_status_checks`],
       { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
     );
+  } catch (e) {
+    // THE FACT THIS TASK EXISTS TO PRESERVE. One line, classified at the point of failure, because
+    // nothing downstream can recover it: `gh` absent, an unprivileged token, a network error and a
+    // 404 on an unprotected branch all land here and all used to become a bare `undefined`.
+    return { kind: "unreadable", branch, reason: firstLine((e as Error)?.message) || "gh read failed" };
+  }
+  try {
     const parsed = JSON.parse(raw) as { contexts?: unknown; checks?: Array<{ context?: unknown }> };
     const fromChecks = (parsed.checks ?? [])
       .map((c) => c.context)
       .filter((c): c is string => typeof c === "string" && c.length > 0);
-    if (fromChecks.length > 0) return fromChecks;
+    if (fromChecks.length > 0) return { kind: "contexts", contexts: fromChecks };
     const fromContexts = Array.isArray(parsed.contexts) ? parsed.contexts.filter((c): c is string => typeof c === "string") : [];
-    return fromContexts.length > 0 ? fromContexts : undefined;
-  } catch {
-    return undefined;
+    // READ SUCCESSFULLY, AND THE ANSWER IS NONE — a different fact from a failed read, and the
+    // whole point of the split. The branch is protected; it simply requires no contexts.
+    return fromContexts.length > 0 ? { kind: "contexts", contexts: fromContexts } : { kind: "none" };
+  } catch (e) {
+    return { kind: "unreadable", branch, reason: firstLine((e as Error)?.message) || "unparseable protection payload" };
   }
+}
+
+/** W1-T2399: keeps a multi-line `gh` error to one legible sentence for an escalation body. */
+function firstLine(msg: string | undefined): string {
+  if (!msg) return "";
+  const line = msg.split("\n").find((l) => l.trim().length > 0) ?? "";
+  return line.trim().slice(0, 160);
+}
+
+export function ghRequiredStatusCheckContexts(owner: string, repo: string, branch = "main"): string[] | undefined {
+  // W1-T2399: a THIN WRAPPER over the classified read above, so every pre-existing caller keeps
+  // the exact `string[] | undefined` contract it was written against. `none` and `unreadable` both
+  // answer `undefined` here, which is precisely the collapse the classified form exists to avoid —
+  // a caller that needs to tell them apart calls `readRequiredStatusCheckContexts` directly.
+  const read = readRequiredStatusCheckContexts(owner, repo, branch);
+  return read.kind === "contexts" ? read.contexts : undefined;
 }
 
 // ── Real GitHub gateway (execs `gh`; runs outside the sandbox — TLS only there).
