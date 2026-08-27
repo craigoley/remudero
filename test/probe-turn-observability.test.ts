@@ -276,7 +276,9 @@ test("probeTurnBudget is still commands + 1 (report) + the named allowance, neve
   const prompt = containmentProbePrompt("tok123");
   const commands = probeCommandCount(prompt);
   assert.ok(commands > 0, "the real prompt must list at least one numbered command");
-  assert.equal(probeTurnBudget(prompt), commands + 1 + PROBE_TURN_ALLOWANCE);
+  // W1-T2344: PROBE_TURN_ALLOWANCE became a function of the SAME command count
+  // (capped at a stated ceiling) rather than a flat constant.
+  assert.equal(probeTurnBudget(prompt), commands + 1 + PROBE_TURN_ALLOWANCE(commands));
 });
 
 test("this task does not reintroduce a literal maxTurns at the probe spawn call site", () => {

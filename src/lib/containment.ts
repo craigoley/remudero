@@ -585,6 +585,32 @@ export function probeCommandCount(prompt: string): number {
 }
 
 /**
+ * BACKSTOP (test/bound-kind-declared.test.ts): the per-command allowance below is
+ * the PRIMARY mechanism that sizes the probe's slack; this ceiling does not fire
+ * under the probe's current, healthy 6-command shape (6 < 8) and exists only to
+ * catch UNBOUNDED growth if commands keep accruing — the same failure mode this
+ * task itself fixes, pointed the other way (Q1: "a scaling allowance also grows
+ * without bound as commands are added").
+ *
+ * THE STATED CEILING (W1-T2344, Q1) — PICKED, NOT MEASURED, the same discipline
+ * {@link EGRESS_TIMEOUT_SECONDS} admits to rather than dressing the number up as
+ * derived. Set two commands above the probe's real count today (6), so a SEVENTH
+ * and an EIGHTH command still move {@link PROBE_TURN_ALLOWANCE} the way W1-T2201
+ * already made them move the base — the property Q1 asks for — while a NINTH
+ * would need a deliberate bump of this constant rather than silent, unbounded
+ * growth every time an arm is added.
+ *
+ * WHAT IT COSTS: at the ceiling, a probe that is genuinely HANGING (a worker
+ * looping, a command that never returns a usable result) now spends up to 8
+ * turns of allowance before the fail-closed verdict engages — up from the old
+ * flat 3. Every turn added here is a turn spent before that safety fires, on
+ * every hanging probe, for the sake of the non-hanging ones (Q1's "argument
+ * against myself"). Raising this ceiling later must restate that cost, not just
+ * bump the number.
+ */
+export const PROBE_TURN_ALLOWANCE_CEILING = 8;
+
+/**
  * TURN ALLOWANCE beyond one Bash turn per command plus the closing REPORT turn —
  * turns a careful probe legitimately spends that are NOT worker misbehaviour
  * (W1-T2201 rationale, Q1). Named for what each one buys, rather than picked as a
@@ -601,15 +627,32 @@ export function probeCommandCount(prompt: string): number {
  *      string, so it cannot tell an attempt to CREATE the tripwire from an `ls`
  *      that only names it) — a probe that double-checks its own reading pays a
  *      turn re-deriving it from fragments, through no fault of its own.
- * ONE named turn per legitimate cost, so raising this later is a decision about a
- * SPECIFIC new cost, not a knob nudged until a flaky run happens to pass.
+ *
+ * W1-T2344 — WHY THIS IS NOW A FUNCTION OF COMMAND COUNT, NOT A FLAT CONSTANT.
+ * Reason 1 above is PER COMMAND, not per probe: any command whose result is only
+ * knowable by marker file can individually cost the ambiguous-result re-reading
+ * turn, and reasons 2 (a malformed retry) and 3 (tripwire rework) are each also
+ * more likely the more commands a probe runs, never less. A flat allowance of 3
+ * was a FULL command's worth of slack at the original 3-command spike and had
+ * diluted to HALF a turn per command by the time a sixth command landed — the
+ * derived base (see {@link probeTurnBudget}) kept climbing right on schedule, so
+ * the dilution never showed up as a number failing to move, only as the probe
+ * exhausting its turns on 29% of dispatches (measured 2026-08-26 from the
+ * `containment.probe` ledger, every exhausted row exactly one turn over cap).
+ * ONE named slack turn PER COMMAND, capped at {@link PROBE_TURN_ALLOWANCE_CEILING}
+ * so raising it later is a decision about a SPECIFIC new cost (or a deliberate
+ * ceiling bump), never a knob nudged until a flaky run happens to pass and never
+ * unbounded growth hidden behind a base that is already moving.
  */
-export const PROBE_TURN_ALLOWANCE = 3;
+export function PROBE_TURN_ALLOWANCE(commandCount: number): number {
+  return Math.min(commandCount, PROBE_TURN_ALLOWANCE_CEILING);
+}
 
 /**
  * The probe's turn cap — DERIVED, never a hand-picked literal: one turn per
  * command the prompt actually lists, plus one turn for the closing REPORT, plus
- * the named allowance above.
+ * the named allowance above (itself now a function of that SAME command count,
+ * W1-T2344 — see {@link PROBE_TURN_ALLOWANCE}'s own doc for why).
  *
  * W1-T2201 — WHY THIS EXISTS: the previous `maxTurns: 6` was a literal unchanged
  * since the original 3-command spike (`b697de79`, #18; `git log -S'maxTurns: 6'
@@ -623,7 +666,7 @@ export const PROBE_TURN_ALLOWANCE = 3;
  * moves this cap automatically instead of silently eating whatever slack is left.
  */
 export function probeTurnBudget(prompt: string): number {
-  return probeCommandCount(prompt) + 1 + PROBE_TURN_ALLOWANCE;
+  return probeCommandCount(prompt) + 1 + PROBE_TURN_ALLOWANCE(probeCommandCount(prompt));
 }
 
 /**
@@ -712,16 +755,33 @@ export const EGRESS_ALLOWED_REMOTE_IP_FILE = "egress-allowed-remote-ip.txt";
  * allowlisted control both terminate at the same address, one local
  * interception proxy answered both, and "the upstream was reached" is
  * unsupported. See {@link assessEgressContainment} for how this is used.
+ *
+ * W1-T2344 (Q2) — WHY EACH REQUEST ALSO `echo`s ITS OWN OUTCOME NOW. Everything
+ * above still redirects to `/dev/null` and writes markers/remote-ip files for
+ * `defaultExecutor`'s own `existsSync`-based evidence gathering (UNCHANGED) —
+ * but that left the WORKER'S OWN Bash-tool turn with no output at all to report,
+ * exactly the ambiguity {@link PROBE_TURN_ALLOWANCE}'s reason 1 names ("Both
+ * curls produced no output. Let me verify which marker files were created" — a
+ * real transcript, W1-T2344 rationale). Reading the SAME marker this command
+ * already wrote and echoing "reached"/"unreached" (plus the already-exposed
+ * remote_ip, never the response body) turns that into an ordinary command with
+ * ordinary output — the worker can quote it directly in its REPORT and never
+ * needs the extra turn to go check the marker files itself.
  */
 export function egressProbeCommand(allowedHost: string): string {
   const t = EGRESS_TIMEOUT_SECONDS;
   return (
     `curl -sS -m ${t} -o /dev/null -w '%{remote_ip}' https://${EGRESS_BLOCKED_HOST} ` +
     `> ${EGRESS_BLOCKED_REMOTE_IP_FILE} 2>/dev/null && touch ${EGRESS_BLOCKED_MARKER}; ` +
+    `if [ -f ${EGRESS_BLOCKED_MARKER} ]; then echo "blocked: reached ($(cat ${EGRESS_BLOCKED_REMOTE_IP_FILE}))"; ` +
+    `else echo "blocked: unreached"; fi; ` +
     `curl -sS -m ${t} -o /dev/null -w '%{remote_ip}' https://${allowedHost} ` +
-    `> ${EGRESS_ALLOWED_REMOTE_IP_FILE} 2>/dev/null && touch ${EGRESS_ALLOWED_MARKER}` +
+    `> ${EGRESS_ALLOWED_REMOTE_IP_FILE} 2>/dev/null && touch ${EGRESS_ALLOWED_MARKER}; ` +
+    `if [ -f ${EGRESS_ALLOWED_MARKER} ]; then echo "allowed: reached ($(cat ${EGRESS_ALLOWED_REMOTE_IP_FILE}))"; ` +
+    `else echo "allowed: unreached"; fi` +
     `   (a request to a NON-allowlisted host, then one to an allowlisted host; -w exposes only` +
-    ` the remote address already connected to, the body stays discarded)`
+    ` the remote address already connected to, the body stays discarded; each request` +
+    ` echoes its own reached/unreached outcome so the worker never needs marker-file archaeology)`
   );
 }
 

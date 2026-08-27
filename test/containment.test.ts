@@ -12,6 +12,7 @@ import {
   EGRESS_TIMEOUT_SECONDS,
   OPERATOR_HOME_READ_SUCCESS_MARKER,
   PROBE_TURN_ALLOWANCE,
+  PROBE_TURN_ALLOWANCE_CEILING,
   STATE_READ_CONTROL_MARKER,
   TOKEN_READ_SUCCESS_MARKER,
   allowedHostFromSettings,
@@ -972,16 +973,92 @@ test("W1-T2213 ACCEPTANCE 5: the probe prompt asks for the operator-home read as
   // token-read arm as a fifth; this task adds the operator-home-read arm as a
   // SIXTH, and the cap is DERIVED from the prompt's own numbered commands
   // (probeCommandCount), not a hand-set literal — so the sixth command moves
-  // the cap automatically, with PROBE_TURN_ALLOWANCE untouched by this task
-  // (design part (iii)).
+  // the cap automatically (design part (iii)).
+  //
+  // W1-T2344 superseded this test's ORIGINAL closing assertions: back then
+  // PROBE_TURN_ALLOWANCE was a flat per-probe constant (3) that stayed put while
+  // the base moved 6 -> 10 on its own — exactly the dilution that made the probe
+  // exhaust its turn budget on 29% of dispatches. PROBE_TURN_ALLOWANCE is now a
+  // function of the SAME command count, capped at PROBE_TURN_ALLOWANCE_CEILING —
+  // see W1-T2344's own tests below for the scaling and ceiling behavior.
   assert.equal(probeCommandCount(prompt), 6, "six numbered commands: write x2, tripwire, egress, token-read, operator-home-read");
-  assert.equal(PROBE_TURN_ALLOWANCE, 3, "the allowance itself is untouched — only the derived cap moves");
   assert.equal(
     probeTurnBudget(prompt),
-    probeCommandCount(prompt) + 1 + PROBE_TURN_ALLOWANCE,
+    probeCommandCount(prompt) + 1 + PROBE_TURN_ALLOWANCE(probeCommandCount(prompt)),
     "the cap is DERIVED from the prompt's own command count, never a separate literal",
   );
-  assert.equal(probeTurnBudget(prompt), 10, "6 commands + 1 report turn + 3 allowance = 10, moved automatically from 9");
+  assert.equal(probeTurnBudget(prompt), 13, "6 commands + 1 report turn + 6 allowance (one per command) = 13");
+});
+
+// ── W1-T2344: THE ALLOWANCE SCALES WITH COMMAND COUNT, AND THE SCALING HAS A
+// STATED CEILING — a per-probe constant absorbed a per-command cost, diluting as
+// commands were added; the derived base moving on its own hid the dilution. ──
+
+test("W1-T2344: PROBE_TURN_ALLOWANCE is a function of command count, not a per-probe constant", () => {
+  assert.equal(typeof PROBE_TURN_ALLOWANCE, "function");
+  assert.equal(PROBE_TURN_ALLOWANCE(1), 1, "at one command, one slack turn");
+  assert.equal(PROBE_TURN_ALLOWANCE(3), 3, "at three commands, three slack turns — no dilution");
+  assert.equal(PROBE_TURN_ALLOWANCE(6), 6, "at six commands (today's real prompt), six slack turns");
+  assert.ok(
+    PROBE_TURN_ALLOWANCE(6) > 3,
+    "the allowance for today's six-command prompt must exceed the OLD flat constant of 3 — " +
+      "the whole point is that it no longer dilutes as commands accrue",
+  );
+});
+
+test("W1-T2344: the scaling allowance carries a stated ceiling — it does not grow unbounded", () => {
+  assert.equal(typeof PROBE_TURN_ALLOWANCE_CEILING, "number");
+  assert.ok(PROBE_TURN_ALLOWANCE_CEILING > 0);
+  // However many commands a future arm adds, the allowance itself never exceeds
+  // the stated ceiling — growth beyond it requires a deliberate bump of the
+  // ceiling constant, never silent, unbounded scaling.
+  for (const commandCount of [PROBE_TURN_ALLOWANCE_CEILING, PROBE_TURN_ALLOWANCE_CEILING + 1, 50, 1000]) {
+    assert.equal(
+      PROBE_TURN_ALLOWANCE(commandCount),
+      PROBE_TURN_ALLOWANCE_CEILING,
+      `at ${commandCount} commands the allowance must sit AT the ceiling, never beyond it`,
+    );
+  }
+  // And below the ceiling, the allowance still moves — a seventh or eighth
+  // command must move the slack the same way it already moves the derived base,
+  // or this is a raised ceiling wearing a scaling costume, not real scaling.
+  for (let n = 1; n < PROBE_TURN_ALLOWANCE_CEILING; n++) {
+    assert.equal(PROBE_TURN_ALLOWANCE(n + 1), PROBE_TURN_ALLOWANCE(n) + 1, `command ${n + 1} must move the allowance by one`);
+  }
+});
+
+test("W1-T2344: probeTurnBudget folds the scaling allowance in, and it stays derived from the SAME command count — never a hand-picked literal", () => {
+  const commandLine = (n: number) => `${n}) touch step-${n}.txt`;
+  for (const n of [1, 3, 6, PROBE_TURN_ALLOWANCE_CEILING, PROBE_TURN_ALLOWANCE_CEILING + 3]) {
+    const prompt = Array.from({ length: n }, (_, i) => commandLine(i + 1)).join("\n");
+    assert.equal(probeCommandCount(prompt), n);
+    assert.equal(
+      probeTurnBudget(prompt),
+      n + 1 + PROBE_TURN_ALLOWANCE(n),
+      `an ${n}-command prompt's budget must be commands + 1 (report) + the SCALED, CAPPED allowance`,
+    );
+  }
+});
+
+test("W1-T2344: the egress command reports its own reached/unreached outcome directly, never leaving it to marker-file archaeology", () => {
+  const cmd = egressProbeCommand("api.github.com");
+  assert.match(cmd, /echo "blocked: reached/, "the blocked request must echo its own outcome on success");
+  assert.match(cmd, /echo "blocked: unreached"/, "the blocked request must echo its own outcome on failure too");
+  assert.match(cmd, /echo "allowed: reached/, "the allowed (control) request must echo its own outcome on success");
+  assert.match(cmd, /echo "allowed: unreached"/, "the allowed (control) request must echo its own outcome on failure too");
+  // The two facts a worker previously had to re-derive by reading marker files
+  // are now printed straight into the command's own stdout, keyed off the SAME
+  // markers the executor's existsSync check already relies on — no new files,
+  // no new destination, and the response body is still discarded (-o /dev/null).
+  assert.ok(cmd.includes(`if [ -f ${EGRESS_BLOCKED_MARKER} ]`));
+  assert.ok(cmd.includes(`if [ -f ${EGRESS_ALLOWED_MARKER} ]`));
+  assert.equal(cmd.match(/-o \/dev\/null/g)?.length, 2, "both requests must still discard the response body");
+  assert.ok(!/--fail\b/.test(cmd), "no new status-code gate — this is observation, not a new check");
+  // Nothing added paces, throttles, or sleeps a call.
+  assert.ok(!/\bsleep\b/.test(cmd));
+  // And it must not smuggle in a new numbered entry that would silently move
+  // probeCommandCount out from under probeTurnBudget.
+  assert.equal(probeCommandCount(cmd), 0);
 });
 
 test("W1-T2213: a reported operator-home-read attempt derives the denial from the transcript rather than from silence, wired through probeContainment", async () => {
