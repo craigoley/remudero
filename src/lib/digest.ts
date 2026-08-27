@@ -1,6 +1,8 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { readLedgerLines } from "./status.js";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
+import { gunzipSync } from "node:zlib";
+import { readLedgerLines, type LedgerFsDeps } from "./status.js";
+import { ledgerRotationEntries, rotationStampIso } from "./ledger-grep.js";
 import { notify, type NotifyChannel, type NotifyDeps } from "./notify.js";
 import { renderAlertsSummary, type AlertsPollSummary } from "./ops.js";
 import { renderIssuesSummary, type IssuesPollSummary } from "./issues-intake.js";
@@ -699,12 +701,151 @@ function renderBoardReviewSnapshot(b: BoardReviewDigestSnapshot): string {
   return parts.length ? parts.join(", ") : "(ran, no counts recorded)";
 }
 
+// ── W1-T2388: THE ROTATION UNION — `buildDigest` used to open ONE path (the live ledger),
+// which `rotateLedger` (ledger.ts, byte-driven at `LEDGER_ROTATION_CEILING_BYTES`) sheds
+// every non-decision-relevant row out of on every rotation. Measured: 7 of the 10 steps this
+// module sweeps (`board_review.ran`, `inbox.polled`, `issues.polled`, `learnings.injected`,
+// `ops.alerts_polled`, `review.downgrade_suppressed`, `sweep.repeat_escalated`) are absent from
+// `DECISION_RELEVANT_LEDGER_STEPS`, so their rows survive only in the archive their rotation
+// moved them to — and rotations are frequent enough (96.7% of gaps inside the default 1440-
+// minute digest cadence) that this is a routine loss, not a theoretical one. THE FIX ADDS NO
+// STEP TO `DECISION_RELEVANT_LEDGER_STEPS` (that set is for a REAL DECIDING reader — see its
+// own doc in ledger.ts — and the digest never decides anything, `escalate: false` below,
+// unconditionally): it teaches THIS READ PATH to union the live file with the rotations that
+// can still hold a row inside `[sinceIso, now]`, exactly the way `resolveLedgerUnion`
+// (ledger-grep.ts) unions for every other ledger reader in this repo, reusing its OWN
+// `ledgerRotationEntries`/`rotationStampIso` definitions rather than a second spelling of them.
+
+/**
+ * The rotation archives whose rows CAN fall inside `[sinceIso, now]` — never the ones that
+ * provably cannot. `rotationStampIso` (ledger-grep.ts) recovers a rotation's own instant from
+ * its FILENAME, and `rotateLedger` (ledger.ts) only ever archives lines ALREADY WRITTEN, so
+ * every row inside a rotation is at or before the instant in its own name (verified on a real
+ * corpus, ledger-grep.ts's own doc). An archive stamped strictly before `sinceIso` can therefore
+ * hold only rows also before `sinceIso` — PROVABLY IRRELEVANT — and is filtered out here before
+ * anything ever opens it (this task's own acceptance: "an archive stamped before the window is
+ * never opened"). A name whose stamp cannot be parsed is KEPT rather than skipped: this function
+ * cannot prove it irrelevant, and ledger-grep.ts's own rule for its `unclassified` case applies
+ * just as much here — "cannot decide, so read it" — never silently dropping a real corpus file.
+ *
+ * `ledgerRotationEntries` already returns its entries sorted ascending by path, which is
+ * chronological order for this filename's ISO-derived stamp — preserved here (filtering never
+ * reorders) so a caller folding these archives in gets original ledger order for free.
+ */
+function relevantRotations(names: string[], stateDir: string, sinceIso: string) {
+  return ledgerRotationEntries(names, stateDir).filter((e) => {
+    const stamp = rotationStampIso(basename(e.path));
+    return stamp === undefined || stamp >= sinceIso;
+  });
+}
+
+/** The minimal fs surface {@link collectDigestLedgerLines} needs for the archive half of the
+ *  union — deliberately injectable (mirrors {@link "./status.js".LedgerTailFsDeps} and
+ *  ledger-grep.ts's own `LedgerGrepFsDeps`) so a test can drive "archive present/relevant/
+ *  unreadable" without touching this host's real state dir. `ledgerFs`, separately, controls
+ *  the LIVE half via {@link readLedgerLines}'s own existing seam. */
+export interface DigestLedgerReadDeps {
+  readdirSync?: (dir: string) => string[];
+  readFileBuffer?: (path: string) => Buffer;
+  gunzipSync?: (buf: Buffer) => Buffer;
+  ledgerFs?: LedgerFsDeps;
+}
+
+/** What {@link collectDigestLedgerLines} read. */
+export interface DigestLedgerRead {
+  /** Archive rows (chronological, oldest first) followed by every live-file row. */
+  lines: LedgerLine[];
+  /**
+   * Every archive whose rotation stamp fell inside `[sinceIso, now]` but could not be opened — a
+   * corrupt `.gz`, an unreadable file. NON-EMPTY means this read is INCOMPLETE: a row inside the
+   * window may be missing from `lines`. This task's own acceptance refuses to let that degrade to
+   * a quiet board — see {@link renderIncompleteReadNotice}, which every caller of this function
+   * renders when `unreadArchives` is non-empty, exactly like {@link resolveLedgerUnion}
+   * (ledger-grep.ts, W1-T444) refuses on partial coverage rather than silently answering smaller.
+   */
+  unreadArchives: string[];
+}
+
+/**
+ * The digest's OWN bounded rotation union: the live ledger file plus every archive that CAN
+ * hold a row at/after `sinceIso` (see {@link relevantRotations}) — never the full corpus, and
+ * never the live file alone. Archives are read oldest-first so `lines` preserves the ledger's
+ * original chronological order end to end (archives, then the live file's own newer tail).
+ *
+ * A read-failure at any layer degrades to LESS coverage, reported via `unreadArchives`, never to
+ * a throw: an unreadable state dir behaves exactly like "no rotations exist" (today's answer),
+ * and a rotation that exists but will not open is named rather than silently dropped.
+ */
+export function collectDigestLedgerLines(
+  ledgerPath: string,
+  sinceIso: string,
+  deps: DigestLedgerReadDeps = {},
+): DigestLedgerRead {
+  const stateDir = dirname(ledgerPath);
+  const readdir = deps.readdirSync ?? readdirSync;
+  let names: string[];
+  try {
+    names = readdir(stateDir);
+  } catch {
+    // An unreadable/absent state dir degrades to the live file alone — exactly today's answer,
+    // never a throw (mirrors readLedgerUnionBounded's own discipline, status.ts).
+    names = [];
+  }
+  const rotations = relevantRotations(names, stateDir, sinceIso);
+
+  const readBuf = deps.readFileBuffer ?? ((p: string) => readFileSync(p));
+  const gunzip = deps.gunzipSync ?? gunzipSync;
+  const lines: LedgerLine[] = [];
+  const unreadArchives: string[] = [];
+  for (const entry of rotations) {
+    let text: string;
+    try {
+      const buf = readBuf(entry.path);
+      text = (entry.form === "gzip" ? gunzip(buf) : buf).toString("utf8");
+    } catch {
+      unreadArchives.push(entry.path);
+      continue;
+    }
+    for (const raw of text.split("\n")) {
+      const l = raw.trim();
+      if (!l) continue;
+      try {
+        lines.push(JSON.parse(l) as LedgerLine);
+      } catch {
+        // A torn line costs its own row, never the read — mirrors readLedgerLines' own
+        // per-line discipline (status.ts), just without a second console.error stream: the
+        // live half already logs torn lines, and duplicating that per archive would drown it.
+      }
+    }
+  }
+  // ledger-read-intent: live — the newest half of the union, read last so `lines` keeps
+  // chronological order (archives oldest-first above, the live file's own newer tail last).
+  lines.push(...readLedgerLines(ledgerPath, deps.ledgerFs));
+  return { lines, unreadArchives };
+}
+
+/**
+ * THE ACCEPTANCE, RENDERED: an incomplete read never degrades to a quiet board. One archive
+ * inside the window that would not open is named, not summarised into a bare count, so an
+ * operator reading the digest knows exactly which rotation to go check by hand.
+ */
+export function renderIncompleteReadNotice(unreadArchives: string[]): string {
+  return `INCOMPLETE READ: ${unreadArchives.length} archive(s) inside this window could not be opened, rows may be missing: ${unreadArchives.join(", ")}`;
+}
+
 /**
  * Build the digest text straight from a ledger file, as of `sinceIso`. `consoleBaseUrl`
  * threads through to {@link renderDigest} — see its doc for the W1-T144 deep-link contract.
+ *
+ * Reads the SAME bounded rotation union every other digest producer in this module reads
+ * ({@link collectDigestLedgerLines}) — a step whose rows already rotated out of the live file
+ * (7 of the 10 this module sweeps, see the W1-T2388 section header above) still renders, and a
+ * window with no relevant rotation costs exactly what reading the live file alone always cost.
  */
 export function buildDigest(ledgerPath: string, sinceIso: string, consoleBaseUrl?: string): string {
-  return renderDigest(summarize(readLedgerLines(ledgerPath), sinceIso), consoleBaseUrl);
+  const { lines, unreadArchives } = collectDigestLedgerLines(ledgerPath, sinceIso);
+  const text = renderDigest(summarize(lines, sinceIso), consoleBaseUrl);
+  return unreadArchives.length ? [text, renderIncompleteReadNotice(unreadArchives)].join("\n") : text;
 }
 
 /** Build the digest from `ledgerPath` and deliver it over the SAME notify channel as real-time pings. */
@@ -1101,13 +1242,17 @@ export function runDigestCadenceReport(opts: {
    *  {@link GenerativeDigestItem}'s doc. Defaults to none: a purely deterministic digest. */
   suggestions?: GenerativeDigestItem[];
 }): DigestCadenceRunResult {
-  const lines = readLedgerLines(opts.ledgerPath);
+  // W1-T2388: the SAME bounded rotation union buildDigest reads (collectDigestLedgerLines) —
+  // this producer is the daemon-loop rung that actually fires on a real fleet, so reading the
+  // live file alone here would leave the exact defect this task exists to remove.
+  const { lines, unreadArchives } = collectDigestLedgerLines(opts.ledgerPath, opts.sinceIso);
   const summary = summarize(lines, opts.sinceIso);
   const retros = citeRetrosInWindow(lines, opts.sinceIso);
   const deterministicItems = digestSummaryToDeterministicItems(summary, opts.sinceIso);
   const itemLines = renderDigestCadenceItems([...deterministicItems, ...(opts.suggestions ?? [])]);
   const retroLines = retros.map((r) => `retro cited: ${r.taskId}${r.prUrl ? ` — ${r.prUrl}` : ""}`);
-  const text = [renderDigest(summary, opts.consoleBaseUrl), ...retroLines, ...itemLines].join("\n");
+  const incompleteLines = unreadArchives.length ? [renderIncompleteReadNotice(unreadArchives)] : [];
+  const text = [renderDigest(summary, opts.consoleBaseUrl), ...retroLines, ...itemLines, ...incompleteLines].join("\n");
   const unavailable = opts.deps.channel.unavailable?.();
   notify(text, opts.deps);
   return { text, channelName: opts.deps.channelName ?? "imessage", delivered: unavailable === undefined };
