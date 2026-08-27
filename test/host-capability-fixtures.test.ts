@@ -286,6 +286,25 @@ const DECLARED: readonly Declared[] = [
       "divergences the host-parity baseline declares. Linux-only by construction; the file's own header says the " +
       "branch has never run anywhere.",
   },
+  {
+    kind: "platform-tool",
+    file: "fleet-heartbeat-supervisor-tick.test.ts",
+    key: "/usr/bin/date",
+    count: 2,
+    reason:
+      "FIXED_NOW_DATE stubs `date` to freeze the script's NOW, and reaches /usr/bin/date by ABSOLUTE " +
+      "path deliberately: the stub's own dir is first on PATH, so resolving through PATH would re-exec " +
+      "the stub forever. THE TWO SITES DEPEND ON THE HOST DIFFERENTLY and the distinction is the point. " +
+      "The passthrough (`exec /usr/bin/date \"$@\"`) needs only that the absolute path EXIST — measured " +
+      "present and GNU on a Linux runner, and this file's suite passes there. The delegating branch also " +
+      "needs GNU SYNTAX: it renders `-d \"@<epoch>\"`, which is a GNU spelling, so on a BSD/macOS date " +
+      "that argument is not the epoch flag and the branch cannot behave as written. NOT COPIED FROM THE " +
+      "SIBLING ABOVE: that entry's tests assert a FOREIGN date's behaviour, while these use the host's " +
+      "real date to render one fixed instant, so a host difference does not flip an assertion here, it " +
+      "removes the freeze the test depends on. THE PINNED BRANCH GENUINELY FIRES: scripts/fleet-heartbeat.sh:169 " +
+      "is `NOW_ISO=\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"`, the exact argv the delegating guard matches, so " +
+      "this is not a stub for a path nothing takes.",
+  },
   // ── git against the LIVE checkout ───────────────────────────────────────────────────────────
   {
     kind: "live-tree-git",

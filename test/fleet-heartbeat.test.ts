@@ -352,9 +352,16 @@ test("MUTANT: keying liveness on ONE daemon step instead of the prefix is caught
 });
 
 test("MUTANT: taking the LAST daemon line instead of the max is caught", () => {
+  // W1-T2349's deploy-supervisor probe mirrors this exact grep/sed/sort/tail idiom for the
+  // `deploy.` prefix, so the bare sed/sort/tail fragment alone is no longer unique in the script —
+  // the find string below anchors on the preceding `daemon\.` grep clause to stay unique to THIS
+  // block, byte-for-byte as the committed script has it.
   const beat = runBeat({
     ledger: MIXED_LEDGER,
-    mutate: ["| sed -n 's/^{\"ts\":\"\\([^\"]*\\)\".*/\\1/p' | sort | tail -n 1", "| sed -n 's/^{\"ts\":\"\\([^\"]*\\)\".*/\\1/p' | tail -n 1"],
+    mutate: [
+      `grep '"step":"daemon\\.' "$LEDGER" 2>/dev/null \\\n    | sed -n 's/^{"ts":"\\([^"]*\\)".*/\\1/p' | sort | tail -n 1`,
+      `grep '"step":"daemon\\.' "$LEDGER" 2>/dev/null \\\n    | sed -n 's/^{"ts":"\\([^"]*\\)".*/\\1/p' | tail -n 1`,
+    ],
   });
   assert.equal(
     field(beat.published, "daemon_last_ts"),

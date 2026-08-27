@@ -235,6 +235,78 @@ else
   DAEMON_VERDICT="STALE — last poll $(human_age "$DAEMON_AGE_S") ago"
 fi
 
+# ── probe: deploy-supervisor liveness, the max ts over the `deploy.` prefix (W1-T2349) ───────────
+# THE GAP THIS CLOSES. The daemon probe above answers "is the daemon alive"; nothing until now
+# answered "is the thing that ADVANCES the daemon's code alive" — the deploy-supervisor went
+# 7h26m overdue on the mini with nothing off-host reporting it, because every other beat field
+# (daemon liveness, the install verdict, the restart budget, three shas) can read perfectly
+# healthy while the deploy cycle itself has stopped ticking.
+#
+# WHY THIS MIRRORS THE `daemon.` PROBE ABOVE, STEP FOR STEP. `runDeployCycle`
+# (src/lib/deployer.ts) has no single ledger step that fires unconditionally either —
+# `deploy.skip` on a same-head no-op, `deploy.not_idle` / `deploy.idle_ceiling_forced` while the
+# idle gate defers, `deploy.abort_dirty_tree`, `deploy.pulled`, `deploy.dry_run`,
+# `deploy.kickstart` -> `deploy.ok` / `deploy.unhealthy_rollback` on a real cycle — but RE-READING
+# THAT FUNCTION TOP TO BOTTOM (2026-08-27), every `return` in it is preceded by a `deps.log("deploy…")`
+# call on the same branch, so every tick logs at least one `deploy.`-prefixed line before the next.
+# That includes a DEFERRED tick: `deploy.not_idle` fires every time the idle gate holds, so the
+# 30-minute `DEPLOY_IDLE_DEFER_CEILING_MS` (src/lib/deployer.ts) bounds how long a deploy can be
+# HELD, never how long the ledger can go quiet, and does not enter the threshold below. The MAX ts
+# over the prefix is therefore the same always-advancing signal the `daemon.` probe already reads,
+# over the supervisor's own ledger writes rather than the daemon's.
+#
+# THE FIELD NAMES MIRROR `daemon_*` ONE-FOR-ONE, WITH ONE DELIBERATE DIFFERENCE. Same
+# `sort | tail -n 1` idiom, same `epoch_of`/`human_age` reuse, same never-touch-a-new-file
+# discipline. But an ABSENT reading here does NOT reuse the `daemon_last_age_s=unknown` shape:
+# it follows `restart_count`/`image_build_sha` instead and OMITS `supervisor_last_age_s` from the
+# payload entirely rather than writing the string "unknown" into a numeric-shaped field — the
+# same absent-never-reassuring law, applied consistently.
+#
+# A HOST WITH NO `deploy.` LINE EVER IS NOT A DEFECT IN THIS PROBE. The container host (W1-T483)
+# advances its tree from `deploy/entrypoint.sh` under docker, with no launchd and no
+# deploy-supervisor unit, so its ledger may legitimately carry zero `deploy.` lines forever. This
+# probe cannot and does not decide "never installed" vs "went quiet" — it publishes the same
+# `supervisor_verdict=unknown` either way, with the reason in `supervisor_source`, and leaves the
+# never-present-is-silent judgment to the watcher, which sees every beat over time and a branch
+# list that already knows which hosts run a deploy-supervisor at all.
+SUPERVISOR_LAST_TS=""
+SUPERVISOR_LAST_STEP=""
+SUPERVISOR_SOURCE="ledger"
+if [ ! -r "$LEDGER" ]; then
+  SUPERVISOR_SOURCE="unreadable — no ledger at ${LEDGER}"
+else
+  SUPERVISOR_LAST_TS="$(grep '"step":"deploy\.' "$LEDGER" 2>/dev/null \
+    | sed -n 's/^{"ts":"\([^"]*\)".*/\1/p' | sort | tail -n 1)"
+  if [ -n "$SUPERVISOR_LAST_TS" ]; then
+    SUPERVISOR_LAST_STEP="$(grep -F "\"ts\":\"${SUPERVISOR_LAST_TS}\"" "$LEDGER" 2>/dev/null \
+      | grep -o '"step":"deploy\.[^"]*"' | tail -n 1 | cut -d'"' -f4)"
+  else
+    SUPERVISOR_SOURCE="no deploy.* line in the ledger — this host may never run a deploy-supervisor cycle (the container host advances via deploy/entrypoint.sh instead, W1-T483)"
+  fi
+fi
+
+SUPERVISOR_LAST_EPOCH="$(epoch_of "$SUPERVISOR_LAST_TS")"
+SUPERVISOR_AGE_S=""
+if [ -n "$SUPERVISOR_LAST_EPOCH" ]; then SUPERVISOR_AGE_S="$((NOW_EPOCH - SUPERVISOR_LAST_EPOCH))"; fi
+
+# THE THRESHOLD IS DERIVED AND GENEROUS (design note v). The installed supervisor unit's
+# `StartInterval` is `DEFAULT_SUPERVISOR_INTERVAL_S = 120` (src/lib/launchd.ts) — every tick runs
+# ONE `rmd deploy-run`, i.e. one `runDeployCycle`, i.e. at least one `deploy.*` log line, whether
+# or not that cycle actually deployed anything. This carries a GENEROUS CONSTANT rather than
+# shelling `rmd status` or parsing the installed plist — the beat may not shell an `rmd` verb (see
+# this script's own header) and a plist path is host-specific and absent entirely on the container
+# host. 1200s is 10x the 120s interval, the SAME multiple `DAEMON_STALE_AFTER_S` already uses
+# against `DEFAULT_POLL_INTERVAL_MS` (600s / 60s) above, and against the 7h26m (26760s) failure
+# that filed this task, a 1200s bound still catches it more than 20x over.
+SUPERVISOR_STALE_AFTER_S=1200
+if [ -z "$SUPERVISOR_AGE_S" ]; then
+  SUPERVISOR_VERDICT="unknown"
+elif [ "$SUPERVISOR_AGE_S" -le "$SUPERVISOR_STALE_AFTER_S" ]; then
+  SUPERVISOR_VERDICT="live"
+else
+  SUPERVISOR_VERDICT="STALE — last deploy cycle $(human_age "$SUPERVISOR_AGE_S") ago"
+fi
+
 # ── probe: cheap diagnostics ──────────────────────────────────────────────────────────────────
 # `df -Pk` is the POSIX-portable form and reports 1K blocks on both macOS and Linux, so this one
 # expression is correct on the mini and on any future host. `readDiskFreeBytes`
@@ -369,6 +441,10 @@ daemon_last_age_s=${DAEMON_AGE_S:-unknown}
 daemon_boot_ts=${DAEMON_BOOT_TS:-none}
 daemon_boot_age_s=${BOOT_AGE_S:-unknown}
 daemon_boot_head_sha=${DAEMON_BOOT_SHA:-none}
+supervisor_verdict=${SUPERVISOR_VERDICT}
+supervisor_last_ts=${SUPERVISOR_LAST_TS:-none}
+supervisor_last_step=${SUPERVISOR_LAST_STEP:-none}
+supervisor_source=${SUPERVISOR_SOURCE}
 rmd_verdict=${RMD_VERDICT}
 tsx_present=${TSX_PRESENT}
 node_modules_entries=${NODE_MODULES_ENTRIES}
@@ -385,6 +461,16 @@ restart_source=${RESTART_SOURCE}
 image_build_sha_source=${IMAGE_BUILD_SHA_SOURCE}
 EOF
 )"
+
+# Same absent-never-zero shape as RESTART_COUNT/IMAGE_BUILD_SHA below: `supervisor_source` (in the
+# heredoc above) is always present as the diagnosis, and `supervisor_last_age_s` is appended ONLY
+# when a `deploy.` line was actually found and its ts parsed — so
+# `field(payload, "supervisor_last_age_s") === undefined` is the honest signal that nothing was
+# read, never a literal "unknown" sitting in a field a reader might coerce to a number.
+if [ -n "$SUPERVISOR_AGE_S" ]; then
+  PAYLOAD="${PAYLOAD}
+supervisor_last_age_s=${SUPERVISOR_AGE_S}"
+fi
 
 # APPENDED, NOT INTERPOLATED WITH A SENTINEL — see the probe's own note above. `restart_source` is
 # always present because it is a diagnosis and can never be misread as headroom; the two NUMBERS
