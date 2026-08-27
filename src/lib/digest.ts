@@ -439,6 +439,18 @@ export function deriveKnowledgeBudgetCap(
   };
 }
 
+/** The `board_review.ran` fields {@link DigestSummary.boardReview} carries, read straight off the row
+ *  the daemon tick writes (daemon.ts's `log("board_review.ran", …)`). Every field is optional: this
+ *  reads a row written by another module, so a row from an older or newer writer degrades to a
+ *  partial line rather than a throw. */
+export interface BoardReviewDigestSnapshot {
+  oldestOpenAgeHours?: number;
+  redCount?: number;
+  unhandledEscalationCount?: number;
+  itemsConsidered?: number;
+  proposals?: number;
+}
+
 export interface DigestSummary {
   sinceIso: string;
   merged: string[];
@@ -476,6 +488,27 @@ export interface DigestSummary {
    * that simply predates this feature (design note (iv)). See {@link aggregateCacheHitTotals}.
    */
   cacheHit?: CacheHitTotals;
+  /**
+   * The LATEST `board_review.ran` snapshot inside the window (the board-review rung, daemon.ts) —
+   * what the last board read SAW: the oldest open item's age, the red count, the unhandled
+   * escalation count, how many items it considered and how many proposals it drafted.
+   *
+   * `.ran` ALONE, of the rung's three steps, and the choice is the point. `.fired` is 1:1 with
+   * `.ran` and carries only the trigger reason, so sweeping both double-counts one event and adds
+   * nothing a reader can act on. `.skipped` fires when a REAL depth trigger is held off by the
+   * cadence — that is the cadence WORKING, and five "would have run, but only 92 minutes since the
+   * last one" lines a day is exactly the correct-behaviour noise a digest must not carry.
+   *
+   * LATEST WINS, not additive — the same rule as `alerts`/`issues`/`inbox` above and for the same
+   * reason: these are snapshot counts of a board's current state, never an event tally.
+   *
+   * SOFT-COMPOSED by {@link renderDigest} exactly like `inbox`: a window with no `board_review.ran`
+   * omits the line ENTIRELY rather than printing a "(no run this window)" placeholder, so a digest
+   * over a window predating the rung renders byte-identical to before this field existed. A QUIET
+   * BOARD THEREFORE SHOWS NOTHING HERE — the rung only runs when a depth trigger fires, so silence
+   * is the honest reading rather than an absence dressed up as a measurement.
+   */
+  boardReview?: BoardReviewDigestSnapshot;
   /**
    * W1-T178 (verdict stability): count of `review.downgrade_suppressed` ledger
    * lines inside the window — a semantic-lane downgrade suppressed because the
@@ -519,6 +552,17 @@ export function summarize(lines: LedgerLine[], sinceIso: string): DigestSummary 
     }
     if (l.step === "inbox.polled" && l.inbox && typeof l.inbox === "object") {
       summary.inbox = l.inbox as InboxPollSummary;
+    }
+    // The rung's own row, latest-wins like the three above. Reading the ROW rather than calling the
+    // rung's module keeps this file a pure ledger reader: no new import, no new seam, no write path.
+    if (l.step === "board_review.ran") {
+      summary.boardReview = {
+        oldestOpenAgeHours: typeof l.oldestOpenAgeHours === "number" ? l.oldestOpenAgeHours : undefined,
+        redCount: typeof l.redCount === "number" ? l.redCount : undefined,
+        unhandledEscalationCount: typeof l.unhandledEscalationCount === "number" ? l.unhandledEscalationCount : undefined,
+        itemsConsidered: typeof l.itemsConsidered === "number" ? l.itemsConsidered : undefined,
+        proposals: typeof l.proposals === "number" ? l.proposals : undefined,
+      };
     }
   }
   summary.cacheHit = aggregateCacheHitTotals(since);
@@ -565,6 +609,9 @@ export function renderDigest(s: DigestSummary, consoleBaseUrl?: string): string 
     // absent entirely (not a "(no poll this window)" placeholder) line otherwise, see the
     // `inbox` field's doc on DigestSummary.
     ...(s.inbox ? [`inbox: ${renderInboxPollSummary(s.inbox)}`] : []),
+    // Soft-composed exactly like `inbox` above — absent, never a placeholder, when the window
+    // carries no `board_review.ran`. See the `boardReview` field's doc on DigestSummary.
+    ...(s.boardReview ? [`board review: ${renderBoardReviewSnapshot(s.boardReview)}`] : []),
     // W1-T929: soft-composed — present only when the window carries usable cache-token data
     // (see the `cacheHit` field's doc on DigestSummary), two lines (per-run, per-class), never
     // a "(no data)" placeholder otherwise.
@@ -573,6 +620,18 @@ export function renderDigest(s: DigestSummary, consoleBaseUrl?: string): string 
     `notional cost: $${s.costUsd.toFixed(2)}`,
   ];
   return lines.join("\n");
+}
+
+/** One line for {@link DigestSummary.boardReview} — every field optional, so a row missing one omits
+ *  that clause rather than printing `undefined`. Mirrors `renderAlertsSummary`'s shape. */
+function renderBoardReviewSnapshot(b: BoardReviewDigestSnapshot): string {
+  const parts: string[] = [];
+  if (typeof b.oldestOpenAgeHours === "number") parts.push(`oldest open ${b.oldestOpenAgeHours.toFixed(1)}h`);
+  if (typeof b.redCount === "number") parts.push(`${b.redCount} red`);
+  if (typeof b.unhandledEscalationCount === "number") parts.push(`${b.unhandledEscalationCount} unhandled escalation(s)`);
+  if (typeof b.itemsConsidered === "number") parts.push(`${b.itemsConsidered} item(s) considered`);
+  if (typeof b.proposals === "number") parts.push(`${b.proposals} proposal(s)`);
+  return parts.length ? parts.join(", ") : "(ran, no counts recorded)";
 }
 
 /**
