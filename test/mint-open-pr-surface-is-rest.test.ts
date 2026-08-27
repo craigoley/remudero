@@ -258,6 +258,17 @@ function fakeGh(rows: unknown[]): { bin: string; cleanup: () => void } {
   return { bin: dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
+/** A fake `gh` on PATH whose `api` arm answers with RAW (not necessarily valid JSON) text — used
+ *  to drive {@link fetchOpenPrRows}'s `JSON.parse` catch arm deterministically, the same way
+ *  {@link fakeGh} drives its happy path. */
+function fakeGhRaw(rawOutput: string): { bin: string; cleanup: () => void } {
+  const dir = mkdtempSync(join(tmpdir(), "t2324-fakegh-raw-"));
+  const script = join(dir, "gh");
+  writeFileSync(script, `#!/bin/sh\nif [ "$1" = "api" ]; then\n  cat <<'RAW'\n${rawOutput}\nRAW\n  exit 0\nfi\nexit 1\n`);
+  chmodSync(script, 0o755);
+  return { bin: dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+}
+
 function runCheckWithOpenPrs(cwd: string, base: string, headRef: string, ghBin: string) {
   return spawnSync(
     process.execPath,
@@ -344,6 +355,61 @@ test("W1-T2324 (Q3, open-vs-open): an UNREACHABLE gh SKIPS this half rather than
     assert.doesNotMatch(r.stderr, /ALREADY CLAIMED/);
   } finally {
     rmSync(brokenGhDir, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T2324 (Q3, open-vs-open): unparsable JSON from `gh api` SKIPS this half rather than failing the whole gate", () => {
+  // Distinct from the "unreachable gh" case above: `gh` itself runs fine (exit 0) but the body it
+  // prints back is not valid JSON — drives fetchOpenPrRows' JSON.parse catch arm specifically,
+  // rather than its result.error/status arm.
+  const dir = planRepo({});
+  const gh = fakeGhRaw("not json at all {{{");
+  try {
+    writeFileSync(join(dir, "plan", "tasks.d", "W1-T955-new.yaml"), '- id: W1-T955\n  title: "t"\n');
+    const r = runCheckWithOpenPrs(dir, "main", "this-branch", gh.bin);
+    assert.equal(r.status, 0, `unparsable JSON must not fail the gate closed: ${r.stderr}`);
+    assert.match(r.stdout, /open-PR collision check SKIPPED/);
+    assert.doesNotMatch(r.stderr, /ALREADY CLAIMED/);
+  } finally {
+    gh.cleanup();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T2324 (Q3, open-vs-open): owner/repo AND head-ref are both derived from git when neither flag is passed", () => {
+  // No --owner/--repo/--head-ref this time — exercises resolveOwnerRepoFromGit (parsing the
+  // `origin` remote's url) and currentBranch (reading the checked-out branch) for real, the
+  // production path CI itself takes when GITHUB_HEAD_REF is unset (a non-pull_request trigger).
+  const dir = planRepo({});
+  execFileSync("git", ["remote", "add", "origin", "https://github.com/o/r.git"], { cwd: dir, env: GIT_ENV });
+  const gh = fakeGh([
+    { number: 56, html_url: "https://github.com/o/r/pull/56", head: { ref: "other-branch" }, title: "feat: also files W1-T956", body: "" },
+  ]);
+  try {
+    writeFileSync(join(dir, "plan", "tasks.d", "W1-T956-new.yaml"), '- id: W1-T956\n  title: "t"\n');
+    const env: NodeJS.ProcessEnv = { ...GIT_ENV, PATH: `${gh.bin}:${process.env.PATH}` };
+    delete env.GITHUB_HEAD_REF; // must not leak from the real workflow invoking this very test
+    const r = spawnSync(
+      process.execPath,
+      [
+        SCRIPT,
+        "--cwd",
+        dir,
+        "--base",
+        "main",
+        "--dir",
+        "src",
+        "--baseline",
+        join(REPO_ROOT, "scripts", "task-id-existence-baseline.json"),
+      ],
+      { cwd: dir, encoding: "utf8", env },
+    );
+    assert.equal(r.status, 1, `expected a refusal, got ${r.status}: ${r.stderr}`);
+    assert.match(r.stderr, /ALREADY CLAIMED by another OPEN PR/);
+    assert.match(r.stderr, /W1-T956/, "the git-derived owner/repo/head-ref path still finds the collision");
+  } finally {
+    gh.cleanup();
     rmSync(dir, { recursive: true, force: true });
   }
 });
