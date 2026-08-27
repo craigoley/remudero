@@ -1,0 +1,135 @@
+- id: W1-T2426
+  title: "THE LIGHT PASS ADMITS ONE PR TO post-review BY OLDEST ACTIVITY, AND THE ACT OF REVIEWING IS ITSELF THE ACTIVITY THAT RESETS THE KEY — `oldestActivityFirst` ranks on `lastActivityAt`, which `run-task.ts` populates as `pr.updatedAt`, and a posted verdict moves `updatedAt` to now on every PR measured, so the PR just reviewed becomes the NEWEST candidate and sorts last; W1-T1218's own shipped ordering at the sibling site is immune because it keys on `createdAt`, which nothing can bump"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 20.00
+  files: [src/lib/sweep.ts, test/review-admission-key-is-not-self-defeating.test.ts]
+  origin: "operator-brief#review-admission-key-self-defeating-2026-08-27"
+  plan_refs: ["W1-T1218", "W1-T526", "W1-T528", "W1-T2419"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE ID. Eight surfaces, anchored `W1-T2426([^0-9]|$)` with a `[0-9]` class and never `\d`, each
+    printed anchored beside unanchored. Surface 1 reads 1 of 539 reservation refs. The open set was
+    enumerated FIRST and every control drawn from it; where a band is merged-only and the open set
+    cannot populate it, that is said rather than reported as a bare zero.
+
+    ── Q1. THE STOP CONDITION DID NOT FIRE, AND THE READ IS WHY ──────────────────────────────────
+
+    W1-T1218 OWNS AN ABSENT SORT. Its title: "`runSweep` builds `pendingReviews` by push in
+    PR-iteration order, NEVER SORTS IT, then takes `slice(0, reviewLanes)` and defers the rest."
+    THE DEFECT THERE IS THE ABSENCE OF AN ORDERING.
+
+    ⚠ AND ITS FIX HAS SHIPPED, WHICH IS THE FACT THAT DECIDES THIS. `src/lib/sweep.ts` at
+    `origin/main` carries the comment "W1-T1218: ORDER BEFORE THE CUT" and the call
+    `orderPendingReviews(pendingReviews)` ahead of `slice(0, reviewLanes)`. That function keys on
+    `createdAt` and says so in its own doc: "THE KEY IS `createdAt`, WITH `prNumber` AS BOTH
+    TIEBREAK AND SUBSTITUTE." A CREATION TIME CANNOT BE BUMPED BY A REVIEW. W1-T1218's site is
+    IMMUNE to the defect below, by the choice of key its own remedy made.
+
+    THIS IS A DIFFERENT SITE, A DIFFERENT TASK AND THE OPPOSITE DEFECT. `selectReviewAdmission`
+    (W1-T526, shipped in a separate commit) gates the LIGHT pass's one-per-pass admission and
+    delegates to `oldestActivityFirst`, which ranks on `lastActivityAt`. It is not an absent sort;
+    it is a PRESENT sort whose key the gated action mutates. Amending W1-T1218 would attach a
+    mutable-key finding to a shard about an absent sort whose shipped fix chose an immutable one,
+    and would misfile both. A NEW ID IS THEREFORE CORRECT AND THE STOP CONDITION IS NOT MET.
+
+    ⚠ ONE CORRECTION TO THE BRIEF, MADE RATHER THAN INHERITED. W1-T1218's merged commit is #2525,
+    not #2529, and that commit is a PLAN FILING — one file, the shard itself. The build landed
+    separately. Nothing here rests on the number, but a reader chasing #2529 would find the wrong
+    change.
+
+    ── THE MECHANISM, MEASURED AND NOT ASSUMED ───────────────────────────────────────────────────
+
+    THE KEY IS `updatedAt`, BY SYMBOL AND IN THREE PLACES. `oldestActivityFirst` reads
+    `candidate.lastActivityAt`. `run-task.ts` populates it twice as `lastActivityAt: pr.updatedAt`
+    and `lastActivityAt: raw.updatedAt`. `sweep.ts`'s own prose calls it "the PR's `updatedAt`" and
+    names the producer: "a field the real gateway DOES populate (`run-task.ts`'s
+    `lastActivityAt: pr.updatedAt`)".
+
+    AND A POSTED VERDICT MOVES THAT FIELD, MEASURED ON EIGHT PRs. For every PR carrying a
+    `review.posted` row since 18:00 on 2026-08-27, GitHub's `updated_at` sits AT or JUST AFTER the
+    post: PR 3157 +4s, PR 3162 +5s, PR 3161 +8s, PR 3159 +8s, PR 3152 +19s, PR 3158 +38s, PR 3153
+    +90s. One outlier, PR 3140 at +1132s, is later operator activity on the same PR and is the same
+    mechanism from a different actor. SO THE ORDERING IS SELF-DEFEATING FOR THE PR IT JUST ACTED ON:
+    reviewing a PR makes it the newest-activity candidate, and an oldest-first queue sorts it last.
+
+    THAT IS ONLY A DEFECT WHEN THE VERDICT NEEDS REDOING, AND THAT CASE IS REAL. On a passing
+    verdict, deprioritising the PR is correct. On a FAILING one the disposition row itself says the
+    PR should be re-reviewed — "checks green, remudero-review failed but the PR has seen activity
+    since that verdict was posted" — and the same activity that qualifies it also sends it to the
+    back of the queue.
+
+    ⚠ Q2. THE POPULATION, MEASURED BEFORE ANYTHING IS PROPOSED, AND IT SPLITS ────────────────────
+
+    Read over the THREE-FORM LEDGER UNION — 0 `.gz`, 38 rotated, 1 live, 477,591 rows, `ok: true` —
+    and enumerated from `src/`, never from the ledger's own key set.
+
+    19,958 `sweep.disposed` rows carry `disposition: post-review`; 770 of them are `acted: false`.
+    Grouping consecutive losses per (pr, head) and breaking a run on any `acted: true`, there are
+    39 runs of THREE OR MORE, worst 88 and median 7. So this is not one PR's bad night.
+
+    ⚠ AND THE STAND-DOWN REASON SPLITS THAT 770 INTO MECHANISMS THAT MUST NOT BE POOLED. 314 rows
+    carry `deferred to full sweep (light pass)` — W1-T526's admission loss, 72 runs of which 17
+    reach three or more, worst 63 (PR 2226), median 5. 58 carry "review budget exhausted this pass
+    (3 lanes in use)", which is the OTHER site and not this defect. 53 carry a duplicate review key.
+    AND 289 CARRY NO REASON AT ALL.
+
+    ⚠ THE PROMPTING INCIDENT IS IN THAT LAST GROUP, AND THE ATTRIBUTION IT WOULD NEED IS NOT IN THE
+    LEDGER. All nine of PR 3152's stand-downs record `stand_down_reason` absent. The brief's
+    hypothesis — that W1-T526's admission is what stood 3152 down — CANNOT BE CONFIRMED FROM THE
+    ROW, and is left unproven here rather than asserted. What IS confirmed is the key's mutability,
+    which is measured above and is independent of which PR it bit. The no-reason population is 289
+    rows over 18 PRs, worst 98 on PR 3063, and it spans the same window as the reasoned one
+    (2026-08-15 to 2026-08-27), so it is a coexisting path and not a field that stopped being
+    written. NAMING THAT GAP IS PART OF THIS TASK'S EVIDENCE; CLOSING IT IS NOT THIS TASK.
+
+    CONTROL IN BOTH DIRECTIONS, AND BOTH FIRE. Direction 1: the query must find PR 3152's run, and
+    it does, at nine consecutive losses on head `3a3463c8`. Direction 2: it must NOT sweep up a PR
+    that legitimately had nothing to post. Scoping to `disposition: post-review` EXCLUDES 63,943 of
+    the 64,713 `acted != true` rows — 35,303 `wait`, 13,344 `blocked-fixable`, 11,956
+    `blocked-ambiguous`, 2,473 `mergeable`, 480 `stale` — leaving 770. A PR with nothing to post
+    never receives this disposition, so the exclusion is by construction and the control is not
+    vacuous.
+
+    ── Q3. THE CAP IS KEPT, AND THE REMEDY IS THE ORDERING ONLY ──────────────────────────────────
+
+    ⚠ NOTHING HERE RAISES THE ONE-PER-PASS BOUND, ADDS A SECOND LANE, OR PACES ANYTHING. `rmd review`
+    is a spawning verb and the bound is what makes the light pass affordable; W1-T526's intent is
+    correct and is not reopened. W1-T1066 forbids a timer, and a "wait N passes before re-admitting"
+    rule would be one wearing a different name.
+
+    WHAT CHANGES IS THE KEY THE COMPARATOR READS, AND THE PRECEDENT IS IN THIS FILE ALREADY.
+    `orderPendingReviews` chose an immutable key and named the trade in its own doc: "Creation time
+    is not the same as waiting time ... Head PUSH time would be the better waiting key and
+    `OpenPrView` does not carry it." The same reasoning applies here and reaches the same place: a
+    key the gated action cannot move. `oldestActivityFirst` is CONSUMED BY TWO CALLERS — W1-T528's
+    `update-branch` selection deliberately reuses it — so any change must either preserve that
+    contract or be made at the `selectReviewAdmission` call site alone, and a build must say which.
+
+    ── WHAT IS OWNED ELSEWHERE, CHECKED BY READING ───────────────────────────────────────────────
+
+    W1-T2424 owns the population literal that made PR 3152's body wrong and produced the failing
+    verdict in the first place. W1-T2419 owns the same surface RE-POSTING an unchanged verdict as a
+    new comment. W1-T1213 owns a REFUSED attempt pinning a head. THIS OWNS ONLY THE ADMISSION ORDER,
+    and specifically only that its key is bumped by the action it gates.
+
+  acceptance:
+    - claim: "the admission comparator ranks on a key that a posted verdict cannot move"
+      proof: "unit test: test/review-admission-key-is-not-self-defeating.test.ts"
+    - claim: "a PR whose review just failed is not sorted behind PRs that have waited less time than it has"
+      proof: "unit test: test/review-admission-key-is-not-self-defeating.test.ts"
+    - claim: "posting a verdict on one PR does not change the relative order of the remaining candidates"
+      proof: "unit test: test/review-admission-key-is-not-self-defeating.test.ts"
+    - claim: "the one-per-pass admission bound is unchanged and no second lane is introduced"
+      proof: "unit test: test/review-admission-key-is-not-self-defeating.test.ts"
+    - claim: "nothing added waits, sleeps or paces between admissions"
+      proof: "unit test: test/review-admission-key-is-not-self-defeating.test.ts"
+    - claim: "the sibling caller that reuses the comparator keeps the ordering contract it was given"
+      proof: "unit test: test/review-admission-key-is-not-self-defeating.test.ts"
+    - claim: "a stand-down on this disposition records which mechanism stood it down"
+      proof: "unit test: test/review-admission-key-is-not-self-defeating.test.ts"
