@@ -1,0 +1,162 @@
+- id: W1-T2375
+  title: "The Rule 21 follow-up escape gives amended criteria a second home without taking the first away — `followUpCarriesCriteria` requires the follow-up to be FILED in the same PR and nothing requires the parent's dispatchability to be addressed, so both stay dispatchable and the fleet builds both"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  origin: "oper#rule-21-follow-up-leaves-parent-dispatchable-2026-08-27"
+  files: [src/lib/task-linter.ts, test/rule-21-follow-up-couples-parent-disposition.test.ts]
+  rationale: |
+    Filed by reading and by measuring only, from a scratch worktree PROVEN equal to origin/main by sha
+    (47176fb56a7d1fd4bafe82e13894448901f76c79), clone shallow-checked `false`. Source read from that
+    tree; every count below re-derived here rather than carried, and one figure the brief supplied is
+    corrected because re-deriving it changed what it proves.
+
+    (1) THE MECHANISM, BY SYMBOL. `criteriaAdded` (`src/lib/task-linter.ts`) blocks a PR that adds a
+    criterion to a MERGED task. `followUpCarriesCriteria` is its one escape: the block lifts when the
+    same PR files a new task whose own acceptance carries the added criteria — its doc says why, "so
+    the criteria have a home that will actually be dispatched". The call site (`lintPlanCommand`,
+    `src/run-task.ts`) supplies `followUpTasks` as the OTHER tasks newly introduced by this changed
+    set, and passes `followUpFiled` into `postMergeAmendmentViolations`.
+
+    THE ESCAPE REQUIRES A NEW HOME AND NEVER ASKS ABOUT THE OLD ONE. Nothing in the predicate, the
+    call site or the §5C pass looks at the parent's dispatchability. The criteria get a second home
+    and keep the first, and both are dispatchable.
+
+    (2) THE COST, MEASURED, AND IT IS ONE INSTANCE RATHER THAN TWO. `#3010` filed the follow-up at
+    2026-08-26T22:30:50Z. Nothing addressed the parent until `#3066` at 2026-08-27T11:08:24Z — A GAP
+    OF 12h37m34s. Inside that window the fleet dispatched BOTH: `#3039` on head
+    `run-W1-T2327-1787795780406`, created 02:22:24Z, and `#3043` on head
+    `run-W1-T2340-1787801842342`, created 03:46:03Z. THE PARENT AND THE FOLLOW-UP, BUILT IN PARALLEL.
+    Both are open and both are red on `ci`, `ci-gate` and `coverage-ratchet` as of this filing.
+
+    (3) THE OTHER CITED INSTANCE IS A DIFFERENT DEFECT, AND SAYING SO IS LOAD-BEARING RATHER THAN
+    PEDANTIC. The brief offers W1-T2274/W1-T2275 as a second occurrence: the retirement merged at
+    2026-08-25T15:32:41Z (`#2840`) and the duplicate `#2923` merged 18h59m23s later. Re-derived at the
+    ruling's own commit, `57d47446` set `retirement: retired` AND LEFT `status: queued`. So `#2840`
+    DID dispose of its parent in the ruling PR — the disposition was simply inert, because
+    `isDispatchEligible` (`src/lib/drain.ts`) refuses on `t.status === "blocked"` and `drain.ts`
+    references `retirement` ZERO times, against a control of one `status === "blocked"` branch in the
+    same function. That inertness was its own defect and was closed separately by `#2969`.
+
+    THAT CHANGES THE ARGUMENT RATHER THAN WEAKENING IT. A coupling that merely required a
+    `retirement:` field would have PASSED `#2840` and prevented nothing. The measured population for
+    the shape THIS task owns is ONE, not two — and the correction is why the proposal below is keyed
+    on DISPATCHABILITY rather than on the field.
+
+    (4) THE FIELD IS BARELY USED, AND BOTH USES ARE POST-HOC. Exactly 2 of 646 shards carry a
+    `retirement:` field — W1-T2275 and W1-T2327 — against a control of 646 of 646 carrying `origin:`.
+    Both were added AFTER a duplicate had already been built, never at filing time.
+
+    (5) AND THE REPO ALREADY SOLVED THIS ONCE, WITHOUT THE FIELD. `dec38d91` (`#1293`) split W1-T314
+    into three successors and disposed of the parent in the SAME commit by setting `status: blocked`,
+    reasoning in its own note that blocked "is the equivalent this repo already established for a
+    retirement record" and citing W1-T229 and W1-T270/W1-T269 as precedent. So the practice exists,
+    predates the field, and was simply never required.
+  design: |
+    (i) Q1 — THE COUPLING IS ONE PREDICATE IN THE LINTER, NOT A NEW GATE, BECAUSE THE §5C PASS ALREADY
+    HOLDS EVERYTHING IT NEEDS. `lintPlanCommand` already resolves, for the same task, in the same
+    branch: the base-ref shard (`oldTask`), the head shard, the merged projection (`proj.merged`), and
+    the set of tasks newly introduced by this changed set (`followUpTasks`). A parent's head-side
+    `status` is therefore already in hand at the moment `followUpFiled` is computed. The addition is a
+    second condition on the SAME escape, not a second traversal.
+
+    (ii) AND IT MUST BE DISPATCHABILITY, NOT RETIREMENT — rationale (3) is the proof. A rule reading
+    "the parent must carry `retirement:`" would have passed `#2840`, whose parent carried exactly that
+    and was dispatched anyway. THE PROPERTY THAT MATTERS IS THE ONE THE DISPATCHER READS: after this
+    PR, is the parent still selectable? `isDispatchEligible` answers from `status` alone, so the check
+    is about `status`, and a `retirement:` field alongside it is provenance rather than mechanism.
+
+    (iii) Q2 — THE PARTIAL CASE, AND THERE IS NO CLEAN AUTOMATIC ANSWER, SO THE RULE MUST ASK.
+    `followUpCarriesCriteria` was tightened from `some` to `every` by `#3017`, so a follow-up now
+    carries ALL criteria the PR added. It does not follow that the parent is retire-able: the parent's
+    OTHER criteria — the ones already merged and not amended — may stand untouched, and a parent whose
+    remaining work is real must not be blocked to satisfy a linter.
+
+    SO THE RULE IS AN EXPLICIT DISPOSITION, NOT A RETIREMENT. The PR must state which case it is, and
+    the linter must be unable to guess: either the parent is fully superseded and its `status` moves
+    to `blocked` in this same PR, or it is PARTLY superseded and the PR says so in the parent's own
+    prose, naming what remains. A filer who does neither has left the question open, and that is the
+    only case this check refuses. It does not decide which disposition is right; it refuses silence.
+
+    (iv) THE SEVERITY QUESTION, ANSWERED AGAINST THE HOUSE POSTURE RATHER THAN ASSUMED. The
+    surrounding arm is `criteriaAdded`, the ONE blocking arm in `postMergeAmendmentViolations`; the
+    W1-T2254 widening beside it reports at `warn` because W1-T2248 ruled a merged field must stay
+    correctable. This check sits on the BLOCKING arm's escape hatch rather than beside the reporters,
+    so a build should treat it as a condition ON THAT ESCAPE — the escape is not available until the
+    disposition is stated — rather than as a fourth independent violation. That keeps the blocking
+    surface exactly one predicate wide, which is the property W1-T2248's ruling protects.
+
+    (v) Q3 — THE RETROFIT, AND IT REFUSES NOTHING HISTORICAL. Over 835 plan commits on main, 161 add a
+    criterion to a pre-existing plan file, and 6 of those also file a new shard in the same commit —
+    the textual shape. ZERO of the 6 add a `retirement:` field. But the textual proxy OVER-COUNTS,
+    because it does not ask whether the amended parent was merged: the linter's own retrofit, recorded
+    in `followUpCarriesCriteria`'s comment, measured 4 with a new task in the same PR and exactly ONE
+    where the escape has ever actually fired — `13a73d57`, which is instance (2) above.
+
+    SO THE HONEST FIGURE IS 1 OF 1, and the gate refuses nothing that has ever merged. `dec38d91` is
+    the near-miss that proves the rule is satisfiable: it already did the thing, by hand, in 2026-08.
+
+    (vi) THE CONTROL ON THE ZERO, STATED BECAUSE A ZERO HERE WOULD OTHERWISE BE UNSUPPORTED. The
+    retrofit's "0 of 6 retired the parent" is only meaningful if the query could see a retirement at
+    all. It can: the same extractor finds the `retirement:` additions in `#2840` and `#3066`, neither
+    of which is in the 6 because neither amends criteria. A zero from a query that cannot see its
+    target is not a measurement, and this one is not that.
+  acceptance:
+    - claim: "a PR amending a merged task's criteria under the follow-up escape must state the parent's disposition"
+      proof: "unit test: test/rule-21-follow-up-couples-parent-disposition.test.ts"
+    - claim: "a parent moved out of dispatch in the same PR satisfies the requirement"
+      proof: "unit test: test/rule-21-follow-up-couples-parent-disposition.test.ts"
+    - claim: "a parent left dispatchable with no stated disposition is refused, and the message names both tasks"
+      proof: "unit test: test/rule-21-follow-up-couples-parent-disposition.test.ts"
+    - claim: "a partly superseded parent may keep its dispatchability when the PR states what remains"
+      proof: "unit test: test/rule-21-follow-up-couples-parent-disposition.test.ts"
+    - claim: "the check reads the property the dispatcher reads, never the provenance field beside it"
+      proof: "unit test: test/rule-21-follow-up-couples-parent-disposition.test.ts"
+    - claim: "an amendment with no follow-up filed is unaffected, and still blocks exactly as before"
+      proof: "unit test: test/rule-21-follow-up-couples-parent-disposition.test.ts"
+    - claim: "the blocking surface stays one predicate wide"
+      proof: "unit test: test/rule-21-follow-up-couples-parent-disposition.test.ts"
+    - claim: "every merged PR matching the historical shape still passes"
+      proof: "unit test: test/rule-21-follow-up-couples-parent-disposition.test.ts"
+  status: queued
+  attempts: 0
+  plan_refs: ["W1-T180", "W1-T1268", "W1-T2248", "W1-T2254", "W1-T2326"]
+  note: |
+    WHAT MUST NOT CHANGE.
+
+    RULE 21 STAYS. A merged task's CLAIMS are frozen, and `criteriaAdded` remains the ONLY blocking
+    arm in `postMergeAmendmentViolations`. This task adds a condition to that arm's existing escape
+    hatch; it must not add a second blocking arm, and it must not touch the report-only checks beside
+    it, whose `warn` severity W1-T2248's ruling protects.
+
+    THE RETIREMENT RULING STANDS AND IS NOT REOPENED. The `retirement:` field, value `retired`, reason
+    in prose, never deletion. Nothing here proposes a new vocabulary, and nothing here proposes
+    changing what a retirement means.
+
+    NOTHING AUTO-RETIRES. A retirement is an operator act. This check REFUSES SILENCE; it never writes
+    a disposition, never infers one, and never picks between the full and partial cases. A build that
+    sets a parent's `status` on the filer's behalf has answered a different question and is wrong.
+
+    THE DUPLICATE-DISPATCH CLASS IS OWNED ELSEWHERE. W1-T1268 owns duplicate dispatch as a class. This
+    shard owns only the MISSING COUPLING AT FILING TIME — the moment a PR gives criteria a second home
+    without addressing the first. A build that widens into dispatch-side dedupe is in W1-T1268's
+    scope, not this one's.
+
+    NOTHING PACES, THROTTLES OR SLEEPS. The check is a pure predicate over objects the §5C pass has
+    already resolved: no git read, no network call, no timer, no retry.
+
+    THE FIGURES ARE QUERIES, NOT NUMBERS TO CARRY. 835, 161, 6, 2-of-646 and the 12h37m gap are stamped
+    with the sha and date they were read at and will move. Re-run them rather than quoting them; no
+    acceptance criterion asserts any of them, deliberately.
+
+    RULE 19 BAND. `risk: high` is set UP FRONT for the SPAN of the declared `files:` — one module and
+    its test — and carries no claim about blast radius, which is one predicate on one existing arm.
+
+    THE FORWARD REFERENCE IS DELIBERATE. The declared test file does not exist yet; it is named in
+    `files:` so the pure-path proofs resolve under the forward-reference carve-out and read
+    `not_yet_built` until the build lands. Every proof is pure-path `unit test:`, so this shard
+    carries no `grep:` pattern at all.
