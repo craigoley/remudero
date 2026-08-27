@@ -1,0 +1,130 @@
+- id: W1-T2424
+  title: "A TEST THAT PINS A REPO-WIDE POPULATION BY LITERAL MAKES EVERY ADDITION TO THAT POPULATION AN OUT-OF-SCOPE EDIT — W1-T1271 filed this at n=1 on a word-form count; these are n=2 and n=3, measured on two different tests and two different PRs, and they are the ONLY two of six sharp instances that survive the deliberate-baseline test: `claims-harness-third-state` merely DESCRIBES its count and `producer-completeness` guards only one direction of it, while four siblings pin a literal on purpose and must not be touched"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 20.00
+  files: [test/claims-harness-third-state.test.ts, test/producer-completeness.test.ts]
+  origin: "operator-brief#population-literal-out-of-scope-2026-08-27"
+  plan_refs: ["W1-T1271", "W1-T2232", "W1-T2334", "W1-T920"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE ID. Eight surfaces, anchored `W1-T2424([^0-9]|$)` with a `[0-9]` class and never `\d`, each
+    printed anchored beside unanchored. Surface 1 reads 1 of 537 reservation refs. The open set was
+    enumerated FIRST and every control drawn from it; where a band is merged-only and the open set
+    cannot populate it, that is said rather than reported as a bare zero.
+
+    ⚠ W1-T1271 ALREADY OWNS THIS CLASS AT n=1, AND THIS IS FILED AS ITS SECOND AND THIRD INSTANCES
+    RATHER THAN AS A DISCOVERY. Its title is this defect in one sentence: the probe prompt's step
+    count is pinned as a literal in a file no prompt-changing shard declares, so every future step
+    breaks a suite outside the changing task's `files:`. It is `risk: medium` and its `files:` is
+    ONE stem, `test/deny-floor-probe.test.ts`, so it cannot reach either instance below. Its own
+    analysis is the frame this reuses: "the literal is a proxy for that agreement, and the proxy
+    breaks on every future step while the property it stands for does not."
+
+    ── Q1. THE CLASSIFIER, STATED BEFORE THE COUNT, AND THE COUNT IS A LOWER BOUND ───────────────
+
+    A TEST ASSERTION QUALIFIES WHEN BOTH HOLD. (a) Its SUBJECT is a REPO-WIDE POPULATION: an
+    imported constant taken whole, or a scan of the working tree, or the output of a run over a
+    COMMITTED artifact — never a fixture the test itself constructs. (b) Its EXPECTED value is a
+    NUMERIC LITERAL, bare or embedded in a matched pattern.
+
+    IT IS A LOWER BOUND, AND ONE INSTANCE PROVES IT. W1-T1271's own case asserts `/THREE commands/`
+    — a count spelled as a WORD, which no numeric classifier can see. A census keyed on digits
+    therefore cannot find the very instance that named the class, and any total below is a floor.
+
+    ⚠ CONTROL IN BOTH DIRECTIONS, AND THE SECOND ONE FAILED FIRST, WHICH IS WHY THE CLASSIFIER IS
+    NARROW. Direction 1: the query must find both briefed instances, and it does —
+    `producer-completeness.test.ts:175` and `claims-harness-third-state.test.ts:203`. Direction 2:
+    it must NOT sweep up a count over the test's OWN FIXTURE. A first pass keyed on "the file
+    imports from `src/`" matched 770 of 781 test files and 5,991 assertions, and a second keyed on
+    "the subject names an imported symbol" still returned 75 — of which nearly all are
+    `parseAcceptanceBlock(WRAPPED).length` and `headlessFitnessViolations(t).length`, where the
+    FUNCTION is imported and the DATA is a fixture. That is exactly the false positive direction 2
+    forbids. The discriminator that survives is the POPULATION, not the import: the subject must be
+    the constant or scan ITSELF, with no locally-built argument.
+
+    THE SHARP CENSUS IS SIX, AND EVERY ONE IS NAMED SO THE FLOOR IS AUDITABLE.
+      1. `commit-message.test.ts:328`               CONVENTIONAL_RULE_COVERAGE.length == 10
+      2. `drain-continue-on-blocked-ci.test.ts:80`  NON_HALTING_VERDICTS.size == 4
+      3. `replay.test.ts:37`                        SEEDED_GOLDENS.length == 3
+      4. `rule-efficacy.test.ts:150`                RULE_SIGNATURES.length == 3
+      5. `producer-completeness.test.ts:175`        Object.keys(KNOWN_UNWIRED).length == 4
+      6. `claims-harness-third-state.test.ts:203`   matches OK -- all 14 claims hold
+
+    ⚠ Q2. THE STOP CONDITION WAS APPLIED PER INSTANCE, AND FOUR OF SIX STOP HERE ────────────────
+
+    FOUR ARE DELIBERATE BASELINES AND MUST NOT BE TOUCHED. Each says so in its own text, which is
+    how the judgement was made rather than by taste. (1) its test title pins agreement with an
+    EXTERNAL package: "matching @commitlint/config-conventional's error-level rule count" — deriving
+    it from the same source it is checking would disarm it entirely. (2) its own comment states the
+    purpose outright: "the size assertion is what stops the set being emptied wholesale by a later
+    change". (3) enforces a design decision to stay small: "start minimal — 3 goldens, not a full
+    curated corpus". (4) pins agreement with its own shard's rationale: "starts with the three rules
+    named in the rationale". FOR ALL FOUR THE LITERAL IS THE POINT, exactly as it is for
+    `catch-erasure`, `bound-kind` and `negative-reachability`, and nothing here proposes changing any
+    of them.
+
+    TWO SURVIVE, AND THEY SURVIVE FOR DIFFERENT REASONS.
+
+    INSTANCE n=2 DESCRIBES AND DOES NOT GUARD. `claims-harness-third-state.test.ts` pins the count
+    TWICE: in its test title ("13 of its 14 claims") and in
+    `assert.match(output, /OK -- all 14 claim\(s\) hold/)`. The property under test is that the CLI's
+    summary line is well formed end to end; the 14 is incidental to that and guards nothing. W1-T2334
+    added the fifteenth claim and its `files:` names `plan/claims.yaml` but NOT this test file, so no
+    in-scope edit could satisfy it.
+
+    INSTANCE n=3 GUARDS, BUT ONLY IN ONE DIRECTION.
+    `assert.equal(Object.keys(KNOWN_UNWIRED).length, 4, "the four fields still unwired")` does real
+    work: it stops a fifth exemption being added silently. But an EQUALITY also refuses the good
+    direction. #3115 wired `supersessionVerdict` and had to change the literal from 5 to 4 — and
+    W1-T920's `files:` is `[src/lib/sweep.ts, src/run-task.ts, src/lib/policy.ts, test/sweep.test.ts]`,
+    naming NEITHER `src/lib/producer-completeness.ts` NOR its test, so wiring one field forced edits
+    to two files that task did not declare. NOTE the same file's OTHER assertions are already the
+    derived form and need no maintenance at all: `r.unwired`, `r.staleAllowlist`, `r.unknownAllowlist`
+    and `r.unresolvableSpreads` all assert against an empty array.
+
+    ── Q3. WHAT DERIVING COSTS, ANSWERED PER INSTANCE RATHER THAN AS A RULE ──────────────────────
+
+    A DERIVED COUNT CANNOT CATCH AN UNINTENDED CHANGE TO THE POPULATION, WHICH IS WHAT A BASELINE
+    EXISTS FOR. So the question is never "derive or pin" in general; it is whether THIS count guards
+    something or merely describes it.
+
+    FOR n=2 THE COUNT DESCRIBES, SO DERIVING COSTS NOTHING. The assertion's subject is the summary
+    line's SHAPE. Asserting the shape while reading the number from the same `plan/claims.yaml` the
+    harness read loses no coverage, because no coverage rested on the number.
+
+    FOR n=3 THE COUNT GUARDS, SO IT MUST NOT BE DERIVED — IT MUST BECOME ONE-SIDED. The whole value
+    is refusing GROWTH. A ceiling keeps that and frees the good direction, which is precisely the
+    shape the ratchets this shard refuses to touch already use: `bareCatchViolations()` fires only
+    when actual exceeds baseline. Making this assertion a ceiling costs the ability to notice a
+    SHRINK, and a shrink is the outcome the repo wants.
+
+    ⚠ NO GATE, AND NO REPO-WIDE RULE ABOUT LITERALS. Such a rule would break the four deliberate
+    baselines above and the three named ratchets. The remedy is per-test and small: two assertions
+    in two files, both already in `files:`.
+
+    ── WHAT IS OWNED ELSEWHERE, CHECKED BY READING RATHER THAN ASSUMED ───────────────────────────
+
+    W1-T1271 owns instance n=1 and is `risk: medium` over one stem, unable to reach these two.
+    W1-T2232 owns a different mechanism entirely: tests that read SOURCE AS TEXT and compare with
+    `indexOf`, where the hazard is the reading, not a pinned total. Neither covers a population
+    literal in a second and third file.
+
+  acceptance:
+    - claim: "the claims harness asserts the summary line's shape without pinning how many claims the committed file happens to carry"
+      proof: "unit test: test/claims-harness-third-state.test.ts"
+    - claim: "adding a claim to the committed claims file no longer requires an edit to the harness test"
+      proof: "unit test: test/claims-harness-third-state.test.ts"
+    - claim: "the unwired allowlist assertion refuses growth and permits shrinkage"
+      proof: "unit test: test/producer-completeness.test.ts"
+    - claim: "wiring a field so the allowlist shrinks leaves the assertion passing untouched"
+      proof: "unit test: test/producer-completeness.test.ts"
+    - claim: "the derived assertions in the producer completeness suite are left exactly as they are"
+      proof: "unit test: test/producer-completeness.test.ts"
+    - claim: "no baseline is raised and no deliberate literal elsewhere is changed by this work"
+      proof: "unit test: test/producer-completeness.test.ts"
