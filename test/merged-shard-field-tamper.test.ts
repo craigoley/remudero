@@ -212,10 +212,20 @@ test("ACCEPTANCE 6 (iv): no delta against the base -> EMPTY (identical task, ide
 });
 
 test("ACCEPTANCE 6 (v): followUpFiled: true -> EMPTY for the acceptance-added case (the pre-existing escape hatch keeps working)", () => {
-  const t = current({ acceptance: [...BASE_ACCEPTANCE, { claim: "a genuinely new claim", proof: "unit test: test/widget.test.ts::new" }] });
+  // W1-T2375: the escape now has TWO conditions — a follow-up AND a stated parent disposition.
+  // The fixture states it (status: blocked); the ASSERTION is unchanged, because the escape still
+  // works. Adding the disposition is what a real PR must now do, not a weakening of the test.
+  const t = current({ status: "blocked", acceptance: [...BASE_ACCEPTANCE, { claim: "a genuinely new claim", proof: "unit test: test/widget.test.ts::new" }] });
   const res = lintTask(t, { postMergeAmendment: ctx({ followUpFiled: true }) });
   assert.equal(res.ok, true);
   assert.ok(!res.violations.some((v) => v.check === "post-merge-amendment"));
+});
+
+test("ACCEPTANCE 6 (v, W1-T2375): followUpFiled: true with the parent left DISPATCHABLE now refuses — the second condition", () => {
+  const t = current({ acceptance: [...BASE_ACCEPTANCE, { claim: "a genuinely new claim", proof: "unit test: test/widget.test.ts::new" }] });
+  const res = lintTask(t, { postMergeAmendment: ctx({ followUpFiled: true }) });
+  assert.equal(res.ok, false, "a follow-up alone no longer buys the escape");
+  assert.ok(res.violations.some((v) => v.check === "post-merge-amendment" && v.severity === "block"));
 });
 
 // The original blocking control still fires exactly as before this task.

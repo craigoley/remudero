@@ -1407,7 +1407,9 @@ test("W1-T180 ACCEPTANCE 1: reword/reorder-only changes (SAME set, different ord
 
 test("W1-T180 ACCEPTANCE 2: the SAME PR filing a follow-up task carrying the amended criteria PASSES — the check gates the orphaning, not the amending", () => {
   const addedCriterion = { claim: "monotonic under darkness", proof: "unit test: test/status.test.ts::monotonic under darkness" };
-  const amended = task({ id: "W1-T155", files: ["src/lib/status.ts"], acceptance: [...W1_T155_BASE_CRITERIA, addedCriterion] });
+  // W1-T2375: the escape now also requires the parent's disposition to be stated. The parent is
+  // fully superseded here, so it moves out of dispatch; the assertions below are unchanged.
+  const amended = task({ id: "W1-T155", status: "blocked", files: ["src/lib/status.ts"], acceptance: [...W1_T155_BASE_CRITERIA, addedCriterion] });
   const followUp = task({ id: "W1-T179", files: ["src/lib/status.ts"], acceptance: [addedCriterion] });
   const changedSet = [amended, followUp];
   for (const t of changedSet) {
@@ -1547,7 +1549,8 @@ test("W1-T1098 ACCEPTANCE 4: the check stays silent when the derived status cann
 
 test("W1-T1098 ACCEPTANCE 5: the follow-up escape hatch keeps working for a real (claim-level) amendment under claim-only keying", () => {
   const addedCriterion = { claim: "a brand new promise carried by the follow-up", proof: "unit test: test/status.test.ts::carried" };
-  const amended = task({ id: "W1-T155", files: ["src/lib/status.ts"], acceptance: [...W1_T155_BASE_CRITERIA, addedCriterion] });
+  // W1-T2375: parent disposition stated (fully superseded) — assertions below unchanged.
+  const amended = task({ id: "W1-T155", status: "blocked", files: ["src/lib/status.ts"], acceptance: [...W1_T155_BASE_CRITERIA, addedCriterion] });
   // The follow-up task carries the SAME claim with a DIFFERENT proof wording —
   // claim-only keying means the escape hatch still recognizes it as carried.
   const followUp = task({

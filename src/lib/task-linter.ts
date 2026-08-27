@@ -1596,6 +1596,43 @@ export function followUpCarriesCriteria(added: AcceptanceCriterion[], candidateT
   return added.every((c) => carried.has(criterionKey(c)));
 }
 
+/** The phrase a PR uses to state that an amended parent is only PARTLY superseded — the
+ *  follow-up carries the amended criteria, but the parent's OTHER, unamended criteria still
+ *  stand, so it must remain dispatchable. Deliberately a MARKER rather than free prose: the
+ *  check must be unable to guess, and an author who has thought about the question can say so
+ *  in one line while an author who has not cannot do it by accident. Named in the refusal
+ *  message so it is discoverable from the failure rather than only from this file. */
+export const PARENT_SURVIVES_MARKER = "PARENT SURVIVES:";
+
+/**
+ * Whether this PR has STATED the amended parent's disposition (W1-T2375). Two ways, and the
+ * check accepts either without preferring one:
+ *
+ *   - FULLY SUPERSEDED — the parent is out of dispatch, `status: "blocked"`. This is the
+ *     property {@link "./drain.js".isDispatchEligible} itself reads (`t.status === "blocked"`),
+ *     and `drain.ts` references `retirement` ZERO times, so a `retirement:` field alone leaves
+ *     the parent selectable. KEYED ON DISPATCHABILITY, NOT ON THE FIELD, deliberately: the
+ *     2026-08-25 instance set `retirement: retired`, left `status: queued`, and was dispatched
+ *     anyway — a field-keyed rule would have passed it and prevented nothing.
+ *   - PARTLY SUPERSEDED — the parent stays dispatchable and its own prose carries
+ *     {@link PARENT_SURVIVES_MARKER}, naming what remains.
+ *
+ * READS THE HEAD STATE, NOT THE DELTA. The question is "after this PR, is the disposition
+ * answered", not "did this PR answer it" — a parent already blocked at the base ref cannot
+ * orphan anything, and a second amendment to a parent that already states its survival should
+ * not have to restate it. Both arms are therefore evaluated on `task`, with `baseTask` unused
+ * here; it stays in the signature because a future arm that genuinely needs the delta should
+ * not have to re-thread it.
+ *
+ * NEVER WRITES OR INFERS A DISPOSITION. A retirement is an operator act. This predicate only
+ * reports whether the question has been answered; picking the answer is not its job.
+ */
+export function parentDispositionStated(task: Task, _baseTask?: Task): boolean {
+  if (task.status === "blocked") return true;
+  const prose = `${task.note ?? ""}\n${task.rationale ?? ""}`;
+  return prose.includes(PARENT_SURVIVES_MARKER);
+}
+
 /**
  * Context the CALLER resolves via I/O and injects through {@link LintOpts} —
  * see the module comment above this section for why it cannot be fetched here.
@@ -1619,6 +1656,11 @@ export interface PostMergeAmendmentContext {
    *  whole changed set by the caller, since a single task's lint has no
    *  visibility into its siblings. */
   followUpFiled: boolean;
+  /** The ids of the tasks that satisfied {@link followUpFiled} — resolved by the same call site
+   *  that already builds `followUpTasks` to compute it (run-task.ts's `lintPlanCommand`), so
+   *  carrying them needs no new resolution, exactly as W1-T2254's `baseTask` widening did.
+   *  Used only to NAME the follow-up in the refusal below; the decision never depends on it. */
+  followUpTaskIds?: string[];
   /** This task's WHOLE shard as it existed at the PR's base ref — not just its
    *  `acceptance:` (see {@link baseAcceptance}). W1-T2254: the call site
    *  (run-task.ts's `lintPlanCommand`) already resolves this base-ref task to
@@ -1762,17 +1804,36 @@ export function postMergeAmendmentViolations(task: Task, opts: LintOpts = {}): L
   const currentCriteria = task.acceptance ?? [];
   const violations: LintViolation[] = [];
   const added = criteriaAdded(ctx.baseAcceptance, currentCriteria);
-  if (added.length > 0 && !ctx.followUpFiled) {
+  // W1-T2375: the follow-up escape now has TWO conditions, not one. Filing a follow-up gives the
+  // amended criteria a second home; it does not take the first away, and nothing here used to ask
+  // about the parent. MEASURED ONCE: a follow-up filed 2026-08-26T22:30:50Z left its parent
+  // dispatchable for 12h37m34s, inside which the fleet dispatched BOTH in parallel.
+  //
+  // A CONDITION ON THE ESCAPE, NOT A FOURTH VIOLATION (shard design iv). The escape is simply not
+  // available until the disposition is stated, so the BLOCKING surface stays exactly one predicate
+  // wide — the property W1-T2248's ruling protects, and the reason this is not a new gate.
+  const dispositionStated = parentDispositionStated(task, ctx.baseTask);
+  const escapeAvailable = ctx.followUpFiled && dispositionStated;
+  if (added.length > 0 && !escapeAvailable) {
+    const followUps = ctx.followUpTaskIds ?? [];
+    const namedFollowUps = followUps.length > 0 ? followUps.join(", ") : "the follow-up filed here";
     violations.push(
       ...added.map((c) => ({
         check: "post-merge-amendment" as const,
         severity: "block" as const,
-        message:
-          `task ${task.id} is already MERGED, but this PR adds/changes acceptance criterion ` +
-          `("${(c.claim ?? "").slice(0, 80)}") with no follow-up task carrying it filed in the same PR — ` +
-          "Standing rule 21: MERGED is terminal (an amendment does not re-queue the task), the drain " +
-          "skips a merged id outright, and the retro sweep skips a closed one, so this criterion would " +
-          "orphan silently; file a follow-up task carrying it in this SAME PR",
+        message: ctx.followUpFiled
+          ? `task ${task.id} is already MERGED, and this PR adds/changes acceptance criterion ` +
+            `("${(c.claim ?? "").slice(0, 80)}") with a follow-up (${namedFollowUps}) carrying it — but ` +
+            `${task.id}'s own disposition is unstated, so BOTH stay dispatchable and the fleet can build ` +
+            `both. Standing rule 21's follow-up escape gives the criteria a second home; it does not take ` +
+            `the first away. State which case this is: move ${task.id} to status: blocked if it is fully ` +
+            `superseded, or say what remains in its own note with "${PARENT_SURVIVES_MARKER}" if it is ` +
+            "partly superseded. Nothing here retires anything for you — a retirement is an operator act."
+          : `task ${task.id} is already MERGED, but this PR adds/changes acceptance criterion ` +
+            `("${(c.claim ?? "").slice(0, 80)}") with no follow-up task carrying it filed in the same PR — ` +
+            "Standing rule 21: MERGED is terminal (an amendment does not re-queue the task), the drain " +
+            "skips a merged id outright, and the retro sweep skips a closed one, so this criterion would " +
+            "orphan silently; file a follow-up task carrying it in this SAME PR",
       })),
     );
   }
