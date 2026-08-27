@@ -451,6 +451,16 @@ export interface BoardReviewDigestSnapshot {
   proposals?: number;
 }
 
+/** One `sweep.repeat_escalated` trip {@link DigestSummary.repeatEscalations} carries, read straight
+ *  off the row the sweep writes (sweep.ts's W1-T2345 counter). Every field optional: this reads a row
+ *  written by another module, so a row from an older or newer writer degrades to a partial line
+ *  rather than a throw. */
+export interface RepeatEscalationDigestEntry {
+  prNumber?: number;
+  disposition?: string;
+  streak?: number;
+}
+
 export interface DigestSummary {
   sinceIso: string;
   merged: string[];
@@ -510,6 +520,27 @@ export interface DigestSummary {
    */
   boardReview?: BoardReviewDigestSnapshot;
   /**
+   * Every `sweep.repeat_escalated` trip inside the window — the W1-T2345 counter firing on a PR whose
+   * verdict has not moved on an unchanged head for `repeatDispositionBound` consecutive derivations.
+   *
+   * ADDITIVE, NOT LATEST-WINS, and the difference from `boardReview` above is the point. A board read
+   * is a SNAPSHOT of one board's current state, so the newest row supersedes the older ones. A repeat
+   * trip is an EVENT about one particular PR, fires at most once per PR per unchanged head by
+   * construction (`repeatAlreadyEscalated`, sweep.ts), and two trips are two DIFFERENT PRs stuck —
+   * collapsing them to "latest" would report one and hide the rest.
+   *
+   * DEDUPED BY PR NUMBER anyway, because the ledger union can carry the same row twice across
+   * overlapping rotations, and a digest counting a rotation artefact as a second stuck PR would be
+   * wrong in the direction that costs an operator a look.
+   *
+   * SOFT-COMPOSED by {@link renderDigest} exactly like `boardReview`: a window with no trip omits the
+   * line ENTIRELY rather than printing a "(none this window)" placeholder, so a digest over a quiet
+   * board — or one predating the counter — renders byte-identical to before this field existed. A
+   * QUIET BOARD SHOWS NOTHING HERE, which is the honest reading: the counter only fires when a PR is
+   * demonstrably stuck.
+   */
+  repeatEscalations?: RepeatEscalationDigestEntry[];
+  /**
    * W1-T178 (verdict stability): count of `review.downgrade_suppressed` ledger
    * lines inside the window — a semantic-lane downgrade suppressed because the
    * deterministic floor still passed on an unchanged head. This is the signal
@@ -564,6 +595,22 @@ export function summarize(lines: LedgerLine[], sinceIso: string): DigestSummary 
         proposals: typeof l.proposals === "number" ? l.proposals : undefined,
       };
     }
+    // W1-T2345's counter trip. The sweep ALREADY writes this row; what was missing is a READER.
+    // The shard's own design says so in terms — "the escalation surface is THE DIGEST … a second
+    // queue nobody drains is not an answer" — and `digest.ts` referenced the step ZERO times.
+    if (l.step === "sweep.repeat_escalated") {
+      const prNumber = typeof l.pr_number === "number" ? l.pr_number : undefined;
+      const list = (summary.repeatEscalations ??= []);
+      // Dedup on PR number: the union can replay one row across overlapping rotations, and a
+      // rotation artefact must never read as a second stuck PR.
+      if (prNumber === undefined || !list.some((e) => e.prNumber === prNumber)) {
+        list.push({
+          prNumber,
+          disposition: typeof l.disposition === "string" ? l.disposition : undefined,
+          streak: typeof l.streak === "number" ? l.streak : undefined,
+        });
+      }
+    }
   }
   summary.cacheHit = aggregateCacheHitTotals(since);
   return summary;
@@ -612,6 +659,9 @@ export function renderDigest(s: DigestSummary, consoleBaseUrl?: string): string 
     // Soft-composed exactly like `inbox` above — absent, never a placeholder, when the window
     // carries no `board_review.ran`. See the `boardReview` field's doc on DigestSummary.
     ...(s.boardReview ? [`board review: ${renderBoardReviewSnapshot(s.boardReview)}`] : []),
+    // Soft-composed exactly like `board review` above — absent, never a placeholder, when the
+    // window carries no trip. See the `repeatEscalations` field's doc on DigestSummary.
+    ...(s.repeatEscalations?.length ? [`stuck (repeat bound): ${renderRepeatEscalations(s.repeatEscalations)}`] : []),
     // W1-T929: soft-composed — present only when the window carries usable cache-token data
     // (see the `cacheHit` field's doc on DigestSummary), two lines (per-run, per-class), never
     // a "(no data)" placeholder otherwise.
@@ -620,6 +670,21 @@ export function renderDigest(s: DigestSummary, consoleBaseUrl?: string): string 
     `notional cost: $${s.costUsd.toFixed(2)}`,
   ];
   return lines.join("\n");
+}
+
+/** One line for {@link DigestSummary.repeatEscalations} — every PR that tripped the repeat bound in
+ *  this window, each naming the verdict that would not move and how many consecutive derivations it
+ *  survived. Every field optional, so a row missing one omits that clause rather than printing
+ *  `undefined`. Mirrors `renderBoardReviewSnapshot`'s shape. */
+function renderRepeatEscalations(entries: RepeatEscalationDigestEntry[]): string {
+  return entries
+    .map((e) => {
+      const who = e.prNumber !== undefined ? `#${e.prNumber}` : "(pr unknown)";
+      const what = e.disposition ? ` ${e.disposition}` : "";
+      const many = e.streak !== undefined ? ` x${e.streak}` : "";
+      return `${who}${what}${many}`;
+    })
+    .join(", ");
 }
 
 /** One line for {@link DigestSummary.boardReview} — every field optional, so a row missing one omits
