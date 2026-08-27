@@ -15268,6 +15268,10 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
           // reportable field too.
           baseTask: oldTask,
           followUpFiled: followUpCarriesCriteria(added, followUpTasks),
+          // W1-T2375: the SAME array just used to compute `followUpFiled` above — no new
+          // resolution — so a parent-disposition violation can name which follow-up(s)
+          // actually carry the criteria instead of saying "a follow-up task" with no id.
+          followUpTasks,
         },
         // impl-DS: only ever populated in --base mode, so the check is silent whole-plan.
         newMonolithIds,

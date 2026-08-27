@@ -212,7 +212,16 @@ test("ACCEPTANCE 6 (iv): no delta against the base -> EMPTY (identical task, ide
 });
 
 test("ACCEPTANCE 6 (v): followUpFiled: true -> EMPTY for the acceptance-added case (the pre-existing escape hatch keeps working)", () => {
-  const t = current({ acceptance: [...BASE_ACCEPTANCE, { claim: "a genuinely new claim", proof: "unit test: test/widget.test.ts::new" }] });
+  // W1-T2375: `followUpFiled: true` alone is no longer sufficient — the escape also requires
+  // the PARENT to state its own disposition (moved to `status: "blocked"` here; a stated
+  // partial disposition via note/rationale would satisfy it just as well). Without either,
+  // `followUpFiled: true` alone left BOTH the parent and its follow-up dispatchable, which is
+  // the exact orphaning-adjacent gap W1-T2375 closes — see
+  // test/rule-21-follow-up-couples-parent-disposition.test.ts for that check's own coverage.
+  const t = current({
+    status: "blocked",
+    acceptance: [...BASE_ACCEPTANCE, { claim: "a genuinely new claim", proof: "unit test: test/widget.test.ts::new" }],
+  });
   const res = lintTask(t, { postMergeAmendment: ctx({ followUpFiled: true }) });
   assert.equal(res.ok, true);
   assert.ok(!res.violations.some((v) => v.check === "post-merge-amendment"));

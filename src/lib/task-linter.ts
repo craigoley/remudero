@@ -1597,6 +1597,50 @@ export function followUpCarriesCriteria(added: AcceptanceCriterion[], candidateT
 }
 
 /**
+ * IDs of `candidateTasks` that carry at least one of `added`'s criteria — a
+ * REPORTING helper, not a gate: {@link followUpCarriesCriteria} already decided
+ * whether the escape is available (every criterion carried, by SOME task or
+ * another); this just names WHICH task(s) so a violation message naming the
+ * follow-up alongside the parent (see {@link postMergeAmendmentViolations}) is
+ * never forced to say "a follow-up task" with no id attached.
+ */
+function followUpTaskIdsCarrying(added: AcceptanceCriterion[], candidateTasks: Task[]): string[] {
+  const addedKeys = new Set(added.map(criterionKey));
+  return candidateTasks.filter((t) => (t.acceptance ?? []).some((c) => addedKeys.has(criterionKey(c)))).map((t) => t.id);
+}
+
+/**
+ * W1-T2375 (Rule 21's own escape, closed): TRUE iff `task` (the head-ref
+ * shard — the SAME object {@link postMergeAmendmentViolations} lints) has
+ * itself declared a disposition for the amendment the follow-up escape just
+ * let through. Two shapes, per that task's design (Q2), and ONLY these two:
+ *
+ *  - FULLY SUPERSEDED: `task.status === "blocked"` in THIS PR — the exact
+ *    property `isDispatchEligible` (lib/drain.ts) reads, never the
+ *    `retirement:` field beside it (W1-T2375 rationale (3): a parent that
+ *    carried `retirement:` and nothing else was dispatched anyway, because
+ *    `drain.ts` never reads that field).
+ *  - PARTLY SUPERSEDED: the parent's own prose (`note` or `rationale`)
+ *    changed from `baseTask` to `task` — the filer said SOMETHING about what
+ *    remains. This check cannot and does not judge whether the prose is any
+ *    good; it only refuses SILENCE (no status move AND no prose change),
+ *    exactly as that task's design says: "It does not decide which
+ *    disposition is right; it refuses silence."
+ *
+ * `baseTask` undefined ⇒ nothing to diff the prose against, so this check
+ * defers — same "nothing to diff against" contract every other base-ref
+ * comparison in this section uses ({@link criteriaAdded}, {@link
+ * mergedFieldChangeViolations}) — rather than refusing on a resolution gap
+ * that is not the filer's doing.
+ */
+export function parentDispositionStated(task: Task, baseTask: Task | undefined): boolean {
+  if (task.status === "blocked") return true;
+  if (!baseTask) return true;
+  const norm = (s?: string) => (s ?? "").trim();
+  return norm(baseTask.note) !== norm(task.note) || norm(baseTask.rationale) !== norm(task.rationale);
+}
+
+/**
  * Context the CALLER resolves via I/O and injects through {@link LintOpts} —
  * see the module comment above this section for why it cannot be fetched here.
  */
@@ -1619,6 +1663,14 @@ export interface PostMergeAmendmentContext {
    *  whole changed set by the caller, since a single task's lint has no
    *  visibility into its siblings. */
   followUpFiled: boolean;
+  /** The SAME candidate array the caller already built to compute
+   *  `followUpFiled` (`followUpCarriesCriteria`'s second argument) — carried
+   *  here too, not re-resolved, purely so a W1-T2375 violation naming the
+   *  parent's unaddressed dispatchability can also name the follow-up task(s)
+   *  that already carry the criteria (see {@link followUpTaskIdsCarrying}).
+   *  Undefined/empty ⇒ the message falls back to generic wording; it never
+   *  affects whether the check fires. */
+  followUpTasks?: Task[];
   /** This task's WHOLE shard as it existed at the PR's base ref — not just its
    *  `acceptance:` (see {@link baseAcceptance}). W1-T2254: the call site
    *  (run-task.ts's `lintPlanCommand`) already resolves this base-ref task to
@@ -1741,10 +1793,27 @@ export function criteriaProofChanged(
 }
 
 /** Every acceptance criterion this PR adds or changes on an ALREADY-MERGED
- *  task, absent a follow-up task in the same PR to carry it. No {@link
- *  LintOpts.postMergeAmendment} at all ⇒ this check is skipped entirely (the
- *  pre-dispatch call site never dispatches a merged task in the first place,
- *  so it never supplies this context).
+ *  task, absent a follow-up task in the same PR to carry it — OR, W1-T2375,
+ *  absent a stated disposition for the PARENT once a follow-up DOES carry it.
+ *  No {@link LintOpts.postMergeAmendment} at all ⇒ this check is skipped
+ *  entirely (the pre-dispatch call site never dispatches a merged task in the
+ *  first place, so it never supplies this context).
+ *
+ *  W1-T2375: the follow-up escape (below) gives the amended criteria a SECOND
+ *  home without ever asking about the FIRST — nothing required the parent's
+ *  own dispatchability to be addressed, so a filed follow-up and an untouched
+ *  parent both stayed dispatchable and the fleet built both. This is a
+ *  CONDITION ON THE SAME ESCAPE, not a second blocking arm: `check:
+ *  "post-merge-amendment"` is still the only blocking check this function
+ *  emits ({@link parentDispositionStated} decides which of the two blocking
+ *  messages below fires, never a third). The escape now requires BOTH that a
+ *  follow-up carries the criteria AND that the parent itself has stated a
+ *  disposition ({@link parentDispositionStated}) — moved to `status:
+ *  "blocked"` (fully superseded) or said in its own prose what remains
+ *  (partly superseded). It refuses only SILENCE: it never picks a
+ *  disposition, never writes one, and an amendment with no follow-up filed
+ *  at all is completely unaffected (the first branch below, byte-identical
+ *  to before W1-T2375).
  *
  *  W1-T2254 widens this past the one BLOCKING case (a genuinely new/changed
  *  claim with no follow-up): three REPORT-ONLY, `severity: "warn"` checks run
@@ -1773,6 +1842,27 @@ export function postMergeAmendmentViolations(task: Task, opts: LintOpts = {}): L
           "Standing rule 21: MERGED is terminal (an amendment does not re-queue the task), the drain " +
           "skips a merged id outright, and the retro sweep skips a closed one, so this criterion would " +
           "orphan silently; file a follow-up task carrying it in this SAME PR",
+      })),
+    );
+  } else if (added.length > 0 && ctx.followUpFiled && !parentDispositionStated(task, ctx.baseTask)) {
+    // W1-T2375: the escape's SECOND condition. The follow-up already carries every added
+    // criterion (`ctx.followUpFiled`), so the FIRST branch above does not fire — but nothing
+    // has yet said whether ${task.id} itself is still meant to be dispatched, so both a filed
+    // follow-up AND an untouched parent stay eligible and the fleet can build both.
+    const followUpIds = followUpTaskIdsCarrying(added, ctx.followUpTasks ?? []);
+    const followUpNames = followUpIds.length > 0 ? followUpIds.join(", ") : "the follow-up task";
+    violations.push(
+      ...added.map((c) => ({
+        check: "post-merge-amendment" as const,
+        severity: "block" as const,
+        message:
+          `task ${task.id} is already MERGED, but this PR adds/changes acceptance criterion ` +
+          `("${(c.claim ?? "").slice(0, 80)}") whose follow-up (${followUpNames}) already carries it, ` +
+          `while ${task.id} itself is left with no stated disposition — Standing rule 21's follow-up ` +
+          "escape hands the criteria a second home but never asks about the first, so both stay " +
+          `dispatchable unless ${task.id} says otherwise IN THIS SAME PR: either move ${task.id}'s ` +
+          "status: to \"blocked\" (fully superseded by the follow-up) or say in its own note/rationale " +
+          "what work remains (partly superseded) — silence is what this refuses, not either answer",
       })),
     );
   }
