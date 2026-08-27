@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import { test } from "node:test";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -77,6 +77,79 @@ async function waitUntilDead(pid: number, timeoutMs = 5000): Promise<void> {
  * IT THROWS ON THE CEILING, and that is load-bearing: a poll that gave up and let the caller
  * proceed would convert this file's regression locks into vacuous passes.
  */
+
+/**
+ * W1-T2350: SERIALISE THE TWO REAL, SYSTEM-WIDE ORPHAN SWEEPS ACROSS TEST FILES.
+ *
+ * THE DEFECT THIS CLOSES. `sweepOrphanWorkers`'s production `listCandidates` is
+ * `defaultListCandidates` -- `ps -eo pid=,command=`, EVERY pid on the machine, not this
+ * fixture's. Both this suite and its twin (test/daemon.test.ts <-> test/worker-containment.test.ts)
+ * spawn a marker-carrying stray and then run the REAL `daemonCommand`, whose boot sweep kills
+ * every marked pid whose runId is not active in ITS OWN `state/inflight` directory. The two
+ * fixtures have different roots, so neither sweep can see that the other's stray belongs to a
+ * live test. `node --test` runs FILES concurrently, so whichever sweep reaches the process table
+ * first kills BOTH strays and ledgers both into ITS OWN ledger. The loser then finds its stray
+ * already dead -- so `waitUntilDead` and the ESRCH assertion still PASS -- and no
+ * `worker_orphan_killed` line in its own ledger: `actual: undefined, expected: true` at the
+ * ledger assertion. That is the observed CI failure verbatim (run 33025181897 attempt 1,
+ * test/daemon.test.ts:2261), and it is what `scripts/test-with-retry.mjs` was re-running the
+ * whole instrumented suite to paper over.
+ *
+ * IT IS NOT A MARKER-VISIBILITY PROBLEM. `waitUntilMarkersVisible` never throws in these
+ * failures -- if it had, the error would be its own message, not an assertion. MEASURED on this
+ * host: each file's W1-T356 test passes 20/20 run alone, and the pair fails 10/10 run
+ * concurrently, with no artificial load at all.
+ *
+ * WHY A LOCK AND NOT A FAKE PROCESS TABLE. "the REAL daemonCommand" is the point of both tests:
+ * injecting a fake `listCandidates` would stop proving that the wired closure reads the real one,
+ * which is the entire wiring claim. So both sweeps stay real and are merely kept from OVERLAPPING.
+ *
+ * SHAPE (W1-T1066: never pace, never sleep a fixed beat). A bounded wait on the CONDITION -- the
+ * lock directory being free -- polled at the same 20 ms beat `waitUntilDead` and
+ * `waitUntilMarkersVisible` already use, and it THROWS at its ceiling so a wedged lock fails
+ * loudly instead of silently letting the caller run unserialised. `mkdirSync` is the atomic
+ * primitive: it fails EEXIST rather than clobbering. A holder that died mid-test is reclaimed by
+ * pid, so one SIGKILL cannot wedge every later run on a developer machine.
+ */
+const REAL_SWEEP_LOCK = join(tmpdir(), "rmd-real-orphan-sweep.lock");
+
+async function withRealSweepLock<T>(fn: () => Promise<T>, timeoutMs = 60_000): Promise<T> {
+  const start = Date.now();
+  for (;;) {
+    try {
+      mkdirSync(REAL_SWEEP_LOCK);
+      writeFileSync(join(REAL_SWEEP_LOCK, "holder.pid"), String(process.pid));
+      break;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+      // A holder pid of 0 means the directory exists but its pid file is not written yet -- the
+      // other process is mid-acquire. That is a LIVE holder, never a stale one, so it is waited
+      // out rather than reclaimed.
+      let holder = 0;
+      try {
+        holder = Number(readFileSync(join(REAL_SWEEP_LOCK, "holder.pid"), "utf8").trim()) || 0;
+      } catch {
+        holder = 0;
+      }
+      if (holder > 0 && !isPidAlive(holder)) {
+        rmSync(REAL_SWEEP_LOCK, { recursive: true, force: true });
+        continue;
+      }
+      if (Date.now() - start > timeoutMs) {
+        throw new Error(
+          `real-sweep lock ${REAL_SWEEP_LOCK} (holder pid ${holder || "unknown"}) never released within ${timeoutMs}ms`,
+        );
+      }
+      await new Promise((r) => setTimeout(r, 20));
+    }
+  }
+  try {
+    return await fn();
+  } finally {
+    rmSync(REAL_SWEEP_LOCK, { recursive: true, force: true });
+  }
+}
+
 async function waitUntilMarkersVisible(pid: number, timeoutMs = 5000): Promise<void> {
   const start = Date.now();
   while (defaultReadMarkers(pid) === undefined) {
@@ -436,46 +509,48 @@ function ledgerLines(root: string): Array<Record<string, unknown>> {
 }
 
 test("W1-T356 wiring: the REAL daemonCommand boots with the orphan sweep wired from the module's own exported defaults — a marker-carrying stray from an ended run is killed and ledgered (worker_orphan_killed), a marker-less process is left alone, alive, and reported (daemon.orphan_sweep)", async () => {
-  const { home, root, planPath } = fixtureHome();
-  const oldHome = process.env.HOME;
-  process.env.HOME = home;
-  const strayEnv = { ...process.env, [RUN_ID_ENV]: "run-ended-w1-t356", [TASK_ID_ENV]: "W1-T356-fixture" };
-  const stray = spawnDetachedGroup({ command: "/bin/sh", args: ["-c", "sleep 300"], env: strayEnv });
-  const unrelated = spawnDetachedGroup({ command: "/bin/sh", args: ["-c", "sleep 300"], env: { PATH: process.env.PATH } });
-  try {
-    // W1-T459: the boot sweep can only attribute this stray once `ps eww` publishes its marker
-    // env, so wait for exactly that — same discipline as the direct defaultReadMarkers test above.
-    // The UNRELATED process needs no wait: its assertion is that it SURVIVES, which holds whether
-    // or not ps has caught up, so polling it would bound nothing.
-    await waitUntilMarkersVisible(stray.pid);
-    const loopStub = async (): Promise<DaemonSummary> => ({ attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 });
-    const code = await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], { runDaemon: loopStub });
-    assert.equal(code, 0);
+  await withRealSweepLock(async () => {
+    const { home, root, planPath } = fixtureHome();
+    const oldHome = process.env.HOME;
+    process.env.HOME = home;
+    const strayEnv = { ...process.env, [RUN_ID_ENV]: "run-ended-w1-t356", [TASK_ID_ENV]: "W1-T356-fixture" };
+    const stray = spawnDetachedGroup({ command: "/bin/sh", args: ["-c", "sleep 300"], env: strayEnv });
+    const unrelated = spawnDetachedGroup({ command: "/bin/sh", args: ["-c", "sleep 300"], env: { PATH: process.env.PATH } });
+    try {
+      // W1-T459: the boot sweep can only attribute this stray once `ps eww` publishes its marker
+      // env, so wait for exactly that — same discipline as the direct defaultReadMarkers test above.
+      // The UNRELATED process needs no wait: its assertion is that it SURVIVES, which holds whether
+      // or not ps has caught up, so polling it would bound nothing.
+      await waitUntilMarkersVisible(stray.pid);
+      const loopStub = async (): Promise<DaemonSummary> => ({ attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 });
+      const code = await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], { runDaemon: loopStub });
+      assert.equal(code, 0);
 
-    await waitUntilDead(stray.pid);
-    assert.throws(
-      () => process.kill(stray.pid, 0),
-      /ESRCH/,
-      "the real daemonCommand's boot-time sweep (daemonBoot's own sweepOrphanWorkers param) must have killed the attributed stray",
-    );
-    assert.equal(isPidAlive(unrelated.pid), true, "a marker-less process must never be signalled, no matter how suspicious it looks");
+      await waitUntilDead(stray.pid);
+      assert.throws(
+        () => process.kill(stray.pid, 0),
+        /ESRCH/,
+        "the real daemonCommand's boot-time sweep (daemonBoot's own sweepOrphanWorkers param) must have killed the attributed stray",
+      );
+      assert.equal(isPidAlive(unrelated.pid), true, "a marker-less process must never be signalled, no matter how suspicious it looks");
 
-    const lines = ledgerLines(root);
-    const killedLine = lines.find((l) => l.step === "worker_orphan_killed" && l.pid === stray.pid);
-    assert.ok(killedLine, "the real production ledger dep must record the kill");
-    assert.equal(killedLine!.run_id, "run-ended-w1-t356");
-    assert.equal(killedLine!.task_id, "W1-T356-fixture");
+      const lines = ledgerLines(root);
+      const killedLine = lines.find((l) => l.step === "worker_orphan_killed" && l.pid === stray.pid);
+      assert.ok(killedLine, "the real production ledger dep must record the kill");
+      assert.equal(killedLine!.run_id, "run-ended-w1-t356");
+      assert.equal(killedLine!.task_id, "W1-T356-fixture");
 
-    const sweepLine = lines.find((l) => l.step === "daemon.orphan_sweep");
-    assert.ok(sweepLine, "daemonBoot must log the sweep's own summary — the wired param reached it");
-    assert.ok(Number(sweepLine!.killed) >= 1, "the summary count must reflect the real kill");
-  } finally {
-    safeKillGroup(stray.pid);
-    safeKillGroup(unrelated.pid);
-    if (oldHome === undefined) delete process.env.HOME;
-    else process.env.HOME = oldHome;
-    rmSync(home, { recursive: true, force: true });
-  }
+      const sweepLine = lines.find((l) => l.step === "daemon.orphan_sweep");
+      assert.ok(sweepLine, "daemonBoot must log the sweep's own summary — the wired param reached it");
+      assert.ok(Number(sweepLine!.killed) >= 1, "the summary count must reflect the real kill");
+    } finally {
+      safeKillGroup(stray.pid);
+      safeKillGroup(unrelated.pid);
+      if (oldHome === undefined) delete process.env.HOME;
+      else process.env.HOME = oldHome;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
 });
 
 // ── W1-T459: the beat is a CONDITION POLL, and it must stay one ───────────────────────────────
@@ -516,6 +591,67 @@ test("waitUntilMarkersVisible THROWS at its ceiling when the markers never appea
   } finally {
     safeKillGroup(p.pid);
   }
+});
+
+// ── W1-T2350: the cross-file sweep lock is itself a bounded waiter, and must stay one ────────
+//
+// Same discipline as the W1-T459 pair above: pin the SHAPE, not a number. A lock that gave up
+// quietly would let both real sweeps run concurrently again and re-open the exact flake it closes.
+
+test("withRealSweepLock runs the body while holding the lock and releases it on the way out", async () => {
+  assert.equal(existsSync(REAL_SWEEP_LOCK), false, "precondition: no lock is held before this test");
+  let heldDuringBody = false;
+  const got = await withRealSweepLock(async () => {
+    heldDuringBody = existsSync(REAL_SWEEP_LOCK);
+    return "body-ran";
+  });
+  assert.equal(got, "body-ran", "the body's value is returned to the caller");
+  assert.equal(heldDuringBody, true, "the lock is HELD while the body runs — that is the whole point");
+  assert.equal(existsSync(REAL_SWEEP_LOCK), false, "and released afterwards, so the twin file can proceed");
+});
+
+test("withRealSweepLock releases even when the body THROWS — a failing sweep test cannot wedge its twin", async () => {
+  await assert.rejects(
+    () => withRealSweepLock(async () => {
+      throw new Error("body blew up");
+    }),
+    /body blew up/,
+    "the body's own error propagates unchanged",
+  );
+  assert.equal(existsSync(REAL_SWEEP_LOCK), false, "the finally arm released the lock despite the throw");
+});
+
+test("withRealSweepLock THROWS at its ceiling rather than running a second real sweep unserialised", async () => {
+  // A LIVE holder: this process itself. The reclaim arm must not fire, so the ceiling must.
+  mkdirSync(REAL_SWEEP_LOCK);
+  writeFileSync(join(REAL_SWEEP_LOCK, "holder.pid"), String(process.pid));
+  try {
+    await assert.rejects(
+      () => withRealSweepLock(async () => "must not run", 100),
+      /never released within 100ms/,
+      "the ceiling must reject — a quiet give-up would run both sweeps at once again",
+    );
+  } finally {
+    rmSync(REAL_SWEEP_LOCK, { recursive: true, force: true });
+  }
+});
+
+test("withRealSweepLock reclaims a lock whose holder pid is DEAD — one SIGKILL cannot wedge every later run", async () => {
+  const corpse = spawnDetachedGroup({ command: "/bin/sh", args: ["-c", "sleep 30"], env: { PATH: process.env.PATH } });
+  safeKillGroup(corpse.pid);
+  await waitUntilDead(corpse.pid);
+  assert.equal(isPidAlive(corpse.pid), false, "precondition: the recorded holder really is gone");
+  mkdirSync(REAL_SWEEP_LOCK);
+  writeFileSync(join(REAL_SWEEP_LOCK, "holder.pid"), String(corpse.pid));
+  let ran = false;
+  try {
+    await withRealSweepLock(async () => {
+      ran = true;
+    }, 2000);
+  } finally {
+    rmSync(REAL_SWEEP_LOCK, { recursive: true, force: true });
+  }
+  assert.equal(ran, true, "a dead holder is reclaimed rather than waited out to the ceiling");
 });
 
 test("neither declared-flake suite still sleeps a fixed beat before reading ps — the shape, asserted structurally", () => {

@@ -2184,6 +2184,79 @@ function fixtureHome(): { home: string; root: string; planPath: string } {
   return { home, root, planPath };
 }
 
+
+/**
+ * W1-T2350: SERIALISE THE TWO REAL, SYSTEM-WIDE ORPHAN SWEEPS ACROSS TEST FILES.
+ *
+ * THE DEFECT THIS CLOSES. `sweepOrphanWorkers`'s production `listCandidates` is
+ * `defaultListCandidates` -- `ps -eo pid=,command=`, EVERY pid on the machine, not this
+ * fixture's. Both this suite and its twin (test/daemon.test.ts <-> test/worker-containment.test.ts)
+ * spawn a marker-carrying stray and then run the REAL `daemonCommand`, whose boot sweep kills
+ * every marked pid whose runId is not active in ITS OWN `state/inflight` directory. The two
+ * fixtures have different roots, so neither sweep can see that the other's stray belongs to a
+ * live test. `node --test` runs FILES concurrently, so whichever sweep reaches the process table
+ * first kills BOTH strays and ledgers both into ITS OWN ledger. The loser then finds its stray
+ * already dead -- so `waitUntilDead` and the ESRCH assertion still PASS -- and no
+ * `worker_orphan_killed` line in its own ledger: `actual: undefined, expected: true` at the
+ * ledger assertion. That is the observed CI failure verbatim (run 33025181897 attempt 1,
+ * test/daemon.test.ts:2261), and it is what `scripts/test-with-retry.mjs` was re-running the
+ * whole instrumented suite to paper over.
+ *
+ * IT IS NOT A MARKER-VISIBILITY PROBLEM. `waitUntilMarkersVisible` never throws in these
+ * failures -- if it had, the error would be its own message, not an assertion. MEASURED on this
+ * host: each file's W1-T356 test passes 20/20 run alone, and the pair fails 10/10 run
+ * concurrently, with no artificial load at all.
+ *
+ * WHY A LOCK AND NOT A FAKE PROCESS TABLE. "the REAL daemonCommand" is the point of both tests:
+ * injecting a fake `listCandidates` would stop proving that the wired closure reads the real one,
+ * which is the entire wiring claim. So both sweeps stay real and are merely kept from OVERLAPPING.
+ *
+ * SHAPE (W1-T1066: never pace, never sleep a fixed beat). A bounded wait on the CONDITION -- the
+ * lock directory being free -- polled at the same 20 ms beat `waitUntilDead` and
+ * `waitUntilMarkersVisible` already use, and it THROWS at its ceiling so a wedged lock fails
+ * loudly instead of silently letting the caller run unserialised. `mkdirSync` is the atomic
+ * primitive: it fails EEXIST rather than clobbering. A holder that died mid-test is reclaimed by
+ * pid, so one SIGKILL cannot wedge every later run on a developer machine.
+ */
+const REAL_SWEEP_LOCK = join(tmpdir(), "rmd-real-orphan-sweep.lock");
+
+async function withRealSweepLock<T>(fn: () => Promise<T>, timeoutMs = 60_000): Promise<T> {
+  const start = Date.now();
+  for (;;) {
+    try {
+      mkdirSync(REAL_SWEEP_LOCK);
+      writeFileSync(join(REAL_SWEEP_LOCK, "holder.pid"), String(process.pid));
+      break;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+      // A holder pid of 0 means the directory exists but its pid file is not written yet -- the
+      // other process is mid-acquire. That is a LIVE holder, never a stale one, so it is waited
+      // out rather than reclaimed.
+      let holder = 0;
+      try {
+        holder = Number(readFileSync(join(REAL_SWEEP_LOCK, "holder.pid"), "utf8").trim()) || 0;
+      } catch {
+        holder = 0;
+      }
+      if (holder > 0 && !isPidAlive(holder)) {
+        rmSync(REAL_SWEEP_LOCK, { recursive: true, force: true });
+        continue;
+      }
+      if (Date.now() - start > timeoutMs) {
+        throw new Error(
+          `real-sweep lock ${REAL_SWEEP_LOCK} (holder pid ${holder || "unknown"}) never released within ${timeoutMs}ms`,
+        );
+      }
+      await new Promise((r) => setTimeout(r, 20));
+    }
+  }
+  try {
+    return await fn();
+  } finally {
+    rmSync(REAL_SWEEP_LOCK, { recursive: true, force: true });
+  }
+}
+
 function ledgerLines(root: string): Array<Record<string, unknown>> {
   return readFileSync(ledgerPathFor({ root } as never), "utf8")
     .split("\n")
@@ -2221,61 +2294,63 @@ async function waitUntilMarkersVisible(pid: number, timeoutMs = 5000): Promise<v
 }
 
 test("W1-T356 wiring: the REAL daemonCommand sets DaemonDeps.sweepOrphans to the SAME production closure daemonBoot uses — calling the CAPTURED dep kills+ledgers an ended-run stray and leaves an unattributable process alone", async () => {
-  const { home, root, planPath } = fixtureHome();
-  const oldHome = process.env.HOME;
-  process.env.HOME = home;
-  const strayEnv = { ...process.env, [RUN_ID_ENV]: "run-ended-poll-1", [TASK_ID_ENV]: "W1-T356-poll-fixture" };
-  const stray = spawnDetachedGroup({ command: "/bin/sh", args: ["-c", "sleep 300"], env: strayEnv });
-  const unrelated = spawnDetachedGroup({ command: "/bin/sh", args: ["-c", "sleep 300"], env: { PATH: process.env.PATH } });
-  let captured: DaemonDeps | undefined;
-  try {
-    // W1-T459: the sweep can only attribute this stray once `ps eww` publishes its marker env, so
-    // wait for exactly that condition — same discipline as worker-containment.test.ts's own
-    // defaultReadMarkers test. This is the beat whose expiry produced the observed
-    // `killedLine undefined`: unattributed means unkilled means unledgered.
-    await waitUntilMarkersVisible(stray.pid);
-    const code = await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
-      runDaemon: async (_plan, deps): Promise<DaemonSummary> => {
-        captured = deps;
-        return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
-      },
-    });
-    assert.equal(code, 0, "the injected runDaemon returns a clean 'stopped' summary -> exit 0");
-    assert.ok(captured, "runDaemon was reached and its DaemonDeps captured");
-    assert.equal(typeof captured!.sweepOrphans, "function", "the per-poll half must be set, not left undefined");
-
-    // The boot-time half already ran during this SAME daemonCommand call (daemonBoot's own
-    // sweepOrphanWorkers param) and may have already reaped the stray — call the CAPTURED
-    // per-poll dep too, so this test proves the per-poll field independently, not merely that
-    // boot ran first. Either call reaching it is a pass: the assertion is on the OUTCOME
-    // (killed + ledgered), not on which of the two wired call sites did it.
-    const report = await captured!.sweepOrphans!();
-    assert.ok(report, "the per-poll dep, called directly, must return a real OrphanSweepReport");
-
-    await waitUntilDead(stray.pid);
-    assert.throws(() => process.kill(stray.pid, 0), /ESRCH/, "the attributed stray must be dead via one of the two wired call sites");
-    assert.equal(isPidAlive(unrelated.pid), true, "a marker-less process must never be signalled, no matter how suspicious it looks");
-
-    const lines = ledgerLines(root);
-    const killedLine = lines.find((l) => l.step === "worker_orphan_killed" && l.pid === stray.pid);
-    assert.ok(killedLine, "the real production ledger dep must record the kill");
-    assert.equal(killedLine!.run_id, "run-ended-poll-1");
-    assert.equal(killedLine!.task_id, "W1-T356-poll-fixture");
-  } finally {
+  await withRealSweepLock(async () => {
+    const { home, root, planPath } = fixtureHome();
+    const oldHome = process.env.HOME;
+    process.env.HOME = home;
+    const strayEnv = { ...process.env, [RUN_ID_ENV]: "run-ended-poll-1", [TASK_ID_ENV]: "W1-T356-poll-fixture" };
+    const stray = spawnDetachedGroup({ command: "/bin/sh", args: ["-c", "sleep 300"], env: strayEnv });
+    const unrelated = spawnDetachedGroup({ command: "/bin/sh", args: ["-c", "sleep 300"], env: { PATH: process.env.PATH } });
+    let captured: DaemonDeps | undefined;
     try {
-      killProcessGroup(stray.pid);
-    } catch {
-      // best-effort cleanup only
+      // W1-T459: the sweep can only attribute this stray once `ps eww` publishes its marker env, so
+      // wait for exactly that condition — same discipline as worker-containment.test.ts's own
+      // defaultReadMarkers test. This is the beat whose expiry produced the observed
+      // `killedLine undefined`: unattributed means unkilled means unledgered.
+      await waitUntilMarkersVisible(stray.pid);
+      const code = await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
+        runDaemon: async (_plan, deps): Promise<DaemonSummary> => {
+          captured = deps;
+          return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
+        },
+      });
+      assert.equal(code, 0, "the injected runDaemon returns a clean 'stopped' summary -> exit 0");
+      assert.ok(captured, "runDaemon was reached and its DaemonDeps captured");
+      assert.equal(typeof captured!.sweepOrphans, "function", "the per-poll half must be set, not left undefined");
+
+      // The boot-time half already ran during this SAME daemonCommand call (daemonBoot's own
+      // sweepOrphanWorkers param) and may have already reaped the stray — call the CAPTURED
+      // per-poll dep too, so this test proves the per-poll field independently, not merely that
+      // boot ran first. Either call reaching it is a pass: the assertion is on the OUTCOME
+      // (killed + ledgered), not on which of the two wired call sites did it.
+      const report = await captured!.sweepOrphans!();
+      assert.ok(report, "the per-poll dep, called directly, must return a real OrphanSweepReport");
+
+      await waitUntilDead(stray.pid);
+      assert.throws(() => process.kill(stray.pid, 0), /ESRCH/, "the attributed stray must be dead via one of the two wired call sites");
+      assert.equal(isPidAlive(unrelated.pid), true, "a marker-less process must never be signalled, no matter how suspicious it looks");
+
+      const lines = ledgerLines(root);
+      const killedLine = lines.find((l) => l.step === "worker_orphan_killed" && l.pid === stray.pid);
+      assert.ok(killedLine, "the real production ledger dep must record the kill");
+      assert.equal(killedLine!.run_id, "run-ended-poll-1");
+      assert.equal(killedLine!.task_id, "W1-T356-poll-fixture");
+    } finally {
+      try {
+        killProcessGroup(stray.pid);
+      } catch {
+        // best-effort cleanup only
+      }
+      try {
+        killProcessGroup(unrelated.pid);
+      } catch {
+        // best-effort cleanup only
+      }
+      if (oldHome === undefined) delete process.env.HOME;
+      else process.env.HOME = oldHome;
+      rmSync(home, { recursive: true, force: true });
     }
-    try {
-      killProcessGroup(unrelated.pid);
-    } catch {
-      // best-effort cleanup only
-    }
-    if (oldHome === undefined) delete process.env.HOME;
-    else process.env.HOME = oldHome;
-    rmSync(home, { recursive: true, force: true });
-  }
+  });
 });
 
 // ── W1-T254 (the #707 fix): the restricted LIGHT-SWEEP TICKER ──────────────
