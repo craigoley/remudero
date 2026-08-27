@@ -258,8 +258,9 @@ jobs:
           # never re-derived from the ledger here, because this job cannot reach the host's
           # filesystem at all; it only reads what `scripts/fleet-heartbeat.sh` already decided.
           # NEVER-PRESENT IS SILENT (design note iv): `unknown` covers both "this host has no
-          # deploy-supervisor at all" (the container host advances via deploy/entrypoint.sh, never
-          # logging a deploy.* line) and "the ledger could not be read", and neither is a finding —
+          # deploy-supervisor at all" (the container host advances via its own deploy entrypoint
+          # script under docker instead, never logging a deploy.* line) and "the ledger could not
+          # be read", and neither is a finding —
           # only a branch whose beat SAYS `STALE` is. IT COUNTS INTO THE SAME `stale` TOTAL a beat's
           # own age already does (design note vi: "counts it like `stale`") rather than a second
           # counter, so the combined pass/fail verdict below stays the single `[ "$stale" -eq 0 ]`
