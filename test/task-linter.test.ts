@@ -1720,3 +1720,60 @@ test("advisory-routing carries NO severity override anywhere in LintOpts — war
   assert.ok(!fnSrc.includes("opts"), "advisoryRoutingViolations must take no LintOpts parameter at all");
   assert.ok(!/advisoryRouting\?:\s*LintSeverity/.test(src), "LintOpts must carry no advisoryRouting severity knob");
 });
+
+// ── W1-T180's escape, tightened to its own doc (2026-08-26) ─────────────────────────────────
+//
+// `followUpCarriesCriteria` read `some`/`some` — at least ONE added criterion carried by at least
+// one candidate task — while its doc has always said "every criterion in `added`". The doc is the
+// one that serves W1-T180's purpose ("so the criteria have a home that will actually be
+// dispatched"): one carried criterion gives the other four no home, and a PR could add five
+// criteria to a MERGED task, carry one, and pass — orphaning four through Rule 21's own escape.
+//
+// RETROFIT, measured before the change over 823 plan commits: 93 criteria amendments, 4 with a new
+// task in the same PR, 34 adding more than one, exactly 1 both — and that one (#396, W1-T136 +2
+// beside a new W1-T176) is carried by NEITHER, so it fails both readings. Tightening refuses
+// nothing that has ever happened.
+
+test("W1-T180: a MULTI-criterion amendment carried by only ONE follow-up criterion is REFUSED", () => {
+  const added = [
+    { claim: "the first amended claim", proof: "unit test: a" },
+    { claim: "the second amended claim", proof: "unit test: b" },
+  ];
+  const followUp = { id: "W1-T900", acceptance: [{ claim: "the first amended claim", proof: "unit test: z" }] } as unknown as Task;
+  assert.equal(followUpCarriesCriteria(added, [followUp]), false, "one of two carried is not a home for both");
+  // THE OLD READING, stated rather than described, so the change is visible and not merely asserted.
+  const addedKeys = new Set(added.map((c) => c.claim.trim().replace(/\s+/g, " ")));
+  const oldReading = [followUp].some((t) => (t.acceptance ?? []).some((c) => addedKeys.has(c.claim.trim().replace(/\s+/g, " "))));
+  assert.equal(oldReading, true, "and the shipped code PERMITTED it until this change");
+});
+
+test("W1-T180: a multi-criterion amendment is PERMITTED when every added criterion has a home", () => {
+  const added = [
+    { claim: "the first amended claim", proof: "unit test: a" },
+    { claim: "the second amended claim", proof: "unit test: b" },
+  ];
+  // Across SEVERAL follow-ups, since the caller passes every new task in the changed set.
+  const f1 = { id: "W1-T900", acceptance: [{ claim: "the first amended claim", proof: "unit test: z" }] } as unknown as Task;
+  const f2 = { id: "W1-T901", acceptance: [{ claim: "the second amended claim", proof: "unit test: y" }] } as unknown as Task;
+  assert.equal(followUpCarriesCriteria(added, [f1, f2]), true, "a filer can satisfy this — one follow-up per criterion, or one carrying all");
+  const both = { id: "W1-T902", acceptance: added.map((c) => ({ ...c, proof: "unit test: q" })) } as unknown as Task;
+  assert.equal(followUpCarriesCriteria(added, [both]), true, "or a single follow-up carrying every one");
+});
+
+test("W1-T180 REGRESSION LOCK: the single-criterion case W1-T2327 just used still passes", () => {
+  const added = [{ claim: "a job left non-terminal inside a run whose conclusion is terminal is reported as stalled rather than pending", proof: "unit test: x" }];
+  const followUp = {
+    id: "W1-T2340",
+    // Proof wording deliberately different — the key is the normalised CLAIM only.
+    acceptance: [{ claim: "a job left non-terminal inside a run whose conclusion is terminal is reported as stalled rather than pending", proof: "unit test: terminal-run" }],
+  } as unknown as Task;
+  assert.equal(followUpCarriesCriteria(added, [followUp]), true);
+});
+
+test("W1-T180: whitespace normalisation still decides the match, and an empty `added` is still vacuously true", () => {
+  const added = [{ claim: "a   claim   with    runs of space", proof: "unit test: a" }];
+  const followUp = { id: "W1-T903", acceptance: [{ claim: "a claim with runs of space", proof: "unit test: b" }] } as unknown as Task;
+  assert.equal(followUpCarriesCriteria(added, [followUp]), true, "criterionKey collapses whitespace");
+  assert.equal(followUpCarriesCriteria([], []), true, "nothing to carry");
+  assert.equal(followUpCarriesCriteria(added, []), false, "no candidate tasks at all is never a home");
+});

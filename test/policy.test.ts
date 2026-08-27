@@ -232,7 +232,7 @@ test("the SHIPPED plan/policy.yaml loads, and every row's value sits within its 
     "workerAbandon",
     "sweepWallClockBoundMs",
     "fixSpawnWallClockBoundMs",
-    "sweep", "drain", "retro", "autoTriage", "measurementCadence", "digestCadence", "headroom", "launchd", "scratchReap", "worktreeReapBoot",
+    "sweep", "drain", "retro", "autoTriage", "boardReview", "measurementCadence", "digestCadence", "headroom", "launchd", "scratchReap", "worktreeReapBoot",
   ];
   assert.deepEqual(Object.keys(p.values).sort(), expectedTopLevelKeys.sort());
 
@@ -548,6 +548,14 @@ test("every LIFTED field records origin=lifted:<source-site> — the net-new fie
     "digestCadence.enabled",
     "digestCadence.minIntervalMinutes",
     "digestCadence.maxPerDay",
+    // W1-T2304's wiring: the three `boardReview.*` fields join them for the same reason. The
+    // whole-board rung had no prior source literal to lift from — it is a NEW schedule for a NEW
+    // unit of work (the board, not one PR), and its 120/6 are derived from the board's own
+    // measured behaviour rather than copied off a sibling row. See plan/policy.yaml's own
+    // `boardReview` block for the derivation.
+    "boardReview.enabled",
+    "boardReview.minIntervalMinutes",
+    "boardReview.maxPerDay",
   ]);
   const liftedPaths = Object.keys(p.origin).filter((path) => !NET_NEW.has(path));
   assert.ok(liftedPaths.length > 0);

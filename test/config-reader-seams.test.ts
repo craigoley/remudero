@@ -238,7 +238,21 @@ test("CALIBRATION: the detection finds the readers recon-EJ measured, and no mor
   // The file set is UNCHANGED by it (`src/run-task.ts` already carried the nineteenth), so the
   // `files` assertion below needed no edit — which is itself the check that this reader landed
   // where its sibling lives rather than opening a new unredirectable surface.
-  assert.equal(readers.length, 20, `expected 20 unredirectable policy reads; saw:\n${readers.map((r) => `  ${r.file}:${r.line} ${r.text}`).join("\n")}`);
+  // TWENTY-ONE since `buildBoardReviewDaemonHooks`'s own `policyFor` (run-task.ts, W1-T2304's
+  // wiring) landed — an EIGHTEENTH consumer, also SEAMED (`deps.policy ?? loadPolicy(policyPath(
+  // repoRoot))`), resolving the `boardReview` row that gives the whole-board rung its own daemon
+  // schedule. It is the THIRD structural sibling of the shape above, not a new kind of thing: the
+  // same thunk, a sibling row, in the hook builder next to the other two —
+  // `buildMeasurementCadenceDaemonHooks` reads `values.measurementCadence`,
+  // `buildDigestCadenceDaemonHooks` reads `values.digestCadence`, this one reads
+  // `values.boardReview`. Three hook builders, three rows, three seamed reads.
+  // IT PASSED TEST 2 BEFORE THIS NUMBER MOVED, which is the order this comment requires: the
+  // calibration failed at 21-vs-20 while test 2 stayed green, so the reader arrived already seamed
+  // and is NOT allowlisted — adding it to ALLOWED would fail test 3's STALE-ENTRY LOCK and test 5.
+  // The file set is UNCHANGED by it (`src/run-task.ts` already carried the other two), so the
+  // `files` assertion below needed no edit — itself the check that this reader landed where its
+  // siblings live rather than opening a new unredirectable surface.
+  assert.equal(readers.length, 21, `expected 21 unredirectable policy reads; saw:\n${readers.map((r) => `  ${r.file}:${r.line} ${r.text}`).join("\n")}`);
 
   // `symbolise` labels the LAST bare `const policy = loadPolicy(...)` as daemonCommand's, because that
   // reader carries no distinctive identifier of its own. Today exactly ONE such line survives —
