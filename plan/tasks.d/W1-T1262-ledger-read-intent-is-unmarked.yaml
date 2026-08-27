@@ -77,6 +77,21 @@
       itself added. The resolver hole and the caller hole are different holes with different fixes,
       and this task owns only the second.
 
+      FORWARD POINTER, ADDED 2026-08-27 — THIS BLOCK IS NOT AN UNFILED FINDING, AND IT WAS READ AS
+      ONE. On 2026-08-27 (ii) was investigated as work needing a mint. It is not: it is a SCOPE
+      BOUNDARY inside the shard that was itself the fix, and both sides of the boundary are closed.
+      THE CALLER SIDE — option (c), the reader that refuses a bare path — is what this very task
+      shipped, as `63f038b8` (#2650); `ledgerReadIntentViolations` (`src/lib/status.ts`) is the scan,
+      with `test/ledger-read-intent.test.ts` beside it. THE RESOLVER SIDE was already closed by
+      W1-T444 before this shard was written, as `70d52c2` (#1657), and the sentence immediately above
+      says so.
+
+      SO THERE IS NOTHING HERE TO FILE, and that is what this pointer exists to say. The three
+      lettered options are a costing of alternatives, not a backlog, and the paragraph above records
+      that none would have caught W1-T444's instance — an argument about scope, not a gap left open.
+      A pointer naming only a successor id would be wrong here: there is no successor, because there
+      was no gap.
+
     (iii) THE FALSIFIER RUNS BOTH WAYS. A reader that takes the live file WITHOUT declaring it must
     fail; a reader that declares the live file must PASS unchanged. A check that failed every
     live-file read would satisfy the first and destroy `rmd doctor`, which clause (i) forbids.
