@@ -11682,6 +11682,85 @@ export function readHeadShaRest(prUrl: string, fetch: GhApiFetcher = ghJson): st
   return sha;
 }
 
+/**
+ * A DIVERGENCE between the two independent resolvers that decide whether a trailered PR body gets
+ * judged: the CI gate's `declaredPlanTaskIds` (scripts/acceptance-author-gate.mjs, a line scan
+ * over `- id:` — deliberately NOT `loadPlan`, so a plan defect elsewhere never red-lights a body
+ * unrelated to it) and this reviewer's own `loadPlan` (a real parse). A DUPLICATE id anywhere in
+ * the plan makes `loadPlan` THROW while the line scan still resolves this task's id fine — so the
+ * gate keeps exempting the trailered body while `reviewCommand` cannot load a single criterion for
+ * it. `taskId` names which trailer resolved; `reason` is `loadPlan`'s own thrown message.
+ */
+interface ResolverDivergence {
+  taskId: string;
+  reason: string;
+}
+
+/**
+ * Resolve a trailered PR's judging criteria from the plan at `planPath` — the exact lookup
+ * `reviewCommand` (its only call site) used to run inline inside a bare try/catch whose catch body
+ * held only a comment reading "a bad/absent plan is not the reviewer's concern; fall through to
+ * the body".
+ * That swallow is W1-T2315's defect: it makes "the plan could not be loaded" indistinguishable
+ * from "there was no trailer to resolve in the first place", both landing in the same body
+ * fallback by paths a caller cannot tell apart. Extracted to its own function, taking `planPath`
+ * as a parameter rather than reading the module-level `repoRoot`, so a test can point it at a
+ * scratch plan (e.g. one declaring a duplicate id) without a real checkout or a live `gh` call.
+ *
+ * `divergence` is set ONLY when `loadPlan` itself THROWS — never merely because the id is absent
+ * from a plan that loaded fine (a retired/typo'd id), since `declaredPlanTaskIds` would equally
+ * fail to find that id: both resolvers already agree there, so there is nothing to reconcile.
+ * `criteria` stays `[]` in both failure shapes; `reviewCommand`'s own body-fallback (unchanged)
+ * is what actually recovers criteria from `## Acceptance` when this returns nothing.
+ */
+export function resolvePlanCriteriaForReview(
+  taskId: string,
+  planPath: string,
+): {
+  criteria: AcceptanceCriterion[];
+  source?: string;
+  taskDeclaredFiles?: string[];
+  openTaskIds?: Set<string>;
+  divergence?: ResolverDivergence;
+} {
+  try {
+    // W1-T120: read the raw bytes ourselves (loadPlan re-reads the same path internally) so the
+    // READ-IDENTITY ASSERTION below hashes exactly what was opened — the abs path + content hash
+    // of the plan file this review actually read, legible in the printed summary instead of
+    // merely inferable from cwd.
+    const planRaw = readFileSync(planPath, "utf8");
+    const plan = loadPlan(planPath);
+    const t = plan.byId.get(taskId);
+    const result: {
+      criteria: AcceptanceCriterion[];
+      source?: string;
+      taskDeclaredFiles?: string[];
+      openTaskIds?: Set<string>;
+    } = {
+      criteria: t?.acceptance?.length ? t.acceptance : [],
+      taskDeclaredFiles: t?.files,
+      // W1-T367 (design (v)): no derived projection in hand here (unlike `runTask`'s dispatch
+      // path) — computing one would be a second, independent GitHub read this reviewer does not
+      // otherwise need. `openTaskIdsFromPlan(plan)` with no projection degrades to the EMPTY set
+      // (documented on that function), so every `SHIPS-UNWIRED:` marker is FLAGGED rather than
+      // wrongly honoured — the safe direction, never the pre-W1-T367 read that credited 248
+      // merged tasks as open.
+      openTaskIds: openTaskIdsFromPlan(plan),
+    };
+    if (t?.acceptance?.length) {
+      result.source =
+        `plan/tasks.yaml task ${taskId} (${t.acceptance.length} criteria) — ` +
+        `read: ${formatReadIdentity(planPath, planRaw)}`;
+    }
+    return result;
+  } catch (e) {
+    return {
+      criteria: [],
+      divergence: { taskId, reason: String((e as Error)?.message ?? e) },
+    };
+  }
+}
+
 async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCommandDeps = {}): Promise<number> {
   const {
     fetchView,
@@ -11730,35 +11809,17 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   // `criteria` degrading to the body's Acceptance: block — never a reason to fail the review.
   let taskDeclaredFiles: string[] | undefined;
   let openTaskIds: Set<string> | undefined;
+  // W1-T2315: `resolvePlanCriteriaForReview` is the SAME lookup this block used to run inline —
+  // extracted so its divergence signal (below) is directly unit-testable against a scratch plan,
+  // never a reason this call site's own behaviour changes.
+  let resolverDivergence: ResolverDivergence | undefined;
   if (taskId) {
-    try {
-      const reviewPlanPath = join(repoRoot, "plan", "tasks.yaml");
-      // W1-T120: read the raw bytes ourselves (loadPlan re-reads the same path
-      // internally) so the READ-IDENTITY ASSERTION below hashes exactly what was
-      // opened — the abs path + content hash of the plan file this review actually
-      // read, legible in the printed summary instead of merely inferable from cwd.
-      const reviewPlanRaw = readFileSync(reviewPlanPath, "utf8");
-      const plan = loadPlan(reviewPlanPath);
-      const t = plan.byId.get(taskId);
-      if (t?.acceptance?.length) {
-        criteria = t.acceptance;
-        source =
-          `plan/tasks.yaml task ${taskId} (${criteria.length} criteria) — ` +
-          `read: ${formatReadIdentity(reviewPlanPath, reviewPlanRaw)}`;
-      }
-      taskDeclaredFiles = t?.files;
-      // W1-T367 (design (v)): this manual `rmd review` path has no derived projection in hand
-      // here (unlike `runTask`'s dispatch path, which builds one for `assertRunnable` and
-      // passes it straight through) — computing one would be a second, independent GitHub read
-      // this reviewer does not otherwise need. `openTaskIdsFromPlan(plan)` with no projection
-      // argument degrades to the EMPTY set (documented on that function), so every
-      // `SHIPS-UNWIRED:` marker at this call site is FLAGGED rather than wrongly honoured — the
-      // safe direction (design (vi)), never the pre-W1-T367 yaml read that credited 248 merged
-      // tasks as open.
-      openTaskIds = openTaskIdsFromPlan(plan);
-    } catch {
-      // A bad/absent plan is not the reviewer's concern; fall through to the body.
-    }
+    const resolved = resolvePlanCriteriaForReview(taskId, join(repoRoot, "plan", "tasks.yaml"));
+    criteria = resolved.criteria;
+    if (resolved.source) source = resolved.source;
+    taskDeclaredFiles = resolved.taskDeclaredFiles;
+    openTaskIds = resolved.openTaskIds;
+    resolverDivergence = resolved.divergence;
   }
   if (criteria.length === 0) {
     const fromBody = parseAcceptanceBlock(body);
@@ -11773,6 +11834,19 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   const runId = `review-PR${view.number}-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: taskId ?? `PR-${view.number}`, step, lane: "review", ...extra });
+
+  // W1-T2315: name the divergence rather than let it pass silently into the body fallback above —
+  // a trailer that resolved nothing because the plan could not be LOADED is a different fact, with
+  // a different remedy, than a body carrying no trailer at all. Ledgered (never a reason to fail
+  // this review) so whoever reconciles the gate and this resolver has the id and the plan's own
+  // error to work from, instead of rediscovering it from a truncated `## Acceptance` verdict.
+  if (resolverDivergence) {
+    log("review.resolver_divergence", { task_id: resolverDivergence.taskId, reason: resolverDivergence.reason });
+    console.log(
+      `### rmd review: plan resolver diverged from the CI gate for ${resolverDivergence.taskId} — ` +
+        `${resolverDivergence.reason} (falling back to the PR body; see review.resolver_divergence in the ledger)`,
+    );
+  }
 
   console.log(`### rmd review PR #${view.number} — criteria from ${source}`);
 
