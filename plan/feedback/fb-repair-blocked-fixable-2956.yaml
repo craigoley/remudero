@@ -24,7 +24,7 @@ raw: >-
   2026-08-27T03:31:01.853Z: required checks red — ci-log fix, strike 1/2
 attachments: []
 origin: repair#blocked-fixable
-status: proposed
+status: accepted
 reply_to: null
 proposal_pr: https://github.com/craigoley/remudero/pull/3150
 summary:
