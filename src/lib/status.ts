@@ -248,6 +248,14 @@ export interface PrRef {
    * that needs it treats the branch as unowned, the same fail-soft discipline as the rest.
    */
   headRefName?: string;
+  /**
+   * The PR's raw body text (W1-T2392) — rides the SAME batched `gh pr list` fetch `title` and
+   * `headRefName` already ride, at zero extra cost (see `buildBatchedGithub`'s own `prBody`
+   * comment: "`body`/`headRefName`/`title`" all come off the one list call, unlike
+   * `changedFiles`). Carried so {@link indexProseNamedTaskIds} can read prose without a second
+   * fetch. Optional like every sibling here — omitted ⇒ the prose index sees the title alone.
+   */
+  body?: string;
 }
 
 /**
@@ -263,6 +271,16 @@ export type Phase = "recon" | "implement" | "review" | "fix-rung";
 /** One task's projected merge-state, derived from GitHub (never from yaml). */
 export interface StatusProjection {
   taskId: string;
+  /**
+   * W1-T2392 — A MERGED BUILD NOBODY CREDITED, REPORTED AND NOTHING ELSE. Present only on a
+   * projection that is NOT merged (so all three credit surfaces came back empty) when some merged
+   * PR touching `src/` names this task in its own prose. It changes NO decision: `merged` stays
+   * false, the task stays as dispatchable as it was, and every consumer that does not read this
+   * field behaves byte-identically. A WARN, never a block — the shard forbids a blocking check
+   * outright, because all three surfaces are empty on 30.1% of recent builds and twelve of those
+   * thirty-one are standalone repairs that name no task at all.
+   */
+  uncreditedBuild?: UncreditedBuildWarning;
   /**
    * Derived status label in the plan's vocabulary. DELIBERATELY stays within
    * {@link TaskStatus}'s closed set (never a new enum value) even after W1-T155's
@@ -803,6 +821,14 @@ export interface DeriveDeps {
    * sleep (mirrors {@link DeriveDeps.now}). Defaults to {@link DEFAULT_LIVENESS_BOUND_MS}.
    */
   livenessBoundMs?: number;
+  /**
+   * W1-T2392 — id -> the merged PRs naming it in their own prose, built ONCE by
+   * {@link projectPlan} from the merged list it already fetches for W1-T257's batching. Supplied
+   * rather than derived here on purpose: a second `listMergedHeadBranches()` call would break
+   * W1-T257's own guard, which counts batched fetches. Absent ⇒ {@link
+   * StatusProjection.uncreditedBuild} is never set and derivation is exactly as it was.
+   */
+  proseNamedTaskIds?: Map<string, UncreditedBuildWarning[]>;
   /**
    * THE INFLIGHT-LOCK ANCHOR (the third disjunct beside `hasOpenPr`/`recentActivity`): the
    * task's current in-flight lock holder, or `null` when no lock is held. ABSENT ⇒ SKIP —
@@ -3521,6 +3547,14 @@ export function deriveStatus(task: Task, deps: DeriveDeps): StatusProjection {
     }
   }
 
+  // W1-T2392: reaching here already proves NOT merged, i.e. every credit path came back empty —
+  // so this only ever asks the remaining question, "did a build for this land anyway?". The index
+  // is SUPPLIED by `projectPlan` off the merged list it already fetched, never fetched again here:
+  // W1-T257's guard counts batched calls and a second one would break it. Absent the dep (every
+  // per-task caller) this is silent and derivation is byte-identical to before.
+  const uncredited = uncreditedBuildWarning(task.id, deps.proseNamedTaskIds, deps.github.changedFiles?.bind(deps.github));
+  if (uncredited) projection.uncreditedBuild = uncredited;
+
   const escalation = resolveEscalation(ledgerLines, task.id, deps.github);
   if (escalation) {
     projection.needsHuman = true;
@@ -3980,8 +4014,12 @@ export function projectPlan(
       }
     }
     const captured = byTask;
+    // W1-T2392: the SAME `allMerged` rows, walked once more in memory for the prose index — no
+    // second fetch, and skipped entirely when the batched read failed (`null`).
+    const prose = allMerged !== null ? indexProseNamedTaskIds(allMerged) : undefined;
     effectiveDeps = {
       ...effectiveDeps,
+      ...(prose ? { proseNamedTaskIds: prose } : {}),
       mergedHeadBranches: captured ? (taskId: string) => captured.get(taskId) ?? [] : () => null,
     };
   }
@@ -5180,7 +5218,8 @@ export function buildBatchedGithub(
     return cache;
   };
 
-  const asRef = (p: BatchedPr): PrRef => ({ number: p.number, url: p.url, state: p.state, title: p.title, headRefName: p.headRefName });
+  // W1-T2392: `body` rides along for the prose index — already on the row, no extra fetch.
+  const asRef = (p: BatchedPr): PrRef => ({ number: p.number, url: p.url, state: p.state, title: p.title, headRefName: p.headRefName, body: p.body });
   // W1-T2387 — the COMMIT surface, memoized and lazy; mirrors {@link ghGateway}'s own fallback
   // exactly (same doc, same precedence). Built at most ONCE per gateway instance and only after a
   // task has actually missed on the body index, so a board whose PRs all carry the body trailer
@@ -5400,4 +5439,97 @@ export function buildBatchedGithub(
       return lastIssueFetchFailureReason;
     },
   };
+}
+
+// ── W1-T2392 — A BUILD THAT MERGED WITH NO CREDIT ON ANY SURFACE ─────────────────────────────
+
+/**
+ * W1-T2392 — WHAT A MERGED, UNCREDITED BUILD LOOKS LIKE ONCE SOMEONE NOTICES.
+ *
+ * A REPORT, NEVER A CREDIT (the shard's Q2). Carrying this on a projection changes no merge
+ * state, no dispatch decision and no disposition: `StatusProjection.merged` is untouched and the
+ * task stays exactly as dispatchable as it was. Crediting from prose would be the over-crediting
+ * W1-T2387 was required to rule out — a task credited wrongly is never built at all, which is
+ * strictly worse than one built twice.
+ */
+export interface UncreditedBuildWarning {
+  /** The merged PR that names this task in its own prose. */
+  prNumber: number;
+  prUrl: string;
+  /** Which prose surface carried the id. Measured at head: 5 of 19 name it in the title, 14 only
+   *  in the body — so a title-only reader would have missed #3095, the instance this exists for. */
+  namedIn: "title" | "body";
+}
+
+/** W1-T2392: the anchored id form, a `[0-9]` class and never `\d`, so `W1-T239` never matches a
+ *  mention of `W1-T2392`. Built per lookup rather than per candidate — see
+ *  {@link indexProseNamedTaskIds} for why the scan is inverted. */
+function proseNamesTaskId(text: string | undefined, taskId: string): boolean {
+  if (!text) return false;
+  const at = text.indexOf(taskId);
+  if (at < 0) return false;
+  return new RegExp(`${taskId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}([^0-9]|$)`).test(text);
+}
+
+/**
+ * W1-T2392 — THE SCAN IS INVERTED, AND THAT IS A COST DECISION RATHER THAN A STYLE ONE.
+ *
+ * The naive shape asks, per task, "does any merged PR name me?" — roughly 2,400 merged PRs times
+ * roughly 900 plan tasks, over bodies averaging several kilobytes. That is tens of gigabytes of
+ * scanning per projection and would make `deriveStatus` unusable.
+ *
+ * So this walks the merged set ONCE and returns id -> the PRs naming it, and every task then does
+ * a map lookup. Titles and bodies are both read because the measurement says they must be: at
+ * head, of the 19 uncredited builds naming an id, only 5 name it in the TITLE — #3095, the
+ * instance this task exists for, names W1-T2379 in its body alone.
+ */
+export function indexProseNamedTaskIds(prs: readonly PrRef[]): Map<string, UncreditedBuildWarning[]> {
+  const ID = /W1-T[0-9]+/g;
+  const out = new Map<string, UncreditedBuildWarning[]>();
+  for (const pr of prs) {
+    const seen = new Map<string, "title" | "body">();
+    for (const m of (pr.title ?? "").matchAll(ID)) seen.set(m[0], "title");
+    for (const m of (pr.body ?? "").matchAll(ID)) if (!seen.has(m[0])) seen.set(m[0], "body");
+    for (const [id, where] of seen) {
+      // Re-assert ANCHORED, because the cheap global scan above matches a prefix: `W1-T239`
+      // would otherwise be credited a mention of `W1-T2392`.
+      const text = where === "title" ? pr.title : pr.body;
+      if (!proseNamesTaskId(text, id)) continue;
+      const arr = out.get(id) ?? [];
+      arr.push({ prNumber: pr.number, prUrl: pr.url, namedIn: where });
+      out.set(id, arr);
+    }
+  }
+  return out;
+}
+
+/**
+ * W1-T2392 — DOES THIS TASK HAVE A MERGED BUILD NOBODY CREDITED?
+ *
+ * THE CREDIT CHECK IS NOT RE-IMPLEMENTED HERE, and that is the point. This is only ever consulted
+ * on a projection that is NOT merged, and "not merged" already means every one of the three paths
+ * came back empty — `findMergedByTrailer`'s body trailer, `findMergedByHeadBranch`'s
+ * `run-<id>-<digits>` head, and W1-T2387's commit surface. So the all-surfaces-empty condition the
+ * shard scopes this to is exactly the caller's own state, and no fourth path is built.
+ *
+ * THE PLAN-ONLY REFUSAL IS LOAD-BEARING, not hygiene. The single largest naming population is
+ * shard FILINGS, whose titles name their own id by convention (`chore(plan): file … (W1-T2392)`).
+ * Without this every filed task would warn about the PR that filed it. `changedFiles` is the same
+ * seam rung (c)'s own plan-only refusal uses (W1-T413), and it fails OPEN exactly as it does
+ * there: an unreadable file list yields no warning rather than a fabricated one.
+ */
+export function uncreditedBuildWarning(
+  taskId: string,
+  named: Map<string, UncreditedBuildWarning[]> | undefined,
+  changedFiles: ((prUrl: string) => string[] | undefined) | undefined,
+): UncreditedBuildWarning | undefined {
+  const candidates = named?.get(taskId);
+  if (!candidates || candidates.length === 0) return undefined;
+  if (!changedFiles) return undefined; // no way to tell a build from a filing — say nothing
+  for (const c of candidates) {
+    const files = changedFiles(c.prUrl);
+    if (files === undefined) continue; // unreadable — fail OPEN, never fabricate
+    if (files.some((f) => f.startsWith("src/") && !f.endsWith(".test.ts"))) return c;
+  }
+  return undefined;
 }

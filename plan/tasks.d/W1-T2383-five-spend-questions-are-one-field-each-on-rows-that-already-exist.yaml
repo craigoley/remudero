@@ -1,0 +1,207 @@
+- id: W1-T2383
+  title: "FIVE QUESTIONS ABOUT THE FLEET'S OWN SPEND ARE UNANSWERABLE AND FOUR OF THEM ARE ONE FIELD ON A ROW THAT ALREADY EXISTS — 276 risk_judge rows carry no cost so a deliberately cheap tier's spend cannot be read, max_turns is absent on 233 of 233 fix.done rows against 629.99 US dollars of fix-rung spend, every one of 544 run.start rows reads implement so triage and retro cost nothing observable, and no recon reuse row exists so the invalidation rate has no denominator"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 20.00
+  files: [src/lib/risk-judge.ts, src/run-task.ts, test/spend-observability-fields.test.ts]
+  origin: "operator-brief#fleet-spend-observability-2026-08-27"
+  plan_refs: ["W1-T2344", "W1-T2238", "W1-T458", "W1-T1066"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-08-27 over 499 verdict rows, 544 run.start rows and 1,103 phase rows spanning
+    2026-08-08 to 2026-08-27, read off the live ledger file together with 36 rotations sorted
+    before reading rather than globbed.
+
+    THE CORPUS IS COMPLETE, AND THE REASON IS NOT THE ONE FIRST GIVEN. `verdict` and `run.start`
+    ARE members of `DECISION_RELEVANT_LEDGER_STEPS`, so those two survive rotation by
+    registration. THE PHASE FAMILY IS NOT: `implement.done`, `recon.done` and `fix.done` are all
+    absent from that Set, and an earlier statement that they were registered was WRONG and is
+    corrected here rather than carried. What makes the phase corpus complete anyway is a
+    measurement, not a membership: 398 of 499 verdicts carry an `implement.done` row, the 101 that
+    do not are 94 `blocked_containment` plus 4 `blocked_isolation`, 2 `pr_attribution_failed` and
+    1 `failed`, and ZERO of them are merged, blocked_ci or no_pr. Coverage reads 100 percent on the
+    OLDEST days and dips only on the newest, which is the opposite of what rotation pruning does.
+    The gap is runs that never reached a phase, not rows that were dropped.
+
+    ── Q1. THE FIVE, RANKED, AND FIELDS SEPARATED FROM STEPS ──────────────────────────────────
+
+    THEY ARE NOT EQUAL AND MUST NOT BE PROPOSED AS THOUGH THEY WERE. Four are FIELDS on rows the
+    fleet already writes. One is a NEW STEP. The costs differ and so does what each buys.
+
+    (1) FIELD, AND THE ONLY ONE GATING A LIVE DESIGN QUESTION. `cost_usd` on
+    `risk_judge.decision`. There are 276 risk-judge rows, 249 decisions and 27 escalations, and
+    ZERO carry a cost; none carries a mount either. `resolveRiskJudgeMount` DELIBERATELY takes the
+    cheapest configured tier at a floor, and that is a designed choice whose consequence nobody can
+    read: whether the cheap tier is producing verdicts worth their price is not derivable from
+    anything on disk. Every other item on this list buys an accounting line; this one buys the
+    answer to a question the code was written to raise.
+
+    (2) FIELD. `max_turns` on `fix.done`, absent on 233 of 233 rows. The fix rung spent 629.99 US
+    dollars over the window, on a surface the verdict rows do not contain at all: only 16 of 109
+    fix run ids also carry a verdict, so fix spend is invisible to any reader who joins on
+    verdicts. The turn count IS recorded; the cap it ran under is not, so NOBODY CAN TELL WHETHER A
+    FIX RUN EVER HIT ITS CAP. This matters beyond accounting because W1-T2344 records that an
+    exhausted budget has a readable signature — a run one turn over its cap — and that signature is
+    only visible when the cap sits beside the count. W1-T2238 already established the discipline:
+    the cap is carried as an INPUT so a historical row stays checkable after the constant moves.
+
+    (3) ROWS ON AN ALREADY-REGISTERED STEP. A `run.start` for the triage and retro lanes. All 544
+    run.start rows read `type: implement`, and triage and retro emit neither a run.start nor a
+    verdict, so THEIR COST IS INVISIBLE and only the within-run phase split can be measured today.
+    The volume is small and measured: 91 distinct triage task ids and 16 retro run ids over the
+    window, 5.6 runs a day between them.
+
+    (4) FIELD. `compaction_events` on `implement.done`. The key is declared and reads empty on
+    every row, so it could not be ranked as a cost predictor at all when turns, mount tier and
+    recon turns were. Ranked LAST of the four fields because turns already explain 82 percent of
+    cost variance, so the headroom this could occupy is small by construction.
+
+    (5) A NEW STEP, WHICH IS WHY IT IS SEPARATE. `recon.reused`. There is no reuse row of any kind.
+    CONTROLLED: `recon.absent` reads 77 and `recon.invalidated` reads 7 on the same corpus, so the
+    family IS emitted and the absence is a missing member rather than a search that could not see.
+    Without a reuse row the invalidation count has NO DENOMINATOR, so 7 invalidations cannot be
+    turned into a rate. Ranked last overall: the invalidation cost is already measured at roughly
+    0.38 US dollars a discarded recon, about 2.66 US dollars across every invalidation on record,
+    so the denominator would most likely confirm a non-problem.
+
+    ── Q2. THE LEDGER GROWTH, PRICED BEFORE ANYTHING IS PROPOSED ──────────────────────────────
+
+    THIS FILE IS ON THE DISPATCH PATH AND ON EVERY CONSOLE POLL, so every retained step makes
+    `readLedgerLines` slower and the delta is priced here rather than waved at.
+
+    THE FOUR FIELDS ADD ZERO LINES. A field on a row already being written costs a few bytes on
+    that row and no new line at all, so items 1, 2 and 4 have no line delta and need no retention
+    decision. That is the whole reason they rank above the step.
+
+    THE ONE ROW ADDITION IS 5.6 LINES A DAY. Triage and retro run.start rows join a step that is
+    ALREADY registered, taking `run.start` from 28.7 to 34.3 rows a day, still far under the 200
+    newest per step that retention keeps. Rotation runs at a measured 7.03 hour median interval
+    against a median rotated file of 11,970 lines, so 5.6 a day is 1.6 lines resident per window,
+    which is 0.014 percent of a file.
+
+    THE NEW STEP NEEDS A RETENTION DECISION AND THE RECOMMENDATION IS NOT TO RETAIN IT. Bounded
+    above by the recon rate of 23.3 a day, an unretained `recon.reused` is 6.8 lines resident per
+    rotation window, 0.057 percent of a median file. It should stay OUT of the never-rotated core
+    because it is a rate statistic and not a decision input, which is the same rule that keeps
+    `panel.escalation_marked_handled` out: a step belongs in that Set only while a real deciding
+    reader consults it.
+
+    ── Q3. WHAT THIS IS NOT ───────────────────────────────────────────────────────────────────
+
+    THIS PROPOSES NO CAP CHANGE, NO MOUNT CHANGE AND NO TUNING OF ANY KIND. The efficiency
+    measurement it follows concluded the run process is ALREADY EFFICIENT: volume more than doubled
+    while cost per run fell 28 percent, turns explain 82 percent of cost variance against 2.5
+    percent for the mount tier, and the 400-turn implement budget is correctly generous with zero
+    of 422 runs reaching it and exactly one getting within 20 percent.
+
+    WHAT THIS BUYS IS THE ABILITY TO ANSWER, NOT A CHANGE. It should be said plainly and up front
+    that the answers may all be "nothing to change" — a cheap risk-judge tier that turns out to be
+    earning itself, a fix rung that never approaches its cap, triage and retro that cost very
+    little. An observability task that discovers nothing is a task that did its job; the defect it
+    fixes is that today the question cannot be put at all.
+
+    ── WHAT IS OWNED ELSEWHERE AND IS NOT THIS SHARD'S ────────────────────────────────────────
+
+    THE CI-RELIABILITY HALF IS NOT HERE. Measured at 46.7 percent of all fleet spend, of which 97.4
+    percent was work that later merged, it is the largest single line in the budget and it is
+    already owned: #3074 and #3071 are open against it. Nothing here touches it and nothing here
+    should be read as an alternative to it. The probe's one-turn-over property belongs to W1-T2344
+    and the uncredited-merge re-dispatch belongs to W1-T458; both are cited, neither is re-filed.
+
+    ── WHAT MUST NOT CHANGE ───────────────────────────────────────────────────────────────────
+
+    NOTHING PACES, THROTTLES OR SLEEPS — W1-T1066 records a polling loop that locked the operator
+    out of his own repository for ninety minutes. NO GATE IS WEAKENED AND NO BOUND IS TUNED. THE
+    FAIL-CLOSED CONTAINMENT VERDICT STAYS, and a run refused by the probe must keep being refused
+    whatever its spend turns out to be. Adding a cost field must never become a reason to spend
+    differently without a separate, measured decision the operator gates.
+
+    RISK BAND. `risk: high` is set UP FRONT and is Rule 19's SPAN rather than blast radius:
+    `files:` crosses two source stems, the risk judge and the dispatch entrypoint. The blast radius
+    is separately LOW — every change is an added field or an added row on a path that already runs,
+    and no predicate, cap or verdict is touched.
+
+    ── AMENDED 2026-08-27: RANK 4 IS ALREADY BUILT — DO NOT BUILD IT AGAIN ───────────────────────
+
+    ITEM (4) ABOVE IS WRONG IN TWO WAYS, AND THIS SECTION RECORDS BOTH SO NOBODY SPENDS A DISPATCH
+    REDISCOVERING THEM. It says `compaction_events` "is declared and reads empty on every row, so it
+    could not be ranked as a cost predictor at all". The first half is right about the ROWS and
+    wrong about the CODE; the second half stopped being true two days before this shard was written.
+
+    (A) THE FIELD IS FULLY WIRED END-TO-END, BY SYMBOL. `detectCompactionEvents`
+    (`src/lib/compaction.ts`) matches the SDK's own `{type:"system", subtype:"compact_boundary"}`
+    message; `collectWorkerResult` (`src/lib/worker.ts`) pushes each match into `compactionEvents`;
+    `WorkerResult` returns it; and `workerLedgerFields` (`src/lib/worker.ts`) writes
+    `compaction_events: r.compactionEvents` onto the row. IT IS NOT A DECLARED-AND-NEVER-WRITTEN
+    KEY: MEASURED over a three-form ledger union of 4,374,033 lines (666 `.gz` + 6 plain archives +
+    the live file, each form's line count printed as its own coverage control), 1,498 rows CARRY the
+    key. Rank 4 is therefore not a field to add. There is nothing to build.
+
+    (B) THE ZERO IS STRUCTURAL, NOT MISSING. All 1,498 are empty for one reason: `spawnWorker` never
+    sets `autoCompactEnabled`, so `compactionConfigured` — read as
+    `(options as Record<string, unknown>).autoCompactEnabled === true` — is FALSE BY CONSTRUCTION,
+    and a call that never compacts emits no boundary to detect. AND A TEST ENFORCES IT:
+    `test/compaction-zero-is-unexplained.test.ts` asserts the Options construction never assigns
+    `autoCompactEnabled`, in its own words because "this task reads an existing channel, it does not
+    turn one on". So the empty reading is the CORRECT one, and making it non-empty is not
+    observability work at all.
+
+    (C) THE PREMISE WAS REPAIRED BEFORE THIS SHARD WAS WRITTEN. W1-T2245 shipped `ec7de683` (#2829,
+    2026-08-25) adding `compaction_configured` and `compaction_failures` to the SAME line, precisely
+    so a reader could tell DISABLED from NEVER-NEEDED from FAILED. `worker.ts`'s own doc says it:
+    "all three now ride this one line, so the zero explains itself without a second query". The
+    ambiguity item (4) rests on — that the zero could not be interpreted, and so the field could not
+    be ranked — was already gone when this shard was filed on 2026-08-27.
+
+    (D) SCOPE CORRECTION. Item (4) scopes the field to `implement.done`. MEASURED over the same
+    union, `compaction_events` rides SEVEN steps: `recon.done` 483, `review.reviewer` 462,
+    `implement.done` 427, `triage.synthesized` 74, `implement.resumed` 33, `retro.synthesized` 10,
+    `inbox.draft_synthesized` 9. `implement.done` is 427 of 1,498 — UNDER A THIRD of the population.
+    Any future reader of this field must not scope itself to one step.
+
+    (E) THE LIMIT OF THIS EVIDENCE, STATED PLAINLY RATHER THAN LEFT TO BE DISCOVERED. NO WORKER ROW
+    NEWER THAN 2026-08-14T15:04:16Z SURVIVES IN ANY FORM — rotation retains 200 lines per step, and
+    every worker row written since has aged out — so `compaction_configured` reads 0 across the whole
+    union and COULD NOT BE CONFIRMED PRESENT POST-#2829 FROM THE LEDGER. (A), (B) and (C) rest on
+    SOURCE, not on rows; only the 1,498-row population count and the seven-step split in (D) rest on
+    the ledger, and those predate #2829 without depending on it. A future reader wanting ledger
+    confirmation of `compaction_configured` must drive a fresh worker spawn rather than query
+    history.
+
+    THE OPEN QUESTION THIS DOES NOT ANSWER, AND MUST NOT. Whether auto-compaction SHOULD be enabled
+    is a TUNING decision and is left to the operator. It is out of scope here twice over: this
+    shard's own criterion says observability is not tuning, and the test in (B) actively refuses any
+    change that would turn the channel on. Recorded as an operator question, proposed as nothing.
+
+    RANK 5 (`recon.reused`) IS UNTOUCHED BY THIS AMENDMENT — still unbuilt, still a new step, and
+    this shard's own recommendation not to retain it stands.
+
+    THIS AMENDMENT IS PURELY ADDITIVE: no criterion is added, removed or edited, and `acceptance`,
+    `files`, `title` and `status` are byte-identical through `loadPlan`.
+  acceptance:
+    - claim: "the risk judge records its own spend on the decision row it already writes, so a deliberately cheap tier can be priced"
+      proof: "unit test: test/spend-observability-fields.test.ts"
+    - claim: "a fix run records the cap it ran under beside the turns it used, so an exhausted fix is distinguishable from a merely long one"
+      proof: "unit test: test/spend-observability-fields.test.ts"
+    - claim: "a triage or a retro run records its start the way an implement run already does, so its lane is not invisible"
+      proof: "unit test: test/spend-observability-fields.test.ts"
+    - claim: "a reused recon artifact is recorded, so the invalidation count acquires a denominator"
+      proof: "unit test: test/spend-observability-fields.test.ts"
+    - claim: "the compaction count is populated rather than declared and left empty"
+      proof: "unit test: test/spend-observability-fields.test.ts"
+    - claim: "the recon turn cap is unchanged by this task, since observability is not tuning"
+      proof: "grep: export const RECON_MAX_TURNS = 20 in src/run-task.ts"
+    - claim: "the risk judge still resolves the cheapest configured tier, since measuring a floor is not moving it"
+      proof: "grep: export function resolveRiskJudgeMount in src/lib/risk-judge.ts"
+    - claim: "nothing added paces or throttles or sleeps a call"
+      proof: "unit test: test/spend-observability-fields.test.ts"
+  falsifier: |
+    If a reader can already price a risk-judge decision and tell an exhausted fix run from a long
+    one using only rows the fleet writes today, then the questions this task exists to unblock are
+    already answerable and it must be closed rather than implemented. The check is direct: a
+    risk_judge row carrying a cost, and a fix.done row carrying the cap beside its turn count.

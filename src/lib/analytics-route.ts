@@ -48,6 +48,7 @@
  */
 
 import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { isQueueDispatchRunStart } from "./ledger.js";
 import { dirname, join } from "node:path";
 import { gunzipSync } from "node:zlib";
 import type { Route } from "./service.js";
@@ -241,7 +242,10 @@ function deriveTaskDurations(lines: ReadonlyArray<Record<string, unknown>>): {
   const starts = new Map<string, { ts: number; taskId: string }>();
   const verdicts = new Map<string, number>();
   for (const l of lines) {
-    if (l.step !== "run.start" && l.step !== "verdict") continue;
+    // W1-T2383 rank 3: a lane `run.start` has no verdict BY DESIGN (this task deliberately
+    // adds no verdict row for triage/retro), so pairing it here would land every lane run in
+    // `noTerminalCount` below. Queue dispatches only.
+    if (!isQueueDispatchRunStart(l) && l.step !== "verdict") continue;
     const runId = str(l.run_id);
     const ts = typeof l.ts === "string" ? Date.parse(l.ts) : NaN;
     if (runId === undefined || !Number.isFinite(ts)) continue;

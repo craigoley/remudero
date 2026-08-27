@@ -1,0 +1,146 @@
+- id: W1-T2392
+  title: "A BUILD CAN MERGE WITH NO CREDIT ON ANY SURFACE AND THEN GETS BUILT AGAIN — measured at head, 31 of 102 merged src-touching PRs over three days match none of the three credit paths, 19 of those 31 name a task id in their own prose without an anchored trailer, and four ids in two days were re-dispatched into work that had already landed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 25.00
+  files: [src/lib/status.ts, test/uncredited-build-detection.test.ts]
+  origin: "operator-brief#uncredited-build-2026-08-27"
+  plan_refs: ["W1-T2387", "W1-T256", "W1-T2370", "W1-T2318", "W1-T2323", "W1-T2379"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-08-27 at origin/main c77bb12d, over the 268 pull requests merged between
+    2026-08-25T00:00:00Z and 2026-08-27T15:30Z. Read from the merge commits and from each pull
+    request's own stored body over REST; no ledger claim is made here at all.
+
+    (1) THE FOUR INSTANCES THAT PROMPTED THIS. W1-T2318 spent four dispatches before #3059 recorded
+    that the work had already shipped. W1-T2323 spent six before #3093. W1-T2326 is looping at
+    filing time. W1-T2379 merged as #3095 and was rebuilt by #3100 for 18.53 US dollars. The
+    pattern is one thing: a build lands, no surface records it, and the dispatcher offers the task
+    again because nothing it reads says otherwise.
+
+    (2) THREE CREDIT PATHS EXIST AND ALL THREE CAN BE EMPTY AT ONCE. `findMergedByTrailer` reads
+    the pull request BODY. `findMergedByHeadBranch` (W1-T256) matches a head named
+    `run-<taskId>-<digits>`. W1-T2387's union (#3102, open at filing) adds the COMMIT surface. A
+    hand-built pull request on a `fix/...` branch carrying no anchored trailer satisfies NONE of
+    them.
+
+    (3) THE POPULATION, AT HEAD.
+
+      merged pull requests over the window                    268
+      of those TOUCHING src/ and not a test file, a BUILD      102
+        credited by the PR BODY trailer                         68   66.7 percent
+        credited by the COMMIT trailer                          71   69.6 percent
+        credited by the head branch shape                       67   65.7 percent
+        credited by ANY of the three                            71   69.6 percent
+        ALL THREE EMPTY AT ONCE                                 31   30.4 percent
+
+    NEARLY A THIRD OF EVERY BUILD THAT MERGED IN THREE DAYS IS UNCREDITED ON EVERY SURFACE.
+
+    (4) AND OF THOSE 31, WHICH ARE VISIBLY BUILDS OF SOMETHING. Nineteen, 61.3 percent, NAME A
+    TASK ID IN THEIR OWN TITLE OR BODY PROSE while carrying no anchored trailer anywhere. Twelve,
+    38.7 percent, name no id at all. That split is the whole of question two below and it is the
+    reason this shard proposes what it proposes.
+
+    (5) CONTROLLED IN BOTH DIRECTIONS, because a query that found nothing would look identical to
+    a defect that had gone away. The uncredited query FINDS #3095 — body false, commit false, head
+    branch false, and its prose names W1-T2379 — which is the measured instance the brief supplied.
+    The same query does NOT sweep up #3043, whose body and commit both carry a trailer. A query
+    that could not separate those two would be measuring its own shape rather than the fleet's.
+
+    (6) A SURFACE FACT WORTH CARRYING, BECAUSE IT BOUNDS WHAT W1-T2387 CAN BUY. The body and the
+    commit surfaces are nearly the same set here: 68 and 71, with the commit adding exactly THREE
+    builds the body does not already credit, and ZERO going the other way. So the union W1-T2387
+    ships is real and is not the remedy for this: it moves the credited share from 69.6 to 69.6
+    percent, because every body-credited build in this window is already commit-credited too.
+    THE 31 ARE NOT WAITING ON A FOURTH SURFACE. They carry no id anywhere a parser looks.
+
+    (7) A MEASUREMENT HAZARD RECORDED SO THE NEXT READER DOES NOT REPEAT IT. A first pass read the
+    merge commit message as a proxy for the pull request body and reported the body surface at
+    ZERO. That was an artefact twice over: this repository squash-merges, so #3095's merge commit
+    is 79 bytes of subject with the body discarded entirely; and the extraction itself mangled its
+    own line separators. Both were caught by the #3043 control, not by inspection. THE BODY AND
+    THE COMMIT ARE DIFFERENT SURFACES AND MUST BE READ SEPARATELY.
+  design: |
+    (i) Q2 -- IS A GATE THE RIGHT SHAPE. NO, AND THE NUMBERS SAY SO PLAINLY.
+
+    The natural remedy is to refuse a src-touching pull request whose body carries no trailer.
+    Measured, that refuses 31 of 102 builds -- 30.4 percent of everything that landed in three
+    days, including work that merged cleanly and was correct. Among the refused would be twelve
+    pull requests that name no task id anywhere and read, from their own titles, as standalone
+    repairs rather than builds of a queued task: creating a marker directory instead of assuming
+    it, naming a placeholder form for an example id, cutting a type-only import edge. A gate that
+    refuses those has not found a defect; it has invented a paperwork requirement for work that
+    never had a task.
+
+    SO THE ANSWER IS A WARN, AND A NARROW ONE. The nineteen that name an id in their own prose
+    while carrying no anchored trailer are a different population entirely: they are visibly
+    builds of something, they are mechanically separable from the other twelve, and they are 18.6
+    percent of builds rather than 30.4. THAT is the signal worth surfacing. A reader that says
+    "this merged diff names W1-T2379 and no surface credits it" is precise; one that says "this
+    merged diff has no trailer" is noise a third of the time.
+
+    THE SHARD DOES NOT PROPOSE A BLOCKING CHECK AND A BUILD THAT SHIPS ONE HAS ANSWERED A
+    DIFFERENT QUESTION.
+
+    (ii) Q3 -- THE CHEAPEST DETECTION POINT, WHICH IS AFTER THE MERGE RATHER THAN BEFORE IT.
+
+    The miss is not observable pre-merge. Nothing about an open pull request proves it implements
+    a queued task; the evidence only exists once the diff has landed and a dispatch has been spent
+    against it. That is the same shape W1-T2387 records, and it is why a pre-merge gate is both
+    expensive and late.
+
+    `deriveStatus` (`src/lib/status.ts`) IS THE PLACE, and its own construction is the argument.
+    It already loads the plan, already resolves each task's merge credit through the three paths
+    above, and already produces the `StatusProjection` every consumer reads -- the drain's dispatch
+    decision, the board's rendering, the sweep's dispositions. A signal carried there reaches all
+    of them without a second reader being invented. The drain also reads the plan and could carry
+    it, but the drain is ONE consumer: putting it there would leave the board and the sweep still
+    blind, and would put a report inside the code path that decides whether to spend money.
+
+    WHAT IT WOULD READ. For a task the plan still shows as open, a merged pull request whose diff
+    names it in prose and whose three credit surfaces are all empty. Every input is already in
+    hand at that point; nothing new is fetched.
+
+    (iii) THE HUMAN CAUSE IS RECORDED AND IS NOT THE FIX. All four briefs that produced these
+    instances said "no trailer". That instruction is CORRECT for a plan-only filing, which files a
+    task rather than building one, and WRONG for a build. The convention is therefore not
+    ambiguous in the abstract -- it is ambiguous exactly where the two modes meet, and it failed
+    four times in two days at that seam. A convention with a four-in-two-days failure rate is not
+    a convention problem, and a build that ships a clearer wording has fixed nothing. NAMING THIS
+    HERE IS DELIBERATE SO THAT NOBODY PROPOSES DOCUMENTATION AS THE REMEDY.
+
+    (iv) WHAT IS OWNED ELSEWHERE AND IS NOT THIS SHARD'S. The commit-surface union is W1-T2387,
+    open as #3102 at filing. The head-branch path is W1-T256 and is unchanged. The unverifiable
+    retry is W1-T2370. THIS SHARD OWNS ONLY THE CASE WHERE ALL SURFACES ARE EMPTY AT ONCE, and it
+    proposes no change to any of the three paths themselves.
+
+    (v) RULE 19 BAND, SET UP FRONT. `risk: high` is the SPAN reading and carries no claim about
+    blast radius: `files:` names two stems as `sizingViolation` counts them, `status` and
+    `uncredited-build-detection`, and that pairing is refused at medium. The blast radius is
+    separately LOW -- the proposal is a report on a projection that already exists, taking no
+    action and refusing nothing.
+  acceptance:
+    - claim: "a merged build that names a queued task in its prose while every credit surface is empty is reported"
+      proof: "unit test: test/uncredited-build-detection.test.ts"
+    - claim: "a build credited on any one of the three surfaces is not reported, so the signal is not merely every trailerless PR"
+      proof: "unit test: test/uncredited-build-detection.test.ts"
+    - claim: "a merged PR that names no task id at all is not reported, since it is not visibly a build of anything"
+      proof: "unit test: test/uncredited-build-detection.test.ts"
+    - claim: "the report takes no action and refuses nothing, so no dispatch or merge decision changes"
+      proof: "unit test: test/uncredited-build-detection.test.ts"
+    - claim: "the three existing credit paths are unchanged by this task"
+      proof: "grep: export function deriveStatus in src/lib/status.ts"
+    - claim: "nothing added paces or throttles or sleeps a call"
+      proof: "unit test: test/uncredited-build-detection.test.ts"
+  falsifier: |
+    If the uncredited-build population at head is dominated by pull requests that name no task id
+    anywhere, then there is no reliable signal to report and this task must be closed rather than
+    implemented: reporting on the trailerless population alone would be a paperwork check, which
+    design (i) refuses. The measurement is direct — re-run the split of merged src-touching PRs
+    into those naming an id in prose and those naming none, and if the naming share falls below
+    half, the premise has gone.

@@ -115,9 +115,13 @@ function makeOrigin(feedbackId?: string): string {
 
 /** A `gh` shim answering every subcommand these runs make, so execution reaches the pushes
  *  instead of dying at the first gh call. `pr view --json headRefName` echoes back the run's
- *  OWN branch so the run-ownership guard passes. `opts.failPrList` makes `gh pr list` (the
- *  mint's `openPrTexts` enumerator, W1-T311) fail non-zero — used by the degraded-mint test
- *  below to reach the real gateway's refusal/catch path rather than its success path.
+ *  OWN branch so the run-ownership guard passes. `opts.failPrList` makes the mint's
+ *  `openPrTexts` enumerator (W1-T311) fail non-zero — used by the degraded-mint test below to
+ *  reach the real gateway's refusal/catch path rather than its success path. W1-T2324: that
+ *  enumerator (`openPrMintTexts`, src/run-task.ts) moved off `gh pr list --json ...` (GraphQL)
+ *  onto `gh api repos/.../pulls?state=open&per_page=100` (REST) — both matchers are kept below
+ *  so this shim answers either shape, since nothing here needs to know which one a given caller
+ *  still issues.
  *
  *  `bareOrigin` backs the W1-T903 REST cases (`gh api ... pulls` create/probe/single-GET) —
  *  `openPlanPr`/`readHeadShaRest`/`fetchPrLifecycle` all read this same REST surface now, never
@@ -150,6 +154,11 @@ function writeGhShim(
       opts.failPrList
         ? '  *"pr list"*) echo "gh: rate limit exceeded" 1>&2; exit 1 ;;'
         : '  *"pr list"*) echo "[]" ;;',
+      // W1-T2324: the REST shape openPrMintTexts now issues — same `opts.failPrList` toggle,
+      // same reasoning, just matched on the new argv.
+      opts.failPrList
+        ? '  *"pulls?state=open"*) echo "gh: rate limit exceeded" 1>&2; exit 1 ;;'
+        : '  *"pulls?state=open"*) echo "[]" ;;',
       // `ensureRepoDir`'s clone (only reached when `repoDir` does not exist yet — every OTHER
       // test here pre-clones it, so this case never fires for them). Real `git clone` from the
       // SAME throwaway bare origin, with repo-local identity (a bare CI runner has none) so the
