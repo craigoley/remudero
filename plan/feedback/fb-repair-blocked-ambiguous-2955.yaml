@@ -32,7 +32,19 @@ raw: >-
 attachments: []
 origin: repair#blocked-ambiguous
 status: proposed
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/3121
+summary:
+  headline: Blocked-ambiguous surface repair recurrence exceeds threshold
+  what_happened: Four repair attempts for the blocked-ambiguous surface occurred
+    in 7 days, exceeding the 3-instance threshold. All PRs passed checks but
+    could not merge; underlying cause is unknown.
+  decision: Investigate root cause of repeated surface repair attempts
+  options:
+    - label: Assign to engineering for investigation
+      consequence: Root cause analysis and permanent fix to halt recurring repairs
+    - label: Escalate as critical priority
+      consequence: Emergency response with potential system halt or override
+    - label: Gather more data before investigating
+      consequence: Monitor pattern longer; may reduce investigation scope but delays action
 expansion: null
 answered_by: null
