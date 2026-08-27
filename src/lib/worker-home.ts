@@ -848,18 +848,22 @@ export const WORKER_KEYCHAIN_SERVICE = "Claude Code-credentials";
 
 /** Named failure classes for the credential rung — queryable, not prose.
  *
- * The first four are the macOS keychain rung's own (W1-T235). The last two are the
+ * The first four are the macOS keychain rung's own (W1-T235). The next two are the
  * NON-DARWIN file store's (recon-cloud-workers-spike, stop 6): a keychain either yields a
  * secret or does not, but a file has more ways to be wrong than that, and collapsing them
  * would put this rung back in the position the whole taxonomy exists to avoid. See
- * {@link classifyWorkerCredentialFile} for which observation earns which class. */
+ * {@link classifyWorkerCredentialFile} for which observation earns which class. The last
+ * is W1-T2398's: the credential IS usable right now but its recorded expiry cannot
+ * outlive the caller's own `expectedRunMs` — a distinct fact from all of the above, none
+ * of which speak to run length at all. */
 export type WorkerKeychainReasonClass =
   | "login-keychain-locked"
   | "credential-item-missing"
   | "worker-keychain-unlock-failed"
   | "provision-failed"
   | "credential-file-unreadable"
-  | "credential-file-malformed";
+  | "credential-file-malformed"
+  | "credential-too-short-for-run";
 
 /**
  * A credential-NAMED failure out of the worker-keychain rung. Thrown BEFORE
@@ -976,6 +980,31 @@ export interface EnsureWorkerKeychainOpts extends WorkerKeychainPaths {
    * caller-supplied hint. Appended LAST — no positional caller shifts.
    */
   priorSpawnCredentialExpired?: boolean;
+  /**
+   * W1-T2398: how long (ms) the caller expects THIS run to take — the dispatcher's own
+   * estimate (e.g. the task's `budget_usd` translated to a turn/time cap), never derived
+   * in here. Omitted ⇒ behavior is BYTE-FOR-BYTE what it was before this option existed:
+   * `DEFAULT_CREDENTIAL_EXPIRY_SKEW_MS` (or `credentialExpirySkewMs`) alone is the margin,
+   * and this function never refuses on run length.
+   *
+   * Supplied, it does two things, both scoped to the ALREADY-RUNNING gate below — no new
+   * fetch, no re-authentication, no pacing/sleep of any kind:
+   *  (1) it WIDENS the effective skew fed to {@link classifyCredentialSidecar} to
+   *      `Math.max(credentialExpirySkewMs ?? DEFAULT_CREDENTIAL_EXPIRY_SKEW_MS,
+   *      expectedRunMs)`, so a credential that would expire mid-run is classified
+   *      `"expired"` and re-provisioned from the login keychain exactly as any other
+   *      expiry is — the fixed constant becomes a FLOOR, not the whole margin;
+   *  (2) AFTER that (re-)provisioning attempt — or immediately, on the steady-state path
+   *      that never needed one — it compares the credential this call is about to hand
+   *      out against `expectedRunMs` one last time and THROWS {@link WorkerKeychainError}
+   *      (`credential-too-short-for-run`) if even the freshest available copy still can't
+   *      outlast the run, refusing the spawn before it starts rather than starting one
+   *      doomed to lose auth partway through. A credential that carries no recorded
+   *      expiry is never invented one for this comparison — {@link extractCredentialExpiryMs}'s
+   *      "never invent a field" contract holds, and the check is simply skipped.
+   * Appended LAST — no positional caller shifts.
+   */
+  expectedRunMs?: number;
 }
 
 /** Why THIS call did (or didn't) provision — the switch's audit trail (W1-T265),
@@ -995,6 +1024,16 @@ export interface WorkerKeychainSummary {
   account_label?: string;
   /** `"absent"` (nothing existed) | `"identity-changed"` (mismatch) | `"skipped"` (matched, or no accountId supplied). */
   reason: WorkerKeychainProvisionReason;
+  /**
+   * W1-T2398: `recordedExpiresAt - now` for the credential THIS call is handing out,
+   * measured at the moment of the check below — independent of whether
+   * `opts.expectedRunMs` was ever supplied, so the rate this shard's own rationale
+   * could not measure from a ledger becomes answerable off-host purely by a caller
+   * logging this field. `undefined` exactly when no numeric expiry is known for this
+   * credential (no sidecar, or a credential that never carried an `expiresAt`) — never
+   * invented.
+   */
+  observedHeadroomMs?: number;
 }
 
 function classifyLoginReadError(err: unknown): WorkerKeychainReasonClass {
@@ -1004,9 +1043,14 @@ function classifyLoginReadError(err: unknown): WorkerKeychainReasonClass {
   return "provision-failed";
 }
 
-/** Default skew for the arm-2 expiry gate below: a stored token AT OR WITHIN this
- * window of its recorded `expiresAt` is treated as already stale, so a spawn never
- * races a token that expires mid-run. */
+/** Default FLOOR (not the whole margin — see `EnsureWorkerKeychainOpts.expectedRunMs`,
+ * W1-T2398) for the arm-2 expiry gate below: a stored token AT OR WITHIN this window of
+ * its recorded `expiresAt` is treated as already stale. On its own this constant answers
+ * only "is this credential expired NOW", never "will it still be valid when this run
+ * ENDS" — a spawn holding six minutes of credential would pass a bare five-minute check
+ * and lose it six minutes in. `deriveProvisionGate` widens the effective margin to
+ * `Math.max(this, expectedRunMs)` when a caller supplies `expectedRunMs`, so a credential
+ * that cannot outlive its own run is caught instead of handed out. */
 export const DEFAULT_CREDENTIAL_EXPIRY_SKEW_MS = 5 * 60 * 1000;
 
 /**
@@ -1035,6 +1079,19 @@ export function extractCredentialExpiryMs(secret: string): number | undefined {
 /** Verdict of the cheap, sidecar-only arm-2 staleness read, below. */
 export type CredentialSidecarVerdict = "unknown" | "fresh" | "expired" | "broken";
 
+/** Pure: parse a RECORDED expiry-sidecar value into its epoch-ms number, or
+ *  `undefined` for anything that isn't one (absent, empty, non-numeric) — the same
+ *  three non-answers {@link classifyCredentialSidecar} folds into `"unknown"`/`"broken"`,
+ *  factored out so W1-T2398's headroom read (below) shares the exact parse, never a
+ *  second hand-rolled copy of it. */
+function parseSidecarExpiryMs(recorded: string | undefined): number | undefined {
+  if (recorded === undefined) return undefined;
+  const trimmed = recorded.trim();
+  if (trimmed === "") return undefined;
+  const expiresAt = Number(trimmed);
+  return Number.isFinite(expiresAt) ? expiresAt : undefined;
+}
+
 /**
  * Pure: classify a RECORDED expiry-sidecar value (never the credential itself — see
  * `WorkerKeychainPaths.expiryPath`'s doc) against a clock + skew. `undefined` (no
@@ -1049,10 +1106,9 @@ export function classifyCredentialSidecar(
   opts: { nowMs: number; skewMs: number },
 ): CredentialSidecarVerdict {
   if (recorded === undefined) return "unknown";
-  const trimmed = recorded.trim();
-  if (trimmed === "") return "broken";
-  const expiresAt = Number(trimmed);
-  if (!Number.isFinite(expiresAt)) return "broken";
+  if (recorded.trim() === "") return "broken";
+  const expiresAt = parseSidecarExpiryMs(recorded);
+  if (expiresAt === undefined) return "broken";
   return opts.nowMs + opts.skewMs >= expiresAt ? "expired" : "fresh";
 }
 
@@ -1314,6 +1370,15 @@ interface ProvisionGate {
   credentialSidecarBroken: boolean;
   treatAsAbsent: boolean;
   needsProvisioning: boolean;
+  /**
+   * W1-T2398: the sidecar's recorded expiry (epoch ms), parsed independently of the
+   * skew comparison above — present whenever the store exists, identity hasn't
+   * changed, and the sidecar holds a well-formed number, EVEN when the credential is
+   * nowhere near stale. `undefined` when there is nothing to read or nothing
+   * parseable — never invented. Lets a caller measure headroom on the steady-state
+   * path, where nothing else here touches the sidecar at all.
+   */
+  recordedExpiresAtMs?: number;
 }
 
 /**
@@ -1339,20 +1404,27 @@ function deriveProvisionGate(opts: EnsureWorkerKeychainOpts, storeExists: boolea
 
   let credentialExpired = false;
   let credentialSidecarBroken = false;
+  let recordedExpiresAtMs: number | undefined;
   if (storeExists && !identityChanged) {
+    // Read + parse ONCE, unconditionally — W1-T2398's headroom (below) needs the
+    // parsed value even on the arm-(3)-forced path, which used to skip this read
+    // entirely because it had nothing left to decide with it.
+    let recorded: string | undefined;
+    try {
+      recorded = readFileSync(opts.expiryPath, "utf8");
+    } catch {
+      recorded = undefined; // no sidecar — predates this feature, or the credential carried no expiry field
+    }
+    recordedExpiresAtMs = parseSidecarExpiryMs(recorded);
     if (opts.priorSpawnCredentialExpired) {
       credentialExpired = true;
     } else {
-      let recorded: string | undefined;
-      try {
-        recorded = readFileSync(opts.expiryPath, "utf8");
-      } catch {
-        recorded = undefined; // no sidecar — predates this feature, or the credential carried no expiry field
-      }
-      const verdict = classifyCredentialSidecar(recorded, {
-        nowMs: (opts.now ?? Date.now)(),
-        skewMs: opts.credentialExpirySkewMs ?? DEFAULT_CREDENTIAL_EXPIRY_SKEW_MS,
-      });
+      // W1-T2398: DEFAULT_CREDENTIAL_EXPIRY_SKEW_MS (or a caller-supplied override) is
+      // a FLOOR, never the whole margin — widened to the caller's own expected run
+      // length so a credential that would expire mid-run reads "expired" here exactly
+      // like one that is already stale, and takes the same re-provision path below.
+      const skewMs = Math.max(opts.credentialExpirySkewMs ?? DEFAULT_CREDENTIAL_EXPIRY_SKEW_MS, opts.expectedRunMs ?? 0);
+      const verdict = classifyCredentialSidecar(recorded, { nowMs: (opts.now ?? Date.now)(), skewMs });
       if (verdict === "expired") credentialExpired = true;
       else if (verdict === "broken") credentialSidecarBroken = true; // present-but-empty/unparseable never reads as healthy
     }
@@ -1366,6 +1438,7 @@ function deriveProvisionGate(opts: EnsureWorkerKeychainOpts, storeExists: boolea
     credentialSidecarBroken,
     treatAsAbsent,
     needsProvisioning: treatAsAbsent || identityChanged || credentialExpired,
+    recordedExpiresAtMs,
   };
 }
 
@@ -1413,6 +1486,11 @@ export function ensureWorkerKeychain(opts: EnsureWorkerKeychainOpts): WorkerKeyc
   // present, identity-matching, unexpired store) find `needsProvisioning: false` right
   // here and never touch the provisioning lock below at all.
   let gate = deriveProvisionGate(opts, storeExists);
+  // W1-T2398: the expiry of the credential THIS call will ultimately hand out —
+  // starts as whatever the (pre-lock) gate above just read, gets refreshed after a
+  // peer-converge re-derive, and gets overwritten with the freshly-copied secret's
+  // OWN expiry when this call is the one that actually (re-)provisions below.
+  let finalExpiresAtMs = gate.recordedExpiresAtMs;
 
   // Arm (6): fail fast, without touching the login keychain again, once a
   // credential-expiry recovery has already failed once this boot for this path.
@@ -1442,6 +1520,7 @@ export function ensureWorkerKeychain(opts: EnsureWorkerKeychainOpts): WorkerKeyc
       // loser that skipped this re-check would redundantly re-provision on top of
       // what its peer just wrote — the exact hazard this lock exists to prevent.
       gate = deriveProvisionGate(opts, exists(opts.keychainPath));
+      finalExpiresAtMs = gate.recordedExpiresAtMs;
 
       if (gate.needsProvisioning) {
         // A mismatch/staleness verdict means a LIVE keychain file may be sitting at
@@ -1540,6 +1619,10 @@ export function ensureWorkerKeychain(opts: EnsureWorkerKeychainOpts): WorkerKeyc
             // already absent — fine
           }
         }
+        // W1-T2398: this IS the freshest copy this call can produce — the value the
+        // headroom check below must reason about, not the (possibly now-stale)
+        // pre-provision reading `finalExpiresAtMs` already held.
+        finalExpiresAtMs = expiresAtMs;
       }
       // else: a concurrent peer already (re-)provisioned this exact store while this
       // call waited for the lock — CONVERGE on its result rather than redoing the
@@ -1548,6 +1631,25 @@ export function ensureWorkerKeychain(opts: EnsureWorkerKeychainOpts): WorkerKeyc
       // "skipped": present, identity-matching, unexpired).
     } finally {
       lock.release();
+    }
+  }
+
+  // W1-T2398: the LAST gate, after any (re-)provisioning attempt above has had its
+  // chance to fetch a fresher copy — refuse BEFORE this credential is ever unlocked
+  // or handed to a spawn, never after. `finalExpiresAtMs` is `undefined` exactly when
+  // no numeric expiry is known at all (no sidecar, or a credential that never carried
+  // one) — the comparison is skipped rather than inventing a deadline, same discipline
+  // as {@link extractCredentialExpiryMs}'s own contract.
+  let observedHeadroomMs: number | undefined;
+  if (finalExpiresAtMs !== undefined) {
+    observedHeadroomMs = finalExpiresAtMs - (opts.now ?? Date.now)();
+    if (opts.expectedRunMs !== undefined && observedHeadroomMs < opts.expectedRunMs) {
+      throw new WorkerKeychainError(
+        "credential-too-short-for-run",
+        `worker credential ${opts.keychainPath} has ${observedHeadroomMs}ms of headroom before its recorded ` +
+          `expiry, less than the ${opts.expectedRunMs}ms this run is expected to take — refusing to spawn a ` +
+          `worker whose credential cannot outlive its own run`,
+      );
     }
   }
 
@@ -1576,5 +1678,6 @@ export function ensureWorkerKeychain(opts: EnsureWorkerKeychainOpts): WorkerKeyc
         : gate.credentialExpired
           ? "credential-expired"
           : "skipped",
+    observedHeadroomMs,
   };
 }
