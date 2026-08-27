@@ -36,6 +36,10 @@
  */
 import type { ConflictFileDiff, MergeConflictEvidence, MergeState } from "./merge-state.js";
 import type { WorkflowRunObservation } from "./workflow-run.js";
+// W1-T2384: from the LEAF, never from sweep.js. dependency-cruiser reads a type-only import as
+// a dependency (MEASURED: importing this off sweep.js took it 13 -> 24 warnings), and sweep.ts
+// imports a VALUE back off this module — see supersession.ts's own header.
+import type { SupersessionVerdict } from "./supersession.js";
 
 export function openPrsRestArgs(owner: string, repo: string): string[] {
   return ["api", `repos/${owner}/${repo}/pulls?state=open&per_page=100`];
@@ -1597,6 +1601,112 @@ export function fetchMergeConflictEvidence(
  * only PRs already confirmed `mergeState === "dirty"`, a set this repo has measured at six over a
  * whole 7-day window, so the cap is defensive headroom, not an expected truncation.
  */
+/** `gh api` argv listing ONE pull request's changed files. */
+export function prFilesRestArgs(owner: string, repo: string, prNumber: number): string[] {
+  return ["api", `repos/${owner}/${repo}/pulls/${prNumber}/files?per_page=100`];
+}
+
+/** One `/pulls/N/files` row, loosely typed — every field optional, because this reads another
+ *  service's payload and a missing key must degrade rather than throw. */
+interface RestPrFile {
+  filename?: string;
+  additions?: number;
+  deletions?: number;
+}
+
+/**
+ * W1-T2384 — ONE open PR's supersession verdict, over REST. The producer
+ * {@link SupersessionVerdict} has never had; W1-T920 declared the field, the shape and the gated
+ * disposition row, and deferred the detector to "a separate shard" that was never filed.
+ *
+ * THE READ, AND ITS OWN CORPUS CONTROL. Both PRs' changed-file lists, compared by path.
+ * `rawLineCount` is every added+deleted line this PR's own read observed BEFORE any matching —
+ * W1-T920 design (v) requires it precisely so a zero can be told from a finding: a read that
+ * observed nothing is INDETERMINATE, never "unique", because "unique" would SAVE a PR the
+ * arithmetic condemned the moment someone turns `conceptCoexistenceEnabled` on.
+ *
+ * THE THREE OUTCOMES, and `"indeterminate"` is a real one (W1-T920 design (iii), which this
+ * honours AT THE POINT OF PRODUCTION rather than only at the point of use):
+ *   - every path this PR touches is also touched by the superseding PR -> `"superseded"`, carrying
+ *     the evidence the disposition row names instead of a bare integer;
+ *   - no path is shared -> `"unique"`, a POSITIVE finding;
+ *   - a partial overlap, or a read whose control came back empty -> `"indeterminate"`, stated.
+ *
+ * Throws on a failed/malformed read (no retry, the same discipline {@link fetchMergeConflictEvidence}
+ * keeps); the caller catches per PR and leaves the field `undefined`.
+ */
+export function fetchSupersessionVerdict(
+  owner: string,
+  repo: string,
+  prNumber: number,
+  supersedingPrNumber: number,
+  taskId: string,
+  fetch: GhApiFetcher,
+): SupersessionVerdict {
+  const ours = fetch(prFilesRestArgs(owner, repo, prNumber)) as RestPrFile[];
+  const theirs = fetch(prFilesRestArgs(owner, repo, supersedingPrNumber)) as RestPrFile[];
+  if (!Array.isArray(ours) || !Array.isArray(theirs)) throw new Error("supersession read carried no file list");
+
+  const ourPaths = ours.map((f) => f.filename).filter((f): f is string => typeof f === "string" && f.length > 0);
+  const theirPaths = new Set(theirs.map((f) => f.filename).filter((f): f is string => typeof f === "string" && f.length > 0));
+  const rawLineCount = ours.reduce((n, f) => n + (f.additions ?? 0) + (f.deletions ?? 0), 0);
+  const matchedHunks = ourPaths.filter((f) => theirPaths.has(f)).length;
+  const diff = { rawLineCount, matchedHunks };
+
+  // THE CONTROL FIRST. An empty corpus cannot support either finding — see this function's own doc.
+  if (ourPaths.length === 0 || rawLineCount === 0) {
+    return { status: "indeterminate", detail: `the diff read for #${prNumber} observed no changed lines — no finding is supportable`, diff } as SupersessionVerdict;
+  }
+  if (matchedHunks === ourPaths.length) {
+    return {
+      status: "superseded",
+      evidence: { supersedingPrNumber, taskId, diff },
+      detail: `every one of #${prNumber}'s ${ourPaths.length} changed path(s) is also changed by #${supersedingPrNumber}`,
+    };
+  }
+  if (matchedHunks === 0) {
+    return { status: "unique", detail: `none of #${prNumber}'s ${ourPaths.length} changed path(s) is touched by #${supersedingPrNumber}` };
+  }
+  return {
+    status: "indeterminate",
+    detail: `#${prNumber} shares ${matchedHunks} of ${ourPaths.length} changed path(s) with #${supersedingPrNumber} — a partial overlap supports neither finding`,
+  };
+}
+
+/**
+ * W1-T2384 — every supersession verdict for a bounded set, mirroring
+ * {@link hydrateMergeConflictEvidence} immediately below in shape, cap and failure direction.
+ *
+ * SCOPED THE WAY ITS SIBLING IS. That one takes only PRs already confirmed `mergeState === "dirty"`;
+ * this takes only PRs the ARITHMETIC already flagged — `supersededBy != null`, a higher-numbered
+ * open PR crediting the same task. That is the population the detector exists for and nothing
+ * wider: `plan/feedback/fb-repair-stale-2954.yaml` counts FIVE across a 7-day window and its
+ * successor three across the next, so this is two calls per flagged PR over a set measured in
+ * single digits, never a per-PR fetch over the whole open board.
+ *
+ * `cap` reuses {@link MERGE_STATE_HYDRATION_CAP} rather than inventing a second ceiling (the
+ * shard's design (ii), and `hydrateMergeConflictEvidence`'s own choice). BEST-EFFORT PER PR: a
+ * throw skips THAT PR and the pass continues, leaving `supersessionVerdict` `undefined` — which is
+ * byte-identical to today and the fail-closed direction every consumer already assumes.
+ */
+export function hydrateSupersessionVerdicts(
+  owner: string,
+  repo: string,
+  supersededPrs: readonly { number: number; supersededBy: number; taskId: string }[],
+  fetch: GhApiFetcher,
+  cap: number = MERGE_STATE_HYDRATION_CAP,
+): Map<number, SupersessionVerdict> {
+  const out = new Map<number, SupersessionVerdict>();
+  for (const p of supersededPrs.slice(0, cap)) {
+    try {
+      out.set(p.number, fetchSupersessionVerdict(owner, repo, p.number, p.supersededBy, p.taskId, fetch));
+    } catch {
+      /* best-effort: this PR keeps the pre-existing undefined supersessionVerdict, the pass continues */
+    }
+  }
+  return out;
+}
+
 export function hydrateMergeConflictEvidence(
   owner: string,
   repo: string,

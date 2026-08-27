@@ -205,6 +205,7 @@ import {
   type OpenPrRest,
   fetchSinglePrRest,
   hydrateMergeConflictEvidence,
+  hydrateSupersessionVerdicts,
   hydrateWorkflowRuns,
   hydrateMergeStates,
   liveStateFromRest,
@@ -22889,6 +22890,22 @@ export function buildOpenPrViews(
     (byTask.get(t) ?? byTask.set(t, []).get(t)!).push(pr.number);
   }
 
+  // W1-T2384: the supersession producer's SCOPED SET — only PRs the arithmetic ALREADY flagged.
+  // This mirrors `dirtyPrs` above (which `hydrateMergeConflictEvidence` takes) rather than
+  // fetching per open PR: the population is exactly those with a higher-numbered peer crediting
+  // the same task, measured at FIVE across a 7-day window in fb-repair-stale-2954 and three in its
+  // successor. Two calls per flagged PR over a single-digit set, never N+1 over the board — the
+  // unscoped shape that made W1-T2340's first attempt N+1 per PR.
+  const supersededPrs: { number: number; supersededBy: number; taskId: string }[] = [];
+  for (const pr of raw) {
+    const t = resolveOpenPrTaskId(pr, ledger);
+    if (!t) continue;
+    const peers = byTask.get(t) ?? [];
+    const newest = peers.length ? Math.max(...peers) : pr.number;
+    if (newest > pr.number) supersededPrs.push({ number: pr.number, supersededBy: newest, taskId: t });
+  }
+  const supersessionVerdicts = hydrateSupersessionVerdicts(owner, repo, supersededPrs, fetch);
+
   return raw.map((pr) => {
     const taskId = resolveOpenPrTaskId(pr, ledger);
     const peers = taskId ? (byTask.get(taskId) ?? []) : [];
@@ -23023,6 +23040,13 @@ export function buildOpenPrViews(
       // policy-gated `conflicted` row and the `blocked-ambiguous` row beneath it each read this.
       mergeConflict: mergeConflicts.get(pr.number),
       workflowRuns: workflowRuns.get(pr.number),
+      // W1-T2384: the supersessionVerdict producer W1-T920 deferred and never filed — populated
+      // ONLY for a PR `supersededBy` above just flagged (the hydration was scoped to exactly that
+      // subset). Absent from the map ⇒ never attempted, or a best-effort read failed ⇒ undefined,
+      // the pre-existing value every PR has always carried. BOTH policy flags that read this stay
+      // OFF by default (`supersessionDisposalEnabled`, `conceptCoexistenceEnabled`), so no
+      // disposition moves — see lib/sweep.ts's DISPOSITION_RULES.
+      supersessionVerdict: supersessionVerdicts.get(pr.number),
       // W1-T435: `pendingAnswer`'s long-promised producer (see that field's own "SCOPE" doc,
       // lib/sweep.ts) — an operator's steering note on a `wrong`/`needs-follow-up` verdict, or an
       // answered clarification from the console, either re-arms the `blocked-fixable` disposition

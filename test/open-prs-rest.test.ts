@@ -21,6 +21,9 @@ import {
   fetchSinglePrRest,
   GhPaceFloorStandDownError,
   hydrateMergeConflictEvidence,
+  hydrateSupersessionVerdicts,
+  fetchSupersessionVerdict,
+  prFilesRestArgs,
   liveStateFromRest,
   mapRestPr,
   MERGE_STATE_HYDRATION_CAP,
@@ -1618,4 +1621,101 @@ test("W1-T1008: the sweep branch receives the stand-down it already handles", as
     "the branch this task's reader already has treats it as a stand-down, not a failure",
   );
   assert.equal(summary.actionsFailed, 0);
+});
+
+/* ────────────────────────────────────────────────────────────────────────────────────────────
+ * W1-T2384 — SUPERSESSION EVIDENCE: hydrateSupersessionVerdicts / fetchSupersessionVerdict /
+ * prFilesRestArgs. The producer `OpenPrView.supersessionVerdict` never had — W1-T920 declared the
+ * field, the shape and the gated row and deferred the detector to "a separate shard" nobody filed.
+ * Mirrors the W1-T984 conflict-evidence coverage immediately above: bounded, best-effort, per
+ * ALREADY-FLAGGED PR, and never a hard failure of the sweep.
+ * ──────────────────────────────────────────────────────────────────────────────────────────── */
+
+/** A `/pulls/N/files` fake keyed by PR number, counting every call so the per-PR cost is a
+ *  measured number rather than a claim. */
+function filesFetcher(byPr: Record<number, unknown>): GhApiFetcher & { calls: string[][] } {
+  const calls: string[][] = [];
+  const f = ((args: string[]) => {
+    calls.push(args);
+    const m = /pulls\/(\d+)\/files/.exec(args[1] ?? "");
+    if (!m) throw new Error("unexpected argv: " + args.join(" "));
+    const n = Number(m[1]);
+    const v = byPr[n];
+    if (v === undefined) throw new Error("no fake for PR " + n);
+    return v;
+  }) as GhApiFetcher & { calls: string[][] };
+  f.calls = calls;
+  return f;
+}
+const file = (filename: string, additions = 5, deletions = 2) => ({ filename, additions, deletions });
+
+test("W1-T2384: prFilesRestArgs asks for ONE pull request's files, paged at 100", () => {
+  assert.deepEqual(prFilesRestArgs(OWNER, REPO, 1955), ["api", "repos/craigoley/remudero/pulls/1955/files?per_page=100"]);
+});
+
+test("W1-T2384: every path the PR touches is also touched by the superseding PR ⇒ superseded, carrying evidence rather than a bare integer", () => {
+  const f = filesFetcher({ 1955: [file("src/lib/sweep.ts"), file("test/sweep.test.ts")], 1960: [file("src/lib/sweep.ts"), file("test/sweep.test.ts"), file("src/lib/board.ts")] });
+  const v = fetchSupersessionVerdict(OWNER, REPO, 1955, 1960, "W1-T900", f);
+  assert.equal(v.status, "superseded");
+  assert.ok(v.evidence, "a superseded verdict MUST name its evidence — that is the whole deliverable");
+  assert.equal(v.evidence!.supersedingPrNumber, 1960);
+  assert.equal(v.evidence!.taskId, "W1-T900");
+  assert.equal(v.evidence!.diff.matchedHunks, 2);
+  assert.equal(v.evidence!.diff.rawLineCount, 14, "the corpus control: 2 files x (5 added + 2 deleted)");
+});
+
+test("W1-T2384: no shared path ⇒ unique, a POSITIVE finding and never a silent absence", () => {
+  const f = filesFetcher({ 1955: [file("src/lib/digest.ts")], 1960: [file("src/lib/sweep.ts")] });
+  const v = fetchSupersessionVerdict(OWNER, REPO, 1955, 1960, "W1-T900", f);
+  assert.equal(v.status, "unique");
+  assert.equal(v.evidence, undefined, "evidence is REQUIRED only for `superseded`");
+  assert.match(v.detail, /none of #1955/);
+});
+
+test("W1-T2384: a PARTIAL overlap supports neither finding ⇒ indeterminate, never collapsed to unique", () => {
+  const f = filesFetcher({ 1955: [file("src/lib/sweep.ts"), file("src/lib/digest.ts")], 1960: [file("src/lib/sweep.ts")] });
+  const v = fetchSupersessionVerdict(OWNER, REPO, 1955, 1960, "W1-T900", f);
+  assert.equal(v.status, "indeterminate", "collapsing this to `unique` would SAVE a PR the arithmetic condemned");
+  assert.match(v.detail, /partial overlap/);
+});
+
+test("W1-T2384: an EMPTY corpus control ⇒ indeterminate — a read that observed nothing supports no finding", () => {
+  const f = filesFetcher({ 1955: [], 1960: [file("src/lib/sweep.ts")] });
+  const v = fetchSupersessionVerdict(OWNER, REPO, 1955, 1960, "W1-T900", f);
+  assert.equal(v.status, "indeterminate");
+  assert.equal(v.diff?.rawLineCount, 0, "the control is CARRIED, so the zero is visible rather than inferred");
+});
+
+test("W1-T2384: hydrateSupersessionVerdicts is BEST-EFFORT per PR — one throw leaves that PR undefined and the pass continues", () => {
+  const f = filesFetcher({ 1955: [file("src/lib/sweep.ts")], 1960: [file("src/lib/sweep.ts")], 1970: [file("src/lib/x.ts")] /* 1971 absent ⇒ throws */ });
+  const out = hydrateSupersessionVerdicts(OWNER, REPO, [
+    { number: 1955, supersededBy: 1960, taskId: "W1-T900" },
+    { number: 1970, supersededBy: 1971, taskId: "W1-T901" },
+  ], f);
+  assert.equal(out.get(1955)?.status, "superseded", "the readable PR still produced");
+  assert.equal(out.get(1970), undefined, "the failing one keeps the pre-existing undefined — byte-identical to today");
+});
+
+test("W1-T2384: the per-PR cost is TWO calls, and the hydration is scoped to the flagged set alone", () => {
+  const f = filesFetcher({ 1955: [file("src/lib/sweep.ts")], 1960: [file("src/lib/sweep.ts")] });
+  hydrateSupersessionVerdicts(OWNER, REPO, [{ number: 1955, supersededBy: 1960, taskId: "W1-T900" }], f);
+  assert.equal(f.calls.length, 2, "exactly two /files reads per flagged PR — its own and the superseding one");
+  // AND NOTHING is fetched for a board with nothing flagged: the N+1 shape W1-T2340's first
+  // attempt had is impossible here because the caller passes only `supersededBy != null` PRs.
+  const quiet = filesFetcher({});
+  hydrateSupersessionVerdicts(OWNER, REPO, [], quiet);
+  assert.equal(quiet.calls.length, 0, "an unflagged board costs ZERO calls");
+});
+
+test("W1-T2384: the hydration reuses MERGE_STATE_HYDRATION_CAP rather than inventing a second ceiling", () => {
+  const byPr: Record<number, unknown> = {};
+  const flagged = [];
+  for (let i = 0; i < MERGE_STATE_HYDRATION_CAP + 5; i++) {
+    byPr[1000 + i] = [file("src/lib/sweep.ts")];
+    byPr[2000 + i] = [file("src/lib/sweep.ts")];
+    flagged.push({ number: 1000 + i, supersededBy: 2000 + i, taskId: "W1-T900" });
+  }
+  const f = filesFetcher(byPr);
+  const out = hydrateSupersessionVerdicts(OWNER, REPO, flagged, f);
+  assert.equal(out.size, MERGE_STATE_HYDRATION_CAP, "truncated at the SAME cap the sibling uses");
 });

@@ -22,6 +22,17 @@ import {
   type OpenIssue,
 } from "./escalate.js";
 import { GhPaceFloorStandDownError } from "./open-prs-rest.js";
+// W1-T2384: the supersession types moved to a leaf that imports NOTHING, so open-prs-rest.ts
+// can declare the producer without closing the type cycle this module's VALUE import above
+// would otherwise complete — see supersession.ts's own header for the measured before/after.
+// Re-exported below so every existing `from "…/sweep.js"` call site keeps working untouched.
+import type {
+  SupersessionDiffFinding,
+  SupersessionEvidence,
+  SupersessionStatus,
+  SupersessionVerdict,
+} from "./supersession.js";
+export type { SupersessionDiffFinding, SupersessionEvidence, SupersessionStatus, SupersessionVerdict };
 import type { ConflictFileDiff, MergeConflictEvidence, MergeState } from "./merge-state.js";
 import type { WorkflowRunObservation } from "./workflow-run.js";
 // Re-exported so existing `import type { … } from "./sweep.js"` call sites keep working.
@@ -206,7 +217,6 @@ export type Disposition =
  *     separately so a caller can tell "checked, none found" from "could not check", the same
  *     fail-open direction `readLiveState`'s `ok:false` already uses elsewhere in this module.
  */
-export type SupersessionStatus = "superseded" | "unique" | "indeterminate";
 
 /**
  * W1-T920 (design note iv) — the diff finding carries its OWN corpus control. A diff read that
@@ -216,25 +226,12 @@ export type SupersessionStatus = "superseded" | "unique" | "indeterminate";
  * built from a zero-length raw read must never claim `"superseded"` — see the DISPOSITION_RULES
  * row's own doc for how a detector is expected to enforce this before ever setting `status`.
  */
-export interface SupersessionDiffFinding {
-  /** Total diff lines the read observed, BEFORE any hunk matching — the corpus control. */
-  rawLineCount: number;
-  /** Hunks matched against symbols already present on the superseding PR/task. */
-  matchedHunks: number;
-}
 
 /**
  * W1-T920 (design note v) — the evidence a `"superseded"` verdict NAMES, never a bare label.
  * This is what made the #1955 diagnosis checkable in one read: the superseding PR number, the
  * shared task id, and the diff finding with its own control, together in one place.
  */
-export interface SupersessionEvidence {
-  /** The PR (open or merged) whose work already covers this PR's task. */
-  supersedingPrNumber: number;
-  /** The plan task both PRs share — the trailer this verdict was matched on. */
-  taskId: string;
-  diff: SupersessionDiffFinding;
-}
 
 /**
  * W1-T920 — one open PR's supersession finding, read (never computed) by the disposition. See
@@ -243,13 +240,6 @@ export interface SupersessionEvidence {
  * BE BUILT") — this type and the disposition row that reads it are the full wired MECHANISM,
  * unit-tested against caller-supplied verdicts, but nothing in the real gateway sets one yet.
  */
-export interface SupersessionVerdict {
-  status: SupersessionStatus;
-  /** REQUIRED when `status === "superseded"`; absent otherwise. */
-  evidence?: SupersessionEvidence;
-  /** Human-legible explanation, always present — e.g. why a read came back indeterminate. */
-  detail: string;
-}
 
 /**
  * One failing required CI check's name + the tail of its log — the W1-T94
