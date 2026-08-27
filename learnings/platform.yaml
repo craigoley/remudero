@@ -183,7 +183,8 @@
   fact: >-
     Playwright MCP uses accessibility-tree snapshots (2-5KB structured YAML), 10-100x cheaper than
     screenshots (500KB-2MB images) for structural work. MCP is the sandboxed-client path; the CLI is
-    cheaper still but requires shell access.
+    cheaper still but requires shell access. Request a screenshot only for an artifact a human must
+    eyeball; use snapshots for everything structural.
   src: research#playwright
   cited: "2026-07-14"
 - id: playwright-run-code-unsafe-is-rce
@@ -207,7 +208,8 @@
   cited: "2026-07-14"
 - id: screenshots-are-token-expensive
   subsystem: design-review
-  lifecycle: active
+  lifecycle: superseded
+  superseded_by: playwright-mcp-accessibility-tree
   files: [src/lib/containment.ts]
   fact: >-
     Screenshots blow up token usage (500KB-2MB each) — request only when necessary, for artifacts a human

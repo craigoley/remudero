@@ -137,7 +137,13 @@ import {
 // W1-T372: the daemon-tick counterpart to daemon-health.ts's own pull-only rate-limit display
 // (readGhRateLimitRemaining, unrelated cadence, unchanged) — reads BOTH gh api rate_limit
 // buckets off one exec call for runDaemon's own `readGhQuota` dep, wired below.
-import { isBucketExhausted, readGhRateLimitBuckets, type GhRateLimitBuckets } from "./lib/daemon-health.js";
+import {
+  isBucketExhausted,
+  readGhRateLimitBuckets,
+  ghRateLimitWindow,
+  type GhRateLimitBuckets,
+  type GhRateLimitProvenance,
+} from "./lib/daemon-health.js";
 // W1-T117/W1-T356: the orphan sweep's own exported defaults — see the shared `sweepOrphans`
 // closure below (daemonCommand), wired into BOTH daemonBoot's boot-time param and
 // DaemonDeps.sweepOrphans.
@@ -6846,6 +6852,16 @@ export async function runFixRung(opts: {
           // criterion 1). Never recorded against `unmet_count`/any task's own criteria (acceptance
           // criterion 4) — this only ever fixes the body's SHAPE.
           strikes = attempt;
+          // W1-T2306: TAG THIS STRIKE WITH THE VERDICT REGIME IT WAS SPENT UNDER — the SAME
+          // computation the ordinary dispatch below uses (W1-T199), not a bespoke one, so both
+          // `fix.dispatch` writers agree on what "executed" means. Before this, this arm was the
+          // ONLY writer of `fix.dispatch` that omitted `verdict_regime` — an omission read by
+          // `strikeRegimeOf` as "keyword_only" BY CONSTRUCTION (never a decision), which let the
+          // amnesty in `priorStrikesFor` erase every body-repair strike the instant the task's
+          // regime turned "executed", however many were spent (this task's rationale, §1/§2).
+          const verdictRegime: StrikeRegime = review.criteria.some((c) => c.proof_exec !== "not_executable")
+            ? "executed"
+            : "keyword_only";
           deps.log("fix.dispatch", {
             strike: strikes,
             strike_cap: opts.strikeCap,
@@ -6853,6 +6869,7 @@ export async function runFixRung(opts: {
             round: attempt === 1 ? "resume" : "fresh",
             mode: "body-repair",
             defect: repair.defect,
+            verdict_regime: verdictRegime,
           });
           deps.say(
             `fix rung: strike ${strikes}/${opts.strikeCap} — repaired an author-time acceptance-gate ` +
@@ -11666,6 +11683,85 @@ export function readHeadShaRest(prUrl: string, fetch: GhApiFetcher = ghJson): st
   return sha;
 }
 
+/**
+ * A DIVERGENCE between the two independent resolvers that decide whether a trailered PR body gets
+ * judged: the CI gate's `declaredPlanTaskIds` (scripts/acceptance-author-gate.mjs, a line scan
+ * over `- id:` — deliberately NOT `loadPlan`, so a plan defect elsewhere never red-lights a body
+ * unrelated to it) and this reviewer's own `loadPlan` (a real parse). A DUPLICATE id anywhere in
+ * the plan makes `loadPlan` THROW while the line scan still resolves this task's id fine — so the
+ * gate keeps exempting the trailered body while `reviewCommand` cannot load a single criterion for
+ * it. `taskId` names which trailer resolved; `reason` is `loadPlan`'s own thrown message.
+ */
+interface ResolverDivergence {
+  taskId: string;
+  reason: string;
+}
+
+/**
+ * Resolve a trailered PR's judging criteria from the plan at `planPath` — the exact lookup
+ * `reviewCommand` (its only call site) used to run inline inside a bare try/catch whose catch body
+ * held only a comment reading "a bad/absent plan is not the reviewer's concern; fall through to
+ * the body".
+ * That swallow is W1-T2315's defect: it makes "the plan could not be loaded" indistinguishable
+ * from "there was no trailer to resolve in the first place", both landing in the same body
+ * fallback by paths a caller cannot tell apart. Extracted to its own function, taking `planPath`
+ * as a parameter rather than reading the module-level `repoRoot`, so a test can point it at a
+ * scratch plan (e.g. one declaring a duplicate id) without a real checkout or a live `gh` call.
+ *
+ * `divergence` is set ONLY when `loadPlan` itself THROWS — never merely because the id is absent
+ * from a plan that loaded fine (a retired/typo'd id), since `declaredPlanTaskIds` would equally
+ * fail to find that id: both resolvers already agree there, so there is nothing to reconcile.
+ * `criteria` stays `[]` in both failure shapes; `reviewCommand`'s own body-fallback (unchanged)
+ * is what actually recovers criteria from `## Acceptance` when this returns nothing.
+ */
+export function resolvePlanCriteriaForReview(
+  taskId: string,
+  planPath: string,
+): {
+  criteria: AcceptanceCriterion[];
+  source?: string;
+  taskDeclaredFiles?: string[];
+  openTaskIds?: Set<string>;
+  divergence?: ResolverDivergence;
+} {
+  try {
+    // W1-T120: read the raw bytes ourselves (loadPlan re-reads the same path internally) so the
+    // READ-IDENTITY ASSERTION below hashes exactly what was opened — the abs path + content hash
+    // of the plan file this review actually read, legible in the printed summary instead of
+    // merely inferable from cwd.
+    const planRaw = readFileSync(planPath, "utf8");
+    const plan = loadPlan(planPath);
+    const t = plan.byId.get(taskId);
+    const result: {
+      criteria: AcceptanceCriterion[];
+      source?: string;
+      taskDeclaredFiles?: string[];
+      openTaskIds?: Set<string>;
+    } = {
+      criteria: t?.acceptance?.length ? t.acceptance : [],
+      taskDeclaredFiles: t?.files,
+      // W1-T367 (design (v)): no derived projection in hand here (unlike `runTask`'s dispatch
+      // path) — computing one would be a second, independent GitHub read this reviewer does not
+      // otherwise need. `openTaskIdsFromPlan(plan)` with no projection degrades to the EMPTY set
+      // (documented on that function), so every `SHIPS-UNWIRED:` marker is FLAGGED rather than
+      // wrongly honoured — the safe direction, never the pre-W1-T367 read that credited 248
+      // merged tasks as open.
+      openTaskIds: openTaskIdsFromPlan(plan),
+    };
+    if (t?.acceptance?.length) {
+      result.source =
+        `plan/tasks.yaml task ${taskId} (${t.acceptance.length} criteria) — ` +
+        `read: ${formatReadIdentity(planPath, planRaw)}`;
+    }
+    return result;
+  } catch (e) {
+    return {
+      criteria: [],
+      divergence: { taskId, reason: String((e as Error)?.message ?? e) },
+    };
+  }
+}
+
 async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCommandDeps = {}): Promise<number> {
   const {
     fetchView,
@@ -11714,35 +11810,17 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   // `criteria` degrading to the body's Acceptance: block — never a reason to fail the review.
   let taskDeclaredFiles: string[] | undefined;
   let openTaskIds: Set<string> | undefined;
+  // W1-T2315: `resolvePlanCriteriaForReview` is the SAME lookup this block used to run inline —
+  // extracted so its divergence signal (below) is directly unit-testable against a scratch plan,
+  // never a reason this call site's own behaviour changes.
+  let resolverDivergence: ResolverDivergence | undefined;
   if (taskId) {
-    try {
-      const reviewPlanPath = join(repoRoot, "plan", "tasks.yaml");
-      // W1-T120: read the raw bytes ourselves (loadPlan re-reads the same path
-      // internally) so the READ-IDENTITY ASSERTION below hashes exactly what was
-      // opened — the abs path + content hash of the plan file this review actually
-      // read, legible in the printed summary instead of merely inferable from cwd.
-      const reviewPlanRaw = readFileSync(reviewPlanPath, "utf8");
-      const plan = loadPlan(reviewPlanPath);
-      const t = plan.byId.get(taskId);
-      if (t?.acceptance?.length) {
-        criteria = t.acceptance;
-        source =
-          `plan/tasks.yaml task ${taskId} (${criteria.length} criteria) — ` +
-          `read: ${formatReadIdentity(reviewPlanPath, reviewPlanRaw)}`;
-      }
-      taskDeclaredFiles = t?.files;
-      // W1-T367 (design (v)): this manual `rmd review` path has no derived projection in hand
-      // here (unlike `runTask`'s dispatch path, which builds one for `assertRunnable` and
-      // passes it straight through) — computing one would be a second, independent GitHub read
-      // this reviewer does not otherwise need. `openTaskIdsFromPlan(plan)` with no projection
-      // argument degrades to the EMPTY set (documented on that function), so every
-      // `SHIPS-UNWIRED:` marker at this call site is FLAGGED rather than wrongly honoured — the
-      // safe direction (design (vi)), never the pre-W1-T367 yaml read that credited 248 merged
-      // tasks as open.
-      openTaskIds = openTaskIdsFromPlan(plan);
-    } catch {
-      // A bad/absent plan is not the reviewer's concern; fall through to the body.
-    }
+    const resolved = resolvePlanCriteriaForReview(taskId, join(repoRoot, "plan", "tasks.yaml"));
+    criteria = resolved.criteria;
+    if (resolved.source) source = resolved.source;
+    taskDeclaredFiles = resolved.taskDeclaredFiles;
+    openTaskIds = resolved.openTaskIds;
+    resolverDivergence = resolved.divergence;
   }
   if (criteria.length === 0) {
     const fromBody = parseAcceptanceBlock(body);
@@ -11757,6 +11835,19 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   const runId = `review-PR${view.number}-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: taskId ?? `PR-${view.number}`, step, lane: "review", ...extra });
+
+  // W1-T2315: name the divergence rather than let it pass silently into the body fallback above —
+  // a trailer that resolved nothing because the plan could not be LOADED is a different fact, with
+  // a different remedy, than a body carrying no trailer at all. Ledgered (never a reason to fail
+  // this review) so whoever reconciles the gate and this resolver has the id and the plan's own
+  // error to work from, instead of rediscovering it from a truncated `## Acceptance` verdict.
+  if (resolverDivergence) {
+    log("review.resolver_divergence", { task_id: resolverDivergence.taskId, reason: resolverDivergence.reason });
+    console.log(
+      `### rmd review: plan resolver diverged from the CI gate for ${resolverDivergence.taskId} — ` +
+        `${resolverDivergence.reason} (falling back to the PR body; see review.resolver_divergence in the ledger)`,
+    );
+  }
 
   console.log(`### rmd review PR #${view.number} — criteria from ${source}`);
 
@@ -15946,8 +16037,13 @@ export function defaultBoardReviewItems(config: Config, io: BoardReviewItemsIo =
  *  carrying the same counts, and the ledger is the append-only record.
  *
  *  WHAT ACTUALLY SURFACES IT, because a report nobody reads costs the same as one that never ran:
- *   1. the `board_review.fired`/`.ran` ledger rows the daemon tick emits — which `digest.ts`'s
- *      cadence already sweeps into the operator's inbox on its own schedule;
+ *   1. the `board_review.ran` ledger row the daemon tick emits, which `digest.ts` sweeps into the
+ *      operator's digest on its own cadence — latest-wins, soft-composed, `.ran` only. THIS CLAUSE
+ *      WAS FALSE WHEN IT WAS WRITTEN AND IS CORRECTED HERE RATHER THAN QUIETLY DROPPED: it said the
+ *      digest "already" swept these rows, and `digest.ts` referenced `board_review` ZERO times
+ *      against a control of two references to `escalation.issue_opened`, a step it genuinely
+ *      sweeps. The rung fired five times before anyone noticed, because the sentence describing
+ *      how its output reached a human was the reason nobody checked;
  *   2. the registry proposals the rung drafts into `state/inbox-proposals.json`, which the inbox
  *      already reads and renders (`renderInbox`) — the same registry `updateProposalRegistry`
  *      serves for every other rung.
@@ -17979,11 +18075,36 @@ export function escalateHeadroomParkCeiling(
  * for a human close — W1-T345 is the filed retraction mechanism this notice does not depend
  * on; until it lands (or if it never does), the reset timestamp alone tells a human reading
  * this later that no action closes it.
+ *
+ * W1-T2305 — `deps.provenanceBracket` is THE BRACKET RULE (design (ii)), applied at the one
+ * place this task's own design (iv) names as consequential: when a caller HAS two provenanced
+ * readings (same actor, same resource) taken at different times, this checks — via
+ * {@link ghRateLimitWindow}, lib/daemon-health.ts — that they agree on actor AND reset epoch
+ * before letting the escalation through; a mismatched bracket describes two different identities
+ * or two different reset periods and is DISCARDED (ledgered as such, never escalated), which is
+ * the one outcome design (iv) says this task must make impossible. Optional and omitted by every
+ * call site today (`reportDrainQuotaExhaustion` below and `runDaemon`'s own tick both hand this
+ * a single `GhRateLimitBucket` reading with no second, provenanced reading to bracket against —
+ * see this task's follow-ups for wiring a real second reading in) — an omitted bracket escalates
+ * exactly as before, so no existing caller's behavior changes and the escalation paths keep
+ * their ability to fire (design (v)): "dispatch is NOT paused by this hook" remains true, and so
+ * does "this notice still opens."
  */
 export function escalateQuotaExhaustion(
   info: { bucket: "core" | "graphql"; remaining: number; resetsAt: string },
   ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway },
+  deps: { provenanceBracket?: { start: GhRateLimitProvenance; end: GhRateLimitProvenance } } = {},
 ): void {
+  if (deps.provenanceBracket && !ghRateLimitWindow(deps.provenanceBracket.start, deps.provenanceBracket.end)) {
+    appendLedger(ctx.ledgerPath, {
+      run_id: ctx.runId,
+      task_id: "daemon",
+      step: "daemon.quota_exhausted.provenance_discarded",
+      bucket: info.bucket,
+      resets_at: info.resetsAt,
+    });
+    return;
+  }
   const already = readLedgerLines(ctx.ledgerPath).some(
     (l) => l.step === "daemon.quota_exhausted.escalated" && l.bucket === info.bucket && l.resets_at === info.resetsAt,
   );
@@ -18069,6 +18190,9 @@ export function reportDrainQuotaExhaustion(
     readGhQuota?: () => GhRateLimitBuckets;
     escalate?: typeof escalateQuotaExhaustion;
     log?: (step: string, extra?: Record<string, unknown>) => void;
+    /** W1-T2305 — see {@link escalateQuotaExhaustion}'s own doc on this same field; threaded
+     *  straight through, unchanged when omitted. */
+    provenanceBracket?: { start: GhRateLimitProvenance; end: GhRateLimitProvenance };
   } = {},
 ): void {
   if (summary.stopReason !== "no_runnable") return;
@@ -18088,7 +18212,9 @@ export function reportDrainQuotaExhaustion(
     log("drain.quota", { bucket, remaining: reading.remaining, resets_at: reading.resetsAt });
     if (!isBucketExhausted(reading)) continue;
     try {
-      escalate({ bucket, remaining: reading.remaining, resetsAt: reading.resetsAt }, ctx);
+      escalate({ bucket, remaining: reading.remaining, resetsAt: reading.resetsAt }, ctx, {
+        provenanceBracket: deps.provenanceBracket,
+      });
     } catch (e) {
       // Mirrors the daemon tick's own catch around this same hook: an escalation that throws is
       // ledgered and swallowed. The drain has already finished its work by this point; losing the

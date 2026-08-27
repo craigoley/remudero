@@ -1,0 +1,124 @@
+- id: W1-T2370
+  title: "THE CODE KNOWS THE DIFFERENCE BETWEEN REFUTED AND COULD-NOT-CHECK AND DISCARDS IT ONE LINE LATER — AlreadySatisfiedResolution is a three-state union whose unverifiable arm fires in production, and both it and a genuine refusal fall to no_pr, which the drain re-offers; separate them at the DISPATCH decision, never at the credit decision"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 25.00
+  files: [src/run-task.ts, test/run-task.test.ts]
+  origin: "operator-brief#unverifiable-vs-refuted-2026-08-27"
+  plan_refs: ["W1-T119", "W1-T441", "W1-T458", "W1-T2339", "W1-T1066"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-08-27 over a ledger union reading 35 archives with the live file read, 0 unread
+    and ok true.
+
+    THE DISTINCTION EXISTS AND IS THROWN AWAY. `AlreadySatisfiedResolution` (src/run-task.ts) is a
+    genuine three-state union: verified, refuted with one of unparsable_ref / not_found /
+    different_pr, and unverifiable carrying a classified GhFailureReason. BOTH ARMS FIRE IN
+    PRODUCTION — five already_satisfied.refused rows all-time, every one of them not_found, and one
+    already_satisfied.unverified: the spawnSync gh ETIMEDOUT on 2026-08-27T06:09:52Z, reason
+    transport, claiming a PR that really was merged.
+
+    AND THE FUNCTION'S OWN DOC SAYS THE COLLAPSE IS DELIBERATE: both fall to the same no_pr verdict,
+    so the cost is a forensic label, never a wrong dispatch decision. THAT REASONING IS SOUND FOR
+    CREDITING AND UNSOUND FOR RE-DISPATCHING. It is correct that neither outcome may CREDIT the
+    task; crediting an unverified claim is the failure the guard exists to prevent. It does not
+    follow that both should RE-OFFER it. `no_pr` is in NON_HALTING_VERDICTS, so the drain hands the
+    task straight back and a full build is spent re-deriving an answer the GATEWAY could not give.
+
+    (Q1) SEPARATE THEM AT THE DISPATCH DECISION, NOT AT THE CREDIT DECISION. The credit rule is
+    unchanged and must stay unchanged: an unverifiable claim is never credited. What changes is what
+    happens next.
+
+    REFUTED — the gateway answered and contradicted the worker. Re-dispatch is correct: the claim
+    was false, and nothing about the read is in doubt.
+
+    UNVERIFIABLE — nothing was established. The cheap correct move is to RETRY THE VERIFICATION, NOT
+    THE WORK. Everything the retry needs is already on the row the code writes: claimed_ref and
+    claimed_number are both ledgered beside the classified reason. A transport timeout is not
+    evidence the task is unbuilt.
+
+    WHAT A RETRY COSTS, AND WHERE IT LIVES. It is a GATEWAY READ, not a build. Against the live
+    board a WARM gateway answers findMergedByTrailerAll in under a millisecond off rows already in
+    hand; a COLD one costs 26 sequential REST calls and about nineteen seconds and no dollars. The
+    thing it replaces cost $8.46 for three re-dispatches of one task, about $2.82 each, plus a
+    worker run and a PR that then had to be escalated. Three verification retries are therefore at
+    most three cold gateway reads against one avoided build, and on the warm path they are free.
+
+    IT LIVES AT THE CALLER, NOT IN THE RESOLVER. `resolveAlreadySatisfied` is a pure function over a
+    gateway it is handed, and it should stay that way — the retry belongs at the one call site that
+    today maps the unverifiable arm straight onto no_pr, between the resolution and the verdict.
+    That site already logs already_satisfied.unverified with everything a retry needs.
+
+    (Q2) THE BOUND, DERIVED RATHER THAN CHOSEN. An unverifiable claim must never become an unbounded
+    wait, and the ledger says what a bound can and cannot buy. Across 321 board_gateway.fetch_failed
+    rows all-time — classified 253 rate_limit and 68 auth — only 8.1 percent recovered on the very
+    next fetch. But failures arrive in RUNS, and the run lengths are what matter: of 25 observed
+    consecutive-failure runs, 8 were length 1, 8 were length 2 and 2 were length 3, while the tail
+    ran 5, 9, 10, 11, 24, 49, 84 and 99.
+
+    N IS 3. Three attempts clear 18 of the 25 observed runs — 72 percent — at a cost of at most
+    three gateway reads and no dollars. The seven runs it cannot clear are all length 5 or more:
+    genuine outages lasting minutes to hours, where retrying a read cannot help and no bound short
+    of unbounded would clear them. AFTER THE THIRD FAILED ATTEMPT the outcome is exactly today's:
+    fall to no_pr and let the drain re-offer, with the row still saying unverifiable rather than
+    refused. The bound therefore never makes anything worse than the present behaviour; it only
+    removes the 72 percent of cases where a full build was spent on a read that would have succeeded
+    on the next try.
+
+    NON_HALTING_VERDICTS IS NOT RE-TUNED BY THIS TASK. The set lives in src/lib/drain.ts, which is
+    deliberately NOT in this task's `files:` — the fix is at the run-task call site that maps the
+    unverifiable arm onto a verdict, never in the set of verdicts the drain treats as non-halting.
+    That commitment is recorded here in prose rather than as an acceptance criterion precisely
+    because a criterion proving it would have to name a file this task must not be permitted to
+    edit, and `files:` is the scope guard's permission list.
+
+    NOTHING PACES, THROTTLES OR SLEEPS BETWEEN ATTEMPTS — W1-T1066 records a polling loop that
+    locked the operator out of his repository for ninety minutes. Three consecutive reads with no
+    wait, or nothing.
+
+    AND THE GUARD IS NOT WEAKENED. In all three observed refusals the guard refused CORRECTLY on the
+    evidence available to it. Nothing here proposes trusting an unverified claim, relaxing the
+    number-equality check W1-T441 added, or crediting a task the gateway did not credit.
+
+    (Q3) WHAT THIS SHARD IS NOT, BECAUSE IT ARRIVED WITH A DIFFERENT CLASS. The four re-dispatches
+    that surfaced this cost $10.27 and were NOT caused by the collapse above. They were caused by
+    MISSING TRAILERS: PRs 2972, 2998 and 3000 each merged carrying ZERO anchored Remudero-Task
+    lines, so not_found was CORRECT every time and the gateway was healthy — driven directly, a cold
+    and a warm merged half both answered the empty list while a control id resolved to its PR off
+    the same 2,369 merged rows. That is W1-T458's uncredited-merge class, neighbouring W1-T2339, and
+    THIS SHARD OWNS NEITHER. It must not grow to cover them.
+
+    RECORDED, NOT PROPOSED: `resolveAlreadySatisfied` consults ONLY the trailer path.
+    findMergedByHeadBranch is never reached from it, so a PR credited by head branch or by commit
+    subject is invisible to this guard. That is a real property of the verification surface and it
+    is written here so the next reader does not rediscover it; widening the surface is a decision
+    for whoever owns the credit paths, and this task does not take it.
+
+    RISK BAND. `risk: high` is set UP FRONT and is Rule 19's SPAN, not blast radius: `files:` touches
+    the dispatch verdict path that every run terminates through.
+  acceptance:
+    - claim: "an unverifiable resolution retries the verification before any verdict is reached"
+      proof: "unit test: test/run-task.test.ts"
+    - claim: "a refuted resolution is never retried, because the gateway already answered"
+      proof: "unit test: test/run-task.test.ts"
+    - claim: "the retry re-reads the gateway and never re-runs the worker"
+      proof: "unit test: test/run-task.test.ts"
+    - claim: "after the third failed attempt the outcome is exactly the present one and the row still says unverifiable"
+      proof: "unit test: test/run-task.test.ts"
+    - claim: "an unverified claim is still never credited, so the guard is not weakened"
+      proof: "unit test: test/run-task.test.ts"
+    - claim: "nothing added paces or throttles or sleeps between attempts"
+      proof: "unit test: test/run-task.test.ts"
+    - claim: "the three state resolution union is unchanged"
+      proof: "grep: export type AlreadySatisfiedResolution in src/run-task.ts"
+  falsifier: |
+    If a fresh window of already_satisfied.unverified rows shows that the verification never
+    succeeds on a second or third immediate attempt — that every unverifiable claim sits inside a
+    failure run of five or more — then the bound buys nothing and this task must be closed rather
+    than implemented. The measurement to re-run is the consecutive-run-length histogram over
+    board_gateway.fetch_failed and board_gateway.fetch_ok rows, sorted by ts across rotations.

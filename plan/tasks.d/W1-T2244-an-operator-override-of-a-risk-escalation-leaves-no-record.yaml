@@ -159,6 +159,25 @@
     archives away. A new step MUST be registered there or the record decays exactly when a
     calibrator would want history.
 
+    FORWARD POINTER, ADDED 2026-08-27 — `panel.escalation_marked_handled`'s OWN EXCLUSION IS NOT A
+    GAP, and (iv) can be read as saying it is. (iv)'s point is that THIS task's new step must be
+    registered, and that stands. But it also observes that the existing panel row "archives away",
+    and on 2026-08-27 that observation was investigated as unfiled work. It is not.
+
+    MEASURED OVER THE LEDGER UNION AT THE FLEET STATE DIR ON 2026-08-27:
+    `panel.escalation_marked_handled` has emitted ZERO rows across 443,272 lines spanning
+    2026-08-08T21:59:00Z to 2026-08-27T11:27:57Z, against a control of 360 `risk_judge.escalated`
+    rows over the same corpus. It has ZERO production readers: `src/` carries one WRITER
+    (`panel-actions.ts`'s `buildEscalationMarkHandledRoute`) and two comments, and no consumer at all
+    — against a control of four `src/` files reading `risk_judge.escalated`, `sweep.ts` among them,
+    which is a real deciding reader. So there is nothing to strip and nothing to retain.
+
+    AND THE EXCLUSION IS ALREADY DOCUMENTED WITH ITS GOVERNING RULE, in `src/lib/ledger.ts`'s own
+    `DECISION_RELEVANT_LEDGER_STEPS` block: the step is "deliberately NOT registered here: it carries
+    no verdict, confidence, disposition or reason a calibrator could read back". That is the rule
+    stated beside the decision — a step belongs in that set only while a real deciding reader
+    consults it. Nothing here proposes changing that, and no id is requested.
+
     (v) AND IN THE TWO MEASURED CASES THE ROUTE NEVER RAN. Both issues were closed by hand over
     REST, so not even the thin row above exists for them. Whatever is built must be reachable on
     the path an operator actually uses, or it will record the cases that were never the problem.

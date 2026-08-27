@@ -158,6 +158,18 @@ export type { WorkflowRunObservation } from "./workflow-run.js";
  *     suppresses the same action. Fix dispatch is additionally keyed on the head sha
  *     so a NEW push (state changed) legitimately re-earns a strike, up to the cap.
  *   - Every disposition produces one `sweep.disposed` ledger line via appendLedger.
+ *   - W1-T2345 — A DERIVATION IS NOT AN ACTION, BUT IT IS NOT FREE EITHER: the invariant above
+ *     lets an unchanging verdict re-derive every pass forever, by design — the sweep IS
+ *     level-triggered and must keep re-deriving. What it must not do is carry that repetition at
+ *     full weight silently: once one PR's (disposition, head_sha) pair — never its rendered
+ *     `reason`, whose prose can carry a live counter that changes every tick even when the
+ *     verdict has not (see {@link repeatDispositionStreaksFromLedger}'s own doc) — repeats
+ *     {@link SweepPolicy.repeatDispositionBound} consecutive times, the sweep escalates ONCE via
+ *     the SAME `deps.escalate()` the blocked-ambiguous rung already calls (reaching the existing
+ *     digest/inbox surface with no new transport), and stays quiet until either the head moves or
+ *     the bound is re-armed some other way. The disposition itself is NEVER replaced or cached —
+ *     it is re-derived exactly as before this task; only its repetition gets a second, distinct
+ *     signal once it stops being informative on its own.
  *
  * All external effects (arm / dispatch-fix / close / escalate, and reading the
  * ledger for prior actions) are INJECTED — this module never calls `gh`/git/network
@@ -610,6 +622,33 @@ export interface SweepPolicy {
    * in {@link DEFAULT_SWEEP_POLICY}, which keeps `plan/policy.yaml` out of this task's `files:`.
    */
   mergeConflictAdmissionEnabled: boolean;
+  /**
+   * W1-T2345 (MEASURED 2026-08-26, `sweep.disposed` ledger rows, 44,603 rows across 1,156 PRs) —
+   * THE UNBOUNDED-IDENTICAL-DISPOSITION BOUND: once one PR's (disposition, head_sha) pair — see
+   * {@link repeatDispositionStreaksFromLedger}'s own doc for why the KEY excludes the rendered
+   * `reason` text — repeats this many CONSECUTIVE `sweep.disposed` rows, the sweep escalates
+   * exactly once (never again until the head moves) via the SAME `deps.escalate()` the
+   * blocked-ambiguous rung already calls.
+   *
+   * WHY 50, DERIVED AGAINST THE MERGE-TIME POPULATION, NOT PICKED: the measured PR's longest
+   * identical-verdict run (keyed this way) was 186, reached at 132 minutes of PR age. Across the
+   * last 98 merged PRs, median time-to-merge is 24 minutes and 8% exceed four hours — N=50 trips
+   * on that SAME 8% (a bound at N=20 or N=30 would instead fire on 28.6%/17.4% of ALL PRs, i.e. on
+   * ordinary, healthy work still inside the p75 the brief warns about). N=50 also fires 3.5x
+   * earlier than the existing 8-hour board-review rung (W1-T2304) on the case that motivated
+   * this — the two arms are ORTHOGONAL (that rung is age-triggered and misses a PR that is stuck
+   * but young; this one is repetition-triggered and misses a PR that is merely old while still
+   * making progress), never a retune of one another.
+   *
+   * NEVER PRE-EMPTS {@link pendingCeilingMinutes} — that field's own doc says it "stays exactly as
+   * it was" for this task, and 132 minutes (this bound's OWN measured trip point) is already past
+   * the 60-minute ceiling, so a `wait`-turned-`blocked-ambiguous` PR always crosses that ceiling
+   * first. NET-NEW, and deliberately NOT sourced from `plan/policy.yaml` — the same choice
+   * `conceptCoexistenceEnabled`/`mergeConflictAdmissionEnabled` above already made: a hardcoded
+   * literal in {@link DEFAULT_SWEEP_POLICY}, since this task's own `files:` is `src/lib/sweep.ts`
+   * + `test/sweep.test.ts` only.
+   */
+  repeatDispositionBound: number;
 }
 
 /**
@@ -739,6 +778,10 @@ export const DEFAULT_SWEEP_POLICY: SweepPolicy = {
   // W1-T984: NOT sourced from plan/policy.yaml (see the field's own doc, above) — a hardcoded
   // literal, off, the same choice `conceptCoexistenceEnabled` just above already made.
   mergeConflictAdmissionEnabled: false,
+  // W1-T2345: NOT sourced from plan/policy.yaml (see the field's own doc, above) — a hardcoded
+  // literal, 50, derived against the merge-time population measured 2026-08-26 (see the field's
+  // own doc for the full derivation), never a round number picked because it looked safe.
+  repeatDispositionBound: 50,
 };
 
 /**
@@ -3849,6 +3892,140 @@ export function toQuestionEntry(q: ClarificationQuestion, ts: string): QuestionE
   };
 }
 
+// ── W1-T2345 — THE UNBOUNDED-IDENTICAL-DISPOSITION COUNTER ──────────────────────────────────
+//
+// A disposition that CANNOT change on an unchanged head is re-derived at full weight forever
+// (measured: one PR dispositioned 301 times over 8.7h; the longest run of one verdict on one
+// unchanged head, keyed correctly, was 186). The sweep was right every time — this bounds the
+// REPETITION, never the verdict: {@link deriveDisposition} is untouched, `sweep.disposed` still
+// writes one row every pass (the level-triggered invariant this module's own header names), and
+// nothing here paces, throttles, or sleeps a call. See `SweepPolicy.repeatDispositionBound`'s own
+// doc for the N=50 derivation.
+
+/** One PR's identical-verdict run, as folded off `sweep.disposed` rows already on the ledger —
+ *  see {@link repeatDispositionStreaksFromLedger}'s own doc for the fold rules. */
+interface RepeatDispositionRun {
+  headSha: string;
+  disposition: string;
+  /** Consecutive `sweep.disposed` rows ending at (and including) the last one read. */
+  streak: number;
+  /** Whether the one-time repeat escalation already fired somewhere inside THIS run. */
+  escalated: boolean;
+}
+
+/**
+ * Fold every `sweep.disposed` row (any lines array — the caller's own pre-pass ledger read,
+ * exactly like {@link priorActionsFromLedger}'s sibling folds) into each `pr_number`'s trailing
+ * identical-verdict run: how many CONSECUTIVE rows, ending at the last one this ledger has for
+ * that PR, share the SAME `(disposition, head_sha)` pair.
+ *
+ * KEYED ON `(disposition, head_sha)`, NEVER ON THE RENDERED `reason` — the task's own measurement
+ * (rationale Q1) is why: a `wait` row's `reason` carries a live minute counter ("checks pending
+ * 362m", then "365m", then "367m") that renders differently on every tick even though the
+ * verdict has not moved at all. Keyed on that text the longest run on the measured PR was 11 and
+ * a bound of 3 first tripped at 487 minutes — seven minutes AFTER the existing 8-hour board-review
+ * rung (W1-T2304) would already have fired, i.e. useless. Keyed on the verdict itself instead, the
+ * SAME corpus's longest run was 186, tripping a bound of 50 at 132 minutes — 3.5x earlier.
+ *
+ * EVERY `sweep.disposed` ROW COUNTS, REGARDLESS OF `acted` — a `wait` row is always `acted:false`
+ * and a deduped `mergeable` row is `acted:false` too, and both are still genuine DERIVATIONS of
+ * the identical unchanging verdict (design Q3: "the counter counts derivations, it never replaces
+ * one"). Gating this fold on `acted === true`, the way {@link priorActionsFromLedger}'s OWN
+ * action-dedup sets do, would silently exempt exactly the shapes (`wait`, a deduped repeat) this
+ * task exists to bound.
+ *
+ * A row for a DIFFERENT `pr_number`, or one whose `disposition`/`head_sha` differs from the run in
+ * progress, breaks it: the next row for that PR starts a FRESH run of length 1, `escalated: false`
+ * — this is the head-move reset the acceptance criteria ask for. `escalated` is carried forward
+ * unconditionally once set (a row's own `repeat_escalated: true`, written only on the pass that
+ * trips the bound — see `runSweep`'s own call site) for as long as the run continues, so the
+ * one-time escalation this fold gates never re-fires while the head stays put.
+ *
+ * Rows with no numeric `pr_number`, no string `head_sha`, or no string `disposition` are skipped
+ * — the same fail-open shape every sibling ledger fold in this module already takes on a
+ * malformed/pre-feature row, never a thrown parse error.
+ */
+function repeatDispositionStreaksFromLedger(lines: ReadonlyArray<Record<string, unknown>>): Map<number, RepeatDispositionRun> {
+  const runs = new Map<number, RepeatDispositionRun>();
+  for (const line of lines) {
+    if (line.step !== "sweep.disposed") continue;
+    const prNumber = typeof line.pr_number === "number" ? line.pr_number : undefined;
+    const headSha = typeof line.head_sha === "string" ? line.head_sha : undefined;
+    const disposition = typeof line.disposition === "string" ? line.disposition : undefined;
+    if (prNumber === undefined || headSha === undefined || disposition === undefined) continue;
+    const prev = runs.get(prNumber);
+    const continuesRun = prev !== undefined && prev.headSha === headSha && prev.disposition === disposition;
+    runs.set(prNumber, {
+      headSha,
+      disposition,
+      streak: continuesRun && prev ? prev.streak + 1 : 1,
+      escalated: (continuesRun && prev ? prev.escalated : false) || line.repeat_escalated === true,
+    });
+  }
+  return runs;
+}
+
+/**
+ * The repeat escalation's own `reason` string — deliberately NEVER a re-judgement of the
+ * disposition (design Q1/Q3: "nothing here proposes a different verdict"), only a statement that
+ * it has stopped moving.
+ */
+function repeatEscalationReason(disposition: Disposition, dispositionReason: string, streak: number, bound: number): string {
+  return (
+    `disposition "${disposition}" has repeated ${streak} consecutive time(s) on the SAME head ` +
+    `(>= ${bound} repeat bound) — the sweep's own verdict is unchanged and not in question, only ` +
+    `its unchanging repetition is: ${dispositionReason}`
+  );
+}
+
+/**
+ * Render the repeat-bound trip as a {@link ClarificationQuestion} — reusing the SAME shape (and
+ * the SAME `deps.escalate()` transport) the blocked-ambiguous rung already uses, per this task's
+ * `files:` scope (`src/lib/sweep.ts` + `test/sweep.test.ts` only, so this reaches the existing
+ * digest/inbox surface with no new escalation vocabulary and no edit to `escalate.ts`/`digest.ts`/
+ * `run-task.ts`). Unlike {@link renderClarificationQuestion}, there is no single unmet criterion
+ * to point at — the two resolutions name the two honest outcomes of a verdict that is not itself
+ * disputed, only stuck repeating.
+ */
+export function renderRepeatEscalationQuestion(
+  pr: OpenPrView,
+  disposition: Disposition,
+  reason: string,
+  streak: number,
+  bound: number,
+): ClarificationQuestion {
+  const resolutions: readonly [ClarificationResolution, ClarificationResolution] = [
+    {
+      label: "acknowledge-unchanged",
+      detail:
+        `no action needed from the sweep's own dispositioning — verdict "${disposition}" is correct and the sweep ` +
+        `will keep re-deriving it every pass; this notice is visibility only, never a request to change the verdict.`,
+    },
+    {
+      label: "intervene-manually",
+      detail:
+        `the automated remedy (if any) for "${disposition}" has had ${streak} unchanged passes on this head with ` +
+        `nothing moving it forward — an operator looks at PR #${pr.prNumber} directly rather than waiting on another pass.`,
+    },
+  ];
+  const question =
+    `Task ${pr.taskId ?? "UNKNOWN"}, PR #${pr.prNumber} (${pr.prUrl}): the sweep has dispositioned this PR ` +
+    `"${disposition}" ${streak} consecutive time(s) on the SAME head (>= ${bound} repeat bound) — ${reason}. The ` +
+    `verdict itself is not in question, only its unchanging repetition is. Which is right — ` +
+    `(1) ${resolutions[0].label}: ${resolutions[0].detail}, or (2) ${resolutions[1].label}: ${resolutions[1].detail}`;
+  return {
+    taskId: pr.taskId ?? "UNKNOWN",
+    prNumber: pr.prNumber,
+    prUrl: pr.prUrl,
+    question,
+    criterion: "",
+    reviewerRequirement: reason,
+    specText: "",
+    strikeHistory: [],
+    resolutions,
+  };
+}
+
 /**
  * The ADDITIONAL strikes an operator's clarification answer grants — PURE,
  * table-free (the policy has exactly one lever today; a second lever is a
@@ -5033,6 +5210,15 @@ export async function runSweep(
   // W1-T1275 (design iv) — the SAME fresh-every-pass, ledger-only bound as `requeuedCheckKeys`
   // immediately above. See `reaggregatedCiGateKeysFromLedger`'s own doc.
   const reaggregatedCiGateKeys = reaggregatedCiGateKeysFromLedger(ledgerLines);
+  // W1-T2345 — the SAME fresh-every-pass, ledger-only fold as `requeuedCheckKeys`/
+  // `reaggregatedCiGateKeys` above. See `repeatDispositionStreaksFromLedger`'s own doc.
+  const priorRepeatRuns = repeatDispositionStreaksFromLedger(ledgerLines);
+  // `prIndex` -> this PASS's own streak (+ whether the one-time repeat escalation fires this
+  // pass), populated in the per-PR walk below and read back by `finalizeDisposition` — a Map
+  // keyed by index rather than two new positional parameters threaded through every one of that
+  // function's four call sites (three of them reached only from the deferred post-review batch,
+  // well after the walk that computes this).
+  const repeatMeta = new Map<number, { streak: number; escalated: boolean }>();
 
   // ── W1-T931 COST-ANOMALY SENTINEL ───────────────────────────────────────────────────────────
   // Hung off THIS pass, not a new src/run-task.ts verdict call site (design note vi): `runSweep`
@@ -5179,6 +5365,11 @@ export async function runSweep(
     // UNANSWERED question stays ledgered on every subsequent sweep, even once
     // `acted` goes false (deduped: no repeat escalate()).
     if (!deps.dryRun) {
+      // W1-T2345 — this PASS's own repeat-streak figures, computed once per PR earlier in the
+      // walk (see `repeatMeta`'s own doc) and read back here by `index` so all four
+      // `finalizeDisposition` call sites (including the two reached only from the deferred
+      // post-review batch) carry it with no change to their own signatures.
+      const repeat = repeatMeta.get(index);
       const disposedLine = {
         run_id: deps.runId,
         task_id: pr.taskId ?? "SWEEP",
@@ -5192,6 +5383,13 @@ export async function runSweep(
         ...(depReviewOutcome ? { dep_review_outcome: depReviewOutcome } : {}),
         ...(actionError ? { action_error: actionError } : {}),
         ...(standDownReason ? { stand_down_reason: standDownReason } : {}),
+        // W1-T2345: `repeat_streak` rides every row (grep/test-provable, and cheap — it is
+        // always in hand by this point) so `repeatDispositionStreaksFromLedger`'s NEXT-pass fold
+        // never has to guess it back out of row order; `repeat_escalated` is present ONLY on the
+        // one pass that actually fired the one-time escalation (see that fold's own doc for why
+        // this is the field the "stays quiet until the head moves" guarantee is built on).
+        ...(repeat !== undefined ? { repeat_streak: repeat.streak } : {}),
+        ...(repeat?.escalated ? { repeat_escalated: true } : {}),
         // W1-T1061: the FIELD sibling to `stand_down_reason`'s prose — present whenever
         // `deps.arm` returned a concrete outcome for THIS pr this pass (armed or not),
         // absent whenever no arm was even attempted (every other disposition, and a
@@ -5257,6 +5455,42 @@ export async function runSweep(
     const pr = openPrs[prIndex];
     const { disposition, reason } = deriveDisposition(pr, policy, now);
     byDisposition[disposition]++;
+
+    // W1-T2345 — THE UNBOUNDED-IDENTICAL-DISPOSITION COUNTER, computed for EVERY disposition
+    // (never only blocked-ambiguous) and BEFORE the per-disposition dedup/action logic below —
+    // this bounds the DERIVATION itself, orthogonal to whatever per-head dedup (armed/fixed/
+    // escalated/closed) a specific disposition's own gated action already has. See
+    // `repeatDispositionStreaksFromLedger`'s own doc for the (disposition, head_sha) key and why
+    // it excludes `reason`'s prose.
+    const priorRepeatRun = priorRepeatRuns.get(pr.prNumber);
+    const repeatRunContinues =
+      priorRepeatRun !== undefined && priorRepeatRun.headSha === pr.headSha && priorRepeatRun.disposition === disposition;
+    const repeatStreak = repeatRunContinues && priorRepeatRun ? priorRepeatRun.streak + 1 : 1;
+    const repeatAlreadyEscalated = repeatRunContinues && priorRepeatRun ? priorRepeatRun.escalated : false;
+    const repeatBoundTripped = repeatStreak >= policy.repeatDispositionBound;
+    let repeatEscalatedNow = false;
+    // Skipped entirely under --dry-run (a preview must leave no trace — the same rule
+    // `finalizeDisposition`'s own `sweep.disposed` write already follows) and whenever a prior
+    // pass already fired this run's one-time escalation (`repeatAlreadyEscalated`) — the "stays
+    // quiet until the head moves" half of the acceptance criteria.
+    if (repeatBoundTripped && !repeatAlreadyEscalated && !deps.dryRun) {
+      try {
+        await deps.escalate(
+          pr,
+          repeatEscalationReason(disposition, reason, repeatStreak, policy.repeatDispositionBound),
+          renderRepeatEscalationQuestion(pr, disposition, reason, repeatStreak, policy.repeatDispositionBound),
+        );
+        log("sweep.repeat_escalated", { pr_number: pr.prNumber, disposition, streak: repeatStreak, head_sha: pr.headSha });
+        repeatEscalatedNow = true;
+      } catch (e) {
+        // W1-T254 per-PR throw containment, mirrored: a throw from the real GH gateway is this
+        // PR's own signal, never the whole pass. `repeatEscalatedNow` stays false, so THIS
+        // attempt is not recorded as having fired — the next pass (streak now one higher) tries
+        // again rather than silently forgetting the notification forever on a transient failure.
+        log("sweep.repeat_escalate_failed", { pr_number: pr.prNumber, error: String((e as Error)?.message ?? e) });
+      }
+    }
+    repeatMeta.set(prIndex, { streak: repeatStreak, escalated: repeatEscalatedNow });
 
     // W1-T196: a blocked-ambiguous PR that never resolved a task id is a
     // KNOWN, non-emergency state ONLY when it is POSITIVELY a plan-filing PR

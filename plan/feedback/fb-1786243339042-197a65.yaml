@@ -25,7 +25,8 @@ raw: "DRAIN CRASHES ON LINUX AFTER COMPLETING — notify.ts shells osascript,
   today, which matters more than the crash."
 attachments: []
 origin: cli
-status: new
+status: rejected
 proposal_pr: null
 summary: null
 expansion: null
+answered_by: null

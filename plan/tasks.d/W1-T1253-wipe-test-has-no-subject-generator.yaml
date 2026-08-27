@@ -79,6 +79,21 @@
     shard. It is recorded here so it is not lost, and deliberately not fixed here: a generator that
     produces perfect subjects for a harness that contaminates arm B produces perfect nonsense, so
     the two are worth nothing separately and must not be silently merged into one.
+
+    FORWARD POINTER, ADDED 2026-08-27 — (vi) IS CLOSED, AND ITS STATED MECHANISM WAS REFUTED.
+    W1-T1256 took this scope and shipped as `36902387` (#2646). It is recorded here because a reader
+    reaching (vi) could not otherwise learn it, and on 2026-08-27 four findings named in merged
+    rationales were investigated as unfiled work for exactly that reason — this one among them.
+
+    THE REFUTATION MATTERS MORE THAN THE POINTER, so it is stated rather than left to be re-derived.
+    (vi) blames the misplaced local reset: `reset --hard origin/main` runs once before arm A rather
+    than between the arms. W1-T1256 re-derived that from source and found it is NOT the contamination
+    path. Each arm is already cut a per-run worktree at a unique `run-<taskId>-<epochMs>` path, so
+    arm A's working tree is not what arm B inherits. THE CHANNEL IS REMOTE: arm A pushes, its PR
+    auto-merges at PR-open, `projectPlan` then reports the task merged, and arm B returns
+    `task_already_merged` without spawning — so a SUCCESSFUL ARM A DESTROYS ITS OWN CONTROL, and the
+    sandbox's own `origin/main` then contains arm A's diff. No reset between arms reaches any of
+    that. A pointer naming only the successor would invite the same wrong re-derivation.
   acceptance:
     - claim: "a generated subject selects the learnings shards its files were asked to select"
       proof: "unit test: test/sandbox-subject-generator.test.ts"

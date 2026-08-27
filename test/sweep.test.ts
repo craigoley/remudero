@@ -22,6 +22,7 @@ import {
   renderClarificationQuestion,
   renderMootedCloseComment,
   renderReconcileCloseComment,
+  renderRepeatEscalationQuestion,
   renderSweepSummary,
   runCreditBackfill,
   runEscalationReconcile,
@@ -4079,4 +4080,218 @@ test("W1-T528: the failure classifier separates a conflict from an ordinary erro
   for (const s of ["gh: command not found", "HTTP 500", "network unreachable", ""]) {
     assert.equal(classifyUpdateBranchFailure(s), "error", `"${s}" is an ordinary error`);
   }
+});
+
+// ── W1-T2345: A DISPOSITION THAT CANNOT CHANGE IS RE-DERIVED FOREVER ────────────────────────────
+//
+// Measured: one PR dispositioned 301 times over 8.7h; the longest run of one verdict on one
+// unchanged head (keyed on disposition+head_sha, never the rendered reason) was 186. The sweep
+// was right every time — these tests never assert a different VERDICT, only that its unchanging
+// REPETITION gets a distinct, one-time signal once it stops being informative on its own.
+//
+// Most tests below run against a LOW bound (3) rather than the real default (50) — rule 2's own
+// "every threshold a test might flip lives in the policy object" applies here exactly as it does
+// to `pendingCeilingMinutes`/`reviewOrphanCap` elsewhere in this file; a 50-pass loop per test
+// would only slow the suite down, never sharpen what it proves. One test below (immediately
+// following) locks the real default at 50, so the low-bound tests and the shipped constant never
+// silently drift apart.
+
+test("W1-T2345: the default repeat-disposition bound is 50, per the measured merge-time derivation", () => {
+  assert.equal(
+    DEFAULT_SWEEP_POLICY.repeatDispositionBound,
+    50,
+    "N=50 trips on the SAME ~8% of PRs the merge-time distribution independently calls slow, and " +
+      "3.5x earlier than the existing 8-hour board-review rung on the case that motivated this task",
+  );
+});
+
+const REPEAT_BOUND_3: SweepPolicy = { ...DEFAULT_SWEEP_POLICY, repeatDispositionBound: 3 };
+
+test("W1-T2345: a verdict repeated on an unchanged head escalates differently once, not at full weight forever", async () => {
+  const shared = ledgerPath();
+  const target = mergeablePr();
+
+  const first = fakeDeps({ ledgerPath: shared });
+  await runSweep([target], first, REPEAT_BOUND_3);
+  assert.equal(first.escalated.length, 0, "pass 1 of 3 — nowhere near the bound");
+
+  const second = fakeDeps({ ledgerPath: shared });
+  await runSweep([target], second, REPEAT_BOUND_3);
+  assert.equal(second.escalated.length, 0, "pass 2 of 3 — still short of the bound");
+
+  const third = fakeDeps({ ledgerPath: shared });
+  await runSweep([target], third, REPEAT_BOUND_3);
+  assert.equal(third.escalated.length, 1, "pass 3 of 3 trips the bound — exactly one escalation");
+  assert.match(
+    third.escalated[0].reason,
+    /disposition "mergeable" has repeated 3 consecutive time\(s\) on the SAME head \(>= 3 repeat bound\)/,
+  );
+  // Reuses the SAME deps.escalate() transport the blocked-ambiguous rung already calls — the
+  // existing digest/inbox surface, with no second escalation vocabulary and no new field on
+  // SweepDeps at all.
+  assert.equal(third.escalated[0].question.prNumber, target.prNumber);
+  assert.equal(third.escalated[0].question.resolutions.length, 2, "exactly two candidate resolutions, like every other clarification");
+});
+
+test("W1-T2345: the bound keys on the verdict and the head, never the rendered reason text", async () => {
+  const shared = ledgerPath();
+  const target = mergeablePr();
+  // Two PRIOR rows carrying a DIFFERENT reason each — a live minute counter, exactly like the
+  // `wait` disposition's own reason text (rationale Q1: "checks pending 362m", then "365m", then
+  // "367m" — textually different every tick despite an unmoving verdict). If the fold read this
+  // field the streak would never accumulate past 1.
+  appendLedger(shared, {
+    run_id: "SWEEP-0",
+    task_id: target.taskId ?? "SWEEP",
+    step: "sweep.disposed",
+    pr_number: target.prNumber,
+    pr_url: target.prUrl,
+    disposition: "mergeable",
+    acted: false,
+    reason: "review success, required checks green — arming auto-merge (attempt 1)",
+    head_sha: target.headSha,
+  });
+  appendLedger(shared, {
+    run_id: "SWEEP-1",
+    task_id: target.taskId ?? "SWEEP",
+    step: "sweep.disposed",
+    pr_number: target.prNumber,
+    pr_url: target.prUrl,
+    disposition: "mergeable",
+    acted: false,
+    reason: "review success, required checks green — arming auto-merge (attempt 2, still waiting)",
+    head_sha: target.headSha,
+  });
+  const deps = fakeDeps({ ledgerPath: shared });
+  await runSweep([target], deps, REPEAT_BOUND_3);
+  assert.equal(deps.escalated.length, 1, "2 seeded rows + this pass's own = 3 — the bound trips despite 3 distinct reason strings");
+});
+
+test("W1-T2345: the escalation is emitted once per trip and not repeated while the head is unchanged", async () => {
+  const shared = ledgerPath();
+  const target = mergeablePr();
+  for (let i = 0; i < REPEAT_BOUND_3.repeatDispositionBound; i++) {
+    await runSweep([target], fakeDeps({ ledgerPath: shared }), REPEAT_BOUND_3);
+  }
+  const tripped = readLedgerLines(shared).filter((l) => l.step === "sweep.disposed" && l.repeat_escalated === true);
+  assert.equal(tripped.length, 1, "sanity: the bound tripped exactly once so far");
+
+  // Several MORE passes at the SAME head — the streak keeps growing (still re-deriving, never
+  // capped), but the one-time escalation must never fire a second time for this run.
+  for (let i = 0; i < 5; i++) {
+    const again = fakeDeps({ ledgerPath: shared });
+    await runSweep([target], again, REPEAT_BOUND_3);
+    assert.equal(again.escalated.length, 0, `pass ${REPEAT_BOUND_3.repeatDispositionBound + i + 1}: still quiet — same head, already escalated`);
+  }
+});
+
+test("W1-T2345: a head that moves resets the count, so a PR making progress is never escalated for repetition", async () => {
+  const shared = ledgerPath();
+  const headA = mergeablePr();
+  for (let i = 0; i < REPEAT_BOUND_3.repeatDispositionBound - 1; i++) {
+    await runSweep([headA], fakeDeps({ ledgerPath: shared }), REPEAT_BOUND_3);
+  }
+  const trippedOnA = fakeDeps({ ledgerPath: shared });
+  await runSweep([headA], trippedOnA, REPEAT_BOUND_3);
+  assert.equal(trippedOnA.escalated.length, 1, "sanity: head A trips the bound on its 3rd pass");
+
+  // A NEW head — same disposition, but a genuine push landed.
+  const headB: OpenPrView = { ...headA, headSha: "bbbb222" };
+  const firstOnB = fakeDeps({ ledgerPath: shared });
+  await runSweep([headB], firstOnB, REPEAT_BOUND_3);
+  assert.equal(firstOnB.escalated.length, 0, "streak resets to 1 on the new head — nowhere near the bound");
+
+  // The reset is a restart, never a one-way disablement: head B can trip the SAME bound on its
+  // own, given its own 3 consecutive passes.
+  await runSweep([headB], fakeDeps({ ledgerPath: shared }), REPEAT_BOUND_3);
+  const trippedOnB = fakeDeps({ ledgerPath: shared });
+  await runSweep([headB], trippedOnB, REPEAT_BOUND_3);
+  assert.equal(trippedOnB.escalated.length, 1, "head B reaches its OWN 3rd consecutive pass and escalates again");
+});
+
+test("W1-T2345: tripping the bound never changes the derived disposition — the sweep keeps re-deriving fresh every pass", async () => {
+  const shared = ledgerPath();
+  const passes = REPEAT_BOUND_3.repeatDispositionBound + 2;
+  for (let i = 0; i < passes; i++) {
+    const deps = fakeDeps({ ledgerPath: shared });
+    const summary = await runSweep([mergeablePr()], deps, REPEAT_BOUND_3);
+    assert.equal(summary.byDisposition.mergeable, 1, `pass ${i + 1}: still derives "mergeable" fresh, escalation or not`);
+  }
+  const disposed = readLedgerLines(shared).filter((l) => l.step === "sweep.disposed");
+  assert.equal(disposed.length, passes, "one sweep.disposed row per pass — the level-triggered invariant holds through and past the trip");
+  for (const line of disposed) {
+    assert.equal(line.disposition, "mergeable", "the counter never substitutes a cached verdict for a fresh derivation");
+  }
+});
+
+test("W1-T2345: a dry run never escalates and leaves no repeat-streak trace", async () => {
+  const shared = ledgerPath();
+  const target = mergeablePr();
+  for (let i = 0; i < REPEAT_BOUND_3.repeatDispositionBound + 2; i++) {
+    const deps = fakeDeps({ ledgerPath: shared, dryRun: true });
+    await runSweep([target], deps, REPEAT_BOUND_3);
+    assert.equal(deps.escalated.length, 0, "a preview must leave no trace — including never firing the repeat escalation");
+  }
+  assert.equal(readLedgerLines(shared).filter((l) => l.step === "sweep.disposed").length, 0, "dry-run writes no ledger line at all, as before this task");
+});
+
+test("W1-T2345: nothing added paces, throttles, or sleeps a call — no timer is ever scheduled", async () => {
+  const shared = ledgerPath();
+  const target = mergeablePr();
+  for (let i = 0; i < REPEAT_BOUND_3.repeatDispositionBound - 1; i++) {
+    await runSweep([target], fakeDeps({ ledgerPath: shared }), REPEAT_BOUND_3);
+  }
+  const originalSetTimeout = globalThis.setTimeout;
+  // Poisoned for the duration of this one trip only, restored unconditionally below — W1-T1066
+  // records a polling loop that locked an operator out of his own repository for ninety minutes;
+  // this proves the repeat-escalation trip itself schedules no timer of any kind.
+  // @ts-expect-error — test-only monkeypatch of a global, restored in `finally`.
+  globalThis.setTimeout = (..._args: unknown[]) => {
+    throw new Error("runSweep's repeat-escalation must never schedule a timer — nothing paces, throttles, or sleeps a call");
+  };
+  try {
+    const deps = fakeDeps({ ledgerPath: shared });
+    await runSweep([target], deps, REPEAT_BOUND_3);
+    assert.equal(deps.escalated.length, 1, "the bound still trips correctly with setTimeout poisoned");
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
+test("W1-T2345: renderRepeatEscalationQuestion never re-litigates the verdict, only its repetition", () => {
+  const target = mergeablePr();
+  const q = renderRepeatEscalationQuestion(target, "conflicted", "a real merge conflict — not permitted to resolve", 186, 50);
+  assert.equal(q.prNumber, target.prNumber);
+  assert.equal(q.prUrl, target.prUrl);
+  assert.equal(q.resolutions.length, 2);
+  assert.match(q.question, /"conflicted" 186 consecutive time\(s\)/);
+  assert.match(q.question, /not in question, only its unchanging repetition is/);
+});
+
+test("W1-T2345: an ALREADY-escalated blocked-ambiguous PR still trips the repeat bound independently", async () => {
+  // The real-world shape this task exists for: blocked-ambiguous's OWN sha-keyed dedup
+  // (`prior.escalated`) already stops it from re-escalating after pass 1 (W1-T514) — this proves
+  // the repeat counter surfaces the notification a SECOND time once the identical, un-acted-upon
+  // block has sat for `repeatDispositionBound` more passes, rather than staying silent forever
+  // just because the disposition-specific dedup already fired once.
+  const shared = ledgerPath();
+  const target = strikesExhaustedPr();
+
+  const first = fakeDeps({ ledgerPath: shared });
+  await runSweep([target], first, REPEAT_BOUND_3);
+  assert.equal(first.escalated.length, 1, "pass 1: blocked-ambiguous's own escalation fires (streak 1, nowhere near the bound)");
+
+  const second = fakeDeps({ ledgerPath: shared });
+  await runSweep([target], second, REPEAT_BOUND_3);
+  assert.equal(second.escalated.length, 0, "pass 2: blocked-ambiguous is deduped (W1-T514) and the repeat streak (2) is still short");
+
+  const third = fakeDeps({ ledgerPath: shared });
+  await runSweep([target], third, REPEAT_BOUND_3);
+  assert.equal(
+    third.escalated.length,
+    1,
+    "pass 3: blocked-ambiguous is STILL deduped, but the repeat counter independently trips — a second, distinct " +
+      "notification, never a silence just because the first escalation already happened",
+  );
+  assert.match(third.escalated[0].reason, /disposition "blocked-ambiguous" has repeated 3 consecutive time\(s\)/);
 });

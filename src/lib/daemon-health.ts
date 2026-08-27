@@ -46,6 +46,7 @@ import type { ServerResponse } from "node:http";
 import { readLedgerLines, type LedgerReader } from "./status.js";
 import { DEFAULT_POLL_INTERVAL_MS } from "./daemon.js";
 import type { Route } from "./service.js";
+import { parseGhRateLimitHeaders } from "./worker.js";
 
 /** {@link deriveLastPoll}'s result — see this module's header for each field's own source. */
 export interface DaemonPollInfo {
@@ -201,6 +202,90 @@ export function readGhRateLimitBuckets(exec: (args: string[]) => string = defaul
   } catch {
     return {};
   }
+}
+
+// ── W1-T2305: PROVENANCE, not a new probe ───────────────────────────────────────────────────
+//
+// The investigation this task adopts (plan/tasks.d/W1-T2305-…yaml, its own rationale/design)
+// measured `gh api rate_limit` — the call every reader above shells — disagreeing with itself:
+// three calls in the SAME SECOND returned 10383, 0, 10383, and sixteen consecutive reads all
+// gave a reset "exactly one hour ahead TO THE SECOND", a window manufactured at request time
+// rather than a bucket. The endpoint is FREE (uncounted against any quota), which is exactly
+// why it is unreliable: nothing about it is tied to a real, metered call.
+//
+// `lib/worker.ts`'s own `ghJson` (W1-T525) already solved this for its OWN call sites: it reads
+// `X-Ratelimit-*` off the SAME response header block a real, metered `gh api …` call carried —
+// never a separate probe — via its exported {@link parseGhRateLimitHeaders}. `GhRateLimitProvenance`
+// below lifts that same discipline into a SHARED shape that also carries the ACTOR (the login the
+// response's own body named), because the login does not identify the bucket (design (ii)): the
+// operator's measurement found the fleet's `gh` children spend an installation-token bucket that
+// every shell an operator can open never touches — a reading with no actor attached is silently
+// assumed to be "the" bucket when it may describe a completely different identity's.
+//
+// `ghRateLimitWindow` is THE BRACKET RULE (design (ii)), stated once so every consumer asks it
+// the same way: two readings are comparable — form a usable WINDOW — only when they name the
+// SAME actor, the SAME resource, and the SAME reset epoch. Any of the three differing means the
+// readings describe different identities or different reset periods, and treating them as
+// comparable is exactly the manufactured-burst failure mode this task's own rationale (6)
+// documents (a reset followed by a nonzero `used` is equally consistent with a genuine burst and
+// with ordinary use spread across the prior window — nothing about a mismatched pair can tell
+// them apart, so it must be DISCARDED, never subtracted).
+//
+// This is additive: none of the four existing readers above change shape or call site — every
+// pinned expectation on `readGhRateLimitRemaining`/`readGhRateLimitBuckets` (this file) and
+// `probeGithubThrottle` (lib/retro.ts) holds exactly as before. The shared primitive is here so a
+// CONSUMER of a reading — concretely, `escalateQuotaExhaustion` (run-task.ts) — can refuse to act
+// on a bracket that does not hold together, which is design (iv)'s own bar: "an escalation raised
+// off a bucket whose reset epoch does not match the window it claims to describe is the one
+// outcome this task must make impossible." Nothing here paces, sleeps, defers, or governs a call
+// (design (v)) — both functions below are pure and synchronous.
+
+/**
+ * One GitHub rate-limit reading with full PROVENANCE: the actor (GitHub login) the response's
+ * OWN body named, and the resource/remaining/reset its OWN response headers named — both read
+ * off the SAME response, which must itself have been a real, metered call. `reset` is kept as
+ * the header's raw Unix-epoch-seconds unit (never the derived ISO string) so a comparison can
+ * never be fooled by a formatting difference that hides a real epoch mismatch.
+ */
+export interface GhRateLimitProvenance {
+  actor: string;
+  resource: string;
+  remaining: number;
+  reset: number;
+}
+
+/**
+ * Build a {@link GhRateLimitProvenance} from ONE metered response: `actor` is supplied by the
+ * caller (read off that SAME response's own body — e.g. `gh api user`'s `.login`, or GraphQL's
+ * `.data.viewer.login` — never inferred or guessed), `resource`/`remaining`/`reset` come off that
+ * SAME response's header block via {@link parseGhRateLimitHeaders} (lib/worker.ts). Returns
+ * `undefined` — never a fabricated reading — when the actor is absent or the header block did
+ * not carry all three fields, mirroring every other reader in this module's fail-soft discipline.
+ */
+export function ghRateLimitProvenanceFromResponse(
+  actor: string | undefined,
+  headerBlock: string,
+): GhRateLimitProvenance | undefined {
+  if (!actor) return undefined;
+  const { resource, remaining, reset } = parseGhRateLimitHeaders(headerBlock);
+  if (!resource || typeof remaining !== "number" || typeof reset !== "number") return undefined;
+  return { actor, resource, remaining, reset };
+}
+
+/**
+ * THE BRACKET RULE (design (ii)) — see this section's header. Two readings form a usable WINDOW
+ * only when they agree on actor, resource, AND reset epoch; any disagreement DISCARDS the
+ * bracket (`undefined`) rather than letting a caller subtract across it. A matching pair returns
+ * `end` — the later reading is the current, validated state of that one window.
+ */
+export function ghRateLimitWindow(
+  start: GhRateLimitProvenance,
+  end: GhRateLimitProvenance,
+): GhRateLimitProvenance | undefined {
+  if (start.actor !== end.actor) return undefined;
+  if (start.resource !== end.resource) return undefined;
+  if (start.reset !== end.reset) return undefined;
+  return end;
 }
 
 /** {@link buildDaemonHealthRoute}'s dependencies. */

@@ -35,7 +35,9 @@
 // merged clock, so the miss window for the case that actually happens is zero.
 
 import assert from "node:assert/strict";
+import { generateKeyPairSync } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { refreshInstallationToken } from "../src/lib/github-app.js";
 import { test } from "node:test";
 import { buildBatchedGithub, type BatchedPr } from "../src/lib/status.js";
 import { fetchBoardPrsRest, type RestPullRow } from "../src/lib/open-prs-rest.js";
@@ -383,6 +385,41 @@ void test("W1-T2319's abort-label defect is closed, and the catch no longer read
   // and falls back to the signal only when the error identifies nothing.
   assert.match(APP_SRC, /function describeExchangeCatch\(/);
   assert.match(APP_SRC, /err === timeoutController\.signal\.reason/);
+});
+
+void test("W1-T2319: the non-abort arm is REACHED, not merely present — a real failure names itself", async () => {
+  // PINNED AS BEHAVIOUR, NOT AS SOURCE TEXT. The clause above asserts the helper and its identity
+  // comparison EXIST; that cannot distinguish a reachable arm from dead code. `exchange request
+  // failed` was UNREACHED in 145 failures — not unreachable, unreached, because every one of them
+  // was the same blocked-loop cause and took the abort path. Making it reachable is half of what
+  // W1-T2319 is for, so it is driven here: a `fetchImpl` that throws an error which is NOT
+  // `signal.reason` must come back named by the ERROR, with no abort involved.
+  const { privateKey } = generateKeyPairSync("rsa", {
+    modulusLength: 2048,
+    publicKeyEncoding: { type: "spki", format: "pem" },
+    privateKeyEncoding: { type: "pkcs1", format: "pem" },
+  });
+  const env: NodeJS.ProcessEnv = { GH_TOKEN: "OLD-STATIC-TOKEN" };
+  const logs: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const notOurAbort = Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNREFUSED" } });
+  const result = await refreshInstallationToken({
+    appId: "app-1",
+    installationId: "inst-1",
+    privateKeyPath: "/fake/key.pem",
+    env,
+    readKey: () => privateKey,
+    fetchImpl: (async () => {
+      throw notOurAbort;
+    }) as typeof fetch,
+    log: (step, extra = {}) => logs.push({ step, extra }),
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "exchange request failed: ECONNREFUSED", "the reachable arm, named by the error");
+  assert.equal(logs.at(-1)?.extra.reason, "exchange request failed: ECONNREFUSED", "and the ledger line agrees");
+  // THE DISCRIMINATOR IS UNCHANGED: this error is not the signal's reason, which is why the abort
+  // label was not taken. `err.name` is only the fallback identifier for the label, never the test.
+  assert.notEqual(result.reason, "exchange timed out");
+  assert.equal(env.GH_TOKEN, "OLD-STATIC-TOKEN", "and a failed exchange still leaves the old pool untouched");
 });
 
 void test("nothing added to the gateway paces, throttles or sleeps", () => {
