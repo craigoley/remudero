@@ -57,6 +57,37 @@
     emissions` is report-only by stated decision in its own module header, `rule-efficacy` has an
     escalate arm and no demote arm, and feedback discharge is already W1-T1257. Rule 19's span
     would refuse the combination; each is its own concern.
+    **OPERATOR RULING 2026-08-27 — RETIREMENT IS RECORDED IN THE FIELD, NEVER IN PROSE AND NEVER BY
+    DELETION.** Recorded on THIS shard because this shard owns the vocabulary: RETIREMENT_REASONS
+    and RetirementReason are declared in src/lib/plan.ts under this task's own number, and Task
+    carries the retirement field. W1-T2275 is the single live INSTANCE of that field, not its
+    definition, so the ruling belongs on the definition.
+
+    (a) DELETION IS REFUSED. Removing a shard stops the id resolving, which promotes a trailer to a
+    bare body claim and re-opens the id-collision class that cost three renames on 2026-08-26. A
+    retirement must leave the record readable.
+
+    (b) PROSE IS REFUSED because it is invisible to every instrument. Measured on this tree: exactly
+    ONE shard carries a retirement field line, against 643 shard files. Every census and every
+    dispatch read counts a prose-retired shard as live.
+
+    (c) THE VOCABULARY COLLAPSES TO ONE VALUE: retired. closed and withdrawn stay parseable but are
+    display-only synonyms with no behavioural difference anywhere in src, so the reason for a
+    retirement goes in prose BESIDE the field, never in the enum value. Authors write one word.
+
+    (d) THE FIELD RENDERS CORRECTLY NOW. PR 2969 fixed the status-queued case that had hidden the
+    one task using it, so recording a retirement is observable rather than inert.
+
+    **SCOPE: THIS RECORDS, IT DOES NOT ACT.** Nothing is retired here, no existing shard is
+    migrated, and deriveRetiredBlockers is untouched. The prose-retired population is a
+    MEASUREMENT, not a work list.
+
+    **ONE COMMISSIONING FIGURE DID NOT REPRODUCE AND IS LEFT AS THE OPERATOR'S.** The brief states
+    38 prose-retired shards and 0 using the field. On this tree the field count is ONE, not zero,
+    and no reading reproduced 38: title-prefixed reads 2, the RETIRED token 12, WITHDRAWN 29, and
+    status-blocked-with-retirement-prose 22. The ruling holds identically under every one of those,
+    so the exact population is left unclaimed rather than restated.
+
   note: |
     ── Q1. THE SMALLEST FORM: A SIBLING FIELD, AND NOT BECAUSE IT IS CHEAPER ──────────────────
 
