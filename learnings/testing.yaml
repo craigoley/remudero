@@ -77,6 +77,20 @@
   assertion: 'grep -q "execWhitelistedProof" src/lib/review.ts'
   src: operator-report 2026-08-23; two instances hit first-hand while filing W1-T1282
   cited: "2026-08-23"
+- id: proof-anchored-on-prose
+  subsystem: evidence
+  lifecycle: active
+  files: [src/lib/review.ts, plan/tasks.d, plan/tasks.yaml]
+  fact: >-
+    A `grep:` proof matching PROSE in src/ (a comment, a doc line) passes because the sentence exists —
+    so it demands writing that sentence, not making the behaviour true. Anchor a proof on executable code.
+  assertion: 'grep -q ''"-arn"'' src/lib/review.ts'
+  src: >-
+    self-witnessed 2026-08-26 — W1-T2294's own PR body used `grep: FALLBACK IS THE DEFAULT in
+    src/lib/github-app.ts`, a doc-comment sentence, and the review accepted it. parseDialectGrep
+    compiles to ["-arn", "--", pattern, path]: no comment filter, no file-type filter, so a comment is
+    matched exactly as code is.
+  cited: "2026-08-26"
 - id: control-proves-reach-not-window
   subsystem: evidence
   lifecycle: active

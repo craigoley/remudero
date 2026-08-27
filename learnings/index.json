@@ -117,6 +117,7 @@
         "grep-anchor-must-fit-one-line",
         "lazy-config-in-ci",
         "live-proof-runs-the-checked-out-code",
+        "proof-anchored-on-prose",
         "scan-both-quote-styles",
         "task-linting-is-mostly-deterministic"
       ],
