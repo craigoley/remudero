@@ -101,8 +101,7 @@
 
 - id: sdk-result-envelope
   subsystem: ledger
-  lifecycle: superseded
-  superseded_by: sdk-result-fields
+  lifecycle: active
   files: [src/lib/ledger.ts, src/lib/worker.ts, src/run-task.ts]
   fact: >-
     The Agent SDK yields the type:"result" envelope (num_turns, total_cost_usd, subtype) and THEN
@@ -229,8 +228,7 @@
     (NonNullableUsage aggregate), and modelUsage: Record<MODEL_NAME, ModelUsage> — the MODEL(S) used are
     the map KEYS; each ModelUsage has inputTokens, outputTokens, cacheReadInputTokens (camelCase),
     cacheCreationInputTokens, costUSD, contextWindow. EFFORT is NOT in the envelope — it is an INPUT
-    (Options.effort / the mount), so log the configured effort, not a read-back. The envelope is YIELDED
-    and the iterator THEN throws on an error subtype: read it before the catch or a failure looks free.
+    (Options.effort / the mount), so log the configured effort, not a read-back.
   src: SDK 0.3.209 (installed sdk.d.ts)
   cited: "2026-07-15"
 
