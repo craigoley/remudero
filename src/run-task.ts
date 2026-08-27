@@ -205,6 +205,7 @@ import {
   type OpenPrRest,
   fetchSinglePrRest,
   hydrateMergeConflictEvidence,
+  hydrateWorkflowRuns,
   hydrateMergeStates,
   liveStateFromRest,
   mapRestPr,
@@ -22659,6 +22660,20 @@ export function buildOpenPrViews(
   const dirtyPrs = raw.filter((p) => mergeStates.get(p.number) === "dirty").map((p) => ({ number: p.number, headRefOid: p.headRefOid }));
   const mergeConflicts = hydrateMergeConflictEvidence(owner, repo, "main", dirtyPrs, fetch);
 
+    // WORKFLOW RUNS (W1-T2340 — the producer `OpenPrView.workflowRuns` has lacked since it was
+    // declared): a THIRD bounded follow-up fetch, scoped the same way the conflict-evidence one
+    // directly above is. Only heads whose `checksState` reads `pending` are fetched — that is
+    // exactly the population `stalledRunReason` exists for, since a stalled head is one this
+    // sweep would otherwise wait on forever, and a green or red head pays nothing. Within a PR,
+    // `fetchWorkflowRunObservations` fetches jobs only for runs that have ALREADY concluded,
+    // because a run still going cannot satisfy the predicate's first clause — so a pending PR
+    // whose runs are all in flight costs one call, and only a genuinely stalled head costs more.
+    // Nothing here loops or waits: one read per pass, on a population that is usually empty.
+    const pendingPrs = raw
+      .filter((p) => checksStateFromRollup(p.statusCheckRollup, requiredContexts) === "pending")
+      .map((p) => ({ number: p.number, headRefOid: p.headRefOid }));
+    const workflowRuns = hydrateWorkflowRuns(owner, repo, pendingPrs, fetch);
+
   // supersededBy: the HIGHEST-numbered other open PR crediting the same task.
   const byTask = new Map<string, number[]>();
   for (const pr of raw) {
@@ -22800,6 +22815,7 @@ export function buildOpenPrViews(
       // value every PR has always carried — see lib/sweep.ts's DISPOSITION_RULES for how the
       // policy-gated `conflicted` row and the `blocked-ambiguous` row beneath it each read this.
       mergeConflict: mergeConflicts.get(pr.number),
+      workflowRuns: workflowRuns.get(pr.number),
       // W1-T435: `pendingAnswer`'s long-promised producer (see that field's own "SCOPE" doc,
       // lib/sweep.ts) — an operator's steering note on a `wrong`/`needs-follow-up` verdict, or an
       // answered clarification from the console, either re-arms the `blocked-fixable` disposition

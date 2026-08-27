@@ -23,8 +23,12 @@ import {
 } from "./escalate.js";
 import { GhPaceFloorStandDownError } from "./open-prs-rest.js";
 import type { ConflictFileDiff, MergeConflictEvidence, MergeState } from "./merge-state.js";
+import type { WorkflowRunObservation } from "./workflow-run.js";
 // Re-exported so existing `import type { … } from "./sweep.js"` call sites keep working.
 export type { ConflictFileDiff, MergeConflictEvidence, MergeState } from "./merge-state.js";
+// W1-T2340: declared in a leaf module so `open-prs-rest.ts`'s producer can import it without
+// closing an open-prs-rest <-> sweep cycle — see workflow-run.ts's own doc.
+export type { WorkflowRunObservation } from "./workflow-run.js";
 
 /**
  * lib/sweep.ts — the level-triggered PR-pipeline reconciler (W1-T77, ratifies
@@ -1050,6 +1054,20 @@ export interface OpenPrView {
    */
   cancelledRequiredChecks?: CancelledRequiredCheck[];
   /**
+   * W1-T2340 — this head's own workflow runs (`actions/runs` filtered by head sha), each with
+   * its jobs' OWN status — the raw input {@link stalledRunReason} reads. `undefined` when the
+   * listing could not be fetched at all (never degrades to `[]`, which would silently read as
+   * "GitHub scheduled nothing" instead of "we could not check") — {@link stalledRunReason}
+   * refuses to report a stall on `undefined`, the same fail-toward-no-positive-claim direction
+   * {@link checksStateFromRollup} takes on an unreadable required-contexts list.
+   *
+   * NOT YET POPULATED by the real gateway — wiring `run-task.ts`'s live populate is separate
+   * follow-up work, outside this task's declared `files:`. Every existing caller that never
+   * sets this field keeps reading `undefined`, so the new disposition row below never fires for
+   * them.
+   */
+  workflowRuns?: readonly WorkflowRunObservation[];
+  /**
    * GitHub's own merge-conflict state, simplified (W1-T106, the #170 DIRTY
    * strand) — see {@link MergeState}'s own doc. `undefined`/`"unknown"` never
    * disposition CONFLICTED (fail-closed): only an OBSERVED `"dirty"` does.
@@ -1480,6 +1498,60 @@ export function cancelledRequiredCheckNames(
   return gate
     .filter((c) => (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase() === "CANCELLED")
     .map((c) => c.name ?? c.context ?? "unknown");
+}
+
+
+/** Job-level statuses {@link stalledRunReason} treats as that job having reached a final state. */
+const JOB_TERMINAL_STATUSES = new Set(["completed"]);
+
+/**
+ * W1-T2340 (the corrected discriminator W1-T2327's criterion 1 was amended into, after
+ * measurement falsified the original job-count reading — see this task's own rationale) — names
+ * the reason a head's own workflow runs should be read as STALLED rather than pending, or
+ * `undefined` when none of them are.
+ *
+ * THE DISCRIMINATOR: a job whose STATUS is non-terminal, inside a run whose CONCLUSION is
+ * terminal. Not an absence of jobs (the falsified reading — measured wrong on #2974, which
+ * carried twenty-three check-runs, three of them green, from runs that had already concluded): a
+ * job PINNED non-terminal by a run that has already finished and will never schedule anything
+ * further. NEEDS NO THRESHOLD (acceptance 3) — a concluded run cannot become "more concluded"
+ * with the passage of time, so there is nothing to wait out and no ceiling to tune, which is why
+ * this function takes no `policy`/`now` parameter at all.
+ *
+ * ANY terminal conclusion trips it, not only `startup_failure` (acceptance 6) — a cancelled or
+ * abandoned run pins a job exactly the same way, and the join does not special-case one
+ * conclusion string over another: `conclusion` being present at all IS "this run is done."
+ *
+ * A run still in progress (`conclusion` undefined/empty) is untouched (acceptance 4) — its jobs
+ * are left alone here whatever their own status, because a run that has not concluded may
+ * legitimately still schedule or advance them; "work in flight still reads as in flight."
+ *
+ * FAILS TOWARD "NOT STALLED" ON EVERY UNREADABLE INPUT — never invents a stall: `runs` undefined
+ * (the listing could not be fetched at all) returns `undefined` immediately, the same
+ * fail-toward-no-positive-claim direction {@link checksStateFromRollup} takes on an unreadable
+ * required-contexts list.
+ *
+ * PURE AND SYNCHRONOUS (acceptance 7 — nothing added paces, throttles or sleeps a call): one loop
+ * over `runs`, each job list read once — no fetch, no wait, no retry, and nothing here schedules a
+ * second look. The read this function judges is whatever the caller already fetched for this
+ * sweep pass; a run that only becomes stalled a minute from now is simply not yet stalled on THIS
+ * read, and the next sweep pass (a level trigger, never a loop of this function's own) judges it
+ * fresh.
+ */
+export function stalledRunReason(runs: readonly WorkflowRunObservation[] | undefined): string | undefined {
+  if (runs === undefined) return undefined;
+  for (const run of runs) {
+    const conclusion = (run.conclusion ?? "").trim();
+    if (conclusion === "") continue; // run still in progress — untouched, not this function's concern
+    const stuck = (run.jobs ?? []).find((j) => !JOB_TERMINAL_STATUSES.has((j.status ?? "").toLowerCase()));
+    if (stuck) {
+      return (
+        `a job is still "${stuck.status ?? "unstarted"}" but its own run already concluded "${conclusion}" — ` +
+        `a terminal run schedules nothing further, so that job will never move`
+      );
+    }
+  }
+  return undefined;
 }
 
 /**
@@ -2715,6 +2787,15 @@ export function reviewVerdictOvertakenByActivity(pr: OpenPrView): boolean {
  *      backoff interval elapses this row yields and the post-review row
  *      below dispatches again — escalate for visibility, AND keep retrying,
  *      never one instead of the other.
+ *   8.7. STALLED-BY-A-TERMINAL-RUN (W1-T2340, the corrected discriminator W1-T2327's criterion 1
+ *      was amended into): `checksState === "pending"` AND {@link stalledRunReason} names a run
+ *      whose own conclusion already went terminal while one of its jobs stayed non-terminal ->
+ *      blocked-ambiguous, escalating immediately rather than waiting out the pending ceiling —
+ *      the run that pinned the job is done and will never move it, so there is nothing left to
+ *      wait for. Ordered BEFORE row 9 for exactly that reason: a datable-pending PR that is
+ *      ALSO this shape must be named "stalled," never "waiting," on the very pass it becomes
+ *      detectable. `OpenPrView.workflowRuns` undefined (unpopulated by every caller today) never
+ *      matches, so this row is a pure addition until the real gateway wires the observation.
  *   9. WAIT (W1-T114, the 30-issue predicate-storm fix): checks pending AND a
  *      datable, in-window newest-check-start (policy.pendingCeilingMinutes) ->
  *      wait — no action, ledgered, re-derived next sweep. Never reached when
@@ -3154,6 +3235,34 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
         `(< ${policy.pendingCeilingMinutes}m ceiling) — a review is already in flight, waiting`
       );
     },
+  },
+  {
+    // W1-T2340 — A HEAD PENDING ONLY BECAUSE A RUN HAS ALREADY CONCLUDED BUT PINNED ONE OF ITS
+    // OWN JOBS NON-TERMINAL reads exactly like ordinary in-flight CI to the datable-pending rows
+    // immediately below — `checksState` reads "pending" either way (a terminal run can leave a
+    // PARTIALLY registered rollup, and `checksStateFromRollup` already reads that as pending,
+    // never "none"). Left alone, this head would wait out `policy.pendingCeilingMinutes` (60m,
+    // or forever if undated) before the stale-pending row even considered it, even though the
+    // run that pinned the job is DONE and will never move it. Ordered STRICTLY BEFORE the
+    // datable-pending rows so a stalled head is named the moment it becomes detectable, never
+    // after waiting out a ceiling built for ordinary in-flight checks — see
+    // {@link stalledRunReason}'s own doc: this shape needs no threshold at all.
+    //
+    // GATED ON `checksState === "pending"` EXPLICITLY, never `"none"`: this row can therefore
+    // never fire on the same input the ABSENT re-push arm requires (`checksState === "none"`),
+    // and a partially registered rollup stays "pending" so that sibling arm is never starved of
+    // the case it already owns.
+    //
+    // TAKES NO ACTION OF ITS OWN — re-running a terminally concluded run is a decision this task
+    // explicitly leaves to the operator (W1-T2327 measured GitHub itself refusing the obvious
+    // remedy: `403 this workflow run cannot be retried`), never assumed here. Disposition is the
+    // SAME blocked-ambiguous escalate path every other ambiguous block already uses — one
+    // ledger-deduped issue per head, never a second mechanism.
+    disposition: "blocked-ambiguous",
+    when: (pr) => pr.checksState === "pending" && stalledRunReason(pr.workflowRuns) !== undefined,
+    reason: (pr) =>
+      `stalled, not pending — ${stalledRunReason(pr.workflowRuns)} — a required check that never truly ` +
+      `finished still blocks the merge; escalating once rather than waiting on something that will not arrive`,
   },
   {
     // WAIT (W1-T114, the 30-issue predicate-storm fix, LIVE INCIDENT

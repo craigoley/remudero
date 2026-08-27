@@ -35,6 +35,7 @@
  * combined with `--jq`.
  */
 import type { ConflictFileDiff, MergeConflictEvidence, MergeState } from "./merge-state.js";
+import type { WorkflowRunObservation } from "./workflow-run.js";
 
 export function openPrsRestArgs(owner: string, repo: string): string[] {
   return ["api", `repos/${owner}/${repo}/pulls?state=open&per_page=100`];
@@ -1333,6 +1334,145 @@ export function hydrateMergeStates(
       if (state !== undefined) out.set(n, state);
     } catch {
       /* best-effort: this PR keeps the pre-existing undefined, the pass continues */
+    }
+  }
+  return out;
+}
+
+/* ────────────────────────────────────────────────────────────────────────────────────────────
+ * WORKFLOW RUN OBSERVATIONS (W1-T2340 — the producer for `OpenPrView.workflowRuns`).
+ *
+ * `stalledRunReason` (lib/sweep.ts) joins a run's OWN conclusion against its jobs' OWN statuses:
+ * a job left non-terminal inside a run that already concluded will never move, because a terminal
+ * run schedules nothing further. That join needs data the rollup does not carry — the rollup is
+ * check-runs, and a run that concluded without its jobs finishing contributes entries that look
+ * merely pending.
+ *
+ * WHY A PRODUCER AND NOT A `KNOWN_UNWIRED` ENTRY. `stalledRunReason(undefined)` returns
+ * `undefined`, so an allowlist entry would ship a detector that can never fire. Every existing
+ * entry in that list costs a missing DETAIL while the surrounding behaviour still works; this one
+ * would cost the whole feature, and the allowlist's own doc refuses exactly that trade ("an entry
+ * with a vague reason is worse than no entry").
+ *
+ * THIS IS A NEW FETCH, NOT A REUSE — VERIFIED, NOT ASSUMED. Every `actions/runs` and
+ * `actions/jobs` reference in `src/` before this (4 and 7 respectively, against controls of 19
+ * `check-runs` and 21 `pulls/`) is a POST rerun endpoint or job-URL parsing. Nothing listed runs
+ * by head sha.
+ *
+ * COST, AND WHERE THE BOUND COMES FROM. Two scopes, both derived rather than picked:
+ *
+ *   1. ACROSS PRs — only heads whose `checksState` reads `pending`. That is precisely the
+ *      population the detector exists for: a stalled head is one the sweep would otherwise wait
+ *      on forever. A green or red head pays NOTHING, the same shape
+ *      {@link hydrateMergeConflictEvidence} uses when it fetches only for already-`dirty` PRs.
+ *   2. WITHIN a PR — jobs are fetched only for runs whose `conclusion` is already non-empty.
+ *      A run that has not concluded cannot satisfy the predicate's first clause, so its jobs
+ *      cannot change the answer. The bound is read off the predicate itself, never guessed.
+ *
+ * So a pending PR whose runs are all still going costs ONE call. The measured stalled head (four
+ * concluded runs, six jobs between them) costs five: one listing plus one per concluded run.
+ * That asymmetry is the point — the expensive path is only walked where the detector can fire.
+ *
+ * CADENCE, NOT VOLUME, IS WHAT BITES. A 90-minute secondary-rate-limit lockout on this account
+ * was caused by poll CADENCE at a low total count, so this adds no loop and no wait of its own:
+ * it is a bounded read taken once per sweep pass, on a population that is usually empty.
+ */
+
+/** Hard ceiling on the number of PRs this hydrates in ONE sweep pass. Above it the remaining PRs
+ *  keep `workflowRuns: undefined` and disposition exactly as they did before this existed — the
+ *  honest degradation, since that was every PR's behaviour until now. Reuses
+ *  {@link MERGE_STATE_HYDRATION_CAP}'s value rather than inventing a second ceiling, matching
+ *  {@link hydrateMergeConflictEvidence}'s own choice.
+ *
+ *  KIND: BACKSTOP (test/bound-kind-declared.test.ts). It is sized to sit ABOVE the population it
+ *  bounds rather than to shape it: {@link MERGE_STATE_HYDRATION_CAP} is 25 against an all-time
+ *  observed maximum of 23 open PRs, and this cap bounds the SAME population in the SAME pass, so
+ *  it is expected never to bind. That is the discriminator — a PRIMARY CONTROL is a number the
+ *  system is meant to run against, and this one is a number reaching it would mean the open-PR
+ *  count had left every range this repo has ever observed. */
+export const WORKFLOW_RUN_HYDRATION_CAP = MERGE_STATE_HYDRATION_CAP;
+
+/** `gh api` argv listing the workflow runs for ONE head sha. */
+export function runsForHeadRestArgs(owner: string, repo: string, headSha: string): string[] {
+  return ["api", `repos/${owner}/${repo}/actions/runs?head_sha=${headSha}&per_page=100`];
+}
+
+/** `gh api` argv listing the jobs of ONE workflow run. The runs listing does NOT carry jobs, so
+ *  this second call is required for any run the predicate could fire on. */
+export function jobsForRunRestArgs(owner: string, repo: string, runId: number): string[] {
+  return ["api", `repos/${owner}/${repo}/actions/runs/${runId}/jobs?per_page=100`];
+}
+
+/** True when a run's conclusion is populated — GitHub sets it only once the run itself concluded.
+ *  The SAME first clause {@link "./sweep.js".stalledRunReason} tests, kept here so the fetch scope
+ *  and the predicate cannot drift apart. */
+function runHasConcluded(conclusion: unknown): boolean {
+  return typeof conclusion === "string" && conclusion.trim() !== "";
+}
+
+/**
+ * Observations for ONE head: every workflow run on it, with jobs attached to the runs that have
+ * already concluded. A run still in progress is reported WITHOUT jobs — deliberately, since the
+ * predicate cannot fire on it and fetching them would be spend with no possible effect.
+ *
+ * Throws only if the RUN LISTING itself fails; a per-run jobs failure leaves that run's `jobs`
+ * `undefined`, which reads as "could not check" rather than "GitHub scheduled nothing" — the same
+ * distinction {@link "./sweep.js".WorkflowRunObservation.jobs}'s own doc draws.
+ */
+export function fetchWorkflowRunObservations(
+  owner: string,
+  repo: string,
+  headSha: string,
+  fetch: GhApiFetcher,
+): WorkflowRunObservation[] {
+  const listing = fetch(runsForHeadRestArgs(owner, repo, headSha)) as {
+    workflow_runs?: ReadonlyArray<{ id?: number; conclusion?: string | null }>;
+  };
+  const runs = listing?.workflow_runs ?? [];
+  const out: WorkflowRunObservation[] = [];
+  for (const run of runs) {
+    const conclusion = typeof run.conclusion === "string" ? run.conclusion : undefined;
+    if (!runHasConcluded(conclusion) || typeof run.id !== "number") {
+      out.push({ conclusion });
+      continue;
+    }
+    let jobs: ReadonlyArray<{ status?: string }> | undefined;
+    try {
+      const j = fetch(jobsForRunRestArgs(owner, repo, run.id)) as {
+        jobs?: ReadonlyArray<{ status?: string | null }>;
+      };
+      jobs = (j?.jobs ?? []).map((x) => ({ status: typeof x.status === "string" ? x.status : undefined }));
+    } catch {
+      /* leave `jobs` undefined: "could not check", never "nothing was scheduled" */
+    }
+    out.push({ conclusion, jobs });
+  }
+  return out;
+}
+
+/**
+ * Fetch run observations for up to {@link WORKFLOW_RUN_HYDRATION_CAP} heads, returning a map from
+ * PR number to its observations. Absent from the map ⇒ caller leaves `workflowRuns` `undefined`,
+ * which is the value every PR carried before this producer existed.
+ *
+ * BEST-EFFORT, PER PR — the same discipline {@link hydrateMergeStates} and {@link
+ * hydrateMergeConflictEvidence} use: a throw on one PR (rate limit, a head deleted mid-pass, a
+ * network blip) skips THAT PR and continues, never propagates. Callers pass only PRs whose
+ * `checksState` reads `pending`.
+ */
+export function hydrateWorkflowRuns(
+  owner: string,
+  repo: string,
+  pendingPrs: readonly { number: number; headRefOid: string }[],
+  fetch: GhApiFetcher,
+  cap: number = WORKFLOW_RUN_HYDRATION_CAP,
+): Map<number, readonly WorkflowRunObservation[]> {
+  const out = new Map<number, readonly WorkflowRunObservation[]>();
+  for (const p of pendingPrs.slice(0, cap)) {
+    try {
+      out.set(p.number, fetchWorkflowRunObservations(owner, repo, p.headRefOid, fetch));
+    } catch {
+      /* best-effort: this PR keeps the pre-existing undefined workflowRuns, the pass continues */
     }
   }
   return out;
