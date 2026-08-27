@@ -1,0 +1,153 @@
+- id: W1-T2388
+  title: "THE DIGEST RENDERS TEN STEPS AND ONLY THREE SURVIVE A ROTATION — `buildDigest` reads ONE live path with no rotation union, `rotateLedger` fires on a 4 MiB BYTE CEILING rather than a clock, and 7 of the 10 steps the digest sweeps are absent from `DECISION_RELEVANT_LEDGER_STEPS`, so their lines vanish at the next rotation; measured over 672 real rotation stamps, 96.7% of inter-rotation gaps fall inside the default 1440-minute cadence and roughly 16% of a day's rows survive to be rendered"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 20.00
+  files: [src/lib/digest.ts, test/digest-rotation-union.test.ts]
+  origin: "operator-brief#digest-window-retention-2026-08-27"
+  plan_refs: ["W1-T2381", "W1-T2345", "W1-T2382", "W1-T209", "W1-T444"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE ID. Eight surfaces swept, anchored `W1-T2388([^0-9]|$)` with a `[0-9]` class and never `\d`,
+    anchored printed beside unanchored at every surface. Surface 1 reads 1: `refs/rmd-id/W1-T2388`
+    resolves against a namespace of 501 refs. Shard filenames 0 of 652; declared ids 0 of 907;
+    open-PR titles 0 of 4 read CASE-SENSITIVELY (lower-case probe `w1-t2388` also 0); open-PR bodies
+    0; open-PR head refs 0; merged trailers 0 of 2,401 merged bodies; merged subjects 0 of 2,435.
+    The open-PR enumeration was itself controlled — 4 PRs read over REST, because a refused call
+    returns `[]` and manufactures three false zeros.
+
+    TWO CONTROLS FAILED FIRST AND WERE REPLACED, WHICH IS WHY THEY ARE NAMED. W1-T2345 was chosen
+    for the open-PR title surface and reads 0 there (it is not in the open set); W1-T2323 was chosen
+    for head branches and reads 0 (its `run-` head was deleted when #3093 merged). Both were
+    re-picked to ids that fire on THEIR OWN surface: W1-T2383 reads 1 on titles (#3089), and
+    W1-T2375 reads 1 on head branches from the LIVE `run-W1-T2375-1787835153437` head of open #3091.
+    An anchor-leak probe confirms the anchor discriminates rather than being merely quiet: W1-T238
+    reads anchored 0 against unanchored 20.
+
+    (1) Q1 — WHAT `buildDigest` SWEEPS, SPLIT BY RETENTION. Re-derived from source rather than taken
+    from the brief; the first extraction was WRONG and its own control caught it (an `awk` range over
+    `summarize` found 8 steps and missed `run.start`, which the brief names, so the list was rebuilt
+    over the whole reader). TEN steps, of which `learnings.injected` is reached by a `!==` guard
+    rather than an `===` branch and is invisible to the obvious grep:
+
+      RETAINED (3)                     NOT RETAINED (7) — these lines can silently vanish
+        escalation.issue_opened          board_review.ran            (#3069's own line)
+        run.start                        inbox.polled
+        verdict                          issues.polled
+                                         learnings.injected
+                                         ops.alerts_polled
+                                         review.downgrade_suppressed
+                                         sweep.repeat_escalated      (W1-T2381's surviving surface)
+
+    Controlled in both directions against the same corpus of 146 `DECISION_RELEVANT_LEDGER_STEPS`
+    members: `escalation.issue_opened` present 1, `sweep.repeat_escalated` present 0, a fabricated
+    step present 0. SO SEVEN OF TEN DIGEST LINES ARE UNRETAINED, AND THE SPLIT IS NOT A PROPERTY OF
+    THE DIGEST AT ALL — it is an accident of whether some decider elsewhere happens to consult the
+    step. `buildDigest` renders all ten through the same live-only read.
+
+    (2) Q2 — MEASURED, AND THE EXPOSURE IS REAL RATHER THAN THEORETICAL. Rotation is byte-driven
+    (`ledgerExceedsRotationCeiling` is `statSize(path) > LEDGER_ROTATION_CEILING_BYTES`, 4 MiB), so
+    the rate was DERIVED FROM REAL ROTATION STAMPS, never assumed from a clock.
+
+    THE CORPUS, STATED: `/Users/craigoleyagent/Remudero/state` — 666 `.gz` archives, 6 plain
+    archives and 1 live `ledger.ndjson`, 672 of which carry a parseable rotation stamp in their own
+    filename, spanning 2026-07-22T21:26:36Z to 2026-08-17T01:16:14Z = 603.8 hours (25.2 days), 150 MB
+    on disk. NOTE THE PATH: this is the STATE ROOT, one level ABOVE the repo checkout. A previous
+    measurement looked in `<checkout>/state`, found three unrelated files, and reported that no
+    ledger existed on this host; that was wrong and is corrected here. A per-form coverage control
+    was ALSO wrong at first — the loop interpolated the glob from a shell variable, which zsh does
+    not expand, so it reported 0/0/1 for a corpus of 673 files. The control was fixed, not the
+    corpus.
+
+    ONE ROTATION EVENT WRITES SEVERAL ARCHIVE FILES, so raw file gaps are not event gaps: the median
+    file-to-file gap is 0.0 minutes. Clustering stamps within 60 s into one event gives 154 events
+    over 603.8 h = 0.26/hour = 6.1 PER DAY (at 300 s: 79 events, 3.1/day). Against the digest's own
+    cadence — `digestCadence.minIntervalMinutes`, default 1440 (once/day), bounded [15, 1440]:
+
+      inter-event gaps EXCEEDING 1440 min:            5 of 153  (3.3%)
+      -> a rotation lands inside the cadence in:      96.7% of windows
+      days with at least one rotation:                19 of 27
+      days with ZERO rotations:                        8   (windows that lose nothing)
+      rotation events per active day:                 median 1, mean 8.1, max 121
+      mean inter-event gap 237 min against a 1440-min window
+      -> roughly 16% of a day's rows survive to a daily digest
+
+    SO THE SHARD DOES NOT PROPOSE NOTHING. The brief's own off-ramp — "if rotations are rare relative
+    to the digest cadence, the exposure is theoretical" — does not apply: they are frequent, and the
+    8 zero-rotation days are the exception rather than the rule.
+
+    (3) Q3 — THE READER FIX, AND THE RETENTION FIX IS REFUSED. Adding steps to
+    `DECISION_RELEVANT_LEDGER_STEPS` is refused for the reason the set's own doc gives: a step
+    belongs there only while a REAL DECIDING READER consults it. The digest is a REPORTER —
+    `captureFeedback` 0, `updateProposalRegistry` 0, `landFeedback` 0 in `digest.ts`, and its own
+    policy literal carries `escalate: false` ("the digest never escalates"). Registering a
+    render-only step would break the very rule that keeps `panel.escalation_marked_handled` out, and
+    would buy retention by corrupting the set's meaning for every other reader.
+
+    THE CANDIDATE IS TEACHING `buildDigest` THE ROTATION UNION, AND THE PRICE IS MEASURED, NOT
+    ESTIMATED. On this corpus, one read of each:
+
+      live-only (today)     :     6 ms     17,362 lines    1 file
+      FULL union            :  3,057 ms  4,356,624 lines  672 archives, 118.1 MiB compressed
+      -> 481x slower, 251x more lines
+
+    A BOUND IS AVAILABLE AND IT IS FREE: every archive's rotation timestamp is IN ITS OWN FILENAME
+    (`ledger.<ISO>Z.ndjson[.gz]`), and an archive stamped before `sinceIso` can hold only older rows,
+    so it is provably irrelevant and never has to be opened. Bounded to a 24-hour window the median
+    cost collapses to 1 archive / 3 ms.
+
+    BUT THE BOUND DOES NOT TAME THE TAIL, AND THIS IS THE FINDING THAT SHOULD DECIDE THE DESIGN. The
+    WORST-CASE 24-hour window in this corpus contains 649 OF THE 672 ARCHIVES — 2,939 ms, 3,898,329
+    lines, 89.4 MiB — because rotations are violently bursty (max 121 events in one day). So the
+    bounded union is BIMODAL: ~3 ms on a median day and ~3 s on a busy one, AND THE EXPENSIVE CASE IS
+    EXACTLY THE BUSY CASE — the same "shortest when busiest" pathology the live-only read already has,
+    inherited by its own fix. Any build must price the tail rather than the median, and should treat
+    3 s on a reporter that runs at most every 15 minutes and blocks nothing as acceptable, or bound
+    the read a second way (an archive cap with a stated, rendered truncation) rather than pretend the
+    median is the cost.
+
+    WHAT MUST NOT HAPPEN: a digest that silently renders a PARTIAL union reads exactly like a quiet
+    board, which is the failure this task exists to remove. `resolveLedgerUnion` already refuses on
+    partial coverage (W1-T444); whatever the build does, an incomplete read must say so in the
+    rendered output rather than degrade to an absence.
+
+    ALREADY OWNED ELSEWHERE, RECORDED SO THIS DOES NOT RE-FILE IT: the trip's ROUTING is W1-T2381
+    (#3098), the counter itself is W1-T2345, its once-per-head reset is W1-T2382, and the board
+    rung's own digest line is #3069's. THIS SHARD OWNS ONLY THE DIGEST'S READ PATH.
+
+    RISK BAND. `risk: high` is set UP FRONT and is RULE 19'S SPAN, NOT BLAST RADIUS: `files:` reads as
+    two distinct concerns (the `digest` stem and this task's own test stem), and `lint-plan` refuses
+    that at `risk: medium` — measured today on W1-T2387, which was filed at medium and returned
+    `[sizing] spans 2 distinct subsystems/concerns`. The actual blast radius is one reporter's read
+    path; nothing decides anything on it.
+  acceptance:
+    - claim: "the digest renders a step whose rows have already been rotated out of the live file"
+      proof: "unit test: test/digest-rotation-union.test.ts"
+    - claim: "an archive stamped before the window is never opened"
+      proof: "unit test: test/digest-rotation-union.test.ts"
+    - claim: "a window with no rotation reads exactly what it reads today"
+      proof: "unit test: test/digest-rotation-union.test.ts"
+    - claim: "an incomplete read is rendered as incomplete and never as a quiet board"
+      proof: "unit test: test/digest-rotation-union.test.ts"
+    - claim: "no step is added to the decision relevant set by this task"
+      proof: "unit test: test/digest-rotation-union.test.ts"
+    - claim: "the digest stays a reporter and files nothing"
+      proof: "grep: escalate: false in src/lib/digest.ts"
+    - claim: "nothing added paces or throttles or sleeps a call"
+      proof: "unit test: test/digest-rotation-union.test.ts"
+  falsifier: |
+    If a fresh measurement over the rotation stamps shows rotations are RARE relative to the digest
+    cadence — inter-event gaps mostly EXCEEDING `digestCadence.minIntervalMinutes` rather than the
+    measured 3.3% — then the exposure is theoretical and this task must be closed rather than built.
+    The measurement to re-run is the same one: parse the rotation stamp out of every archive
+    FILENAME across all three forms with a per-form coverage control, cluster stamps within 60 s into
+    events because one rotation writes several files, and compare the event gaps against the live
+    `minIntervalMinutes`, not against an assumed daily clock.
+
+    SEPARATELY FALSIFYING: if a bounded union's WORST-CASE window is cheap — not the median, the tail
+    — then the bimodality recorded in (3) is wrong and the design question it raises is moot.
