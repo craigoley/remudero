@@ -1,0 +1,101 @@
+- id: W1-T2413
+  title: "THE HEAD OF THE DISPATCH QUEUE IS REFUSED ABOVE THE SELECTOR, SO NOTHING THAT READS THE SELECTOR CAN SEE IT — three priority:1 tasks sort first, pass every isDispatchEligible filter, and have not dispatched in sixteen days while the queue behind them drains in under five hours"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  origin: oper#queue-head-not-moving-2026-08-27
+  files: [src/lib/drain.ts, src/lib/daemon.ts, src/lib/status-board.ts, test/queue-head-refusal-is-legible.test.ts]
+  rationale: |
+    **ORDERING IS NOT THE PROBLEM, AND THE MEASUREMENT IS WHAT MAKES THAT SHARP.** `compareDispatch`
+    (src/lib/drain.ts:372-373) sorts by `priority` ascending with absent as `+Infinity`, then
+    declared-scope, then ordinal; `nextRunnable` (:413) and `runnableCandidates` (:623) both iterate
+    `dispatchOrder`. It works. Only 4 of 916 records declare `priority` and those four sort to the
+    head. And nothing queues: over 30 merged tasks, filing-to-merge reads **p50 4.7h, p90 19.5h, max
+    24.4h, 29 of 30 inside a day and none over seven**. So a task at the head is not waiting behind
+    lower-value work — there is no waiting to do.
+
+    **YET THREE OF THE FOUR HAVE NEVER DISPATCHED.** W1-T418, W1-T419 and W1-T420 carry
+    `priority: 1`, are `verify: auto`, declare ZERO dependencies, lint clean with 0 violations, and
+    are returned by `runnableCandidates` in the first four of 580. They have no `run-*` branch and
+    no merged trailer, sixteen days after filing, while the fleet holds 94 run branches and cut one
+    0.3 hours before this was measured. They are not slow. They are skipped.
+
+    **THE REFUSAL LIVES ABOVE THE SELECTOR, WHICH IS WHY NO SELECTOR-LEVEL VIEW SHOWS IT.**
+    `DispatchFilterReason` (src/lib/drain.ts) has exactly six arms — `already-merged`,
+    `verify-not-auto`, `blocked`, `unmet-deps`, `continued-this-pass`, `run-branch-already-pushed` —
+    and **none of them names the circuit breaker** (measured: 0 arms matching circuit|breaker,
+    against a control of 6 arms present). `isDispatchBreakerTripped` (src/lib/status.ts:1888) is
+    consulted by the daemon through `deps.isCircuitTripped`, which logs `dispatch.circuit_broken`
+    (src/lib/daemon.ts:3219) — and by `deriveCircuitBrokenBlockers` (src/lib/status-board.ts:1538),
+    whose own doc at :1522 states it is **not read to CHANGE any dispatch decision**. So a task whose
+    breaker has tripped is `isDispatchEligible === true`, sorts FIRST, and is refused one layer up,
+    where the only record is a ledger row.
+
+    **THE HYPOTHESIS THIS TASK MUST TEST FIRST, AND IT IS A LEDGER READ RATHER THAN A CODE READ.**
+    `dispatchesWithoutNewOwnedPr` trips at `DEFAULT_MAX_TASK_DISPATCHES = 5`, and W1-T2249 records
+    that an API outage can trip it on runs that produced nothing through no fault of the task. A
+    tripped breaker on a `priority: 1` task is invisible in `dispatchOrder` and fatal to it.
+    W1-T2335 records that `deriveCircuitBrokenBlockers` renders for tasks dispatch will never take,
+    so the board may already be showing this with nobody reading it.
+
+    **THE READ COULD NOT BE PERFORMED WHERE THIS WAS FILED, AND THAT IS STATED RATHER THAN GUESSED.**
+    Every ledger-shaped file on the filing host was enumerated over the three forms
+    (`ledger.ndjson`, `ledger.*.ndjson`, `ledger.*.ndjson.gz`, counted separately because a glob
+    naming one answers from the other). The largest carries **654 rows and 2 distinct steps**
+    (`cli.invoked` 644, `next_task_id.reserve` 10) — a container-local scratch ledger with no
+    `run.start`, no `dispatch.*`, no `pr.opened`. **Zero files anywhere name W1-T418, W1-T419 or
+    W1-T420**, against a control of 9 files containing `cli.invoked`, so the query was live and the
+    corpus was simply the wrong one. The build's FIRST act is that read on the host that has the
+    rows, and it must distinguish three outcomes: never seen by any rung (no rows at all), refused
+    with a stated reason (`dispatch.skipped`, `dispatch.circuit_broken`, `stood_down`, `ineligible`),
+    or dispatched and lost. The zero must be controlled — `dispatch.circuit_broken` has to be shown
+    firing for SOME task, or the query is blind rather than the population empty.
+
+    **`priority` IS READ, AND SAYING SO MATTERS BECAUSE THE OBVIOUS READING IS THE WRONG ONE.** Its
+    seven readers in `src/` are two in `compareDispatch` (the real dispatch read), one parse in
+    plan.ts, four range checks in task-linter.ts — controls on the same query shape: `verify` 19,
+    `files` 111, `depends_on` 10. The field is not decorative by construction; it is decorative in
+    EFFECT, because the order it produces is irrelevant when nothing queues and the head is refused
+    elsewhere. **The finding is the skip, not the field.** Removing `priority` is not proposed, and
+    no scoring model is proposed — either would answer a question the measurement did not ask.
+  note: |
+    **RULE 19 BAND, SET UP FRONT AND FOR THE SPAN.** `files:` reaches the dispatch vocabulary
+    (`drain.ts`), the refusal site (`daemon.ts`) and the render (`status-board.ts`). That is three
+    modules across two layers, so `risk: high` is Rule 19's SIZING verdict on the SPAN and carries no
+    claim about blast radius — the likely change is small and additive.
+
+    **THE READ COMES BEFORE THE CHANGE, AND MAY END THE TASK.** If the ledger shows these three were
+    never seen by any rung, the defect is upstream of the breaker entirely and this shard's remedy is
+    wrong; say so and stop rather than building the visibility fix anyway. A report before a rung, a
+    rung before a gate.
+
+    **WHAT MUST NOT CHANGE.** No gate is weakened and no cap is raised —
+    `DEFAULT_MAX_TASK_DISPATCHES = 5` is the backstop that made the W1-T1 storm (~130 dispatches,
+    ~$130, ~10h) impossible to repeat, and raising it to clear three stuck tasks would trade a real
+    bound for a symptom. Nothing paces, nothing sleeps, nothing auto-files, and no rung may
+    auto-dispatch a `verify: human` task. The operator gates every merge.
+
+    **NOT THIS SHARD'S, AND RECORDED SO IT IS NOT RE-MINED.** The standing `verify: human` queue —
+    42 tasks, p50 13.9 days, ten at 44.4 days, with `staleTask`, `reRank`, `retireTask`,
+    `expireTask` and `queueAge` all reading 0 in `src/` — is the union of W1-T2289 (intake rungs
+    never read their own queue depth), W1-T2304 (no rung's unit is the board) and W1-T391
+    (retirement records and operator blocks are indistinguishable on disk). W1-T20d's plan-health
+    sweep is shipped (#140) and re-grades LINT VIOLATIONS ONLY, skipping merged tasks; the three
+    stuck ids lint clean, so it is silent on them by construction.
+  acceptance:
+    - claim: "a task whose dispatch breaker has tripped is distinguishable from one no rung ever considered"
+      proof: "unit test: test/queue-head-refusal-is-legible.test.ts"
+    - claim: "the refusal reason a task was skipped for is readable without opening the ledger by hand"
+      proof: "unit test: test/queue-head-refusal-is-legible.test.ts"
+    - claim: "a tripped breaker on a task that sorts first is reported rather than left silent"
+      proof: "unit test: test/queue-head-refusal-is-legible.test.ts"
+    - claim: "the dispatch cap is unchanged and no gate is weakened by this change"
+      proof: "unit test: test/queue-head-refusal-is-legible.test.ts"
+    - claim: "a verify human task is never auto-dispatched by anything added here"
+      proof: "unit test: test/queue-head-refusal-is-legible.test.ts"
+    - claim: "nothing added paces or throttles or sleeps a call"
+      proof: "unit test: test/queue-head-refusal-is-legible.test.ts"
