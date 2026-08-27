@@ -101,7 +101,8 @@ raw: >-
   (contradictory) — escalating
 attachments: []
 origin: repair#blocked-ambiguous
-status: new
+status: rejected
 proposal_pr: null
 summary: null
 expansion: null
+answered_by: null
