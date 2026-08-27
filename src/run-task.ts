@@ -568,6 +568,7 @@ import {
   lastPendingReviewStatusFromLedger,
   rubricAdvisorySection,
   scopeAdvisorySection,
+  inverseScopeAdvisorySection,
   unwiredExportAdvisorySection,
   keywordOnlyAnnotation,
   acceptanceBlockDiagnostics,
@@ -4610,7 +4611,15 @@ async function runReview(args: {
   // passing case is exactly where nothing else would ever mention it. Advisory only: whether an
   // unwired export should BLOCK is W1-T323's open operator adjudication, not this call site's.
   const unwiredSection = unwiredExportAdvisorySection(verdict.unwiredAdvisories);
-  if (hasUnmet || rubricSection || scopeSection || unwiredSection) {
+  // The third and last renderable sibling (`unresolved_task_scope`, the fourth reason code, is
+  // deliberately NOT rendered — its evidence field has no producer in src/, so a section for it
+  // would be dead code; see inverseScopeAdvisorySection's doc). Same contract as the two above:
+  // reads the advisory the loop already ledgered, shares their one best-effort comment, and is
+  // present INDEPENDENT of `verdict.state` because an undertouched declared scope is normal on an
+  // otherwise-passing review — the passing case being exactly where nothing else would mention it.
+  // Advisory only: blocking is W1-T323's open adjudication, not this call site's.
+  const inverseScopeSection = inverseScopeAdvisorySection(verdict.unwiredAdvisories);
+  if (hasUnmet || rubricSection || scopeSection || unwiredSection || inverseScopeSection) {
     // Post the full unmet list (+ the advisory rubric section, if any) as a PR
     // comment so a blocked PR — or one with a rubric concern — names its gap in
     // one place a human (or the next run) reads. Best-effort — never blocks the
@@ -4628,6 +4637,7 @@ async function runReview(args: {
     if (rubricSection) parts.push(rubricSection);
     if (scopeSection) parts.push(scopeSection);
     if (unwiredSection) parts.push(unwiredSection);
+    if (inverseScopeSection) parts.push(inverseScopeSection);
     const body = parts.join("\n\n---\n\n");
     try {
       execFileSync("gh", ["pr", "comment", prUrl, "--body", body], { stdio: "pipe" });
