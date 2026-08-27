@@ -1,0 +1,149 @@
+- id: W1-T2414
+  title: "A TEST FIXTURE THAT SEEDS THE CONFIG AT A PATH `configPath()` DOES NOT RESOLVE DIES ONLY ON CI — the absent file sends `loadConfig` down its `result.created` branch, creation calls `resolveClaudeBin()` → `execFileSync(\"which\", [\"claude\"])`, and a runner with no `claude` binary fails with `Command failed: which claude`, which names nothing about config paths; every developer host has the binary, so the test passes everywhere it is written and fails only where it is judged"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 20.00
+  files: [src/lib/config.ts, test/config-fixture-path-parity.test.ts]
+  origin: "operator-brief#fixture-config-path-dies-only-on-ci-2026-08-27"
+  plan_refs: ["W1-T2397", "W1-T464", "W1-T472", "W1-T1074", "W1-T1041", "W1-T2408", "W1-T294"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE ID. Eight surfaces swept before a byte of this file was written, each against a control drawn
+    from the ENUMERATED OPEN SET (#3145, #3144, #3142, #3140, #3133, #3127, #3126), anchored
+    `W1-T2414([^0-9]|$)` with a `[0-9]` class and never `\d`. SURFACE 1 READS 1: `refs/rmd-id/W1-T2414`
+    resolves on origin against a namespace of 527 refs, with W1-T2407 and W1-T2413 both firing 1 there.
+    Shard filenames 0 of 834; declared ids 0 of 918; open-PR titles 0 of 7 read case-sensitively;
+    open-PR bodies 0 of 395 lines; remote head refs 0 of 149, checked BOTH case-sensitively and
+    case-insensitively; merged trailers 0 of 45 trailer lines; merged subjects 0 of 400.
+
+    CONTROLS, AND TWO THAT HAD TO BE RE-PICKED — RECORDED BECAUSE THE RE-PICK IS THE EVIDENCE. On
+    titles W1-T2332 (#3133) and W1-T2407 (#3145) fire 1 each; on bodies W1-T2407 fires 9 and W1-T2413
+    fires 6; on subjects W1-T2407 fires 1 and W1-T2403 fires 2; on filenames and declared ids W1-T2407
+    fires 1. HEAD REFS ARE CASE-MIXED AND A CASE-SENSITIVE SWEEP IS BLIND TO HALF OF THEM: W1-T1279
+    fires 1 case-sensitively from `run-W1-T1279-1787864315393`, while W1-T2408 fires 0 case-sensitively
+    and 1 case-INsensitively from `chore/plan-file-w1-t2408`, so this id was checked both ways.
+    ON TRAILERS THE FIRST CONTROL FAILED TO FIRE AND WAS REPLACED: W1-T1279 reads 0 there because
+    #3142 is still OPEN, and W1-T2407/W1-T2403 read 0 because PLAN FILINGS CORRECTLY CARRY NO TRAILER;
+    W1-T2398 and W1-T2393, both merged BUILDS, fire 1 each. Trailers and subjects are MERGED-ONLY
+    surfaces, so this id's zero there is structural, not evidence of anything. ANCHOR-LEAK PROBE on a
+    POPULATED band: `W1-T24` reads anchored 2 against unanchored 15 on declared ids, so the anchor
+    discriminates; `W1-T241` was rejected as a probe because it reads 1 against 1 and would prove
+    nothing.
+
+    (Q1) THE POPULATION, MEASURED FROM `test/` AND NOT FROM MEMORY, AT `4d0d0ccc`. 1,016 tracked files
+    under `test/`; 70 mention `config.json`. By PATH SHAPE: 5 files write a `.remudero` path, 55 write
+    `.config/remudero`, and 10 call `configPath()` itself and are correct by construction.
+
+    ⚠ BUT PATH SPELLING IS NOT THE PREDICATE, AND THE FIRST SWEEP THAT ASSUMED IT WAS ANSWERED WRONG IN
+    BOTH DIRECTIONS. Its POSITIVE control failed — the shape query did not find #3126's own fixture —
+    and its NEGATIVE control failed too, sweeping up one file that writes nothing. All 5 `.remudero`
+    writers reference `loadConfig` ZERO times: they seed `.remudero/mounts.yaml`, a different artifact,
+    and none of them can reach `resolveClaudeBin` at all.
+
+    THE REAL PREDICATE IS REACHING `resolveClaudeBin`, and it is a set intersection: a fixture must
+    REDIRECT `process.env.HOME` (58 files), REFERENCE `loadConfig`/`configPath` (43 files) — 22 files
+    do both — and NOT seed `.config/remudero` (55 files do seed it). That leaves 6 static candidates:
+    `autonomy-ratchet`, `fs-race-alerts`, `ledger-grep`, `rule-efficacy`, `verdict-calibration` and
+    `worker-credential-preflight`.
+
+    RUN WITHOUT THE BINARY, THE ANSWER IS ZERO — AND THAT ZERO IS CONTROLLED. All 6 were executed with
+    `claude` on PATH and again with every PATH entry holding a `claude` executable removed (2 entries
+    dropped; `command -v claude` confirmed NO under the stripped PATH). BOTH RUNS: `tests 109 pass 107
+    fail 2`, and the failure SETS are IDENTICAL — two pre-existing `spawnWorker` credential assertions
+    unrelated to this chain. So NO fixture on main today fails for this reason.
+
+    ⚠ THE POSITIVE CONTROL IS WHAT MAKES THAT ZERO A MEASUREMENT RATHER THAN AN UNPROVEN ONE. The same
+    method was run against #3126's DEFECTIVE sha `21a9f3d0`, where the fixture seeds `.remudero`:
+    26/26 with the binary, 25/26 without, a SINGLE-MEMBER failure set — "DAEMON WIRING: daemonCommand
+    actually PASSES both callbacks into the deps it hands runDaemon" — carrying the exact text
+    `Command failed: which claude`. That is the same single-member set CI reported. The method sees the
+    defect when it is present; on main it is absent.
+
+    ⚠ AND THE MEASURED INSTANCE IS ALREADY REPAIRED, WHICH CHANGES WHAT THIS TASK IS FOR. #3126's head
+    moved from `21a9f3d0` to `0b26058c` — "test(dispatch): write the fixture config where configPath
+    reads it" — which now seeds `.config/remudero` and carries a comment naming this exact trap. THAT
+    REPAIR RODE INSIDE W1-T2397, WHICH OWNS SOMETHING ELSE ENTIRELY (a task with an open unmerged build
+    being dispatched again), so it fixed ONE FIXTURE and left the CLASS unowned. THIS TASK IS FILED FOR
+    THE CLASS, NOT THE INSTANCE, and its acceptance must not be read as repairing #3126.
+
+    (Q2) WHY IT IS INVISIBLE LOCALLY, WHICH IS THE WHOLE DEFECT. `resolveClaudeBin` shells `which
+    claude`, and every developer host has that binary — this one resolves it at TWO PATH locations, so
+    the failure cannot occur here by construction. THE TEST PASSES EVERYWHERE IT IS WRITTEN AND FAILS
+    ONLY WHERE IT IS JUDGED. Nothing in the failure text mentions a config path, a HOME redirect or a
+    fixture, so the reader is pointed at a missing binary rather than at the seam that reached for it,
+    and #3126 spent a full CI cycle on that misdirection.
+
+    THE ONE EXISTING CHECK THAT COULD HAVE SEEN IT IS `rmd preflight --ci-parity` (`src/lib/ci-parity.ts`,
+    W1-T294), which shells CI's OWN commands rather than a local approximation. It would have run the
+    suite the way CI runs it — but not without the binary, so it would still have passed on any
+    developer host. AND THE OBLIGATION TO RUN IT WAS REMOVED BY W1-T464 BECAUSE IT GATED NOTHING.
+    WHETHER THAT REMOVAL SHOULD STAND IS W1-T472's AND W1-T1074's QUESTION; both are CITED HERE AND
+    NEITHER IS RE-FILED. This task takes no position on it.
+
+    (Q3) THE CHEAPEST THING THAT WOULD HAVE CAUGHT #3126, IN COST ORDER.
+
+      (a) A SHARED `fixtureHome()` THE FIXTURES IMPORT INSTEAD OF HAND-ROLLING. The working precedent
+          already exists — `fixtureHome()` in `test/auto-triage-wiring.test.ts` seeds `.config/remudero`
+          and is green on CI with the same test-name shape. MEASURED: 12 files define their OWN
+          `fixtureHome`, and ZERO export one, so the helper is copied twelve times and each copy is an
+          independent chance to spell the path wrong. Cheapest, and it fixes the copies that adopt it.
+      (b) A TEST ASSERTING EVERY SEEDED CONFIG PATH EQUALS `configPath()`'s OWN OUTPUT. A census over
+          `test/`, in the shape this repo already uses for population properties. It catches a wrong
+          path at authoring time rather than on a runner.
+      (c) MAKING `resolveClaudeBin`'s FAILURE NAME THE CONFIG PATH IT WAS REACHED FROM. ⚠ THIS IS THE
+          ONLY ONE OF THE THREE THAT STILL HELPS WHEN SOMEONE HAND-ROLLS A FIXTURE ANYWAY. (a) helps
+          only the fixtures that import it and (b) only the shapes its census recognises; both are
+          defeated by the next author who writes a fresh path by hand — which is exactly what happened
+          here, with a correct precedent already in the tree. (c) cannot be bypassed, because every
+          route to the failure passes through it. WHAT IT COSTS: one catch arm around the `execFileSync`
+          at `src/lib/config.ts:456` that rethrows naming `configPath()` and the fact that creation was
+          entered, plus a test that asserts the message carries the path. It changes no control flow and
+          no return type, and the eager read stays eager. It does NOT prevent the defect — it converts a
+          misdirecting failure into a self-explaining one, which is a diagnosis change, not a gate.
+
+    ⚠ EXPLICITLY REFUSED, AND NOT BECAUSE THEY WOULD NOT WORK. Stubbing the binary, adding `claude` to
+    CI, and making `loadConfig` lazy are all out of scope by ruling: the first two make the runner lie
+    about a real dependency, and THE EAGER READ IS LOAD-BEARING — deferring it is a much larger change
+    with its own consumers and is not this task's to make.
+
+    OWNED ELSEWHERE, RECORDED SO THIS DOES NOT ABSORB THEM: the `--ci-parity` obligation is W1-T472's
+    and W1-T1074's; the `ci` versus `coverage-ratchet` harness disagreement is W1-T1041's; the
+    shipped-and-silent class is W1-T2408's, filed and still OPEN as #3140 rather than merged. THIS TASK
+    OWNS ONLY THE FIXTURE CONFIG PATH THAT REACHES `resolveClaudeBin`.
+
+    RULE 19 BAND, SET UP FRONT. `risk: high` is the SPAN reading and carries no claim about blast
+    radius: `files:` names two stems as the sizing check counts them, `config` and
+    `config-fixture-path-parity`, and that pairing is refused at `risk: medium`. The blast radius is the
+    opposite of the band — (c) adds a catch arm that rethrows and (b) adds a census that reads files.
+    If (a) is chosen instead, a shared helper module is a SEPARATE filing; declaring it here would
+    presume the remedy before the operator has ruled, the shape W1-T466 and W1-T2407 already use.
+  acceptance:
+    - claim: "every fixture seeding a config for loadConfig writes it where configPath resolves"
+      proof: "unit test: test/config-fixture-path-parity.test.ts"
+    - claim: "the parity check fails when a fixture seeds the legacy dot-remudero home"
+      proof: "unit test: test/config-fixture-path-parity.test.ts"
+    - claim: "the check names the offending file and the path it expected"
+      proof: "unit test: test/config-fixture-path-parity.test.ts"
+    - claim: "a fixture that seeds no config file at all is never reported"
+      proof: "unit test: test/config-fixture-path-parity.test.ts"
+    - claim: "the claude lookup failure names the config path it was reached from"
+      proof: "unit test: test/config-fixture-path-parity.test.ts"
+    - claim: "the config read stays eager and no test stubs the claude binary"
+      proof: "unit test: test/config-fixture-path-parity.test.ts"
+  falsifier: |
+    If a sweep of `test/` finds no fixture that redirects HOME, reaches `loadConfig`, and seeds its
+    config anywhere other than `configPath()`'s own output — measured the way this shard measured it,
+    by RUNNING the candidates with every PATH entry holding a `claude` executable removed and comparing
+    failure SETS rather than counts against a run with the binary present — then no fixture is at risk
+    today and only remedy (c) has standing, since (a) and (b) would be guarding an empty set. That is
+    already the state on `4d0d0ccc`: the at-risk count is ZERO, and the case for this task rests on the
+    class recurring rather than on a live instance.
+
+    SEPARATELY DECISIVE: if `configPath()` stops resolving `~/.config/remudero/config.json`, or if
+    `loadConfig`'s `created` branch stops calling `resolveClaudeBin`, the chain described here is gone
+    and the finding must be re-derived rather than trusted.
