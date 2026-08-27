@@ -501,6 +501,20 @@ export function ownBranchOf(runId: string): string {
  * polarity, unavailable is never silently absent. Never throws; a probe that
  * itself crashes the retro over a transient CLI hiccup would be worse than the
  * silent-zero bug this task fixes.
+ *
+ * W1-T2305: This probe's `.rate.remaining` read is the free, legacy `gh api rate_limit` object
+ * daemon-health.ts's own module header now names as unreliable (the endpoint disagreed with
+ * itself three times in one second in the measurement that task cites) — moving THIS call onto a
+ * real metered response is out of scope here (design (vii) names no attempt to make GitHub's own
+ * reporting accurate, and the cost of a wrong reading on this path is bounded: retroTriggerCheck
+ * skips one tick and the daemon retries the next, per that task's own rationale (3)). The
+ * threshold below (`<= 0`, never `=== 0`) is deliberately kept identical to
+ * `isBucketExhausted`'s (lib/daemon-health.ts) — copied rather than imported: importing that
+ * module here would close `retro.ts → daemon-health.ts → daemon.ts → retro.ts`, a genuinely new
+ * dependency cycle (measured: it raises depcruise's own pinned no-circular count, W1-T…
+ * `cli-plumbing-extraction.test.ts`'s baseline, from 13 to 19). A malformed reading that comes
+ * back negative therefore still reads as exhausted here too, exactly as it does everywhere else
+ * this repo asks the same question.
  */
 export function probeGithubThrottle(): string | undefined {
   try {

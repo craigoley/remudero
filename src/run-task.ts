@@ -137,7 +137,13 @@ import {
 // W1-T372: the daemon-tick counterpart to daemon-health.ts's own pull-only rate-limit display
 // (readGhRateLimitRemaining, unrelated cadence, unchanged) — reads BOTH gh api rate_limit
 // buckets off one exec call for runDaemon's own `readGhQuota` dep, wired below.
-import { isBucketExhausted, readGhRateLimitBuckets, type GhRateLimitBuckets } from "./lib/daemon-health.js";
+import {
+  isBucketExhausted,
+  readGhRateLimitBuckets,
+  ghRateLimitWindow,
+  type GhRateLimitBuckets,
+  type GhRateLimitProvenance,
+} from "./lib/daemon-health.js";
 // W1-T117/W1-T356: the orphan sweep's own exported defaults — see the shared `sweepOrphans`
 // closure below (daemonCommand), wired into BOTH daemonBoot's boot-time param and
 // DaemonDeps.sweepOrphans.
@@ -17978,11 +17984,36 @@ export function escalateHeadroomParkCeiling(
  * for a human close — W1-T345 is the filed retraction mechanism this notice does not depend
  * on; until it lands (or if it never does), the reset timestamp alone tells a human reading
  * this later that no action closes it.
+ *
+ * W1-T2305 — `deps.provenanceBracket` is THE BRACKET RULE (design (ii)), applied at the one
+ * place this task's own design (iv) names as consequential: when a caller HAS two provenanced
+ * readings (same actor, same resource) taken at different times, this checks — via
+ * {@link ghRateLimitWindow}, lib/daemon-health.ts — that they agree on actor AND reset epoch
+ * before letting the escalation through; a mismatched bracket describes two different identities
+ * or two different reset periods and is DISCARDED (ledgered as such, never escalated), which is
+ * the one outcome design (iv) says this task must make impossible. Optional and omitted by every
+ * call site today (`reportDrainQuotaExhaustion` below and `runDaemon`'s own tick both hand this
+ * a single `GhRateLimitBucket` reading with no second, provenanced reading to bracket against —
+ * see this task's follow-ups for wiring a real second reading in) — an omitted bracket escalates
+ * exactly as before, so no existing caller's behavior changes and the escalation paths keep
+ * their ability to fire (design (v)): "dispatch is NOT paused by this hook" remains true, and so
+ * does "this notice still opens."
  */
 export function escalateQuotaExhaustion(
   info: { bucket: "core" | "graphql"; remaining: number; resetsAt: string },
   ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway },
+  deps: { provenanceBracket?: { start: GhRateLimitProvenance; end: GhRateLimitProvenance } } = {},
 ): void {
+  if (deps.provenanceBracket && !ghRateLimitWindow(deps.provenanceBracket.start, deps.provenanceBracket.end)) {
+    appendLedger(ctx.ledgerPath, {
+      run_id: ctx.runId,
+      task_id: "daemon",
+      step: "daemon.quota_exhausted.provenance_discarded",
+      bucket: info.bucket,
+      resets_at: info.resetsAt,
+    });
+    return;
+  }
   const already = readLedgerLines(ctx.ledgerPath).some(
     (l) => l.step === "daemon.quota_exhausted.escalated" && l.bucket === info.bucket && l.resets_at === info.resetsAt,
   );
@@ -18068,6 +18099,9 @@ export function reportDrainQuotaExhaustion(
     readGhQuota?: () => GhRateLimitBuckets;
     escalate?: typeof escalateQuotaExhaustion;
     log?: (step: string, extra?: Record<string, unknown>) => void;
+    /** W1-T2305 — see {@link escalateQuotaExhaustion}'s own doc on this same field; threaded
+     *  straight through, unchanged when omitted. */
+    provenanceBracket?: { start: GhRateLimitProvenance; end: GhRateLimitProvenance };
   } = {},
 ): void {
   if (summary.stopReason !== "no_runnable") return;
@@ -18087,7 +18121,9 @@ export function reportDrainQuotaExhaustion(
     log("drain.quota", { bucket, remaining: reading.remaining, resets_at: reading.resetsAt });
     if (!isBucketExhausted(reading)) continue;
     try {
-      escalate({ bucket, remaining: reading.remaining, resetsAt: reading.resetsAt }, ctx);
+      escalate({ bucket, remaining: reading.remaining, resetsAt: reading.resetsAt }, ctx, {
+        provenanceBracket: deps.provenanceBracket,
+      });
     } catch (e) {
       // Mirrors the daemon tick's own catch around this same hook: an escalation that throws is
       // ledgered and swallowed. The drain has already finished its work by this point; losing the
