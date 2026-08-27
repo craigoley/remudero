@@ -662,7 +662,8 @@ import {
   taskIdFromRunBranch,
   readMergeCreditedTaskIds,
   isMergeCreditLine,
-} from "./lib/status.js";
+  readRequiredStatusCheckContexts,
+  type RequiredContextsRead,} from "./lib/status.js";
 import {
   DEFAULT_SWEEP_POLICY,
   actionableGateFailuresFromReasons,
@@ -23066,7 +23067,17 @@ export function buildOpenPrViews(
   // repo for this whole sweep pass (never per-PR, never hardcoded) — see
   // checksStateFromRollup's doc for why this must gate checksState instead of
   // every reported check.
-  const requiredContexts = (deps.requiredContexts ?? ghRequiredStatusCheckContexts)(owner, repo);
+  // W1-T2399: the CLASSIFIED read, so a failure keeps its reason all the way to the escalation.
+  // `deps.requiredContexts` (the injectable used by every existing fixture) still answers the old
+  // `string[] | undefined` shape and is wrapped back into the classified one, so no fixture moves;
+  // only the real, unwrapped path can produce an `unreadable` cause, which is the only path that
+  // ever had one to lose.
+  const requiredRead: RequiredContextsRead = deps.requiredContexts
+    ? ((r) => (r && r.length > 0 ? ({ kind: "contexts", contexts: r } as const) : ({ kind: "none" } as const)))(
+        deps.requiredContexts(owner, repo),
+      )
+    : readRequiredStatusCheckContexts(owner, repo);
+  const requiredContexts = requiredRead.kind === "contexts" ? requiredRead.contexts : undefined;
 
   // MERGE STATE: one bounded follow-up fetch per PR, because the LIST endpoint omits
   // `mergeable_state` (see hydrateMergeStates' doc for the live verification and the incident).
@@ -23250,7 +23261,13 @@ export function buildOpenPrViews(
       // SOFT to undefined/empty on an unreadable protection rule — that same
       // signal must gate the zero-runs discriminator OFF (never assume
       // permissive on missing information).
+      // W1-T2399: UNCHANGED in what it decides — `none` and `unreadable` both still read true, so
+      // every disposition row gated on this behaves exactly as before. What is new is the sibling
+      // field below, which is populated ONLY for a genuine read failure.
       requiredContextsUnreadable: !requiredContexts || requiredContexts.length === 0,
+      ...(requiredRead.kind === "unreadable"
+        ? { requiredContextsReadFailure: { branch: requiredRead.branch, reason: requiredRead.reason } }
+        : {}),
       // Absent from the map ⇒ GitHub had not computed it (or we could not ask) ⇒ undefined, the
       // pre-existing value. Only a DEFINITE observed "dirty" ever reaches the conflicted rows.
       mergeState: mergeStates.get(pr.number),

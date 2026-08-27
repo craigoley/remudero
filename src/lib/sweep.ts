@@ -1159,6 +1159,14 @@ export interface OpenPrView {
    */
   requiredContextsUnreadable?: boolean;
   /**
+   * W1-T2399 — WHY the repo-wide required-contexts read was unreadable, captured where the read
+   * happens (`readRequiredStatusCheckContexts`, status.ts) and carried here so the escalation can
+   * name it WITHOUT a second GitHub call. Present only when {@link requiredContextsUnreadable} is
+   * true AND the cause was a genuine read failure; protection that readably declares NO required
+   * contexts leaves this undefined, which is the whole point of the split.
+   */
+  requiredContextsReadFailure?: { branch: string; reason: string };
+  /**
    * W1-T225 (the 2026-07-21 PRs #477/#484 jam): true when the ledger already
    * carries a `review.posted` (or `review.post_refused`) outcome for THIS
    * task at an EARLIER head sha than {@link headSha} — i.e. this PR HAS been
@@ -2278,7 +2286,10 @@ export function describeRedCause(cause: RedCause, pr: OpenPrView, allPrs: readon
  * run until the conflict resolves. This is the split acceptance 3 requires: `checksState: "none"`
  * is no longer read as one fact meaning two different things.
  */
-export type ObservedBlockerState = "CONFLICTED" | "FAILING" | "ABSENT" | "PENDING";
+/** W1-T2399 adds `GATE_UNREADABLE`: the repo-wide protection read failed, which is a fact about
+ *  the REPO rather than about this PR's checks. It used to be reported as `ABSENT` — a claim that
+ *  the required check had zero observed runs, contradicted by the PR's own green `checksState`. */
+export type ObservedBlockerState = "CONFLICTED" | "FAILING" | "ABSENT" | "PENDING" | "GATE_UNREADABLE";
 
 export function observedBlockerState(pr: OpenPrView): ObservedBlockerState | undefined {
   if (pr.mergeState === "dirty" || pr.mergeable === false) return "CONFLICTED";
@@ -2292,6 +2303,14 @@ export function observedBlockerState(pr: OpenPrView): ObservedBlockerState | und
   if (pr.reviewState === "failure") return undefined;
   if (pr.checksState === "pending") return "PENDING";
   if (pr.checksState === "none") return "ABSENT";
+  // W1-T2399 — CHECKED BEFORE THE W1-T176 SHAPE BELOW, because when the repo-wide read failed we
+  // do not KNOW that any context is absent: `checksState` is green, so the PR's own checks plainly
+  // ran. Reporting ABSENT here asserts zero observed check runs on a head that has them, which is
+  // the false sentence this task exists to remove. The DISPOSITION is untouched — a PR reaching
+  // here still falls to the same terminal catch-all and still escalates (W1-T176 boundary (ii)).
+  if (pr.checksState === "green" && pr.reviewState === "none" && pr.requiredContextsUnreadable === true) {
+    return "GATE_UNREADABLE";
+  }
   // The W1-T176 shape: every OTHER required context is green, but remudero-review specifically
   // has zero observed runs — invisible to the branch above because overall checksState reads
   // "green", not "none" (only the one required context is absent).
@@ -2487,6 +2506,20 @@ function renderObservedFacts(pr: OpenPrView, state: ObservedBlockerState | undef
         `[ABSENT]${suffix} the required check has ZERO observed check runs on head ` +
         `${pr.headSha.slice(0, 7)} — it has not started at all, not merely running slowly.`
       );
+    case "GATE_UNREADABLE": {
+      // W1-T2399: names the REPO-WIDE read as the observed blocker, including the branch it could
+      // not read and the classified reason, rather than asserting anything about this PR's checks.
+      const f = pr.requiredContextsReadFailure;
+      const where = f ? `branch protection on \`${f.branch}\`` : "branch protection";
+      const why = f ? ` — ${f.reason}` : "";
+      return (
+        `[GATE_UNREADABLE]${suffix} this PR's own checks are GREEN on head ${pr.headSha.slice(0, 7)}; ` +
+        `what could not be read is ${where}${why}, a REPO-WIDE read that this sweep pass makes once. ` +
+        `An unreadable gate is never assumed permissive (W1-T176), so the merge is held — but nothing ` +
+        `here is a claim about this PR's check runs. Remedy: restore the protection read (token scope, ` +
+        `\`gh\` availability, network), then the next pass disposes this PR on its real state.`
+      );
+    }
     case "PENDING":
       return `[PENDING]${suffix} required checks are still running on head ${pr.headSha.slice(0, 7)}.`;
     default:
