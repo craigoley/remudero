@@ -489,6 +489,18 @@ export type RiskOverrideDisposition = (typeof RISK_OVERRIDE_DISPOSITIONS)[number
 export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "run.start",
   "pr.opened",
+  // W1-T2425: the breaker's own REFUSAL row, joining the ESCALATION row immediately below it.
+  // Same prefix, same writer, and until now opposite retention: `.escalated` was decision-relevant
+  // and survived (measured 2 live / 2 union on the fleet) while this one belonged to none of the
+  // three retention sets and was archived entire by PASS 1 (0 live / 78 union). The row carries
+  // `freshCount` — the count the breaker actually decided on, present on 78 of 78 rows — and
+  // `seedCountFromCircuitBreak` (status.ts) reads it to give a RESTARTED process the baseline its
+  // in-memory `cache.lastCounts` cannot carry across a boot. Archived away, that baseline reads
+  // absent, `evaluateDispatchBreakerDetailed`'s regression arm is unreachable, and a rotation that
+  // shortens the live file un-trips a tripped breaker silently — which is exactly the class this
+  // Set exists to prevent, and exactly what happened to W1-T1279 for 84 hours on 2026-08-27.
+  // Bounded by PASS 4's per-step cap like every other member; no cap moves for it.
+  "dispatch.circuit_broken",
   "dispatch.circuit_broken.escalated",
   // W1-T316: escalateLifetimeCapExceeded's (run-task.ts) own dedup marker — the SAME
   // "written whether or not delivery succeeds" discipline as `dispatch.circuit_broken.escalated`
