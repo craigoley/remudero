@@ -91,6 +91,56 @@
 
     RISK BAND. `risk: high` is set UP FRONT and is Rule 19's SPAN, not blast radius: `files:` crosses
     the board gateway and the daemon's own wiring.
+
+    ── AMENDED 2026-08-27: ALREADY SHIPPED, UNCREDITED, AND BURNING A DISPATCH EACH TIME ─────────
+
+    VERIFIED ON THIS DISPATCH, BY SYMBOL RATHER THAN BY TITLE. This shard's work is on origin/main,
+    shipped as TWO merged PRs, both ancestors of HEAD:
+      • #2998 `fix(board-gateway): floor the index TTL at the fetch that produced it`
+        (merged 2026-08-26T20:41:29Z) — the floor itself.
+      • #3000 `perf(board-gateway): give the open and merged halves their own clocks`
+        (merged 2026-08-26T22:04:19Z) — the per-half split.
+    Both land in ONE symbol at `src/lib/status.ts`:
+    `const effectiveOpenTtlMs = (): number => (ttlMs === 0 ? 0 : Math.max(ttlMs, openFetchDurationMs))`
+    — the TTL floored at the fetch that produced the cache, on the OPEN half's own clock. Every
+    acceptance proof below already holds at head, re-run on this checkout rather than assumed:
+    `test/board-index-ttl-outlives-its-fetch.test.ts` passes 10/10, and the grep proofs resolve
+    at `DEFAULT_WORKER_QUIET_FLOOR_MS` 2, `findMergedByTrailer` 24, `BOARD_MAX_PAGES` 3,
+    `buildBatchedGithub` 38 (control symbol 0). There is no remaining diff for `files:` to carry.
+
+    WHY THE TASK KEPT BEING RE-DISPATCHED — A CREDIT GAP, NOT A BUILD GAP. Six runs on 2026-08-27
+    ended `ALREADY_SATISFIED claim … did not verify against the board gateway (not_found) — falling
+    to no_pr`, at roughly $2 each. THE REFUSAL IS CORRECT AND MUST NOT BE RELAXED: neither credit
+    path can see this task.
+      • THE TRAILER PATH. `resolveAlreadySatisfied` (src/run-task.ts) reads
+        `findMergedByTrailer`, whose own doc states the surface in terms — "MEASURED over all 1,169
+        merged PR BODIES (anchored `^Remudero-Task: <id>$`)" and "a FUZZY BODY index". #2998 and
+        #3000 carry ZERO anchored trailers IN THEIR BODIES. Measured: a REST sweep of every merged
+        PR body for `^Remudero-Task:[ \t]*W1-T2323[ \t]*$` returns `[]`, against a control sweep
+        for W1-T2318 that returns `[3059]`.
+      • THE HEAD-BRANCH PATH. `ownsBranch` matches `^run-W1-T2323-[0-9]+$`. #2998's head was
+        `fix-board-index-ttl-on-completion` and #3000's was `split-board-index-open-merged-clocks`
+        — neither matches (control: #3059's `run-W1-T2318-1787819701423` does).
+
+    AND THE CAUSE IS NARROWER THAN "THEY FORGOT THE TRAILER". BOTH MERGE COMMITS DO CARRY an
+    anchored `Remudero-Task: W1-T2323` line — #2998's at line 57 of its message, #3000's at line
+    78. The trailer reached the COMMIT and never the BODY, and the resolver reads bodies only. The
+    operator briefs that produced both PRs said "no trailer on the PR"; that instruction is right
+    for a plan-only filing, which must not credit a task it did not build, and WRONG for a BUILD,
+    which is the only thing that should. A build's body is the one place the credit projection
+    looks.
+
+    WHAT THIS AMENDMENT SUPPLIES, AND WHAT IT DOES NOT. It is filed from a branch named
+    `run-W1-T2323-<epochMs>` and its PR body carries an anchored `Remudero-Task: W1-T2323` line, so
+    BOTH paths above resolve once it merges and the re-dispatch loop ends — the same repair #3059
+    made for W1-T2318 after four wasted dispatches. It carries NO code change and touches no
+    criterion: `acceptance`, `files`, `title` and `status` are left byte-identical (verified through
+    `loadPlan` before and after, and by `postMergeAmendmentViolations` in both directions).
+    DELIBERATELY NO `status:` CHANGE — `status` is a guarded field whose edit would emit a drift
+    warn, and it is not a completion signal anyway: nothing updates it on merge and no credit path
+    reads it. This repairs ONE INSTANCE; the uncredited-merge class is W1-T458's, and the mechanism
+    that would have caught this — a build whose body carries no trailer for the task it builds — is
+    still unguarded.
   acceptance:
     - claim: "a cached board reading is never older than the TTL claims, measured from when it became available"
       proof: "unit test: test/board-index-ttl-outlives-its-fetch.test.ts"
