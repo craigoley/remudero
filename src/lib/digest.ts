@@ -744,7 +744,7 @@ const realDigestFs: LedgerGrepFsDeps = {
 export const DIGEST_MAX_ARCHIVES = 1024;
 
 /**
- * W1-T2388 — THE BOUND THAT ACTUALLY BINDS, AND IT IS MEMORY RATHER THAN WALL CLOCK. MEASURED, and
+ * W1-T2388 — THE PRIMARY CONTROL, AND IT BINDS ON MEMORY RATHER THAN WALL CLOCK. MEASURED, and
  * the measurement is why this exists at all: the busiest real 24-hour window in this corpus holds
  * 649 of its 672 rotations, and a reader that retained every in-window row from them DIED with a
  * V8 heap OOM at 4.1 GB — twice, once before the window filter was added and again after it, because
@@ -756,6 +756,13 @@ export const DIGEST_MAX_ARCHIVES = 1024;
  * most recent ones — which is what a digest of a window wants — and the count dropped is RENDERED
  * rather than silently shortening the board. 250,000 is ~14x the live file's own 17,509 lines and
  * comfortably inside heap on this host; it is a ceiling on the pathological case, not a target.
+ *
+ * KIND: PRIMARY CONTROL, and the pairing is the point — {@link DIGEST_MAX_ARCHIVES} above is the
+ * BACKSTOP. This is the bound the measurement says actually binds (the OOM was rows retained, not
+ * archives opened), so it is the one a reader must reason about first; the archive cap exists to
+ * stop a pathological directory before this one is even reached. Declared in the vocabulary
+ * `test/bound-kind-declared.test.ts` reads rather than grandfathered: grandfathering is for bounds
+ * that predate the property, and this one was added by the same change.
  */
 export const DIGEST_MAX_ROWS = 250_000;
 
@@ -873,6 +880,11 @@ export function readDigestWindow(
       const buf = fs.readFileSync(entry.path);
       addText((entry.form === "gzip" ? fs.gunzipSync(buf) : buf).toString("utf8"));
     } catch {
+      // An archive that cannot be read or gunzipped is RECORDED as unread, never skipped silently:
+      // `DigestWindowRead.unreadArchives` is what lets the render state an incomplete read on its
+      // own line instead of looking quiet (W1-T444's coverage-not-readability rule). Swallowing
+      // here is deliberate — one corrupt rotation must not cost the whole digest — and the caller
+      // still learns it happened.
       unread.push(entry.path);
     }
   }
