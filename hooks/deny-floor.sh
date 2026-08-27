@@ -16,9 +16,11 @@ input="$(cat)"
 if command -v jq >/dev/null 2>&1; then
   cmd="$(printf '%s' "$input" | jq -r '.tool_input.command // ""')"
   path="$(printf '%s' "$input" | jq -r '.tool_input.file_path // ""')"
+  hook_cwd="$(printf '%s' "$input" | jq -r '.cwd // ""')"
 else
   cmd="$input"
   path="$input"
+  hook_cwd=""
 fi
 haystack="$cmd $path"
 
@@ -106,6 +108,27 @@ fi
 if printf '%s' "$cmd" | grep -Eq 'git[[:space:]]+push\b'; then
   if printf '%s' "$cmd" | grep -Eq 'refs/rmd-pause/'; then
     deny "git push naming the shared pause namespace (refs/rmd-pause/, W1-T2262)"
+  fi
+fi
+
+# 8) an installing package manager where THIS PROJECT'S `node_modules` is a symlink
+#    (W1-T2312 — the 2026-08-05/08-11 outages). `linkWorktreeNodeModules` (src/lib/
+#    worker.ts) symlinks every worker worktree's `node_modules` to the canonical
+#    checkout's real tree ON PURPOSE, so the deps are already present via the link.
+#    `SymlinkInstallRefusal` (src/run-task.ts, `ensureInstallFresh`) guards rmd's OWN
+#    install path, but a raw `npm ci`/`npm install` typed straight into a Bash tool
+#    call executes npm directly and never reaches that in-process gate — this hook is
+#    the only surface that sees it. The symlink test is the discriminator, and it is
+#    what keeps this from crying wolf: a checkout whose `node_modules` is REAL or
+#    ABSENT still installs normally (the legitimate case `ensureInstallFresh` itself
+#    already carves out), and non-installing verbs (`npm run`, `npm test`, `npm ls`,
+#    ...) never match the command pattern at all. `cwd` is read from the hook's own
+#    JSON payload (`BaseHookInput.cwd`, present on every PreToolUse call — worker and
+#    interactive lanes alike) rather than `$PWD`, since the hook process's own
+#    directory is not guaranteed to track the session's.
+if printf '%s' "$cmd" | grep -Eq '\b(npm|pnpm)[[:space:]]+(ci|install|i|add)\b|\byarn[[:space:]]+(install|add)\b'; then
+  if [ -L "${hook_cwd:-.}/node_modules" ]; then
+    deny "an install here empties the shared node_modules through the symlink for every live run (W1-T2312) — the deps are already linked, so just run typecheck/test; a genuinely newer dependency comes from refreshing the canonical checkout, not installing in this worktree"
   fi
 fi
 
