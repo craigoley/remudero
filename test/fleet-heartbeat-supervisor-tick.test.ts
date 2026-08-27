@@ -63,6 +63,8 @@ interface BeatOpts {
   ledger?: string[];
   tsx?: boolean;
   env?: Record<string, string>;
+  /** A `date` to put on PATH ahead of the real one — see FIXED_NOW_DATE below. */
+  dateStub?: string;
   /** Applied to the copied script as [find, replace], with `find` asserted UNIQUE. */
   mutate?: [string, string];
 }
@@ -105,6 +107,10 @@ function runBeat(opts: BeatOpts = {}): Beat {
 
   writeFileSync(join(binDir, "git"), gitStub(), { mode: 0o755 });
   chmodSync(join(binDir, "git"), 0o755);
+  if (opts.dateStub) {
+    writeFileSync(join(binDir, "date"), opts.dateStub, { mode: 0o755 });
+    chmodSync(join(binDir, "date"), 0o755);
+  }
 
   const r = spawnSync("bash", [scriptPath], {
     encoding: "utf8",
@@ -202,17 +208,41 @@ test("a beat seeded with a deploy line older than the window publishes an overdu
   assert.equal(field(beat.published, "rmd_verdict"), "ok", "the install reading must be untouched");
 });
 
+// A `date` that freezes NOW_EPOCH (and NOW_ISO) to a FIXED instant, for the exact-second boundary
+// test below. Without this, `NOW` is captured once in this file (line ~144) and the script takes
+// its OWN real `date -u +%s` reading a bash startup and several probes later (line 170) — real
+// scheduler jitter between those two reads is entirely capable of ticking the clock over a whole
+// second, which flips a test asserting the EXACT second of a `-le` boundary regardless of whether
+// the script's comparison is right. Freezing the script's NOW to the SAME instant this file's
+// `iso()` helper already anchors to removes that race without touching what is actually asserted.
+// ABSOLUTE PATH, never `env date`: this dir is FIRST on PATH, so resolving through PATH would
+// re-exec this stub forever — mirrors `BSD_DATE` in test/fleet-heartbeat.test.ts.
+const FIXED_NOW_DATE = (epochS: number): string =>
+  [
+    "#!/usr/bin/env bash",
+    `if [ "$1" = "-u" ] && [ "$2" = "+%s" ]; then printf '%s\\n' ${epochS}; exit 0; fi`,
+    `if [ "$1" = "-u" ] && [ "$2" = "+%Y-%m-%dT%H:%M:%SZ" ]; then exec /usr/bin/date -u -d "@${epochS}" +%Y-%m-%dT%H:%M:%SZ; fi`,
+    'exec /usr/bin/date "$@"',
+    "",
+  ].join("\n");
+
 test("the staleness predicate discriminates at its own boundary, in both directions", () => {
   // SUPERVISOR_STALE_AFTER_S=1200 in the script: exactly at the threshold still reads live (the
   // comparison is `-le`), one second past reads STALE. Mirrors the same boundary discipline
   // `.github/workflows/fleet-heartbeat-watch.yml`'s own self-check applies to STALE_AFTER_MINUTES.
+  // The script's NOW is pinned via FIXED_NOW_DATE to the exact instant `iso()` is anchored to, so
+  // only the ledger timestamp — never scheduler jitter — decides which side of the boundary lands.
+  const dateStub = FIXED_NOW_DATE(Math.floor(NOW.getTime() / 1000));
+
   const atThreshold = runBeat({
     ledger: [FRESH_DAEMON(), `{"ts":"${iso(1200_000)}","step":"deploy.skip","reason":"up-to-date"}`],
+    dateStub,
   });
   assert.equal(field(atThreshold.published, "supervisor_verdict"), "live", "exactly at the threshold is still live");
 
   const pastThreshold = runBeat({
     ledger: [FRESH_DAEMON(), `{"ts":"${iso(1201_000)}","step":"deploy.skip","reason":"up-to-date"}`],
+    dateStub,
   });
   assert.match(
     field(pastThreshold.published, "supervisor_verdict") ?? "",
