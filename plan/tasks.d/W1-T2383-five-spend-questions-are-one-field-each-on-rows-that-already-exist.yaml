@@ -125,6 +125,64 @@
     `files:` crosses two source stems, the risk judge and the dispatch entrypoint. The blast radius
     is separately LOW — every change is an added field or an added row on a path that already runs,
     and no predicate, cap or verdict is touched.
+
+    ── AMENDED 2026-08-27: RANK 4 IS ALREADY BUILT — DO NOT BUILD IT AGAIN ───────────────────────
+
+    ITEM (4) ABOVE IS WRONG IN TWO WAYS, AND THIS SECTION RECORDS BOTH SO NOBODY SPENDS A DISPATCH
+    REDISCOVERING THEM. It says `compaction_events` "is declared and reads empty on every row, so it
+    could not be ranked as a cost predictor at all". The first half is right about the ROWS and
+    wrong about the CODE; the second half stopped being true two days before this shard was written.
+
+    (A) THE FIELD IS FULLY WIRED END-TO-END, BY SYMBOL. `detectCompactionEvents`
+    (`src/lib/compaction.ts`) matches the SDK's own `{type:"system", subtype:"compact_boundary"}`
+    message; `collectWorkerResult` (`src/lib/worker.ts`) pushes each match into `compactionEvents`;
+    `WorkerResult` returns it; and `workerLedgerFields` (`src/lib/worker.ts`) writes
+    `compaction_events: r.compactionEvents` onto the row. IT IS NOT A DECLARED-AND-NEVER-WRITTEN
+    KEY: MEASURED over a three-form ledger union of 4,374,033 lines (666 `.gz` + 6 plain archives +
+    the live file, each form's line count printed as its own coverage control), 1,498 rows CARRY the
+    key. Rank 4 is therefore not a field to add. There is nothing to build.
+
+    (B) THE ZERO IS STRUCTURAL, NOT MISSING. All 1,498 are empty for one reason: `spawnWorker` never
+    sets `autoCompactEnabled`, so `compactionConfigured` — read as
+    `(options as Record<string, unknown>).autoCompactEnabled === true` — is FALSE BY CONSTRUCTION,
+    and a call that never compacts emits no boundary to detect. AND A TEST ENFORCES IT:
+    `test/compaction-zero-is-unexplained.test.ts` asserts the Options construction never assigns
+    `autoCompactEnabled`, in its own words because "this task reads an existing channel, it does not
+    turn one on". So the empty reading is the CORRECT one, and making it non-empty is not
+    observability work at all.
+
+    (C) THE PREMISE WAS REPAIRED BEFORE THIS SHARD WAS WRITTEN. W1-T2245 shipped `ec7de683` (#2829,
+    2026-08-25) adding `compaction_configured` and `compaction_failures` to the SAME line, precisely
+    so a reader could tell DISABLED from NEVER-NEEDED from FAILED. `worker.ts`'s own doc says it:
+    "all three now ride this one line, so the zero explains itself without a second query". The
+    ambiguity item (4) rests on — that the zero could not be interpreted, and so the field could not
+    be ranked — was already gone when this shard was filed on 2026-08-27.
+
+    (D) SCOPE CORRECTION. Item (4) scopes the field to `implement.done`. MEASURED over the same
+    union, `compaction_events` rides SEVEN steps: `recon.done` 483, `review.reviewer` 462,
+    `implement.done` 427, `triage.synthesized` 74, `implement.resumed` 33, `retro.synthesized` 10,
+    `inbox.draft_synthesized` 9. `implement.done` is 427 of 1,498 — UNDER A THIRD of the population.
+    Any future reader of this field must not scope itself to one step.
+
+    (E) THE LIMIT OF THIS EVIDENCE, STATED PLAINLY RATHER THAN LEFT TO BE DISCOVERED. NO WORKER ROW
+    NEWER THAN 2026-08-14T15:04:16Z SURVIVES IN ANY FORM — rotation retains 200 lines per step, and
+    every worker row written since has aged out — so `compaction_configured` reads 0 across the whole
+    union and COULD NOT BE CONFIRMED PRESENT POST-#2829 FROM THE LEDGER. (A), (B) and (C) rest on
+    SOURCE, not on rows; only the 1,498-row population count and the seven-step split in (D) rest on
+    the ledger, and those predate #2829 without depending on it. A future reader wanting ledger
+    confirmation of `compaction_configured` must drive a fresh worker spawn rather than query
+    history.
+
+    THE OPEN QUESTION THIS DOES NOT ANSWER, AND MUST NOT. Whether auto-compaction SHOULD be enabled
+    is a TUNING decision and is left to the operator. It is out of scope here twice over: this
+    shard's own criterion says observability is not tuning, and the test in (B) actively refuses any
+    change that would turn the channel on. Recorded as an operator question, proposed as nothing.
+
+    RANK 5 (`recon.reused`) IS UNTOUCHED BY THIS AMENDMENT — still unbuilt, still a new step, and
+    this shard's own recommendation not to retain it stands.
+
+    THIS AMENDMENT IS PURELY ADDITIVE: no criterion is added, removed or edited, and `acceptance`,
+    `files`, `title` and `status` are byte-identical through `loadPlan`.
   acceptance:
     - claim: "the risk judge records its own spend on the decision row it already writes, so a deliberately cheap tier can be priced"
       proof: "unit test: test/spend-observability-fields.test.ts"
