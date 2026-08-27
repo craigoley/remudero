@@ -1,0 +1,187 @@
+- id: W1-T2416
+  title: "THE REPAIR-RECURRENCE FILER HAS NO MEMORY OF ITS OWN VERDICT — `fb-repair-blocked-fixable` has been filed for THREE CONSECUTIVE WINDOWS (2954, 2955, 2956), the first two are `status: rejected` on disk, and the third was filed anyway: the id embeds the window bucket so the only dedup (`existsSync`, run-task.ts) is per-window by construction, and a surface whose baseline rate sits above the threshold re-enters the Architect's front door forever at ~$1.85 a triage run"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 35.00
+  files: [src/run-task.ts, src/lib/digest.ts, test/repair-filing-respects-prior-rejection.test.ts]
+  origin: "feedback#fb-repair-blocked-fixable-2956"
+  plan_refs: ["§7B", "W1-T905", "W1-T2231", "W1-T2381", "W1-T470", "W1-T494"]
+  status: queued
+  attempts: 0
+  rationale: |
+    FILED FROM fb-repair-blocked-fixable-2956, AND THE ENTRY'S OWN SUBSTANCE IS NOT WHAT IS FILED
+    HERE. The entry reports that `blocked-fixable` was repaired for 3 distinct PRs (#3025 at 16c4060,
+    #3039 at ee02fe5, #3040 at 561188c) between 2026-08-27 and 2026-09-03, every one reading "required
+    checks red — ci-log fix, strike 1/2 or 2/2". That is the fix rung doing exactly its job on the
+    fleet's ordinary throughput, and it is owned: W1-T527 owns classifying the four causes of red,
+    W1-T2328/#3123 owns the strike predicate, W1-T2231 owns whether an invocation counts as a repair.
+    NONE OF THEM IS RE-FILED. The class-level defect this triage found is one level up — in the FILER.
+
+    (1) THE THREE ENTRIES, READ OFF DISK, NOT INFERRED.
+      plan/feedback/fb-repair-blocked-fixable-2954.yaml  18 distinct PRs  08-13 -> 08-20  status: rejected
+      plan/feedback/fb-repair-blocked-fixable-2955.yaml   3 distinct PRs  08-20 -> 08-27  status: rejected
+      plan/feedback/fb-repair-blocked-fixable-2956.yaml   3 distinct PRs  08-27 -> 09-03  status: new
+    Three CONSECUTIVE window buckets, one surface, one origin (`repair#blocked-fixable`), and the same
+    evidence class in all three. Two recorded rejections did not stop the third. Neither rejected entry
+    carries a `summary`, so the fleet also has no record of WHY it was rejected — the verdict exists,
+    the reasoning does not, and this task does not pretend to recover it.
+
+    (2) THE MECHANISM, EXACTLY, AND IT IS ONE LINE. `dueRepairFilings` (src/lib/sweep.ts) mints
+    `id: fb-repair-${surface}-${bucket}` with `bucket = Math.floor(now / windowMs)`. The ONLY dedup is
+    the caller-side wiring in `buildSweepEffects` (src/run-task.ts):
+      `if (existsSync(feedbackEntryPath(repoRoot, filing.id))) return; // already filed this window`
+    Its own trailing comment says "this window". The pure fold's doc says the same thing from the other
+    side: the id is "STABLE for the SAME surface across every pass inside the SAME window ... and a
+    genuinely new window can file again once the pattern persists into it."
+
+    (3) SO THIS IS NOT A BUG IN W1-T905 — IT IS A CASE ITS OWN DOC NAMES IN ONE DIRECTION ONLY. Re-filing
+    a persisting pattern next window is DELIBERATE, and it is right when nobody has ruled on it yet. What
+    the design never contemplated is the pattern persisting AND being rejected, repeatedly. There is no
+    read of the prior entry's status anywhere on the path; `dueRepairFilings` "recomputes fresh from
+    ledger rows every call, with no memory of what was already filed" (its own doc, verbatim). The filer
+    therefore cannot distinguish "nobody has looked at this yet" from "this was looked at twice and
+    refused", and it treats every window as the first.
+
+    (4) RETUNING THE THRESHOLD CANNOT FIX IT, AND THAT IS MEASURED RATHER THAN ASSERTED.
+    plan/policy.yaml bounds `sweep.repairFilingThreshold` at `max: 15`. fb-repair-blocked-fixable-2954
+    recorded EIGHTEEN distinct PRs in a single window. So even the highest threshold the schema permits
+    would have filed that window, and `blocked-fixable` — the surface every red-CI PR lands on — has now
+    cleared the live threshold of 3 in three windows running. W1-T2231's design (vii) names
+    `repairFilingThreshold` and `repairFilingWindowDays` as explicitly NOT its defect and NOT in its
+    scope ("zero firings changed"), so this ground is unowned rather than duplicated — and this task does
+    not touch either value either, because the numbers are not the defect. The MISSING VERDICT READ is.
+
+    (5) THE PRICE, FROM THE PLAN'S OWN SHIPPED LOG. MASTER-PLAN's RETRO-1787858337550 entry prices
+    `TRIAGE-fb-repair-blocked-fixable-2955 -> PR #3113 at $1.851 / 0 turns`, a run "whose whole diff is
+    plan/feedback/fb-repair-blocked-fixable-2955.yaml — which is this shard's actual deliverable". Each
+    re-filing therefore costs a spawned triage run, a branch, a PR and a review pass to arrive back at a
+    rejection that is already on disk. It also pollutes retro accounting: that same merge is why R32-4
+    "hit on a member P56's spirit excludes" and why design rule 17 had to be written.
+
+    (6) THIS IS THE FAILURE MODE W1-T905 WROTE ITS OWN RISK NOTE ABOUT. That note: "a wrong recurrence key
+    does not fail loudly, it floods the Architect's front door. That failure mode is why (ii) keys on the
+    SURFACE and (iii) makes the id the dedup." Both mitigations work AS WRITTEN and neither reaches
+    across a window boundary, because the id they rely on contains the boundary. W1-T470 recorded the
+    same shape at a different caller — "reads 'not yet filed' ... AND FILES AGAIN EVERY RUN, an unbounded
+    refile loop wearing a dedupe as a disguise" — and is cited as the precedent, not re-filed.
+
+    (7) THE READER ALREADY EXISTS, WHICH IS WHY THIS IS CHEAP. `listFeedback(root, {status})`
+    (src/lib/feedback.ts) already returns `FeedbackEntry[]` carrying `origin`, and `origin` is exactly
+    `repair#<surface>` — the surface key the suppression needs. `FEEDBACK_STATUSES` already includes
+    `rejected`. No new store, no new field, no schema change, and no change to the pure fold's arithmetic.
+  design: |
+    (i) THE VERDICT READ GOES WHERE THE DEDUP ALREADY IS, AND THE FOLD STAYS PURE. W1-T905 design (ix)
+    put the filesystem read in `buildSweepEffects` (src/run-task.ts) precisely so sweep.ts touches no
+    I/O; `captureRepairFeedbackImpl`'s `existsSync` is already there. The prior-verdict read is a second
+    condition at that SAME site. `dueRepairFilings` keeps recomputing fresh from ledger rows, keeps its
+    id, keeps its threshold arithmetic, and gains no memory. Do not move the dedup into sweep.ts and do
+    not give the fold a store.
+
+    (ii) SUPPRESS ON THE SURFACE'S OWN LATEST VERDICT, NEVER ON THE ID. Match prior entries by
+    `origin: repair#<surface>` (not by id — the id is what cannot match across windows), take the most
+    recent by `ts`, and file nothing when its status is `rejected`. A prior entry that is `new`,
+    `grilling`, `proposed`, `accepted` or `answered` suppresses NOTHING: an untriaged backlog is not a
+    ruling, and an ACCEPTED entry means the class is being worked, which is a different question this
+    task deliberately leaves alone.
+
+    (iii) SUPPRESSION IS NOT SILENCE, AND A ROW NOTHING READS IS NOT AN ANSWER. The suppressed pass
+    ledgers `sweep.repair_filing_suppressed` naming the surface, the distinct-PR count, the window
+    bounds and the id of the rejected entry that suppressed it — and that row MUST reach an existing
+    reader in the same change. src/lib/digest.ts already reads a sibling sweep row this exact way
+    (`sweep.repeat_escalated`, its `DigestSummary` carries the trips), so this is a precedented addition
+    to a reader that exists, not a new transport. W1-T905's own design (vi) refuses "a new ledger row
+    nothing reads" by name, citing `daemon.tree_dirty`/`daemon.stale_code` (W1-T494); W1-T2381 MEASURED
+    that outcome happening anyway — `escalation.deduped` has "exactly one consumer in src/, which is its
+    own writer". Shipping the row without the reader repeats both. If the digest reader cannot be landed
+    in this change, the suppression does not ship either.
+
+    (iv) THE ESCAPE HATCH IS THE OPERATOR'S VERDICT, AND IT IS THE ONLY ONE. A rejected
+    `repair#<surface>` entry is a ruling that this surface's recurrence is understood; it is lifted by
+    moving that entry off `rejected` to any other status, at which point the next window files normally.
+    NO TIME-BASED AUTO-EXPIRY, NO COUNT-BASED "MATERIALLY WORSE" RE-OPEN. Both would require inventing a
+    threshold this task has no measurement for, which is the move W1-T1252 declined and W1-T2224 refused
+    to make a fourth time. The digest line in (iii) is what keeps a genuinely worsening surface visible
+    without a magic number deciding for the operator.
+
+    (v) BEST EFFORT, STRUCTURALLY — UNCHANGED. The verdict read runs inside the same throw containment
+    the capture already has (W1-T905 design viii). An unreadable or malformed prior entry FAILS OPEN to
+    today's behaviour (file it), never closed: a filer silenced by its own parse error is strictly worse
+    than one that files a duplicate.
+
+    (vi) SCOPED TO THE FILER, NOT TO THE SURFACE. Nothing here touches `DISPOSITION_RULES`,
+    `REPAIR_SURFACE_DISPOSITIONS`, any repair verb, any dispatch condition, `acted`, or `spent`. It adds
+    no disposition, no lane and no rung — W1-T905 design (i) and W1-T527's "no new lane, no new rung"
+    ruling both still bind.
+
+    (vii) OUT OF SCOPE, NAMED SO IT IS NOT SMUGGLED IN: `repairFilingThreshold` and
+    `repairFilingWindowDays` (rationale 4 — not the defect, and W1-T2231 already disclaimed them); why
+    `blocked-fixable` recurs at all (the fix-rung family, W1-T527/W1-T2328); whether a rejection should
+    be required to record a `summary` (a real gap, named in rationale 1, and NOT filed here on one
+    observation); the repeat-escalation counter and its routing (W1-T2345/W1-T2381); and every other
+    `captureFeedback` caller — `issues-intake.ts` and `coverage-improvement.ts` are cited as shape
+    precedents and neither is modified.
+  acceptance:
+    - claim: "a due surface whose most recent prior entry for that same origin is rejected files no new feedback entry"
+      proof: "unit test: test/repair-filing-respects-prior-rejection.test.ts"
+    - claim: "a due surface with no prior entry files exactly as it does today"
+      proof: "unit test: test/repair-filing-respects-prior-rejection.test.ts"
+    - claim: "a prior entry that is new or grilling or proposed or accepted or answered suppresses nothing"
+      proof: "unit test: test/repair-filing-respects-prior-rejection.test.ts"
+    - claim: "the prior verdict is matched on the repair origin surface and never on the window keyed id"
+      proof: "unit test: test/repair-filing-respects-prior-rejection.test.ts"
+    - claim: "a rejected entry for one surface never suppresses a different surface"
+      proof: "unit test: test/repair-filing-respects-prior-rejection.test.ts"
+    - claim: "a suppressed filing ledgers a row naming the surface and the count and the rejected entry that suppressed it"
+      proof: "unit test: test/repair-filing-respects-prior-rejection.test.ts"
+    - claim: "an unreadable or malformed prior entry fails open and the filing still happens"
+      proof: "unit test: test/repair-filing-respects-prior-rejection.test.ts"
+    - claim: "the same window dedup still refuses a second filing inside one window"
+      proof: "unit test: test/repair-filing-respects-prior-rejection.test.ts"
+    - claim: "the suppression row reaches the digest reader rather than being a row nothing reads"
+      proof: "grep: repair_filing_suppressed in src/lib/digest.ts"
+  falsifier: |
+    If a fresh read of plan/feedback/ shows the `repair#<surface>` entries are NOT being repeatedly
+    rejected — i.e. the rejections were a two-entry accident rather than a standing verdict, and later
+    entries for the same surface were triaged to `proposed` or `accepted` — then the filer is doing its
+    job, the re-file is the feature W1-T905's own doc describes, and this task must be closed rather
+    than implemented. The measurement to re-run is direct and needs no ledger: enumerate
+    plan/feedback/*.yaml, group by `origin`, and read the `status` field of each group's entries in `ts`
+    order.
+
+    SEPARATELY FALSIFYING: if a digest (or equivalent) reader for the suppression row cannot be landed
+    in this change, the build must stop at that check rather than ship a suppression whose only trace is
+    a ledger row with no consumer — design (iii), and the outcome W1-T2381 measured at one-in-eight.
+  note: |
+    `risk: high` IS RULE 19'S SPAN, NOT BLAST RADIUS. `files:` names three distinct stems
+    (`run-task`, `digest`, and this task's own test), which the sizing check refuses at `risk: medium` —
+    the same reading W1-T2231 recorded for its own two-stem filing. The actual change is one added
+    condition at an existing `if`, one ledger append, and one reader arm beside an existing sibling.
+
+    files: DERIVED, NOT GUESSED. src/run-task.ts holds `captureRepairFeedbackImpl` and its `existsSync`
+    dedup inside `buildSweepEffects` — the ONE place sweep effects are wired (W1-T905 design ix) and the
+    only place this condition may live. src/lib/digest.ts already reads `sweep.repeat_escalated` off the
+    ledger into `DigestSummary` and is where the suppression row's reader belongs.
+    test/repair-filing-respects-prior-rejection.test.ts is a NEW suite rather than an append to
+    test/sweep.test.ts (200+ tests, contended by every sweep task in flight) or to
+    test/sweep-repair-filing.test.ts (W1-T905's own suite, which pins the filing behaviour this task
+    conditions rather than replaces). src/lib/feedback.ts is deliberately NOT declared: `listFeedback`,
+    `FEEDBACK_STATUSES` and `FeedbackEntry.origin` are already exported and need no change, and
+    declaring a file this does not touch would serialise the lane for nothing (W1-T471).
+
+    src/lib/sweep.ts IS DELIBERATELY NOT DECLARED. The pure fold keeps its arithmetic, its id and its
+    lack of memory; adding the verdict read there would put filesystem I/O into the module W1-T905
+    design (ix) keeps free of it, and would collide with the sweep.ts work already in flight
+    (W1-T2231, W1-T2381).
+
+    PROOFS: eight whole-file `unit test:` criteria against a suite that does not exist yet — the path
+    form parses now and executes once built, which is the correct shape for FILED work. The single
+    `grep:` is stated POSITIVELY against text the change ADDS (the new step name in the digest reader),
+    so it cannot read `executed_fail` on the very PR that satisfies it.
+
+    depends_on EMPTY: every input this needs — the filer, the entries, `listFeedback`, the digest's
+    sibling reader — is on main today. W1-T2231 touches the same filer's COUNTING predicate and this
+    touches its VERDICT read; they do not overlap in `files:` and neither gates the other.
