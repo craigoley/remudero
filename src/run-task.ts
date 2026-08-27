@@ -209,6 +209,7 @@ import {
   hydrateMergeStates,
   liveStateFromRest,
   mapRestPr,
+  openPrsRestArgs,
   paceGhEntry,
   prStateFromRest,
   rollupFor,
@@ -297,7 +298,13 @@ import { assertProposedPlanLoads,
   triageEmptyScopeDisposition,
   triagePrompt,
 } from "./lib/triage.js";
-import { isAllocatableTaskId, mintNextTaskId, type MintDegradation, type MintSources } from "./lib/task-id.js";
+import {
+  isAllocatableTaskId,
+  mintNextTaskId,
+  UNTRUSTED_SOURCE_REASON_PREFIX,
+  type MintDegradation,
+  type MintSources,
+} from "./lib/task-id.js";
 import {
   firstUnreservedAtOrAbove,
   reserveTaskIdBlock,
@@ -14411,6 +14418,41 @@ export interface NextTaskIdReserveDeps {
   reserver?: RemoteRefReserver;
   runGit?: (args: string[]) => { status: number | null; stdout: string; stderr: string };
   holderOf?: (taskId: string, run: (args: string[]) => { status: number | null; stdout: string; stderr: string }) => ReservationHolder;
+  /** W1-T2324: the open-PR mention read {@link mintNextTaskIdWithHistory} folds in. Omitting it
+   *  (every real caller) reaches the genuine `openPrMintTexts(self.owner, self.repo)` read; a
+   *  test injects a deterministic one so `--reserve`'s mechanics are provable without depending
+   *  on whatever `gh` happens to see (or whether `gh` is reachable at all) at test time. */
+  openPrTexts?: () => string[];
+}
+
+/**
+ * W1-T2324 (Q2) — the ONE degradation that makes `next-task-id --reserve`'s ATOMIC CLAIM on
+ * origin unsafe. `--reserve` is the one verb this binds: printing a degraded id (the unflagged
+ * verb, and `rmd triage`/`rmd plan`'s own advisory mint — both OUT of this task's scope, see
+ * plan/tasks.d/W1-T2326-*.yaml's note "W1-T2324 IS NOT AMENDED BY THIS... this task fixes what
+ * happens to the reservation AFTER a number exists") costs nothing a caller cannot re-check;
+ * ATOMICALLY CLAIMING one on origin is what makes a collision durable — the 2026-08-26 incident
+ * this task is filed over: the mint printed "DEGRADED: open-prs (cannot enumerate open PRs: ...
+ * GraphQL: API rate limit already exceeded ...)" and reserved anyway.
+ *
+ * REFUSE ONLY WHEN THE MISSING SURFACE IS OPEN-PRs, not on any degraded source. `shards` and
+ * `history` are monotone and already-merged — a degraded read there is a smaller, still-safe
+ * ceiling, and refusing on it would make an atomic claim a fleet-wide intake stop over a read
+ * that cannot itself hide a live id (a mint that refuses on every degraded surface is a fleet
+ * that stops intake, and an intake rung that stops during a budget shortfall is a worse failure
+ * than a rare collision — the task's own asymmetry argument). Open PRs are the ONE surface that
+ * can hold an id claimed but not yet visible anywhere else — the entire population an id mint can
+ * collide with.
+ *
+ * NOT the "read fine but uncorroborated" arm ({@link UNTRUSTED_SOURCE_REASON_PREFIX},
+ * `mintNextTaskId`'s own `MAX_MENTION_LEAD` guard): that source DID answer — it was dropped
+ * because its highest mention leads the plan's own ceiling by an implausible margin, prose that
+ * most likely names an id nothing has filed — and the mint already falls back safely to the
+ * plan's own ceiling. Only a source that FAILED TO READ AT ALL (a rate limit, a network blip, an
+ * unauthenticated `gh`) counts as "the open-PR surface specifically is unavailable" here.
+ */
+function openPrSurfaceOutage(degraded: readonly MintDegradation[]): MintDegradation | undefined {
+  return degraded.find((d) => d.source === "open-prs" && !d.reason.startsWith(UNTRUSTED_SOURCE_REASON_PREFIX));
 }
 
 export async function nextTaskIdCommand(
@@ -14436,7 +14478,7 @@ export async function nextTaskIdCommand(
     mint = mintNextTaskIdWithHistory({
       planPath,
       repoRoot,
-      openPrTexts: offline ? undefined : () => openPrMintTexts(self.owner, self.repo),
+      openPrTexts: offline ? undefined : (deps.openPrTexts ?? (() => openPrMintTexts(self.owner, self.repo))),
     });
   } catch (e) {
     console.error(`### rmd next-task-id: ${(e as Error).message}`);
@@ -14478,6 +14520,21 @@ export async function nextTaskIdCommand(
   // THAT id and never the one it first tried. Re-implementing the scan in this command is the
   // failure mode the shard asks review to refuse.
   if (rest.includes("--reserve")) {
+    // W1-T2324 (Q2) — see {@link openPrSurfaceOutage}'s doc for the full rationale. Printing a
+    // degraded id costs nothing a caller cannot re-check; `--reserve` is what makes a collision
+    // durable, so this is the one arm of this verb the gate binds.
+    const openPrOutage = openPrSurfaceOutage(mint.degraded);
+    if (openPrOutage) {
+      console.error(
+        `### rmd next-task-id --reserve: REFUSED — the open-PR surface is degraded (${openPrOutage.reason}). ` +
+          "This is the one surface that can hold an id another still-open PR already claimed but no " +
+          "other source can yet see, so claiming atomically on it while it is unreadable risks " +
+          "reissuing a live id (the W1-T2316 reissue, #2965/#2970). Nothing was claimed. Printing " +
+          "(without --reserve) still works — only the ATOMIC claim refuses. Retry once the surface " +
+          "is reachable.",
+      );
+      return 2;
+    }
     const contested: string[] = [];
     const run = deps.runGit ?? ((args: string[]) => spawnSync("git", args, { cwd: repoRoot, encoding: "utf8" }));
     const base = deps.reserver ?? gitRemoteRefReserver({ run: gitRunAdapter(run) });
@@ -22556,20 +22613,41 @@ export function deriveStrikeHistory(lines: Array<Record<string, unknown>>, taskI
 
 /**
  * The CHEAPLY-ENUMERABLE half of the mint's reserved set (lib/task-id.ts): every open PR's
- * title, body, and head branch, as raw text to scan for already-minted `W1-T<n>` ids. ONE
- * `gh pr list` — deliberately WITHOUT `statusCheckRollup` (the payload-heavy field
- * `buildOpenPrViews` needs), so this stays an O(1)-ish read a mint can always afford.
+ * title, body, and head branch, as raw text to scan for already-minted `W1-T<n>` ids.
  *
- * An id minted by an OPEN plan PR exists nowhere on main — that is exactly the gap that let
- * `W1-T256` be minted twice (#770). Scanning free text over-counts by design: a skipped
- * number costs nothing, a collision costs a renumber + re-push cycle.
+ * REST, NOT GraphQL (W1-T2324). This used to be `gh pr list --json title,body,headRefName` —
+ * `--json` is implemented over GitHub's GraphQL API, so this ONE call put the mint's next-id
+ * verb behind the same point-priced budget `buildOpenPrViews` was moved off of on 2026-07-28
+ * (lib/open-prs-rest.ts's own header). It was not hypothetical: on 2026-08-26 the mint printed,
+ * verbatim, "DEGRADED: open-prs (cannot enumerate open PRs: ... GraphQL: API rate limit already
+ * exceeded for user ID 4397075)" and reserved anyway — the ceiling came from three surfaces
+ * instead of four, and the missing surface was precisely the one holding the id `#2965` had just
+ * merged. Two shards landed carrying `W1-T2316`.
+ *
+ * THE DISCRIMINATOR IS THE FIELD SET, NOT THE SUBCOMMAND — measured against an exhausted bucket:
+ * `gh pr view --json number` is served over REST while `--json statusCheckRollup` is refused as
+ * GraphQL. `title`, `body` and `head.ref` all come back on the SAME REST rows
+ * (`GET /repos/<o>/<r>/pulls?state=open`), core-billed at one page and one point (measured 432ms).
+ *
+ * ITS OWN CALL, deliberately NOT {@link fetchOpenPrsRest} or `fetchBoardPrsRest`
+ * (lib/open-prs-rest.ts). `fetchOpenPrsRest` pays 1+2N requests per call (a check-runs +
+ * combined-status fetch per open PR) for a `statusCheckRollup` this mint never reads.
+ * `fetchBoardPrsRest` walks every state behind a 15-second TTL cache sized for an 18-22 second
+ * board fetch (W1-T2323) — reusing it would make a cold-cache mint pay a 26-call board walk for
+ * one page of open PRs. The mint wants the newest open ids, not a board or a rollup, so its own
+ * one-page REST call (reusing only {@link openPrsRestArgs}'s URL, never the gateways built on it)
+ * is what it pays for.
+ *
+ * `fetch` is injectable (defaults to {@link ghJson}) purely so this is testable with zero network
+ * — every real caller omits it.
+ *
+ * Scanning free text over-counts by design: a skipped number costs nothing, a collision costs a
+ * renumber + re-push cycle. An id minted by an OPEN plan PR exists nowhere on main — that is
+ * exactly the gap that let `W1-T256` be minted twice (#770).
  */
-export function openPrMintTexts(owner: string, repo: string): string[] {
-  const rows = ghJson([
-    "pr", "list", "--repo", `${owner}/${repo}`, "--state", "open", "--limit", "100",
-    "--json", "title,body,headRefName",
-  ]) as Array<{ title?: string; body?: string; headRefName?: string }>;
-  return rows.map((r) => [r.title ?? "", r.body ?? "", r.headRefName ?? ""].join("\n"));
+export function openPrMintTexts(owner: string, repo: string, fetch: GhApiFetcher = ghJson): string[] {
+  const rows = fetch(openPrsRestArgs(owner, repo)) as RestPullRow[];
+  return rows.map((r) => [r.title ?? "", r.body ?? "", r.head?.ref ?? ""].join("\n"));
 }
 
 /**

@@ -136,12 +136,17 @@ test("TRIAGE ID MINT (the #770/#775 collision class): `rmd triage` derives the i
     // PR that has not merged). `pr create`/`--json headRefName`/`pr diff` are answered too, only
     // so the run can reach the PROPOSED branch the `triage.id_minted` row now lives behind
     // (W1-T1011) — this proof cares about the mint's provenance, not what happens after.
+    //
+    // W1-T2324: the mint's own open-PR read moved off `gh pr list --json ...` (GraphQL) onto
+    // `gh api repos/<o>/<r>/pulls?state=open&per_page=100` (REST) — see openPrMintTexts,
+    // src/run-task.ts. The shimmed row shape moves with it: REST's `head.ref`, never the old
+    // `gh --json`-shaped `headRefName`.
     writeFileSync(
       join(shimDir, "gh"),
       [
         "#!/bin/sh",
         'case "$*" in',
-        '  *"pr list"*) echo \'[{"title":"chore(plan): file W1-T12","body":"adds W1-T12","headRefName":"run-TRIAGE-x"}]\' ;;',
+        '  *"pulls?state=open"*) echo \'[{"number":998,"html_url":"https://github.com/craigoley/remudero/pull/998","title":"chore(plan): file W1-T12","body":"adds W1-T12","head":{"ref":"run-TRIAGE-x"}}]\' ;;',
         '  *"pr create"*) echo "https://github.com/craigoley/remudero/pull/999" ;;',
         `  *"--json headRefName"*) git -C ${bare} for-each-ref --format='{"headRefName":"%(refname:short)"}' refs/heads/run-* | tail -1 ;;`,
         "  *\"--json body\"*) echo '{\"body\":\"\"}' ;;",

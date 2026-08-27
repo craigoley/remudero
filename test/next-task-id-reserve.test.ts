@@ -4,6 +4,21 @@
  * EVERY ARM IS DRIVEN THROUGH AN INJECTED RESERVER, NEVER A REAL REMOTE, and every refusal arm has
  * a paired positive control. That split is why this does not block `diff-coverage`: a refusal
  * reachable only through a real `git push` is a line no test can cover.
+ *
+ * `openPrTexts: NO_OPEN_PRS` (W1-T2324): every `--reserve` call below now ALSO injects a
+ * reachable, empty open-PR read. Before W1-T2324, `--reserve` reserved regardless of the mint's
+ * `degraded` state, so these tests were unknowingly exercising the REAL `gh` open-PR read (no
+ * seam existed to override it) and tolerated whatever it returned (`code === 0 || code === 1`,
+ * below). W1-T2324 makes `--reserve` REFUSE when the open-PR surface specifically could not be
+ * read at all — correct in production, but it turns an unauthenticated `gh` in a sandboxed test
+ * run (measured: CI's `ci` job sets no `GH_TOKEN` for `npm test`, so the real read fails fast
+ * with "gh: To use GitHub CLI in a GitHub Actions workflow, set the GH_TOKEN environment
+ * variable") into a hard, non-deterministic refusal for tests that are about the RESERVE
+ * mechanics, not about the open-PR surface's own reachability. Injecting a deterministic reader
+ * — exactly like `reserver`/`holderOf`/`runGit` are already injected two lines below — restores
+ * that isolation; it changes no test's assertion, only removes its accidental network dependency.
+ * The open-PR-degradation arm itself (refuses / still proceeds on a settled-surface degradation)
+ * is proven in test/mint-open-pr-surface-is-rest.test.ts, against `nextTaskIdCommand` directly.
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -32,6 +47,10 @@ function stubReserver(taken: Set<string>, unreachableFor?: (id: string) => boole
     },
   };
 }
+
+/** A reachable open-PR read that sees nothing — see this file's header for why every `--reserve`
+ *  call below injects it. */
+const NO_OPEN_PRS = (): string[] => [];
 
 function capture(): { out: string[]; err: string[]; restore: () => void } {
   const out: string[] = [];
@@ -66,7 +85,7 @@ test("W1-T1055: --reserve claims the id on the remote", async () => {
   const cap = capture();
   let code: number;
   try {
-    code = await nextTaskIdCommand(["--offline"].filter(() => false).concat(["--reserve"]), {}, { reserver, holderOf: () => "unknown" });
+    code = await nextTaskIdCommand(["--offline"].filter(() => false).concat(["--reserve"]), {}, { reserver, holderOf: () => "unknown", openPrTexts: NO_OPEN_PRS });
   } finally {
     cap.restore();
   }
@@ -83,7 +102,7 @@ test("W1-T1055: a contested first candidate reports the id actually held", async
   const cap0 = capture();
   let firstId = "";
   try {
-    await nextTaskIdCommand(["--reserve"], {}, { reserver: (() => { const r = stubReserver(new Set()); return r; })(), holderOf: () => "unknown" });
+    await nextTaskIdCommand(["--reserve"], {}, { reserver: (() => { const r = stubReserver(new Set()); return r; })(), holderOf: () => "unknown", openPrTexts: NO_OPEN_PRS });
   } finally {
     cap0.restore();
   }
@@ -93,7 +112,7 @@ test("W1-T1055: a contested first candidate reports the id actually held", async
   const reserver = stubReserver(new Set([firstId]));
   const cap = capture();
   try {
-    await nextTaskIdCommand(["--reserve"], {}, { reserver, holderOf: () => "fleet" });
+    await nextTaskIdCommand(["--reserve"], {}, { reserver, holderOf: () => "fleet", openPrTexts: NO_OPEN_PRS });
   } finally {
     cap.restore();
   }
@@ -117,7 +136,7 @@ test("W1-T1055: an unreachable origin refuses instead of minting optimistically"
   const cap = capture();
   let code: number;
   try {
-    code = await nextTaskIdCommand(["--reserve"], {}, { reserver, holderOf: () => "unknown" });
+    code = await nextTaskIdCommand(["--reserve"], {}, { reserver, holderOf: () => "unknown", openPrTexts: NO_OPEN_PRS });
   } finally {
     cap.restore();
   }
@@ -132,7 +151,7 @@ test("W1-T1055: an unreachable origin refuses instead of minting optimistically"
   const ok = stubReserver(new Set());
   const cap2 = capture();
   try {
-    await nextTaskIdCommand(["--reserve"], {}, { reserver: ok, holderOf: () => "unknown" });
+    await nextTaskIdCommand(["--reserve"], {}, { reserver: ok, holderOf: () => "unknown", openPrTexts: NO_OPEN_PRS });
   } finally {
     cap2.restore();
   }
@@ -145,7 +164,7 @@ test("W1-T1055: the unflagged verb reserves nothing and its output is unchanged"
   const reserver = stubReserver(new Set());
   const cap = capture();
   try {
-    await nextTaskIdCommand([], {}, { reserver, holderOf: () => "unknown" });
+    await nextTaskIdCommand([], {}, { reserver, holderOf: () => "unknown", openPrTexts: NO_OPEN_PRS });
   } finally {
     cap.restore();
   }
@@ -158,7 +177,7 @@ test("W1-T1055: the unflagged verb reserves nothing and its output is unchanged"
   // the flag being absent and not a reserver that is never wired.
   const cap2 = capture();
   try {
-    await nextTaskIdCommand(["--reserve"], {}, { reserver, holderOf: () => "unknown" });
+    await nextTaskIdCommand(["--reserve"], {}, { reserver, holderOf: () => "unknown", openPrTexts: NO_OPEN_PRS });
   } finally {
     cap2.restore();
   }
