@@ -25919,30 +25919,55 @@ async function triageCommandLocked(
     localIdBlock = reserveTaskIdBlock(mint.n, TRIAGE_MAX_NEW_TASKS, taskIdReservationsDir(config.root), {
       info: { purpose: `rmd triage ${feedbackId} (run ${runId})` },
     });
-    // W1-T1011: THE REMOTE HALF OF THIS RESERVATION IS TAKEN LATER — once `decideTriage` has
-    // actually returned `propose`, at the `decision.action === "propose"` branch below — NOT
-    // here, and NOT before `spawn`. Before this task both halves were taken together, right
-    // here, pre-spawn: measured over the retained ledger union, 21 of 64 minted ids belonged to
-    // a run that then errored, and the permanent `refs/rmd-id/<id>` ref this second half writes
-    // has NO release path (task-id-reservation.ts's own "NOTHING RELEASES A RESERVATION"
-    // doctrine — the answer is not deletion because the ref IS the allocation record), so every
-    // one of those 21 burned a remote id forever for a run that filed nothing. The LOCAL block
-    // just above is UNCHANGED and still taken before `spawn`: it is what makes the "a minter
-    // that cannot reserve must not spend" guarantee true regardless of when the remote half
-    // moves — an unwritable local store still throws `TaskIdReservationError` right here, and
-    // the paid worker is never started.
+    // Built ONCE, here, because the reservation below now happens before the prompt rather than
+    // inside the propose branch. `spawnSync`, not `execFileSync`: a rejected push is a NORMAL
+    // outcome (contention), and a throwing runner would make it indistinguishable from an
+    // unreachable remote — the conflation `classifyPushFailure` exists to prevent. `worktreePath`,
+    // NOT the module-level `repoRoot`: the reservation must be pushed to the SAME `origin` this
+    // filing will push its branch to.
+    const triageRemoteRefReserver = gitRemoteRefReserver({
+      run: (args) => {
+        const r = spawnSync("git", ["-C", worktreePath, ...args], { encoding: "utf8" });
+        return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+      },
+    });
+    // W1-T2326: THE REMOTE HALF IS TAKEN HERE, BEFORE THE PROMPT IS BUILT — and that ORDERING is
+    // the whole task. It used to be taken 100+ lines below, inside `decision.action === "propose"`,
+    // and its result reached nothing but the `triage.id_minted` row: the worker was prompted from
+    // `localIdBlock`, which starts at the ADVISORY `mint.n`. So the lane reserved one id and filed
+    // under another. MEASURED over 96 `triage.id_minted` rows: 42 carried a reservation differing
+    // from the advisory, and `reserved_ids[0]` was later filed 44 times against the advisory's 49 —
+    // the lane's own reservation was filed LESS often than the number it did not reserve. On
+    // 2026-08-26 a container reserved three ids and filed under two others one second later.
     //
-    // THE TRADE-OFF THIS NARROWS, NAMED RATHER THAN HIDDEN: the worker below is told the LOCAL
-    // id, not a remote one, so cross-host protection during the run shrinks from "the whole run"
-    // to "the filing moment" below — roughly the worker's own runtime, during which another host
-    // could take the same-looking id. That is acceptable because contention only ever ADVANCES,
-    // never refuses (reserveTaskIdRemote's own doc), so losing that narrower race costs a
-    // renumber at proposal time, never a failure.
-    const reservedIds = localIdBlock.ids.map((n) => `W1-T${n}`);
-    const reservedTaskId = reservedIds[0];
+    // `planCommand` below has always done it this way (`const reservedIds =
+    // planRemoteIdBlock.taskIds`); this makes triage its sibling rather than its exception.
+    //
+    // WHAT THIS COSTS, NAMED RATHER THAN HIDDEN — IT RE-OPENS W1-T1011. That task moved this call
+    // DOWN because a run that errors or resolves no_task/grill never files, while `refs/rmd-id/<id>`
+    // has NO release path: it measured 21 of 64 minted ids burned by runs that filed nothing.
+    // RE-MEASURED for W1-T2326: 169 `triage.start` rows against 96 `triage.id_minted`, so 73 of 169
+    // runs (43%) never reach propose. At this block width that is up to 219 more permanently-held
+    // ids. THE DOCTRINE ONE FILE OVER SETTLES IT — task-id-reservation.ts, in capitals: A HOLE IS
+    // NOT A DEFECT; A COLLISION IS. The same doc prices the whole reservation corpus at ~24 KiB.
+    // Holes are the cheap side; this buys the expensive one.
+    //
+    // `localIdBlock` ABOVE IS UNCHANGED AND MUST STAY: it is taken before `spawn`, so an unwritable
+    // local store still throws `TaskIdReservationError` and the paid worker (median $0.96) is never
+    // started — "a minter that cannot reserve must not spend". It is also the only half with a
+    // release path (`localIdBlock?.releaseAll()` in the `finally`), which the remote half
+    // deliberately does not have. This call only decides WHICH ids the worker is told about.
+    const remoteIdBlock: RemoteReservationBlock = withIdReservationLogging(log, "triage.id_reservation_failed", () =>
+      reserveTaskIdBlockRemote(localIdBlock!.ids[0], TRIAGE_MAX_NEW_TASKS, triageRemoteRefReserver),
+    );
+    // NAMED FOR WHAT IT IS. The old `reservedTaskId` was bound to an advisory-derived value, and
+    // that name is most of why this survived review: every reader who checked "does the worker get
+    // the reserved id" read it and stopped. These two are derived from the remote block only.
+    const reservedIds = remoteIdBlock.taskIds;
+    const reservedHeadTaskId = reservedIds[0];
     say(`next task id: ${describeMintWithHistory(mint)}`);
-    if (localIdBlock.ids[0] !== mint.n)
-      say(`reserved ${reservedTaskId} instead — ${mint.id} is held by a live minter`);
+    if (remoteIdBlock.ids[0] !== mint.n)
+      say(`reserved ${reservedHeadTaskId} instead — ${mint.id} is held by a live minter`);
 
     // impl-FU — THE RELINT LOOP. Spawn, lint what was actually filed with the REAL linter, hand the
     // REAL violations back, bounded. Sits AFTER `decideTriage` inside each round (a CLEAR/GRILL
@@ -25953,7 +25978,7 @@ async function triageCommandLocked(
     const loop = await runRelintLoop({
       lane: "triage",
       filedIds: reservedIds,
-      initialPrompt: triagePrompt(entry, runId, reservedTaskId, reservedIds.slice(1)),
+      initialPrompt: triagePrompt(entry, runId, reservedHeadTaskId, reservedIds.slice(1)),
       log,
       run: async (prompt, attempt) => {
         worker = await spawn({
@@ -26044,44 +26069,26 @@ async function triageCommandLocked(
       }
     }
 
-    // W1-T1011: THE PERMANENT REMOTE RESERVATION, TAKEN HERE — the verdict is PROPOSED (checked
-    // above, past the collision guard) and this is immediately BEFORE the commit below writes
-    // the shard into git history. A run that errored, or resolved no_task/grill, never reaches
-    // this line and takes no permanent ref — see the LOCAL-reservation comment above for the
-    // full rationale. Same policy `rmd plan`/`rmd approve` use for their own remote halves: one
-    // refusal record via `withIdReservationLogging`, both arms unit-tested, never a hand-written
-    // `catch` per lane.
+    // W1-T1011 TOOK THE PERMANENT REMOTE RESERVATION HERE; W1-T2326 MOVED IT ABOVE THE PROMPT,
+    // because a reservation nothing downstream reads is not a reservation. What stays here is the
+    // RECORD and the CHECK: the row still fires only on a PROPOSED verdict, so its meaning ("this
+    // run filed under these ids") is unchanged, and the check below is the other half of the
+    // mint-and-reserve contract — reserving ids is worthless if nobody verifies the worker used
+    // them. Same shape `planCommand` has had all along (`unreservedFiledIds` + `plan.id_check`).
     if (decision.action === "propose") {
-      // Read the start id HERE, not inside the closure below: the compiler cannot know an arrow
-      // is called immediately, so `localIdBlock` widens back to `| undefined` inside it (TS18048).
-      const proposeReserveFrom = localIdBlock!.ids[0];
-      const remoteIdBlock: RemoteReservationBlock = withIdReservationLogging(log, "triage.id_reservation_failed", () =>
-        reserveTaskIdBlockRemote(
-          proposeReserveFrom,
-          TRIAGE_MAX_NEW_TASKS,
-          gitRemoteRefReserver({
-            run: (args) => {
-              // spawnSync, not execFileSync: a rejected push is a NORMAL outcome here (contention),
-              // and a throwing runner would make it indistinguishable from an unreachable remote —
-              // the exact conflation `classifyPushFailure` exists to prevent.
-              // `worktreePath`, NOT the module-level `repoRoot`: the reservation must be pushed to
-              // the SAME `origin` this filing will push its branch to. Building it from the install
-              // root sent it at whatever remote the install happened to point at — which, under a
-              // test driving a fixture origin, is a different server entirely.
-              const r = spawnSync("git", ["-C", worktreePath, ...args], { encoding: "utf8" });
-              return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
-            },
-          }),
-        ),
-      );
-      // `triage.id_minted` — the SAME ledger event this lane has always written, moved to when
-      // it is now taken rather than duplicated (design (v)): the row records the remote block
-      // that is now the durable allocation, not a second event alongside it.
+      // `triage.id_minted` — the SAME ledger event this lane has always written, still fired once
+      // per PROPOSED run.
       log("triage.id_minted", {
         minted_id: remoteIdBlock.taskIds[0],
         reserved_ids: remoteIdBlock.taskIds,
         mint_id: mint.id,
+        // THE FALSE FRIEND, KEPT FOR ITS EXISTING READERS AND NO LONGER ALONE. This compares the
+        // LOCAL block against the advisory, never RESERVED against advisory, so it read `false`
+        // through both degraded rows of 2026-08-26 — anyone auditing the ledger for this defect
+        // using the field named after it found nothing, twice. The field beside it answers the
+        // question its name implies.
         reserved_above_mint: localIdBlock!.ids[0] !== mint.n,
+        reserved_differs_from_advisory: remoteIdBlock.taskIds[0] !== mint.id,
         remote_refs: remoteIdBlock.refs,
         max_seen: mint.maxSeen,
         source_monolith: mint.sources.monolith,
@@ -26104,6 +26111,35 @@ async function triageCommandLocked(
     // `plan/ MASTER-PLAN.md` pathspec now stages the amendment, and it regenerates
     // plan/plan-index.json first so a stray or renumbered heading never ships stale.
     applyPlanProposalCommit(worktreePath, commitMessage, log);
+
+    // OUTPUT VALIDATION (W1-T2326 Q2) — the PORT of `planCommand`'s `unreservedFiledIds` +
+    // `plan.id_check`. Reserving ids is half the mint-and-reserve contract; this is the other half,
+    // and triage never had it: did the worker actually file under the ids we hold?
+    //
+    // PLACED AFTER THE COMMIT, AND A TEST IS WHY. Before it, the worker's shard is UNTRACKED, and
+    // `git diff` does not report untracked files — so the check read a clean diff and passed
+    // VACUOUSLY on a genuine mismatch. `planCommand` runs its own copy post-commit for exactly this
+    // reason. MERGE BASE, not the moving tip (its comment again): a bare `origin/main` here made a
+    // shard landed by SOMEONE ELSE's PR read as an id THIS worker filed.
+    //
+    // REPORT-ONLY BY CONSTRUCTION, matching its sibling's posture: an unreserved id is not
+    // necessarily a collision, `lint-plan`'s duplicate-id check already refuses a real one
+    // downstream, and this lane must not gain a new refusal — an intake rung that stops on an
+    // advisory finding is a worse failure than a rare collision. It decides nothing, refuses
+    // nothing and escalates nothing; it makes the divergence legible at the moment it happens,
+    // which is exactly what the three collisions of 2026-08-26 lacked.
+    if (decision.action === "propose") {
+      const triageDiff = execFileSync("git", ["-C", worktreePath, "diff", worktreeMergeBase(worktreePath), "--", "plan"], {
+        encoding: "utf8",
+        maxBuffer: 64 * 1024 * 1024,
+      });
+      const unreserved = unreservedFiledIds(triageDiff, reservedIds);
+      log("triage.id_check", { reserved: reservedIds, unreserved, ok: unreserved.length === 0 });
+      if (unreserved.length > 0) {
+        say(`warning: triage worker filed unreserved id(s): ${unreserved.join(", ")} (reserved: ${reservedIds.join(", ")})`);
+      }
+    }
+
     gitPushRunBranch(worktreePath);
 
     // The title is the SAME header string that just went into the commit, split off
