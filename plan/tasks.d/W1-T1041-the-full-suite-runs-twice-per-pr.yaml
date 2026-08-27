@@ -190,6 +190,103 @@
     `test/workflow-playwright-install.test.ts` asserts the two install `run:` lines are
     byte-identical (W1-T1027, #2226) — a shape that becomes meaningless the moment only one job
     installs a browser. RE-DERIVE BOTH; do not delete either.
+
+    ────────────────────────────────────────────────────────────────────────────────────────
+    AMENDED 2026-08-27 (second) — THE MECHANISM OF DISAGREEMENT, NAMED. EVIDENCE ONLY: NO
+    RULING IS MADE HERE, NO HARNESS IS RECOMMENDED, AND NOTHING IS PROPOSED FOR REMOVAL.
+    ────────────────────────────────────────────────────────────────────────────────────────
+
+    (7) THE DISAGREEMENT IS ONE-DIRECTIONAL ON THE TEST STEP, AND THE ONE APPARENT REVERSE IS NOT A
+    REVERSE. Re-reading the 2026-08-19 cluster of §(3) run by run over REST: FIVE test-step
+    disagreements, ALL of them plain-PASS / instrumented-FAIL, with FOUR agreeing runs alongside
+    them as controls — three both-pass (32255301031 12:56Z, 32277192171 16:39Z, 32282983498 17:40Z)
+    and one both-fail (32259303025 13:39Z). The controls matter: a query that returned only
+    disagreements would prove nothing about direction.
+
+    RUN 32262707192 (14:13Z) READS AS THE REVERSE — `ci` failure, `coverage-ratchet` success — AND
+    IT IS NOT ONE. Its `ci` job failed at STEP 5, "Install Playwright's Chromium", with
+    `playwright install failed after 3 attempts`; the log carries NO test summary in either reporter
+    form. That is the EXTERNAL class §(5) above already defines and already excludes. Counted
+    correctly, the cluster does not run both directions on the test step.
+
+    ⚠ SCOPE OF THIS RE-READING, STATED SO IT IS NOT OVER-READ: the ten runs enumerated above come
+    from THREE of the eight branch names §(3) lists — `dependabot/npm_and_yarn/stryker-mutator/
+    core-10.0.0`, `ci/widen-licence-allow-list` and `docs/operator-rulings-t472-t446-w12t1`. The
+    `run-W1-T*` branches return zero because GitHub DELETES a head on merge, the query-shape zero
+    CLAUDE.md's clause (d) names — not evidence of absence. So "5 of 5" is over the ENUMERABLE
+    SUBSET, not over the whole cluster, and §(3)'s own count of ten stands unrevised.
+
+    (8) THE CAUSE IS A HARNESS RACE, NOT A PRODUCT DEFECT — AND IT IS ALREADY WRITTEN DOWN IN THE
+    TREE. `test/acceptance-block-diagnostics.test.ts:424` states it: node's test runner runs test
+    FILES concurrently against the SAME on-disk tree, a source-mutating check writes the real
+    checked-out file and spawns a child, and for the width of that window any other concurrently
+    running file importing the same module reads the MUTATED bytes. Its own words: MEASURED in
+    `coverage-ratchet` "(not `ci`, which never overlaps the same way)", producing exactly §(3)'s
+    four assertions in a file the diff never touched.
+
+    SO INSTRUMENTATION IS MORE SENSITIVE, NOT TRUER. It slows execution, which widens the overlap
+    window until another file's import lands inside it. What it exposes is real — but it is a race
+    in the TEST HARNESS, not a defect in the product under test. THAT DISTINCTION IS THE WHOLE
+    POINT: "the job that fails more often" and "the job that is right more often" are not the same
+    claim, and only the first is measured here.
+
+    A SECOND, SEPARATE HARM SITS AT A DIFFERENT LAYER AND MUST NOT BE MERGED WITH THE FIRST.
+    W1-T2292's enrolment defect is live in this corpus — `test/triage.test.ts` carries 45
+    spawn/exec sites and ZERO `NODE_V8_COVERAGE` blanking, so its children are silently enrolled —
+    and W1-T2276 records the malformed lcov record that follows. That corrupts the coverage
+    ARTIFACT, making `diff-coverage` name an entered function uncovered; it does not fail
+    assertions. INSTRUMENTATION MAKES TEST OUTCOMES NOISIER; ENROLMENT MAKES COVERAGE OUTPUT LESS
+    TRUSTWORTHY. Two harms, two layers, and a ruling that conflates them will price one of them
+    wrong.
+
+    PERSISTENCE, MEASURED ACROSS EIGHT DAYS: the failing test in run 32265264156 (14:38Z, 08-19) is
+    `W1-T356 wiring: the REAL daemonCommand sets DaemonDeps.sweepOrphans …` — THE SAME TEST that
+    failed under coverage on #3134 and #3135 on 2026-08-27, on unrelated diffs. This is a standing
+    coverage-only failure, not a one-off.
+
+    (9) WHAT EACH OPTION STOPS DETECTING — the shard's own question, answered in detection terms
+    rather than seconds. NO OPTION IS RECOMMENDED.
+
+      (a) COVERAGE ALWAYS, DROP PLAIN `ci`. Stops detecting nothing on the coverage side, but makes
+          the NOISIER harness the sole verdict — every instrumented false failure of §(7) becomes
+          the only verdict there is. AND ON `main` IT DETECTS NOTHING AT ALL unless W1-T1033's
+          PR-only guard is lifted: main's `coverage-ratchet` green is VACUOUS today, its step 6
+          measured at 0 SECONDS against 1086s on a PR. Lifting that guard is a separate change with
+          its own cost, and (a) silently depends on it.
+      (b) PLAIN ALWAYS, COMPUTE COVERAGE ELSEWHERE. Stops detecting the WHOLE diff-coverage class —
+          §(5) above measured 30 of 52 single-sided failures as that step, the largest single
+          category and this job's unique signal.
+      (c) KEEP BOTH. Stops detecting nothing. Costs the duplicate run priced in §(4), plus the
+          instrumented false-failure rate of §(7).
+
+    (10) A PREMISE CORRECTION THAT CHANGES WHERE (b)'s BLOCKER SITS. It is natural to assume
+    `diff-coverage` is welded to one path; it is not. `scripts/diff-coverage.mjs:612` declares
+    `lcov: { type: 'string', default: 'coverage/lcov.info' }` through `parseArgs`, so the path is a
+    FLAG WITH A DEFAULT, not a hardcoded literal. (The `readFileSync` at line 617 IS genuinely
+    unguarded — a missing lcov throws rather than reporting.) THE BLOCKER FOR (b) IS THEREFORE NOT
+    THE PATH: it is that SOMETHING must still run instrumented to produce an lcov at all. Anyone
+    costing (b) on the belief that the path is welded will cost the wrong obstacle.
+
+    (11) THE RETRY, MEASURED, BECAUSE IT BEARS ON THE SAME RULING. `scripts/test-with-retry.mjs`
+    re-runs the WHOLE suite once on any red. Measured 2026-08-27: it fired 0 OF 8 TIMES on green
+    `coverage-ratchet` jobs (#3153, #3148, #3145, #3140, #3137, #3136, #3132, #3130) — so on a green
+    run it costs nothing — and 5 OF 5 on red (#3126, #3127, #3133, #3134, #3135), RESCUING ZERO. In
+    THREE of those five the doubled runtime pushed the job past the 2340s cap, converting a legible
+    `failure` that named the failing test into an illegible `cancelled` that named nothing.
+
+    ⚠ n = 5, AND ALL FIVE WERE DETERMINISTIC FAILURES — each PR's own real defect, or the standing
+    coverage-only failure of §(8). THAT IS PRECISELY THE CASE A FLAKE-RETRY CANNOT HELP, so this
+    sample CANNOT establish the retry's value against real flakes and must not be read as doing so.
+    The rate that would settle it is this shard's OWN 600-run window, re-measured for retry firing
+    and rescue, not the five runs above. Nothing here proposes removing or changing the retry.
+
+    (12) A COUNT SLIP IN §(3), CORRECTED HERE RATHER THAN IN PLACE (this amendment is purely
+    additive, so §(3)'s text is left exactly as merged). §(3) says "SEVEN OF THE TEN", "SEVEN
+    UNRELATED BRANCHES" and "Seven branches sharing one failure set", and then LISTS EIGHT NAMES.
+    ⚠ WHICH NUMBER IS WRONG IS NOT DETERMINABLE FROM THE SHARD: "seven of the ten" counts RUNS
+    while "seven unrelated branches" counts BRANCHES, so the eighth name may be a second run on a
+    branch already counted, or the word may simply be wrong. THIS AMENDMENT DOES NOT RESOLVE IT —
+    it records that the list and the prose disagree, so a reader does not take either as measured.
   acceptance:
     - claim: "the shard establishes the duplication from both commands and names the difference that is not instrumentation"
       proof: "grep: tmp-hygiene is loaded by ci and NOT by coverage-ratchet in plan/tasks.d/W1-T1041-the-full-suite-runs-twice-per-pr.yaml"
