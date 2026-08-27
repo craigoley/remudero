@@ -497,6 +497,56 @@ export function judgeStaleGitLocks(locks: ReadonlyArray<{ path: string; ageMs: n
 }
 
 /**
+ * CHECKOUT DEPTH (W1-T2332). A shallow canonical checkout breaks every history read SILENTLY —
+ * `git log -S`, `--follow`, merge-base checks all stay plausible while computed over a fraction
+ * of the corpus (`docs/operator-guide.md`'s own measurement: a 120-commit clone answered ZERO
+ * deletions for a file deleted before its horizon, with the "does this query return rows" control
+ * passing loudly). The only prior detector in the fleet was `defaultMergeEvidenceLog` /
+ * `defaultVerdictCalibrationGitLog` REFUSING BY NAME — an earned, correct guard that only speaks
+ * when a linter that happens to need history runs. This arm asks the question when nobody needed
+ * an answer.
+ *
+ * REPORT ONLY, LIKE `git-locks` ABOVE. `git fetch --unshallow` is the remedy this arm NAMES,
+ * never runs — an automatic unshallow at boot is exactly the second-actor-mutating-state hazard
+ * `rmd doctor --fix` is refused by name over.
+ *
+ * shallow ⇒ FAIL, naming the reachable commit count and the remedy command. FAIL rather than WARN
+ * is deliberate: the fault is invisible by construction and the remedy is one command.
+ * unreadable (no git, not a repository, a throw — the caller passes `undefined`) ⇒ WARN
+ * "unreadable", NEVER OK: a read that FAILED reporting as a read that SAID NO is the class
+ * W1-T472 design (v) names and this repo has now measured eight times.
+ * full ⇒ OK, still naming the commit count so the horizon is legible even when it is fine — the
+ * operator-guide's own prescription, applied where a reader already looks.
+ */
+export function judgeCheckoutDepth(depth: { shallow: boolean; commitCount: number } | undefined): Check {
+  const threshold = "full history (not a shallow clone)";
+  if (depth === undefined) {
+    return {
+      name: "checkout-depth",
+      verdict: "WARN",
+      measured: "unreadable",
+      threshold,
+      detail: "the depth read failed — do not read this as a full checkout",
+    };
+  }
+  if (depth.shallow) {
+    return {
+      name: "checkout-depth",
+      verdict: "FAIL",
+      measured: `shallow, ${depth.commitCount} commit(s) reachable`,
+      threshold,
+      detail: "remedy: git fetch --unshallow — doctor reports and stops, nothing here unshallows anything",
+    };
+  }
+  return {
+    name: "checkout-depth",
+    verdict: "OK",
+    measured: `${depth.commitCount} commit(s) reachable`,
+    threshold,
+  };
+}
+
+/**
  * PAUSE HELD WHILE DISPATCH CONTINUES. Earned on 2026-08-20: the operator held a pause for
  * fourteen minutes with no acknowledgement and reasonably concluded the control was dead. The
  * underlying tick defect is filed as W1-T1065 (#2298) and is CITED, NOT FIXED here — doctor
@@ -696,6 +746,10 @@ export interface DoctorInputs {
   gitLocks: ReadonlyArray<{ path: string; ageMs: number }>;
   workerCount: number;
   oldestWorkerEtimeS?: number;
+  /** W1-T2332 — the canonical checkout's history horizon, measured by the caller (this module
+   *  never touches the filesystem, per the file header). `undefined` means the read failed —
+   *  `judgeCheckoutDepth` reports that as unreadable, never as a healthy full checkout. */
+  checkoutDepth?: { shallow: boolean; commitCount: number };
 }
 
 /**
@@ -717,6 +771,7 @@ export function buildDoctorReport(inputs: DoctorInputs): DoctorReport {
     judgeLockDivergence(inputs.totalLocks, inputs.deadLocks, inputs.locksUnreadableReason),
     judgeLaneLessWorkers(inputs.oldestWorkerEtimeS, inputs.workerCount),
     judgeStaleGitLocks(inputs.gitLocks),
+    judgeCheckoutDepth(inputs.checkoutDepth),
     judgeDiskHeadroom(inputs.diskFreeBytes),
     judgeMemory(inputs.mem.availableBytes, inputs.mem.totalBytes, inputs.mem.swapTotalBytes),
   ];

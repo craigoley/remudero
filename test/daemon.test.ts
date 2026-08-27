@@ -2951,6 +2951,74 @@ test("daemonBoot: with no orphan sweep injected, no daemon.orphan_sweep line is 
   assert.equal(lines.filter((l) => l.step === "daemon.orphan_sweep").length, 0);
 });
 
+// ── daemonBoot: W1-T2332 — the checkout-depth history horizon on daemon.boot ───────────────
+//
+// The boot record already carried env, node path, node version and head sha (its sibling facts)
+// but never the horizon those reads are computed over. These tests drive `checkoutDepth`, the
+// trailing param appended after `declaredNodeVersion` (daemon.ts's own "no positional caller
+// shifts" discipline), with no real git and no daemon — a pure record-shape assertion.
+
+test("daemonBoot: a measured checkout depth is recorded on the SAME daemon.boot row, alongside its siblings", () => {
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const result = daemonBoot(
+    (step, extra = {}) => lines.push({ step, extra }),
+    { PATH: "/usr/bin" },
+    undefined, // sweepTmp
+    undefined, // sweepLocks
+    undefined, // unlockWorkerKeychain
+    undefined, // crashLoopCheck
+    undefined, // resolveClaudeBin
+    false, // allowApiKey
+    undefined, // sweepOrphanWorkers
+    undefined, // bootHeadSha
+    undefined, // sweepFeedbackLanding
+    undefined, // nodeRuntime — default
+    undefined, // declaredNodeVersion
+    { shallow: false, commitCount: 980 },
+  );
+  assert.ok(result, "a checkout-depth measurement never blocks boot from returning normally");
+  const boots = lines.filter((l) => l.step === "daemon.boot");
+  assert.equal(boots.length, 1, "NO NEW LEDGER ROW — the boot record is the boot record");
+  assert.equal(boots[0]?.extra.checkout_shallow, false);
+  assert.equal(boots[0]?.extra.checkout_commit_count, 980);
+  assert.ok("env_clean" in boots[0]!.extra, "still carries its sibling boot facts on the same row");
+});
+
+test("daemonBoot: a SHALLOW checkout is recorded on daemon.boot AND the boot still completes — it never halts boot", () => {
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const result = daemonBoot(
+    (step, extra = {}) => lines.push({ step, extra }),
+    { PATH: "/usr/bin" },
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    false,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    { shallow: true, commitCount: 208 },
+  );
+  assert.ok(result, "T197 doctrine: the daemon sleeps through problems — a shallow tree must not refuse to come up");
+  const boot = lines.find((l) => l.step === "daemon.boot");
+  assert.ok(boot);
+  assert.equal(boot?.extra.checkout_shallow, true);
+  assert.equal(boot?.extra.checkout_commit_count, 208);
+});
+
+test("daemonBoot: with no checkoutDepth measurement (unreadable), the fields are OMITTED rather than a guessed value — and boot still completes", () => {
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const result = daemonBoot((step, extra = {}) => lines.push({ step, extra }), { PATH: "/usr/bin" });
+  assert.ok(result, "an absent measurement never blocks boot");
+  const boot = lines.find((l) => l.step === "daemon.boot");
+  assert.ok(boot);
+  assert.equal("checkout_shallow" in boot!.extra, false, "omitted, never a guessed false");
+  assert.equal("checkout_commit_count" in boot!.extra, false, "omitted, never a guessed count");
+});
+
 // ── WHY THE DAEMON IS IDLE (impl-DF) ────────────────────────────────────────────────────────
 
 test("idle reasons: an idle daemon SAYS why, and does not repeat an unchanged picture on every tick", async () => {

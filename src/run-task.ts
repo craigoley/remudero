@@ -20364,6 +20364,17 @@ export async function daemonCommand(
         return undefined;
       }
     })(),
+    // W1-T2332: the canonical checkout's HISTORY HORIZON, measured HERE — the caller — exactly
+    // where `bootHeadSha` above already resolves `git rev-parse HEAD`, over the SAME
+    // module-relative directory (never cwd, same reasoning as `bootHeadSha`'s own comment: the
+    // daemon/CLI/worker run from different directories and only the module path is stable across
+    // them). `readCheckoutDepth` shares its one try/catch with both git reads, so a partial
+    // answer omits the fields exactly like a failed one — never a guessed value. A shallow
+    // checkout does NOT halt this boot (T197 doctrine, this function's own doctrine for the
+    // keychain rung above); `rmd doctor`'s `checkout-depth` arm is where the FAIL verdict lives.
+    // Appended LAST, after the node pin, per `daemonBoot`'s own "no positional caller shifts"
+    // discipline.
+    readCheckoutDepth(dirname(dirname(fileURLToPath(import.meta.url)))),
   );
 
   const runDaemonFn = deps.runDaemon ?? runDaemon;
@@ -21771,6 +21782,49 @@ export function localMergedProjections(lines: ReadonlyArray<Record<string, unkno
   return projections;
 }
 
+/**
+ * W1-T2332: the canonical checkout's HISTORY HORIZON — `git rev-parse --is-shallow-repository`
+ * and `git rev-list --count HEAD`, read here at the CALLER exactly where `bootHeadSha` above
+ * already resolves `git rev-parse HEAD` (best-effort, in a try/catch), because `src/lib/daemon.ts`
+ * never touches the filesystem by its own header, and `src/lib/doctor.ts`'s `judgeCheckoutDepth`
+ * takes only already-measured inputs so every verdict arm is reachable from a test with no git.
+ *
+ * A shallow checkout breaks every history read SILENTLY (`git log -S`, `--follow`, merge-base
+ * checks — see `defaultMergeEvidenceLog`/`defaultVerdictCalibrationGitLog` above, the only prior
+ * detectors, both refusing by name rather than reporting). Both git reads share ONE try/catch: a
+ * partial answer (one succeeds, the other throws) is not a usable answer, so it is treated the
+ * same as a failed read — `undefined`, never a guessed value. Wired into both `daemonBoot` (the
+ * boot record) and `doctorCommand` (the `checkout-depth` health arm) below, never a second
+ * independent measurement.
+ */
+export function readCheckoutDepth(cwd: string): { shallow: boolean; commitCount: number } | undefined {
+  try {
+    const shallow =
+      execFileSync("git", ["rev-parse", "--is-shallow-repository"], {
+        cwd,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim() === "true";
+    const commitCount = parseInt(
+      execFileSync("git", ["rev-list", "--count", "HEAD"], {
+        cwd,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim(),
+      10,
+    );
+    if (!Number.isFinite(commitCount)) return undefined;
+    return { shallow, commitCount };
+  } catch {
+    // THE REASON, STATED HERE RATHER THAN ONLY IN THE DOC ABOVE (catch-erasure ratchet, route 4):
+    // both git reads share this ONE try/catch, so a PARTIAL answer — one read succeeding and the
+    // other throwing — is not a usable answer and is treated exactly like a failed read. `undefined`
+    // is "not measured", never a guessed depth, and `judgeCheckoutDepth` refuses on it by name
+    // rather than reporting a horizon nobody observed.
+    return undefined;
+  }
+}
+
 /** Injectable seams for {@link doctorCommand} — every reader it drives, so the whole command is
  *  exercisable without a real /proc, a real ledger, or a live daemon. */
 export interface DoctorDeps {
@@ -21786,6 +21840,8 @@ export interface DoctorDeps {
   readPauseAgeMs?: (root: string, nowMs: number) => number | undefined;
   readGitLocks?: (root: string, nowMs: number) => Array<{ path: string; ageMs: number }>;
   readLockFiles?: (dir: string) => { locks: string[]; unreadableReason?: string };
+  /** W1-T2332 — the `checkout-depth` arm's only measurement. Defaults to {@link readCheckoutDepth}. */
+  readCheckoutDepth?: (cwd: string) => { shallow: boolean; commitCount: number } | undefined;
 }
 
 /**
@@ -21849,6 +21905,7 @@ export async function doctorCommand(rest: string[], deps: DoctorDeps = {}): Prom
     deadLocks: dead,
     gitLocks: (deps.readGitLocks ?? readGitLocks)(repoRoot, nowMs),
     workerCount: 0,
+    ...(((v) => (v === undefined ? {} : { checkoutDepth: v }))((deps.readCheckoutDepth ?? readCheckoutDepth)(repoRoot))),
   });
 
   if (rest.includes("--json")) out(JSON.stringify({ worst: report.worst, checks: report.checks }, null, 2));

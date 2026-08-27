@@ -7,7 +7,11 @@
  * test — which stopped four PRs on the day this was written.
  */
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
+import { readCheckoutDepth } from "../src/run-task.js";
 
 import {
   DOCTOR_USAGE_EXIT,
@@ -21,6 +25,7 @@ import {
   judgeLaneLessWorkers,
   judgeLedgerFreshness,
   judgeLockDivergence,
+  judgeCheckoutDepth,
   judgeMemory,
   judgePauseHonoured,
   judgeRepairStall,
@@ -70,6 +75,11 @@ function baseInputs(over: Partial<Parameters<typeof buildDoctorReport>[0]> = {})
     deadLocks: [],
     gitLocks: [],
     workerCount: 0,
+    // W1-T2332: a healthy, full checkout by default — same discipline as `gitLocks: []` above —
+    // so every PRE-EXISTING test below (none of which is about checkout depth) keeps testing
+    // what it always tested rather than incidentally tripping the new arm's unreadable-by-default
+    // WARN (judgeCheckoutDepth never reads an absent measurement as healthy).
+    checkoutDepth: { shallow: false, commitCount: 980 },
     ...over,
   };
 }
@@ -181,9 +191,10 @@ test("W1-T1209: the existing doctor arms are unchanged", () => {
   }
   assert.equal(report.worst, "OK");
   assert.equal(report.exitCode, 0);
-  // +2, not +1: W1-T1236 lands a SECOND new arm (sweep-liveness) after this test's own baseline —
-  // this file's own baseInputs() carries a healthy sweep.pass/sweep.summary pair, so it reads OK.
-  assert.equal(report.checks.length, preExisting.length + 2, "repair-stall and sweep-liveness both joined the report");
+  // +3, not +2: W1-T1236 lands a SECOND new arm (sweep-liveness) after this test's own baseline,
+  // and W1-T2332 a THIRD (checkout-depth) later still — this file's own baseInputs() carries a
+  // healthy sweep.pass/sweep.summary pair and a full checkoutDepth, so both read OK.
+  assert.equal(report.checks.length, preExisting.length + 3, "repair-stall, sweep-liveness and checkout-depth all joined the report");
 });
 
 // ── W1-T1236 — sweep liveness: a reader for `sweep.pass`, the per-pass heartbeat nothing read ──
@@ -328,7 +339,9 @@ test("W1-T1236: the existing doctor arms are unchanged", () => {
   }
   assert.equal(report.worst, "OK");
   assert.equal(report.exitCode, 0);
-  assert.equal(report.checks.length, preExisting.length + 1, "exactly one new check joined the report");
+  // +2, not +1: W1-T2332 lands a further new arm (checkout-depth) after this test's own baseline —
+  // this file's own baseInputs() carries a healthy, full checkoutDepth, so it reads OK.
+  assert.equal(report.checks.length, preExisting.length + 2, "sweep-liveness and checkout-depth both joined the report");
 });
 
 // ── criterion 2 — dispatch starvation, a reader for a field nothing read ───────────────────────
@@ -548,6 +561,10 @@ test("doctor: the verb registration dispatches into the doctor module", async ()
     readDiskFreeBytes: () => 40 * 1024 ** 3,
     readPauseAgeMs: () => undefined,
     readGitLocks: () => [],
+    // W1-T2332: injected so this test's exit code never depends on whether the checkout THIS
+    // suite happens to run in is shallow (e.g. a CI runner's shallow clone) — the same reason
+    // every other reader above is injected rather than left to hit the real filesystem/git.
+    readCheckoutDepth: () => ({ shallow: false, commitCount: 980 }),
   });
   assert.equal(code, 0, "a healthy local read exits 0");
   assert.match(lines.join("\n"), /^rmd doctor: OK/m, "the command printed the module's own report");
@@ -576,6 +593,9 @@ function doctorDoctorDeps(over: Record<string, unknown> = {}) {
     readDiskFreeBytes: () => 40 * 1024 ** 3,
     readPauseAgeMs: () => undefined,
     readGitLocks: () => [],
+    // W1-T2332: same reasoning as the standalone verb-registration test above — a real, unstubbed
+    // git read would make these tests' exit codes depend on the ambient checkout's actual depth.
+    readCheckoutDepth: () => ({ shallow: false, commitCount: 980 }),
     ...over,
   };
 }
@@ -746,6 +766,79 @@ test("doctor: disk, locks, workers and git locks each judge against a printed th
   assert.equal(judgeStaleGitLocks([]).verdict, "OK");
 });
 
+// ── W1-T2332 — checkout-depth: the history horizon nothing proactive asked about ────────────
+//
+// A shallow canonical checkout breaks every history read SILENTLY: `git log -S`, `--follow` and
+// merge-base checks all stay plausible over a truncated corpus (docs/operator-guide.md's own
+// measurement — a 120-commit clone answered ZERO deletions for a file deleted before its horizon,
+// with the "does this query return rows" control passing loudly). The prior fleet detector was
+// `defaultMergeEvidenceLog`/`defaultVerdictCalibrationGitLog` REFUSING BY NAME, which only speaks
+// when a linter that needs history happens to run — this arm asks proactively. Each test below is
+// one of the shard's checkout-depth acceptance claims.
+
+test("W1-T2332: a shallow checkout is a FAIL naming the reachable commit count and the remedy command", () => {
+  const shallow = judgeCheckoutDepth({ shallow: true, commitCount: 208 });
+  assert.equal(shallow.verdict, "FAIL", "FAIL rather than WARN is deliberate — invisible by construction, remedy is one command");
+  assert.match(shallow.measured, /shallow/);
+  assert.match(shallow.measured, /208/, "the reachable commit count is named, never a bare non-OK verdict");
+  assert.match(shallow.detail!, /git fetch --unshallow/, "the remedy command is named in the operator-guide's own words");
+
+  // POSITIVE CONTROL: the identical shape but full reads OK — FAIL comes from shallow-ness, not
+  // merely from a checkout-depth measurement existing at all.
+  assert.equal(judgeCheckoutDepth({ shallow: false, commitCount: 208 }).verdict, "OK");
+});
+
+test("W1-T2332: a measurement that could not be taken reports UNREADABLE rather than healthy — never OK", () => {
+  const unreadable = judgeCheckoutDepth(undefined);
+  assert.equal(unreadable.verdict, "WARN");
+  assert.match(unreadable.measured, /unreadable/);
+  assert.notEqual(unreadable.verdict, "OK", "a read that FAILED must never report as a read that SAID NO (W1-T472 design (v))");
+});
+
+test("W1-T2332: a full checkout still prints its reachable commit count so the horizon is legible when it is fine", () => {
+  const full = judgeCheckoutDepth({ shallow: false, commitCount: 2461 });
+  assert.equal(full.verdict, "OK");
+  assert.match(full.measured, /2461/, "the horizon is printed even though nothing is wrong — the operator-guide's own prescription");
+});
+
+test("W1-T2332: the arm is report-only — it repairs nothing, fetches nothing, and changes no exit path other than its own verdict", () => {
+  const shallow = judgeCheckoutDepth({ shallow: true, commitCount: 100 });
+  // PURITY AS THE PROOF OF "NO ACTION" (mirrors judgeRepairStall's/judgeSweepLiveness's own
+  // tests): a function with a side effect (an unshallow fetch) is not idempotent on identical
+  // inputs in a test process free of that state. Calling it twice yields a byte-identical Check.
+  assert.deepEqual(judgeCheckoutDepth({ shallow: true, commitCount: 100 }), shallow);
+  assert.deepEqual(judgeCheckoutDepth({ shallow: true, commitCount: 100 }), shallow);
+  assert.match(shallow.detail!, /doctor reports and stops/);
+  assert.match(shallow.detail!, /nothing here unshallows anything/);
+});
+
+test("W1-T2332: the verdict is a pure function over measured inputs, callable with no git and no live process", () => {
+  // No filesystem, no execFileSync, no daemon — every arm reachable by calling one function with
+  // one set of plain numbers, exactly this file's own header discipline for every judge* above.
+  assert.equal(judgeCheckoutDepth({ shallow: true, commitCount: 0 }).verdict, "FAIL");
+  assert.equal(judgeCheckoutDepth({ shallow: false, commitCount: 1 }).verdict, "OK");
+  assert.equal(judgeCheckoutDepth(undefined).verdict, "WARN");
+});
+
+test("W1-T2332: buildDoctorReport wires checkout-depth into the composed report, and a shallow checkout is the report's own FAIL", () => {
+  const healthy = buildDoctorReport(baseInputs());
+  const healthyCheck = healthy.checks.find((c) => c.name === "checkout-depth");
+  assert.ok(healthyCheck, "checkout-depth must actually appear in the composed report, not merely be defined and unreached");
+  assert.equal(healthyCheck!.verdict, "OK", "baseInputs()'s full, deep checkoutDepth reads OK");
+  assert.equal(healthy.worst, "OK");
+
+  // CONTROL: swap in a shallow measurement and the SAME composed report reads FAIL end to end —
+  // proving buildDoctorReport really threads checkoutDepth through, never a stub.
+  const shallow = buildDoctorReport(baseInputs({ checkoutDepth: { shallow: true, commitCount: 208 } }));
+  assert.equal(shallow.checks.find((c) => c.name === "checkout-depth")!.verdict, "FAIL");
+  assert.equal(shallow.worst, "FAIL");
+  assert.equal(shallow.exitCode, 2);
+
+  // CONTROL: an absent measurement reads WARN through the same composed path, never OK.
+  const unreadable = buildDoctorReport(baseInputs({ checkoutDepth: undefined }));
+  assert.equal(unreadable.checks.find((c) => c.name === "checkout-depth")!.verdict, "WARN");
+});
+
 test("doctor: the state readers degrade to a stated unknown rather than throwing", () => {
   // an absent PAUSE is 'not paused', not an error
   assert.equal(readPauseAgeMs("/nonexistent-doctor-root", Date.now()), undefined);
@@ -848,4 +941,14 @@ test("doctor: a merged verdict row builds the local projection, and a truthy non
   assert.equal(localMergedProjections([{ step: "verdict", merged: true }]).size, 0);
   // and a non-verdict step never contributes
   assert.equal(localMergedProjections([{ step: "run.start", task_id: "W1-T9", merged: true }]).size, 0);
+});
+
+test("W1-T2332: readCheckoutDepth's shared try/catch returns undefined on an unreadable directory — the arm the ratchet's route-4 comment describes", () => {
+  // THE CATCH ARM, DRIVEN. `readCheckoutDepth` runs BOTH git reads inside ONE try/catch, so a
+  // directory git cannot read is the honest way to reach it without a seam: `git rev-parse
+  // --is-shallow-repository` fails and the whole measurement is treated as absent rather than
+  // partially guessed. `undefined` is "not measured" — `judgeCheckoutDepth` refuses on it by name.
+  const missing = join(tmpdir(), `rmd-t2332-absent-${process.pid}`);
+  assert.equal(existsSync(missing), false, "CONTROL: the directory really is absent, so git really will fail");
+  assert.equal(readCheckoutDepth(missing), undefined, "a failed read is undefined, never a guessed depth");
 });

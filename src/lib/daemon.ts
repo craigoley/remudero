@@ -1989,6 +1989,22 @@ export function daemonBoot(
    * Omitted ⇒ no version-pin comparison is made; the own-account-roots check still runs.
    */
   declaredNodeVersion?: string,
+  /**
+   * W1-T2332: the canonical checkout's HISTORY HORIZON — `git rev-parse --is-shallow-repository`
+   * and `git rev-list --count HEAD`, measured by the CALLER exactly where it already resolves
+   * `bootHeadSha` above (`src/run-task.ts`, best-effort, in a try/catch), because this module
+   * never touches the filesystem by its own header. Every sibling boot fact (env, node path, node
+   * version, head sha) was already carried on this row and this one was not — a shallow clone
+   * breaks every history read SILENTLY (`git log -S`, `--follow`, merge-base checks all stay
+   * plausible over a truncated corpus) and nothing proactive asked. Recorded here, NOT ledgered
+   * as a new row: the boot record is the boot record. A SHALLOW CHECKOUT MUST NOT HALT THE BOOT
+   * (T197 doctrine, this function's own doctrine for the keychain rung above) — this only ever
+   * adds fields to the existing `daemon.boot` line; `rmd doctor`'s `checkout-depth` arm
+   * (`src/lib/doctor.ts`) is where the FAIL verdict lives. Appended LAST, after
+   * `declaredNodeVersion`, per this function's own "no positional caller shifts" discipline.
+   * Omitted ⇒ the fields are absent, exactly as before — never a guessed value.
+   */
+  checkoutDepth?: { shallow: boolean; commitCount: number },
 ): BootAssertion {
   const assertion = assertCleanBoot(env, allowApiKey, nodeRuntime, declaredNodeVersion);
   log("daemon.boot", {
@@ -1998,6 +2014,7 @@ export function daemonBoot(
     node_version: assertion.node_version,
     ...(assertion.node_drift ? { node_drift: assertion.node_drift } : {}),
     ...(bootHeadSha ? { head_sha: bootHeadSha } : {}),
+    ...(checkoutDepth ? { checkout_shallow: checkoutDepth.shallow, checkout_commit_count: checkoutDepth.commitCount } : {}),
   });
   // BOOT-RATE INVARIANT (W1-T215): the SHAPE-not-cause check — see this
   // function's doc and detectDaemonCrashLoop's, above. Logged either way
