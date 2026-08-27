@@ -77,7 +77,7 @@ test("W1-T1009: every ci.yml job declares a timeout-minutes", async () => {
 
 // ── acceptance 2: the Playwright-carrying jobs are bounded at the derived heavy-band value ──
 
-test("W1-T1009: the Playwright-carrying jobs are bounded at the derived value", async () => {
+test("W1-T1009: the Playwright-carrying jobs are bounded inside the heavy band", async () => {
   const jobs = await loadCiJobs();
   const playwrightJobs = jobsCarryingPlaywrightInstall(jobs);
 
@@ -92,12 +92,53 @@ test("W1-T1009: the Playwright-carrying jobs are bounded at the derived value", 
       "if this changed, the heavy/light timeout banding needs to change with it",
   );
 
-  const HEAVY_MINUTES = 35; // 2100s — see the derivation comment beside `ci`'s timeout-minutes in ci.yml
+  // W1-T1009 asserted EQUALITY to 35 here. That was right while both heavy jobs shared a number
+  // and wrong the moment they stopped: PR #3064 raised `coverage-ratchet` to 39m because it runs
+  // the whole suite under --experimental-test-coverage and one flaky test sends that step into a
+  // second full pass, neither of which `ci` pays for. THE BAND IS THE INVARIANT, NOT THE NUMBER --
+  // a heavy job sits at or above the derived floor, strictly below ci-gate's cap, and strictly
+  // above every light-band job; it may sit anywhere in between, and the two heavy jobs need not
+  // agree. Asserting the literal made a legitimate raise fail a guard that had nothing to say
+  // about it, which is how a ratchet gets deleted rather than satisfied.
+  const HEAVY_FLOOR_MINUTES = 35; // 2100s — the derived FLOOR; see the comment beside `ci`'s timeout-minutes in ci.yml
+  const waitCapSeconds = await loadWaitCapSeconds();
+
+  // Both guards below exist so a broken scan cannot make this test pass by asserting nothing:
+  // an empty heavy band would skip the loop entirely, and an empty light band would make the
+  // separation check compare against -Infinity.
+  assert.ok(
+    playwrightJobs.length > 0,
+    "expected at least one Playwright-carrying job — an empty band would make every assertion below vacuous",
+  );
+  const lightMinutes = Object.entries(jobs)
+    .filter(([jobId]) => !playwrightJobs.includes(jobId))
+    .map(([, job]) => job["timeout-minutes"])
+    .filter((m): m is number => typeof m === "number" && Number.isFinite(m));
+  assert.ok(lightMinutes.length > 0, "expected at least one light-band job to separate the heavy band from");
+  const heaviestLight = Math.max(...lightMinutes);
+
   for (const jobId of playwrightJobs) {
-    assert.equal(
-      jobs[jobId]!["timeout-minutes"],
-      HEAVY_MINUTES,
-      `Playwright-carrying job '${jobId}' must be bounded at the derived heavy-band value (${HEAVY_MINUTES}m)`,
+    const minutes = jobs[jobId]!["timeout-minutes"];
+    assert.ok(
+      typeof minutes === "number" && Number.isFinite(minutes),
+      `Playwright-carrying job '${jobId}' declares no numeric timeout-minutes (got ${JSON.stringify(minutes)}) — ` +
+        "a job that grows this step must be bounded with it, or it inherits GitHub's 360-minute default",
+    );
+    assert.ok(
+      minutes! >= HEAVY_FLOOR_MINUTES,
+      `Playwright-carrying job '${jobId}' is bounded at ${minutes}m, BELOW the derived heavy floor ` +
+        `(${HEAVY_FLOOR_MINUTES}m) — under the observed non-hung tail it kills honest work`,
+    );
+    assert.ok(
+      minutes! * 60 < waitCapSeconds,
+      `Playwright-carrying job '${jobId}' (${minutes}m = ${minutes! * 60}s) must stay strictly below ` +
+        `ci-gate.yml's WAIT_CAP_SECONDS (${waitCapSeconds}s) — at or above it ci-gate times out first ` +
+        "and the misattribution defect this task fixes returns intact",
+    );
+    assert.ok(
+      minutes! > heaviestLight,
+      `Playwright-carrying job '${jobId}' (${minutes}m) must be bounded strictly ABOVE every light-band ` +
+        `job (heaviest light is ${heaviestLight}m) — otherwise the heavy/light banding is not a banding`,
     );
   }
 });
