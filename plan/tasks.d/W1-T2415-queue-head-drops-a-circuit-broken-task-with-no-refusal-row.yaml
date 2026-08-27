@@ -1,0 +1,242 @@
+- id: W1-T2415
+  title: "THE QUEUE HEAD DROPS A CIRCUIT-BROKEN TASK WITH NO REFUSAL ROW — `deriveQueueHead` binds `isCircuitTripped` into `runnableCandidates` and passes NEITHER `onCircuitBreak` NOR `onIndeterminate` (both read 0 across `src/lib/status-board.ts`), so a tripped task leaves `rows` and is named in nothing on the one surface built to explain a refusal, while the sibling exclusion `run-branch-already-pushed` gets a `refused` row from the very same call"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 20.00
+  files: [src/lib/status-board.ts, test/queue-head-names-a-circuit-broken-refusal.test.ts]
+  origin: "operator-brief#circuit-breaker-refusal-has-no-filter-reason-2026-08-27"
+  plan_refs: ["W1-T1205", "W1-T2249", "W1-T2335", "W1-T2413", "W1-T206", "W1-T280", "W1-T316"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE ID. Eight surfaces swept at base 880a49df, anchored `W1-T2415([^0-9]|$)` with a `[0-9]`
+    class and never `\d`, every open-surface control drawn from the open set enumerated FIRST over
+    REST (HTTP 200, type array, length 8, page 2 length 0). SURFACE 1 READS 1:
+    `refs/rmd-id/W1-T2415` resolves against 531 refs, and the anchor is proved live on a POPULATED
+    band — `W1-T241` reads anchored 0 against unanchored 9 over that same file, so the `[0-9]`
+    class is discriminating and not merely quiet. Shard filenames 0 of 664 (control W1-T2413 = 1);
+    declared `- id:` lines 0 of 932 (control W1-T2413 = 1); open-PR titles 0 of 8 CASE-SENSITIVELY
+    (control W1-T2414 = 1 from #3148, lower-case `w1-t2414` = 0); open head branches 0 of 158 rows
+    over the open set unioned with every remote head (control W1-T1279 = 2).
+
+    SURFACE 5 IS NOT ZERO AND THAT IS CORRECT. Open-PR bodies read 2 for this id, both inside
+    #3149 ("chore(plan): retire W1-T2413 with its criteria preserved"), which names W1-T2415 as
+    the successor id held for this finding and carries `grep: W1-T2415` against W1-T2413's own
+    shard. That is a FORWARD REFERENCE, not a competing filing: it declares no id, opens no
+    branch, and its own text says the successor shard "is not yet on an" origin. Reported as a
+    non-zero with its cause rather than filtered away.
+
+    SURFACES 7 AND 8 ARE MERGED-ONLY AND THEIR ZEROS SAY NOTHING ABOUT AN UNFILED ID. Merged
+    trailers read 0 of 569 lines and merged subjects 0 of 2,475 — structurally silent for an id
+    that has never merged, so they are recorded as coverage rather than as evidence. Both were
+    still controlled: trailers fire 1 on W1-T2249, subjects fire 1 on W1-T2413 and 1 on W1-T2409,
+    and the trailer anchor discriminates on a populated band (`W1-T24` reads anchored 1 against
+    unanchored 4).
+
+    ── THE PREMISE, CORRECTED WHERE IT IS WRONG ────────────────────────────────────────────────
+
+    (1) THE BREAKER IS NOT REFUSED ABOVE THE SELECTOR. IT IS A RUNG INSIDE IT. The brief's reading
+    is that a tripped task is `isDispatchEligible === true`, sorts normally, and is refused one
+    layer up. Read at this sha, `opts.isCircuitTripped?.(t.id)` sits INSIDE `isDispatchEligible`
+    (`src/lib/drain.ts`), after the `unmet-deps` guard and the indeterminate guard, before the
+    lifetime cap, `isOpenPr` and `hasPushedRunBranch` — and it does `opts.onCircuitBreak?.(t)`
+    then `return false`. So a tripped task is `isDispatchEligible === FALSE`, never enters
+    `eligible`, and never sorts anywhere. `nextCurated` applies the identical rung for a curated
+    selection with its own comment saying so. THE MECHANISM IS THE OPPOSITE OF THE ONE DESCRIBED;
+    THE SYMPTOM IS REAL ANYWAY, AND IS NARROWER.
+
+    (2) NOR IS IT "VISIBLE ONLY AS A LEDGER ROW". `CircuitBrokenBlocker` (`src/lib/status-board.ts`)
+    is a rendered BLOCKERS class carrying `dispatchCount`, `maxDispatches` and a `resetNote`, built
+    by `deriveCircuitBrokenBlockers` over `distinctDispatchedTaskIds`. The breaker IS explained on
+    the board. WHAT IS TRUE IS SHARPER: it is absent from the QUEUE HEAD.
+
+    (3) THE ACTUAL DEFECT, BY SYMBOL. `deriveQueueHead` (`src/lib/status-board.ts`) builds the
+    candidate list by calling `runnableCandidates(plan, isMerged, limit, {...})` with exactly four
+    keys: `isIndeterminate`, `isCircuitTripped`, `hasPushedRunBranch`, `onFiltered`. Three
+    predicates and ONE observation callback. `onCircuitBreak` and `onIndeterminate` are both
+    accepted keys of `NextRunnableOpts` and NEITHER is passed — measured, unchained, over the whole
+    file: `onCircuitBreak` occurs 0 times and `onIndeterminate` occurs 0 times. So the predicate
+    correctly REMOVES a tripped task from `rows` and the callback that would NAME it is never
+    supplied. It leaves the queue head and lands in nothing.
+
+    (4) AND THE SIBLING EXCLUSION IN THE SAME CALL GETS A ROW. `onFiltered` is wired, but its body
+    opens `if (reason !== "run-branch-already-pushed") return;`, so only that one arm reaches
+    `refused`. `DispatchFilterReason` has SIX arms — `already-merged`, `verify-not-auto`,
+    `blocked`, `unmet-deps`, `continued-this-pass`, `run-branch-already-pushed` — and none is the
+    breaker. `QueueHeadSection.refused`'s own doc enumerates why each of the other FIVE arms is
+    deliberately excluded from that surface; the circuit breaker is in that enumeration NOWHERE,
+    because it is not a member of the union at all. This is an omission with no recorded decision
+    behind it, which is precisely the shape W1-T1205 already fixed once for `run-branch-already-
+    pushed`: "the row is named on this surface rather than vanishing from it with no trace beyond
+    a ledger row".
+
+    (5) THE UNION'S OWN DOC ARGUES THE SPLIT IS DELIBERATE, AND IT MUST BE ANSWERED, NOT IGNORED.
+    `DispatchFilterReason`'s header says the five original arms are the conditions that used to
+    return SILENTLY, while "every OTHER filter (indeterminate, circuit, lifetime cap, open PR)
+    already ledgers itself through its own dedicated `onXxx` callback", and it distinguishes
+    `run-branch-already-pushed` on the ground that "unlike an open PR or a tripped breaker, nothing
+    is IN FLIGHT and nothing clears it on its own". THAT ARGUMENT IS ABOUT THE UNION, NOT ABOUT THE
+    QUEUE HEAD. It justifies not adding a seventh arm; it does not justify `deriveQueueHead`
+    declining to pass the dedicated callback the doc itself points at. The remedy this shard
+    proposes therefore takes the doc at its word rather than contradicting it.
+
+    (6) THE DAEMON ALREADY HAD TO WORK AROUND THE SAME GAP, WHICH IS THE PRECEDENT. `runDaemon`
+    (`src/lib/daemon.ts`) cannot get the breaker out of `idleReasons.snapshot()` either, because
+    `IdleReasonTally` is keyed on the six arms. So it carries a SIDE ARRAY, `circuitBrokenThisTick`,
+    pushed from its own `onCircuitBreak`, and assembles `StarvationCensus.circuitBroken` from it
+    alongside the tally's `blocked` and `unmet-deps` buckets. A second consumer needing the same
+    thing is not a new design question — it is the same one, already answered once, in the file
+    next door.
+
+    ── Q1. HOW OFTEN IT ACTUALLY TRIPS. MEASURED, ON THE HOST THAT HAS THE ROWS ────────────────
+
+    (7) THE CORPUS AND ITS PER-FORM COVERAGE CONTROL. Read on the container
+    (`/home/craigoleyagent/rmd-state2/state`, host `1abc274530a9`), never the mini — a recon
+    earlier tonight read the mini's own scratch exhaust and correctly refused to conclude. Three
+    forms, each counted separately because `ledger.*.ndjson*` does not match `ledger.ndjson`:
+    1 live file of 8,333 rows, 38 dated plain rotations of 465,878 rows, and ZERO `.gz` archives.
+    474,211 raw rows, 322,045 distinct. THE COVERAGE CONTROL IS THE BRIEF'S OWN FIGURE AND IT
+    RECONCILES EXACTLY: `dispatch.skipped` reads 3 in the live form and 2,075 across the plain
+    rotations, 2,078 corpus-wide. Both non-empty forms were opened; the empty form is reported as
+    empty rather than globbed silently.
+
+    (8) IT HAS TRIPPED, AND THE POPULATION IS TWO. 78 distinct `dispatch.circuit_broken` rows,
+    spanning 2026-08-24T09:40:38.142Z to 2026-08-27T19:46:45.062Z. Every one carries
+    `lane:"daemon"` — the drain lane has produced NONE. Every one carries the identical detail:
+    `freshCount:5, maxDispatches:5, hasNewOwnedPr:false, ledgerState:"tripped",
+    corroboration:"not-corroborated", state:"tripped"`. The rows resolve to TWO task ids:
+    W1-T1279 with 77 and W1-T2323 with 1. Alongside them sit 20 raw / 2 distinct
+    `dispatch.circuit_broken.escalated` rows: W1-T1279 opened issue #2693 with `delivered:true`,
+    and W1-T2323's carries `issue_url:null, delivered:false`.
+
+    (9) SO THE ANSWER IS NEITHER "NEVER" NOR "OFTEN". The breaker fires rarely and, when it does,
+    it holds. W1-T1279 was refused on every daemon tick for THREE DAYS AND ELEVEN HOURS —
+    2026-08-24T09:40 to its next `run.start` at 2026-08-27T20:59:58 — and produced ZERO dispatches
+    in that window. That is 77 refusals nobody reading the queue head could see a reason for.
+
+    ── Q2. AND IT CAN TRIP FOR THE WRONG REASON. THIS IS NOT HYPOTHETICAL HERE ──────────────────
+
+    (10) THE ONE HIGH-VOLUME INSTANCE IS THE INFRASTRUCTURE CLASS W1-T2249 DOCUMENTED. That shard's
+    title names the mechanism outright — a probe whose worker died on a 529 or an expired token is
+    counted by `dispatchesWithoutNewOwnedPr` as a dispatch that produced nothing — and its
+    rationale (6) records the live row for W1-T1279 with the same `freshCount:5, maxDispatches:5,
+    hasNewOwnedPr:false, ledgerState:"tripped"` shape and concludes "FIVE INFRASTRUCTURE REFUSALS
+    HALTED A TASK'S DISPATCH AND OPENED AN ESCALATION (#2693)". `DEFAULT_MAX_TASK_DISPATCHES` is 5
+    (`src/lib/status.ts`), and W1-T1279 has exactly 6 `run.start` rows in the union against 1
+    `pr.opened` (control: 520 distinct `pr.opened` rows corpus-wide, so the query sees the family).
+
+    (11) THE OUTCOME CORROBORATES THE DIAGNOSIS RATHER THAN RESTING ON IT. When W1-T1279 finally
+    dispatched at 2026-08-27T20:59:58, it opened PR #3142 at 21:11:57 — a PR in roughly twelve
+    minutes, on the first attempt, after three and a half days of refusal. A task that cannot
+    produce a PR does not do that.
+
+    (12) AND W1-T2249'S BUILD DID NOT STOP IT. Its implementation merged as 145099d4 on
+    2026-08-25T16:12:35Z. 54 of the 78 rows are NEWER than that merge. This shard does not claim
+    that fix failed — `dispatch.circuit_broken` cannot say WHY its five runs produced nothing, and
+    that unanswerable question is the same visibility gap this task names, one layer down. It is
+    recorded as an open reading for whoever owns the counter, not as a verdict.
+
+    (13) A HYPOTHESIS, LABELLED AS ONE, ABOUT HOW THE TRIP CLEARED. No ledger row explains the
+    clear: across every step naming W1-T1279 between 19:46:46 and 21:12 there is no merge, no
+    credit backfill and no reset. What IS visible: a rotation stamped
+    `ledger.2026-08-27T20-18-33-155Z.ndjson`, and a daemon restart from `DAEMON-1787856970963`
+    (last seen 20:39:33) to `DAEMON-1787863181387` (first seen 20:58:35), both between the last
+    refusal and the dispatch. `breakerGateFor` (`src/run-task.ts`) answers from
+    `readLedgerLines(ledgerPath)` — the LIVE file alone — and the live file now holds 0
+    `dispatch.circuit_broken` and 4 `run.start` rows for W1-T1279 against 77 and 6 in the union.
+    W1-T206's guard is scoped by its own doc to a SAME-PROCESS rotation ("a same-process rotation
+    gets caught as it happens"), which a fresh process cannot be. THIS IS A HYPOTHESIS, NOT A
+    CONCLUSION, AND IT IS EXPLICITLY NOT THIS TASK'S TO FIX: it concerns when the breaker clears,
+    not whether a refusal can be read. It is recorded so it is not re-derived from scratch.
+
+    (14) THE ONE PLACE A `circuit_broken` COUNT ALREADY EXISTS HAS NEVER CARRIED ONE, AND THAT
+    ZERO IS A WINDOW ARTIFACT, NOT A DEFECT. `dispatch.starvation.escalated` reads 34 distinct
+    rows, each with a `circuit_broken` count and a `circuit_broken_ids` list. `circuit_broken`
+    reads 0 in all 34, while the control field `blocked` reads greater than 0 in all 34. IT WOULD
+    BE WRONG TO CALL THAT BROKEN: those rows span 2026-08-13T00:51:33Z to 2026-08-24T06:29:17Z and
+    the first breaker trip is 2026-08-24T09:40:38Z, so not one tick ever held both conditions. An
+    absent check is not a passing check; the slot is untested, and this shard says untested rather
+    than working or broken.
+
+    ── Q3. THE CHEAPEST THING ──────────────────────────────────────────────────────────────────
+
+    (15) NOT A SEVENTH ARM. Adding one widens `DispatchFilterReason`, which types
+    `IdleReasonTally` as a `Record` over it, `tallyDispatchFilters`'s `seen` literal, its
+    `snapshot`, `QueueHeadRefusedRow.reason` and every consumer that switches on the union — and
+    it directly contradicts the union doc's own recorded reasoning in (5), which would then have
+    to be rewritten rather than honoured.
+
+    (16) THE MINIMUM CHANGE IS ONE CALLBACK AND ONE ROW SHAPE, IN ONE FILE. `deriveQueueHead`
+    already binds `isCircuitTripped`; it passes no `onCircuitBreak`. Supplying one, collecting the
+    ids exactly as the daemon collects `circuitBrokenThisTick`, and emitting them onto the
+    `refused` list the section already has, reuses the surface, the `IDLE_REASON_ID_CAP` bound and
+    the `refusedTruncated` counter that are all there. `QueueHeadRefusedRow.reason` widens from
+    `DispatchFilterReason` to that union plus one literal — a change local to this file, not to
+    the dispatcher's vocabulary. The detail the operator needs is already computed:
+    `CircuitBrokenBlocker` proves `dispatchCount`/`maxDispatches`/`resetNote` are derivable from
+    the same `lines` this function already holds.
+
+    (17) THE COST OF BEING WRONG IS ONE EXTRA ROW ON A DISPLAY. Nothing here is consulted to
+    dispatch. If the refusal is named on a task the operator does not care about, the queue head
+    prints a row it need not have; if it stays unnamed, a task sits refused for three and a half
+    days with the reason readable only by grepping a rotating ledger on a container. That
+    asymmetry is why the remedy is proposed at all rather than a record being proposed instead.
+
+    ── WHAT IS OWNED ELSEWHERE, AND MUST NOT BE RE-FILED HERE ──────────────────────────────────
+
+    (18) W1-T2335 owns `deriveCircuitBrokenBlockers` rendering a `circuit_broken` class for a task
+    dispatch will never take. W1-T2249 owns the outage-trips-the-breaker class and the counter
+    that must not count an infrastructure refusal. W1-T2413 owns the premise corrected in (1):
+    W1-T418, W1-T419 and W1-T420 are MERGED, not skipped, and its retirement is in flight as
+    #3149. W1-T206 owns the torn/rotated breaker read. W1-T1205 owns the `refused` surface this
+    task extends and must not be re-litigated. THIS TASK OWNS ONE THING: that the queue head
+    cannot name a circuit-broken refusal.
+
+    (19) AND WHAT MUST NOT MOVE. The breaker trips when it trips: `DEFAULT_MAX_TASK_DISPATCHES`
+    stays 5, the reset rule stays a fresh owned PR, the corroboration rung stays as it is, and
+    nothing auto-resets. No cap, no pacing, no sleep, no new ledger step, and no entry added to
+    `DECISION_RELEVANT_LEDGER_STEPS`. `dispatch.circuit_broken` already carries everything a
+    reader needs; this is about reading it, not writing more.
+
+    (20) RULE 19 BAND, SET FROM SPAN UP FRONT. `risk: high` records the SPAN the acceptance text
+    and `files:` reach across, not blast radius — the change is display-only by construction and
+    (17) prices being wrong at one printed row. IF the operator prefers the seventh-arm design
+    over (16), `src/lib/drain.ts` must be added to `files:` by amendment first; it is deliberately
+    NOT declared here, so the dispatch overlap map is not serialized against every drain task for
+    a path this design does not touch.
+  acceptance:
+    - claim: "a circuit-broken task is named on the queue head's refused list instead of vanishing from it"
+      proof: "unit test: test/queue-head-names-a-circuit-broken-refusal.test.ts"
+    - claim: "the named refusal carries the dispatch count and the breaker's own reset condition, not a bare label"
+      proof: "unit test: test/queue-head-names-a-circuit-broken-refusal.test.ts"
+    - claim: "the run-branch-already-pushed refusal keeps its existing row unchanged and is not displaced"
+      proof: "unit test: test/queue-head-names-a-circuit-broken-refusal.test.ts"
+    - claim: "the refused list stays capped at the existing bound and still reports what it dropped"
+      proof: "unit test: test/queue-head-names-a-circuit-broken-refusal.test.ts"
+    - claim: "the DispatchFilterReason union still has six arms and gains none"
+      proof: "unit test: test/queue-head-names-a-circuit-broken-refusal.test.ts"
+    - claim: "no dispatch decision changes: the same tasks are eligible and the same tasks are refused"
+      proof: "unit test: test/queue-head-names-a-circuit-broken-refusal.test.ts"
+    - claim: "a queue head with no tripped task prints no placeholder row"
+      proof: "unit test: test/queue-head-names-a-circuit-broken-refusal.test.ts"
+    - claim: "nothing added writes a ledger step or paces or sleeps a call"
+      proof: "unit test: test/queue-head-names-a-circuit-broken-refusal.test.ts"
+  falsifier: |
+    If `deriveQueueHead` is found to pass `onCircuitBreak` at the sha a build starts from, the
+    premise is already closed and this task must be re-derived rather than built. The check is one
+    unchained command against `src/lib/status-board.ts`, which reads 0 occurrences today alongside
+    0 for `onIndeterminate`.
+
+    SEPARATELY FALSIFYING: if a fresh three-form union read on the container shows
+    `dispatch.circuit_broken` rows from the DRAIN lane, or resolving to more than the two task ids
+    W1-T1279 and W1-T2323, the population Q1 sizes has changed and Q3's cost argument must be
+    re-priced against it. The positive control for that re-run is `dispatch.skipped` at 2,078
+    corpus-wide across the live and plain forms, with each form counted separately.
+
+    AND IF the starvation census is ever observed carrying a non-zero `circuit_broken`, the reading
+    in (14) is superseded: the slot would then be exercised, and whether the queue head still needs
+    its own row must be argued against that surface rather than against its emptiness.
