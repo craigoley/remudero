@@ -69,6 +69,60 @@
     lock, every one before #2226 merged at 16:37:12Z. ZERO CDN 403s appear anywhere in the window
     (control: `Could not get lock` matches in all 18, and `cdn.playwright` appears in 12 of the 22
     logs read) — that cause is NOT REPRODUCED here and this shard does not carry it as measured.
+
+    ── AMENDED 2026-08-27: TWO FACTS FOR THE OPEN RULING (evidence only; no ruling is made here) ──
+
+    (6) A FRESH INSTANCE OF THE DISAGREEMENT — AND IT CONFIRMS (3) RATHER THAN DISCOVERING IT. This
+    amendment does not report a new phenomenon: (3) above already measured 12 of 600 runs disagreeing,
+    10 one way and 2 the other, with a named seven-branch cluster. What follows is one more instance,
+    on two PRs whose diff is a SINGLE YAML FILE each, verified over REST at 2026-08-27.
+
+    ON ATTEMPT 1 OF EACH: PR #3134 (head 72a65c8e, 1 file) — `ci` SUCCESS in 626s, Test step 589s;
+    `coverage-ratchet` NOT-SUCCESS at 2367s, Test-with-coverage step 2329s. PR #3135 (head 49bd5648,
+    1 file) — `ci` SUCCESS in 720s, Test step 681s; `coverage-ratchet` NOT-SUCCESS at 2356s, step
+    2322s. Same suite, same head, opposite verdicts, on a diff that touches no source at all.
+
+    ⚠ AND THE CONCLUSION IS `cancelled`, NOT `failure` — CORRECTED AGAINST THE API RATHER THAN
+    CARRIED. The brief that prompted this amendment recorded these as failures naming
+    `test/daemon.test.ts:2296` with `tests 10797 pass 10795 fail 1`. The GitHub API reports the job
+    conclusion as CANCELLED for both. The test-level detail lives in the job log, which is
+    unreadable from the container this was written in (the logs endpoint redirects to a blob host the
+    egress proxy refuses), so THAT detail is the operator's attributed measurement and is not
+    re-derived here. The conclusion, the durations and the step timings ARE re-derived. The
+    distinction matters, and (8) below is why.
+
+    (7) AND ONE OF THE TWO NEVER RUNS AGAINST MAIN, SO ITS GREEN THERE IS VACUOUS — THIS IS THE PART
+    (1)-(5) DID NOT COVER. `.github/workflows/ci.yml` guards the coverage job's real work with
+    `[ "${GITHUB_EVENT_NAME}" = "pull_request" ] || { echo "W1-T1033: coverage-ratchet is PR-only;
+    skipping..."; exit 0; }`. MEASURED on two completed push-event runs on main (33117783544,
+    33116854470): `coverage-ratchet` reports SUCCESS with a whole-job duration of 27s and 35s, and
+    steps 6, 7, 8 and 9 — Test-with-coverage, the base..head diff, diff-coverage and the ratchet —
+    each ran 0s. CONTROL, the same job on PR heads the same day: 1130s (#3134), 1100s (#3135), 1123s
+    (#3136). So on main the job runs none of its own checks and reports green, AND IT IS A REQUIRED
+    CONTEXT. A required check that cannot fail on the branch it protects is a different property from
+    duplication, and it belongs to the same ruling.
+
+    (8) THE AMPLIFIER, RECORDED SO NOBODY MISREADS THE DURATIONS ABOVE. (1) already notes that both
+    jobs route through `scripts/test-with-retry.mjs` (W1-T255) and that a red run re-runs the whole
+    command once. WHAT IS ADDED HERE IS THE ARITHMETIC AND ITS CONSEQUENCE: one failing test doubles
+    a 761-1414s job to roughly 2350s. Against the job cap that lands either side of the line — under
+    it the job reads `failure`, over it `cancelled` — which is exactly what (6) shows, a 2329s step
+    at roughly twice the 1130s single pass. THAT IS WHY A ONE-YAML DIFF CAN PRESENT AS A TIMEOUT, and
+    why a reader comparing raw job durations across the two harnesses will over-state the gap unless
+    they first ask whether the retry fired.
+
+    (9) WHAT THIS AMENDMENT DOES NOT DECIDE, STATED SO THE SCOPE STAYS WHERE IT WAS FILED. It makes
+    NO RULING and recommends NO HARNESS. The question this task already poses — whether one run can
+    serve both, and which survives if it cannot — is unchanged and still open; (6) and (7) are
+    evidence for it, nothing more. It proposes removing NEITHER job, changing the PR-only guard, nor
+    touching any `timeout-minutes`.
+
+    AND W1-T1033 OWNS "NOTHING RUNS THE SUITE AGAINST MAIN". Its PR-only guard is A DELIBERATE COST
+    CHOICE, NOT AN OVERSIGHT — the workflow says so in its own comment at the `on:` block, and the
+    guard is repeated at four steps and eighteen job-level `if:` lines, which is not what an accident
+    looks like. Whether main SHOULD run under coverage is part of the same ruling this task asks for,
+    not a separate defect, and (7) is recorded here because it changes what that ruling costs — not
+    as a complaint about the guard.
   design: |
     THE DELIVERABLE IS A MEASURED ANSWER AND A RULING. The arithmetic is recorded here; the choice
     is not made here, because (3) shows the two harnesses produce different verdicts on the same
