@@ -29,6 +29,7 @@ import {
   type ObservedScopeByTask,
 } from "./dispatch-overlap.js";
 import { taskIdFromRunBranch } from "./status.js";
+import type { OpenSiblingBuild } from "./status.js";
 
 /** A merged predicate — DERIVED FROM GITHUB in the real runner (status.ts). */
 export type MergedSet = (taskId: string) => boolean;
@@ -107,6 +108,27 @@ export function closedUnmergedRunBranchTaskIds(closedPrRows: string): ReadonlySe
 export interface NextRunnableOpts {
   /** Returns the open PR number for a task whose latest PR is currently OPEN. */
   isOpenPr?: OpenPrCheck;
+
+  /**
+   * W1-T2397 — THE OPEN-SIBLING OBSERVATION, READ OFF THE PROJECTION THIS PASS ALREADY BUILT.
+   *
+   * Answers, for the task about to be dispatched: is there an OPEN PR building it that is NOT its
+   * own `run-<taskId>-<digits>` branch? `StatusProjection.openSiblingBuild` (status.ts) is where
+   * it comes from, so this costs no read of its own.
+   *
+   * IT IS NOT `isOpenPr` AND MUST NEVER BECOME IT. `isOpenPr` decides eligibility; widening THAT
+   * is the refusal W1-T2397 declined on measurement — the naive predicate fired four times in 72
+   * hours and three of those merged. This one is consulted AFTER a task has already been chosen,
+   * feeds {@link onOpenSiblingBuild} alone, and cannot change what is dispatched.
+   */
+  openSiblingBuildFor?: (taskId: string) => OpenSiblingBuild | undefined;
+  /**
+   * W1-T2397: called ONCE, for the task actually being dispatched, when {@link
+   * openSiblingBuildFor} reports an open sibling build. The real wiring writes one ledger row and
+   * prints one console line naming BOTH PRs; this module never decides anything on it. Omitted ⇒
+   * the observation is not made and dispatch is byte-identical to before this existed.
+   */
+  onOpenSiblingBuild?: (task: Task, sibling: OpenSiblingBuild) => void;
   /** Task ids this drain already continued past ({@link NON_HALTING_VERDICTS}) — never offered
    *  again in the same pass. Omit ⇒ no exclusion, exactly as before this existed. */
   excludeIds?: ReadonlySet<string>;
@@ -412,7 +434,22 @@ function idOrdinal(id: string): { workstream: number; ordinal: number } {
 
 export function nextRunnable(plan: Plan, isMerged: MergedSet, opts: NextRunnableOpts = {}): Task | undefined {
   for (const t of dispatchOrder(plan.tasks)) {
-    if (isDispatchEligible(plan, t, isMerged, opts)) return t;
+    if (!isDispatchEligible(plan, t, isMerged, opts)) continue;
+    // W1-T2397: OBSERVE, THEN DISPATCH ANYWAY. Deliberately placed AFTER eligibility has already
+    // said yes and BEFORE the task is returned unchanged — so it runs once per dispatch (not once
+    // per candidate, which is what keeps it quiet: 101 of 105 dispatches in 72 hours had no open
+    // sibling at all), and so it is structurally incapable of changing the answer. A throw here
+    // must not cost a dispatch either: the observation is worth one line, never a stalled task.
+    const sibling = opts.openSiblingBuildFor?.(t.id);
+    if (sibling && opts.onOpenSiblingBuild) {
+      try {
+        opts.onOpenSiblingBuild(t, sibling);
+      } catch {
+        // An observation that throws is still only an observation — W1-T2397's whole argument is
+        // that a wrong warn costs one line, and a warn that costs a dispatch would invert it.
+      }
+    }
+    return t;
   }
   return undefined;
 }
