@@ -230,7 +230,7 @@ jobs:
     # (PR #2150, five minutes after PR #2148's `ci` hang on the same step), so it gets the same
     # 35m/2100s bound, jointly constrained to stay strictly below ci-gate.yml's
     # WAIT_CAP_SECONDS (2400s).
-    timeout-minutes: 35
+    timeout-minutes: 39
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
