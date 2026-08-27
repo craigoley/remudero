@@ -5220,10 +5220,10 @@ export function renderFixPrompt(opts: {
  * (`renderEscalationEvidence`, below) must keep meaning "there was truly nothing", never
  * "nothing looked like a diagnostic".
  */
-const CI_LOG_LINE_PREFIX_RE = /^[^\t\n]*\t[^\t\n]*\t\S+ ?/;
-const CI_LOG_BANNER_RE = /^(##\[(group|endgroup)\]|-{3,})/;
-const CI_LOG_BARE_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?$/;
-const CI_LOG_DIAGNOSTIC_RE = new RegExp(
+export const CI_LOG_LINE_PREFIX_RE = /^[^\t\n]*\t[^\t\n]*\t\S+ ?/;
+export const CI_LOG_BANNER_RE = /^(##\[(group|endgroup)\]|-{3,})/;
+export const CI_LOG_BARE_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?$/;
+export const CI_LOG_DIAGNOSTIC_RE = new RegExp(
   [
     "error TS\\d+:", // tsc
     "\\(\\d+,\\d+\\):\\s*(error|warning)", // tsc-shaped `file(line,col): error|warning`

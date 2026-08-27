@@ -24,7 +24,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { runFixRung } from "../src/run-task.js";
+import {
+  CI_LOG_BANNER_RE,
+  CI_LOG_BARE_TIMESTAMP_RE,
+  CI_LOG_DIAGNOSTIC_RE,
+  CI_LOG_LINE_PREFIX_RE,
+  runFixRung,
+} from "../src/run-task.js";
 import type { CiFailure } from "../src/lib/sweep.js";
 import type { IssueGateway } from "../src/lib/escalate.js";
 import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
@@ -383,4 +389,60 @@ test("runFixRung: a blocked_ci exhaustion whose failing-check list was NEVER COL
     "never-collected still reads distinctly from checked-and-empty",
   );
   assert.doesNotMatch(issueCalls[0].body, /Earlier strike\(s\) already repaired/, "nothing was ever red, so no trajectory to state");
+});
+
+// ── direct unit coverage for the four selection regexes (negative-reachability-ratchet's own
+// fixture-less `_RE` gate, W1-T2317): each below drives BOTH its unhealthy (rejecting) and
+// healthy (accepting) arm against a genuinely distinguishable input, not merely a touch. ──────
+
+test("CI_LOG_LINE_PREFIX_RE: matches the `<job>\\t<step>\\t<timestamp> ` prefix a --log-failed line carries, and only that", () => {
+  assert.equal(
+    CI_LOG_LINE_PREFIX_RE.test("ci\tTypecheck\t2026-08-23T16:01:14.5196266Z ##[group]Run npx tsc"),
+    true,
+    "a real job/step/timestamp-prefixed line matches",
+  );
+  assert.equal(
+    CI_LOG_LINE_PREFIX_RE.test("no tabs in this line at all"),
+    false,
+    "a line with no <job>\\t<step>\\t<timestamp> shape does not match",
+  );
+});
+
+test("CI_LOG_BANNER_RE: matches a `##[group]`/`##[endgroup]`/`---`-section banner, and rejects an ordinary diagnostic line", () => {
+  assert.equal(
+    CI_LOG_BANNER_RE.test("##[group]Run npx tsc -p tsconfig.json --noEmit"),
+    true,
+    "a group-open banner matches",
+  );
+  assert.equal(CI_LOG_BANNER_RE.test("##[endgroup]"), true, "a group-close banner matches");
+  assert.equal(CI_LOG_BANNER_RE.test("--- gated check runs ---"), true, "a dashed section banner matches");
+  assert.equal(
+    CI_LOG_BANNER_RE.test("test/sandbox-subject-generator.test.ts(90,9): error TS2741: Property 'bySubsystem' is missing"),
+    false,
+    "an ordinary tsc diagnostic line is not a banner",
+  );
+});
+
+test("CI_LOG_BARE_TIMESTAMP_RE: matches a bare ISO timestamp line, and rejects a line that merely starts with one", () => {
+  assert.equal(CI_LOG_BARE_TIMESTAMP_RE.test("2026-08-23T16:01:16.0000000Z"), true, "a bare timestamp, alone, matches");
+  assert.equal(
+    CI_LOG_BARE_TIMESTAMP_RE.test("2026-08-23T16:01:16.0000000Z ##[endgroup]"),
+    false,
+    "a timestamp followed by content is not a BARE timestamp line",
+  );
+});
+
+test("CI_LOG_DIAGNOSTIC_RE: matches a tsc-shaped compiler diagnostic, and rejects the run-invocation banner it is meant to skip past", () => {
+  assert.equal(
+    CI_LOG_DIAGNOSTIC_RE.test(
+      "test/sandbox-subject-generator.test.ts(90,9): error TS2741: Property 'bySubsystem' is missing but required",
+    ),
+    true,
+    "a tsc `file(line,col): error TSnnnn:` diagnostic matches",
+  );
+  assert.equal(
+    CI_LOG_DIAGNOSTIC_RE.test("##[group]Run npx tsc -p tsconfig.json --noEmit"),
+    false,
+    "the step's own run-invocation banner — never a diagnostic — does not match",
+  );
 });
