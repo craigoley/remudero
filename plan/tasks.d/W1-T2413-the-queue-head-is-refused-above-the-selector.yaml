@@ -9,6 +9,9 @@
   risk: high
   origin: oper#queue-head-not-moving-2026-08-27
   files: [src/lib/drain.ts, src/lib/daemon.ts, src/lib/status-board.ts, test/queue-head-refusal-is-legible.test.ts]
+  status: blocked
+  retirement: retired
+  attempts: 0
   rationale: |
     **ORDERING IS NOT THE PROBLEM, AND THE MEASUREMENT IS WHAT MAKES THAT SHARP.** `compareDispatch`
     (src/lib/drain.ts:372-373) sorts by `priority` ascending with absent as `+Infinity`, then
@@ -146,6 +149,60 @@
     (retirement records and operator blocks are indistinguishable on disk). W1-T20d's plan-health
     sweep is shipped (#140) and re-grades LINT VIOLATIONS ONLY, skipping merged tasks; the three
     stuck ids lint clean, so it is silent on them by construction.
+    ── RETIRED 2026-08-27, CRITERIA PRESERVED (W1-T269/W1-T270 shape) ──────────────────────────
+
+    THE SIX WITHDRAWN CRITERIA, PRESERVED VERBATIM so a future re-filing needs no archaeology:
+    (1) claim 'a task whose dispatch breaker has tripped is distinguishable from one no rung ever
+    considered' / proof 'unit test: test/queue-head-refusal-is-legible.test.ts';
+    (2) claim 'the refusal reason a task was skipped for is readable without opening the ledger by
+    hand' / proof 'unit test: test/queue-head-refusal-is-legible.test.ts';
+    (3) claim 'a tripped breaker on a task that sorts first is reported rather than left silent' /
+    proof 'unit test: test/queue-head-refusal-is-legible.test.ts';
+    (4) claim 'the dispatch cap is unchanged and no gate is weakened by this change' / proof 'unit
+    test: test/queue-head-refusal-is-legible.test.ts';
+    (5) claim 'a verify human task is never auto-dispatched by anything added here' / proof 'unit
+    test: test/queue-head-refusal-is-legible.test.ts';
+    (6) claim 'nothing added paces or throttles or sleeps a call' / proof 'unit test:
+    test/queue-head-refusal-is-legible.test.ts'.
+    They are preserved, not deleted, and the `acceptance:` block below is UNCHANGED — Rule 21
+    freezes it, and this retirement does not edit, reword or drop a single one of them.
+
+    Q1 — WHY RETIRED RATHER THAN CORRECTED. Five of the six criteria above are written against the
+    starvation premise the amendment above disproves: the "queue head", "the refusal reason a task
+    was skipped for", the unchanged cap, the human gate and the pacing guard all presuppose a task
+    that dispatch is failing to take. Exactly ONE survives — (1), the circuit-breaker observability
+    gap: `DispatchFilterReason` has six arms and none names the breaker, `isDispatchBreakerTripped`
+    is consulted a layer above `isDispatchEligible`, and `deriveCircuitBrokenBlockers`' own doc says
+    it is not read to change any dispatch decision. RULE 21 FREEZES `acceptance:`, so the surviving
+    criterion cannot be lifted out of this shard and the five false ones cannot be removed from
+    beside it. A shard whose title, `files:` and five-sixths of its criteria describe a condition
+    that does not occur is not repairable by amendment. Retirement is the only move that leaves the
+    record honest.
+
+    THE SUCCESSOR, NAMED SO IT IS FINDABLE — AND ITS STATE STATED RATHER THAN ASSUMED. The id held
+    for the re-filing of criterion (1) is **W1-T2415**, reserved at `refs/rmd-id/W1-T2415`
+    (2026-08-27T21:41:04Z). ⚠ AS OF THIS EDIT THE SUCCESSOR SHARD IS NOT YET ON ANY SURFACE: it is
+    absent from `plan/tasks.d/` in `origin/main`'s tree, absent from the declared ids, and no open PR
+    files it — W1-T2414 is the CI-only fixture-config path, not this. The reservation is therefore
+    the pointer a future reader should follow, and the filing is PENDING, not missing. Read together
+    with W1-T2335, which records the neighbouring half — `deriveCircuitBrokenBlockers` rendering
+    `circuit_broken` for tasks dispatch will never take — and is a different task, not this one.
+
+    ⚠ Q2 — THE WORK IS NOT DONE AND WAS NEVER NEEDED. This is a retirement BY CORRECTION, not by
+    completion, and the distinction is W1-T269's. Nothing here was built, nothing here was
+    superseded by a later merge, and no criterion is being dropped as already-satisfied. The three
+    tasks the shard was written from — W1-T418, W1-T419, W1-T420 — were MERGED the whole time
+    (`verdict.merged` x60, `sweep.credit_backfill` x3), so there was never a starved queue head to
+    make legible. A reader must not record this as shipped, and must not count it as delivered work.
+
+    Q3 — THE MISREADING ITSELF, AS THE DURABLE LESSON. **"FIRST IN `dispatchOrder`" IS NOT "NEXT UP",
+    BECAUSE THE SORT PRECEDES THE FILTER.** `compareDispatch` orders every task; `isDispatchEligible`
+    then decides which of them may run, and it opens on the live merged credit, `isMerged(t.id)`. A
+    merged task therefore sorts to the HEAD of the list and is correctly refused on the very next
+    line, every pass. The head of the list is a display of candidates, not a queue of them, and
+    reading position in `dispatchOrder` as intent-to-dispatch is what produced five false criteria
+    here. Anyone re-filing from this record should take the lesson before taking the criteria.
+
   acceptance:
     - claim: "a task whose dispatch breaker has tripped is distinguishable from one no rung ever considered"
       proof: "unit test: test/queue-head-refusal-is-legible.test.ts"
