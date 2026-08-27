@@ -174,7 +174,7 @@ interface Exemption {
 const EXEMPTIONS: Exemption[] = [
   {
     file: ".github/workflows/fleet-heartbeat-watch.yml",
-    line: 245,
+    line: 287,
     flag: "--depth",
     reason:
       "hosted GitHub Actions runner, fetching one named branch ref by name, for a heartbeat " +
