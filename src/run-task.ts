@@ -5832,6 +5832,110 @@ export function detectReviewFalseBlock(check: {
 }
 
 /**
+ * W1-T2328 (the "inert fix" defect this closes — a strike whose push landed but changed nothing
+ * a re-check could see): the ci-log SIBLING of {@link detectReviewFalseBlock} — does THIS round's
+ * freshly refreshed failing-check evidence show the SAME findings as the evidence the strike that
+ * just ran was dispatched to fix, so a further strike could only re-discover what this one already
+ * showed?
+ *
+ * DROPS detectReviewFalseBlock's head-sha conjunct ON PURPOSE (design Q2): that function requires
+ * BOTH "same criteria" AND "same head sha" because a reviewer re-posting against an UNCHANGED head
+ * is the only way it can be certain no new work was even offered. Here a fix worker's push landing
+ * a real commit is not in question — the rung already pushed and CI already re-ran against a new
+ * head before this is ever called — so an identical finding set after that landed push IS the
+ * evidence on its own; requiring the sha to ALSO be unchanged would make this never fire on the
+ * exact shape it exists for.
+ *
+ * COMPARES THE ANNOTATION MESSAGE SET, NEVER THE LOG TAIL OR THE CONCLUSION (design Q1):
+ *  - The CONCLUSION alone can only ever prove "fixed" (failure→success needs no comparison — the
+ *    rung is already done); failure→failure is the ambiguous case this exists for, so the
+ *    conclusion can never answer it alone.
+ *  - The LOG TAIL is unusable as the comparison KEY: {@link CiFailure.logUnavailable} documents
+ *    that a denied read once behaved exactly as if nothing had failed, so keying on an
+ *    always-empty string would report "unchanged" on every round — the worst possible failure for
+ *    this feature, since it would stand a healthy rung down.
+ *  - The ANNOTATION message set (`tailSource === "annotations"`, {@link CiFailure.logTail} split
+ *    into lines, normalised and compared as a SET rather than a raw string diff, because two runs
+ *    of the same gate can legitimately order their findings differently) is the one surface
+ *    {@link fetchCiFailures} names as load-bearing evidence rather than a best-effort blob:
+ *    {@link CiAnnotationFallback}'s three-way union already distinguishes "this check published
+ *    nothing" (`empty`) from "the fetch itself broke" (`failed`) from a real read (`recovered`),
+ *    so silence is never confused with a match.
+ *
+ * ABSTAINS (returns `undefined`, meaning "strike normally") on anything short of two directly
+ * comparable annotation sets for EVERY still-failing check name shared between the two rounds:
+ *  - the failing check NAME SET itself moved (a check resolved, or a different one turned red) —
+ *    real ground moved, the same signal {@link unchangedTreeStandDownReason}'s own `gateKey`
+ *    conjunct already uses to mean exactly that;
+ *  - either round carries no evidence at all (the very first round, or an unrefreshed/throwing
+ *    fetch);
+ *  - ANY shared check's tail did not come from `tailSource: "annotations"` on BOTH sides (a
+ *    readable log tail, a `no-job-id`/`fetch-failed`/`empty-log` read, or a failed/empty
+ *    annotation fallback are all "not comparable", never "comparable and equal") — per design
+ *    Q1's own rule: "fail toward spending the strike, never toward standing down, because a false
+ *    stand-down destroys a legitimate strike while a missed detection only costs what today
+ *    already costs."
+ *
+ * Pure and exported so the comparison is unit-testable independent of the rung's fetch/spawn
+ * plumbing — mirrors {@link detectReviewFalseBlock}'s own reason for being pure.
+ */
+export function detectCiLogVerdictUnchanged(check: {
+  /** The ci-log evidence THIS round's fix worker was dispatched to resolve. */
+  priorFailures: readonly CiFailure[];
+  /** The SAME check names' evidence, freshly refetched after this round's push landed and CI
+   *  re-ran. */
+  currentFailures: readonly CiFailure[];
+}): string | undefined {
+  const { priorFailures, currentFailures } = check;
+  if (priorFailures.length === 0 || currentFailures.length === 0) return undefined;
+
+  const priorNames = priorFailures.map((f) => f.name).slice().sort();
+  const currentNames = currentFailures.map((f) => f.name).slice().sort();
+  if (priorNames.length !== currentNames.length || priorNames.some((n, i) => n !== currentNames[i])) {
+    return undefined; // the failing set itself moved — real ground moved, never "unchanged"
+  }
+
+  const priorByName = new Map(priorFailures.map((f) => [f.name, f] as const));
+  const currentByName = new Map(currentFailures.map((f) => [f.name, f] as const));
+  for (const name of priorNames) {
+    const priorSet = comparableAnnotationSet(priorByName.get(name));
+    const currentSet = comparableAnnotationSet(currentByName.get(name));
+    if (!priorSet || !currentSet || !annotationSetsEqual(priorSet, currentSet)) {
+      return undefined; // not comparable, or genuinely different — abstain, strike normally
+    }
+  }
+  return (
+    `ci-log false-block: ${priorNames.join(", ")} — identical annotation finding set both before ` +
+    `and after this strike's landed push (no verdict movement to show for it)`
+  );
+}
+
+/**
+ * W1-T2328: the normalised, order-insensitive annotation MESSAGE SET a {@link CiFailure} carries —
+ * `undefined` (never comparable) unless its tail was actually sourced from annotations
+ * (`tailSource === "annotations"`) and that tail is non-empty. A readable LOG tail
+ * (`tailSource === "log"`), an unread log with no annotation fallback reached, or an annotation
+ * fallback that came back `empty`/`failed` are all "not comparable" by this same test — never
+ * silently treated as an empty (and therefore falsely "equal") set.
+ */
+function comparableAnnotationSet(failure: CiFailure | undefined): Set<string> | undefined {
+  if (!failure || failure.tailSource !== "annotations") return undefined;
+  const lines = failure.logTail
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l !== "");
+  return lines.length > 0 ? new Set(lines) : undefined;
+}
+
+/** Order-insensitive set equality — `annotationSetsEqual` never cares which order two runs of
+ *  the same gate reported their findings in. */
+function annotationSetsEqual(a: Set<string>, b: Set<string>): boolean {
+  if (a.size !== b.size) return false;
+  for (const v of a) if (!b.has(v)) return false;
+  return true;
+}
+
+/**
  * W1-T1095 (capability 1 of 3, RECORD-AND-RESUME — design note (i)): recognizes the "blocked
  * on #N" idiom in a review's own summary or an UNMET criterion's own reason — the phrase a
  * reviewer already writes when a criterion cannot be satisfied from INSIDE this diff because it
@@ -7278,6 +7382,14 @@ export async function runFixRung(opts: {
     // worker-visible unmet set the fix rung actually dispatches (W1-T166).
     const priorHeadSha = review.headSha;
     const priorUnmetClaims = new Set(unmet.map((c) => c.claim));
+    // W1-T2328: the ci-log evidence THIS round's dispatch (below) is about to target, snapshotted
+    // BEFORE the strike runs — mirrors `priorHeadSha`/`priorUnmetClaims` immediately above, for
+    // the ci-log mode those two exist to cover in review mode. `undefined` outside ci-log mode
+    // (merge-conflict or review dispatch): {@link detectCiLogVerdictUnchanged} treats an empty/
+    // absent prior evidence set as "not comparable" and abstains, so this is inert there by
+    // construction, never a special case. Read again after the push below (`currentCiFailures`,
+    // refreshed by `deps.fetchCiFailures`) to see whether the strike that just ran moved anything.
+    const priorCiFailures = currentMergeConflict === undefined && noReviewYet ? currentCiFailures ?? [] : undefined;
     const evidence: FixEvidence =
       currentMergeConflict !== undefined
         ? { mergeConflict: currentMergeConflict, constraint: opts.constraint }
@@ -7462,6 +7574,79 @@ export async function runFixRung(opts: {
           deps.log("fix.ci_failures_fetch_error", { strike: strikes, error: String((e as Error)?.message ?? e) });
         }
       }
+
+      // W1-T2328 SITE — THE CI-LOG VERDICT-UNCHANGED CHECK, RIGHT AFTER THE REFRESH ABOVE: this
+      // strike's push landed and CI re-ran, but did the finding set actually MOVE? Comparing
+      // `priorCiFailures` (what this strike targeted, snapshotted before dispatch above) against
+      // the evidence just refreshed answers that — see `detectCiLogVerdictUnchanged`'s own doc for
+      // the comparison and its abstain rule. `priorCiFailures` is `undefined` unless THIS round
+      // was dispatched in ci-log mode, so a review-mode or merge-conflict-mode strike that
+      // regressed CI for the first time is never compared against evidence it never had (the
+      // function's own empty-array guard would abstain anyway; the `undefined` check here just
+      // skips the call). Composes the SAME two outcomes `detectReviewFalseBlock` already composes
+      // (design Q2's "disposition" — never a third invented one): NO ADDITIONAL STRIKE is spent
+      // (this falls through to `escalated` instead of `continue`-ing to the next round's dispatch)
+      // and the escalation CARRIES THE EVIDENCE, exactly like the review false-block escape below.
+      if (priorCiFailures !== undefined) {
+        const ciFalseBlockReason = detectCiLogVerdictUnchanged({
+          priorFailures: priorCiFailures,
+          currentFailures: currentCiFailures ?? [],
+        });
+        if (ciFalseBlockReason) {
+          // W1-T177 discipline extended to this NEW spending site, exactly like the review
+          // false-block escape does: a fresh terminal-state read before filing a needs-human
+          // issue, so a PR that went terminal between this round's push and here never gets a
+          // false-block escalation opened against it either.
+          const preCiFalseBlockStandDown = await fixRungStandDownReason(deps.readLiveState, opts.prUrl, "rung.ci_false_block", deps.log);
+          if (preCiFalseBlockStandDown) {
+            deps.log("fix.stood_down", { site: "rung.ci_false_block", strikes, reason: preCiFalseBlockStandDown.reason });
+            deps.say(`fix rung: standing down before ci-log false-block escalation — ${preCiFalseBlockStandDown.reason}`);
+            return {
+              outcome: "stood_down",
+              review,
+              strikes,
+              reason: preCiFalseBlockStandDown.reason,
+              standDownReason: preCiFalseBlockStandDown.reason,
+            };
+          }
+          deps.log("fix.ci_false_block", { strike: strikes, reason: ciFalseBlockReason });
+          deps.say(
+            `fix rung: ESCAPING after strike ${strikes}/${opts.strikeCap} — ${ciFalseBlockReason} — escalating for ` +
+              `re-judgment rather than striking toward exhaustion: ${opts.prUrl}`,
+          );
+          const issueUrl = escalate(
+            {
+              class: "BLOCKED",
+              taskId: opts.taskId,
+              runId: opts.runId,
+              headSha: review.headSha,
+              cause: escalationCause(false, true),
+              summary: `ci-log false-block after ${strikes} strike(s) (${ciFalseBlockReason}) — ${opts.prUrl}`,
+              detail:
+                `The blocked_ci FIX RUNG (ci-log mode, W1-T94/W1-T100/W1-T2328) detected a CI-LOG FALSE-BLOCK it ` +
+                `cannot resolve by dispatching more code: ${ciFalseBlockReason}. Failing check(s):\n\n` +
+                renderEscalationEvidence(currentCiFailures ?? [], (f) => `- ${summarizeCiFailure(f)}`, currentCiFailures !== undefined) +
+                `\n\nThis strike's push landed a real commit and the check(s) re-ran, but the annotation findings ` +
+                `are byte-identical to what the previous round already observed — a further strike could only ` +
+                `re-discover what this one already showed. Escalating for a HUMAN RE-JUDGMENT after ${strikes} ` +
+                `strike(s) instead of spending the remaining strike(s) confirming the same finding again.`,
+              options: [
+                {
+                  label: "hand-fix",
+                  detail: "resolve the failing check(s) on the same branch by hand, then push to re-trigger CI.",
+                },
+                { label: "close", detail: "close the PR and re-scope the task if the check itself cannot be satisfied." },
+              ],
+              recommendation: "hand-fix",
+            },
+            { issues: deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId },
+          );
+          deps.log("fix.exhausted", { strikes, issue_url: issueUrl, reason: "ci_false_block" });
+          deps.say(`fix rung: escalated (ci-log false-block) — ${issueUrl}`);
+          return { outcome: "escalated", review, strikes, reason: "ci_false_block", issueUrl };
+        }
+      }
+
       continue; // still failing — loop to the next strike (or exhaust below)
     }
 
