@@ -237,7 +237,9 @@ import {
   proposeFeedbackWithSummary,
   readFeedbackEntry,
   realDecisionSummarizer,
+  realFeedbackExpander,
   resolveDecisionSummaryMount,
+  resolveFeedbackExpansionMount,
   setFeedbackStatus,
   FeedbackError,
   type FeedbackEntry,
@@ -21422,11 +21424,18 @@ export async function serveCommand(
   // to the actual shared pacer below; a test supplies a spy factory to observe the options this
   // construction passes (the pacer, the derived TTL) or a fake pacer to observe `wait()`/
   // `recordResult()` without shelling out to `gh`.
+  // `loadMounts`/`spawn` (W1-T2303) back the feedback-expansion rung resolved below: real callers
+  // omit both and get the actual `.remudero/mounts.yaml` table and the actual `spawnWorker` — a
+  // test overrides `loadMounts` to force the "no mount configured" leg deterministically (without
+  // touching the shipped table) and overrides `spawn` to observe/stub the rung's one real call
+  // without shelling out to a live worker.
   deps: {
     branch?: (repoDir: string) => string | null;
     bindRetry?: { attempts?: number; delayMs?: number };
     buildBatchedGithub?: typeof buildBatchedGithub;
     boardPacer?: GhCallPacer;
+    loadMounts?: typeof loadMounts;
+    spawn?: typeof spawnWorker;
   } = {},
 ): Promise<number> {
   // `--host` was documented in USAGE and read by resolveServeHosts, but was NOT in this
@@ -21513,6 +21522,51 @@ export async function serveCommand(
     pacer: boardPacer,
     ttlMs: DEFAULT_BOARD_POLL_TTL_MS,
   });
+  // W1-T2303: resolve the feedback-expansion rung ONCE at boot (never per request) — the SAME
+  // shape `resolveDecisionSummaryMount`/`realDecisionSummarizer` already wire for the sibling
+  // decision-summary rung (`triageCommandLocked`'s `summarizeDeps`), reused verbatim: no new
+  // mounts.yaml row, no new model-call idiom. `rmd serve` is a long-lived process with no
+  // per-request worktree, so design (ii) is answered from source rather than copied from that
+  // per-run precedent:
+  //   - cwd: `repoRoot`, the daemon's own checkout — the SAME root the `feedbackLand` bridge
+  //     below already writes against and the real `bin/rmd approve`/`reframe` RatifyCliGateway
+  //     spawn already runs from (lib/serve.ts's own doc: "config.root === fleetControlRoot ...
+  //     the same root every other rmd-serve state file already lives under"). There is no
+  //     worktree standing in for one and none should be minted for a prompt-only rung that
+  //     touches no files.
+  //   - settingsFile: rendered ONCE here, at boot, from the SAME template/hooksDir every other
+  //     spawn renders from (`settings/worker.json`, `hooks/` — both real, absolute,
+  //     repoRoot-anchored paths regardless of which worktree a per-run spawn happens to use) —
+  //     never re-rendered per preview request. `buildFeedbackExpansionSpawnArgs` (feedback.ts)
+  //     already pins `tools: []` on this rung, so no tool this settings file's hooks/permissions
+  //     govern can ever fire for it — the rendered file's only remaining job is to be valid JSON
+  //     the SDK's `settings` option accepts, exactly like every other rendered settings file.
+  // Resolution failure (no mounts table, an empty routing table, a bad template) is caught here
+  // and leaves `expandFeedback` unset — the SAME `{ expansion: null }` fail-open degrade an
+  // unset dep already produces (panel-graph.ts's own doc on `PanelGraphDeps.expandFeedback`), so
+  // a broken/absent mounts install boots `rmd serve` UNCHANGED rather than crash-looping the
+  // whole console over one optional rung.
+  let expandFeedback: ReturnType<typeof realFeedbackExpander> | undefined;
+  try {
+    const mountsTable = (deps.loadMounts ?? loadMounts)(mountsPath(repoRoot));
+    const feedbackExpansionMount = resolveFeedbackExpansionMount(mountsTable);
+    const feedbackExpanderSettingsFile = renderWorkerSettings({
+      templatePath: join(repoRoot, "settings", "worker.json"),
+      hooksDir: join(repoRoot, "hooks"),
+      outPath: join(config.root, "tmp", `serve-settings-${runId}.json`),
+    });
+    validateWorkerSettingsFile(feedbackExpanderSettingsFile);
+    expandFeedback = realFeedbackExpander({
+      mount: feedbackExpansionMount,
+      cwd: repoRoot,
+      settingsFile: feedbackExpanderSettingsFile,
+      spawn: deps.spawn ?? spawnWorker,
+    });
+    log("serve.feedback_expander_resolved", { model: feedbackExpansionMount.model, effort: feedbackExpansionMount.effort });
+  } catch (e) {
+    log("serve.feedback_expander_unavailable", { error: String((e as Error)?.message ?? e) });
+  }
+
   const server = buildServeServer({
     boardGithubRefreshMs: DEFAULT_BOARD_POLL_TTL_MS,
     // `inflightHolder` wires deriveStatus's THIRD liveness disjunct (lib/status.ts) to the real
@@ -21544,6 +21598,11 @@ export async function serveCommand(
       // operator's accept/reject click writes against `repoRoot` (the daemon's own checkout)
       // and, without this, leaves it dirty until the next `git checkout --`/reset wipes it.
       feedbackLand: {},
+      // W1-T2303: the real feedback-expansion rung, resolved once above — `undefined` on a
+      // resolution failure, which degrades POST /v1/feedback/preview to the SAME
+      // `{ expansion: null }` it has always returned (panel-graph.ts's own fail-open doc), never
+      // a boot crash.
+      expandFeedback,
     },
     ledgerPath,
     issues: ghIssueCloser(),

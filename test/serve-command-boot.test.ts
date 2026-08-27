@@ -21,6 +21,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { serveCommand } from "../src/run-task.js";
 import { serveLogPaths } from "../src/lib/launchd.js";
+import type { Mounts } from "../src/lib/mounts.js";
+import type { WorkerResult } from "../src/lib/worker.js";
 
 async function freePort(): Promise<number> {
   const probe = createServer();
@@ -164,6 +166,137 @@ test("an OFF-MAIN checkout warns loudly and SERVES ANYWAY — a KeepAlive'd serv
   const warned = stderr.join("\n");
   assert.match(warned, /WARNING: this checkout is on branch 'run-W1-T152', not 'main'/);
   assert.match(warned, /Serving anyway/);
+
+  process.emit("SIGTERM");
+  assert.equal(await running, 0);
+});
+
+// ── W1-T2303: the feedback-expansion rung, wired at boot ────────────────────────────────────
+//
+// PanelGraphDeps.expandFeedback was assigned nowhere in production — this is the boot-path half
+// of that fix (the route's own fail-open legs are already covered, against a stub, by
+// test/panel-graph.test.ts). Both tests below drive the REAL `serveCommand` construction (never
+// a synthetic ServeDeps object) so the proof is that `rmd serve` itself resolves and threads the
+// rung through, not merely that `buildPreviewFeedbackRoute` can be handed one.
+
+function fakeWorkerResult(text: string): WorkerResult {
+  return {
+    sessionId: "s-feedback-expander-boot",
+    costUsd: 0.001,
+    numTurns: 1,
+    text,
+    blocks: [text],
+    stderr: "",
+    subtype: "success",
+    isError: false,
+    apiError: false,
+    permissionDenials: [],
+    childEnvKeys: [],
+    model: "haiku",
+    effort: "medium",
+    tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+    modelUsage: {},
+    compactionEvents: [],
+    qualitySuspect: false,
+  };
+}
+
+/** A `Mounts` table whose routing table defines no routes at all — the shape
+ *  `resolveRiskJudgeMount`/`resolveFeedbackExpansionMount` throws `MountsError` against
+ *  ("no worker mount found in mounts.yaml routes"), i.e. "an install that resolves no mount". */
+function noRouteMounts(): Mounts {
+  const mount = { model: "haiku", effort: "medium", maxTurns: 1, contextBudget: 1000 };
+  return { tiers: { haiku: 0 }, efforts: { medium: 0 }, architect: mount, judge: mount, routes: {} };
+}
+
+test("serve resolves a real feedback-expansion rung at boot: a preview backed by the stubbed spawn arms a real four-section expansion, not null", async (t) => {
+  const port = await freePort();
+  const { home, root } = instance({ host: "127.0.0.1", port });
+  const oldHome = process.env.HOME;
+  process.env.HOME = home;
+
+  const expansionPayload = {
+    claim: "the drain retry banner overlaps the status pill",
+    evidence: "",
+    recon: ["establish whether this reproduces at other viewport widths"],
+    falsifying_check: "if the overlap does not reproduce on a fresh reload, this is a one-off render glitch",
+  };
+  let spawnCalls = 0;
+  const spawn = async (): Promise<WorkerResult> => {
+    spawnCalls++;
+    return fakeWorkerResult(JSON.stringify(expansionPayload));
+  };
+
+  const stdout: string[] = [];
+  const realLog = console.log;
+  console.log = (...a: unknown[]) => void stdout.push(a.join(" "));
+
+  const running = serveCommand([], { branch: () => "main", spawn });
+  t.after(() => {
+    console.log = realLog;
+    process.env.HOME = oldHome;
+    process.emit("SIGTERM");
+  });
+
+  const deadline = Date.now() + 60_000;
+  while (Date.now() < deadline && !stdout.some((l) => l.includes("listening on"))) await sleep(100);
+  assert.match(stdout.join("\n"), /listening on/, "boots exactly as before this task");
+
+  // "resolved ONCE and threaded through": construction alone must not have spawned anything —
+  // the rung is a real cost only on an operator-initiated preview click (design (iv)).
+  assert.equal(spawnCalls, 0, "resolving the rung at boot must not itself spawn a worker");
+
+  const tokens = JSON.parse(readFileSync(join(root, "state", "service-tokens.json"), "utf8")) as { write: string };
+  const res = await fetch(`http://127.0.0.1:${port}/v1/feedback/preview`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${tokens.write}`, "content-type": "application/json" },
+    body: JSON.stringify({ text: "the console doesn't show me when spend is blocked" }),
+  });
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as { expansion: unknown };
+  assert.deepEqual(body.expansion, expansionPayload, "the real expander (stubbed spawn) armed a real expansion, not { expansion: null }");
+  assert.equal(spawnCalls, 1, "exactly one spawn per preview click");
+
+  const ledger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8");
+  assert.match(ledger, /"step":"serve\.feedback_expander_resolved"/);
+
+  process.emit("SIGTERM");
+  assert.equal(await running, 0);
+});
+
+test("an install whose mounts table resolves no route boots UNCHANGED: preview still degrades to { expansion: null }, same fail-open as before this wiring", async (t) => {
+  const port = await freePort();
+  const { home, root } = instance({ host: "127.0.0.1", port });
+  const oldHome = process.env.HOME;
+  process.env.HOME = home;
+
+  const stdout: string[] = [];
+  const realLog = console.log;
+  console.log = (...a: unknown[]) => void stdout.push(a.join(" "));
+
+  const running = serveCommand([], { branch: () => "main", loadMounts: () => noRouteMounts() });
+  t.after(() => {
+    console.log = realLog;
+    process.env.HOME = oldHome;
+    process.emit("SIGTERM");
+  });
+
+  const deadline = Date.now() + 60_000;
+  while (Date.now() < deadline && !stdout.some((l) => l.includes("listening on"))) await sleep(100);
+  assert.match(stdout.join("\n"), /listening on/, "a mount that fails to resolve must not crash-loop the whole console");
+
+  const ledger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8");
+  assert.match(ledger, /"step":"serve\.feedback_expander_unavailable"/);
+  assert.match(ledger, /no worker mount found in mounts\.yaml routes/);
+
+  const tokens = JSON.parse(readFileSync(join(root, "state", "service-tokens.json"), "utf8")) as { write: string };
+  const res = await fetch(`http://127.0.0.1:${port}/v1/feedback/preview`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${tokens.write}`, "content-type": "application/json" },
+    body: JSON.stringify({ text: "x" }),
+  });
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { expansion: null }, "unresolved mount degrades exactly like an unset dep — never a 5xx, never a crash");
 
   process.emit("SIGTERM");
   assert.equal(await running, 0);
