@@ -26,8 +26,10 @@ import {
   buildBatchedGithub,
   buildCommitTrailerLookup,
   commitTrailerTaskId,
+  COMMIT_TRAILER_TASK_ID_RE,
   ghGateway,
   parseCommitTrailerCredits,
+  TASK_ID_SHAPE_RE,
   type BatchedPr,
   type CommitTrailerLookup,
 } from "../src/lib/status.js";
@@ -40,6 +42,21 @@ const RS = String.fromCharCode(30);
 function gitLogDump(records: Array<{ sha: string; subject: string; body: string }>): string {
   return records.map((r) => `${r.sha}${NUL}${r.subject}${NUL}${r.body}${RS}`).join("");
 }
+
+// ── negative-reachability-ratchet.test.ts's own gate: every module-scope `_RE` validator needs a
+// fixture that drives BOTH an accepting and a rejecting arm, by direct identifier. `commitTrailerTaskId`
+// above already exercises both regexes end-to-end; these two additionally drive each regex directly.
+
+test("W1-T2387: TASK_ID_SHAPE_RE accepts a task id and rejects a run id (direct regex exercise)", () => {
+  assert.equal(TASK_ID_SHAPE_RE.test("W1-T2387"), true);
+  assert.equal(TASK_ID_SHAPE_RE.test("T42"), true);
+  assert.equal(TASK_ID_SHAPE_RE.test("DAEMON-1787845578879"), false);
+});
+
+test("W1-T2387: COMMIT_TRAILER_TASK_ID_RE captures an anchored trailer's value and misses an untrailered body (direct regex exercise)", () => {
+  assert.equal(COMMIT_TRAILER_TASK_ID_RE.exec("fix(x): thing\n\nRemudero-Task: W1-T2387\n")?.[1], "W1-T2387");
+  assert.equal(COMMIT_TRAILER_TASK_ID_RE.exec("no trailer here at all"), null);
+});
 
 // ── The task-id grammar guard, isolated (the falsifier's own negative arm) ─────────────────────
 

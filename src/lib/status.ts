@@ -4039,14 +4039,17 @@ export function ghRequiredStatusCheckContexts(owner: string, repo: string, branc
  * — but CAPTURING the value rather than testing a known one, because this surface must classify an
  * unknown captured token before it can ever be compared to a specific taskId.
  */
-const COMMIT_TRAILER_TASK_ID_RE = /^Remudero-Task:\s*(\S+)\s*$/m;
+export const COMMIT_TRAILER_TASK_ID_RE = /^Remudero-Task:\s*(\S+)\s*$/m;
 
 /**
  * `W<n>-T<n>` or bare `T<n>` — the same task-id vocabulary {@link TASK_ID_RE} (retro.ts) scans free
  * text for, here anchored to the WHOLE captured token rather than merely containing one. A run id
- * (`DAEMON-<epochMs>`) has no `-T\d+` suffix and matches neither branch.
+ * (`DAEMON-<epochMs>`) has no `-T\d+` suffix and matches neither branch. EXPORTED (unlike most
+ * validator regexes in this file) so test/trailer-surface-union.test.ts can drive both arms
+ * directly by identifier, satisfying negative-reachability-ratchet.test.ts's fixture-less `_RE`
+ * gate rather than merely raising status.ts's already-fixture-less count.
  */
-const TASK_ID_SHAPE_RE = /^(?:[A-Za-z0-9]+-T\d+|T\d+)$/;
+export const TASK_ID_SHAPE_RE = /^(?:[A-Za-z0-9]+-T\d+|T\d+)$/;
 
 /**
  * The task id a commit's own trailer credits, or `undefined` when the body carries no anchored
