@@ -62,6 +62,66 @@
     EFFECT, because the order it produces is irrelevant when nothing queues and the head is refused
     elsewhere. **The finding is the skip, not the field.** Removing `priority` is not proposed, and
     no scoring model is proposed — either would answer a question the measurement did not ask.
+
+    ── THE PREMISE IS FALSE: THERE IS NO SKIP (amendment 2026-08-27) ───────────────────────────
+
+    **W1-T418, W1-T419 AND W1-T420 ARE NOT SKIPPED. THEY ARE MERGED.** A BUILD MUST NOT PROCEED ON
+    THE ORIGINAL PREMISE — there is no starved queue head to make legible, because the three tasks
+    the shard was written from were never waiting. A worker that reads only the sections above this
+    one will build a fix for a condition that does not occur.
+
+    MEASURED ON THE DAEMON'S OWN LEDGER over the three-form union: rows naming those three ids carry
+    `verdict.merged` x60, `sweep.credit_backfill` x3, `review.posted` x7, `followup.harvested` x12
+    and `daemon.idle_reasons` x2,758. CONTROL: `dispatch.skipped` reads 2,078 corpus-wide, so the
+    query does see that step family — the absence of a skip for these three is a measurement and
+    not a blind read.
+
+    WHERE THE MISREADING CAME FROM, NAMED SO IT IS NOT REPEATED: **"first in `dispatchOrder`" WAS
+    READ AS "NEXT UP", AND IT IS NOT.** `compareDispatch` SORTS and `isDispatchEligible` FILTERS, in
+    that order. `isDispatchEligible` opens on the live merged credit — `isMerged(t.id)` — so a
+    merged task sorts to the HEAD of `dispatchOrder` and is then correctly refused, every pass.
+    **THE HEAD OF THE LIST IS NOT THE NEXT PICK.** The ordering is a display of candidates, not a
+    queue of them.
+
+    AND `status: queued` ON A MERGED TASK IS THE DESIGN, NOT STALENESS — this shard must not be read
+    as evidence of a stale record either. The plan never writes merge credit into `status:`; credit
+    is derived at read time. Measured over the whole plan: of 423 tasks credited by a merged commit
+    trailer, 405 read `status: queued`, 6 `blocked` and 12 carry none. These three are among the 405,
+    which is the ordinary case and not an outlier. (This shard itself declares no `status:` at all.)
+
+    ── WHAT SURVIVES, AND IT IS ONE THING ─────────────────────────────────────────────────────
+
+    THE CIRCUIT-BREAKER OBSERVATION STANDS ON ITS OWN EVIDENCE AND IS INDEPENDENT OF THE FALSE
+    PREMISE. `DispatchFilterReason` has SIX arms and NONE of them names the breaker;
+    `isDispatchBreakerTripped` is consulted at `daemon.ts:3219`, logging `dispatch.circuit_broken`;
+    and `deriveCircuitBrokenBlockers`' own doc at `status-board.ts:1522` says it is not read to
+    change any dispatch decision. So a task whose breaker has tripped is `isDispatchEligible ===
+    true`, sorts first, and is refused ONE LAYER ABOVE the selector — visible only as a ledger row,
+    invisible to every reason surface an operator actually reads. THAT IS A REAL OBSERVABILITY GAP.
+
+    IS IT WORTH KEEPING THE TASK FOR? ON THE EVIDENCE, NO — AND THAT IS THE HONEST ANSWER RATHER
+    THAN A HEDGE. Five of the six acceptance criteria are written against the starvation premise
+    (the "queue head", the "refusal reason a task was skipped for", the unchanged cap, the human
+    gate, the pacing guard); exactly one — "a task whose dispatch breaker has tripped is
+    distinguishable from one no rung ever considered" — survives the correction. A task whose title,
+    `files:` and five-sixths of its criteria describe a condition that does not occur is not
+    repairable by amendment: Rule 21 freezes those criteria, so the surviving one cannot be
+    separated from the five without a follow-up, and the follow-up IS the real task.
+
+    **SO THE RECOMMENDATION IS RETIREMENT, AND THIS PR DELIBERATELY DOES NOT RETIRE IT.** A
+    retirement sets `status: blocked` and adds `retirement: retired` with the criteria preserved
+    verbatim — the W1-T269/W1-T270 shape — and that is a separate operator decision. What this
+    amendment does is make the false premise impossible to miss while the record stands.
+
+    ── WHAT IS NOT PROPOSED, AND WHAT IS OWNED ELSEWHERE ──────────────────────────────────────
+
+    NOTHING HERE PROPOSES REMOVING `priority`, ADDING A SCORING MODEL, OR CHANGING `compareDispatch`.
+    The ordering is measurably irrelevant: filing-to-merge reads p50 4.7h, p90 19.5h and max 24.4h
+    over 30 tasks, none over seven days. NOTHING QUEUES, so nothing waits for a better order.
+
+    THE 42-TASK `verify: human` STANDING QUEUE IS NOT THIS SHARD'S. It is the union of W1-T2289,
+    W1-T2304 and W1-T391, recorded here so a reader does not attach it to the starvation premise
+    this section retracts.
   note: |
     **RULE 19 BAND, SET UP FRONT AND FOR THE SPAN.** `files:` reaches the dispatch vocabulary
     (`drain.ts`), the refusal site (`daemon.ts`) and the render (`status-board.ts`). That is three
