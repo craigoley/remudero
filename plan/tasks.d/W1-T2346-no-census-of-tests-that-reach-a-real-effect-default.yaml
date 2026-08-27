@@ -1,0 +1,154 @@
+- id: W1-T2346
+  title: "NOTHING ENUMERATES THE TESTS THAT FALL THROUGH TO A REAL-EFFECT DEPENDENCY DEFAULT — the live-write guard fences four gh/git WRITE verbs and nothing else, so a unit test that reaches `armIfVerdictPermits`' production default still performs a live REST head read and a machine-local config/ledger read before any fence is consulted, and no check anywhere names the population that can do it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  risk: medium
+  rationale: |
+    READ-ONLY, ON THE TRIAGE WORKTREE FOR fb-1786025201466-7081b2. No suite was run, nothing was
+    spawned, and no config was touched. Every line/number below is a QUERY plus its answer, not a
+    constant — re-derive before building, because the arm path moves weekly.
+
+    (1) THE FALSIFIER THE FEEDBACK NAMED WAS RUN, AND IT FAILED — SO THE DEFECT IS NOT ONLY THE
+    FIXTURE. The falsifying check was: "if `armIfVerdictPermits` already refuses without an explicit
+    token and these three tests supplied one inadvertently, the default is safe and the defect is
+    only in the fixture." It does not refuse. `armIfVerdictPermits` (`src/run-task.ts:2756`) declares
+    `deps: { arm?; ledgerLines? } = {}` and at line 2795 calls
+
+        const result = (deps.arm ?? armAutoMergeDetailed)(ctx.prUrl, ctx.taskId);
+
+    There is no token, no arm-required flag and no refusal branch. `runReview`'s single call site
+    (`src/run-task.ts:4577`) passes `{ arm: args.arm }`, and `arm` is OPTIONAL on `runReview`, so a
+    caller that omits it hands `undefined` straight into that `??` and the real arm is what runs. The
+    same shape repeats on `armAutoMerge` (1943), `armAutoMergeDetailed` (1960), the direct-merge path
+    (2308) and the disarm path (2391), each written `deps: ArmDeps = realArmDeps()`.
+
+    (2) AND THE EXISTING GUARD DOES NOT COVER THE HALF THAT ACTUALLY FIRED. `realArmDeps()`
+    (1830-1899) is not uniformly fenced — it is fenced only at the WRITE leaves:
+      - `armAuto`, `mergeDirect`, `disableAuto` — each opens with
+        `assertLiveWriteAllowed("gh-pr-merge", ...)`, so under `NODE_TEST_CONTEXT` the irreversible
+        act throws `LiveWriteBlockedError`. THIS PART HELD. A fallen-through test does not merge a
+        PR and does not spend.
+      - `headSha: (prUrl) => readHeadShaRest(prUrl)` — a LIVE REST READ against real credentials,
+        performed by `armAutoMergeDetailed` at line 1971 BEFORE anything is fenced. It is a read, so
+        `LiveWriteBoundary` (`git-push | gh-pr-create | gh-pr-merge | gh-issue-create |
+        gh-pr-update-branch`, `src/lib/live-write-guard.ts:86`) does not and cannot see it.
+      - `ledgerLines: () => readLedgerLines(ledgerPathFor(loadConfigImpl()))` — the machine's own
+        config, read at line 1850, likewise before any fence.
+    So the guard's coverage of this path is exactly the write leaves. The feedback's crash entered
+    through the reads, which is why it presented as a `SyntaxError` from `JSON.parse` and not as a
+    refusal.
+
+    (3) THE SPECIFIC CRASH IS ALREADY SWALLOWED; THE CLASS IS NOT — AND CONFLATING THE TWO IS THE
+    WAY THIS GETS CLOSED WRONGLY. W1-T1000002 wrapped `realArmDeps().ledgerLines` in a
+    `try { ... } catch { return []; }` (1848-1854) for an unrelated reason (arming must survive a
+    host that cannot resolve a config). That catch now absorbs the exact
+    `SyntaxError: Unexpected end of JSON input` the feedback reproduced. IT ABSORBS NOTHING ELSE:
+    `armIfVerdictPermits`' OWN evidence read at line 2777 —
+    `(deps.ledgerLines ?? (() => readLedgerLines(ctx.ledgerPath)))()` — has no catch and still reads
+    a path handed in from `ctx` on the capped branch, and `deps.headSha` at 1971 is caught only to be
+    turned into a `head-unavailable` outcome, i.e. the REST call is still made. A future reader must
+    not conclude from "that stack trace no longer reproduces" that the class is closed.
+
+    (4) THE POPULATION IS UNKNOWN, WHICH IS THE WHOLE FILING. 18 `runReview(` call sites across 10
+    files under `test/` (`test/unwired-export-advisory-section`, `run-review-holdout-integration`,
+    `rubric-authorship-wiring`, `ships-unwired-floor`, `wiring-ordering-behaviour`, `review`,
+    `scope-guard-overrun`, `review-pending-post-degrades`, `worker`, `review-status-pending`). That
+    count is the CEILING for one entry point only, and it is not the answer: whether each reaches the
+    default depends on whether its verdict passes and whether it supplies `arm`. `runReview` is also
+    not the only door — `armAutoMerge`/`armAutoMergeDetailed`/`attemptArm` are exported and any
+    caller may omit `deps` entirely. NOTHING IN THE TREE ANSWERS "which tests reach a real-effect
+    default", and the three tests in the feedback were found only because an unrelated CI box had an
+    empty config.
+
+    (5) WHY THE NEAREST EXISTING CHECKS DO NOT ANSWER IT. `test/live-write-guard-command-sites.test.ts`
+    checks the guard FROM THE GUARD'S SIDE — that each of the four verbs has its assertion — never
+    which tests can arrive at one. W1-T1206 builds a derived completeness check for
+    `scripts/clock-sweep.mjs`' OWN candidate population against `SPAWN_REACHING`; that is the same
+    DISCIPLINE (and is adopted here) applied to a different population, and it is scoped to the clock
+    sweep's shifted-clock runs, not to the default-dependency question. W1-T515 explicitly rules the
+    live-write guard the wrong module for its plan-tree writes and must not be read as covering this.
+  design: |
+    (i) THE DELIVERABLE IS THE DERIVED ALARM, AND IT IS A STATIC READ. One new test file that (a)
+    derives, from `src/`, every exported function whose optional dependency parameter DEFAULTS to a
+    real-effect implementation — the `deps: ArmDeps = realArmDeps()` and `deps.x ?? realThing` shapes
+    of rationale (1), found by reading source, never by a hardcoded list of names — and (b) derives,
+    from `test/`, which suites call one of those entry points without supplying the seam. It runs no
+    suite, spawns nothing, shifts no clock and touches no network. A completeness check that reaches
+    the effects it is checking for is the defect twice (W1-T1206 design (iv), adopted verbatim).
+
+    (ii) THE OUTPUT IS A POPULATION WITH A REASONED EXCLUSION SET, NOT A BOOLEAN. The precedent is
+    `test/instrument-surface-completeness.test.ts` (W1-T402) as applied by W1-T1206: a declared
+    exclusion set is the sole authority, the alarm never adds to or subtracts from it, and an
+    exclusion carrying NO STATED REASON does not count as an excuse. A suite that deliberately drives
+    the real dep against its own containment stays in the set WITH its reason written down; a suite
+    that merely never noticed it does not.
+
+    (iii) BOTH HALVES OF "REAL EFFECT" ARE IN SCOPE AND THE SPLIT MUST BE REPORTED. The check
+    classifies each reachable default as WRITE-FENCED (an `assertLiveWriteAllowed` boundary stands
+    between the default and the effect) or UNFENCED (a live read, a machine-local config/ledger read,
+    or any effect the `LiveWriteBoundary` union does not name). Rationale (2) is the worked example:
+    the same `realArmDeps()` object is both. Collapsing them into one verdict would report the arm
+    path as "guarded" and hide the reads that actually fired.
+
+    (iv) AMBIENT MACHINE STATE IS PART OF THE PREDICATE, NOT A SEPARATE CONCERN. `loadConfig()` shells
+    `which claude` and parses an instance config; LEARNINGS.md's PR #18 entry already records this as
+    a STRUCTURAL trap ("resolve config LAZILY so injected-executor tests never touch it"). A default
+    that reaches `loadConfig()` or `ledgerPathFor(...)` counts as reachable ambient state even when the
+    result is caught and discarded, because the outcome of the test then depends on the box.
+
+    (v) NOTHING IS FLIPPED HERE. This task changes no default and declares no `src/` path. Making the
+    real arm opt-in is W1-T2347 and depends on this census, because flipping a default without first
+    knowing the population is how a green suite turns red for reasons nobody can attribute.
+
+    (vi) OUT OF SCOPE, NAMED. Widening `LiveWriteBoundary` (W1-T920/W1-T921 ruled on `gh-pr-close`
+    and that ruling is not reopened); the clock-sweep exclusion alarm (W1-T1206 owns it); the three
+    `runReview` tests from the feedback, which are already repaired on the #1431 branch with the
+    arm/disarm seams and are cited as the worked example rather than re-fixed.
+  acceptance:
+    - claim: "the set of real-effect dependency defaults is derived by reading src rather than hardcoded as a list of names"
+      proof: "unit test: test/operator-gated-default-reachability.test.ts"
+    - claim: "a test that calls an entry point without supplying the seam is reported as reaching that entry point's production default"
+      proof: "unit test: test/operator-gated-default-reachability.test.ts"
+    - claim: "each reachable default is classified as write-fenced or unfenced and a live read counts as unfenced"
+      proof: "unit test: test/operator-gated-default-reachability.test.ts"
+    - claim: "a default that reaches loadConfig or the ledger path counts as reaching ambient machine state"
+      proof: "unit test: test/operator-gated-default-reachability.test.ts"
+    - claim: "an exclusion carrying no stated reason does not excuse a candidate"
+      proof: "unit test: test/operator-gated-default-reachability.test.ts"
+    - claim: "the check completes without running a suite spawning a process or touching the network"
+      proof: "unit test: test/operator-gated-default-reachability.test.ts"
+  files: [test/operator-gated-default-reachability.test.ts]
+  status: queued
+  attempts: 0
+  origin: feedback#fb-1786025201466-7081b2
+  plan_refs: ["W1-T1206", "W1-T1000002", "W1-T515", "W1-T402", "W1-T2232", "W1-T1087"]
+  note: |
+    THE FALSIFIER WAS RUN BEFORE THIS WAS FILED, AND IT IS RECORDED BECAUSE IT PARTLY SUCCEEDED. The
+    feedback offered an exit — if the default already refuses without a token, only the fixture is at
+    fault. It does not refuse (rationale 1), so the exit is closed. But the guard DID hold at the
+    write leaves (rationale 2), so the honest claim is narrower than the report's: no money was spent
+    and no PR was merged. What was reached was a live REST read and the machine's own config. File
+    the smaller true thing.
+
+    `risk: medium` IS RULE 19'S SPAN AND ALSO THE BLAST RADIUS. ONE declared path, ONE stem, no `src/`
+    change, and the deliverable is a static read that cannot itself reach an effect. Arguing it up to
+    `high` because the SUBJECT is auto-merge would be flattering the filing; the artefact is a test
+    file that reads two directories.
+
+    EVERY PROOF IS THE PURE-PATH `unit test:` FORM NAMING A FILE THAT DOES NOT EXIST ON THIS TREE, so
+    each resolves through W1-T456's forward-reference carve-out to `not_yet_built` on the filing PR
+    and EXECUTES once the file lands. No proof greps its own declared path, and none names an
+    existing test file — a pure-path proof aimed at an existing home would pass today and discriminate
+    nothing.
+
+    `files:` IS THE ONE FILE THIS TASK WRITES. Every `src/` and `test/` path the check READS is
+    deliberately undeclared: a declared-but-untouched path fails `inverseScopeUntouchedFiles`
+    (`src/lib/review.ts`) exactly as an undeclared one fails `scopeViolationFiles`.
+
+    THE COUNTS ARE DATED TO THIS TRIAGE AND ARE QUERIES. 18 `runReview(` sites in 10 files; five
+    `deps ... = realArmDeps()` defaults; a five-verb `LiveWriteBoundary`. Re-derive all three; the
+    number is not the finding, the derivation is.
