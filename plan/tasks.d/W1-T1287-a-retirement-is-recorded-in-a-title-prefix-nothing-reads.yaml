@@ -178,6 +178,20 @@
     guard is its own concern with its own blast radius and NEEDS ITS OWN ID. What this task owes
     is honesty about the gap, not a fix for it.
 
+    FORWARD POINTER, ADDED 2026-08-27 — (xii)'s GAP IS CLOSED, AND ITS OWN CONDITION WAS MET.
+    (xii) said a guard for `status:` "NEEDS ITS OWN ID". It got one: W1-T2254 widened Rule 21 past
+    the single field it guarded, shipping as `ad0c69b2` (#2844). `status` is now the FIRST entry in
+    `REPORTED_MERGED_FIELDS` (`src/lib/task-linter.ts`), ahead of `files`, `depends_on`, `priority`,
+    `risk`, `verify`, `type`, `principles`, `budget_usd` and `retirement`.
+
+    THE LIMIT IS RECORDED WITH THE CLOSURE, because reading the closure alone would overstate it.
+    `mergedFieldChangeViolations` emits at `severity: "warn"`, never `"block"`, and that is
+    deliberate rather than incomplete: W1-T2248 ruled that a merged `files:` can be provably wrong
+    and must stay correctable, so the widening had to be a DETECTOR rather than a BAR. The only
+    blocking arm in `postMergeAmendmentViolations` remains `criteriaAdded`. So a post-merge `status:`
+    edit is now VISIBLE and still PERMITTED — the outcome W1-T2248 asked for, and a narrower closure
+    than (xii)'s wording implies.
+
     (xiii) RULE 19 BAND. `risk: high` is set UP FRONT because `files:` spans two source stems
     (`plan.ts`, `status-board.ts`) and Rule 19 sizes on SPAN. The band is the span reading, NOT a
     blast-radius judgement -- the change is additive at both sites and perturbs no existing
