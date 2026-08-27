@@ -24,7 +24,8 @@ raw: >-
   2026-08-20T04:44:55.620Z: required checks red — ci-log fix, strike 1/2
 attachments: []
 origin: repair#blocked-fixable
-status: new
+status: rejected
 proposal_pr: null
 summary: null
 expansion: null
+answered_by: null
