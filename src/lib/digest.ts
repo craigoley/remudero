@@ -1,6 +1,10 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
+import { readFileSync as nodeReadFileSync, readdirSync as nodeReaddirSync } from "node:fs";
+import { gunzipSync as nodeGunzipSync } from "node:zlib";
+
 import { readLedgerLines } from "./status.js";
+import { ledgerRotationEntries, rotationStampIso, type LedgerGrepFsDeps } from "./ledger-grep.js";
 import { notify, type NotifyChannel, type NotifyDeps } from "./notify.js";
 import { renderAlertsSummary, type AlertsPollSummary } from "./ops.js";
 import { renderIssuesSummary, type IssuesPollSummary } from "./issues-intake.js";
@@ -463,6 +467,11 @@ export interface RepeatEscalationDigestEntry {
 
 export interface DigestSummary {
   sinceIso: string;
+  /** W1-T2388: what the windowed union actually reached. OPTIONAL, so every existing caller of
+   *  {@link summarize}/{@link renderDigest} (and every fixture) type-checks and renders unchanged;
+   *  {@link buildDigest} always sets it. Read ONLY to say so when the read was incomplete — never
+   *  to decide anything. */
+  read?: DigestWindowRead;
   merged: string[];
   blocked: Array<{ taskId: string; verdict: string; prUrl?: string }>;
   escalations: Array<{ taskId: string; class: string; issueUrl: string }>;
@@ -637,8 +646,20 @@ export function consoleCardUrl(consoleBaseUrl: string, taskId: string): string {
  * field existed — no caller that predates W1-T144 sees any change.
  */
 export function renderDigest(s: DigestSummary, consoleBaseUrl?: string): string {
+  // W1-T2388: AN INCOMPLETE READ MUST NEVER LOOK LIKE A QUIET BOARD — that is the failure this
+  // task exists to remove, so it is stated on its own line rather than inferred from short output.
+  // A COMPLETE read adds nothing: a clean board renders byte-identically to before this task.
+  const incomplete: string[] = [];
+  if (s.read && s.read.unread.length > 0) incomplete.push(`${s.read.unread.length} rotation(s) unreadable`);
+  if (s.read && s.read.archivesTruncated > 0) {
+    incomplete.push(`${s.read.archivesTruncated} rotation(s) past the ${s.read.capsApplied.maxArchives} archive cap`);
+  }
+  if (s.read && s.read.rowsTruncated > 0) {
+    incomplete.push(`${s.read.rowsTruncated} row(s) past the ${s.read.capsApplied.maxRows} row cap`);
+  }
   const lines = [
     `Remudero daily digest — since ${s.sinceIso}`,
+    ...(incomplete.length ? [`INCOMPLETE READ — this digest is missing rows: ${incomplete.join("; ")}`] : []),
     `merged: ${s.merged.length ? s.merged.join(", ") : "(none)"}`,
     `blocked: ${
       s.blocked.length ? s.blocked.map((b) => `${b.taskId} (${b.verdict}${b.prUrl ? ` — ${b.prUrl}` : ""})`).join(", ") : "(none)"
@@ -703,8 +724,181 @@ function renderBoardReviewSnapshot(b: BoardReviewDigestSnapshot): string {
  * Build the digest text straight from a ledger file, as of `sinceIso`. `consoleBaseUrl`
  * threads through to {@link renderDigest} — see its doc for the W1-T144 deep-link contract.
  */
+/** The real fs behind {@link readDigestWindow} — the SAME four operations `ledger-grep.ts`'s own
+ *  {@link LedgerGrepFsDeps} names, reused rather than a fifth shape, so a test drives this reader
+ *  with the fixtures that module's callers already use. */
+const realDigestFs: LedgerGrepFsDeps = {
+  readdirSync: (dir) => nodeReaddirSync(dir),
+  existsSync: () => true,
+  readFileSync: (path) => nodeReadFileSync(path),
+  gunzipSync: (buf) => nodeGunzipSync(buf),
+};
+
+/**
+ * W1-T2388 — A BACKSTOP, NOT A POLICY. The bound that matters is the WINDOW (every archive stamped
+ * before `sinceIso` is skipped unopened); this cap exists only so an unbounded corpus cannot make a
+ * reporter unbounded. It sits ABOVE the whole measured corpus (672 rotations, 118.1 MiB) and above
+ * the worst 24-hour window in it (649 rotations, 89.4 MiB), so it does not bite on today's data —
+ * and when it does bite, {@link renderDigest} SAYS SO rather than rendering a shorter board.
+ */
+export const DIGEST_MAX_ARCHIVES = 1024;
+
+/**
+ * W1-T2388 — THE BOUND THAT ACTUALLY BINDS, AND IT IS MEMORY RATHER THAN WALL CLOCK. MEASURED, and
+ * the measurement is why this exists at all: the busiest real 24-hour window in this corpus holds
+ * 649 of its 672 rotations, and a reader that retained every in-window row from them DIED with a
+ * V8 heap OOM at 4.1 GB — twice, once before the window filter was added and again after it, because
+ * in a busy window the rows ARE in window. Wall clock was never the binding constraint (the digest's
+ * own cadence floor is `minIntervalMinutes` >= 15, i.e. 900,000 ms, against a ~3 s union), so
+ * bounding seconds would have bounded the wrong thing.
+ *
+ * ROWS, NOT ARCHIVES, and NEWEST FIRST: archives are read newest-first, so the rows kept are the
+ * most recent ones — which is what a digest of a window wants — and the count dropped is RENDERED
+ * rather than silently shortening the board. 250,000 is ~14x the live file's own 17,509 lines and
+ * comfortably inside heap on this host; it is a ceiling on the pathological case, not a target.
+ */
+export const DIGEST_MAX_ROWS = 250_000;
+
+/** What one windowed union read actually reached — carried so the render can refuse to look quiet
+ *  when it was merely incomplete (W1-T444's coverage-not-readability rule, applied to a reporter). */
+export interface DigestWindowRead {
+  lines: LedgerLine[];
+  /** Rotations the enumerator classified under `<ledgerPath>`'s own directory. */
+  archivesConsidered: number;
+  /** In-window rows dropped because the row cap bit — always rendered, never silent. */
+  rowsTruncated: number;
+  /** The caps ACTUALLY applied. Carried rather than re-read from the constants, so a render can
+   *  never name a bound the read did not use — the first draft printed {@link DIGEST_MAX_ROWS}
+   *  beside a truncation produced by an injected cap, and its own test caught it. */
+  capsApplied: { maxArchives: number; maxRows: number };
+  /** Skipped UNOPENED because their own filename stamp precedes `sinceIso`. */
+  archivesSkippedByStamp: number;
+  /** Actually opened and parsed. */
+  archivesRead: number;
+  /** Found, in-window, and NOT opened because {@link DIGEST_MAX_ARCHIVES} bit. */
+  archivesTruncated: number;
+  /** In-window rotations that were opened and threw — partial coverage, never silence. */
+  unread: string[];
+}
+
+/**
+ * W1-T2388 — THE DIGEST'S OWN WINDOWED UNION READ.
+ *
+ * THE DEFECT. `buildDigest` read ONE live path. `rotateLedger` fires on `statSize(path) > 4 MiB` —
+ * a BYTE ceiling, not a clock — measured at 6.1 rotation events a day, with a rotation landing
+ * inside the digest's cadence in 96.7% of windows and roughly 16% of a day's rows surviving to a
+ * daily digest. Only 3 of the 10 steps the digest sweeps are in `DECISION_RELEVANT_LEDGER_STEPS`,
+ * and they are there because some DECIDER elsewhere consults them, not for the digest's sake — so
+ * the other seven (`board_review.ran`, `inbox.polled`, `issues.polled`, `learnings.injected`,
+ * `ops.alerts_polled`, `review.downgrade_suppressed`, `sweep.repeat_escalated`) simply vanished.
+ *
+ * THE WINDOW IS THE BOUND, AND IT IS FREE. `rotationStampIso`'s own doc establishes the property
+ * this rests on — "every line in a rotation is at or before the instant in its name", verified on
+ * this host over an 18-archive sample — so an archive stamped before `sinceIso` can hold only older
+ * rows and is provably irrelevant WITHOUT BEING OPENED. An UNPARSEABLE name is read, never skipped:
+ * that same doc says a caller must treat "cannot decide" as "read it", and skipping would drop a
+ * real corpus file.
+ *
+ * ONE ENUMERATOR. `ledgerRotationEntries` is THE definition of the corpus (W1-T444: two
+ * hand-maintained filters once disagreed and each read a different half). This adds no second
+ * suffix matcher.
+ *
+ * NOT `readLedgerUnionBounded`, AND ITS OWN DOC IS WHY: "every rung this serves reads the NEWEST
+ * row of a step, never a count, so stopping early cannot under-count anything." The digest COUNTS —
+ * it sums `cost_usd`, tallies `verdictDowngradesSuppressed`, and pushes arrays — so that reader's
+ * early exit would under-report silently, which is this defect wearing a different hat.
+ *
+ * DEDUPED BY EXACT LINE TEXT, because rotations overlap heavily: `run.start` reads 257,438 RAW
+ * lines across the `.gz` half and 779 DISTINCT over the union.
+ */
+export function readDigestWindow(
+  ledgerPath: string,
+  sinceIso: string,
+  opts: { maxArchives?: number; maxRows?: number; fs?: LedgerGrepFsDeps } = {},
+): DigestWindowRead {
+  const fs = opts.fs ?? realDigestFs;
+  const cap = opts.maxArchives ?? DIGEST_MAX_ARCHIVES;
+  const rowCap = opts.maxRows ?? DIGEST_MAX_ROWS;
+  const dir = dirname(ledgerPath);
+  let names: string[] = [];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    // An unreadable directory is "no archives" — the live read below still answers, exactly as it
+    // did before this function existed. Never a throw in a reporter.
+  }
+  const rotations = ledgerRotationEntries(names, dir);
+  const inWindow = rotations.filter((e) => {
+    const stamp = rotationStampIso(basename(e.path));
+    return stamp === undefined || stamp >= sinceIso;
+  });
+  const skipped = rotations.length - inWindow.length;
+  // Newest first, so a cap that bites drops the OLDEST in-window archives rather than an arbitrary
+  // set — and `archivesTruncated` says how many.
+  const ordered = [...inWindow].sort((a, b) => (a.path < b.path ? 1 : a.path > b.path ? -1 : 0));
+  const opened = ordered.slice(0, cap);
+  const seen = new Set<string>();
+  const lines: LedgerLine[] = [];
+  // FILTER BEFORE RETAINING, WHICH IS A MEMORY BOUND AND NOT AN OPTIMISATION — MEASURED: an
+  // earlier draft parsed and deduped every line first and DIED with a V8 heap OOM at 4.1 GB on
+  // this corpus's 4,356,624 lines. An in-window archive is mostly OLD rows (rotations overlap
+  // heavily), so the window predicate is what keeps the retained set proportional to the WINDOW
+  // rather than to the archives' total size. The dedup `Set` is likewise fed only by retained
+  // rows, so it cannot grow past the window either.
+  //
+  // The predicate is `collectSince`'s own, applied one step earlier — a row with no string `ts`
+  // is dropped there today and is dropped here, so `summarize`'s later `collectSince` call is a
+  // no-op over this input rather than a second, different opinion.
+  const addText = (text: string): void => {
+    for (const raw of text.split("\n")) {
+      const line = raw.trim();
+      if (!line) continue;
+      let parsed: LedgerLine;
+      try {
+        parsed = JSON.parse(line) as LedgerLine;
+      } catch {
+        continue; // a torn line is skipped, exactly as `readLedgerLines` already skips one
+      }
+      if (typeof parsed.ts !== "string" || (parsed.ts as string) < sinceIso) continue;
+      if (seen.has(line)) continue;
+      if (lines.length >= rowCap) { rowsTruncated++; continue; }
+      seen.add(line);
+      lines.push(parsed);
+    }
+  };
+  let rowsTruncated = 0;
+  const unread: string[] = [];
+  for (const entry of opened) {
+    try {
+      const buf = fs.readFileSync(entry.path);
+      addText((entry.form === "gzip" ? fs.gunzipSync(buf) : buf).toString("utf8"));
+    } catch {
+      unread.push(entry.path);
+    }
+  }
+  try {
+    addText(fs.readFileSync(ledgerPath).toString("utf8"));
+  } catch {
+    // The live file may genuinely not exist yet — `readLedgerLines` returns [] for that too.
+  }
+  return {
+    lines,
+    archivesConsidered: rotations.length,
+    archivesSkippedByStamp: skipped,
+    archivesRead: opened.length - unread.length,
+    archivesTruncated: ordered.length - opened.length,
+    rowsTruncated,
+    capsApplied: { maxArchives: cap, maxRows: rowCap },
+    unread,
+  };
+}
+
 export function buildDigest(ledgerPath: string, sinceIso: string, consoleBaseUrl?: string): string {
-  return renderDigest(summarize(readLedgerLines(ledgerPath), sinceIso), consoleBaseUrl);
+  // W1-T2388: the WINDOWED union, not the live file alone. `readLedgerLines` stays imported and in
+  // use elsewhere in this module; only the digest's own read moves.
+  const read = readDigestWindow(ledgerPath, sinceIso);
+  const summary = summarize(read.lines, sinceIso);
+  return renderDigest({ ...summary, read }, consoleBaseUrl);
 }
 
 /** Build the digest from `ledgerPath` and deliver it over the SAME notify channel as real-time pings. */
