@@ -432,6 +432,28 @@ function idOrdinal(id: string): { workstream: number; ordinal: number } {
   return { workstream: Number(m[1]), ordinal: Number(m[2]) };
 }
 
+/**
+ * W1-T2397 — the observation, fired for a task THIS PASS HAS ALREADY CHOSEN.
+ *
+ * ONE EMITTER FOR BOTH SELECTORS. `nextRunnable` (the drain's single-lane pick) and
+ * {@link runnableCandidates} (the DAEMON's batch pick) are different loops, and the daemon uses
+ * ONLY the second — so an observation living in `nextRunnable` alone never reaches the lane that
+ * carries the dispatches (`daemon.boot` 347 / `run.start` 558 against `drain.start` 16, measured
+ * over the container's ledger union). Sharing this one function is what stops them drifting.
+ *
+ * A THROW IS STILL ONLY AN OBSERVATION: W1-T2397's whole argument is that a wrong warn costs one
+ * line, and a warn that cost a dispatch would invert it.
+ */
+function observeOpenSibling(t: Task, opts: NextRunnableOpts): void {
+  const sibling = opts.openSiblingBuildFor?.(t.id);
+  if (!sibling || !opts.onOpenSiblingBuild) return;
+  try {
+    opts.onOpenSiblingBuild(t, sibling);
+  } catch {
+    /* an observation that throws is still only an observation */
+  }
+}
+
 export function nextRunnable(plan: Plan, isMerged: MergedSet, opts: NextRunnableOpts = {}): Task | undefined {
   for (const t of dispatchOrder(plan.tasks)) {
     if (!isDispatchEligible(plan, t, isMerged, opts)) continue;
@@ -440,15 +462,7 @@ export function nextRunnable(plan: Plan, isMerged: MergedSet, opts: NextRunnable
     // per candidate, which is what keeps it quiet: 101 of 105 dispatches in 72 hours had no open
     // sibling at all), and so it is structurally incapable of changing the answer. A throw here
     // must not cost a dispatch either: the observation is worth one line, never a stalled task.
-    const sibling = opts.openSiblingBuildFor?.(t.id);
-    if (sibling && opts.onOpenSiblingBuild) {
-      try {
-        opts.onOpenSiblingBuild(t, sibling);
-      } catch {
-        // An observation that throws is still only an observation — W1-T2397's whole argument is
-        // that a wrong warn costs one line, and a warn that costs a dispatch would invert it.
-      }
-    }
+    observeOpenSibling(t, opts);
     return t;
   }
   return undefined;
@@ -663,7 +677,18 @@ export function runnableCandidates(plan: Plan, isMerged: MergedSet, limit: numbe
   for (const t of dispatchOrder(plan.tasks)) {
     if (isDispatchEligible(plan, t, isMerged, opts)) eligible.push(t);
   }
-  return packDisjointFirst(eligible, limit, opts.observedByTask ?? NO_OBSERVED_SCOPE);
+  const collected = packDisjointFirst(eligible, limit, opts.observedByTask ?? NO_OBSERVED_SCOPE);
+  // W1-T2397: OBSERVE, THEN DISPATCH ANYWAY — the SAME placement `nextRunnable` uses, one level
+  // over. AFTER eligibility has said yes AND after the pack has chosen, so it fires once per task
+  // actually dispatched rather than once per eligible candidate (which is what keeps it quiet: 101
+  // of 105 dispatches in 72 hours had no open sibling at all), and BEFORE `collected` is returned
+  // UNCHANGED — structurally incapable of altering which tasks this batch dispatches.
+  //
+  // THIS IS THE DAEMON'S SELECTOR. `runDaemon` calls `runnableCandidates`, never `nextRunnable`, so
+  // the observation wired into the latter alone could not reach the lane that carries 97% of
+  // dispatches — measured, and the reason this branch exists at all.
+  for (const t of collected) observeOpenSibling(t, opts);
+  return collected;
 }
 
 /**

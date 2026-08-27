@@ -858,6 +858,20 @@ export interface DaemonDeps {
    */
   isOpenPr?: OpenPrCheck;
   /**
+   * W1-T2397 — the open-sibling OBSERVATION's two halves, forwarded verbatim into this tick's
+   * {@link NextRunnableOpts}; see those fields' own docs in drain.ts for the contract, and
+   * run-task.ts's `openSiblingObservation` for the one factory both lanes build them from.
+   *
+   * THIS IS THE LANE THAT DISPATCHES. Measured over the container's ledger union: `daemon.boot`
+   * 347 and `run.start` 558 against `drain.start` 16 — and the instance that motivated the task
+   * (W1-T2387 dispatched while #3102 was open, producing #3109) came through here, not the drain.
+   *
+   * NOT `isOpenPr`, and never to be folded into it: that would be the refusal W1-T2397 measured
+   * and declined. Omitted ⇒ no observation, and dispatch is byte-identical to before they existed.
+   */
+  openSiblingBuildFor?: NextRunnableOpts["openSiblingBuildFor"];
+  onOpenSiblingBuild?: NextRunnableOpts["onOpenSiblingBuild"];
+  /**
    * W1-T177 (TERMINAL-STATE CHECK AT EVERY SPENDING SITE): an OPTIONAL fresh,
    * live re-read of ONE candidate in-flight PR's GitHub state, consulted ONLY
    * when `isOpenPr` reports a task in-flight — see drain.ts's
@@ -3165,6 +3179,11 @@ export async function runDaemon(
         : undefined;
       const dispatchOpts: NextRunnableOpts = {
       isOpenPr: deps.isOpenPr,
+      // W1-T2397: forwarded into the tick's own opts, exactly as drain.ts forwards them at both of
+      // its `skipOpts` sites. `nextRunnable` consults them AFTER eligibility and BEFORE returning,
+      // so this cannot change what this tick dispatches.
+      openSiblingBuildFor: deps.openSiblingBuildFor,
+      onOpenSiblingBuild: deps.onOpenSiblingBuild,
       // W1-T2286: the SAME map handed to `partitionByFileOverlap`'s own direct call below — see
       // `DaemonDeps.observedByTask`'s own doc for why the pack step and the real partition must
       // never disagree.
