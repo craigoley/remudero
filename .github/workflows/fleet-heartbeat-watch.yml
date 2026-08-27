@@ -168,7 +168,7 @@ jobs:
           bash -n scripts/fleet-heartbeat.sh || fail "scripts/fleet-heartbeat.sh does not parse"
           work=$(mktemp -d)
           iso_ago() { date -u -d "-$1 seconds" +%Y-%m-%dT%H:%M:%S.000Z; }
-          seed() { # seed <name> <daemon-age-s> <install-healthy?>
+          seed() { # seed <name> <daemon-age-s> <install-healthy?> [deploy-age-s|none]
             mkdir -p "$work/$1/root/state" "$work/$1/install/scripts"
             cp scripts/fleet-heartbeat.sh "$work/$1/install/scripts/"
             printf '{"ts":"%s","step":"daemon.boot","env_clean":true,"head_sha":"0123456789abcdef0123456789abcdef01234567"}\n' "$(iso_ago 9000)" \
@@ -181,6 +181,14 @@ jobs:
               chmod +x "$work/$1/install/node_modules/.bin/tsx"
             else
               mkdir -p "$work/$1/install/node_modules"
+            fi
+            # THE FOURTH ARG IS OPTIONAL AND DEFAULTS TO OMITTED (W1-T2349): every seed() call
+            # above this one predates the deploy-supervisor probe and must keep asserting exactly
+            # what it asserted, so a ledger with no `deploy.` line is the default, not a special
+            # case that needs naming at every call site.
+            if [ -n "${4:-}" ] && [ "$4" != "none" ]; then
+              printf '{"ts":"%s","step":"deploy.skip","reason":"up-to-date"}\n' "$(iso_ago "$4")" \
+                >> "$work/$1/root/state/ledger.ndjson"
             fi
           }
           beat() { RMD_HEARTBEAT_DRY_RUN=1 RMD_ROOT="$work/$1/root" bash "$work/$1/install/scripts/fleet-heartbeat.sh"; }
@@ -201,6 +209,26 @@ jobs:
           # goes silent here and reads identically to a power cut; this one must still report.
           beat brokeninstall | grep -q '^daemon_verdict=live$' || fail "the broken-install beat lost the daemon signal it must still carry"
           echo "self-check: the beat script separates healthy / dead-daemon / broken-install"
+
+          # (ii.b) THE DEPLOY-SUPERVISOR TICK (W1-T2349). The daemon and install fields above can
+          # all read healthy while the SEPARATE deploy-supervisor cycle has stopped ticking — that
+          # is the whole gap this field closes, so the self-check proves the three states `seed`'s
+          # new fourth argument can produce: a fresh `deploy.` line, an hours-old one, and a ledger
+          # with none at all.
+          seed freshdeploy 45 healthy 30
+          beat freshdeploy | grep -q '^supervisor_verdict=live$' || fail "a fresh deploy. line did not read as live"
+
+          seed staledeploy 45 healthy 5400
+          beat staledeploy | grep -q '^supervisor_verdict=STALE' || fail "a 90-minute-old deploy. line did not read as STALE"
+          # THE CASE THIS TASK FILES: a stalled deploy cycle must not be confused with a dead
+          # daemon or a broken install — both of the OTHER verdicts must still read healthy.
+          beat staledeploy | grep -q '^daemon_verdict=live$' || fail "a stale deploy-supervisor beat lost the daemon signal it must still carry"
+          beat staledeploy | grep -q '^rmd_verdict=ok$'      || fail "a stale deploy-supervisor beat lost the install signal it must still carry"
+
+          seed nodeploy 45 healthy none
+          beat nodeploy | grep -q '^supervisor_verdict=unknown$' || fail "a ledger with no deploy. line did not read as unknown"
+          ! beat nodeploy | grep -q '^supervisor_last_age_s=' || fail "an absent deploy signal still published an age"
+          echo "self-check: the beat script separates a fresh / stale / absent deploy-supervisor tick"
 
           # (iii) THE RESTART BUDGET DEGRADES TO ABSENT, NEVER TO ZERO (W1-T483). No `remudero-daemon`
           # exists on a runner, so this exercises the unreadable path for real rather than by
@@ -226,6 +254,19 @@ jobs:
           absent=0
           stale=0
 
+          # `supervisor_verdict` (W1-T2349) is judged FROM THE VALUE THE BEAT ITSELF PUBLISHED —
+          # never re-derived from the ledger here, because this job cannot reach the host's
+          # filesystem at all; it only reads what `scripts/fleet-heartbeat.sh` already decided.
+          # NEVER-PRESENT IS SILENT (design note iv): `unknown` covers both "this host has no
+          # deploy-supervisor at all" (the container host advances via deploy/entrypoint.sh, never
+          # logging a deploy.* line) and "the ledger could not be read", and neither is a finding —
+          # only a branch whose beat SAYS `STALE` is. IT COUNTS INTO THE SAME `stale` TOTAL a beat's
+          # own age already does (design note vi: "counts it like `stale`") rather than a second
+          # counter, so the combined pass/fail verdict below stays the single `[ "$stale" -eq 0 ]`
+          # check it always was — a stalled deploy cycle on an otherwise-fresh beat is still a
+          # reason this job must fail, exactly as a stale beat itself is.
+          is_supervisor_stale() { case "$1" in STALE*) return 0 ;; *) return 1 ;; esac; }
+
           # THE LOOP NEVER EXITS EARLY, IN EITHER DIRECTION, AND THAT IS THE FIX. A `break` or an
           # `exit 1` on the first stale branch would hide every host after it; an early success on
           # the first fresh branch would hide every host after THAT — which is precisely the outage
@@ -248,6 +289,19 @@ jobs:
             age_m=$(( age_s / 60 ))
             subject=$(git log -1 --format=%s "origin/${branch}")
             payload=$(git show "origin/${branch}:heartbeat.txt" 2>/dev/null || echo "(no heartbeat.txt on the branch)")
+            sup_verdict=$(printf '%s\n' "$payload" | sed -n 's/^supervisor_verdict=//p' | tail -n 1)
+
+            # THE CONDITION LEADS THE REPORT, NAMED EXPLICITLY (design note vi) — this workflow's
+            # issue title reads "the machine has stopped reporting", which is WRONG for a fresh
+            # beat carrying a stalled deploy cycle, so the per-branch block must say WHICH failure
+            # fired rather than leave the reader to infer it from the age line and payload alone.
+            if [ "$age_s" -gt "$threshold_s" ]; then
+              condition="BEAT STALE — the machine itself has stopped reporting (${age_m}m, threshold ${STALE_AFTER_MINUTES}m)"
+            elif is_supervisor_stale "$sup_verdict"; then
+              condition="DEPLOY-SUPERVISOR STALE — the beat is fresh but the deploy cycle has stopped: ${sup_verdict}"
+            else
+              condition="fresh — beat ${age_m}m old, deploy-supervisor ${sup_verdict:-unknown}"
+            fi
 
             # THE LAST BEAT'S PAYLOAD, NOT JUST ITS AGE. "No beat for 71 minutes" is half an answer;
             # "and the last one said the daemon had not polled in two hours", or "and the last one
@@ -257,6 +311,7 @@ jobs:
             # attributed and the report would repeat the very confusion this closes.
             {
               echo "── ${branch} ──"
+              echo "Condition: ${condition}"
               echo "Last beat was ${age_m} minute(s) ago (threshold: ${STALE_AFTER_MINUTES}m)."
               echo "Last beat subject: ${subject}"
               echo
@@ -268,6 +323,9 @@ jobs:
             if [ "$age_s" -gt "$threshold_s" ]; then
               stale=$(( stale + 1 ))
               echo "heartbeat-watch: STALE — '${branch}' has not beaten for ${age_m} minute(s)." >&2
+            elif is_supervisor_stale "$sup_verdict"; then
+              stale=$(( stale + 1 ))
+              echo "heartbeat-watch: DEPLOY-SUPERVISOR STALE — '${branch}': ${sup_verdict}" >&2
             else
               echo "heartbeat-watch: fresh — '${branch}' is ${age_m} minute(s) old."
             fi
