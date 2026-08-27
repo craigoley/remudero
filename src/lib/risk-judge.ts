@@ -563,12 +563,81 @@ export async function assessRisk(input: RiskJudgeInput, deps: RiskJudgeDeps): Pr
 // HERE, one layer up, exactly where P28 is free to NOT reuse this
 // orchestrator and instead wrap assessRisk in its own.
 
+/**
+ * W1-T2383 (rank 1) — WHAT ONE RISK-JUDGE JUDGMENT COST, carried from the spawn that paid it to
+ * the `risk_judge.decision` row that reports it.
+ *
+ * THE ROW EXISTS AND THE FIGURE DOES NOT: measured 2026-08-27, 276 risk-judge rows (249 decisions,
+ * 27 escalations) carry no cost and no mount, so {@link resolveRiskJudgeMount}'s DELIBERATE choice
+ * of the cheapest configured tier is a design decision whose consequence nobody can read. This
+ * type is what makes it readable; it changes no verdict, no threshold and no mount.
+ *
+ * THE CAP RIDES BESIDE THE COUNT, never instead of it — the same W1-T2238/W1-T303 discipline
+ * `WorkerResult.maxTurns` already records: a historical row must stay checkable against its own
+ * cap after `mounts.yaml` moves.
+ */
+export interface RiskJudgeSpend {
+  /** Summed `WorkerResult.costUsd` across every spawn this judgment paid for. */
+  costUsd: number;
+  /** Summed `WorkerResult.numTurns` across those same spawns. */
+  numTurns: number;
+  /** The configured cap each spawn ran under (an INPUT, never read back). */
+  maxTurns?: number;
+  /** The mount actually spawned — the tier whose price this row makes readable. */
+  model: string;
+  effort: string;
+  /** Billing account, so a wired spend reader credits the row instead of refusing it. */
+  accountLabel?: string;
+  /** How many spawns this judgment paid for — 1 on the healthy path (W1-T2212). */
+  attempts: number;
+}
+
+/**
+ * The one place a judgment's spend is accumulated. {@link realRiskJudge} RECORDS one entry per
+ * spawn; {@link runRiskJudge} READS the total once, just before it writes the row it already
+ * writes. Two seams would let the summing rule live in two places — this keeps it in one.
+ *
+ * A judgment that SPAWNED NOTHING reports `undefined`, never a zero: a cache hit
+ * ({@link RiskJudgeDeps.cache}) and a judge that threw before any spawn both genuinely cost
+ * nothing to spawn, and a `0` would read as "measured, free" rather than "not measured".
+ */
+export interface RiskJudgeSpendCollector {
+  record(entry: RiskJudgeSpend): void;
+  total(): RiskJudgeSpend | undefined;
+}
+
+/** Build a fresh {@link RiskJudgeSpendCollector}. One per judgment — never shared across two. */
+export function riskJudgeSpendCollector(): RiskJudgeSpendCollector {
+  let acc: RiskJudgeSpend | undefined;
+  return {
+    record(entry: RiskJudgeSpend): void {
+      acc =
+        acc === undefined
+          ? { ...entry }
+          : {
+              ...entry,
+              costUsd: acc.costUsd + entry.costUsd,
+              numTurns: acc.numTurns + entry.numTurns,
+              attempts: acc.attempts + entry.attempts,
+            };
+    },
+    total(): RiskJudgeSpend | undefined {
+      return acc;
+    },
+  };
+}
+
 export interface RiskJudgeOrchestratorDeps extends RiskJudgeDeps {
   /** Open (or reuse) a needs-human escalation for this verdict/action. Mirrors
    *  escalate.ts's `escalate()` — sync or async, either is accepted. */
   escalate: (verdict: RiskJudgeVerdict, action: RiskJudgeAction) => Promise<string> | string;
   /** One ledger-shaped line per step; no-op default (real callers ledger it). */
   log?: (step: string, extra?: Record<string, unknown>) => void;
+  /** W1-T2383 (rank 1): the collector {@link realRiskJudge} recorded this judgment's spawns into.
+   *  Omitted by a caller that wires none, in which case the decision row is byte-identical to
+   *  before this field existed — the same omit-rather-than-undefined shape W1-T970 used for
+   *  `pr_number`/`head_sha` on the sibling escalation row. */
+  spend?: RiskJudgeSpendCollector;
 }
 
 export interface RiskJudgeResult {
@@ -593,12 +662,28 @@ export async function runRiskJudge(
   const verdict = await assessRisk(input, deps);
   const action = planRiskJudgeAction(verdict, config);
 
+  // W1-T2383 (rank 1): read ONCE, after `assessRisk` has done whatever spawning it was going to
+  // do, and spread onto the SAME row rather than a second one — a field on a row already being
+  // written costs no ledger line and needs no retention decision (the shard's own Q2). Every key
+  // is OMITTED, not `undefined`, when no collector was wired.
+  const spent = deps.spend?.total();
   log("risk_judge.decision", {
     verdict: verdict.verdict,
     reasons: verdict.reasons,
     confidence: verdict.confidence,
     action: action.kind,
     reason: action.reason,
+    ...(spent === undefined
+      ? {}
+      : {
+          cost_usd: spent.costUsd,
+          num_turns: spent.numTurns,
+          ...(spent.maxTurns === undefined ? {} : { max_turns: spent.maxTurns }),
+          model: spent.model,
+          effort: spent.effort,
+          ...(spent.accountLabel === undefined ? {} : { account_label: spent.accountLabel }),
+          attempts: spent.attempts,
+        }),
   });
 
   if (action.kind === "escalate") {
@@ -738,6 +823,9 @@ export function realRiskJudge(opts: {
   spawn?: typeof spawnWorker;
   maxAttempts?: number;
   log?: (step: string, extra?: Record<string, unknown>) => void;
+  /** W1-T2383 (rank 1): one entry per SPAWN, so a retried judgment (W1-T2212) reports what all
+   *  of its attempts cost rather than only the last. Optional and no-op by default. */
+  spend?: RiskJudgeSpendCollector;
 }): (input: RiskJudgeInput) => Promise<RiskJudgeVerdict> {
   const spawn = opts.spawn ?? spawnWorker;
   const maxAttempts = opts.maxAttempts ?? RISK_JUDGE_MAX_ATTEMPTS;
@@ -749,6 +837,18 @@ export function realRiskJudge(opts: {
     const spawnArgs = buildRiskJudgeSpawnArgs({ input, mount: opts.mount, cwd: opts.cwd, settingsFile: opts.settingsFile });
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       const result = await spawn(spawnArgs);
+      // W1-T2383 (rank 1): recorded BEFORE the parse, so an UNPARSEABLE attempt's spend is
+      // counted too — a retry that produced nothing readable still cost real money, and a
+      // figure that silently dropped it would understate exactly the case worth watching.
+      opts.spend?.record({
+        costUsd: result.costUsd,
+        numTurns: result.numTurns,
+        maxTurns: result.maxTurns,
+        model: opts.mount.model,
+        effort: opts.mount.effort,
+        accountLabel: result.accountLabel,
+        attempts: 1,
+      });
       const outcome = parseRiskJudgeResponse(result.text);
       opts.log?.("risk_judge.parse_attempt", { attempt, max_attempts: maxAttempts, kind: outcome.kind });
       if (outcome.kind === "parsed") return outcome.verdict;
