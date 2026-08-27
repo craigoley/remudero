@@ -32,7 +32,7 @@ raw: "THE SHARED node_modules WAS EMPTIED UNDER TWO LIVE WORKERS AND THE CAUSE
   only that a repair can produce a real directory where a symlink belonged."
 attachments: []
 origin: cli
-status: proposed
+status: accepted
 proposal_pr: https://github.com/craigoley/remudero/pull/2960
 summary:
   headline: Shared code library corrupted — identify root cause and protect

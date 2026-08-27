@@ -31,7 +31,7 @@ raw: >-
   — escalating
 attachments: []
 origin: repair#blocked-ambiguous
-status: proposed
+status: accepted
 proposal_pr: https://github.com/craigoley/remudero/pull/3121
 summary:
   headline: Blocked-ambiguous surface repair recurrence exceeds threshold
