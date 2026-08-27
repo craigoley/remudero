@@ -26,8 +26,22 @@ attachments: []
 origin: repair#blocked-fixable
 status: proposed
 reply_to: null
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/3150
+summary:
+  headline: "CI log check failure recurring: 3 repairs in 48 hours"
+  what_happened: "PRs #3025, #3039, and #3040 each required repair for ci-log
+    check failures within 48 hours, triggering the 3-in-7-day recurrence alert."
+  decision: Determine the root cause of ci-log check failures immediately.
+  options:
+    - label: Escalate to infrastructure team
+      consequence: Dedicated resources investigate checker configuration; repairs
+        paused pending findings.
+    - label: Continue repairs while reviewing recent changes
+      consequence: Maintains forward progress; investigation happens in parallel; may
+        miss root cause.
+    - label: Halt all repairs pending investigation
+      consequence: Stops forward progress; forces investigation to complete before any
+        new fixes applied.
 expansion: null
 submission_key: null
 answered_by: null
