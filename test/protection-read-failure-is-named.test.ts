@@ -35,7 +35,10 @@ import {
   renderClarificationQuestion,
   type OpenPrView,
 } from "../src/lib/sweep.js";
-import { readRequiredStatusCheckContexts } from "../src/lib/status.js";
+import { ghRequiredStatusCheckContexts, readRequiredStatusCheckContexts } from "../src/lib/status.js";
+import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const NOW = Date.parse("2026-08-27T19:00:00Z");
 const RECENT = "2026-08-27T18:30:00.000Z";
@@ -179,4 +182,61 @@ test("nothing added paces or throttles or sleeps a call", () => {
     globalThis.setInterval = realInterval;
   }
   assert.equal(timers, 0);
+});
+
+
+// ── the two arms the classified read added that no test above reaches ─────────────────────────
+//
+// Both are on the SAME split this task is about, and both were uncovered: the JSON-parse catch is
+// the third way a read can fail (gh RAN and answered something unparseable — distinct from gh
+// failing, which the tests above cover), and the thin wrapper is the compatibility surface every
+// pre-existing caller still goes through.
+
+/** A `gh` first on PATH that prints `stdout` and exits 0 — needed to reach the parse arm, which a
+ *  missing `gh` can never get to because the exec throws first. */
+function fakeGhPrinting(stdout: string): string {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-fake-gh-protection-"));
+  const p = join(dir, "gh");
+  writeFileSync(p, `#!/bin/sh\ncat <<'EOF'\n${stdout}\nEOF\n`);
+  chmodSync(p, 0o755);
+  return dir;
+}
+
+function withPath<T>(dir: string, fn: () => T): T {
+  const saved = process.env.PATH;
+  process.env.PATH = `${dir}:${saved}`;
+  try {
+    return fn();
+  } finally {
+    process.env.PATH = saved;
+  }
+}
+
+test("W1-T2399: a gh that ANSWERS but not with JSON is unreadable-with-a-reason, not a readable none", () => {
+  const read = withPath(fakeGhPrinting("not json at all"), () =>
+    readRequiredStatusCheckContexts("o", "r", "main"),
+  );
+  assert.equal(read.kind, "unreadable", "an unparseable payload must not collapse into `none`");
+  if (read.kind === "unreadable") {
+    assert.equal(read.branch, "main", "the branch it tried is carried, same as the exec-failure arm");
+    assert.ok(read.reason.length > 0, "and a reason, never an empty string");
+    assert.ok(read.reason.length <= 160, "bounded to one legible sentence");
+  }
+  // POSITIVE CONTROL on the same harness: valid JSON through the same path DOES read as contexts,
+  // so the assertion above is the parse arm and not a fake `gh` that never works.
+  const ok = withPath(fakeGhPrinting('{"contexts":["ci"]}'), () => readRequiredStatusCheckContexts("o", "r", "main"));
+  assert.equal(ok.kind, "contexts");
+  if (ok.kind === "contexts") assert.deepEqual(ok.contexts, ["ci"]);
+});
+
+test("W1-T2399: the thin wrapper keeps the pre-existing string[] | undefined contract on all three readings", () => {
+  // contexts -> the array, unwrapped
+  assert.deepEqual(
+    withPath(fakeGhPrinting('{"contexts":["ci","lint-plan"]}'), () => ghRequiredStatusCheckContexts("o", "r", "main")),
+    ["ci", "lint-plan"],
+  );
+  // a readable NONE and an UNREADABLE read both answer undefined — the documented collapse the
+  // classified form exists to let a caller avoid, asserted here so the wrapper's contract is pinned.
+  assert.equal(withPath(fakeGhPrinting('{"contexts":[]}'), () => ghRequiredStatusCheckContexts("o", "r", "main")), undefined);
+  assert.equal(ghRequiredStatusCheckContexts("nope", "nope", "no-such-branch"), undefined, "no gh reachable -> undefined");
 });
