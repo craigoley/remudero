@@ -23078,6 +23078,11 @@ export function buildOpenPrViews(
       )
     : readRequiredStatusCheckContexts(owner, repo);
   const requiredContexts = requiredRead.kind === "contexts" ? requiredRead.contexts : undefined;
+  // W1-T2399: the read failure's own cause, hoisted so the view below can assign the key
+  // unconditionally — see that assignment's own comment for why the conditional-spread form could
+  // not be used. `undefined` for every read that succeeded, which is every existing fixture.
+  const requiredContextsReadFailure =
+    requiredRead.kind === "unreadable" ? { branch: requiredRead.branch, reason: requiredRead.reason } : undefined;
 
   // MERGE STATE: one bounded follow-up fetch per PR, because the LIST endpoint omits
   // `mergeable_state` (see hydrateMergeStates' doc for the live verification and the incident).
@@ -23265,9 +23270,16 @@ export function buildOpenPrViews(
       // every disposition row gated on this behaves exactly as before. What is new is the sibling
       // field below, which is populated ONLY for a genuine read failure.
       requiredContextsUnreadable: !requiredContexts || requiredContexts.length === 0,
-      ...(requiredRead.kind === "unreadable"
-        ? { requiredContextsReadFailure: { branch: requiredRead.branch, reason: requiredRead.reason } }
-        : {}),
+      // ASSIGNED DIRECTLY, NOT THROUGH A CONDITIONAL SPREAD — and that is a wiring requirement, not
+      // a style choice. `producerAssignedKeys` (lib/producer-completeness.ts) resolves an object
+      // literal's keys STATICALLY, and its own test pins that "a spread inside a producer literal is
+      // reported as unresolvable rather than silently ignored" — so `...(cond ? { field } : {})`
+      // hides the assignment and `OpenPrView`'s completeness audit reads the field as having NO
+      // PRODUCER. The key is therefore written unconditionally and the CONDITION moved into the
+      // value (`requiredContextsReadFailure` above). Behaviour is unchanged: every consumer reads it
+      // for truthiness (`sweep.ts`'s `const f = pr.requiredContextsReadFailure`), and `undefined` and
+      // absent are indistinguishable to all of them — nothing does an `in`/`hasOwnProperty` check.
+      requiredContextsReadFailure,
       // Absent from the map ⇒ GitHub had not computed it (or we could not ask) ⇒ undefined, the
       // pre-existing value. Only a DEFINITE observed "dirty" ever reaches the conflicted rows.
       mergeState: mergeStates.get(pr.number),
