@@ -16036,8 +16036,13 @@ export function defaultBoardReviewItems(config: Config, io: BoardReviewItemsIo =
  *  carrying the same counts, and the ledger is the append-only record.
  *
  *  WHAT ACTUALLY SURFACES IT, because a report nobody reads costs the same as one that never ran:
- *   1. the `board_review.fired`/`.ran` ledger rows the daemon tick emits — which `digest.ts`'s
- *      cadence already sweeps into the operator's inbox on its own schedule;
+ *   1. the `board_review.ran` ledger row the daemon tick emits, which `digest.ts` sweeps into the
+ *      operator's digest on its own cadence — latest-wins, soft-composed, `.ran` only. THIS CLAUSE
+ *      WAS FALSE WHEN IT WAS WRITTEN AND IS CORRECTED HERE RATHER THAN QUIETLY DROPPED: it said the
+ *      digest "already" swept these rows, and `digest.ts` referenced `board_review` ZERO times
+ *      against a control of two references to `escalation.issue_opened`, a step it genuinely
+ *      sweeps. The rung fired five times before anyone noticed, because the sentence describing
+ *      how its output reached a human was the reason nobody checked;
  *   2. the registry proposals the rung drafts into `state/inbox-proposals.json`, which the inbox
  *      already reads and renders (`renderInbox`) — the same registry `updateProposalRegistry`
  *      serves for every other rung.
