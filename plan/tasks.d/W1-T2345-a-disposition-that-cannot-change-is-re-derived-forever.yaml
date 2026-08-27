@@ -1,0 +1,110 @@
+- id: W1-T2345
+  title: "A DISPOSITION THAT CANNOT CHANGE IS RE-DERIVED FOREVER — the sweep dispositioned one PR 301 times over 8.7 hours and its longest run of one verdict on one unchanged head was 186; the sweep was CORRECT every time, and the defect is that the 186th derivation carries exactly the weight of the first"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 30.00
+  files: [src/lib/sweep.ts, test/sweep.test.ts]
+  origin: "operator-brief#unbounded-identical-disposition-2026-08-26"
+  plan_refs: ["W1-T2304", "W1-T2327", "W1-T2340", "W1-T2339", "W1-T1066"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-08-26 off `sweep.disposed` ledger rows over a union reading 33 archives with the
+    live file read, 0 unread and ok true. 44,603 disposition rows all time across 1,156 distinct
+    PRs; 301 of them on the one PR this brief was written from, spanning 8.7 hours.
+
+    THE SWEEP WAS RIGHT EVERY TIME AND THAT IS THE POINT. Its verdicts were correct: six hours of
+    a workflow that scheduled zero jobs, then a real merge conflict it is not permitted to resolve.
+    Nothing here proposes a different verdict. The defect is arithmetic, not judgement: a verdict
+    that CANNOT change on an unchanged head is re-derived at full weight forever, and the escalation
+    it did emit at the 60-minute ceiling produced an issue that sat unread until an operator asked.
+
+    (Q1) THE COUNTER, AND THE KEY IS THE WHOLE DESIGN. A naive reading of identical — same
+    disposition, same reason string, same head — DOES NOT WORK, and the measurement is what says so
+    rather than taste. The reason text carries a live minute counter, so consecutive rows read
+    checks pending 362m, then 365m, then 367m: textually different every time. Keyed that way the
+    longest run on the measured PR was ELEVEN, and a bound of three was first reached at 487 minutes
+    of age — SEVEN MINUTES AFTER the board rung's own 8-hour arm would already have fired. A counter
+    that fires later than the thing it is meant to precede is not worth building.
+
+    KEYED ON THE VERDICT INSTEAD — disposition plus head sha, ignoring the rendered reason — the
+    same corpus reads completely differently. Longest run on the measured PR: 186. And the bound
+    becomes early rather than late:
+
+      N=5    reached at 10 minutes of PR age      90.2 percent of all 1,156 PRs would trip it
+      N=10   reached at 16 minutes                76.6 percent
+      N=20   reached at 29 minutes                28.6 percent
+      N=30   reached at 47 minutes                17.4 percent
+      N=50   reached at 132 minutes                8.2 percent
+      N=100  reached at 195 minutes                4.3 percent
+
+    N IS 50, AND IT IS DERIVED AGAINST THE MERGE-TIME POPULATION, NOT AGAINST TODAY. Across the last
+    98 merged PRs the median time to merge is 24 minutes, p75 is 74, p90 is 200; 29 percent exceed
+    an hour, 8 percent exceed four hours and 3 percent exceed eight. A bound at N=20 or N=30 would
+    fire on 28.6 or 17.4 percent of all PRs — at or past the p75 the brief warns about, i.e. on
+    healthy work. N=50 trips 8.2 percent, which lands on the SAME population the merge-time
+    distribution already calls slow — the 8 percent past four hours — and it reached that state on
+    the measured PR at 132 minutes, THREE AND A HALF TIMES EARLIER than the 8-hour arm. That
+    coincidence between the two independently-measured 8 percents is the calibration argument; N=50
+    is not a round number chosen because it looked safe.
+
+    (Q2) WHAT DIFFERENTLY MEANS, AND IT IS NOT ANOTHER ISSUE. The 60-minute escalation already
+    produced exactly one issue and it went unread; a second queue nobody drains is not an answer and
+    this task refuses to file one. The escalation surface is THE DIGEST: `digest.ts`'s cadence
+    already sweeps ledger rows into the operator's inbox on its own schedule, and `renderInbox`
+    already renders what lands there. A distinct disposition, ledgered once when the bound trips and
+    not again until the head moves, reaches a surface that is ALREADY READ. Emitting it as its own
+    disposition also makes it visible to the board rung's read, so the two agree rather than
+    competing.
+
+    IS THE BOARD RUNG ALONE ENOUGH? NO, AND THE ANSWER IS MEASURED RATHER THAN ARGUED. W1-T2304's
+    rung is depth-triggered on oldest open age at or past 8 hours, and on the measured PR that arm
+    fires at 480 minutes while N=50 fires at 132. The two are ORTHOGONAL, not redundant: the age arm
+    catches a PR that is old even while it is making progress, and misses a PR that is stuck but
+    young; the counter catches a PR whose verdict has not moved on an unchanged head, whatever its
+    age. Had the counter existed today the operator would have been told at 2.2 hours instead of
+    8.7. Had ONLY the counter existed, a slow-but-progressing PR would still have gone unnoticed.
+    Both arms, or the gap stays open in one direction.
+
+    (Q3) WHAT MUST NOT CHANGE. THE SWEEP KEEPS RE-DERIVING. A disposition is a fresh judgement about
+    a live PR and caching one would be strictly worse than the loop this bounds — the counter counts
+    derivations, it never replaces one. THE 60-MINUTE PENDING CEILING STAYS exactly as it is; N=50
+    was measured at 132 minutes on the case that motivated this, so it can never pre-empt that
+    ceiling. THE FIX RUNG KEEPS its two-strike ceiling, its unchanged-tree stand-down and its
+    escape. And NOTHING PACES, THROTTLES OR SLEEPS — W1-T1066 records a polling loop that locked the
+    operator out of his repository for ninety minutes; a counter over rows the sweep already writes
+    adds no call and no wait.
+
+    ALREADY OWNED ELSEWHERE, RECORDED SO THIS DOES NOT RE-FILE IT. The zero-job and startup-failure
+    blindness that consumed the first six hours is W1-T2327, merged, with W1-T2340 carrying its
+    corrected discriminator. PR-age watching is W1-T2304's board rung. The monolith-conflict class
+    that consumed the next two and a half hours is adjacent to W1-T2339. THIS SHARD OWNS ONLY THE
+    UNBOUNDED IDENTICAL-DISPOSITION LOOP and must not grow to cover any of the three.
+
+    RISK BAND. `risk: high` is set UP FRONT and is Rule 19's SPAN, not blast radius: `files:` crosses
+    the sweep's disposition path, which every open PR passes through on every tick.
+  acceptance:
+    - claim: "a verdict repeated on an unchanged head escalates differently once, rather than at full weight forever"
+      proof: "unit test: test/sweep.test.ts"
+    - claim: "the bound keys on the verdict and the head, never on the rendered reason text whose minute counter changes every tick"
+      proof: "unit test: test/sweep.test.ts"
+    - claim: "a head that moves resets the count, so a PR making progress is never escalated for repetition"
+      proof: "unit test: test/sweep.test.ts"
+    - claim: "the escalation is emitted once per trip and not repeated while the head is unchanged"
+      proof: "unit test: test/sweep.test.ts"
+    - claim: "the sweep still re-derives every tick, since the counter counts derivations rather than replacing one"
+      proof: "unit test: test/sweep.test.ts"
+    - claim: "the sixty minute pending ceiling is unchanged"
+      proof: "grep: pendingCeilingMinutes in src/lib/sweep.ts"
+    - claim: "nothing added paces or throttles or sleeps a call"
+      proof: "unit test: test/sweep.test.ts"
+  falsifier: |
+    If `sweep.disposed` rows over a fresh window show that no PR reaches fifty consecutive
+    dispositions of one verdict on one unchanged head, the loop this task bounds does not occur at
+    the rate measured and the task must be closed rather than implemented. The measurement to re-run
+    is the same one: group rows by pr_number, key each on disposition plus head_sha, and take the
+    longest consecutive run.
