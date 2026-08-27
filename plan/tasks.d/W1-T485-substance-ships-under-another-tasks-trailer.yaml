@@ -1,5 +1,5 @@
 - id: W1-T485
-  title: "a task whose SUBSTANCE ships under ANOTHER task's trailer is credited to nobody and sits in the decision queue forever — W1-T458's advisory was live when it last happened and correctly did not fire, because a PR that resolves A task says nothing about which task it actually shipped"
+  title: "a task whose SUBSTANCE ships under ANOTHER task's trailer is credited to nobody and sits in the decision queue forever — W1-T458's advisory EXISTS but has never fired, because nothing supplies the open-task file map it compares against, and a PR that resolves A task says nothing about which task it actually shipped"
   repo: remudero
   depends_on: []
   type: implement
