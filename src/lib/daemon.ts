@@ -70,6 +70,10 @@ import type { UsageSnapshot } from "./headroom.js";
 // the filesystem (this file's own header).
 import type { GhRateLimitBuckets } from "./daemon-health.js";
 import type { CostGovernorResult, QueueGovernorResult } from "./sweep.js";
+// W1-T2379: a VALUE import, unlike the type-only line above. Safe: `sweep.ts` imports nothing
+// from this module, so this edge closes no cycle (contrast the daemon-health note above, where a
+// value import WOULD). See `drainDetachedSweepActions`' own doc for what it drains and why.
+import { drainDetachedSweepActions } from "./sweep.js";
 // VALUE import (W1-T342's gate moved to its own pure module so drain.ts can share it — see that
 // module's header for why neither daemon.ts nor sweep.ts could host it). Pure, no filesystem.
 import { checkDispatchGovernors, type DispatchGovernorVerdict } from "./dispatch-governor.js";
@@ -1676,6 +1680,13 @@ function startInFlightTicker(
     stop: async () => {
       active = false;
       if (ticker) await ticker;
+      // W1-T2379: the tick no longer awaits the fix rung's CI wait (`SweepDeps.detachFixWait`),
+      // so awaiting `ticker` alone would return while a dispatch this ticker started was still
+      // settling. Draining here preserves the property this `stop()` has always had —
+      // "a `sweepLight()` already in flight is allowed to finish rather than aborted" (W1-T254)
+      // — for the half of that work that now lives outside the pass. Resolves immediately when
+      // nothing is detached, which is every caller that never ran a light pass.
+      await drainDetachedSweepActions();
     },
   };
 }

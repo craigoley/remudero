@@ -4422,6 +4422,25 @@ export interface SweepDeps {
    * lane serialized; it is the one lane safe to run alongside `runOne`.
    */
   actionable?: (d: Disposition) => boolean;
+
+  /**
+   * W1-T2379 — DO NOT AWAIT THE FIX RUNG'S CI WAIT. Set ONLY by {@link runSweepLightPass}, whose
+   * caller is `startInFlightTicker`'s awaited tick; every other caller (`rmd sweep`, the daemon's
+   * full per-iteration sweep) leaves it undefined and awaits the dispatch exactly as before, so
+   * no non-tick path changes at all.
+   *
+   * WHAT IT CHANGES, PRECISELY: `deps.dispatchFix` is still CALLED on this pass, and this pass
+   * still writes its own `sweep.disposed` row with `acted: true` before returning — the dedup
+   * seed `priorActionsFromLedger` reads and `fixRungStalledWithoutNewHead` (W1-T1110) re-arms
+   * from is untouched. Only the `await` on that call moves, into
+   * {@link drainDetachedSweepActions}. `spent` is therefore left `undefined`, which is already
+   * what today's real (void-returning) wiring produces, so no ledger row's shape changes either.
+   *
+   * IT IS NOT AN ADMISSION CHANGE. `lightPassActionable` (W1-T1211) still decides WHETHER a fix
+   * may be dispatched from a light pass, and still admits `blocked-fixable`/`conflicted` under
+   * `fixRungAllowed`. This decides only how long the dispatcher's CALLER blocks.
+   */
+  detachFixWait?: boolean;
   /**
    * THE ABSENT-CHECK-SUITE REMEDY (W1-T186 follow-up). Pushes an EMPTY commit to the PR's own
    * branch, minting a fresh head sha, and returns it. Optional: omitted (or absent, as in every
@@ -5119,6 +5138,68 @@ const ZERO_COUNTS = (): Record<Disposition, number> => ({
  * CONCURRENT second claim for a key already in flight is refused.
  */
 const inFlightReviewKeys = new Set<string>();
+
+/**
+ * W1-T2379 — THE DETACHED-WAIT REGISTRY, module-scoped for exactly the reason
+ * {@link inFlightReviewKeys} above is: every caller builds a fresh `SweepDeps` but runs in the
+ * SAME process, so a module-level container is visible to all of them with no wiring outside
+ * this file.
+ *
+ * WHAT IT HOLDS AND WHY IT EXISTS. `startInFlightTicker` (lib/daemon.ts) awaits
+ * `deps.sweepLight()`; {@link runSweepLightPass} returns `Promise.all` over every open PR; and
+ * `deps.dispatchFix` — the one lane W1-T1211 admits into the light pass that spends a worker —
+ * waits on CI. So the tick's period was `pollIntervalMs + max(action duration)`, and the second
+ * term is bounded by GitHub Actions rather than by anything this repo sets. A measured pass ran
+ * 16m41s against a 60s interval.
+ *
+ * NOT FIRE-AND-FORGET, WHICH IS THE WHOLE DIFFICULTY. `runSweep` records `acted: true` for a
+ * dispatched fix from the pass-level default (see {@link SweepAction.acted}), and
+ * `priorActionsFromLedger` seeds `prior.fixed` from that row — which is the dedup that stops a
+ * second strike, and which `fixRungStalledWithoutNewHead` (W1-T1110) later re-arms FROM ROWS THE
+ * RUN ITSELF WROTE. A remedy that returned before the row was written would silently break the
+ * re-arm. So the dispatch is STARTED and the row is WRITTEN synchronously, inside the pass; only
+ * the CI wait that follows is moved out of the await, into this registry, where
+ * {@link drainDetachedSweepActions} can still be awaited by the ticker's own `stop()`.
+ *
+ * A DETACHED REJECTION IS SWALLOWED HERE ON PURPOSE, and it is not a silent loss: the pass has
+ * already recorded `acted: true`, so the head is deduped for this strike, and a dispatch that
+ * ends without landing a new head is EXACTLY the state `fixRungStalledWithoutNewHead` exists to
+ * re-arm from. Rethrowing instead would surface as an unhandled rejection long after the pass
+ * that caused it returned, attributable to nothing.
+ */
+const detachedSweepActions = new Set<Promise<void>>();
+
+/**
+ * W1-T2379: hand a started action to {@link detachedSweepActions} so the caller need not await
+ * it. The promise stored is ALREADY settled-safe (its rejection is caught here), so a drain can
+ * never itself reject. Returns nothing — a caller that wants the outcome must await the original.
+ */
+function detachSweepAction(work: Promise<unknown>): void {
+  const held: Promise<void> = work.then(
+    () => undefined,
+    () => undefined,
+  );
+  detachedSweepActions.add(held);
+  void held.finally(() => detachedSweepActions.delete(held));
+}
+
+/**
+ * W1-T2379 — LET WORK ALREADY IN FLIGHT FINISH RATHER THAN ABORTING IT, which is the property
+ * `startInFlightTicker`'s `stop()` has always had and which detaching a wait must not cost.
+ * Awaits every action detached by {@link runSweepLightPass} and settles once they all have.
+ * Safe to call when nothing is detached (resolves immediately) and safe to call twice.
+ */
+export async function drainDetachedSweepActions(): Promise<void> {
+  while (detachedSweepActions.size > 0) {
+    await Promise.all([...detachedSweepActions]);
+  }
+}
+
+/** W1-T2379: how many detached actions are still in flight. Test-facing only — no production
+ *  reader branches on this; the ticker awaits {@link drainDetachedSweepActions} instead. */
+export function detachedSweepActionCount(): number {
+  return detachedSweepActions.size;
+}
 
 /**
  * THE SHARED ENTRY POINT (acceptance 4): BOTH `rmd sweep` and the daemon poll
@@ -5907,12 +5988,15 @@ export async function runSweep(
               // return sets `spent` for `dueRepairFilings` alone to read; `void` (today's real
               // wiring, every pre-existing fake) leaves it `undefined` — no `spent` field is
               // written at all, so no existing ledger row's shape changes.
-              const dispatchOutcome = await deps.dispatchFix(
-                pr,
-                isBlockedCi(pr)
-                  ? { unmetCriteria: [], ciFailures: pr.ciFailures ?? [] }
-                  : { unmetCriteria: pr.unmetCriteria, actionableGateFailures: pr.actionableGateFailures },
-              );
+              const fixEvidence = isBlockedCi(pr)
+                ? { unmetCriteria: [], ciFailures: pr.ciFailures ?? [] }
+                : { unmetCriteria: pr.unmetCriteria, actionableGateFailures: pr.actionableGateFailures };
+              // W1-T2379: started either way — only the `await` moves. See `SweepDeps.detachFixWait`.
+              if (deps.detachFixWait) {
+                detachSweepAction(Promise.resolve(deps.dispatchFix(pr, fixEvidence)));
+                break;
+              }
+              const dispatchOutcome = await deps.dispatchFix(pr, fixEvidence);
               if (dispatchOutcome !== undefined) spent = dispatchFixSpent(dispatchOutcome);
               break;
             }
@@ -5941,7 +6025,13 @@ export async function runSweep(
               // W1-T2231: the SAME "conflicted" analogue of blocked-fixable's own capture just
               // above — REPAIR_SURFACE_DISPOSITIONS (below) treats both as dispatch-based repair
               // surfaces, so both must feed `spent` the same way.
-              const conflictedDispatchOutcome = await deps.dispatchFix(pr, { unmetCriteria: [], mergeConflict: pr.mergeConflict });
+              const conflictedEvidence = { unmetCriteria: [], mergeConflict: pr.mergeConflict };
+              // W1-T2379: the conflicted twin of the blocked-fixable arm above, same reasoning.
+              if (deps.detachFixWait) {
+                detachSweepAction(Promise.resolve(deps.dispatchFix(pr, conflictedEvidence)));
+                break;
+              }
+              const conflictedDispatchOutcome = await deps.dispatchFix(pr, conflictedEvidence);
               if (conflictedDispatchOutcome !== undefined) spent = dispatchFixSpent(conflictedDispatchOutcome);
               break;
             }
@@ -6502,11 +6592,15 @@ export async function runSweepLightPass(
   return Promise.all(
     openPrs.map((pr) => {
       const baseActionable = deps.actionable;
+      // W1-T2379: `detachFixWait` is set on EVERY forwarded shape, admitted or not — the tick this
+      // pass runs inside is awaited whichever PR won the post-review admission, so the fix rung's
+      // CI wait must leave the await on both branches or the defect survives on one of them.
       const scopedDeps: SweepDeps =
         admitted?.prNumber === pr.prNumber
-          ? deps
+          ? { ...deps, detachFixWait: true }
           : {
               ...deps,
+              detachFixWait: true,
               actionable: (d) => (d === "post-review" ? false : baseActionable ? baseActionable(d) : true),
             };
       return runSweep([pr], scopedDeps, policy);
