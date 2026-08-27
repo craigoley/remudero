@@ -467,3 +467,62 @@ test("buildMarkerAwareDigest: a read-only preview — resolves the SAME sinceIso
   const again = buildMarkerAwareDigest(path, store, "tok-a", nowIso);
   assert.equal(again.text, preview.text);
 });
+
+// ── The board-review rung's own row reaches the digest ─────────────────────────────────────────
+//
+// The rung's source comment claimed `digest.ts`'s cadence "already sweeps" its rows into the
+// operator's inbox. It did not: `digest.ts` referenced `board_review` ZERO times, against a control
+// of two references to `escalation.issue_opened`, a step it genuinely swept. The rung fired five
+// times before anyone noticed, because the sentence describing how its output reached a human was
+// the reason nobody checked. These tests are the thing that sentence was standing in for.
+
+test("board review: a `board_review.ran` row inside the window renders its counts", () => {
+  const path = ledgerFile([
+    { ts: "2026-07-14T09:00:00.000Z", step: "run.start", task_id: "W1-T1" },
+    {
+      ts: "2026-07-14T09:06:26.731Z",
+      step: "board_review.ran",
+      oldestOpenAgeHours: 9.345202777777779,
+      redCount: 4,
+      unhandledEscalationCount: 4,
+      itemsConsidered: 5,
+      proposals: 5,
+    },
+  ]);
+  const text = buildDigest(path, "2026-07-14T00:00:00.000Z");
+  assert.match(text, /^board review: oldest open 9\.3h, 4 red, 4 unhandled escalation\(s\), 5 item\(s\) considered, 5 proposal\(s\)$/m);
+});
+
+test("board review: `.fired` and `.skipped` sweep NOTHING — only `.ran` carries what a reader can act on", () => {
+  // `.fired` is 1:1 with `.ran` and adds only the trigger reason; `.skipped` is the cadence holding
+  // a real depth trigger off, which is the system WORKING and is noise five times a day.
+  const path = ledgerFile([
+    { ts: "2026-07-14T09:00:00.000Z", step: "board_review.fired", reason: "oldest open non-draft item has sat 9.3h (>= 8h threshold)" },
+    { ts: "2026-07-14T09:07:00.000Z", step: "board_review.skipped", reason: "depth trigger fired but only 29.5m since the last run (minInterval 120m)" },
+  ]);
+  const text = buildDigest(path, "2026-07-14T00:00:00.000Z");
+  assert.doesNotMatch(text, /board review:/, "neither of the other two steps produces a line");
+});
+
+test("board review: a QUIET window omits the line entirely — soft-composed, never a placeholder", () => {
+  const quiet = ledgerFile([{ ts: "2026-07-14T09:00:00.000Z", step: "run.start", task_id: "W1-T1" }]);
+  const text = buildDigest(quiet, "2026-07-14T00:00:00.000Z");
+  assert.doesNotMatch(text, /board review/, "no line at all");
+  assert.doesNotMatch(text, /no run this window/, "and no placeholder either — the `inbox` precedent, not the `alerts` one");
+});
+
+test("board review: LATEST WINS across repeated runs, and a row missing a field omits that clause", () => {
+  const path = ledgerFile([
+    { ts: "2026-07-14T06:47:50.272Z", step: "board_review.ran", oldestOpenAgeHours: 7.04, redCount: 4, unhandledEscalationCount: 2, itemsConsidered: 4, proposals: 2 },
+    { ts: "2026-07-14T09:05:52.907Z", step: "board_review.ran", redCount: 1, proposals: 0 },
+  ]);
+  const text = buildDigest(path, "2026-07-14T00:00:00.000Z");
+  assert.match(text, /^board review: 1 red, 0 proposal\(s\)$/m, "the newest row wins and its absent fields are omitted, not printed as undefined");
+  assert.doesNotMatch(text, /7\.0h/, "the earlier row is not summed in");
+  assert.doesNotMatch(text, /undefined/, "no field renders as undefined");
+});
+
+test("board review: a `.ran` row carrying no counts at all still renders, honestly", () => {
+  const path = ledgerFile([{ ts: "2026-07-14T09:00:00.000Z", step: "board_review.ran" }]);
+  assert.match(buildDigest(path, "2026-07-14T00:00:00.000Z"), /^board review: \(ran, no counts recorded\)$/m);
+});
