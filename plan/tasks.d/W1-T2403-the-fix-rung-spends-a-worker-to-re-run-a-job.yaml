@@ -1,0 +1,154 @@
+- id: W1-T2403
+  title: "THE FIX RUNG SPENDS A WORKER TO RE-RUN A JOB, AND THE RETRIGGER CONSUMES A STRIKE — #3121's fix worker produced one empty commit, `cf21fb53`, whose own subject reads 'ci: retrigger for a coverage-ratchet infra flake unrelated to this diff'; 10 of 72 commits on fix-touched PRs are empty, and 4 of the 10 strike-exhausted PRs in that sample carry a retrigger-shaped commit, so `fixStrikeCap` is being spent on infrastructure noise and escalating with no defect fixed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 25.00
+  files: [src/run-task.ts, test/fix-rung-retrigger-accounting.test.ts]
+  origin: "operator-brief#fix-rung-spends-a-worker-to-retrigger-2026-08-27"
+  plan_refs: ["W1-T356", "W1-T2379", "W1-T1066", "W1-T127", "W1-T2344"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE ID, AND WHAT "FIRST RESERVED" WAS TAKEN TO MEAN. Eight surfaces swept, anchored
+    `W1-T2403([^0-9]|$)` with a `[0-9]` class and never `\d`, anchored printed beside unanchored at
+    every surface, every open-surface control drawn from the open set enumerated FIRST (HTTP 200, an
+    array, 2 rows). SURFACE 1 READS 1: `refs/rmd-id/W1-T2403` resolves against 516 refs. Shard
+    filenames 0 of 659; declared ids 0 of 914; open-PR titles 0 of 2 CASE-SENSITIVELY; bodies 0;
+    head refs 0; merged trailers 0 of 748 trailer lines; merged subjects 0 of 2,461.
+
+    THE BRIEF SAID "THE FIRST RESERVED ID" AND THE MEASUREMENT DOES NOT AGREE WITH THE HEADER, SO
+    THE READING IS RECORDED RATHER THAN ASSUMED. Of 516 reserved ids, 157 are reserved and neither
+    declared nor carrying a shard file; the LOWEST is W1-T524 and the lowest in this band is
+    W1-T2390. W1-T2403 is the header's own number, is reserved, and is unfiled — it satisfies every
+    stated constraint including "surface 1 must read 1" — so it is what this files under. If "first"
+    meant W1-T2390 or W1-T524 the operator can renumber; nothing else in this shard depends on it.
+
+    CONTROLS, INCLUDING THE TWO THAT HAD TO BE RE-TAKEN. W1-T2399 fires 1 on filenames, declared
+    ids and merged subjects; W1-T2397 fires 1 on open titles and open bodies from the open set. On
+    MERGED TRAILERS W1-T2397 reads ZERO — its builds (#3125, #3126) carry the trailer in the PR BODY
+    and not in the squash commit — so it was re-controlled on W1-T2399, W1-T2345 and W1-T2324,
+    reading 1, 1 and 3. And OPEN HEAD REFS HAS NO LIVE CONTROL AT ALL: both open heads are
+    `feat/…` and `fix/…`, so ZERO task-shaped heads exist to fire on; the zero is a property of the
+    surface today, recorded rather than papered over. Probes on a POPULATED band: W1-T240 reads
+    anchored 0 against unanchored 4 on the refs, W1-T239 reads 1 against 6 on filenames, 1 against 6
+    on declared ids, 0 against 2 on merged trailers and 0 against 11 on merged subjects.
+
+    THE LEDGER WAS READ OVER THE THREE-FORM UNION, with a per-form coverage control: 0 `.gz`, 37
+    dated plain rotations, 1 live file, and `run.start` reading 0 / 7,103 / 214 across them, so both
+    non-empty forms were genuinely opened. A live-only read produced two false findings today.
+
+    ── Q1. HOW MANY FIX DISPATCHES END IN A RETRIGGER-SHAPED COMMIT ────────────────────────────
+
+    THE CLASSIFIER, STATED BEFORE THE NUMBER, AND IT IS A LOWER BOUND. A commit is RETRIGGER-SHAPED
+    if EITHER (a) it changes ZERO files — an empty commit — OR (b) its SUBJECT LINE matches
+    `re-?trigger`, or matches `flake|flaky|infra` together with `ci|check|coverage|run|rerun`. It is
+    a lower bound by construction: a fix that changed one real line for the wrong reason is
+    invisible to it, and so is a retrigger whose subject says nothing.
+
+    THE MESSAGE ARM IS SUBJECT-ONLY, AND THE FIRST DRAFT WAS NOT. Matching the whole commit BODY
+    swept up three commits that changed real lines, because their bodies discuss a flake; narrowing
+    to the subject dropped two of the three. The remaining one is named below rather than hidden.
+
+    THE POPULATION, AND WHY IT IS A SAMPLE. Over the union there are 237 `fix.dispatch` rows across
+    111 run ids and 139 task ids, spanning 2026-08-12 to 2026-08-27. THE ROWS DO NOT CARRY A PR
+    NUMBER — `fix.dispatch` has `run_id`/`task_id` and nothing else — and only 15 percent join to a
+    `pr.opened` row, so a full census is not available from the ledger alone. 211 of the 237
+    dispatches (89 percent) also run under a `DAEMON-…` pseudo run id with no branch of its own.
+    The sample taken is therefore the 28 `PR-####` task ids the fix rung dispatched against, which
+    name their PR directly and need no resolution, PLUS #3121 itself: 29 PRs, 72 commits.
+
+    THE RESULT: 11 OF 72 COMMITS ARE RETRIGGER-SHAPED (15.3 percent), on 9 of the 29 PRs.
+    The empty-commit arm alone reads 10; the subject-named arm reads 6; 5 satisfy both.
+
+    BOTH DIRECTIONS CONTROLLED. It FINDS `cf21fb53` on #3121, the commit this task was filed from.
+    And of the 62 commits that changed real lines, EXACTLY ONE is swept — `852b5c3a`,
+    "test(w1-t187): retry the CI-flaky 500ms benchmark before failing", which is a genuine fix
+    caught by the subject arm. So the message arm has a MEASURED false-positive rate of 1 in 62,
+    and THE EMPTY-COMMIT ARM HAS NONE BY CONSTRUCTION: a commit that changed zero files cannot be a
+    repair. A build should treat the empty arm as the signal and the subject arm as advisory.
+
+    ── Q2. WHETHER A CHEAPER RUNG IS EVEN POSSIBLE — UNDETERMINED, AND THAT IS THE ANSWER ──────
+
+    THE QUESTION IS NOT SETTLED FROM HERE, AND GUESSING IT WOULD DECIDE THE WHOLE SHAPE OF A BUILD.
+    What is known: re-running a CONCLUDED RUN from the fleet's credential 403s, observed repeatedly
+    on 2026-08-27, which is exactly why a fresh head is the current remedy; and the operator
+    successfully re-ran a single JOB on #3089 with `POST .../actions/jobs/{id}/rerun`.
+
+    THE TWO CANDIDATE CAUSES OF THAT 403 HAVE OPPOSITE ANSWERS AND THIS RECON COULD NOT SEPARATE
+    THEM. Either (i) the fleet's token lacks `actions: write`, in which case the JOB endpoint fails
+    identically, since GitHub gates both on the same permission — and the shard becomes "the empty
+    commit is the only remedy", making the finding purely the strike accounting of (Q3); or (ii) the
+    403 is endpoint semantics about re-running a run that has already concluded, in which case the
+    single-JOB endpoint may well succeed and the rung has a remedy costing no worker at all.
+
+    THE DISCRIMINATOR IS ONE OPERATOR-SIDE READ, NOT A PROBE: the fine-grained PAT's own permission
+    list. A live `POST` would settle it too, but that is a MUTATION on someone's PR and this is a
+    recon; it was not attempted. WHOEVER BUILDS THIS MUST SETTLE Q2 FIRST — a build that assumes (ii)
+    and finds (i) has written a rung that 403s on every use.
+
+    ── Q3. THE STRIKE QUESTION, WHICH IS SEPARATE FROM THE MECHANISM ───────────────────────────
+
+    IT IS SEPARATE BECAUSE IT IS TRUE UNDER EITHER ANSWER TO Q2. Even if the empty commit stays the
+    only remedy, the question is whether producing one should consume a strike. MEASURED IN THE SAME
+    SAMPLE: 10 PR-shaped task ids exhausted their strikes, and FOUR OF THOSE TEN carry a
+    retrigger-shaped commit — #2161, #2527, #2707 and #2877. So 40 percent of the exhaustions in
+    this sample had at least one strike spent on infrastructure noise before escalating to the
+    operator with no defect fixed.
+
+    THAT IS THE COST STATED AGAINST THE ONE ALREADY MEASURED: `blocked_ci` is 1,593.44 US dollars,
+    46.7 percent of all fleet spend over 19 days, and 148 of 152 blocked-CI tasks (97.4 percent)
+    later earned merge credit — the work was right and CI was not. 81 of those 152 were touched by
+    the fix rung at 453.06 dollars.
+
+    A NON-CONSUMING RETRIGGER IS SAFE ONLY IF SOMETHING ELSE BOUNDS IT, AND THE BOUND MUST NOT BE A
+    TIMER. `fixStrikeCap` is 2 and exists to stop a rung chasing a real defect forever; a retrigger
+    for a check that is KNOWN flaky is a different thing, but "does not consume a strike" with no
+    other bound is an unbounded loop, which is the shape this repo has refused before. The candidate
+    bound is a SEPARATE, SMALL retrigger counter per head — the same once-per-head shape W1-T2345's
+    disposition counter already uses — so a permanent flake stops after a stated number of
+    retriggers on an unchanged head and escalates naming the check, while a real defect still spends
+    real strikes. NOTHING SLEEPS, THROTTLES OR PACES (W1-T1066), and this proposes NO change to
+    `fixStrikeCap` in either direction and no change to the CI wait cap.
+
+    ── WHAT IS OWNED ELSEWHERE, RECORDED SO THIS DOES NOT RE-FILE IT ───────────────────────────
+
+    The orphan-sweep flake itself is W1-T356 (#3074) — two of the retrigger commits above name it.
+    The light-sweep tick variance is W1-T2379. The `coverage-ratchet` job cap is #3064's. THIS SHARD
+    OWNS ONLY THE RUNG'S REMEDY AND ITS STRIKE ACCOUNTING; it does not diagnose any individual
+    flake and must not grow to.
+
+    RISK BAND. `risk: high` is set UP FRONT and is RULE 19'S SPAN, not blast radius: `files:` crosses
+    the `run-task` fix-rung stem and this task's own test stem, which the sizing check reads as more
+    than one concern and refuses at `risk: medium`. The blast radius is one accounting decision on a
+    rung that already runs.
+  acceptance:
+    - claim: "a retrigger-shaped fix outcome is recorded as such rather than as an ordinary repair"
+      proof: "unit test: test/fix-rung-retrigger-accounting.test.ts"
+    - claim: "a fix that changed real lines is still recorded as an ordinary repair"
+      proof: "unit test: test/fix-rung-retrigger-accounting.test.ts"
+    - claim: "a retrigger on an unchanged head is bounded by its own counter rather than by a timer"
+      proof: "unit test: test/fix-rung-retrigger-accounting.test.ts"
+    - claim: "a real defect still spends real strikes and still exhausts at the existing cap"
+      proof: "unit test: test/fix-rung-retrigger-accounting.test.ts"
+    - claim: "the strike cap value is unchanged by this task in either direction"
+      proof: "unit test: test/fix-rung-retrigger-accounting.test.ts"
+    - claim: "a permanently failing check stops retriggering and escalates naming the check"
+      proof: "unit test: test/fix-rung-retrigger-accounting.test.ts"
+    - claim: "nothing added paces or throttles or sleeps a call"
+      proof: "unit test: test/fix-rung-retrigger-accounting.test.ts"
+  falsifier: |
+    Re-run the classifier over a fresh window. If ZERO commits on fix-touched PRs are empty, the
+    rung is not spending workers on retriggers at the measured rate and this task must be closed
+    rather than implemented. The measurement to re-run is the same one, over the THREE-FORM ledger
+    union with a per-form coverage control: take every `fix.dispatch` row, resolve the PRs it
+    targeted, list each PR's commits over REST, and classify on the two arms above. Control both
+    directions — the query must still find `cf21fb53`, and must still leave the 62-odd commits that
+    changed real lines alone apart from the one named subject-arm false positive.
+
+    SEPARATELY DECISIVE FOR Q2: if the fleet's credential CAN re-run a single job, the empty commit
+    stops being the only remedy and the mechanism half of this shard is rewritten around that
+    endpoint. Settle it before building.
