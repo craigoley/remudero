@@ -167,6 +167,24 @@
 # claims.yaml assertion). It reuses W1-T410's extractAssertedUnbuiltTaskIds (src/lib/retro.ts)
 # rather than re-deriving the not-shipped phrase extractor a second time.
 
+# Added by W1-T2334 (fb-1786006232525-6d94d8): docs/operator-guide.md and the generated
+# docs/cli-reference.md both promised verbs like `check-proof`/`emissions` were read-only, but
+# `checkCliFreshness` (src/lib/self-sync.ts) runs BEFORE almost any verb's body and can
+# fast-forward this checkout's `main` on a clean, behind, on-main checkout -- true about each
+# verb's own body, false about the invocation, and `RMD_SELF_SYNC_DONE=1` (the provable escape
+# hatch) appeared nowhere under docs/ outside docs/research/. This claim guards the fix so the
+# guide cannot silently drift back to the unqualified wording.
+
+- id: docs-fast-forward-escape-hatch
+  claim: "docs/operator-guide.md names the CLI entry point's checkCliFreshness fast-forward
+    (git merge --ff-only origin/main, before almost any verb's own body runs) and documents
+    RMD_SELF_SYNC_DONE=1 as the idiom that keeps a verb the guide calls read-only provably so --
+    derived from every COMMANDS registry verb that itself claims read-only-ness, so a verb added
+    later is covered without redoing this task."
+  plan_section: "docs/operator-guide.md#the-commands-rmd-binrmd"
+  assertion: 'node --test --import tsx --test-name-pattern "docs/operator-guide.md names the entry-point fast-forward and documents RMD_SELF_SYNC_DONE=1" test/docs-claims.test.ts'
+  precondition_paths: ["test/docs-claims.test.ts"]
+
 - id: plan-state-claims-self-consistent
   claim: "MASTER-PLAN.md does not assert a task id BOTH shipped (the '## SHIPPED log' section, in
     either its long-form W<n>-T<n> or house-style compressed-pair T<n>/#<pr> notation) AND

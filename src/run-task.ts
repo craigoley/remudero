@@ -30023,8 +30023,27 @@ const COMMANDS: readonly CommandSpec[] = [
   },
 ] as const;
 
+// W1-T2334: stated ONCE here, not pasted onto every "READ-ONLY"/"Read-only" line above (that
+// would be forty near-duplicate paragraphs, motion rather than correction) -- a command's own
+// blurb above is accurate about ITS BODY; the CLI ENTRY POINT it dispatches through is a separate
+// question this footer answers. checkCliFreshness (src/lib/self-sync.ts) runs before almost
+// every command's first line and, on a checkout that is clean, behind origin/main, on branch
+// main, not a linked worktree and with no dirty path overlapping the incoming diff, advances
+// main via `git merge --ff-only origin/main` and re-execs -- a worktree, a detached HEAD, a
+// conflicting dirty path or a real divergence all refuse instead, never silently. This footer
+// renders into BOTH `rmd --help`'s real output and docs/cli-reference.md's "## `rmd --help`"
+// section (USAGE is passed to renderReference in scripts/generate-cli-reference.mjs), so it
+// reaches an operator on either surface without a per-command rewrite; docs/operator-guide.md's
+// verb-table preamble states the same condition in full prose for the reader who wants it.
 const USAGE_FOOTER =
-  "An UNKNOWN command, or an unrecognized argument to a command, prints this usage and exits\nNON-ZERO, spawning nothing — the control surface never falls through to a drain on bad input.";
+  "An UNKNOWN command, or an unrecognized argument to a command, prints this usage and exits\n" +
+  "NON-ZERO, spawning nothing — the control surface never falls through to a drain on bad input.\n" +
+  "\n" +
+  "A command's own description above is accurate about what ITS BODY does; the CLI ENTRY POINT\n" +
+  "can still fast-forward this checkout's main first (git merge --ff-only origin/main) on a\n" +
+  "clean, behind, on-main checkout, before almost any command dispatches — see the operator\n" +
+  "guide's verb-table preamble for the exact condition. Set RMD_SELF_SYNC_DONE=1 to run any\n" +
+  "command provably read-only.";
 
 /** Full `rmd --help` text — every command's usage line, generated from COMMANDS. */
 const USAGE = `usage:\n${COMMANDS.map((c) => `  ${c.usage}`).join("\n")}\n\n${USAGE_FOOTER}`;

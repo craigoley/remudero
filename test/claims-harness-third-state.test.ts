@@ -196,9 +196,9 @@ test("claims-check CLI: every failure shape that was red before W1-T2215 is stil
   assert.notEqual(doesNotExist.status, 0, doesNotExist.stdout + doesNotExist.stderr);
 });
 
-test("claims-check: the real plan/claims.yaml (now carrying precondition_paths on 13 of its 14 claims) still holds end-to-end -- adding the third-state mechanism did not turn a true claim red", () => {
+test("claims-check: the real plan/claims.yaml (now carrying precondition_paths on 14 of its 15 claims) still holds end-to-end -- adding the third-state mechanism did not turn a true claim red", () => {
   const result = spawnSync(process.execPath, [SCRIPT], { cwd: REPO_ROOT, encoding: "utf8" });
   const output = result.stdout + result.stderr;
   assert.equal(result.status, 0, output);
-  assert.match(output, /OK -- all 14 claim\(s\) hold/);
+  assert.match(output, /OK -- all 15 claim\(s\) hold/);
 });
