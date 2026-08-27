@@ -1,0 +1,198 @@
+- id: W1-T2423
+  title: "A CONTAINMENT-PROBE REFUSAL COUNTS AS A DISPATCH THAT PRODUCED NOTHING — `dispatchesWithoutNewOwnedPr` increments on `run.start` and the containment probe gates BEFORE the task worker ever runs, so 94 runs across 63 tasks were counted against a bound that measures a task's ability to open a PR; W1-T1279 reached `freshCount: 5` on five such refusals and was refused for 84 hours, and W1-T2249's exclusion is keyed on a `check` value stamped at WRITE time that ZERO of 517 verdict rows carry"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 25.00
+  files: [src/lib/status.ts, test/probe-refusal-is-not-a-dispatch.test.ts]
+  origin: "operator-brief#breaker-counts-probe-refusals-2026-08-27"
+  plan_refs: ["W1-T2249", "W1-T2344", "W1-T2415", "W1-T206", "W1-T271", "W1-T316", "W1-T1281", "W1-T2201"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE ID. Eight surfaces swept at base 293d1d91, anchored `W1-T2423([^0-9]|$)` with a `[0-9]`
+    class and never `\d`, every open-surface control drawn from the open set enumerated FIRST over
+    REST (HTTP 200, type array, length 4, page 2 length 0). SURFACE 1 READS 1:
+    `refs/rmd-id/W1-T2423` resolves against 536 refs, and the anchor is proved discriminating on a
+    POPULATED band — `W1-T242` reads anchored 0 against unanchored 4 over that same file. Shard
+    filenames 0 of 668 (control W1-T2415 = 1); declared `- id:` lines 0 of 936 (control = 1);
+    open-PR titles 0 of 4 CASE-SENSITIVELY (control W1-T2408 = 1, lower-case `w1-t2408` = 0);
+    open-PR bodies 0 over 10,916 bytes (control W1-T2408 = 7); head branches 0 of 150 rows across
+    the open set unioned with every remote head (control W1-T2334 = 2). Surfaces 7 and 8 are
+    MERGED-ONLY and their zeros are recorded as coverage rather than evidence for an id that has
+    never merged: trailers 0 of 574 (control W1-T2249 = 1), subjects 0 of 2,487 (control
+    W1-T2415 = 1).
+
+    ── Q1. ONE TASK OR TWO. TWO, AND THIS SHARD IS THE FIRST ───────────────────────────────────
+
+    (1) THE ARGUMENT, NOT THE ASSERTION. The count defect and the rotating-gate defect were found
+    in one sitting and are still independent, because each survives the other's repair.
+    `dispatchesWithoutNewOwnedPr` would still count a probe refusal as a dispatch on a ledger that
+    NEVER rotated — the miscount is in what the function treats as a dispatch, and nothing about
+    file retention enters that decision. And `evaluateDispatchBreakerDetailed` would still read a
+    rolling window with a PERFECT count — its own marker reads `ledger-read-intent: live` and it
+    calls `readLedgerLines`, whose doc says THE LIVE FILE ALONE, so the set of rows the correct
+    count is taken over would still shrink under `MAX_RETAINED_LINES_PER_STEP`. Two defects, two
+    repairs, neither implying the other.
+
+    (2) SO THE SPLIT IS THE DESIGN, NOT A CONVENIENCE. Filing both here would put a change to what
+    counts and a change to what is read behind one acceptance block, and Rule 19 would be
+    satisfied only by a `risk` band standing in for a decomposition that was never done. THIS
+    SHARD IS THE COUNT. The gate is recorded in (14) below with its measurements so nobody
+    re-derives it, and it is deliberately NOT filed here.
+
+    ── DEFECT ONE, RE-DERIVED FROM SOURCE AND LEDGER ───────────────────────────────────────────
+
+    (3) WHAT THE COUNTER COUNTS. `dispatchesWithoutNewOwnedPr` (`src/lib/status.ts`) walks the
+    lines for one task and increments on `line.step === "run.start"`, resetting to 0 on
+    `pr.opened` or a merge credit. `isDispatchBreakerTripped` compares that count against
+    `DEFAULT_MAX_TASK_DISPATCHES`, which is 5. The bound's own meaning is stated in its callers
+    and in W1-T2249's added doc: a run that "never reached the task worker at all" tests nothing
+    about the task's ability to produce a PR.
+
+    (4) BUT THE CONTAINMENT PROBE GATES BEFORE THE WORKER RUNS, AND ITS REFUSAL STILL COUNTS.
+    `run.start` is written at dispatch; the probe refuses afterwards and the run ends
+    `verdict: "blocked_containment"`. No `pr.opened` follows, so the increment stands. MEASURED
+    over a controlled three-form union: 94 distinct `blocked_containment` verdict rows across 63
+    DISTINCT TASKS, out of 517 distinct verdict rows corpus-wide.
+
+    (5) THE MEASURED INSTANCE, AND WHY IT IS THE MAXIMUM. W1-T1279's five runs that set
+    `freshCount: 5` were ALL containment-probe refusals. Four ended on a 6-turn probe budget
+    reporting `Reached maximum number of turns (6)`; one, at 2026-08-24T05:10:27Z, was a genuine
+    `API Error: 529 Overloaded` costing $0.000842. Every one of the five reads
+    `check: "outside-cwd-denial"`. Across all 63 tasks W1-T1279's 5 is the HIGHEST containment
+    count — the next are 4 (W1-T2231, W1-T2201) — so exactly one task has ever reached the bound
+    on probe refusals alone, and two more were one run away.
+
+    (6) AND W1-T2249's EXCLUSION CANNOT REACH THEM, BY CONSTRUCTION RATHER THAN BY OVERSIGHT. Its
+    pre-scan requires FOUR conjuncts on a verdict row — `step === "verdict"`,
+    `verdict === "blocked_containment"`, `check === SPAWN_TRANSPORT_FAILURE_CHECK`
+    (`"spawn-transport-failure"`), and a string `run_id` — then skips `run.start` rows sharing a
+    collected `run_id`. ALL 94 `blocked_containment` rows carry `check: "outside-cwd-denial"` and
+    ZERO of the 517 verdict rows carry the transport symbol, so the third conjunct has never once
+    been satisfied. WORSE, `check` is stamped at WRITE time and this counter re-reads history
+    without re-classifying it: W1-T1279's rows were written roughly 31 hours BEFORE the symbol
+    existed, so the exclusion is FORWARD-ONLY over a BACKWARD-LOOKING counter and could never have
+    cleared this breaker — not even for the 529 that is squarely its own class.
+
+    (7) W1-T2249 IS NOT WRONG AND IS NOT RE-LITIGATED HERE. Its shard says in terms: "THIS TASK
+    ADDS A FIFTH REASON; IT DOES NOT MERGE THE FOUR." It named the transport class, excluded that
+    class, and said so. The gap is not that it chose badly; it is that an ALLOW-LIST OF CHECK
+    SYMBOLS is the wrong instrument for this question, which is what (8) is about.
+
+    ── Q2. THE QUESTION IS UPSTREAM OF ANY EXCLUSION LIST ──────────────────────────────────────
+
+    (8) DO NOT WIDEN THE LIST. Adding turn-exhaustion to W1-T2249's pre-scan would repeat its
+    shape and inherit both its defects: a new symbol still stamped at write time, still unable to
+    reach rows already written, and still one enumerated failure mode ahead of the next one. THE
+    QUESTION IS WHETHER A RUN THAT ENDED BEFORE THE TASK WORKER STARTED IS A DISPATCH AT ALL.
+
+    (9) THE DISCRIMINATOR ALREADY EXISTS AND IS NOT NEW. `verdict: "blocked_containment"` IS the
+    statement that the probe refused and the worker never ran. It needs no new symbol, it is
+    already on every one of the 94 rows, and — the point W1-T2249's `check` key cannot match — IT
+    WAS ALREADY ON W1-T1279's FIVE ROWS ON 2026-08-24. A counter keyed on the run's own terminal
+    verdict is therefore backward-compatible with history as written, which an allow-list keyed on
+    a later symbol structurally is not.
+
+    (10) THE SIBLING CLASS IS NAMED AND DELIBERATELY NOT BUNDLED. `blocked_isolation` reads 4
+    distinct rows (W1-T519, W1-T1099, W1-T1104, W1-T1284), all `check: "inherited-functions"`,
+    `observed: "unproven"` — the same pre-worker shape, at most one per task, so no task is
+    anywhere near the bound on it. Whether it joins this rule is a design question for the build
+    to answer explicitly and record; it must not be swept in silently because it looks similar.
+
+    ── Q3. THE CONTRAST CASE, WHICH ANY REMEDY MUST KEEP REFUSING ──────────────────────────────
+
+    (11) W1-T2323 IS WHAT THE BOUND IS FOR, AND IT MUST STILL TRIP. Its five runs read
+    `verdict: "no_pr"` with `check: null` — the worker RAN, five times, and produced nothing. That
+    is a genuine no-progress streak and the breaker refusing it is correct. The discriminator in
+    (9) leaves it untouched: `no_pr` is not `blocked_containment`, so all five keep counting.
+    MEASURED: `no_pr` reads 35 distinct rows and W1-T2323's 5 is the maximum there too, so the two
+    tripped tasks in the entire corpus sit on OPPOSITE sides of this line — one false positive
+    that clears, one true positive that does not. THAT SEPARATION IS THE ACCEPTANCE TEST.
+
+    ── WHAT ACTUALLY ENDED THE 84 HOURS, SO NOBODY CREDITS THE BREAKER ─────────────────────────
+
+    (12) THE PROBE'S TURN BUDGET MOVED; THE TASK DID NOT. `max_turns` on `containment.probe` rows
+    reads null through 2026-08-25T07:27, then 10 from 2026-08-25T08:38:48, then 13 from
+    2026-08-27T03:38:33. W1-T1279's successful probe on 2026-08-27T21:00:32 used `num_turns: 7`
+    against `max_turns: 13`. UNDER THE 6-TURN BUDGET IN FORCE DURING ALL FIVE FAILURES IT WOULD
+    HAVE EXHAUSTED AGAIN. Nothing about W1-T1279 changed between the refusals and the success; the
+    allowance did. That allowance is W1-T2344's and is cited, not re-filed.
+
+    (13) THE COST, MEASURED. 84 hours 19 minutes of not shipping. $1.3162 of probe spend across
+    the five refused runs. 77 `dispatch.circuit_broken` rows. And escalation #2693, opened
+    2026-08-24T09:40:40Z with labels `needs-human`, `escalation-blocked` and `needs-action` and NO
+    ASSIGNEES, carries exactly ONE comment — posted by the fleet bot at 2026-08-27T22:55:40Z
+    auto-closing it because the task had merged. NO HUMAN EVER READ IT, against a control of 96 of
+    100 recent issues carrying at least one comment. Nothing was blocked behind W1-T1279: a
+    breaker refusal removes the task from the eligible set, so it cannot be anyone's `blocked_by`,
+    and the fleet ran 190 dispatches across 124 distinct tasks inside the window.
+
+    ── WHAT WORKED, AND WHAT IS RECORDED BUT NOT FILED ─────────────────────────────────────────
+
+    (14) THE DEDUP HELD, AND THE GATE IS THE OTHER TASK. Exactly ONE escalation was opened across
+    84 hours, several daemon restarts and a rotation — the cross-boot dedup keyed on
+    `dispatch.circuit_broken.escalated`, a member of `DECISION_RELEVANT_LEDGER_STEPS`, did its
+    job and no duplicate-issue storm occurred. SEPARATELY, AND NOT FILED HERE: the breaker's gate
+    reads the live file alone, `run.start` reads 207 live against 568 distinct over the union at
+    `MAX_RETAINED_LINES_PER_STEP = 200`, W1-T1279's two oldest runs had rotated out so the live
+    file held 3 and `freshCount 3 < 5` cleared it, and the indeterminate guard could not fire
+    because `priorCount` comes from `cache.lastCounts`, an in-memory Map rebuilt per invocation,
+    and the daemon had restarted. That is Q1's second task and needs its own id.
+
+    ── WHAT MUST NOT MOVE ──────────────────────────────────────────────────────────────────────
+
+    (15) `DEFAULT_MAX_TASK_DISPATCHES` STAYS 5. Nothing auto-resets a breaker. Nothing paces,
+    sleeps or throttles. The reset rule stays a fresh owned PR or a merge credit. The lifetime cap
+    (W1-T271/W1-T316) is a separate, independent backstop and is not touched. This task changes
+    WHAT COUNTS AS A DISPATCH and nothing else about the bound.
+
+    (16) OWNED ELSEWHERE, CITED NOT RE-FILED. W1-T2415 owns the missing `DispatchFilterReason` arm
+    that leaves a breaker refusal unnamed on the queue head. W1-T2344 owns the probe's turn
+    allowance and the derived-cap dilution that produced four of these five refusals. W1-T2249
+    owns the 529 exclusion and its `spawn-transport-failure` symbol. W1-T206 owns the torn-read
+    guard. THIS TASK OWNS ONE THING: that a run which never reached the worker is counted as a
+    dispatch that produced nothing.
+
+    (17) RULE 19 BAND SET FROM SPAN UP FRONT. `risk: high` records the SPAN the `files:` list and
+    the acceptance text reach across, and is independently justified: the symbol being changed
+    gates fleet spend, so a wrong edit either burns runs forever or stops bounding them at all.
+    `src/lib/containment.ts` is deliberately NOT declared — the discriminator in (9) reads a
+    verdict this repo already writes, and declaring the probe's own module would serialize this
+    task against every containment change for a path it does not touch.
+  acceptance:
+    - claim: "a run whose own verdict is blocked_containment does not count toward the dispatch breaker"
+      proof: "unit test: test/probe-refusal-is-not-a-dispatch.test.ts"
+    - claim: "a run that reached the worker and produced no PR still counts exactly as it does today"
+      proof: "unit test: test/probe-refusal-is-not-a-dispatch.test.ts"
+    - claim: "the five historical runs written before any exclusion symbol existed are excluded by their own verdict"
+      proof: "unit test: test/probe-refusal-is-not-a-dispatch.test.ts"
+    - claim: "the contrast task with five no-pr runs still trips at the same threshold"
+      proof: "unit test: test/probe-refusal-is-not-a-dispatch.test.ts"
+    - claim: "the exclusion is not an allow-list of check symbols and adds no new symbol"
+      proof: "unit test: test/probe-refusal-is-not-a-dispatch.test.ts"
+    - claim: "the reset rule is unchanged and a fresh owned PR still zeroes the streak"
+      proof: "unit test: test/probe-refusal-is-not-a-dispatch.test.ts"
+    - claim: "the lifetime dispatch cap is untouched and still counts every run"
+      proof: "unit test: test/probe-refusal-is-not-a-dispatch.test.ts"
+    - claim: "the bound stays five and nothing added resets a breaker or paces a call"
+      proof: "unit test: test/probe-refusal-is-not-a-dispatch.test.ts"
+  falsifier: |
+    If a fresh three-form union read shows any verdict row carrying
+    `check: "spawn-transport-failure"`, W1-T2249's exclusion has begun to fire and the population
+    this task addresses must be re-derived against it rather than against the 94 rows that all
+    read `outside-cwd-denial` today. The read control for that re-run is `dispatch.skipped` at 10
+    live plus 2,075 rotated, with each form counted separately and the `.gz` form reported as
+    empty rather than globbed silently.
+
+    SEPARATELY FALSIFYING: if any task is found whose `no_pr` runs alone reach the bound and whose
+    breaker would be cleared by the discriminator, the rule is too wide and must be re-derived —
+    the whole claim is that `blocked_containment` and `no_pr` separate the false positive from the
+    true one, and W1-T2323's five `no_pr` runs are the standing control for that separation.
+
+    AND IF the containment probe is ever changed so that a refusal happens AFTER the task worker
+    has run, the premise in (4) is void: the discriminator would then exclude runs that did test
+    the task, and the counter would stop bounding the thing it exists to bound.
