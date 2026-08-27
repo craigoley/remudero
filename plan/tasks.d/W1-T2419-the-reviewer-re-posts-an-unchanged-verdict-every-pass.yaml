@@ -1,0 +1,148 @@
+- id: W1-T2419
+  title: "THE REVIEWER RE-POSTS AN UNCHANGED VERDICT AS A NEW COMMENT ON EVERY SWEEP PASS — the post-review row admits on `checksState green && reviewState none`, `reviewPostRefusedFor` deliberately checks only `review.post_refused` because a delivered post is assumed to flip the live rollup, and NOTHING anywhere compares the verdict about to be written against the one already standing; the commit status is last-write-wins and costs nothing to rewrite, but the comment APPENDS, so #3140 accumulated ten byte-identical failure comments in twelve minutes on one unmoved head"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 20.00
+  files: [src/lib/review.ts, test/review-verdict-repost-is-deduped.test.ts]
+  origin: "operator-brief#reviewer-reposts-unchanged-verdict-2026-08-27"
+  plan_refs: ["W1-T1213", "W1-T195", "W1-T2382", "W1-T176"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE ID. Eight surfaces, anchored `W1-T2419([^0-9]|$)` with a `[0-9]` class and never `\d`,
+    anchored printed beside unanchored at every one. Surface 1 reads 1 of 532 reservation refs. The
+    open set was enumerated FIRST and every control drawn from it; where a surface is merged-only
+    and the open set cannot populate it, that is stated rather than reported as a bare zero.
+
+    ⚠ EVERY PROOF BELOW GREPS THIS SHARD'S OWN BYTES, NEVER CODE THAT DOES NOT EXIST YET. That rule
+    is not decoration: #3140 is red at this moment for exactly the opposite, a filing whose proof
+    read `export function runtimeAdoptionRows` against a module the filing does not create. The
+    reviewer executed it, found it unmet, and posted a failure — which is the very verdict this
+    shard is about. This is the W1-T1070/W1-T1071 dead-proof class and a filing must not repeat it.
+
+    ── Q1. WHAT DEDUPES A REVIEW POST TODAY, BY SYMBOL, AND WHAT IT KEYS ON ──────────────────────
+
+    THE ADMISSION. The `post-review` disposition row (lib/sweep.ts) reads
+    `checksState === "green" && requiredContextsUnreadable !== true && (reviewState === "none" ||
+    (reviewState === "pending" && reviewPendingIsStale(...)))`. A POSTED FAILURE does NOT re-enter
+    that population: `reviewStateFromRollup` (run-task.ts) maps a `FAILURE`/`ERROR` context to
+    `"failure"`, and no arm of that predicate admits `failure`. The row is correct.
+
+    THE ONLY LEDGER-BACKED DEDUP IS `reviewPostRefusedFor` (run-task.ts), and it keys on
+    `step === "review.post_refused"` matched on BOTH `task_id` AND `head_sha`. Its own doc states
+    why it stops there, and the sentence is the whole finding: it excludes `review.posted`
+    "(a real post always flips GitHub's live rollup away from 'zero runs,' so `reviewStateFromRollup`
+    itself carries that outcome on the next read — no ledger check needed)". THE DEDUP FOR A
+    DELIVERED VERDICT IS THEREFORE NOT A DEDUP AT ALL. It is an INFERENCE from a value the sweep
+    re-reads from GitHub each pass, and it holds only for as long as that read is current.
+
+    NOTHING COMPARES THE NEW VERDICT AGAINST THE STANDING ONE. A search of `src/` for a
+    prior-verdict, standing-verdict or verdict-unchanged comparison reads ZERO. CONTROL, the same
+    search style on a dedup symbol that DOES exist: `reviewPostRefusedFor` reads 6. So the zero is a
+    real absence and not a mis-shaped query.
+
+    MEASURED ON #3140, AND THE LEDGER SHOWS THE ROW ADMITTING TEN TIMES. Disposition trace over the
+    three-form union: `wait` on eleven passes from 20:47 to 21:04, then `post-review` on TEN
+    CONSECUTIVE PASSES from 21:06:02 to 21:18:57, then `blocked-ambiguous` from 21:20:19 onward.
+    `sweep.post_review.attempt` x10 and `sweep.post_review.done` x10, every one carrying
+    `head_sha=a4f11db5` and `exit=1`. The head never moved. The verdict never changed. The row that
+    admits on `reviewState === "none"` admitted ten times AFTER a failure had already been posted,
+    and only stopped when the state finally read `failure` and the PR fell to the next row.
+
+    THE COST SITS ON THE COMMENT, NOT THE STATUS, AND THE TWO SURFACES DIFFER BY CONSTRUCTION. The
+    commit status is LAST-WRITE-WINS: the head carries exactly ONE `remudero-review` context today,
+    at `failure`, however many times it was written. The comment APPENDS. GitHub's own bytes on
+    #3140: eleven comments, ten of them from `remudero-fleet[bot]`, all ten hashing to the SAME
+    sha256 prefix `045862033022acf7`, at 80 to 95 second intervals. An operator opening that PR
+    reads one sentence ten times.
+
+    ⚠ Q2. THE POPULATION, MEASURED BEFORE ANYTHING IS PROPOSED, AND IT SPLITS IN TWO ─────────────
+
+    Read over the THREE-FORM LEDGER UNION — 0 `.gz`, 38 rotated, 1 live, 474,991 rows, `ok: true` —
+    and ENUMERATED FROM `src/`, never from the ledger's own key set.
+
+    THE RE-DISPATCH IS SYSTEMIC. 8,054 `sweep.post_review.done` rows across 856 distinct
+    (pr, head) pairs. 845 of those pairs carry MORE THAN ONE post on the SAME head. Splitting by the
+    `exit` the row already records: 64 pairs re-posted a FAILURE verdict (exit 1, the path that
+    appends a comment) for 593 posts, median 9 and worst 27; 780 pairs re-posted a SUCCESS verdict
+    (exit 0, status-only) for 7,432 posts; ONE pair is excluded because its verdict genuinely
+    changed between posts.
+
+    CONTROL BOTH DIRECTIONS, AND BOTH FIRE. Direction 1, the query must find #3140: found, 10 posts,
+    exits `[1]`, one head. Direction 2, the query must NOT sweep up a PR whose verdict legitimately
+    changed: PR #2434 carries 18 posts on head `202d3026` with exits `[0, 1]` and is EXCLUDED by
+    that same `exit` test, correctly. A count alone would have proven nothing — `review.posted`
+    fires legitimately many times a day across PRs — so the key is repeats on ONE head with ONE
+    verdict, which is what was counted.
+
+    ⚠ AND THE COMMENT POPULATION IS ONE, WHICH IS A RECORD AND NOT A REMEDY. The ledger count is an
+    UPPER BOUND on comment repeats, not a measure of them, because a `sweep.post_review.done` does
+    not always append a comment. VERIFIED ON GITHUB'S OWN BYTES, not inferred: every failure-repeat
+    candidate since 2026-08-25 was fetched and its `remudero-review` comments hashed — #2821 has 1,
+    #2891 has 1, #3063 has 1, and #2822, #2884, #2928, #2934, #3005, #3030 have NONE. Only #3140
+    carries more than one, at ten identical. CONTROL: the identical query returns 10 for #3140, so
+    the nine zeros are real absences and not a broken fetch. A second control: the worst ledger
+    case, PR #2056 at 27 posts, carries only two comments on GitHub and both are from a human.
+
+    SO THE HONEST SHAPE IS TWO FINDINGS OF DIFFERENT SIZES. The re-dispatch of an unchanged verdict
+    is systemic and cheap. The COMMENT accumulation is confirmed exactly once. What distinguishes
+    #3140 is that it carries NO `Remudero-Task:` trailer, so its criteria resolve from the PR body's
+    own `## Acceptance` block, and a criteria-unmet failure on that path is the shape that writes an
+    explanatory comment every time. A remedy sized for 64 PRs would be sized for a population that
+    was never measured to exist.
+
+    ── Q3. WHAT IS ALREADY OWNED, VERIFIED BY READING EACH SHARD RATHER THAN ASSUMING ────────────
+
+    W1-T1213 owns a REFUSED attempt sharing a dedup set with a DELIVERED verdict, and its failure
+    mode is the mirror of this one: a refusal that PINS a head so nothing posts again. It is about
+    `review.post_refused` and about not posting. This is about a delivered verdict posted again.
+
+    W1-T195 owns escalation dedup ACROSS RUNGS, keyed on (PR, head sha, cause class), so a second
+    observer APPENDS to an existing escalation instead of opening its own. Different surface —
+    issues, not PR comments — and different actor: two rungs observing one state, not one rung
+    firing repeatedly.
+
+    W1-T2382 owns a repeated DISPOSITION, caused by `rotateLedger`'s PASS 3 collapsing every
+    `sweep.disposed` row for one pr@head to a single line. It is `status: blocked` and
+    `retirement: retired`. Different object: the disposition counter, not the comment.
+
+    NONE OF THE THREE OWNS A REPEATED COMMENT CARRYING AN UNCHANGED VERDICT. That was checked by
+    reading all three titles at `origin/main`, not by assuming from their names.
+
+    ── WHAT IS REFUSED, AND WHY ─────────────────────────────────────────────────────────────────
+
+    ⚠ THE STATUS RE-POST MUST KEEP BEING WRITTEN AND NOTHING HERE MAY SUPPRESS IT. It is
+    last-write-wins, it costs one request, and a stale status is worse than a repeated one — a
+    suppressed write would leave a head advertising a verdict the sweep no longer holds. Only the
+    COMMENT is the surface with a cost, because only the comment appends.
+
+    ⚠ NO TIMER, NO PACING, NO SLEEP, NO BACKOFF INTERVAL. W1-T1066 records a polling loop that
+    locked the operator out of his own repository for ninety minutes, and a "post at most once per
+    N minutes" rule is that shape wearing a different name. The discriminator must be the VERDICT'S
+    OWN BYTES against the standing comment's bytes, never the clock.
+
+    AND NO GATE. A report before a rung, a rung before a gate — and on this measurement the honest
+    remedy is smaller still: one comparison at the single site that writes the comment, refusing to
+    append when the body it is about to write already stands as the newest review comment on that
+    head. The status write is untouched, no disposition changes, no cap moves, and the sweep's
+    admission row is left exactly as it is because it is CORRECT.
+
+  acceptance:
+    - claim: "The shard records the measured repeat on one unmoved head, by count and by interval, rather than asserting it."
+      proof: "grep: TEN CONSECUTIVE PASSES in plan/tasks.d/W1-T2419-the-reviewer-re-posts-an-unchanged-verdict-every-pass.yaml"
+    - claim: "The shard names the symbol whose own doc explains why a delivered verdict has no ledger dedup."
+      proof: "grep: reviewPostRefusedFor in plan/tasks.d/W1-T2419-the-reviewer-re-posts-an-unchanged-verdict-every-pass.yaml"
+    - claim: "The shard records that nothing compares a new verdict against the standing one, with the control that makes that zero real."
+      proof: "grep: NOTHING COMPARES THE NEW VERDICT AGAINST THE STANDING ONE in plan/tasks.d/W1-T2419-the-reviewer-re-posts-an-unchanged-verdict-every-pass.yaml"
+    - claim: "The shard splits the systemic re-dispatch from the once-confirmed comment accumulation instead of reporting one number."
+      proof: "grep: THE COMMENT POPULATION IS ONE in plan/tasks.d/W1-T2419-the-reviewer-re-posts-an-unchanged-verdict-every-pass.yaml"
+    - claim: "The shard carries a control in both directions, including the PR whose verdict legitimately changed and is excluded."
+      proof: "grep: CONTROL BOTH DIRECTIONS, AND BOTH FIRE in plan/tasks.d/W1-T2419-the-reviewer-re-posts-an-unchanged-verdict-every-pass.yaml"
+    - claim: "The shard distinguishes itself from each of the three filed shards that touch neighbouring dedup problems."
+      proof: "grep: NONE OF THE THREE OWNS A REPEATED COMMENT in plan/tasks.d/W1-T2419-the-reviewer-re-posts-an-unchanged-verdict-every-pass.yaml"
+    - claim: "The shard forbids suppressing the status re-post and forbids any timer or pacing as the discriminator."
+      proof: "grep: NO TIMER, NO PACING, NO SLEEP, NO BACKOFF INTERVAL in plan/tasks.d/W1-T2419-the-reviewer-re-posts-an-unchanged-verdict-every-pass.yaml"
