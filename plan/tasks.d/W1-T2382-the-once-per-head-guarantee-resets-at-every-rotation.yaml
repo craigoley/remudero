@@ -11,6 +11,7 @@
   origin: "operator-brief#once-per-head-fires-twice-2026-08-27"
   plan_refs: ["W1-T2345", "W1-T2381", "W1-T1262", "W1-T244", "W1-T209", "W1-T2304", "W1-T2379", "W1-T1066"]
   status: blocked
+  retirement: retired
   attempts: 0
   rationale: |
     THE ID. Eight surfaces swept, each against a control firing on ITS OWN surface, before a byte of
@@ -141,6 +142,105 @@
     RISK BAND. `risk: high` is set UP FRONT because the sizing check reads `files:` as spanning two
     concerns — the `sweep` stem and this task's own test stem — and refuses that at `risk: medium`.
     Rule 19's SPAN, not blast radius.
+
+    ────────────────────────────────────────────────────────────────────────────────────────
+    RETIRED 2026-08-27. THE OPERATOR RULED FOR OPTION (C) AND IT SHIPPED AS #3136.
+    ────────────────────────────────────────────────────────────────────────────────────────
+
+    (Q1) THE RULING AND ITS EVIDENCE. Of the three remedies costed above, (C) was chosen and
+    merged as #3136 (`d7b6f43f`, "docs(sweep): correct the once-per-head promise to once per
+    rotation window"), two files, +53/-7, VERIFIED COMMENT-ONLY: zero non-comment lines added and
+    zero removed on either side, every numeric literal in `src/lib/sweep.ts` byte-identical to its
+    merge base, and `src/lib/ledger.ts` never opened.
+
+      (A) TEACH PASS 3 TO PREFER A `repeat_escalated: true` ROW — DECLINED ON COST, NOT FOUND
+          WRONG. It remains the correct behavioural fix and every word of the analysis above still
+          stands. It was declined because editing `rotateLedger`'s PASS 3 is the highest-blast-
+          radius change available in this repo — `test/ledger-rotation.test.ts` re-derives that
+          retention doctrine from every consumer's source — while the defect it repairs costs ONE
+          REDUNDANT LEDGER ROW EVERY FOUR HOURS PER STUCK HEAD. The price is the whole rotation
+          contract; the purchase is one row.
+      (B) READ THE UNION IN THE FOLD — CONTRAINDICATED BY ITS OWN DOC, so never a real candidate.
+          `readLedgerUnionBounded` states that every rung it serves reads the NEWEST ROW of a step,
+          NEVER A COUNT, so stopping early cannot under-count anything. This fold reads a COUNT — a
+          consecutive run — which is exactly the shape that early exit is documented as not
+          serving, so it would under-count SILENTLY. The unbounded alternative puts an archive walk
+          on the path every open PR takes every tick.
+      (C) CORRECT THE PROMISE — SHIPPED. #3136 rewrote the guarantee at six sites: four in
+          `src/lib/sweep.ts` (`SweepPolicy.repeatDispositionBound`'s doc, which had claimed
+          "exactly once (never again until the head moves)"; `repeatDispositionStreaksFromLedger`'s
+          doc; `RepeatDispositionRun.escalated`'s field doc; and the `repeatAlreadyEscalated`
+          call-site comment) and two in `test/sweep.test.ts`. The stated guarantee is now ONCE PER
+          HEAD PER ROTATION WINDOW, with the mechanism named — PASS 3 prefers the last `acted: true`
+          row while the trip's flag rides an `acted: false` one, so the evidence is SELECTED
+          AGAINST rather than shed by chance — and with the window recorded as BYTE-DRIVEN at the
+          4 MiB ceiling rather than clock-driven, which means it is SHORTEST EXACTLY WHEN THE FLEET
+          IS BUSIEST.
+
+    ONE RENAME WAS REFUSED, AND THAT REFUSAL IS PART OF THE RULING. `test/sweep.test.ts` carries a
+    W1-T2345 test whose TITLE states the false guarantee, and W1-T2345's own merged shard cites
+    that title verbatim as a `unit test:` proof. Renaming it would break a merged task's proof in
+    order to fix a comment, so the title stands and a comment above it now records what the test
+    actually pins — true WITHIN a rotation window — and why its never-rotated fixture is
+    structurally blind to this defect.
+
+    (Q2) THE WORK IS NOT DONE, AND THIS RETIREMENT IS NOT A COMPLETION. THE COUNTER STILL RESETS AT
+    EVERY ROTATION. #3136 changed no behaviour whatsoever; what changed is that the documentation
+    no longer claims otherwise. The mechanism described above is intact and every measurement in
+    this shard remains reproducible against it.
+
+    THE RESIDUAL COST, RESTATED SO NOBODY RE-DERIVES IT: about 5 to 6 re-fires per day per stuck
+    head, against roughly 543 full-weight derivations a day for the same head with no counter at
+    all — so ABOUT 99 PERCENT OF THE INTENDED REDUCTION IS STILL DELIVERED. The marginal cost of
+    one extra fire was measured directly and is one ledger row plus one comment appended to an
+    already-open issue; on the digest side it is ZERO, because #3085's reader deduplicates on PR
+    number and a second trip for the same PR renders no second line.
+
+    ⚠ #3136 DID NOT SATISFY CRITERIA 1 AND 2, AND WAS NOT MEANT TO. Those two assert that a
+    rotation does not reset the streak and that the marker survives a rotation. BOTH DESCRIBE
+    OPTION (A)'s BEHAVIOUR. Option (C) changes no behaviour by ruling, so both remain unsatisfied
+    by construction. A reader who takes this retirement for a completion has misread it: the
+    guarantee was CORRECTED, not RESTORED.
+
+    (Q3) WHAT WOULD RE-OPEN THIS. Two conditions, either alone sufficient:
+
+      1. THE RE-FIRE RATE RISES MATERIALLY above the 5-to-6-per-day-per-stuck-head measured here.
+         Rotation is byte-driven, so a busier fleet rotates sooner and re-fires more often; the
+         rate is the thing to watch, not the mechanism, which is already understood.
+      2. A CONSUMER APPEARS THAT DEPENDS ON THE MARKER SURVIVING A ROTATION. Today nothing reads
+         `repeat_escalated` across a rotation boundary. The moment something does, the marker's
+         destruction stops being a redundant row and becomes a CORRECTNESS FAULT.
+
+    Under either condition option (A) becomes worth its blast radius, and this shard should be
+    re-filed against `src/lib/ledger.ts` with the criteria below reinstated as written.
+
+    THE SIX CRITERIA, PRESERVED VERBATIM so a future re-filing needs no archaeology. They are NOT
+    withdrawn as wrong — criteria 1 and 2 describe the behaviour option (A) would deliver and were
+    declined on COST. Each claim and its proof, quoted exactly:
+
+      1. claim: "a rotation between two passes does not reset the repeat streak for an unchanged head"
+         proof: "unit test: test/sweep.test.ts"
+      2. claim: "the once per head marker survives a rotation that keeps an acted true row over the flagged one"
+         proof: "unit test: test/sweep.test.ts"
+      3. claim: "a head that genuinely moves still resets the streak and re arms the trip"
+         proof: "unit test: test/sweep.test.ts"
+      4. claim: "the bound stays at fifty and the key stays the disposition and the head sha"
+         proof: "unit test: test/sweep.test.ts"
+      5. claim: "the rendered reason text is still excluded from the key"
+         proof: "unit test: test/sweep.test.ts"
+      6. claim: "the sweep still re derives every pass and nothing added paces or sleeps"
+         proof: "unit test: test/sweep.test.ts"
+
+    ⚠ THE `acceptance:` BLOCK ITSELF IS UNTOUCHED BY THIS AMENDMENT. The list above is a duplicate
+    for the reader, never a replacement: Rule 21 holds `acceptance`, `files` and `title`
+    byte-identical, and this amendment proved all three through `loadPlan` before writing.
+
+    OWNED ELSEWHERE, RECORDED SO THIS RETIREMENT DOES NOT ABSORB THEM: the counter itself — its
+    existence, its key and its bound — is W1-T2345 (#3048); the trip's ROUTING to the digest
+    rather than to an escalation issue is W1-T2381 (#3087); the digest's own rotation window is
+    W1-T2388 (#3118); the undeclared `ledger-read-intent` on this fold's read is W1-T2393 (#3122).
+    `src/lib/ledger.ts` STAYS UNTOUCHED and stays out of `files:` — that exclusion IS the ruling,
+    not an oversight.
   acceptance:
     - claim: "a rotation between two passes does not reset the repeat streak for an unchanged head"
       proof: "unit test: test/sweep.test.ts"
