@@ -282,6 +282,13 @@ export interface StatusProjection {
    */
   uncreditedBuild?: UncreditedBuildWarning;
   /**
+   * W1-T2397 — AN OPEN, UNMERGED BUILD OF THIS TASK ON SOMEONE ELSE'S BRANCH. A REPORT AND
+   * NOTHING ELSE: no eligibility path reads it, `prState` is untouched, and the dispatch proceeds
+   * whether or not it is present. Populated by {@link projectPlan} from the OPEN half the gateway
+   * already holds. See {@link openSiblingBuild} for why this is a warn and not a refusal.
+   */
+  openSiblingBuild?: OpenSiblingBuild;
+  /**
    * Derived status label in the plan's vocabulary. DELIBERATELY stays within
    * {@link TaskStatus}'s closed set (never a new enum value) even after W1-T155's
    * taxonomy work below — two real consumers are load-bearing on that: daemon.ts's
@@ -4055,6 +4062,8 @@ export function projectPlan(
       mergedHeadBranches: captured ? (taskId: string) => captured.get(taskId) ?? [] : () => null,
     };
   }
+  /** W1-T2397: every OPEN PR this pass already fetched, for the open-sibling observation. */
+  let openForSiblings: readonly PrRef[] | undefined;
   // BATCHED rung (c3) CORROBORATION (W1-T377) — the same batch-once shape as the merged index
   // directly above, over the OPEN slice of the SAME fetch. Free on `buildBatchedGithub`; a single
   // extra `gh pr list --state open` on `ghGateway`. A FAILED read yields `null` for every task, so
@@ -4077,9 +4086,22 @@ export function projectPlan(
       ...effectiveDeps,
       openHeadBranches: capturedOpen ? (taskId: string) => capturedOpen.get(taskId) ?? [] : () => null,
     };
+    // W1-T2397: the SAME `allOpen` rows, kept for the open-sibling observation below — no second
+    // enumeration, and `null` (a failed read) stays `undefined` so the observation simply does not
+    // fire rather than reporting an absence it cannot see.
+    openForSiblings = allOpen ?? undefined;
   }
   const byId = new Map<string, StatusProjection>();
-  for (const task of plan.tasks) byId.set(task.id, deriveStatus(task, effectiveDeps));
+  for (const task of plan.tasks) {
+    const p = deriveStatus(task, effectiveDeps);
+    // W1-T2397: computed HERE rather than inside `deriveStatus` so it can never be mistaken for a
+    // precedence input — it is attached after the projection is decided, and read only by a log.
+    if (!p.merged) {
+      const sib = openSiblingBuild(task.id, task.files, openForSiblings, effectiveDeps.github.changedFiles?.bind(effectiveDeps.github));
+      if (sib) p.openSiblingBuild = sib;
+    }
+    byId.set(task.id, p);
+  }
   // W1-T951: ONE flush for the whole plan sweep — see the batching note above. Skipped entirely
   // when nothing new was discovered this cycle (the common case once a plan's credits are mostly
   // durable), so a steady-state poll loop costs zero writes, not one no-op write per cycle.
@@ -5576,6 +5598,78 @@ export function uncreditedBuildWarning(
     const files = changedFiles(c.prUrl);
     if (files === undefined) continue; // unreadable — fail OPEN, never fabricate
     if (files.some((f) => f.startsWith("src/") && !f.endsWith(".test.ts"))) return c;
+  }
+  return undefined;
+}
+
+// ── W1-T2397 — AN OPEN, UNMERGED BUILD OF THIS TASK, OBSERVED AND NEVER ACTED ON ─────────────
+
+/**
+ * W1-T2397 — WHAT AN OPEN SIBLING BUILD LOOKS LIKE, AND WHY IT IS ONLY EVER A REPORT.
+ *
+ * THE ASYMMETRY THIS NAMES. `isDispatchEligible` already sees open PRs, through `opts.isOpenPr`
+ * <- `lastProj?.get(id)?.prState === "OPEN"`, resolved in `corroborateOpenByBranch` off the
+ * batched gateway's OPEN half — no second call. But it attributes them by {@link ownsBranch}
+ * alone, `^run-<taskId>-<digits>$`: ONE surface, where the merged side now has three. So an
+ * operator-briefed build on a `fix/` branch is invisible and the task is dispatched again.
+ * Measured: W1-T2387's #3102 was open and 87 minutes old when the fleet produced #3109.
+ *
+ * A WARN, AND THE MEASUREMENT IS WHY. The naive predicate ("any open PR naming this task") fired
+ * four times in 72 hours and THREE OF THOSE MERGED — a refusal would have blocked shipped work.
+ * Nor does a staleness bound rescue it: time-to-merge is median 18 minutes, p90 119, p95 255,
+ * p99 864, so a threshold has to sit near EIGHT HOURS before it stops firing on healthy work, and
+ * a refusal that is right at eight hours still costs eight hours of stall. A warn that is wrong
+ * costs one line. THAT ASYMMETRY IS THE ENTIRE ARGUMENT for building this at a population of one.
+ *
+ * IT MUST NEVER FEED `isOpenPr`. Widening that is what converts this observation into the refusal
+ * the shard declined, because `isDispatchEligible` already treats an in-flight PR as a reason to
+ * skip. Nothing here is read by any eligibility path, and a test asserts `prState` is byte-
+ * identical with and without this present.
+ */
+export interface OpenSiblingBuild {
+  prNumber: number;
+  prUrl: string;
+  headRefName?: string;
+  /** The declared paths this open PR touches — the discriminator, not the prose. */
+  overlappingPaths: string[];
+}
+
+/**
+ * W1-T2397 — IS THERE AN OPEN PR BUILDING THIS TASK THAT IS NOT ITS OWN RUN BRANCH?
+ *
+ * FILE OVERLAP IS THE SIGNAL, NOT THE PROSE, and that is what makes it quiet. Naming a task is
+ * not evidence a build of it is in flight: of the four naive firings, two siblings were plan
+ * FILINGS (`chore(plan): file …`) and two were builds of DIFFERENT tasks mentioning the id in
+ * passing. Requiring a path in the dispatched task's own declared `files:` drops both classes by
+ * construction — a filing touches `plan/` alone and never overlaps — and halves the population.
+ * Measured on the same window: 101 of 105 dispatches have no open sibling of any kind.
+ *
+ * THE TASK'S OWN RUN BRANCH IS EXCLUDED, because that is the in-flight case `isOpenPr` already
+ * owns; re-reporting it would be noise on the one shape already handled.
+ *
+ * `changedFiles` UNREADABLE ⇒ NO OBSERVATION, never a guess: an absent file list is a read that
+ * failed, and the same fail-open direction {@link GitHub.changedFiles}' own doc sets.
+ */
+export function openSiblingBuild(
+  taskId: string,
+  declaredFiles: readonly string[] | undefined,
+  openPrs: readonly PrRef[] | null | undefined,
+  changedFiles: ((prUrl: string) => string[] | undefined) | undefined,
+): OpenSiblingBuild | undefined {
+  if (!declaredFiles || declaredFiles.length === 0) return undefined;
+  if (!openPrs || openPrs.length === 0) return undefined;
+  if (!changedFiles) return undefined;
+  const declared = new Set(declaredFiles);
+  // Newest first: a task with two open builds already has the problem this reports; the newest is
+  // the one still moving. Mirrors `corroborateOpenByBranch`'s own tiebreak rather than inventing one.
+  for (const pr of [...openPrs].sort((a, b) => b.number - a.number)) {
+    if (pr.state.toUpperCase() !== "OPEN") continue;
+    if (ownsBranch(pr.headRefName, taskId)) continue; // the in-flight case `isOpenPr` already owns
+    const files = changedFiles(pr.url);
+    if (files === undefined) continue; // unreadable — never a guess
+    const overlappingPaths = files.filter((f) => declared.has(f));
+    if (overlappingPaths.length === 0) continue;
+    return { prNumber: pr.number, prUrl: pr.url, headRefName: pr.headRefName, overlappingPaths };
   }
   return undefined;
 }
