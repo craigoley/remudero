@@ -1610,3 +1610,37 @@ export function restoreState(archiveDir: string, targetStateDir: string): void {
     );
   }
 }
+
+/**
+ * W1-T2383 rank 3 — IS THIS `run.start` A QUEUE DISPATCH, OR A LANE RUN?
+ *
+ * Until this task every `run.start` row carried `type: "implement"` (measured: 547 of 547), so
+ * "a run.start" and "a task dispatched off the queue" were the same fact and three readers were
+ * written on that identity. Adding a row for the triage and retro lanes separates them, and this
+ * predicate is where the separation is stated ONCE rather than re-derived at each reader.
+ *
+ * TRUE for an implement dispatch, and for a row that declares no `type` at all — the 67
+ * pre-schema rows in the retained corpus predate the field and were all implement dispatches, so
+ * treating an absent `type` as one keeps every historical reading byte-identical. FALSE only for
+ * a row that positively declares some other lane.
+ *
+ * THE THREE READERS THAT NEED IT, AND WHY (each has a test pinning it):
+ *   - `distinctDispatchedTaskIds` (status-board.ts) feeds `deriveCircuitBrokenBlockers`, which
+ *     does NOT filter to plan tasks. Measured against the real lane history: two feedback ids
+ *     would have reached the cap of five runs with no `pr.opened` and rendered a phantom
+ *     `circuit_broken` blocker for an id no dispatch will ever take.
+ *   - `dispatchRunStarts` (status-board.ts) feeds `deriveDispatchCadence`, whose bound is
+ *     "3x the longest observed gap between DISPATCHES on this host". A lane run is not a queue
+ *     dispatch, so counting it would silently tighten a queue-head staleness bound.
+ *   - `taskDurations` (analytics-route.ts) pairs a start with a verdict and counts the unpaired
+ *     as `noTerminalCount`. The lanes emit no verdict by design (this task deliberately does not
+ *     add one), so every lane run would land there and inflate that metric.
+ *
+ * EVERY OTHER `run.start` READER IS KEYED ON `task_id` and needs nothing: `RETRO` and
+ * `TRIAGE-fb-*` are not plan task ids, so a fold asked about a plan task never sees these rows.
+ */
+export function isQueueDispatchRunStart(line: Record<string, unknown>): boolean {
+  if (line.step !== "run.start") return false;
+  const type = line.type;
+  return type === undefined || type === "implement";
+}

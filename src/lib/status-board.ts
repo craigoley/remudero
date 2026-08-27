@@ -43,6 +43,7 @@
  */
 
 import { execFileSync } from "node:child_process";
+import { isQueueDispatchRunStart } from "./ledger.js";
 // Imported as the module's DEFAULT export (a plain, mutable object), not as named bindings
 // (`import { existsSync } from "node:fs"`) — the same load-bearing reason status.ts's own header
 // comment documents: ESM named-export bindings off `node:fs` are non-configurable, so a test
@@ -1421,7 +1422,10 @@ function projectPlanOnce(
 function distinctDispatchedTaskIds(lines: Array<Record<string, unknown>>): string[] {
   const ids = new Set<string>();
   for (const line of lines) {
-    if (line.step === "run.start" && typeof line.task_id === "string") ids.add(line.task_id);
+    // W1-T2383 rank 3: QUEUE dispatches only. A triage/retro `run.start` names an id no
+    // dispatch will ever take, and `deriveCircuitBrokenBlockers` below does not filter to plan
+    // tasks — see `isQueueDispatchRunStart`' own doc for the two ids this measurably spared.
+    if (isQueueDispatchRunStart(line) && typeof line.task_id === "string") ids.add(line.task_id);
   }
   return [...ids];
 }
@@ -1434,7 +1438,9 @@ function distinctDispatchedTaskIds(lines: Array<Record<string, unknown>>): strin
 function dispatchRunStarts(lines: Array<Record<string, unknown>>): Array<{ ts: string; parsed: number }> {
   const out: Array<{ ts: string; parsed: number }> = [];
   for (const line of lines) {
-    if (line.step !== "run.start") continue;
+    // W1-T2383 rank 3: QUEUE dispatches only — this cadence's own doc calls the bound "the
+    // longest observed gap between DISPATCHES", and a lane run is not one.
+    if (!isQueueDispatchRunStart(line)) continue;
     const ts = typeof line.ts === "string" ? line.ts : undefined;
     const parsed = ts !== undefined ? Date.parse(ts) : NaN;
     if (ts !== undefined && Number.isFinite(parsed)) out.push({ ts, parsed });
@@ -1494,7 +1500,11 @@ export function deriveDispatchCadence(lines: Array<Record<string, unknown>>): Di
  *  dispatchable one. With no plan/no projections in hand (an unreadable plan or an unreachable
  *  GitHub gateway) this renders exactly as it does today — degrading toward today, never toward
  *  silence (design (iv)): the renderer cannot know a task is withdrawn without a plan to ask. */
-function deriveCircuitBrokenBlockers(
+// W1-T2383 rank 3: EXPORTED so the guard above (`isQueueDispatchRunStart` inside
+// `distinctDispatchedTaskIds`) is provable against this fold's REAL output rather than asserted
+// from source text — the same reason W1-T1047 exported `deriveDispatchCadence`. Behaviour
+// unchanged; nothing outside a test calls it.
+export function deriveCircuitBrokenBlockers(
   lines: Array<Record<string, unknown>>,
   plan: Plan | undefined,
   projections: Map<string, StatusProjection> | undefined,

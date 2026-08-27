@@ -14435,6 +14435,47 @@ export function gitRunAdapter(
  * `diff-coverage` blocks the diff on lines no test can reach. Here one test drives it against a
  * real local bare repo and the seam is genuinely exercised.
  */
+/**
+ * W1-T2383 rank 3 — THE `run.start` ROW FOR A NON-IMPLEMENT LANE.
+ *
+ * THE GAP THIS CLOSES. Every `run.start` row in the retained corpus reads `type: "implement"`
+ * (547 of 547), and the triage and retro lanes emit none at all, so their spend is invisible to
+ * every reader that joins on one. Measured over 19 days: 183 lane runs (168 triage, 15 retro),
+ * 10.3 a day, carrying 396.93 US dollars — 188.06 triage, 208.87 retro — that no cost surface
+ * can currently attribute.
+ *
+ * WHY A START ROW IS ENOUGH, AND WHY NO VERDICT ROW IS ADDED (the task's Q3). The cost is
+ * ALREADY on disk: `triage.synthesized` carries `cost_usd` on 150 of 168 triage runs and
+ * `retro.synthesized` on 15 of 15. What was missing is the row that names the run's LANE, TYPE
+ * and CLASS so that cost can be attributed to one. This row supplies the join key and the
+ * attribution; a verdict row would be a bigger change with different consumers and is
+ * deliberately not made here.
+ *
+ * DELIBERATELY NO `mount` OBJECT. The implement row carries `{model, effort, max_turns,
+ * context_budget}` resolved from a (type x risk x class) route these lanes have no row for.
+ * Emitting a PARTIAL one would hand every reader a shape it could not trust; the architect and
+ * worker models ride as flat fields instead, exactly as `<lane>.start` already records them, and
+ * a reader that reaches for `.mount` sees `undefined` — the same thing the 67 pre-schema rows
+ * already give it.
+ *
+ * ONE BUILDER, TWO CALL SITES, so the two lanes' rows cannot drift apart.
+ */
+export function laneRunStartFields(opts: {
+  lane: "triage" | "retro";
+  repo: string;
+  architect: string;
+  worker: string;
+}): Record<string, unknown> {
+  return {
+    repo: opts.repo,
+    type: opts.lane,
+    task_class: opts.lane,
+    mount_class: opts.lane,
+    architect: opts.architect,
+    worker: opts.worker,
+  };
+}
+
 export function triageClaimReserverFor(worktreePath: string): TriageClaimReserver {
   return gitTriageClaimReserver({
     // spawnSync, not execFileSync: a rejected push is a NORMAL outcome here (contention), and a
@@ -16963,6 +17004,9 @@ async function retroCommand(
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: "RETRO", step, lane: "retro", ...extra });
   const say = (msg: string) => console.log(`\n### [retro] ${msg}`);
+  // W1-T2383 rank 3: the lane's own dispatch row, BESIDE its existing start row rather than
+  // replacing it — `retro.start` carries this lane's own fields and has its own readers.
+  log("run.start", laneRunStartFields({ lane: "retro", repo, architect: arch, worker: wrk }));
   log("retro.start", { since: gather.sinceTs ?? null, runs_in_scope: gather.totalRuns, architect: arch, worker: wrk });
   say(`retro ${runId} — architect ${arch} over worker ${wrk}; ${gather.totalRuns} runs in scope`);
 
@@ -26075,6 +26119,8 @@ async function triageCommandLocked(
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, lane: "triage", ...extra });
   const say = (msg: string) => console.log(`\n### [triage] ${msg}`);
+  // W1-T2383 rank 3: the lane's own dispatch row, beside `triage.start` rather than replacing it.
+  log("run.start", laneRunStartFields({ lane: "triage", repo, architect: arch, worker: wrk }));
   log("triage.start", { feedback_id: feedbackId, architect: arch, worker: wrk });
   say(`triage ${runId} — architect ${arch} over worker ${wrk} — feedback#${feedbackId}`);
 
