@@ -5255,6 +5255,10 @@ export async function runSweep(
   deps: SweepDeps,
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
 ): Promise<SweepSummary> {
+  // Alias-bound call site (W1-T2393): the bare `readLedgerLines` regex can't match this because
+  // it's bound to a name and invoked below, so this is documentary only — see that task's own
+  // rationale for why the enforced corpus and the regex are both left alone here.
+  // ledger-read-intent: live — this fold reads the live file only, never rotations.
   const readLedger = deps.readLedger ?? readLedgerLines;
   const appendLine = deps.appendLine ?? appendLedger;
   const now = deps.now ? deps.now() : Date.now();
@@ -7824,6 +7828,10 @@ export async function runPostFixReverification(
   deps: PostFixReverificationDeps,
   classes: readonly FixClass[] = DEFAULT_FIX_CLASSES,
 ): Promise<PostFixReverificationSummary> {
+  // Alias-bound call site (W1-T2393): the bare `readLedgerLines` regex can't match this because
+  // it's bound to a name and invoked below, so this is documentary only — see that task's own
+  // rationale for why the enforced corpus and the regex are both left alone here.
+  // ledger-read-intent: live — this fold reads the live file only, never rotations.
   const readLedger = deps.readLedger ?? readLedgerLines;
   const appendLine = deps.appendLine ?? appendLedger;
   const log = deps.log ?? (() => {});

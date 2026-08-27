@@ -152,3 +152,104 @@ test("PROPERTY src/lib/status.ts — the narrowing point readLedgerLines is defi
   const violations = ledgerReadIntentViolations([{ path: "src/lib/status.ts", text }]);
   assert.deepEqual(violations, [], "every readLedgerLines call inside its own defining module must be declared");
 });
+
+// ── W1-T2393 — RECORDING, NOT FIXING ────────────────────────────────────────────────────────────
+//
+// The gate above judges exactly one file (src/lib/status.ts). It never walks src/lib/sweep.ts, so
+// sweep.ts's own two `readLedgerLines` call sites — bound to a name (`readLedger`) and invoked
+// through that alias — are invisible to it for TWO independent reasons: the corpus never contains
+// sweep.ts, and even if it did, `LEDGER_READ_INTENT_CALL_RE` requires a literal `readLedgerLines(`
+// and cannot match an alias call. W1-T2393 does not widen the corpus or the regex (that is a
+// separate, more expensive task — see this task's own rationale, Q3): it only adds the same
+// declaring comment sweep.ts's peers already carry, by hand, at the two sites the regex can't
+// reach, and pins here that doing so touched nothing else.
+
+test("PROPERTY sweep.ts's two value-bound readLedger call sites declare the live intent, not union", () => {
+  const text = readFileSync(join(REPO_ROOT, "src/lib/sweep.ts"), "utf8");
+  const lines = text.split("\n");
+  const bindingLine = "  const readLedger = deps.readLedger ?? readLedgerLines;";
+  const bindingLineIndexes = lines
+    .map((line, i) => (line === bindingLine ? i : -1))
+    .filter((i) => i >= 0);
+  assert.equal(
+    bindingLineIndexes.length,
+    2,
+    "sweep.ts must still bind readLedgerLines through the alias at exactly its two known sites " +
+      "(runSweep and runPostFixReverification) — a different count means this pin is stale",
+  );
+  for (const i of bindingLineIndexes) {
+    const declared = lines[i - 1].match(/ledger-read-intent:\s*(live|union)\b/);
+    assert.ok(declared, `line ${i + 1}'s alias binding must declare an intent on the line directly above it`);
+    assert.equal(
+      declared[1],
+      "live",
+      "both folds read the live file only, never rotations — 'union' would misdeclare what they do " +
+        "(this task's Q2: the marker is documentary, so an honest value here still costs nothing)",
+    );
+  }
+});
+
+test("PROPERTY the gate's regex is unchanged — it still cannot see a value-bound alias call", () => {
+  // Same shape as sweep.ts's real call sites: bind the reader to a name, call the alias. If this
+  // now reported a violation, the regex would have been widened by this task — it was not.
+  const source = [
+    "export function fold(path, ledgerFs) {",
+    "  const readLedger = readLedgerLines;",
+    "  return readLedger(path, ledgerFs);",
+    "}",
+    "",
+  ].join("\n");
+  const violations = ledgerReadIntentViolations([{ path: "src/lib/fixture-alias.ts", text: source }]);
+  assert.deepEqual(
+    violations,
+    [],
+    "widening the regex to catch value bindings is the expensive lever this task's Q3 measured and " +
+      "declined — not something to slip in here",
+  );
+  // The definition line and a bare declared call must still behave exactly as before, too — the
+  // regex's existing, narrower behaviour is untouched in both directions.
+  const stillCaughtBare = ledgerReadIntentViolations([
+    { path: "src/lib/fixture-still-bare.ts", text: "export function g(p) {\n  return readLedgerLines(p);\n}\n" },
+  ]);
+  assert.equal(stillCaughtBare.length, 1, "a bare undeclared call must still be caught exactly as before");
+});
+
+test("PROPERTY the enforced corpus is unchanged — this test file still feeds exactly src/lib/status.ts from disk", () => {
+  const selfText = readFileSync(join(REPO_ROOT, "test/ledger-read-intent.test.ts"), "utf8");
+  const diskReads = [...selfText.matchAll(/execFileSync\(\s*"git",\s*\[\s*"ls-files",\s*"([^"]+)"/g)].map(
+    (m) => m[1],
+  );
+  assert.deepEqual(
+    diskReads,
+    ["src/lib/status.ts"],
+    "widening the enforced corpus to more of src/ is a separate task with its own budget (this " +
+      "task's rationale) — this shard must not quietly start enforcing sweep.ts or anything else",
+  );
+});
+
+test("PROPERTY sweep.ts's new markers are documentation only — nothing paces, throttles, sleeps or delays", () => {
+  const text = readFileSync(join(REPO_ROOT, "src/lib/sweep.ts"), "utf8");
+  const lines = text.split("\n");
+  const markerLines = lines
+    .map((line, i) => (line.includes("ledger-read-intent: live") && line.includes("this fold reads") ? i : -1))
+    .filter((i) => i >= 0);
+  assert.equal(markerLines.length, 2, "exactly two documentary marker lines were added by this task");
+  for (const markerLine of markerLines) {
+    let start = markerLine;
+    while (lines[start - 1]?.trim().startsWith("//")) start--;
+    const end = markerLine;
+    const block = lines.slice(start, end + 1).join("\n");
+    assert.doesNotMatch(
+      block,
+      /\b(setTimeout|setInterval|sleep|throttle|debounce|delay|await\s+new\s+Promise)\b/i,
+      "a declaring comment must never carry a pacing primitive — this task adds documentation, not behaviour",
+    );
+    // Immediately after the comment block, the pre-existing alias binding must be untouched — no
+    // call was inserted between the new marker and the line it documents.
+    assert.equal(
+      lines[end + 1],
+      "  const readLedger = deps.readLedger ?? readLedgerLines;",
+      "the marker must sit directly above the unchanged alias binding, nothing inserted between them",
+    );
+  }
+});
