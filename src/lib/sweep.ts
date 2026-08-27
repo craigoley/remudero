@@ -23,8 +23,12 @@ import {
 } from "./escalate.js";
 import { GhPaceFloorStandDownError } from "./open-prs-rest.js";
 import type { ConflictFileDiff, MergeConflictEvidence, MergeState } from "./merge-state.js";
+import type { WorkflowRunObservation } from "./workflow-run.js";
 // Re-exported so existing `import type { … } from "./sweep.js"` call sites keep working.
 export type { ConflictFileDiff, MergeConflictEvidence, MergeState } from "./merge-state.js";
+// W1-T2340: declared in a leaf module so `open-prs-rest.ts`'s producer can import it without
+// closing an open-prs-rest <-> sweep cycle — see workflow-run.ts's own doc.
+export type { WorkflowRunObservation } from "./workflow-run.js";
 
 /**
  * lib/sweep.ts — the level-triggered PR-pipeline reconciler (W1-T77, ratifies
@@ -1453,29 +1457,6 @@ export function cancelledRequiredCheckNames(
     .map((c) => c.name ?? c.context ?? "unknown");
 }
 
-/**
- * W1-T2340 — one workflow RUN + its jobs' own status, structurally: `actions/runs` filtered by
- * head sha (or `gh run list --json status,conclusion,jobs`) reports it. Kept minimal (name ONLY
- * the fields {@link stalledRunReason} reads), mirroring {@link RollupCheckEntry}'s own contract —
- * this deterministic core never depends on run-task.ts's richer wiring shape.
- *
- * DISTINCT FROM {@link RollupCheckEntry}, DELIBERATELY: a check-runs rollup names WHICH check ran
- * and how it concluded, but never exposes the RUN's own conclusion — a run whose conclusion is
- * terminal (a startup failure, a cancellation, any concluded run) can still leave a job pinned
- * "queued"/"in_progress" in the rollup forever (W1-T2327's own measurement on #2974: four
- * startup-failure runs left six jobs non-terminal between them, three of those jobs already
- * green). A reader that consults the rollup alone cannot tell that job's own run has already
- * finished. This type is the one join that makes that visible — see {@link stalledRunReason}, its
- * sole consumer.
- */
-export interface WorkflowRunObservation {
-  /** The run's OWN conclusion — GitHub populates this ONLY once the run itself has concluded
-   *  (`"success"`, `"failure"`, `"cancelled"`, `"startup_failure"`, ...). `undefined`/empty means
-   *  the run has not concluded — still queued or in progress. */
-  conclusion?: string;
-  /** Each job this run scheduled, with its OWN status — independent of the run's own conclusion. */
-  jobs?: ReadonlyArray<{ status?: string }>;
-}
 
 /** Job-level statuses {@link stalledRunReason} treats as that job having reached a final state. */
 const JOB_TERMINAL_STATUSES = new Set(["completed"]);

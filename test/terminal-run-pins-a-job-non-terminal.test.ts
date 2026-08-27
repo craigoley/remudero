@@ -8,6 +8,11 @@ import {
   type OpenPrView,
   type WorkflowRunObservation,
 } from "../src/lib/sweep.js";
+import {
+  WORKFLOW_RUN_HYDRATION_CAP,
+  fetchWorkflowRunObservations,
+  hydrateWorkflowRuns,
+} from "../src/lib/open-prs-rest.js";
 
 /**
  * W1-T2340 — the `followUpFiled` shard for W1-T2327's falsified criterion 1. Corrected
@@ -180,4 +185,166 @@ test("DISPOSITION_RULES: the stalled-run row is ordered BEFORE the datable check
   assert.ok(stalledIdx >= 0, "the stalled-run row must match its own fixture");
   assert.ok(waitIdx >= 0, "the datable-pending WAIT row must match its own fixture");
   assert.ok(stalledIdx < waitIdx, "stalled-run row must be ordered before the WAIT row");
+});
+
+// ══ THE COUNTER-EXAMPLE THAT CHOSE THIS BRANCH (W1-T2340) ═════════════════════════════════════
+//
+// W1-T2327's original criterion 1 asserted that a head whose runs include one that scheduled no
+// job is stalled. #3010 measured it false: four `startup_failure` runs on #2974's old head
+// scheduled SIX jobs between them (2, 2, 1, 1). The corrected discriminator — the one this branch
+// implements — is a job whose status is non-terminal INSIDE a run whose conclusion is terminal.
+//
+// These pin the difference. A sibling implementation keyed on run STATUS plus an age ceiling fires
+// on the row below and reports "no job ever scheduled" without ever reading `jobs`; this predicate
+// must stay SILENT on it, because a queued run has not concluded and can still move its jobs.
+
+test("W1-T2340: a QUEUED run with jobs already scheduled is silent — the refuted premise", () => {
+  const queuedWithJobs: WorkflowRunObservation[] = [
+    { conclusion: undefined, jobs: [{ status: "queued" }, { status: "queued" }] },
+  ];
+  assert.equal(
+    stalledRunReason(queuedWithJobs),
+    undefined,
+    "a run that has NOT concluded can still schedule and move its jobs — nothing is pinned yet",
+  );
+});
+
+test("W1-T2340: an empty-string conclusion is treated as not-concluded, not as a terminal run", () => {
+  assert.equal(stalledRunReason([{ conclusion: "   ", jobs: [{ status: "queued" }] }]), undefined);
+  assert.equal(stalledRunReason([{ conclusion: "", jobs: [{ status: "queued" }] }]), undefined);
+});
+
+test("W1-T2340: the measured head still fires, and a healthy head still does not", () => {
+  // The measured shape: four concluded runs, six jobs, Semgrep left queued forever.
+  const measured: WorkflowRunObservation[] = [
+    { conclusion: "startup_failure", jobs: [{ status: "completed" }, { status: "completed" }] },
+    { conclusion: "startup_failure", jobs: [{ status: "completed" }, { status: "completed" }] },
+    { conclusion: "startup_failure", jobs: [{ status: "completed" }] },
+    { conclusion: "startup_failure", jobs: [{ status: "queued" }] },
+  ];
+  const reason = stalledRunReason(measured);
+  assert.ok(reason, "the pinned Semgrep job must be named");
+  assert.match(reason!, /still "queued"/);
+  assert.match(reason!, /startup_failure/);
+
+  const healthy: WorkflowRunObservation[] = [
+    { conclusion: undefined, jobs: [{ status: "in_progress" }] },
+    { conclusion: "success", jobs: [{ status: "completed" }] },
+  ];
+  assert.equal(stalledRunReason(healthy), undefined);
+});
+
+// ══ THE PRODUCER (W1-T2340) ══════════════════════════════════════════════════════════════════
+//
+// The predicate above was inert until something assigned `OpenPrView.workflowRuns`; these pin the
+// producer that now does, and above all its COST. Not an allowlist entry: `stalledRunReason(
+// undefined)` returns undefined, so declaring the field unwired would have shipped a detector
+// that can never fire.
+
+/** A fetcher that records every `gh api` path it is asked for, so cost is asserted, not assumed. */
+function recordingFetch(responses: Record<string, unknown>, calls: string[]) {
+  return (args: string[]): unknown => {
+    const path = args[1] ?? "";
+    calls.push(path);
+    for (const [frag, body] of Object.entries(responses)) {
+      if (path.includes(frag)) return body;
+    }
+    throw new Error(`no stub for ${path}`);
+  };
+}
+
+test("W1-T2340 producer: jobs are fetched ONLY for runs that already concluded", () => {
+  const calls: string[] = [];
+  const fetch = recordingFetch(
+    {
+      "actions/runs?head_sha=HEAD1": {
+        workflow_runs: [
+          { id: 11, conclusion: "startup_failure" },
+          { id: 22, conclusion: null }, // still running — its jobs cannot change the answer
+        ],
+      },
+      "actions/runs/11/jobs": { jobs: [{ status: "queued" }] },
+    },
+    calls,
+  );
+  const obs = fetchWorkflowRunObservations("o", "r", "HEAD1", fetch);
+
+  assert.equal(calls.length, 2, "one listing + one jobs call for the ONE concluded run");
+  assert.ok(calls.some((c) => c.includes("actions/runs?head_sha=HEAD1")));
+  assert.ok(calls.some((c) => c.includes("actions/runs/11/jobs")));
+  assert.ok(!calls.some((c) => c.includes("actions/runs/22/jobs")), "the unconcluded run costs nothing");
+
+  assert.equal(obs.length, 2);
+  assert.deepEqual(obs[0], { conclusion: "startup_failure", jobs: [{ status: "queued" }] });
+  assert.equal(obs[1]!.conclusion, undefined);
+  assert.equal(obs[1]!.jobs, undefined, "not [] — that would read as 'nothing was scheduled'");
+
+  // And the whole point: this observation trips the predicate.
+  assert.ok(stalledRunReason(obs));
+});
+
+test("W1-T2340 producer: the measured stalled head costs five calls, a healthy pending head one", () => {
+  const stalledCalls: string[] = [];
+  const four = [11, 22, 33, 44];
+  const stalled = recordingFetch(
+    {
+      "actions/runs?head_sha=STALLED": {
+        workflow_runs: four.map((id) => ({ id, conclusion: "startup_failure" })),
+      },
+      "actions/runs/11/jobs": { jobs: [{ status: "completed" }, { status: "completed" }] },
+      "actions/runs/22/jobs": { jobs: [{ status: "completed" }, { status: "completed" }] },
+      "actions/runs/33/jobs": { jobs: [{ status: "completed" }] },
+      "actions/runs/44/jobs": { jobs: [{ status: "queued" }] },
+    },
+    stalledCalls,
+  );
+  const obs = fetchWorkflowRunObservations("o", "r", "STALLED", stalled);
+  assert.equal(stalledCalls.length, 5, "1 listing + 4 concluded runs — the measured head's shape");
+  assert.equal(obs.flatMap((o) => o.jobs ?? []).length, 6, "six jobs between them, as measured");
+  assert.ok(stalledRunReason(obs), "and it is reported stalled");
+
+  const healthyCalls: string[] = [];
+  const healthy = recordingFetch(
+    { "actions/runs?head_sha=HEALTHY": { workflow_runs: [{ id: 99, conclusion: null }] } },
+    healthyCalls,
+  );
+  const healthyObs = fetchWorkflowRunObservations("o", "r", "HEALTHY", healthy);
+  assert.equal(healthyCalls.length, 1, "a pending head whose runs are still going costs ONE call");
+  assert.equal(stalledRunReason(healthyObs), undefined);
+});
+
+test("W1-T2340 producer: a jobs fetch that throws leaves jobs undefined, never []", () => {
+  const calls: string[] = [];
+  const fetch = (args: string[]): unknown => {
+    const path = args[1] ?? "";
+    calls.push(path);
+    if (path.includes("head_sha=")) return { workflow_runs: [{ id: 7, conclusion: "cancelled" }] };
+    throw new Error("rate limited");
+  };
+  const obs = fetchWorkflowRunObservations("o", "r", "H", fetch);
+  assert.equal(obs.length, 1);
+  assert.equal(obs[0]!.conclusion, "cancelled");
+  assert.equal(obs[0]!.jobs, undefined, "'could not check' must not degrade into 'nothing scheduled'");
+  assert.equal(stalledRunReason(obs), undefined, "and an unreadable job list never invents a stall");
+});
+
+test("W1-T2340 producer: hydrateWorkflowRuns is best-effort per PR and capped", () => {
+  const fetch = (args: string[]): unknown => {
+    const path = args[1] ?? "";
+    if (path.includes("head_sha=BAD")) throw new Error("head deleted mid-pass");
+    if (path.includes("head_sha=")) return { workflow_runs: [{ id: 5, conclusion: "failure" }] };
+    return { jobs: [{ status: "queued" }] };
+  };
+  const map = hydrateWorkflowRuns("o", "r", [
+    { number: 1, headRefOid: "GOOD1" },
+    { number: 2, headRefOid: "BAD" },
+    { number: 3, headRefOid: "GOOD3" },
+  ], fetch);
+  assert.deepEqual([...map.keys()].sort(), [1, 3], "the throwing PR is skipped, the pass continues");
+  assert.equal(map.get(2), undefined, "absent from the map ⇒ caller leaves workflowRuns undefined");
+
+  // The cap truncates rather than running away.
+  const many = Array.from({ length: WORKFLOW_RUN_HYDRATION_CAP + 5 }, (_, i) => ({ number: i + 1, headRefOid: `H${i}` }));
+  assert.equal(hydrateWorkflowRuns("o", "r", many, fetch).size, WORKFLOW_RUN_HYDRATION_CAP);
+  assert.equal(hydrateWorkflowRuns("o", "r", [], fetch).size, 0, "an empty population costs nothing");
 });
