@@ -20,7 +20,7 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -28,7 +28,10 @@ import { openSiblingBuild, projectPlan } from "../src/lib/status.js";
 import type { GitHub, OpenSiblingBuild, PrRef, StatusProjection } from "../src/lib/status.js";
 import { nextRunnable, runDrain } from "../src/lib/drain.js";
 import type { DrainDeps } from "../src/lib/drain.js";
-import { drainCommand } from "../src/run-task.js";
+import { drainCommand, openSiblingObservation } from "../src/run-task.js";
+import { runDaemon } from "../src/lib/daemon.js";
+import type { DaemonDeps } from "../src/lib/daemon.js";
+import { daemonCommand } from "../src/run-task.js";
 import type { Plan, Task } from "../src/lib/plan.js";
 
 const TASK_FILES = ["src/lib/status.ts", "src/lib/drain.ts", "test/open-build-is-not-credit.test.ts"];
@@ -363,4 +366,196 @@ test("WIRING: runDrain stays SILENT on the common case — the 101-of-105 shape,
   );
   assert.deepEqual(ran, ["W1-T2397"], "dispatched");
   assert.deepEqual(observed, [], "and not one row or line — silence is the common case");
+});
+
+// ── THE DAEMON LANE: the path that carries 97% of dispatches, and the one that had the defect ──
+//
+// #3125 wired `drainCommand` and said plainly it had wired the LOW-VOLUME caller. Measured over the
+// container's ledger union: `drain.start` 16 against `daemon.boot` 347 and `run.start` 558 — and
+// the instance that motivated W1-T2397 came through the DAEMON (W1-T2387 dispatched while #3102 was
+// open, producing #3109), so until now the lane observing was the one that never had the defect.
+//
+// PINNED AT THE `runDaemon` LEVEL ON PURPOSE. #3125 learned that deleting drain.ts's forwarding
+// left every test green because they drove `nextRunnable` directly — the same shape #3118 hit
+// driving `readDigestWindow` directly. These run the real loop.
+
+const daemonPlan = (): Plan => {
+  const one = task("W1-T2397");
+  return { tasks: [one], byId: new Map([["W1-T2397", one]]) } as unknown as Plan;
+};
+
+test("DAEMON WIRING: runDaemon forwards both callbacks — the observation fires through the REAL daemon loop", async () => {
+  const sibling = openSiblingBuild("W1-T2397", TASK_FILES, [OPEN_SIBLING], changedFiles)!;
+  const observed: Array<{ id: string; pr: number }> = [];
+  const ran: string[] = [];
+  const merged = new Set<string>();
+  const s = await runDaemon(
+    daemonPlan(),
+    {
+      refreshMerged: () => (id: string) => merged.has(id),
+      openSiblingBuildFor: (id: string) => (id === "W1-T2397" ? sibling : undefined),
+      onOpenSiblingBuild: (t: Task, sib: OpenSiblingBuild) => void observed.push({ id: t.id, pr: sib.prNumber }),
+      runOne: async (id: string) => {
+        ran.push(id);
+        merged.add(id);
+        return { taskId: id, runId: id + "-run", merged: true, costUsd: 0, verdict: "merged" };
+      },
+      sleep: async () => {},
+    } as never,
+    { max: 1 },
+  );
+  assert.deepEqual(ran, ["W1-T2397"], "THE DISPATCH STILL HAPPENED — the observation never refuses");
+  assert.deepEqual(observed, [{ id: "W1-T2397", pr: 3102 }], "and the handler fired exactly once, through the real daemon loop");
+  assert.equal(s.stopReason, "max_reached");
+});
+
+test("DAEMON WIRING: runDaemon stays SILENT on the common case — the 101-of-105 shape", async () => {
+  const observed: string[] = [];
+  const ran: string[] = [];
+  const merged = new Set<string>();
+  await runDaemon(
+    daemonPlan(),
+    {
+      refreshMerged: () => (id: string) => merged.has(id),
+      openSiblingBuildFor: () => undefined,
+      onOpenSiblingBuild: (t: Task) => void observed.push(t.id),
+      runOne: async (id: string) => {
+        ran.push(id);
+        merged.add(id);
+        return { taskId: id, runId: id + "-run", merged: true, costUsd: 0, verdict: "merged" };
+      },
+      sleep: async () => {},
+    } as never,
+    { max: 1 },
+  );
+  assert.deepEqual(ran, ["W1-T2397"], "dispatched");
+  assert.deepEqual(observed, [], "and not one row or line");
+});
+
+test("DAEMON WIRING: the dispatch is byte-identical with and without the observation", async () => {
+  const sibling = openSiblingBuild("W1-T2397", TASK_FILES, [OPEN_SIBLING], changedFiles)!;
+  const runWith = async (obs: boolean): Promise<string[]> => {
+    const ran: string[] = [];
+    const merged = new Set<string>();
+    await runDaemon(
+      daemonPlan(),
+      {
+        refreshMerged: () => (id: string) => merged.has(id),
+        ...(obs ? { openSiblingBuildFor: () => sibling, onOpenSiblingBuild: () => {} } : {}),
+        runOne: async (id: string) => {
+          ran.push(id);
+          merged.add(id);
+          return { taskId: id, runId: id + "-run", merged: true, costUsd: 0, verdict: "merged" };
+        },
+        sleep: async () => {},
+      } as never,
+      { max: 1 },
+    );
+    return ran;
+  };
+  assert.deepEqual(await runWith(true), await runWith(false), "observing changes nothing about what is dispatched");
+});
+
+test("DAEMON WIRING: a THROWING observation still dispatches, through the daemon loop too", async () => {
+  const sibling = openSiblingBuild("W1-T2397", TASK_FILES, [OPEN_SIBLING], changedFiles)!;
+  const ran: string[] = [];
+  const merged = new Set<string>();
+  await runDaemon(
+    daemonPlan(),
+    {
+      refreshMerged: () => (id: string) => merged.has(id),
+      openSiblingBuildFor: () => sibling,
+      onOpenSiblingBuild: () => {
+        throw new Error("the observer blew up");
+      },
+      runOne: async (id: string) => {
+        ran.push(id);
+        merged.add(id);
+        return { taskId: id, runId: id + "-run", merged: true, costUsd: 0, verdict: "merged" };
+      },
+      sleep: async () => {},
+    } as never,
+    { max: 1 },
+  );
+  assert.deepEqual(ran, ["W1-T2397"], "a warn that cost a dispatch would invert W1-T2397's whole argument");
+});
+
+// ── the one factory both lanes build from ──────────────────────────────────────────────────────
+
+test("both lanes share ONE definition of the row and the line, and the row names which lane observed", () => {
+  const sibling = openSiblingBuild("W1-T2397", TASK_FILES, [OPEN_SIBLING], changedFiles)!;
+  const proj = new Map<string, StatusProjection>([
+    ["W1-T2397", { taskId: "W1-T2397", openSiblingBuild: sibling } as unknown as StatusProjection],
+  ]);
+  const seen: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const printed: string[] = [];
+  const realLog = console.log;
+  console.log = (...a: unknown[]) => void printed.push(a.join(" "));
+  try {
+    for (const lane of ["drain", "daemon"] as const) {
+      const obs = openSiblingObservation(lane, () => proj, (step, extra = {}) => void seen.push({ step, extra }));
+      assert.equal(obs.openSiblingBuildFor("W1-T2397")?.prNumber, 3102, `${lane}: reads openSiblingBuild off the projection`);
+      obs.onOpenSiblingBuild(task("W1-T2397"), sibling);
+    }
+  } finally {
+    console.log = realLog;
+  }
+  assert.notEqual(printed.length, 0, "CONTROL: the capture is live — an empty list would make every match below vacuous");
+  assert.deepEqual(seen.map((l) => l.step), ["dispatch.open_sibling_build", "dispatch.open_sibling_build"]);
+  assert.deepEqual(seen.map((l) => l.extra.lane), ["drain", "daemon"], "the lane rides on the row — the 16-vs-347 split is what an operator slices by");
+  assert.equal(seen[0].extra.sibling_pr_number, 3102);
+  assert.deepEqual(seen[0].extra.overlapping_paths, sibling.overlappingPaths);
+  assert.match(printed[0], /^### drain: /);
+  assert.match(printed[1], /^### daemon: /);
+  for (const line of printed) assert.match(line, /DISPATCHING ANYWAY/);
+});
+
+test("the supplier reads openSiblingBuild, NOT prState — it can never become isOpenPr, on either lane", () => {
+  // Q2's invariant, on the SHAPE the factory reads: a projection with an OPEN sibling and no OPEN
+  // state of its own yields a sibling and no in-flight answer.
+  const proj = new Map<string, StatusProjection>([
+    ["W1-T2397", { taskId: "W1-T2397", openSiblingBuild: { prNumber: 3102, prUrl: OPEN_SIBLING.url, overlappingPaths: ["src/lib/status.ts"] } } as unknown as StatusProjection],
+  ]);
+  const obs = openSiblingObservation("daemon", () => proj, () => {});
+  const isOpenPr = (id: string) => (proj.get(id)?.prState === "OPEN" ? proj.get(id)!.prNumber : undefined);
+  assert.equal(obs.openSiblingBuildFor("W1-T2397")?.prNumber, 3102, "the observation sees it");
+  assert.equal(isOpenPr("W1-T2397"), undefined, "and eligibility does NOT — different fields of the same projection");
+});
+
+test("DAEMON WIRING: daemonCommand actually PASSES both callbacks into the deps it hands runDaemon", async () => {
+  // The reachability assertion #3125 did not have for its own lane: without the producer these are
+  // `undefined` and the whole branch is unreachable, however many unit tests the loop carries.
+  const home = mkdtempSync(join(tmpdir(), "t2397-daemon-"));
+  const root = join(home, "root");
+  mkdirSync(join(root, "state"), { recursive: true });
+  // THE CONFIG MUST SIT WHERE `configPath()` READS IT — `~/.config/remudero/config.json`, not
+  // `~/.remudero/`. With the file ABSENT, `loadConfig` takes its CREATE branch, and creation calls
+  // `resolveClaudeBin()` -> `execFileSync("which", ["claude"])`, which throws on a CI runner that
+  // has no `claude` binary. Writing it at the real path means the READ branch is taken and
+  // `resolveClaudeBin` is never reached at all — the fix is not reaching it, never stubbing the
+  // binary. `test/auto-triage-wiring.test.ts` already uses this exact path for this exact reason.
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
+  const planPath = join(home, "tasks.yaml");
+  writeFileSync(planPath, "[]\n");
+
+  let captured: DaemonDeps | undefined;
+  const oldHome = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    const code = await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
+      runDaemon: async (_plan: unknown, deps: DaemonDeps) => {
+        captured = deps;
+        return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
+      },
+    } as never);
+    assert.equal(code, 0);
+  } finally {
+    if (oldHome === undefined) delete process.env.HOME;
+    else process.env.HOME = oldHome;
+    rmSync(home, { recursive: true, force: true });
+  }
+  assert.ok(captured, "runDaemon was reached");
+  assert.equal(typeof captured!.openSiblingBuildFor, "function", "the SUPPLIER is passed on the daemon lane too");
+  assert.equal(typeof captured!.onOpenSiblingBuild, "function", "and the HANDLER is");
 });

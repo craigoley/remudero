@@ -19101,6 +19101,62 @@ export function pushDrainRundown(
   });
 }
 
+/**
+ * W1-T2397 — THE OPEN-SIBLING OBSERVATION, BUILT ONCE FOR BOTH DISPATCHING LANES.
+ *
+ * #3120 shipped the predicate live with no production caller; #3125 wired `drainCommand` and said
+ * plainly that it had wired the LOW-VOLUME one. MEASURED over the container's ledger union:
+ * `drain.start` 16 against `daemon.boot` 347 and `run.start` 558 — and the motivating instance came
+ * through the DAEMON, not the drain (W1-T2387 was dispatched while #3102 was open, producing
+ * #3109). So the lane that had never carried the defect was the only lane observing it.
+ *
+ * ONE FACTORY RATHER THAN TWO COPIES: the row shape and the line are defined here once, so the two
+ * lanes cannot drift into reporting the same event differently — the two-enumerator defect this
+ * repo has paid for elsewhere (`ledgerRotationEntries`' own doc). `lane` rides on the row precisely
+ * because the volume split above is the thing an operator will want to slice by.
+ *
+ * THE SUPPLIER READS THE SAME PROJECTION `isOpenPr` READS and adds NO FETCH: `projectPlan` already
+ * computes `StatusProjection.openSiblingBuild` on every pass (status.ts), and both call sites
+ * already hold that projection for their own `isOpenPr`/`openPrCount` closures.
+ *
+ * IT IS NOT `isOpenPr` AND MUST NOT BECOME IT: a different FIELD of the same projection, consulted
+ * at a different POINT — `isOpenPr` gates eligibility, this is asked only after a task has been
+ * chosen. Folding them is the refusal W1-T2397 declined on measurement: the naive predicate fired
+ * four times in 72 hours and THREE OF THOSE MERGED.
+ *
+ * ONE ROW AND ONE LINE PER DISPATCH, never per candidate — `nextRunnable` consults it after
+ * eligibility has said yes, so it fires once for the task actually dispatched, and 101 of 105
+ * dispatches in 72 hours had no open sibling at all. Both PRs are named, because the whole value is
+ * telling the operator where the other build is.
+ */
+export function openSiblingObservation(
+  lane: "drain" | "daemon",
+  projection: () => Map<string, StatusProjection> | undefined,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): {
+  openSiblingBuildFor: (id: string) => OpenSiblingBuild | undefined;
+  onOpenSiblingBuild: (task: Task, sibling: OpenSiblingBuild) => void;
+} {
+  return {
+    openSiblingBuildFor: (id) => projection()?.get(id)?.openSiblingBuild,
+    onOpenSiblingBuild: (task, sibling) => {
+      log("dispatch.open_sibling_build", {
+        lane,
+        task_id: task.id,
+        sibling_pr_number: sibling.prNumber,
+        sibling_pr_url: sibling.prUrl,
+        ...(sibling.headRefName === undefined ? {} : { sibling_head_ref: sibling.headRefName }),
+        overlapping_paths: sibling.overlappingPaths,
+      });
+      console.log(
+        `### ${lane}: ${task.id} already has an OPEN build — PR #${sibling.prNumber} (${sibling.prUrl}) touches ` +
+          `${sibling.overlappingPaths.join(", ")}. DISPATCHING ANYWAY: an open PR is not proof the work is done, ` +
+          "and refusing on one can stall a task indefinitely (W1-T2397).",
+      );
+    },
+  };
+}
+
 async function drainCommand(
   rest: string[],
   deps: {
@@ -19294,34 +19350,8 @@ async function drainCommand(
     const p = lastProj?.get(id);
     return p?.prState === "OPEN" ? p.prNumber : undefined;
   };
-  // W1-T2397 — THE OBSERVATION'S SUPPLIER, READ OFF THE SAME PROJECTION `isOpenPr` READS.
-  // `projectPlan` already computes `StatusProjection.openSiblingBuild` on every pass (status.ts),
-  // so this costs no read of its own — the same "never a second GitHub read path" contract the
-  // `isOpenPr`/`openPrCount` closures beside it already follow.
-  //
-  // SEPARATE FROM `isOpenPr` ON PURPOSE: a different FIELD of the same projection, consulted at a
-  // different POINT. `isOpenPr` gates eligibility; this is asked only after a task has been
-  // chosen. Folding the two would be the refusal W1-T2397 declined on measurement — the naive
-  // predicate fired four times in 72 hours and THREE OF THOSE MERGED.
-  const openSiblingBuildFor = (id: string): OpenSiblingBuild | undefined => lastProj?.get(id)?.openSiblingBuild;
-  // ONE ROW AND ONE LINE PER DISPATCH, never per candidate: `nextRunnable` consults this after
-  // eligibility has already said yes, so it fires once for the task actually dispatched. Measured:
-  // 101 of 105 dispatches in 72 hours had no open sibling at all, so the common case is silent.
-  // BOTH PRs are named, because the whole value is telling the operator where the other build is.
-  const onOpenSiblingBuild = (task: Task, sibling: OpenSiblingBuild): void => {
-    log("dispatch.open_sibling_build", {
-      task_id: task.id,
-      sibling_pr_number: sibling.prNumber,
-      sibling_pr_url: sibling.prUrl,
-      ...(sibling.headRefName === undefined ? {} : { sibling_head_ref: sibling.headRefName }),
-      overlapping_paths: sibling.overlappingPaths,
-    });
-    console.log(
-      `### drain: ${task.id} already has an OPEN build — PR #${sibling.prNumber} (${sibling.prUrl}) touches ` +
-        `${sibling.overlappingPaths.join(", ")}. DISPATCHING ANYWAY: an open PR is not proof the work is done, ` +
-        "and refusing on one can stall a task indefinitely (W1-T2397).",
-    );
-  };
+  // W1-T2397: the observation, built ONCE for both lanes — see {@link openSiblingObservation}.
+  const { openSiblingBuildFor, onOpenSiblingBuild } = openSiblingObservation("drain", () => lastProj, log);
   // W1-T172: the queue governor's other input (alongside DrainOpts.wipLimit) —
   // OPEN entries in the SAME projection `isOpenPr` just read, never a second
   // GitHub read path. Only consulted by the multi-lane path.
@@ -20073,6 +20103,12 @@ export async function daemonCommand(
     const p = lastProj?.get(id);
     return p?.prState === "OPEN" ? p.prNumber : undefined;
   };
+  // W1-T2397: the SAME observation drainCommand builds, on the lane that carries the dispatches —
+  // `daemon.boot` 347 and `run.start` 558 against `drain.start` 16, and the motivating instance
+  // (W1-T2387 dispatched while #3102 was open, producing #3109) came through HERE. Reads
+  // `lastProj`, the same projection `isOpenPr` just above and `openPrCount` just below read, so it
+  // adds no fetch of its own.
+  const { openSiblingBuildFor, onOpenSiblingBuild } = openSiblingObservation("daemon", () => lastProj, log);
   // W1-T321: the queue governor's live input, mirroring drainCommand's identical `openPrCount` —
   // OPEN entries in the SAME projection `refreshMerged` just read, never a second GitHub read path.
   const openPrCount = () => {
@@ -20368,6 +20404,10 @@ export async function daemonCommand(
       {
         refreshMerged,
         isOpenPr,
+        // W1-T2397: the second half of the wiring #3125 could only take for `drainCommand`. Same
+        // pair, same factory, same contract — and this is the lane that actually dispatches.
+        openSiblingBuildFor,
+        onOpenSiblingBuild,
         // W1-T916 — THE ARGUMENT W1-T534 DECLARED AND NOTHING PASSED, SUPPLIED HERE AT LAST.
         // `nextRunnable` consumes `opts.hasPushedRunBranch?.(t.id)`; with no supplier that
         // optional call short-circuited to `undefined` on every pass, so the duplicate-dispatch
