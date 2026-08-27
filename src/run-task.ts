@@ -15268,6 +15268,9 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
           // reportable field too.
           baseTask: oldTask,
           followUpFiled: followUpCarriesCriteria(added, followUpTasks),
+          // W1-T2375: the ids behind `followUpFiled`, so the refusal can NAME the follow-up
+          // alongside the parent. Already resolved above — no new lookup.
+          followUpTaskIds: followUpTasks.map((t) => t.id),
         },
         // impl-DS: only ever populated in --base mode, so the check is silent whole-plan.
         newMonolithIds,
