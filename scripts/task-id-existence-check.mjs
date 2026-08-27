@@ -252,8 +252,12 @@ export function scanDeclaredPlanIdOccurrences(cwd, opts = {}) {
  * merge-base answers "what did main look like when this branch was cut", and main landed a PR about
  * every twenty minutes on 2026-08-26. W1-T2316 merged at 14:59:02Z, AFTER the branch that reissued
  * it was cut, so a merge-base read would have found nothing. What this read cannot see is an id
- * added by another still-open PR (open-vs-open) — those ids sit on no ref it can reach, and getting
- * them needs the mint's open-PR surface, which is W1-T2324's OTHER half and a separate concern.
+ * added by another still-open PR (open-vs-open) — those ids sit on no ref it can reach; getting
+ * them needs the mint's open-PR surface (W1-T2324's Q1: REST, never GraphQL — `openPrMintTexts`,
+ * src/run-task.ts). That half is {@link evaluateOpenPrIdCollisions} below, cross-referencing
+ * {@link addedIdsAtHead}'s output (this function's own "added" shape, generalized to every added
+ * id rather than only ones that already collide with THIS base) against {@link fetchOpenPrRows}'s
+ * REST read of every other open PR's title/body/head-ref text.
  *
  * `readable: false` is the read FAILING (shallow clone with no `origin/main`, unresolvable ref).
  * It is never "the base declares nothing" — reading an unreadable surface as an empty one is the
@@ -286,6 +290,124 @@ export function resolveBaseDeclaredIds(baseRef, cwd) {
     }
   }
   return { readable: true, byId };
+}
+
+/**
+ * owner/repo, parsed from `remote`'s url at `cwd` — no hardcoded slug in the tree, mirroring
+ * src/lib/repo-location.ts's `resolveOwnerRepo`. DELIBERATELY DUPLICATED rather than imported:
+ * this script is a plain `.mjs` outside `tsconfig.json`'s `include` (this file's own header),
+ * with no build step between it and `src/`'s TypeScript — the same reason {@link TASK_ID_RE}
+ * above duplicates `lib/task-id.ts`'s id grammar instead of importing it.
+ *
+ * `undefined` on an unparsable/unreadable url — never a guessed owner/repo, which would send the
+ * open-PR REST read below to a repo that is not this one.
+ */
+export function resolveOwnerRepoFromGit(remote, cwd) {
+  const result = spawnSync("git", ["config", "--get", `remote.${remote}.url`], { cwd, encoding: "utf8" });
+  if (result.error || result.status !== 0) return undefined;
+  const m = /[/:]([^/:]+)\/([^/]+?)(?:\.git)?$/.exec(result.stdout.trim());
+  return m ? { owner: m[1], repo: m[2] } : undefined;
+}
+
+/** The checked-out branch at `cwd`, or `undefined` on a DETACHED HEAD (a PR checkout in CI,
+ *  which is exactly why {@link main}'s `--head-ref` flag / `GITHUB_HEAD_REF` env both take
+ *  priority over this — see the call site). Never guessed from anything else. */
+export function currentBranch(cwd) {
+  const result = spawnSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd, encoding: "utf8" });
+  if (result.error || result.status !== 0) return undefined;
+  const branch = result.stdout.trim();
+  return branch === "" || branch === "HEAD" ? undefined : branch;
+}
+
+/**
+ * Every OPEN pull request's number, url, head ref and mention-scannable text, read over REST —
+ * `GET /repos/<owner>/<repo>/pulls?state=open&per_page=100`, never `gh pr list --json`
+ * (GraphQL) — the SAME discriminator W1-T2324's Q1 fixed in the mint itself
+ * (`openPrMintTexts`, src/run-task.ts): the field set decides the transport, not the subcommand.
+ *
+ * `reachable: false` covers a `gh` that cannot run AT ALL (no network, no credentials — MEASURED:
+ * CI's `task-id-existence` job carries no `GH_TOKEN` today, so `gh api` fails fast with "gh: To
+ * use GitHub CLI in a GitHub Actions workflow, set the GH_TOKEN environment variable") as well as
+ * a response this could not parse. The caller treats it exactly like {@link resolveReservedIds}'s
+ * own `reachable: false` — read-only, degrade to a STATED SKIP, never fail the whole gate closed
+ * on a blip, and never read it as "no other open PR claims this id".
+ */
+export function fetchOpenPrRows(owner, repo, cwd) {
+  const result = spawnSync("gh", ["api", `repos/${owner}/${repo}/pulls?state=open&per_page=100`], {
+    cwd,
+    encoding: "utf8",
+    maxBuffer: 16 * 1024 * 1024,
+  });
+  if (result.error || result.status !== 0) return { reachable: false, rows: [] };
+  let rows;
+  try {
+    rows = JSON.parse(result.stdout);
+  } catch {
+    return { reachable: false, rows: [] };
+  }
+  if (!Array.isArray(rows)) return { reachable: false, rows: [] };
+  return { reachable: true, rows };
+}
+
+/** Any `W1-T<n>` MENTION in free text — deliberately loose, mirroring `lib/task-id.ts`'s
+ *  `mentionedTaskIds` (the mint's own open-PR reader): over-counting here only ever refuses a PR
+ *  that turns out to be innocent (fixable by renumbering, or by the id genuinely being free once
+ *  re-checked), while under-counting would let a real open-vs-open collision merge silently. */
+const MENTION_RE = /\bW1-T[0-9]+\b/g;
+function mentionedIds(text) {
+  const ids = new Set();
+  MENTION_RE.lastIndex = 0;
+  let m;
+  while ((m = MENTION_RE.exec(text)) !== null) ids.add(m[0]);
+  return ids;
+}
+
+/**
+ * Ids THIS branch ADDS relative to `base` — {@link evaluateAddedIdCollisions}'s per-id "reissued"
+ * shape, generalized to every declared id (not only ones that already collide with `base`), so
+ * the open-vs-open check below has a complete claim set to cross-reference. An id whose declaring
+ * file at HEAD is the SAME as at `base` is a shard this change merely carries along, not an add.
+ *
+ * `base.readable === false` propagates as `{ readable: false, ids: [] }` rather than guessing an
+ * empty add set — the same false-zero {@link resolveBaseDeclaredIds} itself refuses on.
+ */
+export function addedIdsAtHead(occurrencesById, base) {
+  if (!base.readable) return { readable: false, ids: [] };
+  const ids = [];
+  for (const [id, occurrences] of occurrencesById) {
+    const headFiles = [...new Set(occurrences.map((o) => o.file))];
+    const baseFiles = base.byId.get(id);
+    const newFiles = baseFiles ? headFiles.filter((f) => !baseFiles.has(f)) : headFiles;
+    if (newFiles.length > 0) ids.push(id);
+  }
+  return { readable: true, ids };
+}
+
+/**
+ * Cross-reference ids THIS PR adds ({@link addedIdsAtHead}) against every OTHER open PR's mention
+ * surface (title + body + head ref) — the OTHER half of Q3 {@link resolveBaseDeclaredIds}'s own
+ * doc names as out of its reach: not just "does main already declare this id" but "has another
+ * still-open PR already claimed it". MEASURED at filing (W1-T2324's rationale): of 4 open PRs
+ * adding a plan id, exactly one collided with main and ZERO collided with another open PR — so
+ * this check is expected to stay silent on a healthy board and fire only on the genuine defect
+ * class it exists for.
+ *
+ * `ownHeadRef` EXCLUDES this PR's own row — otherwise every added id would trivially "collide"
+ * with itself, since this branch's own title/body/branch name is exactly what mentions the id it
+ * is adding. An `ownHeadRef` this cannot resolve (`undefined`) excludes nothing, which is the
+ * FAIL-OPEN direction for the exclusion (a missed self-exclusion could only ever flag a PR's own
+ * id against itself, which {@link main} would report as a false collision an author notices
+ * immediately — never a silent miss of a REAL cross-PR collision).
+ */
+export function evaluateOpenPrIdCollisions(addedIds, openPrRows, ownHeadRef) {
+  const others = openPrRows.filter((r) => (r.head && r.head.ref) !== ownHeadRef);
+  const collisions = [];
+  for (const id of addedIds) {
+    const claimants = others.filter((r) => mentionedIds([r.title, r.body, r.head && r.head.ref].filter(Boolean).join("\n")).has(id));
+    if (claimants.length > 0) collisions.push({ id, prs: claimants.map((r) => ({ number: r.number, url: r.html_url })) });
+  }
+  collisions.sort((a, b) => a.id.localeCompare(b.id));
+  return collisions;
 }
 
 /**
@@ -391,7 +513,19 @@ export function evaluateIds(citedHits, declaredIds, reservation, baseline) {
   return results;
 }
 
-function main(argv) {
+/**
+ * EXPORTED for the same reason the thirteen functions above are: this script is a plain `.mjs`
+ * and its own suite covers error/degradation arms by importing them, because a subprocess's
+ * coverage is not the parent run's (test/task-id-existence-check.test.ts says so in as many
+ * words). The open-PR half's wiring below lives HERE rather than in an exported helper, so
+ * without this export those lines are reachable only by a subprocess and therefore uncoverable.
+ *
+ * Behaviour is unchanged: the direct-execution guard at the bottom of this file still decides
+ * whether `main` runs on `node scripts/task-id-existence-check.mjs`, and an importing caller must
+ * invoke it deliberately. It communicates through `process.exitCode`, so an in-process caller is
+ * responsible for saving and restoring that — see the test.
+ */
+export function main(argv) {
   const { values } = parseArgs({
     args: argv,
     options: {
@@ -402,6 +536,16 @@ function main(argv) {
       remote: { type: "string", default: "origin" },
       base: { type: "string" },
       cwd: { type: "string" },
+      // W1-T2324 (Q3, open-vs-open half) — all three OPTIONAL and best-effort: `owner`/`repo`
+      // default to parsing `remote`'s url (works offline, no `gh` needed for this half alone);
+      // `head-ref` defaults to `GITHUB_HEAD_REF` (set by GitHub Actions on `pull_request`, where
+      // `git rev-parse --abbrev-ref HEAD` reads a useless "HEAD" — the checkout is detached) and
+      // then to the local branch name. None is required: an unresolved owner/repo or an
+      // unreachable `gh` degrades this ONE half to a stated SKIP (see `main` below), never fails
+      // the base-collision check above it closed on a network blip.
+      owner: { type: "string" },
+      repo: { type: "string" },
+      "head-ref": { type: "string" },
     },
   });
 
@@ -450,10 +594,12 @@ function main(argv) {
         "a base. Pass --base origin/main to enable it.",
     );
   }
+  // Resolved ONCE and reused below by the open-vs-open half — `resolveBaseDeclaredIds` shells
+  // `git grep` + one `git show` per matched file, and the open-vs-open check needs the exact same
+  // base read `evaluateAddedIdCollisions` already took.
+  const base = values.base === undefined ? undefined : resolveBaseDeclaredIds(values.base, cwd);
   const collisionVerdict =
-    values.base === undefined
-      ? { refused: false, unreadableBase: false, collisions: [] }
-      : evaluateAddedIdCollisions(occurrencesById, resolveBaseDeclaredIds(values.base, cwd));
+    base === undefined ? { refused: false, unreadableBase: false, collisions: [] } : evaluateAddedIdCollisions(occurrencesById, base);
   if (collisionVerdict.unreadableBase) {
     console.error(
       `task-id-existence: FAILED -- could not read declared plan ids at base "${values.base}". This ` +
@@ -477,6 +623,51 @@ function main(argv) {
         '"a duplicate id made the plan unreadable".\n',
     );
     process.exitCode = 1;
+  }
+
+  // W1-T2324 (Q3, open-vs-open half) — the collision class `resolveBaseDeclaredIds` cannot see:
+  // an id claimed only by ANOTHER still-open PR, not yet on main. Runs ONLY when the base itself
+  // was readable (an unreadable base already refused above; piling a second, less certain check
+  // on top of that would just be noise) and only when this branch actually adds an id (nothing to
+  // cross-reference otherwise). Every failure mode here is a STATED SKIP, never a silent pass
+  // dressed up as a check that ran — an operator reading the log sees exactly which half of Q3
+  // executed.
+  if (base !== undefined && base.readable) {
+    const added = addedIdsAtHead(occurrencesById, base);
+    if (added.ids.length > 0) {
+      const ownerRepo = values.owner && values.repo ? { owner: values.owner, repo: values.repo } : resolveOwnerRepoFromGit(values.remote, cwd);
+      if (ownerRepo === undefined) {
+        console.log(
+          `task-id-existence: open-PR collision check SKIPPED -- could not resolve owner/repo from remote ` +
+            `"${values.remote}"'s url. Pass --owner/--repo to enable it.`,
+        );
+      } else {
+        const ownHeadRef = values["head-ref"] ?? process.env.GITHUB_HEAD_REF ?? currentBranch(cwd);
+        const openPrs = fetchOpenPrRows(ownerRepo.owner, ownerRepo.repo, cwd);
+        if (!openPrs.reachable) {
+          console.log(
+            `task-id-existence: open-PR collision check SKIPPED -- could not read the open-PR list for ` +
+              `${ownerRepo.owner}/${ownerRepo.repo} (network blip, or \`gh\` has no credentials in this ` +
+              `environment). An id claimed only by another still-open PR cannot be checked until this ` +
+              "read succeeds; the base-collision check above already ran and is unaffected.",
+          );
+        } else {
+          const openPrCollisions = evaluateOpenPrIdCollisions(added.ids, openPrs.rows, ownHeadRef);
+          if (openPrCollisions.length > 0) {
+            console.error("\ntask-id-existence: FAILED -- the following added id(s) are ALREADY CLAIMED by another OPEN PR:\n");
+            for (const c of openPrCollisions) {
+              console.error(`  ${c.id} -- claimed by ${c.prs.map((p) => p.url || `#${p.number}`).join(", ")}`);
+            }
+            console.error(
+              "\nRenumber to a fresh reserved id. Whichever of the two PRs merges first leaves the other " +
+                "carrying a duplicate id that merges with NO git conflict, exactly like the main-collision " +
+                "case above.\n",
+            );
+            process.exitCode = 1;
+          }
+        }
+      }
+    }
   }
 
   const results = evaluateIds(citedHits, declaredIds, reservation, baseline);
