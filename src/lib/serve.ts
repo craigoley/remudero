@@ -1218,9 +1218,19 @@ export function renderShellHtml(
        the bookmark's own \`?token=\` carries only the read token (see this shell's bootstrap,
        below). Every write affordance on this page starts DISABLED with a stated reason (standing
        rule 22) and is re-enabled by probeWriteScope only once a client-held write token actually
-       proves out against GET /v1/auth/scope -- never merely because one was typed. -->
+       proves out against GET /v1/auth/scope -- never merely because one was typed.
+       W1-T2409: the "Get one by running: rmd console-url --write" instruction used to be the ONLY
+       way to obtain a write token -- an already-authenticated operator had to leave this page for
+       a shell. #write-token-request-btn calls the new GET /v1/console/write-grant "ask" (see that
+       route's own doc, serve.ts) with the read token this tab already carries, and stores what it
+       returns exactly where a pasted token already lives -- never the URL, never a new disk path,
+       never a log line. The paste form stays as a fallback (a token minted on another host, or a
+       tab whose read token this route itself would reject). -->
   <div id="write-token-panel" class="write-token-panel">
-    <p id="write-token-status" role="status" aria-live="polite" class="counts">Read-only — write actions are unavailable. Enter a write token to enable them for this tab. Get one by running: rmd console-url --write</p>
+    <p id="write-token-status" role="status" aria-live="polite" class="counts">Read-only — write actions are unavailable. Request a write token for this tab, or paste one. Get one by running: rmd console-url --write</p>
+    <div class="btn-row">
+      <button id="write-token-request-btn" type="button">Request write access</button>
+    </div>
     <form id="write-token-form" class="inline-action">
       <label for="write-token-input">Write token</label>
       <input id="write-token-input" type="password" autocomplete="off" placeholder="paste write token" />
@@ -1439,7 +1449,7 @@ export function renderShellHtml(
       // operator how to get a new one; never weaken the storage, and never print a token.
       msg = "Not authorized to write (HTTP " + status + "). This tab has no valid write token — "
           + "they live in sessionStorage by design and are cleared when the tab or browser closes.\\n"
-          + "Run  rmd console-url --write  and open the URL it prints, then retry.";
+          + "Click \\"Request write access\\" above, or run  rmd console-url --write  and paste the token it prints, then retry.";
     } else if (status === 0) {
       msg = "Write failed: could not reach the console service (" + path + ")."
           + (detail ? "\\n" + detail : "");
@@ -3948,15 +3958,20 @@ export function renderShellHtml(
     const statusEl = document.getElementById("write-token-status");
     const form = document.getElementById("write-token-form");
     const clearBtn = document.getElementById("write-token-clear-btn");
+    // W1-T2409: the "ask" button lives beside the paste form and shares its hidden/shown state --
+    // both are ways to OBTAIN a token, so both go away once one is already held and accepted.
+    const requestBtn = document.getElementById("write-token-request-btn");
     if (hasWriteScope) {
       statusEl.textContent = "Write access enabled for this tab.";
       form.hidden = true;
+      if (requestBtn) requestBtn.hidden = true;
       clearBtn.hidden = false;
     } else {
       statusEl.textContent = writeToken
         ? "That write token was not accepted — write actions stay unavailable."
-        : "Read-only — write actions are unavailable. Enter a write token to enable them for this tab. Get one by running: rmd console-url --write";
+        : "Read-only — write actions are unavailable. Request a write token for this tab, or paste one. Get one by running: rmd console-url --write";
       form.hidden = false;
+      if (requestBtn) requestBtn.hidden = false;
       clearBtn.hidden = true;
     }
     paintWriteStateBadge();
@@ -4014,6 +4029,39 @@ export function renderShellHtml(
       // 'writeToken' above; it just will not survive a reload. Never fall back to the URL/a cookie.
     }
     probeWriteScope();
+  });
+  // W1-T2409: the in-page "ask" -- GET /v1/console/write-grant with the read token this tab
+  // already carries (authHeaders, the SAME header the shell's own bootstrap fetches use, NEVER
+  // the URL). No pacing/retry/timeout added here: one round trip, resolved or failed immediately,
+  // matching every other side-effect-free probe on this page (probeWriteScope, above).
+  document.getElementById("write-token-request-btn").addEventListener("click", () => {
+    const btn = document.getElementById("write-token-request-btn");
+    const statusEl = document.getElementById("write-token-status");
+    btn.disabled = true;
+    fetch("/v1/console/write-grant", { headers: authHeaders })
+      .then((res) => {
+        if (!res.ok) throw new Error("write-grant request failed: HTTP " + res.status);
+        return res.json();
+      })
+      .then((data) => {
+        writeToken = String((data && data.token) || "");
+        try {
+          window.sessionStorage.setItem(WRITE_TOKEN_STORAGE_KEY, writeToken);
+        } catch {
+          // storage disabled/blocked -- same fallback the paste-form handler above already accepts:
+          // the token still works for THIS page load via the in-memory 'writeToken', never a
+          // fallback to the URL/a cookie/a second disk path.
+        }
+        return probeWriteScope();
+      })
+      .catch(() => {
+        // Never a token in this branch -- writeToken is left exactly as it was. The paste form
+        // stays visible as the fallback (updateWriteTokenUi's own doc, above).
+        statusEl.textContent = "Could not request a write token for this tab — try again, or paste one below.";
+      })
+      .finally(() => {
+        btn.disabled = false;
+      });
   });
   document.getElementById("write-token-clear-btn").addEventListener("click", () => {
     writeToken = "";
@@ -5032,6 +5080,45 @@ function buildAuthScopeRoute(): Route {
 }
 
 /**
+ * `GET /v1/console/write-grant` — W1-T2409's in-console "ask", replacing "leave the page and run
+ * `rmd console-url --write` in a shell" with one in-page round trip. The write-token panel's own
+ * text used to say exactly that; this route is what a click on its new button now calls instead.
+ *
+ * `scope: "read"` DELIBERATELY. Before this call, the only credential an operator's tab holds is
+ * the read bearer the shell booted with (Q1 of this task's rationale: the bearer token is the
+ * only in-process gate `serve.ts` has — the tailnet/Cloudflare login in front of it is invisible
+ * to this code). Requiring `write` scope here would be asking for the very thing this route
+ * exists to hand out, so it cannot be write-scoped and does not need a {@link WriteTier}.
+ *
+ * THIS DOES NOT COLLAPSE READ INTO WRITE (Q2). Every write-scoped route's own scope check is
+ * completely unchanged — a caller presenting only the read token still 403s on
+ * `POST /v1/control/pause` and every other write route, exactly as before (see
+ * test/console-write-entry.test.ts). What this route adds is a way to LEARN the separate write
+ * bearer's value, over the same in-memory {@link ServiceTokens} this process already holds for
+ * every request's own auth check — never a new disk read (this handler never touches the
+ * filesystem), so the write token is written to no path it was not already written to, and it
+ * never rides the URL: no `allowQueryToken`, a GET with the value in the JSON response body only,
+ * never a redirect `Location` header or a query string. The client stores the returned value in
+ * sessionStorage exactly where a pasted token already lives (W1-T202's own `WRITE_TOKEN_STORAGE_KEY`)
+ * — never a second disk location, never a log line (service.ts's own request logging never
+ * includes a response body).
+ *
+ * No pacing, no throttle, no delay: side-effect-free and synchronous, the same shape
+ * `buildAuthScopeRoute` above already uses for the read half of this same probe/reveal pair.
+ */
+function buildConsoleWriteGrantRoute(tokens: ServiceTokens): Route {
+  return {
+    method: "GET",
+    path: "/v1/console/write-grant",
+    scope: "read",
+    handler: (_req, res) => {
+      res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ token: tokens.write }));
+    },
+  };
+}
+
+/**
  * W1-T945: the run-id SHAPE `readWorkerTail` (run-task.ts) validates BEFORE building a path —
  * duplicated here rather than imported, because serve.ts is a lib module and run-task.ts is the
  * CLI entrypoint that imports FROM lib/*, never the reverse (this file's own module header); the
@@ -5274,6 +5361,8 @@ export function buildServeRoutes(deps: ServeDeps): Route[] {
     // analytics-route.ts's module header for the reader discipline and scope.
     buildAnalyticsRoute({ ...deps.analytics, ledgerPath: deps.ledgerPath }),
     buildAuthScopeRoute(),
+    // W1-T2409: the in-console write-grant "ask" — see buildConsoleWriteGrantRoute's own doc.
+    buildConsoleWriteGrantRoute(deps.tokens),
     buildShellRoute(
       deps.phaseElapsedThresholdsMs ?? DEFAULT_PHASE_ELAPSED_THRESHOLDS_MS,
       consoleSha,
