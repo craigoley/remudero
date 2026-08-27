@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { mkdtempSync, mkdirSync, symlinkSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 // W1-T203 acceptance criterion 4: "the deny-floor refuses a worker attempt to
 // POST a commit status, and that refusal is asserted against the floor script
@@ -14,6 +17,15 @@ const HOOK_PATH = fileURLToPath(new URL("../hooks/deny-floor.sh", import.meta.ur
 
 function runDenyFloor(command: string): { status: number | null; stderr: string } {
   const input = JSON.stringify({ tool_input: { command } });
+  const result = spawnSync("bash", [HOOK_PATH], { input, encoding: "utf8" });
+  return { status: result.status, stderr: result.stderr };
+}
+
+// Rule 8 (W1-T2312) keys off the PROJECT directory, not the hook process's own
+// $PWD, so these calls carry the real PreToolUse payload shape: a top-level `cwd`
+// alongside `tool_input.command` (BaseHookInput.cwd, sdk.d.ts).
+function runDenyFloorAt(command: string, cwd: string): { status: number | null; stderr: string } {
+  const input = JSON.stringify({ cwd, tool_input: { command } });
   const result = spawnSync("bash", [HOOK_PATH], { input, encoding: "utf8" });
   return { status: result.status, stderr: result.stderr };
 }
@@ -116,4 +128,95 @@ test("W1-T1066: the refusal names cadence rather than a bare blocked", () => {
   assert.match(stderr, /polling/i);
   assert.match(stderr, /gh/i);
   assert.notEqual(stderr.trim(), "deny-floor: blocked");
+});
+
+// W1-T2312 — THE WORKTREE INSTALL HAD NO TOOL-BOUNDARY REFUSAL. `linkWorktreeNodeModules`
+// symlinks every worker worktree's `node_modules` to the canonical checkout on purpose, so
+// an `npm ci`/`npm install` typed straight into a Bash tool call empties the SHARED tree
+// through that link (the 2026-08-05/08-11 outages) — `SymlinkInstallRefusal` guards only
+// rmd's own install path, never a raw Bash command. Rule 8 is the tool-boundary refusal;
+// these tests spawn the real hook script against a real symlinked/real/absent
+// `node_modules`, never a description of the regex.
+
+test("W1-T2312: an install is refused when the project's node_modules is a symlink", () => {
+  const canonical = mkdtempSync(join(tmpdir(), "deny-floor-canonical-"));
+  mkdirSync(join(canonical, "node_modules"));
+  const worktree = mkdtempSync(join(tmpdir(), "deny-floor-worktree-"));
+  symlinkSync(join(canonical, "node_modules"), join(worktree, "node_modules"));
+
+  try {
+    const { status, stderr } = runDenyFloorAt("npm ci", worktree);
+    assert.equal(status, 2);
+    assert.match(stderr, /empties the shared node_modules through the symlink/);
+
+    const install = runDenyFloorAt("npm install", worktree);
+    assert.equal(install.status, 2);
+  } finally {
+    rmSync(worktree, { recursive: true, force: true });
+    rmSync(canonical, { recursive: true, force: true });
+  }
+});
+
+test("W1-T2312: an install is allowed when node_modules is real or absent — the symlink test is the discriminator", () => {
+  const realTree = mkdtempSync(join(tmpdir(), "deny-floor-real-"));
+  mkdirSync(join(realTree, "node_modules"));
+  const noTree = mkdtempSync(join(tmpdir(), "deny-floor-none-"));
+
+  try {
+    assert.equal(runDenyFloorAt("npm ci", realTree).status, 0);
+    assert.equal(runDenyFloorAt("npm install", realTree).status, 0);
+    assert.equal(runDenyFloorAt("npm ci", noTree).status, 0);
+    assert.equal(runDenyFloorAt("npm install", noTree).status, 0);
+  } finally {
+    rmSync(realTree, { recursive: true, force: true });
+    rmSync(noTree, { recursive: true, force: true });
+  }
+});
+
+test("W1-T2312: non-installing npm verbs are never blocked, even with a symlinked node_modules", () => {
+  const canonical = mkdtempSync(join(tmpdir(), "deny-floor-canonical-"));
+  mkdirSync(join(canonical, "node_modules"));
+  const worktree = mkdtempSync(join(tmpdir(), "deny-floor-worktree-"));
+  symlinkSync(join(canonical, "node_modules"), join(worktree, "node_modules"));
+
+  try {
+    assert.equal(runDenyFloorAt("npm run build", worktree).status, 0);
+    assert.equal(runDenyFloorAt("npm test", worktree).status, 0);
+    assert.equal(runDenyFloorAt("npm ls", worktree).status, 0);
+    assert.equal(runDenyFloorAt("npm run typecheck", worktree).status, 0);
+  } finally {
+    rmSync(worktree, { recursive: true, force: true });
+    rmSync(canonical, { recursive: true, force: true });
+  }
+});
+
+test("W1-T2312: pnpm/yarn install equivalents are refused too when node_modules is a symlink", () => {
+  const canonical = mkdtempSync(join(tmpdir(), "deny-floor-canonical-"));
+  mkdirSync(join(canonical, "node_modules"));
+  const worktree = mkdtempSync(join(tmpdir(), "deny-floor-worktree-"));
+  symlinkSync(join(canonical, "node_modules"), join(worktree, "node_modules"));
+
+  try {
+    assert.equal(runDenyFloorAt("pnpm install", worktree).status, 2);
+    assert.equal(runDenyFloorAt("yarn install", worktree).status, 2);
+  } finally {
+    rmSync(worktree, { recursive: true, force: true });
+    rmSync(canonical, { recursive: true, force: true });
+  }
+});
+
+test("W1-T2312: the refusal names the shared-tree mechanism and the remedy, not a bare blocked", () => {
+  const canonical = mkdtempSync(join(tmpdir(), "deny-floor-canonical-"));
+  mkdirSync(join(canonical, "node_modules"));
+  const worktree = mkdtempSync(join(tmpdir(), "deny-floor-worktree-"));
+  symlinkSync(join(canonical, "node_modules"), join(worktree, "node_modules"));
+
+  try {
+    const { stderr } = runDenyFloorAt("npm ci", worktree);
+    assert.match(stderr, /refreshing the canonical checkout/);
+    assert.match(stderr, /typecheck\/test/);
+  } finally {
+    rmSync(worktree, { recursive: true, force: true });
+    rmSync(canonical, { recursive: true, force: true });
+  }
 });
