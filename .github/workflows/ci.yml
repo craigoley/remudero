@@ -225,11 +225,17 @@ jobs:
     # rather than run it wrong, and must not spend the ~740s p50 (up to 1638s) of the coverage
     # collection step design (ii) prices at 211-422 CI-min/day for a comparison that means nothing
     # on a push.
-    # W1-T1009: HEAVY band -- see the `ci` job's comment above for the full derivation. This job
-    # carries the same `npx playwright install` step and hung on it independently of `ci`
-    # (PR #2150, five minutes after PR #2148's `ci` hang on the same step), so it gets the same
-    # 35m/2100s bound, jointly constrained to stay strictly below ci-gate.yml's
-    # WAIT_CAP_SECONDS (2400s).
+    # W1-T1009: HEAVY band -- see the `ci` job's comment above for the full derivation of the
+    # 35m/2100s figure. This job carries the same `npx playwright install` step and hung on it
+    # independently of `ci` (PR #2150, five minutes after PR #2148's `ci` hang on the same step),
+    # so it sits in the same band -- but NO LONGER at the same number. Unlike `ci` it runs the
+    # whole suite under --experimental-test-coverage, and one flaky test sends that step into a
+    # RETRY -- a second full pass -- which puts it past 2100s; PR #3064 raised it to 39m/2340s as
+    # a STOPGAP while `ci` stays at 35m/2100s. THE CEILING IS THE INVARIANT, NOT EITHER NUMBER:
+    # both must stay strictly below ci-gate.yml's WAIT_CAP_SECONDS (2400s), and 39m/2340s is the
+    # largest whole minute that clears it (40m is 2400s exactly, which is not strictly below). At
+    # or above that cap ci-gate times out first and the misattribution defect returns intact; if
+    # WAIT_CAP_SECONDS is ever retuned (W1-T312), re-derive both values.
     timeout-minutes: 39
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
