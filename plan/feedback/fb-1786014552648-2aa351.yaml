@@ -26,7 +26,7 @@ raw: "rmd status WARNS ABOUT A CIRCUIT BREAKER ON A TASK THAT CANNOT DISPATCH â€
   must stay."
 attachments: []
 origin: cli
-status: proposed
+status: accepted
 proposal_pr: https://github.com/craigoley/remudero/pull/3011
 summary:
   headline: Stale circuit breaker warning on permanently-blocked task

@@ -29,7 +29,7 @@ raw: "THE CONSOLE'S ANSWER BUTTON FILES A REPLY AND NEVER CLOSES THE QUESTION â€
   and the gap is only that it had not run yet."
 attachments: []
 origin: cli
-status: proposed
+status: accepted
 proposal_pr: https://github.com/craigoley/remudero/pull/2951
 summary:
   headline: Answered questions stay open indefinitely

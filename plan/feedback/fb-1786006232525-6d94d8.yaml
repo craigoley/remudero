@@ -24,7 +24,7 @@ raw: "THREE CORRECTIONS FROM THE 07:25Z MONITOR, TWO OF THEM TO CLAIMS I
   non-zero, the fix is confirmed and only the earlier claim was premature."
 attachments: []
 origin: cli
-status: proposed
+status: accepted
 proposal_pr: https://github.com/craigoley/remudero/pull/3003
 summary:
   headline: "Retract: rmd verbs mutate state, not pure readers"

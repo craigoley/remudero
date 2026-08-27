@@ -30,7 +30,7 @@ raw: >-
   2026-08-16T01:43:31.080Z: superseded-by #1927
 attachments: []
 origin: repair#stale
-status: proposed
+status: accepted
 proposal_pr: https://github.com/craigoley/remudero/pull/3094
 summary:
   headline: "Stale surface repairs recurring: 5 fixes in 7 days"

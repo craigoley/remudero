@@ -29,7 +29,7 @@ raw: "THE CONSOLE FEEDBACK PATH FILES ON EVERY CLICK WHILE THE BANNER SAYS
   state."
 attachments: []
 origin: cli
-status: proposed
+status: accepted
 proposal_pr: https://github.com/craigoley/remudero/pull/2927
 summary:
   headline: Feedback files duplicate; confirmation message is false

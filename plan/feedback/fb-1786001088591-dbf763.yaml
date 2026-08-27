@@ -28,7 +28,7 @@ raw: "THE CANONICAL CHECKOUT WAS SHALLOW AND NOTHING NOTICED UNTIL #1407 REFUSED
   nothing detected it for that long."
 attachments: []
 origin: cli
-status: proposed
+status: accepted
 proposal_pr: https://github.com/craigoley/remudero/pull/2993
 summary:
   headline: Main codebase history 79% incomplete; safety guard caught it

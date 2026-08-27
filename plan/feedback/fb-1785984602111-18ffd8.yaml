@@ -28,7 +28,7 @@ raw: "A REFACTOR OF UNTESTED CODE INHERITS ITS COVERAGE DEBT AT THE GATE —
   and this is only a documentation gap about what a refactor costs."
 attachments: []
 origin: cli
-status: proposed
+status: accepted
 proposal_pr: https://github.com/craigoley/remudero/pull/2970
 summary:
   headline: Gate blocks refactoring of already-untested code
