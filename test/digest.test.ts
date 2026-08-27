@@ -526,3 +526,64 @@ test("board review: a `.ran` row carrying no counts at all still renders, honest
   const path = ledgerFile([{ ts: "2026-07-14T09:00:00.000Z", step: "board_review.ran" }]);
   assert.match(buildDigest(path, "2026-07-14T00:00:00.000Z"), /^board review: \(ran, no counts recorded\)$/m);
 });
+
+// ── W1-T2345's repeat-bound trip reaches the digest ────────────────────────────────────────────
+//
+// The counter shipped as #3048 and fires: 8 `sweep.repeat_escalated` rows across 6 distinct PRs on
+// the fleet ledger. But it routes the trip to `deps.escalate(...)`, i.e. an ISSUE — the surface the
+// shard explicitly refused ("a second queue nobody drains is not an answer"), and `digest.ts`
+// referenced the step ZERO times. These tests are the reader the shard's own design named.
+
+test("repeat bound: a `sweep.repeat_escalated` row inside the window renders the PR, its verdict and its streak", () => {
+  const path = ledgerFile([
+    { ts: "2026-07-14T09:00:00.000Z", step: "run.start", task_id: "W1-T1" },
+    { ts: "2026-07-14T09:05:00.000Z", step: "sweep.repeat_escalated", pr_number: 3039, disposition: "blocked-ambiguous", streak: 50, head_sha: "ee02fe5f" },
+  ]);
+  assert.match(buildDigest(path, "2026-07-14T00:00:00.000Z"), /^stuck \(repeat bound\): #3039 blocked-ambiguous x50$/m);
+});
+
+test("repeat bound: two DIFFERENT stuck PRs both render — additive, never latest-wins", () => {
+  // A board read is a snapshot, so newest wins. A trip is an event about one PR: two trips are two
+  // different PRs stuck, and collapsing them would report one and hide the other.
+  const path = ledgerFile([
+    { ts: "2026-07-14T09:05:00.000Z", step: "sweep.repeat_escalated", pr_number: 3039, disposition: "blocked-ambiguous", streak: 50, head_sha: "aaa" },
+    { ts: "2026-07-14T09:06:00.000Z", step: "sweep.repeat_escalated", pr_number: 3025, disposition: "blocked-fixable", streak: 61, head_sha: "bbb" },
+  ]);
+  const text = buildDigest(path, "2026-07-14T00:00:00.000Z");
+  assert.match(text, /#3039 blocked-ambiguous x50/);
+  assert.match(text, /#3025 blocked-fixable x61/, "the second stuck PR is not hidden by the first");
+});
+
+test("repeat bound: the SAME PR replayed across overlapping rotations counts once", () => {
+  const path = ledgerFile([
+    { ts: "2026-07-14T09:05:00.000Z", step: "sweep.repeat_escalated", pr_number: 3039, disposition: "blocked-ambiguous", streak: 50, head_sha: "aaa" },
+    { ts: "2026-07-14T09:05:00.000Z", step: "sweep.repeat_escalated", pr_number: 3039, disposition: "blocked-ambiguous", streak: 50, head_sha: "aaa" },
+  ]);
+  const text = buildDigest(path, "2026-07-14T00:00:00.000Z");
+  assert.equal((text.match(/#3039/g) ?? []).length, 1, "a rotation artefact must never read as a second stuck PR");
+});
+
+test("repeat bound: a QUIET board omits the line entirely — soft-composed, never a placeholder", () => {
+  const quiet = ledgerFile([{ ts: "2026-07-14T09:00:00.000Z", step: "run.start", task_id: "W1-T1" }]);
+  const text = buildDigest(quiet, "2026-07-14T00:00:00.000Z");
+  assert.doesNotMatch(text, /stuck \(repeat bound\)/, "no line at all");
+  assert.doesNotMatch(text, /none this window/, "and no placeholder — the `boardReview` precedent, not the `alerts` one");
+});
+
+test("repeat bound: the counter's OTHER two steps sweep nothing — only the trip itself is a reader's business", () => {
+  // `sweep.repeat_escalate_failed` is a transient gateway failure the sweep retries next pass, and
+  // `sweep.disposed` is the level-triggered row that fires every tick for every PR. Neither belongs
+  // in a digest; sweeping `sweep.disposed` would put 85,000 rows in front of an operator.
+  const path = ledgerFile([
+    { ts: "2026-07-14T09:05:00.000Z", step: "sweep.repeat_escalate_failed", pr_number: 3039, error: "boom" },
+    { ts: "2026-07-14T09:06:00.000Z", step: "sweep.disposed", pr_number: 3039, disposition: "blocked-ambiguous", head_sha: "aaa" },
+  ]);
+  assert.doesNotMatch(buildDigest(path, "2026-07-14T00:00:00.000Z"), /stuck \(repeat bound\)/);
+});
+
+test("repeat bound: a row missing fields omits those clauses rather than printing undefined", () => {
+  const path = ledgerFile([{ ts: "2026-07-14T09:05:00.000Z", step: "sweep.repeat_escalated", pr_number: 3039 }]);
+  const text = buildDigest(path, "2026-07-14T00:00:00.000Z");
+  assert.match(text, /^stuck \(repeat bound\): #3039$/m);
+  assert.doesNotMatch(text, /undefined/);
+});
