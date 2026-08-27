@@ -220,6 +220,77 @@ test("W1-T2324 (Q2): the unflagged verb and the read-fine-but-uncorroborated arm
   assert.equal(cap.out.join("\n").includes("RESERVED "), false);
 });
 
+// ── (Q2, criterion 8) the ATOMIC RESERVE PATH is still `reserveTaskIdRemote`, claiming on origin ──
+//
+// The criterion this pins is an INVARIANCE claim — "the atomic reserve path is still the one that
+// claims on origin" — so its `grep:` proof matches the merge-base BY CONSTRUCTION and can only ever
+// read `executed_stale`. The observable guarantee is therefore asserted here instead, against the
+// REAL wiring: every other `--reserve` test injects its own `reserver`, which means
+// `gitRemoteRefReserver` and `reserveTaskIdRemote` are never actually reached by any of them. These
+// two supply a recording git runner and NO reserver, so the production seam runs for real.
+
+function recordingGit(): {
+  calls: string[][];
+  run: (args: string[]) => { status: number | null; stdout: string; stderr: string };
+} {
+  const calls: string[][] = [];
+  return {
+    calls,
+    run: (args: string[]) => {
+      calls.push(args);
+      if (args[0] === "hash-object") return { status: 0, stdout: "4b825dc642cb6eb9a060e54bf8d69288fbee4904\n", stderr: "" };
+      if (args[0] === "commit-tree") return { status: 0, stdout: "a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9\n", stderr: "" };
+      return { status: 0, stdout: "", stderr: "" };
+    },
+  };
+}
+
+test("W1-T2324 (Q2): with NO reserver injected the claim still runs through reserveTaskIdRemote — one push, to origin's refs/rmd-id namespace", async () => {
+  const git = recordingGit();
+  const cap = capture();
+  let code: number;
+  try {
+    code = await nextTaskIdCommand(["--reserve"], {}, { runGit: git.run, holderOf: () => "unknown", openPrTexts: () => [] });
+  } finally {
+    cap.restore();
+  }
+  const pushes = git.calls.filter((a) => a[0] === "push");
+  assert.equal(pushes.length, 1, "exactly one atomic claim was attempted through the real reserver");
+  assert.equal(pushes[0]![1], "origin", "the claim is made on ORIGIN — a local ref would not be atomic across minters");
+  assert.match(
+    pushes[0]![2]!,
+    /^[0-9a-f]{40}:refs\/rmd-id\/W1-T\d+$/,
+    "the PUSH IS THE CLAIM: an anchor commit pushed to refs/rmd-id/<id>, exactly as before this task",
+  );
+  assert.match(cap.out.join("\n"), /^RESERVED W1-T\d+ on origin \(refs\/rmd-id\/W1-T\d+\) after 1 attempt\(s\)$/m);
+  assert.ok(code === 0 || code === 1);
+});
+
+test("W1-T2324 (Q2): the open-PR refusal returns BEFORE that path — no anchor is minted and nothing is pushed", async () => {
+  const git = recordingGit();
+  const cap = capture();
+  let code: number;
+  try {
+    code = await nextTaskIdCommand(
+      ["--reserve"],
+      {},
+      {
+        runGit: git.run,
+        holderOf: () => "unknown",
+        openPrTexts: () => {
+          throw new Error("GraphQL: API rate limit already exceeded for user ID 4397075");
+        },
+      },
+    );
+  } finally {
+    cap.restore();
+  }
+  assert.equal(code, 2, "fail-closed");
+  assert.equal(git.calls.filter((a) => a[0] === "push").length, 0, "nothing was claimed on origin");
+  assert.equal(git.calls.filter((a) => a[0] === "commit-tree").length, 0, "not even an anchor was minted — the refusal precedes the whole path");
+  assert.match(cap.err.join("\n"), /REFUSED/);
+});
+
 // ══ (Q3, open-vs-open half) an added id another OPEN PR already claims is refused ══════════════
 //
 // Driven through the real CLI as a subprocess against scratch git repos, exactly like this
