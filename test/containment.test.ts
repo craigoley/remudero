@@ -1040,6 +1040,23 @@ test("W1-T2344: probeTurnBudget folds the scaling allowance in, and it stays der
   }
 });
 
+test("W1-T2344: the egress command adds no pacing, throttle or sleep, and still discards both bodies", () => {
+  // RESTORES the one assertion lost when this branch's own Q2 test was dropped in the merge with
+  // origin/main. The echo itself is now covered far better by #3016's
+  // test/egress-command-reports-its-own-outcome.test.ts, which EXECUTES the command — but that
+  // file carries no delay assertion, and this property (acceptance criterion 7) had no other home
+  // repo-wide. Asserted against main's shipped implementation rather than this branch's dropped one.
+  const cmd = egressProbeCommand("api.github.com");
+  for (const banned of ["sleep", "setTimeout(", "setInterval(", "Atomics.wait("]) {
+    assert.ok(!cmd.includes(banned), `${banned} must not appear — reporting an outcome is not pacing a call`);
+  }
+  assert.equal((cmd.match(/-o \/dev\/null/g) ?? []).length, 2, "both requests still discard the response body");
+  assert.ok(!/--fail\b/.test(cmd), "no new status-code gate — this is observation, not a new check");
+  // And printing an outcome must not smuggle in a numbered command, which would move
+  // probeCommandCount out from under probeTurnBudget.
+  assert.equal(probeCommandCount(cmd), 0);
+});
+
 test("W1-T2213: a reported operator-home-read attempt derives the denial from the transcript rather than from silence, wired through probeContainment", async () => {
   // Drives probeContainment's OWN wiring for this arm (not just the pure
   // verdict): an executor that REPORTS a read attempt must have
