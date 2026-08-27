@@ -644,12 +644,36 @@ export interface TokenFallbackRow {
   lastOkTs?: string;
 }
 
+/**
+ * W1-T2392: one merged BUILD that names a task in its own prose and that no credit surface
+ * claimed — `StatusProjection.uncreditedBuild`, carried through verbatim rather than re-derived.
+ *
+ * WARN, NEVER CREDIT. `uncreditedBuildWarning` (status.ts) deliberately does not credit from prose:
+ * a task credited wrongly is never built at all, which is strictly worse than one credited late.
+ * This row is a REPORT of that warning and changes no disposition — the projection it reads is the
+ * same object every other consumer sees, and nothing here writes back to it.
+ */
+export interface UncreditedBuildRow {
+  /** The task whose build merged uncredited. */
+  taskId: string;
+  /** The merged PR that names it in prose. */
+  prNumber: number;
+  prUrl: string;
+  /** Which prose surface carried the id — measured at head, 14 of 19 name it in the BODY only,
+   *  so an operator told "title" for a body-named build would look in the wrong place. */
+  namedIn: "title" | "body";
+}
+
 export interface NeedsMeSection {
   costAnomaly: CostAnomalyRow[];
   imageDrift?: ImageDriftRow;
   /** W1-T1000003: currently-standing operator merge holds — empty (never `undefined`) when
    *  none stand, so the quiet case renders no row at all (design (iii)). */
   mergeHeld: MergeHeldRow[];
+  /** W1-T2392: merged builds no credit surface claimed. EMPTY (never `undefined`) when none —
+   *  same quiet-case discipline as `mergeHeld` above, so the common board renders no row at all.
+   *  MEASURED at head: 84 of 103 recent builds ARE credited, so quiet is the common case. */
+  uncreditedBuilds: UncreditedBuildRow[];
   /** The standing App-token fallback, if one stands — absent when the last refresh succeeded, so a
    *  healthy fleet renders no row. */
   tokenFallback?: TokenFallbackRow;
@@ -2046,7 +2070,10 @@ function deriveMergeHeld(lines: ReadonlyArray<Record<string, unknown>>): MergeHe
   return rows;
 }
 
-function deriveNeedsMe(lines: ReadonlyArray<Record<string, unknown>>): NeedsMeSection {
+function deriveNeedsMe(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  projections: Map<string, StatusProjection> | undefined,
+): NeedsMeSection {
   const byRunId = new Map<string, CostAnomalyRow>();
   for (const l of lines) {
     if (l.step !== COST_ANOMALY_STEP) continue;
@@ -2108,7 +2135,19 @@ function deriveNeedsMe(lines: ReadonlyArray<Record<string, unknown>>): NeedsMeSe
   // module already has `lines` in hand from the read `deriveNeedsMe`'s caller performed once).
   const mergeHeld = deriveMergeHeld(lines);
 
-  return { costAnomaly, imageDrift, mergeHeld, ...(tokenFallback ? { tokenFallback } : {}) };
+  // W1-T2392: READ, never re-derive. `deriveStatus` already decided this per task and put it on the
+  // projection; this walks the SAME map the queue/blocker sections above were handed, so no second
+  // plan pass and no second `changedFiles` call. Sorted by task id so the block is stable between
+  // renders rather than following Map insertion order.
+  const uncreditedBuilds: UncreditedBuildRow[] = [];
+  for (const [taskId, p] of projections ?? []) {
+    const w = p.uncreditedBuild;
+    if (!w) continue;
+    uncreditedBuilds.push({ taskId, prNumber: w.prNumber, prUrl: w.prUrl, namedIn: w.namedIn });
+  }
+  uncreditedBuilds.sort((a, b) => a.taskId.localeCompare(b.taskId));
+
+  return { costAnomaly, imageDrift, mergeHeld, uncreditedBuilds, ...(tokenFallback ? { tokenFallback } : {}) };
 }
 
 /**
@@ -2302,7 +2341,7 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
 
   // ── W1-T931: NEEDS ME — same `lines` window every other section above already read, one
   // extra pure fold (deriveNeedsMe), no second ledger read. ──────────────────────────────────
-  const needsMe = deriveNeedsMe(lines);
+  const needsMe = deriveNeedsMe(lines, projections);
 
   return {
     generatedAt: new Date(nowMs).toISOString(),
@@ -2594,7 +2633,13 @@ function renderLearningsInjectionBlock(s: LearningsInjectionSection): string[] {
  *  "no rule matches, no line" doctrine elsewhere. */
 function renderNeedsMeBlock(n: NeedsMeSection): string[] {
   const out = ["── NEEDS ME ─────────────────────────────────────────────"];
-  if (n.costAnomaly.length === 0 && !n.imageDrift && n.mergeHeld.length === 0 && !n.tokenFallback) {
+  if (
+    n.costAnomaly.length === 0 &&
+    !n.imageDrift &&
+    n.mergeHeld.length === 0 &&
+    n.uncreditedBuilds.length === 0 &&
+    !n.tokenFallback
+  ) {
     out.push("nothing needs you");
     return out;
   }
@@ -2609,6 +2654,15 @@ function renderNeedsMeBlock(n: NeedsMeSection): string[] {
   for (const r of n.mergeHeld) {
     const target = r.prNumber !== undefined ? `PR #${r.prNumber}${r.taskId ? ` (${r.taskId})` : ""}` : "the whole fleet";
     out.push(`merge held : ${target} — held by ${r.by}: ${r.reason}`);
+  }
+  // W1-T2392: names the task, the PR and WHICH prose surface carried the id — a reader told only
+  // "uncredited" has to go find the PR, and one told "title" for a body-named build looks in the
+  // wrong half of it. Says what to do, because a warning nobody can act on is noise.
+  for (const r of n.uncreditedBuilds) {
+    out.push(
+      `uncredited build : ${r.taskId} — merged ${r.prUrl} (#${r.prNumber}) names it in the ${r.namedIn}, ` +
+        `but no credit surface claimed it; the task stays dispatchable until a trailer or a run-${r.taskId}-<epochMs> head credits it`,
+    );
   }
   for (const r of n.costAnomaly) {
     out.push(
