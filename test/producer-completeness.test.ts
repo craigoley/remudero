@@ -165,8 +165,14 @@ test("every KNOWN_UNWIRED entry carries a substantive reason, not a TODO", () =>
   // shrinking the count again, six -> five. W1-T920 added supersessionVerdict — its DETECTOR is a
   // separate, out-of-scope shard (that task's own design note), so the field stays unwired here
   // until that shard lands and wires a producer — five -> six. W1-T984 wired mergeConflict
-  // (buildOpenPrViews now assigns it via hydrateMergeConflictEvidence) — six -> five.
-  assert.equal(Object.keys(KNOWN_UNWIRED).length, 5, "the five fields still unwired");
+  // (buildOpenPrViews now assigns it via hydrateMergeConflictEvidence) — six -> five. W1-T2384
+  // wired supersessionVerdict, the detector W1-T920 deferred to "a separate shard" and nobody
+  // filed for months: buildOpenPrViews now assigns it via hydrateSupersessionVerdicts
+  // (lib/open-prs-rest.ts), scoped to PRs the arithmetic already flagged — five -> four. It was
+  // WIRED, never allowlisted: this file's own doc forbids the vague entry because "it launders
+  // 'nobody has looked at this' into 'this is fine'", and an entry for a detector that can never
+  // fire is exactly that.
+  assert.equal(Object.keys(KNOWN_UNWIRED).length, 4, "the four fields still unwired");
   for (const [field, reason] of Object.entries(KNOWN_UNWIRED)) {
     assert.ok(reason.length >= 80, `${field}: a one-word reason launders 'nobody looked' into 'this is fine'`);
     assert.doesNotMatch(reason, /^\s*(TODO|FIXME|tbd)\b/i, `${field}: name the reason`);
