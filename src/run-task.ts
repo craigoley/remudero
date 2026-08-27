@@ -515,6 +515,7 @@ import {
   boundRiskJudgeChangeView,
   realRiskJudge,
   resolveRiskJudgeMount,
+  riskJudgeSpendCollector,
   runRiskJudge,
   type RiskJudgeChangedFile,
   type RiskJudgeChangeView,
@@ -7413,6 +7414,14 @@ export async function runFixRung(opts: {
       billing_mode: billingMode(fixResult.childEnvKeys),
       account_label: fixResult.accountLabel,
       num_turns: fixResult.numTurns,
+      // W1-T2383 (rank 2): THE CAP BESIDE THE COUNT. Absent on 233 of 233 `fix.done` rows as
+      // measured 2026-08-27, against $629.99 of fix-rung spend on a surface verdict rows do not
+      // contain at all (only 16 of 109 fix run ids also carry a verdict) — so nobody could tell
+      // an EXHAUSTED fix run from a merely long one. `WorkerResult.maxTurns` is the W1-T303
+      // INPUT (`SpawnWorkerArgs.maxTurns`, itself `opts.mount.maxTurns`), never a read-back off
+      // the envelope, which is what keeps this row checkable after `mounts.yaml` moves. Omitted
+      // rather than `undefined` when the spawn configured no cap.
+      ...(fixResult.maxTurns === undefined ? {} : { max_turns: fixResult.maxTurns }),
     });
 
     // The fix rung's own footer carries the same '## Follow-ups' invitation (renderFixPrompt
@@ -10884,15 +10893,20 @@ async function runTask(
     // already applied to the judge itself), so no separate fail-closed branch is needed here —
     // and catching it to fall back onto the declared `task.files` list alone would silently
     // reproduce this task's own defect under the cover of "best effort".
+    // W1-T2383 (rank 1): ONE collector per judgment — `realRiskJudge` records each spawn into it
+    // and `runRiskJudge` reads the total onto the `risk_judge.decision` row it already writes.
+    // Declared HERE, at the single call site, so it cannot outlive one judgment.
+    const riskJudgeSpend = riskJudgeSpendCollector();
     const judgeWithChangeView = async (input: RiskJudgeInput): Promise<RiskJudgeVerdict> => {
       const view = changeView(prUrl);
-      return realRiskJudge({ mount: riskJudgeMount, cwd: worktreePath, settingsFile, spawn })({
+      return realRiskJudge({ mount: riskJudgeMount, cwd: worktreePath, settingsFile, spawn, spend: riskJudgeSpend })({
         ...input,
         change: { ...input.change, changeView: view },
       });
     };
     const riskJudgeResult = await runRiskJudge(riskJudgeInput, {
       judge: judgeWithChangeView,
+      spend: riskJudgeSpend,
       escalate: (verdict, action) => {
         // W1-T125 shape, retargeted by W1-T975: this run itself never arms until
         // AFTER the risk judge proceeds (see the deferred arm call further down),
