@@ -3866,6 +3866,10 @@ export function buildCommitTrailerIndex(opts: {
     try {
       originUrl = exec(["config", "--get", "remote.origin.url"]).trim();
     } catch {
+      // No `origin` remote to read, so this checkout cannot be SHOWN to be this gateway's repo.
+      // That is the foreign-checkout case the block comment above describes: a genuine ABSENCE of
+      // local evidence, which is an empty map — never `null`, which this file reserves for the
+      // `git log` read itself failing.
       return new Map();
     }
     const localSlug = originUrl.replace(/\.git$/, "").replace(/^.*[:/]([^/]+\/[^/]+)$/, "$1");
@@ -3874,6 +3878,9 @@ export function buildCommitTrailerIndex(opts: {
     try {
       raw = exec(["log", ref, "--format=%H%x00%s%x00%b%x1e"]);
     } catch {
+      // The local commit surface could not be READ (no such ref, a shallow clone, a git that would
+      // not run). `null` is this file's "unreadable", kept distinct from the empty map above so a
+      // failed read is never mistaken for a repo that genuinely credits nothing (W1-T119).
       return null;
     }
     const out = new Map<string, PrRef[]>();
