@@ -1413,9 +1413,11 @@ function projectPlanOnce(
 
 // ── BLOCKERS BY CLASS derivation ────────────────────────────────────────────────────────────
 
-/** Every distinct task id the ledger has EVER dispatched — the circuit-broken class needs no
- *  plan at all, just the ledger's own `run.start` history (mirrors `dispatchesWithoutNewOwnedPr`'s
- *  own task-id-agnostic scan). */
+/** Every distinct task id the ledger has EVER dispatched — enumerated from just the ledger's own
+ *  `run.start` history (mirrors `dispatchesWithoutNewOwnedPr`'s own task-id-agnostic scan), no
+ *  plan needed for THIS step. W1-T2335: {@link deriveCircuitBrokenBlockers} itself now consults
+ *  the plan/projections it's given to skip a candidate dispatch will never take — see its own
+ *  doc — but this enumeration is unaffected and still needs neither. */
 function distinctDispatchedTaskIds(lines: Array<Record<string, unknown>>): string[] {
   const ids = new Set<string>();
   for (const line of lines) {
@@ -1482,10 +1484,27 @@ export function deriveDispatchCadence(lines: Array<Record<string, unknown>>): Di
   };
 }
 
-function deriveCircuitBrokenBlockers(lines: Array<Record<string, unknown>>): CircuitBrokenBlocker[] {
+/** W1-T2335: skips a task `isDispatchEligible` (drain.ts) has ALREADY refused two guards before
+ *  it ever reaches the breaker check — plan-declared `status: "blocked"` (:527, whether or not
+ *  it carries W1-T1287's `retirement:`) and a task the batched projection already credits
+ *  MERGED (:504), copying the identical skip {@link deriveIndeterminateBlockers} performs on
+ *  the very next lines rather than inventing a second one. Neither `plan` nor `projections` is
+ *  read to CHANGE any dispatch decision — `dispatchesWithoutNewOwnedPr`/`isDispatchBreakerTripped`
+ *  stay untouched, so the row RETURNS byte-identical the moment the task's status returns to a
+ *  dispatchable one. With no plan/no projections in hand (an unreadable plan or an unreachable
+ *  GitHub gateway) this renders exactly as it does today — degrading toward today, never toward
+ *  silence (design (iv)): the renderer cannot know a task is withdrawn without a plan to ask. */
+function deriveCircuitBrokenBlockers(
+  lines: Array<Record<string, unknown>>,
+  plan: Plan | undefined,
+  projections: Map<string, StatusProjection> | undefined,
+): CircuitBrokenBlocker[] {
   const out: CircuitBrokenBlocker[] = [];
   for (const taskId of distinctDispatchedTaskIds(lines)) {
     if (!isDispatchBreakerTripped(lines, taskId)) continue;
+    const planTask = plan?.tasks.find((t) => t.id === taskId);
+    if (planTask?.status === "blocked") continue; // dispatch will never take it — plan already excludes it
+    if (projections?.get(taskId)?.merged) continue; // landed since — no longer news (mirrors deriveIndeterminateBlockers)
     const dispatchCount = dispatchesWithoutNewOwnedPr(lines, taskId);
     out.push({
       kind: "circuit_broken",
@@ -1626,7 +1645,7 @@ function deriveBlockers(
   github: GitHub | undefined,
   limit: number,
 ): BlockersSection {
-  const circuitBroken = deriveCircuitBrokenBlockers(lines);
+  const circuitBroken = deriveCircuitBrokenBlockers(lines, plan, projections);
   const indeterminate = deriveIndeterminateBlockers(lines, projections);
   const retired = deriveRetiredBlockers(plan);
   let blockedPrs: BlockedPrBlocker[] = [];
