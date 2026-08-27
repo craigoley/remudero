@@ -1,0 +1,165 @@
+- id: W1-T2399
+  title: "ONE UNREADABLE BRANCH-PROTECTION READ ESCALATES EVERY CHECKS-GREEN PR IN THE PASS, AND TELLS THE OPERATOR THE OPPOSITE OF WHAT HAPPENED — `requiredContextsUnreadable` is the ONLY residual discriminator that can drop a `checks green, review none` PR to the terminal catch-all, the repo-wide read that sets it is made ONCE PER SWEEP PASS, its failure reason is thrown away inside a bare `catch`, and `observedBlockerState` then labels the PR ABSENT and asserts the required check has ZERO observed check runs — a claim about the PR's checks that the sweep never observed and that its own green `checksState` contradicts"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 45.00
+  files: [src/lib/status.ts, src/lib/sweep.ts, src/run-task.ts, test/protection-read-failure-is-named.test.ts]
+  origin: feedback#fb-repair-blocked-ambiguous-2955
+  plan_refs: ["§4", "§7B", "W1-T176", "W1-T186", "W1-T103", "W1-T2293"]
+  status: queued
+  attempts: 0
+  rationale: |
+    TRIGGER (verbatim, off `plan/feedback/fb-repair-blocked-ambiguous-2955.yaml`, itself read off each
+    PR's own `sweep.disposed` ledger row): the `blocked-ambiguous` surface was repaired for 4 distinct
+    PRs in the 7d window to 2026-08-27, and — unlike its rejected predecessor fb-2954, whose 20 PRs
+    wore SEVEN different reasons — all four rows carry ONE reason, character for character:
+    `not positively mergeable — checks green, review none — escalating`. #2286 at 758be10 and #2299 at
+    bd724cd share the IDENTICAL timestamp 2026-08-20T16:25:22.579Z (so: one pass, two PRs), with #2297
+    at 16:08:34.199Z and #2298 at 16:13:40.433Z — four escalations across at least three passes inside
+    a 17-minute band. The recurrence report states its own root cause is UNOBSERVED. This task supplies
+    it, and the derivation is mechanical rather than inferential.
+
+    (1) THE SHAPE HAS EXACTLY ONE REMAINING DISCRIMINATOR, BY EXHAUSTION OF THE TABLE. In
+    `DISPOSITION_RULES` (`src/lib/sweep.ts`) every row that can claim a PR with
+    `checksState === "green" && reviewState === "none"` carries the SAME guard —
+    `pr.requiredContextsUnreadable !== true`: the W1-T176 zero-runs/post-refused row, the W1-T225/W1-T1018
+    review-orphan-cap row, and the POST-REVIEW row that is supposed to catch this shape and run the
+    review lane. The terminal catch-all is `when: () => true` and renders
+    `not positively mergeable — checks ${pr.checksState}, review ${pr.reviewState} — escalating`. Every
+    earlier row that could preempt a green PR (superseded, stale, dependabot, pending-answer, strikes
+    exhausted, conflicted, mergeable) writes its OWN distinct reason, none of which is the observed
+    string. THEREFORE a PR reaching that catch-all at `green`/`none` implies
+    `requiredContextsUnreadable === true`. Not a hypothesis: there is no other path to that string at
+    that pair of states.
+
+    (2) AND THAT FLAG IS REPO-WIDE AND PER-PASS, WHICH IS THE FAN-OUT. `buildOpenPrViews`
+    (`src/run-task.ts`) reads the list ONCE for the whole sweep pass —
+    `(deps.requiredContexts ?? ghRequiredStatusCheckContexts)(owner, repo)`, with W1-T103's own comment
+    saying "read ONCE per repo for this whole sweep pass (never per-PR)" — and then stamps
+    `requiredContextsUnreadable: !requiredContexts || requiredContexts.length === 0` onto EVERY view it
+    builds. So a single failed `gh api` call does not block one PR: it marks every checks-green PR in
+    that pass at once, and each one opens its own operator question. Four issues, one fault. That is the
+    RECURRENCE MECHANISM the feedback is reporting, and it is structural, not a coincidence of timing.
+
+    (3) THE CAUSE IS DISCARDED AT THE POINT OF CAPTURE, SO NOTHING DOWNSTREAM CAN EVER NAME IT.
+    `ghRequiredStatusCheckContexts` (`src/lib/status.ts`) execs
+    `gh api repos/<owner>/<repo>/branches/main/protection/required_status_checks` with
+    `stdio: ["ignore", "pipe", "ignore"]` — stderr goes to the floor — and ends in a bare
+    `catch { return undefined; }`. It returns the SAME `undefined` for a rate-limited call, an
+    unprivileged token, `gh` absent, a network failure, AND for protection that genuinely declares no
+    required contexts. `run-task.ts` then collapses `undefined` and `[]` into ONE boolean. Two facts
+    with opposite remedies — "our credentials/quota broke, fix the reader" versus "this repo has no
+    required checks, fix the protection" — become one bit, and the bit has no reason attached.
+    `classifyGhFailure` already exists in this codebase and is imported by `run-task.ts` for exactly
+    this genre of triage; it is never applied to this read.
+
+    (4) THE ESCALATION THEN STATES SOMETHING AFFIRMATIVELY FALSE — THIS IS THE PART THAT COSTS AN
+    OPERATOR. `observedBlockerState` (`src/lib/sweep.ts`) ends with
+    `if (pr.checksState === "green" && pr.reviewState === "none") return "ABSENT";`, and
+    `renderObservedFacts` renders ABSENT as "the required check has ZERO observed check runs on head
+    <sha> — it has not started at all, not merely running slowly." On the unreadable path the sweep
+    never learned WHICH contexts are required, so it cannot have observed that any of them has zero
+    runs; `checksState` read GREEN on the same view. Beside it `mergeableFactLine` prints
+    `observed mergeable=true, mergeableState=clean` under a headline reading `not positively
+    mergeable`. The operator is handed a self-contradicting message pointing at the wrong subsystem —
+    they go looking at the PR's checks, which are fine, and the actual broken thing (a repo-level API
+    read) is never mentioned in any of the four issues.
+
+    (5) WHY THIS IS NOT AN EXISTING TASK, STATED AS A TEST. W1-T186 ("an escalation must name the
+    observed blocker") is BUILT IN SOURCE — `mergeable`/`mergeableState` are on `OpenPrView`,
+    `observedBlockerState` and `renderObservedFacts` exist, and the four named states are CONFLICTED /
+    FAILING / ABSENT / PENDING (its shard still reads `status: queued`, which is a separate bookkeeping
+    matter and NOT this task's business). Its table is closed over the CHECKS axis, and this shape has
+    green checks; W1-T186's own ABSENT branch is the branch that produces the false sentence in (4). So
+    a build satisfying all five of W1-T186's proofs leaves this defect intact — that is the test.
+    W1-T176 owns WHEN this escalates and is UNTOUCHED here (see note (i)). W1-T2293 names "an
+    unreadable required-contexts read" only as a sibling instance of "this reason is about US, not the
+    diff", and its `files:`/acceptance are entirely the FIX RUNG's `FIX_MODE_RULES` router in
+    `run-task.ts` — a different table, a different rung, no overlap with the sweep's disposition
+    reason. CITED, NOT WAITED ON: neither ordering blocks the other.
+  design: |
+    PRESERVE THE CAUSE WHERE IT IS THROWN AWAY. `ghRequiredStatusCheckContexts` must return, alongside
+    the contexts, WHY it has none — at minimum distinguishing (a) the call failed, with a classified
+    cause (`classifyGhFailure` is already imported in `run-task.ts` and is the existing vocabulary; do
+    not invent a second one), from (b) the call succeeded and protection declares no required contexts.
+    Keep it FAIL-SOFT: it must still never throw and never crash a sweep pass. Existing callers that
+    want only the list must keep compiling — a widened return that breaks `checksStateFromRollup`'s
+    caller is a redesign this task does not authorise.
+
+    CARRY IT, DO NOT RE-DERIVE IT. `buildOpenPrViews` already stamps `requiredContextsUnreadable` per
+    view off the one repo-level read; carry the cause the same way, in the SAME object literal (PR
+    #1083's producer-completeness test anchors on that literal, and W1-T225's comment says so). No
+    second GitHub call: this is the pass's existing read, kept instead of dropped.
+
+    THEN STOP THE FALSE SENTENCE AND SAY THE TRUE ONE. `observedBlockerState` must not answer ABSENT
+    for a view whose required-contexts read was unreadable — the sweep has no ground for a claim about
+    that PR's check runs. Name the real state instead, and have `renderObservedFacts` say what was
+    observed: the repo-wide required-contexts read for `<owner>/<repo>` on `<branch>` could not be read
+    this pass, with the classified cause, and the remedy is about the READER (token scope, rate limit,
+    `gh` availability) or the PROTECTION, never about this PR's diff or its checks. The terminal
+    catch-all's reason string must likewise stop rendering only `checks X, review Y` for this shape.
+
+    RECOGNITION IS STRUCTURAL, NEVER A PROSE MATCH. Key on the carried flag and cause, never on
+    grepping a rendered message — W1-T2293 note (vii) is the standing form of this rule and the reason
+    it is repeated here.
+
+    EXPLICITLY NOT IN SCOPE, AND EACH FOR A STATED REASON. (a) CHANGING THE DISPOSITION — see note (i).
+    (b) COLLAPSING THE FAN-OUT: whether one repo-wide fault should raise ONE escalation for the pass
+    rather than one per PR is a real question — MASTER-PLAN design rule 8 already counts an
+    infrastructure event ONCE however many labels it wears — but it is a change to escalation VOLUME
+    with its own blast radius, it interacts with W1-T514's dedup key, and it should be decided when the
+    fault is finally observable rather than in the same breath that makes it observable. Filed as a
+    named follow-on, not smuggled in here. (c) RETRYING the protection read, adding a cache, or holding
+    a last-known-good list: each is a way of ACTING on the fault; this task makes the fault legible and
+    stops there.
+  acceptance:
+    - claim: "a checks-green, review-none PR whose required-contexts read was unreadable is never labelled ABSENT, and its escalation never claims the required check has zero observed check runs"
+      proof: "unit test: test/protection-read-failure-is-named.test.ts"
+    - claim: "that escalation names the repo-wide required-contexts read as the observed blocker, including the branch it could not read"
+      proof: "unit test: test/protection-read-failure-is-named.test.ts"
+    - claim: "a required-contexts read that FAILED is distinguishable from protection that declares no required contexts — the producer no longer collapses both into one boolean"
+      proof: "unit test: test/protection-read-failure-is-named.test.ts"
+    - claim: "the classified cause is captured where the read happens and reaches the disposition view without a second GitHub call"
+      proof: "unit test: test/protection-read-failure-is-named.test.ts"
+    - claim: "the disposition is unchanged: an unreadable gate still escalates, and nothing posts a review or arms auto-merge on it"
+      proof: "unit test: test/protection-read-failure-is-named.test.ts"
+    - claim: "a readable required-contexts read still routes a checks-green, review-none PR to the review lane exactly as today"
+      proof: "unit test: test/protection-read-failure-is-named.test.ts"
+    - claim: "the read still fails soft — a throwing or absent gh never crashes the sweep pass"
+      proof: "unit test: test/protection-read-failure-is-named.test.ts"
+  note: |
+    (i) W1-T176 BOUNDARY (ii) IS NOT REOPENED, AND MUST NOT BE. That task settled, at risk:high, that
+    an unreadable gate classifies AMBIGUOUS and ESCALATES — "an unreadable gate must never be assumed
+    permissive" — and this task keeps that verbatim. Nothing here posts a review, arms a merge, or
+    downgrades the shape to `wait`. What is unsettled, and all this task claims, is WHAT THE
+    ESCALATION SAYS: W1-T176 wrote the fail-closed rule and never wrote the sentence, so the fallback
+    sentence is the generic catch-all — and W1-T186's ABSENT branch then fills the silence with a claim
+    that is false for this cause. A build that "fixes" this by no longer escalating has rebuilt the
+    exact fail-open hole W1-T176 was filed to close.
+
+    (ii) THE FEEDBACK'S OWN LIMIT IS RESPECTED. fb-2955 reports a RECURRENCE and states its root cause
+    is unobserved; it is not evidence for a remedy. What is cited above as OBSERVED is only the four
+    ledger rows and their timestamps. Everything else is re-derived from source in this working tree
+    and stated as such — the 17-minute band is consistent with a bounded read outage and is NOT claimed
+    as proof of one, because the cause is precisely the thing the code currently discards. Once (3)
+    ships, the next occurrence names its own cause and no one has to reason like this again.
+
+    (iii) AND THE SIBLING FEEDBACK IS WHY THIS ONE IS ACTIONABLE. fb-2954 covered the same surface and
+    was REJECTED, correctly: its 20 PRs wore seven different reasons, so "blocked-ambiguous recurs" was
+    a surface-level count with no single defect under it. fb-2955 is homogeneous — one reason, one
+    shape, one discriminator — which is what makes a filing possible here and was not possible there.
+    A future heterogeneous recurrence on this surface should still be rejected on the same grounds.
+
+    (iv) RULE 19 BAND. `risk: high` is set UP FRONT because `files:` spans three source stems — the
+    reader (`status.ts`), the producer (`run-task.ts`) and the renderer (`sweep.ts`) — and Rule 19
+    refuses ≥2 subsystems below high. THE BAND IS THE SPAN READING, NOT A BLAST-RADIUS JUDGEMENT: no
+    disposition changes, no new GitHub call, and the behavioural surface is one predicate plus the text
+    it selects. The span is irreducible — the fact is destroyed in the reader, so it cannot be named in
+    the renderer without crossing both.
+
+    (v) NO depends_on. W1-T186's build is already in source, W1-T176's rule is already enforced, and
+    W1-T2293 is a different router; nothing here waits on any of them.
