@@ -4104,7 +4104,9 @@ test("W1-T528: the failure classifier separates a conflict from an ordinary erro
  * These tests used to read `deps.escalated.length` as a proxy for "the bound tripped". That proxy
  * died with the `deps.escalate()` call W1-T2345's own rationale refused ("a second queue nobody
  * drains is not an answer"); the row is what `digest.ts` reads (#3085). The counter's behaviour —
- * bound, (disposition, head_sha) key, head reset, once-per-head — is unchanged and still pinned.
+ * bound, (disposition, head_sha) key, head reset, once-per-head-per-rotation-window — is unchanged
+ * and still pinned. W1-T2382 corrected that last term: it was written "once-per-head" here and the
+ * storage layer does not provide that. See `SweepPolicy.repeatDispositionBound`'s own doc.
  *
  * `fakeDeps` wires no `log`, so `deps.log ?? (() => {})` swallows the row: a test that asserted on
  * the ledger FILE without wiring one would read 0 and pass for the wrong reason. This collector is
@@ -4192,6 +4194,15 @@ test("W1-T2345: the bound keys on the verdict and the head, never the rendered r
   assert.equal(deps.escalated.length, 0, "W1-T2381: and it opens no issue doing so");
 });
 
+// ⚠ W1-T2382 — THIS TITLE STATES A GUARANTEE THE STORAGE LAYER DOES NOT PROVIDE, AND IT IS LEFT
+// UNCHANGED DELIBERATELY: W1-T2345's own merged shard cites it verbatim as a `unit test:` proof, so
+// renaming it would break a merged task's proof to fix a comment. What the test actually pins is
+// narrower and still true — WITHIN ONE ROTATION WINDOW the escalation fires once and the later
+// passes stay quiet. Every pass below runs against a single `shared` ledger file that is never
+// rotated, which is exactly why it passes and exactly why it cannot see the defect. Once the live
+// file rotates, `rotateLedger`'s PASS 3 keeps the last `acted: true` row per `pr@head` and the
+// trip's flag rides an `acted: false` row, so the fold reads a fresh run of length 1 and the bound
+// re-arms — MEASURED on #3025 (188 then exactly 50) and #3039 (106 then 50).
 test("W1-T2345: the escalation is emitted once per trip and not repeated while the head is unchanged", async () => {
   const shared = ledgerPath();
   const target = mergeablePr();
