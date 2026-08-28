@@ -5019,13 +5019,34 @@ function runPrewarmChannelsSync(req: PrewarmWorkerRequest): PrewarmWorkerRespons
   return response;
 }
 
+/**
+ * THE WORKER BRANCH's whole body, as a named function rather than an inline statement.
+ *
+ * EXTRACTED FOR COVERAGE, AND THE EXEMPTION ROUTE IS CLOSED BY DESIGN. Node's
+ * `--experimental-test-coverage` instruments the PARENT only, so a statement that runs solely
+ * inside a spawned `Worker` records `DA:<line>,0` however many real workers the suite spawns —
+ * measured, this line read 0 while its own `if` above read 703. `// diff-cov: process-boundary`
+ * cannot cover it either: `scripts/diff-coverage.mjs` refuses that directive unless the guarded
+ * declaration contains `spawnSync`/`execFileSync(process.execPath …)`/`process.exit`, in as many
+ * words — "the directive may only exempt re-exec/exit glue" — and a `postMessage` is none of
+ * those. So the line earns real coverage instead: the main thread can call this directly with a
+ * stand-in port, which is exactly what `test/board-prewarm-does-not-block.test.ts` does.
+ *
+ * The guard below stays a ONE-LINE `if` on purpose: the statement line is then executed (and so
+ * covered) on every main-thread load while its body still never runs there.
+ */
+export function postPrewarmWorkerResponse(
+  port: { postMessage: (value: unknown) => void } | null,
+  req: PrewarmWorkerRequest,
+): void {
+  port?.postMessage(runPrewarmChannelsSync(req));
+}
+
 // THE WORKER BRANCH ITSELF. Only reachable inside a worker thread this module's own
 // `runPrewarmWorker` (below) spawned with `workerData.kind === BOARD_PREWARM_WORKER_KIND` — a
 // worker spawned any other way (there are none in this codebase) or the normal main-thread load
 // both leave this untouched.
-if (!isMainThread && isPrewarmWorkerRequest(workerData)) {
-  parentPort?.postMessage(runPrewarmChannelsSync(workerData));
-}
+if (!isMainThread && isPrewarmWorkerRequest(workerData)) postPrewarmWorkerResponse(parentPort, workerData);
 
 export function buildBatchedGithub(
   owner: string,

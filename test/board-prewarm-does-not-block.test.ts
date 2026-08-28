@@ -29,7 +29,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { buildBatchedGithub, GH_CALL_TIMEOUT_MS, type GitHub } from "../src/lib/status.js";
+import { buildBatchedGithub, GH_CALL_TIMEOUT_MS, postPrewarmWorkerResponse, type GitHub } from "../src/lib/status.js";
 import { gatePrewarmOnClients, DEFAULT_BOARD_PREWARM_MS } from "../src/lib/serve.js";
 import type { SseRoute, SseSend } from "../src/lib/service.js";
 
@@ -332,4 +332,42 @@ test("W1-T2440 (review): a worker that exits without message or error does not w
     "in_flight",
     "a second warm after an exited worker must run — a still-set prewarmWorker makes every later warm a permanent no-op",
   );
+});
+
+// ── THE WORKER BRANCH's BODY, covered on the MAIN thread ─────────────────────────────────────
+//
+// WHY THIS TEST EXISTS AND WHY IT IS NOT THEATRE. Node's `--experimental-test-coverage`
+// instruments the PARENT process only, so the statement that runs inside the spawned `Worker`
+// records `DA:<line>,0` no matter how many real workers the tests above spawn — measured on this
+// branch, that line read 0 while its own `if` read 703, and `diff-coverage` BLOCKED on it. The
+// `// diff-cov: process-boundary` escape is refused here by design (`scripts/diff-coverage.mjs`
+// allows it only for `spawnSync`/`execFileSync(process.execPath …)`/`process.exit` glue), so the
+// body was extracted into `postPrewarmWorkerResponse` and is exercised directly instead of
+// exempted. The tests above still prove the REAL worker path end to end; this one proves the one
+// statement they cannot observe.
+test("W1-T2440: the worker branch's body posts a real response back through its port", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "prewarm-port-"));
+  const counterFile = join(dir, "calls");
+  const ghBin = writeFakeGh(dir, counterFile);
+  const posted: unknown[] = [];
+  postPrewarmWorkerResponse({ postMessage: (v) => void posted.push(v) }, {
+    kind: "remudero-board-prewarm-walk",
+    owner: "o",
+    repo: "r",
+    ghBin,
+    fetchOpen: true,
+    fetchMerged: false,
+    fetchIssues: false,
+  } as never);
+
+  assert.equal(posted.length, 1, "exactly one response must reach the port");
+  const msg = posted[0] as { open?: { ok: boolean; rows?: unknown[] } };
+  assert.ok(msg.open, "the channel this request asked for must be present in the response");
+  assert.equal(msg.open.ok, true, "the fake gh answers successfully, so the channel must classify ok");
+  assert.ok(Array.isArray(msg.open.rows), "and it must carry real rows, not an empty envelope");
+  // A NULL port is the shape `parentPort` really has on the main thread — it must not throw.
+  assert.doesNotThrow(() => postPrewarmWorkerResponse(null, {
+    kind: "remudero-board-prewarm-walk", owner: "o", repo: "r", ghBin,
+    fetchOpen: false, fetchMerged: false, fetchIssues: false,
+  } as never));
 });
