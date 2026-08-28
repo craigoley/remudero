@@ -382,6 +382,8 @@ function declaredLiterals(srcRoot: string, pattern: RegExp, keep: (name: string)
   try {
     files = tsFilesUnder(srcRoot);
   } catch {
+    // An unreadable/absent srcRoot degrades to "no declared names" — never throws (Shape 5's
+    // discipline: this report can never become the thing that blocks a merge).
     return [];
   }
   const found = new Map<string, string>();
@@ -390,6 +392,8 @@ function declaredLiterals(srcRoot: string, pattern: RegExp, keep: (name: string)
     try {
       src = readFileSync(file, "utf8");
     } catch {
+      // A file listed but unreadable by the time we get here (deleted/permissions mid-scan)
+      // contributes no literals — same degrade-not-throw discipline as the directory read above.
       continue;
     }
     const lines = src.split("\n");
@@ -416,6 +420,8 @@ function allFilesUnder(dir: string, acc: string[] = []): string[] {
   try {
     entries = readdirSync(dir);
   } catch {
+    // A missing/unreadable deploy dir degrades to "no files under it" — the deploy corpus is
+    // then decided by `env` alone, never a thrown error out of a report.
     return acc;
   }
   for (const entry of entries) {
@@ -424,6 +430,8 @@ function allFilesUnder(dir: string, acc: string[] = []): string[] {
     try {
       isDir = statSync(p).isDirectory();
     } catch {
+      // Entry vanished between readdir and stat (race with a concurrent write) — skip it, same
+      // best-effort discipline as the readdir degrade above.
       continue;
     }
     if (isDir) allFilesUnder(p, acc);
@@ -440,6 +448,8 @@ function deploySupplies(deployRoot: string | undefined, varName: string): boolea
     try {
       if (readFileSync(file, "utf8").includes(varName)) return true;
     } catch {
+      // Unreadable/binary file under the deploy tree — skip it and keep scanning the rest;
+      // one bad file must never erase the whole deploy-corpus reading.
       continue;
     }
   }
@@ -525,6 +535,8 @@ export function auditRuntimeAdoption(opts: RuntimeAdoptionOptions): RuntimeAdopt
       }
     }
   } catch (err) {
+    // A thrown ledger read carries the distinction forward as a `note` on every row below
+    // (never erased) — the caller sees UNMEASURED, not a silently-swallowed verified zero.
     ledgerNote =
       `ledger union read threw: ${err instanceof Error ? err.message : String(err)} — every ledger ` +
       `reading below is UNMEASURED, not a verified zero`;
