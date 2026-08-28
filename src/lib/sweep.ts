@@ -4471,6 +4471,27 @@ export interface SweepDeps {
    * lane serialized; it is the one lane safe to run alongside `runOne`.
    */
   actionable?: (d: Disposition) => boolean;
+  /**
+   * W1-T2426 — WHY {@link SweepDeps.actionable} REFUSED, when the caller can say.
+   *
+   * `actionable` is a PREDICATE: it returns `false` and carries no reason, so every disposition it
+   * gates records the one generic sentence "deferred to full sweep (light pass)". That is legible
+   * enough when the light pass is gating a lane it never runs, and NOT legible when the same
+   * sentence also covers a `post-review` that WAS eligible and merely lost this pass's single
+   * admission — the two are different events with the same row. MEASURED: 289 such rows across 18
+   * PRs, worst 98 on one PR, none of them naming which mechanism applied.
+   *
+   * Consulted ONLY when `actionable` has already refused, so it can never admit anything and
+   * cannot change a single disposition. Absent ⇒ the generic sentence, byte-identical to today —
+   * the same "no predicate ⇒ no opinion" default the rest of this seam set uses.
+   *
+   * ⚠ W1-T526's light-pass comment says its stand-down uses "the SAME … reason every other gated
+   * disposition already gets … never a new reason string". That was the right call when nothing
+   * distinguished the two events; W1-T2426's criterion 7 asks for the mechanism to be named, and
+   * this seam does it WITHOUT a new mechanism — the refusal is still `actionable`'s, and only the
+   * sentence recorded for it changes.
+   */
+  standDownReasonFor?: (d: Disposition) => string | undefined;
 
   /**
    * W1-T2379 — DO NOT AWAIT THE FIX RUNG'S CI WAIT. Set ONLY by {@link runSweepLightPass}, whose
@@ -5843,7 +5864,10 @@ export async function runSweep(
       // as of W1-T473.
       if (deps.actionable && !deps.actionable(disposition)) {
         acted = false;
-        standDownReason = "deferred to full sweep (light pass)";
+        // W1-T2426: the caller may name WHICH mechanism refused; absent, the generic sentence
+        // every gated disposition has always recorded, unchanged.
+        standDownReason =
+          deps.standDownReasonFor?.(disposition) ?? "deferred to full sweep (light pass)";
       } else {
         try {
           switch (disposition) {
@@ -6654,6 +6678,7 @@ export async function runSweepLightPass(
   return Promise.all(
     openPrs.map((pr) => {
       const baseActionable = deps.actionable;
+      const baseStandDownReasonFor = deps.standDownReasonFor;
       // W1-T2379: `detachFixWait` is set on EVERY forwarded shape, admitted or not — the tick this
       // pass runs inside is awaited whichever PR won the post-review admission, so the fix rung's
       // CI wait must leave the await on both branches or the defect survives on one of them.
@@ -6664,6 +6689,15 @@ export async function runSweepLightPass(
               ...deps,
               detachFixWait: true,
               actionable: (d) => (d === "post-review" ? false : baseActionable ? baseActionable(d) : true),
+              // W1-T2426 (criterion 7): name the mechanism, not just the fact. A `post-review`
+              // refused HERE was eligible and lost this pass's single admission — a different
+              // event from a lane the light pass never runs, and until now both wrote the same
+              // sentence. The bound itself is untouched: this records the refusal, never makes one.
+              standDownReasonFor: (d) =>
+                d === "post-review"
+                  ? "not admitted this pass: one post-review admission per light pass" +
+                    (admitted ? ` (#${admitted.prNumber} won it)` : "")
+                  : baseStandDownReasonFor?.(d),
             };
       return runSweep([pr], scopedDeps, policy);
     }),
@@ -6707,10 +6741,44 @@ export function selectReviewAdmission(
   policy: SweepPolicy,
   now: number,
 ): OpenPrView | undefined {
-  return oldestActivityFirst(
+  return oldestByKey(
     openPrs.filter((pr) => deriveDisposition(pr, policy, now).disposition === "post-review"),
     now,
+    reviewAdmissionKey,
   );
+}
+
+/**
+ * W1-T2426 — THE ADMISSION KEY, AND WHY IT IS NOT {@link OpenPrView.lastActivityAt}.
+ *
+ * {@link selectReviewAdmission}'s own doc above argues that oldest-first cannot starve because
+ * "a PR that loses this pass is STRICTLY OLDER next pass (nothing un-ages a head)". THAT PREMISE
+ * IS FALSE FOR THE WINNER. `lastActivityAt` is populated from the PR's `updatedAt`
+ * (`run-task.ts`'s `lastActivityAt: pr.updatedAt` and `lastActivityAt: raw.updatedAt`), and
+ * POSTING A VERDICT IS ITSELF AN UPDATE: measured across seven PRs carrying a `review.posted`
+ * row, GitHub's `updated_at` sits at or just after the post — +4s, +5s, +8s, +8s, +19s, +38s and
+ * +90s. So the act of reviewing resets the key of the PR it reviewed, and an oldest-first queue
+ * sorts that PR LAST. The loser is fine — it really is older next pass — but a PR whose review
+ * FAILED is thrown behind PRs that have waited strictly less time than it has, and it must win
+ * the whole queue again before it is re-attempted.
+ *
+ * THE ANSWER IS ALREADY IN THIS FILE. W1-T1218's {@link orderPendingReviews} ranks the review
+ * lane on `createdAt` and says in its own doc why: an IMMUTABLE key. That site is immune to this
+ * defect by that choice, and this one adopts it.
+ *
+ * THE FALLBACK CAN ONLY UNDER-RANK, NEVER OVER-RANK. {@link OpenPrView.createdAt} is OPTIONAL —
+ * both real producers populate it (`run-task.ts`, and `open-prs-rest.ts` when the row carries
+ * `created_at`), and it is optional only so fixtures and unwired producers stay valid. When it is
+ * absent or unparseable this falls back to `lastActivityAt`, and that direction is safe by
+ * construction: `updatedAt >= createdAt` for every PR, so a fallback candidate is scored YOUNGER
+ * than its true age and can only be passed over, never allowed to jump the queue. That is the
+ * same "fails toward not jumping the queue on state we cannot date" direction the comparator's
+ * own unreadable-age rule already takes.
+ */
+export function reviewAdmissionKey(pr: Pick<OpenPrView, "createdAt" | "lastActivityAt">): string {
+  const created = pr.createdAt;
+  if (created !== undefined && created !== "" && !Number.isNaN(Date.parse(created))) return created;
+  return pr.lastActivityAt;
 }
 
 /**
@@ -6727,10 +6795,35 @@ export function oldestActivityFirst<T extends { prNumber: number; lastActivityAt
   candidates: readonly T[],
   now: number,
 ): T | undefined {
+  return oldestByKey(candidates, now, (c) => c.lastActivityAt);
+}
+
+/**
+ * W1-T2426 — THE RANKING ITSELF, with the key it ranks on supplied by the caller.
+ *
+ * ONE IMPLEMENTATION, TWO KEYS — DELIBERATELY NOT TWO COMPARATORS. W1-T528's design note (iii),
+ * quoted in {@link oldestActivityFirst}'s doc above, required that the two rungs share an ordering
+ * "rather than shipping a second ordering that could silently disagree". Extracting the key rather
+ * than forking the comparator keeps that guarantee: the tie-break on ascending `prNumber`, the
+ * `-Infinity` treatment of an unparseable date, and the strict `>` that makes the FIRST maximal
+ * candidate win are all defined exactly once and cannot drift apart.
+ *
+ * {@link oldestActivityFirst} IS UNCHANGED IN BEHAVIOUR and remains the key W1-T528's
+ * `update-branch` selection consumes. That is not an oversight — see {@link reviewAdmissionKey}
+ * for why only the review-admission call site moves: for `update-branch`, `updatedAt` advancing
+ * when the branch is updated is the CORRECT ranking, because a just-updated branch should not be
+ * re-selected ahead of one that has waited; for `post-review` the same advance is pathological,
+ * because reviewing is not the work finishing, it is the work being attempted.
+ */
+function oldestByKey<T extends { prNumber: number }>(
+  candidates: readonly T[],
+  now: number,
+  keyOf: (candidate: T) => string,
+): T | undefined {
   let winner: T | undefined;
   let winnerAgeMs = -Infinity;
   for (const candidate of candidates) {
-    const pushedAt = Date.parse(candidate.lastActivityAt);
+    const pushedAt = Date.parse(keyOf(candidate));
     const ageMs = Number.isNaN(pushedAt) ? -Infinity : now - pushedAt;
     if (!winner || ageMs > winnerAgeMs || (ageMs === winnerAgeMs && candidate.prNumber < winner.prNumber)) {
       winner = candidate;
