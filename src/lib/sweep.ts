@@ -1477,6 +1477,50 @@ export interface CancelledRequiredCheck {
    * named no-op rather than guessing a target.
    */
   jobId?: string;
+  /**
+   * W1-T2431 — GitHub's OWN `run_attempt` for the workflow run this check belongs to, read off
+   * the SAME rollup {@link jobId} is already parsed from (no new gateway, no new credential —
+   * the rationale's Option A). This is a SURFACE the fleet does not write: it increments whether
+   * the re-run was fired by `deps.requeueCheck`'s own `actions/jobs/{job_id}/rerun` call OR by an
+   * operator running `gh run rerun --job` by hand, so — unlike a ledger row the fleet only writes
+   * about its own act — it counts an equivalent operator act too (rationale (2)/(4): 3 of 7
+   * measured re-runs carried no `sweep.check_requeued` ledger row anywhere in the union).
+   *
+   * `undefined` when the real gateway has not read it (see {@link cancelledCheckAlreadyRequeuedFromSurface}'s
+   * own doc for the fail-toward-no-positive-claim default) — SCOPE, mirroring how
+   * `workflowRuns`/`pendingAnswer` above shipped their mechanism ahead of their producer: this
+   * field, {@link cancelledCheckAlreadyRequeuedFromSurface}, and its `runSweep` call site are the
+   * full MECHANISM, wired end-to-end and unit-tested here, but `run-task.ts`'s
+   * `cancelledRequiredChecks` does not populate it yet. Until that producer wiring lands this is
+   * always `undefined` in the real gateway, so the ledger-derived half of the decision (below)
+   * keeps bounding the re-queue exactly as it does today — this is a WIDENING of the `true` case,
+   * never a replacement that could narrow it.
+   */
+  runAttempt?: number;
+}
+
+/**
+ * W1-T2431 — whether THIS check's run has already been re-run at least once, read off GitHub's
+ * own {@link CancelledRequiredCheck.runAttempt} rather than a ledger row the fleet wrote about
+ * its own re-queue action. `runAttempt` is GitHub's ground truth for the run, so it reads true
+ * for a re-run fired by ANY actor — the fleet's `requeueCheck` or an operator's `gh run rerun`
+ * — which is precisely the acting-party distinction a ledger keyed on the fleet's own write
+ * cannot make (this task's whole premise). It also closes rationale (6) for free: a value read
+ * fresh off GitHub every pass cannot be archived by `rotateLedger`, because it is not a ledger
+ * row at all — so the count the caller derives from it survives a rotation the ledger-only half
+ * would not.
+ *
+ * `undefined` or `<= 1` reads as "not yet re-run" — the SAME fail-toward-no-positive-claim
+ * direction {@link checksStateFromRollup} takes on an unreadable required-contexts list and
+ * {@link stalledRunReason} takes on an unreadable run listing: an unread/absent `runAttempt`
+ * must never MANUFACTURE a prior re-queue that did not happen, so a first cancellation with no
+ * real attempt history still re-queues exactly as it does today. Callers OR this with the
+ * ledger-derived reading ({@link requeuedCheckKeysFromLedger}) rather than substitute it — this
+ * only WIDENS which pairs read "already requeued", it never narrows the existing ledger-only
+ * guarantee.
+ */
+export function cancelledCheckAlreadyRequeuedFromSurface(runAttempt: number | undefined): boolean {
+  return typeof runAttempt === "number" && runAttempt > 1;
 }
 
 /**
@@ -6056,7 +6100,14 @@ export async function runSweep(
                 const outcomes: string[] = [];
                 for (const check of cancelledChecks) {
                   const key = `${pr.headSha}@${check.name}`;
-                  const decision = cancelledCheckRequeueDecision(requeuedCheckKeys.has(key));
+                  // W1-T2431: OR the ledger-derived reading with the surface-derived one — a
+                  // re-run this fleet ledgered OR one GitHub's own run_attempt shows already
+                  // happened (an operator's `gh run rerun`, invisible to the ledger alone) both
+                  // read "already requeued". See `cancelledCheckAlreadyRequeuedFromSurface`'s own
+                  // doc: this only widens the true case, the ledger-only guarantee is untouched.
+                  const decision = cancelledCheckRequeueDecision(
+                    requeuedCheckKeys.has(key) || cancelledCheckAlreadyRequeuedFromSurface(check.runAttempt),
+                  );
                   if (decision.requeue) {
                     // LEDGERED BEFORE THE CALL (design ii: "the attempt is LEDGERED BEFORE it
                     // can be repeated") — a crash between this write and the real GitHub call
