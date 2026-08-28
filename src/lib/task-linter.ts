@@ -87,6 +87,7 @@ export type LintCheck =
   | "post-merge-field-drift"
   | "post-merge-criterion-removed"
   | "post-merge-proof-changed"
+  | "post-merge-correction-without-prompt"
   | "provenance"
   | "call-site"
   | "monolith-filing"
@@ -1807,6 +1808,52 @@ export function criteriaProofChanged(
   return changed;
 }
 
+/** The phrase a rationale uses to record that a title-level claim was later falsified and
+ *  corrected (W1-T2438). `renderImplementPrompt` (run-task.ts) renders `task.prompt ??
+ *  task.title` — the frozen title, unconditionally, for every dispatched build (MEASURED: 0 of
+ *  681 shards on main declare `prompt:`) — so a correction recorded only in `rationale:` never
+ *  reaches a worker: `rationale` has no post-merge consumer on the dispatch path at all (see the
+ *  {@link REPORTED_MERGED_FIELDS} doc comment's own list of exclusions). Rule 21 permits the
+ *  correction to land in `rationale:` post-merge; it does NOT permit the title to change, so the
+ *  remedy is a place to put the correction the worker actually reads (`prompt:`), never a
+ *  relaxed freeze. A MARKER, not a free-text heuristic, for the same reason {@link
+ *  PARENT_SURVIVES_MARKER} is one: whether a rationale "records a correction" cannot be guessed
+ *  from prose, and an author who has actually recorded one can say so in one line. */
+export const RATIONALE_CORRECTION_MARKER = "CORRECTS TITLE:";
+
+/** Whether `task.rationale` states, via {@link RATIONALE_CORRECTION_MARKER}, that a title-level
+ *  claim was later falsified — the predicate {@link correctionWithoutPromptViolation} gates on.
+ *  Exported so a test can drive the marker directly, mirroring {@link parentDispositionStated}. */
+export function rationaleRecordsCorrection(task: Task): boolean {
+  return (task.rationale ?? "").includes(RATIONALE_CORRECTION_MARKER);
+}
+
+/** A task whose rationale records a correction ({@link rationaleRecordsCorrection}) but carries
+ *  no `prompt:` — the composition W1-T2438 exists to catch: the only field Rule 21 lets an
+ *  amendment change (`rationale:`) is not the field `renderImplementPrompt` reads, so the
+ *  correction is invisible to every dispatched build. REPORT ONLY, `severity: "warn"`, same
+ *  register as {@link mergedFieldChangeViolations}: this never blocks a merge and never writes a
+ *  `prompt:` for anyone — filling it in is the author's act, same as {@link
+ *  PARENT_SURVIVES_MARKER}'s disposition is never inferred. `task.prompt` present and non-blank
+ *  ⇒ no violation regardless of the marker, since the correction already reaches the worker.
+ *  Gates on NOTHING about the title's own text — a title carrying a count is not itself a
+ *  violation (195 of 950 legitimately do, per this task's own rationale); only a RECORDED,
+ *  marker-stated correction with no `prompt:` trips this. */
+export function correctionWithoutPromptViolation(task: Task): LintViolation | undefined {
+  if (!rationaleRecordsCorrection(task)) return undefined;
+  if (task.prompt && task.prompt.trim()) return undefined;
+  return {
+    check: "post-merge-correction-without-prompt",
+    severity: "warn",
+    message:
+      `task ${task.id} is already MERGED and its rationale records a correction (carries ` +
+      `"${RATIONALE_CORRECTION_MARKER}") but declares no \`prompt:\` — \`renderImplementPrompt\` ` +
+      "(run-task.ts) renders `task.prompt ?? task.title`, so a dispatched build reads only the " +
+      "frozen title and never sees this correction. The title stays frozen (Rule 21); add a " +
+      "`prompt:` carrying the corrected brief instead.",
+  };
+}
+
 /** Every acceptance criterion this PR adds or changes on an ALREADY-MERGED
  *  task, absent a follow-up task in the same PR to carry it. No {@link
  *  LintOpts.postMergeAmendment} at all ⇒ this check is skipped entirely (the
@@ -1820,7 +1867,11 @@ export function criteriaProofChanged(
  *  to the criteria-orphaning harm the BLOCK exists to prevent, and a warning
  *  never blocks a merge regardless, so there is nothing for it to escape. See
  *  {@link mergedFieldChangeViolations}, {@link criteriaRemoved} and {@link
- *  criteriaProofChanged} for what each reports and why it stays a report. */
+ *  criteriaProofChanged} for what each reports and why it stays a report.
+ *  W1-T2438 adds a FOURTH report under the same three early exits, gated on
+ *  `ctx.merged`/`ctx.statusResolvable` exactly like the other three but reading
+ *  no diff at all (unlike the three above, it is not comparing against
+ *  `baseTask`/`baseAcceptance` — see {@link correctionWithoutPromptViolation}). */
 export function postMergeAmendmentViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
   const ctx = opts.postMergeAmendment;
   if (!ctx) return [];
@@ -1893,6 +1944,10 @@ export function postMergeAmendmentViolations(task: Task, opts: LintOpts = {}): L
         "reported here.",
     })),
   );
+  // W1-T2438: the frozen title is the only field renderImplementPrompt reads, so a correction
+  // Rule 21 permits in `rationale:` reaches no dispatched build until it also lands in `prompt:`.
+  const correction = correctionWithoutPromptViolation(task);
+  if (correction) violations.push(correction);
   return violations;
 }
 
