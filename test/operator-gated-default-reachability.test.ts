@@ -417,10 +417,27 @@ function findTestCallSites(entryNames: ReadonlySet<string>): TestCallSite[] {
 // ── PART 4: the exclusion set — a REASON is the sole authority, never a boolean ─────────────────
 //
 // Design clause (ii), the `INSTRUMENT_SURFACE_EXCLUSIONS` precedent applied to this population:
-// a candidate stays REPORTED unless its key carries a non-blank reason here. Empty today —
-// nothing has ever been reasoned about this population before this file existed, so every
-// candidate the real-tree tests below find is, correctly, unexcused.
-const REACHABILITY_EXCLUSIONS: Readonly<Record<string, string>> = {};
+// a candidate stays REPORTED unless its key carries a non-blank reason here.
+//
+// W1-T2347 added the first entries: every one names a call site in its own
+// test/arm-seam-default-is-opt-in.test.ts that deliberately omits `deps` (or a family seam field)
+// to PROVE requireExplicitArmSeam (src/run-task.ts) refuses the omission under the node test
+// runner, before `realArmDeps()`'s own fields are ever touched — the opposite of the silent,
+// forgotten-seam reach this population exists to name. None of these ever runs a live effect.
+const ARM_SEAM_TEST_REASON =
+  "test/arm-seam-default-is-opt-in.test.ts (W1-T2347) deliberately omits the seam here to prove " +
+  "requireExplicitArmSeam refuses before realArmDeps() is ever touched — never reaches a live effect.";
+const REACHABILITY_EXCLUSIONS: Readonly<Record<string, string>> = {
+  // LEVEL-1 omitted-`deps` call sites (the first real-tree test below).
+  "armAutoMerge:test/arm-seam-default-is-opt-in.test.ts:77": ARM_SEAM_TEST_REASON,
+  "armAutoMergeDetailed:test/arm-seam-default-is-opt-in.test.ts:60": ARM_SEAM_TEST_REASON,
+  "armAutoMergeDetailed:test/arm-seam-default-is-opt-in.test.ts:175": ARM_SEAM_TEST_REASON,
+  "armAutoMergeDetailed:test/arm-seam-default-is-opt-in.test.ts:259": ARM_SEAM_TEST_REASON,
+  "armAutoMergeDetailed:test/arm-seam-default-is-opt-in.test.ts:278": ARM_SEAM_TEST_REASON,
+  "armAutoMergeDetailed:test/arm-seam-default-is-opt-in.test.ts:312": ARM_SEAM_TEST_REASON,
+  "armAutoMergeAtOpen:test/arm-seam-default-is-opt-in.test.ts:84": ARM_SEAM_TEST_REASON,
+  "armAutoMergeAtOpen:test/arm-seam-default-is-opt-in.test.ts:97": ARM_SEAM_TEST_REASON,
+};
 
 function findUnexplainedReach<T extends { key: string }>(candidates: readonly T[], exclusions: Readonly<Record<string, string>>): T[] {
   return candidates.filter((c) => {
@@ -645,7 +662,7 @@ test("real tree: withdrawArmIfVerdictRefuses is ALSO derived as family, via its 
   assert.deepEqual(REAL.familyFields.get("withdrawArmIfVerdictRefuses")!.get("disarm"), { kind: "chain", target: "disarmAutoMerge" });
 });
 
-test("real tree: no test/ call site of a LEVEL-1 entry point (armAutoMerge/armAutoMergeDetailed/armAutoMergeAtOpen/disarmAutoMerge) omits the deps argument today", () => {
+test("real tree: no UNEXCUSED test/ call site of a LEVEL-1 entry point (armAutoMerge/armAutoMergeDetailed/armAutoMergeAtOpen/disarmAutoMerge) omits the deps argument today", () => {
   const sites = findTestCallSites(REAL.level1Names);
   assert.ok(sites.length > 10, "sanity: real call sites were actually found, not running vacuously");
   const depsIndexByName = new Map([...REAL.level1Names].map((name) => {
@@ -654,11 +671,21 @@ test("real tree: no test/ call site of a LEVEL-1 entry point (armAutoMerge/armAu
     const fn = fns.find((f) => f.exported && f.name === name && /=\s*realArmDeps\s*\(\s*\)/.test(f.paramsText));
     return [name, fn ? depsParamIndex(fn.paramsText) : -1] as const;
   }));
-  const gaps = sites.filter((s) => positionalDepsOmitted(s.argTexts, depsIndexByName.get(s.name) ?? -1));
+  const gaps = sites
+    .filter((s) => positionalDepsOmitted(s.argTexts, depsIndexByName.get(s.name) ?? -1))
+    .map((s) => ({ key: `${s.name}:${s.file}:${s.line}`, file: s.file, line: s.line }));
+  // W1-T2347 (design clause ii, same discipline the family-field exclusions below already use):
+  // an omission is EXCUSED only with a substantive, non-blank reason in REACHABILITY_EXCLUSIONS —
+  // never merely because it exists. The only entries excused today are
+  // test/arm-seam-default-is-opt-in.test.ts's OWN — that file exists specifically to prove
+  // requireExplicitArmSeam refuses these exact omissions, so omitting `deps` there is the point
+  // of the test, not a forgotten seam; every one of them throws before realArmDeps() is ever
+  // read from (see that file's own acceptance-1 tests).
+  const reported = findUnexplainedReach(gaps, REACHABILITY_EXCLUSIONS);
   assert.deepEqual(
-    gaps.map((g) => `${g.file}:${g.line}`),
+    reported.map((g) => `${g.file}:${g.line}`),
     [],
-    "a positional deps argument was omitted at one of these call sites — it now reaches realArmDeps() for real",
+    "a positional deps argument was omitted at one of these call sites, unexcused — it now reaches realArmDeps() for real",
   );
 });
 
@@ -690,10 +717,15 @@ test("real tree: armIfVerdictPermits/withdrawArmIfVerdictRefuses call sites that
   // (rationale (2)'s third bullet) regardless of whether its fixture's verdict ever arms for
   // real — this file over-approximates in the SAFE direction, exactly like
   // `test/clock-sweep-effect-completeness.test.ts`'s own documented choice.
+  // W1-T2347 landed a fix in between the census and this re-derivation, adding lines ahead of
+  // these two in test/run-task.test.ts (a withLiveWritesAllowed wrap for an unrelated, pre-
+  // existing deliberate real-dependency fixture) — the task's own note said to re-derive before
+  // trusting this list, and re-deriving is exactly how these two shifted from :5885/:5946 to
+  // :5891/:5952. The THIRD witness (arm-ordering.test.ts) is untouched by that edit and unmoved.
   const expectedKeys = [
     "armIfVerdictPermits:test/arm-ordering.test.ts:63:ledgerLines",
-    "armIfVerdictPermits:test/run-task.test.ts:5885:ledgerLines",
-    "armIfVerdictPermits:test/run-task.test.ts:5946:ledgerLines",
+    "armIfVerdictPermits:test/run-task.test.ts:5891:ledgerLines",
+    "armIfVerdictPermits:test/run-task.test.ts:5952:ledgerLines",
   ];
   for (const key of expectedKeys) {
     assert.ok(

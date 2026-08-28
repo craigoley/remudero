@@ -806,7 +806,12 @@ import {
   type FailureSignal,
 } from "./lib/classify.js";
 import { shouldRecordDecision, reversibilityFactor, type DiffFileChange } from "./lib/risk-score.js";
-import { assertLiveWriteAllowed } from "./lib/live-write-guard.js";
+import {
+  assertLiveWriteAllowed,
+  isTestRunner,
+  liveWritesExempt,
+  LIVE_WRITE_OVERRIDE_ENV,
+} from "./lib/live-write-guard.js";
 import {
   checkSharedPause,
   clearKick,
@@ -1740,10 +1745,31 @@ export function appendTaskTrailerToCommit(worktreePath: string, taskId: string):
  * call: a resumed process recovers the SAME decision from nothing but the
  * ledger + the live head (acceptance criterion 3), never from memory.
  */
+/**
+ * W1-T2347 — a hidden marker {@link realArmDeps} stamps onto every object it returns, so the four
+ * `deps: ArmDeps = realArmDeps()`-shaped entry points can tell "the caller omitted `deps` (or
+ * explicitly forwarded the real one)" apart from "the caller supplied its own seam" WITHOUT
+ * changing any of their signatures — the census (test/operator-gated-default-reachability.test.ts,
+ * W1-T2346) derives its LEVEL-1 population by matching that exact `= realArmDeps()` parameter-text
+ * shape, and a signature change (e.g. `deps?: ArmDeps` + manual resolution) would have silently
+ * broken that regression pin. A `unique symbol` computed key is invisible to the census's own
+ * text-scan (it only recognises a leading-identifier `key:`, never a computed `[symbol]:`), so
+ * `realArmDeps()`'s own field-by-field classification is unaffected too.
+ */
+const REAL_ARM_DEPS_MARKER: unique symbol = Symbol("run-task.realArmDeps");
+
+/** True only for an object {@link realArmDeps} itself returned — never for a hand-built fixture,
+ *  however complete, since no test has any reason to stamp this symbol onto one. */
+function isRealArmDepsObject(deps: unknown): boolean {
+  return typeof deps === "object" && deps !== null && (deps as Record<PropertyKey, unknown>)[REAL_ARM_DEPS_MARKER] === true;
+}
+
 /** Injectable side effects for {@link armAutoMerge} — exported so a behavioral
  * test drives EVERY branch (incl. the clean-status direct-merge fallback) with
  * fakes; the real defaults are the same gh calls the function always made. */
 export interface ArmDeps {
+  /** W1-T2347 — see {@link REAL_ARM_DEPS_MARKER}'s own doc. Optional and never set by a fixture. */
+  [REAL_ARM_DEPS_MARKER]?: true;
   /** The PR's live head sha — read over REST via {@link readHeadShaRest}, never `gh --json`. */
   headSha: (prUrl: string) => string;
   /** The ledger lines the W1-T230 verdict gate reads. */
@@ -1849,6 +1875,71 @@ export function isPrMergedNow(prUrl: string, fetch: GhApiFetcher = ghJson): bool
   }
 }
 
+/**
+ * W1-T2347 — thrown by {@link requireExplicitArmSeam} rather than returning a sentinel: a
+ * swallowed refusal would read as "the arm did nothing for some other reason", the same
+ * false-confidence failure {@link LiveWriteBlockedError} (lib/live-write-guard.ts) already
+ * argues against for the write leaves this complements.
+ */
+export class ArmSeamRequiredError extends Error {
+  override name = "ArmSeamRequiredError";
+  constructor(entryPoint: string) {
+    super(
+      `run-task: REFUSED to reach ${entryPoint}'s production arm dependency (realArmDeps()) under ` +
+        `the node test runner — no seam was supplied. Reaching it performs a live REST head read ` +
+        `and reads this machine's own config/ledger, unmocked, BEFORE the live-write guard's own ` +
+        `write-leaf fence (assertLiveWriteAllowed) is ever consulted. Supply the seam this test ` +
+        `needs — an \`arm\`/\`disarm\` override, or a narrowed ArmDeps passed to ${entryPoint} ` +
+        `directly — or, if this suite deliberately drives the real dependency against its own ` +
+        `containment, wrap that section in withLiveWritesAllowed(() => …) or set ` +
+        `${LIVE_WRITE_OVERRIDE_ENV}=1 (both from src/lib/live-write-guard.ts).`,
+    );
+  }
+}
+
+/**
+ * W1-T2347 — REACHING THE REAL AUTO-MERGE ARM FROM A TEST IS OPT-OUT RATHER THAN OPT-IN.
+ * `deps.arm ?? armAutoMergeDetailed` (armIfVerdictPermits) and its three siblings each defaulted
+ * a whole `deps: ArmDeps = realArmDeps()` parameter, so a fixture that merely forgot to inject a
+ * seam was silently wired to the PRODUCTION dependency rather than left unwired — recon-AQ found
+ * this the hard way (see live-write-guard.ts's own incident header) and W1-T2346's census named
+ * the population, unexcused. This closes it the NARROW way the task's own design settles on: the
+ * requirement is gated on {@link isTestRunner}, so a daemon/operator/CI process that is not
+ * `node --test` calls this and returns immediately — production wiring never moves.
+ *
+ * CONSULTED AS EACH ENTRY POINT'S FIRST STATEMENT — before the `!taskId` short-circuit, before
+ * `deps.headSha`, before `deps.ledgerLines()`, before anything else. `realArmDeps()` itself is
+ * inert (it only builds closures; no dep call inside it performs I/O until invoked LATER), so
+ * whether it already ran as part of resolving a defaulted `deps` parameter is safe — what matters
+ * is that this throws before any of ITS FIELDS is ever called. `seamSupplied` is computed by the
+ * caller via {@link isRealArmDepsObject} (a hidden marker `realArmDeps()` stamps onto its own
+ * return value — see that symbol's own doc): this is what lets every one of the four entry points
+ * KEEP its exact original `deps: ArmDeps = realArmDeps()` parameter shape, which is the same
+ * shape W1-T2346's census (test/operator-gated-default-reachability.test.ts) derives its LEVEL-1
+ * population from — an `deps?: ArmDeps` signature change here would have silently broken that
+ * regression pin instead of extending it.
+ *
+ * TWO WAYS OUT, both already established call sites and each with its own test in
+ * `test/arm-seam-default-is-opt-in.test.ts`: supply an explicit seam (any `deps` argument that is
+ * NOT the object `realArmDeps()` itself returned — an `arm`/`disarm` override, or a narrowed
+ * `ArmDeps` — the SAME injectable seam every arm entry point already exists for); or wrap the
+ * section that deliberately drives the real dependency in `withLiveWritesAllowed` /
+ * `RMD_ALLOW_LIVE_WRITES=1`, the live-write guard's own per-test/per-process opt-outs. No third
+ * escape hatch is added, and no by-name allowlist of suites — W1-T1206 rationale 6 names why a
+ * by-name set fails OPEN the moment a file is added.
+ */
+export function requireExplicitArmSeam(
+  entryPoint: string,
+  seamSupplied: boolean,
+  env: NodeJS.ProcessEnv = process.env,
+): void {
+  if (seamSupplied) return;
+  if (!isTestRunner(env)) return;
+  if (env[LIVE_WRITE_OVERRIDE_ENV] === "1") return;
+  if (liveWritesExempt()) return;
+  throw new ArmSeamRequiredError(entryPoint);
+}
+
 export function realArmDeps(
   // W1-T1000002: INJECTABLE, appended as the only parameter, the same convention `reviewRunner`/
   // `spawnImpl`/`disarmImpl` already follow in `buildSweepEffects`. The `[]`-on-failure contract
@@ -1858,6 +1949,10 @@ export function realArmDeps(
   loadConfigImpl: typeof loadConfig = loadConfig,
 ): ArmDeps {
   return {
+    // W1-T2347: see REAL_ARM_DEPS_MARKER's own doc — a computed-symbol key, deliberately, so the
+    // census's `^([A-Za-z0-9_]+)\s*:` field-name regex never matches it and this stays invisible
+    // to that derivation.
+    [REAL_ARM_DEPS_MARKER]: true,
     headSha: (prUrl) => readHeadShaRest(prUrl),
     // W1-T1000002: `attemptArm` calls this thunk on EVERY arm, so a host that cannot resolve a
     // config would turn arming into a crash. `loadConfig` does far more than yield a root — it
@@ -1967,6 +2062,10 @@ export function armAutoMerge(
   taskId: string | undefined,
   deps: ArmDeps = realArmDeps(),
 ): ArmOutcome {
+  // W1-T2347: no guard call of its own — this is a thin forward, and whatever it hands
+  // armAutoMergeDetailed (the real default when `deps` was omitted here, or an explicit seam)
+  // is exactly what that function's OWN requireExplicitArmSeam check (via REAL_ARM_DEPS_MARKER)
+  // sees and rules on. Two guard calls for one omission would be a second copy of the same rule.
   return armAutoMergeDetailed(prUrl, taskId, deps).outcome;
 }
 
@@ -1984,6 +2083,11 @@ export function armAutoMergeDetailed(
   taskId: string | undefined,
   deps: ArmDeps = realArmDeps(),
 ): ArmAttemptResult {
+  // W1-T2347: consulted BEFORE any dep on `deps` is invoked — see requireExplicitArmSeam's own
+  // doc for why this must precede even the `!taskId` short-circuit below, and REAL_ARM_DEPS_
+  // MARKER's doc for why the parameter keeps its original `= realArmDeps()` default text rather
+  // than becoming `deps?: ArmDeps` (the census's own population derivation matches that shape).
+  requireExplicitArmSeam("armAutoMergeDetailed", !isRealArmDepsObject(deps));
   if (!taskId) {
     deps.say(`automerge.ledger_refused (W1-T230): no task id resolvable for this PR — arming withheld: ${prUrl}`);
     return { outcome: "no-task-id" };
@@ -2330,6 +2434,13 @@ export function armAutoMergeAtOpen(
   deps: (Pick<ArmDeps, "armAuto" | "mergeDirect" | "isMerged" | "say"> & Partial<Pick<ArmDeps, "ledgerLines" | "readMergeFacts" | "sleepSync">>) = realArmDeps(),
   irreversible = false,
 ): ArmOutcome {
+  // W1-T2347: this is one of the four `deps: ArmDeps = realArmDeps()`-shaped LEVEL-1 sites the
+  // task's rationale names, gated for the SAME reason as its three siblings: it reaches
+  // `realArmDeps()` by the identical shape, and design note (vi) asks this be ruled on
+  // explicitly rather than left out by omission — see the PR body for that ruling. Consulted
+  // before EVERY branch, including `irreversible` below, which never touches a live dep itself
+  // but must not let `deps` have been resolved to the real default regardless.
+  requireExplicitArmSeam("armAutoMergeAtOpen", !isRealArmDepsObject(deps));
   if (irreversible) {
     deps.say(
       `automerge.irreversible_refused (W1-T919/W1-T947): diff classified irreversible — refusing to ` +
@@ -2412,6 +2523,8 @@ export function disarmAutoMerge(
   // the SAME seam and the same discipline W1-T1050 added for a thrown `mergeDirect`.
   deps: Pick<ArmDeps, "disableAuto" | "say"> & Partial<Pick<ArmDeps, "isMerged">> = realArmDeps(),
 ): DisarmOutcome {
+  // W1-T2347: see armAutoMergeDetailed's own comment — same guard, same reason, same marker.
+  requireExplicitArmSeam("disarmAutoMerge", !isRealArmDepsObject(deps));
   try {
     deps.disableAuto(prUrl);
     deps.say(`automerge.disarmed (W1-T125): early arm withdrawn — ${prUrl}`);

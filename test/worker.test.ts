@@ -404,6 +404,10 @@ esac
       reviewerMount: { model: "sonnet", effort: "medium", maxTurns: 10, contextBudget: 120000 },
       ledgerPath,
       runId: "RUNREVIEW-E2E-1",
+      // W1-T2347: the unsubstantiated report fails the review, so withdrawArmIfVerdictRefuses
+      // reaches its `disarm` fallback — supplied so it never falls through to the real
+      // disarmAutoMerge default; this test is about the reviewer spawn, not arming.
+      disarm: () => "not-armed" as const,
     } as never);
 
     assert.ok(reviewerLedgered, "the advisory reviewer actually spawned and ledgered — the injected queryFn was really reached");
