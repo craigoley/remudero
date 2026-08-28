@@ -226,9 +226,12 @@ jobs:
     # collection step design (ii) prices at 211-422 CI-min/day for a comparison that means nothing
     # on a push.
     # W1-T1009: HEAVY band -- see the `ci` job's comment above for the full derivation of the
-    # 35m/2100s figure. This job carries the same `npx playwright install` step and hung on it
-    # independently of `ci` (PR #2150, five minutes after PR #2148's `ci` hang on the same step),
-    # so it sits in the same band -- but NO LONGER at the same number. Unlike `ci` it runs the
+    # 35m/2100s figure. This job shares `ci`'s HEAVY band, but W1-T2430's own measurement (4 of
+    # 55 recent runs cancelled, all four killed within a six-second band at the timeout) found
+    # every one of THIS job's cancellations died on the `Test with coverage` step below, none on
+    # `npx playwright install` -- PR #2150 was `ci`'s OWN hang, on that step, five minutes after
+    # PR #2148's `ci` hang on the same step; this job sits in the same band for its own reason,
+    # not by repeating `ci`'s. It is NO LONGER at the same number either. Unlike `ci` it runs the
     # whole suite under --experimental-test-coverage, and one flaky test sends that step into a
     # RETRY -- a second full pass -- which puts it past 2100s; PR #3064 raised it to 39m/2340s as
     # a STOPGAP while `ci` stays at 35m/2100s. THE CEILING IS THE INVARIANT, NOT EITHER NUMBER:
