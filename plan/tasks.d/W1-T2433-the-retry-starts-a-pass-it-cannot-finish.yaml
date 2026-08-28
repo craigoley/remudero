@@ -134,6 +134,76 @@
     existing meaning as the kill switch. `coverage-ratchet` is not removed, made conditional, or
     demoted. Nothing paces, sleeps or auto-resets, and no cap moves. The change is to ONE decision
     inside the wrapper: whether to START pass 2.
+
+    ── CORRECTION, 2026-08-28: CLAUSE (6)'s HEADLINE CLAIM IS FALSIFIED, AND SO IS THE TITLE ──
+
+    THE CLAIM "ZERO have ever produced a green" — CARRIED IN THIS SHARD'S OWN TITLE AND IN CLAUSE
+    (6) — IS FALSE. A `coverage-ratchet` retry has completed and ended GREEN. THE TITLE CANNOT BE
+    CORRECTED: Rule 21 freezes it on a merged task, so this rationale is the only place the record
+    can be set straight, and a reader who stops at the title will act on a claim the evidence does
+    not support.
+
+    THE EVIDENCE, MEASURED, NOT RE-DERIVED. #3160's own re-run, job 98723527768: ONE real
+    `FLAKE-RETRY:` marker line at 01:28:56 naming the same `W1-T356 wiring … sweepOrphans` test,
+    10,920 DISTINCT test names against 21,875 emitted lines — a second pass — a duration of 2159s
+    against the 2340s bound, and a conclusion of SUCCESS with 181 seconds to spare. The marker was
+    counted anchored at line start, so the mentions of that phrase inside a TEST TITLE, which are
+    the false-positive class, are excluded.
+
+    THE CORRECTED POPULATION IS SIX TWO-PASS RUNS, NOT FIVE: one completing RED at 2176s, ONE
+    COMPLETING GREEN at 2159s, and four cancelled at 2355/2360/2361/2361. The retry does sometimes
+    do its job. It did it once in six.
+
+    AND THIS SHARD'S OWN FALSIFIER NAMED EXACTLY THIS OBSERVATION BEFORE IT ARRIVED — "If a
+    `coverage-ratchet` run is observed ending GREEN at a two-pass duration, the claim in (6) is
+    void". It is kept rather than retired, because it is still the right test; what changes is that
+    it has now fired once and the population must be re-read as a coin-flip rather than a
+    certainty. Clause (7)'s "near-certain loss" should be read as four of six.
+
+    THE CORRECTION STRENGTHENS THE REMEDY RATHER THAN WEAKENING IT, WHICH IS WHY THIS IS NOT A
+    RETIREMENT. The proposed guard separates the two outcomes using only what the wrapper already
+    has. On the run that SUCCEEDED, pass 1 took 1107s and 1233s remained — MORE than pass 1
+    consumed — so the guard PERMITS the retry, and it finished with 181s to spare. On the run that
+    was CANCELLED, pass 1 took 1393s and 947s remained — LESS than pass 1 consumed — so the guard
+    DECLINES, returning a red that names the flaky test at 23 minutes instead of a cancellation
+    that names nothing at 39. THE RULE WAS NEVER "STOP RETRYING": it admits exactly the run that
+    worked and refuses exactly the run that could not. EVERY ACCEPTANCE CRITERION STILL STANDS ON
+    ITS OWN — none of the seven asserts a rate, a population or a green count; they assert the
+    guard's behaviour, and that behaviour is now better evidenced than when they were written.
+
+    THE TIMING IS THE REUSABLE HALF. This shard merged at 2026-08-28T01:40:45Z. The falsifying run
+    finished at 01:46:28Z. THE MERGE LANDED FIVE MINUTES AND FORTY-THREE SECONDS INSIDE THE WINDOW
+    BETWEEN A CLAIM AND ITS FALSIFICATION, and Rule 21 closed over it. Nobody acted wrongly: the
+    claim was true on every reading available when it was filed.
+
+    AND IT IS THE SAME CLASS AS W1-T2427, WHICH ONLY RHYMES WITH LAST NIGHT'S REVIEW WINDOW.
+    W1-T2427's title is frozen at "FOUR ARMS" while #3183 amends its rationale to record a FIFTH
+    site — a COUNT IN A FROZEN TITLE, superseded by later measurement, corrected only where the
+    correction cannot be seen first. That is exactly this shape, and it is now the second instance.
+    The #3164/#3168 window is a DIFFERENT failure that merely resembles it: there the instrument
+    was momentarily wrong about a world that had not changed — a plan read failed transiently and
+    the same read succeeded later — whereas here the instrument was right and the world moved
+    afterwards. Both freeze a commitment that no longer matches the record, but one is a defective
+    read and the other is correct-at-the-time, and their remedies differ accordingly: that one
+    wants a non-silent catch and a path back to re-review, this one wants the correction to be
+    loud where a frozen title cannot be.
+
+    WHAT THE FROZEN TITLE ACTUALLY COSTS, MEASURED RATHER THAN ASSUMED — AND IT IS NOT ONLY A
+    HUMAN MISREADING. `renderImplementPrompt` (`src/run-task.ts`) renders `task.prompt ?? task.title`
+    as the worker's prompt body, and NO TASK RECORD ON MAIN DECLARES `prompt:` — re-measured at
+    this sha, 0 of 681 shards. So for a dispatched build the title IS the prompt. `design:` is read
+    by nothing in `src/`, and `task.acceptance` is consumed by the REVIEWER rather than the worker,
+    so this rationale reaches a worker ONLY because recon opens the record from disk and relays it
+    — and run-task.ts's own comment records what happens when that transport degrades: on W1-T399,
+    implement burned 138 turns and produced zero commits from a one-line title. THE COST IS
+    THEREFORE A WRONG DISPATCH AND NOT MERELY A WRONG IMPRESSION, which is why this correction is
+    written at the top of its own section rather than folded into clause (6).
+
+    NOT RETIRED, AND NOT THE OPERATOR'S DECISION TO MAKE HERE. The acceptance criteria stand on
+    their own as argued above, so no retirement is proposed. If a future reading finds the guard
+    unwarranted because retries mostly succeed, THAT is a retirement decision for the operator and
+    is named here rather than taken.
+
   acceptance:
     - claim: "the wrapper declines a second pass when the remaining budget is less than the first pass consumed"
       proof: "unit test: test/retry-does-not-start-a-pass-it-cannot-finish.test.ts"
