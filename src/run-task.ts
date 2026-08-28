@@ -6174,6 +6174,120 @@ export function prerequisiteMerged(liveState: LiveStateResult | undefined): bool
 }
 
 /**
+ * W1-T2436 (capability 2 of 3 — THE MISSING PRODUCER): has THIS pull request already had a
+ * prerequisite PR opened for its instrument entanglement? A pure "last one wins" fold over
+ * `fix.prerequisite_opened` ledger rows, keyed by `pr_url` — mirrors {@link fixRebaseAlreadySpent}'s
+ * own idiom (a ledger fold, never a second state file) so a re-invoked rung never dispatches a
+ * SECOND worker to open a SECOND prerequisite for a split it has already produced.
+ *
+ * `undefined` means no prerequisite has been opened yet for this exact PR — the caller must
+ * dispatch one. This is deliberately never keyed on the ENTANGLED PR's own review text: rationale
+ * (2) — `detectInstrumentEntanglement` (lib/review.ts) is purely diff-derived, so a fresh review
+ * of an UNCHANGED entangled diff reports `instrumentEntangled: true` forever, regardless of
+ * anything this rung does. The ledger, not the review, is this capability's own memory.
+ */
+export function priorPrerequisitePrFor(lines: ReadonlyArray<Record<string, unknown>>, prUrl: string): number | undefined {
+  let found: number | undefined;
+  for (const line of lines) {
+    if (line.step === "fix.prerequisite_opened" && line.pr_url === prUrl && typeof line.prerequisite_pr === "number") {
+      found = line.prerequisite_pr;
+    }
+  }
+  return found;
+}
+
+/**
+ * W1-T2436 (capability 2 of 3): the prompt for the worker THIS rung dispatches when an entangled
+ * PR's own review names the DISJOINT instrument/src split (`review.instrumentEntanglementPaths`,
+ * `detectInstrumentEntanglement`'s own `instrumentPaths`/`srcPaths`, lib/review.ts). Rationale (4):
+ * "the worker is handed the instrument half and the source half ... and authors whatever the
+ * prerequisite needs to stand alone" — a human did exactly this twice (#3082, #3186), each time
+ * AUTHORING new code the original PR never carried, which is why this is a worker dispatch and
+ * never a mechanical `git mv`/partition (rationale (3): a partition's own PR failed its own CI in
+ * both cases on record).
+ *
+ * PURE: no I/O, no git, no gh — the worker itself carries out every git/gh step this text
+ * describes, exactly like every other fix-rung dispatch's prompt (`renderFixPrompt`).
+ */
+export function renderPrerequisitePrPrompt(args: {
+  task: { id: string; title: string };
+  branch: string;
+  prUrl: string;
+  instrumentPaths: readonly string[];
+  srcPaths: readonly string[];
+}): string {
+  return [
+    `Task ${args.task.id} (${args.task.title})'s own pull request ${args.prUrl} (branch \`${args.branch}\`) was ` +
+      `refused by the blocked_review fix rung under Standing rule 25: it changes measurement-instrument ` +
+      `path(s) alongside src/ path(s) in the SAME diff, and no worker may resolve that by writing more code ` +
+      `into that PR.`,
+    "",
+    "Your job is DIFFERENT: open a NEW, SEPARATE pull request — the prerequisite — that carries ONLY the " +
+      "instrument-surface change below, standing on its own and passing its own CI. Do this:",
+    "",
+    "1. Starting from a fresh branch off `origin/main` (never the branch above — leave it untouched), bring " +
+      "over ONLY these instrument-surface path(s), exactly as they read on that branch right now:",
+    ...args.instrumentPaths.map((p) => `   - ${p}`),
+    "2. These src/ path(s) belong to the ORIGINAL pull request and must NOT appear in your new one:",
+    ...args.srcPaths.map((p) => `   - ${p}`),
+    "3. Author WHATEVER this prerequisite needs to stand on its own — new tests, new supporting code, " +
+      "anything the instrument-surface change requires to pass CI by itself. Do not assume the split is " +
+      "mechanical: a plain `git mv`/cherry-pick of the same hunk has already been tried twice and failed CI " +
+      "both times.",
+    "4. Push your branch and open the pull request against `main` with `gh pr create`.",
+    "5. Leave the ORIGINAL branch/PR entirely alone — no push, no edit, no comment on it.",
+    "",
+    "End your REPORT with a line reading exactly: PR_URL: <the new pull request's url>",
+    "If you cannot produce a pull request that passes its own CI, say so plainly in your REPORT instead of " +
+      "opening one that does not.",
+  ].join("\n");
+}
+
+/**
+ * W1-T2436 (capability 2 of 3): the SpawnWorkerArgs for dispatching {@link renderPrerequisitePrPrompt}'s
+ * worker — PURE, mirroring {@link buildFixRungDispatchArgs}'s own split (the arg-builder carries
+ * the testable contract; the spawn wrapper, wired in `runFixRung`, is untested by design). Runs in
+ * the SAME worktree/mount/budget/settings as an ordinary fix strike (no new config surface) but on
+ * a FRESH session (`resumeSessionId` omitted) — this worker's job has nothing to resume from, and
+ * the SAME restricted `FIX_WORKER_TOOLS` set every other fix-rung spawn already uses.
+ */
+export function buildPrerequisitePrDispatchArgs(args: {
+  task: { id: string; title: string };
+  branch: string;
+  prUrl: string;
+  worktreePath: string;
+  mount: Mount;
+  settingsFile: string;
+  config: Config;
+  budgetUsd: number;
+  runId: string;
+  taskId: string;
+  instrumentPaths: readonly string[];
+  srcPaths: readonly string[];
+}): SpawnWorkerArgs {
+  return {
+    cwd: args.worktreePath,
+    permissionMode: "bypassPermissions",
+    settingsFile: args.settingsFile,
+    model: args.mount.model,
+    effort: args.mount.effort,
+    maxTurns: args.mount.maxTurns,
+    maxBudgetUsd: args.budgetUsd,
+    config: args.config,
+    prompt: renderPrerequisitePrPrompt({
+      task: args.task,
+      branch: args.branch,
+      prUrl: args.prUrl,
+      instrumentPaths: args.instrumentPaths,
+      srcPaths: args.srcPaths,
+    }),
+    tools: FIX_WORKER_TOOLS,
+    runId: args.runId,
+    taskId: args.taskId,
+  };
+}
+
+/**
  * W1-T1095 (capability 3 — REBASE): the observed facts the rebase decision reads. Split from
  * its I/O so every arm below is a unit fixture — the same split `fixRungTerminationVerdict`
  * (above) already took when the coverage gate forced it.
@@ -7534,17 +7648,24 @@ export async function runFixRung(opts: {
       return { outcome: "escalated", review, strikes, retriggers, reason: "rule15_violation", issueUrl };
     }
 
-    // W1-T297 (Standing rule 25 — INSTRUMENT CHANGES RIDE ALONE): a diff that
-    // changes a measurement-instrument path (a ratchet/coverage script, a
-    // recorded baseline, a workflow's measurement wiring, or the mutation
-    // scope) AND a src/ product path in the SAME PR (see
-    // ReviewVerdict.instrumentEntangled, review.ts) is never eligible for an
-    // ordinary "add the work" fix dispatch: no worker can legitimately
-    // resolve an entanglement by WRITING MORE CODE — the only honest
-    // resolutions (split the PR, or revert the instrument hunk) restructure
-    // it instead. REFUSE the strike and escalate immediately (zero strikes
-    // spent), naming the observed evidence (W1-T186) — the instrument paths
-    // found and the src paths beside them.
+    // W1-T297 (Standing rule 25 — INSTRUMENT CHANGES RIDE ALONE), W1-T2436 (capability 2 of 3 —
+    // THE MISSING PRODUCER): a diff that changes a measurement-instrument path (a
+    // ratchet/coverage script, a recorded baseline, a workflow's measurement wiring, or the
+    // mutation scope) AND a src/ product path in the SAME PR (see ReviewVerdict.instrumentEntangled,
+    // review.ts) is never eligible for an ordinary "add the work" fix dispatch: no worker can
+    // legitimately resolve an entanglement by WRITING MORE CODE into THIS PR — the only honest
+    // resolutions (split the PR, or revert the instrument hunk) restructure it instead.
+    //
+    // W1-T1095 named three capabilities; this is the one that never shipped, and it is the one
+    // the other two (park above, rebase via `runFixRebase`) both CONSUME — rationale (2):
+    // `outOfDiffBlockerFor` is read 110 lines above this refusal and correctly finds nothing,
+    // because the PR it would name does not exist. A mechanical partition cannot produce that PR
+    // (rationale (3): both hand repairs on record required AUTHORING new code in files the
+    // original PR never touched — a `git mv` opens a PR whose own CI fails), so this DISPATCHES A
+    // WORKER to build the prerequisite instead of escalating immediately. Escalation still fires,
+    // unchanged, the moment that worker's own attempt cannot go green (rationale (5): a REFUSAL
+    // CONDITION, never a retry — a second stuck PR beside the first is worse than the escalation
+    // it replaces). Zero strikes spent either way, exactly as before this task.
     if (review.instrumentEntangled) {
       const paths = review.instrumentEntanglementPaths;
       const instrumentList = paths?.instrumentPaths.join(", ") ?? "(unavailable)";
@@ -7555,40 +7676,144 @@ export async function runFixRung(opts: {
         instrument_paths: paths?.instrumentPaths,
         src_paths: paths?.srcPaths,
       });
-      deps.say(
-        `fix rung: REFUSED — instrument path(s) ${instrumentList} entangled with src/ path(s) ${srcList} in the ` +
-          `same PR; escalating rather than dispatching a fix worker: ${opts.prUrl}`,
-      );
-      const issueUrl = escalate(
-        {
-          class: "BLOCKED",
-          taskId: opts.taskId,
+
+      // W1-T2436: the SAME escalation this refusal has always opened — reused VERBATIM (never
+      // re-worded) for every "cannot go green" arm below, so a failed prerequisite attempt leaves
+      // the operator with the identical, already-understood issue this rung has always filed for
+      // Standing rule 25 — never a second, differently-shaped one. Design note (9): this rung must
+      // never merge anything, never rebase onto an unmerged prerequisite, and must escalate exactly
+      // as it does today when the prerequisite cannot go green.
+      const escalateInstrumentEntangled = (): string =>
+        escalate(
+          {
+            class: "BLOCKED",
+            taskId: opts.taskId,
+            runId: opts.runId,
+            summary: `blocked_review: instrument change entangled with src/ in one PR (Standing rule 25) — ${opts.prUrl}`,
+            detail:
+              `The blocked_review FIX RUNG (W1-T76, W1-T297) refused to dispatch a fix worker: the PR's diff ` +
+              `changes measurement-instrument path(s) ${instrumentList} alongside src/ path(s) ${srcList} — two ` +
+              `independently falsifiable claims ("the instrument is right" and "the code is right") shipped as one ` +
+              `green, self-graded by the very instrument version it also changed. No worker may legitimately resolve ` +
+              `this by writing more code. Review summary: ${review.summary}`,
+            options: [
+              {
+                label: "split",
+                detail:
+                  "land the instrument change in its own PR, then rebase this one onto it — the sanctioned shape.",
+              },
+              {
+                label: "revert",
+                detail: "revert the instrument hunk on this branch, keeping only the src/ change, then re-review.",
+              },
+            ],
+            recommendation: "split",
+          },
+          { issues: deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId },
+        );
+      const escalateAndExhaust = (): FixRungOutcome => {
+        const issueUrl = escalateInstrumentEntangled();
+        deps.log("fix.exhausted", { strikes, issue_url: issueUrl, reason: "instrument_entangled" });
+        deps.say(`fix rung: escalated (instrument entanglement) — ${issueUrl}`);
+        return { outcome: "escalated", review, strikes, retriggers, reason: "instrument_entangled", issueUrl };
+      };
+
+      // W1-T2436: this PR's own memory of whether it already dispatched a prerequisite — see
+      // `priorPrerequisitePrFor`'s own doc for why this is ledger-keyed rather than review-text-
+      // keyed (a fresh review of this unchanged entangled diff reports `instrumentEntangled: true`
+      // forever, so `outOfDiffBlockerFor` can never discover a prerequisite THIS capability itself
+      // produced). Never re-dispatches a SECOND worker for a split already produced.
+      const ledgerLinesFn = deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath));
+      let prerequisitePr = priorPrerequisitePrFor(ledgerLinesFn(), opts.prUrl);
+
+      if (prerequisitePr === undefined) {
+        deps.say(
+          `fix rung: instrument path(s) ${instrumentList} entangled with src/ path(s) ${srcList} — dispatching ` +
+            `a worker to open the prerequisite PR (never escalating straight to an issue): ${opts.prUrl}`,
+        );
+        const dispatchArgs = buildPrerequisitePrDispatchArgs({
+          task: opts.task,
+          branch: opts.branch,
+          prUrl: opts.prUrl,
+          worktreePath: opts.worktreePath,
+          mount: opts.mount,
+          settingsFile: opts.settingsFile,
+          config: opts.config,
+          budgetUsd: opts.budgetUsd,
           runId: opts.runId,
-          summary: `blocked_review: instrument change entangled with src/ in one PR (Standing rule 25) — ${opts.prUrl}`,
-          detail:
-            `The blocked_review FIX RUNG (W1-T76, W1-T297) refused to dispatch a fix worker: the PR's diff ` +
-            `changes measurement-instrument path(s) ${instrumentList} alongside src/ path(s) ${srcList} — two ` +
-            `independently falsifiable claims ("the instrument is right" and "the code is right") shipped as one ` +
-            `green, self-graded by the very instrument version it also changed. No worker may legitimately resolve ` +
-            `this by writing more code. Review summary: ${review.summary}`,
-          options: [
-            {
-              label: "split",
-              detail:
-                "land the instrument change in its own PR, then rebase this one onto it — the sanctioned shape.",
-            },
-            {
-              label: "revert",
-              detail: "revert the instrument hunk on this branch, keeping only the src/ change, then re-review.",
-            },
-          ],
-          recommendation: "split",
+          taskId: opts.taskId,
+          instrumentPaths: paths?.instrumentPaths ?? [],
+          srcPaths: paths?.srcPaths ?? [],
+        });
+        // W1-T1044: the SAME wall-clock bound + best-effort reclaim every ordinary strike's own
+        // spawn already takes (spawnFixWorkerBounded) — this dispatch is never a strike (`strikes`
+        // is read, never incremented, on this whole path) but it is still a real subprocess and
+        // must never be allowed to hang the rung forever.
+        const spawnOutcome = await spawnFixWorkerBounded(deps, dispatchArgs, { runId: opts.runId, taskId: opts.taskId });
+        const prerequisiteUrl =
+          spawnOutcome.kind === "spawned"
+            ? parseReport(workerTranscript(deps.account(spawnOutcome.result)))?.prUrl
+            : undefined;
+        const target = prerequisiteUrl ? mergeTargetFromPrUrl(prerequisiteUrl) : undefined;
+        if (!target) {
+          // THE REFUSAL CONDITION (rationale (5)/(9)): the dispatched worker never produced a
+          // pull request this rung can address (abandoned spawn, or a worker that honestly
+          // reported it could not build one) — escalate exactly as this refusal always has,
+          // rather than leave a second, worker-authored stuck PR beside the first.
+          deps.log("fix.prerequisite_dispatch_failed", {
+            strike: strikes,
+            reason: spawnOutcome.kind === "abandoned" ? "spawn wall-clock bound exceeded" : "worker opened no pull request",
+          });
+          return escalateAndExhaust();
+        }
+        const ciState = await deps.waitForCiGreen(prerequisiteUrl!, deps.log);
+        if (ciState !== "green") {
+          // THE REFUSAL CONDITION, SECOND ARM: a prerequisite that CANNOT GO GREEN escalates
+          // exactly as the rung does today (rationale (5)) — never merged, never rebased onto.
+          deps.log("fix.prerequisite_ci_failed", { strike: strikes, prerequisite_pr: target.prNumber, ci_state: ciState });
+          return escalateAndExhaust();
+        }
+        deps.log("fix.prerequisite_opened", {
+          strike: strikes,
+          pr_url: opts.prUrl,
+          prerequisite_pr: target.prNumber,
+          prerequisite_pr_url: prerequisiteUrl,
+          instrument_paths: paths?.instrumentPaths,
+          src_paths: paths?.srcPaths,
+        });
+        prerequisitePr = target.prNumber;
+      }
+
+      // CAPABILITIES 1 AND 3, CONSUMED — NEVER RE-IMPLEMENTED (rationale (11)): the exact same
+      // fail-safe merged-check and rebase this rung already ships above for a review-authored
+      // "blocked on #N" park. `prerequisiteMerged`'s own fail-safe default (`ok:false` ⇒ not
+      // merged) still guards this identically — nothing here can rebase onto, or merge, an
+      // unmerged prerequisite.
+      const prerequisiteState = deps.readPrerequisiteState ? await deps.readPrerequisiteState(prerequisitePr) : undefined;
+      if (!prerequisiteMerged(prerequisiteState)) {
+        const parkReason = `blocked on #${prerequisitePr} — a prerequisite outside this diff, not yet merged`;
+        deps.log("fix.parked", { strike: strikes, blocked_on_pr: prerequisitePr, reason: parkReason });
+        deps.say(`fix rung: PARKED — ${parkReason}; no strike spent, will resume once it merges: ${opts.prUrl}`);
+        return { outcome: "parked", review, strikes, retriggers, reason: parkReason, blockedOnPr: prerequisitePr };
+      }
+      deps.log("fix.resumed", { strike: strikes, blocked_on_pr: prerequisitePr });
+      deps.say(`fix rung: RESUMING — prerequisite #${prerequisitePr} has merged; dispatching normally: ${opts.prUrl}`);
+      const rebase = await runFixRebase(
+        { prUrl: opts.prUrl, prerequisitePr, reviewPassed: false, strikes },
+        {
+          log: deps.log,
+          say: deps.say,
+          ledgerLines: ledgerLinesFn,
+          readMergeFacts: deps.readMergeFacts,
+          updateBranch: deps.updateBranch,
         },
-        { issues: deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId },
       );
-      deps.log("fix.exhausted", { strikes, issue_url: issueUrl, reason: "instrument_entangled" });
-      deps.say(`fix rung: escalated (instrument entanglement) — ${issueUrl}`);
-      return { outcome: "escalated", review, strikes, retriggers, reason: "instrument_entangled", issueUrl };
+      if (rebase.rebased) {
+        return { outcome: "rebased", review, strikes, retriggers, reason: rebase.reason, blockedOnPr: prerequisitePr };
+      }
+      // Not rebased (already contains the base, or refused) — fall through exactly like the
+      // existing capability-1/3 branch above: an ordinary strike proceeds against this round's
+      // review.
     }
 
     // W1-T166: holdout criteria are reviewer-visible but WORKER-hidden — the fix rung dispatches

@@ -357,7 +357,13 @@ function fakeIssues(calls: Array<{ title: string; body: string; labels: string[]
   };
 }
 
-test("W1-T297 criteria 4/5/7: runFixRung REFUSES an entangled blocked_review — zero fix-worker spawns, an immediate escalation naming the instrument paths, the src paths, and the split/rebase resolution", async () => {
+// W1-T2436 (capability 2 of 3): an entangled blocked_review no longer escalates STRAIGHT to an
+// issue — it first dispatches a worker to build the prerequisite PR (test/entanglement-split-
+// dispatches-a-worker.test.ts owns that dispatch's own contract in full). This fixture's own
+// worker fake reports no pull request at all, so it still exercises exactly the escalation this
+// test has always pinned: same issue body, same ledger line, same zero strikes spent — proving
+// that arm is BYTE-IDENTICAL to before once the (new) prerequisite attempt itself cannot go green.
+test("W1-T297 criteria 4/5/7: runFixRung never spends an ordinary add-the-work strike on an entangled blocked_review — a failed prerequisite attempt still escalates naming the instrument paths, the src paths, and the split/rebase resolution", async () => {
   const spawnCalls: SpawnWorkerArgs[] = [];
   const issueCalls: Array<{ title: string; body: string; labels: string[] }> = [];
   const ledgerPath = tmpLedgerPath();
@@ -392,7 +398,15 @@ test("W1-T297 criteria 4/5/7: runFixRung REFUSES an entangled blocked_review —
     },
   });
 
-  assert.equal(spawnCalls.length, 0, "an entangled diff is NEVER eligible for an ordinary add-the-work fix dispatch");
+  // W1-T2436: exactly ONE spawn now happens — the prerequisite-building worker this rung
+  // dispatches instead of escalating straight to an issue — never the ORIGINAL entangled diff
+  // being handed to an ordinary "add the work" fix worker (that invariant is what this test
+  // still pins: the spawned prompt is never a repair prompt against the entangled PR itself).
+  assert.equal(spawnCalls.length, 1, "the prerequisite-building worker is dispatched exactly once");
+  assert.ok(
+    !spawnCalls[0].prompt.includes("criterion A merges cleanly"),
+    "the spawned worker is building the PREREQUISITE, never an ordinary fix against the entangled PR's own unmet criteria",
+  );
   assert.equal(outcome.outcome, "escalated");
   assert.equal(outcome.strikes, 0, "no strike is spent on a diff the rung refuses to act on");
   assert.equal(issueCalls.length, 1);
