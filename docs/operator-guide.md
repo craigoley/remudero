@@ -232,6 +232,35 @@ amendment — never a rung editing its own declaration mid-build. No rung
 applies a correction to its own declaration: a rung that notices a wrong
 `files:` may at most report it, and a human authors the amendment.
 
+## An instrument-entangled PR now gets a prerequisite PR, not an escalation issue (W1-T2436)
+
+**What changed for you.** Standing rule 25 refuses a diff that touches both a measurement
+instrument (`.github/workflows/`, a `*-ratchet.mjs`, a `*-baseline.json`) and executable `src/`
+code in the same changeset — an instrument must not be edited in the same breath as the code it
+grades. Previously the fix rung reacted by escalating straight to an issue and stopping, leaving
+you to split the PR by hand. It now **dispatches a worker to open the prerequisite PR** — the
+instrument half, on its own — and parks the entangled PR until that prerequisite merges.
+
+**What you will see.** On the console and in the rung's own output:
+
+```
+fix rung: instrument path(s) <…> entangled with src/ path(s) <…> — dispatching
+a worker to open the prerequisite PR (never escalating straight to an issue): <pr-url>
+```
+
+The escalation path still exists and still fires when the rung is exhausted; it is no longer the
+*first* response to an entanglement.
+
+**It will not open a second prerequisite for the same PR.** The rung remembers what it already did
+through the ledger, not through the review: `fix.prerequisite_opened` rows are folded by `pr_url`,
+and that step is registered in `DECISION_RELEVANT_LEDGER_STEPS` so a rotation cannot archive the
+memory away. This matters because `detectInstrumentEntanglement` is purely diff-derived — a fresh
+review of an unchanged entangled diff reports it entangled *forever*, so the review text can never
+tell the rung that it has already produced the split. If you ever see two prerequisite PRs opened
+for one entangled PR, that registration is the thing to check first.
+
+**To drive it by hand**, `rmd fix <pr-number>` runs the same path.
+
 ## Onboarding a new project
 
 `rmd project init <repo> ...` seeds a target repo with the same gate stack

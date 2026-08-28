@@ -589,6 +589,17 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // deliberately NOT here: nothing decides on them, and a step belongs in this set only while a
   // real deciding reader consults it.
   "fix.rebased",
+  // W1-T2436 (capability 2): run-task.ts's `priorPrerequisitePrFor` folds these rows, keyed by
+  // `pr_url`, to answer "has a prerequisite PR already been opened for this entangled PR?" — the
+  // SAME ledger-as-memory idiom as `fix.rebased` directly above, and for the same reason: there is
+  // no state file and no timer, so this row is the ONLY record that the split was already
+  // produced. Its own doc says the ledger "not the review, is this capability's own memory",
+  // precisely because `detectInstrumentEntanglement` is diff-derived and reports an unchanged
+  // entangled diff as entangled forever. Archived away by a rotation, the fold reads `undefined`
+  // and the rung dispatches a SECOND worker to open a SECOND prerequisite PR for a split it has
+  // already produced — an unbounded re-dispatch, the same class the `fix.rebased` note above
+  // guards against. Bounded by PASS 4's per-step cap like every other member; no cap moves for it.
+  "fix.prerequisite_opened",
   "dep-review.decided",
   "review.posted",
   "review.post_refused",
