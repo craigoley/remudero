@@ -20,6 +20,13 @@
 // A failing run also writes one line to stderr (real `node --test` runs interleave diagnostics
 // there too), so the wrapper's stderr-forwarding path is exercised by the same failing-mode runs
 // rather than needing a dedicated fixture mode.
+//
+// --sleep-ms N (W1-T2433): blocks for N milliseconds before concluding pass/fail, so tests can
+// give a "pass 1" a controlled, known duration -- needed to exercise
+// scripts/test-with-retry.mjs's TEST_RETRY_BUDGET_SECONDS decline logic (whether the wrapper
+// starts pass 2 depends on how long pass 1 actually took). Uses a synchronous busy-wait rather
+// than `setTimeout`/async sleep so it also holds up any downstream event-loop-timing assumptions
+// the same way a genuinely slow test suite would.
 
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 
@@ -32,6 +39,14 @@ const mode = opt("--mode", "always-pass");
 const stateFile = opt("--state-file");
 const testName = opt("--test-name", "sample flaky test");
 const format = opt("--format", "tap");
+const sleepMs = Number(opt("--sleep-ms", "0"));
+
+if (sleepMs > 0) {
+  const until = Date.now() + sleepMs;
+  while (Date.now() < until) {
+    // busy-wait: this fixture stands in for a slow real test suite, not an async delay.
+  }
+}
 
 let count = 0;
 if (stateFile && existsSync(stateFile)) {
