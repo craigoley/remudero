@@ -109,6 +109,52 @@ jobs:
         # strict mode rejects it while strict-off accepts the same file unchanged -- that test
         # runs as part of `npm test` below and is the falsifier proof this step is ACTIVE.
         run: npx tsc -p tsconfig.json --noEmit
+      - name: Determine this diff's fast-lane class (W1-T2428 — the `ci` half)
+        # THE SAME STEP THE `coverage-ratchet` JOB ALREADY RUNS, and deliberately a SECOND copy
+        # rather than a shared output: `needs:` would make `ci` wait on `coverage-ratchet`, turning
+        # two parallel jobs into a chain and costing more wall-clock than the skip saves.
+        #
+        # THE CLASS COMES FROM THE REAL PREDICATE, NEVER A BASH RESPELLING (Q2): scripts/
+        # diff-class.mjs imports `isInPlanScope` straight from src/lib/plan-architect.ts. A fourth
+        # spelling here would surface as a SILENTLY SKIPPED SUITE rather than a red check, which is
+        # the one failure this whole lane must not have.
+        #
+        # FAIL CLOSED, TWICE OVER: the script never throws (empty/unreadable/malformed all resolve
+        # to SOURCE internally), and this step ALSO clamps stdout to the three known tokens and
+        # defaults to SOURCE on anything else — so a `node`/`tsx` that cannot start at all still
+        # leaves CLASS=SOURCE. On a push there is no PR base, so changed-files.txt is left empty
+        # and the script's own empty-list rule resolves it to SOURCE; no push-vs-PR branch here.
+        #
+        # NO PR-SCOPED TOKEN IN THIS JOB BODY (the invariant #3187 tripped): `BASE_SHA` is read
+        # through `env:` and guarded by GITHUB_EVENT_NAME, exactly as coverage-ratchet does it.
+        id: classify
+        run: |
+          # PUSH-SAFE BY CONSTRUCTION, and that is an INVARIANT not a preference:
+          # test/push-ci-on-main.test.ts asserts no `run:` body in THIS job mentions
+          # any request-scoped context token — this job also runs on a push to
+          # main, where every one of them is empty. `coverage-ratchet` may use them (it is gated on
+          # the event); `ci` may not. So the base comes from GITHUB_BASE_REF, a plain environment
+          # variable set on a pull request and EMPTY on a push — exactly the discriminator needed,
+          # without naming a forbidden token. `fetch-depth: 0` above guarantees the history for it.
+          if [ -n "${GITHUB_BASE_REF}" ]; then
+            # NO DEPTH-LIMITING FLAG (test/no-shallowing-of-the-canonical-checkout.test.ts,
+            # W1-T2333): shallowing flags are forbidden on any git invocation under
+            # .github/workflows/, and one here was also unnecessary — this job's own checkout
+            # above already sets `fetch-depth: 0`, so the history is complete before this runs.
+            # The ratchet scans TEXT, so this note names no flag literally either.
+            git fetch --no-tags origin "${GITHUB_BASE_REF}" >/dev/null 2>&1 || true
+            git diff --name-only "origin/${GITHUB_BASE_REF}...HEAD" > changed-files.txt 2>/dev/null || : > changed-files.txt
+          else
+            : > changed-files.txt
+          fi
+          CLASS="$(node --import tsx scripts/diff-class.mjs --changed-files changed-files.txt 2>diff-class.log)" || CLASS="SOURCE"
+          case "$CLASS" in
+            PLAN_ONLY|DOCS_ONLY|SOURCE) ;;
+            *) CLASS="SOURCE" ;;
+          esac
+          cat diff-class.log || true
+          echo "class=${CLASS}" >> "$GITHUB_OUTPUT"
+          echo "W1-T2428 fast-lane: this diff classifies as ${CLASS}."
       - name: Test
         # W1-T255: routed through scripts/test-with-retry.mjs (npm run test:ci), NOT plain
         # `npm test` -- see that script's header comment for the full rationale. On a green run
@@ -118,7 +164,46 @@ jobs:
         # leaves a record instead of erasing it on a manual re-run. `npm test` itself stays
         # retry-free -- Stryker's commandRunner re-runs it once per mutant (stryker.conf.json),
         # where a retry would blur the kill signal.
-        run: npm run test:ci
+        #
+        # W1-T2428 (the `ci` half): on a PLAN_ONLY/DOCS_ONLY diff, run ONLY the suites such a diff
+        # can actually fail — enumerated AT RUN TIME from the tree by scripts/diff-class.mjs, never
+        # a frozen list (criterion 5), so a suite added in the same commit is picked up by the very
+        # run that adds it.
+        #
+        # FAIL CLOSED ON THE ENUMERATION TOO, not just on the class. The script prints NOTHING and
+        # exits nonzero on any enumeration error, and its own doc says a caller reading zero lines
+        # "must fail closed (run the FULL suite), never trust an empty list as 'no suites matter'".
+        # That is exactly what the `|| SUITES=""` plus the empty-check below do: any failure, and
+        # any empty result, falls through to the unmodified `npm run test:ci`.
+        #
+        # AND THE SKIP NAMES ITSELF (criterion 7 / Q4): the class, the suite count and the total go
+        # to the log AND to $GITHUB_STEP_SUMMARY. A 0-second green that says nothing is
+        # indistinguishable from a real one, which is the defect this must not add.
+        run: |
+          CLASS="${{ steps.classify.outputs.class }}"
+          if [ "$CLASS" = "SOURCE" ]; then
+            echo "W1-T2428 fast-lane: class=SOURCE — running the FULL suite."
+            npm run test:ci
+            exit $?
+          fi
+          SUITES="$(node --import tsx scripts/diff-class.mjs --list-plan-reading-suites)" || SUITES=""
+          if [ -z "$SUITES" ]; then
+            echo "W1-T2428 fast-lane: class=${CLASS} but the suite enumeration FAILED or was empty — running the FULL suite (fail closed)."
+            echo "- W1-T2428 fast-lane: class=${CLASS}, enumeration unusable — ran the **full** suite (fail closed)" >> "$GITHUB_STEP_SUMMARY"
+            npm run test:ci
+            exit $?
+          fi
+          COUNT="$(printf '%s\n' "$SUITES" | grep -c .)"
+          TOTAL="$(ls test/*.test.ts | grep -c .)"
+          echo "W1-T2428 fast-lane: class=${CLASS} — running ${COUNT} of ${TOTAL} suites (the plan/docs-reading set); skipping the rest, which this diff cannot fail."
+          echo "- W1-T2428 fast-lane: class=${CLASS} — ran **${COUNT} of ${TOTAL}** suites (the plan/docs-reading set), skipped the remainder" >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' "$SUITES" | sed 's/^/    /' >> "$GITHUB_STEP_SUMMARY"
+          # THE SAME HARNESS IMPORTS `npm run test:ci` CARRIES — `--import tsx` and
+          # `--import ./test/setup/tmp-hygiene.ts`. W1-T1217 records that omitting the second
+          # is a real divergence rather than a saving, and W1-T1250's parity check refuses any
+          # node-test-runner invocation in a workflow that lacks it. The fast lane changes
+          # WHICH suites run, never the harness they run under.
+          node --test --import tsx --import ./test/setup/tmp-hygiene.ts $SUITES
 
   commitlint:
     # W1-T31 (MASTER-PLAN §6A), relocated by W1-T129 — Conventional Commits gate. This repo

@@ -20,11 +20,12 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { parse as parseYaml } from "yaml";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");
@@ -212,13 +213,30 @@ test("acceptance 5: CONTROL — test/plan-proposals.test.ts (reads MASTER-PLAN.m
   assert.ok(suites.includes("test/plan-proposals.test.ts"), `expected test/plan-proposals.test.ts in: ${suites.slice(0, 5).join(", ")}...`);
 });
 
-test("acceptance 5: CONTROL — test/sweep.test.ts (a pure-source suite, no repo-root constant) is NOT in the enumerated set", () => {
+test("acceptance 5: CONTROL — a suite naming no plan or docs path at all is NOT in the enumerated set", () => {
+  // W1-T2428 (the `ci` half): THIS CONTROL MOVED, AND THE REASON IS MEASURED, NOT COSMETIC.
+  //
+  // It used to name `test/sweep.test.ts` and justify the exclusion as "carries zero repo-root
+  // constant". BOTH HALVES OF THAT WERE WRONG. `sweep.test.ts` does carry a repo-root idiom —
+  // `new URL(..., import.meta.url)` — so the stated reason was already false; and the predicate it
+  // was controlling (`hasRepoRootConstant && namesPlanOrDocsPath`) was MEASURED under-inclusive:
+  // with a malformed plan staged, six suite files it excluded went red, and no source-shape
+  // spelling separates them (four reach the root via `import.meta.url`, one via nothing at all,
+  // while `sweep.test.ts` uses the same idiom and genuinely does not care about the plan).
+  //
+  // So the predicate is now the plan/docs-path half ALONE, and the control has to be a suite that
+  // names no such path — a genuine negative rather than one that happened to fail the dropped
+  // conjunct. `sweep.test.ts` is now (harmlessly) included: over-including runs one extra suite,
+  // under-including silently drops one that CAN fail.
   const suites = planReadingSuiteFiles();
-  assert.ok(!suites.includes("test/sweep.test.ts"));
-  // Positive control on WHY: sweep.test.ts genuinely carries zero repo-root constant, so its
-  // exclusion is not a fluke of the plan/docs-path half of the predicate.
-  const sweepSource = readFileSync(join(REPO_ROOT, "test", "sweep.test.ts"), "utf8");
-  assert.equal(hasRepoRootConstant(sweepSource), false);
+  const control = "test/abandon-reclaims-the-worker.test.ts";
+  assert.ok(!suites.includes(control), `expected ${control} to be excluded`);
+  // Positive control on WHY: it names no plan/docs path at all, so its exclusion is the predicate
+  // working rather than an accident of file naming.
+  const controlSource = readFileSync(join(REPO_ROOT, control), "utf8");
+  assert.equal(namesPlanOrDocsPath(controlSource), false);
+  // And the discriminator still discriminates in the other direction, on the same call.
+  assert.ok(suites.includes("test/plan-proposals.test.ts"));
 });
 
 test("acceptance 5: the enumeration is LIVE tree-scanning, not memoized — a freshly added qualifying fixture file is picked up", () => {
@@ -391,4 +409,152 @@ test("CLI: reading the changed-file list from stdin via '-' works the same as a 
   });
   assert.equal(result.status, 0, result.stdout + result.stderr);
   assert.equal(result.stdout.trim(), CLASSES.PLAN_ONLY);
+});
+
+// ── W1-T2428, THE `ci` HALF: the wiring, driven against the workflow's ACTUAL BASH ─────────────
+//
+// #3193 shipped the classifier and wired it into `coverage-ratchet` ONLY. `ci`'s own Test step was
+// byte-identical to main, so a plan-only PR still paid the full suite — and
+// `--list-plan-reading-suites` had ZERO references anywhere in ci.yml, so what shipped was a pure
+// SKIP rather than "run the suites a plan diff can fail". These tests pin the missing half.
+//
+// EVERY ASSERTION READS THE REAL ci.yml. Intent is not testable; the bash that will actually run
+// is. Each fail-closed mode below is driven by EXECUTING the step's own script with `bash`, never
+// by asserting on prose.
+
+const CI_YML = readFileSync(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
+
+/** The `ci` job's steps, parsed from the real workflow — never a hand-copied excerpt. */
+function ciSteps(): Array<{ name?: string; id?: string; run?: string }> {
+  const doc = parseYaml(CI_YML) as { jobs: Record<string, { steps?: Array<{ name?: string; id?: string; run?: string }> }> };
+  return doc.jobs.ci.steps ?? [];
+}
+function ciTestStepRun(): string {
+  const s = ciSteps().find((x) => x.name === "Test");
+  assert.ok(s?.run, "the ci job must still have a Test step with a run body");
+  return s!.run!;
+}
+function ciClassifyRun(): string {
+  const s = ciSteps().find((x) => x.id === "classify");
+  assert.ok(s?.run, "the ci job must carry a classify step");
+  return s!.run!;
+}
+
+test("W1-T2428 ci half: the enumeration is CONSUMED by the ci job, not merely exported", () => {
+  // The gap this task closes: the flag existed in the script and had zero references in ci.yml.
+  assert.ok(
+    ciTestStepRun().includes("--list-plan-reading-suites"),
+    "ci's Test step must consume --list-plan-reading-suites — a pure skip is not 'run the suites a plan diff can fail'",
+  );
+});
+
+test("W1-T2428 ci half: the class comes from the imported predicate, never a bash respelling", () => {
+  const run = ciClassifyRun();
+  assert.ok(run.includes("scripts/diff-class.mjs"), "the class must come from the script that imports isInPlanScope");
+  // A fourth spelling would surface as a SILENTLY SKIPPED SUITE rather than a red check.
+  assert.ok(!/isInPlanScope/.test(run), "the workflow must not respell the predicate inline");
+  assert.ok(!/plan\/tasks\.d/.test(run), "the workflow must not hand-roll a plan-path match");
+});
+
+test("W1-T2428 ci half: SOURCE runs the full suite, unchanged", () => {
+  const run = ciTestStepRun();
+  assert.ok(run.includes("npm run test:ci"), "a source diff must still run the whole suite");
+  assert.match(run, /CLASS"?\s*=\s*"SOURCE"/, "the full-suite path must be selected by the class, not by chance");
+});
+
+test("W1-T2428 ci half: every skip NAMES itself — class, count and total — in the job summary", () => {
+  const run = ciTestStepRun();
+  // A 0-second green that says nothing is indistinguishable from a real one.
+  assert.ok(run.includes("GITHUB_STEP_SUMMARY"), "a skip must write to the job summary, never exit silently");
+  assert.ok(/\$\{?COUNT\}? of \$\{?TOTAL\}?|\*\*\$\{COUNT\} of \$\{TOTAL\}\*\*/.test(run), "the summary must carry the count and the total");
+  assert.ok(run.includes("fast-lane"), "the summary line must name the mechanism doing the skipping");
+});
+
+test("W1-T2428 ci half: the ci job body stays push-safe — no request-scoped token in any run", () => {
+  // The invariant #3187 tripped: this job also runs on a push to main, where these are empty.
+  for (const step of ciSteps()) {
+    for (const tok of ["github.event", "pull_request", "BASE_SHA"]) {
+      assert.ok(!(step.run ?? "").includes(tok), `ci step ${step.name ?? step.id} must not reference ${tok}`);
+    }
+  }
+});
+
+test("W1-T2428 ci half: coverage-ratchet step bodies still carry no literal if: (the #729 discipline)", () => {
+  const doc = parseYaml(CI_YML) as { jobs: Record<string, { steps?: Array<{ if?: string }> }> };
+  for (const step of doc.jobs["coverage-ratchet"].steps ?? []) {
+    assert.equal(step.if, undefined, "a conditionally-skipped required check deadlocks merge forever");
+  }
+});
+
+// ── THE FIVE FAIL-CLOSED MODES, each EXECUTED as bash, all selecting SOURCE ───────────────────
+//
+// `source` must match `unset` byte-for-byte: a mode that cannot determine a class must be
+// indistinguishable from a plain source diff, or the lane skips on ignorance.
+
+/** Run the classify step's own clamp logic with a stubbed script output. */
+function classifyClamp(stdout: string, exitCode: number): string {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-t2428-clamp-"));
+  const stub = join(dir, "stub.sh");
+  writeFileSync(stub, `#!/bin/sh\nprintf '%s' ${JSON.stringify(stdout)}\nexit ${exitCode}\n`);
+  execFileSync("chmod", ["+x", stub]);
+  // The clamp, lifted verbatim in shape from the classify step: capture, then case-clamp.
+  const script = `
+    CLASS="$(${stub} 2>/dev/null)" || CLASS="SOURCE"
+    case "$CLASS" in
+      PLAN_ONLY|DOCS_ONLY|SOURCE) ;;
+      *) CLASS="SOURCE" ;;
+    esac
+    printf '%s' "$CLASS"
+  `;
+  return execFileSync("bash", ["-c", script], { encoding: "utf8" });
+}
+
+test("W1-T2428 ci half: fail-closed 1 — a classifier crashing at exit 7 selects SOURCE", () => {
+  assert.equal(classifyClamp("", 7), "SOURCE");
+});
+
+test("W1-T2428 ci half: fail-closed 2 — a classifier printing garbage selects SOURCE", () => {
+  assert.equal(classifyClamp("MAYBE_PLAN", 0), "SOURCE");
+});
+
+test("W1-T2428 ci half: fail-closed 3 — an empty class selects SOURCE", () => {
+  assert.equal(classifyClamp("", 0), "SOURCE");
+});
+
+test("W1-T2428 ci half: fail-closed 4 — a push run (no base ref) leaves an empty file list, which the script resolves to SOURCE", () => {
+  // The classify step branches on GITHUB_BASE_REF being non-empty; a push leaves it unset.
+  const run = ciClassifyRun();
+  assert.match(run, /if \[ -n "\$\{GITHUB_BASE_REF\}" \]/, "the base must be discriminated by an env var, not a request token");
+  assert.match(run, /: > changed-files\.txt/, "the push branch must produce an EMPTY list");
+  // And the real script resolves an empty list to SOURCE — the property the branch relies on.
+  const empty = join(mkdtempSync(join(tmpdir(), "rmd-t2428-empty-")), "none.txt");
+  writeFileSync(empty, "");
+  const out = execFileSync("node", ["--import", "tsx", join(REPO_ROOT, "scripts", "diff-class.mjs"), "--changed-files", empty], {
+    encoding: "utf8",
+    cwd: REPO_ROOT,
+  }).trim();
+  assert.equal(out, "SOURCE");
+});
+
+test("W1-T2428 ci half: fail-closed 5 — an unresolvable base ref still yields an empty list, never a crashed step", () => {
+  // `git diff` against a ref that does not exist must not abort the step; the step redirects to an
+  // empty list, which the script resolves to SOURCE.
+  const script = `
+    cd ${JSON.stringify(REPO_ROOT)}
+    git diff --name-only "origin/definitely-not-a-real-ref-xyz...HEAD" > /tmp/rmd-t2428-unres.txt 2>/dev/null || : > /tmp/rmd-t2428-unres.txt
+    wc -l < /tmp/rmd-t2428-unres.txt
+  `;
+  const lines = execFileSync("bash", ["-c", script], { encoding: "utf8" }).trim();
+  assert.equal(lines, "0", "an unresolvable base must leave an empty list rather than a partial one");
+});
+
+test("W1-T2428 ci half: fail-closed 6 — an enumeration that fails runs the FULL suite, never an empty set", () => {
+  const run = ciTestStepRun();
+  // The script prints nothing and exits nonzero on an enumeration error; a caller reading zero
+  // lines must fail closed rather than trust "no suites matter".
+  assert.match(run, /\|\|\s*SUITES=""/, "the enumeration must fall back rather than abort");
+  assert.match(run, /if \[ -z "\$SUITES" \]/, "an empty enumeration must be detected");
+  const idxEmpty = run.indexOf('if [ -z "$SUITES" ]');
+  const after = run.slice(idxEmpty);
+  assert.ok(after.includes("npm run test:ci"), "the empty-enumeration branch must run the FULL suite");
 });
