@@ -1787,6 +1787,68 @@ export function isMergeCreditLine(line: Record<string, unknown>): boolean {
 }
 
 /**
+ * W1-T2425 — THE PRIOR COUNT THIS PROCESS DID NOT LIVE THROUGH.
+ *
+ * {@link evaluateDispatchBreakerDetailed}'s regression guard refuses a count that fell with
+ * nothing in the ledger to explain it, but it can only refuse what it can COMPARE against, and
+ * its `priorCount` comes from {@link DispatchBreakerCache.lastCounts} — an in-memory Map
+ * `breakerGateFor` (run-task.ts) rebuilds PER INVOCATION. That function's own doc scopes its
+ * claim honestly to a SAME-PROCESS rotation; a rotation plus a daemon RESTART was never covered,
+ * because a brand-new process starts with nothing to compare against and reads a shortened live
+ * file as forward progress. MEASURED on the fleet: W1-T1279 was refused every tick for 84 hours,
+ * a rotation dropped its two oldest `run.start` rows, the daemon restarted across the same gap,
+ * and the fresh process read `freshCount 3 < 5` and dispatched — with no line anywhere recording
+ * a reset.
+ *
+ * THE EVIDENCE WAS ALREADY BEING WRITTEN, JUST NOT KEPT: the `dispatch.circuit_broken` row the
+ * breaker's own refusal emits carries `freshCount` — the exact number the comparison needs (78 of
+ * 78 rows on the fleet). It was archived by `rotateLedger`'s PASS 1 because the step belonged to
+ * none of its three retention sets; this task adds it to `DECISION_RELEVANT_LEDGER_STEPS`, where
+ * PASS 4's existing per-step cap bounds it exactly as it bounds `run.start`/`pr.opened`.
+ *
+ * NOT A WIDER READ: this reads the SAME `lines` the caller already loaded from the live file —
+ * no second open, no archive, and `readLedgerLines`' `ledger-read-intent: live` contract at the
+ * call site is untouched. NOT A RESET EITHER: a seeded prior can only make the INDETERMINATE arm
+ * reachable, and indeterminate already means skip-and-retry, never dispatch.
+ *
+ * TWO KEYS, DELIBERATELY. The reset lines key the task on `task_id` (the same field
+ * {@link dispatchesWithoutNewOwnedPr} filters on), but a `dispatch.circuit_broken` row is written
+ * by the DAEMON's own run — its `task_id` is `"DAEMON"` and the task it refused is carried on
+ * `task`. Reading `task_id` for both would silently seed nothing, which is a zero that looks
+ * exactly like "this task never tripped".
+ *
+ * THE RESET MIRRORS THE COUNTER'S OWN. A `dispatch.circuit_broken` row OLDER than a `pr.opened`
+ * or merge credit describes a streak that has since been legitimately cleared, so forward
+ * progress discards the seed exactly as it zeroes the count — otherwise a task that tripped,
+ * shipped, and dispatched once would compare its 1 against a stale 5 and refuse itself.
+ *
+ * The step literal is written INLINE rather than through a constant on purpose:
+ * `test/ledger-rotation.test.ts` re-derives the decision-relevant set by scanning consumer
+ * sources for an equality comparison against a quoted step name, so hiding this read behind a
+ * symbol would blind the very gate that keeps the row from being archived again. That scan is
+ * TEXTUAL, not syntactic — it reads comments too, so a doc that spells the comparison out
+ * verbatim mints a phantom step and fails the gate. This paragraph describes it instead.
+ */
+export function seedCountFromCircuitBreak(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  taskId: string,
+): number | undefined {
+  let seed: number | undefined;
+  for (const line of lines) {
+    if (line.task_id === taskId && (line.step === "pr.opened" || isMergeCreditLine(line))) {
+      seed = undefined; // forward progress — the same reset the counter itself applies
+      continue;
+    }
+    if (line.step !== "dispatch.circuit_broken" || line.task !== taskId) continue;
+    const fresh = line.freshCount;
+    // A row with no usable count records that a refusal happened, not what it decided on —
+    // it must not seed a guess. Absence stays absence.
+    if (typeof fresh === "number" && Number.isFinite(fresh) && fresh >= 0) seed = fresh;
+  }
+  return seed;
+}
+
+/**
  * How many `run.start` ledger lines exist for `taskId` SINCE its most recent
  * FORWARD-PROGRESS line (or in total, if it has never recorded one) — "dispatches
  * with no NEW owned PR" (P29(ii)'s own phrasing).
@@ -2034,7 +2096,11 @@ export interface DispatchBreakerDetail {
   freshCount: number;
   /** The bound `freshCount` was compared against. */
   maxDispatches: number;
-  /** The cache's prior count for this task; absent on the first observation. */
+  /** The cache's prior count for this task; absent on the first observation. W1-T2425: on a
+   *  first observation the cache may itself have been seeded from the newest
+   *  `dispatch.circuit_broken` row for this task (see {@link seedCountFromCircuitBreak}), so
+   *  this can be present on a process's very first call — it is still the cache's value, just
+   *  one the cache learned from disk rather than from a read this process performed. */
   priorCount?: number;
   /** Whether a `pr.opened` line exists — the regression check's second term. */
   hasNewOwnedPr: boolean;
@@ -2072,7 +2138,19 @@ export function evaluateDispatchBreakerDetailed(
   // ledger-read-intent: live — the dispatch breaker wants the newest rows only.
   const lines = readLedgerLines(ledgerPath, ledgerFs);
   const freshCount = dispatchesWithoutNewOwnedPr(lines, taskId);
-  const priorCount = cache.lastCounts.get(taskId);
+  let priorCount = cache.lastCounts.get(taskId);
+  // W1-T2425: FIRST OBSERVATION OF THIS TASK IN THIS PROCESS — seed the baseline from the
+  // breaker's own on-disk record rather than starting blind, so the regression arm below is
+  // reachable across a restart. Only ever on a MISS (a live process's own observation always
+  // outranks the ledger's), and only from the lines already read here — see
+  // {@link seedCountFromCircuitBreak} for why this is neither a wider read nor a reset.
+  if (priorCount === undefined) {
+    const seeded = seedCountFromCircuitBreak(lines, taskId);
+    if (seeded !== undefined) {
+      priorCount = seeded;
+      cache.lastCounts.set(taskId, seeded);
+    }
+  }
   const hasNewOwnedPr = lastPrOpened(lines, taskId) !== undefined;
   const base = { freshCount, maxDispatches, priorCount, hasNewOwnedPr };
 
