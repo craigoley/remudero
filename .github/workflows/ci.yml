@@ -60,6 +60,37 @@ jobs:
           node-version-file: .nvmrc
       - name: Install (clean, from lockfile)
         run: npm ci
+      - name: Classify this diff (W1-T2428 fast lane)
+        # W1-T2428: THE CLASS COMES FROM `isInPlanScope` (src/lib/plan-architect.ts), via
+        # scripts/diff-class.mjs -- the SAME canonical predicate the reviewer's own `planOnly`
+        # already reads -- and never a bash reimplementation. Three plan-scope predicates already
+        # exist in src/ and two of them DISAGREE on a real PR: on #3131's file list `isInPlanScope`
+        # says plan-only while lib/triage.ts's `nonPlanFilesInDiff` returns `docs/ORIENTATION.md`.
+        # A fourth spelling in shell would drift from all three, silently, and the drift would show
+        # up as a skipped suite rather than a red check.
+        #
+        # FAIL CLOSED IN EVERY DIRECTION -- this is the criterion, not a note. `class` starts at
+        # `source`, which runs everything, i.e. EXACTLY today's behaviour, and is only ever
+        # narrowed by a successful classification printing one of three known names. A push run
+        # (where `GITHUB_BASE_REF` is empty, which is also why this step needs no PR-scoped context
+        # and stays push-safe for W1-T1033), a failed or truncated `git diff`, an EMPTY file list,
+        # a crashing import, or any unrecognised word on stdout all leave it at `source`. The
+        # expensive answer is the safe one. A MIXED diff takes the strictest class present:
+        # classifyFiles() only returns plan-only when EVERY path satisfies the predicate, so one
+        # `src/` path forces `source` whatever else the diff carries.
+        run: |
+          class=source
+          if [ -n "${GITHUB_BASE_REF}" ] \
+            && git diff --name-only "origin/${GITHUB_BASE_REF}"...HEAD > "${RUNNER_TEMP:-/tmp}"/rmd-changed.txt \
+            && [ -s "${RUNNER_TEMP:-/tmp}"/rmd-changed.txt ]; then
+            class=$(npx tsx scripts/diff-class.mjs --from "${RUNNER_TEMP:-/tmp}"/rmd-changed.txt 2>/dev/null | tail -1)
+          fi
+          case "${class}" in
+            plan-only|docs-only|source) ;;
+            *) class=source ;;
+          esac
+          echo "RMD_DIFF_CLASS=${class}" >> "${GITHUB_ENV}"
+          echo "W1-T2428: diff class = ${class} ($(wc -l < "${RUNNER_TEMP:-/tmp}"/rmd-changed.txt 2>/dev/null || echo 0) changed files)"
       - name: Install Playwright's Chromium (W1-T153 shell a11y/responsive tests need a real headless browser — Lighthouse-equivalent axe-core scan, 390px/1440px no-hscroll, fleet-control read-back/STOP-confirm interaction)
         # NO `--with-deps`, AND THAT IS THE WHOLE FIX: it is what invoked apt, and apt is what
         # failed. MEASURED ON A GREEN RUN: `--with-deps` reported `0 upgraded, 9 newly installed`
@@ -118,7 +149,45 @@ jobs:
         # leaves a record instead of erasing it on a manual re-run. `npm test` itself stays
         # retry-free -- Stryker's commandRunner re-runs it once per mutant (stryker.conf.json),
         # where a retry would blur the kill signal.
-        run: npm run test:ci
+        #
+        # W1-T2428 FAST LANE. A plan-only or docs-only diff cannot fail a suite that reads no plan
+        # and no docs path, so it runs the ENUMERATED plan-reading subset instead of the whole
+        # glob. ENUMERATED FROM THE TREE on every run by `--plan-suites`, never hand-copied: a
+        # baked list goes stale the moment someone adds a plan-reading test, and this set is what
+        # makes the lane safe rather than a blanket skip. `test/plan-proposals.test.ts` is the
+        # exemplar -- it is in the set, and it caught a real duplicate proposal id.
+        #
+        # EVERY OTHER CLASS, including every fail-closed fallback above, runs `npm run test:ci`
+        # verbatim and byte-for-byte unchanged. So does an enumeration that comes back empty.
+        run: |
+          case "${RMD_DIFF_CLASS}" in
+            plan-only|docs-only)
+              npx tsx scripts/diff-class.mjs --plan-suites > "${RUNNER_TEMP:-/tmp}"/rmd-suites.txt || true
+              if [ -s "${RUNNER_TEMP:-/tmp}"/rmd-suites.txt ]; then
+                n=$(wc -l < "${RUNNER_TEMP:-/tmp}"/rmd-suites.txt)
+                {
+                  echo "### W1-T2428 fast lane: class \`${RMD_DIFF_CLASS}\`"
+                  echo
+                  echo "**SKIPPED** the full \`test/**/*.test.ts\` glob (\`npm run test:ci\`)."
+                  echo
+                  echo "**RAN INSTEAD** the ${n} enumerated plan-reading suites: every test file that"
+                  echo "reads the committed tree from a repo-root constant AND names a plan or docs"
+                  echo "path. Those are the only suites a \`${RMD_DIFF_CLASS}\` diff can fail."
+                } >> "${GITHUB_STEP_SUMMARY}"
+                echo "W1-T2428: class=${RMD_DIFF_CLASS} -- skipping the full glob, running ${n} plan-reading suites:"
+                cat "${RUNNER_TEMP:-/tmp}"/rmd-suites.txt
+                # shellcheck disable=SC2046
+                node scripts/test-with-retry.mjs node --test --import tsx \
+                  --import ./test/setup/tmp-hygiene.ts $(cat "${RUNNER_TEMP:-/tmp}"/rmd-suites.txt)
+              else
+                echo "W1-T2428: class=${RMD_DIFF_CLASS} but the plan-reading enumeration came back EMPTY -- running the FULL suite (fail closed)."
+                npm run test:ci
+              fi
+              ;;
+            *)
+              npm run test:ci
+              ;;
+          esac
 
   commitlint:
     # W1-T31 (MASTER-PLAN §6A), relocated by W1-T129 — Conventional Commits gate. This repo
@@ -246,6 +315,37 @@ jobs:
           node-version-file: .nvmrc
       - name: Install (clean, from lockfile)
         run: npm ci
+      - name: Classify this diff (W1-T2428 fast lane)
+        # W1-T2428: THE CLASS COMES FROM `isInPlanScope` (src/lib/plan-architect.ts), via
+        # scripts/diff-class.mjs -- the SAME canonical predicate the reviewer's own `planOnly`
+        # already reads -- and never a bash reimplementation. Three plan-scope predicates already
+        # exist in src/ and two of them DISAGREE on a real PR: on #3131's file list `isInPlanScope`
+        # says plan-only while lib/triage.ts's `nonPlanFilesInDiff` returns `docs/ORIENTATION.md`.
+        # A fourth spelling in shell would drift from all three, silently, and the drift would show
+        # up as a skipped suite rather than a red check.
+        #
+        # FAIL CLOSED IN EVERY DIRECTION -- this is the criterion, not a note. `class` starts at
+        # `source`, which runs everything, i.e. EXACTLY today's behaviour, and is only ever
+        # narrowed by a successful classification printing one of three known names. A push run
+        # (where `GITHUB_BASE_REF` is empty, which is also why this step needs no PR-scoped context
+        # and stays push-safe for W1-T1033), a failed or truncated `git diff`, an EMPTY file list,
+        # a crashing import, or any unrecognised word on stdout all leave it at `source`. The
+        # expensive answer is the safe one. A MIXED diff takes the strictest class present:
+        # classifyFiles() only returns plan-only when EVERY path satisfies the predicate, so one
+        # `src/` path forces `source` whatever else the diff carries.
+        run: |
+          class=source
+          if [ -n "${GITHUB_BASE_REF}" ] \
+            && git diff --name-only "origin/${GITHUB_BASE_REF}"...HEAD > "${RUNNER_TEMP:-/tmp}"/rmd-changed.txt \
+            && [ -s "${RUNNER_TEMP:-/tmp}"/rmd-changed.txt ]; then
+            class=$(npx tsx scripts/diff-class.mjs --from "${RUNNER_TEMP:-/tmp}"/rmd-changed.txt 2>/dev/null | tail -1)
+          fi
+          case "${class}" in
+            plan-only|docs-only|source) ;;
+            *) class=source ;;
+          esac
+          echo "RMD_DIFF_CLASS=${class}" >> "${GITHUB_ENV}"
+          echo "W1-T2428: diff class = ${class} ($(wc -l < "${RUNNER_TEMP:-/tmp}"/rmd-changed.txt 2>/dev/null || echo 0) changed files)"
       - name: Install Playwright's Chromium (same requirement as the ci job — W1-T153's shell a11y/responsive tests launch a real headless browser; this job runs the same test/**/*.test.ts glob under coverage, so it needs it too)
         # Same step as the `ci` job's above, and the same reason: see that step's comment for the
         # measurement behind dropping `--with-deps`. Fixing one copy and not the other leaves the
@@ -284,6 +384,31 @@ jobs:
         # once -- zero behavior change from before this task.
         run: |
           [ "${GITHUB_EVENT_NAME}" = "pull_request" ] || { echo "W1-T1033: coverage-ratchet is PR-only; skipping the real test-with-coverage run on a ${GITHUB_EVENT_NAME} event (see this job's own comment above)."; exit 0; }
+          # W1-T2428 FAST LANE: a plan-only/docs-only diff ADDS NO SOURCE LINE, so the per-diff
+          # check has an empty set to judge and the aggregate floor cannot move. Both gates are
+          # vacuous here, and the ~20 minutes of instrumented suite they need to become vacuous is
+          # the single largest cost on such a PR. Skipping is a bash guard in the step body, NEVER
+          # a YAML condition key -- test/diff-coverage.test.ts asserts this job body carries no
+          # such key at all (the #729 skipped-check-deadlock discipline) -- and the job still
+          # registers its check run and still concludes SUCCESS, so no name can go absent from
+          # ci-gate's required list.
+          case "${RMD_DIFF_CLASS}" in
+            plan-only|docs-only)
+              {
+                echo "### W1-T2428 fast lane: class \`${RMD_DIFF_CLASS}\`"
+                echo
+                echo "**SKIPPED** in the \`coverage-ratchet\` job, all four steps:"
+                echo "\`Test with coverage\`, \`Compute this PR's base...head diff\`,"
+                echo "\`Diff coverage\` and \`Coverage ratchet\`."
+                echo
+                echo "**WHY** a \`${RMD_DIFF_CLASS}\` diff adds no source line, so the per-diff check"
+                echo "has an empty set to judge and the aggregate floor cannot move. The job still"
+                echo "registers this check run and still concludes success."
+              } >> "${GITHUB_STEP_SUMMARY}"
+              echo "W1-T2428: class=${RMD_DIFF_CLASS}; skipping the instrumented coverage run."
+              exit 0
+              ;;
+          esac
           # W1-T1217: `--import ./test/setup/tmp-hygiene.ts` is NOT optional here and its absence
           # was a real divergence, not a saving. The `ci` job runs this same
           # `test/**/*.test.ts` glob through `npm run test:ci`, whose script DOES carry that
@@ -313,6 +438,7 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           [ "${GITHUB_EVENT_NAME}" = "pull_request" ] || { echo "W1-T1033: coverage-ratchet is PR-only; skipping on a ${GITHUB_EVENT_NAME} event — BASE_SHA is empty here and would fail this diff."; exit 0; }
+          case "${RMD_DIFF_CLASS}" in plan-only|docs-only) echo "W1-T2428: class=${RMD_DIFF_CLASS}; skipping the base...head diff -- no coverage run was collected above."; exit 0;; esac
           git diff "${BASE_SHA}"...HEAD > pr.diff
       # RMD_CI_REPORT is set per-STEP on these two gate steps ONLY, never at job level: the coverage
       # collection step above runs the whole suite, and test/{diff-coverage,coverage-ratchet}.test.ts
@@ -325,12 +451,14 @@ jobs:
           RMD_CI_REPORT: "1"
         run: |
           [ "${GITHUB_EVENT_NAME}" = "pull_request" ] || { echo "W1-T1033: coverage-ratchet is PR-only; skipping on a ${GITHUB_EVENT_NAME} event (no pr.diff was computed above)."; exit 0; }
+          case "${RMD_DIFF_CLASS}" in plan-only|docs-only) echo "W1-T2428: class=${RMD_DIFF_CLASS}; skipping diff-coverage -- this diff adds no source line, so there is nothing to judge."; exit 0;; esac
           node scripts/diff-coverage.mjs --lcov coverage/lcov.info --diff pr.diff
       - name: Coverage ratchet (blocks a PR whose branch coverage is below the absolute floor)
         env:
           RMD_CI_REPORT: "1"
         run: |
           [ "${GITHUB_EVENT_NAME}" = "pull_request" ] || { echo "W1-T1033: coverage-ratchet is PR-only; skipping on a ${GITHUB_EVENT_NAME} event (no coverage/lcov.info was collected above)."; exit 0; }
+          case "${RMD_DIFF_CLASS}" in plan-only|docs-only) echo "W1-T2428: class=${RMD_DIFF_CLASS}; skipping the aggregate ratchet -- this diff changes no source line, so coverage cannot have dropped."; exit 0;; esac
           node scripts/coverage-ratchet.mjs --lcov coverage/lcov.info --baseline scripts/coverage-baseline.json
 
   mutation-ratchet:
