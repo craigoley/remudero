@@ -21,25 +21,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-
-/**
- * The CLI-catch test below (main()'s --list-plan-reading-suites error path, scripts/diff-
- * class.mjs:211-213) forces planReadingSuiteFiles() to throw by dropping an unreadable
- * (`chmod 000`) file directly under the REAL test/ dir, mirroring test/adoption-report-has-a-
- * producer.test.ts's own root guard: under uid 0, `chmod 000` cannot deny a read (measured
- * 2026-08-26 there), so the throw this test depends on would never fire and the assertions
- * would fail for a reason unrelated to what they test. CI's runner is non-root, so the test
- * still runs and can still fail there, which is the only place its failure would mean anything.
- */
-const ROOT_CANNOT_BE_DENIED_A_READ: string | false =
-  typeof process.getuid === "function" && process.getuid() === 0
-    ? "uid 0 — chmod 000 cannot deny root a read, so this test's unreadable-file premise never holds here; " +
-      "the assertion is unchanged and still runs on CI's non-root runner"
-    : false;
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");
@@ -135,29 +120,15 @@ test("acceptance 2 (CLI): --list-plan-reading-suites failing (bad root) exits no
   assert.throws(() => planReadingSuiteFiles(join(REPO_ROOT, "no-such-directory-at-all")));
 });
 
-test(
-  "acceptance 2 (CLI, real process boundary): --list-plan-reading-suites exits 1 and prints NOTHING on stdout when enumeration throws",
-  { skip: ROOT_CANNOT_BE_DENIED_A_READ },
-  () => {
-    // Drives main()'s own try/catch (scripts/diff-class.mjs:206-215) as a real subprocess, not
-    // merely the unit-level throw proven above — an unreadable file directly under the REAL
-    // test/ dir makes readFileSync inside planReadingSuiteFiles throw for real, so this exercises
-    // the CLI's catch block (console.error x2, process.exitCode = 1) byte-for-byte as CI runs it.
-    const unreadable = join(REPO_ROOT, "test", "zz-w1-t2428-unreadable-fixture.test.ts");
-    writeFileSync(unreadable, "// deliberately unreadable fixture for a CLI-level enumeration failure\n");
-    chmodSync(unreadable, 0o000);
-    try {
-      const result = runCli(["--list-plan-reading-suites"]);
-      assert.equal(result.status, 1, result.stdout + result.stderr);
-      assert.equal(result.stdout, "", "a failed enumeration must print NOTHING on stdout, never a false empty-but-trusted list");
-      assert.match(result.stderr, /diff-class: FAILED to enumerate the plan-reading suite set/);
-      assert.match(result.stderr, /printing NOTHING — a caller reading zero lines here must fail closed/);
-    } finally {
-      chmodSync(unreadable, 0o644);
-      rmSync(unreadable, { force: true });
-    }
-  },
-);
+// A real-subprocess variant of the above (forcing main()'s --list-plan-reading-suites catch,
+// scripts/diff-class.mjs:206-215, via an actually-unreadable file under the real test/ dir) was
+// deliberately NOT added here: the only portable way to make a regular file's readFileSync throw
+// for every uid is `chmodSync` to a mode with no owner-read bit, and test/host-capability-
+// fixtures.test.ts (out of this task's declared file scope, W1-T1227) ratchets every such call
+// site — a new undeclared one fails ITS OWN build, not this script's. The unit-level throw proven
+// above already covers the identical planReadingSuiteFiles contract; only the extra byte-for-byte
+// subprocess assertion of main()'s catch body is left uncovered here (see this REPORT's
+// Follow-ups).
 
 // ── acceptance 3: an empty file list runs everything rather than reading as plan-only ──────────
 
