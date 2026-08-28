@@ -1,0 +1,141 @@
+- id: W1-T2440
+  title: "THE BOARD PRE-WARM SHELLS ITS PR WALK SYNCHRONOUSLY AND PARKS THE ONLY THREAD WHILE IT RUNS — `warm?(): void` returns void by signature and both gateways reach `gh` through `execFileSync`, which `status.ts` already documents as parking the process for the call's duration, so every other request the console makes waits behind a walk it did not ask for; the cadence is not the defect and the bound is correctly sized"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 25.00
+  files: [src/lib/status.ts, test/board-prewarm-does-not-block.test.ts]
+  origin: "operator-brief#console-poll-cost-centre-2026-08-28"
+  plan_refs: ["W1-T2323", "W1-T154", "W1-T2219", "W1-T119"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE ID. Eight surfaces swept before a byte of this file was written, controls from the ENUMERATED
+    OPEN SET (#3214, #3205), anchored `W1-T2440([^0-9]|$)` with a `[0-9]` class and never `\d`.
+    SURFACE 1 READS 1 against 553 refs, W1-T2438 and W1-T2437 firing 1 each. Filenames 0 of 855;
+    declared ids 0 of 939; open titles 0 of 2; open bodies 0 of 104 lines; head refs 0 of 145 checked
+    BOTH cases; merged trailers 0 of 47; merged subjects 0 of 400. Controls: W1-T2323 fires 1 on
+    filenames and declared ids; W1-T2437 fires 12 on bodies; W1-T2430 fires 1 on head refs;
+    W1-T2347/W1-T2419 on trailers; W1-T2438/W1-T2272 on subjects. ⚠ ONE CONTROL READ ZERO AND IS
+    REPORTED: W1-T2439 reads 0 on head refs because no such branch exists — the surface stays
+    controlled by W1-T2430. ⚠ AND ONE ANCHOR BAND WAS REJECTED: `W1-T244` reads 1 against 1, too
+    sparse to prove anything; `W1-T24` reads 2 against 36 and `W1-T2` 1 against 270, so the anchor
+    discriminates on a populated band.
+
+    (1) THE MECHANISM, BY SYMBOL, AND THE MODULE ALREADY SAYS IT. `GitHub.warm?(): void`
+    (`src/lib/status.ts`) RETURNS VOID — it is synchronous by signature, so a caller cannot await
+    it even if it wanted to. `prewarmBoardGithub` (`src/lib/serve.ts`) is just
+    `setInterval(() => github.warm?.(), refreshMs)`, and `DEFAULT_BOARD_PREWARM_MS = 15_000`.
+    The blocking is documented in `status.ts` itself, twice and unprompted: "the real, synchronous
+    `execFileSync` path BLOCKS THE WHOLE PROCESS for its duration", and "Both gateways shell `gh`
+    through `execFileSync`, which is SYNCHRONOUS: a call that never returns does not merely stall
+    the sweep, it PARKS THE DAEMON'S ONLY THREAD". THE DEFECT IS ALREADY WRITTEN DOWN; what is
+    missing is that the console pays it too.
+
+    (2) ⚠ THREE CADENCES, NOT ONE — AND CONFLATING THEM MISPRICES THE PROBLEM. The browser polls
+    `/v1/status` every 3 s (`POLL_INTERVAL_MS = 3000`, `serve.ts`); the SSE stream paces at
+    `DEFAULT_POLL_MS` = 250 ms (`board.ts`); the SERVER warms the gateway every 15 s. SO A POLL DOES
+    NOT TRIGGER A WALK: there are FIVE polls per warm, and the walk's cost is per-warm, not
+    per-poll. Any argument of the form "a 3 s poll cannot consume a 1000-PR walk" is true but does
+    not describe the coupling — the coupling is that a poll ARRIVING DURING a warm waits behind it,
+    because the warm holds the thread.
+
+    (3) THE CONTROL — THE WALK IS NOT USELESS, AND THIS TASK DOES NOT ARGUE THAT IT IS. `BatchedPr`
+    carries `number`, `url`, `state`, `headRefName`, `body`, `autoMergeRequest` and `title`, and the
+    board consumes them: counted across `src/lib/board.ts`, `state` 44 references, `number` 32,
+    `title` 29, `url` 9, `body` 6. THE CONSOLE READS WHAT IT FETCHES. The question is not whether
+    the walk is needed but whether it must be paid on the thread that serves the request.
+
+    (4) SO `execFileSync` IS THE DEFECT AND THE CADENCE IS NOT, AND THE ORDER MATTERS. An async
+    fetch AT THE SAME 15 s CADENCE removes the dead wall clock without touching a single bound: the
+    walk still runs, still costs the same GraphQL, and still refreshes at the same rate — it simply
+    stops holding the thread while it does. PRICE THAT FIRST, before any cache, any pacing, any
+    slower poll and any change to `GH_CALL_TIMEOUT_MS`.
+
+    ⚠ AND THE PRICE IS A SIGNATURE, WHICH THIS SHARD NAMES RATHER THAN HIDES. `warm?(): void` is
+    part of the `GitHub` interface that several gateways implement; making the fetch async changes
+    that return type and reaches every implementer and every caller that treats it as fire-and-
+    forget. That is the real cost of remedy (a), it is not small, and a build must scope it before
+    committing rather than discovering it. `GH_CALL_TIMEOUT_MS = 60_000` is DELIBERATELY UNTOUCHED:
+    its own doc says the number "is sized so it cannot fire on a healthy call, which is this repo's
+    recurring defect when it does", against a measured healthy call of 0.70–0.90 s.
+
+    (5) ⚠ AND THE ZERO-VIEWER HALF IS ALREADY FIXED — DO NOT RE-FILE IT. `gatePrewarmOnClients`
+    refcounts SSE connections so the timer only runs while somebody is watching: zero clients means
+    `warm()` is never called at all. Its doc records the burn that motivated it (a serve process
+    left running unwatched issued 78.9% of all GraphQL traffic on the account). THIS TASK IS ABOUT
+    THE WATCHED CASE, which that fix deliberately leaves paying the same synchronous cost.
+
+    (6) THE POPULATION, AND THIS CHECKOUT CANNOT REPRODUCE THE COMMISSIONING SPLIT. Read over the
+    three-form union at the CONFIG ROOT (666 `.gz`, 6 plain, 1 live; per-form read control
+    `run.start` 257,438 / 1,314 / 200), `board_gateway.*` returns 189,592 rows — `fetch_ok` 51,163,
+    `fetch_bytes` 51,163, `issue_fetch_bytes` 35,133, `issue_fetch_ok` 35,132,
+    `issue_fetch_failed` 11,939, `fetch_failed` 5,062.
+
+    ⚠ BUT THE LANE ATTRIBUTION DOES NOT REPRODUCE HERE, AND THE REASON IS WORTH MORE THAN THE
+    NUMBER. Keyed on the STEP NAME for failure (there is no `ok` field — a first pass keyed on one
+    and read 0 failures for every lane, which was wrong), the split is `lane=<absent>` 187,695 rows
+    with 16,926 failed (9.0%) and `lane=daemon` 1,897 with 75 (4.0%). NO `board_gateway` ROW ON THIS
+    HOST CARRIES `lane=serve`. The control fires: `lane=serve` appears 207 times across other steps,
+    `lane=daemon` 20,747, `lane=retro` 0 — so the query can see a serve lane, it simply is not on
+    these rows. AND EVERY ONE of the 335 board_gateway rows in the LIVE file carries `lane=daemon`.
+
+    THE HONEST READING IS TWO-PART. First, 187,695 of 189,592 rows — 99% — CARRY NO LANE FIELD AT
+    ALL, so any percentage attributed to a lane rests on the 1% that do. Second, this host's
+    archives stop at 2026-08-17 while the commissioning measurement is dated 2026-08-28, so the
+    windows do not overlap and NEITHER READING REFUTES THE OTHER. What follows is not that the
+    serve-lane claim is wrong; it is that A LANE SPLIT ON THIS STEP IS NOT VERIFIABLE FROM A CORPUS
+    WHERE THE FIELD IS ABSENT FROM 99% OF ROWS, and a remedy sized on that split should say which
+    host it was taken from.
+
+    (7) ⚠ NO CACHE WITHOUT THE THREE THINGS W1-T2323 ALREADY DEMANDS. That task records that "the
+    board index expires before its own fetch finishes — the daemon's gateway takes the default
+    15,000 ms TTL while a full walk costs 18–22 s, so every read after a full walk is already
+    stale". A TTL SHORTER THAN ITS OWN REFRESH IS ALREADY A FILED DEFECT, and adding a second cache
+    on top of it would inherit the same shape. If a cache is ever proposed it needs a GENERATION
+    STAMP rather than a wall-clock TTL, a staleness definition expressed in generations, and a COLD
+    START THAT READS UNKNOWN RATHER THAN EMPTY — an empty board and an unfetched board are different
+    facts and the console must not render them alike.
+
+    (8) ⚠ AND NO WEBHOOK, DELIBERATELY. A poll is SELF-HEALING: a missed cycle is recovered by the
+    next one. A missed event is lost silently, and this repo has been bitten by exactly that shape
+    three times this week — #3164's stale plan, W1-T2425's rotated window, and W1-T2431's rows that
+    never land. Nothing here proposes pacing, a slower poll as the primary remedy, or raising the
+    60 s bound.
+
+    (9) OWNED ELSEWHERE: the TTL-shorter-than-its-own-refresh defect is W1-T2323's and is CITED, not
+    re-filed; the zero-viewer gate is `gatePrewarmOnClients`'s and is already shipped; the read-state
+    vocabulary that would let a caller see an in-flight fetch is W1-T2219's. THIS TASK OWNS ONLY THE
+    SYNCHRONOUS SHELL ON THE REQUEST-SERVING THREAD.
+
+    RULE 19 BAND, SET UP FRONT. `risk: high` is the SPAN reading and carries no claim about blast
+    radius: `files:` names two stems as the sizing check counts them, `status` and
+    `board-prewarm-does-not-block`, and that pairing is refused at `risk: medium`.
+  acceptance:
+    - claim: "the board pre-warm does not hold the thread while its walk runs"
+      proof: "unit test: test/board-prewarm-does-not-block.test.ts"
+    - claim: "a request arriving during a warm is served without waiting for it"
+      proof: "unit test: test/board-prewarm-does-not-block.test.ts"
+    - claim: "the refresh cadence and the call bound are both unchanged"
+      proof: "unit test: test/board-prewarm-does-not-block.test.ts"
+    - claim: "the zero viewer gate still stops the timer when the last client leaves"
+      proof: "unit test: test/board-prewarm-does-not-block.test.ts"
+    - claim: "the fields the board reads from a walked row are unchanged"
+      proof: "unit test: test/board-prewarm-does-not-block.test.ts"
+    - claim: "nothing added introduces a second cache or a wall clock staleness rule"
+      proof: "unit test: test/board-prewarm-does-not-block.test.ts"
+  falsifier: |
+    If a measurement on the host that actually serves the console shows the pre-warm's walk
+    completing well inside one poll interval — so no request ever waits behind it — then the
+    synchronous shell costs nothing observable there and this task should be closed rather than
+    implemented. The measurement must time the WARM ITSELF against concurrent request latency on
+    the same process, not the walk in isolation: a walk that takes 18–22 s (W1-T2323's own figure)
+    against a 3 s poll is six polls deep, and only a same-process observation shows whether they
+    queued.
+
+    SEPARATELY DECISIVE: if `GitHub.warm` ever returns a promise, or if either gateway stops
+    reaching `gh` through `execFileSync`, the mechanism named here is gone and the finding must be
+    re-derived rather than trusted.
