@@ -118,10 +118,17 @@ forensic detail, so the narrative does not need to live here.
   string, so a title assembled from `" + "`-joined literals exists verbatim in no file: a proof
   spanning that concatenation seam resolves to ZERO candidates and is judged unexecutable even
   though the test exists and passes. *(impl-AG, caught pre-commit)*
-- **Keep a `unit test:` body under 100 characters with at most ONE comma and no `"; "`, and never
-  let a `grep:` PATTERN contain `" in "`.** `looksLikeScenarioNarrative` (`src/lib/task-linter.ts`)
-  fails `proof-resolvability` at ≥2 commas, or `"; "` plus a comma, or >100 chars. A `grep:` proof
-  splits on the LAST `" in "` before a path-like token, so `" in "` inside the pattern mis-splits.
+- **Keep a `unit test:` body under 100 characters with at most ONE comma and no `"; "`; a `grep:`
+  PATTERN MAY contain `" in "` provided an explicit path follows it.**
+  `looksLikeScenarioNarrative` (`src/lib/task-linter.ts`) fails `proof-resolvability` at ≥2
+  commas, or `"; "` plus a comma, or >100 chars. **CORRECTED 2026-08-28 — this bullet banned
+  `" in "` outright and said the pattern "mis-splits".** `DIALECT_GREP_PATH_RE`
+  (`src/lib/review.ts`) is `/^(.*?)\s+in\s+(\S*[./*]\S*)$/i` — LAZY, with the path group `\S`-only
+  against `$`, so the split always lands before the FINAL token and an embedded `" in "` survives
+  intact: `grep: always succeeds in one call in src/lib/ledger.ts` reads `verdict: pass`. THE REAL
+  HAZARD IS A STOLEN TRAILING TOKEN — a pattern ENDING in a path-like token with NO explicit path
+  has that token taken as the path: `grep: the convergence invariant fires in ledger.ts` greps
+  `ledger.ts` and reads `verdict: exec_error`. THE CHECK IS `captured path == declared path`.
   Forward references are legitimate — for an unimplemented task the named test does not exist yet;
   what must hold today is that the proof PARSES. Forward-referencing a PATH is safe;
   forward-referencing a SYMBOL NAME is a guess. *(#982, #984; #920 → #943 vs #921 as counter-example)*
@@ -743,3 +750,14 @@ forensic detail, so the narrative does not need to live here.
   added one seamed policy read and reddened `test/config-reader-seams.test.ts`, a file outside its
   `files:` that references nothing it touched. Also run any suite that enumerates a population your
   file joins, found by what it walks rather than by name. *(#2639, #2605)*
+
+## Lessons from 2026-08-28
+
+- **A Rule 21 protocol run passing `{ baseTask }` ALONE reports THREE VACUOUS ZEROS — including the
+  one you would report as real.** `postMergeAmendmentViolations` (`src/lib/review.ts`) returns `[]`
+  on its first two lines at `!ctx.statusResolvable` and `!ctx.merged`, so the real row, the vacuity
+  row and the trap row all read 0 FOR THE SAME REASON and the table looks correct. Pass
+  `statusResolvable: true`, `merged: true` and `baseAcceptance`. THE BLOCKING CONTROL — a row you
+  have deliberately made violate — IS THE ONLY THING SEPARATING A REAL ZERO FROM A DEAD CALL, and
+  it must run in the SAME call shape as the rows you report. *(#3211 — three zeros reported, then
+  withdrawn when the blocking control read 0 too)*
