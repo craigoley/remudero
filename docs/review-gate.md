@@ -556,3 +556,41 @@ delegation shells out via the Agent SDK and is untested by design" pattern (`spa
 (e.g. `spawnReconSpecialist(…)`) is INVALID and must earn coverage, because such a caller typically
 carries real orchestration (lazy-prepare, containment probing) that a test should exercise with
 injected deps. Every exemption is still logged; the fail-closed validator is unchanged.
+## coverage-ratchet is no longer a test verdict (2026-08-28, operator ruling)
+
+**What changed for an operator reading a red check.** `coverage-ratchet` used to fail whenever the
+instrumented suite failed, which made it a second, slower copy of `ci`'s verdict. It no longer does.
+`ci` owns test correctness; `coverage-ratchet` owns coverage. A red `coverage-ratchet` now means a
+COVERAGE regression (or a missing lcov), and nothing else — so the two checks stop reporting the
+same defect twice, in two different colours, at two different times.
+
+**The retry is gone from this job and stays in `ci`.** `scripts/test-with-retry.mjs` re-ran the
+WHOLE command on any first-pass failure, and in `coverage-ratchet` the second pass routinely could
+not finish inside the job's 2340s `timeout-minutes: 39`. MEASURED over 299 `coverage-ratchet` jobs
+spanning 2026-08-27T13:32Z to 2026-08-28T14:20Z — about 25 hours: 271 success, 20 failure, and
+**8 cancelled, every one between 2355s and 2361s**. All eight were killed by the bound rather than
+by a verdict, and they are ~2.7% of all runs in a single day. The long tail brackets that bound
+closely on the other side — 2270s, 2225s, 2223s, 2204s, 2187s, 2176s red and **2159s green** — so a
+second pass is a coin flip against the timeout rather than a rescue. Re-derive rather than quote
+this; the window moves, and a narrower one badly understates it (the same query over the 100 most
+recent runs sees only 2 of these 8).
+
+A cancellation **names no failing test**, so the retry converted a `failure` that named the failing
+assertion into a `cancelled` that named nothing. `ci-gate` reads a cancellation as FAILURE, after
+which `remudero-review` never posts and the PR sits green-but-unreviewed — which is how a PR can
+show every job green in the Actions tab and still never receive a verdict.
+
+**What this gives up, stated rather than buried.** That one green in six was a real rescue. A flake
+unique to the instrumented harness now reports red on the first pass instead of being papered over.
+`ci` still retries, so a flake that reproduces in both harnesses is still absorbed there.
+
+**The one thing this step still fails on is a missing lcov.** Without it the coverage gates below
+have nothing to read, and a green job would mean "coverage was never checked" — the vacuous pass the
+job exists to prevent. Absence is a real failure, and is the only `exit 1` left in the step.
+
+**A step-level shell guard, never a YAML conditional and never a `paths:` filter.**
+`test/diff-coverage.test.ts` asserts this job body carries no line beginning with a YAML
+conditional (the #729 skipped-check deadlock discipline), and the job stays in `ci-gate`'s
+`REQUIRED` list — it must still register and still fail on a coverage regression. Because no step
+here carries an `if:`, a failing step skips every step after it, so swallowing the test exit code is
+the only way to keep the coverage gates running at all.

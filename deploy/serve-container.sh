@@ -68,6 +68,24 @@
 #   ./deploy/serve-container.sh --dry-run          # print the docker run, change nothing
 #   TAG=<sha> ./deploy/serve-container.sh          # pin a build instead of :latest
 #   RMD_STATE_DIR=/path ./deploy/serve-container.sh    # if the bind mount is not the daemon's
+#   RMD_CLAUDE_JSON_PATH=/path ./deploy/serve-container.sh   # if ~/.claude.json is not the host's
+#
+# W1-T2434: THE ACCOUNT FILE, MOUNTED READ-ONLY AND WIRED THROUGH THE SEAM W1-T997 ALREADY BUILT.
+# `readAccountUsageFile` (src/lib/account-usage.ts) reads `~/.claude.json` for the console's
+# ACCOUNT strip — email/uuid/org plus the cached usage windows. Under this container's own
+# `HOME=/home/node` that path has never existed: nothing here mounted it, so every request read
+# `unreadable` and the strip named no account at all, even though the identical file sits, fresh,
+# on the host that launches this script (the same host `remudero-daemon` reads its credentials
+# from — see `deploy/recycle-container.sh`'s `CRED_DIR`). `resolveAccountFilePath`/
+# `RMD_ACCOUNT_FILE_PATH` (serve.ts, W1-T997) were built for exactly this and were never supplied
+# by any deploy artifact (producer-completeness.ts's runtime-adoption audit named this gap
+# directly). MOUNTED READ-ONLY, never read-write: unlike the daemon's credential directory (which
+# self-refreshes and must stay writable), nothing in this container ever needs to write
+# `.claude.json`, and CONTAINMENT is unaffected either way — `readAccountUsageFile` already
+# projects out only six scalar fields and the parsed object never escapes that function. ABSENT IS
+# NOT REFUSED: a host with no `.claude.json` yet starts and serves exactly as before this task,
+# with the ACCOUNT strip reading "unknown" rather than the console failing to boot over a
+# telemetry-only reading.
 set -euo pipefail
 
 REGISTRY="${REGISTRY:-synthwatcholey0620}"
@@ -81,6 +99,12 @@ TUNNEL_CONTAINER="${RMD_TUNNEL_CONTAINER:-cloudflared}"
 NETWORK="${RMD_SERVE_DOCKER_NETWORK:-rmd-net}"
 
 STATE_MOUNT_DEST="/home/node/Remudero"
+# W1-T2434: the host-side account file and where it lands in the container — see the header note
+# above. Derived from `${HOME}` the same way `recycle-container.sh`'s `CRED_DIR` derives the
+# daemon's credential directory, so both containers agree on whose `.claude.json` is authoritative
+# without either retyping the other's default.
+CLAUDE_JSON_PATH="${RMD_CLAUDE_JSON_PATH:-${HOME:-/root}/.claude.json}"
+CLAUDE_JSON_MOUNT_DEST="/home/node/.claude.json"
 SERVE_PORT="${RMD_SERVE_PORT:-4317}"
 # The pair from part 1 of the header. Both are named here, next to each other, so a future edit
 # cannot drop one and leave a launch that boots and binds the wrong interface.
@@ -218,6 +242,20 @@ for VAR_NAME in GH_APP_ID GH_APP_INSTALLATION_ID GH_APP_PRIVATE_KEY_PATH; do
 done
 unset CURRENT VAR_NAME
 
+# ── 4c. THE ACCOUNT FILE — MOUNTED READ-ONLY WHEN PRESENT, NEVER REFUSED WHEN ABSENT (W1-T2434) ──
+# See the header note for the defect this closes. `-f` (a regular file, not a directory) is the
+# right test: `~/.claude.json` is a FILE beside `~/.claude/`, never the directory itself, and a
+# host where the two got swapped should read as "absent" rather than mount the wrong thing.
+ACCOUNT_FILE_ARGS=()
+if [ -f "${CLAUDE_JSON_PATH}" ]; then
+  ACCOUNT_FILE_ARGS=(-v "${CLAUDE_JSON_PATH}:${CLAUDE_JSON_MOUNT_DEST}:ro" -e "RMD_ACCOUNT_FILE_PATH=${CLAUDE_JSON_MOUNT_DEST}")
+  echo "serve-container: account file ${CLAUDE_JSON_PATH} -> ${CLAUDE_JSON_MOUNT_DEST} (read-only)"
+else
+  echo "serve-container: NOTE — no account file at ${CLAUDE_JSON_PATH}; the ACCOUNT strip will read unknown." >&2
+  echo "  Not a refusal: identity is telemetry, not a serving requirement. Set RMD_CLAUDE_JSON_PATH" >&2
+  echo "  if the operator's ~/.claude.json lives somewhere else on this host." >&2
+fi
+
 # ── 5. AN EXISTING CONTAINER IS NEVER SILENTLY REPLACED ─────────────────────────────────────────
 # Replacing the console is a deliberate act: it is frequently the only surface an operator has on a
 # fleet they are away from, and this script is also the natural thing to re-run "just to check".
@@ -247,6 +285,14 @@ RUN_ARGS=(
   -e GH_APP_PRIVATE_KEY_PATH
   -e "RMD_SERVE_NETWORK=${SERVE_NETWORK_ENV_VALUE}"
   -v "${STATE_DIR}:${STATE_MOUNT_DEST}"
+  # W1-T2434: the `[@]+"..."` form, not a bare `"${ACCOUNT_FILE_ARGS[@]}"`. Under `set -u` (line 1)
+  # bash BEFORE 4.4 treats expanding an EMPTY array as an unbound variable and aborts the script —
+  # MEASURED on bash 3.2.57, which is what `/usr/bin/env bash` resolves to on macOS: `EMPTY[@]:
+  # unbound variable`, exit 1. That fires on exactly the ABSENT-account-file path this block's own
+  # header promises is "not a refusal", so the bare form would refuse to launch the console on the
+  # one host state it was written to tolerate. The production host is bash 5.2.21 (measured) where
+  # either form works; this one works on both.
+  "${ACCOUNT_FILE_ARGS[@]+"${ACCOUNT_FILE_ARGS[@]}"}"
   "${REF}"
   ./bin/rmd serve --host "${SERVE_BIND_HOST}"
 )

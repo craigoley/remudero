@@ -128,12 +128,44 @@ test("test-with-retry: FLAKE-RETRY evidence is also appended to $GITHUB_STEP_SUM
   assert.match(summary, /FLAKE-RETRY: first attempt failed — .*summary-recorded test/);
 });
 
-// ── both required test surfaces route through the wrapper; `npm test` itself stays retry-free ──
-
-test("test-with-retry: is wired into both required test surfaces (ci job + coverage-ratchet job) in .github/workflows/ci.yml, and `npm test` itself stays retry-free for Stryker", async () => {
+// ── ONE required surface routes through the wrapper now; `npm test` itself stays retry-free ─────
+//
+// THIS TEST USED TO ASSERT THE OPPOSITE AND KEPT PASSING AFTER THE WIRING CHANGED. It read
+// `ciYaml.match(/test-with-retry\.mjs/g).length >= 2` on the RAW file, naming "the ci job's Test
+// step and the coverage-ratchet job's test-with-coverage step". The 2026-08-28 ruling removed the
+// wrapper from coverage-ratchet — and the assertion stayed green, because three PROSE mentions
+// survive in ci.yml's comments. `assertion-discrimination` caught exactly that: literal present in
+// the raw target, ABSENT once comments are stripped, so the assertion could not tell "the mechanism
+// is wired" from "someone wrote the name down". The gate failed the PR that made the claim false,
+// which is the gate working.
+//
+// THE REPLACEMENT READS EXECUTABLE CONTENT ONLY, AND IN BOTH DIRECTIONS, so it discriminates
+// whichever way the wiring moves: `ci` must still reach the wrapper, and no `run:` step may name it
+// again. Re-adding it to coverage-ratchet turns this red on the second assertion; dropping it from
+// `ci` turns it red on the first.
+test("test-with-retry: the ci job reaches the wrapper through `npm run test:ci` while no run: step names it directly, and `npm test` stays retry-free for Stryker", async () => {
   const ciYaml = await readFile(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
-  const occurrences = ciYaml.match(/test-with-retry\.mjs/g) ?? [];
-  assert.ok(occurrences.length >= 2, "expected test-with-retry.mjs to appear at least twice in ci.yml (the ci job's Test step and the coverage-ratchet job's test-with-coverage step)");
+  // A `#` line comment is the only comment form a YAML workflow has, and every surviving mention of
+  // the wrapper in this file sits on one. Dropping those lines leaves the executable content.
+  const executable = ciYaml
+    .split("\n")
+    .filter((line) => !/^\s*#/.test(line))
+    .join("\n");
+
+  // POSITIVE CONTROL ON THE STRIPPER ITSELF, and it is load-bearing rather than decorative: an
+  // over-eager filter that emptied `executable` would make the doesNotMatch below vacuously true —
+  // the "zero is not a measurement until a control proves the query could see its corpus" shape.
+  assert.match(
+    executable,
+    /npm run test:ci/,
+    "the ci job's Test step must still invoke the wrapper via `npm run test:ci` (and if this line is gone, the assertion below proves nothing)",
+  );
+
+  assert.doesNotMatch(
+    executable,
+    /test-with-retry/,
+    "no run: step may name the wrapper directly: `ci` reaches it through `npm run test:ci`, and coverage-ratchet must not retry at all (2026-08-28 ruling — of six two-pass runs on record, four were cancelled against timeout-minutes: 39, and a cancellation names no failing test)",
+  );
 
   const pkg = JSON.parse(await readFile(join(REPO_ROOT, "package.json"), "utf8"));
   assert.doesNotMatch(pkg.scripts.test, /test-with-retry/, "`npm test` must stay retry-free -- Stryker re-runs it once per mutant, where a retry would blur the kill signal");

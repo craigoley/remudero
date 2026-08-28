@@ -396,3 +396,162 @@ test("runFixRung: a FAILING body update is traced and the review still runs on t
   assert.equal(reviewReports[0], STALE_BODY, "the review judges the body exactly as fetched when the correction could not be written");
   assert.equal(outcome.outcome, "escalated", "the rung completes its ordinary refusal rather than throwing");
 });
+
+// ── the repairer must refuse a claim it can only see PART of ─────────────────────────
+//
+// `recognizeChangesetClaims`' own `countRe` (lib/review.ts) captures an enumeration as
+// comma-separated tokens only. An author whose last item is joined with "and" therefore gets a
+// claim that STOPS EARLY, and the splice in `deriveChangesetClaimUpdate` replaces only the span it
+// was handed — leaving the orphan behind. MEASURED before this guard, against a 3-file diff:
+//
+//   in : "touches exactly two files: src/x.ts and src/y.ts."
+//   out: "touches exactly 3 files: a.ts, b.ts, c.ts and src/y.ts."
+//
+// A body that now names FOUR paths while claiming three: a worse claim than the stale one it
+// replaced, written automatically, on a PR whose author never asked for it. Every other refusal in
+// this function guards against editing the WRONG text; this one guards against editing the right
+// text INCOMPLETELY, which is the failure mode that turns a false-positive check into a
+// false-positive edit.
+
+const AND_STYLE_DIFF = ["a.ts", "b.ts", "c.ts"];
+
+/** One ordinary fix-worker strike's own pushes. The BODY REPAIR contributes none — the two rung
+ *  tests below assert this same number with the repair firing and refusing, which is what isolates
+ *  the repair's contribution from the worker's. */
+const PUSHES_PER_WORKER_STRIKE = 1;
+
+test("an 'A and B' enumeration is REFUSED, not half-rewritten — the orphaned tail is why", () => {
+  const body = "This PR touches exactly two files: src/x.ts and src/y.ts.";
+  assert.equal(
+    deriveChangesetClaimUpdate(body, AND_STYLE_DIFF),
+    undefined,
+    "the repairer cannot see the whole claim, so it must decline rather than splice",
+  );
+  // THE FALSIFIER FOR THIS GUARD: the pre-fix behaviour, spelled out. If the guard is removed, the
+  // function returns this string — which both changes the count AND leaves `and src/y.ts` behind.
+  // Asserting the absence of THIS EXACT output is what makes the test fail when the fix is reverted,
+  // rather than merely passing because some other refusal happened to fire.
+  const corrupted = "This PR touches exactly 3 files: a.ts, b.ts, c.ts and src/y.ts.";
+  assert.notEqual(deriveChangesetClaimUpdate(body, AND_STYLE_DIFF), corrupted);
+});
+
+test("a comma list whose LAST item is joined with 'and' is refused too — the truncation is the same shape", () => {
+  assert.equal(
+    deriveChangesetClaimUpdate("touches exactly two files: src/x.ts, src/y.ts and src/z.ts.", AND_STYLE_DIFF),
+    undefined,
+  );
+});
+
+test("the guard does NOT over-refuse — comma-only lists, bare counts, and ordinary prose containing 'and' still repair exactly as before", () => {
+  // CONTROLS. A guard that refused these would have closed the corruption by disabling the repair,
+  // which is not a fix. Each of these three was repairable before the guard and must still be.
+  assert.equal(
+    deriveChangesetClaimUpdate("touches exactly two files: src/x.ts, src/y.ts.", AND_STYLE_DIFF),
+    "touches exactly 3 files: a.ts, b.ts, c.ts.",
+  );
+  assert.equal(deriveChangesetClaimUpdate("touches exactly two files.", AND_STYLE_DIFF), "touches exactly 3 files.");
+  // `and` present, but the token after it is not path-shaped — prose, not a continued enumeration.
+  assert.equal(
+    deriveChangesetClaimUpdate("touches exactly two files and 2 directories.", AND_STYLE_DIFF),
+    "touches exactly 3 files and 2 directories.",
+  );
+  // A sentence boundary ends the clause: the `And` below begins new prose, not a list item.
+  assert.equal(
+    deriveChangesetClaimUpdate("touches exactly two files. And the rationale is elsewhere.", AND_STYLE_DIFF),
+    "touches exactly 3 files. And the rationale is elsewhere.",
+  );
+});
+
+test("runFixRung: a comma-style stale claim is REPAIRED in place — one body write, a fix.body_claim_updated row, and no commit", async () => {
+  const failing = fakeReview("failure", [
+    criterion({ claim: "criterion A is covered", met: false, reason: "proof unmet: report does not substantiate it (matched 4/12 proof keywords)" }),
+  ]);
+  const STALE_BODY = "This PR touches exactly 2 files: a.ts, b.ts.\n\nRemudero-Task: CHANGESET-REPAIR-A\n";
+
+  const steps: string[] = [];
+  const written: string[] = [];
+  let pushes = 0;
+
+  await runFixRung({
+    ...fixRungBaseOpts(),
+    strikeCap: 1,
+    initialReview: failing,
+    deps: {
+      spawn: async () => result({ sessionId: "fix-1" }),
+      waitForCiGreen: async () => "green",
+      fetchPrBody: async () => STALE_BODY,
+      fetchPrDiffFiles: async () => ["a.ts", "b.ts", "new.test.ts"],
+      updatePrBody: async (_url: string, body: string) => {
+        written.push(body);
+      },
+      runReview: async () => failing,
+      push: () => {
+        pushes += 1;
+      },
+      issues: fakeIssues(),
+      ledgerPath: tmpLedgerPath(),
+      log: (step) => steps.push(step),
+      say: () => {},
+      account: (r) => r,
+    },
+  });
+
+  assert.equal(written.length, 1, "exactly one body write");
+  assert.match(written[0], /exactly 3 files: a\.ts, b\.ts, new\.test\.ts/, "the count AND the enumeration are corrected");
+  assert.ok(steps.includes("fix.body_claim_updated"), "the correction is recorded");
+  // BODY-ONLY, MEASURED AS A DELTA RATHER THAN AN ABSOLUTE. This strike also runs an ordinary fix
+  // WORKER, which legitimately commits — so a bare `pushes === 0` would be asserting something
+  // false about the surrounding round, not something true about the repair. What the repair must
+  // contribute is ZERO pushes, and the control for that is the refusal test below: identical rung,
+  // identical worker, repair declines. Both record the same count, so the repair adds none.
+  assert.equal(pushes, PUSHES_PER_WORKER_STRIKE, "the repair itself adds no push — see the refusal test's identical count");
+});
+
+test("runFixRung: an 'A and B' stale claim is REFUSED in place — no body write, no fix.body_claim_updated row, and the review judges the body as-fetched", async () => {
+  const failing = fakeReview("failure", [
+    criterion({ claim: "criterion A is covered", met: false, reason: "proof unmet: report does not substantiate it (matched 4/12 proof keywords)" }),
+  ]);
+  // #3217's shape: the last enumerated file is joined with "and", so the recognised claim stops at
+  // `a.ts` and a splice would leave ` and b.ts` orphaned behind the rewritten count.
+  const STALE_BODY = "This PR touches exactly 2 files: a.ts and b.ts.\n\nRemudero-Task: CHANGESET-REPAIR-B\n";
+
+  const steps: string[] = [];
+  const written: string[] = [];
+  const reviewReports: string[] = [];
+  let pushes = 0;
+
+  await runFixRung({
+    ...fixRungBaseOpts(),
+    strikeCap: 1,
+    initialReview: failing,
+    deps: {
+      spawn: async () => result({ sessionId: "fix-1" }),
+      waitForCiGreen: async () => "green",
+      fetchPrBody: async () => STALE_BODY,
+      fetchPrDiffFiles: async () => ["a.ts", "b.ts", "new.test.ts"],
+      updatePrBody: async (_url: string, body: string) => {
+        written.push(body);
+      },
+      runReview: async (args) => {
+        reviewReports.push(args.report);
+        return failing;
+      },
+      push: () => {
+        pushes += 1;
+      },
+      issues: fakeIssues(),
+      ledgerPath: tmpLedgerPath(),
+      log: (step) => steps.push(step),
+      say: () => {},
+      account: (r) => r,
+    },
+  });
+
+  assert.deepEqual(written, [], "REFUSED: not one body write may happen on a claim the repairer cannot fully see");
+  assert.ok(!steps.includes("fix.body_claim_updated"), "nothing may be recorded as a correction");
+  assert.equal(reviewReports[0], STALE_BODY, "the review judges the body exactly as fetched — the stale claim is left for a human");
+  // THE CONTROL THE REPAIR TEST'S PUSH ASSERTION LEANS ON: the repair declined here, and the push
+  // count is unchanged. Same rung, same worker, one push either way ⇒ the body repair contributes
+  // no commit. Neither test can establish that alone; the pair does.
+  assert.equal(pushes, PUSHES_PER_WORKER_STRIKE, "an ordinary strike pushes exactly this many times, repair or no repair");
+});

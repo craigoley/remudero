@@ -401,8 +401,10 @@ test("ACCOUNT strip: a usage cache belonging to a DIFFERENT account renders unkn
     const { context, page } = await openShell(base);
     try {
       await page.waitForFunction(() => (document.getElementById("au-account")?.textContent ?? "\u2026") !== "\u2026", null, { timeout: 5000 });
-      assert.equal(await glanceText(page, "au-five-hour"), "unknown");
-      assert.equal(await glanceText(page, "au-seven-day"), "unknown");
+      // W1-T2434: the reason now travels onto these two fields as well, not only onto au-as-of --
+      // a bare "unknown" is indistinguishable from every other unknown cause the strip can render.
+      assert.equal(await glanceText(page, "au-five-hour"), "unknown (account-mismatch)");
+      assert.equal(await glanceText(page, "au-seven-day"), "unknown (account-mismatch)");
       assert.match(await glanceText(page, "au-as-of"), /account-mismatch/, "the reason is named, so the operator knows WHY it is unknown");
       assert.equal(await glanceText(page, "au-account"), "operator@example.com", "identity still answers -- only the usage half is withheld");
       const body = await page.textContent("body");
