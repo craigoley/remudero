@@ -125,3 +125,56 @@
     and proves nothing. AND the negative arm is load-bearing: seed a commit whose trailer is a RUN
     id (`Remudero-Task: DAEMON-1787...`) and assert no task is credited — remove the grammar check
     and that case must go red, or the union has widened credit rather than completed it.
+  note: |
+    ── MERGE CREDIT, RECORDED AFTER THE FACT (amendment 2026-08-28) ────────────────────────────
+
+    THIS TASK IS BUILT AND MERGED. It shipped as PR #3102, "fix(status): credit a merged task from
+    the commit trailer when the body carries none (W1-T2387)", merged 2026-08-27T17:28:19Z as
+    commit `eb1629350110ae4023e69742be80bc4060bcd0d7`.
+
+    CONFIRMED BY SYMBOL AT HEAD, NEVER BY TITLE. `commitTrailerFallback`, `buildCommitTrailerIndex`
+    and `TASK_ID_TRAILER_RE` are present in `src/lib/status.ts` at `origin/main` (16 combined
+    references) and absent at `eb162935^` (0). `test/trailer-surface-union.test.ts` exists at head
+    (375 lines) and did not exist at `eb162935^`. Every acceptance claim on this shard is exercised
+    there: `node --test` on that file alone reports `23/23` pass, and the wider suite naming
+    `status.ts` (`test/*status*.test.ts` plus the trailer file) reports `395/396` pass, 1 unrelated
+    skip, 0 fail. `tsc --noEmit` exits 0. So the build is real and a fourth dispatch of this shard
+    would rebuild work already on `origin/main`.
+
+    NOTHING CREDITED IT, AND ALL THREE CREDIT PATHS WERE VERIFIED EMPTY AGAINST A CONTROL THAT
+    READS NON-ZERO. #3102's PR BODY carries zero occurrences of the literal string
+    `Remudero-Task: W1-T2387` (`gh pr view 3102 --json body -q .body | grep -cF` reads 0; GitHub's
+    own fuzzy `in:body` search reports a false-positive hit on token overlap alone, which is why
+    this was checked with a literal `grep -F` rather than trusted from the search — control: the
+    same query against #3104's body, which does carry an anchored `Remudero-Task: W1-T2379` line,
+    reads 1). #3102's MERGE COMMIT carries no `^Remudero-Task: W1-T2387$` line either — the text
+    that superficially matches is `` `Remudero-Task: RETRO-1787193680272` `` inside a doc-comment
+    quotation of the run-id grammar, not a trailer of its own. Read through this very shard's own
+    `buildCommitTrailerIndex({slug: "craigoley/remudero"})()`, the local commit index has no entry
+    for `W1-T2387` at all (control: the same index reads three entries — `#3093`, `#3000`, `#2998`
+    — for `W1-T2323`, so the query can see a real hit when there is one). And #3102's HEAD BRANCH
+    was `fix/trailer-surface-union`, which does not match `^run-W1-T2387-[0-9]+$` (control: this
+    amendment's own PR branch does match that pattern, which is the repair below).
+
+    SO THE FLEET DISPATCHED IT AGAIN, TWICE. `run-W1-T2387-1787845578879` reopened this exact work
+    as PR #3109 — titled from its `wip:` commit subjects by `gh pr create --fill` rather than an
+    explicit conventional subject, the exact pitfall this repo's own run contract warns workers off
+    — and was closed unmerged 2026-08-27T16:49:33Z without landing. This run, on
+    `run-W1-T2387-1787945900779`, is the third dispatch of a task whose code has been on
+    `origin/main` since the first.
+
+    WHAT THIS AMENDMENT CHANGES AND WHAT IT DOES NOT. `status` is NOT changed and is deliberately
+    left `queued`: it is a reported (not guarded-for-blocking) field, and `isDispatchEligible`
+    gates on the MERGED SET and on `status === "blocked"`, neither of which a status edit here
+    would satisfy honestly. No acceptance criterion is touched and `files:` is unchanged. The
+    repair is not in this text at all: it is this amending PR's own head branch
+    (`run-W1-T2387-<epochMs>`) and its anchored `Remudero-Task: W1-T2387` body line — exactly the
+    surfaces `findMergedByHeadBranch` and the body search read.
+
+    WHAT THIS DOES NOT FIX. This is one hand repair of the same class W1-T2379 (#3104), W1-T2318
+    (#3059) and W1-T2323 (#3093) already needed — a build that merged uncredited on every surface
+    this task's OWN union checks. It is not a mechanism defect in the union itself: #3102's fix is
+    real and its tests are real; the union was simply never told about its own PR, because that PR
+    carried the fix without carrying its own trailer. `W1-T2392` (a build can merge with no credit
+    on any surface) already owns that broader mechanism question; this note credits one instance,
+    it does not widen or narrow the mechanism.
