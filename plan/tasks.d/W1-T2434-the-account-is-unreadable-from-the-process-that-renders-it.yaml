@@ -1,0 +1,189 @@
+- id: W1-T2434
+  title: "THE ACCOUNT IS UNREADABLE FROM THE PROCESS THAT RENDERS IT, AND THE ONE REASON LIVE TODAY IS THE ONE THAT DISCARDS IDENTITY — `remudero-serve` resolves `~/.claude.json` under `HOME=/home/node` where the file does not exist while the sibling `remudero-daemon` container holds it readable, `RMD_ACCOUNT_FILE_PATH` reads 0 in both, and `readAccountUsageFile` fails soft to `unreadable` with no email, uuid or org — breaking `deriveAccountUsage`'s own promise that identity is returned in every case"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 25.00
+  files: [deploy/serve-container.sh, src/lib/account-usage.ts, test/account-identity-is-readable.test.ts]
+  origin: "operator-ruling#console-account-switch-piece-one-2026-08-28"
+  plan_refs: ["W1-T266", "W1-T269", "W1-T270", "W1-T997", "W1-T333", "W1-T329"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THIS IS PIECE ONE OF A RULING, NOT A PROPOSAL. The operator has ruled for a console account
+    switch. W1-T266's serial-switch rule STANDS and is not re-argued here: `docs/account-selection.md`
+    line 42 reads "Ruling: serial switch only. Two accounts must never be live simultaneously on
+    one host", and an operator-initiated browser login keeps the switch serial by construction.
+    NOTHING BELOW PROPOSES CONCURRENT OPERATION, A SECOND HOST, OR AUTOMATIC FAILOVER. A backup
+    account is a SERIAL SUCCESSOR, never a parallel one.
+
+    THE ID. Eight surfaces swept at base 1338a5e6, anchored `W1-T2434([^0-9]|$)` with a `[0-9]`
+    class and never `\d`, every open-surface control drawn from the open set enumerated FIRST over
+    REST (HTTP 200, type array, length 5, page 2 length 0). SURFACE 1 READS 1:
+    `refs/rmd-id/W1-T2434` resolves against 548 refs, and the anchor discriminates on a POPULATED
+    band — `W1-T243` reads anchored 0 against unanchored 6. Shard filenames 0 of 680 and declared
+    `- id:` lines 0 of 948, both controlled on W1-T2433 = 1; open-PR titles 0 of 5
+    CASE-SENSITIVELY (control W1-T2430 = 1, lower-case = 0); open-PR bodies 0 over 22,288 bytes
+    (controls W1-T2430 = 1, W1-T2415 = 2); head branches 0 of 153 rows (controls W1-T2430 = 2 and
+    W1-T2383 = 2, both LIVE `run-*` heads); merged trailers 0 of 597 (control W1-T2249 = 1);
+    merged subjects 0 of 2,527 (control W1-T2433 = 1). Surfaces 7 and 8 are MERGED-ONLY and their
+    zeros are coverage, not evidence, for an id that has never merged.
+
+    ── Q1. WHAT MAKES THE ACCOUNT READABLE, AND WHY IDENTITY IS NOT UTILISATION ────────────────
+
+    (1) THE READ TARGETS A PATH THAT DOES NOT EXIST WHERE THE READER RUNS. `readAccountUsageFile`
+    (`src/lib/account-usage.ts`) defaults to `join(homedir(), ".claude.json")`. MEASURED on the
+    host: `remudero-serve` runs `HOME=/home/node`, that directory holds `.claude` as a DIRECTORY,
+    and `ls` of `/home/node/.claude.json` returns "No such file or directory". The sibling
+    `remudero-daemon` container HAS the file. So the identity is present on the same host, one
+    container over, and the process that renders it reads a path its own filesystem has never had.
+
+    (2) AND THE OVERRIDE BUILT FOR EXACTLY THIS IS WIRED NOWHERE. W1-T997 shipped
+    `resolveAccountFilePath` and `ACCOUNT_FILE_PATH_ENV = "RMD_ACCOUNT_FILE_PATH"` (`src/lib/serve.ts`),
+    and its own comment says an install setting neither an explicit override nor the variable
+    "renders byte-identical to before this task". MEASURED: the variable reads 0 in the
+    `remudero-serve` environment AND 0 in `remudero-daemon`; `deploy/runtime-env-vars.sh` contains
+    0 occurrences of it; and `deploy/serve-container.sh` never mentions `.claude` at all. The
+    mechanism exists and has never been switched on.
+
+    (3) SO THE FAILURE IS THE CATCH, AND THE CATCH DISCARDS IDENTITY.
+    `readAccountUsageFile` wraps its read in `try { JSON.parse(readFileSync(path)) } catch { return
+    { unreadable: true } }` — a return with NO `email`, NO `uuid` and NO `org`.
+
+    (4) WHICH BREAKS A PROMISE THE MODULE MAKES IN ITS OWN DOC. `deriveAccountUsage` states:
+    "Identity is returned in every case (it comes from a different part of the file and is fresh),
+    so the panel can always answer 'which account' even when it cannot answer 'how much'." That
+    holds for reasons 2, 3 and 4 — `no-cache`, `account-mismatch`, `too-old` — because in each of
+    those the FILE PARSED and only the cache block is unusable. IT FAILS FOR REASON 1, because
+    reason 1 is the case where the file itself did not parse, so both halves are lost together.
+    THE ONE REASON LIVE TODAY IS THE ONE THAT BREAKS THE PROMISE, which is why the strip reads
+    `account unknown` rather than a named account with unknown windows.
+
+    (5) THE TWO HALVES HAVE DIFFERENT FRESHNESS CONTRACTS, AND THAT IS WHY SEPARATING THEM IS THE
+    WHOLE PIECE RATHER THAN A TIDINESS. Identity comes from `oauthAccount`, written at login,
+    carrying no as-of and never aged by anything. Utilisation comes from `cachedUsageUtilization`,
+    carrying `fetchedAtMs` and aged against `USAGE_CACHE_MAX_AGE_MS`, which is 30 minutes. Once the
+    file is reachable, identity is readable ONE HUNDRED PERCENT OF THE TIME; utilisation is
+    readable whenever some Claude Code process has refreshed it inside the window.
+
+    (6) A PREMISE CORRECTION, MEASURED, BECAUSE THE BRIEF'S FIGURE HAS MOVED. The ruling records
+    the cache at 66.5 minutes old and concludes that wiring the path alone would change the word
+    from `unreadable` to `too-old`. READ AGAIN AT 2026-08-28T10:46Z FROM THE DAEMON CONTAINER, AND
+    PRINTING ONLY PRESENCE AND AGE, NEVER A CREDENTIAL: identity present (email, uuid and org all
+    true), cache present (`fetchedAtMs` and `accountUuid` both true), both windows present, file
+    mtime 2026-08-28T10:32:12Z, and THE CACHE 13.9 MINUTES OLD — INSIDE the 30-minute bound. At
+    that reading, wiring the path would have cleared the WHOLE strip, not merely the account line.
+    THE HONEST STATEMENT IS THEREFORE NEITHER: two samples straddle the bound, so utilisation is
+    INTERMITTENTLY fresh, its refresh is written by Claude Code and by NOTHING IN THIS REPO, and
+    the build must not promise a number it does not own. IDENTITY IS THE PART THIS REPO CAN MAKE
+    UNCONDITIONAL, AND THAT IS THE DELIVERABLE.
+
+    ── Q2. WHAT A STALE CACHE RENDERS — PART OF THIS PIECE, AND HERE IS WHY ────────────────────
+
+    (7) THE REASON IS ALREADY COMPUTED AND ALREADY CARRIED. `usageUnknownReason` returns one of
+    four values and the snapshot carries it as `usageUnknownReason`. It is rendered on exactly ONE
+    of the four fields it explains; the other three discard it and print a bare word — the
+    measured strip reads `5h window unknown` and `7d window unknown` with no reason beside either.
+
+    (8) SO SURFACING IT ON THE OTHER THREE IS A RENDER CHANGE, NOT A NEW DERIVATION, AND BELONGS
+    HERE. The whole point of this piece is that the panel stops saying less than it knows; a bare
+    `unknown` on three fields is the same defect in a different place, it needs no new input, and
+    splitting it into its own task would file a second shard to consume a value this one already
+    puts in the payload. IF THE BUILD FINDS THAT IT CANNOT BE DONE WITHOUT TOUCHING THE CLIENT
+    TEMPLATE BEYOND THE STRIP, it should say so and stop rather than widen — W1-T270's preserved
+    criterion (4) is the standing hazard there, that the rendered shell's client script must still
+    parse after the change.
+
+    ── Q3. THE OTHER TWO PIECES, SCOPED AND DELIBERATELY NOT FILED ─────────────────────────────
+
+    (9) PIECE TWO — THE CONSOLE SURFACE. W1-T270 is WITHDRAWN on W1-T266's ruling with its five
+    criteria PRESERVED VERBATIM in its own `note:`, and Rule 21 freezes them, so a re-filing
+    inherits their evidence rather than amending that shard: (1) one row per configured account
+    label with window, reset, reserve state and spend buckets; (2) spend older than the attribution
+    epoch excluded with the boundary shown; (3) a single configured account rendered as a NAMED
+    single account, distinguishable from a missing one; (4) the rendered shell's client script
+    still parses; (5) THE PANEL IS READ-ONLY — no write-scoped route and no console-initiated
+    switch affordance. Criterion (5) is honoured by piece two and SUPERSEDED BY THE RULING for
+    piece three; that is the one place the ruling changes what those criteria demanded, and it is
+    named here so nobody reads the contradiction as an oversight.
+
+    (10) PIECE THREE — THE SWITCH ACTION. Drain, prompt the operator's browser login, resume:
+    `rmd down`, a credential step the operator performs, `rmd up`. Serial by construction, because
+    the credential step is a human at a browser and the fleet is stopped on either side of it.
+
+    (11) WHY THE SEQUENCE IS ONE AND CANNOT BE REORDERED. You cannot render an account you cannot
+    read, and you cannot safely switch one you cannot render — and the second half is not a
+    slogan, it is a code fact. The switch's own safety check is `usageUnknownReason`'s reason 3,
+    `account-mismatch`, whose doc says it exists because "after a switch the cache still holds the
+    previous account's percentages until some Claude Code process rewrites it, and rendering those
+    against the new account's name is the precise failure this panel exists to avoid". THAT CHECK
+    COMPARES `input.uuid` AGAINST `input.cacheUuid`, AND `input.uuid` IS EXACTLY THE FIELD REASON 1
+    DISCARDS. So while the file is unreachable the mismatch guard cannot fire at all, and piece
+    three would ship its own safety check dead. Piece one is load-bearing for piece three's
+    safety, not merely for its appearance.
+
+    ── THE HARD CONSTRAINTS THE BUILD INHERITS ────────────────────────────────────────────────
+
+    (12) SUBSCRIPTION OAUTH, NEVER A KEY — AND THE KEY WINS IF PRESENT. The fleet runs on
+    subscription OAuth via `claude login`. `src/lib/env.ts` names `ANTHROPIC_API_KEY` as the
+    SANCTIONED_KEY overflow valve and documents it at precedence rung 2, ahead of the subscription
+    path. SO ANY SWITCH MUST CHECK FOR `ANTHROPIC_API_KEY` IN THE ENVIRONMENT BEFORE IT BEGINS: a
+    switch performed while that variable is set changes the login and not the account actually
+    used, which is a silent no-op wearing a success message.
+
+    (13) THE WORKER KEYCHAIN COPY IS GATED ON FILE EXISTENCE AND MUST BE CLEARED MANUALLY, per
+    `docs/account-selection.md`, which is the GOVERNING RECORD for all of this and is cited rather
+    than restated.
+
+    (14) AND NOTHING HERE TOUCHES HEADROOM. W1-T269 is withdrawn with its four criteria preserved
+    verbatim — per-account snapshots, per-label reserve resolution, one account's unreadable
+    reading not masking another's, and the ledgered line naming which account it measured. All
+    four assume MULTIPLE ACCOUNTS MEASURED AT ONCE, which the serial ruling forecloses. They are
+    cited so a future reader finds them, and re-filing them would contradict W1-T266.
+
+    ── WHAT MUST NOT MOVE ─────────────────────────────────────────────────────────────────────
+
+    (15) `USAGE_CACHE_MAX_AGE_MS` stays 30 minutes. No cache is written, refreshed, faked or
+    back-dated by this repo — its freshness belongs to Claude Code and this task does not claim
+    it. No credential is read, logged, rendered or copied: `readAccountUsageFile`'s own rule that
+    "THE PARSED OBJECT NEVER ESCAPES THIS FUNCTION" is a constraint this task inherits and must
+    not relax, and the six projected fields stay the only ones copied out. No route gains a write
+    scope. Nothing paces, sleeps or auto-resets.
+  acceptance:
+    - claim: "the console resolves the account file to a path that exists where the serve process runs"
+      proof: "unit test: test/account-identity-is-readable.test.ts"
+    - claim: "identity is returned even when the usage cache cannot be used, so the panel names the account"
+      proof: "unit test: test/account-identity-is-readable.test.ts"
+    - claim: "an unreadable file no longer discards the email and uuid when identity is separately available"
+      proof: "unit test: test/account-identity-is-readable.test.ts"
+    - claim: "every field that goes unknown carries the reason it went unknown rather than a bare word"
+      proof: "unit test: test/account-identity-is-readable.test.ts"
+    - claim: "a stale cache still renders as too-old and is never silently treated as fresh"
+      proof: "unit test: test/account-identity-is-readable.test.ts"
+    - claim: "the account-mismatch guard can fire, because the uuid it compares is present"
+      proof: "unit test: test/account-identity-is-readable.test.ts"
+    - claim: "no credential field is copied out of the account file and the parsed object never escapes"
+      proof: "unit test: test/account-identity-is-readable.test.ts"
+    - claim: "the cache age bound is unchanged and nothing writes or back-dates the cache"
+      proof: "unit test: test/account-identity-is-readable.test.ts"
+    - claim: "no write-scoped route and no console-initiated switch affordance is added by this piece"
+      proof: "unit test: test/account-identity-is-readable.test.ts"
+  falsifier: |
+    If `RMD_ACCOUNT_FILE_PATH` is found set in the serve environment at the sha a build starts
+    from, or `/home/node/.claude.json` is found to exist there, the premise in (1) and (2) is
+    closed and the strip's `unreadable` has another cause that must be found before anything is
+    changed. The check is two commands against the running container, with the sibling
+    `remudero-daemon`, which HAS the file, as the positive control proving the query can see one.
+
+    SEPARATELY FALSIFYING: if `deriveAccountUsage` is found to return identity on the `unreadable`
+    reason at that sha, (3) and (4) are already fixed and only the render half of (7) remains. The
+    check is the presence of `email` or `uuid` on the value `readAccountUsageFile` returns from its
+    catch arm.
+
+    AND IF the cache is observed durably INSIDE the 30-minute bound across repeated readings, (6)'s
+    "intermittently fresh" reading is too pessimistic and the utilisation half needs no hedging —
+    but the two readings recorded here, 66.5 minutes and 13.9 minutes, straddle the bound, so that
+    must be measured over time rather than assumed from either one.
