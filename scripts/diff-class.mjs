@@ -200,12 +200,21 @@ export function main(argv) {
     options: {
       "changed-files": { type: "string" },
       "list-plan-reading-suites": { type: "boolean", default: false },
+      // TEST-ONLY: overrides the enumeration root passed to planReadingSuiteFiles(). ci.yml never
+      // passes this flag (it always enumerates the real repo tree); it exists so
+      // test/fast-lane-classifier.test.ts can drive main()'s own --list-plan-reading-suites catch
+      // block (below) as a REAL subprocess, by pointing it at a directory that does not exist, and
+      // so genuinely throws — without chmod'ing a file under the real test/ dir, which
+      // test/host-capability-fixtures.test.ts ratchets against a declared allowlist this task's
+      // file scope (W1-T1227) does not include.
+      "plan-reading-root": { type: "string" },
     },
   });
 
   if (values["list-plan-reading-suites"]) {
     try {
-      for (const path of planReadingSuiteFiles()) console.log(path);
+      const root = values["plan-reading-root"] ?? REPO_ROOT;
+      for (const path of planReadingSuiteFiles(root)) console.log(path);
       process.exitCode = 0;
     } catch (err) {
       console.error(`diff-class: FAILED to enumerate the plan-reading suite set — ${err && err.message ? err.message : String(err)}`);

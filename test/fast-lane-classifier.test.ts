@@ -120,15 +120,25 @@ test("acceptance 2 (CLI): --list-plan-reading-suites failing (bad root) exits no
   assert.throws(() => planReadingSuiteFiles(join(REPO_ROOT, "no-such-directory-at-all")));
 });
 
-// A real-subprocess variant of the above (forcing main()'s --list-plan-reading-suites catch,
-// scripts/diff-class.mjs:206-215, via an actually-unreadable file under the real test/ dir) was
-// deliberately NOT added here: the only portable way to make a regular file's readFileSync throw
-// for every uid is `chmodSync` to a mode with no owner-read bit, and test/host-capability-
-// fixtures.test.ts (out of this task's declared file scope, W1-T1227) ratchets every such call
-// site — a new undeclared one fails ITS OWN build, not this script's. The unit-level throw proven
-// above already covers the identical planReadingSuiteFiles contract; only the extra byte-for-byte
-// subprocess assertion of main()'s catch body is left uncovered here (see this REPORT's
-// Follow-ups).
+test(
+  "acceptance 2 (CLI, real process boundary): --list-plan-reading-suites exits 1 and prints NOTHING on stdout when enumeration throws",
+  () => {
+    // Drives main()'s own try/catch (scripts/diff-class.mjs's --list-plan-reading-suites branch)
+    // as a REAL subprocess, not merely the unit-level throw proven just above. The chmod-based
+    // approach (making a real test/ file unreadable) was rejected here: test/host-capability-
+    // fixtures.test.ts ratchets every chmodSync call site in test/ against a declared allowlist,
+    // and this task's declared file scope (W1-T1227) does not include that guard file. Instead,
+    // this uses the CLI's TEST-ONLY `--plan-reading-root` flag (see scripts/diff-class.mjs's
+    // main()) to point the real enumeration at a directory that genuinely does not exist, so
+    // readdirSync inside planReadingSuiteFiles throws for real — exercising the CLI's catch block
+    // (both console.error lines, process.exitCode = 1) byte-for-byte as CI would hit it.
+    const result = runCli(["--list-plan-reading-suites", "--plan-reading-root", join(REPO_ROOT, "no-such-directory-at-all")]);
+    assert.equal(result.status, 1, result.stdout + result.stderr);
+    assert.equal(result.stdout, "", "a failed enumeration must print NOTHING on stdout, never a false empty-but-trusted list");
+    assert.match(result.stderr, /diff-class: FAILED to enumerate the plan-reading suite set/);
+    assert.match(result.stderr, /printing NOTHING — a caller reading zero lines here must fail closed/);
+  },
+);
 
 // ── acceptance 3: an empty file list runs everything rather than reading as plan-only ──────────
 
