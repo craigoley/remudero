@@ -3478,15 +3478,48 @@ export function acceptanceGateBodyRepair(body: string): AcceptanceGateBodyRepair
   return { defect: check.defect, repairedBody: ensureJudgeableBody(body, ACCEPTANCE_GATE_BODY_REPAIR_FALLBACK) };
 }
 
-function ensureTaskTrailer(prUrl: string, taskId: string): void {
+/**
+ * W1-T2435: the read and the write below still share ONE `catch` — the stamp stays
+ * best-effort DELIBERATELY, so a failed provenance write must never fail a run that
+ * otherwise succeeded (`acceptanceGateBodyRepair`'s doc, just above, explains what a
+ * landed stamp buys downstream). What changed is that a failure is no longer silent:
+ * the `catch` now writes exactly one diagnostic ledger row, naming the id it was HANDED
+ * (never inferred — `taskId` is a parameter, never derived from `prUrl` or a branch
+ * name anywhere on this path) and WHICH of the two calls threw, via `phase`, set to
+ * `"write"` only once the read has already succeeded and a write is about to be
+ * attempted. A body that already carries the trailer returns before `phase` ever
+ * changes and before either the row or a write happens; a clean stamp never reaches
+ * the `catch` at all. `log` defaults to a no-op so every existing call site keeps
+ * compiling without threading one through, but all five real call sites below pass
+ * their own ledger-backed `log` so the row actually lands.
+ *
+ * `read`/`write` are injectable (mirroring {@link changeView}'s `fetch` param and
+ * {@link ghPrHeadGateway}'s `gh` param) so a unit test can drive the read-failure and
+ * write-failure branches without a real `gh` call.
+ */
+export function ensureTaskTrailer(
+  prUrl: string,
+  taskId: string,
+  log: (step: string, extra?: Record<string, unknown>) => void = () => {},
+  read: (args: string[]) => unknown = ghJson,
+  write: (args: string[]) => unknown = (args) => execFileSync("gh", args, { stdio: "pipe" }),
+): void {
   const trailer = `Remudero-Task: ${taskId}`;
+  let phase: "read" | "write" = "read";
   try {
-    const view = ghJson(["pr", "view", prUrl, "--json", "body"]) as { body?: string };
+    const view = read(["pr", "view", prUrl, "--json", "body"]) as { body?: string };
     const body = view.body ?? "";
     if (body.includes(trailer)) return;
     const newBody = body.trim().length > 0 ? `${body.trimEnd()}\n\n${trailer}\n` : `${trailer}\n`;
-    execFileSync("gh", ["pr", "edit", prUrl, "--body", newBody], { stdio: "pipe" });
-  } catch {
+    phase = "write";
+    write(["pr", "edit", prUrl, "--body", newBody]);
+  } catch (e) {
+    log("trailer_stamp.failed", {
+      task_id: taskId,
+      pr_url: prUrl,
+      phase,
+      error: String((e as Error)?.message ?? e),
+    });
     // Provenance trailer is best-effort; the ledger (source (a)) still records the PR.
   }
 }
@@ -11059,7 +11092,7 @@ async function runTask(
       return { taskId, runId, merged: false, costUsd, verdict: "pr_attribution_failed" };
     }
     // Stamp the provenance trailer (deriveStatus source (c)) before gating.
-    ensureTaskTrailer(prUrl, taskId);
+    ensureTaskTrailer(prUrl, taskId, log);
     log("pr.opened", { pr_url: prUrl });
     say(`PR: ${prUrl}`);
 
@@ -17886,7 +17919,7 @@ async function retroCommand(
     // substring `"Remudero-Task: RETRO"`), but a worker that omitted the trailer got a bare
     // `RETRO` stamp — which `reviewCommand` would then key its verdict to, missing the arm
     // from the other direction. One id, both paths.
-    ensureTaskTrailer(prUrl, runId);
+    ensureTaskTrailer(prUrl, runId, log);
 
     // W1-T136 (#394 class): verify-and-repair the PR body's Acceptance block BEFORE the
     // gate runs. retroPrompt instructs the Architect worker to write one, but that's
@@ -27673,7 +27706,7 @@ async function triageCommandLocked(
       worktreeRemove(repoDir, worktreePath);
       return 1;
     }
-    ensureTaskTrailer(prUrl, taskId);
+    ensureTaskTrailer(prUrl, taskId, log);
 
     // Record the proposal_pr back onto the entry for the propose path (chicken-and-egg: the PR
     // URL only exists after the first push) — a second small commit onto the SAME open PR,
@@ -28111,7 +28144,7 @@ export async function planCommand(
       worktreeRemove(repoDir, worktreePath);
       return 1;
     }
-    ensureTaskTrailer(prUrl, taskId);
+    ensureTaskTrailer(prUrl, taskId, log);
 
     // DETERMINISTIC GUARDS: a plan PR is PLAN-ONLY (plan/** or MASTER-PLAN.md), and an EXPAND
     // proposal must cite a research source (lib/plan-architect.ts's `outOfPlanScopeFilesInDiff`
@@ -29173,7 +29206,10 @@ export interface AlertFixDispatchDeps {
   loadMounts: typeof loadMounts;
   resolveMount: typeof resolveMount;
   spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult>;
-  ensureTaskTrailer: (prUrl: string, taskId: string) => void;
+  /** W1-T2435: takes the SAME `log` the rest of this dispatch already writes through, so a
+   *  swallowed read/write failure lands a `trailer_stamp.failed` row on this lane too, not just
+   *  the four `runTaskBody`-family call sites. */
+  ensureTaskTrailer: (prUrl: string, taskId: string, log: (step: string, extra?: Record<string, unknown>) => void) => void;
   /** W1-T952 design (ii): the author-time acceptance check, applied to the just-opened PR before
    *  CI/review would pay for a round trip to discover the same defect. Injectable so a test can
    *  drive both the refusal and the positive-control branch without a real `gh` call — see the
@@ -29275,7 +29311,7 @@ export async function dispatchAlertFixRun(
 
     const report = parseReport(workerTranscript(worker));
     if (report?.prUrl) {
-      deps.ensureTaskTrailer(report.prUrl, taskId);
+      deps.ensureTaskTrailer(report.prUrl, taskId, log);
       log("alert-fix.pr_opened", { pr_url: report.prUrl, origin: `alert#${originId}` });
       // W1-T952 design (ii): the diagnostics call, at the one point this lane already reads the
       // PR back — before CI/review would pay a full cycle to discover the same thing (rationale
