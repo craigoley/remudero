@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { stringify as stringifyYaml } from "yaml";
+import { renderDigest, summarize } from "../src/lib/digest.js";
 import { feedbackDir, feedbackEntryPath, readFeedbackEntry, type FeedbackEntry, type FeedbackStatus } from "../src/lib/feedback.js";
 import type { RepairFilingCapture } from "../src/lib/sweep.js";
 import { captureRepairFeedbackWithPriorVerdict, latestPriorVerdictSuppresses } from "../src/run-task.js";
@@ -197,4 +198,70 @@ test("captureRepairFeedbackWithPriorVerdict: the SAME-WINDOW dedup still refuses
 
   assert.deepEqual(secondRead, firstWrite, "a second call for the SAME window-keyed id must be a pure no-op");
   assert.equal(rec.calls.length, 0, "the same-window dedup exits before the verdict read even runs -- no ledger row either");
+});
+
+// ── digest.ts's `sweep.repair_filing_suppressed` reader (design iii) ──────────
+//
+// captureRepairFeedbackWithPriorVerdict ledgers the row above via its own `log` callback; run-
+// task.ts's real logger writes that call straight to the fleet ledger. These tests exercise the
+// READER side directly (summarize + renderDigest, both pure) so the row this task's filer already
+// writes has an assertable consumer, mirroring W1-T2345's `sweep.repeat_escalated` precedent.
+
+test("digest: a `sweep.repair_filing_suppressed` row renders the surface, its distinct-PR count and the rejecting entry", () => {
+  const summary = summarize(
+    [
+      {
+        ts: "2026-08-27T09:05:00.000Z",
+        step: "sweep.repair_filing_suppressed",
+        id: "fb-repair-blocked-fixable-2956",
+        surface: "blocked-fixable",
+        distinct_pr_count: 3,
+        rejected_entry_id: "fb-repair-blocked-fixable-2955",
+      },
+    ],
+    "2026-08-27T00:00:00.000Z",
+  );
+  assert.equal(summary.repairFilingsSuppressed?.length, 1);
+  const text = renderDigest(summary);
+  assert.match(text, /^repair filings suppressed \(prior rejection\): blocked-fixable x3 — suppressed by fb-repair-blocked-fixable-2955$/m);
+});
+
+test("digest: two DIFFERENT suppressed surfaces both render — additive, never latest-wins", () => {
+  const summary = summarize(
+    [
+      {
+        ts: "2026-08-27T09:05:00.000Z",
+        step: "sweep.repair_filing_suppressed",
+        id: "fb-repair-blocked-fixable-2956",
+        surface: "blocked-fixable",
+        distinct_pr_count: 3,
+        rejected_entry_id: "fb-repair-blocked-fixable-2955",
+      },
+      {
+        ts: "2026-08-27T09:06:00.000Z",
+        step: "sweep.repair_filing_suppressed",
+        id: "fb-repair-stale-2956",
+        surface: "stale",
+        distinct_pr_count: 5,
+        rejected_entry_id: "fb-repair-stale-2955",
+      },
+    ],
+    "2026-08-27T00:00:00.000Z",
+  );
+  const text = renderDigest(summary);
+  assert.match(text, /blocked-fixable x3 — suppressed by fb-repair-blocked-fixable-2955/);
+  assert.match(text, /stale x5 — suppressed by fb-repair-stale-2955/, "the second suppressed surface is not hidden by the first");
+});
+
+test("digest: a suppression row missing every optional field still renders, honestly", () => {
+  const summary = summarize([{ ts: "2026-08-27T09:05:00.000Z", step: "sweep.repair_filing_suppressed" }], "2026-08-27T00:00:00.000Z");
+  const text = renderDigest(summary);
+  assert.match(text, /^repair filings suppressed \(prior rejection\): \(surface unknown\)$/m);
+  assert.doesNotMatch(text, /undefined/);
+});
+
+test("digest: a QUIET board omits the line entirely — soft-composed, never a placeholder", () => {
+  const summary = summarize([{ ts: "2026-08-27T09:00:00.000Z", step: "run.start", task_id: "W1-T1" }], "2026-08-27T00:00:00.000Z");
+  const text = renderDigest(summary);
+  assert.doesNotMatch(text, /repair filings suppressed/, "no line at all");
 });
