@@ -17968,8 +17968,48 @@ async function retroCommand(
   }
 }
 
+/**
+ * The retro's OWN Acceptance-block authoring rules (W1-T2437). `renderAcceptanceBlock`
+ * (lib/plan-pr-emitter.ts) enforces "one bullet per line" BY CONSTRUCTION and never checks a
+ * proof's dialect — but that guarantee is unreachable here: `retro.ts` builds no PR body at all
+ * (see that module's own doc — it does not even import plan-pr-emitter), so a retro's body is
+ * entirely HAND-AUTHORED by the spawned Architect worker below, and `parseAcceptanceBlock` /
+ * `judgeReview` (lib/review.ts) are what actually grades it.
+ *
+ * TWO SEPARATE FAILURES, taught as two separate rules on purpose. A claim WRAPPED onto a
+ * continuation line silently truncates the whole block — `acceptanceAuthorTimeCheck` refuses
+ * this as `unparseable`, BEFORE remudero-review even runs. Independently, a proof with no
+ * recognised dialect prefix caps the review (`no-dialect`) even on a block that parsed
+ * perfectly. Fixing the wrap never fixes the dialect and vice versa — measured live on #3191,
+ * which failed BOTH, one after the other, on two separate pushes.
+ *
+ * Reuses the SAME dialect prefixes review.ts already recognises (`grep:` / `demonstration:`,
+ * W1-T277) — never a new one invented here. test/retro-acceptance-block-shape.test.ts extracts
+ * these forms straight from this array and runs them through the real parser, the same
+ * discipline test/proof-grammar.test.ts already applies to the filing lanes' own grammar
+ * ({@link "./lib/proof-grammar.js".ACCEPTANCE_PROOF_GRAMMAR}). NOT that same constant reused
+ * verbatim: that one is FRAMED for a task-filing worker proving its own not-yet-built acceptance
+ * criteria ("you are FILING work, so its test does not exist yet") — the wrong framing for a
+ * retro, whose claims are about MASTER-PLAN.md prose it is editing in the SAME turn, never a
+ * test file it is deferring.
+ */
+export const RETRO_ACCEPTANCE_BLOCK_GRAMMAR: readonly string[] = [
+  "  ACCEPTANCE BLOCK SHAPE: `- <claim> | <proof>` bullets, CONTIGUOUS, ONE CRITERION PER PHYSICAL",
+  "  LINE. Do not wrap a claim or a proof onto a second line — the reviewer's parser ends the block",
+  "  at the first line it does not recognise as a NEW bullet, silently discarding every bullet",
+  "  written after the wrap. If a claim needs more room, SHORTEN it; never wrap it.",
+  "  Every <proof> must OPEN with a recognised dialect, or the reviewer CAPS the PR even though the",
+  "  block itself parsed fine — a wrap and a missing dialect are two SEPARATE failures; fixing one",
+  "  never fixes the other. Two forms:",
+  '    proof: "grep: <pattern> in <path>"                — greps LITERAL text THIS diff adds to',
+  "      MASTER-PLAN.md (a SHIPPED entry's PR link, the calibration table's own header row, NET",
+  "      STATE's refreshed line)",
+  '    proof: "demonstration: <what a human can check>"  — for a claim with nothing stable to grep,',
+  "      e.g. naming the section a COMPRESSION pass deleted (a negative diff has nothing new to match)",
+];
+
 /** The Architect retro prompt — fed ONLY the deterministic gather + current plan. */
-function retroPrompt(gatherReport: string, calTable: string, runId: string): string {
+export function retroPrompt(gatherReport: string, calTable: string, runId: string): string {
   return [
     "You are the REMUDERO ARCHITECT running a RETRO (MASTER-PLAN §Self-improvement). You ride a HIGHER",
     "tier than implement workers. You are fed ONLY the deterministic GATHER below and the current",
@@ -18009,9 +18049,11 @@ function retroPrompt(gatherReport: string, calTable: string, runId: string): str
     "Then, from the working directory:",
     "- git add MASTER-PLAN.md && commit with a concise message;",
     "- `git push origin HEAD` (NOT -u);",
-    "- open a PR: `gh pr create --fill --base main`. The PR body MUST include an `Acceptance:` block of",
-    "  `- <claim> | <proof>` bullets covering: SHIPPED log added, NET STATE refreshed, calibration table",
-    "  present, and COMPRESSION done (name the deletion). Include as the LAST body line:",
+    "- open a PR: `gh pr create --fill --base main`. The PR body MUST include an `Acceptance:` block",
+    "  covering: SHIPPED log added, NET STATE refreshed, calibration table present, and COMPRESSION",
+    "  done (name the deletion).",
+    ...RETRO_ACCEPTANCE_BLOCK_GRAMMAR,
+    "  Include as the LAST body line:",
     `  Remudero-Task: RETRO-${runId.replace(/^RETRO-/, "")}`,
     "- End your REPORT with exactly: PR_URL: <the pull request url>",
   ].join("\n");

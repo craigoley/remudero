@@ -13,6 +13,16 @@
 # checked-in prose home of exactly the observed-outcomes data this skill's
 # own output_contract already describes reconciling against ("the gather +
 # calibration table").
+#
+# W1-T2437 — THIS FILE IS REGISTRY METADATA, NOT THE ARCHITECT'S PROMPT. `loadSkillRegistry`
+# (src/lib/skill.ts) reads only the five keys below (tools/permission_profile/output_contract/
+# grounding_sources/gate/tier), for `rmd skill list` and the dashboard's skill-run buttons — it
+# is never consulted by `retroCommand` (src/run-task.ts). The text the spawned Architect worker
+# actually reads is `retroPrompt()` in that same file, which is where its PR body's `Acceptance:`
+# block SHAPE is now spelled out (`RETRO_ACCEPTANCE_BLOCK_GRAMMAR`, exported alongside it): one
+# criterion per physical line, never wrapped, and every proof opening with a recognised dialect
+# (`grep:`/`demonstration:`) — see that constant's own doc for why. Recorded here so the next
+# reader does not repeat the mistake of treating this YAML's prose as the fed instruction.
 tools:
   - Read
   - Grep
