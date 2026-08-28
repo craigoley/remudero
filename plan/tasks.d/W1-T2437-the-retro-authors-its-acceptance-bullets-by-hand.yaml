@@ -1,0 +1,134 @@
+- id: W1-T2437
+  title: "THE RETRO'S ACCEPTANCE BLOCK IS AUTHORED BY AN AGENT AND FAILS TWO WAYS THE HOUSE RENDERER WOULD HAVE PREVENTED ONE OF — `retro.ts` builds no PR body at all and imports `plan-pr-emitter` in comments only, so `renderAcceptanceBlock` is unreachable from that lane by construction; the Architect worker writes the bullets by hand, they wrap onto continuation lines that `parseAcceptanceBlock` treats as the block's end, and separately their proofs carry no recognised dialect"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 15.00
+  files: [.remudero/skills/retro.yaml, test/retro-acceptance-block-shape.test.ts]
+  origin: "operator-brief#retro-authors-its-own-bullets-2026-08-28"
+  plan_refs: ["W1-T1060", "W1-T2272", "W1-T166", "W1-T2435"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE ID. Eight surfaces swept before a byte of this file was written, controls from the ENUMERATED
+    OPEN SET (#3212, #3211, #3210, #3209, #3205, #3191), anchored `W1-T2437([^0-9]|$)` with a
+    `[0-9]` class and never `\d`. SURFACE 1 READS 1 against 551 refs, W1-T2436 and W1-T2435 firing 1
+    each. Filenames 0 of 852; declared ids 0 of 936; open titles 0 of 6; open bodies 0 of 365 lines;
+    head refs 0 of 149 checked BOTH cases; merged trailers 0 of 48; merged subjects 0 of 400.
+    Controls fired on every surface: W1-T2272 on filenames, declared ids and subjects; W1-T2436 on
+    bodies (11) and refs; W1-T1060 on bodies (1); W1-T2347 and W1-T2419 on merged trailers. ⚠ ONE
+    CONTROL READ ZERO AND IS REPORTED RATHER THAN RE-PICKED SILENTLY: W1-T2415 reads 0 on head refs,
+    because that PR has closed and GitHub deleted the head — the surface stays controlled by
+    W1-T2430, which fires 1. ANCHOR-LEAK on three bands: 1/6, 2/33, 1/267 — discriminates on each.
+
+    (1) Q1 — WHAT THE RETRO PATH ACTUALLY CALLS, AND THE ANSWER IS "NOTHING". `renderAcceptanceBlock`
+    lives in `src/lib/plan-pr-emitter.ts` and is called from exactly two places, both inside that
+    same module: `ensureJudgeableBody` and `buildPlanPrBody`. `src/lib/retro.ts` NEVER CALLS IT —
+    and does not import the module at all: a grep for `plan-pr-emitter` in that file returns two
+    hits, BOTH IN DOC COMMENTS, and one of them states the omission is deliberate — "that helper is
+    not imported here to avoid a retro.ts -> plan-pr-emitter.ts dependency neither module otherwise
+    needs". A code-only import grep returns ZERO.
+
+    THE REASON IT IS UNREACHABLE IS STRUCTURAL, NOT AN OVERSIGHT: `retro.ts` BUILDS NO PR BODY.
+    `retroCommand` (`src/run-task.ts`) mints `RETRO-<ms>`, cuts a worktree, and SPAWNS AN ARCHITECT
+    WORKER; that agent authors the body and opens the PR itself. There is no code path in this lane
+    that renders an Acceptance block, so there is nothing for the renderer to be wired into.
+
+    ⚠ AND THE EMITTER ALREADY KNEW THIS PRODUCER EXISTED. `ensureJudgeableBody`'s own doc opens
+    "Given an arbitrary PR body (e.g. what a retro's LLM worker produced)" — the retro's agent is
+    the MOTIVATING CASE for the repair helper, which is a different thing from being a caller of the
+    renderer. The module anticipated the output; nothing routes the input.
+
+    (2) THE CONTROL — A LIVE WRITER THAT DOES USE THE RENDERER, so the comparison is between two
+    real lanes rather than against an ideal. `buildPlanPrBody` (`plan-pr-emitter.ts`) composes
+    `[intro, "", renderAcceptanceBlock(criteria)]` and is called from `src/run-task.ts` at the
+    plan-filing site. Bodies from that path round-trip through `parseAcceptanceBlock` BY
+    CONSTRUCTION — `src/lib/review.ts` says so in as many words, calling them "GUARANTEED to
+    round-trip". Same repo, same parser, two writers, one of which cannot produce the defect.
+
+    (3) Q2 — ONE CHANGE DOES NOT END BOTH DEFECTS, AND THE CODE SHOWS WHY. `renderAcceptanceBlock`'s
+    whole loop is `lines.push(\`- ${claim} | ${proof}\`)`. IT EMITS ONE LINE PER CRITERION, which
+    ends the WRAP class by construction. IT TAKES `proof` AS GIVEN AND VALIDATES NOTHING: there is
+    no dialect check, no prefix requirement, no call to any parser. So a proof with no recognised
+    dialect renders perfectly and still caps the review.
+
+    THE TWO DEFECTS ARE THEREFORE SEPARATE AND MUST BE SCOPED SEPARATELY. Both are live on ONE PR:
+    #3191 first failed the gate as `unparseable` (six bullets written, ONE parsed), and AFTER that
+    repair its review returned "FAIL — unmet: … — capped: no-dialect:1". A single remedy claimed for
+    both would be wrong on the second, and this shard does not claim it.
+
+    (4) Q3 — THE POPULATION, RE-DERIVED HERE RATHER THAN QUOTED. All-time `acceptance-author-gate`
+    runs: 54 failures of 1,315 (4.1%), split by reading each failing job's log — `no-header` 38,
+    `empty-proofs` 12, `unparseable` 4, `no-trailer` 0. ⚠ THE 4 `unparseable` RUNS ARE ONLY TWO
+    DISTINCT BRANCHES, because runs double-count retries: `run-RETRO-1787858337550` (#3131) and
+    `run-RETRO-1787883095112` (#3191). BOTH ARE `rmd retro` SYNCS. No task build has produced this
+    class.
+
+    AND THE `no-dialect` COUNT IS NOT IN THAT TABLE AT ALL, because it is a REVIEW verdict rather
+    than a gate defect — the gate judges the block's shape, the reviewer judges the proof's dialect.
+    Scanning 60 recent PRs' `remudero-review` status HISTORY: ONE carries a `no-dialect` verdict,
+    #3191, the same PR. ⚠ THE CONTROL FOR THAT ZERO IS WEAK AND IS SAID SO: a "capped" probe over
+    the same window fires on THAT SAME PR and no other, so it proves the query runs but not that it
+    would find a different capped PR. A wider window is needed before treating 1 as the ceiling.
+
+    SO: TWO PRs, ONE GENERATOR. That is a PRODUCER DEFECT, NOT A RUNG'S POPULATION, and this shard
+    proposes no repair rung.
+
+    (5) ⚠ AND NO REPAIR ARM FOR THE WRAPPED CLASS, DELIBERATELY. `acceptanceGateBodyRepair` refuses
+    `unparseable` by design note i — "repairing it would mean guessing which line break the author
+    intended" — and THAT REFUSAL IS CORRECT. Rejoining lines is only provably lossless when a human
+    can see the author's intent; a rung cannot. THE FIX IS AT THE WRITER, which is why `files:`
+    names the retro's own instruction surface and not the repair path.
+
+    (6) ⚠ AND NOTHING HERE WRITES OR ALTERS A CLAIM. Changing how a bullet is RENDERED is a producer
+    fix; changing what it ASSERTS is the W1-T166 shape. The remedy this shard scopes constrains
+    LAYOUT and, separately, requires that a proof carry a dialect the reviewer already recognises —
+    it never supplies the proof's content, and a build that invents one has failed this task rather
+    than completed it.
+
+    (7) WHAT `files:` DECLARES AND WHAT IT DELIBERATELY DOES NOT. `.remudero/skills/retro.yaml` is
+    the instruction the Architect follows, and a grep of it plus `src/lib/prompts.ts` for
+    `## Acceptance`, `acceptance` or `--body` returns NOTHING — the shape is currently unconstrained
+    anywhere the worker can read it. `src/lib/plan-pr-emitter.ts` is EXCLUDED because it is correct
+    as it stands and this task must not edit a module whose only fault is not being called.
+    `src/lib/retro.ts` is EXCLUDED because it builds no body, so an edit there would be a change
+    with no output. If the operator rules instead for a code-side render step before the PR opens,
+    that is a different surface and a separate filing.
+
+    (8) OWNED ELSEWHERE, RECORDED SO THIS DOES NOT RE-FILE THEM: the gate is W1-T1060's; the repair
+    arm is W1-T2272's — SHIPPED as #2905 and #3045, and its `status: queued` is STALE, worth
+    correcting whenever that shard is next touched; the swallowed trailer stamp beside it is
+    W1-T2435's; and the retro's own SHIPPED-log criterion — the one whose proof read `no-dialect` —
+    belongs to the retro task, not here. THIS TASK OWNS ONLY THE SHAPE OF THE BLOCK THE RETRO
+    WRITES.
+
+    RULE 19 BAND, SET UP FRONT. `risk: high` is the SPAN reading and carries no claim about blast
+    radius: `files:` names two stems as the sizing check counts them, `retro` and
+    `retro-acceptance-block-shape`, and that pairing is refused at `risk: medium`.
+  acceptance:
+    - claim: "the retro's acceptance bullets are emitted one criterion per physical line"
+      proof: "unit test: test/retro-acceptance-block-shape.test.ts"
+    - claim: "a claim wrapped onto a continuation line is refused before the PR opens"
+      proof: "unit test: test/retro-acceptance-block-shape.test.ts"
+    - claim: "a proof carrying no recognised dialect prefix is refused separately from the wrap"
+      proof: "unit test: test/retro-acceptance-block-shape.test.ts"
+    - claim: "the block a retro produces round trips through the parser the reviewer uses"
+      proof: "unit test: test/retro-acceptance-block-shape.test.ts"
+    - claim: "no claim text is generated altered or supplied by anything this task adds"
+      proof: "unit test: test/retro-acceptance-block-shape.test.ts"
+    - claim: "the plan filing lane's own body shape is unchanged"
+      proof: "unit test: test/retro-acceptance-block-shape.test.ts"
+  falsifier: |
+    If a fresh sweep of `acceptance-author-gate` failures finds an `unparseable` defect on a branch
+    that is NOT a `run-RETRO-*` sync, the defect is not confined to one producer and a writer-side
+    fix is the wrong scope — a repair path or a parser change would then be arguable where today it
+    is not. The measurement must count DISTINCT BRANCHES and not runs: the four runs on record are
+    two PRs, and counting runs overstates the population two-fold.
+
+    SEPARATELY DECISIVE: if `renderAcceptanceBlock` gains a dialect check, the second half of this
+    task is already solved elsewhere and only the layout half remains; and if `retro.ts` ever begins
+    building the PR body in code, the unreachability this shard rests on is gone and the finding must
+    be re-derived rather than trusted.
