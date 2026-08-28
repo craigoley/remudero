@@ -48,6 +48,88 @@
     a fleet that authors as the customer cannot be distinguished from the customer by any platform
     control, in their audit log or anyone else's. That is a property of the design, not of this
     installation, and it does not improve by waiting.
+
+    ── AMENDMENT 2026-08-27: THE TITLE CLAIM IS FALSE AT HEAD, AND THE REAL CONFLATION IS NARROWER ─
+
+    THIS TASK'S TITLE ASSERTS THAT EVERY AUTONOMOUS PULL REQUEST IS AUTHORED BY `cao825`, TYPE USER.
+    MEASURED 2026-08-27, THAT IS NO LONGER TRUE. Fleet pull requests are authored by
+    `remudero-fleet[bot]`: 143 of `main`'s commits carry it, and 20 of the day's 88 merges. Live
+    check on two `run-*` lanes, #3167 and #3166 — PR author `remudero-fleet[bot]`, branch-tip git
+    author `remudero-worker <remudero-worker@users.noreply.github.com>`, set by
+    `deploy/entrypoint.sh` lines 55-56. THE FLEET ALREADY HAS A DISTINCT ACTOR ON BOTH SURFACES.
+
+    ⚠ THE GENUINE CONFLATION IS OPERATOR AND AGENT, NOT FLEET AND HUMAN. The day's merges split 62
+    `cao825`, 20 `remudero-fleet[bot]`, 6 `claude[bot]`, and the 62 is the operator PLUS the agent
+    session, both authenticating on the same token, inseparable from any artefact. That is a
+    strictly narrower problem than this shard describes, and it is the one that blocked an
+    automation census the same day: the question "what did the operator actually do today" could not
+    be answered at all.
+
+    ⚠ AND W1-T204's POLICY QUESTION IS ALREADY ANSWERED, TODAY, WITH NO CHANGE. A platform rule
+    keyed on actor can tell a fleet change from a human one right now, because `remudero-fleet[bot]`
+    is a distinct actor. Both of W1-T204's allowed shapes are expressible; they did not collapse.
+
+    ── NOTHING BREAKS ON A SPLIT, MEASURED RATHER THAN ASSUMED ───────────────────────────────────
+
+    THE FAILURE MODE THIS SHARD IMPLIES — that splitting the identity silently uncredits work — IS
+    ABSENT. Every candidate was tested by symbol:
+      `ownsBranch` (`src/lib/status.ts`)  a pure regex over the branch NAME, zero identity reads
+      `deriveStatus` credit sources       `"trailer" | "head-branch"` — content-keyed, never actor-keyed
+      `main` branch protection            `restrictions: null`, `required_reviews: null`,
+                                          `enforce_admins: false`, 2 required checks — no actor rule
+      the auto-merge arm path             no `user.login` read anywhere along it
+    THE ONLY CONSUMER OF AN ACTOR LOGIN ANYWHERE UNDER `src/` is `src/lib/dep-review.ts` at lines 50
+    and 258, confirming a pull request is Dependabot's. Nothing else reads who authored anything.
+
+    ⚠ Q1. THE SQUASH REWRITES THE AUTHOR, WHICH KILLS THE CHEAP OPTION ──────────────────────────
+
+    GITHUB REWRITES A SQUASHED COMMIT'S AUTHOR TO THE PULL REQUEST'S AUTHOR. PROVEN ON #3172: its
+    branch tip read `Ubuntu <craigoleyagent@Remudero...cloudapp.net>` and the merged commit reads
+    `Craig Oley <craigoley@gmail.com>`. That is why `remudero-worker` survives on only THREE of
+    `main`'s commits against 2,259 for `craigoley@gmail.com` and 143 for `remudero-fleet[bot]` —
+    the worker identity is set correctly on every branch and destroyed at merge.
+
+    SO A DISTINCT GIT AUTHOR EMAIL IS CHEAP AND INSUFFICIENT. It costs one configuration line and no
+    credential: `RMD_GIT_AUTHOR_NAME` and `RMD_GIT_AUTHOR_EMAIL` already exist as entrypoint
+    overrides, and `src/lib/feedback-landing.ts` (lines 70-71, 374-376) is the working precedent for
+    a per-commit `git -c user.name= -c user.email=` override that needs no global config. It would
+    make the split legible on branch tips and pull-request commit lists, which survive only until
+    the branch is reaped. IT WOULD NOT SURVIVE THE MERGE. Only a distinct TOKEN does, because the
+    pull-request author does — which is precisely why `remudero-fleet[bot]` is legible on 143
+    commits and `remudero-worker` on three.
+
+    ALSO RECORDED SO A BUILD DOES NOT REDISCOVER IT: `src/` sets a git identity in exactly ONE
+    place, `feedback-landing.ts`. Everything else inherits ambient configuration. CONTROL: the same
+    search finds 49 identity assignments under `test/`, so the count of one is a real floor and not
+    a broken query. W1-T1012's harness seam already reaches the branch-tip commit
+    (`src/run-task.ts` at 10686 and 17496) to append the task trailer and COULD set an author there
+    — but by the paragraph above, that would not reach `main`.
+
+    ⚠ Q2. W1-T203 IS THE ONE CONSUMER THAT WANTS THIS, AND IT SHIPS DARK FOR WANT OF IT ──────────
+
+    `REMUDERO_REVIEWER_LOGIN` and `REMUDERO_REVIEWER_TOKEN` are set ZERO times in the daemon
+    container and named by ZERO files under `deploy/`. CONTROL, the same two probes on a variable
+    that IS supplied: `GH_TOKEN` reads 1 in-container and is named by 7 files under `deploy/`. So
+    the gate is not merely unconfigured — it has never been configurable on this installation.
+
+    A SPLIT ARMS THAT GATE RATHER THAN BREAKING IT. W1-T203's own doc requires a dedicated identity
+    "which workers never hold", and ships dark deliberately so a provenance gate armed before the
+    identity exists cannot deadlock every merge. W1-T2211 — a worker can read the console's write
+    token, `risk: high`, queued — is the standing reason that gate matters rather than being
+    theoretical.
+
+    ── Q3. THE ZERO-COST ANSWER TO WHAT WAS ACTUALLY ASKED ───────────────────────────────────────
+
+    MEASURE `.user.login` ON PULL REQUESTS INSTEAD OF AUTHORSHIP ON `main`. It costs nothing, needs
+    no credential and no configuration, and it separates fleet from human immediately — the 20 / 62
+    / 6 split above came from exactly that field. IT DOES NOT SEPARATE OPERATOR FROM AGENT, and
+    nothing short of a distinct token will, because both hold the same one.
+
+    NOTHING HERE PROPOSES CREATING AN ACCOUNT, ROTATING A CREDENTIAL, OR CHANGING BRANCH PROTECTION.
+    This task stays `verify: human` and the ruling stays the operator's; this amendment only makes
+    it decidable, by replacing the premise it would have been decided on. `acceptance`, `files`,
+    `title`, `status` and `risk` are untouched by this edit.
+
   design: |
     (i) THIS TASK ESTABLISHES; IT DOES NOT WIRE. The deliverable is a written disposition naming
     the candidate actors, what each costs, and what breaks — not a credential and not a code
