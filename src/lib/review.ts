@@ -8,7 +8,7 @@ import { reclaimStaleLock } from "./fs-race-safe.js";
 import { appendLedger } from "./ledger.js";
 import { liveStateFromRest, type GhApiFetcher } from "./open-prs-rest.js";
 import { isInPlanScope } from "./plan-architect.js";
-import { visibleCriteria, type AcceptanceCriterion } from "./plan.js";
+import { loadPlanAtRef, visibleCriteria, type AcceptanceCriterion } from "./plan.js";
 import { scanUnreachedExports, type UnreachedExport } from "./reachability.js";
 import { loadDefaultPolicy } from "./policy.js";
 import { readLedgerLines } from "./status.js";
@@ -5608,6 +5608,105 @@ export function acceptanceAuthorTimeCheck(
     };
   }
   return { ok: true, message: "Acceptance block is judgeable" };
+}
+
+// ── CRITERIA RESOLUTION AT THE PR's OWN HEAD (W1-T2432) ─────────────────────
+//
+// THE DEFECT. run-task.ts's `resolvePlanCriteriaForReview` (`reviewCommand`'s only call site)
+// resolves a trailered PR's criteria via `loadPlan(planPath)` — a read of the CONTAINER's
+// checked-out working tree, i.e. whatever sha the daemon last booted onto. The daemon restarts
+// on freshness continuously (W1-T126, not re-filed here), so a `plan/tasks.d/` shard that merges
+// between two boots is invisible to that read even though it is reachable from the very PR head
+// this reviewer is about to judge — `acceptanceAuthorTimeCheck`'s sibling in run-task.ts then
+// posts "no acceptance criteria to judge (fail closed)" on evidence that was never absent, only
+// unread (measured on #3168; see plan/tasks.d/W1-T2432-*.yaml rationale (1)-(2)).
+
+/** A DIVERGENCE between the trailer this body carries and the plan {@link loadPlanAtRef} could
+ *  load AT THE PR's HEAD — the head-resolved sibling of run-task.ts's own (unexported)
+ *  `ResolverDivergence`. Set ONLY when `loadPlanAtRef` itself throws (a duplicate id, an
+ *  unreadable git object at `headSha`) — never merely because `taskId` is absent from a plan
+ *  that loaded fine, the same distinction `resolvePlanCriteriaForReview` draws. */
+export interface PlanCriteriaAtHeadDivergence {
+  taskId: string;
+  reason: string;
+}
+
+/** {@link resolvePlanCriteriaAtHead}'s result — same shape as run-task.ts's
+ *  `resolvePlanCriteriaForReview` (criteria/source/taskDeclaredFiles/divergence) so swapping one
+ *  call for the other at a future call site is a like-for-like replacement, not a rewrite. */
+export interface PlanCriteriaAtHeadResult {
+  criteria: AcceptanceCriterion[];
+  /** The `Remudero-Task:` trailer's id, when the body carried one. `undefined` when it did not
+   *  (claim 4: an untrailered body is unchanged — this function never touches git for it). */
+  taskId?: string;
+  taskDeclaredFiles?: string[];
+  source?: string;
+  divergence?: PlanCriteriaAtHeadDivergence;
+}
+
+/**
+ * THE FIX (W1-T2432, remedy (a) of the two the filing priced). Resolve a trailered PR body's
+ * judging criteria from the plan AS IT STANDS AT THE PR's OWN HEAD SHA — `git show
+ * <headSha>:<planRelPath>` plus a `git ls-tree` of the sibling `tasks.d/` at that same sha, via
+ * {@link loadPlanAtRef} (W1-T2220's already-shipped remedy (c), reused rather than re-invented:
+ * the filing's rationale (3) names exactly this as the reason remedy (a) is priced as "may be
+ * free") — rather than the container's checked-out working tree. THIS MAY BE FREE per that
+ * rationale: the caller already holds `headSha` off the PR view it just fetched, and `runGit`
+ * shells out to the LOCAL git objects a real checkout/clone already has, so resolving here costs
+ * no second network fetch (claim 6).
+ *
+ * NAMED COST, UNCHANGED FROM `loadPlanAtRef`'s OWN: this reads the sha's COMMITTED objects, so a
+ * shard merging into `plan/tasks.d/` after `headSha` (i.e. after the PR's own base parent) is
+ * still invisible here — a strictly smaller window than today's boot-to-boot one, never zero
+ * (rationale (3)). That residual window is NOT this task's concern.
+ *
+ * The `Remudero-Task:` trailer is extracted HERE, via the SAME anchored {@link TASK_TRAILER_RE}
+ * {@link acceptanceAuthorTimeCheck} above already uses, rather than by a separate caller-side
+ * `reviewTaskIdFromBody` — one spelling of "find the trailer", not two.
+ *
+ * NEVER WIRED HERE, on purpose. Standing rule — one concern per PR — and this task's own file
+ * list (`src/lib/review.ts` + its unit test) deliberately excludes `src/run-task.ts`: swapping
+ * `reviewCommand`'s call from `resolvePlanCriteriaForReview` to this function, so a live review
+ * actually benefits, is a follow-up plumbing change over a contract this function proves
+ * standalone first.
+ *
+ * SYNCHRONOUS BY CONSTRUCTION (claim 6): no `Promise`, no timer, no retry loop between resolving
+ * criteria and handing them to {@link judgeReview} — a caller can do both in the same tick. Each
+ * blob {@link loadPlanAtRef} needs is read exactly once (one `git show` per file, one
+ * `git ls-tree` for the shard directory), never re-fetched.
+ */
+export function resolvePlanCriteriaAtHead(
+  body: string,
+  repoRoot: string,
+  planRelPath: string,
+  headSha: string,
+  runGit?: (args: string[]) => string,
+): PlanCriteriaAtHeadResult {
+  const trailerMatch = TASK_TRAILER_RE.exec(body ?? "");
+  // CLAIM 4: no anchored trailer ⇒ unchanged — nothing to resolve, and no git object is ever
+  // touched to find that out. The caller's existing PR-body `## Acceptance` fallback (unchanged
+  // by this function) is what recovers criteria here, exactly as it does today.
+  if (!trailerMatch) return { criteria: [] };
+  const taskId = trailerMatch[1];
+
+  try {
+    const plan = runGit === undefined ? loadPlanAtRef(repoRoot, planRelPath, headSha) : loadPlanAtRef(repoRoot, planRelPath, headSha, runGit);
+    const t = plan.byId.get(taskId);
+    // CLAIM 3: a task that resolves but declares no (or empty) acceptance — or a trailer whose
+    // id resolves nowhere in the plan at this head — both read as `criteria: []`, same fail-closed
+    // shape `judgeReview` already refuses to pass (claim 3 is proven at that composition, not here).
+    const criteria = t?.acceptance?.length ? t.acceptance : [];
+    return {
+      criteria,
+      taskId,
+      taskDeclaredFiles: t?.files,
+      source: criteria.length ? `plan at ${headSha} task ${taskId} (${criteria.length} criteria)` : undefined,
+    };
+  } catch (e) {
+    // A duplicate id or an unreadable git object at headSha — named, never swallowed into a
+    // silent empty plan (mirrors resolvePlanCriteriaForReview's own divergence shape).
+    return { criteria: [], taskId, divergence: { taskId, reason: String((e as Error)?.message ?? e) } };
+  }
 }
 
 /** One PR-authoring path's coverage — design item (i), W1-T952: "write down which the fix COVERS
