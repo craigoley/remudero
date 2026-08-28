@@ -2255,9 +2255,14 @@ export function renderShellHtml(
   /** One usage window as "12% · resets 20:50:00 EDT". "unknown" -- NEVER "0%" -- whenever the
    *  server withheld the reading (account-usage.ts returns the window ABSENT rather than zero
    *  for every unknown case, so a falsy check here can never turn a real 0% into "unknown":
-   *  a genuine zero arrives as the number 0 and \`w.percentUsed != null\` keeps it). */
-  function usageWindowLabel(w) {
-    if (!w || w.percentUsed == null) return "unknown";
+   *  a genuine zero arrives as the number 0 and \`w.percentUsed != null\` keeps it).
+   *
+   *  W1-T2434: \`reason\` -- \`usageUnknownReason\`, the SAME value \`au-as-of\` already rendered
+   *  alone -- is carried here too, so "unknown" on the five-hour/seven-day fields says WHY
+   *  ("unknown (too-old)") rather than a bare word indistinguishable from every other unknown
+   *  cause. Render change only: the reason was already computed and already on the payload. */
+  function usageWindowLabel(w, reason) {
+    if (!w || w.percentUsed == null) return reason ? \`unknown (\${reason})\` : "unknown";
     const pct = \`\${w.percentUsed}%\`;
     return w.resetsAt ? \`\${pct} · resets \${formatClock(w.resetsAt)}\` : pct;
   }
@@ -2283,9 +2288,15 @@ export function renderShellHtml(
    *  the server withholds the numbers entirely once they are too old, from a different account,
    *  or un-ageable (\`usageUnknownReason\`), at which point every window shows "unknown". */
   function renderAccountUsage(a) {
-    setGlanceValue("au-account", a.accountEmail || a.accountUuid || "unknown");
-    setGlanceValue("au-five-hour", usageWindowLabel(a.fiveHour));
-    setGlanceValue("au-seven-day", usageWindowLabel(a.sevenDay));
+    // W1-T2434: identity is absent ONLY on the "unreadable" reason (readAccountUsageFile's own
+    // catch loses both halves together -- see that function's doc); the other three reasons leave
+    // email/uuid populated, so this fallback is reached only when the reason IS the identity loss.
+    setGlanceValue(
+      "au-account",
+      a.accountEmail || a.accountUuid || (a.usageUnknownReason ? \`unknown (\${a.usageUnknownReason})\` : "unknown"),
+    );
+    setGlanceValue("au-five-hour", usageWindowLabel(a.fiveHour, a.usageUnknownReason));
+    setGlanceValue("au-seven-day", usageWindowLabel(a.sevenDay, a.usageUnknownReason));
     const gov =
       a.governor === "armed"
         ? "ARMED"
