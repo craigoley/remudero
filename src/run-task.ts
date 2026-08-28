@@ -10205,6 +10205,33 @@ async function runTask(
       say(
         `REFUSED: ${task.id} is already merged${mergedPrUrl ? ` (${mergedPrUrl})` : ""} — pass --rerun to dispatch anyway`,
       );
+      // W1-T2446: EVIDENCE ARM, HOISTED HERE. `decideDispatchClaimRelease`'s evidence arm
+      // (dispatch-claim.ts) fires only where `claimReserver` is in scope, and until now that
+      // was exactly ONE call site 300 lines below (`claimOutcome === "taken"`, at the CAS this
+      // refusal always returns before reaching) -- so the one release arm that needs neither a
+      // live holder nor an operator was unreachable in exactly the case it was written for.
+      // W1-T2424's claim survived its own merge until an operator deleted the ref by hand.
+      // `isMerged(task)` above is the SAME projection already paid for -- no new probe. The
+      // reserver is bound to `repoDir`'s path, not constructed yet this early: reading and
+      // dropping a claim that turns out to be held costs one `ls-remote` plus, at most, one
+      // delete -- no new I/O beyond that. Best-effort and silent when there is nothing to
+      // release: `holder()`/`drop()` are plain git reads/writes that fail closed (return
+      // undefined/false) on an unreachable remote or on a repo this host has never cloned,
+      // same as any other dispatch attempt for this task would see from a fresh host -- see
+      // `dispatchClaimReserverFor`'s own doc for why `repoDir`, not `repoRoot`. NO TIMER: the
+      // only new input is `isMerged`, the identical evidence `decideDispatchClaimRelease`'s
+      // one existing call site already reuses -- this hoists ITS reach, never its meaning.
+      const staleClaimReserver = opts.claimReserver ?? dispatchClaimReserverFor(join(config.root, "repos", task.repo));
+      if (staleClaimReserver.holder(task.id) !== undefined) {
+        const released = releaseDispatchClaim(task.id, staleClaimReserver, { evidenceObserved: true });
+        log("dispatch.claim_released", {
+          ref: dispatchClaimRef(task.id),
+          arm: released.arm,
+          release: released.release,
+          dropped: released.dropped,
+          reason: released.reason,
+        });
+      }
       return { taskId, runId, merged: false, costUsd: 0, verdict: "task_already_merged" };
     }
   }
