@@ -1886,38 +1886,63 @@ export function seedCountFromCircuitBreak(
  * {@link dispatchesEver} is the lifetime bound that catches it, and no step resets that.
  */
 /**
- * W1-T2249: the containment preflight's `check` symbol for a probe whose OWN
- * worker died on a transport/API failure (a 529, a dropped connection) before
- * it ever attempted a write — see `src/lib/containment.ts`'s
- * `spawn-transport-failure` arm. A run refused for THIS reason never reached
- * the task worker at all: nothing about the task's own ability to produce a PR
- * was tested, so it must not count toward "dispatched with no new owned PR"
- * any more than a run that never dispatched would.
+ * W1-T2423 — THE RUN VERDICTS THAT MEAN THE TASK WORKER NEVER STARTED.
+ *
+ * Both are PREFLIGHT PROBES that run once per dispatch and refuse ahead of every worker;
+ * run-task.ts says so on each in its own words — the containment probe confirms an outside-cwd
+ * write is OS-denied "before any task worker runs", the isolation probe confirms a worker
+ * inherits zero operator aliases "before any task worker (recon/implement) runs", and both FAIL
+ * CLOSED. So a run that ends in either tested THE HOST, not the task, and nothing about this
+ * task's own ability to open a PR was observed. Counting it toward "dispatched with no new owned
+ * PR" measures the wrong thing.
+ *
+ * W1-T2249 IS SUBSUMED, NOT RE-LITIGATED. It established exactly this principle for ONE probe
+ * failure mode — a probe worker that died on a 529 — and its own doc stated the general rule:
+ * "A run refused for THIS reason never reached the task worker at all". It keyed the exclusion on
+ * `check === "spawn-transport-failure"`, and that key is why it never fired: `check` is stamped at
+ * WRITE time, so the rule is FORWARD-ONLY over a counter that reads history backwards. MEASURED
+ * over the fleet's three-form union: all 94 `blocked_containment` rows across 63 distinct tasks
+ * read `check: "outside-cwd-denial"`, and ZERO of 517 distinct verdict rows carry the transport
+ * symbol — so its third conjunct has never once been satisfied, and W1-T1279's rows, written some
+ * 31 hours before the symbol existed, could never have been reached by it at all. Every row that
+ * arm matched is a strict subset of this set, so its behaviour is preserved exactly.
+ *
+ * WHY A VERDICT AND NOT A CHECK. `verdict` is written by the same `log("verdict", …)` call that
+ * has recorded these refusals since long before either exclusion existed, so a rule keyed on it
+ * reads correctly over rows already on disk — the property an allow-list of reason symbols
+ * structurally cannot have. It also needs no registration: a probe that grows a new failure
+ * reason is covered the day it ships, with nothing to remember to add here.
+ *
+ * DELIBERATELY THESE TWO AND NO MORE. Other pre-worker returns exist in run-task.ts
+ * (`blocked_git_fetch`, `blocked_illformed`, `blocked_inflight`, `task_already_merged`), but they
+ * are a different question — they describe the repo, plan or PR state rather than a probe of this
+ * host — and they are not a live one: each reads ZERO verdict rows over the whole union, against
+ * a control distribution in which nine other verdicts do appear. Widening to them would be a
+ * change with no measured population behind it.
  */
-const SPAWN_TRANSPORT_FAILURE_CHECK = "spawn-transport-failure";
+const PRE_WORKER_REFUSAL_VERDICTS: ReadonlySet<string> = new Set(["blocked_containment", "blocked_isolation"]);
 
 export function dispatchesWithoutNewOwnedPr(
   lines: ReadonlyArray<Record<string, unknown>>,
   taskId: string,
 ): number {
-  // W1-T2249 — PRE-SCAN, two passes over the (small, per-task) line set rather
-  // than one: a run's own `verdict` line always lands AFTER its `run.start` in
-  // ledger order, so the set of run_ids to EXCLUDE must be known before the
-  // counting pass below reaches their `run.start` lines. Narrow on purpose —
-  // ONLY the new spawn-transport-failure class is excluded here; NOTHING ELSE
-  // about the counter moves (design part (iv)): the threshold is unchanged,
-  // the `pr.opened`/merge-credit reset is unchanged, and a genuine dispatch
-  // that produces no PR still counts exactly as it does today.
-  const transportFailureRunIds = new Set<string>();
+  // PRE-SCAN (W1-T2249's shape, kept; W1-T2423 widens only what it matches) — two passes over
+  // the (small, per-task) line set rather than one: a run's own `verdict` line always lands AFTER
+  // its `run.start` in ledger order, so the set of run_ids to EXCLUDE must be known before the
+  // counting pass below reaches their `run.start` lines. NOTHING ELSE about the counter moves:
+  // the threshold is unchanged, the `pr.opened`/merge-credit reset is unchanged, and a genuine
+  // dispatch that produces no PR still counts exactly as it does today — see
+  // {@link PRE_WORKER_REFUSAL_VERDICTS} for which verdicts qualify and why these two only.
+  const preWorkerRefusalRunIds = new Set<string>();
   for (const line of lines) {
     if (
       line.task_id === taskId &&
       line.step === "verdict" &&
-      line.verdict === "blocked_containment" &&
-      line.check === SPAWN_TRANSPORT_FAILURE_CHECK &&
+      typeof line.verdict === "string" &&
+      PRE_WORKER_REFUSAL_VERDICTS.has(line.verdict) &&
       typeof line.run_id === "string"
     ) {
-      transportFailureRunIds.add(line.run_id);
+      preWorkerRefusalRunIds.add(line.run_id);
     }
   }
   let count = 0;
@@ -1926,10 +1951,11 @@ export function dispatchesWithoutNewOwnedPr(
     if (line.step === "pr.opened" || isMergeCreditLine(line)) {
       count = 0; // forward progress — a new PR, or a credited merge, resets the streak
     } else if (line.step === "run.start") {
-      // W1-T2249: a run.start whose OWN run ended in spawn_transport_failure is an
-      // infrastructure refusal, not a dispatch that "produced nothing" — exclude it
-      // rather than let an API outage trip the breaker in the task worker's stead.
-      if (typeof line.run_id === "string" && transportFailureRunIds.has(line.run_id)) continue;
+      // W1-T2423: a run.start whose OWN run ended before the task worker started is a refusal by
+      // a HOST preflight, not a dispatch that "produced nothing" — exclude it rather than let a
+      // probe failure trip the breaker in the task worker's stead. A run with NO verdict row is
+      // NOT excluded: unknown stays counted, so a crash can never buy a task extra dispatches.
+      if (typeof line.run_id === "string" && preWorkerRefusalRunIds.has(line.run_id)) continue;
       count++;
     }
   }
