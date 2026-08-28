@@ -27,6 +27,7 @@
 // cannot quietly reintroduce the discard this task closes.
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -80,6 +81,57 @@ test("W1-T2434: an absent host account file is not refused — the mount and env
     /REFUSING.*account file|REFUSING.*claude\.json/i,
     "a missing account file must degrade the ACCOUNT strip, never block the console from starting",
   );
+});
+
+// The two assertions above read the guard's SHAPE. This one RUNS it, because shape is exactly what
+// the absent path had right while the behaviour was wrong: `set -euo pipefail` is line 1 of
+// serve-container.sh, and bash BEFORE 4.4 treats expanding an EMPTY array as an unbound variable —
+// MEASURED on bash 3.2.57, what `/usr/bin/env bash` resolves to on macOS: `EMPTY[@]: unbound
+// variable`, exit 1. So a bare `"${ACCOUNT_FILE_ARGS[@]}"` aborts the launch on precisely the
+// no-account-file host the block above promises to tolerate, and no text assertion can see it.
+//
+// THE FALSIFIER IS VERSION-INDEPENDENT ON PURPOSE. It does not assert "the bare form aborts" —
+// that discriminates only on bash < 4.4 and would be vacuous on CI's bash 5, which is how a
+// version-gated control quietly becomes no control at all. It asserts the EXPANSION SEMANTICS the
+// docker invocation depends on, which every bash agrees about: empty ⇒ contributes NOTHING, and
+// populated ⇒ contributes every element in order. The naive alternative fix, `"${arr[@]:-}"`,
+// passes the "does not abort" reading and FAILS this one — it injects an empty-string argv element
+// that `docker run` reads as a positional argument. Both lines are extracted verbatim from the real
+// script rather than retyped, so this cannot drift away from what ships.
+test("W1-T2434: the ACCOUNT_FILE_ARGS expansion contributes nothing when empty and everything when populated — run, not pattern-matched", () => {
+  const sh = readFileSync(SERVE_CONTAINER_SH, "utf8");
+  const initLine = sh.split("\n").find((l) => l.trim() === "ACCOUNT_FILE_ARGS=()");
+  const useLine = sh.split("\n").find((l) => l.includes("ACCOUNT_FILE_ARGS[@]") && l.trim().startsWith('"'));
+  assert.ok(initLine, "the initialiser must still exist in the shipped script");
+  assert.ok(useLine, "the expansion must still exist in the shipped script");
+
+  const probe = (populate: boolean) =>
+    spawnSync(
+      "bash",
+      [
+        "-c",
+        [
+          "set -euo pipefail",
+          initLine,
+          populate ? 'ACCOUNT_FILE_ARGS=(-v "/h/.claude.json:/c/.claude.json:ro" -e "RMD_ACCOUNT_FILE_PATH=/c/.claude.json")' : ":",
+          `RUN_ARGS=( BEFORE ${useLine.trim()} AFTER )`,
+          'printf "%s\\n" "${#RUN_ARGS[@]}" "${RUN_ARGS[*]}"',
+        ].join("\n"),
+      ],
+      { encoding: "utf8" },
+    );
+
+  const empty = probe(false);
+  assert.equal(empty.status, 0, `the absent-file path must not abort under set -u: ${empty.stderr}`);
+  const [emptyCount, emptyArgv] = empty.stdout.trim().split("\n");
+  assert.equal(emptyCount, "2", `an empty ACCOUNT_FILE_ARGS must contribute NO argv element, got: ${emptyArgv}`);
+  assert.equal(emptyArgv, "BEFORE AFTER", "and specifically must not inject an empty string docker would read as a positional arg");
+
+  const full = probe(true);
+  assert.equal(full.status, 0, full.stderr);
+  const [fullCount, fullArgv] = full.stdout.trim().split("\n");
+  assert.equal(fullCount, "6", `a populated ACCOUNT_FILE_ARGS must contribute all four elements, got: ${fullArgv}`);
+  assert.match(fullArgv, /BEFORE -v \/h\/\.claude\.json:\/c\/\.claude\.json:ro -e RMD_ACCOUNT_FILE_PATH=\/c\/\.claude\.json AFTER/);
 });
 
 test("W1-T2434: once RMD_ACCOUNT_FILE_PATH resolves to a mounted, readable file, the route reads real identity end-to-end", async () => {

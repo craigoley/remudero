@@ -285,7 +285,14 @@ RUN_ARGS=(
   -e GH_APP_PRIVATE_KEY_PATH
   -e "RMD_SERVE_NETWORK=${SERVE_NETWORK_ENV_VALUE}"
   -v "${STATE_DIR}:${STATE_MOUNT_DEST}"
-  "${ACCOUNT_FILE_ARGS[@]}"
+  # W1-T2434: the `[@]+"..."` form, not a bare `"${ACCOUNT_FILE_ARGS[@]}"`. Under `set -u` (line 1)
+  # bash BEFORE 4.4 treats expanding an EMPTY array as an unbound variable and aborts the script —
+  # MEASURED on bash 3.2.57, which is what `/usr/bin/env bash` resolves to on macOS: `EMPTY[@]:
+  # unbound variable`, exit 1. That fires on exactly the ABSENT-account-file path this block's own
+  # header promises is "not a refusal", so the bare form would refuse to launch the console on the
+  # one host state it was written to tolerate. The production host is bash 5.2.21 (measured) where
+  # either form works; this one works on both.
+  "${ACCOUNT_FILE_ARGS[@]+"${ACCOUNT_FILE_ARGS[@]}"}"
   "${REF}"
   ./bin/rmd serve --host "${SERVE_BIND_HOST}"
 )
