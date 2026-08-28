@@ -6593,6 +6593,91 @@ export async function runFixRebase(
 }
 
 /**
+ * W1-T1095 (capability 1 park / capability 3 rebase), W1-T2436 (capability 2 — THE MISSING
+ * PRODUCER): the ONE park-or-resume-and-rebase orchestration this rung runs once a prerequisite
+ * PR NUMBER is known — shared by BOTH producers of that number: the review-text-derived one
+ * ({@link outOfDiffBlockerFor}, capability 1's own idiom) and the ledger-derived one
+ * ({@link priorPrerequisitePrFor}, this task's own idiom). Extracted so "capabilities 1 and 3 are
+ * consumed, never re-implemented" (this task's rationale (11)) is true of the ORCHESTRATION
+ * around `prerequisiteMerged`/`runFixRebase`, not only of those two leaf functions — a single
+ * call site owns the park/resume/rebase shape, so a future change to it (a new ledger field, a
+ * different resume message) cannot drift between two independently-maintained copies.
+ *
+ * Returns a terminal {@link FixRungOutcome} (`"parked"` or `"rebased"`) for the caller to return
+ * immediately, or `undefined` to mean "the prerequisite is merged but no rebase happened (already
+ * contains the base, or refused) — fall through and proceed as an ordinary strike", exactly as
+ * both call sites already did inline before this extraction.
+ */
+async function parkOrResumeOnPrerequisite(
+  prerequisitePr: number,
+  ctx: {
+    prUrl: string;
+    review: ReviewVerdict & { headSha: string; reviewerOutcome: string };
+    strikes: number;
+    retriggers: number;
+  },
+  deps: {
+    readPrerequisiteState?: (prNumber: number) => LiveStateResult | Promise<LiveStateResult>;
+    log: (step: string, extra?: Record<string, unknown>) => void;
+    say: (msg: string) => void;
+    ledgerLines: () => Array<Record<string, unknown>>;
+    readMergeFacts?: (prNumber: number) => FixRebaseMergeFacts | Promise<FixRebaseMergeFacts>;
+    updateBranch?: (prNumber: number) => { ok: boolean; error?: string } | Promise<{ ok: boolean; error?: string }>;
+  },
+): Promise<FixRungOutcome | undefined> {
+  const { review, strikes, retriggers, prUrl } = ctx;
+  const prerequisiteState = deps.readPrerequisiteState ? await deps.readPrerequisiteState(prerequisitePr) : undefined;
+  if (!prerequisiteMerged(prerequisiteState)) {
+    const parkReason = `blocked on #${prerequisitePr} — a prerequisite outside this diff, not yet merged`;
+    deps.log("fix.parked", { strike: strikes, blocked_on_pr: prerequisitePr, reason: parkReason });
+    deps.say(`fix rung: PARKED — ${parkReason}; no strike spent, will resume once it merges: ${prUrl}`);
+    return { outcome: "parked", review, strikes, retriggers, reason: parkReason, blockedOnPr: prerequisitePr };
+  }
+  deps.log("fix.resumed", { strike: strikes, blocked_on_pr: prerequisitePr });
+  deps.say(`fix rung: RESUMING — prerequisite #${prerequisitePr} has merged; dispatching normally: ${prUrl}`);
+
+  // W1-T1095 (capability 3 — REBASE): the prerequisite has merged, but this head does not yet
+  // CONTAIN it. Take the base before spending the next strike, or the fix worker re-runs against
+  // a checkout that still lacks the remedy the review named and fails identically. Every arm of
+  // this call ledgers its reason, including every refusal — see `runFixRebase`.
+  const rebase = await runFixRebase(
+    {
+      prUrl,
+      prerequisitePr,
+      // STRUCTURALLY FALSE HERE, AND SAID SO RATHER THAN DRESSED UP: this is only ever reached
+      // while `review.state` is narrowed to `"failure"` (a passing review returns `outcome:
+      // "fixed"` before any of this), so the compiler itself rejects `review.state === "success"`
+      // as a comparison with no overlap. The guard still exists in `decideFixRebase` — it is the
+      // operator's stated safety requirement and is proven by its own unit fixture — but at
+      // today's call sites it is defence in depth, not a live arm. Naming that is the point; an
+      // inert arm sold as a live one is the defect this fleet keeps filing.
+      reviewPassed: false,
+      strikes,
+    },
+    {
+      log: deps.log,
+      say: deps.say,
+      ledgerLines: deps.ledgerLines,
+      readMergeFacts: deps.readMergeFacts,
+      updateBranch: deps.updateBranch,
+    },
+  );
+  if (rebase.rebased) {
+    // THE HEAD MOVED, SO THIS RUNG IS OVER — and this return is the whole reason the rebase is
+    // safe. `update-branch` merges the base into the REMOTE head branch, so the local worktree
+    // this rung would hand the next fix worker is now behind origin; that worker's
+    // `gitPushRunBranch` is a plain (non-force) push and would be rejected as non-fast-forward,
+    // and the sweep's push dep SWALLOWS failures ("the worker may already have pushed"), so the
+    // strike would be spent and land nothing, silently. Returning here spends NO strike and lets
+    // the next poll materialise a fresh worktree at the new head — the same re-invoked-later
+    // shape parking already uses, never a local fetch/reset (which would take `.git/config.lock`
+    // on a repo the fleet runs six lanes against).
+    return { outcome: "rebased", review, strikes, retriggers, reason: rebase.reason, blockedOnPr: prerequisitePr };
+  }
+  return undefined;
+}
+
+/**
  * W1-T1095 (capability 3): map GitHub's two REST payloads onto {@link FixRebaseMergeFacts} —
  * PURE, so the mapping is a unit fixture and the network read below stays a one-line wrapper.
  *
@@ -7553,38 +7638,15 @@ export async function runFixRung(opts: {
     // (the same way every other dispatch already is) and this check now reads differently.
     const outOfDiffBlocker = outOfDiffBlockerFor(review);
     if (outOfDiffBlocker !== undefined) {
-      const prerequisiteState = deps.readPrerequisiteState
-        ? await deps.readPrerequisiteState(outOfDiffBlocker)
-        : undefined;
-      if (!prerequisiteMerged(prerequisiteState)) {
-        const parkReason = `blocked on #${outOfDiffBlocker} — a prerequisite outside this diff, not yet merged`;
-        deps.log("fix.parked", { strike: strikes, blocked_on_pr: outOfDiffBlocker, reason: parkReason });
-        deps.say(`fix rung: PARKED — ${parkReason}; no strike spent, will resume once it merges: ${opts.prUrl}`);
-        return { outcome: "parked", review, strikes, retriggers, reason: parkReason, blockedOnPr: outOfDiffBlocker };
-      }
-      deps.log("fix.resumed", { strike: strikes, blocked_on_pr: outOfDiffBlocker });
-      deps.say(`fix rung: RESUMING — prerequisite #${outOfDiffBlocker} has merged; dispatching normally: ${opts.prUrl}`);
-
-      // W1-T1095 (capability 3 — REBASE): the prerequisite has merged, but this head does not
-      // yet CONTAIN it. Take the base before spending the next strike, or the fix worker re-runs
-      // against a checkout that still lacks the remedy the review named and fails identically.
-      // Every arm of this call ledgers its reason, including every refusal — see `runFixRebase`.
-      const rebase = await runFixRebase(
+      // W1-T2436: the park/resume/rebase orchestration itself now lives in ONE shared place
+      // ({@link parkOrResumeOnPrerequisite}) — this is capability 1's own producer
+      // (`outOfDiffBlockerFor`, a review-authored "blocked on #N") handing its prerequisite
+      // number to the SAME consumer capability 2's ledger-derived producer uses below.
+      const outcome = await parkOrResumeOnPrerequisite(
+        outOfDiffBlocker,
+        { prUrl: opts.prUrl, review, strikes, retriggers },
         {
-          prUrl: opts.prUrl,
-          prerequisitePr: outOfDiffBlocker,
-          // STRUCTURALLY FALSE HERE, AND SAID SO RATHER THAN DRESSED UP: the rung only ever
-          // reaches this line while `review.state` is narrowed to `"failure"` (a passing review
-          // returns `outcome: "fixed"` before any of this), so the compiler itself rejects
-          // `review.state === "success"` as a comparison with no overlap. The guard still exists
-          // in `decideFixRebase` — it is the operator's stated safety requirement and is proven
-          // by its own unit fixture — but at TODAY'S single call site it is defence in depth,
-          // not a live arm. Naming that is the point; an inert arm sold as a live one is the
-          // defect this fleet keeps filing.
-          reviewPassed: false,
-          strikes,
-        },
-        {
+          readPrerequisiteState: deps.readPrerequisiteState,
           log: deps.log,
           say: deps.say,
           ledgerLines: deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)),
@@ -7592,18 +7654,7 @@ export async function runFixRung(opts: {
           updateBranch: deps.updateBranch,
         },
       );
-      if (rebase.rebased) {
-        // THE HEAD MOVED, SO THIS RUNG IS OVER — and this return is the whole reason the rebase
-        // is safe. `update-branch` merges the base into the REMOTE head branch, so the local
-        // `opts.worktreePath` this rung would hand the next fix worker is now behind origin;
-        // that worker's `gitPushRunBranch` is a plain (non-force) push and would be rejected as
-        // non-fast-forward, and the sweep's push dep SWALLOWS failures ("the worker may already
-        // have pushed"), so the strike would be spent and land nothing, silently. Returning here
-        // spends NO strike and lets the next poll materialise a fresh worktree at the new head —
-        // the same re-invoked-later shape parking already uses, never a local fetch/reset (which
-        // would take `.git/config.lock` on a repo the fleet runs six lanes against).
-        return { outcome: "rebased", review, strikes, retriggers, reason: rebase.reason, blockedOnPr: outOfDiffBlocker };
-      }
+      if (outcome) return outcome;
     }
 
     // W1-T58 (ratifies P3 via P8/RETRO-1784058021334, Standing rule 15): a diff
@@ -7668,8 +7719,10 @@ export async function runFixRung(opts: {
     // it replaces). Zero strikes spent either way, exactly as before this task.
     if (review.instrumentEntangled) {
       const paths = review.instrumentEntanglementPaths;
-      const instrumentList = paths?.instrumentPaths.join(", ") ?? "(unavailable)";
-      const srcList = paths?.srcPaths.join(", ") ?? "(unavailable)";
+      const instrumentPaths = paths?.instrumentPaths ?? [];
+      const srcPaths = paths?.srcPaths ?? [];
+      const instrumentList = paths ? instrumentPaths.join(", ") : "(unavailable)";
+      const srcList = paths ? srcPaths.join(", ") : "(unavailable)";
       deps.log("fix.instrument_entangled", {
         strike: strikes,
         summary: review.summary,
@@ -7722,9 +7775,11 @@ export async function runFixRung(opts: {
       // `priorPrerequisitePrFor`'s own doc for why this is ledger-keyed rather than review-text-
       // keyed (a fresh review of this unchanged entangled diff reports `instrumentEntangled: true`
       // forever, so `outOfDiffBlockerFor` can never discover a prerequisite THIS capability itself
-      // produced). Never re-dispatches a SECOND worker for a split already produced.
-      const ledgerLinesFn = deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath));
-      let prerequisitePr = priorPrerequisitePrFor(ledgerLinesFn(), opts.prUrl);
+      // produced). Never re-dispatches a SECOND worker for a split already produced. Read ONCE —
+      // the materialized array is reused below for `parkOrResumeOnPrerequisite`'s own ledger read
+      // too, rather than re-opening and re-parsing the same file a second time this round.
+      const ledgerLines = (deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))();
+      let prerequisitePr = priorPrerequisitePrFor(ledgerLines, opts.prUrl);
 
       if (prerequisitePr === undefined) {
         deps.say(
@@ -7742,8 +7797,8 @@ export async function runFixRung(opts: {
           budgetUsd: opts.budgetUsd,
           runId: opts.runId,
           taskId: opts.taskId,
-          instrumentPaths: paths?.instrumentPaths ?? [],
-          srcPaths: paths?.srcPaths ?? [],
+          instrumentPaths,
+          srcPaths,
         });
         // W1-T1044: the SAME wall-clock bound + best-effort reclaim every ordinary strike's own
         // spawn already takes (spawnFixWorkerBounded) — this dispatch is never a strike (`strikes`
@@ -7778,39 +7833,29 @@ export async function runFixRung(opts: {
           pr_url: opts.prUrl,
           prerequisite_pr: target.prNumber,
           prerequisite_pr_url: prerequisiteUrl,
-          instrument_paths: paths?.instrumentPaths,
-          src_paths: paths?.srcPaths,
+          instrument_paths: instrumentPaths,
+          src_paths: srcPaths,
         });
         prerequisitePr = target.prNumber;
       }
 
-      // CAPABILITIES 1 AND 3, CONSUMED — NEVER RE-IMPLEMENTED (rationale (11)): the exact same
-      // fail-safe merged-check and rebase this rung already ships above for a review-authored
-      // "blocked on #N" park. `prerequisiteMerged`'s own fail-safe default (`ok:false` ⇒ not
-      // merged) still guards this identically — nothing here can rebase onto, or merge, an
-      // unmerged prerequisite.
-      const prerequisiteState = deps.readPrerequisiteState ? await deps.readPrerequisiteState(prerequisitePr) : undefined;
-      if (!prerequisiteMerged(prerequisiteState)) {
-        const parkReason = `blocked on #${prerequisitePr} — a prerequisite outside this diff, not yet merged`;
-        deps.log("fix.parked", { strike: strikes, blocked_on_pr: prerequisitePr, reason: parkReason });
-        deps.say(`fix rung: PARKED — ${parkReason}; no strike spent, will resume once it merges: ${opts.prUrl}`);
-        return { outcome: "parked", review, strikes, retriggers, reason: parkReason, blockedOnPr: prerequisitePr };
-      }
-      deps.log("fix.resumed", { strike: strikes, blocked_on_pr: prerequisitePr });
-      deps.say(`fix rung: RESUMING — prerequisite #${prerequisitePr} has merged; dispatching normally: ${opts.prUrl}`);
-      const rebase = await runFixRebase(
-        { prUrl: opts.prUrl, prerequisitePr, reviewPassed: false, strikes },
+      // CAPABILITIES 1 AND 3, CONSUMED — NEVER RE-IMPLEMENTED (rationale (11)): the SAME shared
+      // orchestration ({@link parkOrResumeOnPrerequisite}) capability 1's own `outOfDiffBlockerFor`
+      // branch above calls — one park/resume/rebase implementation for both producers of a
+      // prerequisite number, not two independently-maintained copies.
+      const outcome = await parkOrResumeOnPrerequisite(
+        prerequisitePr,
+        { prUrl: opts.prUrl, review, strikes, retriggers },
         {
+          readPrerequisiteState: deps.readPrerequisiteState,
           log: deps.log,
           say: deps.say,
-          ledgerLines: ledgerLinesFn,
+          ledgerLines: () => ledgerLines,
           readMergeFacts: deps.readMergeFacts,
           updateBranch: deps.updateBranch,
         },
       );
-      if (rebase.rebased) {
-        return { outcome: "rebased", review, strikes, retriggers, reason: rebase.reason, blockedOnPr: prerequisitePr };
-      }
+      if (outcome) return outcome;
       // Not rebased (already contains the base, or refused) — fall through exactly like the
       // existing capability-1/3 branch above: an ordinary strike proceeds against this round's
       // review.
