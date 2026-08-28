@@ -111,6 +111,31 @@
     (x) RULE 19 BAND. risk high is set up front because the file list spans two source stems -- the
     judge's own module and the call site that assembles its input -- and Rule 19 sizes on SPAN. The
     band is the span reading, not a blast-radius judgement.
+
+    ── Q4. RE-VERIFIED AT DISPATCH (2026-08-28) -- TRIGGER STILL NOT FIRED, SO THIS STOPS ─────────
+
+    (xi) THE INTERSECTION IN (iv) WAS RE-RUN LIVE, PER (vi)'S OWN INSTRUCTION, BEFORE A LINE OF
+    risk-judge.ts OR run-task.ts WAS TOUCHED. `gh api search/issues -f
+    q='repo:craigoley/remudero "risk judge ESCALATED" in:title'` returns total_count 37 -- IDENTICAL
+    to the count (iv) measured at filing -- and, sorted by creation date descending, the newest item
+    is still issue #3060 (created 2026-08-27T09:02:16Z): the founding instance itself, PR #3059 /
+    W1-T2318. No risk-judge escalation of any kind, let alone a second amendment-shaped one, has
+    opened since this shard was filed. `gh pr view 3059` independently confirms its diff is the
+    single file plan/tasks.d/W1-T2318-boot-enumerates-2400-closed-prs-to-list-five-open-branches.yaml,
+    MERGED 2026-08-27T10:40:07Z -- (i)/(iv)'s characterisation stands re-derived, not merely trusted.
+
+    (xii) THE RATE IS STILL ONE OF ONE, SO THIS DISPATCH RECORDS AND STOPS. Per (vi): "if it still
+    returns one id, record the new instance and stop." This amendment touches only this note --
+    acceptance, files:, risk:, type: and status: below are byte-identical to the filed shard, so it
+    remains queued and ready to build the narrowing the instant a second fleet-dispatched amendment
+    is blocked on the same reasoning.
+
+    (xiii) A NOTED SELF-REFERENCE. This very amendment is itself a plan-only diff (one file under
+    plan/) landing under a chore(plan) subject on a run-W1-T2371-<digits> head, amending a shard
+    (this one) that declares source paths in files: -- the exact shape (i)/(iv) describe. If the
+    real risk judge escalates THIS PR on that basis, the rate becomes two of two and (vi)'s trigger
+    is satisfied for whoever picks this shard up next; if it does not, nothing about the disposition
+    above changes. Recorded so the outcome is legible either way, not predicted.
   acceptance:
     - claim: "a plan-only diff under a plan-declaring subject is no longer read as evidence of incomplete work or misdeclared scope"
       proof: "unit test: test/risk-judge-plan-only-amendment.test.ts"
