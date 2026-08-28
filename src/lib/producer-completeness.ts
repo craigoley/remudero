@@ -1,5 +1,6 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { resolveLedgerUnion, type LedgerGrepFsDeps } from "./ledger-grep.js";
 
 /**
  * PRODUCER COMPLETENESS — does anything actually WRITE the fields we read?
@@ -288,4 +289,290 @@ export function auditProducerCompleteness(opts: {
     unresolvableSpreads,
     producers,
   };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+// SHAPE 5 — DID A WIRED, MERGED FEATURE EVER RUN? (W1-T2408)
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+//
+// W1-T2266 (#2875) named four shapes for "shipped but never adopted": a symbol with no caller,
+// a field with no writer, a script with no invoker, a gate with no subject. Its own design note
+// (4) says the shapes "differ in where the evidence lives, not merely in what is unadopted" —
+// and every one of its corpora is STATIC: a checkout, a `package.json`, a workflow file. All
+// four ask "is anything WIRED to it". None of them ask "did it ever RUN".
+//
+// FOUR MERGED FEATURES PROVED THE GAP. `resolveAccountFilePath` (W1-T997, #2153) HAS a caller
+// (`buildServeRoutes`) — shape 1 clears — yet `RMD_ACCOUNT_FILE_PATH` is supplied by no deploy
+// artifact and no live container, so the seam never receives a value. Fifteen `panel.*` write
+// steps (W1-T2273, #2885) each HAVE a call site inside a route handler — shape 1 clears again —
+// yet all fifteen read ZERO across the ledger union, against a CONTROL of the same serve
+// process's own `serve.start`/`serve.bind_failed`/`serve.stop` steps reading nonzero from the
+// identical file. Wired is not the same claim as ran.
+//
+// THE METHOD IS BORROWED, NOT REINVENTED. `auditProducerCompleteness` above already owns the
+// "zero-with-control" shape — a reading is only trustworthy beside a control proving the same
+// read mechanism can see a nonzero. What it does not own is the SCOPE: it answers the question
+// only for `OpenPrView`'s optional fields. `auditRuntimeAdoption` below carries that same method
+// over two corpora that are neither a checkout nor a package manifest: the ledger union
+// (`resolveLedgerUnion`, the rotated + live forms together) and the deployed environment.
+//
+// DECLARED NAMES COME FROM `src/`, NEVER FROM THE LEDGER'S OWN OBSERVED KEYS. A first attempt at
+// this exact measurement kept only ledger-step literals whose PREFIX already appeared somewhere
+// in the ledger, as a cheap way to tell a step name from a config key — and that filter read
+// `panel.*` at zero, not because the steps fire, but because `panel` had never appeared in the
+// ledger at all, so the entire family was discarded by the very condition meant to make it
+// interesting. A detector keyed on "steps I have seen" is structurally blind to a feature that
+// never ran once. `declaredLedgerSteps`/`declaredEnvVarNames` below scan SOURCE TEXT only.
+//
+// A GATE IS REFUSED HERE ON PURPOSE. `daemon.cost_governor`/`daemon.queue_governor` also read
+// zero, and by `DispatchGovernorState`'s own doc (`account-usage.ts`) neither ever logs "not
+// deferring" — only that it IS deferring — so their zero is the HEALTHY state, and nothing
+// mechanical separates it from `panel.*`'s inert one. `auditRuntimeAdoption` therefore returns
+// ROWS, never a verdict: no `ok`, no `pass`, no `blocking` field anywhere in its output, and a
+// row whose name is in `possiblyHealthyZero` carries that as DATA rather than being silently
+// dropped or silently trusted. It also emits no per-section "N of M reaching" figure — that
+// number would require deciding, per row, whether a zero is inert or healthy, which this method
+// has just proven it cannot do from the artefacts alone.
+
+/** Where a {@link RuntimeAdoptionRow}'s live reading was taken from. */
+export type RuntimeAdoptionCorpus = "ledger" | "environment";
+
+/** One declared name, and the exact `file:line` it was scanned from — never a ledger key. */
+export interface DeclaredRuntimeName {
+  name: string;
+  /** 1-based `file:line` of the source literal this name was scanned from. */
+  declaredAt: string;
+}
+
+/** A `"foo.bar"`-shaped dotted lower-case string literal — the same convention every ledger
+ *  step name in this repo already follows (`"panel.proposal_accepted"`, `"serve.start"`). */
+const LEDGER_STEP_LITERAL = /"([a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+)"/g;
+
+/** Excludes literals that only LOOK like a dotted step name because they end in a file
+ *  extension (`"package.json"`, `"scripts/foo.mjs"`) — the "minus file-extension shapes"
+ *  correction this measurement needed once it stopped filtering by observed ledger prefix. */
+const FILE_EXTENSION_TAIL = /\.(ts|tsx|js|jsx|mjs|cjs|json|md|yaml|yml|ndjson|gz|txt|html|css|svg|png|sh)$/i;
+
+/** This repo's one production env-var prefix — matches `RMD_ACCOUNT_FILE_PATH`,
+ *  `RMD_ALLOW_LIVE_SPAWN`, and every sibling the same way, as a plain string-literal scan (the
+ *  literals are declared as bare strings, e.g. `ACCOUNT_FILE_PATH_ENV = "RMD_ACCOUNT_FILE_PATH"`,
+ *  not necessarily behind a `process.env.` prefix at the declaration site). */
+const ENV_VAR_LITERAL = /"(RMD_[A-Z0-9_]+)"/g;
+
+/**
+ * Every ledger-step-shaped string literal declared under `srcRoot`, scanned from SOURCE TEXT —
+ * see this section's header for why the ledger's own observed keys are never consulted. Degrades
+ * to `[]` on an unreadable/absent `srcRoot` or file, never throws (Shape 5's "never a gate" rule
+ * starts here, not just at the report's own return value).
+ */
+export function declaredLedgerSteps(srcRoot: string): DeclaredRuntimeName[] {
+  return declaredLiterals(srcRoot, LEDGER_STEP_LITERAL, (name) => !FILE_EXTENSION_TAIL.test(name));
+}
+
+/**
+ * Every `RMD_*`-shaped env-var-name string literal declared under `srcRoot`, scanned from SOURCE
+ * TEXT. Same degrade-never-throw discipline as {@link declaredLedgerSteps}.
+ */
+export function declaredEnvVarNames(srcRoot: string): DeclaredRuntimeName[] {
+  return declaredLiterals(srcRoot, ENV_VAR_LITERAL, () => true);
+}
+
+function declaredLiterals(srcRoot: string, pattern: RegExp, keep: (name: string) => boolean): DeclaredRuntimeName[] {
+  let files: string[];
+  try {
+    files = tsFilesUnder(srcRoot);
+  } catch {
+    // An unreadable/absent srcRoot degrades to "no declared names" — never throws (Shape 5's
+    // discipline: this report can never become the thing that blocks a merge).
+    return [];
+  }
+  const found = new Map<string, string>();
+  for (const file of files) {
+    let src: string;
+    try {
+      src = readFileSync(file, "utf8");
+    } catch {
+      // A file listed but unreadable by the time we get here (deleted/permissions mid-scan)
+      // contributes no literals — same degrade-not-throw discipline as the directory read above.
+      continue;
+    }
+    const lines = src.split("\n");
+    for (let i = 0; i < lines.length; i++) {
+      for (const m of lines[i].matchAll(pattern)) {
+        const name = m[1];
+        if (!keep(name) || found.has(name)) continue;
+        found.set(name, `${file}:${i + 1}`);
+      }
+    }
+  }
+  return [...found.entries()].map(([name, declaredAt]) => ({ name, declaredAt }));
+}
+
+function escapeForRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** Every regular file under `dir`, any extension — unlike {@link tsFilesUnder} this walks a
+ *  deploy tree (yaml, shell, Dockerfiles), so it degrades to `[]` rather than throwing on a
+ *  missing/unreadable directory instead of assuming a `.ts`-only checkout shape. */
+function allFilesUnder(dir: string, acc: string[] = []): string[] {
+  let entries: string[];
+  try {
+    entries = readdirSync(dir);
+  } catch {
+    // A missing/unreadable deploy dir degrades to "no files under it" — the deploy corpus is
+    // then decided by `env` alone, never a thrown error out of a report.
+    return acc;
+  }
+  for (const entry of entries) {
+    const p = join(dir, entry);
+    let isDir: boolean;
+    try {
+      isDir = statSync(p).isDirectory();
+    } catch {
+      // Entry vanished between readdir and stat (race with a concurrent write) — skip it, same
+      // best-effort discipline as the readdir degrade above.
+      continue;
+    }
+    if (isDir) allFilesUnder(p, acc);
+    else acc.push(p);
+  }
+  return acc;
+}
+
+/** True iff some file under `deployRoot` names `varName` verbatim — the same "0 files under
+ *  `deploy/` name it" reading `RMD_ACCOUNT_FILE_PATH` failed. */
+function deploySupplies(deployRoot: string | undefined, varName: string): boolean {
+  if (!deployRoot) return false;
+  for (const file of allFilesUnder(deployRoot)) {
+    try {
+      if (readFileSync(file, "utf8").includes(varName)) return true;
+    } catch {
+      // Unreadable/binary file under the deploy tree — skip it and keep scanning the rest;
+      // one bad file must never erase the whole deploy-corpus reading.
+      continue;
+    }
+  }
+  return false;
+}
+
+/** One line of the report: a declared thing, its live reading, the corpus that reading came
+ *  from, and the population control that makes a zero legible. Never a verdict — there is no
+ *  boolean anywhere on this shape that means "this failed" or "block on this". */
+export interface RuntimeAdoptionRow {
+  name: string;
+  corpus: RuntimeAdoptionCorpus;
+  /** `file:line` the name was scanned from — always source, never the ledger's own keys. */
+  declaredAt: string;
+  /** The live reading: a match count for `ledger`, `0`/`1` (supplied or not) for `environment`. */
+  reading: number;
+  /** A same-corpus reading proving the read mechanism itself can see a nonzero, so this row's
+   *  zero (if it is one) is never printed alone. */
+  control: { label: string; reading: number };
+  /** True when `name` is on the caller's allowlist of readings this method cannot classify as
+   *  inert vs. correctly-rare (e.g. a dispatch governor that only ever logs while deferring). */
+  possiblyHealthyZero: boolean;
+  /** Set on an allowlisted row (the reason it's there) or when the ledger union itself could not
+   *  be read (every ledger reading in that run is UNMEASURED, not a verified zero). */
+  note?: string;
+}
+
+export interface RuntimeAdoptionOptions {
+  /** Where declared ledger-step / env-var literals are scanned from. */
+  srcRoot: string;
+  /** State dir the ledger union (`resolveLedgerUnion`) is read from. */
+  stateDir: string;
+  /** Injectable fs surface for the ledger union read — real fs by default. */
+  ledgerFsDeps?: LedgerGrepFsDeps;
+  /** The environment a live installation actually supplies. Defaults to `process.env`, injected
+   *  so a test can drive both "supplied" and "supplied nowhere" without touching the real one. */
+  env?: Readonly<Record<string, string | undefined>>;
+  /** Where deploy artifacts are scanned for an env-var name they might supply — optional; when
+   *  omitted, the environment corpus is decided by `env` alone. */
+  deployRoot?: string;
+  /** A declared ledger step known to fire on a healthy install — the population control every
+   *  ledger-corpus row is checked against. */
+  ledgerControlName: string;
+  /** A declared env var known to be supplied everywhere — the population control every
+   *  environment-corpus row is checked against. */
+  envControlName: string;
+  /** Declared names whose zero this method cannot classify as inert vs. correctly-rare, each
+   *  with the reason it's there — same allowlist-is-the-design discipline as
+   *  {@link KNOWN_UNWIRED} above, applied to a different corpus. */
+  possiblyHealthyZero?: Readonly<Record<string, string>>;
+}
+
+/**
+ * Shape 5: does a declared ledger step or env var ever show a live, nonzero reading — never a
+ * verdict, always rows. See this section's header for the method, the four merged instances that
+ * motivated it, and why a gate is refused. NEVER THROWS: every I/O path degrades (an unreadable
+ * `srcRoot`, an absent `stateDir`, a `deployRoot` that doesn't exist all read as "found nothing"
+ * rather than propagating), so this can never become the thing that blocks a merge.
+ */
+export function auditRuntimeAdoption(opts: RuntimeAdoptionOptions): RuntimeAdoptionRow[] {
+  const rows: RuntimeAdoptionRow[] = [];
+  const healthy = opts.possiblyHealthyZero ?? {};
+
+  // ── LEDGER CORPUS — one resolveLedgerUnion pass covers every declared step plus the control,
+  // never one pass per name, so a large declared list costs one read, not N. ──
+  const steps = declaredLedgerSteps(opts.srcRoot);
+  const namesToMatch = new Set(steps.map((s) => s.name));
+  namesToMatch.add(opts.ledgerControlName);
+  const ledgerCounts = new Map<string, number>();
+  let ledgerNote: string | undefined;
+  try {
+    const pattern = new RegExp(`"step":"(?:${[...namesToMatch].map(escapeForRegExp).join("|")})"`);
+    const union = resolveLedgerUnion(opts.stateDir, pattern, opts.ledgerFsDeps);
+    if (!union.ok) {
+      ledgerNote =
+        `ledger union unreadable at ${opts.stateDir} (archiveCount=${union.archiveCount}, ` +
+        `unread=${union.unread.length}) — every ledger reading below is UNMEASURED, not a verified zero`;
+    } else {
+      for (const line of union.matches) {
+        for (const name of namesToMatch) {
+          if (line.includes(`"step":"${name}"`)) ledgerCounts.set(name, (ledgerCounts.get(name) ?? 0) + 1);
+        }
+      }
+    }
+  } catch (err) {
+    // A thrown ledger read carries the distinction forward as a `note` on every row below
+    // (never erased) — the caller sees UNMEASURED, not a silently-swallowed verified zero.
+    ledgerNote =
+      `ledger union read threw: ${err instanceof Error ? err.message : String(err)} — every ledger ` +
+      `reading below is UNMEASURED, not a verified zero`;
+  }
+  const ledgerControlReading = ledgerCounts.get(opts.ledgerControlName) ?? 0;
+  for (const step of steps) {
+    const allowlisted = step.name in healthy;
+    rows.push({
+      name: step.name,
+      corpus: "ledger",
+      declaredAt: step.declaredAt,
+      reading: ledgerCounts.get(step.name) ?? 0,
+      control: { label: opts.ledgerControlName, reading: ledgerControlReading },
+      possiblyHealthyZero: allowlisted,
+      note: allowlisted ? healthy[step.name] : ledgerNote,
+    });
+  }
+
+  // ── ENVIRONMENT CORPUS ──
+  const env = opts.env ?? process.env;
+  const envNames = declaredEnvVarNames(opts.srcRoot);
+  const suppliedReading = (name: string): number =>
+    env[name] !== undefined || deploySupplies(opts.deployRoot, name) ? 1 : 0;
+  const envControlReading = suppliedReading(opts.envControlName);
+  for (const v of envNames) {
+    const allowlisted = v.name in healthy;
+    rows.push({
+      name: v.name,
+      corpus: "environment",
+      declaredAt: v.declaredAt,
+      reading: suppliedReading(v.name),
+      control: { label: opts.envControlName, reading: envControlReading },
+      possiblyHealthyZero: allowlisted,
+      note: allowlisted ? healthy[v.name] : undefined,
+    });
+  }
+
+  return rows;
 }
