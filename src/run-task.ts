@@ -3398,6 +3398,31 @@ export function deriveChangesetClaimUpdate(body: string, diffFiles: string[]): s
   // on the wrong occurrence (or both), which is exactly the "wrong edit" design point 4 forbids.
   if (firstIdx === -1 || body.indexOf(claim, firstIdx + 1) !== -1) return undefined;
 
+  // REFUSE WHEN THE ENUMERATION CONTINUES PAST THE CLAIM THE DETECTOR HANDED US.
+  //
+  // `recognizeChangesetClaims`' own `countRe` (lib/review.ts) captures an enumeration as
+  // `[^\s,]+(?:\s*,\s*[^\s,]+)*` — COMMA-SEPARATED ONLY. An author who writes the last item with
+  // "and" therefore gets a claim that STOPS EARLY: MEASURED, `exactly two files: src/x.ts and
+  // src/y.ts` recognises as the claim `exactly two files: src/x.ts`, leaving ` and src/y.ts`
+  // outside it. The splice below replaces only the recognised span, so the orphan survives and the
+  // repaired body reads `exactly 3 files: a.ts, b.ts, c.ts and src/y.ts` — a body that now names
+  // FOUR paths while claiming three, which is a WORSE claim than the stale one it replaced.
+  //
+  // THIS IS AN EDIT, NOT A MISS, WHICH IS WHY IT MATTERS: every other refusal in this function
+  // guards against changing the wrong text, and this one guards against changing the right text
+  // INCOMPLETELY. A false-positive auto-edit is strictly worse than leaving the claim stale for a
+  // human, because the stale claim is at least self-consistent.
+  //
+  // The guard is deliberately NARROW: it fires only when the text immediately after the claim
+  // continues the list with a PATH-SHAPED token (one containing `.` or `/` — the same shape test
+  // this file's own changeset checks use to stay silent on prose). `exactly 3 files. And the
+  // rationale...` does not match (the period ends the clause), and `exactly 3 files and 2
+  // directories` does not match (`2` and `directories` are not path-shaped), so ordinary prose is
+  // untouched. Fixing the recognition regex to span `and` is a DIFFERENT change to a detector this
+  // task does not own; refusing is the correct action for a repairer that cannot see the whole claim.
+  const afterClaim = body.slice(firstIdx + claim.length);
+  if (/^\s*(?:,\s*)?and\s+\S*[./]\S*/i.test(afterClaim)) return undefined;
+
   const m = /^(exactly\s+)\w+(\s+files?\b)(?:\s*:\s*(.+))?$/i.exec(claim);
   if (!m) return undefined;
   const [, exactlyWord, , enumerationRaw] = m;
@@ -18002,7 +18027,7 @@ async function retroCommand(
 }
 
 /**
- * The retro's OWN Acceptance-block authoring rules (W1-T2437). `renderAcceptanceBlock`
+ * The retro's OWN Acceptance-block authoring rules (the truncated-claim guard). `renderAcceptanceBlock`
  * (lib/plan-pr-emitter.ts) enforces "one bullet per line" BY CONSTRUCTION and never checks a
  * proof's dialect — but that guarantee is unreachable here: `retro.ts` builds no PR body at all
  * (see that module's own doc — it does not even import plan-pr-emitter), so a retro's body is
