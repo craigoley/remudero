@@ -2185,6 +2185,43 @@ export function isBlockedCi(pr: OpenPrView): boolean {
 }
 
 /**
+ * W1-T1269 — does the CURRENT unmet-criteria set repeat, claim-for-claim, the set the most
+ * recently RECORDED fix-rung strike was already dispatched to resolve? THE EARLIER STOP this
+ * task adds, never a longer leash (design note iv): DISPOSITION_RULES row 5.5 escalates on a
+ * `true` here so a dispatch that could only reproduce a strike already PROVEN to add no
+ * information is preempted before the ordinary strike cap is ever reached.
+ *
+ * KEYED ON IDENTITY, NEVER ON COUNT (design note i — the weaker measure this task refuses):
+ * compares the two claim SETS, not their sizes. A strike that fixes one criterion while
+ * breaking another leaves the COUNT unchanged but the SET different, and correctly reads as
+ * progress here (returns `false`) — `unmetCriteria.length` alone cannot tell that case apart
+ * from a genuine repeat.
+ *
+ * STOPS ONLY ON AN EXACT MATCH (design note ii — the conservative reading, deliberately): the
+ * stronger INCLUSION-DESCENT rule (stop unless the new set is a strict subset of the old one)
+ * is REFUSED — it would also stop a strike that swapped which criteria are unmet, which is
+ * lateral progress, not a repeat. Only byte-identical claim sets (same size, same membership)
+ * count as "no progress"; anything else — including a different set of the SAME size — falls
+ * through and the rung keeps its remaining strikes (design note vi, the falsifier that must run
+ * both ways).
+ *
+ * FAILS CLOSED, always, never a guess: `false` when there is no recorded strike, when the most
+ * recently recorded strike's {@link StrikeAttempt.unmetClaims} was never populated (every
+ * producer that hasn't wired that field yet — see its own SCOPE note), or when either side's
+ * claim set is empty (an empty set means "resolved," never "repeated"). Every existing
+ * caller/fixture that predates this field behaves exactly as before this function existed.
+ */
+export function fixRungRepeatsIdenticalFailure(pr: OpenPrView): boolean {
+  const history = pr.strikeHistory ?? [];
+  const priorClaims = history[history.length - 1]?.unmetClaims;
+  if (!priorClaims || priorClaims.length === 0) return false;
+  const currentClaims = pr.unmetCriteria.map((c) => c.claim);
+  if (currentClaims.length === 0 || currentClaims.length !== priorClaims.length) return false;
+  const priorSet = new Set(priorClaims);
+  return currentClaims.every((c) => priorSet.has(c));
+}
+
+/**
  * W1-T923 (design note iv) — given the STRUCTURED `reasons` a gate failure's ledger row
  * carried, decide whether it names a SINGLE, unambiguous remedy. Exactly one reason is one
  * automatable form and is copied through VERBATIM (never re-derived); zero or TWO-OR-MORE
@@ -2858,8 +2895,21 @@ export function reviewVerdictOvertakenByActivity(pr: OpenPrView): boolean {
  *      the check goes green a fresh review runs and rows 6/7 take over from
  *      there if IT still fails. FIX FIRST: this PR reaches the question rung
  *      (row 11) only by exhausting the ladder through row 4, never straight here.
+ *   5.5. FAILING + the unmet criteria repeat, claim-for-claim, what the most recently
+ *      recorded strike was already dispatched to fix (W1-T1269) -> blocked-ambiguous
+ *      (escalate BEFORE the cap, never at a raised one). Ordered after row 5 (a checks-red
+ *      PR still gets ci-log treatment first) and after row 4 (a PR already at cap keeps
+ *      that row's own "exhausted" reason, unaffected) but strictly before row 6, so a
+ *      dispatch that would only reproduce a strike already proven to add no information is
+ *      preempted the FIRST time it recurs, not merely once the cap is spent. Keys on
+ *      IDENTITY (`claim` text, via {@link fixRungRepeatsIdenticalFailure}), never on
+ *      `.length` — a strike that swaps which criteria are unmet, even at the same count, is
+ *      lateral progress and still falls through to row 6 below with its remaining strikes.
+ *      Fails CLOSED (never matches) until a producer populates
+ *      {@link StrikeAttempt.unmetClaims} — see that field's own SCOPE note.
  *   6. FAILING + actionable unmet criteria, strikes left -> blocked-fixable (fix rung).
- *      Only reached with checks NOT red (row 5 above already claimed that case). W1-T923:
+ *      Only reached with checks NOT red (row 5 above already claimed that case) and the
+ *      unmet set not a proven repeat (row 5.5 above already claimed that case). W1-T923:
  *      ALSO matches a GATE failure (empty unmetCriteria) that named its own single-form
  *      remedy via {@link OpenPrView.actionableGateFailures} — a third disjunct, never a
  *      separate row (see that field's own doc for the #1991 motivating case).
@@ -3126,7 +3176,24 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     reason: (pr, policy) => `required checks red — ci-log fix, strike ${pr.priorStrikes + 1}/${policy.strikeCap}`,
   },
   {
+    // W1-T1269 — row 5.5 (table doc above): AN EARLIER STOP, NEVER A LONGER LEASH. Ordered
+    // after row 4 (a PR already at the cap keeps that row's own "exhausted" reason, byte
+    // identical) and after row 5 (checks-red still gets ci-log treatment first — "ci-log wins"
+    // is unaffected), but strictly before row 6 below, so a dispatch that would only reproduce
+    // a strike already proven to add no information is preempted the first time it recurs
+    // rather than waiting for the cap. `fixRungRepeatsIdenticalFailure` fails CLOSED — it never
+    // matches until a producer populates `StrikeAttempt.unmetClaims` (see that field's own
+    // SCOPE note), so this row is inert in production today, exactly like `pendingAnswer`'s own
+    // shipped-ahead-of-producer precedent.
+    disposition: "blocked-ambiguous",
+    when: (pr) => pr.reviewState === "failure" && fixRungRepeatsIdenticalFailure(pr),
+    reason: (pr, policy) =>
+      `fix strike repeated the identical unmet criteria (strike ${pr.priorStrikes}/${policy.strikeCap}) — ` +
+      `no further strike can add information — escalating before the cap`,
+  },
+  {
     // Reached only when checks are NOT red (row 5 above already claimed that
+    // case) and the unmet set is not a proven repeat (row 5.5 above already claimed that
     // case) — a pure review-shaped block. Genuinely REACHABLE for a review
     // failure (W1-T394): `isBlockedCi`/`pr.checksState` never go true off a
     // red `remudero-review` alone (checksStateFromRollup excludes it from the
@@ -3872,6 +3939,24 @@ export interface StrikeAttempt {
   round: "resume" | "fresh";
   /** Unmet criteria count going INTO this strike. */
   unmetCount: number;
+  /**
+   * W1-T1269 — the unmet criteria CLAIM SET (never just {@link unmetCount}'s size) going INTO
+   * this strike, keyed by each {@link CriterionVerdict.claim}'s own text — the identity
+   * `fixRungRepeatsIdenticalFailure` compares against the current `OpenPrView.unmetCriteria` to
+   * tell a strike that failed IDENTICALLY (same claims, same reasons) from one that fixed half
+   * (a smaller count) or fixed one thing while breaking another (the SAME count, a DIFFERENT
+   * set) — `unmetCount` alone cannot separate the last two.
+   *
+   * SCOPE (honest, mirrors how `pendingAnswer`/`reviewOrphanedByPush` shipped their own
+   * mechanism ahead of their producer): this field, {@link fixRungRepeatsIdenticalFailure}, and
+   * its `DISPOSITION_RULES` row (5.5) are the full MECHANISM, wired end-to-end and unit-tested
+   * here — but `run-task.ts`'s `deriveStrikeHistory` does not populate it yet, so every
+   * `StrikeAttempt` the real gateway records today carries `unmetClaims: undefined`.
+   * `fixRungRepeatsIdenticalFailure` fails CLOSED on `undefined` (never matches), so this is
+   * additive: the earlier-stop row stays permanently inert in production until that follow-up
+   * producer lands, and every existing caller/fixture is byte-identical.
+   */
+  unmetClaims?: readonly string[];
   /** Whether CI reached green after this strike (a review only runs once it does). */
   ciGreen: boolean;
   /** The review verdict AFTER this strike, if one ran. */
