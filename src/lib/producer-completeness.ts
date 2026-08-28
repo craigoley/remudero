@@ -198,10 +198,10 @@ export const KNOWN_UNWIRED: Readonly<Record<string, string>> = {
     "The stale-pending rows fail toward the pre-existing behaviour, so the cost is a missing " +
     "escalation detail rather than a wrong action. Fixed FORWARD by #1041's bounding; the FIELD is " +
     "still unwired.",
-  isPlanFiling:
-    "documented as pending at its own declaration — the plan-filing stand-down (sweep.ts:2000) is " +
-    "written and waiting for a producer. Until that wiring lands the row never matches, which is " +
-    "the fail-open direction.",
+  // isPlanFiling WIRED by W1-T2439: buildOpenPrViews (run-task.ts) now assigns it from
+  // `isPlanOnlyFilingPr`, the predicate that was already implemented beside it and never called —
+  // removed here per this file's own "removing a field from this list means wiring it" rule. The
+  // key is a plain assignment, not a conditional spread, so `producerAssignedKeys` sees it.
   mergeable:
     "single-PR-only REST field. #1082 wired mergeState (the narrowed vocabulary the disposition " +
     "rows read) but deliberately did NOT widen mapRestPr to carry the raw booleans; mergeableFactLine " +
