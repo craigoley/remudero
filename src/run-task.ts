@@ -805,7 +805,12 @@ import {
   type FailureSignal,
 } from "./lib/classify.js";
 import { shouldRecordDecision, reversibilityFactor, type DiffFileChange } from "./lib/risk-score.js";
-import { assertLiveWriteAllowed } from "./lib/live-write-guard.js";
+import {
+  assertLiveWriteAllowed,
+  isTestRunner,
+  liveWritesExempt,
+  LIVE_WRITE_OVERRIDE_ENV,
+} from "./lib/live-write-guard.js";
 import {
   checkSharedPause,
   clearKick,
@@ -1848,6 +1853,65 @@ export function isPrMergedNow(prUrl: string, fetch: GhApiFetcher = ghJson): bool
   }
 }
 
+/**
+ * W1-T2347 — thrown by {@link requireExplicitArmSeam} rather than returning a sentinel: a
+ * swallowed refusal would read as "the arm did nothing for some other reason", the same
+ * false-confidence failure {@link LiveWriteBlockedError} (lib/live-write-guard.ts) already
+ * argues against for the write leaves this complements.
+ */
+export class ArmSeamRequiredError extends Error {
+  override name = "ArmSeamRequiredError";
+  constructor(entryPoint: string) {
+    super(
+      `run-task: REFUSED to reach ${entryPoint}'s production arm dependency (realArmDeps()) under ` +
+        `the node test runner — no seam was supplied. Reaching it performs a live REST head read ` +
+        `and reads this machine's own config/ledger, unmocked, BEFORE the live-write guard's own ` +
+        `write-leaf fence (assertLiveWriteAllowed) is ever consulted. Supply the seam this test ` +
+        `needs — an \`arm\`/\`disarm\` override, or a narrowed ArmDeps passed to ${entryPoint} ` +
+        `directly — or, if this suite deliberately drives the real dependency against its own ` +
+        `containment, wrap that section in withLiveWritesAllowed(() => …) or set ` +
+        `${LIVE_WRITE_OVERRIDE_ENV}=1 (both from src/lib/live-write-guard.ts).`,
+    );
+  }
+}
+
+/**
+ * W1-T2347 — REACHING THE REAL AUTO-MERGE ARM FROM A TEST IS OPT-OUT RATHER THAN OPT-IN.
+ * `deps.arm ?? armAutoMergeDetailed` (armIfVerdictPermits) and its three siblings each defaulted
+ * a whole `deps: ArmDeps = realArmDeps()` parameter, so a fixture that merely forgot to inject a
+ * seam was silently wired to the PRODUCTION dependency rather than left unwired — recon-AQ found
+ * this the hard way (see live-write-guard.ts's own incident header) and W1-T2346's census named
+ * the population, unexcused. This closes it the NARROW way the task's own design settles on: the
+ * requirement is gated on {@link isTestRunner}, so a daemon/operator/CI process that is not
+ * `node --test` calls this and returns immediately — production wiring never moves.
+ *
+ * MUST be consulted BEFORE `realArmDeps()` is even constructed, not merely before one of its
+ * fields is invoked: `realArmDeps()` itself is inert (it only builds closures), but the two
+ * dep calls this task's rationale names (`deps.headSha`, `deps.ledgerLines()`, both inside
+ * {@link armAutoMergeDetailed}) fire moments later against whatever object is resolved here, so
+ * gating at construction is the earliest — and therefore the only correct — placement.
+ *
+ * TWO WAYS OUT, both already established call sites and each with its own test in
+ * `test/arm-seam-default-is-opt-in.test.ts`: supply an explicit seam (any non-`undefined` `deps`
+ * argument, at this function or a caller that forwards one down — an `arm`/`disarm` override, or
+ * a narrowed `ArmDeps` — the SAME injectable seam every arm entry point already exists for); or
+ * wrap the section that deliberately drives the real dependency in `withLiveWritesAllowed` /
+ * `RMD_ALLOW_LIVE_WRITES=1`, the live-write guard's own per-test/per-process opt-outs. No third
+ * escape hatch is added, and no by-name allowlist of suites — W1-T1206 rationale 6 names why a
+ * by-name set fails OPEN the moment a file is added.
+ */
+export function requireExplicitArmSeam(
+  entryPoint: string,
+  seamSupplied: boolean,
+  env: NodeJS.ProcessEnv = process.env,
+): void {
+  if (seamSupplied) return;
+  if (!isTestRunner(env)) return;
+  if (env[LIVE_WRITE_OVERRIDE_ENV] === "1") return;
+  if (liveWritesExempt()) return;
+  throw new ArmSeamRequiredError(entryPoint);
+}
+
 export function realArmDeps(
   // W1-T1000002: INJECTABLE, appended as the only parameter, the same convention `reviewRunner`/
   // `spawnImpl`/`disarmImpl` already follow in `buildSweepEffects`. The `[]`-on-failure contract
@@ -1964,7 +2028,12 @@ export interface ArmAttemptResult {
 export function armAutoMerge(
   prUrl: string,
   taskId: string | undefined,
-  deps: ArmDeps = realArmDeps(),
+  // W1-T2347: no default here — `deps` is forwarded to armAutoMergeDetailed UNCHANGED, `undefined`
+  // included, so that function's own requireExplicitArmSeam check sees the true omission. A
+  // default of `realArmDeps()` on THIS parameter would have constructed the real object before
+  // the forward, defeating the callee's check by handing it an already-real (and therefore
+  // "supplied") deps argument.
+  deps?: ArmDeps,
 ): ArmOutcome {
   return armAutoMergeDetailed(prUrl, taskId, deps).outcome;
 }
@@ -1981,17 +2050,23 @@ export function armAutoMerge(
 export function armAutoMergeDetailed(
   prUrl: string,
   taskId: string | undefined,
-  deps: ArmDeps = realArmDeps(),
+  // W1-T2347: `deps` is OPTIONAL rather than defaulted to `realArmDeps()` directly — the guard
+  // below must run BEFORE that call, not as a side effect of evaluating a default expression the
+  // guard would run too late to precede. `deps ?? realArmDeps()` immediately after is otherwise
+  // byte-identical to the prior default-parameter behaviour for every non-test caller.
+  deps?: ArmDeps,
 ): ArmAttemptResult {
+  requireExplicitArmSeam("armAutoMergeDetailed", deps !== undefined);
+  const resolvedDeps = deps ?? realArmDeps();
   if (!taskId) {
-    deps.say(`automerge.ledger_refused (W1-T230): no task id resolvable for this PR — arming withheld: ${prUrl}`);
+    resolvedDeps.say(`automerge.ledger_refused (W1-T230): no task id resolvable for this PR — arming withheld: ${prUrl}`);
     return { outcome: "no-task-id" };
   }
   let headSha: string;
   try {
-    headSha = deps.headSha(prUrl);
+    headSha = resolvedDeps.headSha(prUrl);
   } catch (e) {
-    deps.say(
+    resolvedDeps.say(
       `automerge.head_sha_unavailable (W1-T230): ${String((e as Error)?.message ?? e)} — arm withheld: ${prUrl}`,
     );
     return { outcome: "head-unavailable" };
@@ -1999,15 +2074,15 @@ export function armAutoMergeDetailed(
   // ONE ledger read feeds both the verdict and its override — the same construction the two
   // `decideAutoMergeArm` call sites above already use, so the override escape hatch survives
   // this path's delegation instead of being silently dropped by it.
-  const ledgerLines = deps.ledgerLines();
+  const ledgerLines = resolvedDeps.ledgerLines();
   const prior = priorReviewVerdictFromLedger(ledgerLines, taskId);
   const override = prior?.capped ? cappedOverrideFromLedger(ledgerLines, taskId, headSha) : undefined;
   const decision = decideArmFromLedgerVerdict(prior, headSha, override);
   if (!decision.arm) {
-    deps.say(`automerge.ledger_refused (W1-T230): ${decision.reason} — ${prUrl}`);
+    resolvedDeps.say(`automerge.ledger_refused (W1-T230): ${decision.reason} — ${prUrl}`);
     return { outcome: "ledger-refused" };
   }
-  return attemptArm(prUrl, deps);
+  return attemptArm(prUrl, resolvedDeps);
 }
 
 /**
@@ -2326,17 +2401,24 @@ function irreversibleSignalForWorktree(worktreePath: string): boolean {
  */
 export function armAutoMergeAtOpen(
   prUrl: string,
-  deps: (Pick<ArmDeps, "armAuto" | "mergeDirect" | "isMerged" | "say"> & Partial<Pick<ArmDeps, "ledgerLines" | "readMergeFacts" | "sleepSync">>) = realArmDeps(),
+  // W1-T2347: OPTIONAL, not defaulted — same reasoning as armAutoMergeDetailed's own `deps`
+  // above. This is one of the four `deps: ArmDeps = realArmDeps()`-shaped LEVEL-1 sites the
+  // task's rationale names, gated for the same reason as its three siblings: it reaches
+  // `realArmDeps()` by the identical shape, and design note (vi) asks this be ruled on
+  // explicitly rather than left out by omission — see the PR body for that ruling.
+  deps?: (Pick<ArmDeps, "armAuto" | "mergeDirect" | "isMerged" | "say"> & Partial<Pick<ArmDeps, "ledgerLines" | "readMergeFacts" | "sleepSync">>),
   irreversible = false,
 ): ArmOutcome {
+  requireExplicitArmSeam("armAutoMergeAtOpen", deps !== undefined);
+  const resolvedDeps = deps ?? realArmDeps();
   if (irreversible) {
-    deps.say(
+    resolvedDeps.say(
       `automerge.irreversible_refused (W1-T919/W1-T947): diff classified irreversible — refusing to ` +
         `arm at open; an operator must review and merge this manually: ${prUrl}`,
     );
     return "irreversible-refused";
   }
-  return attemptArm(prUrl, deps).outcome;
+  return attemptArm(prUrl, resolvedDeps).outcome;
 }
 
 /**
@@ -2409,16 +2491,20 @@ export function disarmAutoMerge(
   // W1-T1215: `isMerged` widens the deps OPTIONALLY and is consulted ONLY from the catch below,
   // so the ordinary (successful) withdrawal costs exactly the requests it costs today. This is
   // the SAME seam and the same discipline W1-T1050 added for a thrown `mergeDirect`.
-  deps: Pick<ArmDeps, "disableAuto" | "say"> & Partial<Pick<ArmDeps, "isMerged">> = realArmDeps(),
+  // W1-T2347: no default — see armAutoMergeDetailed's own `deps` comment for why the guard below
+  // must precede `realArmDeps()` rather than run as a side effect of defaulting this parameter.
+  deps?: Pick<ArmDeps, "disableAuto" | "say"> & Partial<Pick<ArmDeps, "isMerged">>,
 ): DisarmOutcome {
+  requireExplicitArmSeam("disarmAutoMerge", deps !== undefined);
+  const resolvedDeps = deps ?? realArmDeps();
   try {
-    deps.disableAuto(prUrl);
-    deps.say(`automerge.disarmed (W1-T125): early arm withdrawn — ${prUrl}`);
+    resolvedDeps.disableAuto(prUrl);
+    resolvedDeps.say(`automerge.disarmed (W1-T125): early arm withdrawn — ${prUrl}`);
     return "disarmed";
   } catch (e) {
     const msg = String((e as { stderr?: unknown })?.stderr ?? (e as Error)?.message ?? e);
-    deps.say(`automerge.disarm_failed (W1-T125): ${msg} — ${prUrl}`);
-    return classifyDisarmFailure(msg, deps.isMerged?.(prUrl));
+    resolvedDeps.say(`automerge.disarm_failed (W1-T125): ${msg} — ${prUrl}`);
+    return classifyDisarmFailure(msg, resolvedDeps.isMerged?.(prUrl));
   }
 }
 

@@ -642,6 +642,12 @@ esac
         headCheckoutDir,
         ledgerPath,
         runId: "REVIEW-UNWIRED-1",
+        // W1-T2347: this fixture is about the SHIPS-UNWIRED advisory, not arming — it never
+        // asserted on arm/disarm before and does not now. `disarm` is supplied explicitly so
+        // `withdrawArmIfVerdictRefuses`'s refused-verdict branch never falls through to the real
+        // `disarmAutoMerge` default, which armAutoMergeDetailed's own new seam requirement (see
+        // requireExplicitArmSeam) now refuses to reach from a test with no seam.
+        disarm: () => "not-armed" as const,
       });
       return {
         advised: lines.filter((l) => l.step === "review.unwired_advisory"),

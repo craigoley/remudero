@@ -37,6 +37,7 @@ import {
 import { DEFAULT_PRUNE_GRACE_MS } from "../src/lib/worker.js";
 import { buildDefaultHeadroomPolicy, DEFAULT_POLL_INTERVAL_MS } from "../src/lib/daemon.js";
 import { fixStrikeCap } from "../src/lib/config.js";
+import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { DEFAULT_SWEEP_POLICY, type OpenPrView } from "../src/lib/sweep.js";
 import { DEFAULT_MAX } from "../src/lib/drain.js";
 import { HEADROOM_LIMIT_PCT } from "../src/lib/headroom.js";
@@ -1123,7 +1124,12 @@ test("a policy flag off leaves a session pull request unarmed", async () => {
       false, // armSessionPrs OFF (the shipped default)
       (step, extra) => { logs.push({ step, extra }); },
     );
-    const outcome = await effects.arm(pr);
+    // W1-T2347: this fixture deliberately drives the REAL armAutoMergeDetailed default (no fake
+    // supplied above) to prove its own no-task-id short-circuit fires before any live effect —
+    // exactly the kind of deliberate real-dependency exercise withLiveWritesAllowed exists for,
+    // never a forgotten seam. `deps` is still never invoked here (the short-circuit reads no
+    // dep), so nothing about the assertions below changes.
+    const outcome = await withLiveWritesAllowed(() => effects.arm(pr));
     assert.equal(
       outcome,
       "no-task-id",
