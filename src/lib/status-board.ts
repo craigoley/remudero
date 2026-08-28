@@ -386,7 +386,28 @@ export interface QueueHeadRow {
 export interface QueueHeadRefusedRow {
   taskId: string;
   title: string;
-  reason: DispatchFilterReason;
+  /**
+   * W1-T2415: the {@link DispatchFilterReason} union PLUS `"circuit-broken"` — widened HERE and
+   * nowhere else, deliberately. A seventh arm on the union itself would move `IdleReasonTally`
+   * (a `Record` over it), `tallyDispatchFilters`'s own literal, and every consumer that switches
+   * on it — and it would contradict that union's own doc, which says the circuit "already
+   * ledgers itself through its own dedicated `onXxx` callback". This takes the doc at its word:
+   * the breaker reaches this surface through `onCircuitBreak`, exactly as `runDaemon`
+   * (daemon.ts) already collects ids for `StarvationCensus` with `circuitBrokenThisTick`, and
+   * only this section's own row type learns the extra literal.
+   */
+  reason: DispatchFilterReason | "circuit-broken";
+  /**
+   * Present ONLY on a `"circuit-broken"` row (W1-T2415). status.ts's
+   * `dispatchesWithoutNewOwnedPr` at derivation time, the bound it was compared against, and the
+   * breaker's OWN reset condition — the same three facts {@link CircuitBrokenBlocker} already
+   * carries, re-derived through the same helpers rather than re-worded, so BLOCKERS and QUEUE
+   * HEAD can never disagree about one task. Absent on every other reason: a
+   * `run-branch-already-pushed` row is byte-identical to what it was before this task.
+   */
+  dispatchCount?: number;
+  maxDispatches?: number;
+  resetNote?: string;
 }
 
 export interface QueueHeadSection {
@@ -1528,6 +1549,13 @@ export function deriveDispatchCadence(lines: Array<Record<string, unknown>>): Di
 // `distinctDispatchedTaskIds`) is provable against this fold's REAL output rather than asserted
 // from source text — the same reason W1-T1047 exported `deriveDispatchCadence`. Behaviour
 // unchanged; nothing outside a test calls it.
+/** W1-T2415: ONE wording for the breaker's own reset condition, shared by the BLOCKERS class and
+ *  the QUEUE HEAD refusal row. Extracted rather than copied — two surfaces describing one
+ *  breaker in two sentences is how they drift. */
+function circuitBreakerResetNote(taskId: string, dispatchCount: number): string {
+  return `resets only on a fresh owned PR for ${taskId} — ${dispatchCount}/${DEFAULT_MAX_TASK_DISPATCHES} dispatches since the last one`;
+}
+
 export function deriveCircuitBrokenBlockers(
   lines: Array<Record<string, unknown>>,
   plan: Plan | undefined,
@@ -1545,7 +1573,7 @@ export function deriveCircuitBrokenBlockers(
       taskId,
       dispatchCount,
       maxDispatches: DEFAULT_MAX_TASK_DISPATCHES,
-      resetNote: `resets only on a fresh owned PR for ${taskId} — ${dispatchCount}/${DEFAULT_MAX_TASK_DISPATCHES} dispatches since the last one`,
+      resetNote: circuitBreakerResetNote(taskId, dispatchCount),
     });
   }
   return out;
@@ -1782,16 +1810,44 @@ export function deriveQueueHead(
   // buckets are, counting what it drops rather than growing without bound.
   const refused: QueueHeadRefusedRow[] = [];
   let refusedTotal = 0;
+  // ONE cap and ONE counter for every reason that reaches this list, so W1-T1205's
+  // `IDLE_REASON_ID_CAP` bound and its `refusedTruncated` count keep meaning what they meant
+  // when only one reason could reach it.
+  const pushRefused = (row: QueueHeadRefusedRow): void => {
+    refusedTotal++;
+    if (refused.length < IDLE_REASON_ID_CAP) refused.push(row);
+  };
   const candidates = runnableCandidates(plan, isMerged, limit, {
     isIndeterminate,
     isCircuitTripped,
     hasPushedRunBranch,
+    // W1-T2415: THE CALLBACK THIS FUNCTION ALREADY HAD AVAILABLE AND NEVER SUPPLIED. The
+    // `isCircuitTripped` predicate above has always removed a tripped task from `rows`
+    // (`isDispatchEligible` calls this hook and returns false — the task is
+    // `isDispatchEligible === false` and never sorts), but with no `onCircuitBreak` passed, the
+    // one surface built to EXPLAIN a refusal could not name it: it simply vanished, while the
+    // sibling exclusion from this very same call got a `refused` row. Observation only — it
+    // never gates, so the eligible set is byte-identical with or without it. Matches
+    // `runDaemon`'s own `circuitBrokenThisTick` collection (daemon.ts), which exists for exactly
+    // this reason: the `DispatchFilterReason` tally cannot express the breaker.
+    onCircuitBreak: (task) => {
+      const dispatchCount = dispatchesWithoutNewOwnedPr(lines, task.id);
+      pushRefused({
+        taskId: task.id,
+        title: task.title,
+        reason: "circuit-broken",
+        dispatchCount,
+        maxDispatches: DEFAULT_MAX_TASK_DISPATCHES,
+        // The SAME wording `deriveCircuitBrokenBlockers` renders, so the two surfaces cannot
+        // drift into two descriptions of one breaker.
+        resetNote: circuitBreakerResetNote(task.id, dispatchCount),
+      });
+    },
     onFiltered: (task, reason) => {
       // Scoped to this one reason — see `QueueHeadSection.refused`'s own doc for why the other
       // `DispatchFilterReason`s are deliberately not duplicated onto this surface.
       if (reason !== "run-branch-already-pushed") return;
-      refusedTotal++;
-      if (refused.length < IDLE_REASON_ID_CAP) refused.push({ taskId: task.id, title: task.title, reason });
+      pushRefused({ taskId: task.id, title: task.title, reason });
     },
   });
   const refusedTruncated = Math.max(0, refusedTotal - refused.length);
@@ -1859,12 +1915,28 @@ const QUEUE_HEAD_NEXT_ACTIONS: readonly NextActionRule<QueueHeadSection>[] = [
     // W1-T1205 (rationale (4)): PERMANENT, not transient — GitHub deletes a PR's head branch on
     // MERGE but not on CLOSE, so a run branch left standing after an unmerged-close never clears
     // on its own. Named here so an operator sees it without grepping `dispatch.skipped` rows.
-    applies: (ctx) => ctx.refused.length > 0,
+    // W1-T2415: SCOPED to its own reason. It used to fire on ANY refused row and hand out
+    // run-branch advice, so a breaker refusal would have been given the wrong remedy.
+    applies: (ctx) => ctx.refused.some((r) => r.reason === "run-branch-already-pushed"),
     action: (ctx) => {
-      const r = ctx.refused[0]!;
-      const additional = ctx.refused.length - 1 + ctx.refusedTruncated;
+      const branchRefused = ctx.refused.filter((r) => r.reason === "run-branch-already-pushed");
+      const r = branchRefused[0]!;
+      const additional = branchRefused.length - 1 + ctx.refusedTruncated;
       const more = additional > 0 ? ` (+${additional} more)` : "";
       return `${r.taskId}${more} has a run branch already pushed to origin — dispatch will refuse it until that branch is gone (see \`rmd reap-branches\`)`;
+    },
+  },
+  {
+    // W1-T2415: LAST, so it never displaces a rule above it — the breaker is a standing state an
+    // operator can read at leisure, unlike a stall or a perpetual re-dispatch that is burning
+    // spend right now. Names the reset condition rather than a remedy, because there is no
+    // action to take beyond landing a PR for the task: nothing here resets a breaker.
+    applies: (ctx) => ctx.refused.some((r) => r.reason === "circuit-broken"),
+    action: (ctx) => {
+      const broken = ctx.refused.filter((r) => r.reason === "circuit-broken");
+      const r = broken[0]!;
+      const more = broken.length > 1 ? ` (+${broken.length - 1} more)` : "";
+      return `${r.taskId}${more} is refused by the dispatch circuit breaker — ${r.resetNote ?? "it resets only on a fresh owned PR"}`;
     },
   },
 ];
@@ -2478,7 +2550,10 @@ function renderBlockersBlock(b: BlockersSection): string[] {
   return out;
 }
 
-function renderQueueHeadBlock(q: QueueHeadSection): string[] {
+/** EXPORTED for test only — the same visibility `deriveCircuitBrokenBlockers` already carries,
+ *  so a test can assert what an operator actually READS rather than only the section object.
+ *  Behaviour unchanged; no caller moves. */
+export function renderQueueHeadBlock(q: QueueHeadSection): string[] {
   const out = ["── QUEUE HEAD ───────────────────────────────────────────"];
   if (q.unknownReason) {
     out.push(`unknown — ${q.unknownReason}`);
@@ -2500,7 +2575,14 @@ function renderQueueHeadBlock(q: QueueHeadSection): string[] {
     // W1-T1205 (design (ii)): what dispatch is REFUSING, named — never silently absent from a
     // list that only ever showed what it would take.
     for (const r of q.refused) {
-      out.push(`REFUSED: ${r.taskId} — ${r.title} (run branch already pushed to origin)`);
+      // W1-T2415: BRANCH ON THE REASON. This line used to hardcode the run-branch wording for
+      // every row, so a breaker refusal pushed here would have been mislabelled as a stale
+      // branch — a worse failure than the silence it replaces.
+      const why =
+        r.reason === "circuit-broken"
+          ? `dispatch circuit breaker tripped — ${r.resetNote ?? `${r.dispatchCount}/${r.maxDispatches} dispatches with no new owned PR`}`
+          : "run branch already pushed to origin";
+      out.push(`REFUSED: ${r.taskId} — ${r.title} (${why})`);
     }
     if (q.refusedTruncated > 0) {
       out.push(`REFUSED: (+${q.refusedTruncated} more not shown)`);
