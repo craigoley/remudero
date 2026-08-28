@@ -179,7 +179,28 @@ export function planReadingSuiteFiles(root = REPO_ROOT) {
     if (!entry.isFile() || !entry.name.endsWith(".test.ts")) continue;
     const abs = join(testDir, entry.name);
     const content = readFileSync(abs, "utf8");
-    if (hasRepoRootConstant(content) && namesPlanOrDocsPath(content)) {
+    // W1-T2428 (the `ci` half): NAMING A PLAN/DOCS PATH IS THE WHOLE PREDICATE. The
+    // `hasRepoRootConstant(content) &&` conjunct that stood here was MEASURED under-inclusive and
+    // is removed rather than widened, because no source-shape spelling separates the set:
+    //
+    //   With a malformed plan staged (a shard duplicating an existing id) and the 106 suites this
+    //   conjunct EXCLUDED run to completion — 2,425 tests, every chunk carrying its own `# tests`
+    //   summary, against a baseline of 0 failures on a WELL-FORMED plan — SIX suite files failed:
+    //   credited-proof-visibility-seam-defaults, learnings-injection-w1t6, merged-claim-audit,
+    //   mounts-wiring, retro, task-linter. Every one of them can fail on a plan-only diff and
+    //   every one was being skipped.
+    //
+    //   WIDENING THE CONJUNCT DOES NOT FIX IT. Four of the six reach the repo root through
+    //   `new URL(..., import.meta.url)` rather than a `REPO_ROOT` constant, so adding that idiom
+    //   recovers four — but `credited-proof-visibility-seam-defaults` carries NO root-reaching
+    //   idiom at all and still fails, and `sweep.test.ts` carries the SAME `import.meta.url` idiom
+    //   while genuinely not caring about the plan. The spelling and the property are independent.
+    //
+    // DROPPING THE CONJUNCT CAPTURES 6 OF 6 and costs 158 suites of 802 — the lane still skips
+    // 80%. That trade is the direction this function's own doc already names: over-including runs
+    // one extra harmless suite, under-including silently drops one that CAN fail, "which is the
+    // failure mode this whole classifier exists to avoid".
+    if (namesPlanOrDocsPath(content)) {
       out.push(relative(root, abs).split(sep).join("/"));
     }
   }
