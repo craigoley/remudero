@@ -102,10 +102,11 @@ export const GITHUB_POSTURE_ALLOWLIST: Readonly<Record<string, GithubPostureAllo
   }),
 };
 
-// ── The read: `security_and_analysis` + `enforce_admins`, GET only ─────────────────────────
+// ── The read: `security_and_analysis` + `enforce_admins` + the repo-root merge settings, GET
+// ── only ─────────────────────────────────────────────────────────────────────────────────────
 
 /** Every capability this module reads or annotates, and where its status comes from. */
-export type GithubPostureCapabilitySource = "security_and_analysis" | "enforce_admins" | "static";
+export type GithubPostureCapabilitySource = "security_and_analysis" | "enforce_admins" | "merge_settings" | "static";
 
 export interface GithubPostureCapabilityDescriptor {
   key: string;
@@ -115,7 +116,13 @@ export interface GithubPostureCapabilityDescriptor {
 /**
  * The eight `security_and_analysis` keys (task rationale (2)) + `enforce_admins` (branch
  * protection, read separately — GitHub does not fold it into the repo payload) + `code_quality`
- * (a `"static"` entry: never read live, see {@link GITHUB_POSTURE_ALLOWLIST}).
+ * (a `"static"` entry: never read live, see {@link GITHUB_POSTURE_ALLOWLIST}) +
+ * `squash_merge_commit_message` (W1-T2448: a `"merge_settings"` entry read off the SAME repo-root
+ * payload `security_and_analysis` already reads — no new GET). It is the only reason 611 anchored
+ * commit trailers exist on `main` (`buildCommitTrailerIndex`, `status.ts`), named nowhere under
+ * `src/`/`test/`/`.github/`/`scripts/`/`docs/` before this, and a UI flip away from
+ * `COMMIT_MESSAGES` would otherwise be invisible: the commit index FAILS CLOSED rather than
+ * erroring, so the symptom is silent queue noise days later, not a red check.
  */
 export const GITHUB_POSTURE_CAPABILITIES: readonly GithubPostureCapabilityDescriptor[] = [
   { key: "secret_scanning", source: "security_and_analysis" },
@@ -128,7 +135,13 @@ export const GITHUB_POSTURE_CAPABILITIES: readonly GithubPostureCapabilityDescri
   { key: "secret_scanning_delegated_bypass", source: "security_and_analysis" },
   { key: "enforce_admins", source: "enforce_admins" },
   { key: "code_quality", source: "static" },
+  { key: "squash_merge_commit_message", source: "merge_settings" },
 ];
+
+/** The only value of `squash_merge_commit_message` under which a squash merge's commit body
+ *  carries the trailers `buildCommitTrailerIndex` anchors on (W1-T2448 rationale, Q1/Q3) — a
+ *  live read of anything else is the flip that would otherwise go unasserted. */
+export const GITHUB_POSTURE_SQUASH_MERGE_COMMIT_MESSAGE_EXPECTED = "COMMIT_MESSAGES";
 
 export type GithubPostureCapabilityStatus = "enabled" | "disabled";
 
@@ -176,6 +189,14 @@ function statusFrom(raw: unknown, descriptor: GithubPostureCapabilityDescriptor)
     const enabled = (raw as { enabled?: unknown }).enabled;
     return typeof enabled === "boolean" ? (enabled ? "enabled" : "disabled") : undefined;
   }
+  if (descriptor.source === "merge_settings") {
+    // Read straight off the repo-root payload `security_and_analysis` already reads (no new
+    // GET) — "enabled" means "still the value 611 anchored trailers depend on", "disabled"
+    // means it has flipped to anything else, the exact drift that is otherwise invisible.
+    const value = (raw as Record<string, unknown>)[descriptor.key];
+    if (typeof value !== "string") return undefined;
+    return value === GITHUB_POSTURE_SQUASH_MERGE_COMMIT_MESSAGE_EXPECTED ? "enabled" : "disabled";
+  }
   const block = (raw as { security_and_analysis?: unknown }).security_and_analysis;
   if (block === undefined || block === null || typeof block !== "object") return undefined;
   const entry = (block as Record<string, unknown>)[descriptor.key];
@@ -187,10 +208,11 @@ function statusFrom(raw: unknown, descriptor: GithubPostureCapabilityDescriptor)
 /**
  * The read (task rationale (i)): `GET /repos/{owner}/{repo}` + `GET .../branches/{branch}/
  * protection/enforce_admins`, folded into a {@link GithubPostureSnapshot}. Returns `undefined`
- * when the repo read itself is unreadable — the primary source for 9 of 10 capabilities — so a
- * caller degrades to "no finding" rather than manufacturing a false all-clear from a half read.
- * `enforce_admins` alone being unreadable just omits that one key from the snapshot; every other
- * capability the repo read resolved is still reported.
+ * when the repo read itself is unreadable — the primary source for 10 of 11 capabilities,
+ * `squash_merge_commit_message` (W1-T2448) included — so a caller degrades to "no finding"
+ * rather than manufacturing a false all-clear from a half read. `enforce_admins` alone being
+ * unreadable just omits that one key from the snapshot; every other capability the repo read
+ * resolved is still reported.
  */
 export function readGithubPosture(
   owner: string,
