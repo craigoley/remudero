@@ -1,0 +1,133 @@
+- id: W1-T2427
+  title: "FOUR ARMS OF THE alreadyDone SWITCH SET THE DEDUP FLAG AND NO REASON, SO A DEDUPED STAND-DOWN READS EXACTLY LIKE AN UNWIRED ACTION PATH — `post-review`, `blocked-ambiguous`, `dep-review` and `stale` each assign `alreadyDone` from a `prior.*` set and fall straight to `break`, while the sibling arms `mergeable`, `blocked-fixable`/`conflicted` and `wait` all set `dedupStandDownReason` on the very same runs; `finalizeDisposition` spreads the field conditionally, so absent means silent"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 20.00
+  files: [src/lib/sweep.ts, test/dedup-stand-downs-name-themselves.test.ts]
+  origin: "operator-brief#silent-dedup-stand-downs-2026-08-28"
+  plan_refs: ["W1-T1116", "W1-T1110", "W1-T1061", "W1-T2426"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE ID. Eight surfaces, anchored `W1-T2427([^0-9]|$)` with a `[0-9]` class and never `\d`, each
+    printed anchored beside unanchored. Surface 1 reads 1 of 540 reservation refs. The open set was
+    enumerated FIRST and every control drawn from it; where the open set cannot supply a control for
+    a band, that is stated rather than reported as a pass.
+
+    ── Q1. THE SILENT ARMS, BY SYMBOL ───────────────────────────────────────────────────────────
+
+    `runSweep`'s `alreadyDone` switch (`src/lib/sweep.ts`) has eight arms. Three of them set
+    `dedupStandDownReason` beside the flag and four do not.
+
+      SETS A REASON — the control, and these fire on the SAME runs as the silent ones:
+        `mergeable`                     four disjuncts, each with its own sentence (W1-T1116)
+        `blocked-fixable` / `conflicted`  guarded by `if (alreadyDone)` (W1-T1110)
+        `wait`                          reuses `reason` verbatim (W1-T1116 design iv)
+
+      SETS NO REASON — assigns the flag and falls to `break`:
+        `post-review`        `alreadyDone = prior.reviewDelivered.has(reviewKey) || prior.reviewRefused.has(reviewKey)`
+        `blocked-ambiguous`  `alreadyDone = prior.escalated.has(...)`
+        `dep-review`         `alreadyDone = prior.depReviewed.has(...)`
+        `stale`              `alreadyDone = prior.closed.has(pr.prNumber)`
+
+    THE FIELD IS WRITTEN CONDITIONALLY, WHICH IS WHY ABSENT MEANS SILENT rather than empty:
+    `finalizeDisposition` spreads `...(standDownReason ? { stand_down_reason: standDownReason } : {})`,
+    so an undefined value produces no key at all and a reader cannot distinguish "declined for a
+    stated reason" from "no reason was ever computed".
+
+    ⚠ THIS IS THE FOURTH SITE OF A CLASS THIS REPO HAS ALREADY REPAIRED TWICE, AND THOSE TWO ARE
+    CITED RATHER THAN RE-FILED. W1-T1116 records that the `mergeable` arm's switch set no
+    `standDownReason` on any of its three disjuncts, and fixed those plus `wait`. W1-T1110 records
+    127 identical stand-downs on one PR reading exactly like an unwired action path, and fixed the
+    fix-dispatch arm. W1-T1061 moved an arm outcome out of a prose reason and into its own field.
+    NEITHER REACHED THESE FOUR ARMS. Nothing here re-opens any of them.
+
+    ── THE MEASUREMENT, OVER A CONTROLLED THREE-FORM UNION ───────────────────────────────────────
+
+    0 `.gz`, 39 rotated, 1 live, 483,535 rows, `ok: true`. Of 65,482 `sweep.disposed` rows carrying
+    `acted != true`, 33,192 carry `stand_down_reason` and 32,290 do not.
+
+    ⚠ AND THE SPLIT BY TIME CORRECTS A READING THIS SHARD WOULD OTHERWISE HAVE MADE. The silent
+    bulk is HISTORICAL and already repaired: `wait` at 20,596 silent rows stops on 2026-08-22,
+    `mergeable` at 778 stops on 2026-08-22, and `stale` at 222 stops on 2026-08-17 — while all
+    three keep producing REASONED rows into 2026-08-27 and 2026-08-28. THOSE ARE W1-T1116's FIX
+    LANDING AND MUST NOT BE COUNTED AS A LIVE DEFECT. What is still silent TODAY is
+    `blocked-ambiguous` (7,888 rows, newest 2026-08-27T23:06:37), `blocked-fixable` (2,497, newest
+    2026-08-27T21:28:01) and `post-review` (291, newest 2026-08-27T23:41:58).
+
+    ⚠ AND ONE MORE CORRECTION THE OPERATOR'S OWN FRAMING WOULD NOT HAVE SURFACED: `post-review` is
+    NOT the largest instance. `blocked-ambiguous` is silent twenty-seven times more often and is
+    equally live. The post-review case is the one that COST something measurable, which is a
+    different claim from being the biggest.
+
+    THE CONTROL RUNS BOTH WAYS AND ON THE SAME CORPUS. Every disposition appears in the reasoned
+    column too — `blocked-fixable` 10,932, `blocked-ambiguous` 4,107, `post-review` 485,
+    `dep-review` 372, `stale` 260 — so the field is demonstrably writable on these rows and its
+    absence is a property of the ARM taken, never of the row type or of the writer.
+
+    ⚠ Q2. WHETHER EACH SILENT ARM IS A STAND-DOWN AT ALL, ANSWERED ON W1-T1110's CRITERION ───────
+
+    THE TEST IS NOT "did it decline" BUT "could a reader otherwise tell it from a broken action
+    path". All four fail that test, and each fails it for its own reason.
+
+      `post-review` — FAILS, AND THE COST IS ALREADY BANKED. A silent row here is indistinguishable
+      from an unwired `deps.postReview`, from a lost light-pass admission, and from a dry run.
+      W1-T2426 could not attribute PR 3152's nine consecutive stand-downs to `selectReviewAdmission`
+      for exactly this reason, and recorded the gap rather than guessing. A FUTURE FIX TO THE
+      ADMISSION ORDER CANNOT BE PROVEN TO HAVE WORKED FROM THESE ROWS.
+
+      `blocked-ambiguous` — FAILS. Deduped on `prior.escalated`, so a silent row reads the same as
+      `deps.escalate` never being wired or throwing. This is the largest live population.
+
+      `dep-review` — FAILS. Same shape on `prior.depReviewed`; 18 silent rows, small but not zero.
+
+      `stale` — FAILS AS CODE EVEN THOUGH THE LEDGER HAS GONE QUIET. Its newest silent row is
+      2026-08-17, but the arm is unchanged, so the next time a closed PR is deduped it goes silent
+      again. A population that has stopped firing is not a fixed arm.
+
+    NONE OF THE FOUR IS A NO-OP THAT NEVER CONSIDERED ACTING. Each computed a `prior.*` membership
+    test and DECLINED on it — that is a decision, and the precedent is settled: `wait` is the one
+    genuinely no-op-shaped arm in the switch and W1-T1116 gave it a reason anyway, reusing
+    `reason` verbatim rather than inventing a second sentence.
+
+    ── Q3. WHAT IT COSTS ────────────────────────────────────────────────────────────────────────
+
+    ZERO NEW LEDGER LINES. The rows already exist and already carry `acted`, `disposition`,
+    `pr_number`, `head_sha` and `repeat_streak`; this adds one string to a row that is written
+    either way. Each arm already holds the fact the sentence would state, at the point of the
+    check — `reviewDelivered`/`reviewRefused`, `prior.escalated`, `prior.depReviewed`,
+    `prior.closed` — so nothing new is read, computed or fetched. The two precedents did exactly
+    this shape on their own arms and neither added a step name.
+
+    ⚠ WHAT IS REFUSED. No disposition changes. The one-per-pass admission bound is untouched.
+    Nothing paces, sleeps or retries. No gate is added and no escalation surface is opened — the
+    two repairs cited above both put the sentence on the EXISTING row, and W1-T2381 separately
+    records that routing a repeat condition to an issue surface reached no reader seven times out
+    of eight.
+
+    ── WHAT IS OWNED ELSEWHERE ──────────────────────────────────────────────────────────────────
+
+    The admission ORDER is W1-T2426, whose key is bumped by the action it gates. The repeated
+    COMMENT carrying an unchanged verdict is W1-T2419. The population literal that made a PR body
+    wrong is W1-T2424. THIS OWNS ONLY THE MISSING REASON, and specifically only the four arms named
+    above.
+
+  acceptance:
+    - claim: "a dedup that suppresses a post-review dispatch names itself on the row it already writes"
+      proof: "unit test: test/dedup-stand-downs-name-themselves.test.ts"
+    - claim: "a dedup that suppresses an escalation names itself on the row it already writes"
+      proof: "unit test: test/dedup-stand-downs-name-themselves.test.ts"
+    - claim: "a dedup that suppresses a dependency review names itself on the row it already writes"
+      proof: "unit test: test/dedup-stand-downs-name-themselves.test.ts"
+    - claim: "a dedup that suppresses a stale close names itself on the row it already writes"
+      proof: "unit test: test/dedup-stand-downs-name-themselves.test.ts"
+    - claim: "a disposal that never reached a dedup check still writes no reason field at all"
+      proof: "unit test: test/dedup-stand-downs-name-themselves.test.ts"
+    - claim: "the sibling arms that already name themselves keep the exact sentences they write today"
+      proof: "unit test: test/dedup-stand-downs-name-themselves.test.ts"
+    - claim: "no new ledger step is emitted and the disposed row gains no second reason field"
+      proof: "unit test: test/dedup-stand-downs-name-themselves.test.ts"
