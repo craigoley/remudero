@@ -1,0 +1,150 @@
+- id: W1-T2447
+  title: "THE COMMIT-TRAILER CREDIT SURFACE SURVIVES A SQUASH ONLY BECAUSE A REPO SETTING SAYS SO, AND NOTHING IN THE REPO ASSERTS IT — `squash_merge_commit_message` reads `COMMIT_MESSAGES`, which is the ONLY reason `buildCommitTrailerIndex` can read anything at all; flip it to `PR_BODY` in the GitHub UI and 611 anchored trailers stop being written with no test, no gate and no ledger row noticing, while the W1-T2387 miss that prompted this had a different cause entirely — the trailer was never written to the branch tip"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 15.00
+  files: [src/lib/status.ts, test/commit-trailer-surface-squash-setting.test.ts]
+  origin: "operator-brief#commit-trailer-surface-squash-2026-08-28"
+  plan_refs: ["W1-T2387", "W1-T2435", "W1-T256", "W1-T2392", "W1-T20c", "W1-T1012"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE ID. Eight surfaces swept at base 0cbfdc47, anchored `W1-T2447([^0-9]|$)`, `[0-9]` never
+    `\d`. SURFACE 1 READS 1 against 560 refs (control W1-T2445/2446 = 2). Shard filenames 0 of 690
+    and declared ids 0 of 945 — ⚠ AND THE FIRST CONTROL I CHOSE WAS DEAD: W1-T2446 reads 0 on both
+    because its own shard PR has not merged yet, so it proves nothing. Re-controlled on W1-T2444,
+    which reads 1 on both. Open set enumerated FIRST over REST under a structural guard (array,
+    len 2): titles 0 of 2 (control 2), bodies 0 over 14,708 bytes (control 2), heads 0 of 2
+    (control 1). Merged trailers 0 of 99 (control 42) and merged subjects 0 of 99 (control 57) are
+    MERGED-ONLY — coverage, never evidence.
+
+    ── ⚠ THE BRIEF'S MECHANISM IS BACKWARDS FOR THIS REPO, AND THE CORRECTION IS THE FINDING ───
+
+    THE BRIEF SAYS: "GitHub's squash builds its message from the PR TITLE AND BODY — not from the
+    branch commits. So a trailer that exists only on the branch cannot survive the merge."
+
+    MEASURED, from the repository's own settings:
+      squash_merge_commit_message : "COMMIT_MESSAGES"
+      squash_merge_commit_title   : "COMMIT_OR_PR_TITLE"
+
+    THE SQUASH BODY IS THE CONCATENATED BRANCH COMMIT MESSAGES. A trailer written onto the branch
+    tip DOES survive. `appendTaskTrailerToCommit` is not writing to an erased surface.
+
+    THE COUNTEREXAMPLE IS DECISIVE AND WOULD BE IMPOSSIBLE UNDER THE BRIEF'S MODEL: all NINE of
+    #3102's retrofitted credits read body-trailer FALSE and squash-trailer TRUE. If the squash were
+    body-derived, no PR could ever have a squash trailer without a body trailer. Nine do.
+
+    ⚠ AND I NEARLY SHIPPED THE BRIEF'S CONCLUSION FROM MY OWN BAD EVIDENCE. Over the 99 most
+    recent merged PRs the two surfaces separate PERFECTLY — 25 of 25 with a body trailer have a
+    squash trailer, 0 of 25 without one do — which reads exactly like "the squash is body-derived".
+    IT IS CORRELATION FROM A COMMON CAUSE: the fleet stamps the body and the commit on the same
+    path, so recent PRs have both or neither. The setting and the nine counterexamples refute it.
+    A perfectly separating sample is not a mechanism.
+
+    ── Q1: HOW THE NINE WERE ACTUALLY EARNED — BY THE COMMIT SURFACE, AND ONLY BY IT ───────────
+
+    #3005, #3000, #2998, #2999, #2682, #2357, #1293, #468, #292. Every one: body trailer FALSE,
+    squash trailer TRUE.
+
+    ⚠ SEVEN OF THE NINE HAVE A NON-RUN HEAD BRANCH — `fix/triage-files-under-the…`,
+    `split-board-index-open-mer…`, `fix-board-index-ttl-on-com…`, `fix/added-id-collides-with…`,
+    `plan/reservation-namespace…`, `claude/split-w1-t314-conso…`, `feat/strike-regime-tagging…` —
+    so `findMergedByHeadBranch`'s `run-<id>-<epoch>` pattern (W1-T256) cannot match them. THOSE
+    SEVEN ARE CREDITABLE BY THE COMMIT SURFACE ALONE. The union has fired for exactly the
+    population it was built for, repeatedly. IT IS NOT INERT.
+
+    CONTROLLED BOTH WAYS.
+      POSITIVE — credited by commit trailer alone: the seven above (body FALSE, squash TRUE,
+      non-run head). The remaining two (#2357 `run-W1-T1085-…`, #292 `run-W1-T42-…`) carry
+      run-shaped heads and would be credited either way.
+      NEGATIVE — credited ONLY by head branch: #1657, head `run-W1-T444-1786560477`, whose squash
+      commit carries ZERO anchored trailers and for which `Remudero-Task: W1-T444` appears nowhere
+      on main. It is credited by W1-T256's path and by nothing else.
+
+    ── SO WHAT ACTUALLY WENT WRONG FOR W1-T2387 — A DIFFERENT DEFECT ENTIRELY ──────────────────
+
+    Not erasure. THE TRAILER WAS NEVER WRITTEN TO #3102'S BRANCH TIP. `W1-T2387` appears TEN times
+    across main's commit messages, and every one is a SUBJECT mention — `…(W1-T2387)` — never an
+    anchored `Remudero-Task:` line. #3102's own squash is visibly commit-derived (it carries the
+    `* fix(status): …` bullets of its branch commits and ends at `Co-authored-by`), so if the tip
+    had carried a trailer it would be there. It is not.
+
+    That is `appendTaskTrailerToCommit` failing to run or failing silently — which is EXACTLY
+    W1-T2435's bare `catch {}`, filed and built today as #3223, which now RECORDS those failures.
+    THE INSTRUMENTATION FOR THIS LANDED HOURS AGO AND ITS ROWS ARE THE NEXT EVIDENCE. CITED, NOT
+    RE-FILED.
+
+    ⚠ AND THE READING HAS ALREADY MOVED UNDER US. The brief measured anchored
+    `Remudero-Task: W1-T2387` on main as 0. It now reads 1, carried by commit a9b3e992 —
+    `chore(plan): record W1-T2387 merge credit on its own shard (#3237)`, the very PR the daemon
+    opened BECAUSE the credit was missing. The symptom filed the record that closed its own gap,
+    for one task, by accident. The mechanism is untouched.
+
+    ── Q2: WHAT SURVIVES A SQUASH, MEASURED — ALL OF IT, AND THAT IS THE POINT ─────────────────
+
+    Because the setting concatenates branch commit messages verbatim, there is no per-trailer
+    survival rule to enumerate. Measured at line-start across main's 2,559 commits:
+
+      Co-authored-by:   1900
+      Remudero-Task:     802     (611 of them ANCHORED to the strict grammar)
+      Signed-off-by:      13
+      Reviewed-by:         0
+
+    The 191-line gap between 802 and 611 is the grammar doing its job: those are run ids
+    (`RETRO-…`, `TRIAGE-fb-…`, `PR-…`) that `appendTaskTrailerToCommit`'s second call site
+    (W1-T1012, the Architect path) writes and the plan-id grammar correctly rejects — the same
+    shape #3102 reported as "170 of 740". ⚠ THE GRAMMAR IS NOT RELAXED HERE and must not be: it is
+    what makes a commit hit the same class of evidence as a body line (W1-T20c).
+
+    SO ANY COMMIT-SURFACE CREDIT PATH CAN WORK. The surface is sound; its INPUT is unreliable.
+
+    ── Q3: THE REAL REMEDY, POINTED AT AND NOT BUILT ──────────────────────────────────────────
+
+    ⚠ NOT PROPOSED: removing `buildCommitTrailerIndex`, changing the merge method away from squash,
+    or relaxing the anchored grammar.
+
+    The remedy the brief names — put the trailer in the PR BODY, which `ensureTaskTrailer` already
+    intends to do unconditionally — IS RIGHT, BUT FOR A DIFFERENT REASON THAN THE BRIEF GIVES. Not
+    "because the squash erases the commit trailer": it does not. Because THE COMMIT SURFACE'S
+    SURVIVAL IS A REPOSITORY SETTING, changeable in the GitHub UI by anyone with admin, with no
+    commit, no review and no ledger row. Flip `squash_merge_commit_message` to `PR_BODY` and 611
+    anchored trailers silently stop being written; `buildCommitTrailerIndex` keeps returning an
+    index that quietly stops growing, and `deriveStatus` keeps reading it. The BODY is read
+    directly and depends on no setting. That is the argument for the body path, and it survives the
+    correction above.
+
+    WHAT THIS TASK SHOULD ACTUALLY DO, GIVEN ALL OF THAT: assert the dependency that is currently
+    unstated. `buildCommitTrailerIndex` (`src/lib/status.ts:4088`) reads
+    `ref = opts.ref ?? "origin/main"` through a real `git log` and its doc explains the union
+    without ever saying that the union works only while the repo squashes from COMMIT_MESSAGES.
+    Nothing in `src/`, `test/` or `.github/` mentions `squash_merge_commit_message` at all. A test
+    that pins the assumption — or, failing that, a doc line that names it — turns a silent
+    setting-dependency into something a reader can see. That is the whole build.
+
+    RISK BAND. `risk: high` set UP FRONT; the band is RULE 19'S SPAN, not blast radius.
+    `subsystemsOf` (`src/lib/task-linter.ts`) derives ONE id per `files:` entry via
+    `moduleIdFromPath` and A TEST'S OWN STEM COUNTS, so `[src/lib/status.ts,
+    test/commit-trailer-surface-squash-setting.test.ts]` reads as TWO concerns (`status`,
+    `commit-trailer-surface-squash-setting`). Any task whose test does not share its source's stem
+    is ≥2 and must be `high`, whatever the change size.
+
+    ── OWNED ELSEWHERE, NOT CLAIMED HERE ──────────────────────────────────────────────────────
+
+    The union itself is W1-T2387's, and this task records that its surface rests on an unstated
+    setting — NOT that its idea was wrong; the seven credits above are its idea working. The
+    stamp's silent `catch {}` is W1-T2435's and shipped today as #3223; its rows are the next
+    evidence and are not re-filed here. The head-branch path is W1-T256's. The detector for a build
+    no surface credits is W1-T2392's.
+  acceptance:
+    - claim: "the commit surface's dependence on the squash message setting is stated where the index is built"
+      proof: "unit test: test/commit-trailer-surface-squash-setting.test.ts"
+    - claim: "the anchored trailer grammar is unchanged and still rejects a run id"
+      proof: "unit test: test/commit-trailer-surface-squash-setting.test.ts"
+    - claim: "the body surface remains consulted first and the commit surface can still only add credit"
+      proof: "unit test: test/commit-trailer-surface-squash-setting.test.ts"
+    - claim: "no merge method and no index reader is removed by this task"
+      proof: "unit test: test/commit-trailer-surface-squash-setting.test.ts"
