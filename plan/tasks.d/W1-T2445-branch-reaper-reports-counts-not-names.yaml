@@ -1,0 +1,153 @@
+- id: W1-T2445
+  title: "THE BRANCH REAPER COMPUTES A PER-BRANCH REASON FOR ALL 143 BRANCHES AND THEN DISCARDS IT — `planBranchReap` writes `plan.reasons[name]` for every branch including `closed_unmerged`, and NOTHING prints it, ledgers it, or names the 28 held branches; separately, NO DELETION PATH EXISTS ANYWHERE IN `src/`, so the 107 branches it calls deletable are never deleted by anything"
+  repo: remudero
+  depends_on: []
+  type: manual
+  verify: human
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 0.00
+  files: [src/run-task.ts, plan/tasks.d/W1-T2445-branch-reaper-reports-counts-not-names.yaml]
+  origin: "operator-brief#reaper-closed-pr-blindness-2026-08-28"
+  plan_refs: ["W1-T2246", "W1-T2247", "W1-T2397", "W1-T2429", "W1-T2387", "W1-T447"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE BRIEF'S STATED MECHANISM IS FALSIFIED BY THE CODE AND BY TODAY'S MEASUREMENT, AND THIS
+    RECORD LEADS WITH THAT rather than filing the finding it was asked for. The reaper does NOT
+    treat a closed PR like an absent one: `planBranchReap` (`src/lib/status.ts`) tests
+    `f.prState === "closed"` BEFORE any hold arm and pushes that branch to `plan.deletable` with
+    reason `closed_unmerged`. A closed-unmerged PR has never been a reason to HOLD. Measured live
+    at `0cbfdc47`: of the 28 held branches, 28 read NO-PR and ZERO read closed-unmerged. The two
+    branches the brief names are no longer on origin at all.
+
+    WHAT IS REAL, AND IT IS TWO SEPARATE THINGS, BOTH MEASURED. First, `plan.reasons` is written
+    per branch and then thrown away: a grep of `run-task.ts` for `plan.reasons` or `.reasons[`
+    returns NOTHING, the console prints only counts plus the `undetermined` names, and the
+    `branch_reap.dry_run` ledger row carries `branches`/`deletable`/`guarded`/`hold`/`undetermined`
+    as integers and no per-branch reason at all. THE 28 HELD BRANCH NAMES ARE NEVER PRINTED — only
+    `undetermined` names are, and that list was empty — so an operator reads `hold: 28` and has no
+    way to act on it without re-deriving the set by hand, which is what this filing had to do.
+    Second, and larger: `git grep -nE 'push.*--delete|":refs/heads/|deleteRef|delete_ref' -- src/
+    scripts/` returns ZERO. THERE IS NO DELETION PATH IN THIS CODEBASE. `reapBranchesCommand` takes
+    no flags at all (`unknownArgError("reap-branches", rest, [], [])`) and always prints "DRY RUN —
+    nothing was deleted." So the 107 branches it classifies deletable — `closed_unmerged` among
+    them — persist indefinitely because NOTHING ACTS ON THE REPORT, not because anything was
+    misclassified. That is the honest account of the cost the brief observed.
+
+    THE ID. Eight surfaces swept before a byte of this file was written, anchored
+    `W1-T2445([^0-9]|$)` with a `[0-9]` class and never `\d`. SURFACE 1 READS 1 against 559
+    reservation refs, with W1-T2443 and W1-T2444 firing 1 each as controls. Shard filenames 0 of
+    690; declared ids 0 of 945; head branches 0 of 142 checked BOTH cases; merged trailers 0 of 622;
+    merged subjects 0 of 2,559. Controls fired on every one of those: W1-T1000003 on filenames,
+    declared ids and subjects, W1-T2443 on filenames, 90 live `run-*` heads on the branch surface,
+    W1-T2439 plus 622 trailers on the trailer surface. ANCHOR-LEAK ran on a POPULATED band and
+    discriminated — bare `W1-T244` matches 7 refs unanchored and 0 anchored.
+
+    ⚠ TWO SURFACES HAVE NO CONTROL AND THAT IS REPORTED RATHER THAN SCORED. Open-PR TITLES and
+    open-PR BODIES both read 0 — but the open-PR set was EMPTY at filing time, so those zeros are
+    VACUOUS: there was no population to draw a control from and none could be constructed. A later
+    reader must not treat those two as evidence.
+
+    ⚠ AND ONE CONTROL FIRED BY ACCIDENT, WHICH IS WORTH MORE THAN A DESIGNED ONE. The brief asked
+    for a control showing the per-head query finding an OPEN PR on some other held branch. The
+    reaper's own run enumerated 142 branches; an independent re-read moments later saw 143, and the
+    new arrival — `run-W1-T2387-1787945900779` — sits in the held set carrying OPEN PR #3237. So the
+    query really does distinguish open from absent, proven on a branch inside the very set under
+    examination. THE OFF-BY-ONE IS REPORTED, NOT SMOOTHED: the derived hold set is 29 against the
+    reaper's own 28 for exactly that reason, and the two numbers were taken seconds apart.
+
+    (1) Q1 — WHAT THE REAPER READS, BY SYMBOL. `perHeadPrState` (`run-task.ts`) issues
+    `repos/<o>/<r>/pulls?head=<owner>:<branch>&state=all&per_page=100` and folds each row through
+    `foldPrState`, which returns `merged` when `merged_at` is non-null, `open` for an open row, and
+    `closed` otherwise. It is wired at the `facts` build as `prState.get(name) ?? perHeadPrState(…)`
+    — the bulk walk first, the per-head read as the fallback W1-T2246 added precisely because a
+    bulk `"none"` means only "not seen in the bounded window". Run by hand against both branches the
+    brief names, that exact query returned `2660:closed:merged=false` and `3109:closed:merged=false`.
+    THE READ IS CORRECT AND ALWAYS WAS.
+
+    SO WHY DID THE LABEL SAY "confirmed no PR"? Because the SUMMARY has only two buckets:
+    `confirmedHold = plan.hold.length - plan.undetermined.length`, printed as "confirmed no PR +
+    commits not in main". Anything held that is not `state_undetermined` is asserted to have no PR
+    BY SUBTRACTION — a claim the classifier itself never made. W1-T2246 split "no PR" from "could
+    not tell" and left every other reason to be inferred from the residue. Today that residue really
+    is 28 branches with no PR, so the label happens to be true; it is derived rather than read, and
+    it would be silently wrong the moment any other reason lands in `hold`.
+
+    (2) Q2 — THE POPULATION, AND THE THIRD NUMBER IS ZERO. Across all 28 held branches, classified
+    by the reaper's OWN per-head query: 28 with NO PR, 0 with a closed-unmerged PR, and 1 more (the
+    off-by-one above) with an OPEN PR. AND HOW MANY ARE BLOCKING A TASK `isDispatchEligible` WOULD
+    OTHERWISE TAKE: **zero**. `rmd status`'s QUEUE HEAD reports one candidate, W1-T1269, at
+    `attempts 0` and NOT refused — its branch is gone and it is eligible today. Exactly one task is
+    REFUSED, W1-T2387, for "run branch already pushed to origin" — and that branch carries OPEN PR
+    #3237, so the refusal is CORRECT and is W1-T2397's territory, not this task's.
+
+    THE FINDING IS THEREFORE A REPORTING GAP, NOT A THROTTLE, AND THE SHARD SAYS SO PLAINLY. The
+    brief's own test — "if it is two, say so; a remedy for two is the shape this repo has declined
+    eleven times" — resolves at ZERO on this measurement. Both instances it cites were real when
+    taken and are now resolved by branch deletion. Nothing here argues that a queue is being
+    throttled today.
+
+    (3) Q3 — THE TWO CANDIDATES, PRICED, NEITHER PROPOSED AS AUTOMATIC. ⚠ REAPING ON "CLOSED" ALONE
+    IS NOT ONE OF THEM AND MUST NOT BE READ INTO THIS RECORD: a PR closed by mistake, or closed
+    while its branch still carries work someone wants, must still be held, the reaper's caution is
+    CORRECT, and the commits are unrecoverable once the branch is gone.
+
+    CANDIDATE A — SURFACE WHAT IS ALREADY COMPUTED. Print `plan.reasons[name]` beside every held and
+    deletable branch, and carry the same map into the `branch_reap.dry_run` ledger row. COST: no new
+    query, no new API call, no new decision — the map is fully populated before the summary is
+    printed and is discarded one line later. It changes what an operator can SEE and nothing about
+    what the tool DOES; a `closed_unmerged` branch becomes actionable by name instead of hiding
+    inside an integer. RISK: none to behaviour; the only failure mode is a longer report.
+
+    CANDIDATE B — REQUIRE AN EXPLICIT OPERATOR CONFIRMATION PER BRANCH. COST IS MUCH HIGHER AND THE
+    REASON IS STRUCTURAL: there is no execute path to gate. A per-branch confirmation presupposes a
+    deletion mechanism that does not exist anywhere in `src/`, so this candidate is really "build
+    the reaper's execute half, then gate it", and it inherits every question about who may run it,
+    where the confirmation is recorded, and what happens to a confirmation that goes stale between
+    the read and the delete. RISK: it is the only one of the two that can destroy work.
+
+    ⚠ THE TWO ARE NOT ALTERNATIVES ON EQUAL FOOTING and the record should not pretend otherwise:
+    A is a producer fix to a value already in hand, B is a new capability. An operator may want
+    both, either, or neither, and this task asserts no preference.
+
+    (4) OWNED ELSEWHERE, RECORDED SO THIS FILING DOES NOT RE-OPEN THEM. The dispatch refusal on an
+    existing run branch — including the open-sibling observation — is W1-T2397's and is CORRECT;
+    nothing here proposes changing it. The duplicate build that produced #3109 is W1-T2429's
+    (branch attribution). The credit surfaces are W1-T2387's, whose own new run branch is the OPEN
+    PR that served as this filing's control. THIS TASK OWNS ONLY WHAT THE REAPER REPORTS.
+
+    RULE 19 BAND, SET UP FRONT. `risk: high` is the SPAN reading and carries NO claim about blast
+    radius: `subsystemsOf` derives ONE id PER `files:` ENTRY, this record declares two entries whose
+    stems differ (`run-task` and this shard's own filename), and the acceptance text names the
+    reaper, the ledger and the dispatch queue — refused at `risk: medium`. Declaring its own plan
+    record is legal here ONLY because this is `verify: human`; `rule15-filing` refuses that for a
+    `verify: auto` task, and any later conversion must drop the self-reference in the same edit.
+  acceptance:
+    - claim: "the record leads with the brief's mechanism being falsified rather than restating it"
+      proof: "grep: THE BRIEF'S STATED MECHANISM IS FALSIFIED in plan/tasks.d/W1-T2445-branch-reaper-reports-counts-not-names.yaml"
+    - claim: "the discarded per-branch reason is named as the first real finding"
+      proof: "grep: WHAT IS REAL, AND IT IS TWO SEPARATE THINGS in plan/tasks.d/W1-T2445-branch-reaper-reports-counts-not-names.yaml"
+    - claim: "the absence of any deletion path is recorded as the larger of the two"
+      proof: "grep: THERE IS NO DELETION PATH IN THIS CODEBASE in plan/tasks.d/W1-T2445-branch-reaper-reports-counts-not-names.yaml"
+    - claim: "the summary label is shown to be derived by subtraction rather than read"
+      proof: "grep: BY SUBTRACTION — a claim the classifier itself never made in plan/tasks.d/W1-T2445-branch-reaper-reports-counts-not-names.yaml"
+    - claim: "the dispatch-blocking count is reported as zero rather than assumed"
+      proof: "grep: THE FINDING IS THEREFORE A REPORTING GAP in plan/tasks.d/W1-T2445-branch-reaper-reports-counts-not-names.yaml"
+    - claim: "both candidates are priced and neither is proposed as automatic"
+      proof: "grep: THE TWO ARE NOT ALTERNATIVES ON EQUAL FOOTING in plan/tasks.d/W1-T2445-branch-reaper-reports-counts-not-names.yaml"
+    - claim: "reaping on closed alone is explicitly excluded"
+      proof: "grep: IS NOT ONE OF THEM AND MUST NOT BE READ INTO THIS RECORD in plan/tasks.d/W1-T2445-branch-reaper-reports-counts-not-names.yaml"
+    - claim: "the vacuous open-PR surfaces are reported rather than scored as evidence"
+      proof: "grep: TWO SURFACES HAVE NO CONTROL AND THAT IS REPORTED in plan/tasks.d/W1-T2445-branch-reaper-reports-counts-not-names.yaml"
+  falsifier: |
+    If a later run of `rmd reap-branches` ever reports a branch in `hold` whose per-head PR state is
+    `closed`, then `planBranchReap`'s ordering has changed and the brief's original mechanism is
+    live after all — the closed arm would no longer be reached before the hold arm, and this
+    record's leading correction would be wrong.
+
+    SEPARATELY DECISIVE: if a deletion path appears in `src/` — any `push --delete`, `:refs/heads/`
+    refspec or `deleteRef` call — then candidate B stops being "build the execute half" and becomes
+    a gate on something real, and its pricing here is obsolete. And if the dispatch-blocking count
+    ever reads above zero for a branch with NO open PR, the reporting gap has become a throttle and
+    the question stops being a preference.
