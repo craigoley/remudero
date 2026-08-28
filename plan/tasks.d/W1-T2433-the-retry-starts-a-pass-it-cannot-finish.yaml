@@ -1,0 +1,165 @@
+- id: W1-T2433
+  title: "THE FLAKE RETRY STARTS A SECOND PASS IT OFTEN CANNOT FINISH, AND A CANCELLATION NAMES NOTHING — `test-with-retry.mjs` re-runs the IDENTICAL WHOLE `coverage-ratchet` command on any pass-1 failure, and of the FIVE two-pass runs observed, ONE completed (returning a red) and FOUR were cancelled within 21 seconds of the 39-minute bound; ZERO have ever produced a green, so the retry has never once done the thing it exists to do while costing a full extra pass every time it fires"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 20.00
+  files: [scripts/test-with-retry.mjs, test/retry-does-not-start-a-pass-it-cannot-finish.test.ts]
+  origin: "operator-brief#retry-cannot-finish-so-a-flake-is-a-cancellation-2026-08-28"
+  plan_refs: ["W1-T1009", "W1-T459", "W1-T1041", "W1-T1074", "W1-T1075", "W1-T2430", "W1-T2431", "W1-T312"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE ID. Eight surfaces swept at base 49b4b18b, anchored `W1-T2433([^0-9]|$)` with a `[0-9]`
+    class and never `\d`, every open-surface control drawn from the open set enumerated FIRST over
+    REST (HTTP 200, type array, length 8, page 2 length 0). SURFACE 1 READS 1:
+    `refs/rmd-id/W1-T2433` resolves against 546 refs, and the anchor discriminates on a POPULATED
+    band — `W1-T243` reads anchored 0 against unanchored 4. Shard filenames 0 of 677, declared
+    `- id:` lines 0 of 945, merged subjects 0 of 2,508 — each controlled on W1-T2425, a MERGED id
+    (1, 1 and 2 respectively); the first control tried was W1-T2431, which reads 0 on all three
+    because it is still OPEN, so a merged control was substituted rather than a zero reported.
+    Open-PR titles 0 of 8 CASE-SENSITIVELY (control W1-T2431 = 1, lower-case `w1-t2431` = 0);
+    open-PR bodies 0 over 48,514 bytes (control W1-T2431 = 10); head branches 0 of 159 rows
+    (controls W1-T2408 = 2 and W1-T2419 = 2, both LIVE `run-*` heads). Merged trailers 0 of 578
+    (control W1-T2249 = 1). Surfaces 7 and 8 are MERGED-ONLY and their zeros are coverage, not
+    evidence, for an id that has never merged.
+
+    ── THE BOUND, RE-DERIVED AT HEAD, AND A CORRECTION ─────────────────────────────────────────
+
+    (1) THE DIAGNOSING LANE READ THE WRONG NUMBER, AND FROM A STALE TREE. It reported 2100s and
+    concluded the retry "can never finish". `.github/workflows/ci.yml` at origin/main line 239
+    reads `timeout-minutes: 39` — 2340s — raised by #3064, merged 2026-08-27T11:30:46Z, whose own
+    comment in that file names this defect already: the retry is "a second full pass -- which puts
+    it past 2100s; PR #3064 raised it to 39m/2340s as a STOPGAP while `ci` stays at 35m/2100s".
+    The 2100s figure came from a local checkout 19 commits behind. THE ARITHMETIC BELOW IS
+    AGAINST 2340s, AND THE EARLIER CONCLUSION IS WITHDRAWN: the retry is not impossible, it is
+    marginal.
+
+    (2) AND THE STOPGAP IS SPENT, WHICH IS SHARPER THAN THE ORIGINAL CLAIM. `ci-gate.yml` sets
+    `WAIT_CAP_SECONDS: 2400`, and both job bounds must stay STRICTLY BELOW it — #3064's own
+    comment says so: "THE CEILING IS THE INVARIANT, NOT EITHER NUMBER". 2340s leaves SIXTY
+    SECONDS. There is no third raise available.
+
+    (3) THE ARITHMETIC AGAINST THE LIVE BOUND. One pass of `coverage-ratchet` reads p50 1115s and
+    max 1414s over 49 successful runs. Two passes at the median is 2230s — INSIDE 2340s, with 110
+    seconds of headroom, 4.7 percent. Two passes at the observed max is 2828s, over by 488s. So
+    the retry fits only in the lower half of its own distribution.
+
+    ── THE EVIDENCE THAT SURVIVES EITHER BOUND ────────────────────────────────────────────────
+
+    (4) THE CANCELLATIONS CLUSTER AT THE BOUND, NOT AT A NATURAL DURATION. The four cancelled runs
+    read 2355, 2360, 2361 and 2361 seconds — A SPREAD OF SIX SECONDS, every one just above 2340.
+    A hang would scatter; a natural runtime would scatter. This is a timer.
+
+    (5) AND THE RETRY IS PROVEN TO HAVE RUN, NOT INFERRED. `FLAKE-RETRY: first attempt failed —
+    W1-T356 wiring … sweepOrphans` appears verbatim at 00:40:13 in the cancelled job; the SAME
+    test name appears at 00:34:12 AND at 00:56:08 within ONE job whose log carries a single
+    timestamp window; and that job emitted 21,311 test lines for 10,852 DISTINCT names against
+    10,922 for 10,904 on a successful run. CONTROL: exactly 1 real `FLAKE-RETRY:` marker line in
+    the cancelled run and 0 in the successful one, counted with the marker anchored at line start
+    so the 2-versus-1 mentions of that phrase inside a TEST TITLE — the false-positive class — are
+    excluded.
+
+    ── Q1. THE CONSEQUENCE, STATED WITHOUT OVERREACHING ───────────────────────────────────────
+
+    (6) THE RETRY HAS NEVER ONCE PRODUCED A GREEN HERE. Over 56 sampled `coverage-ratchet` runs:
+    49 succeeded and EVERY ONE ran a single pass (max 1414s, far below any two-pass duration); 3
+    failed at 1137s, 1138s and 2176s; 4 were cancelled at the bound. So FIVE two-pass runs are
+    observed — the 2176s failure plus the four cancellations. ONE completed, and what it returned
+    was a RED. ZERO ended green. The retry exists to rescue a flake, and in this job it has
+    rescued none, while spending a full extra pass every time it fires.
+
+    (7) SO THE RIGHT WORD IS NOT "FLAKY AT SEVEN PERCENT". Seven percent is how often a pass-1
+    flake occurs; what follows from it is not a seven-percent risk but a near-certain loss — four
+    of the five retries died, and the one that lived returned the red it would have returned an
+    hour earlier. AND A CANCELLATION NAMES NOTHING: the flaky test is identified in pass 1's
+    output, which the cancellation discards, so the operator is handed a job that stopped rather
+    than a test that failed.
+
+    (8) AND THE REPAIR PATH CANNOT SEE IT EITHER, WHICH IS WHY IT PERSISTS. `ci-gate` aggregates
+    the cancellation and reports `failure`, while `cancelledRequiredCheckNames` filters to branch
+    protection's required contexts — measured, exactly `{remudero-review, ci-gate}` — so the
+    cancelled job is not a required context and the failing one is not a cancellation. The
+    re-queue lane is structurally blind to this shape. W1-T2430 owns that lane being trapped
+    behind a spend bound and W1-T2431 owns its counter's blindness; BOTH ARE CITED AND NEITHER IS
+    RE-FILED. This task owns only the fact that the retry produces the unreadable shape.
+
+    ── Q2. THE CHEAP REMEDY, AND WHY THE ALTERNATIVES ARE WORSE ───────────────────────────────
+
+    (9) DO NOT START A PASS YOU CANNOT FINISH. `test-with-retry.mjs` spawns the whole command and
+    already knows how long pass 1 took, because it waits for it. Before spawning pass 2 it can
+    compare the elapsed time against the budget it was given and, when the remainder is less than
+    pass 1 consumed, decline the retry and exit with PASS 1's REAL EXIT CODE — a red that names
+    the flaky test, delivered at 18 minutes instead of a cancellation that names nothing delivered
+    at 39. It changes nothing when the retry fits: a run with room still retries exactly as today,
+    and a green first pass is still spawned exactly once.
+
+    (10) THE ALTERNATIVES, PRICED. RAISING THE BOUND is not available: 2340s already sits 60s
+    below the 2400s ceiling that #3064's own comment calls the invariant, and W1-T1009 chose the
+    original figure to sit in a measured gap rather than as a round number. DISABLING THE RETRY
+    GLOBALLY (`TEST_RETRY=0`) throws away a mechanism that is fine in the `ci` job, which is
+    faster — measured on this same PR, `ci` completed in 602s, so two of its passes are 1204s
+    against its own 2100s bound, a 43 percent margin. REMOVING `coverage-ratchet` is not
+    considered: the gate is correct and W1-T1074/W1-T1075 already own the separate question of it
+    running too late.
+
+    ── Q3. WHAT NOTHING OWNS, AND THE DISTINCTION THAT MUST NOT BE FOLDED ─────────────────────
+
+    (11) ALL SHARD TITLES ON MAIN WERE READ AND NONE NAMES THIS. The neighbours each own a
+    different thing:
+      - W1-T459 owns THE FLAKE ITSELF — two of three declared whole-suite flakes are one
+        fixed-sleep race waiting for `ps eww` to see a new pid. Its title predicts the outcome
+        exactly: "a required check goes red and A HUMAN PRESSES RE-RUN TWICE", which is what
+        happened on #3160 tonight.
+      - W1-T1074/W1-T1075 own the gate running too late.
+      - W1-T1041 owns THE SUITE RUNNING TWICE ACROSS TWO JOBS — `ci` and `coverage-ratchet` each
+        running the identical glob under a different harness.
+      - W1-T2430 and W1-T2431 own the repair path in (8).
+
+    (12) THE DISTINCTION, STATED SO NOBODY FOLDS THEM. W1-T1041's doubling is BETWEEN TWO JOBS and
+    is a billing question — the same tests run in `ci` and again in `coverage-ratchet`, and both
+    finish. THIS ONE IS WITHIN A SINGLE JOB and is a correctness question — one job runs the suite
+    twice against a bound sized for one and a half, so the second pass is truncated and the
+    verdict is destroyed. Fixing either leaves the other exactly where it was: halving the
+    cross-job duplication does not stop a retry from overrunning, and declining an unfinishable
+    retry does not stop two jobs running the same glob.
+
+    ── WHAT MUST NOT MOVE ─────────────────────────────────────────────────────────────────────
+
+    (13) `timeout-minutes` STAYS AT 39 for `coverage-ratchet` and 35 for `ci`, both strictly below
+    `WAIT_CAP_SECONDS` at 2400. The retry is NOT disabled globally and `TEST_RETRY` keeps its
+    existing meaning as the kill switch. `coverage-ratchet` is not removed, made conditional, or
+    demoted. Nothing paces, sleeps or auto-resets, and no cap moves. The change is to ONE decision
+    inside the wrapper: whether to START pass 2.
+  acceptance:
+    - claim: "the wrapper declines a second pass when the remaining budget is less than the first pass consumed"
+      proof: "unit test: test/retry-does-not-start-a-pass-it-cannot-finish.test.ts"
+    - claim: "a declined retry exits with the first attempt's real code and names the failing test"
+      proof: "unit test: test/retry-does-not-start-a-pass-it-cannot-finish.test.ts"
+    - claim: "a retry that does fit still runs exactly as it does today"
+      proof: "unit test: test/retry-does-not-start-a-pass-it-cannot-finish.test.ts"
+    - claim: "a green first pass is still spawned exactly once and pays no extra wall time"
+      proof: "unit test: test/retry-does-not-start-a-pass-it-cannot-finish.test.ts"
+    - claim: "a deterministic failure still fails both passes when both fit, so the retry cannot mask a real break"
+      proof: "unit test: test/retry-does-not-start-a-pass-it-cannot-finish.test.ts"
+    - claim: "the existing kill switch keeps its meaning and the flake evidence is still recorded"
+      proof: "unit test: test/retry-does-not-start-a-pass-it-cannot-finish.test.ts"
+    - claim: "no job bound is read from or written by the wrapper beyond the budget it is given"
+      proof: "unit test: test/retry-does-not-start-a-pass-it-cannot-finish.test.ts"
+  falsifier: |
+    If a `coverage-ratchet` run is observed ending GREEN at a two-pass duration, the claim in (6)
+    is void and the retry has rescued a flake at least once — the population must then be re-taken
+    and the remedy re-argued against a mechanism that sometimes works. The measurement to repeat
+    is the duration census by conclusion over the last 56 runs, whose single-pass maximum of 1414s
+    is what makes a two-pass run identifiable at all.
+
+    SEPARATELY FALSIFYING: if the cancellations are ever observed scattering rather than clustering
+    within seconds of the bound, they are not the timer and (4) is wrong — a hang or a natural
+    overrun would produce a spread, and the four observed differ by six seconds total.
+
+    AND IF `timeout-minutes` is raised again, the arithmetic in (3) moves and the remedy may become
+    unnecessary — but (2) records that only 60 seconds remain below the invariant ceiling, so that
+    falsifier is bounded by the ceiling rather than open-ended.
