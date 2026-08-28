@@ -396,8 +396,10 @@ export function checkCliFreshness(
       `rmd is behind origin/main (${shortSha(headSha)}..${shortSha(originSha)}) but this checkout is ` +
       `on ${where}, not \`main\` -- refusing to auto-sync (never moving a ref that is not main). ` +
       `Self-sync exists to keep the operator's own \`main\` checkout fresh; fast-forwarding here ` +
-      `would move your work's base out from under it. Run \`${REMEDY_COMMAND}\` yourself if that is ` +
-      `really what you want.`;
+      `would move your work's base out from under it. If you don't need this checkout synced, set ` +
+      `\`${SELF_SYNC_GUARD_ENV}=1\` to skip this check without moving anything -- the read-only ` +
+      `escape. Run \`${REMEDY_COMMAND}\` yourself only if you actually want to fast-forward this ` +
+      `checkout to origin/main.`;
     warn(message);
     // W1-T486: no path content on this branch -- only the two shas already in `message`.
     log("self_sync.refused", { reason: "off-main", old_sha: headSha, new_sha: originSha });
