@@ -7354,6 +7354,122 @@ export function fetchPrLifecycle(prUrl: string, fetch: GhApiFetcher = ghJson): P
   return { merged: state === "MERGED", closed: state === "CLOSED" };
 }
 
+// ── W1-T2419: the COMMENT channel is append-only, unlike the status row above ─────────────────
+//
+// GROUND TRUTH: the `remudero-review` commit status (above) is last-write-wins — a head carries
+// exactly one context regardless of how many times it is rewritten, so a repeat write is cheap
+// and this task leaves it untouched. A `gh pr comment` APPENDS. #3140 accumulated TEN
+// byte-identical failure comments across ten consecutive sweep passes (21:06:02–21:18:57, one
+// unmoved head) because nothing anywhere compared the verdict about to be written against the one
+// already standing: `reviewPostRefusedFor` (run-task.ts) keys only on `review.post_refused`, on
+// the stated assumption that a DELIVERED post always flips the live rollup away from a
+// re-postable state — true for the status row {@link decideReviewStatusPost} reads, silent about
+// the comment thread itself.
+//
+// The fix is ONE comparison at the single site that writes the comment
+// ({@link postReviewCommentGuarded}, `runReview`'s only call path in run-task.ts from here on):
+// refuse to append when the body about to be written is BYTE-IDENTICAL to the newest comment
+// already standing on that PR. NO ledger, NO timer/pacing/backoff (the W1-T1066 polling-lockout
+// class this task's rationale explicitly refuses) — the discriminator is the verdict's own bytes
+// against a FRESH read of GitHub's live state on every call, exactly like the status row's own
+// lifecycle re-read above. Nothing here suppresses the status write, and nothing here changes
+// disposition/arm/cap logic — the sweep's `post-review` admission row stays exactly as it is
+// because it is correct (this task's own rationale, Q1).
+// ────────────────────────────────────────────────────────────────────────────
+
+/** One comment {@link fetchNewestPrComment} reads back off GitHub — only the two fields the
+ * byte-compare below needs. */
+export interface PrCommentRecord {
+  body: string;
+  created_at: string;
+}
+
+/**
+ * The NEWEST comment on `prUrl` by `created_at`, or `undefined` when the PR has no comments yet or
+ * its owner/repo/number can't be parsed (defensive — not reachable from a real PR URL). REST only
+ * (`GET repos/{o}/{r}/issues/{number}/comments`), never `gh pr view --json comments` (GraphQL) —
+ * same reasoning as {@link fetchPrLifecycle}, reusing its {@link prLifecycleUrlTarget} parse.
+ * `per_page=100` with no further pagination, the same single-page simplification this module's
+ * other single-PR REST readers already make (e.g. {@link fetchPrLifecycle}) — a PR carrying over
+ * 100 comments is not a shape this fleet's own review flow produces.
+ */
+export function fetchNewestPrComment(prUrl: string, fetch: GhApiFetcher = ghJson): PrCommentRecord | undefined {
+  const target = prLifecycleUrlTarget(prUrl);
+  if (!target) return undefined;
+  const rows = fetch([
+    "api",
+    `repos/${target.owner}/${target.repo}/issues/${target.number}/comments?per_page=100`,
+  ]) as unknown;
+  if (!Array.isArray(rows)) return undefined;
+  let newest: PrCommentRecord | undefined;
+  for (const row of rows as Array<{ body?: unknown; created_at?: unknown }>) {
+    if (typeof row?.body !== "string" || typeof row?.created_at !== "string") continue;
+    if (!newest || row.created_at > newest.created_at) newest = { body: row.body, created_at: row.created_at };
+  }
+  return newest;
+}
+
+/**
+ * THE comparison this task's rationale (Q1) found nowhere in `src/`: "NOTHING COMPARES THE NEW
+ * VERDICT AGAINST THE STANDING ONE." This is that comparison, and the only place it happens.
+ * Byte-exact, never fuzzy/trimmed/hashed — a verdict that changed by even one byte (a different
+ * unmet-criteria ordinal, an added rubric line) is a DIFFERENT verdict and must still post. This
+ * is the same distinction the shard's ledger measurement drew between PR #3140 (an unmoved head,
+ * exit unchanged across ten posts — a real repeat) and PR #2434 (18 posts on one head, but exits
+ * `[0, 1]` — a genuinely changed verdict, correctly excluded from the repeat count).
+ */
+export function isDuplicateReviewComment(newBody: string, standing: PrCommentRecord | undefined): boolean {
+  return standing !== undefined && standing.body === newBody;
+}
+
+/** Injectable seam for {@link postReviewCommentGuarded} — mirrors every other guarded-write DI
+ * shape in this module: real defaults, tests override to avoid a real `gh` spawn/network. */
+export interface PostReviewCommentDeps {
+  /** Defaults to {@link fetchNewestPrComment} via {@link ghJson}. */
+  fetchNewest?: (prUrl: string) => PrCommentRecord | undefined;
+  /** Defaults to a real `gh pr comment <prUrl> --body <body>`. */
+  postComment?: (prUrl: string, body: string) => void;
+}
+
+/** Exported so a unit test can PATH-stub `gh` and drive this exact real invocation directly,
+ * mirroring {@link execGhStatusPost}'s own reasoning: it keeps this one-line real wrapper from
+ * being permanently uncovered by the diff-coverage ratchet. */
+export function execGhPrComment(prUrl: string, body: string): void {
+  execFileSync("gh", ["pr", "comment", prUrl, "--body", body], { stdio: "pipe" });
+}
+
+/**
+ * THE ONE POST SITE for a review-verdict PR comment (W1-T2419) — `runReview`'s (run-task.ts) only
+ * call path from here on, replacing the old bare `execFileSync("gh", ["pr", "comment", ...])`.
+ * Refuses to append (`{posted: false, reason: "duplicate"}`) when `body` is byte-identical to the
+ * newest comment already standing on `prUrl`, per {@link isDuplicateReviewComment} — the fix this
+ * task makes. Every other case posts exactly as the old call did, including its best-effort
+ * failure contract: a `gh` error (fetching the standing comment OR posting the new one) is
+ * swallowed rather than thrown — the status + ledger already carry the verdict, so a comment
+ * hiccup must never crash the run, same as before this task.
+ */
+export function postReviewCommentGuarded(
+  prUrl: string,
+  body: string,
+  deps: PostReviewCommentDeps = {},
+): { posted: boolean; reason?: "duplicate" | "gh_error" } {
+  const fetchNewest = deps.fetchNewest ?? ((url: string) => fetchNewestPrComment(url));
+  const postComment = deps.postComment ?? execGhPrComment;
+  let standing: PrCommentRecord | undefined;
+  try {
+    standing = fetchNewest(prUrl);
+  } catch {
+    standing = undefined; // best-effort read: an unreadable comment list must never block the post below
+  }
+  if (isDuplicateReviewComment(body, standing)) return { posted: false, reason: "duplicate" };
+  try {
+    postComment(prUrl, body);
+    return { posted: true };
+  } catch {
+    return { posted: false, reason: "gh_error" }; // best-effort — status + ledger already carry the verdict
+  }
+}
+
 /** One posting attempt {@link decideReviewStatusPost} judges. */
 export interface ReviewStatusPostAttempt {
   headSha: string;

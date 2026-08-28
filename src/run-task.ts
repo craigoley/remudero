@@ -592,6 +592,7 @@ import {
   type AcceptanceAuthorTimeResult,
   parseAcceptanceBlock,
   parseReviewerVerdicts,
+  postReviewCommentGuarded,
   postReviewPending,
   postReviewStatusGuarded,
   priorReviewVerdictFromLedger,
@@ -4657,11 +4658,12 @@ async function runReview(args: {
     if (unwiredSection) parts.push(unwiredSection);
     if (inverseScopeSection) parts.push(inverseScopeSection);
     const body = parts.join("\n\n---\n\n");
-    try {
-      execFileSync("gh", ["pr", "comment", prUrl, "--body", body], { stdio: "pipe" });
-    } catch {
-      /* comment is best-effort; the status + ledger already carry the verdict */
-    }
+    // W1-T2419: THE ONE POST SITE — postReviewCommentGuarded (lib/review.ts) refuses to append
+    // when `body` is byte-identical to the newest comment already standing on this PR, so an
+    // unmoved head with an unchanged verdict no longer accumulates a repeat comment on every
+    // sweep pass (#3140: ten byte-identical failure comments across ten consecutive passes).
+    // Comment posting stays best-effort either way — see that function's own doc.
+    postReviewCommentGuarded(prUrl, body);
   }
   // W1-T63/P10-a: the console summary distinguishes a completed review from a
   // floor-only one (reviewer never attempted, or attempted but walled/failed).
