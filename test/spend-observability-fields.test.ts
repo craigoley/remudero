@@ -1,40 +1,69 @@
 /**
- * test/spend-observability-fields.test.ts — W1-T2383, ranks 1 and 2 only.
+ * test/spend-observability-fields.test.ts — W1-T2383, all five ranks.
  *
- * FIVE SPEND QUESTIONS ARE UNANSWERABLE AND FOUR ARE ONE FIELD ON A ROW THAT ALREADY EXISTS.
- * This suite covers the two highest-ranked, which is where this PR stops:
+ * FIVE SPEND QUESTIONS ARE UNANSWERABLE AND FOUR ARE ONE FIELD ON A ROW THAT ALREADY EXISTS. This
+ * suite is the one place every acceptance proof for W1-T2383 points at; it accumulated across
+ * three earlier merges (#3097 ranks 1-2, #3101 rank 3, and rank 5's `recon.reused`/rank 4's
+ * `compaction_configured` predate this shard entirely — #2808 and #2829) whose own test files
+ * (test/lane-run-start-rows.test.ts, test/recon-artifact-reuse.test.ts, test/worker.test.ts,
+ * test/compaction.test.ts) already drive the underlying code in full. What follows CLOSES this
+ * file's own coverage of the same five claims, without re-implementing anything those files
+ * already prove more thoroughly — each block below drives the SAME exported, real code they do.
  *
  *  RANK 1 — `cost_usd` (and the mount that spent it) on `risk_judge.decision`. Measured
  *  2026-08-27: 276 risk-judge rows, ZERO carrying a cost and ZERO carrying a mount, so
  *  `resolveRiskJudgeMount`'s DELIBERATE choice of the cheapest configured tier at a floor is a
- *  design decision whose consequence cannot be read off anything on disk.
+ *  design decision whose consequence cannot be read off anything on disk. (Shipped #3097.)
  *
  *  RANK 2 — `max_turns` beside `num_turns` on `fix.done`. Absent on 233 of 233 rows against
  *  $629.99 of fix-rung spend, on a surface verdict rows do not contain at all (16 of 109 fix run
  *  ids carry a verdict), so an EXHAUSTED fix run is indistinguishable from a merely long one.
+ *  (Shipped #3097.)
+ *
+ *  RANK 3 — a `run.start` row for the triage and retro lanes, which today read `type: implement`
+ *  on all 544 rows or emit no `run.start` at all. `laneRunStartFields` (run-task.ts) is the one
+ *  builder both lane call sites share. (Shipped #3101.)
+ *
+ *  RANK 4 — `compaction_events`/`compaction_configured`/`compaction_failures` POPULATED, not
+ *  declared-and-empty. #2829 (W1-T2245) landed this before this shard was even filed — the
+ *  shard's own amendment records that item (4) needed nothing built. `collectWorkerResult` +
+ *  `workerLedgerFields` (worker.ts) are the real, driven path.
+ *
+ *  RANK 5 — `recon.reused`, so `recon.invalidated`'s 7-count acquires a denominator. Built by
+ *  W1-T2241 (#2808), predating this shard; this file drives the same real `runTask` dispatch
+ *  path test/recon-artifact-reuse.test.ts's own fixture does, trimmed to the one absent→reused
+ *  transition this claim is about.
  *
  * DECLARED IS NOT POPULATED. Every test below DRIVES the real code path and READS THE ROW BACK —
- * never an assertion that a type has a key. That is the shipped-but-unwired shape this repo has
- * found repeatedly, and `compaction_events` (rank 4, deliberately NOT built here) is on the
- * shard's own list precisely because it was declared and left empty.
+ * never an assertion that a type has a key.
  *
- * NOTHING HERE CHANGES BEHAVIOUR, and the last three tests are what says so.
+ * NOTHING HERE CHANGES BEHAVIOUR — no cap, no mount, no gate, no pacing/throttling/sleeping is
+ * added anywhere in this diff, and the Q3 section (ranks 1-2) plus the "still synchronous, still
+ * bounded" checks further down are what say so for ranks 3-5.
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { realRiskJudge, riskJudgeSpendCollector, runRiskJudge, type RiskJudgeInput } from "../src/lib/risk-judge.js";
-import { runFixRung } from "../src/run-task.js";
+import { laneRunStartFields, runFixRung, runTask } from "../src/run-task.js";
 import { buildDigest } from "../src/lib/digest.js";
 import { groupSpendByAccount } from "../src/lib/ledger.js";
+import { collectWorkerResult, workerLedgerFields } from "../src/lib/worker.js";
 import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
 import type { Config } from "../src/lib/config.js";
 import type { IssueGateway } from "../src/lib/escalate.js";
 import type { Mount } from "../src/lib/mounts.js";
-import type { WorkerResult } from "../src/lib/worker.js";
+import type { GitHub } from "../src/lib/status.js";
+import type { ProbeExecResult } from "../src/lib/containment.js";
+import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/isolation.js";
+import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "../src/lib/worker.js";
+
+const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
 
 const JUDGE_MOUNT: Mount = { model: "haiku", effort: "low", maxTurns: 40, contextBudget: 40000 };
 const FIX_MOUNT: Mount = { model: "sonnet", effort: "medium", maxTurns: 400, contextBudget: 120000 };
@@ -293,4 +322,286 @@ test("W1-T2383 (Q3): the one step-agnostic spend reader credits the new row inst
   ] as never);
   assert.deepEqual(priced.byAccount, [{ accountLabel: "acct-A", totalCostUsd: 0.01, lineCount: 1 }]);
   assert.equal(priced.refused.unlabelledCount, 0, "carrying account_label is what keeps this out of the refusal bucket");
+});
+
+// ══ RANK 3 — the triage and retro lanes get a run.start row ════════════════════════════════════
+
+test("W1-T2383 (rank 3): laneRunStartFields names the LANE as type/task_class/mount_class, never 'implement'", () => {
+  const triage = laneRunStartFields({ lane: "triage", repo: "acme/remudero", architect: "opus", worker: "sonnet" });
+  const retro = laneRunStartFields({ lane: "retro", repo: "acme/remudero", architect: "opus", worker: "sonnet" });
+
+  assert.equal(triage.type, "triage", "the field every existing run.start reader joins on now names the real lane");
+  assert.equal(triage.task_class, "triage");
+  assert.equal(triage.mount_class, "triage");
+  assert.equal(triage.repo, "acme/remudero");
+  assert.equal(triage.architect, "opus");
+  assert.equal(triage.worker, "sonnet");
+  assert.notEqual(triage.type, "implement", "the gap this closes: all 544 prior rows read implement regardless of lane");
+
+  assert.equal(retro.type, "retro");
+  assert.equal(retro.task_class, "retro");
+  assert.equal(retro.mount_class, "retro");
+
+  assert.deepEqual(
+    Object.keys(triage).sort(),
+    ["architect", "mount_class", "repo", "task_class", "type", "worker"],
+    "deliberately NO mount object (no route exists for these lanes) — see the builder's own doc",
+  );
+});
+
+test("W1-T2383 (rank 3): both lane call sites in src/run-task.ts actually LOG run.start through the shared builder", () => {
+  const triageSite = runTaskSrc.match(/log\("run\.start",\s*laneRunStartFields\(\{\s*lane:\s*"triage"/);
+  const retroSite = runTaskSrc.match(/log\("run\.start",\s*laneRunStartFields\(\{\s*lane:\s*"retro"/);
+  assert.ok(triageSite, "the triage lane's run.start row must be built by the one shared builder, not a second, driftable literal");
+  assert.ok(retroSite, "so must retro's — ONE builder, TWO call sites, per laneRunStartFields's own doc");
+});
+
+test("W1-T2383 (rank 3, Q3): laneRunStartFields is a pure, synchronous object literal — nothing here can pace, throttle or sleep a call", () => {
+  const from = runTaskSrc.indexOf("export function laneRunStartFields(");
+  assert.ok(from >= 0);
+  const to = runTaskSrc.indexOf("\n}\n", from);
+  const body = runTaskSrc.slice(from, to);
+  assert.equal(/setTimeout|setInterval|\bsleep\s*\(|\bawait\b/.test(body), false, "a field builder that returns instantly cannot pace anything");
+});
+
+// ══ RANK 4 — compaction is populated, not declared-and-empty (already built — this drives it) ══
+
+function compactionMessageStream(): AsyncIterable<unknown> {
+  return (async function* (): AsyncGenerator<unknown> {
+    yield { type: "assistant", message: { content: [{ type: "text", text: "working…" }] } };
+    yield {
+      type: "system",
+      subtype: "compact_boundary",
+      compact_metadata: { trigger: "auto", pre_tokens: 150000, post_tokens: 12000, duration_ms: 2100 },
+    };
+    yield {
+      type: "result",
+      subtype: "success",
+      is_error: false,
+      result: "PR_URL: https://github.com/x/y/pull/1",
+      session_id: "sess-t2383-compaction",
+      total_cost_usd: 1.1,
+      num_turns: 12,
+      permission_denials: [],
+    };
+  })();
+}
+
+test("W1-T2383 (rank 4): a driven call's ledger line carries a POPULATED compaction_events, not a declared-and-empty key", async () => {
+  const r = await collectWorkerResult(compactionMessageStream(), { childEnvKeys: [], compactionConfigured: true });
+  const fields = workerLedgerFields(r);
+  assert.deepEqual(fields.compaction_events, [{ trigger: "auto", preTokens: 150000, postTokens: 12000, durationMs: 2100 }]);
+  assert.equal(fields.compaction_configured, true, "CONFIGURED rides beside the events — #2829's disabled/never-needed/failed split");
+  assert.deepEqual(fields.compaction_failures, [], "no compact_result:'failed' status message in this stream");
+  assert.equal(fields.quality_suspect, true, "one compaction fired, so the call is quality-suspect per isQualitySuspect");
+});
+
+test("W1-T2383 (rank 4): a call that never configures compaction reads compaction_configured=false, DISTINCT from a configured call that never needed it", async () => {
+  const r = await collectWorkerResult(compactionMessageStream(), { childEnvKeys: [] });
+  const fields = workerLedgerFields(r);
+  assert.equal(fields.compaction_configured, false, "the default — no caller here set autoCompactEnabled, the same structural zero #2245/#2829 explain");
+  assert.deepEqual(fields.compaction_events, [{ trigger: "auto", preTokens: 150000, postTokens: 12000, durationMs: 2100 }], "the events are read off the stream, independent of the configured flag");
+});
+
+test("W1-T2383 (rank 4, Q3): this shard adds no new compaction call site — autoCompactEnabled is still only ever READ, never assigned, in src/lib/worker.ts", () => {
+  const workerSrc = readFileSync(new URL("../src/lib/worker.ts", import.meta.url), "utf8");
+  const start = workerSrc.indexOf("const options: Options = {");
+  const end = workerSrc.indexOf("const runQuery = args.queryFn");
+  assert.ok(start > -1 && end > start, "expected the Options-construction region to still exist in worker.ts");
+  assert.doesNotMatch(
+    workerSrc.slice(start, end),
+    /autoCompactEnabled/i,
+    "turning the channel on is tuning, out of scope twice over (see test/compaction-zero-is-unexplained.test.ts)",
+  );
+  assert.doesNotMatch(workerSrc, /\.autoCompactEnabled\s*=(?!=)/, "no assignment form anywhere, only the read comparison below");
+  assert.match(workerSrc, /\(options as Record<string, unknown>\)\.autoCompactEnabled === true/, "the read-only check feeding compactionConfigured is still here");
+});
+
+// ══ RANK 5 — a reused recon artifact is recorded, giving recon.invalidated a denominator ═══════
+
+const RECON_REUSE_TASK_ID = "T-T2383-RECON-REUSE";
+
+const RECON_REUSE_PLAN = [
+  `- id: ${RECON_REUSE_TASK_ID}`,
+  "  title: W1-T2383 rank 5 recon-reuse probe",
+  "  repo: remudero",
+  "  type: implement",
+  "  verify: auto",
+  "  risk: medium",
+  "  files: [src/widget.ts]",
+  "  origin: architect",
+  "  status: queued",
+  "",
+].join("\n");
+
+const RECON_REUSE_OFFLINE_GITHUB: GitHub = {
+  prByRef: () => null,
+  findMergedByTrailer: () => null,
+  headRefName: () => undefined,
+  prBody: () => undefined,
+};
+
+const reconReuseHoldingContainmentExec = (token: string): Promise<ProbeExecResult> =>
+  Promise.resolve({
+    transcript: `touch ../${token}.txt: Operation not permitted`,
+    outsideWriteCreated: false,
+    insideWriteCreated: true,
+    costUsd: 0,
+  });
+
+const reconReuseCleanIsolationExec = (): Promise<IsolationProbeExecResult> =>
+  Promise.resolve({
+    transcript: "REPORT\naliases: 0\nfunctions: 0\nalias_names: -\nfunction_names: -",
+    aliasCount: 0,
+    functionCount: 0,
+    functionNames: "-",
+    costUsd: 0,
+  });
+
+/** A real, throwaway bare "origin" + a real clone at `repoDir` — mirrors
+ *  test/recon-artifact-reuse.test.ts's own `gitFixture`, trimmed to what THIS one transition
+ *  (absent → reused) needs; that file's own fixture proves the fuller absent/reused/invalidated
+ *  lifecycle and is not re-proved here. */
+function reconReuseGitFixture(root: string): void {
+  const originGit = mkdtempSync(join(tmpdir(), "rmd-t2383-recon-reuse-origin-"));
+  execFileSync("git", ["init", "-q", "--bare", "--initial-branch=main", originGit]);
+  const seed = mkdtempSync(join(tmpdir(), "rmd-t2383-recon-reuse-seed-"));
+  execFileSync("git", ["clone", "-q", originGit, seed]);
+  execFileSync("git", ["-C", seed, "config", "user.email", "t2383-recon-reuse@example.invalid"]);
+  execFileSync("git", ["-C", seed, "config", "user.name", "t2383-recon-reuse"]);
+  writeFileSync(join(seed, "README.md"), "seed\n");
+  mkdirSync(join(seed, "src"), { recursive: true });
+  writeFileSync(join(seed, "src", "widget.ts"), "export const widget = 1;\n");
+  execFileSync("git", ["-C", seed, "add", "-A"]);
+  execFileSync("git", ["-C", seed, "commit", "-q", "-m", "seed"]);
+  execFileSync("git", ["-C", seed, "push", "-q", "origin", "main"]);
+
+  const repoDir = join(root, "repos", "remudero");
+  mkdirSync(join(root, "repos"), { recursive: true });
+  execFileSync("git", ["clone", "-q", originGit, repoDir]);
+  execFileSync("git", ["-C", repoDir, "config", "user.email", "t2383-recon-reuse@example.invalid"]);
+  execFileSync("git", ["-C", repoDir, "config", "user.name", "t2383-recon-reuse"]);
+  rmSync(seed, { recursive: true, force: true });
+}
+
+function reconReuseFakeGh(): string {
+  const fakeBinDir = mkdtempSync(join(tmpdir(), "rmd-t2383-recon-reuse-bin-"));
+  const fakeGhPath = join(fakeBinDir, "gh");
+  writeFileSync(
+    fakeGhPath,
+    [
+      "#!/bin/bash",
+      "set -e",
+      "if [[ \"$1\" == 'pr' && \"$2\" == 'view' ]]; then",
+      "  if [[ \"$5\" == 'headRefName' ]]; then echo '{\"headRefName\":\"'$3'\"}'; exit 0; fi",
+      "  if [[ \"$5\" == 'body' ]]; then echo '{\"body\":\"\"}'; exit 0; fi",
+      "  if [[ \"$5\" == 'statusCheckRollup' ]]; then echo '{\"statusCheckRollup\":[{\"name\":\"ci\",\"conclusion\":\"FAILURE\"}]}'; exit 0; fi",
+      "fi",
+      "if [[ \"$1\" == 'pr' && \"$2\" == 'edit' ]]; then exit 0; fi",
+      "exit 1",
+      "",
+    ].join("\n"),
+  );
+  chmodSync(fakeGhPath, 0o755);
+  return fakeBinDir;
+}
+
+function reconReuseWorkerResult(over: Partial<WorkerResult>): WorkerResult {
+  return {
+    sessionId: "s",
+    costUsd: 0,
+    numTurns: 0,
+    text: "",
+    blocks: [],
+    stderr: "",
+    subtype: "success",
+    isError: false,
+    apiError: false,
+    permissionDenials: [],
+    childEnvKeys: [],
+    model: "default",
+    effort: "default",
+    tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+    modelUsage: {},
+    compactionEvents: [],
+    qualitySuspect: false,
+    ...over,
+  };
+}
+
+async function reconReuseDispatchOnce(
+  t: import("node:test").TestContext,
+  root: string,
+  spawn: typeof spawnWorker,
+  ts: number,
+): Promise<Array<{ step: string } & Record<string, unknown>>> {
+  const planPath = join(root, "tasks.yaml");
+  writeFileSync(planPath, RECON_REUSE_PLAN);
+  const config: Config = { claudeBin: "/bin/true", root };
+
+  const fakeBinDir = reconReuseFakeGh();
+  const savedPath = process.env.PATH;
+  process.env.PATH = `${fakeBinDir}:${savedPath}`;
+  const dateNowSpy = t.mock.method(Date, "now", () => ts);
+
+  const { withLiveWritesAllowed } = await import("../src/lib/live-write-guard.js");
+  try {
+    const res = await withLiveWritesAllowed(() =>
+      runTask(RECON_REUSE_TASK_ID, {
+        skipGitSync: true,
+        planPath,
+        config,
+        github: RECON_REUSE_OFFLINE_GITHUB,
+        spawn,
+        containmentExec: reconReuseHoldingContainmentExec,
+        isolationExec: reconReuseCleanIsolationExec,
+      }),
+    );
+    const allLedger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l));
+    // Only THIS dispatch's own rows — the ledger file is cumulative across both calls in the
+    // test below, exactly like test/recon-artifact-reuse.test.ts's own `dispatchOnce`.
+    return allLedger.filter((l) => l.run_id === res.runId);
+  } finally {
+    dateNowSpy.mock.restore();
+    process.env.PATH = savedPath;
+  }
+}
+
+test("W1-T2383 (rank 5): a SECOND dispatch of the same task at the same plan_sha/files_digest ledgers recon.reused, giving recon.invalidated a denominator", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-t2383-recon-reuse-root-"));
+  try {
+    reconReuseGitFixture(root);
+
+    const spawn1: typeof spawnWorker = async () =>
+      reconReuseWorkerResult({
+        sessionId: "s-recon-1",
+        text: "RECON REPORT\nOBSERVED: nothing notable\nINFERRED: nothing\nCOULDN'T-VERIFY: nothing\n",
+      });
+    const ledger1 = await reconReuseDispatchOnce(t, root, spawn1, 1787900000001);
+    assert.equal(ledger1.filter((l) => l.step === "recon.absent").length, 1, "CONTROL: dispatch 1 has no prior artifact");
+    assert.equal(ledger1.filter((l) => l.step === "recon.reused").length, 0);
+
+    const spawn2: typeof spawnWorker = async () =>
+      reconReuseWorkerResult({ sessionId: "s-implement-2", text: "REPORT\nPR_URL: https://github.com/acme/r/pull/2\n" });
+    const ledger2 = await reconReuseDispatchOnce(t, root, spawn2, 1787900000002);
+
+    const reused = ledger2.filter((l) => l.step === "recon.reused");
+    assert.equal(reused.length, 1, "the SAME plan_sha/files_digest means the prior artifact is REUSED, not re-run — this is the row rank 5 adds");
+    assert.ok("plan_sha" in reused[0] && "files_digest" in reused[0], "the row carries the key a reader would join recon.invalidated against");
+    assert.equal(ledger2.filter((l) => l.step === "recon.absent").length, 0);
+    assert.equal(ledger2.filter((l) => l.step === "recon.invalidated").length, 0, "reused and invalidated are mutually exclusive on the same dispatch");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T2383 (rank 5, Q3): recon.reused/absent/invalidated logging adds no timer — the branch that decides them runs synchronously before any spawn", () => {
+  const from = runTaskSrc.indexOf('log("recon.reused"');
+  const to = runTaskSrc.indexOf('log("recon.absent"', from);
+  assert.ok(from > 0 && to > from);
+  const region = runTaskSrc.slice(from - 400, to + 200);
+  assert.equal(/setTimeout|setInterval/.test(region), false, "the reuse/absent/invalidated decision itself never paces or sleeps");
 });
