@@ -246,6 +246,40 @@ jobs:
           node-version-file: .nvmrc
       - name: Install (clean, from lockfile)
         run: npm ci
+      - name: Determine this diff's fast-lane class (W1-T2428 — a PLAN_ONLY/DOCS_ONLY diff cannot move source coverage)
+        # THE CLASS COMES FROM THE REAL PREDICATE, NEVER A FOURTH REIMPLEMENTATION.
+        # scripts/diff-class.mjs imports isInPlanScope straight from src/lib/plan-architect.ts —
+        # see that script's own header and plan/tasks.d/W1-T2428-*.yaml's rationale (Q1: two of
+        # the repo's three existing scope predicates already disagree; a bash reimplementation
+        # here would be a fourth). FAIL CLOSED, TWICE OVER: the script itself never throws (an
+        # unreadable/empty/malformed input already resolves to SOURCE internally — see its own
+        # module doc), and this step ALSO clamps whatever reaches stdout to the three known
+        # tokens and defaults to SOURCE on anything else — so even a `node`/`tsx` invocation that
+        # cannot start at all still leaves CLASS=SOURCE, never an empty or garbage value a later
+        # step's bash `[ "$CLASS" = ... ]` could misread. On a push (no PR base to diff against)
+        # changed-files.txt is deliberately left empty, which the script's own empty-list rule
+        # already resolves to SOURCE — no separate push-vs-PR branch needed here.
+        # STEP-LEVEL BASH, NEVER A YAML `if:` — this job must keep registering a check run
+        # unconditionally (test/diff-coverage.test.ts asserts its body carries no `if:` at all,
+        # the #729/skipped-check-deadlock discipline this task's rationale, Q4, cites); the class
+        # this step computes is READ by bash guards in the steps below, not gated behind one.
+        id: classify
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+            git diff --name-only "${BASE_SHA}"...HEAD > changed-files.txt || true
+          else
+            : > changed-files.txt
+          fi
+          CLASS="$(node --import tsx scripts/diff-class.mjs --changed-files changed-files.txt 2>diff-class.log)" || CLASS="SOURCE"
+          case "$CLASS" in
+            PLAN_ONLY|DOCS_ONLY|SOURCE) ;;
+            *) CLASS="SOURCE" ;;
+          esac
+          cat diff-class.log || true
+          echo "class=${CLASS}" >> "$GITHUB_OUTPUT"
+          echo "W1-T2428 fast-lane: this diff classifies as ${CLASS}."
       - name: Install Playwright's Chromium (same requirement as the ci job — W1-T153's shell a11y/responsive tests launch a real headless browser; this job runs the same test/**/*.test.ts glob under coverage, so it needs it too)
         # Same step as the `ci` job's above, and the same reason: see that step's comment for the
         # measurement behind dropping `--with-deps`. Fixing one copy and not the other leaves the
@@ -284,6 +318,12 @@ jobs:
         # once -- zero behavior change from before this task.
         run: |
           [ "${GITHUB_EVENT_NAME}" = "pull_request" ] || { echo "W1-T1033: coverage-ratchet is PR-only; skipping the real test-with-coverage run on a ${GITHUB_EVENT_NAME} event (see this job's own comment above)."; exit 0; }
+          CLASS="${{ steps.classify.outputs.class }}"
+          if [ "$CLASS" != "SOURCE" ]; then
+            echo "W1-T2428 fast-lane: class=${CLASS} — skipping Test with coverage (no src/**/test/** path in this diff, so coverage cannot newly move)."
+            echo "- W1-T2428 fast-lane: class=${CLASS} — skipped **Test with coverage** (no src/**/test/** path in this diff)" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           # W1-T1217: `--import ./test/setup/tmp-hygiene.ts` is NOT optional here and its absence
           # was a real divergence, not a saving. The `ci` job runs this same
           # `test/**/*.test.ts` glob through `npm run test:ci`, whose script DOES carry that
@@ -313,6 +353,12 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           [ "${GITHUB_EVENT_NAME}" = "pull_request" ] || { echo "W1-T1033: coverage-ratchet is PR-only; skipping on a ${GITHUB_EVENT_NAME} event — BASE_SHA is empty here and would fail this diff."; exit 0; }
+          CLASS="${{ steps.classify.outputs.class }}"
+          if [ "$CLASS" != "SOURCE" ]; then
+            echo "W1-T2428 fast-lane: class=${CLASS} — skipping the base...head diff computation (Diff coverage below has nothing to check)."
+            echo "- W1-T2428 fast-lane: class=${CLASS} — skipped **Compute this PR's base...head diff**" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           git diff "${BASE_SHA}"...HEAD > pr.diff
       # RMD_CI_REPORT is set per-STEP on these two gate steps ONLY, never at job level: the coverage
       # collection step above runs the whole suite, and test/{diff-coverage,coverage-ratchet}.test.ts
@@ -325,12 +371,24 @@ jobs:
           RMD_CI_REPORT: "1"
         run: |
           [ "${GITHUB_EVENT_NAME}" = "pull_request" ] || { echo "W1-T1033: coverage-ratchet is PR-only; skipping on a ${GITHUB_EVENT_NAME} event (no pr.diff was computed above)."; exit 0; }
+          CLASS="${{ steps.classify.outputs.class }}"
+          if [ "$CLASS" != "SOURCE" ]; then
+            echo "W1-T2428 fast-lane: class=${CLASS} — skipping Diff coverage (no pr.diff was computed above; no src/**/test/** path in this diff to check)."
+            echo "- W1-T2428 fast-lane: class=${CLASS} — skipped **Diff coverage**" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           node scripts/diff-coverage.mjs --lcov coverage/lcov.info --diff pr.diff
       - name: Coverage ratchet (blocks a PR whose branch coverage is below the absolute floor)
         env:
           RMD_CI_REPORT: "1"
         run: |
           [ "${GITHUB_EVENT_NAME}" = "pull_request" ] || { echo "W1-T1033: coverage-ratchet is PR-only; skipping on a ${GITHUB_EVENT_NAME} event (no coverage/lcov.info was collected above)."; exit 0; }
+          CLASS="${{ steps.classify.outputs.class }}"
+          if [ "$CLASS" != "SOURCE" ]; then
+            echo "W1-T2428 fast-lane: class=${CLASS} — skipping Coverage ratchet (no coverage/lcov.info was collected above; no src/** path in this diff can move the aggregate)."
+            echo "- W1-T2428 fast-lane: class=${CLASS} — skipped **Coverage ratchet**" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           node scripts/coverage-ratchet.mjs --lcov coverage/lcov.info --baseline scripts/coverage-baseline.json
 
   mutation-ratchet:
