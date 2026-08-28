@@ -1,0 +1,173 @@
+- id: W1-T2441
+  title: "EVERY FIX SPAWN IN ONE DAEMON RUN SHARES A WORKER HOME THAT ANY ONE OF THEM DELETES ON EXIT — `fixArgs` began passing `runId` at src/run-task.ts:7779, `perRunWorkerHomeDir` keys the home on it rather than on the spawn, and worker.ts:1178 rmSyncs that shared directory in a `finally` on EVERY exit path, so a sibling still running loses its HOME mid-flight: 55 child SIGKILLs since a hard onset at 2026-08-25T20:20:35.634Z against zero in the 402,824 union rows before it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 25.00
+  files: [src/lib/worker.ts, src/lib/worker-home.ts, test/worker-home-reap-visibility.test.ts]
+  origin: "operator-brief#shared-fix-worker-home-2026-08-28"
+  plan_refs: ["W1-T170", "W1-T2261", "W1-T2407", "W1-T1064", "W1-T115", "W1-T131"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE ID. Eight surfaces swept at base d69e5441, anchored `W1-T2441([^0-9]|$)` with a `[0-9]`
+    class and never `\d`. SURFACE 1 READS 1: `refs/rmd-id/W1-T2441` resolves against 557
+    `refs/rmd-id/*` refs on origin, with neighbours W1-T2439/W1-T2440 reading 2 as the control that
+    the ref surface is populated and the anchor discriminates. Shard filenames 0 of 687 and
+    declared `- id:` lines 0 of 942, both controlled on W1-T2428 = 1. The open-PR surfaces
+    (titles CASE-SENSITIVE, bodies, head branches) and the merged surfaces (trailers, subjects) are
+    recorded in the PR body rather than here, because the open set had to be enumerated first over
+    REST under a structural guard and that enumeration is a fact about the moment of filing, not
+    about this task. Merged trailers and merged subjects are MERGED-ONLY surfaces whose zeros are
+    coverage, never evidence.
+
+    ── THE DEFECT, BY SYMBOL ──────────────────────────────────────────────────────────────────
+
+    (1) `spawnWorker` DECLARES the invariant this breaks, in its own doc at src/lib/worker.ts:920:
+    "`env.home` -> a worker-home dir UNIQUE to this call (W1-T170: `perRunWorkerHomeDir`,
+    preferring `args.runId` when supplied), materialized fresh and reaped in a `finally`
+    regardless of outcome — the pre-W1-T170 singleton `<root>/worker-home` does not survive two
+    overlapping spawns (WS-2)." UNIQUE TO THIS CALL is the property that is now false.
+
+    (2) `perRunWorkerHomeDir` (src/lib/worker-home.ts:549) returns `${workerHomeRoot}-${id}` where
+    `id` is `runId` when non-empty and a fresh `randomUUID()` otherwise. Keyed on the RUN, the
+    directory is unique per run — not per call. Two fix spawns inside one daemon run receive the
+    SAME path.
+
+    (3) src/lib/worker.ts:952 binds it: `const workerHome = perRunWorkerHomeDir(workerHomeRoot,
+    args.runId);` — and src/lib/worker.ts:1178, inside the outer `finally`, runs
+    `reapWorkerHome(workerHomeRoot, workerHome);`, which `rmSync(target, {recursive: true, force:
+    true})`s the directory (worker-home.ts:587). The comment above it says the reap covers "every
+    exit path, including a thrown error", which is exactly the property that makes this fire: the
+    FIRST sibling to finish, for any reason, deletes the home the others are still living in.
+
+    (4) `fixArgs` (src/run-task.ts:7756) began supplying `runId: opts.runId` at src/run-task.ts:7779
+    in commit 51db5367 (#2862, W1-T2261, merged 2026-08-25T18:58:53Z). That commit's purpose was
+    the reclaim marker, not the home; the home change is a downstream consequence of the same
+    field. BEFORE it, `args.runId` was absent on this path and the `randomUUID()` branch gave every
+    spawn its own directory, satisfying the invariant by accident.
+
+    ── ONSET AND RATE, RE-DERIVED RATHER THAN CARRIED ─────────────────────────────────────────
+
+    MEASURED over the three-form union at the CONFIG ROOT (`/home/craigoleyagent/rmd-state2/state`,
+    never the checkout's `state/`): 0 `.gz`, 43 plain rotations, 1 live, 529,897 rows parsed with
+    zero unparseable. The population is `step == "sweep.fix.error"` carrying "terminated by signal
+    SIGKILL" — NOT a bare SIGKILL substring, which over the same union reads 231 rows and sweeps in
+    `anchor.built`, `report.followups`, `followup.harvested`, `sweep.dispose` and `sweep.disposed`
+    prose that is not a child death at all.
+
+      child SIGKILLs                55
+      first                         2026-08-25T20:20:35.634Z
+      last                          2026-08-28T13:25:16.861Z
+      span                          2.71 days -> 20.3 per day
+      union rows before the first   402,824, carrying ZERO
+      distinct run_ids              20, of which 10 carry three or more
+
+    THE OPERATOR BRIEF SAID 13.8 PER DAY AND THIS SHARD SAYS 20.3. Both are honest readings of a
+    moving window; the rate has risen since the brief was written, and the figure to act on is the
+    one with its window named. It is STILL HAPPENING: the last kill is 2026-08-28T13:25:16.861Z.
+
+    ── THE BISECT, JOINED THROUGH daemon.boot.head_sha ────────────────────────────────────────
+
+    Last clean `fix.dispatch` at 19:15:15.926Z under head `2df515ca`; first killed run booted at
+    19:19:27.295Z under head `b6bd43ea`. FIFTY-TWO MINUTES WIDE. Seven commits in range, three
+    touch source, and exactly ONE touches the worker spawn — 51db5367 above.
+
+    ── ALTERNATIVES RULED OUT, WITH THE CONTROL THAT RULED EACH OUT ───────────────────────────
+
+    Recorded so nobody re-runs them.
+
+    (a) AN SDK BUMP. 0.3.233 -> 0.3.241 lands roughly 41 hours LATE relative to the onset, so it
+    cannot be upstream of it.
+
+    (b) AN INSTALL IN THE WINDOW. `daemon.install_freshness` carries 11 rows all-time. The last
+    BEFORE the onset is 2026-08-22T21:09:10.637Z and the first at-or-after is
+    2026-08-26T07:28:48.617Z, so the onset falls strictly inside that gap and the bisect window
+    holds ZERO rows. `rmd-op/node_modules` has mtime 2026-08-22 21:10:48, ninety-eight seconds
+    after that last pre-onset freshness row and three days before the onset. NO INSTALL RAN.
+    (A naive "largest gap over all rows" query answers 87.7h at 08-15 -> 08-19 and is the WRONG
+    QUESTION — the gap that matters is the one CONTAINING the onset, not the biggest one.)
+
+    (c) A CLAUDE CODE AUTO-UPDATE. `DISABLE_AUTOUPDATER=1` is present in the live daemon process
+    environment, read from `/proc/<pid>/environ`. RECORDED AS A DIVERGENCE RATHER THAN SMOOTHED:
+    the brief states the container is pinned at 2.1.220, and `claude --version` ON THE HOST reads
+    2.1.226. Those are two different surfaces and this shard read the host one; the container's own
+    pin was NOT read here and is not claimed either way.
+
+    (d) MEMORY PRESSURE. The brief records cgroup `oom_kill` at 0 with `Memory=max` and
+    `RestartCount=2`. NOT RE-READ HERE — the cgroup file is not reachable over the ssh surface this
+    shard was written from, so it is carried as the brief's reading and marked unverified, never as
+    this shard's own measurement.
+
+    (e) W1-T2261'S OWN RECLAIM KILL. Ruled out by that task's OWN new instrumentation, which is the
+    cleanest control available: `fix.spawn_reclaimed` reads 0 rows and `fix.spawn_reclaim_no_match`
+    reads 0 rows over the full union. The reclaim path never fired, so it killed nothing.
+
+    ── CORROBORATION ON DISK AND IN THE BURST SHAPE ──────────────────────────────────────────
+
+    BOTH BRANCHES OF `perRunWorkerHomeDir` ARE LIVE RIGHT NOW. The config root holds three worker
+    homes: two named by UUID (`worker-home-19a95c78-...`, `worker-home-1acbb8f0-...`, the
+    no-runId branch) and one named by run (`worker-home-DAEMON-1787887636875`, the runId branch).
+
+    THAT DAEMON-NAMED HOME IS THE EXHIBIT. Its mtime is 2026-08-28 04:31:56.241Z. The LAST child
+    SIGKILL on that same run is 2026-08-28T04:31:48.923Z — the directory was written 7.3 SECONDS
+    AFTER the kill, and it still holds the child's whole HOME: `.claude/`, `.claude.json`,
+    `.gitconfig`, `.bashrc`, `.cache`. Something was still using it after a sibling died in it.
+
+    THE KILLS BURST. The tightest three-kill window on a single `run_id` is 721 MILLISECONDS —
+    `DAEMON-1787921830251`, 13:25:16.140Z to 13:25:16.861Z. No per-worker OOM and no per-worker
+    deadline produces three deaths inside three quarters of a second; a single shared resource
+    disappearing underneath all three does.
+
+    ── THE FALSIFIER IS UNCLOSED, AND THAT IS WHY THE FIRST BUILD IS INSTRUMENTATION ──────────
+
+    THE FALSIFIER: a `worker-home-DAEMON-<runid>` removal OBSERVED racing a live sibling spawn —
+    a reap and a still-running child on the same path, both timestamped. Everything above is
+    consistent with it and none of it IS it.
+
+    IT IS NOT CHECKABLE TODAY, for two reasons that are themselves the work:
+      (i)  `reapWorkerHome` ALREADY COMPUTES the answer. worker-home.ts:573 declares
+           `WorkerHomeReapResult` as `{reaped, target, reason}` and worker-home.ts:587 returns it
+           populated on all four arms — `guard-rejected`, `absent`, reaped-true, and a caught
+           error. src/lib/worker.ts:1178 CALLS IT IN STATEMENT POSITION AND DISCARDS THE RESULT.
+           `grep -acE "=\s*reapWorkerHome\(" src/lib/worker.ts` reads 0: nothing anywhere assigns
+           it. The one fact needed — WHICH path was removed, WHEN, and by which spawn — is
+           computed and thrown away.
+      (ii) The daemon's own stdout is not on disk. `state/logs/daemon.out.log` does not exist at
+           the config root, so there is no second surface to reconstruct it from.
+
+    SO THE FIRST BUILD IS INSTRUMENTATION, NOT THE FIX. Surface the discarded
+    `WorkerHomeReapResult` at the call site and make the reap observable with its target, its
+    reason and its spawn identity. Then the falsifier becomes a query rather than a guess.
+
+    ⚠ DO NOT SHIP THE REMEDY IN THIS TASK. Do not make the home unique again, do not add locking,
+    and do not refcount spawns. A defect fix shipped inside instrumentation destroys the evidence
+    that would have proved it was the right fix — and the operator has NOT RULED on the remedy.
+    The instrumentation must leave the defect firing.
+
+    ── OWNED ELSEWHERE, SO THIS TASK DOES NOT CLAIM IT ────────────────────────────────────────
+
+    The spawn marker (`runId`/`taskId` on `fixArgs`) is W1-T2261's and stays as it is. The orphan
+    sweep is W1-T2407's: `worker_orphan_killed` reads 3 rows ALL-TIME and each lands AFTER its own
+    run's kills, so it is sweeping debris rather than causing it. The other two failure classes
+    inside `sweep.fix.error` — the GraphQL rate-limit refusal and the rest — are their own task and
+    are not in scope here.
+
+    RISK BAND. `risk: high` is set UP FRONT and the band is RULE 19'S SPAN, NOT BLAST RADIUS: the
+    `files:` list reaches two source modules (`src/lib/worker.ts` and `src/lib/worker-home.ts`)
+    because the value is computed in one and discarded in the other, and Rule 19 sizes on that
+    span regardless of how small the change is. A note for the builder: the new observability is
+    NOT read by any decision, so it does not belong in `DECISION_RELEVANT_LEDGER_STEPS` and adding
+    it there would widen the span for nothing.
+  acceptance:
+    - claim: "the reap result is no longer discarded at the call site"
+      proof: "unit test: test/worker-home-reap-visibility.test.ts"
+    - claim: "the removed target and the reason it was removed are both observable"
+      proof: "unit test: test/worker-home-reap-visibility.test.ts"
+    - claim: "the reap remains best-effort and still never throws on any arm"
+      proof: "unit test: test/worker-home-reap-visibility.test.ts"
+    - claim: "no remedy ships here — the home is still keyed on the run and the defect still fires"
+      proof: "unit test: test/worker-home-reap-visibility.test.ts"
