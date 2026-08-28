@@ -24404,6 +24404,55 @@ export function fixHeadAcceptable(head: string | undefined, taskId: string, synt
 }
 
 /**
+ * WHY a fix dispatch just declined an uncreditable head, as ONE aggregatable token.
+ *
+ * `sweep.fix.uncreditable_head` recorded `head`/`synthetic` and no reason at all, so telemetry
+ * could not tell whether a run of declines was ONE cause or several: reading `head` alone cannot
+ * distinguish a well-formed run branch that claims the WRONG task (`run-W1-T172-<epochMs>`,
+ * refused for a different id — two of the seven rows this host's ledger has ever recorded) from
+ * one that is not a run branch at all, because the row does not carry the task id being fixed.
+ * Both read as "an odd branch name" and neither is actionable.
+ *
+ * DELIBERATELY A SECOND, INDEPENDENT DERIVATION rather than a value threaded out of
+ * {@link fixHeadAcceptable}: it consults that predicate as an ORACLE first and reports
+ * `"unclassified"` — never a guess — whenever the predicate says the head IS acceptable and this
+ * classifier therefore has no refusal to explain. That is the catch-all's whole purpose: it is
+ * reachable ONLY when the two disagree, so a future change to `fixHeadAcceptable` that this
+ * function is not taught about surfaces in telemetry as an honest "unattributed" rather than as a
+ * confidently wrong cause. It is named to read that way on a dashboard.
+ *
+ * The reasons, exhaustive over today's predicate:
+ *   - `head_unresolved`    — `gh pr view` resolved no `headRefName`. The SAME `!head` case the
+ *                            predicate's own first guard refuses, and the one the call site's
+ *                            `!realBranch` arm reaches without ever calling the predicate.
+ *   - `foreign_run_branch` — the head IS `run-<id>-<epochMs>` ({@link isDispatchedRunBranch}) but
+ *                            not THIS task's own. Reachable under BOTH `synthetic` values, and the
+ *                            only one reachable when `synthetic` is true: a synthetic PR whose head
+ *                            claims some other task is MIS-TRAILERED, not task-less.
+ *   - `not_a_run_branch`   — the head is not run-shaped at all (`fix/…`, `feat/…`). Reachable ONLY
+ *                            when `synthetic` is false, because the predicate ACCEPTS exactly this
+ *                            shape for a synthetic PR — so a `not_a_run_branch` row carrying
+ *                            `synthetic: true` is by construction impossible and would itself be a
+ *                            signal worth reading.
+ *   - `unclassified`       — see above. Never a real cause.
+ *
+ * Pure, synchronous, no clock and no I/O — unit-testable against the same fixtures
+ * `fixHeadAcceptable`'s own tests use. Changes NOTHING about WHEN the rung declines: the call
+ * site's guard is untouched and this runs only after that guard has already fired.
+ */
+export type UncreditableHeadReason = "head_unresolved" | "foreign_run_branch" | "not_a_run_branch" | "unclassified";
+
+export function uncreditableHeadReason(
+  head: string | undefined,
+  taskId: string,
+  synthetic: boolean,
+): UncreditableHeadReason {
+  if (!head) return "head_unresolved";
+  if (fixHeadAcceptable(head, taskId, synthetic)) return "unclassified";
+  return isDispatchedRunBranch(head) ? "foreign_run_branch" : "not_a_run_branch";
+}
+
+/**
  * W1-T2402: does `e` — whatever `dispatchFix`'s catch just caught — carry a SIGNAL TERMINATION,
  * and if so what is known about what the killed spawn spent? Read STRUCTURALLY off the error
  * object's own `signal`/`costUsd` properties, never by string-matching the free-text `.message`
@@ -25091,7 +25140,17 @@ export function buildSweepEffects(
         if (synthetic) log("sweep.fix.synthetic_task", { pr_number: pr.prNumber, task_id: task.id });
         const realBranch = headRef.headRefName;
         if (!realBranch || !fixHeadAcceptable(realBranch, task.id, synthetic)) {
-          log("sweep.fix.uncreditable_head", { pr_number: pr.prNumber, head: realBranch, synthetic });
+          // The guard above is UNCHANGED — this decides nothing, it only explains the decline
+          // that already happened. `reason` matches the field `sweep.fix.not_open` already uses
+          // for the same purpose (its own value comes from the pure `terminalStateReason`), so
+          // this introduces no new telemetry convention; the value is an enumerated token rather
+          // than that row's free prose because this one has to aggregate.
+          log("sweep.fix.uncreditable_head", {
+            pr_number: pr.prNumber,
+            head: realBranch,
+            synthetic,
+            reason: uncreditableHeadReason(realBranch, task.id, synthetic),
+          });
           return;
         }
         worktreePath = join(worktreesDir(config), `sweep-${task.id}-${Date.now()}`);
