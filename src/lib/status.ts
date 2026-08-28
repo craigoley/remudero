@@ -2897,6 +2897,83 @@ function hasAnchoredTrailer(body: string | undefined, taskId: string): boolean {
   return new RegExp(`^Remudero-Task:\\s*${escapeRegExp(taskId)}\\s*$`, "m").test(body);
 }
 
+// ── W1-T2429 — A BUILD ON AN UNCLAIMED BRANCH IS INVISIBLE FOR THE WHOLE TIME A PR IS OPEN ─────
+
+/**
+ * W1-T2429 — which shape of run-branch-claim gap {@link runBranchClaimGap} found, if any.
+ *
+ * `"merged-untraced"` — the PR already MERGED and its anchored trailer already credited the
+ * task ({@link creditsByAnchoredTrailer}'s `!branchClaimsOtherTask` path — the merge itself was
+ * NEVER broken, per this shard's own rationale), but the head branch it merged from was never
+ * one of the three accepted claim forms while the PR was open. Reporting this is what makes the
+ * gap leave a TRACE after the fact; today it merges clean and leaves none.
+ *
+ * `"open-unattributable"` — the PR is still OPEN, carries the anchored trailer, and its head is
+ * not one of the three accepted forms. `projectPlan` attributes an open PR to a task by
+ * `/^run-(.+)-\d+$/` on `headRefName` alone ({@link taskIdFromRunBranch}) and nothing else, so
+ * this PR matches none of it: no `pr.opened` line is ever written for it, and a second dispatch
+ * of the same task stays admissible until it merges.
+ */
+export type RunBranchClaimGapKind = "merged-untraced" | "open-unattributable";
+
+/** W1-T2429 — one PR's run-branch-claim gap, named and nothing else. */
+export interface RunBranchClaimGap {
+  kind: RunBranchClaimGapKind;
+  taskId: string;
+  prNumber: number;
+  prUrl: string;
+  headRefName?: string;
+}
+
+/**
+ * W1-T2429 — DETECTION, AND NOTHING ELSE (rationale §5: no enforcement surface is presumed by
+ * this shard's `files:`). Does `pr` carry `taskId`'s anchored trailer on a head branch that
+ * claims the task in NONE of the three accepted forms?
+ *
+ * A PLAN FILING NAMES NOTHING (acceptance 3). {@link hasAnchoredTrailer} is the FIRST gate here,
+ * exactly as it is {@link creditsByAnchoredTrailer}'s first gate: a filing's body never carries a
+ * `Remudero-Task:` line at all (`plan-pr-emitter.ts` omits the trailer for a filing PR, and the
+ * 2026-07-30 ruling's own doc distinguishes a filing from a build on this exact basis), so this
+ * returns `undefined` before the head branch is ever inspected. A PR that only MENTIONS the id in
+ * loose prose without the anchored line is refused the same way — this is not
+ * {@link indexProseNamedTaskIds}'s fuzzy scan.
+ *
+ * OWNERSHIP IS RE-USED, NEVER RE-DERIVED (acceptance 4). {@link ownsOwnRunBranch} is the exact
+ * three-form test ({@link ownsBranch}, {@link isBareRunBranch}, {@link isOwnedSlugBranch})
+ * {@link creditsByAnchoredTrailer} and {@link corroboratesForwardProgress} already call — nothing
+ * here widens or narrows what "claims the branch" means, so a head that claims the task in any
+ * accepted form reads `undefined` exactly as it reads "owned" on every other rung.
+ *
+ * A MERGED PR IS STILL CREDITED (acceptance 1 REPORTS, it never DENIES): the merge credit path is
+ * {@link creditsByAnchoredTrailer}'s `!branchClaimsOtherTask` check, left completely untouched by
+ * this function — a `"merged-untraced"` result is a trace of the gap, not a refusal of the credit
+ * that already happened.
+ *
+ * CLOSED-UNMERGED IS OUT OF SCOPE: neither credit path this shard reports on (merge-trailer
+ * credit, open-PR dispatch visibility) applies to a closed, unmerged PR, so this reads `undefined`
+ * for one.
+ *
+ * PURE (acceptance 6): reads only fields already present on `pr` — no network call, no file-list
+ * fetch, no ledger walk, no `taskId` lookup beyond the one passed in.
+ *
+ * NEVER CONSULTED BY DISPATCH (acceptance 5): unlike {@link openSiblingBuild} this is not wired
+ * into `projectPlan`/`StatusProjection`, `drain.ts`, `worker.ts` or `run-task.ts` — this shard's
+ * own `files:` names only this stem and its test; wiring a consumer that acts on the report is,
+ * per the rationale, a separate filing.
+ */
+export function runBranchClaimGap(pr: PrRef, taskId: string): RunBranchClaimGap | undefined {
+  if (!hasAnchoredTrailer(pr.body, taskId)) return undefined;
+  if (ownsOwnRunBranch(pr.headRefName, taskId)) return undefined;
+  const state = pr.state.toUpperCase();
+  if (state === "MERGED") {
+    return { kind: "merged-untraced", taskId, prNumber: pr.number, prUrl: pr.url, headRefName: pr.headRefName };
+  }
+  if (state === "OPEN") {
+    return { kind: "open-unattributable", taskId, prNumber: pr.number, prUrl: pr.url, headRefName: pr.headRefName };
+  }
+  return undefined; // CLOSED (unmerged): no credit path either way — nothing to report
+}
+
 /**
  * PLAN-ONLY-FILING REFUSAL (W1-T1004) — was `prUrl` opened by a plan-only FILING run (the
  * retro/triage/`rmd plan` flows), per THAT run's own positive ledger record, never inferred
