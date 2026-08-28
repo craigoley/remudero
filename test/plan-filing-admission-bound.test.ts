@@ -51,9 +51,15 @@ test("W1-T2439 (acceptance 1): buildOpenPrViews assigns isPlanFiling from the le
 
 test("W1-T2439 (acceptance 1, control): the KNOWN_UNWIRED entry is removed, not left in place", () => {
   const allow = readFileSync(new URL("../src/lib/producer-completeness.ts", import.meta.url), "utf8");
+  // Strip comments before asserting: the mechanism this test pins is that `isPlanFiling` is no
+  // longer a LIVE key of the KNOWN_UNWIRED object literal (that is what the completeness audit
+  // actually reads) -- not that some comment nearby happens to say a sentence. A comment-only
+  // match would be satisfiable by prose alone, never by the audit's own code path.
+  const withoutComments = allow.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
   const entry = /^\s{2}isPlanFiling:\s*$/m.test(allow) || /^\s{2}isPlanFiling:\s*"/m.test(allow);
   assert.equal(entry, false, "the field is wired, so its allowlist entry must be gone (this file's own rule)");
-  assert.match(allow, /isPlanFiling WIRED by W1-T2439/, "and the removal must say what wired it");
+  assert.ok(!/\bisPlanFiling\s*:/.test(withoutComments),
+    "isPlanFiling must not appear as a live key anywhere in KNOWN_UNWIRED once comments are stripped");
 });
 
 // ── acceptance 2: the cheap lane admits more than one ───────────────────────────────────────
