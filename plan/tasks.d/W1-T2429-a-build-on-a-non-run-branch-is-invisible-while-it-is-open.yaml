@@ -1,0 +1,132 @@
+- id: W1-T2429
+  title: "A BUILD THAT PUSHES ITS OWN BRANCH NAME IS INVISIBLE TO DISPATCH FOR THE WHOLE TIME IT IS OPEN — `projectPlan` attributes an OPEN PR to a task by `/^run-(.+)-\\d+$/` on `headRefName` and by nothing else, so a build landing on `feat/…`, `fix/…` or `chore/…` writes no `pr.opened`, `isOpenPr` cannot see it, and a second dispatch of the same task is admissible until the PR merges; the merge itself is credited normally by the anchored trailer, which is exactly why the gap leaves no trace after the fact"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 20.00
+  files: [src/lib/status.ts, test/run-branch-claim-is-unenforced.test.ts]
+  origin: "operator-request#fleet-branch-naming-gap-2026-08-28"
+  plan_refs: ["W1-T2427", "W1-T2426", "W1-T377", "W1-T378", "W1-T447", "W1-T1076"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE ID. Eight surfaces swept before a byte of this file was written, each against a control drawn
+    from the ENUMERATED OPEN SET (#3173, #3170, #3168, #3166, #3164, #3160), anchored
+    `W1-T2429([^0-9]|$)` with a `[0-9]` class and never `\d`. SURFACE 1 READS 1: `refs/rmd-id/W1-T2429`
+    resolves on origin against a namespace of 542 refs, with W1-T2428 and W1-T2414 both firing 1 there.
+    Shard filenames 0 of 845; declared ids 0 of 929; open-PR titles 0 of 5; open-PR bodies 0 of 292
+    lines; remote head refs 0 of 147, checked BOTH case-sensitively and case-insensitively; merged
+    trailers 0 of 38 trailer lines; merged subjects 0 of 400.
+
+    ONE CONTROL FAILED AND WAS RE-PICKED, WHICH IS THE EVIDENCE THAT THE REST FIRED. On open-PR TITLES
+    the first control (W1-T2414, open as #3166) reads 0 — because that PR's TITLE carries no id at all,
+    not because the surface is unreadable. Re-picked to ids actually present in an open title: W1-T2423,
+    W1-T2425 and W1-T1070 each fire 1, and the lowercase form `w1-t2423` correctly reads 0, confirming
+    the sweep is case-sensitive as intended. On bodies W1-T2428 fires 8 and W1-T2414 fires 3; on head
+    refs W1-T2414 fires 1 while `w1-t2428` fires 0 case-sensitively and 1 case-INsensitively, so this id
+    was checked both ways. Trailers and subjects are MERGED-ONLY surfaces — W1-T2426 and W1-T2427 fire
+    there — so this id's zero on them is structural. ANCHOR-LEAK PROBE on a POPULATED band: `W1-T242`
+    reads anchored 1 against unanchored 6 on declared ids, so the anchor discriminates.
+
+    (1) THE MECHANISM, BY SYMBOL, AND IT IS NARROWER THAN "THE FLEET NAMES BRANCHES WRONG".
+    `run-task.ts` MINTS THE CORRECT NAME on every push path it owns — `const branch = ` + "`run-${runId}`"
+    appears at six sites (9903, 17367, 26685, 27269, 27596, 28019). The convention is not broken where
+    the orchestrator writes it. WHAT IS MISSING IS ENFORCEMENT: a worker whose AGENT pushes its own
+    branch bypasses those paths entirely, and `git grep` for any branch-shape check in
+    `src/lib/worker.ts` returns NOTHING. The convention is UNENFORCED PROSE, the exact category
+    CLAUDE.md opens by naming — a rule that binds only because someone read it.
+
+    THE CONSEQUENCE IS ASYMMETRIC BETWEEN OPEN AND MERGED, AND THAT ASYMMETRY IS WHY IT HIDES.
+    For a MERGED PR the branch name vetoes nothing: the 2026-07-30 operator ruling
+    (`isOwnedSlugBranch`'s own doc, `status.ts`) says a branch carrying no task claim at all —
+    "`feat-*`, `fix/*`, `w1-t235-worker-keychain`, …" — vetoes no trailer credit. So the task IS
+    credited on merge and nothing looks wrong afterwards. For an OPEN PR there is no trailer path:
+    `projectPlan` matches `/^run-(.+)-\d+$/` on the head ref (`status.ts:2268`) and NOTHING ELSE, and
+    all three accepted claim forms require `run-<taskId>` as a PREFIX — `ownsBranch`
+    (`^run-<taskId>-\d+$`), `isBareRunBranch` (`head === run-<taskId>`) and `isOwnedSlugBranch`
+    (`head.startsWith("run-<taskId>-")`). A `feat/…` head matches none of the three. So the work is
+    invisible for exactly the interval in which invisibility costs something — while it is being built.
+
+    (2) THE COST IS ALREADY MEASURED IN THIS TREE, WHICH IS WHY THIS IS NOT A THEORETICAL FILING.
+    `status.ts`'s own doc above `isMergeCreditLine` records it: a task whose PR lands on a slug-named
+    branch "fails `ownsBranch`'s `run-<taskId>-\d+$`, so no `pr.opened` is ever written, and the task is
+    recorded as MERGED by the credit-backfill and as MAKING NO PROGRESS by this counter at the same
+    time. MEASURED: W1-T377 and W1-T378 both shipped (#1386, #1391), both carry `verdict.merged` from
+    the backfill and `pr.opened` x0, and both ran to exactly 5 dispatches against
+    DEFAULT_MAX_TASK_DISPATCHES before tripping — 10 dispatches re-running finished work." That is the
+    cost when it bites, and it was paid before.
+
+    (3) THE LIVE INSTANCE, AND THE RATE — WHICH IS SMALL, AND SAID PLAINLY RATHER THAN INFLATED.
+    Measured 2026-08-28 over the last 60 merged PRs: 43 of 60 merged on a NON-`run-*` branch, which
+    sounds alarming and is NOT the defect population. Splitting by builder (co-author trailer) and by
+    kind: 6 fleet-authored PRs on non-`run` branches, and FIVE OF THOSE SIX ARE PLAN FILINGS
+    (`chore/plan-file-w1-t2427`, `…2426`, `…2424`, `…2419`, `chore/retire-w1-t2413-…`) where a non-run
+    branch is CORRECT — a filing must not be credited, and naming it `run-…` would claim work it never
+    did. EXACTLY ONE IS A BUILD: #3172, `feat/dedup-stand-downs-name-themselves`, W1-T2427's
+    implementation.
+
+    ⚠ THE CLASSIFIER'S OWN LIMIT, STATED SO THE FIGURE IS NOT OVER-READ: it recognises only two
+    co-author email forms, and 35 of the 59 matched merges fall into neither bucket — some carry a
+    co-author line it did not match, some carry none at all after the squash. SO "SIX FLEET, ONE BUILD"
+    IS A LOWER BOUND, NOT A CENSUS. The remedy must not be sized off it.
+
+    (4) THE INSTANCE COST NOTHING THIS TIME, AND THE REASON IS LUCK, NOT A GUARD. #3172 opened
+    2026-08-28T00:21:59Z, 44 seconds after #3171 opened on a different task, and merged 00:24:06Z — a
+    window of about two minutes. A session was separately briefed to build W1-T2427 during that window
+    and STOPPED, but not because dispatch refused it: the operator's brief happened to require a sweep
+    of open PRs' DECLARED PATHS, and that sweep saw `src/lib/sweep.ts` on both. THE CHECK THAT EXISTS
+    FOR THIS — `git ls-remote --heads origin 'run-<id>-*'` — READ ZERO, because the branch was not
+    `run-*`. The scope-time check and the defect share a blind spot, so the check cannot be the guard
+    against it.
+
+    (5) WHAT THIS TASK DOES NOT DECIDE. Whether the remedy is DETECTION (a report naming a PR whose
+    anchored trailer claims a task while its head claims none — the shape `status.ts` already has the
+    facts for, since `BranchFacts` and the trailer walk both exist) or ENFORCEMENT (refusing or
+    renaming such a push) is an operator ruling, and enforcement has a real cost this shard does not
+    price: the operator's OWN session work is deliberately non-`run` by standing instruction, and 17 of
+    the 59 merges in the window are exactly that. A guard that cannot tell an operator branch from a
+    worker branch would refuse the operator's own convention.
+
+    NO ENFORCEMENT SURFACE IS PRESUMED BY `files:`. `src/lib/worker.ts` and `src/run-task.ts` are the
+    only places a push could be refused or renamed, and BOTH ARE EXCLUDED — declaring either would
+    presume the remedy before the operator has ruled, the shape W1-T466 and W1-T2407 already use.
+    `src/lib/status.ts` plus this task's own test stem covers detection and nothing else; if
+    enforcement is chosen it is a separate filing.
+
+    (6) ALREADY OWNED ELSEWHERE, RECORDED SO THIS DOES NOT RE-FILE IT: the three accepted claim forms
+    and the 2026-07-30 foreign-branch ruling are `status.ts`'s own and are NOT reopened here; the
+    duplicate-title/slug detector is W1-T1076's; branch reaping is W1-T447's. THIS TASK OWNS ONLY THE
+    OPEN-PR ATTRIBUTION GAP FOR A BUILD ON AN UNCLAIMED BRANCH.
+
+    RULE 19 BAND, SET UP FRONT. `risk: high` is the SPAN reading and carries no claim about blast
+    radius: `files:` names two stems as the sizing check counts them, `status` and
+    `run-branch-claim-is-unenforced`, and that pairing is refused at `risk: medium`. The blast radius is
+    the opposite of the band — detection reads facts already gathered and decides nothing.
+  acceptance:
+    - claim: "a merged PR whose trailer claims a task while its head claims none is reported"
+      proof: "unit test: test/run-branch-claim-is-unenforced.test.ts"
+    - claim: "an open PR on an unclaimed branch is named as unattributable to its task"
+      proof: "unit test: test/run-branch-claim-is-unenforced.test.ts"
+    - claim: "a plan filing on a non run branch is never reported, because it claims no task"
+      proof: "unit test: test/run-branch-claim-is-unenforced.test.ts"
+    - claim: "all three accepted claim forms still attribute exactly what they attributed before"
+      proof: "unit test: test/run-branch-claim-is-unenforced.test.ts"
+    - claim: "the report changes no dispatch decision and refuses no push"
+      proof: "unit test: test/run-branch-claim-is-unenforced.test.ts"
+    - claim: "nothing added reads the network or walks the ledger to produce the report"
+      proof: "unit test: test/run-branch-claim-is-unenforced.test.ts"
+  falsifier: |
+    If a sweep of merged PRs finds no BUILD whose anchored `Remudero-Task:` trailer names a task while
+    its head branch matches none of `ownsBranch`, `isBareRunBranch` or `isOwnedSlugBranch` — measured
+    the way this shard measured it, by splitting the population by BUILDER and by KIND rather than
+    counting non-`run` branches, since plan filings correctly use them — then the gap is not being
+    exercised and this task should be closed rather than implemented. The rate measured here is ONE
+    build in fifty-nine, from a classifier that could not attribute thirty-five of them, so a re-run
+    that reads zero is a weak refutation and a re-run that reads several is a strong confirmation.
+
+    SEPARATELY DECISIVE: if `projectPlan` stops attributing an open PR by `/^run-(.+)-\d+$/` on the head
+    ref alone — for instance by consulting the anchored trailer the way the merged path already does —
+    the mechanism described here is gone and the finding must be re-derived rather than trusted.
