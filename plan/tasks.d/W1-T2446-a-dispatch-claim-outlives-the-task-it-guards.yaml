@@ -1,0 +1,182 @@
+- id: W1-T2446
+  title: "A DISPATCH CLAIM OUTLIVES THE TASK IT GUARDS BECAUSE ITS EVIDENCE RELEASE ARM IS WIRED WHERE A MERGED TASK CAN NEVER REACH IT — `decideDispatchClaimRelease`'s evidence arm fires only at `claimOutcome === \"taken\"` (run-task.ts:10524), but the already-merged guard at run-task.ts:10199 returns `task_already_merged` three hundred lines earlier, so the one arm that can drop a stale claim is unreachable in exactly the case it was written for, and W1-T2424's claim survived its own merge until an operator deleted the ref by hand"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 20.00
+  files: [src/run-task.ts, src/lib/status-board.ts, test/dispatch-claim-evidence-reachability.test.ts]
+  origin: "operator-brief#dispatch-claim-outlives-its-task-2026-08-28"
+  plan_refs: ["W1-T2270", "W1-T2397", "W1-T2387", "W1-T2427", "W1-T396", "W1-T1066", "W1-T319", "W1-T1035"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE ID. Eight surfaces swept at base 0cbfdc47, anchored `W1-T2446([^0-9]|$)` with a `[0-9]`
+    class and never `\d`. SURFACE 1 READS 1: `refs/rmd-id/W1-T2446` against 559 refs, control
+    W1-T2444/2445 = 2. Shard filenames 0 of 690 and declared `- id:` lines 0 of 945, control
+    W1-T2444 = 1 on both. Merged trailers 0 of 99 (control 42) and merged subjects 0 of 99
+    (control 57) are MERGED-ONLY surfaces whose zeros are coverage, never evidence.
+
+    ⚠ SURFACES 4, 5 AND 6 ARE VACUOUS, NOT ZERO. The open set was enumerated FIRST over REST under
+    a structural guard and came back a well-formed array of LENGTH 0 — there are no open PRs at
+    all right now. A zero over an empty population carries no information and no control is
+    constructible from it, so it is recorded as VACUOUS rather than as a passed check. (The first
+    fetch returned two bytes and the structural guard REFUSED it rather than reporting three
+    zeros; that refusal is why this row is honest.)
+
+    ── WHAT THE CLAIM IS FOR, AND IT IS NOT WEAKENED HERE ─────────────────────────────────────
+
+    `refs/rmd-dispatch/<taskId>` (`dispatchClaimRef`, src/lib/dispatch-claim.ts:43) is a git-ref
+    CAS that stops TWO LANES DISPATCHING ONE TASK — the double-dispatch this repo has paid for
+    repeatedly. The refusal itself is W1-T2397's and is CORRECT. Nothing in this task loosens the
+    claim, shortens it, or makes it advisory. The question is only what RELEASES it.
+
+    ── Q1: EVERY RELEASE PATH THAT EXISTS TODAY, BY SYMBOL ────────────────────────────────────
+
+    `decideDispatchClaimRelease` (dispatch-claim.ts:114) is PURE and has exactly three arms, in
+    order, with NO time-based expiry — and its own doc explains the refusal of a timer in terms:
+    "a claim that outlives its lane is a visible ref an operator can drop; a claim that expires
+    under a running lane re-opens the exact race this exists to close."
+
+      1. HOLDER   — `heldByThisRun`, i.e. `anchor !== undefined` (`releaseDispatchClaim`,
+                    dispatch-claim.ts:206). Wired at run-task.ts:10593 and run-task.ts:12029.
+      2. EVIDENCE — `evidenceObserved`, the CALLER's own predicate. Wired at exactly ONE site,
+                    run-task.ts:10524, passing `isMerged(task)`.
+      3. OPERATOR — everything else: `git push origin :refs/rmd-dispatch/<id>`.
+
+    WHICH OF THESE CAN A DYING LANE BE RELIED ON TO REACH? NONE OF THEM.
+
+    Arm 1 is a `finally`. A `finally` does not run when the process is SIGKILLed, and this fleet
+    kills fix children routinely — W1-T2441 measures 55 child SIGKILLs since 2026-08-25 on this
+    very daemon container, so "the lane died without unwinding" is the observed common case, not a
+    hypothetical. Arm 3 is a human. Arm 2 is the only automatic path that does not require the
+    dying lane to do anything — and it is the one that cannot fire.
+
+    ── THE DEFECT: ARM 2 IS UNREACHABLE IN EXACTLY THE CASE IT WAS WRITTEN FOR ─────────────────
+
+    Arm 2 is guarded by `if (claimOutcome === "taken")` — it fires ONLY when a SECOND lane attempts
+    the same task's claim and LOSES the CAS. That loser then drops the ref if the task is merged.
+
+    But a merged task never gets that far. `if (isMerged(task))` at run-task.ts:10199 logs
+    `dispatch.refused_already_merged` and RETURNS `task_already_merged` at run-task.ts:10208 —
+    while `claimReserver` is not even constructed until run-task.ts:10504 and the CAS runs at
+    run-task.ts:10506. THE GUARD RETURNS THREE HUNDRED LINES BEFORE THE CLAIM IS TOUCHED.
+
+    So arm 2 can only fire in a race so narrow it is nearly a coincidence: the task must be NOT
+    merged at line 10199 and merged by the time the loser evaluates `isMerged(task)` at 10524. For
+    W1-T2424 — merged that morning as #3192 — the guard refused every later attempt long before
+    the claim was read, and the claim simply stayed.
+
+    THERE IS A SECOND, UNDOCUMENTED REMEDY, and it is worth recording because an operator hunting
+    this will not guess it: `--rerun` sets `opts.rerun`, which takes the `dispatch.rerun_override`
+    branch at run-task.ts:10201 INSTEAD of returning — so a `--rerun` dispatch does reach the CAS,
+    does lose it, and does drop the stale claim through arm 2. `git push origin :<ref>` is the
+    documented remedy; `--rerun` is an accidental one.
+
+    ── Q2: THE CHEAPEST SAFE RELEASE IS NOT A TIMER, AND THE CHECK ALREADY EXISTS ──────────────
+
+    ⚠ NOT PROPOSED: a wall-clock expiry, any pacing (W1-T1066), or auto-dropping a claim on a LIVE
+    task. A timer releases a claim held by a lane that is merely slow, which is the race the claim
+    exists to close.
+
+    THE RIGHT PREDICATE IS ALREADY WRITTEN AND ALREADY FREE. `isMerged(task)` is the SAME
+    projection the guard at 10199 already evaluated — the merge-credit derivation is W1-T2387's,
+    re-used and never re-derived. A CLAIM ON A TASK THAT IS CREDITED MERGED GUARDS NOTHING, which
+    is precisely what arm 2's own doc says: "no liveness question is asked because none can be
+    answered."
+
+    IS THE CHECK AVAILABLE WHERE THE CLAIM IS READ? THE TWO READ SITES ANSWER DIFFERENTLY, AND
+    THAT ASYMMETRY IS THE WHOLE COSTING:
+
+      • THE DISPATCH RUNG (run-task.ts) HAS THE PREDICATE AND NOT THE VISITS. `isMerged(task)` is
+        in scope and already true at line 10199; `claimReserver` is not constructed until 10504,
+        so acting there costs hoisting one `dispatchClaimReserverFor(repoDir)` plus one ref delete
+        — no new probe, no new I/O beyond the delete itself. BUT this rung only ever visits a task
+        someone is actively dispatching, and nothing dispatches a merged task: `isDispatchEligible`
+        (drain.ts) filters it, the daemon's console-kick loop filters it, and this guard refuses
+        it. A drop wired here fires only if something attempts the task again.
+
+      • THE BOARD (status-board.ts) HAS THE VISITS AND NOT THE PREDICATE. `readDispatchClaims`
+        reads the WHOLE namespace in exactly ONE `git ls-remote origin 'refs/rmd-dispatch/*'` on
+        every render, so it visits every claim whether or not anyone is dispatching. But
+        `buildLatchRows` (status-board.ts:1167) receives `root, nowMs, isPidAlive,
+        readSharedPauseState, originMainSha, readDispatchClaims` and NOTHING ELSE — zero
+        merge-credit signals in scope, confirmed by scan. Its caller `buildStatusBoard`
+        (status-board.ts:2276) has none either. The file DOES build
+        `const isMerged: MergedSet = (id) => projections.get(id)?.merged === true` at
+        status-board.ts:1800 and again at :1969 — but in other functions. Threading it in is the
+        same "appended last and optional, so no positional caller shifts" convention
+        `buildLatchRows` already uses TWICE.
+
+    ⚠ AND THE BOARD RENDERS A CLAIM IT NEVER EVALUATES. The row's text is
+    "... is held (holder <h>) with no landed work observed — a new dispatch is refused until an
+    operator drops it". "WITH NO LANDED WORK OBSERVED" IS ASSERTED UNCONDITIONALLY FOR EVERY HELD
+    CLAIM; nothing on that path consults merge credit. For W1-T2424 the work HAD landed, and the
+    board still said it had not. That sentence is the one place the fix is cheapest to make
+    HONEST even if no automatic drop is ever added.
+
+    SO THE DECISION IS A WIRING QUESTION, NOT A NEW MECHANISM: which of the two sites gains the
+    other's property. This shard prices both and DECIDES NEITHER — the board's own doc says it
+    "reads and reports, it never drops anything", and reversing that is an operator call.
+
+    ── Q3: THE POPULATION, MEASURED BEFORE ANYTHING IS PROPOSED ───────────────────────────────
+
+    `git ls-remote origin 'refs/rmd-dispatch/*'` at 2026-08-28T19:52Z returns TWO refs:
+
+      W1-T1269   held 2026-08-28 19:39:50Z   holder pid 1720291@1abc274530a9
+      W1-T2387   held 2026-08-28 19:40:55Z   holder pid 1720291@1abc274530a9
+
+    Neither is credited merged (trailer 0, subject 0 against a 99-PR merged corpus). BOTH ARE HELD
+    BY A LIVE PROCESS: pid 1720291 inside container `1abc274530a9` (`remudero-daemon`, up 2 days)
+    reads `01:39:32` of elapsed time under `ps`. One long-running lane took both claims during its
+    own run, twelve minutes before this reading.
+
+    CONTROLLED BOTH WAYS. POSITIVE — the credit query FINDS the stranded case: W1-T2424 reads
+    trailer 1 and subject 1, against a corpus control of 42 anchored trailers, so the query can see
+    a credited-merged task. NEGATIVE — it does NOT sweep a live claim: both held refs read 0 on the
+    same query, and their holder is demonstrably running.
+
+    ⚠ SO EVERY OTHER CLAIM IS LIVE, AND THAT IS THE HONEST HEADLINE. The observed population of
+    STRANDED claims is ONE, ever, and it is already deleted. THIS IS A RECORD, NOT A RUNG. The
+    defect is real and structural — arm 2 is unreachable by construction, not by accident — but its
+    measured frequency is one, and nothing here justifies building a sweeper.
+
+    A NOTE ON THE LIVENESS CHECK ITSELF, because it demonstrates the premise: this measurement
+    could not resolve pid 1720291 from the ssh host at all — `ps -p 1720291` there returns nothing,
+    because the pid belongs to a different container's namespace. It took `docker exec` into
+    `1abc274530a9` to answer. That is `decideDispatchClaimRelease`'s "cross-host liveness is NOT
+    decidable" (W1-T396) demonstrated rather than asserted, and it is why arm 3 is a person.
+
+    ── WHAT `rmd status` ALREADY GETS RIGHT ───────────────────────────────────────────────────
+
+    THE DETECTION IS ALREADY GOOD AND MUST NOT BE REBUILT. The board named the ref, named the
+    holder, and printed the exact command to drop it — `git push origin :refs/rmd-dispatch/W1-T2424`
+    — which is how the stranding was noticed and fixed at all. W1-T2270 built that row precisely so
+    the "a visible ref an operator can drop" premise would stop being false. THE GAP IS NOT
+    DETECTION. It is that nothing acts on a detection that is already complete, and that one clause
+    of the row's text is asserted rather than evaluated.
+
+    RISK BAND. `risk: high`, set UP FRONT, and the band is RULE 19'S SPAN, NOT BLAST RADIUS.
+    `subsystemsOf` (`src/lib/task-linter.ts`) derives ONE id per `files:` entry via
+    `moduleIdFromPath`, and A TEST FILE'S OWN STEM IS AN ID — so this list reads as THREE concerns
+    (`run-task`, `status-board`, `dispatch-claim-evidence-reachability`), and any list with a test
+    whose stem differs from its source is already ≥2 whatever the change size. `risk: high` is
+    `sizingViolation`'s own early-return exemption, never a claim that this task is dangerous.
+
+    ── OWNED ELSEWHERE, NOT CLAIMED HERE ──────────────────────────────────────────────────────
+
+    The dispatch REFUSAL is W1-T2397's and stays exactly as it is. The merge-credit DERIVATION is
+    W1-T2387's — re-used through `isMerged`, never re-derived here (and note W1-T2387 is itself one
+    of the two tasks currently holding a live claim). The stand-down REASONS are W1-T2427's. This
+    task owns only the reachability of one release arm.
+  acceptance:
+    - claim: "a claim whose task is credited merged is released without an operator"
+      proof: "unit test: test/dispatch-claim-evidence-reachability.test.ts"
+    - claim: "a claim on a task that is not credited merged is never dropped automatically"
+      proof: "unit test: test/dispatch-claim-evidence-reachability.test.ts"
+    - claim: "no wall-clock expiry and no pacing is introduced on any path"
+      proof: "unit test: test/dispatch-claim-evidence-reachability.test.ts"
+    - claim: "the board no longer asserts that no landed work was observed without checking"
+      proof: "unit test: test/dispatch-claim-evidence-reachability.test.ts"
