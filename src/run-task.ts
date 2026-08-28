@@ -5334,6 +5334,13 @@ export interface FixRungOutcome {
   review: ReviewVerdict & { headSha: string; reviewerOutcome: string };
   strikes: number;
   /**
+   * W1-T2403: how many rounds this invocation spent on a RETRIGGER-SHAPED outcome (see
+   * {@link isRetriggerShapedCommit}) rather than an ordinary strike — SEPARATE from `strikes`,
+   * never folded into it. `0` on every outcome this task's own change did not touch (no round
+   * this rung ran was ever classified retrigger-shaped).
+   */
+  retriggers: number;
+  /**
    * W1-T1095 (design note ii — "every termination writes a reason"): a short, ALWAYS-PRESENT
    * machine-legible reason naming why THIS pass ended the way it did — never blank, regardless
    * of `outcome`. Distinct from `standDownReason` (a longer, human-facing sentence set only for
@@ -6531,6 +6538,98 @@ async function spawnFixWorkerBounded(
   }
 }
 
+// ── W1-T2403 — THE RETRIGGER-SHAPED FIX OUTCOME, ACCOUNTED SEPARATELY FROM A STRIKE ────────────
+//
+// MEASURED (this task's own rationale): 11 of 72 commits on fix-touched PRs are RETRIGGER-SHAPED
+// — an empty commit, or a subject naming a known-flaky re-trigger — and 4 of 10 strike-exhausted
+// PRs in that sample carried one before escalating with NO defect fixed. `fixStrikeCap` (below,
+// UNTOUCHED in either direction) exists to stop a rung chasing a real defect forever; a retrigger
+// for a check that is KNOWN flaky is a different thing, and spending a strike on it burns the
+// cap on infrastructure noise, not on the diff. This section classifies a round's own commit(s)
+// and, when EVERY new commit is retrigger-shaped, spends a SEPARATE, capped `retriggers` count
+// instead of `strikes` — bounded by its OWN counter (never a timer: nothing here paces,
+// throttles, or sleeps a call, W1-T1066), the same "bound the REPETITION, not the decision" shape
+// W1-T2345's per-head disposition counter already uses.
+
+/** One round's own new commit — only what {@link isRetriggerShapedCommit} needs. `changedFiles`
+ *  is the number of files that commit touched (0 for an empty commit, `git commit --allow-empty`
+ *  shaped); `subject` is that commit's own subject line, never its body (see the classifier's own
+ *  doc for why body-matching was tried and dropped). */
+export interface FixRoundCommit {
+  changedFiles: number;
+  subject: string;
+}
+
+/**
+ * A commit is RETRIGGER-SHAPED if EITHER (a) it changed ZERO files — an empty commit — OR (b)
+ * its SUBJECT LINE matches `re-?trigger`, or matches `flake|flaky|infra` together with
+ * `ci|check|coverage|run|rerun` — the exact two-arm classifier this task's own rationale states
+ * ("THE CLASSIFIER, STATED BEFORE THE NUMBER"), measured a LOWER BOUND by construction: a fix
+ * that changed one real line for the wrong reason is invisible to it, and so is a retrigger whose
+ * subject says nothing.
+ *
+ * SUBJECT-ONLY, deliberately never the commit body — matching the whole body swept up genuine
+ * fixes whose bodies merely DISCUSS a flake (measured: 3 false positives, narrowed to 1 on the
+ * subject alone — `852b5c3a`, the one named false positive this classifier accepts).
+ *
+ * The three word-match regexes are declared HERE, inside the function body, rather than at
+ * module scope — a plain implementation detail of the one function that owns them (this
+ * codebase's own idiom for a validator regex, e.g. `TASK_TRAILER_RE` in lib/review.ts), never a
+ * shared or exported surface.
+ */
+export function isRetriggerShapedCommit(commit: FixRoundCommit): boolean {
+  if (commit.changedFiles === 0) return true;
+  const subject = commit.subject;
+  if (/re-?trigger/i.test(subject)) return true;
+  return /flake|flaky|infra/i.test(subject) && /ci|check|coverage|run|rerun/i.test(subject);
+}
+
+/**
+ * BACKSTOP (W1-T1266's declared-kind convention): under HEALTHY operation this never fires — a
+ * genuine fix resolves the review and the loop exits via `review.state === "success"` long before
+ * any cap is reached. This bound only bites once the ordinary path has ALREADY failed to happen
+ * across multiple rounds (a check stays red no matter how many retrigger-shaped rounds run), the
+ * same "fires only once something else has already failed" shape CLAUDE.md names.
+ *
+ * The per-head bound on retrigger-shaped rounds ONE `runFixRung` invocation spends before it
+ * stops retriggering and escalates naming the check(s) that stayed red — see the exhaustion
+ * branch near this function's own `retriggerCap` read. A SEPARATE, SMALL cap, never
+ * `fixStrikeCap` (config.ts) — that value is unchanged by this task in either direction — and
+ * never a timer: a permanently failing check stops after this many retriggers on the SAME rung
+ * dispatch, not after an elapsed duration.
+ */
+export const DEFAULT_FIX_RETRIGGER_CAP = 2;
+
+/** Read the commits THIS round's own push added since `sinceSha` (exclusive) — newest last, so
+ *  {@link isRetriggerShapedCommit} can be applied to each in the order they landed. Real
+ *  production call sites wire {@link readFixRoundCommitsViaGit}; tests inject a fake so the whole
+ *  rung stays free of a real `git` call, matching every other `deps` reader here. */
+export type ReadFixRoundCommits = (worktreePath: string, sinceSha: string) => FixRoundCommit[] | Promise<FixRoundCommit[]>;
+
+/**
+ * The real `git`-backed {@link ReadFixRoundCommits}: every commit `sinceSha..HEAD` in
+ * `worktreePath`, oldest first, each with its own changed-file count (`git diff-tree`) and
+ * subject (`git log -1 --format=%s`). A `sinceSha` that does not resolve (the very first round,
+ * before this rung's own prior head existed on this branch) is never passed here — callers only
+ * invoke this with a real, previously-observed head sha.
+ */
+export function readFixRoundCommitsViaGit(worktreePath: string, sinceSha: string): FixRoundCommit[] {
+  const shas = execFileSync("git", ["-C", worktreePath, "rev-list", "--reverse", `${sinceSha}..HEAD`], { encoding: "utf8" })
+    .split("\n")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  return shas.map((sha) => {
+    const subject = execFileSync("git", ["-C", worktreePath, "log", "-1", "--format=%s", sha], { encoding: "utf8" }).trim();
+    const changedFiles = execFileSync("git", ["-C", worktreePath, "diff-tree", "--no-commit-id", "--name-only", "-r", sha], {
+      encoding: "utf8",
+    })
+      .split("\n")
+      .map((s) => s.trim())
+      .filter(Boolean).length;
+    return { subject, changedFiles };
+  });
+}
+
 /**
  * Dispatch ONE bounded fix worker per strike, up to `strikeCap` (config,
  * default 2), on a `blocked_review` verdict. Every dispatch receives the FULL
@@ -6568,6 +6667,13 @@ export async function runFixRung(opts: {
   config: Config;
   budgetUsd: number;
   strikeCap: number;
+  /**
+   * W1-T2403: the per-head bound on retrigger-shaped rounds (see {@link isRetriggerShapedCommit})
+   * this invocation spends before it stops retriggering and escalates naming the check(s) that
+   * stayed red. Optional — defaults to {@link DEFAULT_FIX_RETRIGGER_CAP}. NEVER `strikeCap`
+   * itself, which this task leaves unchanged in either direction.
+   */
+  retriggerCap?: number;
   /** The blocked_review verdict that triggered this rung. */
   initialReview: ReviewVerdict & { headSha: string; reviewerOutcome: string };
   reviewBase: { owner: string; repo: string; headCheckoutDir: string; reviewerMount: Mount };
@@ -6783,11 +6889,23 @@ export async function runFixRung(opts: {
      * wire {@link captureWorktreeSnapshotViaGit}.
      */
     captureWorktreeSnapshot?: (worktreePath: string) => WorktreeSnapshot | undefined | Promise<WorktreeSnapshot | undefined>;
+    /**
+     * W1-T2403: read THIS round's own new commit(s) — `sinceSha..HEAD` in `opts.worktreePath` —
+     * consulted right after `deps.spawn` demonstrably returns and BEFORE `strikes` is committed,
+     * to decide whether the round is an ordinary repair or RETRIGGER-SHAPED (see
+     * {@link isRetriggerShapedCommit}). Optional and FAIL OPEN, exactly like every other reader
+     * here: omitted, or a throwing read, leaves this round's commit list empty, which classifies
+     * as an ORDINARY repair — an unreadable signal can only ever cause a strike to spend, never
+     * invent a retrigger. The real call sites wire {@link readFixRoundCommitsViaGit}.
+     */
+    readRoundCommits?: ReadFixRoundCommits;
   };
 }): Promise<FixRungOutcome> {
   const { deps } = opts;
+  const retriggerCap = opts.retriggerCap ?? DEFAULT_FIX_RETRIGGER_CAP;
   let review = opts.initialReview;
   let strikes = 0;
+  let retriggers = 0;
   let sessionToResume: string | undefined = opts.initialSessionId;
   // W1-T100: true until a REAL review has run FOR THE CURRENT head. A
   // blocked_ci dispatch (opts.ciFailures set) has no reviewer verdict at all
@@ -6857,7 +6975,12 @@ export async function runFixRung(opts: {
   // round (never a guessed number).
   const prNumber = prNumberFromRef(opts.prUrl);
 
-  while (review.state !== "success" && strikes < opts.strikeCap) {
+  // W1-T2403: `retriggers < retriggerCap` is the SEPARATE bound that stops an unbounded loop the
+  // moment `strikes` stops moving (a retrigger-shaped round never increments it, below) — without
+  // this, an all-retrigger run would spin forever since `strikes < opts.strikeCap` alone would
+  // never trip. Nothing here paces, throttles, or sleeps a call: the bound is a COUNT, never a
+  // timer.
+  while (review.state !== "success" && strikes < opts.strikeCap && retriggers < retriggerCap) {
     // W1-T177 SITE (i) — TERMINAL-STATE CHECK before `strikes++`: the ONLY
     // point that stops a strike being SPENT on a PR that went terminal
     // (merged/closed) since the previous round. Read FRESH every round —
@@ -6967,11 +7090,11 @@ export async function runFixRung(opts: {
         deps.say(
           `fix rung: standing down before strike ${strikes + 1} — ${preStrikeStandDown.reason} — escalated: ${issueUrl}`,
         );
-        return { outcome: "stood_down", review, strikes, reason: preStrikeStandDown.reason, standDownReason: preStrikeStandDown.reason, issueUrl };
+        return { outcome: "stood_down", review, strikes, retriggers, reason: preStrikeStandDown.reason, standDownReason: preStrikeStandDown.reason, issueUrl };
       }
       deps.log("fix.stood_down", { site: "rung.strike", strike: strikes + 1, reason: preStrikeStandDown.reason });
       deps.say(`fix rung: standing down before strike ${strikes + 1} — ${preStrikeStandDown.reason}`);
-      return { outcome: "stood_down", review, strikes, reason: preStrikeStandDown.reason, standDownReason: preStrikeStandDown.reason };
+      return { outcome: "stood_down", review, strikes, retriggers, reason: preStrikeStandDown.reason, standDownReason: preStrikeStandDown.reason };
     }
 
     // W1-T2272 SITE — ACCEPTANCE-AUTHOR-GATE BODY REPAIR, BEFORE `strikes++`/any commit (design
@@ -7084,7 +7207,7 @@ export async function runFixRung(opts: {
         "spending a strike on empty evidence";
       deps.log("fix.stood_down", { site: "rung.empty_ci_failures", strike: strikes + 1, reason });
       deps.say(`fix rung: standing down before strike ${strikes + 1} — ${reason}`);
-      return { outcome: "stood_down", review, strikes, reason, standDownReason: reason };
+      return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason };
     }
 
     // W1-T1227 SITE — SCOPE GATE, BEFORE `strikes++`: a prior strike (this invocation's own, the
@@ -7149,7 +7272,7 @@ export async function runFixRung(opts: {
         deps.say(
           `fix rung: standing down before strike ${strikes + 1} — ${scopeStandDown.reason} — escalated: ${issueUrl}`,
         );
-        return { outcome: "stood_down", review, strikes, reason: scopeStandDown.reason, standDownReason: scopeStandDown.reason, issueUrl };
+        return { outcome: "stood_down", review, strikes, retriggers, reason: scopeStandDown.reason, standDownReason: scopeStandDown.reason, issueUrl };
       }
     }
 
@@ -7177,7 +7300,7 @@ export async function runFixRung(opts: {
         const parkReason = `blocked on #${outOfDiffBlocker} — a prerequisite outside this diff, not yet merged`;
         deps.log("fix.parked", { strike: strikes, blocked_on_pr: outOfDiffBlocker, reason: parkReason });
         deps.say(`fix rung: PARKED — ${parkReason}; no strike spent, will resume once it merges: ${opts.prUrl}`);
-        return { outcome: "parked", review, strikes, reason: parkReason, blockedOnPr: outOfDiffBlocker };
+        return { outcome: "parked", review, strikes, retriggers, reason: parkReason, blockedOnPr: outOfDiffBlocker };
       }
       deps.log("fix.resumed", { strike: strikes, blocked_on_pr: outOfDiffBlocker });
       deps.say(`fix rung: RESUMING — prerequisite #${outOfDiffBlocker} has merged; dispatching normally: ${opts.prUrl}`);
@@ -7219,7 +7342,7 @@ export async function runFixRung(opts: {
         // spends NO strike and lets the next poll materialise a fresh worktree at the new head —
         // the same re-invoked-later shape parking already uses, never a local fetch/reset (which
         // would take `.git/config.lock` on a repo the fleet runs six lanes against).
-        return { outcome: "rebased", review, strikes, reason: rebase.reason, blockedOnPr: outOfDiffBlocker };
+        return { outcome: "rebased", review, strikes, retriggers, reason: rebase.reason, blockedOnPr: outOfDiffBlocker };
       }
     }
 
@@ -7262,7 +7385,7 @@ export async function runFixRung(opts: {
       );
       deps.log("fix.exhausted", { strikes, issue_url: issueUrl, reason: "rule15_violation" });
       deps.say(`fix rung: escalated (rule 15 violation) — ${issueUrl}`);
-      return { outcome: "escalated", review, strikes, reason: "rule15_violation", issueUrl };
+      return { outcome: "escalated", review, strikes, retriggers, reason: "rule15_violation", issueUrl };
     }
 
     // W1-T297 (Standing rule 25 — INSTRUMENT CHANGES RIDE ALONE): a diff that
@@ -7319,7 +7442,7 @@ export async function runFixRung(opts: {
       );
       deps.log("fix.exhausted", { strikes, issue_url: issueUrl, reason: "instrument_entangled" });
       deps.say(`fix rung: escalated (instrument entanglement) — ${issueUrl}`);
-      return { outcome: "escalated", review, strikes, reason: "instrument_entangled", issueUrl };
+      return { outcome: "escalated", review, strikes, retriggers, reason: "instrument_entangled", issueUrl };
     }
 
     // W1-T166: holdout criteria are reviewer-visible but WORKER-hidden — the fix rung dispatches
@@ -7393,7 +7516,7 @@ export async function runFixRung(opts: {
         "standing down rather than spending another strike on unchanged empty evidence";
       deps.log("fix.stood_down", { site: "rung.empty_review_evidence", strike: strikes + 1, reason });
       deps.say(`fix rung: standing down before strike ${strikes + 1} — ${reason}`);
-      return { outcome: "stood_down", review, strikes, reason, standDownReason: reason };
+      return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason };
     }
 
     // W1-T2293 SITE — THE INFRASTRUCTURE-FAULT GUARD, BEFORE `strikes++`: unlike the guard just
@@ -7414,7 +7537,7 @@ export async function runFixRung(opts: {
       if (infraFaultReason) {
         deps.log("fix.stood_down", { site: "rung.report_substituted", strike: strikes + 1, reason: infraFaultReason });
         deps.say(`fix rung: standing down before strike ${strikes + 1} — ${infraFaultReason}`);
-        return { outcome: "stood_down", review, strikes, reason: infraFaultReason, standDownReason: infraFaultReason };
+        return { outcome: "stood_down", review, strikes, retriggers, reason: infraFaultReason, standDownReason: infraFaultReason };
       }
     }
 
@@ -7529,7 +7652,7 @@ export async function runFixRung(opts: {
         // Mirrors the spawn-infra-blocked path immediately below: no subprocess demonstrably
         // ran to completion, so this round is never committed as a strike (W1-T127's own
         // "a strike is only spent once a worker demonstrably ran" invariant).
-        return { outcome: "spawn_abandoned", review, strikes, reason: "spawn wall-clock bound exceeded", spawnAbandonedElapsedMs: spawnOutcome.elapsedMs };
+        return { outcome: "spawn_abandoned", review, strikes, retriggers, reason: "spawn wall-clock bound exceeded", spawnAbandonedElapsedMs: spawnOutcome.elapsedMs };
       }
       spawnElapsedMs = spawnOutcome.elapsedMs;
       fixResult = deps.account(spawnOutcome.result);
@@ -7557,29 +7680,73 @@ export async function runFixRung(opts: {
       throw e;
     }
 
-    // A worker DEMONSTRABLY ran (spawn returned rather than throwing) — only now
-    // is this round committed as a real strike.
-    strikes = attempt;
-    deps.log("fix.dispatch", {
-      strike: strikes,
-      strike_cap: opts.strikeCap,
-      unmet_count: unmet.length,
-      round,
-      mode: fixMode,
-      verdict_regime: verdictRegime,
-      // W1-T1219: the spawn's own elapsed milliseconds — see spawnFixWorkerBounded's own doc.
-      elapsed_ms: spawnElapsedMs,
-    });
-    deps.say(
-      currentMergeConflict !== undefined
-        ? `fix rung: strike ${strikes}/${opts.strikeCap} (${round}) — dispatching ONE merge-conflict fix worker for ` +
-          `${(currentMergeConflict.files ?? []).length} conflicting file(s)`
-        : noReviewYet
-        ? `fix rung: strike ${strikes}/${opts.strikeCap} (${round}) — dispatching ONE ci-log fix worker for ` +
-          `${(currentCiFailures ?? []).length} failing check(s)`
-        : `fix rung: strike ${strikes}/${opts.strikeCap} (${round}) — dispatching ONE fix worker for ` +
-          `${unmet.length} unmet criteri${unmet.length === 1 ? "on" : "a"}`,
-    );
+    // A worker DEMONSTRABLY ran (spawn returned rather than throwing) — only now is this round
+    // even CANDIDATE for a real strike.
+    //
+    // W1-T2403 SITE — THE RETRIGGER-SHAPED COMMIT CHECK, BEFORE `strikes` IS COMMITTED: mirrors
+    // the W1-T127 discipline immediately above (a candidate round only becomes real once a fact
+    // about it is known) — here the fact is whether the round's OWN new commit(s) are all
+    // retrigger-shaped (see `isRetriggerShapedCommit`'s own doc). Read via `deps.readRoundCommits`
+    // against `priorHeadSha` (this round's own dispatch target, snapshotted above BEFORE the
+    // spawn ran) — local worktree state, already reflects whatever the worker just committed,
+    // never waits on `deps.push` below. Optional + fail open: an omitted or throwing reader
+    // leaves `roundCommits` empty, which classifies as an ORDINARY repair, never a retrigger — an
+    // unreadable signal can only ever cause a strike to spend, exactly like every other optional
+    // read this rung takes.
+    let roundCommits: FixRoundCommit[] = [];
+    if (deps.readRoundCommits) {
+      try {
+        roundCommits = await deps.readRoundCommits(opts.worktreePath, priorHeadSha);
+      } catch (e) {
+        deps.log("fix.round_commits_read_error", { attempt, error: String((e as Error)?.message ?? e) });
+      }
+    }
+    const roundIsRetrigger = roundCommits.length > 0 && roundCommits.every(isRetriggerShapedCommit);
+
+    if (roundIsRetrigger) {
+      // Spends the SEPARATE, capped `retriggers` count instead of a strike — never a
+      // `fix.dispatch` line, the ONLY step `priorStrikesFor` counts toward `strikeCap` — so this
+      // round is recorded as a retrigger, not an ordinary repair, and never inflates strike
+      // history read back from the ledger either.
+      retriggers += 1;
+      deps.log("fix.retrigger", {
+        retrigger: retriggers,
+        retrigger_cap: retriggerCap,
+        strike: strikes,
+        round,
+        mode: fixMode,
+        commits: roundCommits.map((c) => ({ subject: c.subject, changed_files: c.changedFiles })),
+        // W1-T1219: mirrors `fix.dispatch`'s own elapsed-ms field — see its doc, above.
+        elapsed_ms: spawnElapsedMs,
+      });
+      deps.say(
+        `fix rung: retrigger ${retriggers}/${retriggerCap} (${round}) — this round's own commit(s) are ` +
+          `RETRIGGER-SHAPED (W1-T2403: an empty commit, or a subject naming a known-flaky re-trigger) — not ` +
+          `spending strike ${attempt}/${opts.strikeCap}: ${opts.prUrl}`,
+      );
+    } else {
+      strikes = attempt;
+      deps.log("fix.dispatch", {
+        strike: strikes,
+        strike_cap: opts.strikeCap,
+        unmet_count: unmet.length,
+        round,
+        mode: fixMode,
+        verdict_regime: verdictRegime,
+        // W1-T1219: the spawn's own elapsed milliseconds — see spawnFixWorkerBounded's own doc.
+        elapsed_ms: spawnElapsedMs,
+      });
+      deps.say(
+        currentMergeConflict !== undefined
+          ? `fix rung: strike ${strikes}/${opts.strikeCap} (${round}) — dispatching ONE merge-conflict fix worker for ` +
+            `${(currentMergeConflict.files ?? []).length} conflicting file(s)`
+          : noReviewYet
+          ? `fix rung: strike ${strikes}/${opts.strikeCap} (${round}) — dispatching ONE ci-log fix worker for ` +
+            `${(currentCiFailures ?? []).length} failing check(s)`
+          : `fix rung: strike ${strikes}/${opts.strikeCap} (${round}) — dispatching ONE fix worker for ` +
+            `${unmet.length} unmet criteri${unmet.length === 1 ? "on" : "a"}`,
+      );
+    }
     sessionToResume = fixResult.sessionId;
     deps.log("fix.done", {
       strike: strikes,
@@ -7662,6 +7829,7 @@ export async function runFixRung(opts: {
               outcome: "stood_down",
               review,
               strikes,
+              retriggers,
               reason: preCiFalseBlockStandDown.reason,
               standDownReason: preCiFalseBlockStandDown.reason,
             };
@@ -7704,7 +7872,7 @@ export async function runFixRung(opts: {
           );
           deps.log("fix.exhausted", { strikes, issue_url: issueUrl, reason: "ci_false_block" });
           deps.say(`fix rung: escalated (ci-log false-block) — ${issueUrl}`);
-          return { outcome: "escalated", review, strikes, reason: "ci_false_block", issueUrl };
+          return { outcome: "escalated", review, strikes, retriggers, reason: "ci_false_block", issueUrl };
         }
       }
 
@@ -7863,7 +8031,7 @@ export async function runFixRung(opts: {
       if (preFalseBlockStandDown) {
         deps.log("fix.stood_down", { site: "rung.false_block", strikes, reason: preFalseBlockStandDown.reason });
         deps.say(`fix rung: standing down before false-block escalation — ${preFalseBlockStandDown.reason}`);
-        return { outcome: "stood_down", review, strikes, reason: preFalseBlockStandDown.reason, standDownReason: preFalseBlockStandDown.reason };
+        return { outcome: "stood_down", review, strikes, retriggers, reason: preFalseBlockStandDown.reason, standDownReason: preFalseBlockStandDown.reason };
       }
       const stillUnmet = review.criteria.filter((c) => !c.met);
       deps.log("fix.false_block", {
@@ -7907,14 +8075,71 @@ export async function runFixRung(opts: {
       );
       deps.log("fix.exhausted", { strikes, issue_url: issueUrl, reason: "false_block" });
       deps.say(`fix rung: escalated (review false-block) — ${issueUrl}`);
-      return { outcome: "escalated", review, strikes, reason: "false_block", issueUrl };
+      return { outcome: "escalated", review, strikes, retriggers, reason: "false_block", issueUrl };
     }
   }
 
   if (review.state === "success") {
     deps.log("fix.resolved", { strikes, reason: "review passed" });
     deps.say(`fix rung: resolved after ${strikes} strike(s) — review now passes`);
-    return { outcome: "fixed", review, strikes, reason: "review passed" };
+    return { outcome: "fixed", review, strikes, retriggers, reason: "review passed" };
+  }
+
+  // W1-T2403 SITE — THE RETRIGGER-CAP EXHAUSTION, DISTINCT FROM THE STRIKE-CAP EXHAUSTION BELOW.
+  // The loop above can now stop for TWO different reasons: a real defect exhausting `strikeCap`
+  // (unchanged, below) or a PERMANENTLY FAILING CHECK exhausting `retriggerCap` with ZERO real
+  // strikes spent chasing it. Both escalate — nothing loops forever on either bound — but this
+  // one names the check(s) that stayed red rather than an "unmet criteria" list, because no
+  // criterion was ever judged unfixable; the check simply never turned green. The
+  // `strikes < opts.strikeCap` guard means this branch is skipped when BOTH caps trip on the same
+  // round — the ordinary strike-exhaustion escalate() below already covers that case correctly.
+  if (retriggers >= retriggerCap && strikes < opts.strikeCap) {
+    const preRetriggerStandDown = await fixRungStandDownReason(deps.readLiveState, opts.prUrl, "rung.retrigger_exhaustion", deps.log);
+    if (preRetriggerStandDown) {
+      deps.log("fix.stood_down", { site: "rung.retrigger_exhaustion", strikes, retriggers, reason: preRetriggerStandDown.reason });
+      deps.say(`fix rung: standing down before retrigger-cap escalation — ${preRetriggerStandDown.reason}`);
+      return {
+        outcome: "stood_down",
+        review,
+        strikes,
+        retriggers,
+        reason: preRetriggerStandDown.reason,
+        standDownReason: preRetriggerStandDown.reason,
+      };
+    }
+    const staleCheckNames = Array.from(new Set([...everRedCiCheckNames, ...(currentCiFailures ?? []).map((f) => f.name)]));
+    const issueUrl = escalate(
+      {
+        class: "BLOCKED",
+        taskId: opts.taskId,
+        runId: opts.runId,
+        headSha: review.headSha,
+        cause: escalationCause(currentMergeConflict !== undefined, noReviewYet),
+        summary:
+          staleCheckNames.length > 0
+            ? `fix rung retrigger cap exhausted (${retriggers} retrigger(s), ${staleCheckNames.join(", ")} never went green) — ${opts.prUrl}`
+            : `fix rung retrigger cap exhausted (${retriggers} retrigger(s)) — ${opts.prUrl}`,
+        detail:
+          `The fix rung (W1-T2403) dispatched ${retriggers} RETRIGGER-SHAPED round(s) on ${opts.branch} — every ` +
+          `round's own new commit(s) either changed zero files or named a known-flaky re-trigger (see ` +
+          `isRetriggerShapedCommit's own doc) — and the check(s) below never went green. ZERO real strike(s) ` +
+          `were spent chasing this (of ${opts.strikeCap} available); the SEPARATE retrigger counter (cap ` +
+          `${retriggerCap}) stopped it rather than a timer or an unbounded loop. Check(s) that stayed red:\n\n` +
+          renderEscalationEvidence(staleCheckNames, (n) => `- ${n}`, staleCheckNames.length > 0),
+        options: [
+          {
+            label: "hand-fix",
+            detail: "investigate the named check directly — it is not a defect in this diff — and re-trigger it by hand once fixed.",
+          },
+          { label: "close", detail: "close the PR and re-scope the task if the check itself is permanently broken." },
+        ],
+        recommendation: "hand-fix",
+      },
+      { issues: deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId },
+    );
+    deps.log("fix.exhausted", { strikes, retriggers, issue_url: issueUrl, reason: "retrigger_cap_exhausted" });
+    deps.say(`fix rung: retrigger cap exhausted (${retriggers} retrigger(s)) — escalated: ${issueUrl}`);
+    return { outcome: "escalated", review, strikes, retriggers, reason: "retrigger_cap_exhausted", issueUrl };
   }
 
   // W1-T177 SITE (ii) — TERMINAL-STATE CHECK immediately before the
@@ -7926,7 +8151,7 @@ export async function runFixRung(opts: {
   if (preEscalateStandDown) {
     deps.log("fix.stood_down", { site: "rung.exhaustion", strikes, reason: preEscalateStandDown.reason });
     deps.say(`fix rung: standing down before escalation — ${preEscalateStandDown.reason}`);
-    return { outcome: "stood_down", review, strikes, reason: preEscalateStandDown.reason, standDownReason: preEscalateStandDown.reason };
+    return { outcome: "stood_down", review, strikes, retriggers, reason: preEscalateStandDown.reason, standDownReason: preEscalateStandDown.reason };
   }
 
   // Strikes exhausted — escalate (BLOCKED class, W1-T8) rather than loop
@@ -8010,7 +8235,7 @@ export async function runFixRung(opts: {
     : "review_still_failing";
   deps.log("fix.exhausted", { strikes, issue_url: issueUrl, reason: exhaustionReason });
   deps.say(`fix rung: exhausted after ${strikes} strike(s) — escalated: ${issueUrl}`);
-  return { outcome: "escalated", review, strikes, reason: exhaustionReason, issueUrl };
+  return { outcome: "escalated", review, strikes, retriggers, reason: exhaustionReason, issueUrl };
 }
 
 /** The verdict + ledger payload a worker's ERROR envelope maps to. */
@@ -10914,6 +11139,9 @@ async function runTask(
           // W1-T1284: the pre-strike UNCHANGED-TREE check's live worktree reader — three LOCAL
           // git reads against this rung's own checkout, never the PR's remote head.
           captureWorktreeSnapshot: captureWorktreeSnapshotViaGit,
+          // W1-T2403: the SAME local-worktree discipline as `captureWorktreeSnapshot` above — a
+          // real `git` read against this rung's own checkout, never a remote call.
+          readRoundCommits: readFixRoundCommitsViaGit,
         },
       });
       review = rung.review;
@@ -24694,8 +24922,12 @@ export function buildSweepEffects(
             // body), so this is a pure override, not a second ledger writer.
             log: (s, extra) => {
               // W1-T1127: the ONE line `fixRungStalledWithoutNewHead`/`priorActionsFromLedger`
-              // treat as "a real strike was spent" — see this closure's own doc, above.
-              if (s === "fix.dispatch") dispatchStarted = true;
+              // treat as "a real strike was spent" — see this closure's own doc, above. W1-T2403
+              // extends this to `fix.retrigger` too: a retrigger-shaped round spends NO strike but
+              // is still real engagement — a worker demonstrably ran and pushed — so a throw AFTER
+              // it must reach this SAME "already acted" path, never the "wrote no fix.* row"
+              // rethrow meant for a dispatch that never got this far.
+              if (s === "fix.dispatch" || s === "fix.retrigger") dispatchStarted = true;
               log(s, { task_id: task.id, ...extra });
             },
             say,
@@ -24728,6 +24960,8 @@ export function buildSweepEffects(
             // W1-T1284: same LOCAL worktree reader as the run-loop call site above — see that
             // site's own comment.
             captureWorktreeSnapshot: captureWorktreeSnapshotViaGit,
+            // W1-T2403: same LOCAL worktree reader as the run-loop call site above.
+            readRoundCommits: readFixRoundCommitsViaGit,
           },
         });
       } catch (e) {
