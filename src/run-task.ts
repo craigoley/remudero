@@ -26131,11 +26131,57 @@ export const AWAITING_EXTERNAL_LEDGER_STEP = "run.awaiting_external";
  * The other four lanes are DELIBERATELY UNCHANGED (design note iii) — widening the blanket further
  * is a separate argument this task does not make.
  */
-export function lightPassActionable(disposition: Disposition, fixRungAllowed: boolean): boolean {
+export function lightPassActionable(
+  disposition: Disposition,
+  fixRungAllowed: boolean,
+  // W1-T2430 — TRUE ONLY for `buildSweepLightHook`'s SECOND, narrower `runSweepLightPass` call,
+  // over the subset `blockedFixableIsRequeueOnly` has already proven can never reach
+  // `dispatchFix` (every `ciFailures` entry on that PR names a cancelled required check, so
+  // `runSweep`'s own `blocked-fixable` case always breaks at its "cancelled required check(s)"
+  // stand-down before it ever gets there — see that case's own comment in `src/lib/sweep.ts`).
+  // Admitting here can therefore never widen the spend bound `fixRungAllowed` exists to
+  // enforce: the lane's whole action is one `POST actions/jobs/{id}/rerun` (W1-T1223), which
+  // spawns no worker. Every EXISTING caller passes 2 args and gets this function's original
+  // 3-line shape back, byte-identical (W1-T1211) — this is an ADDITIVE 3rd parameter, not a
+  // change to `fixRungAllowed`'s own meaning.
+  requeueLaneOnly: boolean = false,
+): boolean {
   if (disposition === "post-review") return true;
   // The two dispositions whose ACTION is `dispatchFix` — the only lane that spawns a worker.
-  if (disposition === "blocked-fixable" || disposition === "conflicted") return fixRungAllowed;
+  // `blocked-fixable` alone gains the second admitting arm above; `conflicted`'s sole action is
+  // always `dispatchFix` (merge-conflict resolution), so it stays gated on `fixRungAllowed` only
+  // — W1-T1211's own widening, deliberately untouched (design note iii, unchanged by this task).
+  if (disposition === "blocked-fixable") return fixRungAllowed || requeueLaneOnly;
+  if (disposition === "conflicted") return fixRungAllowed;
   return false;
+}
+
+/**
+ * W1-T2430 — DOES THIS PR'S ENTIRE RED VERDICT REDUCE TO CANCELLATIONS?
+ *
+ * TRUE only when {@link isBlockedCi} holds, at least one required check is cancelled
+ * ({@link OpenPrView.cancelledRequiredChecks}), and EVERY {@link OpenPrView.ciFailures} entry
+ * names one of those cancelled checks — the EXACT SAME fold `runSweep`'s own `blocked-fixable`
+ * case performs (`src/lib/sweep.ts`, the `cancelledChecks`/`genuineFailures` pair immediately
+ * before its `dispatchFix` call) to decide whether to stand down after re-queueing rather than
+ * fall through to a fix dispatch. Recomputed here, read-only, off the SAME {@link OpenPrView}
+ * snapshot `runSweep` itself will evaluate (no re-fetch, so no race between this predicate's
+ * answer and the switch's own) — a PR this returns `true` for is GUARANTEED to reach that
+ * stand-down branch and never `dispatchFix`, which is what lets `buildSweepLightHook` admit it
+ * on a light pass without loosening `fixRungAllowed`'s own gate for any other PR.
+ *
+ * A PR with NO cancelled required check (the common case) always reads FALSE here — never
+ * routed to the requeue-only batch, so its ordinary `deferred to full sweep (light pass)`
+ * stand-down is entirely unchanged by this predicate's existence.
+ */
+export function blockedFixableIsRequeueOnly(pr: OpenPrView): boolean {
+  if (!isBlockedCi(pr)) return false;
+  const cancelledChecks = pr.cancelledRequiredChecks ?? [];
+  if (cancelledChecks.length === 0) return false;
+  const genuineFailures = (pr.ciFailures ?? []).filter(
+    (f) => !cancelledChecks.some((c) => c.name === f.name),
+  );
+  return genuineFailures.length === 0;
 }
 
 /**
@@ -26232,30 +26278,86 @@ export function buildSweepLightHook(
         readLedgerLines(ledgerPath),
         inFlightTaskIdsFrom(join(config.root, "state", "inflight")),
       );
-      await runSweepLightPass(
-        openPrs,
-        {
-          ...effects,
-          ledgerPath,
-          runId,
-          log,
-          // W1-T1211: `post-review` always, and the fix rung TOO when every in-flight run is
-          // demonstrably waiting rather than working — see `lightPassActionable` and
-          // `runIsAwaitingExternal` above. Read once per tick, not per PR, so the whole fan-out
-          // sees one consistent answer.
-          actionable: (d) => lightPassActionable(d, fixRungAllowed),
-          // W1-T528: `runSweepLightPass` fans ONE `runSweep` call out PER open PR, concurrently
-          // (this function's own doc, directly above) — `selectUpdateBranchTarget`'s "oldest
-          // head first" only holds ACROSS the whole open-PR set one `runSweep` call sees, so N
-          // single-PR calls here could each pick "the oldest of one" and update-branch N PRs in
-          // one tick, exactly the N+(N-1)+…+1 cost this shard exists to prevent. `updateBranch`
-          // joins dispatchFix/close/escalate/depReview/arm on the list that stands down here
-          // until the NEXT FULL sweep (`sweepCommand`/the daemon poll rung, both of which call
-          // `runSweep` ONCE over the whole set) picks it back up.
-          updateBranch: undefined,
-        },
-        DEFAULT_SWEEP_POLICY,
-      );
+      // W1-T2430 — SPLIT OFF THE REQUEUE-ONLY PRs, off the SAME `openPrs` snapshot both batches
+      // below evaluate (no re-fetch between this filter and `runSweep`'s own switch, so no race
+      // — see `blockedFixableIsRequeueOnly`'s own doc). A PR in this subset is PROVEN to reach
+      // `runSweep`'s "cancelled required check(s)" stand-down before it can ever call
+      // `dispatchFix`, so admitting its `blocked-fixable` disposition here — even though
+      // `fixRungAllowed` is false — can never spend a fix-rung strike. Every other open PR
+      // (including a `blocked-fixable` PR with a genuine, non-cancelled failure) stays in the
+      // batch below, gated by `fixRungAllowed` exactly as before this task.
+      const requeueOnlyPrs = openPrs.filter((pr) => blockedFixableIsRequeueOnly(pr));
+      const requeueOnlyPrNumbers = new Set(requeueOnlyPrs.map((pr) => pr.prNumber));
+      const restPrs = requeueOnlyPrNumbers.size === 0 ? openPrs : openPrs.filter((pr) => !requeueOnlyPrNumbers.has(pr.prNumber));
+      const passes: Array<Promise<unknown>> = [
+        // UNCHANGED FROM BEFORE THIS TASK when `requeueOnlyPrs` is empty (the overwhelming
+        // common case — cancellations were measured at ~7% of `coverage-ratchet` runs): `restPrs`
+        // is then `openPrs` itself and this is the SAME single `runSweepLightPass` call this
+        // function has always made, including its own "an empty pass still gets exactly one
+        // `runSweep` call" heartbeat (see that function's own doc).
+        runSweepLightPass(
+          restPrs,
+          {
+            ...effects,
+            ledgerPath,
+            runId,
+            log,
+            // W1-T1211: `post-review` always, and the fix rung TOO when every in-flight run is
+            // demonstrably waiting rather than working — see `lightPassActionable` and
+            // `runIsAwaitingExternal` above. Read once per tick, not per PR, so the whole fan-out
+            // sees one consistent answer.
+            actionable: (d) => lightPassActionable(d, fixRungAllowed),
+            // W1-T528: `runSweepLightPass` fans ONE `runSweep` call out PER open PR, concurrently
+            // (this function's own doc, directly above) — `selectUpdateBranchTarget`'s "oldest
+            // head first" only holds ACROSS the whole open-PR set one `runSweep` call sees, so N
+            // single-PR calls here could each pick "the oldest of one" and update-branch N PRs in
+            // one tick, exactly the N+(N-1)+…+1 cost this shard exists to prevent. `updateBranch`
+            // joins dispatchFix/close/escalate/depReview/arm on the list that stands down here
+            // until the NEXT FULL sweep (`sweepCommand`/the daemon poll rung, both of which call
+            // `runSweep` ONCE over the whole set) picks it back up.
+            updateBranch: undefined,
+          },
+          DEFAULT_SWEEP_POLICY,
+        ),
+      ];
+      if (requeueOnlyPrs.length > 0) {
+        // A SECOND, SEPARATE `runSweepLightPass` call — never merged into the one above — so
+        // this batch's own `selectReviewAdmission` (post-review's one-per-pass fairness) never
+        // competes with the other batch's. That is safe here specifically because every PR in
+        // `requeueOnlyPrs` is `isBlockedCi` (via `blockedFixableIsRequeueOnly`), and
+        // `DISPOSITION_RULES` routes every `isBlockedCi` PR to `blocked-fixable` (or, exhausted,
+        // `blocked-ambiguous`) STRICTLY BEFORE the `post-review`/`conflicted` rows — so no PR in
+        // this batch can ever BE post-review-eligible, and this call's own admission of it is
+        // therefore a no-op collision risk that cannot occur. Only fired when non-empty, so a
+        // quiet tick (no cancellation this pass) never doubles the heartbeat above.
+        passes.push(
+          runSweepLightPass(
+            requeueOnlyPrs,
+            {
+              ...effects,
+              ledgerPath,
+              runId,
+              log,
+              // `requeueLaneOnly: true` — see `lightPassActionable`'s own doc for why this can
+              // never admit a `dispatchFix` call for a PR `blockedFixableIsRequeueOnly` selected.
+              actionable: (d) => lightPassActionable(d, fixRungAllowed, true),
+              // W1-T2430 — SCOPED TO EXACTLY THE ONE POST W1-T1223's re-queue lane fires. Left
+              // wired, this batch's own `blocked-fixable` case would ALSO reach the unrelated
+              // stale-ci-gate reaggregate lane (`src/lib/sweep.ts`'s `staleCiGateTransition`
+              // block, ordered before the cancelled-check block) whenever GitHub's rollup
+              // happened to show a stale transition — a SECOND new action this task's design
+              // never asks for ("the only new thing a light pass may do is that POST").
+              // Undefining both keeps that block a no-op (`ciGateRollup` reads `undefined`,
+              // `staleCiGateTransition` reads it false) without touching `src/lib/sweep.ts`.
+              readCiGateRollup: undefined,
+              reaggregateCiGate: undefined,
+              updateBranch: undefined,
+            },
+            DEFAULT_SWEEP_POLICY,
+          ),
+        );
+      }
+      await Promise.all(passes);
     } catch (e) {
       log("sweep_light.error", { error: String((e as Error)?.message ?? e) });
     }
