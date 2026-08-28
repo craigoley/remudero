@@ -5,6 +5,7 @@ import { execFileSync } from "node:child_process";
 // instead of installing a spy). Same import-shape comment as src/lib/worker.ts's
 // run.lock / src/lib/status.ts's projection cache, the two atomic-write precedents this
 // module's own registry writer mirrors.
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import { dirname } from "node:path";
 import type { MergedResolver, Plan } from "./plan.js";
@@ -357,6 +358,60 @@ export function isRatifiedInLedger(ledgerLines: { step?: unknown; task_id?: unkn
 }
 
 /**
+ * THE ONE PLACE an approve run's `run_id` becomes a GIT REF NAME (and, through
+ * `join(worktreesDir(config), branch)`, a WORKTREE DIRECTORY NAME). Sanitising happens HERE, at
+ * the branch-name boundary, and NEVER on the proposal id itself: that id is a registry key in
+ * `state/inbox-proposals.json` and a `task_id` VALUE on every ledger row the proposal ever wrote,
+ * so rewriting it would orphan both.
+ *
+ * WHY IT EXISTS (MEASURED 2026-08-28T20:24:45Z and again at :46Z, the fleet host's ledger):
+ * `approveCommand` mints `APPROVE-${proposalId}-${Date.now()}`, and `board-review.ts` mints
+ * proposal ids of the form `board-review:escalation:#3039`. A COLON IS ILLEGAL IN A GIT REF, so
+ * `git worktree add -b run-APPROVE-board-review:escalation:#3039-...` died with
+ * `fatal: '...' is not a valid branch name` and NO proposal has ever been ratified — 0
+ * `ratify.approved` rows across a 533,478-row three-form ledger union, against a control of 137
+ * inbox/board-review rows in the same corpus. `#` is NOT the offender and never was: measured
+ * through `git check-ref-format --branch`, `run-APPROVE-board-review-escalation-#3039-1` is
+ * LEGAL while `run-APPROVE-board-review:escalation-3039-1` is ILLEGAL.
+ *
+ * NOT ONLY `board-review:`. Of the id shapes this codebase MINTS, three carry a colon and are
+ * illegal — `board-review:stale:<ref>` and `board-review:escalation:<ref>` (lib/board-review.ts)
+ * and `rule-efficacy:<ruleId>` ({@link ruleEfficacyProposalId}, lib/rule-efficacy.ts, latent
+ * today because no such proposal is open) — while the feedback docket's `FD-<date>-<slug>`
+ * (lib/feedback-docket.ts, already slugged at the mint) and the registry's own prose `P<N>` ids
+ * are legal. So this is a general boundary defect, not a board-review special case, which is why
+ * the transform below is TOTAL rather than a targeted replacement.
+ *
+ * INJECTIVITY — the property that stops two distinct runs sharing one branch, and hence one
+ * worktree. The readable half is deliberately LOSSY (`board-review:x` and `board-review-x` slug
+ * identically), so injectivity does NOT rest on it: a 12-hex-character SHA-256 prefix of the
+ * ORIGINAL, unslugged `runId` is appended unconditionally. Two distinct run ids therefore reach
+ * the same branch only on a 48-bit SHA-256 prefix collision. Unconditional, never "hash only when
+ * the name was illegal", because a conditional transform reintroduces exactly the ambiguity the
+ * digest exists to remove — a legal id could otherwise be crafted to equal some illegal id's
+ * slugged form.
+ *
+ * SAFE TO CHANGE THE NAME FOR ALREADY-LEGAL SHAPES TOO: this lane has never pushed a branch.
+ * `git ls-remote --heads origin 'run-APPROVE-*'` reads 0 (control: `run-W1-*` reads 59), and no
+ * `run-APPROVE-*` worktree exists on the fleet host — so there is no prior name to preserve, and
+ * {@link priorApproveRunBranch}, which derives a RESUME candidate from ledger evidence, routes
+ * through this same function so the two derivations can never drift apart.
+ */
+export function approveRunBranch(runId: string): string {
+  const slug = runId
+    // Whitelist. Every byte git forbids in a ref (space, control chars, and ~^:?*[\ ) plus "/"
+    // and "@" falls outside it, so one rule covers them all rather than a list that can rot.
+    .replace(/[^A-Za-z0-9._-]/g, "-")
+    .replace(/\.{2,}/g, "-") // git forbids ".." anywhere in a ref name
+    .replace(/-{2,}/g, "-") // collapse runs, so the appended digest's own "-" stays a boundary
+    .replace(/^[-.]+|[-.]+$/g, ""); // no leading "-"/"." and no trailing "." for git's own rules
+  // The digest closes the ".lock" tail rule too: the ref can never END in ".lock" with 12 hex
+  // characters after it.
+  const digest = createHash("sha256").update(runId).digest("hex").slice(0, 12);
+  return `run-${slug || "approve"}-${digest}`;
+}
+
+/**
  * W1-T903: the branch a PRIOR `rmd approve <proposalId>` run would have pushed, derived PURELY
  * from ledger evidence — `approveCommand` (run-task.ts) mints `run_id`s of the shape
  * `APPROVE-<proposalId>-<ms>` and its gateway always pushes `run-<run_id>`, so any ledger line
@@ -382,7 +437,7 @@ export function priorApproveRunBranch(ledgerLines: { run_id?: unknown; task_id?:
     if (!/^\d+$/.test(runId.slice(prefix.length))) continue;
     if (best === undefined || runId > best) best = runId;
   }
-  return best === undefined ? undefined : `run-${best}`;
+  return best === undefined ? undefined : approveRunBranch(best);
 }
 
 /**

@@ -352,6 +352,7 @@ import {
   parseDraftCache,
   parseProposalRegistry,
   parseSupersedesExpr,
+  approveRunBranch,
   priorApproveRunBranch,
   pruneRatifiedProposals,
   proposalsNeedingDraft,
@@ -29087,7 +29088,13 @@ export async function approveCommand(rest: string[], deps: { config?: Config; ga
       const dir = ensureRepoDir();
       const pruned = pruneStaleRuns(dir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
       if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
-      const branch = `run-${runId}`;
+      // THE BRANCH-NAME BOUNDARY. `runId` is `APPROVE-<proposalId>-<ms>` and a board-review
+      // proposal id carries colons, which git refuses in a ref — so the bare `run-${runId}` that
+      // stood here died in `worktreeAdd` with `fatal: ... is not a valid branch name` and no
+      // proposal has ever been ratified. {@link approveRunBranch} (lib/inbox.ts) sanitises HERE,
+      // never the id itself (a registry key and a ledger value), and the SAME call fixes the
+      // WORKTREE DIRECTORY on the next line, which is derived from this string.
+      const branch = approveRunBranch(runId);
       worktreePath = join(worktreesDir(config), branch);
       worktreeAdd(dir, worktreePath, branch, "origin/main");
       writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });

@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { approveProposal, describeApproveGatewayError, priorApproveRunBranch, type DraftedCandidate, type InboxClassification, type RatifyGateway } from "../src/lib/inbox.js";
+import { approveProposal, approveRunBranch, describeApproveGatewayError, priorApproveRunBranch, type DraftedCandidate, type InboxClassification, type RatifyGateway } from "../src/lib/inbox.js";
 import { createPlanPrRest, probeExistingPlanPr, ratifyPrCreateRestArgs, ratifyPrProbeRestArgs } from "../src/lib/plan-pr-emitter.js";
 
 // W1-T903: `rmd approve` used to commit + push the ratification branch and only THEN shell
@@ -217,7 +217,11 @@ test("priorApproveRunBranch names the MOST RECENT APPROVE-<id>-<ms> run's branch
     { run_id: "DRAIN-1234", task_id: "P-READY", step: "run.start" },
     { run_id: "APPROVE-P-READY-200", task_id: "P-READY", step: "approve.error" },
   ];
-  assert.equal(priorApproveRunBranch(lines, "P-READY"), "run-APPROVE-P-READY-200");
+  // The branch name is derived through `approveRunBranch` (the ONE branch-name boundary, so
+  // resume and creation can never drift) — asserted against the derivation of the MOST RECENT
+  // run id, and asserted NOT to equal the older one, which is the discrimination this test owns.
+  assert.equal(priorApproveRunBranch(lines, "P-READY"), approveRunBranch("APPROVE-P-READY-200"));
+  assert.notEqual(priorApproveRunBranch(lines, "P-READY"), approveRunBranch("APPROVE-P-READY-100"));
   assert.equal(priorApproveRunBranch(lines, "P-NEVER-APPROVED"), undefined);
   assert.equal(priorApproveRunBranch([], "P-READY"), undefined);
 });

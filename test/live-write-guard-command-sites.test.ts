@@ -16,6 +16,7 @@ import {
 } from "../src/run-task.js";
 import { ghPrMergeSquash, type WorkerResult } from "../src/lib/worker.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+import { approveRunBranch } from "../src/lib/inbox.js";
 
 // ── WHY THIS FILE EXISTS ─────────────────────────────────────────────────────────────
 // PR #954's guard call sites inside `triageCommand` and `planCommand` sat after a
@@ -537,7 +538,10 @@ test("GUARDED SITE approve resume: findPushedBranch/completeRatificationBranch d
 
     // A PRIOR run's branch, already pushed to the SAME origin, carrying a CONCRETE id (never
     // NEW-1 — completeRatificationBranch must read it back as-is, no re-mint).
-    const priorBranch = "run-APPROVE-P-RESUME-1700000000000";
+    // Named through `approveRunBranch` — the SAME boundary `createRatificationBranch` and
+    // `priorApproveRunBranch` both route through, so this fixture seeds the branch a real prior
+    // run would actually have pushed rather than a hand-written literal that can drift from it.
+    const priorBranch = approveRunBranch("APPROVE-P-RESUME-1700000000000");
     const priorClone = mkdtempSync(join(tmpdir(), "cmdsite-appresumeprior-"));
     execFileSync("git", ["clone", "--quiet", bare, priorClone], { encoding: "utf8", env: GIT_ENV });
     execFileSync("git", ["-C", priorClone, "checkout", "--quiet", "-b", priorBranch], { encoding: "utf8", env: GIT_ENV });
