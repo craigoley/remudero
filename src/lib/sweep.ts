@@ -5769,15 +5769,40 @@ export async function runSweep(
       }
       case "stale":
         alreadyDone = prior.closed.has(pr.prNumber);
+        // W1-T2427: NAME THE DEDUP. Same shape the `mergeable` (W1-T1116) and
+        // `blocked-fixable`/`conflicted` (W1-T1110) arms already use — the fact is already in
+        // hand (this very membership test), so the sentence costs no read and no ledger line.
+        // This arm has been QUIET since 2026-08-17, which is not the same as fixed: the code was
+        // unchanged, so it went silent again the next time a closed PR was deduped.
+        if (alreadyDone) {
+          dedupStandDownReason =
+            `this PR is already recorded CLOSED by a prior sweep pass (pr #${pr.prNumber} is in the ` +
+            `closed set) — the close is deduped, not skipped, and no second close was attempted`;
+        }
         break;
       case "blocked-ambiguous":
         // W1-T514: sha-keyed, exactly like every sibling arm above — a new
         // head re-earns its own escalation rather than being deduped by a
         // stale head's `acted:true` line forever.
         alreadyDone = prior.escalated.has(`${pr.prNumber}@${pr.headSha}`);
+        // W1-T2427: the LARGEST silent population (7,888 rows). Without this sentence the row is
+        // indistinguishable from `deps.escalate` being unwired or throwing.
+        if (alreadyDone) {
+          dedupStandDownReason =
+            `an escalation was already filed for this head (${pr.headSha.slice(0, 7)}) — the ` +
+            `escalation is deduped, not skipped, and a new head re-earns its own`;
+        }
         break;
       case "dep-review":
         alreadyDone = prior.depReviewed.has(`${pr.prNumber}@${pr.headSha}`);
+        // W1-T2427: names the TERMINAL-outcome dedup specifically, because a `hold` deliberately
+        // does NOT dedup (see `priorActionsFromLedger`'s own dep-review arm) — so "deduped" here
+        // is a positive statement about the prior outcome, never a silent skip.
+        if (alreadyDone) {
+          dedupStandDownReason =
+            `dependency review already reached a TERMINAL outcome at this head ` +
+            `(${pr.headSha.slice(0, 7)}) — a hold would have re-run instead of deduping`;
+        }
         break;
       case "post-review": {
         // W1-T254: OUTCOME-keyed — see PriorActions.reviewDelivered/reviewRefused's docs. Keyed
@@ -5792,7 +5817,24 @@ export async function runSweep(
         // post-review lane once more (which re-tests `decideReviewStatusPost` fresh — see that
         // set's own doc; this clears the dedup, it does not post a verdict or arm anything).
         const reviewKey = `${pr.taskId ?? ""}@${pr.headSha}`;
-        alreadyDone = prior.reviewDelivered.has(reviewKey) || prior.reviewRefused.has(reviewKey);
+        const reviewDelivered = prior.reviewDelivered.has(reviewKey);
+        alreadyDone = reviewDelivered || prior.reviewRefused.has(reviewKey);
+        // W1-T2427 — THE SENTENCE MUST SEPARATE FOUR STATES THAT LOOK IDENTICAL TODAY (W1-T1110's
+        // criterion: not "did it decline" but "could a reader otherwise tell it from a broken
+        // action path"). An `acted:false` post-review row with no reason reads the same whether
+        // this dedup fired, `deps.postReview` was never wired, the light-pass admission was lost
+        // to another PR (`selectReviewAdmission`, W1-T526), or the pass was a dry run. Only the
+        // first of those is this arm, and only this arm can say so — the other three name
+        // themselves elsewhere in the flow. Naming the KEY and WHICH set matched is what let
+        // W1-T2426 fail to attribute PR #3152's nine stand-downs: the mechanism was confirmed
+        // independently and the instance could not be, from these rows.
+        if (alreadyDone) {
+          dedupStandDownReason = reviewDelivered
+            ? `a verdict was already DELIVERED for ${reviewKey} — the re-post is deduped by this ` +
+              `arm, not lost to an admission and not unwired`
+            : `a review post was already REFUSED for ${reviewKey} — the re-post is deduped by this ` +
+              `arm, not lost to an admission and not unwired`;
+        }
         break;
       }
       case "wait":
