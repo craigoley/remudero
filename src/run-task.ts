@@ -24789,21 +24789,61 @@ export function fixDispatchSignalDeath(e: unknown): { signal: string; costUsd: n
 }
 
 /**
+ * W1-T2444 — THE THREE PREDICATES, READ OFF `dispatchFix`'s OWN CATCH, NOT RE-DERIVED FROM A
+ * LEDGER SWEEP. `sweep.fix.error` today is 135 historical rows that split 55/42/38 across a
+ * shared worker home (W1-T2441), a shared `.git/config` lock (`checkout -B` contention across
+ * concurrent sweep worktrees), and GitHub GraphQL rate-limit exhaustion — three unrelated
+ * defects with DISJOINT windows, so no rate anyone quotes off the bare step name describes a
+ * single real process. This function is the classifier, so a future rate can name its class
+ * instead of averaging over silence.
+ *
+ * ORDER MATTERS, first match wins, same order the ledger sweep used to derive the 55/42/38 split:
+ *   1. a signal death — read STRUCTURALLY off `signalDeath`, never by matching "SIGKILL" in the
+ *      free-text message (the same trap {@link fixDispatchSignalDeath}'s own doc closes) — is
+ *      `"sigkill"`.
+ *   2. `Command failed: git … checkout -B …` (the linked-worktree writing upstream-tracking
+ *      config into the CANONICAL clone's `.git/config`, and losing the lock race) is
+ *      `"checkout_b"`.
+ *   3. `Command failed: gh pr view …` (37 of 38 in the historical corpus were the primary
+ *      GraphQL budget; the 38th an unrelated `HTTP 503` this same predicate happens to cover) is
+ *      `"gh_pr_view"`.
+ * Anything else is left OUT of `ledgerFields` entirely — never forced into a class, never
+ * written as the string `"unclassified"` — because a fourth cause existing tomorrow must not
+ * silently misreport as one of today's three.
+ */
+export function fixDispatchErrorClass(
+  message: string,
+  signalDeath: { signal: string; costUsd: number } | undefined,
+): string | undefined {
+  if (signalDeath) return "sigkill";
+  if (/Command failed: git\b.*\bcheckout -B\b/.test(message)) return "checkout_b";
+  if (/Command failed: gh pr view\b/.test(message)) return "gh_pr_view";
+  return undefined;
+}
+
+/**
  * W1-T2402: the WHOLE of `dispatchFix`'s catch decision, pulled out pure so every branch is
  * unit-testable without spawning anything. `ledgerFields` is what `sweep.fix.error` gets spread
  * with — the existing `error` string PLUS `signal`/`cost_usd` when {@link fixDispatchSignalDeath}
- * finds them. `rethrow` mirrors W1-T1127's OWN `dispatchStarted` rule byte-for-byte and
+ * finds them, PLUS (W1-T2444) `class` when {@link fixDispatchErrorClass} recognises the failure —
+ * the SAME conditional-spread shape `signal`/`cost_usd` already established, not a new
+ * convention. `rethrow` mirrors W1-T1127's OWN `dispatchStarted` rule byte-for-byte and
  * UNCHANGED by this task: a strike already spent (`dispatchStarted`) keeps this swallowed here so
  * `runSweep` keeps recording `acted:true`, exactly as it does today; a failure before any strike
  * still propagates to `runSweep`'s own `catch`, which already records `acted:false`. Nothing here
- * paces, throttles, sleeps, or awaits — it is synchronous, and reads no clock.
+ * paces, throttles, sleeps, or awaits — it is synchronous, and reads no clock. No new ledger step
+ * is introduced — this is still written under `sweep.fix.error`, unchanged, so
+ * `DECISION_RELEVANT_LEDGER_STEPS` (lib/ledger.ts) needs no update.
  */
 export function dispatchFixCatchOutcome(e: unknown, dispatchStarted: boolean): { ledgerFields: Record<string, unknown>; rethrow: boolean } {
   const signalDeath = fixDispatchSignalDeath(e);
+  const message = String((e as Error)?.message ?? e);
+  const errorClass = fixDispatchErrorClass(message, signalDeath);
   return {
     ledgerFields: {
-      error: String((e as Error)?.message ?? e),
+      error: message,
       ...(signalDeath ? { signal: signalDeath.signal, cost_usd: signalDeath.costUsd } : {}),
+      ...(errorClass ? { class: errorClass } : {}),
     },
     rethrow: !dispatchStarted,
   };
