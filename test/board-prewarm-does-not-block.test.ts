@@ -301,3 +301,35 @@ test("W1-T2440: the zero-viewer gate still stops the timer when the last client 
   assert.equal(warms, afterDisconnect, "the timer must stop once the last viewer disconnects -- no warm()s after that point");
   gated.stop();
 });
+
+// ── W1-T2440 REVIEW FINDING: A WORKER THAT EXITS WITHOUT `message` OR `error` WEDGES THE PREWARM ──
+//
+// `runPrewarmWorker` registers exactly two handlers — `message` and `error` — and BOTH are the only
+// places `finish()` runs. A worker thread can end without emitting either: `process.exit()` inside
+// the worker is the ordinary case, and an external `terminate()` is the other. When that happens
+// `prewarmWorker` stays SET, and the guard at the top of `runPrewarmWorker` (`if (prewarmWorker)
+// return;`) makes every later warm a permanent no-op — `fetchInFlight` and the three
+// `*WarmInFlight` flags stay true forever, so the read paths keep returning the in-flight
+// placeholder and the board never refreshes again short of a process restart.
+//
+// THE FALSIFIER IS THE SECOND WARM, NOT THE FIRST. A single wedged warm is indistinguishable from
+// one that is merely slow; what proves the wedge is that a LATER warm, after the worker is gone,
+// still cannot start. So this drives warm() twice and asserts the second one recovers.
+test("W1-T2440 (review): a worker that exits without message or error does not wedge every later warm", async () => {
+  const workerUrl = new URL(`data:text/javascript,${encodeURIComponent("process.exit(0);")}`);
+  const gh: GitHub = buildBatchedGithub("o", "r", { workerUrl });
+
+  gh.warm?.();
+  await waitUntil(() => gh.readState?.() !== "in_flight", 5000);
+  assert.notEqual(gh.readState?.(), "in_flight", "an exited worker must not leave the gateway stuck in_flight");
+
+  // THE WEDGE TEST: a second warm must be able to START. Before the fix this returns immediately at
+  // `if (prewarmWorker) return;` and the state never leaves whatever the first attempt left behind.
+  gh.warm?.();
+  await waitUntil(() => gh.readState?.() !== "in_flight", 5000);
+  assert.notEqual(
+    gh.readState?.(),
+    "in_flight",
+    "a second warm after an exited worker must run — a still-set prewarmWorker makes every later warm a permanent no-op",
+  );
+});

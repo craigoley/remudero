@@ -5885,24 +5885,60 @@ export function buildBatchedGithub(
       return;
     }
     prewarmWorker = worker;
-    worker.once("message", (msg: PrewarmWorkerResponse) => {
-      const elapsedMs = Math.max(0, now() - startedAt);
-      if (msg.open) applyOpenOutcome(msg.open, elapsedMs, previouslyOpen);
-      if (msg.merged) applyMergedOutcome(msg.merged, elapsedMs);
-      if (msg.issues) applyIssuesOutcome(msg.issues);
+    // EVERY TERMINAL PATH MUST REACH `finish()` EXACTLY ONCE, AND `exit` IS A TERMINAL PATH.
+    //
+    // `message` and `error` are not exhaustive: a worker thread can end WITHOUT emitting either —
+    // `process.exit()` inside the worker is the ordinary case, an external `terminate()` the other.
+    // Before this guard that left `prewarmWorker` SET, so the `if (prewarmWorker) return;` at the
+    // top of this function made every LATER warm a permanent no-op while `fetchInFlight` and the
+    // three `*WarmInFlight` flags stayed true — the read paths kept returning the in-flight
+    // placeholder and the board never refreshed again short of a process restart. MEASURED against
+    // a `data:` worker whose whole body is `process.exit(0)`: the gateway never left `in_flight`.
+    //
+    // `settled` is the once-only latch rather than three independent `once` handlers, because
+    // `error` and `exit` BOTH fire for a crashed worker and the second arrival must not re-apply a
+    // failure over an outcome already recorded (which would clobber a good `message` result with
+    // "unknown" whenever the normal terminate below races the exit event).
+    let settled = false;
+    const settle = (apply: () => void): void => {
+      if (settled) return;
+      settled = true;
+      apply();
       finish();
+    };
+    worker.once("exit", (code) => {
+      settle(() => {
+        const elapsedMs = Math.max(0, now() - startedAt);
+        const failure = {
+          ok: false as const,
+          reason: "unknown" as GhFailureReason,
+          message: `prewarm worker exited with code ${code} before reporting`,
+        };
+        if (fetchOpen) applyOpenOutcome(failure, elapsedMs, previouslyOpen);
+        if (fetchMerged) applyMergedOutcome(failure, elapsedMs);
+        if (fetchIssues) applyIssuesOutcome(failure);
+      });
+    });
+    worker.once("message", (msg: PrewarmWorkerResponse) => {
+      settle(() => {
+        const elapsedMs = Math.max(0, now() - startedAt);
+        if (msg.open) applyOpenOutcome(msg.open, elapsedMs, previouslyOpen);
+        if (msg.merged) applyMergedOutcome(msg.merged, elapsedMs);
+        if (msg.issues) applyIssuesOutcome(msg.issues);
+      });
       void worker.terminate();
     });
     worker.once("error", (err) => {
       // The worker itself died — never a per-channel classified failure, which arrives via a
       // normal message — so every channel THIS call asked for is marked failed, the same "loud,
       // classified, never silent" discipline W1-T181 established for the synchronous path.
-      const elapsedMs = Math.max(0, now() - startedAt);
-      const failure = { ok: false as const, reason: "unknown" as GhFailureReason, message: err instanceof Error ? err.message : String(err) };
-      if (fetchOpen) applyOpenOutcome(failure, elapsedMs, previouslyOpen);
-      if (fetchMerged) applyMergedOutcome(failure, elapsedMs);
-      if (fetchIssues) applyIssuesOutcome(failure);
-      finish();
+      settle(() => {
+        const elapsedMs = Math.max(0, now() - startedAt);
+        const failure = { ok: false as const, reason: "unknown" as GhFailureReason, message: err instanceof Error ? err.message : String(err) };
+        if (fetchOpen) applyOpenOutcome(failure, elapsedMs, previouslyOpen);
+        if (fetchMerged) applyMergedOutcome(failure, elapsedMs);
+        if (fetchIssues) applyIssuesOutcome(failure);
+      });
     });
   };
 
