@@ -6120,6 +6120,11 @@ export const INSTRUMENT_SURFACE: readonly string[] = [
   // covered by the "^\\.github/workflows/" entry above; this line is the script that job's `run:`
   // step calls). Same shape as the two entries directly above.
   "^scripts/acceptance-author-gate\\.mjs$",
+  // W1-T2428: the fast lane's diff classifier. It decides which suites the `ci` and
+  // `coverage-ratchet` jobs RUN, so a diff touching it changes what those gates measure — the
+  // definition of this surface. Same shape as the three entries directly above: rule logic called
+  // from a `run:` step of an unconditional, required ci.yml job.
+  "^scripts/diff-class\\.mjs$",
 ];
 
 const INSTRUMENT_SURFACE_RE = new RegExp(INSTRUMENT_SURFACE.join("|"));
