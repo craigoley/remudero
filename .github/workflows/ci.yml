@@ -398,12 +398,13 @@ jobs:
         # passing, asserting test. `--enable-source-maps` makes Node translate V8 coverage positions
         # through tsx's inline source map back to the real .ts line before emitting DA: records, so the
         # two line-numbering schemes (git diff vs. lcov) finally agree.
-        # W1-T255: routed through scripts/test-with-retry.mjs, same as the ci job's Test step
-        # above -- on a red run, the WHOLE command (including the lcov write) retries exactly
-        # once and the SECOND run's coverage/lcov.info is what coverage-ratchet/diff-coverage
-        # below consume, so the artifact stays one coherent, single-run document rather than a
-        # per-test patchwork. On a green run the underlying node invocation still runs exactly
-        # once -- zero behavior change from before this task.
+        # W1-T255 IS NO LONGER IN FORCE HERE, AND THIS BLOCK SAID THE OPPOSITE UNTIL 2026-08-28.
+        # It described this step as "routed through scripts/test-with-retry.mjs, same as the ci
+        # job's Test step above", which the ruling below REVERSES: the retry is gone from this job
+        # and stays in `ci`. A comment left asserting the retired wiring is worse than none — it is
+        # the first thing a reader consults when the job misbehaves, and it would have sent them
+        # looking for a second pass that no longer happens. The wrapper's rationale still applies
+        # verbatim to the `ci` job; read it there.
         run: |
           [ "${GITHUB_EVENT_NAME}" = "pull_request" ] || { echo "W1-T1033: coverage-ratchet is PR-only; skipping the real test-with-coverage run on a ${GITHUB_EVENT_NAME} event (see this job's own comment above)."; exit 0; }
           CLASS="${{ steps.classify.outputs.class }}"
