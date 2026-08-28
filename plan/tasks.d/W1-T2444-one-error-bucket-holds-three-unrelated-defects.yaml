@@ -1,0 +1,182 @@
+- id: W1-T2444
+  title: "ONE ERROR BUCKET HOLDS THREE UNRELATED DEFECTS WITH DISJOINT WINDOWS, SO EVERY RATE QUOTED FROM IT DESCRIBES NO REAL PROCESS — `sweep.fix.error` is 135 distinct rows splitting 55/42/38 into a shared worker home, a shared git config lock and GitHub quota exhaustion, and `checkout-B` ENDED three days BEFORE `sigkill` BEGAN, so the union rate averages over periods in which two of the three classes were not firing at all"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 15.00
+  files: [src/run-task.ts, test/fix-error-class-field.test.ts]
+  origin: "operator-brief#fix-error-bucket-three-defects-2026-08-28"
+  plan_refs: ["W1-T2441", "W1-T2443", "W1-T2440", "W1-T2402", "W1-T1127", "W1-T2383"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE ID. Eight surfaces swept at base 21def697, anchored `W1-T2444([^0-9]|$)` with a `[0-9]`
+    class and never `\d`. SURFACE 1 READS 1: `refs/rmd-id/W1-T2444` against 557 refs, control
+    W1-T2442/2443 = 2. Shard filenames 0 of 689 and declared `- id:` lines 0 of 944, control
+    W1-T2441 = 1 on both. The open set was enumerated FIRST over REST under a structural guard
+    (array, length 2): titles 0 CASE-SENSITIVELY, bodies 0 over 11,472 bytes, head branches 0.
+    ⚠ SURFACE 4 HAS NO CONTROL — neither open PR title carries ANY `W1-T` id, so that zero rests
+    on the anchor alone and is recorded as such rather than as a passed check. Merged trailers 0
+    of 99 (control 41) and merged subjects 0 of 99 (control 59) are MERGED-ONLY surfaces whose
+    zeros are coverage, never evidence. No surface was unreadable; had one been, it would read
+    UNREAD here and not 0.
+
+    ── THE MEASUREMENT, AND THE CLASSIFIER IT RESTS ON ────────────────────────────────────────
+
+    Three-form union at the CONFIG root (`/home/craigoleyagent/rmd-state2/state`): 0 `.gz`, 43
+    plain, 1 live, 530,740 rows. PER-FORM READ CONTROL on the step itself — gz 0, plain 179, live
+    0 — so the `.gz` zero is coverage (there are no such files) and the live zero is real. After
+    de-duplicating rotations on `(ts, message)`: 135 DISTINCT rows, and the raw 179 is rotation
+    overlap, not 179 events.
+
+    THE CLASSIFIER IS THREE ORDERED MESSAGE PREDICATES, FIRST MATCH WINS, stated here so it can be
+    re-run rather than believed:
+      1. message contains `terminated by signal SIGKILL`            -> sigkill
+      2. message matches `Command failed: git\b.*\bcheckout -B\b`   -> checkout-B
+      3. message matches `Command failed: gh pr view\b`             -> gh-pr-view
+
+      sigkill      55   40.7%
+      checkout-B   42   31.1%
+      gh-pr-view   38   28.1%
+      UNCLASSIFIED  0    0.0%
+
+    ⚠ AND IT IS A LOWER BOUND, NOT A PARTITION. Only 13 of 135 rows (9.6%) carry a STRUCTURAL
+    `signal` field; the other 122 are STRING-ONLY, so the split rests on message matching and a
+    message reworded upstream reclassifies silently. The 0.0% unclassified says the three
+    predicates cover today's corpus; it does NOT say a fourth class cannot exist tomorrow.
+
+    CONTROLLED BOTH WAYS. Positively: each predicate returns non-zero (55/42/38), so none is a
+    query that cannot see its corpus. Negatively: the neighbours are counted separately and NOT
+    swept in — `fix.dispatch` 5,912, `fix.review` 4,109, `fix.ci_not_green` 1,256,
+    `sweep.fix.synthetic_task` 158, `sweep.fix.uncreditable_head` 133, `fix.exhausted` 36,
+    `fix.false_block` 4. The selector is `step == "sweep.fix.error"` exactly, never a prefix.
+
+    ── WHY EVERY UNION RATE IS MEANINGLESS: THE WINDOWS ARE DISJOINT ──────────────────────────
+
+    THIS IS THE FINDING, and it is stronger than "the bucket is confusing".
+
+      class        n    own window                                     span-rate  days-with-rows
+      sigkill      55   2026-08-25T20:20 -> 2026-08-28T13:25            20.3/day   4  -> 13.8/day
+      checkout-B   42   2026-08-20T14:07 -> 2026-08-22T16:15            20.1/day   3  -> 14.0/day
+      gh-pr-view   38   2026-08-16T12:08 -> 2026-08-27T20:45             3.3/day   7  ->  5.4/day
+
+    `checkout-B` STOPPED on 2026-08-22 and `sigkill` STARTED on 2026-08-25. They never overlap. A
+    union rate therefore averages a class over days on which it emitted nothing, and describes no
+    process that was ever running. The union reads 135 over a 12.05-day span = 11.2/day, or 135
+    over 11 days-with-rows = 12.3/day.
+
+    ⚠ AND THE BRIEF'S TWO EXAMPLES OF HARM NEED CORRECTING, WHICH MAKES THE REAL CASE STRONGER.
+    "13.8/day against a true 20.3" is NOT a wrong figure against a right one: both are the SIGKILL
+    class, and they differ only in DENOMINATOR — 13.8 divides by the 4 days that carry rows, 20.3
+    by the 2.71-day elapsed span. Each is correct for its own question. The defect is that the
+    bucket gives a reader no way to know WHICH denominator a quoted rate used, or which class it
+    applied to. The 27/day figure is reproducible only as 135 / 5 days, and NO class window and no
+    union window is 5 days long, so that one has no denominator this shard can find at all.
+
+    ── THE THREE CLASSES, DIAGNOSED ───────────────────────────────────────────────────────────
+
+    (1) SIGKILL — 55 rows, ONGOING, one host (`1abc274530a9`), 10 of 20 run_ids carry three or
+    more. ROOT-CAUSED AND OWNED BY W1-T2441 (`51db5367` added `runId` to `fixArgs`, so every fix
+    spawn in one daemon run shares `worker-home-DAEMON-<epoch>` and the first to exit rmSyncs it).
+    CITED, NOT RE-DERIVED HERE.
+
+    (2) CHECKOUT-B — 42 rows, and it is NOT undiagnosed. The full message is:
+        `Command failed: git -C /home/node/Remudero/worktrees/sweep-<task>-<epoch> checkout -B
+         run-<task>-<epoch> origin/run-<task>-<epoch>`
+        `error: could not lock config file /home/node/Remudero/remudero/.git/config: File exists`
+        `error: unable to write upstream branch configuration`
+    `checkout -B` writes upstream tracking config, and a linked worktree writes it into the
+    CANONICAL CLONE's `.git/config`, not its own. Concurrent sweep worktrees therefore contend for
+    one lockfile.
+
+    DOES IT SHARE A MECHANISM WITH SIGKILL? IT SHARES THE SHAPE AND NOT THE RESOURCE, and the
+    distinction decides whether W1-T2441 fixes it. Both are concurrent fix spawns in one daemon run
+    contending over something shared across the RUN rather than owned per CALL — the same family as
+    `spawnWorker`'s "UNIQUE to this call" invariant. But the resource is the clone's config
+    lockfile, not the worker home; the window is disjoint; the host is different (39 of 42 on
+    `5935b6b32a81`, versus all 55 sigkills on `1abc274530a9`); and nothing in W1-T2441's remedy
+    touches `git config` locking. IT IS ALSO DORMANT — no row since 2026-08-22T16:15, six days.
+
+    (3) GH-PR-VIEW — 38 rows, and the brief's hypothesis is CONFIRMED FROM THE LEDGER, not inferred
+    from plausibility: 37 of 38 carry, verbatim in the message,
+        `GraphQL: API rate limit already exceeded for user ID <n>`
+    The 38th is `HTTP 503: No server is currently available to service your request`, a different
+    transient that this classifier's third predicate happens to cover.
+
+    ⚠ AND THE BRIEF CONFLATES TWO DIFFERENT LIMITS. All 37 name GRAPHQL — the PRIMARY GraphQL
+    budget, which IS visible in `gh api rate_limit` under `.resources.graphql`. The limit that made
+    `gh api rate_limit` report `remaining: 5000, used: 0` while every real call 403'd is the
+    SECONDARY (abuse) limit on REST, which that endpoint cannot see. The ledger rows are the first
+    kind, not the second. Both are real; only one is in this bucket.
+
+    WHAT WOULD MAKE IT COUNTABLE. The rows carry exactly ten field names — `ts`, `step`, `host`,
+    `lane`, `run_id`, `task_id`, `pr_number`, `error`, `signal`, `cost_usd`. A 403 is countable
+    today only by substring. `error` already holds the cause; what is missing is a field that
+    SURVIVES a reword.
+
+    ── THE COST, BEYOND CONFUSION ─────────────────────────────────────────────────────────────
+
+    A single-cause story covers at most 40.7% of the bucket. W1-T2441 removes that 40.7%;
+    `checkout-B` is already dormant; so the LIVE bucket after W1-T2441 is `gh-pr-view` alone at
+    3.3/day over its own span. Any reader who takes "sweep.fix.error is running at N/day" as one
+    problem's rate is wrong by construction, and no amount of care in the reading fixes it, because
+    the row does not carry the class.
+
+    ── THE REMEDY, PRICED, WITH NO NEW STEP NAME AND NO REWRITE ───────────────────────────────
+
+    ⚠ NOT PROPOSED, EXPLICITLY: a new step name, splitting `sweep.fix.error` into several steps, or
+    any backfill that rewrites history. The 135 existing rows stay exactly as they are.
+
+    OPTION A — A STRUCTURED `class` FIELD GOING FORWARD. There is exactly one seam:
+    `dispatchFixCatchOutcome` (`src/run-task.ts:24801`) is pure, exported, and already the sole
+    shaper of `ledgerFields`; the write site (`src/run-task.ts:25599`) merely spreads it. It
+    already sets `signal`/`cost_usd` conditionally, so a conditional `class` is the SAME shape the
+    row already has — precedent, not a new convention. Cost: one pure function, one test file, no
+    new step, no ledger-retention change (the step is unchanged, so
+    `DECISION_RELEVANT_LEDGER_STEPS` is untouched). Benefit: from the day it ships, a rate can name
+    its class. It does NOT improve the 135 historical rows.
+
+    OPTION B — NOTHING. Defensible, and the honest case for it is: W1-T2441 removes 40.7%,
+    `checkout-B` has not fired in six days, and what remains is one small class whose cause is
+    already legible in its own message text. On that reading the bucket stops being confusing
+    because it stops being mixed, and a `class` field buys accuracy nobody needs.
+
+    THE RECORD THIS TASK PROPOSES, WHICHEVER IS CHOSEN: the three-way split, its classifier, its
+    controls and the disjoint-window finding above are the durable artifact. If Option B is taken,
+    that record is the whole deliverable and this task retires with it; the next reader then has
+    the denominator problem stated instead of rediscovering it from a rate that looked like one
+    number.
+
+    RISK BAND. `risk: high`, and the band is RULE 19'S SPAN, NOT BLAST RADIUS — nothing here
+    touches a gate, a ratchet, or a workflow, and the change is one conditional field on one pure
+    function.
+
+    ⚠ AND THE SPAN IS 2 FOR A REASON WORTH RECORDING, because it is not the one it looks like.
+    `subsystemsOf` (`src/lib/task-linter.ts`) derives ONE id per entry in `files:` via
+    `moduleIdFromPath`, and a TEST FILE'S OWN STEM IS AN ID. So
+    `[src/run-task.ts, test/fix-error-class-field.test.ts]` reads as TWO concerns —
+    `run-task` and `fix-error-class-field` — not as "a module and its test". This shard was first
+    filed at `risk: medium` on the reading that one source module plus its test is a narrow span,
+    and `lint-plan` refused it in as many words: *"spans 2 distinct subsystems/concerns
+    (fix-error-class-field, run-task) at risk:medium — Rule 19: raise to risk:high or decompose"*.
+    THE CONSEQUENCE FOR ANY FUTURE FILING: a task whose test file does not share its source's stem
+    spans 2 and must be `high`, however small the change. `risk: high` is the Rule 19 exemption
+    (`sizingViolation` returns early on it), never a claim that this task is dangerous.
+
+    ── OWNED ELSEWHERE, NOT CLAIMED HERE ──────────────────────────────────────────────────────
+
+    The SIGKILL cause is W1-T2441's. The uncreditable-head reason code is W1-T2443's (#3229,
+    merged). The rate-limit CONSUMER — what the fleet does when the budget is spent — is W1-T2440's.
+    This task owns only the observation that one step name carries three of them.
+  acceptance:
+    - claim: "the class of a fix-dispatch failure is recorded structurally rather than only in prose"
+      proof: "unit test: test/fix-error-class-field.test.ts"
+    - claim: "the existing signal and cost fields are unchanged and still conditional"
+      proof: "unit test: test/fix-error-class-field.test.ts"
+    - claim: "an unrecognised failure is left unclassified rather than forced into a class"
+      proof: "unit test: test/fix-error-class-field.test.ts"
+    - claim: "no new ledger step is introduced and the step name is unchanged"
+      proof: "unit test: test/fix-error-class-field.test.ts"
