@@ -1,0 +1,127 @@
+- id: W1-T2430
+  title: "THE CANCELLED-CHECK RE-QUEUE IS TRAPPED BEHIND A SPEND BOUND IT COSTS NOTHING TO CROSS — `lightPassActionable` admits `blocked-fixable` only under `fixRungAllowed` because that lane's ACTION is `dispatchFix`, but the same case now also carries a re-queue whose whole action is one POST that spawns no worker"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 25.00
+  files: [src/run-task.ts, test/light-pass-requeue-admission.test.ts, .github/workflows/ci.yml]
+  origin: "oper#requeue-lane-unreachable-from-light-pass-2026-08-28"
+  plan_refs: ["W1-T1211", "W1-T1223", "W1-T2283", "W1-T1041", "W1-T2407", "W1-T356", "W1-T1066"]
+  status: queued
+  attempts: 0
+  rationale: |
+    **THIS IS ONE DEFECT, NOT TWO, AND THE SECOND ONE IS ALREADY FIXED.** The commissioning brief
+    named two independent reasons the re-queue could not reach a cancelled `coverage-ratchet`. Only
+    the first survives at head; the second describes behaviour that W1-T2283 already removed.
+
+    **THE SURVIVING DEFECT — THE LANE IS INSIDE A SPEND GATE IT DOES NOT SPEND AGAINST.**
+    `lightPassActionable` (`src/run-task.ts`) is three lines:
+    `post-review` always admits; `blocked-fixable` and `conflicted` admit only under
+    `fixRungAllowed`; everything else refuses. Its own doc gives the reason in terms — the
+    restriction's justification is "spend-and-capacity ... and of those five lanes ONLY
+    `dispatchFix` spawns a worker."
+
+    The cancelled-check re-queue lane sits inside that same `case`. Measured at this base: the
+    `deps.actionable` gate is `src/lib/sweep.ts:5907`, `case "blocked-fixable":` is `:5966`, and the
+    `cancelledRequiredChecks` lane is `:6053`, inside both. Its entire action is
+    `deps.requeueCheck` -> `POST actions/jobs/{id}/rerun` (W1-T1223, "THE JOB, NEVER THE RUN"). It
+    spawns nothing. So a bound whose stated reason is worker spend is holding a lane that spends no
+    worker.
+
+    **AND THIS IS W1-T1211'S OWN ARGUMENT RECURRING ONE LEVEL DOWN, AGAINST A LANE THAT DID NOT
+    EXIST WHEN IT WAS WRITTEN.** That task's doc says "the blanket is wider than its reason for
+    exactly one case" and then, verbatim, "The other four lanes are DELIBERATELY UNCHANGED (design
+    note iii) — widening the blanket further is a separate argument this task does not make." This
+    shard is that separate argument. W1-T1211 is CITED, NOT RE-FILED, and its own widening is
+    untouched.
+
+    **THE SECOND REASON DOES NOT EXIST AT HEAD — RE-TESTED BY EXECUTION, NOT BY READING.** The brief
+    holds that `cancelledRequiredCheckNames` filters to branch protection's required contexts and so
+    drops `coverage-ratchet` before its CANCELLED conclusion is read. That was true before W1-T2283
+    and its doc says so. Driven directly at this base with the live shape — `coverage-ratchet`
+    CANCELLED, `ci-gate` FAILURE, required `{remudero-review, ci-gate}` — it returns
+    `["coverage-ratchet"]`. Controls: an empty required set returns `[]` (branch protection
+    unreadable still refuses), and a rollup with nothing cancelled returns `[]`.
+
+    **SO THE SURVIVAL TEST RESOLVES TO ONE.** Fix the admission and the derivation still names the
+    cancelled job correctly, because it already does. Fix the derivation — there is nothing to fix —
+    and the admission still blocks the lane on every light pass, for every cancellation. One defect
+    survives the other's repair; the other has no defect left to survive. Filing two here would be
+    the span that retired W1-T2413.
+
+    **THE RECURRENCE, RE-DERIVED, WITH TWO CORRECTIONS TO THE BRIEF'S FIGURES.** Over 55
+    `coverage-ratchet` jobs on recent pull-request runs: 48 successes, p50 1114s, p90 1383s — and
+    **max 2167s, not 1414s**. Four cancellations at 2355 / 2360 / 2361 / 2361s, on four DISTINCT
+    heads. That is 4 of 55, about 7%.
+
+    **THE GAP IS 188 SECONDS, NOT 946.** The brief's figure is the distance from p90; from the
+    slowest actual success it is 188s, and a `failure` also ran 2176s. The "hangs, not slow runs"
+    reading therefore does NOT rest on a wide gap, and should not be argued from one.
+    **IT RESTS ON THE CLUSTERING**: four cancellations inside a six-second band against a 2340s cap
+    is a job being killed at a ceiling, not four runs that happened to finish at the same moment.
+    A run that merely ran long would land scattered.
+
+    **WHICH IS WHY THE CAP IS NOT THE LEVER, AND THIS SHARD PROPOSES NOTHING ABOUT IT.** Raising
+    `timeout-minutes` lengthens each stall and changes nothing else; removing `coverage-ratchet` is
+    not on the table; and nothing here paces, throttles or sleeps (W1-T1066). The hang's own CAUSE
+    is W1-T2407/W1-T356's and is not claimed here. This shard makes the EXISTING remedy reachable
+    on the pass that actually runs.
+
+    **RECORDED, NOT RE-FILED.** The re-queue itself is W1-T1223's. The light-pass admission rule is
+    W1-T1211's. The harness duplication is W1-T1041's. The hang's cause is W1-T2407/W1-T356's. The
+    derivation's widening was W1-T2283's and is already merged.
+  design: |
+    **WHAT CHANGES: ONE PREDICATE, ONE LANE.** `lightPassActionable` must admit the disposition when
+    the pass's available action is a re-queue rather than a fix dispatch. It must NOT admit
+    `blocked-fixable` for the purpose of `dispatchFix` when `fixRungAllowed` is false — the spend
+    bound stays exactly where it is for the lane it was written for.
+
+    **WHY THAT CANNOT ADMIT ANYTHING THAT SPENDS.** `selectReviewAdmission`'s one-per-pass bound
+    exists because `rmd review` is a spawning verb. The re-queue is not: its action is a single
+    `POST actions/jobs/{id}/rerun`, no worktree, no worker, no model tokens. The widening must be
+    scoped so that the only new thing a light pass may do is that POST — proved by a test that
+    admits the re-queue and still refuses `dispatchFix` on the same disposition with
+    `fixRungAllowed` false.
+
+    **COST OF BEING WRONG: ONE EXTRA API CALL PER PASS.** If the widening admits a pass that finds
+    no cancelled check, the lane reads `cancelledRequiredChecks` and does nothing — the same read
+    the full sweep already performs. There is no second worker, no second review, no dollar.
+
+    **THE ONE-LINE RIDE-ALONG.** `.github/workflows/ci.yml`'s own comment attributes the
+    `coverage-ratchet` hang to the `npx playwright install` step, citing PR #2150. Measured here:
+    all four cancellations in the sample died on the `Test with coverage` step, none on the
+    playwright step. The comment is a false pointer at the file the next reader opens first, and
+    correcting it is one line. It does not change what any step does.
+
+    **WHAT MUST NOT CHANGE.** `fixRungAllowed` still gates `dispatchFix`. The other four lanes stay
+    as W1-T1211 left them. `cancelledRequiredCheckNames` is untouched — it already works.
+    `REQUIRED_CHECK_FAIL`, the `required.size === 0` refusal and the `REVIEW_CONTEXT` exclusion all
+    stay. No cap moves, no check is removed, nothing paces.
+  acceptance:
+    - claim: "a light pass admits the cancelled-check re-queue lane"
+      proof: "unit test: test/light-pass-requeue-admission.test.ts"
+    - claim: "the same pass still refuses to dispatch a fix when the fix rung is not allowed"
+      proof: "unit test: test/light-pass-requeue-admission.test.ts"
+    - claim: "the admitted lane's only action is one re-queue call and it spawns no worker"
+      proof: "unit test: test/light-pass-requeue-admission.test.ts"
+    - claim: "a pass with no cancelled check admits the lane and takes no action"
+      proof: "unit test: test/light-pass-requeue-admission.test.ts"
+    - claim: "the other light-pass lanes are admitted exactly as they were"
+      proof: "unit test: test/light-pass-requeue-admission.test.ts"
+    - claim: "the workflow comment names the step the hangs actually died on"
+      proof: "unit test: test/light-pass-requeue-admission.test.ts"
+  note: |
+    RISK BAND IS RULE 19'S SPAN, SET UP FRONT. `files:` crosses a runtime predicate
+    (`src/run-task.ts`), its test, and a CI workflow comment (`.github/workflows/ci.yml`) — two
+    concerns, so `risk: medium` would fail sizing. The change itself is a three-line predicate and a
+    comment.
+
+    ONE TASK WAS FILED, NOT TWO, AND THE REASON IS IN THE RATIONALE: the brief's second defect was
+    re-tested by execution and does not exist at this base. No second id is named for minting
+    because there is no second subject.
+
+    THE FIGURES HERE ARE THIS BASE'S. The brief's line numbers (5066/5123/5210) had drifted to
+    5907/5966/6053 by the time this was written; cite the symbols, not the numbers.
