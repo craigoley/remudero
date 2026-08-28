@@ -54,6 +54,7 @@ import {
   type SecurityRunner,
   lostWorkerHomeGrants,
   type WorkerHomeGrantOutcome,
+  type WorkerHomeReapResult,
 } from "./worker-home.js";
 import {
   buildContainedSpawnFn,
@@ -457,6 +458,42 @@ export function workerLedgerFields(r: WorkerResult): {
     // guessed" discipline `max_turns` above already keeps.
     worker_duration_ms: r.workerDurationMs,
   };
+}
+
+/**
+ * W1-T2441: the fields the previously-discarded {@link WorkerHomeReapResult} becomes once
+ * observed — target/reason/spawn-identity, named so a query over them can answer the falsifier
+ * this task's own filing could not close ("a `worker-home-DAEMON-<runid>` removal racing a live
+ * sibling spawn — a reap and a still-running child on the same path, both timestamped").
+ *
+ * Pure — {@link spawnWorker}'s `finally` is the only real caller and the default sink
+ * ({@link defaultLogHomeReap}) is a thin `console.error` wrapper around this, so a test can drive
+ * every arm (`guard-rejected` / `absent` / reaped-true / a caught error) with no process spawned.
+ *
+ * NOT a ledger row: this module writes no ledger rows by design (see `workerLedgerFields`'s own
+ * "carried on the RESULT rather than logged here" note above `lostGrants`) — reap visibility is
+ * diagnostic-only and, per this task's own filing, deliberately does NOT belong in
+ * `DECISION_RELEVANT_LEDGER_STEPS`: nothing downstream reads it to decide anything, so adding it
+ * there would widen this change's span for nothing.
+ */
+export function workerHomeReapLogFields(
+  result: WorkerHomeReapResult,
+  spawn: { runId?: string; taskId?: string },
+): Record<string, unknown> {
+  return {
+    step: "worker_home_reap",
+    reaped: result.reaped,
+    target: result.target,
+    reason: result.reason,
+    run_id: spawn.runId,
+    task_id: spawn.taskId,
+  };
+}
+
+/** Default {@link SpawnWorkerArgs.logHomeReap} sink — one JSON line to stderr, matching this
+ *  file's other best-effort exit-path diagnostics (e.g. `assertWorktreeBaseCurrent`'s `warn`). */
+function defaultLogHomeReap(result: WorkerHomeReapResult, spawn: { runId?: string; taskId?: string }): void {
+  console.error(JSON.stringify(workerHomeReapLogFields(result, spawn)));
 }
 
 // ── Toolchain resolution (W1-T113: the vanished-binary incident) ───────────
@@ -900,6 +937,26 @@ export interface SpawnWorkerArgs {
    * reviewer's and the architect's own direct `spawnWorker` calls omit it and are unaffected.
    */
   clockBound?: { boundMs: number; now?: () => number; pollMs?: number };
+  /**
+   * W1-T2441: observe the per-spawn worker-home reap this call's teardown already runs
+   * (`reapWorkerHome`, worker-home.ts). That call ALREADY COMPUTES a {@link WorkerHomeReapResult}
+   * naming the target it removed (or didn't) and why, on every arm (`guard-rejected`, `absent`,
+   * reaped-true, a caught error) — it was previously discarded in statement position at the
+   * `finally` call site below (`grep -acE "=\s*reapWorkerHome\(" src/lib/worker.ts` read 0 before
+   * this task). Called on EVERY exit path, including a thrown error, exactly like the reap
+   * itself, and NEVER allowed to throw — see the call site's own try/catch. Omitted ⇒ the default
+   * ({@link workerHomeReapLogFields} to `console.error`, one JSON line — the same best-effort
+   * exit-path diagnostic-output discipline this file's `assertWorktreeBaseCurrent`'s `warn`
+   * already uses).
+   *
+   * INSTRUMENTATION ONLY (W1-T2441's own constraint): this does not change WHAT is reaped or
+   * WHEN. `reapWorkerHome`/`perRunWorkerHomeDir` are byte-for-byte unchanged — the home is still
+   * keyed on `runId` (so every fix spawn inside one daemon run still shares one), and a
+   * still-running sibling can still lose its home out from under it the moment another sibling
+   * exits. No remedy ships here; this only makes the already-computed fact observable, so the
+   * falsifier becomes a query instead of a guess.
+   */
+  logHomeReap?: (result: WorkerHomeReapResult, spawn: { runId?: string; taskId?: string }) => void;
 }
 
 /**
@@ -1175,7 +1232,20 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     // (W1-T115/W1-T131) applied to a resource that must not accumulate across
     // concurrent or serial spawns. Guarded (never touches the singleton root or
     // anything outside its own sibling) and best-effort — see worker-home.ts.
-    reapWorkerHome(workerHomeRoot, workerHome);
+    //
+    // W1-T2441: `reapWorkerHome` ALREADY COMPUTES which target it removed (or didn't) and
+    // why, on every arm — previously discarded here in statement position (nothing ever
+    // assigned its return value). Surfaced now via `logHomeReap`, instrumentation only: the
+    // reap itself is byte-for-byte unchanged (still best-effort, still never throws, still
+    // keyed on the shared per-RUN home `perRunWorkerHomeDir` returns) — no remedy ships here.
+    // The logger is wrapped so a caller-supplied `logHomeReap` can never turn this
+    // previously-bulletproof teardown into a new failure mode.
+    const homeReapResult = reapWorkerHome(workerHomeRoot, workerHome);
+    try {
+      (args.logHomeReap ?? defaultLogHomeReap)(homeReapResult, { runId: args.runId, taskId: args.taskId });
+    } catch {
+      // best-effort observability only — a logger failure must never surface as a failed teardown
+    }
   }
 }
 
