@@ -363,6 +363,178 @@ export function configPath(): string {
   return join(homedir(), ".config", "remudero", "config.json");
 }
 
+/**
+ * A test fixture that redirects HOME, reaches `loadConfig`/`configPath`, but hand-rolls its own
+ * seeded `config.json` at some OTHER literal path is the trap W1-T2414 is filed against: the
+ * absent file sends `loadConfig` down its `created` branch, which shells `resolveClaudeBin()` —
+ * present on every developer host, absent on a runner with no `claude` binary, so the fixture
+ * passes everywhere it is written and fails only where it is judged. `configPath()`'s own
+ * construction (`.config/remudero/config.json`) is the ONE correct shape; this is its census.
+ */
+export const FIXTURE_CONFIG_PATH_SEGMENTS = [".config", "remudero", "config.json"] as const;
+
+/** One fixture whose seeded config path does not match {@link configPath}'s own construction. */
+export interface FixtureConfigPathViolation {
+  /** The file the offending fixture lives in (repo-relative, as handed in). */
+  file: string;
+  /** `.config/remudero/config.json` — what {@link configPath} itself resolves to. */
+  expected: string;
+  /** The literal path segments this fixture actually wrote, joined the same way. */
+  found: string;
+}
+
+/** `join(...)` call ARGUMENTS, paren-matched (not a full parser — same trade-off
+ *  test/catch-erasure-ratchet.test.ts's brace matching already makes on this codebase's diffs). */
+function matchingParenArgs(source: string, openParenIndex: number): { args: string; end: number } {
+  let depth = 1;
+  let i = openParenIndex + 1;
+  for (; i < source.length && depth > 0; i++) {
+    if (source[i] === "(") depth++;
+    else if (source[i] === ")") depth--;
+  }
+  return { args: source.slice(openParenIndex + 1, i - 1), end: i };
+}
+
+/** Top-level comma-separated arguments of a call, respecting quotes and nested parens — so
+ *  `join(a, b(","), "c")` splits into three, not four. */
+function splitTopLevelArgs(argsSource: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let quote: string | null = null;
+  let current = "";
+  for (let i = 0; i < argsSource.length; i++) {
+    const ch = argsSource[i];
+    if (quote) {
+      current += ch;
+      if (ch === quote && argsSource[i - 1] !== "\\") quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === "`") {
+      quote = ch;
+      current += ch;
+    } else if (ch === "(") {
+      depth++;
+      current += ch;
+    } else if (ch === ")") {
+      depth--;
+      current += ch;
+    } else if (ch === "," && depth === 0) {
+      parts.push(current);
+      current = "";
+    } else {
+      current += ch;
+    }
+  }
+  if (current.trim().length > 0) parts.push(current);
+  return parts.map((p) => p.trim()).filter((p) => p.length > 0);
+}
+
+/**
+ * The literal string segments a `join(...)` call's arguments resolve to, in order, resolving ONE
+ * level of variable indirection (`const configDir = join(home, ".config", "remudero")` followed
+ * by `join(configDir, "config.json")` — the exact shape `test/feedback-landing.test.ts` and
+ * `test/install-checkout-command.test.ts` already use). A non-literal, unresolvable argument
+ * (`home`, `homedir()`, `tmpdir()`) contributes nothing — it is the opaque root, never part of
+ * the tail this check compares.
+ */
+function literalJoinTail(argsSource: string, varTails: Map<string, string[]>): string[] {
+  const segments: string[] = [];
+  for (const arg of splitTopLevelArgs(argsSource)) {
+    const literal = /^["'`]([^"'`]*)["'`]$/.exec(arg);
+    if (literal) {
+      segments.push(literal[1] ?? "");
+      continue;
+    }
+    const ident = /^[A-Za-z_$][\w$]*$/.exec(arg);
+    if (ident && varTails.has(arg)) segments.push(...(varTails.get(arg) ?? []));
+    // else: an opaque root expression (a bare identifier with no known tail, or a call like
+    // `homedir()`/`tmpdir()`) — deliberately contributes no segments.
+  }
+  return segments;
+}
+
+/**
+ * Every `const <name> = join(...)` (or `let`/`var`) assignment in `source`, resolved to its
+ * literal tail — the one level of indirection real fixtures in this repo actually use.
+ */
+function collectJoinVarTails(source: string): Map<string, string[]> {
+  const tails = new Map<string, string[]>();
+  const assignRe = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*join\(/g;
+  let m: RegExpExecArray | null;
+  while ((m = assignRe.exec(source))) {
+    const name = m[1];
+    if (!name) continue;
+    const openParen = assignRe.lastIndex - 1;
+    const { args } = matchingParenArgs(source, openParen);
+    tails.set(name, literalJoinTail(args, tails));
+  }
+  return tails;
+}
+
+/** Blank out comments while preserving every other character's offset (same trade-off
+ *  test/catch-erasure-ratchet.test.ts's `stripCommentsPreserveOffsets` already makes on this
+ *  codebase's own diffs) — so a doc comment DESCRIBING `configPath()`'s construction, split
+ *  across a line-wrapped `//` block, is never misparsed as a real `join(...)` call site. */
+function stripComments(source: string): string {
+  let out = source.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " "));
+  out = out.replace(/\/\/[^\n]*/g, (m) => " ".repeat(m.length));
+  return out;
+}
+
+/**
+ * Census over `files` for the trap this task is filed against — see the module-level doc comment
+ * above. Pure and injected (no fs of its own), so it drives against BOTH synthetic fixtures
+ * (proving it fires, and proving it stays quiet on the innocent cases) and the repo's own `test/`
+ * tree (proving nothing live is at risk today, W1-T2414's falsifier).
+ *
+ * A fixture is IN SCOPE only if it both redirects `process.env.HOME` and references
+ * `loadConfig`/`configPath` — anything else cannot reach `resolveClaudeBin` through this seam by
+ * construction, so it is silently skipped rather than reported (false-positive containment: a
+ * `.remudero`-writing fixture that seeds a wholly different artifact, e.g. `mounts.yaml`, and
+ * never calls `loadConfig` is not this defect). Within scope, only a `join(...)` call whose
+ * literal tail actually ENDS in `"config.json"` counts as "seeding a config file" — a fixture
+ * that never writes one is never reported (in-scope but silent, same containment).
+ */
+export function findFixtureConfigPathViolations(
+  files: { path: string; content: string }[],
+): FixtureConfigPathViolation[] {
+  const expected = FIXTURE_CONFIG_PATH_SEGMENTS.join("/");
+  const violations: FixtureConfigPathViolation[] = [];
+  for (const { path, content: raw } of files) {
+    const content = stripComments(raw);
+    const redirectsHome = /process\.env\.HOME\s*=/.test(content);
+    const reachesConfig = /\bloadConfig\s*\(|\bconfigPath\s*\(/.test(content);
+    if (!redirectsHome || !reachesConfig) continue;
+
+    const varTails = collectJoinVarTails(content);
+    const joinCallRe = /\bjoin\(/g;
+    let m: RegExpExecArray | null;
+    const seenFound = new Set<string>();
+    while ((m = joinCallRe.exec(content))) {
+      const openParen = joinCallRe.lastIndex - 1;
+      const { args } = matchingParenArgs(content, openParen);
+      const tail = literalJoinTail(args, varTails);
+      if (tail.length === 0 || tail[tail.length - 1] !== "config.json") continue;
+      const found = tail.join("/");
+      if (found === expected || seenFound.has(found)) continue;
+      seenFound.add(found);
+      violations.push({ file: path, expected, found });
+    }
+  }
+  return violations;
+}
+
+/** Render a {@link FixtureConfigPathViolation} into the human-readable line a reviewer sees —
+ *  naming both the offending file and the path `configPath()` actually expected (W1-T2414). */
+export function renderFixtureConfigPathViolation(v: FixtureConfigPathViolation): string {
+  return (
+    `${v.file}: seeds its config at "${v.found}", but loadConfig()/configPath() resolves it at ` +
+    `"${v.expected}" — this fixture will pass on every developer host and fail only on a runner ` +
+    `with no \`claude\` binary, where the absent file sends loadConfig into resolveClaudeBin() ` +
+    `(W1-T2414: "Command failed: which claude" names nothing about the config path that caused it)`
+  );
+}
+
 /** The two shared-knowledge homes {@link learningsHomes} resolves. */
 export interface LearningsHomes {
   /** See {@link userOverallLearningsHome}. */
@@ -451,10 +623,28 @@ export function globalArtifactPath(config: Config): string {
  * `execFileSync('which', ...)` runs the `which` binary directly, so it never
  * sees the interactive zsh `claude` function (FIELD FINDING 3) — it returns the
  * on-disk executable that a spawned Node process would actually exec.
+ *
+ * W1-T2414: `which` fails with a bare `Command failed: which claude` — nothing about a config
+ * path, a HOME redirect or a fixture — so a test whose fixture seeds the config somewhere
+ * `configPath()` doesn't resolve reads, on CI, as a missing binary rather than the wrong seam
+ * that reached for it. This rethrows naming the config path this call was reached from (from
+ * `configPath()` itself, not a passed-in argument — it takes none, so there is nothing to spell
+ * wrong) and WHICH branch of {@link loadConfig} entered it, via `reason`. Control flow, return
+ * type and the eager call itself are unchanged — this only makes the failure self-explaining.
  */
-function resolveClaudeBin(): string {
-  const out = execFileSync("which", ["claude"], { encoding: "utf8" }).trim();
-  if (!out) throw new Error("could not resolve `claude` binary via `which`");
+function resolveClaudeBin(reason: string): string {
+  let out: string;
+  try {
+    out = execFileSync("which", ["claude"], { encoding: "utf8" }).trim();
+  } catch (err) {
+    const cause = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `could not resolve the \`claude\` binary for config at ${configPath()} (${reason}): ${cause}`,
+    );
+  }
+  if (!out) {
+    throw new Error(`\`which claude\` returned nothing for config at ${configPath()} (${reason})`);
+  }
   return out;
 }
 
@@ -500,7 +690,7 @@ export function loadConfig(): Config {
   if (result.created) {
     try {
       const created: Config = {
-        claudeBin: resolveClaudeBin(),
+        claudeBin: resolveClaudeBin("config creation was entered"),
         root: join(homedir(), "Remudero"),
       };
       writeSync(result.fd, JSON.stringify(created, null, 2) + "\n");
@@ -510,7 +700,7 @@ export function loadConfig(): Config {
     }
   }
   const parsed = JSON.parse(result.raw) as Partial<Config>;
-  if (!parsed.claudeBin) parsed.claudeBin = resolveClaudeBin();
+  if (!parsed.claudeBin) parsed.claudeBin = resolveClaudeBin("existing config is missing claudeBin");
   if (!parsed.root) parsed.root = join(homedir(), "Remudero");
   validateConfig(parsed as Config);
   return parsed as Config;
