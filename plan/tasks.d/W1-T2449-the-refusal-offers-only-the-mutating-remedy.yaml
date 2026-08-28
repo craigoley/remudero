@@ -1,0 +1,140 @@
+- id: W1-T2449
+  title: "THE SYNC REFUSAL OFFERS ONLY THE MUTATING REMEDY AND WITHHOLDS THE READ-ONLY ONE — the off-main arm ends `Run \\`git pull --ff-only\\` yourself`, which is the one thing a reader on a detached checkout must NOT do, while `RMD_SELF_SYNC_DONE=1` appears nowhere in any refusal text; the read-only carve-out ALREADY EXISTS and is correctly sized, so this is a message defect and not a gate defect"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 10.00
+  files: [src/lib/self-sync.ts, test/self-sync-refusal-names-the-guard-env.test.ts]
+  origin: "operator-brief#readonly-verb-sync-guard-2026-08-28"
+  plan_refs: ["W1-T1134", "W1-T446", "W1-T445", "W1-T486", "W1-T2427", "W1-T126", "W1-T255"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE ID. Eight surfaces swept at base a1013597, anchored `W1-T2449([^0-9]|$)`, `[0-9]` never
+    `\d`. SURFACE 1 READS 1 against 562 refs (control W1-T2447/2448 = 2). Shard filenames 0 of 694
+    and declared ids 0 of 949, controlled on W1-T2444 = 1 on both. Open set enumerated FIRST under
+    a structural guard; merged trailers and merged subjects are MERGED-ONLY — coverage, never
+    evidence. Any surface without a constructible control is recorded VACUOUS, never 0.
+
+    ── ⚠ THE BRIEF'S TWO PREMISES ARE BOTH FALSE, AND SAYING SO IS MOST OF THE VALUE ──────────
+
+    (1) "A read-only carve-out would be new." IT ALREADY EXISTS.
+    `READ_ONLY_FRESHNESS_EXEMPT_VERBS` (`src/run-task.ts:31445`) is
+    `new Set(["doctor", "status"])`, shipped as W1-T1134, and `main()`'s gate chain consults it
+    before the blanket `else` that runs `checkCliFreshness`. Its own comment states the axis:
+    "THE GATE'S AXIS IS DISPATCH-OR-DECIDE, NOT 'WRITES NOTHING'".
+
+    (2) "`rmd inbox` WRITES NOTHING." IT SPAWNS A WORKER. Its own registry usage says `rmd inbox`
+    "drafts missing/stale candidates via a bounded, read-only Architect worker and caches them
+    state-side", and that only `--dry-run` "classifies against whatever is already cached and
+    spawns no worker". It also appends a ledger row (`src/run-task.ts:28884`). W1-T1134's comment
+    already anticipated exactly this and excluded it BY NAME with the reason: "a flag can be absent
+    and the verb still dispatch, so `sweep`/`inbox` stay OUT even though their `--dry-run` forms
+    are read-only — exempting the verb name would also exempt their non-dry-run dispatch."
+    ⚠ SO THE OBSERVED REFUSAL OF `rmd inbox` WAS THE GATE WORKING AS DESIGNED.
+
+    ── Q1: THE SPLIT, DRIVEN RATHER THAN READ — AND THE STOP CONDITION DOES NOT FIRE ──────────
+
+    Empirically driven against a real clone checked out DETACHED and diverged from its origin/main,
+    invoking each verb through the real `bin/rmd`:
+
+      REFUSED (reached the blanket `else`):  peek, check-acceptance, ledger-grep,
+                                             emissions, receipt, trace
+      RAN (exempt):                          status, doctor
+
+    So NOT every guarded verb mutates — `peek`'s own usage string begins "W1-T945: READ-ONLY tail
+    of one run's output". The stop condition the brief set does not fire, and there IS a finding.
+
+    CONTROLLED BOTH WAYS. A verb that genuinely needs a fresh base: `run-task`, `drain`, `triage`,
+    `fix`, `approve`, `review`, `lint-plan` — W1-T1134's comment names them as correctly falling to
+    the `else`, and their answer is derived from the plan and then ACTED ON. A verb that only
+    reads: `peek`, refused above. And the exempt pair RAN, which proves the carve-out mechanism
+    itself works rather than being inert.
+
+    ── ⚠ Q2: THE MEASUREMENT DEFLATES THE FINDING, AND THAT IS THE ANSWER ─────────────────────
+
+    Measured over the three-form union at the CONFIG root, every `cli.invoked` row ever written,
+    grouped by the `host` field. The detached container is `1abc274530a9` (`remudero-daemon`,
+    confirmed detached: `git symbolic-ref -q HEAD` prints nothing).
+
+      next-task-id      Remudero 346, <none> 3
+      check-acceptance  Remudero 129
+      ledger-grep       Remudero 107
+      check-proof       Remudero  50
+      peek              <none> 10, Remudero 1
+      status            Remudero  19, 1abc274530a9 2, 5935b6b32a81 1     <- EXEMPT
+      doctor            Remudero   9, 5935b6b32a81 7                      <- EXEMPT
+
+    ⚠ ZERO NON-EXEMPT READ-ONLY INVOCATIONS ON THE DETACHED HOST, ACROSS THE ENTIRE UNION. The
+    only read-only verbs ever run there are `status` and `doctor` — precisely the two W1-T1134
+    already exempted. Every other read-only invocation lands on `Remudero`, the operator host whose
+    checkout is on `main`, where this arm never fires at all.
+
+    SO THE CALLER IS ONLY EVER A HUMAN AT A SHELL. No rung, no sweep, no daemon path calls a
+    non-exempt read-only verb on a detached checkout. W1-T1134 did not merely add a carve-out; it
+    sized one correctly against a population this measurement now confirms.
+
+    ── THE ACTUAL DEFECT, WHICH IS ONE SENTENCE OF TEXT ───────────────────────────────────────
+
+    Given a human is the only caller, the brief's own instruction applies: the remedy is one line
+    of the refusal message. AND THAT LINE IS MISSING. `RMD_SELF_SYNC_DONE` appears NOWHERE in any
+    refusal text — measured, 0 occurrences in the off-main arm.
+
+    WORSE, THE REMEDY IT DOES OFFER IS THE WRONG ONE FOR THIS READER. `REMEDY_COMMAND`
+    (`src/lib/self-sync.ts:145`) is `"git pull --ff-only"`, and the off-main message ends
+    "Run `git pull --ff-only` yourself if that is really what you want." On a DETACHED head that
+    is either a no-op or precisely the base-move the guard's own preceding sentence warns against —
+    "fast-forwarding here would move your work's base out from under it". The message spends its
+    last clause offering the mutation and never names the read-only escape that would have
+    answered the question the operator actually asked.
+
+    THE FIX IS TO NAME `RMD_SELF_SYNC_DONE=1` IN THE OFF-MAIN ARM. Not a new mechanism: the env
+    var is already the documented, first-class escape (`SELF_SYNC_GUARD_ENV`,
+    `src/lib/self-sync.ts:80`), already honoured as the very first branch of `checkCliFreshness`,
+    and already the idiom every brief in this repo uses.
+
+    ── Q3: WHAT A READ-ONLY CARVE-OUT WOULD RISK, AND WHY THAT ARGUES AGAINST WIDENING IT ──────
+
+    A stale plan produces a CONFIDENT WRONG ANSWER, which is this repo's most expensive failure
+    shape: #3164 and #3168 were both judged against a plan that predated their own shards this same
+    week. A verb exempted from the freshness gate reads whatever the detached checkout happens to
+    hold, and prints it with no indication of vintage.
+
+    ⚠ SO THE RISK ARGUES AGAINST WIDENING THE SET, NOT FOR IT — and Q2 already removed the demand.
+    Widening it would trade a loud refusal (which the operator can clear in one keystroke) for a
+    silent stale read, on a population measured at ZERO. THIS TASK THEREFORE PROPOSES NO NEW EXEMPT
+    VERB.
+
+    AND IF THE SET IS EVER WIDENED BY A LATER TASK, THE CONSTRAINT IS ALREADY DERIVABLE: whatever
+    an exempted verb returns must NAME THE SHA IT READ, so a stale answer is legible as stale
+    rather than confident. That constraint is recorded here for that future reader; it is not built
+    now, because nothing is being exempted now.
+
+    ⚠ NOT PROPOSED, EXPLICITLY: weakening the guard, auto-syncing a detached head, changing the
+    entrypoint's checkout, or adding any verb to `READ_ONLY_FRESHNESS_EXEMPT_VERBS`. The guard's
+    reasoning is sound and its message says so; only its final clause is wrong.
+
+    RISK BAND. `risk: high` set UP FRONT; the band is RULE 19'S SPAN, not blast radius — the change
+    is one string. `subsystemsOf` (`src/lib/task-linter.ts`) derives one id PER `files:` entry via
+    `moduleIdFromPath` and A TEST'S OWN STEM IS AN ID, so `[src/lib/self-sync.ts,
+    test/self-sync-refusal-names-the-guard-env.test.ts]` reads as TWO concerns.
+
+    ── OWNED ELSEWHERE, NOT CLAIMED HERE ──────────────────────────────────────────────────────
+
+    The exempt set and its dispatch-or-decide axis are W1-T1134's and are not widened here.
+    `checkCliFreshness`'s own predicate is W1-T446's — untouched, as W1-T1134 was also careful to
+    state. The refusal's ledger row is W1-T486's. The stale-plan review window is W1-T2427's fifth
+    site. The freshness restart that detaches the container is W1-T126's, and the entrypoint's
+    deliberate `checkout: <sha>` is not in scope.
+  acceptance:
+    - claim: "the off-main refusal names the read-only escape as well as the mutating remedy"
+      proof: "unit test: test/self-sync-refusal-names-the-guard-env.test.ts"
+    - claim: "the guard's predicate and its refusal decision are unchanged"
+      proof: "unit test: test/self-sync-refusal-names-the-guard-env.test.ts"
+    - claim: "no verb is added to the read-only exempt set by this task"
+      proof: "unit test: test/self-sync-refusal-names-the-guard-env.test.ts"
+    - claim: "the dirty and diverged arms keep their own remedies unchanged"
+      proof: "unit test: test/self-sync-refusal-names-the-guard-env.test.ts"
