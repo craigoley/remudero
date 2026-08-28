@@ -69,15 +69,61 @@ test("GH_CALL_TIMEOUT_MS cannot fire on a healthy call — it is orders of magni
   assert.ok(GH_CALL_TIMEOUT_MS <= 120_000, "a ceiling above two minutes stops bounding the hang this exists to stop");
 });
 
-// ── THE WIRING, not just the leaf: both gateways must actually pass it. ───────────────────────
+// ── THE WIRING, not just the leaf: EVERY gh exec site must actually pass it. ─────────────────
+//
+// W1-T2440 MADE THE OLD MATCHER BLIND, AND BLIND IN THE UNSAFE DIRECTION. It hardcoded the string
+// `execFileSync("gh", args, {` — a LITERAL binary. That task legitimately made the binary an
+// EXPRESSION at two of the three sites: the warm worker shells `req.ghBin` (it runs on another
+// thread and receives its binary in the request), and the batched gateway's own default became
+// `opts.ghBin ?? "gh"` so a test proving the worker path never reaches a real `gh` cannot be
+// silently bypassed by a cache-miss read on the main thread. Both still carry the bound. But the
+// old pattern matched NEITHER, so it saw 1 site of 3 — and an unbounded `gh` added at either of
+// the two it could no longer see would have sailed straight past this guard. Widening the matcher
+// STRENGTHENS this test; it does not relax it.
+//
+// THE COUNT IS NO LONGER THE ONLY GUARD, precisely because a hardcoded count is what went stale.
+// A LOOSE scan derives the denominator independently — every `execFileSync(` whose first argument
+// is gh-shaped, options object or not — and the strict matcher must account for ALL of them. A
+// future site written in a shape neither pattern anticipated fails on that equality rather than
+// disappearing from the census.
+const GH_BIN_EXPR = String.raw`(?:"gh"|[A-Za-z_$][\w$]*\.ghBin(?:\s*\?\?\s*"gh")?)`;
 
-test("BOTH gateways in lib/status.ts bound their `gh` child — a fix applied to one leaves the other able to park the daemon", () => {
+test("EVERY gh exec site in lib/status.ts bounds its child — a fix applied to one leaves the others able to park the daemon", () => {
   const src = readFileSync(new URL("../src/lib/status.ts", import.meta.url), "utf8");
-  const execSites = [...src.matchAll(/execFileSync\("gh", args, \{[^}]*\}\)/g)].map((m) => m[0]);
-  assert.equal(execSites.length, 2, `exactly two real gh exec sites are expected here: ${execSites.length} found`);
+  // Source only — the doc comments in this file spell `execFileSync("gh", args, ...)` in prose,
+  // and counting those would inflate the census with text that executes nothing.
+  const code = src
+    .split("\n")
+    .filter((l) => !/^\s*(\*|\/\/|\/\*)/.test(l))
+    .join("\n");
+
+  const loose = [...code.matchAll(new RegExp(String.raw`execFileSync\(${GH_BIN_EXPR},`, "g"))];
+  const execSites = [...code.matchAll(new RegExp(String.raw`execFileSync\(${GH_BIN_EXPR}, args, \{[^}]*\}\)`, "g"))].map((m) => m[0]);
+
+  assert.equal(
+    execSites.length,
+    loose.length,
+    `a gh exec site exists that this matcher cannot parse — loose scan found ${loose.length}, strict found ${execSites.length}. ` +
+      `Widen the pattern rather than letting the site drop out of the census.`,
+  );
+  assert.equal(
+    execSites.length,
+    3,
+    `exactly three real gh exec sites are expected here (ghGateway's default, the prewarm worker's, ` +
+      `and buildBatchedGithub's default): ${execSites.length} found`,
+  );
   for (const site of execSites) {
     assert.match(site, /timeout: GH_CALL_TIMEOUT_MS/, `an unbounded gh exec site survives: ${site}`);
   }
+  // NEGATIVE CONTROL: this file also shells `git`, and those calls are deliberately unbounded.
+  // A matcher that swept them in would report a false violation on the very next assertion.
+  for (const site of execSites) {
+    assert.doesNotMatch(site, /execFileSync\("git"/, `the git exec sites must stay outside this census: ${site}`);
+  }
+  assert.ok(
+    /execFileSync\("git", args, \{/.test(code),
+    "premise: lib/status.ts really does carry git exec sites, so excluding them is a real exclusion and not a vacuous one",
+  );
 });
 
 test("both gateways construct their REAL default exec when no `exec` is injected — the bounded closure is the one production gets", () => {

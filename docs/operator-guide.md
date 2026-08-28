@@ -356,6 +356,41 @@ binds `0.0.0.0` inside its own network namespace rather than the tailnet address
 declarations rather than one — see [Bringing up the console
 container](#bringing-up-the-console-container-remudero-serve) in the crisis runbook.
 
+## The board pre-warm runs off the request-serving thread (W1-T2440)
+
+**What an operator sees change.** The console's board pre-warm used to shell its PR/issue walk
+synchronously, which parked the only thread serving requests for as long as the walk took — the
+console appeared hung while it was warming. The walk now runs in a `node:worker_threads` Worker, so
+requests keep being served while it refreshes. Nothing about the refresh cadence or the REST call
+bound changed; only where the walk executes.
+
+**A read taken during a warm is honest about it.** While a channel is in flight the gateway returns
+the last good rows (or an empty cache) rather than blocking, so a board fetched mid-warm can be one
+cycle stale. It is never silently wrong: `readState()` reports `in_flight`, and a channel that
+failed reports `failed` with a classified reason.
+
+**Three ways the walk can end, and all three are reported.** The Worker can reply normally, it can
+crash, or it can *exit without replying at all* — `process.exit()` inside the worker, or an external
+`terminate()`. All three settle the warm exactly once and release the in-flight flags:
+
+| ending | what the board shows |
+|---|---|
+| normal reply | fresh rows; `board_gateway.fetch_ok` |
+| crash (`error`) | `failed`, reason `unknown`, carrying the worker's own error text |
+| exit with no reply | `failed`, reason `unknown`, `prewarm worker exited with code N before reporting` |
+
+**Why that third row exists.** Only `message` and `error` were handled at first. A worker that
+exited without emitting either left the gateway's `prewarmWorker` handle set, and the guard at the
+top of the warm path (`if (prewarmWorker) return;`) then made every later warm a permanent no-op —
+the in-flight flags stayed true and the board never refreshed again short of a process restart.
+MEASURED against a worker whose whole body is `process.exit(0)`: the gateway never left
+`in_flight`. If you ever see a console whose board is stuck and whose `readState()` reads
+`in_flight` indefinitely, that is the shape to look for.
+
+**If the Worker cannot be constructed at all**, the warm falls back to the synchronous walk it
+replaced — same `ghBin`, never a differently-configured `gh` — and logs
+`prewarm worker spawn failed, falling back to a synchronous walk`. That path is slower, not wrong.
+
 ## Shipping a new CI gate: three PRs, in this order
 
 A new gate — a workflow job plus the script it runs — cannot land as one PR, and merging the
