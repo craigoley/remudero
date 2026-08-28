@@ -42,7 +42,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -335,4 +335,79 @@ test("loadConfig's creation branch still calls resolveClaudeBin unconditionally 
     /resolveClaudeBin\(/,
     "creation must still call resolveClaudeBin unconditionally, not behind a lazy seam",
   );
+});
+
+// ── (c) the OTHER failure arm: `which` succeeds and prints NOTHING ───────────────────────────
+//
+// `resolveClaudeBin` has two guards, and the test above reaches only the first (`which` exits
+// nonzero, caught and rethrown). The second — `which` exits ZERO with EMPTY stdout — is the one
+// `diff-coverage` named on this PR (src/lib/config.ts:646, the single added line with no covering
+// test). A real `which` never prints nothing for a binary it found, so that guard is defensive by
+// construction and unreachable through the PATH-stripping helper above, which is exactly why it
+// arrived uncovered.
+//
+// SHIMS THE LOOKUP TOOL, NEVER THE BINARY — the distinction this file's header discipline
+// actually draws. `withoutClaudeOnPath` above must never fake a `claude`, and it does not; here
+// there is still no `claude` anywhere. What is replaced is `which` itself, made to return the one
+// shape the real one cannot produce, because a guard against an impossible-in-practice output can
+// be proven no other way. The shim is a real executable in a temp dir prepended to PATH, removed
+// with the temp dir, and the assertion below discriminates the two arms by their DIFFERENT
+// messages — a test that merely asserted "throws" would pass against either guard and prove
+// neither.
+
+function withEmptyWhichOnPath<T>(fn: () => T): T {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-config-parity-emptywhich-"));
+  const shim = join(dir, "which");
+  writeFileSync(shim, "#!/bin/sh\nexit 0\n");
+  chmodSync(shim, 0o755);
+  const savedPath = process.env.PATH;
+  process.env.PATH = [dir, savedPath ?? ""].filter(Boolean).join(delimiter);
+  try {
+    assert.equal(
+      execFileSync("which", ["claude"], { encoding: "utf8" }).trim(),
+      "",
+      "setup sanity: the shimmed `which` must exit 0 and print nothing — the arm under test",
+    );
+    return fn();
+  } finally {
+    process.env.PATH = savedPath;
+  }
+}
+
+test("the claude lookup names the config path when `which` succeeds but resolves nothing", () => {
+  const home = fixtureHomeWithNoConfig();
+  const savedHome = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    withEmptyWhichOnPath(() => {
+      const expectedPath = configPath();
+      assert.throws(
+        () => loadConfig(),
+        (err: unknown) => {
+          assert.ok(err instanceof Error, "loadConfig must throw an Error, not swallow an empty resolution");
+          const message = (err as Error).message;
+          assert.match(
+            message,
+            /returned nothing/,
+            "this must be the EMPTY-RESOLUTION guard, not the caught-throw guard above it",
+          );
+          assert.doesNotMatch(
+            message,
+            /Command failed/,
+            "and must not be the `which` failure arm — the two guards are distinct and must stay so",
+          );
+          assert.match(
+            message,
+            new RegExp(escapeRegExp(expectedPath)),
+            "it must name the config path it was reached from, exactly as the sibling arm does",
+          );
+          assert.match(message, /creation was entered/, "and say which branch of loadConfig reached for the binary");
+          return true;
+        },
+      );
+    });
+  } finally {
+    if (savedHome === undefined) delete process.env.HOME;
+    else process.env.HOME = savedHome;
+  }
 });
