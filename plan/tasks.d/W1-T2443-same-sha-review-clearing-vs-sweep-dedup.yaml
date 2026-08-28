@@ -1,0 +1,178 @@
+- id: W1-T2443
+  title: "NOTHING HERE IS A DEFECT — A SAME-SHA REVIEW FAILURE WAS CLEARED BY A HAND-RUN `rmd review` WHILE THE SWEEP DEDUPED THIRTEEN RE-POSTS, AND THE TWO RULES THAT GOVERN THAT MOMENT POINT OPPOSITE WAYS: the post-review dedup exists so a stale verdict is cleared by A NEW HEAD, while W1-T2299's row 3.6 exists so A REPAIRED BODY can reach the reviewer WITHOUT one — the operator must rule on which wins"
+  repo: remudero
+  depends_on: []
+  type: manual
+  verify: human
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 0.00
+  files: [src/lib/sweep.ts, plan/tasks.d/W1-T2443-same-sha-review-clearing-vs-sweep-dedup.yaml]
+  origin: "operator-brief#same-sha-review-clearing-2026-08-28"
+  plan_refs: ["W1-T2299", "W1-T254", "W1-T1213", "W1-T2427", "W1-T413", "W1-T203", "W1-T990", "W1-T2442"]
+  status: queued
+  attempts: 0
+  rationale: |
+    NOTHING IN THIS RECORD IS A DEFECT AND THE SHARD MUST NOT BE READ AS ONE. Every component named
+    below behaved exactly as written and as documented: the verdict was a TRUE POSITIVE, the dedup
+    held thirteen consecutive times, the escape hatch re-judged a repaired body through the same
+    deterministic judge and passed it honestly, and the reviewer identity fell back exactly as its
+    own doc says it will while unprovisioned. THE QUESTION IS WHETHER THE COMPOSITION OF THOSE
+    CORRECT PARTS IS WHAT THE OPERATOR WANTS. No remedy is proposed and none should be inferred.
+
+    THE ID. Eight surfaces swept before a byte of this file was written, anchored
+    `W1-T2443([^0-9]|$)` with a `[0-9]` class and never `\d`. SURFACE 1 READS 1 — the reservation
+    exists, which is the required reading. Shard filenames on origin/main 0 of 687; declared `- id:`
+    entries 0; head branches 0 of 147 checked BOTH cases; merged `Remudero-Task:` trailers 0 of 615;
+    merged subjects 0 of 2,550. Controls fired on every surface reported: W1-T999 on reservation
+    refs, W1-T1000002 and W1-T1000003 on filenames and declared ids, 94 live `run-*` heads on the
+    branch surface, W1-T2439 and 615 trailers on the trailer surface, W1-T2440 on subjects. The
+    ANCHOR-LEAK probe ran on a POPULATED band and discriminated: bare `W1-T244` matches 5 refs
+    unanchored and 0 anchored, so the anchor is doing real work rather than reading zero because the
+    band is empty.
+
+    ⚠ TWO SURFACES COULD NOT BE READ AND ARE SAID SO RATHER THAN REPORTED AS ZERO. Open-PR TITLES
+    and open-PR BODIES both require REST, and GitHub's SECONDARY (cadence) rate limit was in force
+    throughout this filing — `gh api rate_limit` read core 5000/5000 while list calls returned 403,
+    so the ceiling was call spacing, not budget. IN PLACE OF THEM, and only in place of them, every
+    remote head's TREE was read locally with no API call: 287 heads fetched, 252 carrying a
+    `plan/tasks.d` tree and 35 predating that directory entirely (each named, none silently
+    dropped), and the COVERAGE CONTROL — the oldest shard id on main, W1-T173 — fires on 252 of 252.
+    Zero hits for this id. THAT SUBSTITUTE COVERS A SHARD FILE ON AN OPEN HEAD; IT DOES NOT COVER A
+    TITLE OR BODY THAT MENTIONS THE ID WITHOUT ONE, and that residual gap is real.
+
+    (1) WHAT WAS MEASURED, ON #3219, 2026-08-28. At 13:12:18.610Z a `review.posted` landed
+    `state: "failure"`, and it was a TRUE POSITIVE: the body carried an attributive scope shorthand
+    before a changeset noun, which `shorthandIsAboutChangeset` (W1-T413) correctly reads as a claim
+    about the PR's own diff. That is verified BY EXECUTION rather than by reading the verdict —
+    the current body returns `[]` from `bodyContradictsDiff`, and a control injecting the original
+    phrasing fires exactly as the verdict read. From 13:23:22 to 13:36:42 THIRTEEN sweep cycles ran
+    roughly seventy seconds apart and every one declined with the same sentence: a verdict was
+    already DELIVERED for W1-T2428@2ba669fb, the re-post deduped. At 13:32:24Z the body was repaired
+    by `gh api --method PATCH`. At 13:37:24Z `rmd review 3219` was run by hand from an operator
+    worktree. At 13:38:05Z `review.posted` landed `state: "success"` ON THE SAME SHA, and the PR
+    merged three seconds later.
+
+    (2) WHY EACH HALF IS CORRECT, READ FROM THE SOURCE AT THIS BASE. The dedup arm lives in
+    `deriveDisposition`'s `post-review` case in `src/lib/sweep.ts`: it keys `taskId@headSha`, sets
+    `alreadyDone` when `prior.reviewDelivered` holds that key, and its own comment states the
+    intent without hedging — a DELIVERED verdict suppresses this head forever. That is W1-T254's
+    outcome-keying, W1-T1213's delivered/refused split, and W1-T2427's naming of the stand-down, all
+    working. Row 3.6 of the SAME module's disposition table is W1-T2299's VERDICT OVERTAKEN BY
+    ACTIVITY arm, and its rationale is quoted in the table itself: a corrected PR body cannot reach
+    the reviewer that judged the old one. It admits a failing head that has seen activity since its
+    verdict posted, precisely so a corrected input can be re-judged.
+
+    THE TENSION IS THAT BOTH APPLY AT ONCE HERE, AND THEY RESOLVE IN OPPOSITE DIRECTIONS. Row 3.6
+    admits the head to post-review because the body was edited after the verdict; the action gate
+    then declines because a verdict was already delivered for that exact key. THE DISPOSITION AND
+    THE ACTION GATE ARE SEPARATE STAGES, so neither overrides the other and neither is wrong — the
+    head is offered and the offer is not acted on, thirteen times, deterministically.
+
+    ⚠ AND THE ESCAPE HATCH IS NOT A BYPASS, WHICH IS WHAT MAKES THIS A POLICY QUESTION RATHER THAN
+    AN INCIDENT. `docs/review-gate.md` documents `rmd review <n>` as invoking the SAME deterministic
+    `judgeReview`, never a bypass and never a `--force`, and the posted description string is
+    `judgeReview`'s own format. It re-judged a repaired body and passed it honestly. Had the body
+    not been repaired it would have failed again.
+
+    (3) Q1 — STATED EXACTLY, AND DELIBERATELY NOT ANSWERED HERE. SHOULD THE DOCUMENTED ESCAPE HATCH
+    BE USABLE TO CLEAR A SAME-SHA FAILURE THAT THE SWEEP IS DELIBERATELY DEDUPING? Both answers are
+    defensible from the code as written. If YES, row 3.6's stated purpose is served by an operator
+    running a verb rather than by the sweep, and the dedup's forever-suppression is the safety
+    property that makes an unattended fleet tractable. If NO, then row 3.6 is unreachable for the
+    case it names — a body repair on an unchanged sha — and the arm's intent is only ever satisfied
+    by a new head, which is the thing the dedup already assumed. THIS SHARD RECORDS THE QUESTION AND
+    LEAVES IT OPEN.
+
+    (4) Q2 — THE POPULATION, AND WHY THE ONE READABLE CORPUS CANNOT ANSWER THE QUESTION ASKED.
+    Measured over the THREE-FORM UNION at the config root: 666 `.gz` archives, 6 plain archives, 1
+    live file, with a per-form read control on `run.start` reading 257,438 / 1,314 / 200 and a
+    per-form control on the event itself, `review.posted`, reading 428,142 / 1,425 / 201. Across
+    1,624 deduplicated `review.posted` rows covering 1,375 distinct head shas, with ZERO blind rows
+    (every row carried a `head_sha`), 118 SHAS SHOW A `success` AFTER A `failure` ON THE SAME SHA.
+
+    ⚠ THAT FIGURE DOES NOT ANSWER THE QUESTION, AND SAYING SO IS THE POINT. The case that prompted
+    this brief IS NOT AMONG THE 118, and cannot be: this corpus holds exactly three rows for sha
+    2ba669fb — `review.pending_posted` at 13:37:28, `review.posted state:"success"` at 13:38:05, and
+    `automerge.armed` at 13:38:09 — and NO `failure` row at all. The failing verdict was produced on
+    the other host. THE PAIR IS SPLIT ACROSS TWO CORPORA, so neither host alone can see it, and a
+    single-corpus count systematically undercounts exactly the class of interest.
+
+    ⚠ AND THE SECOND CORPUS IS UNREADABLE FROM HERE, WHICH IS REPORTED RATHER THAN SCORED AS ZERO. A
+    filesystem sweep of this machine finds ONE ledger corpus, 673 files under the config root; no
+    fleet-side mirror exists locally. The dedup stand-down sentence reads 0 in all three forms here
+    — and that zero is a WINDOW zero, not an absence: the live file's newest `sweep.disposed` row is
+    2026-08-13T00:30:31Z, so this corpus's sweep coverage does not reach today's 13:23–13:36 window
+    at all, while the family control reads 2,547,918 / 10,141 / 1,157. A readable corpus is not a
+    corpus that covers the window.
+
+    SO THE HONEST READING IS: n IS AT LEAST 1 FOR THE PRECISE CLASS — a hand-run verb clearing a
+    same-sha failure the sweep was actively deduping — AND ITS TRUE SIZE IS NOT MEASURABLE FROM ONE
+    HOST. The 118 is a superset of a DIFFERENT class (any same-sha re-review, most of them predating
+    the dedup) and must not be quoted as this population. A policy change argued from n=1 is the
+    shape this repo has declined before, and this shard argues for none.
+
+    (5) Q3 — WHY THE IDENTITY LOOKED ALARMING AND WAS NOT. The passing status was posted under
+    `cao825`, the operator's own GitHub account, which reads at first glance like a human hand
+    stamping a required check. IT IS NOT. `REMUDERO_REVIEWER_TOKEN` is UNPROVISIONED, and
+    `src/lib/review.ts` says in its own words that the feature ships DARK until an operator
+    provisions the identity and sets both env vars; unset, `postReviewStatus` falls back to ambient
+    `gh` auth, byte-identical to pre-W1-T203 behaviour. The account is simply whatever `gh` on the
+    operator's Mac is authenticated as.
+
+    ⚠ AND THE DENY-FLOOR DID NOT FAIL. Its own header states that the orchestrator's poster calls
+    `gh` via `execFileSync` directly from the `rmd run-task` process — never through a Claude Code
+    Bash tool call — and so never reaches that hook at all; only a spawned worker's Bash call does.
+    Replayed against three URL spellings, all three were DENIED. The wrapper is below the Bash tool
+    BY DESIGN, and its silence here is the documented behaviour rather than a gap.
+
+    (6) OWNED ELSEWHERE, RECORDED SO THIS FILING DOES NOT RE-OPEN THEM. The reviewer identity is
+    W1-T203's; the app_id pin is W1-T2442's; the re-review path is W1-T2299's; and the authoring
+    identity is W1-T990's. ALL FOUR ARE BACKLOGGED BY OPERATOR RULING and none is in scope here.
+    ⚠ W1-T2442 IS NOT ON origin/main AS OF THIS FILING — it appears on no shard filename, no
+    declared id, and no remote head's tree — so the pin it owns is reserved or in flight rather than
+    landed, and a reader should not expect to find it beside this record.
+
+    (7) WHAT THIS SHARD MUST NOT BE READ AS PROPOSING. It does not propose removing the escape
+    hatch, weakening or re-keying the dedup, provisioning a reviewer credential, pinning branch
+    protection, or any change whatsoever to `enforce_admins`. Each of those is a live option the
+    operator may choose, and naming them as forbidden HERE is what keeps this record a question
+    rather than a smuggled recommendation.
+
+    RULE 19 BAND, SET UP FRONT. `risk: high` is the SPAN reading and carries NO claim about blast
+    radius — `subsystemsOf` derives concerns from the acceptance text as well as from `files:`, and
+    this record's criteria name the sweep, the review lane and the ledger, which is refused at
+    `risk: medium`. `files:` names TWO stems — the module that holds BOTH halves of the tension, and
+    this record itself.
+
+    ⚠ AND DECLARING ITS OWN PLAN RECORD IS LEGAL HERE ONLY BECAUSE THIS IS `verify: human`.
+    `rule15-filing` refuses a self-declared record for a `verify: auto` task; measured at this base,
+    adding the path here takes `lint-plan --base` from 7 `proof-scope` warnings to 0 failing and 0
+    warnings rather than to a violation. A future task that converts this record to `verify: auto`
+    must drop the self-reference in the same edit.
+  acceptance:
+    - claim: "the record states in its first sentence that nothing here is a defect"
+      proof: "grep: NOTHING IN THIS RECORD IS A DEFECT in plan/tasks.d/W1-T2443-same-sha-review-clearing-vs-sweep-dedup.yaml"
+    - claim: "the operator question is stated and left unanswered by this filing"
+      proof: "grep: THIS SHARD RECORDS THE QUESTION AND in plan/tasks.d/W1-T2443-same-sha-review-clearing-vs-sweep-dedup.yaml"
+    - claim: "the population figure is recorded together with the reason it cannot answer the question"
+      proof: "grep: THAT FIGURE DOES NOT ANSWER THE QUESTION in plan/tasks.d/W1-T2443-same-sha-review-clearing-vs-sweep-dedup.yaml"
+    - claim: "the unreadable second corpus is reported rather than scored as a zero"
+      proof: "grep: AND THE SECOND CORPUS IS UNREADABLE FROM HERE in plan/tasks.d/W1-T2443-same-sha-review-clearing-vs-sweep-dedup.yaml"
+    - claim: "the reviewer identity is recorded as a documented dark fallback and not a failure"
+      proof: "grep: AND THE DENY-FLOOR DID NOT FAIL in plan/tasks.d/W1-T2443-same-sha-review-clearing-vs-sweep-dedup.yaml"
+    - claim: "the four surfaces owned by other tasks are named as out of scope"
+      proof: "grep: ALL FOUR ARE BACKLOGGED BY OPERATOR RULING in plan/tasks.d/W1-T2443-same-sha-review-clearing-vs-sweep-dedup.yaml"
+    - claim: "the risk band is justified as a Rule 19 span reading rather than blast radius"
+      proof: "grep: is the SPAN reading and carries NO claim in plan/tasks.d/W1-T2443-same-sha-review-clearing-vs-sweep-dedup.yaml"
+  falsifier: |
+    If a reading of the FLEET corpus shows that the sweep's post-review dedup has ever been cleared
+    on an unchanged sha WITHOUT an operator running a verb by hand, then row 3.6 is reachable on its
+    own stated case and there is no tension to rule on — the composition already resolves itself and
+    this record should be retired rather than answered.
+
+    SEPARATELY DECISIVE: if a cross-host measurement finds this class occurring at any material rate
+    rather than once, the question stops being a policy preference and becomes a load-bearing gap;
+    and conversely, if the union of BOTH corpora still shows exactly one instance, then a policy
+    change argued from it is the n=1 shape this repo has declined before, and leaving the
+    composition alone is itself a defensible ruling.
