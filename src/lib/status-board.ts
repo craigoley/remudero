@@ -1182,6 +1182,13 @@ function buildLatchRows(
   // appended last (Q1's own convention on this exact function) so no positional caller shifts;
   // omitted reads as `{status: "clear"}`, matching a repo that has never taken a dispatch claim.
   readDispatchClaims: () => DispatchClaimsRead = () => ({ status: "clear" }),
+  // W1-T2446: SAME "appended last and optional" convention as the two thunks above — the merge
+  // credit `readDispatchClaims`'s own row text asserted away rather than consulted. This board
+  // "reads and reports, it never drops anything" (unchanged — no release call is added here);
+  // it only stops the held-claim row from asserting "no landed work observed" for a task that
+  // IS credited merged. Omitted reads as `() => false`, matching a repo/plan this render could
+  // not project (today's behavior, byte-identical, for every caller that omits it).
+  isMerged: MergedSet = () => false,
 ): LatchRow[] {
   const rows: LatchRow[] = [];
 
@@ -1241,12 +1248,23 @@ function buildLatchRows(
   const dispatchClaims = readDispatchClaims();
   if (dispatchClaims.status === "held") {
     for (const { taskId, holder } of dispatchClaims.claims) {
+      // W1-T2446: "WITH NO LANDED WORK OBSERVED" was asserted UNCONDITIONALLY for every held
+      // claim — nothing on this path ever consulted merge credit, so for a task whose work HAD
+      // landed (W1-T2424) the board kept saying it had not. `isMerged` is the SAME projection
+      // `deriveQueueHead`/`deriveInbox` already build in this same render (`projections.get(id)
+      // ?.merged === true`) — no new probe, no new read, threaded in rather than re-derived.
+      // This ONLY corrects the sentence's truth value: it names the claim as stale rather than
+      // asserting it is live, and still `git push origin :<ref>` — the OPERATOR arm, unchanged.
+      // No drop is issued from here; this row still only reads and reports.
       rows.push({
         name: `dispatch-claim:${taskId}`,
-        consequence:
-          `${taskId}'s dispatch claim ${dispatchClaimRef(taskId)} is held (holder ${holder}) with no ` +
-          `landed work observed — a new dispatch of ${taskId} is refused until an operator drops it: ` +
-          `git push origin :${dispatchClaimRef(taskId)}`,
+        consequence: isMerged(taskId)
+          ? `${taskId}'s dispatch claim ${dispatchClaimRef(taskId)} is held (holder ${holder}) — ${taskId} ` +
+            `is credited MERGED, so this claim is stale, not live-guarded work: drop it with ` +
+            `git push origin :${dispatchClaimRef(taskId)}`
+          : `${taskId}'s dispatch claim ${dispatchClaimRef(taskId)} is held (holder ${holder}) with no ` +
+            `landed work observed — a new dispatch of ${taskId} is refused until an operator drops it: ` +
+            `git push origin :${dispatchClaimRef(taskId)}`,
       });
     }
   } else if (dispatchClaims.status === "unreachable") {
@@ -2352,9 +2370,18 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
     nextAction: pickNextAction(LIVENESS_NEXT_ACTIONS, livenessCtx),
   };
 
+  // W1-T2446: HOISTED from the "W1-T280 (DERIVED half)" block below — LATCHES now needs the
+  // same merge-credit projection INBOX/QUEUE HEAD/BLOCKERS already build, to correct the held
+  // dispatch-claim row's text (see `buildLatchRows`'s own doc). `projectPlanOnce` depends only
+  // on `deps`/`ledgerPath`/`lines`/`now`, every one of which is already in scope this early —
+  // moving its ONE batched GitHub read up costs nothing and is spent exactly once either way.
+  const plan = deps.plan ?? tryLoadDefaultPlan(deps.repoDir);
+  const { projections, unknownReason: ghUnknownReason } = projectPlanOnce(plan, deps.github, ledgerPath, lines, now);
+  const isMerged: MergedSet = (id) => projections?.get(id)?.merged === true;
+
   // ── LATCHES ──
   const rows = buildLatchRows(root, nowMs, isPidAlive, () => readSharedPauseState(deps.repoDir), originSha, () =>
-    readDispatchClaims(deps.repoDir),
+    readDispatchClaims(deps.repoDir), isMerged,
   );
   const latchesSection: LatchesSection = { rows, nextAction: undefined };
   latchesSection.nextAction = pickNextAction(LATCHES_NEXT_ACTIONS, latchesSection);
@@ -2374,9 +2401,8 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
   lastCycle.supersededAgeMs = Number.isFinite(supersededParsed) ? Math.max(0, nowMs - supersededParsed) : undefined;
   lastCycle.nextAction = pickNextAction(LAST_CYCLE_NEXT_ACTIONS, lastCycle);
 
-  // ── W1-T280 (DERIVED half) ──
-  const plan = deps.plan ?? tryLoadDefaultPlan(deps.repoDir);
-  const { projections, unknownReason: ghUnknownReason } = projectPlanOnce(plan, deps.github, ledgerPath, lines, now);
+  // ── W1-T280 (DERIVED half) ── `plan`/`projections`/`ghUnknownReason` are now hoisted above,
+  // ahead of LATCHES (W1-T2446) — this section reuses them, never re-derives them.
   const queueHeadLimit = deps.queueHeadLimit ?? 5;
 
   const blockers = deriveBlockers(plan, lines, projections, deps.github, queueHeadLimit);
