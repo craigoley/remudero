@@ -465,6 +465,18 @@ export interface RepeatEscalationDigestEntry {
   streak?: number;
 }
 
+/** One `sweep.repair_filing_suppressed` trip {@link DigestSummary.repairFilingsSuppressed}
+ *  carries, read straight off the row {@link "../run-task.js".captureRepairFeedbackWithPriorVerdict}
+ *  writes (W1-T2416) when a due surface's most recent prior verdict for its own `repair#<surface>`
+ *  origin is `rejected`. Every field optional: this reads a row written by another module, so a
+ *  row from an older or newer writer degrades to a partial line rather than a throw. */
+export interface RepairFilingSuppressedDigestEntry {
+  id?: string;
+  surface?: string;
+  distinctPrCount?: number;
+  rejectedEntryId?: string;
+}
+
 export interface DigestSummary {
   sinceIso: string;
   /** W1-T2388: what the windowed union actually reached. OPTIONAL, so every existing caller of
@@ -550,6 +562,26 @@ export interface DigestSummary {
    */
   repeatEscalations?: RepeatEscalationDigestEntry[];
   /**
+   * Every `sweep.repair_filing_suppressed` trip inside the window — W1-T2416's verdict read
+   * refusing to re-file a `repair#<surface>` recurrence whose most recent prior entry for that
+   * SAME origin is already `rejected` (design ii/iii of that task). ADDITIVE, not latest-wins,
+   * mirroring `repeatEscalations` immediately above and for the same reason: two trips name two
+   * DIFFERENT surfaces stood down in the same window, and collapsing to "latest" would report
+   * one and hide the rest.
+   *
+   * DEDUPED BY THE FILING'S OWN `id`, mirroring `repeatEscalations`'s PR-number dedup: the ledger
+   * union can carry the same row twice across overlapping rotations, and a digest counting a
+   * rotation artefact as a second suppression would be wrong in the direction that costs an
+   * operator a look.
+   *
+   * SOFT-COMPOSED by {@link renderDigest} exactly like `repeatEscalations`: a window with no trip
+   * omits the line ENTIRELY rather than printing a "(none this window)" placeholder, so a digest
+   * over a quiet board — or one predating this reader — renders byte-identical to before this
+   * field existed. This IS the reader design (iii) requires: the row the filer already writes had
+   * no consumer until this field, and a ledger row nothing reads is not an answer.
+   */
+  repairFilingsSuppressed?: RepairFilingSuppressedDigestEntry[];
+  /**
    * W1-T178 (verdict stability): count of `review.downgrade_suppressed` ledger
    * lines inside the window — a semantic-lane downgrade suppressed because the
    * deterministic floor still passed on an unchanged head. This is the signal
@@ -620,6 +652,23 @@ export function summarize(lines: LedgerLine[], sinceIso: string): DigestSummary 
         });
       }
     }
+    // W1-T2416's suppression row. The filer already writes this row (run-task.ts's
+    // `captureRepairFeedbackWithPriorVerdict`); what was missing is a READER — the same gap
+    // W1-T2345's `sweep.repeat_escalated` closed above, and the same precedent this task follows.
+    if (l.step === "sweep.repair_filing_suppressed") {
+      const id = typeof l.id === "string" ? l.id : undefined;
+      const list = (summary.repairFilingsSuppressed ??= []);
+      // Dedup on the filing's own id: the union can replay one row across overlapping rotations,
+      // and a rotation artefact must never read as a second suppression.
+      if (id === undefined || !list.some((e) => e.id === id)) {
+        list.push({
+          id,
+          surface: typeof l.surface === "string" ? l.surface : undefined,
+          distinctPrCount: typeof l.distinct_pr_count === "number" ? l.distinct_pr_count : undefined,
+          rejectedEntryId: typeof l.rejected_entry_id === "string" ? l.rejected_entry_id : undefined,
+        });
+      }
+    }
   }
   summary.cacheHit = aggregateCacheHitTotals(since);
   return summary;
@@ -683,6 +732,11 @@ export function renderDigest(s: DigestSummary, consoleBaseUrl?: string): string 
     // Soft-composed exactly like `board review` above — absent, never a placeholder, when the
     // window carries no trip. See the `repeatEscalations` field's doc on DigestSummary.
     ...(s.repeatEscalations?.length ? [`stuck (repeat bound): ${renderRepeatEscalations(s.repeatEscalations)}`] : []),
+    // Soft-composed exactly like `stuck (repeat bound)` above — absent, never a placeholder, when
+    // the window carries no trip. See the `repairFilingsSuppressed` field's doc on DigestSummary.
+    ...(s.repairFilingsSuppressed?.length
+      ? [`repair filings suppressed (prior rejection): ${renderRepairFilingsSuppressed(s.repairFilingsSuppressed)}`]
+      : []),
     // W1-T929: soft-composed — present only when the window carries usable cache-token data
     // (see the `cacheHit` field's doc on DigestSummary), two lines (per-run, per-class), never
     // a "(no data)" placeholder otherwise.
@@ -704,6 +758,21 @@ function renderRepeatEscalations(entries: RepeatEscalationDigestEntry[]): string
       const what = e.disposition ? ` ${e.disposition}` : "";
       const many = e.streak !== undefined ? ` x${e.streak}` : "";
       return `${who}${what}${many}`;
+    })
+    .join(", ");
+}
+
+/** One line for {@link DigestSummary.repairFilingsSuppressed} — every due surface whose recurrence
+ *  filing was suppressed because its own most recent verdict is already `rejected` (W1-T2416),
+ *  each naming the surface, how many distinct PRs its own evidence carried, and the rejected
+ *  entry that suppressed it. Mirrors `renderRepeatEscalations`'s shape. */
+function renderRepairFilingsSuppressed(entries: RepairFilingSuppressedDigestEntry[]): string {
+  return entries
+    .map((e) => {
+      const who = e.surface ?? "(surface unknown)";
+      const count = e.distinctPrCount !== undefined ? ` x${e.distinctPrCount}` : "";
+      const why = e.rejectedEntryId ? ` — suppressed by ${e.rejectedEntryId}` : "";
+      return `${who}${count}${why}`;
     })
     .join(", ");
 }

@@ -24263,6 +24263,72 @@ export function dispatchFixCatchOutcome(e: unknown, dispatchStarted: boolean): {
   };
 }
 
+/**
+ * W1-T2416 — THE VERDICT READ THE FILER NEVER HAD. Given every prior feedback entry that shares
+ * this filing's exact `origin` (`repair#<surface>` — matched on the SURFACE, never on the
+ * window-keyed `id`, which by construction cannot match across windows, design ii), returns the
+ * most recent one (by `ts`) ONLY when its `status` is `rejected` — the one verdict this filer now
+ * respects — or `undefined` when nothing should be suppressed:
+ *   - no prior entry for this origin at all (a due surface with no history files exactly as it
+ *     does today);
+ *   - the most recent prior entry is `new`/`grilling`/`proposed`/`accepted`/`answered` — an
+ *     untriaged backlog is not a ruling, and an `accepted` entry means the class is being worked,
+ *     a different question this task deliberately leaves alone (design ii).
+ * Pure over its input — no I/O — so it is unit-testable with hand-built fixtures, no disk
+ * involved.
+ */
+export function latestPriorVerdictSuppresses(priorEntriesForOrigin: readonly FeedbackEntry[]): FeedbackEntry | undefined {
+  let latest: FeedbackEntry | undefined;
+  for (const entry of priorEntriesForOrigin) {
+    if (!latest || Date.parse(entry.ts) > Date.parse(latest.ts)) latest = entry;
+  }
+  return latest?.status === "rejected" ? latest : undefined;
+}
+
+/**
+ * W1-T2416 — the SAME per-window dedup {@link buildSweepEffects}'s `captureRepairFeedbackImpl`
+ * default has always used (the `existsSync` check, first, unchanged), PLUS the prior-verdict read
+ * design (i) puts at this exact site: a surface whose most recent `repair#<surface>` entry was
+ * rejected files nothing, and instead ledgers `sweep.repair_filing_suppressed` naming the
+ * surface, the distinct-PR count carried in this filing's own evidence, and the id of the
+ * rejected entry that suppressed it (design iii) — so the suppression is never silent even though
+ * the filing it stands down is.
+ *
+ * `root` is a parameter, not the module-level `repoRoot` {@link buildSweepEffects}'s default
+ * binds it to — so this is directly unit-testable against a throwaway directory, the same shape
+ * `test/sweep-repair-filing.test.ts`'s own `realCaptureRepairFeedback` already established for
+ * the dedup half of this function.
+ *
+ * BEST EFFORT, STRUCTURALLY, AND FAILS OPEN (design v): an unreadable or malformed prior entry —
+ * `listFeedback` throwing on a corrupt neighbour in `plan/feedback/`, or a `ts` that fails to
+ * parse — must never silence a filing that would otherwise happen; the read is wrapped so any
+ * throw falls through to filing exactly as before this task, never to silence.
+ */
+export function captureRepairFeedbackWithPriorVerdict(
+  root: string,
+  filing: RepairFilingCapture,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): void {
+  if (existsSync(feedbackEntryPath(root, filing.id))) return; // already filed this window
+  let suppressedBy: FeedbackEntry | undefined;
+  try {
+    const priorEntriesForOrigin = listFeedback(root).filter((e) => e.origin === filing.origin);
+    suppressedBy = latestPriorVerdictSuppresses(priorEntriesForOrigin);
+  } catch {
+    suppressedBy = undefined; // fail OPEN — file it, never silenced by a read error
+  }
+  if (suppressedBy) {
+    log("sweep.repair_filing_suppressed", {
+      surface: filing.origin.replace(/^repair#/, ""),
+      distinct_pr_count: (filing.raw.match(/^- PR #\d+/gm) ?? []).length,
+      rejected_entry_id: suppressedBy.id,
+      id: filing.id,
+    });
+    return;
+  }
+  captureFeedback(root, { id: filing.id, raw: filing.raw, origin: filing.origin as FeedbackOrigin });
+}
+
 export function buildSweepEffects(
   owner: string,
   repo: string,
@@ -24326,10 +24392,11 @@ export function buildSweepEffects(
   // place effects are wired, rather than inside sweep.ts's pure fold. Injectable so a test can
   // assert the dedup/capture behavior without writing a real plan/feedback/ entry; production
   // wiring is unchanged.
-  captureRepairFeedbackImpl: (filing: RepairFilingCapture) => void = (filing) => {
-    if (existsSync(feedbackEntryPath(repoRoot, filing.id))) return; // already filed this window
-    captureFeedback(repoRoot, { id: filing.id, raw: filing.raw, origin: filing.origin as FeedbackOrigin });
-  },
+  // W1-T2416: now routes through {@link captureRepairFeedbackWithPriorVerdict}, which keeps this
+  // SAME `existsSync` per-window dedup first and adds the prior-verdict read beside it — see that
+  // function's own doc. Production wiring (`repoRoot`, this closure's own `log`) is unchanged.
+  captureRepairFeedbackImpl: (filing: RepairFilingCapture) => void = (filing) =>
+    captureRepairFeedbackWithPriorVerdict(repoRoot, filing, log),
   // W1-T921 — appended LAST, the same convention every dep above follows. The `close` effect below
   // is the ONE `gh` site in this object whose ARGUMENT VECTOR is the thing under test: whether it
   // carries `--delete-branch`. Without a seam that vector is unobservable offline, because asserting
