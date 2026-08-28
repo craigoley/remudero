@@ -1,4 +1,10 @@
 import { execFileSync } from "node:child_process";
+// W1-T2440: the board pre-warm's walk moves onto a separate OS thread (see `runPrewarmWorker`,
+// `buildBatchedGithub`'s own doc) so `execFileSync` below can keep being genuinely synchronous
+// without parking the process that serves `/v1/status` while a scheduled warm runs. This is the
+// SAME module, loaded a second time in worker mode — `isMainThread`/`workerData` gate the
+// worker-only branch near `buildBatchedGithub`, never executed when this file loads normally.
+import { Worker, isMainThread, parentPort, workerData } from "node:worker_threads";
 // Imported as the module's DEFAULT export (a plain, mutable object), not as named
 // bindings (`import { existsSync } from "node:fs"`) — deliberately, and load-bearing
 // for W1-T115's "assert via injected fs" proof shape. ESM named-export bindings off
@@ -4860,6 +4866,151 @@ export function resetDefaultGhCallPacerForTest(pacer?: GhCallPacer): void {
   defaultGhCallPacer = pacer;
 }
 
+// ── W1-T2440 — THE PRE-WARM'S WALK, OFF THE REQUEST-SERVING THREAD ──────────────────────────
+//
+// `GitHub.warm?(): void` (this module) is a fire-and-forget hook: `lib/serve.ts`'s
+// `prewarmBoardGithub` is `setInterval(() => github.warm?.(), DEFAULT_BOARD_PREWARM_MS)` and
+// never awaits it, because it cannot — the signature returns `void`. Before this task, `warm()`
+// called `index()`/`issueIndex()` DIRECTLY, and both walk the same `execFileSync("gh", …)` this
+// module's own `GH_CALL_TIMEOUT_MS` doc already names as parking the whole process for the
+// call's duration. A COLD walk is 18-22s (W1-T2323's own measurement); a request that arrives
+// during it queued behind a refresh it never asked for.
+//
+// THE FIX NAMED IN THE TASK: an async fetch at the SAME cadence removes the dead wall clock
+// without touching a single bound — `DEFAULT_BOARD_PREWARM_MS` and `GH_CALL_TIMEOUT_MS` are both
+// untouched by this block. But `warm?(): void` staying `void` (task rationale: widening it to
+// `Promise<void>` reaches every `GitHub` implementer and caller, which this task does not own)
+// rules out the usual `async`/`await` rewrite — there is no promise for a caller to await, and
+// the actual `gh` shelling is still a blocking child-process wait Node has no non-blocking
+// primitive for (see lib/run-task.ts's `execFileAsync`/`ghJsonAsync`, which solves the SAME class
+// of problem for its own two poll loops, but by making its caller `async`, which `warm()` cannot
+// do without the signature change above).
+//
+// SO THE WALK MOVES TO A SEPARATE OS THREAD INSTEAD OF A DIFFERENT CALL SHAPE. A `worker_threads`
+// `Worker` genuinely does not share this process's event loop — `execFileSync` blocking THAT
+// thread never blocks this one — and it reuses `fetchBoardPrsRest`/`fetchLabelledIssuesRest`
+// (this module's own imports) UNCHANGED: the worker branch below calls the exact same exported
+// functions `restFetchHalf`/`fetchAllIssues` already call, with the exact same delta ("known")
+// stop test, the exact same page sizes and the exact same `BOARD_MAX_PAGES` ceiling — there is no
+// second walk mechanism to drift out of sync with the synchronous one below, only a second
+// THREAD running the first one.
+//
+// THIS FILE, LOADED TWICE. `new Worker(new URL(import.meta.url), …)` re-imports this exact
+// module in a fresh worker thread; `isMainThread`/`workerData` below gate the branch so it only
+// ever runs there, never during this module's normal (main-thread) load. `execArgv:
+// process.execArgv` carries this process's own loader flags (`tsx` under `npm test`, nothing
+// extra once built) so the worker can load this same TypeScript source the main thread did.
+//
+// SCOPED TO THE REAL DEFAULT, NEVER TO AN INJECTED GATEWAY. A `Worker`'s `workerData` is
+// structured-cloned — a JS closure cannot cross that boundary — so `opts.exec`/`opts.fetchAll`/
+// `opts.fetchAllIssues` (every fixture in test/status.test.ts, including the three `warm()`
+// fixtures that assert the injected fetch count moves the INSTANT `warm()` returns) cannot be
+// threaded through a worker at all. `warm()` below keeps calling `index()`/`issueIndex()`
+// synchronously, byte-for-byte as before this task, whenever any of those three are supplied —
+// only the real, unconfigured production gateway takes the worker path this block adds.
+const BOARD_PREWARM_WORKER_KIND = "remudero-board-prewarm-walk" as const;
+
+/** What the main thread hands the worker — plain data only, per `workerData`'s structured-clone
+ *  contract. `knownBoardPrs`/`knownIssues` are the SAME delta caches `restFetchHalf`/
+ *  `fetchAllIssues` already carry between refreshes (`Map` clones structurally, so the worker's
+ *  copy is a snapshot, never a live handle back into this process's memory). */
+interface PrewarmWorkerRequest {
+  kind: typeof BOARD_PREWARM_WORKER_KIND;
+  owner: string;
+  repo: string;
+  ghBin: string;
+  fetchOpen: boolean;
+  fetchMerged: boolean;
+  fetchIssues: boolean;
+  knownBoardPrs?: Map<number, BoardPrRest>;
+  knownIssues?: Map<number, BoardIssueRest>;
+}
+
+function isPrewarmWorkerRequest(v: unknown): v is PrewarmWorkerRequest {
+  return !!v && typeof v === "object" && (v as { kind?: unknown }).kind === BOARD_PREWARM_WORKER_KIND;
+}
+
+/** One channel's outcome, classified exactly like `attemptFetch`'s own catch (same
+ *  {@link classifyGhFailure}), so a worker-side failure reads identically to a synchronous one. */
+type PrewarmChannelOutcome<T> =
+  | { ok: true; rows: T[]; truncated: boolean; bytes: number; calls: number; mode: "full" | "delta" }
+  | { ok: false; reason: GhFailureReason; message: string };
+
+interface PrewarmWorkerResponse {
+  open?: PrewarmChannelOutcome<BoardPrRest>;
+  merged?: PrewarmChannelOutcome<BoardPrRest>;
+  issues?: PrewarmChannelOutcome<BoardIssueRest>;
+}
+
+/** Runs one channel's fetch inside the worker and NEVER throws out of this function — a failure
+ *  becomes data in the response instead of an uncaught worker exception, mirroring `attemptFetch`
+ *  W1-T181's "the catch classifies and marks, it never propagates" discipline. */
+function prewarmRunChannel<T, R extends { rows: T[]; truncated: boolean; calls: number; mode: "full" | "delta" }>(
+  fetch: () => R,
+  bytes: () => number,
+): PrewarmChannelOutcome<T> {
+  try {
+    const fetched = fetch();
+    return { ok: true, rows: fetched.rows, truncated: fetched.truncated, bytes: bytes(), calls: fetched.calls, mode: fetched.mode };
+  } catch (err) {
+    const e = err as NodeJS.ErrnoException & { status?: number | null; stderr?: string | Buffer };
+    return {
+      ok: false,
+      reason: classifyGhFailure(e?.status, e?.stderr != null ? String(e.stderr) : undefined, e?.code),
+      message: e?.message ?? String(err),
+    };
+  }
+}
+
+// THE WORKER BRANCH ITSELF. Only reachable inside a worker thread this module's own
+// `runPrewarmWorker` (below) spawned with `workerData.kind === BOARD_PREWARM_WORKER_KIND` — a
+// worker spawned any other way (there are none in this codebase) or the normal main-thread load
+// both leave this untouched.
+if (!isMainThread && isPrewarmWorkerRequest(workerData)) {
+  const req = workerData;
+  // Its OWN pacer, not the main thread's module-scoped `defaultGhCallPacer` — a `Worker` has its
+  // own heap, so the two cannot share one gap-tracking object. This still paces the up-to-three
+  // calls THIS worker makes against each other; it does NOT coordinate with the main thread's
+  // sweep-driven pacer the way every same-thread caller does today. Priced, not hidden: a
+  // narrower rate-limit exposure than before this task, worth a follow-up, never a reason to keep
+  // the walk on the request-serving thread in the meantime.
+  // `isTestRunner()`-gated exactly like the main thread's own `defaultGhCallPacer` (this file's
+  // W1-T1005 doc) — `NODE_TEST_CONTEXT` is inherited from `process.env` at Worker construction,
+  // so the same real-vs-test split holds here: real callers still get the genuine 1.5s gap this
+  // pacer enforces, and the test suite does not pay it 1.5s at a time per warm().
+  const workerPacer = createGhCallPacer(isTestRunner() ? { sleepSync: () => {} } : {});
+  const runSync = (args: string[]): string =>
+    execFileSync(req.ghBin, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 1 << 26, timeout: GH_CALL_TIMEOUT_MS });
+  const makeFetchJson = (): { fetchJson: (args: string[]) => unknown; bytes: () => number } => {
+    let bytes = 0;
+    return {
+      fetchJson: (args: string[]): unknown => {
+        const raw = paceGhEntry(workerPacer, isGhRateLimitError, () => runSync(args));
+        bytes += Buffer.byteLength(raw, "utf8");
+        return JSON.parse(raw);
+      },
+      bytes: () => bytes,
+    };
+  };
+  const response: PrewarmWorkerResponse = {};
+  if (req.fetchOpen) {
+    const { fetchJson, bytes } = makeFetchJson();
+    response.open = prewarmRunChannel(() => fetchBoardPrsRest(req.owner, req.repo, fetchJson, undefined, "open"), bytes);
+  }
+  if (req.fetchMerged) {
+    const { fetchJson, bytes } = makeFetchJson();
+    response.merged = prewarmRunChannel(() => fetchBoardPrsRest(req.owner, req.repo, fetchJson, req.knownBoardPrs, "closed"), bytes);
+  }
+  if (req.fetchIssues) {
+    const { fetchJson, bytes } = makeFetchJson();
+    response.issues = prewarmRunChannel(
+      () => fetchLabelledIssuesRest(req.owner, req.repo, NEEDS_HUMAN_LABEL, fetchJson, req.knownIssues),
+      bytes,
+    );
+  }
+  parentPort?.postMessage(response);
+}
+
 export function buildBatchedGithub(
   owner: string,
   repo: string,
@@ -4928,6 +5079,14 @@ export function buildBatchedGithub(
      * was found to be worth its staleness.
      */
     mergedTtlMs?: number;
+    /**
+     * W1-T2440: which binary the WORKER-based warm walk shells (see `runPrewarmWorker` below) —
+     * mirrors `opts.exec`'s role for the synchronous path, but as a path rather than a function,
+     * because a `Worker`'s `workerData` cannot carry a closure across the thread boundary. Real
+     * callers omit it and get `"gh"`, exactly what the synchronous default already shells; a test
+     * points this at a real (but fake) executable to prove the worker path without a real `gh`.
+     */
+    ghBin?: string;
   } = {},
 ): GitHub {
   const ttlMs = opts.ttlMs ?? 15_000;
@@ -5019,6 +5178,17 @@ export function buildBatchedGithub(
   let openOutcome: FetchOutcome | undefined;
   let mergedOutcome: FetchOutcome | undefined;
   let fetchInFlight = false;
+  // W1-T2440: true from the moment `runPrewarmWorker` spawns a worker for this channel until its
+  // result (success or failure) is applied — `openRows`/`mergedRows`/`issueIndex` check these
+  // FIRST so a request arriving mid-warm is served the existing cache instead of racing the
+  // worker with a second, synchronous fetch on this thread.
+  let openWarmInFlight = false;
+  let mergedWarmInFlight = false;
+  let issuesWarmInFlight = false;
+  /** The one background walk this gateway ever has in flight at a time (W1-T2440) — a second
+   *  `warm()` call while this is set is a no-op, exactly like the existing "within TTL" no-op
+   *  the synchronous path already has (status.test.ts's own W1-T154 fixture). */
+  let prewarmWorker: Worker | undefined;
   const lastFetchFailed = (): boolean => (openOutcome?.failed ?? false) || (mergedOutcome?.failed ?? false);
   const lastFetchFailureReason = (): GhFailureReason | undefined =>
     (openOutcome?.failed ? openOutcome.reason : undefined) ?? (mergedOutcome?.failed ? mergedOutcome.reason : undefined);
@@ -5223,6 +5393,11 @@ export function buildBatchedGithub(
   }
   let issueCache: IssueIndex | undefined;
   const issueIndex = (): IssueIndex => {
+    // W1-T2440: same reasoning as `openRows`/`mergedRows`'s own guards — a background worker
+    // already owns this refresh. `issueCache ?? { at: 0, byUrl: new Map(), byNum: new Map() }`
+    // mirrors this function's own pre-first-fetch answer (empty maps), never a new "no issues"
+    // fabrication: a caller reading through `issueByUrl` gets exactly today's cold-cache answer.
+    if (issuesWarmInFlight) return issueCache ?? { at: 0, byUrl: new Map(), byNum: new Map() };
     if (!issueCache || now() - issueCache.at >= ttlMs) {
       let all: BatchedIssue[];
       try {
@@ -5382,6 +5557,13 @@ export function buildBatchedGithub(
    */
   const openRows = (): BatchedPr[] => {
     if (!splitHalves) return bothHalves().open;
+    // W1-T2440: a background worker already owns this channel's refresh — serving the (possibly
+    // stale, possibly absent) cache beats a SECOND, synchronous `execFileSync` walk racing it on
+    // THIS thread, which is exactly the block this task removes, reintroduced one layer up. A
+    // caller that needs to tell "no PRs" from "not fetched yet" already has `readState()` (W1-
+    // T2219), which reports `"in_flight"` for the whole time this guard is taken (`fetchInFlight`
+    // is set before the worker spawns, in `runPrewarmWorker`, below).
+    if (openWarmInFlight) return openHalf?.rows ?? [];
     if (!openHalf || now() - openHalf.at >= effectiveOpenTtlMs()) {
       const previouslyOpen = openHalf ? new Set(openHalf.rows.map((p) => p.number)) : undefined;
       const fetched = attemptFetch(() => restFetchHalf("open"), "open");
@@ -5439,6 +5621,9 @@ export function buildBatchedGithub(
    */
   const mergedRows = (): BatchedPr[] => {
     if (!splitHalves) return bothHalves().merged;
+    // W1-T2440: same reasoning as `openRows`'s own guard, immediately above it — this channel's
+    // background worker owns the refresh, so a query never starts a second one underneath it.
+    if (mergedWarmInFlight) return mergedHalf?.rows ?? [];
     if (!mergedHalf || now() - mergedHalf.at >= effectiveMergedTtlMs()) {
       const fetched = attemptFetch(() => restFetchHalf("closed"), "merged");
       // Verbatim, same reasoning as the open half — `mergedNewestFirst`'s `state === "MERGED"`
@@ -5532,6 +5717,149 @@ export function buildBatchedGithub(
     const idx = index();
     const s = String(ref);
     return idx.byUrl.get(s) ?? idx.byNum.get(s) ?? idx.byNum.get(s.replace(/^.*\/(\d+)$/, "$1"));
+  };
+
+  // ── W1-T2440 — APPLYING A WORKER'S RESULT, ON THIS THREAD ──────────────────────────────────
+  //
+  // These three mirror `attemptFetch`'s/`issueIndex()`'s own success/failure bookkeeping exactly
+  // (same fields, same log events, same W1-T119/W1-T181 discipline) — they exist because a
+  // worker's result arrives on a MESSAGE, not a return value, so there is no call site left for
+  // `attemptFetch` itself to wrap. Nothing about WHAT is recorded changes; only WHEN it runs.
+  const applyOpenOutcome = (outcome: PrewarmChannelOutcome<BoardPrRest>, elapsedMs: number, previouslyOpen: Set<number> | undefined): void => {
+    openFetchDurationMs = elapsedMs;
+    if (!outcome.ok) {
+      openOutcome = { failed: true, reason: outcome.reason };
+      console.error(`board gateway: batched PR fetch failed (${outcome.reason}): ${outcome.message}`);
+      log("board_gateway.fetch_failed", { reason: outcome.reason, message: outcome.message, channel: "open" });
+      return;
+    }
+    openOutcome = { failed: false, reason: undefined };
+    openHalf = { at: now(), rows: outcome.rows };
+    openEpoch += 1;
+    lastOpenTruncated = outcome.truncated;
+    log("board_gateway.fetch_ok", { prCount: outcome.rows.length, channel: "open" });
+    log("board_gateway.fetch_bytes", { bytes: outcome.bytes, restCalls: outcome.calls, mode: outcome.mode, truncated: outcome.truncated, half: "open" });
+    // W1-T2323's own cross-half invalidation ("the one line that pays most of it back"),
+    // replayed here verbatim for the async path — see `openRows`'s doc for why a PR leaving the
+    // open set is the merge/close itself, observed, and must not wait out `mergedTtlMs`.
+    if (previouslyOpen) {
+      const stillOpen = new Set(outcome.rows.map((p) => p.number));
+      for (const number of previouslyOpen) {
+        if (!stillOpen.has(number)) {
+          mergedHalf = undefined;
+          break;
+        }
+      }
+    }
+  };
+  const applyMergedOutcome = (outcome: PrewarmChannelOutcome<BoardPrRest>, elapsedMs: number): void => {
+    mergedFetchDurationMs = elapsedMs;
+    if (!outcome.ok) {
+      mergedOutcome = { failed: true, reason: outcome.reason };
+      console.error(`board gateway: batched PR fetch failed (${outcome.reason}): ${outcome.message}`);
+      log("board_gateway.fetch_failed", { reason: outcome.reason, message: outcome.message, channel: "merged" });
+      return;
+    }
+    mergedOutcome = { failed: false, reason: undefined };
+    mergedHalf = { at: now(), rows: outcome.rows };
+    mergedEpoch += 1;
+    lastClosedTruncated = outcome.truncated;
+    knownBoardPrs = new Map(outcome.rows.map((r) => [r.number, r]));
+    log("board_gateway.fetch_ok", { prCount: outcome.rows.length, channel: "merged" });
+    log("board_gateway.fetch_bytes", { bytes: outcome.bytes, restCalls: outcome.calls, mode: outcome.mode, truncated: outcome.truncated, half: "closed" });
+  };
+  const applyIssuesOutcome = (outcome: PrewarmChannelOutcome<BoardIssueRest>): void => {
+    if (!outcome.ok) {
+      lastIssueFetchFailed = true;
+      lastIssueFetchFailureReason = outcome.reason;
+      console.error(`board gateway: batched issue fetch failed (${outcome.reason}): ${outcome.message}`);
+      log("board_gateway.issue_fetch_failed", { reason: outcome.reason, message: outcome.message });
+      return;
+    }
+    knownIssues = new Map(outcome.rows.map((r) => [r.number, r]));
+    const all: BatchedIssue[] = outcome.rows.map((r) => ({ number: r.number, url: r.url, state: r.state, title: r.title }));
+    issueCache = { at: now(), byUrl: new Map(all.map((i) => [i.url, i])), byNum: new Map(all.map((i) => [String(i.number), i])) };
+    lastIssueFetchFailed = false;
+    lastIssueFetchFailureReason = undefined;
+    log("board_gateway.issue_fetch_ok", { issueCount: all.length });
+  };
+
+  /**
+   * W1-T2440 — `warm()`'S REAL-DEFAULT PATH. See this file's module-scope doc above
+   * `BOARD_PREWARM_WORKER_KIND` for why a `Worker`, not an `async`/`await` rewrite.
+   *
+   * Computes "is a refresh due" per channel EXACTLY as `openRows`/`mergedRows`/`issueIndex`
+   * already do (same `now() - X.at >= ttl` shape) so a `warm()` called faster than the TTL is
+   * still a no-op, matching the synchronous path's own "a second warm() within the TTL does not
+   * refetch" contract (status.test.ts). At most ONE worker is ever in flight — a `warm()` call
+   * while `prewarmWorker` is set returns immediately, exactly like the existing TTL no-op.
+   */
+  const runPrewarmWorker = (): void => {
+    if (prewarmWorker) return;
+    const fetchOpen = !openHalf || now() - openHalf.at >= effectiveOpenTtlMs();
+    const fetchMerged = !mergedHalf || now() - mergedHalf.at >= effectiveMergedTtlMs();
+    const fetchIssues = !issueCache || now() - issueCache.at >= ttlMs;
+    if (!fetchOpen && !fetchMerged && !fetchIssues) return;
+    // Captured BEFORE the walk starts, exactly like `openRows`'s own `previouslyOpen` — the set
+    // this compares against must be the pre-refresh snapshot, not whatever `openHalf` becomes by
+    // the time the worker's message arrives.
+    const previouslyOpen = fetchOpen && openHalf ? new Set(openHalf.rows.map((p) => p.number)) : undefined;
+    const startedAt = now();
+    if (fetchOpen) openWarmInFlight = true;
+    if (fetchMerged) mergedWarmInFlight = true;
+    if (fetchIssues) issuesWarmInFlight = true;
+    fetchInFlight = true;
+    const finish = (): void => {
+      prewarmWorker = undefined;
+      openWarmInFlight = false;
+      mergedWarmInFlight = false;
+      issuesWarmInFlight = false;
+      fetchInFlight = false;
+    };
+    const req: PrewarmWorkerRequest = {
+      kind: BOARD_PREWARM_WORKER_KIND,
+      owner,
+      repo,
+      ghBin: opts.ghBin ?? "gh",
+      fetchOpen,
+      fetchMerged,
+      fetchIssues,
+      knownBoardPrs,
+      knownIssues,
+    };
+    let worker: Worker;
+    try {
+      worker = new Worker(new URL(import.meta.url), { workerData: req, execArgv: process.execArgv });
+    } catch (err) {
+      // Spawning itself failed (e.g. this runtime has no worker_threads support) — fall back to
+      // TODAY's synchronous walk rather than never refreshing again. The ONE place this task's
+      // fix degrades to the pre-fix behaviour, and only when a worker cannot be created at all.
+      finish();
+      console.error(`board gateway: prewarm worker spawn failed, falling back to a synchronous warm: ${err instanceof Error ? err.message : String(err)}`);
+      index();
+      issueIndex();
+      return;
+    }
+    prewarmWorker = worker;
+    worker.once("message", (msg: PrewarmWorkerResponse) => {
+      const elapsedMs = Math.max(0, now() - startedAt);
+      if (msg.open) applyOpenOutcome(msg.open, elapsedMs, previouslyOpen);
+      if (msg.merged) applyMergedOutcome(msg.merged, elapsedMs);
+      if (msg.issues) applyIssuesOutcome(msg.issues);
+      finish();
+      void worker.terminate();
+    });
+    worker.once("error", (err) => {
+      // The worker itself died — never a per-channel classified failure, which arrives via a
+      // normal message — so every channel THIS call asked for is marked failed, the same "loud,
+      // classified, never silent" discipline W1-T181 established for the synchronous path.
+      const elapsedMs = Math.max(0, now() - startedAt);
+      const failure = { ok: false as const, reason: "unknown" as GhFailureReason, message: err instanceof Error ? err.message : String(err) };
+      if (fetchOpen) applyOpenOutcome(failure, elapsedMs, previouslyOpen);
+      if (fetchMerged) applyMergedOutcome(failure, elapsedMs);
+      if (fetchIssues) applyIssuesOutcome(failure);
+      finish();
+    });
   };
 
   return {
@@ -5689,16 +6017,28 @@ export function buildBatchedGithub(
       const i = lookupIssue(url);
       return i ? { state: i.state, title: i.title } : null;
     },
-    // W1-T154: forces `index()` NOW. Boot calls this once (cache is empty -> always fetches);
-    // a background timer paced to `ttlMs` calls it again every tick, and by construction the
-    // cache is always exactly at (or past) its TTL when that fires, so `index()`'s own
-    // `now() - cache.at >= ttlMs` check refetches every time — no separate "force" branch needed.
+    // W1-T154: forces a fetch NOW. Boot calls this once (cache is empty -> always fetches); a
+    // background timer paced to `ttlMs` calls it again every tick, and by construction the cache
+    // is always exactly at (or past) its TTL when that fires, so a refetch happens every time —
+    // no separate "force" branch needed.
     // W1-T182: warms the issue index too, on the same cadence — a cold escalation join would
     // otherwise pay its first `gh issue list` on the request path exactly like the pre-W1-T154
     // PR fetch did.
+    // W1-T2440: an INJECTED gateway (every fixture above, including the three W1-T154 `warm()`
+    // tests that assert the fetch count moves the instant this call returns) keeps calling
+    // `index()`/`issueIndex()` directly and SYNCHRONOUSLY — a `Worker` cannot receive a JS
+    // closure, so there is no worker path for a fixture-driven gateway to take, and none of this
+    // task's fix is observable through one. The real, unconfigured default takes
+    // `runPrewarmWorker` instead: same cadence, same `GH_CALL_TIMEOUT_MS` bound, same delta walk,
+    // off this thread — see that function's own doc, and the module-scope doc above
+    // `BOARD_PREWARM_WORKER_KIND`, for why.
     warm() {
-      index();
-      issueIndex();
+      if (opts.exec || opts.fetchAll || opts.fetchAllIssues) {
+        index();
+        issueIndex();
+        return;
+      }
+      runPrewarmWorker();
     },
     // W1-T2219: readFailed()/readFailureReason() no longer force `index()`. Pre-fix, EITHER
     // accessor alone forced a fetch — so asking "did the read fail" PERFORMED the read and
