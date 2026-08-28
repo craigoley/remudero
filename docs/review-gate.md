@@ -566,11 +566,14 @@ same defect twice, in two different colours, at two different times.
 
 **The retry is gone from this job and stays in `ci`.** `scripts/test-with-retry.mjs` re-ran the
 WHOLE command on any first-pass failure, and in `coverage-ratchet` the second pass routinely could
-not finish inside the job's 2340s `timeout-minutes: 39`. MEASURED over the 100 most recent `ci.yml`
-runs (2026-08-28): 86 success, 12 failure, **2 cancelled — both at 2355s**, i.e. killed by the bound
-rather than by a verdict. The long tail brackets that bound closely: 2270s, 2225s, 2223s, 2204s,
-2187s, 2176s red and **2159s green**, so a second pass is a coin flip against the timeout rather
-than a rescue. Re-derive rather than quote this — the window moves.
+not finish inside the job's 2340s `timeout-minutes: 39`. MEASURED over 299 `coverage-ratchet` jobs
+spanning 2026-08-27T13:32Z to 2026-08-28T14:20Z — about 25 hours: 271 success, 20 failure, and
+**8 cancelled, every one between 2355s and 2361s**. All eight were killed by the bound rather than
+by a verdict, and they are ~2.7% of all runs in a single day. The long tail brackets that bound
+closely on the other side — 2270s, 2225s, 2223s, 2204s, 2187s, 2176s red and **2159s green** — so a
+second pass is a coin flip against the timeout rather than a rescue. Re-derive rather than quote
+this; the window moves, and a narrower one badly understates it (the same query over the 100 most
+recent runs sees only 2 of these 8).
 
 A cancellation **names no failing test**, so the retry converted a `failure` that named the failing
 assertion into a `cancelled` that named nothing. `ci-gate` reads a cancellation as FAILURE, after
