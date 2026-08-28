@@ -1,0 +1,143 @@
+- id: W1-T2436
+  title: "THE ENTANGLEMENT ESCALATION SHOULD BE A WORKER DISPATCH, NOT A FILE MOVE — W1-T1095's capability 2 is the only one of its three that never shipped, and it is the one that must CREATE the prerequisite PR the other two consume; both shipped halves park and rebase on a `blocked on #N` number that nothing in the tree ever writes, and the two hand repairs on record each required AUTHORING new code rather than relocating existing lines, so a mechanical partition opens a PR that fails its own CI"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 30.00
+  files: [src/run-task.ts, test/entanglement-split-dispatches-a-worker.test.ts]
+  origin: "operator-brief#entanglement-split-needs-a-worker-2026-08-28"
+  plan_refs: ["W1-T1095", "W1-T2324", "W1-T2430", "W1-T503", "W1-T1213", "W1-T386", "W1-T419"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE ID. Eight surfaces swept before a byte of this file was written, controls from the ENUMERATED
+    OPEN SET (#3210, #3209, #3205, #3191), anchored `W1-T2436([^0-9]|$)` with a `[0-9]` class and
+    never `\d`. SURFACE 1 READS 1: `refs/rmd-id/W1-T2436` resolves against 550 refs, W1-T2435 and
+    W1-T2434 firing 1 each. Filenames 0 of 852; declared ids 0 of 936; open titles 0 of 4; open
+    bodies 0 of 198 lines; head refs 0 of 147 checked BOTH cases; merged trailers 0 of 48; merged
+    subjects 0 of 400. ⚠ TWO CONTROLS READ ZERO AND ARE REPORTED RATHER THAN RE-PICKED SILENTLY:
+    W1-T1095 reads 0 on OPEN BODIES (no open PR mentions it) and W1-T2415 reads 0 on HEAD REFS (that
+    PR has since closed and GitHub deleted the head). Both surfaces stay controlled by W1-T2430,
+    which fires 9 and 1 respectively. ANCHOR-LEAK on three bands: 1/6, 2/33, 1/267 — discriminates
+    on every one.
+
+    (1) THE GAP, MEASURED BY SYMBOL AND CONTROLLED BOTH WAYS. W1-T1095 named three inabilities. Two
+    shipped and one did not, and a symbol sweep separates them cleanly. READING 0 FILES UNDER `src/`:
+    `openPrerequisitePr`, `splitInstrumentPr`, `openSplitPr`, `createPrerequisite`, `prerequisitePrFor`.
+    READING 1 FILE EACH: `outOfDiffBlockerFor`, `prerequisiteMerged`, `fixRungTerminationVerdict`
+    (capability 1, #2411) and `runFixRebase`, `decideFixRebase`, `ghUpdateBranch` (capability 3,
+    #2483). Five zeros against six ones from the same query is the control in both directions.
+
+    (2) AND THE MISSING ONE IS THE PRODUCER THE OTHER TWO CONSUME. `outOfDiffBlockerFor` is reached
+    at `src/run-task.ts:7407` and matches exactly `/\bblocked on #(\d+)\b/i` (`:6125`); the
+    entanglement arm logs `fix.instrument_entangled` at `:7519`. SO THE BLOCKER READ HAPPENS 110
+    LINES BEFORE THE ENTANGLEMENT REFUSAL, and it correctly finds nothing — because the PR it would
+    name is precisely what does not exist. Both shipped halves are inert on this path for want of a
+    number nothing writes.
+
+    (3) A PARTITION CANNOT PRODUCE THAT PR, AND THE TWO REPAIRS ON RECORD SAY SO. #3063 → #3082
+    lifted the instrument path PLUS 274 test lines present in neither PR beforehand. #3187 → #3186
+    added `src/lib/review.ts +5` and 51 new test lines, and #3187 does not touch `review.ts` at all.
+    IN 2 OF 2 THE PREREQUISITE REQUIRED AUTHORING; IN 1 OF 2, NEW PRODUCTION CODE IN A FILE THE
+    ORIGINAL PR NEVER OPENED. A mechanical `git mv` of the instrument half opens a PR whose own CI
+    fails, which is why this is scoped as a dispatch rather than a partition.
+
+    (4) WHAT THE WORKER IS HANDED, AND IT ALREADY EXISTS. The refusal computes both halves and they
+    are DISJOINT BY CONSTRUCTION: `instrumentPaths` (`src/lib/review.ts:6574`) filters on
+    `INSTRUMENT_SURFACE_RE.test(f)`, `srcPaths` (`:6611`) on `isProductPath(f) &&
+    !INSTRUMENT_SURFACE_RE.test(f)` — one requires the predicate the other negates, so no path can
+    appear in both. THAT PAIR IS THE BRIEF, NOT THE DIFF: the worker is told which files belong to
+    the prerequisite and which stay, and authors whatever the prerequisite needs to stand alone. A
+    human did exactly this twice from exactly that input. NOTE that `srcPaths` also carries
+    `srcChangeIsExecutable` (#2945), so it is a strict subset of the non-instrument product paths —
+    the brief the worker receives is narrower than "everything else", and a build must not widen it.
+
+    (5) WHAT THE WORKER MUST DELIVER FOR THE SHIPPED HALVES TO TAKE OVER, AND THE RULING THIS RESTS
+    ON. Two things and no more: a prerequisite PR THAT PASSES ITS OWN CI, and the string
+    `blocked on #N` written where `outOfDiffBlockerFor` reads it. Then capability 1 parks and
+    capability 3 rebases, both already shipped and already tested. ⚠ IF THE PREREQUISITE CANNOT GO
+    GREEN, THE RUNG MUST ESCALATE EXACTLY AS IT DOES TODAY. A second stuck PR beside the first is
+    worse than the escalation it replaces — the operator then has two red PRs and one of them is
+    the machine's own. That is the ruling this task rests on, and it is a REFUSAL CONDITION, not a
+    retry.
+
+    (6) THE POPULATION, AND THIS CHECKOUT CANNOT SEE THE COMMISSIONING WINDOW. The brief reports 5
+    rows across 4 incidents from 2026-08-15 to 2026-08-28 (W1-T503, W1-T1213, W1-T2324 twice,
+    W1-T2430). Read here over the three-form union at the CONFIG ROOT (666 `.gz`, 6 plain, 1 live;
+    per-form read control `run.start` 257,438 / 1,314 / 200), the step `fix.instrument_entangled`
+    returns TWO rows against a control of 67 `fix.exhausted` — and they are DIFFERENT INCIDENTS:
+    W1-T386 at 2026-08-07T00:28:51Z and W1-T419 at 2026-08-12T08:39:46Z.
+
+    ⚠ THE REASON IS WINDOW COVERAGE, NOT DISAGREEMENT, AND IT MUST BE SAID PLAINLY: this host's
+    archives stop at 2026-08-17 and the live file retains 200 rows per step, so the brief's window
+    falls in the gap. Neither reading refutes the other. WHAT FOLLOWS IS THAT THE ALL-TIME
+    POPULATION IS AT LEAST SIX INCIDENTS, NOT FOUR — the two id sets are disjoint — and any
+    frequency argument built on four is understated by whatever the unread window holds.
+
+    (7) THE CONCENTRATION HYPOTHESIS IS ALREADY WEAKENED BY THE ROWS THIS HOST CAN SEE. The brief
+    labels it as a hypothesis: 3 of its 4 name `src/run-task.ts`, the file 343 tasks declare, with
+    the falsifier "if the next entanglements name other files, the concentration is coincidence."
+    THE TWO ROWS READABLE HERE NAME OTHER FILES: W1-T386's instrument paths are
+    `.github/workflows/ci-gate.yml` and `.github/workflows/ci.yml`; W1-T419's is
+    `scripts/learnings-budget-ratchet.mjs`. Neither names `src/run-task.ts`. Those are EARLIER than
+    the brief's window rather than later, so they do not satisfy the falsifier's "next" as written —
+    but they are the same class of evidence pointing the same way, and a build must not size itself
+    on the concentration holding.
+
+    (8) AND 2-IN-TWELVE-DAYS AGAINST 2-IN-TWO IS NOT A TREND AT n=4. The detector NARROWED on
+    2026-08-26 (#2945, `srcChangeIsExecutable`), so the recent pair is not an artefact of a widened
+    predicate — but a rate computed on four points, two of them clustered, supports no slope. This
+    task is filed on the SHAPE of the defect (a capability that cannot be reached because its
+    producer is missing), not on a trend.
+
+    (9) ⚠ WHAT THE RUNG MUST NOT DO. Merge anything — the operator gates every merge. Rebase onto an
+    UNMERGED prerequisite — `prerequisiteMerged` already fails safe on `ok:false` and that guard
+    stays. Weaken Rule 25, widen the prose carve-out, or raise `fixStrikeCap`. THE REFUSAL IS
+    CORRECT AND STAYS CORRECT; only the ESCALATION becomes a dispatch.
+
+    (10) A CITATION CORRECTION, MEASURED — AND SHARPER THAN THE COMMISSIONING NOTE. A SUBJECT-ONLY
+    grep over FULL history finds exactly ONE hit for W1-T1095: the filing, `1b68f5a5 … (#2382)`.
+    Both builds are credited by TRAILER, not by subject. But the two do not behave alike in the
+    squash: #2411 (`9a6250a4`) carries the anchored trailer in its SQUASHED COMMIT BODY on main,
+    while #2483 (`533d8d84`) DOES NOT — its trailer survives only in the PR body on GitHub. So a
+    credit scan reading `git log` on main finds one of the two builds; a scan reading PR bodies
+    finds both. ⚠ AND A SEPARATE WARNING FOR WHOEVER RE-RUNS THIS: `git log --grep 'W1-T1095'`
+    returns ELEVEN commits because it searches whole messages including trailers, and
+    `git log --grep "(#2411)"` returns the WRONG SHA because the parentheses are regex. Use
+    `--format=%s | grep` for subjects and `grep -F` for PR-number lookups.
+
+    (11) OWNED ELSEWHERE: the three capabilities and their framing are W1-T1095's; Rule 25 and
+    `detectInstrumentEntanglement` are `src/lib/review.ts`'s and are not reopened; the park and
+    rebase halves are #2411's and #2483's and are consumed, not modified. THIS TASK OWNS ONLY THE
+    MISSING PRODUCER.
+
+    RULE 19 BAND, SET UP FRONT. `risk: high` is the SPAN reading and carries no claim about blast
+    radius: `files:` names two stems as the sizing check counts them, `run-task` and
+    `entanglement-split-dispatches-a-worker`, and that pairing is refused at `risk: medium`.
+  acceptance:
+    - claim: "an entangled refusal dispatches a worker instead of escalating straight to an issue"
+      proof: "unit test: test/entanglement-split-dispatches-a-worker.test.ts"
+    - claim: "the worker is handed the instrument half and the source half as computed by the refusal"
+      proof: "unit test: test/entanglement-split-dispatches-a-worker.test.ts"
+    - claim: "a prerequisite that cannot go green escalates exactly as the rung does today"
+      proof: "unit test: test/entanglement-split-dispatches-a-worker.test.ts"
+    - claim: "nothing merges and no rebase runs against an unmerged prerequisite"
+      proof: "unit test: test/entanglement-split-dispatches-a-worker.test.ts"
+    - claim: "the blocked on N string is written where the parked arm already reads it"
+      proof: "unit test: test/entanglement-split-dispatches-a-worker.test.ts"
+    - claim: "the strike cap and the instrument surface rule are unchanged"
+      proof: "unit test: test/entanglement-split-dispatches-a-worker.test.ts"
+  falsifier: |
+    If a fresh read of `fix.instrument_entangled` over a union that COVERS the window finds the
+    entanglement refusal is not reached — or is reached only on PRs a partition really could have
+    split, meaning the prerequisite needed no new code — then a dispatch is the wrong instrument and
+    this task should be closed in favour of the partition it rejects. The measurement must compare
+    the prerequisite PR against the original for ADDED lines in files the original never touched;
+    2 of 2 on record required them, and a run of zeros would refute the premise directly.
+
+    SEPARATELY DECISIVE: if `outOfDiffBlockerFor` stops keying on `blocked on #N`, or if
+    `instrumentPaths` and `srcPaths` stop being disjoint, the brief this task hands a worker no
+    longer exists and the finding must be re-derived rather than trusted.
