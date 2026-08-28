@@ -4908,13 +4908,13 @@ export function resetDefaultGhCallPacerForTest(pacer?: GhCallPacer): void {
 // threaded through a worker at all. `warm()` below keeps calling `index()`/`issueIndex()`
 // synchronously, byte-for-byte as before this task, whenever any of those three are supplied —
 // only the real, unconfigured production gateway takes the worker path this block adds.
-export const BOARD_PREWARM_WORKER_KIND = "remudero-board-prewarm-walk" as const;
+const BOARD_PREWARM_WORKER_KIND = "remudero-board-prewarm-walk" as const;
 
 /** What the main thread hands the worker — plain data only, per `workerData`'s structured-clone
  *  contract. `knownBoardPrs`/`knownIssues` are the SAME delta caches `restFetchHalf`/
  *  `fetchAllIssues` already carry between refreshes (`Map` clones structurally, so the worker's
  *  copy is a snapshot, never a live handle back into this process's memory). */
-export interface PrewarmWorkerRequest {
+interface PrewarmWorkerRequest {
   kind: typeof BOARD_PREWARM_WORKER_KIND;
   owner: string;
   repo: string;
@@ -4936,23 +4936,10 @@ type PrewarmChannelOutcome<T> =
   | { ok: true; rows: T[]; truncated: boolean; bytes: number; calls: number; mode: "full" | "delta" }
   | { ok: false; reason: GhFailureReason; message: string };
 
-export interface PrewarmWorkerResponse {
+interface PrewarmWorkerResponse {
   open?: PrewarmChannelOutcome<BoardPrRest>;
   merged?: PrewarmChannelOutcome<BoardPrRest>;
   issues?: PrewarmChannelOutcome<BoardIssueRest>;
-}
-
-/**
- * W1-T2440 round 2 — the narrow slice of `worker_threads.Worker` `runPrewarmWorker` actually
- * calls, structurally satisfied by a real `Worker` (so the production default needs no adapter)
- * and small enough for a test to implement with a plain object — no real thread, no real `gh`,
- * no coverage-collection dependency on either. See `buildBatchedGithub`'s own `opts.workerFactory`
- * doc for why this seam exists.
- */
-export interface PrewarmWorkerHandle {
-  once(event: "message", listener: (msg: PrewarmWorkerResponse) => void): unknown;
-  once(event: "error", listener: (err: Error) => void): unknown;
-  terminate(): unknown;
 }
 
 /** Runs one channel's fetch inside the worker and NEVER throws out of this function — a failure
@@ -4976,37 +4963,37 @@ function prewarmRunChannel<T, R extends { rows: T[]; truncated: boolean; calls: 
 }
 
 /**
- * W1-T2440 round 2 — THE WORKER'S ACTUAL WORK, PULLED OUT OF THE `!isMainThread` GATE BELOW SO A
- * TEST CAN CALL IT DIRECTLY, on the main thread, with no real `worker_threads.Worker` involved at
- * all. Round 1 left this logic inline inside the gate; every line of it read "uncovered" in CI's
- * diff-coverage despite two tests exercising it through an actual spawned worker (the SAME
- * assertions, run locally outside CI's own concurrency, passed with full coverage) — the
- * COLLECTION of a real OS thread's V8 profile back into this run's merged lcov is not something a
- * unit test can force, so the fix is to leave nothing NEEDING that collection to be covered.
- * Exported for exactly that: test/board-prewarm-does-not-block.test.ts calls this directly. The
- * `!isMainThread` gate below is now a single line with no branching of its own to cover — it
- * still cannot be unit-tested without a real worker, but there is nothing left inside it TO test,
- * mirroring the codebase's own "process-boundary" spawn-glue pattern (scripts/diff-coverage.mjs).
+ * THE WALK ITSELF — one channel set, run synchronously wherever it is CALLED FROM. Factored out
+ * of the worker branch immediately below (rather than left inline there) so it has exactly ONE
+ * body: the worker branch calls it inside the spawned thread; `runPrewarmWorker`'s own
+ * spawn-failure fallback (see its doc) calls it DIRECTLY on the main thread when a `Worker`
+ * cannot even be constructed, rather than reverting to the pre-worker `index()`/`issueIndex()`
+ * pair. That second call site means the fallback also honours `req.ghBin` (the worker's own
+ * knob, not the unrelated hardcoded `"gh"` `index()`'s default `exec` would have shelled), and —
+ * load-bearing for THIS task's own diff-coverage gate — it gives every line in here a real,
+ * main-thread execution a test can force without depending on cross-isolate coverage
+ * instrumentation ever reaching into a spawned `Worker` at all.
  */
-export function runPrewarmWorkerBody(req: PrewarmWorkerRequest): PrewarmWorkerResponse {
+function runPrewarmChannelsSync(req: PrewarmWorkerRequest): PrewarmWorkerResponse {
   // Its OWN pacer, not the main thread's module-scoped `defaultGhCallPacer` — a `Worker` has its
   // own heap, so the two cannot share one gap-tracking object. This still paces the up-to-three
-  // calls THIS worker makes against each other; it does NOT coordinate with the main thread's
+  // calls THIS walk makes against each other; it does NOT coordinate with the main thread's
   // sweep-driven pacer the way every same-thread caller does today. Priced, not hidden: a
   // narrower rate-limit exposure than before this task, worth a follow-up, never a reason to keep
   // the walk on the request-serving thread in the meantime.
   // `isTestRunner()`-gated exactly like the main thread's own `defaultGhCallPacer` (this file's
-  // W1-T1005 doc) — `NODE_TEST_CONTEXT` is inherited from `process.env` at Worker construction,
-  // so the same real-vs-test split holds here: real callers still get the genuine 1.5s gap this
-  // pacer enforces, and the test suite does not pay it 1.5s at a time per warm().
-  const workerPacer = createGhCallPacer(isTestRunner() ? { sleepSync: () => {} } : {});
+  // W1-T1005 doc) — `NODE_TEST_CONTEXT` is inherited from `process.env` at Worker construction
+  // (or is simply already set when this runs directly on the main thread), so the same
+  // real-vs-test split holds here: real callers still get the genuine 1.5s gap this pacer
+  // enforces, and the test suite does not pay it 1.5s at a time per warm().
+  const walkPacer = createGhCallPacer(isTestRunner() ? { sleepSync: () => {} } : {});
   const runSync = (args: string[]): string =>
     execFileSync(req.ghBin, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 1 << 26, timeout: GH_CALL_TIMEOUT_MS });
   const makeFetchJson = (): { fetchJson: (args: string[]) => unknown; bytes: () => number } => {
     let bytes = 0;
     return {
       fetchJson: (args: string[]): unknown => {
-        const raw = paceGhEntry(workerPacer, isGhRateLimitError, () => runSync(args));
+        const raw = paceGhEntry(walkPacer, isGhRateLimitError, () => runSync(args));
         bytes += Buffer.byteLength(raw, "utf8");
         return JSON.parse(raw);
       },
@@ -5032,12 +5019,12 @@ export function runPrewarmWorkerBody(req: PrewarmWorkerRequest): PrewarmWorkerRe
   return response;
 }
 
-// THE WORKER-ONLY ENTRY POINT. Only reachable inside a worker thread this module's own
+// THE WORKER BRANCH ITSELF. Only reachable inside a worker thread this module's own
 // `runPrewarmWorker` (below) spawned with `workerData.kind === BOARD_PREWARM_WORKER_KIND` — a
 // worker spawned any other way (there are none in this codebase) or the normal main-thread load
-// both leave this untouched. No logic of its own left to test (see `runPrewarmWorkerBody`'s doc).
+// both leave this untouched.
 if (!isMainThread && isPrewarmWorkerRequest(workerData)) {
-  parentPort?.postMessage(runPrewarmWorkerBody(workerData));
+  parentPort?.postMessage(runPrewarmChannelsSync(workerData));
 }
 
 export function buildBatchedGithub(
@@ -5117,16 +5104,17 @@ export function buildBatchedGithub(
      */
     ghBin?: string;
     /**
-     * W1-T2440 round 2 — TEST-ONLY seam for `runPrewarmWorker`'s own worker handle. Real callers
-     * omit it and get an actual `new Worker(new URL(import.meta.url), …)` — see `runPrewarmWorker`
-     * for why that's the default. A test injects a synthetic {@link PrewarmWorkerHandle} to reach
-     * the spawn-failure fallback and the worker `"error"` handler deterministically, WITHOUT a real
-     * OS thread: round 1's own diff-coverage failure showed a real worker's V8 coverage profile is
-     * not reliably merged back into a CI run's lcov (every line inside the worker-only gate read
-     * "uncovered" there despite two tests exercising it end to end through a real spawned worker),
-     * so nothing that can instead be reached from THIS thread should depend on that collection.
+     * W1-T2440 TEST-ONLY SEAM: overrides the URL `runPrewarmWorker` hands `new Worker(...)`.
+     * Every REAL caller omits this and gets `new URL(import.meta.url)` — the worker ALWAYS
+     * re-imports this exact module in production (see the module-scope doc above
+     * `BOARD_PREWARM_WORKER_KIND`, "THIS FILE, LOADED TWICE"); there is no other script it could
+     * ever run for a real gateway. Exists solely so a test can point a REAL
+     * `worker_threads.Worker` at a tiny, deliberately-throwing script and observe the genuine
+     * `worker.once("error", …)` handling below run against an ACTUAL crashed worker thread —
+     * never a mocked stand-in for one — the same "prefer a real, fake seam over a mock" shape
+     * `ghBin` (immediately above) already uses for the synchronous `gh` call itself.
      */
-    workerFactory?: (req: PrewarmWorkerRequest) => PrewarmWorkerHandle;
+    workerUrl?: string | URL;
   } = {},
 ): GitHub {
   const ttlMs = opts.ttlMs ?? 15_000;
@@ -5228,7 +5216,7 @@ export function buildBatchedGithub(
   /** The one background walk this gateway ever has in flight at a time (W1-T2440) — a second
    *  `warm()` call while this is set is a no-op, exactly like the existing "within TTL" no-op
    *  the synchronous path already has (status.test.ts's own W1-T154 fixture). */
-  let prewarmWorker: PrewarmWorkerHandle | undefined;
+  let prewarmWorker: Worker | undefined;
   const lastFetchFailed = (): boolean => (openOutcome?.failed ?? false) || (mergedOutcome?.failed ?? false);
   const lastFetchFailureReason = (): GhFailureReason | undefined =>
     (openOutcome?.failed ? openOutcome.reason : undefined) ?? (mergedOutcome?.failed ? mergedOutcome.reason : undefined);
@@ -5263,8 +5251,16 @@ export function buildBatchedGithub(
     // that specific failure is now classified instead of "unknown".
     // `timeout` (GH_CALL_TIMEOUT_MS) bounds the call the 2026-08-13 hour-long sweep was parked
     // on — `changedFiles` below shells this same closure with `--paginate`.
+    // W1-T2440: `opts.ghBin ?? "gh"`, not a bare `"gh"` literal — this closure is EVERY
+    // synchronous `gh` call this gateway makes OUTSIDE the warm worker (a cache-miss read that
+    // lands while no background warm owns that channel, and `runPrewarmChannelsSync`'s own
+    // spawn-failure fallback, which calls back INTO this same gateway's `index()`/`issueIndex()`
+    // — see that fallback's own doc). A test that sets `ghBin` to prove the worker path never
+    // shells a real `gh` must get the SAME fake binary here too, or a read that lands between
+    // warms (e.g. a cross-half invalidation forcing a synchronous refetch) silently reaches for
+    // the real `gh` instead. Real callers omit `ghBin` and get exactly `"gh"`, unchanged.
     ((args: string[]) =>
-      execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 1 << 26, timeout: GH_CALL_TIMEOUT_MS }));
+      execFileSync(opts.ghBin ?? "gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 1 << 26, timeout: GH_CALL_TIMEOUT_MS }));
   // W1-T265: the cross-refresh row cache the REST delta stops against. Held HERE, at gateway
   // scope, not inside `index()` — `index()` deliberately replaces its own cache with an EMPTY
   // one on a failed fetch (the W1-T181 pairing below), and reusing that as the delta base would
@@ -5867,19 +5863,25 @@ export function buildBatchedGithub(
       knownBoardPrs,
       knownIssues,
     };
-    let worker: PrewarmWorkerHandle;
+    let worker: Worker;
     try {
-      worker = opts.workerFactory
-        ? opts.workerFactory(req)
-        : new Worker(new URL(import.meta.url), { workerData: req, execArgv: process.execArgv });
+      worker = new Worker(opts.workerUrl ?? new URL(import.meta.url), { workerData: req, execArgv: process.execArgv });
     } catch (err) {
       // Spawning itself failed (e.g. this runtime has no worker_threads support) — fall back to
-      // TODAY's synchronous walk rather than never refreshing again. The ONE place this task's
-      // fix degrades to the pre-fix behaviour, and only when a worker cannot be created at all.
+      // running the SAME channel walk (`runPrewarmChannelsSync`, immediately above) synchronously
+      // on THIS thread, applied through the SAME `applyOpenOutcome`/`applyMergedOutcome`/
+      // `applyIssuesOutcome` bookkeeping a landed worker message uses, rather than the unrelated
+      // `index()`/`issueIndex()` pair. The ONE place this task's fix degrades to a blocking
+      // `execFileSync` on the request-serving thread, and only when a worker cannot be created at
+      // all — but even degraded, it stays `req.ghBin`-aware, never silently reverting to a
+      // differently-configured `"gh"` default the way calling `index()` here would have.
       finish();
-      console.error(`board gateway: prewarm worker spawn failed, falling back to a synchronous warm: ${err instanceof Error ? err.message : String(err)}`);
-      index();
-      issueIndex();
+      console.error(`board gateway: prewarm worker spawn failed, falling back to a synchronous walk: ${err instanceof Error ? err.message : String(err)}`);
+      const elapsedMs = Math.max(0, now() - startedAt);
+      const response = runPrewarmChannelsSync(req);
+      if (response.open) applyOpenOutcome(response.open, elapsedMs, previouslyOpen);
+      if (response.merged) applyMergedOutcome(response.merged, elapsedMs);
+      if (response.issues) applyIssuesOutcome(response.issues);
       return;
     }
     prewarmWorker = worker;
