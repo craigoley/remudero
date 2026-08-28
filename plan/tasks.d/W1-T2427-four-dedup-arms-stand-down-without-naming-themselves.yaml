@@ -116,6 +116,59 @@
     wrong is W1-T2424. THIS OWNS ONLY THE MISSING REASON, and specifically only the four arms named
     above.
 
+    ── AMENDMENT 2026-08-28: A FIFTH SITE, THE REVIEWER RATHER THAN THE SWEEP ────────────────────
+
+    THE SAME CRITERION FAILS ONE FILE OVER. `remudero-review` posts
+    `no acceptance criteria to judge (fail closed)` for TWO DIFFERENT SITUATIONS AND THE SAME
+    SENTENCE, so a reader cannot tell a correct refusal from a resolvable input the reviewer did
+    not have. That is exactly W1-T1110's test — not "did it decline" but "could a reader otherwise
+    tell it from a broken action path" — applied to `src/lib/review.ts` instead of the
+    `alreadyDone` switch this task owns.
+
+    MEASURED OVER THE THREE-FORM UNION, 2026-08-28. All-time there are 61 such refusals.
+      59 carry a SYNTHETIC `PR-NNNN` task id: genuinely trailer-less pull requests where the
+         refusal is CORRECT and must not change (sample: PR 2822, `task_id` reads `PR-2822`).
+       2 carry a RESOLVED `W1-T` id — PRs 3164 and 3168 — where the trailer parsed, the shard
+         existed on `main`, and the reviewer read a plan that predated it.
+    THE 2 AND THE 59 LAND ON ONE SENTENCE. Nothing on the row separates them.
+
+    THE CAUSE, PROVEN BY SHA RATHER THAN BY INFERENCE. `daemon.boot` at 2026-08-27T22:56:34Z
+    carried `head_sha=6511fe60`; both verdicts posted inside that boot window, at 00:15:52Z and
+    00:38:38Z. At `6511fe60` both shards read ABSENT from `plan/tasks.d/`; at the next boot's
+    `070f5b7b` both read PRESENT, with W1-T990 as a control reading 1 at BOTH shas and the
+    population moving 668 to 675. Their shards merged 37 and 46 minutes AFTER the container booted.
+
+    ⚠ AND THE FALSE TELL, RECORDED SO IT IS NOT CHASED AGAIN. The review log prints
+    `read: plan/tasks.yaml (sha256:85921b21b6e1)` and that value is CONSTANT BY CONSTRUCTION — it
+    hashes the MONOLITH, which does not change when a shard lands under `plan/tasks.d/`. Verified:
+    that hash equals `plan/tasks.yaml` at `origin/main` exactly. A constant hash is consistent with
+    a stale plan and is NOT evidence of one. THE BOOT SHA IS THE EVIDENCE.
+
+    ⚠ Q2 — THE REMEDY SHAPE, WITHOUT THE MECHANISM. Either of two things separates the two
+    situations at ZERO LEDGER COST, because the `review.posted` row already exists and already
+    carries a resolved `task_id`:
+      • a distinct failure class for the case where `task_id` RESOLVED but the plan lookup missed, or
+      • a boot-sha stamp on the row, so a reader can date the plan the verdict was judged against.
+    WHICH OF THE TWO IS A BUILD's CHOICE AND IS NOT DECIDED HERE. Neither adds a ledger line,
+    neither adds a step name, and neither is a rung.
+
+    ⚠ Q3 — THE SCALE, STATED SO NOBODY OVER-BUILDS. This is 2 of 61 all-time and the FIRST
+    OCCURRENCE across 484,000 union rows. Both happened inside 23 minutes, because two shards
+    merged inside one boot window. IT IS NOT STRUCTURAL AND THE REMEDY IS A SENTENCE, NOT A RUNG.
+    A reader who finds this paragraph while sizing the work should size it accordingly.
+
+    ⚠ WHAT MUST NOT CHANGE. FAIL-CLOSED STAYS. "Nothing to judge is never a pass" was CORRECT on
+    the evidence the reviewer had; the 59 depend on it and the 2 were not wrongly refused, only
+    wrongly indistinguishable. THE DEFECT IS THAT THE SENTENCE CANNOT DISTINGUISH ITSELF. And no
+    `## Acceptance` block goes into a BUILD's pull-request body as a workaround — a build's criteria
+    belong to its shard, and a body block creates a second source that can drift, which is
+    W1-T2315's class.
+
+    SCOPE. This amendment records a fifth site of this task's own class; it does not widen this
+    task's `files:`, which stay `src/lib/sweep.ts` and its test. Whether the reviewer half is built
+    here or filed separately is the operator's call, and this paragraph exists so that call is made
+    on evidence rather than rediscovered.
+
   acceptance:
     - claim: "a dedup that suppresses a post-review dispatch names itself on the row it already writes"
       proof: "unit test: test/dedup-stand-downs-name-themselves.test.ts"
