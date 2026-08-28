@@ -1,0 +1,155 @@
+- id: W1-T2435
+  title: "THE TRAILER STAMPER SWALLOWS ITS OWN FAILURE AND A REPAIR ARM RESTS ON IT HAVING WORKED — `ensureTaskTrailer` wraps both its read and its write in one bare `catch {}` and emits no ledger row on either path, so when the stamp does not land nothing records it; `acceptanceGateBodyRepair` calls itself a structural no-op for any plan-tracked PR precisely because it assumes that stamp, and when the assumption fails the arm cannot see that it failed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 15.00
+  files: [src/run-task.ts, test/trailer-stamp-failure-is-recorded.test.ts]
+  origin: "operator-brief#trailer-stamp-swallows-failure-2026-08-28"
+  plan_refs: ["W1-T1060", "W1-T2272", "W1-T2315", "W1-T166", "W1-T923"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE ID. Eight surfaces swept before a byte of this file was written, controls drawn from the
+    ENUMERATED OPEN SET (#3205, #3199, #3191, #3185, #3175), anchored `W1-T2435([^0-9]|$)` with a
+    `[0-9]` class and never `\d`. SURFACE 1 READS 1: `refs/rmd-id/W1-T2435` resolves on origin
+    against 548 refs, with W1-T2432 and W1-T2430 firing 1 each. Shard filenames 0 of 851; declared
+    ids 0 of 935; open-PR titles 0 of 5; open-PR bodies 0 of 278 lines; remote head refs 0 of 148,
+    checked BOTH case-sensitively and case-insensitively; merged trailers 0 of 48 trailer lines;
+    merged subjects 0 of 400. Controls fired on every surface: W1-T2272 on filenames, declared ids
+    and subjects; W1-T2430 on titles, bodies and head refs; W1-T2347 and W1-T2419 on merged
+    trailers. ⚠ ONE CONTROL READ ZERO AND IS REPORTED RATHER THAN RE-PICKED SILENTLY: W1-T2347
+    reads 0 on merged SUBJECTS, because the PR that shipped it (#3189) carries no id in its subject
+    line — the surface is still controlled by W1-T2272, which fires 1. ANCHOR-LEAK PROBE on three
+    bands: `W1-T243` 1 against 5, `W1-T24` 2 against 32, `W1-T2` 1 against 266 — the anchor
+    discriminates on every one.
+
+    (1) THE MECHANISM, BY SYMBOL. `ensureTaskTrailer` (`src/run-task.ts`) reads the PR body, appends
+    `Remudero-Task: <id>` when absent, and writes it back with `gh pr edit`. BOTH the read and the
+    write sit inside ONE `try` whose `catch {}` is empty but for the comment "Provenance trailer is
+    best-effort; the ledger (source (a)) still records the PR." It has FIVE call sites and emits
+    ZERO log calls on either path — verified by counting `log(` inside the function body, which is
+    0.
+
+    THE DOWNSTREAM DEPENDENCY IS EXPLICIT AND IN WRITING. `acceptanceGateBodyRepair`'s call site
+    says the arm "is a structural no-op for any plan-tracked task's PR either way: `ensureTaskTrailer`
+    stamps a real `Remudero-Task:` trailer unconditionally, which short-circuits
+    `acceptanceAuthorTimeCheck` to `ok: true` before it ever inspects the body's own Acceptance
+    block." That reasoning is correct WHEN THE STAMP LANDS. When it does not, the arm still declines
+    — for the right reason under a false premise — and nothing anywhere records that the premise
+    failed.
+
+    (2) THE RATE IS UNMEASURABLE FROM THE LEDGER, AND THAT IS THE FINDING RATHER THAN AN OBSTACLE.
+    Read over the three-form union at the CONFIG ROOT (`~/Remudero/state`: 666 `.gz`, 6 plain, 1
+    live; per-form read control `run.start` fires 257,438 / 1,314 / 200), NO step records a trailer
+    stamp on either path: steps matching `trailer`, `stamp` and `pr_opened` all read 0, against a
+    control of 94,195 `fix.dispatch` rows. The only `provenance` step is `correction.provenance`
+    (5,459), a different concern. A BARE `catch {}` LEAVES NOTHING TO COUNT, so the question "how
+    often does the stamp fail" cannot be answered from the record at all — only inferred from a
+    proxy.
+
+    (3) THE PROXY, AND IT SHRINKS THE POPULATION TO ONE. `no-header` gate failures on plan-tracked
+    `run-*` PRs are the observable proxy: a stamped trailer short-circuits the gate, so a `no-header`
+    failure on a worker PR means the trailer was absent when the gate ran. All-time there are 53
+    `acceptance-author-gate` failures of 1,307 runs (4.1%), split by reading each failing job's log:
+    `no-header` 37, `empty-proofs` 12, `unparseable` 4, `no-trailer` 0.
+
+    CONTROLLED BOTH WAYS, AS THE FINDING REQUIRES. The proxy FINDS #3189
+    (`run-W1-T2347-1787878211722` is in the `no-header` set) and it does NOT sweep up a PR where no
+    stamp was ever attempted: of the 37, TWENTY are on hand-named branches (`chore/`, `fix/`, …)
+    where `ensureTaskTrailer` never ran, and they are excluded rather than counted. Seventeen runs
+    across FOURTEEN distinct `run-*` branches remain.
+
+    ⚠ AND THE OBVIOUS READING OF THOSE FOURTEEN IS WRONG. Measuring the gap from each failing gate
+    run to the next successful one on the same branch separates a RACE from a real failure — the
+    gate fires at PR-open and the stamp lands moments later, and `acceptance-author-gate` re-triggers
+    on `types: [edited]`, so a stamp arriving seconds late clears itself:
+
+        gap 5s..72s   — TEN branches — the gate ran before the stamp; self-cleared, working as designed
+        gap ~58m, ~66m — TWO branches — slow, but cleared with no human
+        gap 8h26m      — ONE branch — `run-W1-T2347-…`, #3189, the operator repair
+        never cleared  — ONE branch — `run-W1-T2387-…`, PR #3109, CLOSED UNMERGED (an abandoned WIP,
+                         so a permanently red gate on it is correct, not a stuck PR)
+
+    SO THE POPULATION WHERE A SWALLOWED STAMP FAILURE DEMONSTRABLY COST A HUMAN IS EXACTLY ONE.
+    Ten of the fourteen are a timing race that heals itself in under 72 seconds, and reporting them
+    as stamp failures would have inflated a population of one into a population of fourteen.
+
+    (4) SO THIS IS A RECORD, NOT A RUNG — AND THE BRIEF'S OWN SCALE ARGUMENT DOES NOT SURVIVE THE
+    SPLIT. The commissioning argument was that this silent catch "sits under that 37, not under the
+    2-instance wrapped class". It sits under ONE of the 37: twenty had no stamp attempted and ten
+    were races. One instance is not a rung's population, and this repo has declined eight gates on
+    exactly that reasoning.
+
+    (5) WHAT TO RECORD, AND WHY NOT BLOCKING. The stamp is best-effort DELIBERATELY — a failed
+    provenance write must not fail a run that otherwise succeeded, and nothing here proposes
+    changing that. THE CANDIDATES ARE BOTH DIAGNOSTIC:
+
+      (a) ONE FIELD ON A ROW THAT ALREADY EXISTS. Cheapest by a wide margin if a row is already
+          written at each of the five call sites, since it costs no new ledger volume. ⚠ BUT THIS
+          SHARD DOES NOT ASSERT THAT SUCH A ROW EXISTS AT EVERY SITE — the five call sites were not
+          each traced to a neighbouring emitter, and a build must establish that before choosing
+          (a), or it will find itself adding a row and calling it a field.
+      (b) ONE NEW ROW ON A PATH THAT CURRENTLY WRITES NONE. Unambiguous and self-contained: one
+          `log(...)` in the `catch`, carrying the id it was handed, the prUrl, and WHICH of the two
+          calls threw — the read or the write — since one `catch` covers both and the two have
+          different causes (a missing PR, a permissions failure, a rate limit). Costs one row per
+          FAILURE only, never on the success path, so its volume is bounded by the defect it
+          measures.
+
+    SHOULD THE REPAIR ARM CONSULT THE SIGNAL? NOT YET, AND THE MEASUREMENT IS WHY. Wiring
+    `acceptanceGateBodyRepair` to read a stamp-failure row would let it distinguish "the trailer is
+    absent because the stamp failed" from "the trailer is absent because this is not a tracked PR" —
+    but at a population of one that is a consumer built for a signal that has fired once. RECORD
+    FIRST, AND LET THE ROW ACCUMULATE; a second and third instance make the consumer arguable, and
+    the row is what would make them countable at all. That ordering is the whole point: today the
+    question cannot even be asked.
+
+    (6) ⚠ WHAT MUST NOT BE BUILT. NO INFERRING PROVENANCE FROM A BRANCH NAME. `run-W1-T2347-…`
+    IMPLIES its task, and a rung acting on that implication is guessing — the reward-hacking shape
+    W1-T166 exists to measure. The distinction is sharp and worth stating once: `ensureTaskTrailer`
+    KNOWS the id because it was HANDED it as an argument; the repair arm does not, and may not
+    derive it. A recorded failure carries the id from the site that already had it, which is exactly
+    why recording is safe where inferring is not.
+
+    (7) OWNED ELSEWHERE, RECORDED SO THIS DOES NOT RE-FILE THEM: the gate itself is W1-T1060's; the
+    repair arm is W1-T2272's — SHIPPED as #2905 and #3045, and its `status: queued` is STALE, worth
+    correcting whenever that shard is next touched; the two-source criteria question is W1-T2315's;
+    and the `unparseable` wrapped-block class is a `rmd retro` PRODUCER defect rather than a rung —
+    its four failures are two PRs on `run-RETRO-*` branches, and the remedy there is rendering those
+    bullets through `renderAcceptanceBlock` (`plan-pr-emitter.ts`), which emits the one-line house
+    form. THIS TASK OWNS ONLY THE SWALLOWED STAMP FAILURE.
+
+    RULE 19 BAND, SET UP FRONT. `risk: high` is the SPAN reading and carries no claim about blast
+    radius: `files:` names two stems as the sizing check counts them, `run-task` and
+    `trailer-stamp-failure-is-recorded`, and that pairing is refused at `risk: medium`. The blast
+    radius is the opposite of the band — a diagnostic write inside an existing catch changes no
+    control flow and no return type.
+  acceptance:
+    - claim: "a stamp failure writes a row naming the task id it was handed"
+      proof: "unit test: test/trailer-stamp-failure-is-recorded.test.ts"
+    - claim: "the row distinguishes a failed read from a failed write"
+      proof: "unit test: test/trailer-stamp-failure-is-recorded.test.ts"
+    - claim: "a successful stamp writes no row at all"
+      proof: "unit test: test/trailer-stamp-failure-is-recorded.test.ts"
+    - claim: "a body that already carries the trailer still returns early and writes nothing"
+      proof: "unit test: test/trailer-stamp-failure-is-recorded.test.ts"
+    - claim: "the stamp stays best effort and no caller fails because the trailer did not land"
+      proof: "unit test: test/trailer-stamp-failure-is-recorded.test.ts"
+    - claim: "no task id is derived from a branch name anywhere on this path"
+      proof: "unit test: test/trailer-stamp-failure-is-recorded.test.ts"
+  falsifier: |
+    If a fresh sweep of `acceptance-author-gate` failures finds no plan-tracked `run-*` PR whose
+    `no-header` failure persisted beyond the seconds a stamp needs to land — measured the way this
+    shard measured it, by the GAP from the failing gate run to the next successful one on the same
+    branch, and NOT by counting `no-header` failures, which over-counts by fourteen to one — then the
+    stamp is not failing at a rate worth recording and this task should be closed rather than
+    implemented. A count of gate failures is not a count of stamp failures, and treating them as the
+    same number is the specific error this shard exists to have already made and corrected.
+
+    SEPARATELY DECISIVE: if `ensureTaskTrailer` stops wrapping its read and write in a single bare
+    `catch`, or if `acceptanceAuthorTimeCheck` stops short-circuiting on a trailer, the mechanism
+    named here is gone and the finding must be re-derived rather than trusted.
