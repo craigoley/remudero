@@ -1,0 +1,146 @@
+- id: W1-T2432
+  title: "A BUILD IS UNJUDGEABLE UNTIL THE REVIEWER's OWN CONTAINER RESTARTS PAST ITS SHARD — `rmd review` resolves criteria through `loadPlan`, which auto-discovers `plan/tasks.d/` next to the plan file, and it reads the checkout at the container's BOOTED sha rather than the PR's own head; a shard and its build landing between two boots therefore produce a fail-closed verdict on evidence that is present in the repository and reachable from the head the reviewer is already holding"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 20.00
+  files: [src/lib/review.ts, test/review-resolves-criteria-at-the-prs-own-head.test.ts]
+  origin: "operator-brief#unjudgeable-until-restart-2026-08-28"
+  plan_refs: ["W1-T2315", "W1-T126", "W1-T205", "W1-T2280", "W1-T2426"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE ID. Eight surfaces swept before a byte of this file was written, each control drawn from the
+    ENUMERATED OPEN SET (#3180, #3179, #3178, #3175, #3174, #3166, #3160), anchored
+    `W1-T2432([^0-9]|$)` with a `[0-9]` class and never `\d`. SURFACE 1 READS 1:
+    `refs/rmd-id/W1-T2432` resolves on origin against 545 refs, with W1-T2430 and W1-T2429 firing 1
+    each. Shard filenames 0 of 846; declared ids 0 of 930; open-PR titles 0 of 7; open-PR bodies 0 of
+    374 lines; remote head refs 0 of 151, checked BOTH case-sensitively and case-insensitively;
+    merged trailers 0 of 38 trailer lines; merged subjects 0 of 400.
+
+    CONTROLS FIRED ON EVERY SURFACE: titles W1-T2429/W1-T2430/W1-T204 = 1 each; bodies W1-T204 = 6
+    and W1-T1070 = 11; head refs W1-T2415 = 1, while `w1-t2429` reads 0 case-sensitively and 1
+    case-INsensitively, so this id was checked both ways; filenames and declared ids W1-T2425 = 1;
+    trailers and subjects — MERGED-ONLY surfaces — W1-T2425 and W1-T2423 fire there, so this id's
+    zero on them is structural rather than evidence. ANCHOR-LEAK PROBE: the first band tried,
+    `W1-T243`, read anchored 1 against unanchored 1 and was REJECTED as too sparse to prove
+    anything; `W1-T24` reads 2 against 27 and `W1-T2` reads 1 against 261, so the anchor
+    discriminates on a populated band.
+
+    (1) THE MECHANISM, BY SYMBOL. `loadPlan` (`src/lib/plan.ts`) resolves shards from
+    `join(dirname(planPath), "tasks.d")` — it auto-discovers `plan/tasks.d/` next to whatever plan
+    file it is handed. The reviewer resolves a task's criteria through that call against the
+    checkout it is running from, and on a container that checkout is the BOOTED sha. A shard that
+    merged after the boot is therefore absent from the reviewer's view while being present in the
+    repository, and `acceptanceAuthorTimeCheck`'s fail-closed arm posts
+    "FAIL — no acceptance criteria to judge (fail closed)" with `proof_exec: 0/0`.
+
+    THE WINDOW IS REAL AND RECURRING RATHER THAN A ONE-OFF, because the daemon restarts on
+    freshness continuously — the in-container pattern is `stopped: stale — origin/main advanced` on
+    a cycle, so any shard and build landing between the same two boots meet this. That restart
+    behaviour is W1-T126's and is NOT re-filed here.
+
+    (2) THE POPULATION, AND THE CORPUS IS SELF-ERASING — WHICH IS THE MEASUREMENT'S MAIN LIMIT.
+    A cleared verdict survives only in a head sha's STATUS HISTORY, never in the combined rollup, so
+    a current-status scan reads zero by construction and would have reported "no such defect ever".
+    Walking `/commits/<sha>/statuses` per head over the last 45 merged PRs: EXACTLY ONE carries a
+    fail-closed "no acceptance criteria to judge" verdict in its history — #3168 — and its stored
+    body holds an anchored `Remudero-Task: W1-T2423`, so the evidence existed when the verdict said
+    it did not.
+
+    CONTROLLED BOTH WAYS, AS THE FINDING REQUIRES. The state query is not blind to failures: it
+    returns `success,failure,pending` for #3168 and `success,pending` for #3164. The trailer arm
+    discriminates: merged PLAN FILINGS #3174, #3180 and #3163 each read 0 anchored trailers, which
+    is CORRECT — a filing implements nothing and fail-closed on it would be the right answer, so
+    the query does not sweep them up.
+
+    ⚠ AND ONE PREMISE OF THE COMMISSIONING BRIEF IS NOT REPRODUCIBLE. It records that BOTH #3164 and
+    #3168 posted the fail-closed verdict. #3164's head carries only TWO review statuses — `pending`
+    then `success` — and no failure at any point. Only #3168 shows the failure. If #3164 was
+    force-pushed the orphaned sha's statuses would be unreachable from the PR, so this is stated as
+    "not reproducible at head", not as "the brief is wrong". SO THE MEASURED POPULATION IS ONE, AND
+    THAT IS A RECORD RATHER THAN A MANDATE.
+
+    (3) FAIL-CLOSED IS NOT THE DEFECT AND MUST NOT BE WEAKENED. "Nothing to judge is never a pass"
+    is exactly right on evidence the reviewer does not have. THE DEFECT IS THAT THE EVIDENCE WAS
+    REACHABLE AND WAS NOT READ. Two candidate remedies, and they differ in cost by an order of
+    magnitude:
+
+      (a) RESOLVE CRITERIA AGAINST THE PR's OWN HEAD rather than the container's checkout. THIS MAY
+          BE FREE: the reviewer already holds the head sha it is reviewing, and W1-T2280 records
+          that `proofQueueAudit` already resolves proofs against the real checkout, so the pattern
+          exists in this codebase rather than needing invention. The cost to price is whether a
+          plan blob read at the PR's head is available without a second fetch, and what it does on
+          a PR whose base is behind — a head-resolved read sees the shard if the PR's own base
+          carries it, and still misses a shard that merged after the PR's base parent, which is a
+          strictly smaller window than today's but not zero.
+      (b) RE-READ THE PLAN BEFORE JUDGING. Simpler to state and strictly more expensive per review:
+          it pays a plan load on every verdict rather than once per boot, and it closes the window
+          only up to the moment of the read — a shard merging during the review still misses.
+
+    NEITHER IS CHOSEN HERE. `files:` names `src/lib/review.ts` because both candidates land there;
+    no plan-loading surface is declared, because declaring `src/lib/plan.ts` would presume remedy
+    (b)'s shape before the operator has ruled — the exclusion W1-T466 and W1-T2407 already use.
+
+    (4) A POSTED FAIL-CLOSED VERDICT CAN CLEAR ITSELF, AND THAT IS MEASURED RATHER THAN INFERRED.
+    #3168's head carries ONE commit, so it never moved, and its review status went
+    `failure 2026-08-28T00:38:37Z` then `success 2026-08-28T01:01:59Z` — 23 minutes 22 seconds
+    apart, ON THE SAME SHA. The mechanism is `src/lib/sweep.ts`'s post-review row that matches
+    `pr.reviewState === "failure"`, gated by `reviewVerdictOvertakenByActivity`, whose whole body is
+    `activityAt > verdictAt` and which FAILS CLOSED on an absent or unparseable
+    `reviewVerdictPostedAt`. So a failed verdict is re-offered when, and only when, activity
+    post-dates it.
+
+    ⚠ THIS CORRECTS A WIDELY-CITED RULE. "The designed path for a stale verdict is a NEW HEAD" is
+    true of the sweep's post-review row that requires `reviewState === "none"`, and FALSE of this
+    one. An operator who needs to clear such a verdict does not need a commit: any activity that
+    advances the PR's `updatedAt` — a body edit, a comment — re-offers the head. That is the
+    recurring cost, and it is one edit rather than a rebuild.
+
+    ⚠ AND A COUPLING WORTH NAMING BEFORE ANYONE BUILDS THIS. `lastActivityAt` is populated from the
+    PR's `updatedAt`, and W1-T2426 measured that POSTING A VERDICT ITSELF ADVANCES `updatedAt` by
+    +4s to +90s. So the verdict's own bump can satisfy `activityAt > verdictAt` and re-offer the
+    head once without any external action. Whether #3168 cleared for that reason or because of a
+    separate edit is NOT established here, and a build must not assume either.
+
+    (5) THE FALSE TELL, RECORDED SO NOBODY CHASES IT. The review log's
+    `read: plan/tasks.yaml (sha256:85921b21b6e1)` is CONSTANT across the whole evening, and that is
+    EXPECTED, not evidence of staleness: it names the MONOLITH, whose bytes do not change when a
+    shard lands in `plan/tasks.d/`. A stale reviewer and a fresh one print the same line. Any
+    diagnosis resting on that hash moving is chasing a constant.
+
+    (6) OWNED ELSEWHERE, RECORDED SO THIS DOES NOT RE-FILE THEM: the two-source criteria question is
+    W1-T2315's; the freshness restart that opens the window is W1-T126's; the plan-only carve-out
+    that decides which PRs need criteria at all is W1-T205's. THIS TASK OWNS ONLY THE RESOLUTION
+    WINDOW — the interval in which a reviewer holds a checkout older than the evidence it is judging.
+
+    RULE 19 BAND, SET UP FRONT. `risk: high` is the SPAN reading and carries no claim about blast
+    radius: `files:` names two stems as the sizing check counts them, `review` and
+    `review-resolves-criteria-at-the-prs-own-head`, and that pairing is refused at `risk: medium`.
+  acceptance:
+    - claim: "criteria resolve from the plan as it stands at the pull request's own head"
+      proof: "unit test: test/review-resolves-criteria-at-the-prs-own-head.test.ts"
+    - claim: "a shard merged after the reviewer booted is still found when it is present at that head"
+      proof: "unit test: test/review-resolves-criteria-at-the-prs-own-head.test.ts"
+    - claim: "a task with genuinely no criteria anywhere still fails closed"
+      proof: "unit test: test/review-resolves-criteria-at-the-prs-own-head.test.ts"
+    - claim: "a body carrying no anchored trailer is unchanged and still fails closed"
+      proof: "unit test: test/review-resolves-criteria-at-the-prs-own-head.test.ts"
+    - claim: "the verdict is posted fresh and no prior verdict is carried forward"
+      proof: "unit test: test/review-resolves-criteria-at-the-prs-own-head.test.ts"
+    - claim: "nothing added fetches twice or waits between resolving and judging"
+      proof: "unit test: test/review-resolves-criteria-at-the-prs-own-head.test.ts"
+  falsifier: |
+    If a walk of `/commits/<head>/statuses` over a fresh window finds no `remudero-review` failure
+    whose description is "no acceptance criteria to judge (fail closed)" on a PR whose stored body
+    holds an anchored `Remudero-Task:` line, then the window is not being hit and this task should be
+    closed rather than implemented. The measurement MUST walk status HISTORY and not the combined
+    rollup: a verdict that later cleared leaves no trace in the rollup, so a rollup scan reads zero
+    whether or not the defect occurred, and that zero is worthless.
+
+    SEPARATELY DECISIVE: if `loadPlan` stops resolving shards relative to the plan file it is handed,
+    or if the reviewer stops resolving criteria from the container's checkout, the mechanism named
+    here is gone and the finding must be re-derived rather than trusted.
