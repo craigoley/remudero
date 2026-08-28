@@ -663,6 +663,34 @@ export interface SweepPolicy {
    * + `test/sweep.test.ts` only.
    */
   repeatDispositionBound: number;
+  /**
+   * W1-T2439 (half two) — HOW MANY PLAN-FILING PRs THE NON-SPAWNING REVIEW LANE MAY ADMIT PER
+   * LIGHT PASS. The spawning lane stays at exactly ONE (see {@link selectReviewAdmission}); this
+   * governs only PRs whose {@link OpenPrView.isPlanFiling} reads `true`, whose review takes the
+   * deterministic path and spawns no judge in 98 percent of cases.
+   *
+   * THE NUMBER IS DERIVED, NOT PICKED, from the two quantities the shard requires and both
+   * measured at this sha:
+   *
+   *   COST. A deterministic review costs FIVE GitHub calls: one `gh pr view --json
+   *   statusCheckRollup`, plus TWO guarded posts (pending and final) each of which is one
+   *   `fetchLifecycle()` read plus one `POST repos/{owner}/{repo}/statuses/{sha}`. The cheap path
+   *   is cheap, NOT free — the daemon hit `API rate limit already exceeded` repeatedly on
+   *   2026-08-27, which is why this is a number and not the absence of one.
+   *
+   *   CADENCE. `plan/policy.yaml`'s `pollIntervalMs` is 60_000 and the same file records healthy
+   *   sweep ticks at 61.8 s median, so a pass runs about 60 times an hour.
+   *
+   *   QUEUE. The observed wait this bound has to clear is p50 94 s against 3.0 s of work — about
+   *   1.6 passes, so a queue two deep at the median.
+   *
+   * SO: a bound of 3 clears the median queue in ONE pass, and its worst case costs
+   * 3 x 5 x 60 = 900 calls/hour, 18 percent of the 5,000/hour core budget — bounded, statable,
+   * and well under the lane it exists to unblock. A bound of 8 would clear p90 in one pass and
+   * cost 2,400/hour (48 percent), which is the shape this repo has rejected before. 3 is the
+   * smallest number that satisfies "more than one" AND clears the median.
+   */
+  planFilingAdmissionBound: number;
 }
 
 /**
@@ -796,6 +824,7 @@ export const DEFAULT_SWEEP_POLICY: SweepPolicy = {
   // literal, 50, derived against the merge-time population measured 2026-08-26 (see the field's
   // own doc for the full derivation), never a round number picked because it looked safe.
   repeatDispositionBound: 50,
+  planFilingAdmissionBound: 3,
 };
 
 /**
@@ -6767,7 +6796,15 @@ export async function runSweepLightPass(
   // "deferred to full sweep (light pass)" reason every other gated disposition already gets
   // from this restricted caller — never a new reason string, never a new mechanism.
   const now = deps.now ? deps.now() : Date.now();
-  const admitted = selectReviewAdmission(openPrs, policy, now);
+  // W1-T2439: the light pass now admits from BOTH lanes — the spawning one at its unchanged bound
+  // of exactly one, and the non-spawning plan-filing one at its own smaller, derived bound. The
+  // admitted SET is what each PR's own scoped deps are decided against; nothing else moves.
+  const { spawning, planFilings } = selectReviewAdmissions(openPrs, policy, now);
+  const admittedNumbers = new Set<number>([
+    ...(spawning ? [spawning.prNumber] : []),
+    ...planFilings.map((p) => p.prNumber),
+  ]);
+  const admitted = spawning;
   return Promise.all(
     openPrs.map((pr) => {
       const baseActionable = deps.actionable;
@@ -6776,7 +6813,7 @@ export async function runSweepLightPass(
       // pass runs inside is awaited whichever PR won the post-review admission, so the fix rung's
       // CI wait must leave the await on both branches or the defect survives on one of them.
       const scopedDeps: SweepDeps =
-        admitted?.prNumber === pr.prNumber
+        admittedNumbers.has(pr.prNumber)
           ? { ...deps, detachFixWait: true }
           : {
               ...deps,
@@ -6788,8 +6825,11 @@ export async function runSweepLightPass(
               // sentence. The bound itself is untouched: this records the refusal, never makes one.
               standDownReasonFor: (d) =>
                 d === "post-review"
-                  ? "not admitted this pass: one post-review admission per light pass" +
-                    (admitted ? ` (#${admitted.prNumber} won it)` : "")
+                  ? (pr.isPlanFiling === true
+                      ? `not admitted this pass: at most ${policy.planFilingAdmissionBound} plan-filing ` +
+                        "post-review admissions per light pass"
+                      : "not admitted this pass: one post-review admission per light pass" +
+                        (admitted ? ` (#${admitted.prNumber} won it)` : ""))
                   : baseStandDownReasonFor?.(d),
             };
       return runSweep([pr], scopedDeps, policy);
@@ -6834,11 +6874,60 @@ export function selectReviewAdmission(
   policy: SweepPolicy,
   now: number,
 ): OpenPrView | undefined {
-  return oldestByKey(
-    openPrs.filter((pr) => deriveDisposition(pr, policy, now).disposition === "post-review"),
-    now,
-    reviewAdmissionKey,
-  );
+  return selectReviewAdmissions(openPrs, policy, now).spawning;
+}
+
+/**
+ * W1-T2439 (half two) — THE SPLIT ADMISSION, AND WHY THE PREDICATE IS `isPlanFiling` AND NOT THE
+ * REVIEW'S OUTCOME.
+ *
+ * `reviewer_outcome` is written on the `review.posted` row AFTER the review runs, and this
+ * function receives only `readonly OpenPrView[]`, a policy and a clock — it cannot see an outcome
+ * that does not exist yet. {@link OpenPrView.isPlanFiling} is the one signal available at
+ * admission, which is exactly why this task's half one wired its producer first.
+ *
+ * TWO LANES, AND ONLY ONE OF THEM CAN SPAWN:
+ *   - SPAWNING — every PR whose `isPlanFiling` is not `true`. Bound UNCHANGED at exactly one, the
+ *     same `oldestByKey` over the same key, byte-identical to what W1-T526 always ran.
+ *   - NON-SPAWNING — PRs whose `isPlanFiling` is `true`, whose review takes the deterministic path.
+ *     Bounded by {@link SweepPolicy.planFilingAdmissionBound}, whose number is derived in its own
+ *     doc rather than picked.
+ *
+ * ⚠ FAIL-OPEN ON AN UNPOPULATED SIGNAL. `isPlanFiling === undefined` — every fixture that predates
+ * half one, and any gateway that does not populate it — is treated as SPAWNING, so it competes for
+ * the single slot exactly as it does today. The split can only ever ADD throughput on a positive
+ * signal; an absent one changes nothing.
+ *
+ * ⚠ AND THE 2 PERCENT THAT DO REACH THE JUDGE ARE CHARGED TO THE SPAWNING SIDE, BY CONSTRUCTION
+ * RATHER THAN BY DETECTION: this split never RAISES the spawning bound, so a plan filing whose
+ * review turns out to spawn consumes judge capacity that was never expanded to accommodate it.
+ * That is the honest guarantee available at admission time — the shard's Q1 establishes that
+ * detecting the outcome beforehand is unbuildable, so the design charges it instead of predicting
+ * it.
+ */
+export function selectReviewAdmissions(
+  openPrs: readonly OpenPrView[],
+  policy: SweepPolicy,
+  now: number,
+): { spawning: OpenPrView | undefined; planFilings: OpenPrView[] } {
+  const eligible = openPrs.filter((pr) => deriveDisposition(pr, policy, now).disposition === "post-review");
+  const filings = eligible.filter((pr) => pr.isPlanFiling === true);
+  const rest = eligible.filter((pr) => pr.isPlanFiling !== true);
+
+  // The cheap lane, oldest-first on the SAME immutable key, truncated at its own bound. Sorting
+  // by the key rather than repeatedly calling `oldestByKey` keeps one ordering definition.
+  const bound = Math.max(0, policy.planFilingAdmissionBound);
+  const planFilings = [...filings]
+    .sort((a, b) => {
+      const ka = Date.parse(reviewAdmissionKey(a));
+      const kb = Date.parse(reviewAdmissionKey(b));
+      const aa = Number.isNaN(ka) ? -Infinity : now - ka;
+      const ab = Number.isNaN(kb) ? -Infinity : now - kb;
+      return ab !== aa ? ab - aa : a.prNumber - b.prNumber;
+    })
+    .slice(0, bound);
+
+  return { spawning: oldestByKey(rest, now, reviewAdmissionKey), planFilings };
 }
 
 /**

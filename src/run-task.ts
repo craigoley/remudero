@@ -23735,6 +23735,20 @@ export function buildOpenPrViews(
       // now ALSO be populated for a task-id-less PR (the `filingUnmetKey` fallback above) — this
       // stays `false` even then, on purpose (see the note above `filingUnmetKey`).
       criteriaRecoverable: taskId !== undefined,
+      // W1-T2439 (half one) — THE PRODUCER `isPlanFiling` HAS BEEN WAITING FOR. Its declaration
+      // (lib/sweep.ts) shipped the mechanism end-to-end and said so in its own SCOPE note:
+      // "`run-task.ts`'s `buildOpenPrViews` does not populate it yet. Until that producer wiring
+      // lands, this is always `undefined` in the real gateway". This is that wiring, and the
+      // predicate is NOT re-derived here — `isPlanOnlyFilingPr` (above) already implements the ONE
+      // positive signal that doc requires: a `pr.opened{plan_only:true}` line the emitter itself
+      // wrote for THIS pr_url, never an absent trailer and never a plan/**-only diff.
+      //
+      // ASSIGNED UNCONDITIONALLY, WITH THE CONDITION IN THE VALUE — never `...(cond ? {k} : {})`.
+      // `producerAssignedKeys` (lib/producer-completeness.ts) walks this literal's TOP-LEVEL KEYS
+      // and pushes any SPREAD onto `unresolvableSpreads`; that is deliberate and has its own
+      // passing test, which is exactly what made #3127 read as unwired after a conditional spread.
+      // A plain key whose value is a call is what the census recognises.
+      isPlanFiling: isPlanOnlyFilingPr(ledger, pr.url),
       // W1-T923: a SIBLING read, off the SAME `review.posted` ledger line `unmetCriteria` above
       // already scans — see `actionableGateFailuresFromLedger`'s own doc for why it is keyed
       // differently (no `isPlanOnlyFilingPr` gate) and why it never parses `failure_reason`.
