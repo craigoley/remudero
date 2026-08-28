@@ -1744,10 +1744,31 @@ export function appendTaskTrailerToCommit(worktreePath: string, taskId: string):
  * call: a resumed process recovers the SAME decision from nothing but the
  * ledger + the live head (acceptance criterion 3), never from memory.
  */
+/**
+ * W1-T2347 — a hidden marker {@link realArmDeps} stamps onto every object it returns, so the four
+ * `deps: ArmDeps = realArmDeps()`-shaped entry points can tell "the caller omitted `deps` (or
+ * explicitly forwarded the real one)" apart from "the caller supplied its own seam" WITHOUT
+ * changing any of their signatures — the census (test/operator-gated-default-reachability.test.ts,
+ * W1-T2346) derives its LEVEL-1 population by matching that exact `= realArmDeps()` parameter-text
+ * shape, and a signature change (e.g. `deps?: ArmDeps` + manual resolution) would have silently
+ * broken that regression pin. A `unique symbol` computed key is invisible to the census's own
+ * text-scan (it only recognises a leading-identifier `key:`, never a computed `[symbol]:`), so
+ * `realArmDeps()`'s own field-by-field classification is unaffected too.
+ */
+const REAL_ARM_DEPS_MARKER: unique symbol = Symbol("run-task.realArmDeps");
+
+/** True only for an object {@link realArmDeps} itself returned — never for a hand-built fixture,
+ *  however complete, since no test has any reason to stamp this symbol onto one. */
+function isRealArmDepsObject(deps: unknown): boolean {
+  return typeof deps === "object" && deps !== null && (deps as Record<PropertyKey, unknown>)[REAL_ARM_DEPS_MARKER] === true;
+}
+
 /** Injectable side effects for {@link armAutoMerge} — exported so a behavioral
  * test drives EVERY branch (incl. the clean-status direct-merge fallback) with
  * fakes; the real defaults are the same gh calls the function always made. */
 export interface ArmDeps {
+  /** W1-T2347 — see {@link REAL_ARM_DEPS_MARKER}'s own doc. Optional and never set by a fixture. */
+  [REAL_ARM_DEPS_MARKER]?: true;
   /** The PR's live head sha — read over REST via {@link readHeadShaRest}, never `gh --json`. */
   headSha: (prUrl: string) => string;
   /** The ledger lines the W1-T230 verdict gate reads. */
@@ -1885,17 +1906,23 @@ export class ArmSeamRequiredError extends Error {
  * requirement is gated on {@link isTestRunner}, so a daemon/operator/CI process that is not
  * `node --test` calls this and returns immediately — production wiring never moves.
  *
- * MUST be consulted BEFORE `realArmDeps()` is even constructed, not merely before one of its
- * fields is invoked: `realArmDeps()` itself is inert (it only builds closures), but the two
- * dep calls this task's rationale names (`deps.headSha`, `deps.ledgerLines()`, both inside
- * {@link armAutoMergeDetailed}) fire moments later against whatever object is resolved here, so
- * gating at construction is the earliest — and therefore the only correct — placement.
+ * CONSULTED AS EACH ENTRY POINT'S FIRST STATEMENT — before the `!taskId` short-circuit, before
+ * `deps.headSha`, before `deps.ledgerLines()`, before anything else. `realArmDeps()` itself is
+ * inert (it only builds closures; no dep call inside it performs I/O until invoked LATER), so
+ * whether it already ran as part of resolving a defaulted `deps` parameter is safe — what matters
+ * is that this throws before any of ITS FIELDS is ever called. `seamSupplied` is computed by the
+ * caller via {@link isRealArmDepsObject} (a hidden marker `realArmDeps()` stamps onto its own
+ * return value — see that symbol's own doc): this is what lets every one of the four entry points
+ * KEEP its exact original `deps: ArmDeps = realArmDeps()` parameter shape, which is the same
+ * shape W1-T2346's census (test/operator-gated-default-reachability.test.ts) derives its LEVEL-1
+ * population from — an `deps?: ArmDeps` signature change here would have silently broken that
+ * regression pin instead of extending it.
  *
  * TWO WAYS OUT, both already established call sites and each with its own test in
- * `test/arm-seam-default-is-opt-in.test.ts`: supply an explicit seam (any non-`undefined` `deps`
- * argument, at this function or a caller that forwards one down — an `arm`/`disarm` override, or
- * a narrowed `ArmDeps` — the SAME injectable seam every arm entry point already exists for); or
- * wrap the section that deliberately drives the real dependency in `withLiveWritesAllowed` /
+ * `test/arm-seam-default-is-opt-in.test.ts`: supply an explicit seam (any `deps` argument that is
+ * NOT the object `realArmDeps()` itself returned — an `arm`/`disarm` override, or a narrowed
+ * `ArmDeps` — the SAME injectable seam every arm entry point already exists for); or wrap the
+ * section that deliberately drives the real dependency in `withLiveWritesAllowed` /
  * `RMD_ALLOW_LIVE_WRITES=1`, the live-write guard's own per-test/per-process opt-outs. No third
  * escape hatch is added, and no by-name allowlist of suites — W1-T1206 rationale 6 names why a
  * by-name set fails OPEN the moment a file is added.
@@ -1921,6 +1948,10 @@ export function realArmDeps(
   loadConfigImpl: typeof loadConfig = loadConfig,
 ): ArmDeps {
   return {
+    // W1-T2347: see REAL_ARM_DEPS_MARKER's own doc — a computed-symbol key, deliberately, so the
+    // census's `^([A-Za-z0-9_]+)\s*:` field-name regex never matches it and this stays invisible
+    // to that derivation.
+    [REAL_ARM_DEPS_MARKER]: true,
     headSha: (prUrl) => readHeadShaRest(prUrl),
     // W1-T1000002: `attemptArm` calls this thunk on EVERY arm, so a host that cannot resolve a
     // config would turn arming into a crash. `loadConfig` does far more than yield a root — it
@@ -2028,13 +2059,12 @@ export interface ArmAttemptResult {
 export function armAutoMerge(
   prUrl: string,
   taskId: string | undefined,
-  // W1-T2347: no default here — `deps` is forwarded to armAutoMergeDetailed UNCHANGED, `undefined`
-  // included, so that function's own requireExplicitArmSeam check sees the true omission. A
-  // default of `realArmDeps()` on THIS parameter would have constructed the real object before
-  // the forward, defeating the callee's check by handing it an already-real (and therefore
-  // "supplied") deps argument.
-  deps?: ArmDeps,
+  deps: ArmDeps = realArmDeps(),
 ): ArmOutcome {
+  // W1-T2347: no guard call of its own — this is a thin forward, and whatever it hands
+  // armAutoMergeDetailed (the real default when `deps` was omitted here, or an explicit seam)
+  // is exactly what that function's OWN requireExplicitArmSeam check (via REAL_ARM_DEPS_MARKER)
+  // sees and rules on. Two guard calls for one omission would be a second copy of the same rule.
   return armAutoMergeDetailed(prUrl, taskId, deps).outcome;
 }
 
@@ -2050,23 +2080,22 @@ export function armAutoMerge(
 export function armAutoMergeDetailed(
   prUrl: string,
   taskId: string | undefined,
-  // W1-T2347: `deps` is OPTIONAL rather than defaulted to `realArmDeps()` directly — the guard
-  // below must run BEFORE that call, not as a side effect of evaluating a default expression the
-  // guard would run too late to precede. `deps ?? realArmDeps()` immediately after is otherwise
-  // byte-identical to the prior default-parameter behaviour for every non-test caller.
-  deps?: ArmDeps,
+  deps: ArmDeps = realArmDeps(),
 ): ArmAttemptResult {
-  requireExplicitArmSeam("armAutoMergeDetailed", deps !== undefined);
-  const resolvedDeps = deps ?? realArmDeps();
+  // W1-T2347: consulted BEFORE any dep on `deps` is invoked — see requireExplicitArmSeam's own
+  // doc for why this must precede even the `!taskId` short-circuit below, and REAL_ARM_DEPS_
+  // MARKER's doc for why the parameter keeps its original `= realArmDeps()` default text rather
+  // than becoming `deps?: ArmDeps` (the census's own population derivation matches that shape).
+  requireExplicitArmSeam("armAutoMergeDetailed", !isRealArmDepsObject(deps));
   if (!taskId) {
-    resolvedDeps.say(`automerge.ledger_refused (W1-T230): no task id resolvable for this PR — arming withheld: ${prUrl}`);
+    deps.say(`automerge.ledger_refused (W1-T230): no task id resolvable for this PR — arming withheld: ${prUrl}`);
     return { outcome: "no-task-id" };
   }
   let headSha: string;
   try {
-    headSha = resolvedDeps.headSha(prUrl);
+    headSha = deps.headSha(prUrl);
   } catch (e) {
-    resolvedDeps.say(
+    deps.say(
       `automerge.head_sha_unavailable (W1-T230): ${String((e as Error)?.message ?? e)} — arm withheld: ${prUrl}`,
     );
     return { outcome: "head-unavailable" };
@@ -2074,15 +2103,15 @@ export function armAutoMergeDetailed(
   // ONE ledger read feeds both the verdict and its override — the same construction the two
   // `decideAutoMergeArm` call sites above already use, so the override escape hatch survives
   // this path's delegation instead of being silently dropped by it.
-  const ledgerLines = resolvedDeps.ledgerLines();
+  const ledgerLines = deps.ledgerLines();
   const prior = priorReviewVerdictFromLedger(ledgerLines, taskId);
   const override = prior?.capped ? cappedOverrideFromLedger(ledgerLines, taskId, headSha) : undefined;
   const decision = decideArmFromLedgerVerdict(prior, headSha, override);
   if (!decision.arm) {
-    resolvedDeps.say(`automerge.ledger_refused (W1-T230): ${decision.reason} — ${prUrl}`);
+    deps.say(`automerge.ledger_refused (W1-T230): ${decision.reason} — ${prUrl}`);
     return { outcome: "ledger-refused" };
   }
-  return attemptArm(prUrl, resolvedDeps);
+  return attemptArm(prUrl, deps);
 }
 
 /**
@@ -2401,24 +2430,24 @@ function irreversibleSignalForWorktree(worktreePath: string): boolean {
  */
 export function armAutoMergeAtOpen(
   prUrl: string,
-  // W1-T2347: OPTIONAL, not defaulted — same reasoning as armAutoMergeDetailed's own `deps`
-  // above. This is one of the four `deps: ArmDeps = realArmDeps()`-shaped LEVEL-1 sites the
-  // task's rationale names, gated for the same reason as its three siblings: it reaches
-  // `realArmDeps()` by the identical shape, and design note (vi) asks this be ruled on
-  // explicitly rather than left out by omission — see the PR body for that ruling.
-  deps?: (Pick<ArmDeps, "armAuto" | "mergeDirect" | "isMerged" | "say"> & Partial<Pick<ArmDeps, "ledgerLines" | "readMergeFacts" | "sleepSync">>),
+  deps: (Pick<ArmDeps, "armAuto" | "mergeDirect" | "isMerged" | "say"> & Partial<Pick<ArmDeps, "ledgerLines" | "readMergeFacts" | "sleepSync">>) = realArmDeps(),
   irreversible = false,
 ): ArmOutcome {
-  requireExplicitArmSeam("armAutoMergeAtOpen", deps !== undefined);
-  const resolvedDeps = deps ?? realArmDeps();
+  // W1-T2347: this is one of the four `deps: ArmDeps = realArmDeps()`-shaped LEVEL-1 sites the
+  // task's rationale names, gated for the SAME reason as its three siblings: it reaches
+  // `realArmDeps()` by the identical shape, and design note (vi) asks this be ruled on
+  // explicitly rather than left out by omission — see the PR body for that ruling. Consulted
+  // before EVERY branch, including `irreversible` below, which never touches a live dep itself
+  // but must not let `deps` have been resolved to the real default regardless.
+  requireExplicitArmSeam("armAutoMergeAtOpen", !isRealArmDepsObject(deps));
   if (irreversible) {
-    resolvedDeps.say(
+    deps.say(
       `automerge.irreversible_refused (W1-T919/W1-T947): diff classified irreversible — refusing to ` +
         `arm at open; an operator must review and merge this manually: ${prUrl}`,
     );
     return "irreversible-refused";
   }
-  return attemptArm(prUrl, resolvedDeps).outcome;
+  return attemptArm(prUrl, deps).outcome;
 }
 
 /**
@@ -2491,20 +2520,18 @@ export function disarmAutoMerge(
   // W1-T1215: `isMerged` widens the deps OPTIONALLY and is consulted ONLY from the catch below,
   // so the ordinary (successful) withdrawal costs exactly the requests it costs today. This is
   // the SAME seam and the same discipline W1-T1050 added for a thrown `mergeDirect`.
-  // W1-T2347: no default — see armAutoMergeDetailed's own `deps` comment for why the guard below
-  // must precede `realArmDeps()` rather than run as a side effect of defaulting this parameter.
-  deps?: Pick<ArmDeps, "disableAuto" | "say"> & Partial<Pick<ArmDeps, "isMerged">>,
+  deps: Pick<ArmDeps, "disableAuto" | "say"> & Partial<Pick<ArmDeps, "isMerged">> = realArmDeps(),
 ): DisarmOutcome {
-  requireExplicitArmSeam("disarmAutoMerge", deps !== undefined);
-  const resolvedDeps = deps ?? realArmDeps();
+  // W1-T2347: see armAutoMergeDetailed's own comment — same guard, same reason, same marker.
+  requireExplicitArmSeam("disarmAutoMerge", !isRealArmDepsObject(deps));
   try {
-    resolvedDeps.disableAuto(prUrl);
-    resolvedDeps.say(`automerge.disarmed (W1-T125): early arm withdrawn — ${prUrl}`);
+    deps.disableAuto(prUrl);
+    deps.say(`automerge.disarmed (W1-T125): early arm withdrawn — ${prUrl}`);
     return "disarmed";
   } catch (e) {
     const msg = String((e as { stderr?: unknown })?.stderr ?? (e as Error)?.message ?? e);
-    resolvedDeps.say(`automerge.disarm_failed (W1-T125): ${msg} — ${prUrl}`);
-    return classifyDisarmFailure(msg, resolvedDeps.isMerged?.(prUrl));
+    deps.say(`automerge.disarm_failed (W1-T125): ${msg} — ${prUrl}`);
+    return classifyDisarmFailure(msg, deps.isMerged?.(prUrl));
   }
 }
 

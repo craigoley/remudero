@@ -2871,6 +2871,10 @@ esac
       reviewerMount: { model: "sonnet", effort: "medium", maxTurns: 400, contextBudget: 120000 },
       ledgerPath,
       runId: "REVIEW-RUBRIC-1",
+      // W1-T2347: this fixture asserts on the rubric comment, not on arming — the verdict here
+      // refuses (unmet criteria), so withdrawArmIfVerdictRefuses reaches its `disarm` fallback;
+      // supplied explicitly so it never falls through to the real disarmAutoMerge default.
+      disarm: () => "not-armed" as const,
     } as never);
 
     const posted = readFileSync(commentFile, "utf8");
@@ -2942,6 +2946,9 @@ esac
       judgeRubricFn: () => {
         throw new Error("rubric exploded");
       },
+      // W1-T2347: see the sibling fixture above — this verdict also refuses, reaching
+      // withdrawArmIfVerdictRefuses's `disarm` fallback; supplied so it never falls through.
+      disarm: () => "not-armed" as const,
     } as never);
 
     assert.ok(steps.includes("review.rubric.error"), "the throw is ledgered, never swallowed silently");

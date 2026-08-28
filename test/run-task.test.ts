@@ -5808,18 +5808,24 @@ test("buildSweepEffects.arm: the sweep's real arm wrapper reaches armAutoMerge (
     { tasks: [] } as never,
     () => {},
   );
-  await effects.arm({
-    prNumber: 1,
-    prUrl: "url/1",
-    taskId: undefined,
-    reviewState: "none",
-    checksState: "green",
-    unmetCriteria: [],
-    priorStrikes: 0,
-    lastActivityAt: new Date().toISOString(),
-    headSha: "x",
-    autoMergeArmed: false,
-  } as never);
+  // W1-T2347: `taskId: undefined` deliberately drives armAutoMergeDetailed's REAL default all
+  // the way to its own no-task-id short-circuit ("safe ... no gh spawned", per this test's own
+  // name) — a deliberate real-dependency exercise, not a forgotten seam, so it takes the
+  // withLiveWritesAllowed escape hatch requireExplicitArmSeam's own message names.
+  await withLiveWritesAllowed(() =>
+    effects.arm({
+      prNumber: 1,
+      prUrl: "url/1",
+      taskId: undefined,
+      reviewState: "none",
+      checksState: "green",
+      unmetCriteria: [],
+      priorStrikes: 0,
+      lastActivityAt: new Date().toISOString(),
+      headSha: "x",
+      autoMergeArmed: false,
+    } as never),
+  );
   rmSync(root, { recursive: true, force: true });
 });
 

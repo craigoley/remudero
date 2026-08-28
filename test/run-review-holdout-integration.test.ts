@@ -82,6 +82,10 @@ test("runReview (W1-T166 end-to-end): the review.posted ledger filters the holdo
       // no headCheckoutDir -> the floor is keyword-only (no proof execution)
       ledgerPath,
       runId: "REVIEW-TEST-1",
+      // W1-T2347: this verdict fails (both criteria unmet), so withdrawArmIfVerdictRefuses
+      // reaches its `disarm` fallback — supplied so it never falls through to the real
+      // disarmAutoMerge default, which this fixture has nothing to do with.
+      disarm: () => "not-armed" as const,
     });
 
     assert.equal(verdict.state, "failure", "an unmet visible+holdout set fails overall");
