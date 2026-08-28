@@ -1,0 +1,154 @@
+- id: W1-T2448
+  title: "EXACTLY ONE UNASSERTED REPOSITORY SETTING CARRIES A SILENT-FAILURE COST AND THE OTHERS FAIL LOUDLY — `squash_merge_commit_message: COMMIT_MESSAGES` is the only reason 611 anchored trailers exist on main, nothing under src/ test/ .github/ scripts/ or docs/ names it, and a UI flip to PR_BODY would be invisible because the commit index FAILS CLOSED rather than erroring, while `allow_squash_merge`, `allow_auto_merge` and `delete_branch_on_merge` all announce themselves on the first attempt"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 15.00
+  files: [src/lib/github-posture.ts, test/github-posture-merge-settings.test.ts]
+  origin: "operator-brief#unasserted-repo-settings-2026-08-28"
+  plan_refs: ["W1-T2387", "W1-T2435", "W1-T2442", "W1-T1040", "W1-T2447", "W1-T31"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE ID. Eight surfaces swept at base 15a3850b, anchored `W1-T2448([^0-9]|$)`, `[0-9]` never
+    `\d`. SURFACE 1 READS 1 against 561 refs (control W1-T2446/2447 = 2). Shard filenames 0 of 692
+    and declared ids 0 of 947 — controlled on W1-T2444, which reads 1 on both (W1-T2447 reads 0 on
+    both because its own shard PR has not merged, so it is NOT usable as a control). Open set
+    enumerated FIRST under a structural guard (array, len 2): titles 0 of 2 (control 1), bodies 0
+    over 13,730 bytes (control 2), heads 0 of 2 (control 1). Merged trailers 0 of 99 (control 40)
+    and merged subjects 0 of 99 (control 56) are MERGED-ONLY — coverage, never evidence. No
+    surface was vacuous this round; had a control been unconstructible it would read VACUOUS here
+    rather than 0.
+
+    ── Q1: WHAT THE FLEET DEPENDS ON, AND WHAT IT ACTUALLY ASSERTS ────────────────────────────
+
+    MEASURED LIVE (`GET /repos/craigoley/remudero`):
+
+      allow_squash_merge           true          delete_branch_on_merge       true
+      allow_merge_commit           true          allow_auto_merge             true
+      allow_rebase_merge           true          allow_update_branch          true
+      squash_merge_commit_title    COMMIT_OR_PR_TITLE
+      squash_merge_commit_message  COMMIT_MESSAGES
+
+    ⚠ AND "MENTIONED" IS NOT "ASSERTED" — the distinction is the whole finding, and counting
+    mentions alone would have produced a wrong answer. Files naming each key under `src/`, `test/`,
+    `.github/`, `scripts/`, `docs/`:
+
+      squash_merge_commit_message   0    <- named NOWHERE
+      allow_squash_merge            0        allow_merge_commit    0
+      allow_auto_merge              0        allow_rebase_merge    0
+      squash_merge_commit_title     2    <- both are PROSE
+      delete_branch_on_merge        3    <- all three are PROSE
+      enforce_admins               10        required_status_checks 9
+
+    THE TWO NON-ZERO MERGE KEYS ARE COMMENTS, NOT CHECKS. `squash_merge_commit_title` appears in
+    `test/commitlint-mode.test.ts`'s header explaining why commitlint lints the PR TITLE — a
+    comment that DEPENDS on the setting while asserting nothing about it. `delete_branch_on_merge`
+    appears the same way in `src/lib/worker.ts` and `src/run-task.ts` ("The repository already
+    carries `delete_branch_on_merge: true`, so the head branch is still deleted"), justifying the
+    absence of a `--delete-branch` flag. Both are load-bearing beliefs with no falsifier.
+
+    ── THE CONTROL: THE REPO DOES ASSERT SETTINGS, SO A ZERO ELSEWHERE IS A REAL ABSENCE ──────
+
+    `GITHUB_POSTURE_CAPABILITIES` (`src/lib/github-posture.ts`, W1-T1040) asserts TEN capabilities
+    against a recorded baseline — eight `security_and_analysis` keys, plus `enforce_admins`, plus a
+    static `code_quality` — and `checkGithubPosture` emits a finding when the live read DIFFERS
+    from the baseline, throttled to once a day by `decideGithubPostureCheck`. So drift detection
+    for GitHub-side settings EXISTS, is baseline-compared, and works. THE QUERY IS NOT BROKEN; the
+    merge keys are genuinely absent from it.
+
+    ⚠ AND ITS CONTRACT ALREADY ANSWERS Q2's WARN-OR-BLOCK QUESTION, so this task does not get to
+    invent one. That module's own header: "IT MUST NOT BLOCK. Every function here is a plain
+    read/compare — no exceptions escape, no write is ever issued, and nothing here can fail a check
+    or change a dispatch verdict." The finding is a ledger row plus a daemon summary line, and it
+    is DELIBERATELY not routed through `escalate()` because `notify()` gates on `MANUAL ||
+    HARD_STOP` and would have made it invisible on the tier where nine crash-loop issues sat unread
+    for five days. WARN, NEVER BLOCK, IS THE ESTABLISHED POSTURE.
+
+    ── Q2: WHAT AN ASSERTION WOULD COST, AND WHERE IT LIVES ───────────────────────────────────
+
+    The READ exists three times over — `github-posture.ts`, `onboard/inventory.ts` and `status.ts`
+    all already reach GitHub for protection — so nothing new needs inventing. What is missing is
+    narrower than "a settings checker": `readGithubPosture`'s gateway issues exactly TWO GETs
+    (`security_and_analysis` via the repo payload, and `.../protection/enforce_admins`), and
+    `GithubPostureCapabilitySource` admits exactly three sources —
+    `"security_and_analysis" | "enforce_admins" | "static"`. A merge key belongs to none of them.
+
+    COST: one new source arm reading the repo root payload the gateway already fetches, one
+    descriptor in `GITHUB_POSTURE_CAPABILITIES`, and its falsifier. No new clock (the once-a-day
+    throttle already exists), no new escalation path (the ledger row already exists), no new
+    baseline file (`state/github-posture.json` already exists).
+
+    ⚠ AND NO WRITE, EVER. Fleet code GETs protection and never PUTs it, deliberately; measured
+    write sites: ZERO. This task proposes reading and comparing only. A remedy that "fixes" a
+    flipped setting by writing it back would take the operator's own policy control away, and is
+    not proposed.
+
+    ── Q3: RANKED BY WHAT A FLIP WOULD COST, NOT BY LIKELIHOOD ────────────────────────────────
+
+    ⚠ ONLY ONE OF THEM FAILS SILENTLY, SO THIS TASK IS SCOPED TO THAT ONE.
+
+      SETTING                      FLIP TO      HOW IT ANNOUNCES ITSELF
+      squash_merge_commit_message  PR_BODY      ⚠ NOTHING. SILENT BY CONSTRUCTION.
+      allow_squash_merge           false        LOUD — `ghMergePrArgv`'s `merge_method=squash` PUT
+                                                is refused by GitHub on the first merge attempt.
+      allow_auto_merge             false        LOUD — `gh pr merge --auto` throws, and
+                                                `armFailureAction` already classifies that failure
+                                                (14 references in run-task.ts).
+      delete_branch_on_merge       false        VISIBLE — branches simply accumulate, and
+                                                `reap-branches` sees a growing population. The
+                                                comments at worker.ts and run-task.ts that rely on
+                                                it would be wrong, but observably so.
+      squash_merge_commit_title    PR_TITLE     VISIBLE — commitlint's subject assumption shifts;
+                                                a mismatch surfaces as a lint verdict.
+      enforce_admins               either       OUT OF SCOPE — the operator's own policy question,
+                                                and ALREADY asserted by `github-posture.ts`.
+
+    WHY THE FIRST ROW IS DIFFERENT IN KIND. `buildCommitTrailerIndex`'s own doc states the rule:
+    "FAILS CLOSED: a commit index that could not be built reads FALSE, never 'credited'"
+    (src/lib/status.ts:626). An empty index and an absent one are indistinguishable to every
+    consumer. So the symptom of a PR_BODY flip is not an error and not a red check — it is a slow
+    return of uncredited merges and re-dispatched shipped work, appearing days later as queue
+    noise. THAT IS THE EXACT COST W1-T2387 WAS FILED ON: ten wasted dispatches across two tasks in
+    two days.
+
+    ── ⚠ THE NEAR-MISS THAT PRODUCED THIS, RECORDED BECAUSE IT IS THE REUSABLE LESSON ─────────
+
+    Over the 99 most recent merged PRs the body and commit trailer surfaces separated PERFECTLY:
+    25 of 25 PRs with a body trailer had a squash trailer, and 0 of 25 without one did. That reads
+    exactly like the squash being body-derived, and it is WRONG. It is correlation from a common
+    cause — the fleet stamps the body and the branch commit on the same path, so a recent PR has
+    both or neither. The repository setting and nine counterexamples (body FALSE, squash TRUE)
+    refute it.
+
+    A PERFECTLY SEPARATING SAMPLE IS NOT A MECHANISM. The separation was 100% and the conclusion it
+    supported was still false, because the sample could not contain the case that discriminates.
+    The check that settled it was reading the SETTING — the authority — rather than measuring the
+    output harder.
+
+    RISK BAND. `risk: high` set UP FRONT; the band is RULE 19'S SPAN, not blast radius.
+    `subsystemsOf` (`src/lib/task-linter.ts`) derives one id PER `files:` entry via
+    `moduleIdFromPath` and A TEST'S OWN STEM IS AN ID, so `[src/lib/github-posture.ts,
+    test/github-posture-merge-settings.test.ts]` reads as TWO concerns. Any list whose test does
+    not share its source's stem is ≥2 whatever the change size.
+
+    ── OWNED ELSEWHERE, NOT CLAIMED HERE ──────────────────────────────────────────────────────
+
+    The commit-surface union is W1-T2387's. The silent stamp failure is W1-T2435's, built as
+    #3223. The `app_id` pin on the required contexts is W1-T2442's. `enforce_admins` is the
+    operator's policy question and is explicitly OUT OF SCOPE — it is also the one merge-adjacent
+    setting already covered by `github-posture.ts`. That the surface itself rests on an unstated
+    setting is W1-T2447's; THIS task owns only the narrower question of which settings are
+    asserted and which single one fails silently.
+  acceptance:
+    - claim: "the squash message setting is compared against a recorded baseline like every other posture capability"
+      proof: "unit test: test/github-posture-merge-settings.test.ts"
+    - claim: "a drift finding warns through the existing ledger row and never blocks a dispatch"
+      proof: "unit test: test/github-posture-merge-settings.test.ts"
+    - claim: "no setting is ever written and the gateway stays GET-only"
+      proof: "unit test: test/github-posture-merge-settings.test.ts"
+    - claim: "an unreadable settings payload degrades to no finding rather than a false all-clear"
+      proof: "unit test: test/github-posture-merge-settings.test.ts"
