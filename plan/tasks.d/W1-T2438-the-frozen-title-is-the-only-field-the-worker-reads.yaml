@@ -1,0 +1,171 @@
+- id: W1-T2438
+  title: "THE ONE FIELD RULE 21 FREEZES IS THE ONLY ONE A WORKER READS — `renderImplementPrompt` renders `task.prompt ?? task.title` and 0 of 681 shards declare `prompt:`, so a frozen title IS the entire brief, while `design:` is read by nothing and `acceptance:` goes to the reviewer; when later measurement falsifies a title-level claim the correction can only land in `rationale:`, which no dispatched build ever sees"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 20.00
+  files: [src/lib/task-linter.ts, test/a-corrected-title-reaches-the-worker.test.ts]
+  origin: "operator-brief#frozen-title-is-the-prompt-2026-08-28"
+  plan_refs: ["W1-T166", "W1-T399", "W1-T2427", "W1-T2433", "W1-T2254", "W1-T2375"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE ID. Eight surfaces swept at base def87848, anchored `W1-T2438([^0-9]|$)` with a `[0-9]`
+    class and never `\d`, every open-surface control drawn from the open set enumerated FIRST over
+    REST (HTTP 200, type array, length 5, page 2 length 0). SURFACE 1 READS 1:
+    `refs/rmd-id/W1-T2438` resolves against 551 refs, and the anchor discriminates on a POPULATED
+    band — `W1-T243` reads anchored 0 against unanchored 9. Shard filenames 0 of 681 and declared
+    `- id:` lines 0 of 949, both controlled on W1-T2434 = 1; open-PR titles 0 of 5
+    CASE-SENSITIVELY (control W1-T2435 = 1, lower-case = 0); open-PR bodies 0 over 25,936 bytes
+    (control W1-T2433 = 9); head branches 0 of 154 rows; merged trailers 0 of 600 (control
+    W1-T2249 = 1); merged subjects 0 of 2,531 (control W1-T2434 = 1). Surfaces 7 and 8 are
+    MERGED-ONLY and their zeros are coverage, not evidence, for an id that has never merged.
+
+    ── THE INTERACTION, WHICH IS THE FINDING — NEITHER HALF IS ─────────────────────────────────
+
+    (1) THE FREEZE IS RIGHT AND IS NOT QUESTIONED HERE. Rule 21 exists so a merged task's contract
+    cannot be edited into agreement with whatever a worker happened to do — the reward-hacking
+    shape W1-T166 measures. NOTHING BELOW PROPOSES UNFREEZING THE TITLE.
+
+    (2) THE PROMPT PATH IS ALSO RIGHT, AND IT IS WHERE THE TWO COLLIDE.
+    `renderImplementPrompt` (`src/run-task.ts`) renders `task.prompt ?? task.title` as the
+    worker's prompt body. MEASURED AT THIS SHA: 0 of 681 shards on main declare `prompt:`. So for
+    EVERY dispatched build the title is not a label on the brief — IT IS THE BRIEF, ENTIRE.
+
+    (3) AND NO OTHER FIELD REACHES THE WORKER. `design:` is read by nothing in `src/` at all
+    (244 monolith tasks write it). `task.acceptance` is consumed by `runReview` — the REVIEWER,
+    not the worker. So `rationale:`, which is where a Rule-21 amendment must put a correction,
+    reaches a build ONLY if recon opens the record from disk and relays it.
+
+    (4) THE COST IS ALREADY RECORDED IN THE TREE, SO THIS IS NOT A HYPOTHETICAL. `run-task.ts`'s
+    own comment on that path names it: on W1-T399, implement BURNED 138 TURNS AND PRODUCED ZERO
+    COMMITS from a one-line title, precisely because recon — the sole transport for the task's own
+    text — had degraded.
+
+    (5) SO THE DEFECT IS THE COMPOSITION: the field that must not change is the only field the
+    worker sees, and the field a correction is allowed to change is one the worker never sees.
+    TWO INSTANCES IN TWENTY-FOUR HOURS. W1-T2433's title-level claim was falsified 5m43s after
+    merge and corrected in `rationale:` by #3211. W1-T2427 is frozen at "FOUR ARMS" while #3183
+    records a FIFTH site. In both, a build dispatched today reads the uncorrected count.
+
+    ── Q1. HOW MANY TITLES CARRY A CLAIM LATER MEASUREMENT CAN CONTRADICT ──────────────────────
+
+    (6) THE CLASSIFIER, STATED BEFORE IT WAS RUN, AND ITS FIRST VERSION REJECTED BY ITS OWN
+    CONTROL. A falsifiable title claim is a COUNT OVER AN OBSERVED POPULATION, in four shapes: a
+    spelled cardinal or a numeral GOVERNING A COUNTABLE ARTIFACT, an `N of M` rate, or an absolute
+    count (`ZERO`/`NONE`, or `never` governing an observation verb). Task ids, issue numbers, shas
+    and paths are stripped first so an identifier's digits cannot masquerade as a count.
+    VERSION 1 ALSO MATCHED BARE `never`/`every`/`all` AND RETURNED 691 OF 950 — 72.7 PERCENT — AND
+    WAS REJECTED BY ITS OWN CONTROL B, because those are DESIGN RULES ("a proof that cannot execute
+    never lands"), which no measurement contradicts since they state what the system is FOR.
+
+    (7) THE MEASUREMENT. 195 OF 950 TITLES CARRY A FALSIFIABLE COUNT — 20.5 PERCENT. Controlled
+    BOTH WAYS: control A FINDS W1-T2427 and control C FINDS W1-T2433, the two known instances; and
+    the negative controls W1-T2415, W1-T2434 and W1-T2430 — titles that describe a defect without
+    quantifying it — are all EXCLUDED. A FOURTH NEGATIVE CONTROL WAS NOMINATED AND FAILED, AND THE
+    FAILURE WAS MINE NOT THE CLASSIFIER'S: W1-T2431 was swept, and its title does carry "3 of the
+    7", so it is a TRUE POSITIVE mis-nominated as a control. That is recorded rather than quietly
+    dropped.
+
+    (8) SO THE PROBLEM IS BOUNDED BUT NOT A HANDFUL. One title in five is the kind a later
+    measurement can contradict; two have actually been contradicted, both within a day, which is
+    roughly one percent of the at-risk set REALISED SO FAR. The bound matters because it decides
+    the remedy's shape: 195 is far too many to correct by hand and far too few to justify changing
+    how titles are written.
+
+    ── Q2. `prompt:` IS THE ANSWER, AND IT IS ALREADY AVAILABLE ────────────────────────────────
+
+    (9) THE FIELD EXISTS, IS READ FIRST, AND IS USED BY NOTHING. `renderImplementPrompt` reads
+    `task.prompt ?? task.title`, so a shard carrying a `prompt:` supplies the worker's brief while
+    its title stays byte-identical. The freeze survives untouched because the correction never
+    goes near the frozen field.
+
+    (10) AND IT IS NOT FROZEN, WHICH IS THE LOAD-BEARING FACT — ESTABLISHED, NOT ASSUMED.
+    `REPORTED_MERGED_FIELDS` (`src/lib/task-linter.ts`) lists exactly ten fields — `status`,
+    `files`, `depends_on`, `priority`, `risk`, `verify`, `type`, `principles`, `budget_usd`,
+    `retirement` — and its own doc names `prompt` among those DELIBERATELY EXCLUDED, on the stated
+    test "does anything read this after the task merges". MEASURED AGAINST THE REAL LINTER on the
+    merged W1-T2433, with both controls firing: adding `prompt:` gives block 0 / warn 0, while
+    mutating `risk` gives block 1 / warn 1 and appending a criterion gives block 1. SO THE REMEDY
+    TRIPS NOTHING TODAY AND NEEDS NO GATE CHANGED.
+
+    (11) AND ONE MEASUREMENT THE BRIEF'S FRAMING WOULD NOT HAVE SURFACED: THE TITLE IS NOT FROZEN
+    BY THE LINTER EITHER. `title` is likewise absent from `REPORTED_MERGED_FIELDS` — its doc says
+    `title`, `note` and `rationale` are "prose an amendment is EXPECTED to touch" — and mutating
+    the title on the merged W1-T2433 gives block 0 / warn 0 against the same two firing controls.
+    THE FREEZE IS A CONVENTION THIS REPO'S OPERATOR PROTOCOL ENFORCES, NOT A GATE. That is
+    recorded because it changes what the remedy must be: not a fight with a mechanism, but a place
+    to put a correction that the discipline permits and the worker reads. IT IS ALSO WHY THE
+    CONVENTION MUST NOT BE RELAXED — nothing would catch it.
+
+    ── Q3. THE REMEDY LEAVES THE FREEZE INTACT ────────────────────────────────────────────────
+
+    (12) WHEN A MERGED TASK'S TITLE-LEVEL CLAIM IS FALSIFIED, THE AMENDMENT CARRIES A `prompt:`.
+    The title stays exactly as merged, so the contract a reviewer grades against cannot drift and
+    the W1-T166 shape stays closed. The corrected brief lands in the one field a dispatched worker
+    actually reads. The build's own job is to make that reliable rather than remembered: a merged
+    task whose `rationale:` records a correction and which carries NO `prompt:` is the state this
+    task exists to make visible, and a check in `src/lib/task-linter.ts` is where it belongs
+    because that is where every other post-merge amendment condition already lives.
+
+    (13) WHAT THIS IS NOT. It is not a new gate on authoring: a title may still carry a count, and
+    195 of them do. It is not a rewrite of `renderImplementPrompt`, whose precedence is already
+    correct. It is not a second copy of the brief maintained in parallel — `prompt:` is written
+    only when a correction exists, so an untouched task keeps rendering byte-identically from its
+    title.
+
+    ── THE NEAR-MISS CLASS, DISTINGUISHED ─────────────────────────────────────────────────────
+
+    (14) #3164 AND #3168 SHARE THE WINDOW AND NOT THE FAILURE. There an INSTRUMENT WAS MOMENTARILY
+    WRONG ABOUT A WORLD THAT HAD NOT CHANGED — a plan read failed transiently and the same read
+    succeeded later — so the remedy is a non-silent catch and a route back to re-review. HERE THE
+    INSTRUMENT WAS RIGHT AND THE WORLD MOVED AFTERWARDS, so no re-read helps and the remedy is a
+    place to put the correction where it is read. SAME WINDOW, DIFFERENT REMEDIES; folding them
+    would send one of the two to the wrong fix.
+
+    ── OWNED ELSEWHERE ────────────────────────────────────────────────────────────────────────
+
+    (15) The freeze is Rule 21's and W1-T166 measures the shape it protects against. The prompt
+    render and its measured cost are W1-T399's. The fifth-site correction is W1-T2427's, landed by
+    #3183. The falsified claim is W1-T2433's, corrected by #3211. W1-T2254 and W1-T2375 own the
+    post-merge amendment checks this would sit beside. THIS TASK OWNS ONE THING: that a correction
+    Rule 21 permits cannot reach the only field a worker reads.
+
+    ── WHAT MUST NOT MOVE ─────────────────────────────────────────────────────────────────────
+
+    (16) The title stays frozen, by convention and by this task's own design. `REPORTED_MERGED_FIELDS`
+    gains no member — adding `title` or `prompt` to it would report on every legitimate amendment,
+    which is exactly the noise its doc rejects. `renderImplementPrompt`'s precedence is unchanged.
+    No cap moves, nothing paces, and no gate is added to authoring a title.
+  acceptance:
+    - claim: "a merged task whose rationale records a correction and carries no prompt is named by the linter"
+      proof: "unit test: test/a-corrected-title-reaches-the-worker.test.ts"
+    - claim: "a task carrying a prompt renders that prompt to the worker while its title stays byte-identical"
+      proof: "unit test: test/a-corrected-title-reaches-the-worker.test.ts"
+    - claim: "an untouched task with no prompt still renders from its title exactly as it does today"
+      proof: "unit test: test/a-corrected-title-reaches-the-worker.test.ts"
+    - claim: "adding a prompt to a merged task trips no blocking and no reported-field check"
+      proof: "unit test: test/a-corrected-title-reaches-the-worker.test.ts"
+    - claim: "the title remains outside the reported merged fields and no member is added to that list"
+      proof: "unit test: test/a-corrected-title-reaches-the-worker.test.ts"
+    - claim: "the acceptance freeze is untouched and appending a criterion to a merged task still blocks"
+      proof: "unit test: test/a-corrected-title-reaches-the-worker.test.ts"
+    - claim: "nothing added gates the authoring of a title that carries a count"
+      proof: "unit test: test/a-corrected-title-reaches-the-worker.test.ts"
+  falsifier: |
+    If `prompt` is found inside `REPORTED_MERGED_FIELDS` at the sha a build starts from, the remedy
+    in (12) is frozen too and solves nothing — the finding would then be that NO field a worker
+    reads is amendable, which is a different and larger task. The check is one membership test
+    against that array, with `risk` as the positive control proving the array is read at all.
+
+    SEPARATELY FALSIFYING: if any shard on main is found to declare `prompt:`, the measurement in
+    (2) is stale and the "0 of 681" premise must be re-taken — the render would then already be
+    reading something other than the title for at least one task, and the population at risk is
+    smaller than (7) reports.
+
+    AND IF `renderImplementPrompt` is ever changed so the worker receives `rationale:` or
+    `design:` directly, the composition in (5) is broken by that change alone and this task is
+    unnecessary — the correction would already reach the build without a new field.
