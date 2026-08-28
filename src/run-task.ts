@@ -15750,7 +15750,37 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
     if (blocking.length) {
       failing++;
       failingTaskIds.push(task.id);
-      console.error(`✗ ${task.id}: ${blocking.length} violation(s)`);
+      // W1-T2339: THE REPORT LEARNS WHOSE VIOLATION IT IS; THE GATE DOES NOT MOVE. `failing`,
+      // `blocking.length` and the exit code below are computed exactly as before this task —
+      // this block only ANNOTATES the printed line for a failing task, in --base mode, with
+      // how many of ITS OWN violations already existed at the base ref. A COUNT, never a set
+      // diff: `LintViolation` (task-linter.ts) carries no stable identity across a reword (see
+      // this task's own design note), so a per-task count is the only comparison that survives
+      // wording changes. Only `opts.moduleExists` is reused for the base-side lint — every
+      // diff-specific opt above (postMergeAmendment, newMonolithIds, duplicateCorpusOpts,
+      // resolveNameFilteredCandidates, readGrepProofFile) describes THIS diff, which the base
+      // task was never part of.
+      let baseBlockingCount: number | undefined;
+      if (scope && oldById) {
+        const oldTask = oldById.get(task.id);
+        if (oldTask) {
+          try {
+            const { violations: baseViolations } = lintTask(oldTask, { moduleExists: opts.moduleExists });
+            baseBlockingCount = baseViolations.filter((v) => v.severity === "block").length;
+          } catch {
+            // Degrades the ANNOTATION only, never the run — the same fail-open the base-plan
+            // load failure above already relies on (`oldById` stays undefined there for the
+            // identical reason: a base-side problem is not this PR's failure to report).
+            baseBlockingCount = undefined;
+          }
+        } else {
+          // Absent from the base plan entirely ⇒ it had zero violations, because it did not exist.
+          baseBlockingCount = 0;
+        }
+      }
+      const attribution =
+        baseBlockingCount !== undefined ? ` (${baseBlockingCount} pre-existing on base ${baseRef})` : "";
+      console.error(`✗ ${task.id}: ${blocking.length} violation(s)${attribution}`);
       for (const v of blocking) console.error(`    [${v.check}] ${v.message}`);
     }
     for (const v of soft) {
