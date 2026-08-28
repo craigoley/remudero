@@ -1,0 +1,164 @@
+- id: W1-T2439
+  title: "THE ONE-PER-PASS REVIEW CAP IS PRICED FOR A JUDGE THAT 98 PERCENT OF PLAN-ONLY REVIEWS NEVER SPAWN — `selectReviewAdmission` admits one open PR per pass on the stated ground that review is a spawning verb, while 541 of 552 plan-only reviews record `not_attempted` at p50 3.0s against 117.4s for a review that does spawn, and the operator pays the queue rather than the call: last-check-green to verdict reads p90 473s, 158 times the work it waits on"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 25.00
+  files: [src/lib/sweep.ts, src/run-task.ts, test/plan-filing-admission-bound.test.ts]
+  origin: "operator-brief#review-cap-priced-for-a-judge-it-rarely-spawns-2026-08-28"
+  plan_refs: ["W1-T526", "W1-T2426", "W1-T2427", "W1-T205", "W1-T1211", "W1-T2430", "W1-T1218"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE ID. Eight surfaces swept at base fe4b0591, anchored `W1-T2439([^0-9]|$)` with a `[0-9]`
+    class and never `\d`, every open-surface control drawn from the open set enumerated FIRST over
+    REST (HTTP 200, type array, length 2, page 2 length 0). SURFACE 1 READS 1:
+    `refs/rmd-id/W1-T2439` resolves against 553 refs, and the anchor discriminates on a POPULATED
+    band — `W1-T243` reads anchored 0 against unanchored 10. Shard filenames 0 of 684 and declared
+    `- id:` lines 0 of 952, both controlled on W1-T2438 = 1; open-PR titles 0 of 2 CASE-SENSITIVELY
+    (control W1-T2437 = 1, lower-case = 0); open-PR bodies 0 over 9,401 bytes (controls
+    W1-T2430 = 4, W1-T2437 = 12); head branches 0 of 147 rows (control W1-T2430 = 2, a live
+    `run-*` head). Merged trailers 0 of 600 (control W1-T2249 = 1) and merged subjects 0 of 2,537
+    (control W1-T2438 = 1) are MERGED-ONLY surfaces whose zeros are coverage, not evidence.
+
+    ── THE CAP, AND THE PRICE IT WAS SET AT ───────────────────────────────────────────────────
+
+    (1) `selectReviewAdmission` (`src/lib/sweep.ts`, W1-T526) returns at most ONE `OpenPrView` per
+    pass — `oldestByKey` over the PRs whose `deriveDisposition` reads `post-review`. Its own doc
+    justifies the bound by spend, and the sibling doc it rests on says "of those five lanes ONLY
+    `dispatchFix` spawns a worker" and "`rmd review` is a spawning verb". THE CAP IS CORRECT FOR
+    THE REVIEW IT WAS PRICED AGAINST. It is wrong about how often that review happens.
+
+    (2) MEASURED over a controlled three-form union at the config root
+    (`/home/craigoleyagent/rmd-state2/state`, NOT the checkout's `state/`): live 1 file / 9,148
+    rows, 42 plain rotations / 510,290 rows, ZERO `.gz`; per-form read control `dispatch.skipped`
+    reads 46 live and 2,125 rotated, so both non-empty forms were opened. Joining
+    `review.pending_posted` to `review.posted` per `run_id`:
+      `not_attempted` + `plan_only:true`   n=541  p50   3.0s  p90  13.2s
+      `success`       + `plan_only:false`  n=266  p50 117.4s  p90 235.4s  max 2371.0s
+      `not_attempted` + `plan_only:false`  n=255  p50  11.4s  p90  29.9s
+      `success`       + `plan_only:true`   n= 11  p50  80.6s  p90 137.9s
+    DISJOINT BY 39 TIMES AT THE MEDIAN. `not_attempted` is the row saying NO LLM JUDGE WAS
+    SPAWNED, and 541 of the 552 plan-only reviews — 98 percent — land there.
+
+    ── Q1. WHAT THE OPERATOR PAYS IS THE WAIT, NOT THE CALL ───────────────────────────────────
+
+    (3) THE QUEUE IS THE COST. MEASURED over the 40 most recently updated merged PRs, taking the
+    newest successful check-run `completed_at` against the first non-pending `remudero-review`
+    status: 38 pairs resolved, 28 usable, and TEN EXCLUDED BECAUSE THE VERDICT LANDED BEFORE SOME
+    LATER CHECK FINISHED — a real ordering, reported rather than silently dropped. Of the 28:
+    p50 94s, p90 473s, MAX 1442s on #3168, min 30s on #3188.
+
+    (4) SO THE RATIO IS THE FINDING. Against a cheap review's own 3.0s median, the PR waits 31
+    times the work at p50 AND 158 TIMES THE WORK AT p90. The observed queue is the same shape: at
+    11:22Z #3209 read 0 failing, 0 cancelled and 0 pending checks with `review=pending` while
+    #3210 through #3214 waited behind it, and #3152 lost EIGHT CONSECUTIVE ADMISSIONS on
+    2026-08-27. Nothing in that picture is spend. It is a serialisation bound applied to work that
+    is not the thing being serialised.
+
+    ── Q2. THE OUTCOME IS NOT KNOWABLE AT ADMISSION, SO THE BOUND CANNOT KEY ON IT ────────────
+
+    (5) A SPLIT BOUND KEYED ON `reviewer_outcome` IS UNBUILDABLE AS STATED, AND THAT MUST BE SAID
+    PLAINLY RATHER THAN DESIGNED AROUND. `reviewer_outcome` is a field of the `review.posted` row
+    — written AFTER the review has run. `selectReviewAdmission` is handed
+    `readonly OpenPrView[]`, a policy and a clock, and nothing else.
+
+    (6) AND `plan_only` IS NOT THE OUTCOME EITHER — THIS IS THE CENTRE OF THE TASK. ELEVEN of the
+    552 plan-only reviews recorded `success` at p50 80.6s, so a plan-only review CAN reach the
+    judge. A bound keyed on plan-only-ness alone would admit roughly 2 percent of spawning reviews
+    through the lane sized for a 3-second one. ANY REMEDY MUST BE SIZED TO SURVIVE THAT 2 PERCENT
+    RATHER THAN ASSUME IT AWAY.
+
+    (7) WHAT WOULD BE AVAILABLE BEFORE THE CALL, ENUMERATED FROM THE INTERFACE RATHER THAN GUESSED.
+    `OpenPrView` carries 38 fields and NOT ONE is a changed-file list or a diff scope, so
+    `isInPlanScope` — the honest structural predicate — cannot be evaluated without a fresh
+    per-candidate GitHub read, which (9) forbids treating as free. But the interface DOES carry
+    `isPlanFiling`, declared for exactly this class of question.
+
+    (8) AND `isPlanFiling` IS WRITTEN, TESTED, AND UNPOPULATED — WHICH MAKES THE PREREQUISITE
+    CONCRETE RATHER THAN VAGUE. It is a registered member of `KNOWN_UNWIRED`
+    (`src/lib/producer-completeness.ts`), whose own entry reads: "the plan-filing stand-down is
+    written and waiting for a producer. Until that wiring lands the row never matches, which is
+    the fail-open direction." `buildOpenPrViews` (`src/run-task.ts`) never assigns it, so it reads
+    `undefined` in the real gateway today. THE FIRST HALF OF THIS TASK IS THEREFORE THE PRODUCER,
+    NOT THE BOUND: there is no split to build until the field the split would read is populated,
+    and that ordering is why `src/run-task.ts` is declared alongside `src/lib/sweep.ts`.
+
+    ── Q3. A SECOND BOUND IS A SMALLER NUMBER, NEVER THE ABSENCE OF ONE ───────────────────────
+
+    (9) THE DETERMINISTIC PATH IS CHEAP, NOT FREE, AND CALLING IT FREE IS HOW THIS GOES WRONG.
+    `reviewCommand` still shells `gh pr view --json statusCheckRollup` and `postReviewStatus`
+    still POSTs `repos/{owner}/{repo}/statuses/{sha}` — twice per review, once pending and once
+    final. The daemon hit `API rate limit already exceeded` repeatedly on 2026-08-27, and a
+    batched PR fetch failed with HTTP 502 on `pulls?state=closed&per_page=100&page=24`. A LANE
+    WITH NO BOUND WOULD SPEND THAT BUDGET FASTER THAN THE ONE THIS TASK IS TRYING TO UNBLOCK.
+
+    (10) SO THE SECOND BOUND IS A NUMBER, AND THIS SHARD DELIBERATELY DOES NOT PICK IT. It must be
+    derived by the build from two things it can measure at that sha: the per-review API call count
+    on the deterministic path, and the observed queue depth the bound has to clear. A number
+    chosen here from a queue observed once would be the picked-figure shape this repo has rejected
+    before. What the shard DOES fix is the shape: one bound for the spawning lane, unchanged at
+    one; a SMALLER SECOND BOUND for the non-spawning lane; and the 2 percent from (6) charged
+    against the spawning bound rather than the cheap one, so a plan-only review that turns out to
+    spawn cannot escape the cap it should have been under.
+
+    ── THE SHAPE THIS IS THE THIRD INSTANCE OF ───────────────────────────────────────────────
+
+    (11) A BLANKET WIDER THAN ITS REASON. W1-T1211 found it first: a light-pass restriction
+    justified by worker spend, applied to four lanes of which only one spawns a worker. W1-T2430
+    found it again: the same restriction trapping a re-queue lane that is one API call. THIS IS
+    THE THIRD, and the reason is identical each time — the bound names the expensive case
+    correctly and is applied to a population the expensive case is a minority of. BOTH ARE CITED
+    AND NEITHER IS RE-FILED.
+
+    ── OWNED ELSEWHERE ───────────────────────────────────────────────────────────────────────
+
+    (12) W1-T526 owns the cap itself and its serialisation argument, which stands. W1-T2426 owns
+    the admission ORDER and the immutable-key fix that keeps it from starving. W1-T2427 owns the
+    missing stand-down reason that makes a deduped stand-down read like an unwired path.
+    W1-T205 owns the plan-only carve-out that makes the cheap path cheap. W1-T1218 owns
+    `orderPendingReviews`, the sibling lane that already ranks on an immutable key. THIS TASK OWNS
+    ONE THING: that the admission bound is priced for a judge the admitted review usually does not
+    spawn.
+
+    ── WHAT MUST NOT MOVE ────────────────────────────────────────────────────────────────────
+
+    (13) THE CAP IS NOT REMOVED. No spawning lane is added. Auto-merge is not armed sooner. Nothing
+    paces, sleeps or throttles — W1-T1066's ruling stands. The admission ORDER is untouched, so
+    W1-T2426's immutable key keeps doing its job. And no bound anywhere is raised: the one that
+    exists stays at one, and the only new number is a smaller one on a narrower lane.
+  acceptance:
+    - claim: "the producer populates the plan-filing signal so the admission lane can read it at all"
+      proof: "unit test: test/plan-filing-admission-bound.test.ts"
+    - claim: "a non-spawning review lane admits more than one PR per pass under its own smaller bound"
+      proof: "unit test: test/plan-filing-admission-bound.test.ts"
+    - claim: "the spawning lane keeps its existing bound of exactly one admission per pass"
+      proof: "unit test: test/plan-filing-admission-bound.test.ts"
+    - claim: "a plan-only review that reaches the judge is charged against the spawning bound"
+      proof: "unit test: test/plan-filing-admission-bound.test.ts"
+    - claim: "an unpopulated plan-filing signal falls back to today's single-admission behaviour"
+      proof: "unit test: test/plan-filing-admission-bound.test.ts"
+    - claim: "the admission ordering is unchanged and still ranks on the immutable key"
+      proof: "unit test: test/plan-filing-admission-bound.test.ts"
+    - claim: "no lane is unbounded and no existing bound is raised"
+      proof: "unit test: test/plan-filing-admission-bound.test.ts"
+    - claim: "nothing added paces or sleeps or arms auto-merge earlier"
+      proof: "unit test: test/plan-filing-admission-bound.test.ts"
+  falsifier: |
+    If `isPlanFiling` is found populated by `buildOpenPrViews` at the sha a build starts from,
+    clause (8) is stale and the producer half is already done — the task reduces to the bound
+    alone. The check is one grep of `src/run-task.ts` for an assignment to that field, with
+    `lastActivityAt` as the positive control proving the producer assigns fields at all.
+
+    SEPARATELY FALSIFYING: if a fresh union read shows the `not_attempted` and `success`
+    populations converging — a plan-only review reaching the judge at a rate well above the 11 of
+    552 measured here — then the cheap lane is not cheap in practice and the cap's reason DOES
+    reach it. The measurement to repeat is the `review.pending_posted` to `review.posted` join
+    split on `reviewer_outcome` and `plan_only`, with the per-form read control recorded in (2).
+
+    AND IF the queue wait is observed collapsing without any change to the bound, the cost in (3)
+    was a transient of queue depth rather than of the cap, and the remedy must be re-argued
+    against whatever actually cleared it.
