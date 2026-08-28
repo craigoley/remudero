@@ -421,12 +421,53 @@ jobs:
           # disables git's background gc for every spawned git) was simply absent from the
           # coverage run. Any test asserting on that environment passes in `ci` and fails here,
           # which is exactly how this was found.
+          # ── OPERATOR RULING 1 (2026-08-28): NO FLAKE RETRY IN THIS JOB. ───────────────────
+          # `scripts/test-with-retry.mjs` is GONE from this invocation and STAYS in the `ci` job,
+          # which is faster and where a second pass fits inside its own bound. Here it re-ran the
+          # WHOLE suite on any pass-1 failure, and the second pass usually could not finish: of the
+          # SIX two-pass `coverage-ratchet` runs on record, one completed red (2176s), ONE
+          # COMPLETED GREEN (2159s), and FOUR were cancelled at 2355-2361s against the 2340s bound.
+          # A cancellation names no test, so the retry converted a `failure` that named the failing
+          # assertion into a `cancelled` that named nothing.
+          #
+          # WHAT THIS GIVES UP, STATED RATHER THAN BURIED: that ONE green in six was a real rescue.
+          # Removing the retry means a genuine flake in this job now reports red on the first pass
+          # instead of being papered over. The `ci` job still retries, so a flake that reproduces
+          # in both harnesses is still caught there; a flake unique to instrumentation is not.
+          #
+          # ── OPERATOR RULING 2: THIS STEP IS NO LONGER A TEST VERDICT. ─────────────────────
+          # `ci` owns correctness — it runs the same glob on the quieter harness AND runs on main.
+          # This job owns COVERAGE. The duplication is inherent (lcov cannot be produced without
+          # running the suite instrumented), so what is removed is the duplicated VERDICT, not the
+          # duplicated run.
+          #
+          # A STEP-LEVEL SHELL GUARD, NEVER A YAML CONDITIONAL AND NEVER A `paths:` FILTER.
+          # test/diff-coverage.test.ts asserts this job body carries no line beginning with a YAML
+          # conditional (the #729 skipped-check-deadlock discipline), and this job STAYS REQUIRED in
+          # ci-gate's list — it must still register and still fail on a coverage regression. The
+          # comment two blocks below is what makes a plain `exit 0` here safe: no step in this job
+          # carries a YAML conditional, so a FAILING step skips every step after it. Swallowing the
+          # test exit code is therefore the only way to keep the coverage gates running at all.
           mkdir -p coverage
-          node scripts/test-with-retry.mjs \
-            node --enable-source-maps --experimental-test-coverage --test-coverage-exclude="test/**" \
+          set +e
+          node --enable-source-maps --experimental-test-coverage --test-coverage-exclude="test/**" \
             --test-reporter=spec --test-reporter-destination=stdout \
             --test-reporter=lcov --test-reporter-destination=coverage/lcov.info \
             --test --import tsx --import ./test/setup/tmp-hygiene.ts "test/**/*.test.ts"
+          TEST_EXIT=$?
+          set -e
+          if [ "$TEST_EXIT" -ne 0 ]; then
+            echo "coverage-ratchet: the instrumented suite exited ${TEST_EXIT}. THIS JOB NO LONGER TREATS THAT AS ITS VERDICT (operator ruling, 2026-08-28) — \`ci\` owns test correctness. The coverage gates below still run and still block."
+            echo "- coverage-ratchet: instrumented suite exited **${TEST_EXIT}** — not this job's verdict; see the \`ci\` job for the test result. Coverage gates below still ran." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          # THE ONE THING THIS STEP STILL FAILS ON: no lcov. Without it the coverage gates below
+          # have nothing to read, and a green job would then mean "coverage was never checked" —
+          # exactly the vacuous pass this whole job exists to prevent. Absence is a real failure.
+          if [ ! -s coverage/lcov.info ]; then
+            echo "coverage-ratchet: no lcov produced — the coverage gates below would have nothing to read. FAILING."
+            exit 1
+          fi
+          exit 0
       # ORDER IS LOAD-BEARING (2026-08-13): diff-coverage runs BEFORE the aggregate ratchet.
       # No step in this job carries an `if:`, so a failing step skips every step after it —
       # MEASURED: in five of six recent failing CI runs the ratchet step concluded `failure` and
