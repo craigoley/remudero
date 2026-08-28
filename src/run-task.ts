@@ -23973,6 +23973,68 @@ export function fixHeadAcceptable(head: string | undefined, taskId: string, synt
   return ownRunBranch || !isDispatchedRunBranch(head);
 }
 
+/**
+ * W1-T2402: does `e` — whatever `dispatchFix`'s catch just caught — carry a SIGNAL TERMINATION,
+ * and if so what is known about what the killed spawn spent? Read STRUCTURALLY off the error
+ * object's own `signal`/`costUsd` properties, never by string-matching the free-text `.message`
+ * a caller would otherwise have to grep for "terminated by signal SIGKILL" — the SDK's own
+ * wording (`@anthropic-ai/claude-agent-sdk`'s `sdk.mjs`: `getProcessExitError` builds
+ * `Error("Claude Code process terminated by signal " + signal + …)` and its own `_n` helper
+ * `Object.assign`s `{signal, errorClass: "process_killed_by_signal", telemetryMessage}` directly
+ * onto that `Error` before rejecting with it). That literal string appears nowhere in this
+ * repo's own source, so reading it by substring would be exactly the class of misread this repo
+ * has already been burned by twice (`fallback_push` matching a prose mention, `credential_expired`
+ * matching 191 unrelated `containment.probe` rows) — LEARNINGS. The SDK's own error propagates
+ * unwrapped up through `collectWorkerResult`'s `if (!sawResult) throw err` and `spawnWorker`'s own
+ * pass-through catch (worker.ts) whenever ITS OWN clock-bound watchdog did not itself trip, so the
+ * `signal` property really does survive, unaltered, all the way to this catch.
+ *
+ * THE SIGNAL ALONE NEVER DECIDES ANYTHING (the shard's own correction to its brief): this fleet
+ * sends itself the identical `SIGKILL` from at least three of its OWN paths (`killProcessGroup`'s
+ * default, `deployer.ts`'s forced-deploy kickstart, W1-T1044's wall-clock reclaim) — so this
+ * function only ever RECORDS the signal, structurally; it does not classify who sent it, and (see
+ * {@link dispatchFixCatchOutcome}) it never changes whether the strike this call already spent
+ * gets swallowed or propagated.
+ *
+ * `undefined` for an ordinary in-process failure (a failed `git`, a missing binary, a bad `gh`
+ * response) that carries no such field — the existing, unchanged `sweep.fix.error` shape.
+ */
+export function fixDispatchSignalDeath(e: unknown): { signal: string; costUsd: number } | undefined {
+  if (typeof e !== "object" || e === null) return undefined;
+  const signal = (e as { signal?: unknown }).signal;
+  if (typeof signal !== "string" || signal.length === 0) return undefined;
+  const costUsd = (e as { costUsd?: unknown }).costUsd;
+  // W1-T2402 Q2(a): `0` — never guessed higher — is the honest floor when the kill lands before
+  // any SDK result envelope ever arrives, which is what every real signal kill on this fleet's
+  // own spawn path does: `collectWorkerResult` only ever populates a cost figure off a
+  // `type:"result"` envelope, and a pre-envelope throw means that envelope never arrived, so
+  // there is nothing truthful to report beyond zero. Reads an explicit numeric `.costUsd` off
+  // `e` when one IS present — forward-compatible with a future caller that does carry one — so
+  // this never regresses once that becomes available; never guessed otherwise.
+  return { signal, costUsd: typeof costUsd === "number" ? costUsd : 0 };
+}
+
+/**
+ * W1-T2402: the WHOLE of `dispatchFix`'s catch decision, pulled out pure so every branch is
+ * unit-testable without spawning anything. `ledgerFields` is what `sweep.fix.error` gets spread
+ * with — the existing `error` string PLUS `signal`/`cost_usd` when {@link fixDispatchSignalDeath}
+ * finds them. `rethrow` mirrors W1-T1127's OWN `dispatchStarted` rule byte-for-byte and
+ * UNCHANGED by this task: a strike already spent (`dispatchStarted`) keeps this swallowed here so
+ * `runSweep` keeps recording `acted:true`, exactly as it does today; a failure before any strike
+ * still propagates to `runSweep`'s own `catch`, which already records `acted:false`. Nothing here
+ * paces, throttles, sleeps, or awaits — it is synchronous, and reads no clock.
+ */
+export function dispatchFixCatchOutcome(e: unknown, dispatchStarted: boolean): { ledgerFields: Record<string, unknown>; rethrow: boolean } {
+  const signalDeath = fixDispatchSignalDeath(e);
+  return {
+    ledgerFields: {
+      error: String((e as Error)?.message ?? e),
+      ...(signalDeath ? { signal: signalDeath.signal, cost_usd: signalDeath.costUsd } : {}),
+    },
+    rethrow: !dispatchStarted,
+  };
+}
+
 export function buildSweepEffects(
   owner: string,
   repo: string,
@@ -24669,14 +24731,22 @@ export function buildSweepEffects(
           },
         });
       } catch (e) {
-        log("sweep.fix.error", { pr_number: pr.prNumber, error: String((e as Error)?.message ?? e) });
+        // W1-T2402: a signal-terminated spawn (this fleet's own `killProcessGroup`/forced-deploy/
+        // wall-clock-reclaim paths, or a genuine host OOM — indistinguishable by signal alone, see
+        // `fixDispatchSignalDeath`'s own doc) used to be recoverable only by string-matching the
+        // SDK's free-text message, and left `sweep.fix.error` with no `cost_usd` at all — the same
+        // defect class W1-T2383 closed on the success path. `dispatchFixCatchOutcome` reads the
+        // signal/cost structurally and decides `rethrow` off `dispatchStarted` ALONE, byte-for-byte
+        // W1-T1127's existing rule — the signal itself never enters that decision.
+        const outcome = dispatchFixCatchOutcome(e, dispatchStarted);
+        log("sweep.fix.error", { pr_number: pr.prNumber, ...outcome.ledgerFields });
         // W1-T1127: still ledgered above (nothing is repaired by going quiet) — but a failure
         // that struck BEFORE the worker ran must propagate, not return cleanly, so `runSweep`'s
         // own `catch` (sweep.ts) records `acted: false` instead of seeding the dedup gate against
         // a head that wrote no `fix.*` row. A failure AFTER the worker ran (`dispatchStarted`)
         // stays swallowed here — that strike is real and must keep seeding the gate exactly as
         // it does today.
-        if (!dispatchStarted) throw e;
+        if (outcome.rethrow) throw e;
       } finally {
         if (worktreePath) {
           try {
