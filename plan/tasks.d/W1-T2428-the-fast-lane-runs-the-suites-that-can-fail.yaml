@@ -1,0 +1,109 @@
+- id: W1-T2428
+  title: "A PLAN-ONLY OR DOCS-ONLY CHANGE RUNS THE WHOLE SOURCE SUITE — 60% of merges and 58.7% of CI spend is plan-only, at 1,873s a merge, while the suites that can actually fail on such a diff are a knowable subset; the fast lane runs THOSE and skips the rest, never the job"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  origin: oper#fast-lane-for-plan-and-docs-2026-08-28
+  files: [.github/workflows/ci.yml, scripts/diff-class.mjs, test/fast-lane-classifier.test.ts]
+  rationale: |
+    **THE OPERATOR HAS RULED THAT THIS LANE EXISTS. This shard designs it; it does not re-argue it.**
+    Measured 2026-08-27: plan-only is **36 of 60 recent merges (60%)** and **58.7% of CI spend**, at a
+    mean **1,873s** each (`ci` 685 + `coverage-ratchet` 1,187) — about **18.7 runner-hours a day**.
+
+    **THE CONSTRAINT THAT SHAPES THE WHOLE DESIGN: `ci` IS NOT VACUOUS ON A PLAN DIFF.** Suites read
+    the COMMITTED TREE from a repo-root constant, and one of them caught a real defect this way:
+    `test/plan-proposals.test.ts:126` found a duplicate proposal id on #3131. MEASURED HERE by
+    intersecting two enumerations over `test/` — 219 files carrying a repo-root constant, 203 naming a
+    plan or docs path — **94 files sit in both**. Control both directions: `plan-proposals` IS in that
+    intersection, and `sweep.test.ts`, a pure-source suite, is NOT. **So the lane runs the suites that
+    can fail and skips the rest. Never "skip the job".**
+
+    **Q1 — THE CLASSIFIER MUST NOT BE A FOURTH PREDICATE, AND TWO OF THE THREE DISAGREE TODAY.**
+    Measured on #3131's real file list `[MASTER-PLAN.md, docs/ORIENTATION.md, plan/plan-index.json]`:
+    `isInPlanScope` (plan-architect.ts:364) returns true for all three and `outOfPlanScopeFilesInDiff`
+    returns `[]` — PLAN-ONLY; `nonPlanFilesInDiff` (triage.ts:618) returns `["docs/ORIENTATION.md"]`
+    — NOT plan-only. Control: on a `src/lib/sweep.ts` diff both answer `["src/lib/sweep.ts"]`, so the
+    split is real and not a broken call. The third, `TASKS_SHARD_PATH_RE` (task-linter.ts:2092), is a
+    shard-PATH matcher, not a scope predicate, and is not a candidate.
+
+    **`isInPlanScope` IS CANONICAL, for a stated reason rather than by preference.** It is the widest
+    CORRECT definition: `docs/ORIENTATION.md` is REGENERATED from `MASTER-PLAN.md`, so a plan change
+    legitimately carries it, and `isInPlanScope`'s own doc says the plan skill's output contract names
+    both. It is also already what the SWEEP computes `planOnly` from for the reviewer, so making it
+    canonical adds no new source of truth. Triage's narrower floor is deliberate for ITS OWN refusal
+    and must keep refusing `docs/ORIENTATION.md` on a triage branch — so triage does NOT delegate its
+    POLICY, but its MECHANISM should: `outOfPlanScopeFilesInDiff` already mirrors
+    `nonPlanFilesInDiff`'s shape one module over, and one of the two should call the other.
+
+    **THE WORKFLOW MUST CALL THE REAL TYPESCRIPT PREDICATE.** A tiny node entry point imports it and
+    prints a class; the workflow reads that. A bash reimplementation would be a FOURTH predicate and
+    would drift from the three that already disagree.
+
+    **Q3 — THE CLASSES.** PLAN-ONLY runs `lint-plan`, the plan-PR emitter, plan-index,
+    `plan-proposals`, `task-id-existence-check`, `acceptance-author-gate`, `commitlint`,
+    `remudero-review`, and the 94-file plan-reading set enumerated above — from `test/` at build time
+    with the same intersection and the same two controls, never a hand-copied list. DOCS-ONLY runs the
+    docs gates: `cli-reference:check`, `claims`, `docs-index`. SOURCE runs everything, unchanged.
+    **A MIXED DIFF TAKES THE STRICTEST CLASS PRESENT** — a diff carrying one `src/` path is SOURCE,
+    whatever else it carries.
+
+    **Q4 — THE BRANCH-PROTECTION TRAP, WHICH IS FATAL IF MISSED.** Only `remudero-review` and
+    `ci-gate` are required on main, but `ci-gate`'s own REQUIRED list names `ci`, `lint-plan`,
+    `depcruise`, `containment-probe`, `coverage-ratchet`, `mutation-ratchet`, `jscpd-gate`, `claims`,
+    `learnings-budget-ratchet`, `commitlint`, `api-client-drift` and more — and its own comment says a
+    required check that never registers times out and REDS the gate. **A workflow-level `paths:`
+    filter therefore strands `ci-gate` for `WAIT_CAP_SECONDS: 2400` and then fails it.** The shape is a
+    STEP-LEVEL BASH GUARD INSIDE A JOB THAT STILL RUNS AND STILL REGISTERS. Four already exist at
+    `ci.yml` lines 286, 315, 327 and 333, and `ci.yml:214` records why it is bash and never a YAML
+    `if:` — `test/diff-coverage.test.ts` asserts that job body carries none, the #729
+    skipped-check-deadlock discipline.
+
+    **Q5 — THE SKIP MUST NAME ITSELF, AND THIS IS THE PART THE OPERATOR GETS FOR FREE.** A job that
+    exits 0 without running is today indistinguishable from one that passed: main's `coverage-ratchet`
+    is green with step 6 having run 0 SECONDS. Every fast-lane skip states its CLASS, the STEPS it
+    skipped, and WHY, in the job summary and on the `ci-gate` rollup. A fast green that says it is a
+    fast green costs nothing and keeps the rollup readable.
+
+    **Q6 — THE CLASS IS DERIVED ONCE AND READ TWICE.** The sweep already computes `planOnly` through
+    `isInPlanScope` and posts a plan-only verdict citing W1-T205. The class belongs beside that
+    predicate in `plan-architect.ts`, with the node entry point as its only new surface, so CI and the
+    sweep read ONE derivation. Whether the sweep should arm auto-merge SOONER on a fast-lane PR now
+    that its required set is smaller is left as an OPERATOR DECISION and is not assumed here — the arm
+    is the one place where being wrong merges something.
+  note: |
+    **RULE 19 BAND, SET UP FRONT AND FOR THE SPAN.** `files:` reaches CI configuration
+    (`.github/workflows/ci.yml`), a new executable entry point (`scripts/diff-class.mjs`) and a test.
+    That is three surfaces across two layers, so `risk: high` is Rule 19's SIZING verdict on the SPAN
+    and carries no claim about blast radius.
+
+    **FAIL CLOSED IS A CRITERION, NOT A NOTE — see acceptance.** On any error, an empty file list,
+    truncated pagination, or a class it cannot determine, the lane RUNS EVERYTHING.
+
+    **WHAT MUST NOT CHANGE.** No check leaves `ci-gate`'s REQUIRED list. `remudero-review` still posts
+    on every PR. `lint-plan` still gates every plan diff. `ci-gate` holding on a red required check is
+    W1-T176 working as designed and is not touched. Nothing paces, throttles or sleeps (W1-T1066). No
+    cap is raised and no gate is weakened. The operator gates every merge.
+
+    **NOT IN SCOPE.** Consolidating triage's predicate onto the canonical one is named above as the
+    right direction but is a SEPARATE change — this task must not alter what a triage branch refuses.
+  acceptance:
+    - claim: "the class comes from the existing canonical predicate rather than a fourth reimplementation"
+      proof: "unit test: test/fast-lane-classifier.test.ts"
+    - claim: "on any error or an undeterminable class the lane runs everything"
+      proof: "unit test: test/fast-lane-classifier.test.ts"
+    - claim: "an empty file list runs everything rather than reading as plan-only"
+      proof: "unit test: test/fast-lane-classifier.test.ts"
+    - claim: "a diff carrying one source path is classified source whatever else it carries"
+      proof: "unit test: test/fast-lane-classifier.test.ts"
+    - claim: "the plan-reading suites are enumerated from the tree at build time, never hand-copied"
+      proof: "unit test: test/fast-lane-classifier.test.ts"
+    - claim: "every job still registers a check run, so no required check can go absent"
+      proof: "unit test: test/fast-lane-classifier.test.ts"
+    - claim: "each skip names its class and the steps it skipped rather than exiting silently"
+      proof: "unit test: test/fast-lane-classifier.test.ts"
+    - claim: "no name is removed from the gate's required list by this change"
+      proof: "unit test: test/fast-lane-classifier.test.ts"
