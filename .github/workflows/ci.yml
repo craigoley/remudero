@@ -137,7 +137,12 @@ jobs:
           # variable set on a pull request and EMPTY on a push — exactly the discriminator needed,
           # without naming a forbidden token. `fetch-depth: 0` above guarantees the history for it.
           if [ -n "${GITHUB_BASE_REF}" ]; then
-            git fetch --no-tags --depth=1 origin "${GITHUB_BASE_REF}" >/dev/null 2>&1 || true
+            # NO DEPTH-LIMITING FLAG (test/no-shallowing-of-the-canonical-checkout.test.ts,
+            # W1-T2333): shallowing flags are forbidden on any git invocation under
+            # .github/workflows/, and one here was also unnecessary — this job's own checkout
+            # above already sets `fetch-depth: 0`, so the history is complete before this runs.
+            # The ratchet scans TEXT, so this note names no flag literally either.
+            git fetch --no-tags origin "${GITHUB_BASE_REF}" >/dev/null 2>&1 || true
             git diff --name-only "origin/${GITHUB_BASE_REF}...HEAD" > changed-files.txt 2>/dev/null || : > changed-files.txt
           else
             : > changed-files.txt
@@ -193,7 +198,12 @@ jobs:
           echo "W1-T2428 fast-lane: class=${CLASS} — running ${COUNT} of ${TOTAL} suites (the plan/docs-reading set); skipping the rest, which this diff cannot fail."
           echo "- W1-T2428 fast-lane: class=${CLASS} — ran **${COUNT} of ${TOTAL}** suites (the plan/docs-reading set), skipped the remainder" >> "$GITHUB_STEP_SUMMARY"
           printf '%s\n' "$SUITES" | sed 's/^/    /' >> "$GITHUB_STEP_SUMMARY"
-          npx tsx --test $SUITES
+          # THE SAME HARNESS IMPORTS `npm run test:ci` CARRIES — `--import tsx` and
+          # `--import ./test/setup/tmp-hygiene.ts`. W1-T1217 records that omitting the second
+          # is a real divergence rather than a saving, and W1-T1250's parity check refuses any
+          # node-test-runner invocation in a workflow that lacks it. The fast lane changes
+          # WHICH suites run, never the harness they run under.
+          node --test --import tsx --import ./test/setup/tmp-hygiene.ts $SUITES
 
   commitlint:
     # W1-T31 (MASTER-PLAN §6A), relocated by W1-T129 — Conventional Commits gate. This repo
