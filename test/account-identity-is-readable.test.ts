@@ -237,9 +237,27 @@ test("W1-T2434: the reader still projects only identity and usage — no credent
   for (const forbidden of ["oauthAccount", "accessToken", "refreshToken", "apiKey", "primaryApiKey", "sk-ant"]) {
     assert.equal(serialized.includes(forbidden), false, `the served payload must never contain ${forbidden}`);
   }
-  // Source-level lock: the parsed object is never returned or assigned outside readAccountUsageFile.
-  const src = readFileSync(ACCOUNT_USAGE_TS, "utf8");
-  assert.match(src, /THE PARSED OBJECT NEVER ESCAPES THIS FUNCTION/, "the containment rule this task inherits is still documented, not quietly dropped");
+  // Real containment check, not a comment: a fixture carries a field ClaudeJsonShape never names
+  // (plus a credential-shaped one) at the SAME top level as oauthAccount. If readAccountUsageFile
+  // ever returned the parsed reference itself instead of building `out` field-by-field, these would
+  // ride along into the projection. A comment claiming containment can't make this pass — only the
+  // real field-by-field copy can.
+  const escapeDir = mkdtempSync(join(tmpdir(), "account-identity-escape-"));
+  const escapePath = join(escapeDir, "claude.json");
+  writeFileSync(
+    escapePath,
+    JSON.stringify({
+      oauthAccount: { emailAddress: "escape@example.com" },
+      accessToken: "sk-ant-should-never-leak",
+      __unexpectedTopLevelField: "marker",
+    }),
+  );
+  const escaped = readAccountUsageFile(escapePath);
+  assert.deepEqual(
+    Object.keys(escaped).sort(),
+    ["email"],
+    "a field the parsed object carries but ClaudeJsonShape never names must not reach the projection",
+  );
 });
 
 // ── (8) THE CACHE AGE BOUND IS UNCHANGED, AND NOTHING WRITES OR BACK-DATES IT ────────────────────
