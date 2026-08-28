@@ -4084,6 +4084,21 @@ function prNumberFromSquashSubject(subject: string): number | undefined {
  * `null` on a failed read, never an empty Map: the failure/absence distinction every other
  * reader in this file keeps (W1-T119). Newest first, matching `findMergedByTrailer`'s own
  * documented ordering — `git log` already emits in that order.
+ *
+ * ⚠ THE WHOLE SURFACE DEPENDS ON A REPO SETTING THIS FILE OTHERWISE NEVER NAMES (W1-T2447).
+ * This reads `git log`, which sees only what GitHub actually WROTE into the squash commit — and
+ * GitHub chooses that content from the repo's `squash_merge_commit_message` setting.
+ * `COMMIT_MESSAGES` concatenates the branch's own commit subjects/bodies into the squash commit,
+ * which is the ONLY reason `appendTaskTrailerToCommit`'s amended tip-commit trailer is still
+ * there for the `git log` below to find. The other legal value, `PR_BODY`, discards the branch
+ * commits entirely and writes the PR body instead. MEASURED against this repository's own
+ * settings: `squash_merge_commit_message: "COMMIT_MESSAGES"`. That is an admin-only GitHub UI
+ * toggle — no commit, no review, no ledger row — and flipping it to `PR_BODY` does not break
+ * this function: it keeps returning a `Map` and {@link deriveStatus} keeps reading it, but every
+ * FUTURE squash stops carrying a trailer at all, so the index quietly stops growing while
+ * looking exactly as healthy as it does today. Before this comment and the pinning test at
+ * `test/commit-trailer-surface-squash-setting.test.ts`, nothing in `src/`, `test/` or
+ * `.github/` named `squash_merge_commit_message` at all.
  */
 export function buildCommitTrailerIndex(opts: {
   /** `owner/repo`, only ever used to render the {@link PrRef} url — never to fetch anything. */
