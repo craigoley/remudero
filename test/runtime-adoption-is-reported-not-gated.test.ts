@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -243,5 +244,209 @@ test("the report never produces a joinable per-section reaching fraction", () =>
     assert.ok(envNames.every((n) => typeof n.name === "string" && typeof n.declaredAt === "string"));
   } finally {
     rmSync(srcRoot, { recursive: true, force: true });
+  }
+});
+
+// ── The degrade paths, driven for real ────────────────────────────────────────────────────────
+//
+// `auditRuntimeAdoption`'s own contract is "NEVER THROWS: every I/O path degrades". Until these
+// tests existed that promise was UNVERIFIED on every branch that implements it: the deploy-corpus
+// walk (`allFilesUnder`), its two catch arms, `deploySupplies`'s read arm, the source-scan's
+// unreadable-file arm, and the ledger-read arm were reachable only with a real `deployRoot` or a
+// throwing fs, and no fixture supplied either. An unreachable degrade arm is the one thing a
+// "never blocks a merge" report cannot afford, since it is exactly what fires in the field.
+//
+// A unix SOCKET is the fixture for "statSync says file, readFileSync throws": it is not a
+// directory, so the walk collects it, and reading it fails ENXIO for every uid — including root,
+// where a chmod-000 fixture would silently still be readable and the arm would go uncovered.
+
+function withSocket(dir: string, name: string, run: () => void): void {
+  const srv = createServer();
+  try {
+    srv.listen(join(dir, name));
+    run();
+  } finally {
+    srv.close();
+  }
+}
+
+test("auditRuntimeAdoption: a deployRoot that SUPPLIES the env var is read from the deploy tree, including a nested directory", () => {
+  const srcRoot = buildFixtureSrc();
+  const stateDir = tmp("rmd-adopt-state-");
+  const deployRoot = tmp("rmd-adopt-deploy-");
+  try {
+    buildLedgerFixture(stateDir);
+    mkdirSync(join(deployRoot, "nested", "deeper"), { recursive: true });
+    // The name lives only in the DEEPEST directory, so a walk that fails to recurse reads zero.
+    writeFileSync(join(deployRoot, "nested", "deeper", "entrypoint.sh"), "export RMD_ACCOUNT_FILE_PATH=/x\n");
+    writeFileSync(join(deployRoot, "unrelated.yaml"), "nothing: here\n");
+
+    const rows = auditRuntimeAdoption({
+      srcRoot,
+      stateDir,
+      deployRoot,
+      env: { RMD_SUPPLIED_TOKEN: "present" }, // NOT supplied by env — only the deploy tree names it
+      ledgerControlName: "serve.start",
+      envControlName: "RMD_SUPPLIED_TOKEN",
+    });
+
+    const row = byName(rows, "RMD_ACCOUNT_FILE_PATH");
+    assert.ok(row, "the declared env var must appear as a row");
+    assert.equal(row!.reading, 1, "the deploy tree supplies it, so the reading is 1, not 0");
+
+    // FALSIFIER: the same report with no deployRoot must read 0 for that name — otherwise the
+    // assertion above would pass without the deploy walk having contributed anything.
+    const without = auditRuntimeAdoption({
+      srcRoot,
+      stateDir,
+      env: { RMD_SUPPLIED_TOKEN: "present" },
+      ledgerControlName: "serve.start",
+      envControlName: "RMD_SUPPLIED_TOKEN",
+    });
+    assert.equal(byName(without, "RMD_ACCOUNT_FILE_PATH")!.reading, 0, "without the deploy tree the same name reads 0");
+  } finally {
+    rmSync(srcRoot, { recursive: true, force: true });
+    rmSync(stateDir, { recursive: true, force: true });
+    rmSync(deployRoot, { recursive: true, force: true });
+  }
+});
+
+test("auditRuntimeAdoption: a deployRoot that does not exist degrades to no deploy files rather than throwing", () => {
+  const srcRoot = buildFixtureSrc();
+  const stateDir = tmp("rmd-adopt-state-");
+  try {
+    buildLedgerFixture(stateDir);
+    const rows = auditRuntimeAdoption({
+      srcRoot,
+      stateDir,
+      deployRoot: join(tmpdir(), "rmd-adopt-deploy-does-not-exist-xyzzy"),
+      env: { RMD_SUPPLIED_TOKEN: "present" },
+      ledgerControlName: "serve.start",
+      envControlName: "RMD_SUPPLIED_TOKEN",
+    });
+    assert.ok(rows.length > 0, "the report still returns rows");
+    assert.equal(byName(rows, "RMD_ACCOUNT_FILE_PATH")!.reading, 0, "an unreadable deploy dir contributes nothing");
+  } finally {
+    rmSync(srcRoot, { recursive: true, force: true });
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("auditRuntimeAdoption: an entry under deployRoot that cannot be stat'd or cannot be read is skipped, and the rest of the tree is still scanned", () => {
+  const srcRoot = buildFixtureSrc();
+  const stateDir = tmp("rmd-adopt-state-");
+  const deployRoot = tmp("rmd-adopt-deploy-");
+  try {
+    buildLedgerFixture(stateDir);
+    // (a) a DANGLING SYMLINK: readdir lists it, statSync throws on it.
+    symlinkSync(join(deployRoot, "no-such-target"), join(deployRoot, "dangling"));
+    // (c) a real file naming the var, placed AFTER the two bad entries alphabetically, so it is
+    //     only reached if both skips genuinely continue rather than abandoning the walk.
+    writeFileSync(join(deployRoot, "zz-supplies.env"), "RMD_ACCOUNT_FILE_PATH=/x\n");
+
+    // (b) a SOCKET: statSync says not-a-directory, readFileSync throws ENXIO.
+    withSocket(deployRoot, "unreadable.sock", () => {
+      const rows = auditRuntimeAdoption({
+        srcRoot,
+        stateDir,
+        deployRoot,
+        env: { RMD_SUPPLIED_TOKEN: "present" },
+        ledgerControlName: "serve.start",
+        envControlName: "RMD_SUPPLIED_TOKEN",
+      });
+      assert.equal(
+        byName(rows, "RMD_ACCOUNT_FILE_PATH")!.reading,
+        1,
+        "the readable file after the two bad entries must still be found — a skip must continue, not abort",
+      );
+    });
+  } finally {
+    rmSync(srcRoot, { recursive: true, force: true });
+    rmSync(stateDir, { recursive: true, force: true });
+    rmSync(deployRoot, { recursive: true, force: true });
+  }
+});
+
+test("declaredLedgerSteps: a listed source file that cannot be read contributes no literals and does not abort the scan", () => {
+  const srcRoot = buildFixtureSrc();
+  try {
+    const before = declaredLedgerSteps(srcRoot).length;
+    assert.ok(before > 0, "the fixture must declare at least one step, or this proves nothing");
+    withSocket(srcRoot, "unreadable.ts", () => {
+      const after = declaredLedgerSteps(srcRoot);
+      assert.equal(after.length, before, "an unreadable .ts file changes nothing and throws nothing");
+    });
+  } finally {
+    rmSync(srcRoot, { recursive: true, force: true });
+  }
+});
+
+test("auditRuntimeAdoption: a ledger read that THROWS is carried forward as a note on every ledger row, never a silent zero", () => {
+  const srcRoot = buildFixtureSrc();
+  const stateDir = tmp("rmd-adopt-state-");
+  try {
+    buildLedgerFixture(stateDir);
+    const rows = auditRuntimeAdoption({
+      srcRoot,
+      stateDir,
+      ledgerFsDeps: {
+        // `readdirSync` is caught INSIDE resolveLedgerUnion (an absent state dir is "zero
+        // archives", never a throw), so throwing there exercises the union's own degrade, not
+        // this function's. `existsSync` is called OUTSIDE that try, so it is the seam that
+        // actually reaches the catch arm under test.
+        readdirSync: () => [],
+        existsSync: () => {
+          throw new Error("ledger dir exploded");
+        },
+        readFileSync: () => Buffer.from(""),
+        gunzipSync: (b) => b,
+      },
+      env: { RMD_SUPPLIED_TOKEN: "present" },
+      ledgerControlName: "serve.start",
+      envControlName: "RMD_SUPPLIED_TOKEN",
+    });
+    const ledgerRows = rows.filter((r) => r.corpus === "ledger");
+    assert.ok(ledgerRows.length > 0, "there must be ledger rows to carry the note");
+    for (const r of ledgerRows) {
+      assert.match(r.note ?? "", /UNMEASURED/, `every ledger row must be marked UNMEASURED, saw: ${r.note}`);
+      assert.match(r.note ?? "", /ledger dir exploded/, "the note must carry the thrown message, not a generic one");
+    }
+  } finally {
+    rmSync(srcRoot, { recursive: true, force: true });
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("auditRuntimeAdoption: a ledger union that reports itself UNREADABLE (rather than throwing) is also carried as UNMEASURED, never a verified zero", () => {
+  const srcRoot = buildFixtureSrc();
+  const stateDir = tmp("rmd-adopt-state-");
+  try {
+    buildLedgerFixture(stateDir);
+    const rows = auditRuntimeAdoption({
+      srcRoot,
+      stateDir,
+      // This one IS swallowed by resolveLedgerUnion and comes back as `ok: false` — a different
+      // arm from the thrown case above, and the pair is what proves the two are distinguished.
+      ledgerFsDeps: {
+        readdirSync: () => {
+          throw new Error("swallowed inside the union");
+        },
+        existsSync: () => true,
+        readFileSync: () => Buffer.from(""),
+        gunzipSync: (b) => b,
+      },
+      env: { RMD_SUPPLIED_TOKEN: "present" },
+      ledgerControlName: "serve.start",
+      envControlName: "RMD_SUPPLIED_TOKEN",
+    });
+    const ledgerRows = rows.filter((r) => r.corpus === "ledger");
+    assert.ok(ledgerRows.length > 0);
+    for (const r of ledgerRows) {
+      assert.match(r.note ?? "", /UNMEASURED/);
+      assert.match(r.note ?? "", /unreadable at/, "the unreadable arm names the state dir, not a thrown message");
+    }
+  } finally {
+    rmSync(srcRoot, { recursive: true, force: true });
+    rmSync(stateDir, { recursive: true, force: true });
   }
 });
