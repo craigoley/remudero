@@ -172,7 +172,17 @@ test("every KNOWN_UNWIRED entry carries a substantive reason, not a TODO", () =>
   // WIRED, never allowlisted: this file's own doc forbids the vague entry because "it launders
   // 'nobody has looked at this' into 'this is fine'", and an entry for a detector that can never
   // fire is exactly that.
-  assert.equal(Object.keys(KNOWN_UNWIRED).length, 4, "the four fields still unwired");
+  // W1-T2424: this is a CEILING, not an equality. The history above is entirely one-directional
+  // wiring (six -> five -> four, never a re-add), and an equality refuses BOTH the bad direction
+  // (a fifth exemption sneaking in) AND the good one (wiring the fourth away, per #3115's own
+  // precedent of shrinking this exact count) -- forcing an edit to this file for a change that is
+  // strictly an improvement. A ceiling keeps the guard (growth still fails) and frees the shrink.
+  const unwiredCount = Object.keys(KNOWN_UNWIRED).length;
+  assert.ok(
+    unwiredCount <= 4,
+    `KNOWN_UNWIRED has ${unwiredCount} entries, exceeding the ceiling of 4 -- a new exemption must ` +
+      "either wire a real producer or justify why the ceiling itself should move",
+  );
   for (const [field, reason] of Object.entries(KNOWN_UNWIRED)) {
     assert.ok(reason.length >= 80, `${field}: a one-word reason launders 'nobody looked' into 'this is fine'`);
     assert.doesNotMatch(reason, /^\s*(TODO|FIXME|tbd)\b/i, `${field}: name the reason`);

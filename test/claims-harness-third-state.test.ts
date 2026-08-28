@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { parse as parseYaml } from "yaml";
 
 // ── W1-T2215: the claims harness gets a THIRD state ──────────────────────────
 //
@@ -196,9 +198,35 @@ test("claims-check CLI: every failure shape that was red before W1-T2215 is stil
   assert.notEqual(doesNotExist.status, 0, doesNotExist.stdout + doesNotExist.stderr);
 });
 
-test("claims-check: the real plan/claims.yaml (now carrying precondition_paths on 14 of its 15 claims) still holds end-to-end -- adding the third-state mechanism did not turn a true claim red", () => {
-  const result = spawnSync(process.execPath, [SCRIPT], { cwd: REPO_ROOT, encoding: "utf8" });
-  const output = result.stdout + result.stderr;
-  assert.equal(result.status, 0, output);
-  assert.match(output, /OK -- all 15 claim\(s\) hold/);
-});
+// W1-T2424: the summary line's SHAPE is what this proves -- that every committed claim gets
+// counted into one "OK -- all N claim(s) hold" line -- and the 14-vs-15-vs-whatever count is
+// incidental to that, so both numbers below are read from the same committed plan/claims.yaml
+// scripts/claims-check.mjs itself reads, rather than pinned as literals that a future claim
+// addition (which only touches plan/claims.yaml, never this test) would otherwise go stale
+// against. (This test file still never imports scripts/claims-check.mjs itself -- see the header
+// comment above -- it parses the YAML directly, the same pattern test/claims-check.test.ts uses.)
+function loadRealClaimsForShape(): Array<{ precondition_paths?: unknown }> {
+  const doc = parseYaml(readFileSync(join(REPO_ROOT, "plan", "claims.yaml"), "utf8"));
+  const claims = Array.isArray(doc) ? doc : (doc as { claims?: unknown[] })?.claims;
+  assert.ok(Array.isArray(claims), "plan/claims.yaml must parse to a list of claims");
+  return claims as Array<{ precondition_paths?: unknown }>;
+}
+
+const REAL_CLAIMS = loadRealClaimsForShape();
+const REAL_CLAIMS_TOTAL = REAL_CLAIMS.length;
+const REAL_CLAIMS_WITH_PRECONDITION = REAL_CLAIMS.filter((c) => c.precondition_paths !== undefined).length;
+
+test(
+  `claims-check: the real plan/claims.yaml (now carrying precondition_paths on ${REAL_CLAIMS_WITH_PRECONDITION} of its ${REAL_CLAIMS_TOTAL} claims) still holds end-to-end -- adding the third-state mechanism did not turn a true claim red`,
+  () => {
+    const result = spawnSync(process.execPath, [SCRIPT], { cwd: REPO_ROOT, encoding: "utf8" });
+    const output = result.stdout + result.stderr;
+    assert.equal(result.status, 0, output);
+    assert.match(
+      output,
+      new RegExp(`OK -- all ${REAL_CLAIMS_TOTAL} claim\\(s\\) hold`),
+      `expected the summary to report exactly ${REAL_CLAIMS_TOTAL} claims -- the same count ` +
+        "plan/claims.yaml itself carries right now; got:\n" + output,
+    );
+  },
+);
