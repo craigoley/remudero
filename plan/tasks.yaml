@@ -3495,6 +3495,92 @@
     verify:human DELIBERATELY. The deliverable is a change to live GitHub protection state, which a
     headless worker can neither apply nor honestly verify (Rule 18). A worker can prepare the config and
     the assertions, but an operator confirms the live protection and the two-sided behaviour.
+
+    ────────────────────────────────────────────────────────────────────────────────────────
+    AMENDED 2026-08-28 — THE CAPABILITY CHECK THIS BLOCK ASKS FOR, PERFORMED. Evidence and
+    pricing only: NOTHING IS ENABLED, NO PROTECTION IS CHANGED, NO CODEOWNERS EDIT IS MADE OR
+    PROPOSED. This task stays `verify: human`; the point is to make the ruling DECIDABLE.
+    ────────────────────────────────────────────────────────────────────────────────────────
+
+    SHAPE (a) IS WRITABLE TODAY, AND IT IS HALF-BUILT IN THE FORBIDDEN FORM. A `CODEOWNERS` file
+    ALREADY EXISTS at the repo root and reads, in full:
+
+        # Remudero code ownership. Every change requires review from the owner.
+        # (Repo Issues/Discussions stay OFF until WS-4; CODEOWNERS ships from PR #1.)
+        *       @craigoley
+
+    That is a BLANKET WILDCARD — precisely the shape the rationale above refuses — and it is
+    ADVISORY ONLY, because `required_pull_request_reviews` reads `null` on main's live protection,
+    so it requests a review and cannot hold anything. MAKING IT COMPLIANT IS A NARROWING, NOT AN
+    ADDITION: scope the pattern to the gate-config paths below and enable `require_code_owner_reviews`.
+    The repository is ORG-OWNED and PUBLIC, so code-owner reviews and rulesets are both available;
+    NO RULESETS ARE CURRENTLY CONFIGURED. Live protection at the time of measurement:
+    `restrictions: null`, `required_pull_request_reviews: null`, `enforce_admins: false`, two
+    required checks (`remudero-review`, `ci-gate`).
+
+    SHAPE (b) REMAINS BLOCKED, AND W1-T990's PREMISE IS ONLY PARTLY STALE. W1-T990 records that
+    every autonomous PR is authored by the operator's own account, so both shapes collapse. That is
+    NO LONGER WHOLLY TRUE — `remudero-fleet[bot]` is a genuinely distinct actor. But the collapse is
+    PARTIAL, NOT RESOLVED. Over the last 200 merges: 61 (30.5 percent) carry an author field that
+    identifies a non-operator actor — `remudero-fleet[bot]` 50, `claude[bot]` 9, dependabot 2 — and
+    139 (69.5 percent) collapse onto the operator: 95 unattributed, 37 Claude sessions, and 7 AZURE
+    CONTAINER WORKERS THAT BUILD TASKS AND PUSH AS THE OPERATOR. An actor-keyed `restrictions`
+    allowlist would bind the honest 30.5 percent and miss the rest. A RULE THAT BINDS THE HONEST
+    HALF IS NOT A GATE. So shape (a) is available and shape (b) is not; the reason is W1-T990's and
+    is not re-filed here.
+
+    (Q1) THE GATE-CONFIG PATH SET, ENUMERATED FROM THE TREE RATHER THAN ASSUMED, WITH EDIT COUNTS
+    BY IDENTITY. 143 merges touch gate config all time; 9 are identifiably fleet:
+
+        .github/workflows/ (16 files)            77 merges    3 fleet
+        plan/policy.yaml                         40           3
+        scripts/claude-md-budget-baseline.json    8           2
+        plan/claims.yaml                          7           1
+        scripts/coverage-baseline.json            5           0
+        scripts/mutation-baseline.json            2           0
+        scripts/cycle-baseline.json               1           0
+        scripts/learnings-budget-baseline.json    1           0
+        plan/alert-policy.yaml                    1           0
+        scripts/mutation-relevant-paths.json      1           0
+
+    Test fixtures under `test/fixtures/**` carry `baseline` in their names and are EXCLUDED: they
+    are inputs to tests, not configuration any gate reads.
+
+    ⚠ AND THE MEASUREMENT BUG THAT NEARLY HID THIS, RECORDED BECAUSE THE ZERO LOOKED LIKE A FINDING.
+    A first pass reported `scripts/coverage-baseline.json` and `plan/policy.yaml` at ZERO merges
+    each — which would have read as "the fleet never touches the baselines, so the rule is free".
+    Both were a SHELL-QUOTING ERROR in the measuring loop (a multi-path group string that did not
+    expand), not a property of the corpus: the same paths return 5 and 40 when queried singly. The
+    corrected query was controlled BOTH WAYS on the same command shape —
+    `scripts/coverage-baseline.json` returns 0 fleet of 5 while
+    `scripts/claude-md-budget-baseline.json` returns 2 of 8 — so a zero and a non-zero come from one
+    query and the query discriminates.
+
+    (Q2) THE COST, WHICH IS NOT FREE INSURANCE. Catching those 9 fleet edits requires an operator
+    review on all 143 gate-config merges: ROUGHLY 16 OPERATOR REVIEWS PER IDENTIFIABLE FLEET EDIT.
+    At the current rate — 52 gate-config merges in the last 14 days against 1,180 merges total, or
+    4.4 percent — that is ABOUT 3.7 REVIEWS PER DAY, indefinitely.
+
+    ⚠ THE RATIO IS SOFT IN ONE DIRECTION ONLY, AND THAT ASYMMETRY MATTERS TO THE RULING. 27 of those
+    52 recent gate-config merges are UNATTRIBUTED by the classifier, which reads the author field
+    plus two co-author email forms and nothing else. That bucket can only CONTAIN fleet work, never
+    exclude it. So 9 IS A LOWER BOUND and the true ratio is AT OR BELOW 16:1 — the rule may be
+    better value than this figure suggests, and cannot be worse.
+
+    (Q3) A LIVE COLLISION, NOT A HYPOTHETICAL ONE. W1-T2428 (the fast lane) declares
+    `files: [.github/workflows/ci.yml, scripts/diff-class.mjs, test/fast-lane-classifier.test.ts]` —
+    it names `.github/workflows/ci.yml` DIRECTLY. And `ci-gate`'s own REQUIRED check list lives in
+    `.github/workflows/ci-gate.yml`. A RULE COVERING `.github/workflows/` PUTS AN OPERATOR REVIEW ON
+    THE FAST-LANE BUILD, and that directory is 27 OF THE 52 recent gate-config merges — the single
+    largest slice, and the one most likely to be edited again. Whether `.github/workflows/` belongs
+    in the scoped set is therefore the load-bearing half of the ruling, not a detail of it.
+
+    WHAT THIS AMENDMENT DOES NOT DO. It enables nothing, edits no `CODEOWNERS`, and changes no
+    protection setting — all three are the operator's, and this task is `verify: human` precisely
+    because a headless worker can neither apply nor honestly verify live protection state (Rule 18,
+    stated in this block above). The two-sided proof this block already demands is unchanged: it is
+    still not enough to show a gate-touching PR is held; an ORDINARY PR must still merge with no
+    human approval, and that negative is still the property most likely to be silently lost.
   acceptance:
     - claim: "a PR that modifies a gate config or a baseline file cannot merge without the operator, asserted against the live protection configuration rather than described"
       proof: "unit test: test/gate-self-modification.test.ts"
