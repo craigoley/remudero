@@ -1,0 +1,207 @@
+- id: W1-T2431
+  title: "A COUNTER CANNOT SEE AN ACTION IT DID NOT WRITE — every sweep dedup keys on a ledger row the fleet emits about its OWN act, so an equivalent operator act is uncounted and the counter reads LOW; measured on `sweep.check_requeued`, where 3 of the 7 re-run attempts GitHub's own surface records carry no fleet row anywhere in the union, and #3160 has now been cancelled TWICE on one head with `escalateCancelledCheck` unable to fire"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 25.00
+  files: [src/lib/sweep.ts, test/requeue-count-reads-the-surface.test.ts]
+  origin: "operator-brief#counter-blind-to-an-action-it-did-not-write-2026-08-27"
+  plan_refs: ["W1-T1223", "W1-T1127", "W1-T1110", "W1-T2423", "W1-T990", "W1-T2430", "W1-T2425", "W1-T186"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE ID. Eight surfaces swept at base 070f5b7b, anchored `W1-T2431([^0-9]|$)` with a `[0-9]`
+    class and never `\d`, every open-surface control drawn from the open set enumerated FIRST over
+    REST (HTTP 200, type array, length 8, page 2 length 0). SURFACE 1 READS 1:
+    `refs/rmd-id/W1-T2431` resolves against 544 refs, and the anchor is proved discriminating on a
+    POPULATED band — `W1-T243` reads anchored 0 against unanchored 2. Shard filenames 0 of 675
+    (control W1-T2425 = 1); declared `- id:` lines 0 of 943 (control = 1); open-PR titles 0 of 8
+    CASE-SENSITIVELY (controls W1-T2429 = 1 and W1-T990 = 1, lower-case `w1-t2429` = 0 — the first
+    control tried, W1-T2414, reads 0 because that PR's title carries no id, so a firing one was
+    substituted rather than a zero reported); open-PR bodies 0 over 44,120 bytes (control
+    W1-T2425 = 7); head branches 0 of 158 rows (control W1-T2414 = 2). Surfaces 7 and 8 are
+    MERGED-ONLY and their zeros are coverage, not evidence, for an id that has never merged:
+    trailers 0 of 577 (control W1-T2249 = 1), subjects 0 of 2,502 (control W1-T2425 = 1).
+
+    ── Q1. THE COUNTERS, ENUMERATED FROM `priorActionsFromLedger` AND MEASURED ──────────────────
+
+    (1) THE SHAPE. `priorActionsFromLedger` (`src/lib/sweep.ts`) builds every per-head dedup set
+    the sweep consults, and each is seeded by a step the FLEET writes ABOUT ITS OWN ACTION. That
+    is the property at issue: the row is a record of the actor, not of the world. An operator
+    doing the same thing to the same PR changes the world and writes no row, so the set reads as
+    though the act never happened.
+
+    (2) THE ENUMERATION, WITH EACH ONE'S SEEDING STEP CONFIRMED PRESENT OVER THE UNION so the
+    query is not naming steps that do not exist (union counts, distinct): `sweep.check_requeued`
+    17, `review.posted` 1,376, `review.post_refused` 39, `risk_judge.escalated` 27,
+    `sweep.absent_repush` 4, `automerge.armed` 1,496, `sweep.disposed` 49,520, `run.start` 575,
+    `pr.opened` 528, `verdict.merged` 1,092.
+
+      - `CHECK_REQUEUE_STEP` (`sweep.check_requeued`) -> the re-queue dedup. Operator equivalent:
+        `gh run rerun --job`. INVISIBLE, measured below.
+      - `fixed` (`prior.fixed`, seeded from acted `sweep.disposed` rows) -> the fix-rung head
+        dedup. Operator equivalent: fixing and pushing by hand. INVISIBLE.
+      - `armed` (`automerge.armed`) -> the arm dedup. Operator equivalent: `gh pr merge --auto`.
+        INVISIBLE.
+      - `riskRefused` (`risk_judge.escalated`) -> the risk-refusal withhold. Operator equivalent:
+        opening the issue by hand. INVISIBLE.
+      - `absentRepushes` (`sweep.absent_repush`) -> `ABSENT_REPUSH_CAP`. Operator equivalent: an
+        empty commit. INVISIBLE.
+      - `reviewDelivered`/`reviewRefused` (`review.posted`/`review.post_refused`) -> the review
+        dedup. SPLIT, and the split is the point: an operator running `rmd review` executes the
+        same code and the row IS written, so that act is counted; an operator POSTing the status
+        through `gh api .../statuses` writes nothing and is invisible. The verb, not the actor,
+        decides.
+      - `dispatchesWithoutNewOwnedPr` -> SPLIT WITHIN ONE FUNCTION, and this is Q1's CONTROL.
+        Its INCREMENT reads `run.start`, a fleet row about its own dispatch, and would not see a
+        run started any other way. Its RESET reads `pr.opened` OR a merge credit, and the credit
+        arm is written by `runCreditBackfill` from `findMergedByTrailer`, which shells
+        `gh pr list --search` — A READ OF GITHUB'S OWN STATE. So an operator who merges a PR BY
+        HAND IS SEEN, because that half is re-derived from the surface instead of from a row the
+        fleet wrote about itself.
+
+    (3) THE CONTROL MATTERS BECAUSE WITHOUT IT THIS FINDING IS CIRCULAR. A sweep that looked only
+    at fleet-written rows would of course find only fleet-written rows. One counter in the same
+    codebase already reads a surface the operator touches, which is what makes "keyed on the
+    fleet's own row" a CHOICE rather than the only shape available — and it is the shape Q3
+    proposes generalising.
+
+    (4) THE MEASURED INSTANCE, BOTH SIDES. GitHub records a re-run on the workflow run itself:
+    7 of the last 100 `ci.yml` pull_request runs carry `run_attempt > 1`, on PRs 3121, 3133,
+    3134, 3135, 3142, 3145 and 3160. The fleet's own record names 16 distinct PRs across 17
+    `sweep.check_requeued` rows: 2931, 2936, 2959, 2966, 2972, 2993, 3025, 3027, 3039, 3040,
+    3070, 3089, 3121, 3133, 3142, 3145. FOUR OF THE SEVEN INTERSECT. THREE DO NOT — 3134, 3135
+    and 3160 have no `sweep.check_requeued` row ANYWHERE IN THE UNION, archives included, so the
+    fleet did not re-queue them and something else did. #3160's is attributable with certainty:
+    an operator re-ran its cancelled `coverage-ratchet` through `gh` at 23:17.
+
+    (5) AND THE COST IS ALREADY PAID ON THAT PR. #3160's coverage-ratchet was cancelled at the
+    35-minute bound a second time at 2026-08-28T00:56:15Z, on the SAME head. That is precisely
+    the condition `escalateCancelledCheck` (W1-T1223 design iii) exists to raise, and its own
+    text says why the escalation is the right outcome: a concurrency group, a capacity fault or a
+    workflow-level cancel are all beyond what a second re-queue could fix. It will not fire,
+    because `cancelledCheckRequeueDecision` is handed `requeuedCheckKeys.has(key)` and that key
+    was never written. The fleet will re-queue a third time instead.
+
+    ── AND A SECOND, INDEPENDENT REASON THE SAME COUNTER READS LOW ─────────────────────────────
+
+    (6) THE ROW DOES NOT SURVIVE A ROTATION EITHER. `sweep.check_requeued` is a member of NONE of
+    `rotateLedger`'s three retention sets — the membership test against
+    `DECISION_RELEVANT_LEDGER_STEPS` reads 0 — so PASS 1 archives every one of its lines.
+    MEASURED: live 0 against 17 over the union. Its own sibling `sweep.absent_repush`, written by
+    the same file for the same "count what I already did" purpose, IS decision-relevant (the test
+    reads 2) and survives intact at 4 live against 4 union. SAME FILE, SAME PURPOSE, OPPOSITE
+    RETENTION. So even a re-queue the fleet DID write reads as never-having-happened after the
+    next rotation. THAT HALF IS W1-T2425's CLASS, not this task's, and is recorded here rather
+    than filed — but any remedy that keeps counting from a ledger row must close it too, which is
+    itself an argument for Q3's answer.
+
+    ── Q2. THE DIRECTION, PER COUNTER, AND WHAT IT COSTS ───────────────────────────────────────
+
+    (7) AN UNCOUNTED ACT ALWAYS READS LOW, NEVER HIGH. The asymmetry is structural: the fleet
+    emits a row only when the fleet acts, so an outside act can add unrecorded history but can
+    never invent history that did not occur. Reading low splits into two costs:
+      - RETRY WHAT WAS ALREADY TRIED — spend. `fixed` low re-dispatches a fix WORKER for a fix
+        already made, the most expensive of these by far since it is the only lane that spawns
+        one. `absentRepushes` low earns the PR another empty commit, which is the unbounded loop
+        `ABSENT_REPUSH_CAP` exists to bound. `reviewDelivered` low re-posts a review, spending an
+        LLM judge. `armed` low re-attempts an arm, an idempotent API call and nearly free.
+      - FAIL TO ESCALATE WHAT WAS ALREADY ESCALATED — delay. `CHECK_REQUEUE_STEP` low is this
+        shape exactly: the second cancellation reads as the first, no human is told, and the PR
+        waits. #3160 has been open and red for over an hour and a half at filing time.
+      - `dispatchesWithoutNewOwnedPr` low means the breaker trips LATER than it should, which is
+        spend on a task already failing to produce work.
+
+    (8) THE OPPOSITE CASE EXISTS AND IT IS WORSE, AND IT IS NOT THIS TASK'S. A counter reads HIGH
+    when the operator uses a SANCTIONED `rmd` verb: the row is written, but it carries nothing
+    that distinguishes the actor, so it counts as though the fleet had acted. `rmd run-task
+    --rerun` logs `dispatch.rerun_override` and then a `run.start`, and that `run.start`
+    increments the very breaker the operator was overriding — refusing later work on the strength
+    of a dispatch the operator deliberately asked for. THAT IS W1-T990's, the identity that makes
+    an operator action unattributable, and it is CITED HERE PRECISELY SO THE TWO HALVES ARE NOT
+    CONFUSED: this task is about an act that writes NO row; that one is about an act that writes
+    a row indistinguishable from the fleet's.
+
+    ── Q3. DERIVE THE COUNT FROM THE SURFACE. BOTH OPTIONS PRICED ──────────────────────────────
+
+    (9) NOT A CONVENTION. Asking an operator to write a ledger row by hand is a rule that binds
+    only because someone read it, and an unenforced convention with a measured failure rate is
+    what tonight's findings were about. It is also self-defeating here: the operator who forgets
+    is exactly the operator whose act goes uncounted.
+
+    (10) OPTION A — READ THE SURFACE THAT ALREADY RECORDS IT. GitHub records a re-run in two
+    places this repo can already reach with the credential it holds: `run_attempt` on the
+    workflow run, and a NEW JOB ID minted for the re-run under the same run id (MEASURED on
+    #3160: job 98703339653 became 98714534929 under run 33125740057). `cancelledRequiredCheckNames`
+    already reads the rollup, and `requeueCheck` already POSTs to `actions/jobs/{job_id}/rerun`,
+    so the endpoint family and the credential are both in hand. PRICE: one additional REST read
+    per red PR per pass, on the same gateway the sweep already uses; nothing new to remember, no
+    new step to register. IT ALSO CLOSES (6) FOR FREE — a surface read cannot be archived by a
+    rotation, because it is not a ledger row.
+
+    (11) OPTION B — RECORD NOTHING AND ACCEPT THE DRIFT. PRICE: measured, not hypothetical. Three
+    of seven re-runs uncounted in one day; one PR cancelled twice on one head with the designed
+    escalation suppressed; and a third re-queue about to be spent on a job whose failure mode the
+    design already declares beyond re-queueing. The drift is small in count and total in effect
+    on the PR it lands on.
+
+    (12) THE RECOMMENDATION IS A, AND THE POPULATION IS RECORDED HONESTLY RATHER THAN INFLATED.
+    Three uncounted re-runs in a hundred CI runs is roughly three percent of PRs, over ONE DAY,
+    and only ONE of the three is attributable to a named operator action with certainty. That is
+    a small population. It is proposed as a fix rather than a record for one reason only: the
+    counter it breaks is the one whose entire job is to stop after the first attempt, so a rate
+    of three percent produces a failure every time it occurs, not three percent of the time.
+
+    ── WHAT IS OWNED ELSEWHERE ────────────────────────────────────────────────────────────────
+
+    (13) W1-T1223 owns the re-queue lane and its escalation. W1-T1127/W1-T1110 own the strike
+    accounting. W1-T2423 owns what the dispatch count counts. W1-T990 owns the identity that
+    makes an operator action unattributable — the reads-HIGH half of (8). W1-T2430 owns the same
+    lane being trapped behind a spend bound in the light pass. W1-T2425 owns the rotation-window
+    class that (6) is a second instance of. THIS TASK OWNS ONE THING: that a counter keyed on the
+    fleet's own row cannot see an equivalent act it did not write.
+
+    (14) AND WHAT MUST NOT MOVE. Nothing here changes WHEN a check is re-queued, WHEN a breaker
+    trips, or any cap: not `DEFAULT_MAX_TASK_DISPATCHES`, not `MAX_RETAINED_LINES_PER_STEP`, not
+    `ABSENT_REPUSH_CAP`, not the fix-rung strike cap. Nothing auto-resets and nothing paces. The
+    change is to WHERE ONE COUNT IS READ FROM, and only for the re-queue counter — the other
+    counters in (2) are enumerated so the class is legible, not so they can all be rewritten at
+    once.
+
+    (15) RULE 19 BAND SET FROM SPAN UP FRONT. `risk: high` records the SPAN the acceptance text
+    and `files:` reach across — the sweep's dedup construction and its gateway read are separate
+    concerns inside one file — and is independently justified: a counter that decides whether a
+    human is told is not a display.
+  acceptance:
+    - claim: "the re-queue count is derived from the surface rather than from a row the fleet wrote about itself"
+      proof: "unit test: test/requeue-count-reads-the-surface.test.ts"
+    - claim: "a re-run taken outside the fleet is counted, so a second cancellation on one head escalates"
+      proof: "unit test: test/requeue-count-reads-the-surface.test.ts"
+    - claim: "a first cancellation on a head with no prior attempt still re-queues exactly as it does today"
+      proof: "unit test: test/requeue-count-reads-the-surface.test.ts"
+    - claim: "the count survives a rotation because it is not read from an archived ledger step"
+      proof: "unit test: test/requeue-count-reads-the-surface.test.ts"
+    - claim: "an unreadable surface read fails toward the existing behaviour and never invents an attempt"
+      proof: "unit test: test/requeue-count-reads-the-surface.test.ts"
+    - claim: "no cap moves and nothing auto-resets or paces"
+      proof: "unit test: test/requeue-count-reads-the-surface.test.ts"
+    - claim: "the other dedup sets are untouched and keep reading exactly what they read today"
+      proof: "unit test: test/requeue-count-reads-the-surface.test.ts"
+  falsifier: |
+    If `sweep.check_requeued` is found to read non-zero over the LIVE ledger at the sha a build
+    starts from, it has joined a retention set and (6) is closed — the remedy must then be
+    re-derived against a counter that only has the operator blindness, not both. The control for
+    that re-run is `sweep.absent_repush` at 4 live, proving the query can see a retained sibling.
+
+    SEPARATELY FALSIFYING: if every re-attempt GitHub's surface records is found to have a
+    matching `sweep.check_requeued` row over the union, the population in (4) is empty and this is
+    a record rather than a fix. The measurement to repeat is the two id lists in (4), matched by
+    PR number, with the seeding-step census in (2) as the control that the union query can see
+    each family at all.
+
+    AND IF the sweep is ever changed so that an operator action writes its own attributable row,
+    the premise inverts: the count would then be readable from the ledger after all, and reading
+    the surface would be a second source where one already sufficed.
