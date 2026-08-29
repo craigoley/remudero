@@ -1,0 +1,108 @@
+- id: W1-T2461
+  title: "A RENDERED COUNT AND ITS OWN BODY DISAGREE ON SCREEN — `renderInbox` counts and lists the SAME array, then emits a header row with an empty body for every READY proposal whose draft is not cached, so seventeen rows read as four and an operator learns to stop trusting the panel"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 20.00
+  files: [src/lib/inbox.ts, test/inbox.test.ts]
+  origin: "oper#count-and-body-disagree-2026-08-30"
+  plan_refs: ["W1-T2450", "W1-T2445", "W1-T2397", "W1-T193", "W1-T111"]
+  status: queued
+  attempts: 0
+  rationale: |
+    **THE COMMISSIONING HYPOTHESIS IS FALSE, AND THE REAL MECHANISM IS SHARPER.** The brief expects
+    the renderer to print only proposals carrying a cached draft, which would make the header a
+    count over a wider set than the list. It is not what the code does. `renderInbox`
+    (`src/lib/inbox.ts:1059`) computes `ready` once and both COUNTS it and ITERATES it —
+    `${ready.length} READY` in the header, `for (const c of ready)` for the body. One derivation,
+    two uses. They cannot disagree.
+
+    **WHAT DIVERGES IS THE RENDERING, NOT THE FILTERING.** Each row prints
+    `c.draft?.stampLine ?? ""` and `c.draft?.fragmentYaml ?? ""`. A READY proposal whose draft is
+    not cached therefore emits its `READY — <id>` line with an EMPTY stamp and an EMPTY drafted-tasks
+    block. The row is present and carries nothing.
+
+    **REPRODUCED AGAINST THE REAL RENDERER, NOT ARGUED.** Driving `renderInbox` with four drafted
+    and thirteen undrafted READY classifications: header reads `17 READY`, seventeen `READY —` rows
+    are emitted, THIRTEEN carry an empty stamp line, and FOUR carry visible content. That is exactly
+    the reported symptom — prints seventeen, reads as four. Control: the same renderer over an
+    all-drafted input emits ZERO empty stamp lines, so the empties are the undrafted rows and not an
+    artifact of the harness.
+
+    **SO THE `next action` LINE IS NOT THE DEFECT EITHER.** `status-board.ts:2082` renders
+    `${ctx.readyCount} proposal(s) ready` from `readyCount`, itself
+    `classifications.filter((c) => c.state === "ready").length` at `status-board.ts:2068`. Seventeen
+    proposals really are ready and really are listed. The operator cannot ACT on thirteen of them
+    because their rows are blank, which is a different complaint from being promised a list that is
+    not shown.
+
+    **THE HONEST SCOPE: ONE DEFECT, AND THE OTHER THREE ARE A PATTERN WITH NO SHARED MECHANISM.**
+    Checked by symbol rather than taken from the brief. The reaper's figure is arithmetic —
+    `const confirmedHold = plan.hold.length - plan.undetermined.length` at `run-task.ts:14360`,
+    W1-T2445's own subject. The queue-head line is a definition that excludes in-flight work —
+    `out.push("nothing dispatchable")` at `status-board.ts:2661`. The liveness rows are a sensor
+    read on the wrong platform, W1-T2450's subject. **A subtraction, a definition, a sensor and an
+    optional-chaining fallback share a SYMPTOM and no mechanism.** There is no common repair, and a
+    shard whose criteria spanned all four would be four tasks wearing one id.
+
+    **WHAT THE CLASS COSTS, WHICH IS THE PART WORTH RECORDING.** Each instance is individually
+    defensible; the aggregate teaches an operator to stop reading the panel. Both the operator and
+    the assistant trusted a wrong row over `ps` twice in one evening. That is the argument for the
+    discipline in the design, and it is NOT an argument for a mechanism that would police all four.
+
+    **CITED, NOT RE-FILED:** W1-T2450 owns the liveness rows, W1-T2445 owns the reaper's counts,
+    W1-T2397 owns the dispatch of a task with an open build. Nothing here re-opens any of them, and
+    nothing here removes a panel row or suppresses a `next action` line.
+  design: |
+    **THE FIX IS IN THE RENDERER AND NOWHERE ELSE.** A READY row whose draft is absent must say so
+    on its own line rather than printing two empty fields. The count stays as it is, the list stays
+    as it is, and the same `ready` array keeps feeding both — what changes is that a row with no
+    cached draft is legible as such instead of looking like a rendering failure.
+
+    **THE DISCIPLINE, PRICED HONESTLY AGAINST ALL FOUR.** A rendered count and its list should come
+    from one derivation, and where they cannot, the surface should name which one it is showing.
+    Applied to these four instances it would have caught **ZERO of them outright**:
+      - `rmd inbox` already satisfies it — one derivation, and it still misleads.
+      - the reaper's subtraction is a count with no list to reconcile against.
+      - the queue-head line is a count of one thing and a claim about another.
+      - the liveness rows are three independent sensors, not a count and a body.
+    **SAYING THAT PLAINLY IS THE POINT.** The discipline is worth writing down as a convention for
+    NEW surfaces; it is not a repair for any instance measured here, and proposing it as one would
+    be the manufactured common fix the scope note above refuses.
+
+    **WHAT MUST NOT CHANGE.** No panel row is removed. No `next action` line is suppressed. The
+    header's arithmetic is untouched, `readyCount` is untouched, and `state === "ready"` keeps
+    meaning exactly what it means today. A proposal with no cached draft stays READY — its
+    readiness is computed from its dependencies, never from whether a draft happens to be on disk,
+    and conflating the two would be a worse defect than the blank row.
+  acceptance:
+    - claim: "a ready proposal whose draft is not cached renders a line saying so instead of two empty fields"
+      proof: "unit test: test/inbox.test.ts"
+    - claim: "the header count still equals the number of rows the body emits"
+      proof: "unit test: test/inbox.test.ts"
+    - claim: "a ready proposal with a cached draft renders exactly as it does today"
+      proof: "unit test: test/inbox.test.ts"
+    - claim: "readiness is still computed from dependencies and never from whether a draft is on disk"
+      proof: "unit test: test/inbox.test.ts"
+    - claim: "no panel row is removed and no next-action line is suppressed"
+      proof: "unit test: test/inbox.test.ts"
+  note: |
+    RISK BAND IS RULE 19'S SPAN, SET UP FRONT. `files:` names one runtime module and the test that
+    already covers it, so `moduleIdFromPath` folds both to the single id `inbox` and the span is one
+    concern — which is what `risk: medium` supports. The test deliberately lives at
+    `test/inbox.test.ts` rather than a new file named after this defect: `subsystemsOf` reads a
+    test's basename as its own concern, so a differently-named suite would have read as a second one
+    and forced `risk: high` for a one-module change. It is deliberately NOT `high`: this
+    does not cross into the status board, the reaper or the daemon sensors, and widening it to reach
+    them is the four-tasks-one-id shape the rationale refuses.
+
+    THE COMMISSIONING HYPOTHESIS WAS TESTED AND FAILED. The brief expected a filtering divergence
+    and the renderer has none. That is recorded here so the next reader does not re-derive it, and
+    so nobody builds the fix the hypothesis implies.
+
+    THE DISCIPLINE IN THE DESIGN CATCHES NONE OF THE FOUR. It is written as a convention for new
+    surfaces, priced at zero against the measured instances, and must not be presented as their
+    remedy.
