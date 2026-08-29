@@ -184,3 +184,30 @@ test("W1-T2442: reviewGatePinPrecondition is not hardcoded UNSAFE — SAFE and U
   assert.equal(safe.verdict, "safe");
   assert.notEqual(unsafe.verdict, safe.verdict);
 });
+
+// THE SAFE ARM THAT ACTUALLY CARRIES AN INSTRUCTION — and the one diff-coverage caught untested.
+//
+// Both SAFE cases above pair a provisioned identity with an ALREADY-PINNED context, so
+// `unpinnedContexts` is empty and only the FALSE arm of the reason ternary runs. The TRUE arm —
+// provisioned identity, but a required context still unpinned — is the actionable case this whole
+// reader exists for: it is the one that names WHICH contexts may now be pinned. `diff-coverage`
+// flagged `src/lib/review.ts:4649` on this PR for exactly that gap, and a "safe" verdict whose
+// instruction half is untested would let the names it prints drift silently.
+test("W1-T2442: a provisioned identity with a still-unpinned context is SAFE and NAMES the contexts that may now be pinned", () => {
+  const snap = snapshot([
+    { context: "ci-gate", app_id: 15368 },
+    { context: "remudero-review", app_id: null },
+  ]);
+  const result = reviewGatePinPrecondition(snap, "provisioned");
+  assert.equal(result.verdict, "safe", "a provisioned identity is safe to pin against even while a context is unpinned");
+  assert.deepEqual(result.unpinnedContexts, ["remudero-review"], "the unpinned context is named, and the pinned one is not");
+  assert.equal(result.reviewerCredentialPresent, "present");
+  assert.match(result.reason, /may now be pinned to the app id/, "the SAFE-with-work reason carries the instruction, not just the verdict");
+  assert.match(result.reason, /remudero-review/, "and it names the context the operator has to act on");
+
+  // FALSIFIER FOR THE ARM ITSELF: the same identity with nothing left to pin must NOT render the
+  // instruction, or the two SAFE arms would be indistinguishable to a reader.
+  const nothingToDo = reviewGatePinPrecondition(snapshot([{ context: "ci-gate", app_id: 15368 }]), "provisioned");
+  assert.equal(nothingToDo.verdict, "safe");
+  assert.doesNotMatch(nothingToDo.reason, /may now be pinned to the app id/);
+});

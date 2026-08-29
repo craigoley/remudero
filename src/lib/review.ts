@@ -4565,6 +4565,14 @@ export function reviewerIdentityPosture(readEnvVar: (name: string) => string | u
     token = readEnvVar(REVIEWER_TOKEN_ENV);
     login = readEnvVar(REVIEWER_IDENTITY_ENV);
   } catch {
+    // W1-T2295 route (iv) — THE REASON, STATED, because the return value alone cannot carry it.
+    // A throwing `readEnvVar` (an unreadable environment, an injected seam that refuses) and a
+    // successful read that found nothing are DIFFERENT facts, and this function already renders
+    // them differently: the failed read is `"unknown"`, the successful empty read is `"dark"`.
+    // The distinction is real and deliberate; it is simply invisible to the ratchet's detector,
+    // which sees a bare string literal with no `reason:`/`ok:` key to inspect. Nothing is erased
+    // here — `"unknown"` can never be mistaken for `"provisioned"`, which is the whole point of
+    // the three-state split this function's own doc describes above.
     return "unknown";
   }
   const tokenSet = typeof token === "string" && token.trim().length > 0;
