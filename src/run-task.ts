@@ -21943,25 +21943,51 @@ function realUid(): number {
   return typeof process.getuid === "function" ? process.getuid() : 0;
 }
 
+/** True iff `e` is the ENOENT `execFileSync` throws when `launchctl` ITSELF cannot be found —
+ *  every non-macOS host, this container included (W1-T2450 recon: `command -v launchctl`
+ *  measured absent here, `uname -s` Linux). Distinct from `execFileSync` throwing because
+ *  `launchctl` ran and exited non-zero (a real "not loaded"/"not found" answer, which carries
+ *  no `.code === "ENOENT"`) — the ONE bit that tells "I have no sensor here" apart from "the
+ *  answer is no" (recon rationale Q1). */
+function isLaunchctlAbsent(e: unknown): boolean {
+  return typeof e === "object" && e !== null && (e as NodeJS.ErrnoException).code === "ENOENT";
+}
+
 /**
  * `launchctl print gui/<uid>/<label>` — the SAME query both `rmd down`'s "already down" check
  * and `rmd up`'s "already up" check read, so the two verbs can never disagree about whether a
  * service is loaded. A non-bootstrapped label exits non-zero ("Could not find service..."),
  * which `execFileSync` turns into a throw — caught here as `loaded: false`, never a crash.
+ * Deliberately drops the `sensed` bit {@link queryLaunchdServiceSensed} carries: `rmd down`/
+ * `rmd up` treat "no launchd here" and "not loaded" identically on purpose (idempotent
+ * unload-when-absent is the right degrade for THEM) — only the status panel must not fold the
+ * two together (W1-T2450), so it calls the `*Sensed` sibling below instead.
  */
 export function queryLaunchdService(
   label: string,
   uid: number,
   exec: (cmd: string, args: string[]) => string = defaultLifecycleExec,
 ): LaunchdServiceState {
+  const { sensed: _sensed, ...state } = queryLaunchdServiceSensed(label, uid, exec);
+  return state;
+}
+
+/** Sensor-aware sibling of {@link queryLaunchdService}, for the status panel's `queryService`
+ *  (W1-T2450) — the one caller that must distinguish "launchctl itself is unavailable" from "a
+ *  bootstrapped-but-unloaded/absent service". Same query, same catch, ONE extra bit. */
+export function queryLaunchdServiceSensed(
+  label: string,
+  uid: number,
+  exec: (cmd: string, args: string[]) => string = defaultLifecycleExec,
+): LaunchdServiceState & { sensed: boolean } {
   let out: string;
   try {
     out = exec("launchctl", ["print", launchctlGuiTarget(uid, label)]);
-  } catch {
-    return { loaded: false, pid: null };
+  } catch (e) {
+    return { loaded: false, pid: null, sensed: !isLaunchctlAbsent(e) };
   }
   const m = LAUNCHCTL_PID_RE.exec(out);
-  return { loaded: true, pid: m ? Number(m[1]) : null };
+  return { loaded: true, pid: m ? Number(m[1]) : null, sensed: true };
 }
 
 /** `launchctl list <label>`'s one-line, tab-separated `PID\tStatus\tLabel` — the SAME fact the
@@ -21984,18 +22010,29 @@ export function queryLaunchdListStatus(
   label: string,
   exec: (cmd: string, args: string[]) => string = defaultLifecycleExec,
 ): LaunchdListStatus {
+  const { sensed: _sensed, ...status } = queryLaunchdListStatusSensed(label, exec);
+  return status;
+}
+
+/** Sensor-aware sibling of {@link queryLaunchdListStatus} — see
+ *  {@link queryLaunchdServiceSensed}'s doc for why the status panel needs this and `rmd down`/
+ *  `rmd up` (which have no caller for this function at all) do not. */
+export function queryLaunchdListStatusSensed(
+  label: string,
+  exec: (cmd: string, args: string[]) => string = defaultLifecycleExec,
+): LaunchdListStatus & { sensed: boolean } {
   let out: string;
   try {
     out = exec("launchctl", ["list", label]);
-  } catch {
-    return { pid: null, lastExitCode: undefined };
+  } catch (e) {
+    return { pid: null, lastExitCode: undefined, sensed: !isLaunchctlAbsent(e) };
   }
   const line = out.split("\n").find((l) => LAUNCHCTL_LIST_LINE_RE.test(l.trim()));
   const m = line ? LAUNCHCTL_LIST_LINE_RE.exec(line.trim()) : null;
-  if (!m) return { pid: null, lastExitCode: undefined };
+  if (!m) return { pid: null, lastExitCode: undefined, sensed: true };
   const pid = m[1] === "-" ? null : Number(m[1]);
   const lastExitCode = Number(m[2]);
-  return { pid, lastExitCode: Number.isFinite(lastExitCode) ? lastExitCode : undefined };
+  return { pid, lastExitCode: Number.isFinite(lastExitCode) ? lastExitCode : undefined, sensed: true };
 }
 
 /** `launchctl bootstrap gui/<uid> <plistPath>` — loads a unit that is not yet loaded. */
@@ -22527,7 +22564,7 @@ export async function upCommand(rest: string[], deps: UpDeps = {}): Promise<numb
  *  launchd query, the same "swap the edges, keep the middle real" shape as {@link DownDeps}. */
 export interface StatusDeps {
   loadConfig?: () => Config;
-  queryService?: (service: ServiceName) => { running: boolean; pid: number | null; lastExitCode?: number };
+  queryService?: (service: ServiceName) => { running: boolean; pid: number | null; lastExitCode?: number; sensed?: boolean };
   /** The deploy-supervisor's installed `StartInterval`, seconds — defaults to reading the
    *  actual unit off disk (`launchdPlistPath(SUPERVISOR_LABEL)`); overridable so a test never
    *  touches the real filesystem. */
@@ -22814,17 +22851,26 @@ export async function statusCommand(rest: string[], deps: StatusDeps = {}): Prom
   const uid = realUid();
   const queryService =
     deps.queryService ??
-    ((service: ServiceName): { running: boolean; pid: number | null; lastExitCode?: number } => {
+    ((service: ServiceName): { running: boolean; pid: number | null; lastExitCode?: number; sensed: boolean } => {
       const label = service === "daemon" ? DAEMON_LABEL : service === "serve" ? SERVE_LABEL : SUPERVISOR_LABEL;
-      const state = queryLaunchdService(label, uid);
+      // W1-T2450: the SENSOR-AWARE query, not `queryLaunchdService` — this is the ONE caller
+      // that must not fold "launchctl itself is unavailable" (every non-launchd host) into the
+      // same `pid: null` a genuinely unloaded/stopped service returns (recon rationale Q1: the
+      // panel "cannot tell 'I HAVE NO SENSOR HERE' from 'THE ANSWER IS NO'").
+      const state = queryLaunchdServiceSensed(label, uid);
       // "running" means a live pid, not merely "loaded" — a bootstrapped-but-not-spawned job
       // answers "is it running" with no, exactly like an unloaded one.
-      if (service !== "deploy-supervisor") return { running: state.pid !== null, pid: state.pid };
+      if (service !== "deploy-supervisor") return { running: state.pid !== null, pid: state.pid, sensed: state.sensed };
       // deploy-supervisor is an interval job: its own `pid`/`loaded` mean nothing between ticks
       // (see status-board.ts's ServiceKind) — `launchctl list`'s Status column is the fact that
       // actually carries its health (the W1-T301 fix).
-      const listStatus = queryLaunchdListStatus(label);
-      return { running: listStatus.pid !== null, pid: listStatus.pid, lastExitCode: listStatus.lastExitCode };
+      const listStatus = queryLaunchdListStatusSensed(label);
+      return {
+        running: listStatus.pid !== null,
+        pid: listStatus.pid,
+        lastExitCode: listStatus.lastExitCode,
+        sensed: listStatus.sensed,
+      };
     });
   const resolveSupervisorIntervalS =
     deps.resolveSupervisorIntervalS ??

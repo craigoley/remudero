@@ -59,6 +59,7 @@ import {
   DEFAULT_CRASHLOOP_WINDOW,
   type CrashLoopVerdict,
   type CrashLoopWindow,
+  type DaemonBootTimestamp,
 } from "./daemon.js";
 import { COST_ANOMALY_STEP } from "./cost-anomaly.js";
 import { IMAGE_DRIFT_STEP } from "./image-drift.js";
@@ -152,6 +153,18 @@ export interface ServiceLivenessRow {
   service: ServiceName;
   running: boolean;
   pid: number | null;
+  /**
+   * False iff the LAUNCHD SENSOR ITSELF could not be asked at all — `launchctl` absent
+   * (ENOENT — every non-macOS host, W1-T2450) — as opposed to launchctl running and giving a
+   * real "not loaded"/"no tick" answer. Defaults to `true` (the old, sensor-implicit
+   * behaviour) when the caller's `queryService` doesn't report it, so every pre-existing
+   * caller keeps reading exactly as before. `false` is the ONE bit `running: false` alone
+   * could never carry: "I have no sensor here" vs "the answer is no" (recon rationale Q1) —
+   * see {@link livenessState}, which reads it BEFORE falling into the resident/interval
+   * running-vs-stopped logic below, so an absent sensor renders `"unknown"`, never a
+   * confidently wrong `"stopped"`.
+   */
+  sensed?: boolean;
   bootedAt?: string;
   bootedAgeMs?: number;
   headSha?: string;
@@ -172,12 +185,15 @@ export interface ServiceLivenessRow {
   overdueThresholdMs?: number;
 }
 
-/** The THREE liveness states a service can be in, replacing the old binary running/not-running
+/** The liveness states a service can be in, replacing the old binary running/not-running
  *  render that made a healthy idle-between-ticks supervisor and a genuinely dead one print the
- *  identical "not running" line (the bug this type exists to retire). Resident services only
- *  ever report `"running"`/`"stopped"`; interval services add `"idle"` (mid-tick or fresh since
- *  its last tick) and `"overdue"` (no tick recently enough, or its last exit was nonzero). */
-export type LivenessState = "running" | "stopped" | "idle" | "overdue";
+ *  identical "not running" line (the bug W1-T301 exists to retire). Resident services only
+ *  ever report `"running"`/`"stopped"`/`"unknown"`; interval services add `"idle"` (mid-tick or
+ *  fresh since its last tick) and `"overdue"` (no tick recently enough, or its last exit was
+ *  nonzero). `"unknown"` (W1-T2450) is neither: it means the launchd sensor itself could not be
+ *  asked (no `launchctl` on this host) — a stated "I don't know", never a fabricated `"stopped"`
+ *  that happens to share `running: false` with a real one. */
+export type LivenessState = "running" | "stopped" | "idle" | "overdue" | "unknown";
 
 /** Fallback for {@link ServiceLivenessRow.overdueThresholdMs} when the installed unit's own
  *  `StartInterval` could not be read — 3x the supervisor plist's own default pace ({@link
@@ -191,6 +207,12 @@ export const SUPERVISOR_TICK_OVERDUE_MS = DEFAULT_SUPERVISOR_INTERVAL_S * 3 * 10
  *  the identical facts. */
 export function livenessState(row: ServiceLivenessRow): LivenessState {
   if (row.running) return "running";
+  // W1-T2450: an absent sensor is read BEFORE the resident/interval split below — it applies
+  // to both kinds identically (a daemon row and a deploy-supervisor row share the same
+  // launchd sensor, recon rationale Q1's ROW 3 "inherits row 1's sensor"), and it must win
+  // over every downstream inference (lastExitCode/tickAgeMs are equally untrustworthy when
+  // the sensor that would have populated them never answered).
+  if (row.sensed === false) return "unknown";
   if (serviceKind(row.service) === "resident") return "stopped";
   // interval: a nonzero last exit is a real failure regardless of how fresh it was, and no
   // tick ever observed reads as overdue too — never a healthy-looking "idle" for a supervisor
@@ -720,12 +742,15 @@ export interface StatusBoardDeps {
   /**
    * Per-service running/pid(+ for `"deploy-supervisor"`, its last completed run's exit code).
    * `launchctl print`/`launchctl list` live at the CLI layer (run-task.ts's own
-   * `queryLaunchdService` + `DAEMON_LABEL`/`SERVE_LABEL`/`SUPERVISOR_LABEL`) — this module never
-   * shells to launchd itself (Rule 16: lib/ stays a thin, injectable seam over that). Required;
-   * no default exists inside lib/. `lastExitCode` is `undefined` when unknown (never bootstrapped,
-   * or the query failed) — the caller must not fabricate a healthy-looking `0`.
+   * `queryLaunchdServiceSensed`/`queryLaunchdListStatusSensed` + `DAEMON_LABEL`/`SERVE_LABEL`/
+   * `SUPERVISOR_LABEL`) — this module never shells to launchd itself (Rule 16: lib/ stays a thin,
+   * injectable seam over that). Required; no default exists inside lib/. `lastExitCode` is
+   * `undefined` when unknown (never bootstrapped, or the query failed) — the caller must not
+   * fabricate a healthy-looking `0`. `sensed` (W1-T2450) is `false` iff `launchctl` itself could
+   * not be invoked at all (ENOENT — no launchd on this host); omitted/`true` reads exactly as
+   * before this field existed — see {@link ServiceLivenessRow.sensed}.
    */
-  queryService: (service: ServiceName) => { running: boolean; pid: number | null; lastExitCode?: number };
+  queryService: (service: ServiceName) => { running: boolean; pid: number | null; lastExitCode?: number; sensed?: boolean };
   /** The checkout to compare against `origin/main` (the daemon's own repoRoot). */
   repoDir: string;
   /**
@@ -934,27 +959,53 @@ function defaultReadDispatchClaims(repoDir: string): DispatchClaimsRead {
 interface BootInfo {
   ts?: string;
   headSha?: string;
-  /** Every `daemon.boot` line's own `ts`, oldest-or-newest order irrelevant — {@link
-   *  detectDaemonCrashLoop} sorts internally. Feeds the crash-loop check without a second scan. */
-  allTimestamps: string[];
+  /** Every `daemon.boot` line, oldest-or-newest order irrelevant ({@link detectDaemonCrashLoop}
+   *  sorts internally), each carrying WHY THE BOOT BEFORE IT ended when the ledger says so
+   *  (W1-T2450: recon rationale Q3 — see {@link DaemonBootTimestamp}). A boot immediately
+   *  preceded by a `daemon.summary` line whose `stopReason` is `"stale"` was a FRESHNESS
+   *  restart (`daemon_selfrestart_for_freshness`/W1-T126's `exit 75`), not a crash, and is
+   *  tagged `priorExitReason: "freshness"` so the crash-loop check can tell six routine
+   *  restarts from six real crashes without discarding either signal. */
+  allBoots: DaemonBootTimestamp[];
 }
 
 function deriveDaemonBoots(lines: ReadonlyArray<Record<string, unknown>>): BootInfo {
   let bestTs: string | undefined;
   let bestParsed = -Infinity;
   let bestHeadSha: string | undefined;
-  const allTimestamps: string[] = [];
+  // W1-T2450: every `daemon.summary` line's own `ts`/`stopReason`, gathered in the SAME pass —
+  // paired against each boot BELOW by nearest-preceding timestamp, never by input line order
+  // (a rotation union is not guaranteed chronological), since exactly one summary (at most)
+  // ever precedes any one boot: a daemon process logs one `daemon.boot` at start and, on the
+  // ONE path that restarts itself (`return summary("stale", ...)` in the scheduler loop),
+  // exactly one `daemon.summary` right before it exits.
+  const summaries: { ms: number; stopReason?: string }[] = [];
+  const bootLines: { ts: string; ms: number; headSha?: string }[] = [];
   for (const line of lines) {
-    if (line.step !== "daemon.boot") continue;
     const ts = typeof line.ts === "string" ? line.ts : undefined;
-    if (ts) allTimestamps.push(ts);
     const parsed = ts ? Date.parse(ts) : NaN;
+    if (line.step === "daemon.summary") {
+      if (Number.isFinite(parsed)) summaries.push({ ms: parsed, stopReason: typeof line.stopReason === "string" ? line.stopReason : undefined });
+      continue;
+    }
+    if (line.step !== "daemon.boot") continue;
+    if (ts) bootLines.push({ ts, ms: parsed, headSha: typeof line.head_sha === "string" ? line.head_sha : undefined });
     if (!Number.isFinite(parsed) || parsed < bestParsed) continue;
     bestParsed = parsed;
     bestTs = ts;
     bestHeadSha = typeof line.head_sha === "string" ? line.head_sha : undefined;
   }
-  return { ts: bestTs, headSha: bestHeadSha, allTimestamps };
+  summaries.sort((a, b) => a.ms - b.ms);
+  const allBoots: DaemonBootTimestamp[] = bootLines.map((boot) => {
+    if (!Number.isFinite(boot.ms)) return { ts: boot.ts };
+    let nearest: { ms: number; stopReason?: string } | undefined;
+    for (const s of summaries) {
+      if (s.ms >= boot.ms) break; // summaries is ascending: the first non-earlier one ends the search
+      nearest = s;
+    }
+    return nearest?.stopReason === "stale" ? { ts: boot.ts, priorExitReason: "freshness" } : { ts: boot.ts };
+  });
+  return { ts: bestTs, headSha: bestHeadSha, allBoots };
 }
 
 /**
@@ -1362,7 +1413,23 @@ const LIVENESS_NEXT_ACTIONS: readonly NextActionRule<LivenessCtx>[] = [
     },
   },
   {
-    applies: (ctx) => !ctx.services.find((s) => s.service === "daemon")?.running,
+    // W1-T2450: a daemon row reading `"unknown"` (no launchd sensor on this host — see
+    // `livenessState`) must NEVER be advised on as a `"stopped"` one — `rmd up` is nonsense
+    // advice for a process this panel never actually asked about. Checked BEFORE the
+    // `"stopped"` rule below so the unknown case wins.
+    applies: (ctx) => {
+      const row = ctx.services.find((s) => s.service === "daemon");
+      return row !== undefined && livenessState(row) === "unknown";
+    },
+    action: () =>
+      "no launchd sensor on this host (`launchctl` unavailable) — daemon/deploy-supervisor " +
+      "liveness cannot be read here; confirm with `ps` instead",
+  },
+  {
+    applies: (ctx) => {
+      const row = ctx.services.find((s) => s.service === "daemon");
+      return row !== undefined && livenessState(row) === "stopped";
+    },
     action: () => "the daemon is not running — `rmd up` (or `rmd daemon ...`) to resume the fleet",
   },
   {
@@ -2326,7 +2393,10 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
   // ── LIVENESS ──
   const services: ServiceLivenessRow[] = (["daemon", "serve", "deploy-supervisor"] as const).map((service) => {
     const q = deps.queryService(service);
-    const row: ServiceLivenessRow = { service, running: q.running, pid: q.pid };
+    // W1-T2450: `sensed` defaults to `true` when the caller doesn't report it — the old,
+    // sensor-implicit behaviour — so every test/deps bundle that predates this field keeps
+    // reading exactly as it always has.
+    const row: ServiceLivenessRow = { service, running: q.running, pid: q.pid, sensed: q.sensed ?? true };
     if (service === "daemon") {
       row.bootedAt = boots.ts;
       const parsed = boots.ts ? Date.parse(boots.ts) : NaN;
@@ -2360,7 +2430,7 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
     headVsOriginMain = sameCommit(boots.headSha, originSha) ? { status: "fresh" } : { status: "stale", headSha: boots.headSha, originSha };
   }
 
-  const crashLoop = detectDaemonCrashLoop(boots.allTimestamps, crashLoopWindow);
+  const crashLoop = detectDaemonCrashLoop(boots.allBoots, crashLoopWindow);
 
   const livenessCtx: LivenessCtx = { services, headVsOriginMain, crashLoop };
   const liveness: LivenessSection = {
@@ -2486,6 +2556,10 @@ function renderLivenessState(s: ServiceLivenessRow): string {
       return `running (pid ${s.pid ?? "unknown"})`;
     case "stopped":
       return "not running";
+    case "unknown":
+      // W1-T2450: names WHICH absence this is — "no sensor" here, vs the interval branch's own
+      // "no tick observed yet" below, which only ever fires once a sensor DID answer.
+      return "unknown — no launchd sensor on this host (`launchctl` unavailable)";
     case "idle":
       return `idle — last tick ${s.tickAt ? `${formatAgeMs(s.tickAgeMs)} ago` : "unknown"} (${s.tickStep ?? "unknown"})`;
     case "overdue":

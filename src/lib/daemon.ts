@@ -1831,21 +1831,47 @@ export interface CrashLoopVerdict {
 }
 
 /**
+ * One `daemon.boot` timestamp, optionally carrying WHY THE BOOT IMMEDIATELY
+ * BEFORE IT ended (never why this one did — a boot cannot know its own
+ * future). W1-T2450 (recon rationale Q3): before this field existed,
+ * {@link detectDaemonCrashLoop}'s entire input was a bare timestamp array, so
+ * a freshness restart (a deliberate `exit 75` self-relaunch onto a newer
+ * `origin/main` — W1-T126, `daemon_selfrestart_for_freshness`) and a real
+ * crash were the identical event to it: six routine freshness restarts are
+ * six boots, and six boots breach a `maxBoots: 5` window exactly like six
+ * crashes would. A bare ISO string is still accepted everywhere this type
+ * is — it reads as `{ ts }` with no reason, and an absent/`"unknown"` reason
+ * counts toward the window exactly as it always has (never a blanket
+ * amnesty for an unlabeled boot); only an EXPLICIT `"freshness"` is ever
+ * excluded.
+ */
+export interface DaemonBootTimestamp {
+  ts: string;
+  priorExitReason?: "freshness" | "unknown";
+}
+
+/**
  * Find the densest `windowMs`-wide run of boots and compare its size against
  * `maxBoots`. Unparseable timestamps are dropped rather than thrown on — the
  * ledger's own torn-line discipline (ledger.ts) — so one malformed line never
  * takes the invariant itself down. Detects the SHAPE only: it does not care
  * WHY a boot happened, so the identical function catches a headroom-exit
  * loop, an escalate-throw loop, and whatever the next uncaught-throw cause
- * turns out to be. O(n²) in the boot count, which is fine — callers pass a
- * bounded recent tail of the ledger, never its full history.
+ * turns out to be — EXCEPT a boot explicitly labeled `priorExitReason:
+ * "freshness"` (see {@link DaemonBootTimestamp}), which this now excludes
+ * from both the density count and the returned evidence: it is the daemon
+ * restarting itself on purpose, not a symptom. O(n²) in the boot count,
+ * which is fine — callers pass a bounded recent tail of the ledger, never
+ * its full history.
  */
 export function detectDaemonCrashLoop(
-  bootTimestamps: readonly string[],
+  bootTimestamps: ReadonlyArray<string | DaemonBootTimestamp>,
   window: CrashLoopWindow = DEFAULT_CRASHLOOP_WINDOW,
 ): CrashLoopVerdict {
-  const parsed = bootTimestamps
-    .map((raw) => ({ raw, ms: Date.parse(raw) }))
+  const records = bootTimestamps.map((b) => (typeof b === "string" ? { ts: b } : b));
+  const parsed = records
+    .filter((r) => r.priorExitReason !== "freshness")
+    .map((r) => ({ raw: r.ts, ms: Date.parse(r.ts) }))
     .filter((p) => Number.isFinite(p.ms))
     .sort((a, b) => a.ms - b.ms);
 
