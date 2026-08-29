@@ -1,0 +1,114 @@
+- id: W1-T2452
+  title: "THE FIX-RUNG STRIKE CAP DOES NOT BIND CUMULATIVELY — the sweep gates on the ledger's running count but dispatches a rung with a FRESH FULL cap, so a dispatch at cap-1 spends cap MORE strikes (observed: 'fix strikes exhausted (3/2)' on #3043); the dispatch must carry the REMAINING allowance against the ceiling actually in force, and every rendered ratio must name that same ceiling"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "OBSERVED 2026-08-27, read verbatim off PR #3043's own sweep.disposed row and carried into
+    plan/feedback/fb-repair-blocked-ambiguous-2956.yaml:27-29: 'PR #3043 at 3283dcd, 2026-08-27T05:50:30.678Z:
+    fix strikes exhausted (3/2) — ci failed on 3283dcd; coverage-ratchet failed on 3283dcd — escalating.'
+    THREE STRIKES AGAINST A CAP OF TWO. The sibling PR in the same report reads the healthy '(2/2)' (#3039,
+    :22-25), so this is not how the string always renders — one extra fix worker ran past a guard whose whole
+    job is to stop it.
+    MECHANISM, VERIFIED AT SOURCE (line anchors are a 2026-08-27 read; drift expected, re-verify before
+    editing). The sweep's exhaustion guard is CUMULATIVE — row 4's `when` is
+    `pr.priorStrikes >= policy.strikeCap` (src/lib/sweep.ts:2905) over a running ledger-derived count
+    (`priorStrikesFor`, src/run-task.ts:22501, fed into the view at :22730). The rung it dispatches is NOT.
+    `dispatchFix` computes `const strikeCap = pr.pendingAnswer ? strikeCapForAnswer(...) : fixStrikeCap(config)`
+    (src/run-task.ts:23869-23873) and passes it straight through (:23886) — the FULL cap, never reduced by what
+    the ledger already spent — and `runFixRung` then loops `while (review.state !== \"success\" && strikes <
+    opts.strikeCap)` from `strikes = 0` (src/run-task.ts:6690). sweep.ts states the premise itself at :2826-2828:
+    `runFixRung always counts a NEW call from 0`. So the effective cumulative ceiling is not `cap`; it is
+    `cap + (cap - 1)` in the worst case — 3 when the cap is 2, and wider as the cap rises.
+    THE REACHABLE ROUTE TO THE OBSERVED 3, stated concretely so the implementer can seed it: dispatch #1 at
+    priorStrikes 0 spends ONE strike and returns early (any of the rung's own escape/guard paths does this —
+    the W1-T168 false-block escape at :7613, the empty-review-evidence guard at :7192, the
+    zero-enumerable-failures guard at :6891 — each fires only once `strikes > 0` WITHIN an invocation and resets
+    on the next one, which is the same per-invocation-vs-cumulative disagreement seen from another side). The
+    ledger now reads 1. The next sweep sees 1 < 2, so row 5/6 matches and dispatches a rung with a fresh budget
+    of 2. Ledger 3. The sweep after that sees 3 >= 2 and escalates: 'fix strikes exhausted (3/2)'.
+    THE INTENDED SEMANTICS ARE CUMULATIVE, so this is a defect and not a re-decision. `strikeCapForAnswer`'s own
+    doc (src/lib/sweep.ts:3924-3930) reasons explicitly about `the cumulative ledger ceiling an exhausted-but-
+    answered PR is allowed to reach`; the answered row checks `pr.priorStrikes < policy.strikeCap +
+    strikeCapForAnswer(...)` (:2831); and the shipped tests pin '(2/2)' with the comment 'the cap itself (2) is
+    untouched' (test/sweep.test.ts:1481, :1610). Nothing in the design contemplates 3.
+    THE SECOND, HONEST READING — and the implementer must settle it from the ledger rather than assume this
+    task's. An operator answer legitimately extends the ceiling to `cap + strikeCapForAnswer` (4, by default),
+    while row 4 renders its ratio against the BASE cap (`${pr.priorStrikes}/${policy.strikeCap}`, :2909-2912).
+    So a '3/2' could ALSO be an answered PR whose denominator is simply the wrong number. Against that reading:
+    the answered row (3) PRECEDES row 4 and would have re-dispatched at 3 < 4 rather than escalating, so an
+    escalation at 3/2 implies no live answer. EITHER WAY THE FIX IS THE SAME INVARIANT — the ceiling actually in
+    force must govern both the allowance dispatched and the ratio rendered — which is why this task fixes both
+    and requires the live reading to be reported, not guessed.
+    COST: one unbudgeted fix worker per occurrence, on the autonomous spend loop, invisible except as a
+    denominator that does not match. This is the §9 tripwire doctrine's own failure shape: a limit set near the
+    work that does not actually limit it."
+  design: |
+    ONE CONCEPT: THE CEILING ACTUALLY IN FORCE. For a PR with no live operator answer that is
+    `policy.strikeCap`; with one it is `policy.strikeCap + strikeCapForAnswer(policy.strikeCap, policy.clarify)`
+    — the SAME extended ceiling the answered disposition row already checks (src/lib/sweep.ts:2831), never a
+    second, independently-computed number that could diverge from the routing decision.
+    (i) DISPATCH THE REMAINDER, NOT A FRESH BUDGET. At the dispatch site (src/run-task.ts:23869-23886) the
+    strike budget handed to `runFixRung` becomes `ceiling - pr.priorStrikes`, so a rung started at 1 of 2 can
+    spend exactly 1 more and the ledger's cumulative count for one PR can never exceed the ceiling. The answered
+    path keeps its extra allowance in full — it is computed against the EXTENDED ceiling, so W1-T78's re-arm is
+    preserved rather than quietly narrowed.
+    (ii) FAIL DIRECTION, AND IT IS THE LOAD-BEARING HALF. A remainder of zero or less must NEVER dispatch a
+    zero-budget rung. That would convert an overspend into a silent no-op that strands every fixable PR — the
+    strictly worse failure, and the one this codebase has paid for repeatedly (W1-T170's stall class, W1-T99's
+    'one failed action killed the pass'). Row 4 already routes `priorStrikes >= cap` to escalate, so a
+    non-positive remainder at the dispatch site means the rows disagree: take the exhaustion/escalate path with
+    the ceiling named, and ledger the disagreement rather than swallowing it.
+    (iii) EVERY RENDERED RATIO NAMES THE CEILING THAT GOVERNED. Row 4's exhaustion reason (:2909-2912) renders
+    against the ceiling in force, so an answered PR's ratio stops reading as an impossible overshoot; the
+    blocked-fixable reasons (:2925, :2945, :2948) name the allowance the dispatch actually carries instead of
+    announcing `strike N/cap` while handing the rung a budget of `cap`. This is the W1-T186 named-reason
+    doctrine applied to the number rather than the check: a ratio whose denominator is not the ceiling that
+    governed is an uninvestigable string, which is exactly how this defect stayed invisible.
+    (iv) REPORT WHICH READING WAS TRUE. The PR body states, from #3043's own ledger rows, whether the observed
+    3/2 was the non-answered overshoot (i) fixes or the wrong-denominator rendering (iii) fixes. Both are fixed
+    regardless; the report exists so the next reader is not left with this task's inference in place of evidence.
+    (v) NOT IN SCOPE, deliberately. The coverage-ratchet failure named in the same escalation line is ALREADY
+    DECIDED — W1-T220 owns its unfalsifiable-red/nondeterminism and W1-T255 owns the bounded whole-command retry;
+    nothing here re-litigates them. #3039's 'log NOT read: the log fetch was attempted and FAILED' from the same
+    report is a DIFFERENT defect on a DIFFERENT PR (a ci-log mode dispatched with no log) and is deliberately
+    left unfiled here rather than folded in (Rule 19). The strike/infra-fault accounting question — whether a
+    strike may be debited where no worker ran — is W1-T127's remit and is untouched: this task changes only HOW
+    MANY strikes may be spent, never WHICH events count as one.
+  acceptance:
+    - claim: "the cumulative ceiling BINDS — a PR whose ledger already carries N strikes dispatches a rung whose budget is the REMAINING allowance against the ceiling in force, so one PR's cumulative ledger strike count can never exceed that ceiling; the observed 'fix strikes exhausted (3/2)' shape is unreachable against this dispatch"
+      proof: "unit test: test/strike-cap-cumulative.test.ts"
+    - claim: "a non-positive remainder NEVER dispatches a zero-budget rung — it takes the exhaustion path with the ceiling named and the row disagreement ledgered, so closing an overspend can never strand a fixable PR in a silent no-op"
+      proof: "unit test: test/strike-cap-cumulative.test.ts"
+    - claim: "every rendered ratio names the ceiling that actually governed — the exhaustion reason renders against the extended ceiling when an operator answer is live, and a blocked-fixable reason names the allowance the dispatch actually carries rather than announcing one strike while handing the rung a full cap"
+      proof: "unit test: test/strike-cap-cumulative.test.ts"
+    - claim: "W1-T78's answered-clarification re-arm is preserved exactly, not narrowed — an answered PR still receives its full extra allowance, computed against the extended ceiling the answered disposition row already checks, and the shipped sweep behaviour is unchanged"
+      proof: "unit test: test/sweep.test.ts"
+  risk: high
+  origin: feedback#fb-repair-blocked-ambiguous-2956
+  plan_refs: ["§3", "§9"]
+  files: [src/run-task.ts, src/lib/sweep.ts, test/strike-cap-cumulative.test.ts]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-08-27 while grounding the board-review proposal board-review:escalation:#3043. EVIDENCE
+    LIMIT, STATED RATHER THAN HIDDEN: the '3/2' string is read verbatim off plan/feedback/
+    fb-repair-blocked-ambiguous-2956.yaml, which itself records that each line is 'read verbatim off each PR's
+    own sweep.disposed ledger row, never invented'. The MECHANISM was verified at source this session
+    (run-task.ts:23869-23886/:6690, sweep.ts:2905/:2826-2828/:2831). The live ledger for #3043 was NOT replayed
+    — no shell was available — so the reachable-route paragraph in the rationale is a source-grounded inference,
+    and design (iv) exists precisely to replace it with evidence.
+    depends_on IS DELIBERATELY EMPTY. The real prerequisites — the fix rung (W1-T76) and the sweep reconciler
+    (W1-T77) — are shipped in code and reachable at the line anchors cited above, while their plan records are
+    still `status: queued`; a hard edge onto either would strand an active spend leak behind a record that may
+    never be credited. This is the same judgement W1-T177 and W1-T128 recorded for the same reason: sequencing by
+    note, not by a gate that cannot resolve.
+    risk:high on BOTH axes, and the sizing one is the lesser. The files: span (run-task + sweep + the new test)
+    trips the §5C sizing rule below high, and this is genuinely atomic coupling — the dispatched allowance and
+    the rendered ratio are the same number in two modules, so a split yields one task announcing a budget it
+    does not set and another setting a budget it does not announce, neither independently testable (the
+    W1-T240/W1-T250/W1-T253 exit, recorded on the merits). Independently, the honest reading supports high on
+    its own: this changes what the unattended spend loop is permitted to spend, and the dangerous direction is
+    NOT the overspend it closes but a remainder computed one off, which would starve the fix rung and strand
+    every fixable PR. The second acceptance criterion is that guard and is load-bearing, not defensive."
