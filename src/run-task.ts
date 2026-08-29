@@ -17115,23 +17115,37 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
  *  - `unhandledEscalations` from the SAME `projectPlan` projection every other plan reader
  *    derives from (`StatusProjection.needsHuman`), joined to the PR by `prNumber`. A projection
  *    that could not be read yields zero, never a fabricated escalation.
+ *  - `escalationTitle`/`escalationIssueUrl`/`escalationUnverified` (W1-T2453) from the SAME
+ *    projection entry `unhandledEscalations` above already reads — `escalationsByPrNumber` carries
+ *    them alongside the boolean, so naming an escalation costs zero extra reads: the fields were
+ *    already in hand one line before this mapper, per this task's own rationale.
  */
+export interface BoardItemEscalationInfo {
+  title?: string;
+  issueUrl?: string;
+  unverified?: true;
+}
+
 export function boardItemsFromOpenPrs(
   prs: readonly OpenPrRest[],
   now: Date,
-  needsHumanByPrNumber: ReadonlySet<number> = new Set(),
+  escalationsByPrNumber: ReadonlyMap<number, BoardItemEscalationInfo> = new Map(),
 ): BoardItem[] {
   return prs.map((pr) => {
     const openedMs = pr.createdAt ? Date.parse(pr.createdAt) : Number.NaN;
     const ageHours = Number.isNaN(openedMs) ? 0 : Math.max(0, (now.getTime() - openedMs) / 3_600_000);
     const red = (pr.statusCheckRollup ?? []).filter((e) => e.conclusion === "FAILURE" || e.conclusion === "TIMED_OUT").length;
+    const escalation = escalationsByPrNumber.get(pr.number);
     return {
       id: `#${pr.number}`,
       isDraft: pr.isDraft === true,
       status: "open" as const,
       ageHours,
       redCheckCount: red,
-      unhandledEscalations: needsHumanByPrNumber.has(pr.number) ? 1 : 0,
+      unhandledEscalations: escalation ? 1 : 0,
+      ...(escalation?.title !== undefined ? { escalationTitle: escalation.title } : {}),
+      ...(escalation?.issueUrl !== undefined ? { escalationIssueUrl: escalation.issueUrl } : {}),
+      ...(escalation?.unverified ? { escalationUnverified: true as const } : {}),
     };
   });
 }
@@ -17165,7 +17179,7 @@ export function defaultBoardReviewItems(config: Config, io: BoardReviewItemsIo =
   try {
     const { owner, repo } = (io.resolveOwnerRepo ?? resolveOwnerRepo)();
     const prs = (io.fetchOpenPrs ?? ((o: string, r: string) => fetchOpenPrsRest(o, r, ghJson)))(owner, repo);
-    let needsHuman = new Set<number>();
+    let escalations = new Map<number, BoardItemEscalationInfo>();
     try {
       const plan = (io.loadPlan ?? loadPlan)(join(repoRoot, "plan", "tasks.yaml"));
       const proj = (io.projectPlan ?? projectPlan)(
@@ -17173,12 +17187,22 @@ export function defaultBoardReviewItems(config: Config, io: BoardReviewItemsIo =
         { ledgerPath: ledgerPathFor(config), github: buildBatchedGithub(owner, repo) },
         join(config.root, "state", "status.json"),
       );
-      needsHuman = new Set([...proj.values()].filter((p) => p.needsHuman && p.prNumber !== undefined).map((p) => p.prNumber!));
+      // W1-T2453: carry the SAME entries' `escalationTitle`/`escalationIssueUrl`/
+      // `escalationUnverified` through — they are already on `p`, one line above, so naming the
+      // escalation in `boardItemsFromOpenPrs` costs no second read.
+      escalations = new Map(
+        [...proj.values()]
+          .filter((p) => p.needsHuman && p.prNumber !== undefined)
+          .map((p) => [
+            p.prNumber!,
+            { title: p.escalationTitle, issueUrl: p.escalationIssueUrl, unverified: p.escalationUnverified },
+          ] as const),
+      );
     } catch {
       // The escalation arm degrades to zero rather than taking the whole read down — the open-PR
       // list is the arm that qualified on 2026-08-26 and it is already in hand.
     }
-    return boardItemsFromOpenPrs(prs, io.now?.() ?? new Date(), needsHuman);
+    return boardItemsFromOpenPrs(prs, io.now?.() ?? new Date(), escalations);
   } catch {
     // AN OUTAGE YIELDS NO ITEMS, AND THAT IS THE CHOSEN FAIL DIRECTION, not an oversight. An
     // empty board makes `decideBoardReviewTrigger` answer `fire: false`, which is the same thing

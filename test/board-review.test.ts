@@ -411,7 +411,77 @@ test("an unhandled escalation is mined into its own proposal candidate, distinct
   assert.equal(report.fire, true);
   assert.deepEqual(report.proposalIds, ["board-review:escalation:pr-1"]);
   assert.equal(registryState.length, 1);
-  assert.match(registryState[0].summary, /carries 2 unhandled escalation\(s\)/);
+  // W1-T2453: no title/url carried on this item, so the finding still fires but is honest that
+  // the ask could not be read — never a bare "carries N unhandled escalation(s)" count.
+  assert.match(registryState[0].summary, /carries an unhandled escalation whose ask could not be read/);
+});
+
+// ── W1-T2453 acceptance 1: a NAMED escalation is decidable from its own text ───────────────────
+
+test("a named escalation's finding carries its own one-line ask and a direct link to its issue", () => {
+  const items = [
+    item({
+      id: "pr-1",
+      ageHours: 1,
+      unhandledEscalations: 1,
+      escalationTitle: "[fix] T2145: strike cap does not bind",
+      escalationIssueUrl: "https://github.com/o/r/issues/3043",
+    }),
+  ];
+  let registryState: Proposal[] = [];
+
+  const report = buildBoardReview({
+    policy: ON,
+    marker: { kind: "absent" },
+    items,
+    now: NOW,
+    reportPath: "/state/report.json",
+    registryPath: "/state/inbox-proposals.json",
+    writeReport: () => {},
+    updateRegistry: (_p, update) => {
+      const next = update(registryState);
+      if (next !== null) registryState = next;
+      return next;
+    },
+  });
+
+  assert.equal(report.fire, true);
+  // The finding id is UNCHANGED (design (ii)) — updateProposalRegistry's idempotence keys on it,
+  // and an already-open candidate must not be re-minted as a duplicate by this change.
+  assert.deepEqual(report.proposalIds, ["board-review:escalation:pr-1"]);
+  assert.equal(registryState.length, 1);
+  assert.match(registryState[0].summary, /\[fix\] T2145: strike cap does not bind/, "the summary names the ask");
+  assert.match(registryState[0].summary, /https:\/\/github\.com\/o\/r\/issues\/3043/, "and links the issue directly");
+  assert.doesNotMatch(registryState[0].summary, /carries 1 unhandled escalation\(s\)/, "never the old bare count");
+});
+
+// ── W1-T2453 acceptance 3: an unreadable ask is HONEST ABSENCE, never a dropped finding ────────
+
+test("an escalation whose issue could not be read still produces its finding, stating the ask was unreadable", () => {
+  const items = [item({ id: "pr-1", ageHours: 1, unhandledEscalations: 1, escalationUnverified: true })];
+  let registryState: Proposal[] = [];
+
+  const report = buildBoardReview({
+    policy: ON,
+    marker: { kind: "absent" },
+    items,
+    now: NOW,
+    reportPath: "/state/report.json",
+    registryPath: "/state/inbox-proposals.json",
+    writeReport: () => {},
+    updateRegistry: (_p, update) => {
+      const next = update(registryState);
+      if (next !== null) registryState = next;
+      return next;
+    },
+  });
+
+  assert.equal(report.fire, true, "still a finding, never silently dropped for being unverified");
+  assert.deepEqual(report.proposalIds, ["board-review:escalation:pr-1"], "same id as the named case — no duplicate minting");
+  assert.equal(registryState.length, 1);
+  assert.match(registryState[0].summary, /could not be read/, "the summary says so honestly");
+  assert.match(registryState[0].summary, /issue state unverified/);
+  assert.doesNotMatch(registryState[0].summary, /carries 1 unhandled escalation\(s\)/, "never rendered as an ordinary bare count");
 });
 
 // ── W1-T2304's own producer wiring into measurement-cadence.ts's spine (design's own "Ownership"
