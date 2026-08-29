@@ -761,3 +761,12 @@ forensic detail, so the narrative does not need to live here.
   have deliberately made violate — IS THE ONLY THING SEPARATING A REAL ZERO FROM A DEAD CALL, and
   it must run in the SAME call shape as the rows you report. *(#3211 — three zeros reported, then
   withdrawn when the blocking control read 0 too)*
+
+## Lessons from 2026-08-29
+
+- **ZERO A `DA:` VALUE INSIDE THE TARGET's OWN `SF:` BLOCK — a whole-file replace hits another
+  file's identical line number and returns a FALSE `OK`.** Every brief here demands this falsifier;
+  done naively it proves nothing while looking like it passed. lcov holds one `DA:<line>` PER FILE,
+  so replacing `DA:5042,6` across the artefact edited a different record and `diff-coverage` still
+  read `OK`. Slice `SF:<path>`→`end_of_record`, assert exactly ONE match in that slice, and require
+  the `SF:` count and byte size unchanged. *(#3227)*
