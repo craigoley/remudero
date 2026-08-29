@@ -1,0 +1,126 @@
+- id: W1-T2462
+  title: "THE FIX FOR THE FAIL-CLOSED REVIEW IS SHIPPED, TESTED AND UNCALLED — `resolvePlanCriteriaAtHead` has zero production callers, so `reviewCommand` still resolves a trailered PR's criteria from the container's checked-out tree and still posts fail-closed on evidence that is present at the PR's own head"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 35.00
+  files: [src/run-task.ts, test/review-wires-criteria-at-head.test.ts]
+  origin: "oper#at-head-resolver-has-no-call-site-2026-08-29"
+  plan_refs: ["W1-T2220", "W1-T2432"]
+  status: queued
+  attempts: 0
+  rationale: |
+    RE-DERIVED IN A SCRATCH WORKTREE PROVEN EQUAL TO origin/main at d278e84d. THIS IS A WIRING TASK,
+    NOT A DIAGNOSIS: the defect is W1-T2432's and is not re-derived here. What follows is only what
+    a builder needs that W1-T2432 does not already carry.
+
+    (1) THE FIX EXISTS AND HAS NO PRODUCTION CALLER — CONFIRMED AT HEAD WITH A CONTROL.
+    `resolvePlanCriteriaAtHead` (`src/lib/review.ts`) appears exactly TWICE across `src/`: its own
+    definition and one `{@link}` in a neighbouring doc comment. Against controls read the same way
+    with the same tool in the same tree: `postReviewStatus` 51, `bodyContradictsDiff` 40,
+    `parseAcceptanceBlock` 35, `acceptanceAuthorTimeCheck` 20. So the zero is absence, not a blind
+    query. It is NOT unbuilt: `test/review-resolves-criteria-at-the-prs-own-head.test.ts` exercises
+    it at eight call sites. Shipped, tested, uncalled.
+
+    (2) AND IT WAS UNCALLED ON PURPOSE, WHICH IS WHY THIS TASK EXISTS RATHER THAN A BUG REPORT. The
+    function's own doc says so in terms: "NEVER WIRED HERE, on purpose. Standing rule — one concern
+    per PR — and this task's own file list (`src/lib/review.ts` + its unit test) deliberately
+    excludes `src/run-task.ts`: swapping `reviewCommand`'s call from `resolvePlanCriteriaForReview`
+    to this function, so a live review actually benefits, is a follow-up plumbing change over a
+    contract this function proves standalone first." THIS SHARD IS THAT NAMED FOLLOW-UP. Nothing
+    here corrects W1-T2432; it completes it.
+
+    (3) THE TWO CONSTRAINTS A BUILDER WOULD OTHERWISE HAVE TO REDISCOVER, BOTH FROM THAT SAME DOC.
+    COST IS NOT THE BLOCKER: the swap "MAY BE FREE" because "the caller already holds `headSha` off
+    the PR view it just fetched", and `runGit` reads LOCAL git objects a real checkout already has,
+    so it costs no second network fetch. ORDERING IS NOT THE BLOCKER EITHER: the function is
+    "SYNCHRONOUS BY CONSTRUCTION — no `Promise`, no timer, no retry loop", so a caller can resolve
+    and judge in the same tick. And the result type is declared to be the same shape as
+    `resolvePlanCriteriaForReview`'s "so swapping one call for the other at a future call site is a
+    like-for-like replacement, not a rewrite."
+
+    (4) THE RESIDUAL WINDOW, NAMED SO NOBODY BUILDS EXPECTING ZERO. Reading at the head sha reads
+    that sha's COMMITTED objects, so a shard merging into `plan/tasks.d/` AFTER `headSha` stays
+    invisible — "a strictly smaller window than today's boot-to-boot one, never zero". That
+    residual is W1-T2432's stated non-concern and is not this task's either.
+  design: |
+    (i) Q3 — THE POPULATION, AND THE LEDGER COULD NOT ANSWER IT. `resolveLedgerUnion` at the config
+    root (`/root/Remudero`, read from `loadConfig` rather than guessed) returns `archiveCount: 0`
+    and `ok: false` — the union's own coverage refusal, not a count. PRINTED BESIDE THAT ZERO, as
+    the refusal requires: the union's newest ts is 2026-08-29T23:45:54.773Z, over a live file
+    holding only `cli.invoked` (327), `deploy.skip` (7) and `next_task_id.reserve` (6), with ZERO
+    `review.posted` rows and no rotations. So no ledger figure is carried here.
+
+    (ii) MEASURED INSTEAD OVER THE GITHUB SURFACE, AND THE BRIEF'S TWO INSTANCES DO NOT BOTH HOLD.
+    `#3265` DID post `FAIL — no acceptance criteria to judge (fail closed)`, on sha `8dcf861d` —
+    verified by walking every commit of that PR and reading each sha's `remudero-review` commit
+    status. `#3168` shows a single commit whose status is `PASS — 8 criteria substantiated`; its
+    fail-closed instance is asserted in `src/lib/review.ts` ("measured on #3168") but is NOT
+    reproducible from the API, presumably because the sha that carried it is no longer on the
+    branch.
+
+    (iii) ★ AND #3265 IS THE OTHER VARIANT, WHICH CHANGES WHAT THE POPULATION IS. Its trailer names
+    W1-T2456, and W1-T2456's shard was filed by a SEPARATE PR — commit `7d15551a`, "chore(plan):
+    file W1-T2456 so its implementation is not judged by its own acceptance", landed
+    2026-08-29T20:48:54Z. `#3265`'s own diff adds no shard at all. So `#3265` failed closed because
+    the container's tree PREDATED a shard that had already merged, not because the PR added its own.
+
+    THE HONEST COUNT IS THEREFORE: fail-closed instances VERIFIED = 1; instances matching the
+    SELF-ADDED-SHARD shape = 0 observed. Both are the SAME defect — `loadPlan` reading a tree that
+    is not the PR's head — and `resolvePlanCriteriaAtHead` addresses both, fully for the self-added
+    case and partially for the stale-container case, bounded by (4)'s residual window. A build must
+    not claim it closes the second one completely.
+
+    (iv) THE WORKAROUND THAT ALREADY WORKS, RECORDED SO THIS DOES NOT OVERSTATE THE HARM. A plan PR
+    carrying a `## Acceptance` block INSTEAD of a trailer is judged correctly today, because the
+    body fallback resolves criteria without touching the plan at all. That is the idiom every
+    filing in this session used, and it is why the defect is survivable rather than blocking.
+
+    (v) SO THE SHAPE OF THE CHANGE IS ONE SWAP AT ONE CALL SITE. `reviewCommand` (`src/run-task.ts`)
+    calls `resolvePlanCriteriaForReview`; the replacement takes the body, repo root, plan path and
+    the `headSha` the caller already holds. The result shape matches by construction (3), so the
+    downstream judging path is untouched.
+  note: |
+    WHAT MUST NOT CHANGE.
+
+    `loadPlan` IS NOT TOUCHED. Its working-tree read is correct for every other caller; the defect
+    is which REF the review path asks about, not how a plan is parsed.
+
+    THE TRAILER FORMAT IS NOT TOUCHED. `TASK_TRAILER_RE` stays the one anchored spelling, and
+    `resolvePlanCriteriaAtHead` already reuses it deliberately rather than adding a second.
+
+    THE BODY FALLBACK STAYS. A PR with no resolvable trailer must still be judged from its own
+    `## Acceptance` block — that fallback is the workaround in (iv) and removing it would break the
+    idiom every plan filing currently relies on.
+
+    FAIL-CLOSED STAYS FAIL-CLOSED. A trailer whose id resolves nowhere at the head sha, or a task
+    that declares no criteria, must still read as no criteria to judge. This task widens what the
+    reviewer can SEE; it must not soften what it does when it genuinely sees nothing.
+
+    THE RESIDUAL WINDOW IS NOT A DEFECT TO CLOSE HERE. Per (4), a shard merging after the head sha
+    stays invisible. A build that reaches for origin/main, a fetch, or a network read to close that
+    gap has left this task's scope and has also given up the "may be free" property that makes the
+    swap safe.
+
+    RULE 19 BAND. `risk: high` is set for the SPAN of the declared `files:`, NOT for blast radius —
+    the change itself is one call swapped for another of the same declared result shape. The band
+    was corrected before filing: `sizingViolation` counts the TEST file's stem as its own concern,
+    so `[src/run-task.ts, test/review-wires-criteria-at-head.test.ts]` reads as TWO
+    (`run-task`, `review-wires-criteria-at-head`) and refuses at `medium`. A builder reading `high`
+    here should not infer a wide change; it is the span rule, and it is measured, not assumed.
+  acceptance:
+    - claim: "the review path resolves a trailered PR's criteria from the plan at the PR's own head sha rather than the container's checked-out tree"
+      proof: "unit test: test/review-wires-criteria-at-head.test.ts"
+    - claim: "a PR whose own diff adds the shard its trailer names is judged from that shard instead of posting no acceptance criteria to judge"
+      proof: "unit test: test/review-wires-criteria-at-head.test.ts"
+    - claim: "an untrailered body is unchanged and still resolves from its own acceptance block, with no git object read to establish that"
+      proof: "unit test: test/review-wires-criteria-at-head.test.ts"
+    - claim: "a trailer whose id resolves nowhere at the head sha still reads as no criteria, so fail-closed stays fail-closed"
+      proof: "unit test: test/review-wires-criteria-at-head.test.ts"
+    - claim: "the swap costs no second network fetch and stays synchronous, resolving and judging in the same tick"
+      proof: "unit test: test/review-wires-criteria-at-head.test.ts"
+    - claim: "a shard merging after the head sha is still invisible, and the wiring claims no more than that"
+      proof: "unit test: test/review-wires-criteria-at-head.test.ts"
