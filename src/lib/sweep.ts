@@ -3157,10 +3157,17 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // W1-T186 (the #420 fixture): once checks are the reason strikes exhausted, NAME the check
     // + sha here too — not just in the rendered ClarificationQuestion — so the ledgered/summary
     // reason itself never reads as the generic, uninvestigable "fix strikes exhausted".
-    reason: (pr, policy) =>
-      isBlockedCi(pr)
-        ? `fix strikes exhausted (${pr.priorStrikes}/${policy.strikeCap}) — ${describeCiFailures(pr)} — escalating`
-        : `fix strikes exhausted (${pr.priorStrikes}/${policy.strikeCap}) — escalating`,
+    //
+    // W1-T2452: the denominator is {@link fixCeilingInForce}, NEVER the bare `policy.strikeCap`
+    // — an answered PR whose live operator answer extended its ceiling renders against THAT
+    // ceiling, so a legitimate "reached the extended ceiling, escalating again" reads as exactly
+    // that instead of an impossible overshoot of the base cap.
+    reason: (pr, policy) => {
+      const ceiling = fixCeilingInForce(pr, policy.strikeCap, policy.clarify);
+      return isBlockedCi(pr)
+        ? `fix strikes exhausted (${pr.priorStrikes}/${ceiling}) — ${describeCiFailures(pr)} — escalating`
+        : `fix strikes exhausted (${pr.priorStrikes}/${ceiling}) — escalating`;
+    },
   },
   {
     // W1-T100 (the #170 fix); BROADENED + PROMOTED ahead of the review-failing
@@ -3173,7 +3180,10 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // exhaustion.
     disposition: "blocked-fixable",
     when: (pr) => isBlockedCi(pr),
-    reason: (pr, policy) => `required checks red — ci-log fix, strike ${pr.priorStrikes + 1}/${policy.strikeCap}`,
+    // W1-T2452: denominator is {@link fixCeilingInForce}, not the bare `policy.strikeCap` — see
+    // that function's own doc; keeps this ratio naming the SAME ceiling the dispatch site
+    // (`dispatchFix`, run-task.ts) actually budgets against.
+    reason: (pr, policy) => `required checks red — ci-log fix, strike ${pr.priorStrikes + 1}/${fixCeilingInForce(pr, policy.strikeCap, policy.clarify)}`,
   },
   {
     // W1-T1269 — row 5.5 (table doc above): AN EARLIER STOP, NEVER A LONGER LEASH. Ordered
@@ -3208,12 +3218,16 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // through to row 7 unchanged.
     disposition: "blocked-fixable",
     when: (pr) => pr.reviewState === "failure" && (pr.unmetCriteria.length > 0 || (pr.actionableGateFailures?.length ?? 0) > 0),
+    // W1-T2452: denominator is {@link fixCeilingInForce} in both branches — see that
+    // function's own doc; keeps this ratio naming the SAME ceiling the dispatch site
+    // (`dispatchFix`, run-task.ts) actually budgets against.
     reason: (pr, policy) => {
+      const ceiling = fixCeilingInForce(pr, policy.strikeCap, policy.clarify);
       if (pr.unmetCriteria.length > 0) {
-        return `${pr.unmetCriteria.length} unmet criteri${pr.unmetCriteria.length === 1 ? "on" : "a"} — strike ${pr.priorStrikes + 1}/${policy.strikeCap}`;
+        return `${pr.unmetCriteria.length} unmet criteri${pr.unmetCriteria.length === 1 ? "on" : "a"} — strike ${pr.priorStrikes + 1}/${ceiling}`;
       }
       const n = pr.actionableGateFailures!.length;
-      return `${n} actionable gate failure${n === 1 ? "" : "s"} (named remedy) — strike ${pr.priorStrikes + 1}/${policy.strikeCap}`;
+      return `${n} actionable gate failure${n === 1 ? "" : "s"} (named remedy) — strike ${pr.priorStrikes + 1}/${ceiling}`;
     },
   },
   {
@@ -4245,6 +4259,54 @@ export function renderRepeatEscalationQuestion(
  */
 export function strikeCapForAnswer(originalCap: number, policy: ClarifyPolicy = DEFAULT_CLARIFY_POLICY): number {
   return policy.resetStrikeCounterOnAnswer ? originalCap : 1;
+}
+
+/**
+ * W1-T2452 — THE CUMULATIVE STRIKE CEILING ACTUALLY IN FORCE for a PR: `strikeCap`
+ * ordinarily, or the EXTENDED ceiling (`strikeCap + strikeCapForAnswer(...)`) once an
+ * operator's clarification answer is live — the SAME extended number the "answered"
+ * {@link DISPOSITION_RULES} row already checks (its own `when`, `pr.priorStrikes <
+ * policy.strikeCap + strikeCapForAnswer(...)`, above) — never a second, independently
+ * computed ceiling that could diverge from the routing decision. Every rendered strike
+ * ratio (the exhaustion/blocked-fixable `reason`s below) and the real fix-rung dispatch
+ * budget (`buildSweepEffects`'s `dispatchFix`, run-task.ts) both read THIS one function, so
+ * neither can silently drift from the other — the defect this task fixes was exactly that
+ * drift (a rendered ratio naming `strikeCap` while the dispatch site computed a DIFFERENT
+ * number for the same PR).
+ */
+export function fixCeilingInForce(
+  pr: Pick<OpenPrView, "pendingAnswer">,
+  strikeCap: number,
+  clarifyPolicy: ClarifyPolicy = DEFAULT_CLARIFY_POLICY,
+): number {
+  if (!pr.pendingAnswer) return strikeCap;
+  const clarify: ClarifyPolicy = {
+    resetStrikeCounterOnAnswer: pr.pendingAnswer.resetStrikeCounter ?? clarifyPolicy.resetStrikeCounterOnAnswer,
+  };
+  return strikeCap + strikeCapForAnswer(strikeCap, clarify);
+}
+
+/**
+ * W1-T2452 — THE STRIKE BUDGET TO DISPATCH for one `runFixRung` call: the REMAINDER against
+ * {@link fixCeilingInForce}, NEVER a fresh full cap. `runFixRung` always counts a NEW call
+ * from 0 strikes (see that function's own loop, `strikes < opts.strikeCap`) — handing it a
+ * fresh full cap every dispatch let one PR's cumulative ledger strike count exceed the
+ * ceiling by up to `cap - 1` on every dispatch after the first (observed: "fix strikes
+ * exhausted (3/2)" on PR #3043, cap=2). Passing `ceiling - priorStrikes` instead means the
+ * ledger's running count can never exceed `ceiling`, however many dispatches it takes.
+ *
+ * Returns `null` when the remainder is non-positive. THIS IS THE LOAD-BEARING HALF (design
+ * note ii): the caller MUST NOT dispatch a zero/negative-budget rung in that case — a
+ * silent zero-budget dispatch would convert an overspend into a no-op that strands an
+ * otherwise-fixable PR forever. A `null` return means the caller's own routing disagreed
+ * with the ceiling actually in force (row 4 of {@link DISPOSITION_RULES} already routes
+ * `priorStrikes >= strikeCap` to escalate, so this should be unreachable in production) —
+ * the caller must ledger that disagreement and take the exhaustion/escalate path instead,
+ * never spend a worker on a budget of zero.
+ */
+export function fixDispatchBudget(priorStrikes: number, ceiling: number): number | null {
+  const remaining = ceiling - priorStrikes;
+  return remaining > 0 ? remaining : null;
 }
 
 /** The last line in `lines` matching `pred` — append-only files read oldest-first, so the
