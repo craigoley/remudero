@@ -1,0 +1,136 @@
+- id: W1-T2442
+  title: "THE REQUIRED REVIEW GATE IS ENFORCED BY CONVENTION, NOT BY MECHANISM — `required_status_checks.contexts` lists `remudero-review` beside `ci-gate`, but `ci-gate` is pinned `app_id: 15368` while `remudero-review` carries `app_id: null`, so ANY actor holding a repo-scoped token satisfies it; the mechanism built to close that (`REVIEWER_TOKEN_ENV`) ships DARK by its own doc and reads absent on every live process, and the hook meant to backstop it matches COMMAND TEXT rather than a credential"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 20.00
+  files: [src/lib/review.ts, test/required-gate-pin-precondition.test.ts]
+  origin: "operator-brief#required-review-gate-unpinned-2026-08-28"
+  plan_refs: ["W1-T203", "W1-T990", "W1-T2299"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE ID. Eight surfaces, anchored `W1-T2442([^0-9]|$)` with a `[0-9]` class and never a `\d`
+    shorthand. Surface 1 — reservation refs — READS 1 of 557, which is the mint's own reservation and
+    the only surface that must be non-zero. Surfaces 2 (687 shard filenames) and 3 (922 declared
+    `- id:` lines) read 0 against a W1-T2427 control reading 1 in each. Surface 6 (145 remote heads)
+    reads 0 against a control of 94 `run-` heads. Surfaces 7 and 8 (merged trailers, merged subjects
+    over 2,550 commits) read 0 against W1-T2427 controls of 1 and 3.
+
+    ⚠ SURFACES 4 AND 5 — OPEN-PR TITLES AND BODIES — COULD NOT BE READ, AND THIS SAYS SO RATHER THAN
+    REPORTING A BARE ZERO. The core REST budget was exhausted at the time of filing (`gh api user -i`:
+    `X-Ratelimit-Remaining: 0`, `X-Ratelimit-Resource: core`, reset 2026-08-28T16:27:03Z — never
+    `gh api rate_limit`, which misreports on this host). In their place the SUBSTANTIVE half of what
+    those two surfaces exist to catch was swept with git alone: every one of 146 remote heads had its
+    `plan/tasks.d/` tree read, 0 carried a W1-T2442 shard, and 5 carried the W1-T2427 control. That
+    covers an in-flight duplicate FILING; it does not cover a PR whose title or body merely mentions
+    the id, and that residue is stated, not closed.
+
+    ── Q1. THE GATE, AND WHY THE OBSERVED INSTANCE IS NOT A FORGE ────────────────────────────────
+
+    OBSERVED on the protected branch: `required_status_checks.contexts` is exactly
+    `["remudero-review", "ci-gate"]`. In the parallel `checks[]` array `ci-gate` carries
+    `app_id: 15368` and `remudero-review` carries `app_id: null`. A null `app_id` is not a
+    weaker pin, it is NO pin: the context is satisfied by whichever actor posts it, so any holder of a
+    repo-scoped token can turn the gate green.
+
+    THE MECHANISM BUILT TO PREVENT EXACTLY THAT IS DARK, AND SAYS SO IN ITS OWN DOC.
+    `REVIEWER_TOKEN_ENV` (`src/lib/review.ts`) names `REMUDERO_REVIEWER_TOKEN`, and the comment
+    immediately above it states the feature ships DARK until an operator provisions the identity —
+    deliberately, on the same bootstrap-ordering doctrine `docs/review-gate.md` records for `ci-gate`,
+    because a provenance gate armed before its identity exists would deadlock every merge. That is a
+    designed posture, not an oversight, and nothing here treats it as a bug.
+
+    `postReviewStatus` (`src/lib/review.ts`) reads that variable and overrides `GH_TOKEN`/`GITHUB_TOKEN`
+    ONLY when it is set, falling through to `process.env` otherwise. MEASURED on the live fleet: of 4
+    running `bin/rmd`/`run-task` processes, 0 carry `REMUDERO_REVIEWER_TOKEN` in `/proc/<pid>/environ`
+    and 4 carry `GH_TOKEN` — the control on the same read, the same processes, the same tool. No token
+    value was read or printed; presence only. So every `remudero-review` status posts as whatever
+    ambient identity `gh` resolves.
+
+    ⚠ AND THE HOOK MEANT TO BACKSTOP IT MATCHES TEXT, NOT A CREDENTIAL. `hooks/deny-floor.sh`
+    (W1-T203, "THE FORGE ATTACK") pipes the command STRING through three conjunctive `grep -Eq`
+    arms — `gh[[:space:]]+api\b`, then `(-X|--method)[[:space:]]+POST`, then
+    `repos/[^[:space:]]*/statuses(/|[[:space:]]|$)` — and denies only when all three fire. Driven with
+    the source's own bytes rather than a paraphrase: the canonical spelling DENIES (the control), while
+    `gh api --method=POST repos/.../statuses/<sha>` is ALLOWED because the equals form carries no
+    whitespace before POST, and a plain `curl -X POST https://api.github.com/repos/.../statuses/<sha>`
+    is ALLOWED because it is not `gh api`. Its own header already concedes the larger hole: a call that
+    does not traverse the Bash tool never reaches the hook at all.
+
+    ⚠ Q1 FRAMING — THE EVIDENCE DOES NOT CARRY "FORGE", AND THIS SHARD DOES NOT CLAIM ONE. On #3219
+    the fleet posted `remudero-review` = `failure` at 13:12:18Z on `bodyContradictsDiff`, reporting a
+    body that claimed plan-only against a diff that changed `.github/workflows/ci.yml` among others.
+    THAT VERDICT WAS TRUE. A repair then posted `success` as `cao825` at 13:38:04Z and the PR merged
+    four seconds later. That sequence IS W1-T2299's sanctioned re-review path (row 3.6), running under
+    an agent identity for one reason only: the reviewer token is dark, so the sanctioned path and an
+    unsanctioned one are indistinguishable at the wire. THE FINDING IS THE INDISTINGUISHABILITY, NOT AN
+    INCIDENT. ⚠ AND IT CANNOT BE RESOLVED BY LOOKING HARDER: the token type behind a status post is NOT
+    DERIVABLE from any endpoint — the statuses API carries no `app` field, and the audit log records no
+    status-creation action at all.
+
+    ── Q2. THE PIN, AND THE PRECONDITION THAT GATES IT ───────────────────────────────────────────
+
+    The pin is `app_id: 4648213`, read from `GET /apps/remudero-fleet`.
+
+    ⚠ IT IS NOT `318611788`. That is the BOT USER id, the value that surfaces in `.creator.id` and in
+    audit `.actor_id`, and it is the number a reader lands on first because those are the fields a
+    status or an audit row actually exposes. Only the APP id is valid in
+    `required_status_checks.checks[].app_id`; supplying the user id there does not pin the context.
+
+    ⚠ AND THE PIN IS GATED ON A CREDENTIAL FACT NOBODY HAS ESTABLISHED. `status-board.ts` renders a
+    token-fallback line whose own words are that the App installation token refresh last FAILED and
+    `GH_TOKEN` was left as found, so `gh` calls bill the personal token's buckets rather than the
+    installation's. IF THAT FALLBACK IS IN PRODUCTION USE, PINNING MAKES THE GATE FAIL CLOSED WITH NO
+    SIGNAL — every fleet-posted status would be rejected for a mismatched app, and the only symptom
+    would be PRs that never go green. The evidence that this is a live possibility rather than a
+    theoretical one: #3216's status was posted by `cao825` on a fine-grained PAT via `gh 2.63.2`, which
+    is the FLEET's own CLI version — precisely what that fallback looks like from outside.
+
+    SO THE ORDER IS FIXED AND THIS TASK ONLY MAKES IT LEGIBLE: the identity must be provisioned and
+    OBSERVED to be in use before the context is pinned, never the reverse.
+
+    ── Q3. WHAT THE PIN DOES NOT CLOSE — RECORDED, NOT PROPOSED ──────────────────────────────────
+
+    #3215 merged carrying ZERO statuses of any context, one second after a `protected_branch.policy_override`
+    event raised from a browser. `enforce_admins` is `false` and there are 81 override events, all
+    `cao825`. Pinning the app changes nothing about this: an administrator overriding protection never
+    needed to satisfy the context in the first place.
+
+    ⚠ THAT IS AN ADMIN BYPASS AND A POLICY QUESTION THAT BELONGS TO THE OPERATOR, NOT A DEFECT. It is
+    recorded here as OUT OF SCOPE so that a later reader does not mistake the pin for a complete
+    answer, and it is deliberately not proposed for change.
+
+    ── OWNED ELSEWHERE — CITED, NOT RE-OPENED ────────────────────────────────────────────────────
+
+      W1-T203   the reviewer IDENTITY and the deny-floor hook. This task does not provision it.
+      W1-T990   the AUTHORING identity, BACKLOGGED by operator ruling. Cited only.
+      W1-T2299  the sanctioned RE-REVIEW path (row 3.6) that #3219 exercised. Unchanged.
+
+    ⚠ AND THREE THINGS THIS TASK MUST NOT DO, BY OPERATOR INSTRUCTION: it does not provision a
+    credential, it does not change branch protection, and it does not scope the installation token.
+    Credential work is backlogged. What is left, and what is built here, is the PRECONDITION READER —
+    a pure statement of whether the pin is safe to apply yet, so that when the operator returns to the
+    credential backlog the answer is measured rather than argued.
+
+    ── RULE 19 ──────────────────────────────────────────────────────────────────────────────────
+
+    `risk: high` IS SET UP FRONT AND IT IS RULE 19's SPAN, NOT BLAST RADIUS. `subsystemsOf` derives a
+    module id per `files:` entry from the basename (`moduleIdFromPath`, `src/lib/task-linter.ts`), so
+    `src/lib/review.ts` and `test/required-gate-pin-precondition.test.ts` resolve to two distinct ids
+    and `sizingViolation` blocks any band below high. The change itself is additive and read-only.
+
+  acceptance:
+    - claim: "unpinnedRequiredContexts names every required context whose app_id is null and omits an app-pinned one"
+      proof: "unit test: test/required-gate-pin-precondition.test.ts"
+    - claim: "reviewerIdentityPosture resolves three states and never two — an unreadable environment degrades to unknown and can never render as provisioned"
+      proof: "unit test: test/required-gate-pin-precondition.test.ts"
+    - claim: "the precondition reader reports the pin UNSAFE while the reviewer identity is dark, naming the env var it looked for"
+      proof: "unit test: test/required-gate-pin-precondition.test.ts"
+    - claim: "the reader reports presence of the reviewer credential and never its value, on every arm including the unknown one"
+      proof: "unit test: test/required-gate-pin-precondition.test.ts"
+    - claim: "a provisioned identity paired with an app-pinned context reports the pin SAFE — the falsifier that keeps the UNSAFE verdict load-bearing"
+      proof: "unit test: test/required-gate-pin-precondition.test.ts"
