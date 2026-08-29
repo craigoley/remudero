@@ -863,7 +863,15 @@ test("GUARDED SITE sweep fix-rung push: dispatchFix drives runFixRung to its bes
     try {
       await withLiveWritesAllowed(() =>
         effects.dispatchFix(
-          { prNumber: 7, prUrl: "https://github.com/acme/sandboxrepo/pull/7", taskId: TASK, reviewState: "failure" } as never,
+          // `priorStrikes` is a REQUIRED field of OpenPrView (sweep.ts) that this fixture omitted
+        // behind its `as never` cast. It was inert until W1-T2452: the dispatch site now budgets
+        // against it (`fixDispatchBudget(pr.priorStrikes, ceiling)`), and `ceiling - undefined` is
+        // NaN, which is not `> 0`, so an ABSENT count read as an EXHAUSTED one and the rung stood
+        // down with `sweep.fix.ceiling_exhausted` before reaching the guarded push this test is
+        // about. A fresh PR carries zero prior strikes and its full allowance — the state
+        // W1-T2452's own first criterion requires to dispatch — so stating it restores what the
+        // test has always asserted rather than relaxing it.
+        { prNumber: 7, prUrl: "https://github.com/acme/sandboxrepo/pull/7", taskId: TASK, reviewState: "failure", priorStrikes: 0 } as never,
           // W1-T1282: a real (non-empty) failing check — an empty `ciFailures: []` now stands
           // the rung down before any strike (the two-reader-split guard), and this fixture is
           // testing the push guard site, not ci-log evidence content.
