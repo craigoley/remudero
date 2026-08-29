@@ -196,7 +196,9 @@ export interface PolicyValues {
    *
    *  ABSENT ⇒ the same safe defaults, matching every other cadence's absent-means-default shape.
    *  Defaults to ENABLED because the rung is read-only: it writes one report artifact and drafts
-   *  registry proposals, and Rule 15 still stands — nothing it produces auto-files. */
+   *  registry proposals, and nothing it produces files a task ITSELF — the rung's own scope, not a
+ *  rule forbidding it. W1-T2456: this said "Rule 15 still stands"; §12 rule 15 is the
+ *  acceptance-criteria goalpost rule and rule 27 now PERMITS automatic filing. */
   boardReview: {
     enabled: boolean;
     minIntervalMinutes: number;

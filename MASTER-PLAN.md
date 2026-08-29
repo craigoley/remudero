@@ -277,7 +277,9 @@ suggesting its documented "describing another PR is ignored" exemption is not ac
 deliberate comment-provenance assertions, and its contributor docs do not point authors there.
 **(g)** W1-T2451's own filing documents that `evidenceAnchors: []` made board-review proposal drift
 mechanically unreachable — fixed by #3255, with `ReadinessContext.boardReferents` left dark by the
-task's own file fence. Standing rule 15 forbids auto-filing; (a)–(g) are RECORDED, not filed.
+task's own file fence. (a)–(g) are RECORDED, not filed — NOT because a rule forbade it (the
+no-auto-filing doctrine was mis-cited as a §12 rule number; rule 27 PERMITS automatic filing,
+operator ruling 2026-08-29) but because this lane chose to record rather than file.
 ★ **PRIOR CYCLES — NOT SUMMARISED HERE.** The header's retro ledger folds R1–R35 with every arc, rank
 change, mint and DR rule named, and the SHIPPED log's own section headers carry every id, PR and
 date.
@@ -408,7 +410,8 @@ by no instrument in this file — three straddlers (TASK L) and one whose run st
 ownership on it instead of FILTERING every candidate, so a correct rejection ends the search** (P60,
 established on #3242/#3237 with #3251/#3255 as the control); **and all 5 hand-named code merges carry
 no `Remudero-Task:` trailer on either surface** (P33's un-entitled class, not P58's); and the
-follow-up chain the harvests name but standing rule 15 forbids auto-filing (~95 candidates, still headed
+follow-up chain the harvests name but the unwritten no-auto-filing doctrine, mis-cited as a §12
+rule number, held back (~95 candidates, still headed
 by R19's unresolved P0: `service.ts` drains the request body to bind a HIGH-tier nonce and four of five
 HIGH-tier handlers hang re-reading it).
 **NEXT (L2) — ONE MINT AT RANK 2, ONE RETIRED CLASS RETURNED, AND A FALSIFIER THAT CAUGHT ITS OWN
@@ -1791,7 +1794,8 @@ fourth cycle**).
 **ONE new P-number: P60 is MINTED (the highest prior header was P59).**
 **ONE task letter RESTORED: TASK G is UN-RETIRED on a member no held class can claim. A–N stand; the
 next unused is O.** **STANDING: candidates are ratified by the Architect via a tasks.yaml PR —
-standing rule 15, never auto-filed.**
+the unwritten no-auto-filing doctrine, mis-cited as a §12 rule
+number; rule 27 now permits automatic filing.**
 
 - **★ THE HEADLINE — A CORRECT REJECTION ENDED THE SEARCH, AND THE SAME WINDOW SHOWS IT DIDN'T HAVE
   TO.** Read out-of-band over `pulls/<n>/files`, `pulls/<n>`, `commits/<merge_commit_sha>` and the epoch
@@ -2447,7 +2451,8 @@ credits, 17 rejected trailers split 10 self-redispatch / 7 foreign-proper; ZERO 
 **RETRO-1786537819709 (R17) — MINING HEADER FOLDED TO ONE LINE BY R32** (64 runs / 27 PRs / 5
 credits, 37 rejected trailers — 18 FOREIGN, 19 SIBLING; ZERO new numbers; proposed **TASKS C, D and
 E**, whose canonical entries follow and are maintained IN PLACE). **STANDING FOR EVERY BLOCK BELOW:
-candidates are ratified by the Architect via a tasks.yaml PR — rule 15, never auto-filed.**
+candidates are ratified via a tasks.yaml PR. HISTORICAL: written under the unwritten no-auto-filing
+doctrine, mis-cited as a §12 rule number; rule 27 now permits automatic filing.**
 
 - **★ TASK C (P47 — TRAILER EMISSION AND TRAILER READING, BOTH ENDS). ★★ CLAUSE (a)'s EMISSION HALF
   IS CLOSED BY SHIPPING — T1012/#2240 committed the trailer rather than leaving it in the body —
@@ -3204,7 +3209,8 @@ and is maintained IN PLACE).
   quoted prose line, the line number) so the resolver is an Architect edit, not a guess; **(iii)** a
   bulk re-band PR is REQUIRED to update or delete the prose it invalidates, which this check enforces
   for free the moment it exists; **(iv)** the eight known shards are reconciled in one plan-only PR —
-  NOT auto-filed here (rule 15), because deciding whether T947/T949 should be `human` or `auto` is an
+  NOT auto-filed here — not because a rule forbade it (rule 27 permits it), but because deciding
+  whether T947/T949 should be `human` or `auto` is an
   operator ruling, not a lint fix. GOLDEN (fixture-only): a fixture task with `verify: auto` and a note
   containing *"verify: human"* FAILS with both sides quoted; the same task with the note deleted PASSES;
   a task with `verify: human` and a note saying *"human"* PASSES; a note that merely mentions another
@@ -3417,7 +3423,8 @@ One surviving TASK proposal under an existing id:
 
 **DECISION-QUALITY REVIEW (2026-08-02, OUT-OF-CYCLE — not retro-mined).** Derived from reading the plan
 against the decision-research literature (§5E carries the mapping and the vocabulary). Candidates for
-the Architect to ratify via a tasks.yaml PR (rule 15) — **never auto-filed**, deliberately NOT written
+the Architect to ratify via a tasks.yaml PR — **not auto-filed AT THE TIME OF WRITING** (the doctrine
+mis-cited as a §12 rule number; rule 27 now permits it), deliberately NOT written
 as tasks. Each names a root cause no open proposal covers; everything else the literature flags here
 is already an instance of P38, P40(ii), P42 or W1-T271 and is folded there rather than given an id.
 
@@ -5591,6 +5598,28 @@ a second project on the harness; **WS-12 (site) is independent — separate repo
    provenance, so a vanished override is visible). The next filing that touches the store owns the
    question. [operator feedback fb-1785950676514-c5cdcc; W1-T332/#1312, W1-T343/#1363, W1-T344,
    W1-T364/#1417, W1-T1049; recorded 2026-08-23]
+
+27. **AUTOMATIC FILING IS PERMITTED — THE FLEET MAY FILE, BUILD, TEST AND MERGE ITS OWN WORK, and
+   escalates to a human only when a judge decides one is genuinely needed.** [operator ruling,
+   2026-08-29; W1-T2456]
+
+   THIS RULE EXISTS BECAUSE ITS ABSENCE WAS READ AS A PROHIBITION. An unwritten doctrine — that only
+   the Architect may author a task —
+   was cited in this file as **"standing rule 15" at five places** and in
+   `src/lib/retro.ts` as **"standing rule 16"**, and §12 carries no such rule under either number:
+   15 is the acceptance-criteria goalpost rule and 16 is the mis-specified-task correction rule.
+
+   MEASURED 2026-08-29: a scan of the whole of §12 for the doctrine's own vocabulary
+   (`auto-fil|autofil|never file|architect authors`) returns **0**, with a firing control
+   (`Architect` appears 5 times in the same span). A deleted prohibition leaves SILENCE, and that is what let
+   the inferred doctrine take root — so the permission is stated here affirmatively rather than
+   merely removed, and `test/rule-citations-match-their-rule.test.ts` now fails when a citation
+   claims a doctrine its cited rule does not carry.
+
+   WHAT DOES NOT CHANGE: **rule 15 itself stands.** `criterionFieldTampered` still refuses a worker
+   editing the acceptance criteria its own judge reads, and under an LLM-as-judge design that is MORE
+   load-bearing, not less. `rule15FilingViolation` is likewise untouched — it is a task-record SHAPE
+   check and never had anything to do with who may file.
 
 - Lives at repo root. Header carries sync date + focus, his-house style.
 - Humans and agents edit via commits/PRs; the Architect does narrative syncs at workstream

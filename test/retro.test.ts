@@ -874,9 +874,9 @@ test("buildGather/renderGather surface procedural-success candidates (W1-T87/P13
 // come back with follow-up research, actions, tasks, etc — they get added to
 // the plan." run-task.ts ledgers a worker's OPTIONAL '## Follow-ups' section as
 // ONE `report.followups` event (type, text, run/task/PR provenance); this
-// module mines the unharvested ones into PROPOSAL CANDIDATES (rule 15: never
-// an auto-filed task) and marks each processed so a later pass mints nothing
-// twice.
+// module mines the unharvested ones into PROPOSAL CANDIDATES rather than tasks — the module's
+// own scope — and marks each processed so a later pass mints nothing twice. W1-T2456: this
+// cited "rule 15", which carries no such doctrine.
 
 test("mineFollowups: a report.followups event ledgers entries with provenance, and mints ONE candidate per entry citing run/task/PR", () => {
   const records = parseLedger(

@@ -9213,8 +9213,9 @@ export function implementAttemptOutcome(r: WorkerResult): AttemptOutcome {
  * parse/ledger/say sequence is written once. Absent section (the common case) is a
  * silent no-op; present ⇒ ONE `report.followups` ledger line with every typed entry
  * plus this call's own provenance, for the retro's harvest (lib/retro.ts) to mine
- * into proposal candidates. Rule 15 stays intact: this ledgers raw declarations, it
- * never files a task itself.
+ * into proposal candidates: this ledgers raw declarations and files no task itself, which is
+ * this function's own scope. W1-T2456: the citation read "Rule 15 stays intact"; §12 rule 15
+ * carries no such doctrine and rule 27 permits automatic filing.
  */
 function harvestFollowupsFromReport(
   text: string,
@@ -21553,7 +21554,8 @@ export async function daemonCommand(
         // BOARD-REVIEW RUNG (W1-T2304's design, wired here). Same shape as the two cadences
         // immediately above and gated the same way — SAFE ON in policy data (plan/policy.yaml's
         // `boardReview` row): the rung writes one report artifact and drafts registry proposals,
-        // and nothing it produces auto-files (Rule 15).
+        // and nothing it produces files a task itself — the rung's own scope. W1-T2456: this
+            // cited "(Rule 15)" for a doctrine that rule does not carry; see §12 rule 27.
         checkBoardReview: boardReviewHooks?.checkBoardReview,
         runBoardReview: boardReviewHooks?.runBoardReview,
         // W1-T1019: W1-T300's OWN in-flight guard (daemon.ts, `deps.isFeedbackOpenPr`/

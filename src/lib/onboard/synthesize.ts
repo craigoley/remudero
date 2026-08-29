@@ -420,7 +420,9 @@ export async function runOnboardSynthesize(targetDir: string, deps: SynthesizeDe
   deps.git.exec(["commit", "-m", `onboard: draft MASTER-PLAN.md, plan/tasks.yaml, AGENTS.md (rmd onboard synthesize)`], targetDir);
   deps.git.exec(["push", "-u", "origin", branch], targetDir);
 
-  // EXACTLY one draft PR (acceptance criterion 3) — never auto-merged (Standing rule 15).
+  // EXACTLY one draft PR (acceptance criterion 3) — never auto-merged. W1-T2456: the citation here
+  // used to read "Standing rule 15", which is the acceptance-criteria goalpost rule and says nothing
+  // about merging; this lane simply opens a DRAFT and arms nothing.
   const prUrl = deps.gh.openPr({
     owner,
     repo,
