@@ -681,6 +681,8 @@ import {
   dedupeRollupByLatestAttempt,
   deriveDayCostUsd,
   deriveDisposition,
+  fixCeilingInForce,
+  fixDispatchBudget,
   isBlockedCi,
   listRetirableEscalationIssues,
   logCostGovernorDeferral,
@@ -697,7 +699,6 @@ import {
   runSweep,
   runSweepLightPass,
   stillRedRequiredNames,
-  strikeCapForAnswer,
   terminalStateReason,
   toQuestionEntry,
   type ActionableGateFailure,
@@ -25555,6 +25556,45 @@ export function buildSweepEffects(
         const preflightStandDown = await dispatchFixPreflightStandDown(ghLiveState, pr, log);
         if (preflightStandDown) return;
 
+        // W1-T78: an operator's answer to a PRIOR clarification question (routed here by the
+        // DISPOSITION_RULES "answered" row) re-arms this SAME dispatch — never a new call site —
+        // carrying the answer as an added constraint (threaded below, once `task` resolves),
+        // its ceiling extended per the answer's own policy (config-driven, {@link
+        // strikeCapForAnswer}, folded into {@link fixCeilingInForce} below), instead of the
+        // ORIGINAL blocked_review dispatch's plain strikeCap. The fallback (when the answer
+        // itself carries no override) is `policy.clarify` — the SAME policy
+        // `DISPOSITION_RULES`' answered row just used to ROUTE here — never a second,
+        // independently-hardcoded default that could silently diverge from the routing decision.
+        //
+        // W1-T2452: THE CUMULATIVE CEILING NOW BINDS, and is checked BEFORE any worktree/git
+        // side effect — the SAME discipline the preflight check just above uses, so a refusal
+        // here never leaves a stray worktree behind. `runFixRung` always counts a NEW call from
+        // 0 strikes, so handing it a fresh full cap on every dispatch let one PR's ledger-derived
+        // `priorStrikes` exceed the ceiling by up to `cap - 1` on every dispatch after the first
+        // (observed: "fix strikes exhausted (3/2)" on PR #3043, cap=2). `fixCeilingInForce`
+        // (sweep.ts) names the SAME ceiling `DISPOSITION_RULES`' rows already render — base cap,
+        // or the extended answer ceiling when `pr.pendingAnswer` is live — and
+        // `fixDispatchBudget` hands `runFixRung` only the REMAINDER against it, so the ledger's
+        // running strike count for one PR can never cross that ceiling regardless of how many
+        // dispatches it takes.
+        const ceiling = fixCeilingInForce(pr, fixStrikeCap(config), policy.clarify);
+        const strikeCap = fixDispatchBudget(pr.priorStrikes, ceiling);
+        if (strikeCap == null) {
+          // W1-T2452 design note (ii), THE LOAD-BEARING HALF: a non-positive remainder must
+          // NEVER dispatch a zero-budget rung — that would silently convert an overspend into
+          // a no-op that strands an otherwise-fixable PR forever. `DISPOSITION_RULES` row 4
+          // already routes `priorStrikes >= strikeCap` to escalate, so reaching here at all
+          // means THIS dispatch's own routing disagreed with the ceiling actually in force —
+          // ledger that disagreement (naming the ceiling) instead of silently swallowing it,
+          // and spend nothing.
+          log("sweep.fix.ceiling_exhausted", {
+            pr_number: pr.prNumber,
+            prior_strikes: pr.priorStrikes,
+            ceiling,
+          });
+          return;
+        }
+
         // Creditability is load-bearing (status.ts ownsBranch): a fix must amend
         // THIS task's own run-branch (run-<id>-<epochMs>), never a foreign/fix-*
         // head — a fix on an uncreditable head loops forever + strands dependents.
@@ -25599,22 +25639,6 @@ export function buildSweepEffects(
           outPath: join(config.root, "tmp", `sweep-fix-settings-${task.id}-${Date.now()}.json`),
         });
         const budgetUsd = task.budget_usd ?? DEFAULT_BUDGET_USD;
-
-        // W1-T78: an operator's answer to a PRIOR clarification question
-        // (routed here by the DISPOSITION_RULES "answered" row) re-arms this
-        // SAME dispatch — never a new call site — carrying the answer as an
-        // added constraint and a strike cap set per the answer's own policy
-        // (config-driven, {@link strikeCapForAnswer}), instead of the
-        // ORIGINAL blocked_review dispatch's plain strikeCap. The fallback
-        // (when the answer itself carries no override) is `policy.clarify` —
-        // the SAME policy `DISPOSITION_RULES`' answered row just used to
-        // ROUTE here — never a second, independently-hardcoded default that
-        // could silently diverge from the routing decision.
-        const strikeCap = pr.pendingAnswer
-          ? strikeCapForAnswer(fixStrikeCap(config), {
-              resetStrikeCounterOnAnswer: pr.pendingAnswer.resetStrikeCounter ?? policy.clarify.resetStrikeCounterOnAnswer,
-            })
-          : fixStrikeCap(config);
 
         await runFixRung({
           ...buildFixRungDispatchArgs({
