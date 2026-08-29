@@ -267,6 +267,12 @@ export function decideBoardReviewCadence(i: BoardReviewCadenceInputs): BoardRevi
 interface BoardFinding {
   id: string;
   summary: string;
+  /** The board item that produced this finding (W1-T2451) — carried through onto the minted
+   *  proposal's OWN {@link Proposal.originatingItemId} so referent liveness becomes an
+   *  expressible, structured fact rather than something a reader has to parse back out of the
+   *  `id` string (see this task's own header note on why {@link approveRunBranch}'s id-shape
+   *  enumeration is a warning sign, not a reusable identity source). */
+  itemId: string;
 }
 
 /** Findings become proposal candidates, never tasks (design (iii)) — one per stale item and one
@@ -281,12 +287,14 @@ function diagnoseBoardFindings(items: readonly BoardItem[]): BoardFinding[] {
         summary:
           `board-review: ${it.id} has sat open ${it.ageHours.toFixed(1)}h, past the ` +
           `${BOARD_REVIEW_OLDEST_OPEN_AGE_HOURS}h depth threshold`,
+        itemId: it.id,
       });
     }
     if (it.unhandledEscalations > 0) {
       findings.push({
         id: `board-review:escalation:${it.id}`,
         summary: `board-review: ${it.id} carries ${it.unhandledEscalations} unhandled escalation(s)`,
+        itemId: it.id,
       });
     }
   }
@@ -380,7 +388,19 @@ export function buildBoardReview(opts: BuildBoardReviewOpts): BoardReviewReport 
       const existingIds = new Set(current.map((p) => p.id));
       const additions: Proposal[] = findings
         .filter((f) => !existingIds.has(f.id))
-        .map((f) => ({ id: f.id, summary: f.summary, evidenceAnchors: [] as EvidenceAnchor[] }));
+        .map((f) => ({
+          id: f.id,
+          summary: f.summary,
+          evidenceAnchors: [] as EvidenceAnchor[],
+          // W1-T2451: bind the referent structurally. `evidenceAnchors` is permanently empty for
+          // this whole proposal family (a PR NUMBER is not in the tree — a git-grep anchor would
+          // be a category error dressed as a fix, per this task's own design), which makes the
+          // `evidence_anchors` drift predicate mechanically unreachable for it. Recording WHICH
+          // board item minted this finding is what lets classifyProposal (inbox.ts) ask "has the
+          // referent resolved" instead — a question the id string alone couldn't structurally
+          // answer.
+          originatingItemId: f.itemId,
+        }));
       return additions.length > 0 ? [...current, ...additions] : null;
     });
     const draftedIds = new Set((drafted ?? []).map((p) => p.id));

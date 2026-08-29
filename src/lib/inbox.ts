@@ -127,6 +127,74 @@ export interface Proposal {
    *  reframe history rides the proposal until resolution" (P25 iii design). Empty/absent
    *  for a proposal that has never been reframed. */
   reframeHistory?: ReframeRecord[];
+  /** W1-T2451: the board item (board-review.ts's `BoardItem.id`) that produced this proposal,
+   *  when it was minted by the board-review rung — absent for every OTHER proposal family (a
+   *  hand-authored `P##`, a feedback-docket `FD-…`, a rule-efficacy `rule-efficacy:…`), which
+   *  have no such ephemeral referent to track. board-review.ts mints EVERY finding with
+   *  `evidenceAnchors: []` (a PR number is not a git-grep-able fact), which makes the
+   *  `evidence_anchors` drift predicate below permanently unreachable for this family — without
+   *  this field, nothing ever expresses "the PR this proposal is ABOUT has merged/closed/had its
+   *  escalation handled", so such a proposal renders READY forever. This is what makes that fact
+   *  expressible: see {@link classifyProposal}'s referent-retirement check. */
+  originatingItemId?: string;
+}
+
+// ── Board-review referent retirement (W1-T2451) ────────────────────────────────────────────
+//
+// A board-review proposal's evidenceAnchors is permanently `[]` (see Proposal.originatingItemId's
+// doc), so the ordinary evidence-drift predicate can never retire one. This is the SEPARATE
+// mechanism the design calls for: the proposal's bound referent (above) is checked against the
+// board item's OWN current state, read in ONE BATCH per classification pass — never one read per
+// proposal (a per-proposal GitHub/git read here would repeat the exact N-calls-per-tick shape
+// every other batched-gateway surface in this codebase already refuses to reintroduce).
+
+/** A board item's live state, as read off the board — the same status/escalation-count vocabulary
+ *  board-review.ts's own `BoardItem` carries. Duplicated here rather than imported: board-
+ *  review.ts already imports FROM inbox.ts (for {@link Proposal}/{@link updateProposalRegistry}),
+ *  so importing back would be a cycle — the same "deliberate, small duplication" board-review.ts's
+ *  own header doc argues for regarding measurement-cadence.ts's marker shape. */
+export interface BoardReferentState {
+  status: "open" | "merged" | "dead";
+  unhandledEscalations: number;
+}
+
+/**
+ * The result of the ONE batched read of every board-review referent's current state this
+ * classification pass — never a read per proposal. `"ok"` carries every item the read could
+ * observe, keyed by {@link Proposal.originatingItemId}; a proposal whose id is absent from
+ * `states` (an unparseable/unknown/vanished referent) is treated exactly like `"unreadable"` for
+ * THAT proposal — cannot-observe means WAIT (W1-T130), never a silent retirement. `"unreadable"`
+ * means the WHOLE batched read failed (GitHub unreachable, transport error): every board-review
+ * proposal keeps whatever classification it would otherwise have gotten and is marked unverified,
+ * rather than any of them being folded into a guess in either direction.
+ */
+export type BoardReferentRead = { kind: "ok"; states: ReadonlyMap<string, BoardReferentState> } | { kind: "unreadable" };
+
+/** True once a board-review finding's OWN referent has left the state that produced it. A
+ *  `board-review:stale:<ref>` finding resolves once the item is no longer open (merged or dead) —
+ *  staleness is a property of an OPEN item, so a closed one cannot still be stale. A
+ *  `board-review:escalation:<ref>` finding resolves the same way OR once its escalations are all
+ *  handled while the item stays open (design: "merged, dead, or its escalation handled") — an
+ *  escalation can be acknowledged without the PR itself closing. Kind is read off the proposal's
+ *  OWN id prefix, the same namespace board-review.ts already mints and {@link approveRunBranch}'s
+ *  own doc already enumerates — never re-derived from the referent's identity, which this task's
+ *  whole point is that the id string should NOT have to carry. */
+function boardReferentResolved(proposal: Proposal, state: BoardReferentState): boolean {
+  if (state.status !== "open") return true;
+  return proposal.id.startsWith("board-review:escalation:") && state.unhandledEscalations === 0;
+}
+
+type BoardReferentLookup = { kind: "live" } | { kind: "resolved" } | { kind: "unreadable" };
+
+/** Resolves ONE proposal's referent against the batch {@link BoardReferentRead} — never issuing
+ *  its own read. A proposal with no {@link Proposal.originatingItemId} at all (every non-board-
+ *  review proposal) is simply `"live"`: this whole mechanism does not apply to it. */
+function resolveBoardReferent(proposal: Proposal, read: BoardReferentRead | undefined): BoardReferentLookup {
+  if (!proposal.originatingItemId) return { kind: "live" };
+  if (!read || read.kind === "unreadable") return { kind: "unreadable" };
+  const state = read.states.get(proposal.originatingItemId);
+  if (!state) return { kind: "unreadable" };
+  return boardReferentResolved(proposal, state) ? { kind: "resolved" } : { kind: "live" };
 }
 
 // ── Drafted candidate (the LLM's output — a value from here on, never re-invoked) ─────────
@@ -272,7 +340,7 @@ export interface PredicateFailure {
   detail: string;
 }
 
-export type InboxState = "ready" | "not_ready" | "deferred_with_trigger" | "ratified" | "drafting";
+export type InboxState = "ready" | "not_ready" | "deferred_with_trigger" | "ratified" | "drafting" | "retired";
 
 export interface InboxClassification {
   proposalId: string;
@@ -289,6 +357,19 @@ export interface InboxClassification {
    *  proposal's draft was spawned (W1-T193's "never renders nothing during a legitimate
    *  multi-minute mid-draft window" bar). */
   draftSpawnedAt?: string;
+  /** W1-T2451: present iff state === "retired" — names why the proposal's board-review referent
+   *  resolved (merged/dead/escalation-handled), so an operator reading the registry sees that a
+   *  finding existed and why it went moot, never a silent drop (retirement is a state, never a
+   *  deletion — the proposal itself stays in the registry unchanged). */
+  retiredReason?: string;
+  /** W1-T2451: true iff this proposal names a board-review referent (has an
+   *  {@link Proposal.originatingItemId}) whose current state could not be determined this pass —
+   *  either the whole batched {@link BoardReferentRead} failed, or this proposal's own id was
+   *  absent from it (unparseable/unknown referent). The classification's `state` is otherwise
+   *  computed exactly as it would be with no referent tracking at all — cannot-observe means
+   *  WAIT (W1-T130): a proposal is never silently retired, and never silently kept out of a
+   *  legitimate READY, just because its referent could not be read this pass. */
+  referentUnverified?: boolean;
 }
 
 export interface ReadinessContext {
@@ -313,6 +394,17 @@ export interface ReadinessContext {
    * fixes is exactly a registry entry that drifted from an already-ledgered `ratify.approved`.
    */
   isRatified: (proposalId: string) => boolean;
+  /**
+   * W1-T2451: the ONE batched read of every board-review referent's current state this
+   * classification pass — never a per-proposal read. Optional, exactly like
+   * {@link draftSpawnedAt}'s/{@link depsUnobservable}'s own optional siblings: every existing
+   * fixture/caller that never had a reason to think about a board-review referent is unaffected,
+   * and every proposal without an {@link Proposal.originatingItemId} ignores this entirely. When
+   * omitted, a proposal WITH an `originatingItemId` is treated as unreadable (never silently
+   * retired — cannot-observe means WAIT) rather than assumed live, so a caller that forgets to
+   * wire this in fails toward "keep showing it, marked unverified", not toward a false retirement.
+   */
+  boardReferents?: BoardReferentRead;
   /**
    * Present iff the daemon's draft rung currently has an Architect worker running for this
    * proposal id (W1-T193) — returns the ISO spawn timestamp, or `undefined` when no draft
@@ -544,6 +636,29 @@ export function classifyProposal(
   if (ctx.isRatified(proposal.id)) {
     return { proposalId: proposal.id, state: "ratified", reasons: [] };
   }
+  // W1-T2451: a board-review proposal's referent is checked next, before drafting/trigger/the
+  // four AND-clauses below. RESOLVED (the referent left the open board) is a terminal override,
+  // exactly like the ratified check above — a proposal about a PR that already merged, died, or
+  // had its escalation handled must never render READY, drafting, or deferred no matter what the
+  // rest of this function would otherwise say, because there is no longer a live referent for any
+  // of those states to be ABOUT. UNREADABLE never short-circuits: it only sets a flag threaded
+  // into whatever classification the rest of this function computes normally, so a proposal is
+  // never held out of a legitimate READY (or hidden into one) just because this pass's batched
+  // read failed — cannot-observe means WAIT (W1-T130), not "guess in either direction". LIVE (or
+  // no referent at all — every non-board-review proposal) changes nothing below.
+  const referent = resolveBoardReferent(proposal, ctx.boardReferents);
+  if (referent.kind === "resolved") {
+    return {
+      proposalId: proposal.id,
+      state: "retired",
+      reasons: [],
+      retiredReason:
+        `${proposal.id}'s referent (${proposal.originatingItemId}) has resolved — merged, dead, or its ` +
+        `escalation handled — so this proposal can never render READY again; it stays in the registry ` +
+        `as a record of the finding, never deleted`,
+    };
+  }
+  const referentUnverified = referent.kind === "unreadable" ? { referentUnverified: true as const } : {};
   // W1-T193: an Architect worker currently drafting this proposal is checked next, before the
   // ordinary not-ready/deferred predicates below — a proposal legitimately mid-draft for
   // minutes (W1-T192's daemon-side rung) must never render as "not ready" (indistinguishable
@@ -553,7 +668,7 @@ export function classifyProposal(
   // selected for drafting — but the order here is defensive, not load-bearing on that fact.
   const draftSpawnedAt = ctx.draftSpawnedAt?.(proposal.id);
   if (draftSpawnedAt) {
-    return { proposalId: proposal.id, state: "drafting", reasons: [], draftSpawnedAt };
+    return { proposalId: proposal.id, state: "drafting", reasons: [], draftSpawnedAt, ...referentUnverified };
   }
   if (proposal.trigger && !proposal.trigger.fired) {
     return {
@@ -564,6 +679,7 @@ export function classifyProposal(
       // unfired condition, which is the whole reason this proposal is never recommended.
       reasons: [],
       trigger: proposal.trigger,
+      ...referentUnverified,
     };
   }
 
@@ -571,7 +687,7 @@ export function classifyProposal(
 
   if (!draft) {
     reasons.push({ predicate: "drafted", detail: "not-drafted: no drafted candidate available yet" });
-    return { proposalId: proposal.id, state: "not_ready", reasons };
+    return { proposalId: proposal.id, state: "not_ready", reasons, ...referentUnverified };
   }
 
   const draftStale = isDraftStale(draft, proposal.evidenceAnchors);
@@ -613,9 +729,9 @@ export function classifyProposal(
   }
 
   if (reasons.length === 0) {
-    return { proposalId: proposal.id, state: "ready", reasons: [], draftStale, draft };
+    return { proposalId: proposal.id, state: "ready", reasons: [], draftStale, draft, ...referentUnverified };
   }
-  return { proposalId: proposal.id, state: "not_ready", reasons, draftStale };
+  return { proposalId: proposal.id, state: "not_ready", reasons, draftStale, ...referentUnverified };
 }
 
 // ── The draft rung: pure prompt + parser (LLM call is harness-owned, run-task.ts) ─────────
@@ -946,10 +1062,11 @@ export function renderInbox(classifications: InboxClassification[]): string {
   const notReady = classifications.filter((c) => c.state === "not_ready");
   const ratified = classifications.filter((c) => c.state === "ratified");
   const drafting = classifications.filter((c) => c.state === "drafting");
+  const retired = classifications.filter((c) => c.state === "retired");
 
   lines.push(
     `rmd inbox: ${ready.length} READY, ${notReady.length} not ready, ${deferred.length} deferred-with-trigger, ` +
-      `${drafting.length} drafting, ${ratified.length} already ratified.`,
+      `${drafting.length} drafting, ${ratified.length} already ratified, ${retired.length} retired.`,
   );
   for (const c of ready) {
     lines.push("");
@@ -980,6 +1097,13 @@ export function renderInbox(classifications: InboxClassification[]): string {
   for (const c of ratified) {
     lines.push("");
     lines.push(`RATIFIED — ${c.proposalId} (already ratified via a prior \`rmd approve\`; no longer active)`);
+  }
+  // W1-T2451: a proposal whose referent resolved (merged/dead/escalation-handled) is named here,
+  // not silently dropped — retirement is a state, never a deletion, and this is where an operator
+  // sees that the finding existed and why it went moot.
+  for (const c of retired) {
+    lines.push("");
+    lines.push(`RETIRED — ${c.proposalId} (${c.retiredReason ?? "referent resolved"})`);
   }
   return lines.join("\n");
 }
@@ -1414,6 +1538,9 @@ export function refusalReason(c: InboxClassification): string {
   if (c.state === "ready") return "";
   if (c.state === "ratified") {
     return `${c.proposalId} is already RATIFIED (the ledger carries ratify.approved for it) — no further approve action is possible`;
+  }
+  if (c.state === "retired") {
+    return `${c.proposalId} is RETIRED (${c.retiredReason ?? "referent resolved"}) — never approvable`;
   }
   if (c.state === "deferred_with_trigger") {
     return `${c.proposalId} is DEFERRED-WITH-TRIGGER (trigger not fired: ${c.trigger?.description ?? "unnamed trigger"}) — never approvable`;
