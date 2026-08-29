@@ -279,7 +279,7 @@ deliberate comment-provenance assertions, and its contributor docs do not point 
 **(g)** W1-T2451's own filing documents that `evidenceAnchors: []` made board-review proposal drift
 mechanically unreachable — fixed by #3255, with `ReadinessContext.boardReferents` left dark by the
 task's own file fence. (a)–(g) are RECORDED, not filed — NOT because a rule forbade it (the
-no-auto-filing doctrine was mis-cited as standing rule 15; §12 rule 27 PERMITS automatic filing,
+no-auto-filing doctrine was mis-cited as a §12 rule number; rule 27 PERMITS automatic filing,
 operator ruling 2026-08-29) but because this lane chose to record rather than file.
 ★ **PRIOR CYCLES — NOT SUMMARISED HERE.** The header's retro ledger folds R1–R35 with every arc, rank
 change, mint and design rule named, and the SHIPPED log's own section headers carry every id, PR and
@@ -411,7 +411,8 @@ by no instrument in this file — three straddlers (TASK L) and one whose run st
 ownership on it instead of FILTERING every candidate, so a correct rejection ends the search** (P60,
 established on #3242/#3237 with #3251/#3255 as the control); **and all 5 hand-named code merges carry
 no `Remudero-Task:` trailer on either surface** (P33's un-entitled class, not P58's); and the
-follow-up chain the harvests name but standing rule 15 forbids auto-filing (~95 candidates, still headed
+follow-up chain the harvests name but the unwritten no-auto-filing doctrine, mis-cited as a §12
+rule number, held back (~95 candidates, still headed
 by R19's unresolved P0: `service.ts` drains the request body to bind a HIGH-tier nonce and four of five
 HIGH-tier handlers hang re-reading it).
 **NEXT (L2) — ONE MINT AT RANK 2, ONE RETIRED CLASS RETURNED, AND A FALSIFIER THAT CAUGHT ITS OWN
@@ -1795,8 +1796,8 @@ fourth cycle**).
 **ONE new P-number: P60 is MINTED (the highest prior header was P59).**
 **ONE task letter RESTORED: TASK G is UN-RETIRED on a member no held class can claim. A–N stand; the
 next unused is O.** **STANDING: candidates are ratified by the Architect via a tasks.yaml PR —
-the unwritten no-auto-filing doctrine, mis-cited as standing rule 15;
-§12 rule 27 now permits automatic filing.**
+the unwritten no-auto-filing doctrine, mis-cited as a §12 rule
+number; rule 27 now permits automatic filing.**
 
 - **★ THE HEADLINE — A CORRECT REJECTION ENDED THE SEARCH, AND THE SAME WINDOW SHOWS IT DIDN'T HAVE
   TO.** Read out-of-band over `pulls/<n>/files`, `pulls/<n>`, `commits/<merge_commit_sha>` and the epoch
