@@ -1006,7 +1006,17 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
   // root (`perRunWorkerHomeDir`), never the shared root itself; reaped below
   // on every exit path (including error) once this spawn is done with it.
   const workerHomeRoot = workerHomeDir(config);
-  const workerHome = perRunWorkerHomeDir(workerHomeRoot, args.runId);
+  // W1-T2441 REMEDY: `perSpawn: true`. `args.runId` is DAEMON-SCOPED on the fix-rung path (#2862
+  // threaded it in for `workerMarkerEnv` below, which is the attribution the reclaim/orphan
+  // sweeps match on — it is KEPT, not reverted), so without a per-spawn discriminator every fix
+  // spawn in one daemon run resolved to the SAME `worker-home-DAEMON-<epoch>` and the `finally`
+  // below `rmSync -rf`'d it out from under its still-running siblings. MEASURED at head from the
+  // instrumentation #3234 shipped: 68 uuid-named homes reaped exactly once each, against
+  // DAEMON-named homes reaped 1/2/3/4/6 times, one of them reading true,absent,absent,true,true,
+  // true on a single run_id. The uniqueness is opt-in HERE rather than inside
+  // `perRunWorkerHomeDir`, because `readUsageSnapshot` (run-task.ts) deliberately wants a stable,
+  // non-per-call home from that same function.
+  const workerHome = perRunWorkerHomeDir(workerHomeRoot, args.runId, { perSpawn: true });
   const realHome = process.env.HOME ?? homedir();
   try {
     // W1-T235 (WS-7 keychain-unlock gate, macOS only): guarantee the DEDICATED
