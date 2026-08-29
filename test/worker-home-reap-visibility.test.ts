@@ -12,7 +12,12 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync } from "
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { perRunWorkerHomeDir, reapWorkerHome, type WorkerHomeReapResult } from "../src/lib/worker-home.js";
+import {
+  perRunWorkerHomeDir,
+  reapWorkerHome,
+  WORKER_HOME_SPAWN_UUID_RE,
+  type WorkerHomeReapResult,
+} from "../src/lib/worker-home.js";
 import {
   CLAUDE_BIN_ENV_OVERRIDE,
   createClaudeExecutableCache,
@@ -280,5 +285,29 @@ test("remedy shipped: the DEFAULT still returns one stable path per runId, while
     perRunWorkerHomeDir(root, "DAEMON-shared-run", { perSpawn: true }),
     perRunWorkerHomeDir(root, "DAEMON-shared-run", { perSpawn: true }),
     "two fix spawns in one daemon run must never resolve to one directory again",
+  );
+});
+
+// ── negative-reachability-ratchet fixture (W1-T2441, CI round 2) ────────────────────────────
+// `WORKER_HOME_SPAWN_UUID_RE` (src/lib/worker-home.ts) is a module-scope `_RE` validator this
+// task's own remedy introduced; test/negative-reachability-ratchet.test.ts's PROPERTY gate counts
+// any such surface fixture-less (baseline 0 for a brand-new symbol) unless BOTH its unhealthy
+// (rejecting) and healthy (accepting) arms are driven by identifier via a `.test(...)`/`.exec(...)`
+// call somewhere in test/**/*.ts. `runIdFromWorkerHomeSuffix`'s own `.replace(...)` call cannot
+// satisfy that detector (it only credits `.test`/`.exec`), so both arms are asserted here directly.
+test("WORKER_HOME_SPAWN_UUID_RE: matches a trailing per-spawn uuid and rejects a bare runId with no uuid suffix", () => {
+  // healthy arm: a suffix that DOES end in a per-spawn uuid, as perRunWorkerHomeDir's perSpawn
+  // form actually produces (runId, hyphen, canonical v4-shaped uuid).
+  assert.equal(
+    WORKER_HOME_SPAWN_UUID_RE.test("DAEMON-1787980131770-1b9d6c2e-4b8a-4c1a-9c2a-abcdef123456"),
+    true,
+    "a genuine trailing per-spawn uuid must match",
+  );
+  // unhealthy arm: a bare runId with no uuid suffix at all — the DEFAULT (non-perSpawn) shape
+  // perRunWorkerHomeDir still returns for readUsageSnapshot's stable-home caller.
+  assert.equal(
+    WORKER_HOME_SPAWN_UUID_RE.test("DAEMON-1787980131770"),
+    false,
+    "a bare runId with no trailing uuid must not match",
   );
 });

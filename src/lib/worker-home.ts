@@ -571,8 +571,13 @@ export function perRunWorkerHomeDir(
 
 /** A canonical v4-shaped UUID sitting at the END of a worker-home suffix — the per-spawn
  *  discriminator {@link perRunWorkerHomeDir} appends under `perSpawn`. Anchored to `$` so it can
- *  only ever match the trailing segment, never a runId that happens to contain hex. */
-const WORKER_HOME_SPAWN_UUID_RE = /-?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+ *  only ever match the trailing segment, never a runId that happens to contain hex.
+ *  Exported (W1-T2441 round 1 CI fix, negative-reachability-ratchet, test/negative-reachability-
+ *  ratchet.test.ts) so its unhealthy (no trailing uuid) and healthy (trailing uuid) arms can each
+ *  be driven and asserted by identifier from test/worker-home-reap-visibility.test.ts, rather than
+ *  only indirectly through {@link runIdFromWorkerHomeSuffix}'s `.replace(...)` call, which that
+ *  ratchet's `.test(...)`/`.exec(...)`-only detector cannot credit. */
+export const WORKER_HOME_SPAWN_UUID_RE = /-?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * W1-T2441: the RUN ID inside a worker-home directory's suffix, with any per-spawn uuid stripped.
