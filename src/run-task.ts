@@ -15714,6 +15714,40 @@ export interface OpenShardGateway {
  * match. That is already `duplicateTitleViolations`' documented contract and this preserves it:
  * a GitHub outage must never fail a filing, and must never invent one either.
  */
+/**
+ * W1-T2455: every task record ALREADY FILED on `origin/main`, as a slug corpus — what
+ * `approveProposal` scores a proposal's DRAFTED shard slugs against before it mints anything.
+ *
+ * ONE `git ls-tree`. No network, no `git log` body walk, and no second store to drift. It is
+ * deliberately NOT the merged-TRAILER scan: a shard stays in `plan/tasks.d/` whether or not its
+ * implementation merged, so the tree already carries every FILED id — which is the predicate a
+ * mint actually needs ("does a task for this exist") rather than the weaker "did it merge".
+ * MEASURED 2026-08-29: 700 shard paths -> 700 corpus entries.
+ *
+ * BEST-EFFORT BY CONTRACT: an unreadable tree yields an EMPTY corpus, which `approveProposal`
+ * treats as "do not check" rather than "refuse" — see {@link RatifyLedgerDeps.duplicateCorpus}.
+ * `exec` is injectable so both arms are reachable without a repository.
+ */
+export function filedShardSlugCorpus(
+  repoRoot: string,
+  exec: (args: readonly string[]) => string = (args) => execFileSync("git", [...args], { encoding: "utf8" }),
+): DuplicateCorpusEntry[] {
+  try {
+    const paths = exec(["-C", repoRoot, "ls-tree", "origin/main", "--name-only", "--", "plan/tasks.d/"])
+      .split("\n")
+      .filter(Boolean);
+    return planShardSlugCorpus(paths);
+  } catch {
+    // NOT AN ERASING CATCH — the empty corpus IS the decision, and it is the fail-open half of
+    // this check's contract: a `git ls-tree` that cannot run (no origin/main locally, a detached
+    // clone, a permissions hiccup) degrades a duplicate REFUSAL into today's behaviour rather
+    // than blocking a ratification on the checker's own blindness. Nothing actionable is
+    // swallowed: there is no partial corpus to report, and throwing would make a diagnostic
+    // strictly more dangerous than the defect it looks for.
+    return [];
+  }
+}
+
 export function openPlanShardSlugs(github: OpenShardGateway): DuplicateCorpusEntry[] {
   const listOpen = github.listOpenHeadBranches;
   const changed = github.changedFiles;
@@ -29345,9 +29379,11 @@ export async function approveCommand(rest: string[], deps: { config?: Config; ga
     },
   };
 
+  const duplicateCorpus = filedShardSlugCorpus(repoRoot);
+
   let result: ReturnType<typeof approveProposal>;
   try {
-    result = approveProposal(classification, gateway, { ledgerPath, runId });
+    result = approveProposal(classification, gateway, { ledgerPath, runId, duplicateCorpus });
   } catch (e) {
     // W1-T311: createRatificationBranch REFUSED (a degraded mint or a failed reservation) —
     // or any other failure inside either gateway call. approveProposal never reached its own
