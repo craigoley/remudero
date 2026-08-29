@@ -48,6 +48,7 @@ import {
   type SweepPolicy,
 } from "../src/lib/sweep.js";
 import type { Plan, Task } from "../src/lib/plan.js";
+import type { CriterionVerdict } from "../src/lib/review.js";
 
 const NOW = Date.parse("2026-08-29T12:00:00Z");
 const RECENT = "2026-08-29T11:00:00Z"; // well under DEFAULT_SWEEP_POLICY.staleDays
@@ -183,6 +184,46 @@ test("deriveDisposition: a blocked-fixable gate-failure reason also renders the 
   const result = deriveDisposition(gateFailurePr, DEFAULT_SWEEP_POLICY, NOW);
   assert.equal(result.disposition, "blocked-fixable");
   assert.match(result.reason, /strike 1\/4/, `expected the extended ceiling (4) as the denominator; got: ${result.reason}`);
+});
+
+// REVIEW FOLLOW-UP (#3256): the ONE ratio-rendering row this task deliberately leaves on the
+// bare `policy.strikeCap` — row 5.5, W1-T1269's `fixRungRepeatsIdenticalFailure` escalation.
+// It is not an oversight and not a latent wrong denominator: the row is UNREACHABLE while a
+// `pendingAnswer` is live, which is the only state in which `fixCeilingInForce` and
+// `policy.strikeCap` can differ at all. `fixRungRepeatsIdenticalFailure` requires a non-empty
+// `unmetCriteria`, so `reviewShape` inside the "answered" row's own `when` is necessarily true
+// whenever row 5.5 could match — and then either `priorStrikes < ceiling` (the answered row
+// claims the PR first, re-dispatching) or `priorStrikes >= ceiling >= strikeCap` (row 4's
+// exhaustion claims it first). Locked here by MEASUREMENT over the spread rather than left as
+// an argument in a comment, so a future reordering of DISPOSITION_RULES that makes row 5.5
+// reachable-while-answered reddens this test instead of silently shipping the wrong ratio.
+test("row 5.5's bare strikeCap denominator is unreachable while an answer is live, so it can never disagree with the ceiling in force", () => {
+  const unmet = (claim: string): CriterionVerdict => ({ claim, proof: `unit test: ${claim}`, met: false, reason: "not done", proof_exec: "executed_fail" });
+  const repeatShape: Partial<OpenPrView> = {
+    reviewState: "failure",
+    checksState: "green",
+    unmetCriteria: [unmet("A"), unmet("B")],
+    strikeHistory: [{ strike: 1, round: "fresh", unmetCount: 2, unmetClaims: ["A", "B"], ciGreen: true }],
+  };
+
+  let reachedWithoutAnswer = 0;
+  for (let priorStrikes = 0; priorStrikes <= 6; priorStrikes++) {
+    const plain = deriveDisposition(pr({ ...repeatShape, priorStrikes }), DEFAULT_SWEEP_POLICY, NOW);
+    if (/identical unmet criteria/.test(plain.reason)) reachedWithoutAnswer++;
+
+    const answered = deriveDisposition(
+      pr({ ...repeatShape, priorStrikes, pendingAnswer: { constraint: "use approach X" } }),
+      DEFAULT_SWEEP_POLICY,
+      NOW,
+    );
+    assert.equal(
+      /identical unmet criteria/.test(answered.reason),
+      false,
+      `row 5.5 became reachable with a live pendingAnswer at priorStrikes=${priorStrikes} — its denominator would now be wrong: ${answered.reason}`,
+    );
+  }
+  // The CONTROL, so the assertion above is not vacuously true against a row nothing ever hits.
+  assert.ok(reachedWithoutAnswer > 0, "row 5.5 must really fire when no answer is live, or this test proves nothing");
 });
 
 // ── (D) structural lock: the dispatch site can never fall through a non-positive budget ──────
