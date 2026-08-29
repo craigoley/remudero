@@ -373,6 +373,7 @@ import {
   type ReadinessContext,
   type RatifyGateway,
   type ReframeResult,
+  writeRatificationShards,
 } from "./lib/inbox.js";
 import {
   buildFeedbackDocket,
@@ -29052,6 +29053,10 @@ export async function approveCommand(rest: string[], deps: { config?: Config; ga
 
   let repoDir: string | undefined;
   let worktreePath: string | undefined;
+  // The shard path(s) this ratification wrote, captured beside `filedTaskIds` and for the same
+  // reason: `openPlanPr` runs after the branch call and must name what was ACTUALLY written rather
+  // than a path it assumes. Empty on the adopt/resume paths, which write nothing.
+  let shardRelPaths: string[] = [];
   // Filed task id(s), captured by whichever of createRatificationBranch/completeRatificationBranch
   // ran (approveProposal calls exactly one of them, always before openPlanPr — see inbox.ts's
   // own doc) for openPlanPr's Acceptance-criteria auto-authorship below — the closure approach
@@ -29104,7 +29109,12 @@ export async function approveCommand(rest: string[], deps: { config?: Config; ga
       // by anything origin/main gained afterward (a plain two-dot diff would not be) — same
       // `- id: <id>` per-line shape the fresh-mint path below extracts, just over the diff's
       // ADDED lines rather than the freshly-materialized fragment text.
-      const diff = execFileSync("git", ["-C", worktreePath, "diff", "origin/main...HEAD", "--", "plan/tasks.yaml"], { encoding: "utf8" });
+      // BOTH FILING SHAPES, because a resumed branch may predate the shard write: one pushed
+      // before it carries its ids in plan/tasks.yaml, one pushed after carries them in
+      // plan/tasks.d/. Scoping this diff to the monolith alone would read ZERO ids off every
+      // shard-filed branch and hand `openPlanPr` an empty list — a resumed ratification silently
+      // losing the very ids it filed.
+      const diff = execFileSync("git", ["-C", worktreePath, "diff", "origin/main...HEAD", "--", "plan/tasks.yaml", "plan/tasks.d"], { encoding: "utf8" });
       filedTaskIds = diff
         .split("\n")
         .map((line) => /^\+- id:\s*(\S+)/.exec(line)?.[1])
@@ -29180,8 +29190,15 @@ export async function approveCommand(rest: string[], deps: { config?: Config; ga
       }
       log("approve.id_materialized", { proposal_id: payload.proposalId, ids: materialized.ids });
 
-      const tasksPath = join(worktreePath, "plan", "tasks.yaml");
-      writeFileSync(tasksPath, applyFragmentToPlanYaml(readFileSync(tasksPath, "utf8"), materialized.fragmentYaml), "utf8");
+      // ONE SHARD PER DRAFTED TASK, NEVER AN APPEND TO THE MONOLITH. `lint-plan`'s
+      // `monolith-filing` rule refuses a NEW id filed into plan/tasks.yaml in as many words, and
+      // this was the last write site still doing it. It had never met the gate: no proposal had
+      // ever been ratified (0 `ratify.approved` rows before 2026-08-29), so the first successful
+      // approve came back `lint-plan failure` on its own filing and all 17 READY proposals would
+      // have failed identically. `applyFragmentToPlanYaml` (lib/inbox.ts) stays exported and
+      // tested — it is still the monolith composer — but this path no longer reaches it.
+      shardRelPaths = writeRatificationShards(worktreePath, materialized.fragmentYaml, payload.proposalId, { mkdirSync, writeFileSync }, join);
+      log("approve.shards_written", { proposal_id: payload.proposalId, paths: shardRelPaths });
       const masterPlanPath = join(worktreePath, "MASTER-PLAN.md");
       writeFileSync(masterPlanPath, applyStampToMasterPlan(readFileSync(masterPlanPath, "utf8"), payload.proposalId, materialized.stampLine), "utf8");
 
@@ -29219,7 +29236,7 @@ export async function approveCommand(rest: string[], deps: { config?: Config; ga
       const ids = filedTaskIds.length > 0 ? filedTaskIds : [id];
       const body = buildPlanPrBody({
         intro,
-        criteria: filingAcceptanceCriteria(ids, ["plan/tasks.yaml", "MASTER-PLAN.md"]),
+        criteria: filingAcceptanceCriteria(ids, [...shardRelPaths, "MASTER-PLAN.md"]),
       });
       assertLiveWriteAllowed("gh-pr-create", `opening a PR against ${owner}/${repo}`);
       // W1-T903 design (i): REST, not `gh pr create` (GraphQL) — a pure transport swap, since
