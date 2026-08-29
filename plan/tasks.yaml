@@ -13180,3 +13180,112 @@
     asymmetric: a recursion or a cancel-in-progress bug either spins the gate or leaves a cancelled
     ci-gate as the newest run, which reads as a hard red. The guards in design (ii)/(iii) are load-bearing
     criteria, not defensive extras."
+- id: W1-T2451
+  title: "BOARD-REVIEW PROPOSALS OUTLIVE THEIR REFERENTS — every finding is minted with evidenceAnchors: [], so drift is mechanically unreachable and a proposal about an ephemeral PR renders READY forever after that PR merges, closes, or has its escalation handled"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "OBSERVED 2026-08-27 while drafting a ratification candidate for the live proposal
+    `board-review:escalation:#3039` ('#3039 carries 1 unhandled escalation(s)'). Its referent had
+    already burned its fix-rung strikes days earlier — plan/feedback/fb-repair-blocked-fixable-2956.yaml
+    records PR #3039 at ee02fe5, 2026-08-27T03:29:54Z, 'required checks red — ci-log fix, strike 2/2'.
+    The proposal was still offered as a live ratification decision.
+    ROOT CAUSE VERIFIED AT SOURCE, THREE FACTS, EACH READ RATHER THAN ASSUMED:
+    (1) src/lib/board-review.ts:383 — diagnoseBoardFindings' candidates are mapped to
+    `{ id, summary, evidenceAnchors: [] as EvidenceAnchor[] }`. EVERY board-review proposal carries an
+    EMPTY anchor set.
+    (2) src/lib/inbox.ts:548 — classifyProposalReadiness derives drift as
+    `proposal.evidenceAnchors.filter((a) => !ctx.grepAnchorTrue(a))`. Over an empty set that result is
+    ALWAYS empty, so the `evidence_anchors` predicate is MECHANICALLY UNREACHABLE for this whole family:
+    a board-review proposal cannot be EVIDENCE-DRIFTED by construction, not by circumstance.
+    (3) src/lib/inbox.ts:152/163/204 — `anchorFingerprint([])` is the constant `\"\"`, so
+    `isDraftStale(draft, [])` is permanently false and `draftAttemptKey` is permanently `\"::0\"`.
+    CONSEQUENCE: once drafted lint-clean with merged deps, such a proposal is PERMANENTLY READY. No
+    mechanism moves it — not drift, not staleness, not the referent dissolving. Only an operator
+    approve/reject ends it, and approving it files a task about a PR that no longer exists.
+    THE REFERENT IS EPHEMERAL, WHICH IS WHAT MAKES THIS STRUCTURAL RATHER THAN COSMETIC. A `P##`
+    proposal names a durable plan concern; `board-review:escalation:#3039` names a PR NUMBER. PR
+    liveness is exactly the fact these proposals never record and never re-read.
+    THIS IS THE STANDING-RULE-22 CLASS (CLAIMED vs EVIDENCED) ON ITS FOURTH SURFACE, and the three
+    filed siblings each own a DIFFERENT artifact: W1-T162 closes escalation ISSUES whose referent
+    resolved; W1-T257 reconciles feedback ENTRY status once a proposal_pr merges; W1-T190 syncs the
+    registry against the ledger's ratify.approved receipt. NONE of them reads a board-review proposal,
+    and a grep of src/ for `board-review:` returns ONLY the two minting sites in board-review.ts — no
+    reader, no reconciler, no retirement anywhere. W1-T2304's own design fences write authority and
+    bounds recursion but is silent on what happens to a proposal after its referent dissolves."
+  design: |
+    THE INVARIANT: a board-review proposal whose referent has RESOLVED never renders READY. That is
+    one property, and it is UNSATISFIABLE PIECEWISE — which is why the two halves land together.
+    (i) THE MINTER BINDS THE REFERENT. diagnoseBoardFindings records WHICH board item produced each
+    finding, so referent liveness becomes an expressible fact rather than an absent one. Today the id
+    string embeds the PR number and nothing structured carries it.
+    (ii) THE READINESS PREDICATE READS IT. A proposal whose referent has left the open board classifies
+    as a distinct terminal state, not READY. VERIFY FROM SOURCE before choosing the mechanism: the
+    existing `ProposalTrigger`/`deferred_with_trigger` path (inbox.ts:182, ~:500) expresses NOT-YET, not
+    NO-LONGER, so it is probably the wrong vehicle — do not bend it into one without reading it. Equally,
+    do NOT express referent liveness as a git-grep EvidenceAnchor: `gitGrepAnchorTrue` greps a ref, and a
+    PR number is not in the tree, so an anchor would be a category error dressed as a fix.
+    RETIREMENT IS A STATE, NEVER A DELETION. The proposal and its provenance stay in the registry — this
+    repo already established retirement-as-record over erasure (W1-T229; W1-T269/W1-T270 in PR #1030/
+    #1027). An operator must be able to see that a finding existed and why it went moot.
+    FAIL-SAFE DIRECTION, AND IT IS THE OPPOSITE OF THE OBVIOUS ONE: when the referent's state CANNOT BE
+    READ (GitHub unreachable, an unparseable id), KEEP the proposal in its current state and mark it
+    unverified. Hiding a possibly-live decision is worse than showing a resolved one — the same polarity
+    W1-T182 takes for escalation rows and W1-T257 for feedback entries. Cannot-observe means WAIT, never
+    retire (W1-T130).
+    ONE BATCHED READ, NEVER ONE PER PROPOSAL — the batched-gateway discipline every board surface already
+    inherits.
+    SCOPE FENCE, so nothing is orphaned and nothing is re-decided (standing rule 14). The depth trigger,
+    its three thresholds, the cadence/marker pacing, the one sanctioned rerun action, and the recursion
+    bound (`boardItemsInScope`) are all UNTOUCHED. This changes what happens to a finding AFTER it is
+    minted, never whether the rung fires. DELIBERATELY NOT DEPENDED ON: W1-T168 (the fix rung's escape
+    from a block it cannot fix) and the stuck-PR paramedic (fb-1784842083584-6cc22a) both act on the
+    UNDERLYING escalation that made #3039 fire; this task governs the PROPOSAL's lifecycle and must not
+    be held hostage to either. No gate is weakened and no threshold is tuned to reduce a count.
+  acceptance:
+    - claim: "a board-review proposal whose referent has RESOLVED (merged, dead, or its escalation handled) does NOT classify READY — the #3039 falsifier, against a test that FAILS on today's predicate, where evidenceAnchors: [] (board-review.ts:383) makes the evidence_anchors drift check at inbox.ts:548 mechanically unreachable"
+      proof: "unit test: test/board-review-proposal-lifecycle.test.ts"
+    - claim: "a board-review proposal whose referent is STILL LIVE classifies exactly as it does today — the falsifier proving this retires on referent resolution rather than blanket-retiring a whole proposal family"
+      proof: "unit test: test/board-review-proposal-lifecycle.test.ts"
+    - claim: "an UNREADABLE referent state KEEPS the proposal in its current state and marks it unverified, never silently retiring it — cannot-observe means wait (W1-T130), and referent state resolves through ONE batched read, never one per proposal"
+      proof: "unit test: test/board-review-proposal-lifecycle.test.ts"
+    - claim: "retirement is a STATE, not a deletion — the retired proposal and its provenance survive in the registry, and the reconciliation is idempotent so a second pass over already-retired proposals changes nothing"
+      proof: "unit test: test/board-review-proposal-lifecycle.test.ts"
+    - claim: "the minter binds each finding to the board item that produced it, so referent liveness is an expressible fact rather than an absent one"
+      proof: "grep: originatingItemId in src/lib/board-review.ts"
+  risk: high
+  origin: architect
+  plan_refs: ["§7B", "§7", "P25"]
+  files: [src/lib/board-review.ts, src/lib/inbox.ts, test/board-review-proposal-lifecycle.test.ts]
+  status: queued
+  attempts: 0
+  note: "PROVENANCE: filed 2026-08-27 while drafting the ratification candidate for the board-review
+    rung's own live proposal `board-review:escalation:#3039`. `origin: architect` because the schema's
+    origin enum has no `proposal#` form and this is a hand-authored Architect filing; the full chain is
+    board-review rung -> proposal board-review:escalation:#3039 -> this task.
+    THE INSTANCE WAS DELIBERATELY REFUSED, and that refusal is the reason this task exists. Ratifying
+    `board-review:escalation:#3039` as written would have filed a task about ONE PR — an instance, not a
+    class, whose referent had already exhausted strike 2/2 before the proposal was ever read
+    (fb-repair-blocked-fixable-2956.yaml). W1-T20d names that shape by name: mine for a CLASS pattern and
+    propose ONE class-level fix rather than N per-task patches. The proposal is better read as EVIDENCE of
+    a lifecycle gap than as a work item.
+    depends_on IS DELIBERATELY EMPTY, and this is a judgement rather than an oversight. The machinery
+    edited here — classifyProposalReadiness, isDraftStale, anchorFingerprint, updateProposalRegistry — is
+    all LIVE IN SOURCE AND VERIFIED BY READING IT, while the tasks that describe it (W1-T110, W1-T111,
+    W1-T240) still read `queued` in the plan. depends_on is a HARD gate, so citing them would strand a
+    real fix behind an unclosed credit record for code that already exists. The relationship is recorded
+    here instead.
+    risk:high IS A RECORDED REGRADE ON THE MERITS, NOT A WORKAROUND. `files:` spans board-review.ts and
+    inbox.ts, which the linter's mechanical subsystem count reads as two concerns at risk:medium. It is
+    ONE invariant — a proposal whose referent resolved never renders READY — and it is unsatisfiable
+    piecewise: a minter recording a referent nothing reads changes nothing, and a reader with no referent
+    recorded has nothing to read. That is the atomic-coupling exit Rule 19 already grants
+    W1-T240/W1-T250/W1-T253, applied on the same footing.
+    NOT A RE-DECISION of W1-T162 (escalation ISSUES), W1-T257 (feedback ENTRY status), or W1-T190
+    (registry-vs-ledger ratify sync). Those three own different artifacts and different triggers; each
+    reconciles something an operator or the gate ACTED on, whereas this one governs a proposal whose
+    referent dissolved with no operator action ever taken. The plan already draws these boundaries
+    explicitly (W1-T257's own 'DO NOT WIDEN' note), and this filing keeps them."
