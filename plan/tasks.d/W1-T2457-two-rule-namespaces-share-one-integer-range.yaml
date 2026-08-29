@@ -1,0 +1,122 @@
+- id: W1-T2457
+  title: "TWO RULE NAMESPACES SHARE THE WORD \"RULE\" AND ONE INTEGER RANGE, AND ONLY ONE IS DOCUMENTED — MASTER-PLAN carries §12 \"Standing rule N\" (26 entries, contiguous 1..26) AND its own \"design rule N\" (42 citations, 16 distinct numbers, range 1..19), EVERY ONE OF WHICH ALSO EXISTS AS A §12 RULE; CLAUDE.md's decoding row maps the first namespace to its enforcing symbols and never names the second, so a bare `rule N` is unresolvable by form and 877 citations are bare on a colliding integer"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 20.00
+  files: [MASTER-PLAN.md, CLAUDE.md, test/rule-citations-match-their-rule.test.ts]
+  origin: "recon#rule-namespace-collision-2026-08-29"
+  plan_refs: ["W1-T2456", "W1-T2455", "W1-T2279"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE ID. Eight surfaces at base f3f9ca76, anchored `W1-T2457([^0-9]|$)` with a `[0-9]` class and
+    never a `\d` shorthand. SURFACE 1 READS 1 of 570 reservation refs — read from the mint's
+    RESERVED line on origin, never the advisory `max 2456`, because the fleet holds ids the max line
+    does not show. Shard filenames 0 of 700, declared ids 0, head branches 0, merged trailers 0,
+    merged subjects 0 — each against a W1-T2453 control reading 1, and the head sweep against a
+    control of 94 `run-` heads. Open-PR titles and bodies read 0 across 4 open PRs, with a W1-T2456
+    control reading 1 on each and a W1-T999999 negative control reading 0. No band is vacuous: the
+    open set is non-empty, so every control is constructible and every one fires.
+
+    ── Q1. THE FULL SHAPE OF THE COLLISION, MEASURED AT HEAD ─────────────────────────────────────
+
+    NAMESPACE A — §12 "Standing rule N" (`MASTER-PLAN.md` lines 5117..5381): 26 entries, range
+    1..26, NO GAPS. Documented in CLAUDE.md's decoding row, six of them mapped to enforcing symbols.
+
+    NAMESPACE B — "design rule N": 42 citations, 16 distinct numbers, range 1..19. It has NO INDEX
+    and no section of its own — each rule is defined inline in the retro ledger entry that minted it
+    (`wrote **design rule N**`, 5 such mints found). CLAUDE.md never names it.
+
+    ⚠ THE OVERLAP IS TOTAL, NOT PARTIAL: all 16 design-rule numbers also exist as §12 rules, so
+    ZERO design-rule citations are resolvable by number alone. The brief's "a different design rule
+    15" understates it — 15 is not the exception, it is the rule.
+
+    THE CONTROL RUNS BOTH WAYS. Unambiguous by form: `Standing rule 15` and `design rule 15` each
+    carry a namespace word. Unresolvable by form: a bare `rule 15`, of which there are 274 on a
+    colliding integer.
+
+    ⚠ AND THE THIRD AND FOURTH NAMESPACES DO NOT COLLIDE, WHICH IS THE POINT. `G-N` operator
+    directives (17 distinct, 47 citations, 1..17) and `P-N` retro proposals (59 distinct, 736
+    citations, 0..59) occupy the SAME integer range as both rule namespaces and are nonetheless
+    unambiguous, because each carries a MANDATORY LETTER PREFIX. The two rule namespaces are the
+    only ones that share a bare word, and that is the whole defect.
+
+    ── Q2. IS ANY LIVE CITATION RESOLVING WRONG TODAY? NOT YET — THIS IS A HAZARD RECORD ─────────
+
+    #3265's sweep proved every cited number resolves to a REAL §12 entry (0 undefined). That checks
+    EXISTENCE, not INTENT, so intent was re-derived here.
+
+    877 citations are bare AND on a colliding integer. THE NAMESPACES ARE SEPARATED BY LOCALE, NOT
+    BY SYNTAX: design rules are cited only inside MASTER-PLAN's retro ledger, and §12 rules only in
+    `src/`, `docs/`, `CLAUDE.md` and §12 itself. Within either region the convention is uniform, so
+    a reader in that region gets it right.
+
+    EXACTLY ONE CITATION SITS ON THE BOUNDARY. `MASTER-PLAN.md:4308` reads
+    "- **SIZING (Rule 19):** count acceptance criteria; count distinct subsystems implied by
+    `files:`" — bare, outside §12, in a file where "rule 19" otherwise means design rule 19 ("before
+    retiring a class on its zero"). It is disambiguated ONLY by the word SIZING in its own label,
+    never by the citation's form. A cross-boundary vocabulary test over all 85 bare colliding
+    citations outside §12 returned that one and no other.
+
+    ⚠ SO THE HONEST VERDICT IS: A HAZARD RECORD, NOT A LIVE DEFECT — and the remedy is smaller than
+    the collision's size suggests.
+
+    ⚠ AND A CORRECTION TO THE PREMISE THIS TASK WAS FILED UNDER. The defect that already cost
+    automation was NOT a namespace confusion. Of the six MASTER-PLAN sites #3265 corrected, THREE
+    read "Standing rule 15" — explicitly namespaced, and simply FALSE — and three were bare. The
+    fabrication came first; the collision did not cause it. What the collision DID do is degrade the
+    audit: a bare "(rule 15)" in MASTER-PLAN is not obviously checkable against §12, because a
+    reader must first decide which namespace it belongs to. The collision is an amplifier, not the
+    origin, and this record says so rather than inheriting the stronger claim.
+
+    ── Q3. THE THREE REMEDIES, PRICED — NONE PROPOSED AS AUTOMATIC ───────────────────────────────
+
+    (a) NAME BOTH NAMESPACES IN CLAUDE.md's DECODING ROW. Documents the ambiguity; does not remove
+    it. COST MEASURED: the minimal sentence is 182 bytes and CLAUDE.md has 71 free against its cap
+    (67465 of 67536). IT DOES NOT FIT — short by 111 bytes — so it requires a fold first. Raising
+    the cap is out of scope by operator instruction.
+
+    (b) REQUIRE A NAMESPACE WORD AT EVERY CITATION, enforced by extending W1-T2456's guard. Removes
+    the ambiguity at the point of reading. COST: 877 bare colliding citations, of which 478 are in
+    merged plan records (Rule 21 amendment territory) and 191 in `test/fixtures/needs-human-corpus.json`
+    (historical text, not a citation surface). THE LIVE, EDITABLE SURFACE IS 208.
+
+    (c) RENAME ONE NAMESPACE OUTRIGHT. ⚠ THE ONLY REMEDY THAT REMOVES THE AMBIGUITY RATHER THAN
+    DOCUMENTING IT, AND MEASURED CHEAPEST: 44 citations across 3 files — 42 in MASTER-PLAN.md, plus
+    ONE each in two merged shards (W1-T2399, W1-T2416) which are Rule 21 amendment territory. The
+    smaller namespace is the one to move, and it is the undocumented one. A prefix in the shape
+    `G-N`/`P-N` already prove out would make it unambiguous by form, at which point (a) becomes a
+    one-line note and (b) becomes unnecessary.
+
+    THE COUNTER-INTUITIVE RESULT WORTH RECORDING: the remedy that sounds largest is 44 edits, and
+    the one that sounds smallest does not fit in the byte budget.
+
+    ── OWNED ELSEWHERE — CITED, NOT RE-OPENED ───────────────────────────────────────────────────
+
+      W1-T2456 (#3265)  the misattribution fix and the citation guard this would extend.
+      W1-T2455 (#3264)  the drafted-slug dedup at the ratification seam.
+      §12 rule 27       the operator ruling that automatic filing is permitted.
+
+    NOT PROPOSED, BY INSTRUCTION: renumbering any §12 rule, deleting a §12 entry, weakening
+    `criterionFieldTampered`, or raising CLAUDE.md's byte cap.
+
+    ── RULE 19 ──────────────────────────────────────────────────────────────────────────────────
+
+    `risk: high` IS SET UP FRONT AND IS RULE 19's SPAN, NOT BLAST RADIUS. `subsystemsOf` derives one
+    module id per `files:` entry from its basename, and a test's own stem counts, so MASTER-PLAN.md,
+    CLAUDE.md and `test/rule-citations-match-their-rule.test.ts` resolve to three distinct ids and
+    `sizingViolation` blocks any band below high. The change itself is textual and additive.
+
+  acceptance:
+    - claim: "the guard refuses a citation of a colliding integer that carries no namespace word"
+      proof: "unit test: test/rule-citations-match-their-rule.test.ts"
+    - claim: "both rule namespaces are enumerated with their integer ranges and the set that exists in both"
+      proof: "unit test: test/rule-citations-match-their-rule.test.ts"
+    - claim: "the one boundary citation is resolvable by form rather than by the word SIZING in its label"
+      proof: "unit test: test/rule-citations-match-their-rule.test.ts"
+    - claim: "G-N and P-N stay unambiguous because their letter prefix is mandatory, and the test says so"
+      proof: "unit test: test/rule-citations-match-their-rule.test.ts"

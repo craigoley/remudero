@@ -1,34 +1,32 @@
 # ORIENTATION
 
-_MAINTAINED BY `rmd retro` — regenerated 2026-08-28T13:36:42.316Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
+_MAINTAINED BY `rmd retro` — regenerated 2026-08-29T14:15:50.953Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
 
 A fresh Architect session should be able to orient from THIS doc alone plus the plan index —
 not by re-deriving state from the full plan and ledger.
 
 ## Current state
 
-17 run(s) since the last retro marker. Verdicts: {"already_satisfied":1,"blocked":3,"blocked_ci":4,"merged":9}.
+14 run(s) since the last retro marker. Verdicts: {"blocked":1,"blocked_ci":3,"merged":10}.
 
 ### Shipped since marker
-- W1-T2371 → https://github.com/craigoley/remudero/pull/3195
-- W1-T2383 → https://github.com/craigoley/remudero/pull/3199 (gate-side merge; run ended blocked)
-- W1-T2402 → https://github.com/craigoley/remudero/pull/3202
-- W1-T2403 → https://github.com/craigoley/remudero/pull/3203
-- W1-T2416 → https://github.com/craigoley/remudero/pull/3204 (gate-side merge; run ended blocked_ci)
-- W1-T2424 → https://github.com/craigoley/remudero/pull/3192
-- W1-T2428 → https://github.com/craigoley/remudero/pull/3193 (gate-side merge; run ended blocked_ci)
-- W1-T2429 → https://github.com/craigoley/remudero/pull/3194 (gate-side merge; run ended blocked_ci)
-- W1-T2430 → https://github.com/craigoley/remudero/pull/3205 (gate-side merge; run ended blocked)
-- W1-T2431 → https://github.com/craigoley/remudero/pull/3196
-- W1-T2432 → https://github.com/craigoley/remudero/pull/3198
-- W1-T2433 → https://github.com/craigoley/remudero/pull/3200
-- W1-T2435 → https://github.com/craigoley/remudero/pull/3223
-- W1-T2437 → https://github.com/craigoley/remudero/pull/3222 (gate-side merge; run ended blocked)
-- W1-T2438 → https://github.com/craigoley/remudero/pull/3221
+- W1-T1269 → https://github.com/craigoley/remudero/pull/3241
+- W1-T2436 → https://github.com/craigoley/remudero/pull/3228 (gate-side merge; run ended blocked_ci)
+- W1-T2440 → https://github.com/craigoley/remudero/pull/3227 (gate-side merge; run ended blocked_ci)
+- W1-T2441 → https://github.com/craigoley/remudero/pull/3234
+- W1-T2444 → https://github.com/craigoley/remudero/pull/3236
+- W1-T2446 → https://github.com/craigoley/remudero/pull/3248
+- W1-T2447 → https://github.com/craigoley/remudero/pull/3247
+- W1-T2448 → https://github.com/craigoley/remudero/pull/3245
+- W1-T2449 → https://github.com/craigoley/remudero/pull/3249
+- W1-T2450 → https://github.com/craigoley/remudero/pull/3252
+- W1-T2451 → https://github.com/craigoley/remudero/pull/3255
+- W1-T2452 → https://github.com/craigoley/remudero/pull/3256 (gate-side merge; run ended blocked_ci)
+- W1-T2453 → https://github.com/craigoley/remudero/pull/3257
 
 ## Next runnable task
 
-**W1-T1269** — THE FIX RUNG RETRIES WITH NO TEST FOR PROGRESS AND THE EVIDENCE IS ALREADY IN HAND — the only quantity moving across strikes is `strikes` and it ASCENDS, while `unmetCriteria` is a `CriterionVerdict[]` carrying each `claim`, so a strike that fails IDENTICALLY is indistinguishable from one that fixed half; add an earlier stop on a repeated identical failure, never a longer leash
+**W1-T2442** — THE REQUIRED REVIEW GATE IS ENFORCED BY CONVENTION, NOT BY MECHANISM — `required_status_checks.contexts` lists `remudero-review` beside `ci-gate`, but `ci-gate` is pinned `app_id: 15368` while `remudero-review` carries `app_id: null`, so ANY actor holding a repo-scoped token satisfies it; the mechanism built to close that (`REVIEWER_TOKEN_ENV`) ships DARK by its own doc and reads absent on every live process, and the hook meant to backstop it matches COMMAND TEXT rather than a credential
 
 - risk: high · depends_on: (none)
 
