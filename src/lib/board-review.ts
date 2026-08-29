@@ -80,6 +80,24 @@ export interface BoardItem {
   redCheckCount: number;
   /** Escalations raised against this item with no operator acknowledgement yet. */
   unhandledEscalations: number;
+  /** The escalation's real one-line ask (W1-T182's `StatusProjection.escalationTitle`, threaded
+   *  through unread by {@link BoardItem}'s mapper — W1-T2453) — the live issue's title, so a
+   *  candidate this rung mints is decidable from its own text rather than only from a count.
+   *  Present iff `unhandledEscalations > 0` AND the source projection's title could actually be
+   *  read; absent whenever it could not (see {@link escalationUnverified}'s doc for that case),
+   *  same sparse convention `StatusProjection` itself uses. */
+  escalationTitle?: string;
+  /** The escalation issue's own URL (W1-T182's `StatusProjection.escalationIssueUrl`, threaded
+   *  through — W1-T2453), so a finding can link directly rather than soliciting a URL the
+   *  projection already holds. Present iff `unhandledEscalations > 0` and the source projection
+   *  carried one. */
+  escalationIssueUrl?: string;
+  /** True when the escalation is known but its issue's title/state could NOT be confirmed
+   *  (W1-T182's `StatusProjection.escalationUnverified`, threaded through — W1-T2453) — the
+   *  FAIL-CLOSED case: the finding still fires and still names the item, its summary just says
+   *  the ask could not be read rather than silently rendering as an ordinary bare count. Present
+   *  only alongside `unhandledEscalations > 0`, same sparse convention as the fields above. */
+  escalationUnverified?: true;
   /** Set when a check on this item died before any test body ran (an infra death, never a real
    *  test failure) — the population {@link buildBoardReview}'s one sanctioned action draws from. */
   deadBeforeTestBody?: boolean;
@@ -291,9 +309,20 @@ function diagnoseBoardFindings(items: readonly BoardItem[]): BoardFinding[] {
       });
     }
     if (it.unhandledEscalations > 0) {
+      // W1-T2453: NAME the escalation instead of just counting it — the ask and the link are
+      // already on the item (threaded from `StatusProjection` by the mapper, zero extra reads),
+      // so a candidate is decidable from its own text. HONEST ABSENCE (design (iii), inheriting
+      // W1-T182's FAIL-CLOSED direction): a title that could not be read is never dropped and
+      // never silently rendered as the old bare count — the summary SAYS so instead.
+      const summary = it.escalationTitle
+        ? `board-review: ${it.id} — unhandled escalation: "${it.escalationTitle}"` +
+          (it.escalationIssueUrl ? ` — ${it.escalationIssueUrl}` : "")
+        : `board-review: ${it.id} carries an unhandled escalation whose ask could not be read` +
+          (it.escalationUnverified ? " (issue state unverified)" : "") +
+          (it.escalationIssueUrl ? ` — ${it.escalationIssueUrl}` : "");
       findings.push({
         id: `board-review:escalation:${it.id}`,
-        summary: `board-review: ${it.id} carries ${it.unhandledEscalations} unhandled escalation(s)`,
+        summary,
         itemId: it.id,
       });
     }

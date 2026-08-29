@@ -268,15 +268,61 @@ void test("boardItemsFromOpenPrs maps age, draft and reds, and fails in the safe
     { number: 3, url: "u3", headRefName: "b3", headRefOid: "s3", updatedAt: "", body: "", autoMergeRequest: null,
       rollupUnreadable: true },
   ];
-  const items = boardItemsFromOpenPrs(rows, NOW, new Set([2]));
+  const items = boardItemsFromOpenPrs(
+    rows,
+    NOW,
+    new Map([[2, { title: "board-review: #2895 has sat open", issueUrl: "https://github.com/o/r/issues/9" }]]),
+  );
 
   assert.equal(items[0]!.ageHours.toFixed(1), "15.1", "#2895's real age on the day this rung stayed asleep");
   assert.equal(items[0]!.redCheckCount, 1);
   assert.equal(items[0]!.isDraft, false);
   assert.equal(items[1]!.isDraft, true);
   assert.equal(items[1]!.unhandledEscalations, 1, "joined from the projection by PR number");
+  assert.equal(items[1]!.escalationTitle, "board-review: #2895 has sat open", "W1-T2453: the ask threads through, not just the count");
+  assert.equal(items[1]!.escalationIssueUrl, "https://github.com/o/r/issues/9", "W1-T2453: the link threads through too");
   assert.equal(items[2]!.ageHours, 0, "an unknown age is ZERO, never infinity — it must not manufacture a stale finding");
   assert.equal(items[2]!.redCheckCount, 0, "an unreadable rollup is not evidence of a red check");
+  assert.equal(items[2]!.escalationTitle, undefined, "no escalation for #3 — no title manufactured either");
+});
+
+// ── W1-T2453 acceptance 2: naming costs ZERO additional reads — the ask/url come from the SAME
+// `projectPlan` call `unhandledEscalations` already consumed, never a second GitHub/ledger read ──
+
+void test("defaultBoardReviewItems threads escalationTitle/escalationIssueUrl/escalationUnverified from the ONE projectPlan call, no second read", () => {
+  const root = tmp("rmd-br-name-");
+  try {
+    let projectPlanCalls = 0;
+    const items = defaultBoardReviewItems({ root } as unknown as Config, {
+      resolveOwnerRepo: () => ({ owner: "o", repo: "r" }),
+      fetchOpenPrs: () => [
+        { number: 41, url: "u41", headRefName: "b41", headRefOid: "s41", updatedAt: "", body: "", autoMergeRequest: null,
+          createdAt: "2026-08-26T15:00:00Z", isDraft: false, statusCheckRollup: [] },
+        { number: 42, url: "u42", headRefName: "b42", headRefOid: "s42", updatedAt: "", body: "", autoMergeRequest: null,
+          createdAt: "2026-08-26T15:00:00Z", isDraft: false, statusCheckRollup: [] },
+      ],
+      loadPlan: () => ({ tasks: [] }) as never,
+      projectPlan: () => {
+        projectPlanCalls += 1;
+        return new Map([
+          ["T1", { needsHuman: true, prNumber: 41, escalationTitle: "[fix] T1: red base check", escalationIssueUrl: "https://github.com/o/r/issues/41" }],
+          ["T2", { needsHuman: true, prNumber: 42, escalationUnverified: true }],
+        ]) as never;
+      },
+      now: () => NOW,
+    });
+
+    assert.equal(projectPlanCalls, 1, "ONE projection read serves both the count and the naming — no second read to name it");
+    const named = items.find((it) => it.id === "#41")!;
+    assert.equal(named.escalationTitle, "[fix] T1: red base check", "the ask threads through unread");
+    assert.equal(named.escalationIssueUrl, "https://github.com/o/r/issues/41", "the link threads through unread");
+    const unverified = items.find((it) => it.id === "#42")!;
+    assert.equal(unverified.unhandledEscalations, 1, "still a finding — never dropped for being unverified");
+    assert.equal(unverified.escalationTitle, undefined, "no title could be read, so none is manufactured");
+    assert.equal(unverified.escalationUnverified, true, "the honest-absence flag threads through unread");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 void test("defaultBoardReviewItems degrades to an empty board rather than throwing the tick", () => {
