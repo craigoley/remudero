@@ -19,6 +19,7 @@ import { execFileSync } from "node:child_process";
 import fsMarker from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { parse as parseYaml } from "yaml";
+import { updateProposalRegistry, type EvidenceAnchor, type Proposal, type UpdateProposalRegistryOpts } from "./inbox.js";
 import { appendLedger, type LedgerLine } from "./ledger.js";
 import { DEFAULT_PROMOTION_CONFIDENCE_THRESHOLD } from "./learnings.js";
 import type { Lifecycle, LearningEntry, PromotionResult } from "./learnings.js";
@@ -2626,6 +2627,155 @@ export function renderFollowupCandidates(harvest: FollowupHarvest): string {
     );
   }
   return lines.join("\n");
+}
+
+// ── Follow-up routing (W1-T2458) ───────────────────────────────────────────────────────────
+//
+// `mineFollowups` above finds candidates; until this task, `renderFollowupCandidates` only ever
+// rendered them into a markdown section headed "never auto-filed (rule 15)" that no rung read
+// back — of the seven modules calling `updateProposalRegistry` (inbox.ts's single writer), none
+// read a follow-up, and no plan task has ever been filed FROM one (measured 2026-08-29: 463
+// distinct task_ids, 2,115 declared entries, zero routed). `routeFollowupsToRegistry` below is
+// the missing consumer: it takes the SAME `FollowupHarvest` `mineFollowups` already produces and
+// files each still-open candidate through `updateProposalRegistry` — the SAME single writer
+// board-review.ts/rule-efficacy.ts/feedback-docket.ts already use — instead of only rendering
+// prose nobody reads. RULE 15 STAYS INTACT: a routed follow-up is a PROPOSAL CANDIDATE for the
+// inbox's own tiering and an operator's `rmd approve` to act on, never an auto-filed task — the
+// exact discipline `renderFollowupCandidates`'s own header names, now enforced by a writer
+// instead of a caption.
+
+/**
+ * `FollowupEntry.type` semantics — WRITTEN HERE because nothing previously defined what the
+ * three worker-report prefixes MEAN: `parseFollowups` (worker.ts) documents them only as parse
+ * prefixes, and the sole prior read of `.type` was `renderFollowupCandidates` picking a display
+ * label. Any code that branches on `.type` cites THIS definition rather than guessing one, per
+ * this task's own rationale ("IF THE THREE SHOULD ROUTE DIFFERENTLY, DEFINING THE TYPE IS THE
+ * FIRST DELIVERABLE").
+ *
+ *  - "research": an open question a worker surfaced but did not answer. ROUTABLE — the inbox's
+ *    own drafting/ratification loop is exactly the mechanism for turning an open question into a
+ *    scoped task, so this becomes a registry proposal.
+ *  - "task": concrete follow-up work a worker named but that was out of ITS OWN one-concern
+ *    scope. ROUTABLE for the same reason as "research": a proposal IS a candidate plan task, and
+ *    this type names one directly.
+ *  - "action": an ask of a HUMAN/OPERATOR (flip a flag, confirm a choice, run a live check) —
+ *    NOT plan-shaped work. NOT ROUTABLE: minting it as a `Proposal` would hand `classifyProposal`
+ *    something to tier as though it were buildable, which it is not. Declining still leaves the
+ *    entry harvested (`recordFollowupHarvest`, unchanged by this task, already ledgered it) — it
+ *    is simply never promoted to a `Proposal`.
+ */
+export const FOLLOWUP_TYPE_ROUTES: Readonly<Record<FollowupCandidate["type"], "propose" | "not-plan-shaped">> = {
+  research: "propose",
+  task: "propose",
+  action: "not-plan-shaped",
+};
+
+/** One candidate's routing outcome. A decline always NAMES the arm that declined it — never a
+ *  bare boolean — so a reader can tell "already covered by the existing title dedup" from
+ *  "not plan-shaped work" without re-deriving either from `harvest` by hand. */
+export type FollowupRouteOutcome =
+  | { candidate: FollowupCandidate; routed: true; proposalId: string }
+  | {
+      candidate: FollowupCandidate;
+      routed: false;
+      arm: "title-dedup" | "type-not-plan-shaped";
+      reason: string;
+    };
+
+export interface RouteFollowupsDeps {
+  registryPath: string;
+  /** Injectable — production takes `updateProposalRegistry` (the W1-T240 single writer),
+   *  mirroring board-review.ts's `updateRegistry` seam so a test never touches disk. */
+  updateRegistry?: (
+    registryPath: string,
+    update: (current: Proposal[]) => Proposal[] | null,
+    opts?: UpdateProposalRegistryOpts,
+  ) => Proposal[] | null;
+}
+
+/** Stable, deterministic registry id for one followup candidate. `entryId` already carries
+ *  `mineFollowups`'s own uniqueness key (`run_id:ts:index`), so prefixing it is enough — the
+ *  SAME entry always re-resolves to the SAME proposal id, which is what lets
+ *  `updateProposalRegistry`'s own existing-id check (mirrored below) refuse to re-add it on a
+ *  later pass. Never derived from `text`: the free-prose entry can be re-harvested verbatim and
+ *  must still resolve to the id it was filed under the first time. */
+export function followupProposalId(candidate: FollowupCandidate): string {
+  return `followup:${candidate.entryId}`;
+}
+
+/**
+ * Route one `mineFollowups` harvest into the ACTIVE-proposal registry — the single writer
+ * (inbox.ts's `updateProposalRegistry`) board-review.ts/rule-efficacy.ts/feedback-docket.ts
+ * already use — replacing "nobody reads this markdown section" with an actual consumer.
+ *
+ * TWO REFUSAL ARMS, each named on its own outcome, neither re-implemented here:
+ *   - `"title-dedup"`: `harvest.deduped` — `mineFollowups`'s OWN `followupMatchesTitle` arm,
+ *     the existing duplicate refusal this function reuses verbatim rather than re-scoring.
+ *   - `"type-not-plan-shaped"`: {@link FOLLOWUP_TYPE_ROUTES} says the entry's type is not
+ *     routable — the type definition decided above, cited, never re-guessed per call.
+ *
+ * EVERY MINTED PROPOSAL CARRIES `evidenceAnchors: []`, STATED, NEVER SYNTHESIZED. A
+ * `FollowupEntry` is free prose with no `git grep`-able pattern (Q2 of this task's own
+ * rationale); inventing one would hand `classifyProposal`'s evidence arm a fabricated claim
+ * nobody actually asserted. The candidate's OWN `runId`/`taskId`/`prUrl` rides instead, verbatim,
+ * in the proposal's `summary` — sufficient for ATTRIBUTION (where the claim came from), never
+ * for the evidence-anchor arm (what is still true on a ref) — the referent/anchor distinction
+ * this task's rationale draws.
+ *
+ * IDEMPOTENT: a candidate already present in the registry (same {@link followupProposalId}, a
+ * prior pass having already routed it) is never re-added — `updateRegistry`'s own existing-id
+ * check, read fresh under its lock, same discipline board-review.ts's `diagnoseBoardFindings`
+ * wiring already relies on.
+ */
+export function routeFollowupsToRegistry(harvest: FollowupHarvest, deps: RouteFollowupsDeps): FollowupRouteOutcome[] {
+  const updateRegistry = deps.updateRegistry ?? updateProposalRegistry;
+  const outcomes: FollowupRouteOutcome[] = [];
+
+  for (const candidate of harvest.deduped) {
+    outcomes.push({
+      candidate,
+      routed: false,
+      arm: "title-dedup",
+      reason: "already declined by mineFollowups' own followupMatchesTitle dedup arm (harvest.deduped)",
+    });
+  }
+
+  const routable: FollowupCandidate[] = [];
+  for (const candidate of harvest.candidates) {
+    if (FOLLOWUP_TYPE_ROUTES[candidate.type] === "propose") {
+      routable.push(candidate);
+    } else {
+      outcomes.push({
+        candidate,
+        routed: false,
+        arm: "type-not-plan-shaped",
+        reason: `"${candidate.type}" is an operator ask, not plan-shaped work (FOLLOWUP_TYPE_ROUTES)`,
+      });
+    }
+  }
+
+  if (routable.length > 0) {
+    updateRegistry(deps.registryPath, (current) => {
+      const existingIds = new Set(current.map((p) => p.id));
+      const additions: Proposal[] = routable
+        .filter((c) => !existingIds.has(followupProposalId(c)))
+        .map((c) => ({
+          id: followupProposalId(c),
+          summary:
+            `follow-up harvest [${c.type}]: ${c.text} — from ${c.taskId} (run ${c.runId}` +
+            `${c.prUrl ? `, ${c.prUrl}` : ""})`,
+          // Stated, never synthesized — see this function's own doc for why a fabricated
+          // git-grep pattern would be worse than an honest empty set.
+          evidenceAnchors: [] as EvidenceAnchor[],
+        }));
+      return additions.length > 0 ? [...current, ...additions] : null;
+    });
+    for (const candidate of routable) {
+      outcomes.push({ candidate, routed: true, proposalId: followupProposalId(candidate) });
+    }
+  }
+
+  return outcomes;
 }
 
 // ── Phrasing — the ONLY step where an LLM enters (W1-T87/P13) ────────────

@@ -411,6 +411,7 @@ import {
   renderPromotionProposals,
   renderPlanStateTruth,
   resolveMarkerForGather,
+  routeFollowupsToRegistry,
   runlessMergesSince,
   saveMarker,
   shippedSince,
@@ -18084,6 +18085,14 @@ async function retroCommand(
   // This is the ONE place a followup candidate/dedup gets ledger-marked so a later
   // retro's mineFollowups pass over the now-updated ledger mints neither again.
   recordFollowupHarvest(gather.followups, { ledgerPath });
+  // W1-T2458: THE MISSING CONSUMER. Before this, `gather.followups` fed only
+  // `renderFollowupCandidates` (a markdown section this retro's own report prints, that no rung
+  // ever read back) — the ledger marks above stopped a candidate being re-minted, but nothing
+  // ever routed one anywhere an operator/inbox could act on it. This is the ONE real-run call
+  // site: every routable candidate this pass mined is filed through the SAME single writer
+  // (`updateProposalRegistry`) board-review.ts/rule-efficacy.ts/feedback-docket.ts already use,
+  // right alongside the ledger marks above (same real-run-only gate, same non-dry-run guard).
+  routeFollowupsToRegistry(gather.followups, { registryPath: join(config.root, "state", "inbox-proposals.json") });
 
   // G-17 Tier Invariant: the retro Architect MUST outrank implement workers.
   // MOUNT-GOVERNED (§9, W1-T64 — sibling of W1-T63/P10): the retro/architect spawn's MODEL
