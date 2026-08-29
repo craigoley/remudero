@@ -213,13 +213,21 @@ export type DocketSynthesisResult =
   | { kind: "empty" }
   | { kind: "proposal"; candidate: DocketProposalCandidate; referent: string; consumed: DocketItem[] };
 
-function slug(s: string): string {
+/**
+ * Lowercase kebab of arbitrary prose, capped and never empty. EXPORTED (was private) so the
+ * ratification writer in lib/inbox.ts reuses this exact rule rather than adding a fourth private
+ * copy — `issues-intake.ts` and `ops.ts` each already carry their own near-identical one, and a
+ * fifth spelling is how a filename convention drifts from the shards that follow it. `maxLen`
+ * defaults to 40, so every existing caller is byte-identical; a caller whose convention is longer
+ * (the shard filenames) passes its own.
+ */
+export function slug(s: string, maxLen = 40): string {
   return (
     s
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, "-")
       .replace(/^-+|-+$/g, "")
-      .slice(0, 40) || "item"
+      .slice(0, maxLen) || "item"
   );
 }
 

@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { slug as kebabSlug } from "./feedback-docket.js";
 // The DEFAULT export -- a plain, mutable object -- so a test's `t.mock.method` can
 // actually intercept the calls `updateProposalRegistry` makes (named bindings off
 // `node:fs` are non-configurable; mocking them throws "Cannot redefine property"
@@ -1325,10 +1326,11 @@ export interface RatificationPayload {
  *  are each called AT MOST ONCE on a READY classification that is NOT resuming a prior push
  *  (see the three OPTIONAL methods below, W1-T903) — a non-ready classification calls neither. */
 export interface RatifyGateway {
-  /** Apply the fragment to plan/tasks.yaml + the stamp to MASTER-PLAN.md in ONE branch,
-   *  commit, and push it. Returns the branch name actually pushed. Never called when a
-   *  prior-run branch is resumed (`findPushedBranch` below) — the whole point of resuming
-   *  is skipping a second mint/commit/push. */
+  /** File the fragment as one `plan/tasks.d/` shard per drafted task — NEVER an append to
+     *  plan/tasks.yaml, which `lint-plan`'s `monolith-filing` rule refuses for a new id — plus the
+     *  stamp to MASTER-PLAN.md, in ONE branch, commit, and push it. Returns the branch name
+     *  actually pushed. Never called when a prior-run branch is resumed (`findPushedBranch`
+     *  below) — the whole point of resuming is skipping a second mint/commit/push. */
   createRatificationBranch(payload: RatificationPayload): string;
   /** Open the plan PR for the pushed branch. Returns its URL. Skipped when `findExistingPr`
    *  already found one (ADOPT) — a found PR is never re-created. */
@@ -1552,6 +1554,103 @@ export function approveCommitMessage(payload: RatificationPayload): string {
  *  The fragment is already a valid top-level sequence (schema v1) sharing the same list,
  *  so this is pure string composition — never a YAML re-serialization that could reformat
  *  the rest of the file. */
+/** The longest slug the shards on main carry, so a filed shard is never truncated shorter than
+ *  the convention it joins. MEASURED over the 696 shards at the time of writing: median 37, p95
+ *  57, max 72, and 269 of them (39%) longer than `slug`'s own default of 40. */
+const SHARD_SLUG_MAX_LEN = 72;
+
+/** One ratification shard: where it goes, and the exact YAML that goes there. */
+export interface RatificationShardFile {
+  /** Repo-relative, `plan/tasks.d/<id>-<kebab-slug>.yaml` — the shape `monolith-filing` names. */
+  relPath: string;
+  /** A SINGLE-ELEMENT YAML list holding this task's authored block, verbatim. */
+  contents: string;
+}
+
+/**
+ * Split a drafted fragment into ONE `plan/tasks.d/` shard per task it carries.
+ *
+ * WHY THIS EXISTS: `applyFragmentToPlanYaml` below appends to `plan/tasks.yaml`, and `lint-plan`'s
+ * `monolith-filing` rule refuses exactly that for a NEW id — "New tasks belong in their own shard".
+ * The ratification path was the last writer still appending to the monolith, and because no
+ * proposal had ever been ratified (0 `ratify.approved` rows before 2026-08-29) the write had never
+ * once met the gate. Every READY proposal would have failed identically.
+ *
+ * TEXT SPLITTING, NEVER A YAML RE-SERIALIZATION — the same discipline `applyFragmentToPlanYaml`'s
+ * own doc states, and for the same reason: the drafted block is authored, prose-heavy YAML (long
+ * titles, block scalars, comments) and round-tripping it through a parser would reformat what a
+ * human wrote and reviewed. Blocks are cut on a top-level `- ` at column zero, the only place a
+ * new element can begin in a valid top-level sequence.
+ *
+ * N TASKS PRODUCE N FILES. A fragment may draft more than one (`NEW-1`, `NEW-2`, ...) and {@link
+ * materializeDraftTaskIds} already returns `ids: string[]`, so the plural was supported upstream
+ * and only the write site collapsed it into a single append.
+ *
+ * REFUSES RATHER THAN GUESSES: a block whose `- id:` cannot be read yields no file at all, because
+ * writing a shard under a guessed name puts a task somewhere `lint-plan` cannot match to its id.
+ */
+export function ratificationShardFiles(
+  fragmentYaml: string,
+): { ok: true; files: RatificationShardFile[] } | { ok: false; reason: string } {
+  const text = (fragmentYaml ?? "").replace(/\s*$/, "");
+  if (!text.trim()) return { ok: false, reason: "the drafted fragment is empty — nothing to file" };
+  const blocks: string[] = [];
+  for (const line of text.split("\n")) {
+    if (/^- /.test(line)) blocks.push(line);
+    else if (blocks.length > 0) blocks[blocks.length - 1] += `\n${line}`;
+    else if (line.trim()) {
+      return { ok: false, reason: `the fragment does not begin with a top-level "- " task entry (saw: ${line.slice(0, 60)})` };
+    }
+  }
+  if (blocks.length === 0) return { ok: false, reason: "the fragment carries no top-level task entries" };
+
+  const files: RatificationShardFile[] = [];
+  for (const block of blocks) {
+    const id = /^- id:\s*(\S+)/m.exec(block)?.[1];
+    if (!id) return { ok: false, reason: `a drafted task block carries no readable "- id:" line (starts: ${block.slice(0, 60)})` };
+    // The title is the slug's source. A block with none still files — under the id alone — since
+    // the id is what `monolith-filing` matches on and the slug is readability.
+    const title = /^\s+title:\s*(.*)$/m.exec(block)?.[1] ?? "";
+    // The cap is the SHARD convention's, not the docket's; the trailing-hyphen trim is this
+    // writer's own, since `slug` strips edges BEFORE slicing and a cut can land on a separator.
+    const stem = kebabSlug(title.replace(/^["']|["']$/g, ""), SHARD_SLUG_MAX_LEN).replace(/-+$/, "");
+    files.push({ relPath: `plan/tasks.d/${id}${stem ? `-${stem}` : ""}.yaml`, contents: `${block.replace(/\s*$/, "")}\n` });
+  }
+  return { ok: true, files };
+}
+
+/** The filesystem surface {@link writeRatificationShards} needs — injected so the write is
+ *  testable without a real worktree, the same seam discipline the rest of this module uses. */
+export interface ShardWriteFs {
+  mkdirSync: (dir: string, opts: { recursive: true }) => unknown;
+  writeFileSync: (path: string, data: string, enc: "utf8") => void;
+}
+
+/**
+ * Compose {@link ratificationShardFiles} and WRITE them under `worktreePath`, returning the
+ * repo-relative paths written. THROWS on a refusal rather than returning a partial result: a
+ * ratification that cannot name its own shard must write nothing, commit nothing and open no PR,
+ * the same all-or-nothing contract {@link materializeDraftTaskIds} already states for the mint.
+ *
+ * EXTRACTED FROM THE GATEWAY so it is reachable by a test. `createRatificationBranch`
+ * (run-task.ts) needs a real worktree, a real mint and real id reservations to run at all, so a
+ * loop living inline there is untestable by construction — and an untestable write is exactly what
+ * let the monolith append survive until the first ratification in the repo's history met the gate.
+ */
+export function writeRatificationShards(
+  worktreePath: string,
+  fragmentYaml: string,
+  proposalId: string,
+  fs: ShardWriteFs,
+  joinPath: (...parts: string[]) => string,
+): string[] {
+  const shards = ratificationShardFiles(fragmentYaml);
+  if (!shards.ok) throw new Error(`rmd approve: refusing to file ${proposalId} — ${shards.reason}`);
+  fs.mkdirSync(joinPath(worktreePath, "plan", "tasks.d"), { recursive: true });
+  for (const file of shards.files) fs.writeFileSync(joinPath(worktreePath, file.relPath), file.contents, "utf8");
+  return shards.files.map((f) => f.relPath);
+}
+
 export function applyFragmentToPlanYaml(tasksYaml: string, fragmentYaml: string): string {
   const base = tasksYaml.replace(/\s*$/, "");
   return `${base}\n${fragmentYaml.trim()}\n`;
