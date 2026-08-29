@@ -1,0 +1,124 @@
+- id: W1-T2450
+  title: "THREE LIVENESS ROWS READ FAULT ON A HEALTHY DAEMON, AND THE PANEL CONTAINS ITS OWN FALSIFIER WITHOUT CONSULTING IT — `queryLaunchdService` returns `{loaded:false,pid:null}` from a `catch` that cannot tell `launchctl` being ABSENT from the service being STOPPED, so on any non-launchd host `daemon` and `deploy-supervisor` read dead by construction while the SAME panel prints a ledger-derived `boot <age> ago` for the process it just called not running; and `detectDaemonCrashLoop` takes `readonly string[]` timestamps, so a freshness `exit 75` and a crash are the same event to it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 15.00
+  files: [src/lib/status-board.ts, src/run-task.ts, src/lib/daemon.ts, test/liveness-distinguishes-absent-sensor-from-dead-service.test.ts]
+  origin: "operator-brief#liveness-panel-reads-wrong-on-healthy-daemon-2026-08-28"
+  plan_refs: ["W1-T126", "W1-T2440", "W1-T396", "W1-T301", "W1-T215"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE ID. Eight surfaces swept before a byte of this file was written, anchored
+    `W1-T2450([^0-9]|$)` with a `[0-9]` class and never `\d`. SURFACE 1 (reservation refs) READS 1
+    against 563 refs, controls W1-T2437 and W1-T2434 firing 1 each. Shard filenames 0 of 695
+    (control W1-T2437 = 1); declared ids 0 of 963 (control W1-T2437 = 1); merged PR trailers 0 of
+    97 (controls W1-T2434 = 1, W1-T2447 = 1); merged commit subjects 0 of 400 (controls W1-T2437 =
+    1, W1-T2434 = 1). ⚠ THREE SURFACES ARE VACUOUS, NOT ZERO, AND ARE REPORTED AS SUCH: open PR
+    titles, open PR body lines and open head refs all have an EMPTY POPULATION — the repo had zero
+    open PRs at sweep time (HTTP 200, body `[]`, with the same endpoint returning 3 closed PRs as
+    its control), so no control is constructible on those three and their "0" carries no
+    information. ANCHOR-LEAK: `W1-T245([^0-9]|$)` reads 1 on declared ids and 0 on refs, while
+    `W1-T2450([^0-9]|$)` reads 0 on ids and 1 on refs — the anchor discriminates the shorter id
+    from this one on both surfaces.
+
+    OBSERVED 2026-08-28T23:42:51Z, with `ps` as the control taken four minutes later: the panel
+    printed `daemon : not running — boot 1h44m ago`, `crash-loop : BREACHED (6 boots in 10m)` and
+    `deploy-supervisor: overdue — no tick observed yet`, while `ps aux` in the same container
+    showed pid 2154870 alive since 21:58 with 7m29s CPU, running `src/run-task.ts daemon --repo
+    remudero --allow-self-target` and mid-call on a `gh api` pull. The operator and the assistant
+    both trusted the panel over `ps`, twice in one evening. That is the cost being priced here: a
+    panel that reads alarming on the NORMAL case cannot distinguish a real outage from noise.
+
+    (1) Q1 — THE THREE ROWS HAVE TWO MECHANISMS, NOT ONE, AND NOT THREE. Row 1 and row 3 share a
+    sensor; row 2 is independent.
+
+    ROW 1 (`daemon: not running`). `statusCommand`'s default `queryService` (src/run-task.ts)
+    calls `queryLaunchdService(label, uid)`, which execs `launchctl print gui/<uid>/<label>` and
+    carries a bare `catch { return { loaded: false, pid: null } }`. `running` is then
+    `state.pid !== null` — FALSE. On a Linux container there is no `launchctl` at all (MEASURED on
+    this host: `command -v launchctl` ABSENT, `uname -s` Linux, control `ps` PRESENT at
+    /usr/bin/ps), so the exec throws for a reason that has nothing to do with the service and the
+    catch returns the same shape a genuinely stopped job returns. THE PANEL CANNOT TELL "I HAVE NO
+    SENSOR HERE" FROM "THE ANSWER IS NO" — the same zero-is-not-a-measurement family CLAUDE.md's
+    investigation section names, arriving as a liveness verdict instead of a search result.
+
+    ⚠ AND THE PANEL ALREADY HOLDS THE REFUTATION. `bootedAt`/`bootedAgeMs`/`headSha` on the SAME
+    row come from the ledger's `daemon.boot` heartbeat, not from launchd (the type's own doc says
+    so). A row reading `not running — boot 1h44m ago` is asserting, in one line, that the process
+    is dead and that it logged a boot heartbeat 104 minutes ago. Nothing reconciles the two.
+
+    ROW 3 (`deploy-supervisor: overdue — no tick observed yet`) INHERITS ROW 1'S SENSOR AND ADDS A
+    SECOND CAUSE. `queryService` routes the supervisor to `queryLaunchdListStatus` — also
+    `launchctl` — so `pid` is null and `lastExitCode` is `undefined` on a non-launchd host.
+    `livenessState` then falls past `running`, past the nonzero-exit branch (undefined is not
+    nonzero), and lands on `row.tickAgeMs === undefined` ⇒ `"overdue"`. `tickAgeMs` derives from
+    `deploy.*` ledger lines, so a host that has never run `rmd deploy-run` reads overdue whether or
+    not a supervisor exists. Two independent absences, one alarming word.
+
+    CONTROL, AS THE BRIEF REQUIRES — A ROW THAT READS CORRECTLY IN THE SAME INVOCATION. Running
+    `rmd status --json` on this host returns `crashLoop: {"breached":false,"windowBoots":[],
+    "windowMs":600000,"maxBoots":5}`, which is CORRECT: this container has 0 `daemon.boot` rows in
+    its ledger and 0 daemon processes (MEASURED pid-based, not by grepping the process table for
+    its own pattern — control: `ps -eo pid` sees 82 processes). So the reader is not broken; rows
+    1 and 3 are. ⚠ AND THIS HOST IS NOT THE OBSERVATION HOST: its `running:false` is RIGHT, for the
+    right reason. The defect reproduces by MECHANISM (the absent-`launchctl` catch), not by
+    re-observing the same output here.
+
+    (2) Q2 — THE PANEL DOES NOT READ `state/logs/`, SO THE MISSING `daemon.out.log` IS NOT THE
+    MECHANISM. ⚠ THIS CONTRADICTS THE BRIEF'S HYPOTHESIS AND IS REPORTED RATHER THAN CONFIRMED.
+    `state/logs` appears in src/lib/status-board.ts exactly twice, BOTH INSIDE ADVICE STRINGS
+    ("check state/logs/supervisor.err.log"), never as a sensor; the file is named to a human as
+    somewhere to look, and nothing reads it. The module's actual inputs are the ledger (80 `ledger`
+    references) and the launchd query. So `daemon.out.log` being absent while the boot banner names
+    it is a REAL and separate gap — the daemon's stdout goes nowhere a reader can find — but it is
+    not what makes these three rows wrong, and fixing it would not move them.
+
+    (3) Q3 — THE DETECTOR DOES NOT RECEIVE THE EXIT CODE. IT DOES NOT DISCARD IT. `detectDaemonCrashLoop`
+    (src/lib/daemon.ts) is `(bootTimestamps: readonly string[], window)` — its ENTIRE input is a
+    string array of timestamps, and it counts the densest window. There is no exit-code parameter
+    to discard. One layer down the information exists and is already branched on: the entrypoint
+    prints `exited 75 (freshness)` and `sleeping 5s (not the 120s crash throttle)`. It never
+    reaches the ledger: `daemon.boot`'s payload is `env_clean`, `billing_mode`, `node_path`,
+    `node_version`, and optionally `node_drift`/`head_sha`/`checkout_shallow`/
+    `checkout_commit_count` — no exit code of the PRIOR process, and `daemon.stop` records a
+    graceful STOP-file stop, not a freshness exit. So the datum is absent at two layers: never
+    written to the ledger, and not a parameter of the detector. SIX FRESHNESS RESTARTS ARE SIX
+    BOOTS, AND SIX BOOTS BREACH A `maxBoots: 5` WINDOW — the detector is behaving exactly as
+    specified on input that cannot express the distinction.
+
+    ⚠ NOT PROPOSED, PER THE BRIEF: removing any liveness row, raising the crash-loop threshold,
+    suppressing the `next action` line, or changing the freshness-exit design. A DETECTOR THAT
+    CANNOT SEE `exit 75` SHOULD LEARN TO SEE IT. The shape of the fix is that an absent sensor
+    reads as UNKNOWN rather than as a negative, and that a boot carries the reason its predecessor
+    ended.
+
+    ⚠ HOW LONG THIS HAS READ WRONG IS NOT ANSWERABLE FROM THIS HOST, AND THAT IS REPORTED AS
+    VACUOUS RATHER THAN AS ZERO. The ledger union at the config root (/root/Remudero/state) is ONE
+    file, 763 rows, carrying exactly TWO distinct steps (`cli.invoked`, `next_task_id.reserve`) and
+    ZERO `daemon.boot` rows. The corpus cannot answer whether `daemon: not running` has ever
+    coincided with a genuinely dead process, so the narrower finding — "the row works sometimes" —
+    is neither established nor refuted here. Re-run that query on the mini, where the daemon's own
+    ledger lives.
+
+    OWNED ELSEWHERE, RECORDED SO THIS TASK DOES NOT RE-LITIGATE THEM: the freshness restart itself
+    is W1-T126's; the console poll cost is W1-T2440's; cross-host liveness undecidability is
+    W1-T396's. This task owns only the sensor's inability to say "unknown" and the detector's
+    inability to see the exit code it is being judged on.
+  acceptance:
+    - claim: "an absent launchd sensor reads as unknown rather than as a stopped service"
+      proof: "unit test: test/liveness-distinguishes-absent-sensor-from-dead-service.test.ts"
+    - claim: "a genuinely stopped service on a launchd host still reads stopped, so the unknown state is not a blanket amnesty"
+      proof: "unit test: test/liveness-distinguishes-absent-sensor-from-dead-service.test.ts"
+    - claim: "a daemon row carrying a boot heartbeat cannot simultaneously assert the process is not running"
+      proof: "unit test: test/liveness-distinguishes-absent-sensor-from-dead-service.test.ts"
+    - claim: "the deploy-supervisor row separates no sensor from no tick observed, naming which it saw"
+      proof: "unit test: test/liveness-distinguishes-absent-sensor-from-dead-service.test.ts"
+    - claim: "a boot that follows a freshness exit is distinguishable from one that follows a crash"
+      proof: "unit test: test/liveness-distinguishes-absent-sensor-from-dead-service.test.ts"
+    - claim: "a window of freshness restarts does not breach the crash-loop detector while a window of real crashes still does"
+      proof: "unit test: test/liveness-distinguishes-absent-sensor-from-dead-service.test.ts"
