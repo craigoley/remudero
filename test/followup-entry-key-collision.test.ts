@@ -112,8 +112,9 @@ test("W1-T2252: mineFollowups still writes nothing itself — a dry-run preview 
 
 test("W1-T2252: recovering skipped entries produces candidates only — no path files a task", () => {
   // Two rows for the SAME run_id — the exact collision shape this task fixes — both entries now
-  // recovered as CANDIDATES, never auto-filed as tasks (rule 15: mineFollowups mints proposal
-  // candidates for the Architect, never a task itself).
+  // recovered as CANDIDATES rather than tasks — mineFollowups mints proposal candidates and never
+  // a task itself, which is its own scope. W1-T2456: this cited "rule 15", which carries no such
+  // doctrine; §12 rule 27 permits automatic filing.
   const records = parseLedger(
     [
       `{"ts":"2026-05-15T00:00:00.000Z","run_id":"R-CANDIDATE-ONLY","task_id":"W1-T505","step":"report.followups","entries":[{"type":"task","text":"row one's declaration"}]}`,

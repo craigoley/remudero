@@ -1430,9 +1430,11 @@ export function pruneRatifiedProposals(
 // ── rmd approve — one bit ratifies through the gate (MASTER-PLAN P25 ii, W1-T111) ────────
 //
 // APPROVE = one bit: the operator's thumbs-up INITIATES the plan PR carrying the
-// pre-drafted, lint-clean tasks + the RATIFIED stamp (rule 15 preserved — the human's
-// approval initiates every plan edit; the gate still reviews; nothing auto-files without
-// the bit). {@link approveProposal} is the pure DECISION (valid only for READY, one
+// pre-drafted, lint-clean tasks + the RATIFIED stamp. W1-T2456: this said "rule 15 preserved"
+// for a doctrine §12 rule 15 does not carry; rule 27 permits automatic filing outright. What is
+// still true of THIS function is narrower and is its own scope: the approve bit initiates the
+// plan edit, and the gate still reviews.
+// {@link approveProposal} is the pure DECISION (valid only for READY, one
 // gateway call each, one ledger line); the git/gh SIDE EFFECTS are injected via
 // {@link RatifyGateway} (mirrors lib/escalate.ts's `IssueGateway` split) so this is
 // unit-testable without touching a real repo.

@@ -205,7 +205,7 @@ test("W1-T2388: no step is added to DECISION_RELEVANT_LEDGER_STEPS by this task"
 test("W1-T2388: the digest stays a REPORTER — it files nothing and paces nothing", () => {
   const src = readFileSync(new URL("../src/lib/digest.ts", import.meta.url), "utf8");
   for (const writer of ["captureFeedback", "updateProposalRegistry", "landFeedback"]) {
-    assert.equal(src.includes(writer), false, `${writer} must not appear — Rule 15, nothing auto-files`);
+    assert.equal(src.includes(writer), false, `${writer} must not appear — this rung writes no plan record of its own (W1-T2456: the citation here read "Rule 15", which carries no filing doctrine)`);
   }
   const from = src.indexOf("export function readDigestWindow(");
   const region = src.slice(from, src.indexOf("\n}", from));

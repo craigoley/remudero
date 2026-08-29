@@ -1950,8 +1950,9 @@ export interface PlanHealthFlag {
 }
 
 /** A proposed corrective task, auto-filed per violating OPEN task — DATA for the
- *  Architect's plan-only PR to ratify, never written to plan/tasks.yaml directly
- *  (Standing rule 16: only the Architect authors tasks). */
+ *  Architect's plan-only PR to ratify, never written to plan/tasks.yaml directly by THIS function
+ *  — its own scope, not a prohibition. W1-T2456: this cited "Standing rule 16", which is the
+ *  mis-specified-task correction rule; §12 rule 27 permits automatic filing. */
 export interface CorrectiveTaskProposal {
   /** The OPEN task this proposal corrects. */
   forTaskId: string;
@@ -2305,7 +2306,9 @@ export function renderDegradedSuccess(findings: DegradedSuccessFinding[]): strin
 // learnings.ts `LearningEntry` already carries, tagged only by `subsystem:
 // "procedural"`. It rides the EXISTING lifecycle/injection/consolidation
 // machinery (W1-T33/W1-T19) like any other entry; only the Architect writes
-// it into a `learnings/*.yaml` shard (Standing rule 15 — never auto-filed).
+// it into a `learnings/*.yaml` shard — this function's own scope. W1-T2456: the citation here named
+// a §12 rule number that carries no such doctrine; rule 15 is the goalpost rule, and rule 27 permits
+// automatic filing outright.
 
 /** The reduced facts one {@link ProceduralSuccessSignal} judges a MERGED run against. */
 export interface ProceduralRunContext {
@@ -2432,7 +2435,7 @@ export function mineProceduralCandidates(
   return out;
 }
 
-/** Render the mined procedural candidates (markdown) — printed by `--dry-run` and fed to the Architect, which drafts the actual learning (Standing rule 15: only the Architect authors learnings). */
+/** Render the mined procedural candidates (markdown) — printed by `--dry-run` and fed to the Architect, which drafts the actual learning. W1-T2456: this cited "Standing rule 15", which carries no such doctrine — see §12 rule 27. */
 export function renderProceduralCandidates(candidates: ProceduralCandidate[]): string {
   if (candidates.length === 0) {
     return "## Procedural-success mining (P13)\n\nNo shape shared by >=2 merged runs yet.";
@@ -2451,9 +2454,9 @@ export function renderProceduralCandidates(candidates: ProceduralCandidate[]): s
 // A worker's REPORT may carry an OPTIONAL `## Follow-ups` section (§2 OUTPUT
 // CONTRACT, parsed by `parseFollowups` in worker.ts); run-task.ts ledgers each one
 // as a `report.followups` event, verbatim, with run/task/PR provenance. This
-// module mines that event stream deterministically: rule 15 stays intact — the
-// output is PROPOSAL CANDIDATES for the Architect's retro PR to cite, never an
-// auto-filed task.
+// module mines that event stream deterministically, and its OUTPUT is proposal candidates for
+// the Architect's retro PR to cite rather than a filed task — this module's own scope.
+// W1-T2456: the citation here read "rule 15 stays intact"; see §12 rule 27.
 
 /** One followup entry off a `report.followups` ledger event, with its provenance
  *  and a stable {@link entryId} the harvest-mark ledger lines reference. */
@@ -2600,11 +2603,15 @@ export function recordFollowupHarvest(harvest: FollowupHarvest, deps: FollowupHa
 }
 
 /** Render the follow-up harvest (markdown) — printed by `--dry-run` and fed to the
- *  Architect. Rule 15: every line here is a CANDIDATE citing its origin verbatim,
- *  never an instruction to file a task. */
+ *  Architect. Every line here is a CANDIDATE citing its origin verbatim, never an instruction to
+ *  file a task — this function's own scope. W1-T2456: this cited "Rule 15", which carries no such
+ *  doctrine; §12 rule 27 permits automatic filing. */
 export function renderFollowupCandidates(harvest: FollowupHarvest): string {
   const lines = [
-    "## Follow-up harvest (W1-T105) — PROPOSAL CANDIDATES, never auto-filed (rule 15)",
+    // W1-T2456: this heading cited "(rule 15)" for a doctrine §12 rule 15 does not carry. The
+    // harvest still emits CANDIDATES rather than tasks — its own scope — so the shape is unchanged
+    // and only the false citation is dropped.
+    "## Follow-up harvest (W1-T105) — PROPOSAL CANDIDATES, not filed by this rung",
     "",
   ];
   if (harvest.candidates.length === 0) {

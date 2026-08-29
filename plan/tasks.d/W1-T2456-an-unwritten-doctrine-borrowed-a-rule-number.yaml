@@ -1,0 +1,86 @@
+- id: W1-T2456
+  title: "AN UNWRITTEN DOCTRINE BORROWED A RULE NUMBER AND THE BORROWED NUMBER IS CITED AS LAW — §12 rule 15 is the acceptance-criteria goalpost rule and rule 16 is the mis-specified-task correction rule, neither mentions filing, and a scan of the whole of §12 for `auto-fil|autofil|never file|architect authors` returns 0 with a firing control; yet \"standing rule 15 forbids auto-filing\" stood at six places in MASTER-PLAN.md and `src/lib/retro.ts` pinned the same doctrine to rule 16"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 20.00
+  files: [MASTER-PLAN.md, src/lib/policy.ts, src/lib/retro.ts, src/lib/onboard/synthesize.ts, src/run-task.ts, test/rule-citations-match-their-rule.test.ts]
+  origin: "operator-ruling#auto-filing-permitted-2026-08-29"
+  plan_refs: ["W1-T2279", "W1-T2455"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE ID. Eight surfaces, anchored `W1-T2456([^0-9]|$)` with a `[0-9]` class and never `\d`.
+    SURFACE 1 READS 1 of 569 reservation refs — the mint HELD this id on origin, which is the line
+    that governs, not the advisory `max 2455`. Shard filenames 0 of 700, declared ids 0, head
+    branches 0, merged trailers 0, merged subjects 0, all against a W1-T2453 control reading 1.
+    Open-PR titles and bodies read 0 across 4 open PRs, with a control of 4 (every one carries some
+    anchored W1-T id), so the query is not blind.
+
+    ── THE DEFECT ────────────────────────────────────────────────────────────────────────────────
+
+    MEASURED at 0d22e8b8: §12 rule 15 reads "When a worker is blocked by an acceptance gate, it may
+    ADD the missing work or ESCALATE. It may NEVER edit the acceptance criteria to match its diff."
+    A scan of the WHOLE of §12 for `auto-fil|autofil|never file|architect authors` returns 0, with a
+    firing control (`Architect` appears 5 times in the same span). Rule 16 is the mis-specified-task
+    correction rule. NEITHER carries a filing doctrine.
+
+    Yet the claim stood at SIX places in MASTER-PLAN.md — :274, :401, :1686, :2310, :2992, :3205 —
+    and `src/lib/retro.ts` pinned the SAME doctrine to rule 16. ⚠ A PRIOR READ NAMED FIVE; the
+    sixth (:2992) is reported here because line lists drift and the sweep was re-derived rather
+    than trusted. Six more sites in `src/` and `test/` repeated it under one number or the other.
+
+    ── WHY A DELETION WOULD NOT HAVE BEEN ENOUGH ────────────────────────────────────────────────
+
+    The doctrine took root in SILENCE: nothing in §12 said filing was permitted, and an absence was
+    read as a prohibition. So the ruling is recorded AFFIRMATIVELY as §12 rule 27 — dated
+    2026-08-29, attributed to the operator, naming the two borrowed numbers and the measurement —
+    rather than by deleting six claims and leaving the same silence behind.
+
+    ⚠ RULE 15 ITSELF STANDS AND IS NOT TOUCHED. `criterionFieldTampered` is what stops a builder
+    rewriting the acceptance criteria its own judge reads; under an LLM-as-judge design that is MORE
+    load-bearing, not less. `rule15FilingViolation` is likewise untouched — it is a task-record
+    SHAPE check and never governed who may file.
+
+    ── WHAT MAKES IT NOT RECUR ──────────────────────────────────────────────────────────────────
+
+    CLAUDE.md already carried a decoding row mapping rule numbers to enforcing symbols, and it did
+    NOT prevent this, because nothing verified a citation against what the rule SAYS.
+    `test/rule-citations-match-their-rule.test.ts` closes that: each mapped rule is pinned to its
+    SUBJECT WORDS and its enforcing symbol, and a guard refuses any citation outside `plan/` that
+    attributes a filing doctrine to rule 15 or 16.
+
+    THE ASSERTION SHAPE IS A DELIBERATE TRADE. It is NOT a verbatim quote pin: this repo has one
+    (`docs/operator-message-standard.md`, W1-T2279) whose measured cost is that REWORDING a quoted
+    line reddens the suite. A subject-word pin survives rewording and fails when a rule's subject
+    changes or a citation attaches a doctrine the rule does not carry. Its own cost is the mirror:
+    a legitimate rewrite that changes a rule's subject must update the table, which is the review
+    moment the test exists to force. MEASURED LIMIT: changing rule 19's HEADING alone does not
+    redden it (the subject vocabulary survives in the body); removing the subject word from the
+    rule's whole span does.
+
+    ── OUT OF SCOPE, RECORDED ───────────────────────────────────────────────────────────────────
+
+    `plan/` is deliberately untouched: five shard records still carry the old citation, and amending
+    a merged shard is a Rule 21 amendment — a different mechanism and a different concern. They are
+    historical records of what was believed at filing time.
+
+    ⚠ AND A SEPARATE FINDING THAT NEEDS ITS OWN ID, NOT TAKEN HERE: this repo runs TWO rule
+    namespaces sharing the word "rule" and the same integer range — §12 "Standing rule N" and
+    MASTER-PLAN's own "design rule N" (40 citations, including a DIFFERENT "design rule 15").
+    CLAUDE.md's decoding row documents the first and never mentions the second, which is what makes
+    a bare "rule N" ambiguous and is the structural cause of this defect's class. CLAUDE.md also has
+    71 bytes of headroom against its cap, so documenting it is not a free edit.
+
+  acceptance:
+    - claim: "§12 states affirmatively that automatic filing is permitted, dated and attributed to the operator ruling"
+      proof: "unit test: test/rule-citations-match-their-rule.test.ts"
+    - claim: "no file outside plan/ attributes a filing doctrine to rule 15 or rule 16"
+      proof: "unit test: test/rule-citations-match-their-rule.test.ts"
+    - claim: "every mapped rule's own §12 text still carries that rule's subject, so a citation cannot drift from what the rule says"
+      proof: "unit test: test/rule-citations-match-their-rule.test.ts"
+    - claim: "rule 15 is unchanged and still about acceptance criteria, and acquires no filing doctrine"
+      proof: "unit test: test/rule-citations-match-their-rule.test.ts"
