@@ -1,0 +1,109 @@
+- id: W1-T2460
+  title: "EVERY BOARD-REVIEW PROPOSAL MINTED BEFORE #3255 IS PERMANENTLY UNRETIRABLE, AND THE REFERENT IT WOULD RETIRE AGAINST IS SITTING IN ITS OWN ID — `resolveBoardReferent` (lib/inbox.ts) opens with `if (!proposal.originatingItemId) return { kind: \"live\" }`, so a legacy row is classified LIVE without the batched referent read ever being consulted; `board-review:escalation:#3059` names PR #3059, which merged on 2026-08-27, and nothing parses it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 12.00
+  files: [src/lib/inbox.ts, test/legacy-board-review-proposals-can-retire.test.ts]
+  origin: "operator-brief#seventeen-proposals-can-never-retire-2026-08-29"
+  plan_refs: ["W1-T2451", "W1-T2455", "W1-T2458", "W1-T130"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE ID. Eight surfaces swept, anchored `W1-T2460([^0-9]|$)` with a `[0-9]` class and never `\d`.
+    SURFACE 1 (reservation refs on origin) READS 1 against 575 refs — and it is the FIRST id the
+    mint HELD, not the advisory max: three refs were minted 4s apart by sequential pids at
+    2026-08-29T23:42:34/38/42Z (W1-T2460, W1-T2461, W1-T2462), and 2460 is the earliest of that
+    run; W1-T2458/W1-T2459 belong to an earlier 20:03Z run. Shard filenames 0 of 703, declared ids
+    0 of 971, merged trailers 0 of 97 — each with a control firing 1 (W1-T2452). Merged subjects 0
+    of 400, control W1-T1041 firing 2 — ⚠ THE FIRST CONTROL CHOSEN FOR THAT SURFACE READ ZERO AND
+    IS REPORTED RATHER THAN QUIETLY RE-PICKED: W1-T2452 appears in no recent subject, so it could
+    not control that surface and a second was measured. ⚠ THREE SURFACES ARE VACUOUS, NOT ZERO:
+    open PR titles, open body lines and open head refs all have an EMPTY POPULATION (zero open PRs
+    at sweep time), so no control is constructible and their "0" carries no information.
+    ANCHOR-LEAK: `W1-T246([^0-9]|$)` reads 0 on refs while `W1-T2460([^0-9]|$)` reads 1.
+
+    (1) Q1 — THE RETIREMENT PATH, BY SYMBOL, AND WHY IT CANNOT REACH THESE ROWS.
+
+    `classifyProposal` (lib/inbox.ts) calls `resolveBoardReferent(proposal, ctx.boardReferents)`,
+    and that function's FIRST line is `if (!proposal.originatingItemId) return { kind: "live" };`.
+    A proposal carrying no referent field is LIVE by construction — the batched
+    `BoardReferentRead` is never consulted for it, so no state of the world can ever retire it.
+    Only when the field is present does `boardReferentResolved` run, and only a `"resolved"`
+    lookup reaches the `state: "retired"` branch.
+
+    W1-T2451 (#3255) added `originatingItemId` precisely because the OTHER predicate is
+    unreachable for this family: `board-review.ts` mints every finding with `evidenceAnchors: []`
+    — its own comment says a PR number is not a git-grep-able fact — so the `evidence_anchors`
+    drift arm can never fire on a board-review row. The referent field is the replacement, and
+    `board-review.ts` sets it at mint time only. Rows minted BEFORE #3255 have neither.
+
+    CONTROL, BOTH WAYS, driven through the exported `classifyProposal` against ONE shared batched
+    read so the proposal is the only variable:
+      • legacy (no `originatingItemId`), referent CLOSED  -> state=not_ready  (never retires)
+      • post-#3255 (field present), referent CLOSED       -> state=retired    (predicate works)
+      • post-#3255 (field present), referent OPEN with 2 unhandled escalations -> state=not_ready
+
+    THE THIRD ROW IS THE ONE THAT MATTERS FOR ANY REMEDY. A proposal whose id names a still-OPEN
+    PR must not retire, and `boardReferentResolved` already guarantees it: it returns true only
+    when `state.status !== "open"`, or for an escalation whose `unhandledEscalations === 0`. Both
+    remedies below feed that SAME predicate — they supply a referent id, never a resolution — so
+    neither can retire an open referent. That protection is inherited, not re-implemented.
+
+    (2) Q2 — TWO REMEDIES, PRICED, NEITHER PROPOSED AS AUTOMATIC.
+
+    (a) ONE-TIME BACKFILL of `originatingItemId`, parsed from each id, written once to the
+    registry. Touches state once and leaves every line of code unchanged. NOT REVERSIBLE BY
+    CONSTRUCTION: it edits the durable registry, and undoing it means a second write. It also
+    fails UNSAFE in one direction — a mis-parsed id writes a WRONG referent, and a wrong referent
+    resolves against some other PR's state, which is the one way a proposal could retire for a
+    reason that is not its own. It needs a dry-run and a per-row diff before it writes anything.
+
+    (b) PARSE-AT-READ arm in `resolveBoardReferent`: when `originatingItemId` is absent, derive
+    the referent from the id's own trailing segment. Changes code, needs no state migration, and
+    is REVERSIBLE by reverting the commit — the registry is never written. It fails SAFE: an id
+    that does not parse yields no referent and the row stays exactly as it is today (live), which
+    is the current behaviour rather than a new one. It also covers rows minted later by any
+    producer that forgets the field, where (a) covers only the rows present when it ran.
+
+    THE TRADE IS DURABILITY AGAINST BLAST RADIUS, and it is not decided here: (a) is one write and
+    no code, (b) is one code path and no write. `files:` above names (b)'s surface because (a) is
+    an operator action against state, not a task — filing it as one would put a registry write
+    behind a merge gate. Choosing between them is the operator's.
+
+    (3) Q3 — THE COST OF LEAVING IT IS NOT MEASURABLE FROM THE RECON HOST, AND IS REPORTED AS
+    VACUOUS RATHER THAN AS A NUMBER. `<config.root>/state/inbox-proposals.json` does not exist on
+    this host — zero files named `inbox-proposals*.json` anywhere, against a control of 24 JSON
+    files visible in the checkout — so the 17 cannot be enumerated, their referents cannot be
+    resolved, and the oldest READY age cannot be read. The brief's own figures (total 17, prefix
+    {board-review: 17}, anchorCounts {0: 17}) are RECORDED AS REPORTED, not re-derived.
+
+    ONE DATUM IS MEASURABLE AND IS ENOUGH TO SHOW THE FAMILY IS NOT HYPOTHETICAL: the referent the
+    brief names, PR #3059, is `state=closed merged=true closed_at=2026-08-27T10:40:07Z`. At least
+    one legacy proposal therefore names a referent that has already resolved and still cannot
+    retire. Whether that is 1 of 17 or 15 of 17 decides whether the remedy is a build or a record,
+    and THAT QUESTION IS OPEN. The query to settle it runs on the fleet host: read
+    `state/inbox-proposals.json`, take each id's trailing `#<n>`, and resolve those PR states.
+
+    ⚠ NOT PROPOSED, PER THE BRIEF: deleting a registry row, weakening `classifyProposal`, relaxing
+    the anchor requirement on NEW proposals, or a timer. A row that cannot retire keeps its place
+    in the registry as the record of a finding; the defect is that it can never stop being READY,
+    not that it exists.
+
+    OWNED ELSEWHERE, RECORDED SO THIS TASK DOES NOT RE-LITIGATE THEM: the expiry mechanism is
+    W1-T2451's (#3255, shard on main); the drafted-slug dedup is W1-T2455's (#3264) — ⚠ its shard
+    reads 0 on main at this base, so that ownership is recorded from the brief rather than
+    verified in the plan; the follow-up bridge is W1-T2458's (#3275, shard on main). This task
+    owns only the unreachability of the referent for rows minted before the field existed.
+  acceptance:
+    - claim: "a legacy board-review proposal whose referent has already resolved can reach the retired state instead of being classified live by construction"
+      proof: "unit test: test/legacy-board-review-proposals-can-retire.test.ts"
+    - claim: "a proposal whose referent is still open does not retire, and an escalation with unhandled escalations does not retire either"
+      proof: "unit test: test/legacy-board-review-proposals-can-retire.test.ts"
+    - claim: "an id the referent cannot be derived from leaves the proposal exactly as it is treated today rather than guessing a referent"
+      proof: "unit test: test/legacy-board-review-proposals-can-retire.test.ts"
+    - claim: "a proposal that already carries the referent field is unaffected, so the post-#3255 path keeps its current behaviour"
+      proof: "unit test: test/legacy-board-review-proposals-can-retire.test.ts"
