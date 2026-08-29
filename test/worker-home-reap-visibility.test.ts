@@ -245,6 +245,96 @@ test("spawnWorker (end-to-end): three spawns sharing ONE daemon runId produce th
   assert.deepEqual(readdirSync(dir).filter((n) => n.startsWith("worker-home-")), [], "no worker-home sibling is left behind");
 });
 
+// ── The actual defect this task names: a sibling STILL RUNNING must not lose its HOME when
+// another sibling sharing its runId exits first. The "three spawns" test above only proves
+// three SEQUENTIAL spawns get distinct homes — every prior call has already been reaped before
+// the next one starts, so it never actually has two homes materialized AT ONCE and never drives
+// `reapWorkerHome`'s `finally` while a sibling directory is still live on disk. This test holds
+// one spawn OPEN (blocked mid-query, exactly like a still-running fix worker) while a second
+// spawn with the SAME runId runs to completion and reaps ITS OWN home, then asserts the still-
+// running sibling's directory survives untouched on disk until it, too, exits.
+test("spawnWorker (end-to-end): a still-running sibling's home survives another sibling's exit and reap, same runId", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-worker-home-concurrent-siblings-"));
+  const RUN = "DAEMON-concurrent-siblings";
+  const observed: Array<{ result: WorkerHomeReapResult; spawn: { runId?: string; taskId?: string } }> = [];
+
+  let releaseSlow: () => void = () => {};
+  const slowGate = new Promise<void>((resolve) => {
+    releaseSlow = resolve;
+  });
+  function blockingQueryFn(gate: Promise<void>) {
+    return ((params: { prompt: string; options: { spawnClaudeCodeProcess?: (o: unknown) => unknown } }) => {
+      params.options.spawnClaudeCodeProcess?.({
+        command: "/bin/sh",
+        args: ["-c", "true"],
+        env: {},
+        signal: new AbortController().signal,
+      });
+      return (async function* () {
+        await gate; // still "running" until the test releases it — mirrors a live fix spawn
+        yield {
+          type: "result",
+          subtype: "success",
+          is_error: false,
+          result: "done",
+          session_id: "s-slow",
+          total_cost_usd: 0.01,
+          num_turns: 1,
+        };
+      })();
+    }) as unknown as Parameters<typeof spawnWorker>[0]["queryFn"];
+  }
+
+  // Kick off the slow sibling but do NOT await it yet — its synchronous prefix (worker-home
+  // materialization included) runs to completion before this call returns control here, since
+  // nothing above the query itself in spawnWorker awaits anything.
+  const slowPromise = spawnWorker({
+    ...e2eSpawnWorkerArgs(dir, RUN, { taskId: "T-slow" }),
+    queryFn: blockingQueryFn(slowGate),
+    containment: fakeContainment(999970),
+    logHomeReap: (result, spawn) => observed.push({ result, spawn }),
+  } as Parameters<typeof spawnWorker>[0]);
+
+  const slowHomes = readdirSync(dir).filter((n) => n.startsWith("worker-home-") && n.includes(RUN));
+  assert.equal(slowHomes.length, 1, "the still-running sibling's home must already be materialized");
+  const slowHome = join(dir, slowHomes[0]);
+
+  // A second sibling, SAME runId, runs to completion and reaps ITS OWN home while the first is
+  // still blocked mid-query — this is the actual defect shape: two overlapping spawns, one
+  // runId, one finishing while the other is still live.
+  await spawnWorker({
+    ...e2eSpawnWorkerArgs(dir, RUN, { taskId: "T-fast" }),
+    queryFn: fakeQueryFn("success"),
+    containment: fakeContainment(999971),
+    logHomeReap: (result, spawn) => observed.push({ result, spawn }),
+  } as Parameters<typeof spawnWorker>[0]);
+
+  assert.equal(observed.length, 1, "only the fast sibling has exited/reaped so far — the slow one is still running");
+  assert.equal(observed[0].spawn.taskId, "T-fast");
+  assert.equal(
+    existsSync(slowHome),
+    true,
+    "the still-running sibling's home must survive the OTHER sibling's teardown — this is the defect this task names",
+  );
+  assert.deepEqual(
+    readdirSync(dir).filter((n) => n.startsWith("worker-home-") && n.includes(RUN)),
+    [slowHomes[0]],
+    "only the slow sibling's own home remains — the fast sibling reaped exactly its own directory",
+  );
+
+  releaseSlow();
+  await slowPromise;
+  assert.equal(observed.length, 2, "the slow sibling eventually exits and reaps too");
+  assert.equal(observed[1].spawn.taskId, "T-slow");
+  assert.notEqual(observed[0].result.target, observed[1].result.target, "the two siblings never shared a home");
+  assert.equal(existsSync(slowHome), false, "the slow sibling reaped its own home once it actually finished");
+  assert.deepEqual(
+    readdirSync(dir).filter((n) => n.startsWith("worker-home-")),
+    [],
+    "nothing is left behind once both siblings have exited",
+  );
+});
+
 test("spawnWorker (end-to-end): a logHomeReap that itself THROWS never breaks the surrounding teardown — best-effort, never surfaces", async () => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-worker-home-reap-e2e-logger-throws-"));
   await assert.doesNotReject(() =>
