@@ -259,9 +259,14 @@ test("operator-message-standard falsifier: a doc that omits the filled-but-false
 });
 
 test("operator-message-standard: the daemon-liveness rule the doc quotes still exists verbatim in status-board.ts", () => {
+  // W1-T2450 legitimately split this rule in two (an "unknown" — no launchd sensor — rule now
+  // sits ahead of it, so a sensor-absent host is never told "rmd up" for a process it never
+  // actually asked about) — but the MESSAGE this doc quotes, and the "stopped" predicate that
+  // still guards it, are byte-for-byte the ones asserted here; only the now-excluded "unknown"
+  // case is new. No existing operator message is reworded (see CLAIM 9, below).
   assert.match(
     statusBoardSrc,
-    /applies: \(ctx\) => !ctx\.services\.find\(\(s\) => s\.service === "daemon"\)\?\.running,\s*action: \(\) => "the daemon is not running — `rmd up` \(or `rmd daemon \.\.\.`\) to resume the fleet",/,
+    /applies: \(ctx\) => \{\s*const row = ctx\.services\.find\(\(s\) => s\.service === "daemon"\);\s*return row !== undefined && livenessState\(row\) === "stopped";\s*\},\s*action: \(\) => "the daemon is not running — `rmd up` \(or `rmd daemon \.\.\.`\) to resume the fleet",/,
     "the daemon-liveness NextActionRule the doc cites must still match the real source, unrewritten",
   );
 });
