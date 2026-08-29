@@ -162,12 +162,41 @@
     span regardless of how small the change is. A note for the builder: the new observability is
     NOT read by any decision, so it does not belong in `DECISION_RELEVANT_LEDGER_STEPS` and adding
     it there would widen the span for nothing.
+    ── AMENDMENT 2026-08-29 (W1-T2456's ruling did not reach this; this is Rule 21's removal arm) ─
+
+    THE FOURTH CRITERION IS REMOVED, NOT REWRITTEN. It read "no remedy ships here — the home is
+    still keyed on the run and the defect still fires", and it was TRUE of this task's first half:
+    #3234 shipped `logHomeReap` as instrumentation over a defect that was still live, and the
+    criterion existed to stop that PR quietly shipping the remedy too.
+
+    IT IS NOW FALSE. #3261 ships the remedy under THIS SAME TASK ID — `spawnWorker` resolves its
+    home with `perRunWorkerHomeDir(..., { perSpawn: true })`, so no two overlapping spawns share a
+    directory and the reap can no longer remove a sibling's live home. A criterion asserting the
+    remedy did NOT ship cannot be satisfied by a diff that ships it, and `judgeReview` grades the
+    SHARD's claim, not the code's comments — which is why #3261's own round-2 commit, correcting
+    the stale "no remedy ships here" comments in `worker.ts`, could not clear it either.
+
+    WHY REMOVED RATHER THAN REWRITTEN, AND WHY THAT IS THE SANCTIONED SHAPE. The criterion named a
+    deliberate NON-deliverable that no longer exists; there is nothing true to replace it with, and
+    the other three criteria already cover the instrumentation half in full. `postMergeAmendmentViolations`
+    (`src/lib/task-linter.ts`) BLOCKS a criterion ADDED or CHANGED on a merged task absent a
+    follow-up escape, and reports a REMOVED one as `post-merge-criterion-removed`, `severity: "warn"`
+    — "reported rather than blocked" in its own words. Removal is the arm that fits, and it is
+    report-only by design.
+
+    ⚠ WHAT THIS AMENDMENT DOES NOT DO. It adds no criterion, changes no surviving claim or proof,
+    and touches no other field: `title`, `files`, `status`, `risk`, `type`, `verify`, `budget_usd`,
+    `origin` and `plan_refs` are byte-identical to the base, asserted through `loadPlan` rather than
+    by eye. It is plan-only, so `criterionFieldTampered` (`src/lib/review.ts`) — which refuses a
+    worker editing criteria inside its own implementing diff — is exempt by `planOnly`, and
+    `rule15FilingViolation`, which refuses a task record declared beside `src/` at `verify: auto`,
+    never fires because this PR declares no source path at all. That separation is the reason this
+    is its own PR and not a commit on #3261.
+
   acceptance:
     - claim: "the reap result is no longer discarded at the call site"
       proof: "unit test: test/worker-home-reap-visibility.test.ts"
     - claim: "the removed target and the reason it was removed are both observable"
       proof: "unit test: test/worker-home-reap-visibility.test.ts"
     - claim: "the reap remains best-effort and still never throws on any arm"
-      proof: "unit test: test/worker-home-reap-visibility.test.ts"
-    - claim: "no remedy ships here — the home is still keyed on the run and the defect still fires"
       proof: "unit test: test/worker-home-reap-visibility.test.ts"
