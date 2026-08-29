@@ -1,0 +1,94 @@
+- id: W1-T2453
+  title: "A BOARD-REVIEW ESCALATION CANDIDATE NAMES NOTHING — it renders 'carries N unhandled escalation(s)' while the projection it was built from ALREADY holds that escalation's one-line ask and its issue URL, discarded one line before the mapper; carry them through, at zero extra reads"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "SELF-EVIDENCED, 2026-08-27. The ratification candidate this task was filed from reads, in full:
+    'board-review: #3043 carries 1 unhandled escalation(s)'. That is a COUNT. It names no reason, links no
+    issue, and cites no evidence, so grounding it required finding the escalation by grepping the PR number
+    across the repo, reading plan/feedback/fb-repair-blocked-ambiguous-2956.yaml for the verbatim
+    sweep.disposed row, and then reading three source files to establish what the escalation meant. Every
+    escalation candidate this rung mints has that shape, so the cost recurs per candidate, on the intake path
+    whose whole purpose is to hand an Architect something decidable.
+    THE DATA IS ALREADY IN HAND AND IS THROWN AWAY ONE LINE EARLIER — this is the part that makes the fix
+    cheap and the omission hard to defend. `defaultBoardReviewItems` projects the plan
+    (src/run-task.ts:16008-16013) and then reduces the whole projection to
+    `new Set([...proj.values()].filter((p) => p.needsHuman && p.prNumber !== undefined).map((p) => p.prNumber!))`
+    — a Set of numbers. Those same `StatusProjection` objects already carry `escalationIssueUrl`
+    (src/lib/status.ts:357, 'carried so NEEDS ME can render a DIRECT link rather than soliciting a URL the
+    ledger already holds') and `escalationTitle` (:364, 'the escalation's real one-line ask … the live issue's
+    title'), each documented as 'Present iff needsHuman is'. `boardItemsFromOpenPrs` then stores the boolean
+    (`unhandledEscalations: needsHumanByPrNumber.has(pr.number) ? 1 : 0`, :15971) and
+    `diagnoseBoardFindings` renders the count (src/lib/board-review.ts:286-291). No new GitHub call, no new
+    ledger read, no new join — the reason is projected and then dropped.
+    THE DOCTRINE IS ESTABLISHED AND THIS IS THE SURFACE IT WAS NOT APPLIED TO. W1-T186 fixed exactly this for
+    the sweep's own reason line, and sweep.ts records the ruling verbatim at :2906-2908: NAME the check and the
+    sha 'so the reason itself never reads as the generic, uninvestigable \"fix strikes exhausted\"'. W1-T182
+    ratified the same rule for the console's NEEDS ME rows — 'render the escalation's ACTUAL one-line ask, with
+    a direct link — never an input soliciting data the ledger already holds' — and `escalationTitle`/
+    `escalationIssueUrl` EXIST ON THE PROJECTION BECAUSE OF THAT TASK. This rung reads that projection and
+    renders a count anyway. Nothing here re-decides either ruling; it renders the vocabulary they already mint.
+    NOT A CRITICISM OF THE RUNG'S SCOPE. W1-T2304 built the board-review rung deliberately read-only and
+    deliberately mints proposals rather than tasks; that is right and is untouched. The defect is confined to
+    what a minted candidate SAYS."
+  design: |
+    (i) CARRY THE REASON ONTO THE ITEM. `BoardItem` gains the escalation's ask and its issue URL alongside the
+    count it already holds, populated by `boardItemsFromOpenPrs` from the SAME projection entries the caller has
+    already computed — so the fields are threaded, never re-fetched. VERIFY the projection's field names and
+    their sparse convention from src/lib/status.ts before wiring (they are `escalationTitle`,
+    `escalationIssueUrl` and `escalationUnverified` at the time of writing; distrust this note).
+    (ii) RENDER IT IN THE CANDIDATE. `diagnoseBoardFindings`'s escalation summary names the ask and links the
+    issue, so a candidate is decidable from its own text. The finding ID is UNCHANGED
+    (`board-review:escalation:<item id>`) — `updateProposalRegistry`'s idempotence keys on it, and changing the
+    id would re-mint every already-open candidate as a duplicate.
+    (iii) HONEST ABSENCE, NOT A DROPPED FINDING — the half most likely to be got wrong. W1-T182 already defines
+    the case where an escalation is known but its issue could not be read (`escalationUnverified`, status.ts:372,
+    whose own doc records the FAIL-CLOSED boundary: 'an unreadable issue state must KEEP the row rather than
+    silently drop it'). This rung inherits that direction exactly: a `needsHuman` item with no readable title
+    still produces its finding, and the summary SAYS the ask could not be read rather than falling back to a
+    bare count that looks identical to today. An unnamed escalation is a finding; it is never a reason to omit
+    one.
+    (iv) THE TRIGGER IS UNTOUCHED. `decideBoardReviewTrigger`'s depth signals, the cadence bound, and
+    `boardItemsInScope`'s recursion bound are not this task's concern and must behave identically — the change
+    is confined to what a finding CARRIES, never to whether the rung fires or what it counts.
+    (v) THE READ STAYS FAIL-SOFT. `defaultBoardReviewItems` never throws by construction (its own doc records
+    that fail direction: an outage yields no items, so the rung reports nothing rather than taking down the
+    daemon tick). Threading two more fields must not introduce a path that throws when the projection is partial
+    — a missing field degrades to (iii)'s stated-absence, exactly as a missing projection already degrades to
+    zero escalations.
+  acceptance:
+    - claim: "an escalation candidate NAMES the escalation — its summary carries that escalation's own one-line ask and a direct link to its issue, both threaded from the projection the mapper already consumes, so the candidate is decidable from its own text rather than only from a count"
+      proof: "unit test: test/board-review.test.ts"
+    - claim: "the naming costs ZERO additional reads — the ask and the URL come from the same projection entries the board-review read already computes, and no new GitHub or ledger call is made to obtain them"
+      proof: "unit test: test/board-review-wiring.test.ts"
+    - claim: "an escalation whose issue could not be read STILL produces its finding, with the summary stating that the ask was unreadable — an unnamed escalation is a finding and is never silently dropped or rendered as an ordinary bare count"
+      proof: "unit test: test/board-review.test.ts"
+    - claim: "the depth trigger, the cadence bound and the recursion bound are unchanged, and the escalation finding's id is unchanged so an already-open candidate is not re-minted as a duplicate"
+      proof: "unit test: test/board-review.test.ts"
+  risk: high
+  origin: architect
+  plan_refs: ["§7B", "§5C"]
+  files: [src/lib/board-review.ts, src/run-task.ts, test/board-review.test.ts, test/board-review-wiring.test.ts]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-08-27 by the Architect who could not ground board-review:escalation:#3043 from its own
+    text. The evidence for this task IS that proposal: its entire body was a count, and reconstructing what it
+    referred to took a grep on the PR number plus four files. Filed as a SEPARATE task from its sibling W1-T2452
+    under Rule 19 — W1-T2452 fixes the escalation's substance (a strike cap that does not bind), this fixes the
+    messenger, and they share no code path.
+    depends_on IS DELIBERATELY EMPTY. Everything this needs is shipped and reachable: the rung
+    (src/lib/board-review.ts), its reader (src/run-task.ts:16001), and the projection fields (src/lib/status.ts
+    :357/:364/:372). W1-T182 is the ratified doctrine this renders and W1-T2304 is the rung it amends; neither
+    is a gate, and both plan records would stall this behind ids that may never be credited.
+    risk:high IS A RECORDED REGRADE UNDER THE SIZING RULE'S OWN EXEMPTION, NOT A CLAIM THAT THIS IS DANGEROUS —
+    stated plainly because inflating a rating to clear a linter is the workaround this plan has refused before
+    (W1-T217 split instead). Splitting is not available here: the mapper must carry the fields and the renderer
+    must render them, and either alone is a no-op — carrying a field nothing reads changes nothing, rendering a
+    field nothing populates renders nothing — so the two halves are not independently testable (the
+    W1-T240/W1-T250/W1-T253 atomic-coupling exit). The honest reading of the FAILURE DIRECTION is mild: the
+    worst outcome is a candidate summary that is wrong or absent, on a read-only reporting rung that already
+    degrades to silence on any error. That mildness is recorded here rather than dressed up, so a future reader
+    weighing this against genuinely dangerous risk:high work is not misled by the label."

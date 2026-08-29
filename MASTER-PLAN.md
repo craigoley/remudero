@@ -5472,3 +5472,4 @@ higher-thinking mount than the coding agents; relative, config-validated, flywhe
 - P19 rung 2 — Tree-sitter symbol-touch locks; unbanks only when a rung-1 file-overlap ESCAPE is
   observed in the ledger (W1-T172's `dispatch.concurrent_set` line is the trigger).
 - board-review:escalation:#3039 (a board-review finding whose referent is an ephemeral PR; the instance was refused, the class it evidences was filed) — RATIFIED 2026-08-27 -> W1-T2451.
+- board-review:escalation:#3043 (the escalation on #3043, grounded: 'fix strikes exhausted (3/2)' is a real overspend — the sweep gates cumulatively but dispatches a fresh full cap — and the candidate that reported it named neither the ask nor the issue it already held) — RATIFIED 2026-08-27 -> W1-T2452/W1-T2453.
