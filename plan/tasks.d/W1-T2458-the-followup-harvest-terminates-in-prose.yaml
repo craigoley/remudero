@@ -1,0 +1,152 @@
+- id: W1-T2458
+  title: "THE FLEET MINES ITS OWN NEXT-WORK LIST THROUGH FIVE SYMBOLS AND DEPOSITS IT IN A MARKDOWN SECTION NO RUNG READS — 1,046 deduped `report.followups` rows carry 2,115 typed entries from 463 distinct task_ids over 21 days, `mineFollowups` processes them, and `renderFollowupCandidates` returns prose headed \"never auto-filed (rule 15)\"; of the seven modules calling `updateProposalRegistry`, the single registry writer, not one reads a follow-up, and not one plan task has ever been filed FROM a harvested entry"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 20.00
+  files: [src/lib/retro.ts, src/run-task.ts, test/followup-routing-has-a-consumer.test.ts]
+  origin: "recon#followup-harvest-terminates-in-prose-2026-08-29"
+  plan_refs: ["W1-T2455", "W1-T2451", "W1-T2456", "W1-T2457", "W1-T105"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE ID. Eight surfaces at base 9613225b, anchored `W1-T2458([^0-9]|$)` with a `[0-9]` class and
+    never a `\d` shorthand. SURFACE 1 READS 1 of 572 reservation refs, read from the mint's RESERVED
+    line on origin rather than the advisory `max 2457`. Shard filenames 0 of 704 and declared ids 0,
+    both against a W1-T2457 control reading 1. Head branches 0 against a control of 91 `run-` heads.
+    Merged trailers 0 — ⚠ THE FIRST CONTROL CHOSEN FOR THAT BAND FAILED AND IS REPORTED RATHER THAN
+    QUIETLY REPLACED: W1-T2455 reads 0 trailers because its merge carried none (it was credited by
+    its run branch), so the control was re-cut on W1-T2453, which reads 1 against 628 anchored
+    trailers on main. Merged subjects 0 against a W1-T2455 control reading 1. Open-PR titles and
+    bodies 0 across 1 open PR, control 1. No band is bare: every zero here has a control beside it.
+
+    ⚠ AND W1-T2459 IS ALSO HELD ON ORIGIN. The reservation ref carries no identity field, so which
+    lane holds it is not knowable from the ref; this filing takes 2458 as instructed and does not
+    touch 2459.
+
+    ── Q1. THE CHAIN AND THE COUNTS, RE-DERIVED — AND THE INHERITED FIGURES WERE 7x TOO HIGH ─────
+
+    THE CHAIN, by symbol at head: `parseFollowups` (src/lib/worker.ts) -> `harvestFollowupsFromReport`
+    (src/run-task.ts) -> `mineFollowups` (src/lib/retro.ts) -> `renderFollowupCandidates`
+    (src/lib/retro.ts) -> `recordFollowupHarvest` (src/lib/retro.ts). All five resolve.
+
+    ⚠ THE COUNTS DO NOT SURVIVE DEDUPLICATION, AND THE BRIEF'S DID NOT. Rotations overlap heavily,
+    so a raw cross-archive count inflates. Over the three-form union at the CONFIG root — 0 gz, 46
+    plain, 1 live, 567,097 rows, span 2026-08-08T21:59:00Z .. 2026-08-29T20:08:30Z, so no reading
+    here is a stale-corpus zero — the RAW counts are 7,970 `report.followups` and 10,963
+    `followup.harvested`. DEDUPED BY (ts, run_id, step) THEY ARE 1,046 AND 1,061. The declared
+    entries are 2,115 (research 1,038 · task 755 · action 322), not 15,642. The distinct declaring
+    task_id count survives at 463.
+
+    THE CONTROL RUNS BOTH WAYS. Neighbouring step names read 0 AND DO NOT EXIST under any spelling —
+    the real retro steps are `retro.error`/`retro.marker.advanced`/`retro.start`/`retro.synthesized`
+    and the question step is `sweep.question.logged` — so the sweep is not silently collecting a
+    neighbour. The same query on the same corpus reads `fix.dispatch` 295 and `review.posted` 1,503,
+    so it is not blind.
+
+    ⚠ AND THE OTHER DIRECTION FOUND SOMETHING THE BRIEF DID NOT. 21 plan tasks DO carry an origin
+    naming a follow-up (control: 121 cite feedback#, 11 cite retro). BUT NOT ONE WAS ROUTED BY THE
+    CHAIN: every one of those origins is `oper#...`, `recon...` or `pr#...`, and thirteen share a
+    single `oper#followups-2026-08-05` stamp. They are an operator reading the prose by hand, once,
+    24 days ago. THE DOCUMENT IS RE-READ — BY A PERSON, NOT A RUNG — and the corrected claim is
+    narrower and stronger than the one this task was filed under.
+
+    THE TERMINUS NAMES ITS OWN REASON. `renderFollowupCandidates` returns a section headed
+    "PROPOSAL CANDIDATES, never auto-filed (rule 15)". Of the seven modules calling
+    `updateProposalRegistry` — the single registry writer — the two library mentions of "follow-up"
+    that a naive grep finds are INCIDENTAL ENGLISH ("that follow-up wiring", "is a follow-up, out of
+    this scope"), so the substantive count is zero library readers.
+
+    ⚠ AND THE DOCTRINE THAT HEADER CITES WAS A MISATTRIBUTION, ALREADY CORRECTED ELSEWHERE. §12 rule
+    15 is about not editing acceptance criteria and says nothing about filing; the operator ruled the
+    no-auto-filing doctrine retired and it is recorded affirmatively as §12 rule 27. That correction
+    is W1-T2456's and is NOT re-opened here. RULE 15 ITSELF STANDS: `criterionFieldTampered` is what
+    stops a builder rewriting the criteria its own judge reads, and nothing here touches it.
+
+    ── Q2. WHAT A ROUTED FOLLOW-UP WOULD CARRY AS EVIDENCE — AND WHY IT IS NOT AN ANCHOR ─────────
+
+    `Proposal` requires `evidenceAnchors: EvidenceAnchor[]`, and `EvidenceAnchor` is
+    `{description, pattern, path?}` where `pattern` is a literal or regex `git grep` checks on the
+    target ref. A `FollowupEntry` is `{type, text}`: FREE PROSE WITH NO PATTERN. So a
+    follow-up-minted proposal would ship `evidenceAnchors: []` — EXACTLY the board-review family's
+    defect that W1-T2451 had to add `originatingItemId` to work around, and that expiry is W1-T2451's
+    to own, not this task's.
+
+    `FollowupCandidate` already carries `entryId`, `runId`, `taskId` and an optional `prUrl`.
+    ⚠ THAT IS A REFERENT, NOT AN ANCHOR, AND THE DISTINCTION IS THE WHOLE ANSWER. A referent says
+    WHERE THE CLAIM CAME FROM; an anchor says WHAT IS STILL TRUE ON A REF. `git grep` cannot check a
+    run id. So `runId`/`taskId`/`prUrl` is sufficient for ATTRIBUTION and for the
+    `originatingItemId`-shaped retirement W1-T2451 already built — a follow-up whose PR merged and
+    whose text no longer matches anything is retirable by referent — and it is NOT sufficient for
+    `classifyProposal`'s evidence arm, which greps `pattern`. Any routing must therefore either
+    synthesise a pattern from the entry text (which the entry does not guarantee) or route through
+    the referent arm and accept an empty anchor set knowingly. Naming which of the two is the
+    deliverable is this task's first decision, and it is not made here.
+
+    ── Q3. THE TAP IS SMALLER THAN FEARED, AND THE DEDUP THAT WOULD MEET IT IS INERT ─────────────
+
+    2,115 declared entries, not 15,642 — the first thing sizing the tap changes is the size.
+
+    `mineFollowups` HAS its own dedup and it is doing nothing: `followup.deduped` reads 2 rows
+    against 3,068 distinct `followup.harvested` entry harvests (deduped by ts+run_id+entry_id) —
+    0.1%. WHY IS THE CHEAP NEXT READ AND IT IS ANSWERED HERE BY READING THE PREDICATE: the dedup has
+    two arms, a `processed` Set of entry ids already harvested, and `followupMatchesTitle` against
+    OPEN TASK TITLES ONLY. The first arm suppresses re-harvest, not duplication between distinct
+    entries; the second compares free prose to task titles, which is the same paraphrase-blind
+    comparison W1-T2455's own measurement found — its refusal caught 3 of 32 because "2-shingle
+    Jaccard over a kebab slug does not see paraphrase". THAT FIGURE IS W1-T2455's AND IS CITED, NOT
+    RE-DERIVED HERE.
+
+    SO THE HONEST ESTIMATE OF WHAT SURVIVES A REFUSAL BUILT ON THAT MECHANISM IS: NEARLY ALL OF IT.
+    Both existing filters compare a prose sentence against a slug or a title, and neither sees
+    paraphrase, so a tap opened onto 2,115 entries would deliver close to 2,115 candidates rather
+    than a deduplicated few. NO NUMBER IS ASSERTED BEYOND THAT BOUND, because measuring the real
+    survival rate requires running the refusal over the entries, which is a build step, not a recon
+    one — and stating a fraction without running it would be the assumption this record exists to
+    stop.
+
+    ── Q4. THE THREE KINDS DO NOT ROUTE, AND THE TYPE HAS NO DEFINITION TO ROUTE ON ──────────────
+
+    `FollowupEntry.type` is `"research" | "task" | "action"`. NOTHING IN `src/` BRANCHES ON IT. The
+    only `.type ===` comparisons against those literals are in `src/lib/serve.ts`'s command palette,
+    a different `r.type` over search results. The single read of a follow-up candidate's type is
+    `renderFollowupCandidates` rendering a display label.
+
+    ⚠ AND THE TYPE CANNOT BE GIVEN ROUTING SEMANTICS WITHOUT A DEFINITION FIRST. `parseFollowups`'s
+    own doc introduces the three only as PARSE PREFIXES — one typed entry per line, an optional
+    bullet tolerated, a line naming none of the three silently skipped — and says nothing about what
+    any of them MEANS. The worker picks the prefix. So "research should become a proposal and task
+    should become a task" is a guess dressed as a reading: the words suggest a routing the contract
+    never defined. IF THE THREE SHOULD ROUTE DIFFERENTLY, DEFINING THE TYPE IS THE FIRST
+    DELIVERABLE, and a build that branches on today's undefined labels would encode the guess.
+
+    ── OUT OF SCOPE, RECORDED ───────────────────────────────────────────────────────────────────
+
+    NOT PROPOSED, BY INSTRUCTION: a new judge, a timer, pacing, auto-filing without a retirement arm,
+    or any change to `criterionFieldTampered`.
+
+      W1-T2455 (#3264)  the drafted-slug dedup any routing must meet, and the 3-of-32 recall figure.
+      W1-T2451 (#3255)  proposal expiry and the `originatingItemId` referent shape.
+      W1-T2456 (#3265)  the rule-15 misattribution fix and §12 rule 27, which retires the doctrine
+                        the terminus header still cites; that header's own correction is that PR's.
+      W1-T2457 (#3272)  the rule-namespace collision, merged.
+
+    ── RULE 19 ──────────────────────────────────────────────────────────────────────────────────
+
+    `risk: high` IS SET UP FRONT AND IS RULE 19's SPAN, NOT BLAST RADIUS. `subsystemsOf` derives one
+    module id per `files:` entry from its basename and a test's own stem counts, so `src/lib/retro.ts`,
+    `src/run-task.ts` and `test/followup-routing-has-a-consumer.test.ts` resolve to three distinct
+    ids and `sizingViolation` blocks any band below high.
+
+  acceptance:
+    - claim: "a harvested follow-up reaches the proposal registry through the single writer rather than a rendered markdown section"
+      proof: "unit test: test/followup-routing-has-a-consumer.test.ts"
+    - claim: "a routed follow-up carries its runId taskId and prUrl referent, and an empty anchor set is stated rather than hidden"
+      proof: "unit test: test/followup-routing-has-a-consumer.test.ts"
+    - claim: "routing declines an entry the existing duplicate refusal already covers, and says which arm declined it"
+      proof: "unit test: test/followup-routing-has-a-consumer.test.ts"
+    - claim: "the three type labels are given a written definition before any code branches on them"
+      proof: "unit test: test/followup-routing-has-a-consumer.test.ts"
