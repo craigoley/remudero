@@ -314,7 +314,8 @@ forensic detail, so the narrative does not need to live here.
   files, recon slugs), not rules. "G-N" = operator directives indexed in MASTER-PLAN §14's "Grill
   RESOLVED" paragraph (G-17 = `enforceTierInvariant`, `src/lib/mounts.ts`). "P-N" = retro
   proposals in MASTER-PLAN's Retro-proposals ledger; retired ones are tombstones whose full text
-  is git-archaeology only. *(mapped 2026-08-14 — the numbers were tribal knowledge until this row)*
+  is git-archaeology only. "DR-N" = design rules (retro ledger); hyphen avoids the §12 clash.
+  *(mapped 2026-08-14 — the numbers were tribal knowledge until this row)*
 
 ## CI and merging
 

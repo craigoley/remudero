@@ -7,7 +7,7 @@
   principles: {tdd: strict}
   risk: high
   budget_usd: 20.00
-  files: [MASTER-PLAN.md, src/lib/policy.ts, src/lib/retro.ts, src/lib/onboard/synthesize.ts, src/run-task.ts, test/rule-citations-match-their-rule.test.ts]
+  files: [MASTER-PLAN.md, src/lib/policy.ts, src/lib/retro.ts, src/lib/onboard/synthesize.ts, src/run-task.ts, test/rule-15-16-filing-misattribution.test.ts]
   origin: "operator-ruling#auto-filing-permitted-2026-08-29"
   plan_refs: ["W1-T2279", "W1-T2455"]
   status: queued
@@ -49,7 +49,7 @@
 
     CLAUDE.md already carried a decoding row mapping rule numbers to enforcing symbols, and it did
     NOT prevent this, because nothing verified a citation against what the rule SAYS.
-    `test/rule-citations-match-their-rule.test.ts` closes that: each mapped rule is pinned to its
+    `test/rule-15-16-filing-misattribution.test.ts` closes that: each mapped rule is pinned to its
     SUBJECT WORDS and its enforcing symbol, and a guard refuses any citation outside `plan/` that
     attributes a filing doctrine to rule 15 or 16.
 
@@ -77,10 +77,10 @@
 
   acceptance:
     - claim: "§12 states affirmatively that automatic filing is permitted, dated and attributed to the operator ruling"
-      proof: "unit test: test/rule-citations-match-their-rule.test.ts"
+      proof: "unit test: test/rule-15-16-filing-misattribution.test.ts"
     - claim: "no file outside plan/ attributes a filing doctrine to rule 15 or rule 16"
-      proof: "unit test: test/rule-citations-match-their-rule.test.ts"
+      proof: "unit test: test/rule-15-16-filing-misattribution.test.ts"
     - claim: "every mapped rule's own §12 text still carries that rule's subject, so a citation cannot drift from what the rule says"
-      proof: "unit test: test/rule-citations-match-their-rule.test.ts"
+      proof: "unit test: test/rule-15-16-filing-misattribution.test.ts"
     - claim: "rule 15 is unchanged and still about acceptance criteria, and acquires no filing doctrine"
-      proof: "unit test: test/rule-citations-match-their-rule.test.ts"
+      proof: "unit test: test/rule-15-16-filing-misattribution.test.ts"
