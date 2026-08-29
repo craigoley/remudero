@@ -4496,6 +4496,162 @@ export const REVIEWER_IDENTITY_ENV = "REMUDERO_REVIEWER_LOGIN";
  */
 export const REVIEWER_TOKEN_ENV = "REMUDERO_REVIEWER_TOKEN";
 
+// ── THE PIN PRECONDITION (W1-T2442) ─────────────────────────────────────────
+//
+// `required_status_checks.checks[].app_id` is the ONLY thing that turns a required context from
+// "satisfied by convention" into "satisfied by a pinned identity" — a null `app_id` is not a
+// weaker pin, it is NO pin (any repo-scoped token satisfies it). Pinning `remudero-review` is the
+// obvious next step, but Q2 of this task's own rationale records why it is not yet safe: pinning
+// before the reviewer identity is provisioned AND observed live would make the gate fail closed
+// with no signal (every fleet-posted status rejected for a mismatched app, symptom-free). This
+// section is a PURE READER of that precondition — it never provisions a credential, never writes
+// branch protection, never scopes a token (all three explicitly out of scope by operator
+// instruction). What it answers: is pinning safe to apply YET, given the reviewer identity's
+// CURRENT posture — so that when the credential backlog (W1-T203/W1-T990) is picked up, the
+// answer is measured rather than argued.
+// ────────────────────────────────────────────────────────────────────────────
+
+/** One entry off GitHub's `required_status_checks.checks[]` — the array that actually carries
+ *  the pin (`contexts[]` is the deprecated name-only mirror and carries no `app_id` at all). */
+export interface RequiredStatusCheckEntry {
+  context: string;
+  /** `null` ⇒ NOT pinned — satisfied by whichever actor posts the context, regardless of
+   *  identity. A real pin is the GitHub App's numeric `app_id` (never the bot user id — see this
+   *  task's own rationale Q2 on why `.creator.id`/`.actor_id` are a different, invalid number). */
+  app_id: number | null;
+}
+
+/** The shape {@link unpinnedRequiredContexts} and {@link reviewGatePinPrecondition} read off a
+ *  branch protection `required_status_checks` payload. `contexts` is carried for fidelity with
+ *  the live API shape but never consulted — only `checks[]` carries the pin. */
+export interface RequiredStatusChecksSnapshot {
+  contexts?: readonly string[];
+  checks: readonly RequiredStatusCheckEntry[];
+}
+
+/**
+ * Acceptance criterion 1: names every required context whose `app_id` is `null` (unpinned —
+ * satisfied by any repo-scoped token) and omits any context that already carries a real,
+ * non-null `app_id` (an app-pinned one, e.g. `ci-gate`'s `15368`). Pure; reads only `checks[]`.
+ */
+export function unpinnedRequiredContexts(snapshot: RequiredStatusChecksSnapshot): string[] {
+  return snapshot.checks.filter((c) => c.app_id === null || c.app_id === undefined).map((c) => c.context);
+}
+
+/**
+ * Acceptance criterion 2: the reviewer identity's posture, resolved to EXACTLY three states —
+ * never collapsed to a boolean, and never allowed to *guess* "provisioned" from a read it could
+ * not actually perform:
+ *
+ * - `"dark"` — neither {@link REVIEWER_TOKEN_ENV} nor {@link REVIEWER_IDENTITY_ENV} is set. The
+ *   documented default this ships in (the comment above {@link REVIEWER_TOKEN_ENV}) — a real,
+ *   successful read that found nothing, same "absent, not a failure" shape `resolveReviewProvenance`
+ *   already uses above.
+ * - `"unknown"` — the read itself failed (`readEnvVar` threw, e.g. an unreadable environment) OR
+ *   only ONE of the two vars is set (an inconsistent, half-configured state that is neither the
+ *   documented dark default nor a genuine provisioning). Degrading a failed/partial read to
+ *   `"unknown"` rather than guessing either neighbor is the point: it can NEVER render as
+ *   `"provisioned"` off an environment this function could not actually confirm.
+ * - `"provisioned"` — BOTH vars are set (non-empty). The only state {@link reviewGatePinPrecondition}
+ *   treats as safe to pin against.
+ *
+ * Pure — `readEnvVar` is supplied by the caller so this never reaches into `process.env` itself
+ * (same discipline {@link REVIEWER_IDENTITY_ENV}'s own doc records for `resolveReviewProvenance`).
+ */
+export function reviewerIdentityPosture(readEnvVar: (name: string) => string | undefined): ReviewerIdentityPosture {
+  let token: string | undefined;
+  let login: string | undefined;
+  try {
+    token = readEnvVar(REVIEWER_TOKEN_ENV);
+    login = readEnvVar(REVIEWER_IDENTITY_ENV);
+  } catch {
+    return "unknown";
+  }
+  const tokenSet = typeof token === "string" && token.trim().length > 0;
+  const loginSet = typeof login === "string" && login.trim().length > 0;
+  if (tokenSet && loginSet) return "provisioned";
+  if (!tokenSet && !loginSet) return "dark";
+  return "unknown";
+}
+
+export type ReviewerIdentityPosture = "provisioned" | "dark" | "unknown";
+
+/** Whether {@link reviewGatePinPrecondition} could confirm the reviewer credential is present —
+ *  presence only, NEVER the value (the value is never even an input to this reader). Mirrors
+ *  {@link ReviewerIdentityPosture} 1:1 so the two can never disagree about which arm produced them. */
+export type ReviewerCredentialPresence = "present" | "absent" | "unknown";
+
+/** `"safe"` ⇒ pinning the currently-unpinned context(s) would not fail the gate closed.
+ *  `"unsafe"` ⇒ pinning now risks exactly the no-signal failure Q2 of this task's rationale
+ *  records: every fleet-posted status silently rejected for a mismatched app. */
+export type ReviewGatePinVerdict = "safe" | "unsafe";
+
+export interface ReviewGatePinPrecondition {
+  verdict: ReviewGatePinVerdict;
+  reviewerIdentity: ReviewerIdentityPosture;
+  /** Presence only — see {@link ReviewerCredentialPresence}. */
+  reviewerCredentialPresent: ReviewerCredentialPresence;
+  /** Contexts {@link unpinnedRequiredContexts} found on the snapshot passed in. */
+  unpinnedContexts: readonly string[];
+  /** Human-readable justification. Always names {@link REVIEWER_TOKEN_ENV} when the verdict is
+   *  `"unsafe"` on identity grounds (acceptance criterion 3) — never the credential's value. */
+  reason: string;
+}
+
+/**
+ * THE PRECONDITION READER (acceptance criteria 3-5). A pure statement of whether pinning
+ * `remudero-review`'s `app_id` is safe to apply YET — never the pin itself, never a credential.
+ *
+ * - Reviewer identity `"dark"` or `"unknown"` ⇒ ALWAYS `"unsafe"`, naming {@link REVIEWER_TOKEN_ENV}
+ *   in the reason (criterion 3) regardless of which/how-many contexts are currently unpinned —
+ *   an unconfirmed identity is unconfirmed whether there is one unpinned context or none.
+ * - Reviewer identity `"provisioned"` ⇒ `"safe"` — including the falsifier (criterion 5) where
+ *   the context in question is ALREADY app-pinned: this reader is not hardcoded to `"unsafe"`,
+ *   and a provisioned identity paired with an already-pinned context is the plainest possible
+ *   safe state.
+ *
+ * `reviewerCredentialPresent` reports presence derived from `reviewerIdentity` alone on every
+ * arm (criterion 4) — this function is never handed a token or login value, only the posture
+ * {@link reviewerIdentityPosture} already resolved, so no value can leak through it.
+ */
+export function reviewGatePinPrecondition(
+  snapshot: RequiredStatusChecksSnapshot,
+  reviewerIdentity: ReviewerIdentityPosture,
+): ReviewGatePinPrecondition {
+  const unpinnedContexts = unpinnedRequiredContexts(snapshot);
+  const reviewerCredentialPresent: ReviewerCredentialPresence =
+    reviewerIdentity === "provisioned" ? "present" : reviewerIdentity === "dark" ? "absent" : "unknown";
+
+  if (reviewerIdentity !== "provisioned") {
+    const why =
+      reviewerIdentity === "dark"
+        ? `the reviewer identity is dark — ${REVIEWER_TOKEN_ENV} is not set`
+        : `the reviewer identity is unknown — ${REVIEWER_TOKEN_ENV} could not be confirmed set`;
+    return {
+      verdict: "unsafe",
+      reviewerIdentity,
+      reviewerCredentialPresent,
+      unpinnedContexts,
+      reason:
+        `pin is UNSAFE: ${why}, so pinning ` +
+        `${unpinnedContexts.length > 0 ? unpinnedContexts.join(", ") : "a required context"} now risks the gate ` +
+        `failing closed with no signal (every fleet-posted status rejected for a mismatched app)`,
+    };
+  }
+
+  return {
+    verdict: "safe",
+    reviewerIdentity,
+    reviewerCredentialPresent,
+    unpinnedContexts,
+    reason:
+      unpinnedContexts.length > 0
+        ? `pin is SAFE: the reviewer identity is provisioned (${REVIEWER_TOKEN_ENV} set) — ` +
+          `${unpinnedContexts.join(", ")} may now be pinned to the app id`
+        : `pin is SAFE: the reviewer identity is provisioned and every required context is already app-pinned`,
+  };
+}
+
 /**
  * One fetched `remudero-review` commit-status entry — the two fields
  * {@link resolveReviewProvenance} needs off GitHub's "get the combined status
