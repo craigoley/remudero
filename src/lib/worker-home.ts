@@ -546,57 +546,9 @@ type WorkerHomeFsOps = typeof workerHomeFsOps;
  * that has not (yet) wired a runId through, so an absent/empty one falls
  * back to a fresh `randomUUID()` per call.
  */
-export function perRunWorkerHomeDir(
-  workerHomeRoot: string,
-  runId?: string,
-  // APPENDED LAST, the house convention, so no positional caller shifts. Omitted ⇒ byte-identical
-  // to before W1-T2441's remedy: `readUsageSnapshot` (run-task.ts) passes the CONSTANT
-  // "usage-probe" and its own comment asks for "a stable, non-per-call home … rather than
-  // littering `worker-home-*` siblings on every tick", so uniqueness here is OPT-IN at the call
-  // site rather than applied blindly to every caller.
-  opts: { perSpawn?: boolean; uuid?: () => string } = {},
-): string {
-  const uuid = opts.uuid ?? randomUUID;
-  if (!runId || runId.length === 0) return `${workerHomeRoot}-${uuid()}`;
-  // W1-T2441 REMEDY: `perSpawn` restores the concurrency invariant this function's own doc states
-  // — no two overlapping spawns ever share a home — for a caller whose `runId` is DAEMON-SCOPED
-  // rather than per-spawn. `spawnWorker` is that caller: #2862 threaded `runId` through for
-  // `workerMarkerEnv` (worker.ts), and the home path picked it up incidentally, so every fix
-  // spawn in one daemon run resolved to `worker-home-DAEMON-<epoch>` and the first teardown
-  // `rmSync -rf`'d it under its live siblings. The runId STAYS in the name (durable and legible
-  // in `ps`/logs, and {@link runIdFromWorkerHomeSuffix} reads it back for the stale sweep's
-  // live-lock and terminal-verdict predicates); the uuid is what makes it per-spawn.
-  return opts.perSpawn ? `${workerHomeRoot}-${runId}-${uuid()}` : `${workerHomeRoot}-${runId}`;
-}
-
-/** A canonical v4-shaped UUID sitting at the END of a worker-home suffix — the per-spawn
- *  discriminator {@link perRunWorkerHomeDir} appends under `perSpawn`. Anchored to `$` so it can
- *  only ever match the trailing segment, never a runId that happens to contain hex.
- *  Exported (W1-T2441 round 1 CI fix, negative-reachability-ratchet, test/negative-reachability-
- *  ratchet.test.ts) so its unhealthy (no trailing uuid) and healthy (trailing uuid) arms can each
- *  be driven and asserted by identifier from test/worker-home-reap-visibility.test.ts, rather than
- *  only indirectly through {@link runIdFromWorkerHomeSuffix}'s `.replace(...)` call, which that
- *  ratchet's `.test(...)`/`.exec(...)`-only detector cannot credit. */
-export const WORKER_HOME_SPAWN_UUID_RE = /-?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-/**
- * W1-T2441: the RUN ID inside a worker-home directory's suffix, with any per-spawn uuid stripped.
- *
- * WHY THIS EXISTS AND WHY IT IS NOT OPTIONAL. {@link sweepStaleWorkerHomes} used to treat the
- * WHOLE suffix as the run id (`name.slice(prefix.length)`) and hand it to
- * `findLiveInflightLockForRun` and `hasTerminalLedgerVerdict`, both of which compare
- * `run_id === runId` EXACTLY. Appending a per-spawn uuid without this would silently demote both
- * precise predicates to the 24h mtime backstop: a LIVE run's home would no longer be protected by
- * its own inflight lock, and a DEAD run's home would no longer be reaped promptly on its terminal
- * verdict. Neither failure is loud — the sweep would keep returning a plausible summary — which is
- * exactly the class this repo keeps filing tasks about.
- *
- * Returns `""` for a suffix that is a BARE uuid (a caller that threaded no runId): there is no run
- * to resolve, and the caller must treat that as "unresolvable", never as a run id of `""`.
- */
-export function runIdFromWorkerHomeSuffix(suffix: string): string {
-  const stripped = suffix.replace(WORKER_HOME_SPAWN_UUID_RE, "");
-  return stripped;
+export function perRunWorkerHomeDir(workerHomeRoot: string, runId?: string): string {
+  const id = runId && runId.length > 0 ? runId : randomUUID();
+  return `${workerHomeRoot}-${id}`;
 }
 
 /**
@@ -829,17 +781,12 @@ export function sweepStaleWorkerHomes(root: string, opts: WorkerHomeSweepOpts = 
       continue;
     }
 
-    // W1-T2441: the suffix may now carry a PER-SPAWN uuid after the run id, so the run id is
-    // parsed back out rather than assumed to be the whole suffix — both predicates below compare
-    // `run_id` EXACTLY, and an unparsed suffix would match neither. An empty result means the
-    // home carries no run id at all (a bare-uuid home): skip both predicates rather than compare
-    // against `""`, and let the age backstop decide, which is what such a home already got.
-    const runId = runIdFromWorkerHomeSuffix(name.slice(prefix.length));
-    if (runId.length > 0 && findLiveInflightLockForRun(inflightDir, runId, f)) {
+    const runId = name.slice(prefix.length);
+    if (findLiveInflightLockForRun(inflightDir, runId, f)) {
       kept.push(name); // live run: kept however old — no age check at all (claim 2)
       continue;
     }
-    if (runId.length > 0 && hasTerminalLedgerVerdict(ledgerPath, runId, f)) {
+    if (hasTerminalLedgerVerdict(ledgerPath, runId, f)) {
       try {
         f.rmSync(full, { recursive: true, force: true });
         removed.push(name);

@@ -3,21 +3,16 @@
 // but `src/lib/worker.ts:1178` called it in statement position and discarded the return value
 // (`grep -acE "=\s*reapWorkerHome\(" src/lib/worker.ts` read 0 before this task). This suite
 // proves the result is no longer thrown away: the target/reason/spawn-identity are all
-// observable, and the reap stays best-effort and never throws on any arm. Claim 4 below USED to
-// assert that the remedy had deliberately not shipped; it has since shipped under this same task
-// id, and that slot is re-cut accordingly rather than left asserting the opposite.
+// observable, the reap stays best-effort and never throws on any arm, and — per this task's own
+// "do not ship the remedy" constraint — the home is still keyed on the run, not the spawn, so
+// the underlying shared-home defect this instrumentation exists to make queryable still fires.
 
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import {
-  perRunWorkerHomeDir,
-  reapWorkerHome,
-  WORKER_HOME_SPAWN_UUID_RE,
-  type WorkerHomeReapResult,
-} from "../src/lib/worker-home.js";
+import { perRunWorkerHomeDir, reapWorkerHome, type WorkerHomeReapResult } from "../src/lib/worker-home.js";
 import {
   CLAUDE_BIN_ENV_OVERRIDE,
   createClaudeExecutableCache,
@@ -168,9 +163,7 @@ function fakeContainment(pid: number) {
 
 test("spawnWorker (end-to-end, SUCCESS path): logHomeReap observes reaped=true with the real target and spawn identity", async () => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-worker-home-reap-e2e-success-"));
-  // W1-T2441 REMEDY: spawnWorker now resolves a PER-SPAWN home, so the target is
-  // `<root>-<runId>-<uuid>`, never the bare `<root>-<runId>`. Both halves are asserted below.
-  const homePrefix = join(dir, "worker-home-reap-vis-success");
+  const expectedHome = join(dir, "worker-home-reap-vis-success");
   const observed: Array<{ result: WorkerHomeReapResult; spawn: { runId?: string; taskId?: string } }> = [];
   await spawnWorker({
     ...e2eSpawnWorkerArgs(dir, "reap-vis-success", { taskId: "T-success" }),
@@ -181,18 +174,15 @@ test("spawnWorker (end-to-end, SUCCESS path): logHomeReap observes reaped=true w
 
   assert.equal(observed.length, 1, "logHomeReap must be called exactly once, on the success exit path");
   assert.equal(observed[0].result.reaped, true);
-  const target = String(observed[0].result.target);
-  assert.ok(target.startsWith(`${homePrefix}-`), `the target must keep the runId and add a per-spawn suffix: ${target}`);
-  assert.notEqual(target, homePrefix, "the bare runId-keyed path is exactly what two spawns used to collide on");
-  assert.equal(existsSync(target), false, "sanity: the home the reap NAMED really was removed");
-  assert.equal(existsSync(homePrefix), false, "and no bare runId-keyed home was ever created beside it");
+  assert.equal(observed[0].result.target, expectedHome, "the SAME target the reap actually removed must be what's observed");
+  assert.equal(existsSync(expectedHome), false, "sanity: the home really was reaped");
   assert.equal(observed[0].spawn.runId, "reap-vis-success");
   assert.equal(observed[0].spawn.taskId, "T-success");
 });
 
 test("spawnWorker (end-to-end, ERROR path): logHomeReap STILL observes the reap when the SDK stream throws", async () => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-worker-home-reap-e2e-error-"));
-  const homePrefix = join(dir, "worker-home-reap-vis-error");
+  const expectedHome = join(dir, "worker-home-reap-vis-error");
   const observed: Array<{ result: WorkerHomeReapResult; spawn: { runId?: string; taskId?: string } }> = [];
   await assert.rejects(
     () =>
@@ -206,133 +196,8 @@ test("spawnWorker (end-to-end, ERROR path): logHomeReap STILL observes the reap 
   );
   assert.equal(observed.length, 1, "logHomeReap must fire on the thrown-error exit path too — the reap itself always runs there");
   assert.equal(observed[0].result.reaped, true);
-  const target = String(observed[0].result.target);
-  assert.ok(target.startsWith(`${homePrefix}-`), `per-spawn target on the error path too: ${target}`);
-  assert.equal(existsSync(target), false);
-  assert.equal(existsSync(homePrefix), false);
-});
-
-// ── W1-T2441 REMEDY, at the REAL call site: N spawns, ONE runId, N homes, N reaps ───────────
-// The pure-function proof lives in test/worker-home-per-spawn-uniqueness.test.ts; this one drives
-// the actual `spawnWorker` three times with the SAME daemon-scoped runId — the fix rung's own
-// shape — and asserts three distinct targets, three reaped:true rows, and nothing left on disk.
-
-test("spawnWorker (end-to-end): three spawns sharing ONE daemon runId produce three DISTINCT homes, each reaped exactly once", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "rmd-worker-home-multi-spawn-"));
-  const RUN = "DAEMON-1787980131770";
-  const observed: Array<{ result: WorkerHomeReapResult; spawn: { runId?: string; taskId?: string } }> = [];
-  for (let i = 0; i < 3; i++) {
-    await spawnWorker({
-      ...e2eSpawnWorkerArgs(dir, RUN, { taskId: "W1-T2452" }),
-      queryFn: fakeQueryFn("success"),
-      containment: fakeContainment(999990 + i),
-      logHomeReap: (result, spawn) => observed.push({ result, spawn }),
-    } as Parameters<typeof spawnWorker>[0]);
-  }
-
-  assert.equal(observed.length, 3, "one reap observation per spawn");
-  const targets = observed.map((o) => String(o.result.target));
-  assert.equal(new Set(targets).size, 3, `three spawns in one daemon run must not share a home: ${JSON.stringify(targets)}`);
-  for (const o of observed) {
-    assert.equal(o.result.reaped, true, `every spawn must remove its OWN home: ${JSON.stringify(o.result)}`);
-    assert.equal(o.spawn.runId, RUN, "the runId #2862 threaded in is still carried — it is not reverted");
-  }
-  assert.equal(observed.filter((o) => o.result.reason === "absent").length, 0, "no spawn may find its home already deleted by a sibling");
-  for (const t of targets) {
-    assert.ok(t.includes(RUN), `the runId must still be legible in the path: ${t}`);
-    assert.equal(existsSync(t), false, "unique must not mean permanent");
-  }
-  assert.deepEqual(readdirSync(dir).filter((n) => n.startsWith("worker-home-")), [], "no worker-home sibling is left behind");
-});
-
-// ── The actual defect this task names: a sibling STILL RUNNING must not lose its HOME when
-// another sibling sharing its runId exits first. The "three spawns" test above only proves
-// three SEQUENTIAL spawns get distinct homes — every prior call has already been reaped before
-// the next one starts, so it never actually has two homes materialized AT ONCE and never drives
-// `reapWorkerHome`'s `finally` while a sibling directory is still live on disk. This test holds
-// one spawn OPEN (blocked mid-query, exactly like a still-running fix worker) while a second
-// spawn with the SAME runId runs to completion and reaps ITS OWN home, then asserts the still-
-// running sibling's directory survives untouched on disk until it, too, exits.
-test("spawnWorker (end-to-end): a still-running sibling's home survives another sibling's exit and reap, same runId", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "rmd-worker-home-concurrent-siblings-"));
-  const RUN = "DAEMON-concurrent-siblings";
-  const observed: Array<{ result: WorkerHomeReapResult; spawn: { runId?: string; taskId?: string } }> = [];
-
-  let releaseSlow: () => void = () => {};
-  const slowGate = new Promise<void>((resolve) => {
-    releaseSlow = resolve;
-  });
-  function blockingQueryFn(gate: Promise<void>) {
-    return ((params: { prompt: string; options: { spawnClaudeCodeProcess?: (o: unknown) => unknown } }) => {
-      params.options.spawnClaudeCodeProcess?.({
-        command: "/bin/sh",
-        args: ["-c", "true"],
-        env: {},
-        signal: new AbortController().signal,
-      });
-      return (async function* () {
-        await gate; // still "running" until the test releases it — mirrors a live fix spawn
-        yield {
-          type: "result",
-          subtype: "success",
-          is_error: false,
-          result: "done",
-          session_id: "s-slow",
-          total_cost_usd: 0.01,
-          num_turns: 1,
-        };
-      })();
-    }) as unknown as Parameters<typeof spawnWorker>[0]["queryFn"];
-  }
-
-  // Kick off the slow sibling but do NOT await it yet — its synchronous prefix (worker-home
-  // materialization included) runs to completion before this call returns control here, since
-  // nothing above the query itself in spawnWorker awaits anything.
-  const slowPromise = spawnWorker({
-    ...e2eSpawnWorkerArgs(dir, RUN, { taskId: "T-slow" }),
-    queryFn: blockingQueryFn(slowGate),
-    containment: fakeContainment(999970),
-    logHomeReap: (result, spawn) => observed.push({ result, spawn }),
-  } as Parameters<typeof spawnWorker>[0]);
-
-  const slowHomes = readdirSync(dir).filter((n) => n.startsWith("worker-home-") && n.includes(RUN));
-  assert.equal(slowHomes.length, 1, "the still-running sibling's home must already be materialized");
-  const slowHome = join(dir, slowHomes[0]);
-
-  // A second sibling, SAME runId, runs to completion and reaps ITS OWN home while the first is
-  // still blocked mid-query — this is the actual defect shape: two overlapping spawns, one
-  // runId, one finishing while the other is still live.
-  await spawnWorker({
-    ...e2eSpawnWorkerArgs(dir, RUN, { taskId: "T-fast" }),
-    queryFn: fakeQueryFn("success"),
-    containment: fakeContainment(999971),
-    logHomeReap: (result, spawn) => observed.push({ result, spawn }),
-  } as Parameters<typeof spawnWorker>[0]);
-
-  assert.equal(observed.length, 1, "only the fast sibling has exited/reaped so far — the slow one is still running");
-  assert.equal(observed[0].spawn.taskId, "T-fast");
-  assert.equal(
-    existsSync(slowHome),
-    true,
-    "the still-running sibling's home must survive the OTHER sibling's teardown — this is the defect this task names",
-  );
-  assert.deepEqual(
-    readdirSync(dir).filter((n) => n.startsWith("worker-home-") && n.includes(RUN)),
-    [slowHomes[0]],
-    "only the slow sibling's own home remains — the fast sibling reaped exactly its own directory",
-  );
-
-  releaseSlow();
-  await slowPromise;
-  assert.equal(observed.length, 2, "the slow sibling eventually exits and reaps too");
-  assert.equal(observed[1].spawn.taskId, "T-slow");
-  assert.notEqual(observed[0].result.target, observed[1].result.target, "the two siblings never shared a home");
-  assert.equal(existsSync(slowHome), false, "the slow sibling reaped its own home once it actually finished");
-  assert.deepEqual(
-    readdirSync(dir).filter((n) => n.startsWith("worker-home-")),
-    [],
-    "nothing is left behind once both siblings have exited",
-  );
+  assert.equal(observed[0].result.target, expectedHome);
+  assert.equal(existsSync(expectedHome), false);
 });
 
 test("spawnWorker (end-to-end): a logHomeReap that itself THROWS never breaks the surrounding teardown — best-effort, never surfaces", async () => {
@@ -347,57 +212,25 @@ test("spawnWorker (end-to-end): a logHomeReap that itself THROWS never breaks th
       },
     } as Parameters<typeof spawnWorker>[0]),
   );
-  // W1-T2441: assert over the whole SIBLING SET rather than one literal path — with a per-spawn
-  // suffix the old single-path check would pass vacuously against a name that is never created.
-  const leftovers = readdirSync(dir).filter((n) => n.startsWith("worker-home-reap-vis-logger-throws"));
-  assert.deepEqual(leftovers, [], "the reap itself must still have happened even though observing it failed");
-});
-
-// ── Claim 4, RETIRED AND REPLACED (W1-T2441's remedy half) ──────────────────
-// This slot used to assert "no remedy": that two spawns sharing one runId still collide, and it
-// said in its own message that it "fails the moment a future task ships the remedy". The remedy
-// is now shipped, under THIS SAME TASK ID rather than a future one — so the lock is re-cut onto
-// the invariant that actually holds, rather than deleted (which would leave the collision
-// untested) or left standing (which would pass while meaning the opposite of what it says).
-//
-// BOTH HALVES ARE LOCKED: the DEFAULT is unchanged, because `readUsageSnapshot` (run-task.ts)
-// asks this same function for a stable, non-per-call home; the SPAWN path is per-spawn unique.
-// The full remedy suite lives in test/worker-home-per-spawn-uniqueness.test.ts.
-
-test("remedy shipped: the DEFAULT still returns one stable path per runId, while the per-spawn form never repeats", () => {
-  const root = join(tmp(), "worker-home");
   assert.equal(
-    perRunWorkerHomeDir(root, "DAEMON-shared-run"),
-    perRunWorkerHomeDir(root, "DAEMON-shared-run"),
-    "the stable default is what readUsageSnapshot depends on and must not move",
-  );
-  assert.notEqual(
-    perRunWorkerHomeDir(root, "DAEMON-shared-run", { perSpawn: true }),
-    perRunWorkerHomeDir(root, "DAEMON-shared-run", { perSpawn: true }),
-    "two fix spawns in one daemon run must never resolve to one directory again",
-  );
-});
-
-// ── negative-reachability-ratchet fixture (W1-T2441, CI round 2) ────────────────────────────
-// `WORKER_HOME_SPAWN_UUID_RE` (src/lib/worker-home.ts) is a module-scope `_RE` validator this
-// task's own remedy introduced; test/negative-reachability-ratchet.test.ts's PROPERTY gate counts
-// any such surface fixture-less (baseline 0 for a brand-new symbol) unless BOTH its unhealthy
-// (rejecting) and healthy (accepting) arms are driven by identifier via a `.test(...)`/`.exec(...)`
-// call somewhere in test/**/*.ts. `runIdFromWorkerHomeSuffix`'s own `.replace(...)` call cannot
-// satisfy that detector (it only credits `.test`/`.exec`), so both arms are asserted here directly.
-test("WORKER_HOME_SPAWN_UUID_RE: matches a trailing per-spawn uuid and rejects a bare runId with no uuid suffix", () => {
-  // healthy arm: a suffix that DOES end in a per-spawn uuid, as perRunWorkerHomeDir's perSpawn
-  // form actually produces (runId, hyphen, canonical v4-shaped uuid).
-  assert.equal(
-    WORKER_HOME_SPAWN_UUID_RE.test("DAEMON-1787980131770-1b9d6c2e-4b8a-4c1a-9c2a-abcdef123456"),
-    true,
-    "a genuine trailing per-spawn uuid must match",
-  );
-  // unhealthy arm: a bare runId with no uuid suffix at all — the DEFAULT (non-perSpawn) shape
-  // perRunWorkerHomeDir still returns for readUsageSnapshot's stable-home caller.
-  assert.equal(
-    WORKER_HOME_SPAWN_UUID_RE.test("DAEMON-1787980131770"),
+    existsSync(join(dir, "worker-home-reap-vis-logger-throws")),
     false,
-    "a bare runId with no trailing uuid must not match",
+    "the reap itself must still have happened even though observing it failed",
+  );
+});
+
+// ── Claim 4: NO REMEDY — the home is still keyed on the run, not the spawn, ──
+// so two fix spawns inside one daemon run still collide on the same path, and
+// the shared-home defect this instrumentation exists to make queryable still fires.
+
+test("no remedy: perRunWorkerHomeDir still returns the SAME path for two spawns sharing one runId — the defect this task deliberately leaves firing", () => {
+  const root = join(tmp(), "worker-home");
+  const firstSpawn = perRunWorkerHomeDir(root, "DAEMON-shared-run");
+  const secondSpawn = perRunWorkerHomeDir(root, "DAEMON-shared-run");
+  assert.equal(
+    firstSpawn,
+    secondSpawn,
+    "W1-T2441 is instrumentation-only: perRunWorkerHomeDir must remain keyed on runId, not per-spawn, " +
+      "so this test fails the moment a future task ships the remedy here instead of its own task",
   );
 });
