@@ -12,6 +12,8 @@ import { dirname } from "node:path";
 import type { MergedResolver, Plan } from "./plan.js";
 import { parseTasksFromYaml, PlanError, unmetDependencies } from "./plan.js";
 import { lintPlan, lintTask } from "./task-linter.js";
+import { DUPLICATE_SLUG_SHINGLE_K } from "./task-linter.js";
+import { bestNearDuplicate, DEFAULT_DUPLICATE_CUTOFF, type DuplicateCorpusEntry } from "./knowledge-dedup.js";
 import type { GhFailureReason } from "./status.js";
 import { isGhRateLimitError } from "./status.js";
 
@@ -1427,6 +1429,106 @@ export function pruneRatifiedProposals(
   };
 }
 
+// ── W1-T2455: THE DUPLICATE CHECK AT THE RATIFICATION SEAM ──────────────────────────────────
+//
+// `duplicateTitleViolations` (task-linter.ts) has been WIRED since W1-T1076 — `duplicateCorpusOpts`
+// (run-task.ts) supplies its corpus — but three things keep it off the ratification path: its
+// severity is `warn` and `lintPlanCommand` only counts a task as failing inside
+// `if (blocking.length)`; it is scoped to the `--base` pass and returns `{}` for the whole-plan
+// one; and `lint-plan` is not a required check. So `rmd approve` can file a task for a defect that
+// already shipped, and on 2026-08-29 it would have: of 32 drafted shards across the 18 cached
+// drafts, TWO score a perfect 1.00 against a shard already on `origin/main` (W1-T2452, W1-T2453)
+// and one scores 0.57 (W1-T2451) — all three already merged.
+//
+// IT KEYS ON THE DRAFTED SHARD SLUG, NEVER ON THE PROPOSAL. Eleven proposal summaries read
+// literally `board-review: #NNNN carries 1 unhandled escalation(s)` — near-identical yet
+// LEGITIMATELY DISTINCT, one per PR. A proposal-level similarity check would collapse exactly
+// those. Scored on the slug instead, they land at 0.00-0.10, well under the cutoff.
+//
+// HONEST RECALL, MEASURED, NOT CLAIMED: this is a LEXICAL check and it catches the exact and
+// near-exact re-draft (3 of 32 at the shipped {@link DEFAULT_DUPLICATE_CUTOFF}). The ~21 drafts
+// that describe the SAME defect in different words score 0.08-0.18 and are NOT caught. No cutoff
+// is invented here to reach them: there is no clean separation between 0.18 and 0.10 in the
+// measured set, and lowering it would refuse sibling tasks in one arc. That residue is named, not
+// papered over.
+
+/**
+ * The slug stem of each shard a drafted fragment would be filed as — the SAME stems
+ * {@link ratificationShardFiles} emits, so the check scores exactly what would land on disk.
+ *
+ * PLACEHOLDER-TOLERANT BY NECESSITY: at approve time the fragment still carries `NEW-<n>` ids
+ * (`materializeDraftTaskIds` runs later, inside the gateway's branch creation), so
+ * `shardSlugFromPath` — whose regex requires a real `W1-T<n>` id — returns `undefined` for every
+ * one of these paths. Measured: it scored 0 of 32 drafted shards. This reads the stem after the
+ * FIRST `-` instead, which is the same text `planShardSlugCorpus` stores for a filed shard.
+ */
+export function draftedShardSlugs(fragmentYaml: string): DuplicateCorpusEntry[] {
+  const shards = ratificationShardFiles(fragmentYaml);
+  if (!shards.ok) return []; // an unsplittable fragment is refused by the writer, not here
+  const out: DuplicateCorpusEntry[] = [];
+  for (const f of shards.files) {
+    // The id is read from the shard's OWN contents, never guessed off the path: a lazy
+    // `<id>-` regex splits `NEW-1-<slug>` after "NEW" and leaves "1-" glued to the stem, which
+    // silently perturbs every score. `ratificationShardFiles` builds `<id>-<stem>.yaml`, so
+    // stripping the literal declared id is exact.
+    const id = /^\s*-\s*id:\s*(\S+)/m.exec(f.contents)?.[1];
+    const prefix = id ? `plan/tasks.d/${id}-` : undefined;
+    if (!prefix || !f.relPath.startsWith(prefix)) continue;
+    const stem = f.relPath.slice(prefix.length).replace(/\.ya?ml$/, "");
+    if (stem) out.push({ id: f.relPath, text: stem });
+  }
+  return out;
+}
+
+/** One drafted shard that duplicates something already filed. */
+export interface DraftedDuplicate {
+  /** The shard path this fragment would have written. */
+  draftedPath: string;
+  /** The already-filed task id it duplicates. */
+  duplicateOf: string;
+  score: number;
+}
+
+/**
+ * The FIRST drafted shard in `fragmentYaml` that scores at or above the cutoff against `corpus`,
+ * or `undefined` when none does. Pure: no fs, no git, no network — the corpus is the caller's to
+ * supply, exactly as `RatifyGateway` owns every other side effect on this path.
+ *
+ * `corpus` EMPTY ⇒ `undefined`, never a refusal. A caller that could not build the corpus must
+ * not have its ratification blocked by that failure — the same fail-open discipline
+ * {@link duplicateTitleViolations} already applies to an absent `openTaskTitles`.
+ */
+export function draftedDuplicate(
+  fragmentYaml: string,
+  corpus: readonly DuplicateCorpusEntry[],
+  opts: { cutoff?: number; k?: number } = {},
+): DraftedDuplicate | undefined {
+  if (corpus.length === 0) return undefined;
+  const cutoff = opts.cutoff ?? DEFAULT_DUPLICATE_CUTOFF;
+  const k = opts.k ?? DUPLICATE_SLUG_SHINGLE_K;
+  for (const candidate of draftedShardSlugs(fragmentYaml)) {
+    const match = bestNearDuplicate(candidate, corpus, { k });
+    if (match && match.score >= cutoff) {
+      return { draftedPath: candidate.id, duplicateOf: match.id, score: match.score };
+    }
+  }
+  return undefined;
+}
+
+/** The refusal text a {@link DraftedDuplicate} produces — names the score, the cutoff, the
+ *  already-filed id, and the TWO additive answers, mirroring `duplicateTitleViolations`' own
+ *  message: cite the prior task, or say why this differs. Never "file less work". */
+export function draftedDuplicateRefusal(proposalId: string, dup: DraftedDuplicate, cutoff = DEFAULT_DUPLICATE_CUTOFF): string {
+  return (
+    `${proposalId} would file ${dup.draftedPath}, which scores ${dup.score.toFixed(2)} ` +
+    `(>= cutoff ${cutoff}) against ${dup.duplicateOf} — a task record already on origin/main. ` +
+    `Ratifying it would mint a second task for work that is already filed. TWO ANSWERS BOTH ` +
+    `CLEAR THIS, and both are additive: REFRAME the proposal so its draft cites ${dup.duplicateOf} ` +
+    `and names what it does NOT already cover, or RETIRE the proposal if ${dup.duplicateOf} ` +
+    `covers it. Never answer this by deleting a proof or narrowing files:.`
+  );
+}
+
 // ── rmd approve — one bit ratifies through the gate (MASTER-PLAN P25 ii, W1-T111) ────────
 //
 // APPROVE = one bit: the operator's thumbs-up INITIATES the plan PR carrying the
@@ -1502,7 +1604,16 @@ export type ApproveResult =
        *  one — `createRatificationBranch`/`openPlanPr` were both skipped. */
       adopted?: boolean;
     }
-  | { ok: false; proposalId: string; state: InboxState; refusal: string };
+  | {
+      ok: false;
+      proposalId: string;
+      state: InboxState;
+      refusal: string;
+      /** W1-T2455: the already-filed task id this proposal's draft duplicates, when THAT is why
+       *  it was refused. Absent on every other refusal, so a reader can tell the two apart
+       *  without parsing `refusal` prose. */
+      duplicateOf?: string;
+    };
 
 /** GitHub's PR url is always `.../pull/<number>` — the same idiom this codebase already uses
  *  ad hoc at a dozen call sites (e.g. run-task.ts's `armAndLogOutcome` prNum derivation).
@@ -1555,6 +1666,12 @@ export function refusalReason(c: InboxClassification): string {
 export interface RatifyLedgerDeps {
   ledgerPath: string;
   runId: string;
+  /** W1-T2455: already-filed task records to score this proposal's DRAFTED SHARD SLUGS against —
+   *  `planShardSlugCorpus(git ls-tree origin/main -- plan/tasks.d/)`, built by the caller because
+   *  this function performs no IO. OMITTED or EMPTY ⇒ the check does not run and this function is
+   *  byte-identical to before this task, which is the fail-open a corpus-build failure must get:
+   *  a ratification is never blocked by the checker's own inability to read. */
+  duplicateCorpus?: readonly DuplicateCorpusEntry[];
 }
 
 /**
@@ -1597,6 +1714,27 @@ export function approveProposal(
       reason: refusal,
     });
     return { ok: false, proposalId: classification.proposalId, state: classification.state, refusal };
+  }
+  // W1-T2455: a READY proposal whose DRAFT would re-file work already on origin/main is refused
+  // HERE, with ZERO gateway calls — the same shape and the same seam the non-ready refusal above
+  // uses, which is the precedent this rides on. BLOCKING ON THIS PATH ONLY: `duplicateTitleViolations`
+  // stays `warn` for the whole-plan lint pass, where a warn is correct and where promoting it
+  // would redden long-open sibling tasks. Ratification is different — it MINTS, and a mint is
+  // not something a later reader can undo cheaply.
+  const dup = draftedDuplicate(classification.draft.fragmentYaml, deps.duplicateCorpus ?? []);
+  if (dup) {
+    const refusal = draftedDuplicateRefusal(classification.proposalId, dup);
+    appendLedger(deps.ledgerPath, {
+      run_id: deps.runId,
+      task_id: classification.proposalId,
+      step: "ratify.approve_refused",
+      state: classification.state,
+      reason: refusal,
+      duplicate_of: dup.duplicateOf,
+      drafted_path: dup.draftedPath,
+      score: dup.score,
+    });
+    return { ok: false, proposalId: classification.proposalId, state: classification.state, refusal, duplicateOf: dup.duplicateOf };
   }
   const payload: RatificationPayload = {
     proposalId: classification.proposalId,
