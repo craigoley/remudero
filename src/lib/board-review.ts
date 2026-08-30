@@ -484,6 +484,17 @@ export function buildBoardReview(opts: BuildBoardReviewOpts): BoardReviewReport 
 // to carry an `originatingItemId`. `updateRegistry` is the single writer under its lock
 // (W1-T240) and already returns `null` — skipping the write — when nothing changed, so a repeat
 // pass over unchanged state costs a read and no write (idempotent, by construction).
+//
+// W1-T2470: A THIRD GUARD, NARROWER STILL — a proposal carrying a non-empty `reframeHistory` is
+// NEVER retired, whatever its referent reads. `rmd reframe` is the operator's own hand on the
+// row (P25 iii); silently deleting it out from under them the moment its referent PR happens to
+// leave the board is exactly the quiet discard this plan forbids everywhere else (design (iii)).
+// This is a keep-anyway override, not an exception to the referent test above: a reframed row
+// whose referent is still live was already going to survive.
+//
+// W1-T2470: RETIREMENT IS LOUD, NEVER SILENT (design (iv)) — every id this pass actually removes
+// carries its own reason string in {@link ReconcileBoardReviewResult.retired}, not just a bare id
+// list, so "why did that proposal vanish" is a one-line read of this result rather than a recon.
 
 const BOARD_REVIEW_PROPOSAL_ID_PATTERN = /^board-review:(?:stale|escalation):(.+)$/;
 
@@ -517,11 +528,22 @@ export interface ReconcileBoardReviewOpts {
   ) => Proposal[] | null;
 }
 
+/** One row this pass actually removed, WITH the reason it was removed (design (iv), acceptance
+ *  criterion 5 — "every retirement is observable... by id and reason"). */
+export interface RetiredBoardReviewProposal {
+  id: string;
+  reason: string;
+}
+
 export interface ReconcileBoardReviewResult {
   /** Ids actually removed from the registry this pass — empty on an empty board read, a pass
    *  that finds nothing whose referent has left, or a second pass over state a prior call already
-   *  reconciled (acceptance criterion 5). */
+   *  reconciled (acceptance criterion 5). Kept alongside {@link retired} (same ids, same order)
+   *  because `run-task.ts`'s `checkBoardReview` already destructures this exact field name. */
   retiredProposalIds: string[];
+  /** Same rows as {@link retiredProposalIds}, each paired with why it left — the loud-not-silent
+   *  observability this task's design (iv) requires. */
+  retired: RetiredBoardReviewProposal[];
 }
 
 /**
@@ -533,27 +555,30 @@ export interface ReconcileBoardReviewResult {
 export function reconcileBoardReviewReferents(opts: ReconcileBoardReviewOpts): ReconcileBoardReviewResult {
   // An empty read is indistinguishable from a failed one (defaultBoardReviewItems degrades to
   // `[]` on any outage) — never read as "every referent resolved". No items, no registry touch.
-  if (opts.items.length === 0) return { retiredProposalIds: [] };
+  if (opts.items.length === 0) return { retiredProposalIds: [], retired: [] };
 
   const updateRegistry = opts.updateRegistry ?? updateProposalRegistry;
   const liveIds = new Set(opts.items.map((it) => it.id));
-  let retiredProposalIds: string[] = [];
+  let retired: RetiredBoardReviewProposal[] = [];
 
   updateRegistry(opts.registryPath, (current) => {
     const survivors: Proposal[] = [];
-    const retired: string[] = [];
+    const removed: RetiredBoardReviewProposal[] = [];
     for (const p of current) {
       const referentId = boardReviewReferentId(p);
-      if (referentId !== undefined && !liveIds.has(referentId)) {
-        retired.push(p.id);
+      const referentGone = referentId !== undefined && !liveIds.has(referentId);
+      // W1-T2470 design (iii): a non-empty `reframeHistory` is a keep-anyway override — the
+      // operator's own engagement with this row outranks a departed referent.
+      if (referentGone && (p.reframeHistory ?? []).length === 0) {
+        removed.push({ id: p.id, reason: `referent "${referentId}" is no longer on the open board` });
       } else {
         survivors.push(p);
       }
     }
-    if (retired.length === 0) return null; // nothing changed — updateRegistry skips the write
-    retiredProposalIds = retired;
+    if (removed.length === 0) return null; // nothing changed — updateRegistry skips the write
+    retired = removed;
     return survivors;
   });
 
-  return { retiredProposalIds };
+  return { retiredProposalIds: retired.map((r) => r.id), retired };
 }
