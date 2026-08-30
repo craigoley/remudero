@@ -1,0 +1,111 @@
+- id: W1-T2516
+  title: "THE HEADROOM GATE READS A FILE THE FLEET NEVER REFRESHES — every worker's HOME is redirected to a scratch dir (worker-home.ts) so the `cachedUsageUtilization` each worker writes lands in a directory `reapWorkerHome` then deletes, while the gate reads `homedir()/.claude.json` (account-usage.ts) which no fleet activity ever touches; on a headless host the module's own stated worst case — 'a host with no Claude Code activity at all never refreshes it' — is the PERMANENT state"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 16.00
+  files: [src/lib/account-usage.ts, src/lib/worker.ts, test/the-headroom-gate-reads-a-file-the-fleet-never-refreshes.test.ts]
+  origin: "operator-brief#we-lost-an-hour-to-the-session-limit-2026-08-30"
+  plan_refs: ["W1-T197", "W1-T215"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THIS IS WHY THE GATE THAT SHOULD HAVE PREVENTED THE OUTAGE NEVER FIRED. Headroom enforcement is
+    real and its degradation is correct — daemon.ts's header records that the daemon writes "a
+    `daemon.headroom` heartbeat each tick, and never returns while still over", holding in place
+    rather than restart-looping (the W1-T197 lesson). It is not the enforcement that failed. It is
+    the input.
+
+    THE THREE FACTS, EACH READ FROM SOURCE:
+
+      1. account-usage.ts:24 + :69   the reading comes from `~/.claude.json`'s
+                                     `cachedUsageUtilization`, resolved through `homedir()`.
+      2. worker-home.ts:40           "every worker's HOME is redirected to a Remudero-controlled
+                                     SCRATCH directory" — never the real HOME.
+      3. worker-home.ts:626          `reapWorkerHome` deletes those directories; the daemon log
+                                     carries a `worker_home_reap` line for essentially every worker.
+
+    Put together: the ONLY Claude Code processes on a headless fleet host are its own workers; each
+    refreshes the usage cache inside its own scratch HOME; the reaper deletes it; and the gate reads
+    a different file that nothing in the system ever writes. account-usage.ts's header already states
+    the failure mode in the abstract — "Nothing in remudero writes it and nothing in remudero can
+    force it. So its worst case is unbounded: a host with no Claude Code activity at all never
+    refreshes it." HOME redirection turns that worst case into the steady state, and the module could
+    not have known, because HOME redirection lives in a different file for a different reason.
+
+    CORROBORATED BY THE INCIDENT'S OWN STDERR. Every one of the four `api_error: true` rows for
+    W1-T2471 carries, ahead of the session-limit line:
+
+        Claude configuration file not found at: /home/node/Remudero/worker-home-<uuid>/.claude.json
+        A backup file exists at: .../.claude/backups/.claude.json.backup.<ms>
+
+    That is this exact file, in this exact scratch home, absent at the moment it mattered — while the
+    account was in fact 100% through its window.
+
+    WHY A STALENESS BOUND IS NOT THE FIX. `USAGE_CACHE_MAX_AGE_MS` already exists and already refuses
+    to render a stale reading, which is right for a CONSOLE PANEL: better no number than a wrong one.
+    But a gate that degrades to "cannot tell" is a gate that does not gate, and it will degrade that
+    way permanently on a headless host. The choice this task must make explicitly is what enforcement
+    does when the reading is unavailable — today it effectively proceeds, and the measured cost of
+    proceeding is an hour of dispatches into a closed window.
+
+    THE CANDIDATE REMEDIES, RANKED, WITH THEIR COSTS NAMED RATHER THAN ONE ASSERTED:
+      (a) Read the usage cache from a worker's HOME BEFORE the reaper removes it, and persist the
+          projection (percent + resets_at + accountUuid + fetchedAtMs) into `state/` where the gate
+          can read it. Cheapest and needs no new API: the workers are already refreshing it, the
+          value is simply being destroyed. Cost: the write must be at the reap seam or before it, and
+          must carry the account uuid so a switched account is detectable exactly as today.
+      (b) Have the daemon itself refresh `homedir()/.claude.json` by running a trivial Claude Code
+          invocation. Cost: spends window to measure window, which is self-defeating near the limit.
+      (c) Learn the window from refusals instead of a cache. Cost: only observable AFTER the first
+          refusal, so it cannot prevent the first burn — that is W1-T2515's territory, not a
+          substitute for a gate.
+    (a) is the one to build. (b) and (c) are recorded so the next reader does not re-derive them.
+
+    IT MUST NOT INVENT A READING. A gate that guesses is worse than one that abstains: an
+    account-uuid mismatch, a missing file, or a reading older than the bound must all still refuse to
+    assert a percentage — account-usage.ts's existing refusals are correct and stay. What changes is
+    that on this host there is now something real to read.
+
+    FILE LIST CORRECTED AT AUTHOR TIME (2026-08-30), FROM THE CALL SITES RATHER THAN FROM MEMORY.
+    The first draft declared only `src/lib/account-usage.ts`. Remedy (a) has to capture the reading
+    BEFORE the worker home is destroyed, and the reap seam is not in that file:
+
+      git grep -n 'reapWorkerHome' -- src/ | grep -v worker-home.ts   => src/lib/worker.ts:51 (import)
+      git grep -n 'ensureWorkerKeychain' -- src/ | grep -v worker-home.ts => src/lib/worker.ts:48 (import)
+
+    So `src/lib/worker.ts` is where the capture lands, and an undeclared write there would have
+    tripped the reviewer's scope check on a task whose whole point is a file the fleet destroys.
+    Declared now rather than discovered mid-build. (The second grep is the sibling check for
+    W1-T2518, whose own `files:` already names worker.ts correctly — verified, not assumed.)
+    RE-DERIVE RATHER THAN TRUST THIS ROW: `ls -la $(node -e 'console.log(require("os").homedir())')/.claude.json`
+    on the daemon host, and compare its mtime against the newest `worker_home_reap` line in the
+    ledger. A file older than the fleet's last dozen workers is this defect, visible in one command.
+
+    NOT IN SCOPE: the retry burn once a refusal has already happened (W1-T2515); the daemon's
+    cross-task response (W1-T2517); and the console ACCOUNT strip's rendering, which is correct today
+    and is not what failed.
+
+    THE RISK BAND IS BLAST RADIUS: one src stem plus a test is a narrow span, but a headroom gate
+    that reads a wrong number is worse than one that reads none — it would stop the fleet on a stale
+    high reading or, worse, wave it through on a stale low one.
+  acceptance:
+    - claim: "the gate can read a usage projection on a host where every worker HOME is redirected"
+      proof: "unit test: test/the-headroom-gate-reads-a-file-the-fleet-never-refreshes.test.ts"
+    - claim: "a reading survives the reaping of the worker home that produced it"
+      proof: "unit test: test/the-headroom-gate-reads-a-file-the-fleet-never-refreshes.test.ts"
+    - claim: "a reading whose account uuid does not match is still refused, never rendered"
+      proof: "unit test: test/the-headroom-gate-reads-a-file-the-fleet-never-refreshes.test.ts"
+    - claim: "a reading older than the staleness bound is still refused, never presented as current"
+      proof: "unit test: test/the-headroom-gate-reads-a-file-the-fleet-never-refreshes.test.ts"
+    - claim: "an absent reading abstains rather than asserting a percentage"
+      proof: "unit test: test/the-headroom-gate-reads-a-file-the-fleet-never-refreshes.test.ts"
+    - claim: "the console ACCOUNT strip renders exactly what it renders today"
+      proof: "unit test: test/the-headroom-gate-reads-a-file-the-fleet-never-refreshes.test.ts"
+    - claim: "no OAuth material from the config file is copied or persisted anywhere"
+      proof: "unit test: test/the-headroom-gate-reads-a-file-the-fleet-never-refreshes.test.ts"
+    - claim: "removing the persisted projection makes the survives-reaping assertion fail"
+      proof: "unit test: test/the-headroom-gate-reads-a-file-the-fleet-never-refreshes.test.ts"

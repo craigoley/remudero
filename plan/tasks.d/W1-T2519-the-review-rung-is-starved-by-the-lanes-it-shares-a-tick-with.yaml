@@ -1,0 +1,118 @@
+- id: W1-T2519
+  title: "THE REVIEW RUNG IS STARVED BY THE DISPATCH LANES IT SHARES A TICK WITH — `deps.sweep()` runs ONCE per iteration and the iteration cannot come round again until `Promise.allSettled` over that tick's lanes settles, so three 400-turn implement runs block every review for the length of the longest; daemon.ts's own comment measures the gap at p50 39.6s, p95 32.1m, max 64.5m, and a green PR observed 1h47m with zero reviews posted fleet-wide"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 20.00
+  files: [src/lib/daemon.ts, test/the-review-rung-is-starved-by-the-lanes-it-shares-a-tick-with.test.ts]
+  origin: "operator-session#a-green-pr-waited-two-hours-for-a-review-2026-08-30"
+  plan_refs: ["W1-T1065", "W1-T1044", "W1-T2504", "W1-T2513"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE REPO HAS ALREADY MEASURED THIS AND FILED IT UNDER A DIFFERENT QUESTION. W1-T1065's comment in
+    `runDaemon` — written to justify re-reading STOP/PAUSE before admission — states the number
+    outright: "the sweep-to-next-`daemon.iteration` gap runs **p50 39.6s, p95 32.1m, max 64.5m**". It
+    cites that gap as a reason a top-of-tick latch read goes stale. The same gap is also the review
+    latency, and nothing has ever named it as such.
+
+    THE STRUCTURE. One iteration does, in order: `deps.checkFreshness`, `await deps.sweep()` (the full
+    reconciler over every open PR — the ONLY thing that posts `remudero-review` on a PR no run lane
+    owns), `deps.sweepOrphans()`, `deps.sweepFeedbackLanding()`, `deps.readUsage()`, then admission,
+    then `Promise.allSettled` over the admitted lanes. Control returns to `deps.sweep()` only after
+    that settles. So the review rung's period is not `pollIntervalMs`; it is
+    `pollIntervalMs + max(lane duration)`. With `dispatchLanes: 3` and implement mounts at 400 turns,
+    a measured single worker span reached `worker_duration_ms: 1556916` — 25.9 minutes. Three such
+    lanes make a tick that reviews nothing for half an hour by construction.
+
+    OBSERVED, 2026-08-30, ACROSS THE WHOLE BOARD RATHER THAN ONE PR:
+
+      19:54:29Z  last `remudero-review` posted anywhere (#3331)
+      21:16Z     #3335 opened
+      21:17Z     #3336 opened
+      21:26Z     #3328 reached 28/28 checks complete, none failing
+      21:41Z     #3328 combined status STILL `pending`, 0 statuses; #3335 and #3336 also unreviewed
+
+    1 hour 47 minutes, three PRs, zero reviews — while the daemon was demonstrably alive and
+    dispatching (it opened two of those PRs in that window). This is not a stalled daemon and not a
+    PR being skipped: it is the review rung waiting its turn behind the lanes.
+
+    WHY THIS IS THE ANSWER TO A QUESTION ALREADY ASKED. The operator's standing complaint that rmd
+    "isn't managing the queue" — the one that prompted the #3318 investigation — was diagnosed then as
+    `checksStateFromRollup` discarding failure detail (filed as W1-T2504). That diagnosis was right
+    about what the sweep can SEE. It said nothing about how OFTEN the sweep gets to look, which is
+    this task. Both are real; neither substitutes for the other.
+
+    THE FIX IS SCHEDULING, NOT A SECOND SWEEP. Options, with costs named rather than one asserted:
+      (a) Run the review rung on its own cadence, independent of the drain — the honest fix, and the
+          one that matches the rung's actual job (react to CI going green, which happens on GitHub's
+          clock, not the fleet's). Cost: `runSweep` already carries a cross-call mutex (cited at
+          daemon.ts:1683) and `inFlightReviewKeys` was lifted out of it precisely so two callers
+          cannot double-review; that machinery is the prerequisite and it already exists.
+      (b) Bound the tick so lanes cannot hold it — but the lanes are the work, and W1-T1065's comment
+          is explicit that nothing may "abort a lane already admitted or already running". Rejected.
+      (c) Raise `dispatchLanes` so a slow lane matters less. Does not help: the tick still waits for
+          the slowest of MORE lanes.
+    (a) is the one to build.
+
+    IT MUST NOT DOUBLE-REVIEW OR RACE. The reason this is `risk: high` despite a one-file diff: a
+    review rung on its own cadence can overlap the drain's own. `runSweep`'s mutex and
+    `inFlightReviewKeys` exist for exactly that and must be honoured, not bypassed — and the
+    STOP/PAUSE/QUIET_HOURS latches must gate the independent cadence exactly as they gate the tick,
+    or the operator's halt stops dispatch and leaves reviews running.
+
+    COUNTER-EVIDENCE, RECORDED BEFORE ANYONE BUILDS FROM THIS. The drain that spanned the observed
+    window reported `idle ticks: 11` in its own summary, and `deps.sweep` is called at daemon.ts:2702
+    — BEFORE the dispatchable/idle decision, so an idle tick sweeps. Eleven idle ticks therefore mean
+    roughly eleven sweeps ran inside a window in which nothing was reviewed. That does not fit the
+    simple story above and MUST be reconciled before a fix is designed.
+
+    TWO CANDIDATE MECHANISMS NOW, NOT ONE, AND THIS TASK DOES NOT PICK BETWEEN THEM:
+      (i)  STARVATION BY LANES, as argued above. Survives the counter-evidence only if the 11 idle
+           ticks fell BEFORE the lanes were admitted (21:14-21:17Z) and the green transition
+           (21:26Z) fell inside the lane window — plausible from the timestamps, unproven from them.
+      (ii) A SWEEP THAT RUNS AND DOES NOT REACH THE PR. `runGatedSweep` bounds the walk at
+           `DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS = 559_000` (~9.3 min, W1-T1044, policy-threaded). A
+           sweep cut off by that bound ticks, logs, and reviews nothing beyond where it got to —
+           indistinguishable from (i) in the summary line, and it would explain reviews stopping
+           while idle ticks continue.
+
+    THE DISCRIMINATOR, WHICH COSTS ONE QUERY: for each `daemon.iteration` in the window, does a
+    corresponding sweep-completion row exist, and did it terminate normally or on its wall-clock
+    bound? If sweeps ran to completion and still posted nothing, (i) is dead and the defect is in
+    what the sweep SEES (which is W1-T2504's territory, not this task's). If sweeps are absent
+    opposite the lane window, (i) holds. AN IMPLEMENTER WHO SKIPS THIS WILL BUILD AN INDEPENDENT
+    CADENCE THAT CHANGES NOTHING, because a bounded sweep on its own cadence is still bounded.
+
+    RE-DERIVE RATHER THAN TRUST THE 1h47m: it is one observation on one evening. The query is the
+    ledger union for `review.posted` (or the `remudero-review` status timestamps across open PRs)
+    against `daemon.iteration`, differenced pairwise; W1-T1065's p50/p95/max came from exactly that
+    and can be recomputed. Print the corpus's newest ts beside the answer.
+
+    NOT IN SCOPE: what the sweep can see once it runs (W1-T2504); lane start latency within a tick
+    (W1-T2513); the lane count; and the run lane's own review, which is a different call path and is
+    not starved.
+
+    THE RISK BAND IS BLAST RADIUS, NOT RULE 19'S SPAN: one src stem plus a test, but this reschedules
+    the rung that posts a required check on every PR the fleet opens — a mistake here either
+    double-posts verdicts or stops posting them.
+  acceptance:
+    - claim: "the review rung runs on a cadence independent of the dispatch lanes"
+      proof: "unit test: test/the-review-rung-is-starved-by-the-lanes-it-shares-a-tick-with.test.ts"
+    - claim: "a long-running lane no longer delays the next review"
+      proof: "unit test: test/the-review-rung-is-starved-by-the-lanes-it-shares-a-tick-with.test.ts"
+    - claim: "two concurrent callers never review the same head twice"
+      proof: "unit test: test/the-review-rung-is-starved-by-the-lanes-it-shares-a-tick-with.test.ts"
+    - claim: "STOP halts the independent cadence exactly as it halts dispatch"
+      proof: "unit test: test/the-review-rung-is-starved-by-the-lanes-it-shares-a-tick-with.test.ts"
+    - claim: "PAUSE and quiet hours gate the independent cadence identically"
+      proof: "unit test: test/the-review-rung-is-starved-by-the-lanes-it-shares-a-tick-with.test.ts"
+    - claim: "a lane already admitted or running is never aborted by this change"
+      proof: "unit test: test/the-review-rung-is-starved-by-the-lanes-it-shares-a-tick-with.test.ts"
+    - claim: "a daemon with no lanes running behaves exactly as it does today"
+      proof: "unit test: test/the-review-rung-is-starved-by-the-lanes-it-shares-a-tick-with.test.ts"
+    - claim: "restoring the shared tick makes the long-lane-delays-review assertion fail"
+      proof: "unit test: test/the-review-rung-is-starved-by-the-lanes-it-shares-a-tick-with.test.ts"
