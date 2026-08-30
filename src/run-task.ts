@@ -17157,10 +17157,11 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
  *  - `unhandledEscalations` from the SAME `projectPlan` projection every other plan reader
  *    derives from (`StatusProjection.needsHuman`), joined to the PR by `prNumber`. A projection
  *    that could not be read yields zero, never a fabricated escalation.
- *  - `escalationTitle`/`escalationIssueUrl`/`escalationUnverified` (W1-T2453) from the SAME
- *    projection entry `unhandledEscalations` above already reads — `escalationsByPrNumber` carries
- *    them alongside the boolean, so naming an escalation costs zero extra reads: the fields were
- *    already in hand one line before this mapper, per this task's own rationale.
+ *  - `escalationTitle`/`escalationIssueUrl`/`escalationUnverified` (W1-T2453) and
+ *    `escalationOpenedAt` (W1-T2466) from the SAME projection entry `unhandledEscalations` above
+ *    already reads — `escalationsByPrNumber` carries them alongside the boolean, so naming an
+ *    escalation (and dating it) costs zero extra reads: the fields were already in hand one line
+ *    before this mapper, per this task's own rationale.
  *  - `originatesFromProposalId` (W1-T2465 — design (iv)'s recursion bound, MADE REACHABLE) from
  *    the SAME projection's `taskId` joined to the plan's own task, whose `origin:` names the
  *    board-review proposal that produced it (`board-review:stale:<ref>` or
@@ -17175,6 +17176,9 @@ export interface BoardItemEscalationInfo {
   title?: string;
   issueUrl?: string;
   unverified?: true;
+  /** W1-T2466: the escalation's own `StatusProjection.escalationOpenedAt` — when it became a
+   *  needs-human item, threaded through unread the same way title/issueUrl/unverified are. */
+  openedAt?: string;
 }
 
 /** W1-T2465: the SAME `board-review:stale:<ref>` / `board-review:escalation:<ref>` shape
@@ -17206,6 +17210,7 @@ export function boardItemsFromOpenPrs(
       ...(escalation?.title !== undefined ? { escalationTitle: escalation.title } : {}),
       ...(escalation?.issueUrl !== undefined ? { escalationIssueUrl: escalation.issueUrl } : {}),
       ...(escalation?.unverified ? { escalationUnverified: true as const } : {}),
+      ...(escalation?.openedAt !== undefined ? { escalationOpenedAt: escalation.openedAt } : {}),
       ...(originatesFromProposalId !== undefined ? { originatesFromProposalId } : {}),
     };
   });
@@ -17251,13 +17256,19 @@ export function defaultBoardReviewItems(config: Config, io: BoardReviewItemsIo =
       );
       // W1-T2453: carry the SAME entries' `escalationTitle`/`escalationIssueUrl`/
       // `escalationUnverified` through — they are already on `p`, one line above, so naming the
-      // escalation in `boardItemsFromOpenPrs` costs no second read.
+      // escalation in `boardItemsFromOpenPrs` costs no second read. W1-T2466: `escalationOpenedAt`
+      // rides the same join, for the same reason.
       escalations = new Map(
         [...proj.values()]
           .filter((p) => p.needsHuman && p.prNumber !== undefined)
           .map((p) => [
             p.prNumber!,
-            { title: p.escalationTitle, issueUrl: p.escalationIssueUrl, unverified: p.escalationUnverified },
+            {
+              title: p.escalationTitle,
+              issueUrl: p.escalationIssueUrl,
+              unverified: p.escalationUnverified,
+              openedAt: p.escalationOpenedAt,
+            },
           ] as const),
       );
       // W1-T2465: the SAME projection's `taskId`, joined to the plan it was already built from,
