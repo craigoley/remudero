@@ -99,6 +99,7 @@
   # The original list is preserved verbatim in note: for archaeology.
   files: [plan/tasks.d/W1-T314-console-four-tab-separation.yaml]
   status: blocked
+  retirement: withdrawn
   # WITHDRAWN AND DECOMPOSED 2026-08-04 into W1-T334 -> W1-T335 -> W1-T336. The comment below is the
   # EARLIER block, kept as history: it was written after the FOURTH dispatch, the status was later
   # returned to `queued`, and two further dispatches ran and failed. Its own diagnosis — "the likely

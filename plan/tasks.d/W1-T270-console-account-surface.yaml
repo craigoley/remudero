@@ -49,6 +49,7 @@
   plan_refs: ["§4"]
   files: [src/lib/serve.ts, src/lib/board.ts, src/lib/glance.ts]
   status: blocked
+  retirement: withdrawn
   attempts: 0
   note: "THE FIVE WITHDRAWN CRITERIA, PRESERVED VERBATIM so a future re-filing needs no archaeology:
     (1) claim 'the panel renders one row per configured account label with its window reset reserve state and spend

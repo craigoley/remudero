@@ -837,6 +837,7 @@
   plan_refs: ["§5C", "P22"]
   files: [src/run-task.ts]
   status: blocked
+  retirement: withdrawn
   attempts: 0
   note: "THE TWO WITHDRAWN CRITERIA, PRESERVED VERBATIM so a future re-filing needs no archaeology - they are
     withdrawn because they are ALREADY MET, never because they were wrong:
@@ -6432,6 +6433,7 @@
   plan_refs: ["§9"]
   files: [src/lib/config.ts]
   status: blocked
+  retirement: withdrawn
   attempts: 0
   note: "Split from W1-T9 (DIAGNOSIS.md, rule 16). Single concern: config loader + validation, no
     interactivity. Criterion preserved VERBATIM from W1-T9.
@@ -6476,6 +6478,7 @@
   plan_refs: ["§9"]
   files: [src/lib/tier.ts, src/lib/headroom.ts]
   status: blocked
+  retirement: withdrawn
   attempts: 0
   note: "Split from W1-T9 (DIAGNOSIS.md). Pure detection: consumes the /usage output (W1-T4 headroom
     parser) + ~/.claude.json keys (hasAvailableSubscription, cachedUsageUtilization, modelAccessCache,
@@ -6519,6 +6522,7 @@
   plan_refs: ["§9"]
   files: [src/lib/init.ts, src/run-task.ts, bin/rmd]
   status: blocked
+  retirement: withdrawn
   attempts: 0
   note: "Split from W1-T9. The interactive 'operator confirms' criterion was STRUCTURALLY UNFIT for a
     headless worker (W1-T9 burned its last ~15 turns on readline-repro scripts conjuring an operator that
@@ -6667,6 +6671,7 @@
   plan_refs: ["§4B", "§9"]
   files: [src/lib/launchd.ts, src/lib/daemon.ts, src/lib/env.ts]
   status: blocked
+  retirement: withdrawn
   attempts: 0
   note: "Split from W1-T12. GENERATION + in-process boot assertion only. Actually LOADING the plist on a
     real user session is W1-T12d (verify:human) — a headless worker cannot launchctl-load (Rule 18).
@@ -6714,6 +6719,7 @@
   plan_refs: ["§4B"]
   files: [src/lib/daemon.ts]
   status: blocked
+  retirement: withdrawn
   attempts: 0
   note: "Split from W1-T12. The RECOVERY code path, unit-tested over a seeded interrupted state. The LIVE
     kill-and-recover chaos drill is W1-T12d (verify:human) — a worker can't kill a live daemon (Rule 18).
@@ -8616,6 +8622,7 @@
   plan_refs: ["§4B"]
   files: [src/run-task.ts]
   status: blocked
+  retirement: withdrawn
   attempts: 0
   note: "THE TWO WITHDRAWN CRITERIA, PRESERVED VERBATIM so a future re-filing needs no archaeology:
     (1) claim 'rmd drain --repo remudero-sandbox derives status and arms merges against the SANDBOX
@@ -8988,6 +8995,7 @@
   plan_refs: ["§5", "§5D"]
   files: [SECURITY.md]
   status: blocked
+  retirement: withdrawn
   attempts: 0
   note: "THE TWO WITHDRAWN CRITERIA, PRESERVED VERBATIM so a future re-filing needs no archaeology:
     (1) claim 'SECURITY.md exists at a GitHub-honored path and states a PRIVATE disclosure channel,
@@ -12667,6 +12675,7 @@
   plan_refs: ["§7", "§7B"]
   files: [plan/tasks.yaml]
   status: blocked
+  retirement: withdrawn
   attempts: 0
   note: "THE FOUR WITHDRAWN CRITERIA, PRESERVED VERBATIM so a future re-filing needs no archaeology - they
     are withdrawn because they are ALREADY MET, never because they were wrong. Each is given with the proof

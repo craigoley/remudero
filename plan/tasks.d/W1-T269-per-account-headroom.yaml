@@ -60,6 +60,7 @@
   plan_refs: ["§4", "§9"]
   files: [src/lib/headroom.ts, src/lib/daemon.ts]
   status: blocked
+  retirement: withdrawn
   attempts: 0
   note: "THE FOUR WITHDRAWN CRITERIA, PRESERVED VERBATIM so a future re-filing needs no archaeology:
     (1) claim 'a snapshot carries the account label it was read under and an unattributable snapshot says so rather

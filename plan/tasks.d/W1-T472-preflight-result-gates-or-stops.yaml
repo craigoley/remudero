@@ -91,6 +91,7 @@
   plan_refs: ["W1-T463", "W1-T453"]
   files: [src/run-task.ts, src/lib/ci-parity.ts, test/worker-preflight-visibility.test.ts, test/preflight-ci-parity.test.ts]
   status: blocked
+  retirement: withdrawn
   attempts: 0
   note: "`risk: high` IS SET UP FRONT — Rule 19 SPAN across `src/run-task.ts` and
     `src/lib/ci-parity.ts` plus their suites; `sizingViolation` (`src/lib/task-linter.ts`) refuses
