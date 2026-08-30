@@ -2639,10 +2639,8 @@ export function renderFollowupCandidates(harvest: FollowupHarvest): string {
 // ── Follow-up routing (W1-T2458) ───────────────────────────────────────────────────────────
 //
 // `mineFollowups` above finds candidates; until this task, `renderFollowupCandidates` only ever
-// rendered them into a markdown section whose caption cited the wrong rule for the no-auto-filing
-// discipline — W1-T2456 retired that citation, and MASTER-PLAN §12 rule 27 now states the
-// permission affirmatively — and that no rung read
-// back
+// rendered them into a markdown section headed "never auto-filed (rule 15)" that no rung read
+// back — of the seven modules calling `updateProposalRegistry` (inbox.ts's single writer), none
 // read a follow-up, and no plan task has ever been filed FROM one (measured 2026-08-29: 463
 // distinct task_ids, 2,115 declared entries, zero routed). `routeFollowupsToRegistry` below is
 // the missing consumer: it takes the SAME `FollowupHarvest` `mineFollowups` already produces and
@@ -2652,7 +2650,7 @@ export function renderFollowupCandidates(harvest: FollowupHarvest): string {
 // a PROPOSAL CANDIDATE for the inbox's own tiering and an operator's `rmd approve` to act on,
 // rather than a task this lane commits directly. §12 rule 27 PERMITS the fleet to file its own
 // work; routing through the inbox here is a deliberate narrower choice about where a harvested
-// candidate should be judged, never a prohibition inherited from another rule — and it is now
+// candidate should be judged, not a prohibition inherited from another rule — and it is now
 // enforced by a writer instead of a caption.
 
 /**
