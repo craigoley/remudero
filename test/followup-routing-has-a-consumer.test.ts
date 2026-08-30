@@ -4,8 +4,9 @@
 // `parseFollowups` -> `harvestFollowupsFromReport` -> `mineFollowups` -> `renderFollowupCandidates`
 // -> `recordFollowupHarvest` all RESOLVE — 1,046 deduped `report.followups` rows carry 2,115
 // declared entries across 463 distinct task_ids over 21 days — but `renderFollowupCandidates`
-// only ever produced a markdown section headed "never auto-filed (rule 15)" that no rung reads
-// back. Of the seven modules calling `updateProposalRegistry` (inbox.ts's single writer), NONE
+// only ever produced a markdown section whose caption cited the wrong rule for the no-auto-filing
+// discipline (retired by W1-T2456) and that no rung reads
+// back.
 // read a follow-up, and not one plan task has ever been filed FROM a harvested entry.
 //
 // `routeFollowupsToRegistry` (src/lib/retro.ts) is the missing consumer. This file proves, in
