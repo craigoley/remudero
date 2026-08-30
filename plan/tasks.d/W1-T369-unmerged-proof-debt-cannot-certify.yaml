@@ -146,6 +146,7 @@
   plan_refs: ["W1-T358", "W1-T367", "W1-T370"]
   files: [plan/tasks.yaml, test/plan-proof-debt.test.ts]
   status: blocked
+  retirement: withdrawn
   attempts: 0
   note: "WITHDRAWAL RECORD, 2026-08-06, operator-authored plan change at b285a59.
     THE THREE ACCEPTANCE CRITERIA ARE PRESERVED VERBATIM IN PLACE, in the acceptance: block above,

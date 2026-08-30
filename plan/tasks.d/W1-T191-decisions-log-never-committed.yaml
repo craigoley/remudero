@@ -111,6 +111,7 @@
   plan_refs: ["§4"]
   files: [src/run-task.ts, src/lib/feedback.ts, src/lib/panel-graph.ts, src/lib/feedback-landing.ts, test/run-task.test.ts, test/feedback-landing.test.ts]
   status: blocked
+  retirement: withdrawn
   attempts: 0
   rationale: "WITHDRAWN AS ALREADY SATISFIED 2026-08-04 (W1-T324, the plan-hygiene sweep). Every criterion below
     was met by a PR that self-declares the task id (`Remudero-Task: W1-T191`), yet this record sat

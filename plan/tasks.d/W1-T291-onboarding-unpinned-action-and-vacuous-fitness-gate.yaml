@@ -86,6 +86,7 @@
   plan_refs: ["§5", "§5A"]
   files: [src/lib/project-init.ts, test/project-init.test.ts]
   status: blocked
+  retirement: withdrawn
   attempts: 0
   rationale: "WITHDRAWN AS ALREADY SATISFIED 2026-08-04 (W1-T324, the plan-hygiene sweep). Filed and fixed
     within the same 23-minute window on 2026-08-03 — almost certainly the triage-filing PR (#1163, this

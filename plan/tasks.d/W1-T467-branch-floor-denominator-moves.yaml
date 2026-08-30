@@ -141,6 +141,7 @@
   plan_refs: ["W1-T402"]
   files: [scripts/coverage-baseline.json, scripts/coverage-ratchet.mjs, test/coverage-floor-recapture.test.ts, test/coverage-ratchet.test.ts]
   status: blocked
+  retirement: withdrawn
   attempts: 0
   note: "AMENDMENT 2026-08-13 — TWO FRAMINGS THE RULING NEEDS, AND BOTH MUST BE HELD AT ONCE. THE
     OPTIONS BELOW ARE UNCHANGED; this adds no recommendation.

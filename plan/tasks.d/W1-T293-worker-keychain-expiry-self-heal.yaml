@@ -74,6 +74,7 @@
   plan_refs: ["§9", "§4A"]
   files: [src/lib/worker-home.ts, src/lib/worker.ts, docs/operator-guide.md]
   status: blocked
+  retirement: withdrawn
   attempts: 0
   rationale: "WITHDRAWN AS ALREADY SATISFIED 2026-08-04 (W1-T324, the plan-hygiene sweep). Same filing PR #1168
     and same underlying feedback item (fb-1784749981468-a531e5) as sibling W1-T292; filed 03:10 UTC on

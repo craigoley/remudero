@@ -41,6 +41,7 @@
   plan_refs: ["§5"]
   files: [src/lib/review.ts]
   status: blocked
+  retirement: withdrawn
   attempts: 0
   rationale: "WITHDRAWN AS ALREADY SATISFIED 2026-08-04 (W1-T324, the plan-hygiene sweep) — 'THE SHARPEST CASE':
     this task was filed at 21:49 UTC and the PR that implements it merged at 23:23 UTC the SAME DAY, under
