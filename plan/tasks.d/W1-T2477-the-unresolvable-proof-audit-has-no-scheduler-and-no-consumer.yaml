@@ -1,0 +1,90 @@
+- id: W1-T2477
+  title: "SEVENTY-NINE UNRESOLVABLE PROOFS ACROSS TWENTY-ONE OPEN TASKS AND NOTHING HAS EVER REPORTED THEM ON A SCHEDULE — proof-queue-audit is imported by exactly one non-test file, the CLI dispatch, so it runs only when a human types it; and its offender row already carries the proof text and the task, which is a git-greppable fact with a real path. Feed it to the adoption-debt minter as a second producer, never a second rung"
+  repo: remudero
+  depends_on: [W1-T2473]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 14.00
+  files: [src/lib/measurement-cadence.ts, src/lib/proof-queue-audit.ts, test/proof-debt-becomes-a-proposal.test.ts]
+  origin: "operator-brief#next-item-2026-08-30"
+  plan_refs: ["W1-T2473", "W1-T1053", "W1-T2280", "W1-T2455", "W1-T229"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED BY RUNNING THE VERB AT HEAD, NOT ESTIMATED. `rmd proof-queue-audit` over the open,
+    unmerged queue reports SEVENTY-NINE unresolvable proofs across TWENTY-ONE tasks — 77
+    name-filtered-zero-match and 2 grep-path-absent. Every one of those criteria will grade
+    `no-match` at review time and fall to the keyword floor, which is the exact test-theatre the
+    dialect gate exists to stop. The verb has existed since W1-T1053 and nothing has ever run it on
+    a cadence.
+    SURFACE 1 proof-queue-audit importers outside the CLI dispatch = 0
+    SURFACE 2 named causes the audit can report = 4
+    SURFACE 3 fields on one offender row = 6
+    SURFACE 4 fields on an EvidenceAnchor = 3
+    SURFACE 5 unresolvable proofs across the open queue today = 79
+    SURFACE 6 distinct tasks carrying them = 21
+    SURFACE 7 members on the measurement cadence result = 5
+
+    THIS IS A SECOND PRODUCER, NEVER A SECOND RUNG, AND THAT DISTINCTION IS THE WHOLE DESIGN.
+    W1-T2473 builds the minter that turns a debt finding into a proposal carrying a path-bearing
+    EvidenceAnchor. Wiring this verb to LOG would reproduce the exact defect W1-T2473 was filed
+    against — a signal computed on a schedule and read by nothing — so it is wired to that minter
+    or it is not wired at all. depends_on names W1-T2473 for that reason and not for ordering
+    convenience.
+
+    THE ANCHOR IS BETTER HERE THAN ANYWHERE ELSE, AND IT SELF-DRIFTS. An offender row carries the
+    task id and the PROOF TEXT VERBATIM. The proof text is the pattern; the task's own shard is the
+    path. When someone rewrites that proof the pattern stops matching, `grepAnchorTrue` goes false,
+    and `classifyProposal` moves the proposal to not_ready naming `evidence-drifted` — no new
+    terminal state, no reaper, no second mechanism. A proof that is FIXED stops being proposed
+    because the evidence for proposing it is literally gone.
+
+    WHY NOT `emissions` IN THE SAME TASK, STATED RATHER THAN LEFT AS AN OMISSION. Its row is
+    {verb, prefix, count, callSitesBeyondDispatch, status, allowlistReason} and its finding is that
+    a verb has written no ledger line in the window. That has no determinate fix: the remedy is to
+    wire it, delete it, or allowlist it, and the module ALREADY carries an allowlist for exactly
+    that judgement. An unresolvable proof has one remedy and it is mechanical. Mixing a
+    judgement-call producer with a determinate one would put two acceptance concerns in one task
+    for no shared machinery. `emissions` is named as a follow-up, not built here.
+
+    THE CEILING IS INHERITED, NEVER RE-INVENTED. W1-T2473's per-fire mint ceiling and its exact
+    dedup key (shape plus mechanism plus defining file) already bound the minter; this producer
+    supplies findings into that same bound, keyed on task id plus criterion index, so 79 findings
+    cannot become 79 proposals. A second ceiling here would be a second governor on a quantity the
+    first one already bounds — the shape W1-T475 deleted rather than kept.
+
+    ORDERING IS DELIBERATE AND IT IS THE OLDEST-FIRST RULE W1-T2473 ALREADY SETS: the head of a
+    debt queue must not be starved by a newer finding. Offender rows arrive in encounter order over
+    the plan, which is not an age, so this orders by the task's own filing order before applying
+    the inherited ceiling.
+
+    NOT IN SCOPE: changing what the audit reports (its causes, its relocated arm, its
+    exit-0-unconditionally contract — it is a REPORT, not a gate, and stays one); fixing any of the
+    79 proofs, which is what the proposals it mints are FOR; and `emissions`, above.
+
+    THE RISK BAND IS RULE 19's SPAN, NOT BLAST RADIUS: two src stems carrying two independent
+    acceptance concerns — the producer's own finding-to-anchor projection and the cadence wiring —
+    so sizingViolation refuses risk:medium for the span alone.
+  acceptance:
+    - claim: "the cadence runs the proof audit and hands its offenders to the minter"
+      proof: "unit test: test/proof-debt-becomes-a-proposal.test.ts"
+    - claim: "each minted proposal carries the proof text as its pattern and the task's shard as its path"
+      proof: "unit test: test/proof-debt-becomes-a-proposal.test.ts"
+    - claim: "rewriting the proof drifts the anchor false and the proposal classifies not-ready"
+      proof: "unit test: test/proof-debt-becomes-a-proposal.test.ts"
+    - claim: "two fires over an unchanged offender set mint exactly one proposal"
+      proof: "unit test: test/proof-debt-becomes-a-proposal.test.ts"
+    - claim: "dedup keys on task id plus criterion index and consults no similarity score"
+      proof: "unit test: test/proof-debt-becomes-a-proposal.test.ts"
+    - claim: "the inherited per-fire ceiling bounds this producer too rather than adding a second one"
+      proof: "unit test: test/proof-debt-becomes-a-proposal.test.ts"
+    - claim: "offenders are ordered oldest-filed-first so a newer finding cannot starve the head"
+      proof: "unit test: test/proof-debt-becomes-a-proposal.test.ts"
+    - claim: "the audit still exits zero unconditionally and gates nothing"
+      proof: "unit test: test/proof-debt-becomes-a-proposal.test.ts"
+    - claim: "an empty offender set mints nothing and reports a measured clear rather than a bare zero"
+      proof: "unit test: test/proof-debt-becomes-a-proposal.test.ts"
+    - claim: "no path here files a task approves a proposal or edits any acceptance criterion"
+      proof: "unit test: test/proof-debt-becomes-a-proposal.test.ts"
