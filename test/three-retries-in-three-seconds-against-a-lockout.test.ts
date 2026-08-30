@@ -1,3 +1,11 @@
+// WHY SOME OF THIS IS ALSO IN test/classify.test.ts. stryker.conf.json mutates src/lib/classify.ts
+// and runs ONLY classify.test.ts + block-reason.test.ts, so a classify test living anywhere else is
+// invisible to the mutation runner — measured: 38.91% against a 75.92% baseline before the unit
+// assertions moved there. stryker.conf.json is an INSTRUMENT path (review.ts INSTRUMENT_SURFACE),
+// so widening its command alongside a src/ change would trip Rule 25 entanglement. This file stays
+// as W1-T2515s own named falsifier (its shard proofs resolve to this path) and carries the
+// end-to-end incident narrative; classify.test.ts carries the mutant-killing unit assertions.
+
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";

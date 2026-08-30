@@ -120,9 +120,15 @@ export interface UsageLimitRefusal {
   resetsAtMs?: number;
 }
 
-/** The reset clause a refusal carries. 12-hour with am/pm or 24-hour; the zone is optional in the
- *  text but a NON-UTC or ABSENT zone yields no epoch (see {@link UsageLimitRefusal.resetsAtMs}). */
-const USAGE_LIMIT_RESET_RE = /resets?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*(?:\(([^)]{1,16})\))?/i;
+/**
+ * The reset clause a refusal carries. 12-hour with am/pm or 24-hour; the zone is optional in the
+ * text but a NON-UTC or ABSENT zone yields no epoch (see {@link UsageLimitRefusal.resetsAtMs}).
+ *
+ * EXPORTED so its REFUSING arm is testable by name (W1-T2317's negative-reachability ratchet): a
+ * validator whose rejection has never been exercised is the exact shape that ratchet exists to
+ * catch, and this one decides whether a resume time is believed at all.
+ */
+export const USAGE_WINDOW_RESET_RE = /resets?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*(?:\(([^)]{1,16})\))?/i;
 
 /**
  * Recognise a usage/session-window refusal in one attempt's evidence, and extract its stated
@@ -139,7 +145,7 @@ export function detectUsageLimitRefusal(text: string | undefined, nowMs: number)
   if (!hit) return undefined;
   const out: UsageLimitRefusal = { matched: hit[0].trim() };
 
-  const reset = USAGE_LIMIT_RESET_RE.exec(t);
+  const reset = USAGE_WINDOW_RESET_RE.exec(t);
   if (!reset) return out;
   out.resetsAtText = reset[0].replace(/^resets?\s+/i, "").trim();
 
@@ -149,10 +155,13 @@ export function detectUsageLimitRefusal(text: string | undefined, nowMs: number)
   let hour = Number(reset[1]);
   const minute = Number(reset[2] ?? "0");
   const meridiem = (reset[3] ?? "").toLowerCase();
-  if (!Number.isFinite(hour) || !Number.isFinite(minute) || hour > 23 || minute > 59) return out;
+  // BOUNDS, NOT TYPE CHECKS: the capture groups are \d{1,2} and \d{2}, so Number() cannot
+  // produce NaN here — a `Number.isFinite` guard would be unreachable code whose mutants can
+  // never be killed. `99:99` IS reachable, and is what these two bounds refuse.
+  if (hour > 23 || minute > 59) return out;
   if (meridiem === "pm" && hour < 12) hour += 12;
   if (meridiem === "am" && hour === 12) hour = 0;
-  if (hour > 23) return out;
+  // No second bound: `pm` only adds 12 when hour < 12, so the adjusted hour cannot exceed 23.
 
   const now = new Date(nowMs);
   const candidate = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), hour, minute, 0, 0);
@@ -160,10 +169,19 @@ export function detectUsageLimitRefusal(text: string | undefined, nowMs: number)
   return out;
 }
 
-/** The transient backoff FLOOR and CEILING (W1-T2515, policy-as-data). A network transient is
- *  retried promptly — the first wait is one second, not zero — and never waits longer than the
- *  ceiling however many attempts precede it. */
+/**
+ * THE PRIMARY CONTROL (W1-T1266's taxonomy): the wait before the FIRST retry, and the base every
+ * later one doubles from. This is what normally paces a transient retry — before W1-T2515 the pace
+ * was zero, which is how MAX_TRANSIENT_RETRIES was spent in 3.519 seconds. Policy-as-data (rule 2).
+ */
 export const TRANSIENT_BACKOFF_BASE_MS = 1_000;
+
+/**
+ * A BACKSTOP, not the primary control above: it binds only once the doubling has already run away —
+ * from attempt 6 onward — and exists so "bounded" is a property of the code rather than a promise
+ * about how many retries there will ever be. If it is ever OBSERVED to bind in normal operation,
+ * that is a signal about MAX_TRANSIENT_RETRIES, not a reason to raise this.
+ */
 export const TRANSIENT_BACKOFF_CEILING_MS = 30_000;
 
 /**
