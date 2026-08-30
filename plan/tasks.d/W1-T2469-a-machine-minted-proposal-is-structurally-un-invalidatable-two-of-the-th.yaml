@@ -1,0 +1,119 @@
+- id: W1-T2469
+  title: "a machine-minted proposal is structurally UN-INVALIDATABLE — two of the three minting paths ship `evidenceAnchors: []`, so the readiness predicate's evidence arm passes VACUOUSLY, `isDraftStale` is permanently false and `draftAttemptKey` is a constant: a finding whose condition has evaporated still classifies READY and still offers the draft it cached while the condition was live"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 60.00
+  origin: architect
+  plan_refs: ["§7", "§7B", "P25", "W1-T110", "W1-T240", "W1-T1257"]
+  files: [src/lib/inbox.ts, src/lib/board-review.ts, src/lib/rule-efficacy.ts, test/proposal-invalidation.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE PROPOSAL THIS SHARD WAS RATIFIED FROM CANNOT EVER GO STALE, AND THAT IS A MECHANISM RATHER
+    THAN AN OPINION. `board-review:escalation:#3199` was minted with `evidenceAnchors: []` — the
+    literal in `buildBoardReview`'s registry update, src/lib/board-review.ts. Three consequences
+    follow mechanically from an empty anchor set, each re-derivable in src/lib/inbox.ts:
+      (a) THE READINESS PREDICATE'S EVIDENCE ARM PASSES VACUOUSLY. `classifyProposal` computes
+          `const driftedAnchors = proposal.evidenceAnchors.filter(a => !ctx.grepAnchorTrue(a))`.
+          Over an empty array that is empty, so the `evidence_anchors` reason is never pushed and the
+          proposal is INCAPABLE of being classified evidence-drifted.
+      (b) THE CACHED DRAFT NEVER GOES STALE. `isDraftStale` compares `anchorFingerprint`s, and
+          `anchorFingerprint([])` is the empty string, a constant — so `draftStale` is permanently
+          false for every such proposal.
+      (c) THE DAEMON NEVER RE-DRAFTS IT. `draftAttemptKey` is
+          `${anchorFingerprint(anchors)}::${reframeHistory.length}`, which for an anchor-less,
+          never-reframed proposal is the constant `::0`, so the attempt cache suppresses every later
+          attempt for the life of the proposal.
+    So a finding whose condition has since evaporated — the PR merged, its escalation closed — still
+    classifies READY and still offers the draft cached while the condition was live. The invalidation
+    machinery W1-T110 built is INERT for exactly the proposals a machine mints, which are the ones no
+    human curated in the first place.
+
+    A CENSUS, AND A CORRECTION TO THIS SHARD'S OWN FIRST READING, recorded rather than hidden. The
+    first pass here claimed rule-efficacy anchors its proposals and board-review is the lone outlier,
+    on the strength of `evidenceAnchors: anchors` in `escalateRepeatingRules`. Reading a few lines up
+    REFUTES it: `const anchors: EvidenceAnchor[] = []` and nothing is ever pushed onto it. That is
+    the same zero laundered through a named local that reads as though evidence had been assembled —
+    worse than the inline literal, not better. Of the three MINTING paths audited: board-review zero
+    (inline literal), rule-efficacy zero (via the empty local), and the feedback docket ONE REAL
+    ANCHOR (`{ description: "<referent> is still an open referent", pattern: winnerReferent }`,
+    src/lib/feedback-docket.ts, handed to the registry by run-task.ts's docket rung). The third is
+    the control and it is what makes this a defect rather than a design gap: the vehicle works, is
+    used, and two miners skip it.
+    RE-RUN THE CENSUS, DO NOT INHERIT IT. Further `updateProposalRegistry` call sites exist
+    (src/lib/panel-graph.ts, and three in src/run-task.ts) and were NOT audited for this claim —
+    several mutate an existing entry rather than mint a new one. The builder re-derives the minting
+    set with `grep -rn "evidenceAnchors:" src/` and decides the fix's width from that, never from a
+    figure quoted here.
+
+    WHY AN ANCHOR IS AWKWARD HERE, STATED PLAINLY RATHER THAN WISHED AWAY. `EvidenceAnchor` is a
+    REPO-TEXT predicate — `{ description, pattern, path? }`, resolved by `gitGrepAnchorTrue(cwd, ref,
+    anchor)`. A board finding is about LIVE GitHub state, and no grep on main can answer whether a PR
+    still carries an unhandled escalation. The two anchor-less miners did not forget to fill a field;
+    the existing vocabulary cannot express their condition. That is the actual gap, and it is why
+    this is a design decision rather than a one-line patch.
+  design: |
+    THE INVARIANT, and it is the only thing this shard owes: A PROPOSAL WHOSE PRODUCING CONDITION HAS
+    ENDED MUST NOT REACH READY. Everything below is subordinate to it.
+    TWO ROUTES, both legitimate — THE IMPLEMENTER CHOOSES WITH EVIDENCE FROM SOURCE and does not take
+    this note's framing on faith:
+      (A) A SECOND ANCHOR KIND, CALLER-RESOLVED. The precedent already exists one field over:
+          `ProposalTrigger.fired` is documented as resolved by the CALLER, with the module never
+          guessing whether the condition holds. A condition anchor takes the same shape — the miner
+          NAMES the condition, the caller RESOLVES it — which keeps inbox.ts pure and gives the two
+          anchor-less miners something true to emit. Costs a vocabulary widening.
+      (B) MINER-SIDE RE-CHECK. Each miner, on its own next fire, re-evaluates its open findings and
+          LABELS the ones whose condition no longer holds, through the same single writer. Costs no
+          vocabulary change; costs a miner that must run before anything is noticed.
+    BINDING ON EITHER ROUTE, and these four are not the implementer's to trade away:
+      1. AN EMPTY ANCHOR SET IS NOT EVIDENCE. Whatever ships, `classifyProposal` must stop treating a
+         zero-length anchor list as a SATISFIED evidence arm. The honest classification is not-ready
+         with a named reason, never ready by absence.
+      2. NOTHING IS DELETED AND NOTHING IS DECIDED FOR THE HUMAN. An invalidated proposal is LABELLED
+         and KEPT — W1-T1257's ruling on the adjacent queue, verbatim: a discharged entry is
+         LABELLED, never retired, and nothing is closed on a human's behalf. Rule 15 is untouched:
+         this shard files no task, mints no id and ratifies nothing.
+      3. CANNOT-OBSERVE MEANS WAIT (W1-T130), and inbox.ts ALREADY carries the shape to copy — its
+         `deps_observable` arm renders that GitHub could not be read and that this is NOT a claim the
+         dependency is unmerged. An unreadable condition read classifies not-ready-as-unobservable,
+         never READY and never a silent drop.
+      4. THE SINGLE WRITER SURVIVES. Every registry write still rides `updateProposalRegistry`
+         (W1-T240) — never a hand-rolled JSON write, never a second writer, so the lost-update and
+         torn-file hazards that helper exists to close stay closed.
+    VERIFY FROM SOURCE BEFORE EDITING: the predicate, the fingerprint and the attempt key were read
+    on 2026-08-28 and this note may be stale against the installed version.
+  acceptance:
+    - claim: "a proposal with an EMPTY evidence-anchor set never classifies READY on a vacuously satisfied evidence arm — it is not-ready with the missing evidence named"
+      proof: "unit test: test/proposal-invalidation.test.ts"
+    - claim: "a proposal whose producing condition has ENDED stops reaching READY, and the constant anchor fingerprint and constant draft-attempt key stop suppressing re-derivation for it"
+      proof: "unit test: test/proposal-invalidation.test.ts"
+    - claim: "an invalidated proposal is LABELLED and KEPT — no registry entry is removed, and every write still rides the single-writer helper"
+      proof: "unit test: test/proposal-invalidation.test.ts"
+    - claim: "an UNREADABLE condition read classifies not-ready-as-unobservable with a named reason, never READY and never a silent drop"
+      proof: "unit test: test/proposal-invalidation.test.ts"
+    - claim: "both anchor-less minting paths emit a real condition for their findings — asserted per miner, so the class fix cannot land half-applied"
+      proof: "unit test: test/proposal-invalidation.test.ts"
+  note: |
+    FILED from the registry proposal `board-review:escalation:#3199`, which is the fixture: that
+    proposal is un-invalidatable today by the three mechanisms named in the rationale.
+    NOT A RE-DECISION of W1-T1257 (the feedback INBOX's missing discharge path, on
+    `plan/feedback/*.yaml` entries and the closed `FEEDBACK_STATUSES` enum) — this is the PROPOSAL
+    REGISTRY, a different artifact with a different vocabulary and no shared write path. W1-T1257's
+    ruling that a discharged item is LABELLED rather than retired is INHERITED as a binding
+    constraint above, deliberately, so the two queues do not diverge in posture.
+    OUT OF SCOPE, named so it is not silently inherited: (1) AUTO-RETIRING or auto-deciding a
+    proposal is refused above with its reason; whether an invalidated proposal should be hidden from
+    the inbox stays the ratification lane's call. (2) A sixth `FEEDBACK_STATUSES` member is not
+    proposed here and is not this task's to add. (3) The board-review rung's trigger, thresholds,
+    cadence and read-only posture are untouched.
+    RULE 19 BAND, recorded as a regrade rather than a workaround: `risk: high` for the SPAN. The
+    invariant is unsatisfiable piecewise — a widened vocabulary with no miner emitting into it
+    invalidates nothing, and a miner emitting a kind the predicate cannot read changes nothing — so
+    the predicate and at least one miner must land together. The SECOND anchor-less miner is the same
+    one-line shape and is FOLDED IN rather than split, because splitting one defect by instance is
+    fragmentation rather than decomposition. That last part is a judgement, stated so it can be
+    argued with, not a claim of physical inseparability.

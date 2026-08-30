@@ -1,0 +1,89 @@
+- id: W1-T2468
+  title: "the board's escalation arm narrows a NAMED escalation to a bare count — `defaultBoardReviewItems` reduces a projection carrying `escalationIssueUrl`/`escalationTitle`/`escalationUnverified` to a `Set<number>`, so every finding it mints can only say `carries 1 unhandled escalation(s)` and is undraftable by the Architect it is handed to"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 40.00
+  origin: architect
+  plan_refs: ["§7", "§7B", "P25", "W1-T2304", "W1-T186"]
+  files: [src/run-task.ts, src/lib/board-review.ts, test/board-review-escalation-named.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED FROM INSIDE THE DEFECT. This shard is drafted from the registry proposal
+    `board-review:escalation:#3199`, whose entire text is `board-review: #3199 carries 1 unhandled
+    escalation(s)`. That sentence names no issue, no reason and no ask, so the Architect handed it
+    cannot say what #3199 is blocked on without abandoning the proposal and going to GitHub. The
+    finding is undraftable AS WRITTEN, and it is undraftable BY CONSTRUCTION rather than by accident.
+
+    THE INFORMATION EXISTS AND IS DISCARDED ONE LAYER ABOVE THE SUMMARY, re-derivable from source.
+    `StatusProjection` (src/lib/status.ts) carries three fields beside `needsHuman`, each documented
+    as present iff `needsHuman` is: `escalationIssueUrl` — the escalation issue's own URL, carried
+    (W1-T182) so a surface can render a DIRECT link rather than soliciting a URL the ledger already
+    holds; `escalationTitle` — the escalation's real one-line ask, best-effort, present iff the live
+    title could be read; and `escalationUnverified` — set when the issue's live state could NOT be
+    confirmed OPEN. `defaultBoardReviewItems` (src/run-task.ts) reads that projection and reduces all
+    of it to `new Set([...proj.values()].filter(p => p.needsHuman && p.prNumber !== undefined).map(p
+    => p.prNumber!))`, a bare `Set<number>`. `boardItemsFromOpenPrs` then maps that set to
+    `unhandledEscalations: needsHumanByPrNumber.has(pr.number) ? 1 : 0`, and `diagnoseBoardFindings`
+    (src/lib/board-review.ts) renders `carries ${it.unhandledEscalations} unhandled escalation(s)`.
+    The url, the ask and the confidence flag are thrown away at the mapper, one line before the
+    sentence that needed them. This is not a missing read; it is a discarded one.
+
+    THE COUNT IS NOT EVEN A COUNT. The production mapper's ternary can only ever yield 0 or 1, so the
+    ONLY variable in any shipped escalation finding is the PR number. The field is typed as a count
+    and is structurally a boolean, which is why every such finding reads identically.
+
+    AND THE CONFIDENCE FLAG'S LOSS IS A FAIL-OPEN, not merely a thinner sentence. `escalationUnverified`
+    exists because W1-T182 settled the opposite polarity for the escalation surface: an unreadable
+    issue state must KEEP the row and MARK it, never drop it. The board's mapper keeps the row and
+    drops the mark, so a finding can assert that an item `carries 1 unhandled escalation` for an
+    escalation the projection itself could not confirm is still open.
+  design: |
+    (i) CARRY THE REFERENT, DO NOT RE-READ FOR IT. All three fields are already present in the
+    projection `defaultBoardReviewItems` computes, so widening `BoardItem`'s escalation arm from a
+    bare count to the named referent it came from costs ZERO additional GitHub reads. A per-item
+    fetch would regress the one-list-call discipline that function's own doc claims, and is refused
+    here by name rather than left to be discovered.
+    (ii) THE SUMMARY RENDERS WHAT IT HAS, AND SAYS SO WHEN IT HAS NOTHING. With a url, name the url.
+    With a title, render the ask. Flagged unverified, say unverified instead of asserting unhandled.
+    With neither url nor title — a malformed or pre-W1-T8 `escalation.issue_opened` line, a case
+    status.ts already handles explicitly — the finding STILL fires and renders that the reason was
+    never named, which is itself a finding (the W1-T186 named-reason doctrine, and W1-T280's own
+    ruling that a blocker with no named reason renders as exactly that, never as a blank).
+    (iii) OUT OF SCOPE, named so it is not silently inherited: the digest's board-review line
+    (`${b.unhandledEscalationCount} unhandled escalation(s)`, src/lib/digest.ts) is an AGGREGATE
+    across the whole board and stays a count — this shard changes the PER-ITEM finding, not the
+    roll-up. Nothing here changes the depth trigger, the thresholds, the cadence, the report's
+    counts, or the rung's read-only posture.
+    (iv) VERIFY FROM SOURCE BEFORE EDITING — this rationale is a 2026-08-28 survey and the mapper's
+    shape may have moved; distrust the prompt over the installed version.
+  acceptance:
+    - claim: "a finding for an item whose projection carries an escalation url NAMES that url, and renders the escalation's one-line ask when the title was readable — never a bare count"
+      proof: "unit test: test/board-review-escalation-named.test.ts"
+    - claim: "an escalation the projection flagged unverified renders as unverified rather than asserted as unhandled — the W1-T182 fail-closed boundary survives the mapper"
+      proof: "unit test: test/board-review-escalation-named.test.ts"
+    - claim: "a needs-human projection carrying NO issue url still produces the finding, rendered as reason-not-named — an absent referent never drops a live escalation off the board"
+      proof: "unit test: test/board-review-escalation-named.test.ts"
+    - claim: "the named referent costs no additional read — the finding is built from the SAME projection the board reader already computes, with zero per-item fetches"
+      proof: "unit test: test/board-review-escalation-named.test.ts"
+  note: |
+    FILED from the registry proposal `board-review:escalation:#3199` (the board-review rung, W1-T2304),
+    which is also this shard's own fixture: the proposal's full text is the sentence this task exists
+    to make informative.
+    NOT A RE-DECISION of W1-T487 (which fixes the fix rung's own escalation BODY rendering an
+    unguarded map-join over an empty evidence list) nor of W1-T186 (the named-reason doctrine this
+    shard renders rather than mints). Different surface, no shared code path; W1-T186 supplies the
+    vocabulary, this carries it through a mapper that currently drops it.
+    RULE 19 BAND: `risk: high` is set for the SPAN — the mapper lives in run-task.ts and the finding
+    renderer in board-review.ts — not for blast radius. Recorded as a regrade rather than a
+    workaround, following the W1-T180 precedent: the two halves are one concern (a referent carried
+    from the projection into the sentence) and splitting them yields a widened field with nothing
+    reading it, which is the dead-code shape this repo has shipped before.
+    SEQUENCING, not a hard edge: W1-T2469 (the un-invalidatable machine proposal) would consume a named
+    referent if this lands first, since a condition worth re-checking is easier to state once the
+    finding names it. Expressed as sequencing rather than `depends_on` because each is independently
+    valuable and a hard edge would strand one behind the other.
