@@ -338,6 +338,8 @@ import {
 import {
   applyFragmentToPlanYaml,
   applyStampToMasterPlan,
+  approveBatch,
+  approveBatchCommitMessage,
   approveCommitMessage,
   approveProposal,
   classifyProposal,
@@ -368,9 +370,12 @@ import {
   type DraftCache,
   type DraftRungOutcome,
   type EvidenceAnchor,
+  type BatchApproveResult,
   type InboxClassification,
   type Proposal,
   type ReadinessContext,
+  type RatificationPayload,
+  type RatifyBatchGateway,
   type RatifyGateway,
   type ReframeResult,
   writeRatificationShards,
@@ -29340,6 +29345,55 @@ function loadProposalForRatify(
 }
 
 /**
+ * W1-T2471: the N-proposal counterpart of {@link loadProposalForRatify} — builds the SAME
+ * {@link ReadinessContext} ONCE (one ledger read, one registry/draft-cache read) and classifies
+ * every named id against it, rather than re-deriving that context once per id the way N
+ * sequential `loadProposalForRatify` calls would. `proposalIds` is the EXPLICIT, ORDERED set
+ * the operator named (Q4) — an id absent from the ACTIVE registry is reported in `unknown`
+ * rather than silently dropped, so the caller can refuse the whole invocation on a typo instead
+ * of quietly ratifying a smaller batch than the operator asked for. Every KNOWN id is
+ * classified individually and returned in the SAME order it was named, whatever its state —
+ * readiness triage (skip-unready-never-abort) is {@link planRatificationBatch}'s job, not this
+ * loader's. */
+function loadProposalsForRatify(
+  proposalIds: string[],
+  plan: Plan,
+  ledgerPath: string,
+  owner: string,
+  repo: string,
+  config: Config,
+): { found: { id: string; proposal: Proposal; classification: InboxClassification }[]; unknown: string[] } {
+  const registryPath = join(config.root, "state", "inbox-proposals.json");
+  const proposals: Proposal[] = parseProposalRegistry(readFileIfExists(registryPath));
+  const draftsPath = join(config.root, "state", "inbox-drafts.json");
+  const drafts: DraftCache = parseDraftCache(readFileIfExists(draftsPath));
+
+  const deriveDeps: DeriveDeps = { ledgerPath, github: ghGateway(owner, repo) };
+  const { isMerged, depsUnobservable } = buildDepsReadinessAccessors(plan, deriveDeps);
+  const ledgerLines = readLedgerLines(ledgerPath);
+  const ctx: ReadinessContext = {
+    plan,
+    isMerged,
+    depsUnobservable,
+    grepAnchorTrue: (a: EvidenceAnchor) => gitGrepAnchorTrue(repoRoot, "origin/main", a),
+    openProposalIds: new Set(proposals.map((p) => p.id)),
+    isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
+  };
+
+  const found: { id: string; proposal: Proposal; classification: InboxClassification }[] = [];
+  const unknown: string[] = [];
+  for (const id of proposalIds) {
+    const proposal = proposals.find((p) => p.id === id);
+    if (!proposal) {
+      unknown.push(id);
+      continue;
+    }
+    found.push({ id, proposal, classification: classifyProposal(proposal, drafts[proposal.id], ctx) });
+  }
+  return { found, unknown };
+}
+
+/**
  * `rmd approve <P##>` — the operator's ONE BIT (MASTER-PLAN P25 ii, W1-T111). Refuses
  * anything not currently READY (re-classified live, against the SAME facts `rmd inbox`
  * would show right now — never a stale cached verdict), naming the state; a READY
@@ -29349,9 +29403,22 @@ function loadProposalForRatify(
  * {@link approveProposal}; this command is the thin real-world glue (mirrors
  * `inboxCommand`/`planCommand`'s split).
  */
-export async function approveCommand(rest: string[], deps: { config?: Config; gateway?: RatifyGateway } = {}): Promise<number> {
+export async function approveCommand(
+  rest: string[],
+  deps: { config?: Config; gateway?: RatifyGateway; batchGateway?: RatifyBatchGateway } = {},
+): Promise<number> {
   const proposalId = rest[0];
   const badArg = unknownArgError("approve", rest.slice(1), [], []);
+  // W1-T2471: more than one bare id named (e.g. `rmd approve P1 P2 P3`) is what the SINGLE-id
+  // parse above already flags as a bad arg — every token after the first is "unexpected".
+  // Reinterpreted here, and ONLY here, as an EXPLICIT batch (Q4: never an implicit "approve
+  // everything ready" — the operator must NAME every id): every token in `rest` is a bare
+  // proposal id, none a `--flag`. Any OTHER malformed shape (a stray `--flag` anywhere) falls
+  // straight through to the single-path usage error below, UNCHANGED — this branch changes
+  // NOTHING about the single-proposal path's own parsing or behaviour.
+  if (badArg && rest.length >= 2 && rest.every((t) => !t.startsWith("--"))) {
+    return approveBatchCommand(rest, deps);
+  }
   if (!proposalId || badArg) {
     console.error((badArg ?? `rmd approve: <P##> is required — usage: ${commandSyntax("approve")}`) + "\n" + USAGE);
     return 2;
@@ -29687,6 +29754,264 @@ export async function approveCommand(rest: string[], deps: { config?: Config; ga
     const armOutcome = armAndLogOutcome(result.prUrl, `PR-${prNum}`, log, undefined, undefined, armHeadSha);
     removeApproveWorktree();
     console.log(`rmd approve: ${proposalId} gated — ${armReportPhrase(armOutcome)} (review ${reviewCode === 0 ? "success" : "failure"}): ${result.prUrl}`);
+    return reviewCode;
+  } catch (e) {
+    log("approve.error", { error: String((e as Error)?.message ?? e) });
+    try {
+      removeApproveWorktree();
+    } catch {
+      /* best-effort */
+    }
+    throw e;
+  } finally {
+    if (ownedWorktreePath) removeRunLock(ownedWorktreePath);
+  }
+}
+
+/**
+ * `rmd approve <P##> <P##> ...` (N >= 2) — the EXPLICIT-BATCH counterpart of
+ * {@link approveCommand} (W1-T2471): ships every READY member of a batch of NAMED proposals
+ * into ONE branch, ONE commit, ONE folded MASTER-PLAN.md block and ONE plan PR, instead of one
+ * full PR lifecycle (+ one advisory reviewer spawn) per proposal. Reached ONLY when the
+ * operator names two or more bare ids to `rmd approve` — never an implicit "approve every
+ * READY proposal" (Q4): an id absent from the ACTIVE registry refuses the WHOLE invocation
+ * before anything is touched, exactly like the single-path's own "unknown proposal" refusal.
+ *
+ * The pure decision (skip-unready-never-abort, within-batch duplicate growth, shard-collision
+ * refusal, the sequential stamp fold) lives in {@link approveBatch}/{@link planRatificationBatch}
+ * (lib/inbox.ts); this is the thin real-world glue, mirroring {@link approveCommand}'s own
+ * split — `createRatificationBranch` runs the mint/reserve/write loop once PER ACCEPTED
+ * MEMBER inside the SAME worktree (Q3: the shard writer is per-fragment and composes with no
+ * shared state) but commits and pushes exactly ONCE for the whole set.
+ */
+async function approveBatchCommand(
+  rest: string[],
+  deps: { config?: Config; gateway?: RatifyGateway; batchGateway?: RatifyBatchGateway } = {},
+): Promise<number> {
+  const proposalIds = rest;
+  const config = deps.config ?? loadConfig();
+  const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
+  const ledgerPath = ledgerPathFor(config);
+  const registryPath = join(config.root, "state", "inbox-proposals.json");
+  const { owner, repo } = resolveOwnerRepo();
+
+  const { found, unknown } = loadProposalsForRatify(proposalIds, plan, ledgerPath, owner, repo, config);
+  if (unknown.length > 0) {
+    console.error(
+      `rmd approve: unknown proposal(s) ${unknown.join(", ")} — not in the ACTIVE registry (state/inbox-proposals.json); ` +
+        "the batch names ONLY ids that already exist there, nothing is ratified",
+    );
+    return 2;
+  }
+
+  const runId = `APPROVE-BATCH-${Date.now()}`;
+  const log = (step: string, extra: Record<string, unknown> = {}) =>
+    appendLedger(ledgerPath, { run_id: runId, task_id: "BATCH", step, lane: "approve", ...extra });
+
+  let repoDir: string | undefined;
+  let worktreePath: string | undefined;
+  let allShardRelPaths: string[] = [];
+  let allFiledTaskIds: string[] = [];
+  const idBlocks: TaskIdReservationBlock[] = [];
+  const ensureRepoDir = (): string => {
+    repoDir = repoDir ?? join(config.root, "repos", repo);
+    if (!existsSync(repoDir)) {
+      mkdirSync(dirname(repoDir), { recursive: true });
+      execFileSync("gh", ["repo", "clone", `${owner}/${repo}`, repoDir], { stdio: "inherit" });
+    }
+    return repoDir;
+  };
+
+  const gateway: RatifyBatchGateway = deps.batchGateway ?? {
+    createRatificationBranch(payloads) {
+      const dir = ensureRepoDir();
+      const pruned = pruneStaleRuns(dir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
+      if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
+      const branch = approveRunBranch(runId);
+      worktreePath = join(worktreesDir(config), branch);
+      worktreeAdd(dir, worktreePath, branch, "origin/main");
+      writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
+
+      // Q3: ONE mint/reserve/write pass PER ACCEPTED PAYLOAD, sequentially, in the SAME
+      // worktree — each iteration's shard write lands on disk before the NEXT payload's own
+      // mint runs, so `mintNextTaskIdWithHistory`'s shard-directory scan (its `sources.shards`
+      // term) sees every id minted so far and never re-mints one. This is the exact per-member
+      // loop `createRatificationBranch` (single-proposal path, above) already runs once — Q3's
+      // "the writer is per-fragment and composes with no shared state" claim, exercised N times.
+      for (const payload of payloads) {
+        const materialized = materializeDraftTaskIds(
+          { fragmentYaml: payload.fragmentYaml, stampLine: payload.stampLine },
+          {
+            mint: () =>
+              mintNextTaskIdWithHistory({
+                planPath: join(worktreePath as string, "plan", "tasks.yaml"),
+                repoRoot: worktreePath as string,
+                openPrTexts: () => openPrMintTexts(owner, repo),
+              }),
+            reserveBlock: (startId, count) => {
+              const block = reserveTaskIdBlock(startId, count, taskIdReservationsDir(config.root), {
+                info: { purpose: `rmd approve ${payload.proposalId} (batch run ${runId})` },
+              });
+              idBlocks.push(block);
+              const reserveFrom = block.ids[0];
+              const remote = withIdReservationLogging(
+                log,
+                "approve.id_reservation_failed",
+                () =>
+                  reserveTaskIdBlockRemote(
+                    reserveFrom,
+                    count,
+                    gitRemoteRefReserver({
+                      run: (args) => {
+                        const r = spawnSync("git", ["-C", worktreePath as string, ...args], { encoding: "utf8" });
+                        return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+                      },
+                    }),
+                  ),
+                { proposal_id: payload.proposalId },
+              );
+              return { ids: remote.ids };
+            },
+          },
+        );
+        if (!materialized.ok) {
+          throw new Error(`rmd approve: refusing to materialize task id(s) for ${payload.proposalId} — ${materialized.reason}`);
+        }
+        log("approve.id_materialized", { proposal_id: payload.proposalId, ids: materialized.ids });
+        const shardRelPaths = writeRatificationShards(worktreePath, materialized.fragmentYaml, payload.proposalId, { mkdirSync, writeFileSync }, join);
+        log("approve.shards_written", { proposal_id: payload.proposalId, paths: shardRelPaths });
+        allShardRelPaths.push(...shardRelPaths);
+        allFiledTaskIds.push(...[...materialized.fragmentYaml.matchAll(/^- id:\s*(\S+)/gm)].map((m) => m[1]));
+      }
+
+      // Q2: fold every accepted member's stamp SEQUENTIALLY over the ONE accumulator, starting
+      // from THIS worktree's own MASTER-PLAN.md (never a value threaded in from outside) — the
+      // whole reason a batch cannot hit the EOF-append conflict that sinks N parallel
+      // single-approve branches (see lib/inbox.ts's W1-T2471 section header).
+      const masterPlanPath = join(worktreePath, "MASTER-PLAN.md");
+      const foldedMasterPlan = payloads.reduce(
+        (md, p) => applyStampToMasterPlan(md, p.proposalId, p.stampLine),
+        readFileSync(masterPlanPath, "utf8"),
+      );
+      writeFileSync(masterPlanPath, foldedMasterPlan, "utf8");
+
+      try {
+        regeneratePlanIndexFile({ worktreePath });
+      } catch (e) {
+        log("plan_index.regen.error", { error: String((e as Error)?.message ?? e) });
+      }
+
+      execFileSync("git", ["-C", worktreePath, "add", "-A", "--", "plan/", "MASTER-PLAN.md"], { stdio: "inherit" });
+      execFileSync("git", ["-C", worktreePath, "commit", "-m", approveBatchCommitMessage(payloads)], { stdio: "inherit" });
+      gitPushRunBranch(worktreePath);
+      return branch;
+    },
+    openPlanPr(branch, ids) {
+      const intro = [
+        `Batch ratification of ${ids.length} explicitly-named proposals: ${ids.join(", ")}.`,
+        "",
+        "The operator's one-bit approve initiated this PR (MASTER-PLAN P25 ii, W1-T111). The",
+        "gate still reviews (ci + remudero-review); nothing auto-merges without it.",
+      ].join("\n");
+      const filedIds = allFiledTaskIds.length > 0 ? allFiledTaskIds : ids;
+      const body = buildPlanPrBody({
+        intro,
+        criteria: filingAcceptanceCriteria(filedIds, [...allShardRelPaths, "MASTER-PLAN.md"]),
+      });
+      assertLiveWriteAllowed("gh-pr-create", `opening a PR against ${owner}/${repo}`);
+      const created = createPlanPrRest(ghJson, owner, repo, {
+        title: `chore(plan): ratify ${ids.length} proposals via rmd approve`,
+        body,
+        head: branch,
+        base: "main",
+      });
+      return created.prUrl;
+    },
+  };
+
+  let result: BatchApproveResult;
+  try {
+    result = approveBatch(
+      found.map((f) => f.classification),
+      // Unused by the real gateway above — it reads/folds MASTER-PLAN.md itself, inside the
+      // worktree it just created off a FRESH `git fetch` (worktreeAdd), which is the only base
+      // that can never drift from what actually gets committed. See the comment inside
+      // `createRatificationBranch` above.
+      "",
+      gateway,
+      { ledgerPath, runId, duplicateCorpus: filedShardSlugCorpus(repoRoot) },
+    );
+  } catch (e) {
+    log("approve.error", { error: String((e as Error)?.message ?? e) });
+    idBlocks.forEach((b) => b.releaseAll());
+    if (repoDir && worktreePath) {
+      try {
+        worktreeRemove(repoDir, worktreePath);
+      } catch {
+        /* best-effort */
+      }
+      try {
+        removeRunLock(worktreePath);
+      } catch {
+        /* best-effort */
+      }
+    }
+    throw e;
+  }
+
+  if (!result.ok) {
+    console.error(`rmd approve: ${result.refusal}`);
+    for (const s of result.skipped) console.error(`  skipped ${s.proposalId}: ${s.reason}`);
+    return 1;
+  }
+  for (const s of result.skipped) console.log(`rmd approve: skipped ${s.proposalId} — ${s.reason}`);
+
+  idBlocks.forEach((b) => b.releaseAll());
+
+  updateProposalRegistry(registryPath, (current) => {
+    const acceptedIds = new Set(result.accepted.map((p) => p.proposalId));
+    const next = current.filter((p) => !acceptedIds.has(p.id));
+    return next.length === current.length ? null : next;
+  });
+
+  if (!repoDir || !worktreePath) {
+    throw new Error("rmd approve: batch gateway reported success but never created a ratification branch");
+  }
+  const ownedRepoDir = repoDir;
+  const ownedWorktreePath = worktreePath;
+  const removeApproveWorktree = () => worktreeRemove(ownedRepoDir, ownedWorktreePath);
+
+  try {
+    const ownership = checkPrOwnership(result.prUrl, result.branch, ghPrHeadGateway(), 0);
+    if (ownership) {
+      log("verdict", ownership.ledger);
+      console.error(`rmd approve: claimed PR ${result.prUrl} is not this run's own branch (${result.branch})`);
+      removeApproveWorktree();
+      return 1;
+    }
+    log("pr.opened", { pr_url: result.prUrl, branch: result.branch, accepted: result.accepted.map((p) => p.proposalId) });
+    console.log(`rmd approve: batch of ${result.accepted.length} — plan PR opened: ${result.prUrl}`);
+
+    const ci = await waitForCiGreen(result.prUrl, (s, extra) => log(s, extra));
+    if (ci !== "green") {
+      console.log(`ci ${ci} — PR left OPEN: ${result.prUrl}`);
+      removeApproveWorktree();
+      return 1;
+    }
+    const prNum = result.prUrl.match(/\/pull\/(\d+)/)?.[1] ?? result.prUrl;
+    const reviewCode = await reviewCommand(prNum);
+    let armHeadSha: string | undefined;
+    try {
+      armHeadSha = readHeadShaRest(result.prUrl);
+    } catch {
+      /* best-effort — see the single-path comment above */
+    }
+    const armOutcome = armAndLogOutcome(result.prUrl, `PR-${prNum}`, log, undefined, undefined, armHeadSha);
+    removeApproveWorktree();
+    console.log(
+      `rmd approve: batch of ${result.accepted.length} gated — ${armReportPhrase(armOutcome)} ` +
+        `(review ${reviewCode === 0 ? "success" : "failure"}): ${result.prUrl}`,
+    );
     return reviewCode;
   } catch (e) {
     log("approve.error", { error: String((e as Error)?.message ?? e) });
@@ -31492,7 +31817,7 @@ const COMMANDS: readonly CommandSpec[] = [
   {
     name: "approve",
     usage:
-      "rmd approve <P##>   # one bit ratifies through the gate (MASTER-PLAN P25(ii), W1-T111): re-classifies <P##> live against the SAME facts `rmd inbox` would show; valid ONLY for a currently-READY proposal, refused (naming the state) with zero git/gh side effects otherwise; on READY, ships the cached draft's fragment + stamp VERBATIM into a plan PR (one branch, one PR) that rides the full gate (ci-gate + remudero-review) before auto-merge is armed — nothing auto-files without the bit; ledgers exactly one ratify.approved/ratify.approve_refused line",
+      "rmd approve <P##> [<P##> ...]   # one bit ratifies through the gate (MASTER-PLAN P25(ii), W1-T111): re-classifies each named <P##> live against the SAME facts `rmd inbox` would show; valid ONLY for a currently-READY proposal, refused (naming the state) with zero git/gh side effects otherwise; on READY, ships the cached draft's fragment + stamp VERBATIM into a plan PR (one branch, one PR) that rides the full gate (ci-gate + remudero-review) before auto-merge is armed — nothing auto-files without the bit; ledgers exactly one ratify.approved/ratify.approve_refused line per named proposal. NAMING TWO OR MORE ids (W1-T2471) batches them into ONE branch/commit/MASTER-PLAN block/PR instead of one PR lifecycle each — an unready member is SKIPPED (its own reason ledgered) without blocking or aborting the rest; this is an EXPLICIT set only, never an implicit approve-everything-ready",
   },
   {
     name: "reframe",
