@@ -1,0 +1,68 @@
+- id: W1-T2488
+  title: "FIVE RATCHETS AND NOT ONE BOUNDS A SOURCE FILE'S SIZE — `src/run-task.ts` is 32,119 lines against a next-largest of 8,445, and the repo that ratchets its own CLAUDE.md by the byte, its coverage, its cycles, its learnings budget and its mutation score has no gate that would have noticed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 14.00
+  files: [scripts/source-size-ratchet.mjs, src/lib/ci-parity.ts, package.json, test/a-source-file-cannot-outgrow-its-baseline.test.ts]
+  origin: "operator-brief#agree-with-your-recommendations-2026-08-30"
+  plan_refs: ["W1-T373", "W1-T294"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE ASYMMETRY IS THE FINDING. This repo ratchets what it has been burned by: CLAUDE.md's
+    injected byte weight, diff coverage, dependency cycles, the learnings budget, the mutation
+    score. Every one of those exists because something grew unnoticed. File size is the same class
+    of drift and is the one dimension nothing watches.
+    SURFACE 1 lines in the largest source file = 32119
+    SURFACE 2 lines in the next largest source file = 8445
+    SURFACE 3 ratchet scripts in the repo = 5
+    SURFACE 4 of those, ratchets whose baseline is a source file's size = 0
+    SURFACE 5 steps on the habitual fast gate = 7
+
+    A RATCHET, NOT A CAP, AND THE DIFFERENCE DECIDES WHETHER THIS SHIPS. A cap picks a number
+    somebody has to defend and reddens honest work the day it is set. A ratchet records what is
+    there today and refuses only GROWTH, so the 32,119 lines are legal forever and the 32,120th is
+    not. That is the shape every other ratchet here already takes, and it is why this can land
+    without a single line being moved first.
+
+    IT DOES NOT ASK ANYONE TO SPLIT THAT FILE. Decomposing a 32,119-line module is a large,
+    separately-ratifiable piece of work with real risk, and pretending a gate can force it would
+    be the same mistake as refusing the standing blocked population in W1-T2487. What the gate
+    buys is that the decomposition, whenever it is ratified, is not racing accretion.
+
+    IT JOINS THE HABITUAL GATE BECAUSE A GATE ONLY CI RUNS IS PROSE TO THE AUTHOR. `FAST_GATE_STEPS`
+    is the seconds-fast, network-free set a worker can run every time, and its header forbids
+    anything that spawns `node --test` — a line count over tracked files spawns nothing and reads
+    no network, so it belongs there on the same terms as the other seven. The baseline is a
+    checked-in JSON keyed by path, mirroring the ratchets that already work that way.
+
+    LOWERING A BASELINE IS ALWAYS FREE, RAISING IT IS THE MOVE THE GATE EXISTS TO REFUSE. A shrink
+    rewrites the baseline down automatically; a grow fails and names the file and the overage. Never
+    the reverse — CLAUDE.md already records raising a baseline as the move a ratchet exists to stop.
+
+    NOT IN SCOPE: splitting `run-task.ts` or any other file; choosing a target size; and the
+    coverage, cycle, learnings and mutation ratchets, which keep their own baselines untouched.
+
+    THE RISK BAND IS RULE 19's SPAN, NOT BLAST RADIUS: three stems plus a test, carrying two
+    independent acceptance concerns — the ratchet's own semantics and its fast-gate membership.
+  acceptance:
+    - claim: "a source file growing past its recorded baseline fails the gate"
+      proof: "unit test: test/a-source-file-cannot-outgrow-its-baseline.test.ts"
+    - claim: "the failure names the file and the overage in lines"
+      proof: "unit test: test/a-source-file-cannot-outgrow-its-baseline.test.ts"
+    - claim: "a source file at exactly its baseline passes"
+      proof: "unit test: test/a-source-file-cannot-outgrow-its-baseline.test.ts"
+    - claim: "a shrunk file rewrites its baseline downward rather than failing"
+      proof: "unit test: test/a-source-file-cannot-outgrow-its-baseline.test.ts"
+    - claim: "a newly added source file is recorded rather than refused"
+      proof: "unit test: test/a-source-file-cannot-outgrow-its-baseline.test.ts"
+    - claim: "the step is a member of the habitual fast gate"
+      proof: "unit test: test/a-source-file-cannot-outgrow-its-baseline.test.ts"
+    - claim: "the step spawns no test runner and opens no network connection"
+      proof: "unit test: test/a-source-file-cannot-outgrow-its-baseline.test.ts"
+    - claim: "removing the growth refusal makes the over-baseline case pass"
+      proof: "unit test: test/a-source-file-cannot-outgrow-its-baseline.test.ts"

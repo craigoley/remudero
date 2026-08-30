@@ -1,0 +1,112 @@
+- id: W1-T2476
+  title: "A STARVATION EPISODE ENDS TWICE IN THE DAEMON'S OWN WORDS AND NOBODY OUTSIDE THE PROCESS IS TOLD — onStarvation has no counterpart, so the two sites that reset starvationEscalated re-arm an in-process boolean and leave the GitHub issue open forever; #3207 has accumulated ten same-condition appends across two days in which the fleet merged roughly twenty-five PRs. Give the cleared transition a hook and close the escalation it opened"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 14.00
+  files: [src/lib/daemon.ts, src/run-task.ts, test/a-starvation-episode-closes-its-own-escalation.test.ts]
+  origin: "operator-brief#next-item-2026-08-30"
+  plan_refs: ["W1-T1103", "W1-T104", "W1-T2474", "W1-T186", "W1-T130"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE RECONCILER IS NOT THE DEFECT AND MUST NOT BE CHANGED. Its referentless arm is deliberate
+    and its comment says so in as many words — no task, no PR anywhere, "genuinely human
+    territory". W1-T1103 SHIPPED (#2424, amended #2658) and closed the PR-referent half: a
+    synthetic PR-<n> id resolves, and a full pull URL in body or title resolves. A fleet-level
+    notice has neither by construction, because there is no task and no PR for it to be ABOUT.
+    Widening the reconciler to guess one would be the reward-hacking shape that task refused.
+    W1-T1103's shard still reads status: queued, which is the stale-status trap CLAUDE.md names;
+    credit was re-derived from the trailer and the subject rather than read off the field.
+
+    THE PRODUCER ALREADY KNOWS. `escalateStarvation` (run-task.ts) reads `run.start` against
+    `dispatch.starvation.escalated` to decide whether an episode is fresh, so the exact instant an
+    episode ends is computed on the dispatch path and spent only on suppressing a duplicate. And
+    the daemon says it twice, in its own comments: "Nothing recoverable is blocking this tick --
+    re-arm" and "A dispatchable task ends any starvation episode -- re-arm". Both re-arm a LOCAL
+    BOOLEAN. Neither tells anything outside the process.
+    SURFACE 1 onStarvation hook declaration sites = 1
+    SURFACE 2 counterpart hooks for the cleared transition = 0
+    SURFACE 3 sites that reset the in-process starvation flag = 2
+    SURFACE 4 reconciler arms that drop a referentless escalation = 1
+    SURFACE 5 close-capable gateway methods already declared = 1
+
+    MEASURED ON THE LEDGER, HOST-SIDE, NOT REASONED ABOUT. The last twenty
+    dispatch.starvation.escalated rows span 2026-08-21T12:10Z to 2026-08-30T05:39Z and carry FOUR
+    distinct issue urls -- 2063, 2438, 2688 and 3207 -- so the queue has been reported starved
+    twenty times across nine days and four issues, and not one of those issues was closed by the
+    system. Eleven of the twenty name the still-open 3207.
+    SURFACE 6 escalation rows in the ledger tail = 20
+    SURFACE 7 distinct issue urls across those rows = 4
+    SURFACE 8 rows naming the still-open issue = 11
+    SURFACE 9 rows whose circuit-broken bucket was non-empty = 0
+
+    AND THE CONDITION NEVER CHANGED. Six ids appear in EVERY one of the twenty rows -- W1-T269,
+    W1-T270, W1-T314, W1-T392, W1-T472 and W1-T1075 -- for nine days. That is one unchanging
+    condition re-reported twenty times, which is what an episode lifecycle with an opening and no
+    closing produces. It is also why the fix is a CLOSE and not a quieter notice: suppressing the
+    report would hide a real condition, while closing a finished episode reports exactly as often
+    as the condition actually starts.
+
+    THE CIRCUIT-BROKEN BUCKET HAS NEVER FIRED in any of the twenty rows, so of the three
+    recoverable classes the census names, one has no observed population at all. Recorded, not
+    acted on -- this task changes no bucket.
+
+    MEASURED ON THE LIVE ISSUE, NOT REASONED ABOUT. #3207 opened 2026-08-28T10:04Z and carries TEN
+    comments, first 2026-08-28T14:50Z and last 2026-08-30T05:39Z, every one of them reading
+    "Another escalation observed the same condition (task daemon, class BLOCKED) while this issue
+    was already open". So the SECOND-OBSERVER APPEND (W1-T104) works exactly as designed and the
+    LIFECYCLE does not: each append is a fresh episode, which means the previous episode ENDED, and
+    the fleet merged roughly twenty-five PRs across that window. Ten recorded endings, zero closes.
+
+    THE SHAPE IS A SYMMETRIC HOOK, NEVER A SECOND MECHANISM. `onStarvationCleared` mirrors
+    `onStarvation` exactly: optional on DaemonDeps, wrapped in the same try/catch whose comment
+    already reads "a failed notification costs one logged line, never the daemon's liveness", and
+    fired from the SAME two sites that already own the transition. It fires on the EDGE, never per
+    tick — guarded on the flag it is clearing, so a daemon that was never escalated stays silent
+    and a long quiet stretch closes nothing repeatedly.
+
+    IT CARRIES WHY, NOT JUST THAT. The two sites end an episode for different reasons — one
+    because nothing recoverable is blocking, one because a dispatchable task appeared — and the
+    closing comment names which, plus the task id where there is one. A bare "resolved" would
+    make the closed issue unreadable a week later, and the reason is already in hand at both call
+    sites; inventing a generic one would discard it.
+
+    CANNOT-OBSERVE MEANS WAIT (W1-T130), APPLIED TO THE CLOSER. A gateway that cannot read or
+    cannot close leaves the issue OPEN and costs one logged line — never a close on a failed read,
+    and never a throw into the daemon loop. The polarity matches `deriveStatus`'s own.
+
+    NOT IN SCOPE, AND NAMED SO A LATER READER DOES NOT RE-FILE THEM: the reconciler's referentless
+    arm (correct as written); the other eleven hardcoded non-plan referents, which span SIX
+    spellings — DAEMON, DIGEST, DRAIN, NOTIFY, RETRO and daemon, the first and last being the same
+    conceptual referent in two casings — each of which owns its own episode boundary and wants its
+    own closer; W1-T2474's census change, which reduces how OFTEN this fires but never closes what
+    is already open; and any change to dedup, which already works.
+
+    THE RISK BAND IS RULE 19's SPAN, NOT BLAST RADIUS: two src stems carrying two independent
+    acceptance concerns — the daemon-side edge hook and the run-task-side closer — so
+    sizingViolation refuses risk:medium for the span alone. The change itself is small.
+  acceptance:
+    - claim: "an episode that escalated fires the cleared hook exactly once when it ends"
+      proof: "unit test: test/a-starvation-episode-closes-its-own-escalation.test.ts"
+    - claim: "a daemon that never escalated fires the cleared hook not at all"
+      proof: "unit test: test/a-starvation-episode-closes-its-own-escalation.test.ts"
+    - claim: "two consecutive unstarved ticks fire the hook once, never once per tick"
+      proof: "unit test: test/a-starvation-episode-closes-its-own-escalation.test.ts"
+    - claim: "the hook names which of the two sites ended the episode and the task where there is one"
+      proof: "unit test: test/a-starvation-episode-closes-its-own-escalation.test.ts"
+    - claim: "the open starvation escalation is closed with a comment citing that reason"
+      proof: "unit test: test/a-starvation-episode-closes-its-own-escalation.test.ts"
+    - claim: "a gateway that cannot close leaves the issue open and costs one logged line"
+      proof: "unit test: test/a-starvation-episode-closes-its-own-escalation.test.ts"
+    - claim: "a throw in the closer never ends the daemon loop"
+      proof: "unit test: test/a-starvation-episode-closes-its-own-escalation.test.ts"
+    - claim: "the ledger carries a cleared row so an episode ending is countable"
+      proof: "unit test: test/a-starvation-episode-closes-its-own-escalation.test.ts"
+    - claim: "no escalation of another class is closed by this path"
+      proof: "unit test: test/a-starvation-episode-closes-its-own-escalation.test.ts"
+    - claim: "deleting the cleared call leaves the issue open and reddens the suite"
+      proof: "unit test: test/a-starvation-episode-closes-its-own-escalation.test.ts"

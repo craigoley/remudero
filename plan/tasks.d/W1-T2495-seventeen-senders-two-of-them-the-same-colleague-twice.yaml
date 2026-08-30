@@ -1,0 +1,71 @@
+- id: W1-T2495
+  title: "SEVENTEEN SENDERS WRITE TO THE LEDGER AND TWO OF THEM ARE THE SAME COLLEAGUE TWICE — the pseudo task ids include the case-variant pairs DAEMON/daemon and RETRO/retro, none of them is a plan id, and no registry declares any of them, so a message has no From line a human could recognise and one producer's rows split across two keys"
+  repo: remudero
+  depends_on: [W1-T2494]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 14.00
+  files: [src/lib/producer-identity.ts, src/lib/ledger.ts, test/every-message-names-one-declared-sender.test.ts]
+  origin: "operator-brief#make-the-inbox-feel-like-emailing-a-colleague-2026-08-30"
+  plan_refs: ["W1-T2494", "W1-T2497"]
+  status: queued
+  attempts: 0
+  rationale: |
+    A MESSAGE WITHOUT A SENDER IS A NOTIFICATION, AND THIS IS THE CHEAPEST HALF OF MAKING THE INBOX
+    READ LIKE CORRESPONDENCE. Every row the fleet writes carries a task id, and where no plan task
+    owns the work it carries a pseudo id instead. Seventeen of those exist. They were never designed
+    as identities — they are labels each producer chose for itself — and it shows.
+    SURFACE 1 distinct pseudo sender ids written to the ledger = 17
+    SURFACE 2 of those, pairs differing only by case = 2
+    SURFACE 3 modules that raise an escalation = 14
+    SURFACE 4 declared sender registries that exist today = 0
+    SURFACE 5 feedback entries already landed the other way = 155
+
+    THE CASE PAIRS ARE A CORRECTNESS BUG BEFORE THEY ARE A COSMETIC ONE. `DAEMON` and `daemon` are
+    one producer and two keys; so are `RETRO` and `retro`. Anything that groups, counts, dedups or
+    threads by that id sees two colleagues where there is one, which means a per-producer rate is
+    computed over a split denominator and a thread keyed on producer identity (W1-T2494) would fork.
+    That is why this is filed as its own task rather than as presentation.
+
+    A REGISTRY, NOT A NORMALISER, AND THE DIFFERENCE MATTERS. Lower-casing at the read site would
+    paper over the split and leave the next producer free to invent an eighteenth spelling. A
+    declared registry — each producer named once, with the human-readable display name the console
+    shows — makes an undeclared sender a REFUSAL rather than a silent new row, which is the only
+    version of this that does not regenerate its own backlog.
+
+    THE SEVENTEEN ARE A BASELINE, NOT A BLOCKAGE, exactly as W1-T2487 and W1-T2491 handle theirs:
+    the existing spellings are declared as they stand, the two case pairs are collapsed to one
+    entry each, and what the gate owns is that an EIGHTEENTH undeclared sender cannot appear. No
+    historical ledger row is rewritten — the archives are append-only and rewriting them would
+    destroy the record this repo already refuses to delete.
+
+    THE DISPLAY NAME IS THE POINT AND IS NOT DECORATION. `DAEMON` is not a colleague's name; it is
+    a log prefix. The registry carries what the console prints, so a thread reads as being from
+    something a human recognises without an operator having to learn seventeen internal labels.
+
+    NOT IN SCOPE: renaming any pseudo id in the ledger's own rows; the thread model, which W1-T2494
+    owns; the console rendering, which W1-T2497 owns; and plan task ids, which are unaffected.
+
+    THE RISK BAND IS RULE 19's SPAN, NOT BLAST RADIUS: two src stems plus a test, carrying two
+    independent acceptance concerns — the registry's refusal and the case-pair collapse.
+  acceptance:
+    - claim: "each of the seventeen existing pseudo senders resolves to exactly one declared entry"
+      proof: "unit test: test/every-message-names-one-declared-sender.test.ts"
+    - claim: "the two case-variant pairs collapse to one sender each"
+      proof: "unit test: test/every-message-names-one-declared-sender.test.ts"
+    - claim: "an undeclared sender is refused rather than silently accepted"
+      proof: "unit test: test/every-message-names-one-declared-sender.test.ts"
+    - claim: "every declared sender carries a human-readable display name"
+      proof: "unit test: test/every-message-names-one-declared-sender.test.ts"
+    - claim: "no historical ledger row is rewritten by this path"
+      proof: "unit test: test/every-message-names-one-declared-sender.test.ts"
+    - claim: "a plan task id is never treated as a pseudo sender"
+      proof: "unit test: test/every-message-names-one-declared-sender.test.ts"
+    - claim: "grouping by sender yields one bucket for a producer that used two spellings"
+      proof: "unit test: test/every-message-names-one-declared-sender.test.ts"
+    - claim: "replacing the registry with case-folding lets an undeclared sender through"
+      proof: "unit test: test/every-message-names-one-declared-sender.test.ts"
+    - claim: "the ledger write path resolves the sender rather than the registry standing alone"
+      proof: "grep: resolveProducerIdentity( in src/lib/ledger.ts"

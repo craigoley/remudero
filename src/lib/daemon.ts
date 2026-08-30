@@ -762,11 +762,21 @@ export type DaemonFreshness =
  * reported separately from `blocked`/`unmetDeps` because `isDispatchEligible` ledgers it
  * through its own `onCircuitBreak` callback rather than `tallyDispatchFilters`'s
  * `DispatchFilterReason` union — see drain.ts's doc on that split.
+ *
+ * `retired` (W1-T2474) is carried here TOO, but is deliberately EXCLUDED from `blocked` and
+ * from the `starved` verdict below: a `retired` task is a deliberate record that will never be
+ * built (drain.ts's `"retired"` `DispatchFilterReason` split), the same "waiting never helps"
+ * shape as `verify-not-auto`, not the dependency-stalled shape `blocked`/`unmetDeps`/
+ * `circuitBroken` share. A queue whose only remaining blockers are retired is NOT starved —
+ * nothing a human does clears it. Kept on the census (rather than dropped entirely) so the
+ * count stays legible to a reader who wants to see it named, not silently absorbed into
+ * `blocked` or vanished.
  */
 export interface StarvationCensus {
   circuitBroken: IdleReasonBucket;
   blocked: IdleReasonBucket;
   unmetDeps: IdleReasonBucket;
+  retired: IdleReasonBucket;
 }
 
 /** Same shape/truncation discipline as {@link tallyDispatchFilters}'s own buckets, applied to
@@ -2774,6 +2784,9 @@ export async function runDaemon(
               rule_efficacy: result.ruleEfficacy,
               verdict_calibration: result.verdictCalibration,
               autonomy_rate: result.autonomyRate,
+              // W1-T2473: the adoption report (fourth verb, W1-T2266) was computed every fire and
+              // logged nowhere — this names its mint outcome so a discarded report is countable.
+              adoption_mint: result.adoptionMint,
             });
           } catch (e) {
             log("measurement_cadence.run_failed", { error: String((e as Error)?.message ?? e) });
@@ -3510,12 +3523,17 @@ export async function runDaemon(
       // is DONE, not starved, and a verify:human task never becomes machine-dispatchable no
       // matter how long the daemon waits — counting either would misreport "nothing left to
       // do" or "everything needs a human anyway" as the SAME starvation this predicate exists
-      // to name apart from.
+      // to name apart from. `retired` (W1-T2474) joins that same excluded set: a `blocked` task
+      // carrying a retirement ruling is drain.ts's own record that it will never be built, so a
+      // queue whose only remaining blockers are retired is DONE-BY-RULING, not starved — waiting
+      // never helps it either. Named on the census below (never silently dropped) but never
+      // counted toward `starved`.
       const idleTally = idleReasons.snapshot();
       const starvationCensus: StarvationCensus = {
         circuitBroken: bucketFromIds(circuitBrokenThisTick),
         blocked: idleTally.blocked,
         unmetDeps: idleTally["unmet-deps"],
+        retired: idleTally.retired,
       };
       const starved =
         starvationCensus.circuitBroken.count > 0 ||

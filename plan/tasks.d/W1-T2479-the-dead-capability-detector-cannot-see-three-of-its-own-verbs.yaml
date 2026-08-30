@@ -1,0 +1,82 @@
+- id: W1-T2479
+  title: "THE DEAD-CAPABILITY DETECTOR IS BLIND TO THREE OF THE SIXTY-THREE VERBS IT CLAIMS TO COVER AND REPORTS A CONFIDENT SIXTY — deriveCliVerbs matches on INDENTATION DEPTH (four spaces exactly), so retro, resume and notify, whose registry entries are written on one line at two spaces, are invisible with no diagnostic. Fix the population and give it a control BEFORE giving it a schedule"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 12.00
+  files: [src/lib/emissions.ts, src/run-task.ts, test/the-verb-census-proves-it-can-see-its-own-corpus.test.ts]
+  origin: "operator-brief#keep-going-2026-08-30"
+  plan_refs: ["W1-T47", "W1-T2477", "W1-T2478", "W1-T322"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE DETECTOR ANSWERS CONFIDENTLY OVER AN INCOMPLETE CORPUS, WHICH IS THE ONE FAILURE THIS REPO
+    NAMES MOST OFTEN. `deriveCliVerbs` (lib/emissions.ts) is
+    `runTaskSource.matchAll(/^\s{4}name:\s*"([a-z0-9-]+)"/gm)` — it requires EXACTLY four leading
+    spaces. Three registry entries are written on ONE LINE, so their `name:` sits at two spaces:
+    `retro` (run-task.ts), `resume` and `notify`. The scan returns sixty, the registry declares
+    sixty-three, and nothing anywhere reports the difference.
+    SURFACE 1 verbs the registry declares = 63
+    SURFACE 2 verbs the dead-capability detector can see = 60
+    SURFACE 3 verbs it is blind to = 3
+    SURFACE 4 verbs with an attributable ledger prefix = 17
+    SURFACE 5 distinct ledger step prefixes found in source = 80
+    SURFACE 6 non-test importers of the emissions module = 1
+
+    THE BLIND SPOT IS THE WORST KIND: SILENT AND FLATTERING. A verb the scan cannot see is not
+    reported as unmeasurable — it is not reported at all, so `retro` cannot be named dead however
+    long it goes unemitted, and the report reads complete. That is the exact shape CLAUDE.md calls
+    a zero that is not a measurement: the query works, the corpus is wrong, and no control asks.
+
+    AND IT CANNOT SIMPLY IMPORT THE REGISTRY, WHICH IS WHY THE REGEX EXISTS AT ALL. `.dependency-
+    cruiser.cjs`'s `lib-no-spike-or-cli` rule forbids `src/lib` importing `src/run-task.ts` at
+    severity error, so `emissions.ts` may not read `COMMANDS` directly. The layering is correct and
+    stays. The fix is therefore TWO parts and the order matters: make the pattern insensitive to
+    indentation, and have the CALLER — run-task.ts, which can see both the registry and the scan —
+    assert they agree, so a future formatting change or a fourth entry shape cannot reopen this
+    silently. A source scan that cannot be given its own corpus must at least be given a control.
+
+    SURFACE 4 IS NOT A DEFECT AND IS RECORDED SO NOBODY LATER READS IT AS ONE. Seventeen of sixty
+    verbs carry an attributable ledger prefix; the other forty-three do not and are reported
+    SEPARATELY by design (`attributeVerbs`'s own contract). A verb that writes no ledger step is
+    unmeasurable by a ledger, not dead. Conflating the two would turn this report into forty-three
+    false accusations, which is a larger defect than the one being fixed.
+
+    THE SCHEDULE COMES SECOND, DELIBERATELY. This verb is imported by exactly one non-test file,
+    the CLI dispatch, so nothing runs it — but scheduling a detector whose population is wrong just
+    schedules a wrong answer, and the measurement cadence would then carry it four times a day.
+    Population and control first, in this task; the cadence wiring is a follow-up that inherits a
+    corpus it can trust. Filed in that order for the same reason W1-T2477 refused to wire a
+    producer to a log rather than to a consumer.
+
+    THE LAYERING CONSTRAINT IS NOT AN ACCEPTANCE CRITERION AND THAT IS DELIBERATE. `depcruise`
+    already fails the build at severity error if `src/lib` imports the CLI entrypoint, and the rule
+    predates this task — so a `grep:` proof naming it would match the merge-base identically and
+    report `executed_stale`, substantiating nothing. An invariant an existing required check
+    already holds is not this task's to re-prove.
+
+    NOT IN SCOPE: `attributeVerbs`'s allowlist, which is the sanctioned place to record a verb that
+    is legitimately never typed; the cadence wiring, above; and any judgement about whether a named
+    verb should be deleted — this task makes the report honest, never actionable-by-itself.
+
+    THE RISK BAND IS RULE 19's SPAN, NOT BLAST RADIUS: `files:` names two src stems plus a test,
+    carrying two independent acceptance concerns — the scan's own pattern and the caller-side
+    agreement control — so sizingViolation refuses risk:medium for the span alone.
+  acceptance:
+    - claim: "the verb scan sees a registry entry written on one line as well as one written across several"
+      proof: "unit test: test/the-verb-census-proves-it-can-see-its-own-corpus.test.ts"
+    - claim: "the scan and the registry are asserted to agree at the caller that can see both"
+      proof: "unit test: test/the-verb-census-proves-it-can-see-its-own-corpus.test.ts"
+    - claim: "a registry entry in a shape the scan cannot read fails loudly rather than shrinking the corpus"
+      proof: "unit test: test/the-verb-census-proves-it-can-see-its-own-corpus.test.ts"
+    - claim: "the three previously invisible verbs appear in the report"
+      proof: "unit test: test/the-verb-census-proves-it-can-see-its-own-corpus.test.ts"
+    - claim: "a verb with no attributable prefix is still reported unmeasurable and never as dead"
+      proof: "unit test: test/the-verb-census-proves-it-can-see-its-own-corpus.test.ts"
+    - claim: "the report states how many verbs the registry declares beside how many it scanned"
+      proof: "unit test: test/the-verb-census-proves-it-can-see-its-own-corpus.test.ts"
+    - claim: "reverting the pattern fix makes the agreement control fail by name"
+      proof: "unit test: test/the-verb-census-proves-it-can-see-its-own-corpus.test.ts"

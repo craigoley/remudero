@@ -1,0 +1,77 @@
+- id: W1-T2484
+  title: "NINE OF THE ELEVEN UNION READERS ALREADY KNOW THEIR WINDOW AND ALL ELEVEN PAY FOR ALL HISTORY — resolveLedgerUnion takes a state dir and a pattern and nothing else, so a thirty-day question reads every archive ever written and filters in memory afterwards. The archive NAME is the ISO write instant and the list is already sorted by it, so a window is a prefix skip over files that are never opened"
+  repo: remudero
+  depends_on: [W1-T2482]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 16.00
+  files: [src/lib/ledger-grep.ts, src/lib/autonomy.ts, test/a-windowed-union-never-opens-an-archive-outside-it.test.ts]
+  origin: "operator-incident#azure-io-saturation-2026-08-30"
+  plan_refs: ["W1-T2482", "W1-T444", "W1-T209"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THIS IS THE STRUCTURAL HALF OF THE INCIDENT W1-T2482 ONLY DIVIDED BY TEN. Compressing the
+    archives cut the bytes; it did not change the fact that every reader reads all of them. The
+    corpus grows permanently by design (W1-T444 rules deletion out on the merits), so an unwindowed
+    read gets slower forever whatever it is compressed to.
+    SURFACE 1 modules that read the ledger union = 11
+    SURFACE 2 of those, modules that already filter by time = 9
+    SURFACE 3 window parameters the union reader accepts = 0
+    SURFACE 4 archives the incident host held = 47
+    SURFACE 5 sort keys the rotation list is already ordered by = 1
+
+    THE ASYMMETRY IS THE WHOLE FINDING. Nine of the eleven consumers — autonomy, verdict-
+    calibration, rule-efficacy, retro, status, receipt, ledger-replay, analytics-route and
+    measurement-cadence — already carry a since/window/days concept and apply it to rows AFTER the
+    read returns. They know what they want before they ask; the reader gives them no way to say it.
+
+    THE SKIP IS SOUND BY CONSTRUCTION, NOT BY HEURISTIC, AND THAT IS WHY THIS IS SMALL.
+    `datedArchivePath` names each archive `now.toISOString()` with the colons and dots replaced, so
+    the filename IS the write instant and is lexicographically ordered; `ledgerRotationEntries`
+    already sorts the list by that path. Every row inside an archive written at T is at or before
+    T, because rotation moves rows OUT of the live file at T. So for a caller asking for rows at or
+    after T0, any archive whose name sorts below T0 cannot contain one, and is skipped WITHOUT
+    BEING OPENED. Rows newer than T0 live in later archives or in the live file, both of which are
+    still read — so nothing is missed. A window is a prefix skip over an already-sorted list.
+
+    THE REFUSAL CONTRACT MUST SURVIVE, AND IT IS THE HAZARD HERE. `resolveLedgerUnion` reports the
+    whole window UNMEASURED when it cannot read its corpus, and callers depend on that rather than
+    computing a rate over a silently shortened one (the 3.1x undercount W1-T444 measured). A
+    windowed read must distinguish SKIPPED-BECAUSE-OUTSIDE-THE-WINDOW from COULD-NOT-BE-READ, and
+    report only the second as partial coverage. Collapsing them would turn a correct optimisation
+    into exactly the silent undercount this module exists to refuse.
+
+    ONE CONSUMER IS CONVERTED HERE AND THE REST ARE NOT, DELIBERATELY. `autonomy.ts` is the
+    narrowest — one `resolveLedgerUnion` call at a single site, with an explicit window already —
+    so it is the safe first adopter and proves the parameter end to end. The other eight windowed
+    consumers keep today's unwindowed behaviour, which stays correct because the parameter is
+    OPTIONAL and its absence reads everything exactly as now. Converting nine call sites in one
+    task would put nine independent regressions behind one review.
+
+    NOT IN SCOPE: compression (W1-T2482, and this depends on it only for ordering, not
+    correctness); deleting or ageing archives; the two consumers that carry no window at all
+    (coverage-improvement, producer-completeness), which have nothing to pass; and any change to
+    what the union RETURNS for an unwindowed call, which must stay byte-identical.
+
+    THE RISK BAND IS RULE 19's SPAN, NOT BLAST RADIUS: two src stems plus a test, carrying two
+    independent acceptance concerns — the reader's new parameter and the one converted consumer.
+  acceptance:
+    - claim: "an unwindowed read returns byte-identical lines to what it returns today"
+      proof: "unit test: test/a-windowed-union-never-opens-an-archive-outside-it.test.ts"
+    - claim: "a windowed read never opens an archive whose name sorts below the window start"
+      proof: "unit test: test/a-windowed-union-never-opens-an-archive-outside-it.test.ts"
+    - claim: "a windowed read still returns every matching row at or after the window start"
+      proof: "unit test: test/a-windowed-union-never-opens-an-archive-outside-it.test.ts"
+    - claim: "the live ledger is always read regardless of the window"
+      proof: "unit test: test/a-windowed-union-never-opens-an-archive-outside-it.test.ts"
+    - claim: "an archive skipped for being outside the window is not reported as unread coverage"
+      proof: "unit test: test/a-windowed-union-never-opens-an-archive-outside-it.test.ts"
+    - claim: "an archive that genuinely cannot be read is still reported as partial coverage"
+      proof: "unit test: test/a-windowed-union-never-opens-an-archive-outside-it.test.ts"
+    - claim: "the converted consumer reports the same rate over a windowed read as over a full one"
+      proof: "unit test: test/a-windowed-union-never-opens-an-archive-outside-it.test.ts"
+    - claim: "removing the skip makes the never-opened assertion fail by naming the archive"
+      proof: "unit test: test/a-windowed-union-never-opens-an-archive-outside-it.test.ts"

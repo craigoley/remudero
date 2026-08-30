@@ -124,6 +124,7 @@ test("a queue with zero dispatchable tasks and at least one recoverable-class bl
     circuitBroken: { count: 1, ids: ["CB"], truncated: 0 },
     blocked: { count: 1, ids: ["BL"], truncated: 0 },
     unmetDeps: { count: 1, ids: ["DEP"], truncated: 0 },
+    retired: { count: 0, ids: [], truncated: 0 },
   });
 });
 
@@ -169,6 +170,7 @@ test("escalateStarvation: opens an escalation and durably dedups until a task ac
     circuitBroken: { count: 1, ids: ["CB"], truncated: 0 },
     blocked: { count: 1, ids: ["BL"], truncated: 0 },
     unmetDeps: { count: 0, ids: [], truncated: 0 },
+    retired: { count: 0, ids: [], truncated: 0 },
   };
   let calls = 0;
   const fake = {
@@ -213,6 +215,7 @@ test("escalateStarvation: a THROWING gh gateway still writes the dedup marker, s
     circuitBroken: { count: 0, ids: [], truncated: 0 },
     blocked: { count: 0, ids: [], truncated: 0 },
     unmetDeps: { count: 2, ids: ["W1-T1", "W1-T2"], truncated: 0 },
+    retired: { count: 0, ids: [], truncated: 0 },
   };
   const boom = {
     create() {
