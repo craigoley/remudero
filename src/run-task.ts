@@ -9983,6 +9983,23 @@ async function runTask(
     /** Injectable GitHub gateway for the status projection — lets a behavioral test drive the
      *  dispatch path without a network round-trip. Default: the real {@link ghGateway}. */
     github?: GitHub;
+    /**
+     * W1-T2509 — A GATEWAY *FACTORY* THE CALLER MAY MEMOISE, so N concurrent lanes pay ONE cold
+     * walk instead of N. `buildBatchedGithub` holds `knownBoardPrs` at GATEWAY scope, so a gateway
+     * built per lane always starts `undefined`, takes `mode: "full"`, and walks the whole repo
+     * again — the identical constructor-lifetime defect `buildInboxDraftHook`'s own doc measured
+     * for the board rungs (5,022 `mode: "full"` at a mean of 9.74 REST calls against a warm
+     * gateway's steady-state 2). `runOne` never received that fix, so each dispatch lane paid a
+     * full walk SYNCHRONOUSLY before yielding, and `Promise.allSettled(admitted.map(runOne))` could
+     * not enter lane 2 until lane 1 finished it.
+     *
+     * A FACTORY, NOT AN INSTANCE, BECAUSE THE KEY IS `(owner, task.repo)` AND NOT THE DRAIN TARGET:
+     * a task carrying a different `repo:` than the drain's must not be answered by the target's
+     * gateway. The caller memoises per owner/repo; this seam only lets it.
+     *
+     * `github` above still wins when both are supplied — no existing test caller changes shape.
+     */
+    githubFor?: (owner: string, repo: string) => GitHub;
     /** W1-T86 (P12 wipe-test harness): arm B of a `rmd wipe-test` pair — MASK learnings
      *  injection for this run. Forces the rendered prompt's matched-learnings text to ""
      *  WITHOUT reading the store (see {@link computeMatchedLearningsForArm}); never set by
@@ -10201,7 +10218,10 @@ async function runTask(
   // credits, strictly fewer rejected candidates. Coverage is not lost either: the REST walk is
   // bounded at 50 pages x 100 per state (5000 open + 5000 closed) against ~1.5k PRs in this repo,
   // and it reports `truncated` rather than silently dropping a tail.
-  const github = opts.github ?? buildBatchedGithub(owner, task.repo);
+  // W1-T2509: `githubFor` lets a multi-lane caller hand every lane ONE memoised gateway per
+  // owner/repo, so lanes 2..N hit a warm `knownBoardPrs` index (a `mode: "delta"` fetch)
+  // instead of each paying `mode: "full"`. Absent it, this is byte-identical to before.
+  const github = opts.github ?? opts.githubFor?.(owner, task.repo) ?? buildBatchedGithub(owner, task.repo);
   const projection = projectPlan(plan, { ledgerPath: ledgerPathFor(config), github }, statusPath);
   const isMerged = (t: Task): boolean => projection.get(t.id)?.merged ?? false;
   // W1-T322/W1-T367: computed once per run off the SAME plan+projection already built above —
@@ -20915,6 +20935,48 @@ export function planReloader(
   };
 }
 
+/**
+ * W1-T2509 — MEMOISE ONE {@link GitHub} GATEWAY PER `owner/repo`, so N dispatch lanes pay ONE cold
+ * walk instead of N.
+ *
+ * THE DEFECT THIS CLOSES. `buildBatchedGithub` holds `knownBoardPrs` — the row cache
+ * `fetchBoardPrsRest`'s early stop compares against — at GATEWAY scope. A gateway built per lane
+ * therefore always starts `undefined`, takes `mode: "full"`, and walks the whole repo again. That
+ * walk is SYNCHRONOUS, and `runTask` performs it BEFORE its first `await`, so
+ * `Promise.allSettled(admitted.map(runOne))` could not even ENTER lane 2 until lane 1's walk
+ * finished: `dispatch.concurrent_set` named three tasks at `lane_count: 3` while their run ids were
+ * minted 78 s apart. The fan-out was three wide and one deep.
+ *
+ * IT IS THE SAME FIX `buildInboxDraftHook`'s own doc already measured for the board rungs — a warm
+ * gateway's steady state is 2 REST calls (`mode: "delta"`) against a cold one's mean of 9.74
+ * (`mode: "full"`) — applied to the one consumer that never received it.
+ *
+ * KEYED ON `owner/repo`, NEVER ON THE DRAIN TARGET: a task carrying a different `repo:` than the
+ * drain's must not be answered by the target's gateway, so the key is the pair the caller actually
+ * asks about.
+ *
+ * NEVER RESET, AND THAT IS SAFE HERE FOR A REASON WORTH STATING. `drainCommand`'s `githubFactory`
+ * deliberately builds a FRESH instance per `refreshMerged` pass, because that gateway closes over
+ * mutable `lastFetchFailed`/`lastIssueFetchFailed` and hoisting it would let one pass's outage mark
+ * every later pass indeterminate. The LANE gateway has the opposite requirement — the lanes of one
+ * tick are admitted together and should answer from ONE snapshot — and staleness is bounded by
+ * `buildBatchedGithub`'s own `ttlMs` (15 s, far under `pollIntervalMs`), so a warm gateway still
+ * refetches every poll. Warming changes a fetch's SHAPE, never whether one happens.
+ *
+ * PURE: it performs no I/O of its own and calls `build` at most once per distinct key.
+ */
+export function memoiseGatewayByRepo(build: (owner: string, repo: string) => GitHub): (owner: string, repo: string) => GitHub {
+  const cache = new Map<string, GitHub>();
+  return (owner: string, repo: string): GitHub => {
+    const key = `${owner}/${repo}`;
+    const hit = cache.get(key);
+    if (hit !== undefined) return hit;
+    const built = build(owner, repo);
+    cache.set(key, built);
+    return built;
+  };
+}
+
 export async function daemonCommand(
   rest: string[],
   deps: {
@@ -21088,6 +21150,23 @@ export async function daemonCommand(
   // GitHub read path.
   let lastProj: Map<string, StatusProjection> | undefined;
   const githubFactory = deps.githubFactory ?? ((o: string, r: string) => buildBatchedGithub(o, r, { log }));
+
+  // W1-T2509 — ONE GATEWAY PER owner/repo FOR THE WHOLE DAEMON, handed to every dispatch lane.
+  // DELIBERATELY SEPARATE FROM `githubFactory` ABOVE, which must keep building a FRESH instance per
+  // `refreshMerged` pass: that gateway closes over mutable `lastFetchFailed`/`lastIssueFetchFailed`,
+  // so hoisting IT would let one pass's outage mark every later pass of the same drain
+  // indeterminate (the rationale recorded at `drainCommand`'s own `githubFactory`). The LANE
+  // gateway has the opposite requirement — the lanes of ONE tick are admitted together and should
+  // answer from ONE snapshot — so it is memoised here and never reset.
+  //
+  // KEYED ON owner/repo, NOT ON THE DRAIN TARGET: a task carrying a different `repo:` than the
+  // drain's must never be answered by the target's gateway. Staleness is bounded by
+  // `buildBatchedGithub`'s own `ttlMs` (15 s default, far under `pollIntervalMs`), so a warm
+  // gateway still refetches every poll — warming changes a fetch's SHAPE, never whether one
+  // happens (`buildInboxDraftHook`'s doc makes the identical argument, with measurements).
+  const laneGithubFor = memoiseGatewayByRepo((o, r) =>
+    deps.githubFactory ? deps.githubFactory(o, r) : buildBatchedGithub(o, r, { log }),
+  );
   const refreshMerged: () => MergedSet = () => {
     const proj = projectPlan(
       plan,
@@ -21486,6 +21565,14 @@ export async function daemonCommand(
             allowStale,
             skipGitSync: !!flagValue(rest, "--plan"),
             owner: target.owner,
+            // W1-T2509: EVERY LANE SHARES ONE GATEWAY PER owner/repo. Without this each lane built
+            // its own COLD `buildBatchedGithub` and paid a full-repo walk SYNCHRONOUSLY before its
+            // first yield — so `Promise.allSettled(admitted.map(runOne))` could not even ENTER
+            // lane 2 until lane 1's walk finished, and three admitted lanes minted their run ids
+            // 78 s apart (`dispatch.concurrent_set` names all three at `lane_count: 3`). Same fix
+            // and same reason as `buildInboxDraftHook`'s once-per-daemon-start construction; see
+            // `laneGithubFor` for why it memoises per owner/repo rather than per drain target.
+            githubFor: laneGithubFor,
           }),
         readUsage: () => readUsageSnapshotPreferSdk(config),
         // THE LEDGER IS THE DEDUP (impl-FL): seed the once-per-string bound from what previous
