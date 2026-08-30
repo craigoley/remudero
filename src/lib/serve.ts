@@ -4393,6 +4393,7 @@ export function renderShellHtml(
     try {
       svg = journeyGraphSvg({ feedback, tasks });
     } catch {
+      // graph draw failed on this chain shape -- absent, not blank: the text sections below still render.
       svg = "";
     }
     let feedbackHtml = "";
@@ -4403,12 +4404,14 @@ export function renderShellHtml(
           }</p>\`
         : "";
     } catch {
+      // feedback row unreadable -- drop just this line, the graph and task list are unaffected.
       feedbackHtml = "";
     }
     let tasksHtml = "<p>(no tasks yet)</p>";
     try {
       tasksHtml = tasks.length ? \`<ul>\${tasks.map(journeyTaskHtml).join("")}</ul>\` : "<p>(no tasks yet)</p>";
     } catch {
+      // one bad task entry must not blank the whole journey -- say so instead of an empty list.
       tasksHtml = "<p>(unable to render tasks)</p>";
     }
     return \`\${svg}<p>direction: \${escapeHtml(direction)}</p>\${feedbackHtml}\${tasksHtml}\`;
