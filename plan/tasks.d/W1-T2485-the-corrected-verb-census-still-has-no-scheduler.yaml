@@ -1,0 +1,71 @@
+- id: W1-T2485
+  title: "THE DEAD-CAPABILITY REPORT STILL HAS NO SCHEDULER, AND NOW THAT ITS CORPUS IS TRUSTWORTHY IT SHOULD GET ONE — W1-T2479 fixes the population and its control; this gives the corrected report a cadence beside the five verbs already on that spine, as a REPORT into the digest and never a proposal minter, because a verb writing no ledger line has no determinate fix"
+  repo: remudero
+  depends_on: [W1-T2479]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 12.00
+  files: [src/lib/measurement-cadence.ts, src/run-task.ts, test/the-verb-census-reaches-a-reader.test.ts]
+  origin: "operator-brief#go-ahead-with-both-2026-08-30"
+  plan_refs: ["W1-T2479", "W1-T2477", "W1-T1259", "W1-T2266"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE ORDER IS THE POINT AND W1-T2479 IS THE PREREQUISITE, NOT A COURTESY. That task fixes a
+    detector that returned a confident sixty against a registry of sixty-three and reported the
+    gap nowhere. Scheduling it first would have run a wrong answer four times a day; depends_on
+    names it for that reason.
+    SURFACE 1 members on the measurement cadence result = 6
+    SURFACE 2 non-test importers of the emissions module = 1
+    SURFACE 3 verbs with an attributable ledger prefix = 17
+    SURFACE 4 cadence fires per day at the shipped bound = 4
+    SURFACE 5 verbs the emissions allowlist already excuses = 2
+
+    IT JOINS AN EXISTING SPINE RATHER THAN ADDING A CLOCK. `measurementCadence` already carries six
+    members and its policy block states why it is safe on by default: every verb on it is a pure
+    reader, and a cadence that writes nothing cannot launder anything. This verb has no write
+    symbol at all, so it inherits that posture unchanged — no new policy row, no new marker file,
+    no second decision function.
+
+    IT IS A REPORT, NEVER A MINTER, AND THAT IS A RULING NOT A PREFERENCE. W1-T2477 wired
+    proof-queue-audit to the proposal minter because an unresolvable proof has ONE remedy and it is
+    mechanical. A verb that has written no ledger line has THREE — wire it, delete it, or allowlist
+    it — and the module already carries the allowlist for exactly that judgement, excusing two
+    verbs today. Minting a proposal per silent verb would file seventeen judgement calls as though
+    they were defects. So this lands in the digest, where a human reads it, and mints nothing.
+
+    AND THE READER IS THE DELIVERABLE, WHICH IS WHAT SEPARATES THIS FROM WHAT IT IS FIXING. The
+    defect being closed is a producer with no consumer; wiring it to a ledger row nobody reads
+    would reproduce that defect one layer up. The digest is a surface an operator actually opens,
+    so the acceptance criteria pin that the count REACHES it, not merely that the verb ran.
+
+    THE UNMEASURABLE MAJORITY IS REPORTED AS SUCH, NOT SUPPRESSED. Only seventeen of the verbs
+    carry an attributable ledger prefix; the rest cannot be measured by a ledger at all and are
+    reported separately by `attributeVerbs`' own contract. The digest line must carry both numbers,
+    because a bare "N verbs silent" over an unstated denominator is the shape this repo refuses.
+
+    NOT IN SCOPE: changing the allowlist or its entries; deleting any verb the report names, which
+    is an operator judgement this task deliberately does not pre-empt; and `proof-queue-audit`,
+    already wired by W1-T2477.
+
+    THE RISK BAND IS RULE 19's SPAN, NOT BLAST RADIUS: two src stems plus a test, carrying two
+    independent acceptance concerns — the cadence membership and the digest surfacing.
+  acceptance:
+    - claim: "a cadence fire runs the verb census and records its outcome"
+      proof: "unit test: test/the-verb-census-reaches-a-reader.test.ts"
+    - claim: "the digest carries the silent-verb count and the measurable denominator beside it"
+      proof: "unit test: test/the-verb-census-reaches-a-reader.test.ts"
+    - claim: "a verb the allowlist excuses is not counted as silent"
+      proof: "unit test: test/the-verb-census-reaches-a-reader.test.ts"
+    - claim: "a verb with no attributable prefix is reported unmeasurable, never as silent"
+      proof: "unit test: test/the-verb-census-reaches-a-reader.test.ts"
+    - claim: "nothing on this path mints a proposal or files a task"
+      proof: "unit test: test/the-verb-census-reaches-a-reader.test.ts"
+    - claim: "a census that cannot read its corpus reports unmeasured rather than a zero"
+      proof: "unit test: test/the-verb-census-reaches-a-reader.test.ts"
+    - claim: "the five verbs already on the cadence are unchanged in behaviour and order"
+      proof: "unit test: test/the-verb-census-reaches-a-reader.test.ts"
+    - claim: "removing the digest line makes the reaches-a-reader assertion fail"
+      proof: "unit test: test/the-verb-census-reaches-a-reader.test.ts"
