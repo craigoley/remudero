@@ -1002,6 +1002,39 @@ export interface PreflightFastResult {
 }
 
 /**
+ * Runs `fn` with `NODE_TEST_CONTEXT` and `NODE_OPTIONS` removed from `process.env` for the
+ * duration of the call, then restores whatever was there before — the SAME isolation
+ * `test/reapable-prefix.test.ts` and `test/route-scope-matrix.test.ts` already establish for a
+ * spawned `node --test` CHILD, applied here to a spawned `node --test` GRANDCHILD (`npm run
+ * --silent census:*` → the script's own `node --test`, package.json).
+ *
+ * REQUIRED, MEASURED, NOT SPECULATIVE (W1-T2478): `node --test`'s own recursion guard reads
+ * `NODE_TEST_CONTEXT` from its inherited environment — set (as it always is when THIS module's
+ * own caller is itself running under `node --test`, e.g. this file's own test suite exercising
+ * `runPreflightFast` for real), a nested `node --test` prints "run() is being called recursively
+ * ... skipping running files" and exits 0 HAVING ASSERTED NOTHING. `defaultPreflightSpawn`
+ * (lib/commit-message.ts) calls `spawnSync` with no `env` override, so it inherits
+ * `process.env` exactly as it stands at call time. Without this, a census step's `npm run
+ * --silent census:*` would read as a clean PASS while running zero of the suite's own
+ * assertions — the exact "clean fast run, no visibility" shape #3304 already demonstrated once,
+ * reintroduced by this task's own mechanism if left unguarded.
+ */
+function withoutNodeTestContext<T>(fn: () => T): T {
+  const savedContext = process.env.NODE_TEST_CONTEXT;
+  const savedOptions = process.env.NODE_OPTIONS;
+  delete process.env.NODE_TEST_CONTEXT;
+  delete process.env.NODE_OPTIONS;
+  try {
+    return fn();
+  } finally {
+    if (savedContext !== undefined) process.env.NODE_TEST_CONTEXT = savedContext;
+    else delete process.env.NODE_TEST_CONTEXT;
+    if (savedOptions !== undefined) process.env.NODE_OPTIONS = savedOptions;
+    else delete process.env.NODE_OPTIONS;
+  }
+}
+
+/**
  * `rmd preflight --fast`'s engine. One step per `FAST_GATE_STEPS` entry, run and reported
  * independently (same discipline as {@link runCiParity} and
  * {@link import("./commit-message.js").runPreflight}: one failure never blocks a later step's
@@ -1010,10 +1043,12 @@ export interface PreflightFastResult {
  * means the script ran and its gate failed — so a renamed or removed script goes loud, never
  * quiet (design vi).
  *
- * W1-T2478: an entry that declares `boundMs` (the census class) has its OWN spawn timed, and a
+ * W1-T2478: an entry that declares `boundMs` (the census class) has its OWN spawn timed
+ * ({@link withoutNodeTestContext}-wrapped, since its script spawns `node --test` itself), and a
  * run that takes longer than `boundMs` is refused as `BOUND EXCEEDED` regardless of the script's
  * own exit code — the PRIMARY CONTROL described above `FAST_GATE_STEPS`. An entry with no
- * `boundMs` runs exactly as it always has: no timing, no ceiling, unchanged by this task.
+ * `boundMs` runs exactly as it always has: no timing, no ceiling, no env stripping, unchanged by
+ * this task.
  */
 export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {}): PreflightFastResult {
   const spawn = deps.spawn ?? defaultPreflightSpawn;
@@ -1030,7 +1065,7 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
         return shellOut(spawn, label, "npm", ["run", "--silent", script], { cwd: repoRoot });
       }
       const startedAt = now();
-      const result = shellOut(spawn, label, "npm", ["run", "--silent", script], { cwd: repoRoot });
+      const result = withoutNodeTestContext(() => shellOut(spawn, label, "npm", ["run", "--silent", script], { cwd: repoRoot }));
       const elapsedMs = now() - startedAt;
       if (elapsedMs > boundMs) {
         return {

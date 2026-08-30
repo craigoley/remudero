@@ -285,10 +285,14 @@ test(
 
 // ── acceptance 4: --fast still shells no test suite now that --coverage exists beside it ────
 
-test("FAST_GATE_STEPS: unaffected by --coverage's existence — still exactly the seven deterministic npm-script gates, no coverage-shaped entry added", () => {
+test("FAST_GATE_STEPS: unaffected by --coverage's existence — still exactly the seven pre-existing deterministic npm-script gates plus the four W1-T2478 census entries, no coverage-shaped entry added", () => {
   const scripts = FAST_GATE_STEPS.map((s) => s.script).sort();
   assert.deepEqual(scripts, [
     "api-client:check",
+    "census:bound-kind",
+    "census:catch-erasure",
+    "census:negative-reachability",
+    "census:no-shallowing",
     "claims",
     "cli-reference:check",
     "depcruise",
