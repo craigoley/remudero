@@ -434,7 +434,13 @@ test("control: commitMessagesSinceBase/addedFilesSinceBase never throw against t
 
 test("control: resolveHeadRef reads the worktree's OWN current branch when no flag/env is given, matching real git", () => {
   const real = execFileSync("git", ["-C", REPO_ROOT, "rev-parse", "--abbrev-ref", "HEAD"], { encoding: "utf8" }).trim();
-  assert.equal(resolveHeadRef(undefined, REPO_ROOT, {}), real);
+  // A PR-checkout runner (e.g. this repo's own CI) checks out a detached commit, not a branch —
+  // real git then reports the literal string "HEAD" here. resolveHeadRef documents (see its own
+  // source) that "HEAD" is never a claim-bearing branch name and normalizes it to `undefined`
+  // rather than passing it through, so the expectation below normalizes the same way, keeping
+  // this control accurate both on a normal local branch checkout and on a detached CI runner.
+  const expected = real === "HEAD" ? undefined : real;
+  assert.equal(resolveHeadRef(undefined, REPO_ROOT, {}), expected);
   assert.equal(resolveHeadRef("explicit-flag", REPO_ROOT, {}), "explicit-flag", "an explicit flag always wins");
   assert.equal(resolveHeadRef(undefined, REPO_ROOT, { GITHUB_HEAD_REF: "from-env" }), "from-env", "env wins over the local branch when no flag is given");
 });
