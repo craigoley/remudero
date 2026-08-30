@@ -1,0 +1,104 @@
+- id: W1-T2511
+  title: "THE REVIEWER RESOLVES CRITERIA FROM A SHA IT HAS NOT FETCHED YET — `reviewCommand` calls `resolvePlanCriteriaAtHead(..., view.headRefOid)` at run-task.ts:12902 against LOCAL git objects, while the only `git fetch` on that path is the first statement of `materializeReviewWorktree`, called 65 lines LATER at 12967; a head sha the container has not fetched throws, degrades to `criteria: []`, and posts `FAIL — no acceptance criteria to judge (fail closed)` on a PR whose trailer and shard both resolve perfectly from any checkout that holds the object"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 16.00
+  files: [src/run-task.ts, test/the-reviewer-reads-a-sha-it-has-not-fetched.test.ts]
+  origin: "operator-session#3328-fail-closed-on-a-resolvable-trailer-2026-08-30"
+  plan_refs: ["W1-T2462", "W1-T2432", "W1-T2315", "W1-T185"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE ORDERING IS THE DEFECT AND IT IS PROVABLE FROM SOURCE ALONE — no ledger, no timing, no
+    inference about a container's state. Three lines settle it:
+
+      run-task.ts:12902  const resolved = resolvePlanCriteriaAtHead(body, repoRoot, "plan/tasks.yaml", view.headRefOid);
+      run-task.ts:12967  const materialized = materialize(config, repoRoot, view.number, view.headRefName, view.headRefOid);
+      run-task.ts:12388  deps.fetch(repoDir);          // the FIRST statement of materializeReviewWorktree
+
+    `resolvePlanCriteriaAtHead` (`src/lib/review.ts`) reaches `loadPlanAtRef`, which shells
+    `git show <headSha>:plan/tasks.yaml` plus a `git ls-tree` of the sibling `plan/tasks.d/` — both
+    against the container's LOCAL objects. The only network fetch anywhere on this command's path is
+    `deps.fetch(repoDir)` (`git -C <repoDir> fetch origin --quiet`, the real dep at run-task.ts:12278),
+    and it lives INSIDE the materializer that runs 65 lines after the resolution. So the reviewer asks
+    git about a commit it has not yet arranged to have, and the code that WOULD arrange it runs next.
+
+    WHAT THAT COSTS, WORD FOR WORD. `loadPlanAtRef` throws on an unreadable object; the resolver's own
+    catch (review.ts, the `PlanCriteriaAtHeadDivergence` arm) returns `{ criteria: [], divergence }`.
+    `reviewCommand` then falls back to `parseAcceptanceBlock(body)`, and if the body carries no
+    `## Acceptance` block of its own — which a trailered PR is explicitly NOT required to carry, since
+    `resolvePlanCriteriaAtHead`'s whole purpose is to make the shard authoritative — `criteria.length`
+    is 0 and the verdict is `FAIL — no acceptance criteria to judge (fail closed)`. A green PR with a
+    correct trailer and a correct shard fails on a git-object availability accident.
+
+    THE LIVE INSTANCE, WITH A POSITIVE CONTROL. PR #3328's first head `de47edf3` carried
+    `Remudero-Task: W1-T2509`; W1-T2509's shard was reachable FROM THAT VERY SHA (its parent
+    `2b1365d2` is the merge of #3325, which filed it). The gate posted
+    `remudero-review: FAIL — no acceptance criteria to judge (fail closed)` at 2026-08-30T18:55:20Z
+    with 27 checks green and 0 failing. THE CONTROL — the same exported function, the same trailer
+    string, the same sha, run from a checkout that HOLDS the object:
+
+      resolvePlanCriteriaAtHead("Remudero-Task: W1-T2509\n", repoRoot, "plan/tasks.yaml", "de47edf3")
+      => criteria: 8 | source: "plan at de47edf3 task W1-T2509 (8 criteria)" | divergence: (none)
+
+    Eight criteria where the gate found none. The resolver is correct; what it was handed was a sha
+    the reviewing container could not read.
+
+    RE-DERIVE IT RATHER THAN TRUSTING THIS ROW — the discriminating query is already ledgered.
+    W1-T2315 logs `review.resolver_divergence` with the task id and git's own error whenever this arm
+    fires. `rmd ledger-grep "review.resolver_divergence"` over the three-pattern union names every
+    instance and its reason; a row citing an unreadable object at a head sha IS this defect, and a row
+    citing a duplicate id is W1-T2315's other case. Guard the read on the corpus's NEWEST timestamp
+    before believing a zero — the newest archived row on this host has lagged the live day before.
+
+    WHY A ZERO THERE WOULD NOT ACQUIT IT. The ordering above holds regardless of how often the object
+    happens to be present: the daemon's `git fetch --quiet origin` is unrestricted, so on a checkout
+    with the default refspec a recently-pushed branch usually IS local by the time review runs, and
+    this fails only on the race — a head pushed inside the window since the last fetch, a clone with a
+    narrowed `remote.origin.fetch`, or a fork. That is a flaky-looking gate, which is worse than a
+    consistently broken one: it teaches operators to re-push rather than to read the verdict.
+
+    THE FIX IS AN ORDERING, NOT A NEW FETCH. Both remedies are cheap and neither adds a round trip
+    that is not already paid:
+      (a) move the materialization above the resolution — the materializer already holds `headSha`,
+          already fetches, and already refuses when `tip !== headSha` rather than reviewing a wrong
+          tree; the resolution then reads objects that are guaranteed present. Its cost is that a
+          fetch failure would now precede criteria resolution, so the degradation path must stay
+          exactly as legible as it is today.
+      (b) have the resolver fetch the sha itself before `loadPlanAtRef`, keeping the call order.
+    (a) is preferred: it moves an existing statement rather than teaching a pure resolver to do I/O,
+    and `resolvePlanCriteriaAtHead`'s own doc advertises being synchronous and network-free.
+
+    IT MUST STILL FAIL CLOSED. Nothing here may make an unresolvable trailer pass. A sha that cannot
+    be fetched at all, a task id absent from the plan at that head, and a shard with an empty
+    `acceptance:` must all still land the fail-closed verdict — the change is only that a sha the
+    command was ALWAYS going to fetch is fetched before it is read, never that a missing criterion
+    becomes a pass.
+
+    NOT IN SCOPE: `resolvePlanCriteriaForReview`'s remaining zero call sites; the residual window
+    W1-T2432 already named and priced (a shard merging AFTER the PR's own head is invisible by
+    construction); and whether the body's `## Acceptance` fallback should exist at all.
+
+    THE RISK BAND IS BLAST RADIUS, NOT RULE 19's SPAN: one src stem plus a test is a narrow span, but
+    it reorders the review command's own preamble, and a mistake there fails every PR the gate judges.
+  acceptance:
+    - claim: "a head sha absent from local objects no longer resolves to zero criteria when the trailer and shard are valid"
+      proof: "unit test: test/the-reviewer-reads-a-sha-it-has-not-fetched.test.ts"
+    - claim: "the fetch that makes the head sha readable runs BEFORE criteria are resolved from it"
+      proof: "unit test: test/the-reviewer-reads-a-sha-it-has-not-fetched.test.ts"
+    - claim: "a sha that cannot be fetched at all still fails closed, never passes"
+      proof: "unit test: test/the-reviewer-reads-a-sha-it-has-not-fetched.test.ts"
+    - claim: "a trailer whose id is absent from the plan at that head still fails closed"
+      proof: "unit test: test/the-reviewer-reads-a-sha-it-has-not-fetched.test.ts"
+    - claim: "a fetch failure is still named through the same degradation path it uses today"
+      proof: "unit test: test/the-reviewer-reads-a-sha-it-has-not-fetched.test.ts"
+    - claim: "an untrailered body still reaches the PR-body Acceptance fallback unchanged"
+      proof: "unit test: test/the-reviewer-reads-a-sha-it-has-not-fetched.test.ts"
+    - claim: "the materializer still refuses a tree whose tip is not the PR head"
+      proof: "unit test: test/the-reviewer-reads-a-sha-it-has-not-fetched.test.ts"
+    - claim: "restoring the original ordering makes the unfetched-sha case resolve zero criteria again"
+      proof: "unit test: test/the-reviewer-reads-a-sha-it-has-not-fetched.test.ts"
