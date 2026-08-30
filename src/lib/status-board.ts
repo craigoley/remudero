@@ -120,6 +120,7 @@ import {
   readLedgerUnionBounded,
 } from "./status.js";
 import { taskCardRuns } from "./task-card.js";
+import { colourEnabled, paint, sectionRule } from "./tty.js";
 
 // ── The model ────────────────────────────────────────────────────────────────────────────────
 
@@ -2528,6 +2529,15 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
 
 // ── renderStatusBoardText — the TEXT renderer, projecting the SAME model `--json` emits ──────────
 
+/** The width every one of the ten section rules below was already hand-typed at (measured,
+ *  not assumed — see the task rationale's SURFACE 2 correction: all ten, one true width, never
+ *  ten different ones). Pinned here rather than wired to `terminalWidth()` so this render stays
+ *  exactly what it is today regardless of the real terminal's column count — a live-width
+ *  divider is future work this task deliberately leaves alone (NOT IN SCOPE: no change to what
+ *  the board SAYS, and byte-identical-when-off is the load-bearing constraint this pin keeps
+ *  true even when colour IS on, since `sectionRule` itself never paints). */
+const SECTION_RULE_WIDTH = 57;
+
 function formatAgeMs(ms: number | undefined): string {
   if (ms === undefined) return "unknown";
   const s = Math.max(0, Math.floor(ms / 1000));
@@ -2550,41 +2560,59 @@ function shortSha(sha: string | undefined): string {
  *  and a genuinely dead one into the same "not running" line (the bug W1-T301 exists to fix).
  *  Resident services (`"daemon"`/`"serve"`) only ever hit the first two branches, unchanged
  *  from the prior render. */
-function renderLivenessState(s: ServiceLivenessRow): string {
+/** `enabled` defaults to `false` (colour off) — see {@link renderLivenessBlock}'s own default
+ *  for why: every EXISTING single-argument caller/test must keep getting today's plain text,
+ *  unconditionally, never dependent on this process's own env/TTY at the moment it happens to
+ *  run. Only `renderStatusBoardText` ever passes `true`. */
+function renderLivenessState(s: ServiceLivenessRow, enabled = false): string {
   switch (livenessState(s)) {
     case "running":
-      return `running (pid ${s.pid ?? "unknown"})`;
+      return paint.ok(`running (pid ${s.pid ?? "unknown"})`, enabled);
     case "stopped":
-      return "not running";
+      return paint.bad("not running", enabled);
     case "unknown":
       // W1-T2450: names WHICH absence this is — "no sensor" here, vs the interval branch's own
       // "no tick observed yet" below, which only ever fires once a sensor DID answer.
-      return "unknown — no launchd sensor on this host (`launchctl` unavailable)";
+      return paint.dim("unknown — no launchd sensor on this host (`launchctl` unavailable)", enabled);
     case "idle":
-      return `idle — last tick ${s.tickAt ? `${formatAgeMs(s.tickAgeMs)} ago` : "unknown"} (${s.tickStep ?? "unknown"})`;
+      return paint.ok(`idle — last tick ${s.tickAt ? `${formatAgeMs(s.tickAgeMs)} ago` : "unknown"} (${s.tickStep ?? "unknown"})`, enabled);
     case "overdue":
-      return s.lastExitCode !== undefined && s.lastExitCode !== 0
-        ? `overdue — last exit code ${s.lastExitCode}${s.tickAt ? ` (${formatAgeMs(s.tickAgeMs)} ago)` : ""}`
-        : `overdue — ${s.tickAt ? `last tick ${formatAgeMs(s.tickAgeMs)} ago, no fresher one since` : "no tick observed yet"}`;
+      return paint.bad(
+        s.lastExitCode !== undefined && s.lastExitCode !== 0
+          ? `overdue — last exit code ${s.lastExitCode}${s.tickAt ? ` (${formatAgeMs(s.tickAgeMs)} ago)` : ""}`
+          : `overdue — ${s.tickAt ? `last tick ${formatAgeMs(s.tickAgeMs)} ago, no fresher one since` : "no tick observed yet"}`,
+        enabled,
+      );
   }
 }
 
-function renderLivenessBlock(l: LivenessSection): string[] {
-  const out = ["── LIVENESS ─────────────────────────────────────────────"];
+/** `enabled` (colour on/off) defaults to `false` so every pre-existing test that calls this
+ *  with one argument keeps getting exactly today's bytes — only `renderStatusBoardText` passes
+ *  the real, env-derived flag. Colour here is the SAME "crash loop / starved queue / healthy
+ *  idle" distinction the task exists to add: `paint` only ever WRAPS a word this function
+ *  already printed, never replaces it (byte-identical-when-off is asserted directly). */
+function renderLivenessBlock(l: LivenessSection, enabled = false): string[] {
+  const out = [sectionRule("LIVENESS", SECTION_RULE_WIDTH)];
   for (const s of l.services) {
     const bootPart =
       s.service === "daemon" ? ` — boot ${s.bootedAt ? `${formatAgeMs(s.bootedAgeMs)} ago` : "unknown"} (${shortSha(s.headSha)})` : "";
-    out.push(`${s.service.padEnd(16)}: ${renderLivenessState(s)}${bootPart}`);
+    out.push(`${s.service.padEnd(16)}: ${renderLivenessState(s, enabled)}${bootPart}`);
   }
   const stale = l.headVsOriginMain;
   out.push(
     `head vs origin/main : ${
-      stale.status === "unknown" ? "unknown" : stale.status === "fresh" ? "fresh" : `STALE (${shortSha(stale.headSha)} vs ${shortSha(stale.originSha)})`
+      stale.status === "unknown"
+        ? paint.dim("unknown", enabled)
+        : stale.status === "fresh"
+          ? paint.ok("fresh", enabled)
+          : paint.bad(`STALE (${shortSha(stale.headSha)} vs ${shortSha(stale.originSha)})`, enabled)
     }`,
   );
   out.push(
     `crash-loop           : ${
-      l.crashLoop.breached ? `BREACHED (${l.crashLoop.windowBoots.length} boots in ${Math.round(l.crashLoop.windowMs / 60_000)}m)` : "clear"
+      l.crashLoop.breached
+        ? paint.bad(`BREACHED (${l.crashLoop.windowBoots.length} boots in ${Math.round(l.crashLoop.windowMs / 60_000)}m)`, enabled)
+        : paint.ok("clear", enabled)
     }`,
   );
   if (l.nextAction) out.push(`next action: ${l.nextAction}`);
@@ -2592,7 +2620,7 @@ function renderLivenessBlock(l: LivenessSection): string[] {
 }
 
 function renderLatchesBlock(latches: LatchesSection): string[] {
-  const out = ["── LATCHES ──────────────────────────────────────────────"];
+  const out = [sectionRule("LATCHES", SECTION_RULE_WIDTH)];
   if (!latches.rows.length) {
     out.push("no active latches");
   } else {
@@ -2607,7 +2635,7 @@ function renderLastCycleBlock(lc: LastCycleSection): string[] {
   // row is always an ending and never the current state. The old header implied currency it
   // never had — observed pinned to a stopped cycle for ten hours while the daemon dispatched
   // and completed four tasks.
-  const out = ["── LAST CLOSED CYCLE ────────────────────────────────────"];
+  const out = [sectionRule("LAST CLOSED CYCLE", SECTION_RULE_WIDTH)];
   if (!lc.found || !lc.summary) {
     out.push("no cycle recorded");
   } else {
@@ -2627,7 +2655,7 @@ function renderLastCycleBlock(lc: LastCycleSection): string[] {
 }
 
 function renderBlockersBlock(b: BlockersSection): string[] {
-  const out = ["── BLOCKERS BY CLASS ────────────────────────────────────"];
+  const out = [sectionRule("BLOCKERS BY CLASS", SECTION_RULE_WIDTH)];
   const circuitBroken = b.rows.filter((r): r is CircuitBrokenBlocker => r.kind === "circuit_broken");
   const blockedPrs = b.rows.filter((r): r is BlockedPrBlocker => r.kind === "blocked_pr");
   const indeterminate = b.rows.filter((r): r is IndeterminateBlocker => r.kind === "indeterminate");
@@ -2652,15 +2680,18 @@ function renderBlockersBlock(b: BlockersSection): string[] {
 
 /** EXPORTED for test only — the same visibility `deriveCircuitBrokenBlockers` already carries,
  *  so a test can assert what an operator actually READS rather than only the section object.
- *  Behaviour unchanged; no caller moves. */
-export function renderQueueHeadBlock(q: QueueHeadSection): string[] {
-  const out = ["── QUEUE HEAD ───────────────────────────────────────────"];
+ *  Behaviour unchanged for every existing (single-argument) caller: `enabled` defaults to
+ *  `false`, so colour is opt-in and only `renderStatusBoardText` ever passes `true` — see
+ *  {@link renderLivenessBlock}'s own note. STALL/REFUSED are this task's "starved queue"
+ *  example named verbatim in its own title. */
+export function renderQueueHeadBlock(q: QueueHeadSection, enabled = false): string[] {
+  const out = [sectionRule("QUEUE HEAD", SECTION_RULE_WIDTH)];
   if (q.unknownReason) {
     out.push(`unknown — ${q.unknownReason}`);
   } else if (q.rows.length === 0 && q.refused.length === 0) {
-    out.push("nothing dispatchable");
+    out.push(paint.dim("nothing dispatchable", enabled));
   } else {
-    if (q.rows.length === 0) out.push("nothing dispatchable");
+    if (q.rows.length === 0) out.push(paint.dim("nothing dispatchable", enabled));
     for (const r of q.rows) {
       const cost = r.observedPerCycleCostUsd !== undefined ? `, ~$${r.observedPerCycleCostUsd.toFixed(4)}/cycle` : "";
       const flag = r.perpetual ? ` — PERPETUAL (attempts ${r.attempts}${cost})` : ` (attempts ${r.attempts})`;
@@ -2668,8 +2699,11 @@ export function renderQueueHeadBlock(q: QueueHeadSection): string[] {
     }
     if (q.stall) {
       out.push(
-        `STALL: ${q.stall.candidateCount} candidate(s), nothing dispatched in ${formatAgeMs(q.stall.sinceMs)}` +
-          ` (bound ${formatAgeMs(q.stall.boundMs)} — ${q.stall.boundDerivation})`,
+        paint.warn(
+          `STALL: ${q.stall.candidateCount} candidate(s), nothing dispatched in ${formatAgeMs(q.stall.sinceMs)}` +
+            ` (bound ${formatAgeMs(q.stall.boundMs)} — ${q.stall.boundDerivation})`,
+          enabled,
+        ),
       );
     }
     // W1-T1205 (design (ii)): what dispatch is REFUSING, named — never silently absent from a
@@ -2682,10 +2716,10 @@ export function renderQueueHeadBlock(q: QueueHeadSection): string[] {
         r.reason === "circuit-broken"
           ? `dispatch circuit breaker tripped — ${r.resetNote ?? `${r.dispatchCount}/${r.maxDispatches} dispatches with no new owned PR`}`
           : "run branch already pushed to origin";
-      out.push(`REFUSED: ${r.taskId} — ${r.title} (${why})`);
+      out.push(paint.warn(`REFUSED: ${r.taskId} — ${r.title} (${why})`, enabled));
     }
     if (q.refusedTruncated > 0) {
-      out.push(`REFUSED: (+${q.refusedTruncated} more not shown)`);
+      out.push(paint.warn(`REFUSED: (+${q.refusedTruncated} more not shown)`, enabled));
     }
   }
   if (q.nextAction) out.push(`next action: ${q.nextAction}`);
@@ -2693,7 +2727,7 @@ export function renderQueueHeadBlock(q: QueueHeadSection): string[] {
 }
 
 function renderInboxBlock(i: InboxSection): string[] {
-  const out = ["── INBOX ────────────────────────────────────────────────"];
+  const out = [sectionRule("INBOX", SECTION_RULE_WIDTH)];
   if (i.unknownReason) {
     out.push(`unknown — ${i.unknownReason}`);
   } else {
@@ -2705,7 +2739,7 @@ function renderInboxBlock(i: InboxSection): string[] {
 }
 
 function renderHeadroomBlock(h: HeadroomSection): string[] {
-  const out = ["── HEADROOM ─────────────────────────────────────────────"];
+  const out = [sectionRule("HEADROOM", SECTION_RULE_WIDTH)];
   out.push(`enforcement : ${h.enforced ? "ON" : "OFF"}`);
   if (!h.found || !h.telemetry) {
     out.push("no headroom telemetry yet");
@@ -2749,7 +2783,7 @@ function sumCacheHitGrains(byClass: Record<string, CacheHitGrain>): CacheHitGrai
 }
 
 function renderCacheHitBlock(c: CacheHitSection): string[] {
-  const out = ["── CACHE HIT ────────────────────────────────────────────"];
+  const out = [sectionRule("CACHE HIT", SECTION_RULE_WIDTH)];
   if (!c.found || !c.totals) {
     out.push("no cache-token data in this window");
     return out;
@@ -2791,7 +2825,7 @@ function renderCacheHitBlock(c: CacheHitSection): string[] {
  * before; the designed absence moves to its own line, named as what it is.
  */
 function renderLearningsInjectionBlock(s: LearningsInjectionSection): string[] {
-  const out = ["── LEARNINGS INJECTION ──────────────────────────────────"];
+  const out = [sectionRule("LEARNINGS INJECTION", SECTION_RULE_WIDTH)];
   if (!s.found || !s.totals) {
     out.push("no injection rows in this window");
     return out;
@@ -2814,7 +2848,7 @@ function renderLearningsInjectionBlock(s: LearningsInjectionSection): string[] {
  *  it. `nothing needs you` only when NEITHER has anything to report, matching this module's
  *  "no rule matches, no line" doctrine elsewhere. */
 function renderNeedsMeBlock(n: NeedsMeSection): string[] {
-  const out = ["── NEEDS ME ─────────────────────────────────────────────"];
+  const out = [sectionRule("NEEDS ME", SECTION_RULE_WIDTH)];
   if (
     n.costAnomaly.length === 0 &&
     !n.imageDrift &&
@@ -2864,14 +2898,26 @@ function renderNeedsMeBlock(n: NeedsMeSection): string[] {
 
 /** The text projection of {@link StatusBoardModel} — every field it prints comes off the model
  *  passed in, never a fresh read, so `--json` and the default text output can never disagree
- *  (they are the SAME derivation, rendered twice). */
-export function renderStatusBoardText(model: StatusBoardModel): string {
+ *  (they are the SAME derivation, rendered twice); this function is the ONLY thing this task
+ *  changes about that projection, and the JSON path (`statusCommand`'s `--json`, a bare
+ *  `JSON.stringify` of the same model) never calls it, so the JSON projection is untouched by
+ *  anything below.
+ *
+ *  `opts.colourEnabled` defaults to {@link colourEnabled}'s real `process.env`/`process.stdout`
+ *  read — the ONE call site in this module that reads either — so a real terminal run picks up
+ *  `NO_COLOR`/`FORCE_COLOR`/its own TTY-ness automatically, while a test (or any other caller)
+ *  can pin the flag explicitly instead of mutating global state. With colour disabled (the
+ *  default in this suite's own non-TTY `node --test` processes, and always when forced) the
+ *  output is BYTE-IDENTICAL to what this function rendered before this task — every `paint`
+ *  call returns its input unchanged, and `sectionRule` never emits colour at all. */
+export function renderStatusBoardText(model: StatusBoardModel, opts: { colourEnabled?: boolean } = {}): string {
+  const enabled = opts.colourEnabled ?? colourEnabled();
   const lines: string[] = [`### rmd status — ${model.generatedAt}`, ""];
-  lines.push(...renderLivenessBlock(model.liveness), "");
+  lines.push(...renderLivenessBlock(model.liveness, enabled), "");
   lines.push(...renderLatchesBlock(model.latches), "");
   lines.push(...renderLastCycleBlock(model.lastCycle), "");
   lines.push(...renderBlockersBlock(model.blockers), "");
-  lines.push(...renderQueueHeadBlock(model.queueHead), "");
+  lines.push(...renderQueueHeadBlock(model.queueHead, enabled), "");
   lines.push(...renderInboxBlock(model.inbox), "");
   lines.push(...renderHeadroomBlock(model.headroom), "");
   lines.push(...renderCacheHitBlock(model.cacheHit), "");
