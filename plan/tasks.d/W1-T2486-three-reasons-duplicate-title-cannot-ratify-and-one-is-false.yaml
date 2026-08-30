@@ -1,0 +1,70 @@
+- id: W1-T2486
+  title: "A COMMENT GIVES THREE REASONS THE DUPLICATE-TITLE CHECK CANNOT RATIFY AND ONE OF THEM IS FALSE — `inbox.ts` states that `lint-plan` is not a required check, and it has been required since ci-gate named it; meanwhile the plan carries a shard pair with BYTE-IDENTICAL titles AND byte-identical files:, both queued, neither citing the other, which is the exact escape that comment describes"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 16.00
+  files: [src/lib/task-linter.ts, src/lib/inbox.ts, test/an-unanswered-duplicate-title-match-blocks.test.ts]
+  origin: "operator-brief#agree-with-your-recommendations-2026-08-30"
+  plan_refs: ["W1-T420", "W1-T403", "W1-T1062"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THIS IS ONE DEFECT WEARING TWO FILES, WHICH IS WHY IT IS FILED ONCE. The comment at the
+    ratification path in `inbox.ts` explains why a duplicate-title match cannot stop a redundant
+    filing, and gives three reasons. The third is a statement of fact about CI, and it is wrong.
+    A conclusion resting partly on a false premise has to be re-derived, not merely re-worded, and
+    the plan already holds the redundant pair that conclusion permits.
+    SURFACE 1 reasons the ratification comment gives for the check staying advisory = 3
+    SURFACE 2 of those reasons, ones that are false against ci-gate at head = 1
+    SURFACE 3 required checks ci-gate names, lint-plan among them = 13
+    SURFACE 4 shard pairs on main with byte-identical titles and byte-identical files lists = 1
+    SURFACE 5 of that pair, shards citing the other in plan_refs or rationale = 0
+
+    THE TWO TRUE REASONS ARE LOAD-BEARING AND MUST SURVIVE. The check's severity is `warn` and
+    `lintPlanCommand` increments `failing` only inside `if (blocking.length)`, so a warn never
+    reaches the exit code; and the check is scoped to the changed-tasks pass. Both are real, and
+    the third being false does not make the first two negotiable. What changes is that the stated
+    reasoning can no longer be read as complete.
+
+    THE REMEDY IS THE NARROW ARM, NOT A PROMOTION. Promoting `duplicate-title` to `block` outright
+    would refuse legitimate sibling shards in the same arc, and the check's OWN message says so:
+    it names two additive answers — CITE the sibling in plan_refs, or SAY WHY IT DIFFERS in the
+    rationale — and explicitly forbids answering by deleting a proof or narrowing files:. So the
+    blocking arm fires only on an UNANSWERED near-certain match: at or above a near-identity
+    score AND with neither shard citing the other by either exit. A pair that takes either exit
+    stays advisory exactly as today. This is why the operator ruled it narrower than a promotion.
+
+    THE PAIR IN THE PLAN IS THE FALSIFIER, NOT AN ILLUSTRATION. W1-T403 and W1-T1062 carry the
+    same title byte for byte and the same eight-path files: list byte for byte; both read
+    `status: queued`; both read `plan_refs: ["§9", "§4"]`; neither mentions the other anywhere.
+    W1-T403 is `verify: human`, so `isDispatchEligible` refuses it before the linter is ever
+    consulted — meaning the redundant half is not merely duplicated work, it is permanently
+    undispatchable work sitting in the queue against an identical dispatchable twin.
+
+    NOT IN SCOPE: retiring either half of that pair, which is an operator disposition and not a
+    linter's call; changing the near-duplicate scorer, its shingle size or its cutoff; and the
+    whole-plan pass's scoping, which stays as it is.
+
+    THE RISK BAND IS RULE 19's SPAN, NOT BLAST RADIUS: two src stems plus a test, carrying two
+    independent acceptance concerns — the corrected premise and the new blocking arm.
+  acceptance:
+    - claim: "the ratification comment no longer asserts that lint-plan is unrequired"
+      proof: "unit test: test/an-unanswered-duplicate-title-match-blocks.test.ts"
+    - claim: "a near-identical pair where neither shard cites the other is refused"
+      proof: "unit test: test/an-unanswered-duplicate-title-match-blocks.test.ts"
+    - claim: "the same pair passes once either shard names the other in plan_refs"
+      proof: "unit test: test/an-unanswered-duplicate-title-match-blocks.test.ts"
+    - claim: "the same pair passes once either rationale says why it differs"
+      proof: "unit test: test/an-unanswered-duplicate-title-match-blocks.test.ts"
+    - claim: "a merely-similar sibling below the near-identity score stays advisory"
+      proof: "unit test: test/an-unanswered-duplicate-title-match-blocks.test.ts"
+    - claim: "the refusal reaches lint-plan's exit code rather than printing as a warning"
+      proof: "unit test: test/an-unanswered-duplicate-title-match-blocks.test.ts"
+    - claim: "answering by narrowing files or deleting a proof does not clear the refusal"
+      proof: "unit test: test/an-unanswered-duplicate-title-match-blocks.test.ts"
+    - claim: "removing the citation exemption makes a legitimate sibling pair fail"
+      proof: "unit test: test/an-unanswered-duplicate-title-match-blocks.test.ts"

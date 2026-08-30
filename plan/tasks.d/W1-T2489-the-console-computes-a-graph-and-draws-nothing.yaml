@@ -1,0 +1,69 @@
+- id: W1-T2489
+  title: "THE CONSOLE ALREADY COMPUTES ITS PLAN-TASK-PR GRAPH AND ALREADY SERVES IT, AND NOTHING DRAWS IT — `buildPanelGraphRoutes` is imported by `serve.ts` and 1,625 lines of graph builder stand behind it, while the whole console path emits zero `<svg>` and zero canvas elements, so the traceability graph reaches an operator only as text"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 18.00
+  files: [src/lib/serve.ts, src/lib/panel-graph.ts, test/the-console-draws-the-graph-it-computes.test.ts]
+  origin: "operator-brief#amazingly-beautiful-console-2026-08-30"
+  plan_refs: ["W1-T43", "W1-T2475"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THIS IS THE PRODUCER-WITH-NO-CONSUMER SHAPE, ONE LAYER OUT. The expensive half is built: a
+    1,625-line graph builder over `lib/trace.ts`'s pure chain builder, six routes, and a live
+    import in `serve.ts`. The cheap half is missing. A graph that is computed, routed and then
+    rendered as text has paid for everything except the thing that makes it a graph.
+    SURFACE 1 lines in the panel graph builder = 1625
+    SURFACE 2 svg elements the whole console path emits = 0
+    SURFACE 3 canvas elements the whole console path emits = 0
+    SURFACE 4 lines in the console renderer = 5916
+    SURFACE 5 real browser suites already covering console DOM = 10
+
+    INLINE SVG, NEVER A CHARTING DEPENDENCY. The console is served from a template literal inside
+    `serve.ts` and is already covered by ten real Playwright/Chromium suites, so the rendering can
+    be asserted rather than eyeballed. A CDN chart library would add a network dependency to a page
+    whose whole value is being readable when the fleet is unhealthy — which is exactly when a CDN
+    is the wrong thing to depend on. Inline SVG needs nothing, degrades to the existing text, and
+    is diffable.
+
+    THE BACKTICK HAZARD IS NAMED HERE BECAUSE IT HAS BITTEN THIS FILE BEFORE. `serve.ts`'s client
+    JS lives inside a backtick template literal; a backtick anywhere in client code or its comments
+    terminates the outer template and esbuild fails with a parse error that names no cause. SVG
+    path data and attribute strings are exactly the kind of content that invites one. The
+    acceptance criteria therefore pin that the rendered shell still parses.
+
+    IT RENDERS WHAT THE ROUTES ALREADY RETURN AND INVENTS NO NEW DATA. No new route, no new
+    computation, no second graph model — the drawing reads `buildPanelGraphRoutes`' existing
+    payload. If the drawing needs a field the payload lacks, that is a finding to report, not a
+    licence to widen the builder inside this task.
+
+    IT DEGRADES RATHER THAN DISAPPEARS. An empty graph, an unreachable route or a payload the
+    renderer cannot read must fall back to the text rendering that ships today, never to a blank
+    panel — the console's stated job is to be legible when things are broken.
+
+    NOT IN SCOPE: the terminal status board's colour, width and rule helpers, which W1-T2475 owns;
+    any new route or graph field; and any charting of ledger analytics, which is separate work.
+
+    THE RISK BAND IS RULE 19's SPAN, NOT BLAST RADIUS: two src stems plus a test, carrying two
+    independent acceptance concerns — the drawing itself and its degradation path.
+  acceptance:
+    - claim: "the console emits an svg rendering of the graph the routes already return"
+      proof: "unit test: test/the-console-draws-the-graph-it-computes.test.ts"
+    - claim: "the drawing reads the existing payload and adds no new route"
+      proof: "unit test: test/the-console-draws-the-graph-it-computes.test.ts"
+    - claim: "an empty graph falls back to the text rendering rather than a blank panel"
+      proof: "unit test: test/the-console-draws-the-graph-it-computes.test.ts"
+    - claim: "an unreadable payload falls back to the text rendering"
+      proof: "unit test: test/the-console-draws-the-graph-it-computes.test.ts"
+    - claim: "the rendered shell's client script still parses"
+      proof: "unit test: test/the-console-draws-the-graph-it-computes.test.ts"
+    - claim: "the drawing loads no script or stylesheet over the network"
+      proof: "unit test: test/the-console-draws-the-graph-it-computes.test.ts"
+    - claim: "every node the payload names is reachable in the rendered output"
+      proof: "unit test: test/the-console-draws-the-graph-it-computes.test.ts"
+    - claim: "removing the fallback makes the empty-graph case render nothing"
+      proof: "unit test: test/the-console-draws-the-graph-it-computes.test.ts"

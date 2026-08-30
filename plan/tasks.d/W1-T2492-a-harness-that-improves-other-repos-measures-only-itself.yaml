@@ -1,0 +1,75 @@
+- id: W1-T2492
+  title: "A HARNESS BUILT TO IMPROVE OTHER REPOS MEASURES ONLY ITSELF — the four-phase onboarding pipeline, the managed-repo registry and `rmd daemon --repo` are all shipped, yet all three outcome metrics are scoped to a single repo and 1,000 of the plan's 1,002 tasks name this one, so nothing would report an onboarded repo regressing"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 18.00
+  files: [src/lib/autonomy.ts, src/run-task.ts, test/an-outcome-metric-reports-per-repo.test.ts]
+  origin: "operator-brief#self-improves-any-repo-it-is-assigned-to-2026-08-30"
+  plan_refs: ["W1-T437", "W1-T403", "W1-T1062"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE CAPABILITY IS BUILT AND THE FEEDBACK LOOP IS NOT, WHICH IS THE WRONG HALF TO BE MISSING.
+    `onboard` runs four phases and writes a MASTER-PLAN, a task plan and an AGENTS.md into the
+    TARGET repo; `managed-repos.ts` holds the registry and `issues-intake.ts` polls across it;
+    `rmd daemon --repo <name>` selects the drain target and refuses self-targeting without consent;
+    `run-task` clones `<owner>/<task.repo>` per task. Everything needed to work on another repo
+    exists. Nothing measures whether doing so helps.
+    SURFACE 1 distinct repo values across the whole plan = 3
+    SURFACE 2 tasks naming this repo = 1000
+    SURFACE 3 outcome-metric verbs shipped = 3
+    SURFACE 4 of those, metrics scoped to more than one repo = 0
+    SURFACE 5 onboarding phases shipped = 4
+
+    A METRIC THAT CANNOT SPLIT BY REPO IS WORSE THAN ABSENT ONCE A SECOND REPO EXISTS, because it
+    reports one blended number and the blend is dominated by whichever repo has the volume. With
+    1,000 of 1,002 tasks on this one, a foreign repo could merge nothing but reverts and the rate
+    would not move. The number would stay green and mean nothing — the unstated-denominator shape
+    this repo already refuses everywhere else.
+
+    ONE METRIC IS CONVERTED HERE AND TWO ARE NOT, DELIBERATELY. `autonomy.ts` is the narrowest —
+    one union read, an explicit window, a rate over trailer-bearing merges — so it proves the
+    per-repo split end to end. `verdict-calibration` and `rule-efficacy` keep today's behaviour,
+    which stays correct because the split is ADDITIVE: absent a second repo the per-repo report is
+    the single-repo report it already prints. Converting three at once would put three independent
+    regressions behind one review.
+
+    THE UNMEASURABLE ARM IS THE PART THAT MAKES IT HONEST. A repo with too few merges to support a
+    rate must print its COUNT and refuse the rate, exactly as the population floor already does —
+    never a rate over two merges, and never a repo silently omitted because it had none. A repo
+    that has been onboarded and has merged nothing is a finding, not an empty row to drop.
+
+    THE SAME-OWNER CEILING IS REAL AND IS NOT THIS TASK. `resolveOwnerRepo()` takes the owner from
+    this checkout's origin across many call sites, so a repo under a different owner cannot be
+    targeted at all today. That is filed twice already, under W1-T403 and W1-T1062, and W1-T2486
+    exists to resolve exactly that redundancy. This task measures the repos that CAN be targeted.
+
+    NOT IN SCOPE: the owner constraint; converting the other two metrics; the onboarding phases
+    themselves; and any change to what counts as a zero-touch merge.
+
+    OVERLAP IS EXPECTED AND DELIBERATE: `run-task.ts` is shared with W1-T2487 and W1-T2493, so
+    `overlappingPaths` will serialize them rather than race them.
+
+    THE RISK BAND IS RULE 19's SPAN, NOT BLAST RADIUS: two src stems plus a test, carrying two
+    independent acceptance concerns — the per-repo split and the unmeasurable arm.
+  acceptance:
+    - claim: "the metric reports a separate rate per repo rather than one blended number"
+      proof: "unit test: test/an-outcome-metric-reports-per-repo.test.ts"
+    - claim: "each per-repo rate names its own denominator"
+      proof: "unit test: test/an-outcome-metric-reports-per-repo.test.ts"
+    - claim: "a repo below the population floor prints its count and refuses a rate"
+      proof: "unit test: test/an-outcome-metric-reports-per-repo.test.ts"
+    - claim: "an onboarded repo with zero merges is reported rather than omitted"
+      proof: "unit test: test/an-outcome-metric-reports-per-repo.test.ts"
+    - claim: "with a single repo the output equals what it prints today"
+      proof: "unit test: test/an-outcome-metric-reports-per-repo.test.ts"
+    - claim: "a corpus that cannot be read reports unmeasured rather than a zero rate"
+      proof: "unit test: test/an-outcome-metric-reports-per-repo.test.ts"
+    - claim: "a merge whose repo cannot be resolved is reported unattributable, never dropped"
+      proof: "unit test: test/an-outcome-metric-reports-per-repo.test.ts"
+    - claim: "collapsing the split back to one rate makes the per-repo assertion fail"
+      proof: "unit test: test/an-outcome-metric-reports-per-repo.test.ts"

@@ -1,0 +1,74 @@
+- id: W1-T2493
+  title: "THE DAEMON'S PROCESS-LIFETIME RUN ID IS REUSED AS A PER-WORKTREE BRANCH NAME, SO THE DAEMON LANE CAN CUT EXACTLY ONE WORKTREE PER BOOT — `runId = DAEMON-${Date.now()}` is minted once at startup and `worktreeAdd` shells `git worktree add -b`, which refuses an existing branch, so every later daemon-lane worktree dies on `fatal: a branch named 'run-DAEMON-<epochMs>' already exists`"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 16.00
+  files: [src/run-task.ts, src/lib/worker.ts, test/the-daemon-lane-can-cut-more-than-one-worktree.test.ts]
+  origin: "operator-log#daemon-90m-2026-08-30"
+  plan_refs: ["W1-T447", "W1-T1036"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED LIVE, THREE TIMES IN ONE NINETY-MINUTE WINDOW, ON ONE DAEMON PROCESS. The operator's
+    log shows `Preparing worktree (new branch 'run-DAEMON-1788100523733')` three times with the
+    SAME epoch suffix: the first succeeded, the second and third died on
+    `fatal: a branch named 'run-DAEMON-1788100523733' already exists`. An identical suffix across
+    three attempts is the signature — a per-attempt mint could not collide with itself.
+    SURFACE 1 attempts in the observed window sharing one branch name = 3
+    SURFACE 2 of those attempts that failed on an existing branch = 2
+    SURFACE 3 daemon-lane worktrees the current shape can cut per process = 1
+    SURFACE 4 worktreeAdd call sites = 8
+    SURFACE 5 flags worktreeAdd passes that refuse an existing branch = 1
+
+    THE MECHANISM IS TWO CORRECT DECISIONS MEETING BADLY. `runId = DAEMON-${Date.now()}` is minted
+    once, outside any loop, at daemon startup — right for a run id, whose whole purpose is to
+    identify the PROCESS across every ledger row it writes. `worktreeAdd` shells
+    `worktree add -b <branch> --no-track`, and `-b` refusing an existing branch is right too: it is
+    what stops two lanes silently sharing a checkout. Neither is the defect. Using a
+    process-lifetime identifier as a per-worktree branch name is.
+
+    THE CONSEQUENCE IS A CAPABILITY THAT WORKS ONCE AND THEN STOPS SILENTLY. Nothing reports this
+    as a failure — the daemon keeps polling and the log line looks like ordinary git noise — so
+    whatever lane needs that worktree simply does not run for the rest of the process's life, and a
+    restart makes it work again exactly once. That is the shape that reads as flakiness and is
+    fully deterministic, which CLAUDE.md already names as the class most often misdiagnosed.
+
+    THE FIX IS A PER-WORKTREE SUFFIX, NOT A NEW RUN ID AND NOT A FORCE. The run id must keep
+    identifying the process, so ledger attribution is untouched; the BRANCH gets its own uniqueness.
+    Reusing an existing branch, or forcing over it, would defeat exactly the collision protection
+    `-b` provides and would let two lanes share a checkout — the failure `-b` exists to prevent.
+
+    A SURVIVING BRANCH IS THE SECOND HALF AND IS ALREADY KNOWN. Worktree reaping does not
+    necessarily remove the branch it created, so a branch can outlive its worktree and collide with
+    a fresh attempt. The fix must therefore be robust to a leftover branch rather than assuming a
+    clean namespace — which a per-attempt suffix gives for free.
+
+    NOT IN SCOPE: branch reaping, which W1-T447 owns; stale lock reclamation, which W1-T1036 owns;
+    and the run id's meaning or format in the ledger, which stays byte-identical.
+
+    OVERLAP IS EXPECTED AND DELIBERATE: `run-task.ts` is shared with W1-T2487 and W1-T2492, so
+    `overlappingPaths` will serialize them rather than race them.
+
+    THE RISK BAND IS RULE 19's SPAN, NOT BLAST RADIUS: two src stems plus a test, carrying two
+    independent acceptance concerns — the per-attempt branch identity and the leftover-branch case.
+  acceptance:
+    - claim: "two daemon-lane worktrees in one process get different branch names"
+      proof: "unit test: test/the-daemon-lane-can-cut-more-than-one-worktree.test.ts"
+    - claim: "the second worktree is created rather than failing on an existing branch"
+      proof: "unit test: test/the-daemon-lane-can-cut-more-than-one-worktree.test.ts"
+    - claim: "the run id written to the ledger is unchanged across both worktrees"
+      proof: "unit test: test/the-daemon-lane-can-cut-more-than-one-worktree.test.ts"
+    - claim: "a branch left over from a reaped worktree does not block a fresh attempt"
+      proof: "unit test: test/the-daemon-lane-can-cut-more-than-one-worktree.test.ts"
+    - claim: "nothing forces over or reuses an existing branch"
+      proof: "unit test: test/the-daemon-lane-can-cut-more-than-one-worktree.test.ts"
+    - claim: "a genuine two-lane collision on one branch is still refused"
+      proof: "unit test: test/the-daemon-lane-can-cut-more-than-one-worktree.test.ts"
+    - claim: "a failed worktree add is reported rather than swallowed as git noise"
+      proof: "unit test: test/the-daemon-lane-can-cut-more-than-one-worktree.test.ts"
+    - claim: "restoring the shared branch name makes the second-worktree assertion fail"
+      proof: "unit test: test/the-daemon-lane-can-cut-more-than-one-worktree.test.ts"

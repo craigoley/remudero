@@ -1,0 +1,66 @@
+- id: W1-T2490
+  title: "PROPOSALS ARE THE ONLY PLAN ARTIFACT WITH NO SHARDED HOME — tasks shard into `plan/tasks.d/` and decisions into `plan/decisions.d/`, both reviewable one file per record, while every proposal the fleet raises lands in a single `proposals.json` blob that twelve modules reference and no diff can be read"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 16.00
+  files: [src/lib/inbox.ts, src/lib/digest.ts, test/a-proposal-lands-as-its-own-reviewable-record.test.ts]
+  origin: "operator-brief#agree-with-your-recommendations-2026-08-30"
+  plan_refs: ["W1-T2477", "W1-T418", "W1-T2486"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE FLEET IS BEING TAUGHT TO GENERATE ITS OWN WORK AND THE ARTIFACT IT GENERATES IS THE ONE
+    THAT CANNOT BE REVIEWED. W1-T418's rule-efficacy report drafts proposals; W1-T2477 wires the
+    proof audit to the minter; the operator's stated direction is more of this, not less. Every one
+    of those lands in a single JSON blob, so a proposal arriving is a whole-file rewrite in a diff
+    and a human reviewing one reads a blob rather than a record.
+    SURFACE 1 sharded directories under plan today = 2
+    SURFACE 2 modules that reference the proposal registry = 12
+    SURFACE 3 files the whole proposal population lives in = 1
+    SURFACE 4 members of RETIREMENT_REASONS, the lifecycle tasks already have = 3
+    SURFACE 5 call sites that write through updateProposalRegistry = 8
+
+    THE PRECEDENT IS EXACT AND ALREADY WORKING TWICE. `plan/tasks.d/` holds 727 files and
+    `plan/decisions.d/` holds the decision records; both were monoliths once and both were sharded
+    for the same reason — a record per file makes an arriving record a readable diff, makes two
+    concurrent writers a rare conflict instead of a certain one, and lets a reviewer comment on a
+    record rather than a blob. Nothing about proposals argues for the other shape.
+
+    THE READ PATH MUST NOT NOTICE, AND THAT IS THE HAZARD. Eight modules read this registry today
+    and none of them should learn about sharding. So the loader keeps its current signature and
+    return shape, reading the shard directory and the legacy blob as one population exactly as
+    `loadPlan` already merges `tasks.yaml` with `tasks.d/` — including its duplicate-id refusal,
+    which is the property that makes the merge safe rather than merely convenient.
+
+    IDEMPOTENCE ACROSS THE MIGRATION IS THE FALSIFIER WORTH WRITING. A proposal that exists in the
+    blob and as a shard must resolve once, not twice, and a re-run of any minter must not
+    reintroduce a record an operator has dispositioned. `updateProposalRegistry` is already
+    idempotent by rule id; sharding must not quietly break that.
+
+    NOT IN SCOPE: changing what any minter proposes or when; the inbox's tiering and
+    `classifyProposal`, which stay exactly as they are; and deleting the legacy blob, which is a
+    migration step an operator takes once the shard path has run for a while.
+
+    THE RISK BAND IS RULE 19's SPAN, NOT BLAST RADIUS: two src stems plus a test, carrying two
+    independent acceptance concerns — the write path's new shape and the read path's invariance.
+  acceptance:
+    - claim: "a newly minted proposal lands as its own file under the shard directory"
+      proof: "unit test: test/a-proposal-lands-as-its-own-reviewable-record.test.ts"
+    - claim: "the loader returns shards and the legacy blob as one population"
+      proof: "unit test: test/a-proposal-lands-as-its-own-reviewable-record.test.ts"
+    - claim: "a proposal present in both resolves exactly once"
+      proof: "unit test: test/a-proposal-lands-as-its-own-reviewable-record.test.ts"
+    - claim: "two proposals sharing an id are refused rather than merged silently"
+      proof: "unit test: test/a-proposal-lands-as-its-own-reviewable-record.test.ts"
+    - claim: "every existing reader sees the same shape it sees today"
+      proof: "unit test: test/a-proposal-lands-as-its-own-reviewable-record.test.ts"
+    - claim: "re-running a minter reintroduces no dispositioned record"
+      proof: "unit test: test/a-proposal-lands-as-its-own-reviewable-record.test.ts"
+    - claim: "an unreadable shard directory refuses rather than reporting an empty population"
+      proof: "unit test: test/a-proposal-lands-as-its-own-reviewable-record.test.ts"
+    - claim: "removing the duplicate-id refusal makes the both-places case resolve twice"
+      proof: "unit test: test/a-proposal-lands-as-its-own-reviewable-record.test.ts"

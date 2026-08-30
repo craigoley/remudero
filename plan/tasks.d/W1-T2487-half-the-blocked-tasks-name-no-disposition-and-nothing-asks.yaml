@@ -1,0 +1,68 @@
+- id: W1-T2487
+  title: "TWENTY-SIX OF FIFTY BLOCKED TASKS NAME NO DISPOSITION AND NO GATE EVER ASKS FOR ONE — `retirement:` distinguishes a task deliberately stood down from one merely stuck, W1-T2474 just taught drain to split those classes apart, and the field it reads is absent on more than half the population it classifies"
+  repo: remudero
+  depends_on: [W1-T2474]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 14.00
+  files: [src/lib/task-linter.ts, src/run-task.ts, test/a-blocked-task-must-name-its-disposition.test.ts]
+  origin: "operator-brief#agree-with-your-recommendations-2026-08-30"
+  plan_refs: ["W1-T2474", "W1-T2486"]
+  status: queued
+  attempts: 0
+  rationale: |
+    W1-T2474 MADE THIS FIELD LOAD-BEARING AND THAT IS WHAT MAKES ITS ABSENCE A DEFECT RATHER THAN
+    UNTIDINESS. Until that task merged, `retirement:` was documentation; drain now splits retired
+    tasks out of the recoverable blocker class by reading it. A consumer that reads a field which
+    is absent on more than half its population is not classifying, it is defaulting.
+    SURFACE 1 tasks on main with status blocked = 50
+    SURFACE 2 of those, tasks carrying no retirement field = 26
+    SURFACE 3 of those, tasks that do carry one = 24
+    SURFACE 4 members of RETIREMENT_REASONS = 3
+    SURFACE 5 gates that refuse a blocked task naming no disposition = 0
+
+    A GATE, NOT A THIRD SWEEP, AND THE ARITHMETIC IS THE ARGUMENT. This field has already been
+    hand-backfilled once in bulk; twenty-six remain, and the population grows every time a task is
+    blocked. A convention maintained by sweeps regenerates its own backlog at the rate work
+    arrives, which is precisely the failure mode CLAUDE.md's own preamble describes: a rule stated
+    only in prose is violated silently and repeatedly, and the fix is to make something refuse it.
+
+    IT MUST NOT INFER A DISPOSITION, AND `task-linter.ts` ALREADY SAYS SO IN TERMS: "A retirement
+    is an operator act. This predicate only ..." — so the gate ASKS, and never answers. A task
+    moving to blocked with no `retirement:` is refused with the three legal values named; nothing
+    writes one, nothing guesses one, and a blocked task that already carries one is untouched.
+
+    THE EXISTING TWENTY-SIX ARE A BASELINE, NOT A BLOCKAGE. Refusing them all at once would redden
+    every PR that touches the plan until an operator dispositions twenty-six tasks, which is a
+    demand this task has no standing to make. So the gate is scoped exactly as `lint-plan`'s
+    changed-tasks pass already is: it fires on a task the diff moves INTO the blocked state, and
+    the standing population is reported, never refused. The count going to zero is an operator's
+    work at their own pace; the count never growing again is this task's.
+
+    NOT IN SCOPE: dispositioning any of the twenty-six; changing RETIREMENT_REASONS; and drain's
+    reading of the field, which W1-T2474 owns and this task only supplies.
+
+    OVERLAP IS EXPECTED AND DELIBERATE: `run-task.ts` is shared with W1-T2492 and W1-T2493, so
+    `overlappingPaths` will serialize them rather than race them. That is the mechanism working.
+
+    THE RISK BAND IS RULE 19's SPAN, NOT BLAST RADIUS: two src stems plus a test, carrying two
+    independent acceptance concerns — the refusal on transition and the report on the standing set.
+  acceptance:
+    - claim: "a task the diff moves into blocked with no disposition is refused"
+      proof: "unit test: test/a-blocked-task-must-name-its-disposition.test.ts"
+    - claim: "the refusal names the three legal values"
+      proof: "unit test: test/a-blocked-task-must-name-its-disposition.test.ts"
+    - claim: "a task moved into blocked that already names one passes"
+      proof: "unit test: test/a-blocked-task-must-name-its-disposition.test.ts"
+    - claim: "a task already blocked before the diff is reported and never refused"
+      proof: "unit test: test/a-blocked-task-must-name-its-disposition.test.ts"
+    - claim: "nothing on this path writes or infers a disposition"
+      proof: "unit test: test/a-blocked-task-must-name-its-disposition.test.ts"
+    - claim: "the refusal reaches lint-plan's exit code"
+      proof: "unit test: test/a-blocked-task-must-name-its-disposition.test.ts"
+    - claim: "a value outside RETIREMENT_REASONS is refused rather than accepted as present"
+      proof: "unit test: test/a-blocked-task-must-name-its-disposition.test.ts"
+    - claim: "removing the transition scoping makes the standing population fail the gate"
+      proof: "unit test: test/a-blocked-task-must-name-its-disposition.test.ts"
