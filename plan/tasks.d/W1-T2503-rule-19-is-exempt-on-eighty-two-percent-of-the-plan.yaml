@@ -1,0 +1,71 @@
+- id: W1-T2503
+  title: "RULE 19's SIZING CHECK IS EXEMPT ON 82 PERCENT OF THE PLAN AND THE ESCAPE IS ONE WORD — `sizingViolation` returns before evaluating anything when risk is high, 824 of 1,008 tasks are high, and the band means two different things (Rule 19's SPAN or real blast radius) with nothing recording which, so the distinction survives only as a prose disclaimer authors repeat by hand"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 14.00
+  files: [src/lib/task-linter.ts, test/a-high-risk-task-declares-what-its-band-means.test.ts]
+  origin: "operator-audit#nothing-dropped-2026-08-30"
+  plan_refs: ["W1-T2486", "W1-T2487"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE EXEMPTION IS CORRECT AND ITS BLAST RADIUS IS THE PROBLEM. `if (task.risk === "high") return
+    undefined;` is the FIRST line of the predicate, so a high-risk task has its subsystem span
+    computed zero times. That is defensible — high already assumes wide scope — but it means the
+    check constrains only the 184 tasks that are not high, and raising a band is a one-word move
+    available to any author who finds the check inconvenient.
+    SURFACE 1 tasks at risk high across the plan = 824
+    SURFACE 2 tasks at risk medium = 164
+    SURFACE 3 tasks at risk low = 20
+    SURFACE 4 predicates sizingViolation evaluates before exempting a high-risk task = 0
+    SURFACE 5 shards filed in one session that carried the band as a prose disclaimer = 15
+
+    THE BAND CARRIES TWO MEANINGS AND NOTHING RECORDS WHICH, WHICH IS THE ACTUAL DEFECT. A task can
+    be high because its change is genuinely dangerous — a boot script, an auth path, a merge arm —
+    or high because Rule 19's SPAN measure counts two subsystems in a modest, well-understood
+    change. Those are different facts with different review implications, and today they are the
+    same field. Fifteen shards filed in a single session each carry a hand-written line saying which
+    one they mean, which is precisely the unenforced-prose pattern this repo's own preamble says to
+    fix by making something refuse it.
+
+    DECLARE, DO NOT REMOVE. Deleting the exemption would redden 824 tasks and demand a re-banding
+    campaign nobody asked for — the same overreach W1-T2487 and W1-T2491 refuse for their standing
+    populations. What a high-risk task gains is an obligation to SAY which meaning its band carries,
+    so the disclaimer becomes a field the linter can read instead of prose it cannot.
+
+    THE 824 ARE A BASELINE. The obligation attaches to a task the diff makes or moves to high; the
+    standing set is reported and never refused, so no existing task blocks a PR and the count
+    reduces at whatever pace an operator chooses.
+
+    THE PAYOFF IS THAT SPAN BECOMES MEASURABLE AGAIN. Once a high-risk task declares the band is
+    about span, its subsystem count can be checked as a fact rather than skipped as an exemption —
+    without that ever becoming a refusal, because a wide span is exactly what the declaration
+    already admits.
+
+    THIS TASK IS ITSELF HIGH FOR BLAST RADIUS, NOT SPAN: one src stem plus a test is a narrow span,
+    but a change to the plan linter is evaluated against every task in the plan, and a false refusal
+    there stops the whole queue.
+
+    NOT IN SCOPE: re-banding any existing task; changing what `subsystemsOf` counts or the
+    two-subsystem threshold; and the duplicate-title arm, which W1-T2486 owns.
+  acceptance:
+    - claim: "a task the diff moves to high risk without declaring its band meaning is refused"
+      proof: "unit test: test/a-high-risk-task-declares-what-its-band-means.test.ts"
+    - claim: "the refusal names both legal meanings rather than a bare rejection"
+      proof: "unit test: test/a-high-risk-task-declares-what-its-band-means.test.ts"
+    - claim: "a task already high before the diff is reported and never refused"
+      proof: "unit test: test/a-high-risk-task-declares-what-its-band-means.test.ts"
+    - claim: "a task declaring blast radius is exempt from the span check exactly as today"
+      proof: "unit test: test/a-high-risk-task-declares-what-its-band-means.test.ts"
+    - claim: "a task declaring span has its subsystem count reported rather than skipped"
+      proof: "unit test: test/a-high-risk-task-declares-what-its-band-means.test.ts"
+    - claim: "declaring span never turns a wide span into a refusal"
+      proof: "unit test: test/a-high-risk-task-declares-what-its-band-means.test.ts"
+    - claim: "medium and low tasks keep the existing sizing behaviour byte for byte"
+      proof: "unit test: test/a-high-risk-task-declares-what-its-band-means.test.ts"
+    - claim: "dropping the transition scoping makes the standing 824 fail the gate"
+      proof: "unit test: test/a-high-risk-task-declares-what-its-band-means.test.ts"

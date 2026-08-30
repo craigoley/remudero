@@ -1,0 +1,75 @@
+- id: W1-T2501
+  title: "THE BOOT FETCH FAILS OPEN ONTO A STALE TREE AND THE DAEMON WORKS ON IT UNTIL SOMETHING ELSE NOTICES — a transient `cannot lock ref` on three refs at once turned into `fetch FAILED — continuing on the tree as it stands`, and the id mint two commands later read a corpus four ids behind; the fetch is attempted exactly ONCE and the lock that beat it is by nature transient"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 14.00
+  files: [deploy/entrypoint.sh, test/the-boot-fetch-survives-a-transient-ref-lock.test.ts]
+  origin: "operator-log#cannot-lock-ref-2026-08-30"
+  plan_refs: ["W1-T1036", "W1-T496"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED TWICE, AND THE SECOND TIME ITS COST WAS VISIBLE TWO COMMANDS LATER. The boot fetch
+    failed to lock `refs/remotes/origin/main`, `heartbeat-mini` and a feature branch in one call —
+    three refs, one moment, which is the signature of another git process holding them rather than
+    of corruption. The entrypoint logged one line and carried on, so the daemon booted on a stale
+    checkout and the advisory id mint reported a max four ids behind the real one.
+    SURFACE 1 refs that failed to lock in one observed boot fetch = 3
+    SURFACE 2 attempts the entrypoint makes at the boot fetch = 1
+    SURFACE 3 suites that already read the entrypoint = 10
+    SURFACE 4 the exit code the daemon already uses for staleness = 75
+    SURFACE 5 boots observed proceeding on a stale tree = 2
+
+    THIS IS A BAKED PATH AND A MERGE ALONE SHIPS NOTHING — SAY SO IN THE PR OR THE FIX IS INVISIBLE.
+    `deploy/entrypoint.sh` is COPYd into the image as `/usr/local/bin/rmd-entrypoint`, so unlike
+    `src/` it does not reach the running container when it merges. It sits inert in a green commit
+    until an operator triggers the image rebuild. W1-T496 measured a running image 124 commits
+    behind with exactly this shape of change stranded in it, and nothing off-host showed a failure.
+    A worker that merges this and calls it shipped has repeated that.
+
+    A RETRY IS RIGHT HERE PRECISELY BECAUSE THE FAILURE IS A LOCK, and that is a narrower claim than
+    "retry transient failures". `cannot lock ref` means another process held the ref when this one
+    reached for it; the holder finishes. A bounded retry with a short backoff converts that into a
+    successful fetch. A network failure or an auth failure is NOT this case and must not be retried
+    into a longer boot — the retry keys on the lock, never on failure generally.
+
+    FAILING OPEN IS STILL RIGHT AND MUST SURVIVE. The comment beside the neighbouring housekeeping
+    step states the principle — a boot must not die on a step that is not the boot — and it applies
+    here too: a daemon that refuses to start because origin was briefly unreachable is worse than
+    one that starts on yesterday's tree. So the retry does not become a refusal. What changes is
+    that an exhausted retry is reported as a NAMED STALE BOOT rather than one line among many, using
+    the staleness vocabulary the daemon already has.
+
+    THE EXISTING RECOVERY FIRES TOO LATE, NOT NEVER, AND THAT IS THE WHOLE GAP. The daemon does
+    detect staleness and exits 75, and the entrypoint does re-run the fetch — but only after a tick
+    has already dispatched against a stale plan. Making the boot fetch land is cheaper than
+    unwinding what a stale boot did.
+
+    NOT IN SCOPE: stale lock reclamation inside the repo, which W1-T1036 owns; the id reservation
+    path, which held correctly throughout and is the reason the stale mint cost nothing; and
+    triggering the image rebuild, which is an operator act.
+
+    THE RISK BAND HERE IS BLAST RADIUS, NOT RULE 19's SPAN: one baked file plus a test is a narrow
+    span, but a boot script on a self-hosting daemon is the highest-consequence file in the repo —
+    a bad edit costs the container, and the fix cannot be observed until an image rebuild.
+  acceptance:
+    - claim: "a boot fetch that fails on a ref lock is retried rather than abandoned"
+      proof: "unit test: test/the-boot-fetch-survives-a-transient-ref-lock.test.ts"
+    - claim: "a fetch that succeeds on retry leaves the boot otherwise byte-identical"
+      proof: "unit test: test/the-boot-fetch-survives-a-transient-ref-lock.test.ts"
+    - claim: "a failure that is not a ref lock is not retried"
+      proof: "unit test: test/the-boot-fetch-survives-a-transient-ref-lock.test.ts"
+    - claim: "retries are bounded and never lengthen a boot without limit"
+      proof: "unit test: test/the-boot-fetch-survives-a-transient-ref-lock.test.ts"
+    - claim: "an exhausted retry still starts the daemon rather than refusing the boot"
+      proof: "unit test: test/the-boot-fetch-survives-a-transient-ref-lock.test.ts"
+    - claim: "an exhausted retry is reported as a named stale boot, not one log line"
+      proof: "unit test: test/the-boot-fetch-survives-a-transient-ref-lock.test.ts"
+    - claim: "a successful first fetch makes no additional call"
+      proof: "unit test: test/the-boot-fetch-survives-a-transient-ref-lock.test.ts"
+    - claim: "removing the retry restores the single-attempt behaviour and fails the lock case"
+      proof: "unit test: test/the-boot-fetch-survives-a-transient-ref-lock.test.ts"
