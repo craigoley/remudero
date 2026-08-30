@@ -1,0 +1,83 @@
+- id: W1-T2482
+  title: "THE LEDGER WRITER NEVER COMPRESSES WHAT THE READER IS ALREADY BUILT TO DECOMPRESS, AND IT TOOK A HOST OFF THE NETWORK — src/lib/ledger.ts contains zero gzip references while ledger-grep.ts classifies both .ndjson.gz and .ndjson, so 47 four-mebibyte rotations accumulated uncompressed and every one of ELEVEN union-reading modules scans all of them. Compressing them by hand took the state directory from 199M to 29M. Compress at rotation"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 12.00
+  files: [src/lib/ledger.ts, test/rotation-compresses-what-the-reader-already-decompresses.test.ts]
+  origin: "operator-incident#azure-io-saturation-2026-08-30"
+  plan_refs: ["W1-T444", "W1-T256", "W1-T2266"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THIS IS THE FIRST FINDING IN THIS ARC WITH A LIVE OUTAGE ATTACHED, NOT A STALE NUMBER. On
+    2026-08-30 the Azure host spiked memory and disk READ and stopped accepting ssh. It recovered
+    on its own. Disk was never short (11G free) and memory was never exhausted (6.4G available,
+    zero swap used, no OOM or ENOSPC in the logs) — the signature was page cache from a large
+    sequential read, so the lockout was IO starvation rather than exhaustion. `state/last-retro.json`
+    is stamped inside the window, and a retro reads the ledger union.
+
+    THE WRITER AND THE READER DISAGREE ABOUT THE FORMAT, AND ONLY THE READER IS RIGHT.
+    `ledger-grep.ts` classifies `.ndjson.gz` as gzip and `.ndjson` as plain, and gunzips the first.
+    `ledger.ts` writes rotations and never compresses one.
+    SURFACE 1 gzip references in the ledger writer = 0
+    SURFACE 2 rotation forms the union reader already classifies = 2
+    SURFACE 3 rotations on the incident host, all uncompressed = 47
+    SURFACE 4 state directory megabytes before compressing by hand = 199
+    SURFACE 5 state directory megabytes after = 29
+    SURFACE 6 modules that read the ledger union = 11
+    SURFACE 7 rotation ceiling in mebibytes = 4
+
+    THE REMEDY IS MEASURED, NOT ESTIMATED, BECAUSE THE OPERATOR RAN IT. `gzip` over the 47 archives
+    reported per-file ratios from 87.6 to 93.7 percent and took the whole state directory from 199M
+    to 29M. Nothing else changed, and the reader consumed the renamed files without a code change —
+    which is the proof that the format was always supported and only the writer was missing.
+
+    THE BLAST RADIUS IS ELEVEN MODULES, NOT ONE RUNG, AND THAT IS THE PART THAT MAKES IT URGENT.
+    `resolveLedgerUnion` is read by analytics-route, autonomy, coverage-improvement, ledger-replay,
+    measurement-cadence, producer-completeness, receipt, retro, rule-efficacy, status and
+    verdict-calibration. So `rmd status` and the console's own analytics route were each scanning
+    the entire uncompressed history, not merely the four-times-a-day cadence.
+
+    AND THE COST GROWS WITHOUT BOUND BY DESIGN. `rotateLedger` archives permanently — nothing
+    deletes an archive, correctly, because older archives hold the only copy of most history
+    (W1-T444's own corpus rule). At a 4 MiB ceiling the incident host produced 47 archives in
+    seventeen days, roughly 2.8 a day. Compression does not remove that growth; it divides it by
+    about ten, which buys years rather than weeks.
+
+    NOT IN SCOPE, AND NAMED SO THE NEXT READER DOES NOT ASSUME THEY WERE MISSED. (a)
+    `resolveLedgerUnion` TAKES NO TIME WINDOW — its signature is a state dir and a pattern, so a
+    caller wanting thirty days reads all history and filters in memory afterwards. Pushing the
+    window into the read is the larger fix and touches eleven call sites, which is a separate task
+    with its own risk. (b) Deleting or aging archives, which W1-T444 rules out on the merits. (c)
+    Any change to what the union RETURNS — this task must be provably neutral on results, which is
+    what the byte-identical criterion below is for.
+
+    THE MIGRATION IS NOT THIS TASK'S EITHER, AND ALREADY HAPPENED ON THE ONE HOST THAT NEEDED IT.
+    Existing plain archives stay readable forever because the reader classifies both forms; a host
+    carrying them simply pays the old cost until someone compresses them. No migration step, no
+    one-shot script, nothing to run at boot.
+
+    THE RISK BAND IS RULE 19's SPAN, NOT BLAST RADIUS: `files:` names one src stem and its test,
+    two distinct stems, and `sizingViolation` measures span rather than intent — a lesson this arc
+    learned when it authored W1-T2481 at medium and was refused.
+  acceptance:
+    - claim: "a rotation writes a gzipped archive rather than a plain one"
+      proof: "unit test: test/rotation-compresses-what-the-reader-already-decompresses.test.ts"
+    - claim: "the union reader consumes a freshly written rotation with no reader change"
+      proof: "unit test: test/rotation-compresses-what-the-reader-already-decompresses.test.ts"
+    - claim: "a union over compressed archives returns byte-identical lines to one over plain archives"
+      proof: "unit test: test/rotation-compresses-what-the-reader-already-decompresses.test.ts"
+    - claim: "a state directory holding both forms is read completely and neither form is skipped"
+      proof: "unit test: test/rotation-compresses-what-the-reader-already-decompresses.test.ts"
+    - claim: "the live ledger is never compressed, so an append-in-progress is untouched"
+      proof: "unit test: test/rotation-compresses-what-the-reader-already-decompresses.test.ts"
+    - claim: "a rotation that cannot be compressed still lands as a readable archive rather than being lost"
+      proof: "unit test: test/rotation-compresses-what-the-reader-already-decompresses.test.ts"
+    - claim: "the retained newest lines per step are unchanged by compression"
+      proof: "unit test: test/rotation-compresses-what-the-reader-already-decompresses.test.ts"
+    - claim: "reverting the compression makes the archive land plain again and the size assertion fail"
+      proof: "unit test: test/rotation-compresses-what-the-reader-already-decompresses.test.ts"
