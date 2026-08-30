@@ -676,6 +676,64 @@ test("renderInbox: a READY item's rendering carries its drafted tasks and stamp;
   assert.doesNotMatch(rendered, /READY — P-DEFER/);
 });
 
+// W1-T2461: `renderInbox` counts `ready` and iterates the SAME array, so the header count and
+// the number of READY rows can never disagree — the defect was that a READY row with no cached
+// draft printed two EMPTY fields (`stamp: ` / `drafted tasks:` with nothing after), which reads
+// like a rendering failure rather than "nothing drafted yet".
+test("renderInbox: a READY proposal whose draft is not cached names the absence on one line instead of printing an empty stamp and an empty drafted-tasks block", () => {
+  const rendered = renderInbox([{ proposalId: "P-NODRAFT", state: "ready", reasons: [] }]);
+  assert.match(rendered, /READY — P-NODRAFT/, "still listed under READY — a missing draft never demotes it");
+  assert.match(rendered, /^ {2}draft: not cached$/m, "the absence is named on its own line");
+  assert.doesNotMatch(rendered, /^ {2}stamp: *$/m, "no empty stamp field is printed");
+  assert.doesNotMatch(rendered, /^ {2}drafted tasks:\s*$/m, "no empty drafted-tasks block is printed");
+  // The design forbids conflating "no cached draft" with "not ready" — readiness rides on
+  // dependencies (classifyProposal), never on whether a draft happens to be cached.
+  assert.doesNotMatch(rendered, /NOT READY — P-NODRAFT/);
+});
+
+test("renderInbox: the header's READY count always equals the number of READY — rows the body emits, whether or not each one has a cached draft", () => {
+  const anchor: EvidenceAnchor = { description: "x", pattern: "landed" };
+  const classifications: InboxClassification[] = [
+    { proposalId: "P-D1", state: "ready", reasons: [], draft: draftFor("P-D1", CLEAN_FRAGMENT, [anchor]) },
+    { proposalId: "P-ND1", state: "ready", reasons: [] },
+    { proposalId: "P-ND2", state: "ready", reasons: [] },
+    { proposalId: "P-ND3", state: "ready", reasons: [] },
+  ];
+  const rendered = renderInbox(classifications);
+  assert.match(rendered, /rmd inbox: 4 READY,/, "the header's count is unchanged — the same `ready` array still feeds it");
+  const readyRows = rendered.match(/^READY — /gm) ?? [];
+  assert.equal(readyRows.length, 4, "every READY classification gets exactly one header row, drafted or not");
+});
+
+test("renderInbox: a READY proposal WITH a cached draft still renders its stamp and drafted tasks exactly as before — the fix only changes the undrafted branch", () => {
+  const anchor: EvidenceAnchor = { description: "x", pattern: "landed" };
+  const rendered = renderInbox([
+    { proposalId: "P-READY", state: "ready", reasons: [], draft: draftFor("P-READY", CLEAN_FRAGMENT, [anchor]) },
+  ]);
+  assert.match(rendered, /READY — P-READY/);
+  assert.match(rendered, /stamp: - P-READY \(plan\) — RATIFIED 2026-07-20 -> W1-T900\./);
+  assert.match(rendered, /W1-T900/);
+  assert.doesNotMatch(rendered, /draft: not cached/);
+});
+
+test("renderInbox: an undrafted READY row never crowds out any other panel row — not-ready, deferred, ratified, drafting, and retired rows all still render", () => {
+  const rendered = renderInbox([
+    { proposalId: "P-READY-ND", state: "ready", reasons: [] },
+    { proposalId: "P-BLOCKED", state: "not_ready", reasons: [{ predicate: "deps_merged", detail: "dep-unmet: W1-T2 not merged" }] },
+    { proposalId: "P-DEFER", state: "deferred_with_trigger", reasons: [], trigger: { description: "unbuilt consumer", fired: false } },
+    { proposalId: "P-RATIFIED", state: "ratified", reasons: [] },
+    { proposalId: "P-DRAFTING", state: "drafting", reasons: [], draftSpawnedAt: "2026-07-22T10:00:00.000Z" },
+    { proposalId: "P-RETIRED", state: "retired", reasons: [], retiredReason: "merged upstream" },
+  ]);
+  assert.match(rendered, /READY — P-READY-ND/);
+  assert.match(rendered, /draft: not cached/);
+  assert.match(rendered, /NOT READY — P-BLOCKED/);
+  assert.match(rendered, /DEFERRED-WITH-TRIGGER — P-DEFER \(never recommended\)/);
+  assert.match(rendered, /RATIFIED — P-RATIFIED/);
+  assert.match(rendered, /DRAFTING — P-DRAFTING \(spawned 2026-07-22T10:00:00\.000Z\)/);
+  assert.match(rendered, /RETIRED — P-RETIRED \(merged upstream\)/);
+});
+
 // W1-T193: a proposal currently mid-draft is named, with its spawn time — `rmd inbox` must
 // never render nothing (or NOT READY) for a proposal legitimately mid-draft.
 test("renderInbox: a drafting item is named DRAFTING with its spawn timestamp, and its summary count is broken out separately from ready/not-ready/deferred/ratified", () => {
