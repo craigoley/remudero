@@ -13,6 +13,8 @@ import {
   type BoardReviewReport,
 } from "./board-review.js";
 import { updateProposalRegistry, type EvidenceAnchor, type Proposal, type UpdateProposalRegistryOpts } from "./inbox.js";
+import { proofQueueAudit, type ProofQueueAuditOffender, type ProofQueueAuditOpts, type ProofQueueAuditReport } from "./proof-queue-audit.js";
+import type { Task } from "./plan.js";
 
 /**
  * lib/measurement-cadence.ts — W1-T1259: gives `rule-efficacy`, `verdict-calibration` and
@@ -754,6 +756,139 @@ export function mintAdoptionProposals(
   return { status: "backlog", mintedProposalIds, excludedMechanisms };
 }
 
+// ── W1-T2477: proof-queue-audit's offenders — A SECOND PRODUCER INTO THE SAME MINTER, NEVER A
+// SECOND RUNG (this task's own title). proofQueueAudit (lib/proof-queue-audit.ts) already resolves
+// every open task's proof against the real checkout and names every one that can never resolve —
+// SEVENTY-NINE, across TWENTY-ONE tasks, measured at this task's own filing — but it is reachable
+// only through `src/run-task.ts`'s CLI dispatch (SURFACE 1: zero importers outside it), so it runs
+// only when a human types it. An offender row ALREADY carries everything an EvidenceAnchor needs
+// with NO INVENTION: `proof` (verbatim, git-greppable) becomes `pattern`; the offending task's own
+// `plan/tasks.d/<id>-<slug>.yaml` (or monolith) record — the SAME file `lib/plan.ts`'s own
+// `taskRecordPath` resolves — becomes `path`. Wiring this to a fresh LOG line would reproduce the
+// exact defect W1-T2473 was filed against (a signal computed on a schedule and read by nothing),
+// so it goes through `updateProposalRegistry` — the SAME single writer {@link mintAdoptionProposals}
+// already uses — or it does not run at all.
+
+/** THE NATURAL PRIMARY KEY for this producer: task id plus criterion index, never a similarity
+ *  score (mirrors {@link adoptionProposalId}'s own discipline for its family). A criterion that
+ *  is FIXED stops being proposed because {@link proofQueueAudit} simply stops naming it — no
+ *  separate retraction step. */
+export function proofDebtProposalId(o: Pick<ProofQueueAuditOffender, "taskId" | "criterionIndex">): string {
+  return `proof-debt:${o.taskId}:${o.criterionIndex}`;
+}
+
+/** `W<workstream>-T<ordinal>` parses into its numeric parts — ASCENDING ID IS FILING ORDER, the
+ *  same fact `lib/drain.ts`'s own `dispatchOrder` comparator documents for the identical reason
+ *  (ids are minted monotonically at filing time). A LOCAL copy, not an import: drain.ts's own
+ *  `idOrdinal` is unexported and drain.ts sits outside this task's own file scope. Offender rows
+ *  arrive in ENCOUNTER order over the plan (whatever order the caller's `tasks` population lists
+ *  them in), which is not an age — this is what orders them oldest-filed-first before the ceiling
+ *  applies, so a newer finding can never starve the head of the queue. Ids that don't parse sort
+ *  last, deterministically, rather than throwing. */
+function proofDebtFilingOrdinal(id: string): { workstream: number; ordinal: number } {
+  const m = /^W(\d+)-T(\d+)/.exec(id);
+  if (!m) return { workstream: Number.MAX_SAFE_INTEGER, ordinal: Number.MAX_SAFE_INTEGER };
+  return { workstream: Number(m[1]), ordinal: Number(m[2]) };
+}
+
+/** One proof-debt mint pass's outcome — the same shape {@link AdoptionMintCadenceResult} keeps,
+ *  named separately because the two producers key and describe their candidates differently. */
+export interface ProofDebtMintCadenceResult {
+  /** `"clear"`: no offender this fire resolved to a mintable candidate (either none exist, or
+   *  every one named a task {@link shardPathFor} could not resolve) — a MEASURED absence, never a
+   *  bare zero. `"backlog"`: at least one candidate exists, whether or not a NEW proposal was
+   *  actually written this run (idempotent by id). */
+  status: "clear" | "backlog";
+  /** Proposal ids ACTUALLY written this fire, oldest-filed-first, capped at
+   *  {@link ADOPTION_MINT_CEILING} — THE INHERITED CEILING, never a second one: this producer
+   *  supplies candidates into the SAME per-fire bound {@link mintAdoptionProposals} already
+   *  enforces for its own family, rather than adding a second governor on top of it. */
+  mintedProposalIds: string[];
+  /** Every NEW (not-already-proposed) offender the ceiling excluded this fire, named as
+   *  `"<taskId>:<criterionIndex>"` rather than silently dropped — oldest-filed-first, same
+   *  discipline {@link AdoptionMintCadenceResult.excludedMechanisms} already follows. */
+  excludedOffenders: string[];
+}
+
+/**
+ * Mint one bounded, exactly-deduped proposal per unresolvable-proof offender, through
+ * {@link updateProposalRegistry} — the SAME W1-T240 single writer {@link mintAdoptionProposals}
+ * already uses, never a hand-rolled write. NEVER FILES A TASK, NEVER APPROVES A PROPOSAL, NEVER
+ * BYPASSES `classifyProposal`'s readiness gate (Law 5 / this task's own scope): the sanctioned
+ * path stays PROPOSAL then operator-or-judge then `approveProposal`, unchanged.
+ *
+ * `shardPathFor` is INJECTED (mirrors every other real-filesystem predicate this module and
+ * proof-queue-audit.ts already take) so this function never invents the path half of the anchor:
+ * an offender whose task id `shardPathFor` cannot resolve is simply never minted, the same
+ * "no predicate, no opinion" contract `ProofQueueAuditOpts` already keeps for its own resolvers.
+ *
+ * ORDERED oldest-filed-first (via {@link proofDebtFilingOrdinal}) so the ceiling, when it binds,
+ * always keeps the HEAD of the backlog. IDEMPOTENT by id: an offender that already carries an open
+ * `proof-debt:<taskId>:<criterionIndex>` proposal is never re-drafted and never counts against the
+ * ceiling or the excluded set.
+ */
+export function mintProofDebtProposals(
+  offenders: readonly ProofQueueAuditOffender[],
+  shardPathFor: (taskId: string) => string | undefined,
+  registryPath: string,
+  opts?: UpdateProposalRegistryOpts,
+): ProofDebtMintCadenceResult {
+  const candidates: { o: ProofQueueAuditOffender; shardPath: string }[] = [];
+  for (const o of offenders) {
+    const shardPath = shardPathFor(o.taskId);
+    if (shardPath !== undefined) candidates.push({ o, shardPath }); // unresolvable path ⇒ never invented, never minted
+  }
+  if (candidates.length === 0) {
+    return { status: "clear", mintedProposalIds: [], excludedOffenders: [] };
+  }
+  const ordered = [...candidates].sort((a, b) => {
+    const oa = proofDebtFilingOrdinal(a.o.taskId);
+    const ob = proofDebtFilingOrdinal(b.o.taskId);
+    if (oa.workstream !== ob.workstream) return oa.workstream - ob.workstream;
+    if (oa.ordinal !== ob.ordinal) return oa.ordinal - ob.ordinal;
+    if (a.o.taskId !== b.o.taskId) return a.o.taskId < b.o.taskId ? -1 : 1;
+    return a.o.criterionIndex - b.o.criterionIndex; // deterministic tiebreak within one task
+  });
+
+  let mintedProposalIds: string[] = [];
+  let excludedOffenders: string[] = [];
+  updateProposalRegistry(
+    registryPath,
+    (current) => {
+      const existingIds = new Set(current.map((p) => p.id));
+      const additions: Proposal[] = [];
+      mintedProposalIds = [];
+      excludedOffenders = [];
+      for (const { o, shardPath } of ordered) {
+        const id = proofDebtProposalId(o);
+        if (existingIds.has(id)) continue; // already open — idempotent, never re-drafted
+        if (additions.length >= ADOPTION_MINT_CEILING) {
+          excludedOffenders.push(`${o.taskId}:${o.criterionIndex}`); // named, never dropped
+          continue;
+        }
+        const anchors: EvidenceAnchor[] = [
+          {
+            description: `${o.taskId} criterion ${o.criterionIndex} (${o.cause}) still cannot resolve its own proof`,
+            pattern: o.proof,
+            path: shardPath,
+          },
+        ];
+        additions.push({
+          id,
+          summary:
+            `proof-debt: ${o.taskId} criterion ${o.criterionIndex} (${o.cause}) — "${o.claim}" cannot resolve ` +
+            `its proof against the checkout (rmd proof-queue-audit).`,
+          evidenceAnchors: anchors,
+        });
+        mintedProposalIds.push(id);
+      }
+      return additions.length > 0 ? [...current, ...additions] : null;
+    },
+    opts,
+  );
+  return { status: "backlog", mintedProposalIds, excludedOffenders };
+}
+
 export interface MeasurementCadenceRunResult {
   ruleEfficacy: RuleEfficacyCadenceResult;
   verdictCalibration: VerdictCalibrationCadenceResult;
@@ -778,6 +913,17 @@ export interface MeasurementCadenceRunResult {
    *  existed still type-checks. {@link runMeasurementCadenceReport} sets it only when
    *  `opts.boardReview` is supplied. */
   boardReview?: BoardReviewReport;
+  /** W1-T2477: proof-queue-audit's own offender population this fire — see
+   *  {@link mintProofDebtProposals}'s own doc for what "offender" means. Optional on the TYPE for
+   *  the same reason `boardReview` is: {@link runMeasurementCadenceReport} sets it only when
+   *  `opts.proofDebt` is supplied — an EXISTING caller that hasn't opted in gets no new field and
+   *  pays no new cost. */
+  proofDebtReport?: ProofQueueAuditReport;
+  /** W1-T2477: the proof-debt producer's own mint outcome — see {@link mintProofDebtProposals}.
+   *  Same conditional-on-`opts.proofDebt` contract as `proofDebtReport` immediately above, and the
+   *  same `opts.escalate` gating {@link adoptionMint} already keeps: off ⇒ report the MEASURED
+   *  "clear"/"backlog" status without touching the registry. */
+  proofDebtMint?: ProofDebtMintCadenceResult;
 }
 
 /** The verdict-calibration/autonomy-rate git join's only I/O — the SAME shallow-clone refusal
@@ -834,6 +980,27 @@ export interface MeasurementCadenceReportOpts {
     reportPath: string;
     registryPath: string;
     rerunDeadCheck?: (item: BoardItem) => void;
+  };
+  /** W1-T2477: proof-queue-audit's own population and resolvers — bound to a real checkout by the
+   *  caller, mirroring `checkoutDir`/`boardReview` immediately above: THIS module never re-derives
+   *  "open, unmerged" (proof-queue-audit.ts's own SCOPE paragraph owns that split); the caller's
+   *  `tasks` population is trusted verbatim. Optional — omitted skips this producer entirely (no
+   *  audit run, no proof-debt mint), so an EXISTING caller pays no new cost. Production wiring
+   *  (`buildMeasurementCadenceDaemonHooks`, src/run-task.ts) binding these to the SAME resolvers
+   *  `proofQueueAuditCommand` already uses is a follow-up, out of this module's own file scope —
+   *  the same posture `boardReview`'s own doc states for its live board fetch. */
+  proofDebt?: {
+    tasks: readonly Task[];
+    resolveNameFilteredCandidates?: ProofQueueAuditOpts["resolveNameFilteredCandidates"];
+    pathExists?: ProofQueueAuditOpts["pathExists"];
+    creditedIds?: ProofQueueAuditOpts["creditedIds"];
+    symbolFoundAt?: ProofQueueAuditOpts["symbolFoundAt"];
+    /** Resolve a task id to its own `plan/tasks.d/<id>-<slug>.yaml` (or monolith) record path —
+     *  mirrors `lib/plan.ts`'s own `taskRecordPath`, injected so {@link mintProofDebtProposals}
+     *  never invents the path half of its anchor. An id `shardPathFor` cannot resolve is simply
+     *  never minted — the same "no predicate, no opinion" contract every other resolver here
+     *  keeps. */
+    shardPathFor: (taskId: string) => string | undefined;
   };
 }
 
@@ -956,5 +1123,38 @@ export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts):
       })
     : undefined;
 
-  return { ruleEfficacy, verdictCalibration, autonomyRate, adoptionReport, adoptionMint, boardReview };
+  // ── W1-T2477: proof-queue-audit's offenders — a SECOND PRODUCER into the SAME minter, never a
+  // second rung. Skipped entirely when `opts.proofDebt` is absent (an existing caller pays no new
+  // cost) — see that opt's own doc for why real production wiring is a follow-up. `proofQueueAudit`
+  // itself never throws and names every offender regardless of count (it is a REPORT, not a gate —
+  // proof-queue-audit.ts's own module doc), so this call can never turn a cadence tick into a
+  // failure however large the backlog is.
+  let proofDebtReport: ProofQueueAuditReport | undefined;
+  let proofDebtMint: ProofDebtMintCadenceResult | undefined;
+  if (opts.proofDebt) {
+    proofDebtReport = proofQueueAudit(opts.proofDebt.tasks, {
+      resolveNameFilteredCandidates: opts.proofDebt.resolveNameFilteredCandidates,
+      pathExists: opts.proofDebt.pathExists,
+      creditedIds: opts.proofDebt.creditedIds,
+      symbolFoundAt: opts.proofDebt.symbolFoundAt,
+    });
+    proofDebtMint = opts.escalate
+      ? mintProofDebtProposals(proofDebtReport.offenders, opts.proofDebt.shardPathFor, registryPath)
+      : {
+          status: proofDebtReport.offenders.length > 0 ? "backlog" : "clear",
+          mintedProposalIds: [],
+          excludedOffenders: [],
+        };
+  }
+
+  return {
+    ruleEfficacy,
+    verdictCalibration,
+    autonomyRate,
+    adoptionReport,
+    adoptionMint,
+    boardReview,
+    proofDebtReport,
+    proofDebtMint,
+  };
 }
