@@ -81,20 +81,31 @@
     THE RISK BAND IS BLAST RADIUS, NOT RULE 19'S SPAN: two src stems plus a test is a narrow span,
     but this is the retry path every dispatched task runs through, and a wait that fires wrongly
     stalls work that would have succeeded.
+    ACCEPTANCE CORRECTED BEFORE BUILD (2026-08-30, author-time, while this shard is still unbuilt
+    and its PR still plan-only). The first draft's second criterion read "a refusal carrying a reset
+    time WAITS for that time rather than retrying immediately". That is the wrong design and would
+    have been built if left. Waiting inside `runDiagnoseThenRetry` holds a DISPATCH LANE for up to
+    the full window — measured 57m23s in the incident — which costs more than the burn it prevents,
+    and the run's own wall-clock bounds may kill it mid-wait anyway. A lockout with a stated reset is
+    not retryable on any timescale this loop should own. THE CORRECT SHAPE: recognise it, STOP
+    retrying immediately, carry the reset time out in the result so the daemon can hold dispatch
+    (W1-T2517's job), and free the lane. Ordinary transients keep a short bounded backoff, which is
+    the half of the original criterion that was right.
+
   acceptance:
     - claim: "the production retry driver is given a backoff and no longer retries with zero delay"
       proof: "unit test: test/three-retries-in-three-seconds-against-a-lockout.test.ts"
-    - claim: "a refusal carrying a reset time waits for that time rather than retrying immediately"
+    - claim: "a usage-limit refusal stops retrying at once instead of spending the retry budget"
       proof: "unit test: test/three-retries-in-three-seconds-against-a-lockout.test.ts"
-    - claim: "a refusal with no parseable reset time falls back to a bounded backoff, never unbounded"
+    - claim: "the reset time is parsed off the refusal and carried out in the result"
       proof: "unit test: test/three-retries-in-three-seconds-against-a-lockout.test.ts"
-    - claim: "an ordinary network transient still retries promptly, at today's cadence"
+    - claim: "a usage-limit refusal with no parseable reset time still stops, naming that it could not parse one"
       proof: "unit test: test/three-retries-in-three-seconds-against-a-lockout.test.ts"
-    - claim: "a session-limit refusal is distinguishable in the ledger from a network transient"
+    - claim: "an ordinary network transient still retries, under a bounded backoff that never grows without limit"
       proof: "unit test: test/three-retries-in-three-seconds-against-a-lockout.test.ts"
     - claim: "the retry bound is still MAX_TRANSIENT_RETRIES and is not raised by this change"
       proof: "unit test: test/three-retries-in-three-seconds-against-a-lockout.test.ts"
-    - claim: "a task's own build failure still strikes, never absorbed into a wait"
+    - claim: "a task's own build failure still strikes, never absorbed into a usage-limit verdict"
       proof: "unit test: test/three-retries-in-three-seconds-against-a-lockout.test.ts"
-    - claim: "removing the sleep argument makes the zero-delay assertion fail again"
+    - claim: "removing the usage-limit recognition makes the stops-at-once assertion fail"
       proof: "unit test: test/three-retries-in-three-seconds-against-a-lockout.test.ts"
