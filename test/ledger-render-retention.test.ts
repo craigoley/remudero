@@ -4,6 +4,7 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "n
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { gunzipSync } from "node:zlib";
 import {
   CEILING_OVERRIDE_WRITTEN_STEP,
   DECISION_RELEVANT_LEDGER_STEPS,
@@ -64,6 +65,17 @@ function noiseLine(n: number, tsMs: number): string {
 // have their own permanent retention and cosmetic-only steps (fix.done, implement.done, ...) that
 // are out of this task's one concern — OPERATOR_ACTION_STEPS is board.ts's own explicit boundary
 // for "the steps this specific operator-action feed needs to survive rotation."
+
+/** Reads a `rotateLedger` archive back as text regardless of which form it landed in (W1-T2482:
+ *  a rotation now gzips its archive by default, so `result.archivePath` ends `.ndjson.gz`; the
+ *  fallback path still lands plain `.ndjson`) — every assertion below is about which LINES
+ *  survived rotation, not which bytes are on disk, so this decompresses transparently rather
+ *  than each call site special-casing the suffix. */
+function readArchiveContent(path: string): string {
+  const buf = readFileSync(path);
+  return (path.endsWith(".gz") ? gunzipSync(buf) : buf).toString("utf8");
+}
+
 test("RENDER_RELEVANT_LEDGER_STEPS: derived from consumers, not hardcoded — every step account-usage.ts/board.ts render is present", () => {
   const accountUsageSrc = readFileSync(
     fileURLToPath(new URL("../src/lib/account-usage.ts", import.meta.url)),
@@ -228,7 +240,7 @@ test("RENDER RETENTION — a daemon.headroom line older than RENDER_STEP_RETENTI
       "the fresh daemon.headroom line still survives alongside the stale one being dropped",
     );
 
-    const archiveContent = readFileSync(result.archivePath as string, "utf8");
+    const archiveContent = readArchiveContent(result.archivePath as string);
     assert.ok(
       archiveContent.includes(new Date(staleHeadroomMs).toISOString()),
       "the archived (never deleted) roll still holds the stale line verbatim",
@@ -302,7 +314,7 @@ test("RENDER RETENTION — a daemon.cost_governor line older than RENDER_STEP_RE
       "a daemon.cost_governor line long outside the render window is archived — bounded by recency, not kept forever",
     );
 
-    const archiveContent = readFileSync(result.archivePath as string, "utf8");
+    const archiveContent = readArchiveContent(result.archivePath as string);
     assert.ok(archiveContent.includes(new Date(staleMs).toISOString()), "the archived roll still holds the stale line verbatim");
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -367,7 +379,7 @@ test("RENDER RETENTION — a daemon.queue_governor line older than RENDER_STEP_R
       "a daemon.queue_governor line long outside the render window is archived — bounded by recency, not kept forever",
     );
 
-    const archiveContent = readFileSync(result.archivePath as string, "utf8");
+    const archiveContent = readArchiveContent(result.archivePath as string);
     assert.ok(archiveContent.includes(new Date(staleMs).toISOString()), "the archived roll still holds the stale line verbatim");
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -426,7 +438,7 @@ test("RENDER RETENTION — a console.kick_refused line older than the render win
       "a console.kick_refused line long outside the render window is archived — bounded by recency, not kept forever",
     );
 
-    const archiveContent = readFileSync(result.archivePath as string, "utf8");
+    const archiveContent = readArchiveContent(result.archivePath as string);
     assert.ok(archiveContent.includes("W1-T099"), "the archived (never deleted) roll still holds the stale refusal verbatim");
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -497,7 +509,7 @@ test("W1-T1237: a fresh sweep.pass survives rotation and an old one does not", (
       "a sweep.pass line long outside the render window is archived — bounded by recency, not kept forever, exactly like every other render-relevant step",
     );
 
-    const archiveContent = readFileSync(result.archivePath as string, "utf8");
+    const archiveContent = readArchiveContent(result.archivePath as string);
     assert.ok(
       archiveContent.includes(new Date(stalePassMs).toISOString()),
       "the archived (never deleted) roll still holds the stale sweep.pass line verbatim",
@@ -546,7 +558,7 @@ test("W1-T1237: sweep.summary is retained beside sweep.pass", () => {
       "a sweep.summary line long outside the render window is archived — bounded by recency, not kept forever",
     );
 
-    const archiveContent = readFileSync(result.archivePath as string, "utf8");
+    const archiveContent = readArchiveContent(result.archivePath as string);
     assert.ok(
       archiveContent.includes(new Date(staleSummaryMs).toISOString()),
       "the archived (never deleted) roll still holds the stale sweep.summary line verbatim",
@@ -678,7 +690,7 @@ test("RENDER RETENTION — a console.ceiling_override_written line older than RE
       "a console.ceiling_override_written line long outside the render window is archived — bounded by recency, not kept forever",
     );
 
-    const archiveContent = readFileSync(result.archivePath as string, "utf8");
+    const archiveContent = readArchiveContent(result.archivePath as string);
     assert.ok(
       archiveContent.includes(new Date(staleMs).toISOString()),
       "the archived (never deleted) roll still holds the stale audit line verbatim",
