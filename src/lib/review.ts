@@ -3684,6 +3684,29 @@ export function decisionsEntryProvenanceViolations(diff: string): string[] {
  * `remudero-review` state. FAIL-CLOSED: empty criteria, any unmet criterion, or
  * test theater all yield `failure`.
  */
+/**
+ * W1-T2472: THE one definition of "this changeset is plan-only", extracted so two callers cannot
+ * drift. {@link judgeReview} uses it for the W1-T205 classification; run-task.ts's reviewer-spawn
+ * gate uses {@link planOnlyDiff} to answer the same question BEFORE the advisory spawn.
+ *
+ * Deliberately takes both already-computed inputs rather than a diff: judgeReview holds
+ * `diffFiles` and `enforcementData` for other checks, and re-deriving them here would walk the
+ * diff a second time on every review.
+ */
+function planOnlyFromFiles(diffFiles: string[], enforcementData: string[]): boolean {
+  return diffFiles.length > 0 && diffFiles.every(isInPlanScope) && enforcementData.length === 0;
+}
+
+/**
+ * {@link planOnlyFromFiles} over a raw unified diff — the form run-task.ts's spawn gate needs,
+ * since it has the diff text and not judgeReview's intermediates. Same predicate, one definition:
+ * a change to plan-only classification lands in both callers or in neither.
+ */
+export function planOnlyDiff(diff: string): boolean {
+  const diffFiles = changedFiles(walkDiff(diff));
+  return planOnlyFromFiles(diffFiles, enforcementDataInDiff(diffFiles));
+}
+
 export function judgeReview(
   criteria: AcceptanceCriterion[],
   evidence: ReviewEvidence,
@@ -3721,7 +3744,11 @@ export function judgeReview(
   // exists to hold up. Everything else about a plan-scope diff is unchanged.
   const diffFiles = changedFiles(walkDiff(evidence.diff));
   const enforcementData = enforcementDataInDiff(diffFiles);
-  const planOnly = diffFiles.length > 0 && diffFiles.every(isInPlanScope) && enforcementData.length === 0;
+  // W1-T2472: the boolean now lives in {@link planOnlyFromFiles} so the reviewer-spawn gate in
+  // run-task.ts can consult THE SAME definition instead of re-deriving it. The expression is
+  // unchanged and `enforcementData` is still computed here because {@link cappedSummary} needs the
+  // ARRAY, not the boolean — sharing the predicate must not cost a second walk of the diff.
+  const planOnly = planOnlyFromFiles(diffFiles, enforcementData);
 
   // W1-T58 (Standing rule 15 — RATIFIES P3): see {@link ReviewVerdict.criteriaTampered}'s
   // doc for the full design. `!planOnly` is the exemption — a genuine Architect
@@ -7306,7 +7333,23 @@ export function reviewerOutcome(opts: {
   /** true when the spawn itself THREW (e.g. before yielding any result) —
    * distinct from a subtype, since there is none to report. */
   spawnError?: boolean;
+  /**
+   * W1-T2472: true when the spawn was skipped because the changeset is PLAN-ONLY.
+   *
+   * WHY THIS IS A DISTINCT VALUE AND NOT JUST `attempted: false`. `not_attempted` already carries
+   * two documented causes — `spawnReviewer===false` and "no criteria to judge" — and this adds a
+   * THIRD, structurally different one: criteria exist and a reviewer would have been dispatched,
+   * but the diff has no code for the advisory lane to judge (W1-T205). Folding it into
+   * `not_attempted` would make the ledger unable to answer "how often does the skip fire", which
+   * is the only way to measure the change that introduced it, and would silently widen a value
+   * whose own doc enumerates its causes. The verdict is unaffected either way — like every other
+   * `reviewerOutcome`, this is purely a LEGIBILITY signal (P10-a).
+   */
+  planOnlySkip?: boolean;
 }): string {
+  // Checked BEFORE `attempted` so the plan-only skip is never reported as the generic
+  // "never dispatched" case it would otherwise be indistinguishable from.
+  if (opts.planOnlySkip) return "not_attempted_plan_only";
   if (!opts.attempted) return "not_attempted";
   if (opts.spawnError) return "spawn_error";
   return opts.subtype ?? "unknown";

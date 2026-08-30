@@ -600,6 +600,7 @@ import {
   postReviewStatusGuarded,
   priorReviewVerdictFromLedger,
   resolveAutoMergeArm,
+  planOnlyDiff,
   reviewerOutcome,
   reviewerVerdictContract,
   reviewEvidenceStrength,
@@ -4444,9 +4445,23 @@ async function runReview(args: {
   // Advisory semantic layer — a FRESH read-only reviewer (no session inheritance),
   // in a throwaway cwd so it cannot touch the worktree/diff under review.
   let semantic: (boolean | undefined)[] | undefined;
-  const attemptReviewer = args.spawnReviewer !== false && criteria.length > 0;
+  // W1-T2472: a PLAN-ONLY changeset has no code for this advisory lane to judge, so the spawn is
+  // skipped rather than dispatched to discover there is nothing to execute. This does not weaken
+  // the gate: `judgeReview` decides a plan-only diff's state on `floorUnmet` (review.ts), and
+  // `floorMet` is captured BEFORE the semantic downgrade arm, so the reviewer's only output
+  // (`semantic[]`) cannot change a plan-only verdict — leaving it undefined is exactly what the
+  // catch arm below already produces when a spawn fails. Every other gating arm — the deterministic
+  // floor, lint-plan, the plan-PR emitter and the plan-index checks — is untouched and still runs.
+  // The predicate is review.ts's own `planOnlyDiff`, never a second copy of the expression.
+  const planOnlySkip = planOnlyDiff(diff);
+  const attemptReviewer = args.spawnReviewer !== false && criteria.length > 0 && !planOnlySkip;
   let reviewerSubtype: string | undefined;
   let reviewerSpawnFailed = false;
+  if (planOnlySkip) {
+    // The ledger must say WHICH PATH RAN. Without this row a skipped review and a completed one
+    // differ only by the ABSENCE of `review.reviewer`, which is not something a query can count.
+    log("review.reviewer.skipped", { reason: "plan-only", criteria: criteria.length });
+  }
   if (attemptReviewer) {
     try {
       // W1-T115: routed through withTempDir so this throwaway cwd is ALWAYS
@@ -4505,6 +4520,12 @@ async function runReview(args: {
     attempted: attemptReviewer,
     subtype: reviewerSubtype,
     spawnError: reviewerSpawnFailed,
+    // Reported from what ACTUALLY happened, never from the classification alone: `planOnlySkip &&
+    // !attemptReviewer` is true only when the spawn was really not dispatched. Measured while
+    // falsifying this change — with the gate removed but the flag still passed, a run that DID
+    // spawn still reported `not_attempted_plan_only`, i.e. the ledger lied in the one direction
+    // this outcome exists to prevent.
+    planOnlySkip: planOnlySkip && !attemptReviewer,
   });
 
   // BINDING deterministic verdict; the orchestrator is the authoritative poster.
