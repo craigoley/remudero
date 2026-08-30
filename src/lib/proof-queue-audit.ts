@@ -30,6 +30,17 @@
  * filing (the shape W1-T369 already established for proof-dialect/proof-resolvability) — never
  * smuggled in here.
  *
+ * A SECOND CALLER (W1-T2477), STILL NEVER A GATE. `src/run-task.ts`'s CLI dispatch was, until
+ * W1-T2477, the ONLY caller outside this module's own test — so a report this module always
+ * computed correctly ran only when a human happened to type it. `lib/measurement-cadence.ts` now
+ * calls {@link proofQueueAudit} too, as a SECOND PRODUCER feeding its offenders into the adoption-
+ * debt minter (`mintProofDebtProposals`) — never a second gate, never a second gauge of "pass".
+ * Every offender row already carries what that mint needs with no invention: `proof` (verbatim,
+ * git-greppable) becomes the minted proposal's `EvidenceAnchor.pattern`, and the offending task's
+ * own `plan/tasks.d/<id>-<slug>.yaml` record — `lib/plan.ts`'s `taskRecordPath` — becomes its
+ * `path`. This module's own contract is UNCHANGED by that second caller: still pure, still no fs,
+ * still returns a report and never a verdict.
+ *
  * THREE CAUSES, so a class of offender is batchable rather than lost in one undifferentiated
  * number (the split W1-T305 already applies at review time, run one dispatch earlier here):
  *   - `refused-parse`            — the proof DECLARES an executable dialect (`grep:`/`unit
