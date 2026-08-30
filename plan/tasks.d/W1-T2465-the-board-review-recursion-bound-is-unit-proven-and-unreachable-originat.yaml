@@ -1,0 +1,114 @@
+- id: W1-T2465
+  title: "THE BOARD-REVIEW RECURSION BOUND IS UNIT-PROVEN AND UNREACHABLE — `originatesFromProposalId` has three references in src and all three are the doc, the declaration and the reader; no production path writes it, so `itemsExcludedAsSelfProduced` is structurally zero and the rung diagnoses the board it made"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: "board-review:escalation:#3227"
+  plan_refs: ["W1-T2304", "W1-T7B", "W1-T188", "§4B", "§5C"]
+  files: [src/run-task.ts, test/board-review-wiring.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE SHIPPED CRITERION AND THE SHIPPED CODE DISAGREE. W1-T2304's fourth acceptance criterion
+    reads "work born from the rung's own proposals is excluded until merged or dead", proved by
+    `unit test: test/board-review.test.ts`. The pure module honours it: `boardItemsInScope` filters
+    `!it.originatesFromProposalId || it.status !== "open"` (src/lib/board-review.ts:96-97), and the
+    report carries `itemsExcludedAsSelfProduced` (:305). The production reader never sets the field.
+
+    SOURCE-VERIFIED, NOT INFERRED. `originatesFromProposalId` occurs exactly three times in `src/`
+    — board-review.ts:47 (the header doc), :89 (the interface member) and :97 (the reader). There
+    are ZERO writers anywhere in `src/`. The only production constructor of a `BoardItem` is
+    `boardItemsFromOpenPrs` (src/run-task.ts:16820-16838), which returns `id`, `isDraft`, `status`,
+    `ageHours`, `redCheckCount` and `unhandledEscalations` and neither optional field;
+    `defaultBoardReviewItems` (:16865-16893) delegates to it, and the hook's `itemsFor` defaults to
+    that (:17028) with the `items?:` seam documented "Injectable ONLY for tests" (:17019). So in
+    production the filter excludes nothing and the report's count is always zero.
+
+    THE CONTROL IS WHAT MAKES THIS A DEFECT RATHER THAN A CHOICE. The sibling optional field,
+    `deadBeforeTestBody`, is ALSO unpopulated — and that omission is deliberate and documented at
+    the call site: "NO `rerunDeadCheck`: the rung's one sanctioned action is deliberately NOT wired
+    here" (src/run-task.ts:17066-17069). No such note exists anywhere for
+    `originatesFromProposalId`. One optional field is unwired on the record and the other is unwired
+    silently, which is the difference between a bounded scope and a guarantee that was asserted and
+    then not reached — rule 14's call-site-is-the-deliverable class (W1-T7B), and the W1-T188 class
+    of a criterion certified without being reachable.
+
+    THE HARM, STATED AT ITS ACTUAL SIZE AND NOT INFLATED. The loop the bound exists to cut is:
+    this rung files a proposal, an operator ratifies it, the ratified task opens a run PR, that PR
+    joins the open board, and if it sits past 8h or draws an escalation the rung files a finding
+    ABOUT ITS OWN CHILD. That loop is human-gated by Rule 15 at the ratification step, so it is slow
+    and it is not a storm. NO LIVE INSTANCE IS CLAIMED HERE, because none was measured. What is
+    claimed is narrower and fully checkable: a self-bound the module advertises, tests, and reports
+    a count for is inert in the only configuration that runs unattended, and the sibling shard
+    landing alongside this one increases exactly the registry churn the bound was written for.
+
+    THE JOIN THE FIX NEEDS IS ALREADY IN HAND. The reader already loads the plan and projects it to
+    join `needsHuman` to a PR by `prNumber` (src/run-task.ts:16869-16881). A task's `origin:` is
+    declared plan metadata (Standing rule 17) and `provenanceViolation` requires it be non-empty
+    (src/lib/task-linter.ts:1962-1972). So the same projection that answers "which PR belongs to
+    which task" also answers "was that task born from a `board-review:` proposal", with no second
+    read and no new API.
+  design: |
+    POPULATE THE FIELD AT THE ONE PRODUCTION MAPPER. Extend `boardItemsFromOpenPrs` with an
+    origin-by-PR-number lookup, in the SAME shape as the `needsHumanByPrNumber` set it already
+    takes, and have `defaultBoardReviewItems` build it from the plan and projection it already
+    reads: a PR whose task's `origin` names a proposal in this rung's own namespace gets
+    `originatesFromProposalId` set to that id. Nothing in the pure module changes — the filter and
+    the report field already exist and already have unit coverage.
+
+    ABSENCE MEANS NOT-SELF-PRODUCED, NEVER SELF-PRODUCED. This is the fail direction and it is the
+    opposite of the sibling shard's. Marking on an UNCERTAIN read would EXCLUDE real board items
+    from every depth signal and every finding, i.e. it would blind the rung — strictly worse than
+    the inert bound being fixed. The projection read already degrades to empty inside its own catch
+    (src/run-task.ts:16878), and under this change that degradation must leave every item unmarked
+    and the rung's behaviour byte-identical to today.
+
+    THE CONVENTION THIS DEPENDS ON, NAMED RATHER THAN ASSUMED. The chain closes only if a drafted
+    fragment for a board-review proposal carries an `origin:` naming that proposal — as the two
+    tasks in this fragment do. NOTHING ENFORCES THAT, and enforcing it is not folded in: a linter
+    arm binding drafted origins to their proposal id would be a plan-lane gate on a single observed
+    convention, and is recorded here for a future filing rather than built on one instance. A task
+    whose origin does not name a board-review proposal is simply not marked, which is the correct
+    and safe reading.
+
+    OUT OF SCOPE: `deadBeforeTestBody` and `rerunDeadCheck`. Their omission is deliberate and
+    documented at the call site, and wiring an ACTION is an operator decision W1-T2304 explicitly
+    deferred until the rung has a track record. This task touches the read only.
+  acceptance:
+    - claim: "the production reader marks an open PR whose task origin names a board-review proposal as self-produced, so the rung's own in-flight child is excluded from every depth signal and every finding until it merges or dies"
+      proof: "unit test: test/board-review-wiring.test.ts"
+    - claim: "the exclusion is reachable from the production read path rather than only from an injected fixture — the self-produced count can be non-zero without a test-only item constructor"
+      proof: "unit test: test/board-review-wiring.test.ts"
+    - claim: "an unreadable plan or projection leaves every item UNMARKED, so a degraded read can never exclude real board items and blind the rung"
+      proof: "unit test: test/board-review-wiring.test.ts"
+    - claim: "an ordinary PR, and a PR whose task carries any other origin, are never marked self-produced"
+      proof: "unit test: test/board-review-wiring.test.ts"
+    - claim: "the production mapper writes the field at all — the three references in src are no longer only a doc, a declaration and a reader"
+      proof: "grep: originatesFromProposalId in src/run-task.ts"
+  falsifier: |
+    If a build finds ANY production path that already writes `originatesFromProposalId` — a
+    constructor outside `boardItemsFromOpenPrs`, or a caller supplying `items` other than the
+    documented test seam — then the bound is reachable, the premise is false, and this task closes
+    rather than being implemented. The grep that decides it is `originatesFromProposalId` across
+    `src/`, whose current answer is three hits, all in `src/lib/board-review.ts`, none of them a
+    write. The last acceptance proof above is that same grep pointed at the file the fix must touch,
+    so it is false today by construction and true only when the work is done.
+  note: |
+    RISK BAND, RECORDED. `risk: high` is Rule 19's SPAN, not blast radius: `files:` spans the
+    run-task reader and the board-review wiring test, which the sizing check refuses at
+    `risk: medium`. The change itself is one lookup threaded into an existing mapper alongside an
+    existing one.
+
+    SEQUENCING WITH THE SIBLING SHARD IN THIS SAME RATIFICATION. W1-T2464 and W1-T2465 share
+    `src/run-task.ts`, so the pre-dispatch overlap check (W1-T171) will serialize them rather than
+    lane them together. That is correct and is recorded here so the serialization is not later read
+    as a stall. Neither depends on the other: W1-T2464 retires dead findings, W1-T2465 stops the rung
+    generating findings about its own children, and either is worth having alone.
+
+    NOT AN AMENDMENT TO W1-T2304. That task is shipped, so under standing rule 21 an amendment would
+    neither re-queue it nor spawn anything; this is the successor filing that rule requires. W1-T2304
+    keeps its criteria and its record intact.
