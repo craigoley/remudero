@@ -1,0 +1,85 @@
+- id: W1-T2478
+  title: "THE GATE A WORKER IS TOLD TO RUN HABITUALLY IS STRUCTURALLY BLIND TO EVERY CENSUS SUITE — six tests walk the whole src population and assert over it, the fast gate runs none of them, and one of the six (the bound-kind census) reddened #3304 on a single comment omission after a clean fast run. Admit the census class under a MEASURED per-step time bound, replacing a mechanism proxy with the cost bound it was standing in for"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 14.00
+  files: [src/lib/ci-parity.ts, package.json, test/fast-gate-admits-the-census-class.test.ts]
+  origin: "operator-brief#next-item-2026-08-30"
+  plan_refs: ["W1-T373", "W1-T1266", "W1-T294", "W1-T438"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE EXISTING DESIGN IS CITED AND LARGELY UPHELD, NOT STEAMROLLED. `FAST_GATE_STEPS`
+    (src/lib/ci-parity.ts, W1-T373) states its curation criterion in its own header: a step
+    qualifies ONLY if it is deterministic, runs in seconds, needs no network, and HAS DEMONSTRABLY
+    BLOCKED A PR. It then names the one mistake the mode exists to prevent — becoming `npm test` —
+    and enforces that with a blanket exclusion on anything that "spawns `node --test`". The cost
+    concern is correct and this task keeps it. What it replaces is the PROXY.
+
+    THE PROXY IS WRONG FOR EXACTLY ONE CLASS, AND THE CLASS IS MEASURABLE. A census suite is a pure
+    source scan over `src/**` plus a written baseline — structurally identical to `claims`, `jscpd`
+    and `depcruise`, which the fast gate ALREADY runs. It differs only in which runner it happens
+    to have been authored in. Measured at head, each suite run alone:
+    SURFACE 1 census suites that walk the src population = 6
+    SURFACE 2 of those under a two-second per-step bound = 5
+    SURFACE 3 combined milliseconds of those five = 5372
+    SURFACE 4 milliseconds of the one suite that bound excludes = 6371
+    SURFACE 5 steps the fast gate runs today = 7
+    SURFACE 6 census suites the fast gate runs today = 0
+
+    SO THE BOUND EXCLUDES ONE MEMBER ON ITS OWN TERMS, WHICH IS THE POINT. Five suites run in 548,
+    769, 1078, 1196 and 1781 ms — every one inside the header's own "sub-second to low single digit
+    second". The sixth costs 6371 ms alone, more than the other five together, and is refused by
+    the SAME bound rather than by an exception written for it. A criterion that admits everything
+    it is pointed at is not a criterion; this one visibly declines a member.
+
+    THE ADMISSION TEST IS ALREADY SATISFIED, BY THIS WEEK'S OWN EVIDENCE. The header admits a step
+    that "has demonstrably blocked a PR". `test/bound-kind-declared.test.ts` blocked #3304: a build
+    added `ADOPTION_MINT_CEILING`, whose name matched the census's shape and whose comment declared
+    neither BACKSTOP nor PRIMARY CONTROL, and the ci job failed on 1 of 11464 tests. The author had
+    run the fast gate and it passed, because the fast gate cannot see that suite. One comment
+    omission cost a full CI cycle.
+
+    WHY THIS CLASS AND NO OTHER, STATED SO THE LIST CANNOT DRIFT. A census suite is admissible
+    because its cost does not scale with the diff: it walks the same population every time, so its
+    runtime is a property of the tree rather than of the change, and it can be MEASURED ONCE and
+    bounded. An ordinary unit suite has neither property. The admitted set is therefore defined by
+    a predicate — walks the src population, asserts over it, carries a baseline, measured under the
+    bound — never by an enumerated list somebody extends later without re-measuring.
+
+    THE BOUND MUST FIRE ON A HEALTHY CONDITION AND THAT IS DELIBERATE HERE, WHICH IS THE OPPOSITE
+    OF THIS REPO'S RECURRING DEFECT AND MUST BE SAID PLAINLY. A per-step time bound is a PRIMARY
+    CONTROL (W1-T1266's own distinction): it decides admission on an ordinary run, not after
+    something has failed. It is not a backstop and must never be documented as one.
+
+    NOT IN SCOPE: `--ci-parity`, which already shells the full suite and is unchanged; the sixth
+    suite, which stays out until someone makes it cheaper or argues its cost separately; any change
+    to what a census suite ASSERTS; and adding a third preflight mode, which would answer a
+    discoverability problem with a surface the operator then has to remember.
+
+    THE RISK BAND IS RULE 19's SPAN, NOT BLAST RADIUS: the step table and its runner sit in one
+    stem but the npm-script surface is a second, so `files:` spans two independent acceptance
+    concerns and sizingViolation refuses risk:medium for the span alone.
+  acceptance:
+    - claim: "the fast gate runs every census suite that measures under the per-step bound"
+      proof: "unit test: test/fast-gate-admits-the-census-class.test.ts"
+    - claim: "a census suite measured over the bound is refused by the bound and not by an exception"
+      proof: "unit test: test/fast-gate-admits-the-census-class.test.ts"
+    - claim: "admission is decided by a stated predicate rather than an enumerated list"
+      proof: "unit test: test/fast-gate-admits-the-census-class.test.ts"
+    - claim: "the fast gate still never shells the full suite"
+      proof: "unit test: test/fast-gate-admits-the-census-class.test.ts"
+    - claim: "the bound-kind census now fails a fast run on the omission that reddened the build"
+      proof: "unit test: test/fast-gate-admits-the-census-class.test.ts"
+    - claim: "every previously admitted fast step is still admitted and still passes"
+      proof: "unit test: test/fast-gate-admits-the-census-class.test.ts"
+    - claim: "the per-step bound is documented as a primary control and never as a backstop"
+      proof: "grep: PRIMARY CONTROL in src/lib/ci-parity.ts"
+    - claim: "a failing census step names which suite failed rather than a bare non-zero exit"
+      proof: "unit test: test/fast-gate-admits-the-census-class.test.ts"
+    - claim: "removing the census steps makes the omission pass a fast run again"
+      proof: "unit test: test/fast-gate-admits-the-census-class.test.ts"
