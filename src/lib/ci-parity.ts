@@ -845,13 +845,60 @@ export function runCiParity(repoRoot: string, deps: CiParityDeps = {}): CiParity
 // marks the rest, admitted because each is the identical shape (a deterministic npm-script gate
 // CI runs unconditionally) and costs well under half a second.
 //
-// WHAT THIS MUST NOT BECOME (design iii): `npm test`. Growing this list to include anything
-// that spawns `node --test`, touches the network, or is not sub-second-to-low-single-digit-
-// second is the ONE mistake this mode exists to prevent — it would make the fast mode the
-// expensive mode wearing a cheaper name, and the habit it exists to create unaffordable.
-// `runPreflightFast` below never shells `npm run test:ci` (or any bare `npm test`) — it only
-// ever invokes `npm run --silent <script>` for a script named in `FAST_GATE_STEPS`.
-export const FAST_GATE_STEPS: { job: string; script: string; reason: string }[] = [
+// WHAT THIS MUST NOT BECOME (design iii): `npm test`. Growing this list to include a step whose
+// OWN command is the full `test/**/*.test.ts` glob (`npm run test:ci`, a bare `npm test`) is the
+// ONE mistake this mode exists to prevent — it would make the fast mode the expensive mode
+// wearing a cheaper name, and the habit it exists to create unaffordable. `runPreflightFast`
+// below never shells `npm run test:ci` (or any bare `npm test`) — it only ever invokes
+// `npm run --silent <script>` for a script named in `FAST_GATE_STEPS`, and every such script
+// runs AT MOST one named file, never a glob.
+//
+// ── W1-T2478: THE CENSUS CLASS, ADMITTED UNDER A MEASURED BOUND, NOT EXCLUDED BY MECHANISM ────
+//
+// THE PROXY THIS REPLACES. Design (iii) used to read "never spawns `node --test`" — a MECHANISM
+// proxy for the real concern (cost), and wrong for exactly one class: a CENSUS SUITE (a pure
+// source scan over `src/**` plus a written baseline/exemption table — structurally identical to
+// `claims`/`jscpd`/`depcruise` above, which this mode already runs) differs from those only in
+// which test runner it happens to have been authored in. `test/bound-kind-declared.test.ts`
+// blocked #3304 on a single undeclared bound-shaped constant, with a clean fast run immediately
+// before it — the fast gate could not see the one suite built to catch exactly that shape.
+//
+// THE BOUND IS THE PRIMARY CONTROL THAT REPLACES IT. `boundMs` below (present ONLY on the four
+// census entries this task adds) is a measured wall-clock ceiling: `runPreflightFast` times each
+// such step's OWN `npm run --silent <script>` invocation and refuses it — `BOUND EXCEEDED`, named,
+// never a bare non-zero exit — the moment it runs over `boundMs`, REGARDLESS of whether the
+// script itself would have exited zero. This is a PRIMARY CONTROL, not a backstop (W1-T1266's own
+// distinction): it decides admission on THIS ordinary run, before anything has failed, the same
+// way a speed limit governs every trip rather than only the one after a crash. It replaces the
+// mechanism proxy with the cost bound the proxy was always standing in for — a step is admitted
+// because it is CHEAP on THIS run, never because of which runner authored it, and refused by that
+// same measurement, never by a written exception naming it.
+//
+// WHY ONLY THESE FOUR, STATED AS A PREDICATE SO THE LIST CANNOT DRIFT. A census entry qualifies
+// iff it (a) walks the tracked `src/` population via `git ls-files`, (b) asserts something about
+// EVERY file it walks, (c) carries a baseline/exemption table so only NEW violations bite, and
+// (d) measures comfortably under `boundMs` when run alone. `test/bound-kind-declared.test.ts`,
+// `test/catch-erasure-ratchet.test.ts`, `test/negative-reachability-ratchet.test.ts` and
+// `test/no-shallowing-of-the-canonical-checkout.test.ts` each satisfy all four and are wired
+// through their own `census:*` npm script (package.json) — one `node --test` invocation of that
+// ONE file, never the suite glob. A suite that fits shape (a)-(c) but fails (d) is not added here
+// and is not exempted either — it stays out until it is made cheaper or its own cost is argued
+// separately (out of scope for this task), refused by the same predicate a future entry would be.
+//
+// `boundMs` is `undefined` on the seven pre-existing entries below — this task does not re-audit
+// them. Each already states its OWN admission basis in its own `reason` (an explicit measured
+// time for `same-class`, or a demonstrated PR block for `required-core`, e.g. `claims`, whose
+// assertions shell out per-claim and cost seconds, not the sub-second `boundMs` governs) and nothing
+// here changes how any of the seven runs or is judged.
+
+/** THE PRIMARY CONTROL (W1-T2478): the measured wall-clock ceiling every census entry's own
+ *  `npm run --silent <script>` invocation is timed against in {@link runPreflightFast}. 2000ms
+ *  because every census suite this task admits measures well under it alone, and the number is
+ *  the enforcement — not a documented figure a step is separately trusted to honour, but the
+ *  literal value `runPreflightFast` compares an actual `Date.now()` delta against on every run. */
+export const FAST_GATE_CENSUS_BOUND_MS = 2000;
+
+export const FAST_GATE_STEPS: { job: string; script: string; reason: string; boundMs?: number }[] = [
   {
     job: "cli-reference",
     script: "cli-reference:check",
@@ -887,6 +934,40 @@ export const FAST_GATE_STEPS: { job: string; script: string; reason: string }[] 
     script: "no-hand-rolled-fetch:check",
     reason: "same-class — deterministic npm-script gate ci.yml's no-hand-rolled-fetch job runs unconditionally, measured 0.14s",
   },
+  {
+    job: "bound-kind-census",
+    script: "census:bound-kind",
+    reason:
+      "same-class (W1-T2478) — a census suite: walks tracked src/*.ts, asserts every bound-shaped constant declares BACKSTOP or " +
+      "PRIMARY CONTROL against the scripts/bound-kind-baseline.json grandfather list, structurally identical to claims/jscpd/depcruise; " +
+      "measured well under the PRIMARY CONTROL bound below. Blocked #3304 on a single undeclared bound-shaped constant with a clean " +
+      "fast run immediately before it — this is the required-core reason the class exists, restated for this one member (design iv)",
+    boundMs: FAST_GATE_CENSUS_BOUND_MS,
+  },
+  {
+    job: "catch-erasure-census",
+    script: "census:catch-erasure",
+    reason:
+      "same-class (W1-T2478) — a census suite: walks tracked src/*.ts, asserts every bare-erasing catch site stays within its " +
+      "per-file baseline count, structurally identical to claims/jscpd/depcruise; measured well under the bound below",
+    boundMs: FAST_GATE_CENSUS_BOUND_MS,
+  },
+  {
+    job: "negative-reachability-census",
+    script: "census:negative-reachability",
+    reason:
+      "same-class (W1-T2478) — a census suite: walks tracked src/**/*.ts and test/**/*.ts, asserts every _RE/DEFAULT_FIX_CLASSES " +
+      "surface's unhealthy arm is exercised, against its own embedded baseline tables; measured well under the bound below",
+    boundMs: FAST_GATE_CENSUS_BOUND_MS,
+  },
+  {
+    job: "no-shallowing-census",
+    script: "census:no-shallowing",
+    reason:
+      "same-class (W1-T2478) — a census suite: walks tracked src/, scripts/, deploy/ and .github/workflows/, asserts no unexempted " +
+      "depth-limiting git flag against its own EXEMPTIONS table; measured well under the bound below",
+    boundMs: FAST_GATE_CENSUS_BOUND_MS,
+  },
 ];
 
 /** The `package.json` "scripts" object's key set — read once per `runPreflightFast` call so a
@@ -905,6 +986,14 @@ export interface PreflightFastDeps {
   spawn?: PreflightSpawn;
   /** Test seam — production reads the repo's real package.json. */
   packageJsonText?: string;
+  /** Test seam for the {@link FAST_GATE_CENSUS_BOUND_MS} wall clock — a falsifier hands a
+   *  scripted sequence of timestamps to prove a step is refused purely by an elapsed-time
+   *  measurement, with no real slow spawn required. Production always reads `Date.now()`. */
+  now?: () => number;
+  /** Test seam — production always uses {@link FAST_GATE_STEPS} itself; a falsifier can inject a
+   *  narrowed or synthetic list (e.g. with the census entries removed) to prove what a fast run
+   *  can and cannot see, without mutating the real exported table. */
+  steps?: readonly { job: string; script: string; reason: string; boundMs?: number }[];
 }
 
 export interface PreflightFastResult {
@@ -920,16 +1009,38 @@ export interface PreflightFastResult {
  * `package.json`'s "scripts" is reported as `SCRIPT MISSING` — distinct from `FAIL`, which
  * means the script ran and its gate failed — so a renamed or removed script goes loud, never
  * quiet (design vi).
+ *
+ * W1-T2478: an entry that declares `boundMs` (the census class) has its OWN spawn timed, and a
+ * run that takes longer than `boundMs` is refused as `BOUND EXCEEDED` regardless of the script's
+ * own exit code — the PRIMARY CONTROL described above `FAST_GATE_STEPS`. An entry with no
+ * `boundMs` runs exactly as it always has: no timing, no ceiling, unchanged by this task.
  */
 export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {}): PreflightFastResult {
   const spawn = deps.spawn ?? defaultPreflightSpawn;
   const scriptNames = fastGateScriptNames(repoRoot, deps.packageJsonText);
-  const steps = FAST_GATE_STEPS.map(({ job, script }) =>
+  const now = deps.now ?? Date.now;
+  const gateSteps = deps.steps ?? FAST_GATE_STEPS;
+  const steps = gateSteps.map(({ job, script, boundMs }) =>
     runStep(job, () => {
       if (!scriptNames.has(script)) {
         return { ok: false, detail: `SCRIPT MISSING — "${script}" is not defined in package.json's "scripts"; this step did not run` };
       }
-      return shellOut(spawn, `npm run --silent ${script}`, "npm", ["run", "--silent", script], { cwd: repoRoot });
+      const label = `npm run --silent ${script}`;
+      if (boundMs === undefined) {
+        return shellOut(spawn, label, "npm", ["run", "--silent", script], { cwd: repoRoot });
+      }
+      const startedAt = now();
+      const result = shellOut(spawn, label, "npm", ["run", "--silent", script], { cwd: repoRoot });
+      const elapsedMs = now() - startedAt;
+      if (elapsedMs > boundMs) {
+        return {
+          ok: false,
+          detail:
+            `BOUND EXCEEDED — ${label} took ${elapsedMs}ms, over the fast gate's ${boundMs}ms PRIMARY CONTROL bound ` +
+            `(own result: ${result.ok ? "would have PASSed" : "also FAILed"}); refused by measured cost, not by a written exception naming it`,
+        };
+      }
+      return result;
     }),
   );
   return { steps, ok: steps.every((s) => s.ok) };
