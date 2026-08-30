@@ -28,6 +28,8 @@ import {
   MAX_DRAFT_LINT_ATTEMPTS,
   stripMarkdownFence,
   summarizeInboxPoll,
+  type BoardReferentRead,
+  type BoardReferentState,
   type DraftAttemptCache,
   type DraftCache,
   type DraftInFlightCache,
@@ -345,6 +347,89 @@ test("a fired trigger does NOT defer — the proposal is judged on the usual fou
   const draft = draftFor("P-FIRED", CLEAN_FRAGMENT, [anchor]);
   const result = classifyProposal(proposal, draft, baseCtx({ grepAnchorTrue: () => true }));
   assert.equal(result.state, "ready");
+});
+
+// ── W1-T2467: board-review referent retirement, proven at classifyProposal's own read path ────
+//
+// board-review.ts mints EVERY finding with `evidenceAnchors: []` (a PR number is not a
+// git-grep-able fact), which makes the `evidence_anchors` drift predicate above mechanically
+// unreachable for the whole board-review proposal family — so a proposal about a PR that has
+// since merged, closed, or had its escalation handled would render READY forever, and its cached
+// draft would never be recognized as stale (`anchorFingerprint([])` is always `""`). The referent
+// check inside `classifyProposal` (`resolveBoardReferent`/`boardReferentResolved`, W1-T2451) is
+// the fix: exhaustive fixture coverage of the mechanism itself already lives in
+// test/board-review-proposal-lifecycle.test.ts and test/legacy-board-review-proposals-can-retire
+// .test.ts; these four fixtures are THIS file's own anchors for the same predicate, phrased
+// directly against this task's acceptance criteria.
+
+function boardReviewProposalFixture(id: string, originatingItemId: string): Proposal {
+  return {
+    id,
+    summary: `board-review: ${originatingItemId} carries 1 unhandled escalation(s)`,
+    evidenceAnchors: [],
+    originatingItemId,
+  };
+}
+
+function boardReferentRead(states: Record<string, BoardReferentState>): BoardReferentRead {
+  return { kind: "ok", states: new Map(Object.entries(states)) };
+}
+
+test("a board-state proposal whose referent has gone terminal retires — it is never offered as ready and its cached draft is never served", () => {
+  const proposal = boardReviewProposalFixture("board-review:escalation:pr-2467", "pr-2467");
+  const draft = draftFor(proposal.id, CLEAN_FRAGMENT, []);
+  const ctx = baseCtx({ boardReferents: boardReferentRead({ "pr-2467": { status: "merged", unhandledEscalations: 0 } }) });
+
+  const result = classifyProposal(proposal, draft, ctx);
+
+  assert.equal(result.state, "retired");
+  assert.equal(result.draft, undefined, "a retired classification never carries the cached draft forward");
+  assert.match(result.retiredReason ?? "", /pr-2467/);
+});
+
+test("a referent whose state could NOT be read KEEPS the proposal rather than retiring it — cannot-observe means wait, never silently clearing an operator queue", () => {
+  const proposal = boardReviewProposalFixture("board-review:escalation:pr-2468", "pr-2468");
+  const draft = draftFor(proposal.id, CLEAN_FRAGMENT, []);
+  const wholeReadFailed = baseCtx({ boardReferents: { kind: "unreadable" } });
+  const idAbsentFromOkRead = baseCtx({ boardReferents: boardReferentRead({}) }); // read ok, this id just isn't in it
+
+  for (const ctx of [wholeReadFailed, idAbsentFromOkRead]) {
+    const result = classifyProposal(proposal, draft, ctx);
+    assert.equal(result.state, "ready", "keeps whatever classification it would have gotten with no referent tracking at all");
+    assert.equal(result.referentUnverified, true);
+  }
+});
+
+test("a proposal whose referent is still open and still carries its condition is untouched — the falsifier proving retirement keys on resolution rather than emptying the board", () => {
+  const proposal = boardReviewProposalFixture("board-review:escalation:pr-2469", "pr-2469");
+  const draft = draftFor(proposal.id, CLEAN_FRAGMENT, []);
+  // Still open AND the escalation this proposal is ABOUT is still unhandled — a live referent,
+  // not merely a non-empty board (a merged/dead item, or one whose escalation cleared, retires
+  // even though the board itself is non-empty; this is the contrasting falsifier).
+  const ctx = baseCtx({ boardReferents: boardReferentRead({ "pr-2469": { status: "open", unhandledEscalations: 1 } }) });
+
+  const result = classifyProposal(proposal, draft, ctx);
+
+  assert.equal(result.state, "ready");
+  assert.equal(result.referentUnverified, undefined, "a genuinely live referent is never marked unverified");
+});
+
+test("proposals carrying real grep anchors are classified exactly as before — rule-efficacy/docket-shaped proposals (no originatingItemId) ignore boardReferents entirely", () => {
+  const anchor: EvidenceAnchor = { description: "the rule pattern still repeats", pattern: "repeats-3x", path: "MASTER-PLAN.md" };
+  const proposal: Proposal = { id: "rule-efficacy:some-rule", summary: "s", evidenceAnchors: [anchor] };
+  const draft = draftFor(proposal.id, CLEAN_FRAGMENT, [anchor]);
+  // A batched board-referent read IS present, and even names a (merged, i.e. resolved-shaped)
+  // referent — but this proposal carries no originatingItemId and its id sits outside the
+  // board-review namespace, so the referent check must be a total no-op for it either way.
+  const ctx = baseCtx({
+    grepAnchorTrue: () => true,
+    boardReferents: boardReferentRead({ "pr-2467": { status: "merged", unhandledEscalations: 0 } }),
+  });
+
+  const result = classifyProposal(proposal, draft, ctx);
+
+  assert.equal(result.state, "ready");
+  assert.equal(result.referentUnverified, undefined);
 });
 
 // ── W1-T190: the ledger's ratify.approved receipt reconciles a drifted registry entry ──────

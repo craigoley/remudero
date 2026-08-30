@@ -217,7 +217,8 @@ function resolveBoardReferent(proposal: Proposal, read: BoardReferentRead | unde
   if (!read || read.kind === "unreadable") return { kind: "unreadable" };
   const state = read.states.get(referentId);
   if (!state) return { kind: "unreadable" };
-  return boardReferentResolved(proposal, state) ? { kind: "resolved", referentId } : { kind: "live" };
+  const referentResolved = boardReferentResolved(proposal, state);
+  return referentResolved ? { kind: "resolved", referentId } : { kind: "live" };
 }
 
 // ── Drafted candidate (the LLM's output — a value from here on, never re-invoked) ─────────
