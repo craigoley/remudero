@@ -445,3 +445,117 @@ test("minting a proposal files no task, edits no acceptance criterion, and appro
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+// ── THE ESCALATE-OFF ARM IS THE ONE AN OPERATOR MEETS FIRST, AND NOTHING REACHED IT.
+// `runMeasurementCadenceReport`'s proof-debt block has two arms: with `escalate` on it calls
+// `mintProofDebtProposals` and WRITES; with `escalate` off it must still report whether a backlog
+// EXISTS, writing nothing — that is the whole point of the default posture (this module's policy
+// block: every verb on the cadence is a pure reader, and a cadence that writes nothing cannot
+// launder anything). The suite above supplied `escalate: true` at its only call site, so the off
+// arm was never executed and `diff-coverage` named all four of its lines. These two tests execute
+// it deliberately, and they pin BEHAVIOUR rather than line numbers: `backlog` must not require a
+// write, and `clear` must mean a measured absence rather than "we did not look".
+test("with escalate off, a real backlog is REPORTED and nothing is written", () => {
+  const root = tmp("rmd-proofdebt-noescalate-");
+  try {
+    const stateDir = join(root, "state");
+    mkdirSync(stateDir, { recursive: true });
+    const registryPath = join(stateDir, "inbox-proposals.json");
+
+    const planYaml = `
+- id: W1-T910
+  title: "a task whose proof can never resolve"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: medium
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "the symbol exists"
+      proof: "grep: aVanishedSymbol in src/lib/does-not-exist.ts"
+`;
+    const plan = loadPlanFromYaml(planYaml, "fixture");
+
+    const result = runMeasurementCadenceReport({
+      stateDir,
+      cwd: process.cwd(),
+      escalate: false,
+      gitLog: () => ({ dump: "", ref: "test" }),
+      registryPath,
+      proofDebt: {
+        tasks: plan.tasks,
+        pathExists: () => false,
+        shardPathFor: shardPathFor({ "W1-T910": "plan/tasks.d/W1-T910-fixture.yaml" }),
+      },
+    });
+
+    assert.ok(result.proofDebtReport, "the report is attached whether or not escalate is on");
+    assert.equal(result.proofDebtReport!.offenders.length, 1, "the audit still runs with escalate off");
+
+    assert.ok(result.proofDebtMint, "the mint OUTCOME is attached even when nothing is minted");
+    assert.equal(
+      result.proofDebtMint!.status,
+      "backlog",
+      "a real offender must read `backlog` with escalate off — an operator has to be able to see the backlog exists BEFORE opting into writes",
+    );
+    assert.deepEqual(result.proofDebtMint!.mintedProposalIds, [], "escalate off mints nothing");
+    assert.deepEqual(result.proofDebtMint!.excludedOffenders, [], "and excludes nothing on this arm");
+
+    assert.equal(
+      existsSync(registryPath),
+      false,
+      "THE LOAD-BEARING ASSERTION: the escalate-off arm must not touch the registry at all",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("with escalate off, an empty offender set reads `clear` — a measured absence, never an unlooked-at zero", () => {
+  const root = tmp("rmd-proofdebt-noescalate-clear-");
+  try {
+    const stateDir = join(root, "state");
+    mkdirSync(stateDir, { recursive: true });
+    const registryPath = join(stateDir, "inbox-proposals.json");
+
+    const planYaml = `
+- id: W1-T911
+  title: "a task whose proof resolves cleanly"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: medium
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "the symbol exists"
+      proof: "grep: aPresentSymbol in src/lib/measurement-cadence.ts"
+`;
+    const plan = loadPlanFromYaml(planYaml, "fixture");
+
+    const result = runMeasurementCadenceReport({
+      stateDir,
+      cwd: process.cwd(),
+      escalate: false,
+      gitLog: () => ({ dump: "", ref: "test" }),
+      registryPath,
+      proofDebt: {
+        tasks: plan.tasks,
+        pathExists: () => true, // the grep path resolves, so nothing is an offender
+        symbolFoundAt: () => true,
+        shardPathFor: shardPathFor({ "W1-T911": "plan/tasks.d/W1-T911-fixture.yaml" }),
+      },
+    });
+
+    assert.ok(result.proofDebtReport, "the report is attached even when it names nobody");
+    assert.equal(result.proofDebtReport!.offenders.length, 0, "control: this fixture really has no offender");
+    assert.ok(result.proofDebtMint, "the mint outcome is attached for an empty set too");
+    assert.equal(result.proofDebtMint!.status, "clear", "no offenders reads `clear`, the other side of the same arm");
+    assert.equal(existsSync(registryPath), false, "still no write");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
