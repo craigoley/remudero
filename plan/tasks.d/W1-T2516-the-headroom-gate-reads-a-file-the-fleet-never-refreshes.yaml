@@ -7,7 +7,7 @@
   principles: {tdd: strict}
   risk: high
   budget_usd: 16.00
-  files: [src/lib/account-usage.ts, test/the-headroom-gate-reads-a-file-the-fleet-never-refreshes.test.ts]
+  files: [src/lib/account-usage.ts, src/lib/worker.ts, test/the-headroom-gate-reads-a-file-the-fleet-never-refreshes.test.ts]
   origin: "operator-brief#we-lost-an-hour-to-the-session-limit-2026-08-30"
   plan_refs: ["W1-T197", "W1-T215"]
   status: queued
@@ -70,6 +70,17 @@
     assert a percentage — account-usage.ts's existing refusals are correct and stay. What changes is
     that on this host there is now something real to read.
 
+    FILE LIST CORRECTED AT AUTHOR TIME (2026-08-30), FROM THE CALL SITES RATHER THAN FROM MEMORY.
+    The first draft declared only `src/lib/account-usage.ts`. Remedy (a) has to capture the reading
+    BEFORE the worker home is destroyed, and the reap seam is not in that file:
+
+      git grep -n 'reapWorkerHome' -- src/ | grep -v worker-home.ts   => src/lib/worker.ts:51 (import)
+      git grep -n 'ensureWorkerKeychain' -- src/ | grep -v worker-home.ts => src/lib/worker.ts:48 (import)
+
+    So `src/lib/worker.ts` is where the capture lands, and an undeclared write there would have
+    tripped the reviewer's scope check on a task whose whole point is a file the fleet destroys.
+    Declared now rather than discovered mid-build. (The second grep is the sibling check for
+    W1-T2518, whose own `files:` already names worker.ts correctly — verified, not assumed.)
     RE-DERIVE RATHER THAN TRUST THIS ROW: `ls -la $(node -e 'console.log(require("os").homedir())')/.claude.json`
     on the daemon host, and compare its mtime against the newest `worker_home_reap` line in the
     ledger. A file older than the fleet's last dozen workers is this defect, visible in one command.
