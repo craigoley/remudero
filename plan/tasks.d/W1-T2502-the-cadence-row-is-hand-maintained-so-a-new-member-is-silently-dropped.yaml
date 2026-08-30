@@ -1,0 +1,67 @@
+- id: W1-T2502
+  title: "THE CADENCE LOG ROW IS HAND-MAINTAINED, SO EVERY NEW MEMBER IS SILENTLY DROPPED UNTIL SOMEBODY NOTICES — the result carries six members and the row names four, `adoptionReport` occurs ZERO times in the daemon, and W1-T2473 fixed this exact defect on the ADJACENT field two days ago without generalising it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 12.00
+  files: [src/lib/daemon.ts, src/lib/measurement-cadence.ts, test/the-cadence-row-names-every-member.test.ts]
+  origin: "operator-audit#nothing-dropped-2026-08-30"
+  plan_refs: ["W1-T2473", "W1-T2266", "W1-T2304"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE INSTANCE WAS FIXED AND THE CLASS WAS NOT, WHICH IS WHY THIS IS WORTH ITS OWN TASK. W1-T2473
+    found the adoption report computed every fire and logged nowhere, and added ONE line naming its
+    mint outcome. The report it was named after — the field directly above it — is still logged
+    nowhere. A hand-maintained row will keep losing members at the rate members are added.
+    SURFACE 1 members on the measurement cadence result = 6
+    SURFACE 2 members named in the daemon's cadence row = 4
+    SURFACE 3 occurrences of adoptionReport anywhere in the daemon = 0
+    SURFACE 4 gates requiring the row to name every member = 0
+    SURFACE 5 board_review occurrences in the daemon = 6
+
+    THE ROW IS DERIVED FROM THE RESULT, NOT ENUMERATED BESIDE IT, AND THAT IS THE ACTUAL FIX. A
+    third hand-added line closes today's gap and leaves the next one open. Building the row from the
+    result's own keys makes a new member self-reporting by construction, which is the difference
+    between fixing an instance and closing a class — the same distinction this repo draws whenever a
+    rule is moved out of prose and into something that refuses.
+
+    OPTIONAL MEMBERS ARE THE HAZARD AND THEY ARE OPTIONAL FOR A GOOD REASON. Three of the six are
+    optional on the TYPE ONLY, so a hand-built test literal simulating the daemon's injected
+    dependency still type-checks — the producer itself never omits them. A naive derivation would
+    therefore emit `undefined` keys for a legitimate test double and read as absence. Absent and
+    present-but-undefined must be distinguishable in the row.
+
+    NOT EVERY MEMBER IS EQUALLY SILENT AND THE FIX MUST NOT DOUBLE-REPORT. `boardReview` already has
+    its own handling; `adoptionReport` has none at all. The derivation names what is not already
+    named elsewhere rather than duplicating a row that exists.
+
+    THIS IS OBSERVABILITY, NOT BEHAVIOUR. Nothing about what the cadence RUNS changes — no new verb,
+    no new fire, no policy row. The only difference is that what it produced is recoverable from the
+    ledger afterwards, which is the precondition for every measurement question anyone asks of it.
+
+    NOT IN SCOPE: adding or removing a cadence member; changing when the cadence fires; and the verb
+    census W1-T2485 adds to it, which will benefit from this and does not depend on it.
+
+    THE RISK BAND IS RULE 19's SPAN, NOT BLAST RADIUS: two src stems plus a test, carrying two
+    independent acceptance concerns — the derived row and the optional-member distinction.
+  acceptance:
+    - claim: "every member the result carries is named in the logged row"
+      proof: "unit test: test/the-cadence-row-names-every-member.test.ts"
+    - claim: "a member added to the result appears in the row without editing the row"
+      proof: "unit test: test/the-cadence-row-names-every-member.test.ts"
+    - claim: "an absent optional member is distinguishable from one present and undefined"
+      proof: "unit test: test/the-cadence-row-names-every-member.test.ts"
+    - claim: "a member already reported by its own row is not duplicated"
+      proof: "unit test: test/the-cadence-row-names-every-member.test.ts"
+    - claim: "the four members named today keep their existing key names"
+      proof: "unit test: test/the-cadence-row-names-every-member.test.ts"
+    - claim: "what the cadence runs and when it fires are unchanged"
+      proof: "unit test: test/the-cadence-row-names-every-member.test.ts"
+    - claim: "a failure building the row never prevents the cadence from running"
+      proof: "unit test: test/the-cadence-row-names-every-member.test.ts"
+    - claim: "restoring the hand-enumerated row makes the added-member assertion fail"
+      proof: "unit test: test/the-cadence-row-names-every-member.test.ts"
