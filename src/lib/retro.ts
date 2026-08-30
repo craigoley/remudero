@@ -3942,11 +3942,33 @@ function round(n: number): number {
 // the retro already computes the gather and derives the next task from the
 // SAME GitHub-projected status drain uses; this only renders it.
 
-/** Collapse a wrapped markdown fragment into one line, stripping bold markers
- *  (the Standing rules use `**TITLE**` emphasis that reads oddly mid-sentence
- *  once collapsed). Pure text transform — no interpretation of meaning. */
-function collapseRuleText(s: string): string {
+/** Normalise ONE physical line of a rule: drop the `**TITLE**` emphasis the Standing rules use
+ *  (it reads oddly in the rendered list) and squeeze runs of whitespace. Pure text transform — no
+ *  interpretation of meaning, and DELIBERATELY per-line: it never joins a line to its neighbour. */
+function cleanRuleLine(s: string): string {
   return s.replace(/\*\*/g, "").replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Join a rule's physical lines back into ONE rule string while KEEPING those lines.
+ *
+ * W1-T2483 — WHY THIS NO LONGER COLLAPSES. This used to fold every continuation onto one line.
+ * That is not what "verbatim" means, and it broke a real gate:
+ * `test/rule-15-16-filing-misattribution.test.ts` judges a citation inside a THREE-LINE window,
+ * which is a proximity proxy — and proximity is a property of line breaks that a renderer owns.
+ * §12's rule 27 carries the bare prose "rule 15 itself stands" about ninety lines from any wording
+ * about who may file; collapsed onto one line, all ~108 of its lines became mutually adjacent and
+ * the gate fired on an adjacency the plan never had, reddening EVERY retro from that rule's
+ * landing onward (first observed on PR #3309). The gate is correct and is not touched.
+ *
+ * Blank lines are kept too, because a paragraph break is line structure as much as a wrap is —
+ * and dropping them would manufacture exactly the kind of adjacency this fix exists to remove.
+ * Trailing blanks are trimmed so a rule never ends in whitespace.
+ */
+function joinRuleLines(lines: string[]): string {
+  const cleaned = lines.map(cleanRuleLine);
+  while (cleaned.length > 0 && cleaned[cleaned.length - 1] === "") cleaned.pop();
+  return cleaned.join("\n");
 }
 
 /**
@@ -3969,28 +3991,32 @@ export function extractStandingRules(masterPlanMd: string): string[] {
   const section = lines.slice(startIdx + 1, endIdx);
 
   const rules: string[] = [];
-  let current = "";
+  let current: string[] = [];
   const isRuleStart = (l: string) => /^\d+[A-Z]?\.\s+\S/.test(l);
   const isBullet = (l: string) => /^[-*]\s+\S/.test(l);
+  const flush = (): void => {
+    if (current.length > 0) rules.push(joinRuleLines(current));
+    current = [];
+  };
   for (const raw of section) {
     const line = raw.trim();
-    if (!line) continue;
     if (isRuleStart(line)) {
-      if (current) rules.push(collapseRuleText(current));
-      current = line;
+      flush();
+      current = [line];
     } else if (isBullet(line)) {
       // A markdown bullet (`- ...`) is NOT a numbered rule's wrapped continuation —
       // it marks trailing prose after the numbered list (e.g. this section's closing
       // notes on how MASTER-PLAN.md itself is maintained). Stop extracting: nothing
       // past the numbered list is a Standing rule, however this section is worded later.
-      if (current) rules.push(collapseRuleText(current));
-      current = "";
+      flush();
       break;
-    } else if (current) {
-      current += " " + line;
+    } else if (current.length > 0) {
+      // A continuation line — INCLUDING a blank one. Blanks before the first rule are still
+      // ignored (nothing is open yet); inside a rule they are the paragraph breaks §12 writes.
+      current.push(line);
     }
   }
-  if (current) rules.push(collapseRuleText(current));
+  flush();
   return rules;
 }
 
@@ -4006,6 +4032,17 @@ export interface OrientationInput {
   nextTask?: Task;
   /** MASTER-PLAN §12 Standing rules, extracted via {@link extractStandingRules}. */
   standingRules: string[];
+}
+
+/**
+ * Render ONE standing rule as a markdown list item that KEEPS its own line breaks (W1-T2483):
+ * the first line carries the bullet, and every continuation is indented two spaces so it stays
+ * inside that item rather than becoming stray top-level prose. A blank line stays truly blank —
+ * markdown reads an indented block after one as a further paragraph of the SAME item.
+ */
+function orientationBullet(rule: string): string[] {
+  const [first, ...rest] = rule.split("\n");
+  return [`- ${first}`, ...rest.map((l) => (l === "" ? "" : `  ${l}`))];
 }
 
 /**
@@ -4029,7 +4066,7 @@ export function renderOrientation(input: OrientationInput): string {
       ].join("\n")
     : "(none runnable right now — the DAG is exhausted, every remaining task is blocked/unmet, or awaits `verify: human`)";
   const invariantLines = standingRules.length
-    ? standingRules.map((r) => `- ${r}`)
+    ? standingRules.flatMap(orientationBullet)
     : ["- (none extracted — see MASTER-PLAN.md §12 Standing rules directly)"];
 
   return [

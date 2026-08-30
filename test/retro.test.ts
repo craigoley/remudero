@@ -1244,14 +1244,22 @@ Some unrelated section with a numbered list that must NOT leak into §12:
 Unrelated section content that must never appear in the extracted list.
 `;
 
-test("extractStandingRules: pulls ONLY the numbered rules from §12, folding wrapped continuation lines back in", () => {
+// W1-T2483 CHANGED THE SHAPE ASSERTED HERE, DELIBERATELY. A wrapped continuation still belongs to
+// the SAME rule (it never becomes its own bullet — the property this test has always guarded), but
+// it now KEEPS its own line break instead of being folded onto one line. Collapsing was not
+// verbatim, and it made every rendered ORIENTATION.md trip the three-line proximity window in
+// test/rule-15-16-filing-misattribution.test.ts — see
+// test/orientation-preserves-the-line-structure-a-gate-reads.test.ts for that regression.
+test("extractStandingRules: pulls ONLY the numbered rules from §12, keeping each rule's own line breaks", () => {
   const rules = extractStandingRules(STANDING_RULES_FIXTURE);
   assert.deepEqual(rules, [
     "1. PROVENANCE OR IT DOESN'T GO IN A PROMPT.",
     "2. Trust, scheduling, strikes, budgets = deterministic predicates. Never LLM decisions.",
-    "3B. The merge gate is a GitHub-enforced CONTRACT, wrapped onto a SECOND line that must fold back into rule 3B, never becoming its own bullet.",
+    "3B. The merge gate is a GitHub-enforced CONTRACT, wrapped onto\na SECOND line that must fold back into rule 3B, never becoming its own bullet.",
     "20. A LAST NUMBERED RULE.",
   ]);
+  // The wrapped rule is ONE rule carrying TWO lines — not two rules, and not one collapsed line.
+  assert.equal(rules[2].split("\n").length, 2);
 });
 
 test("extractStandingRules: never leaks a numbered list from a DIFFERENT section, and stops at the trailing bullets after the numbered list", () => {
