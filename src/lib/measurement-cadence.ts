@@ -653,9 +653,14 @@ function isMintableAdoptionFinding(f: AdoptionFinding): boolean {
   return MINTABLE_ADOPTION_SHAPES.has(f.shape);
 }
 
-/** THE CEILING (Q3): at most this many NEW proposals minted per fire, so a backlog of hundreds of
- *  findings never floods the inbox in one tick — at the shipped cadence bound of `maxPerDay: 4`
- *  that is at most twelve mints a day before the inbox's own tiering sees any of them. */
+/** THE CEILING (Q3) — a PRIMARY CONTROL, never a backstop (W1-T1266's distinction, and this is
+ *  the arm that decides it): on any fire whose mintable finding set exceeds it, THIS is what stops
+ *  the mint loop, and nothing upstream would have. It is sized for the healthy case by design, so
+ *  it fires on a perfectly ordinary tick — which is exactly why it must not be read as a
+ *  fires-only-when-something-else-broke bound. At most this many NEW proposals are minted per
+ *  fire, so a backlog of hundreds of findings never floods the inbox in one tick — at the shipped
+ *  cadence bound of `maxPerDay: 4` that is at most twelve mints a day before the inbox's own
+ *  tiering sees any of them. */
 export const ADOPTION_MINT_CEILING = 3;
 
 /**
