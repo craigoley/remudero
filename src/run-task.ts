@@ -17161,6 +17161,15 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
  *    projection entry `unhandledEscalations` above already reads — `escalationsByPrNumber` carries
  *    them alongside the boolean, so naming an escalation costs zero extra reads: the fields were
  *    already in hand one line before this mapper, per this task's own rationale.
+ *  - `originatesFromProposalId` (W1-T2465 — design (iv)'s recursion bound, MADE REACHABLE) from
+ *    the SAME projection's `taskId` joined to the plan's own task, whose `origin:` names the
+ *    board-review proposal that produced it (`board-review:stale:<ref>` or
+ *    `board-review:escalation:<ref>`, exactly the id `board-review.ts` mints — a task's
+ *    `origin:` is declared plan metadata, Standing rule 17). ABSENCE MEANS NOT-SELF-PRODUCED,
+ *    NEVER SELF-PRODUCED: a PR whose task cannot be resolved, or whose `origin:` names anything
+ *    else, is left unmarked — the same fail-open direction every other field on this mapper
+ *    takes, because marking on an uncertain read would exclude a real board item from every
+ *    depth signal and every finding, i.e. blind the rung.
  */
 export interface BoardItemEscalationInfo {
   title?: string;
@@ -17168,16 +17177,25 @@ export interface BoardItemEscalationInfo {
   unverified?: true;
 }
 
+/** W1-T2465: the SAME `board-review:stale:<ref>` / `board-review:escalation:<ref>` shape
+ *  `board-review.ts` mints and `lib/inbox.ts`'s `deriveLegacyReferent` parses — duplicated here
+ *  deliberately rather than imported, the same "a deliberate, small duplication rather than a
+ *  cross-layer import" precedent `board-review.ts`'s own header sets, because importing either
+ *  of those (pure-module / registry) modules back from this reader would be a cycle. */
+const BOARD_REVIEW_PROPOSAL_ORIGIN_PATTERN = /^board-review:(?:stale|escalation):.+$/;
+
 export function boardItemsFromOpenPrs(
   prs: readonly OpenPrRest[],
   now: Date,
   escalationsByPrNumber: ReadonlyMap<number, BoardItemEscalationInfo> = new Map(),
+  originByPrNumber: ReadonlyMap<number, string> = new Map(),
 ): BoardItem[] {
   return prs.map((pr) => {
     const openedMs = pr.createdAt ? Date.parse(pr.createdAt) : Number.NaN;
     const ageHours = Number.isNaN(openedMs) ? 0 : Math.max(0, (now.getTime() - openedMs) / 3_600_000);
     const red = (pr.statusCheckRollup ?? []).filter((e) => e.conclusion === "FAILURE" || e.conclusion === "TIMED_OUT").length;
     const escalation = escalationsByPrNumber.get(pr.number);
+    const originatesFromProposalId = originByPrNumber.get(pr.number);
     return {
       id: `#${pr.number}`,
       isDraft: pr.isDraft === true,
@@ -17188,6 +17206,7 @@ export function boardItemsFromOpenPrs(
       ...(escalation?.title !== undefined ? { escalationTitle: escalation.title } : {}),
       ...(escalation?.issueUrl !== undefined ? { escalationIssueUrl: escalation.issueUrl } : {}),
       ...(escalation?.unverified ? { escalationUnverified: true as const } : {}),
+      ...(originatesFromProposalId !== undefined ? { originatesFromProposalId } : {}),
     };
   });
 }
@@ -17222,6 +17241,7 @@ export function defaultBoardReviewItems(config: Config, io: BoardReviewItemsIo =
     const { owner, repo } = (io.resolveOwnerRepo ?? resolveOwnerRepo)();
     const prs = (io.fetchOpenPrs ?? ((o: string, r: string) => fetchOpenPrsRest(o, r, ghJson)))(owner, repo);
     let escalations = new Map<number, BoardItemEscalationInfo>();
+    let originByPrNumber = new Map<number, string>();
     try {
       const plan = (io.loadPlan ?? loadPlan)(join(repoRoot, "plan", "tasks.yaml"));
       const proj = (io.projectPlan ?? projectPlan)(
@@ -17240,11 +17260,23 @@ export function defaultBoardReviewItems(config: Config, io: BoardReviewItemsIo =
             { title: p.escalationTitle, issueUrl: p.escalationIssueUrl, unverified: p.escalationUnverified },
           ] as const),
       );
+      // W1-T2465: the SAME projection's `taskId`, joined to the plan it was already built from,
+      // answers "was this PR's task born from a board-review proposal" with no second read.
+      // `plan.byId?.get(...)` is deliberately optional — a plan shape without an index (or a
+      // task the plan no longer carries) yields `undefined` here, never a throw, so this arm
+      // fails toward NOT-SELF-PRODUCED rather than taking the whole read (escalations included)
+      // down with it.
+      originByPrNumber = new Map(
+        [...proj.values()]
+          .filter((p) => p.prNumber !== undefined)
+          .map((p) => [p.prNumber!, plan.byId?.get(p.taskId)?.origin] as const)
+          .filter((entry): entry is [number, string] => BOARD_REVIEW_PROPOSAL_ORIGIN_PATTERN.test(entry[1] ?? "")),
+      );
     } catch {
-      // The escalation arm degrades to zero rather than taking the whole read down — the open-PR
-      // list is the arm that qualified on 2026-08-26 and it is already in hand.
+      // The escalation/origin arms degrade to zero rather than taking the whole read down — the
+      // open-PR list is the arm that qualified on 2026-08-26 and it is already in hand.
     }
-    return boardItemsFromOpenPrs(prs, io.now?.() ?? new Date(), escalations);
+    return boardItemsFromOpenPrs(prs, io.now?.() ?? new Date(), escalations, originByPrNumber);
   } catch {
     // AN OUTAGE YIELDS NO ITEMS, AND THAT IS THE CHOSEN FAIL DIRECTION, not an oversight. An
     // empty board makes `decideBoardReviewTrigger` answer `fire: false`, which is the same thing
