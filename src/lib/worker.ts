@@ -949,12 +949,14 @@ export interface SpawnWorkerArgs {
    * exit-path diagnostic-output discipline this file's `assertWorktreeBaseCurrent`'s `warn`
    * already uses).
    *
-   * INSTRUMENTATION ONLY (W1-T2441's own constraint): this does not change WHAT is reaped or
-   * WHEN. `reapWorkerHome`/`perRunWorkerHomeDir` are byte-for-byte unchanged — the home is still
-   * keyed on `runId` (so every fix spawn inside one daemon run still shares one), and a
-   * still-running sibling can still lose its home out from under it the moment another sibling
-   * exits. No remedy ships here; this only makes the already-computed fact observable, so the
-   * falsifier becomes a query instead of a guess.
+   * INSTRUMENTATION ONLY, AS OF W1-T2441 (that task's own constraint at the time): this option
+   * itself does not change WHAT is reaped or WHEN — it only surfaces the already-computed
+   * {@link WorkerHomeReapResult}. W1-T2441's own no-remedy premise — "the home is still keyed on
+   * `runId`, so every fix spawn inside one daemon run still shares one" — held at filing but no
+   * longer holds at this call site: W1-T2463 shipped the remedy below (`perRunWorkerHomeDir(...,
+   * { perSpawn: true })`), so a still-running sibling can no longer lose its home out from under
+   * it the moment another sibling exits. This option's own contract (observe, never decide) is
+   * unaffected by that — it still just makes whatever `reapWorkerHome` computed observable.
    */
   logHomeReap?: (result: WorkerHomeReapResult, spawn: { runId?: string; taskId?: string }) => void;
 }
@@ -975,7 +977,8 @@ export interface SpawnWorkerArgs {
  *    option, so a malformed sandbox block fails loud instead of the CLI silently
  *    dropping an invalid settings file and running unsandboxed.
  *  - `env.home` → a worker-home dir UNIQUE to this call (W1-T170: `perRunWorkerHomeDir`,
- *    preferring `args.runId` when supplied), materialized fresh and reaped in a
+ *    preferring `args.runId` when supplied, plus a W1-T2463 per-spawn token so two spawns
+ *    SHARING one `runId` still get distinct homes), materialized fresh and reaped in a
  *    `finally` regardless of outcome — the pre-W1-T170 singleton `<root>/worker-home`
  *    does not survive two overlapping spawns (WS-2).
  */
@@ -1006,7 +1009,16 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
   // root (`perRunWorkerHomeDir`), never the shared root itself; reaped below
   // on every exit path (including error) once this spawn is done with it.
   const workerHomeRoot = workerHomeDir(config);
-  const workerHome = perRunWorkerHomeDir(workerHomeRoot, args.runId);
+  // W1-T2463: opt IN to a per-spawn uniqueness token appended after args.runId (see
+  // perRunWorkerHomeDir's own doc, worker-home.ts). Every fix spawn inside one daemon run
+  // previously resolved to the SAME `worker-home-<runId>` (keyed on runId alone), so one
+  // spawn's teardown (reapWorkerHome, in the `finally` below) tore the directory out from
+  // under a still-live sibling — the ENOTEMPTY collision this task fixes. runId stays the
+  // FIRST component of the path (workerMarkerEnv below still writes the bare args.runId,
+  // untouched), so reclamation is unaffected; only THIS call site opts in — the OTHER
+  // caller in src/ (run-task.ts's readUsageSnapshot, "usage-probe") does not, so its
+  // stable, non-per-call home is unchanged.
+  const workerHome = perRunWorkerHomeDir(workerHomeRoot, args.runId, { perSpawn: true });
   const realHome = process.env.HOME ?? homedir();
   try {
     // W1-T235 (WS-7 keychain-unlock gate, macOS only): guarantee the DEDICATED
@@ -1235,9 +1247,12 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     //
     // W1-T2441: `reapWorkerHome` ALREADY COMPUTES which target it removed (or didn't) and
     // why, on every arm — previously discarded here in statement position (nothing ever
-    // assigned its return value). Surfaced now via `logHomeReap`, instrumentation only: the
-    // reap itself is byte-for-byte unchanged (still best-effort, still never throws, still
-    // keyed on the shared per-RUN home `perRunWorkerHomeDir` returns) — no remedy ships here.
+    // assigned its return value). Surfaced now via `logHomeReap` — the reap call itself
+    // (still best-effort, still never throws, still unconditional in this `finally`) is
+    // untouched by that instrumentation. W1-T2463: `workerHome` above is now this spawn's OWN
+    // per-spawn sibling (`perRunWorkerHomeDir(..., { perSpawn: true })`), not a home shared
+    // with every other spawn in the run, so this unconditional `rmSync` no longer tears down
+    // a still-live sibling's home out from under it.
     // The logger is wrapped so a caller-supplied `logHomeReap` can never turn this
     // previously-bulletproof teardown into a new failure mode.
     const homeReapResult = reapWorkerHome(workerHomeRoot, workerHome);
