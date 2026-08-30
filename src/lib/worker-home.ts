@@ -536,6 +536,29 @@ const workerHomeFsOps = { existsSync, rmSync, readdirSync, statSync, readFileSyn
 type WorkerHomeFsOps = typeof workerHomeFsOps;
 
 /**
+ * W1-T2463: the delimiter between a per-spawn worker home's `runId` component and its
+ * per-spawn uniqueness token (see {@link perRunWorkerHomeDir}'s `perSpawn` option and
+ * {@link sweepStaleWorkerHomes}, which parses it back out). Chosen because every runId
+ * observed in this repo (`grep -n 'const runId = ' src/run-task.ts`) is
+ * `${wordOrTaskId}-${Date.now()}` — hyphen/alphanumeric only, never a dot — so a dot can
+ * never collide with a runId's own characters and the split below is unambiguous.
+ */
+const PER_SPAWN_TOKEN_SEP = ".";
+
+/**
+ * W1-T2463 Q3: the reverse of the encoding {@link perRunWorkerHomeDir} applies under
+ * `perSpawn` — strips a trailing `${PER_SPAWN_TOKEN_SEP}<token>` suffix, if present, so a
+ * caller matching on `runId` (the inflight-lock/ledger-verdict lookups in
+ * {@link sweepStaleWorkerHomes}) compares against the SAME id the spawn was given, never
+ * the token-bearing full directory suffix. A suffix with no separator — the pre-W1-T2463
+ * shape, and `readUsageSnapshot`'s un-opted-in "usage-probe" shape — round-trips unchanged.
+ */
+function stripPerSpawnToken(suffix: string): string {
+  const i = suffix.indexOf(PER_SPAWN_TOKEN_SEP);
+  return i === -1 ? suffix : suffix.slice(0, i);
+}
+
+/**
  * The per-spawn worker HOME: `<workerHomeRoot>-<id>`, a SIBLING of the
  * singleton root (never the root itself, never nested under it — see
  * {@link isReapableWorkerHome}, which enforces exactly that shape on reap).
@@ -545,10 +568,26 @@ type WorkerHomeFsOps = typeof workerHomeFsOps;
  * no two overlapping spawns ever share a home — must hold even for a caller
  * that has not (yet) wired a runId through, so an absent/empty one falls
  * back to a fresh `randomUUID()` per call.
+ *
+ * W1-T2463: `opts.perSpawn` OPTS IN to appending a per-spawn uniqueness token after `id`
+ * (`<workerHomeRoot>-<id>.<token>`), so two spawns sharing one `runId` inside the same
+ * daemon run resolve to DISTINCT homes — the collision `worker.ts:1009` hit, keyed on
+ * `args.runId` alone. `runId` stays the FIRST/durable component (Q1: `workerMarkerEnv`
+ * still writes the bare `runId`, unaffected — this function's return value is never what
+ * reclamation matches on) and the DEFAULT (omitted `opts`) is BYTE-IDENTICAL to before
+ * (Q2: `readUsageSnapshot`'s `perRunWorkerHomeDir(root, "usage-probe")` call never opts in,
+ * so its stable, non-per-call home is unchanged). See {@link stripPerSpawnToken} for the
+ * matching decode {@link sweepStaleWorkerHomes} applies (Q3).
  */
-export function perRunWorkerHomeDir(workerHomeRoot: string, runId?: string): string {
+export function perRunWorkerHomeDir(
+  workerHomeRoot: string,
+  runId?: string,
+  opts: { perSpawn?: boolean; spawnToken?: () => string } = {},
+): string {
   const id = runId && runId.length > 0 ? runId : randomUUID();
-  return `${workerHomeRoot}-${id}`;
+  if (!opts.perSpawn) return `${workerHomeRoot}-${id}`;
+  const token = (opts.spawnToken ?? randomUUID)();
+  return `${workerHomeRoot}-${id}${PER_SPAWN_TOKEN_SEP}${token}`;
 }
 
 /**
@@ -781,7 +820,12 @@ export function sweepStaleWorkerHomes(root: string, opts: WorkerHomeSweepOpts = 
       continue;
     }
 
-    const runId = name.slice(prefix.length);
+    // W1-T2463 Q3: a per-spawn home's suffix is `<runId>${PER_SPAWN_TOKEN_SEP}<token>` when
+    // its call site opted in (worker.ts:1009) — strip the token back out so the lock/verdict
+    // lookups below compare against the SAME runId the spawn was given, never the full,
+    // token-bearing directory suffix. A pre-W1-T2463 (or un-opted-in) suffix has no separator
+    // and round-trips unchanged.
+    const runId = stripPerSpawnToken(name.slice(prefix.length));
     if (findLiveInflightLockForRun(inflightDir, runId, f)) {
       kept.push(name); // live run: kept however old — no age check at all (claim 2)
       continue;

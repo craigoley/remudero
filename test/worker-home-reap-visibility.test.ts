@@ -3,9 +3,11 @@
 // but `src/lib/worker.ts:1178` called it in statement position and discarded the return value
 // (`grep -acE "=\s*reapWorkerHome\(" src/lib/worker.ts` read 0 before this task). This suite
 // proves the result is no longer thrown away: the target/reason/spawn-identity are all
-// observable, the reap stays best-effort and never throws on any arm, and — per this task's own
-// "do not ship the remedy" constraint — the home is still keyed on the run, not the spawn, so
-// the underlying shared-home defect this instrumentation exists to make queryable still fires.
+// observable, and the reap stays best-effort and never throws on any arm. Per this task's own
+// "do not ship the remedy" constraint, the home was STILL keyed on the run alone (not the
+// spawn) when this suite was filed — W1-T2463 has since shipped that remedy at the spawnWorker
+// call site (worker.ts:1009), so the e2e tests below observe a per-spawn-token-bearing target
+// rather than the bare `worker-home-<runId>` literal; see test/worker-home-per-spawn.test.ts.
 
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
@@ -163,7 +165,10 @@ function fakeContainment(pid: number) {
 
 test("spawnWorker (end-to-end, SUCCESS path): logHomeReap observes reaped=true with the real target and spawn identity", async () => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-worker-home-reap-e2e-success-"));
-  const expectedHome = join(dir, "worker-home-reap-vis-success");
+  // W1-T2463: spawnWorker now opts INTO a per-spawn uniqueness token appended after the
+  // runId (`worker-home-<runId>.<token>`, worker.ts:1009/worker-home.ts's `perSpawn`), so the
+  // literal target is no longer predictable ahead of time — only its runId-keyed PREFIX is.
+  const expectedHomePrefix = join(dir, "worker-home-reap-vis-success");
   const observed: Array<{ result: WorkerHomeReapResult; spawn: { runId?: string; taskId?: string } }> = [];
   await spawnWorker({
     ...e2eSpawnWorkerArgs(dir, "reap-vis-success", { taskId: "T-success" }),
@@ -174,15 +179,20 @@ test("spawnWorker (end-to-end, SUCCESS path): logHomeReap observes reaped=true w
 
   assert.equal(observed.length, 1, "logHomeReap must be called exactly once, on the success exit path");
   assert.equal(observed[0].result.reaped, true);
-  assert.equal(observed[0].result.target, expectedHome, "the SAME target the reap actually removed must be what's observed");
-  assert.equal(existsSync(expectedHome), false, "sanity: the home really was reaped");
+  const observedTarget = observed[0].result.target;
+  assert.ok(observedTarget, "a reaped:true result must always name its target");
+  assert.ok(
+    observedTarget.startsWith(`${expectedHomePrefix}.`),
+    "the observed target keeps runId as its durable prefix, with a W1-T2463 per-spawn token appended after it",
+  );
+  assert.equal(existsSync(observedTarget), false, "sanity: the SAME target the reap actually removed is really gone");
   assert.equal(observed[0].spawn.runId, "reap-vis-success");
   assert.equal(observed[0].spawn.taskId, "T-success");
 });
 
 test("spawnWorker (end-to-end, ERROR path): logHomeReap STILL observes the reap when the SDK stream throws", async () => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-worker-home-reap-e2e-error-"));
-  const expectedHome = join(dir, "worker-home-reap-vis-error");
+  const expectedHomePrefix = join(dir, "worker-home-reap-vis-error"); // see W1-T2463 note above
   const observed: Array<{ result: WorkerHomeReapResult; spawn: { runId?: string; taskId?: string } }> = [];
   await assert.rejects(
     () =>
@@ -196,8 +206,10 @@ test("spawnWorker (end-to-end, ERROR path): logHomeReap STILL observes the reap 
   );
   assert.equal(observed.length, 1, "logHomeReap must fire on the thrown-error exit path too — the reap itself always runs there");
   assert.equal(observed[0].result.reaped, true);
-  assert.equal(observed[0].result.target, expectedHome);
-  assert.equal(existsSync(expectedHome), false);
+  const observedTarget = observed[0].result.target;
+  assert.ok(observedTarget, "a reaped:true result must always name its target");
+  assert.ok(observedTarget.startsWith(`${expectedHomePrefix}.`));
+  assert.equal(existsSync(observedTarget), false);
 });
 
 test("spawnWorker (end-to-end): a logHomeReap that itself THROWS never breaks the surrounding teardown — best-effort, never surfaces", async () => {
