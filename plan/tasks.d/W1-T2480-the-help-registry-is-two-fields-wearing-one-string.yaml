@@ -1,0 +1,80 @@
+- id: W1-T2480
+  title: "rmd --help PRINTS 41111 CHARACTERS ON 63 UNWRAPPED LINES AND THE README POINTS A NEW READER STRAIGHT AT IT — and the split it needs already exists implicitly, because commandSyntax recovers the invocation shape with usage.split(/\\s{2,}#/) at read time. Give CommandSpec the fields it is already being parsed into, and render name plus summary at the top level"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 16.00
+  files: [src/run-task.ts, scripts/generate-cli-reference.mjs, docs/cli-reference.md, test/help-renders-a-summary-not-a-paragraph.test.ts, test/help-registry.test.ts]
+  origin: "operator-brief#keep-going-2026-08-30"
+  plan_refs: ["W1-T47", "W1-T48", "W1-T373"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE STRUCTURE IS ALREADY THERE AND IS RECOVERED BY A REGEX. `commandSyntax` (run-task.ts) is
+    literally `commandSpec(name).usage.split(/\s{2,}#/)[0].trimEnd()` — the registry has carried a
+    syntax field and a description field in one string since W1-T47, and one call site pulls them
+    apart at read time to build inline error hints. This task does not invent a split; it gives the
+    record the fields it is already being parsed into, and deletes the parse.
+
+    THE RATIO IS THE ARGUMENT, NOT THE UGLINESS. Measured off the real array at head:
+    SURFACE 1 commands in the registry = 63
+    SURFACE 2 characters rmd --help prints today = 41111
+    SURFACE 3 characters the syntax halves total = 2744
+    SURFACE 4 commands whose usage exceeds 300 characters = 49
+    SURFACE 5 commands with no syntax-description separator = 0
+    SURFACE 6 longest single usage line in characters = 2117
+    The syntax halves are 6.8 percent of the string. A top-level help that printed name plus a
+    short summary would be a small fraction of 41111 characters instead of roughly 411 wrapped rows
+    at a hundred columns, and README sends a first-time reader to exactly that output.
+
+    SURFACE 5 IS A LATENT FAIL-OPEN AND IS REPORTED AS LATENT, NEVER AS A LIVE DEFECT. Every entry
+    carries the separator today, so `commandSyntax` is correct on the current corpus. But its
+    failure mode is silent and unbounded: an entry authored without the two-space-hash returns its
+    WHOLE usage as the syntax, so an inline error hint would print a paragraph. A typed field
+    cannot fail that way, which is a second reason to stop recovering structure by pattern.
+
+    NOTHING IS DELETED FROM THE RECORD. The long prose is why this registry is trustworthy — it
+    carries flag semantics, exit-code tables and the PR citations that make a verb auditable. It
+    moves to `detail`, which `rmd <cmd> --help` and `docs/cli-reference.md` both render in full.
+    The acceptance criteria pin that every existing character survives somewhere, because a
+    "shorter help" that quietly drops prose would be a regression wearing an improvement's name.
+
+    THE DRIFT GATE IS WHAT MAKES THIS SAFE, AND IT ALREADY EXISTS. `cli-reference:check` (W1-T48)
+    fails CI when the committed doc differs from a fresh render of the registry, and
+    `test/help-registry.test.ts` pins registry-to-dispatch coverage. Both keep working across the
+    split, which is why the doc is in `files:` — it is regenerated, never hand-edited.
+
+    NOT IN SCOPE: colour, terminal-width detection and the section-rule helper, which are
+    W1-T2475's; any change to what a command DOES; and adding or removing a command. This task
+    changes the SHAPE of the record and the top-level rendering, nothing else.
+
+    `test/help-registry.test.ts` IS DECLARED DELIBERATELY even though this task does not rewrite it:
+    criterion 7 proves the registry-to-dispatch coverage still holds, and `judgeCriterion` can only
+    carve a proof out as `not_yet_built` when the path it names is a member of `files:`. Undeclared,
+    that criterion would grade `executed_fail` and fail the PR outright rather than degrade.
+
+    THE RISK BAND IS RULE 19's SPAN, NOT BLAST RADIUS: `files:` spans five stems across three
+    independent acceptance concerns — the record shape, the renderers, and the generated doc — so
+    sizingViolation refuses risk:medium for the span alone.
+  acceptance:
+    - claim: "the top-level help prints one short summary per command rather than its full prose"
+      proof: "unit test: test/help-renders-a-summary-not-a-paragraph.test.ts"
+    - claim: "every character of today's usage prose survives in the per-command help or the reference doc"
+      proof: "unit test: test/help-renders-a-summary-not-a-paragraph.test.ts"
+    - claim: "the syntax field is read from the record and no longer recovered by a separator regex"
+      proof: "unit test: test/help-renders-a-summary-not-a-paragraph.test.ts"
+    - claim: "an entry authored without a separator can no longer return a paragraph as its syntax"
+      proof: "unit test: test/help-renders-a-summary-not-a-paragraph.test.ts"
+    - claim: "every registry entry carries a non-empty summary under a stated character cap"
+      proof: "unit test: test/help-renders-a-summary-not-a-paragraph.test.ts"
+    - claim: "the generated reference doc still matches a fresh render of the registry"
+      proof: "unit test: test/help-renders-a-summary-not-a-paragraph.test.ts"
+    - claim: "every dispatched command still has a registry entry and every entry is still dispatched"
+      proof: "unit test: test/help-registry.test.ts"
+    - claim: "per-command help still contains that command's full detail verbatim"
+      proof: "unit test: test/help-renders-a-summary-not-a-paragraph.test.ts"
+    - claim: "no command is added or removed by this change"
+      proof: "unit test: test/help-renders-a-summary-not-a-paragraph.test.ts"
