@@ -1,0 +1,94 @@
+- id: W1-T2517
+  title: "THE DISPATCH LOOP IS NEVER TOLD THE WINDOW CLOSED — `apiError` is produced 13 times across worker.ts/run-task.ts and reaches daemon.ts/drain.ts ZERO times, so a lockout is re-discovered per task at a full spawn each (worker home, containment preflight, isolation preflight, worktree); the spawn-infra backoff in the SAME file is the built, proven precedent for exactly this shape"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 18.00
+  files: [src/lib/daemon.ts, test/the-dispatch-loop-is-never-told-the-window-closed.test.ts]
+  origin: "operator-brief#we-lost-an-hour-to-the-session-limit-2026-08-30"
+  plan_refs: ["W1-T113", "W1-T46", "W1-T2515", "W1-T2516"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE SIGNAL IS ALREADY COMPUTED AND DISCARDED — TWO GREPS, CONTROLS ON BOTH SIDES:
+
+      git grep -cE 'apiError|api_error' -- src/lib/daemon.ts src/lib/drain.ts   => 0 (both files)
+      git grep -c  'spawnInfra|SPAWN_INFRA' -- src/lib/daemon.ts                => 6   (control)
+      git grep -c  'apiError' -- src/lib/worker.ts src/run-task.ts              => 4, 9 (control)
+
+    The zero is coverage, not a broken query: the same tool over the same file finds a DIFFERENT
+    backoff signal six times, and finds the api-error signal thirteen times where it is produced.
+
+    WHAT THAT COSTS PER TASK, FROM THE DAEMON LOG. Rediscovery is not free — each task the daemon
+    tries during a lockout pays the full pre-spawn sequence before the refusal:
+    `containment preflight PASSED`, `isolation preflight PASSED`, `pruned N stale worktree(s)`,
+    `Preparing worktree`, worker-home creation, then the recon and implement spawns. W1-T2471 spent
+    that sequence, ran 25.9 minutes to turn 77, and was refused; the daemon then logged
+    `daemon.block.transient_retry transient_retries: 1` at 19:55:22.966Z and re-queued it, and the
+    next drain dispatched W1-T2471 alongside W1-T2489 and W1-T2491. Three lanes, each rediscovering
+    the same closed window independently.
+
+    WHY PER-TASK STATE CANNOT SEE IT. `blockRetryStates` is a `Map` keyed by task id and
+    `MAX_TRANSIENT_RETRIES` is spent per task, so every new id arrives with a fresh budget. This is
+    the same argument W1-T113 already made for spawn-infra failures, whose escalation dedup is
+    deliberately content-keyed rather than task-keyed because "the vanished-binary class blocks
+    dispatch identically for every task, so task-id keying would still re-escalate once per distinct
+    task hitting the SAME cause". A closed usage window is that class exactly. It has no counter.
+
+    THE PRECEDENT IS IN THE FILE THIS TASK EDITS. `DEFAULT_MAX_SPAWN_INFRA_BACKOFF_MS = 30 * 60_000`
+    with its stated contract — "consecutive failures double `pollIntervalMs` up to this cap rather
+    than hammering a dispatch that is failing for an infrastructure reason nobody has fixed yet" — is
+    the same shape for a different signal: built, proven, policy-as-data, and already resetting on
+    success. A closed window is precisely "a dispatch that is failing for a reason nobody has fixed
+    yet", with the bonus that it fixes itself at a known time.
+
+    THE DISCRIMINATOR IS CONSECUTIVE ACROSS DIFFERENT TASK IDS, AND THAT IS THE WHOLE DESIGN. One
+    task ending `blocked_transient` is noise — a blip, a bad envelope. Two or three DIFFERENT tasks
+    in a row ending the same way is not several broken tasks; it is one broken window. Anything keyed
+    on task id is structurally unable to notice.
+
+    COMPOSES WITH, DOES NOT DUPLICATE, ITS SIBLINGS. W1-T2515 stops one task burning its retries in
+    3.5 seconds and teaches the classifier to read `resets 8:50pm (UTC)`. W1-T2516 restores the
+    headroom gate's input so the fleet need not learn by refusal at all. THIS task is the layer
+    between: once one task HAS been refused, no further task should pay a spawn to learn the same
+    thing. If W1-T2515 lands first, the reset time it parses is the natural input here — hold
+    dispatch until then rather than backing off blindly — but this task must not REQUIRE it: a
+    consecutive-count backoff works with no reset time at all, and that is the shape to build.
+
+    IT MUST NOT BECOME A NEW WAY TO STALL. The cap bounds it; any dispatch reaching a real verdict
+    resets it; STOP/PAUSE/QUIET_HOURS keep today's meaning; and the hold must be VISIBLE — a ledger
+    row and a console line naming the reason and the expected resume, never a silent idle that reads
+    as a healthy queue. A task's own build failure must still strike and still escalate: this pauses
+    DISPATCH, it never converts a failure into a window verdict or clears a strike.
+
+    RE-DERIVE RATHER THAN TRUST THE INCIDENT: `rmd ledger-grep '"verdict":"blocked_transient"'` over
+    the union, grouped by task id and ordered by time — consecutive rows with DIFFERENT task ids
+    inside one window are this defect. Print the corpus's newest ts beside the answer, because these
+    rows rotate.
+
+    NOT IN SCOPE: the retry cadence within one task (W1-T2515); the gate's input (W1-T2516); the
+    `subtype: "success"` mislabelling on a refused envelope, filed separately; and the lane count.
+
+    THE RISK BAND IS BLAST RADIUS: one src stem plus a test is a narrow span, but a backoff that
+    fires wrongly stops the fleet dispatching anything at all — a worse outage than the one it
+    prevents.
+  acceptance:
+    - claim: "consecutive transient refusals across DIFFERENT tasks hold dispatch"
+      proof: "unit test: test/the-dispatch-loop-is-never-told-the-window-closed.test.ts"
+    - claim: "one task ending transient holds nothing"
+      proof: "unit test: test/the-dispatch-loop-is-never-told-the-window-closed.test.ts"
+    - claim: "the same task retrying does not read as a fleet-wide outage"
+      proof: "unit test: test/the-dispatch-loop-is-never-told-the-window-closed.test.ts"
+    - claim: "the hold is bounded by a cap and never grows without limit"
+      proof: "unit test: test/the-dispatch-loop-is-never-told-the-window-closed.test.ts"
+    - claim: "a dispatch reaching a real verdict resets the hold to its floor"
+      proof: "unit test: test/the-dispatch-loop-is-never-told-the-window-closed.test.ts"
+    - claim: "the hold writes a ledger row and a console line naming its reason and expected resume"
+      proof: "unit test: test/the-dispatch-loop-is-never-told-the-window-closed.test.ts"
+    - claim: "a task's own build failure still strikes and escalates, never masked as a window"
+      proof: "unit test: test/the-dispatch-loop-is-never-told-the-window-closed.test.ts"
+    - claim: "removing the cross-task counter makes the consecutive-different-tasks assertion fail"
+      proof: "unit test: test/the-dispatch-loop-is-never-told-the-window-closed.test.ts"

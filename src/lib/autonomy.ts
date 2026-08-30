@@ -60,7 +60,7 @@
 // correctness measurement (that is the quality of what shipped; this is the quantity that
 // shipped untouched); alerting or thresholds on the rate.
 
-import { resolveLedgerUnion, type LedgerGrepFsDeps, type LedgerUnionResult } from "./ledger-grep.js";
+import { resolveLedgerUnion, type LedgerGrepFsDeps, type LedgerUnionOptions, type LedgerUnionResult } from "./ledger-grep.js";
 import { parseGitEventDump, type GitCommitEvent, type VerdictClass } from "./verdict-calibration.js";
 
 export type { VerdictClass };
@@ -137,9 +137,21 @@ export interface AutonomyLedgerMining {
 /**
  * Mine every touch-relevant ledger line under `stateDir`, over the ledger UNION (never the live
  * file alone — see the module doc). Pure apart from the injected fs.
+ *
+ * `opts.since` (W1-T2484) is this module's proof of `resolveLedgerUnion`'s new window parameter:
+ * a caller who only wants merges from some instant onward can pass it straight through, and any
+ * rotation stamped before it is skipped WITHOUT being opened (see `LedgerUnionOptions.since` and
+ * `ledger-grep.ts`'s module doc for why that skip cannot drop a matching row). OMITTED, this
+ * reads the same unwindowed union it always has — the eight other `resolveLedgerUnion` callers
+ * are deliberately left unconverted (see this repo's W1-T2484 plan record) and stay correct
+ * exactly because the parameter is optional.
  */
-export function mineAutonomyLedgerLines(stateDir: string, fsDeps?: LedgerGrepFsDeps): AutonomyLedgerMining {
-  const ledger = resolveLedgerUnion(stateDir, LEDGER_STEP_PATTERN, fsDeps);
+export function mineAutonomyLedgerLines(
+  stateDir: string,
+  fsDeps?: LedgerGrepFsDeps,
+  opts: LedgerUnionOptions = {},
+): AutonomyLedgerMining {
+  const ledger = resolveLedgerUnion(stateDir, LEDGER_STEP_PATTERN, fsDeps, opts);
   if (!ledger.ok) return { ledger, linesByTaskId: new Map() };
 
   const byTask = new Map<string, Record<string, unknown>[]>();

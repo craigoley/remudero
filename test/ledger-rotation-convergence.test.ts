@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { gunzipSync } from "node:zlib";
 import {
   DECISION_RELEVANT_LEDGER_STEPS,
   HEALTH_STEP_RETENTION_WINDOW_MS,
@@ -39,6 +40,14 @@ function rawLine(step: string, taskId: string, tsMs: number, extra: Record<strin
     step,
     ...extra,
   });
+}
+
+/** Reads a `rotateLedger` archive back as text regardless of which form it landed in (W1-T2482:
+ *  a rotation now gzips its archive by default, so `result.archivePath` ends `.ndjson.gz`) —
+ *  the assertion below is about which lines survived rotation, not which bytes are on disk. */
+function readArchiveContent(path: string): string {
+  const buf = readFileSync(path);
+  return (path.endsWith(".gz") ? gunzipSync(buf) : buf).toString("utf8");
 }
 
 function archivesIn(dir: string): string[] {
@@ -153,7 +162,7 @@ test("CONVERGENCE — when the retained core alone would exceed the ceiling, the
     // pre-rotation, absent post-rotation) and every SURVIVING decision line, then assert no
     // shed line is newer than any surviving one — "oldest first," proven structurally rather
     // than by hardcoding one exact boundary count (which would be a brittle byte-budget guess).
-    const archiveContent = readFileSync(result.archivePath as string, "utf8");
+    const archiveContent = readArchiveContent(result.archivePath as string);
     assert.ok(archiveContent.includes("W1-OLD-0"), "every pre-rotation line, including shed ones, is preserved verbatim in the archive");
     const archiveLines = archiveContent
       .trim()

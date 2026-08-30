@@ -15,6 +15,7 @@ import {
 } from "node:fs";
 import { hostname } from "node:os";
 import { basename, dirname, join } from "node:path";
+import { gzipSync } from "node:zlib";
 
 /**
  * Append-only NDJSON ledger (MASTER-PLAN §9). Records the run's step timeline,
@@ -1158,11 +1159,13 @@ function readSyncRange(path: string, start: number, end: number): string {
  *  single writeSync call (same "one syscall, no interleave window" discipline appendLedger
  *  itself uses), then swapped into place with a single renameSync — the swap itself is
  *  atomic on any POSIX filesystem, so a concurrent reader (readLedgerLines/readLedgerTail)
- *  only ever sees the whole old file or the whole new one, never a partial rewrite. */
-function writeFileAtomic(path: string, content: string): void {
+ *  only ever sees the whole old file or the whole new one, never a partial rewrite. `content`
+ *  accepts a `Buffer` (gzip's own output, W1-T2482) as well as a `string`, so the same atomic
+ *  staging idiom covers a compressed archive without a UTF-8 round trip corrupting its bytes. */
+function writeFileAtomic(path: string, content: string | Buffer): void {
   mkdirSync(dirname(path), { recursive: true });
   const tmpPath = `${path}.rotate-tmp-${process.pid}-${Math.random().toString(36).slice(2)}`;
-  const buf = Buffer.from(content, "utf8");
+  const buf = Buffer.isBuffer(content) ? content : Buffer.from(content, "utf8");
   const fd = openSync(tmpPath, "w");
   try {
     const written = writeSync(fd, buf, 0, buf.length);
@@ -1181,11 +1184,59 @@ function datedArchivePath(path: string, now: Date): string {
   return join(dirname(path), `${base}.${stamp}.ndjson`);
 }
 
+/** Minimal fs surface {@link writeArchive} needs for compression, injectable (same reason
+ *  {@link LedgerRotationFsDeps} is) so a test can force the compression step itself to fail —
+ *  proving the plain-archive fallback below — without monkey-patching `node:zlib` globally. */
+export interface LedgerArchiveFsDeps {
+  gzipSync: (buf: Buffer) => Buffer;
+}
+
+const realArchiveFs: LedgerArchiveFsDeps = {
+  gzipSync: (buf) => gzipSync(buf),
+};
+
+/**
+ * W1-T2482 — COMPRESS AT ROTATION, THE HALF THE READER ALREADY EXPECTED. `ledger-grep.ts`'s
+ * `ledgerRotationEntries` has classified `<base>.<stamp>.ndjson.gz` as gzip-form since W1-T444;
+ * this writer never produced one, so every rotation on a long-lived host accumulated plain and
+ * every union read (11 modules) paid to scan all of them. Measured on the incident host: 47
+ * plain archives, 199M -> 29M after gzip, 87.6-93.7% per-file reduction.
+ *
+ * `plainArchivePath` is the name `datedArchivePath` chose (still `.ndjson`, no `.gz`) — the
+ * SAME dated name a caller reading `result.archivePath` back from before this task would have
+ * seen, just with a suffix appended once compression is known to have succeeded, so the
+ * pointer/log line always names the file that actually exists on disk.
+ *
+ * FALLBACK, NOT LOSS: if `gzipSync` itself throws (OOM, a future zlib regression, an injected
+ * test double), the archive lands PLAIN at `plainArchivePath` — the pre-W1-T2482 shape the
+ * union reader has always classified — rather than the rotation losing the snapshot outright.
+ * A rotation's whole job is "the audit trail is relocated, never deleted" (see `rotateLedger`'s
+ * own doc); compression is an optimization layered on top of that guarantee, never a
+ * precondition for it.
+ */
+function writeArchive(plainArchivePath: string, snapshot: string, fsDeps: LedgerArchiveFsDeps): string {
+  try {
+    const compressed = fsDeps.gzipSync(Buffer.from(snapshot, "utf8"));
+    const gzipPath = `${plainArchivePath}.gz`;
+    writeFileAtomic(gzipPath, compressed);
+    return gzipPath;
+  } catch (err) {
+    console.error(
+      `ledger: rotation compression failed for ${plainArchivePath}, archiving plain (${(err as Error)?.message ?? String(err)})`,
+    );
+    writeFileAtomic(plainArchivePath, snapshot);
+    return plainArchivePath;
+  }
+}
+
 /** What one {@link rotateLedger} call did. */
 export interface LedgerRotationResult {
   /** False when the ledger was absent or already at/under the ceiling — nothing to do. */
   rotated: boolean;
-  /** Absolute path to the dated archive holding every pre-rotation line verbatim — set only when `rotated`. */
+  /** Absolute path to the dated archive holding every pre-rotation line verbatim — set only
+   *  when `rotated`. Ends in `.ndjson.gz` (the form {@link writeArchive}/ledger-grep.ts's
+   *  `ledgerRotationEntries` both already call "gzip") unless compression itself failed, in
+   *  which case it ends in plain `.ndjson` — see {@link writeArchive}'s own doc. */
   archivePath?: string;
   /** Lines relocated to the archive because they were neither decision-relevant nor parseable. */
   archivedLineCount?: number;
@@ -1208,6 +1259,13 @@ export interface LedgerRotationResult {
  *
  * A no-op (`{ rotated: false }`) when the ledger is absent or not yet over `ceilingBytes`.
  *
+ * COMPRESSION (W1-T2482): the dated archive is gzipped via {@link writeArchive} before it is
+ * written — the live path rewritten below is NEVER compressed, only the just-rotated snapshot,
+ * so an append-in-progress on the live ledger is untouched by this. `ledger-grep.ts`'s union
+ * reader has classified both `.ndjson.gz` and plain `.ndjson` rotations since W1-T444, so this
+ * needs no reader-side change; it only stops the writer from producing the form the reader was
+ * built to read but never received.
+ *
  * CONCURRENCY: appendLedger never holds a long-lived file descriptor — open, one writeSync,
  * close, every single call (see its own doc) — so the only exposure here is the window
  * between this function's initial snapshot read and its final atomic rename. That window is
@@ -1222,17 +1280,23 @@ export interface LedgerRotationResult {
  */
 export function rotateLedger(
   path: string,
-  opts: { ceilingBytes?: number; fsDeps?: LedgerRotationFsDeps; now?: () => Date } = {},
+  opts: {
+    ceilingBytes?: number;
+    fsDeps?: LedgerRotationFsDeps;
+    now?: () => Date;
+    archiveFsDeps?: LedgerArchiveFsDeps;
+  } = {},
 ): LedgerRotationResult {
   const ceilingBytes = opts.ceilingBytes ?? LEDGER_ROTATION_CEILING_BYTES;
   const fsDeps = opts.fsDeps ?? realRotationFs;
+  const archiveFsDeps = opts.archiveFsDeps ?? realArchiveFs;
   if (!ledgerExceedsRotationCeiling(path, ceilingBytes, fsDeps)) return { rotated: false };
 
   const size0 = statSync(path).size;
   const snapshot = readSyncRange(path, 0, size0);
 
-  const archivePath = datedArchivePath(path, opts.now?.() ?? new Date());
-  writeFileAtomic(archivePath, snapshot);
+  const plainArchivePath = datedArchivePath(path, opts.now?.() ?? new Date());
+  const archivePath = writeArchive(plainArchivePath, snapshot, archiveFsDeps);
 
   // ONE clock read for the whole rotation — the health-window filter, the shed pointer's size
   // estimate, and the shed pointer's actual `ts` all agree on the same instant.

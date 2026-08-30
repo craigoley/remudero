@@ -15,6 +15,7 @@ import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { gunzipSync } from "node:zlib";
 import { fileURLToPath } from "node:url";
 import {
   DECISION_RELEVANT_LEDGER_STEPS,
@@ -45,6 +46,14 @@ import { parseWhitelistedProof, narrowNameFilteredArgs } from "../src/lib/review
 
 function tmpDir(): string {
   return mkdtempSync(join(tmpdir(), "rmd-ledger-rotation-"));
+}
+
+/** Reads a `rotateLedger` archive back as text regardless of which form it landed in (W1-T2482:
+ *  a rotation now gzips its archive by default, so `result.archivePath` ends `.ndjson.gz`) —
+ *  every assertion below is about which lines survived rotation, not which bytes are on disk. */
+function readArchiveContent(path: string): string {
+  const buf = readFileSync(path);
+  return (path.endsWith(".gz") ? gunzipSync(buf) : buf).toString("utf8");
 }
 
 function noiseLine(n: number): string {
@@ -292,7 +301,7 @@ test("ledgerExceedsRotationCeiling: a ledger over the ceiling with no archived r
     const result = rotateLedger(ledgerPath, { ceilingBytes: ceiling });
     assert.equal(result.rotated, true);
     assert.ok(result.archivePath, "a rotation that fires must name the archive it wrote");
-    const archiveContent = readFileSync(result.archivePath as string, "utf8");
+    const archiveContent = readArchiveContent(result.archivePath as string);
     assert.equal(archiveContent.trim().split("\n").length, 20, "the archive holds every pre-rotation line verbatim");
 
     assert.equal(
@@ -465,7 +474,7 @@ test("rotateLedger: a malformed (non-JSON) line is archived, never retained live
     const result = rotateLedger(ledgerPath, { ceilingBytes: ceiling });
     assert.equal(result.rotated, true);
 
-    const archiveContent = readFileSync(result.archivePath as string, "utf8");
+    const archiveContent = readArchiveContent(result.archivePath as string);
     assert.ok(archiveContent.includes("{not valid json at all"), "the malformed line survives verbatim in the archive");
 
     const liveContent = readFileSync(ledgerPath, "utf8");
