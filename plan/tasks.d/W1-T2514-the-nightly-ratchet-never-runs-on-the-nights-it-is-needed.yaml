@@ -1,0 +1,108 @@
+- id: W1-T2514
+  title: "THE NIGHTLY MUTATION RATCHET IS SKIPPED ON EVERY NIGHT IT FAILS — the per-file Stryker loop deliberately runs to the end and re-raises, but it re-raises at the STEP boundary, so the `--nightly-ratchet` step that is the falsifier of record for the ~15k lines of `src/**` the PR gate never mutates is `skipped` instead of judging the files that DID run; measured verbatim on runs #26 and #31: `failing step: install=success scope= stryker=failure ratchet=skipped`, and neither the log tail nor the issue names WHICH config exited non-zero"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 12.00
+  files: [.github/workflows/mutation-nightly.yml, scripts/mutation-ratchet.mjs, test/the-nightly-ratchet-never-runs-on-the-nights-it-is-needed.test.ts]
+  origin: "operator-session#clearing-issue-2686-2026-08-30"
+  plan_refs: ["W1-T133", "W1-T130", "W1-T108"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE INTENT IS RIGHT AND THE PLACEMENT DEFEATS IT. The Stryker step's own comment states the
+    design: run every planned file, collect the failure, and re-raise "so one bad file cannot
+    silently shrink the night into a smaller (and passing) measurement". The loop does exactly
+    that:
+
+      rc=0
+      for cfg in ${{ steps.plan.outputs.configs }}; do
+        npx stryker run "$cfg" 2>&1 | tee -a nightly-failure.log || rc=1
+      done
+      exit "$rc"
+
+    But `exit "$rc"` is a STEP failure, and the `--nightly-ratchet` step that follows carries the
+    default `if: success()`. So the re-raise achieves its first half — no shrunken measurement passes
+    — and destroys its second: the ratchet never judges the files that ran fine. The night produces
+    reports and no comparison.
+
+    MEASURED, VERBATIM, ON TWO OF TWO FAILURES INSPECTED:
+
+      run #26  2026-08-24  failing step: install=success scope= stryker=failure ratchet=skipped
+      run #31  2026-08-29  failing step: install=success scope= stryker=failure ratchet=skipped
+
+    Byte-identical. Both nights uploaded a real report artifact — #31 was 10,301,061 bytes across 7
+    files, #26 was 965,080 across 10 — so the runs that succeeded produced exactly the input the
+    ratchet exists to read, and it was never asked to read it. Run history over 12 nights: #23
+    (08-21), #26 (08-24), #31 (08-29) failed and the rest passed, with #32 (08-30) green. The
+    intermittency follows the ROTATION, not a flake: which files the sample draws decides whether the
+    night touches the one that errors.
+
+    RE-DERIVE RATHER THAN TRUST THE COUNT — no run tally survives the week it was taken in. The query
+    is the workflow's own runs list filtered to `conclusion == "failure"`, then the `failing step:`
+    line from each failed job's log.
+
+    THE WORKFLOW'S STATED INVARIANT IS ABOUT GREEN, AND THE HOLE IS IN RED. Its header says there is
+    "no code path that reaches a green run without a real, valid, at-or-above-baseline comparison
+    (the W1-T130 degrade-loudly polarity)". That is true and is not what fails here. There is a code
+    path to a RED run without one, and it is the path taken every time — so the assertion reads as
+    covering the case it does not cover.
+
+    A LOW SCORE CANNOT BE THE CAUSE, WHICH IS WHY THE DIAGNOSTIC MATTERS. `stryker.conf.json`
+    declares NO `thresholds` key at all, so Stryker's `break` defaults to null and a run does not
+    fail on score. #31's last file finished cleanly — `verdict-calibration.ts`, 69.39%, 238 killed,
+    105 survived, 0 timeout, **0 errors**, "Done in 4 minutes and 31 seconds" — and the step still
+    exited 1, so the non-zero came from an EARLIER config in the loop. Which one is not recoverable
+    from the log tail, and the issue does not say either.
+
+    THE NAME IS ALREADY BEING PRINTED AND THROWN AWAY. The loop echoes `=== stryker run $cfg ===`
+    into `nightly-failure.log` before every invocation, so the failing config's identity is in the
+    artifact the issue carries. The diagnostic step names only the STEP (`stryker=failure`), and the
+    issue body is filled with survivor listings instead — #2686's body and its one comment are ~77 KB
+    of `[Survived]` mutants, none of which is the failure. This is the carry-a-value-that-already-
+    exists class: capture `$cfg` into a `failed_configs` variable in the same loop that already
+    prints it, and put that list in the diagnostic line.
+
+    WHAT THIS COSTS TODAY. `mutation-nightly` is the ONLY whole-repo mutation measurement — the PR
+    gate is `scripts/mutation-ratchet.mjs --changed-files`, deliberately scoped to the diff — so on
+    a failing night nothing measures the ~15k lines outside that diff, and the operator receives an
+    issue naming a step rather than a cause. Two such issues have been delivered and neither was
+    actionable.
+
+    IT MUST STAY LOUD. Making the ratchet run is not a licence to make the night pass: an errored
+    config must still fail the workflow, and the ratchet must still refuse a VACUOUS or INVALID
+    report (its existing checks). What changes is ordering and reporting, never the polarity — the
+    W1-T130 degrade-loudly rule is the constraint this works within, not one it relaxes.
+
+    THE RISK BAND IS RULE 19'S SPAN, NOT BLAST RADIUS. The file list crosses the workflow, the ratchet
+    script and its test, and the linter refuses that at `risk:medium` — so the band is set high up
+    front rather than argued down. Blast radius is genuinely small: `mutation-nightly` is a scheduled
+    job with no `pull_request` trigger and is not listed in `ci-gate.yml`, so nothing here can gate a
+    PR. `scripts/mutation-ratchet.mjs` is in the list because the ratchet may need to accept "some
+    configs errored" as an input rather than be skipped; if the fix turns out to be workflow-ordering
+    only, the implementer should NARROW the list rather than touch it to match.
+
+    NOT IN SCOPE: why any particular config errors (unknown until the diagnostic names it, which is
+    this task's point); raising `nightly.scorePct` off its bootstrap zero, which the workflow's own
+    header reserves for a reviewed human decision; and the PR gate's `--changed-files` scoping, which
+    is deliberate per W1-T133.
+  acceptance:
+    - claim: "the nightly ratchet runs and judges the files that completed, even when another config errored"
+      proof: "unit test: test/the-nightly-ratchet-never-runs-on-the-nights-it-is-needed.test.ts"
+    - claim: "a night with an errored config still fails the workflow — the polarity is unchanged"
+      proof: "unit test: test/the-nightly-ratchet-never-runs-on-the-nights-it-is-needed.test.ts"
+    - claim: "the diagnostic line names every config that exited non-zero, not just the step"
+      proof: "unit test: test/the-nightly-ratchet-never-runs-on-the-nights-it-is-needed.test.ts"
+    - claim: "a night where every config succeeds behaves exactly as it does today"
+      proof: "unit test: test/the-nightly-ratchet-never-runs-on-the-nights-it-is-needed.test.ts"
+    - claim: "the ratchet still refuses a vacuous report — no file judged is not a smaller measurement"
+      proof: "unit test: test/the-nightly-ratchet-never-runs-on-the-nights-it-is-needed.test.ts"
+    - claim: "the ratchet still refuses an invalid report, naming each file that caught nothing"
+      proof: "unit test: test/the-nightly-ratchet-never-runs-on-the-nights-it-is-needed.test.ts"
+    - claim: "a report missing its nightly baseline section still refuses rather than passing"
+      proof: "unit test: test/the-nightly-ratchet-never-runs-on-the-nights-it-is-needed.test.ts"
+    - claim: "restoring the step-boundary re-raise makes the ratchet-ran assertion fail"
+      proof: "unit test: test/the-nightly-ratchet-never-runs-on-the-nights-it-is-needed.test.ts"
