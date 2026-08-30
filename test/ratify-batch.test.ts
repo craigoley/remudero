@@ -233,6 +233,9 @@ test("planRatificationBatch: two members drafting the SAME title are refused wit
   assert.equal(plan.skipped[0].proposalId, "P2");
   assert.equal(plan.skipped[0].duplicateOf, "plan/tasks.d/W1-T901-duplicate-finding.yaml");
   assert.match(plan.skipped[0].reason, /would file .*W1-T902-duplicate-finding\.yaml/);
+  // Same fields approveProposal's own duplicate-refusal ledger line carries (parity, #9).
+  assert.equal(plan.skipped[0].draftedPath, "plan/tasks.d/W1-T902-duplicate-finding.yaml");
+  assert.equal(plan.skipped[0].score, 1);
 });
 
 test("planRatificationBatch: an EMPTY duplicateCorpus still fails open — no member is ever refused for a duplicate it can't possibly have on an otherwise-distinct batch", () => {

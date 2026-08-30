@@ -1993,6 +1993,11 @@ export interface BatchSkip {
   /** Present iff skipped for duplicating an already-filed task (the caller-supplied
    *  origin/main corpus) OR an earlier-accepted member of this same batch. */
   duplicateOf?: string;
+  /** The drafted shard path that would have been written, present alongside `duplicateOf` —
+   *  same {@link DraftedDuplicate} fields {@link approveProposal}'s own duplicate-refusal
+   *  ledger line carries. */
+  draftedPath?: string;
+  score?: number;
 }
 
 /** The pure plan a batch of classifications reduces to — no fs/git/network. */
@@ -2062,6 +2067,8 @@ export function planRatificationBatch(
         state: c.state,
         reason: draftedDuplicateRefusal(c.proposalId, dup),
         duplicateOf: dup.duplicateOf,
+        draftedPath: dup.draftedPath,
+        score: dup.score,
       });
       continue;
     }
@@ -2169,7 +2176,7 @@ export function approveBatch(
       step: "ratify.approve_refused",
       state: s.state,
       reason: s.reason,
-      ...(s.duplicateOf ? { duplicate_of: s.duplicateOf } : {}),
+      ...(s.duplicateOf ? { duplicate_of: s.duplicateOf, drafted_path: s.draftedPath, score: s.score } : {}),
     });
   }
 
