@@ -606,6 +606,8 @@ import {
   cappedReason,
   reviewLedgerLegibilityFields,
   reviewLedgerReasons,
+  resolvePlanCriteriaAtHead,
+  type PlanCriteriaAtHeadDivergence,
   parseWhitelistedProof,
   resolveNameFilteredCandidates,
   narrowNameFilteredArgs,
@@ -12847,16 +12849,18 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   // `criteria` degrading to the body's Acceptance: block — never a reason to fail the review.
   let taskDeclaredFiles: string[] | undefined;
   let openTaskIds: Set<string> | undefined;
-  // W1-T2315: `resolvePlanCriteriaForReview` is the SAME lookup this block used to run inline —
-  // extracted so its divergence signal (below) is directly unit-testable against a scratch plan,
-  // never a reason this call site's own behaviour changes.
-  let resolverDivergence: ResolverDivergence | undefined;
+  // W1-T2462: `resolvePlanCriteriaAtHead` (lib/review.ts) resolves this trailered PR's criteria
+  // from the plan AS IT STANDS AT `view.headRefOid` — the head sha this fetch already holds, so
+  // this costs no second network read — rather than `resolvePlanCriteriaForReview`'s
+  // `loadPlan(planPath)` read of the container's checked-out working tree. That working-tree read
+  // is what let a `plan/tasks.d/` shard that merged between two daemon boots stay invisible to a
+  // review of the very PR head that shard reached (W1-T2432's shipped, previously-uncalled fix).
+  let resolverDivergence: PlanCriteriaAtHeadDivergence | undefined;
   if (taskId) {
-    const resolved = resolvePlanCriteriaForReview(taskId, join(repoRoot, "plan", "tasks.yaml"));
+    const resolved = resolvePlanCriteriaAtHead(body, repoRoot, "plan/tasks.yaml", view.headRefOid);
     criteria = resolved.criteria;
     if (resolved.source) source = resolved.source;
     taskDeclaredFiles = resolved.taskDeclaredFiles;
-    openTaskIds = resolved.openTaskIds;
     resolverDivergence = resolved.divergence;
   }
   if (criteria.length === 0) {
