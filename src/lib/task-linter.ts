@@ -2074,6 +2074,15 @@ export function rulingVerifyViolation(task: Task): LintViolation | undefined {
 export function declaredScopeViolation(task: Task): LintViolation | undefined {
   if (!(task.files === undefined || task.files.length === 0)) return undefined;
   if (task.verify === "human") return undefined;
+  // W1-T2481: `isDispatchEligible` (drain.ts) refuses `t.status === "blocked"` before it ever
+  // reaches `overlappingPaths` — the ONLY place an undeclared scope can serialise the dispatch
+  // lane (this rule's own message). A blocked record cannot produce that harm by construction,
+  // so it is exempt on the SAME `status` field the dispatcher gates on, not on `retirement:`
+  // (which a blocked-and-unscoped record cannot acquire without first tripping this rule — the
+  // exact deadlock this exemption breaks). Un-blocking IS a plan edit, so a `--base` pass
+  // re-lints the record the moment it becomes dispatchable — the check moves to when the harm
+  // becomes possible, it is not removed.
+  if (task.status === "blocked") return undefined;
   return {
     check: "declared-scope",
     severity: "block",
