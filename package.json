@@ -57,6 +57,10 @@
     "spike": "tsx src/spike.ts",
     "learnings-budget-ratchet": "node scripts/learnings-budget-ratchet.mjs",
     "claude-md-budget-ratchet": "node scripts/claude-md-budget-ratchet.mjs",
+    "census:bound-kind": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/bound-kind-declared.test.ts",
+    "census:catch-erasure": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/catch-erasure-ratchet.test.ts",
+    "census:negative-reachability": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/negative-reachability-ratchet.test.ts",
+    "census:no-shallowing": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/no-shallowing-of-the-canonical-checkout.test.ts",
     "commitlint": "commitlint",
     "changelog": "commit-and-tag-version"
   },
