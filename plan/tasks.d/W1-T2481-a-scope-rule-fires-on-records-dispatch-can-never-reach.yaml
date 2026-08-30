@@ -1,0 +1,80 @@
+- id: W1-T2481
+  title: "THE DECLARED-SCOPE RULE FIRES ON FOURTEEN RECORDS DISPATCH CAN NEVER REACH, AND THAT VACUOUS ARM IS WHAT MAKES A TOMBSTONE UNTOUCHABLE — the rule's own message says the harm is at the dispatcher, isDispatchEligible refuses status blocked before it ever consults overlap, and a --base pass inherits the blocking violation the moment any plan edit touches such a record. Exempt what dispatch cannot reach; leave the rule biting the eighty-six tasks it is actually for"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 8.00
+  files: [src/lib/task-linter.ts, test/declared-scope-exempts-what-dispatch-cannot-reach.test.ts]
+  origin: "operator-brief#keep-going-2026-08-30"
+  plan_refs: ["W1-T2474", "W1-T476", "W1-T1287"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE RULE IS RIGHT AND STAYS. `declared-scope` names its own harm precisely: an undeclared scope
+    "overlaps every co-dispatched candidate at the dispatcher (overlappingPaths is fail-closed on
+    it), serializing the lane". That is a real, measured failure (W1-T476) and this task does not
+    soften it for any task that can be dispatched.
+
+    THE HARM IS AT THE DISPATCHER, AND A BLOCKED TASK NEVER ARRIVES. `isDispatchEligible`
+    (drain.ts) refuses on `t.status === "blocked"` and returns before any dependency, breaker,
+    in-flight or overlap consideration. So for a blocked record the violation is not merely
+    unlikely to matter — it is unreachable by construction.
+    SURFACE 1 open tasks with an empty or absent files list = 100
+    SURFACE 2 of those, blocked records dispatch can never reach = 14
+    SURFACE 3 of those, dispatchable tasks the rule really targets = 86
+    SURFACE 4 tombstones the retirement backfill could not mark = 13
+
+    AND THE VACUOUS ARM HAS A MEASURED COST, WHICH IS WHY THIS IS WORTH A TASK. A `--base` pass
+    lints every task id the diff touches, so adding one field to a blocked record inherits that
+    record's pre-existing blocking violation and turns a required check red — the linter itself
+    annotates them "pre-existing on base origin/main". Measured on #3305: applying the retirement
+    ruling to every anchored tombstone reddened lint-plan with 13 failing, all of them this class,
+    and the backfill had to ship 20 of 33 to stay green. Thirteen tombstones are therefore
+    PERMANENTLY UNEDITABLE while the vacuous arm stands, including the records W1-T2474's census
+    most needs marked.
+
+    THE EXEMPTION KEYS ON status, NOT ON retirement, AND THE REASON IS THAT THE OBVIOUS CHOICE
+    DEADLOCKS. Keying on `retirement:` would be tighter, but those thirteen records cannot ACQUIRE
+    a retirement ruling without tripping the very rule the ruling would exempt them from. Keying on
+    `status: blocked` breaks that circle. It is also not a weakening: un-blocking a task is itself
+    a plan edit, so the `--base` pass re-lints it the moment it becomes dispatchable, which is
+    exactly when the harm becomes possible. The check moves to when it matters rather than being
+    removed.
+
+    THIS IS THE MIRROR OF THIS REPO'S NAMED RECURRING DEFECT. CLAUDE.md cites "a bound that fires
+    on a HEALTHY condition" four times over. This is the same shape from the other side: a rule
+    firing on a population that cannot produce the harm it guards. The remedy in both directions is
+    the same — check that the population the rule separates has ever been observed.
+
+    NOT IN SCOPE: the 86 dispatchable tasks with no declared scope, which are the rule working
+    correctly and are a separate, larger filing; backfilling `files:` on any record; and W1-T2474's
+    census change, which reads `retirement:` and is unaffected by which tasks can be edited.
+
+    THE RISK BAND IS high, AND THE CORRECTION IS RECORDED RATHER THAN QUIETLY APPLIED. This shard
+    was first authored at risk:medium on the argument that it carries ONE conceptual concern — the
+    predicate deciding whether the violation is emitted. `sizingViolation` refused it: `files:`
+    names two distinct stems (`task-linter` and the test's own), and Rule 19 is measured on SPAN,
+    not on intent. The gate is right and the reasoning was not: a stem count is checkable at
+    review time and a claim about conceptual unity is not, which is the whole reason Rule 19 is
+    spelled the way it is. Recorded here because the alternative — renaming the test so its stem
+    matched the source and the count fell to one — would have been gaming a gate rather than
+    sizing a task.
+
+  acceptance:
+    - claim: "a blocked task with no declared scope emits no declared-scope violation"
+      proof: "unit test: test/declared-scope-exempts-what-dispatch-cannot-reach.test.ts"
+    - claim: "a dispatchable task with no declared scope still emits it unchanged"
+      proof: "unit test: test/declared-scope-exempts-what-dispatch-cannot-reach.test.ts"
+    - claim: "un-blocking a task makes the violation reappear on the same record"
+      proof: "unit test: test/declared-scope-exempts-what-dispatch-cannot-reach.test.ts"
+    - claim: "a blocked task that does declare a scope is unaffected in either direction"
+      proof: "unit test: test/declared-scope-exempts-what-dispatch-cannot-reach.test.ts"
+    - claim: "editing a tombstone that has no declared scope no longer fails a changed-tasks pass"
+      proof: "unit test: test/declared-scope-exempts-what-dispatch-cannot-reach.test.ts"
+    - claim: "no other linter check changes behaviour for any task in either state"
+      proof: "unit test: test/declared-scope-exempts-what-dispatch-cannot-reach.test.ts"
+    - claim: "deleting the exemption restores the failure on the blocked record"
+      proof: "unit test: test/declared-scope-exempts-what-dispatch-cannot-reach.test.ts"
