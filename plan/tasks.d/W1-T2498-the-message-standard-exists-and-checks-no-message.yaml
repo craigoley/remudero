@@ -1,0 +1,70 @@
+- id: W1-T2498
+  title: "THE OPERATOR MESSAGE STANDARD EXISTS, IS RATIFIED, AND CHECKS NO MESSAGE — 8,942 bytes of ISO-grounded four-part structure with its own suite, yet ZERO src modules consult it and ZERO assertions run over a message anything actually produced, so fourteen escalation producers each still phrase themselves however they like"
+  repo: remudero
+  depends_on: [W1-T2494]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 16.00
+  files: [src/lib/operator-message.ts, src/lib/escalate.ts, test/every-inbox-message-meets-the-standard.test.ts]
+  origin: "operator-brief#an-interpreter-on-the-way-into-the-inbox-2026-08-30"
+  plan_refs: ["W1-T2279", "W1-T2494"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE HARD PART IS DONE AND NOTHING CONSUMES IT. W1-T2279 wrote a structural contract grounded in
+    ISO 24495-1:2023 — relevant, findable, understandable, usable — and a four-part structure, and
+    its own header does the crucial work of separating what a MACHINE can check from what only a
+    READER can judge. Its suite then reads the document and asserts over the document. No message
+    any producer emits is measured against any of it.
+    SURFACE 1 bytes in the operator message standard = 8942
+    SURFACE 2 src modules that check a message against it = 0
+    SURFACE 3 suites asserting over a message a producer emitted = 0
+    SURFACE 4 modules that raise an escalation = 14
+    SURFACE 5 AI writers already composing escalation prose = 5
+
+    STRUCTURE IS CHECKED, PROSE IS NEVER JUDGED, AND THE DOC DREW THAT LINE FIRST. The checker
+    asserts the four parts are PRESENT and identifiable — who is speaking, what happened, what is
+    being asked of the reader, and what follows from doing nothing. It never scores tone, length or
+    clarity, because those are the reader's judgement and a gate that pretends otherwise becomes a
+    style argument that reddens honest messages.
+
+    IT MAKES A GOOD WRITER OF AN EXISTING ONE RATHER THAN ADDING A SECOND. Five AI writers already
+    compose escalation prose; this gives them the shape to fill and refuses what comes back without
+    it. A producer whose message already has the four parts is unaffected, which is what keeps this
+    from being a rewrite of fourteen call sites.
+
+    THE FALLBACK IS THE HAZARD AND IT FAILS TOWARD DELIVERY. A message that cannot be made to meet
+    the structure must still REACH the operator, annotated as non-conforming — never dropped, never
+    held. An escalation is raised because something needs a human; a comprehension gate that can
+    swallow one has traded a badly-worded warning for no warning, which is strictly worse.
+
+    IT IS THE INBOUND HALF OF A PAIR. W1-T2499 is the interpreter on the way back and depends on the
+    thread this attaches to; both exist so a message and its answer are each intelligible to the side
+    receiving them.
+
+    NOT IN SCOPE: rewording any existing message, which would redden W1-T2279's own verbatim-quote
+    suite; judging prose quality; and the reply direction, which W1-T2499 owns.
+
+    THE RISK BAND IS RULE 19's SPAN, NOT BLAST RADIUS: two src stems plus a test, carrying two
+    independent acceptance concerns — the structural check and the non-conforming fallback.
+  acceptance:
+    - claim: "a message carrying all four parts passes the checker"
+      proof: "unit test: test/every-inbox-message-meets-the-standard.test.ts"
+    - claim: "a message missing any one part is reported non-conforming and names which"
+      proof: "unit test: test/every-inbox-message-meets-the-standard.test.ts"
+    - claim: "a non-conforming message still reaches the operator rather than being dropped"
+      proof: "unit test: test/every-inbox-message-meets-the-standard.test.ts"
+    - claim: "the checker scores no prose quality, tone or length"
+      proof: "unit test: test/every-inbox-message-meets-the-standard.test.ts"
+    - claim: "an escalation whose message already conforms is passed through unchanged"
+      proof: "unit test: test/every-inbox-message-meets-the-standard.test.ts"
+    - claim: "no message quoted verbatim by the standard's own suite is reworded"
+      proof: "unit test: test/every-inbox-message-meets-the-standard.test.ts"
+    - claim: "a checker failure never prevents the escalation being raised"
+      proof: "unit test: test/every-inbox-message-meets-the-standard.test.ts"
+    - claim: "making the checker drop a non-conforming message fails the delivery assertion"
+      proof: "unit test: test/every-inbox-message-meets-the-standard.test.ts"
+    - claim: "the escalation path calls the checker rather than the checker standing alone"
+      proof: "grep: checkOperatorMessage( in src/lib/escalate.ts"
