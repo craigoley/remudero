@@ -1,62 +1,305 @@
 # ORIENTATION
 
-_MAINTAINED BY `rmd retro` — regenerated 2026-08-29T14:15:50.953Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
+_MAINTAINED BY `rmd retro` — regenerated 2026-08-30T13:45:20.239Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
 
 A fresh Architect session should be able to orient from THIS doc alone plus the plan index —
 not by re-deriving state from the full plan and ledger.
 
 ## Current state
 
-14 run(s) since the last retro marker. Verdicts: {"blocked":1,"blocked_ci":3,"merged":10}.
+13 run(s) since the last retro marker. Verdicts: {"blocked_ci":2,"blocked_containment":1,"merged":10}.
 
 ### Shipped since marker
-- W1-T1269 → https://github.com/craigoley/remudero/pull/3241
-- W1-T2436 → https://github.com/craigoley/remudero/pull/3228 (gate-side merge; run ended blocked_ci)
-- W1-T2440 → https://github.com/craigoley/remudero/pull/3227 (gate-side merge; run ended blocked_ci)
-- W1-T2441 → https://github.com/craigoley/remudero/pull/3234
-- W1-T2444 → https://github.com/craigoley/remudero/pull/3236
-- W1-T2446 → https://github.com/craigoley/remudero/pull/3248
-- W1-T2447 → https://github.com/craigoley/remudero/pull/3247
-- W1-T2448 → https://github.com/craigoley/remudero/pull/3245
-- W1-T2449 → https://github.com/craigoley/remudero/pull/3249
-- W1-T2450 → https://github.com/craigoley/remudero/pull/3252
-- W1-T2451 → https://github.com/craigoley/remudero/pull/3255
-- W1-T2452 → https://github.com/craigoley/remudero/pull/3256 (gate-side merge; run ended blocked_ci)
-- W1-T2453 → https://github.com/craigoley/remudero/pull/3257
+- W1-T2442 → https://github.com/craigoley/remudero/pull/3263 (gate-side merge; run ended blocked_ci)
+- W1-T2457 → https://github.com/craigoley/remudero/pull/3272
+- W1-T2458 → https://github.com/craigoley/remudero/pull/3275
+- W1-T2460 → https://github.com/craigoley/remudero/pull/3286
+- W1-T2461 → https://github.com/craigoley/remudero/pull/3288
+- W1-T2462 → https://github.com/craigoley/remudero/pull/3285
+- W1-T2463 → https://github.com/craigoley/remudero/pull/3289
+- W1-T2464 → https://github.com/craigoley/remudero/pull/3296
+- W1-T2465 → https://github.com/craigoley/remudero/pull/3299
+- W1-T2466 → https://github.com/craigoley/remudero/pull/3302
+- W1-T2470 → https://github.com/craigoley/remudero/pull/3300
 
 ## Next runnable task
 
-**W1-T2442** — THE REQUIRED REVIEW GATE IS ENFORCED BY CONVENTION, NOT BY MECHANISM — `required_status_checks.contexts` lists `remudero-review` beside `ci-gate`, but `ci-gate` is pinned `app_id: 15368` while `remudero-review` carries `app_id: null`, so ANY actor holding a repo-scoped token satisfies it; the mechanism built to close that (`REVIEWER_TOKEN_ENV`) ships DARK by its own doc and reads absent on every live process, and the hook meant to backstop it matches COMMAND TEXT rather than a credential
+**W1-T2467** — a board-state proposal has no expiry — board-review.ts:383 is the ONE registry producer minting evidenceAnchors: [], which makes the evidence-drift clause vacuous and isDraftStale permanently false, and nothing retires a proposal whose referent PR has since resolved
 
-- risk: high · depends_on: (none)
+- risk: high · depends_on: W1-T2466
 
 ## Never-do invariants (MASTER-PLAN §12 Standing rules — extracted verbatim; §12 is authoritative)
 
 - 1. PROVENANCE OR IT DOESN'T GO IN A PROMPT.
 - 2. Trust, scheduling, strikes, budgets = deterministic predicates. Never LLM decisions.
 - 3. One concern per PR. Branch from latest origin/main. Isolated worktrees.
-- 3B. The merge gate is a GitHub-enforced CONTRACT (required status checks), never a runner-side decision that can be raced. `ci` (typecheck+tests) AND `remudero-review` (acceptance verdict by a fresh-context reviewer) must both be green; GitHub does the merging. The runner ARMS auto-merge and observes — its exit verdict is advisory telemetry, incapable of diverging from reality. Corollary: auto-merge is safe to leave armed, because the contract, not the runner, decides.
+- 3B. The merge gate is a GitHub-enforced CONTRACT (required status checks), never a runner-side
+  decision that can be raced. `ci` (typecheck+tests) AND `remudero-review` (acceptance verdict by a
+  fresh-context reviewer) must both be green; GitHub does the merging. The runner ARMS auto-merge and
+  observes — its exit verdict is advisory telemetry, incapable of diverging from reality. Corollary:
+  auto-merge is safe to leave armed, because the contract, not the runner, decides.
 - 4. Acceptance criteria are proofs, not vibes. Green checks ≠ evidence (the full-shop-flow lesson).
 - 5. Never a third blind patch: two strikes → diagnose → one evidence-armed retry → escalate.
 - 6. Zero ask rules in worker settings. Hooks <1s. Workers carry scoped PATs only. No MCP in workers.
-- 7. DISTRUST THE PROMPT OVER THE INSTALLED VERSION. Empirically the highest-value line in the template: WS-0 caught `allowedDomains` nesting; W1-T1 caught that the SDK's own schema is `$loose` and silently strips unknown keys — a guard built as specified would have PASSED the typo it exists to catch. Every Promptsmith-rendered prompt injects this rule. Read the installed schema; never trust a prompt's spelling, including this document's.
+- 7. DISTRUST THE PROMPT OVER THE INSTALLED VERSION. Empirically the highest-value line in the
+  template: WS-0 caught `allowedDomains` nesting; W1-T1 caught that the SDK's own schema is `$loose`
+  and silently strips unknown keys — a guard built as specified would have PASSED the typo it exists
+  to catch. Every Promptsmith-rendered prompt injects this rule. Read the installed schema; never
+  trust a prompt's spelling, including this document's.
 - 8. OpenClaw stays out. The mini's protected paths are inviolate (deny-floor).
 - 8B. The loop never waits on a human unless the plan says so. Idle = groom.
 - 9. OSS defaults must be defensible on a stranger's machine; yolo is a documented opt-in.
 - 10. This document is truth. Every session syncs it before acting and after shipping.
-- 11. Isolation and containment are PROVEN PER RUN by probe, never assumed from configuration. A setting that "should" isolate (ZDOTDIR, a sandbox block, a stripped env) is a hypothesis until a preflight probe confirms it on THIS machine, THIS run — config that happens to work by accident of the host (PR #8: isolation held only because `~/.bashrc` was absent) must fail closed the moment the accident ends. See FIELD FINDING 11, W1-T17.
-- 12. Supervision is deterministic; judgment is advisory. An LLM may RECOMMEND a halt; only code may ENFORCE one. The flight judge and specialist panels (§4B) return verdicts a deterministic controller acts on; no LLM sits in the merge decision, and none edits code. See §4B, W1-T20/21/22, W2-T1.
-- 13. A doc that DESCRIBES a mechanism is never proof the mechanism EXISTS. Acceptance proofs must be OBSERVABLE SYSTEM STATE — `gh api` output, a status object, a grep of the call site, a passing test — never a file that talks about it. PR #12 shipped `docs/review-gate.md`, passed CI, reported `verdict=merged`, and did none of its job (protection unchanged, no status ever posted). [PR #12/#13]
-- 14. Splitting a task can ORPHAN its call site — when you split, name the integration point explicitly as one side's deliverable. T1C built the reviewer and T1D was to enforce it, but NEITHER owned `run-task.ts` CALLING it; the reviewer was fully-tested dead code for two PRs. The wiring is a deliverable, not a seam. [PR #12/#13]
-- 15. When a worker is blocked by an acceptance gate, it may ADD the missing work or ESCALATE. It may NEVER edit the acceptance criteria to match its diff. Workers have write access to `plan/tasks.yaml`, so this prohibition is stated in every rendered prompt, not assumed. The gate names the gap; the fix is to close the gap, not to move the goalposts. [session doctrine]
-- 16. The Architect may correct a mis-specified task via a plan PR; a worker may never. The test of honesty is that NO criterion is dropped or weakened — only REDISTRIBUTED. A task whose criteria span multiple subsystems collides with one-concern-per-PR and is undeliverable; the Architect decomposes it by CONCERN (every criterion survives verbatim in some child task), and the `satisfied_by` field (Architect-only, plan-only PRs — rule 15) marks a criterion an earlier merge already satisfied. Splits observed: T1C, T1D, W1-T3. [PR #22, W1-T3]
-- 17. PROVENANCE FOR THE PLAN, NOT JUST FOR PROMPTS. Every task must cite WHY it exists (`origin:` feedback#/retro#/architect/human + `plan_refs:` the sections it implements). A task with no origin is an ORPHAN and cannot be trusted to reflect anyone's intent. `origin:`/`plan_refs:` are Architect-only, plan-only fields (same rule as `satisfied_by`, rule 15): a worker adding an origin to justify its own diff is editing the plan to match the work. `rmd trace` (W1-T43) makes the chain feedback → task → run → PR renderable both ways. [§7B]
-- 18. EVERY ACCEPTANCE CRITERION MUST BE SATISFIABLE BY A NON-INTERACTIVE WORKER. A criterion that requires live operator input ("operator confirms", "user selects", "prompt the human") is STRUCTURALLY UNFIT for the headless runner — there is no TTY and no operator, so the worker cannot satisfy or test it and will burn its whole budget trying (W1-T9 spent its last ~15 turns on readline-repro scripts conjuring an operator that isn't there, then died error_max_turns). Interactive behavior is designed for no-TTY and tested via INJECTED INPUT / FLAGS / TTY-ABSENT DEFAULTS, never a live human in the loop: a prompt is an interactive-only affordance layered on top of a fully non-interactive path. This is a new error CLASS, distinct from over-scoping (rule 19) and looping. [DIAGNOSIS.md diag/w1t9-max-turns, W1-T9]
-- 19. SIZING IS A PLAN-LAYER CONCERN, NOT A BUDGET KNOB. A task spanning ≥2 independent acceptance concerns, or shipping ≥2 new subsystems, must be `risk: high` or DECOMPOSED at plan time — never left `risk: medium` and rescued with a bigger turn budget. Two cross-cutting tasks (W1-T6, W1-T9) overran the medium/80 mount; the medium budget is correctly calibrated for genuine single-concern work (observed mean now 45.2 turns — RETRO-1784133446353, 22 runs; honest single-concern merges ran 58–69 turns: #47, #48, #55, #56, #62 — still under the medium/80 ceiling; P7 ratified), so raising it would MASK over-scoping and reward it (and W1-T9 was the THIRD max_turns event — a third budget bump was refused). The retro fix lives in task SIZING (rule 16 decomposition), not in `.remudero/mounts.yaml`. [DIAGNOSIS.md diag/w1t9-max-turns, W1-T6, W1-T9; P7 RETRO-1784133446353]
-- 20. A NEW SIZING/FITNESS RULE MUST RETROACTIVELY RE-GRADE THE OPEN QUEUE — RULES ARE NOT FORWARD-ONLY. When a rule like 18 or 19 is added, every ALREADY-AUTHORED open task must be re-checked against it, not only new authoring. W1-T12 pre-existed rules 18 and 19 and violated BOTH (three concerns at `risk:medium`; three live-context criteria — overnight drain, launchctl-load, live-kill) yet still reached a worker and burned 81 turns / $10.27 — the FOURTH max_turns event — because the rules were enforced forward-only. `rmd retro` re-grades every open task against every standing rule and files a corrective task for each violation (the executable duty is W1-T20d). A rule the queue is never swept against protects only the tasks written after it. [DIAGNOSIS.md diag/w1t12-max-turns, W1-T12]
-- 21. AMENDING AN ALREADY-MERGED TASK DOES NOT RE-QUEUE IT AND SPAWNS NOTHING — THE AMENDER OWNS FILING THE FOLLOW-UP. A criterion added to a task that has already merged is unreachable by every rung: `deriveStatus` treats MERGED as terminal, the drain's first filter is `if (isMerged(t.id)) continue`, the retro's `planHealthSweep` skips merged/done as "already shipped", the linter is status-blind, and `rmd correct` re-points credit but cannot un-credit. So the criterion sits in the plan looking authoritative while nothing can ever dispatch, review or prove it. This is not a gap to be closed by making merge reversible — it is the correct behaviour of a derived-status system, and the duty sits with the author of the amendment: amend for the record if the task's spec was genuinely incomplete, and in the SAME PR file a follow-up task carrying the new criteria VERBATIM (rule 16 — nothing dropped or weakened, only redistributed). This was already the consistent convention (W1-T161, W1-T97, the W1-T65 pair, the W1-T76 follow-up) and it still failed, because convention is not a gate: PR #374 amended W1-T155 at 17:35:20Z, 1h45m after PR #365 credited it merged at 15:50:08Z, adding the monotonic-under-darkness and liveness-bound criteria — and passed every check clean. Both orphaned. One of them WAS the fix for the regression-to-queued-on-read-failure bug, which therefore survived wearing a "merged ✓" badge while the console shipped a render-layer honesty banner over a data layer that still lied. Found by hand, by nothing else. The executable duty is W1-T180 (a §5C lint check that fails a bare post-merge amendment and passes one accompanied by its follow-up); the rehoming of what this already orphaned is W1-T179. [W1-T155/PR #374 vs PR #365, 2026-07-20]
-- 22. THE CONSOLE MUST DISTINGUISH CLAIMED STATE FROM EVIDENCED STATE — THE W1-T128 DOCTRINE, APPLIED TO PIXELS. A CLAIM is what a remote or a judge ASSERTS: merged-per-GitHub, review-passed. EVIDENCE is what the fleet can SHOW: a ledger receipt of the merge, proofs that actually executed. They are not the same fact, and the console must never render them as one. Every surface owes the reader which it is showing, and a surface that cannot obtain evidence SAYS SO rather than silently downgrading to the claim — or worse, to nothing. Three fixtures from 2026-07-20 make the cost concrete. (i) The board rendered `merged 0/160` with every task queued, because a failed GitHub read returned an empty set and cannot-read was presented as nothing-exists (W1-T181). (ii) RECENT rendered "no recent outcomes yet" across a week containing ~100 merges, because the section was GitHub-sourced while the LOCAL ledger held every one of them (W1-T184). (iii) `remudero-review` posted "PASS — 5 criteria substantiated, no test theater" at `proof_exec: 0/5`, directly beneath its own FLOOR DEGRADED banner, over a diff satisfying one criterion in five with zero tests on a `tdd: strict` task — a CLAIM of substantiation rendered as though it were EVIDENCE of it. The rule follows from where authority actually sits: the ledger is LOCAL, append-only and complete — the fleet's own receipt of what it did. GitHub is a REMOTE, rate-limited, occasionally-unreachable claim about the same events. A console that inverts that dependency lets a remote outage empty a local truth. Executable duties: W1-T183 (density/IA — anomaly visible at the list layer), W1-T184 (ledger-first rendering — GitHub decorates, never gates), W1-T179 (last-good status under darkness), W1-T182 (NEEDS ME joins live escalation state, not ledger history). [console design pass, 2026-07-20]
-- 23. WRITE-SIDE ATOMICITY — every multi-process-visible write is atomic or locked. The write-path sibling of cannot-observe ⇒ wait. This codebase has a rich, hard-won READ-side doctrine: a value that cannot be observed is marked indeterminate and deferred, never silently downgraded to absent or permitted (W1-T130/T179/T181/T197). It has no matching write-side doctrine, and the 2026-07-21 recon named the consequence precisely: *read-path integrity is doctrine, write-path atomicity is unowned*. The gap matters because the same invariant a read-side fix protects is REINTRODUCIBLE THROUGH A WRITE RACE UNDERNEATH IT — W1-T179's monotonic-under-darkness guarantee is defeated not by a flaw in its own logic but by a truncating `writeFileSync` on the file it reads. The rule: any file a second process can observe is written whole or not at all — temp-file-plus-rename, an append the kernel serializes, or an explicit lock. And a file that cannot be parsed is a DIFFERENT observation from a file that is absent. Collapsing those two is the write-side form of cannot-observe ⇒ permitted, and it is how a torn read becomes a zeroed circuit breaker or a pruned live worktree. Three fixtures from the 2026-07-21 recon, each verified at source. (i) `appendLedger` has no atomicity guarantee and its reader parses a torn line to `{}` — silently invisible to every consumer, on the file that backs the dispatch circuit breaker (R-8/R-16, W1-T206). (ii) `status.json` is written by four callers with a truncating write, so a reader arriving mid-write loses exactly the cached projection W1-T179 exists to preserve (R-17, W1-T207). (iii) `run.lock` collapses an unparseable read and an absent lock to the same `null` (R-18, W1-T208). One honest caveat, because the doctrine should not be justified by a fiction: `appendFileSync` opens `O_APPEND`, so concurrent appenders do NOT overwrite each other and the recon's suggested PIPE_BUF guarantee does not apply to a regular file. The exposure is a partial write and a silent torn-line read, not a lost append. Doctrine earns its keep by being true. Executable duties: W1-T206 (ledger), W1-T207 (status.json), W1-T208 (run.lock), W1-T209 (breaker-safe archival). [recon intake, 2026-07-21]
-- 24. SECRETS-AT-REST — a credential never lives in a log, a URL, or an argv. The threat model this plan grew up with is a malicious worker escaping its sandbox, and it is well served: scoped PATs, containment probes, deny-floor hooks. What it did not cover is the mundane leak — the operator's own credential sitting in a world-readable file because a startup banner printed it. The 2026-07-21 recon put it exactly: the plan tracks scoped PATs and containment sandboxing but not *a token in a log, a token in a URL, no rotation path*. The rule has three parts. A secret is never printed to stdout or stderr by a long-running service, because that output is routinely redirected to a file that outlives the process. A secret never travels in a URL, because URLs are copied, screenshotted, bookmarked, proxied and restored by session-restore — a link is the worst possible place to put a capability. And ROTATION IS A DOCUMENTED PATH, not an implementation detail someone can reconstruct: an undocumented rotation path is operationally an absent one, which is why R-31 was a real finding even though `rm` had always worked. The corollary that makes it actionable: exposure is judged by where a secret HAS BEEN, not by who was watching. A token that reached a log file, a terminal transcript, a screenshot or a chat window is compromised and must be ROTATED, not merely un-shared. Fixtures: R-5 — both bearer tokens printed to a 0644 `serve.log` with the WRITE token embedded in the console URL, so merely running the command leaked a fleet-control capability to disk (fixed #473, rotated the same day). R-31 — token generation is create-once/read-thereafter, making rotation a `rm` nobody had written down (documented #473). [recon intake, 2026-07-21]
-- 25. INSTRUMENT CHANGES RIDE ALONE — a diff may change what a gate MEASURES, or what the gate concludes about the product, never both in one PR. RECORDED, NOT NEWLY DECIDED: this rule has been ENFORCED IN CODE since W1-T297 while §12 carried no text for it. W1-T297's own shard promised the prose ("ships with the MASTER-PLAN §12 amendment that states the RULE (Standing rule 25) this task makes executable"); the enforcement landed and the amendment did not, so for roughly two hundred PRs every citation pointed at a rule that did not exist here. THE PROSE THEREFORE FOLLOWED THE CODE, not the other way round, and a reader should weigh it accordingly: where this entry and `src/lib/review.ts` disagree, the code is what refuses PRs. MEASURED AT `c709493`, re-derived rather than carried forward: the exact phrase "Standing rule 25" appears at 12 sites across 6 files, 8 of them inside `src/` (`src/lib/review.ts` ×6, `src/run-task.ts` ×2, plus two `test/` suites and two shards); case-insensitively, "rule 25" appears 38 times across 28 files, because ~22 task shards now run an explicit "RULE 25 CHECKED BEFORE FILING" step. It is cited far more often than it was written. This entry grants the gate no new reach. THE MEASUREMENT-INSTRUMENT SURFACE is one exported constant, `INSTRUMENT_SURFACE` (`src/lib/review.ts`) — `.github/workflows/`, every `scripts/*-ratchet.mjs`, `scripts/diff-coverage.mjs`, every `scripts/*-baseline.json`, `scripts/mutation-relevant-paths.json`, `stryker.conf.json` — and BOTH consumers derive from it (`USER_VISIBLE_SURFACE_RE`'s instrument arm and `detectInstrumentEntanglement`) so the two can never drift into a second hand-maintained copy. THE PREDICATE IS ENTANGLEMENT, NOT INSTRUMENT-TOUCHING: refusal requires at least one instrument path AND at least one product path (`src/`, non-test) in the same diff. An instrument-only diff — optionally carrying its own `test/` falsifier and a `docs/` update — is the SANCTIONED shape, and so is a src-only, plan-only or docs-only diff. `isProductPath` is `path.startsWith("src/") && !isTestPath(path)`, so `test/` is deliberately NOT the product half — the design's own carve-out, because otherwise an instrument-only PR could never carry the fixture that proves it; `test/diff-coverage.test.ts` is the established home for exactly that, and a gate implemented in a test entangles with nothing. THE REFUSAL IS HARD AND CANNOT BE FORGIVEN LATER: `instrumentEntangled` is one of the terms in BOTH of `judgeReview`'s rollups — `state` and `floorState` — so it forces `state: "failure"`, and because `applyVerdictStability` (W1-T178) suppresses only an UNCHANGED-HEAD SEMANTIC downgrade (`floorState === "success"`), an entanglement failure can never be suppressed by verdict stability. It is a structural, diff-derived fact, and it preempts the ordinary unmet-criteria text rather than queueing behind it. WHAT A REFUSED WORKER IS TOLD (`src/run-task.ts`), because the rule should read the way the refusal reads. The escalation SUMMARY, verbatim: `blocked_review: instrument change entangled with src/ in one PR (Standing rule 25) — <pr url>`. Its DETAIL names the instrument path(s) and the `src/` path(s) found beside them, calls them "two independently falsifiable claims (\"the instrument is right\" and \"the code is right\") shipped as one green, self-graded by the very instrument version it also changed", and states the part that makes this different from an ordinary block: "No worker may legitimately resolve this by writing more code." The two OPTIONS it offers are the only sanctioned exits — split, "land the instrument change in its own PR, then rebase this one onto it — the sanctioned shape", or revert, "revert the instrument hunk on this branch, keeping only the `src/` change, then re-review". A rule that only refuses re-teaches nothing, so the refusal ships its own remedy. WHY IT IS A RULE AND NOT A STYLE NOTE: a diff that lowers a coverage floor while also changing the code that floor measures is self-certifying — the same PR moves the ruler and the thing being measured, and no reviewer is prompted to notice. Split it: the instrument change rides alone and is judged on its own evidence. [W1-T297; amendment reconstructed 2026-08-11 (#1596) from the enforcement it was always meant to accompany, and completed 2026-08-12 with the three enforcement facts that first pass omitted — the verbatim `blocked_review` refusal, the never-suppressible property, and the re-measured citation counts]
-- 26. A `state/` OVERRIDE MAY ONLY MOVE A VALUE TOWARD *GREATER* EXPOSURE — THE COMMITTED ROW IS THE FLOOR. OPERATOR RULING, recorded verbatim in substance from feedback `fb-1785950676514-c5cdcc` (2026-08-05, cli): *"A LANES OVERRIDE MUST NEVER LOWER … the committed row is the floor and an override may only RAISE it."* Recorded here, not built: no lanes override exists and none is filed (see below for why), so this is a CONDITION ON ONE IF IT IS EVER BUILT — and, per the ruling's own falsifier, on whatever generalisation of the override store lands first. THE ASYMMETRY THAT MAKES IT A RULE: a wiped `state/` silently reverts every override to its committed default, and that fails safe in ONE DIRECTION ONLY. If the committed row is the lower-exposure end, a wipe costs concurrency/spend the operator wanted anyway; if an override is the thing holding the value DOWN, the wipe silently restores the HIGHER exposure with no signal at all. So: to REDUCE exposure, edit the committed row (a reviewed plan-data PR) — a reduction must be durable, never state-resident. Stated by EXPOSURE, not by sign, because the safe direction is a property of the row; for `sweep.dispatchLanes` and `sweep.dailyCostCeilingUsd` exposure rises with the number, so for both of them "toward greater exposure" reads literally as "may only RAISE". THE RULING'S OWN NUMBER IS ALREADY STALE, AND THE STALENESS STRENGTHENS IT. At capture the committed `dispatchLanes` row was `value: 1` (min 1, max 4) and the author noted a wipe would therefore revert *down* — safe. Today (`plan/policy.yaml`) it is `value: 3`, min 1, max 4, beside a net-new `reviewLanes: 3`, and W1-T1049's own measurement says the host fits about four concurrent workers of any kind against a configured worst case of six. The plausible near-term operator move is therefore to run FEWER lanes — i.e. exactly the lowering override this rule forbids. That is not an accident of the rule; it is the rule working. WHAT TO DO INSTEAD, because the rule must leave the emergency reachable: `rmd pause` already halts new dispatch without a PR, a restart or a deploy — `runDaemon` checks it in the tick body and RE-CHECKS it immediately before admission (W1-T1065), in-flight work is never interrupted, and the marker survives the deploy's `pull --ff-only`. Then move the committed row and restart. The measurement the ruling carries: restart is 1.2s median (148 kickstart-to-boot pairs, control 794 boots) against a PR-to-merge median of 12.2m / p90 64.9m — so an override saves the PR, not the restart, and its only unique saving is idle minutes during a flip-back, in a scenario with zero observed instances (`dispatch.concurrent_set` 0 rows, `drain.pause`/`daemon.paused` 0 rows, control `run.start` 682). A LIVE RELOADER for lane width is separately refused: it would buy 1.2 seconds against `src/lib/daemon.ts`'s explicit W1-T343 design — *"resolved ONCE, for this process's whole lifetime"* — and reintroduce the mid-run reconfiguration question that frozen design exists to avoid. FOR WHOEVER GENERALISES THE STORE — IT IS NOT PARAMETERISED, verified at this sha: `dailyCostCeilingOverridePath` returns the literal `state/DAILY_COST_CEILING_OVERRIDE`; both the writer and `resolveDailyCostCeiling` read `policy.bounds["sweep.dailyCostCeilingUsd"]` as a LITERAL key; and `validatePolicy` populates `bounds` for that ONE field only (its own comment says so). Generalising therefore means row key plus filename plus a `bounds` entry for the new row, plus row-specific semantics — for lanes: integers, not floats, and the floor-at-1-never-0 that `laneDispatchBudget` and `runDaemon` both already apply (`Math.max(1, opts.laneCount ?? 1)`), so a bad override can never mean "dispatch nothing" silently. Roughly 4–6 files. OPEN, AND DELIBERATELY NOT DECIDED BY THIS RECORD: the SHIPPED ceiling store is the live instance of the same asymmetry. W1-T364/#1417 gave the console an arm-then-confirm write over `writeDailyCostCeilingOverride`, which validates BOUNDS ONLY — so a *lowering* ceiling override is writable today and its silent loss raises the ceiling by up to the committed $500. Refusing such a write in code would collide with the operator's other standing ruling (`fb-1785858048118-50fab8`: runtime config belongs in a store with a dashboard, not behind a PR), so this entry names the gap rather than closing it; the SIGNAL half is already queued as W1-T333 (render overridden-vs-default provenance, so a vanished override is visible). The next filing that touches the store owns the question. [operator feedback fb-1785950676514-c5cdcc; W1-T332/#1312, W1-T343/#1363, W1-T344, W1-T364/#1417, W1-T1049; recorded 2026-08-23]
+- 11. Isolation and containment are PROVEN PER RUN by probe, never assumed from configuration. A
+  setting that "should" isolate (ZDOTDIR, a sandbox block, a stripped env) is a hypothesis until a
+  preflight probe confirms it on THIS machine, THIS run — config that happens to work by accident of
+  the host (PR #8: isolation held only because `~/.bashrc` was absent) must fail closed the moment the
+  accident ends. See FIELD FINDING 11, W1-T17.
+- 12. Supervision is deterministic; judgment is advisory. An LLM may RECOMMEND a halt; only code may
+  ENFORCE one. The flight judge and specialist panels (§4B) return verdicts a deterministic
+  controller acts on; no LLM sits in the merge decision, and none edits code. See §4B, W1-T20/21/22,
+  W2-T1.
+- 13. A doc that DESCRIBES a mechanism is never proof the mechanism EXISTS. Acceptance proofs must be
+  OBSERVABLE SYSTEM STATE — `gh api` output, a status object, a grep of the call site, a passing test —
+  never a file that talks about it. PR #12 shipped `docs/review-gate.md`, passed CI, reported
+  `verdict=merged`, and did none of its job (protection unchanged, no status ever posted). [PR #12/#13]
+- 14. Splitting a task can ORPHAN its call site — when you split, name the integration point explicitly
+  as one side's deliverable. T1C built the reviewer and T1D was to enforce it, but NEITHER owned
+  `run-task.ts` CALLING it; the reviewer was fully-tested dead code for two PRs. The wiring is a
+  deliverable, not a seam. [PR #12/#13]
+- 15. When a worker is blocked by an acceptance gate, it may ADD the missing work or ESCALATE. It may
+  NEVER edit the acceptance criteria to match its diff. Workers have write access to `plan/tasks.yaml`,
+  so this prohibition is stated in every rendered prompt, not assumed. The gate names the gap; the fix
+  is to close the gap, not to move the goalposts. [session doctrine]
+- 16. The Architect may correct a mis-specified task via a plan PR; a worker may never. The test of
+  honesty is that NO criterion is dropped or weakened — only REDISTRIBUTED. A task whose criteria span
+  multiple subsystems collides with one-concern-per-PR and is undeliverable; the Architect decomposes it
+  by CONCERN (every criterion survives verbatim in some child task), and the `satisfied_by` field
+  (Architect-only, plan-only PRs — rule 15) marks a criterion an earlier merge already satisfied. Splits
+  observed: T1C, T1D, W1-T3. [PR #22, W1-T3]
+- 17. PROVENANCE FOR THE PLAN, NOT JUST FOR PROMPTS. Every task must cite WHY it exists (`origin:`
+  feedback#/retro#/architect/human + `plan_refs:` the sections it implements). A task with no origin is
+  an ORPHAN and cannot be trusted to reflect anyone's intent. `origin:`/`plan_refs:` are Architect-only,
+  plan-only fields (same rule as `satisfied_by`, rule 15): a worker adding an origin to justify its own
+  diff is editing the plan to match the work. `rmd trace` (W1-T43) makes the chain feedback → task → run
+  → PR renderable both ways. [§7B]
+- 18. EVERY ACCEPTANCE CRITERION MUST BE SATISFIABLE BY A NON-INTERACTIVE WORKER. A criterion that
+  requires live operator input ("operator confirms", "user selects", "prompt the human") is STRUCTURALLY
+  UNFIT for the headless runner — there is no TTY and no operator, so the worker cannot satisfy or test
+  it and will burn its whole budget trying (W1-T9 spent its last ~15 turns on readline-repro scripts
+  conjuring an operator that isn't there, then died error_max_turns). Interactive behavior is designed
+  for no-TTY and tested via INJECTED INPUT / FLAGS / TTY-ABSENT DEFAULTS, never a live human in the loop:
+  a prompt is an interactive-only affordance layered on top of a fully non-interactive path. This is a
+  new error CLASS, distinct from over-scoping (rule 19) and looping. [DIAGNOSIS.md diag/w1t9-max-turns, W1-T9]
+- 19. SIZING IS A PLAN-LAYER CONCERN, NOT A BUDGET KNOB. A task spanning ≥2 independent acceptance
+  concerns, or shipping ≥2 new subsystems, must be `risk: high` or DECOMPOSED at plan time — never left
+  `risk: medium` and rescued with a bigger turn budget. Two cross-cutting tasks (W1-T6, W1-T9) overran
+  the medium/80 mount; the medium budget is correctly calibrated for genuine single-concern work
+  (observed mean now 45.2 turns — RETRO-1784133446353, 22 runs; honest single-concern merges ran 58–69
+  turns: #47, #48, #55, #56, #62 — still under the medium/80 ceiling; P7 ratified), so raising it would
+  MASK over-scoping and reward it (and W1-T9 was the THIRD max_turns event — a third budget bump was
+  refused). The retro fix lives in task SIZING (rule 16 decomposition), not in `.remudero/mounts.yaml`.
+  [DIAGNOSIS.md diag/w1t9-max-turns, W1-T6, W1-T9; P7 RETRO-1784133446353]
+- 20. A NEW SIZING/FITNESS RULE MUST RETROACTIVELY RE-GRADE THE OPEN QUEUE — RULES ARE NOT FORWARD-ONLY.
+  When a rule like 18 or 19 is added, every ALREADY-AUTHORED open task must be re-checked against it, not
+  only new authoring. W1-T12 pre-existed rules 18 and 19 and violated BOTH (three concerns at `risk:medium`;
+  three live-context criteria — overnight drain, launchctl-load, live-kill) yet still reached a worker and
+  burned 81 turns / $10.27 — the FOURTH max_turns event — because the rules were enforced forward-only.
+  `rmd retro` re-grades every open task against every standing rule and files a corrective task for each
+  violation (the executable duty is W1-T20d). A rule the queue is never swept against protects only the
+  tasks written after it. [DIAGNOSIS.md diag/w1t12-max-turns, W1-T12]
+- 21. AMENDING AN ALREADY-MERGED TASK DOES NOT RE-QUEUE IT AND SPAWNS NOTHING — THE AMENDER OWNS FILING THE
+  FOLLOW-UP. A criterion added to a task that has already merged is unreachable by every rung: `deriveStatus`
+  treats MERGED as terminal, the drain's first filter is `if (isMerged(t.id)) continue`, the retro's
+  `planHealthSweep` skips merged/done as "already shipped", the linter is status-blind, and `rmd correct`
+  re-points credit but cannot un-credit. So the criterion sits in the plan looking authoritative while nothing
+  can ever dispatch, review or prove it. This is not a gap to be closed by making merge reversible — it is the
+  correct behaviour of a derived-status system, and the duty sits with the author of the amendment: amend for
+  the record if the task's spec was genuinely incomplete, and in the SAME PR file a follow-up task carrying the
+  new criteria VERBATIM (rule 16 — nothing dropped or weakened, only redistributed). This was already the
+  consistent convention (W1-T161, W1-T97, the W1-T65 pair, the W1-T76 follow-up) and it still failed, because
+  convention is not a gate: PR #374 amended W1-T155 at 17:35:20Z, 1h45m after PR #365 credited it merged at
+  15:50:08Z, adding the monotonic-under-darkness and liveness-bound criteria — and passed every check clean.
+  Both orphaned. One of them WAS the fix for the regression-to-queued-on-read-failure bug, which therefore
+  survived wearing a "merged ✓" badge while the console shipped a render-layer honesty banner over a data layer
+  that still lied. Found by hand, by nothing else. The executable duty is W1-T180 (a §5C lint check that fails a
+  bare post-merge amendment and passes one accompanied by its follow-up); the rehoming of what this already
+  orphaned is W1-T179. [W1-T155/PR #374 vs PR #365, 2026-07-20]
+- 22. THE CONSOLE MUST DISTINGUISH CLAIMED STATE FROM EVIDENCED STATE — THE W1-T128 DOCTRINE, APPLIED TO
+  PIXELS. A CLAIM is what a remote or a judge ASSERTS: merged-per-GitHub, review-passed. EVIDENCE is what the
+  fleet can SHOW: a ledger receipt of the merge, proofs that actually executed. They are not the same fact, and
+  the console must never render them as one. Every surface owes the reader which it is showing, and a surface
+  that cannot obtain evidence SAYS SO rather than silently downgrading to the claim — or worse, to nothing.
+  Three fixtures from 2026-07-20 make the cost concrete. (i) The board rendered `merged 0/160` with every task
+  queued, because a failed GitHub read returned an empty set and cannot-read was presented as nothing-exists
+  (W1-T181). (ii) RECENT rendered "no recent outcomes yet" across a week containing ~100 merges, because the
+  section was GitHub-sourced while the LOCAL ledger held every one of them (W1-T184). (iii) `remudero-review`
+  posted "PASS — 5 criteria substantiated, no test theater" at `proof_exec: 0/5`, directly beneath its own
+  FLOOR DEGRADED banner, over a diff satisfying one criterion in five with zero tests on a `tdd: strict` task —
+  a CLAIM of substantiation rendered as though it were EVIDENCE of it.
+  The rule follows from where authority actually sits: the ledger is LOCAL, append-only and complete — the
+  fleet's own receipt of what it did. GitHub is a REMOTE, rate-limited, occasionally-unreachable claim about the
+  same events. A console that inverts that dependency lets a remote outage empty a local truth.
+  Executable duties: W1-T183 (density/IA — anomaly visible at the list layer), W1-T184 (ledger-first rendering
+  — GitHub decorates, never gates), W1-T179 (last-good status under darkness), W1-T182 (NEEDS ME joins live
+  escalation state, not ledger history). [console design pass, 2026-07-20]
+- 23. WRITE-SIDE ATOMICITY — every multi-process-visible write is atomic or locked. The write-path sibling
+  of cannot-observe ⇒ wait. This codebase has a rich, hard-won READ-side doctrine: a value that cannot be
+  observed is marked indeterminate and deferred, never silently downgraded to absent or permitted
+  (W1-T130/T179/T181/T197). It has no matching write-side doctrine, and the 2026-07-21 recon named the
+  consequence precisely: *read-path integrity is doctrine, write-path atomicity is unowned*. The gap matters
+  because the same invariant a read-side fix protects is REINTRODUCIBLE THROUGH A WRITE RACE UNDERNEATH IT —
+  W1-T179's monotonic-under-darkness guarantee is defeated not by a flaw in its own logic but by a truncating
+  `writeFileSync` on the file it reads.
+  The rule: any file a second process can observe is written whole or not at all — temp-file-plus-rename, an
+  append the kernel serializes, or an explicit lock. And a file that cannot be parsed is a DIFFERENT
+  observation from a file that is absent. Collapsing those two is the write-side form of
+  cannot-observe ⇒ permitted, and it is how a torn read becomes a zeroed circuit breaker or a pruned live
+  worktree.
+  Three fixtures from the 2026-07-21 recon, each verified at source. (i) `appendLedger` has no atomicity
+  guarantee and its reader parses a torn line to `{}` — silently invisible to every consumer, on the file that
+  backs the dispatch circuit breaker (R-8/R-16, W1-T206). (ii) `status.json` is written by four callers with a
+  truncating write, so a reader arriving mid-write loses exactly the cached projection W1-T179 exists to
+  preserve (R-17, W1-T207). (iii) `run.lock` collapses an unparseable read and an absent lock to the same
+  `null` (R-18, W1-T208).
+  One honest caveat, because the doctrine should not be justified by a fiction: `appendFileSync` opens
+  `O_APPEND`, so concurrent appenders do NOT overwrite each other and the recon's suggested PIPE_BUF guarantee
+  does not apply to a regular file. The exposure is a partial write and a silent torn-line read, not a lost
+  append. Doctrine earns its keep by being true.
+  Executable duties: W1-T206 (ledger), W1-T207 (status.json), W1-T208 (run.lock), W1-T209 (breaker-safe
+  archival). [recon intake, 2026-07-21]
+- 24. SECRETS-AT-REST — a credential never lives in a log, a URL, or an argv. The threat model this plan
+  grew up with is a malicious worker escaping its sandbox, and it is well served: scoped PATs, containment
+  probes, deny-floor hooks. What it did not cover is the mundane leak — the operator's own credential sitting
+  in a world-readable file because a startup banner printed it. The 2026-07-21 recon put it exactly: the plan
+  tracks scoped PATs and containment sandboxing but not *a token in a log, a token in a URL, no rotation path*.
+  The rule has three parts. A secret is never printed to stdout or stderr by a long-running service, because
+  that output is routinely redirected to a file that outlives the process. A secret never travels in a URL,
+  because URLs are copied, screenshotted, bookmarked, proxied and restored by session-restore — a link is the
+  worst possible place to put a capability. And ROTATION IS A DOCUMENTED PATH, not an implementation detail
+  someone can reconstruct: an undocumented rotation path is operationally an absent one, which is why R-31
+  was a real finding even though `rm` had always worked.
+  The corollary that makes it actionable: exposure is judged by where a secret HAS BEEN, not by who was
+  watching. A token that reached a log file, a terminal transcript, a screenshot or a chat window is
+  compromised and must be ROTATED, not merely un-shared.
+  Fixtures: R-5 — both bearer tokens printed to a 0644 `serve.log` with the WRITE token embedded in the
+  console URL, so merely running the command leaked a fleet-control capability to disk (fixed #473, rotated
+  the same day). R-31 — token generation is create-once/read-thereafter, making rotation a `rm` nobody had
+  written down (documented #473). [recon intake, 2026-07-21]
+- 25. INSTRUMENT CHANGES RIDE ALONE — a diff may change what a gate MEASURES, or what the gate concludes
+  about the product, never both in one PR. RECORDED, NOT NEWLY DECIDED: this rule has been ENFORCED IN
+  CODE since W1-T297 while §12 carried no text for it. W1-T297's own shard promised the prose ("ships with
+  the MASTER-PLAN §12 amendment that states the RULE (Standing rule 25) this task makes executable"); the
+  enforcement landed and the amendment did not, so for roughly two hundred PRs every citation pointed at a
+  rule that did not exist here. THE PROSE THEREFORE FOLLOWED THE CODE, not the other way round, and a
+  reader should weigh it accordingly: where this entry and `src/lib/review.ts` disagree, the code is what
+  refuses PRs. MEASURED AT `c709493`, re-derived rather than carried forward: the exact phrase "Standing
+  rule 25" appears at 12 sites across 6 files, 8 of them inside `src/` (`src/lib/review.ts` ×6,
+  `src/run-task.ts` ×2, plus two `test/` suites and two shards); case-insensitively, "rule 25" appears
+  38 times across 28 files, because ~22 task shards now run an explicit "RULE 25 CHECKED BEFORE FILING"
+  step. It is cited far more often than it was written. This entry grants the gate no new reach. THE MEASUREMENT-INSTRUMENT SURFACE is one exported constant,
+  `INSTRUMENT_SURFACE` (`src/lib/review.ts`) — `.github/workflows/`, every `scripts/*-ratchet.mjs`,
+  `scripts/diff-coverage.mjs`, every `scripts/*-baseline.json`, `scripts/mutation-relevant-paths.json`,
+  `stryker.conf.json` — and BOTH consumers derive from it (`USER_VISIBLE_SURFACE_RE`'s instrument arm and
+  `detectInstrumentEntanglement`) so the two can never drift into a second hand-maintained copy. THE
+  PREDICATE IS ENTANGLEMENT, NOT INSTRUMENT-TOUCHING: refusal requires at least one instrument path AND at
+  least one product path (`src/`, non-test) in the same diff. An instrument-only diff — optionally carrying
+  its own `test/` falsifier and a `docs/` update — is the SANCTIONED shape, and so is a src-only, plan-only
+  or docs-only diff. `isProductPath` is `path.startsWith("src/") && !isTestPath(path)`, so `test/` is
+  deliberately NOT the product half — the design's own carve-out, because otherwise an instrument-only PR
+  could never carry the fixture that proves it; `test/diff-coverage.test.ts` is the established home for
+  exactly that, and a gate implemented in a test entangles with nothing. THE REFUSAL IS HARD AND CANNOT BE
+  FORGIVEN LATER: `instrumentEntangled` is one of the terms in BOTH of `judgeReview`'s rollups — `state`
+  and `floorState` — so it forces `state: "failure"`, and because `applyVerdictStability` (W1-T178)
+  suppresses only an UNCHANGED-HEAD SEMANTIC downgrade (`floorState === "success"`), an entanglement
+  failure can never be suppressed by verdict stability. It is a structural, diff-derived fact, and it
+  preempts the ordinary unmet-criteria text rather than queueing behind it. WHAT A REFUSED WORKER IS TOLD
+  (`src/run-task.ts`), because the rule should read the way the refusal reads. The escalation SUMMARY,
+  verbatim: `blocked_review: instrument change entangled with src/ in one PR (Standing rule 25) — <pr
+  url>`. Its DETAIL names the instrument path(s) and the `src/` path(s) found beside them, calls them "two
+  independently falsifiable claims (\"the instrument is right\" and \"the code is right\") shipped as one
+  green, self-graded by the very instrument version it also changed", and states the part that makes this
+  different from an ordinary block: "No worker may legitimately resolve this by writing more code." The two
+  OPTIONS it offers are the only sanctioned exits — split, "land the instrument change in its own PR,
+  then rebase this one onto it — the sanctioned shape", or revert, "revert the instrument hunk on this
+  branch, keeping only the `src/` change, then re-review". A rule that only refuses re-teaches nothing, so
+  the refusal ships its own remedy.
+  WHY IT IS A RULE AND NOT A STYLE NOTE: a diff that lowers a coverage floor
+  while also changing the code that floor measures is self-certifying — the same PR moves the ruler and the
+  thing being measured, and no reviewer is prompted to notice. Split it: the instrument change rides alone
+  and is judged on its own evidence. [W1-T297; amendment reconstructed 2026-08-11 (#1596) from the
+  enforcement it was always meant to accompany, and completed 2026-08-12 with the three enforcement facts
+  that first pass omitted — the verbatim `blocked_review` refusal, the never-suppressible property, and the
+  re-measured citation counts]
+- 26. A `state/` OVERRIDE MAY ONLY MOVE A VALUE TOWARD *GREATER* EXPOSURE — THE COMMITTED ROW IS THE
+  FLOOR. OPERATOR RULING, recorded verbatim in substance from feedback `fb-1785950676514-c5cdcc`
+  (2026-08-05, cli): *"A LANES OVERRIDE MUST NEVER LOWER … the committed row is the floor and an
+  override may only RAISE it."* Recorded here, not built: no lanes override exists and none is filed
+  (see below for why), so this is a CONDITION ON ONE IF IT IS EVER BUILT — and, per the ruling's own
+  falsifier, on whatever generalisation of the override store lands first.
+  THE ASYMMETRY THAT MAKES IT A RULE: a wiped `state/` silently reverts every override to its
+  committed default, and that fails safe in ONE DIRECTION ONLY. If the committed row is the
+  lower-exposure end, a wipe costs concurrency/spend the operator wanted anyway; if an override is
+  the thing holding the value DOWN, the wipe silently restores the HIGHER exposure with no signal at
+  all. So: to REDUCE exposure, edit the committed row (a reviewed plan-data PR) — a reduction must
+  be durable, never state-resident. Stated by EXPOSURE, not by sign, because the safe direction is a
+  property of the row; for `sweep.dispatchLanes` and `sweep.dailyCostCeilingUsd` exposure rises with
+  the number, so for both of them "toward greater exposure" reads literally as "may only RAISE".
+  THE RULING'S OWN NUMBER IS ALREADY STALE, AND THE STALENESS STRENGTHENS IT. At capture the
+  committed `dispatchLanes` row was `value: 1` (min 1, max 4) and the author noted a wipe would
+  therefore revert *down* — safe. Today (`plan/policy.yaml`) it is `value: 3`, min 1, max 4,
+  beside a net-new `reviewLanes: 3`, and W1-T1049's own measurement says the host fits about four
+  concurrent workers of any kind against a configured worst case of six. The plausible near-term
+  operator move is therefore to run FEWER lanes — i.e. exactly the lowering override this rule
+  forbids. That is not an accident of the rule; it is the rule working.
+  WHAT TO DO INSTEAD, because the rule must leave the emergency reachable: `rmd pause` already halts
+  new dispatch without a PR, a restart or a deploy — `runDaemon` checks it in the tick body and
+  RE-CHECKS it immediately before admission (W1-T1065), in-flight work is never interrupted, and the
+  marker survives the deploy's `pull --ff-only`. Then move the committed row and restart. The
+  measurement the ruling carries: restart is 1.2s median (148 kickstart-to-boot pairs, control
+  794 boots) against a PR-to-merge median of 12.2m / p90 64.9m — so an override saves the
+  PR, not the restart, and its only unique saving is idle minutes during a flip-back, in a scenario
+  with zero observed instances (`dispatch.concurrent_set` 0 rows, `drain.pause`/`daemon.paused` 0
+  rows, control `run.start` 682). A LIVE RELOADER for lane width is separately refused: it would buy
+  1.2 seconds against `src/lib/daemon.ts`'s explicit W1-T343 design — *"resolved ONCE, for this
+  process's whole lifetime"* — and reintroduce the mid-run reconfiguration question that frozen
+  design exists to avoid.
+  FOR WHOEVER GENERALISES THE STORE — IT IS NOT PARAMETERISED, verified at this sha:
+  `dailyCostCeilingOverridePath` returns the literal `state/DAILY_COST_CEILING_OVERRIDE`; both the
+  writer and `resolveDailyCostCeiling` read `policy.bounds["sweep.dailyCostCeilingUsd"]` as a
+  LITERAL key; and `validatePolicy` populates `bounds` for that ONE field only (its own comment says
+  so). Generalising therefore means row key plus filename plus a `bounds` entry for the new
+  row, plus row-specific semantics — for lanes: integers, not floats, and the floor-at-1-never-0
+  that `laneDispatchBudget` and `runDaemon` both already apply (`Math.max(1, opts.laneCount ?? 1)`),
+  so a bad override can never mean "dispatch nothing" silently. Roughly 4–6 files.
+  OPEN, AND DELIBERATELY NOT DECIDED BY THIS RECORD: the SHIPPED ceiling store is the live instance
+  of the same asymmetry. W1-T364/#1417 gave the console an arm-then-confirm write over
+  `writeDailyCostCeilingOverride`, which validates BOUNDS ONLY — so a *lowering* ceiling override is
+  writable today and its silent loss raises the ceiling by up to the committed $500. Refusing such a
+  write in code would collide with the operator's other standing ruling (`fb-1785858048118-50fab8`:
+  runtime config belongs in a store with a dashboard, not behind a PR), so this entry names the gap
+  rather than closing it; the SIGNAL half is already queued as W1-T333 (render overridden-vs-default
+  provenance, so a vanished override is visible). The next filing that touches the store owns the
+  question. [operator feedback fb-1785950676514-c5cdcc; W1-T332/#1312, W1-T343/#1363, W1-T344,
+  W1-T364/#1417, W1-T1049; recorded 2026-08-23]
+- 27. AUTOMATIC FILING IS PERMITTED — THE FLEET MAY FILE, BUILD, TEST AND MERGE ITS OWN WORK, and
+  escalates to a human only when a judge decides one is genuinely needed. [operator ruling,
+  2026-08-29; W1-T2456]
+
+  THIS RULE EXISTS BECAUSE ITS ABSENCE WAS READ AS A PROHIBITION. An unwritten doctrine — that only
+  the Architect may author a task —
+  was cited in this file as "standing rule 15" at five places and in
+  `src/lib/retro.ts` as "standing rule 16", and §12 carries no such rule under either number:
+  15 is the acceptance-criteria goalpost rule and 16 is the mis-specified-task correction rule.
+
+  MEASURED 2026-08-29: a scan of the whole of §12 for the doctrine's own vocabulary
+  (`auto-fil|autofil|never file|architect authors`) returns 0, with a firing control
+  (`Architect` appears 5 times in the same span). A deleted prohibition leaves SILENCE, and that is what let
+  the inferred doctrine take root — so the permission is stated here affirmatively rather than
+  merely removed, and `test/rule-citations-match-their-rule.test.ts` now fails when a citation
+  claims a doctrine its cited rule does not carry.
+
+  WHAT DOES NOT CHANGE: rule 15 itself stands. `criterionFieldTampered` still refuses a worker
+  editing the acceptance criteria its own judge reads, and under an LLM-as-judge design that is MORE
+  load-bearing, not less. `rule15FilingViolation` is likewise untouched — it is a task-record SHAPE
+  check and never had anything to do with who may file.
