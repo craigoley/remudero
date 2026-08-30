@@ -11,6 +11,7 @@ import {
   buildBoardReview,
   decideBoardReviewCadence,
   decideBoardReviewTrigger,
+  reconcileBoardReviewReferents,
   readBoardReviewMarker,
   recordBoardReviewFire,
   type BoardItem,
@@ -539,4 +540,140 @@ test("runMeasurementCadenceReport skips the board-review rung entirely when opts
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+// ── W1-T2464: THE RECONCILER — a board-review finding must not outlive its referent forever ────
+//
+// `evidenceAnchors` is permanently `[]` on every board-review-minted proposal (a PR's open/closed
+// state is not a git-grep-able fact), so nothing in the ordinary drift machinery can ever retire
+// one. `reconcileBoardReviewReferents` is the separate mechanism this task adds, called from the
+// daemon's `checkBoardReview` hook (run-task.ts) rather than from `buildBoardReview`, so it runs
+// on every poll regardless of whether the depth trigger justifies a fire.
+
+function proposal(overrides: Partial<Proposal> & { id: string }): Proposal {
+  return { summary: overrides.id, evidenceAnchors: [], ...overrides };
+}
+
+function fakeRegistry(initial: Proposal[]) {
+  let state = initial;
+  let writes = 0;
+  let calls = 0;
+  const updateRegistry = (
+    _registryPath: string,
+    update: (current: Proposal[]) => Proposal[] | null,
+  ): Proposal[] | null => {
+    calls += 1;
+    const next = update(state);
+    if (next !== null) {
+      state = next;
+      writes += 1;
+    }
+    return next;
+  };
+  return {
+    updateRegistry,
+    get state() {
+      return state;
+    },
+    get writes() {
+      return writes;
+    },
+    get calls() {
+      return calls;
+    },
+  };
+}
+
+// ── acceptance 1 ─────────────────────────────────────────────────────────────────────────────
+
+test("a board-review finding whose referent PR has left the open board is retired on the next check, even on a tick that produces no findings of its own and does not fire", () => {
+  const registry = fakeRegistry([proposal({ id: "board-review:stale:#3227", originatingItemId: "#3227" })]);
+  // A quiet board — #3227 has merged and left it, and every remaining item is far under every
+  // depth threshold, so this tick does not fire.
+  const items = [item({ id: "#9001", ageHours: 0.1 })];
+
+  assert.equal(decideBoardReviewTrigger({ items }).fire, false, "precondition: this tick does not fire");
+
+  const result = reconcileBoardReviewReferents({ items, registryPath: "/state/inbox-proposals.json", updateRegistry: registry.updateRegistry });
+
+  assert.deepEqual(result.retiredProposalIds, ["board-review:stale:#3227"]);
+  assert.deepEqual(registry.state, [], "the row is gone from the registry, not merely reclassified");
+});
+
+test("an escalation finding whose PR has merged is retired the same way as a stale finding", () => {
+  const registry = fakeRegistry([proposal({ id: "board-review:escalation:#3227", originatingItemId: "#3227" })]);
+  const result = reconcileBoardReviewReferents({ items: [item({ id: "#1" })], registryPath: "/state/inbox-proposals.json", updateRegistry: registry.updateRegistry });
+  assert.deepEqual(result.retiredProposalIds, ["board-review:escalation:#3227"]);
+  assert.deepEqual(registry.state, []);
+});
+
+test("a legacy proposal minted before originatingItemId existed still retires, parsed off its own id", () => {
+  const registry = fakeRegistry([proposal({ id: "board-review:stale:#3227" })]); // no originatingItemId
+  const result = reconcileBoardReviewReferents({ items: [item({ id: "#1" })], registryPath: "/state/inbox-proposals.json", updateRegistry: registry.updateRegistry });
+  assert.deepEqual(result.retiredProposalIds, ["board-review:stale:#3227"]);
+});
+
+// ── acceptance 2 ─────────────────────────────────────────────────────────────────────────────
+
+test("an EMPTY board read retires nothing at all — an unreadable board is never read as every condition resolved", () => {
+  const registry = fakeRegistry([proposal({ id: "board-review:stale:#3227", originatingItemId: "#3227" })]);
+  const result = reconcileBoardReviewReferents({ items: [], registryPath: "/state/inbox-proposals.json", updateRegistry: registry.updateRegistry });
+  assert.deepEqual(result.retiredProposalIds, []);
+  assert.equal(registry.calls, 0, "an empty read never even touches the registry");
+  assert.equal(registry.state.length, 1, "the row survives untouched");
+});
+
+// ── acceptance 3 ─────────────────────────────────────────────────────────────────────────────
+
+test("an escalation finding whose referent PR is STILL on the open board survives, even when this tick mines no escalation finding for it", () => {
+  const registry = fakeRegistry([proposal({ id: "board-review:escalation:#3227", originatingItemId: "#3227" })]);
+  // #3227 is still open, but ITS escalation count reads zero this tick (the projection read
+  // degraded, or the escalation really was handled) — either way, the PR itself is still on the
+  // board, so this must survive.
+  const items = [item({ id: "#3227", unhandledEscalations: 0 })];
+
+  const result = reconcileBoardReviewReferents({ items, registryPath: "/state/inbox-proposals.json", updateRegistry: registry.updateRegistry });
+
+  assert.deepEqual(result.retiredProposalIds, [], "the PR is still on the board — nothing retires");
+  assert.equal(registry.state.length, 1);
+});
+
+// ── acceptance 4 ─────────────────────────────────────────────────────────────────────────────
+
+test("retirement never reaches a proposal this rung did not mint — a P##, a rule-efficacy and a docket row all survive", () => {
+  const untouched: Proposal[] = [
+    proposal({ id: "P77" }),
+    proposal({ id: "rule-efficacy:some-rule" }),
+    proposal({ id: "FD-1" }),
+  ];
+  const registry = fakeRegistry([
+    proposal({ id: "board-review:stale:#3227", originatingItemId: "#3227" }),
+    ...untouched,
+  ]);
+  // #3227 has left the board — the board-review row retires, the other three do not, whatever
+  // the board looks like (none of them names a referent this rung could resolve).
+  const result = reconcileBoardReviewReferents({ items: [item({ id: "#1" })], registryPath: "/state/inbox-proposals.json", updateRegistry: registry.updateRegistry });
+
+  assert.deepEqual(result.retiredProposalIds, ["board-review:stale:#3227"]);
+  assert.deepEqual(
+    registry.state.map((p) => p.id).sort(),
+    untouched.map((p) => p.id).sort(),
+    "exactly the three non-board-review rows remain",
+  );
+});
+
+// ── acceptance 5 ─────────────────────────────────────────────────────────────────────────────
+
+test("the reconciliation is idempotent — a second pass over unchanged state retires nothing further and writes nothing", () => {
+  const registry = fakeRegistry([proposal({ id: "board-review:stale:#3227", originatingItemId: "#3227" })]);
+  const items = [item({ id: "#1" })];
+
+  const first = reconcileBoardReviewReferents({ items, registryPath: "/state/inbox-proposals.json", updateRegistry: registry.updateRegistry });
+  assert.deepEqual(first.retiredProposalIds, ["board-review:stale:#3227"]);
+  assert.equal(registry.writes, 1);
+
+  const second = reconcileBoardReviewReferents({ items, registryPath: "/state/inbox-proposals.json", updateRegistry: registry.updateRegistry });
+  assert.deepEqual(second.retiredProposalIds, [], "nothing left to retire");
+  assert.equal(registry.writes, 1, "the second pass performs no registry write");
+  assert.equal(registry.calls, 2, "it still reads — a real registry could have changed underneath it");
 });
