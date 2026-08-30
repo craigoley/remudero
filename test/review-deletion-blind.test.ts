@@ -140,9 +140,20 @@ test("every consumer of the shared changed-file list is enumerated, so a new one
     .filter((l) => l.includes("changedFiles(walkDiff(") && !/^\s*(\/\/|\*|\/\*)/.test(l)).length;
   assert.equal(
     callSites,
-    3,
+    4,
     "known: judgeReview (planOnly + bodyContradictsDiff + detectInstrumentEntanglement), " +
-      "checkOneConcern, checkDocsAwareness. A 4th call site must state its verdict change.",
+      "checkOneConcern, checkDocsAwareness, planOnlyDiff. A 5th call site must state its verdict change.",
+  );
+  // THE 4th CALL SITE, AND ITS VERDICT CHANGE: NONE. W1-T2472's `planOnlyDiff` is the same
+  // plan-only question `judgeReview` already answers, exposed for a caller that must ask it
+  // EARLIER — run-task.ts's advisory-reviewer spawn gate, which runs before judgeReview exists to
+  // be consulted. It feeds no verdict field: it decides only whether to dispatch an advisory
+  // worker whose sole output (`semantic[]`) is inert on a plan-only diff anyway. The boolean it
+  // returns is `planOnlyFromFiles`, the SAME expression judgeReview classifies on, so the two can
+  // never disagree — pinned by its own test rather than asserted here.
+  assert.ok(
+    src.includes("return planOnlyFromFiles(diffFiles, enforcementDataInDiff(diffFiles));"),
+    "planOnlyDiff must keep deriving its answer from planOnlyFromFiles, never from a second copy of the expression",
   );
   // detectInstrumentEntanglement takes the SAME list by argument rather than re-walking, so
   // it is a consumer that this regex cannot see — pinned separately.
