@@ -1,0 +1,107 @@
+- id: W1-T2463
+  title: "EVERY FIX SPAWN IN ONE DAEMON RUN STILL SHARES A SINGLE WORKER HOME AND ANY ONE OF THEM DELETES IT UNDER THE OTHERS — perRunWorkerHomeDir returns `${root}-${runId}` and worker.ts:1009 passes args.runId, so `worker-home-DAEMON-<epoch>` is one directory for every spawn in the run, and reapWorkerHome's unconditional `rmSync -rf` in a `finally` tears it down while siblings are live; the operator has ruled the remedy ships, and it needs its own task because W1-T2441 is instrumentation-only by design"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 12.00
+  files: [src/lib/worker-home.ts, src/lib/worker.ts, test/worker-home-per-spawn.test.ts]
+  origin: "operator-brief#ship-the-per-spawn-worker-home-remedy-2026-08-30"
+  plan_refs: ["W1-T2441", "W1-T170"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE ID. Eight surfaces swept, anchored W1-T2463([^0-9]|$) with a [0-9] class and never a \d
+    shorthand. SURFACE 1 (reservation refs on origin) READS 1 against 576 refs — the id the mint
+    HELD, read from refs/rmd-id/ on origin rather than taken as the advisory max. Its two-way
+    control: W1-T2460 (a known-held neighbour) also reads 1, and the anchor-leak probe
+    W1-T246([^0-9]|$) reads 0, so the anchor is not matching a prefix family.
+    SURFACE 2 shard filenames 0 of 706. SURFACE 3 declared ids 0 of 961. SURFACE 4 merged trailers
+    0 of 98. SURFACE 5 merged subjects 0 of 98 — each with a control firing 1 (W1-T2452 on 2/3/4,
+    W1-T2462 on 5). Live worker branches run-W1-T2463-* read 0 against a control of 90 live run-*
+    heads.
+    ⚠ SURFACES 6, 7 AND 8 ARE VACUOUS, NOT ZERO: open PR titles, open PR body lines and open head
+    refs all have an EMPTY POPULATION (zero open PRs at sweep time, HTTP 200 with a [] payload), so
+    no control is constructible on them and their "0" carries no information at all.
+
+    THE RISK BAND IS RULE 19's SPAN, NOT BLAST RADIUS. `files:` carries three entries whose stems
+    differ — worker-home, worker, and the test file's own stem, which `subsystemsOf` counts as a
+    separate concern in its own right — so `sizingViolation` refuses `risk: medium` for the span
+    alone. Set to `high` up front rather than discovered at lint time. The change itself is small.
+
+    ⚠ THIS IS A NEW TASK, NOT AN AMENDMENT TO W1-T2441, AND W1-T2441's SHARD IS NOT TOUCHED HERE.
+    W1-T2441 is instrumentation-only by design and its rationale says so in as many words: "DO NOT
+    SHIP THE REMEDY IN THIS TASK… and the operator has NOT RULED on the remedy. The instrumentation
+    must leave the defect firing." That was true when it was filed. The operator has since ruled.
+    W1-T2441 is cited here as the DIAGNOSIS and as the FALSIFIER; this task owns only the remedy.
+
+    THE DEFECT, RE-VERIFIED AT HEAD RATHER THAN TRUSTED FROM THE BRIEF. `perRunWorkerHomeDir`
+    (src/lib/worker-home.ts:549) is `const id = runId && runId.length > 0 ? runId : randomUUID();
+    return `${workerHomeRoot}-${id}`;` — unique ONLY when the caller omits a runId. 51db5367 (#2862)
+    added runId to fixArgs, and src/lib/worker.ts:1009 reads
+    `perRunWorkerHomeDir(workerHomeRoot, args.runId)` at head today, so every spawn in one daemon
+    run resolves to the same `worker-home-DAEMON-<epoch>`. `perSpawn` reads 0 in both
+    src/lib/worker.ts and src/lib/worker-home.ts (control: perRunWorkerHomeDir reads 11 across
+    src/), so no remedy is present on main.
+
+    THE EVIDENCE IS STDERR, NOT THE LEDGER. worker.ts's own doc says these rows are not ledger
+    rows — the sink is console.error — and a prior lane took a false zero by querying the ledger for
+    them. Measured 2026-08-30 over 24h of the daemon's stderr: 73 UUID-named homes with teardowns
+    {1: 73} and zero failures; 7 DAEMON-named homes with teardowns 2/3/5/6/6/7/9, 2 `absent`, and 1
+    `ENOTEMPTY`.
+    ⚠ ENOTEMPTY IS THE STRONGER SIGNAL AND IS WHY THIS IS A COLLISION RATHER THAN A DOUBLE-REAP:
+    rmSync failed because the directory was REPOPULATED between its recursive walk and the final
+    rmdir, which means two spawns were live in one directory SIMULTANEOUSLY. An `absent` reading
+    alone is consistent with a harmless second teardown and proves no such overlap.
+
+    ⚠ A PRIOR ATTEMPT WAS REVERTED, AND THIS ONE DIFFERS IN SHAPE. On 2026-08-29 the fix rung
+    reverted the remedy at 16:14:08Z citing W1-T2441's then-live no-remedy criterion; #3270 retired
+    that criterion at 16:22:34Z (+31-2); #3261 then merged at 16:24:32Z with changed_files=0. The
+    revert won the race by 8m26s and the fix is not on main. That attempt lost to a criterion that
+    no longer exists — but the reason to re-shape it is Q2 below, not the timing.
+
+    Q1. KEEP runId IN THE PATH; APPEND UNIQUENESS BESIDE IT, NEVER REVERT THE THREAD. #2862 did not
+    add runId decoratively: it feeds `workerMarkerEnv`, which writes REMUDERO_RUN_ID and
+    REMUDERO_TASK_ID into the child environment that `reclaimAbandonedWorker` and the orphan sweep
+    match on. Dropping runId to restore uniqueness would silently break reclamation. The remedy
+    appends a per-spawn token alongside the runId.
+
+    Q2. UNIQUENESS IS OPT-IN AT THE CALL SITE, AND THE DEFAULT STAYS BYTE-IDENTICAL. A blind UUID
+    breaks the second caller: `readUsageSnapshot` (src/run-task.ts:18717) passes the constant
+    "usage-probe", and its own comment at 18714 asks for "a stable, non-per-call home … rather than
+    littering worker-home-* siblings on every tick". `perRunWorkerHomeDir` has exactly two callers
+    in src/; only worker.ts:1009 opts in. Both halves are locked by tests.
+    ⚠ THIS IS ALSO WHAT LETS W1-T2441's INSTRUMENTATION LOCK KEEP PASSING UNTOUCHED:
+    test/worker-home-reap-visibility.test.ts:226 asserts two calls sharing one runId return the SAME
+    path. A default-changing remedy would redden that test and force an edit to another task's file;
+    an opt-in remedy leaves it green and true.
+
+    Q3. sweepStaleWorkerHomes MUST PARSE THE TOKEN BACK OUT, OR THE REMEDY BREAKS IT SILENTLY.
+    src/lib/worker-home.ts:784 is `const runId = name.slice(prefix.length)` — the WHOLE suffix is
+    taken as the run id — and it feeds `findLiveInflightLockForRun` (`info.run_id === runId`) and
+    `hasTerminalLedgerVerdict` (`rec.step === "verdict" && rec.run_id === runId`), both EXACT
+    comparisons. Appending uniqueness without parsing it back out makes both miss every time and
+    DEMOTES THEM TO THE 24-HOUR MTIME BACKSTOP: a live run's home would no longer be protected by
+    its own inflight lock, and a dead one would no longer be reaped on its verdict. This half ships
+    in the same task and carries its own falsifier.
+
+    ⚠ WEAKEN NOTHING. The `rmSync` is not removed and the reap is not made conditional — the fix is
+    that each spawn owns its own directory, so an unconditional teardown is correct. W1-T2441's
+    instrumentation is not touched; it is what proves the remedy worked.
+  acceptance:
+    - claim: "two spawns sharing one runId resolve to DISTINCT home paths when the call site opts in, so the collision cannot recur"
+      proof: "unit test: test/worker-home-per-spawn.test.ts"
+    - claim: "a driven multi-spawn produces N distinct paths and N teardowns each reporting reaped true, with no absent and no ENOTEMPTY"
+      proof: "unit test: test/worker-home-per-spawn.test.ts"
+    - claim: "the DEFAULT call shape is byte-identical, so the usage-probe stable home is unchanged and is not littered per tick"
+      proof: "unit test: test/worker-home-per-spawn.test.ts"
+    - claim: "the runId remains recoverable from the path, so the run-id marker env that reclamation matches on is unaffected"
+      proof: "unit test: test/worker-home-per-spawn.test.ts"
+    - claim: "the sweep parses the per-spawn token back out and still keeps a live run's home on its inflight lock regardless of age"
+      proof: "unit test: test/worker-home-per-spawn.test.ts"
+    - claim: "the sweep still removes a dead run's home on its terminal verdict rather than falling through to the age backstop"
+      proof: "unit test: test/worker-home-per-spawn.test.ts"
+    - claim: "the reap stays unconditional and best-effort: the recursive remove is still called and still never throws on any arm"
+      proof: "unit test: test/worker-home-per-spawn.test.ts"
