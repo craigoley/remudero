@@ -245,10 +245,13 @@ test("drain.ts: tallyDispatchFilters's DispatchFilterReason-keyed record still h
     // reaches `onFiltered`/the DispatchFilterReason tally even when nothing observes it.
   });
   const snapshot = tally.snapshot();
+  // W1-T2474 adds one more arm, 'retired' (the 'blocked' bucket's own split) — the breaker's
+  // own exclusion still lands in NONE of these, 'retired' included.
   assert.deepEqual(Object.keys(snapshot).sort(), [
     "already-merged",
     "blocked",
     "continued-this-pass",
+    "retired",
     "run-branch-already-pushed",
     "unmet-deps",
     "verify-not-auto",

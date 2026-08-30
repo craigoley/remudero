@@ -479,11 +479,19 @@ export function nextRunnable(plan: Plan, isMerged: MergedSet, opts: NextRunnable
  * tally (queue-head's own consumer, `deriveQueueHead`) must still be able to name it, never see
  * a task vanish with no reason recorded anywhere this union is consulted. Order matters and is
  * the filter's own: see {@link tallyDispatchFilters} on first-match.
+ *
+ * `"retired"` (W1-T2474) is `"blocked"`'s own split, not a new gate: `status: "blocked"` still
+ * refuses every task it always refused, byte-identical, but a `blocked` task ALSO carrying a
+ * `retirement` ruling (plan.ts's `RETIREMENT_REASONS`, W1-T1287) is a deliberate record that will
+ * never be built rather than a dependency-stalled one waiting to clear — the two populations a
+ * human should read apart, per this task's own rationale. A `blocked` task with no `retirement`
+ * files under `"blocked"`, unchanged.
  */
 export type DispatchFilterReason =
   | "already-merged"
   | "verify-not-auto"
   | "blocked"
+  | "retired"
   | "unmet-deps"
   | "continued-this-pass"
   | "run-branch-already-pushed";
@@ -520,6 +528,7 @@ export function tallyDispatchFilters(): {
     "already-merged": [],
     "verify-not-auto": [],
     blocked: [],
+    retired: [],
     "unmet-deps": [],
     "continued-this-pass": [],
     "run-branch-already-pushed": [],
@@ -576,7 +585,13 @@ function isDispatchEligible(plan: Plan, t: Task, isMerged: MergedSet, opts: Next
     return false;
   }
   if (t.status === "blocked") {
-    opts.onFiltered?.(t, "blocked");
+    // W1-T2474: SPLIT AT THE FILTER, NOT AT THE CENSUS — a `blocked` task carrying a
+    // `retirement` ruling (plan.ts's `RETIREMENT_REASONS`, W1-T1287) is a deliberate record
+    // that will never be built, never a dependency-stalled task waiting to clear on its own.
+    // Both still refuse the task identically (this `return false` is unchanged either way);
+    // only the NAME reported to `onFiltered` differs, so a caller reading the tally can tell
+    // the two populations apart instead of conflating them under one "blocked" bucket.
+    opts.onFiltered?.(t, t.retirement !== undefined ? "retired" : "blocked");
     return false;
   }
   if (unmetDependencies(plan, t, merged).length > 0) {

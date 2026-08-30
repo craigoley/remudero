@@ -103,11 +103,13 @@ test("drain.ts: tallyDispatchFilters gives 'run-branch-already-pushed' its OWN b
   assert.equal(snapshot.blocked.count, 0, "the recoverable 'blocked' bucket must not absorb this permanent exclusion");
   assert.equal(snapshot["unmet-deps"].count, 0, "nor must the recoverable 'unmet-deps' bucket");
   // Every bucket a StarvationCensus-shaped reader could ever consult is still present and typed —
-  // the new reason is an ADDITIONAL key, never a replacement for any existing one.
+  // the new reason is an ADDITIONAL key, never a replacement for any existing one. W1-T2474 adds
+  // one more additional key, 'retired' — the blocked bucket's own split, never touching this one.
   assert.deepEqual(Object.keys(snapshot).sort(), [
     "already-merged",
     "blocked",
     "continued-this-pass",
+    "retired",
     "run-branch-already-pushed",
     "unmet-deps",
     "verify-not-auto",

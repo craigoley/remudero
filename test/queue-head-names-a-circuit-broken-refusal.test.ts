@@ -144,15 +144,15 @@ test("W1-T2415: no dispatch decision changes — the same tasks are eligible and
   assert.deepEqual(head.rows.map((r) => r.taskId), without.map((t) => t.id), "queue head rows still match the selector");
 });
 
-test("W1-T2415: the DispatchFilterReason union still has six arms and gains none", () => {
+test("W1-T2415: the DispatchFilterReason union gains no CIRCUIT-BREAKER arm (W1-T2474 adds 'retired', unrelated to this guard)", () => {
   const drain = readFileSync(new URL("../src/lib/drain.ts", import.meta.url), "utf8");
   const decl = drain.slice(drain.indexOf("export type DispatchFilterReason ="));
   const body = decl.slice(0, decl.indexOf(";"));
   const arms = [...body.matchAll(/\|\s*"([a-z-]+)"/g)].map((m) => m[1]);
   assert.deepEqual(
     arms,
-    ["already-merged", "verify-not-auto", "blocked", "unmet-deps", "continued-this-pass", "run-branch-already-pushed"],
-    "the union is untouched — the breaker is named through its own callback, not a seventh arm",
+    ["already-merged", "verify-not-auto", "blocked", "retired", "unmet-deps", "continued-this-pass", "run-branch-already-pushed"],
+    "the union gains exactly the one arm W1-T2474 adds ('retired', blocked's own split) — the breaker is still named through its own callback, not an arm here",
   );
   assert.equal(body.includes("circuit"), false, "and no circuit arm was smuggled in");
 });

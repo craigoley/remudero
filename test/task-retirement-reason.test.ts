@@ -168,8 +168,15 @@ test("criterion 3b: isDispatchEligible (via nextRunnable/runnableCandidates' sha
     nextRunnable(planOf([t]), NONE_MERGED, { onFiltered: tally.onFiltered });
   }
   const snapshot = tally.snapshot();
-  assert.ok(snapshot.blocked.ids.includes("W1-T1000"), "the retired task is still counted under the SAME 'blocked' filter reason");
-  assert.ok(snapshot.blocked.ids.includes("W1-T1001"), "the plain blocked task is counted identically");
+  // W1-T2474: the filter now SPLITS at this exact point — a blocked task carrying a
+  // `retirement` ruling files under its own 'retired' reason, never under 'blocked', so the
+  // two populations (deliberate record vs. dependency-stalled) stop being conflated in the
+  // tally an idle daemon reads. See test/a-retired-task-is-not-a-recoverable-blocker.test.ts
+  // for the full split's coverage; this test only needed updating to stop asserting the old
+  // conflated shape.
+  assert.ok(snapshot.retired.ids.includes("W1-T1000"), "the retired task now files under its own 'retired' filter reason");
+  assert.ok(!snapshot.blocked.ids.includes("W1-T1000"), "the retired task no longer files under 'blocked'");
+  assert.ok(snapshot.blocked.ids.includes("W1-T1001"), "the plain blocked task (no retirement) still files under 'blocked', unchanged");
 });
 
 /** Captures console.log/error/warn during a `lintPlanCommand` call — mirrors
