@@ -1,0 +1,78 @@
+- id: W1-T2509
+  title: "THE DISPATCH FAN-OUT IS THREE LANES WIDE AND ONE LANE DEEP — `dispatch.concurrent_set` proves the batch admits three tasks at `lane_count: 3`, yet their run ids are minted 78 SECONDS APART because `Promise.allSettled(admitted.map(runOne))` maps over work that blocks the single-threaded event loop; the daemon has been paying for three lanes and running one since concurrent dispatch shipped"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 22.00
+  files: [src/lib/worker.ts, src/run-task.ts, test/three-lanes-start-within-one-window.test.ts]
+  origin: "operator-brief#it-doesnt-seem-like-we-have-3-parallel-builds-2026-08-30"
+  plan_refs: ["W1-T343", "W1-T172", "W1-T476"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE SELECTOR, THE PACKER AND THE PARTITION ALL WORK; THE EXECUTION DOES NOT. Every
+    `dispatch.concurrent_set` row across four days names two or three tasks at `lane_count: 3`, so
+    the admission side is correct. The run ids minted inside those lanes are 78 seconds apart. A
+    fan-out whose members start a minute and a quarter after one another is a queue.
+    SURFACE 1 lanes the batch admits = 3
+    SURFACE 2 seconds between the first and second lane's run id = 78
+    SURFACE 3 execFileSync calls reachable from the dispatch path = 30
+    SURFACE 4 governor rows across the archives that could explain it = 0
+    SURFACE 5 locks scoped per lane rather than per drain = 0
+
+    THE MECHANISM IS `.map`, AND IT IS NOT A BUG IN `allSettled`. `admitted.map((t) =>
+    deps.runOne(t.id))` INVOKES each `runOne` in turn to build the promise array. A `runOne` that
+    runs synchronously until its first real yield therefore prevents the NEXT one from being called
+    at all — not merely from progressing. The 78-second gap is not latency inside lane two; it is
+    how long lane one blocks before lane two is entered. The log's own per-task sequence names the
+    culprit: settings validation, then a containment probe, then an isolation probe, each a real
+    child process, before any lane yields.
+
+    SIX ALTERNATIVES WERE ELIMINATED, WHICH IS WHY THIS IS FILED AS A DEFECT RATHER THAN A THEORY.
+    Not a governor (`dispatch.lane_governed` and `dispatch.wip_deferred` both read zero matches over
+    forty-eight archives). Not file overlap (the three tasks in the measured tick are mutually
+    disjoint). Not queue depth (fifty-three runnable at the tightest credit bound, largest disjoint
+    set twenty-one). Not the lane count (the real module reports three). Not a shared lock
+    (`drain.lock` is acquired per drain, the inflight lock per task). Not a deliberate stagger (the
+    fan-out carries none).
+
+    THE ACCEPTANCE BAR IS A TIMING FACT ALREADY IN THE LEDGER, NOT A NEW GAUGE. `dispatch.settled_set`
+    ships as the counterpart to `concurrent_set`, and each lane's run id carries its own start
+    instant. So "three lanes started within one bounded window of the batch row" is measurable today
+    with no new instrumentation — and it is the only criterion that distinguishes a real fix from a
+    faster serial run.
+
+    THE HOST HEADROOM ARGUMENT IS AFFECTED AND MUST BE RE-READ, NOT RE-USED. `plan/policy.yaml`
+    reasons that three builders plus three reviewers is about 7.98 GiB against a smaller host. That
+    arithmetic assumes a concurrency the builders have never actually reached. Whoever fixes this
+    makes that ceiling real for the first time, so the memory figures must be re-measured under
+    genuine three-way concurrency BEFORE anyone treats the existing numbers as observed rather than
+    projected. This task does not raise any lane count and must not.
+
+    NOT IN SCOPE: raising `dispatchLanes` or `reviewLanes`; the review lane's own concurrency; the
+    admission side, which is correct; and the worker's own internal spawns once a lane is genuinely
+    running — only the path between admission and the first yield is this task's.
+
+    THE RISK BAND IS BLAST RADIUS, NOT RULE 19's SPAN: two src stems plus a test is a narrow span,
+    but converting synchronous spawns on the dispatch path changes ordering guarantees for every
+    build the fleet runs, and a mistake there is a fleet-wide outage rather than one red PR.
+  acceptance:
+    - claim: "three admitted lanes mint their run ids within one bounded window of the batch row"
+      proof: "unit test: test/three-lanes-start-within-one-window.test.ts"
+    - claim: "a lane's preflight no longer blocks a sibling lane from being entered"
+      proof: "unit test: test/three-lanes-start-within-one-window.test.ts"
+    - claim: "a single admitted lane behaves exactly as it does today"
+      proof: "unit test: test/three-lanes-start-within-one-window.test.ts"
+    - claim: "a lane that throws still leaves its siblings running, as allSettled already promises"
+      proof: "unit test: test/three-lanes-start-within-one-window.test.ts"
+    - claim: "every preflight still runs and still refuses what it refuses today"
+      proof: "unit test: test/three-lanes-start-within-one-window.test.ts"
+    - claim: "no lane count is raised by this change"
+      proof: "unit test: test/three-lanes-start-within-one-window.test.ts"
+    - claim: "the admission set and its ledger rows are unchanged"
+      proof: "unit test: test/three-lanes-start-within-one-window.test.ts"
+    - claim: "restoring the synchronous preflight makes the one-window assertion fail"
+      proof: "unit test: test/three-lanes-start-within-one-window.test.ts"
