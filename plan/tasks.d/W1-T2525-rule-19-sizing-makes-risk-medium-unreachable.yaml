@@ -1,0 +1,73 @@
+- id: W1-T2525
+  title: "RULE 19 SIZING COUNTS A SOURCE FILE AND ITS OWN TEST AS TWO CONCERNS, SO `risk: medium` IS UNREACHABLE FOR THE DOMINANT TASK SHAPE — every `files: [src/x.ts, test/x.test.ts]` filing is refused at medium and must be raised to high, which drains the band of meaning: FOUR filings hit it in one session and all four were raised for the linter, not for their blast radius"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 10.00
+  files: [src/lib/task-linter.ts, test/rule-19-sizing-counts-a-test-as-a-concern.test.ts]
+  origin: "operator-session#four-sizing-raises-in-one-session-2026-08-30"
+  plan_refs: ["W1-T2520", "W1-T2523", "W1-T2524"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED IN ONE SESSION, FOUR TIMES, VERBATIM FROM THE LINTER:
+
+      W1-T2514  [sizing] spans 3 distinct subsystems/concerns (mutation-nightly, mutation-ratchet,
+                the-nightly-ratchet-never-runs-on-the-nights-it-is-needed) at risk:medium
+      W1-T2518  [sizing] spans 2 distinct subsystems/concerns (daemon,
+                the-fallback-push-became-the-normal-path) at risk:medium
+      W1-T2523  [sizing] spans 2 distinct subsystems/concerns (ci-parity,
+                nothing-tells-you-which-census-suites-your-change-joins) at risk:medium
+      W1-T2524  [sizing] spans 2 distinct subsystems/concerns
+                (a-test-outside-strykers-command-is-invisible, mutation-ratchet) at risk:medium
+
+    READ THE PARENTHESES. In every case one of the "distinct concerns" is the TASK'S OWN TEST FILE,
+    named after the task itself. `files: [src/lib/daemon.ts, test/<this-task>.test.ts]` is not two
+    concerns; it is one concern and its falsifier, which is the shape `principles: {tdd: strict}`
+    asks for on every implement task in this plan.
+
+    THE CONSEQUENCE IS THAT THE BAND STOPS CARRYING INFORMATION. `risk` has three values. The
+    dominant filing shape in this repo — one source stem plus its test — cannot be filed at medium,
+    so it is raised to high every time. All four raises above were made for the linter, and each
+    shard had to say so in prose ("THE RISK BAND IS RULE 19'S SPAN, NOT BLAST RADIUS") precisely
+    because the band no longer means what a reader would assume. When every task is high, high
+    selects nothing — and `risk` feeds mount routing and budget, so this is not only cosmetic.
+
+    WHY THE RULE ITSELF IS RIGHT. Rule 19 exists to stop a filing that quietly bundles two unrelated
+    changes, and it catches that. The defect is only in what counts as a concern: a `test/` path
+    whose basename matches the task's own slug is the task's falsifier, not a second subsystem.
+    That is a narrow, checkable exemption — the derivation already has both the slug and the path.
+
+    WHAT IT MUST NOT DO. A task listing SOMEONE ELSE'S test file, or several unrelated test files,
+    is still spanning concerns and must still be refused: the exemption is for the task's OWN
+    falsifier, keyed on the slug, not for `test/` as a directory. And a genuine two-src-stem span
+    must still be refused at medium exactly as today.
+
+    RE-DERIVE RATHER THAN TRUST THE FOUR: `RMD_SELF_SYNC_DONE=1 ./bin/rmd lint-plan` and read every
+    `[sizing]` line, counting how many name a `test/` path among the "concerns". A count near the
+    total is this defect; a count near zero means it has already been fixed or I mis-read it.
+
+    NOT IN SCOPE: the risk bands' own meanings, mount routing, and the three-src-stem case, which is
+    a real span whatever the test-file rule says.
+
+    THE RISK BAND IS SET HIGH FOR THE REASON THIS TASK IS ABOUT, which is either fitting or
+    embarrassing depending on the outcome. Blast radius is genuinely moderate: a wrong exemption
+    lets a bundled filing through the one gate that catches it.
+  acceptance:
+    - claim: "a task listing one src stem plus its OWN slug-matching test passes sizing at medium"
+      proof: "unit test: test/rule-19-sizing-counts-a-test-as-a-concern.test.ts"
+    - claim: "a task listing two src stems is still refused at medium"
+      proof: "unit test: test/rule-19-sizing-counts-a-test-as-a-concern.test.ts"
+    - claim: "a task listing a test file that does NOT match its slug is still counted as a concern"
+      proof: "unit test: test/rule-19-sizing-counts-a-test-as-a-concern.test.ts"
+    - claim: "a task listing several unrelated test files is still refused"
+      proof: "unit test: test/rule-19-sizing-counts-a-test-as-a-concern.test.ts"
+    - claim: "risk high and low behave exactly as they do today"
+      proof: "unit test: test/rule-19-sizing-counts-a-test-as-a-concern.test.ts"
+    - claim: "an empty files list is still refused as it is today"
+      proof: "unit test: test/rule-19-sizing-counts-a-test-as-a-concern.test.ts"
+    - claim: "removing the exemption makes the one-stem-plus-own-test assertion fail again"
+      proof: "unit test: test/rule-19-sizing-counts-a-test-as-a-concern.test.ts"
