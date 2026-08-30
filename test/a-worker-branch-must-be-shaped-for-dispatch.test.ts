@@ -21,8 +21,8 @@
 // tested once at the bottom, against THIS repo's own real checkout).
 
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -68,14 +68,12 @@ const mod = (await import(pathToFileURL(SCRIPT_PATH).href)) as {
 };
 const {
   matchesRunBranchShape,
-  trailerTaskIds,
   claimedTaskIds,
   evaluateWorkerBranchShape,
   resolveMergeBase,
   commitMessagesSinceBase,
   addedFilesSinceBase,
   resolveHeadRef,
-  main,
 } = mod;
 
 const TASK_ID = "W1-T2491";
@@ -301,6 +299,124 @@ test("control: resolveHeadRef reads the worktree's OWN current branch when no fl
   assert.equal(resolveHeadRef(undefined, REPO_ROOT, { GITHUB_HEAD_REF: "from-env" }), "from-env", "env wins over the local branch when no flag is given");
 });
 
+// ── coverage: the four git-plumbing seams' own DEGRADE (catch) branches ─────────────────────────
+// Each seam below (design note above each production function) swallows a failing `git`
+// invocation and returns the documented "nothing new seen" fallback rather than throwing. The
+// control test above already exercises the SUCCESS path of each against this repo's real HEAD;
+// these force the FAILURE path with a ref/path `git` itself cannot resolve.
+
+test("resolveMergeBase: an unresolvable base ref degrades to undefined, not a throw", () => {
+  assert.equal(resolveMergeBase(REPO_ROOT, "totally-nonexistent-ref-xyz-123"), undefined);
+});
+
+test("commitMessagesSinceBase: an unresolvable mergeBase ref degrades to the empty string, not a throw", () => {
+  assert.equal(commitMessagesSinceBase(REPO_ROOT, "0000000000000000000000000000000000dead"), "");
+});
+
+test("addedFilesSinceBase: an unresolvable mergeBase ref degrades to an empty array, not a throw", () => {
+  assert.deepEqual(addedFilesSinceBase(REPO_ROOT, "0000000000000000000000000000000000dead"), []);
+});
+
+test("resolveHeadRef: an unresolvable worktree path degrades to undefined, not a throw", () => {
+  assert.equal(resolveHeadRef(undefined, "/definitely/does/not/exist/xyz-abc-123", {}), undefined);
+});
+
+// ── coverage: main(), the CLI entrypoint, exercised end to end against a REAL throwaway repo ────
+// `main` is never called directly by the tests above (every other test drives its exported pieces
+// individually) — it is exercised here by actually spawning `node scripts/worker-branch-shape.mjs`
+// against a disposable git repo built fresh per test, so `parseArgs`, the OK/REFUSED branches,
+// `process.exitCode`, and the console output are all real, not simulated.
+
+function git(cwd: string, args: string[]): string {
+  return execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" }).trim();
+}
+
+/** A throwaway repo with one base commit on `base-branch`, ready for a caller to branch from. */
+function initRepo(): string {
+  const dir = mkdtempSync(join(tmpdir(), "wbs-main-"));
+  git(dir, ["init", "-q"]);
+  git(dir, ["config", "user.email", "fixture@example.invalid"]);
+  git(dir, ["config", "user.name", "Fixture"]);
+  writeFileSync(join(dir, "README.md"), "base\n");
+  git(dir, ["add", "-A"]);
+  git(dir, ["commit", "-q", "-m", "chore: base"]);
+  git(dir, ["branch", "-q", "base-branch"]);
+  return dir;
+}
+
+function runScript(dir: string, extraArgs: string[] = []): { status: number; stdout: string; stderr: string } {
+  try {
+    const stdout = execFileSync(process.execPath, [SCRIPT_PATH, "--base", "base-branch", "--worktree-path", dir, ...extraArgs], {
+      encoding: "utf8",
+    });
+    return { status: 0, stdout, stderr: "" };
+  } catch (err) {
+    const e = err as { status: number; stdout: string; stderr: string };
+    return { status: e.status, stdout: e.stdout, stderr: e.stderr };
+  }
+}
+
+test("main(): a run-shaped branch whose new commit carries the trailer prints OK and exits 0", () => {
+  const dir = initRepo();
+  git(dir, ["checkout", "-q", "-b", `run-${TASK_ID}-1787887966537`]);
+  writeFileSync(join(dir, "note.txt"), "x\n");
+  git(dir, ["add", "-A"]);
+  git(dir, ["commit", "-q", "-m", `feat: implement\n\n${TRAILER}`]);
+
+  const { status, stdout } = runScript(dir);
+  assert.equal(status, 0);
+  assert.match(stdout, /worker-branch-shape: OK/);
+  assert.match(stdout, new RegExp(TASK_ID));
+});
+
+test("main(): a claiming branch whose head ref is NOT run-shaped prints REFUSED to stderr and exits 1", () => {
+  const dir = initRepo();
+  git(dir, ["checkout", "-q", "-b", "fix/whatever"]);
+  writeFileSync(join(dir, "note.txt"), "x\n");
+  git(dir, ["add", "-A"]);
+  git(dir, ["commit", "-q", "-m", `fix: something\n\n${TRAILER}`]);
+
+  const { status, stderr } = runScript(dir);
+  assert.equal(status, 1);
+  assert.match(stderr, /worker-branch-shape: REFUSED/);
+  assert.match(stderr, new RegExp(TASK_ID));
+});
+
+test("main(): a run-shaped branch that FILES a shard reads it off disk through its own readFile closure and passes", () => {
+  const dir = initRepo();
+  git(dir, ["checkout", "-q", "-b", `run-${TASK_ID}-1787887966537`]);
+  const shardDir = join(dir, "plan", "tasks.d");
+  execFileSync("mkdir", ["-p", shardDir]);
+  writeFileSync(join(shardDir, `${TASK_ID}-something.yaml`), shardYaml(TASK_ID));
+  git(dir, ["add", "-A"]);
+  git(dir, ["commit", "-q", "-m", "chore(plan): file the shard"]);
+
+  const { status, stdout } = runScript(dir);
+  assert.equal(status, 0);
+  assert.match(stdout, /worker-branch-shape: OK/);
+  assert.match(stdout, new RegExp(TASK_ID));
+});
+
+test("main(): an added path git reports but that no longer exists on disk degrades to no claim from it, not a crash", () => {
+  // The diff's added-file list compares COMMITS, not the working tree — deleting the file from
+  // disk afterward (without a further commit) leaves it "added" in the diff but unreadable by
+  // main()'s own readFile closure, forcing that closure's catch branch (an ENOENT it must
+  // swallow, per shardTaskIds's contract of treating an unreadable file as no declaration).
+  const dir = initRepo();
+  git(dir, ["checkout", "-q", "-b", `run-${TASK_ID}-1787887966537`]);
+  const shardDir = join(dir, "plan", "tasks.d");
+  execFileSync("mkdir", ["-p", shardDir]);
+  const shardPath = join(shardDir, `${TASK_ID}-something.yaml`);
+  writeFileSync(shardPath, shardYaml(TASK_ID));
+  git(dir, ["add", "-A"]);
+  git(dir, ["commit", "-q", "-m", "chore(plan): file the shard"]);
+  unlinkSync(shardPath);
+
+  const { status, stdout } = runScript(dir);
+  assert.equal(status, 0, "no claim was actually readable, so the branch is exempt, not refused");
+  assert.match(stdout, /exempt from the run-<taskId>-<epochMs> shape check/);
+});
+
 test("control: this repo's OWN current branch, run right now, does not regress to a false refusal — the bug this suite's own dev loop found and fixed", () => {
   // Reading only the TIP commit's message (rather than every commit this branch itself adds since
   // base) would misread the PREVIOUS PR's own trailer — already on origin/main's tip — as THIS
@@ -312,192 +428,5 @@ test("control: this repo's OWN current branch, run right now, does not regress t
   const headCommit = execFileSync("git", ["-C", REPO_ROOT, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
   if (headCommit === mergeBase) {
     assert.equal(commitMessagesSinceBase(REPO_ROOT, mergeBase), "", "at the base itself, there is no new commit to claim anything");
-  }
-});
-
-// ── control: each git-plumbing seam's OWN degrade-on-failure branch, forced rather than hoped for ─
-//
-// Every seam above (resolveMergeBase, commitMessagesSinceBase, resolveHeadRef,
-// addedFilesSinceBase) has a `try { execFileSync(...) } catch { return <empty> }` shape — the file
-// banner's "a setup gap degrades to nothing claimed, not a crash" guarantee. The tests above only
-// ever exercise the TRY arm (this repo's own real, resolvable git state); these force the CATCH arm
-// directly, the only way to prove the degrade actually fires rather than merely reading as intent.
-
-test("control: resolveMergeBase's catch arm — an unresolvable baseRef degrades to undefined, not a throw", () => {
-  assert.doesNotThrow(() => resolveMergeBase(REPO_ROOT, "refs/heads/definitely-not-a-real-ref-w1-t2491"));
-  assert.equal(resolveMergeBase(REPO_ROOT, "refs/heads/definitely-not-a-real-ref-w1-t2491"), undefined);
-});
-
-test("control: commitMessagesSinceBase's catch arm — a syntactically valid but non-existent mergeBase sha degrades to \"\", not a throw", () => {
-  const bogusSha = "0".repeat(40);
-  assert.doesNotThrow(() => commitMessagesSinceBase(REPO_ROOT, bogusSha));
-  assert.equal(commitMessagesSinceBase(REPO_ROOT, bogusSha), "");
-});
-
-test("control: addedFilesSinceBase's catch arm — the same bogus mergeBase sha degrades to [], not a throw", () => {
-  const bogusSha = "0".repeat(40);
-  assert.doesNotThrow(() => addedFilesSinceBase(REPO_ROOT, bogusSha));
-  assert.deepEqual(addedFilesSinceBase(REPO_ROOT, bogusSha), []);
-});
-
-test("control: resolveHeadRef's catch arm — a worktree path that is not a git repo at all degrades to undefined, not a throw", () => {
-  const dir = mkdtempSync(join(tmpdir(), "rmd-worker-branch-shape-nogit-"));
-  try {
-    assert.doesNotThrow(() => resolveHeadRef(undefined, dir, {}));
-    assert.equal(resolveHeadRef(undefined, dir, {}), undefined);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-// ── control: main()'s own two branches, in-process ───────────────────────────────────────────────
-//
-// Every test above calls `evaluateWorkerBranchShape` (or a single plumbing seam) directly with
-// fixture values — `main` itself (the CLI wiring: parseArgs, resolving every seam against a real
-// worktree, and printing/exit-coding the verdict) was never once invoked. process.exitCode/
-// console.log/console.error are saved and monkey-patched around each call — leaving them
-// patched would corrupt this suite's own process — the same `withExitCode` shape
-// test/credit-surface-gate.test.ts uses for its own analogous entry point.
-
-async function withExitCode(fn: () => void): Promise<{ exitCode: typeof process.exitCode; err: string[]; out: string[] }> {
-  const priorExit = process.exitCode;
-  const err: string[] = [];
-  const out: string[] = [];
-  const realErr = console.error;
-  const realOut = console.log;
-  console.error = (...a: unknown[]) => void err.push(a.join(" "));
-  console.log = (...a: unknown[]) => void out.push(a.join(" "));
-  try {
-    fn();
-    return { exitCode: process.exitCode, err, out };
-  } finally {
-    console.error = realErr;
-    console.log = realOut;
-    process.exitCode = priorExit;
-  }
-}
-
-test("control: main() refuses with exit 1 and its own REFUSED message when an explicit --head-ref does not carry the shape this real branch's own trailer claims", async () => {
-  const mergeBase = resolveMergeBase(REPO_ROOT, "origin/main");
-  if (mergeBase === undefined) return; // no local origin/main in this environment — nothing to pin
-  const claimed = trailerTaskIds(commitMessagesSinceBase(REPO_ROOT, mergeBase));
-  if (claimed.length === 0) return; // this checkout's own new commits claim nothing right now — nothing to refuse
-  const r = await withExitCode(() =>
-    main(["--base", "origin/main", "--head-ref", "totally-not-run-shaped", "--worktree-path", REPO_ROOT]),
-  );
-  assert.equal(r.exitCode, 1);
-  assert.equal(r.err.length, 1, "the refusal is reported once, on stderr");
-  assert.match(r.err[0], /worker-branch-shape: REFUSED/);
-  assert.deepEqual(r.out, [], "a refusal prints no OK line");
-});
-
-test("control: main() passes with exit 0 and its own OK message when --base cannot be resolved locally (degrades to \"claims nothing\")", async () => {
-  const r = await withExitCode(() =>
-    main(["--base", "refs/heads/definitely-not-a-real-ref-w1-t2491", "--head-ref", "whatever-name", "--worktree-path", REPO_ROOT]),
-  );
-  assert.equal(r.exitCode, 0);
-  assert.deepEqual(r.err, [], "a pass prints nothing on stderr");
-  assert.equal(r.out.length, 1);
-  assert.match(r.out[0], /worker-branch-shape: OK/);
-});
-
-// ── control: main()'s own `readFile` seam — the closure at its bottom that hands shardTaskIds a ──
-// ── real filesystem read, exercised through BOTH of its own try/catch arms ──────────────────────
-
-test("control: main()'s own readFile seam's TRY arm — a filed shard genuinely present on disk is read and refused when its branch is not run-shaped", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "rmd-worker-branch-shape-shard-present-"));
-  try {
-    execFileSync("git", ["-C", dir, "init", "-q"]);
-    execFileSync("git", ["-C", dir, "config", "user.email", "test@example.com"]);
-    execFileSync("git", ["-C", dir, "config", "user.name", "Test"]);
-    execFileSync("git", ["-C", dir, "commit", "--allow-empty", "-q", "-m", "chore: base commit"]);
-
-    const shardRelPath = join("plan", "tasks.d", "W1-T9998-something.yaml");
-    mkdirSync(join(dir, "plan", "tasks.d"), { recursive: true });
-    writeFileSync(join(dir, shardRelPath), "- id: W1-T9998\n  title: filed\n  repo: remudero\n  status: queued\n");
-    execFileSync("git", ["-C", dir, "add", shardRelPath]);
-    execFileSync("git", ["-C", dir, "commit", "-q", "-m", "chore(plan): file W1-T9998"]);
-
-    const r = await withExitCode(() =>
-      main(["--base", "HEAD~1", "--head-ref", "chore/file-w1-t9998", "--worktree-path", dir]),
-    );
-    assert.equal(r.exitCode, 1, "the shard genuinely declares W1-T9998, and this head ref is not run-shaped for it");
-    assert.match(r.err[0], /worker-branch-shape: REFUSED.*W1-T9998/s);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("control: main()'s own readFile seam's CATCH arm — an added shard path git reports but the working tree no longer has on disk degrades to no claim, not a throw", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "rmd-worker-branch-shape-shard-missing-"));
-  try {
-    execFileSync("git", ["-C", dir, "init", "-q"]);
-    execFileSync("git", ["-C", dir, "config", "user.email", "test@example.com"]);
-    execFileSync("git", ["-C", dir, "config", "user.name", "Test"]);
-    execFileSync("git", ["-C", dir, "commit", "--allow-empty", "-q", "-m", "chore: base commit"]);
-
-    const shardRelPath = join("plan", "tasks.d", "W1-T9997-something.yaml");
-    mkdirSync(join(dir, "plan", "tasks.d"), { recursive: true });
-    writeFileSync(join(dir, shardRelPath), "- id: W1-T9997\n  title: filed\n  repo: remudero\n  status: queued\n");
-    execFileSync("git", ["-C", dir, "add", shardRelPath]);
-    execFileSync("git", ["-C", dir, "commit", "-q", "-m", "chore(plan): file W1-T9997"]);
-    // Committed, but now removed from the working tree — forces readFileSync in main()'s own
-    // readFile closure to throw, so this pins its catch arm degrades to "no claim", not a crash.
-    rmSync(join(dir, shardRelPath), { force: true });
-
-    const r = await withExitCode(() =>
-      main(["--base", "HEAD~1", "--head-ref", "chore/file-w1-t9997", "--worktree-path", dir]),
-    );
-    assert.equal(r.exitCode, 0, "the shard's own file is unreadable, so shardTaskIds sees no claim and the branch is never refused for it");
-    assert.doesNotThrow(() =>
-      main(["--base", "HEAD~1", "--head-ref", "chore/file-w1-t9997", "--worktree-path", dir]),
-    );
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-// ── the real CLI process, end-to-end ─────────────────────────────────────────────────────────
-//
-// Every `main()` call above runs in-process, so the direct-execution guard at the very bottom of
-// the script (`if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href)`) was never
-// observed true — that condition only holds when the file is the process's OWN entry point. This
-// spawns the real script exactly as `worker-branch-shape:check` (package.json) does, matching
-// test/credit-surface-gate.test.ts's own `runGate` shape for its analogous CLI.
-
-function runScript(args: string[]) {
-  return spawnSync(process.execPath, [SCRIPT_PATH, ...args], { cwd: REPO_ROOT, encoding: "utf8" });
-}
-
-test("control: the real CLI process exits 0 and prints OK for a branch that claims nothing", () => {
-  const dir = mkdtempSync(join(tmpdir(), "rmd-worker-branch-shape-cli-noclaim-"));
-  try {
-    execFileSync("git", ["-C", dir, "init", "-q"]);
-    execFileSync("git", ["-C", dir, "config", "user.email", "test@example.com"]);
-    execFileSync("git", ["-C", dir, "config", "user.name", "Test"]);
-    execFileSync("git", ["-C", dir, "commit", "--allow-empty", "-q", "-m", "chore: routine housekeeping"]);
-
-    const run = runScript(["--head-ref", "some-operators-scratch-branch", "--worktree-path", dir]);
-    assert.equal(run.status, 0, run.stdout + run.stderr);
-    assert.match(run.stdout, /worker-branch-shape: OK/);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("control: the real CLI process exits 1 for a branch whose new commit claims a task its own head ref is not shaped for", () => {
-  const dir = mkdtempSync(join(tmpdir(), "rmd-worker-branch-shape-cli-refused-"));
-  try {
-    execFileSync("git", ["-C", dir, "init", "-q"]);
-    execFileSync("git", ["-C", dir, "config", "user.email", "test@example.com"]);
-    execFileSync("git", ["-C", dir, "config", "user.name", "Test"]);
-    execFileSync("git", ["-C", dir, "commit", "--allow-empty", "-q", "-m", "chore: base commit"]);
-    execFileSync("git", ["-C", dir, "commit", "--allow-empty", "-q", "-m", "fix(drain): stop a stuck run branch\n\nRemudero-Task: W1-T9999\n"]);
-
-    const run = runScript(["--base", "HEAD~1", "--head-ref", "fix/drain-stuck-run-branch", "--worktree-path", dir]);
-    assert.equal(run.status, 1, run.stdout + run.stderr);
-    assert.match(run.stderr, /worker-branch-shape: REFUSED/);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
   }
 });
