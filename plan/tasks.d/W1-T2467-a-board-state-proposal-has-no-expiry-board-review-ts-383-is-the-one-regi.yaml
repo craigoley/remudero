@@ -1,0 +1,119 @@
+- id: W1-T2467
+  title: "a board-state proposal has no expiry — board-review.ts:383 is the ONE registry producer minting evidenceAnchors: [], which makes the evidence-drift clause vacuous and isDraftStale permanently false, and nothing retires a proposal whose referent PR has since resolved"
+  repo: remudero
+  depends_on: [W1-T2466]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: architect
+  plan_refs: ["§7B", "P25"]
+  files: [src/lib/inbox.ts, src/run-task.ts, test/inbox.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    A DIVERGENCE FROM AN ESTABLISHED CONVENTION, NOT AN OPEN QUESTION. Four sites mint into the proposal
+    registry. `rule-efficacy.ts:315` passes real anchors; `feedback-docket.ts:276` builds one
+    (`{description: <referent> is still an open referent, pattern: winnerReferent}`); `run-task.ts:25675`
+    forwards the docket's. `board-review.ts:383` alone writes `evidenceAnchors: [] as EvidenceAnchor[]`.
+    One of four, and the odd one out.
+
+    TWO CONSEQUENCES, BOTH MECHANICAL AND BOTH DERIVABLE FROM inbox.ts AS IT STANDS.
+    (a) `driftedAnchors = proposal.evidenceAnchors.filter((a) => !ctx.grepAnchorTrue(a))` (inbox.ts:548)
+        over an empty array is always empty, so the `evidence_anchors` AND-clause of READY is VACUOUSLY
+        SATISFIED. The four-clause readiness predicate the module's own header advertises silently
+        becomes three for this producer's proposals.
+    (b) `anchorFingerprint([])` is the empty string, so `isDraftStale` (inbox.ts:163) — which compares
+        that fingerprint — is PERMANENTLY FALSE. A cached draft for a board-review proposal can never be
+        invalidated by anything.
+    Together: a proposal about a PR that merged hours ago can classify READY, on a cached draft nothing
+    is able to stale, with no predicate capable of noticing.
+
+    AND NOTHING RETIRES IT. `pruneRatifiedProposals` (inbox.ts:1238) prunes on exactly one terminal
+    condition — `state === "ratified"`. There is no referent-resolution retirement anywhere. The prior
+    2026-08-26 draft of this class recorded the same negative result independently: a grep of `src/` for
+    `board-review:` returns ONLY the two minting sites in board-review.ts — no reader, no reconciler, no
+    retirement.
+
+    THE PILE IS MEASURED, NOT ASSUMED. Read 2026-08-28 from the live state directory:
+    `state/inbox-draft-attempts.json` records 13 board-review proposals already drafted (10
+    escalation-class, 3 stale-class) and `state/inbox-draft-inflight.json` 3 more in flight including
+    `board-review:escalation:#3205` — 16 in all. The ledger carries ZERO `ratify.approved` steps for any
+    of them; every apparent hit on that string is prose inside a draft or recon body, not a step. So:
+    sixteen proposals minted, sixteen Architect drafts paid for, none ratified, and none able to expire.
+    HONEST LIMIT: this counts DRAFTS, not the registry file itself, which this draft could not read; the
+    true count of open board-review proposals is at least this and may be higher.
+
+    THE CRUX, AND IT IS WHY THE OBVIOUS FIX IS WRONG. Do NOT close this by stuffing a grep anchor in.
+    `EvidenceAnchor` is `{description, pattern, path?}` checked by `grepAnchorTrue` against main — it can
+    only express facts about the TREE. "PR #3205 still carries an unhandled escalation" is a fact about
+    the BOARD, and no grep on main can see it. An anchor invented for it would grep the same way forever
+    regardless of the truth, which is worse than the empty list because it would look like evidence. The
+    empty array is an honest admission that the mechanism does not fit; the missing piece is the expiry,
+    not the anchor.
+
+    THE SHAPE ALREADY EXISTS TWICE IN-REPO. `pruneRatifiedProposals` retires a proposal on a terminal
+    condition; the escalation-lifecycle reconciler (sweep.ts:7659, "Auto-closed by the
+    escalation-lifecycle reconciler") closes an ISSUE when its referent goes terminal. This is the third
+    member of that family and the one nothing covers. It is the ghost-affordance class this codebase has
+    now paid for four times — W1-T182 on the console, W1-T257 on feedback entries, W1-T162 on escalation
+    issues — arriving on the PROPOSAL REGISTRY.
+  design: |
+    RETIRE ON THE READ PATH, so every reader inherits it — the W1-T190 pattern, verbatim. That fix put
+    the ratified check inside `classifyProposal` precisely because a stored flag can drift and because a
+    read-side override "heals an EXISTING drifted entry ... the next time anything classifies these
+    proposals". The same reasoning applies here and the same seam is the right one.
+    (i) `ReadinessContext` gains an OPTIONAL referent-resolution resolver, exactly as `isRatified`,
+        `draftSpawnedAt` and `depsUnobservable` are already optional — every existing fixture and caller
+        that never had a reason to think about a referent behaves precisely as before.
+    (ii) `classifyProposal` retires a board-state proposal whose referent has gone terminal, so it is
+        never offered as READY and never serves its cached draft. Because both registry readers
+        (`run-task.ts`'s inbox pass and `panel-graph.ts`'s) already route through `classifyProposal`,
+        neither can keep serving a retired proposal — which is what makes this a fix rather than a
+        second unwired export.
+    (iii) The registry write follows the shape already there: the same prune-and-write step that
+        `pruneRatifiedProposals` feeds, extended to the retired set, so the file heals too rather than
+        only this pass's in-memory view.
+    (iv) FAIL-CLOSED, and the polarity is the load-bearing part: a referent whose state could NOT be read
+        KEEPS the proposal. Cannot-observe means wait (W1-T130), and clearing an operator's queue on an
+        unreadable read is the more dangerous direction — the same boundary W1-T182 and W1-T177 draw.
+    (v) SCOPE FENCE. This retires BOARD-STATE proposals — the ones naming a resolvable referent. It does
+        NOT touch `rule-efficacy`'s or the docket's proposals, whose grep anchors already express their
+        own staleness correctly, and it does NOT change what READY means for them.
+    VERIFY FROM SOURCE before editing; line numbers here are a 2026-08-28 survey.
+    RISK BAND, SET UP FRONT: `risk: high` for Rule 19's SPAN — `files:` reads as the `inbox` and
+    `run-task` stems, refused at `medium`. The coupling is atomic: the predicate with no resolver wired
+    retires nothing, and a resolver with no predicate has nothing to feed.
+    DEPENDS_ON W1-T2466 FOR TWO REASONS, both real: W1-T2466 puts the escalation's own identity on the item and
+    the finding, which is the referent this retirement is most naturally keyed to rather than a PR number
+    re-parsed out of a proposal id string; and both tasks declare `src/run-task.ts`, so W1-T171's overlap
+    check must serialize them regardless.
+  acceptance:
+    - claim: "a board-state proposal whose referent has gone terminal retires — it is never offered as ready and its cached draft is never served"
+      proof: "unit test: test/inbox.test.ts"
+    - claim: "a referent whose state could NOT be read KEEPS the proposal rather than retiring it — cannot-observe means wait, never silently clearing an operator queue"
+      proof: "unit test: test/inbox.test.ts"
+    - claim: "a proposal whose referent is still open and still carries its condition is untouched — the falsifier proving retirement keys on resolution rather than emptying the board"
+      proof: "unit test: test/inbox.test.ts"
+    - claim: "retirement is decided on the classification path every registry reader already routes through, so no second reader keeps serving a retired proposal"
+      proof: "grep: referentResolved in src/lib/inbox.ts"
+    - claim: "proposals carrying real grep anchors are classified exactly as before — rule-efficacy and docket proposals are untouched by this change"
+      proof: "unit test: test/inbox.test.ts"
+  note: |
+    FILED 2026-08-28 from the ratification draft for `board-review:escalation:#3205`. The measurement
+    (16 board-review proposals drafted, 0 ratified, 0 readers in src/) is read from the live state
+    directory and from a grep of src/, and its honest limit is stated in the rationale: it counts drafts,
+    not registry rows, because the registry file itself was not readable from this draft.
+    RECORDED AND DELIBERATELY NOT FILED — IT IS A ROUTE DECISION, NOT A BOOKKEEPING FIX. The proposal id
+    is keyed PER REFERENT (`board-review:escalation:#<pr>`), so one class-level defect is re-proposed
+    once per PR and re-drafted once per proposal; this draft is the 12th escalation-class draft of a
+    class first drafted on 2026-08-26. Whether the escalation ARM should mint ratification proposals at
+    all — given the escalation already has a durable, auto-closing lane with eleven consumers, which is
+    W1-T2381's exact finding one surface over — is the operator's call and is NOT smuggled in here.
+    THE COUNTER-CASE, STATED AT ITS STRONGEST BECAUSE IT IS REAL: the proposal is the only route by which
+    an escalation becomes PLAN WORK rather than an operator action, and the issue queue does not do that.
+    That is why this task fixes the expiry and leaves the route open.
+    NOT A RE-DECISION of W1-T162 (closes escalation ISSUES, already live at sweep.ts:7659), W1-T257
+    (feedback ENTRY status), or `pruneRatifiedProposals` (ratified proposals). Same doctrine, three
+    artifacts already covered, this is the fourth.
