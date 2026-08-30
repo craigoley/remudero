@@ -61,6 +61,7 @@
     "census:catch-erasure": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/catch-erasure-ratchet.test.ts",
     "census:negative-reachability": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/negative-reachability-ratchet.test.ts",
     "census:no-shallowing": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/no-shallowing-of-the-canonical-checkout.test.ts",
+    "worker-branch-shape:check": "node scripts/worker-branch-shape.mjs",
     "commitlint": "commitlint",
     "changelog": "commit-and-tag-version"
   },
