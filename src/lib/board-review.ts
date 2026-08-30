@@ -98,6 +98,12 @@ export interface BoardItem {
    *  the ask could not be read rather than silently rendering as an ordinary bare count. Present
    *  only alongside `unhandledEscalations > 0`, same sparse convention as the fields above. */
   escalationUnverified?: true;
+  /** ISO-8601 `ts` of when this became a needs-human item (W1-T182's
+   *  `StatusProjection.escalationOpenedAt`, threaded through — W1-T2466) — the escalation's OWN
+   *  open time, never the triggering run's `startedAt` (they name two different events; see
+   *  `StatusProjection.escalationOpenedAt`'s own doc). Present iff `unhandledEscalations > 0` and
+   *  the source projection carried one — same sparse convention as the fields above. */
+  escalationOpenedAt?: string;
   /** Set when a check on this item died before any test body ran (an infra death, never a real
    *  test failure) — the population {@link buildBoardReview}'s one sanctioned action draws from. */
   deadBeforeTestBody?: boolean;
