@@ -1,0 +1,70 @@
+- id: W1-T2497
+  title: "THE CONSOLE HAS NO MAILBOX, ONLY A LIST OF THINGS THAT HAPPENED — ten real browser suites already cover its DOM and forty routes already feed it, but nothing renders a thread, nothing tracks what an operator has read, and the token `unread` means an UNREADABLE LEDGER ARCHIVE in all 21 files that use it"
+  repo: remudero
+  depends_on: [W1-T2494, W1-T2496]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 20.00
+  files: [src/lib/serve.ts, src/lib/panel-graph.ts, test/the-console-reads-like-a-mailbox.test.ts]
+  origin: "operator-brief#make-the-inbox-feel-like-emailing-a-colleague-2026-08-30"
+  plan_refs: ["W1-T2494", "W1-T2496", "W1-T2489", "W1-T2475"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THIS IS THE SURFACE THE OTHER THREE EXIST FOR, AND IT IS DELIBERATELY LAST. W1-T2494 gives a
+    thread, W1-T2495 gives it a sender a human recognises, W1-T2496 gives it a reply. None of that
+    is worth anything until an operator can open it, and rendering it before the model settled
+    would have meant rebuilding the view twice.
+    SURFACE 1 real browser suites already covering console DOM = 10
+    SURFACE 2 lines in the console renderer = 5916
+    SURFACE 3 src files where the token unread means message read-state = 0
+    SURFACE 4 console routes shipped today = 40
+    SURFACE 5 modules that raise an escalation = 14
+
+    READ-STATE HAS TO BE BUILT, NOT FOUND, AND THE GREP THAT SAYS OTHERWISE IS THE TRAP. `unread`
+    appears across 21 files and in every one of them describes a ledger archive that could not be
+    read — coverage, not correspondence. A session that greps the word and builds on what it finds
+    will wire a mailbox to an I/O failure counter.
+
+    WHAT MAKES IT READ LIKE CORRESPONDENCE IS SPECIFIC AND TESTABLE, WHICH IS WHY THE CRITERIA PIN
+    IT RATHER THAN THE ADJECTIVE: threads ordered by their latest message, an unread count that is
+    a count of threads rather than events, each thread showing every message in order with the
+    sender's display name, a reply box that posts to the reply route, and a resolved state that
+    hides a thread without deleting it. Ten Playwright suites already exercise this DOM, so each of
+    those is an assertion rather than a matter of taste.
+
+    IT IS ADDITIVE TO A CONSOLE THAT MUST STAY LEGIBLE WHEN THINGS ARE BROKEN. The console's value
+    is highest exactly when the fleet is unhealthy, so the mailbox loads no script or stylesheet
+    over the network and degrades to the existing rows if the thread store is unreachable — the
+    same rule W1-T2489 sets for the graph drawing, and for the same reason.
+
+    THE BACKTICK HAZARD APPLIES HERE TOO. `serve.ts`'s client JS lives inside a backtick template
+    literal, and a single backtick in client code or its comments terminates the outer template with
+    a parse error naming no cause. This file has been bitten before; the criteria pin that the
+    rendered shell still parses.
+
+    NOT IN SCOPE: the graph drawing, which W1-T2489 owns on these same two files and will therefore
+    serialize against this by `overlappingPaths`; the terminal status board, which W1-T2475 owns;
+    and any new route beyond what W1-T2496 ships.
+
+    THE RISK BAND IS RULE 19's SPAN, NOT BLAST RADIUS: two src stems plus a test, carrying two
+    independent acceptance concerns — the mailbox rendering and its degradation path.
+  acceptance:
+    - claim: "threads render ordered by their latest message"
+      proof: "unit test: test/the-console-reads-like-a-mailbox.test.ts"
+    - claim: "the unread indicator counts threads rather than events"
+      proof: "unit test: test/the-console-reads-like-a-mailbox.test.ts"
+    - claim: "a thread shows every message in order with its sender's display name"
+      proof: "unit test: test/the-console-reads-like-a-mailbox.test.ts"
+    - claim: "opening a thread marks it read and the indicator drops by one"
+      proof: "unit test: test/the-console-reads-like-a-mailbox.test.ts"
+    - claim: "a resolved thread is hidden from the default view and is not deleted"
+      proof: "unit test: test/the-console-reads-like-a-mailbox.test.ts"
+    - claim: "an unreachable thread store degrades to the existing rows rather than a blank panel"
+      proof: "unit test: test/the-console-reads-like-a-mailbox.test.ts"
+    - claim: "the rendered shell's client script still parses and loads nothing over the network"
+      proof: "unit test: test/the-console-reads-like-a-mailbox.test.ts"
+    - claim: "removing the degradation path makes the unreachable-store case render nothing"
+      proof: "unit test: test/the-console-reads-like-a-mailbox.test.ts"

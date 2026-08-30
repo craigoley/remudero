@@ -1,0 +1,70 @@
+- id: W1-T2496
+  title: "FORTY CONSOLE ROUTES AND NOT ONE LETS A HUMAN ANSWER AN ESCALATION IN PROSE — `/v1/escalation/mark-handled` DISMISSES a concern, `/v1/questions/answer` answers a structured question, and neither is a reply, so the only way to say something back to the fleet is to file feedback that names no message"
+  repo: remudero
+  depends_on: [W1-T2494]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 18.00
+  files: [src/lib/panel-actions.ts, src/lib/feedback.ts, test/a-prose-reply-reaches-the-fleet-as-an-input.test.ts]
+  origin: "operator-brief#make-the-inbox-feel-like-emailing-a-colleague-2026-08-30"
+  plan_refs: ["W1-T2494", "W1-T182", "W1-T41"]
+  status: queued
+  attempts: 0
+  rationale: |
+    DISMISSING IS NOT ANSWERING, AND THE DIFFERENCE IS THE WHOLE ASK. `mark-handled` records that a
+    human dealt with something; it carries no words. So today a concern the fleet raised can be
+    silenced but never responded to, and anything the operator actually wants to SAY has to be filed
+    as unattached feedback that names no message and no thread.
+    SURFACE 1 console routes shipped today = 40
+    SURFACE 2 of those, routes that answer an escalation in prose = 0
+    SURFACE 3 AI expanders already processing inbound human prose = 2
+    SURFACE 4 feedback entries already landed = 155
+    SURFACE 5 modules that raise an escalation = 14
+
+    IT REUSES THE TRIAGE DISCIPLINE RATHER THAN ADDING ONE, WHICH IS BOTH THE CHEAP PATH AND THE
+    RATIFIED ONE. MASTER-PLAN §5D is explicit: "One inbox, one triage discipline, whatever the
+    source." A reply therefore lands as a `plan/feedback/` entry — the same record `issues-intake`
+    already produces from a GitHub issue and the same one `rmd triage` already consumes
+    origin-agnostically — carrying the thread id from W1-T2494. Nothing new triages, nothing new
+    files tasks, and the reply inherits every guard those paths already have.
+
+    THE AI ON THIS END IS ALREADY BUILT AND IS THE AUTOMATION WIN. `expandFeedbackDraft` already
+    turns a human's loose prose into the four-section CLAIM/EVIDENCE/RECON/FALSIFYING CHECK skeleton
+    and hands it back for confirmation, and `summarizeFeedbackProposal` already condenses. So a
+    reply typed the way one types an email arrives structured, without the operator filling a form
+    — which is precisely the difference between a ticket system and correspondence.
+
+    A REPLY IS AN INPUT, NEVER A COMMAND, AND THIS IS A HARD LINE. Nothing on this path may dispatch
+    a task, ratify a proposal, arm a merge, or change policy because a human wrote a sentence.
+    `classifyProposal` and the inbox's own tiering keep deciding what a reply becomes; the reply
+    only makes them consider it. Prose arriving over a network route is the LAST place to widen what
+    the fleet will act on unattended.
+
+    THE THREAD IS WHY THIS DEPENDS ON W1-T2494. A reply that cannot name what it replies to is
+    another unattached feedback entry, which is the state this task exists to leave.
+
+    NOT IN SCOPE: the console UI, which W1-T2497 owns; changing `rmd triage`; commenting back on
+    GitHub issues, which `issues-intake`'s own scope fence forbids and which stays forbidden; and
+    any new authority for a reply to act on its own.
+
+    THE RISK BAND IS RULE 19's SPAN, NOT BLAST RADIUS: two src stems plus a test, carrying two
+    independent acceptance concerns — the reply route and its refusal to act.
+  acceptance:
+    - claim: "a prose reply on a thread lands as a feedback entry carrying that thread id"
+      proof: "unit test: test/a-prose-reply-reaches-the-fleet-as-an-input.test.ts"
+    - claim: "the entry is the same record shape triage already consumes"
+      proof: "unit test: test/a-prose-reply-reaches-the-fleet-as-an-input.test.ts"
+    - claim: "a reply dispatches no task, ratifies nothing and arms no merge"
+      proof: "unit test: test/a-prose-reply-reaches-the-fleet-as-an-input.test.ts"
+    - claim: "a reply naming no existing thread is refused rather than filed unattached"
+      proof: "unit test: test/a-prose-reply-reaches-the-fleet-as-an-input.test.ts"
+    - claim: "the existing dismiss route keeps its current behaviour exactly"
+      proof: "unit test: test/a-prose-reply-reaches-the-fleet-as-an-input.test.ts"
+    - claim: "the route requires the same write scope the other write routes require"
+      proof: "unit test: test/a-prose-reply-reaches-the-fleet-as-an-input.test.ts"
+    - claim: "nothing on this path comments on a GitHub issue"
+      proof: "unit test: test/a-prose-reply-reaches-the-fleet-as-an-input.test.ts"
+    - claim: "granting a reply the power to dispatch makes the refusal assertion fail"
+      proof: "unit test: test/a-prose-reply-reaches-the-fleet-as-an-input.test.ts"

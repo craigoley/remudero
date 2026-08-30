@@ -1,0 +1,73 @@
+- id: W1-T2494
+  title: "AN ESCALATION AND THE HUMAN'S ANSWER ARE TWO UNRELATED RECORDS, SO NOTHING IS EVER A CONVERSATION — fourteen modules raise escalations and five AI writers already compose them in prose, 155 feedback entries already come back the other way, and across the whole of `src/` the tokens for a thread, a message or a read-state occur ZERO times, so the two halves of every exchange are joined only in an operator's head"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 20.00
+  files: [src/lib/escalate.ts, src/lib/inbox-thread.ts, test/an-escalation-and-its-reply-are-one-thread.test.ts]
+  origin: "operator-brief#make-the-inbox-feel-like-emailing-a-colleague-2026-08-30"
+  plan_refs: ["W1-T182", "W1-T41", "W1-T77"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE EXPENSIVE HALVES ARE BUILT AND THE CHEAP MIDDLE IS MISSING, WHICH IS WHY THIS IS WORTH
+    DOING NOW. Outbound, `escalateWithSummary` and `escalateWithJudge` already have a model write
+    the escalation in prose. Inbound, `expandFeedbackDraft` and `summarizeFeedbackProposal` already
+    have a model read a human's prose and structure it. Both ends are colleague-grade already. What
+    does not exist is anything joining an outbound message to the answer it provoked.
+    SURFACE 1 modules that raise an escalation = 14
+    SURFACE 2 thread, message and read-state identifiers across src = 0
+    SURFACE 3 console routes shipped today = 40
+    SURFACE 4 of those, routes that answer an escalation in prose = 0
+    SURFACE 5 AI writers already composing escalation prose = 5
+
+    THE THREAD ID MUST BE DERIVED, NEVER MINTED, AND THIS IS THE DESIGN DECISION THE WHOLE THING
+    TURNS ON. A random id per raise makes a re-raised escalation a NEW message, and an inbox that
+    shows the same concern eight times is a notification stream, not correspondence. `escalate.ts`
+    already dedups by producer and class for exactly this reason; the thread key is that same
+    identity, so re-raising an unanswered concern appends to the thread an operator is already
+    reading rather than starting a ninth one.
+
+    GITHUB ISSUES STAY, AND THAT IS A CONSTRAINT NOT A COMPROMISE. Fourteen modules raise
+    escalations and the issue is where several of them are already answered; breaking that to move
+    everyone to a console would trade a working channel for a new one. The thread is a JOIN over
+    what already happens, so the console becomes a second surface on one conversation. An
+    escalation that never reaches the console still behaves exactly as it does today.
+
+    READ-STATE IS GENUINELY ABSENT AND THE OBVIOUS GREP LIES ABOUT IT. `unread` occurs across 21
+    files and means an UNREADABLE LEDGER ARCHIVE every time — coverage, not correspondence. A
+    session reading that count as a read-state concept would build on something that is not there.
+
+    IT MODELS AND STORES, IT DOES NOT RENDER OR REPLY. The console surface is W1-T2497 and the
+    reply route is W1-T2496; both name this task in `depends_on` because a thread they can attach
+    to has to exist first. Shipping all three together would put an unproven data model behind one
+    review.
+
+    NOT IN SCOPE: any UI; the reply route; changing what any of the fourteen producers escalate or
+    when; and `rmd triage`, which stays the single triage discipline whatever the source
+    (MASTER-PLAN §5D).
+
+    THE RISK BAND IS RULE 19's SPAN, NOT BLAST RADIUS: two src stems plus a test, carrying two
+    independent acceptance concerns — the derived thread identity and the append behaviour.
+  acceptance:
+    - claim: "an escalation and a later answer on the same concern resolve to one thread"
+      proof: "unit test: test/an-escalation-and-its-reply-are-one-thread.test.ts"
+    - claim: "re-raising an unanswered concern appends rather than starting a new thread"
+      proof: "unit test: test/an-escalation-and-its-reply-are-one-thread.test.ts"
+    - claim: "the thread identity is derived from producer and class, never randomly minted"
+      proof: "unit test: test/an-escalation-and-its-reply-are-one-thread.test.ts"
+    - claim: "two genuinely different concerns from one producer are different threads"
+      proof: "unit test: test/an-escalation-and-its-reply-are-one-thread.test.ts"
+    - claim: "every message on a thread carries its own ordering and timestamp"
+      proof: "unit test: test/an-escalation-and-its-reply-are-one-thread.test.ts"
+    - claim: "an escalation that never reaches the console behaves exactly as it does today"
+      proof: "unit test: test/an-escalation-and-its-reply-are-one-thread.test.ts"
+    - claim: "a thread whose store cannot be read reports unresolved rather than an empty thread"
+      proof: "unit test: test/an-escalation-and-its-reply-are-one-thread.test.ts"
+    - claim: "minting the id randomly makes the re-raise assertion fail by producing two threads"
+      proof: "unit test: test/an-escalation-and-its-reply-are-one-thread.test.ts"
+    - claim: "the escalation path calls the thread store rather than the store standing alone"
+      proof: "grep: appendThreadMessage( in src/lib/escalate.ts"
