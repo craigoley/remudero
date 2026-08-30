@@ -1,0 +1,73 @@
+- id: W1-T2474
+  title: "THE STARVATION CENSUS COUNTS A TOMBSTONE AS RECOVERABLE WORK — isDispatchEligible files EVERY status:blocked task into one blocked bucket and StarvationCensus classes that whole bucket recoverable in its own words as a class a human resolves, but 46 of the 50 blocked tasks are deliberate retirement records and the retirement field that already distinguishes them appears ZERO times in drain.ts and daemon.ts. Split the bucket at the filter and drop the retired class out of the recoverable set"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 12.00
+  files: [src/lib/drain.ts, src/lib/daemon.ts, test/a-retired-task-is-not-a-recoverable-blocker.test.ts]
+  origin: "operator-brief#go-with-the-recommendations-2026-08-30"
+  plan_refs: ["W1-T1287", "W1-T391", "W1-T314", "W1-T280", "W1-T2473"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE ESCALATION IS NOT DESCRIBING REALITY. Issue #3207 has sat open since 2026-08-28 telling the
+    operator to resolve seventeen named ids while the fleet merged roughly twenty-five PRs in the
+    same window. The defect is not the detector's cadence and not its dedup; it is that the class it
+    counts holds two populations that want opposite responses.
+
+    isDispatchEligible (drain.ts) refuses on task.status === "blocked" and reports the single
+    DispatchFilterReason "blocked". StarvationCensus (daemon.ts) then classes that bucket
+    RECOVERABLE — its own doc says the classes that could clear "without the plan itself ever
+    changing" as opposed to already-merged and verify-not-auto, which it excludes because waiting
+    never helps. For a retirement record waiting never helps either: W1-T314's design block reads
+    "NOT TO BE BUILT AS ONE TASK. Left in the plan as a RECORD of the decomposition decision, not a
+    work item" and its three successor shards shipped.
+
+    AND THE FIELD THAT DISTINGUISHES THEM ALREADY EXISTS AND IS ALREADY VALIDATED. W1-T1287 shipped
+    RETIREMENT_REASONS (retired / closed / withdrawn), plan.ts refuses an invalid value at load, and
+    status-board.ts already renders a RetiredBlocker row on its own. The gap is one hop wide.
+    SURFACE 1 blocked tasks carrying a retirement ruling = 4
+    SURFACE 2 blocked tasks carrying no retirement ruling = 46
+    SURFACE 3 occurrences of the word retirement in drain and daemon = 0
+    SURFACE 4 occurrences of the word retirement in plan and status-board = 15
+
+    WHY THE FIX IS AT THE FILTER AND NOT AT THE CENSUS. Putting the test in daemon.ts alone would
+    leave drain.ts still reporting one reason, so the idle-reason tally the console reads would go on
+    conflating them and the next reader of that tally repeats this investigation. The reason is the
+    unit of vocabulary here (the W1-T186 named-reason doctrine), so the split belongs where the
+    reason is minted.
+
+    THE UNION CHANGE IS TYPE-ENFORCED, WHICH IS WHY IT IS SAFE. IdleReasonTally is
+    Record<DispatchFilterReason, IdleReasonBucket>, so adding a member makes tsc name every
+    construction site that has not been updated. No site can silently keep the old shape.
+
+    NOT IN SCOPE, DELIBERATELY. Backfilling the retirement field across the 46 shards is a PLAN edit
+    and belongs in its own plan-only PR — this task must be judged on the mechanism, and a shard that
+    edits the very records its own gate reads is the shape rule 15 exists to refuse. Nothing here
+    touches criterionFieldTampered, adds a status enum member (W1-T1287's own Q1 ruled that out
+    precisely because it would re-litigate blocked's exclusion semantics at four sites), changes any
+    cadence, or alters what a non-blocked task does.
+
+    THE RISK BAND IS RULE 19's SPAN, NOT BLAST RADIUS: files names two src stems carrying two
+    independent acceptance concerns — the filter reason and the census class — so sizingViolation
+    refuses risk:medium for the span alone. The change itself is small.
+  acceptance:
+    - claim: "a blocked task carrying a retirement ruling is filtered under its own named reason"
+      proof: "unit test: test/a-retired-task-is-not-a-recoverable-blocker.test.ts"
+    - claim: "a blocked task with no retirement ruling still files under the unchanged blocked reason"
+      proof: "unit test: test/a-retired-task-is-not-a-recoverable-blocker.test.ts"
+    - claim: "the starvation census excludes the retired class from its recoverable set"
+      proof: "unit test: test/a-retired-task-is-not-a-recoverable-blocker.test.ts"
+    - claim: "a queue whose only remaining blockers are retired reports no recoverable blocker"
+      proof: "unit test: test/a-retired-task-is-not-a-recoverable-blocker.test.ts"
+    - claim: "that same queue plus one non-retired blocked task still reports a recoverable blocker"
+      proof: "unit test: test/a-retired-task-is-not-a-recoverable-blocker.test.ts"
+    - claim: "the idle-reason tally carries the retired bucket separately so the count stays readable"
+      proof: "unit test: test/a-retired-task-is-not-a-recoverable-blocker.test.ts"
+    - claim: "no dispatch decision changes for any task whose status is not blocked"
+      proof: "unit test: test/a-retired-task-is-not-a-recoverable-blocker.test.ts"
+    - claim: "deleting the exclusion makes the retired-only queue escalate again"
+      proof: "unit test: test/a-retired-task-is-not-a-recoverable-blocker.test.ts"

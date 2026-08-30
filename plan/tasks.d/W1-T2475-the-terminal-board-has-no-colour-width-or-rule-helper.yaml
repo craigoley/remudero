@@ -1,0 +1,83 @@
+- id: W1-T2475
+  title: "THE OPERATOR CONSOLE RENDERS A CRASH LOOP, A STARVED QUEUE AND A HEALTHY IDLE IN THE SAME UNDIFFERENTIATED GREY — there are ZERO ANSI escapes anywhere in src, NO_COLOR and FORCE_COLOR are read nowhere, process.stdout.columns is read nowhere, and renderStatusBoardText hand-types ten 57-character section rules. Add one small semantic tty layer and render the board through it, byte-identical when colour is off"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 14.00
+  files: [src/lib/tty.ts, src/lib/status-board.ts, test/tty-layer-and-status-board-rendering.test.ts]
+  origin: "operator-brief#go-with-the-recommendations-2026-08-30"
+  plan_refs: ["W1-T279", "W1-T280", "W1-T262", "W1-T336", "W1-T183"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THIS REPO HAS SPENT ENORMOUS EFFORT MAKING THE BOARD HONEST AND NONE MAKING IT LEGIBLE AT A
+    GLANCE. status-board.ts's own header carries the doctrine — an unknown that LOOKS healthy is the
+    seventeen-hour DEPLOY_FAILED-invisible failure it exists to retire — and the model is already
+    correct and already two-rendered. What is missing is that a reader cannot tell a BREACHED
+    crash-loop row from a clear one without reading the word, because every row is the same weight.
+    SURFACE 1 hand-typed section rules in the status board = 10
+    SURFACE 2 distinct hand-counted widths among those rules = 1
+    SURFACE 3 ANSI escape sequences anywhere in src = 0
+    SURFACE 4 reads of NO_COLOR or FORCE_COLOR anywhere in src = 0
+    SURFACE 5 reads of the terminal column width anywhere in src = 0
+
+    ONE CORRECTION RECORDED RATHER THAN QUIETLY DROPPED: the ten rules were first reported as being
+    of DIFFERENT hand-counted lengths. MEASURED, THEY ARE ALL EXACTLY 57 CHARACTERS. The DRY defect
+    is real — ten literals and no helper, so an eleventh section is hand-counted again — but it is
+    duplication, never inconsistency, and the weaker claim is the true one.
+
+    THE WEB CONSOLE ALREADY SOLVED THE HARD HALF AND ITS RULE IS INHERITED WHOLESALE. serve.ts's own
+    comments state it: colour is a SECONDARY cue only, the text states the state outright, and the
+    dot is a filled swatch while the label is text coloured to match. So the tty layer exposes
+    SEMANTIC names (ok, warn, bad, dim, key, accent) and never colour names, and no row loses a word
+    it carries today.
+
+    BYTE-IDENTICAL WHEN OFF IS THE LOAD-BEARING CONSTRAINT, AND IT IS WHAT KEEPS THE SUITE GREEN.
+    Every existing assertion over renderStatusBoardText runs with no TTY, so with colour disabled the
+    output must not move by one byte. That is asserted directly against today's bytes rather than
+    reasoned about, and it is also what makes the change safe to land ahead of any further console
+    work.
+
+    THE ONE READ MODEL IS NOT TOUCHED. buildStatusBoard returns the model; the text renderer and
+    --json both project it, and status-board.ts's header says why that must stay true — the console's
+    Now tab can never disagree with the terminal. This task changes the TEXT renderer only, and pins
+    that the JSON projection is unaffected.
+
+    THE EXPORTED SURFACE IS NAMED HERE RATHER THAN LEFT TO THE BUILDER, because lint-plan's
+    call-site check requires a criterion naming a real symbol and a forward-referenced symbol is
+    otherwise a guess. src/lib/tty.ts exports sectionRule for the ten rules, paint for the six
+    semantic wrappers (ok, warn, bad, dim, key, accent), and colourEnabled and terminalWidth for
+    the two environment reads. status-board.ts calls sectionRule; that call is what the last
+    criterion below proves.
+
+    NOT IN SCOPE: any other verb's output (a shared layer invites a sweeping rewrite; this task earns
+    the layer on ONE surface and later verbs adopt it one PR at a time), any new dependency (chalk,
+    picocolors and kleur are all refused — this is roughly a hundred lines and a dependency here would
+    be carried by every worker), and any change to what the board SAYS.
+
+    THE RISK BAND IS RULE 19's SPAN, NOT BLAST RADIUS: a new module plus a renderer rewiring is two
+    independent acceptance concerns, so sizingViolation refuses risk:medium for the span alone.
+  acceptance:
+    - claim: "with colour disabled the rendered board is byte-identical to what it renders today"
+      proof: "unit test: test/tty-layer-and-status-board-rendering.test.ts"
+    - claim: "NO_COLOR disables colour even when the stream reports itself a terminal"
+      proof: "unit test: test/tty-layer-and-status-board-rendering.test.ts"
+    - claim: "FORCE_COLOR enables colour even when the stream is not a terminal"
+      proof: "unit test: test/tty-layer-and-status-board-rendering.test.ts"
+    - claim: "every escape sequence in the coloured output comes from a semantic wrapper"
+      proof: "unit test: test/tty-layer-and-status-board-rendering.test.ts"
+    - claim: "the ten section rules derive from one helper rather than ten literals"
+      proof: "unit test: test/tty-layer-and-status-board-rendering.test.ts"
+    - claim: "a narrow declared width never yields a rendered line wider than that width"
+      proof: "unit test: test/tty-layer-and-status-board-rendering.test.ts"
+    - claim: "an unreadable terminal width falls back to a stated default and never throws"
+      proof: "unit test: test/tty-layer-and-status-board-rendering.test.ts"
+    - claim: "the json projection of the same model is unchanged by any rendering change"
+      proof: "unit test: test/tty-layer-and-status-board-rendering.test.ts"
+    - claim: "no state word the board prints today is replaced by colour alone"
+      proof: "unit test: test/tty-layer-and-status-board-rendering.test.ts"
+    - claim: "the status board actually calls the new layer rather than shipping it unreached"
+      proof: "grep: sectionRule( in src/lib/status-board.ts"
