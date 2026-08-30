@@ -1358,8 +1358,13 @@ export interface DaemonDeps {
    * `opts.boardReview ? … : undefined` in `runMeasurementCadenceReport` and no caller passed the
    * key. That is PR #1066's lesson for the third time; the producer at `daemonCommand`'s call
    * site is what makes it real, not this declaration.
+   *
+   * W1-T2464: also carries `retiredProposalIds` — this hook's OWN reconciliation pass, which runs
+   * on every call regardless of `fire` (see `reconcileBoardReviewReferents`'s header doc, and
+   * `buildBoardReviewDaemonHooks`'s `check` closure that wires it in). Optional so a fixture
+   * built against the pre-W1-T2464 shape (bare `{fire, reason}`) still satisfies the type.
    */
-  checkBoardReview?: () => BoardReviewCadenceDecision;
+  checkBoardReview?: () => BoardReviewCadenceDecision & { retiredProposalIds?: string[] };
   /**
    * Runs one board-review tick. READ-ONLY BY CONSTRUCTION: it writes one report artifact and
    * drafts registry proposals, and nothing else — it does not push, merge, mint or file, and
@@ -2817,15 +2822,23 @@ export async function runDaemon(
     // "did it run" was answerable only by the presence of a file nothing watches. These rows are
     // what the digest already sweeps into the inbox, and they are what makes a future
     // "has it fired" question a one-line ledger read instead of a recon.
+    //
+    // W1-T2464: `checkBoardReview` also RECONCILES — every call, fired or not — retiring any
+    // registry proposal whose referent PR has left the board it just read (see
+    // `reconcileBoardReviewReferents`'s header doc, board-review.ts). `retiredProposalIds` is
+    // logged on BOTH branches below, deliberately: reconciliation is bookkeeping tied to the
+    // check, not to the fire, so a tick that retires rows but does not itself fire must still be
+    // visible — a reconciliation nobody can see repeats this file's own history (the rung fired
+    // five times before anyone noticed, because nothing surfaced its output).
     if (deps.checkBoardReview) {
-      let boardDecision: BoardReviewCadenceDecision | undefined;
+      let boardDecision: (BoardReviewCadenceDecision & { retiredProposalIds?: string[] }) | undefined;
       try {
         boardDecision = deps.checkBoardReview();
       } catch (e) {
         log("board_review.check_failed", { error: String((e as Error)?.message ?? e) });
       }
       if (boardDecision?.fire) {
-        log("board_review.fired", { reason: boardDecision.reason });
+        log("board_review.fired", { reason: boardDecision.reason, retiredProposalIds: boardDecision.retiredProposalIds ?? [] });
         if (deps.runBoardReview) {
           try {
             const report = await deps.runBoardReview();
@@ -2836,13 +2849,15 @@ export async function runDaemon(
               itemsConsidered: report.itemsConsidered,
               proposals: report.proposalIds.length,
               proposalIds: report.proposalIds,
+              retired: (boardDecision.retiredProposalIds ?? []).length,
+              retiredProposalIds: boardDecision.retiredProposalIds ?? [],
             });
           } catch (e) {
             log("board_review.run_failed", { error: String((e as Error)?.message ?? e) });
           }
         }
       } else if (boardDecision) {
-        log("board_review.skipped", { reason: boardDecision.reason });
+        log("board_review.skipped", { reason: boardDecision.reason, retiredProposalIds: boardDecision.retiredProposalIds ?? [] });
       }
     }
 
