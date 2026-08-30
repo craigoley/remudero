@@ -2639,16 +2639,16 @@ export function renderFollowupCandidates(harvest: FollowupHarvest): string {
 // ── Follow-up routing (W1-T2458) ───────────────────────────────────────────────────────────
 //
 // `mineFollowups` above finds candidates; until this task, `renderFollowupCandidates` only ever
-// rendered them into a markdown section headed "never auto-filed" that no rung read
+// rendered them into a markdown section headed "never auto-filed (rule 15)" that no rung read
 // back — of the seven modules calling `updateProposalRegistry` (inbox.ts's single writer), none
 // read a follow-up, and no plan task has ever been filed FROM one (measured 2026-08-29: 463
 // distinct task_ids, 2,115 declared entries, zero routed). `routeFollowupsToRegistry` below is
 // the missing consumer: it takes the SAME `FollowupHarvest` `mineFollowups` already produces and
 // files each still-open candidate through `updateProposalRegistry` — the SAME single writer
 // board-review.ts/rule-efficacy.ts/feedback-docket.ts already use — instead of only rendering
-// prose nobody reads. THE SAME DISCIPLINE STAYS INTACT: a routed follow-up is a PROPOSAL CANDIDATE for the
-// inbox's own tiering and an operator's `rmd approve` to act on, not a directly-filed task — the
-// exact shape `renderFollowupCandidates`'s own header names, now enforced by a writer
+// prose nobody reads. RULE 15 STAYS INTACT: a routed follow-up is a PROPOSAL CANDIDATE for the
+// inbox's own tiering and an operator's `rmd approve` to act on, never an auto-filed task — the
+// exact discipline `renderFollowupCandidates`'s own header names, now enforced by a writer
 // instead of a caption.
 
 /**
