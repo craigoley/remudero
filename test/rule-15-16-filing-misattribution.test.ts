@@ -117,6 +117,25 @@ const FILING_DOCTRINE = /auto-?fil|never auto|never file|architect authors/i;
 /** The two numbers the doctrine actually borrowed. */
 const BORROWED = /\brule ?1[56]\b/i;
 
+// ⚠ THE QUOTATION CARVE-OUT, AND WHY IT IS NOT AN EXEMPTION. The defect this guard exists to catch
+// began as a REAL EMITTED STRING: `renderFollowupCandidates` shipped the markdown heading
+// "## Follow-up harvest (W1-T105) — PROPOSAL CANDIDATES, never auto-filed (rule 15)" from #744
+// until W1-T2456 retired it. Prose that QUOTES that heading verbatim — in order to explain what the
+// defect was — is reporting an artifact, not asserting a doctrine, and without this carve-out no
+// file could document this bug at all: the guard's first form failed on the two comments that
+// describe it and on nothing else, which would have forced the history to be deleted or
+// paraphrased into something less true. So a double-quoted span is removed before the window is
+// judged. A citation written in ORDINARY PROSE is untouched and still fails, which is the whole
+// population the original defect lived in — MASTER-PLAN.md's five citations and retro.ts's sixth
+// were all bare prose, none of them quoted.
+//
+// THE COST, STATED AND ACCEPTED: a determined author could evade by wrapping a genuine doctrine
+// citation in double quotes. That is deliberate evasion rather than the mistake this guard catches
+// (a number borrowed in good faith and repeated), and it is the same trade-off `shorthandIsAboutChangeset`
+// already takes for quoted regions. NOT CHECKED: whether any such evasion exists today.
+/** Remove double-quoted spans, so a quoted artifact reads as a quotation rather than a citation. */
+const stripQuotedSpans = (s: string): string => s.replace(/"[^"]*"/g, " ");
+
 test("no tracked file outside plan/ cites rule 15 or 16 for a filing doctrine neither rule carries", () => {
   // A 3-LINE WINDOW, not one line. The original sweep for this defect was line-scoped and MISSED
   // `renderFollowupCandidates`' own doc, where "Rule 15:" sat on one line and "file a task" on the
@@ -134,8 +153,8 @@ test("no tracked file outside plan/ cites rule 15 or 16 for a filing doctrine ne
   for (const f of files) {
     const lines = read(f).split("\n");
     for (let i = 0; i < lines.length; i++) {
-      const window = lines.slice(i, i + 3).join(" ");
-      if (BORROWED.test(lines[i])) tracked.push(`${f}:${i + 1}: ${window}`);
+      const window = stripQuotedSpans(lines.slice(i, i + 3).join(" "));
+      if (BORROWED.test(stripQuotedSpans(lines[i]))) tracked.push(`${f}:${i + 1}: ${window}`);
     }
   }
   const offenders = tracked.filter((l) => BORROWED.test(l) && FILING_DOCTRINE.test(l));
@@ -145,6 +164,28 @@ test("no tracked file outside plan/ cites rule 15 or 16 for a filing doctrine ne
     "a filing doctrine is being attributed to rule 15 or 16, and §12 carries it under neither — " +
       "see §12 rule 27, which states the permission affirmatively",
   );
+});
+
+test("a rule number inside a quoted artifact is a quotation; the same claim in bare prose still fails", () => {
+  const flags = (line: string): boolean => {
+    const w = stripQuotedSpans(line);
+    return BORROWED.test(w) && FILING_DOCTRINE.test(w);
+  };
+  const quoting = ['// rendered them into a markdown section headed ', '"never auto-filed (rule 15)"', ' that no rung read'].join("");
+  // ASSEMBLED, NOT WRITTEN OUT: this fixture is a bare-prose citation, so spelling it verbatim would
+  // make this file a real offender of the sweep two tests above — which is correct behaviour, not a
+  // bug to exempt. Splitting the number keeps the fixture off the scanned surface without giving the
+  // guard a file-level carve-out. The runtime value is unchanged, and the anti-vacuity assertions
+  // below prove the assembled string is still one the raw predicate flags.
+  const citing = ['// ', 'RULE 1', '5 STAYS INTACT: a routed follow-up is ', 'never an auto-filed', ' task'].join("");
+
+  // ANTI-VACUITY: both lines must be indistinguishable to the UNNARROWED predicate, or this test
+  // would pass even if `stripQuotedSpans` were the identity function.
+  assert.equal(BORROWED.test(quoting) && FILING_DOCTRINE.test(quoting), true, "the quoting line must be one the raw predicate would have flagged");
+  assert.equal(BORROWED.test(citing) && FILING_DOCTRINE.test(citing), true, "and so must the citing line — otherwise the pair discriminates nothing");
+
+  assert.equal(flags(quoting), false, "quoting the retired heading verbatim must not read as citing the rule for its doctrine");
+  assert.equal(flags(citing), true, "an UNQUOTED doctrine citation must still fail — the carve-out is for quotations, not a way out");
 });
 
 test("§12 states the filing permission AFFIRMATIVELY, so the next reader finds a rule instead of inferring one", () => {

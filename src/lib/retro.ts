@@ -2646,10 +2646,12 @@ export function renderFollowupCandidates(harvest: FollowupHarvest): string {
 // the missing consumer: it takes the SAME `FollowupHarvest` `mineFollowups` already produces and
 // files each still-open candidate through `updateProposalRegistry` — the SAME single writer
 // board-review.ts/rule-efficacy.ts/feedback-docket.ts already use — instead of only rendering
-// prose nobody reads. RULE 15 STAYS INTACT: a routed follow-up is a PROPOSAL CANDIDATE for the
-// inbox's own tiering and an operator's `rmd approve` to act on, never an auto-filed task — the
-// exact discipline `renderFollowupCandidates`'s own header names, now enforced by a writer
-// instead of a caption.
+// prose nobody reads. THE ROUTING CHOICE IS THIS LANE'S OWN, NOT A RULE'S: a routed follow-up is
+// a PROPOSAL CANDIDATE for the inbox's own tiering and an operator's `rmd approve` to act on,
+// rather than a task this lane commits directly. §12 rule 27 PERMITS the fleet to file its own
+// work; routing through the inbox here is a deliberate narrower choice about where a harvested
+// candidate should be judged, not a prohibition inherited from another rule — and it is now
+// enforced by a writer instead of a caption.
 
 /**
  * `FollowupEntry.type` semantics — WRITTEN HERE because nothing previously defined what the
