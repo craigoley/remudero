@@ -291,6 +291,54 @@ test("planRatificationBatch: two members drafting the SAME task id (and hence th
   assert.match(plan.refusal, /W1-T901/);
 });
 
+// A classification can reach "ready" with a draft whose fragmentYaml is itself malformed (the
+// classifier's readiness check and ratificationShardFiles's own well-formedness check are
+// separate concerns) — that member must refuse the WHOLE batch via the SAME
+// `shards.ok === false` arm a single-proposal `writeRatificationShards` call would throw on,
+// rather than silently dropping it or filing a broken shard.
+function readyMalformedFragment(proposalId: string): InboxClassification {
+  return {
+    proposalId,
+    state: "ready",
+    reasons: [],
+    draftStale: false,
+    draft: {
+      proposalId,
+      fragmentYaml: "this is not a top-level task entry at all\n",
+      stampLine: `- ${proposalId} (plan) — RATIFIED 2026-08-30 -> W1-T999.`,
+      anchorFingerprint: "landed::MASTER-PLAN.md",
+    },
+  };
+}
+
+test("planRatificationBatch: an accepted member whose draft fragment is not a well-formed task entry refuses the WHOLE batch, naming the offending proposal", () => {
+  const classifications = [readyMalformedFragment("P1"), ready("P2", "W1-T902", "task two")];
+  const plan = planRatificationBatch(classifications, BASE_MASTER_PLAN);
+  assert.equal(plan.ok, false);
+  if (plan.ok) return;
+  assert.match(plan.refusal, /refusing to file P1/);
+  assert.match(plan.refusal, /does not begin with a top-level/);
+});
+
+test("approveBatch: a batch with no READY member (everything skipped) refuses with 'nothing to ratify' WITHOUT ever calling the gateway", () => {
+  const classifications = [notReady("P1", "dep-unmet: W1-T2 not merged"), notReady("P2", "dep-unmet: W1-T3 not merged")];
+  const gateway = fakeBatchGateway();
+  const path = ledgerPath();
+  const result: BatchApproveResult = approveBatch(classifications, BASE_MASTER_PLAN, gateway, { ledgerPath: path, runId: "RUN-BATCH-4" });
+
+  assert.equal(gateway.branchCalls.length, 0, "createRatificationBranch must NEVER be called when nothing is ready");
+  assert.equal(gateway.prCalls.length, 0);
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.match(result.refusal, /no member of this batch is READY/);
+    assert.equal(result.skipped.length, 2);
+  }
+
+  // Both skips still ledger a refusal even though the batch as a whole produces no PR.
+  const lines = readLedger(path).filter((l) => l.step === "ratify.approve_refused");
+  assert.equal(lines.length, 2);
+});
+
 test("approveBatch: a shard-path collision refuses the batch WITHOUT ever calling the gateway — neither branch nor PR is created", () => {
   const classifications = [readyNoTitle("P1", "W1-T901"), readyNoTitle("P2", "W1-T901")];
   const gateway = fakeBatchGateway();
