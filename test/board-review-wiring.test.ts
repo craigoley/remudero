@@ -339,6 +339,115 @@ void test("defaultBoardReviewItems degrades to an empty board rather than throwi
   }
 });
 
+// ── W1-T2465: the recursion bound made REACHABLE from the production read path ──────────────────
+//
+// `originatesFromProposalId` (design (iv), `lib/board-review.ts`) had exactly three references
+// in `src/` before this task — the doc, the interface member and `boardItemsInScope`'s reader —
+// and zero writers. `boardItemsFromOpenPrs` is the only production `BoardItem` constructor, so
+// the tests below drive it (and `defaultBoardReviewItems`, its one real caller) rather than
+// building a `BoardItem` by hand, which is exactly the test-only seam the task's own falsifier
+// rules out as proof.
+
+function planWithOrigin(taskId: string, origin: string | undefined) {
+  return { tasks: [], byId: new Map([[taskId, { id: taskId, origin }]]) } as never;
+}
+
+void test("boardItemsFromOpenPrs marks an item whose origin lookup names a board-review proposal, and boardItemsInScope excludes it while open", async () => {
+  const { boardItemsInScope } = await import("../src/lib/board-review.js");
+  const rows: OpenPrRest[] = [
+    { number: 100, url: "u100", headRefName: "b100", headRefOid: "s100", updatedAt: "", body: "", autoMergeRequest: null,
+      createdAt: "2026-08-26T00:00:00Z", isDraft: false, statusCheckRollup: [] },
+  ];
+  const items = boardItemsFromOpenPrs(rows, NOW, new Map(), new Map([[100, "board-review:escalation:#3227"]]));
+  assert.equal(items[0]!.originatesFromProposalId, "board-review:escalation:#3227", "the field this rung's own report field depends on is now WRITTEN by production code");
+
+  const inScope = boardItemsInScope(items);
+  assert.deepEqual(inScope, [], "the pure filter — already unit-proven, untouched by this task — now has something real to exclude");
+});
+
+void test("defaultBoardReviewItems marks self-produced from the SAME projectPlan call the escalation arm already reads, no second read", () => {
+  const root = tmp("rmd-br-self-");
+  try {
+    let projectPlanCalls = 0;
+    const items = defaultBoardReviewItems({ root } as unknown as Config, {
+      resolveOwnerRepo: () => ({ owner: "o", repo: "r" }),
+      fetchOpenPrs: () => [
+        { number: 200, url: "u200", headRefName: "b200", headRefOid: "s200", updatedAt: "", body: "", autoMergeRequest: null,
+          createdAt: "2026-08-26T15:00:00Z", isDraft: false, statusCheckRollup: [] },
+      ],
+      loadPlan: () => planWithOrigin("T200", "board-review:stale:#100"),
+      projectPlan: () => {
+        projectPlanCalls += 1;
+        return new Map([["T200", { taskId: "T200", prNumber: 200, needsHuman: false }]]) as never;
+      },
+      now: () => NOW,
+    });
+
+    assert.equal(projectPlanCalls, 1, "ONE projection read serves the escalation arm and the self-produced join both — no second read to join it");
+    assert.equal(
+      items[0]!.originatesFromProposalId,
+      "board-review:stale:#100",
+      "reachable from the production read path — no injected BoardItem fixture, no test-only constructor",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+void test("an ordinary PR, and a PR whose task carries any other origin, are never marked self-produced", () => {
+  const root = tmp("rmd-br-other-origin-");
+  try {
+    const items = defaultBoardReviewItems({ root } as unknown as Config, {
+      resolveOwnerRepo: () => ({ owner: "o", repo: "r" }),
+      fetchOpenPrs: () => [
+        { number: 300, url: "u300", headRefName: "b300", headRefOid: "s300", updatedAt: "", body: "", autoMergeRequest: null,
+          createdAt: "2026-08-26T15:00:00Z", isDraft: false, statusCheckRollup: [] },
+        { number: 301, url: "u301", headRefName: "b301", headRefOid: "s301", updatedAt: "", body: "", autoMergeRequest: null,
+          createdAt: "2026-08-26T15:00:00Z", isDraft: false, statusCheckRollup: [] },
+      ],
+      loadPlan: () =>
+        ({
+          tasks: [],
+          byId: new Map([
+            ["T300", { id: "T300", origin: "feedback#42" }],
+            // No task at all for #301 — the join must degrade to unmarked, not throw.
+          ]),
+        }) as never,
+      projectPlan: () =>
+        new Map([
+          ["T300", { taskId: "T300", prNumber: 300, needsHuman: false }],
+          ["T301", { taskId: "T301", prNumber: 301, needsHuman: false }],
+        ]) as never,
+      now: () => NOW,
+    });
+
+    assert.equal(items[0]!.originatesFromProposalId, undefined, "an origin outside the board-review namespace is never read as this rung's own proposal");
+    assert.equal(items[1]!.originatesFromProposalId, undefined, "a PR whose task cannot be resolved at all is left unmarked, not treated as self-produced");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+void test("an unreadable plan or projection leaves every item UNMARKED, never wrongly self-produced", () => {
+  const root = tmp("rmd-br-degrade-");
+  try {
+    const rows: OpenPrRest[] = [
+      { number: 400, url: "u400", headRefName: "b400", headRefOid: "s400", updatedAt: "", body: "", autoMergeRequest: null,
+        createdAt: "2026-08-26T15:00:00Z", isDraft: false, statusCheckRollup: [] },
+    ];
+    const items = defaultBoardReviewItems({ root } as unknown as Config, {
+      resolveOwnerRepo: () => ({ owner: "o", repo: "r" }),
+      fetchOpenPrs: () => rows,
+      loadPlan: () => { throw new Error("plan unreadable"); },
+      now: () => NOW,
+    });
+    assert.equal(items.length, 1, "the open-PR read still succeeds — only the join degrades");
+    assert.equal(items[0]!.originatesFromProposalId, undefined, "a degraded read leaves the item unmarked, the fail-open direction the task requires");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 // ── READ-ONLY, and asserted rather than promised ──────────────────────────────────────────────
 
 void test("the wiring passes no rerunDeadCheck, so the rung takes no action at all", async () => {
