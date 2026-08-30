@@ -1,0 +1,99 @@
+- id: W1-T2466
+  title: "the board-review escalation finding is a bare count — run-task.ts:16819 reduces the projection to a Set of PR numbers and discards the escalationIssueUrl/escalationTitle/escalationOpenedAt W1-T182 added for exactly this, so the proposal names no ask and cannot be ratified"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: architect
+  plan_refs: ["§7B", "P25"]
+  files: [src/run-task.ts, src/lib/board-review.ts, test/board-review.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE EVIDENCE IS THIS DRAFT. Ratifying proposal `board-review:escalation:#3205` required stating what
+    #3205's escalation ASKS. The finding reads, in full: `board-review: #3205 carries 1 unhandled
+    escalation(s)`. It names a count and a referent and nothing else, so the ask cannot be stated, and a
+    ratification candidate for it cannot be grounded. That is not a shortage of effort; it is a shortage
+    of data at the surface, and the data exists one function earlier.
+
+    THE DISCARD SITE IS ONE LINE, verified at source. `defaultBoardReviewItems` (run-task.ts:16819) reads
+    the SAME `projectPlan` projection every other plan reader derives from, then reduces it to:
+    `needsHuman = new Set([...proj.values()].filter((p) => p.needsHuman && p.prNumber !== undefined)
+    .map((p) => p.prNumber!))`. Each `p` it walks past carries FOUR fields W1-T182 put on
+    `StatusProjection` for this exact purpose — `escalationIssueUrl` (status.ts's own doc: "carried so
+    NEEDS ME can render a DIRECT link rather than soliciting a URL the ledger already holds"),
+    `escalationTitle` (the escalation's real one-line ask), `escalationOpenedAt` (when it became a
+    needs-human item, explicitly NOT `startedAt`), and `escalationUnverified` (the fail-closed marker for
+    an issue state that could not be confirmed). The reduction keeps `prNumber` and drops all four.
+    CONTROLLED: a grep of `src/run-task.ts` for those four names returns ZERO matches, against a control
+    of `needsHuman`, which it plainly does read — so this is a discard, not a read I failed to find.
+
+    THE DATA HAS NOWHERE TO LAND EITHER. `BoardItem` (board-review.ts:70-90) carries
+    `unhandledEscalations: number` and no field for an escalation's identity, so even a preserved
+    projection has no seat on the item. `boardItemsFromOpenPrs` (run-task.ts:16777) therefore writes
+    `needsHumanByPrNumber.has(pr.number) ? 1 : 0`, and `diagnoseBoardFindings` (board-review.ts:286-291)
+    mints the summary from that count. Three sites, one datum, lost at the first.
+
+    IT IS W1-T182's OWN CRITERION, ONE SURFACE OVER. That task's third acceptance criterion reads: "each
+    escalation row renders the escalation's ACTUAL one-line ask, with a direct link — never an input
+    soliciting data the ledger already holds", with the falsifier "a row rendering an empty URL input
+    fails ... soliciting a URL the system already holds is both redundant and an invitation to paste the
+    wrong one". W1-T182 fixed that on NEEDS ME and added the carrying fields. The board-review escalation
+    finding solicits exactly that archaeology from the Architect instead of the operator. P25's own
+    design says it plainly too: the reasoning rides with the recommendation, never a bare ask.
+
+    WHAT THIS IS NOT. Not the trigger: `decideBoardReviewTrigger`'s escalation arm reads a real, live
+    signal and fires correctly, and nothing here touches it. Not the escalation lane: `escalate.ts` opens
+    the issue, `digest.ts`/`status.ts`/NEEDS ME render it, and the escalation-lifecycle reconciler
+    (sweep.ts:7659) closes it when the referent goes terminal — that lane works and is untouched. This
+    task changes only what the FINDING carries.
+  design: |
+    ONE DATUM, PRESERVED END TO END, and nothing else changes.
+    (i) `BoardItem` gains an optional escalation descriptor — the issue url, the title/ask, the opened-at
+        timestamp, and the unverified marker — alongside the existing `unhandledEscalations` count, which
+        stays exactly as it is because the trigger arithmetic reads it and must not move.
+    (ii) The mapper stops reducing to `Set<number>`: `defaultBoardReviewItems` passes the escalation
+        detail through, and `boardItemsFromOpenPrs` seats it on the item. The join stays keyed on
+        `prNumber` — the same join, carrying more of what it already walked past.
+    (iii) `diagnoseBoardFindings`'s escalation summary states the ask and links the issue instead of
+        restating the count. A finding whose ask is genuinely absent degrades to the count with the
+        absence STATED, never a fabricated ask and never a throw.
+    (iv) FAIL-CLOSED DIRECTION, inherited verbatim from W1-T182 and NOT re-decided here: an escalation
+        whose live issue state could not be confirmed renders as unverified and is KEPT. Hiding possibly
+        live work is the worse error, which is the opposite polarity from W1-T181's merged-count boundary
+        and is deliberate.
+    (v) THE READ BUDGET IS UNCHANGED. Every field added is already in hand on a projection
+        `defaultBoardReviewItems` builds today; this adds no gateway call, no per-row fetch, and no
+        second read. A implementation that fetches per escalation has missed the point of the task.
+    VERIFY FROM SOURCE before editing — this rationale is a survey and line numbers drift.
+    RISK BAND, SET UP FRONT: `risk: high` because the sizing check reads `files:` as spanning the
+    `run-task` and `board-review` stems and refuses that at `medium`. It is Rule 19's SPAN, not blast
+    radius, and the coupling is atomic: a field on `BoardItem` with no producer carries nothing, and a
+    mapper preserving data with no seat to put it on is a no-op. The invariant is one property across
+    both ends and is unsatisfiable piecewise — the same exit W1-T240/W1-T241/W1-T242/W1-T250/W1-T253 take,
+    and the same up-front banding W1-T2381 records for its own two-stem `files:`.
+  acceptance:
+    - claim: "an escalation finding states the escalation's own ask and links its issue, rather than restating the count the item already carries"
+      proof: "unit test: test/board-review.test.ts"
+    - claim: "the projection's escalation detail survives the board-item mapper — the reduction to a bare set of PR numbers no longer discards it"
+      proof: "grep: escalationIssueUrl in src/run-task.ts"
+    - claim: "an escalation whose live issue state could not be confirmed is KEPT and rendered unverified, never dropped and never asserted handled"
+      proof: "unit test: test/board-review.test.ts"
+    - claim: "an escalation with no detail available still yields a well-formed finding that states the absence, rather than throwing or fabricating an ask"
+      proof: "unit test: test/board-review.test.ts"
+    - claim: "the trigger arithmetic is untouched — the same board fires and does not fire exactly as before this change"
+      proof: "unit test: test/board-review.test.ts"
+  note: |
+    FILED 2026-08-28 while drafting the ratification for `board-review:escalation:#3205`, which is the
+    fixture: the draft could not state the ask. A PRIOR draft of this same class exists uncredited in
+    state/inbox-drafts.json for `board-review:escalation:#2971` (2026-08-26) and reached the same two
+    conclusions independently; it was never approved, and the ledger carries no `ratify.approved` step
+    for any board-review proposal, so nothing was minted from it and this is a re-draft rather than a
+    duplicate of landed work.
+    DELIBERATELY NOT FILED HERE: handling #3205's own escalation, which is an operator action on an issue
+    that already has a working lane, and filing it would be the per-instance patch W1-T20d names.
+    SIBLING: W1-T2467 (the expiry). It declares `src/run-task.ts` too, so the two overlap under W1-T171 and
+    must not be dispatched into the same pass; W1-T2467 carries the hard edge.
