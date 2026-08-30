@@ -1,0 +1,160 @@
+- id: W1-T2464
+  title: "A BOARD-REVIEW FINDING OUTLIVES ITS REFERENT FOREVER — the rung mints anchor-free per-PR proposals, so `board-review:escalation:#3227` can never be evidence-drifted, never be re-drafted, and is never pruned when #3227 merges; the reconciler that retires a finding whose condition the board no longer exhibits"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: "board-review:escalation:#3227"
+  plan_refs: ["W1-T2304", "W1-T110", "W1-T240", "W1-T77", "W1-T162", "W1-T130", "§7B", "§5D"]
+  files: [src/lib/board-review.ts, src/run-task.ts, src/lib/daemon.ts, test/board-review.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    FILED FROM THE PROPOSAL IT IS ABOUT. `board-review:escalation:#3227` is a per-PR operational
+    finding sitting in the PLAN-RATIFICATION lane. Every fact below was read from source in the
+    drafting session, not inherited from the proposal text.
+
+    (1) THE MINT IS ANCHOR-FREE, AND IT IS THE ONLY ONE. `buildBoardReview` files findings through
+    `updateProposalRegistry` with `evidenceAnchors: [] as EvidenceAnchor[]`
+    (src/lib/board-review.ts:383). The two OTHER registry writers both supply real anchors:
+    `rule-efficacy.ts:315` passes a computed `anchors`, and `feedback-docket.ts:276` passes exactly
+    one — `"<referent>" is still an open referent`. So this is not a house convention being
+    followed; it is the one writer that skipped it, and the contrast is the control.
+
+    (2) WHAT AN EMPTY ANCHOR SET BUYS, MECHANICALLY, IN FOUR PLACES:
+      - `classifyProposal` computes `proposal.evidenceAnchors.filter((a) => !ctx.grepAnchorTrue(a))`
+        (src/lib/inbox.ts:548). Over an empty array that is empty, so the `evidence_anchors`
+        predicate CANNOT FAIL. A board-review proposal is structurally exempt from EVIDENCE-DRIFTED.
+      - `anchorFingerprint([])` is the empty string (src/lib/inbox.ts:152-157), and `isDraftStale`
+        compares fingerprints (:163-165), so a cached draft is NEVER stale.
+      - `proposalsNeedingDraft` re-drafts only when `!cached || isDraftStale(...)`
+        (src/lib/inbox.ts:180-186) — so after the FIRST draft, never again.
+      - `draftAttemptKey` reduces to `"::" + reframeCount` (src/lib/inbox.ts:203-205), constant
+        absent a reframe, so the daemon rung's own idempotence throttle also never re-fires.
+    The only pruner in the system, `pruneRatifiedProposals` (src/lib/inbox.ts:1238-1248, single
+    caller src/lib/panel-graph.ts:1324), removes RATIFIED proposals and nothing else.
+
+    (3) THEREFORE THE FAILURE IS PERMANENT, NOT SLOW. A board-review proposal, once drafted, holds a
+    FROZEN draft and a readiness verdict that cannot degrade, for a referent that is an open PR.
+    When #3227 merges and its escalation is answered, the proposal keeps rendering with the draft
+    computed while the finding was live. THIS DRAFT IS THAT FIXTURE: the drafting run it came from
+    exists only because the proposal was minted, and nothing in the system can invalidate the
+    artifact it cached.
+
+    (4) THE REGISTRY GROWS MONOTONICALLY, BY CONSTRUCTION. Finding ids embed the PR number —
+    `id: \`#${pr.number}\`` (src/run-task.ts:16830) — and PR numbers never repeat, so `existingIds`
+    dedup (board-review.ts:380-383) suppresses a REPEAT of the same finding and never a NEW one.
+    Every PR that is ever 8h old (`BOARD_REVIEW_OLDEST_OPEN_AGE_HOURS`, board-review.ts:57) or ever
+    carries one `needsHuman` task adds a permanent row. `plan/policy.yaml`'s `boardReview` row is
+    `enabled: true`, `minIntervalMinutes: 120`, `maxPerDay: 6`, so the rung has six chances a day to
+    add rows and none at all to remove one.
+
+    (5) THE COST IS NOT ONLY NOISE. Each new registry row is a draft candidate for the daemon-side
+    draft rung (W1-T192), i.e. an Architect-tier worker spawn. The spend is bounded by how many PRs
+    the fleet ever opens, which is not a bound.
+
+    (6) AN ANCHOR CANNOT FIX THIS, AND THE OBVIOUS FIX IS THE WRONG ONE. Production resolves
+    anchors as `gitGrepAnchorTrue(repoRoot, "origin/main", a)` (src/run-task.ts:28597 and :28674),
+    and `EvidenceAnchor`'s own contract is a `git grep` pattern on a ref (src/lib/inbox.ts:81-89).
+    A PR's open/closed state is not in the tree, so "#3227 is still open" is not expressible as an
+    anchor. Copying `feedback-docket.ts`'s one-anchor shape here would produce an anchor that greps
+    for a PR number in source and is therefore either always-false or accidentally-true — worse than
+    none. The retirement has to be a RECONCILIATION, which is also the house's own answer to this
+    exact edge-triggered shape (W1-T77's level-triggered sweep, W1-T162 for escalation issues,
+    `pruneRatifiedProposals` for ratified rows).
+  design: |
+    RECONCILE ON EVERY CHECK; DIAGNOSE ONLY ON FIRE. This split is the load-bearing decision, and
+    the naive alternative is broken: `buildBoardReview` returns before mining when the decision is
+    `fire: false` (src/lib/board-review.ts:370-373), and it enters the registry closure only
+    `if (findings.length > 0)` (:378) — so retirement placed inside the mining block would run
+    exactly when there is still something wrong and never when everything has resolved, which is the
+    case that matters. Worse, a board whose findings have all cleared trips no depth arm at all, so
+    it never fires again and the dead rows sit forever. Retirement therefore rides the CHECK, which
+    daemon.ts already calls every poll (src/lib/daemon.ts:2794-2797) and which already holds a
+    fresh item list — the reader's own doc states the items are read on every check and that a
+    non-firing tick costs exactly that one read (src/run-task.ts:17007-17010). Retirement is
+    bookkeeping, not diagnosis: keeping it out of the fire also keeps it out of the report's
+    `reason` string and off the six-per-day fire budget that exists for real board reads.
+
+    THE PREDICATE. A registry proposal is retirable iff its id is in THIS rung's own namespace
+    (`board-review:stale:` / `board-review:escalation:`, board-review.ts:280/288) AND its referent
+    item is ABSENT from a NON-EMPTY board read — i.e. the PR has left the open board. That signal is
+    unambiguous by construction: a total read failure yields `[]` (src/run-task.ts:16883-16892), so
+    a non-empty list is proof the PR list itself was read.
+
+    THE RETIREMENT IS NARROWER THAN THE FINDING SET, DELIBERATELY. Retiring on
+    "finding no longer produced" would be WRONG for the escalation arm, and source says why: the
+    projection read that supplies `needsHuman` sits in its own inner try/catch and degrades to an
+    EMPTY SET while the PR list read succeeds (src/run-task.ts:16869-16881). So "no escalation
+    finding this tick" is ambiguous between HANDLED and PROJECTION-UNREADABLE, and treating it as
+    handled would be the cannot-observe-rendered-as-resolved polarity W1-T130 exists to forbid,
+    installed at the exact spot the codebase already documents as degrading silently. A finding
+    whose PR is still on the board stays.
+
+    FAIL DIRECTIONS, ALL TOWARD KEEPING THE ROW. An empty item list retires nothing. An unreadable
+    registry retires nothing. An id outside this rung's namespace is never touched — a `P##`
+    proposal, a `rule-efficacy:` row and a docket row share the same file and are not this rung's
+    to reap. Every write goes through `updateProposalRegistry`, the single writer under its lock
+    (W1-T240), which already returns `null` and skips the write when nothing changed.
+
+    VISIBILITY. The report gains `retiredProposalIds`, and the `board_review.ran` row already
+    emitted in daemon.ts:2806-2813 gains the count beside the existing `proposals` field. A
+    reconciliation nobody can see repeats the defect this file's own history records — the reader's
+    doc at src/run-task.ts:16905 corrects an earlier claim that the digest swept these rows when it
+    referenced them zero times, and notes the rung fired five times before anyone noticed.
+
+    OUT OF SCOPE, RECORDED SO IT IS NOT SILENTLY INHERITED:
+      - The still-open-but-handled escalation. It needs the reader to report whether the escalation
+        arm was OBSERVED rather than degraded, which is a change to the reader's contract. Named
+        here, deliberately unbuilt, with its trigger: file it when a retired-referent count shows
+        escalation rows surviving their handling.
+      - The orphan draft in `state/inbox-drafts.json`. It is INERT, not a leak in waiting: drafts
+        are read as `drafts[p.id]` per EXISTING proposal (src/lib/inbox.ts:183), so an entry keyed
+        to a retired proposal is never consulted. Drafts-file hygiene is W1-T241's.
+      - Whether per-PR operational findings belong in the plan-ratification lane at all. That is a
+        re-decision of W1-T2304's shipped design (iii) and is not made on one instance.
+  acceptance:
+    - claim: "a board-review finding whose referent PR has left the open board is retired from the proposal registry on the next check, including on a tick that produces no findings of its own and does not fire"
+      proof: "unit test: test/board-review.test.ts"
+    - claim: "an EMPTY board read retires nothing at all — an unreadable board is never read as every condition resolved"
+      proof: "unit test: test/board-review.test.ts"
+    - claim: "an escalation finding whose referent PR is STILL on the open board survives, even when this tick produces no escalation finding for it, because the escalation arm degrades to zero independently of the PR list"
+      proof: "unit test: test/board-review.test.ts"
+    - claim: "retirement never reaches a proposal this rung did not mint — a P-numbered row, a rule-efficacy row and a docket row in the same registry are all untouched"
+      proof: "unit test: test/board-review.test.ts"
+    - claim: "the reconciliation is idempotent — a second pass over unchanged state retires nothing further and performs no registry write"
+      proof: "unit test: test/board-review.test.ts"
+    - claim: "a retirement is visible without opening the report artifact — the board_review ledger row carries what was retired"
+      proof: "grep: retiredProposalIds in src/lib/daemon.ts"
+  falsifier: |
+    If a build finds that something ALREADY retires these rows — a pruner keyed on referent state, a
+    registry reaper outside `pruneRatifiedProposals`, or an anchor supplied to board-review findings
+    by a path not read here — then the permanence claim is false and this task closes rather than
+    being implemented. The check is cheap and must be run first: `evidenceAnchors: []` at
+    src/lib/board-review.ts:383, and `pruneRatifiedProposals`'s ratified-only filter at
+    src/lib/inbox.ts:1242.
+
+    SEPARATELY FALSIFYING: if retiring on ABSENCE-FROM-A-NON-EMPTY-BOARD turns out to be
+    ambiguous — if any production path can produce a non-empty item list that is missing a PR which
+    is in fact still open — then the unambiguous signal this design rests on is gone and the
+    predicate must be re-derived before anything is retired.
+  note: |
+    RISK BAND, SET UP FRONT AND RECORDED RATHER THAN WORKED AROUND. `risk: high` is not blast
+    radius; it is Rule 19's SPAN. `files:` covers the pure rung, its production wiring, the daemon
+    row and the test, which the sizing check reads as multiple concerns and refuses at
+    `risk: medium` — the same regrade W1-T2381, W1-T7B, W1-T68 and W1-T71 each recorded. The
+    invariant is ONE and is unsatisfiable piecewise: a reconciler with no wiring never runs, and
+    wiring with no reconciler changes nothing, which is the atomic-coupling exit W1-T240/T241/T242
+    and W1-T253 already used.
+
+    ALREADY OWNED ELSEWHERE, SO THIS DOES NOT RE-FILE IT: escalation ISSUE lifecycle is W1-T162;
+    escalation dedup is W1-T104; NEEDS-ME's history-versus-live-state join is W1-T182; feedback
+    ENTRY status after its proposal PR merges is W1-T257; the registry's write atomicity is
+    W1-T240. This shard owns only the retirement of THIS rung's own findings.
+
+    THE FLEET FIRES THE RUNG READ-ONLY ON PURPOSE and this change keeps it that way: it adds no
+    push, no merge, no PR edit, and mints nothing. Rule 15 is untouched — retiring a candidate
+    removes a recommendation, it never enacts one.
