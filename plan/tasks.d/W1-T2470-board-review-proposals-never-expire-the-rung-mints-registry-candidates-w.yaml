@@ -1,0 +1,149 @@
+- id: W1-T2470
+  title: "BOARD-REVIEW PROPOSALS NEVER EXPIRE — the rung mints registry candidates with an EMPTY evidenceAnchors array, so the inbox drift predicate that exists to catch a proposal the world moved past is structurally inert for the one proposal class whose subject moves fastest"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: architect
+  plan_refs: ["P25", "§7B", "W1-T2304"]
+  files: [src/lib/board-review.ts, test/board-review.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    RATIFIED FROM the machine-minted proposal board-review:escalation:#3194, whose LITERAL text is
+    not ratifiable and is deliberately not what this task builds. A per-PR condition (PR carries an
+    unhandled escalation) can never become a durable plan task; ratifying it verbatim would file an
+    operational work-order that is stale before it is read. What IS ratifiable is the defect the
+    proposal EVIDENCES, and that defect is measured below rather than argued.
+
+    (1) THE MECHANISM, READ AT SOURCE. buildBoardReview files findings through the single writer as
+    `.map((f) => ({ id: f.id, summary: f.summary, evidenceAnchors: [] as EvidenceAnchor[] }))`
+    (src/lib/board-review.ts:383). classifyProposal computes drift as
+    `proposal.evidenceAnchors.filter((a) => !ctx.grepAnchorTrue(a))` and raises the
+    `evidence_anchors` predicate only when that result is non-empty (src/lib/inbox.ts:548-552).
+    Over an empty array the filter is empty by construction, so THE PREDICATE CAN NEVER FAIL. A
+    board-review proposal is permanently evidence-fresh. The one AND-clause whose entire job is to
+    notice that main has moved past a proposal is inert against precisely the proposal class whose
+    subject — live board state — moves fastest.
+
+    (2) IT IS ACCUMULATING, AND THE COUNT IS THE WHOLE REGISTRY. Read at
+    `<config.root>/state/inbox-proposals.json` on 2026-08-28: TWELVE active proposals, EVERY ONE of
+    them a `board-review:` finding, EVERY ONE carrying `evidenceAnchors: []`. There is no other kind
+    of proposal in the file. Two PRs appear twice under both finding shapes (#3039 and #3043 each
+    carry a `stale:` and an `escalation:` entry), so the accumulation is per-finding, not per-PR.
+
+    (3) ONE ENTRY IS PROVABLY DEAD WITHOUT ANY LIVE READ, WHICH IS WHY THIS IS NOT SPECULATIVE.
+    `board-review:stale:#3025` sits in that registry. W1-T2381's own measured table records issue
+    3051 — the escalation bound to PR #3025 — as CLOSED at 10:49:07Z on 2026-08-27 by the
+    escalation-lifecycle reconciler BECAUSE PR #3025 MERGED. So a proposal asserting that #3025 has
+    sat open past the 8h threshold survives in the registry at full freshness against a PR that
+    merged the previous day. Six further entries (#2971, #3030, #3039, #3043, #3054, #3059, #3063)
+    name PRs inside that same 2026-08-27 sweep window.
+
+    (4) THE COST IS AN ARCHITECT SPAWN EACH. `proposalsNeedingDraft` selects every proposal with no
+    cached draft, so each of the twelve draws a bounded Architect worker to draft a ratification
+    candidate for a condition that has usually already cleared. This very run is one of them.
+
+    (5) SINGLE PRODUCER, THEREFORE NO GENERAL GUARD IS PROPOSED. The other two registry producers
+    both supply real anchors: `rule-efficacy.ts:315` passes a computed `anchors` set, and
+    `feedback-docket.ts:276` passes
+    `[{ description: '"<referent>" is still an open referent', pattern: winnerReferent }]`.
+    board-review.ts is the ONLY caller minting an empty set. One instance is not a pattern, so this
+    task adds NO lint arm at the single writer and NO new schema field — the W1-T2381 discipline
+    applied to its own finding.
+
+    (6) WHY THE FIX IS NOT "ADD ANCHORS", stated so a builder does not burn a run discovering it.
+    An EvidenceAnchor is a `git grep` pattern plus an optional path, evaluated against a repo ref.
+    A board condition — this PR is open, this PR carries an unhandled escalation — is GitHub state
+    and exists nowhere in the tree, so it cannot be expressed as a grep at all. feedback-docket's
+    anchor works only because its referent is genuinely a string in repo files. The impedance is
+    real and the anchor mechanism is the wrong instrument here; the right one is reconciliation by
+    the rung that can already observe the board.
+  design: |
+    BIND A BOARD-REVIEW PROPOSAL'S LIFE TO ITS SUBJECT CONDITION, reconciled level-triggered by the
+    rung that reads the whole board on every fire — the established doctrine (W1-T77/P22's
+    reconciler, W1-T162 for escalation ISSUES, W1-T257 for feedback ENTRIES), applied to REGISTRY
+    PROPOSALS, which no task owns today.
+
+    (i) RETIREMENT. On a fire, `diagnoseBoardFindings` already computes the set of finding ids that
+    are TRUE RIGHT NOW. A registry proposal in the `board-review:` id namespace that is absent from
+    that set describes a condition that has cleared, and is retired through `updateProposalRegistry`
+    — the W1-T240 single writer, which already expresses removal by returning a new array. NO new
+    writer, no second lock, no new file.
+
+    (ii) THE UNOBSERVABLE GUARD IS THE LOAD-BEARING PART, and it inverts the naive implementation.
+    An empty or unread board makes EVERY finding absent, so a bare "absent means retire" rule would
+    delete all twelve proposals on the first outage. Retirement therefore runs ONLY on a tick that
+    actually FIRED and actually READ a non-empty board; a no-fire tick, an empty item list, and a
+    corrupt marker each retire NOTHING. Cannot-observe means WAIT, never retire (W1-T119/W1-T130,
+    the polarity this codebase has already paid for at the gateway and projection layers).
+
+    (iii) TWO NARROW GUARDS AGAINST DISCARDING SOMETHING THAT IS NOT THIS RUNG'S TO DISCARD.
+    Retirement touches ONLY ids in the `board-review:` namespace — a rule-efficacy or docket
+    proposal is never in scope. And a proposal carrying a non-empty `reframeHistory` is NEVER
+    retired: the operator has engaged with it, and silently deleting their reframe is exactly the
+    kind of quiet discard this plan forbids everywhere else.
+
+    (iv) LOUD, NEVER SILENT. Retired ids and the reason land in the BoardReviewReport (the artifact
+    the daemon wiring already ledgers), so "why did that proposal vanish" is a one-line read rather
+    than a recon. A retirement that leaves no trace is the same blindness in a new place.
+
+    (v) ORDERING. Retirement runs in the same fire as diagnosis and before the report is written, so
+    the draft rung's next pass sees the drained registry rather than paying an Architect spawn for a
+    condition already cleared.
+
+    OUT OF SCOPE, DELIBERATELY: the depth thresholds, the trigger, the cadence, the one sanctioned
+    re-run action, and the report schema beyond the retirement field. This task changes what happens
+    to a proposal AFTER its condition clears, and nothing about how a finding is made.
+  acceptance:
+    - claim: "on a fire over a genuinely read board, a proposal in the board-review namespace whose condition is absent from the current findings is retired through the single registry writer, and one whose condition still holds is kept"
+      proof: "unit test: test/board-review.test.ts"
+    - claim: "THE UNOBSERVABLE FALSIFIER — a no-fire tick, an empty item list, and a corrupt marker each retire NOTHING, so a board that cannot be read never drains the registry"
+      proof: "unit test: test/board-review.test.ts"
+    - claim: "retirement never leaves its own namespace and never discards operator engagement — a rule-efficacy or docket proposal is untouched, and a board-review proposal carrying a non-empty reframeHistory is kept"
+      proof: "unit test: test/board-review.test.ts"
+    - claim: "the EXISTING accumulation is healed, not merely prevented — the twelve-proposal registry fixture read on 2026-08-28 drains to only the findings the current board still supports"
+      proof: "unit test: test/board-review.test.ts"
+    - claim: "every retirement is observable in the report by id and reason — a silent retirement fails"
+      proof: "unit test: test/board-review.test.ts"
+  falsifier: |
+    If a fresh read of state/inbox-proposals.json shows board-review proposals being drained by some
+    other mechanism — an approve-side prune, a registry heal, or an operator sweep — then the
+    accumulation this task is built on is not real and the task must be closed rather than built.
+    The measurement to re-run is the one above: read the registry, count entries in the
+    `board-review:` namespace, and resolve each named PR's state; a registry whose entries all track
+    currently-open PRs falsifies the premise outright.
+
+    SEPARATELY FALSIFYING: if `EvidenceAnchor` gains a non-grep evaluator that can express live
+    GitHub state, then anchors CAN carry a board condition, design (vi) of the rationale is wrong,
+    and the correct fix becomes anchoring at mint time rather than reconciling at fire time.
+  note: |
+    RATIFIES the machine-minted proposal board-review:escalation:#3194 — but NOT its literal text.
+    The proposal asserts a per-PR condition; this task fixes the systemic defect that condition
+    evidences. Recorded plainly because the divergence is deliberate: a board-review escalation
+    finding cannot become a plan task, and eleven sibling proposals in the same registry share that
+    property.
+
+    RISK BAND, SET UP FRONT rather than discovered at dispatch. `files:` spans the `board-review`
+    stem and this task's own test stem, which the sizing check reads as two concerns and refuses at
+    `risk: medium` — the identical situation W1-T2381 recorded for `[src/lib/sweep.ts,
+    test/sweep.test.ts]` and resolved the same way. It is Rule 19's SPAN, not blast radius: the
+    change is a filter plus a report field inside one module.
+
+    OBSERVED AND EXPLICITLY NOT OWNED HERE — AN OPERATOR QUESTION, NOT A DECISION I TOOK. Whether
+    per-item board-review findings belong in the RATIFICATION inbox at all is genuinely open. The
+    inbox's output is a plan task, and none of these twelve can become one; the digest is where
+    W1-T2381 has just finished routing a structurally similar signal. But W1-T2304 chose the
+    registry route on stated grounds (late-bound, collision-free attribution), and overturning a
+    merged design is not a draft rung's call. THIS TASK IS CORRECT UNDER EITHER RULING — if the
+    findings stay in the registry they must expire, and if they move to the digest the registry
+    still needs draining of what has already accumulated — which is why it is safe to ratify now and
+    does not block on the answer.
+
+    HONEST LIMIT ON THE EVIDENCE. This draft had no Bash or gh, so PR #3194's live state was NOT
+    verified. Nothing above depends on it: the mechanism is read at source, the accumulation is read
+    from the registry file, and the one provably-dead entry (#3025) is established from W1-T2381's
+    own recorded measurement rather than from a live call.
