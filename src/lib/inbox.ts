@@ -1094,8 +1094,17 @@ export function renderInbox(classifications: InboxClassification[]): string {
   for (const c of ready) {
     lines.push("");
     lines.push(`READY — ${c.proposalId}`);
-    lines.push(`  stamp: ${c.draft?.stampLine ?? ""}`);
-    lines.push(`  drafted tasks:\n${(c.draft?.fragmentYaml ?? "").replace(/^/gm, "    ")}`);
+    // W1-T2461: a READY row with no cached draft used to print an empty stamp line and an
+    // empty drafted-tasks block — two blank fields that read as a rendering failure, not as
+    // "this row has nothing yet". Name the absence on one line instead. Readiness itself is
+    // untouched: it is still computed from dependencies (`classifyProposal`), never from
+    // whether a draft happens to be cached, so this branch is purely a rendering choice.
+    if (c.draft) {
+      lines.push(`  stamp: ${c.draft.stampLine}`);
+      lines.push(`  drafted tasks:\n${c.draft.fragmentYaml.replace(/^/gm, "    ")}`);
+    } else {
+      lines.push(`  draft: not cached`);
+    }
   }
   // W1-T193: a proposal currently mid-draft is named, with its spawn time — the same
   // never-render-nothing-during-a-legitimate-window bar the console's card carries.
