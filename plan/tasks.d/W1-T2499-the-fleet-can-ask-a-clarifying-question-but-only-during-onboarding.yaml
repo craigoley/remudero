@@ -1,0 +1,77 @@
+- id: W1-T2499
+  title: "THE FLEET CAN ALREADY ASK A CLARIFYING QUESTION AND ONLY DURING ONBOARDING — three question generators, a validator, an unanswered-set and an assert-complete guard all ship today, and ZERO modules outside `onboard/` can reach any of them, so a reply on any other subject is acted on or dropped but never asked about"
+  repo: remudero
+  depends_on: [W1-T2494, W1-T2496]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 20.00
+  files: [src/lib/reply-interpreter.ts, src/lib/panel-actions.ts, test/a-reply-is-understood-before-it-is-acted-on.test.ts]
+  origin: "operator-brief#an-interpreter-on-the-way-back-to-rmd-2026-08-30"
+  plan_refs: ["W1-T2496", "W1-T2494", "W1-T2498"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE CLARIFICATION LOOP IS BUILT AND FENCED INTO ONE SUBJECT. `generateGapQuestions`,
+    `generateGoalElicitationQuestions` and `generateOnboardQuestions` produce questions;
+    `validateQuestion`/`validateQuestions` check them; `unansweredQuestions` and
+    `assertAnswersComplete` refuse to proceed while any remain. There is a `plan/questions.ndjson`
+    and a console route that answers one. All of it is reachable only from onboarding.
+    SURFACE 1 question generators shipped today = 3
+    SURFACE 2 of those, importers outside the onboarding directory = 0
+    SURFACE 3 questions the plan has recorded = 2
+    SURFACE 4 feedback entries already landed = 155
+    SURFACE 5 console routes shipped today = 40
+
+    UNDERSTANDING IS THE ABSENCE OF UNANSWERED QUESTIONS, NEVER A MODEL SAYING IT UNDERSTOOD. This
+    is the design decision the task turns on. A comprehension check that asks a model "do you
+    understand?" gets yes, always, and is worth nothing. `assertAnswersComplete` already encodes the
+    honest version — proceed only when the unanswered set is empty — and reusing that predicate is
+    what makes this checkable rather than a vibe.
+
+    THE CLARIFICATION GOES BACK INTO THE THREAD, WHICH IS WHY IT DEPENDS ON TWO TASKS. A question
+    that arrives anywhere other than the conversation it belongs to is a second inbox. It appends to
+    the thread W1-T2494 defines, through the reply route W1-T2496 ships, so an operator answering
+    reads it as the colleague coming back with a question rather than a new ticket.
+
+    RECON RUNS BEFORE THE QUESTION, NOT INSTEAD OF IT, AND THAT ORDER IS THE WHOLE VALUE. A
+    colleague who asks what they could have looked up is worse than one who asks nothing. So the
+    interpreter researches first and asks only what research could not settle, and every question it
+    does ask states what it already established — which is also what stops the loop asking the same
+    thing twice.
+
+    IT ASKS, IT DOES NOT ACT. Nothing here dispatches, ratifies, files a task or arms anything;
+    reaching "understood" is a state on a thread and W1-T2500 owns what happens next. That split
+    keeps the comprehension logic reviewable on its own, and keeps a model's reading of a sentence
+    from being one step away from a spend.
+
+    THE BOUND MATTERS BECAUSE A LOOP THAT CAN ASK FOREVER IS A DENIAL OF SERVICE ON AN OPERATOR.
+    Rounds are bounded; on exhaustion the thread reports what remains unresolved and stops, rather
+    than asking a sixth time or silently proceeding on a guess.
+
+    NOT IN SCOPE: moving or rewriting the onboarding generators, which keep their current behaviour
+    and callers exactly; the execution handoff and any fan-out, which W1-T2500 owns; and the
+    inbound direction, which W1-T2498 owns.
+
+    THE RISK BAND IS RULE 19's SPAN, NOT BLAST RADIUS: two src stems plus a test, carrying two
+    independent acceptance concerns — the comprehension predicate and the bounded round trip.
+  acceptance:
+    - claim: "a reply with an unresolved ambiguity produces a clarifying question on its own thread"
+      proof: "unit test: test/a-reply-is-understood-before-it-is-acted-on.test.ts"
+    - claim: "understood is defined as an empty unanswered set, never a model assertion"
+      proof: "unit test: test/a-reply-is-understood-before-it-is-acted-on.test.ts"
+    - claim: "recon runs before a question is asked and the question states what it established"
+      proof: "unit test: test/a-reply-is-understood-before-it-is-acted-on.test.ts"
+    - claim: "a question research could have settled is not asked"
+      proof: "unit test: test/a-reply-is-understood-before-it-is-acted-on.test.ts"
+    - claim: "the same clarification is never asked twice on one thread"
+      proof: "unit test: test/a-reply-is-understood-before-it-is-acted-on.test.ts"
+    - claim: "rounds are bounded and exhaustion reports what is unresolved rather than guessing"
+      proof: "unit test: test/a-reply-is-understood-before-it-is-acted-on.test.ts"
+    - claim: "nothing on this path dispatches, ratifies, files a task or arms a merge"
+      proof: "unit test: test/a-reply-is-understood-before-it-is-acted-on.test.ts"
+    - claim: "the onboarding generators keep their existing callers and behaviour"
+      proof: "unit test: test/a-reply-is-understood-before-it-is-acted-on.test.ts"
+    - claim: "the reply route calls the interpreter rather than the interpreter standing alone"
+      proof: "grep: interpretReply( in src/lib/panel-actions.ts"

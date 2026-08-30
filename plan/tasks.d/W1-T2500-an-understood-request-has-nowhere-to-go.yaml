@@ -1,0 +1,75 @@
+- id: W1-T2500
+  title: "AN UNDERSTOOD REQUEST HAS NOWHERE TO GO — once a thread has no unanswered clarifications nothing carries it into execution, so the interpreter's work ends in a conversation; the deterministic four-specialist router that already decides fan-out with ZERO model calls inside it is the ratified precedent for deciding when one request becomes several"
+  repo: remudero
+  depends_on: [W1-T2499]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 20.00
+  files: [src/lib/specialist-panel.ts, src/lib/inbox.ts, test/an-understood-request-reaches-execution-through-the-existing-tiering.test.ts]
+  origin: "operator-brief#push-to-rmd-to-execute-when-ready-2026-08-30"
+  plan_refs: ["W1-T2499", "W1-T190", "W2-T1"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THIS IS THE LAST RUNG AND THE ONLY ONE THAT COULD SPEND MONEY, SO ITS CONSTRAINTS ARE THE
+    DELIVERABLE. W1-T2499 leaves a thread in a state where the request is understood. Nothing takes
+    it from there. What this adds is the handoff — and the handoff is exactly where an inbox that
+    reads like correspondence could quietly become an agent that acts on sentences.
+    SURFACE 1 specialists the deterministic router already routes to = 4
+    SURFACE 2 model calls inside the router itself = 0
+    SURFACE 3 src modules that spawn a worker = 5
+    SURFACE 4 routes that ratify a proposal today = 2
+    SURFACE 5 modules that raise an escalation = 14
+
+    IT EMITS A PROPOSAL AND NEVER FILES A TASK. `classifyProposal` is the readiness predicate the
+    whole ratification path already runs on: trigger-deferral first, the ledger's `ratify.approved`
+    receipt overriding everything, every failing predicate collected rather than the first. The
+    understood request becomes a proposal that enters THAT, unchanged. Nothing here files a task
+    directly, auto-approves, adds a timer, or paces anything — those are ruled out by standing
+    operator instruction and nothing about a nicer inbox re-opens them.
+
+    THE APPARENT TENSION WITH "EXECUTE WHEN READY" RESOLVES IN THE OPERATOR'S FAVOUR, AND IT IS
+    WORTH STATING BECAUSE IT LOOKS LIKE A CONTRADICTION. A reply is an input and never a command
+    (W1-T2496). Yet a thread does reach a point where work should start. Both hold because READY is
+    reached by the HUMAN ANSWERING THE CLARIFICATIONS — the ratification happens in the conversation
+    rather than at a separate approve screen. No authority is added; an existing gate moves to where
+    the operator already is. If the clarifications are unanswered, nothing is ready and nothing runs.
+
+    FAN-OUT IS ROUTED, NOT DECIDED BY A MODEL, AND §4B ALREADY SETTLED THIS. `routeSpecialists` is a
+    pure predicate over a bounded set of four, with the scoped rubric each is briefed with declared
+    beside it — "consult, don't committee", it fires and never judges, the same input always routes
+    the same way, no clock and no model call inside the router. "Spins off parallel workers if it
+    makes sense" is that pattern applied to a request rather than a diff. A model choosing when to
+    spawn workers is the version of this feature that ends in an unbounded spend, and it is refused
+    here by construction rather than by a bound.
+
+    THE FAN-OUT IS BOUNDED AND EVERY BRANCH REJOINS THE THREAD. Parallel work whose results land
+    anywhere but the conversation that asked for it rebuilds the producer-with-no-consumer defect
+    this whole arc exists to close.
+
+    NOT IN SCOPE: changing `classifyProposal`, the inbox tiering, or any approval affordance;
+    granting a thread authority to dispatch; and the comprehension loop, which W1-T2499 owns.
+
+    THE RISK BAND IS RULE 19's SPAN, NOT BLAST RADIUS: two src stems plus a test, carrying two
+    independent acceptance concerns — the proposal handoff and the routed fan-out.
+  acceptance:
+    - claim: "a thread with no unanswered clarifications emits a proposal into the existing tiering"
+      proof: "unit test: test/an-understood-request-reaches-execution-through-the-existing-tiering.test.ts"
+    - claim: "nothing on this path files a task directly or auto-approves one"
+      proof: "unit test: test/an-understood-request-reaches-execution-through-the-existing-tiering.test.ts"
+    - claim: "a thread with an unanswered clarification emits nothing and runs nothing"
+      proof: "unit test: test/an-understood-request-reaches-execution-through-the-existing-tiering.test.ts"
+    - claim: "the fan-out decision is a pure predicate with no model call inside it"
+      proof: "unit test: test/an-understood-request-reaches-execution-through-the-existing-tiering.test.ts"
+    - claim: "the same request always routes to the same set of workers"
+      proof: "unit test: test/an-understood-request-reaches-execution-through-the-existing-tiering.test.ts"
+    - claim: "fan-out is bounded and a request that does not decompose spawns one worker"
+      proof: "unit test: test/an-understood-request-reaches-execution-through-the-existing-tiering.test.ts"
+    - claim: "every parallel branch reports back onto the thread that asked"
+      proof: "unit test: test/an-understood-request-reaches-execution-through-the-existing-tiering.test.ts"
+    - claim: "the four existing specialists keep their current triggers and rubrics"
+      proof: "unit test: test/an-understood-request-reaches-execution-through-the-existing-tiering.test.ts"
+    - claim: "letting a model choose the worker set fails the pure-predicate assertion"
+      proof: "unit test: test/an-understood-request-reaches-execution-through-the-existing-tiering.test.ts"
