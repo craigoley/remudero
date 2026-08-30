@@ -64,6 +64,29 @@
     STOP/PAUSE/QUIET_HOURS latches must gate the independent cadence exactly as they gate the tick,
     or the operator's halt stops dispatch and leaves reviews running.
 
+    COUNTER-EVIDENCE, RECORDED BEFORE ANYONE BUILDS FROM THIS. The drain that spanned the observed
+    window reported `idle ticks: 11` in its own summary, and `deps.sweep` is called at daemon.ts:2702
+    — BEFORE the dispatchable/idle decision, so an idle tick sweeps. Eleven idle ticks therefore mean
+    roughly eleven sweeps ran inside a window in which nothing was reviewed. That does not fit the
+    simple story above and MUST be reconciled before a fix is designed.
+
+    TWO CANDIDATE MECHANISMS NOW, NOT ONE, AND THIS TASK DOES NOT PICK BETWEEN THEM:
+      (i)  STARVATION BY LANES, as argued above. Survives the counter-evidence only if the 11 idle
+           ticks fell BEFORE the lanes were admitted (21:14-21:17Z) and the green transition
+           (21:26Z) fell inside the lane window — plausible from the timestamps, unproven from them.
+      (ii) A SWEEP THAT RUNS AND DOES NOT REACH THE PR. `runGatedSweep` bounds the walk at
+           `DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS = 559_000` (~9.3 min, W1-T1044, policy-threaded). A
+           sweep cut off by that bound ticks, logs, and reviews nothing beyond where it got to —
+           indistinguishable from (i) in the summary line, and it would explain reviews stopping
+           while idle ticks continue.
+
+    THE DISCRIMINATOR, WHICH COSTS ONE QUERY: for each `daemon.iteration` in the window, does a
+    corresponding sweep-completion row exist, and did it terminate normally or on its wall-clock
+    bound? If sweeps ran to completion and still posted nothing, (i) is dead and the defect is in
+    what the sweep SEES (which is W1-T2504's territory, not this task's). If sweeps are absent
+    opposite the lane window, (i) holds. AN IMPLEMENTER WHO SKIPS THIS WILL BUILD AN INDEPENDENT
+    CADENCE THAT CHANGES NOTHING, because a bounded sweep on its own cadence is still bounded.
+
     RE-DERIVE RATHER THAN TRUST THE 1h47m: it is one observation on one evening. The query is the
     ledger union for `review.posted` (or the `remudero-review` status timestamps across open PRs)
     against `daemon.iteration`, differenced pairwise; W1-T1065's p50/p95/max came from exactly that
