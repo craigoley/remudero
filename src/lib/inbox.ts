@@ -163,8 +163,10 @@ export interface BoardReferentState {
 /**
  * The result of the ONE batched read of every board-review referent's current state this
  * classification pass — never a read per proposal. `"ok"` carries every item the read could
- * observe, keyed by {@link Proposal.originatingItemId}; a proposal whose id is absent from
- * `states` (an unparseable/unknown/vanished referent) is treated exactly like `"unreadable"` for
+ * observe, keyed by {@link Proposal.originatingItemId} (or, for a proposal minted before that
+ * field existed, the same id derived from the proposal's own string by
+ * {@link deriveLegacyReferent}, W1-T2460); a proposal whose referent id is absent from `states`
+ * (an unparseable/unknown/vanished referent) is treated exactly like `"unreadable"` for
  * THAT proposal — cannot-observe means WAIT (W1-T130), never a silent retirement. `"unreadable"`
  * means the WHOLE batched read failed (GitHub unreachable, transport error): every board-review
  * proposal keeps whatever classification it would otherwise have gotten and is marked unverified,
@@ -186,17 +188,36 @@ function boardReferentResolved(proposal: Proposal, state: BoardReferentState): b
   return proposal.id.startsWith("board-review:escalation:") && state.unhandledEscalations === 0;
 }
 
-type BoardReferentLookup = { kind: "live" } | { kind: "resolved" } | { kind: "unreadable" };
+type BoardReferentLookup = { kind: "live" } | { kind: "resolved"; referentId: string } | { kind: "unreadable" };
+
+/** W1-T2460: every board-review proposal minted BEFORE W1-T2451 (#3255) added
+ *  {@link Proposal.originatingItemId} has no such field, yet its `id` already names the referent
+ *  in its own trailing segment — `board-review.ts` mints exactly `board-review:stale:<itemId>` and
+ *  `board-review:escalation:<itemId>`, so the item id was in the string all along. PARSE-AT-READ
+ *  (this task's remedy (b), never remedy (a)'s one-time registry backfill): a pure derivation off
+ *  the id string, called fresh on every classification pass, so it touches no state and needs no
+ *  migration — reversible by reverting this function alone. FAILS SAFE: any id that is not one of
+ *  those two shapes (a hand-authored `P##`, an `FD-…`, a `rule-efficacy:…`, or simply a
+ *  board-review id some future producer mints under a different prefix) returns `undefined`, and
+ *  {@link resolveBoardReferent} then falls through to `"live"` — exactly the classification that
+ *  proposal already had today — rather than guessing a referent for it. */
+function deriveLegacyReferent(proposalId: string): string | undefined {
+  return /^board-review:(?:stale|escalation):(.+)$/.exec(proposalId)?.[1];
+}
 
 /** Resolves ONE proposal's referent against the batch {@link BoardReferentRead} — never issuing
- *  its own read. A proposal with no {@link Proposal.originatingItemId} at all (every non-board-
- *  review proposal) is simply `"live"`: this whole mechanism does not apply to it. */
+ *  its own read. A proposal with no {@link Proposal.originatingItemId} recorded falls back to
+ *  {@link deriveLegacyReferent}'s parse-at-read derivation (W1-T2460); a proposal for which
+ *  NEITHER source names a referent (every non-board-review proposal, and any board-review id
+ *  {@link deriveLegacyReferent} cannot parse) is simply `"live"`: this whole mechanism does not
+ *  apply to it. */
 function resolveBoardReferent(proposal: Proposal, read: BoardReferentRead | undefined): BoardReferentLookup {
-  if (!proposal.originatingItemId) return { kind: "live" };
+  const referentId = proposal.originatingItemId ?? deriveLegacyReferent(proposal.id);
+  if (!referentId) return { kind: "live" };
   if (!read || read.kind === "unreadable") return { kind: "unreadable" };
-  const state = read.states.get(proposal.originatingItemId);
+  const state = read.states.get(referentId);
   if (!state) return { kind: "unreadable" };
-  return boardReferentResolved(proposal, state) ? { kind: "resolved" } : { kind: "live" };
+  return boardReferentResolved(proposal, state) ? { kind: "resolved", referentId } : { kind: "live" };
 }
 
 // ── Drafted candidate (the LLM's output — a value from here on, never re-invoked) ─────────
@@ -655,7 +676,7 @@ export function classifyProposal(
       state: "retired",
       reasons: [],
       retiredReason:
-        `${proposal.id}'s referent (${proposal.originatingItemId}) has resolved — merged, dead, or its ` +
+        `${proposal.id}'s referent (${referent.referentId}) has resolved — merged, dead, or its ` +
         `escalation handled — so this proposal can never render READY again; it stays in the registry ` +
         `as a record of the finding, never deleted`,
     };

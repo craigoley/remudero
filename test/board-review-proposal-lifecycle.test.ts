@@ -159,21 +159,33 @@ test("a stale-kind proposal does NOT retire just because escalations read zero �
 
 // ── Acceptance 2: a STILL LIVE referent classifies exactly as it does today ────────────────────
 
-test("a board-review proposal whose referent is STILL LIVE classifies identically to the same proposal with no referent tracking at all", () => {
+test("a board-review proposal whose referent is STILL LIVE classifies identically whether bound by an explicit originatingItemId or resolved through W1-T2460's id-derived fallback", () => {
+  // Pre-W1-T2460, a proposal missing `originatingItemId` (every row minted before W1-T2451, or a
+  // fixture standing in for one) short-circuited straight to "live" without ever consulting the
+  // batched read — this test used to compare THAT against a tracked proposal wired to a live
+  // referent to prove wiring the field changed nothing. W1-T2460 closes exactly that gap: such a
+  // proposal is no longer exempt from the batched read, it is resolved through the SAME id,
+  // parsed from its own string. So the meaningful comparison now is the two RESOLUTION PATHS
+  // (explicit field vs. parsed-from-id) against the identical live referent, which must still
+  // agree — see test/legacy-board-review-proposals-can-retire.test.ts for that fix's own coverage
+  // of the previously-unreachable "no field at all, batched read absent" case.
   const trackedId = "board-review:escalation:pr-7004";
   const tracked = boardReviewProposal({ id: trackedId, originatingItemId: "pr-7004" });
-  const untracked: Proposal = { id: trackedId, summary: tracked.summary, evidenceAnchors: [] }; // "today", pre-W1-T2451
+  const legacy: Proposal = { id: trackedId, summary: tracked.summary, evidenceAnchors: [] }; // no field — id-derived
   const draft = draftFor(trackedId, CLEAN_FRAGMENT);
 
   const liveCtx = baseCtx({ boardReferents: referentRead({ "pr-7004": { status: "open", unhandledEscalations: 1 } }) });
-  const noTrackingCtx = baseCtx(); // no boardReferents wired — exactly what every caller looked like before this task
 
-  const liveClassification = classifyProposal(tracked, draft, liveCtx);
-  const todayClassification = classifyProposal(untracked, draft, noTrackingCtx);
+  const trackedClassification = classifyProposal(tracked, draft, liveCtx);
+  const legacyClassification = classifyProposal(legacy, draft, liveCtx);
 
-  assert.deepEqual(liveClassification, todayClassification, "a live referent must never change the classification this proposal family already produced");
-  assert.equal(liveClassification.state, "ready");
-  assert.equal(liveClassification.referentUnverified, undefined, "a live referent is never marked unverified");
+  assert.deepEqual(
+    trackedClassification,
+    legacyClassification,
+    "an explicit originatingItemId and W1-T2460's id-derived fallback must resolve a live referent identically",
+  );
+  assert.equal(trackedClassification.state, "ready");
+  assert.equal(trackedClassification.referentUnverified, undefined, "a live referent is never marked unverified");
 });
 
 test("a board-review proposal whose referent is still OPEN and past nothing stays NOT READY exactly as before, when the drafted fragment itself is unmet", () => {
