@@ -2774,6 +2774,9 @@ export async function runDaemon(
               rule_efficacy: result.ruleEfficacy,
               verdict_calibration: result.verdictCalibration,
               autonomy_rate: result.autonomyRate,
+              // W1-T2473: the adoption report (fourth verb, W1-T2266) was computed every fire and
+              // logged nowhere — this names its mint outcome so a discarded report is countable.
+              adoption_mint: result.adoptionMint,
             });
           } catch (e) {
             log("measurement_cadence.run_failed", { error: String((e as Error)?.message ?? e) });

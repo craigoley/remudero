@@ -12,6 +12,7 @@ import {
   type BoardReviewPolicy,
   type BoardReviewReport,
 } from "./board-review.js";
+import { updateProposalRegistry, type EvidenceAnchor, type Proposal, type UpdateProposalRegistryOpts } from "./inbox.js";
 
 /**
  * lib/measurement-cadence.ts — W1-T1259: gives `rule-efficacy`, `verdict-calibration` and
@@ -636,6 +637,123 @@ function runAdoptionReport(opts: {
   };
 }
 
+// ── W1-T2473: the adoption report's own PROPOSAL MINT — the fourth verb's findings were
+// computed every fire and read by nothing (this task's own title). Q2 of this task's rationale
+// establishes AdoptionFinding as the FIRST family that can carry a real, git-greppable
+// EvidenceAnchor WITHOUT INVENTION: `mechanism` becomes `pattern`, `definedIn` becomes `path`.
+//
+// SHAPES 1-3 ONLY. Shape 4 (`gate-no-subject`) is DECLARED, not scanned (design (iv) above): its
+// `definedIn` is a human-readable description ("state ledger `containment.probe` rows"), never a
+// real repo-relative path — handing that to `git grep -- <path>` (via {@link gitGrepAnchorTrue})
+// would be a bad pathspec (a throw) rather than the git-greppable fact Q2 requires, so shape-4
+// findings are never mintable here.
+const MINTABLE_ADOPTION_SHAPES: ReadonlySet<AdoptionShape> = new Set(["symbol-no-caller", "field-no-writer", "script-no-invoker"]);
+
+function isMintableAdoptionFinding(f: AdoptionFinding): boolean {
+  return MINTABLE_ADOPTION_SHAPES.has(f.shape);
+}
+
+/** THE CEILING (Q3) — a PRIMARY CONTROL, never a backstop (W1-T1266's distinction, and this is
+ *  the arm that decides it): on any fire whose mintable finding set exceeds it, THIS is what stops
+ *  the mint loop, and nothing upstream would have. It is sized for the healthy case by design, so
+ *  it fires on a perfectly ordinary tick — which is exactly why it must not be read as a
+ *  fires-only-when-something-else-broke bound. At most this many NEW proposals are minted per
+ *  fire, so a backlog of hundreds of findings never floods the inbox in one tick — at the shipped
+ *  cadence bound of `maxPerDay: 4` that is at most twelve mints a day before the inbox's own
+ *  tiering sees any of them. */
+export const ADOPTION_MINT_CEILING = 3;
+
+/**
+ * THE NATURAL PRIMARY KEY (Q3): shape + mechanism + definedIn, never a similarity score. An
+ * adoption finding whose mechanism has already been proposed under this id is skipped by
+ * {@link updateProposalRegistry}'s own existing-id check — EXACT dedup, the same discipline
+ * {@link ruleEfficacyProposalId} (lib/rule-efficacy.ts) already uses for its own family.
+ */
+export function adoptionProposalId(finding: Pick<AdoptionFinding, "shape" | "mechanism" | "definedIn">): string {
+  return `adoption:${finding.shape}:${finding.definedIn}:${finding.mechanism}`;
+}
+
+/** One adoption-mint pass's outcome — named on the daemon's own cadence ledger row (W1-T2473's
+ *  whole point: a discarded report becomes countable). */
+export interface AdoptionMintCadenceResult {
+  /** `"clear"`: no mintable adoption finding this fire — a MEASURED absence (design (v)'s own
+   *  backlog-vs-failure framing, applied to the mint outcome), never a bare zero. `"backlog"`: at
+   *  least one mintable finding exists this fire, whether or not a NEW proposal actually got
+   *  written this run — a finding set unchanged since a prior fire still reads "backlog" even
+   *  though {@link mintedProposalIds} is empty the second time (idempotent by id, Q3). */
+  status: "clear" | "backlog";
+  /** Proposal ids ACTUALLY written this fire, oldest-shipped-mechanism first, capped at
+   *  {@link ADOPTION_MINT_CEILING}. */
+  mintedProposalIds: string[];
+  /** Every NEW (not-already-proposed) finding the ceiling excluded THIS fire, named as
+   *  `"<shape>:<definedIn>:<mechanism>"` rather than silently dropped — the same discipline
+   *  {@link AdoptionReportResult.shape4Unmeasurable} already follows, oldest-shipped-first so a
+   *  newer finding can never starve the head of the queue. */
+  excludedMechanisms: string[];
+}
+
+/**
+ * Mint one bounded, exactly-deduped proposal per unadopted mechanism (shapes 1-3 only, see
+ * {@link MINTABLE_ADOPTION_SHAPES}), through {@link updateProposalRegistry} — the SAME W1-T240
+ * single-writer helper {@link escalateRepeatingRules} already uses, never a hand-rolled write.
+ * NEVER FILES A TASK, NEVER APPROVES A PROPOSAL, NEVER BYPASSES {@link classifyProposal}'s
+ * readiness gate (Law 5 / this task's own scope): the sanctioned path stays PROPOSAL then
+ * operator-or-judge then `approveProposal`, unchanged.
+ *
+ * ORDERED oldest-`shippedAt`-first (Q3) so the ceiling, when it binds, always keeps the HEAD of
+ * the backlog rather than whichever finding the scan happened to emit last. IDEMPOTENT by id
+ * (Q3): a mechanism that already carries an open `adoption:<shape>:<definedIn>:<mechanism>`
+ * proposal is never re-drafted and never counts against the ceiling or the excluded set.
+ */
+export function mintAdoptionProposals(
+  findings: AdoptionFinding[],
+  registryPath: string,
+  opts?: UpdateProposalRegistryOpts,
+): AdoptionMintCadenceResult {
+  const candidates = findings.filter(isMintableAdoptionFinding);
+  if (candidates.length === 0) {
+    return { status: "clear", mintedProposalIds: [], excludedMechanisms: [] };
+  }
+  const ordered = [...candidates].sort((a, b) => {
+    if (a.shippedAt !== b.shippedAt) return a.shippedAt < b.shippedAt ? -1 : 1;
+    return adoptionProposalId(a).localeCompare(adoptionProposalId(b)); // deterministic tiebreak
+  });
+
+  let mintedProposalIds: string[] = [];
+  let excludedMechanisms: string[] = [];
+  updateProposalRegistry(
+    registryPath,
+    (current) => {
+      const existingIds = new Set(current.map((p) => p.id));
+      const additions: Proposal[] = [];
+      mintedProposalIds = [];
+      excludedMechanisms = [];
+      for (const f of ordered) {
+        const id = adoptionProposalId(f);
+        if (existingIds.has(id)) continue; // already open — idempotent, never re-drafted (Q3)
+        if (additions.length >= ADOPTION_MINT_CEILING) {
+          excludedMechanisms.push(`${f.shape}:${f.definedIn}:${f.mechanism}`); // named, never dropped
+          continue;
+        }
+        const anchors: EvidenceAnchor[] = [
+          { description: `"${f.mechanism}" (${f.shape}) still has no adopter in ${f.definedIn}`, pattern: f.mechanism, path: f.definedIn },
+        ];
+        additions.push({
+          id,
+          summary:
+            `adoption-debt: "${f.mechanism}" (${f.shape}) in ${f.definedIn} has shipped since ${f.shippedAt} ` +
+            `with no adopter found — ${f.detail} (rmd measurement-cadence's adoption report).`,
+          evidenceAnchors: anchors,
+        });
+        mintedProposalIds.push(id);
+      }
+      return additions.length > 0 ? [...current, ...additions] : null;
+    },
+    opts,
+  );
+  return { status: "backlog", mintedProposalIds, excludedMechanisms };
+}
+
 export interface MeasurementCadenceRunResult {
   ruleEfficacy: RuleEfficacyCadenceResult;
   verdictCalibration: VerdictCalibrationCadenceResult;
@@ -645,6 +763,15 @@ export interface MeasurementCadenceRunResult {
    *  daemon's injected dependency, never calling this module's own producer) still type-checks —
    *  {@link runMeasurementCadenceReport} itself NEVER omits it. */
   adoptionReport?: AdoptionReportResult;
+  /** W1-T2473: the adoption report's own mint outcome — see {@link mintAdoptionProposals}.
+   *  Optional on the TYPE for the same reason `adoptionReport` is: a hand-built test literal
+   *  simulating the daemon's injected dependency from before this field existed still
+   *  type-checks. {@link runMeasurementCadenceReport} itself NEVER omits it. Gated on
+   *  `opts.escalate` exactly like {@link RuleEfficacyCadenceResult.escalated} — the default
+   *  cadence still writes nothing (design (ii)); when escalate is off this reads `"clear"` only
+   *  when there is truly nothing mintable, and `"backlog"` (with empty `mintedProposalIds`)
+   *  when there is, so an operator can see the backlog exists before ever opting into writes. */
+  adoptionMint?: AdoptionMintCadenceResult;
   /** W1-T2304's board-review rung — a further verb on this SAME spine (never a further cadence,
    *  that task's own design (i)). Optional on the TYPE for the same reason `adoptionReport` is:
    *  a hand-built test literal simulating the daemon's injected dependency from before this field
@@ -717,16 +844,18 @@ export interface MeasurementCadenceReportOpts {
  * `lib/daemon.ts`'s poll loop to log (mirroring how `checkAutoTriage`'s own disposition logging
  * lives at the daemon call site, never inside the producer).
  *
- * NEVER FILES A TASK, NEVER MINTS AN ID (Law 5): the only write this function can reach is
- * `escalateRepeatingRules`, gated on `opts.escalate`, which only ever drafts a PROPOSAL —
- * `updateProposalRegistry`'s own contract, unchanged here.
+ * NEVER FILES A TASK, NEVER MINTS AN ID (Law 5): the only writes this function can reach are
+ * `escalateRepeatingRules` and (W1-T2473) `mintAdoptionProposals`, BOTH gated on `opts.escalate`
+ * and BOTH going through `updateProposalRegistry` — the inbox's own tiering, `classifyProposal`'s
+ * readiness gate, and an operator's ratification own every proposal's fate from there, unchanged.
  */
 export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts): MeasurementCadenceRunResult {
+  const registryPath = opts.registryPath ?? join(opts.stateDir, "inbox-proposals.json");
+
   // ── rule-efficacy: no git needed, escalation is the ONE write in this whole module ──────────
   const efficacyReport: RuleEfficacyReport = ruleEfficacyReport(opts.stateDir);
   let escalatedProposalIds: string[] = [];
   if (opts.escalate) {
-    const registryPath = opts.registryPath ?? join(opts.stateDir, "inbox-proposals.json");
     const drafted = escalateRepeatingRules(efficacyReport, registryPath);
     escalatedProposalIds = drafted ? drafted.map((p) => p.id) : [];
   }
@@ -803,6 +932,18 @@ export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts):
     ledgerUnion: opts.ledgerUnion ?? resolveLedgerUnion,
   });
 
+  // ── W1-T2473: the adoption report's own mint — dropped at this exact seam before this task.
+  // Gated on `opts.escalate` exactly like rule-efficacy's own write above (design (ii): the
+  // default cadence stays zero-writes) — when off, report the MEASURED status without touching
+  // the registry at all, never a silent zero and never an unattempted-but-unlabeled "clear".
+  const adoptionMint: AdoptionMintCadenceResult = opts.escalate
+    ? mintAdoptionProposals(adoptionReport.findings, registryPath)
+    : {
+        status: adoptionReport.findings.some(isMintableAdoptionFinding) ? "backlog" : "clear",
+        mintedProposalIds: [],
+        excludedMechanisms: [],
+      };
+
   // ── the board-review rung (W1-T2304): reads the whole open board, never one PR ───────────────
   const boardReview = opts.boardReview
     ? buildBoardReview({
@@ -815,5 +956,5 @@ export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts):
       })
     : undefined;
 
-  return { ruleEfficacy, verdictCalibration, autonomyRate, adoptionReport, boardReview };
+  return { ruleEfficacy, verdictCalibration, autonomyRate, adoptionReport, adoptionMint, boardReview };
 }
