@@ -12,12 +12,12 @@ import {
   applyStampToMasterPlan,
   type BatchApproveResult,
   type DraftedCandidate,
-  type DuplicateCorpusEntry,
   type InboxClassification,
   type RatificationPayload,
   type RatifyBatchGateway,
   type RatifyGateway,
 } from "../src/lib/inbox.js";
+import type { DuplicateCorpusEntry } from "../src/lib/knowledge-dedup.js";
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────
 
