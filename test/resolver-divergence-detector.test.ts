@@ -117,13 +117,17 @@ test("a trailer that resolves nothing (unloadable plan) is DISTINGUISHABLE from 
   const withTrailer = resolvePlanCriteriaForReview("W9-DIV-A", dupPath);
   assert.ok(withTrailer.divergence, "taskId present + unloadable plan => divergence recorded");
 
-  // `reviewCommand` only calls this function inside `if (taskId)` — see the structural assertion
-  // below — so "no trailer at all" never reaches this function and can never produce a divergence.
-  // That asymmetry (divergence reachable ONLY when a taskId resolved) is the distinguishing signal
-  // claim 1 asks for; it cannot be produced by a body carrying no trailer.
+  // `reviewCommand` only calls the (W1-T2462) head-sha resolver inside `if (taskId)` — see the
+  // structural assertion below — so "no trailer at all" never reaches it and can never produce a
+  // divergence. That asymmetry (divergence reachable ONLY when a taskId resolved) is the
+  // distinguishing signal claim 1 asks for; it cannot be produced by a body carrying no trailer.
+  // `reviewCommand` itself now calls `resolvePlanCriteriaAtHead` (lib/review.ts, W1-T2462), not
+  // this function — this function stays exercised directly by this suite's own scratch-plan
+  // fixtures (its divergence shape is unchanged), while `reviewCommand`'s live wiring reads the
+  // plan at the PR's own head sha instead of the container's checked-out tree.
   const runTaskSrc = readSrc("run-task.ts");
-  const ifTaskIdBlock = /if\s*\(taskId\)\s*{\s*const resolved = resolvePlanCriteriaForReview\(taskId, /;
-  assert.match(runTaskSrc, ifTaskIdBlock, "resolvePlanCriteriaForReview must be gated on a resolved taskId, never called for an untrailered body");
+  const ifTaskIdBlock = /if\s*\(taskId\)\s*{\s*const resolved = resolvePlanCriteriaAtHead\(body, repoRoot, /;
+  assert.match(runTaskSrc, ifTaskIdBlock, "resolvePlanCriteriaAtHead must be gated on a resolved taskId, never called for an untrailered body");
 });
 
 // ── ACCEPTANCE 4: AN UNTRAILERED BODY IS UNCHANGED ──────────────────────────────────────────────
@@ -187,12 +191,18 @@ test("the gate STILL resolves a duplicated id fine (it never adopts loadPlan) ev
 
 // ── ACCEPTANCE 8: NO MERGED PR IS RE-REVIEWED, NO MERGED ACCEPTANCE RECORD IS AMENDED ───────────
 
-test("resolvePlanCriteriaForReview is wired at exactly ONE call site — reviewCommand's own manual/live path, never a merged-PR sweep or retro path", () => {
+test("resolvePlanCriteriaForReview is wired at exactly ZERO call sites now — W1-T2462 moved reviewCommand's own manual/live path onto resolvePlanCriteriaAtHead, and neither a merged-PR sweep nor retro path ever gained one", () => {
   const runTaskSrc = readSrc("run-task.ts");
+  // Only its own declaration remains; `reviewCommand` no longer calls it (see the
+  // `resolvePlanCriteriaAtHead` assertion below) and this suite exercises it directly instead.
   const callSites = runTaskSrc.split("resolvePlanCriteriaForReview(").length - 1;
-  assert.equal(callSites, 2, "exactly one definition + one call site; any third occurrence means it was wired somewhere new");
+  assert.equal(callSites, 1, "exactly one definition and no call site; any second occurrence means it was wired somewhere new");
+  // `resolvePlanCriteriaAtHead` (imported from lib/review.ts) is wired at exactly one call site —
+  // `reviewCommand`'s own `if (taskId)` branch, asserted precisely above.
+  const atHeadCallSites = runTaskSrc.split("resolvePlanCriteriaAtHead(").length - 1;
+  assert.equal(atHeadCallSites, 1, "exactly one call site for the head-sha resolver; any second occurrence means it was wired somewhere new");
   // Neither retroCommand nor the fix-rung sweep (which DOES touch merged-adjacent state) gained a
-  // reference to it.
+  // reference to either resolver.
   for (const fn of ["async function retroCommand", "export function fixRungTaskFor("]) {
     const start = runTaskSrc.indexOf(fn);
     assert.ok(start >= 0, `could not locate ${fn} to audit`);
