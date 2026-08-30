@@ -1,0 +1,167 @@
+- id: W1-T2473
+  title: "THE ADOPTION REPORT IS COMPUTED ON EVERY MEASUREMENT-CADENCE FIRE AND READ BY NOTHING — runAdoptionReport returns findings carrying mechanism, definedIn, shippedAt and detail, and the daemon's measurement_cadence.ran row logs only rule_efficacy, verdict_calibration and autonomy_rate, so the one intake-shaped signal that already scans the SOURCE TREE is dropped at the seam. Mint a bounded, exactly-deduped PROPOSAL per unadopted mechanism — the first family able to carry a path-bearing EvidenceAnchor — and name the outcome in the ledger"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 14.00
+  files: [src/lib/measurement-cadence.ts, src/lib/daemon.ts, test/adoption-debt-becomes-a-proposal.test.ts]
+  origin: "operator-brief#plan-debt-has-no-proposal-producer-2026-08-30"
+  plan_refs: ["W1-T2266", "W1-T2289", "W1-T2304", "W1-T2451", "W1-T2455", "W1-T2458", "W1-T2471", "W1-T2472", "W1-T322", "W1-T494"]
+  status: queued
+  attempts: 0
+  rationale: |
+    WHEN THE OPERATOR IS QUIET AND THE BOARD IS CLEAN THE ENTIRE INTAKE LAYER HAS NOTHING TO LOOK
+    AT, BECAUSE NO RUNG READS THE PLAN OR THE SOURCE TREE. The three producers are CITED, not
+    re-derived (measured 2026-08-29): auto-triage's population is plan/feedback/*.yaml at status
+    new, and 160 of 161 skips read "no feedback at status: new"; board-review's population is the
+    OPEN PR/ISSUE BOARD only, and 70 skips read "board younger than every depth threshold"; the
+    feedback docket is operator input, weekly, quiet. rule-efficacy writes nothing — its escalate
+    flag ships false.
+
+    AND decideAutoTriage FIRES CORRECTLY. It fires on deferralPending, capacityUnfilled or
+    backlogPresent and THEN finds an empty population. THE TRIGGER IS NOT WHAT IS BROKEN HERE; THE
+    POPULATION IS. W1-T2289 owns the trigger half and is CITED rather than re-filed. This task adds
+    a POPULATION that exists when the operator is quiet, and changes no trigger.
+
+    THE OPERATOR HAS RULED THAT THE FLEET MAY FILE ITS OWN WORK (MASTER-PLAN section 12 rule 27,
+    #3265). RULE 15 STAYS UNTOUCHED — criterionFieldTampered is what stops a builder rewriting the
+    criteria its own judge reads, and nothing here proposes going near it.
+
+    Q1. WHICH PLAN-DEBT SIGNALS ARE ALREADY COMPUTED AND DISCARDED — FOUR CANDIDATES, VERIFIED AT
+    HEAD 4d4cc2d, NOT ASSUMED. Two are discarded and two are already consumed, and the split is
+    the whole answer to which one this task should key on.
+
+    (a) THE ADOPTION REPORT — DISCARDED, AND IT IS THE ONLY CANDIDATE ALREADY ON A SCHEDULE.
+    runMeasurementCadenceReport calls runAdoptionReport once per fire and returns it in
+    MeasurementCadenceRunResult. daemon.ts's measurement_cadence.ran row logs rule_efficacy,
+    verdict_calibration and autonomy_rate and NOTHING ELSE, so the report is not merely unconsumed
+    — it is not even ledgered. Its shapes 1 to 3 are STATIC SCANS OF THE CHECKOUT
+    (symbol-no-caller, field-no-writer, script-no-invoker) and every finding already carries
+    mechanism, definedIn, shippedAt and detail. Stable enough to key on: the scan is deterministic
+    over a tree, and shippedAt already travels with each finding so a fresh mechanism reads as a
+    BACKLOG rather than a failure.
+    SURFACE 1 runAdoptionReport call sites = 1
+    SURFACE 2 adoptionReport references outside its own module = 0
+    SURFACE 3 result fields logged on the daemon cadence row = 3
+
+    (b) LINT-PLAN's WHOLE-PLAN COUNTS — DISCARDED, BUT NOT ON ANY SCHEDULE AT ALL, AND THE BARE
+    COUNT MISLEADS. RE-DERIVED AT HEAD, NOT CARRIED: 931 open tasks checked, 169 open failing, 651
+    warnings, 52 merged records behind --all. THE PRIOR READ OF 169 AND 651 IS CONFIRMED. But the
+    linter's own split says 166 of the 169 ALREADY HAVE A MERGED IMPLEMENTATION and only 3 do not,
+    so read as supply the figure overstates by roughly fifty-six times. Violation kinds at head:
+    proof-dialect 455, proof-scope 451, proof-resolvability 170, declared-scope 57,
+    proof-grep-safety 6, headless-fitness 5, advisory-routing 4, ruling-verify 1, rule15-filing 1.
+    CI's lint-plan job runs --base against the PR base sha, so it lints CHANGED task ids only, and
+    main-plan-guard deliberately runs loadPlan rather than lint-plan because lint-plan "would
+    therefore be permanently red and would tell the operator nothing".
+    SURFACE 8 whole-plan lint-plan runs on any schedule = 0
+
+    (c) reachability.ts's UNREACHED EXPORTS — ALREADY CONSUMED, AND DIFF-SCOPED. scanUnreachedExports
+    takes a DIFF and is read at review time (review.ts's unwired_export arm); isExportReachable is
+    read at retro time (retro.ts's net_state_claim arm). It cannot enumerate the standing
+    zero-consumer list because it only ever sees what one diff adds — which is exactly why
+    checkBinaryPin sat there until a human noticed. Not a discarded signal; a narrower one.
+
+    (d) THE BARE-CATCH RATCHET — ALREADY CONSUMED, AND IT REFUSES BY NAME. It is a TEST
+    (test/catch-erasure-ratchet.test.ts), so it fails the ci job on breach. RUN AT HEAD: 17 tests,
+    17 pass, 0 fail — the ratchet holds. src/run-task.ts's baseline row is 64 and the detector
+    reports only actual > baseline, so head is at or under 64 and the gate emits no figure of its
+    own. A signal that already refuses must NOT also mint a proposal: that would file work against
+    a defect CI has already blocked.
+
+    Q2. WHAT SUCH A PROPOSAL CARRIES AS EVIDENCE — AND THIS IS THE HALF THAT DECIDES THE TASK.
+    Proposal requires evidenceAnchors of {description, pattern, path?}, and classifyProposal's
+    evidence arm keeps a proposal READY only while grepAnchorTrue holds for EVERY anchor. An
+    AdoptionFinding maps onto that shape WITHOUT INVENTION: mechanism becomes pattern, definedIn
+    becomes path, and description is written from mechanism plus detail. THAT IS A GIT-GREPPABLE
+    FACT WITH A REAL PATH, AND NO PRODUCER MINTS ONE TODAY. board-review mints evidenceAnchors []
+    permanently and needed originatingItemId (W1-T2451) invented for it precisely because of that;
+    retro mints [] "stated, never synthesized"; rule-efficacy declares a local anchors array and
+    never pushes to it, so it mints [] as well; the feedback docket mints ONE anchor carrying a
+    pattern and NO path, which greps the whole tree. So this is the FIRST family that can carry a
+    real anchor.
+    SURFACE 4 updateProposalRegistry call sites = 6
+    SURFACE 5 mint sites assigning a non-empty evidenceAnchors literal = 1
+    SURFACE 6 mint sites whose anchor literal carries a path key = 0
+    SURFACE 7 AdoptionFinding fields available to become an anchor = 5
+
+    ONE CORRECTION TO THE BRIEF'S SECOND CLAUSE, READ FROM classifyProposal RATHER THAN ASSUMED. A
+    real anchor does NOT make the proposal RETIRE itself when the debt is paid. When the mechanism
+    acquires a consumer the anchor stops matching, driftedAnchors is non-empty, and the proposal is
+    classified NOT_READY with the named reason evidence-drifted — it stops being offered, which is
+    the correct and already-built behaviour. The state named "retired" is reachable today only
+    through the board-referent override and the ratified receipt. So the accurate claim is: the
+    first family whose evidence can DRIFT TRUE-TO-FALSE on its own, needing no new mechanism to
+    stop recommending it. No new terminal state is proposed here.
+
+    Q3. THE BOUND, STATED BEFORE ANYONE BUILDS IT. 169 open-failing tasks is not 169 proposals and
+    neither is the adoption finding set. THE CEILING IS THREE MINTS PER FIRE, taken oldest-shippedAt
+    first so the head of the queue cannot be starved by a newer finding, and every finding the
+    ceiling excludes is NAMED in the run's own output rather than silently dropped — the same
+    discipline the shape-4 unmeasurable list already follows. At the shipped cadence bound of four
+    fires per day that is at most twelve mints a day before the inbox's own tiering sees any of
+    them.
+    DEDUP IS EXACT, NEVER LEXICAL, AND THAT IS THE POINT. The existing drafted-slug refusal
+    (W1-T2455) is a 3-shingle Jaccard over a kebab slug at a 0.2 cutoff with MEASURED RECALL OF 3
+    IN 32: the roughly 21 drafts describing the same defect in different words score 0.08 to 0.18
+    and are not caught, and the shard's own comment refuses to lower the cutoff into that band. DO
+    NOT ASSUME IT COVERS THIS. It does not need to: an adoption finding has a NATURAL PRIMARY KEY —
+    shape plus mechanism plus definedIn — so the proposal id is derived from that triple and
+    updateProposalRegistry's existing id-idempotence refuses the second mint outright, with no
+    similarity score anywhere in the path. A finding whose mechanism has already been proposed is
+    skipped by id, exactly as escalateRepeatingRules already skips by ruleEfficacyProposalId.
+
+    Q4. THIS IS ONE RUNG, NOT THREE, AND THE OTHER TWO ARE NAMED AS FOLLOW-UPS RATHER THAN BUILT.
+    The three candidate families want different cadences, different anchors and different ceilings,
+    so they do not share a rung: (a) the adoption report is already on the measurement cadence and
+    its anchor is a symbol plus a file; (b) a lint-violation family has NO producer on any schedule
+    at all, its anchor would be a shard path plus a violation kind, and its ceiling has to reckon
+    with the 166-of-169 already-merged split before it can propose anything honest; (d) the ratchet
+    family must never get a rung, because those signals already refuse in CI. THIS TASK IS SCOPED TO
+    (a) ALONE — the only one whose signal is already computed on a schedule, already carries a
+    path-bearing anchor, and is dropped at a single named seam. (b) is worth a separate filing and
+    is not filed here.
+
+    WHAT THIS DOES NOT DO, EXPLICITLY. It auto-approves nothing; it adds no timer and no pacing
+    (the measurement cadence's own minIntervalMinutes and maxPerDay are unchanged); it does not
+    bypass classifyProposal, which keeps every AND-clause including deps_merged and lint_clean; and
+    it NEVER FILES A TASK. The sanctioned path is unchanged: PROPOSAL then operator or judge then
+    approveProposal.
+
+    THE RISK BAND IS RULE 19's SPAN, NOT BLAST RADIUS. files: names two src stems plus a test, and
+    the two acceptance concerns are independent — the MINT (measurement-cadence.ts) and the LEDGER
+    SURFACING (daemon.ts) — so sizingViolation refuses risk:medium for the span alone. The change
+    itself is small.
+
+    AND IT ADDS NO SIGNAL NOTHING CONSUMES. main-plan-guard's own header names that failure mode
+    (W1-T494) and says it "deliberately does not add a third". This task is the inverse: it gives an
+    EXISTING unconsumed signal its first consumer, and the ledger row it widens is what makes a
+    dropped report countable at all.
+
+    OWNED ELSEWHERE, RECORDED SO THIS SHARD CLAIMS NONE OF IT: the trigger half is W1-T2289's; the
+    board unit is W1-T2304's; the follow-up bridge is W1-T2458's (#3275); the batched approve is
+    W1-T2471's (#3295); the plan-only reviewer-spawn skip is W1-T2472's (#3297/#3298).
+  acceptance:
+    - claim: "every adoption finding reaches a proposal mint instead of being dropped at the cadence seam"
+      proof: "unit test: test/adoption-debt-becomes-a-proposal.test.ts"
+    - claim: "each minted proposal carries an anchor whose pattern is the mechanism and whose path is its defining file"
+      proof: "unit test: test/adoption-debt-becomes-a-proposal.test.ts"
+    - claim: "a mechanism that acquires a consumer drifts its anchor false and the proposal classifies not-ready"
+      proof: "unit test: test/adoption-debt-becomes-a-proposal.test.ts"
+    - claim: "two fires over an unchanged finding set mint exactly one proposal"
+      proof: "unit test: test/adoption-debt-becomes-a-proposal.test.ts"
+    - claim: "dedup keys on shape plus mechanism plus defining file and consults no similarity score"
+      proof: "unit test: test/adoption-debt-becomes-a-proposal.test.ts"
+    - claim: "the per-fire ceiling holds at three and every excluded finding is named rather than dropped"
+      proof: "unit test: test/adoption-debt-becomes-a-proposal.test.ts"
+    - claim: "the excluded set is ordered oldest-shipped-first so a newer finding cannot starve the head"
+      proof: "unit test: test/adoption-debt-becomes-a-proposal.test.ts"
+    - claim: "the daemon cadence ledger row names the adoption outcome so a discarded report is countable"
+      proof: "unit test: test/adoption-debt-becomes-a-proposal.test.ts"
+    - claim: "an empty finding set mints nothing and reports a measured clear rather than a bare zero"
+      proof: "unit test: test/adoption-debt-becomes-a-proposal.test.ts"
+    - claim: "no path here files a task approves a proposal or bypasses the readiness classifier"
+      proof: "unit test: test/adoption-debt-becomes-a-proposal.test.ts"
