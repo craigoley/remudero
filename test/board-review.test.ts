@@ -677,3 +677,96 @@ test("the reconciliation is idempotent — a second pass over unchanged state re
   assert.equal(registry.writes, 1, "the second pass performs no registry write");
   assert.equal(registry.calls, 2, "it still reads — a real registry could have changed underneath it");
 });
+
+// ── W1-T2470: THE EXPIRY TASK'S OWN ACCEPTANCE, ON TOP OF W1-T2464'S RECONCILER ─────────────────
+//
+// `evidenceAnchors` is permanently `[]` on every board-review-minted proposal (W1-T2470's own
+// rationale), which is why the reconciler above exists at all. The three tests below cover what
+// W1-T2464 did not: an operator's `reframeHistory` outranks a departed referent (design (iii)'s
+// second guard), retirement is observable by id AND REASON (design (iv)), and the mechanism
+// actually drains the shape of registry this task's rationale measured, not just a one-row
+// fixture.
+
+// ── acceptance 3 (second guard) ─────────────────────────────────────────────────────────────────
+
+test("a board-review proposal carrying a non-empty reframeHistory is NEVER retired, even though its referent has left the board", () => {
+  const reframed = proposal({
+    id: "board-review:stale:#3227",
+    originatingItemId: "#3227",
+    reframeHistory: [{ feedback: "still relevant, keep it open until I say otherwise" }],
+  });
+  const registry = fakeRegistry([reframed, proposal({ id: "board-review:stale:#9001", originatingItemId: "#9001" })]);
+  // Neither #3227 nor #9001 is on the board — both referents have left — but only the un-reframed
+  // row may retire.
+  const result = reconcileBoardReviewReferents({ items: [item({ id: "#1" })], registryPath: "/state/inbox-proposals.json", updateRegistry: registry.updateRegistry });
+
+  assert.deepEqual(result.retiredProposalIds, ["board-review:stale:#9001"]);
+  assert.deepEqual(registry.state, [reframed], "the reframed row survives untouched, the operator's engagement preserved");
+});
+
+// ── acceptance 5 (observability) ────────────────────────────────────────────────────────────────
+
+test("every retirement carries its own reason alongside its id — a silent retirement fails", () => {
+  const registry = fakeRegistry([
+    proposal({ id: "board-review:stale:#3227", originatingItemId: "#3227" }),
+    proposal({ id: "board-review:escalation:#3043", originatingItemId: "#3043" }),
+  ]);
+  const result = reconcileBoardReviewReferents({ items: [item({ id: "#1" })], registryPath: "/state/inbox-proposals.json", updateRegistry: registry.updateRegistry });
+
+  assert.deepEqual(
+    result.retired.map((r) => r.id).sort(),
+    ["board-review:escalation:#3043", "board-review:stale:#3227"],
+    "the id half of the pairing matches retiredProposalIds",
+  );
+  for (const row of result.retired) {
+    assert.equal(typeof row.reason, "string");
+    assert.ok(row.reason.length > 0, `retirement of ${row.id} must carry a non-empty reason`);
+    assert.match(row.reason, /no longer on the open board/, "the reason names WHY, not just THAT");
+  }
+});
+
+test("an empty pass and a nothing-to-retire pass both report an empty retired[] alongside the empty id list", () => {
+  const emptyItems = reconcileBoardReviewReferents({ items: [], registryPath: "/state/inbox-proposals.json", updateRegistry: fakeRegistry([]).updateRegistry });
+  assert.deepEqual(emptyItems, { retiredProposalIds: [], retired: [] });
+
+  const registry = fakeRegistry([proposal({ id: "board-review:stale:#3227", originatingItemId: "#3227" })]);
+  const stillLive = reconcileBoardReviewReferents({ items: [item({ id: "#3227" })], registryPath: "/state/inbox-proposals.json", updateRegistry: registry.updateRegistry });
+  assert.deepEqual(stillLive, { retiredProposalIds: [], retired: [] });
+});
+
+// ── acceptance 4 — the EXISTING accumulation, healed ────────────────────────────────────────────
+
+test("the twelve-proposal registry shape this task's rationale measured on 2026-08-28 drains to only the findings the current board still supports", () => {
+  // Every entry below mirrors the rationale's own measurement: twelve board-review proposals,
+  // every one carrying `evidenceAnchors: []`, #3039 and #3043 doubled under both finding shapes,
+  // and #3025 (a stale finding) provably dead — its PR merged the day before this fixture's read.
+  const twelve: Proposal[] = [
+    proposal({ id: "board-review:stale:#3025", originatingItemId: "#3025" }), // merged 2026-08-27
+    proposal({ id: "board-review:stale:#2971", originatingItemId: "#2971" }),
+    proposal({ id: "board-review:escalation:#3030", originatingItemId: "#3030" }),
+    proposal({ id: "board-review:stale:#3039", originatingItemId: "#3039" }),
+    proposal({ id: "board-review:escalation:#3039", originatingItemId: "#3039" }),
+    proposal({ id: "board-review:stale:#3043", originatingItemId: "#3043" }),
+    proposal({ id: "board-review:escalation:#3043", originatingItemId: "#3043" }),
+    proposal({ id: "board-review:stale:#3054", originatingItemId: "#3054" }),
+    proposal({ id: "board-review:escalation:#3059", originatingItemId: "#3059" }),
+    proposal({ id: "board-review:stale:#3063", originatingItemId: "#3063" }),
+    proposal({ id: "board-review:escalation:#3065", originatingItemId: "#3065" }),
+    // The one entry whose PR is STILL open — the only row the current board still supports.
+    proposal({ id: "board-review:stale:#3070", originatingItemId: "#3070" }),
+  ];
+  assert.equal(twelve.length, 12, "precondition: the fixture matches the rationale's own count");
+
+  const registry = fakeRegistry(twelve);
+  // The current board carries only #3070 open — every other referent named above has left it,
+  // exactly the "registry whose entries all track currently-open PRs" the falsifier describes NOT
+  // being the case pre-fix.
+  const result = reconcileBoardReviewReferents({
+    items: [item({ id: "#3070" })],
+    registryPath: "/state/inbox-proposals.json",
+    updateRegistry: registry.updateRegistry,
+  });
+
+  assert.equal(result.retiredProposalIds.length, 11, "eleven of the twelve drain in one pass");
+  assert.deepEqual(registry.state.map((p) => p.id), ["board-review:stale:#3070"], "only the still-open referent's finding survives");
+});
