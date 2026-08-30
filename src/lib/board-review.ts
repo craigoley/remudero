@@ -447,3 +447,113 @@ export function buildBoardReview(opts: BuildBoardReviewOpts): BoardReviewReport 
   writeReport(opts.reportPath, JSON.stringify(report, null, 2));
   return report;
 }
+
+// ── The reconciler (W1-T2464) ───────────────────────────────────────────────────────────────────
+//
+// THE FAILURE THIS CLOSES. `buildBoardReview` mints every finding with `evidenceAnchors: []` — a
+// PR's open/closed state is not a git-grep-able fact, so no anchor could ever express "the PR
+// this proposal is ABOUT has left the board" (this task's own rationale (6)). Without a separate
+// mechanism, a board-review proposal renders READY forever, and the registry that holds it grows
+// monotonically: finding ids embed the PR number, PR numbers never repeat, and
+// `pruneRatifiedProposals` (this file's sibling registry reaper) removes only RATIFIED rows.
+//
+// RECONCILE ON EVERY CHECK, NEVER ON FIRE (the load-bearing design decision). Placing this inside
+// `buildBoardReview`'s mining block would run it exactly when there is still something wrong (the
+// mining block is skipped entirely on `!decision.fire`, and entered only `if (findings.length >
+// 0)`) — never when a stale/escalation condition has fully resolved, which is the one case that
+// matters. Worse, a board whose every finding has cleared trips no depth arm at all, so it would
+// never fire again and the retired-in-truth rows would sit forever. `reconcileBoardReviewReferents`
+// is therefore a SEPARATE entry point, called from the daemon's `checkBoardReview` hook
+// (run-task.ts's `buildBoardReviewDaemonHooks`) — which already runs every poll and already reads
+// a fresh item list for the depth trigger — rather than from `runBoardReview`, which only runs on
+// a fire.
+//
+// THE PREDICATE IS NARROWER THAN "no finding this tick", DELIBERATELY. Retiring an escalation
+// finding because this tick minted no matching `board-review:escalation:` finding would be WRONG:
+// the projection read that supplies `unhandledEscalations` sits in its own inner try/catch
+// (`defaultBoardReviewItems`, run-task.ts) and degrades to zero on its own failure while the open-PR
+// list read still succeeds — so "no escalation finding this tick" is ambiguous between HANDLED and
+// PROJECTION-UNREADABLE. Retirement instead asks one unambiguous question: is the referent PR
+// itself still present in a non-empty board read? A finding whose PR is still open survives no
+// matter what its escalation count reads as this tick.
+//
+// FAIL DIRECTIONS, ALL TOWARD KEEPING THE ROW. An empty item list retires nothing (a total read
+// failure degrades to `[]` — see `defaultBoardReviewItems`'s own doc — so an empty list cannot be
+// trusted as "every referent left the board"). An id outside this rung's own namespace
+// (`board-review:stale:`/`board-review:escalation:`) is never touched, whether or not it happens
+// to carry an `originatingItemId`. `updateRegistry` is the single writer under its lock
+// (W1-T240) and already returns `null` — skipping the write — when nothing changed, so a repeat
+// pass over unchanged state costs a read and no write (idempotent, by construction).
+
+const BOARD_REVIEW_PROPOSAL_ID_PATTERN = /^board-review:(?:stale|escalation):(.+)$/;
+
+/** The board item id a board-review-minted proposal is ABOUT, or `undefined` for a proposal
+ *  outside this rung's own namespace — the namespace check comes FIRST (design: "an id outside
+ *  this rung's namespace is never touched"), so a proposal from another family can never be
+ *  retired even if it happened to carry a same-shaped field. `originatingItemId` (set at mint
+ *  time, above) is the primary source; a proposal minted before that field existed falls back to
+ *  parsing its own id's trailing segment — the same "the item id was in the string all along"
+ *  derivation `deriveLegacyReferent` (lib/inbox.ts, W1-T2460) uses for the read-time
+ *  classification this reconciler is independent of, duplicated here deliberately rather than
+ *  imported (this module already imports FROM inbox.ts; importing this one function back would be
+ *  a cycle — the same small, deliberate duplication this file's own header argues for). */
+function boardReviewReferentId(proposal: Proposal): string | undefined {
+  const m = BOARD_REVIEW_PROPOSAL_ID_PATTERN.exec(proposal.id);
+  if (!m) return undefined;
+  return proposal.originatingItemId ?? m[1];
+}
+
+export interface ReconcileBoardReviewOpts {
+  /** The freshest board read available this tick — same shape {@link buildBoardReview} itself
+   *  takes. An EMPTY list retires nothing (see this section's header doc). */
+  items: readonly BoardItem[];
+  registryPath: string;
+  /** Injectable — production takes `updateProposalRegistry` (the W1-T240 single writer), exactly
+   *  like {@link BuildBoardReviewOpts.updateRegistry}. */
+  updateRegistry?: (
+    registryPath: string,
+    update: (current: Proposal[]) => Proposal[] | null,
+    opts?: UpdateProposalRegistryOpts,
+  ) => Proposal[] | null;
+}
+
+export interface ReconcileBoardReviewResult {
+  /** Ids actually removed from the registry this pass — empty on an empty board read, a pass
+   *  that finds nothing whose referent has left, or a second pass over state a prior call already
+   *  reconciled (acceptance criterion 5). */
+  retiredProposalIds: string[];
+}
+
+/**
+ * W1-T2464: retires every registry proposal THIS rung minted whose referent item is absent from
+ * `opts.items` — see this section's header doc for why the predicate is presence-on-the-board
+ * rather than "no finding this tick", and why this is called from the CHECK rather than from
+ * {@link buildBoardReview}.
+ */
+export function reconcileBoardReviewReferents(opts: ReconcileBoardReviewOpts): ReconcileBoardReviewResult {
+  // An empty read is indistinguishable from a failed one (defaultBoardReviewItems degrades to
+  // `[]` on any outage) — never read as "every referent resolved". No items, no registry touch.
+  if (opts.items.length === 0) return { retiredProposalIds: [] };
+
+  const updateRegistry = opts.updateRegistry ?? updateProposalRegistry;
+  const liveIds = new Set(opts.items.map((it) => it.id));
+  let retiredProposalIds: string[] = [];
+
+  updateRegistry(opts.registryPath, (current) => {
+    const survivors: Proposal[] = [];
+    const retired: string[] = [];
+    for (const p of current) {
+      const referentId = boardReviewReferentId(p);
+      if (referentId !== undefined && !liveIds.has(referentId)) {
+        retired.push(p.id);
+      } else {
+        survivors.push(p);
+      }
+    }
+    if (retired.length === 0) return null; // nothing changed — updateRegistry skips the write
+    retiredProposalIds = retired;
+    return survivors;
+  });
+
+  return { retiredProposalIds };
+}

@@ -456,6 +456,7 @@ import {
   decideBoardReviewCadence,
   readBoardReviewMarker,
   recordBoardReviewFire,
+  reconcileBoardReviewReferents,
   type BoardItem,
   type BoardReviewCadenceDecision,
   type BoardReviewReport,
@@ -17393,6 +17394,14 @@ export function buildDigestCadenceDaemonHooks(deps: {
  * deliberate: the board can change between the two, and the report must describe the board it
  * actually diagnosed rather than the one that justified the decision. On a non-firing tick — the
  * overwhelming majority — `run` is never called and the cost is the single `check` read.
+ *
+ * W1-T2464: `checkBoardReview` ALSO reconciles — see {@link reconcileBoardReviewReferents}'s own
+ * header doc for why retirement rides the check rather than the fire-gated `run`. It shares the
+ * SAME item read the cadence decision already pays for on every poll: reconciling costs no
+ * second read, on a firing tick or a quiet one alike, and (being independent of `decision.fire`)
+ * runs even on the overwhelming majority of ticks that never call `run` at all — the one case
+ * design calls out as otherwise unreachable ("a board whose findings have all cleared trips no
+ * depth arm at all, so it never fires again and the dead rows sit forever").
  */
 export function buildBoardReviewDaemonHooks(deps: {
   check?: () => BoardReviewCadenceDecision;
@@ -17404,24 +17413,42 @@ export function buildBoardReviewDaemonHooks(deps: {
   items?: () => BoardItem[];
   /** Injectable ONLY for tests — production takes the real {@link buildBoardReview}. */
   build?: typeof buildBoardReview;
+  /** Injectable ONLY for tests — production takes the real {@link reconcileBoardReviewReferents}
+   *  (W1-T2464). */
+  reconcile?: typeof reconcileBoardReviewReferents;
 } = {}): {
-  checkBoardReview: () => BoardReviewCadenceDecision;
+  checkBoardReview: () => BoardReviewCadenceDecision & { retiredProposalIds: string[] };
   runBoardReview: () => Promise<BoardReviewReport>;
 } {
   const configFor = () => deps.config ?? loadConfig();
   const policyFor = () => deps.policy ?? loadPolicy(policyPath(repoRoot));
   const itemsFor = () => (deps.items ?? (() => defaultBoardReviewItems(configFor())))();
+  const reconcile = deps.reconcile ?? reconcileBoardReviewReferents;
+  // `deps.check` is an existing full-override seam (no current caller uses it against this
+  // function — see test/board-review-wiring.test.ts) — an override bypasses reconciliation
+  // entirely rather than guessing at an items list the override's own closure may not share,
+  // and reports an empty retirement so the field is always present on the returned shape.
   const check =
-    deps.check ??
-    (() => {
-      const root = configFor().root;
-      return decideBoardReviewCadence({
-        policy: policyFor().values.boardReview,
-        marker: readBoardReviewMarker(boardReviewMarkerPath(root)),
-        now: deps.now?.() ?? new Date(),
-        items: itemsFor(),
-      });
-    });
+    deps.check !== undefined
+      ? () => ({ ...deps.check!(), retiredProposalIds: [] as string[] })
+      : () => {
+          const root = configFor().root;
+          // ONE read serves both the reconciler and the cadence decision below — see this
+          // function's own header doc on why a second read here would be exactly the cost this
+          // rung's design forbids paying twice.
+          const items = itemsFor();
+          const { retiredProposalIds } = reconcile({
+            items,
+            registryPath: join(root, "state", "inbox-proposals.json"),
+          });
+          const decision = decideBoardReviewCadence({
+            policy: policyFor().values.boardReview,
+            marker: readBoardReviewMarker(boardReviewMarkerPath(root)),
+            now: deps.now?.() ?? new Date(),
+            items,
+          });
+          return { ...decision, retiredProposalIds };
+        };
   const run =
     deps.run ??
     (async () => {
