@@ -1,0 +1,70 @@
+- id: W1-T2505
+  title: "AN ONBOARDED REPO GETS A CONSTITUTION AND NOWHERE TO PUT WHAT IT LEARNS — `onboard --phase synthesize` writes exactly three files into the target repo (MASTER-PLAN.md, plan/tasks.yaml, AGENTS.md) and ZERO learnings home, so the per-repo project layer the injection already reads has no directory to find in any repo but this one"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 16.00
+  files: [src/lib/onboard/synthesize.ts, src/lib/learnings.ts, test/an-onboarded-repo-has-a-learnings-home.test.ts]
+  origin: "operator-brief#each-repos-learnings-live-in-that-repo-2026-08-30"
+  plan_refs: ["W1-T145", "W1-T146", "W1-T425", "W1-T2492"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE READER EXISTS AND HAS NOTHING TO READ. The worker injection already resolves three layer
+    homes — project, user-overall and global — and `projectLearningsHome(repoRoot)` already names
+    the per-repo convention as `<repoRoot>/learnings`. Onboarding, the one thing that creates a
+    repo's brain, does not create that directory. So the layered architecture is complete on the
+    read side and unreachable on the write side for every repo except this one.
+    SURFACE 1 files onboard synthesize writes into the target repo = 3
+    SURFACE 2 of those, a learnings home = 0
+    SURFACE 3 layer homes the worker injection already resolves = 3
+    SURFACE 4 shards in this repo's own corpus = 5
+    SURFACE 5 entries in this repo's own corpus = 51
+
+    IT SEEDS A HOME, NEVER CONTENT, AND THAT DISTINCTION IS THE WHOLE DESIGN. A learnings entry is
+    a FACT with provenance (`src`) and a citation date; inventing entries for a repo nobody has
+    worked in yet would manufacture provenance for facts nobody established — the exact fabrication
+    this repo's evidence discipline refuses everywhere else. What onboarding creates is the
+    directory, its shard split and its header, so the first real learning has somewhere to land.
+
+    THE SHARD SPLIT IS COPIED, NOT REINVENTED. This repo's corpus is five subsystem shards with an
+    index; that split exists because a single file becomes a merge conflict per entry. An onboarded
+    repo inherits the same shape rather than a novel one, so `loadLearningsCorpus` and the index
+    loader work unchanged against it.
+
+    IT MUST NOT WIDEN THE WRITE SCOPE, WHICH IS STATED AND TESTED. `synthesize.ts`'s header declares
+    it writes ONLY three files under `<target-dir>` on the `onboard/<repo>-plan` branch, and its own
+    suite pins that by spying on the writer. Adding a fourth path is a deliberate, reviewed widening
+    of a fence that exists for a reason — the acceptance criteria therefore pin the NEW scope
+    exactly, so a fifth path is as refused as a fourth was before this task.
+
+    IT PAIRS WITH W1-T2506 AND SHIPS FIRST. That task points the project layer at the target repo's
+    checkout; pointing it at a directory nothing creates would be correct and inert. Seeding first
+    means the pair is observable end to end rather than looking broken between merges.
+
+    NOT IN SCOPE: writing any learnings entry; the injection's own path derivation, which W1-T2506
+    owns; the promotion pass and the export/import transport, both already shipped; and phases 1-3
+    of onboarding, whose own write fence is untouched.
+
+    THE RISK BAND IS RULE 19's SPAN, NOT BLAST RADIUS: two src stems plus a test, carrying two
+    independent acceptance concerns — the seeded home and the unchanged write fence.
+  acceptance:
+    - claim: "synthesize creates a learnings home in the target repo"
+      proof: "unit test: test/an-onboarded-repo-has-a-learnings-home.test.ts"
+    - claim: "the seeded home carries the same shard split this repo's corpus uses"
+      proof: "unit test: test/an-onboarded-repo-has-a-learnings-home.test.ts"
+    - claim: "the seeded home contains no invented learning entry"
+      proof: "unit test: test/an-onboarded-repo-has-a-learnings-home.test.ts"
+    - claim: "the existing corpus loader reads the seeded home without change"
+      proof: "unit test: test/an-onboarded-repo-has-a-learnings-home.test.ts"
+    - claim: "the three files synthesize wrote before are written unchanged"
+      proof: "unit test: test/an-onboarded-repo-has-a-learnings-home.test.ts"
+    - claim: "no path outside the declared write scope is written"
+      proof: "unit test: test/an-onboarded-repo-has-a-learnings-home.test.ts"
+    - claim: "a target repo that already has a learnings home is left untouched"
+      proof: "unit test: test/an-onboarded-repo-has-a-learnings-home.test.ts"
+    - claim: "removing the seed leaves the corpus loader with no directory to read"
+      proof: "unit test: test/an-onboarded-repo-has-a-learnings-home.test.ts"
