@@ -1,0 +1,117 @@
+- id: W1-T2471
+  title: "DRAINING THE INBOX COSTS ONE FULL PR LIFECYCLE AND ONE ADVISORY REVIEWER SPAWN PER PROPOSAL FOR A DIFF THAT IS PURE PLAN TEXT — `approveCommand` (run-task.ts) takes ONE `<P##>` and runs branch, commit, push, PR, review and auto-merge arm per proposal; the inbox holds 17 ready, and parallel approvals cannot fix it because `applyStampToMasterPlan` appends at EOF and N branches conflict there by construction (MEASURED). Ratify an EXPLICIT batch in one branch, one commit, one MASTER-PLAN block, one PR, one review"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 14.00
+  files: [src/lib/inbox.ts, src/run-task.ts, test/ratify-batch.test.ts]
+  origin: "operator-brief#batch-the-inbox-drain-2026-08-30"
+  plan_refs: ["W1-T2455", "W1-T2428", "W1-T205", "W1-T2451"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE ID. Eight surfaces, anchored W1-T2471([^0-9]|$) with a [0-9] class and never a \d shorthand.
+    SURFACE 1 (reservation refs on origin) READS 1 against 584 refs — the id the mint HELD, read
+    from refs/rmd-id/ on origin rather than taken as the advisory max; control W1-T2463 reads 1 and
+    the anchor-leak probe W1-T247([^0-9]|$) reads 0. SURFACE 2 shard filenames 0 of 712. SURFACE 3
+    declared ids 0 of 967. SURFACE 4 merged trailers 0 of 98. SURFACE 5 merged subjects 0 of 98 —
+    each controlled by W1-T2463 firing 1.
+    ⚠ SURFACES 6, 7 AND 8 ARE REAL ZEROS THIS TIME, NOT VACUOUS: the open-PR population is 1 (#3292,
+    itself a ratification PR), and each surface carries a control that FIRES against that single
+    member — "ratify" in the title, "board-review" in the body, "run-APPROVE" in the head ref. Live
+    run-W1-T2471-* heads read 0 against a control of 91 live run-* heads.
+
+    THE RISK BAND IS RULE 19's SPAN, NOT BLAST RADIUS: three `files:` entries with distinct stems
+    (inbox, run-task, ratify-batch), so `sizingViolation` refuses risk:medium for the span alone.
+
+    ⚠ CI IS NOT THE COST — CHECKED BEFORE PRICING ANYTHING. A ratification diff is MASTER-PLAN.md
+    plus plan/tasks.d/*.yaml, and `isInPlanScope("MASTER-PLAN.md")` is TRUE, so the W1-T2428 fast
+    lane applies. Verified with the lane's OWN classifier rather than the predicate: run against
+    #3292's real changed-file list, scripts/diff-class.mjs prints PLAN_ONLY (165 plan-reading suites
+    of 830 test files); controls print SOURCE for src/lib/review.ts alone and SOURCE again for a
+    mixed plan+src list. So the whole saving is in the SPAWN and the SERIALISATION.
+
+    Q1. A PLAN-ONLY RATIFICATION DOES NOT NEED THE SPAWN, AND NOTHING THAT GATES IS LOST — BUT THIS
+    TASK DOES NOT SKIP IT. run-task.ts:4447 is `const attemptReviewer = args.spawnReviewer !== false
+    && criteria.length > 0` — planOnly is never consulted, so a filing spawns a reviewer. The block
+    is headed "Advisory semantic layer"; its ONLY consumed output is
+    `semantic = reviewerSemanticVerdicts(reviewer, criteria.length)`; its catch arm says "Advisory
+    only — the deterministic floor still binds and posts below"; and the verdict built after it is
+    headed "BINDING deterministic verdict". review.ts:3783 is
+    `const unmetForState = planOnly ? floorUnmet : unmet`, and judgeCriterion captures
+    `const floorMet = met` BEFORE the semantic downgrade arm, so on a plan-only diff the spawned
+    reviewer CANNOT change state; review.ts:4170 already emits "semantic downgrade suppressed:
+    deterministic floor still passes". Every other gating arm — testTheater, criteriaTampered,
+    changesetContradictions, instrumentEntangled, unprovenancedDecisionsEntries — is a pure function
+    of the diff. NO RUBRIC ARM RUNS ONLY IN THE SPAWN.
+    ⚠ WHAT WOULD BE LOST IS LEGIBILITY, NOT A GATE: `reviewerOutcome` (P10-a) distinguishes a
+    completed review from a floor-only PASS in the ledger. That is real but advisory.
+    ⚠ AND THE SPAWN SKIP IS NOT THIS TASK. Batching already collapses N spawns to ONE by collapsing
+    N PRs to one, with NO change to the review path at all. Skipping the spawn outright is a
+    separate, additive optimisation on a different surface and is reported here, not taken.
+
+    Q2. PARALLEL APPROVALS ARE THE WRONG SHAPE, MEASURED RATHER THAN ARGUED.
+    `applyStampToMasterPlan` (lib/inbox.ts) replaces an existing `- <proposalId> (` bullet when one
+    is present and OTHERWISE APPENDS AT EOF: `return `${base}\n${stampLine}\n``. A new ratification
+    has no bullet, so it always appends — measured +1/-0 on MASTER-PLAN.md, including on #3292 at
+    head. Two independent ratifications built off one base and merged in a scratch repo produce
+    CONFLICT (content): Merge conflict in MASTER-PLAN.md, both stamp lines in the conflict region.
+    So N parallel branches conflict pairwise by construction and the drain would serialise on
+    conflict resolution instead of on CI.
+    ⚠ THE SAME FACT IS WHY BATCHING WORKS: `applyStampToMasterPlan` is a PURE (md, id, line) => md,
+    so N stamps FOLDED SEQUENTIALLY IN ONE WORKING COPY produce N appended lines with no conflict —
+    the conflict is a property of concurrent branches, never of the transform.
+
+    Q3. N SHARDS IN ONE COMMIT IS ALREADY THE SHIPPED SHAPE, AND IT GENERALISES.
+    `ratificationShardFiles(fragmentYaml)` splits ONE proposal's fragment into N top-level task
+    blocks and returns N pure {relPath, contents} pairs; #3254 filed two tasks in one PR that way.
+    The writer is per-FRAGMENT and side-effect-free apart from the write, so calling it once per
+    proposal into one worktree composes with no shared state. The only coupling is the FILENAME:
+    two members drafting the same task id collide on `plan/tasks.d/<id>-<slug>.yaml`, which is a
+    batch-level precondition to check, not a property of the writer.
+
+    Q4. SEMANTICS CHOSEN: SKIP-UNREADY, NEVER ABORT, AND THE SET IS ALWAYS EXPLICIT.
+    `classifyProposal(proposal, draft, ctx)` returns an `InboxClassification` per proposal carrying
+    `state` and `reasons: PredicateFailure[]` ("Empty iff state === ready. Every failing AND-clause,
+    named"). It is already a per-proposal pure function, so the batch calls it once per member and
+    admits only the ready ones. AN UNREADY MEMBER IS SKIPPED WITH ITS OWN NAMED REASONS AND NEITHER
+    ADMITS THE REST NOR ABORTS THE BATCH — aborting would make one stale draft deny the other
+    sixteen, and admitting would be the auto-approve this task must not build. The batch is an
+    EXPLICIT set: named ids, or a ready-set the operator confirms. Never an implicit approve-all.
+
+    Q5. THE EXISTING REFUSAL DOES NOT COVER WITHIN-BATCH DUPLICATES, AND IS NOT CLAIMED TO.
+    `draftedDuplicate(fragmentYaml, corpus, opts)` (W1-T2455) compares drafted slugs against a
+    CALLER-SUPPLIED corpus of tasks already filed on origin/main. Two members of one batch drafting
+    the same title are both ABSENT from main, so neither is caught. The function is PURE and the
+    corpus is a parameter — its own doc says "the corpus is the caller's to supply" — so the batch
+    needs NO change to it: it folds each accepted member's drafted entries INTO the corpus before
+    classifying the next, dedupping against main UNION members-accepted-so-far.
+    ⚠ AND THE RECALL LIMIT IS UNCHANGED AND MUST NOT BE OVERSOLD: the score is 2-shingle Jaccard
+    over a kebab slug, which does not see paraphrase — measured recall 3 of 32 drafted titles, where
+    24 named defects that had already shipped. Batching closes the WITHIN-BATCH BLIND SPOT ONLY; it
+    does not improve recall, and `corpus.length === 0` still fails OPEN by design.
+
+    ⚠ NOT PROPOSED, EXPLICITLY: auto-approving without an operator decision; removing or weakening
+    the per-proposal readiness check; any change to lint-plan; any change to criterionFieldTampered.
+  acceptance:
+    - claim: "one batch of N named proposals produces ONE branch, ONE commit, every member's shards and ONE MASTER-PLAN block"
+      proof: "unit test: test/ratify-batch.test.ts"
+    - claim: "the N stamps fold sequentially in one working copy, so the EOF append that conflicts across branches cannot conflict inside a batch"
+      proof: "unit test: test/ratify-batch.test.ts"
+    - claim: "each member is classified individually and an unready member is skipped carrying its own named reasons"
+      proof: "unit test: test/ratify-batch.test.ts"
+    - claim: "an unready member neither admits the rest nor aborts the batch, and lands no shard and no stamp"
+      proof: "unit test: test/ratify-batch.test.ts"
+    - claim: "the batch is an explicit set of named ids or an operator-confirmed ready-set, never an implicit approve-everything"
+      proof: "unit test: test/ratify-batch.test.ts"
+    - claim: "the duplicate corpus grows with each accepted member, so two members drafting one title are refused within the batch"
+      proof: "unit test: test/ratify-batch.test.ts"
+    - claim: "the corpus growth is additive only: an empty corpus still fails open and the origin/main refusal is unchanged"
+      proof: "unit test: test/ratify-batch.test.ts"
+    - claim: "two members drafting the same task id collide on one shard path and the batch refuses before writing either"
+      proof: "unit test: test/ratify-batch.test.ts"
+    - claim: "a single-proposal batch produces output byte-identical to today's single approve"
+      proof: "unit test: test/ratify-batch.test.ts"
