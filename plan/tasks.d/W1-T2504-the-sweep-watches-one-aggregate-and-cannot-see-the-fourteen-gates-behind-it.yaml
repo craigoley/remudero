@@ -1,0 +1,76 @@
+- id: W1-T2504
+  title: "THE SWEEP'S RED PREDICATE WATCHES ONE AGGREGATE CHECK AND IS BLIND TO THE FOURTEEN QUALITY GATES BEHIND IT — `checksStateFromRollup` filters to branch protection's contexts and drops the review context, leaving `ci-gate` ALONE, so while that aggregator runs every PR reads `pending` however many gates have already concluded red; MEASURED on #3318, a terminal coverage-ratchet failure was invisible to the fix rung for 24 minutes while the run lane had ALREADY NAMED IT"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 18.00
+  files: [src/lib/sweep.ts, src/lib/open-prs-rest.ts, test/a-red-quality-gate-is-visible-to-the-sweep.test.ts]
+  origin: "operator-brief#why-didnt-rmd-drive-3318-2026-08-30"
+  plan_refs: ["W1-T1223", "W1-T100", "W1-T138", "W1-T977"]
+  status: queued
+  attempts: 0
+  rationale: |
+    ONE FIELD ANSWERS TWO DIFFERENT QUESTIONS AND ONLY ONE OF THEM WANTS THAT FILTER. "What gates
+    the merge" is correctly branch protection's set. "What is red" is a different question, and
+    answering it through the same filter means the sweep can only ever learn about failure
+    second-hand, from an aggregator, after that aggregator finishes.
+    SURFACE 1 checks in ci-gate's own required list = 14
+    SURFACE 2 contexts branch protection requires = 2
+    SURFACE 3 of those, contexts the sweep's red predicate can actually see = 1
+    SURFACE 4 minutes the terminal failure went unseen in the measured case = 24
+    SURFACE 5 producers that already name the red check by name = 1
+
+    THE INFORMATION IS NOT MISSING, IT IS DISCARDED AT A HANDOFF — WHICH IS WHAT MAKES THIS WORTH
+    FIXING RATHER THAN INSTRUMENTING. The run lane's own CI wait finds the failing check and names
+    it: `run-task.ts` returns `required check red: <name>`, and the daemon printed exactly
+    `verdict: blocked_ci (required check red: coverage-ratchet)` before leaving the PR open. It then
+    hands to a sweep whose `isBlockedCi` is `checksState === "red"` over a rollup filtered to one
+    still-running aggregate, which reads `pending`. The producer knew; the consumer cannot ask.
+
+    AND THE DETAIL IS NOT MERELY UNREAD, IT IS NEVER FETCHED. `sweep.ts` states it plainly: the
+    shared snapshot's `ciFailures` is undefined for a PENDING PR BY CONSTRUCTION, because
+    `buildOpenPrViews` only fetches it when `checksState === "red"`. So the mis-classification is
+    self-sealing — nothing downstream can recover what the classification declined to collect.
+
+    A SEPARATE OBSERVABLE, NEVER A FIFTH `checksState` MEMBER, AND THAT IS SETTLED PRECEDENT IN
+    THIS FILE. `checksStateFromRollup`'s own doc refuses a fifth member because it is read at 17
+    comparison sites and "a fifth member every existing row silently fails to match is precisely the
+    false-predicate-falls-through-to-a-row-that-acts shape that produced the 57 issues in the first
+    place". W1-T1223 already took the sanctioned route for exactly this class — `CancelledRequiredCheck`
+    is a SEPARATE observable naming which red required check is an absent verdict. This follows it.
+
+    THE MERGE-ELIGIBILITY READING MUST NOT MOVE. Whatever this adds, `checksState` keeps meaning
+    what it means today for every arming and merge decision — a PR is not newly mergeable or newly
+    blocked because the sweep can now see a gate. Only the FIX RUNG's trigger gains sight.
+
+    THE LATENCY IS THE HARM AND IT COMPOUNDS. ci-gate re-reads inside a bounded grace window
+    (W1-T261) and re-runs, so each re-run re-extends the blindness; the PR sits with a real,
+    actionable, already-named failure and nothing driving it. On the measured case an operator had
+    to notice by hand.
+
+    NOT IN SCOPE: ci-gate's own aggregation or wait cap, both of which are correct; branch
+    protection's contents, which are an operator setting; and the fix rung's own budget, ladder and
+    dedup, which are untouched — this changes only what the trigger can SEE.
+
+    THE RISK BAND IS RULE 19's SPAN, NOT BLAST RADIUS: two src stems plus a test, carrying two
+    independent acceptance concerns — the new observable and the invariance of the existing one.
+  acceptance:
+    - claim: "a PR with a concluded red quality gate is visible as fixable while the aggregate is still pending"
+      proof: "unit test: test/a-red-quality-gate-is-visible-to-the-sweep.test.ts"
+    - claim: "the failing check's own name reaches the fix rung's evidence rather than the aggregate's"
+      proof: "unit test: test/a-red-quality-gate-is-visible-to-the-sweep.test.ts"
+    - claim: "checksState returns exactly what it returns today for every input"
+      proof: "unit test: test/a-red-quality-gate-is-visible-to-the-sweep.test.ts"
+    - claim: "no fifth member is added to the checksState union"
+      proof: "unit test: test/a-red-quality-gate-is-visible-to-the-sweep.test.ts"
+    - claim: "a PR with only pending checks and no concluded failure is still not fixable"
+      proof: "unit test: test/a-red-quality-gate-is-visible-to-the-sweep.test.ts"
+    - claim: "arming and merge-eligibility decisions read the unchanged field"
+      proof: "unit test: test/a-red-quality-gate-is-visible-to-the-sweep.test.ts"
+    - claim: "a check outside the required list does not make a PR fixable on its own"
+      proof: "unit test: test/a-red-quality-gate-is-visible-to-the-sweep.test.ts"
+    - claim: "restoring the aggregate-only read makes the pending-with-red-gate case invisible again"
+      proof: "unit test: test/a-red-quality-gate-is-visible-to-the-sweep.test.ts"
