@@ -1,0 +1,77 @@
+- id: W1-T2507
+  title: "THE PER-SESSION CONTEXT TAX IS PAID ON RULES THE WORKER CANNOT ACT ON — CLAUDE.md is injected IN FULL at 67,535 bytes with ONE byte of headroom, 9,723 of them about operating the daemon host a containerised worker can never touch, 6,400 in five dated append-only sections the file's own maintenance rule forbids, and 30 of its 84 bullets name a concrete path that `learnings/`'s glob matcher already scopes"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 18.00
+  files: [CLAUDE.md, learnings/architecture.yaml, test/claude-md-rules-reach-their-scope.test.ts]
+  origin: "operator-brief#pull-knowledge-out-of-claude-md-2026-08-30"
+  plan_refs: ["W1-T33", "W1-T503", "W1-T2506"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE DESTINATION IS BUILT, MEASURED AND ALREADY CARRYING 51 ENTRIES. `learnings/` matches by file
+    glob, filters `lifecycle: superseded` before ranking, orders by layer then recency, and bounds
+    the injected tax with dropped entries logged. CLAUDE.md is the one blanket whole-file injection
+    left — and the corpus it should move into already holds the principle, cited 2026-07-14:
+    "Prefer retrieval (grep-able plan) over injecting whole files."
+    SURFACE 1 bytes CLAUDE.md injects in full per session = 67535
+    SURFACE 2 bytes of headroom on its budget cap = 1
+    SURFACE 3 bullets naming a concrete repo path = 30
+    SURFACE 4 bytes in the host-operations section = 9723
+    SURFACE 5 bytes in the five dated append-only sections = 6400
+
+    THREE MOVES, EACH WITH ITS OWN JUSTIFICATION, AND NONE OF THEM DELETES A RULE. Thirty bullets
+    name a concrete path and become `learnings/` entries whose `files:` globs are that path — the
+    matcher then injects them to the tasks they govern and to nobody else. The host-operations
+    section governs an operator's machine: a worker in a container cannot run an installing package
+    manager on the daemon host or do interactive work in the fleet's worktree directory, so those
+    rules reach the reader they were written for by leaving worker context, not by being weakened.
+    The five dated sections fold into the topical sections they belong to.
+
+    THE DATED SECTIONS ARE THE FILE VIOLATING ITS OWN MAINTENANCE RULE, WHICH IS WHY THEY GO FIRST.
+    Its preamble states that compression is a deliverable rather than accretion, and that a retro
+    adding a rule must fold, sharpen or delete what it supersedes. Five "Lessons from <date>"
+    sections are an append-only log inside that file. Folding them is not a new policy; it is the
+    stated policy, applied.
+
+    NO RULE LOSES FORCE AND THAT IS THE ACCEPTANCE BAR. A migrated rule must reach a task it governs
+    at least as reliably as it does today — the criteria pin REACHABILITY per moved rule, not merely
+    that CLAUDE.md shrank. A rule that moves and then reaches nobody is worse than one that was
+    merely expensive.
+
+    THE BUDGET GATE HAS BEEN ANSWERED BY RAISING THE CAP, TWICE, WHICH IS THE MOVE THIS REPO REFUSES
+    EVERYWHERE ELSE. One byte of headroom is not a margin. This task's success is measured as the
+    cap coming DOWN once the file is smaller, so the ratchet resumes ratcheting.
+
+    IT DOES NOT BUY PARALLELISM AND THE SHARD SAYS SO. At ~$3/Mtok the saved tokens are roughly two
+    percent of a task's ledgered cost, and lane count is bounded by per-worker process memory, not
+    prompt size. The reasons are the exhausted budget, and attention spent on rules the reader
+    cannot act on. Filing it as a throughput win would be the bound-fires-on-a-healthy-condition
+    shape this repo keeps catching.
+
+    NOT IN SCOPE: the progressive-disclosure mechanism for whatever remains, which W1-T2508 owns;
+    deleting any rule outright; and the learnings matcher, budget or lifecycle, all untouched.
+
+    THE RISK BAND IS RULE 19's SPAN, NOT BLAST RADIUS: two content stems plus a test, carrying two
+    independent acceptance concerns — the migration's reachability and the file's own budget.
+  acceptance:
+    - claim: "every migrated rule reaches a task whose files it governs"
+      proof: "unit test: test/claude-md-rules-reach-their-scope.test.ts"
+    - claim: "no rule is dropped in the move — each has a destination"
+      proof: "unit test: test/claude-md-rules-reach-their-scope.test.ts"
+    - claim: "host-operations rules no longer reach a containerised build worker"
+      proof: "unit test: test/claude-md-rules-reach-their-scope.test.ts"
+    - claim: "the five dated sections are folded, leaving no dated section behind"
+      proof: "unit test: test/claude-md-rules-reach-their-scope.test.ts"
+    - claim: "the budget cap is lowered to match the smaller file"
+      proof: "unit test: test/claude-md-rules-reach-their-scope.test.ts"
+    - claim: "a migrated entry carries provenance rather than appearing uncited"
+      proof: "unit test: test/claude-md-rules-reach-their-scope.test.ts"
+    - claim: "the learnings matcher, budget and lifecycle behave exactly as today"
+      proof: "unit test: test/claude-md-rules-reach-their-scope.test.ts"
+    - claim: "removing a migrated entry's glob makes the reachability assertion fail"
+      proof: "unit test: test/claude-md-rules-reach-their-scope.test.ts"

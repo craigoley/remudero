@@ -1,0 +1,71 @@
+- id: W1-T2508
+  title: "CLAUDE.md IS ALREADY WRITTEN FOR PROGRESSIVE DISCLOSURE AND IS DISCLOSED ALL AT ONCE — every one of its 84 bullets is a bolded HEADLINE plus a body, the headlines are 15.7 percent of the file at a median 123 characters (an agent-skill description by any measure), and the other 84 percent is injected whether the reader needs it or not"
+  repo: remudero
+  depends_on: [W1-T2507]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 18.00
+  files: [src/lib/learnings.ts, src/run-task.ts, test/a-rule-body-loads-only-when-its-headline-is-taken.test.ts]
+  origin: "operator-brief#pull-knowledge-out-of-claude-md-2026-08-30"
+  plan_refs: ["W1-T2507", "W1-T35", "W1-T2506"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE FILE IS ALREADY IN THE SHAPE THE PATTERN REQUIRES AND NOBODY NOTICED. Progressive disclosure
+    asks for metadata always-on and body on activation; agent-skill practice states the separation as
+    "describe what to do, not contain all the material needed to do it". Every bullet here is
+    `**HEADLINE** body *(citation)*`. The split does not have to be invented, only honoured.
+    SURFACE 1 bullets already written as headline plus body = 84
+    SURFACE 2 headline share of the file = 15
+    SURFACE 3 median headline length in characters = 123
+    SURFACE 4 bytes CLAUDE.md injects in full per session = 67535
+    SURFACE 5 bytes of headroom on its budget cap = 1
+
+    W1-T2507 SHIPS FIRST AND THIS OPERATES ON WHAT SURVIVES IT, WHICH IS WHY `depends_on` NAMES IT.
+    That task moves the path-scoped rules into `learnings/` and the host rules out of worker context
+    entirely. Building an index over rules that are about to leave would index the wrong corpus and
+    have to be rebuilt. What remains after it is the genuinely universal residue — above all the
+    investigation-discipline family, whose whole subject is how to run a query without fooling
+    yourself, and which applies to every task regardless of the files it touches.
+
+    THE RETRIEVAL PATH MUST EXIST BEFORE THE BODY IS WITHHELD, AND THAT ORDER IS THE HAZARD. A
+    headline whose body cannot be fetched is strictly worse than today: the reader knows a rule
+    exists, cannot read it, and proceeds anyway. So the criteria pin that a body is retrievable
+    BEFORE any body is withheld, and that a failed retrieval degrades to injecting the full rule
+    rather than to silence.
+
+    CACHE ORDERING IS ALREADY ESTABLISHED HERE AND MUST NOT REGRESS. W1-T35 places volatile content
+    LAST so a growing corpus cannot bust the cache for the stable bytes before it. An always-on
+    headline index is stable and belongs with the stable prefix; a retrieved body is volatile. This
+    task inherits that ordering rather than inventing one.
+
+    IT IS NOT A COST OR PARALLELISM FIX, MEASURED. Roughly 14,000 tokens per spawn, about two percent
+    of a task's ledgered cost, and lane count is bounded by per-worker process memory rather than
+    prompt size. The claim this task DOES make is the one the literature makes: attention spent on
+    inapplicable rules costs output quality. Any acceptance criterion promising throughput would be
+    unmeasurable and is deliberately absent.
+
+    NOT IN SCOPE: the migration itself, which W1-T2507 owns; deleting any rule; the learnings
+    matcher, budget or lifecycle; and any change to what a worker is permitted to do.
+
+    THE RISK BAND IS RULE 19's SPAN, NOT BLAST RADIUS: two src stems plus a test, carrying two
+    independent acceptance concerns — the headline index and the body-retrieval degradation path.
+  acceptance:
+    - claim: "the always-on injection carries headlines and not bodies"
+      proof: "unit test: test/a-rule-body-loads-only-when-its-headline-is-taken.test.ts"
+    - claim: "a rule's full body is retrievable on demand by its headline"
+      proof: "unit test: test/a-rule-body-loads-only-when-its-headline-is-taken.test.ts"
+    - claim: "a body that cannot be retrieved degrades to injecting the full rule, never to silence"
+      proof: "unit test: test/a-rule-body-loads-only-when-its-headline-is-taken.test.ts"
+    - claim: "every headline in the index resolves to exactly one body"
+      proof: "unit test: test/a-rule-body-loads-only-when-its-headline-is-taken.test.ts"
+    - claim: "the headline index sits with the stable prefix and bodies with the volatile tail"
+      proof: "unit test: test/a-rule-body-loads-only-when-its-headline-is-taken.test.ts"
+    - claim: "no rule text is altered by being split into headline and body"
+      proof: "unit test: test/a-rule-body-loads-only-when-its-headline-is-taken.test.ts"
+    - claim: "the learnings injection is unchanged in content and ordering"
+      proof: "unit test: test/a-rule-body-loads-only-when-its-headline-is-taken.test.ts"
+    - claim: "removing the retrieval path makes the degradation assertion fail"
+      proof: "unit test: test/a-rule-body-loads-only-when-its-headline-is-taken.test.ts"

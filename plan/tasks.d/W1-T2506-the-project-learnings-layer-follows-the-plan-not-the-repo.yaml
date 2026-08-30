@@ -1,0 +1,74 @@
+- id: W1-T2506
+  title: "THE PROJECT LEARNINGS LAYER FOLLOWS THE PLAN, NOT THE REPO — the worker injection derives it inline as `join(dirname(planPath), \"..\", \"learnings\")` and the plan is ALWAYS read from this checkout, so a task carrying `repo: <other>` is still injected with THIS repo's learnings; `projectLearningsHome(repoRoot)` exists, is used at two other call sites, and its own doc says it was written to replace exactly this inline derivation"
+  repo: remudero
+  depends_on: [W1-T2505]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 16.00
+  files: [src/run-task.ts, src/lib/learnings.ts, test/the-project-layer-follows-the-target-repo.test.ts]
+  origin: "operator-brief#each-repos-learnings-live-in-that-repo-2026-08-30"
+  plan_refs: ["W1-T2505", "W1-T145", "W1-T2492"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE LAYERED ARCHITECTURE IS BUILT AND ONE OF ITS THREE HOMES POINTS AT THE WRONG REPO. The
+    injection already resolves project, user-overall and global together; the ranking already
+    prefers the most repo-specific fact; the promotion pass, the scrubber and the export/import
+    transport already ship. The project home is the only one derived from the PLAN rather than from
+    the work, and the plan is always this checkout's.
+    SURFACE 1 layer homes the worker injection resolves = 3
+    SURFACE 2 of those derived from the target repo's checkout = 0
+    SURFACE 3 call sites deriving the project home inline from the plan path = 1
+    SURFACE 4 call sites already calling projectLearningsHome = 2
+    SURFACE 5 distinct repo values across the plan = 3
+
+    THE HELPER WAS WRITTEN FOR THIS AND THE REPLACEMENT NEVER HAPPENED — ITS OWN DOC SAYS SO, naming
+    the inline expression verbatim and explaining that the helper exists so the three layer homes
+    "read as one symmetric set". Two other call sites already use it. This is the third, and the
+    only one where the argument should be the TARGET repo's checkout rather than this one's.
+
+    THIS IS WHAT MAKES rmd's OWN LEARNINGS UNEXCEPTIONAL, WHICH IS THE POINT. Once the project home
+    follows `task.repo`, this repo's 51 entries are simply the project layer of the repo `remudero`
+    — read through the identical path any other repo's are, with no special case anywhere. The
+    operator's requirement that rmd "use the same method for learnings about itself" is satisfied by
+    DELETING a distinction, not by adding a mechanism.
+
+    THE ABSENT-HOME CASE IS THE HAZARD AND IT MUST STAY NON-FATAL. `loadLearnings` already treats a
+    missing file as `[]` rather than an error, and the injection's own comment records that a
+    missing user-overall directory and global artifact are non-fatal absences. A target repo whose
+    learnings home does not exist yet must inject nothing and run, never refuse — W1-T2505 seeds the
+    home for newly onboarded repos, but a repo onboarded before it lands still has to work.
+
+    THE RETRO'S PROMOTION CORPUS IS DELIBERATELY LEFT ALONE. `runPromotionPass`'s caller reads
+    `projectLearningsHome(repoRoot)` too, and whether promotion should read the corpus of the repo a
+    learning came from is a real question with its own answer — it decides what gets scrubbed and
+    offered for the shared layers, which is a ratification concern, not an injection one. Changing
+    both in one task would put two unrelated decisions behind one review.
+
+    NOT IN SCOPE: the promotion pass's own corpus resolution; the user-overall and global homes,
+    which are already config-derived and correct; seeding a home, which W1-T2505 owns; and the
+    ranking, budget and lifecycle behaviour, all of which stay byte-identical.
+
+    THE RISK BAND IS RULE 19's SPAN, NOT BLAST RADIUS: two src stems plus a test, carrying two
+    independent acceptance concerns — the repo-following derivation and the absent-home tolerance.
+  acceptance:
+    - claim: "a task naming another repo is injected with that repo's project learnings"
+      proof: "unit test: test/the-project-layer-follows-the-target-repo.test.ts"
+    - claim: "a task naming this repo is injected with exactly what it is injected with today"
+      proof: "unit test: test/the-project-layer-follows-the-target-repo.test.ts"
+    - claim: "a target repo with no learnings home injects nothing and does not refuse"
+      proof: "unit test: test/the-project-layer-follows-the-target-repo.test.ts"
+    - claim: "the user-overall and global homes are resolved exactly as they are today"
+      proof: "unit test: test/the-project-layer-follows-the-target-repo.test.ts"
+    - claim: "ranking, budget and lifecycle behaviour are unchanged"
+      proof: "unit test: test/the-project-layer-follows-the-target-repo.test.ts"
+    - claim: "the retro's promotion corpus resolution is untouched"
+      proof: "unit test: test/the-project-layer-follows-the-target-repo.test.ts"
+    - claim: "no special case anywhere names this repo by name"
+      proof: "unit test: test/the-project-layer-follows-the-target-repo.test.ts"
+    - claim: "restoring the plan-derived path makes the other-repo case inject this repo's corpus"
+      proof: "unit test: test/the-project-layer-follows-the-target-repo.test.ts"
+    - claim: "the injection calls the named helper rather than deriving the path inline"
+      proof: "grep: projectLearningsHome( in src/run-task.ts"
