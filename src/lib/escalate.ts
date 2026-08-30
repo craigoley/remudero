@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { appendLedger } from "./ledger.js";
+import { appendThreadMessage } from "./inbox-thread.js";
 import { assertLiveWriteAllowed } from "./live-write-guard.js";
 import { validateDecisionSummary, type DecisionSummary, type SummarizeDeps } from "./feedback.js";
 import type { Mount, Mounts } from "./mounts.js";
@@ -900,6 +901,14 @@ export interface EscalateDeps {
   issues: IssueGateway;
   ledgerPath: string;
   runId: string;
+  /**
+   * OPTIONAL (W1-T2494) — path to the JSONL thread store {@link appendThreadMessage} writes to.
+   * Omitted entirely by every caller predating this task, which is deliberate: {@link
+   * recordThreadMessage} no-ops when this is unset, so "an escalation that never reaches the
+   * console behaves exactly as it does today" holds trivially for every un-migrated caller, not
+   * just the ones this task happens to test.
+   */
+  threadStorePath?: string;
 }
 
 /**
@@ -1220,12 +1229,44 @@ function refuseUnlessResolvable(e: Escalation): Escalation {
   return resolved === e.taskId ? e : { ...e, taskId: resolved };
 }
 
+/**
+ * W1-T2494: append THIS escalation's own prose onto the thread its derived identity (taskId,
+ * class, cause, and the SAME PR referent {@link findDuplicateEscalation} already scrapes for
+ * dedup) belongs to — the join between an escalation and the answer it eventually provokes (see
+ * inbox-thread.ts's own module doc for why the id is DERIVED, never minted). Fires on EVERY
+ * `escalate()`/{@link escalateWithJudge} call, dup or not: the dup path re-raises the identical
+ * concern, which is precisely the "appends rather than starting a new thread" case this exists
+ * for (design clause i).
+ *
+ * BEST-EFFORT, LIKE THE DEDUP READ ABOVE IT: `deps.threadStorePath` unset (every caller
+ * predating this task) is a silent no-op, and a write that throws (an unreadable/corrupt store)
+ * is swallowed here rather than propagated — this bookkeeping is a second, OPTIONAL surface on a
+ * flow that already worked before it existed (the console is W1-T2497, not this task), so a
+ * failure in it must never be the reason a real escalation fails to open. This is the acceptance
+ * clause "an escalation that never reaches the console behaves exactly as it does today," made
+ * literal: reaching the console can fail; opening the issue never does because of it.
+ */
+function recordThreadMessage(e: Escalation, deps: EscalateDeps): void {
+  if (!deps.threadStorePath) return;
+  try {
+    appendThreadMessage(
+      { taskId: e.taskId, class: e.class, cause: e.cause, prRef: extractPrRef(`${e.summary}\n${e.detail}`) },
+      "escalation",
+      `${e.summary}\n\n${e.detail}`,
+      { threadStorePath: deps.threadStorePath },
+    );
+  } catch {
+    // best-effort — see doc above; a thread-store failure must never block the escalation itself.
+  }
+}
+
 export function escalate(e: Escalation, deps: EscalateDeps): string {
   if (e.options.length === 0) {
     throw new Error(`escalation for ${e.taskId} has no options — every escalation needs an actionable choice`);
   }
   validateEscalationOptionKinds(e);
   const resolved = refuseUnlessResolvable(e);
+  recordThreadMessage(resolved, deps);
   const dup = findDuplicateEscalation(resolved, deps);
   if (dup) return recordDuplicateEscalation(resolved, dup, deps);
   return createEscalationIssue(resolved, deps, { queueLabel: NEEDS_HUMAN_LABEL, step: "escalation.issue_opened" });
@@ -1255,6 +1296,7 @@ export async function escalateWithJudge(
   }
   validateEscalationOptionKinds(e);
   const resolved = refuseUnlessResolvable(e);
+  recordThreadMessage(resolved, deps);
   const dup = findDuplicateEscalation(resolved, deps);
   if (dup) return recordDuplicateEscalation(resolved, dup, deps);
 
