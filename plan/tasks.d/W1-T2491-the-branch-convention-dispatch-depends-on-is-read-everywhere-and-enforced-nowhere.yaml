@@ -1,0 +1,70 @@
+- id: W1-T2491
+  title: "THE BRANCH CONVENTION DISPATCH DEPENDS ON IS READ BY SEVEN MODULES AND ENFORCED BY NOTHING — `run-<taskId>-<epochMs>` is how an in-flight task becomes visible to dispatch and how a merge gets credited when the trailer is missing, yet 52 of 143 remote heads do not match it and no gate anywhere refuses one"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 14.00
+  files: [src/lib/ci-parity.ts, scripts/worker-branch-shape.mjs, test/a-worker-branch-must-be-shaped-for-dispatch.test.ts]
+  origin: "operator-brief#lean-into-automation-2026-08-30"
+  plan_refs: ["W1-T444", "W1-T2488"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THIS CONVENTION IS LOAD-BEARING TWICE AND POLICED ZERO TIMES. `projectPlan` attributes an OPEN
+    PR to a task by `/^run-(.+)-\d+$/` on the head ref and NOT by the trailer, so a PR on any other
+    branch shape is invisible to `isDispatchEligible` and the task it is building stays dispatchable
+    — the duplicate-dispatch case the fleet already pays refs/rmd-dispatch claims to avoid. And
+    `findMergedByHeadBranch` credits a merge from the head ref alone, which is the only reason a
+    trailerless PR is ever credited at all.
+    SURFACE 1 remote heads at head = 143
+    SURFACE 2 of those, heads matching run-<taskId>-<epochMs> = 91
+    SURFACE 3 of those, heads not matching = 52
+    SURFACE 4 src modules that read the pattern = 7
+    SURFACE 5 gates that refuse a non-conforming worker branch = 0
+
+    THE FIFTY-TWO ARE NOT ALL VIOLATIONS AND THE GATE MUST NOT PRETEND THEY ARE. `main`,
+    `heartbeat-mini`, diagnostic branches and an operator's own scratch branches are legitimately
+    outside the convention; they are not building a filed task and nothing should attribute them.
+    A gate that reddened all 52 would be measuring the wrong population. What is checkable is
+    NARROWER and exact: a branch whose PR claims a task — by a `Remudero-Task:` trailer or by
+    declaring a shard in its diff — must carry the shape that makes that claim visible.
+
+    IT REPORTS BEFORE IT REFUSES, FOR THE SAME REASON W1-T2487 DOES. The standing 52 are a baseline
+    an operator disposes of at their own pace; what this task owns is that a NEW branch claiming a
+    task cannot be invisible to dispatch. Refusing the standing set would be a demand this task has
+    no standing to make.
+
+    IT BELONGS ON THE HABITUAL GATE, NOT ONLY IN CI, BECAUSE THE COST IS PAID BEFORE CI RUNS. By the
+    time CI sees a non-conforming branch, the duplicate dispatch it enables has already had its
+    window. `FAST_GATE_STEPS` is network-free and spawns no test runner; reading the current head
+    name and the PR body is neither, so the check sits there beside the other seven.
+
+    NO SWEEP SEES UNPUSHED WORK AND THIS GATE DOES NOT CHANGE THAT. A session that has not pushed is
+    invisible to every query by construction; this makes the PUSHED case honest, which is the half a
+    check can actually own.
+
+    NOT IN SCOPE: renaming or deleting any existing branch, which W1-T447 owns as a dry run;
+    changing how `projectPlan` or `findMergedByHeadBranch` attribute; and the trailer convention.
+
+    THE RISK BAND IS RULE 19's SPAN, NOT BLAST RADIUS: two stems plus a test, carrying two
+    independent acceptance concerns — the narrow refusal and the report over the standing set.
+  acceptance:
+    - claim: "a branch claiming a task by trailer with a non-conforming name is refused"
+      proof: "unit test: test/a-worker-branch-must-be-shaped-for-dispatch.test.ts"
+    - claim: "a branch claiming a task by declaring a shard with a non-conforming name is refused"
+      proof: "unit test: test/a-worker-branch-must-be-shaped-for-dispatch.test.ts"
+    - claim: "a conforming worker branch passes"
+      proof: "unit test: test/a-worker-branch-must-be-shaped-for-dispatch.test.ts"
+    - claim: "a branch claiming no task is never refused whatever its name"
+      proof: "unit test: test/a-worker-branch-must-be-shaped-for-dispatch.test.ts"
+    - claim: "the refusal names the shape dispatch expects rather than a bare rejection"
+      proof: "unit test: test/a-worker-branch-must-be-shaped-for-dispatch.test.ts"
+    - claim: "the step is a member of the habitual fast gate"
+      proof: "unit test: test/a-worker-branch-must-be-shaped-for-dispatch.test.ts"
+    - claim: "the step opens no network connection and spawns no test runner"
+      proof: "unit test: test/a-worker-branch-must-be-shaped-for-dispatch.test.ts"
+    - claim: "dropping the claims-a-task condition makes an innocent branch fail"
+      proof: "unit test: test/a-worker-branch-must-be-shaped-for-dispatch.test.ts"
