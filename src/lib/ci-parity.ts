@@ -935,6 +935,16 @@ export const FAST_GATE_STEPS: { job: string; script: string; reason: string; bou
     reason: "same-class — deterministic npm-script gate ci.yml's no-hand-rolled-fetch job runs unconditionally, measured 0.14s",
   },
   {
+    job: "source-size",
+    script: "source-size-ratchet",
+    reason:
+      "same-class (W1-T2488) — a deterministic npm-script gate: walks src/'s own line counts via a plain readdirSync " +
+      "sweep against scripts/source-size-baseline.json, spawns no subprocess (no test runner, no git) and opens no " +
+      "network connection, measured ~0.2s. src/run-task.ts sat at 32,119 lines against a next-largest source file of " +
+      "8,445 with no ratchet watching it, the one drift dimension the CLAUDE.md/coverage/cycle/learnings/mutation " +
+      "ratchets did not already cover",
+  },
+  {
     job: "bound-kind-census",
     script: "census:bound-kind",
     reason:
