@@ -1,0 +1,105 @@
+- id: W1-T2472
+  title: "A PLAN-ONLY REVIEW SPAWNS AN ADVISORY REVIEWER WORKER TO DISCOVER THERE IS NOTHING TO EXECUTE — run-task.ts's spawn gate is `args.spawnReviewer !== false && criteria.length > 0` and never consults `planOnly`, so every filing dispatches a fresh worker whose only output is `semantic[]`; on a plan-only diff `judgeReview` decides state on `floorUnmet` and `floorMet` is captured BEFORE the semantic downgrade arm, so that output is inert. Skip the spawn when the changeset is plan-only, changing no verdict text"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 12.00
+  files: [src/lib/review.ts, src/run-task.ts, test/review-skips-spawn-on-plan-only.test.ts, test/review-deletion-blind.test.ts]
+  origin: "operator-brief#skip-the-plan-only-reviewer-spawn-2026-08-30"
+  plan_refs: ["W1-T2471", "W1-T205", "W1-T2221", "W1-T63"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE DIAGNOSIS IS W1-T2471's RECON (#3295) AND IS CITED, NOT RE-DERIVED — but every fact was
+    RE-VERIFIED AT HEAD before building, and all four hold: run-task.ts's spawn gate mentions
+    `planOnly` ZERO times anywhere in `runReview` before the spawn; the block is headed "Advisory
+    semantic layer"; its catch arm reads "Advisory only — the deterministic floor still binds and
+    posts below" and the verdict built after it is headed "BINDING deterministic verdict";
+    review.ts:3783 is `const unmetForState = planOnly ? floorUnmet : unmet` with `const floorMet =
+    met` captured at 2650, BEFORE the downgrade arm at 2663. CI is not the cost either —
+    `isInPlanScope("MASTER-PLAN.md")` is true and the fast-lane classifier prints PLAN_ONLY.
+
+    THE RISK BAND IS RULE 19's SPAN, NOT BLAST RADIUS: four `files:` entries across four distinct
+    stems, so `sizingViolation` refuses risk:medium for the span alone. The change itself is small.
+
+    ⚠ THIS SHARD IS FILED IN ITS OWN PLAN-ONLY PR, SEPARATE FROM THE BUILD, AND THAT IS FORCED.
+    `criteriaTampered` is `!planOnly && criterionFieldTampered(diff)`, and a new shard's own
+    `claim:`/`proof:` lines ARE added criterion-field lines. MEASURED through the shipped entry
+    point `judgeReview`, not reasoned about: a filing-only diff reads planOnly=true /
+    criteriaTampered=false, and the SAME shard plus one `src/` file reads planOnly=false /
+    criteriaTampered=TRUE. So filing and build cannot ride in one PR. Splitting is the operator's
+    named remedy; no criterion was edited to make a gate quiet.
+
+    Q1. THE PREDICATE IS EXTRACTED, NEVER COPIED. `planOnlyFromFiles(diffFiles, enforcementData)`
+    now holds the one definition of the boolean and `judgeReview` classifies on that same call;
+    `planOnlyDiff(diff)` is the raw-diff form the spawn gate needs, since it runs BEFORE
+    `judgeReview` exists to be consulted. `enforcementData` is still computed in `judgeReview`
+    because `cappedSummary` needs the ARRAY, not the boolean, so sharing the predicate costs no
+    second walk of the diff. A test pins that the two can never disagree on the same diff.
+
+    ⚠ THE VERDICT TEXT DOES NOT MOVE, AND THAT IS PROVEN DIRECTLY RATHER THAN ASSERTED. The same
+    plan-only diff judged WITH a full set of semantic downgrades and WITHOUT any semantic input at
+    all produces a byte-identical `summary`, `state` and `floorState`. That equality is only
+    meaningful if the criterion PASSES on the floor — a downgrade can only move something that
+    passed — so the fixture's report is written to cover the PROOF's keywords and the test asserts
+    `met === true` first. MEASURED: the first fixture tried had `met === false`, which made the
+    equality trivially true by comparing two identical FAILs. The control on a plan+src diff
+    DIFFERS (CAPPED vs FAIL), so the invariant is not true everywhere by construction.
+
+    Q2. `reviewerOutcome` GAINS A DISTINCT VALUE RATHER THAN REUSING `not_attempted`.
+    `not_attempted`'s own doc enumerates two causes — `spawnReviewer===false` and "no criteria to
+    judge". A plan-only skip is a THIRD, structurally different one: criteria exist and a reviewer
+    would have been dispatched, but the diff has no code for the advisory lane to judge. Folding it
+    in would silently widen a documented value and leave the skip UNCOUNTABLE in the ledger, which
+    is the only way to measure the change that introduced it. So the value is
+    `not_attempted_plan_only`, and a `review.reviewer.skipped` ledger row records which path ran —
+    without it a skipped review differs from a completed one only by the ABSENCE of
+    `review.reviewer`, which no query can count.
+    ⚠ AND IT IS DERIVED FROM WHAT HAPPENED, NOT FROM THE CLASSIFICATION. The flag passed is
+    `planOnlySkip && !attemptReviewer`. FOUND BY THE FALSIFIER: with the gate removed but the flag
+    still passed from the classification alone, a run that DID spawn still reported
+    `not_attempted_plan_only` — the ledger lying in the exact direction this outcome exists to
+    prevent. A test now pins that direction.
+
+    Q3. THE BOUNDARY IS DRIVEN IN BOTH DIRECTIONS, WITH SPAWN COUNTS. A real `runReview` over a
+    pure-plan diff records spawns=0 / outcome=not_attempted_plan_only; the SAME harness over that
+    diff plus ONE `src/` file records spawns=1 / outcome=success. `planOnlyDiff` is separately
+    pinned true / false / false on plan-only, plan+src and an EMPTY diff (the `length > 0` clause).
+    FALSIFIER: removing the gate makes the plan-only side spawn=1 and reddens the suite.
+
+    ⚠ THE CHANGED-FILE-LIST CENSUS MOVES 3 -> 4, WITH ITS VERDICT CHANGE STATED, AS THAT TEST
+    DEMANDS. `planOnlyDiff` is a new `changedFiles(walkDiff(` call site.
+    THE VERDICT CHANGE IS: NONE. It feeds no verdict field — it decides only whether to dispatch an
+    advisory worker whose sole output is inert on the diffs it fires for. The census was itself
+    falsified (a 5th call site reddens it).
+
+    ⚠ WEAKEN NOTHING, AND NOTHING WAS: `planOnly`'s definition is unchanged (extracted, not
+    edited); `lint-plan`, the plan-PR emitter and the plan-index checks all still run and are
+    exactly what the unchanged verdict sentence still credits; the deterministic floor is untouched;
+    `criterionFieldTampered` is untouched. The batched approve (W1-T2471) is NOT built here — its
+    shard is filed on main and no batch entry point exists in `src/`, so the two are additive and
+    do not collide.
+  acceptance:
+    - claim: "a plan-only review dispatches no advisory reviewer worker at all"
+      proof: "unit test: test/review-skips-spawn-on-plan-only.test.ts"
+    - claim: "a changeset that acquires one src/ file still dispatches one, so the skip is scoped to plan-only"
+      proof: "unit test: test/review-skips-spawn-on-plan-only.test.ts"
+    - claim: "the plan-only verdict string is byte-identical to what it was before the spawn was skipped"
+      proof: "unit test: test/review-skips-spawn-on-plan-only.test.ts"
+    - claim: "judging with full semantic downgrades and with none produces the same summary, state and floor state on a plan-only diff"
+      proof: "unit test: test/review-skips-spawn-on-plan-only.test.ts"
+    - claim: "that equality is not vacuous: the criterion passes on the floor, and the same pair on a src diff differs"
+      proof: "unit test: test/review-skips-spawn-on-plan-only.test.ts"
+    - claim: "the spawn gate and the plan-only classification read the same predicate and cannot disagree on one diff"
+      proof: "unit test: test/review-skips-spawn-on-plan-only.test.ts"
+    - claim: "the skip is reported distinctly in the outcome rather than folded into the generic never-dispatched value"
+      proof: "unit test: test/review-skips-spawn-on-plan-only.test.ts"
+    - claim: "the outcome claims a skip only when no spawn happened, never from the plan-only classification alone"
+      proof: "unit test: test/review-skips-spawn-on-plan-only.test.ts"
+    - claim: "the ledger carries a row naming which path ran, so a skipped review is countable"
+      proof: "unit test: test/review-skips-spawn-on-plan-only.test.ts"
+    - claim: "the census of changed-file-list consumers still enumerates every call site and reddens on a new one"
+      proof: "unit test: test/review-deletion-blind.test.ts"
