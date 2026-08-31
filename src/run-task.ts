@@ -548,17 +548,20 @@ import { ContainmentError, probeContainment, type ProbeExecutor } from "./lib/co
 import { IsolationError, probeIsolation, type ProbeExecutor as IsolationProbeExecutor } from "./lib/isolation.js";
 import {
   buildExportBundle,
+  buildHeadlineIndex,
   buildPromotionJudgePrompt,
   DEFAULT_KNOWLEDGE_BUDGET_CHARS,
   loadLearningsCorpus,
   parsePromotionJudgeVerdict,
+  parseRuleHeadlines,
   projectLearningsHome,
   renderDoctrinePreamble,
   renderExportBundle,
+  retrieveRuleBodyOrDegrade,
   runPromotionPass,
   verifyBundlePin,
 } from "./lib/learnings.js";
-import type { LearningEntry, PromotionJudgeDeps } from "./lib/learnings.js";
+import type { LearningEntry, PromotionJudgeDeps, RuleHeadline } from "./lib/learnings.js";
 import { assertProvenance, citation } from "./lib/provenance.js";
 import { loadOperatorNotesForTask, renderOperatorNotes } from "./lib/operator-notes.js";
 import {
@@ -9859,6 +9862,52 @@ export function renderImplementPrompt(
     // worker was told at turn 0, never a re-derived/paraphrased copy.
     ...outputContractLines(task.id),
   ].join("\n");
+}
+
+/**
+ * W1-T2508: the ON-DEMAND half of the progressive-disclosure mechanism `learnings.ts` now
+ * exposes — given a headline+body rule corpus's raw markdown (CLAUDE.md's own bullets, W1-T2507's
+ * migrated residue, or anything in the same `- **HEADLINE** body` shape) and one headline, resolve
+ * JUST that rule's body without the whole corpus sitting in context up front. `learnings.ts` owns
+ * the pure split/index/degrade logic ({@link parseRuleHeadlines}/{@link buildHeadlineIndex}/
+ * {@link retrieveRuleBodyOrDegrade}); this owns the repo-relative FILE resolution `run-task.ts`
+ * already centralises for every other repo-rooted read (`join(repoRoot, ...)`, throughout this
+ * file). `readFile` is injectable — default a real `readFileSync` — so a test can simulate an
+ * unreadable source (the retrieval path failing) without touching disk.
+ *
+ * NOT wired into {@link implementPromptParts}/{@link renderImplementPrompt}: making a worker's
+ * stable prefix carry headlines instead of CLAUDE.md's current whole-file inject is a follow-up
+ * switch-over, not this task's acceptance — W1-T2508's rationale's own "NOT IN SCOPE" names "any
+ * change to what a worker is permitted to do". What this proves is that the retrieval path exists
+ * and degrades to the full rule (never to silence) BEFORE any body is ever withheld from a live
+ * prompt — the ordering the rationale calls out as the hazard.
+ */
+export function retrieveRuleBodyOnDemand(
+  headline: string,
+  sourcePath: string,
+  readFile: (path: string) => string | undefined = (p) => {
+    try {
+      return readFileSync(p, "utf8");
+    } catch {
+      return undefined;
+    }
+  },
+): string {
+  const raw = readFile(sourcePath);
+  if (raw === undefined) {
+    const unreadable: RuleHeadline = {
+      headline,
+      body: ` (unavailable — could not read rule source ${sourcePath})`,
+    };
+    return retrieveRuleBodyOrDegrade(unreadable, () => undefined);
+  }
+  const rules = parseRuleHeadlines(raw);
+  const index = buildHeadlineIndex(rules);
+  const rule = rules.find((r) => r.headline === headline) ?? {
+    headline,
+    body: ` (unavailable — no headline matches "${headline}" in ${sourcePath})`,
+  };
+  return retrieveRuleBodyOrDegrade(rule, (h) => index.get(h));
 }
 
 /**
