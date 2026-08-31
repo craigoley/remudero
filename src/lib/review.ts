@@ -6992,6 +6992,86 @@ export function srcChangeIsExecutable(diff: string, file: string): boolean {
   return !sawChangedLine;
 }
 
+// ── W1-T2521: CENSUS-GATE INTRODUCING-COMMIT CARVE-OUT ──────────────────────────────────────
+//
+// THE CIRCULARITY. A census gate is only real once `src/lib/ci-parity.ts` knows about it (a
+// `src/` registration), and its rule logic is a `scripts/<name>.mjs` file. When that filename
+// happens to match {@link INSTRUMENT_SURFACE}'s `^scripts/[^/]*-ratchet\.mjs$` entry, the two
+// necessarily land in one diff and {@link detectInstrumentEntanglement} refuses it as entangled
+// (#3331) — there is no ordering that avoids this directly: ship the script alone and a
+// DIFFERENT floor (instrument-surface-completeness) refuses it as an undeclared surface (#3335)
+// instead.
+//
+// WHY THE INTRODUCING COMMIT IS NOT WHAT RULE 25 WAS WRITTEN TO CATCH. The rule's premise,
+// stated at {@link detectInstrumentEntanglement}'s own doc, is that "the code's own falsifiers
+// were graded by the very version of the instrument that shipped beside them" — a claim about an
+// EXISTING instrument being changed alongside the product it measures. A script that has never
+// existed before this diff, registered for the first time in this same diff, has no prior
+// version anything could have been mis-graded against.
+//
+// THE CARVE-OUT, NARROW BY CONSTRUCTION. Both halves must be NEW in the SAME diff: the script
+// itself has no prior version (a brand-new file, not a rename or an edit of one that already
+// shipped), AND `src/lib/ci-parity.ts` carries a newly ADDED line naming its stem. Either half
+// missing — an existing script re-registered, a new script whose registration is not part of
+// this diff, or a new script alongside an unrelated `src/` edit — gets NO carve-out and stays
+// governed by the ordinary entanglement predicate below (acceptance claims 2-4). The predicate
+// never inspects the matched {@link INSTRUMENT_SURFACE} pattern itself, so the outcome does not
+// depend on whether the filename happens to match the `-ratchet` shape (claim 5), and it never
+// reads {@link INSTRUMENT_SURFACE_EXCLUSIONS} — that map stays advisory, informing a DIFFERENT
+// alarm only (claim 6, same discipline as {@link ENTANGLEMENT_EXEMPT_INSTRUMENTS} above).
+//
+// NOT SUBTRACTED FROM THE RETURNED EVIDENCE. Unlike {@link ENTANGLEMENT_EXEMPT_INSTRUMENTS} (which
+// removes an exempt path from `instrumentPaths` as if it were never on the surface at all), a
+// carved-out introducing commit keeps its raw `instrumentPaths`/`srcPaths` evidence intact — the
+// script and the registration are real changes, just not the shape Rule 25 exists to catch. Only
+// the `entangled` verdict itself is affected. This is deliberate: it is what lets the raw
+// instrument+src evidence be read back out as the negative control (claim 7) that the carve-out
+// is doing real work, rather than the fixture being vacuously non-entangled to begin with.
+//
+// PATH-ONLY CALLERS GET NO CARVE-OUT, THE SAME FAIL-CLOSED DEFAULT `srcChangeIsExecutable` TAKES
+// ABOVE. Telling a brand-new file from an edited one needs the patch; a caller that cannot supply
+// `diff` gets today's stricter, path-only reading — never a silently widened exemption.
+
+/** The path a census gate's registration lives at (#3331/#3335's own shared root cause). */
+const CENSUS_REGISTRATION_PATH = "src/lib/ci-parity.ts";
+
+/**
+ * True when `file` is a brand-new addition in this diff — a `diff --git` block carrying git's
+ * own `new file mode` marker, or (equivalently, and just as authoritative) a `--- /dev/null`
+ * source side. Neither a rename (git emits `rename from`/`rename to`, not `new file mode`) nor an
+ * ordinary edit of a file that already existed qualifies.
+ */
+function fileIsNewInDiff(diff: string, file: string): boolean {
+  for (const block of diff.split(/(?=^diff --git )/m)) {
+    const header = block.match(/^diff --git a\/\S+ b\/(\S+)/);
+    if (!header || header[1] !== file) continue;
+    return /^new file mode\b/m.test(block) || /^--- \/dev\/null\s*$/m.test(block);
+  }
+  return false;
+}
+
+/** The bare stem a `scripts/<stem>.mjs` (or `.ts`/`.sh`/`.json`) path reduces to — the shape a
+ *  `src/lib/ci-parity.ts` registration entry actually cites (e.g. `script: "source-size-ratchet"`
+ *  for `scripts/source-size-ratchet.mjs`), never the full path with its directory and extension. */
+function scriptStem(path: string): string {
+  const base = path.split("/").pop() ?? path;
+  return base.replace(/\.(mjs|[cm]?[jt]s|sh|json)$/, "");
+}
+
+/**
+ * True when `scriptFile` (already known to be on {@link INSTRUMENT_SURFACE}) is a newly
+ * introduced census gate in `diff`: see the section doc above for the full design. Requires the
+ * script to be brand-new ({@link fileIsNewInDiff}) AND `src/lib/ci-parity.ts` to carry a newly
+ * ADDED line naming its stem — an unrelated, pre-existing registration entry that merely mentions
+ * the stem in a comment or context line does not count, only an add.
+ */
+function isIntroducingCensusGate(diff: string, diffFiles: string[], scriptFile: string): boolean {
+  if (!diffFiles.includes(CENSUS_REGISTRATION_PATH)) return false;
+  if (!fileIsNewInDiff(diff, scriptFile)) return false;
+  const stem = scriptStem(scriptFile);
+  return walkDiff(diff).some((l) => l.file === CENSUS_REGISTRATION_PATH && l.kind === "add" && l.text.includes(stem));
+}
+
 export function detectInstrumentEntanglement(
   diffFiles: string[],
   diff?: string,
@@ -7036,7 +7116,17 @@ export function detectInstrumentEntanglement(
   const srcPaths = diffFiles.filter(
     (f) => isProductPath(f) && !INSTRUMENT_SURFACE_RE.test(f) && (diff === undefined || srcChangeIsExecutable(diff, f)),
   );
-  return { entangled: instrumentPaths.length > 0 && srcPaths.length > 0, instrumentPaths, srcPaths };
+  // W1-T2521: subtract a newly introduced census gate (script + its own first registration,
+  // both new in THIS diff — see the section doc above `CENSUS_REGISTRATION_PATH`) from the
+  // ENTANGLEMENT VERDICT only; `instrumentPaths`/`srcPaths` stay the raw, unedited evidence.
+  const introducedGates = diff === undefined ? [] : instrumentPaths.filter((f) => isIntroducingCensusGate(diff, diffFiles, f));
+  const effectiveInstrumentPaths = introducedGates.length === 0 ? instrumentPaths : instrumentPaths.filter((f) => !introducedGates.includes(f));
+  const effectiveSrcPaths = introducedGates.length === 0 ? srcPaths : srcPaths.filter((f) => f !== CENSUS_REGISTRATION_PATH);
+  return {
+    entangled: effectiveInstrumentPaths.length > 0 && effectiveSrcPaths.length > 0,
+    instrumentPaths,
+    srcPaths,
+  };
 }
 
 /** True when a changed path is anywhere under a `docs/` directory. */
