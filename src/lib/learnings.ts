@@ -471,6 +471,66 @@ export function projectLearningsHome(repoRoot: string): string {
   return join(repoRoot, "learnings");
 }
 
+/**
+ * The five subsystem shard names THIS repo's own corpus is split into (W1-T33 SPLIT —
+ * `learnings/{architecture,ci,failures,platform,testing}.yaml`). `rmd onboard --phase
+ * synthesize` (W1-T2505) seeds an onboarded target repo's {@link projectLearningsHome} with the
+ * SAME split rather than inventing a new one, so {@link loadLearningsCorpus} and the generated
+ * {@link loadLearningsIndex} loader work UNCHANGED against an onboarded repo, exactly as they do
+ * against this one.
+ */
+export const PROJECT_LEARNINGS_SHARD_NAMES = ["architecture", "ci", "failures", "platform", "testing"] as const;
+
+/** One seeded shard file's content: an empty entry list plus a header explaining WHY it is
+ *  empty (W1-T2505's whole design point — see {@link seedProjectLearningsHomeFiles}). */
+function seedShardFileContent(name: string): string {
+  return (
+    [
+      `# learnings/${name}.yaml — seeded by \`rmd onboard --phase synthesize\` (W1-T2505).`,
+      "#",
+      "# One of the five subsystem shards this repo's own corpus is split into (W1-T33 SPLIT):",
+      `# learnings/{${PROJECT_LEARNINGS_SHARD_NAMES.join(",")}}.yaml. Onboarding seeds the SAME`,
+      "# split rather than inventing a new one, so loadLearningsCorpus/loadLearningsIndex (see",
+      "# this file's own header, src/lib/learnings.ts) work unchanged against this repo too.",
+      "#",
+      "# EMPTY ON PURPOSE: onboarding seeds a HOME for facts, never a fact itself. A learnings",
+      "# entry carries provenance (a `src` plus a citation date) -- inventing one here would",
+      "# manufacture provenance for something nobody in this repo has established yet. The first",
+      "# entry any shard here ever carries is the first real learning about this repo.",
+      "",
+      "[]",
+      "",
+    ].join("\n")
+  );
+}
+
+/**
+ * The seeded project learnings home's file contents (W1-T2505), keyed by filename RELATIVE to
+ * the home directory (never a full path — the caller, `rmd onboard --phase synthesize`, decides
+ * where the home itself lives): the five empty subsystem shards ({@link
+ * PROJECT_LEARNINGS_SHARD_NAMES}) plus a matching `index.json`.
+ *
+ * The `index.json` value is exactly what `scripts/generate-learnings-index.mjs`'s own
+ * `buildIndex`/`serializeIndex` would produce from five empty shards (every shard maps to
+ * `{entries: [], globs: []}`, `bySubsystem` empty) -- reproduced here rather than shelled out to,
+ * since onboarding writes through its own injected fs seam (never a child process), and an empty
+ * corpus's index is fully determined regardless. `npm run learnings-index:check`-equivalent
+ * tooling in the seeded repo will find this `index.json` already fresh.
+ */
+export function seedProjectLearningsHomeFiles(): Record<string, string> {
+  const files: Record<string, string> = {};
+  for (const name of PROJECT_LEARNINGS_SHARD_NAMES) {
+    files[`${name}.yaml`] = seedShardFileContent(name);
+  }
+  const indexFiles: Record<string, { entries: string[]; globs: string[] }> = {};
+  for (const name of PROJECT_LEARNINGS_SHARD_NAMES) {
+    indexFiles[`${name}.yaml`] = { entries: [], globs: [] };
+  }
+  const index: LearningsIndex = { files: indexFiles, bySubsystem: {} };
+  files["index.json"] = `${JSON.stringify(index, null, 2)}\n`;
+  return files;
+}
+
 /** Parse one learnings YAML file. A MISSING file is not an error — returns `[]`. */
 export function loadLearnings(path: string): LearningEntry[] {
   let text: string;
