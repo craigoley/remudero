@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -145,6 +145,69 @@ test("an unreadable src/run-task.ts refuses rather than silently scanning zero v
     assert.equal(r.status, "refused");
     assert.match(r.refusedReason ?? "", /run-task\.ts unreadable/);
   } finally {
+    rmSync(checkoutDir, { recursive: true, force: true });
+  }
+});
+
+test("a reshaped run-task.ts (no COMMANDS marker) refuses via deriveCliVerbs's own thrown reason", () => {
+  const checkoutDir = tmp("rmd-vc-reshaped-");
+  const stateDir = join(checkoutDir, "state");
+  mkdirSync(join(checkoutDir, "src"), { recursive: true });
+  writeFileSync(join(checkoutDir, "src/run-task.ts"), 'export const nothingHere = "no COMMANDS marker at all";\n');
+  buildVerbCensusLedgerFixture(stateDir);
+  try {
+    const r = runVerbCensus({ checkoutDir, stateDir, ledgerUnion: resolveLedgerUnion });
+    assert.equal(r.status, "refused");
+    assert.match(r.refusedReason ?? "", /deriveCliVerbs: could not find/);
+    assert.equal(r.silentCount, 0);
+  } finally {
+    rmSync(checkoutDir, { recursive: true, force: true });
+  }
+});
+
+test("every declared verb unmeasurable: refuses rather than measuring an empty population", () => {
+  const checkoutDir = tmp("rmd-vc-allunmeasurable-");
+  const stateDir = join(checkoutDir, "state");
+  mkdirSync(join(checkoutDir, "src/lib"), { recursive: true });
+  writeFileSync(
+    join(checkoutDir, "src/run-task.ts"),
+    'const COMMANDS: readonly CommandSpec[] = [\n' + '  { name: "lonely", usage: "lonely" },\n' + '] as const;\n',
+  );
+  // No ledger step literal anywhere carries the "lonely" prefix — the sole declared verb is
+  // unmeasurable, so `measurable.length` is zero and the census must refuse, not report a bare
+  // "0 silent of 0 measurable" that would misread as a clean bill.
+  writeFileSync(join(checkoutDir, "src/lib/stub-steps.ts"), 'log("other.thing", {});\n');
+  buildVerbCensusLedgerFixture(stateDir);
+  try {
+    const r = runVerbCensus({ checkoutDir, stateDir, ledgerUnion: resolveLedgerUnion });
+    assert.equal(r.status, "refused");
+    assert.match(r.refusedReason ?? "", /no scanned verb carries an attributable ledger prefix/);
+    assert.equal(r.unmeasurableCount, 1);
+    assert.deepEqual(r.unmeasurableVerbs, ["lonely"]);
+    assert.equal(r.silentCount, 0, "a refusal must never masquerade as a measured zero");
+  } finally {
+    rmSync(checkoutDir, { recursive: true, force: true });
+  }
+});
+
+test("a source subdirectory that cannot be scanned is skipped, never the reason the whole census refuses", () => {
+  const checkoutDir = buildVerbCensusFixtureCheckout();
+  const stateDir = join(checkoutDir, "state");
+  buildVerbCensusLedgerFixture(stateDir);
+  const brokenDir = join(checkoutDir, "src/broken");
+  mkdirSync(brokenDir, { recursive: true });
+  writeFileSync(join(brokenDir, "unreadable.ts"), 'log("alpha.thing", {});\n');
+  chmodSync(brokenDir, 0o000);
+  try {
+    const r = runVerbCensus({ checkoutDir, stateDir, ledgerUnion: resolveLedgerUnion });
+    // walkVerbCensusSources's own readdirSync throws on brokenDir (permission denied) and it
+    // returns silently rather than aborting the whole walk — the rest of the corpus (alpha/beta/
+    // gamma's real prefixes, from src/lib/stub-steps.ts) is still scanned and measured normally.
+    assert.equal(r.status, "measured");
+    assert.equal(r.measurableCount, 3);
+    assert.equal(r.silentCount, 2, "alpha/beta still read as silent — the unreadable subdir changed nothing about the reachable corpus");
+  } finally {
+    chmodSync(brokenDir, 0o755);
     rmSync(checkoutDir, { recursive: true, force: true });
   }
 });
