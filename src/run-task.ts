@@ -774,6 +774,7 @@ import {
   noPrReportExcerpt,
   workerLedgerFields,
   workerTranscript,
+  uniqueRunBranch,
   worktreeAdd,
   worktreeLockIsPidAlive,
   worktreeRemove,
@@ -29168,6 +29169,50 @@ const INBOX_DRAFT_WORKER_TOOLS = ["Read", "Grep", "Glob"];
  * happens with the resulting {@link DraftRungOutcome}s. `toDraft.length === 0` short-circuits
  * before any clone/worktree — no spend for the common "nothing to draft" case.
  */
+/**
+ * Materialize the daemon lane's per-attempt worktree — extracted from `draftProposalBatch`
+ * (its one call site) purely so this exact sequence is directly unit-testable against a real
+ * repo, the same rationale `createFixRungWorktree` (above) already documents for its own
+ * extraction (W1-T1129).
+ *
+ * W1-T2493. `runId` here is `buildInboxDraftHook`'s daemon-lifetime run id — built ONCE at
+ * daemon boot and passed to `draftProposalBatch` UNCHANGED on every poll that has proposals
+ * due. Before this function existed, `draftProposalBatch` minted its branch as the bare
+ * `run-${runId}`, so the SECOND poll in one boot asked `worktreeAdd` for the identical branch
+ * the FIRST poll already created and died on `fatal: a branch named '...' already exists` —
+ * see {@link uniqueRunBranch}'s own doc (lib/worker.ts) for the full mechanism and why a
+ * leftover branch is the expected case, not an edge one. `pruneStaleRuns` still runs FIRST
+ * (unchanged position/args), so the ordinary case — a truly orphaned branch from a worktree
+ * that already finished or was reaped — gets reclaimed and this function hands `worktreeAdd`
+ * back the plain, unsuffixed name; `uniqueRunBranch` is what covers every case pruning does
+ * not (a leftover branch whose worktree is still ON DISK when this runs again, or a prune
+ * hiccup) without ever forcing or reusing a branch.
+ *
+ * A worktreeAdd failure is ledgered (`worktree.add_failed`, naming the branch it tried) and
+ * RETHROWN — never swallowed here — so a genuine two-lane collision (a race `uniqueRunBranch`
+ * could not have observed) is still visible on the SAME ledger this whole rung already writes
+ * to, not only as inherited git stderr in a separate log file.
+ */
+export function createDaemonLaneWorktree(
+  repoDir: string,
+  worktreesRoot: string,
+  runId: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): { branch: string; worktreePath: string } {
+  const pruned = pruneStaleRuns(repoDir, worktreesRoot, { graceMs: DEFAULT_PRUNE_GRACE_MS });
+  if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
+  const branch = uniqueRunBranch(repoDir, runId);
+  const worktreePath = join(worktreesRoot, branch);
+  try {
+    worktreeAdd(repoDir, worktreePath, branch, "origin/main");
+  } catch (e) {
+    log("worktree.add_failed", { branch, error: String((e as Error)?.message ?? e) });
+    throw e;
+  }
+  writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
+  return { branch, worktreePath };
+}
+
 export async function draftProposalBatch(
   toDraft: Proposal[],
   config: Config,
@@ -29195,12 +29240,7 @@ export async function draftProposalBatch(
     mkdirSync(dirname(repoDir), { recursive: true });
     execFileSync("gh", ["repo", "clone", `${owner}/${repo}`, repoDir], { stdio: "inherit" });
   }
-  const pruned = pruneStaleRuns(repoDir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
-  if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
-  const branch = `run-${runId}`;
-  const worktreePath = join(worktreesDir(config), branch);
-  worktreeAdd(repoDir, worktreePath, branch, "origin/main");
-  writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
+  const { branch, worktreePath } = createDaemonLaneWorktree(repoDir, worktreesDir(config), runId, log);
 
   try {
     const planText = readFileSync(join(worktreePath, "plan", "tasks.yaml"), "utf8");
