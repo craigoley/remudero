@@ -132,6 +132,7 @@ import {
   type DaemonSummary,
   type HeadroomPolicy,
   type StarvationCensus,
+  type StarvationClearedInfo,
   priorUnrecognisedResetStrings,
 } from "./lib/daemon.js";
 // W1-T372: the daemon-tick counterpart to daemon-health.ts's own pull-only rate-limit display
@@ -19718,6 +19719,77 @@ export function escalateStarvation(
 }
 
 /**
+ * THE CLEARED HALF (this task) — `escalateStarvation` above opens an issue and this closes it,
+ * fired from `runDaemon`'s `onStarvationCleared` hook on the SAME edge that resets
+ * `starvationEscalated` (daemon.ts): a queue that stopped being starved, either because nothing
+ * recoverable is blocking anymore or because a dispatchable task appeared. THE PRODUCER ALREADY
+ * KNOWS which — `info.reason` names it and `info.taskId` names the task where there is one — so
+ * the closing comment says WHY, never a bare "resolved" a week-later reader could not act on.
+ *
+ * THE REFERENT IS THE LEDGER, NEVER A LOOKUP: the issue to close is whichever URL THIS episode's
+ * OWN `dispatch.starvation.escalated` row named (the most recent one, unless a LATER
+ * `dispatch.starvation.cleared` row already closed it) — never any other open issue, so no
+ * escalation of another class is ever touched by this path. Absent (delivery failed, or already
+ * cleared) ⇒ nothing to close, a silent no-op.
+ *
+ * CANNOT-OBSERVE MEANS WAIT (W1-T130), applied to the closer: a gateway that cannot close (no
+ * `closeWithComment`) or one whose close call throws leaves the issue OPEN and costs one ledger
+ * row (`delivered: false`) — never a throw propagated into the daemon loop, matching
+ * `deriveStatus`'s own polarity and `escalateStarvation`'s own "write the marker whether or not
+ * delivery succeeded" discipline. The marker is written on EVERY call that found an issue to
+ * close (success or failure alike), so an episode ending is countable on the ledger either way.
+ */
+export function escalateStarvationCleared(
+  info: StarvationClearedInfo,
+  ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway },
+): void {
+  const lines = readLedgerLines(ctx.ledgerPath);
+  let issueUrl: string | null = null;
+  for (const l of lines) {
+    if (l.step === "dispatch.starvation.escalated") {
+      issueUrl = typeof l.issue_url === "string" ? l.issue_url : null;
+    } else if (l.step === "dispatch.starvation.cleared") {
+      // A prior clear already closed (or gave up on) whatever the last escalation opened —
+      // never re-derive a referent from an OLDER escalated row past this point.
+      issueUrl = null;
+    }
+  }
+  if (!issueUrl) return;
+
+  const reasonText =
+    info.reason === "no-recoverable-blockers"
+      ? "nothing recoverable is blocking the queue anymore"
+      : `a dispatchable task appeared${info.taskId ? ` (${info.taskId})` : ""} and ended the episode`;
+  const comment =
+    `oper#queue-starvation-2026-08-03: this starvation episode has ended — ${reasonText}. ` +
+    `Closing automatically; a fresh episode opens its own issue if the queue starves again.`;
+
+  const issues = ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo);
+  let delivered = false;
+  let failure: string | undefined;
+  if (!issues.closeWithComment) {
+    failure = "issue gateway cannot close issues";
+  } else {
+    try {
+      issues.closeWithComment(issueUrl, comment);
+      delivered = true;
+    } catch (e) {
+      failure = String((e as Error)?.message ?? e);
+    }
+  }
+
+  appendLedger(ctx.ledgerPath, {
+    run_id: ctx.runId,
+    task_id: info.taskId ?? "daemon",
+    step: "dispatch.starvation.cleared",
+    reason: info.reason,
+    issue_url: issueUrl,
+    delivered,
+    ...(failure ? { failure } : {}),
+  });
+}
+
+/**
  * W1-T206: shared dispatch-breaker gate for drainCommand/daemonCommand — ONE
  * {@link DispatchBreakerCache} per invocation (never rebuilt per tick/per task, so a
  * same-process rotation gets caught as it happens — see the cache's own doc), memoized
@@ -21612,6 +21684,9 @@ export async function daemonCommand(
         // is already idle (runDaemon's own in-process bound, `starvationEscalated`) by the time
         // this fires.
         onStarvation: (census) => escalateStarvation(census, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
+        // This task: the cleared half — closes the escalation `escalateStarvation` opened, on
+        // the SAME edge `runDaemon` already resets `starvationEscalated` at.
+        onStarvationCleared: (info) => escalateStarvationCleared(info, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
         checkStop: () => stopDetail(config.root),
         // W1-T1216: LOCAL FIRST (design (i)), falling through to the shared cross-host hold
         // (`refs/rmd-pause/hold`) only when the local file is silent — see checkSharedPause's
