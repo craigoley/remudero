@@ -1,0 +1,95 @@
+- id: W1-T2513
+  title: "EVERY DISPATCH LANE RE-FETCHES ORIGIN AND RE-LOADS THE WHOLE PLAN BEFORE IT YIELDS — `syncPlanFromOrigin`'s `execFileSync(\"git\", [..., \"fetch\", \"--quiet\", \"origin\"])` at run-task.ts:1319 BLOCKS THE EVENT LOOP for 2028 ms measured, and `loadPlan` costs another 837 ms over 1023 tasks, both on `runTask`'s zero-await preamble; the three lanes of one tick fetch the same remote and parse the same file three times, and lane 2 cannot execute a single instruction until lane 1 is done"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 20.00
+  files: [src/run-task.ts, test/one-fetch-and-one-plan-load-per-tick.test.ts]
+  origin: "operator-brief#it-doesnt-seem-like-we-have-3-parallel-builds-2026-08-30"
+  plan_refs: ["W1-T2509", "W1-T60", "W1-T343"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THIS IS THE REMAINDER AFTER W1-T2509, NOT A RESTATEMENT OF IT. W1-T2509 found the dominant term —
+    every lane built its own COLD `buildBatchedGithub` and paid a full-repo REST walk — and shares one
+    gateway per `owner/repo`. That fix is real and it is not this one. What it leaves untouched is the
+    STRUCTURE it exposed: `runTask` carries ZERO `await` across the 404 lines from its declaration (run-task.ts:9963) to its
+    first one (10367, `return await runTaskBody()`), so
+    `Promise.allSettled(admitted.map((t) => deps.runOne(t.id)))` cannot ENTER lane 2 until lane 1's
+    preamble returns, and that preamble still does two expensive things per lane.
+
+    MEASURED IN A CONTAINER ON THIS REPO AT 1023 TASKS, 2026-08-30:
+
+      execFileSync("git", ["-C", repoDir, "fetch", "--quiet", "origin"])   2028 ms   BLOCKING
+      loadPlan("plan/tasks.yaml")                                           837 ms   BLOCKING
+
+    Roughly 2.9 s per lane, times three lanes, before the first lane reaches any awaitable work — and
+    `projectPlan` over the same 1023 tasks runs after both, unmeasured here and deliberately not
+    guessed at. RE-DERIVE RATHER THAN TRUST THESE: both numbers move with the plan's size, the
+    container's network, and the remote's state, and no timing survives the hour it was taken in. The
+    query is the two calls above, timed where they actually run.
+
+    `execFileSync` IS THE WORD THAT MATTERS. It is not merely slow; it blocks the ENTIRE Node event
+    loop. For those 2028 ms the process cannot run lane 2's preamble, cannot resume any pending
+    continuation, and cannot service the daemon's own timers. A lane doing network I/O synchronously
+    is not one lane being slow — it is every lane being stopped. `git grep -c 'execFileSync(' -- src/`
+    reports 213 matching LINES across 42 files, so this is a house pattern rather than an oversight; what
+    makes THESE two special is that they sit on the fan-out's critical path, where the cost is
+    multiplied by the lane count and paid for identical work.
+
+    THE WORK IS IDENTICAL, WHICH IS WHY THE FIX IS REMOVAL AND NOT OVERLAP. The lanes of one tick are
+    admitted together against ONE plan and ONE remote. They fetch the same origin, parse the same
+    `plan/tasks.yaml` plus the same `plan/tasks.d/` shards, and get the same answer. Doing that once
+    per tick and handing the result to every lane is strictly better than making it concurrent: it
+    deletes two thirds of the work rather than interleaving it. This is the SAME shape as W1-T2509's
+    gateway — one snapshot per tick, keyed by what the lanes actually share — which is why it belongs
+    beside it and not inside it.
+
+    AND MAKING IT ASYNC WOULD NOT BE ENOUGH ON ITS OWN, WHICH IS WORTH STATING PLAINLY SO NOBODY
+    REACHES FOR IT FIRST. Converting the fetch to a promise lets other lanes run DURING the network
+    wait, and that is a genuine win for the 2028 ms. It does nothing for the 837 ms: `loadPlan` is
+    CPU-bound, Node is single-threaded, and three concurrent parses of the same file take the same
+    total time as three serial ones. Only sharing removes that term. A yield at the top of `runTask`
+    is likewise not the fix — it makes every lane ENTERED promptly and leaves the blocking work
+    exactly where it is.
+
+    IT MUST STILL REFUSE WHAT IT REFUSES TODAY. `syncPlanOrRefuse`'s contract is load-bearing: a failed
+    fetch refuses the dispatch unless `--allow-stale`, and a `staleDispatch` is announced. A shared
+    snapshot must carry that verdict to EVERY lane identically — one fetch failure refuses all three,
+    never "lane 1 refused and lanes 2-3 proceeded from a stale ref they never checked". Likewise
+    W1-T60's self-sync dispatches from origin/main's plan blob, and a per-tick snapshot must be taken
+    from the same ref at the same moment, never mixed across a fetch boundary mid-tick.
+
+    THE STALENESS BUDGET IS ONE TICK AND NO MORE. `pollIntervalMs` is 60 s; a snapshot reused across
+    ticks would let a merge land and stay invisible for the life of the daemon, which is the failure
+    `drainCommand`'s own `githubFactory` comment already refuses for a different reason. Scoped to one
+    tick, the worst case is that a lane sees the plan as it stood when its batch was admitted — which
+    is what "admitted together" already means.
+
+    NOT IN SCOPE: the other 211 `execFileSync` call sites; `projectPlan`'s own cost, which this makes
+    cheaper to measure rather than fixing; the lane count; and the admission side, which
+    `dispatch.concurrent_set` already proves correct.
+
+    THE RISK BAND IS BLAST RADIUS, NOT RULE 19's SPAN: one src stem plus a test is narrow, but a shared
+    plan snapshot that goes stale, or a fetch refusal that reaches only one lane, would dispatch
+    against a plan nobody checked — silently, and on every task.
+  acceptance:
+    - claim: "three lanes of one tick perform ONE origin fetch between them, not one each"
+      proof: "unit test: test/one-fetch-and-one-plan-load-per-tick.test.ts"
+    - claim: "three lanes of one tick perform ONE plan load between them, not one each"
+      proof: "unit test: test/one-fetch-and-one-plan-load-per-tick.test.ts"
+    - claim: "a fetch failure refuses every lane of the tick identically, never just the first"
+      proof: "unit test: test/one-fetch-and-one-plan-load-per-tick.test.ts"
+    - claim: "a stale dispatch under --allow-stale is announced to every lane, as it is today"
+      proof: "unit test: test/one-fetch-and-one-plan-load-per-tick.test.ts"
+    - claim: "the snapshot never crosses a tick boundary — the next tick re-fetches and re-loads"
+      proof: "unit test: test/one-fetch-and-one-plan-load-per-tick.test.ts"
+    - claim: "a single-lane dispatch behaves exactly as it does today, same calls in the same order"
+      proof: "unit test: test/one-fetch-and-one-plan-load-per-tick.test.ts"
+    - claim: "a caller supplying no snapshot still fetches and loads for itself, unchanged"
+      proof: "unit test: test/one-fetch-and-one-plan-load-per-tick.test.ts"
+    - claim: "restoring the per-lane fetch makes the one-fetch-per-tick assertion fail"
+      proof: "unit test: test/one-fetch-and-one-plan-load-per-tick.test.ts"

@@ -1,0 +1,89 @@
+- id: W1-T2520
+  title: "THE FIX-RUNG STRIKE CAP DOES NOT BIND — `priorStrikesFor` derives the count by COUNTING `fix.dispatch` LEDGER ROWS, a read-modify-write with no mutual exclusion, while `sweepLight`'s retrigger admits `deps.dispatchFix` (the code's own words: 'the one lane W1-T1211 admits into the light pass that spends a worker'); observed 13 fix-worker dispatches across TWO PRs against a cap of 2, and the same review posted to the same sha three times"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 20.00
+  files: [src/lib/sweep.ts, test/the-fix-rung-strike-cap-does-not-bind.test.ts]
+  origin: "operator-session#fix-rung-runaway-2026-08-30"
+  plan_refs: ["W1-T513", "W1-T1211", "W1-T2379", "W1-T76"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED LIVE, AND IT SPENDS A WORKER EACH TIME. One `docker logs --since 90m` window, two PRs:
+
+      "fix rung: strike 1/2 (resume) — dispatching ONE ci-log fix worker for 2 failing check(s)"   x8
+      "fix rung: strike 2/2 (fresh)  — dispatching ONE ci-log fix worker for 1 failing check(s)"   x5
+      "remudero-review=success posted to 21b3e63 — PASS — 9 criteria substantiated"                 x3
+
+    Thirteen fix-worker dispatches against a `strikeCap` of 2, and one review posted three times to
+    ONE sha. The counter is not frozen — it reached 2/2 — it simply advances far slower than the
+    dispatch rate, which is the signature of a read-modify-write race rather than a dead counter.
+
+    THE MECHANISM, FROM SOURCE. `priorStrikes` is not held in memory; it is DERIVED on every read:
+
+      run-task.ts   priorStrikes: priorStrikesFor(ledger, taskId, currentStrikeRegimeFor(ledger, taskId))
+      run-task.ts   priorStrikesFor: for (line of lines) if (line.step === "fix.dispatch" && line.task_id === taskId) n++
+
+    So the cap is "count the rows, then write one more". Between the count and the write there is no
+    exclusion, and there does not need to be a second process for that to matter: `startInFlightTicker`
+    can begin a sweep BETWEEN iterations, and sweep.ts's own comment above `inFlightReviewKeys` says
+    why a module-level container is needed at all — "every caller builds a fresh `SweepDeps` but runs
+    in the SAME process". The very next sentence names the lane: "`deps.dispatchFix` — the one lane
+    W1-T1211 admits into the light pass that spends a worker."
+
+    THE ASYMMETRY IS THE WHOLE BUG, AND IT IS ONE GREP:
+
+      git grep -c 'inFlightReviewKeys' -- src/lib/sweep.ts            => 7   (reviews ARE protected)
+      git grep -cE 'inFlightFix|fixDispatchKeys|claimedFixKeys' -- src/ => 0   (fix dispatch is NOT)
+
+    W1-T513 built exactly this mutex for reviews, for exactly this reason, and the worker-spending
+    lane beside it never got one. The three duplicate reviews on 21b3e63 are the same race showing
+    through the other side: three fix workers each finished and each ran a review.
+
+    RE-DERIVE RATHER THAN TRUST THE 13. One window on one evening, and the counts move with dispatch
+    volume. The query is `rmd ledger-grep '"step":"fix.dispatch"'` over the union, grouped by
+    `task_id` and ordered by ts: consecutive rows for one task inside one sweep interval, or more
+    rows than `strikeCap`, are this defect. Print the corpus's newest ts beside the answer.
+
+    THE FIX IS A CLAIM, NOT A BIGGER CAP. Raising `strikeCap` would multiply the waste; lowering it
+    would not stop the race. What is missing is the same shape `inFlightReviewKeys` already has:
+    claim the key before dispatching, release when the attempt SETTLES (the review mutex's own
+    contract, sweep.ts's "the instant this attempt SETTLES"), and read the count under that claim so
+    two callers cannot both see the same value. The key is the PR, or the (task, head sha) pair —
+    whichever the review mutex already keys on, so there is one spelling of "this PR is being worked"
+    rather than two.
+
+    IT MUST NOT STOP THE RUNG WORKING. The fix rung is correct and valuable: the same log shows it
+    standing down twice for good reasons — "a later attempt already in flight on this head" and
+    "zero enumerable failing check(s) … the checks-red rollup and the ci-log evidence miner
+    disagree" — and then RESOLVING a PR after one strike. This task adds exclusion, never a refusal:
+    a PR with strikes left must still get its strike, and a crashed dispatch must release its claim
+    rather than wedging the PR forever (the release-on-settle half is not optional).
+
+    NOT IN SCOPE: the cap's value; `currentStrikeRegimeFor`'s amnesty rule (a separate reason a
+    strike may not count, and NOT the cause here — the counter did advance); and the review mutex,
+    which works.
+
+    THE RISK BAND IS BLAST RADIUS: one src stem plus a test, but a claim that is taken and never
+    released wedges every red PR out of the fix rung permanently — worse than the waste it fixes.
+  acceptance:
+    - claim: "two concurrent sweeps dispatch at most one fix worker for the same PR"
+      proof: "unit test: test/the-fix-rung-strike-cap-does-not-bind.test.ts"
+    - claim: "the strike count is read under the claim, so both callers cannot see the same value"
+      proof: "unit test: test/the-fix-rung-strike-cap-does-not-bind.test.ts"
+    - claim: "a PR at its strike cap dispatches nothing, however many sweeps observe it"
+      proof: "unit test: test/the-fix-rung-strike-cap-does-not-bind.test.ts"
+    - claim: "the claim is released when the attempt settles, including when it throws"
+      proof: "unit test: test/the-fix-rung-strike-cap-does-not-bind.test.ts"
+    - claim: "a PR with strikes left still gets its strike — this adds exclusion, never a refusal"
+      proof: "unit test: test/the-fix-rung-strike-cap-does-not-bind.test.ts"
+    - claim: "two DIFFERENT PRs still dispatch independently and neither blocks the other"
+      proof: "unit test: test/the-fix-rung-strike-cap-does-not-bind.test.ts"
+    - claim: "the existing stand-down reasons still fire unchanged ahead of any dispatch"
+      proof: "unit test: test/the-fix-rung-strike-cap-does-not-bind.test.ts"
+    - claim: "removing the claim lets two concurrent sweeps both dispatch again"
+      proof: "unit test: test/the-fix-rung-strike-cap-does-not-bind.test.ts"

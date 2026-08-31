@@ -23,7 +23,7 @@
  */
 
 import { readdirSync as nodeReaddirSync, readFileSync as nodeReadFileSync, existsSync as nodeExistsSync } from "node:fs";
-import { join } from "node:path";
+import { join, basename } from "node:path";
 import { gunzipSync as nodeGunzipSync } from "node:zlib";
 import { NEVER_ROTATE_FILENAME } from "./log-rotation.js";
 
@@ -95,6 +95,41 @@ export interface LedgerUnionResult {
    * number this module refuses to hand back; see the module doc.
    */
   matches: string[];
+}
+
+/**
+ * W1-T2484: the window half of {@link resolveLedgerUnion} — OPTIONAL, and its absence is the
+ * unwindowed read every caller gets today, byte-identical.
+ */
+export interface LedgerUnionOptions {
+  /**
+   * An ISO-8601 UTC instant, the same wire shape {@link rotationStampIso} recovers from an
+   * archive's own name (`date.toISOString()`-shaped: fixed-width, `Z`-offset, so two such
+   * strings compare chronologically the same way they compare lexicographically — no parsing
+   * needed to order them, only to guard a malformed one).
+   *
+   * WHEN SET: any rotation whose name-derived stamp sorts strictly before `since` is skipped —
+   * WITHOUT being opened, read, or decompressed — because {@link rotationStampIso}'s own doc
+   * establishes every line inside a rotation is at or before the instant in its name, so a
+   * rotation stamped before `since` cannot hold a row at or after it. `ledgerRotationEntries`
+   * already returns rotations sorted by path (= by stamp, since the name IS the stamp), so this
+   * is a prefix skip over an already-sorted list, not a scan.
+   *
+   * A rotation whose name does not parse as a dated stamp (`rotationStampIso` returns
+   * `undefined` — a decoy, a hand-renamed file) is NEVER skipped on `since`'s account: the same
+   * "cannot decide, so read it" rule {@link rotationStampIso}'s own doc states, because skipping
+   * an unparseable name would silently drop a real corpus file.
+   *
+   * A rotation skipped this way is counted in neither `unread` nor `matches` — it is coverage
+   * the caller declined, not coverage that failed, so `ok` never turns false on its account (see
+   * {@link LedgerUnionResult.ok}'s own coverage-not-readability rule). `archiveFiles` and
+   * `archiveCount` are UNCHANGED by `since` — they answer what exists under `stateDir`, which a
+   * window does not alter.
+   *
+   * The live file (`ledger.ndjson`) is ALWAYS read regardless of `since` — it holds rows not yet
+   * rotated, which by definition cannot be bounded by any rotation's name.
+   */
+  since?: string;
 }
 
 /** How a ledger corpus file is stored, decided from its NAME — see {@link ledgerRotationEntries}. */
@@ -207,11 +242,16 @@ function sanitizeRegExp(pattern: string): string {
  * pattern indistinguishable from the zero-archive verdict on an archive-less root (both would
  * quietly report `ok: false, archiveCount: 0`) while the identical pattern threw on a host with
  * archives — a caller-visible inconsistency this ordering avoids.
+ *
+ * `opts.since` (W1-T2484) is the window: OMITTED, this reads every archive exactly as it always
+ * has (see {@link LedgerUnionOptions.since} for what setting it skips and why that skip is sound
+ * by construction, not heuristic).
  */
 export function resolveLedgerUnion(
   stateDir: string,
   pattern: string | RegExp,
   fsDeps: LedgerGrepFsDeps = realLedgerGrepFs,
+  opts: LedgerUnionOptions = {},
 ): LedgerUnionResult {
   const re = pattern instanceof RegExp ? pattern : new RegExp(sanitizeRegExp(pattern));
 
@@ -256,12 +296,28 @@ export function resolveLedgerUnion(
     }
   };
 
+  // W1-T2484: the window start, pre-parsed ONCE outside the loop. An unparseable `since` (bad
+  // input, not a corpus defect) is treated the same as "no window" — falling through to read
+  // everything — rather than throwing partway through an otherwise-valid call.
+  const sinceMs = opts.since === undefined ? undefined : Date.parse(opts.since);
+  const hasWindow = sinceMs !== undefined && !Number.isNaN(sinceMs);
+
   // W1-T444: the form is decided from the NAME, before the read, and never by trying to
   // decompress and catching. A catch-based sniff would make a genuinely corrupt `.gz`
   // indistinguishable from a plain file — turning the loud failure below into a silent skip,
   // which is this defect rebuilt one level down.
   const unread: string[] = [];
   for (const entry of rotations) {
+    if (hasWindow) {
+      // W1-T2484: a prefix skip over the already-sorted rotation list — see
+      // `LedgerUnionOptions.since`'s doc for why a rotation stamped before the window cannot
+      // hold a matching row, and why an unparseable name is read rather than skipped.
+      const stamp = rotationStampIso(basename(entry.path));
+      if (stamp !== undefined) {
+        const stampMs = Date.parse(stamp);
+        if (!Number.isNaN(stampMs) && stampMs < sinceMs) continue;
+      }
+    }
     try {
       const buf = fsDeps.readFileSync(entry.path);
       addMatchingLines((entry.form === "gzip" ? fsDeps.gunzipSync(buf) : buf).toString("utf8"));

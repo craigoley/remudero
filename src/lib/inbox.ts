@@ -1966,6 +1966,264 @@ export function applyStampToMasterPlan(masterPlanMd: string, proposalId: string,
   return `${base}\n${stampLine}\n`;
 }
 
+// ── W1-T2471: RATIFY A BATCH — one branch, one commit, one MASTER-PLAN block, one PR ───────
+//
+// `approveProposal` above ships exactly ONE proposal per branch/commit/PR/review-spawn. With
+// 17 ready proposals in the inbox that is 17 full PR lifecycles for a diff that is pure plan
+// text, and PARALLEL single-approves cannot fix it: `applyStampToMasterPlan` REPLACES an
+// existing bullet but otherwise APPENDS AT EOF, so N independent branches built off one base
+// each append their own stamp at the SAME point and conflict pairwise on merge (measured).
+//
+// The fix folds N stamps SEQUENTIALLY in ONE working copy instead. `applyStampToMasterPlan` is
+// already a pure `(md, id, line) => md`, so N calls chained through ONE accumulator produce N
+// appended lines with no conflict — there is only ever one branch to conflict on. Everything
+// below is ADDITIVE: `approveProposal`/`RatifyGateway`/the single-proposal path above are
+// UNCHANGED, and this is a second, parallel entry point over an EXPLICIT, ORDERED set of
+// proposal ids the caller names — never a discovered or implicit "approve everything ready".
+
+/** One batch member that did NOT make it into a {@link RatifyBatchPlan}'s `accepted` list,
+ *  carrying its OWN named reason — never a bare "not ready". Either the ordinary
+ *  {@link refusalReason} for a non-ready/ratified/deferred/drafting/retired classification, or
+ *  (Q5) a within-batch duplicate refusal for a READY member whose draft would re-file a title
+ *  an EARLIER-accepted member of this same batch already drafted. */
+export interface BatchSkip {
+  proposalId: string;
+  state: InboxState;
+  reason: string;
+  /** Present iff skipped for duplicating an already-filed task (the caller-supplied
+   *  origin/main corpus) OR an earlier-accepted member of this same batch. */
+  duplicateOf?: string;
+  /** The drafted shard path that would have been written, present alongside `duplicateOf` —
+   *  same {@link DraftedDuplicate} fields {@link approveProposal}'s own duplicate-refusal
+   *  ledger line carries. */
+  draftedPath?: string;
+  score?: number;
+}
+
+/** The pure plan a batch of classifications reduces to — no fs/git/network. */
+export type RatifyBatchPlan =
+  | {
+      ok: true;
+      /** Ready, non-duplicate members, in the order they were classified — what the gateway
+       *  files, one {@link RatificationPayload} per accepted proposal. */
+      accepted: RatificationPayload[];
+      /** Every member that did NOT make `accepted`, each naming its own reason (Q4: an unready
+       *  member neither blocks nor drags in the rest of the batch). */
+      skipped: BatchSkip[];
+      /** Every accepted member's shard files, concatenated in accepted order — N proposals'
+       *  worth of `- id:` blocks, exactly what {@link ratificationShardFiles} would produce for
+       *  each member alone (Q3: the writer is per-fragment and composes with no shared state). */
+      shardFiles: RatificationShardFile[];
+      /** `masterPlanMd` with every accepted member's stamp folded in, IN ORDER, via repeated
+       *  {@link applyStampToMasterPlan} calls over ONE accumulator — never N independent patches
+       *  of the input (Q2: this is the whole reason a batch cannot hit the EOF-append conflict
+       *  that sinks N parallel single-approve branches). */
+      masterPlanMd: string;
+    }
+  | {
+      ok: false;
+      /** A BATCH-LEVEL refusal — nothing is filed for ANY member, accepted or skipped alike,
+       *  because two members drafting the same real task id collide on the same
+       *  `plan/tasks.d/<id>-<slug>.yaml` shard path (Q3): a precondition of the batch itself,
+       *  never a property of any one member's draft, so partial filing would silently clobber
+       *  whichever member wrote second. */
+      refusal: string;
+      skipped: BatchSkip[];
+    };
+
+/**
+ * Reduce a batch of already-computed {@link InboxClassification}s into a {@link RatifyBatchPlan}
+ * — PURE, no fs/git/network, mirroring {@link approveProposal}'s own read-only decision/side-
+ * effect split. `classifications` is the EXPLICIT, ORDERED set the caller named (Q4) — this
+ * function never discovers, expands, or reorders it; each member was already classified
+ * INDIVIDUALLY by the caller's own {@link classifyProposal} call.
+ *
+ * Q5 (within-batch duplicates): `opts.duplicateCorpus` seeds the check exactly as
+ * {@link RatifyLedgerDeps.duplicateCorpus} does for a single approve, and GROWS by one accepted
+ * member's own {@link draftedShardSlugs} before the NEXT member is checked — so two members
+ * drafting the same title are caught even though neither is on origin/main yet. The growth is
+ * PURELY ADDITIVE: an empty/omitted `duplicateCorpus` still fails open (the first member of an
+ * empty-corpus batch is never refused for a duplicate it can't possibly have) — identical to
+ * {@link draftedDuplicate}'s own existing corpus-empty contract, just re-seeded each iteration.
+ */
+export function planRatificationBatch(
+  classifications: readonly InboxClassification[],
+  masterPlanMd: string,
+  opts: { duplicateCorpus?: readonly DuplicateCorpusEntry[] } = {},
+): RatifyBatchPlan {
+  const skipped: BatchSkip[] = [];
+  const accepted: RatificationPayload[] = [];
+  let corpus: readonly DuplicateCorpusEntry[] = opts.duplicateCorpus ?? [];
+
+  for (const c of classifications) {
+    if (c.state !== "ready" || !c.draft) {
+      skipped.push({ proposalId: c.proposalId, state: c.state, reason: refusalReason(c) });
+      continue;
+    }
+    const dup = draftedDuplicate(c.draft.fragmentYaml, corpus);
+    if (dup) {
+      skipped.push({
+        proposalId: c.proposalId,
+        state: c.state,
+        reason: draftedDuplicateRefusal(c.proposalId, dup),
+        duplicateOf: dup.duplicateOf,
+        draftedPath: dup.draftedPath,
+        score: dup.score,
+      });
+      continue;
+    }
+    accepted.push({ proposalId: c.proposalId, fragmentYaml: c.draft.fragmentYaml, stampLine: c.draft.stampLine });
+    // Q5: fold this NOW-accepted member's own drafted shard slugs into the corpus BEFORE the
+    // next member is checked — dedupping against main UNION accepted-so-far, additive only.
+    corpus = [...corpus, ...draftedShardSlugs(c.draft.fragmentYaml)];
+  }
+
+  // Q3: two accepted members' drafts declaring the SAME real task id would write the SAME
+  // shard path, silently clobbering one another. Checked over every accepted payload BEFORE
+  // any shard is folded into the result, refusing the WHOLE batch rather than half-filing it.
+  const shardFiles: RatificationShardFile[] = [];
+  const ownerOf = new Map<string, string>(); // relPath -> the FIRST proposalId to claim it
+  for (const payload of accepted) {
+    const shards = ratificationShardFiles(payload.fragmentYaml);
+    if (!shards.ok) {
+      return { ok: false, refusal: `ratify-batch: refusing to file ${payload.proposalId} — ${shards.reason}`, skipped };
+    }
+    for (const file of shards.files) {
+      const owner = ownerOf.get(file.relPath);
+      if (owner && owner !== payload.proposalId) {
+        return {
+          ok: false,
+          refusal:
+            `ratify-batch: refusing the WHOLE batch — ${owner} and ${payload.proposalId} both drafted a task ` +
+            `that would file ${file.relPath}; NEITHER is written. Reframe one of them so its draft names a ` +
+            `distinct task id, then re-run the batch.`,
+          skipped,
+        };
+      }
+      ownerOf.set(file.relPath, payload.proposalId);
+    }
+    shardFiles.push(...shards.files);
+  }
+
+  const foldedMasterPlanMd = accepted.reduce((md, p) => applyStampToMasterPlan(md, p.proposalId, p.stampLine), masterPlanMd);
+  return { ok: true, accepted, skipped, shardFiles, masterPlanMd: foldedMasterPlanMd };
+}
+
+/** Git/GitHub side effects {@link approveBatch} drives — ONE branch, ONE commit/push, ONE PR
+ *  for the WHOLE accepted set, mirroring {@link RatifyGateway}'s single-proposal shape but
+ *  called exactly once each regardless of how many members the batch accepts. */
+export interface RatifyBatchGateway {
+  /** File every accepted payload's shards (one {@link writeRatificationShards} call per
+   *  payload composes with no shared state, Q3) plus the folded MASTER-PLAN.md text, in ONE
+   *  branch, commit and push. Returns the branch name actually pushed. */
+  createRatificationBranch(payloads: RatificationPayload[]): string;
+  /** Open the plan PR for the pushed branch, naming every accepted proposal id. Returns its
+   *  URL. */
+  openPlanPr(branch: string, proposalIds: string[]): string;
+}
+
+export interface RatifyBatchLedgerDeps {
+  ledgerPath: string;
+  runId: string;
+  /** Same contract as {@link RatifyLedgerDeps.duplicateCorpus} — omitted/empty fails open. */
+  duplicateCorpus?: readonly DuplicateCorpusEntry[];
+}
+
+export type BatchApproveResult =
+  | {
+      ok: true;
+      branch: string;
+      prUrl: string;
+      prNumber?: number;
+      accepted: RatificationPayload[];
+      skipped: BatchSkip[];
+      shardFiles: RatificationShardFile[];
+      masterPlanMd: string;
+    }
+  | { ok: false; refusal: string; skipped: BatchSkip[] };
+
+/**
+ * `rmd approve <P##> <P##> ...` — the N-proposal counterpart of {@link approveProposal}. Every
+ * member is classified INDIVIDUALLY by the caller (this function never re-derives readiness)
+ * and an unready one is SKIPPED, carrying its own named reason, NEVER admitting the rest and
+ * NEVER aborting the whole batch (Q4) — except for the one batch-level precondition
+ * {@link planRatificationBatch} checks before anything is written: two accepted members
+ * colliding on the same shard path, which refuses the WHOLE batch before either gateway call.
+ *
+ * ONE gateway call each — `createRatificationBranch` then `openPlanPr` — for the WHOLE accepted
+ * set, never once per member. Ledgers exactly one `ratify.approve_refused` line per skipped
+ * member (same shape {@link approveProposal} writes for a single refusal) and exactly one
+ * `ratify.approved` line per ACCEPTED member once the one PR exists — a reader diffing the
+ * ledger sees the same one-line-per-proposal receipt whether it was ratified singly or in a
+ * batch, just sharing one `pr_url`/`branch` across every accepted row.
+ *
+ * A batch of exactly ONE READY classification produces a `payload`/`shardFiles`/`masterPlanMd`
+ * BYTE-IDENTICAL to what {@link approveProposal} would produce for that same classification —
+ * test/ratify-batch.test.ts pins this directly against the single-proposal functions above.
+ */
+export function approveBatch(
+  classifications: readonly InboxClassification[],
+  masterPlanMd: string,
+  gateway: RatifyBatchGateway,
+  deps: RatifyBatchLedgerDeps,
+): BatchApproveResult {
+  const plan = planRatificationBatch(classifications, masterPlanMd, { duplicateCorpus: deps.duplicateCorpus });
+
+  for (const s of plan.skipped) {
+    appendLedger(deps.ledgerPath, {
+      run_id: deps.runId,
+      task_id: s.proposalId,
+      step: "ratify.approve_refused",
+      state: s.state,
+      reason: s.reason,
+      ...(s.duplicateOf ? { duplicate_of: s.duplicateOf, drafted_path: s.draftedPath, score: s.score } : {}),
+    });
+  }
+
+  if (!plan.ok) return { ok: false, refusal: plan.refusal, skipped: plan.skipped };
+  if (plan.accepted.length === 0) {
+    return { ok: false, refusal: "ratify-batch: no member of this batch is READY — nothing to ratify", skipped: plan.skipped };
+  }
+
+  const branch = gateway.createRatificationBranch(plan.accepted);
+  const prUrl = gateway.openPlanPr(branch, plan.accepted.map((p) => p.proposalId));
+  const prNumber = prNumberFromUrl(prUrl);
+
+  for (const p of plan.accepted) {
+    appendLedger(deps.ledgerPath, {
+      run_id: deps.runId,
+      task_id: p.proposalId,
+      step: "ratify.approved",
+      pr_url: prUrl,
+      pr_number: prNumber,
+      branch,
+    });
+  }
+
+  return { ok: true, branch, prUrl, prNumber, accepted: plan.accepted, skipped: plan.skipped, shardFiles: plan.shardFiles, masterPlanMd: plan.masterPlanMd };
+}
+
+/** The harness-authored commit message for a BATCH ratification branch — same no-LLM,
+ *  no-Remudero-Task-trailer discipline as {@link approveCommitMessage} (a batch ratification
+ *  branch is still a plan-FILING PR, it implements nothing). The subject deliberately omits
+ *  the id list (unbounded N would blow commitlint's header-length rule) — every member's own
+ *  stamp line, carrying its id, rides in the body instead. */
+export function approveBatchCommitMessage(payloads: readonly RatificationPayload[]): string {
+  return buildPlanPrCommitMessage({
+    scope: "plan",
+    subject: `ratify ${payloads.length} proposals via rmd approve`,
+    extraBody: [
+      ...payloads.map((p) => p.stampLine),
+      "",
+      `The operator's one-bit approve initiated this PR (MASTER-PLAN P25 ii, W1-T111) for a BATCH of ` +
+        `${payloads.length} explicitly-named proposals (${payloads.map((p) => p.proposalId).join(", ")}), ` +
+        "carrying each pre-drafted, lint-clean fragment + its RATIFIED stamp verbatim, folded into ONE " +
+        "branch/commit/PR (W1-T2471). The gate still reviews (ci + remudero-review); nothing auto-merges " +
+        "without it.",
+    ].join("\n"),
+  });
+}
+
 // ── Draft placeholder ids -> concrete ids AT APPROVE TIME (feedback#fb-1784766965325-c7b673,
 //    the SEQUENCING half; lib/task-id.ts is the DERIVATION half) ─────────────────────────────
 //

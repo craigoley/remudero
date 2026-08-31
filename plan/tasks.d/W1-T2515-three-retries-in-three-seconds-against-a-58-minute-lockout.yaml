@@ -1,0 +1,111 @@
+- id: W1-T2515
+  title: "THREE RETRIES IN 3.5 SECONDS AGAINST A 58-MINUTE LOCKOUT — `runDiagnoseThenRetry`'s backoff seam exists at classify.ts:183 and its ONE production caller (run-task.ts:11064) passes no `sleep`, so `MAX_TRANSIENT_RETRIES` is spent in 3.5s; the refusal text carries `resets 8:50pm (UTC)` and `git grep -Ei 'session limit' -- src/` finds nothing, so the exact recovery time is read, logged, and discarded"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 18.00
+  files: [src/lib/classify.ts, src/run-task.ts, test/three-retries-in-three-seconds-against-a-lockout.test.ts]
+  origin: "operator-brief#we-lost-an-hour-to-the-session-limit-2026-08-30"
+  plan_refs: ["W1-T46", "W1-T113"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED OFF THE LEDGER, NOT INFERRED. Four `implement.done` rows for W1-T2471, all
+    `api_error: true`, all carrying the same stderr:
+
+        You've hit your session limit · resets 8:50pm (UTC)
+
+      19:52:34.185Z  cost_usd 5.1246322  num_turns 77  worker_duration_ms 1556916   <- the real run
+      19:52:35.477Z  cost_usd 0          num_turns 1   worker_duration_ms 1277
+      19:52:36.498Z  cost_usd 0          num_turns 1   worker_duration_ms 1007
+      19:52:37.704Z  cost_usd 0          num_turns 1   worker_duration_ms 1192
+      19:52:37.770Z  verdict blocked_transient "repeated transient API error across 3 retries"
+
+    The first worker ran 25.9 minutes and $5.12 before the window closed on it at turn 77. The three
+    retries that followed spanned **3.519 seconds end to end** and each died in about a second. The
+    reset was 20:50Z. Every one of those retries was issued against a lockout with **57 minutes and
+    23 seconds left to run**, and the string saying so was in the error the harness had just parsed.
+
+    DEFECT 1 — THE BACKOFF SEAM EXISTS AND PRODUCTION PASSES NOTHING. classify.ts:183 declares it:
+    "Optional backoff between retries (default: no-op — tests never sleep)", consumed at line 259 as
+    `if (deps.sleep) await deps.sleep(attempts);`. The comment's implication is that only tests skip
+    it. They are not the only ones. There is exactly ONE production call site and it is:
+
+        // src/run-task.ts:11064
+        driverResult = await runDiagnoseThenRetry({ attempt: attemptImplement, diagnose: dispatchDiagnose, log });
+
+    No `sleep`. So nothing ever sleeps, and three retries cost 3.5 seconds instead of anything that
+    could let a transient condition clear. This is a one-argument omission at a single call site.
+
+    DEFECT 2 — A SESSION LIMIT IS NOT A NETWORK FLAKE AND NOTHING TELLS THEM APART. `classify.ts`'s
+    `TRANSIENT_TEXT_PATTERNS` is the established mechanism and it works — it matches ECONNRESET,
+    5xx, socket hang up. A usage-window refusal matches none of them; it lands in "transient" only
+    because `isTransientResult` gates on `isError || apiError`. The two are different in kind: a
+    socket hang up may clear in a second, a session limit clears at a **stated wall-clock time**.
+    Retrying them on the same schedule is what makes the first case cheap and the second case futile.
+    MEASURED: `git grep -Ei "session limit|hit your (session|usage)|resets [0-9]" -- src/` returns
+    ONE line, a comment in `serve.ts` about rendering. POSITIVE CONTROL on the same corpus:
+    `TRANSIENT_TEXT_PATTERNS` is found and is really consulted at classify.ts:88.
+
+    DEFECT 3 — THE RECOVERY TIME IS IN HAND AND THROWN AWAY. `resets 8:50pm (UTC)` is a parseable
+    absolute time sitting in `stderr_excerpt` of a row the harness WROTE. Nothing reads it. This is
+    the carry-a-value-that-already-exists class: the fix is not to acquire a new signal but to stop
+    discarding one. With it, the correct behaviour is not "back off exponentially and hope" but "this
+    task cannot run until 20:50Z; say so, and do not spend spawns before then".
+
+    DEFECT 4, NAMED BUT NOT FIXED HERE — THE ENVELOPE CALLS IT SUCCESS. Every one of those four rows
+    carries `"subtype":"success"` AND `"verdict":"success"` alongside `api_error: true`. Anything
+    reading the verdict field sees a successful run. Only `api_error` dissents, and only
+    `isTransientResult`'s `isError || apiError` gate saves the classification. That mislabelling is
+    real and is filed separately rather than widened into this diff.
+
+    WHAT THE FIX MUST NOT DO. A retry that a real network blip would have cleared must still be
+    retried promptly — a blanket long sleep would trade this hour for a slower recovery from the
+    common case, which is the bound-fires-on-a-healthy-condition defect this repo keeps rediscovering
+    (W1-T312, W1-T380, W1-T382). So the wait must be DERIVED from the refusal: a parsed reset time
+    waits for that time; anything else keeps today's prompt retry. A refusal with no parseable time
+    must degrade to a bounded backoff, never to an unbounded wait, and never to a stall the operator
+    cannot see — the `blocked_transient` verdict and its ledger row stay exactly as legible as today.
+
+    RE-DERIVE RATHER THAN TRUST THESE FIGURES. The timings above are one incident on one host; the
+    query is `rmd ledger-grep '"api_error":true'` over the union, reading `worker_duration_ms` and
+    the gaps between consecutive rows of one run id. Print the corpus's newest ts beside the answer.
+
+    NOT IN SCOPE: the daemon's cross-task response to a window outage; why the headroom gate that
+    would have prevented the dispatch entirely never fired; and the success-mislabelled envelope.
+    Each is filed on its own because each has a different fix site.
+
+    THE RISK BAND IS BLAST RADIUS, NOT RULE 19'S SPAN: two src stems plus a test is a narrow span,
+    but this is the retry path every dispatched task runs through, and a wait that fires wrongly
+    stalls work that would have succeeded.
+    ACCEPTANCE CORRECTED BEFORE BUILD (2026-08-30, author-time, while this shard is still unbuilt
+    and its PR still plan-only). The first draft's second criterion read "a refusal carrying a reset
+    time WAITS for that time rather than retrying immediately". That is the wrong design and would
+    have been built if left. Waiting inside `runDiagnoseThenRetry` holds a DISPATCH LANE for up to
+    the full window — measured 57m23s in the incident — which costs more than the burn it prevents,
+    and the run's own wall-clock bounds may kill it mid-wait anyway. A lockout with a stated reset is
+    not retryable on any timescale this loop should own. THE CORRECT SHAPE: recognise it, STOP
+    retrying immediately, carry the reset time out in the result so the daemon can hold dispatch
+    (W1-T2517's job), and free the lane. Ordinary transients keep a short bounded backoff, which is
+    the half of the original criterion that was right.
+
+  acceptance:
+    - claim: "the production retry driver is given a backoff and no longer retries with zero delay"
+      proof: "unit test: test/three-retries-in-three-seconds-against-a-lockout.test.ts"
+    - claim: "a usage-limit refusal stops retrying at once instead of spending the retry budget"
+      proof: "unit test: test/three-retries-in-three-seconds-against-a-lockout.test.ts"
+    - claim: "the reset time is parsed off the refusal and carried out in the result"
+      proof: "unit test: test/three-retries-in-three-seconds-against-a-lockout.test.ts"
+    - claim: "a usage-limit refusal with no parseable reset time still stops, naming that it could not parse one"
+      proof: "unit test: test/three-retries-in-three-seconds-against-a-lockout.test.ts"
+    - claim: "an ordinary network transient still retries, under a bounded backoff that never grows without limit"
+      proof: "unit test: test/three-retries-in-three-seconds-against-a-lockout.test.ts"
+    - claim: "the retry bound is still MAX_TRANSIENT_RETRIES and is not raised by this change"
+      proof: "unit test: test/three-retries-in-three-seconds-against-a-lockout.test.ts"
+    - claim: "a task's own build failure still strikes, never absorbed into a usage-limit verdict"
+      proof: "unit test: test/three-retries-in-three-seconds-against-a-lockout.test.ts"
+    - claim: "removing the usage-limit recognition makes the stops-at-once assertion fail"
+      proof: "unit test: test/three-retries-in-three-seconds-against-a-lockout.test.ts"

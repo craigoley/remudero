@@ -956,6 +956,11 @@ export function renderShellHtml(
   .card-journey-body { margin-top: 0.35rem; }
   /* the failing/blocking step in a journey — the whole point of "walk backwards to the cause". */
   .journey-fail { color: var(--status-blocked); font-weight: 600; }
+  /* W1-T2489: the journey's inline SVG graph -- drawn INSIDE the text fallback above, never in
+     place of it. No stylesheet or script of its own (inline, same page, same <style> block). */
+  .journey-graph { max-width: 100%; height: auto; display: block; margin: 0 0 0.5rem; color: var(--text-dim); }
+  .journey-graph-fail rect { stroke: var(--status-blocked); }
+  .journey-graph-fail text { fill: var(--status-blocked); }
   @media (min-width: 900px) {
     main { max-width: 64rem; }
   }
@@ -4308,14 +4313,108 @@ export function renderShellHtml(
       t.origin ? \` (origin: \${escapeHtml(t.origin)})\` : ""
     }\${runs}</li>\`;
   }
+  /**
+   * W1-T2489: the SAME chain journeyHtml (below) already renders as nested <ul> text -- drawn
+   * ALSO as an inline SVG node graph, over the identical { feedback, tasks } shape, no new
+   * fetch, no new field, nothing GET /v1/trace (panel-graph.ts) doesn't already return. Returns
+   * "" for an EMPTY graph (no feedback, no tasks) -- called on its own, with no wrapper, an empty
+   * graph therefore draws NOTHING; journeyHtml's own unconditional text rendering just below is
+   * what turns that "" into a real fallback rather than a blank panel.
+   */
+  function journeyGraphSvg(chain) {
+    const feedback = chain.feedback && typeof chain.feedback === "object" ? chain.feedback : null;
+    const tasks = Array.isArray(chain.tasks) ? chain.tasks : [];
+    if (!feedback && tasks.length === 0) return "";
+    const nodeW = 240, nodeH = 30, rowGap = 10, runIndent = 24, pad = 8;
+    const nodes = [];
+    let y = pad;
+    let feedbackIndex = null;
+    if (feedback) {
+      feedbackIndex = nodes.length;
+      nodes.push({
+        x: pad, y, w: nodeW, h: nodeH, kind: "feedback", failing: false, parent: null,
+        label: \`feedback#\${feedback.id}\`, sub: String(feedback.status ?? ""),
+      });
+      y += nodeH + rowGap;
+    }
+    tasks.forEach((t) => {
+      const taskIndex = nodes.length;
+      nodes.push({
+        x: pad, y, w: nodeW, h: nodeH, kind: "task", failing: false, parent: feedbackIndex,
+        label: \`task \${t.id}\`, sub: String(t.title ?? ""),
+      });
+      y += nodeH + rowGap;
+      const runs = Array.isArray(t.runs) ? t.runs : [];
+      runs.forEach((r) => {
+        const failing = typeof r.verdict === "string" && r.verdict.startsWith("blocked");
+        nodes.push({
+          x: pad + runIndent, y, w: nodeW - runIndent, h: nodeH, kind: "run", failing, parent: taskIndex,
+          label: \`run \${r.runId}\`, sub: String(r.verdict ?? "no verdict yet"),
+        });
+        y += nodeH + rowGap;
+      });
+    });
+    const width = pad * 2 + nodeW;
+    const height = y;
+    const edgesSvg = nodes
+      .map((n) => {
+        if (n.parent === null) return "";
+        const p = nodes[n.parent];
+        return \`<line class="journey-graph-edge" x1="\${p.x + 10}" y1="\${p.y + p.h}" x2="\${n.x + 10}" y2="\${n.y}" stroke="currentColor" stroke-opacity="0.4" />\`;
+      })
+      .join("");
+    const nodesSvg = nodes
+      .map((n) => {
+        const cls = \`journey-graph-node journey-graph-node-\${n.kind}\${n.failing ? " journey-graph-fail" : ""}\`;
+        const marker = n.failing ? " ⛔" : "";
+        return (
+          \`<g class="\${cls}">\` +
+          \`<rect x="\${n.x}" y="\${n.y}" width="\${n.w}" height="\${n.h}" rx="6" fill="currentColor" fill-opacity="0.08" stroke="currentColor" stroke-opacity="0.5" />\` +
+          \`<text x="\${n.x + 8}" y="\${n.y + 13}" font-size="10" fill="currentColor">\${escapeHtml(n.label)}\${marker}</text>\` +
+          \`<text x="\${n.x + 8}" y="\${n.y + 24}" font-size="9" fill="currentColor" fill-opacity="0.75">\${escapeHtml(n.sub)}</text>\` +
+          \`</g>\`
+        );
+      })
+      .join("");
+    return \`<svg class="journey-graph" viewBox="0 0 \${width} \${height}" width="\${width}" height="\${height}" role="img" aria-label="provenance graph">\${edgesSvg}\${nodesSvg}</svg>\`;
+  }
   function journeyHtml(chain) {
-    const feedback = chain.feedback
-      ? \`<p>feedback#\${escapeHtml(chain.feedback.id)} [\${escapeHtml(chain.feedback.status)}] — \${escapeHtml(chain.feedback.raw)}\${
-          chain.feedback.proposalPr ? \` → <a href="\${escapeHtml(chain.feedback.proposalPr)}" target="_blank" rel="noreferrer">proposal PR</a>\` : ""
-        }</p>\`
-      : "";
-    const tasks = (chain.tasks ?? []).length ? \`<ul>\${chain.tasks.map(journeyTaskHtml).join("")}</ul>\` : "<p>(no tasks yet)</p>";
-    return \`<p>direction: \${escapeHtml(chain.direction)}</p>\${feedback}\${tasks}\`;
+    const safeChain = chain && typeof chain === "object" ? chain : {};
+    const feedback = safeChain.feedback && typeof safeChain.feedback === "object" ? safeChain.feedback : null;
+    const tasks = Array.isArray(safeChain.tasks) ? safeChain.tasks : [];
+    const direction = typeof safeChain.direction === "string" ? safeChain.direction : "unknown";
+    // DEGRADE, NEVER DISAPPEAR (W1-T2489). Each section below is independently guarded: an empty
+    // graph, an unreachable /v1/trace (an empty/absent chain reaches here the same way), or a
+    // chain shape ANY one of these three sections can't read must still leave the OTHER sections
+    // -- and always the direction line -- standing. A caller that removes these try/catches (or
+    // calls journeyGraphSvg directly with no wrapper at all, criterion 8 below) is what would
+    // actually blank the panel; this function itself never does.
+    let svg = "";
+    try {
+      svg = journeyGraphSvg({ feedback, tasks });
+    } catch {
+      // graph draw failed on this chain shape -- absent, not blank: the text sections below still render.
+      svg = "";
+    }
+    let feedbackHtml = "";
+    try {
+      feedbackHtml = feedback
+        ? \`<p>feedback#\${escapeHtml(feedback.id)} [\${escapeHtml(feedback.status)}] — \${escapeHtml(feedback.raw)}\${
+            feedback.proposalPr ? \` → <a href="\${escapeHtml(feedback.proposalPr)}" target="_blank" rel="noreferrer">proposal PR</a>\` : ""
+          }</p>\`
+        : "";
+    } catch {
+      // feedback row unreadable -- drop just this line, the graph and task list are unaffected.
+      feedbackHtml = "";
+    }
+    let tasksHtml = "<p>(no tasks yet)</p>";
+    try {
+      tasksHtml = tasks.length ? \`<ul>\${tasks.map(journeyTaskHtml).join("")}</ul>\` : "<p>(no tasks yet)</p>";
+    } catch {
+      // one bad task entry must not blank the whole journey -- say so instead of an empty list.
+      tasksHtml = "<p>(unable to render tasks)</p>";
+    }
+    return \`\${svg}<p>direction: \${escapeHtml(direction)}</p>\${feedbackHtml}\${tasksHtml}\`;
   }
   function toggleCardJourney(btn) {
     const body = btn.closest(".row-detail")?.querySelector(".card-journey-body");
