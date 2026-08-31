@@ -6463,6 +6463,15 @@ export const INSTRUMENT_SURFACE_EXCLUSIONS: Readonly<Record<string, string>> = {
   "scripts/needs-human-issue.mjs": "issue-filing ops tool, not a quality gate",
   "scripts/recovery-drill.mjs": "ops drill script for recovery-drill.yml, not a quality/measurement gate",
   "scripts/generate-capability-snapshot.mjs": "its :check mode is not wired into any CI workflow",
+  // ── known gap, widening deferred: real gate-rule logic, not yet promoted to the BLOCKING list ──
+  "scripts/worker-branch-shape.mjs":
+    "KNOWN GAP, WIDENING DEFERRED (W1-T2491) — genuinely gate-rule logic: it refuses a branch that " +
+    "CLAIMS a task without carrying the run-<taskId>-<epochMs> shape seven modules read for dispatch " +
+    "visibility and merge credit, and it is registered as a ci-parity census entry. It is NOT promoted " +
+    "to INSTRUMENT_SURFACE here because W1-T402 design clause (v) requires measuring a widening against " +
+    "real merged diffs first, and promoting it in the same PR that introduces it would make that PR " +
+    "entangled with its own src/lib/ci-parity.ts registration — the circularity #3331 hit from the other " +
+    "side, where a *-ratchet.mjs filename matched the blocking pattern automatically.",
   "scripts/generate-cli-reference.mjs": "its :check mode is not wired into any CI workflow",
   "scripts/generate-docs-index.mjs": "its :check mode is not wired into any CI workflow",
   "scripts/generate-learnings-index.mjs": "its :check mode is not wired into any CI workflow",
