@@ -99,6 +99,26 @@ test("THE FALSIFIER: a source file grown past its recorded baseline BLOCKS, nami
       /by hand/,
       "never 'by hand': recording deliberate growth is the ordinary outcome and is safe in the same PR (W1-T2526 exempts this path from Standing rule 25)",
     );
+    // W1-T2532 ROUND 2: recording the ceiling changes the diff, which makes the PR body's own
+    // file claim false and fails the PR from a DIFFERENT gate (bodyContradictsDiff) whose message
+    // never mentions this one. MEASURED 2026-08-31: #3365, #3373 and #3378 all landed on that
+    // refusal inside one sweep, the extra file being scripts/source-size-baseline.json every time.
+    // Following this remedy must not hand the reader into the next refusal unwarned.
+    assert.match(
+      over.stderr,
+      /THEN UPDATE THE PR BODY/,
+      "the remedy must warn that recording the ceiling invalidates the body's own file claim",
+    );
+    assert.match(
+      over.stderr,
+      /git diff --name-only origin\/main\.\.\.HEAD/,
+      "and name the command that re-derives that claim, so the reader is not left to guess",
+    );
+    assert.match(
+      over.stderr,
+      /negation is not parsed/,
+      "and warn that a NEGATED scope claim is not safe — 'Plan-only: no.' still reads as a plan-only claim (measured on #3373)",
+    );
     // the baseline is NEVER advanced by a failing run — raising a ceiling is a human, on-the-record move
     assert.deepEqual(JSON.parse(readFileSync(baselinePath, "utf8")), { "src/lib/grown.ts": 3 });
   } finally {

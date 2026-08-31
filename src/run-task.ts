@@ -10892,7 +10892,7 @@ async function runTask(
     // directory and global artifact don't exist yet (§6 transport is
     // deferred) — both layers are non-fatal absences, so this is a pure
     // superset of the project-only injection that shipped before.
-    const learningsDir = join(dirname(planPath), "..", "learnings");
+    const learningsDir = projectLearningsHome(repoDir); // W1-T2506: follows the TARGET repo, not the plan's checkout
     // W1-T86 (P12 wipe-test harness): arm B of a wipe-test pair MASKS injection —
     // computeMatchedLearningsForArm("B", ...) returns "" WITHOUT calling any of the
     // load/select/render chain below, so the store is never touched, only the
