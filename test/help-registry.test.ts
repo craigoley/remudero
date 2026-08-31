@@ -11,11 +11,15 @@ import { COMMANDS, USAGE, commandHelp } from "../src/run-task.js";
 
 const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
 
-test("USAGE is generated FROM COMMANDS — every registry entry's usage line appears verbatim", () => {
+test("USAGE is generated FROM COMMANDS — every registry entry's syntax + summary line appears verbatim", () => {
   for (const spec of COMMANDS) {
     assert.ok(
-      USAGE.includes(spec.usage),
-      `USAGE is missing the ${spec.name} registry entry's usage line — it must be generated from COMMANDS, not hand-duplicated`,
+      USAGE.includes(spec.syntax),
+      `USAGE is missing the ${spec.name} registry entry's syntax — it must be generated from COMMANDS, not hand-duplicated`,
+    );
+    assert.ok(
+      USAGE.includes(spec.summary),
+      `USAGE is missing the ${spec.name} registry entry's summary — the top level must print a summary, not the full detail`,
     );
   }
 });
@@ -29,14 +33,15 @@ test("USAGE has no stray command lines beyond COMMANDS — same count of 'rmd <n
   );
 });
 
-test("commandHelp(spec) prints exactly that command's usage line — no other command's text leaks in", () => {
+test("commandHelp(spec) prints exactly that command's syntax + full detail — no other command's text leaks in", () => {
   for (const spec of COMMANDS) {
     const help = commandHelp(spec);
-    assert.ok(help.includes(spec.usage), `commandHelp for ${spec.name} must include its own usage line`);
+    assert.ok(help.includes(spec.syntax), `commandHelp for ${spec.name} must include its own syntax`);
+    assert.ok(help.includes(spec.detail), `commandHelp for ${spec.name} must include its own full detail`);
     const others = COMMANDS.filter((c) => c.name !== spec.name);
     for (const other of others) {
-      // A command's own usage line must not equal another's — otherwise this check is vacuous.
-      assert.notEqual(other.usage, spec.usage);
+      // A command's own syntax must not equal another's — otherwise this check is vacuous.
+      assert.notEqual(other.syntax, spec.syntax);
     }
   }
 });
