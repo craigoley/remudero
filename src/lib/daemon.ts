@@ -33,6 +33,7 @@
 
 import type { AutoTriageDecision } from "./auto-triage.js";
 import type { MeasurementCadenceDecision, MeasurementCadenceRunResult } from "./measurement-cadence.js";
+import { buildMeasurementCadenceRow } from "./measurement-cadence.js";
 import type { BoardReviewCadenceDecision, BoardReviewReport } from "./board-review.js";
 import type { DigestCadenceRunResult } from "./digest.js";
 import type { RunResult } from "./run-result.js";
@@ -2816,14 +2817,12 @@ export async function runDaemon(
         if (deps.runMeasurementCadence) {
           try {
             const result = await deps.runMeasurementCadence();
-            log("measurement_cadence.ran", {
-              rule_efficacy: result.ruleEfficacy,
-              verdict_calibration: result.verdictCalibration,
-              autonomy_rate: result.autonomyRate,
-              // W1-T2473: the adoption report (fourth verb, W1-T2266) was computed every fire and
-              // logged nowhere — this names its mint outcome so a discarded report is countable.
-              adoption_mint: result.adoptionMint,
-            });
+            // W1-T2502: the row is DERIVED from `result`'s own keys (see
+            // `buildMeasurementCadenceRow`'s own doc, measurement-cadence.ts) rather than
+            // hand-enumerated here — a hand-enumerated row silently drops every member added
+            // after it (that is exactly how `adoptionReport`, and independently
+            // `proofDebtReport`/`proofDebtMint`, reached zero occurrences in this file).
+            log("measurement_cadence.ran", buildMeasurementCadenceRow(result));
           } catch (e) {
             log("measurement_cadence.run_failed", { error: String((e as Error)?.message ?? e) });
           }

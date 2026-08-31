@@ -14865,7 +14865,7 @@ export function verdictCalibrationCommand(rest: string[], opts: { stateDir?: str
  * fresh checkout with no `state/ledger.*.gz` reports UNMEASURED, honestly, rather than a
  * live-file-only rate. READ-ONLY: files nothing, proposes nothing.
  */
-export function autonomyRateCommand(rest: string[], opts: { stateDir?: string; cwd?: string } = {}): number {
+export function autonomyRateCommand(rest: string[], opts: { stateDir?: string; cwd?: string; planPath?: string } = {}): number {
   const badArg = unknownArgError("autonomy-rate", rest, [], []);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
@@ -14899,11 +14899,37 @@ export function autonomyRateCommand(rest: string[], opts: { stateDir?: string; c
     gitReadError = (e as Error).message;
   }
 
+  // W1-T2492: attribute each merge's taskId to the repo its OWN plan record names — this module
+  // does no plan I/O of its own (lib/autonomy.ts's module doc), so the caller supplies it. A plan
+  // that fails to load degrades to `repoOf`-absent behavior (every merge unattributable) rather
+  // than crashing this read-only report — same "unreadable is honestly reported, never crashed"
+  // discipline the ledger-union and git-history reads already follow above.
+  const planPath = opts.planPath ?? join(repoRoot, "plan", "tasks.yaml");
+  let plan: Plan | undefined;
+  let planLoadError: string | undefined;
+  try {
+    plan = loadPlan(planPath);
+  } catch (e) {
+    // NOT erased: the message is carried out in `planLoadError` and printed below as
+    // "plan: UNREADABLE (<message>) — every merge below is unattributable", so an unreadable plan
+    // is distinguishable from a plan that simply attributes nothing. Deliberately does not rethrow
+    // — this is a read-only report and a plan it cannot load degrades to `repoOf`-absent behaviour
+    // rather than crashing the command.
+    planLoadError = (e as Error).message;
+  }
+  const repoOf = plan ? (taskId: string): string | undefined => plan!.byId.get(taskId)?.repo : undefined;
+  // knownRepos: every distinct `task.repo` the WHOLE plan names — an onboarded repo with zero
+  // merges this window is still a row (never an absent one), because it has tasks filed against
+  // it even before its first merge.
+  const knownRepos = plan ? [...new Set(plan.tasks.map((t) => t.repo))].sort() : [];
+
   const merges = gitReadError ? [] : parseTrailerMerges(gitDump);
   const report = zeroTouchMergeRate(merges, ledgerMining, {
     windowDescription: gitReadError
       ? `git history UNAVAILABLE — ${gitReadError}`
       : `${merges.length} Remudero-Task-trailer-bearing merge(s) read from ${gitRef}`,
+    repoOf,
+    knownRepos,
   });
 
   console.log(`rmd autonomy-rate — over the unioned ledger at ${stateDir}, git history at ${gitRef}`);
@@ -14911,9 +14937,32 @@ export function autonomyRateCommand(rest: string[], opts: { stateDir?: string; c
   if (gitReadError) {
     console.log(`  git history: UNAVAILABLE — ${gitReadError}`);
   }
+  if (planLoadError) {
+    console.log(`  plan: UNREADABLE (${planLoadError}) — every merge below is unattributable`);
+  }
   console.log(`  window: ${report.windowDescription}`);
   console.log("");
   console.log(`arming posture: ${report.armingPosture}`);
+  console.log("");
+
+  // W1-T2492: the per-repo split, printed even when the overall report is UNMEASURED — a repo's
+  // trailer-bearing merge COUNT is a git-corpus fact, independent of whether the ledger union
+  // could be read.
+  const repoLabel = (r: (typeof report.repos)[number]["rateRefusedReason"]): string =>
+    r === "zero-merges" ? "no merges this window" : r === "below-population-floor" ? "below population floor" : "UNMEASURED";
+  console.log("by repo:");
+  if (report.repos.length === 0) {
+    console.log("  none — no repo could be resolved for any merge and no known repos were supplied");
+  } else {
+    for (const r of report.repos) {
+      if (r.zeroTouchRate === null) {
+        console.log(`  ${r.repo.padEnd(20)} n=${r.total} — ${repoLabel(r.rateRefusedReason)}`);
+      } else {
+        const pct = (r.zeroTouchRate * 100).toFixed(1);
+        console.log(`  ${r.repo.padEnd(20)} n=${r.total} — zero-touch rate ${pct}% (${r.zeroTouchCount}/${r.total})`);
+      }
+    }
+  }
   console.log("");
 
   if (report.status === "unmeasured") {
