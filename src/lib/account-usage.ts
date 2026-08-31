@@ -483,6 +483,122 @@ function deriveCeilingOverrideAudit(lines: ReadonlyArray<Record<string, unknown>
   return out;
 }
 
+/**
+ * W1-T2516: THE DEFECT THIS CLOSES. Every worker's HOME is redirected to a Remudero-controlled
+ * scratch dir (worker-home.ts), so the `cachedUsageUtilization` a worker's OWN Claude Code
+ * invocation refreshes lands inside THAT scratch home — never inside `homedir()/.claude.json`,
+ * the file {@link readAccountUsageFile} reads by default. `reapWorkerHome` (worker-home.ts)
+ * deletes the scratch home moments after the spawn ends. On a genuinely headless fleet host —
+ * where the ONLY Claude Code processes that ever run are the fleet's own workers — nothing ever
+ * refreshes `homedir()/.claude.json`, which is exactly the "worst case" this module's own header
+ * already named in the abstract ("a host with no Claude Code activity at all never refreshes
+ * it"): HOME redirection turns that worst case into the permanent, steady state.
+ *
+ * THE REMEDY. worker.ts's `captureWorkerUsageProjection` reads the worker's own
+ * `.claude.json` and persists a NARROW projection — percent, resets_at, the cache's OWN
+ * `accountUuid`, and `fetchedAtMs`; deliberately never `email`/`org`, see this interface's own
+ * field list — to {@link accountUsageProjectionPath} BEFORE `reapWorkerHome` deletes the home
+ * that produced it (the reap seam is in worker.ts, not this file — see that module's own doc
+ * for why an import here would close an import cycle). {@link mergeAccountUsageProjection}
+ * folds that projection into the PRIMARY (`homedir()`) reading, so a reading now SURVIVES the
+ * reap of the worker home that produced it.
+ *
+ * IDENTITY STAYS OUT OF SCOPE, DELIBERATELY. `email`/`uuid`/`org` are never captured into the
+ * projection and are always carried through from `primary` untouched by
+ * {@link mergeAccountUsageProjection} — this module's "identity is read fresh, never captured
+ * at boot" doctrine (see this file's header) applies here too: a projection captured once at a
+ * worker's teardown must never stand in for a live identity read, or an account switch since
+ * that capture would go undetected. `cacheUuid` IS still carried, precisely so
+ * {@link usageUnknownReason}'s existing account-mismatch guard keeps comparing it against that
+ * live identity, exactly as it already does for a same-process reading — a projection captured
+ * under a since-switched-away-from account is still refused, never rendered.
+ */
+export interface AccountUsageProjection {
+  /** `cachedUsageUtilization.accountUuid` off the capturing worker's OWN `.claude.json`. */
+  cacheUuid?: string;
+  /** `cachedUsageUtilization.fetchedAtMs` off the capturing worker's OWN `.claude.json`. */
+  cacheFetchedAtMs: number;
+  fiveHour?: UsageWindowReading;
+  sevenDay?: UsageWindowReading;
+}
+
+/**
+ * `<root>/state/account-usage-projection.json` — the SAME `state/`-under-root convention every
+ * other console write surface already resolves against (W1-T333's daily cost ceiling override,
+ * fleet-control's PAUSE flag). Spelled out as a literal in BOTH this file and worker.ts's
+ * `captureWorkerUsageProjection` rather than shared via an import: the two modules cannot share
+ * one without an import cycle (worker.ts's own `resolveActiveAccountId` doc already explains
+ * why: this module depends on panel-actions.ts, which depends on worker.ts).
+ * test/the-headroom-gate-reads-a-file-the-fleet-never-refreshes.test.ts asserts the two
+ * literals resolve to the same relative path, so they cannot drift apart silently.
+ */
+export const USAGE_PROJECTION_REL = join("state", "account-usage-projection.json");
+
+/** `<root>/state/account-usage-projection.json` — see {@link USAGE_PROJECTION_REL}. */
+export function accountUsageProjectionPath(root: string): string {
+  return join(root, USAGE_PROJECTION_REL);
+}
+
+/**
+ * Read the persisted projection, failing soft to `undefined` on a missing file, a parse error,
+ * or a payload carrying no usable `cacheFetchedAtMs` — the same fail-soft discipline
+ * {@link readAccountUsageFile} applies to the primary file, so an absent or not-yet-written
+ * projection (every host before its first worker spawn, or a non-fleet install that never
+ * calls `captureWorkerUsageProjection` at all) can never surface as a crash.
+ */
+export function readAccountUsageProjection(path: string): AccountUsageProjection | undefined {
+  let parsed: Partial<AccountUsageProjection>;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<AccountUsageProjection>;
+  } catch {
+    // Missing/unparseable projection file -- fail soft to absent, same discipline as
+    // readAccountUsageFile's own catch below; never a crash for a host that hasn't spawned
+    // a worker yet.
+    return undefined;
+  }
+  if (typeof parsed.cacheFetchedAtMs !== "number" || !Number.isFinite(parsed.cacheFetchedAtMs)) return undefined;
+  const out: AccountUsageProjection = { cacheFetchedAtMs: parsed.cacheFetchedAtMs };
+  if (typeof parsed.cacheUuid === "string" && parsed.cacheUuid !== "") out.cacheUuid = parsed.cacheUuid;
+  if (parsed.fiveHour) out.fiveHour = parsed.fiveHour;
+  if (parsed.sevenDay) out.sevenDay = parsed.sevenDay;
+  return out;
+}
+
+/**
+ * Fold a persisted {@link AccountUsageProjection} into the PRIMARY (`homedir()`) reading,
+ * preferring whichever cache is FRESHER — never the projection unconditionally, so a host
+ * where an interactive session's own live cache is genuinely fresher is never clobbered by an
+ * older worker capture. Returns `primary` UNCHANGED (by reference) whenever there is nothing to
+ * gain from the projection, which is what keeps every existing caller/test that never supplies
+ * one — the console ACCOUNT strip's pre-existing behaviour — byte-for-byte unaffected.
+ *
+ * `primary.unreadable` short-circuits to `primary` as-is, deliberately: the defect this closes
+ * is a STALE cache on an otherwise-readable file (this module's own stated worst case, see
+ * {@link AccountUsageProjection}'s doc), not a wholly missing/unparseable `~/.claude.json` —
+ * narrowing the remedy to exactly the documented failure mode.
+ */
+export function mergeAccountUsageProjection(
+  primary: AccountUsageInput,
+  projection: AccountUsageProjection | undefined,
+): AccountUsageInput {
+  if (!projection || primary.unreadable) return primary;
+  if (
+    typeof primary.cacheFetchedAtMs === "number" &&
+    Number.isFinite(primary.cacheFetchedAtMs) &&
+    primary.cacheFetchedAtMs >= projection.cacheFetchedAtMs
+  ) {
+    return primary; // primary is at least as fresh — nothing to gain from the projection
+  }
+  const merged: AccountUsageInput = { ...primary, cacheFetchedAtMs: projection.cacheFetchedAtMs };
+  if (projection.cacheUuid !== undefined) merged.cacheUuid = projection.cacheUuid;
+  else delete merged.cacheUuid;
+  if (projection.fiveHour !== undefined) merged.fiveHour = projection.fiveHour;
+  else delete merged.fiveHour;
+  if (projection.sevenDay !== undefined) merged.sevenDay = projection.sevenDay;
+  else delete merged.sevenDay;
+  return merged;
+}
+
 /** The shape {@link readAccountUsageFile} narrows `~/.claude.json` down to. Nothing else in that
  *  file is touched, and no other key is ever named in this module. */
 interface ClaudeJsonShape {
@@ -583,6 +699,15 @@ export interface AccountUsageDeps {
    * injects a fake" split every other optional field here already follows.
    */
   resolveCeiling?: () => EffectiveDailyCostCeiling;
+  /**
+   * W1-T2516: injectable reader for the persisted worker-capture projection (see
+   * {@link AccountUsageProjection}) — same "an assembler wires the real thing, a test injects
+   * a fake" seam every other optional field on this type already follows. Omitted ⇒ the real
+   * `readAccountUsageProjection(accountUsageProjectionPath(deps.root))` when `root` is set, or
+   * no projection consulted at all when `root` is unset — an install that never supplies
+   * `root` (every pre-W1-T333 caller of this type) renders BYTE-IDENTICAL to before this task.
+   */
+  readUsageProjection?: () => AccountUsageProjection | undefined;
 }
 
 /**
@@ -599,9 +724,17 @@ export function buildAccountUsageRoute(deps: AccountUsageDeps): Route {
       const now = deps.now ?? Date.now;
       const readLedger = deps.readLedger ?? readLedgerLines;
       const readAccount = deps.readAccount ?? (() => readAccountUsageFile(deps.accountFilePath));
+      // W1-T2516: fold in whatever a worker's own teardown persisted BEFORE its scratch home
+      // was reaped — see AccountUsageProjection's doc for why this survives what the primary
+      // `homedir()` read alone cannot on a headless fleet host. `deps.root` unset (every
+      // pre-W1-T333 caller) ⇒ no projection is even looked for, byte-identical to before.
+      const readProjection =
+        deps.readUsageProjection ??
+        (() => (deps.root ? readAccountUsageProjection(accountUsageProjectionPath(deps.root)) : undefined));
       const policy = deps.policy ?? loadDefaultPolicy();
       const resolveCeiling = deps.resolveCeiling ?? (() => resolveDailyCostCeiling(deps.root ?? process.cwd(), policy));
-      sendJson(res, 200, deriveAccountUsage(readAccount(), readLedger(deps.ledgerPath), now(), resolveCeiling()));
+      const account = mergeAccountUsageProjection(readAccount(), readProjection());
+      sendJson(res, 200, deriveAccountUsage(account, readLedger(deps.ledgerPath), now(), resolveCeiling()));
     },
   };
 }

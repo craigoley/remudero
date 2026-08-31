@@ -5,6 +5,7 @@ import {
   lstatSync,
   mkdirSync,
   readFileSync,
+  renameSync,
   statSync,
   symlinkSync,
   unlinkSync,
@@ -23,7 +24,7 @@ import {
 // rest of this file's fs usage is untouched and keeps its existing named imports.
 import fs from "node:fs";
 import { homedir } from "node:os";
-import { join, sep } from "node:path";
+import { dirname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { query, type Options, type PermissionMode } from "@anthropic-ai/claude-agent-sdk";
 import { loadConfig, workerHomeDir, workerShell, workerZdotdir, type Config } from "./config.js";
@@ -45,6 +46,7 @@ import { DEFAULT_TEARDOWN_SCRATCH_SWEEP_MAX_AGE_MS, reapWorkerScratch, sweepStal
 import { assertLiveWriteAllowed } from "./live-write-guard.js";
 import {
   assertWorkerCredentialFile,
+  CLAUDE_CONFIG_REL,
   ensureWorkerKeychain,
   materializeWorkerHome,
   perRunWorkerHomeDir,
@@ -782,6 +784,94 @@ export function resolveActiveAccountId(path: string = join(homedir(), ".claude.j
   }
 }
 
+/**
+ * W1-T2516: `<root>/state/account-usage-projection.json` — MUST resolve to the SAME relative
+ * path as account-usage.ts's own `USAGE_PROJECTION_REL`. Duplicated here (not imported) for the
+ * SAME reason `resolveActiveAccountId` above re-implements account-usage.ts's own file-reading
+ * rather than importing it: account-usage.ts already depends on panel-actions.ts, which depends
+ * on THIS file — an import here would close that into a cycle.
+ * test/the-headroom-gate-reads-a-file-the-fleet-never-refreshes.test.ts asserts the two
+ * literals stay equal, so they cannot drift apart silently.
+ */
+export const WORKER_USAGE_PROJECTION_REL = join("state", "account-usage-projection.json");
+
+/**
+ * W1-T2516: THE FIX. Every worker's HOME is redirected to a Remudero-controlled scratch dir
+ * (worker-home.ts), so the `cachedUsageUtilization` a worker's OWN Claude Code invocation
+ * refreshes lands inside `<workerHome>/.claude.json` — and `reapWorkerHome` (below, in
+ * `spawnWorker`'s `finally`) deletes that whole directory moments later. Nothing in remudero
+ * ever wrote the account-usage panel's PRIMARY source, `homedir()/.claude.json`, so on a
+ * headless fleet host that file's `cachedUsageUtilization` never refreshes at all (see
+ * account-usage.ts's module header for the full argument).
+ *
+ * Called from `spawnWorker`'s `finally`, BEFORE `reapWorkerHome` runs, so the read happens
+ * while `<workerHome>/.claude.json` still exists. Reads ONLY the same six-field slice
+ * account-usage.ts's own `readAccountUsageFile` projects `~/.claude.json` down to (this is a
+ * private, minimal re-implementation of that projection for the SAME reason
+ * `resolveActiveAccountId` above is one — no import path exists that avoids a cycle), then
+ * persists a narrower cut of it — `accountUuid`/`fetchedAtMs`/the two usage windows,
+ * DELIBERATELY NEVER `email`/`org`/anything OAuth-shaped — to
+ * `<root>/state/account-usage-projection.json`. Written via a temp-file-then-`renameSync` swap
+ * so a concurrent reader (the console's `GET /v1/account-usage`) can never observe a
+ * half-written file.
+ *
+ * BEST-EFFORT AND SILENT, matching every other piece of this teardown: an absent/unreadable
+ * `.claude.json` (a spawn that died before the CLI ever wrote one), a payload carrying no
+ * usable `cachedUsageUtilization.fetchedAtMs`, or a write failure are all simply skipped —
+ * never thrown, never blocking the teardown this runs inside of. Returns whether a projection
+ * was actually written, so a test can assert on it directly rather than re-reading the file.
+ */
+export function captureWorkerUsageProjection(
+  root: string,
+  workerHome: string,
+  fsImpl: {
+    readFileSync: typeof readFileSync;
+    writeFileSync: typeof writeFileSync;
+    mkdirSync: typeof mkdirSync;
+    renameSync: typeof renameSync;
+  } = { readFileSync, writeFileSync, mkdirSync, renameSync },
+): boolean {
+  try {
+    const raw = fsImpl.readFileSync(join(workerHome, CLAUDE_CONFIG_REL), "utf8");
+    const parsed = JSON.parse(raw) as {
+      cachedUsageUtilization?: {
+        accountUuid?: unknown;
+        fetchedAtMs?: unknown;
+        utilization?: {
+          five_hour?: { utilization?: unknown; resets_at?: unknown } | null;
+          seven_day?: { utilization?: unknown; resets_at?: unknown } | null;
+        };
+      };
+    };
+    const cache = parsed.cachedUsageUtilization;
+    if (typeof cache?.fetchedAtMs !== "number" || !Number.isFinite(cache.fetchedAtMs)) return false;
+
+    const window = (w: { utilization?: unknown; resets_at?: unknown } | null | undefined) => {
+      if (!w) return undefined;
+      const out: { percentUsed?: number; resetsAt?: string } = {};
+      if (typeof w.utilization === "number" && Number.isFinite(w.utilization)) out.percentUsed = w.utilization;
+      if (typeof w.resets_at === "string" && w.resets_at !== "") out.resetsAt = w.resets_at;
+      return out.percentUsed === undefined && out.resetsAt === undefined ? undefined : out;
+    };
+
+    const projection: Record<string, unknown> = { cacheFetchedAtMs: cache.fetchedAtMs };
+    if (typeof cache.accountUuid === "string" && cache.accountUuid !== "") projection.cacheUuid = cache.accountUuid;
+    const fiveHour = window(cache.utilization?.five_hour);
+    if (fiveHour) projection.fiveHour = fiveHour;
+    const sevenDay = window(cache.utilization?.seven_day);
+    if (sevenDay) projection.sevenDay = sevenDay;
+
+    const target = join(root, WORKER_USAGE_PROJECTION_REL);
+    fsImpl.mkdirSync(dirname(target), { recursive: true });
+    const tmp = `${target}.tmp-${process.pid}-${Date.now()}`;
+    fsImpl.writeFileSync(tmp, JSON.stringify(projection));
+    fsImpl.renameSync(tmp, target);
+    return true;
+  } catch {
+    return false; // best-effort — never blocks or fails a spawn's teardown
+  }
+}
+
 export interface SpawnWorkerArgs {
   cwd: string;
   permissionMode: PermissionMode;
@@ -1253,6 +1343,11 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     // per-spawn sibling (`perRunWorkerHomeDir(..., { perSpawn: true })`), not a home shared
     // with every other spawn in the run, so this unconditional `rmSync` no longer tears down
     // a still-live sibling's home out from under it.
+    // W1-T2516: capture the usage cache OUT of this spawn's own worker home BEFORE the reap
+    // immediately below deletes it — see captureWorkerUsageProjection's own doc for why this is
+    // the only place in the codebase this reading is still reachable at all. Best-effort and
+    // silent by construction, exactly like the reap it precedes; never gates or delays it.
+    captureWorkerUsageProjection(config.root, workerHome);
     // The logger is wrapped so a caller-supplied `logHomeReap` can never turn this
     // previously-bulletproof teardown into a new failure mode.
     const homeReapResult = reapWorkerHome(workerHomeRoot, workerHome);

@@ -5817,9 +5817,54 @@ export function acceptanceAuthorTimeCheck(
  *  `ResolverDivergence`. Set ONLY when `loadPlanAtRef` itself throws (a duplicate id, an
  *  unreadable git object at `headSha`) — never merely because `taskId` is absent from a plan
  *  that loaded fine, the same distinction `resolvePlanCriteriaForReview` draws. */
+/**
+ * W1-T2511: WHICH cause made a head sha unreadable, decided by one probe rather than inferred from
+ * git's message — which cannot tell them apart.
+ *
+ * `git show <sha>:<path>` emits the same "path '…' exists on disk, but not in '<sha>'" for an
+ * object that was never fetched and for a commit that is present but genuinely lacks the path.
+ * MEASURED, file present on disk in both cases, one of them using a real sha in a repo that had
+ * never heard of it — byte-identical output. So the distinction has to be asked for separately.
+ *
+ * `git cat-file -e <sha>^{commit}` asks exactly that and nothing else: it exits 0 when the commit
+ * object is present locally and non-zero when it is not. A probe that itself cannot run yields
+ * `"undetermined"` — never a guess, because a wrong cause here sends the next reader at the wrong
+ * defect entirely.
+ */
+export function classifyHeadShaAvailability(
+  repoRoot: string,
+  headSha: string,
+  runGit?: (args: string[]) => string,
+): "absent-object" | "readable-object" | "undetermined" {
+  const git =
+    runGit ??
+    ((args: string[]) => execFileSync("git", ["-C", repoRoot, ...args], { encoding: "utf8", stdio: "pipe" }));
+  try {
+    git(["cat-file", "-e", `${headSha}^{commit}`]);
+    return "readable-object";
+  } catch (e) {
+    // DISTINGUISH THE PROBE FAILING FROM THE PROBE ANSWERING "no". `cat-file -e` exits non-zero to
+    // MEAN "absent", which is an answer; anything that prevents it running at all (no git, an
+    // unreadable repoRoot, an injected runner that throws for its own reasons) is not. The
+    // discriminator is whether the error carries a numeric exit status, which a real non-zero exit
+    // does and a spawn failure does not.
+    const status = (e as { status?: unknown } | null)?.status;
+    return typeof status === "number" ? "absent-object" : "undetermined";
+  }
+}
+
 export interface PlanCriteriaAtHeadDivergence {
   taskId: string;
   reason: string;
+  /** W1-T2511: WHICH cause produced `reason`, because git's own message cannot say. `git show
+   *  <sha>:<path>` emits a BYTE-IDENTICAL "path '…' exists on disk, but not in '<sha>'" whether
+   *  the object is absent from local storage or present with that path genuinely missing from its
+   *  tree — MEASURED on both, in a throwaway repo, using a real sha the repo had never seen.
+   *  `absent-object` means the sha was never fetched here (the W1-T2511 ordering defect, and the
+   *  case that resolves itself once the hoisted fetch runs); `readable-object` means the commit is
+   *  present and the plan file really is not in it, which is a different problem entirely.
+   *  `undetermined` when the probe itself could not run — never guessed. */
+  cause?: "absent-object" | "readable-object" | "undetermined";
 }
 
 /** {@link resolvePlanCriteriaAtHead}'s result — same shape as run-task.ts's
@@ -5896,7 +5941,19 @@ export function resolvePlanCriteriaAtHead(
   } catch (e) {
     // A duplicate id or an unreadable git object at headSha — named, never swallowed into a
     // silent empty plan (mirrors resolvePlanCriteriaForReview's own divergence shape).
-    return { criteria: [], taskId, divergence: { taskId, reason: String((e as Error)?.message ?? e) } };
+    //
+    // W1-T2511: and the reason ALONE cannot say which it was, because git will not. One extra
+    // `cat-file -e` separates the two causes that matter, so whoever reads the next divergence is
+    // not left re-running probes to find out whether the sha was simply never fetched.
+    return {
+      criteria: [],
+      taskId,
+      divergence: {
+        taskId,
+        reason: String((e as Error)?.message ?? e),
+        cause: classifyHeadShaAvailability(repoRoot, headSha, runGit),
+      },
+    };
   }
 }
 

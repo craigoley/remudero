@@ -1,0 +1,69 @@
+- id: W1-T2540
+  title: "THE MERGE-CONFLICT WORKER IS TOLD TO RESOLVE TOWARD THE UNION, AND FOR A REGENERABLE ARTIFACT THE UNION IS ALWAYS WRONG — measured three times in one night, the merged truth matched NEITHER side and neither the higher of the two: tell the worker to re-derive such a file with its own tool instead of merging it textually"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 18.00
+  rationale: |
+    W1-T2536 (#3400) turned the merge-conflict fix rung on for the first time. This closes a gap in
+    the prompt that rung dispatches, found by resolving the same conflict class by hand three times
+    on 2026-08-31 before the rung was live.
+
+    (1) WHAT THE PROMPT SAYS TODAY. `renderFixPrompt`'s merge-conflict branch (src/run-task.ts)
+    instructs: "resolve toward the UNION of both sides ONLY where merge-base analysis shows a PURE
+    CONCURRENT ADDITION — both sides only ADDED content". Correct for source code. WRONG for a file
+    whose content is DERIVED from the merged tree, because the merged tree is not either side.
+
+    (2) MEASURED, THREE FOR THREE. Each is `scripts/source-size-baseline.json`, two PRs recording a
+    different ceiling for the same source file. The true value is what the ratchet measures AFTER
+    the merge, and it matched neither side nor their maximum:
+        src/lib/task-linter.ts   ours 3136   theirs 3138   TRUTH 3230
+        src/run-task.ts          ours 32692  theirs 32713  TRUTH 32818
+        src/run-task.ts          ours 32743  theirs 32718  TRUTH 32748
+    A worker following the current instruction ships a false ceiling every time. The gate catches
+    it — the resolution pushes a new head, `remudero-review` is a required per-sha commit status,
+    and the ratchet itself re-runs in CI — so the failure mode is a WASTED CYCLE and a red PR, not
+    a bad merge. That is the fence working, and it is still a cycle spent on a decidable case.
+
+    (3) THE RULE IS GENERAL, NOT A LIST OF FILENAMES. Any artifact a tool regenerates from the tree
+    — a lockfile, a generated reference doc, a plan index, a size ledger — has the same property:
+    its correct post-merge content is a FUNCTION of the merged tree, not a combination of the two
+    inputs. The prompt should say that, and say how to tell (the file names its own generator, or
+    the repo has a command that rewrites it), rather than enumerating paths that will drift.
+
+    (4) WHY THIS IS THE PROMPT AND NOT THE PREDICATE. `isPureConcurrentAddition` decides ADMISSION
+    from a REST compare that carries deletion counts and no hunks; it cannot see that a file is
+    regenerable. The worker holds the actual conflict and the repo's own tooling, so it is the only
+    component that can act on this. W1-T2539 separately removes most of these conflicts at source;
+    this task makes the ones that remain resolvable correctly rather than confidently wrong.
+
+    (5) SCOPE IS THE PROMPT TEXT ONLY. No predicate, no disposition row, no admission flag, and no
+    change to what any gate refuses. `test/run-task.test.ts` already asserts on this exact prompt
+    ("renderFixPrompt: merge-conflict mode names the mode, the conflicting file(s), and the
+    union-with-merge-base discipline"), so the new instruction is pinned beside the existing ones.
+
+    (6) OUT OF SCOPE, NAMED. (a) Teaching the worker WHICH command regenerates a given artifact —
+    it can read the repo; enumerating them here would drift. (b) Any change to the ci-log or review
+    prompt modes. (c) W1-T2539's bucketing, which reduces how often this path is reached at all.
+  acceptance:
+    - claim: "the merge-conflict prompt tells the worker that a regenerable artifact must be re-derived with its own tool rather than merged textually"
+      proof: "unit test: test/run-task.test.ts"
+    - claim: "the prompt states that for such a file the correct value can match neither side, so a union or a maximum is not a safe resolution"
+      proof: "unit test: test/run-task.test.ts"
+    - claim: "the existing union-with-merge-base discipline for ordinary source is preserved, not replaced"
+      proof: "unit test: test/run-task.test.ts"
+    - claim: "the refuse-and-escalate instruction for a deletion-involved or semantic conflict is untouched"
+      proof: "unit test: test/run-task.test.ts"
+  risk: medium
+  origin: incident
+  plan_refs: ["W1-T94", "W1-T106", "W1-T2536", "W1-T2539"]
+  files: [src/run-task.ts, test/run-task.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    `files:` is the prompt's home and its existing suite. `renderFixPrompt`'s merge-conflict branch
+    is in `src/run-task.ts`; `test/run-task.test.ts` already carries the mode-fixture assertions
+    this extends. No new test file: putting the new assertion anywhere else would separate it from
+    the three it must not contradict.

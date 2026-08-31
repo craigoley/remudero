@@ -1,32 +1,29 @@
 # ORIENTATION
 
-_MAINTAINED BY `rmd retro` — regenerated 2026-08-30T13:45:20.239Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
+_MAINTAINED BY `rmd retro` — regenerated 2026-08-31T16:43:32.387Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
 
 A fresh Architect session should be able to orient from THIS doc alone plus the plan index —
 not by re-deriving state from the full plan and ledger.
 
 ## Current state
 
-13 run(s) since the last retro marker. Verdicts: {"blocked_ci":2,"blocked_containment":1,"merged":10}.
+23 run(s) since the last retro marker. Verdicts: {"blocked_ci":17,"incomplete":3,"merged":2,"no_pr":1}.
 
 ### Shipped since marker
-- W1-T2442 → https://github.com/craigoley/remudero/pull/3263 (gate-side merge; run ended blocked_ci)
-- W1-T2457 → https://github.com/craigoley/remudero/pull/3272
-- W1-T2458 → https://github.com/craigoley/remudero/pull/3275
-- W1-T2460 → https://github.com/craigoley/remudero/pull/3286
-- W1-T2461 → https://github.com/craigoley/remudero/pull/3288
-- W1-T2462 → https://github.com/craigoley/remudero/pull/3285
-- W1-T2463 → https://github.com/craigoley/remudero/pull/3289
-- W1-T2464 → https://github.com/craigoley/remudero/pull/3296
-- W1-T2465 → https://github.com/craigoley/remudero/pull/3299
-- W1-T2466 → https://github.com/craigoley/remudero/pull/3302
-- W1-T2470 → https://github.com/craigoley/remudero/pull/3300
+- W1-T2479 → https://github.com/craigoley/remudero/pull/3359 (gate-side merge; run ended blocked_ci)
+- W1-T2487 → https://github.com/craigoley/remudero/pull/3373 (gate-side merge; run ended blocked_ci)
+- W1-T2490 → https://github.com/craigoley/remudero/pull/3358 (gate-side merge; run ended blocked_ci)
+- W1-T2498 → https://github.com/craigoley/remudero/pull/3357 (gate-side merge; run ended blocked_ci)
+- W1-T2501 → https://github.com/craigoley/remudero/pull/3361
+- W1-T2503 → https://github.com/craigoley/remudero/pull/3365 (gate-side merge; run ended blocked_ci)
+- W1-T2504 → https://github.com/craigoley/remudero/pull/3364 (gate-side merge; run ended blocked_ci)
+- W1-T2514 → https://github.com/craigoley/remudero/pull/3404
 
 ## Next runnable task
 
-**W1-T2467** — a board-state proposal has no expiry — board-review.ts:383 is the ONE registry producer minting evidenceAnchors: [], which makes the evidence-drift clause vacuous and isDraftStale permanently false, and nothing retires a proposal whose referent PR has since resolved
+**W1-T2508** — CLAUDE.md IS ALREADY WRITTEN FOR PROGRESSIVE DISCLOSURE AND IS DISCLOSED ALL AT ONCE — every one of its 84 bullets is a bolded HEADLINE plus a body, the headlines are 15.7 percent of the file at a median 123 characters (an agent-skill description by any measure), and the other 84 percent is injected whether the reader needs it or not
 
-- risk: high · depends_on: W1-T2466
+- risk: high · depends_on: W1-T2507
 
 ## Never-do invariants (MASTER-PLAN §12 Standing rules — extracted verbatim; §12 is authoritative)
 

@@ -1,0 +1,101 @@
+- id: W1-T2539
+  title: "THE SIZE BASELINE RECORDS AN EXACT LINE COUNT, SO EVERY PR THAT GROWS A FILE EDITS THE SAME LINE AND TWO SUCH PRs ALWAYS CONFLICT — and the conflict is UNRESOLVABLE by the merge-conflict rung, because changing a value on an existing JSON key is a deletion plus an addition and isPureConcurrentAddition refuses any deletion: record a BUCKETED ceiling instead, so most growth needs no edit at all and two PRs that do cross a boundary write the IDENTICAL line"
+  repo: remudero
+  depends_on: [W1-T2538]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  rationale: |
+    MEASURED 2026-08-31 on origin/main, after W1-T2536 turned the merge-conflict rung ON for the
+    first time in the project's history and it admitted NOTHING.
+
+    (1) THE OBSERVED FAILURE. Three PRs sat `mergeable_state: dirty` for hours (#3363, #3391,
+    #3366) with the rung live. Computing the admission predicate's own inputs against each real
+    merge base:
+        #3363  scripts/source-size-baseline.json  ours -1  theirs -5
+        #3391  scripts/source-size-baseline.json  ours -2  theirs -7
+        #3366  scripts/source-size-baseline.json  ours -2  theirs -10
+    `isPureConcurrentAddition` (src/lib/sweep.ts) requires ZERO deletions on BOTH sides, so it
+    refuses all three. Two more, resolved by hand the same night, score the same way: the merge
+    commits 55848766 and 7f2cdc67 read ours -2 / theirs -6 on this file.
+
+    (2) WHY IT IS STRUCTURAL, NOT INCIDENTAL. Recording a new ceiling for a file that ALREADY has
+    a baseline entry is a MODIFICATION of an existing JSON key, and git counts a modification as a
+    deletion plus an addition. So the dominant conflict shape on this repo can NEVER satisfy a
+    zero-deletion predicate. W1-T2536 is not wrong — the fence, the dispatch, the prompt and the
+    escalation are all correct and live — but it is INERT against the one population it would be
+    most useful for, and will fire only on a genuine both-sides-created-a-new-file conflict.
+
+    (3) AND THE UNION ANSWER IS ALWAYS WRONG HERE, WHICH IS WHY "JUST ADMIT IT" IS NOT THE FIX.
+    Both sides ADD lines, so the merged file is longer than either side recorded. Measured three
+    times: 3230 against sides of 3136/3138; 32818 against 32692/32713; 32748 against 32743/32718.
+    Taking either side, or the higher of the two, ships a FALSE ceiling every time. Only re-running
+    the ratchet answers it. (W1-T2540 carries the prompt half of that lesson.)
+
+    (4) THE FIX, AND ITS TWO PROPERTIES. Record `ceil(lines / 500) * 500` rather than the exact
+    count.
+      (a) A PR whose growth stays inside the current bucket does not touch the baseline AT ALL, so
+          there is no line to collide on. Measured over 300 first-parent commits (the repo
+          squash-merges, so `--merges` reads a near-empty corpus — controlled at 2656 first-parent
+          commits available): per-commit growth of a single source file is p50 40, p75 85, p90 141,
+          p99 287, max 441, and the baseline is touched in 19 of 300 commits (6.3%).
+      (b) When two PRs DO both cross the same boundary they write the SAME VALUE, and git
+          auto-merges an identical change with no conflict. This is the property that removes the
+          class rather than merely making it rarer.
+
+    (5) THE BUCKET IS DERIVED, NOT PICKED. 500 exceeds the observed MAXIMUM single-commit growth
+    (441), so no single commit can traverse a whole bucket from a standing start. Replaying
+    2026-08-31's three conflicts at this bucket: task-linter 3136/3138 both round to 3250 and the
+    merged truth 3230 fits (conflict gone); run-task 32743/32718 both round to 32750 and 32748 fits
+    (gone); the third still blocks, but on an identical, cleanly-merging line.
+
+    (6) THE COST, STATED PLAINLY RATHER THAN BURIED. The ratchet gets COARSER: a file may grow up
+    to 499 lines past its last recorded ceiling before the gate notices — 1.5% of a 32k-line file,
+    15% of a 3k-line one. This is a ratchet against unbounded growth, not a precise budget (the
+    W1-T2526 exemption calls it "a size ledger records how long a file is and grades no
+    falsifier"), so the trade is judged worth it. AN OPERATOR WHO DISAGREES SHOULD SAY SO AT REVIEW:
+    the number is one exported constant.
+
+    (7) MIGRATION IS LAZY AND THAT IS DELIBERATE. The 145 existing entries are exact counts and
+    stay valid ceilings; each file re-records into a bucket the first time it grows past its
+    current value. An EAGER rewrite of all 145 would itself be a 145-line diff to this exact file
+    — a conflict magnet against every in-flight PR, which is the defect this task exists to remove.
+
+    (8) `depends_on: [W1-T2538]` FOR THE SAME REASON. That task's build (#3408) is open against
+    BOTH declared files. Building this one first would manufacture precisely the conflict this task
+    removes.
+
+    (9) OUT OF SCOPE, NAMED. (a) Relaxing `isPureConcurrentAddition` to admit a same-key
+    modification — a real option, but it needs its own evidence and would change what the reviewer
+    admits fleet-wide. (b) Any `.gitattributes` merge driver: a custom driver needs
+    `git config merge.<name>.driver` registered in every clone, worktree and CI runner, and FAILS
+    SILENTLY to the default when it is not — an unenforced mechanism of exactly the kind CLAUDE.md
+    warns against. (c) W1-T2532's automatic recording mode, still unbuilt and complementary.
+  acceptance:
+    - claim: "a recorded ceiling is a bucket rather than the exact line count, so ordinary growth needs no edit"
+      proof: "unit test: test/a-source-file-cannot-outgrow-its-baseline.test.ts"
+    - claim: "two files whose counts differ but fall in the same bucket record the identical value, which is what lets git auto-merge them"
+      proof: "unit test: test/a-source-file-cannot-outgrow-its-baseline.test.ts"
+    - claim: "a file that grows past its bucket still BLOCKS, and the remedy names the bucketed value rather than the raw count"
+      proof: "unit test: test/a-source-file-cannot-outgrow-its-baseline.test.ts"
+    - claim: "a failing run still never advances the baseline, exactly as before"
+      proof: "unit test: test/a-source-file-cannot-outgrow-its-baseline.test.ts"
+    - claim: "a shrink only re-records once the file drops a whole bucket, so a small shrink cannot re-introduce a colliding edit"
+      proof: "unit test: test/a-source-file-cannot-outgrow-its-baseline.test.ts"
+    - claim: "the bucket size is a named export rather than an inline literal, so changing it is a one-line reviewed edit"
+      proof: "grep: CEILING_BUCKET_LINES in scripts/source-size-ratchet.mjs"
+  risk: high
+  band_meaning: blast-radius
+  origin: incident
+  plan_refs: ["W1-T2526", "W1-T2536", "W1-T2538", "W1-T2488"]
+  files: [scripts/source-size-ratchet.mjs, test/a-source-file-cannot-outgrow-its-baseline.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    risk:high, band_meaning: blast-radius — this changes what a live CI gate accepts on EVERY
+    source file, and a wrong bucket either stops catching growth or blocks the whole fleet. The
+    span is one instrument plus its own falsifier suite.
+
+    THE 145 EXISTING ENTRIES ARE NOT REWRITTEN by this task — see rationale (7). A reviewer
+    expecting a large baseline diff should expect the opposite: none.
