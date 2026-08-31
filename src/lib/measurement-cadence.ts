@@ -1158,3 +1158,69 @@ export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts):
     proofDebtMint,
   };
 }
+
+/** Keys of {@link MeasurementCadenceRunResult} that must NEVER appear on the row
+ *  {@link buildMeasurementCadenceRow} builds, because that member already has its OWN log family
+ *  the daemon writes directly (never through `result`) — `boardReview` is `board_review.fired` /
+ *  `.ran` / `.skipped` / `.check_failed` in `daemon.ts`, driven by `checkBoardReview`/
+ *  `runBoardReview`, not by this module's `boardReview` field (production never even passes
+ *  `opts.boardReview` into {@link runMeasurementCadenceReport} — see
+ *  `buildMeasurementCadenceDaemonHooks`). Naming it here too would duplicate a row that already
+ *  exists (W1-T2502's own SURFACE 5 finding) rather than close a gap. A member that gains its own
+ *  row family in the future joins this set at the same time — everything NOT in this set is
+ *  self-reporting by construction and needs no maintenance here. */
+const CADENCE_ROW_OWN_FAMILY_KEYS: ReadonlySet<string> = new Set(["boardReview"]);
+
+/** camelCase -> snake_case, ASCII-only (every {@link MeasurementCadenceRunResult} key is a plain
+ *  camelCase identifier, so this never has to handle acronyms, digits-as-words, or unicode). Used
+ *  ONLY to keep the row's key spelling consistent with the four names the daemon already logged
+ *  before this task (`rule_efficacy`, `verdict_calibration`, `autonomy_rate`, `adoption_mint`) —
+ *  every one of those already satisfies this exact conversion, so no hand-maintained name map is
+ *  needed alongside it (a map would just be a second hand-maintained row under a different name). */
+function cadenceRowKeyName(key: string): string {
+  return key.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`);
+}
+
+/**
+ * Builds the `measurement_cadence.ran` log row FROM `result`'s own keys, so a member added to
+ * {@link MeasurementCadenceRunResult} is named on the row without anyone editing this function or
+ * the daemon call site (W1-T2502 — the row was previously four hand-typed keys that silently
+ * dropped every member added after them; `adoptionReport`, and independently `proofDebtReport` /
+ * `proofDebtMint`, reached zero occurrences in `daemon.ts` this way).
+ *
+ * `Object.keys(result)` — never a fixed list of every field the TYPE declares — is what makes an
+ * ABSENT optional member distinguishable from one PRESENT and `undefined`: {@link
+ * runMeasurementCadenceReport} itself never omits a key (every field above is set, even to
+ * `undefined`, via the object literal's shorthand), but three of the eight fields are optional on
+ * the TYPE ONLY so a hand-built test double simulating `DaemonDeps.runMeasurementCadence` from
+ * before a field existed still type-checks with that key genuinely absent (see
+ * `test/measurement-cadence.test.ts`'s own `runDaemon` fixtures, which return as few as three
+ * keys). `Object.keys` skips a truly-absent key entirely — so the row omits it too — while a key
+ * explicitly set to `undefined` still shows up as an own property and lands on the row with that
+ * value. A fixed enumeration of "every field the type could carry" cannot tell these apart; this
+ * can, because it never invents a key `result` doesn't actually have.
+ *
+ * Never throws: a malformed or hostile `result` (e.g. a key whose getter throws) still returns a
+ * row — a synthetic `row_build_failed` entry naming the error — rather than propagating, because
+ * by the time this runs the cadence has already executed; a logging-shape failure must never read
+ * as a cadence failure (`measurement_cadence.run_failed`) it never had.
+ */
+export function buildMeasurementCadenceRow(result: MeasurementCadenceRunResult): Record<string, unknown> {
+  try {
+    const row: Record<string, unknown> = {};
+    for (const key of Object.keys(result)) {
+      if (CADENCE_ROW_OWN_FAMILY_KEYS.has(key)) continue;
+      row[cadenceRowKeyName(key)] = (result as unknown as Record<string, unknown>)[key];
+    }
+    return row;
+  } catch (e) {
+    // NOT erased: the failure IS the return shape here — `row_build_failed` carries the message
+    // into the ledger row, so a row that could not be derived is distinguishable from one that
+    // derived to nothing. The catch-erasure detector's DISTINCTION_KEY_RE looks for `\bfailed:`
+    // and cannot see it behind the underscore in `row_build_failed`, so the reason is stated here
+    // rather than renaming a shipped ledger key to satisfy a regex. Deliberately does not rethrow:
+    // this row is telemetry about a cadence run, and failing to build it must never take the run
+    // itself down.
+    return { row_build_failed: String((e as Error)?.message ?? e) };
+  }
+}
