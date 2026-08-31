@@ -3016,6 +3016,35 @@ const SHORTHAND_HEAD_NOUN_RE = /^[*_`]*[ \t]+([A-Za-z][A-Za-z0-9_-]*)/;
  * helper reports TRUE and the filename fires. Requiring real whitespace before the head noun is
  * what keeps a path silent.
  */
+/**
+ * W1-T2533 — A DENIED CLAIM IS NOT A CLAIM. The label arm decides on the COLON alone and never
+ * reads what follows, so a body that answers the scope question HONESTLY IN THE NEGATIVE was
+ * refused for having made the claim it just denied.
+ *
+ * MEASURED on #3373, whose body said `Plan-only: no.` — the correct answer, correctly stating the
+ * PR is NOT plan-only — and was refused for it. A reader who answers truthfully is punished, which
+ * is the one shape a scope detector must never punish.
+ *
+ * THE DISCRIMINATOR IS EXACT, AND THE HARD CASE IS WHY. `Plan-only: no code, only the shard.` is an
+ * ASSERTION whose elaboration merely BEGINS with a negative word — it says what the scope IS, and
+ * must stay refused. So:
+ *   - `no`/`nope` counts as a denial only when nothing follows it but punctuation or end of line,
+ *     because `no <noun>` describes content rather than answering the question;
+ *   - `not` counts always, since it negates whatever follows ("not this time", "not really").
+ * That single distinction separates every observed denial from every observed assertion.
+ */
+const DENIED_LABEL_ANSWER_RE = /^[*_`'")\]\s]*:\s*(?:(?:no|nope)(?![ \t]*[\w])|not\b)/i;
+
+/**
+ * W1-T2533 — the ATTRIBUTIVE form of the same denial: "this is NOT a plan-only change". The
+ * attributive arm reads only the noun the shorthand modifies, so it cannot see a negator sitting
+ * in front of the whole noun phrase.
+ *
+ * Bounded to the words IMMEDIATELY before the shorthand, for the same reason the copular arm is
+ * (SELF_REFERENTIAL_CLAIM_RE): a negator anywhere-in-sentence would silence a genuine claim that
+ * merely shares a sentence with an unrelated negation.
+ */
+const DENIED_ATTRIBUTIVE_RE = /\b(?:not|never|isn't|aren't|wasn't)\s+(?:a|an|the)?\s*$/i;
 function shorthandIsAboutChangeset(report: string, index: number, length: number): boolean {
   const rest = report.slice(index + length);
   // THE LABEL FORM IS A CLAIM, and it is the one the house style actually writes: `data-only: no
@@ -3032,7 +3061,11 @@ function shorthandIsAboutChangeset(report: string, index: number, length: number
   // that invariant only by accident until now — the emphasis-only class here never matched the
   // quote, and the sentence-scoped arm this task removed was silently covering for it. The gap was
   // always in this arm; removing its cover is what made it visible.
-  if (/^[*_`'")\]\s]*:/.test(rest)) return true;
+  if (/^[*_`'")\]\s]*:/.test(rest)) {
+    // W1-T2533: ...unless the body ANSWERED the question negatively. See DENIED_LABEL_ANSWER_RE
+    // for why `no <noun>` is still an assertion while `no.` and `not …` are denials.
+    return !DENIED_LABEL_ANSWER_RE.test(rest);
+  }
   // THE COPULAR FORM IS A CLAIM: "This is plan-only.", "The diff is data-only." A linking verb
   // immediately before the shorthand makes it the PREDICATE of whatever the sentence is about, and
   // in a PR body that subject is the change. Deliberately IMMEDIATE rather than anywhere-in-
@@ -3047,7 +3080,10 @@ function shorthandIsAboutChangeset(report: string, index: number, length: number
   // `carve-out` and `diff` is an object three words later — one sentence, two entirely different
   // subjects. Reading only the modified noun keeps every real claim and drops the description.
   const head = SHORTHAND_HEAD_NOUN_RE.exec(rest);
-  return head !== null && CHANGESET_CONTEXT_RE.test(head[1]);
+  if (head === null || !CHANGESET_CONTEXT_RE.test(head[1])) return false;
+  // W1-T2533: "this is NOT a plan-only change" modifies the changeset AND denies it. The negator
+  // sits in front of the whole noun phrase, where the head-noun read cannot see it.
+  return !DENIED_ATTRIBUTIVE_RE.test(report.slice(0, index));
 }
 
 /** Does `file` fall under the claimed-absent `path` (an exact file, or a directory prefix)? */
