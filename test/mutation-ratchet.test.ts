@@ -304,14 +304,37 @@ test("the REAL PR gate config's commandRunner is scoped to exactly the test file
   assert.match(command, /\btest\/block-reason\.test\.ts\b/, "must run block-reason.test.ts -- the only OTHER file importing from src/lib/classify.ts");
   assert.equal(command.includes("test/**"), false, "must never fall back to the full test/**/*.test.ts glob -- that is the latency incident this task fixed");
 
-  // The claim that these are the ONLY two consumers is itself falsifiable against the real
-  // source tree, not just asserted here -- grep every test file for an import naming classify.
+  // WHICH DIRECTION IS ASSERTED, AND WHY ONLY ONE. The property that protects the mutation score
+  // is EVERY IMPORTER IS IN THE COMMAND: a test file that exercises classify.ts but sits outside
+  // the runner contributes nothing to killing its mutants, and the only symptom is a collapsed
+  // score with no reason given (W1-T2524 -- MEASURED at 38.91% against a 75.92% baseline when
+  // exactly that happened). That direction is asserted below, derived from the real tree rather
+  // than from a hand-kept list: the pair this test used to name verbatim went stale the first
+  // time a third file imported classify.ts.
+  //
+  // THE CONVERSE IS DELIBERATELY NOT ASSERTED -- the command is allowed to LEAD the file it
+  // scopes by one PR. stryker.conf.json is on INSTRUMENT_SURFACE (src/lib/review.ts), so it can
+  // never ship in the same diff as a src/ change (Standing rule 25, W1-T2521): a new classify
+  // test and the scope entry that covers it are STRUCTURALLY two PRs, and the scope entry has to
+  // be the one that goes first or the new test lands unmutated. MEASURED, so the lead is not a
+  // silent failure: `node --test` given a path that does not exist runs the remaining files and
+  // exits 0 (`node --test --import tsx test/block-reason.test.ts test/ghost.test.ts` -> `# pass
+  // 15`, `# fail 0`, exit 0), so a leading entry costs a window in which it covers nothing, never
+  // a broken mutation run.
   const testFiles = readdirSync(join(REPO_ROOT, "test")).filter((f) => f.endsWith(".test.ts"));
-  const classifyImporters = testFiles.filter((f) => {
-    const contents = readFileSync(join(REPO_ROOT, "test", f), "utf8");
-    return /from ["'].*classify(\.js)?["']/.test(contents);
-  });
-  assert.deepEqual(classifyImporters.sort(), ["block-reason.test.ts", "classify.test.ts"], "the command-runner scope must track every test file that actually imports classify.ts -- add it here if a new one starts importing classify.ts");
+  const classifyImporters = testFiles
+    .filter((f) => /from ["'].*classify(\.js)?["']/.test(readFileSync(join(REPO_ROOT, "test", f), "utf8")))
+    .sort();
+  assert.ok(
+    classifyImporters.includes("classify.test.ts") && classifyImporters.includes("block-reason.test.ts"),
+    `positive control: the importer sweep must find classify.ts's two known consumers, or it is measuring nothing -- found ${JSON.stringify(classifyImporters)}`,
+  );
+  for (const importer of classifyImporters) {
+    assert.ok(
+      new RegExp(`(^|\\s)test/${importer.replace(/\./g, "\\.")}(\\s|$)`).test(command),
+      `test/${importer} imports src/lib/classify.ts but is NOT in stryker's commandRunner, so its assertions kill no mutants and the score silently drops -- add it to stryker.conf.json (an instrument-only PR; Standing rule 25 forbids shipping that edit beside a src/ change). Command is: ${command}`,
+    );
+  }
 });
 
 test("resolve-scope: the REAL nightly config (scripts/mutation-nightly-scope.json) resolves to a DISTINCT, wider scope than the PR gate, over the SAME candidate list", () => {
