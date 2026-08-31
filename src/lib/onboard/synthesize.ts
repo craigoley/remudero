@@ -13,6 +13,7 @@ import type { GhExec, Inventory } from "./inventory.js";
 import { generateOnboardQuestions, type OnboardAnswer, type OnboardQuestion } from "./session.js";
 import { lintPlan } from "../task-linter.js";
 import { parseTasksFromYaml, type Plan, type Task } from "../plan.js";
+import { seedProjectLearningsHomeFiles } from "../learnings.js";
 
 /**
  * `rmd onboard <target-dir> --phase synthesize` — phase 4 (and last) of the four-phase
@@ -44,13 +45,18 @@ import { parseTasksFromYaml, type Plan, type Task } from "../plan.js";
  * the git/gh call shape) is pure/unit-testable without ever spawning a live worker or
  * shelling real git/gh (Rule 2 — policy as data, not code).
  *
- * WRITE SCOPE: this phase writes ONLY three files, all under `<target-dir>` on the freshly
- * checked-out `onboard/<repo>-plan` branch — `MASTER-PLAN.md`, `plan/tasks.yaml`,
- * `AGENTS.md` — and NOTHING under `<target-dir>/plan/onboarding/` (phases 1-3's own
- * artifacts are READ-ONLY inputs here, never touched). Exactly ONE branch, ONE commit, ONE
- * `gh pr create --draft` call — standing rule 15 ("the Architect proposes, merges nothing"):
- * this phase never opens more than one PR, and never merges anything itself; the human's
- * merge of the draft PR IS the ratification.
+ * WRITE SCOPE (W1-T2505 widened this ONCE, deliberately, and the acceptance criteria pin the
+ * new scope exactly — a further widening is refused the same way a fourth path was refused
+ * before this task): this phase writes, all under `<target-dir>` on the freshly checked-out
+ * `onboard/<repo>-plan` branch — the three drafted files `MASTER-PLAN.md`, `plan/tasks.yaml`,
+ * `AGENTS.md`; PLUS, only when `<target-dir>/learnings/` does not already exist, the seeded
+ * project learnings home ({@link seedProjectLearningsHomeFiles}, learnings.ts) — five empty
+ * subsystem shards and an `index.json` — so the per-repo layer the worker injection already
+ * reads (`projectLearningsHome`) has a directory to find. NOTHING under
+ * `<target-dir>/plan/onboarding/` (phases 1-3's own artifacts are READ-ONLY inputs here, never
+ * touched). Exactly ONE branch, ONE commit, ONE `gh pr create --draft` call — standing rule 15
+ * ("the Architect proposes, merges nothing"): this phase never opens more than one PR, and
+ * never merges anything itself; the human's merge of the draft PR IS the ratification.
  *
  * COMPOSITION (documented per this task's own design note): `rmd onboard` (this whole
  * four-phase family) produces the BRAIN — a ratified MASTER-PLAN.md/tasks.yaml/AGENTS.md.
@@ -348,6 +354,24 @@ function writeSynthesisArtifactAtomic(fsDeps: SynthesizeFsDeps, path: string, co
   fsDeps.renameSync(tmpPath, path);
 }
 
+/**
+ * Seed `<target-dir>/learnings/` (W1-T2505) — the PROJECT layer home {@link
+ * projectLearningsHome}/{@link loadLearningsCorpus} (learnings.ts) already read, which no
+ * onboarding phase created before this task. Writes ONLY when the directory does not already
+ * exist: a target repo that already carries a learnings home (its own, or a prior synthesize
+ * run's) is left byte-for-byte untouched, never clobbered with an empty reseed (acceptance: "a
+ * target repo that already has a learnings home is left untouched"). Seeds a HOME, never a
+ * learning — see {@link seedProjectLearningsHomeFiles}'s own header for why no entry is
+ * invented; this function only decides WHERE the seeded files land.
+ */
+function seedLearningsHomeIfAbsent(fsDeps: SynthesizeFsDeps, targetDir: string): void {
+  const learningsDir = join(targetDir, "learnings");
+  if (fsDeps.existsSync(learningsDir)) return;
+  for (const [filename, content] of Object.entries(seedProjectLearningsHomeFiles())) {
+    writeSynthesisArtifactAtomic(fsDeps, join(learningsDir, filename), content);
+  }
+}
+
 function renderPrBody(input: SynthesizeDraftInput, tasks: Task[]): string {
   return [
     `## rmd onboard synthesize — drafted plan for ${input.owner}/${input.repo}`,
@@ -411,10 +435,15 @@ export async function runOnboardSynthesize(targetDir: string, deps: SynthesizeDe
   // EXACTLY one branch (acceptance criterion 3).
   deps.git.exec(["checkout", "-b", branch], targetDir);
 
-  // The ONLY writes this module performs.
+  // The ONLY writes this module performs (plus the learnings-home seed just below, W1-T2505).
   writeSynthesisArtifactAtomic(deps.fs, masterPlanPath, draft.masterPlan);
   writeSynthesisArtifactAtomic(deps.fs, tasksYamlPath, draft.tasksYaml);
   writeSynthesisArtifactAtomic(deps.fs, agentsMdPath, draft.agentsMd);
+
+  // Seed the project learnings home so the layer the worker injection already reads has
+  // somewhere to write its first real entry — never invented content (acceptance criteria 1-3,
+  // 7); a no-op when the target already has one (acceptance criterion 7).
+  seedLearningsHomeIfAbsent(deps.fs, targetDir);
 
   deps.git.exec(["add", "-A"], targetDir);
   deps.git.exec(["commit", "-m", `onboard: draft MASTER-PLAN.md, plan/tasks.yaml, AGENTS.md (rmd onboard synthesize)`], targetDir);
