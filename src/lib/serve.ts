@@ -2807,6 +2807,9 @@ export function renderShellHtml(
         resolved: Array.isArray(parsed && parsed.resolved) ? parsed.resolved : [],
       };
     } catch {
+      // a corrupt/non-JSON stored value must read back as "nothing marked yet", never crash
+      // the render that asked for it -- same tolerance saveMailboxState (below) gives a full
+      // or blocked store on the write side.
       return { read: [], resolved: [] };
     }
   }
@@ -2944,6 +2947,10 @@ export function renderShellHtml(
       const threads = buildMailboxThreads(tasks, replies);
       inner = threads === null ? "" : mailboxThreadsHtml(mailboxVisibleThreads(threads, resolvedIds, includeResolved), readIds);
     } catch {
+      // any throw inside the build/draw pair above (a malformed row this function's own
+      // Array.isArray guards did not catch) falls back to the pre-existing rows below, the
+      // same degrade-to-existing-rows outcome a clean null return from buildMailboxThreads
+      // gets -- never a half-drawn mailbox.
       inner = "";
     }
     return inner || existingRowsHtml || "";
