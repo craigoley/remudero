@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
@@ -523,4 +524,59 @@ test("REACHABILITY, end to end: runDaemon → escalateStarvation opens → the e
   assert.equal(closeCalls.length, 1, "the episode ending closed exactly one escalation");
   assert.equal(closeCalls[0].url, "https://github.com/o/r/issues/3207", "the SAME issue that was opened is the one that gets closed");
   assert.deepEqual(dispatched, ["DEP"], "a dispatchable task appearing is what ended this episode");
+});
+
+// ── THE WIRING. Every test above injects its OWN `onStarvationCleared`, so the production hook
+// could be absent entirely and all of them would still pass. MEASURED while reviewing this PR:
+// deleting `daemonCommand`'s `onStarvationCleared:` line left the suite at 12/12 green — the
+// "ships unwired" class (W1-T322), and the exact thing acceptance criterion 10 claims is covered.
+// Asserted over source text, deliberately on the CALL rather than a position, and with a
+// comment-stripped copy so a mention in prose can never satisfy it (the #339/W1-T281 bug class:
+// a proof that only greps a COMMENT passes on entirely unbuilt wiring).
+
+const RUN_TASK_SRC = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
+/**
+ * Source with COMMENT LINES dropped — what remains is code that actually runs.
+ *
+ * Deliberately a LINE FILTER, not a `/* … *\/` span strip. MEASURED while writing this: a global
+ * block-comment regex on a 32k-line file swallows a whole region, because `/*` occurs inside
+ * regex literals and strings here; it removed the very call site under test while leaving the
+ * function definition, so the assertion failed for the wrong reason. A line filter cannot
+ * over-reach, and a prose mention of the hook still lives on a `//` line, which is all this needs.
+ */
+const RUN_TASK_CODE = RUN_TASK_SRC.split("\n")
+  .filter((l) => {
+    const t = l.trim();
+    return !t.startsWith("//") && !t.startsWith("*") && !t.startsWith("/*");
+  })
+  .join("\n");
+
+test("daemonCommand WIRES onStarvationCleared to escalateStarvationCleared — the hook is reachable in production, not only from these fixtures", () => {
+  const wired = RUN_TASK_CODE.match(/onStarvationCleared\s*:/g) ?? [];
+  assert.ok(
+    wired.length >= 1,
+    `run-task.ts must pass onStarvationCleared into runDaemon's deps; found ${wired.length} non-comment occurrence(s). ` +
+      "Without this the closer ships unwired and every test above still passes, because each injects its own hook.",
+  );
+  assert.match(
+    RUN_TASK_CODE,
+    /onStarvationCleared\s*:\s*\([^)]*\)\s*=>\s*escalateStarvationCleared\(/,
+    "the wired hook must call escalateStarvationCleared — a hook wired to something else closes no issue",
+  );
+});
+
+test("CONTROL: the comment-stripped source is not vacuous — it still carries the code this file tests", () => {
+  // If the stripper ate the file, the assertions above would pass or fail for the wrong reason.
+  assert.match(RUN_TASK_CODE, /export function escalateStarvationCleared\(/, "the function under test must survive comment-stripping");
+  // ANTI-VACUITY, BOTH WAYS: the code line survives, and a comment line naming the same symbol
+  // does not — otherwise a mention in prose could satisfy the wiring assertion above.
+  assert.match(RUN_TASK_CODE, /onStarvationCleared: \(info\) =>/, "the wired call line itself must survive the filter");
+  assert.ok(
+    /\/\/ This task: the cleared half/.test(RUN_TASK_SRC),
+    "the fixture comment must exist in the raw source, or the negative below proves nothing",
+  );
+  assert.ok(
+    !/\/\/ This task: the cleared half/.test(RUN_TASK_CODE),
+    "and it must NOT survive the filter — a comment must never be able to satisfy the wiring assertion",
+  );
 });
