@@ -94,7 +94,7 @@
   band_meaning: blast-radius
   origin: incident
   plan_refs: ["W1-T490", "W1-T126", "W1-T12b", "W1-T1067"]
-  files: [src/lib/daemon.ts, deploy/entrypoint.sh, test/daemon.test.ts, test/entrypoint-boot.test.ts]
+  files: [src/lib/daemon.ts, deploy/entrypoint.sh, test/daemon.test.ts, test/entrypoint-boot.test.ts, scripts/source-size-baseline.json]
   status: queued
   attempts: 0
   note: |
@@ -114,3 +114,9 @@
     half-live until an operator runs `.github/workflows/acr-build.yml` from the Actions tab and
     redeploys. Rationale (6) is the argument that the intervening state is safe rather than
     merely tolerable.
+
+    `scripts/source-size-baseline.json` IS DECLARED because the doc this change adds to
+    `src/lib/daemon.ts` grows it past its recorded ceiling (3930 -> 3968), and the ratchet's own
+    remedy says recording is the ordinary outcome for deliberate growth. It is exempt from
+    Standing rule 25 per W1-T2526 — a size ledger records how long a file is and grades no
+    falsifier — and adds no Rule 19 concern, since this task's band is blast-radius.
