@@ -22,7 +22,7 @@
   "src/lib/cost-anomaly.ts": 270,
   "src/lib/coverage-improvement.ts": 337,
   "src/lib/daemon-health.ts": 351,
-  "src/lib/daemon.ts": 3930,
+  "src/lib/daemon.ts": 3968,
   "src/lib/dep-review.ts": 399,
   "src/lib/deployer.ts": 1206,
   "src/lib/digest.ts": 1389,
