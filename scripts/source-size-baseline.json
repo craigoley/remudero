@@ -141,8 +141,8 @@
   "src/lib/worker-containment.ts": 489,
   "src/lib/worker-home.ts": 1727,
   "src/lib/worker-scratch.ts": 227,
-  "src/lib/worker.ts": 3547,
+  "src/lib/worker.ts": 3601,
   "src/lib/workflow-run.ts": 28,
-  "src/run-task.ts": 32872,
+  "src/run-task.ts": 32912,
   "src/spike.ts": 311
 }
