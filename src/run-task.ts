@@ -12662,6 +12662,12 @@ interface ReviewCommandDeps {
   /** W1-T913: injectable so a test can observe the pending post without a real `gh` spawn — see
    *  `postReviewPending`'s call site below. Defaults to the real {@link postReviewPending}. */
   postReviewPending?: typeof postReviewPending;
+  /** W1-T2511: the head-sha fetch, hoisted ABOVE criteria resolution. Same signature and same
+   *  default implementation as {@link ReviewWorktreeDeps.fetch}, deliberately — the materializer
+   *  still runs its own, and a second fetch of an already-fetched ref is a no-op, so this adds an
+   *  ordering guarantee rather than a second network cost. Injectable so a test can drive the
+   *  unfetched-sha case without a network. */
+  fetchHead?: (repoDir: string) => void;
 }
 
 /**
@@ -12868,12 +12874,14 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
     materialize,
     runReview: runReviewDep,
     postReviewPending: postReviewPendingDep,
+    fetchHead,
   } = {
     fetchView: ghJson,
     loadConfig,
     materialize: materializeReviewWorktree,
     runReview,
     postReviewPending,
+    fetchHead: realReviewWorktreeDeps.fetch,
     ...deps,
   };
 
@@ -12910,11 +12918,33 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   let taskDeclaredFiles: string[] | undefined;
   let openTaskIds: Set<string> | undefined;
   // W1-T2462: `resolvePlanCriteriaAtHead` (lib/review.ts) resolves this trailered PR's criteria
-  // from the plan AS IT STANDS AT `view.headRefOid` — the head sha this fetch already holds, so
-  // this costs no second network read — rather than `resolvePlanCriteriaForReview`'s
+  // from the plan AS IT STANDS AT `view.headRefOid` rather than `resolvePlanCriteriaForReview`'s
   // `loadPlan(planPath)` read of the container's checked-out working tree. That working-tree read
   // is what let a `plan/tasks.d/` shard that merged between two daemon boots stay invisible to a
   // review of the very PR head that shard reached (W1-T2432's shipped, previously-uncalled fix).
+  //
+  // W1-T2511: AND THE FETCH THAT MAKES THAT SHA READABLE NOW RUNS FIRST. This comment used to say
+  // the resolution cost "no second network read" because "this fetch already holds" the head sha —
+  // and no fetch had run. The only one on this command's path was `deps.fetch(repoDir)`, the first
+  // statement of `materializeReviewWorktree`, 65 lines BELOW. So the reviewer asked git about a
+  // commit it had not yet arranged to have, and the code that would arrange it ran next.
+  //
+  // IT COST TWO DIFFERENT VERDICTS, NOT ONE. `loadPlanAtRef` throws on an unreadable object and the
+  // resolver degrades to `criteria: []`; the body fallback below then decides which. A body with no
+  // `## Acceptance` block yields "FAIL — no acceptance criteria to judge" (#3328). A body that HAS
+  // one yields something quieter and worse: #3365 fell back to a single body criterion and posted
+  // `CAPPED: 0/1 proofs executed` while its shard resolved 8/8 — a silent downgrade that reads
+  // exactly like an ordinary weakly-proven PR and refuses auto-merge with no visible cause.
+  //
+  // THE FETCH IS BEST-EFFORT HERE AND NAMED LATER, DELIBERATELY. A failure is swallowed rather than
+  // returned: `materializeReviewWorktree` re-runs the same fetch below and reports a genuine
+  // outage through its own `fetch-failure` class, which is the degradation path this command
+  // already has. Failing here instead would invent a second one for the same condition.
+  try {
+    fetchHead(repoRoot);
+  } catch {
+    // Swallowed on purpose — see above. The materializer's own fetch names a real outage.
+  }
   let resolverDivergence: PlanCriteriaAtHeadDivergence | undefined;
   if (taskId) {
     const resolved = resolvePlanCriteriaAtHead(body, repoRoot, "plan/tasks.yaml", view.headRefOid);

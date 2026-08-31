@@ -1,0 +1,83 @@
+- id: W1-T2538
+  title: "FOLLOWING THE SIZE RATCHET'S OWN REMEDY HANDS THE READER STRAIGHT INTO A DIFFERENT GATE THAT NEVER MENTIONS IT — recording a ceiling adds a file to the diff, which makes any 'exactly N files' or 'plan-only' claim in the PR body false, and bodyContradictsDiff then fails the PR for a reason the ratchet never warned about: say so in the refusal, name the command that re-derives the claim, and warn that a NEGATED claim is not safe either"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  rationale: |
+    ROUND 2 OF A REMEDY THAT DEMONSTRABLY WORKS. #3377 (W1-T2526's follow-on) made this gate's
+    refusal followable by replacing "record it by hand" with the exact `"path": N` line to write,
+    AND IT WORKED: #3365's ci-log fix worker read that text, recorded the ceiling, and corrected
+    its own file count unprompted. This task closes the trap the remedy walks the reader into.
+
+    (1) THE MECHANISM. `evaluateSourceSizeRatchet` (`scripts/source-size-ratchet.mjs`) refuses a
+    grown file and tells the reader to record the new ceiling in `scripts/source-size-baseline.json`.
+    Doing that ADDS A FILE TO THE DIFF. `bodyContradictsDiff` (`src/lib/review.ts`) opens the diff
+    and fails the PR when the body's own file claim no longer matches — so a scope sentence written
+    before the baseline line existed is now false, and the PR is refused by a SECOND gate whose
+    message never mentions the FIRST.
+
+    (2) MEASURED 2026-08-31 — THREE PRs LANDED ON THAT REFUSAL INSIDE ONE SWEEP, the extra file
+    being `scripts/source-size-baseline.json` every time:
+      | #3365 | body asserted a four-file count | actual 5 |
+      | #3373 | body asserted a plan-only scope | actual src + test + the ledger |
+      | #3378 | body asserted a four-file count | actual 5 |
+
+    (3) AND A NEGATED CLAIM IS NOT SAFE, WHICH NOBODY WOULD GUESS. #3373's body said
+    `Plan-only: no.` — the HONEST answer, correctly stating the PR is NOT plan-only — and the
+    detector still read it as a plan-only claim. `shorthandIsAboutChangeset`'s label arm decides on
+    the colon alone (`if (/^[*_`'")\]\s]*:/.test(rest)) return true;`) and never reads the
+    elaboration, so the negation is not parsed. A reader who answers the question truthfully is
+    refused for it.
+
+    (4) WHY THE REMEDY IS THE RIGHT PLACE, NOT THE DETECTOR. Nothing about what either gate refuses
+    changes here: verdict, exit code and violation lines are untouched. The defect is that the
+    instruction is INCOMPLETE — it names step one of a two-step remedy and stops. Widening
+    `bodyContradictsDiff` to exempt a baseline line would be a change to what the reviewer accepts,
+    which is a different and much larger task; W1-T2533/W1-T2534/W1-T2535 already carry the
+    detector-side questions.
+
+    (5) PROVENANCE, STATED PLAINLY. This work was BUILT FIRST and filed second, on a branch named
+    `run-W1-T2532-*` for a task it does not implement — W1-T2532 asks for an AUTOMATIC recording
+    mode (`test/recording-a-ceiling-does-not-depend-on-reading-prose.test.ts`, unbuilt on main and
+    absent from that diff), which is a strictly larger change than improving the prose. The
+    mis-trailered PR (#3388) also made `projectPlan` read W1-T2532 as in flight, blocking it from
+    dispatch while not implementing it. This shard gives the work its own id; #3388 is closed and
+    W1-T2532 is freed. The two are complementary, not alternatives: even with an automatic mode,
+    the CI path never writes, so the prose remedy still runs for the reader who hits it there.
+
+    (6) OUT OF SCOPE, NAMED. (a) W1-T2532's automatic recording mode — a separate, larger task,
+    left runnable by this filing. (b) Any change to `bodyContradictsDiff`'s predicates — see (4).
+    (c) `scripts/source-size-baseline.json` is NOT declared: this diff does not grow either
+    declared file past its ceiling (verified, ratchet exits 0), so no ceiling is recorded here.
+  acceptance:
+    - claim: "the refusal warns that recording the ceiling invalidates the PR body's own file claim"
+      proof: "grep: THEN UPDATE THE PR BODY in scripts/source-size-ratchet.mjs"
+    - claim: "the refusal names the command that re-derives the file claim rather than leaving the reader to guess"
+      proof: 'grep: git diff --name-only origin/main\.\.\.HEAD in scripts/source-size-ratchet.mjs'
+    - claim: "the refusal warns that a negated scope claim is read as a claim, because the negation is not parsed"
+      proof: "grep: negation is not parsed in scripts/source-size-ratchet.mjs"
+    - claim: "the gate's own suite pins all three additions so the remedy cannot silently lose them"
+      proof: "unit test: test/a-source-file-cannot-outgrow-its-baseline.test.ts"
+    - claim: "nothing about what the gate refuses changes: a grown file still blocks and the baseline is never advanced by a failing run"
+      proof: "unit test: test/a-source-file-cannot-outgrow-its-baseline.test.ts"
+  risk: high
+  band_meaning: span
+  origin: "retro-followup#3377"
+  plan_refs: ["W1-T2526", "W1-T2488", "W1-T2532", "W1-T2533"]
+  files: [scripts/source-size-ratchet.mjs, test/a-source-file-cannot-outgrow-its-baseline.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    risk:high with band_meaning: span — Rule 19's SPAN measure, declared rather than exempted. The
+    two declared files are an instrument and its own falsifier suite, which `subsystemsOf` scores as
+    two concerns because their basenames differ; the change itself is one concern (the refusal text)
+    and its blast radius is low, since no verdict, exit code or violation line changes.
+
+    `files:` DERIVED FROM SOURCE. `evaluateSourceSizeRatchet` and the refusal text are in
+    `scripts/source-size-ratchet.mjs`; `test/a-source-file-cannot-outgrow-its-baseline.test.ts` is
+    that gate's existing falsifier suite and already asserts on the refusal's wording (it pins the
+    W1-T2526 "never by hand" phrasing), so the new assertions belong beside them rather than in a
+    new file.
