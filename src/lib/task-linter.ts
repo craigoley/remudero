@@ -200,17 +200,84 @@ export function subsystemsOf(
   return ids;
 }
 
-/** ≥2 subsystems while risk<high ⇒ a sizing violation (raise to high or decompose). */
-export function sizingViolation(task: Task): LintViolation | undefined {
-  if (task.risk === "high") return undefined; // Rule 19 exemption — high already assumes wide scope
-  const subsystems = subsystemsOf(task);
-  if (subsystems.size < 2) return undefined;
+/** ≥2 subsystems while risk<high ⇒ a sizing violation (raise to high or decompose).
+ *
+ *  W1-T2503: `if (task.risk === "high") return undefined` used to be the WHOLE
+ *  risk:high predicate — but the band conflates two meanings: Rule 19's SPAN
+ *  measure (≥2 subsystems/concerns) or genuine BLAST RADIUS unrelated to span
+ *  (a boot script, an auth path, a merge arm), and nothing recorded which.
+ *  DECLARE, DO NOT REMOVE (the task's own rationale): a task the diff newly
+ *  files or promotes to high (per `opts.riskTransition`, see that field's own
+ *  doc for the exact contract) must now say which meaning its band carries via
+ *  `task.band_meaning`; undeclared there ⇒ BLOCKED, naming both legal values
+ *  rather than a bare rejection. `band_meaning: "blast-radius"` keeps today's
+ *  exemption byte for byte (span left uncomputed, regardless of transition).
+ *  `band_meaning: "span"` computes the subsystem count and REPORTS it
+ *  (`severity: "warn"`) instead of skipping it — never a refusal, because a
+ *  wide span is exactly what declaring "span" already admits.
+ *
+ *  `opts.riskTransition` ABSENT (no diff context at all — every call site of
+ *  this function before this task, and every one of them still today:
+ *  pre-dispatch's `assertLintClean`, whole-plan `lintPlan`, the retro
+ *  plan-health sweep, inbox, panel-skill-run) ⇒ an undeclared band stays
+ *  SILENT, exactly as before this task existed — none of those callers
+ *  regress or newly block on the standing backlog. Present ⇒ an undeclared
+ *  band on a task the diff FILED or MOVED to high (`baseTask` absent, or
+ *  `baseTask.risk !== "high"`) blocks; on a task ALREADY high before the diff
+ *  (`baseTask.risk === "high"` — the standing 824-task baseline) it only
+ *  warns: reported, never refused, so no existing task blocks a PR on this
+ *  alone and the count reduces at whatever pace an operator chooses. */
+export function sizingViolation(task: Task, opts: LintOpts = {}): LintViolation | undefined {
+  if (task.risk !== "high") {
+    const subsystems = subsystemsOf(task);
+    if (subsystems.size < 2) return undefined;
+    return {
+      check: "sizing",
+      severity: "block",
+      message:
+        `spans ${subsystems.size} distinct subsystems/concerns (${[...subsystems].sort().join(", ")}) ` +
+        `at risk:${task.risk} — Rule 19: raise to risk:high or decompose into one task per concern`,
+    };
+  }
+
+  if (task.band_meaning === "blast-radius") return undefined; // exempt, exactly as today
+
+  if (task.band_meaning === "span") {
+    const subsystems = subsystemsOf(task);
+    if (subsystems.size < 2) return undefined;
+    return {
+      check: "sizing",
+      severity: "warn",
+      message:
+        `spans ${subsystems.size} distinct subsystems/concerns (${[...subsystems].sort().join(", ")}) ` +
+        `at risk:high, band_meaning:span — reported, not refused (W1-T2503): a wide span is what ` +
+        `declaring band_meaning: span already admits`,
+    };
+  }
+
+  // No band_meaning declared.
+  const transition = opts.riskTransition;
+  if (!transition) return undefined; // not diff-scoped ⇒ no opinion, exactly as before this task
+  const newOrMovedToHigh = transition.baseTask === undefined || transition.baseTask.risk !== "high";
+  if (!newOrMovedToHigh) {
+    return {
+      check: "sizing",
+      severity: "warn",
+      message:
+        `risk:high with no band_meaning declared — part of the standing baseline (W1-T2503): ` +
+        `reported, not refused. Declare band_meaning: span (Rule 19 SPAN, ≥2 subsystems/concerns) ` +
+        `or band_meaning: blast-radius (dangerous regardless of span) whenever this task is next touched`,
+    };
+  }
   return {
     check: "sizing",
     severity: "block",
     message:
-      `spans ${subsystems.size} distinct subsystems/concerns (${[...subsystems].sort().join(", ")}) ` +
-      `at risk:${task.risk} — Rule 19: raise to risk:high or decompose into one task per concern`,
+      `risk:high with no band_meaning declared — W1-T2503: a task this diff files or promotes to ` +
+      `high must say which of the two things the band means: band_meaning: span (Rule 19's SPAN ` +
+      `measure, ≥2 subsystems/concerns — the count is then REPORTED, never a refusal) or ` +
+      `band_meaning: blast-radius (a dangerous change regardless of span: a boot script, an auth ` +
+      `path, a merge arm — keeps today's exemption)`,
   };
 }
 
@@ -1782,6 +1849,26 @@ export interface PostMergeAmendmentContext {
   baseTask?: Task;
 }
 
+/**
+ * W1-T2503: diff-scoped base-ref state for {@link sizingViolation}'s risk:high
+ * `band_meaning` obligation — presence of THIS OBJECT (not merely a non-undefined
+ * `baseTask` field within it) is the "we know this is a diff" signal, so a genuinely
+ * NEW task (absent from the base ref entirely) is distinguishable from "the caller has
+ * no diff context at all" even though both read `baseTask === undefined`. A caller that
+ * already resolves the base-ref task for {@link PostMergeAmendmentContext.baseTask} (the
+ * merged-amendment check) can reuse that SAME lookup here — one `oldTask` read, two
+ * independent consumers, exactly the reuse W1-T2254's `baseTask` widening already
+ * established for this file.
+ */
+export interface RiskTransitionContext {
+  /** This task's own record in the base-ref plan snapshot. `undefined` ⇒ the task is
+   *  NEW in this diff (Rule 19's "a task the diff FILES ... at high" case, not just
+   *  "moves to high") — the caller resolves this exactly as {@link
+   *  PostMergeAmendmentContext.baseTask} already does, so `undefined` here means "looked
+   *  it up, found nothing" and never "didn't look". */
+  baseTask: Task | undefined;
+}
+
 /** Fields on a merged task's shard that something ELSE in the system still reads
  *  AFTER the task merges (W1-T2254 rationale §Q1 (ii)) — a post-merge edit here
  *  silently changes live behaviour nobody signed off on: `status` feeds dispatch
@@ -2914,6 +3001,13 @@ export interface LintOpts {
    *  pass. Absent ⇒ the check is silent — the whole-plan pass (no base to compare against) must
    *  never refuse, or even report, the standing population of already-blocked tasks. */
   blockedDisposition?: BlockedDispositionContext;
+  /** W1-T2503: diff-scoped base-ref state for {@link sizingViolation}'s risk:high
+   *  `band_meaning` obligation — see {@link RiskTransitionContext} for the full contract.
+   *  Absent (not diff-scoped at all — pre-dispatch, whole-plan `lintPlan`, retro, inbox,
+   *  panel-skill-run) ⇒ the same "no predicate ⇒ no opinion" contract `opts.moduleExists`
+   *  already uses: an undeclared `band_meaning` on a risk:high task stays silent, exactly
+   *  as before this task existed. */
+  riskTransition?: RiskTransitionContext;
   /** Ids present in THIS branch's `plan/tasks.yaml` and absent from the base ref's monolith.
    *  Supplied only in `--base` mode; undefined ⇒ {@link monolithFilingViolations} is silent. */
   newMonolithIds?: ReadonlySet<string>;
@@ -2985,7 +3079,7 @@ export interface LintOpts {
  *  can never block (see {@link advisoryRoutingViolations}'s module comment). */
 export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   const violations: LintViolation[] = [];
-  const sizing = sizingViolation(task);
+  const sizing = sizingViolation(task, opts);
   if (sizing) violations.push(sizing);
   violations.push(...headlessFitnessViolations(task));
   violations.push(...proofShapeViolations(task));

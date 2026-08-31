@@ -13,47 +13,52 @@
 - id: context-economy
   subsystem: knowledge
   lifecycle: active
-  files: [src/lib/learnings.ts, src/run-task.ts]
+  files: [ src/lib/learnings.ts, src/run-task.ts ]
   fact: >-
-    Context is a precious, FINITE resource: find the smallest set of high-signal tokens that maximize the
-    desired outcome — do not dump everything known into the prompt.
+    Context is a precious, FINITE resource: find the smallest set of high-signal
+    tokens that maximize the desired outcome — do not dump everything known into
+    the prompt.
   src: research#effective-context-engineering
   cited: "2026-07-14"
 - id: claude-code-hybrid-retrieval
   subsystem: knowledge
   lifecycle: active
-  files: [src/lib/learnings.ts, src/run-task.ts]
+  files: [ src/lib/learnings.ts, src/run-task.ts ]
   fact: >-
-    Claude Code is HYBRID: stable context up front + glob/grep for just-in-time retrieval, which bypasses
-    stale indexing. Prefer retrieval (grep-able plan) over injecting whole files.
+    Claude Code is HYBRID: stable context up front + glob/grep for just-in-time
+    retrieval, which bypasses stale indexing. Prefer retrieval (grep-able plan)
+    over injecting whole files.
   src: research#effective-context-engineering
   cited: "2026-07-14"
 - id: compaction-recall-first
   subsystem: context
   lifecycle: active
-  files: [src/lib/retro.ts, src/run-task.ts]
+  files: [ src/lib/retro.ts, src/run-task.ts ]
   fact: >-
-    A compaction summary that DROPS a critical fact is worse than no summary — later steps trust it and
-    cannot recover it. Tune for RECALL first; anchor goal/criteria/constraints verbatim; write durable
-    facts out before compacting.
+    A compaction summary that DROPS a critical fact is worse than no summary —
+    later steps trust it and cannot recover it. Tune for RECALL first; anchor
+    goal/criteria/constraints verbatim; write durable facts out before
+    compacting.
   src: research#effective-context-engineering
   cited: "2026-07-14"
 - id: cache-prefix-bytes
   subsystem: context
   lifecycle: active
-  files: [src/lib/learnings.ts, src/run-task.ts]
+  files: [ src/lib/learnings.ts, src/run-task.ts ]
   fact: >-
-    Prompt caches key on EXACT PREFIX BYTES: any early edit invalidates the cache for everything after it,
-    and cache reads cost ~1/10th of fresh input. Assemble prompts stable-first, volatile-last.
+    Prompt caches key on EXACT PREFIX BYTES: any early edit invalidates the
+    cache for everything after it, and cache reads cost ~1/10th of fresh input.
+    Assemble prompts stable-first, volatile-last.
   src: research#scaling-managed-agents
   cited: "2026-07-14"
 - id: harness-assumptions-stale
   subsystem: retro
   lifecycle: active
-  files: [src/lib/retro.ts]
+  files: [ src/lib/retro.ts ]
   fact: >-
-    Harnesses encode assumptions about what Claude cannot do on its own, and those assumptions go STALE as
-    models improve — a retro must question and retire guards, not only add them.
+    Harnesses encode assumptions about what Claude cannot do on its own, and
+    those assumptions go STALE as models improve — a retro must question and
+    retire guards, not only add them.
   src: research#scaling-managed-agents
   cited: "2026-07-14"
 
@@ -61,11 +66,12 @@
 - id: docs-are-a-gated-artifact
   subsystem: docs
   lifecycle: active
-  files: [src/run-task.ts, docs]
+  files: [ src/run-task.ts, docs ]
   fact: >-
-    Docs are a gated artifact: GENERATED docs (rmd --help / CLI reference / API ref / CHANGELOG) drift
-    unless CI enforces byte-equality (regenerate + diff = RED); AUTHORED docs are reviewer-gated. ONE
-    command registry feeds rmd --help + GitHub /docs + the website — never three hand-copies.
+    Docs are a gated artifact: GENERATED docs (rmd --help / CLI reference / API
+    ref / CHANGELOG) drift unless CI enforces byte-equality (regenerate + diff =
+    RED); AUTHORED docs are reviewer-gated. ONE command registry feeds rmd
+    --help + GitHub /docs + the website — never three hand-copies.
   src: research#docs-generation
   cited: "2026-07-14"
 
@@ -74,15 +80,17 @@
 - id: daemon-split-logic-from-live-commissioning
   subsystem: architecture
   lifecycle: active
-  files: [src/lib/daemon.ts, src/lib/launchd.ts, src/run-task.ts]
+  files: [ src/lib/daemon.ts, src/lib/launchd.ts, src/run-task.ts ]
   fact: >-
-    W1-T12 (the daemon) bundled THREE concerns (scheduler loop + launchd unit + crash-recovery) AND three
-    HEADLESS-UNFIT criteria: a live OVERNIGHT drain, a launchctl-LOAD into a real session, and a live
-    KILL-and-recover. A headless worker cannot verify launchd/boot/kill behavior — those are verify:human
-    COMMISSIONING steps. Split the daemon into headless, unit-tested LOGIC (scheduler loop over an injected
-    clock+runner; plist GENERATION + in-process boot assertion; recovery over a SEEDED interrupted state)
-    and a separate verify:human live-commissioning task. The machine builds + unit-proves; the human
-    commissions live (draft→playtest→ready). (Rules 16/18/19.)
+    W1-T12 (the daemon) bundled THREE concerns (scheduler loop + launchd unit +
+    crash-recovery) AND three HEADLESS-UNFIT criteria: a live OVERNIGHT drain, a
+    launchctl-LOAD into a real session, and a live KILL-and-recover. A headless
+    worker cannot verify launchd/boot/kill behavior — those are verify:human
+    COMMISSIONING steps. Split the daemon into headless, unit-tested LOGIC
+    (scheduler loop over an injected clock+runner; plist GENERATION + in-process
+    boot assertion; recovery over a SEEDED interrupted state) and a separate
+    verify:human live-commissioning task. The machine builds + unit-proves; the
+    human commissions live (draft→playtest→ready). (Rules 16/18/19.)
   src: DIAGNOSIS.md (diag/w1t12-max-turns), W1-T12
   cited: "2026-07-15"
 
@@ -91,14 +99,16 @@
 - id: task-quality-gates-before-dispatch
   subsystem: architecture
   lifecycle: active
-  files: [src/lib/task-linter.ts, src/run-task.ts, src/lib/retro.ts]
+  files: [ src/lib/task-linter.ts, src/run-task.ts, src/lib/retro.ts ]
   fact: >-
-    The runner was the FIRST line of task-quality defense, so FOUR malformed tasks (W1-T6, W1-T9, W1-T12)
-    reached workers and burned budget before a human noticed the pattern. Task quality must be gated BEFORE
-    dispatch (a deterministic linter, FAIL-CLOSED: a linter-failing task is never dispatched,
-    verdict=blocked_illformed) and re-graded continuously (the retro plan-health sweep). Reactive diagnosis
-    after an 81-turn / $10 burn is the anti-pattern this project exists to kill — the runner is the LAST
-    line, not the first. (MASTER-PLAN §5C.)
+    The runner was the FIRST line of task-quality defense, so FOUR malformed
+    tasks (W1-T6, W1-T9, W1-T12) reached workers and burned budget before a
+    human noticed the pattern. Task quality must be gated BEFORE dispatch (a
+    deterministic linter, FAIL-CLOSED: a linter-failing task is never
+    dispatched, verdict=blocked_illformed) and re-graded continuously (the retro
+    plan-health sweep). Reactive diagnosis after an 81-turn / $10 burn is the
+    anti-pattern this project exists to kill — the runner is the LAST line, not
+    the first. (MASTER-PLAN §5C.)
   src: W1-T12, this session
   cited: "2026-07-15"
 
@@ -106,19 +116,21 @@
 - id: daemon-repo-targeting-explicit
   subsystem: cli
   lifecycle: active
-  files: [src/run-task.ts, src/lib/launchd.ts]
+  files: [ src/run-task.ts, src/lib/launchd.ts ]
   fact: >-
-    `rmd daemon` originally read its plan from the CHECKOUT it ran in (join(repoRoot,
-    plan/tasks.yaml)) and hardcoded the status gateway to ghGateway(owner, "remudero") — so an
-    unattended run could only drain the main repo and would SILENTLY self-target. The daemon now
-    takes an EXPLICIT target: --repo <name> scopes the gateway to <owner>/<name> and reads the
-    plan from a synced clone (<root>/repos/<name>/plan/tasks.yaml, reset --hard to origin/main so
-    it's current); --plan <path> overrides; --dry-run previews (spawns nothing, logs
-    daemon.target). A SELF-TARGET GUARD refuses to drain the daemon's own source repo unattended
-    without --allow-self-target. `rmd daemon-plist --repo <name>` bakes --repo into the launchd
-    unit's ProgramArguments so the unit drains the intended repo, not an implicit default.
-    (Task EXECUTION already derives its repo from task.repo via runTask — only the daemon's
-    PLAN SOURCE + gateway were pinned.)
+    `rmd daemon` originally read its plan from the CHECKOUT it ran in
+    (join(repoRoot, plan/tasks.yaml)) and hardcoded the status gateway to
+    ghGateway(owner, "remudero") — so an unattended run could only drain the
+    main repo and would SILENTLY self-target. The daemon now takes an EXPLICIT
+    target: --repo <name> scopes the gateway to <owner>/<name> and reads the
+    plan from a synced clone (<root>/repos/<name>/plan/tasks.yaml, reset --hard
+    to origin/main so it's current); --plan <path> overrides; --dry-run previews
+    (spawns nothing, logs daemon.target). A SELF-TARGET GUARD refuses to drain
+    the daemon's own source repo unattended without --allow-self-target. `rmd
+    daemon-plist --repo <name>` bakes --repo into the launchd unit's
+    ProgramArguments so the unit drains the intended repo, not an implicit
+    default. (Task EXECUTION already derives its repo from task.repo via runTask
+    — only the daemon's PLAN SOURCE + gateway were pinned.)
   src: fix/daemon-repo-targeting (W1-T12d)
   cited: "2026-07-15"
 
@@ -126,47 +138,382 @@
 - id: ledger-corpus-needs-the-resolver
   subsystem: ledger
   lifecycle: active
-  files: [src/lib/ledger-grep.ts, src/lib/ledger.ts, src/run-task.ts]
+  files: [ src/lib/ledger-grep.ts, src/lib/ledger.ts, src/run-task.ts ]
   fact: >-
-    A shell glob over state/ledger.*.ndjson.gz names ONE of two rotation forms and answers from the
-    other in silence — it read 0 against 21 archives resolveLedgerUnion found. ledgerRotationEntries
-    (ledger-grep.ts) is the one definition of the corpus and run-task.ts's ledgerCorpusFiles delegates
-    to it; resolveLedgerUnion refuses on partial coverage. Read through the resolver, never a glob.
-  assertion: 'grep -q "ledgerRotationEntries" src/lib/ledger-grep.ts && grep -q "ledgerRotationEntries" src/run-task.ts'
+    A shell glob over state/ledger.*.ndjson.gz names ONE of two rotation forms
+    and answers from the other in silence — it read 0 against 21 archives
+    resolveLedgerUnion found. ledgerRotationEntries (ledger-grep.ts) is the one
+    definition of the corpus and run-task.ts's ledgerCorpusFiles delegates to
+    it; resolveLedgerUnion refuses on partial coverage. Read through the
+    resolver, never a glob.
+  assertion: 'grep -q "ledgerRotationEntries" src/lib/ledger-grep.ts && grep -q
+    "ledgerRotationEntries" src/run-task.ts'
   src: operator-report 2026-08-23; resolver delegation re-derived at 682c5d5a
   cited: "2026-08-23"
 - id: ledger-query-anchors-on-the-step-field
   subsystem: ledger
   lifecycle: active
-  files: [src/lib/ledger-grep.ts, src/lib/ledger.ts]
+  files: [ src/lib/ledger-grep.ts, src/lib/ledger.ts ]
   fact: >-
-    resolveLedgerUnion takes a raw pattern and matches ANYWHERE in a row, so a bare step name like
-    'ratify.' also hits prose — three unrelated rows matched that way. Anchor every step query on the
-    field itself, "step":"<name>", never the bare name, or the count silently includes narrative text.
+    resolveLedgerUnion takes a raw pattern and matches ANYWHERE in a row, so a
+    bare step name like 'ratify.' also hits prose — three unrelated rows matched
+    that way. Anchor every step query on the field itself, "step":"<name>",
+    never the bare name, or the count silently includes narrative text.
   assertion: 'grep -q "pattern: string | RegExp" src/lib/ledger-grep.ts'
   src: operator-report 2026-08-23; raw-pattern signature re-derived at 682c5d5a
   cited: "2026-08-23"
 - id: step-names-come-from-source
   subsystem: ledger
   lifecycle: active
-  files: [src/lib/ledger.ts, src/lib/ledger-grep.ts, src/run-task.ts]
+  files: [ src/lib/ledger.ts, src/lib/ledger-grep.ts, src/run-task.ts ]
   fact: >-
-    A guessed ledger step name is indistinguishable from an absent event. sweep.escalation_reconcile
-    exists nowhere as a step — the real names carry suffixes, sweep.escalation_reconcile.summary and
-    .list_failed — and four guessed names read false zeros. Enumerate from source first
-    (grep -oh '"sweep\.[a-z_.]+"' src/) and query only names that appear there.
+    A guessed ledger step name is indistinguishable from an absent event.
+    sweep.escalation_reconcile exists nowhere as a step — the real names carry
+    suffixes, sweep.escalation_reconcile.summary and .list_failed — and four
+    guessed names read false zeros. Enumerate from source first (grep -oh
+    '"sweep\.[a-z_.]+"' src/) and query only names that appear there.
   assertion: 'grep -q "\"sweep.escalation_reconcile.summary\"" src/lib/sweep.ts'
   src: re-derived at 682c5d5a — bare name 0 hits, suffixed names 2
   cited: "2026-08-23"
 - id: task-credit-needs-an-anchored-trailer
   subsystem: plan
   lifecycle: active
-  files: [plan/tasks.yaml, plan/tasks.d, src/run-task.ts]
+  files: [ plan/tasks.yaml, plan/tasks.d, src/run-task.ts ]
   fact: >-
-    git log --grep <id> is a SUBSTRING match and credits commits that merely MENTION an id. Measured:
-    --grep W1-T1282 returned 2 commits — one of them a different task's filing citing it as a sibling
-    — and ZERO carried the trailer. Credit from ^Remudero-Task:\s*<id>\s*$ (findMergedByTrailer),
-    unioned with the run-<id>-<digits> head-ref path, since plan filings often carry no trailer at all.
+    git log --grep <id> is a SUBSTRING match and credits commits that merely
+    MENTION an id. Measured: --grep W1-T1282 returned 2 commits — one of them a
+    different task's filing citing it as a sibling — and ZERO carried the
+    trailer. Credit from ^Remudero-Task:\s*<id>\s*$ (findMergedByTrailer),
+    unioned with the run-<id>-<digits> head-ref path, since plan filings often
+    carry no trailer at all.
   assertion: 'grep -q "findMergedByTrailer" src/lib/status.ts'
   src: re-derived at 682c5d5a — 2 substring hits, 0 anchored
   cited: "2026-08-23"
+- id: verify-pr-body-against-diff-not-memory
+  subsystem: review
+  lifecycle: active
+  files: [ src/lib/review.ts ]
+  fact: >-
+    Verify every PR-body claim about your own diff against `git diff --numstat`,
+    and re-verify after each follow-up commit: `bodyContradictsDiff`
+    (`src/lib/review.ts`) opens the diff and fails the PR. Never assert scope
+    membership from memory — run the predicate:
+    `isInPlanScope("docs/ORIENTATION.md")` returns TRUE (run, not read), and any
+    claim about it goes stale the moment `plan-architect.ts` moves. The detector
+    also has a SHORTHAND arm: scope-shorthand phrases (the plan-only/data-only
+    family) fire when ANCHORED — as a label with a colon, a copular claim ("this
+    PR is ...-only"), or attributive before a changeset noun — while bare
+    mentions, quoted regions and file paths stay silent
+    (`shorthandIsAboutChangeset`). If the diff carries any file outside the
+    claimed scope, the anchored phrase fails the PR — so do not write the
+    shorthand in a body unless the predicate agrees.
+  src: 'W1-T274, W1-T413, #974, #984, #1685; migrated from CLAUDE.md''s
+    Before-you-push section, W1-T2507'
+  cited: "2026-08-31"
+- id: grep-in-path-lazy-split-hazard
+  subsystem: proofs
+  lifecycle: active
+  files: [ src/lib/task-linter.ts, src/lib/review.ts ]
+  fact: >-
+    Keep a `unit test:` body under 100 characters with at most one comma and no
+    `"; "`; a `grep:` pattern MAY contain `" in "` provided an explicit path
+    follows it. `looksLikeScenarioNarrative` (`src/lib/task-linter.ts`) fails
+    `proof-resolvability` at 2+ commas, or `"; "` plus a comma, or over 100
+    chars. `DIALECT_GREP_PATH_RE` (`src/lib/review.ts`) is
+    `/^(.*?)\s+in\s+(\S*[./*]\S*)$/i` — lazy, with the path group `\S`-only
+    against `$`, so the split always lands before the final token and an
+    embedded `" in "` survives intact: `grep: always succeeds in one call in
+    src/lib/ledger.ts` reads `verdict: pass`. The real hazard is a STOLEN
+    TRAILING TOKEN — a pattern ending in a path-like token with no explicit path
+    has that token taken as the path: `grep: the convergence invariant fires in
+    ledger.ts` greps `ledger.ts` and reads `verdict: exec_error`. The check is
+    `captured path == declared path`. Forward-referencing a PATH is safe (the
+    named test may not exist yet); forward-referencing a SYMBOL NAME is a guess.
+  src: '#982, #984, #920, #921, #943; corrected 2026-08-28; migrated from
+    CLAUDE.md''s Writing-proofs section, W1-T2507'
+  cited: "2026-08-31"
+- id: plan-only-pr-not-auto-capped
+  subsystem: proofs
+  lifecycle: active
+  files: [ src/lib/review.ts ]
+  fact: >-
+    A plan-only PR is not automatically capped — prefer certification over the
+    W1-T205 carve-out. `planOnly` (`src/lib/review.ts`) exempts a plan-only diff
+    from the proof-execution floor; it does not stop real proofs from executing.
+    `grep: <pattern> in <path>` proofs with an explicit path do execute and can
+    earn a full PASS — #877 posted "PASS — 4 criteria substantiated" on 4/4. A
+    path-less `grep:` is refused outright by `parseDialectGrep`.
+  src: '#877; migrated from CLAUDE.md''s Writing-proofs section, W1-T2507'
+  cited: "2026-08-31"
+- id: no-rewriting-proofs-on-verify-human
+  subsystem: proofs
+  lifecycle: active
+  files: [ src/lib/drain.ts ]
+  fact: >-
+    Do not rewrite proofs on `verify: human` tasks. `isDispatchEligible`
+    (`src/lib/drain.ts`) returns false at `t.verify !== "auto"` before the
+    linter is consulted, so their dialect debt can never stall the queue.
+    Forcing chaos drills, device recordings and live deploys into `unit test:`
+    yields proofs that parse, match zero tests, and cap the review — the exact
+    theatre the dialect gate exists to stop. Report them as needing a proof kind
+    the dialect lacks. And before treating a `verify: human` shard's questions
+    as live, check whether a `verify: auto` sibling already merged their
+    substance — measured twice in two days, the queue held open operator
+    questions whose answers had shipped under a different id. The check: grep
+    the shard's load-bearing symbols across merged trailers/subjects before
+    escalating its questions.
+  src: '#984; siblings 2026-08-13/14; migrated from CLAUDE.md''s Writing-proofs
+    section, W1-T2507'
+  cited: "2026-08-31"
+- id: operator-message-standard-is-tested-verbatim
+  subsystem: docs
+  lifecycle: active
+  files: [ docs/operator-message-standard.md ]
+  fact: >-
+    An operator message names the actor, what happened, what to do —
+    `docs/operator-message-standard.md`. Its test pins THAT doc and the source
+    lines it quotes verbatim, so rewording a quoted message reddens it; no
+    message of yours is checked.
+  src: 'W1-T2279; migrated from CLAUDE.md''s Writing-proofs section, W1-T2507'
+  cited: "2026-08-31"
+- id: coverage-test-needs-own-file
+  subsystem: coverage
+  lifecycle: active
+  files: [ test/run-task.test.ts ]
+  fact: >-
+    Put any coverage-load-bearing test in its OWN `test/*.test.ts` file — never
+    append it to `test/run-task.test.ts`. That file intermittently crashes at
+    FILE level under `--experimental-test-coverage` (the W1-T240 registry
+    tests), and the crash zeroes the entire lcov, so `diff-coverage` reads the
+    0-byte file as `OK` vacuously; only the `SF:` count check catches it.
+  src: '#781; migrated from CLAUDE.md''s Coverage-traps section, W1-T2507'
+  cited: "2026-08-31"
+- id: next-task-id-max-across-both-plan-sources
+  subsystem: plan
+  lifecycle: active
+  files: [ plan/tasks.yaml, plan/tasks.d ]
+  fact: >-
+    Compute a new task id from the max across BOTH `plan/tasks.yaml` AND every
+    `plan/tasks.d/*.yaml` shard. "Next number after the last one I saw" collides
+    with tasks that landed concurrently or live in a shard you didn't read, and
+    `rmd lint-plan` then blocks the push: `grep -rhoE '^\s*- id: W1-T[0-9]+'
+    plan/tasks.yaml plan/tasks.d/ | grep -oE 'T[0-9]+'` then max+1. This is
+    minting-only — it truncates letter-suffixed ids; duplicate detection
+    compares whole ids (`sort | uniq -d` on `- id:` lines).
+  src: '#770, #775 renumbered to W1-T257/W1-T261 -- same collision twice; migrated
+    from CLAUDE.md''s Plan-and-task-hygiene section, W1-T2507'
+  cited: "2026-08-31"
+- id: warn-never-reaches-lint-plan-exit-code
+  subsystem: plan
+  lifecycle: active
+  files: [ src/run-task.ts ]
+  fact: >-
+    A `warn` never reaches `lint-plan`'s exit code. `lintPlanCommand`
+    (`src/run-task.ts`) increments `failing` only inside `if (blocking.length)`,
+    then returns `failing > 0 ? 1 : 0`; `proof-resolvability` is demoted at
+    `preDispatchLint` and stays advisory in CI. And `lint-plan` exiting 2 with
+    `cannot resolve --base <ref>` means your base sha is POISONED, not your diff
+    — the message is `run-task.ts`'s own, returned as 2 rather than 1. CI passes
+    `BASE_SHA: ${{ github.event.pull_request.base.sha }}`, an event-payload
+    snapshot, so a re-run replays the same poisoned sha and clears nothing; the
+    remedy is merging current main into the branch (same snapshot class
+    W1-T351/#1380 fixed for commitlint).
+  src: '#984; the base-sha half 2026-08-14; migrated from CLAUDE.md''s
+    Plan-and-task-hygiene section, W1-T2507'
+  cited: "2026-08-31"
+- id: next-task-id-needs-a-fresh-pull
+  subsystem: plan
+  lifecycle: active
+  files: [ src/run-task.ts, src/lib/task-id-reservation.ts, src/lib/auto-triage.ts ]
+  fact: >-
+    `rmd next-task-id` reads the LOCAL checkout — `git pull` first or it returns
+    an id you filed minutes ago. It does account for open PRs once current. No
+    lock covers the triage rung, which mints unattended while you type:
+    `state/triage.lock` is triage-against-triage only and
+    `state/task-id-reservations` is LOCAL, so neither sees another host's
+    unpushed filing. Twice a double-mint made `loadPlan` refuse `origin/main`,
+    taking every plan-reading verb with it — W1-T488 (#1816/#1817) and
+    W1-T533+W1-T534, repaired by renumbering the loser (#1964). Sweep
+    `refs/rmd-id/*` alongside shards and open PRs — only that sees a
+    reserved-but-unfiled id — then re-sweep on a fresh fetch immediately before
+    pushing.
+  src: '#1388: returned W1-T379 right after #1388 filed it, true max 380; migrated
+    from CLAUDE.md''s Plan-and-task-hygiene section, W1-T2507'
+  cited: "2026-08-31"
+- id: hand-mint-uses-the-plain-refspec
+  subsystem: plan
+  lifecycle: active
+  files: [ src/lib/task-id-reservation.ts ]
+  fact: >-
+    Hand-mint with the PLAIN refspec — `git push origin
+    <orphan-sha>:refs/rmd-id/<id>` — never `+` and never `--force-with-lease`:
+    `+` silently defeats the lease, so a push that looks gated has no gate at
+    all. The CAS is a property of the payload, not the namespace: an orphan
+    `commit-tree` over the empty tree with no `-p` gives every writer a unique
+    sha, so a second push is structurally a non-fast-forward — the form
+    `gitRemoteRefReserver.attempt` (`src/lib/task-id-reservation.ts`) already
+    uses. `reserveTaskIdRemote` has ONE call site, the triage mint, so a
+    hand-filed shard bypasses it entirely. MEASURED on the real remote: plain
+    onto an absent ref succeeds; plain onto an existing ref holding an unrelated
+    orphan is rejected (non-fast-forward); `+` forces the update; a deliberately
+    wrong `--force-with-lease` combined with `+` still forces it, the lease
+    ignored outright; that same lease without `+` is rejected (stale info). Read
+    the exit code into a variable — non-zero means the id is TAKEN; renumber,
+    never re-push.
+  src: 'W1-T509; migrated from CLAUDE.md''s Plan-and-task-hygiene section, W1-T2507'
+  cited: "2026-08-31"
+- id: rule19-span-and-never-file-empty-files-list
+  subsystem: plan
+  lifecycle: active
+  files: [ src/lib/dispatch-overlap.ts ]
+  fact: >-
+    A shard whose `files:` spans two concerns fails Rule 19 sizing at
+    `risk:medium` — set `risk:high` up front and record in the note that the
+    band is Rule 19's SPAN, not blast radius; decomposing a predicate from its
+    own falsifier is not a real decomposition. And never file an empty `files:`
+    list: `overlappingPaths` (`src/lib/dispatch-overlap.ts`) fail-closes — one
+    empty side returns the OTHER side's entire list — so an undeclared task
+    overlaps every candidate, and placed first it serializes the whole dispatch
+    pool behind it (measured: one empty-`files:` task at the queue head held
+    admissions to 1 lane where 11 disjoint tasks waited).
+  src: '#1400, #1401, #1779; W1-T476 files the ordering fix; migrated from
+    CLAUDE.md''s Plan-and-task-hygiene section, W1-T2507'
+  cited: "2026-08-31"
+- id: remudero-review-is-a-commit-status
+  subsystem: ci
+  lifecycle: active
+  files: [ src/lib/review.ts, src/lib/open-prs-rest.ts ]
+  fact: >-
+    `remudero-review` is a COMMIT STATUS, not a check-run — `/check-runs` is
+    structurally blind to it. `postReviewStatus` (`src/lib/review.ts`) POSTs
+    `repos/.../statuses/{sha}` with context `REVIEW_CONTEXT`; `rollupFromRest`
+    (`src/lib/open-prs-rest.ts`) says so explicitly: reading only `/check-runs`
+    would drop `remudero-review` entirely and make every reviewed PR look
+    unreviewed. The endpoints that DO see it: GraphQL's `statusCheckRollup` (a
+    union of CheckRun AND StatusContext nodes) and the combined-status endpoint
+    `repos/.../commits/{sha}/status` — use one of those, never `/check-runs`
+    alone, when asking "is this PR reviewed".
+  src: 'measured twice, 2026-08-13/14; migrated from CLAUDE.md''s CI-and-merging
+    section, W1-T2507'
+  cited: "2026-08-31"
+- id: ledger-step-name-is-a-claim-not-evidence
+  subsystem: ledger
+  lifecycle: active
+  files: [ plan/policy.yaml, src/lib/auto-triage.ts, src/run-task.ts ]
+  fact: >-
+    Treat a step NAME as a claim, not evidence — check what the function that
+    wrote it can actually return. `armAutoMerge` returns one of seven outcomes
+    and never throws; five arm nothing, yet five Architect lanes logged
+    `automerge.armed` unconditionally. Measured over the unioned ledger: 176
+    rows; 135 blind, 17 provably false, 119 undecidable (overlapping categories)
+    — the blind rows recorded no `head_sha`, so they can never be adjudicated.
+    And the lanes are not equally gated, the obvious reading is backwards: `grep
+    -n 'return attemptArm' src/run-task.ts` prints them side by side.
+    `triageCommand` arms only after `waitForCiGreen` returns green, and
+    `armAutoMerge` then reads `priorReviewVerdictFromLedger` and gates on
+    `decideArmFromLedgerVerdict` — TWO gates; it never branches on
+    `reviewCommand`'s exit code. `armAutoMergeAtOpen` is `return
+    attemptArm(prUrl, deps);` — no verdict gate and no ci gate — and the
+    implement lane calls it at PR-open, before any review. So implementation
+    PRs, which change source, self-merge earlier and with fewer checks than
+    triage PRs, which only add plan text (operator ruling on W1-T489:
+    documented, not changed). The unattended rate is real now that W1-T469 fires
+    the rung on `partition.serialized.length > 0` rather than idleness, bounded
+    by `autoTriage.maxPerDay`/`minIntervalMinutes` (`plan/policy.yaml`). Cost
+    per run is a QUERY, not a number to carry — re-derive it over the ledger
+    union rather than quoting `src/lib/auto-triage.ts`'s figure.
+  src: '#981; the lane-asymmetry half W1-T489, 2026-08-14; migrated from
+    CLAUDE.md''s Ledger-and-evidence-discipline section, W1-T2507'
+  cited: "2026-08-31"
+- id: state-is-scratch-land-findings-in-a-tracked-artifact
+  subsystem: ledger
+  lifecycle: active
+  files: [ plan/feedback, src/lib/feedback-landing.ts ]
+  fact: >-
+    A report written to `state/` is SCRATCH, not a record — land the finding in
+    a TRACKED artifact in the same session, and never let a tracked artifact
+    rest its evidence on a `state/` path. `.gitignore`'s `state/` entry is
+    correct and load-bearing (the daemon writes runtime exhaust into its own
+    tree every run; un-ignored it reads as dirt in `git status --porcelain`,
+    which crash-looped the daemon on restart), and that directory also holds
+    `state/service-tokens.json` — so this is a PLACEMENT defect, not a gitignore
+    one; do not propose un-ignoring it. On the mini a report there is merely
+    local; in a cloud container it is destruction, because nothing syncs it and
+    the container is reclaimed. MEASURED: 29 distinct `state/*.md` paths cited
+    across 43 tracked files, and all 29 absent from a fresh checkout — every one
+    is a pointer no worker can follow; a session re-derived a whole finding from
+    scratch after `state/recon-retro-test-github-calls.md` turned out not to
+    exist. The durable homes: the PR body, the shard's own `rationale`/`note`,
+    and `plan/feedback/` — tracked AND landed by `landFeedback`
+    (`src/lib/feedback-landing.ts`), which rebuilds from origin/main and pushes,
+    so it survives the container by construction. Nothing in this repo tells a
+    session where to write a report; the convention lives only in the operator's
+    briefs, which is why the rule lives here.
+  src: 'established 2026-08-11; migrated from CLAUDE.md''s
+    Ledger-and-evidence-discipline section, W1-T2507'
+  cited: "2026-08-31"
+- id: trace-the-runtime-value-not-the-declarative-source
+  subsystem: investigation
+  lifecycle: active
+  files: [ .remudero/mounts.yaml ]
+  fact: >-
+    Before editing the config file you were TOLD to change, trace from source
+    where the runtime value is actually read. The named declarative source may
+    be inert while a code-level default governs live behavior: the
+    `.remudero/mounts.yaml` `architect:` row looked authoritative, but spawns
+    resolved from `architectModel(config)`'s `?? "opus"` default, so a row-only
+    edit would have shipped green and changed nothing observable (required
+    wiring `architectModel(config, mounts)`). MIRROR — before filing a NEW
+    signal, `git grep` the producer's own type for consumers: the fact is
+    usually ALREADY COMPUTED AND DISCARDED. Measured: `parseGhRateLimitHeaders`
+    reads `X-Ratelimit-Reset` and `X-Ratelimit-Resource`, consumers `worker.ts`
+    plus one test; the plan-state scanner destructures only `ids` off a result
+    carrying `examinedLines` and `proposalOnlyLines`; `disarmAutoMerge`'s
+    `DisarmOutcome` is dropped at two of three call sites. Carrying a value that
+    already exists is the cheapest fix class here; measuring a new one is not.
+  src: '#781; 2026-08-22/23; migrated from CLAUDE.md''s Investigation-discipline
+    section, W1-T2507'
+  cited: "2026-08-31"
+- id: check-absence-is-not-a-passed-check
+  subsystem: investigation
+  lifecycle: active
+  files: [ src/lib/sweep.ts ]
+  fact: >-
+    A check that is ABSENT is not a check that passed — a rollup shows neither.
+    Asking whether a red was base-caused or in-diff, a sweep read `success` for
+    a required check on three sibling PRs and concluded the fault was in the
+    diff. Those heads predated the check's introduction, so it had never run on
+    them: absence, not agreement. `baseCausedCheckName` (`src/lib/sweep.ts`)
+    needs the check failing on EVERY open PR, so one older head silently refutes
+    a real base outage. Restrict the comparison to heads built after the check
+    first appeared.
+  src: '2026-08-16, #1919; migrated from CLAUDE.md''s Investigation-discipline
+    section, W1-T2507'
+  cited: "2026-08-31"
+- id: run-task-has-zero-catch-erasure-headroom
+  subsystem: codebase
+  lifecycle: active
+  files: [ src/run-task.ts, test/catch-erasure-ratchet.test.ts ]
+  fact: >-
+    `src/run-task.ts` has ZERO headroom on the bare-catch ratchet — 64 of 64, so
+    the next bare erasing `catch {}` reddens
+    `test/catch-erasure-ratchet.test.ts`. Rethrow, record, carry the distinction
+    in the return shape, or state the reason inside the braces. Never raise the
+    baseline — that is the move the gate exists to refuse.
+  src: 'W1-T2295; migrated from CLAUDE.md''s Code-traps section, W1-T2507'
+  cited: "2026-08-31"
+- id: serve-client-js-template-literal-backtick-trap
+  subsystem: codebase
+  lifecycle: active
+  files: [ src/lib/serve.ts ]
+  fact: >-
+    `src/lib/serve.ts`'s client JS lives inside a backtick template literal —
+    never put a backtick inside a client-code comment (e.g. a mention of
+    `lastLiveAt`). It terminates the outer template and esbuild fails with
+    `Expected ";" but found ...`. Sanity-check by rendering the shell and
+    parsing the client script (`new Function(<largest <script> block of
+    renderShellHtml()>)`). serve.ts DOM behavior is covered by real
+    Playwright/Chromium tests (`test/serve.*.test.ts`) — run them for any client
+    change.
+  src: '#777; migrated from CLAUDE.md''s Code-traps section, W1-T2507'
+  cited: "2026-08-31"

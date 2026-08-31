@@ -1,0 +1,91 @@
+- id: W1-T2533
+  title: "A DENIED SCOPE CLAIM IS REFUSED AS A CLAIM — `bodyContradictsDiff`'s label and attributive arms read the shorthand and never the negation, so a body that correctly says `Plan-only: no.` is failed FOR being plan-only; MEASURED in-process on #3373's verbatim body, and the copular arm already gets it right, which is the shape the other two should copy"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 12.00
+  files: [src/lib/review.ts, test/a-denied-scope-claim-is-not-a-claim.test.ts]
+  origin: "operator-session#the-pr-board-is-very-red-2026-08-31"
+  plan_refs: ["W1-T274", "W1-T395", "W1-T413"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON A REAL PR, THEN REPRODUCED IN-PROCESS. #3373's body carried, verbatim:
+
+        ## Scope notes
+
+        Plan-only: no. This is a `src/` + `test/` code change; ...
+
+    That is the honest answer — the PR is NOT plan-only and says so — and the reviewer refused it:
+    `FAIL — body contradicts its own diff: claimed "plan-only", actual changed files: ...`.
+
+    MEASURED by calling `bodyContradictsDiff(body, files)` directly, not inferred from the failure
+    text. Each row is one call, same file list, only the wording varies:
+
+      FIRES   label   + denial      "Plan-only: no."
+      FIRES   label   + assertion   "Plan-only: one file added."
+      silent  copular + denial      "This diff is not plan-only."
+      FIRES   copular + assertion   "This diff is plan-only."
+      FIRES   attrib  + denial      "This is not a plan-only change."
+      FIRES   attrib  + assertion   "This is a plan-only change."
+      silent  denial, no anchor     "It is not plan-only, since src/ moved."
+      silent  cited in prose        "the plan-only carve-out exempts a filing"
+
+    TWO OF THE THREE ANCHORING ARMS ARE NEGATION-BLIND, AND THE THIRD IS NOT — which is what makes
+    this a defect rather than a design choice, and what tells the fix where to aim.
+
+    THE LABEL ARM, by construction. `shorthandIsAboutChangeset`'s first line is
+    `if (/^[*_`'")\]\s]*:/.test(rest)) return true;` — it decides on the colon alone and returns
+    before reading a single character of the elaboration. Its own comment says why: the elaboration
+    "often carries no changeset verb at all ('no code', 'no src')", so reading it was judged
+    guesswork. That reasoning is sound for `data-only: no code.` (a POSITIVE claim whose
+    elaboration happens to start with "no") and wrong for `Plan-only: no.` (a NEGATIVE answer to
+    the question the label poses). The two are indistinguishable without reading past the colon,
+    which is precisely what the arm refuses to do.
+
+    THE ATTRIBUTIVE ARM, for a different reason. `SHORTHAND_HEAD_NOUN_RE` + `CHANGESET_CONTEXT_RE`
+    ask only what noun the shorthand modifies. In "not a plan-only change" the modified noun is
+    `change`, so it fires — the `not` sits BEFORE the article and is never in the window examined.
+
+    THE COPULAR ARM ALREADY BEHAVES. `SELF_REFERENTIAL_CLAIM_RE` matches the linking verb
+    IMMEDIATELY before the shorthand, and "is not plan-only" puts `not` in between, so it does not
+    match. Whether that was intended or is a by-product of the immediacy requirement W1-T413 added
+    for a different reason, the OBSERVABLE BEHAVIOUR is correct and is the reference the other two
+    arms should be measured against. Read that arm before designing a new one.
+
+    WHY IT MATTERS BEYOND ONE PR. Stating scope negatively is the natural thing to write when a
+    template asks "plan-only?" and the answer is no, and this repo's own house style writes exactly
+    that shape. The refusal names "claimed plan-only", so an author reading it sees the reviewer
+    assert something their body denies — the most expensive kind of gate message, because the
+    obvious response is to argue with it rather than reword.
+
+    DO NOT FIX THIS BY DELETING AN ARM. Both arms catch real contradictions on their positive rows
+    above, and W1-T413's own history is a narrowing that had to be re-widened; the fix is to make
+    the negation visible to the label and attributive arms, not to stop them anchoring.
+
+    NOT IN SCOPE: the "exactly N files" count arm (a different predicate with a different failure
+    mode), and anything about the source-size ledger that made these bodies stale in the first
+    place — that is W1-T2532.
+
+    RE-DERIVE THE TABLE BEFORE BUILDING. It is eight `bodyContradictsDiff` calls and takes seconds;
+    the arms have been narrowed and re-widened before (W1-T395, W1-T413) and the rows may have
+    moved since this was measured.
+
+  acceptance:
+    - claim: "a body that answers the scope question negatively is not refused as having claimed it"
+      proof: "unit test: test/a-denied-scope-claim-is-not-a-claim.test.ts"
+    - claim: "the label form still refuses a POSITIVE claim whose elaboration begins with a negative word"
+      proof: "unit test: test/a-denied-scope-claim-is-not-a-claim.test.ts"
+    - claim: "the attributive form still refuses an asserted claim while releasing a denied one"
+      proof: "unit test: test/a-denied-scope-claim-is-not-a-claim.test.ts"
+    - claim: "the copular arm's existing behaviour on both an assertion and a denial is unchanged"
+      proof: "unit test: test/a-denied-scope-claim-is-not-a-claim.test.ts"
+    - claim: "a shorthand merely cited in prose, and a path containing it, both stay silent as before"
+      proof: "unit test: test/a-denied-scope-claim-is-not-a-claim.test.ts"
+    - claim: "#3373's verbatim body is a fixture and passes, so the fix is anchored to the observation"
+      proof: "unit test: test/a-denied-scope-claim-is-not-a-claim.test.ts"
+    - claim: "removing the negation handling makes the denied-claim fixtures refuse again"
+      proof: "unit test: test/a-denied-scope-claim-is-not-a-claim.test.ts"

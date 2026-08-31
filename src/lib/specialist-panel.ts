@@ -246,6 +246,71 @@ export function routeSpecialists(input: SpecialistPanelInput): SpecialistTrigger
   return triggers.filter((t): t is SpecialistTrigger => t !== null);
 }
 
+// ── Request fan-out (W1-T2500) — the SAME router, applied to a request instead of a diff ───
+//
+// W1-T2499 leaves a thread "understood" (reply-interpreter.ts's `status: "understood"`) and
+// stops there by design — it asks, it never acts. "Spins off parallel workers if it makes
+// sense" is that gap's other half: deciding whether an understood request decomposes into more
+// than one worker. §4B already settled HOW that decision gets made — {@link routeSpecialists}
+// is a pure predicate over a bounded set of four, no clock, no model call — so this REUSES it
+// UNCHANGED rather than inventing a second router a request could drift from a diff's (this
+// task's own acceptance forbids touching the four triggers or their rubrics, and nothing below
+// does: {@link routeRequestFanout} only calls the existing export).
+//
+// BOUNDED ON BOTH ENDS. `routeSpecialists` can never return more than the four it already
+// enumerates, so the decomposed case is bounded by construction. The UNDECOMPOSED case — a
+// request that trips none of the four triggers — is not zero workers; it is the ordinary case
+// of a request one worker already owns end to end, so it spawns exactly that one worker
+// (`"general"`) rather than nothing and rather than an unbounded set a model chose (a model
+// choosing the worker set is refused BY CONSTRUCTION here: there is no parameter through which
+// one could reach this function's decision at all).
+
+/** A fan-out branch's worker: one of the four existing specialists, or `"general"` — the single
+ *  worker a request that does not decompose spawns. Never anything a caller invents at runtime;
+ *  the closed union is the same boundedness guarantee {@link SpecialistName} already gives the
+ *  four. */
+export type FanoutWorker = SpecialistName | "general";
+
+/** One parallel branch of a routed request fan-out. `threadId` rides on EVERY branch — never
+ *  optional, never derived later — so a caller can never lose track of the one place a branch's
+ *  result belongs (acceptance: "every parallel branch reports back onto the thread that asked").
+ *  This module only ROUTES; posting a branch's result back onto the thread is the caller's job,
+ *  exactly like {@link buildSpecialistPrompt}'s own advise-never-act split. */
+export interface RequestFanoutBranch {
+  worker: FanoutWorker;
+  threadId: string;
+  reason: string;
+}
+
+export interface RequestFanoutInput {
+  /** The thread this fan-out routes for — the SAME id every branch below carries, so branches
+   *  can never disagree about where they report back. */
+  threadId: string;
+  /** The SAME shape {@link routeSpecialists} already takes, reused rather than re-derived, so
+   *  the request router and the diff router can never disagree about what a "diff" or "task"
+   *  means. At the point a thread reaches "understood" nothing has been drafted yet, so callers
+   *  ordinarily pass an empty-files diff (mirroring `run-task.ts`'s own "only the testing
+   *  trigger is reachable here" pattern, W1-T948) plus whatever task metadata the request
+   *  itself states. */
+  panel: SpecialistPanelInput;
+}
+
+/**
+ * Route an understood request to the worker(s) it fans out to. Deterministic: the SAME input
+ * always returns the SAME branches, in the SAME order {@link routeSpecialists} already returns
+ * its triggers in — no clock, no randomness, no LLM call, because this never calls anything but
+ * the pure predicate above. A request that trips none of the four triggers routes to exactly one
+ * `"general"` branch (acceptance: "a request that does not decompose spawns one worker"), never
+ * zero and never more than the four {@link routeSpecialists} itself is bounded to.
+ */
+export function routeRequestFanout(input: RequestFanoutInput): RequestFanoutBranch[] {
+  const triggers = routeSpecialists(input.panel);
+  if (triggers.length === 0) {
+    return [{ worker: "general", threadId: input.threadId, reason: "request does not decompose" }];
+  }
+  return triggers.map((t) => ({ worker: t.specialist, threadId: input.threadId, reason: t.reason }));
+}
+
 // ── The scoped rubric each specialist is briefed with ───────────────────────
 
 const SPECIALIST_RUBRIC: Record<SpecialistName, string> = {

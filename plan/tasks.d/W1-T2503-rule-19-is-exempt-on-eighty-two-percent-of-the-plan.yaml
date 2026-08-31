@@ -7,7 +7,7 @@
   principles: {tdd: strict}
   risk: high
   budget_usd: 14.00
-  files: [src/lib/task-linter.ts, test/a-high-risk-task-declares-what-its-band-means.test.ts]
+  files: [src/lib/task-linter.ts, src/lib/plan.ts, test/a-high-risk-task-declares-what-its-band-means.test.ts]
   origin: "operator-audit#nothing-dropped-2026-08-30"
   plan_refs: ["W1-T2486", "W1-T2487"]
   status: queued
