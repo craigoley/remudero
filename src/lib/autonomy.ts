@@ -59,6 +59,25 @@
 // NOT IN SCOPE: changing decideAutoMergeArm or any arming policy; W1-T424's revert-join
 // correctness measurement (that is the quality of what shipped; this is the quantity that
 // shipped untouched); alerting or thresholds on the rate.
+//
+// PER-REPO SPLIT (W1-T2492): a harness that works on OTHER repos (`onboard`, `managed-repos.ts`,
+// `rmd daemon --repo`) but only ever measures itself reports one blended rate that a foreign
+// repo's merges cannot move once this repo dominates the denominator — the unstated-denominator
+// shape this repo already refuses everywhere else. `zeroTouchMergeRate` now ALSO splits every row
+// into a `repos: RepoOutcome[]` breakdown, ADDITIVELY: the top-level fields are unchanged, and
+// `repos` carries the same population-floor and no-naked-zero discipline the class split already
+// has (below {@link MIN_REPO_POPULATION_FLOOR} rows prints the count and refuses the rate; zero
+// rows still prints, never omits). A merge's repo comes from `opts.repoOf(taskId)` — this module
+// does no plan I/O of its own, so a caller (run-task.ts's `autonomyRateCommand`) supplies it from
+// the loaded plan's `task.repo` field; a taskId the resolver cannot place lands in
+// {@link UNATTRIBUTABLE_REPO}, never dropped. `opts.knownRepos` names every repo that should be
+// reported even at zero merges (an onboarded-but-idle repo is a finding, not an absent row) —
+// omitted, only repos that actually appear in the corpus are reported. Omitting `repoOf` entirely
+// (every existing caller before this task) makes every merge unattributable, which is the honest
+// answer when the caller supplies no way to place a merge — see the module's own falsifier test
+// for why a single explicit `repoOf` mapping every merge to ONE repo string reproduces exactly
+// the report this module already printed (design: "absent a second repo the per-repo report is
+// the single-repo report it already prints").
 
 import { resolveLedgerUnion, type LedgerGrepFsDeps, type LedgerUnionOptions, type LedgerUnionResult } from "./ledger-grep.js";
 import { parseGitEventDump, type GitCommitEvent, type VerdictClass } from "./verdict-calibration.js";
@@ -208,6 +227,11 @@ export interface ZeroTouchMergeRateReport {
   zeroTouchRate: number | null;
   rows: MergeTouchRow[];
   classes: ZeroTouchClassOutcome[];
+  /** W1-T2492: the SAME rows split by repo instead of by verdict class — see this module's
+   *  PER-REPO SPLIT doc above. Always present, additively: with every merge attributed to one
+   *  repo, `repos` has exactly one entry whose `total`/`zeroTouchCount`/`zeroTouchRate` equal
+   *  this report's own top-level fields (the single-repo report is unchanged). */
+  repos: RepoOutcome[];
   /** Design (iii): the rendering names the current arming posture beside the measured rate —
    *  this module proposes no change to it. */
   armingPosture: string;
@@ -231,6 +255,93 @@ const CLASS_ORDER: readonly (AutonomyVerdictClass | "unclassified")[] = [
   "degraded-arm",
   "unclassified",
 ];
+
+// ── The per-repo split (W1-T2492) ───────────────────────────────────────────────────────────
+
+/** Sentinel bucket for a merge whose `taskId` a supplied `repoOf` could not place — reported as
+ *  its OWN row, exactly like `ZeroTouchClassOutcome`'s `"unclassified"` bucket, never dropped. */
+export const UNATTRIBUTABLE_REPO = "(unattributable)";
+
+/** Below this many rows for a repo, the per-repo report prints the count and REFUSES the rate —
+ *  same discipline as `lib/verdict-calibration.ts`'s `MIN_POPULATION_FLOOR`, kept as this
+ *  module's OWN constant (not imported) because the two reports measure different populations
+ *  and moving one floor must never silently move the other. */
+export const MIN_REPO_POPULATION_FLOOR = 5;
+
+/** One repo's slice of the zero-touch rate. `total` is the denominator, always named (never a
+ *  silently shrunken one) — a repo can appear here at `total: 0` (onboarded, nothing merged yet)
+ *  or below the floor (merged too little to support a rate) without being omitted. */
+export interface RepoOutcome {
+  repo: string;
+  total: number;
+  zeroTouchCount: number;
+  /** `null` exactly when `rateRefusedReason` is set. */
+  zeroTouchRate: number | null;
+  /** `"zero-merges"`: `total === 0` (an onboarded repo that merged nothing this window).
+   *  `"below-population-floor"`: `0 < total < MIN_REPO_POPULATION_FLOOR`.
+   *  `"corpus-unmeasured"`: the whole window is `status: "unmeasured"` — `total` still counts
+   *  the trailer-bearing merges the git corpus attributed to this repo (that read never touched
+   *  the ledger), but which of them were zero-touch could not be determined. */
+  rateRefusedReason?: "zero-merges" | "below-population-floor" | "corpus-unmeasured";
+}
+
+/** Unattributable sorts last; everything else alphabetically — a stable, reviewable order that
+ *  never depends on corpus iteration order. */
+function sortRepoKeys(repos: readonly string[]): string[] {
+  return [...repos].sort((a, b) => {
+    if (a === UNATTRIBUTABLE_REPO) return b === UNATTRIBUTABLE_REPO ? 0 : 1;
+    if (b === UNATTRIBUTABLE_REPO) return -1;
+    return a.localeCompare(b);
+  });
+}
+
+function repoOutcomesUnmeasured(
+  merges: readonly MergeRecord[],
+  repoOf: (taskId: string) => string | undefined,
+  knownRepos: readonly string[],
+): RepoOutcome[] {
+  const totals = new Map<string, number>(knownRepos.map((r) => [r, 0]));
+  for (const m of merges) {
+    const repo = repoOf(m.taskId) ?? UNATTRIBUTABLE_REPO;
+    totals.set(repo, (totals.get(repo) ?? 0) + 1);
+  }
+  return sortRepoKeys([...totals.keys()]).map((repo) => ({
+    repo,
+    total: totals.get(repo)!,
+    zeroTouchCount: 0,
+    zeroTouchRate: null,
+    rateRefusedReason: "corpus-unmeasured",
+  }));
+}
+
+function repoOutcomesMeasured(
+  rows: readonly MergeTouchRow[],
+  repoOf: (taskId: string) => string | undefined,
+  knownRepos: readonly string[],
+  minPopulationFloor: number,
+): RepoOutcome[] {
+  const buckets = new Map<string, { total: number; zeroTouch: number }>(knownRepos.map((r) => [r, { total: 0, zeroTouch: 0 }]));
+  for (const row of rows) {
+    const repo = repoOf(row.taskId) ?? UNATTRIBUTABLE_REPO;
+    let b = buckets.get(repo);
+    if (!b) {
+      b = { total: 0, zeroTouch: 0 };
+      buckets.set(repo, b);
+    }
+    b.total += 1;
+    if (row.zeroTouch) b.zeroTouch += 1;
+  }
+  return sortRepoKeys([...buckets.keys()]).map((repo) => {
+    const b = buckets.get(repo)!;
+    if (b.total === 0) {
+      return { repo, total: 0, zeroTouchCount: 0, zeroTouchRate: null, rateRefusedReason: "zero-merges" };
+    }
+    if (b.total < minPopulationFloor) {
+      return { repo, total: b.total, zeroTouchCount: b.zeroTouch, zeroTouchRate: null, rateRefusedReason: "below-population-floor" };
+    }
+    return { repo, total: b.total, zeroTouchCount: b.zeroTouch, zeroTouchRate: b.zeroTouch / b.total };
+  });
+}
 
 function verdictClassOf(lines: readonly Record<string, unknown>[]): AutonomyVerdictClass | null {
   const posted = [...lines].reverse().find((l) => l.step === "review.posted");
@@ -303,9 +414,25 @@ function classifyRow(taskId: string, sha: string, ts: string, lines: readonly Re
 export function zeroTouchMergeRate(
   merges: readonly MergeRecord[],
   ledgerMining: AutonomyLedgerMining,
-  opts: { windowDescription?: string } = {},
+  opts: {
+    windowDescription?: string;
+    /** Attributes a merge's `taskId` to the repo its plan record targets. Absent/`undefined`
+     *  return for a given `taskId` lands that merge in {@link UNATTRIBUTABLE_REPO}, never
+     *  dropped. Omitted entirely, every merge is unattributable — the honest answer when the
+     *  caller supplies no way to place one (see the module's PER-REPO SPLIT doc). */
+    repoOf?: (taskId: string) => string | undefined;
+    /** Repos to report even at zero merges (an onboarded-but-idle repo is a finding, not an
+     *  absent row) — e.g. every distinct `task.repo` in the loaded plan. Omitted, only repos
+     *  that actually appear in the corpus are reported. */
+    knownRepos?: readonly string[];
+    /** Overrides {@link MIN_REPO_POPULATION_FLOOR} — test-only in practice. */
+    minRepoPopulationFloor?: number;
+  } = {},
 ): ZeroTouchMergeRateReport {
   const windowDescription = opts.windowDescription ?? `${merges.length} trailer-bearing merge(s) read from git history`;
+  const repoOf = opts.repoOf ?? ((): undefined => undefined);
+  const knownRepos = opts.knownRepos ?? [];
+  const minRepoPopulationFloor = opts.minRepoPopulationFloor ?? MIN_REPO_POPULATION_FLOOR;
   const { ledger, linesByTaskId } = ledgerMining;
 
   if (!ledger.ok) {
@@ -332,6 +459,7 @@ export function zeroTouchMergeRate(
       zeroTouchRate: null,
       rows: [],
       classes: CLASS_ORDER.map((verdictClass) => ({ verdictClass, total: 0, zeroTouchCount: 0, zeroTouchRate: null })),
+      repos: repoOutcomesUnmeasured(merges, repoOf, knownRepos),
       armingPosture: CURRENT_ARMING_POSTURE,
     };
   }
@@ -371,6 +499,7 @@ export function zeroTouchMergeRate(
     zeroTouchRate: totalMerges === 0 ? null : zeroTouchCount / totalMerges,
     rows,
     classes,
+    repos: repoOutcomesMeasured(rows, repoOf, knownRepos, minRepoPopulationFloor),
     armingPosture: CURRENT_ARMING_POSTURE,
   };
 }
