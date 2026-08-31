@@ -90,6 +90,111 @@ export function classifyFailure(signal: FailureSignal): FailureClass {
   return "strike";
 }
 
+/**
+ * A USAGE-WINDOW REFUSAL IS NOT A NETWORK BLIP, AND THE DIFFERENCE IS THE SCHEDULE (W1-T2515).
+ * Every pattern in {@link TRANSIENT_TEXT_PATTERNS} above describes a condition that may clear in
+ * the next second — a reset socket, a 502, a runner losing its host. A session/usage limit clears
+ * at a STATED WALL-CLOCK TIME, typically tens of minutes out. Retrying one on the other's schedule
+ * is what spent MAX_TRANSIENT_RETRIES in 3.5 seconds against a lockout with 57m23s left to run.
+ *
+ * NARROW BY CONSTRUCTION: these match the refusal's own phrasing, not any prose that happens to
+ * mention a limit, so a worker writing ABOUT rate limiting is never classified as refused.
+ */
+const USAGE_LIMIT_TEXT_PATTERNS: RegExp[] = [
+  /you'?ve hit your (?:session|usage) limit/i,
+  /(?:session|usage) limit (?:reached|exceeded)\b/i,
+];
+
+/** Extracted from a usage-limit refusal: what it said, and when it says the window reopens. */
+export interface UsageLimitRefusal {
+  /** The refusal text that matched, trimmed — evidence, never re-derived downstream. */
+  matched: string;
+  /** The reset clause verbatim as written (e.g. `8:50pm (UTC)`), when one was present. */
+  resetsAtText?: string;
+  /**
+   * Epoch ms the window reopens. Present ONLY when the refusal stated a time AND that time
+   * carried an explicit UTC marker — a bare clock time in an unknown zone is NEVER converted,
+   * because guessing the operator's zone would produce a confident wrong resume time. Absent is
+   * a supported answer: the caller still stops retrying, it just cannot say when to resume.
+   */
+  resetsAtMs?: number;
+}
+
+/**
+ * The reset clause a refusal carries. 12-hour with am/pm or 24-hour; the zone is optional in the
+ * text but a NON-UTC or ABSENT zone yields no epoch (see {@link UsageLimitRefusal.resetsAtMs}).
+ *
+ * EXPORTED so its REFUSING arm is testable by name (W1-T2317's negative-reachability ratchet): a
+ * validator whose rejection has never been exercised is the exact shape that ratchet exists to
+ * catch, and this one decides whether a resume time is believed at all.
+ */
+export const USAGE_WINDOW_RESET_RE = /resets?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*(?:\(([^)]{1,16})\))?/i;
+
+/**
+ * Recognise a usage/session-window refusal in one attempt's evidence, and extract its stated
+ * reset when it carries one. PURE — `nowMs` is a parameter, never `Date.now()`, so the rollover
+ * arithmetic below is a fixture test rather than a timing test.
+ *
+ * ROLLOVER: the refusal states a clock time, not a date. The reset is the NEXT occurrence of that
+ * time at or after `nowMs`; a time that has already passed today rolls to tomorrow. That is the
+ * right reading for a refusal read the moment it is produced, which is the only place this runs.
+ */
+export function detectUsageLimitRefusal(text: string | undefined, nowMs: number): UsageLimitRefusal | undefined {
+  const t = text ?? "";
+  const hit = USAGE_LIMIT_TEXT_PATTERNS.map((re) => re.exec(t)).find((m) => m !== null);
+  if (!hit) return undefined;
+  const out: UsageLimitRefusal = { matched: hit[0].trim() };
+
+  const reset = USAGE_WINDOW_RESET_RE.exec(t);
+  if (!reset) return out;
+  out.resetsAtText = reset[0].replace(/^resets?\s+/i, "").trim();
+
+  const zone = (reset[4] ?? "").trim().toUpperCase();
+  if (zone !== "UTC") return out; // never invent a zone — see resetsAtMs's doc
+
+  let hour = Number(reset[1]);
+  const minute = Number(reset[2] ?? "0");
+  const meridiem = (reset[3] ?? "").toLowerCase();
+  // BOUNDS, NOT TYPE CHECKS: the capture groups are \d{1,2} and \d{2}, so Number() cannot
+  // produce NaN here — a `Number.isFinite` guard would be unreachable code whose mutants can
+  // never be killed. `99:99` IS reachable, and is what these two bounds refuse.
+  if (hour > 23 || minute > 59) return out;
+  if (meridiem === "pm" && hour < 12) hour += 12;
+  if (meridiem === "am" && hour === 12) hour = 0;
+  // No second bound: `pm` only adds 12 when hour < 12, so the adjusted hour cannot exceed 23.
+
+  const now = new Date(nowMs);
+  const candidate = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), hour, minute, 0, 0);
+  out.resetsAtMs = candidate >= nowMs ? candidate : candidate + 24 * 60 * 60 * 1000;
+  return out;
+}
+
+/**
+ * THE PRIMARY CONTROL (W1-T1266's taxonomy): the wait before the FIRST retry, and the base every
+ * later one doubles from. This is what normally paces a transient retry — before W1-T2515 the pace
+ * was zero, which is how MAX_TRANSIENT_RETRIES was spent in 3.519 seconds. Policy-as-data (rule 2).
+ */
+export const TRANSIENT_BACKOFF_BASE_MS = 1_000;
+
+/**
+ * A BACKSTOP, not the primary control above: it binds only once the doubling has already run away —
+ * from attempt 6 onward — and exists so "bounded" is a property of the code rather than a promise
+ * about how many retries there will ever be. If it is ever OBSERVED to bind in normal operation,
+ * that is a signal about MAX_TRANSIENT_RETRIES, not a reason to raise this.
+ */
+export const TRANSIENT_BACKOFF_CEILING_MS = 30_000;
+
+/**
+ * How long to wait before retry number `attempts + 1`. Bounded exponential, PURE, and monotonic
+ * up to the ceiling — the ceiling is what makes "never unbounded" a property rather than a hope.
+ * `attempts` below 1 is clamped, so a caller that miscounts cannot produce a negative delay.
+ */
+export function transientBackoffMs(attempts: number): number {
+  const n = Math.max(1, Math.floor(attempts));
+  const raw = TRANSIENT_BACKOFF_BASE_MS * 2 ** (n - 1);
+  return Math.min(raw, TRANSIENT_BACKOFF_CEILING_MS);
+}
+
 // ── The strike/diagnose state machine ──────────────────────────────────────
 
 /** Accumulated retry state, threaded across attempts by the caller. */
@@ -179,8 +284,16 @@ export interface DiagnoseThenRetryDeps {
   diagnose: () => Promise<{ text: string }>;
   /** One ledger-shaped line per step; no-op default (real callers ledger it). */
   log?: (step: string, extra?: Record<string, unknown>) => void;
-  /** Optional backoff between retries (default: no-op — tests never sleep). */
-  sleep?: (attemptNumber: number) => Promise<void>;
+  /**
+   * Wait this many MILLISECONDS before the next retry. W1-T2515 changed this from an
+   * attempt-number to a duration: the caller owns the clock, this module owns the schedule
+   * (see transientBackoffMs). Omitted means no wait, which is what every caller got before
+   * that task because the ONE production call site never supplied it at all — three retries
+   * in 3.5 seconds against a 57-minute lockout.
+   */
+  sleep?: (ms: number) => Promise<void>;
+  /** Injectable clock for the usage-window reset arithmetic. Defaults to Date.now. */
+  now?: () => number;
 }
 
 export interface DiagnoseThenRetryResult {
@@ -191,6 +304,13 @@ export interface DiagnoseThenRetryResult {
   diagnosed: boolean;
   attempts: number;
   reason?: string;
+  /**
+   * W1-T2515: set ONLY when the loop stopped because the account's usage window is shut. The
+   * caller (and, through it, the daemon) needs the stated reset to decide when to resume; a
+   * gave_up carrying this field is a FLEET condition, not a task failure, and must never be
+   * read as one. Absent on every other outcome, an ordinary exhausted-retries give-up included.
+   */
+  usageLimit?: UsageLimitRefusal;
 }
 
 /**
@@ -219,6 +339,34 @@ export async function runDiagnoseThenRetry(deps: DiagnoseThenRetryDeps): Promise
         diagnosed,
       });
       return { outcome: "success", strikes: state.strikes, transientRetries: state.transientRetries, diagnosed, attempts };
+    }
+
+    // W1-T2515: A SHUT WINDOW IS NOT A FLAKE. Checked BEFORE classification, because
+    // classifyFailure would call it transient (correctly — it is not the task's fault) and the
+    // loop would then spend the whole transient budget against a lockout that clears on a
+    // wall-clock schedule this loop must not wait out: waiting here holds a dispatch lane for
+    // the full window. Stop, carry the stated reset out, and let the daemon own the resume.
+    const usageLimit = detectUsageLimitRefusal(result.evidence.text, (deps.now ?? Date.now)());
+    if (usageLimit) {
+      log("retry.usage_limit", {
+        attempts,
+        strikes: state.strikes,
+        transient_retries: state.transientRetries,
+        matched: usageLimit.matched,
+        resets_at_text: usageLimit.resetsAtText,
+        resets_at_ms: usageLimit.resetsAtMs,
+      });
+      return {
+        outcome: "gave_up",
+        strikes: state.strikes,
+        transientRetries: state.transientRetries,
+        diagnosed,
+        attempts,
+        reason: usageLimit.resetsAtText
+          ? `usage window shut — ${usageLimit.matched} (resets ${usageLimit.resetsAtText})`
+          : `usage window shut — ${usageLimit.matched} (no reset time stated)`,
+        usageLimit,
+      };
     }
 
     const cls = classifyFailure(result.evidence);
@@ -256,6 +404,6 @@ export async function runDiagnoseThenRetry(deps: DiagnoseThenRetryDeps): Promise
     // retry_transient | retry_strike: loop again (blind retry; `findings`
     // carries forward unchanged — a diagnose report already in hand keeps
     // informing subsequent attempts too).
-    if (deps.sleep) await deps.sleep(attempts);
+    if (deps.sleep) await deps.sleep(transientBackoffMs(attempts));
   }
 }
