@@ -968,6 +968,15 @@ export const FAST_GATE_STEPS: { job: string; script: string; reason: string; bou
       "depth-limiting git flag against its own EXEMPTIONS table; measured well under the bound below",
     boundMs: FAST_GATE_CENSUS_BOUND_MS,
   },
+  {
+    job: "worker-branch-shape",
+    script: "worker-branch-shape:check",
+    reason:
+      "same-class (W1-T2491) — a deterministic, offline, sub-second gate structurally identical to claims/jscpd/depcruise: a " +
+      "plain local git+fs read (never node --test, never a network call) that refuses a branch claiming a task (by an anchored " +
+      "Remudero-Task trailer, or by filing a plan/tasks.d/ shard) whose head ref does not carry the run-<taskId>-<epochMs> shape " +
+      "seven modules read for dispatch visibility and merge credit (scripts/worker-branch-shape.mjs)",
+  },
 ];
 
 /** The `package.json` "scripts" object's key set — read once per `runPreflightFast` call so a
