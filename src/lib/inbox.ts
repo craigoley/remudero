@@ -29,6 +29,7 @@ import { appendLedger } from "./ledger.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { buildPlanPrCommitMessage } from "./plan-pr-emitter.js";
 import { workerLedgerFields, type WorkerResult } from "./worker.js";
+import type { InterpretReplyResult } from "./reply-interpreter.js";
 
 /**
  * `rmd inbox` — the ratification inbox's DETERMINISTIC CORE (MASTER-PLAN P25(i), W1-T110).
@@ -139,6 +140,67 @@ export interface Proposal {
    *  escalation handled", so such a proposal renders READY forever. This is what makes that fact
    *  expressible: see {@link classifyProposal}'s referent-retirement check. */
   originatingItemId?: string;
+}
+
+// ── The understood-request handoff (W1-T2500) ──────────────────────────────────────────────
+//
+// reply-interpreter.ts's `interpretReply` (W1-T2499) reaches `status: "understood"` — an empty
+// unanswered set — and stops there BY DESIGN ("it asks, it does not act"). Nothing carried that
+// state anywhere: an understood thread ended in a conversation, never a task. This is the
+// handoff, and ONLY the handoff — it mints a {@link Proposal} (this module's OWN existing shape,
+// nothing new) and hands it to the SAME tiering {@link classifyProposal} already runs every
+// OTHER proposal through, unchanged: trigger-deferral first, the ledger's `ratify.approved`
+// receipt overriding everything, every failing predicate collected rather than the first. This
+// function's job ends at minting the value classifyProposal reads — it never files a task
+// directly, never auto-approves, never adds a timer, and never paces anything.
+//
+// A THREAD WITH AN UNANSWERED CLARIFICATION EMITS NOTHING AND RUNS NOTHING. This is true by
+// CONSTRUCTION, not by a check this function could get wrong: it only ever returns a value when
+// `interpretation.status === "understood"`; a `"clarifying"` or `"exhausted"` result returns
+// `undefined`, and there is no other branch that could produce a {@link Proposal} from either.
+
+/** The understood request a caller hands to {@link proposalFromUnderstoodRequest} — the thread
+ *  it traces back to, and the request text that thread now understands in full (every
+ *  clarification, if any were asked, answered). */
+export interface UnderstoodRequest {
+  /** The thread this proposal traces back to — folded into {@link understoodRequestProposalId}
+   *  (NEVER into {@link Proposal.originatingItemId}: that field is board-review's OWN referent
+   *  vocabulary, W1-T2451 — a thread id is not a `BoardItem.id`, and reusing the field would wire
+   *  this proposal into the board-referent-retirement mechanism for a referent it can never
+   *  resolve). The id itself is the back-reference; nothing else needs to be. */
+  threadId: string;
+  /** The request text, quoted VERBATIM into the minted proposal's summary — never paraphrased,
+   *  mirroring `synthesizeFeedbackDocketProposal`'s own "verbatim, cited" discipline
+   *  (feedback-docket.ts). */
+  requestText: string;
+}
+
+/** The proposal id {@link proposalFromUnderstoodRequest} mints for one thread — deterministic
+ *  and derived, never random, so re-classifying the SAME understood thread twice (e.g. a second
+ *  daemon poll before ratification) always names the SAME proposal rather than opening a
+ *  duplicate one (mirrors `approveRunBranch`'s own "derived, never minted" discipline, and
+ *  {@link deriveThreadId}'s own doc in inbox-thread.ts, which this id is built on top of). */
+export function understoodRequestProposalId(threadId: string): string {
+  return `thread:${threadId}`;
+}
+
+/**
+ * Mint the {@link Proposal} an understood thread hands to the EXISTING tiering — the ONLY thing
+ * this function does. Returns `undefined` when `interpretation.status !== "understood"`: a
+ * thread that still has an unresolved clarification (`"clarifying"`) or has exhausted its rounds
+ * (`"exhausted"`) emits nothing (acceptance: "a thread with an unanswered clarification emits
+ * nothing and runs nothing"). The returned value is a plain {@link Proposal} with NO trigger, NO
+ * `conflictsWith`, and empty `evidenceAnchors` — nothing here defers, auto-approves, or
+ * pre-judges it; {@link classifyProposal} decides all of that itself, exactly as it already does
+ * for every hand-authored `P##`, `FD-…`, and `rule-efficacy:…` proposal.
+ */
+export function proposalFromUnderstoodRequest(request: UnderstoodRequest, interpretation: InterpretReplyResult): Proposal | undefined {
+  if (interpretation.status !== "understood") return undefined;
+  return {
+    id: understoodRequestProposalId(request.threadId),
+    summary: `Understood request from thread ${request.threadId}:\n${request.requestText}`,
+    evidenceAnchors: [],
+  };
 }
 
 // ── Board-review referent retirement (W1-T2451) ────────────────────────────────────────────
