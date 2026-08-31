@@ -1,0 +1,59 @@
+- id: W1-T2550
+  title: "THE CHANGED-FILES BLOCK W1-T2535 SHIPPED IS EMITTED NOWHERE — `renderChangedFilesBlock` has no production caller at all, `buildPlanPrBody`'s only two call sites never pass `changedFiles`, and the BUILD lane (where every stale file claim actually originates) does not use the emitter"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 22.00
+  rationale: |
+    (1) MEASURED at origin/main. `git grep -l renderChangedFilesBlock` over tracked source returns
+    exactly two files: `src/lib/plan-pr-emitter.ts` (the definition) and
+    `test/a-changed-files-block-cannot-contradict-its-own-diff.test.ts` (its own suite). Its only
+    in-module consumer is `buildPlanPrBody`, guarded by `if (changedFiles !== undefined)`, and both
+    `buildPlanPrBody` call sites in `src/run-task.ts` are the `rmd approve` plan-RATIFICATION lane,
+    neither of which passes the field. So the block is never emitted, on any lane, today.
+
+    (2) THE LANE THAT NEEDS IT IS NOT EVEN A CALLER. Every changed-file claim refused this session
+    was on a WORKER-authored build PR, and the build lane does not author its body through
+    `buildPlanPrBody` at all. W1-T2535's own framing — a derivable claim should be EMITTED, not
+    written — is right, and the derivation reaches no writer.
+
+    (3) THE COST IS MEASURED AND RECURRING. A hand-written count goes stale the moment any gate
+    adds a file to the diff, which is routine: `source-size-ratchet` instructs the author to record
+    a growth, that recording adds a path, and the body's count is then false. That exact sequence
+    invalidated #3419's claim tonight; it is also why the ratchet's own remedy text ends with a
+    warning to re-derive the claim by hand.
+
+    (4) DERIVED, NOT ASSERTED — AND STANDING RULE 15 IS THE BOUND. Emitting a file list derived
+    from `git diff --name-only` restates observed state; it must never author, weaken or edit an
+    acceptance CLAIM, which is `criterionFieldTampered`'s territory. `changedFilesBlockDrift`
+    (W1-T2535) already exists to detect a block that disagrees with the diff, and is the natural
+    check for a body written before the last commit.
+
+    (5) OUT OF SCOPE, NAMED. (a) Removing the free-text claim shorthands — a body may still say
+    what it likes, and `bodyContradictsDiff` still judges it. (b) The detector's quotation arms
+    (W1-T2549). (c) Repairing a body after the fact (W1-T2272, W1-T2541).
+  acceptance:
+    - claim: "the changed-files block is emitted on the lane that authors a build PR body, not only defined"
+      proof: "unit test: test/the-changed-files-block-has-no-production-caller.test.ts"
+    - claim: "the plan-ratification call sites pass the file list they already hold"
+      proof: "unit test: test/the-changed-files-block-has-no-production-caller.test.ts"
+    - claim: "the emitted list is derived from the diff, never authored, so Rule 15's boundary is not crossed"
+      proof: "unit test: test/the-changed-files-block-has-no-production-caller.test.ts"
+    - claim: "a body whose block disagrees with its diff is detected rather than silently shipped"
+      proof: "unit test: test/the-changed-files-block-has-no-production-caller.test.ts"
+    - claim: "a caller that passes no file list still produces a byte-identical body, so nothing existing changes shape"
+      proof: "unit test: test/the-changed-files-block-has-no-production-caller.test.ts"
+  risk: medium
+  origin: retro-followup
+  plan_refs: ["W1-T2535", "W1-T2534", "W1-T307", "W1-T1254"]
+  files: [src/run-task.ts, test/the-changed-files-block-has-no-production-caller.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    The emitter and its drift detector are already built and tested (W1-T2535,
+    src/lib/plan-pr-emitter.ts); this task is the wiring only, which is why `files:` names the
+    caller rather than the emitter. `lint-plan`'s `call-site` check exists for precisely the
+    condition W1-T2535 shipped in — a module reached only by its own tests — and did not catch it
+    because the emitter IS reached, by a function whose own callers never pass the field.

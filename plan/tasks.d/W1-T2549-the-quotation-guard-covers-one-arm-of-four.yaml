@@ -1,0 +1,59 @@
+- id: W1-T2549
+  title: "THE INLINE-QUOTATION GUARD COVERS ONE OF bodyContradictsDiff's FOUR ARMS, SO A BODY THAT QUOTES THE TRAP IT DOCUMENTS IS STILL REFUSED — six PR bodies in one session, three of them on PRs whose entire subject is this detector"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 18.00
+  rationale: |
+    (1) THE ASYMMETRY. W1-T308 established that quotation is not assertion, for BLOCK-level
+    quotation — `stripQuotedRegions` blanks fenced blocks and blockquote lines. W1-T2534 extended
+    that to inline spans for ONE arm, the count arm, via `isInsideInlineQuote` called first in
+    `claimsChangesetContext`. The label arm (`shorthandIsAboutChangeset`), the copular arm
+    (`SELF_REFERENTIAL_CLAIM_RE`) and the attributive arm (`SHORTHAND_HEAD_NOUN_RE`) have no such
+    guard, so an inline-quoted scope label is still read as this body's own claim.
+
+    (2) MEASURED, ONE OPERATOR SESSION, 2026-08-31. Six bodies were refused for quoting a phrase
+    they were documenting. Three of the six were the PR fixing that very detector: #3422's first
+    body (count arm), #3422's second body (LABEL arm, after the count arm was fixed), and #3421,
+    whose measurement table reproduced eight literal trigger strings. The author who measured the
+    trap, documented it and wrote its remedy walked into it three times. That is the evidence that
+    a better warning does not close the class.
+
+    (3) THE WORKAROUND THAT WORKS TODAY IS THE PROOF OF THE GAP. #3421's table was made to pass by
+    moving it into a FENCED block — the block-level escape hatch W1-T308 built. The literals are
+    byte-identical; only the wrapper changed. An inline span is the same act of quotation and gets
+    the opposite treatment, which is the inconsistency this task removes.
+
+    (4) THE FLOOR MUST NOT MOVE, AND THAT IS TESTABLE. A genuine unquoted claim in any of the four
+    arms must still be refused, and W1-T395's invariant (quoting a claim must not change the
+    verdict) is what this task is completing rather than breaching: W1-T395 pinned that a quoted
+    claim behaves like an unquoted one; today it behaves like one in three arms and not in the
+    fourth, which is a difference W1-T395 never sanctioned.
+
+    (5) OUT OF SCOPE, NAMED. (a) Block-level handling (W1-T308), untouched. (b) The count arm
+    (W1-T2534). (c) The denial arms (W1-T2533) — a denied claim and a quoted one are different
+    questions and each needs its own answer. (d) Emitting the changed-file list instead of writing
+    it by hand (W1-T2535 and its unwired-caller follow-up).
+  acceptance:
+    - claim: "an inline-quoted scope label is not read as this body's own claim"
+      proof: "unit test: test/the-quotation-guard-covers-one-arm-of-four.test.ts"
+    - claim: "the same guard applies to the copular and attributive arms, so the four arms agree"
+      proof: "unit test: test/the-quotation-guard-covers-one-arm-of-four.test.ts"
+    - claim: "an unquoted claim is still refused in every arm, so the floor is unmoved"
+      proof: "unit test: test/the-quotation-guard-covers-one-arm-of-four.test.ts"
+    - claim: "the guard is one predicate shared by every arm rather than a copy per arm"
+      proof: "unit test: test/the-quotation-guard-covers-one-arm-of-four.test.ts"
+    - claim: "the verbatim body that was refused for quoting the label form is a fixture and passes"
+      proof: "unit test: test/the-quotation-guard-covers-one-arm-of-four.test.ts"
+  risk: medium
+  origin: incident
+  plan_refs: ["W1-T308", "W1-T395", "W1-T2533", "W1-T2534"]
+  files: [src/lib/review.ts, test/the-quotation-guard-covers-one-arm-of-four.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    `isInsideInlineQuote` already exists (W1-T2534, src/lib/review.ts) and is called from one arm.
+    This task hoists that call rather than reimplementing it — a second copy is exactly how the
+    arms drifted apart in the first place.
