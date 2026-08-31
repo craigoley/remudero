@@ -237,6 +237,21 @@ function main(argv) {
         `rule (W1-T2526), because a size ledger records how long a file is and grades no falsifier. ` +
         `Re-run this script afterwards; it must print "OK".`,
     );
+    // AND THE PR BODY GOES STALE THE MOMENT YOU DO IT (W1-T2532, round 2). `bodyContradictsDiff`
+    // (src/lib/review.ts) OPENS THE DIFF and FAILS the PR when the body's own file claim no longer
+    // matches it -- so adding the line above turns a body that said "exactly 4 files" into a
+    // refusal, from a DIFFERENT gate, with a message that never mentions this one. MEASURED
+    // 2026-08-31: three PRs (#3365, #3373, #3378) landed on that refusal within one sweep, the
+    // extra file being scripts/source-size-baseline.json in every case; #3365's fix worker then
+    // read this text, recorded the ceiling AND corrected its own file count, which is the whole
+    // reason this sentence exists.
+    console.error(
+      `  THEN UPDATE THE PR BODY: adding that line changes the diff, so any "exactly N files" or ` +
+        `"plan-only" claim in the body is now false and \`bodyContradictsDiff\` will fail the PR for ` +
+        `it. Re-derive the claim from \`git diff --name-only origin/main...HEAD\` before pushing. A ` +
+        `NEGATED claim is not safe either: "Plan-only: no." reads to that detector as a plan-only ` +
+        `claim, because it matches the label-with-a-colon shape and the negation is not parsed.`,
+    );
     return 1;
   }
 

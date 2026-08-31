@@ -205,6 +205,40 @@ export const DEFAULT_SWEEP_RETRIGGER_INTERVAL_MS = 20 * 60_000;
 export const DAEMON_EXIT_STALE = 75;
 
 /**
+ * W1-T2537 — THE `blocked` EXIT CODE, THE OTHER HALF OF W1-T490.
+ *
+ * W1-T490 separated `stale` from 1 because docker's `--restart=on-failure:N` counts every
+ * non-zero exit against N and cannot read the value, so a ROUTINE outcome spent the same finite
+ * budget as a crash. It then wrote that "`blocked` and `error` keep 1 precisely so that a crash
+ * remains countable" — and that is where this defect lived. `error` IS a crash and keeps 1.
+ * `blocked` is the daemon COMPLETING a drain pass and reporting that a task is blocked.
+ *
+ * MEASURED 2026-08-30: a pass dispatched three tasks, opened three PRs and posted five review
+ * verdicts, then exited 1 because one of them ended `blocked_ci`. The container sat
+ * `Exited (1)` for 46+ minutes with nothing draining the board. The loop is self-sustaining: a
+ * red board is exactly what PRODUCES blocked passes, so the restart budget is spent fastest
+ * precisely when the fleet is most needed, and once spent nothing drains — which keeps the board
+ * red. On a green board `blocked` is rare and none of this is visible.
+ *
+ * THE FREQUENCY ARGUMENT RUNS THE OTHER WAY FROM W1-T490's. Freshness restarts were one per
+ * merge (14 in 24 hours) and that was already enough to exhaust `on-failure:5` in half a day.
+ * A blocked pass is one per PASS on a red board.
+ *
+ * AS WITH `stale`, THIS FUNCTION ONLY MAKES THE CASE DISTINGUISHABLE; the accounting is
+ * `deploy/entrypoint.sh`'s. And as with `stale`, this is strictly a refinement WITHIN non-zero:
+ * launchd's `KeepAlive{SuccessfulExit:false}` and a bare `--restart=on-failure` with no
+ * entrypoint support both still restart exactly as they did. An entrypoint that predates this
+ * constant — the BAKED half of the split, inert until an image rebuild — sees an unrecognised
+ * non-zero code and falls through to the same sleep-and-exit it uses today, so merging this
+ * ahead of the rebuild changes nothing rather than regressing anything.
+ *
+ * THE DAEMON'S STOP-ON-BLOCK DOCTRINE IS UNTOUCHED. `runDrainLanes`' stop-on-block-at-pass-
+ * granularity is deliberate and stays; only how that halt is classified at the process boundary
+ * changes, which is the one thing a supervisor can see.
+ */
+export const DAEMON_EXIT_BLOCKED = 76;
+
+/**
  * The pure stop-reason → process-exit-code mapping (operator ruling,
  * 2026-07-21: "VERIFY from source how DaemonStopReason reaches the process
  * exit today... the deliverable is the pure stop-reason-to-exit-code
@@ -260,6 +294,10 @@ export const DAEMON_EXIT_STALE = 75;
 export function daemonExitCode(stopReason: DaemonStopReason): number {
   if (stopReason === "stopped" || stopReason === "max_reached") return 0;
   if (stopReason === "stale") return DAEMON_EXIT_STALE;
+  // W1-T2537: `blocked` is a COMPLETED pass reporting news, not a crash — see
+  // {@link DAEMON_EXIT_BLOCKED}. `error` deliberately falls through to 1 below, so a genuine
+  // crash stays countable against docker's on-failure budget exactly as it always was.
+  if (stopReason === "blocked") return DAEMON_EXIT_BLOCKED;
   return 1;
 }
 
