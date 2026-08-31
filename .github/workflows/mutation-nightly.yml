@@ -134,22 +134,48 @@ jobs:
             --plan-dir .stryker-plan \
             --report-dir reports/mutation/nightly 2>&1 | tee -a nightly-failure.log
       # One `npx stryker run` per mutated file, each with its own command. A file that errors does
-      # NOT abort the loop -- the remaining files still produce reports, and the failure is carried
-      # to the end and re-raised, so one bad file cannot silently shrink the night into a smaller
-      # (and passing) measurement. Every run tees into the same log the failure issue carries.
+      # NOT abort the loop -- the remaining files still produce reports.
+      #
+      # W1-T2514: the failure is carried but deliberately NOT re-raised at this STEP boundary
+      # (`continue-on-error: true`). A step-boundary `exit 1` here would leave the `ratchet` step
+      # below `skipped` by its default `if: success()` -- confirmed verbatim on runs #26 and #31
+      # (`stryker=failure ratchet=skipped`), which means the one night an errored config makes the
+      # measurement matter most is exactly the night nothing judges the files that DID complete.
+      # `continue-on-error` overrides this step's `conclusion` to `success` (so `ratchet` still
+      # runs) while leaving its real `outcome` as `failure` -- the "Fail the workflow" step after
+      # `ratchet` reads that `outcome` and turns the job red once `ratchet` has had its turn. The
+      # polarity from the old comment survives unchanged: one bad file still cannot silently shrink
+      # the night into a smaller, passing measurement -- it now ALSO cannot silently skip judging
+      # the files that did complete. Every run tees into the same log the failure issue carries, and
+      # each failing config's identity is captured into `failed_configs` (previously printed to the
+      # log and then thrown away -- the diagnostic below named only the STEP, never the config).
       - name: Stryker mutation runs (one per file -- see the `plan` step above)
         id: stryker
+        continue-on-error: true
         run: |
           set -o pipefail
           rc=0
+          failed=""
           for cfg in ${{ steps.plan.outputs.configs }}; do
             echo "=== stryker run $cfg ===" | tee -a nightly-failure.log
-            npx stryker run "$cfg" 2>&1 | tee -a nightly-failure.log || rc=1
+            if ! npx stryker run "$cfg" 2>&1 | tee -a nightly-failure.log; then
+              rc=1
+              failed="$failed $cfg"
+            fi
           done
+          failed="${failed# }"
+          if [ -n "$failed" ]; then
+            echo "=== failed configs: $failed ===" | tee -a nightly-failure.log
+          fi
+          echo "failed_configs=$failed" >> "$GITHUB_OUTPUT"
           exit "$rc"
       # `--report-dir` merges the per-file reports as a disjoint union; `--mutate-scope` carries the
       # files the plan actually INCLUDED, so the run-validity guard judges what was really run
       # rather than failing on files the plan already declined to measure and named.
+      #
+      # No `if:` needed -- the default `if: success()` now reads TRUE even when `stryker` errored,
+      # because `continue-on-error: true` above overrides that step's `conclusion`, not its
+      # `outcome`. This is the fix's whole point: the files that DID complete get judged.
       - name: Nightly mutation ratchet (blocks LOUDLY on a vacuous or invalid run, a below-baseline sample, or a missing/broken report)
         id: ratchet
         run: |
@@ -158,6 +184,21 @@ jobs:
             --report-dir reports/mutation/nightly \
             --baseline scripts/mutation-baseline.json \
             --mutate-scope "${{ steps.plan.outputs.mutate }}" 2>&1 | tee -a nightly-failure.log
+
+      # W1-T2514: `ratchet` above runs regardless of `stryker`'s real outcome (that is the fix), so
+      # something after it has to turn a swallowed `stryker` failure back into a real job failure --
+      # otherwise `continue-on-error` would silently launder "a config errored" into a green run,
+      # which is exactly the degrade-LOUDLY polarity (W1-T130) this task is barred from relaxing.
+      # `always()` so this still runs (and still fails the job) even when `ratchet` itself also
+      # failed or got skipped because an earlier real failure (install/plan) already reddened the
+      # job -- this step's only job is to never let a `stryker` failure go unreported, never to
+      # swallow one itself.
+      - name: Fail the workflow if any nightly Stryker config errored (ratchet already had its turn)
+        id: stryker-guard
+        if: always() && steps.stryker.outcome == 'failure'
+        run: |
+          echo "::error::nightly Stryker run(s) failed for:${{ steps.stryker.outputs.failed_configs }}"
+          exit 1
 
       # Delivery. `if: failure()` so a green night stays silent -- a notifier that also fires on
       # success is one the reader learns to filter, which is the same gap again.
@@ -170,9 +211,12 @@ jobs:
         run: |
           set -euo pipefail
           # An earlier step (checkout/install/scope) can fail before the log exists; name the
-          # failing step explicitly so the issue is actionable even with no captured output.
+          # failing step explicitly so the issue is actionable even with no captured output. W1-
+          # T2514: this line now also names WHICH config(s) errored (stryker_failed_configs),
+          # rather than only the step-level `stryker=failure` two issues shipped with neither
+          # answering.
           {
-            echo "failing step: install=${{ steps.install.outcome }} scope=${{ steps.scope.outcome }} stryker=${{ steps.stryker.outcome }} ratchet=${{ steps.ratchet.outcome }}"
+            echo "failing step: install=${{ steps.install.outcome }} scope=${{ steps.scope.outcome }} stryker=${{ steps.stryker.outcome }} ratchet=${{ steps.ratchet.outcome }} stryker_failed_configs=${{ steps.stryker.outputs.failed_configs }}"
             echo
           } > nightly-notify.log
           cat nightly-failure.log >> nightly-notify.log 2>/dev/null || echo "(no output captured -- the run failed before the mutation steps)" >> nightly-notify.log
