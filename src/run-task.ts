@@ -31568,12 +31568,15 @@ async function traceCommand(rest: string[]): Promise<number> {
 // other. bin/rmd's header comment is documentation for humans reading the script; this
 // array is what the running binary actually prints and dispatches against.
 /**
- * Caps `summary` below (W1-T2480) — long enough for a genuinely useful one-liner, short enough
- * that 63 of them printed together (`rmd --help`) stay a skimmable list rather than the
+ * PRIMARY CONTROL (W1-T1266's declared-kind convention): the ONLY thing keeping `summary` below
+ * short — there is no runtime truncation behind it, so this cap binding is what actually stops a
+ * summary from growing back into a paragraph, not a backstop behind some other check. Caps
+ * `summary` below (W1-T2480) — long enough for a genuinely useful one-liner, short enough that
+ * 63 of them printed together (`rmd --help`) stay a skimmable list rather than the
  * 41111-character wall of unwrapped prose it used to be. Enforced by
- * test/help-renders-a-summary-not-a-paragraph.test.ts, not by a runtime truncation: an over-cap
- * summary is an authoring mistake to catch in review, and silently truncating one would be the
- * exact "quietly drops prose" regression that task guards against.
+ * test/help-renders-a-summary-not-a-paragraph.test.ts: an over-cap summary is an authoring
+ * mistake to catch in review, and silently truncating one at render time would be the exact
+ * "quietly drops prose" regression that task guards against.
  */
 export const SUMMARY_CHAR_CAP = 100;
 
@@ -31712,12 +31715,7 @@ const COMMANDS: readonly CommandSpec[] = [
     summary: "Report what the reviewer's own parser actually resolves from a PR body file.",
     detail: "read a PR body from a file and report what the REVIEWER'S OWN parseAcceptanceBlock actually resolves from it, against what was written: header found, bullets written, criteria parsed, empty proofs. Exits non-zero when they disagree. A claim WRAPPED onto a second line silently truncates the block (any indented line that is not `proof:` ends it), and a `## Validation` heading is not an Acceptance header — both ship a body that says less than its author wrote. Run this before opening a PR over REST, which bypasses the orchestrator's house-block emitter. READ-ONLY: writes no ledger line, no state file",
   },
-  {
-    name: "retro",
-    syntax: "rmd retro [--dry-run]",
-    summary: "Sync the plan from the ledger (Architect retro).",
-    detail: "sync the plan from the ledger (Architect retro)",
-  },
+  { name: "retro", syntax: "rmd retro [--dry-run]", summary: "Sync the plan from the ledger (Architect retro).", detail: "sync the plan from the ledger (Architect retro)" },
   {
     name: "drain",
     syntax: "rmd drain [--until <id>] [--max <n>] [--repo <name>] [--curated <path>] [--dry-run] [--allow-stale]",
@@ -31844,12 +31842,7 @@ const COMMANDS: readonly CommandSpec[] = [
     summary: "Fleet control: persistent drain-and-hold until `rmd resume`.",
     detail: "fleet control: PERSISTENT drain-and-hold — in-flight completes, no new spawns; survives across runs until `rmd resume`.",
   },
-  {
-    name: "resume",
-    syntax: "rmd resume",
-    summary: "Fleet control: clear PAUSE (and any STOP); spawns resume.",
-    detail: "fleet control: clear PAUSE (and any STOP); spawns resume",
-  },
+  { name: "resume", syntax: "rmd resume", summary: "Fleet control: clear PAUSE (and any STOP); spawns resume.", detail: "fleet control: clear PAUSE (and any STOP); spawns resume" },
   {
     name: "away",
     syntax: "rmd away [on|off]",
@@ -31868,12 +31861,7 @@ const COMMANDS: readonly CommandSpec[] = [
     summary: "Open a needs-human GitHub issue; MANUAL/HARD_STOP also fire a real-time ping.",
     detail: "open a needs-human labeled GitHub issue; MANUAL/HARD_STOP also fire a real-time iMessage ping (BLOCKED collapses to digest)",
   },
-  {
-    name: "notify",
-    syntax: "rmd notify <message>",
-    summary: "Real-time iMessage ping (osascript).",
-    detail: "real-time iMessage ping (osascript)",
-  },
+  { name: "notify", syntax: "rmd notify <message>", summary: "Real-time iMessage ping (osascript).", detail: "real-time iMessage ping (osascript)" },
   {
     name: "digest",
     syntax: "rmd digest [--since <iso>] [--dry-run]",
