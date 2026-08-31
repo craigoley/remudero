@@ -1,6 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import {
+  RUN_BRANCH_RE,
   diagnoseBodyDefects,
   refusesToAuthorAClaim,
   renderBodyDefects,
@@ -126,4 +127,24 @@ test("W1-T2541 criterion 6: the diagnosis reaches the escalation an operator rea
   const noRef = deriveDisposition({ ...pr, headRefName: "chore/hand-named" } as OpenPrView, DEFAULT_SWEEP_POLICY, Date.now());
   assert.doesNotMatch(noRef.reason, /derived repair/);
   assert.match(noRef.reason, /criteria unrecoverable/, "the pre-existing reason is unchanged beneath the addition");
+});
+
+// W1-T2541: the branch-shape regex gets its own two-arm fixture. Every repair this module proposes
+// must be DERIVABLE FROM OBSERVED STATE, and for the trailer defect the entire derivation is this
+// pattern — so its refusing arm is as load-bearing as its accepting one: a head ref that does not
+// name a task must yield NO addition rather than a guess. `taskIdFromHeadRef` above exercises it
+// only through the extraction; naming it here pins the shape itself, which is also what
+// `negative-reachability-ratchet` requires of a module-scope `_RE` validator entering the tree.
+
+test("W1-T2541: RUN_BRANCH_RE accepts the fleet's own head shape and refuses every other branch", () => {
+  // The accepting arm — the shape `projectPlan` attributes an open PR by.
+  assert.equal(RUN_BRANCH_RE.test("run-W1-T2480-1788150533485"), true);
+  assert.equal(RUN_BRANCH_RE.exec("run-W1-T2480-1788150533485")?.[1], "W1-T2480");
+  // The refusing arm. A hand-authored branch names no task, and the trailing digits are REQUIRED —
+  // without them there is no epoch suffix and the capture would swallow the id's own tail.
+  assert.equal(RUN_BRANCH_RE.test("fix/acceptance-block"), false);
+  assert.equal(RUN_BRANCH_RE.test("claude/remudero-codebase-review-jswd3f"), false);
+  assert.equal(RUN_BRANCH_RE.test("plan-2539-2543"), false);
+  assert.equal(RUN_BRANCH_RE.test("run-W1-T2480"), false, "no epoch suffix is not this shape");
+  assert.equal(RUN_BRANCH_RE.exec("main"), null);
 });

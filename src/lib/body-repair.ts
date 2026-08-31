@@ -33,7 +33,7 @@
  */
 
 /** The run-branch shape `projectPlan` attributes an open PR by (`status.ts`'s own regex). */
-const RUN_BRANCH_RE = /^run-(.+)-\d+$/;
+export const RUN_BRANCH_RE = /^run-(.+)-\d+$/;
 
 /** A `Remudero-Task:` trailer line, anchored exactly as the trailer-scan discipline requires. */
 const TRAILER_RE = /(?:^|\n)Remudero-Task:[ \t]*(\S+)[ \t]*(?:\r?\n|$)/;
