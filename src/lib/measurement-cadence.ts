@@ -1214,6 +1214,13 @@ export function buildMeasurementCadenceRow(result: MeasurementCadenceRunResult):
     }
     return row;
   } catch (e) {
+    // NOT erased: the failure IS the return shape here — `row_build_failed` carries the message
+    // into the ledger row, so a row that could not be derived is distinguishable from one that
+    // derived to nothing. The catch-erasure detector's DISTINCTION_KEY_RE looks for `\bfailed:`
+    // and cannot see it behind the underscore in `row_build_failed`, so the reason is stated here
+    // rather than renaming a shipped ledger key to satisfy a regex. Deliberately does not rethrow:
+    // this row is telemetry about a cadence run, and failing to build it must never take the run
+    // itself down.
     return { row_build_failed: String((e as Error)?.message ?? e) };
   }
 }
