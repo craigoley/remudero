@@ -1,0 +1,85 @@
+- id: W1-T2541
+  title: "EVERY FIX RUNG REMEDY IS 'PUSH A COMMIT', SO A PR BLOCKED BY ITS OWN BODY IS UNREACHABLE BY AUTOMATION — a missing Remudero-Task: trailer, a grep proof wrapped in literal quotes, a proof with no dialect prefix and a stale file claim are all mechanically diagnosable by tooling this repo already ships, and nothing acts on any of them"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: |
+    MEASURED over one operator session, 2026-08-31, in which SIX pull requests were repaired BY
+    HAND. Five of the six were blocked by their own PR BODY, not by their code, and every one of
+    the five was diagnosable by a verb this repo already ships.
+
+    (1) THE FIVE, WITH THEIR ACTUAL CAUSES.
+        #3356  six `grep:` proofs each wrapped in literal double quotes. `execWhitelistedProof`
+               runs `grep -arn --` with no `-F`, so the quotes had to appear in the file. Measured:
+               every quoted pattern read 0, every unquoted one read 1. Two further criteria used a
+               `demonstration:` prefix, which is not a dialect and never executes.
+        #3363  no `Remudero-Task:` trailer at all, so `resolvePlanCriteriaAtHead` was never
+               consulted, `criteriaRecoverable` was false, and the verdict read "no acceptance
+               criteria to judge (fail closed)" while nine criteria sat in the task's own shard.
+        #3400  no trailer (author error), criteria resolved from the body instead of the plan, and
+        #3403  `automerge.ledger_refused` then withheld the arm because the ledgered verdict
+               carried no task.
+        #3388  a body claim contradicted its own diff.
+    ALL FIVE ARE DETERMINISTIC. `rmd check-acceptance` already reports whether a block parses and
+    which criteria resolved; `rmd check-proof` already reports `parse:`/`hits:`/`verdict:` per
+    proof; `git diff --name-only origin/main...HEAD` already answers the file-claim question;
+    a trailer is present or it is not.
+
+    (2) THE STRUCTURAL GAP. `FIX_MODE_RULES` has three modes — merge-conflict, ci-log, review — and
+    every one of them ends in "push a commit". There is no rung whose remedy is EDIT THE PR BODY,
+    so this entire class routes to `blocked-ambiguous` and waits for a human. The sweep's diagnosis
+    is already correct and already rendered; only the hand is missing.
+
+    (3) WHAT MAKES THIS SAFE TO AUTOMATE, AND WHERE THE LINE IS. A body edit cannot change what the
+    diff does. The gate still judges the code: a repaired body earns a fresh review on a NEW HEAD
+    (a posted verdict is never re-judged on the same sha), and every proof still has to execute.
+    So the worst case of a wrong repair is the same refusal the PR already carries. THE LINE:
+    this rung must only ever make repairs that are DERIVABLE FROM OBSERVED STATE — a trailer from
+    the run branch's own name, a quote strip, a dialect prefix a proof already implies, a file list
+    from the diff. It must NEVER author a claim, weaken one, or choose which criteria a PR is
+    judged against. Rule 15's `criterionFieldTampered` already refuses a non-plan-only diff that
+    edits `claim:`/`proof:`, and that refusal must keep applying to whatever this rung writes.
+
+    (4) THE STRONGEST EVIDENCE IS THAT THE AUTHOR COULD NOT AVOID IT EITHER. Three PR bodies in
+    this one session were refused for quoting a scope shorthand inside a sentence that also
+    mentioned the changeset — including the body of the PR whose entire subject is that trap. The
+    person who measured it, documented it and wrote its remedy still walked into it three times.
+    A better warning reduces the rate; it does not close the class.
+
+    (5) OUT OF SCOPE, NAMED. (a) The detector-side questions — W1-T2533/W1-T2534/W1-T2535 already
+    carry those and are unbuilt. (b) Any repair that authors or edits a CLAIM. (c) The stale-verdict
+    problem (a body fixed after its verdict is posted needs a new head) — that is W1-T2542, and it
+    is what makes this rung's repairs actually take effect.
+  acceptance:
+    - claim: "a PR whose body carries no task trailer is diagnosed as body-repairable rather than routed to blocked-ambiguous"
+      proof: "unit test: test/a-broken-body-is-repairable-not-ambiguous.test.ts"
+    - claim: "the diagnosis names the specific defect and its derived repair, never a generic failure"
+      proof: "unit test: test/a-broken-body-is-repairable-not-ambiguous.test.ts"
+    - claim: "a grep proof wrapped in literal quotes is identified by executing it, not by pattern-matching the body text"
+      proof: "unit test: test/a-broken-body-is-repairable-not-ambiguous.test.ts"
+    - claim: "a repair that would author or alter a claim is refused, so Rule 15's guard is never routed around"
+      proof: "unit test: test/a-broken-body-is-repairable-not-ambiguous.test.ts"
+    - claim: "a body with no derivable defect yields no repair, so the rung stays silent rather than editing on speculation"
+      proof: "unit test: test/a-broken-body-is-repairable-not-ambiguous.test.ts"
+    - claim: "the diagnosis reaches the escalation an operator actually reads, rather than sitting in a module only its own tests import"
+      proof: "grep: diagnoseBodyDefects( in src/lib/sweep.ts"
+  risk: high
+  band_meaning: blast-radius
+  origin: incident
+  plan_refs: ["W1-T76", "W1-T94", "W1-T230", "W1-T453", "W1-T2542"]
+  files: [src/lib/body-repair.ts, src/lib/sweep.ts, test/a-broken-body-is-repairable-not-ambiguous.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    risk:high, band_meaning: blast-radius — a rung that edits pull request bodies automatically is
+    dangerous in a way its span does not show. The span is deliberately ONE new pure module plus
+    its suite: this task builds the DIAGNOSER and its refusals only. Wiring it into
+    `FIX_MODE_RULES` and giving it a hand that actually writes is a separate, later task, so the
+    dangerous half is reviewed on its own with the safe half already proven.
+
+    A NEW FILE rather than an addition to `src/lib/review.ts`: that module is already the largest
+    instrument surface in the repo and is entangled with Rule 25's isolation rule. A pure module
+    with no writer keeps this reviewable and keeps the refusals testable without a network.

@@ -1,0 +1,69 @@
+- id: W1-T2543
+  title: "THE RUBRIC'S one-concern ARM COUNTS A SOURCE FILE AND ITS OWN TEST AS TWO CONCERNS, WHICH ON THIS REPO IS SIX WELL-FORMED PRs IN SEVEN — 747 of 865 suites are named after the claim they prove rather than the module they cover, and that naming IS the house convention"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 16.00
+  rationale: |
+    (1) MEASURED on origin/main, 2026-08-31:
+        test files                                        865
+        basename matching no src/ module name             747  (86.3%)
+    Naming a suite after the claim it proves — `a-source-file-cannot-outgrow-its-baseline`,
+    `the-reviewer-reads-a-sha-it-has-not-fetched`, `a-blocked-task-must-name-its-disposition` —
+    is the documented house style, not an accident. `moduleIdFromPath` derives a concern id from a
+    basename, so a change to `src/lib/X.ts` plus its dedicated suite scores TWO concerns roughly
+    six times in seven.
+
+    (2) OBSERVED IMPACT. The advisory rubric fired `one-concern: PR spans 2 concerns` on both
+    #3400 (sweep, sweep-conflicted-disposition) and #3403 (daemon, entrypoint-boot) within one
+    hour, on PRs whose code footprint was a file and the suite that exists to test it. An advisory
+    arm that fires on nearly every well-formed PR trains its readers to skim past it, which is
+    where a REAL finding gets lost. That is the cost being paid, and it is a cost to the rubric's
+    other arms, not to these PRs.
+
+    (3) THE FIX MIRRORS ONE THAT ALREADY EXISTS. `subsystemsOf` (src/lib/task-linter.ts) already
+    DISCOUNTS a class of paths from the concern tally: `DATA_ARTIFACT_CLASSES` removes
+    `plan/`, `config/` and `settings/` data so "a code file paired with its OWN data artifact must
+    not count as a SECOND subsystem just because the artifact has a different basename" — that
+    comment describes this defect exactly, one path class earlier. A `test/` path DECLARED IN THE
+    TASK'S OWN `files:` is the same relationship and earns the same discount.
+
+    (4) THE DISCOUNT IS NARROW ON PURPOSE. Only a `test/` path the task itself declares beside the
+    source it covers. A PR that genuinely spans two subsystems still scores two, because both
+    SOURCE stems remain. An undeclared test file is untouched. This removes a false positive; it
+    does not weaken Rule 19's span measure, and a task that really is too wide still reports.
+
+    (4b) THIS SHARD WAS ITSELF REFUSED BY THE DEFECT IT DESCRIBES, WHICH IS THE CLEANEST
+    AVAILABLE EVIDENCE. Filed at risk:medium, `lint-plan` blocked it: "[sizing] spans 2 distinct
+    subsystems/concerns (a-suite-is-not-a-second-concern, task-linter) at risk:medium". Those two
+    are the linter and the suite written to test this very change. The task had to be raised to
+    risk:high with band_meaning: span to be fileable at all — which is precisely the tax this
+    defect levies on every well-formed task in the plan.
+
+    (5) OUT OF SCOPE, NAMED. (a) The rubric's other arms, docs-awareness included — its
+    `scripts/*-baseline.json` false positive is real and separate. (b) `sizingViolation`'s
+    block/warn severities and the `band_meaning` contract (W1-T2503), untouched. (c) Renaming any
+    existing suite: the convention is fine, the counter is what is wrong.
+  acceptance:
+    - claim: "a source file plus a test file declared in the same task's files: scores one concern, not two"
+      proof: "unit test: test/a-suite-is-not-a-second-concern.test.ts"
+    - claim: "a task genuinely spanning two source subsystems still scores two, so Rule 19 is not weakened"
+      proof: "unit test: test/a-suite-is-not-a-second-concern.test.ts"
+    - claim: "a test path the task does not declare is not discounted"
+      proof: "unit test: test/a-suite-is-not-a-second-concern.test.ts"
+    - claim: "the discount is a table row, so a later path class needs no change to the counting function"
+      proof: "unit test: test/a-suite-is-not-a-second-concern.test.ts"
+  risk: high
+  band_meaning: span
+  origin: retro-followup
+  plan_refs: ["W1-T12", "W1-T92", "W1-T2503"]
+  files: [src/lib/task-linter.ts, test/a-suite-is-not-a-second-concern.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    `files:` is the counter and a new suite for it. `subsystemsOf`, `moduleIdFromPath` and
+    `DATA_ARTIFACT_CLASSES` are all in `src/lib/task-linter.ts`; the discount belongs beside the
+    table it mirrors. A new suite rather than an addition to the linter's existing tests, so the
+    86.3% measurement above is pinned as a falsifier in its own file.
