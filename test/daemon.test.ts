@@ -11,6 +11,7 @@ import { HEADROOM_LIMIT_PCT, type UsageSnapshot } from "../src/lib/headroom.js";
 import {
   DEFAULT_MAX_SPAWN_INFRA_BACKOFF_MS,
   DEFAULT_POLL_INTERVAL_MS,
+  DAEMON_EXIT_BLOCKED,
   DAEMON_EXIT_STALE,
   DEFAULT_UNREADABLE_DEGRADED_LIMIT,
   buildDefaultHeadroomPolicy,
@@ -1303,9 +1304,38 @@ test("headroom heartbeat: two boots reading the SAME window a minute apart log t
 
 test("daemonExitCode: stopped/max_reached are the ONLY clean (zero) exits", () => {
   const zero: DaemonStopReason[] = ["stopped", "max_reached"];
-  const nonzero: DaemonStopReason[] = ["blocked", "error"];
+  const nonzero: DaemonStopReason[] = ["blocked", "error", "stale"];
   for (const r of zero) assert.equal(daemonExitCode(r), 0, `${r} should exit 0`);
-  for (const r of nonzero) assert.equal(daemonExitCode(r), 1, `${r} should exit nonzero`);
+  // W1-T2537: still ALL non-zero — the polarity is unchanged and launchd's
+  // KeepAlive{SuccessfulExit:false} restarts on every one of them exactly as before. What
+  // changed is only that they are now DISTINGUISHABLE, which is the assertion below.
+  for (const r of nonzero) assert.notEqual(daemonExitCode(r), 0, `${r} should exit nonzero`);
+});
+
+test("W1-T2537: a blocked pass is distinguishable from a crash, because docker charges them the same otherwise", () => {
+  // THE DEFECT. `daemonExitCode` mapped `blocked` and `error` both to 1, and docker's
+  // `--restart=on-failure:N` counts every non-zero exit against N without reading the value
+  // (W1-T490 MEASURED that: `exit 1` and `exit 42` both parked at RestartCount=2 under
+  // `on-failure:2`). So a COMPLETED drain pass that found a task blocked spent the same finite
+  // budget as a crash — and a red board is exactly what produces blocked passes, so the budget
+  // emptied fastest when the fleet was most needed. MEASURED 2026-08-30: 46+ minutes down after a
+  // pass that had dispatched three tasks and opened three PRs.
+  assert.equal(daemonExitCode("blocked"), DAEMON_EXIT_BLOCKED);
+  assert.notEqual(daemonExitCode("blocked"), daemonExitCode("error"), "a blocked pass and a crash must not share a code");
+});
+
+test("W1-T2537: error KEEPS 1, so a genuine crash stays countable against the on-failure budget", () => {
+  // The bound W1-T490 protected is not being removed, only narrowed to what it is for. `error` is
+  // the daemon throwing; it must still reach docker's count on its first attempt.
+  assert.equal(daemonExitCode("error"), 1);
+});
+
+test("W1-T2537: every non-zero stop reason has its OWN code, so the entrypoint can route each one", () => {
+  // The routing is only possible if the codes are pairwise distinct — a shared code silently
+  // re-merges two policies the entrypoint is meant to treat differently.
+  const codes = (["blocked", "error", "stale"] as DaemonStopReason[]).map(daemonExitCode);
+  assert.equal(new Set(codes).size, codes.length, `expected distinct codes, got ${codes.join(", ")}`);
+  assert.equal(codes.filter((c) => c === 0).length, 0, "none of these is a clean exit");
 });
 
 test("daemonExitCode: a genuine crash (stopReason='error') STILL exits nonzero — preserving the KeepAlive restart the kill -9 drill verified", async () => {
@@ -1341,11 +1371,17 @@ test("W1-T490: a freshness stop carries its OWN code, so the entrypoint can tell
 });
 
 test("W1-T490: and a crash is STILL nonzero-and-countable — the freshness carve-out must not swallow it", () => {
-  // The regression this guards: giving `stale` its own code by widening the ZERO set instead of the
-  // nonzero one. `blocked`/`error` staying at 1 is what leaves `on-failure:N` bounding a crash loop.
-  for (const r of ["blocked", "error"] as DaemonStopReason[]) {
-    assert.equal(daemonExitCode(r), 1, `${r} must stay 1 so docker still counts it against the budget`);
-  }
+  // The regression this guards: giving a stop reason its own code by widening the ZERO set instead
+  // of the nonzero one. `error` staying at 1 is what leaves `on-failure:N` bounding a crash loop.
+  //
+  // W1-T2537 MOVED `blocked` OFF 1, AND THAT IS THIS TEST'S CONTRACT CHANGING, NOT ITS GUARANTEE
+  // WEAKENING. What this test exists to protect is that a CRASH stays countable; `blocked` was
+  // never a crash — it is a drain pass that ran to completion and found a task blocked, and
+  // charging it to the crash budget is what left the container down for 46+ minutes on
+  // 2026-08-30. `error` still carries the whole guarantee, and the non-zero assertion below keeps
+  // `blocked` from doing the OTHER damage this test guards against (crossing to zero).
+  assert.equal(daemonExitCode("error"), 1, "error must stay 1 so docker still counts a crash against the budget");
+  assert.notEqual(daemonExitCode("blocked"), 0, "a blocked stop must still RESTART; 0 would leave the container down");
   // AND `stale` MUST NOT HAVE CROSSED TO ZERO. Zero is the one value that stops a restart happening
   // at all — `--restart=on-failure` leaves the container DOWN on a clean exit — so mapping freshness
   // to 0 would trade a spent budget for a dead fleet, which is the worse failure.
@@ -1355,8 +1391,9 @@ test("W1-T490: and a crash is STILL nonzero-and-countable — the freshness carv
   }
 });
 
-test("W1-T490: every DaemonStopReason maps to a real exit code, and the three classes stay distinct", () => {
+test("W1-T490: every DaemonStopReason maps to a real exit code, and the classes stay distinct", () => {
   // EXHAUSTIVE OVER THE UNION, so a sixth member added later cannot silently inherit a class.
+  // W1-T2537: the class count is now four — see the deepEqual below for why each one exists.
   const all: DaemonStopReason[] = ["stopped", "blocked", "max_reached", "error", "stale"];
   for (const r of all) {
     const code = daemonExitCode(r);
@@ -1364,8 +1401,8 @@ test("W1-T490: every DaemonStopReason maps to a real exit code, and the three cl
   }
   assert.deepEqual(
     [...new Set(all.map(daemonExitCode))].sort((a, b) => a - b),
-    [0, 1, DAEMON_EXIT_STALE],
-    "exactly three classes: clean stop, crash, freshness",
+    [0, 1, DAEMON_EXIT_STALE, DAEMON_EXIT_BLOCKED],
+    "exactly FOUR classes: clean stop, crash, freshness, blocked (W1-T2537 split blocked off the crash class)",
   );
 });
 

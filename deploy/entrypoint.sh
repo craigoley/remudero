@@ -573,6 +573,13 @@ log "restart throttle: a NON-ZERO exit will sleep ${RESTART_THROTTLE_S}s before 
 # loadable then. `test/entrypoint-boot.test.ts` greps this file for the constant and fails if the two
 # ever drift, so the duplication is pinned rather than merely commented.
 DAEMON_EXIT_STALE=75
+
+# THE BLOCKED EXIT CODE, DUPLICATED FROM `DAEMON_EXIT_BLOCKED` (src/lib/daemon.ts) ON PURPOSE, for
+# the same reason the line above duplicates its sibling: this script runs before any node process
+# exists, so it cannot import the constant. `test/entrypoint-boot.test.ts` reads BOTH numbers out
+# of this file and asserts they equal the exported constants, so a drift is a red test, not a
+# silent mis-route.
+DAEMON_EXIT_BLOCKED=76
 # ── WHY 100, MEASURED 2026-08-18 (was 20, sized against a merge rate the fleet has outgrown) ──
 # The note above sizes this budget from a freshness restart happening "ONCE PER MERGE (14 rows in
 # 24 hours)". That rate is gone. MEASURED over the eight complete UTC days ending 2026-08-18, via
@@ -617,6 +624,37 @@ case "$FRESHNESS_RESTART_PAUSE_S" in
   '' | *[!0-9]*)
     log "RMD_FRESHNESS_RESTART_PAUSE_S is not a whole number of seconds — ignoring it and using 5"
     FRESHNESS_RESTART_PAUSE_S=5
+    ;;
+esac
+
+# ── W1-T2537: THE BLOCKED RETRY, THE OTHER HALF OF THE FRESHNESS LOOP ────────────────────────
+# A `blocked` stop is a COMPLETED drain pass reporting that a task is blocked — not a crash. It
+# was charged to docker's `on-failure:N` exactly as a crash was, and MEASURED 2026-08-30 that
+# left the container `Exited (1)` for 46+ minutes after a pass that had dispatched three tasks and
+# opened three PRs. The loop is self-sustaining: a red board is what PRODUCES blocked passes, so
+# the budget empties fastest when the fleet is most needed, and once empty nothing drains.
+#
+# NEITHER NUMBER IS PICKED. The cap MIRRORS `FRESHNESS_RESTART_MAX` above — the same worst-case
+# shape already ratified for the sibling path, and the bound is what hands a pathological loop
+# back to docker's count instead of replacing a bound with nothing. The pause is the daemon's OWN
+# `DEFAULT_POLL_INTERVAL_MS` (60s, src/lib/daemon.ts), documented there as "check back once a
+# minute while nothing is runnable" — which is exactly what a blocked board is. Deliberately NOT
+# the 5s freshness pause (a blocked board needs CI wall-clock to change; a stale checkout does
+# not) and NOT the 120s crash throttle (that exists to slow a boot failing the same way, and this
+# is a pass that ran to completion).
+BLOCKED_RESTART_MAX="${RMD_BLOCKED_RESTART_MAX:-100}"
+case "$BLOCKED_RESTART_MAX" in
+  '' | *[!0-9]*)
+    log "RMD_BLOCKED_RESTART_MAX is not a whole number — ignoring it and using 100"
+    BLOCKED_RESTART_MAX=100
+    ;;
+esac
+
+BLOCKED_RESTART_PAUSE_S="${RMD_BLOCKED_RESTART_PAUSE_S:-60}"
+case "$BLOCKED_RESTART_PAUSE_S" in
+  '' | *[!0-9]*)
+    log "RMD_BLOCKED_RESTART_PAUSE_S is not a whole number of seconds — ignoring it and using 60"
+    BLOCKED_RESTART_PAUSE_S=60
     ;;
 esac
 
@@ -669,6 +707,7 @@ trap 'forward_signal INT' INT
 # `wait` below already produced — byte-for-byte the prior behaviour on every path this block does
 # not touch.
 freshness_restarts=0
+blocked_restarts=0
 while :; do
   rc=0
   child_rc=""
@@ -699,12 +738,31 @@ while :; do
     continue
   fi
 
-  # EVERYTHING ELSE EXITS, AND IS COUNTED. A crash (`blocked`/`error` ⇒ 1) reaches here on its first
+  # W1-T2537 — THE SECOND CASE THAT DOES NOT SPEND THE BUDGET, and for the same reason: a
+  # `blocked` stop is a pass that RAN TO COMPLETION and found a task blocked. Re-syncing first is
+  # not decoration — PRs may have merged while that pass ran, so the next pass genuinely has a
+  # different board to work, which is what makes the retry meaningful rather than a re-run of the
+  # same tree. Past the cap it falls through to the crash throttle below, so the bound is
+  # REPLACED, never removed.
+  if [ "$rc" -eq "$DAEMON_EXIT_BLOCKED" ] && [ "$blocked_restarts" -lt "$BLOCKED_RESTART_MAX" ]; then
+    blocked_restarts=$((blocked_restarts + 1))
+    log "exited $rc (blocked) — restart ${blocked_restarts}/${BLOCKED_RESTART_MAX} IN-CONTAINER, so docker's on-failure budget is not spent"
+    log "  a blocked pass is a COMPLETED pass, not a crash; sleeping ${BLOCKED_RESTART_PAUSE_S}s then re-running the fetch/checkout so the next pass sees any merges"
+    sleep "$BLOCKED_RESTART_PAUSE_S"
+    sync_tree
+    log "checkout: $(git -C "$TREE" rev-parse HEAD) ($REF)"
+    continue
+  fi
+
+  # EVERYTHING ELSE EXITS, AND IS COUNTED. A crash (`error` ⇒ 1) reaches here on its first
   # attempt, so `--restart=on-failure:N` bounds a crash loop exactly as it did before this block
   # existed. A freshness storm reaches here only after exhausting the loop above, which is what
   # keeps the in-container path from replacing a bound with nothing.
   if [ "$rc" -eq "$DAEMON_EXIT_STALE" ]; then
     log "exited $rc (freshness) — but ${FRESHNESS_RESTART_MAX} in-container restarts are already spent, so this one goes to docker's count"
+  fi
+  if [ "$rc" -eq "$DAEMON_EXIT_BLOCKED" ]; then
+    log "exited $rc (blocked) — but ${BLOCKED_RESTART_MAX} in-container restarts are already spent, so this one goes to docker's count"
   fi
   log "exited $rc — sleeping ${RESTART_THROTTLE_S}s before exiting so the restart is rate-limited, not just counted"
   sleep "$RESTART_THROTTLE_S"
