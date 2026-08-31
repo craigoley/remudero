@@ -898,6 +898,55 @@ export function runCiParity(repoRoot: string, deps: CiParityDeps = {}): CiParity
  *  literal value `runPreflightFast` compares an actual `Date.now()` delta against on every run. */
 export const FAST_GATE_CENSUS_BOUND_MS = 2000;
 
+/**
+ * W1-T2545 — THE BOUND ABOVE IS NOW THE *SOFT* ONE, AND THE REFUSAL IS RELATIVE.
+ *
+ * WHY THE ABSOLUTE CEILING COULD NOT HOLD. A census entry qualifies for this gate precisely
+ * BECAUSE it walks the tracked `src/` population and asserts over every file in it — so its cost
+ * is a monotonic function of a corpus that only grows. A fixed millisecond ceiling against a
+ * monotonically growing cost is a gate that ejects its own entries over time, and ejection is
+ * silent in the direction that matters: `runPreflightFast` refused the step, so the fast gate
+ * stopped running a census suite CI still enforces — restoring exactly the blindness W1-T2478
+ * existed to close. MEASURED at origin/main 05dcb050, `rmd preflight --fast` on a clean tree:
+ * `negative-reachability-census: BOUND EXCEEDED — took 2509ms`, own result "would have PASSed",
+ * with the whole gate reporting FAIL. On GitHub runners the same entry measured 2268ms and
+ * 2250ms while main's own `ci` passed, so the distribution STRADDLED the ceiling: a coin flip
+ * per run, decided by runner speed rather than by anything about the tree.
+ *
+ * THAT LAST OBSERVATION IS THE FIX. A wall-clock number conflates two things — how much work the
+ * suite does, and how fast the machine is — and only the first is a property of the repo. So the
+ * refusal is now measured against the SAME RUN's own cheapest census entry: a slow machine slows
+ * every entry together, leaving the ratio stable, while a suite genuinely doing far more work
+ * than its siblings stands out on any machine. The bound is derived from the measured population
+ * rather than written down, which is what keeps it from being outgrown.
+ *
+ * THE SOFT BOUND STILL EARNS ITS KEEP: an entry over it is REPORTED, with its cost, so growth is
+ * visible long before it is refused — the warning the absolute ceiling could only deliver by
+ * failing the gate.
+ */
+
+/** The same-run reference is floored here, so an unusually cheap entry cannot make the ratio
+ *  harsh for its siblings — with one very fast census suite, 4x its cost is not a meaningful
+ *  ceiling for a suite that legitimately walks more. */
+export const FAST_GATE_CENSUS_REFERENCE_FLOOR_MS = 1000;
+
+/** How many times the same run's cheapest census entry an entry may cost before it is refused as
+ *  RUNAWAY. Sized against the measured spread (2026-08-31, one container: 960 / 1128 / 2344 /
+ *  2615ms — a 2.7x spread across four healthy entries), so a merely-grown suite passes and one
+ *  doing several times the work of its cheapest sibling does not. */
+export const FAST_GATE_CENSUS_RUNAWAY_MULTIPLE = 4;
+
+/**
+ * The refusal threshold for THIS run, derived from the census durations THIS run measured.
+ * Returns `undefined` when no census entry ran — there is no population to derive a bound from,
+ * and inventing one would be the constant this task is removing.
+ */
+export function censusRunawayThresholdMs(durationsMs: readonly number[]): number | undefined {
+  if (durationsMs.length === 0) return undefined;
+  const reference = Math.max(FAST_GATE_CENSUS_REFERENCE_FLOOR_MS, Math.min(...durationsMs));
+  return reference * FAST_GATE_CENSUS_RUNAWAY_MULTIPLE;
+}
+
 export const FAST_GATE_STEPS: { job: string; script: string; reason: string; boundMs?: number }[] = [
   {
     job: "cli-reference",
@@ -1074,7 +1123,11 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
   const scriptNames = fastGateScriptNames(repoRoot, deps.packageJsonText);
   const now = deps.now ?? Date.now;
   const gateSteps = deps.steps ?? FAST_GATE_STEPS;
-  const steps = gateSteps.map(({ job, script, boundMs }) =>
+  // W1-T2545 — PASS ONE: run every step and, for a census entry, keep its measured cost beside
+  // its own result. Nothing is refused on cost here, because the threshold is derived from the
+  // population and the population is not complete until the last entry has run.
+  const censusCosts = new Map<number, number>();
+  const steps = gateSteps.map(({ job, script, boundMs }, i) =>
     runStep(job, () => {
       if (!scriptNames.has(script)) {
         return { ok: false, detail: `SCRIPT MISSING — "${script}" is not defined in package.json's "scripts"; this step did not run` };
@@ -1086,17 +1139,36 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
       const startedAt = now();
       const result = withoutNodeTestContext(() => shellOut(spawn, label, "npm", ["run", "--silent", script], { cwd: repoRoot }));
       const elapsedMs = now() - startedAt;
-      if (elapsedMs > boundMs) {
-        return {
-          ok: false,
-          detail:
-            `BOUND EXCEEDED — ${label} took ${elapsedMs}ms, over the fast gate's ${boundMs}ms PRIMARY CONTROL bound ` +
-            `(own result: ${result.ok ? "would have PASSed" : "also FAILed"}); refused by measured cost, not by a written exception naming it`,
-        };
+      censusCosts.set(i, elapsedMs);
+      // The SOFT bound reports; it never refuses. A census suite's cost grows with the corpus it
+      // walks, so crossing a written number is news about the tree, not a fault in this run.
+      if (elapsedMs > boundMs && result.ok) {
+        return { ok: true, detail: `${result.detail} — COST ${elapsedMs}ms, over the ${boundMs}ms soft bound (reported, not refused)` };
       }
       return result;
     }),
   );
+
+  // PASS TWO: with every census cost measured on the SAME machine in the SAME run, a runaway
+  // entry is the one costing several times its cheapest sibling — a ratio a slow runner cannot
+  // manufacture, because it slows every entry together. An entry whose own command FAILED is
+  // left exactly as it is: a real failure is never restated as a cost refusal.
+  const threshold = censusRunawayThresholdMs([...censusCosts.values()]);
+  if (threshold !== undefined) {
+    for (const [i, elapsedMs] of censusCosts) {
+      if (elapsedMs <= threshold || !steps[i].ok) continue;
+      const { job, script } = gateSteps[i];
+      steps[i] = {
+        ...steps[i],
+        ok: false,
+        detail:
+          `${job}: RUNAWAY — npm run --silent ${script} took ${elapsedMs}ms, over ${threshold}ms ` +
+          `(${FAST_GATE_CENSUS_RUNAWAY_MULTIPLE}x this run's cheapest census entry, floored at ` +
+          `${FAST_GATE_CENSUS_REFERENCE_FLOOR_MS}ms); its own result would have PASSed. Refused by a bound ` +
+          `derived from this run's own measurements, never by a written constant a growing corpus outgrows`,
+      };
+    }
+  }
   return { steps, ok: steps.every((s) => s.ok) };
 }
 
