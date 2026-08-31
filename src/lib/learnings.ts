@@ -1520,3 +1520,139 @@ export function renderMatchedLearnings(selected: LearningEntry[]): string {
 export function renderLearningsContext(selected: LearningEntry[]): string {
   return [renderDoctrinePreamble(), renderMatchedLearnings(selected)].filter((s) => s.length > 0).join("\n");
 }
+
+/**
+ * PROGRESSIVE DISCLOSURE FOR A HEADLINE+BODY RULE CORPUS (W1-T2508).
+ *
+ * CLAUDE.md's own bullets are already written `- **HEADLINE** body *(citation)*` — an
+ * agent-skill-shaped split (description always-on, full material on activation) that nobody
+ * had to invent, only honour (W1-T2508's rationale). This is a SEPARATE mechanism from the
+ * `LearningEntry` corpus above: a `LearningEntry.fact` is one line with no headline/body
+ * structure of its own, {@link selectLearnings}/{@link renderMatchedLearnings}/
+ * {@link renderDoctrinePreamble} are UNCHANGED by anything below, and nothing here is wired
+ * into {@link renderLearningsContext} or `run-task.ts`'s `implementPromptParts` — flipping a
+ * live prompt's shape is explicitly NOT this task's acceptance (its rationale's "NOT IN
+ * SCOPE" names "any change to what a worker is permitted to do"). What this proves is that
+ * the RETRIEVAL PATH exists and is safe before any body is ever withheld — the hazard the
+ * rationale names: "a headline whose body cannot be fetched is strictly worse than today."
+ */
+
+/**
+ * One parsed rule bullet. `body` is EVERYTHING in the original bullet other than the bolded
+ * headline marker — `` `- **${headline}**${body}` `` reproduces the source bullet BYTE FOR
+ * BYTE, so splitting a rule into headline+body never alters its text (W1-T2508 acceptance:
+ * "no rule text is altered by being split into headline and body").
+ */
+export interface RuleHeadline {
+  /** The bolded headline text, with the `**` markers already stripped. May itself span
+   *  multiple source lines (CLAUDE.md wraps a long headline before closing `**`). */
+  headline: string;
+  /** Everything after the closing `**`, verbatim — the retrievable "material needed to do
+   *  it" an agent-skill description defers until activation. */
+  body: string;
+}
+
+export const RULE_BULLET_START_RE = /^- \*\*/;
+export const RULE_HEADLINE_RE = /^- \*\*([\s\S]+?)\*\*/;
+
+/**
+ * Split `markdown` into top-level `- **HEADLINE** body` bullets — the exact shape CLAUDE.md's
+ * "Before you push" / "Investigation discipline" etc. sections already use. A bullet runs from
+ * one line matching `^- \*\*` up to (but not including) the next such line or a `#` heading, so
+ * a bullet's body may freely contain blank lines, nested sub-bullets, or a markdown table (real
+ * CLAUDE.md bullets do, e.g. the "baked path" rule's ships-on-merge table) without truncating
+ * early. A line that opens a bullet but never closes its `**` is refused loudly — a malformed
+ * source degrading silently into a wrong split would be worse than not splitting at all.
+ */
+export function parseRuleHeadlines(markdown: string): RuleHeadline[] {
+  const lines = markdown.split("\n");
+  const blocks: string[] = [];
+  let current: string[] | null = null;
+  for (const line of lines) {
+    if (RULE_BULLET_START_RE.test(line)) {
+      if (current) blocks.push(current.join("\n"));
+      current = [line];
+    } else if (/^#/.test(line)) {
+      if (current) {
+        blocks.push(current.join("\n"));
+        current = null;
+      }
+    } else if (current) {
+      current.push(line);
+    }
+  }
+  if (current) blocks.push(current.join("\n"));
+
+  return blocks.map((raw) => {
+    const m = RULE_HEADLINE_RE.exec(raw);
+    if (!m) {
+      throw new LearningsError(`parseRuleHeadlines: bullet opens "**" but never closes it: ${raw.slice(0, 80)}…`);
+    }
+    return { headline: m[1], body: raw.slice(m[0].length) };
+  });
+}
+
+/**
+ * Index every rule by its headline. A headline mapping to two DIFFERENT bodies is refused
+ * loudly rather than letting the second silently win — "every headline in the index resolves
+ * to exactly one body" is an acceptance criterion, not an assumption, and a silent overwrite is
+ * exactly the kind of zero-signal wrong-answer CLAUDE.md's own "Investigation discipline"
+ * section warns against.
+ */
+export function buildHeadlineIndex(rules: RuleHeadline[]): Map<string, string> {
+  const index = new Map<string, string>();
+  for (const rule of rules) {
+    const existing = index.get(rule.headline);
+    if (existing !== undefined && existing !== rule.body) {
+      throw new LearningsError(`buildHeadlineIndex: headline "${rule.headline}" resolves to two different bodies`);
+    }
+    index.set(rule.headline, rule.body);
+  }
+  return index;
+}
+
+/**
+ * The ALWAYS-ON half: headlines only, never a body — the STABLE metadata an agent-skill
+ * description is, in the always-on-injection/on-activation split this mirrors. One bolded
+ * headline per line, in the corpus's own order; ~15% of CLAUDE.md's own bulk by the rationale's
+ * own measurement, because a headline is a skill description by any measure.
+ */
+export function renderHeadlineOnlyIndex(rules: RuleHeadline[]): string {
+  return rules.map((r) => `- **${r.headline}**`).join("\n");
+}
+
+/** Look up one rule's body by its headline. `undefined` means "not retrievable" — callers that
+ *  must never go silent on that use {@link retrieveRuleBodyOrDegrade}, never this directly. */
+export function retrieveRuleBody(index: Map<string, string>, headline: string): string | undefined {
+  return index.get(headline);
+}
+
+/**
+ * Resolve one rule's body ON DEMAND via the injected `retrieve` — and if that retrieval fails
+ * (returns `undefined`: a missing index entry, an unreadable source, a dead retrieval path),
+ * degrade to injecting the FULL rule (`- **headline**body`) rather than nothing. This is the
+ * hazard W1-T2508's rationale names explicitly: "a headline whose body cannot be fetched is
+ * strictly worse than today: the reader knows a rule exists, cannot read it, and proceeds
+ * anyway" — so a failed retrieval must never resolve to `""` or throw, only to the pre-split
+ * rule text the reader would have seen before any split existed.
+ */
+export function retrieveRuleBodyOrDegrade(
+  rule: RuleHeadline,
+  retrieve: (headline: string) => string | undefined,
+): string {
+  const body = retrieve(rule.headline);
+  if (body !== undefined) return body;
+  return `- **${rule.headline}**${rule.body}`;
+}
+
+/**
+ * The wider CONTEXT-block shape this mechanism assembles into, mirroring
+ * {@link renderLearningsContext}'s own stable-then-volatile ordering (cache-aware assembly,
+ * W1-T35): the headline index is STABLE (bounded, corpus-shape, changes only when a rule is
+ * added/reworded) and sits first; `retrievedBodies` is VOLATILE (grows over the life of a
+ * session as the worker actually asks for material) and sits last, exactly where
+ * {@link renderMatchedLearnings} sits relative to {@link renderDoctrinePreamble} today.
+ */
+export function renderProgressiveRuleContext(rules: RuleHeadline[], retrievedBodies: string[]): string {
+  return [renderHeadlineOnlyIndex(rules), retrievedBodies.join("\n")].filter((s) => s.length > 0).join("\n\n");
+}
