@@ -1,0 +1,72 @@
+- id: W1-T2523
+  title: "NOTHING TELLS YOU WHICH POPULATION-WALKING SUITES YOUR CHANGE JOINS, SO THE CALLER SWEEP THIS REPO MANDATES IS STRUCTURALLY BLIND TO THEM — `git grep -l <symbol>` cannot find a suite that walks `src/**` and asserts a property of the whole set; one PR tripped TWO of them (bound-kind-declared, negative-reachability-ratchet) and both were invisible to a correctly-run caller sweep, surfacing only from a 40-minute both-sides full-suite diff"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 14.00
+  files: [src/lib/ci-parity.ts, test/nothing-tells-you-which-census-suites-your-change-joins.test.ts]
+  origin: "operator-session#two-census-suites-missed-2026-08-30"
+  plan_refs: ["W1-T2478", "W1-T1266", "W1-T2317"]
+  status: queued
+  attempts: 0
+  rationale: |
+    CLAUDE.md ALREADY NAMES THIS AND THE NAMING DID NOT PREVENT IT. Its own words: "A CENSUS TEST
+    NAMES NONE OF YOUR SYMBOLS, SO THE CALLER SWEEP ABOVE CANNOT FIND IT — `git grep -l <symbol>` is
+    blind to a suite that WALKS a population (`src/**`) and asserts its size." The remedy it offers
+    is to "also run any suite that enumerates a population your file joins, found by what it walks
+    rather than by name" — which asks an author to already know the answer. That is a prose rule
+    with no instrument behind it, exactly the class CLAUDE.md's own preamble says gets violated
+    silently and repeatedly.
+
+    MEASURED ON ONE PR, 2026-08-30. A change adding two exported constants and one regex to
+    `src/lib/classify.ts` tripped:
+      test/bound-kind-declared.test.ts          (TRANSIENT_BACKOFF_BASE_MS / _CEILING_MS undeclared)
+      test/negative-reachability-ratchet.test.ts (a new `_RE` validator with no both-arm fixture)
+    The caller sweep was run — `git grep -l` over every changed symbol, plus every suite that
+    mentioned them — and found NEITHER, because neither names any of those symbols. They surfaced
+    only from a full-suite run on both the branch AND its parent, diffed as SETS: base 179 distinct
+    failing names, head 226, of which 61 were an environmental Playwright mismatch and exactly 2
+    were real. Roughly 40 minutes of wall clock to learn something a query could answer in a second.
+
+    THE ANSWER IS ALREADY DERIVABLE. These suites are recognisable by what they DO: read the tracked
+    tree (`git ls-files`), filter to `src/**`, and assert a property per file or over the whole set.
+    `src/lib/ci-parity.ts` already knows this family exists — it carries a "census suite" class with
+    its own reasoned entries and a wall-clock bound. So the population is enumerable from the same
+    data the fast gate already keeps, and the missing thing is a QUERY over it: given a set of
+    changed paths, name the census suites those paths enter.
+
+    WHAT THIS MUST NOT BECOME. Not a new gate — there are enough, and a wrong derivation that
+    REFUSED a PR would be the bound-fires-on-a-healthy-condition defect this repo keeps
+    rediscovering. A report an author can run before pushing, and that the fast gate can print, is
+    the whole ask. It also must not claim completeness it cannot have: a suite that walks the tree
+    in some way this derivation does not recognise must be reported as UNKNOWN COVERAGE rather than
+    silently omitted, or it rebuilds the same blind spot one layer up.
+
+    RE-DERIVE RATHER THAN TRUST THE TWO: the query is `git grep -l 'ls-files' -- 'test/*.test.ts'`
+    intersected with suites that filter on `src/`, which is an approximation and should be stated as
+    one — the same posture W1-T2317's own ratchet takes about its text-proximity heuristic.
+
+    NOT IN SCOPE: making either suite easier to satisfy, and the fast gate's own admission bounds.
+
+    THE RISK BAND IS SET HIGH BECAUSE THE LINTER REFUSES A src+test PAIR AT medium (see W1-T2525);
+    the sentence below is the honest description of the blast radius, not the reason for the band.
+    THE RISK BAND IS RULE 19'S SPAN: one src stem plus a test is narrow, and the blast radius is
+    genuinely small because the deliverable is a REPORT that refuses nothing.
+  acceptance:
+    - claim: "given a changed src path, the census suites that path enters are named"
+      proof: "unit test: test/nothing-tells-you-which-census-suites-your-change-joins.test.ts"
+    - claim: "a changed path entering no census suite reports an empty set, not a guess"
+      proof: "unit test: test/nothing-tells-you-which-census-suites-your-change-joins.test.ts"
+    - claim: "a suite that walks the tree in an unrecognised way is reported as UNKNOWN, never omitted"
+      proof: "unit test: test/nothing-tells-you-which-census-suites-your-change-joins.test.ts"
+    - claim: "the report refuses nothing and cannot fail a PR by itself"
+      proof: "unit test: test/nothing-tells-you-which-census-suites-your-change-joins.test.ts"
+    - claim: "the two suites that were missed on 2026-08-30 are both named for a classify.ts change"
+      proof: "unit test: test/nothing-tells-you-which-census-suites-your-change-joins.test.ts"
+    - claim: "a test/ change does not report src-population suites it cannot join"
+      proof: "unit test: test/nothing-tells-you-which-census-suites-your-change-joins.test.ts"
+    - claim: "removing the derivation makes the two-suites-named assertion fail"
+      proof: "unit test: test/nothing-tells-you-which-census-suites-your-change-joins.test.ts"

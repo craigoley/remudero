@@ -1,0 +1,73 @@
+- id: W1-T2521
+  title: "A NEW CENSUS GATE CANNOT SHIP ITSELF, AND WHICH WALL IT HITS IS DECIDED BY ITS FILENAME — registering one requires editing `src/lib/ci-parity.ts` (src) while shipping `scripts/<name>.mjs`; if the name matches `^scripts/[^/]*-ratchet\\.mjs$` it is INSTANTLY an INSTRUMENT_SURFACE path and Rule 25 refuses the PR for entanglement with its own registration (#3331), and if it does not match, instrument-surface-completeness refuses it as undeclared (#3335) — two gates filed the same week, opposite refusals, same underlying circularity"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 16.00
+  files: [src/lib/review.ts, test/a-new-census-gate-cannot-ship-itself.test.ts]
+  origin: "operator-session#both-still-red-2026-08-30"
+  plan_refs: ["W1-T402", "W1-T2488", "W1-T2491"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED TWICE IN ONE WEEK, ON TWO PRs THAT DIFFER ONLY IN A FILENAME.
+
+      #3331 (W1-T2488)  scripts/source-size-ratchet.mjs   + src/lib/ci-parity.ts (+10, registration)
+                        -> `^scripts/[^/]*-ratchet\.mjs$` matches, so the script is INSTRUMENT the
+                           moment it exists. detectInstrumentEntanglement refuses the PR. Remedy:
+                           a two-PR split (#3345 lands the instrument, then main is merged into
+                           #3331's head so its diff drops the instrument paths).
+      #3335 (W1-T2491)  scripts/worker-branch-shape.mjs   + src/lib/ci-parity.ts (+9, registration)
+                        -> matches no blocking pattern, so instrument-surface-completeness derives
+                           it as a gate-rule-like path that is declared NOWHERE and fails `ci`
+                           (1 of 11589). Remedy: an INSTRUMENT_SURFACE_EXCLUSIONS entry.
+
+    Same shape, same week, two different refusals and two different remedies — selected by whether
+    the author happened to put "-ratchet" in the filename. Neither author did anything wrong.
+
+    THE CIRCULARITY, STATED PLAINLY. A census gate is only real once `src/lib/ci-parity.ts` knows
+    about it, and that registration is a `src/` edit. Its rule logic is a `scripts/` file. Rule 25
+    exists to stop a diff changing an instrument and the code it measures together — a good rule —
+    but a gate's FIRST commit is inherently both. There is no ordering that satisfies it directly:
+    ship the script alone and the completeness alarm fires (or, once promoted, nothing measures it);
+    ship both and entanglement fires.
+
+    THE EXISTING ESCAPE IS REAL BUT REACHABLE ONLY BY ACCIDENT. `INSTRUMENT_SURFACE_EXCLUSIONS`
+    already documents the right answer as its second shape — "KNOWN GAP, WIDENING DEFERRED: the
+    candidate genuinely IS gate-rule logic … Adding these to the BLOCKING INSTRUMENT_SURFACE list
+    widens what refuses a PR, which W1-T402's design (clause v) requires measuring against real
+    merged diffs first" — and it is never read by `detectInstrumentEntanglement`, so an entry clears
+    the alarm without widening what blocks. That is exactly the path #3335 could take. #3331 could
+    not: its filename had already made the script blocking, and no exclusion un-blocks it.
+
+    WHAT THIS TASK SHOULD DECIDE (and the shard deliberately does not pre-judge): whether a gate's
+    OWN INTRODUCING COMMIT is carved out of `detectInstrumentEntanglement` — the diff that first
+    creates a script and first registers it is not the diff Rule 25 was written to catch, which is a
+    LATER change moving an instrument and the thing it measures together. A carve-out keyed on "this
+    path is NEW in this diff AND its registration is NEW in this diff" is narrow, checkable, and
+    would have let both PRs through unmodified; the risk is that it also lets a genuinely entangled
+    first commit through, which is what the test must pin.
+
+    NOT IN SCOPE: promoting either script to INSTRUMENT_SURFACE (W1-T402 clause (v) wants that
+    measured against merged diffs first), and the two PRs' own remedies, which are already applied.
+
+    THE RISK BAND IS BLAST RADIUS: one src stem plus a test, but this edits the predicate that
+    refuses PRs for entanglement — too wide a carve-out silently retires Rule 25.
+  acceptance:
+    - claim: "a diff that both creates a gate script and first registers it is not refused as entangled"
+      proof: "unit test: test/a-new-census-gate-cannot-ship-itself.test.ts"
+    - claim: "a later diff moving an instrument and the code it measures is still refused"
+      proof: "unit test: test/a-new-census-gate-cannot-ship-itself.test.ts"
+    - claim: "a diff that changes an EXISTING instrument alongside src is still refused"
+      proof: "unit test: test/a-new-census-gate-cannot-ship-itself.test.ts"
+    - claim: "the carve-out requires BOTH the script and its registration to be new in the same diff"
+      proof: "unit test: test/a-new-census-gate-cannot-ship-itself.test.ts"
+    - claim: "the outcome no longer depends on whether the filename matches the ratchet pattern"
+      proof: "unit test: test/a-new-census-gate-cannot-ship-itself.test.ts"
+    - claim: "INSTRUMENT_SURFACE_EXCLUSIONS stays advisory and still never blocks"
+      proof: "unit test: test/a-new-census-gate-cannot-ship-itself.test.ts"
+    - claim: "removing the carve-out makes the introducing-commit assertion fail again"
+      proof: "unit test: test/a-new-census-gate-cannot-ship-itself.test.ts"
