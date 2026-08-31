@@ -104,8 +104,8 @@ export type InterpretReplyResult =
   | { status: "clarifying"; question: ClarifyingQuestion }
   | { status: "exhausted"; unresolved: ClarifyingQuestion[] };
 
-/** "Asking a sixth time" is the rationale's own example of the failure this bound closes — five
- *  distinct clarifications is the ceiling before a thread reports exhaustion instead. */
+/** PRIMARY CONTROL, not a backstop: this is what normally stops the clarification loop.
+ *  "Asking a sixth time" is the rationale's own example of the failure this bound closes. */
 export const DEFAULT_MAX_ROUNDS = 5;
 
 // ── Thread-message encoding — how a clarification round-trip is told apart from the original
