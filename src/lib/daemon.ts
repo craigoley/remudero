@@ -715,6 +715,15 @@ export interface DaemonOpts {
    */
   maxSpawnInfraBackoffMs?: number;
   /**
+   * W1-T2517: the cross-task API-window-hold ceiling in ms (default
+   * {@link DEFAULT_MAX_API_WINDOW_HOLD_MS}) — the SAME doubling-capped shape
+   * `maxSpawnInfraBackoffMs` uses just above, for a different signal: consecutive
+   * `blocked_transient` verdicts across DIFFERENT task ids (see
+   * {@link reasonAboutApiWindow}'s own doc for why task identity is the discriminator).
+   * POLICY DATA (rule 2), retunable without a source change.
+   */
+  maxApiWindowHoldMs?: number;
+  /**
    * W1-T343 (ADOPT DRAIN'S EXISTING LANE MACHINERY, NEVER A SECOND IMPLEMENTATION): the
    * width this tick's dispatch batch may hold — `SweepPolicy.dispatchLanes` (POLICY DATA,
    * rule 2; ONE threshold home, the same row `rmd drain` already reads), resolved by the
@@ -1871,6 +1880,94 @@ async function runGatedSweep(
 export const DEFAULT_MAX_SPAWN_INFRA_BACKOFF_MS = 30 * 60_000;
 
 /**
+ * W1-T2517 (THE DISPATCH LOOP IS NEVER TOLD THE WINDOW CLOSED): `apiError` is produced 13
+ * times across worker.ts/run-task.ts and reaches daemon.ts/drain.ts ZERO times, so a closed
+ * usage window is re-discovered per task at a full spawn each — worker home, containment
+ * preflight, isolation preflight, worktree — before run-task.ts's OWN worker-level retry loop
+ * (classify.ts's MAX_TRANSIENT_RETRIES) finally gives up and returns a `blocked_transient`
+ * verdict. `reasonAboutBlock`/`blockRetryStates` (above) already bound how many times the
+ * SAME task id retries that verdict across ticks (W1-T46) — but `blockRetryStates` is keyed
+ * by task id, so a NEW task id always arrives with a fresh budget and pays the full spawn to
+ * rediscover the identical closed window. That is precisely the argument W1-T113 already made
+ * for spawn-infra failures (see `toolchainEscalated`'s own doc): a cause that blocks dispatch
+ * identically for every task needs a signal keyed on the CAUSE, never on task id.
+ *
+ * THE DISCRIMINATOR IS CONSECUTIVE ACROSS DIFFERENT TASK IDS. One task ending
+ * `blocked_transient` is noise — a blip, a bad envelope — indistinguishable from ordinary
+ * per-task flake, so it holds nothing (`streak` stays below {@link API_WINDOW_HOLD_STREAK_FLOOR}).
+ * The SAME task retrying (its own per-task backoff, W1-T2515's scope) never advances the streak
+ * either — `taskId === state.lastTaskId` is a no-op here — so a single flaky task looping on its
+ * own retries can never read as a fleet-wide outage. Two or more DIFFERENT task ids ending
+ * `blocked_transient` back-to-back IS the signal: not several broken tasks, one broken window.
+ *
+ * MIRRORS THE SPAWN-INFRA BACKOFF SHAPE (`DEFAULT_MAX_SPAWN_INFRA_BACKOFF_MS`, just above) —
+ * doubling, capped, reset on any dispatch reaching a REAL (non-`blocked_transient`) verdict —
+ * built, proven, policy-as-data. Deliberately does NOT require a parsed reset time (that is
+ * W1-T2515's classifier work, `classify.ts`'s `detectUsageLimitRefusal`): a plain consecutive
+ * count works with zero knowledge of when the window reopens, and composes with a reset time
+ * arriving later without requiring it.
+ *
+ * NEVER TOUCHES BLOCK-REASONING ITSELF. This function is a pure, ADDITIONAL observation layered
+ * beside `reasonAboutBlock` — it never changes a disposition, never clears a strike, and a
+ * task's own real failure (any verdict other than `blocked_transient`) both strikes/escalates
+ * exactly as before AND resets this streak to its floor in the same step (see the `verdict !==
+ * "blocked_transient"` branch below) — a build failure is never masked as a window.
+ *
+ * KIND: BACKSTOP (`test/bound-kind-declared.test.ts`'s vocabulary, W1-T1266), not a primary
+ * control — the streak floor above is what normally stops an ordinary blip from holding
+ * anything at all, and most real windows resolve inside a few small doublings; this ceiling
+ * exists only so a window closed unusually long cannot make the hold unbounded, exactly the
+ * `DEFAULT_MAX_SPAWN_INFRA_BACKOFF_MS` cap just above does not bite on an ordinary spawn retry.
+ */
+export const DEFAULT_MAX_API_WINDOW_HOLD_MS = 30 * 60_000;
+
+/**
+ * Below this streak, holding dispatch would be a new way to stall over noise — see
+ * {@link reasonAboutApiWindow}'s doc for why the floor is 2, not 1.
+ */
+export const API_WINDOW_HOLD_STREAK_FLOOR = 2;
+
+/** Cross-task `blocked_transient` streak state — see {@link reasonAboutApiWindow}'s doc. */
+export interface ApiWindowHoldState {
+  /** Consecutive `blocked_transient` verdicts across DIFFERENT task ids. */
+  streak: number;
+  /** The task id the streak last advanced on; `undefined` once the streak is at its floor. */
+  lastTaskId: string | undefined;
+}
+
+export const INITIAL_API_WINDOW_HOLD_STATE: ApiWindowHoldState = { streak: 0, lastTaskId: undefined };
+
+export interface ApiWindowHoldDisposition {
+  /** The state to thread into the next call. */
+  state: ApiWindowHoldState;
+  /** ms to hold dispatch this tick; 0 below {@link API_WINDOW_HOLD_STREAK_FLOOR}. */
+  holdMs: number;
+}
+
+/**
+ * Pure decision: given the running cross-task streak and this dispatch's own task id + verdict,
+ * how long (if at all) should the NEXT dispatch be held? See this constant block's own doc,
+ * above, for the full rationale — this is its computation.
+ */
+export function reasonAboutApiWindow(
+  state: ApiWindowHoldState,
+  taskId: string,
+  verdict: RunResult["verdict"],
+  pollIntervalMs: number,
+  maxHoldMs: number = DEFAULT_MAX_API_WINDOW_HOLD_MS,
+): ApiWindowHoldDisposition {
+  // A REAL verdict (anything but `blocked_transient`) resets to the floor — this dispatch
+  // reached a decisive outcome, so whatever streak of ambiguous refusals preceded it is
+  // over, one way or another.
+  if (verdict !== "blocked_transient") return { state: INITIAL_API_WINDOW_HOLD_STATE, holdMs: 0 };
+  const streak = taskId === state.lastTaskId ? state.streak : state.streak + 1;
+  const nextState: ApiWindowHoldState = { streak, lastTaskId: taskId };
+  if (streak < API_WINDOW_HOLD_STREAK_FLOOR) return { state: nextState, holdMs: 0 };
+  const holdMs = Math.min(pollIntervalMs * 2 ** (streak - API_WINDOW_HOLD_STREAK_FLOOR), maxHoldMs);
+  return { state: nextState, holdMs };
+}
+
+/**
  * THE BOOT-RATE INVARIANT (W1-T215, recon T2-AC2). Two DIFFERENT root causes
  * have already produced a daemon relaunch loop: W1-T197's headroom-exhausted
  * exit-1 (fixed by moving headroom overage to an in-process idle heartbeat —
@@ -2354,6 +2451,11 @@ export async function runDaemon(
   // MAX_TRANSIENT_RETRIES (reasonAboutBlock). Dropped once a task's
   // disposition is no longer `retry_transient` (merged, flagged, or escalated).
   const blockRetryStates = new Map<string, RetryState>();
+  // W1-T2517: the CROSS-task counterpart to `blockRetryStates` just above — content-keyed on
+  // "was the LAST blocked_transient a different task id", never on one task's own retry budget,
+  // for the same W1-T113 reason `toolchainEscalated` is content-keyed rather than task-keyed
+  // (see `reasonAboutApiWindow`'s own doc). Threaded across ticks for the life of this daemon run.
+  let apiWindowHoldState: ApiWindowHoldState = INITIAL_API_WINDOW_HOLD_STATE;
   // CIRCUIT BREAKER ESCALATION DEDUP (P29(ii)): the daemon is a PERSISTENT
   // loop — `nextRunnable` is re-invoked on EVERY tick, forever, so without this
   // a task that stays tripped would be re-escalated on every idle poll for as
@@ -2414,6 +2516,7 @@ export async function runDaemon(
   // this process's life.
   let starvationEscalated = false;
   const maxSpawnInfraBackoffMs = opts.maxSpawnInfraBackoffMs ?? DEFAULT_MAX_SPAWN_INFRA_BACKOFF_MS;
+  const maxApiWindowHoldMs = opts.maxApiWindowHoldMs ?? DEFAULT_MAX_API_WINDOW_HOLD_MS;
   // BOUNDED DEGRADED MODE (recon R-7: the live ledger shows /usage unreadable
   // ~78% of the time — an unconditional fail-closed-on-first-miss would halt
   // the fleet most of the time, so this counts CONSECUTIVE misses instead of
@@ -3830,7 +3933,14 @@ export async function runDaemon(
     // `runDrainLanes`' stop-on-block-at-pass-granularity doctrine) — but every lane's own
     // bookkeeping (retry state, fix dispatch, independent-failure flag, merge) still runs.
     let blockedDetail: string | undefined;
+    // W1-T2517: updated ALONGSIDE block-reasoning, never inside it — a pure additional
+    // observation over the SAME per-lane loop (see `reasonAboutApiWindow`'s doc). Lane order
+    // is the settlement order already fixed above, so a batch is walked deterministically.
+    let apiWindowHoldMs = 0;
     for (const { task, result } of toProcess) {
+      const apiWindowDisposition = reasonAboutApiWindow(apiWindowHoldState, task.id, result.verdict, pollIntervalMs, maxApiWindowHoldMs);
+      apiWindowHoldState = apiWindowDisposition.state;
+      apiWindowHoldMs = apiWindowDisposition.holdMs;
       const outcome = await processDispatchResult(planForBatch, task, result, isMerged);
       if (outcome.kind === "genuine_blocker" && blockedDetail === undefined) {
         blockedDetail = outcome.detail;
@@ -3838,6 +3948,25 @@ export async function runDaemon(
     }
     if (blockedDetail !== undefined) {
       return summary("blocked", blockedDetail);
+    }
+
+    if (apiWindowHoldMs > 0) {
+      // CONSECUTIVE DIFFERENT-task-id `blocked_transient` refusals (>= API_WINDOW_HOLD_STREAK_FLOOR):
+      // hold dispatch rather than let the next tick immediately pay another full spawn (worker
+      // home, containment preflight, isolation preflight, worktree) to rediscover the identical
+      // closed window. VISIBLE by design (rationale: "never a silent idle that reads as a healthy
+      // queue") — one ledger row naming the reason, the streak that triggered it, and the
+      // wall-clock instant dispatch resumes.
+      ticks++;
+      const resumesAtMs = now().getTime() + apiWindowHoldMs;
+      log("daemon.api_window_hold", {
+        tick: ticks,
+        hold_ms: apiWindowHoldMs,
+        consecutive_different_tasks: apiWindowHoldState.streak,
+        reason: "consecutive blocked_transient refusals across different tasks — the API usage window looks closed; holding dispatch instead of re-discovering it per task",
+        resumes_at: new Date(resumesAtMs).toISOString(),
+      });
+      await deps.sleep(apiWindowHoldMs);
     }
 
     if (spawnInfraSeenThisTick && toProcess.length === 0) {
