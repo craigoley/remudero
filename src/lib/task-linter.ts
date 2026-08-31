@@ -2408,11 +2408,11 @@ export function advisoryRoutingViolations(task: Task): LintViolation[] {
   return [];
 }
 
-// ── DUPLICATE-CLOSURE AT KNOWLEDGE INTAKE (W1-T420) ──────────────────────────
+// ── DUPLICATE-CLOSURE AT KNOWLEDGE INTAKE (W1-T420, narrowed W1-T2486) ───────
 //
-// ONE PURE MODULE (src/lib/knowledge-dedup.ts's `bestNearDuplicate`), TWO CONSUMERS HERE, TWO
-// SEVERITIES — matched to population size and false-positive cost (the W1-T352-vs-W1-T322
-// calibration argument applied at filing time). Both consumers below pass their own corpus in
+// ONE PURE MODULE (src/lib/knowledge-dedup.ts's `bestNearDuplicate`), THREE CONSUMERS HERE,
+// TWO SEVERITIES — matched to population size and false-positive cost (the W1-T352-vs-W1-T322
+// calibration argument applied at filing time). Every consumer below pass its own corpus in
 // (this module reads no disk, same purity contract `moduleExists` already keeps for
 // `callSiteViolations`); the CALLER resolves `learnings/*.yaml` and `plan/tasks.yaml` + shards
 // and injects the result.
@@ -2423,8 +2423,21 @@ export function advisoryRoutingViolations(task: Task): LintViolation[] {
 //     advisory posture is that it never blocks): title similarity is legitimately high for
 //     sibling tasks in an arc (a W1-T369/T370-shaped pair would rightly score high), and a
 //     false BLOCK at filing costs a whole re-file cycle. The warn is the pointer; the author
-//     decides. Escalation to blocking is follow-on work gated on a measured false-positive
-//     rate (W1-T322's advisory-first posture) — not done here.
+//     decides.
+//
+// (i-b) `unansweredDuplicateTitleViolations` (W1-T2486) — THE NARROW BLOCKING ARM, not a
+//     promotion of (i). Promoting the whole check to `block` would refuse legitimate sibling
+//     shards in the same arc (the W1-T369/T370 shape (i) exists to spare) — this arm fires only
+//     on an UNANSWERED NEAR-CERTAIN match: score >= {@link NEAR_IDENTITY_DUPLICATE_CUTOFF} (well
+//     above {@link DEFAULT_DUPLICATE_CUTOFF}'s "possibly related" line — see that constant's
+//     measured sibling ceiling of 0.091) AND neither shard citing the other by either of (i)'s
+//     own two additive answers: CITE the sibling in plan_refs, or SAY WHY IT DIFFERS in the
+//     rationale. Either shard's exit clears it (`opts.openTaskRecords` carries what the OTHER
+//     shard already said, since a plain id/text {@link OpenTaskTitleCorpus} entry cannot answer
+//     that). W1-T403/W1-T1062 — byte-identical titles AND files:, both queued, neither citing
+//     the other — is the fixture this arm exists to catch; it is exactly the escape the old
+//     inbox.ts ratification comment named and could not close, because that check was, and (i)
+//     still is, advisory-only.
 //
 // (ii) `learningDuplicateViolation` — LEARNINGS INTAKE, BLOCKING. NOT wired into `lintTask`
 //      (a `Task` does not carry a learning's `fact`/`id` — there is nothing on `Task` to hang
@@ -2538,6 +2551,89 @@ export function duplicateTitleViolations(task: Task, opts: LintOpts = {}): LintV
         `additive: CITE ${match.id} (name it in plan_refs and say what it already covers), or SAY ` +
         `WHY IT DIFFERS in the rationale. Never answer this by deleting a proof, narrowing files:, ` +
         "or removing any other evidence — this check asks for a citation, never for less work.",
+    },
+  ];
+}
+
+/**
+ * The near-identity cutoff for {@link unansweredDuplicateTitleViolations}'s BLOCKING arm — well
+ * above {@link DEFAULT_DUPLICATE_CUTOFF} (0.2, tuned to flag a merely POSSIBLE duplicate for the
+ * warn-only check above) and well above the measured reworded-near-duplicate band that constant's
+ * own doc comment reports (0.28-0.36). A genuine sibling pair's measured ceiling is 0.091 (same
+ * doc comment); a "same lesson reworded" pair still tops out at 0.36. 0.9 sits far above both —
+ * this arm is deliberately built to catch only a near-VERBATIM restatement (the W1-T403/W1-T1062
+ * fixture scores a perfect 1.00, byte-identical titles), never a paraphrase or a legitimate
+ * sibling, so raising the stakes to `block` never costs a false refusal against either measured
+ * population. NOT a change to {@link DEFAULT_DUPLICATE_CUTOFF} itself, or to the scorer/shingle
+ * width knowledge-dedup.ts owns — this is a SEPARATE, higher bar for a separate, narrower arm.
+ */
+export const NEAR_IDENTITY_DUPLICATE_CUTOFF = 0.9;
+
+/** A near-duplicate corpus entry carrying what {@link unansweredDuplicateTitleViolations} needs
+ *  that a plain {@link OpenTaskTitleCorpus} entry (id/text only) cannot answer: did the OTHER
+ *  shard already clear this pair from ITS side? `Task` itself carries no `plan_refs` field
+ *  (plan.ts keeps it declarative-only — see panel-graph.ts's own note on why), so a caller
+ *  assembles this the same way `opts.duplicateSlug` already threads slug data `Task` lacks. Both
+ *  fields are optional and independently checked: a shard with either one but not the other still
+ *  clears via the one it has. */
+export interface DuplicateAnswerCorpusEntry extends DuplicateCorpusEntry {
+  /** This candidate's own `plan_refs` list, verbatim. Cleared when it contains the OTHER task's
+   *  id exactly (an exact-string check — plan_refs is a flat list of citations, not prose). */
+  planRefs?: readonly string[];
+  /** This candidate's own `rationale` prose. Cleared when it NAMES the other task's id — the
+   *  mechanical, deterministic proxy for "says why it differs": whether prose correctly explains
+   *  a difference cannot be graded by a linter, but whether the id is named at all can be. */
+  rationale?: string;
+}
+
+/** `true` iff `id` is named in `refs` (exact-string membership) or mentioned in `text` (a
+ *  delimiter-bounded, case-insensitive substring match — `W1-T25` must never match a mention of
+ *  `W1-T250`, the same hazard `classifyFailingMergeEvidence` guards against). Either surface
+ *  clearing is enough; this is the shared predicate both directions of the citation check use. */
+export function citesTaskId(refs: readonly string[] | undefined, text: string | undefined, id: string): boolean {
+  if (refs?.includes(id)) return true;
+  if (!text) return false;
+  const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?:^|[^A-Za-z0-9-])${escaped}(?:$|[^A-Za-z0-9-])`, "i").test(text);
+}
+
+/**
+ * BLOCKING (the narrow arm, W1-T2486): this task scores >= {@link NEAR_IDENTITY_DUPLICATE_CUTOFF}
+ * against some OTHER entry in `opts.openTaskRecords`, AND neither shard has answered — this task
+ * does not cite the match (in `opts.taskPlanRefs` or its own `task.rationale`), and the matched
+ * entry does not cite this task back (in ITS `planRefs`/`rationale`). Either citation, from either
+ * side, clears it: a legitimate sibling pair that names its twin in plan_refs or explains the
+ * difference in its rationale is UNTOUCHED by this arm, exactly as (i)'s own message already
+ * promises. Absent `opts.openTaskRecords` ⇒ silent — same "no corpus, no opinion" contract
+ * {@link duplicateTitleViolations} already uses for `opts.openTaskTitles`.
+ *
+ * NEVER answered by narrowing `files:` or deleting a proof: this predicate reads only the
+ * citation surfaces above, so nothing else about either shard can clear it.
+ */
+export function unansweredDuplicateTitleViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
+  const corpus = opts.openTaskRecords;
+  if (!corpus || corpus.length === 0) return [];
+  const cutoff = opts.nearIdentityCutoff ?? NEAR_IDENTITY_DUPLICATE_CUTOFF;
+  const scored = opts.duplicateSlug?.trim();
+  const candidateText = scored && scored.length > 0 ? scored : task.title;
+  const k = opts.duplicateShingleK ?? DEFAULT_SHINGLE_K;
+  const match = bestNearDuplicate({ id: task.id, text: candidateText }, corpus, { k });
+  if (!match || match.score < cutoff) return [];
+  const matchEntry = corpus.find((e) => e.id === match.id);
+  const thisCites = citesTaskId(opts.taskPlanRefs, task.rationale, match.id);
+  const otherCites = citesTaskId(matchEntry?.planRefs, matchEntry?.rationale, task.id);
+  if (thisCites || otherCites) return [];
+  return [
+    {
+      check: "duplicate-title",
+      severity: "block",
+      message:
+        `task ${task.id} scores ${match.score.toFixed(2)} (>= near-identity cutoff ${cutoff}, k=${k}) ` +
+        `against ${match.id} and NEITHER shard cites the other — an UNANSWERED near-certain match, ` +
+        `refused rather than merely flagged. TWO ANSWERS BOTH CLEAR THIS, and both are additive: CITE ` +
+        `${match.id} (name it in plan_refs and say what it already covers), or SAY WHY IT DIFFERS in ` +
+        `the rationale. Never answer this by deleting a proof, narrowing files:, or removing any other ` +
+        "evidence — this check asks for a citation, never for less work.",
     },
   ];
 }
@@ -2762,6 +2858,20 @@ export interface LintOpts {
   /** W1-T1076: shingle width for {@link duplicateTitleViolations}. The live caller passes
    *  {@link DUPLICATE_SLUG_SHINGLE_K}; absent ⇒ {@link DEFAULT_SHINGLE_K}, W1-T420's original. */
   duplicateShingleK?: number;
+  /** W1-T2486: the richer corpus {@link unansweredDuplicateTitleViolations}'s BLOCKING arm scores
+   *  against — each entry carries its own `planRefs`/`rationale` so the check can tell whether
+   *  the OTHER shard already answered. Supplied by the caller — never fetched. Absent/empty ⇒
+   *  the arm is silent, same "no corpus, no opinion" contract `opts.openTaskTitles` uses. */
+  openTaskRecords?: readonly DuplicateAnswerCorpusEntry[];
+  /** Jaccard cutoff for {@link unansweredDuplicateTitleViolations}. Default {@link
+   *  NEAR_IDENTITY_DUPLICATE_CUTOFF} — see that constant's own doc comment for why it sits far
+   *  above {@link DEFAULT_DUPLICATE_CUTOFF}. */
+  nearIdentityCutoff?: number;
+  /** W1-T2486: THIS task's own `plan_refs` list, for {@link unansweredDuplicateTitleViolations}
+   *  to check whether THIS shard already cites the matched sibling. Supplied by the caller —
+   *  `Task` itself carries no `plan_refs` field (see {@link DuplicateAnswerCorpusEntry}'s own
+   *  note on why). Absent ⇒ only `task.rationale` is checked on this task's side. */
+  taskPlanRefs?: readonly string[];
   /** W1-T1225: a `grep:` proof's named path -> that file's own text, or `undefined` when the path
    *  is not on disk (the linter reads no disk itself) — for {@link proofGrepUnmatchableViolations}
    *  to feed {@link classifyGrepZeroHit}. Same "no predicate ⇒ no opinion" contract {@link
@@ -2776,7 +2886,8 @@ export interface LintOpts {
  *  proof-resolvability/post-merge-amendment/provenance/ruling-verify) always run —
  *  post-merge-amendment is a no-op absent `opts.postMergeAmendment` — budget-sanity
  *  runs only when `opts.mountMaxTurns` is supplied, duplicate-title (W1-T420) is a
- *  no-op absent `opts.openTaskTitles`, proof-name-resolution (W1-T488) is a no-op
+ *  no-op absent `opts.openTaskTitles`, its narrow blocking arm (W1-T2486) is a no-op absent
+ *  `opts.openTaskRecords`, proof-name-resolution (W1-T488) is a no-op
  *  absent `opts.resolveNameFilteredCandidates`, and dispatch-priority (W1-T422) and
  *  advisory-routing (W1-T519) always run — advisory-routing is a no-op (empty array) only
  *  when the task's title/rationale/note match none of {@link ADVISORY_ROUTING_LEXICON}, and
@@ -2796,6 +2907,7 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   violations.push(...callSiteViolations(task, opts));
   violations.push(...monolithFilingViolations(task, opts));
   violations.push(...duplicateTitleViolations(task, opts));
+  violations.push(...unansweredDuplicateTitleViolations(task, opts));
   const prov = provenanceViolation(task);
   if (prov) violations.push(prov);
   const ruling = rulingVerifyViolation(task);
