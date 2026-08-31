@@ -257,8 +257,19 @@ diff --git a/test/knowledge-budget-derivation.test.ts b/test/knowledge-budget-de
   assert.equal(v.state, "success", v.summary);
 });
 
-test("ENTANGLEMENT_EXEMPT_INSTRUMENTS: exactly the one named, reviewed W1-T941 path — no blanket widening", () => {
-  assert.deepEqual([...ENTANGLEMENT_EXEMPT_INSTRUMENTS], ["scripts/knowledge-budget-baseline.json"]);
+// W1-T2526 added the SECOND entry, and this guard is why that could not happen quietly: it names
+// every exempt path verbatim, so widening the set is a diff a reviewer must approve by hand. Kept
+// in exactly that shape — the assertion is the enumeration, never a size or a predicate, because a
+// looser form would let a third path in without anyone reading its reason. Each entry carries its
+// OWN justification at the declaration (W1-T941: nothing in CI ratchets against it; W1-T2526: it
+// IS read in CI, but it is a size LEDGER and not a score FLOOR, so raising an entry cannot make a
+// failing falsifier pass), and test/a-size-ledger-is-not-a-score-floor.test.ts pins that the two
+// reasons stay distinct.
+test("ENTANGLEMENT_EXEMPT_INSTRUMENTS: exactly the two named, reviewed paths — no blanket widening", () => {
+  assert.deepEqual(
+    [...ENTANGLEMENT_EXEMPT_INSTRUMENTS],
+    ["scripts/knowledge-budget-baseline.json", "scripts/source-size-baseline.json"],
+  );
 });
 
 // ── Criterion 5: THE MESSAGE MUST TEACH THE ESCAPE ──────────────────────────

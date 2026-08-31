@@ -6649,6 +6649,37 @@ export const ENTANGLEMENT_EXEMPT_INSTRUMENTS: ReadonlySet<string> = new Set([
   // its only reader is the pinned DEFAULT_KNOWLEDGE_BUDGET_CHARS constant (src/lib/learnings.ts)
   // and test/knowledge-budget-derivation.test.ts's own falsifier, both landing beside it.
   "scripts/knowledge-budget-baseline.json",
+  // W1-T2526: the per-file source-size LEDGER. THIS ENTRY DOES NOT FIT THE REASON ABOVE, AND
+  // SAYS SO RATHER THAN PRETENDING IT DOES. `scripts/source-size-ratchet.mjs` IS read in CI (via
+  // test/a-source-file-cannot-outgrow-its-baseline.test.ts's "the shipped tree passes its own
+  // recorded baseline", inside the unconditional `ci` job), so the knowledge-budget entry's
+  // "nothing ratchets against it" reason is false here and is deliberately not reused.
+  //
+  // THE REASON THAT DOES APPLY IS THE LEDGER/FLOOR DISTINCTION. Standing rule 25's premise, in
+  // detectInstrumentEntanglement's own words, is that "the code's own falsifiers were graded by
+  // the very version of the instrument that shipped beside them". A SCORE FLOOR
+  // (scripts/mutation-baseline.json, the coverage floors) grades falsifiers: lower it and a
+  // weakened test suite passes, which is exactly the hazard, and those stay blocking. This file
+  // grades nothing. It records how long each source file currently is. Raising an entry cannot
+  // make a failing falsifier pass, cannot hide a bug, and cannot change any verdict about the
+  // code's correctness -- it can only permit one named file to be longer, and the growth that
+  // made it necessary is in the same diff, line for line, where a reviewer already reads it.
+  //
+  // AND WITHOUT THIS THE GATE IS UNSATISFIABLE, MEASURED. The ratchet's own header names the only
+  // sanctioned way to move a ceiling up ("a human raising scripts/source-size-baseline.json by
+  // hand, on the record"), so EVERY PR that grows a src/ file must carry both halves and was
+  // refused. Pre-raising in a separate instrument-only PR is not an escape either:
+  // evaluateSourceSizeRatchet classifies a recorded value above the measured one as `shrunk` and
+  // writes it back DOWN on the next otherwise-clean run. On 2026-08-31 the ledger went stale on
+  // five consecutive merges and left `main` itself red on this gate; #3352 was the repair, and it
+  // could only ever arrive one PR late.
+  //
+  // NARROWER ALTERNATIVE, DELIBERATELY NOT TAKEN HERE. The precise carve-out is on the SHAPE of
+  // the hunk -- exempt an edit to this file only when every changed line is a `"path": N` ceiling
+  // entry -- which would keep the rule's full force over any OTHER edit to it. That is a bigger
+  // change than the deadlock could wait for; if this blanket entry proves too wide, that is the
+  // replacement, not a wider pattern.
+  "scripts/source-size-baseline.json",
 ]);
 
 /**
