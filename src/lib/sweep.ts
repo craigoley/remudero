@@ -1092,35 +1092,10 @@ export interface OpenPrView {
    * attempt on this head, distinct from a genuine failure ({@link ciFailures} names both; this
    * names only the cancellations). Populated ALONGSIDE `ciFailures`, when `checksState ===
    * "red"`; `[]`/undefined when checks aren't red or nothing cancelled contributed to the red
-   * verdict. Never makes `checksState` anything but "red" — see {@link CancelledRequiredCheck}'s
-   * own doc.
+   * verdict. Never makes `checksState` anything but "red" — see {@link CancelledRequiredCheck}'s own doc.
    */
   cancelledRequiredChecks?: CancelledRequiredCheck[];
-  /**
-   * W1-T2504 — names of ci-gate's OWN required checks whose LATEST (deduped) attempt has already
-   * concluded red, read off {@link redQualityGateNames} INDEPENDENTLY of ci-gate's own aggregate
-   * verdict. `checksState` stays keyed to branch protection's own (narrower) required-contexts
-   * set for merge-eligibility — see that field's own doc — so a PR can carry `checksState:
-   * "pending"` (the `ci-gate` aggregate is still running) and a non-empty `redRequiredChecks`
-   * (one of the checks it aggregates already failed) AT THE SAME TIME. That is the whole point:
-   * this field lets the fix rung's own trigger ({@link isBlockedCi}) see a failure `checksState`
-   * cannot yet report, closing the blind window MEASURED on #3318 (a 24-minute gap between the
-   * run lane's CI wait naming `coverage-ratchet` red and the sweep noticing anything at all).
-   *
-   * `[]`/undefined when no ci-gate-required check has concluded red on this head — including
-   * every input that predates this field. NEVER makes `checksState` anything but what
-   * {@link checksStateFromRollup} itself would compute — see that function's own doc for why a
-   * fifth `checksState` member is refused; this is a SEPARATE observable, exactly the route
-   * {@link CancelledRequiredCheck} (W1-T1223) already took for the same reason.
-   *
-   * SCOPE (mirrors how `workflowRuns`/`isPlanFiling` shipped their mechanism ahead of their
-   * producer): this field, {@link redQualityGateNames}, and `isBlockedCi`'s widened read are the
-   * full MECHANISM, wired end-to-end and unit-tested here — but `run-task.ts`'s
-   * `buildOpenPrViews` does not populate it yet (that file is not among this task's declared
-   * `files:`). Until that producer wiring lands, this is always `undefined` in the real gateway,
-   * so `isBlockedCi` keeps reading exactly `checksState === "red"` in production, unchanged.
-   */
-  redRequiredChecks?: string[];
+  redRequiredChecks?: string[]; // W1-T2504 — see {@link redQualityGateNames}/{@link isBlockedCi}; unpopulated in the real gateway (out of scope).
   /**
    * W1-T2340 — this head's own workflow runs (`actions/runs` filtered by head sha), each with
    * its jobs' OWN status — the raw input {@link stalledRunReason} reads. `undefined` when the
@@ -1620,68 +1595,7 @@ export function cancelledRequiredCheckNames(
     .map((c) => c.name ?? c.context ?? "unknown");
 }
 
-/**
- * W1-T2504 — names of ci-gate's OWN required checks (`.github/workflows/ci-gate.yml`'s
- * `REQUIRED` list — 14 entries at this writing: `ci`, `lint-plan`, `depcruise`,
- * `containment-probe`, `coverage-ratchet`, `mutation-ratchet`, `jscpd-gate`, `claims`,
- * `learnings-budget-ratchet`, `commitlint`, `api-client-drift`, `no-hand-rolled-fetch`,
- * `scan-pr / osv-scan`, `License Review`) whose LATEST (deduped) attempt has already
- * concluded red, read INDEPENDENTLY of ci-gate's own aggregate verdict.
- *
- * WHY A SECOND `requiredContexts`-SHAPED PARAMETER, NEVER BRANCH PROTECTION'S OWN:
- * {@link checksStateFromRollup} answers "what gates the merge" — branch protection's set, which on
- * this repo names only `ci-gate` + `remudero-review` (the latter excluded unconditionally). This
- * function answers a DIFFERENT question, "what is red RIGHT NOW among the checks ci-gate itself
- * aggregates" — a materially larger set (14 vs. the 1 checksStateFromRollup can actually see once
- * `remudero-review` drops out) that a caller reads from `ci-gate.yml`'s own `REQUIRED` env, never
- * from branch protection. Passing branch protection's narrower set here would silently reproduce
- * the exact blindness this function exists to close — so this is a SEPARATE parameter, never a
- * reuse of {@link checksStateFromRollup}'s `requiredContexts` argument.
- *
- * `requiredCheckNames` empty/undefined returns `[]` — the same fail-toward-no-positive-claim
- * direction {@link checksStateFromRollup} takes on an unreadable required-contexts list: a caller
- * that cannot confirm ci-gate's own required set must never guess at which check names to trust.
- *
- * FILTERED TO `requiredCheckNames` BEFORE JUDGING, unlike {@link cancelledRequiredCheckNames}
- * (which widened to ALL non-review entries for W1-T2283, because branch protection's set was too
- * narrow to include the check that actually gets cancelled). Here the caller supplies ci-gate's
- * OWN full required set, so the narrowing is exactly the one this task's acceptance demands: "a
- * check outside the required list does not make a PR fixable on its own" — an advisory scanner or
- * a warn-only job (e.g. the `Review` job ci-gate.yml's own header names as deliberately excluded
- * from `REQUIRED`) reporting a failure conclusion must never be read as a quality-gate red.
- *
- * DEDUPED BY {@link dedupeRollupByLatestAttempt} — the SAME rule {@link checksStateFromRollup}
- * itself reads red from — so a required check's SUPERSEDED failed attempt, followed by a later
- * SUCCESS on the same head, is never reported here either.
- *
- * NEVER READS `checksState` AND NEVER TOUCHES IT: this is the SEPARATE observable, exactly the
- * route {@link CancelledRequiredCheck} (W1-T1223) already took for the identical reason —
- * `checksStateFromRollup`'s own doc refuses a fifth member of the union because it is read at 17
- * comparison sites, and a name every existing row silently fails to match is the
- * false-predicate-falls-through-to-a-row-that-acts shape that produced the 57-issue incident. A
- * PR can therefore carry `checksState: "pending"` (ci-gate, the aggregate, is still running) AND a
- * non-empty return here (one of the checks it aggregates has already concluded red) AT THE SAME
- * TIME — that is the whole point: this closes the blind window MEASURED on #3318, where the run
- * lane's own CI wait had already named `coverage-ratchet` red 24 minutes before the sweep's
- * `checksState` read caught up.
- */
-export function redQualityGateNames(
-  rollup: RollupCheckEntry[] | undefined,
-  requiredCheckNames: Iterable<string> | undefined,
-): string[] {
-  const required = new Set(requiredCheckNames ?? []);
-  if (required.size === 0) return [];
-  const all = (rollup ?? []).filter(
-    (c) =>
-      c.name !== REVIEW_CONTEXT &&
-      c.context !== REVIEW_CONTEXT &&
-      (required.has(c.name ?? "") || required.has(c.context ?? "")),
-  );
-  const gate = dedupeRollupByLatestAttempt(all);
-  return gate
-    .filter((c) => REQUIRED_CHECK_FAIL.has((c.state ?? c.conclusion ?? c.status ?? "").toUpperCase()))
-    .map((c) => c.name ?? c.context ?? "unknown");
-}
+export function redQualityGateNames(rollup: RollupCheckEntry[] | undefined, requiredCheckNames: Iterable<string> | undefined): string[] { const required = new Set(requiredCheckNames ?? []); return dedupeRollupByLatestAttempt((rollup ?? []).filter((c) => c.name !== REVIEW_CONTEXT && c.context !== REVIEW_CONTEXT && (required.has(c.name ?? "") || required.has(c.context ?? "")))).filter((c) => REQUIRED_CHECK_FAIL.has((c.state ?? c.conclusion ?? c.status ?? "").toUpperCase())).map((c) => c.name ?? c.context ?? "unknown"); } // W1-T2504 — ci-gate.yml's OWN required checks already concluded red, INDEPENDENTLY of its still-running verdict (fixes #3318's blind window). Never reads/touches `checksState`.
 
 /** Job-level statuses {@link stalledRunReason} treats as that job having reached a final state. */
 const JOB_TERMINAL_STATUSES = new Set(["completed"]);
@@ -2109,7 +2023,6 @@ export function withoutDownstreamGateFailure(failures: readonly CiFailure[]): Ci
   return others;
 }
 
-
 /**
  * W1-T1275 (design iii/iv) — the ONE (head, sibling-transition) shape that makes `ci-gate`'s own
  * concluded verdict stale: its own latest (deduped) attempt concluded a NON-SUCCESS terminal
@@ -2265,18 +2178,7 @@ const MS_PER_DAY = 86_400_000;
  * `pr.reviewState` instead, by DISPOSITION_RULES' separate review-shaped row.
  * This keeps `isBlockedCi`'s own contract exactly as documented above ("a
  * required check is red — the failing signal IS the CI log") true by
- * construction, for every caller listed here.
- *
- * WIDENED (W1-T2504) to also read {@link OpenPrView.redRequiredChecks}: `pr.checksState` reads
- * "red" only once ci-gate — the SLOW aggregate that WAITS for every sibling before it reports
- * anything — itself concludes, so a required check that has ALREADY failed still reads
- * `checksState: "pending"` for as long as ci-gate keeps running (MEASURED on #3318: 24 minutes).
- * `redRequiredChecks` is populated independently, off the checks ci-gate itself aggregates rather
- * than the aggregate's own still-pending verdict, so this predicate — every caller's "is CI
- * blocking this PR right now" question — stops waiting on the aggregate to catch up. This widens
- * the FIX RUNG'S OWN reading only: `checksState` itself is untouched (see that field's own doc),
- * so every arming/merge-eligibility decision that reads `pr.checksState` directly, rather than
- * through this predicate, sees exactly what it saw before this task.
+ * construction, for every caller listed here. WIDENED (W1-T2504) — also reads {@link OpenPrView.redRequiredChecks}; `checksState` untouched.
  */
 export function isBlockedCi(pr: OpenPrView): boolean {
   return pr.checksState === "red" || (pr.redRequiredChecks?.length ?? 0) > 0;
@@ -2684,20 +2586,7 @@ export function absentChecksRepushDecision(
 function describeCiFailures(pr: OpenPrView): string {
   const failures = pr.ciFailures ?? [];
   if (failures.length === 0) {
-    // W1-T2504: ciFailures is populated only when checksState === "red" (that field's own doc),
-    // so a PR whose checksState still reads "pending" while a ci-gate-required check has already
-    // concluded red carries redRequiredChecks instead — NAME those checks rather than falling
-    // straight to the generic "no failing-check detail captured" text below, which is exactly
-    // the aggregate-shaped message this task's acceptance ("the failing check's own name reaches
-    // the fix rung's evidence rather than the aggregate's") refuses.
-    const redGates = pr.redRequiredChecks ?? [];
-    if (redGates.length > 0) {
-      return (
-        `required check(s) already concluded red on head ${pr.headSha.slice(0, 7)} while ci-gate's ` +
-        `own aggregate still reads "${pr.checksState}": ${redGates.join(", ")}`
-      );
-    }
-    return `a required check failed on head ${pr.headSha.slice(0, 7)} (no failing-check detail captured)`;
+    return (pr.redRequiredChecks?.length ?? 0) > 0 ? `required check(s) already concluded red on head ${pr.headSha.slice(0, 7)} while ci-gate's own aggregate still reads "${pr.checksState}": ${(pr.redRequiredChecks ?? []).join(", ")}` : `a required check failed on head ${pr.headSha.slice(0, 7)} (no failing-check detail captured)`; // W1-T2504: names concluded-red gates instead of the generic fallback.
   }
   return failures
     .map((f) => {
@@ -3294,20 +3183,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // W1-T2452: denominator is {@link fixCeilingInForce}, not the bare `policy.strikeCap` — see
     // that function's own doc; keeps this ratio naming the SAME ceiling the dispatch site
     // (`dispatchFix`, run-task.ts) actually budgets against.
-    //
-    // W1-T2504: `pr.checksState === "red"` keeps the BYTE-IDENTICAL reason it always had — every
-    // existing fixture asserting this exact string is untouched. The branch only diverges for the
-    // NEW way `isBlockedCi` can now be true: `checksState` still reads something other than
-    // "red" (the ci-gate aggregate has not concluded) while `redRequiredChecks` already names a
-    // failed required check — that case gets `describeCiFailures`' own naming instead of reusing
-    // wording that asserts a `checksState` reading which, here, is not actually true.
-    reason: (pr, policy) => {
-      const ceiling = fixCeilingInForce(pr, policy.strikeCap, policy.clarify);
-      if (pr.checksState === "red") {
-        return `required checks red — ci-log fix, strike ${pr.priorStrikes + 1}/${ceiling}`;
-      }
-      return `${describeCiFailures(pr)} — ci-log fix, strike ${pr.priorStrikes + 1}/${ceiling}`;
-    },
+    reason: (pr, policy) => (pr.checksState === "red" ? `required checks red — ci-log fix, strike ${pr.priorStrikes + 1}/${fixCeilingInForce(pr, policy.strikeCap, policy.clarify)}` : `${describeCiFailures(pr)} — ci-log fix, strike ${pr.priorStrikes + 1}/${fixCeilingInForce(pr, policy.strikeCap, policy.clarify)}`), // W1-T2504: "red" keeps its byte-identical reason; else names the gate.
   },
   {
     // W1-T1269 — row 5.5 (table doc above): AN EARLIER STOP, NEVER A LONGER LEASH. Ordered

@@ -555,11 +555,6 @@ interface RestStatus {
  * structurally assignable to it WITHOUT an import. That assignability is compile-checked for
  * real: test/open-prs-rest.test.ts passes `rollupFromRest(...)` straight into
  * `checksStateFromRollup`, so a drift in either shape fails `tsc`.
- *
- * W1-T2504: the SAME structural assignability holds for `redQualityGateNames` (lib/sweep.ts) —
- * it reads only `name`/`context`/`state`/`conclusion`/`status`/`startedAt`, the identical subset
- * `RollupCheckEntry` already declares, so a `rollupFromRest(...)` array is a valid argument there
- * too with no widening of this interface required.
  */
 export interface RestRollupEntry {
   name?: string;
