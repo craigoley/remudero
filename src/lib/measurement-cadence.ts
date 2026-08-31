@@ -696,6 +696,8 @@ function walkVerbCensusSources(dir: string, out: string[]): void {
   try {
     entries = readdirSync(dir, { withFileTypes: true });
   } catch {
+    // unreadable subtree (permission denied, vanished mid-walk) — skipped, never the reason the
+    // WHOLE census refuses; same posture as the per-file catch just below.
     return;
   }
   for (const e of entries) {
@@ -764,6 +766,8 @@ export function runVerbCensus(opts: {
   try {
     verbs = deriveCliVerbs(runTaskSource);
   } catch (e) {
+    // reshaped COMMANDS array (renamed/no closing `] as const;`) — deriveCliVerbs's own thrown
+    // reason IS the refusal text, surfaced verbatim rather than reworded.
     return refuse(String((e as Error)?.message ?? e));
   }
 

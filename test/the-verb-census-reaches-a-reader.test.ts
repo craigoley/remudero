@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import fsDefault, { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -190,14 +190,30 @@ test("every declared verb unmeasurable: refuses rather than measuring an empty p
   }
 });
 
-test("a source subdirectory that cannot be scanned is skipped, never the reason the whole census refuses", () => {
+test("a source subdirectory that cannot be scanned is skipped, never the reason the whole census refuses", (t) => {
   const checkoutDir = buildVerbCensusFixtureCheckout();
   const stateDir = join(checkoutDir, "state");
   buildVerbCensusLedgerFixture(stateDir);
   const brokenDir = join(checkoutDir, "src/broken");
   mkdirSync(brokenDir, { recursive: true });
   writeFileSync(join(brokenDir, "unreadable.ts"), 'log("alpha.thing", {});\n');
-  chmodSync(brokenDir, 0o000);
+  // A MOCKED readdirSync, never a chmod: host-capability-fixtures.test.ts's own DECLARED census
+  // refuses an undeclared uid-dependent chmod fixture (its own guidance prefers a uid-independent
+  // denial or, failing that, an explicit DECLARED entry — neither of which this task's declared
+  // file scope permits touching). Mocking `fsDefault.readdirSync` reaches the exact same
+  // `walkVerbCensusSources` catch arm deterministically, on every uid, with no host filesystem
+  // side effect at all: only the one path this test names throws; every other call — including
+  // the ones this same walk makes for `src/lib`, `state`, etc. — passes through to the real
+  // implementation unchanged.
+  const originalReaddirSync = fsDefault.readdirSync.bind(fsDefault);
+  t.mock.method(fsDefault, "readdirSync", (p: unknown, opts?: unknown) => {
+    if (p === brokenDir) {
+      const err = new Error(`EACCES: permission denied, scandir '${brokenDir}'`) as NodeJS.ErrnoException;
+      err.code = "EACCES";
+      throw err;
+    }
+    return (originalReaddirSync as (...args: unknown[]) => unknown)(p, opts);
+  });
   try {
     const r = runVerbCensus({ checkoutDir, stateDir, ledgerUnion: resolveLedgerUnion });
     // walkVerbCensusSources's own readdirSync throws on brokenDir (permission denied) and it
@@ -207,7 +223,6 @@ test("a source subdirectory that cannot be scanned is skipped, never the reason 
     assert.equal(r.measurableCount, 3);
     assert.equal(r.silentCount, 2, "alpha/beta still read as silent — the unreadable subdir changed nothing about the reachable corpus");
   } finally {
-    chmodSync(brokenDir, 0o755);
     rmSync(checkoutDir, { recursive: true, force: true });
   }
 });
