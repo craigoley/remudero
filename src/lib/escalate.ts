@@ -247,7 +247,7 @@ function checkOperatorMessageSafe(e: Escalation): OperatorMessageCheckResult | u
   try {
     return checkOperatorMessage(toOperatorMessage(e));
   } catch {
-    return undefined;
+    return undefined; // best-effort: a checker failure must never block the escalation itself
   }
 }
 
