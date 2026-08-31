@@ -51,6 +51,12 @@ import { readLedgerLines, DEFAULT_LIVENESS_BOUND_MS, type LedgerReader } from ".
 import { deriveLastPoll } from "./daemon-health.js";
 import { deriveThreadId, readThread, appendThreadMessage, type ThreadIdentity } from "./inbox-thread.js";
 import { captureFeedback } from "./feedback.js";
+import {
+  interpretReply,
+  formatClarifyingQuestion,
+  formatExhaustionReport,
+  type InterpretReplyDeps,
+} from "./reply-interpreter.js";
 
 /** Non-task-scoped panel actions (pause/resume/stop/quiet-hours) ledger under this sentinel — mirrors run-task.ts's drainCommand, which ledgers its own fleet-wide lines as `task_id: "DRAIN"`. */
 export const PANEL_TASK_ID = "PANEL";
@@ -75,6 +81,16 @@ export interface PanelActionDeps {
    * a missing wire is a refusal, never a silent unattached filing.
    */
   threadStorePath?: string;
+  /**
+   * W1-T2499: rules {@link buildEscalationReplyRoute} hands `interpretReply` (reply-interpreter.ts)
+   * to decide whether a reply is UNDERSTOOD or leaves an unresolved ambiguity worth asking about.
+   * OPTIONAL for the exact reason `threadStorePath` above is: every route built before this task
+   * (and every caller of this one that never sets it) must keep compiling and behaving exactly as
+   * before — unset means `interpretReply` runs with its own default (`rules: []`), which is always
+   * `"understood"`, so an unconfigured deploy never asks anything and this route's prior behaviour
+   * is unchanged bit for bit.
+   */
+  interpretReplyDeps?: InterpretReplyDeps;
 }
 
 /** Shared with lib/panel-graph.ts (W3-T6, the plan->task->PR graph + feedback/decision routes) -- one JSON-envelope writer for every panel route, never a second copy. */
@@ -681,13 +697,33 @@ export function buildEscalationReplyRoute(deps: PanelActionDeps): Route {
         return;
       }
       appendThreadMessage(identity, "reply", input.text, { threadStorePath: deps.threadStorePath });
+
+      // W1-T2499: is this reply UNDERSTOOD, or does it leave an ambiguity worth asking about?
+      // `interpretReply` is pure -- it decides, it never dispatches, ratifies, files a task, or
+      // arms a merge; the append below is this route's own side effect, on the SAME thread the
+      // reply just landed on, never a new inbox.
+      const interpretation = interpretReply(
+        { identity, threadId, replyText: input.text, priorMessages: existing.messages },
+        deps.interpretReplyDeps,
+      );
+      const followUp =
+        interpretation.status === "clarifying"
+          ? formatClarifyingQuestion(interpretation.question)
+          : interpretation.status === "exhausted"
+            ? formatExhaustionReport(interpretation.unresolved)
+            : undefined;
+      if (followUp) {
+        appendThreadMessage(identity, "escalation", followUp, { threadStorePath: deps.threadStorePath });
+      }
+
       const entry = captureFeedback(deps.root, { raw: input.text, origin: "ui", threadId });
       const origin = bearerTokenId(req);
       ledgerPanelAction(deps, "panel.escalation_replied", input.taskId, origin, {
         thread_id: threadId,
         feedback_id: entry.id,
+        interpretation: interpretation.status,
       });
-      sendJson(res, 200, { ok: true, taskId: input.taskId, threadId, feedback: entry });
+      sendJson(res, 200, { ok: true, taskId: input.taskId, threadId, feedback: entry, interpretation });
     }),
   };
 }
