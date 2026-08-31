@@ -3033,7 +3033,7 @@ const SHORTHAND_HEAD_NOUN_RE = /^[*_`]*[ \t]+([A-Za-z][A-Za-z0-9_-]*)/;
  *   - `not` counts always, since it negates whatever follows ("not this time", "not really").
  * That single distinction separates every observed denial from every observed assertion.
  */
-const DENIED_LABEL_ANSWER_RE = /^[*_`'")\]\s]*:\s*(?:(?:no|nope)(?![ \t]*[\w])|not\b)/i;
+export const DENIED_LABEL_ANSWER_RE = /^[*_`'")\]\s]*:\s*(?:(?:no|nope)(?![ \t]*[\w])|not\b)/i;
 
 /**
  * W1-T2533 — the ATTRIBUTIVE form of the same denial: "this is NOT a plan-only change". The
@@ -3044,7 +3044,7 @@ const DENIED_LABEL_ANSWER_RE = /^[*_`'")\]\s]*:\s*(?:(?:no|nope)(?![ \t]*[\w])|n
  * (SELF_REFERENTIAL_CLAIM_RE): a negator anywhere-in-sentence would silence a genuine claim that
  * merely shares a sentence with an unrelated negation.
  */
-const DENIED_ATTRIBUTIVE_RE = /\b(?:not|never|isn't|aren't|wasn't)\s+(?:a|an|the)?\s*$/i;
+export const DENIED_ATTRIBUTIVE_RE = /\b(?:not|never|isn't|aren't|wasn't)\s+(?:a|an|the)?\s*$/i;
 function shorthandIsAboutChangeset(report: string, index: number, length: number): boolean {
   const rest = report.slice(index + length);
   // THE LABEL FORM IS A CLAIM, and it is the one the house style actually writes: `data-only: no

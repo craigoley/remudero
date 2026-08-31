@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { bodyContradictsDiff } from "../src/lib/review.js";
+import { DENIED_ATTRIBUTIVE_RE, DENIED_LABEL_ANSWER_RE, bodyContradictsDiff } from "../src/lib/review.js";
 
 /**
  * W1-T2533 — the label arm of `shorthandIsAboutChangeset` decides on the COLON alone and never
@@ -81,4 +81,41 @@ test("W1-T2533: the detector still refuses the claims it exists to catch — the
   for (const line of ["Plan-only: one file added.", "This is a plan-only change.", "The diff is plan-only."]) {
     assert.equal(refused(line), true, `must still refuse: ${line}`);
   }
+});
+
+// W1-T2533: the two denial regexes get their own both-arm fixtures, driving the REFUSING arm and
+// the ACCEPTING arm separately. `bodyContradictsDiff` above exercises them only through the
+// surrounding arm logic, so a regex that widened into a general escape hatch (or narrowed into a
+// dead branch) could still leave those cases green. `negative-reachability-ratchet` enumerates
+// every module-scope `_RE` in src/ and holds each file's fixture-less count at its baseline, which
+// is what requires the two symbols to be named by identifier here rather than only reached through
+// their caller.
+
+test("W1-T2533: DENIED_LABEL_ANSWER_RE separates a negative ANSWER from a description of content", () => {
+  // The unhealthy arm the regex exists to name: the label was answered, so there is no claim.
+  assert.equal(DENIED_LABEL_ANSWER_RE.test(": no."), true);
+  assert.equal(DENIED_LABEL_ANSWER_RE.test(": nope"), true);
+  assert.equal(DENIED_LABEL_ANSWER_RE.test(": not this time"), true);
+  assert.equal(DENIED_LABEL_ANSWER_RE.test("**: no**"), true, "reads through markdown emphasis");
+  // The healthy arm: `no <noun>` DESCRIBES the changeset rather than denying the label, so it is
+  // still a claim and must stay judgeable. This is the distinction the regex's lookahead draws.
+  assert.equal(DENIED_LABEL_ANSWER_RE.test(": no code."), false);
+  assert.equal(DENIED_LABEL_ANSWER_RE.test(": no src touched"), false);
+  assert.equal(DENIED_LABEL_ANSWER_RE.test(": one file added."), false);
+  assert.equal(DENIED_LABEL_ANSWER_RE.test(" describes a lane, not this diff"), false, "no colon: not the label form at all");
+});
+
+test("W1-T2533: DENIED_ATTRIBUTIVE_RE fires only on a negator IMMEDIATELY before the noun phrase", () => {
+  // The unhealthy arm: the shorthand is modified AND denied, so the attributive read must not
+  // credit it as a claim.
+  assert.equal(DENIED_ATTRIBUTIVE_RE.test("this is not a "), true);
+  assert.equal(DENIED_ATTRIBUTIVE_RE.test("this is never a "), true);
+  assert.equal(DENIED_ATTRIBUTIVE_RE.test("it isn't a "), true);
+  assert.equal(DENIED_ATTRIBUTIVE_RE.test("these aren't "), true, "the article is optional");
+  // The healthy arm: an affirmative attributive stays a claim, and — the bound that matters — a
+  // negation EARLIER in the same sentence must not silence one, which is why the pattern is
+  // anchored to the end of the preceding text rather than searched anywhere in it.
+  assert.equal(DENIED_ATTRIBUTIVE_RE.test("this is a "), false);
+  assert.equal(DENIED_ATTRIBUTIVE_RE.test("not the lane it ran in, this is a "), false);
+  assert.equal(DENIED_ATTRIBUTIVE_RE.test("the revert was not reviewed, so the "), false);
 });
