@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { lintTask, sizingViolation, type RiskTransitionContext } from "../src/lib/task-linter.js";
-import type { Task } from "../src/lib/plan.js";
+import { parseTasksFromYaml, PlanError, type Task } from "../src/lib/plan.js";
 
 /**
  * W1-T2503: `sizingViolation` used to exempt EVERY `risk: high` task from Rule 19's span
@@ -182,4 +182,48 @@ test("ACCEPTANCE 8: the TRANSITION SCOPING is what protects the standing baselin
   // do, and it fails the gate outright.
   const unscoped = sizingViolation(standing, { riskTransition: filedNewAtHigh });
   assert.equal(unscoped?.severity, "block", "dropping the transition scoping must fail the standing task");
+});
+
+// ── ACCEPTANCE 9: the YAML loader validates `band_meaning` exactly like every other
+//    enum field on a task (risk, status, retirement) — a bogus value is a PlanError,
+//    a legal one round-trips onto the parsed Task ────────────────────────────────────
+
+test("ACCEPTANCE 9: parseTasksFromYaml rejects an unrecognised band_meaning", () => {
+  const yaml = `
+- id: W1-BAD-BAND
+  title: bogus band
+  repo: remudero
+  type: implement
+  risk: high
+  band_meaning: not-a-real-value
+`;
+  assert.throws(
+    () => parseTasksFromYaml(yaml, "test-blob"),
+    (err: unknown) => err instanceof PlanError && /invalid band_meaning/.test((err as Error).message),
+  );
+});
+
+test("ACCEPTANCE 9b: parseTasksFromYaml accepts a legal band_meaning and carries it onto the Task", () => {
+  const yaml = `
+- id: W1-GOOD-BAND
+  title: legit band
+  repo: remudero
+  type: implement
+  risk: high
+  band_meaning: blast-radius
+`;
+  const [t] = parseTasksFromYaml(yaml, "test-blob");
+  assert.equal(t.band_meaning, "blast-radius");
+});
+
+test("ACCEPTANCE 9c: parseTasksFromYaml leaves band_meaning undefined when the task omits it", () => {
+  const yaml = `
+- id: W1-NO-BAND
+  title: no band declared
+  repo: remudero
+  type: implement
+  risk: high
+`;
+  const [t] = parseTasksFromYaml(yaml, "test-blob");
+  assert.equal(t.band_meaning, undefined);
 });
