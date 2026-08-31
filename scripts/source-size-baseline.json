@@ -32,7 +32,7 @@
   "src/lib/doctor.ts": 798,
   "src/lib/drain-lock.ts": 156,
   "src/lib/drain.ts": 2363,
-  "src/lib/emissions.ts": 183,
+  "src/lib/emissions.ts": 205,
   "src/lib/env.ts": 510,
   "src/lib/escalate.ts": 1434,
   "src/lib/feedback-docket.ts": 334,
@@ -140,6 +140,6 @@
   "src/lib/worker-scratch.ts": 227,
   "src/lib/worker.ts": 3452,
   "src/lib/workflow-run.ts": 28,
-  "src/run-task.ts": 32543,
+  "src/run-task.ts": 32587,
   "src/spike.ts": 311
 }
