@@ -41,6 +41,11 @@
     to fix, and it escalates exactly as today. `NEVER an empty commit and never a close-and-reopen`
     — both are explicitly forbidden ways to kick CI, and a base merge is neither.
 
+    RETIRED AS `withdrawn` ON THE OPERATOR RULING, 2026-08-31, on the correction below. The
+    capability is not missing, so there is nothing here to build; what remains open is a different
+    question (why the existing row did not fire), and it belongs to its own task written against
+    the ledger rather than to this one.
+
     (7) OUT OF SCOPE, NAMED. (a) Repairing the body itself — W1-T2541. This task only makes a
     repair TAKE EFFECT. (b) Any change to what the reviewer judges. (c) The conflicted case, which
     already has its own rung (W1-T106/W1-T2536).
@@ -62,7 +67,8 @@
   origin: incident
   plan_refs: ["W1-T176", "W1-T2541", "W1-T106"]
   files: [src/lib/stale-verdict.ts, src/lib/sweep.ts, test/a-stale-verdict-earns-a-new-head.test.ts]
-  status: queued
+  status: blocked
+  retirement: withdrawn
   attempts: 0
   note: |
     risk:high, band_meaning: blast-radius — a predicate that causes the fleet to push commits to
