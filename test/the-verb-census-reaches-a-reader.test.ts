@@ -389,3 +389,56 @@ test("nothing in runVerbCensus's own body mints a proposal, writes the registry,
     assert.ok(!body.includes(forbidden), `runVerbCensus must never call ${forbidden} — it is a report, never a minter`);
   }
 });
+
+// ── the unreadable-subtree arm of the source walk ─────────────────────────────────────────────
+//
+// `walkVerbCensusSources` skips a subtree it cannot read rather than letting the read error escape.
+// That arm is unreachable through the real filesystem in this harness: the entry must be a
+// DIRECTORY for the walk to recurse into it (so the ENOTDIR trick test/inflight-sweep-rung.test.ts
+// uses does not apply), `chmod` is inert for uid 0, and a path long enough to throw ENAMETOOLONG
+// cannot afterwards be removed by `rmSync` — MEASURED: rmSync fails ENAMETOOLONG on unlink and the
+// tree survives, so that route litters the runner. Driven through the injected reader instead.
+
+test("an unreadable subtree is absorbed by the walk — the census still returns a structured result, and the read error is never its reason", () => {
+  const checkoutDir = buildVerbCensusFixtureCheckout();
+  const stateDir = join(checkoutDir, "state");
+  buildVerbCensusLedgerFixture(stateDir);
+  try {
+    let threwFor = 0;
+    const readdirImpl = ((dir: string, opts?: unknown) => {
+      // Throw for the SUBTREE only — the top-level `src` read must succeed, or the walk never
+      // recurses and this would prove nothing about the arm under test.
+      if (dir.endsWith(`${"/"}lib`)) {
+        threwFor += 1;
+        throw Object.assign(new Error("EACCES: permission denied (injected)"), { code: "EACCES" });
+      }
+      return (fsDefault.readdirSync as (d: string, o?: unknown) => unknown)(dir, opts);
+    }) as unknown as Parameters<typeof runVerbCensus>[0]["readdirImpl"];
+
+    const r = runVerbCensus({ checkoutDir, stateDir, ledgerUnion: resolveLedgerUnion, readdirImpl });
+
+    assert.ok(threwFor > 0, "the injected reader must actually have been asked for the subtree — otherwise this test drives nothing");
+    // THE POINT: the walk does not let the read error escape. The census completes and answers in
+    // its own vocabulary; losing the subtree costs it the prefixes that lived there, which is a
+    // DIFFERENT fact from a read failure and is reported as such.
+    assert.equal(r.status, "refused");
+    assert.equal(r.refusedReason, "no scanned verb carries an attributable ledger prefix this run");
+    assert.ok(!/EACCES|permission denied|injected/i.test(r.refusedReason ?? ""), "the read error must never surface as the census's reason");
+    assert.equal(r.measurableCount, 0, "the prefixes lived in the subtree that was skipped");
+  } finally {
+    rmSync(checkoutDir, { recursive: true, force: true });
+  }
+});
+
+test("CONTROL: the same fixture WITHOUT the injected failure measures — so the assertion above is not vacuous", () => {
+  const checkoutDir = buildVerbCensusFixtureCheckout();
+  const stateDir = join(checkoutDir, "state");
+  buildVerbCensusLedgerFixture(stateDir);
+  try {
+    const r = runVerbCensus({ checkoutDir, stateDir, ledgerUnion: resolveLedgerUnion });
+    assert.equal(r.status, "measured", "the readable walk measures — the subtree IS load-bearing input");
+    assert.equal(r.measurableCount, 3);
+  } finally {
+    rmSync(checkoutDir, { recursive: true, force: true });
+  }
+});

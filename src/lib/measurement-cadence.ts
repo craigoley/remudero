@@ -685,16 +685,29 @@ export interface VerbCensusCadenceResult extends MeasurementCadenceVerbStatus {
 
 const VERB_CENSUS_SKIP_DIR_NAMES = new Set(["node_modules", ".git", "dist", "build", "coverage"]);
 
+/**
+ * The one `readdirSync` {@link walkVerbCensusSources} calls, injectable so its unreadable-subtree
+ * arm is reachable from a test. That arm cannot be driven through the real filesystem here: the
+ * entry must be a DIRECTORY for the walk to recurse into it (so the ENOTDIR trick
+ * test/inflight-sweep-rung.test.ts uses does not apply), `chmod` is inert for uid 0, and a path
+ * long enough to throw ENAMETOOLONG cannot afterwards be removed by `rmSync` -- a test that
+ * litters the runner is worse than the gap it closes. Injection is the same shape
+ * `LedgerGrepFsDeps` (lib/ledger-grep.ts) already uses for exactly this reason.
+ *
+ * Optional and LAST on both signatures, so every existing caller is byte-identical.
+ */
+type VerbCensusReaddir = typeof readdirSync;
+
 /** Every `.ts` file's TEXT under `<checkoutDir>/src`, recursively — the same corpus `rmd
  *  emissions` (`src/run-task.ts`'s `emissionsCommand`) reads, reproduced here rather than
  *  imported: that command is a CLI entry point and `src/lib` modules never import from it in
  *  reverse (`.dependency-cruiser.cjs`'s `lib-no-spike-or-cli` rule) — the same small, deliberate
  *  duplication {@link defaultMeasurementCadenceGitLog}'s own doc states the alternative (a
  *  cross-layer import) would be worse. */
-function walkVerbCensusSources(dir: string, out: string[]): void {
+function walkVerbCensusSources(dir: string, out: string[], readdir: VerbCensusReaddir = readdirSync): void {
   let entries;
   try {
-    entries = readdirSync(dir, { withFileTypes: true });
+    entries = readdir(dir, { withFileTypes: true });
   } catch {
     // unreadable subtree (permission denied, vanished mid-walk) — skipped, never the reason the
     // WHOLE census refuses; same posture as the per-file catch just below.
@@ -704,7 +717,7 @@ function walkVerbCensusSources(dir: string, out: string[]): void {
     if (VERB_CENSUS_SKIP_DIR_NAMES.has(e.name)) continue;
     const child = join(dir, e.name);
     if (e.isDirectory()) {
-      walkVerbCensusSources(child, out);
+      walkVerbCensusSources(child, out, readdir);
     } else if (e.name.endsWith(".ts")) {
       try {
         out.push(readFileSync(child, "utf8"));
@@ -739,6 +752,8 @@ export function runVerbCensus(opts: {
   stateDir: string;
   ledgerUnion: (stateDir: string, pattern: RegExp) => LedgerUnionResult;
   allowlist?: ReadonlyMap<string, string>;
+  /** See {@link VerbCensusReaddir}. Absent ⇒ the real `readdirSync`, unchanged. */
+  readdirImpl?: VerbCensusReaddir;
 }): VerbCensusCadenceResult {
   const refuse = (
     refusedReason: string,
@@ -772,7 +787,7 @@ export function runVerbCensus(opts: {
   }
 
   const sources: string[] = [];
-  walkVerbCensusSources(join(opts.checkoutDir, "src"), sources);
+  walkVerbCensusSources(join(opts.checkoutDir, "src"), sources, opts.readdirImpl);
   const attributed = attributeVerbs(verbs, deriveStepPrefixes(sources));
   const measurable = attributed.filter((a): a is { name: string; prefix: string } => a.prefix !== null);
   const unmeasurableVerbs = attributed.filter((a) => a.prefix === null).map((a) => a.name);
