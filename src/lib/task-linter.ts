@@ -2412,7 +2412,7 @@ export function advisoryRoutingViolations(task: Task): LintViolation[] {
 //
 // ONE PURE MODULE (src/lib/knowledge-dedup.ts's `bestNearDuplicate`), THREE CONSUMERS HERE,
 // TWO SEVERITIES — matched to population size and false-positive cost (the W1-T352-vs-W1-T322
-// calibration argument applied at filing time). Every consumer below pass its own corpus in
+// calibration argument applied at filing time). Every consumer below passes its own corpus in
 // (this module reads no disk, same purity contract `moduleExists` already keeps for
 // `callSiteViolations`); the CALLER resolves `learnings/*.yaml` and `plan/tasks.yaml` + shards
 // and injects the result.
