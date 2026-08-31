@@ -1,0 +1,90 @@
+- id: W1-T2544
+  title: "A PROOF THAT CANNOT POSSIBLY EXECUTE PASSES THE AUTHOR-TIME GATE AND FAILS ONLY AT VERDICT — the retro emitter wrapped its grep patterns in double quotes one cycle and BACKTICKS the next, and both times every pattern read 0 while acceptance-author-gate stayed green: refuse a wrapped pattern and a non-dialect proof where the author can still act, not after the verdict is posted and the sha is spent"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 22.00
+  rationale: |
+    MEASURED on two consecutive retro cycles, six hours apart, 2026-08-31. Both failed. Both had
+    entirely correct CONTENT. Both failed purely on proof formatting that no gate refused until the
+    verdict was already posted.
+
+    (1) THE TWO CYCLES, AND THE WRAPPER CHANGED BETWEEN THEM.
+        RETRO-1788144172947 (#3356) — six `grep:` patterns wrapped in DOUBLE QUOTES.
+        RETRO-1788193081371 (#3413) — five `grep:` patterns wrapped in BACKTICKS.
+    `execWhitelistedProof` runs `grep -arn --` with no `-F`, so a wrapper is a character that must
+    appear in the file. MEASURED on each PR's own head: EVERY wrapped pattern reads 0 and EVERY
+    bare one reads 1 (and 0 at the merge base, so each discriminates once unwrapped). The emitter is
+    wrapping patterns in whatever delimiter reads well in Markdown; the delimiter is incidental and
+    will change again.
+
+    (2) BOTH CYCLES ALSO CARRIED NON-DIALECT PROOFS. #3356 used `demonstration:` twice, #3413 four
+    times. `rmd check-proof` refuses a proof with no `unit test:`/`grep:` prefix as prose that never
+    executes — but nothing refuses it at AUTHOR time, so it contributes nothing and the criterion
+    silently falls to the keyword floor.
+
+    (3) THE GATE THAT SHOULD HAVE CAUGHT BOTH DID NOT, AND ITS ARMS SAY WHY.
+    `acceptanceAuthorTimeCheck` (`src/lib/review.ts`) has exactly three refusals — `no-header`,
+    `unparseable` (a claim wrapped onto a second line) and `empty-proofs` (a claim with NO proof).
+    A wrapped pattern is not empty and a `demonstration:` line is not empty, so both reach
+    `ok: true, "Acceptance block is judgeable"`. MEASURED through the real parser:
+        `grep: \`FOLDED BY R39\` in MASTER-PLAN.md`   -> parseWhitelistedProof: PARSES
+        `grep: FOLDED BY R39 in MASTER-PLAN.md`      -> parseWhitelistedProof: PARSES
+        `demonstration: two entries replaced by one` -> parseWhitelistedProof: null
+    So the wrapped case needs a STRUCTURAL check (it parses and then reads 0), and the prose case
+    needs only that the gate consult the parser it does not currently consult.
+
+    (4) WHY AUTHOR TIME IS THE RIGHT PLACE AND NOT THE REVIEWER. The reviewer ALREADY knows: it
+    grades exactly this as `no-dialect` and `dialect-parse-error` (`src/lib/review.ts`'s own
+    proof_skip vocabulary). But it knows at VERDICT time, and a posted verdict is never re-judged
+    on the same sha — so learning it there costs a new head. `acceptance-author-gate` is a required
+    check that runs on the PR itself, so the same fact delivered there is a red check the author or
+    the fix rung can act on immediately, with the sha still live. This task MOVES a fact that is
+    already computed to a place where it is still actionable; it invents no new judgement.
+
+    (5) THE WRAPPED-PATTERN TEST IS EXACT, NOT A HEURISTIC. Refuse only a pattern WHOLLY enclosed
+    in a matching pair of ` ` `, `"` or `'` with non-empty content between them. A pattern that
+    merely CONTAINS a delimiter is untouched, and so is one enclosed in mismatched delimiters. The
+    refusal names the bare pattern the author meant, so the fix is a copy-paste rather than a
+    diagnosis.
+
+    (6) FAIL-CLOSED IS WRONG HERE AND THE POLARITY IS DELIBERATE. This gate refuses an author; a
+    false refusal blocks a correct PR. Every arm therefore fires only on a POSITIVE structural
+    finding — a delimiter pair actually present, a parser actually returning null — and anything it
+    cannot classify passes exactly as today.
+
+    (7) OUT OF SCOPE, NAMED. (a) The reviewer's own grading, unchanged — this adds an earlier
+    warning, never a second verdict. (b) The retro's emitter itself: fixing the producer is
+    worthwhile but would leave every hand-written body unprotected, and the gate protects both.
+    (c) W1-T2535's changed-files block, a different stale-claim defect on the same bodies.
+  acceptance:
+    - claim: "a grep pattern wholly wrapped in backticks is refused at author time, naming the bare pattern the author meant"
+      proof: "unit test: test/a-proof-that-cannot-execute-is-refused-at-author-time.test.ts"
+    - claim: "the same refusal fires for double quotes and single quotes, so the delimiter that changed between two cycles is not special-cased"
+      proof: "unit test: test/a-proof-that-cannot-execute-is-refused-at-author-time.test.ts"
+    - claim: "a proof carrying no house dialect at all is refused rather than passing as judgeable"
+      proof: "unit test: test/a-proof-that-cannot-execute-is-refused-at-author-time.test.ts"
+    - claim: "a pattern that merely contains a delimiter, or is enclosed in mismatched ones, is NOT refused"
+      proof: "unit test: test/a-proof-that-cannot-execute-is-refused-at-author-time.test.ts"
+    - claim: "both real retro bodies are replayed: each is refused as written and accepted once unwrapped"
+      proof: "unit test: test/a-proof-that-cannot-execute-is-refused-at-author-time.test.ts"
+    - claim: "a body that already passed this gate still passes, so the change adds a refusal rather than reshaping the contract"
+      proof: "unit test: test/a-proof-that-cannot-execute-is-refused-at-author-time.test.ts"
+  risk: high
+  band_meaning: blast-radius
+  origin: incident
+  plan_refs: ["W1-T2297", "W1-T305", "W1-T2535", "W1-T2532"]
+  files: [src/lib/review.ts, test/a-proof-that-cannot-execute-is-refused-at-author-time.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    risk:high, band_meaning: blast-radius — `acceptance-author-gate` is a REQUIRED check, so a false
+    refusal here blocks every PR that trips it. That is why rationale (6) fixes the polarity: every
+    arm fires on a positive structural finding and anything unclassifiable passes unchanged.
+
+    `files:` DERIVED FROM SOURCE. `acceptanceAuthorTimeCheck`, `acceptanceBlockDiagnostics` and
+    `parseWhitelistedProof` are all in `src/lib/review.ts`; the new arm belongs beside the three
+    refusals it joins, and reusing that module's own parser is what keeps this from becoming a
+    second spelling of "this proof cannot run".
