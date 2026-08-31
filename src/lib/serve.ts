@@ -64,6 +64,7 @@ import {
   buildDrainFeedbackRoute,
   buildDrainNowRoute,
   buildEscalationMarkHandledRoute,
+  buildEscalationReplyRoute,
   buildKickRoute,
   buildPauseRoute,
   buildQuietHoursRoute,
@@ -5420,6 +5421,13 @@ export function buildServeRoutes(deps: ServeDeps): Route[] {
     buildAnswerQuestionRoute(questionDeps),
     buildApproveManualRoute(fleetControlDeps),
     buildEscalationMarkHandledRoute(fleetControlDeps),
+    // W1-T2496: the prose-reply route — MOUNTED so it never joins the "declared but unreachable"
+    // class this module's own history has three prior instances of (see the buildDrainFeedbackRoute
+    // note below). `fleetControlDeps` carries no `threadStorePath` (production wiring of the real
+    // thread-store path is a separate concern, mirroring escalate.ts's own OPTIONAL field, W1-T2494)
+    // — so this route currently refuses every real call with "no thread store configured", the SAME
+    // safe refusal it gives any thread it cannot confirm, never a silent unattached filing.
+    buildEscalationReplyRoute(fleetControlDeps),
     // W1-T164: operator guidance notes — console-editable, provenance-stamped, task-scoped.
     // Rooted at `questionsRoot` (repoRoot) — the SAME durable, gitignored `plan/` store
     // worker.ts's question channel already reads/writes (see operator-notes.ts's module doc).
