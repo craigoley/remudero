@@ -81,6 +81,11 @@ const COVERAGE_DEBT: ReadonlyMap<string, string> = new Map([
   ["POST /v1/feedback/decision", "needs a feedback-landing fixture (real git bridge)"],
   ["POST /v1/operator-notes/add", "advisory note; no fleet effect"],
   ["POST /v1/drain/feedback", "covered by test/route-registration.test.ts (mount + write scope)"],
+  [
+    "POST /v1/escalation/reply",
+    "W1-T2496: capture-only (files a feedback entry + a thread message), same shape as POST /v1/feedback " +
+      "above — no fleet-effect root to mis-wire. Covered by test/a-prose-reply-reaches-the-fleet-as-an-input.test.ts.",
+  ],
   ["POST /v1/skills/run", "covered by test/skill-run-route-registered.test.ts"],
 ]);
 
