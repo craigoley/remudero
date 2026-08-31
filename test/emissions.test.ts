@@ -273,7 +273,10 @@ test("emissionsCommand renders the real report over the real corpus", () => {
   assert.equal(code, 0);
   assert.match(out, /^rmd emissions — window 30d/m);
   assert.match(out, /corpus\s+: \d+ ledger file\(s\)/);
-  assert.match(out, /verbs\s+: \d+ declared, \d+ measurable, \d+ unauditable/);
+  // W1-T2479: "declared" (COMMANDS.length) and "scanned" (deriveCliVerbs's own count) are printed
+  // separately — assertVerbScanAgreesWithRegistry has already asserted they're equal by this
+  // point, but the report states its own corpus check rather than collapsing to one number.
+  assert.match(out, /verbs\s+: \d+ declared, \d+ scanned, \d+ measurable, \d+ unauditable/);
   // The false-positive lock, against the LIVE corpus rather than a fixture: the daemon and the
   // sweep run constantly, so neither may ever be classified as dead here.
   //
