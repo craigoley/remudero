@@ -16542,6 +16542,11 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
           // in the PR. Already in scope — no new resolution, no new git read.
           followUpTasks,
         },
+        // W1-T2487: `oldTask` is the SAME base-ref shard already resolved above for
+        // `postMergeAmendment.baseTask` — no new resolution or git read. Populated only here
+        // (the changed-tasks/`--base` pass), so `blockedDispositionViolations` stays silent on
+        // the whole-plan pass, exactly as this task's rationale scopes the refusal.
+        blockedDisposition: { baseTask: oldTask },
         // impl-DS: only ever populated in --base mode, so the check is silent whole-plan.
         newMonolithIds,
         // W1-T1076: `scope` is populated iff `--base` was given, so this branch IS the
