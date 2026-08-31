@@ -5497,6 +5497,82 @@ const ZERO_COUNTS = (): Record<Disposition, number> => ({
 const inFlightReviewKeys = new Set<string>();
 
 /**
+ * W1-T2520 — THE FIX-DISPATCH MUTEX, {@link inFlightReviewKeys}'s SIBLING FOR THE OTHER LANE:
+ * `deps.dispatchFix` — "the one lane W1-T1211 admits into the light pass that spends a worker"
+ * ({@link detachedSweepActions}'s own doc below) — never got one. `priorStrikesFor` (run-task.ts)
+ * derives `OpenPrView.priorStrikes` by COUNTING `fix.dispatch` ledger rows at OpenPrView-build
+ * time, with no exclusion between that count and the dispatch it gates: two calls in this SAME
+ * process (the daemon's full sweep racing a light-pass tick, or two overlapping light passes) can
+ * both build an `OpenPrView` off the SAME pre-dispatch ledger state and both see `priorStrikes`
+ * under the cap — OBSERVED LIVE as 13 fix-worker dispatches across two PRs against a `strikeCap`
+ * of 2, and one review posted three times to one sha (the same race showing through the review
+ * lane once three fix workers each finished and each ran a review).
+ *
+ * A CLAIM ALONE IS NOT ENOUGH, which is why this is not simply a second copy of
+ * {@link inFlightReviewKeys}: a SECOND, non-concurrent call reaching this PR after the first
+ * already dispatched would still be carrying the FIRST call's now-stale `pr.priorStrikes` — the
+ * exact "read-modify-write race" shape the counter advancing slower than the dispatch rate is the
+ * signature of. {@link claimFixDispatch} (below, inside `runSweep`) also RE-READS the ledger and
+ * RE-COUNTS strikes the instant the claim is taken, so the count two callers act on can never be
+ * the same stale snapshot — see that function's own doc for the read-under-the-claim mechanics.
+ *
+ * MODULE-SCOPED for the exact reason {@link inFlightReviewKeys} is (its own doc above): every
+ * caller builds a fresh `SweepDeps` but runs in the SAME process, so a module-level `Set` needs no
+ * new wiring outside this file.
+ *
+ * KEYED IDENTICALLY TO {@link inFlightReviewKeys} — `${taskId}@${headSha}` — "the key is the PR,
+ * or the (task, head sha) pair — whichever the review mutex already keys on, so there is one
+ * spelling of 'this PR is being worked' rather than two" (this task's own rationale). A SEPARATE
+ * `Set` from `inFlightReviewKeys`, never a shared one: the review and fix-dispatch lanes are
+ * different budgets that must never block each other's claim.
+ *
+ * NOT PROCESS-GLOBAL-FOREVER, the same discipline as {@link inFlightReviewKeys}: a key is added
+ * the instant it is claimed and removed the instant that claim's fate is decided — refused before
+ * dispatch (strikes already exhausted under the claim, or a concurrent claim already held it), or
+ * the dispatch itself SETTLES, success or throw alike. A key never outlives the single in-flight
+ * attempt that claimed it, so a legitimate later pass over the same still-open PR is never
+ * permanently locked out — only a genuinely concurrent second claim, or a real cap breach, is
+ * refused. The fix rung keeps working: a PR with strikes left still gets its strike; this adds
+ * exclusion, never a refusal.
+ */
+const inFlightFixKeys = new Set<string>();
+
+/**
+ * W1-T2520 — THE SAME PLAIN FOLD {@link priorStrikesFor} (run-task.ts) PERFORMS UNDER ITS DEFAULT
+ * `"keyword_only"` REGIME: every `fix.dispatch` row for this task counts, no amnesty. Duplicated
+ * here rather than imported, because this module is deliberately kept free of a run-task.ts
+ * dependency (see the hand-filed-repair/`armOutcomeArmed` doc comments elsewhere in this file) —
+ * and because `currentStrikeRegimeFor`'s amnesty override is explicitly NOT this task's concern: a
+ * strike a regime change later amnesties is a separate reason a strike may not count, and it is
+ * NOT the cause of the race this task fixes (the counter DID advance; it just advanced slower than
+ * the read-modify-write race let dispatches through). What this exists for is FRESHNESS, not
+ * amnesty parity: called with a ledger read taken AFTER the claim below, so two callers reading
+ * concurrently can no longer see the same stale count.
+ *
+ * COUNTS DISTINCT `strike` NUMBERS, NOT RAW ROWS — deliberately NOT `priorStrikesFor`'s own plain
+ * `n++` per matching line. A real dispatch's `strike` field is the count `priorStrikesFor` itself
+ * returned at call time (run-task.ts's own `fix.dispatch` log sites), so two GENUINE strikes for
+ * one task can never share a number; a duplicate `strike` value on two `fix.dispatch` rows is
+ * always the SAME attempt re-described (a fuller row appended after a leaner one, never a second
+ * worker spent). Rows carrying no numeric `strike` at all are each counted on their own — the
+ * ledger gives this fold nothing to dedupe them BY, so it must not silently drop one.
+ */
+function freshFixDispatchCount(lines: Array<Record<string, unknown>>, taskId: string | undefined): number {
+  if (!taskId) return 0;
+  const strikeNumbers = new Set<number>();
+  let unnumbered = 0;
+  for (const line of lines) {
+    if (line.step !== "fix.dispatch" || line.task_id !== taskId) continue;
+    if (typeof line.strike === "number") {
+      strikeNumbers.add(line.strike);
+    } else {
+      unnumbered++;
+    }
+  }
+  return strikeNumbers.size + unnumbered;
+}
+
+/**
  * W1-T2379 — THE DETACHED-WAIT REGISTRY, module-scoped for exactly the reason
  * {@link inFlightReviewKeys} above is: every caller builds a fresh `SweepDeps` but runs in the
  * SAME process, so a module-level container is visible to all of them with no wiring outside
@@ -5723,6 +5799,57 @@ export async function runSweep(
   // with no change to this function's own claim/stand-down logic below —
   // only WHERE the Set lives moved, never HOW it is consulted.
   const claimedReviewKeys = inFlightReviewKeys;
+
+  /**
+   * W1-T2520 — CLAIM THIS PR'S FIX-DISPATCH KEY (or refuse), the fix-rung twin of the review-key
+   * claim just above (`claimedReviewKeys`) but for {@link inFlightFixKeys}, the OTHER lane that
+   * spends a worker. Refuses in exactly two shapes, both SYNCHRONOUS — no `await` ever separates
+   * the check from the claim, the same guarantee `claimedReviewKeys` gives: (1) a genuinely
+   * concurrent second claim for a key already in flight, or (2) — RE-DERIVED THE INSTANT THE
+   * CLAIM IS TAKEN, never trusted off the `OpenPrView` snapshot this whole pass started from —
+   * the strike count freshly re-read off the ledger has already reached the ceiling
+   * `fixCeilingInForce` computes for this PR. Either refusal releases nothing it never held; only
+   * a successful claim's `run` releases it, in a `finally`, once the guarded call SETTLES —
+   * success or throw alike — exactly the discipline `claimedReviewKeys`'s own release site (below)
+   * documents.
+   */
+  function claimFixDispatch(
+    pr: OpenPrView,
+  ): { ok: true; run: <T>(fn: () => T | Promise<T>) => Promise<T> } | { ok: false; reason: string } {
+    const fixKey = `${pr.taskId ?? ""}@${pr.headSha}`;
+    if (inFlightFixKeys.has(fixKey)) {
+      return {
+        ok: false,
+        reason: `duplicate fix-dispatch key (${fixKey}) already claimed this pass — a concurrent sweep is already dispatching this PR's fix rung`,
+      };
+    }
+    inFlightFixKeys.add(fixKey);
+    // READ UNDER THE CLAIM: a fresh ledger read, taken only now that the claim is held, so a
+    // fix.dispatch row a concurrent caller already wrote before this instant is counted here even
+    // though this pass's own `ledgerLines` (read at the TOP of runSweep, before any claim existed)
+    // predates it.
+    const freshLines = readLedger(deps.ledgerPath);
+    const ceiling = fixCeilingInForce(pr, policy.strikeCap, policy.clarify);
+    const freshStrikes = freshFixDispatchCount(freshLines, pr.taskId);
+    if (freshStrikes >= ceiling) {
+      inFlightFixKeys.delete(fixKey);
+      return {
+        ok: false,
+        reason: `fix strikes exhausted under the claim (${freshStrikes}/${ceiling}) — refused before dispatch, never spending a strike a concurrent sweep already spent`,
+      };
+    }
+    return {
+      ok: true,
+      run: async (fn) => {
+        try {
+          return await fn();
+        } finally {
+          inFlightFixKeys.delete(fixKey);
+        }
+      },
+    };
+  }
+
   // Reviews eligible this pass, deferred out of the main walk so they can run
   // CONCURRENTLY with each other (bounded below), rather than one at a time
   // inside it — see `reviewLanes` after the loop.
@@ -6413,12 +6540,22 @@ export async function runSweep(
               const fixEvidence = isBlockedCi(pr)
                 ? { unmetCriteria: [], ciFailures: pr.ciFailures ?? [] }
                 : { unmetCriteria: pr.unmetCriteria, actionableGateFailures: pr.actionableGateFailures };
-              // W1-T2379: started either way — only the `await` moves. See `SweepDeps.detachFixWait`.
-              if (deps.detachFixWait) {
-                detachSweepAction(Promise.resolve(deps.dispatchFix(pr, fixEvidence)));
+              // W1-T2520 — THE FIX-DISPATCH CLAIM: see `claimFixDispatch`'s own doc for why a
+              // claim alone (without the fresh re-read it also performs) would not have stopped
+              // the observed race. A refusal here spends nothing — `deps.dispatchFix` is never
+              // called — and stands down exactly like any other declined disposition.
+              const fixClaim = claimFixDispatch(pr);
+              if (!fixClaim.ok) {
+                acted = false;
+                standDownReason = fixClaim.reason;
                 break;
               }
-              const dispatchOutcome = await deps.dispatchFix(pr, fixEvidence);
+              // W1-T2379: started either way — only the `await` moves. See `SweepDeps.detachFixWait`.
+              if (deps.detachFixWait) {
+                detachSweepAction(fixClaim.run(() => deps.dispatchFix(pr, fixEvidence)));
+                break;
+              }
+              const dispatchOutcome = await fixClaim.run(() => deps.dispatchFix(pr, fixEvidence));
               if (dispatchOutcome !== undefined) spent = dispatchFixSpent(dispatchOutcome);
               break;
             }
@@ -6448,12 +6585,20 @@ export async function runSweep(
               // above — REPAIR_SURFACE_DISPOSITIONS (below) treats both as dispatch-based repair
               // surfaces, so both must feed `spent` the same way.
               const conflictedEvidence = { unmetCriteria: [], mergeConflict: pr.mergeConflict };
-              // W1-T2379: the conflicted twin of the blocked-fixable arm above, same reasoning.
-              if (deps.detachFixWait) {
-                detachSweepAction(Promise.resolve(deps.dispatchFix(pr, conflictedEvidence)));
+              // W1-T2520: the conflicted twin of the blocked-fixable claim above, same reasoning
+              // — see `claimFixDispatch`'s own doc.
+              const conflictedFixClaim = claimFixDispatch(pr);
+              if (!conflictedFixClaim.ok) {
+                acted = false;
+                standDownReason = conflictedFixClaim.reason;
                 break;
               }
-              const conflictedDispatchOutcome = await deps.dispatchFix(pr, conflictedEvidence);
+              // W1-T2379: the conflicted twin of the blocked-fixable arm above, same reasoning.
+              if (deps.detachFixWait) {
+                detachSweepAction(conflictedFixClaim.run(() => deps.dispatchFix(pr, conflictedEvidence)));
+                break;
+              }
+              const conflictedDispatchOutcome = await conflictedFixClaim.run(() => deps.dispatchFix(pr, conflictedEvidence));
               if (conflictedDispatchOutcome !== undefined) spent = dispatchFixSpent(conflictedDispatchOutcome);
               break;
             }
