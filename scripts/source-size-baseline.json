@@ -1,5 +1,5 @@
 {
-  "src/lib/account-usage.ts": 607,
+  "src/lib/account-usage.ts": 740,
   "src/lib/alert-lane.ts": 333,
   "src/lib/analytics-route.ts": 354,
   "src/lib/auto-triage.ts": 673,
@@ -140,7 +140,7 @@
   "src/lib/worker-containment.ts": 489,
   "src/lib/worker-home.ts": 1727,
   "src/lib/worker-scratch.ts": 227,
-  "src/lib/worker.ts": 3452,
+  "src/lib/worker.ts": 3547,
   "src/lib/workflow-run.ts": 28,
   "src/run-task.ts": 32748,
   "src/spike.ts": 311
