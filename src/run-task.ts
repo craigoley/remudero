@@ -132,6 +132,7 @@ import {
   type DaemonSummary,
   type HeadroomPolicy,
   type StarvationCensus,
+  type StarvationClearedInfo,
   priorUnrecognisedResetStrings,
 } from "./lib/daemon.js";
 // W1-T372: the daemon-tick counterpart to daemon-health.ts's own pull-only rate-limit display
@@ -14058,6 +14059,33 @@ export function replayCommand(
 }
 
 /**
+ * Assert that `deriveCliVerbs`'s scan over run-task.ts's own source and the real `COMMANDS`
+ * registry name EXACTLY the same verbs — the control W1-T2479 added because the scan cannot be
+ * given the registry directly (`.dependency-cruiser.cjs`'s `lib-no-spike-or-cli` rule forbids
+ * `src/lib` importing this file) and so has no way to know, on its own, whether it missed an
+ * entry. THIS function is the one place both are visible at once.
+ *
+ * Throws rather than returning a boolean: a disagreement here means the emissions report's whole
+ * corpus is wrong, which is not a condition any caller should be able to shrug off silently the
+ * way `retro`/`resume`/`notify` fell through the four-space-only pattern with no diagnostic at
+ * all. The message NAMES every verb on the wrong side, never just a count.
+ */
+function assertVerbScanAgreesWithRegistry(scanned: ReadonlyArray<string>, declared: ReadonlyArray<string>): void {
+  const scannedSet = new Set(scanned);
+  const declaredSet = new Set(declared);
+  const missingFromScan = declared.filter((n) => !scannedSet.has(n));
+  const extraInScan = scanned.filter((n) => !declaredSet.has(n));
+  if (missingFromScan.length === 0 && extraInScan.length === 0) return;
+  const parts: string[] = [];
+  if (missingFromScan.length > 0) parts.push(`declared but not scanned: ${missingFromScan.join(", ")}`);
+  if (extraInScan.length > 0) parts.push(`scanned but not declared: ${extraInScan.join(", ")}`);
+  throw new Error(
+    `assertVerbScanAgreesWithRegistry: the verb scan and the COMMANDS registry disagree (${parts.join("; ")}) — ` +
+      "the emissions report's corpus cannot be trusted until deriveCliVerbs (lib/emissions.ts) or COMMANDS agree again.",
+  );
+}
+
+/**
  * `rmd emissions [--days N]` — which CLI verbs have written NO ledger line in the window.
  *
  * STRICTLY READ-ONLY: unions the ledger corpus, counts, prints. Writes nothing, spawns nothing.
@@ -14089,6 +14117,14 @@ export function emissionsCommand(rest: string[], opts: { stateDir?: string } = {
   walk(srcDir);
 
   const verbs = deriveCliVerbs(readFileSync(join(srcDir, "run-task.ts"), "utf8"));
+  // THE CONTROL deriveCliVerbs cannot give itself. lib/emissions.ts may not import COMMANDS
+  // (.dependency-cruiser.cjs's lib-no-spike-or-cli rule), so it can only ever report what its own
+  // regex found, with no way to know if that regex missed a shape. THIS caller can see both — the
+  // real COMMANDS registry and the scan over run-task.ts's own source — so it is the one place the
+  // two can be asserted to agree. A mismatch (a fourth entry shape, a renamed field, a reshaped
+  // array) FAILS LOUD here rather than silently shrinking the corpus the way the four-space-only
+  // pattern did for `retro`/`resume`/`notify` (W1-T2479).
+  assertVerbScanAgreesWithRegistry(verbs, COMMANDS.map((c) => c.name));
   const attributed = attributeVerbs(verbs, deriveStepPrefixes(sources));
   const measurable = attributed.filter((a): a is { name: string; prefix: string } => a.prefix !== null);
   const unauditable = attributed.filter((a) => a.prefix === null).map((a) => a.name);
@@ -14173,7 +14209,12 @@ export function emissionsCommand(rest: string[], opts: { stateDir?: string } = {
   const rows = emissionsReport({ measurable, counts, callSites, allowlist: EMISSIONS_ALLOWLIST });
   console.log(`rmd emissions — window ${days}d (since ${cutoff.slice(0, 10)})`);
   console.log(`  corpus  : ${files.length} ledger file(s) (${inWindow.length} within the window, ${files.length - inWindow.length} skipped as older), ${scanned} lines scanned, ${seen.size} distinct in-window events on measured prefixes`);
-  console.log(`  verbs   : ${verbs.length} declared, ${measurable.length} measurable, ${unauditable.length} unauditable`);
+  // "declared" is COMMANDS.length, not verbs.length: the two are asserted equal above by
+  // assertVerbScanAgreesWithRegistry, but printing BOTH (rather than collapsing to one number)
+  // is the report stating its own corpus check rather than assuming it, per W1-T2479.
+  console.log(
+    `  verbs   : ${COMMANDS.length} declared, ${verbs.length} scanned, ${measurable.length} measurable, ${unauditable.length} unauditable`,
+  );
   console.log("");
   for (const r of rows) {
     console.log(
@@ -14824,7 +14865,7 @@ export function verdictCalibrationCommand(rest: string[], opts: { stateDir?: str
  * fresh checkout with no `state/ledger.*.gz` reports UNMEASURED, honestly, rather than a
  * live-file-only rate. READ-ONLY: files nothing, proposes nothing.
  */
-export function autonomyRateCommand(rest: string[], opts: { stateDir?: string; cwd?: string } = {}): number {
+export function autonomyRateCommand(rest: string[], opts: { stateDir?: string; cwd?: string; planPath?: string } = {}): number {
   const badArg = unknownArgError("autonomy-rate", rest, [], []);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
@@ -14858,11 +14899,37 @@ export function autonomyRateCommand(rest: string[], opts: { stateDir?: string; c
     gitReadError = (e as Error).message;
   }
 
+  // W1-T2492: attribute each merge's taskId to the repo its OWN plan record names — this module
+  // does no plan I/O of its own (lib/autonomy.ts's module doc), so the caller supplies it. A plan
+  // that fails to load degrades to `repoOf`-absent behavior (every merge unattributable) rather
+  // than crashing this read-only report — same "unreadable is honestly reported, never crashed"
+  // discipline the ledger-union and git-history reads already follow above.
+  const planPath = opts.planPath ?? join(repoRoot, "plan", "tasks.yaml");
+  let plan: Plan | undefined;
+  let planLoadError: string | undefined;
+  try {
+    plan = loadPlan(planPath);
+  } catch (e) {
+    // NOT erased: the message is carried out in `planLoadError` and printed below as
+    // "plan: UNREADABLE (<message>) — every merge below is unattributable", so an unreadable plan
+    // is distinguishable from a plan that simply attributes nothing. Deliberately does not rethrow
+    // — this is a read-only report and a plan it cannot load degrades to `repoOf`-absent behaviour
+    // rather than crashing the command.
+    planLoadError = (e as Error).message;
+  }
+  const repoOf = plan ? (taskId: string): string | undefined => plan!.byId.get(taskId)?.repo : undefined;
+  // knownRepos: every distinct `task.repo` the WHOLE plan names — an onboarded repo with zero
+  // merges this window is still a row (never an absent one), because it has tasks filed against
+  // it even before its first merge.
+  const knownRepos = plan ? [...new Set(plan.tasks.map((t) => t.repo))].sort() : [];
+
   const merges = gitReadError ? [] : parseTrailerMerges(gitDump);
   const report = zeroTouchMergeRate(merges, ledgerMining, {
     windowDescription: gitReadError
       ? `git history UNAVAILABLE — ${gitReadError}`
       : `${merges.length} Remudero-Task-trailer-bearing merge(s) read from ${gitRef}`,
+    repoOf,
+    knownRepos,
   });
 
   console.log(`rmd autonomy-rate — over the unioned ledger at ${stateDir}, git history at ${gitRef}`);
@@ -14870,9 +14937,32 @@ export function autonomyRateCommand(rest: string[], opts: { stateDir?: string; c
   if (gitReadError) {
     console.log(`  git history: UNAVAILABLE — ${gitReadError}`);
   }
+  if (planLoadError) {
+    console.log(`  plan: UNREADABLE (${planLoadError}) — every merge below is unattributable`);
+  }
   console.log(`  window: ${report.windowDescription}`);
   console.log("");
   console.log(`arming posture: ${report.armingPosture}`);
+  console.log("");
+
+  // W1-T2492: the per-repo split, printed even when the overall report is UNMEASURED — a repo's
+  // trailer-bearing merge COUNT is a git-corpus fact, independent of whether the ledger union
+  // could be read.
+  const repoLabel = (r: (typeof report.repos)[number]["rateRefusedReason"]): string =>
+    r === "zero-merges" ? "no merges this window" : r === "below-population-floor" ? "below population floor" : "UNMEASURED";
+  console.log("by repo:");
+  if (report.repos.length === 0) {
+    console.log("  none — no repo could be resolved for any merge and no known repos were supplied");
+  } else {
+    for (const r of report.repos) {
+      if (r.zeroTouchRate === null) {
+        console.log(`  ${r.repo.padEnd(20)} n=${r.total} — ${repoLabel(r.rateRefusedReason)}`);
+      } else {
+        const pct = (r.zeroTouchRate * 100).toFixed(1);
+        console.log(`  ${r.repo.padEnd(20)} n=${r.total} — zero-touch rate ${pct}% (${r.zeroTouchCount}/${r.total})`);
+      }
+    }
+  }
   console.log("");
 
   if (report.status === "unmeasured") {
@@ -19730,6 +19820,79 @@ export function escalateStarvation(
 }
 
 /**
+ * THE CLEARED HALF (this task) — `escalateStarvation` above opens an issue and this closes it,
+ * fired from `runDaemon`'s `onStarvationCleared` hook on the SAME edge that resets
+ * `starvationEscalated` (daemon.ts): a queue that stopped being starved, either because nothing
+ * recoverable is blocking anymore or because a dispatchable task appeared. THE PRODUCER ALREADY
+ * KNOWS which — `info.reason` names it and `info.taskId` names the task where there is one — so
+ * the closing comment says WHY, never a bare "resolved" a week-later reader could not act on.
+ *
+ * THE REFERENT IS THE LEDGER, NEVER A LOOKUP: the issue to close is whichever URL THIS episode's
+ * OWN `dispatch.starvation.escalated` row named (the most recent one, unless a LATER
+ * `dispatch.starvation.cleared` row already closed it) — never any other open issue, so no
+ * escalation of another class is ever touched by this path. Absent (delivery failed, or already
+ * cleared) ⇒ nothing to close, a silent no-op.
+ *
+ * CANNOT-OBSERVE MEANS WAIT (W1-T130), applied to the closer: a gateway that cannot close (no
+ * `closeWithComment`) or one whose close call throws leaves the issue OPEN and costs one ledger
+ * row (`delivered: false`) — never a throw propagated into the daemon loop, matching
+ * `deriveStatus`'s own polarity and `escalateStarvation`'s own "write the marker whether or not
+ * delivery succeeded" discipline. The marker is written on EVERY call that found an issue to
+ * close (success or failure alike), so an episode ending is countable on the ledger either way.
+ */
+export function escalateStarvationCleared(
+  info: StarvationClearedInfo,
+  ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway },
+): void {
+  const lines = readLedgerLines(ctx.ledgerPath);
+  let issueUrl: string | null = null;
+  for (const l of lines) {
+    if (l.step === "dispatch.starvation.escalated") {
+      issueUrl = typeof l.issue_url === "string" ? l.issue_url : null;
+    } else if (l.step === "dispatch.starvation.cleared") {
+      // A prior clear already closed (or gave up on) whatever the last escalation opened —
+      // never re-derive a referent from an OLDER escalated row past this point.
+      issueUrl = null;
+    }
+  }
+  if (!issueUrl) return;
+
+  const reasonText =
+    info.reason === "no-recoverable-blockers"
+      ? "nothing recoverable is blocking the queue anymore"
+      : `a dispatchable task appeared${info.taskId ? ` (${info.taskId})` : ""} and ended the episode`;
+  const comment =
+    `oper#queue-starvation-2026-08-03: this starvation episode has ended — ${reasonText}. ` +
+    `Closing automatically; a fresh episode opens its own issue if the queue starves again.`;
+
+  const issues = ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo);
+  let delivered = false;
+  let failure: string | undefined;
+  if (!issues.closeWithComment) {
+    failure = "issue gateway cannot close issues";
+  } else {
+    try {
+      issues.closeWithComment(issueUrl, comment);
+      delivered = true;
+    } catch (e) {
+      // CANNOT-OBSERVE MEANS WAIT (W1-T130): never rethrown into the daemon loop -- the
+      // ledger row appended below carries this as its own `failure` field instead.
+      failure = String((e as Error)?.message ?? e);
+    }
+  }
+
+  appendLedger(ctx.ledgerPath, {
+    run_id: ctx.runId,
+    task_id: info.taskId ?? "daemon",
+    step: "dispatch.starvation.cleared",
+    reason: info.reason,
+    issue_url: issueUrl,
+    delivered,
+    ...(failure ? { failure } : {}),
+  });
+}
+
+/**
  * W1-T206: shared dispatch-breaker gate for drainCommand/daemonCommand — ONE
  * {@link DispatchBreakerCache} per invocation (never rebuilt per tick/per task, so a
  * same-process rotation gets caught as it happens — see the cache's own doc), memoized
@@ -21624,6 +21787,9 @@ export async function daemonCommand(
         // is already idle (runDaemon's own in-process bound, `starvationEscalated`) by the time
         // this fires.
         onStarvation: (census) => escalateStarvation(census, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
+        // This task: the cleared half — closes the escalation `escalateStarvation` opened, on
+        // the SAME edge `runDaemon` already resets `starvationEscalated` at.
+        onStarvationCleared: (info) => escalateStarvationCleared(info, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
         checkStop: () => stopDetail(config.root),
         // W1-T1216: LOCAL FIRST (design (i)), falling through to the shared cross-host hold
         // (`refs/rmd-pause/hold`) only when the local file is silent — see checkSharedPause's
@@ -32530,6 +32696,10 @@ export { commitsAhead };
 // commandSyntax/commandSpec are the same lookup individual command handlers use for their
 // inline usage hints (fix/escalate/notify/project/correct) — no hand-written duplicate text.
 export { COMMANDS, USAGE, commandHelp, commandSpec, commandSyntax, type CommandSpec };
+// Exported for W1-T2479's agreement-control test: assertVerbScanAgreesWithRegistry is the caller-
+// side check that the emissions census (lib/emissions.ts's deriveCliVerbs) and this file's own
+// COMMANDS registry name the same verbs — export only, logic lives inline in emissionsCommand.
+export { assertVerbScanAgreesWithRegistry };
 
 // The W1-T447 guard list, the branch-citation scan and the reverse-drift planner MOVED to
 // ./lib/branch-reaper.ts. Re-exported here so every existing import path keeps working unchanged --

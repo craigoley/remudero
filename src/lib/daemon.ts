@@ -33,6 +33,7 @@
 
 import type { AutoTriageDecision } from "./auto-triage.js";
 import type { MeasurementCadenceDecision, MeasurementCadenceRunResult } from "./measurement-cadence.js";
+import { buildMeasurementCadenceRow } from "./measurement-cadence.js";
 import type { BoardReviewCadenceDecision, BoardReviewReport } from "./board-review.js";
 import type { DigestCadenceRunResult } from "./digest.js";
 import type { RunResult } from "./run-result.js";
@@ -779,6 +780,20 @@ export interface StarvationCensus {
   retired: IdleReasonBucket;
 }
 
+/**
+ * The CLEARED half of the starvation episode (this task): which of the two sites in `runDaemon`
+ * below ended the episode, so `onStarvationCleared`'s wiring can close the escalation it opened
+ * with a comment that says WHY rather than a bare "resolved". The two sites end an episode for
+ * different reasons — see the comments at each site — and only one of them has a task to name:
+ * a `dispatchable-task` clear has one (the task that just became eligible); a
+ * `no-recoverable-blockers` clear does not (nothing dispatched — the blockers themselves cleared).
+ */
+export interface StarvationClearedInfo {
+  reason: "no-recoverable-blockers" | "dispatchable-task";
+  /** Present only for `reason: "dispatchable-task"` — the task whose eligibility ended the episode. */
+  taskId?: string;
+}
+
 /** Same shape/truncation discipline as {@link tallyDispatchFilters}'s own buckets, applied to
  *  the circuit-broken ids collected outside that tally (see {@link StarvationCensus}'s doc). */
 function bucketFromIds(ids: readonly string[]): IdleReasonBucket {
@@ -1170,6 +1185,28 @@ export interface DaemonDeps {
    * daemon still idles exactly as before this hook existed, it just opens no issue.
    */
   onStarvation?: (census: StarvationCensus) => void | Promise<void>;
+  /**
+   * The CLEARED half of the transition `onStarvation` above only ever opens (this task):
+   * `onStarvation` has no counterpart, so the two sites below that reset `starvationEscalated`
+   * re-arm an in-process boolean and tell nothing outside the process — the escalation issue
+   * `onStarvation` opened stays open forever, even once a human (or a later dispatch) has made
+   * the condition moot. Mirrors `onStarvation` EXACTLY, never a second mechanism: optional on
+   * `DaemonDeps`, wrapped in the SAME try/catch whose comment already reads "a failed
+   * notification costs one logged line, never the daemon's liveness", and fired from the SAME
+   * two sites that already own the transition.
+   *
+   * Fires ON THE EDGE, never per tick — guarded on the flag it is clearing (`starvationEscalated`),
+   * so a daemon that was never escalated stays silent (nothing to clear) and a long quiet
+   * stretch of already-unstarved ticks closes nothing repeatedly (the SAME "dedup while the
+   * condition holds, once per episode" discipline `onStarvation` itself applies, just for the
+   * opposite edge). `info.reason` names WHICH of the two sites ended the episode — the daemon
+   * says so in its own comments at each site — and `info.taskId` names the task where there is
+   * one, so the real command (run-task.ts's `escalateStarvationCleared`) can close the issue
+   * `escalateStarvation` opened with a comment that says why, not a bare "resolved". Optional —
+   * omitted, the daemon still re-arms exactly as before this hook existed, it just closes no
+   * issue.
+   */
+  onStarvationCleared?: (info: StarvationClearedInfo) => void | Promise<void>;
   /**
    * Fleet control (W1-T11, MASTER-PLAN §4A/§4B): a defined return ⇒ a hard STOP
    * is in effect, and the string is the ledger/summary detail. Checked FIRST,
@@ -2780,14 +2817,12 @@ export async function runDaemon(
         if (deps.runMeasurementCadence) {
           try {
             const result = await deps.runMeasurementCadence();
-            log("measurement_cadence.ran", {
-              rule_efficacy: result.ruleEfficacy,
-              verdict_calibration: result.verdictCalibration,
-              autonomy_rate: result.autonomyRate,
-              // W1-T2473: the adoption report (fourth verb, W1-T2266) was computed every fire and
-              // logged nowhere — this names its mint outcome so a discarded report is countable.
-              adoption_mint: result.adoptionMint,
-            });
+            // W1-T2502: the row is DERIVED from `result`'s own keys (see
+            // `buildMeasurementCadenceRow`'s own doc, measurement-cadence.ts) rather than
+            // hand-enumerated here — a hand-enumerated row silently drops every member added
+            // after it (that is exactly how `adoptionReport`, and independently
+            // `proofDebtReport`/`proofDebtMint`, reached zero occurrences in this file).
+            log("measurement_cadence.ran", buildMeasurementCadenceRow(result));
           } catch (e) {
             log("measurement_cadence.run_failed", { error: String((e as Error)?.message ?? e) });
           }
@@ -3554,7 +3589,17 @@ export async function runDaemon(
         // Nothing recoverable is blocking this tick — re-arm, so a LATER starvation episode
         // (new recoverable blockers, after this one cleared) escalates again rather than
         // staying silenced for the rest of this process's life.
+        const wasEscalated = starvationEscalated;
         starvationEscalated = false;
+        if (wasEscalated) {
+          // Same backstop discipline as the `onStarvation` catch above: a failed notification
+          // costs one logged line, never the daemon's liveness.
+          try {
+            await deps.onStarvationCleared?.({ reason: "no-recoverable-blockers" });
+          } catch (e) {
+            log("daemon.escalation.failed", { task: "daemon", error: String((e as Error)?.message ?? e) });
+          }
+        }
       }
 
 
@@ -3563,7 +3608,17 @@ export async function runDaemon(
     }
 
     // A dispatchable task ends any starvation episode — re-arm so a LATER one escalates again.
+    const starvationWasEscalated = starvationEscalated;
     starvationEscalated = false;
+    if (starvationWasEscalated) {
+      // Same backstop discipline as the `onStarvation` catch above: a failed notification costs
+      // one logged line, never the daemon's liveness.
+      try {
+        await deps.onStarvationCleared?.({ reason: "dispatchable-task", taskId: dispatchSet[0]?.id });
+      } catch (e) {
+        log("daemon.escalation.failed", { task: "daemon", error: String((e as Error)?.message ?? e) });
+      }
+    }
 
     // RE-CHECK STOP/PAUSE IMMEDIATELY BEFORE ADMISSION (W1-T1065). `checkStop`/`checkPause`
     // above are each read EXACTLY ONCE, at the top of this tick — but `deps.checkFreshness`,
