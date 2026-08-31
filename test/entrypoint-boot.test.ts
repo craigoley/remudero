@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { DAEMON_EXIT_STALE } from "../src/lib/daemon.js";
+import { DAEMON_EXIT_BLOCKED, DAEMON_EXIT_STALE } from "../src/lib/daemon.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = join(REPO_ROOT, "deploy", "entrypoint.sh");
@@ -728,6 +728,63 @@ test("W1-T490: the entrypoint's freshness code is the SAME NUMBER as DAEMON_EXIT
   // POSITIVE CONTROL on that match: the same predicate must FAIL against a mutated script, or it
   // would pass for a file that no longer carries the assignment at all.
   assert.equal(/^DAEMON_EXIT_STALE=(\d+)$/m.test(script.replace(/^DAEMON_EXIT_STALE=\d+$/m, "# gone")), false);
+});
+
+test("W1-T2537: the entrypoint's blocked code is the SAME NUMBER as DAEMON_EXIT_BLOCKED, not a drifting literal", () => {
+  // The sibling of the W1-T490 test directly above, for the same reason: the entrypoint cannot
+  // import src/lib/daemon.ts (it runs at exactly the moment the daemon has stopped), so the
+  // constant is written twice. A silent drift here would route a blocked exit down the crash
+  // path and restore the whole outage, with every other test green.
+  const script = readFileSync(SCRIPT, "utf8");
+  const m = script.match(/^DAEMON_EXIT_BLOCKED=(\d+)$/m);
+  assert.ok(m, "the entrypoint must define DAEMON_EXIT_BLOCKED as a plain assignment this test can read");
+  assert.equal(Number(m![1]), DAEMON_EXIT_BLOCKED, "entrypoint and daemon.ts disagree about the blocked exit code");
+  // POSITIVE CONTROL on the match, exactly as the freshness test runs one: the predicate must
+  // FAIL against a mutated script, or it would pass for a file no longer carrying the assignment.
+  assert.equal(/^DAEMON_EXIT_BLOCKED=(\d+)$/m.test(script.replace(/^DAEMON_EXIT_BLOCKED=\d+$/m, "# gone")), false);
+  // AND THE TWO CODES MUST DIFFER IN THE SCRIPT ITSELF — reading each constant correctly is not
+  // enough if both resolve to the same number, since the two arms would then be unreachable past
+  // whichever is checked first.
+  const stale = script.match(/^DAEMON_EXIT_STALE=(\d+)$/m);
+  assert.notEqual(Number(m![1]), Number(stale![1]), "the two in-container arms must not share a code");
+});
+
+test("W1-T2537: a blocked exit restarts IN-CONTAINER and never reaches the crash throttle", () => {
+  // The behavioural half. A blocked stop must take the same in-container path freshness takes —
+  // re-sync then loop — so docker's on-failure budget is untouched by a pass that ran to
+  // completion.
+  const script = readFileSync(SCRIPT, "utf8");
+  const arm = script.match(/if \[ "\$rc" -eq "\$DAEMON_EXIT_BLOCKED" \][\s\S]*?\n  fi/);
+  assert.ok(arm, "the entrypoint must carry a DAEMON_EXIT_BLOCKED arm");
+  const body = arm![0];
+  assert.match(body, /blocked_restarts=\$\(\(blocked_restarts \+ 1\)\)/, "the arm must count its own restarts");
+  assert.match(body, /-lt "\$BLOCKED_RESTART_MAX"/, "the arm must be bounded, never unconditional");
+  assert.match(body, /sleep "\$BLOCKED_RESTART_PAUSE_S"/, "it must pace itself on its own pause");
+  assert.doesNotMatch(body, /RESTART_THROTTLE_S/, "the crash throttle is exactly what this path must NOT pay");
+  assert.match(body, /sync_tree/, "re-syncing is what makes the retry meaningful: PRs may have merged mid-pass");
+  assert.match(body, /continue/, "it loops rather than exiting, so docker never counts it");
+});
+
+test("W1-T2537: a blocked exit past the cap still falls through, so the bound is replaced and not removed", () => {
+  // The in-container loop must never become an unbounded one — that would delete the crash-loop
+  // bound entirely, which is the objection W1-T490 recorded as STILL BINDING.
+  const script = readFileSync(SCRIPT, "utf8");
+  const armIdx = script.indexOf('if [ "$rc" -eq "$DAEMON_EXIT_BLOCKED" ] && [ "$blocked_restarts" -lt "$BLOCKED_RESTART_MAX" ]');
+  const throttleIdx = script.indexOf('sleep "$RESTART_THROTTLE_S"');
+  assert.ok(armIdx > 0, "the bounded arm must exist");
+  assert.ok(throttleIdx > armIdx, "and the crash throttle must sit BELOW it, as the fall-through");
+  assert.match(
+    script.slice(armIdx, throttleIdx),
+    /in-container restarts are already spent, so this one goes to docker's count/,
+    "an exhausted cap must say so, exactly as the freshness path does",
+  );
+});
+
+test("W1-T2537: the entrypoint no longer calls a blocked stop a crash", () => {
+  // The false equation, in the script's own words: "A crash (`blocked`/`error` => 1) reaches here
+  // on its first attempt". `error` is a crash; a completed pass reporting a blocked task is not.
+  const script = readFileSync(SCRIPT, "utf8");
+  assert.doesNotMatch(script, /A crash \(`blocked`\/`error`/, "the comment asserting blocked IS a crash must be gone");
 });
 
 // ── W1-T498: THE FRESHNESS RETRY MUST NOT PAY THE CRASH THROTTLE ───────────────────────────────
