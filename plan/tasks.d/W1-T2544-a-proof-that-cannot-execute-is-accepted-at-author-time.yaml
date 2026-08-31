@@ -20,6 +20,16 @@
     wrapping patterns in whatever delimiter reads well in Markdown; the delimiter is incidental and
     will change again.
 
+    (2a) THE demonstration: HALF IS REPORTED, NEVER REFUSED, AND THAT IS A DELIBERATE NARROWING.
+    W1-T277 makes `demonstration:` a THIRD dialect on purpose — "it names an operator action, not
+    an artifact this process can observe" — and `task-linter.ts` already refuses it ONLY on a
+    `verify: auto` task, leaving it correct for a human-verified one. A PR body carries no
+    `verify` field, so refusing it here would be STRICTER than the plan-side rule and would block a
+    legitimate human-verified criterion. What is unambiguous is the CONSEQUENCE: every such proof
+    caps `proof_exec`, and a capped verdict cannot arm auto-merge without an operator override. So
+    this arm COUNTS them and names the cap in its message while returning ok — the author learns the
+    ceiling early without a gate deciding a policy question that is not its to decide.
+
     (2) BOTH CYCLES ALSO CARRIED NON-DIALECT PROOFS. #3356 used `demonstration:` twice, #3413 four
     times. `rmd check-proof` refuses a proof with no `unit test:`/`grep:` prefix as prose that never
     executes — but nothing refuses it at AUTHOR time, so it contributes nothing and the criterion
@@ -64,7 +74,7 @@
       proof: "unit test: test/a-proof-that-cannot-execute-is-refused-at-author-time.test.ts"
     - claim: "the same refusal fires for double quotes and single quotes, so the delimiter that changed between two cycles is not special-cased"
       proof: "unit test: test/a-proof-that-cannot-execute-is-refused-at-author-time.test.ts"
-    - claim: "a proof carrying no house dialect at all is refused rather than passing as judgeable"
+    - claim: "a proof that cannot execute is COUNTED and named in the message without blocking, because demonstration: is a deliberate dialect"
       proof: "unit test: test/a-proof-that-cannot-execute-is-refused-at-author-time.test.ts"
     - claim: "a pattern that merely contains a delimiter, or is enclosed in mismatched ones, is NOT refused"
       proof: "unit test: test/a-proof-that-cannot-execute-is-refused-at-author-time.test.ts"
