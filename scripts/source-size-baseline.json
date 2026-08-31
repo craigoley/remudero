@@ -129,7 +129,7 @@
   "src/lib/task-class.ts": 68,
   "src/lib/task-id-reservation.ts": 611,
   "src/lib/task-id.ts": 330,
-  "src/lib/task-linter.ts": 3044,
+  "src/lib/task-linter.ts": 3136,
   "src/lib/tier.ts": 164,
   "src/lib/tmp.ts": 163,
   "src/lib/trace.ts": 369,
@@ -142,6 +142,6 @@
   "src/lib/worker-scratch.ts": 227,
   "src/lib/worker.ts": 3452,
   "src/lib/workflow-run.ts": 28,
-  "src/run-task.ts": 32713,
+  "src/run-task.ts": 32718,
   "src/spike.ts": 311
 }
