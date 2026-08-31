@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { lintTask, sizingViolation, type RiskTransitionContext } from "../src/lib/task-linter.js";
-import { parseTasksFromYaml, PlanError, type Task } from "../src/lib/plan.js";
+import { BAND_MEANINGS, PlanError, parseTasksFromYaml, type Task } from "../src/lib/plan.js";
 
 /**
  * W1-T2503: `sizingViolation` used to exempt EVERY `risk: high` task from Rule 19's span
@@ -184,46 +184,58 @@ test("ACCEPTANCE 8: the TRANSITION SCOPING is what protects the standing baselin
   assert.equal(unscoped?.severity, "block", "dropping the transition scoping must fail the standing task");
 });
 
-// ── ACCEPTANCE 9: the YAML loader validates `band_meaning` exactly like every other
-//    enum field on a task (risk, status, retirement) — a bogus value is a PlanError,
-//    a legal one round-trips onto the parsed Task ────────────────────────────────────
+// ── LOAD-TIME VALIDATION: band_meaning is checked the same way `retirement` is ────────────
 
-test("ACCEPTANCE 9: parseTasksFromYaml rejects an unrecognised band_meaning", () => {
+test("an unrecognised band_meaning value is REFUSED at load with a PlanError naming the field, the offending value, and both legal values", () => {
   const yaml = `
-- id: W1-BAD-BAND
-  title: bogus band
+- id: BAD
+  title: bad
   repo: remudero
+  depends_on: []
   type: implement
+  verify: auto
   risk: high
-  band_meaning: not-a-real-value
+  status: queued
+  attempts: 0
+  band_meaning: not-a-real-meaning
 `;
-  assert.throws(
-    () => parseTasksFromYaml(yaml, "test-blob"),
-    (err: unknown) => err instanceof PlanError && /invalid band_meaning/.test((err as Error).message),
-  );
+  assert.throws(() => parseTasksFromYaml(yaml, "fixture"), PlanError);
+  let message = "";
+  try {
+    parseTasksFromYaml(yaml, "fixture");
+  } catch (err) {
+    message = (err as Error).message;
+  }
+  assert.match(message, /band_meaning/, "the error must name the field");
+  assert.match(message, /not-a-real-meaning/, "the error must name the offending value");
+  for (const permitted of BAND_MEANINGS) {
+    assert.match(message, new RegExp(permitted), `the error must list '${permitted}' among the permitted values`);
+  }
 });
 
-test("ACCEPTANCE 9b: parseTasksFromYaml accepts a legal band_meaning and carries it onto the Task", () => {
+test("a task carrying a legal band_meaning parses with it preserved, and one omitting it parses with it undefined", () => {
   const yaml = `
-- id: W1-GOOD-BAND
-  title: legit band
+- id: WITH-SPAN
+  title: with
   repo: remudero
+  depends_on: []
   type: implement
+  verify: auto
   risk: high
-  band_meaning: blast-radius
-`;
-  const [t] = parseTasksFromYaml(yaml, "test-blob");
-  assert.equal(t.band_meaning, "blast-radius");
-});
-
-test("ACCEPTANCE 9c: parseTasksFromYaml leaves band_meaning undefined when the task omits it", () => {
-  const yaml = `
-- id: W1-NO-BAND
-  title: no band declared
+  status: queued
+  attempts: 0
+  band_meaning: span
+- id: WITHOUT
+  title: without
   repo: remudero
+  depends_on: []
   type: implement
+  verify: auto
   risk: high
+  status: queued
+  attempts: 0
 `;
-  const [t] = parseTasksFromYaml(yaml, "test-blob");
-  assert.equal(t.band_meaning, undefined);
+  const tasks = parseTasksFromYaml(yaml, "fixture");
+  assert.equal(tasks.find((t) => t.id === "WITH-SPAN")?.band_meaning, "span");
+  assert.equal(tasks.find((t) => t.id === "WITHOUT")?.band_meaning, undefined);
 });
