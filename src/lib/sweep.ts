@@ -1092,10 +1092,10 @@ export interface OpenPrView {
    * attempt on this head, distinct from a genuine failure ({@link ciFailures} names both; this
    * names only the cancellations). Populated ALONGSIDE `ciFailures`, when `checksState ===
    * "red"`; `[]`/undefined when checks aren't red or nothing cancelled contributed to the red
-   * verdict. Never makes `checksState` anything but "red" — see {@link CancelledRequiredCheck}'s own doc.
+   * verdict. Never makes `checksState` anything but "red" — see {@link CancelledRequiredCheck}'s
+   * own doc.
    */
-  cancelledRequiredChecks?: CancelledRequiredCheck[];
-  redRequiredChecks?: string[]; // W1-T2504 — see {@link redQualityGateNames}/{@link isBlockedCi}; unpopulated in the real gateway (out of scope).
+  cancelledRequiredChecks?: CancelledRequiredCheck[]; redRequiredChecks?: string[]; // W1-T2504 — {@link redQualityGateNames}'s output; separate observable, never touches checksState.
   /**
    * W1-T2340 — this head's own workflow runs (`actions/runs` filtered by head sha), each with
    * its jobs' OWN status — the raw input {@link stalledRunReason} reads. `undefined` when the
@@ -1595,7 +1595,7 @@ export function cancelledRequiredCheckNames(
     .map((c) => c.name ?? c.context ?? "unknown");
 }
 
-export function redQualityGateNames(rollup: RollupCheckEntry[] | undefined, requiredCheckNames: Iterable<string> | undefined): string[] { const required = new Set(requiredCheckNames ?? []); return dedupeRollupByLatestAttempt((rollup ?? []).filter((c) => c.name !== REVIEW_CONTEXT && c.context !== REVIEW_CONTEXT && (required.has(c.name ?? "") || required.has(c.context ?? "")))).filter((c) => REQUIRED_CHECK_FAIL.has((c.state ?? c.conclusion ?? c.status ?? "").toUpperCase())).map((c) => c.name ?? c.context ?? "unknown"); } // W1-T2504 — ci-gate.yml's OWN required checks already concluded red, INDEPENDENTLY of its still-running verdict (fixes #3318's blind window). Never reads/touches `checksState`.
+export const redQualityGateNames = (rollup: RollupCheckEntry[] | undefined, requiredCheckNames: Iterable<string> | undefined): string[] => dedupeRollupByLatestAttempt((rollup ?? []).filter((c) => c.name !== REVIEW_CONTEXT && c.context !== REVIEW_CONTEXT && ([...(requiredCheckNames ?? [])].includes(c.name ?? "") || [...(requiredCheckNames ?? [])].includes(c.context ?? "")))).filter((c) => REQUIRED_CHECK_FAIL.has((c.state ?? c.conclusion ?? c.status ?? "").toUpperCase())).map((c) => c.name ?? c.context ?? "unknown"); // W1-T2504
 
 /** Job-level statuses {@link stalledRunReason} treats as that job having reached a final state. */
 const JOB_TERMINAL_STATUSES = new Set(["completed"]);
@@ -2178,10 +2178,10 @@ const MS_PER_DAY = 86_400_000;
  * `pr.reviewState` instead, by DISPOSITION_RULES' separate review-shaped row.
  * This keeps `isBlockedCi`'s own contract exactly as documented above ("a
  * required check is red — the failing signal IS the CI log") true by
- * construction, for every caller listed here. WIDENED (W1-T2504) — also reads {@link OpenPrView.redRequiredChecks}; `checksState` untouched.
+ * construction, for every caller listed here.
  */
 export function isBlockedCi(pr: OpenPrView): boolean {
-  return pr.checksState === "red" || (pr.redRequiredChecks?.length ?? 0) > 0;
+  return pr.checksState === "red" || (pr.redRequiredChecks?.length ?? 0) > 0; // W1-T2504
 }
 
 /**
@@ -2586,7 +2586,7 @@ export function absentChecksRepushDecision(
 function describeCiFailures(pr: OpenPrView): string {
   const failures = pr.ciFailures ?? [];
   if (failures.length === 0) {
-    return (pr.redRequiredChecks?.length ?? 0) > 0 ? `required check(s) already concluded red on head ${pr.headSha.slice(0, 7)} while ci-gate's own aggregate still reads "${pr.checksState}": ${(pr.redRequiredChecks ?? []).join(", ")}` : `a required check failed on head ${pr.headSha.slice(0, 7)} (no failing-check detail captured)`; // W1-T2504: names concluded-red gates instead of the generic fallback.
+    return (pr.redRequiredChecks ?? []).length > 0 ? `required check(s) already concluded red on head ${pr.headSha.slice(0, 7)} while ci-gate's own aggregate still reads "${pr.checksState}": ${(pr.redRequiredChecks ?? []).join(", ")}` : `a required check failed on head ${pr.headSha.slice(0, 7)} (no failing-check detail captured)`; // W1-T2504
   }
   return failures
     .map((f) => {
@@ -3183,7 +3183,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // W1-T2452: denominator is {@link fixCeilingInForce}, not the bare `policy.strikeCap` — see
     // that function's own doc; keeps this ratio naming the SAME ceiling the dispatch site
     // (`dispatchFix`, run-task.ts) actually budgets against.
-    reason: (pr, policy) => (pr.checksState === "red" ? `required checks red — ci-log fix, strike ${pr.priorStrikes + 1}/${fixCeilingInForce(pr, policy.strikeCap, policy.clarify)}` : `${describeCiFailures(pr)} — ci-log fix, strike ${pr.priorStrikes + 1}/${fixCeilingInForce(pr, policy.strikeCap, policy.clarify)}`), // W1-T2504: "red" keeps its byte-identical reason; else names the gate.
+    reason: (pr, policy) => `${pr.checksState === "red" ? "required checks red" : describeCiFailures(pr)} — ci-log fix, strike ${pr.priorStrikes + 1}/${fixCeilingInForce(pr, policy.strikeCap, policy.clarify)}`, // W1-T2504: "red" is byte-identical; else names the specific check.
   },
   {
     // W1-T1269 — row 5.5 (table doc above): AN EARLIER STOP, NEVER A LONGER LEASH. Ordered
