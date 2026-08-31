@@ -14,6 +14,7 @@ import {
 } from "./board-review.js";
 import { updateProposalRegistry, type EvidenceAnchor, type Proposal, type UpdateProposalRegistryOpts } from "./inbox.js";
 import { proofQueueAudit, type ProofQueueAuditOffender, type ProofQueueAuditOpts, type ProofQueueAuditReport } from "./proof-queue-audit.js";
+import { attributeVerbs, deriveCliVerbs, deriveStepPrefixes, EMISSIONS_ALLOWLIST } from "./emissions.js";
 import type { Task } from "./plan.js";
 
 /**
@@ -639,6 +640,199 @@ function runAdoptionReport(opts: {
   };
 }
 
+// ── THE VERB CENSUS: a sixth verb (W1-T2485) ────────────────────────────────────────────────
+//
+// `lib/emissions.ts` (`rmd emissions`) already answers "which CLI verb has written NO ledger
+// line" — W1-T2479 fixed its own corpus (a four-space-only pattern silently dropped three
+// one-line `COMMANDS` entries, 60 of 63 scanned with nothing reporting the gap) and gave it a
+// CONTROL so a future corpus regression fails loud instead of quietly shrinking. What it never
+// had was a CLOCK: an operator who never types `rmd emissions` never sees the report at all.
+// This section is that clock, joining the SAME spine the five verbs above already ride (no new
+// policy block, no second marker, no new interval) rather than adding one of its own.
+//
+// A REPORT, NEVER A MINTER, AND THAT IS DELIBERATE. A verb this instrument names silent has
+// THREE remedies — wire it to a step, delete it, or allowlist it — and only a human can tell
+// which. `mintAdoptionProposals`'s own precedent (a symbol with no caller has exactly ONE
+// mechanical remedy) does not transfer here, so nothing below ever calls a minter or the
+// proposal registry; the outcome is read, never filed.
+//
+// THE ALLOWLIST IS REUSED, NEVER RE-DECLARED. `lib/emissions.ts`'s own `EMISSIONS_ALLOWLIST`
+// already carries the judgement calls this task would otherwise have to re-litigate — a verb it
+// excuses reads as excused here too, by construction, never as a second silent count.
+//
+// UNMEASURABLE IS NAMED, NEVER FOLDED INTO SILENT. Only verbs `attributeVerbs` can attach a
+// ledger prefix to are measurable by this instrument at all; the rest (`run-task` itself is the
+// standing example — see `attributeVerbs`'s own doc) are a SEPARATE denominator, so a bare "N
+// verbs silent" is never read against the wrong population.
+
+export interface VerbCensusCadenceResult extends MeasurementCadenceVerbStatus {
+  /** Verbs with an attributable ledger prefix this run (`attributeVerbs`) — the population this
+   *  instrument can measure at all. */
+  measurableCount: number;
+  /** Declared CLI verbs (`deriveCliVerbs`) minus `measurableCount` — no attributable prefix, so
+   *  this instrument cannot see them either way. Reported apart from `silentCount`, never folded
+   *  into it. */
+  unmeasurableCount: number;
+  /** Of `measurableCount`, verbs with zero ledger lines in this run's corpus, EXCLUDING every
+   *  verb `EMISSIONS_ALLOWLIST` already excuses. */
+  silentCount: number;
+  /** `silentCount`'s own membership, named — the digest line carries the count; a reader chasing
+   *  down which verb needs a decision (wire it, delete it, allowlist it) reads this. */
+  silentVerbs: string[];
+  /** `unmeasurableCount`'s own membership, named for the same reason. */
+  unmeasurableVerbs: string[];
+}
+
+const VERB_CENSUS_SKIP_DIR_NAMES = new Set(["node_modules", ".git", "dist", "build", "coverage"]);
+
+/** Every `.ts` file's TEXT under `<checkoutDir>/src`, recursively — the same corpus `rmd
+ *  emissions` (`src/run-task.ts`'s `emissionsCommand`) reads, reproduced here rather than
+ *  imported: that command is a CLI entry point and `src/lib` modules never import from it in
+ *  reverse (`.dependency-cruiser.cjs`'s `lib-no-spike-or-cli` rule) — the same small, deliberate
+ *  duplication {@link defaultMeasurementCadenceGitLog}'s own doc states the alternative (a
+ *  cross-layer import) would be worse. */
+function walkVerbCensusSources(dir: string, out: string[]): void {
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const e of entries) {
+    if (VERB_CENSUS_SKIP_DIR_NAMES.has(e.name)) continue;
+    const child = join(dir, e.name);
+    if (e.isDirectory()) {
+      walkVerbCensusSources(child, out);
+    } else if (e.name.endsWith(".ts")) {
+      try {
+        out.push(readFileSync(child, "utf8"));
+      } catch {
+        // unreadable — never the reason the WHOLE census refuses; just absent from the corpus.
+      }
+    }
+  }
+}
+
+function escapeVerbCensusRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * THE SIXTH VERB'S ENTRY POINT, called twice: once inside {@link runMeasurementCadenceReport}
+ * (this verb's own fire, alongside the five above it) and once more by
+ * `src/run-task.ts`'s `buildDigestCadenceDaemonHooks`, exported for exactly that second caller —
+ * the digest cadence fires on its OWN, independently-throttled interval (its own marker/policy
+ * row, never `measurementCadence`'s), so it re-reads fresh at SEND time rather than trusting a
+ * snapshot from measurement-cadence's last, possibly hours-stale, fire.
+ *
+ * `checkoutDir` absent ⇒ REFUSED, never a silent zero (this module's own P48 discipline,
+ * restated for this verb): with no checkout there is no `COMMANDS` registry to scan and no
+ * source corpus to attribute prefixes against, so "0 silent" would be a fabricated clean bill
+ * rather than a measurement. Same refusal shape when the ledger union itself cannot prove
+ * complete coverage (`!union.ok` — a fresh checkout with no archives, an unmounted archive
+ * volume) — a partial read must never masquerade as a clean sweep either.
+ */
+export function runVerbCensus(opts: {
+  checkoutDir?: string;
+  stateDir: string;
+  ledgerUnion: (stateDir: string, pattern: RegExp) => LedgerUnionResult;
+  allowlist?: ReadonlyMap<string, string>;
+}): VerbCensusCadenceResult {
+  const refuse = (
+    refusedReason: string,
+    counts: Partial<Pick<VerbCensusCadenceResult, "measurableCount" | "unmeasurableCount" | "unmeasurableVerbs">> = {},
+  ): VerbCensusCadenceResult => ({
+    status: "refused",
+    refusedReason,
+    measurableCount: counts.measurableCount ?? 0,
+    unmeasurableCount: counts.unmeasurableCount ?? 0,
+    silentCount: 0,
+    silentVerbs: [],
+    unmeasurableVerbs: counts.unmeasurableVerbs ?? [],
+  });
+
+  if (!opts.checkoutDir) {
+    return refuse("no checkout dir supplied — cannot read the CLI verb registry or its source corpus");
+  }
+  let runTaskSource: string;
+  try {
+    runTaskSource = readFileSync(join(opts.checkoutDir, "src", "run-task.ts"), "utf8");
+  } catch (e) {
+    return refuse(`src/run-task.ts unreadable: ${String((e as Error)?.message ?? e)}`);
+  }
+  let verbs: string[];
+  try {
+    verbs = deriveCliVerbs(runTaskSource);
+  } catch (e) {
+    return refuse(String((e as Error)?.message ?? e));
+  }
+
+  const sources: string[] = [];
+  walkVerbCensusSources(join(opts.checkoutDir, "src"), sources);
+  const attributed = attributeVerbs(verbs, deriveStepPrefixes(sources));
+  const measurable = attributed.filter((a): a is { name: string; prefix: string } => a.prefix !== null);
+  const unmeasurableVerbs = attributed.filter((a) => a.prefix === null).map((a) => a.name);
+
+  if (measurable.length === 0) {
+    return refuse("no scanned verb carries an attributable ledger prefix this run", { unmeasurableCount: unmeasurableVerbs.length, unmeasurableVerbs });
+  }
+
+  const pattern = new RegExp(`"step":"(?:${measurable.map((m) => escapeVerbCensusRegExp(m.prefix)).join("|")})\\.`);
+  const union = opts.ledgerUnion(opts.stateDir, pattern);
+  if (!union.ok) {
+    return refuse(
+      `ledger corpus incomplete under ${union.stateDir} (${union.archiveCount} archive(s), ${union.unread.length} unread)`,
+      { measurableCount: measurable.length, unmeasurableCount: unmeasurableVerbs.length, unmeasurableVerbs },
+    );
+  }
+
+  const counts = new Map<string, number>();
+  for (const line of union.matches) {
+    const m = /"step":"([^"]+)"/.exec(line);
+    if (!m) continue;
+    const dot = m[1].indexOf(".");
+    if (dot === -1) continue;
+    const prefix = m[1].slice(0, dot);
+    counts.set(prefix, (counts.get(prefix) ?? 0) + 1);
+  }
+
+  const allow = opts.allowlist ?? EMISSIONS_ALLOWLIST;
+  const silentVerbs: string[] = [];
+  for (const { name, prefix } of measurable) {
+    if (allow.has(name)) continue; // excused — never counted silent, per the allowlist's own contract
+    if ((counts.get(prefix) ?? 0) === 0) silentVerbs.push(name);
+  }
+
+  return {
+    status: "measured",
+    measurableCount: measurable.length,
+    unmeasurableCount: unmeasurableVerbs.length,
+    silentCount: silentVerbs.length,
+    silentVerbs,
+    unmeasurableVerbs,
+  };
+}
+
+/**
+ * THE DIGEST LINE — the whole point (this task's own rationale: "wiring it to a ledger row
+ * nobody reads would reproduce that defect one layer up"). Pure text, no I/O, so a caller (the
+ * digest cadence producer, `src/run-task.ts`'s `buildDigestCadenceDaemonHooks`) can hand it
+ * straight to `runDigestCadenceReport`'s `suggestions` seam (lib/digest.ts) without this module
+ * knowing anything about `NotifyChannel` or a ledger path. Marked `(measured)` in its own text
+ * because the seam it rides renders every entry `[SUGGESTED]` — this line is a count, not a
+ * suggestion, and says so rather than let the wrapper's own label misdescribe it.
+ */
+export function renderVerbCensusDigestLine(r: VerbCensusCadenceResult): string {
+  if (r.status === "refused") {
+    return `verb census (measured): unmeasured — ${r.refusedReason}`;
+  }
+  const names = r.silentCount > 0 ? `: ${r.silentVerbs.join(", ")}` : "";
+  return (
+    `verb census (measured): ${r.silentCount} silent of ${r.measurableCount} measurable verb(s) ` +
+    `(${r.unmeasurableCount} unmeasurable) — rmd emissions for detail${names}`
+  );
+}
+
 // ── W1-T2473: the adoption report's own PROPOSAL MINT — the fourth verb's findings were
 // computed every fire and read by nothing (this task's own title). Q2 of this task's rationale
 // establishes AdoptionFinding as the FIRST family that can carry a real, git-greppable
@@ -924,6 +1118,14 @@ export interface MeasurementCadenceRunResult {
    *  same `opts.escalate` gating {@link adoptionMint} already keeps: off ⇒ report the MEASURED
    *  "clear"/"backlog" status without touching the registry. */
   proofDebtMint?: ProofDebtMintCadenceResult;
+  /** W1-T2485: the verb census — a SIXTH verb on this SAME spine, joining rather than adding a
+   *  clock (this verb's own header doc, above). Optional on the TYPE for the same reason
+   *  `adoptionReport` is: a hand-built test literal simulating the daemon's injected dependency
+   *  from before this field existed still type-checks. {@link runMeasurementCadenceReport} itself
+   *  NEVER omits it — unlike `boardReview`/`proofDebtReport`, this verb needs no extra opt-in
+   *  input beyond `stateDir`/`checkoutDir`, both already required, so it runs unconditionally on
+   *  every fire exactly like `adoptionReport` does. */
+  verbCensus?: VerbCensusCadenceResult;
 }
 
 /** The verdict-calibration/autonomy-rate git join's only I/O — the SAME shallow-clone refusal
@@ -1099,6 +1301,13 @@ export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts):
     ledgerUnion: opts.ledgerUnion ?? resolveLedgerUnion,
   });
 
+  // ── the sixth verb: the verb census (W1-T2485) — see that section's own header doc above ───
+  const verbCensus = runVerbCensus({
+    checkoutDir: opts.checkoutDir,
+    stateDir: opts.stateDir,
+    ledgerUnion: opts.ledgerUnion ?? resolveLedgerUnion,
+  });
+
   // ── W1-T2473: the adoption report's own mint — dropped at this exact seam before this task.
   // Gated on `opts.escalate` exactly like rule-efficacy's own write above (design (ii): the
   // default cadence stays zero-writes) — when off, report the MEASURED status without touching
@@ -1156,5 +1365,6 @@ export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts):
     boardReview,
     proofDebtReport,
     proofDebtMint,
+    verbCensus,
   };
 }
