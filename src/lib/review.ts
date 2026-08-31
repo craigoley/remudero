@@ -2892,7 +2892,39 @@ const CHANGESET_CONTEXT_RE =
  * NEXT sentence says nothing about this claim, and scanning the whole body would re-create the
  * unanchored match this exists to prevent (every PR body says "changed" somewhere).
  */
+/**
+ * W1-T2534 — IS THE MATCH INSIDE AN INLINE QUOTED SPAN? A quotation is not an assertion, and
+ * W1-T308 already established that for BLOCK-level quotation: {@link stripQuotedRegions} blanks
+ * fenced blocks and blockquote lines. It does NOT touch an INLINE span, so a body REPORTING
+ * another PR's count read identically to one making that count itself.
+ *
+ * MEASURED — the exact sentence that refused #3388, and again #3408 whose entire subject is this
+ * detector:
+ *     Adding the baseline line changes the diff — so a body that said "exactly 4 files" is now false.
+ * `claimsChangesetContext` scans BACKWARD to the sentence start, finds "changes the diff", and
+ * reads the quoted count as this body's own claim. Three PR bodies in one session were refused
+ * this way, including the one documenting the trap.
+ *
+ * COUNTS DELIMITERS ON THE MATCH'S OWN LINE, never across lines: a stray unmatched quote earlier
+ * in a long body must not silence every claim after it. An ODD count before the match means the
+ * match sits inside an open span. Backtick and double quote only — an apostrophe is ordinary
+ * English punctuation and counting it would silence half of any body that uses contractions.
+ */
+function isInsideInlineQuote(report: string, index: number): boolean {
+  const lineStart = report.lastIndexOf("\n", index - 1) + 1;
+  const before = report.slice(lineStart, index);
+  for (const d of ['"', "`"]) {
+    let n = 0;
+    for (const ch of before) if (ch === d) n++;
+    if (n % 2 === 1) return true;
+  }
+  return false;
+}
 export function claimsChangesetContext(report: string, index: number): boolean {
+  // W1-T2534: a claim inside an inline quoted span is a MENTION of someone else's claim, never
+  // this body's own — the inline sibling of W1-T308's block-level rule. Checked FIRST, because no
+  // amount of surrounding changeset context turns a quotation into an assertion.
+  if (isInsideInlineQuote(report, index)) return false;
   const before = report.slice(0, index);
   // Sentence start: the last terminator, newline, or list-bullet before the claim.
   const start = Math.max(
