@@ -1,0 +1,55 @@
+- id: W1-T2547
+  title: "THE RUBRIC'S docs-awareness ARM READS A SIZE LEDGER AS A USER-VISIBLE SURFACE — W1-T2543 gave the one-concern arm a companion-path discount and docs-awareness kept the same blindness, so every PR that records a line-count growth is told to write documentation for a number"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 14.00
+  rationale: |
+    (1) OBSERVED VERBATIM on #3422, 2026-08-31:
+
+        - **docs-awareness**: user-visible surface changed (scripts/source-size-baseline.json,
+          src/lib/review.ts) with no docs/ update and no stated reason
+
+    `scripts/source-size-baseline.json` is a generated table of per-file line counts. It has no
+    user-visible surface to document, and W1-T2526 already ruled it exempt from Standing rule 25's
+    instrument-isolation rule on exactly that reasoning: "a size ledger records how long a file is
+    and grades no falsifier."
+
+    (2) IT IS NOT AN ISOLATED CASE, IT IS EVERY PR THAT GROWS A FILE. `source-size-ratchet`'s own
+    remedy text instructs the author to record the growth in this file, in this PR. So the gate
+    that tells you to touch it and the rubric that penalises touching it are pointed at each other.
+    Six PRs carried that file in one evening.
+
+    (3) THE FIX ALREADY HAS A SHAPE IN THIS REPO, ONE ARM OVER. W1-T2543 added
+    `COMPANION_PATH_CLASSES` / `isCompanionPath` to `src/lib/task-linter.ts` for the one-concern
+    arm's identical blindness. This is the same table, applied to the arm that reads
+    "user-visible surface". The point of a table is that a second consumer needs no new mechanism.
+
+    (4) THE DISCOUNT STAYS NARROW. Only generated ledger artifacts whose whole content is a
+    measurement. A PR that changes a real user-visible surface still reports, and a stated reason
+    still satisfies the arm as it does today — this removes a false positive rather than an arm.
+
+    (5) OUT OF SCOPE, NAMED. (a) The other rubric arms. (b) Whether docs-awareness should block
+    (it is advisory and stays advisory). (c) Re-auditing which paths are generated: the class is
+    the ledgers this repo already exempts elsewhere, cited rather than invented.
+  acceptance:
+    - claim: "a generated size ledger is not counted as a user-visible surface by the docs-awareness arm"
+      proof: "unit test: test/docs-awareness-does-not-read-a-ledger-as-a-surface.test.ts"
+    - claim: "a real user-visible surface change still reports, so the arm is not disabled"
+      proof: "unit test: test/docs-awareness-does-not-read-a-ledger-as-a-surface.test.ts"
+    - claim: "the exemption is a table row shared with the one-concern arm rather than a second mechanism"
+      proof: "unit test: test/docs-awareness-does-not-read-a-ledger-as-a-surface.test.ts"
+    - claim: "a stated reason still satisfies the arm exactly as it does today"
+      proof: "unit test: test/docs-awareness-does-not-read-a-ledger-as-a-surface.test.ts"
+  risk: medium
+  origin: retro-followup
+  plan_refs: ["W1-T2543", "W1-T2526", "W1-T2488"]
+  files: [src/lib/review.ts, test/docs-awareness-does-not-read-a-ledger-as-a-surface.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    The arm lives in `src/lib/review.ts` (the rubric), while the companion table W1-T2543 added
+    lives in `src/lib/task-linter.ts`; whichever direction the import runs, the table is shared
+    rather than duplicated — a second copy is the defect this task is fixing, one arm later.

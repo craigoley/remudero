@@ -1,0 +1,64 @@
+- id: W1-T2551
+  title: "EVERY GENERATOR-BACKED GATE PRINTS THE EXACT EDIT THAT FIXES IT AND NOTHING APPLIES IT — a machine-readable remedy is treated as prose for a human to retype, so a class of CI failure whose fix is `npm run <generator>` still costs a full round trip"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 28.00
+  rationale: |
+    (1) THE REMEDY IS ALREADY MACHINE-READABLE. `source-size-ratchet` prints, on failure:
+
+        TO FIX: either shrink the growth back down, or record it -- edit
+        scripts/source-size-baseline.json and set:
+          "src/lib/daemon.ts": 3994,
+
+    That is not advice, it is a patch. Three PRs tonight (#3418, #3419, and two conflict
+    resolutions) were red on exactly this and were fixed by a human running the generator.
+
+    (2) IT IS A CLASS, NOT ONE GATE. Every `*:check` script in package.json is a generator run in
+    verify mode: `plan-index:check`, `docs-index:check`, `learnings-index:check`,
+    `cli-reference:check`, `capability-snapshot:check`, `api-client:check`. Each fails when the
+    committed artifact differs from what its generator would produce, and each is fixed by running
+    that generator. The pairing is already DECLARED in package.json — the `:check` name and its
+    bare counterpart — so no inference is needed to know which command fixes which failure.
+
+    (3) WHAT THE FIX RUNG DOES INSTEAD TODAY. `FIX_MODE_RULES`'s ci-log mode spawns a worker with
+    the failing log and asks it to work out a fix. For this class that is an expensive way to
+    reach a command the gate already named, and it spends a strike against `strikeCap` on work
+    that is deterministic.
+
+    (4) THE SAFETY PROPERTY IS THAT THE GENERATOR IS THE AUTHOR. The rung must run the repo's OWN
+    generator and commit its output — never hand-edit the artifact, never synthesise a value. A
+    generator whose output still fails its own check is a real failure and must escalate
+    unchanged. And it must be bounded to a declared pairing: a check with no generator counterpart
+    is left to the ordinary rung exactly as today.
+
+    (5) OUT OF SCOPE, NAMED. (a) Any gate whose fix is not a generator run. (b) The conflict rung's
+    admission of regenerable artifacts (W1-T2548) — the same insight, a different rung, and each
+    must stand on its own review. (c) Whether a regeneration should count against the strike cap
+    (W1-T2306 settled the analogous question for body repair; this task follows its ruling rather
+    than reopening it).
+  acceptance:
+    - claim: "a failing check with a declared generator counterpart is fixed by running that generator, not by spawning a worker"
+      proof: "unit test: test/a-printed-remedy-is-never-applied.test.ts"
+    - claim: "the pairing is read from package.json's own declared scripts rather than a hand-maintained list"
+      proof: "unit test: test/a-printed-remedy-is-never-applied.test.ts"
+    - claim: "a failing check with no generator counterpart still reaches the ordinary fix rung unchanged"
+      proof: "unit test: test/a-printed-remedy-is-never-applied.test.ts"
+    - claim: "a generator whose output still fails its own check escalates rather than committing a non-fix"
+      proof: "unit test: test/a-printed-remedy-is-never-applied.test.ts"
+    - claim: "the rung commits the generator's output and never an edit it composed itself"
+      proof: "unit test: test/a-printed-remedy-is-never-applied.test.ts"
+  risk: high
+  band_meaning: blast-radius
+  origin: retro-followup
+  plan_refs: ["W1-T2272", "W1-T2306", "W1-T2548", "W1-T2538"]
+  files: [src/run-task.ts, test/a-printed-remedy-is-never-applied.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    risk:high, band_meaning: blast-radius — a rung that commits generated output automatically is
+    dangerous beyond its span. Bounded by the declared `<name>` / `<name>:check` pairing in
+    package.json, so what it may run is a fact about the repo rather than a judgement, and the
+    committed content is the generator's, never the rung's.
