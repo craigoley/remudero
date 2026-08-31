@@ -27,6 +27,7 @@ import {
   type LintOpts,
 } from "../src/lib/task-linter.js";
 import type { Task } from "../src/lib/plan.js";
+import { duplicateCorpusOpts } from "../src/run-task.js";
 
 /** A minimal, otherwise-clean Task fixture — mirrors test/knowledge-dedup.test.ts's own helper. */
 function task(over: Partial<Task> & { id: string; title: string }): Task {
@@ -97,22 +98,61 @@ test("SANITY: the fixtures score where this suite depends on them scoring", () =
 
 // ── criterion 1: the ratification comment no longer asserts lint-plan is unrequired ────────────
 
-test("CRITERION 1: inbox.ts's ratification comment no longer asserts lint-plan is not required", () => {
+// WHY THE SURVIVING REASONS ARE ASSERTED AGAINST MECHANISM AND NOT AGAINST THE COMMENT. The first
+// draft of this test greped src/lib/inbox.ts for the prose of each reason ("severity is `warn`",
+// "if (blocking.length)", "scoped to the `--base` pass and returns `{}` for the") — and every one
+// of those literals exists in that file ONLY inside the comment this task rewrote, so
+// `assertion-discrimination` refused them by name: "satisfiable by a COMMENT ALONE ... the
+// assertion cannot tell 'the mechanism is real' from 'someone wrote the word down'". It was right.
+// Each claim below now names the thing the comment is ABOUT: ci-gate.yml's own required list, the
+// two severities the two checks really return, the file where `if (blocking.length)` is executable
+// code rather than quoted prose, and `duplicateCorpusOpts`'s real empty-object return.
+test("CRITERION 1: inbox.ts's ratification comment no longer asserts lint-plan is not required, and each surviving reason holds against the mechanism it describes", () => {
   const src = readFileSync(fileURLToPath(new URL("../src/lib/inbox.ts", import.meta.url)), "utf8");
   assert.doesNotMatch(
     src,
     /and `lint-plan` is not a required check\. So `rmd approve`/,
     "the old, false third reason must be gone verbatim",
   );
+
+  // THE CORRECTION, CHECKED AGAINST THE DATA IT CORRECTS. ci-gate.yml's REQUIRED array is YAML
+  // data, not a comment, so this cannot be satisfied by anyone merely writing the sentence down.
+  const ciGate = readFileSync(fileURLToPath(new URL("../.github/workflows/ci-gate.yml", import.meta.url)), "utf8");
   assert.match(
-    src,
-    /`lint-plan` is not a required check — it is \(ci-gate\.yml's REQUIRED list names it/,
-    "the comment must now affirmatively correct the record, not merely delete the claim",
+    ciGate,
+    /^\s*"lint-plan",\s*$/m,
+    "lint-plan must really be an entry in ci-gate.yml's REQUIRED list — the fact the old comment denied",
   );
-  // THE TWO TRUE REASONS MUST SURVIVE (rationale: "load-bearing and must survive").
-  assert.match(src, /severity is `warn`/);
-  assert.match(src, /if \(blocking\.length\)/);
-  assert.match(src, /scoped to the `--base` pass and returns `\{\}` for the/);
+
+  // SURVIVING REASON 1 — the warn/block split is real, not asserted. The advisory check returns
+  // `warn` and this task's new arm returns `block`; that difference IS why the old check could
+  // never stop a redundant filing.
+  const advisory = duplicateTitleViolations(task({ id: "x", title: SIBLING_LOW_A }), {
+    openTaskTitles: [{ id: "y", text: SIBLING_LOW_B }],
+  });
+  assert.equal(advisory[0]?.severity, "warn", "the pre-existing duplicate-title check really is advisory");
+  const blocking = unansweredDuplicateTitleViolations(task({ id: "W1-T403", title: FALSIFIER_TITLE }), {
+    openTaskRecords: [{ id: "W1-T1062", text: FALSIFIER_TITLE }],
+  });
+  assert.equal(blocking[0]?.severity, "block", "and the new arm really blocks — the whole point of the remedy");
+
+  // SURVIVING REASON 2 — `if (blocking.length)` is EXECUTABLE code in run-task.ts. The same literal
+  // in inbox.ts is quoted prose, which is what made the original assertion undiscriminating.
+  const runTask = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
+  assert.match(
+    runTask,
+    /if \(blocking\.length\)/,
+    "lintPlanCommand's exit code must still be gated on the BLOCKING array, which a warn never joins",
+  );
+
+  // SURVIVING REASON 3 — the whole-plan pass really receives an empty opts object, so the duplicate
+  // corpus is scoped to `--base`. This is `duplicateCorpusOpts`'s own return, not a sentence about it.
+  const corpus = [{ id: "W1-T1062", text: FALSIFIER_TITLE }];
+  assert.deepEqual(duplicateCorpusOpts(false, "W1-T403", corpus, undefined), {}, "unscoped ⇒ nothing");
+  assert.ok(
+    duplicateCorpusOpts(true, "W1-T403", corpus, undefined).openTaskTitles?.length,
+    "scoped ⇒ the corpus really is handed over, so the empty object above is a decision and not an accident",
+  );
 });
 
 // ── criterion 2: an unanswered near-certain match is refused ───────────────────────────────────
