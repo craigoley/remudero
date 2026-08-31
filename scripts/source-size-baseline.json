@@ -69,7 +69,7 @@
   "src/lib/live-write-guard.ts": 200,
   "src/lib/log-rotation.ts": 115,
   "src/lib/managed-repos.ts": 73,
-  "src/lib/measurement-cadence.ts": 1160,
+  "src/lib/measurement-cadence.ts": 1374,
   "src/lib/merge-state.ts": 66,
   "src/lib/mounts.ts": 348,
   "src/lib/notify.ts": 145,
@@ -141,6 +141,6 @@
   "src/lib/worker-scratch.ts": 227,
   "src/lib/worker.ts": 3452,
   "src/lib/workflow-run.ts": 28,
-  "src/run-task.ts": 32587,
+  "src/run-task.ts": 32606,
   "src/spike.ts": 311
 }
