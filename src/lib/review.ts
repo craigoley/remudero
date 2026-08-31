@@ -1306,6 +1306,38 @@ export function cappedReason(
     .join(",");
 }
 
+/**
+ * W1-T2544 — a `grep:` pattern WHOLLY enclosed in a matching pair of delimiters, which is a
+ * Markdown formatting artifact and never what the author meant.
+ *
+ * `execWhitelistedProof` runs `grep -arn --` with NO `-F`, so a delimiter is a character that must
+ * appear in the file. MEASURED on two consecutive retro cycles six hours apart: #3356 wrapped six
+ * patterns in DOUBLE QUOTES and #3413 wrapped five in BACKTICKS; every wrapped pattern read 0 and
+ * every bare one read 1 (and 0 at the merge base, so each discriminated once unwrapped). The
+ * emitter wraps in whatever renders well in Markdown, so the delimiter is incidental and the check
+ * must not special-case the two seen so far.
+ *
+ * DISTINCT FROM {@link parseWhitelistedProof}'s CODE-SPAN STRIP, which unwraps the WHOLE proof
+ * (`` `grep: x in y` ``). This is the pattern INSIDE an otherwise well-formed proof
+ * (`grep: `x` in y`), which parses perfectly and then matches nothing — so no parser can catch it.
+ *
+ * EXACT, NEVER A HEURISTIC (this gate refuses an author, so a false positive blocks a correct PR):
+ * only a MATCHING pair with non-empty content between. A pattern that merely CONTAINS a delimiter,
+ * or carries mismatched ones, returns undefined and passes untouched.
+ */
+export function wrappedGrepPattern(proof: string): { delimiter: string; bare: string } | undefined {
+  const m = /^\s*grep:\s*(.+?)\s+in\s+\S+\s*$/.exec(proof ?? "");
+  if (!m) return undefined;
+  const pattern = m[1].trim();
+  for (const d of ["`", '"', "'"]) {
+    if (pattern.length > 2 && pattern.startsWith(d) && pattern.endsWith(d)) {
+      const bare = pattern.slice(1, -1);
+      // A delimiter surviving inside the stripped text means this was not a simple wrap.
+      if (bare.length > 0 && !bare.includes(d)) return { delimiter: d, bare };
+    }
+  }
+  return undefined;
+}
 export function parseWhitelistedProof(proof: string): WhitelistedProof | null {
   // House dialect (W1-T72) checked FIRST and EXCLUSIVELY: a proof WRITTEN with
   // a dialect label is handled ONLY by its own parser — success or refuse
@@ -5798,6 +5830,43 @@ export function acceptanceAuthorTimeCheck(
       message: `${d.emptyProofs || d.bulletsWritten} criterion/criteria have no proof — a claim with nothing to execute.`,
     };
   }
+
+  // W1-T2544 — REPORTED, NEVER REFUSED. Both signals below are real and both are ADVISORY, because
+  // this gate is pure (no filesystem) and `acceptance-author-gate` is a REQUIRED check: a false
+  // refusal blocks a correct PR.
+  //
+  // WHY THE WRAP CANNOT BE REFUSED, THOUGH IT IS USUALLY WRONG. `execWhitelistedProof` greps with
+  // no `-F`, so a delimiter is a character that must appear in the file — and MEASURED on two
+  // retro cycles six hours apart (#3356 in double quotes, #3413 in backticks) every wrapped
+  // pattern read 0. But a wholly-wrapped pattern CAN be correct: MASTER-PLAN.md is full of Markdown
+  // code spans, and a JSON file genuinely contains `"key"`. Only reading the target file separates
+  // the two, which this function cannot do. W1-T1060/#3191 settled the same boundary from the other
+  // side — this gate judges SHAPE, and dialect is a REVIEW verdict, not a gate defect.
+  //
+  // SO THE VALUE IS THE EARLY WARNING, NOT A BLOCK: the author (or the fix rung) sees the ceiling
+  // while the sha is still live, instead of after a verdict that can never be re-judged on it.
+  const criteria = parseAcceptanceBlock(text);
+  const wrapped = criteria
+    .map((c, i) => ({ i: i + 1, w: wrappedGrepPattern(c.proof ?? "") }))
+    .filter((r) => r.w !== undefined);
+  const inert = criteria.filter((c) => parseWhitelistedProof(c.proof ?? "") === null).length;
+  const notes: string[] = [];
+  if (wrapped.length > 0) {
+    const f = wrapped[0];
+    notes.push(
+      `${wrapped.length} grep proof(s) wrap their pattern in ${f.w!.delimiter} — the executor greps ` +
+        `with no -F, so unless the file really contains those delimiters the pattern reads 0. If it ` +
+        `does not, criterion ${f.i} should read: grep: ${f.w!.bare} in <path>`,
+    );
+  }
+  if (inert > 0) {
+    notes.push(
+      `${inert} of ${criteria.length} proof(s) cannot execute (no runnable dialect), so the verdict ` +
+        `caps at proof_exec ${criteria.length - inert}/${criteria.length} and cannot arm auto-merge ` +
+        "without an operator override",
+    );
+  }
+  if (notes.length > 0) return { ok: true, message: `Acceptance block is judgeable — but ${notes.join("; ")}.` };
   return { ok: true, message: "Acceptance block is judgeable" };
 }
 
