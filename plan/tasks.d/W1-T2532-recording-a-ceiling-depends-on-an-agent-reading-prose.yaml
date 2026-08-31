@@ -1,0 +1,87 @@
+- id: W1-T2532
+  title: "RECORDING A SOURCE-SIZE CEILING IS A MANUAL STEP NO LANE PERFORMS, SO EVERY GROWING PR IS RED UNTIL A HUMAN OR AN AGENT READS A PROSE REMEDY AND ACTS ON IT — #3377 and #3388 made that prose followable and it WORKED ONCE (#3365's fix worker recorded the ceiling and corrected its own body unprompted), but a message an agent may read is a mitigation, not a mechanism; MEASURED at 6 of 9 open PRs blocked simultaneously on this one gate"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 14.00
+  files: [scripts/source-size-ratchet.mjs, package.json, test/recording-a-ceiling-does-not-depend-on-reading-prose.test.ts]
+  origin: "operator-session#the-pr-board-is-very-red-2026-08-31"
+  plan_refs: ["W1-T2488", "W1-T2521", "W1-T2526"]
+  status: queued
+  attempts: 0
+  rationale: |
+    FILED AFTER ITS OWN MITIGATION SHIPPED, DELIBERATELY. #3377 and #3388 both carry
+    `Remudero-Task: W1-T2532` and merged before this shard existed, because the board was red and
+    the message fix was the fastest thing that could move it. Neither closes this task. They
+    changed what the refusal SAYS; this task is about what nothing DOES.
+
+    THE DEFECT. `scripts/source-size-ratchet.mjs`'s header names the only sanctioned way to move a
+    ceiling: a human raising `scripts/source-size-baseline.json`. W1-T2488 then wired the gate into
+    `ci` via test/a-source-file-cannot-outgrow-its-baseline.test.ts's "the shipped tree passes its
+    own recorded baseline". So every PR that grows a `src/` file is red until SOMEONE edits a JSON
+    file, and no lane in the fleet performs that edit as part of building. The worker builds,
+    pushes, and reads `blocked_ci`.
+
+    MEASURED 2026-08-31, by merging main into each open worker branch and running the ratchet:
+    SIX of nine open PRs blocked simultaneously, every overage being that PR's own growth
+    (W1-T2492, W1-T2502, W1-T2487, W1-T2499, W1-T2485, W1-T2503 BLOCKED; W1-T2480 and the RETRO
+    branch OK). Each was cleared only by a session editing the file by hand.
+
+    AND THE FIX RUNG COULD NOT DO IT, WHICH IS THE PART THAT MAKES THIS STRUCTURAL. The sweep DID
+    dispatch ci-log fix workers at these PRs. They pushed, the finding did not move, and the rung
+    escalated `ci-log false-block` FOUR times — issues #3362, #3368, #3369, #3374 — each reading
+    "identical annotation finding set both before and after this strike's landed push". The cause
+    was in the message: it ended "raise the entry in <absolute runner path> by hand", and "by hand"
+    reads as "not yours to edit".
+
+    WHAT #3377 AND #3388 ALREADY DID, so this task does not redo it: the refusal now prints the
+    repo-relative path, the exact `"path": N` line to write, the standing permission W1-T2526
+    established, and a warning that recording the line invalidates the PR body's own file claim
+    (`bodyContradictsDiff` refused #3365, #3373 and #3378 on exactly that, inside one sweep).
+
+    WHY THAT IS STILL NOT ENOUGH. It worked once — #3365's fix worker read it, recorded the
+    ceiling, and corrected its own file count with nobody asking. One observation is evidence the
+    message is READABLE, not that the step is RELIABLE: it fires only after a PR has already gone
+    red, spent a CI cycle, and drawn a fix-rung strike, and only if that worker chooses to act on
+    prose. The cost of the miss is the whole board.
+
+    THE SHAPE OF THE FIX, AND THE CONSTRAINT ON IT. The recording must happen where the growth
+    happens — before the push, not after the red — and it must not make the CI assertion vacuous.
+    A script that auto-records whenever it runs would satisfy the `ci` test unconditionally,
+    because that test spawns the script against the runner's own checkout: the write would land in
+    the runner's tree and the gate would pass for every tree, forever. So an opt-in recording mode
+    (a flag, invoked only on the authoring path, never by the CI assertion) is the shape to
+    investigate first, NOT an unconditional write.
+
+    TRACE THE SEAM, DO NOT ASSUME IT. `runPreflightFast` has exactly ONE call site,
+    `preflightCommand` (`git grep -n 'runPreflightFast(' -- src/`), so the fleet's workers do not
+    run the fast gate and wiring the recording there reaches nobody. Find what a worker actually
+    runs before pushing and put it there. If that seam turns out to be a `src/` file, this becomes
+    a two-PR split — the instrument half first, then the wiring — for the reason W1-T2521 files
+    and #3345/#3349 demonstrate; `files:` above names the instrument half only, and widening it is
+    a review-ratified decision recorded in the PR body, not a shard edit (a verify:auto task cannot
+    amend its own record).
+
+    NOT IN SCOPE: changing what the ratchet refuses, its exit code, or its violation lines; and
+    changing `bodyContradictsDiff`. Its inability to read a negation — "Plan-only: no." is refused
+    as a plan-only claim because it matches the label-with-a-colon shape — is real, was measured on
+    #3373, and is a separate defect in a separate file.
+
+    RE-DERIVE THE POPULATION BEFORE BUILDING. The six-of-nine figure is one moment on one day. The
+    query is: for each open PR, merge origin/main into its head and run
+    `node scripts/source-size-ratchet.mjs`; report the count with the sha it was taken at.
+
+  acceptance:
+    - claim: "a build that grows a source file records its own ceiling without anyone reading a prose remedy"
+      proof: "unit test: test/recording-a-ceiling-does-not-depend-on-reading-prose.test.ts"
+    - claim: "the CI assertion is still able to refuse: the recording mode is opt-in and the path CI runs never writes"
+      proof: "unit test: test/recording-a-ceiling-does-not-depend-on-reading-prose.test.ts"
+    - claim: "a file that shrinks is still ratcheted DOWN and a brand-new file is still recorded, exactly as before"
+      proof: "unit test: test/recording-a-ceiling-does-not-depend-on-reading-prose.test.ts"
+    - claim: "the recorded line is byte-identical to what the refusal instructs a reader to write, so the two paths cannot drift"
+      proof: "unit test: test/recording-a-ceiling-does-not-depend-on-reading-prose.test.ts"
+    - claim: "removing the opt-in guard makes the CI assertion pass over a tree that really is over its baseline"
+      proof: "unit test: test/recording-a-ceiling-does-not-depend-on-reading-prose.test.ts"

@@ -115,15 +115,16 @@ test("the REAL committed CLAUDE.md is currently within the recorded size budget 
 // verdict. The cap stays the DECLARED figure rather than drifting upward silently, and a future
 // raise still has to change this constant deliberately and say why in prose.
 //
-// 2026-08-28: raised 65536 -> 67536 by an operator decision, and THE ROUND-BOUNDARY PROPERTY IS
-// GONE ON PURPOSE. 64 KiB was legible, not load-bearing; the increment (+2000) is now the thing
-// that was reasoned about, so a later reader must not "restore" a power of two by rounding this
-// constant. The prose assertion below tracks the CURRENT raise's date, not the file's whole
+// 2026-08-31 (W1-T2507): LOWERED 67536 -> 40000, the first time this ratchet has ever moved down --
+// not by making the file's content cheaper to hold, but by moving content OUT of CLAUDE.md (22
+// concrete-path bullets into learnings/architecture.yaml, the host-operations section into
+// docs/operator-guide.md, the five dated "Lessons from" sections folded into their topical
+// homes). The prose assertion below tracks the CURRENT change's date, not the file's whole
 // history -- the superseded record lives on in the baseline's priorBumpRationale, which the
 // third assertion pins so a raise cannot quietly erase the argument it had to answer.
 test("the real baseline pins the DECLARED cap, declares no measured figure, and carries a written reason", () => {
   const baseline = JSON.parse(readFileSync(join(REPO_ROOT, "scripts", "claude-md-budget-baseline.json"), "utf8"));
-  assert.equal(baseline.capBytes, 67536, `the cap must stay the declared figure: ${JSON.stringify(baseline)}`);
+  assert.equal(baseline.capBytes, 44000, `the cap must stay the declared figure: ${JSON.stringify(baseline)}`);
   assert.equal(
     Object.hasOwn(baseline, "measuredBytes"),
     false,
@@ -131,12 +132,12 @@ test("the real baseline pins the DECLARED cap, declares no measured figure, and 
   );
   assert.match(
     String(baseline.bumpRationale ?? ""),
-    /2026-08-28/,
-    "a cap raise must stay on the record in prose — an unexplained number is what this gate exists to prevent",
+    /2026-08-31/,
+    "a cap change must stay on the record in prose — an unexplained number is what this gate exists to prevent",
   );
   assert.match(
     String(baseline.priorBumpRationale ?? ""),
-    /2026-08-22/,
+    /2026-08-28/,
     "the superseded raise's reasoning must survive the raise that supersedes it — otherwise the record shows only the argument that won",
   );
 });

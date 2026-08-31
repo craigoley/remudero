@@ -1,0 +1,76 @@
+- id: W1-T2535
+  title: "EVERY SCOPE CLAIM IN A PR BODY IS `git diff --name-only` RESTATED BY HAND, SO IT GOES STALE THE INSTANT ANYTHING IS ADDED — `renderAcceptanceBlock` exists precisely because hand-written acceptance blocks kept failing to parse, and there is NO equivalent for the changed-files section, which is the one still failing; MEASURED: the same claim went stale for fleet workers, a careful hand-edit, and the PR whose own subject was this trap"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 16.00
+  files: [src/lib/plan-pr-emitter.ts, test/a-changed-files-block-cannot-contradict-its-own-diff.test.ts]
+  origin: "operator-session#how-do-we-get-it-all-green-2026-08-31"
+  plan_refs: ["W1-T274", "W1-T2532", "W1-T2533", "W1-T2534"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE PATTERN, NOT AN INCIDENT. On 2026-08-31 three distinct defects reddened the board and all
+    three reduce to one thing: a PR body ASSERTS, in prose, a fact a machine can DERIVE from the
+    diff. The file count, the scope, `plan-only` — every one is `git diff --name-only` restated by
+    hand, and every one goes stale the moment anything is added to the diff. The gate is then
+    correct to refuse a body that was true when it was written.
+
+    THE EVIDENCE THAT PROSE DISCIPLINE IS NOT THE FIX is that it failed for all three kinds of
+    author inside one day, on the same claim:
+
+      fleet workers      #3365, #3378 — recorded a ceiling, body's count went stale
+      a careful hand-edit  a seven-PR batch added the ceiling line and left every body untouched
+      the trap's own PR    #3388, whose entire subject is this detector, was refused by it
+
+    CLAUDE.md already carries the rule ("Verify every PR-body claim about your own diff against
+    `git diff --numstat`, and RE-VERIFY after each follow-up commit"), stated as forcefully as
+    prose can state anything, and it did not hold. That file's own header says the fix for a rule
+    that turns out to matter is to make something REFUSE it — this task is the other half of that:
+    make the claim unwritable by hand, so there is nothing to forget.
+
+    THE SEAM ALREADY EXISTS AND ITS PRECEDENT IS EXACT. `renderAcceptanceBlock`
+    (src/lib/plan-pr-emitter.ts) exists because hand-written acceptance blocks kept failing to
+    parse — the identical failure mode, on the identical surface, solved by generating the block
+    instead of asking authors to get it right. There is NO equivalent renderer for the
+    changed-files section, and that is precisely the section still failing.
+
+    THE PROPERTY TO AIM FOR. A changed-files block rendered from `git diff --name-only
+    origin/main...HEAD` at push time cannot contradict the diff, because it IS the diff — the
+    count arm would compare generated text against the thing it was generated from. That is
+    structurally unfalsifiable rather than merely well-tested, which is the difference between
+    this and a better warning message (#3377/#3388, both mitigations, both already shipped).
+
+    TRACE THE WIRING, DO NOT ASSUME IT. `renderAcceptanceBlock` serves the PLAN lane; a build PR's
+    body is written by the worker, not emitted. So a renderer alone changes nothing until something
+    calls it on the build path, and finding that call site is the same tracing job W1-T2532 names.
+    If it turns out to be a `src/` file beyond this one, or the implement prompt, that is a scope
+    widening to be ratified in the PR body — a verify:auto task cannot amend its own record.
+
+    WHAT THIS DOES NOT DO. It does not make `bodyContradictsDiff` smarter — W1-T2533 (negation) and
+    W1-T2534 (mention) are real defects in that predicate and stay filed on their own. A generated
+    block removes the COUNT arm's failure class; the shorthand arms still judge prose an author
+    writes freely, and should.
+
+    AND IT MUST NOT BECOME A RUBBER STAMP. A block the author can edit after generation, or that
+    regenerates from something other than the pushed diff, reintroduces exactly the drift it exists
+    to remove — with the added harm that the body now LOOKS machine-derived. Whatever shape the
+    build takes, the falsifier is: change the diff after rendering and prove the two disagree
+    loudly rather than silently.
+
+  acceptance:
+    - claim: "a changed-files block rendered from a diff lists exactly that diff's files, in a stable order"
+      proof: "unit test: test/a-changed-files-block-cannot-contradict-its-own-diff.test.ts"
+    - claim: "a body carrying the rendered block is not refused by bodyContradictsDiff for the diff it was rendered from"
+      proof: "unit test: test/a-changed-files-block-cannot-contradict-its-own-diff.test.ts"
+    - claim: "a rendered block that no longer matches its diff is detectable, so a stale block cannot pass as fresh"
+      proof: "unit test: test/a-changed-files-block-cannot-contradict-its-own-diff.test.ts"
+    - claim: "an empty diff renders a block that says so rather than an empty section that reads as an omission"
+      proof: "unit test: test/a-changed-files-block-cannot-contradict-its-own-diff.test.ts"
+    - claim: "the acceptance block renderer's own output is unchanged, so this adds a section rather than reshaping the body"
+      proof: "unit test: test/a-changed-files-block-cannot-contradict-its-own-diff.test.ts"
+    - claim: "hand-editing the rendered block to disagree with its diff is caught rather than silently accepted"
+      proof: "unit test: test/a-changed-files-block-cannot-contradict-its-own-diff.test.ts"
