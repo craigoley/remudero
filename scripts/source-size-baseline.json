@@ -89,7 +89,7 @@
   "src/lib/panel-skills.ts": 73,
   "src/lib/plan-architect.ts": 600,
   "src/lib/plan-index.ts": 83,
-  "src/lib/plan-pr-emitter.ts": 572,
+  "src/lib/plan-pr-emitter.ts": 666,
   "src/lib/plan.ts": 655,
   "src/lib/policy.ts": 1000,
   "src/lib/producer-completeness.ts": 578,
