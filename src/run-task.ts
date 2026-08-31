@@ -10892,15 +10892,7 @@ async function runTask(
     // directory and global artifact don't exist yet (§6 transport is
     // deferred) — both layers are non-fatal absences, so this is a pure
     // superset of the project-only injection that shipped before.
-    // W1-T2506: the PROJECT layer follows the TARGET repo (`repoDir`, the checkout this run
-    // clones/dispatches against — see the "Clone + worktree" block above), never the plan's own
-    // checkout. The prior derivation joined `dirname(planPath)` with a literal `".."` and
-    // `"learnings"`, which always resolved to THIS checkout's learnings regardless of
-    // `task.repo`, because the plan is always read from here. `projectLearningsHome`
-    // (lib/learnings.ts) is the named helper the other two project-layer call sites already
-    // use; a target repo with no `learnings/` home yet degrades to `[]` via
-    // `loadLearningsCorpus`'s own missing-directory tolerance, never a refusal.
-    const learningsDir = projectLearningsHome(repoDir);
+    const learningsDir = projectLearningsHome(repoDir); // W1-T2506: follows the TARGET repo, not the plan's checkout
     // W1-T86 (P12 wipe-test harness): arm B of a wipe-test pair MASKS injection —
     // computeMatchedLearningsForArm("B", ...) returns "" WITHOUT calling any of the
     // load/select/render chain below, so the store is never touched, only the
