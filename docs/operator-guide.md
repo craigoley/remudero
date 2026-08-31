@@ -547,6 +547,104 @@ reproduce here, that is said rather than repeated.
   `grep -o … | wc -l`, and let a zero be a zero** rather than substituting one after the fact.
 
 
+## Operating this host (migrated from CLAUDE.md, W1-T2507)
+
+These rules govern the daemon's own host machine — the operator's mac mini, its shared
+`node_modules`, its `launchd` unit, its worktree-reaping fleet directory — not anything a
+containerised implement/review worker can act on. They lived in CLAUDE.md (injected in full into
+every worker's prompt) until W1-T2507 moved them here: a worker running inside a container cannot
+run an installing package manager on this host, cannot do interactive work in its worktrees
+directory, and cannot trigger a `launchctl kickstart` on it, so injecting these rules into every
+worker session paid a per-session context tax for a reader who was never in the room. They still
+apply in full to whoever IS operating this host by hand.
+
+- **Never run an installing package manager (`npm ci` / `npm install`) anywhere on this host while
+  the daemon is up — every worktree SHARES the canonical `node_modules`.** Worktrees symlink back to
+  `~/Remudero/remudero/node_modules`: one mutable tree, no lock, shared by the live daemon and every
+  concurrent worker. On 2026-07-29 an install inside a worktree emptied it under the running daemon
+  and `bin/rmd` died at `node_modules/.bin/tsx: No such file or directory` on every KeepAlive
+  relaunch until a restoring install put 401 packages back. Wire a worktree up with
+  `ln -s ~/Remudero/remudero/node_modules <worktree>/node_modules`; note `.gitignore`'s
+  `node_modules/` has a trailing slash so it does NOT match that symlink — add a local exclude
+  before staging. *(the 2026-07-29 daemon outage)*
+- **Never do interactive work inside `<config.root>/worktrees` — the fleet reaps it.**
+  `reapStaleWorktrees` scans that directory on a cadence and `rm -rf`s entries it judges terminal,
+  without running `git worktree prune`; its signature is every worktree gone while the admin records
+  survive as `prunable`. One was destroyed twice in about eleven minutes mid-command. Cut worktrees
+  elsewhere (e.g. `~/Remudero/<name>-work`) and commit more often than feels necessary. Recovery:
+  the git admin dir and index live in the PARENT clone, so staged blobs survive —
+  `GIT_INDEX_FILE=<clone>/.git/worktrees/<name>/index git ls-files -s -- <path>` then
+  `git cat-file -p <sha>`. *(the 2026-07-31 impl-BH run — two wipes, full recovery)*
+- **Keep the operator checkout (`~/Remudero/remudero`) on `main`; do branch work in a `git worktree`,
+  never by checking out a feature branch on it.** The launchd daemon (`com.remudero.daemon`) loads
+  its code from that checkout, so a branch checkout risks it serving branch code on restart.
+  *(#768/#773)*
+- **A deploy is only observable if the daemon records the sha it booted on.** `decideDeployTrigger`
+  deploys when EITHER the install is behind origin/main OR the running daemon is not on the install
+  (`runningStale`), so fast-forwarding the checkout does not consume the trigger. An unrecorded
+  running sha is treated as stale (fail-eager), costing one self-correcting restart. To force a
+  deploy by hand: `git pull` then `launchctl kickstart -k gui/$UID/com.remudero.daemon`. *(#1054)*
+- **A fix you merge mid-drain reaches the PLAN and the WORKERS immediately and the JUDGE not at all
+  — so "I merged it and the next run still did the wrong thing" is a RESTART, not a failed fix.**
+  Three clocks, not one: `syncPlanFromOrigin` re-reads the plan blob from origin/main at every
+  dispatch, `worktreeAdd` cuts each worker a fresh worktree off origin/main, but `judgeReview` (and
+  the linter, and the drain loop) run in the orchestrator's own module graph, loaded once at process
+  start. The trap is the MIXED result this produces — the worker visibly behaves differently while
+  the judge that grades it does not — which reads as a flaky gate. NEVER validate a review/linter/
+  drain change by watching the next live run; prove it in-process against the choke point's own
+  objects, and treat judge behaviour as unobservable until a restart. `src/lib/self-sync.ts` says so
+  itself: it covers process STARTUP only and hands in-process staleness to the WS-2 self-updater.
+  *(re-derived 2026-08-11; operator table: docs/operator-guide.md's "What a merged
+  fix reaches before you restart")*
+- **A suite failing WIDE with ONE repeated message is an environment fault — read the message
+  before the diff. THE DISCRIMINATOR IS THE RATIO, NOT A VERSION NUMBER.** `Cannot find package
+  'tsx'` means the shared `node_modules` is empty (the bullet above), and the fleet then looks
+  alive but cannot restart *(2026-08-06 — 52 supervisor failures)*. A repeated
+  `browserType.launch` means the installed Playwright build is not the pinned one — 96 of 97
+  failures, one message; no real regression does that. Run
+  `node -p "require('playwright-core/browsers.json').browsers.find(b=>b.name==='chromium').revision"`
+  against `ls ~/Library/Caches/ms-playwright`. FIX THE ENVIRONMENT — alias the build where the
+  runner looks; **never edit the pin**. Container-scoped: the mini already carries the expected
+  revision. *(2026-08-15)*
+- **Run EVERY `rmd` verb as `RMD_SELF_SYNC_DONE=1 ./bin/rmd <verb>` — there are no read-only verbs.**
+  `checkCliFreshness` (`src/lib/self-sync.ts`) runs `git(["merge", "--ff-only", "origin/main"])` on a
+  checkout that is CLEAN and BEHIND, before the verb's own work. So `status`, `lint-plan` and
+  `check-proof` — the three every brief calls pure readers — all FAST-FORWARD THE CHECKOUT as a side
+  effect. Under a live worker that silently takes a pull the deploy owns, on a tree someone else is
+  mid-task in. `SELF_SYNC_GUARD_ENV` is the documented escape and is the only safe form for an agent
+  that is not deliberately syncing. *(established 2026-08-06; contradicts every brief written before it)*
+- **NEVER match on command TEXT to kill a process — `pkill -f` and `pgrep -f` SELF-MATCH.** The
+  pattern you are searching for appears in the command line of the shell running the search, so that
+  shell is inside its own match set and dies mid-command; the harness reports exit 144 and every
+  later step in the same invocation is silently skipped. One session hit this TWICE IN ONE EVENING,
+  the second time while cleaning up after the first, and another killed its shell with
+  `pkill -f "main-pristine"` days earlier. "Use a more careful pattern" is too weak a rule — it asks
+  for care where a DIFFERENT MECHANISM is available: use the harness's own task id and its stop
+  mechanism, or a pid captured at spawn (`child.pid`, a pidfile). Do not grep the process table to
+  find something to kill. When you must reach a whole tree, spawn it `detached` and use
+  `killProcessGroup` (`src/lib/worker-containment.ts`), which is pid-based and ESRCH-tolerant.
+  *(2026-08-09 ×2; the `main-pristine` kill days earlier)*
+- **PREFER `git checkout -- <path>` WITH A SAVED COPY OVER EVERY `git stash` FORM — the stash is A
+  SHARED UNNAMED LIFO STACK on a checkout several sessions touch, and `git stash pop` with no
+  argument takes `stash@{0}` whoever pushed it.** Same shape as the shared `node_modules` bullet
+  above: one mutable resource, no lock, several writers. MEASURED 2026-08-13 — the stack held ONE
+  entry dated 2026-07-23 on base `7c406b6` (#648), three weeks older than any live session, and a
+  session's `git stash -u` + `pop` restored its payload into that session's tree. It noticed and
+  removed them, but **`git status` after a `pop` shows another session's files INDISTINGUISHABLE
+  FROM YOUR OWN WORK** — nothing marks provenance, and `git log` authorship does not either (every
+  entry here is `cao825`). THE CHECK IS ONE COMMAND: `git stash list` before and after any stash
+  operation. **AND INSPECT WITH `^3`, because the obvious command UNDERSTATES the payload** —
+  `git stash show --stat stash@{0}` printed NOTHING for that entry, since all 9 files were UNTRACKED
+  and untracked payload hangs off the third parent: `git show --stat 'stash@{0}^3'` is what shows it.
+  **`git stash push <path>` WORKS and is still the wrong verb**: the new entry lands at `stash@{0}` and DEMOTES the older one, so a
+  concurrent bare `pop` takes yours. `git checkout -- <path>` is scoped to the path, cannot reach
+  another session's work, and cannot silently no-op. *(2026-08-13 — the eight-file pop)*
+
+(The mount-versus-image-rebuild boundary — which half of a diff ships on merge and which needs an
+operator-triggered rebuild — is NOT host-operator-only knowledge: an author editing `deploy/` or
+the Dockerfile needs it too, so it stays in CLAUDE.md's "CI and merging" section rather than
+migrating here.)
+
 ## Crisis runbook: the procedures you need at 3am
 
 The rest of this guide is about reading state. These four are the ones you need when you have

@@ -32,16 +32,6 @@ forensic detail, so the narrative does not need to live here.
   full-suite command the coverage-ratchet job runs, so a green run is the real signal, not a
   scoped approximation. Run the gate itself, never a proxy for what it does -- the next local
   check this repo adds inherits this rule too. *(W1-T294, W1-T338)*
-- **Verify every PR-body claim about your own diff against `git diff --numstat`, and RE-VERIFY after
-  each follow-up commit.** `bodyContradictsDiff` (`src/lib/review.ts`, W1-T274) OPENS THE DIFF and
-  FAILS the PR — **NEVER ASSERT SCOPE MEMBERSHIP FROM MEMORY; RUN THE PREDICATE** —
-  `isInPlanScope("docs/ORIENTATION.md")` returns **TRUE** (run, not read), and any claim about it
-  goes stale the moment `plan-architect.ts` moves. **The detector also has a SHORTHAND arm**: scope-shorthand
-  phrases (the plan-only/data-only family) fire when ANCHORED — as a label with a colon, a copular
-  claim ("this PR is …-only"), or attributive before a changeset noun — while bare mentions, quoted
-  regions and file paths stay silent (`shorthandIsAboutChangeset`, W1-T413). If the diff carries any
-  file outside the claimed scope, the anchored phrase fails the PR — so do not write the shorthand
-  in a body unless the predicate agrees, and do not fear it in quotes. *(#974, #984, #1685)*
 - **A test run with no `# tests` summary is NOT A RESULT, and a summary over an UNVERIFIED FILE LIST
   is not one either — `node --test` given a ghost path returns a green count, silently. `ls` first.** A killed or timed-out run prints every assertion it reached and no totals, so its
   failure set is a SUBSET BY CONSTRUCTION and reads as "fewer failures on this side". One session
@@ -51,7 +41,7 @@ forensic detail, so the narrative does not need to live here.
   counts does not save you when one side is truncated, because the truncated set is a subset either
   way. Require `# tests`/`# pass`/`# fail` on BOTH sides before diffing, and normalise paths first
   when the sides ran in different trees. *(2026-08-09 — truncated by the session's own `pkill -f`,
-  the self-match rule under "Operating this host")*
+  the self-match rule now in docs/operator-guide.md)*
 
 ## Writing proofs and acceptance criteria
 
@@ -118,20 +108,6 @@ forensic detail, so the narrative does not need to live here.
   string, so a title assembled from `" + "`-joined literals exists verbatim in no file: a proof
   spanning that concatenation seam resolves to ZERO candidates and is judged unexecutable even
   though the test exists and passes. *(impl-AG, caught pre-commit)*
-- **Keep a `unit test:` body under 100 characters with at most ONE comma and no `"; "`; a `grep:`
-  PATTERN MAY contain `" in "` provided an explicit path follows it.**
-  `looksLikeScenarioNarrative` (`src/lib/task-linter.ts`) fails `proof-resolvability` at ≥2
-  commas, or `"; "` plus a comma, or >100 chars. **CORRECTED 2026-08-28 — this bullet banned
-  `" in "` outright and said the pattern "mis-splits".** `DIALECT_GREP_PATH_RE`
-  (`src/lib/review.ts`) is `/^(.*?)\s+in\s+(\S*[./*]\S*)$/i` — LAZY, with the path group `\S`-only
-  against `$`, so the split always lands before the FINAL token and an embedded `" in "` survives
-  intact: `grep: always succeeds in one call in src/lib/ledger.ts` reads `verdict: pass`. THE REAL
-  HAZARD IS A STOLEN TRAILING TOKEN — a pattern ENDING in a path-like token with NO explicit path
-  has that token taken as the path: `grep: the convergence invariant fires in ledger.ts` greps
-  `ledger.ts` and reads `verdict: exec_error`. THE CHECK IS `captured path == declared path`.
-  Forward references are legitimate — for an unimplemented task the named test does not exist yet;
-  what must hold today is that the proof PARSES. Forward-referencing a PATH is safe;
-  forward-referencing a SYMBOL NAME is a guess. *(#982, #984; #920 → #943 vs #921 as counter-example)*
 - **Verify a `grep:` proof with the executor's REAL invocation — `grep -arn -- '<pattern>' <path>` —
   never with `grep -F`.** The executor passes the pattern with no `-F`, so it is a BASIC REGEX and a
   glob-looking pattern is silently wrong: `learnings/*.yaml` reads as *learnings, zero-or-more slashes,
@@ -142,24 +118,12 @@ forensic detail, so the narrative does not need to live here.
   execution, is the bar for every dialect**: a proof reading 1/1 across head and base substantiates
   nothing. Run a control pattern that must NOT match: `grep -r` with no file operand searches the
   cwd, not stdin, and fakes a match for anything. *(#1120 — a `-F`-verified proof failed the review)*
-- **A plan-only PR is not automatically CAPPED — prefer certification over the W1-T205 carve-out.**
-  `planOnly` (`src/lib/review.ts`) exempts a plan-only diff from the proof-execution FLOOR; it does
-  not stop real proofs from executing. `grep: <pattern> in <path>` proofs with an EXPLICIT path do
-  execute and can earn a full PASS — #877 posted "PASS — 4 criteria substantiated" on 4/4. A
-  path-less `grep:` is refused outright by `parseDialectGrep`. *(#877)*
-- **Do NOT rewrite proofs on `verify: human` tasks.** `isDispatchEligible` (`src/lib/drain.ts`)
-  returns false at `t.verify !== "auto"` BEFORE the linter is consulted, so their dialect debt can
-  never stall the queue. Forcing chaos drills, device recordings and live deploys into `unit test:`
-  yields proofs that parse, match zero tests, and cap the review — the exact theatre the dialect
-  gate exists to stop. Report them as needing a proof kind the dialect lacks. **And before treating
-  a `verify: human` shard's questions as LIVE, check whether a `verify: auto` sibling already
-  merged their substance** — measured twice in two days: the queue held open operator questions
-  whose answers had shipped under a different id. The check: grep the shard's load-bearing symbols
-  across merged trailers/subjects before escalating its questions. *(#984; siblings 2026-08-13/14)*
-
-- **An operator message names the actor, what happened, what to do — `docs/operator-message-standard.md`.**
-  Its test pins THAT DOC and the source lines it quotes VERBATIM, so rewording a quoted message
-  reddens it; no message of yours is checked. *(W1-T2279)*
+- **A `grep:` proof must match text on ONE PHYSICAL LINE — a YAML block scalar wraps, and the
+  pattern then reads 0 at head with no error.** Distinct from the acceptance-parser wrap hazard
+  above: that one truncates a BLOCK, this one silently fails to match at all, so the criterion
+  degrades on a body that looks right. Verify every proof at head AND base before pushing; the
+  head-side zero is what catches it. *(#2645 — "GRANT A STRIKE BACK WHEN THE SIGNATURE CHANGES" read
+  0, repointed to a phrase that did not wrap)*
 
 ## Coverage traps
 
@@ -168,11 +132,6 @@ forensic detail, so the narrative does not need to live here.
   across a new file's leading AND trailing source-line records (a source-map preamble/epilogue
   artifact), and diff-coverage flags an interface's property lines sitting there as uncovered code.
   Middle types, bracketed by executed statements, get no `DA:0`. *(#777 — head and tail both failed)*
-- **Put any coverage-load-bearing test in its OWN `test/*.test.ts` file — never append it to
-  `test/run-task.test.ts`.** That file intermittently crashes at FILE level under
-  `--experimental-test-coverage` (the W1-T240 registry tests) — and the crash zeroes the ENTIRE
-  lcov, so `diff-coverage` reads the 0-byte file as `OK` VACUOUSLY; only the `SF:` count check
-  (the vacuous-pass bullet below) catches it. *(#781)*
 - **When every test injects a fake, the seam's DEFAULT implementation and each `catch` arm are
   unreachable — write one test that really shells out, and one per catch arm.** #978 shipped 182
   lines of tests that all supplied their own `PreflightSpawn`, so `defaultPreflightSpawn` never ran
@@ -199,6 +158,22 @@ forensic detail, so the narrative does not need to live here.
   gate — measure MAIN's coverage of that region before assuming the PR caused it.** Rewriting a
   block converts a silent pre-existing gap into a blocking failure. *(#1399 — every line of the
   comment-assembly block scored 0 hits on origin/main; the PR only moved it)*
+- **A deps object supplying SOME fakes leaves every other seam on its REAL default — so relaxing a
+  guard can make a previously-dead default FIRE, in a file the diff never touched.** The MIRROR of
+  the all-fakes bullet above. A test stubbing only `log` let the real `defaultReexec` fire, which
+  replays `process.argv.slice(1)` — under `node --test` that IS the runner — killing six runners at
+  `exit 143` with no failed step and no summary, which reads as preemption. Run every CALLER of a
+  changed symbol (`git grep -l`), never the files the task declares; the scoped run was green.
+  *(#2237, #2248)*
+- **Verify a new falsifier by DELETING the fix and re-running — `# fail N` removed vs `# fail 0`
+  restored is the evidence it is load-bearing.** A guard seeded with rows already carrying the field
+  under test passed either way. *(#2250)*
+- **ZERO A `DA:` VALUE INSIDE THE TARGET's OWN `SF:` BLOCK — a whole-file replace hits another
+  file's identical line number and returns a FALSE `OK`.** Every brief here demands this falsifier;
+  done naively it proves nothing while looking like it passed. lcov holds one `DA:<line>` PER FILE,
+  so replacing `DA:5042,6` across the artefact edited a different record and `diff-coverage` still
+  read `OK`. Slice `SF:<path>`→`end_of_record`, assert exactly ONE match in that slice, and require
+  the `SF:` count and byte size unchanged. *(#3227)*
 
 ## Plan and task hygiene
 
@@ -249,62 +224,25 @@ forensic detail, so the narrative does not need to live here.
   technically-true aggregate that misleads. Read as supply it reported one task remaining while the
   selector offered 25. *(#982, #984, #985, #906, #920, #942, #943; the misreading and the staleness,
   2026-08-07)*
-- **Compute a new task id from the max across BOTH `plan/tasks.yaml` AND every `plan/tasks.d/*.yaml`
-  shard.** "Next number after the last one I saw" collides with tasks that landed concurrently or
-  live in a shard you didn't read, and `rmd lint-plan` then blocks the push.
-  `grep -rhoE '^\s*- id: W1-T[0-9]+' plan/tasks.yaml plan/tasks.d/ | grep -oE 'T[0-9]+'` → max+1.
-  **MINTING-ONLY — truncates letter-suffixed ids; duplicate detection compares whole ids:
-  `sort | uniq -d` on `- id:` lines.**
-  *(#770/#775 renumbered to W1-T257/W1-T261 — same collision twice)*
-- **A `warn` NEVER REACHES `lint-plan`'s EXIT CODE — this bullet claimed the changed-tasks pass
-  promotes one, and a session acted on that twice.** `lintPlanCommand` (`src/run-task.ts`) increments
-  `failing` only inside `if (blocking.length)`, then `return failing > 0 ? 1 : 0`. `proof-resolvability`
-  is demoted at `preDispatchLint` and stays advisory in CI. **AND `lint-plan`
-  EXITING 2 WITH `cannot resolve --base <ref>` MEANS YOUR BASE SHA IS POISONED, NOT YOUR DIFF** —
-  the message is `run-task.ts`'s own, returned as 2 rather than 1. CI passes
-  `BASE_SHA: ${{ github.event.pull_request.base.sha }}`, an EVENT-PAYLOAD SNAPSHOT, so **A RE-RUN
-  REPLAYS THE SAME POISONED SHA** and clears nothing; the remedy is merging current main into the
-  branch. Same snapshot class W1-T351/#1380 fixed for commitlint. *(#984; the base-sha half
-  2026-08-14)*
-- **`rmd next-task-id` reads the LOCAL checkout — `git pull` first or it returns an id you filed
-  minutes ago.** It DOES account for open PRs once current. **NO LOCK COVERS THE TRIAGE RUNG, WHICH
-  MINTS UNATTENDED WHILE YOU TYPE**: `state/triage.lock` is triage-against-triage only and
-  `state/task-id-reservations` is LOCAL, so neither sees another host's unpushed filing. TWICE a
-  double-mint made `loadPlan` REFUSE `origin/main`, taking every plan-reading verb with it — W1-T488
-  (#1816/#1817; repair #1820 merged only behind a temporary `enforce_admins` toggle) and
-  W1-T533+W1-T534, repaired by RENUMBERING the loser to W1-T911/W1-T912 (#1964). Sweep
-  `refs/rmd-id/*` alongside shards and open PRs — only that sees a RESERVED-BUT-UNFILED id (531/532
-  were) — then re-sweep on a fresh fetch immediately before pushing. *(#1388: returned W1-T379 right
-  after #1388 filed it, true max 380)*
-- **Hand-mint with the PLAIN refspec — `git push origin <orphan-sha>:refs/rmd-id/<id>` — never `+`
-  and never `--force-with-lease`: `+` SILENTLY DEFEATS THE LEASE, so a push that looks gated has no
-  gate at all.** The CAS is a property of the PAYLOAD, not the namespace: an orphan `commit-tree`
-  over the empty tree with no `-p` gives every writer a unique sha, so a second push is structurally
-  a non-fast-forward — the form `gitRemoteRefReserver.attempt` (`src/lib/task-id-reservation.ts`)
-  already uses, and this rule only stops hand-mints diverging from it. `reserveTaskIdRemote` has ONE
-  call site, the triage mint, so a hand-filed shard bypasses it entirely (W1-T509 does NOT close the
-  double-mint above; the second collision happened with it live). MEASURED on the real remote, one
-  probe ref: plain onto an ABSENT ref → rc=0 `* [new reference]`; plain onto an EXISTING ref holding
-  an unrelated orphan → **rc=1 `! [rejected] (non-fast-forward)`**; `+` → rc=0 `(forced update)`; a
-  deliberately WRONG `--force-with-lease` combined with `+` → rc=0, the lease ignored outright;
-  CONTROL, that identical lease WITHOUT `+` → `! [rejected] (stale info)`. W1-T509's header never
-  tested `+`, and `+` is the case that clobbers. Read the EXIT CODE into a variable — non-zero means
-  the id is TAKEN; renumber, never re-push.
 - **A contested reservation is never deleted and an unfiled one is never free — the
   LOSER of a race renumbers.** A reserved id with no shard anywhere is HELD, not abandoned; deleting
   the ref re-opens the race it settled, and reclaiming one is an operator decision. *(2026-08-18: two hosts
   minted `refs/rmd-id/W1-T967` 5.76s apart; the first read back its own nonce, then after the PR
   opened re-read the other's commit — it carried `+`. Only the message's pid+host+time named the
   winner; the ref has no identity field.)*
-- **A shard whose `files:` spans two concerns fails Rule 19 sizing at `risk:medium` — set
-  `risk:high` UP FRONT and record in the note that the band is Rule 19's SPAN, not blast radius.**
-  Decomposing a predicate from its own falsifier is not a real decomposition. **And NEVER file an
-  empty `files:` list**: `overlappingPaths` (`src/lib/dispatch-overlap.ts`) fail-closes — one empty
-  side returns the OTHER side's entire list — so an undeclared task overlaps every candidate, and
-  placed first it serializes the whole dispatch pool behind it (measured: one empty-`files:` task at
-  the queue head held admissions to 1 lane where 11 disjoint tasks waited; W1-T476 files the
-  ordering fix, but the authoring rule stands regardless). *(#1400 shipped it, pushing open-failing 176→177;
-  #1401 pre-empted it and stayed at 176; #1779)*
+- **A `verify: auto` task can NEVER declare its own plan record in `files:`, so a ratified scope
+  widening is recorded in the source comment and PR body, not the shard** — `rule15-filing` refuses
+  it, and the reviewer's `scope_violation` is ADVISORY, naming "review-ratified widenings"
+  legitimate. *(#2255)*
+- **A shard's `status:` field is not a completion signal — it stays `queued` on tasks that
+  shipped.** THREE THIS SESSION: W1-T1127 read `queued` on main while its build had merged as
+  #2476 (both credit paths — trailer AND a `run-W1-T1127-<digits>` head); W1-T1065's
+  admission-time re-check is in `daemon.ts` under its own name; W1-T1059's caller is wired in
+  `run-task.ts`. Read alone it cost a full rebuild that was discarded. The credit projection above
+  is the ONLY completion signal; `status:` is what the FILING wrote and nothing updates it on
+  merge. Pair it with the `ls-remote` hazard already under "Investigation discipline": a deleted
+  head and a stale `status:` agree on "not done" and are both wrong. *(#2476 — a whole build
+  discarded on two signals that agreed)*
 - **Decoding rule citations — where each family canonically lives.** "Rule N" / "Standing rule N"
   = MASTER-PLAN **§12** (1–25, plus 3B/8B); the linter enforces several by name — 15:
   `criterionFieldTampered` + `rule15FilingViolation`, 17: `provenanceViolation`, 18:
@@ -341,14 +279,6 @@ forensic detail, so the narrative does not need to live here.
 - **A CONFLICTING PR registers ZERO check runs. `total: 0` reads as "still queued" but means
   `mergeable_state: dirty` — check mergeability before waiting on CI.** *(#1399 — a full CI cycle
   spent waiting on checks that were never going to start)*
-- **`remudero-review` is a COMMIT STATUS, not a check-run — `/check-runs` is structurally blind to
-  it.** `postReviewStatus` (`src/lib/review.ts`) POSTs `repos/…/statuses/{sha}` with context
-  `REVIEW_CONTEXT`; `rollupFromRest` (`src/lib/open-prs-rest.ts`) says it in terms: reading only
-  `/check-runs` "would drop `remudero-review` entirely and make every reviewed PR look unreviewed."
-  Two analyses were misled by that read. The endpoints that DO see it: GraphQL's
-  `statusCheckRollup` (a union of CheckRun AND StatusContext nodes) and the combined-status
-  endpoint `repos/…/commits/{sha}/status` — use one of those, never `/check-runs` alone, when
-  asking "is this PR reviewed". *(measured twice, 2026-08-13/14)*
 - **When two PRs append tests to the same file's TAIL, the conflict region can cut just before a
   SHARED closing `});`** — keeping both sides then leaves one block unclosed, and esbuild reports
   `Unexpected end of file` rather than naming the merge. Close the ours-side block explicitly.
@@ -359,6 +289,30 @@ forensic detail, so the narrative does not need to live here.
   the defaults `[opened, synchronize, reopened]` exclude `edited` and a retitle alone triggers no run.
   Cheapest path is retitle THEN push; backwards, re-run the job. Close/reopen fires `reopened` without
   touching another lane's branch. *(W1-T351; re-derived 2026-08-06)*
+- **A merge to a BAKED path ships nothing until an operator triggers an image rebuild — know which
+  half of your diff you are in before you call a merge "shipped."** On a container host the daemon
+  runs from a **bind-mounted checkout** (`<state-root> -> .../Remudero`, the entrypoint `cd`s into
+  it), while its own **entrypoint script and every apt-level binary come from the image**. A path
+  read from the mount ships the instant it merges; a path baked into the image sits inert in a
+  MERGED, GREEN-EVERYWHERE commit until `.github/workflows/acr-build.yml` (`workflow_dispatch`
+  only, run by the operator from the Actions tab) is triggered and the new image is
+  deployed. The failure mode is
+  not a red check: docker still restarts the container, the daemon still logs `exited N`, and every
+  diagnostic that reads the MOUNT still says the code is current — because it is; only the image is
+  not. MEASURED 2026-08-14: the running image was 124 commits behind `origin/main`, including a
+  Dockerfile fix and an entrypoint fix, neither showing as a failure off-host.
+
+  | ships on merge (the mount) | needs an image rebuild (the image) |
+  |---|---|
+  | `src/`, `test/`, `plan/`, `scripts/`, `bin/` | `deploy/entrypoint.sh` — the EXECUTED entrypoint (`COPY … /usr/local/bin/rmd-entrypoint`) |
+  | `deploy/*.sh` run BY THE OPERATOR from the checkout (`host-update.sh`, `verify-image.sh`) | `deploy/Dockerfile` itself — every apt binary (`jq`, `tini`, `bubblewrap`, `socat`), the node version, the `/app` snapshot |
+  | `package.json` / the lockfile — via the mount and `ensureInstallFresh`, no rebuild needed | — |
+
+  **`node_modules` resolves to the MOUNT, not the image** — `/app` carries its own that the
+  entrypoint never falls back to, and the one the daemon loads is the same inode as the checkout's,
+  so a dependency bump is a mount-side change. `scripts/fleet-heartbeat.sh` publishes
+  `image_build_sha` (from `/etc/rmd-build-sha`) alongside the two checkout shas it already carried (`daemon_boot_head_sha`, `install_head_sha`) so this
+  boundary is checkable from the beat without shelling into the host. *(W1-T496, 2026-08-14)*
 
 ## Ledger and evidence discipline
 
@@ -367,16 +321,6 @@ forensic detail, so the narrative does not need to live here.
   `zgrep -h '<pat>' state/ledger.*.ndjson.gz state/ledger.*.ndjson state/ledger.ndjson | sort -u`.
   `zgrep` reads plain input transparently (MEASURED: 223 hits on an uncompressed rotation), so the
   fix is always THE GLOB, never the tool. Never assume either half is empty.
-- **Both one-sided globs are live defects, in OPPOSITE directions**: the sanctioned-until-now
-  `.gz`-only form hid **34,861 rows (8.3% of the corpus), every row rotated out since
-  2026-08-05T10:56:55Z** — mostly `board_gateway.*` and `sweep.*`; and `ledger.*.ndjson` alone
-  misses all 666 `.gz`. **`src/` HAD the same bug both ways; W1-T444/#1657 (commit 70d52c2) fixed
-  it**: `ledgerRotationEntries` (`src/lib/ledger-grep.ts`) is now THE ONE definition of the corpus
-  (both forms), `resolveLedgerUnion` reads both and refuses on partial coverage, and
-  `ledgerCorpusFiles` (`run-task.ts`) delegates to it — so **`rmd ledger-grep` IS the sanctioned
-  in-process reader**; the three-pattern zgrep stays the out-of-process shell idiom. The check:
-  `grep -c ledgerRotationEntries src/lib/ledger-grep.ts src/run-task.ts` — non-zero in both, or
-  this bullet has gone stale again.
 - **THE CONTROL MUST PROVE EACH FORM WAS READ, and a raw cross-archive count CANNOT** — rotations
   duplicate heavily, so `run.start` reads **257,438 raw lines across the `.gz` alone but only 779
   distinct over the full union**: a control like that stays six figures while a whole form is
@@ -393,49 +337,12 @@ forensic detail, so the narrative does not need to live here.
   — outcome from the gate that refused, reason from `decideAutoMergeArm` which had APPROVED, with
   the real reason going only to stdout. A self-contradictory line is worse than a terse one: it
   sends every later diagnosis toward a policy question instead of the real defect. *(#981)*
-- **Treat a step NAME as a claim, not evidence — check what the function that wrote it can actually
-  return.** `armAutoMerge` returns one of seven outcomes and never throws; five arm nothing, yet five
-  Architect lanes logged `automerge.armed` unconditionally. Measured over the unioned ledger: 176
-  rows; 135 blind, 17 provably false, 119 undecidable — OVERLAPPING categories, not a partition
-  (they sum past 176) — the blind rows recorded no `head_sha`, so
-  they can never be adjudicated. Any claim resting on that step name is unsound for rows
-  before #981. **AND THE LANES ARE NOT EQUALLY GATED — THE OBVIOUS READING IS BACKWARDS, SO
-  READ BOTH ARMS BEFORE ARGUING FROM ONE:** `grep -n 'return attemptArm' src/run-task.ts` prints
-  them side by side. `triageCommand` arms only AFTER `waitForCiGreen` returns green, and
-  `armAutoMerge` then reads `priorReviewVerdictFromLedger` and gates on `decideArmFromLedgerVerdict`
-  — TWO gates; it never branches on `reviewCommand`'s exit code, so the `(review success)` in its
-  console line is REPORTED, not consulted. `armAutoMergeAtOpen` is `return attemptArm(prUrl,
-  deps);` — NO verdict gate and NO ci gate — and the implement lane calls it at PR-OPEN, before any
-  review. **So IMPLEMENTATION PRs, which change source, self-merge earlier and with fewer checks
-  than triage PRs, which only add plan text.** Operator ruling on W1-T489: DOCUMENTED, not changed.
-  The unattended rate is real now that W1-T469 fires the rung on `partition.serialized.length > 0`
-  rather than idleness, bounded by `autoTriage.maxPerDay`/`minIntervalMinutes` (`plan/policy.yaml`).
-  Cost per run is a QUERY, not a number to carry (name-the-query rule above): re-derive it
-  over the ledger union rather than quoting `src/lib/auto-triage.ts`'s figure. *(#981; the lane-asymmetry half W1-T489, 2026-08-14)*
 - **On a zero match, `node --test --test-name-pattern` still emits `ok 1 - <RELATIVE test path>` —
   exclude the wrapper by the RELATIVE path, never the absolute one.** A control filtering on the
   absolute path counts the wrapper, returns 1, and reports a false pass, which would make every
   proof verification vacuous. Always run the control
   (`--test-name-pattern "no test title matches this xyzzy"`) and require a post-filter count of 0
   before believing any match count. *(#981 — the control caught the blind discriminator, not the proofs)*
-- **A report written to `state/` is SCRATCH, not a record — land the finding in a TRACKED artifact
-  in the same session, and never let a tracked artifact rest its evidence on a `state/` path.**
-  `.gitignore`'s `state/` entry is correct and load-bearing (W1-T256: runtime exhaust the daemon
-  writes into its own tree every run; un-ignored it reads as dirt in `git status --porcelain`, which
-  pre-W1-T255 crash-looped the daemon on restart) and that directory also holds
-  `state/service-tokens.json`. So this is a PLACEMENT defect, not a gitignore one — do not propose
-  un-ignoring it. On the mini a report there is merely local; **in a cloud container it is
-  destruction**, because nothing syncs it and the container is reclaimed. MEASURED at d968c50: **29
-  distinct `state/*.md` paths cited across 43 tracked files — and all 29 absent from a fresh
-  checkout**, so every one is a pointer no worker can follow; a session re-derived a whole finding
-  from scratch after `state/recon-retro-test-github-calls.md` turned out not to exist. The durable
-  homes: the PR body, the shard's own `rationale`/`note`, and `plan/feedback/` — tracked AND landed
-  by `landFeedback` (`src/lib/feedback-landing.ts`), which rebuilds from origin/main and pushes, so
-  it survives the container by construction. **Nothing in this repo tells a session where to write a
-  report**; the convention lives only in the operator's briefs, which is why the rule lives here. THE
-  COMPLIANT SHAPE is this file's own ledger-union bullet: it CARRIES its figures with their dates and
-  a re-run query (`MAX_RETAINED_LINES_PER_STEP = 200` is symbol-anchored — the check IS the name),
-  and any `state/` path is a supplementary pointer, never the evidence. *(established 2026-08-11)*
 - **A fixture shelling git PLUMBING fails on every CI runner and passes on every dev machine, so it
   reads as flaky when it is deterministic.** `commit-tree` refuses `Author identity unknown` unless
   an identity is set, and `actions/checkout` sets NEITHER repo nor global: the fault is ambient
@@ -446,17 +353,6 @@ forensic detail, so the narrative does not need to live here.
 
 ## Investigation discipline
 
-- **Before editing the config file you were TOLD to change, trace from source where the runtime
-  value is actually read.** The named declarative source may be inert while a code-level default
-  governs live behavior: the `.remudero/mounts.yaml` `architect:` row looked authoritative, but
-  spawns resolved from `architectModel(config)`'s `?? "opus"` default, so a row-only edit would have
-  shipped green and changed nothing observable. *(#781 — required wiring `architectModel(config, mounts)`)*
-  **MIRROR — before filing a NEW signal, `git grep` the producer's own type for consumers: the fact
-  is usually ALREADY COMPUTED AND DISCARDED.** 2026-08-22/23: `parseGhRateLimitHeaders` reads
-  `X-Ratelimit-Reset` and `X-Ratelimit-Resource`, consumers `worker.ts` plus one test; the plan-state
-  scanner destructures only `ids` off a result carrying `examinedLines` and `proposalOnlyLines`;
-  `disarmAutoMerge`'s `DisarmOutcome` is dropped at two of three call sites. Carrying a value that
-  already exists is the cheapest fix class here; measuring a new one is not.
 - **When a gate reads the ledger for a record the SAME function writes, check the WRITE ORDER before
   believing the gate's stated reason.** `armIfVerdictPermits` once ran before the `log("review.posted")`
   its own gate required, so it fail-closed to `ledger-refused` on every first pass with nothing
@@ -511,7 +407,6 @@ forensic detail, so the narrative does not need to live here.
   deciding a `files:` list, a violation count or a scope audit. Never carry a count; run
   `git ls-files -z | xargs -0 perl -0777 -ne 'print "$ARGV\n" if /\0/'`. `git grep --cached -I -l ''`
   is NOT a substitute — git sniffs only the first 8000 bytes. *(2026-08-11; folded 2026-08-16)*
-
 - **(c) A GLOB THAT NAMES ONE FILE FORM ANSWERS FROM THE OTHER WITHOUT SAYING SO.** Under `bash` a
   non-matching glob passes through literally and `grep` fails it into `2>/dev/null`; under `zsh` it
   errors. THE GENERAL FORM: control on COVERAGE (did every form get opened?), not on READABILITY (did
@@ -551,178 +446,13 @@ forensic detail, so the narrative does not need to live here.
   and a retry reading 0 traced to `cmd 2>&1 > f`, which sends stderr to the TERMINAL while this verb
   puts violations on stderr and the summary on stdout. Use `> out 2> err`.
   *(2026-08-14, both directions; the capture half 2026-08-15)*
-
-- **(g) A CHECK THAT IS ABSENT IS NOT A CHECK THAT PASSED — A ROLLUP SHOWS NEITHER.** Asking whether
-  a red was base-caused or in-diff, a sweep read `success` for a required check on three sibling PRs
-  and concluded the fault was in the diff. Those heads PREDATED the check's introduction, so it had
-  never run on them: absence, not agreement. `baseCausedCheckName` (`src/lib/sweep.ts`) needs the
-  check failing on EVERY open PR, so one older head silently refutes a real base outage. Restrict
-  the comparison to heads built after the check first appeared. *(2026-08-16, #1919)*
-- **(h) A CHANGE THAT REMOVES AN ACCESS PATH MUST PROVE THE REPLACEMENT FIRST, FROM A NEW SESSION
+- **(g) A CHANGE THAT REMOVES AN ACCESS PATH MUST PROVE THE REPLACEMENT FIRST, FROM A NEW SESSION
   — AN EXISTING CONNECTION IS NOT EVIDENCE.** `PasswordAuthentication no` went live against a
   0-byte `authorized_keys`; two pre-change sessions survived only because sshd never
   re-authenticates an established connection, and no third could have opened by any method. Prove
   the replacement under `BatchMode=yes` (which fails rather than prompting) and keep the old path
   until it does. The recurring shape is CREDENTIAL AND ACCESS ROTATION, not ssh. *(2026-08-16)*
-
-## Operating this host
-
-- **Never run an installing package manager (`npm ci` / `npm install`) anywhere on this host while
-  the daemon is up — every worktree SHARES the canonical `node_modules`.** Worktrees symlink back to
-  `~/Remudero/remudero/node_modules`: one mutable tree, no lock, shared by the live daemon and every
-  concurrent worker. On 2026-07-29 an install inside a worktree emptied it under the running daemon
-  and `bin/rmd` died at `node_modules/.bin/tsx: No such file or directory` on every KeepAlive
-  relaunch until a restoring install put 401 packages back. Wire a worktree up with
-  `ln -s ~/Remudero/remudero/node_modules <worktree>/node_modules`; note `.gitignore`'s
-  `node_modules/` has a trailing slash so it does NOT match that symlink — add a local exclude
-  before staging. *(the 2026-07-29 daemon outage)*
-- **Never do interactive work inside `<config.root>/worktrees` — the fleet reaps it.**
-  `reapStaleWorktrees` scans that directory on a cadence and `rm -rf`s entries it judges terminal,
-  without running `git worktree prune`; its signature is every worktree gone while the admin records
-  survive as `prunable`. One was destroyed twice in about eleven minutes mid-command. Cut worktrees
-  elsewhere (e.g. `~/Remudero/<name>-work`) and commit more often than feels necessary. Recovery:
-  the git admin dir and index live in the PARENT clone, so staged blobs survive —
-  `GIT_INDEX_FILE=<clone>/.git/worktrees/<name>/index git ls-files -s -- <path>` then
-  `git cat-file -p <sha>`. *(the 2026-07-31 impl-BH run — two wipes, full recovery)*
-- **Keep the operator checkout (`~/Remudero/remudero`) on `main`; do branch work in a `git worktree`,
-  never by checking out a feature branch on it.** The launchd daemon (`com.remudero.daemon`) loads
-  its code from that checkout, so a branch checkout risks it serving branch code on restart.
-  *(#768/#773)*
-- **A deploy is only observable if the daemon records the sha it booted on.** `decideDeployTrigger`
-  deploys when EITHER the install is behind origin/main OR the running daemon is not on the install
-  (`runningStale`), so fast-forwarding the checkout does not consume the trigger. An unrecorded
-  running sha is treated as stale (fail-eager), costing one self-correcting restart. To force a
-  deploy by hand: `git pull` then `launchctl kickstart -k gui/$UID/com.remudero.daemon`. *(#1054)*
-- **A fix you merge mid-drain reaches the PLAN and the WORKERS immediately and the JUDGE not at all
-  — so "I merged it and the next run still did the wrong thing" is a RESTART, not a failed fix.**
-  Three clocks, not one: `syncPlanFromOrigin` re-reads the plan blob from origin/main at every
-  dispatch, `worktreeAdd` cuts each worker a fresh worktree off origin/main, but `judgeReview` (and
-  the linter, and the drain loop) run in the orchestrator's own module graph, loaded once at process
-  start. The trap is the MIXED result this produces — the worker visibly behaves differently while
-  the judge that grades it does not — which reads as a flaky gate. NEVER validate a review/linter/
-  drain change by watching the next live run; prove it in-process against the choke point's own
-  objects, and treat judge behaviour as unobservable until a restart. `src/lib/self-sync.ts` says so
-  itself: it covers process STARTUP only and hands in-process staleness to the WS-2 self-updater.
-  *(re-derived 2026-08-11; operator table: docs/operator-guide.md's "What a merged
-  fix reaches before you restart")*
-- **A suite failing WIDE with ONE repeated message is an environment fault — read the message
-  before the diff. THE DISCRIMINATOR IS THE RATIO, NOT A VERSION NUMBER.** `Cannot find package
-  'tsx'` means the shared `node_modules` is empty (the bullet above), and the fleet then looks
-  alive but cannot restart *(2026-08-06 — 52 supervisor failures)*. A repeated
-  `browserType.launch` means the installed Playwright build is not the pinned one — 96 of 97
-  failures, one message; no real regression does that. Run
-  `node -p "require('playwright-core/browsers.json').browsers.find(b=>b.name==='chromium').revision"`
-  against `ls ~/Library/Caches/ms-playwright`. FIX THE ENVIRONMENT — alias the build where the
-  runner looks; **never edit the pin**. Container-scoped: the mini already carries the expected
-  revision. *(2026-08-15)*
-- **Run EVERY `rmd` verb as `RMD_SELF_SYNC_DONE=1 ./bin/rmd <verb>` — there are no read-only verbs.**
-  `checkCliFreshness` (`src/lib/self-sync.ts`) runs `git(["merge", "--ff-only", "origin/main"])` on a
-  checkout that is CLEAN and BEHIND, before the verb's own work. So `status`, `lint-plan` and
-  `check-proof` — the three every brief calls pure readers — all FAST-FORWARD THE CHECKOUT as a side
-  effect. Under a live worker that silently takes a pull the deploy owns, on a tree someone else is
-  mid-task in. `SELF_SYNC_GUARD_ENV` is the documented escape and is the only safe form for an agent
-  that is not deliberately syncing. *(established 2026-08-06; contradicts every brief written before it)*
-- **NEVER match on command TEXT to kill a process — `pkill -f` and `pgrep -f` SELF-MATCH.** The
-  pattern you are searching for appears in the command line of the shell running the search, so that
-  shell is inside its own match set and dies mid-command; the harness reports exit 144 and every
-  later step in the same invocation is silently skipped. One session hit this TWICE IN ONE EVENING,
-  the second time while cleaning up after the first, and another killed its shell with
-  `pkill -f "main-pristine"` days earlier. "Use a more careful pattern" is too weak a rule — it asks
-  for care where a DIFFERENT MECHANISM is available: use the harness's own task id and its stop
-  mechanism, or a pid captured at spawn (`child.pid`, a pidfile). Do not grep the process table to
-  find something to kill. When you must reach a whole tree, spawn it `detached` and use
-  `killProcessGroup` (`src/lib/worker-containment.ts`), which is pid-based and ESRCH-tolerant.
-  *(2026-08-09 ×2; the `main-pristine` kill days earlier)*
-- **PREFER `git checkout -- <path>` WITH A SAVED COPY OVER EVERY `git stash` FORM — the stash is A
-  SHARED UNNAMED LIFO STACK on a checkout several sessions touch, and `git stash pop` with no
-  argument takes `stash@{0}` whoever pushed it.** Same shape as the shared `node_modules` bullet
-  above: one mutable resource, no lock, several writers. MEASURED 2026-08-13 — the stack held ONE
-  entry dated 2026-07-23 on base `7c406b6` (#648), three weeks older than any live session, and a
-  session's `git stash -u` + `pop` restored its payload into that session's tree. It noticed and
-  removed them, but **`git status` after a `pop` shows another session's files INDISTINGUISHABLE
-  FROM YOUR OWN WORK** — nothing marks provenance, and `git log` authorship does not either (every
-  entry here is `cao825`). THE CHECK IS ONE COMMAND: `git stash list` before and after any stash
-  operation. **AND INSPECT WITH `^3`, because the obvious command UNDERSTATES the payload** —
-  `git stash show --stat stash@{0}` printed NOTHING for that entry, since all 9 files were UNTRACKED
-  and untracked payload hangs off the third parent: `git show --stat 'stash@{0}^3'` is what shows it.
-  **`git stash push <path>` WORKS and is still the wrong verb**: the new entry lands at `stash@{0}` and DEMOTES the older one, so a
-  concurrent bare `pop` takes yours. `git checkout -- <path>` is scoped to the path, cannot reach
-  another session's work, and cannot silently no-op. *(2026-08-13 — the eight-file pop)*
-
-- **A merge to a BAKED path ships nothing until an operator triggers an image rebuild — know which
-  half of your diff you are in before you call a merge "shipped."** On a container host the daemon
-  runs from a **bind-mounted checkout** (`<state-root> -> .../Remudero`, the entrypoint `cd`s into
-  it), while its own **entrypoint script and every apt-level binary come from the image**. A path
-  read from the mount ships the instant it merges; a path baked into the image sits inert in a
-  MERGED, GREEN-EVERYWHERE commit until `.github/workflows/acr-build.yml` (`workflow_dispatch`
-  only, run by the operator from the Actions tab) is triggered and the new image is
-  deployed. The failure mode is
-  not a red check: docker still restarts the container, the daemon still logs `exited N`, and every
-  diagnostic that reads the MOUNT still says the code is current — because it is; only the image is
-  not. MEASURED 2026-08-14: the running image was 124 commits behind `origin/main`, including a
-  Dockerfile fix and an entrypoint fix, neither showing as a failure off-host.
-
-  | ships on merge (the mount) | needs an image rebuild (the image) |
-  |---|---|
-  | `src/`, `test/`, `plan/`, `scripts/`, `bin/` | `deploy/entrypoint.sh` — the EXECUTED entrypoint (`COPY … /usr/local/bin/rmd-entrypoint`) |
-  | `deploy/*.sh` run BY THE OPERATOR from the checkout (`host-update.sh`, `verify-image.sh`) | `deploy/Dockerfile` itself — every apt binary (`jq`, `tini`, `bubblewrap`, `socat`), the node version, the `/app` snapshot |
-  | `package.json` / the lockfile — via the mount and `ensureInstallFresh`, no rebuild needed | — |
-
-  **`node_modules` resolves to the MOUNT, not the image** — `/app` carries its own that the
-  entrypoint never falls back to, and the one the daemon loads is the same inode as the checkout's,
-  so a dependency bump is a mount-side change. `scripts/fleet-heartbeat.sh` publishes
-  `image_build_sha` (from `/etc/rmd-build-sha`) alongside the two checkout shas it already carried (`daemon_boot_head_sha`, `install_head_sha`) so this
-  boundary is checkable from the beat without shelling into the host. *(W1-T496, 2026-08-14)*
-
-## Code traps
-
-- **`src/run-task.ts` has ZERO headroom on the bare-catch ratchet — 64 of 64, so the NEXT bare
-  erasing `catch {}` reddens `test/catch-erasure-ratchet.test.ts`.** Rethrow, record, carry the
-  distinction in the return shape, or state the reason INSIDE the braces. NEVER raise the
-  baseline — that is the move the gate exists to refuse. *(W1-T2295)*
-- **`src/lib/serve.ts`'s client JS lives inside a backtick template literal — never put a backtick
-  inside a client-code comment** (e.g. `` `lastLiveAt` ``). It terminates the outer template and
-  esbuild fails with `Expected ";" but found …`. Sanity-check by rendering the shell and parsing the
-  client script (`new Function(<largest <script> block of renderShellHtml()>)`). serve.ts DOM
-  behavior is covered by REAL Playwright/Chromium tests (`test/serve.*.test.ts`) — run them for any
-  client change. *(#777)*
-
-## Lessons from 2026-08-19
-
-- **A deps object supplying SOME fakes leaves every other seam on its REAL default — so relaxing a
-  guard can make a previously-dead default FIRE, in a file the diff never touched.** The MIRROR of
-  the all-fakes bullet above. A test stubbing only `log` let the real `defaultReexec` fire, which
-  replays `process.argv.slice(1)` — under `node --test` that IS the runner — killing six runners at
-  `exit 143` with no failed step and no summary, which reads as preemption. Run every CALLER of a
-  changed symbol (`git grep -l`), never the files the task declares; the scoped run was green.
-  *(#2237, #2248)*
-- **Read re-entrancy from `process.env`, not an injected `env` argument — a spawn writes a child's
-  environment and cannot reach a parameter.** A caller passing `{}` saw no loop guard; `isCiEnv({})`
-  is false for the same reason. *(#2248)*
-- **A fixed date constant compared against rows stamped at REAL time is a time bomb; the signature
-  is a red beginning at a clock boundary with no diff involved.** Compare the last green run's
-  timestamp against the first red one before blaming a change. Stamp through the injected clock at
-  the write seam; moving the constant only re-arms it. *(#2250)*
-- **Verify a new falsifier by DELETING the fix and re-running — `# fail N` removed vs `# fail 0`
-  restored is the evidence it is load-bearing.** A guard seeded with rows already carrying the field
-  under test passed either way. *(#2250)*
-- **A `verify: auto` task can NEVER declare its own plan record in `files:`, so a ratified scope
-  widening is recorded in the source comment and PR body, not the shard** — `rule15-filing` refuses
-  it, and the reviewer's `scope_violation` is ADVISORY, naming "review-ratified widenings"
-  legitimate. *(#2255)*
-
-## Lessons from 2026-08-23
-
-- **A shard's `status:` field is not a completion signal — it stays `queued` on tasks that
-  shipped.** THREE THIS SESSION: W1-T1127 read `queued` on main while its build had merged as
-  #2476 (both credit paths — trailer AND a `run-W1-T1127-<digits>` head); W1-T1065's
-  admission-time re-check is in `daemon.ts` under its own name; W1-T1059's caller is wired in
-  `run-task.ts`. Read alone it cost a full rebuild that was discarded. The credit projection above
-  is the ONLY completion signal; `status:` is what the FILING wrote and nothing updates it on
-  merge. Pair it with the `ls-remote` hazard already under "Investigation discipline": a deleted
-  head and a stale `status:` agree on "not done" and are both wrong. *(#2476 — a whole build
-  discarded on two signals that agreed)*
-- **A gate run from a checkout that is BEHIND answers about a file and a threshold that both
+- **(h) A GATE RUN FROM A CHECKOUT that is BEHIND answers about a file and a threshold that both
   moved — run it against `origin/main`'s blobs and report the behind-count.** MEASURED: the
   operator checkout sat 465 commits behind, and `node scripts/claude-md-budget-ratchet.mjs` there
   printed `60965 bytes (cap 61046) OK` while `git show origin/main:CLAUDE.md` is 63798 against a
@@ -730,31 +460,19 @@ forensic detail, so the narrative does not need to live here.
   invisible because the gate is honest about what it read and silent about which tree that was.
   `git rev-list --count HEAD..origin/main` costs nothing; print it beside any gate verdict taken
   outside a fresh worktree. *(2026-08-23, this retro's own first measurement)*
-
-## Lessons from 2026-08-23 (second retro)
-
-- **A POSITIVE CONTROL PROVES THE QUERY CAN SEE ITS CORPUS; IT DOES NOT PROVE THE CORPUS COVERS THE
-  WINDOW.** The (a)-(g) family above all catch a query that cannot read. This one reads perfectly and
+- **(i) A POSITIVE CONTROL PROVES THE QUERY CAN SEE ITS CORPUS; IT DOES NOT PROVE THE CORPUS COVERS THE
+  WINDOW.** The (a)-(f) family above all catch a query that cannot read. This one reads perfectly and
   still answers about the wrong period: `"step":"risk_judge.decision"` read 87 rows across the union
   (gz 64 / plain 23 / live 0) — control fires — while `rate_limited_rest_merge` read 0 because the
   corpus's newest row is 2026-08-12 and the feature merged 2026-08-23. Before acting on a ledger
   zero, print the corpus's NEWEST ts beside the event's own date; a control says nothing about that
   gap. *(W1-T1280/#2651)*
-- **A `grep:` proof must match text on ONE PHYSICAL LINE — a YAML block scalar wraps, and the
-  pattern then reads 0 at head with no error.** Distinct from the acceptance-parser wrap hazard
-  above: that one truncates a BLOCK, this one silently fails to match at all, so the criterion
-  degrades on a body that looks right. Verify every proof at head AND base before pushing; the
-  head-side zero is what catches it. *(#2645 — "GRANT A STRIKE BACK WHEN THE SIGNATURE CHANGES" read
-  0, repointed to a phrase that did not wrap)*
-- **A CENSUS TEST NAMES NONE OF YOUR SYMBOLS, SO THE CALLER SWEEP ABOVE CANNOT FIND IT** — `git grep
+- **(j) A CENSUS TEST NAMES NONE OF YOUR SYMBOLS, SO THE CALLER SWEEP ABOVE CANNOT FIND IT** — `git grep
   -l <symbol>` is blind to a suite that WALKS a population (`src/**`) and asserts its size. #2639
   added one seamed policy read and reddened `test/config-reader-seams.test.ts`, a file outside its
   `files:` that references nothing it touched. Also run any suite that enumerates a population your
   file joins, found by what it walks rather than by name. *(#2639, #2605)*
-
-## Lessons from 2026-08-28
-
-- **A Rule 21 protocol run passing `{ baseTask }` ALONE reports THREE VACUOUS ZEROS — including the
+- **(k) A RULE 21 protocol run passing `{ baseTask }` ALONE reports THREE VACUOUS ZEROS — including the
   one you would report as real.** `postMergeAmendmentViolations` (`src/lib/review.ts`) returns `[]`
   on its first two lines at `!ctx.statusResolvable` and `!ctx.merged`, so the real row, the vacuity
   row and the trap row all read 0 FOR THE SAME REASON and the table looks correct. Pass
@@ -763,11 +481,12 @@ forensic detail, so the narrative does not need to live here.
   it must run in the SAME call shape as the rows you report. *(#3211 — three zeros reported, then
   withdrawn when the blocking control read 0 too)*
 
-## Lessons from 2026-08-29
+## Code traps
 
-- **ZERO A `DA:` VALUE INSIDE THE TARGET's OWN `SF:` BLOCK — a whole-file replace hits another
-  file's identical line number and returns a FALSE `OK`.** Every brief here demands this falsifier;
-  done naively it proves nothing while looking like it passed. lcov holds one `DA:<line>` PER FILE,
-  so replacing `DA:5042,6` across the artefact edited a different record and `diff-coverage` still
-  read `OK`. Slice `SF:<path>`→`end_of_record`, assert exactly ONE match in that slice, and require
-  the `SF:` count and byte size unchanged. *(#3227)*
+- **Read re-entrancy from `process.env`, not an injected `env` argument — a spawn writes a child's
+  environment and cannot reach a parameter.** A caller passing `{}` saw no loop guard; `isCiEnv({})`
+  is false for the same reason. *(#2248)*
+- **A fixed date constant compared against rows stamped at REAL time is a time bomb; the signature
+  is a red beginning at a clock boundary with no diff involved.** Compare the last green run's
+  timestamp against the first red one before blaming a change. Stamp through the injected clock at
+  the write seam; moving the constant only re-arms it. *(#2250)*
