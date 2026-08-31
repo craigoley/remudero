@@ -62,7 +62,7 @@
   "src/lib/knowledge-dedup.ts": 209,
   "src/lib/last-seen.ts": 105,
   "src/lib/launchd.ts": 775,
-  "src/lib/learnings.ts": 1522,
+  "src/lib/learnings.ts": 1658,
   "src/lib/ledger-grep.ts": 354,
   "src/lib/ledger-replay.ts": 181,
   "src/lib/ledger.ts": 1773,
@@ -142,6 +142,6 @@
   "src/lib/worker-scratch.ts": 227,
   "src/lib/worker.ts": 3547,
   "src/lib/workflow-run.ts": 28,
-  "src/run-task.ts": 32767,
+  "src/run-task.ts": 32821,
   "src/spike.ts": 311
 }

@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 import {
   AUTONOMY_CLAUSE,
+  RULE_BULLET_START_RE,
+  RULE_HEADLINE_RE,
   buildHeadlineIndex,
   DISTRUST_RULE,
   LearningsError,
@@ -261,4 +263,41 @@ test("the learnings injection is unchanged in content and ordering", () => {
   assert.equal(combined, [expectedDoctrine, expectedFacts].join("\n"));
   // Doctrine (stable) still precedes matched facts (volatile) — ordering unchanged.
   assert.ok(combined.indexOf(DISTRUST_RULE) < combined.indexOf("FIRST fact, in order."));
+});
+
+// W1-T2508: the two regexes that decide what IS a rule bullet get their own two-arm fixtures.
+// `parseRuleHeadlines` above exercises them only through a whole document, so a pattern that
+// widened (swallowing an ordinary list item) or narrowed (dropping a real rule) could still leave
+// those cases green. `negative-reachability-ratchet` holds each src/ file's fixture-less
+// module-scope `_RE` count at its baseline and a NEW surface pays immediately, which is what
+// requires both symbols to be named by identifier here rather than only reached through a caller.
+
+test("W1-T2508: RULE_BULLET_START_RE separates a rule bullet from ordinary prose and ordinary list items", () => {
+  // The accepting arm — a bullet whose first content is bold, which is the rule-headline shape.
+  assert.equal(RULE_BULLET_START_RE.test("- **Run the shipped local gate before your FIRST push**"), true);
+  assert.equal(RULE_BULLET_START_RE.test("- **A**"), true, "a one-character headline is still the shape");
+  // The refusing arm. An ordinary list item, an indented continuation, a bold run that does not
+  // start the line, and a heading must all be left alone — mistaking any of them for a rule
+  // headline is how a body gets withheld from a prompt that needed it.
+  assert.equal(RULE_BULLET_START_RE.test("- an ordinary list item"), false);
+  assert.equal(RULE_BULLET_START_RE.test("  - **an indented continuation**"), false);
+  assert.equal(RULE_BULLET_START_RE.test("Some prose with **bold** inside it"), false);
+  assert.equal(RULE_BULLET_START_RE.test("## **A bold heading**"), false);
+  assert.equal(RULE_BULLET_START_RE.test(""), false);
+});
+
+test("W1-T2508: RULE_HEADLINE_RE captures the headline text and refuses an unclosed bold run", () => {
+  // The accepting arm — the capture is the headline, and it is NON-GREEDY, so a bullet carrying
+  // a second bold run later on still yields only the headline.
+  assert.equal(RULE_HEADLINE_RE.exec("- **Before you push** run the gate")?.[1], "Before you push");
+  assert.equal(
+    RULE_HEADLINE_RE.exec("- **First** then **second**")?.[1],
+    "First",
+    "non-greedy: the capture stops at the first closing marker, never spanning to a later one",
+  );
+  // The refusing arm. An unclosed bold run has no headline to take, and neither does a plain
+  // bullet — in both cases the parser must fall through rather than invent a boundary.
+  assert.equal(RULE_HEADLINE_RE.exec("- **never closed"), null);
+  assert.equal(RULE_HEADLINE_RE.exec("- an ordinary list item"), null);
+  assert.equal(RULE_HEADLINE_RE.exec("**not a bullet at all**"), null);
 });

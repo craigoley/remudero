@@ -1552,8 +1552,8 @@ export interface RuleHeadline {
   body: string;
 }
 
-const RULE_BULLET_START_RE = /^- \*\*/;
-const RULE_HEADLINE_RE = /^- \*\*([\s\S]+?)\*\*/;
+export const RULE_BULLET_START_RE = /^- \*\*/;
+export const RULE_HEADLINE_RE = /^- \*\*([\s\S]+?)\*\*/;
 
 /**
  * Split `markdown` into top-level `- **HEADLINE** body` bullets — the exact shape CLAUDE.md's

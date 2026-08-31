@@ -9889,6 +9889,11 @@ export function retrieveRuleBodyOnDemand(
     try {
       return readFileSync(p, "utf8");
     } catch {
+      // DELIBERATE ERASURE, and the one place it is correct here: `undefined` is this seam's
+      // OWN "the rule source could not be read" value, and the sole caller below turns it into
+      // an explicit unreadable RuleHeadline that degrades to the FULL rule. Distinguishing a
+      // missing file from an unreadable one would change nothing at that call site — both must
+      // degrade, never withhold — so carrying the distinction would be dead information.
       return undefined;
     }
   },
