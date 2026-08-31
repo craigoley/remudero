@@ -16,13 +16,35 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { CEILING_BUCKET_LINES, ceilingFor, evaluateSourceSizeRatchet } from "../scripts/source-size-ratchet.mjs";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { test } from "node:test";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = join(REPO_ROOT, "scripts", "source-size-ratchet.mjs");
 const REAL_BASELINE = join(REPO_ROOT, "scripts", "source-size-baseline.json");
+
+// `scripts/**` sits OUTSIDE tsconfig's `include` (see tsconfig.json), so a static
+// `import … from "../scripts/source-size-ratchet.mjs"` is a TS7016 — the same reason
+// test/learnings-ratchet-candidates.test.ts reaches its script through a runtime import rather
+// than a typed one. A dynamic specifier is not statically resolved, so this loads the REAL
+// module with no shadow copy to drift from it.
+const { CEILING_BUCKET_LINES, ceilingFor, evaluateSourceSizeRatchet } = (await import(
+  pathToFileURL(SCRIPT).href
+)) as {
+  CEILING_BUCKET_LINES: number;
+  ceilingFor: (lines: number) => number;
+  evaluateSourceSizeRatchet: (
+    currentLines: Record<string, number>,
+    baseline: Record<string, number>,
+  ) => {
+    ok: boolean;
+    violations: Array<{ path: string; lines: number; baseline: number; overage: number }>;
+    shrunk: Array<{ path: string; from: number; to: number }>;
+    added: Array<{ path: string; lines: number }>;
+    removed: string[];
+    nextBaseline: Record<string, number>;
+  };
+};
 
 function tmpRoot(): string {
   return mkdtempSync(join(tmpdir(), "rmd-source-size-ratchet-"));
