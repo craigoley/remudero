@@ -19774,6 +19774,8 @@ export function escalateStarvationCleared(
       issues.closeWithComment(issueUrl, comment);
       delivered = true;
     } catch (e) {
+      // CANNOT-OBSERVE MEANS WAIT (W1-T130): never rethrown into the daemon loop -- the
+      // ledger row appended below carries this as its own `failure` field instead.
       failure = String((e as Error)?.message ?? e);
     }
   }
