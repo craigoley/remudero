@@ -110,10 +110,7 @@ test("generate-cli-reference --check: a STALE file that hand-edits ONE command's
     const gen = runGenerate(out);
     assert.equal(gen.status, 0, gen.stdout + gen.stderr);
     const original = readFileSync(out, "utf8");
-    const tampered = original.replace(
-      "### `rmd resume`\n\n```\nrmd resume\n```",
-      "### `rmd resume`\n\n```\nrmd resume --hand-edited-drift\n```",
-    );
+    const tampered = original.replace("```\nrmd resume\n```", "```\nrmd resume --hand-edited-drift\n```");
     assert.notEqual(tampered, original, "fixture setup: the `rmd resume` section must actually exist to tamper");
     writeFileSync(out, tampered);
     const result = runCheck(out);
