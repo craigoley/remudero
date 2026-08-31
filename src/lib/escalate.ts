@@ -4,6 +4,12 @@ import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { appendLedger } from "./ledger.js";
 import { appendThreadMessage } from "./inbox-thread.js";
+import {
+  checkOperatorMessage,
+  operatorMessageFooter,
+  type OperatorMessage,
+  type OperatorMessageCheckResult,
+} from "./operator-message.js";
 import { assertLiveWriteAllowed } from "./live-write-guard.js";
 import { validateDecisionSummary, type DecisionSummary, type SummarizeDeps } from "./feedback.js";
 import type { Mount, Mounts } from "./mounts.js";
@@ -195,6 +201,54 @@ export interface Escalation {
    * body (fail-open, never lossy — W1-T313).
    */
   decisionSummary?: DecisionSummary | null;
+  /**
+   * OPTIONAL (W1-T2498) — WHAT FOLLOWS FROM DOING NOTHING about this escalation, in the reader's
+   * own terms: the fourth part of {@link checkOperatorMessage}'s presence check (see
+   * operator-message.ts's own doc for why this is checked structurally, never for content). Every
+   * caller predating this task omits it, which is deliberate and never blocking — {@link
+   * toOperatorMessage} reads it as `undefined` (an omitted part) when unset, and an omitted part
+   * is reported non-conforming, annotated, and delivered anyway, exactly like every other missing
+   * slot this check can observe. `null` is a distinct, EXPLICIT "nothing follows from inaction"
+   * (docs/operator-message-standard.md's "the message SAYS there is nothing rather than omitting
+   * the part") and counts as present.
+   */
+  consequence?: string | null;
+}
+
+/**
+ * Project an {@link Escalation} onto the four presence slots {@link checkOperatorMessage} reads
+ * (W1-T2498). Every field here is read from something the escalation ALREADY carries — never a
+ * new REQUIRED field invented for this task, so no existing producer is forced to change what it
+ * passes. `speaker` (from `class`) and `whatIsAsked` (from `recommendation`) are populated by
+ * every caller today because both fields are already required strings on {@link Escalation}
+ * itself; `whatHappened` (from `detail`) can be an empty string a caller genuinely left blank;
+ * `consequenceOfInaction` (from the new optional `consequence`) is the part most existing
+ * producers omit, and is exactly the kind of gap this task exists to make visible rather than
+ * silently accept.
+ */
+export function toOperatorMessage(e: Escalation): OperatorMessage {
+  return {
+    speaker: e.class,
+    whatHappened: e.detail,
+    whatIsAsked: e.recommendation,
+    consequenceOfInaction: e.consequence,
+  };
+}
+
+/**
+ * {@link checkOperatorMessage}, best-effort (W1-T2498) — a checker failure (this function does
+ * not throw today, but a future edit could) must NEVER prevent the escalation being raised, the
+ * same fail-open discipline {@link recordThreadMessage} already applies to the thread-store
+ * write. Returns `undefined` on failure rather than a fabricated verdict, so a caller can tell
+ * "checked and non-conforming" apart from "could not check at all" and skip annotating in the
+ * latter case instead of guessing.
+ */
+function checkOperatorMessageSafe(e: Escalation): OperatorMessageCheckResult | undefined {
+  try {
+    return checkOperatorMessage(toOperatorMessage(e));
+  } catch {
+    return undefined; // best-effort: a checker failure must never block the escalation itself
+  }
 }
 
 /** The three-way cause split {@link Escalation.cause} keys on (W1-T195's design). */
@@ -1167,7 +1221,13 @@ function recordDuplicateEscalation(e: Escalation, dup: OpenIssue, deps: Escalate
 function createEscalationIssue(
   e: Escalation,
   deps: EscalateDeps,
-  opts: { queueLabel: string; step: string; firstComment?: string; extra?: Record<string, unknown> },
+  opts: {
+    queueLabel: string;
+    step: string;
+    firstComment?: string;
+    extra?: Record<string, unknown>;
+    messageCheck?: OperatorMessageCheckResult;
+  },
 ): string {
   const title = `[${e.class}] ${e.taskId}: ${e.summary}`;
   deps.issues.ensureLabel?.(opts.queueLabel);
@@ -1187,6 +1247,11 @@ function createEscalationIssue(
       `\n\n_Degraded: label(s) ${degradedLabels.join(", ")} could not be provisioned on this repo — ` +
       `this issue was opened without them so the escalation itself is never lost (W1-T99)._`;
   }
+  // W1-T2498: a non-conforming operator message is ANNOTATED, never dropped or held — the footer
+  // is purely additive (see operator-message.ts's own doc), so `e.detail`/`e.summary`/
+  // `e.recommendation` render exactly as the caller wrote them either way.
+  const messageFooter = opts.messageCheck ? operatorMessageFooter(opts.messageCheck) : undefined;
+  if (messageFooter) body += `\n\n${messageFooter}`;
   const url = deps.issues.create(title, body, labels);
   if (opts.firstComment) {
     // W1-T349 design clause (ii): a demoted item's judge reason rides as the FIRST comment —
@@ -1197,6 +1262,12 @@ function createEscalationIssue(
     run_id: deps.runId,
     task_id: e.taskId,
     ...(degradedLabels.length > 0 ? { degraded_labels: degradedLabels } : {}),
+    ...(opts.messageCheck
+      ? {
+          operator_message_ok: opts.messageCheck.ok,
+          ...(opts.messageCheck.ok ? {} : { operator_message_missing: opts.messageCheck.missing }),
+        }
+      : {}),
     step: opts.step,
     class: e.class,
     issue_url: url,
@@ -1269,7 +1340,12 @@ export function escalate(e: Escalation, deps: EscalateDeps): string {
   recordThreadMessage(resolved, deps);
   const dup = findDuplicateEscalation(resolved, deps);
   if (dup) return recordDuplicateEscalation(resolved, dup, deps);
-  return createEscalationIssue(resolved, deps, { queueLabel: NEEDS_HUMAN_LABEL, step: "escalation.issue_opened" });
+  const messageCheck = checkOperatorMessageSafe(resolved);
+  return createEscalationIssue(resolved, deps, {
+    queueLabel: NEEDS_HUMAN_LABEL,
+    step: "escalation.issue_opened",
+    messageCheck,
+  });
 }
 
 /**
@@ -1301,15 +1377,21 @@ export async function escalateWithJudge(
   if (dup) return recordDuplicateEscalation(resolved, dup, deps);
 
   const verdict = await judgeEscalation(resolved, deps);
+  const messageCheck = checkOperatorMessageSafe(resolved);
   if (verdict.decision === "demote") {
     return createEscalationIssue(resolved, deps, {
       queueLabel: FLEET_NOTICE_LABEL,
       step: "escalation.demoted",
       firstComment: verdict.reason,
       extra: { judge_reason: verdict.reason },
+      messageCheck,
     });
   }
-  return createEscalationIssue(resolved, deps, { queueLabel: NEEDS_HUMAN_LABEL, step: "escalation.issue_opened" });
+  return createEscalationIssue(resolved, deps, {
+    queueLabel: NEEDS_HUMAN_LABEL,
+    step: "escalation.issue_opened",
+    messageCheck,
+  });
 }
 
 /**

@@ -278,6 +278,72 @@ checkout_target() {
   fi
 }
 
+# ── THE BOOT FETCH RETRIES A TRANSIENT REF LOCK, BOUNDED, AND ONLY A LOCK (W1-T2501) ─────────
+# MEASURED (operator-log#cannot-lock-ref-2026-08-30): the boot fetch failed to lock THREE refs in
+# one call — `refs/remotes/origin/main`, `heartbeat-mini` and a feature branch — the signature of
+# another git process holding them, not of corruption; the holder finishes. The old code made
+# exactly ONE attempt, logged one line and carried on: the daemon booted on the stale tree that
+# produced, and the advisory id mint two commands later read a corpus four ids behind.
+#
+# THE RETRY KEYS ON THE LOCK, NEVER ON FAILURE GENERALLY — a narrower claim than "retry transient
+# failures". `cannot lock ref` / `unable to update local ref` is git's own wording for exactly this
+# case: another process held the ref when this one reached for it. A network failure or an auth
+# failure is NOT this case, must NOT be retried into a longer boot, and keeps today's single-attempt,
+# fail-open behaviour untouched below.
+#
+# BOUNDED, AND FAILING OPEN STILL SURVIVES. `FETCH_LOCK_RETRY_MAX` caps the attempts and
+# `FETCH_LOCK_RETRY_PAUSE_S` is the backoff between them, so a boot can never wait on this
+# indefinitely. An exhausted retry does not die — the neighbouring housekeeping step's own principle
+# holds here too: a boot must not refuse to start because origin was briefly unreachable — it is
+# reported as a NAMED STALE BOOT (grep `STALE BOOT`) instead of one line among many, so an exhausted
+# retry is at least as visible as the daemon's own freshness vocabulary.
+FETCH_LOCK_RETRY_MAX="${RMD_FETCH_LOCK_RETRY_MAX:-5}"
+case "$FETCH_LOCK_RETRY_MAX" in
+  '' | *[!0-9]*)
+    log "RMD_FETCH_LOCK_RETRY_MAX is not a whole number — ignoring it and using 5"
+    FETCH_LOCK_RETRY_MAX=5
+    ;;
+esac
+
+FETCH_LOCK_RETRY_PAUSE_S="${RMD_FETCH_LOCK_RETRY_PAUSE_S:-2}"
+case "$FETCH_LOCK_RETRY_PAUSE_S" in
+  '' | *[!0-9]*)
+    log "RMD_FETCH_LOCK_RETRY_PAUSE_S is not a whole number of seconds — ignoring it and using 2"
+    FETCH_LOCK_RETRY_PAUSE_S=2
+    ;;
+esac
+
+# Attempts the boot fetch, retrying ONLY a ref-lock failure, up to FETCH_LOCK_RETRY_MAX times with
+# FETCH_LOCK_RETRY_PAUSE_S between attempts. Returns 0 the moment a fetch succeeds — including a
+# first-try success, which makes no additional call and prints nothing about retrying. Returns
+# non-zero, having already logged the underlying git error, when either the failure is not a ref
+# lock (one attempt only, FETCH_LOCK_EXHAUSTED left 0 so the caller keeps today's plain message) or
+# the retries are exhausted (FETCH_LOCK_EXHAUSTED set to 1, so the caller can name it a stale boot).
+boot_fetch() {
+  fetch_attempt=1
+  FETCH_LOCK_EXHAUSTED=0
+  while :; do
+    if fetch_out="$(git -C "$TREE" fetch --prune origin 2>&1)"; then
+      if [ "$fetch_attempt" -gt 1 ]; then
+        log "fetch: succeeded on retry $fetch_attempt/$FETCH_LOCK_RETRY_MAX — the ref lock cleared"
+      fi
+      return 0
+    fi
+    if ! printf '%s' "$fetch_out" | grep -qiE 'cannot lock ref|unable to update local ref'; then
+      printf '%s\n' "$fetch_out" | sed 's/^/  /' >&2
+      return 1
+    fi
+    if [ "$fetch_attempt" -ge "$FETCH_LOCK_RETRY_MAX" ]; then
+      printf '%s\n' "$fetch_out" | sed 's/^/  /' >&2
+      FETCH_LOCK_EXHAUSTED=1
+      return 1
+    fi
+    log "fetch: another process holds a ref lock (attempt $fetch_attempt/$FETCH_LOCK_RETRY_MAX) — retrying in ${FETCH_LOCK_RETRY_PAUSE_S}s"
+    sleep "$FETCH_LOCK_RETRY_PAUSE_S"
+    fetch_attempt=$((fetch_attempt + 1))
+  done
+}
+
 # FETCH, GUARD, CHECKOUT — EXTRACTED SO IT CAN RUN MORE THAN ONCE (W1-T490).
 # The body is byte-for-byte what the `else` branch below used to hold inline; only its location
 # moved. It is a function now because the freshness-restart block at the foot of this script has to
@@ -329,7 +395,13 @@ sync_tree() {
   # log line below.
   git -C "$TREE" worktree prune || log "worktree prune FAILED — continuing (housekeeping never blocks the boot)"
 
-  git -C "$TREE" fetch --prune origin || log "fetch FAILED — continuing on the tree as it stands"
+  if ! boot_fetch; then
+    if [ "$FETCH_LOCK_EXHAUSTED" -eq 1 ]; then
+      log "STALE BOOT: fetch FAILED after $FETCH_LOCK_RETRY_MAX attempt(s), still ref-locked — continuing on the tree as it stands"
+    else
+      log "fetch FAILED — continuing on the tree as it stands"
+    fi
+  fi
 
   # A REPO ALREADY STUCK STAYS STUCK, AND THE ENTRYPOINT SAYS SO RATHER THAN FIXING IT.
   # `worktree prune` removes the CAUSE; it does not remove `.git/gc.log`, which is the thing

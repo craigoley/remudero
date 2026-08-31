@@ -14059,6 +14059,33 @@ export function replayCommand(
 }
 
 /**
+ * Assert that `deriveCliVerbs`'s scan over run-task.ts's own source and the real `COMMANDS`
+ * registry name EXACTLY the same verbs — the control W1-T2479 added because the scan cannot be
+ * given the registry directly (`.dependency-cruiser.cjs`'s `lib-no-spike-or-cli` rule forbids
+ * `src/lib` importing this file) and so has no way to know, on its own, whether it missed an
+ * entry. THIS function is the one place both are visible at once.
+ *
+ * Throws rather than returning a boolean: a disagreement here means the emissions report's whole
+ * corpus is wrong, which is not a condition any caller should be able to shrug off silently the
+ * way `retro`/`resume`/`notify` fell through the four-space-only pattern with no diagnostic at
+ * all. The message NAMES every verb on the wrong side, never just a count.
+ */
+function assertVerbScanAgreesWithRegistry(scanned: ReadonlyArray<string>, declared: ReadonlyArray<string>): void {
+  const scannedSet = new Set(scanned);
+  const declaredSet = new Set(declared);
+  const missingFromScan = declared.filter((n) => !scannedSet.has(n));
+  const extraInScan = scanned.filter((n) => !declaredSet.has(n));
+  if (missingFromScan.length === 0 && extraInScan.length === 0) return;
+  const parts: string[] = [];
+  if (missingFromScan.length > 0) parts.push(`declared but not scanned: ${missingFromScan.join(", ")}`);
+  if (extraInScan.length > 0) parts.push(`scanned but not declared: ${extraInScan.join(", ")}`);
+  throw new Error(
+    `assertVerbScanAgreesWithRegistry: the verb scan and the COMMANDS registry disagree (${parts.join("; ")}) — ` +
+      "the emissions report's corpus cannot be trusted until deriveCliVerbs (lib/emissions.ts) or COMMANDS agree again.",
+  );
+}
+
+/**
  * `rmd emissions [--days N]` — which CLI verbs have written NO ledger line in the window.
  *
  * STRICTLY READ-ONLY: unions the ledger corpus, counts, prints. Writes nothing, spawns nothing.
@@ -14090,6 +14117,14 @@ export function emissionsCommand(rest: string[], opts: { stateDir?: string } = {
   walk(srcDir);
 
   const verbs = deriveCliVerbs(readFileSync(join(srcDir, "run-task.ts"), "utf8"));
+  // THE CONTROL deriveCliVerbs cannot give itself. lib/emissions.ts may not import COMMANDS
+  // (.dependency-cruiser.cjs's lib-no-spike-or-cli rule), so it can only ever report what its own
+  // regex found, with no way to know if that regex missed a shape. THIS caller can see both — the
+  // real COMMANDS registry and the scan over run-task.ts's own source — so it is the one place the
+  // two can be asserted to agree. A mismatch (a fourth entry shape, a renamed field, a reshaped
+  // array) FAILS LOUD here rather than silently shrinking the corpus the way the four-space-only
+  // pattern did for `retro`/`resume`/`notify` (W1-T2479).
+  assertVerbScanAgreesWithRegistry(verbs, COMMANDS.map((c) => c.name));
   const attributed = attributeVerbs(verbs, deriveStepPrefixes(sources));
   const measurable = attributed.filter((a): a is { name: string; prefix: string } => a.prefix !== null);
   const unauditable = attributed.filter((a) => a.prefix === null).map((a) => a.name);
@@ -14174,7 +14209,12 @@ export function emissionsCommand(rest: string[], opts: { stateDir?: string } = {
   const rows = emissionsReport({ measurable, counts, callSites, allowlist: EMISSIONS_ALLOWLIST });
   console.log(`rmd emissions — window ${days}d (since ${cutoff.slice(0, 10)})`);
   console.log(`  corpus  : ${files.length} ledger file(s) (${inWindow.length} within the window, ${files.length - inWindow.length} skipped as older), ${scanned} lines scanned, ${seen.size} distinct in-window events on measured prefixes`);
-  console.log(`  verbs   : ${verbs.length} declared, ${measurable.length} measurable, ${unauditable.length} unauditable`);
+  // "declared" is COMMANDS.length, not verbs.length: the two are asserted equal above by
+  // assertVerbScanAgreesWithRegistry, but printing BOTH (rather than collapsing to one number)
+  // is the report stating its own corpus check rather than assuming it, per W1-T2479.
+  console.log(
+    `  verbs   : ${COMMANDS.length} declared, ${verbs.length} scanned, ${measurable.length} measurable, ${unauditable.length} unauditable`,
+  );
   console.log("");
   for (const r of rows) {
     console.log(
@@ -32607,6 +32647,10 @@ export { commitsAhead };
 // commandSyntax/commandSpec are the same lookup individual command handlers use for their
 // inline usage hints (fix/escalate/notify/project/correct) — no hand-written duplicate text.
 export { COMMANDS, USAGE, commandHelp, commandSpec, commandSyntax, type CommandSpec };
+// Exported for W1-T2479's agreement-control test: assertVerbScanAgreesWithRegistry is the caller-
+// side check that the emissions census (lib/emissions.ts's deriveCliVerbs) and this file's own
+// COMMANDS registry name the same verbs — export only, logic lives inline in emissionsCommand.
+export { assertVerbScanAgreesWithRegistry };
 
 // The W1-T447 guard list, the branch-citation scan and the reverse-drift planner MOVED to
 // ./lib/branch-reaper.ts. Re-exported here so every existing import path keeps working unchanged --
