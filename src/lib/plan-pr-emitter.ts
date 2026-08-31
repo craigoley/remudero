@@ -247,6 +247,90 @@ export function buildPlanPrCommitMessage(opts: PlanPrCommitOpts): string {
 
 // ── 5. PR-body assembly ───────────────────────────────────────────────────────────────────
 
+/** The heading {@link renderChangedFilesBlock} emits and {@link changedFilesBlockIsStale} reads.
+ *  One constant so the writer and the reader can never drift — the two-enumerator defect this
+ *  repo has paid for elsewhere. */
+export const CHANGED_FILES_HEADING = "## Changed files";
+
+/**
+ * W1-T2535 — RENDER the changed-files section from the diff instead of restating it in prose.
+ *
+ * THE PATTERN, NOT AN INCIDENT. Every "exactly N files" or scope sentence in a PR body is
+ * `git diff --name-only` restated by hand, and it goes stale the moment anything is added to the
+ * diff — after which `bodyContradictsDiff` is CORRECT to refuse a body that was true when written.
+ * MEASURED 2026-08-31, the same claim failing for all three kinds of author in one day: fleet
+ * workers (#3365, #3378, each after recording a size ceiling), a careful hand-edit (a seven-PR
+ * batch that added the ceiling line and left every body untouched), and #3388 — whose entire
+ * subject is this detector, refused by it.
+ *
+ * THE PRECEDENT IS EXACT. {@link renderAcceptanceBlock} exists because hand-written acceptance
+ * blocks kept failing to parse: the identical failure mode, on the identical surface, solved by
+ * GENERATING the section rather than asking authors to get it right. There was no equivalent for
+ * changed files, and that is precisely the section still failing.
+ *
+ * WHY THIS IS STRUCTURAL RATHER THAN A BETTER WARNING (#3377 and #3388 both shipped warnings, and
+ * both were mitigations): a block rendered FROM the diff cannot contradict the diff, because it IS
+ * the diff. There is no claim left to go stale.
+ *
+ * EMITS NO COUNT. A count is a second assertion about the same list, and the list is already
+ * present and countable — writing both is how the two drift. The paths ARE the claim.
+ */
+export function renderChangedFilesBlock(files: readonly string[]): string {
+  const sorted = [...files].map((f) => f.trim()).filter(Boolean).sort();
+  if (sorted.length === 0) {
+    // An EMPTY section reads as an omission — a reader cannot tell "nothing changed" from "the
+    // author forgot". Say which it is.
+    return `${CHANGED_FILES_HEADING}\n\n(none — this changeset adds, removes and modifies no files.)`;
+  }
+  return [CHANGED_FILES_HEADING, "", ...sorted.map((f) => `- \`${f}\``)].join("\n");
+}
+
+/**
+ * W1-T2535 — does a body carry a rendered block that NO LONGER matches the diff it names?
+ *
+ * The renderer makes a FRESH block unfalsifiable; this catches the other direction — a block
+ * rendered once and then left behind by a later commit, or hand-edited to disagree. Returns the
+ * two differences rather than a bare boolean, because "which files" is the whole remedy.
+ *
+ * A body carrying NO block at all is not stale, it is absent: both arrays come back empty and the
+ * caller can tell the two apart via {@link hasChangedFilesBlock}. Fail-closed would be wrong here —
+ * a body that never opted in has nothing to be stale about.
+ */
+export function changedFilesBlockDrift(
+  body: string,
+  actual: readonly string[],
+): { missing: string[]; extra: string[] } {
+  const listed = listedChangedFiles(body);
+  if (listed === undefined) return { missing: [], extra: [] };
+  const a = new Set([...actual].map((f) => f.trim()).filter(Boolean));
+  const l = new Set(listed);
+  return {
+    missing: [...a].filter((f) => !l.has(f)).sort(),
+    extra: [...l].filter((f) => !a.has(f)).sort(),
+  };
+}
+
+/** True iff `body` carries a rendered changed-files block at all. */
+export function hasChangedFilesBlock(body: string): boolean {
+  return listedChangedFiles(body) !== undefined;
+}
+
+/** The paths a rendered block lists, or undefined when the body carries no block. Reads only the
+ *  backticked bullets the renderer emits, so ordinary prose mentioning a path is never mistaken
+ *  for the block itself. */
+function listedChangedFiles(body: string): string[] | undefined {
+  const i = (body ?? "").indexOf(CHANGED_FILES_HEADING);
+  if (i < 0) return undefined;
+  const rest = body.slice(i + CHANGED_FILES_HEADING.length);
+  const end = rest.search(/\n#{1,6} /);
+  const section = end < 0 ? rest : rest.slice(0, end);
+  const out: string[] = [];
+  for (const line of section.split("\n")) {
+    const m = /^- `([^`]+)`\s*$/.exec(line.trim());
+    if (m) out.push(m[1].trim());
+  }
+  return out;
+}
 export interface PlanPrBodyOpts {
   /** Free-text intro prose (may itself be multi-line/multi-paragraph). */
   intro: string;
@@ -255,6 +339,11 @@ export interface PlanPrBodyOpts {
   criteria: AcceptanceCriterion[];
   /** OMIT for a plan-FILING PR — see the correctness rule above. */
   taskId?: string;
+  /** W1-T2535 — the diff this body describes, rendered via {@link renderChangedFilesBlock} instead
+   *  of restated in prose. OPTIONAL, and OMITTING IT LEAVES THE OUTPUT BYTE-IDENTICAL: every
+   *  existing caller keeps the body it already produced, so this adds a section rather than
+   *  reshaping the contract. */
+  changedFiles?: readonly string[];
 }
 
 /**
@@ -262,8 +351,13 @@ export interface PlanPrBodyOpts {
  * Acceptance block, and an optional `Remudero-Task:` trailer.
  */
 export function buildPlanPrBody(opts: PlanPrBodyOpts): string {
-  const { intro, criteria, taskId } = opts;
-  const parts = [intro.trim(), "", renderAcceptanceBlock(criteria)];
+  const { intro, criteria, taskId, changedFiles } = opts;
+  // W1-T2535: the changed-files block sits ABOVE the Acceptance block, because the Acceptance
+  // block must stay the LAST thing before the trailer — its bullets are never to be interrupted
+  // (the #394 lesson, already recorded on `criteria` above).
+  const parts = [intro.trim()];
+  if (changedFiles !== undefined) parts.push("", renderChangedFilesBlock(changedFiles));
+  parts.push("", renderAcceptanceBlock(criteria));
   if (taskId) parts.push("", `Remudero-Task: ${taskId}`);
   return `${parts.join("\n")}\n`;
 }

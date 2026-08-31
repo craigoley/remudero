@@ -41,6 +41,37 @@
     to fix, and it escalates exactly as today. `NEVER an empty commit and never a close-and-reopen`
     — both are explicitly forbidden ways to kick CI, and a base merge is neither.
 
+    RETIRED AS `withdrawn` ON THE OPERATOR RULING, 2026-08-31, on the correction below. The
+    capability is not missing, so there is nothing here to build; what remains open is a different
+    question (why the existing row did not fire), and it belongs to its own task written against
+    the ledger rather than to this one.
+    ── CORRECTION, 2026-08-31, BEFORE ANY CODE WAS WRITTEN. THIS TASK IS LARGELY ALREADY BUILT AND
+    ITS CENTRAL PREMISE IS WRONG. Tracing the wiring before implementing found
+    `reviewVerdictOvertakenByActivity` (src/lib/sweep.ts) and its `post-review` DISPOSITION_RULES
+    row, shipped by W1-T2299, which already:
+      - compares `lastActivityAt` against `reviewVerdictPostedAt` — the same discriminator (5) asks
+        for, and its producer `reviewVerdictPostedAtFromRollup` (run-task.ts) IS wired;
+      - FAILS CLOSED on either timestamp being absent or unparseable — criterion 5, already met;
+      - is BOUNDED against repeated triggering by `reviewOrphanCap`/`reviewOrphanBackoffMinutes` —
+        criterion 4, already met, and reusing an existing threshold rather than minting a third.
+
+    AND ITS REMEDY IS BETTER THAN THE ONE (4) PROPOSES. This shard assumed the only path was A NEW
+    HEAD, because "a posted verdict is never re-judged on the same sha". W1-T2299 changed that: the
+    row re-runs the REVIEW LANE in place and posts a FRESH verdict, so no commit is needed at all.
+    Merging a base branch purely to move the sha — what a human did three times on 2026-08-31 — is
+    strictly more expensive than what the fleet can already do.
+
+    WHAT REMAINS GENUINELY OPEN is a DIFFERENT question from the one filed here: the row did not
+    fire on #3388, #3356 or #3413 that night. Its `when` also requires `checksState === "green"`,
+    and in each case the body was edited and a merge hand-pushed within minutes — plausibly before
+    any sweep pass observed the interval. That is unproven either way from off-host, and proving it
+    needs the ledger, not a new predicate.
+
+    THE RECOMMENDATION IS TO RETIRE THIS TASK rather than build it. `retirement` is OPERATOR-ONLY
+    (W1-T1287 — "a retirement is a judgement call, not a re-verifiable assertion"), so this shard
+    records the finding and leaves the disposition to the operator. Building it as filed would have
+    shipped a second predicate for a question already answered, and a worse remedy for it.
+
     (7) OUT OF SCOPE, NAMED. (a) Repairing the body itself — W1-T2541. This task only makes a
     repair TAKE EFFECT. (b) Any change to what the reviewer judges. (c) The conflicted case, which
     already has its own rung (W1-T106/W1-T2536).
@@ -62,7 +93,8 @@
   origin: incident
   plan_refs: ["W1-T176", "W1-T2541", "W1-T106"]
   files: [src/lib/stale-verdict.ts, src/lib/sweep.ts, test/a-stale-verdict-earns-a-new-head.test.ts]
-  status: queued
+  status: blocked
+  retirement: withdrawn
   attempts: 0
   note: |
     risk:high, band_meaning: blast-radius — a predicate that causes the fleet to push commits to
