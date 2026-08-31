@@ -1,0 +1,69 @@
+- id: W1-T2527
+  title: "A COUNT ASSERTION WITHOUT ITS MEMBER LIST MERGES CLEAN AND FAILS ONLY AT RUNTIME — two PRs each adding one entry to a shared table both change `assert.equal(x.length, 7)` to `8`, so git sees IDENTICAL text on both sides, auto-resolves, and ships a tree whose real count is 9; MEASURED on `test/fast-gate-admits-the-census-class.test.ts` when #3331 and #3335 both joined FAST_GATE_STEPS"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 10.00
+  files: [test/a-count-assertion-names-its-members.test.ts]
+  origin: "operator-session#lets-get-rmd-more-automated-2026-08-31"
+  plan_refs: ["W1-T2488", "W1-T2491"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED, NOT HYPOTHETICAL. #3331 (W1-T2488) and #3335 (W1-T2491) each added one entry to
+    `FAST_GATE_STEPS` (src/lib/ci-parity.ts). Both branches therefore edited the same three suites
+    that assert that table's exact membership. Merging main into #3331 raised THREE conflicts, all
+    of them in assertions that name the MEMBERS — a `deepEqual` over the sorted script list, and two
+    test titles counting them in prose. Every one of those was caught, because both sides had
+    written different text.
+
+    ONE ASSERTION DID NOT CONFLICT AND WAS WRONG ANYWAY:
+
+        test/fast-gate-admits-the-census-class.test.ts
+        assert.equal(result.steps.length, 8);
+
+    Main read 8 (seven pre-existing plus the branch-shape gate). #3331 read 8 (seven pre-existing
+    plus source-size). IDENTICAL TEXT, so git auto-merged it with no marker, and the merged tree's
+    real count is 9. It failed at runtime — `expected: 8, actual: 9` — after a clean merge, in a
+    file whose other three assertions about the same table had just been resolved by hand.
+
+    THE PROPERTY THAT SEPARATES THE SAFE ONES FROM THE UNSAFE ONE. A `deepEqual` over the members
+    conflicts because two authors adding DIFFERENT members write DIFFERENT text. A bare `.length`
+    count collapses both additions to the same number, so the textual merge has nothing to see. The
+    count is not redundant with the member list — it is strictly weaker AND strictly more dangerous,
+    because it is the only form whose conflict is invisible.
+
+    WHY A TEST AND NOT A GATE SCRIPT. Registering a new `scripts/*.mjs` gate is itself the
+    circularity W1-T2521 files (a src edit for its registration beside its own rule logic). A suite
+    that walks `test/**` and asserts a property of the corpus needs no registration at all — `ci`
+    already runs every test file — and this repo already has that shape
+    (test/config-reader-seams.test.ts, the census suites). Build it that way.
+
+    SCOPE THE RULE OR IT BECOMES A BASELINE. A blanket "no `.length` assertion anywhere" would flag
+    hundreds of legitimate uses and force an exemption list that grows silently — the failure mode
+    scripts/task-id-existence-check.mjs names in its own header. The hazard is narrower and is
+    STATABLE: a count assertion over a symbol that the SAME test function also enumerates with a
+    `deepEqual`/`deepStrictEqual`, or a count over a table another test in the same file enumerates.
+    That is the shape where the count adds no coverage and adds a silent merge hazard. A count that
+    is the ONLY assertion about that collection is legitimate and must not be flagged — establish
+    that with a negative fixture, not by assertion.
+
+    RE-DERIVE THE POPULATION RATHER THAN TRUSTING A NUMBER HERE. The query is a walk of `test/**`
+    for `assert.equal(<expr>.length, <int>)` co-located with a `deepEqual` naming the same
+    receiver; run it before choosing whether the rule needs any baseline at all, and report the
+    count with the sha it was taken at.
+
+  acceptance:
+    - claim: "a count assertion over a collection the same test also enumerates with deepEqual is flagged, naming the file and the line"
+      proof: "unit test: test/a-count-assertion-names-its-members.test.ts"
+    - claim: "a count assertion that is the only assertion about its collection is NOT flagged"
+      proof: "unit test: test/a-count-assertion-names-its-members.test.ts"
+    - claim: "the real #3331-versus-#3335 shape is reproduced as a fixture and flagged, so the rule is anchored to the incident rather than to a guess"
+      proof: "unit test: test/a-count-assertion-names-its-members.test.ts"
+    - claim: "the suite runs over the live test/ tree and reports what it finds, so the rule is not vacuous over an empty corpus"
+      proof: "unit test: test/a-count-assertion-names-its-members.test.ts"
+    - claim: "removing the co-location condition makes the negative fixture flag too, proving the condition is load-bearing"
+      proof: "unit test: test/a-count-assertion-names-its-members.test.ts"
