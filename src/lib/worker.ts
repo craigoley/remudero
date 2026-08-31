@@ -57,6 +57,7 @@ import {
   lostWorkerHomeGrants,
   type WorkerHomeGrantOutcome,
   type WorkerHomeReapResult,
+  type WorkerKeychainSummary,
 } from "./worker-home.js";
 import {
   buildContainedSpawnFn,
@@ -496,6 +497,46 @@ export function workerHomeReapLogFields(
  *  file's other best-effort exit-path diagnostics (e.g. `assertWorktreeBaseCurrent`'s `warn`). */
 function defaultLogHomeReap(result: WorkerHomeReapResult, spawn: { runId?: string; taskId?: string }): void {
   console.error(JSON.stringify(workerHomeReapLogFields(result, spawn)));
+}
+
+/**
+ * W1-T2518: the fields `ensureWorkerKeychain`'s {@link WorkerKeychainSummary} becomes once
+ * observed at THIS call site — `observedHeadroomMs` (worker-home.ts:1080) existed since
+ * W1-T2398 but this call site previously discarded the whole summary, chaining `.keychainPath`
+ * directly off the call and reading nothing else (`git grep -n '= ensureWorkerKeychain(' src/`
+ * read one hit, `.keychainPath` chained straight off it, before this task). Logged on EVERY
+ * darwin provisioning call, `expectedRunMs` supplied or not, so the rate the credential's
+ * expiry margin is actually exercised becomes answerable off-host — worker-home.ts's own doc
+ * names this exact gap ("the rate this shard's own rationale could not measure from a ledger
+ * becomes answerable off-host purely by a caller logging this field").
+ *
+ * Pure — {@link spawnWorker}'s darwin branch is the only real caller and the default sink
+ * ({@link defaultLogKeychainHeadroom}) is a thin `console.error` wrapper around this, matching
+ * `workerHomeReapLogFields`'s identical discipline just above.
+ */
+export function workerKeychainHeadroomLogFields(
+  summary: WorkerKeychainSummary,
+  expectedRunMs: number | undefined,
+  spawn: { runId?: string; taskId?: string },
+): Record<string, unknown> {
+  return {
+    step: "worker_keychain_headroom",
+    observed_headroom_ms: summary.observedHeadroomMs,
+    expected_run_ms: expectedRunMs,
+    provision_reason: summary.reason,
+    run_id: spawn.runId,
+    task_id: spawn.taskId,
+  };
+}
+
+/** Default {@link SpawnWorkerArgs.logKeychainHeadroom} sink — one JSON line to stderr, matching
+ *  this file's other best-effort exit-path diagnostics (e.g. `defaultLogHomeReap` above). */
+function defaultLogKeychainHeadroom(
+  summary: WorkerKeychainSummary,
+  expectedRunMs: number | undefined,
+  spawn: { runId?: string; taskId?: string },
+): void {
+  console.error(JSON.stringify(workerKeychainHeadroomLogFields(summary, expectedRunMs, spawn)));
 }
 
 // ── Toolchain resolution (W1-T113: the vanished-binary incident) ───────────
@@ -946,6 +987,21 @@ export interface SpawnWorkerArgs {
      * unchanged behavior, matching every other opt-in seam in this block.
      */
     priorSpawnCredentialExpired?: boolean;
+    /**
+     * W1-T2518: the dispatcher's own run-length estimate, forwarded VERBATIM to
+     * `ensureWorkerKeychain`'s `expectedRunMs` (worker-home.ts) — the option W1-T2398 shipped
+     * with ZERO callers (`git grep -n expectedRunMs origin/main -- src/` read 9 hits, all
+     * inside worker-home.ts itself — the declaration, its docs, and its two use sites — and
+     * none a caller). This is that first caller. Omitted ⇒ byte-identical behavior, matching
+     * `expectedRunMs`'s own doc ("never derived in here") — this call site is where a real
+     * estimate belongs, never invented inside worker-home.ts. Supplied, it widens the
+     * effective expiry skew and, after `ensureWorkerKeychain`'s own re-provision attempt,
+     * refuses the spawn (`WorkerKeychainError`, `credential-too-short-for-run`) before it
+     * starts when even a freshly re-provisioned credential still can't outlast the run — see
+     * that option's own doc for the full two-part contract. Appended LAST — no positional
+     * caller shifts.
+     */
+    expectedRunMs?: number;
   };
   /**
    * W1-T117: attribution markers threaded into the child's env
@@ -1049,6 +1105,21 @@ export interface SpawnWorkerArgs {
    * unaffected by that — it still just makes whatever `reapWorkerHome` computed observable.
    */
   logHomeReap?: (result: WorkerHomeReapResult, spawn: { runId?: string; taskId?: string }) => void;
+  /**
+   * W1-T2518: sink for the darwin keychain rung's {@link WorkerKeychainSummary}, observed at
+   * THIS call site on EVERY darwin provisioning call — `keychain.expectedRunMs` supplied or
+   * not — so the rate `observedHeadroomMs` (worker-home.ts:1080) actually gets exercised
+   * becomes answerable off-host purely by reading this line, exactly as that field's own doc
+   * anticipates. Never called on the non-darwin path: `assertWorkerCredentialFile` returns no
+   * summary carrying this field at all. Omitted ⇒ {@link defaultLogKeychainHeadroom}, one JSON
+   * line to stderr — the same best-effort diagnostic-output discipline `logHomeReap` above
+   * already uses.
+   */
+  logKeychainHeadroom?: (
+    summary: WorkerKeychainSummary,
+    expectedRunMs: number | undefined,
+    spawn: { runId?: string; taskId?: string },
+  ) => void;
 }
 
 /**
@@ -1129,7 +1200,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     // carry the account its spend is attributed to (W1-T268's ledger dimension).
     const accountId = args.keychain?.accountId ?? resolveActiveAccountId();
     if (platform === "darwin") {
-      workerKeychainPath = ensureWorkerKeychain({
+      const keychainSummary = ensureWorkerKeychain({
         ...workerKeychainPaths(join(config.root, "state")),
         loginKeychainPath: join(realHome, "Library", "Keychains", "login.keychain-db"),
         grantApps: workerKeychainGrantApps(claudeBin),
@@ -1137,7 +1208,19 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         exists: args.keychain?.exists,
         accountId,
         priorSpawnCredentialExpired: args.keychain?.priorSpawnCredentialExpired,
-      }).keychainPath;
+        // W1-T2518: this call's FIRST forwarding of expectedRunMs — see the option's own doc
+        // on `SpawnWorkerArgs.keychain`, above, and `expectedRunMs`'s doc in worker-home.ts for
+        // the full contract (widen-then-refuse) this now actually exercises.
+        expectedRunMs: args.keychain?.expectedRunMs,
+      });
+      // W1-T2518: surfaced on EVERY darwin call, regardless of whether this refused (a throw
+      // above skips this line entirely — nothing to log, the error message itself names the
+      // headroom and the estimate) or returned a summary to spawn on.
+      (args.logKeychainHeadroom ?? defaultLogKeychainHeadroom)(keychainSummary, args.keychain?.expectedRunMs, {
+        runId: args.runId,
+        taskId: args.taskId,
+      });
+      workerKeychainPath = keychainSummary.keychainPath;
     } else {
       // recon-cloud-workers-spike stop 6: the SAME refusal contract, one rung later in the
       // taxonomy and one platform over. The darwin branch above is untouched — this is an

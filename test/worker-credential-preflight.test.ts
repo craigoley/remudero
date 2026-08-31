@@ -129,8 +129,12 @@ test("the darwin branch is untouched and the new rung is its else, appearing exa
   const PRE_CHANGE = "}).keychainPath;\n    }\n    materializeWorkerHome(";
   assert.equal(src.split(PRE_CHANGE).length - 1, 0, "the darwin gate has no else again — the gap is back");
 
-  // And the darwin branch itself still guards the keychain call, unchanged.
-  assert.match(src, /if \(platform === "darwin"\) \{\s*\n\s*workerKeychainPath = ensureWorkerKeychain\(/);
+  // And the darwin branch itself still guards the keychain call, unchanged. W1-T2518 renamed the
+  // immediate binding from `workerKeychainPath` to `keychainSummary` (it now also carries
+  // `observedHeadroomMs`/`reason` for the headroom-logging rung, not just `.keychainPath`) — the
+  // invariant this asserts (the FIRST statement of the darwin branch is still a direct,
+  // unwrapped `ensureWorkerKeychain` call, never deferred or moved out) is unchanged.
+  assert.match(src, /if \(platform === "darwin"\) \{\s*\n\s*const keychainSummary = ensureWorkerKeychain\(/);
 
   // Reverting the rung means classifying nothing, so an absent credential stops being refusable.
   const reverted = (_path: string) => undefined; // what the non-darwin branch did before
