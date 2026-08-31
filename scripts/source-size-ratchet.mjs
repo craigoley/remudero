@@ -214,8 +214,28 @@ function main(argv) {
     for (const v of verdict.violations) {
       console.error(`  - ${v.path}: ${v.lines} lines > baseline ${v.baseline} lines (+${v.overage} line(s) over)`);
     }
+    // THE REMEDY MUST BE FOLLOWABLE BY WHOEVER READS IT, INCLUDING AN AGENT (W1-T2532). The
+    // earlier wording ended "raise the entry in <absolute runner path> by hand", and both halves
+    // were defects in practice: "by hand" reads as "a human must do this", so the sweep's ci-log
+    // fix worker declined to touch the file and pushed nothing that moved the finding -- MEASURED
+    // as four consecutive `ci-log false-block` escalations (issues #3362, #3368, #3369, #3374)
+    // against PRs whose ONLY failing check was this gate, while 6 of 9 open PRs sat blocked. And
+    // the absolute path is the CI runner's, which names nothing the reader can edit.
+    //
+    // NOTHING ABOUT WHAT THIS GATE REFUSES CHANGES. The verdict, the exit code and the violation
+    // lines above are untouched; only the sentence explaining what to do about them is. Raising a
+    // ceiling is still a deliberate, reviewed edit that lands in the diff where a reviewer reads
+    // it -- that visibility, not the difficulty of making the edit, is what the ratchet is for.
+    const rel = relative(root, baselinePath).split(sep).join("/") || DEFAULT_BASELINE_RELATIVE_PATH;
+    console.error(`  TO FIX: either shrink the growth back down, or record it -- edit ${rel} and set:`);
+    for (const v of verdict.violations) {
+      console.error(`    "${v.path}": ${v.lines},`);
+    }
     console.error(
-      `  Shrink the growth back down, or -- if it is deliberate and reviewed -- raise the entry in ${baselinePath} by hand.`,
+      `  Recording is the ordinary outcome for deliberate growth and is safe to do in this same PR: ` +
+        `${DEFAULT_BASELINE_RELATIVE_PATH} is exempt from Standing rule 25's instrument-isolation ` +
+        `rule (W1-T2526), because a size ledger records how long a file is and grades no falsifier. ` +
+        `Re-run this script afterwards; it must print "OK".`,
     );
     return 1;
   }

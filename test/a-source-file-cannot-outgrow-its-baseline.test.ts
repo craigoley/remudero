@@ -77,6 +77,28 @@ test("THE FALSIFIER: a source file grown past its recorded baseline BLOCKS, nami
     assert.match(over.stderr, /src\/lib\/grown\.ts/, "the failure must name the file");
     assert.match(over.stderr, /7 lines > baseline 3 lines/, "the failure must state both the actual and baseline line counts");
     assert.match(over.stderr, /\+4 line\(s\) over/, "the failure must name the exact overage");
+    // W1-T2532: THE REMEDY MUST BE FOLLOWABLE BY WHOEVER READS IT, INCLUDING AN AGENT. The first
+    // wording ended "raise the entry in <absolute runner path> by hand", and the sweep's ci-log fix
+    // worker read "by hand" as "not yours to edit": four consecutive `ci-log false-block`
+    // escalations (issues #3362, #3368, #3369, #3374) landed against PRs whose ONLY failing check
+    // was this gate, while 6 of 9 open PRs sat blocked on it. These assertions pin the three things
+    // that make the message actionable, so it cannot silently revert to prose.
+    assert.match(over.stderr, /TO FIX:/, "the failure must lead with what to do, not only what is wrong");
+    assert.match(
+      over.stderr,
+      /"src\/lib\/grown\.ts": 7,/,
+      "it must print the exact JSON line to write, so following it needs no arithmetic and no guesswork",
+    );
+    assert.match(
+      over.stderr,
+      /scripts\/source-size-baseline\.json/,
+      "and name the baseline by its REPO-RELATIVE path — the absolute runner path names nothing the reader can edit",
+    );
+    assert.doesNotMatch(
+      over.stderr,
+      /by hand/,
+      "never 'by hand': recording deliberate growth is the ordinary outcome and is safe in the same PR (W1-T2526 exempts this path from Standing rule 25)",
+    );
     // the baseline is NEVER advanced by a failing run — raising a ceiling is a human, on-the-record move
     assert.deepEqual(JSON.parse(readFileSync(baselinePath, "utf8")), { "src/lib/grown.ts": 3 });
   } finally {
