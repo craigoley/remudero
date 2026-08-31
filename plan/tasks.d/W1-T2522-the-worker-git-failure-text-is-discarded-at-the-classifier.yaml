@@ -1,0 +1,76 @@
+- id: W1-T2522
+  title: "THE WORKER'S OWN GIT FAILURE TEXT IS DISCARDED AT `fallbackPushCause`, SO 15 `credential_expired` INCIDENTS HAVE NO CAUSE — the seam ledgers a CLASS plus a fixed `detail` string and drops the stderr that would say whether it was a 401, an empty password, a missing helper or a blocked exec; four hypotheses were raised against those 15 rows and TWO were disproved from source, leaving the cause unknown after a full session of investigation"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 12.00
+  files: [src/run-task.ts, test/the-worker-git-failure-text-is-discarded.test.ts]
+  origin: "operator-session#credential-expired-cause-unknown-2026-08-30"
+  plan_refs: ["W1-T2267", "W1-T2398", "W1-T2518"]
+  status: queued
+  attempts: 0
+  rationale: |
+    SUPERSEDES W1-T2518'S REMEDY, WHICH WAS WRONG AND WOULD HAVE SHIPPED GREEN. That shard priced
+    "wire `expectedRunMs` at the keychain call site". Its ONLY consumer, `ensureWorkerKeychain`, is
+    called inside `if (platform === "darwin")` (worker.ts:1042) and the fleet runs in a LINUX
+    container, so the fix could not have touched a single one of the incidents it was filed from.
+    W1-T2518's other half — that `expectedRunMs` has zero callers — remains true and unaddressed;
+    it is simply not the cause. This task carries the part that is actionable now.
+
+    TWO MORE HYPOTHESES DIED THE SAME WAY, RECORDED SO NOBODY RE-DERIVES THEM:
+      "the worker never gets a token"  — refuted: env.ts:89's ALLOWLIST includes "GH_TOKEN".
+      "the token expired mid-run"      — refuted by the daemon log: the ORCHESTRATOR's fallback push
+                                         SUCCEEDS with the SAME GH_TOKEN, in the same minute,
+                                         immediately after the worker's push failed. A token that
+                                         works for one process is not expired for the other.
+    And the non-darwin branch is explicit that it does not gate on expiry at all: "An EXPIRED token
+    is reported and ALLOWED THROUGH … refusing there would be a bound firing on a healthy
+    condition." That reasoning is about the CLAUDE credential; the failure is git/gh.
+
+    SO THE CAUSE IS SOMETHING ABOUT GIT/GH INSIDE THE WORKER SANDBOX, AND NOTHING RECORDS IT. The
+    credential helper is set `--global` by the entrypoint and resolves HOME-relatively, while every
+    worker's HOME is redirected to a scratch directory; `.gitconfig` IS granted into that home, so
+    the helper line probably travels — whether the `!f() { … }` function then executes under the
+    worker's isolated shell is exactly what nobody has checked. That is a fifth hypothesis, and it
+    deserves the same treatment as the four before it: measurement, not argument.
+
+    THE SEAM, AND WHY THIS IS CHEAP. run-task.ts:11328 writes
+    `log("fallback_push.cause", { branch, cause: pushCause.cause, detail: pushCause.detail })`.
+    `cause` is a class and `detail` is a FIXED string per class ("the worker's own transcript/stderr
+    carries a git/gh authentication failure") — the same sentence on all 15 rows. The classifier has
+    ALREADY read the worker's transcript and stderr to decide the class; the evidence is in hand at
+    the moment it is thrown away. This is the fourth instance of that pattern this session, after a
+    parsed-but-unread reset time, an `apiError` that never reaches the dispatch loop, and
+    `fallback_push.cause` itself having no consumer.
+
+    RE-DERIVE RATHER THAN TRUST THE 15: `rmd ledger-grep 'fallback_push.cause'` over the union,
+    filtered to `"cause":"credential_expired"`. The step does not exist before 2026-08-25T22:54Z
+    (W1-T2267 introduced it), so an earlier zero is a query-shape zero, not an onset.
+
+    IT MUST NOT LEAK A CREDENTIAL. The whole value here is a verbatim failure message, and git/gh
+    failures can echo a URL carrying a token. The carried text must be bounded and must be scrubbed
+    the same way every other ledgered excerpt in this repo is, or this trades an unknown cause for a
+    secret in a file the console renders.
+
+    NOT IN SCOPE: fixing the credential path — nothing yet establishes what breaks it, and a fix
+    aimed at the wrong one ships green and closes the finding. That is W1-T2518's lesson, paid once.
+  acceptance:
+    - claim: "the worker's own git/gh failure text is carried into the ledger, not just its class"
+      proof: "unit test: test/the-worker-git-failure-text-is-discarded.test.ts"
+    - claim: "a push failure with no readable stderr still ledgers the class, naming the absence"
+      proof: "unit test: test/the-worker-git-failure-text-is-discarded.test.ts"
+    - claim: "a token-bearing URL in the text is scrubbed before it reaches the ledger"
+      proof: "unit test: test/the-worker-git-failure-text-is-discarded.test.ts"
+    - claim: "an oversized stderr is bounded before it reaches the ledger row"
+      proof: "unit test: test/the-worker-git-failure-text-is-discarded.test.ts"
+    - claim: "the existing cause field is unchanged for every existing consumer"
+      proof: "unit test: test/the-worker-git-failure-text-is-discarded.test.ts"
+    - claim: "the fallback still pushes and still opens the PR — this adds evidence, never a refusal"
+      proof: "unit test: test/the-worker-git-failure-text-is-discarded.test.ts"
+    - claim: "a run whose worker pushed for itself ledgers nothing new"
+      proof: "unit test: test/the-worker-git-failure-text-is-discarded.test.ts"
+    - claim: "removing the carried text makes the evidence assertion fail"
+      proof: "unit test: test/the-worker-git-failure-text-is-discarded.test.ts"
