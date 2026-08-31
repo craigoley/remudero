@@ -8,7 +8,7 @@ import { slug as kebabSlug } from "./feedback-docket.js";
 // module's own registry writer mirrors.
 import { createHash } from "node:crypto";
 import fs from "node:fs";
-import { dirname } from "node:path";
+import { basename, dirname, extname, join } from "node:path";
 import type { MergedResolver, Plan } from "./plan.js";
 import { parseTasksFromYaml, PlanError, unmetDependencies } from "./plan.js";
 import { lintPlan, lintTask } from "./task-linter.js";
@@ -29,6 +29,7 @@ import { appendLedger } from "./ledger.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { buildPlanPrCommitMessage } from "./plan-pr-emitter.js";
 import { workerLedgerFields, type WorkerResult } from "./worker.js";
+import type { InterpretReplyResult } from "./reply-interpreter.js";
 
 /**
  * `rmd inbox` — the ratification inbox's DETERMINISTIC CORE (MASTER-PLAN P25(i), W1-T110).
@@ -139,6 +140,67 @@ export interface Proposal {
    *  escalation handled", so such a proposal renders READY forever. This is what makes that fact
    *  expressible: see {@link classifyProposal}'s referent-retirement check. */
   originatingItemId?: string;
+}
+
+// ── The understood-request handoff (W1-T2500) ──────────────────────────────────────────────
+//
+// reply-interpreter.ts's `interpretReply` (W1-T2499) reaches `status: "understood"` — an empty
+// unanswered set — and stops there BY DESIGN ("it asks, it does not act"). Nothing carried that
+// state anywhere: an understood thread ended in a conversation, never a task. This is the
+// handoff, and ONLY the handoff — it mints a {@link Proposal} (this module's OWN existing shape,
+// nothing new) and hands it to the SAME tiering {@link classifyProposal} already runs every
+// OTHER proposal through, unchanged: trigger-deferral first, the ledger's `ratify.approved`
+// receipt overriding everything, every failing predicate collected rather than the first. This
+// function's job ends at minting the value classifyProposal reads — it never files a task
+// directly, never auto-approves, never adds a timer, and never paces anything.
+//
+// A THREAD WITH AN UNANSWERED CLARIFICATION EMITS NOTHING AND RUNS NOTHING. This is true by
+// CONSTRUCTION, not by a check this function could get wrong: it only ever returns a value when
+// `interpretation.status === "understood"`; a `"clarifying"` or `"exhausted"` result returns
+// `undefined`, and there is no other branch that could produce a {@link Proposal} from either.
+
+/** The understood request a caller hands to {@link proposalFromUnderstoodRequest} — the thread
+ *  it traces back to, and the request text that thread now understands in full (every
+ *  clarification, if any were asked, answered). */
+export interface UnderstoodRequest {
+  /** The thread this proposal traces back to — folded into {@link understoodRequestProposalId}
+   *  (NEVER into {@link Proposal.originatingItemId}: that field is board-review's OWN referent
+   *  vocabulary, W1-T2451 — a thread id is not a `BoardItem.id`, and reusing the field would wire
+   *  this proposal into the board-referent-retirement mechanism for a referent it can never
+   *  resolve). The id itself is the back-reference; nothing else needs to be. */
+  threadId: string;
+  /** The request text, quoted VERBATIM into the minted proposal's summary — never paraphrased,
+   *  mirroring `synthesizeFeedbackDocketProposal`'s own "verbatim, cited" discipline
+   *  (feedback-docket.ts). */
+  requestText: string;
+}
+
+/** The proposal id {@link proposalFromUnderstoodRequest} mints for one thread — deterministic
+ *  and derived, never random, so re-classifying the SAME understood thread twice (e.g. a second
+ *  daemon poll before ratification) always names the SAME proposal rather than opening a
+ *  duplicate one (mirrors `approveRunBranch`'s own "derived, never minted" discipline, and
+ *  {@link deriveThreadId}'s own doc in inbox-thread.ts, which this id is built on top of). */
+export function understoodRequestProposalId(threadId: string): string {
+  return `thread:${threadId}`;
+}
+
+/**
+ * Mint the {@link Proposal} an understood thread hands to the EXISTING tiering — the ONLY thing
+ * this function does. Returns `undefined` when `interpretation.status !== "understood"`: a
+ * thread that still has an unresolved clarification (`"clarifying"`) or has exhausted its rounds
+ * (`"exhausted"`) emits nothing (acceptance: "a thread with an unanswered clarification emits
+ * nothing and runs nothing"). The returned value is a plain {@link Proposal} with NO trigger, NO
+ * `conflictsWith`, and empty `evidenceAnchors` — nothing here defers, auto-approves, or
+ * pre-judges it; {@link classifyProposal} decides all of that itself, exactly as it already does
+ * for every hand-authored `P##`, `FD-…`, and `rule-efficacy:…` proposal.
+ */
+export function proposalFromUnderstoodRequest(request: UnderstoodRequest, interpretation: InterpretReplyResult): Proposal | undefined {
+  if (interpretation.status !== "understood") return undefined;
+  return {
+    id: understoodRequestProposalId(request.threadId),
+    summary: `Understood request from thread ${request.threadId}:\n${request.requestText}`,
+    evidenceAnchors: [],
+  };
 }
 
 // ── Board-review referent retirement (W1-T2451) ────────────────────────────────────────────
@@ -1231,6 +1293,122 @@ export function parseProposalRegistry(text: string | undefined): Proposal[] {
   return result.kind === "ok" ? result.proposals : [];
 }
 
+// ── W1-T2490: PROPOSAL SHARDING — a proposal gets the same one-record-per-file home
+// `plan/tasks.d/` already gave tasks and `plan/decisions.d/` gave decisions ───────────────
+//
+// `state/inbox-proposals.json` was the last plan artifact still a single blob: an arriving
+// proposal was a whole-file rewrite, and two minters filing DIFFERENT proposals in the same
+// window contended on the same file — exactly the collision shape `plan/tasks.d/` was built
+// to retire (the nine-PR appender train, #271). This mirrors that fix, not a new one:
+// `loadProposalRegistry` merges the legacy blob with a sibling `inbox-proposals.d/` shard
+// directory exactly as plan.ts's `loadPlan` merges `tasks.yaml` with `tasks.d/`, including
+// its duplicate-id refusal — the property that makes the merge safe rather than merely
+// convenient. `updateProposalRegistry` (below) is the only writer, so this is invisible to
+// every caller of it: same signature, same `Proposal[]` shape in and out.
+//
+// NOT IN SCOPE (this task's own rationale): changing what any minter proposes or when, the
+// inbox's tiering/`classifyProposal`, or deleting the legacy blob — an existing blob-sourced
+// proposal stays right where it is until an operator runs a migration codemod later; only a
+// NEW or actively-rewritten proposal ever lands in a shard file.
+
+/** Sibling shard directory to `registryPath` (`state/inbox-proposals.d/`, next to
+ *  `state/inbox-proposals.json`) — derived from the registry's own path, never hardcoded,
+ *  so a test fixture using a differently-named registry file still resolves correctly. */
+export function proposalShardDir(registryPath: string): string {
+  const stem = basename(registryPath, extname(registryPath));
+  return join(dirname(registryPath), `${stem}.d`);
+}
+
+/** The shard file a given proposal `id` is written to — DERIVED, never stored: a slug
+ *  prefix for human scanning plus a content hash of the id so two ids that slugify to the
+ *  same text (differing only in punctuation) cannot collide and silently overwrite one
+ *  another. Reading NEVER trusts this name back — {@link readProposalShards} keys on each
+ *  shard's OWN `id` field, the same "derive, don't construct" discipline plan.ts's
+ *  `taskRecordPath` doc argues for tasks. This is only where a WRITE lands. */
+function proposalShardFilename(id: string): string {
+  const hash = createHash("sha256").update(id).digest("hex").slice(0, 12);
+  const slug = id
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 60);
+  return `${slug || "proposal"}-${hash}.json`;
+}
+
+function proposalShardPath(registryPath: string, id: string): string {
+  return join(proposalShardDir(registryPath), proposalShardFilename(id));
+}
+
+/** List the shard files under `shardDir` (sorted, deterministic order). `[]` when the
+ *  directory does not exist — the back-compat case for every registry that has not
+ *  migrated to sharding yet, mirroring plan.ts's `listShardFiles` ENOENT tolerance exactly.
+ *  Any OTHER read failure (EACCES, ENOTDIR — the directory slot is occupied by something
+ *  that is not a directory) is NOT forgiven: that means the shard population cannot be
+ *  trusted, and reporting an empty population instead of refusing would silently hide
+ *  every proposal it holds from `rmd inbox` and any other reader. */
+function listProposalShardFiles(shardDir: string): string[] {
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(shardDir);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return [];
+    throw new Error(`cannot read proposal shard directory (${shardDir}): ${String(err)}`);
+  }
+  return entries.filter((f) => f.endsWith(".json")).sort();
+}
+
+/** Parse every shard under `shardDir`, keyed by each file's OWN declared `id` — never the
+ *  filename (see {@link proposalShardFilename}'s doc). Two shard files declaring the SAME
+ *  id is a genuine, never-expected collision and is refused loud rather than silently
+ *  picked one way, mirroring plan.ts's `loadPlan` duplicate-task-id guard exactly. */
+function readProposalShards(shardDir: string): Map<string, { proposal: Proposal; path: string }> {
+  const out = new Map<string, { proposal: Proposal; path: string }>();
+  for (const file of listProposalShardFiles(shardDir)) {
+    const shardPath = join(shardDir, file);
+    let raw: unknown;
+    try {
+      raw = JSON.parse(fs.readFileSync(shardPath, "utf8"));
+    } catch (err) {
+      throw new Error(`cannot read proposal shard (${shardPath}): ${String(err)}`);
+    }
+    const proposal = raw as Proposal;
+    if (typeof proposal?.id !== "string" || proposal.id.length === 0) {
+      throw new Error(`proposal shard (${shardPath}) has no valid 'id' field`);
+    }
+    const existing = out.get(proposal.id);
+    if (existing) {
+      throw new Error(`duplicate proposal id '${proposal.id}' (shard ${shardPath} collides with ${existing.path})`);
+    }
+    out.set(proposal.id, { proposal, path: shardPath });
+  }
+  return out;
+}
+
+/**
+ * Load `registryPath` (the legacy `state/inbox-proposals.json` blob) merged with any shards
+ * under the sibling `inbox-proposals.d/` directory, as ONE population — exactly as plan.ts's
+ * `loadPlan` merges `tasks.yaml` with `tasks.d/`. SAME signature and return shape as the
+ * `parseProposalRegistry(readFileIfExists(registryPath))` idiom every current reader already
+ * uses (a path in, a `Proposal[]` out) — a future caller can swap to this with NO other
+ * change, which is the point: the modules reading this registry today must not need to
+ * learn sharding exists.
+ *
+ * A proposal id present in BOTH the blob and a shard resolves to the shard's copy, ONCE —
+ * the expected steady state once {@link updateProposalRegistry} starts sharding new/edited
+ * proposals instead of rewriting the whole blob for them (this task's rationale: "a proposal
+ * that exists in the blob and as a shard must resolve once, not twice"). A proposal id
+ * claimed by TWO DIFFERENT SHARD FILES is the genuine collision {@link readProposalShards}
+ * refuses — that guard is what stops the both-places case from silently resolving twice.
+ */
+export function loadProposalRegistry(registryPath: string): Proposal[] {
+  const blobProposals = parseProposalRegistry(fs.existsSync(registryPath) ? fs.readFileSync(registryPath, "utf8") : undefined);
+  const shards = readProposalShards(proposalShardDir(registryPath));
+  const byId = new Map<string, Proposal>();
+  for (const p of blobProposals) byId.set(p.id, p);
+  for (const { proposal } of shards.values()) byId.set(proposal.id, proposal);
+  return [...byId.values()];
+}
+
 // ── W1-T240: the ONE registry-write helper every writer of state/inbox-proposals.json
 // goes through ─────────────────────────────────────────────────────────────────────────
 //
@@ -1355,13 +1533,67 @@ export function updateProposalRegistry(
   }
 
   try {
-    const current = parseProposalRegistry(fs.existsSync(registryPath) ? fs.readFileSync(registryPath, "utf8") : undefined);
+    // W1-T2490: `current` is the SHARD-MERGED population (same merge {@link
+    // loadProposalRegistry} does), read under this SAME lock — never a value some earlier,
+    // unlocked read produced. `shards` is kept so the write half below knows, for each id in
+    // `current`, whether it already lives in its own file.
+    const shardDir = proposalShardDir(registryPath);
+    const shards = readProposalShards(shardDir);
+    const blobProposals = parseProposalRegistry(fs.existsSync(registryPath) ? fs.readFileSync(registryPath, "utf8") : undefined);
+    const byId = new Map<string, Proposal>();
+    for (const p of blobProposals) byId.set(p.id, p);
+    for (const { proposal } of shards.values()) byId.set(proposal.id, proposal);
+    const current = [...byId.values()];
+
     const next = update(current);
     if (next === null) return null;
+    const currentIds = new Set(current.map((p) => p.id));
+    const nextIds = new Set(next.map((p) => p.id));
+
+    // A shard mirror ABSENT from `next` was just dispositioned (ratified, retired, pruned)
+    // — delete its file so the shard directory never goes on reviewably claiming a record
+    // an operator has dispositioned, and so a later {@link loadProposalRegistry} (and the
+    // idempotent `existingIds` check every minter already runs against `current`) never
+    // resurrects it — this task's idempotence-across-the-migration falsifier.
+    for (const { proposal, path: shardPath } of shards.values()) {
+      if (!nextIds.has(proposal.id)) {
+        try {
+          fs.unlinkSync(shardPath);
+        } catch {
+          // already gone — idempotent, mirrors the lock cleanup below
+        }
+      }
+    }
+
+    // A `next` proposal that is NEW (its id was not in `current` at all) or already had a
+    // shard mirror gets its OWN file, atomically (sibling temp file + rename — the SAME
+    // idiom the blob write below uses) — MIRRORED alongside the blob write below, never
+    // instead of it. This is the write half of the sharded-home fix: a newly minted
+    // proposal is a single new file a reviewer can open on its own, while the blob write
+    // below is UNCHANGED from before this task — every one of the eight existing readers
+    // that still parses the blob directly keeps seeing the exact same complete population
+    // it always has ("the read path must not notice"). Promoting an UNTOUCHED legacy entry
+    // to a shard of its own is a migration step an operator takes later, not a side effect
+    // of an unrelated write (this task's own scope) — only a NEW or actively-rewritten
+    // proposal ever gains a mirror here.
+    for (const proposal of next) {
+      const isNew = !currentIds.has(proposal.id);
+      const hadShard = shards.has(proposal.id);
+      if (isNew || hadShard) {
+        fs.mkdirSync(shardDir, { recursive: true });
+        const shardPath = proposalShardPath(registryPath, proposal.id);
+        const tmpShardPath = `${shardPath}.tmp-${process.pid}-${Date.now()}`;
+        fs.writeFileSync(tmpShardPath, JSON.stringify(proposal, null, 2), "utf8");
+        fs.renameSync(tmpShardPath, shardPath);
+      }
+    }
+
     // ATOMIC WRITE: sibling temp file + rename (see this section's header doc for the
     // in-tree precedent this mirrors). Every call is a live `fs.` property lookup (never
     // a destructured named import) so a test's `t.mock.method(fs, ...)` can intercept it —
-    // see this file's `import fs from "node:fs"` comment.
+    // see this file's `import fs from "node:fs"` comment. UNCHANGED from before this task:
+    // the blob always carries the WHOLE of `next`, exactly as it always has, so no existing
+    // reader of this file needs to change to keep seeing every proposal.
     const tmpPath = `${registryPath}.tmp-${process.pid}-${Date.now()}`;
     fs.writeFileSync(tmpPath, JSON.stringify({ proposals: next }, null, 2), "utf8");
     fs.renameSync(tmpPath, registryPath);

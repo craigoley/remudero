@@ -49,6 +49,14 @@ import { appendQuestionAnswer } from "./worker.js";
 import { hashToken } from "./last-seen.js";
 import { readLedgerLines, DEFAULT_LIVENESS_BOUND_MS, type LedgerReader } from "./status.js";
 import { deriveLastPoll } from "./daemon-health.js";
+import { deriveThreadId, readThread, appendThreadMessage, type ThreadIdentity } from "./inbox-thread.js";
+import { captureFeedback } from "./feedback.js";
+import {
+  interpretReply,
+  formatClarifyingQuestion,
+  formatExhaustionReport,
+  type InterpretReplyDeps,
+} from "./reply-interpreter.js";
 
 /** Non-task-scoped panel actions (pause/resume/stop/quiet-hours) ledger under this sentinel — mirrors run-task.ts's drainCommand, which ledgers its own fleet-wide lines as `task_id: "DRAIN"`. */
 export const PANEL_TASK_ID = "PANEL";
@@ -62,6 +70,27 @@ export interface PanelActionDeps {
   root: string;
   ledgerPath: string;
   issues: IssueCloser;
+  /**
+   * W1-T2496: path to the JSONL thread store `buildEscalationReplyRoute` reads/appends through
+   * (`inbox-thread.ts`'s {@link ThreadStoreDeps.threadStorePath}, the SAME store `escalate.ts`'s
+   * own OPTIONAL best-effort write already targets, W1-T2494). OPTIONAL on this type for the
+   * same reason `escalate.ts`'s own field is: every route in this module PREDATING this task
+   * builds a `PanelActionDeps` literal with no such field, and that must keep compiling and
+   * behaving exactly as before. Unset here means `buildEscalationReplyRoute` can never find an
+   * existing thread to reply to, so it refuses every reply loud (see that route's own doc) —
+   * a missing wire is a refusal, never a silent unattached filing.
+   */
+  threadStorePath?: string;
+  /**
+   * W1-T2499: rules {@link buildEscalationReplyRoute} hands `interpretReply` (reply-interpreter.ts)
+   * to decide whether a reply is UNDERSTOOD or leaves an unresolved ambiguity worth asking about.
+   * OPTIONAL for the exact reason `threadStorePath` above is: every route built before this task
+   * (and every caller of this one that never sets it) must keep compiling and behaving exactly as
+   * before — unset means `interpretReply` runs with its own default (`rules: []`), which is always
+   * `"understood"`, so an unconfigured deploy never asks anything and this route's prior behaviour
+   * is unchanged bit for bit.
+   */
+  interpretReplyDeps?: InterpretReplyDeps;
 }
 
 /** Shared with lib/panel-graph.ts (W3-T6, the plan->task->PR graph + feedback/decision routes) -- one JSON-envelope writer for every panel route, never a second copy. */
@@ -573,6 +602,132 @@ export function buildEscalationMarkHandledRoute(deps: PanelActionDeps): Route {
   };
 }
 
+// ── POST /v1/escalation/reply ────────────────────────────────────────────────
+
+interface EscalationReplyInput {
+  taskId: string;
+  class: string;
+  cause?: string;
+  prRef?: string;
+  text: string;
+}
+
+function validateEscalationReply(body: unknown): { error: string } | EscalationReplyInput {
+  if (!isRecord(body)) return { error: "body must be a JSON object" };
+  if (typeof body.taskId !== "string" || !body.taskId.trim()) return { error: "taskId is required" };
+  if (typeof body.class !== "string" || !body.class.trim()) return { error: "class is required" };
+  if (body.cause !== undefined && typeof body.cause !== "string") return { error: "cause must be a string" };
+  if (body.prRef !== undefined && typeof body.prRef !== "string") return { error: "prRef must be a string" };
+  if (typeof body.text !== "string" || !body.text.trim()) return { error: "text is required" };
+  return {
+    taskId: body.taskId,
+    class: body.class,
+    cause: body.cause as string | undefined,
+    prRef: body.prRef as string | undefined,
+    text: body.text,
+  };
+}
+
+/**
+ * POST /v1/escalation/reply (W1-T2496) — the prose-reply affordance neither
+ * `/v1/questions/answer` (a structured QUESTION contract) nor `/v1/escalation/mark-handled`
+ * (a dismiss, carrying no words) is: a human answering an ESCALATION in the human's own
+ * sentence, the way one replies to an email rather than filling a form. Forty console routes
+ * shipped before this one and none of them was a reply (this task's own title) — this is that
+ * fortieth-plus route.
+ *
+ * THE THREAD, NEVER A NEW CHANNEL. `taskId`/`class`/`cause`/`prRef` are the exact
+ * {@link ThreadIdentity} `escalate.ts` already raises this concern under (its own dedup key —
+ * see inbox-thread.ts's module doc), so this route DERIVES the same thread id from them
+ * ({@link deriveThreadId}) rather than accepting one the caller minted or typed. A THREAD THAT
+ * HAS NEVER RECEIVED A MESSAGE IS REFUSED (400): naming an escalation that was never actually
+ * raised — or a store this checkout cannot read — is refused loud, never silently filed as
+ * feedback with nothing to attach it to, which is the exact "unattached feedback" failure mode
+ * this task exists to close. `deps.threadStorePath` unset (no wiring yet) is the SAME refusal:
+ * this route can never confirm a thread it cannot read, so it never guesses.
+ *
+ * THE ENTRY IS A PLAIN `plan/feedback/<id>.yaml` RECORD — {@link captureFeedback} (feedback.ts),
+ * the SAME writer `rmd feedback`/the console's own `POST /v1/feedback` already use, carrying
+ * the derived thread id as feedback.ts's `thread_id` field. Nothing here mints a second store, a
+ * second status lifecycle, or a second triage path: `rmd triage` (W1-T41) already reads every
+ * entry this writes, origin-agnostically — exactly the discipline MASTER-PLAN §5D rules ("one
+ * inbox, one triage discipline, whatever the source").
+ *
+ * A REPLY IS AN INPUT, NEVER A COMMAND — the hard line this task exists to hold (rationale,
+ * plan/tasks.d). This handler calls exactly THREE things: {@link appendThreadMessage} (record
+ * the reply on its thread), {@link captureFeedback} (file it where triage already looks), and
+ * `ledgerPanelAction` (attribute it). It never touches `deps.issues` (no GitHub issue comment,
+ * close, or create — commenting back on an issue stays `issues-intake`'s own forbidden ground),
+ * never `fleet-control.ts`'s `requestKick`/`requestDrainNow`/`requestPause`/`resumeFleet` (no
+ * dispatch), and never a ratify gateway (no merge arm, no proposal ratified). `classifyProposal`
+ * and `rmd triage`'s own tiering are what decide what this reply BECOMES; this route only makes
+ * them consider it, exactly like every other `origin: ui` feedback entry captured today.
+ */
+export function buildEscalationReplyRoute(deps: PanelActionDeps): Route {
+  return {
+    method: "POST",
+    path: "/v1/escalation/reply",
+    scope: "write",
+    // W1-T404: LOW — bookkeeping (files a feedback entry + a thread message); reversible, and
+    // grants no new authority — see this route's own doc for the "input, never a command" line.
+    tier: "low",
+    handler: jsonAction(validateEscalationReply, (input, req, res) => {
+      const identity: ThreadIdentity = { taskId: input.taskId, class: input.class, cause: input.cause, prRef: input.prRef };
+      const threadId = deriveThreadId(identity);
+      if (!deps.threadStorePath) {
+        sendJson(res, 400, {
+          error: "invalid_request",
+          detail: `no thread store configured — thread "${threadId}" cannot be confirmed to exist`,
+        });
+        return;
+      }
+      const existing = readThread(threadId, { threadStorePath: deps.threadStorePath });
+      if (existing.status === "unresolved") {
+        sendJson(res, 400, {
+          error: "invalid_request",
+          detail: `thread "${threadId}" cannot be read (${existing.reason}) — refusing to file an unattached reply`,
+        });
+        return;
+      }
+      if (existing.messages.length === 0) {
+        sendJson(res, 400, {
+          error: "invalid_request",
+          detail: `thread "${threadId}" names no existing escalation — refusing to file an unattached reply`,
+        });
+        return;
+      }
+      appendThreadMessage(identity, "reply", input.text, { threadStorePath: deps.threadStorePath });
+
+      // W1-T2499: is this reply UNDERSTOOD, or does it leave an ambiguity worth asking about?
+      // `interpretReply` is pure -- it decides, it never dispatches, ratifies, files a task, or
+      // arms a merge; the append below is this route's own side effect, on the SAME thread the
+      // reply just landed on, never a new inbox.
+      const interpretation = interpretReply(
+        { identity, threadId, replyText: input.text, priorMessages: existing.messages },
+        deps.interpretReplyDeps,
+      );
+      const followUp =
+        interpretation.status === "clarifying"
+          ? formatClarifyingQuestion(interpretation.question)
+          : interpretation.status === "exhausted"
+            ? formatExhaustionReport(interpretation.unresolved)
+            : undefined;
+      if (followUp) {
+        appendThreadMessage(identity, "escalation", followUp, { threadStorePath: deps.threadStorePath });
+      }
+
+      const entry = captureFeedback(deps.root, { raw: input.text, origin: "ui", threadId });
+      const origin = bearerTokenId(req);
+      ledgerPanelAction(deps, "panel.escalation_replied", input.taskId, origin, {
+        thread_id: threadId,
+        feedback_id: entry.id,
+        interpretation: interpretation.status,
+      });
+      sendJson(res, 200, { ok: true, taskId: input.taskId, threadId, feedback: entry, interpretation });
+    }),
+  };
+}
+
 // ── recordRiskOverride — an operator's record of a risk-judge escalation override (W1-T2244) ──
 //
 // THE GAP THIS CLOSES. A CAPPED verdict's own escape hatch — `rmd review <pr>
@@ -834,6 +989,7 @@ export function buildPanelActionRoutes(deps: PanelActionDeps): Route[] {
     buildAnswerQuestionRoute(deps),
     buildApproveManualRoute(deps),
     buildEscalationMarkHandledRoute(deps),
+    buildEscalationReplyRoute(deps),
     buildDrainFeedbackRoute(deps),
     buildKickRoute(deps),
     buildDrainNowRoute(deps),

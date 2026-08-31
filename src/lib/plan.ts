@@ -32,6 +32,21 @@ export type TaskRisk = (typeof TASK_RISKS)[number];
 /** Default risk when a task omits it (medium — the routing table's middle mount). */
 export const DEFAULT_RISK: TaskRisk = "medium";
 
+/**
+ * W1-T2503: which of two things a `risk: high` band ASSERTS for THIS task — Rule 19's
+ * SPAN measure (`"span"`, ≥2 subsystems/concerns) or genuine BLAST RADIUS unrelated to
+ * span (`"blast-radius"`: a boot script, an auth path, a merge arm). Before this field
+ * the two facts — different review implications each — shared one value with nothing
+ * recording which; fifteen shards filed in a single session wrote the distinction by
+ * hand as prose their linter never read. See task-linter.ts's `sizingViolation` for
+ * where this is enforced: computed and REPORTED for `"span"`, exempt for
+ * `"blast-radius"`, and required only on a task the diff newly files or promotes to
+ * `risk: high` — the standing backlog authored before this field existed is read as
+ * `undefined` and is reported, never refused.
+ */
+export const BAND_MEANINGS = ["span", "blast-radius"] as const;
+export type BandMeaning = (typeof BAND_MEANINGS)[number];
+
 /** A dependency is "satisfied" only once it has landed. */
 const MERGED_STATUSES = new Set<TaskStatus>(["merged", "done"]);
 
@@ -112,6 +127,16 @@ export interface Task {
    * DEFAULT_RISK} (medium). Schema/CI/telemetry-touching tasks run `high`.
    */
   risk: TaskRisk;
+  /**
+   * W1-T2503: which of two things THIS task's `risk: high` band means — Rule 19's SPAN
+   * (`"span"`) or genuine BLAST RADIUS unrelated to span (`"blast-radius"`). See {@link
+   * BandMeaning}'s own doc comment for the full rationale. Optional on every task,
+   * including `risk: high` ones — required-ness is enforced by the §5C linter's
+   * `sizingViolation` (task-linter.ts), never by this loader, and ONLY for a task the
+   * diff newly files or promotes to high; a task already high before that is read as
+   * `undefined` and reported, never refused.
+   */
+  band_meaning?: BandMeaning;
   /**
    * OPTIONAL dispatch priority (lower dispatches sooner; absent ⇒ the default tier,
    * ordered after every task that carries one). The honest successor to file
@@ -237,6 +262,10 @@ export function parseTasksFromYaml(text: string, sourceLabel: string): Task[] {
     if (retirement !== undefined && !RETIREMENT_REASONS.includes(retirement)) {
       throw new PlanError(`task ${id}: invalid retirement '${String(retirement)}' (must be ${RETIREMENT_REASONS.join("|")})`);
     }
+    const bandMeaning = e.band_meaning as BandMeaning | undefined;
+    if (bandMeaning !== undefined && !BAND_MEANINGS.includes(bandMeaning)) {
+      throw new PlanError(`task ${id}: invalid band_meaning '${String(bandMeaning)}' (must be ${BAND_MEANINGS.join("|")})`);
+    }
     const task: Task = {
       id,
       title: req(e.title as string, "title", id),
@@ -245,6 +274,7 @@ export function parseTasksFromYaml(text: string, sourceLabel: string): Task[] {
       type: req(e.type as Task["type"], "type", id),
       verify: (e.verify as Task["verify"]) ?? "auto",
       risk,
+      band_meaning: bandMeaning,
       priority: typeof e.priority === "number" ? e.priority : undefined,
       status,
       attempts: typeof e.attempts === "number" ? e.attempts : 0,

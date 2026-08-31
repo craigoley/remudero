@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { lintPlan } from "../src/lib/task-linter.js";
 import { parseTasksFromYaml } from "../src/lib/plan.js";
+import { seedProjectLearningsHomeFiles } from "../src/lib/learnings.js";
 import type { Inventory } from "../src/lib/onboard/inventory.js";
 import type { Candidate } from "../src/lib/onboard/recon.js";
 import { generateOnboardQuestions, type OnboardAnswer } from "../src/lib/onboard/session.js";
@@ -457,7 +458,8 @@ test("acceptance 3: the complete-answers fixture flow opens exactly one branch a
   assert.equal(result.prUrl, "https://github.com/acme-corp/widget-fixture/pull/42");
   assert.equal(draftCalls, 1, "the fixture draft was already clean — no re-draft needed");
 
-  // Write-spy: nothing lands under plan/onboarding/ — only the three drafted files, under <target-dir>.
+  // Write-spy: nothing lands under plan/onboarding/ — only the three drafted files plus the
+  // seeded learnings home (W1-T2505's ONE reviewed widening of this scope), under <target-dir>.
   const writeTargets = writeSpy.mock.calls.map((c) => c.arguments[0] as string);
   const renameTargets = renameSpy.mock.calls.map((c) => c.arguments[1] as string);
   for (const target of [...writeTargets, ...renameTargets]) {
@@ -468,10 +470,12 @@ test("acceptance 3: the complete-answers fixture flow opens exactly one branch a
     const target = call.arguments[0] as string;
     assert.ok(!target.startsWith(onboardingPrefix), `mkdir target "${target}" must never touch plan/onboarding/`);
   }
+  const learningsDir = join(targetDir, "learnings");
+  const expectedLearningsPaths = Object.keys(seedProjectLearningsHomeFiles()).map((f) => join(learningsDir, f));
   assert.deepEqual(
     renameTargets.sort(),
-    [result.masterPlanPath, result.tasksYamlPath, result.agentsMdPath].sort(),
-    "exactly the three drafted files are written, nothing else",
+    [result.masterPlanPath, result.tasksYamlPath, result.agentsMdPath, ...expectedLearningsPaths].sort(),
+    "exactly the three drafted files plus the seeded learnings home, nothing else",
   );
 
   // The three files actually exist with the drafted content.

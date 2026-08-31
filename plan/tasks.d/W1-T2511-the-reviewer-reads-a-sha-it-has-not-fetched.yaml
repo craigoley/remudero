@@ -101,6 +101,40 @@
 
     THE RISK BAND IS BLAST RADIUS, NOT RULE 19's SPAN: one src stem plus a test is a narrow span, but
     it reorders the review command's own preamble, and a mistake there fails every PR the gate judges.
+    A SECOND SYMPTOM, MEASURED 2026-08-31 ON W1-T2503 / #3365 — and it is the more dangerous one,
+    because it does not look like a failure. Same root cause, different downstream path:
+
+        fatal: path 'plan/tasks.yaml' exists on disk, but not in '3c19c12f...'
+        ### rmd review: plan resolver diverged from the CI gate for W1-T2503 ...
+         (falling back to the PR body; see review.resolver_divergence in the ledger)
+        ### rmd review PR #3365 — criteria from PR body Acceptance: block (1 criteria)
+        CAPPED: 0/1 proofs executed — not certified
+
+    THE FALLBACK SUCCEEDED, WHICH IS WHY IT IS WORSE. #3365's body happened to carry its own
+    `## Acceptance` block, so `parseAcceptanceBlock` found ONE criterion instead of none. The
+    verdict was therefore not the loud "no acceptance criteria to judge" this task's headline
+    describes — it was a CAPPED verdict that refuses to arm auto-merge and reads exactly like an
+    ordinary weakly-proven PR. The shard's own criteria resolve 8/8 from the plan; the body's
+    single criterion capped at 0/1. So the SAME defect produces a hard FAIL when the body is bare
+    and a silent DOWNGRADE when it is not, and only the first is obvious enough to investigate.
+
+    A BUILD THAT ONLY EXERCISES THE ZERO-CRITERIA PATH WOULD SHIP AND LEAVE THIS LIVE.
+
+    AND THE DIAGNOSTIC CANNOT TELL YOU WHICH CAUSE IT IS. `git show <sha>:<path>` emits the
+    IDENTICAL message for an absent OBJECT and for a present commit whose tree lacks the path.
+    MEASURED in a throwaway repo, file present on disk in every case:
+
+      commit present, path not in its tree   -> fatal: path '...' exists on disk, but not in '<sha>'
+      object entirely absent (unfetched)     -> fatal: path '...' exists on disk, but not in '<sha>'
+
+    The second row used W1-T2503's real sha in a repo that had never heard of it and reproduced the
+    daemon's line byte for byte. So the resolver's own error text inherits git's ambiguity, and
+    whoever debugs the next instance cannot tell "not fetched" from "genuinely not in that commit"
+    without a separate probe. `git cat-file -e <sha>^{commit}` settles it in one call and belongs
+    in the divergence message. CONTROL for this whole diagnosis: `git show 3c19c12f...:plan/tasks.yaml`
+    reads the file cleanly from any checkout holding the object, so the sha and the path are both
+    sound and the fault is the clone's view of them.
+
   acceptance:
     - claim: "a head sha absent from local objects no longer resolves to zero criteria when the trailer and shard are valid"
       proof: "unit test: test/the-reviewer-reads-a-sha-it-has-not-fetched.test.ts"
@@ -117,4 +151,8 @@
     - claim: "the materializer still refuses a tree whose tip is not the PR head"
       proof: "unit test: test/the-reviewer-reads-a-sha-it-has-not-fetched.test.ts"
     - claim: "restoring the original ordering makes the unfetched-sha case resolve zero criteria again"
+      proof: "unit test: test/the-reviewer-reads-a-sha-it-has-not-fetched.test.ts"
+    - claim: "a divergence that falls back to a body block is not silently capped — the cause is named on the verdict, not only in the ledger"
+      proof: "unit test: test/the-reviewer-reads-a-sha-it-has-not-fetched.test.ts"
+    - claim: "the divergence message distinguishes an unfetched object from a path genuinely absent at that sha"
       proof: "unit test: test/the-reviewer-reads-a-sha-it-has-not-fetched.test.ts"

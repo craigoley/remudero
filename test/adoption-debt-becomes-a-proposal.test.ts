@@ -332,8 +332,10 @@ test("minting a proposal files no task and approves nothing — the registry is 
 
     // LAW 5, DIRECTLY: nothing under `root` besides the registry itself — no minted task shard,
     // no feedback entry, no second write path (mirrors measurement-cadence.test.ts's own
-    // rule-efficacy assertion of the same shape).
-    assert.deepEqual(readdirSync(root), ["inbox-proposals.json"]);
+    // rule-efficacy assertion of the same shape). W1-T2490: `inbox-proposals.d/` is the newly
+    // minted proposal's OWN shard mirror — part of the registry's own footprint, not a second
+    // write path — updateProposalRegistry writes it alongside, never instead of, the blob.
+    assert.deepEqual(readdirSync(root).sort(), ["inbox-proposals.d", "inbox-proposals.json"]);
 
     const proposal = readRegistry(registryPath)[0];
 
