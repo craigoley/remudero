@@ -761,6 +761,24 @@ export function renderShellHtml(
   .ask-type-badge.ask-type-blocked-pr {
     background: rgba(255, 107, 107, 0.14); color: var(--status-blocked); border-color: var(--status-blocked);
   }
+  /* W1-T2497: THE MAILBOX -- inline, same page, same <style> block (no stylesheet of its own,
+     same rule journeyGraphSvg's own CSS comment (~line 961) already documents for the graph). */
+  .mailbox-heading { font-size: 0.85rem; margin: 0.6rem 0 0.25rem; display: flex; align-items: center; gap: 0.4em; }
+  .mailbox-unread-count:empty { display: none; }
+  .mailbox-unread-count {
+    display: inline-block; min-width: 1.2em; padding: 0 0.4em; border-radius: 999px; text-align: center;
+    font-size: 0.7rem; font-weight: 700; background: var(--status-needs-human); color: #241a02;
+  }
+  .mailbox { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.5rem; }
+  .mailbox-empty { font-size: 0.85rem; opacity: 0.7; margin: 0.25rem 0; }
+  .mailbox-thread { list-style: none; border: 1px solid var(--border, #333); border-radius: 6px; padding: 0.4rem 0.6rem; }
+  .mailbox-thread-unread { border-color: var(--status-needs-human); }
+  .mailbox-thread-head { display: flex; align-items: center; gap: 0.4em; }
+  .mailbox-unread-dot { width: 0.5em; height: 0.5em; border-radius: 999px; background: var(--status-needs-human); display: inline-block; }
+  .mailbox-messages { list-style: none; margin: 0.3rem 0; padding: 0; display: flex; flex-direction: column; gap: 0.2rem; }
+  .mailbox-message { font-size: 0.85rem; }
+  .mailbox-sender { font-weight: 700; margin-right: 0.4em; }
+  .mailbox-reply { display: flex; gap: 0.4em; margin-top: 0.3rem; }
   #stale-badge {
     display: inline-block; margin: 0.25rem 0 0; padding: 0.15rem 0.5rem; border-radius: 999px;
     font-size: 0.75rem; font-weight: 600; background: var(--status-needs-human); color: #241a02;
@@ -1144,6 +1162,11 @@ export function renderShellHtml(
   </button></h2>
   <div id="needs-me-body">
     <ul id="needs-me-list" class="row-list">${skeletonRows(2)}</ul>
+    <!-- W1-T2497: THE MAILBOX -- the same escalations above, read as a thread rather than a
+         list. ADDITIVE: needs-me-list is untouched, this renders alongside it, from data
+         already fetched (no new route, no script/stylesheet over the network). -->
+    <h3 class="mailbox-heading">Mailbox<span id="mailbox-unread-count" class="mailbox-unread-count" aria-label="unread threads"></span></h3>
+    <div id="mailbox" class="mailbox" aria-label="Mailbox"></div>
   </div>
 </section>
 
@@ -1487,6 +1510,10 @@ export function renderShellHtml(
   // claim - unknown is reported as unknown, never upgraded to "done".
   const WRITE_ACK = {
     "/v1/escalation/mark-handled": { kind: "done", text: "Marked handled — the escalation issue is closed. The row clears on the next refresh." },
+    // W1-T2497: the mailbox's own reply box (W1-T2496's route) -- "done" is true the instant the
+    // 200 lands (appendThreadMessage + captureFeedback both already ran server-side), same as
+    // every other same-request-completes-the-write route in this table.
+    "/v1/escalation/reply": { kind: "done", text: "Reply sent — filed to the thread, and now in the feedback queue for triage." },
     "/v1/feedback/decision": { kind: "done", text: "Decision recorded — the entry moves out of NEEDS ME on the next refresh." },
     "/v1/inbox/approve": { kind: "done", text: "Proposal approved — the drafted tasks are filed." },
     "/v1/inbox/reframe": { kind: "done", text: "Reframe recorded — your wording is saved against the proposal." },
@@ -2126,6 +2153,7 @@ export function renderShellHtml(
     const tasks = Array.from(tasksById.values());
     const nowIds = renderNow(tasks);
     const needsMeIds = renderNeedsMe(tasks, latestFeedbackEntries, latestInboxReady, latestInboxDrafting);
+    renderMailbox(tasks, latestFeedbackEntries);
     renderAccepted(latestFeedbackEntries);
     const upNextIds = renderUpNext(latestUpNextCards);
     const recentIds = renderRecent(latestRecentEntries);
@@ -2752,6 +2780,188 @@ export function renderShellHtml(
       \`\${statusBadge("needs-human")}<span class="ask-type-badge ask-type-blocked-pr">Blocked</span>\` +
       \`<span class="detail">blocked-PR ledger entries unverified -- \${escapeHtml(reason)}</span>\`
     );
+  }
+  // ── MAILBOX (W1-T2497) — the same escalations, read as a thread rather than a list ────────
+  // ADDITIVE, never a replacement: needs-me-list (above) is untouched -- ten real Playwright
+  // suites already assert its rows, and this task's own rationale forbids breaking them. This
+  // renders ALONGSIDE it, from the SAME two already-fetched feeds (tasks off GET /v1/status,
+  // feedbackEntries off GET /v1/feedback) -- no new route (this task's own NOT-IN-SCOPE line),
+  // and no thread-store file read from the browser: a thread's messages are recovered entirely
+  // from data these two routes already carry -- the escalation's own \`escalationTitle\` (one
+  // message) plus any \`origin: "ui"\` reply feedback entry whose \`thread_id\` was derived
+  // (POST /v1/escalation/reply, W1-T2496) from the SAME (taskId, class) this row's title names.
+  //
+  // A reply's \`thread_id\` also folds in \`cause\`/\`prRef\` (inbox-thread.ts's \`deriveThreadId\`),
+  // neither of which any route exposes to this console today -- so matching is by PREFIX
+  // (taskId+class), not exact equality. A task very rarely carries two DIFFERENT-cause open
+  // escalations of the same class at once (NEEDS ME itself already renders at most one row per
+  // task), so this is a deliberate, documented simplification, not an oversight.
+  const MAILBOX_SENDER = { escalation: "Fleet", reply: "You" };
+  const MAILBOX_STATE_KEY = "rmd-console-mailbox-v1";
+  function loadMailboxState() {
+    try {
+      const raw = localStorage.getItem(MAILBOX_STATE_KEY);
+      const parsed = raw ? JSON.parse(raw) : null;
+      return {
+        read: Array.isArray(parsed && parsed.read) ? parsed.read : [],
+        resolved: Array.isArray(parsed && parsed.resolved) ? parsed.resolved : [],
+      };
+    } catch {
+      return { read: [], resolved: [] };
+    }
+  }
+  function saveMailboxState(state) {
+    try {
+      localStorage.setItem(MAILBOX_STATE_KEY, JSON.stringify(state));
+    } catch {
+      /* a full/blocked localStorage must not break the click that triggered this -- see
+         setSectionCollapsed's own identical tolerance, above. */
+    }
+  }
+  /** \`[CLASS]\` off \`escalationTitle\`'s own \`"[CLASS] taskId: summary"\` prefix -- the SAME
+   *  regex askTypeFromEscalationTitle already uses, kept separate so a caller that needs the raw
+   *  class string (not the binary question/action verdict) never has to re-derive it. */
+  function mailboxEscalationClass(title) {
+    const m = title ? /^\\[(\\w+)\\]/.exec(title) : null;
+    return m ? m[1] : "UNKNOWN";
+  }
+  /** The PREFIX every reply to this (taskId, class) concern shares -- see this section's header
+   *  for why this is a prefix, not the exact inbox-thread.ts \`deriveThreadId\` string. */
+  function mailboxThreadKey(taskId, cls) {
+    return \`thread:\${taskId}::\${cls}::\`;
+  }
+  /**
+   * Build one thread record per NEEDS ME escalation row, each carrying every message that
+   * concerns it (its own opening escalation, plus any matching reply) IN ORDER, and the whole
+   * list ordered by its OWN latest message -- never by the escalation's own open time alone, so
+   * a thread a reply just landed on jumps back to the top exactly like an email inbox (claim:
+   * "threads render ordered by their latest message"). \`tasks\`/\`replies\` shaped wrong (not
+   * arrays) is the "thread store unreachable" case this function signals by returning \`null\` --
+   * never a thrown error, never a guessed-at partial list.
+   */
+  function buildMailboxThreads(tasks, replies) {
+    if (!Array.isArray(tasks) || (replies !== undefined && replies !== null && !Array.isArray(replies))) return null;
+    const safeReplies = Array.isArray(replies) ? replies : [];
+    const threads = [];
+    for (const t of tasks) {
+      if (!t || !t.needsHuman || !t.escalationTitle || !t.taskId) continue;
+      const cls = mailboxEscalationClass(t.escalationTitle);
+      const key = mailboxThreadKey(t.taskId, cls);
+      const messages = [{ role: "escalation", sender: MAILBOX_SENDER.escalation, body: t.escalationTitle, ts: t.escalationOpenedAt || "" }];
+      for (const r of safeReplies) {
+        if (r && typeof r.thread_id === "string" && r.thread_id.indexOf(key) === 0) {
+          messages.push({ role: "reply", sender: MAILBOX_SENDER.reply, body: r.raw || "", ts: r.ts || "" });
+        }
+      }
+      messages.sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
+      threads.push({
+        threadId: key,
+        taskId: t.taskId,
+        escClass: cls,
+        issueUrl: t.escalationIssueUrl,
+        messages,
+        latestTs: messages[messages.length - 1].ts,
+      });
+    }
+    threads.sort((a, b) => (a.latestTs < b.latestTs ? 1 : a.latestTs > b.latestTs ? -1 : 0));
+    return threads;
+  }
+  /** Threads NOT in \`resolvedIds\` -- the default view -- unless \`includeResolved\` is set, in
+   *  which case every thread renders regardless (claim: "a resolved thread is hidden from the
+   *  default view and is not deleted" -- nothing here ever removes a thread's own messages, it
+   *  only ever changes which threads THIS call returns). */
+  function mailboxVisibleThreads(threads, resolvedIds, includeResolved) {
+    if (includeResolved) return threads;
+    const resolved = new Set(resolvedIds || []);
+    return threads.filter((t) => !resolved.has(t.threadId));
+  }
+  /** A COUNT OF THREADS, never of messages (claim: "the unread indicator counts threads rather
+   *  than events") -- a thread with three unread replies is still ONE unread thread. */
+  function mailboxUnreadCount(threads, readIds) {
+    const read = new Set(readIds || []);
+    return threads.filter((t) => !read.has(t.threadId)).length;
+  }
+  /** Pure -- returns a NEW array with \`threadId\` added, never mutates \`readIds\` (claim:
+   *  "opening a thread marks it read and the indicator drops by one"). */
+  function mailboxMarkRead(readIds, threadId) {
+    const read = new Set(readIds || []);
+    read.add(threadId);
+    return Array.from(read);
+  }
+  /** Pure -- same shape as {@link mailboxMarkRead}, for the Resolve affordance. */
+  function mailboxMarkResolved(resolvedIds, threadId) {
+    const resolved = new Set(resolvedIds || []);
+    resolved.add(threadId);
+    return Array.from(resolved);
+  }
+  /**
+   * THE INNER DRAWING FUNCTION -- draws \`threads\` (an ALREADY-BUILT array, never raw
+   * tasks/replies) as the mailbox's own markup: every message in order, its sender's display
+   * name, an unread dot, a reply box that posts to POST /v1/escalation/reply (W1-T2496), and a
+   * Resolve control. \`threads\` shaped wrong (not an array) draws NOTHING -- \`""\`, not a
+   * partial/blank shell -- which is what lets {@link mailboxHtml} (below) prove the degrade-to-
+   * existing-rows path is ITS OWN code, never a side effect of this function's own fallback
+   * (claim: "removing the degradation path makes the unreachable-store case render nothing").
+   */
+  function mailboxThreadsHtml(threads, readIds) {
+    if (!Array.isArray(threads)) return "";
+    if (threads.length === 0) return \`<p class="mailbox-empty">no open threads</p>\`;
+    const read = new Set(readIds || []);
+    return threads
+      .map((t) => {
+        const unread = !read.has(t.threadId);
+        const messagesHtml = t.messages
+          .map(
+            (m) =>
+              \`<li class="mailbox-message mailbox-message-\${m.role}"><span class="mailbox-sender">\${escapeHtml(m.sender)}</span><span class="mailbox-body">\${escapeHtml(m.body)}</span></li>\`,
+          )
+          .join("");
+        const issueLink = t.issueUrl
+          ? \`<a href="\${escapeHtml(t.issueUrl)}" target="_blank" rel="noopener noreferrer">view issue</a>\`
+          : "";
+        return (
+          \`<li class="mailbox-thread\${unread ? " mailbox-thread-unread" : ""}" data-thread-id="\${escapeHtml(t.threadId)}">\` +
+          \`<div class="mailbox-thread-head"><span class="task-id">\${escapeHtml(t.taskId)}</span>\${unread ? '<span class="mailbox-unread-dot" aria-label="unread"></span>' : ""}</div>\` +
+          \`<ul class="mailbox-messages">\${messagesHtml}</ul>\` +
+          \`<span class="btn-row">\${issueLink}<button type="button" class="mailbox-open"\${unread ? "" : " disabled"} data-thread-id="\${escapeHtml(t.threadId)}">Open</button><button type="button" class="mailbox-resolve" data-thread-id="\${escapeHtml(t.threadId)}">Resolve</button></span>\` +
+          \`<form class="mailbox-reply" data-task-id="\${escapeHtml(t.taskId)}" data-class="\${escapeHtml(t.escClass)}"><input type="text" placeholder="Reply…" /><button type="submit"\${writeGateAttrs()}>Reply</button></form>\` +
+          \`</li>\`
+        );
+      })
+      .join("");
+  }
+  /**
+   * THE WRAPPER -- degrades to \`existingRowsHtml\` (the console's pre-existing NEEDS ME rows,
+   * verbatim -- never a second, competing rendering of the same data) whenever
+   * {@link mailboxThreadsHtml} could not draw anything at all, i.e. \`tasks\`/\`replies\` came back
+   * a shape this feature cannot read (claim: "an unreachable thread store degrades to the
+   * existing rows rather than a blank panel"). Never throws: a build failure inside
+   * {@link buildMailboxThreads} itself is caught here too, same fail-safe direction.
+   */
+  function mailboxHtml(tasks, replies, readIds, resolvedIds, includeResolved, existingRowsHtml) {
+    let inner = "";
+    try {
+      const threads = buildMailboxThreads(tasks, replies);
+      inner = threads === null ? "" : mailboxThreadsHtml(mailboxVisibleThreads(threads, resolvedIds, includeResolved), readIds);
+    } catch {
+      inner = "";
+    }
+    return inner || existingRowsHtml || "";
+  }
+  let mailboxState = loadMailboxState();
+  function renderMailbox(tasks, feedbackEntries) {
+    const el = document.getElementById("mailbox");
+    if (!el) return;
+    const list = document.getElementById("needs-me-list");
+    const existingRowsHtml = list ? list.innerHTML : "";
+    el.innerHTML = mailboxHtml(tasks, feedbackEntries, mailboxState.read, mailboxState.resolved, false, existingRowsHtml);
+    const badge = document.getElementById("mailbox-unread-count");
+    if (badge) {
+      const threads = buildMailboxThreads(tasks, feedbackEntries);
+      const visible = threads === null ? [] : mailboxVisibleThreads(threads, mailboxState.resolved, false);
+      const count = mailboxUnreadCount(visible, mailboxState.read);
+      badge.textContent = count > 0 ? String(count) : "";
+    }
   }
   function renderNeedsMe(tasks, feedbackEntries, inboxReady, inboxDrafting) {
     const rows = [];
@@ -3720,6 +3930,38 @@ export function renderShellHtml(
       await postJson("/v1/inbox/approve", { proposalId });
       refreshAll();
     }
+  });
+
+  // ── MAILBOX write-actions (W1-T2497) ────────────────────────────────────────────────────
+  // Open/Resolve are BOTH read-state, held entirely client-side (localStorage) -- see this
+  // section's own header above for why: neither changes anything the thread store or the
+  // escalation issue itself knows about, so both work identically whether or not a write
+  // token is present (claim 4/5 need no write scope to hold). The reply form is the one real
+  // WRITE here, and gates on hasWriteScope exactly like every other form on this page.
+  document.getElementById("mailbox").addEventListener("click", (e) => {
+    const openBtn = e.target.closest(".mailbox-open");
+    const resolveBtn = e.target.closest(".mailbox-resolve");
+    if (openBtn) {
+      mailboxState = { ...mailboxState, read: mailboxMarkRead(mailboxState.read, openBtn.dataset.threadId) };
+      saveMailboxState(mailboxState);
+      renderMailbox(Array.from(tasksById.values()), latestFeedbackEntries);
+    } else if (resolveBtn) {
+      mailboxState = { ...mailboxState, resolved: mailboxMarkResolved(mailboxState.resolved, resolveBtn.dataset.threadId) };
+      saveMailboxState(mailboxState);
+      renderMailbox(Array.from(tasksById.values()), latestFeedbackEntries);
+    }
+  });
+  document.getElementById("mailbox").addEventListener("submit", async (e) => {
+    const replyForm = e.target.closest(".mailbox-reply");
+    if (!replyForm) return;
+    e.preventDefault();
+    if (!hasWriteScope) return;
+    const input = replyForm.querySelector("input");
+    const text = input.value.trim();
+    if (!text) return;
+    await postJson("/v1/escalation/reply", { taskId: replyForm.dataset.taskId, class: replyForm.dataset.class, text });
+    input.value = "";
+    refreshAll();
   });
 
   // ── UP NEXT write-actions (fb-1784988460437-9daa9b): Run a queued task, Drain now ──────
