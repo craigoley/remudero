@@ -3,31 +3,64 @@
     "architecture.yaml": {
       "entries": [
         "cache-prefix-bytes",
+        "check-absence-is-not-a-passed-check",
         "claude-code-hybrid-retrieval",
         "compaction-recall-first",
         "context-economy",
+        "coverage-test-needs-own-file",
         "daemon-repo-targeting-explicit",
         "daemon-split-logic-from-live-commissioning",
         "docs-are-a-gated-artifact",
+        "grep-in-path-lazy-split-hazard",
+        "hand-mint-uses-the-plain-refspec",
         "harness-assumptions-stale",
         "ledger-corpus-needs-the-resolver",
         "ledger-query-anchors-on-the-step-field",
+        "ledger-step-name-is-a-claim-not-evidence",
+        "next-task-id-max-across-both-plan-sources",
+        "next-task-id-needs-a-fresh-pull",
+        "no-rewriting-proofs-on-verify-human",
+        "operator-message-standard-is-tested-verbatim",
+        "plan-only-pr-not-auto-capped",
+        "remudero-review-is-a-commit-status",
+        "rule19-span-and-never-file-empty-files-list",
+        "run-task-has-zero-catch-erasure-headroom",
+        "serve-client-js-template-literal-backtick-trap",
+        "state-is-scratch-land-findings-in-a-tracked-artifact",
         "step-names-come-from-source",
         "task-credit-needs-an-anchored-trailer",
-        "task-quality-gates-before-dispatch"
+        "task-quality-gates-before-dispatch",
+        "trace-the-runtime-value-not-the-declarative-source",
+        "verify-pr-body-against-diff-not-memory",
+        "warn-never-reaches-lint-plan-exit-code"
       ],
       "globs": [
+        ".remudero/mounts.yaml",
         "docs",
+        "docs/operator-message-standard.md",
+        "plan/feedback",
+        "plan/policy.yaml",
         "plan/tasks.d",
         "plan/tasks.yaml",
+        "src/lib/auto-triage.ts",
         "src/lib/daemon.ts",
+        "src/lib/dispatch-overlap.ts",
+        "src/lib/drain.ts",
+        "src/lib/feedback-landing.ts",
         "src/lib/launchd.ts",
         "src/lib/learnings.ts",
         "src/lib/ledger-grep.ts",
         "src/lib/ledger.ts",
+        "src/lib/open-prs-rest.ts",
         "src/lib/retro.ts",
+        "src/lib/review.ts",
+        "src/lib/serve.ts",
+        "src/lib/sweep.ts",
+        "src/lib/task-id-reservation.ts",
         "src/lib/task-linter.ts",
-        "src/run-task.ts"
+        "src/run-task.ts",
+        "test/catch-erasure-ratchet.test.ts",
+        "test/run-task.test.ts"
       ]
     },
     "ci.yaml": {
@@ -148,11 +181,15 @@
       "platform.yaml"
     ],
     "ci": [
+      "architecture.yaml",
       "ci.yaml"
     ],
     "cli": [
       "architecture.yaml",
       "failures.yaml"
+    ],
+    "codebase": [
+      "architecture.yaml"
     ],
     "config": [
       "testing.yaml"
@@ -164,6 +201,7 @@
       "architecture.yaml"
     ],
     "coverage": [
+      "architecture.yaml",
       "ci.yaml"
     ],
     "design-review": [
@@ -177,6 +215,9 @@
     ],
     "feedback": [
       "platform.yaml"
+    ],
+    "investigation": [
+      "architecture.yaml"
     ],
     "knowledge": [
       "architecture.yaml"
@@ -194,10 +235,14 @@
     "process": [
       "failures.yaml"
     ],
+    "proofs": [
+      "architecture.yaml"
+    ],
     "retro": [
       "architecture.yaml"
     ],
     "review": [
+      "architecture.yaml",
       "ci.yaml"
     ],
     "reviewer": [
