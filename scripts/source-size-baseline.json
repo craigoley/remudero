@@ -3,7 +3,7 @@
   "src/lib/alert-lane.ts": 333,
   "src/lib/analytics-route.ts": 354,
   "src/lib/auto-triage.ts": 673,
-  "src/lib/autonomy.ts": 376,
+  "src/lib/autonomy.ts": 505,
   "src/lib/block-reason.ts": 146,
   "src/lib/board-review.ts": 590,
   "src/lib/board.ts": 1090,
@@ -141,6 +141,6 @@
   "src/lib/worker-scratch.ts": 227,
   "src/lib/worker.ts": 3452,
   "src/lib/workflow-run.ts": 28,
-  "src/run-task.ts": 32587,
+  "src/run-task.ts": 32631,
   "src/spike.ts": 311
 }
