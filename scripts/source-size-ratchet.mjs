@@ -126,17 +126,69 @@ export function readBaseline(text, path) {
 }
 
 /**
+ * W1-T2539 -- THE BUCKET. A recorded ceiling is rounded UP to a multiple of this, never the exact
+ * line count, and that single change removes an entire conflict class.
+ *
+ * WHY AN EXACT COUNT COLLIDES. Every PR that grows a file must edit the SAME LINE of the baseline,
+ * so two such PRs always conflict -- and the conflict is UNRESOLVABLE by the merge-conflict rung,
+ * because changing a value on an existing JSON key is a deletion plus an addition and
+ * `isPureConcurrentAddition` (src/lib/sweep.ts) refuses any deletion. MEASURED 2026-08-31 on the
+ * three PRs left dirty after W1-T2536 turned that rung on: ours -1/-2/-2 against theirs -5/-7/-10,
+ * all on this file. Two more, resolved by hand the same night, scored the same.
+ *
+ * WHAT BUCKETING BUYS, AND THE SECOND PROPERTY IS THE ONE THAT MATTERS.
+ *   (a) Growth that stays inside the current bucket does not touch the baseline at all, so there
+ *       is no line to collide on. MEASURED over 300 first-parent commits (this repo squash-merges,
+ *       so `--merges` reads a near-empty corpus -- controlled at 2656 first-parent commits
+ *       available): per-commit growth of a single source file is p50 40, p75 85, p90 141, p99 287,
+ *       max 441, and the baseline is touched in 19 of 300 commits (6.3%).
+ *   (b) When two PRs DO both cross the same boundary they write the SAME VALUE, and git
+ *       auto-merges an identical change with no conflict at all. That is what removes the class
+ *       rather than merely making it rarer.
+ *
+ * 500 IS DERIVED, NOT PICKED: it exceeds the observed MAXIMUM single-commit growth (441), so no
+ * one commit can traverse a whole bucket from a standing start. REPLAYING THE THREE REAL CONFLICTS
+ * AT THIS BUCKET, ALL THREE DISAPPEAR -- each pair rounds to ONE value and each merged truth fits
+ * under it, so there is no differing line to conflict on and no breach to record:
+ *     3136 / 3138   -> both 3500, merged truth 3230  fits
+ *     32692 / 32713 -> both 33000, merged truth 32818 fits
+ *     32743 / 32718 -> both 33000, merged truth 32748 fits
+ * (An earlier draft of this comment quoted 3250 and 32750 -- those are a 250-bucket's answers,
+ * caught by probing `ceilingFor` rather than trusting the arithmetic in the comment.)
+ *
+ * THE COST, STATED RATHER THAN BURIED: the ratchet is COARSER. A file may grow up to 499 lines
+ * past its last recorded ceiling before the gate notices -- 1.5% of a 32k-line file, 15% of a 3k
+ * one. This is a ratchet against unbounded growth, not a precise budget (W1-T2526 calls it "a size
+ * ledger records how long a file is and grades no falsifier"), so the trade is judged worth it.
+ * An operator who disagrees changes ONE exported constant.
+ *
+ * MIGRATION IS LAZY, DELIBERATELY. The existing entries are exact counts and stay valid ceilings;
+ * each file re-records into a bucket the first time it grows past its current value. An EAGER
+ * rewrite of all of them would itself be a large diff to this exact file -- a conflict magnet
+ * against every in-flight PR, which is the defect this task exists to remove.
+ */
+export const CEILING_BUCKET_LINES = 500;
+
+/** The ceiling a file of `lines` lines records: rounded UP to the next {@link
+ *  CEILING_BUCKET_LINES}. Never 0 -- an empty or tiny file still gets one full bucket, so its
+ *  first real content does not instantly breach a ceiling of nothing. */
+export function ceilingFor(lines) {
+  return Math.max(CEILING_BUCKET_LINES, Math.ceil(lines / CEILING_BUCKET_LINES) * CEILING_BUCKET_LINES);
+}
+/**
  * Pure verdict over one run's measured line counts.
  *
  * `currentLines` is `{ [path]: measuredLineCount }` for every file `listSourceFiles` currently
  * sees. `baseline` is the previously recorded map (`readBaseline`'s return).
  *
- *   - absent from baseline:        NEW -- pushed into `added` and `nextBaseline`, never refused.
+ *   - absent from baseline:        NEW -- pushed into `added`; `nextBaseline` takes its BUCKET.
  *   - `current > recorded`:        GROWN -- pushed into `violations` (named, with the exact
  *                                  overage in lines); `nextBaseline` keeps the OLD value, so a
  *                                  growing file's ceiling never advances just because it ran.
- *   - `current < recorded`:        SHRUNK -- pushed into `shrunk`; `nextBaseline` takes the NEW,
- *                                  lower value, holding the gain automatically.
+ *   - `ceilingFor(current) < recorded`: SHRUNK BY A WHOLE BUCKET -- pushed into `shrunk`;
+ *                                  `nextBaseline` takes the lower BUCKET. A smaller shrink leaves
+ *                                  the ceiling alone (W1-T2539), so the gain is held only when it
+ *                                  is big enough to be worth a colliding edit.
  *   - `current === recorded`:      unchanged; carried through to `nextBaseline` as-is.
  *
  * A path recorded in `baseline` but absent from `currentLines` (the file was deleted or renamed
@@ -154,15 +206,21 @@ export function evaluateSourceSizeRatchet(currentLines, baseline) {
   for (const path of Object.keys(currentLines).sort()) {
     const lines = currentLines[path];
     const recorded = baseline[path];
+    // W1-T2539: every value written here is a BUCKET, never the raw count -- see
+    // {@link CEILING_BUCKET_LINES}. The COMPARISON is still against the raw line count, so the gate
+    // refuses exactly what it always refused; only the recorded number changes.
     if (recorded === undefined) {
       added.push({ path, lines });
-      nextBaseline[path] = lines;
+      nextBaseline[path] = ceilingFor(lines);
     } else if (lines > recorded) {
       violations.push({ path, lines, baseline: recorded, overage: lines - recorded });
       nextBaseline[path] = recorded;
-    } else if (lines < recorded) {
-      shrunk.push({ path, from: recorded, to: lines });
-      nextBaseline[path] = lines;
+    } else if (ceilingFor(lines) < recorded) {
+      // SHRUNK, but only by a WHOLE BUCKET. A smaller shrink leaves the ceiling alone: rewriting it
+      // for every few lines lost would re-introduce exactly the colliding edit this task removes,
+      // on the way DOWN instead of up.
+      shrunk.push({ path, from: recorded, to: ceilingFor(lines) });
+      nextBaseline[path] = ceilingFor(lines);
     } else {
       nextBaseline[path] = recorded;
     }
@@ -229,7 +287,9 @@ function main(argv) {
     const rel = relative(root, baselinePath).split(sep).join("/") || DEFAULT_BASELINE_RELATIVE_PATH;
     console.error(`  TO FIX: either shrink the growth back down, or record it -- edit ${rel} and set:`);
     for (const v of verdict.violations) {
-      console.error(`    "${v.path}": ${v.lines},`);
+      // W1-T2539: the BUCKET, which is what the author must write -- printing the raw count here
+      // would hand them a value the next run immediately refuses to keep.
+      console.error(`    "${v.path}": ${ceilingFor(v.lines)},`);
     }
     console.error(
       `  Recording is the ordinary outcome for deliberate growth and is safe to do in this same PR: ` +
