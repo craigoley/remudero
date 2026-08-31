@@ -11,20 +11,14 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 
-// Deliberately a DYNAMIC import, never a static `from "...classify..."` one: test/
-// mutation-ratchet.test.ts greps every test/**/*.test.ts file for a static classify.ts
-// import and requires each one be named in stryker.conf.json's PR-gate commandRunner scope
-// (W1-T133's latency fix). Widening that INSTRUMENT-path config to cover this file would trip
-// Rule 25 entanglement against this task's declared scope (src/lib/classify.ts, src/run-task.ts,
-// and this file only). A dynamic import reaches the identical production module at runtime
-// without becoming a new STATIC importer that scope must track — classify.test.ts already
-// carries the mutation-covered unit assertions (see the file-header comment above).
-const { MAX_TRANSIENT_RETRIES, TRANSIENT_BACKOFF_CEILING_MS, detectUsageLimitRefusal, runDiagnoseThenRetry, transientBackoffMs } =
-  await import("../src/lib/classify.js");
-// Same reasoning for the type: `import(...)` as a TYPE QUERY (not a `from` import
-// declaration) is erased entirely by tsx's type-stripping and never appears as a runtime
-// import, so it does not trip the same grep either.
-type AttemptOutcome = import("../src/lib/classify.js").AttemptOutcome;
+import {
+  MAX_TRANSIENT_RETRIES,
+  TRANSIENT_BACKOFF_CEILING_MS,
+  detectUsageLimitRefusal,
+  runDiagnoseThenRetry,
+  transientBackoffMs,
+} from "../src/lib/classify.js";
+import type { AttemptOutcome } from "../src/lib/classify.js";
 
 // W1-T2515. The incident, verbatim from the ledger's `stderr_excerpt` on four consecutive
 // `implement.done` rows for W1-T2471, all `api_error: true`:
