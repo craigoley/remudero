@@ -1,0 +1,69 @@
+- id: W1-T2548
+  title: "THE CONFLICT RUNG ADMITS ONLY A PURE CONCURRENT ADDITION, AND EVERY CONFLICT THIS REPO ACTUALLY PRODUCES IS A SAME-KEY VALUE CHANGE — structurally a deletion plus an addition, so `isPureConcurrentAddition` refuses it by construction and the rung W1-T2536 just enabled admits nothing"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 32.00
+  rationale: |
+    (1) MEASURED, SIX CONFLICTS IN ONE EVENING, ALL THE SAME SHAPE. Every conflict on the open
+    board was `scripts/source-size-baseline.json`, one JSON key, two different numbers:
+
+        #3417  "src/run-task.ts": 32759 (ours) vs 32767 (theirs) -> merged truth 32778
+        #3391  "src/run-task.ts": 32788        vs 32767          -> merged truth 32807
+        #3419  "src/lib/daemon.ts": ours/theirs differ            -> merged truth 4123
+        #3421  "src/lib/review.ts": 8298       vs 8335           -> merged truth 8371
+
+    THE MERGED TRUTH MATCHES NEITHER SIDE, every time, because both branches really did add lines.
+    A textual union is not merely unhelpful here, it is WRONG — no combination of the two recorded
+    numbers is the right one.
+
+    (2) THE RUNG CANNOT SEE ANY OF THEM. `isPureConcurrentAddition` requires ZERO deletions on
+    BOTH sides. Changing a value under an existing key is a deleted line plus an added line, so
+    that predicate can never return true for this class. W1-T2536 turned
+    `mergeConflictAdmissionEnabled` on and the rung has admitted nothing since, which reads as "the
+    feature works and there is nothing to do" rather than "the feature cannot see its own
+    workload."
+
+    (3) THE MISSING CONCEPT IS A REGENERABLE ARTIFACT, AND THE REPO ALREADY HAS THE POPULATION.
+    Every one of these files has a generator that produces it from the tree:
+    `source-size-ratchet`, `plan-index`, `docs-index`, `learnings-index`, `cli-reference`,
+    `capability-snapshot`, `api-client`. For such a file the resolution is not a merge at all —
+    take either side, run the generator on the MERGED tree, and the output is correct by
+    construction. That is what the operator did by hand four times tonight, and it is what
+    W1-T2540 already instructs the conflict WORKER to do. What is missing is the rung's admission
+    predicate agreeing that such a conflict is admissible in the first place.
+
+    (4) THE SAFETY ARGUMENT IS THE GENERATOR, NOT A HEURISTIC. Admission must require a DECLARED
+    generator for that exact path, and the resolution must be the generator's own output on the
+    merged tree — never a diff heuristic, never a chosen side. A path with no declared generator
+    stays refused exactly as today. That keeps the dangerous capability (auto-resolving a
+    conflict) bounded by a list a human wrote, not by an inference.
+
+    (5) OUT OF SCOPE, NAMED. (a) The pure-addition arm, which stays. (b) Conflicts in hand-written
+    source, which must stay refused. (c) W1-T2539's bucketed ceiling reduces how OFTEN this file
+    conflicts and does not remove the class — the two are complements, not substitutes.
+  acceptance:
+    - claim: "a same-key value conflict in a file with a declared generator is admitted rather than refused"
+      proof: "unit test: test/the-conflict-rung-cannot-admit-a-regenerable-artifact.test.ts"
+    - claim: "the resolution is the generator's output on the merged tree, never either side's recorded value"
+      proof: "unit test: test/the-conflict-rung-cannot-admit-a-regenerable-artifact.test.ts"
+    - claim: "a conflicted path with no declared generator is still refused, so admission is bounded by a written list"
+      proof: "unit test: test/the-conflict-rung-cannot-admit-a-regenerable-artifact.test.ts"
+    - claim: "a conflict touching hand-written source alongside a regenerable one is refused whole"
+      proof: "unit test: test/the-conflict-rung-cannot-admit-a-regenerable-artifact.test.ts"
+    - claim: "the refusal cause names which condition failed, so a refusal is diagnosable without re-deriving it"
+      proof: "unit test: test/the-conflict-rung-cannot-admit-a-regenerable-artifact.test.ts"
+  risk: high
+  band_meaning: blast-radius
+  origin: incident
+  plan_refs: ["W1-T2536", "W1-T2540", "W1-T2539", "W1-T94", "W1-T106"]
+  files: [src/lib/sweep.ts, test/the-conflict-rung-cannot-admit-a-regenerable-artifact.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    risk:high, band_meaning: blast-radius — automatic conflict resolution is dangerous in a way
+    its span does not show. The generator list is DATA, so adding a path later is a reviewed
+    one-line edit rather than a change to the admission function. `conflictRefusalCause`
+    (W1-T2536, src/lib/sweep.ts) already exists and is where the new refusal reason belongs.

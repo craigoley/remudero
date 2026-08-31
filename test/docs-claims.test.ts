@@ -108,8 +108,8 @@ export function checkUnitTestLiteralMatchClaim(claudeMdText: string): { ok: bool
  * line ever runs — see rationale (1)/(2) of the W1-T2334 task record. A verb added later that
  * also claims read-only-ness is picked up automatically; nothing here needs redoing.
  */
-export function readOnlyClaimingVerbs(commands: readonly { name: string; usage: string }[]): string[] {
-  return commands.filter((c) => /read-only/i.test(c.usage)).map((c) => c.name);
+export function readOnlyClaimingVerbs(commands: readonly { name: string; detail: string }[]): string[] {
+  return commands.filter((c) => /read-only/i.test(c.detail)).map((c) => c.name);
 }
 
 /**
@@ -226,11 +226,11 @@ test("docs-claims falsifier: an operator guide missing a real COMMANDS verb turn
   assert.deepEqual(result.missing, ["sweep"]);
 });
 
-test("docs-claims falsifier: readOnlyClaimingVerbs derives from usage text, never a hand-written list", () => {
+test("docs-claims falsifier: readOnlyClaimingVerbs derives from detail text, never a hand-written list", () => {
   const commands = [
-    { name: "a", usage: "rmd a   # READ-ONLY: does nothing" },
-    { name: "b", usage: "rmd b   # writes a cache file" },
-    { name: "c", usage: "rmd c   # Read-only: writes no ledger line" },
+    { name: "a", detail: "READ-ONLY: does nothing" },
+    { name: "b", detail: "writes a cache file" },
+    { name: "c", detail: "Read-only: writes no ledger line" },
   ];
   assert.deepEqual(readOnlyClaimingVerbs(commands), ["a", "c"]);
 });

@@ -1,0 +1,64 @@
+- id: W1-T2546
+  title: "A GITHUB RATE-LIMIT 403 EXITS 1 AND SPENDS THE CONTAINER'S CRASH-RESTART BUDGET — the identical category error W1-T2537 just fixed for `blocked`: an environmental refusal the daemon should wait out is reported as a crash, and a budget sized for crashes is consumed by an outage that resolves itself"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  rationale: |
+    (1) OBSERVED, 2026-08-31 18:42-18:44 UTC, in the operator's own daemon log:
+
+        stopped   : error — W1-T2508: Command failed: gh api repos/craigoley/remudero/pulls/3428
+        gh: API rate limit exceeded for user ID <id> ... (HTTP 403)
+        rmd-entrypoint: exited 1 — sleeping 120s before exiting so the restart is rate-limited
+
+    Two PRs (#3428, #3429) had already been opened successfully; the run died reading one back.
+    `daemonExitCode` maps `error` to 1, docker's `on-failure` policy counts that restart, and the
+    budget that exists to stop a genuinely broken image from thrashing is spent on an outage that
+    clears itself on GitHub's own schedule.
+
+    (2) IT IS THE SAME ARGUMENT W1-T2537 ALREADY WON. That task established `blocked` is not a
+    crash and gave it `DAEMON_EXIT_BLOCKED = 76` with its own bounded in-container retry arm. A
+    403 from a rate limiter is further from a crash than `blocked` is: nothing about the tree, the
+    plan or the code is wrong, and the correct response is to WAIT, which is exactly what the
+    freshness and blocked arms in `deploy/entrypoint.sh` already know how to do.
+
+    (3) WHY IT MATTERS BEYOND TIDINESS. This account's GraphQL budget is exhausted routinely
+    (CLAUDE.md's own `gh pr create` rule), and a 90-minute secondary-limit lockout has already
+    happened once (the polling incident). During such a window every daemon pass can die this way,
+    so the restart budget drains at the rate the limiter refuses — and when it is gone the fleet is
+    dead until an operator notices, with a red board and no failing check to explain it.
+
+    (4) THE DISCRIMINATOR MUST BE THE REFUSAL, NOT THE STRING. A message-substring match on
+    "rate limit exceeded" is fixture theatre waiting to happen: it would silently stop working the
+    day GitHub rewords it. The classifier already has a home (`src/lib/classify.ts`), and the
+    signal that actually identifies this class is the HTTP status plus the refusing endpoint, both
+    of which the failing call has. A misclassification in the SAFE direction (treating a real
+    crash as environmental) must remain impossible: an unrecognised failure stays `error`.
+
+    (5) OUT OF SCOPE, NAMED. (a) Reducing API consumption (W1-T525's metered seam, filed).
+    (b) The 120s restart throttle itself, which is correct and stays. (c) `deploy/entrypoint.sh`
+    is BAKED into the image, so whatever lands there ships only on the next `acr-build.yml` run —
+    that is a deploy fact to state in the PR body, not a reason to avoid the change.
+  acceptance:
+    - claim: "a rate-limit refusal is classified as environmental rather than as a crash"
+      proof: "unit test: test/a-rate-limit-refusal-spends-the-crash-restart-budget.test.ts"
+    - claim: "an environmental refusal exits with its own code, so the crash-restart budget is not charged"
+      proof: "unit test: test/a-rate-limit-refusal-spends-the-crash-restart-budget.test.ts"
+    - claim: "an unrecognised failure still exits as a crash, so the classification can only ever narrow what counts as one"
+      proof: "unit test: test/a-rate-limit-refusal-spends-the-crash-restart-budget.test.ts"
+    - claim: "the classifier keys on the refusal itself rather than on the provider's wording"
+      proof: "unit test: test/a-rate-limit-refusal-spends-the-crash-restart-budget.test.ts"
+  risk: high
+  band_meaning: blast-radius
+  origin: incident
+  plan_refs: ["W1-T2537", "W1-T525", "W1-T2515"]
+  files: [src/lib/classify.ts, src/lib/daemon.ts, test/a-rate-limit-refusal-spends-the-crash-restart-budget.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    risk:high, band_meaning: blast-radius — a wrong classification here decides whether the fleet
+    restarts or dies, and the span is small. Mirrors W1-T2537's shape deliberately: a new exit
+    code beside DAEMON_EXIT_BLOCKED and DAEMON_EXIT_STALE, so the entrypoint arm that consumes it
+    is the one already proven.
