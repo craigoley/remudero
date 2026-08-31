@@ -350,6 +350,11 @@ export const LEDGER_ROTATION_CEILING_BYTES = 4 * 1024 * 1024; // 4 MiB
  *                                              last starvation notice; losing it re-pages the
  *                                              operator on every idle poll for as long as the
  *                                              queue stays starved (oper#queue-starvation-2026-08-03).
+ *   - "dispatch.starvation.cleared"         → run-task.ts's escalateStarvationCleared referent —
+ *                                              read alongside the row above to find the CURRENT
+ *                                              episode's open issue; losing it can re-close an
+ *                                              already-closed issue or skip a genuinely open one
+ *                                              (this task).
  *   - "verdict" / "verdict.merged"          → sweep.ts's hasMergeCredit — the credit-backfill
  *                                              rung's idempotence (P29(i)/W1-T149/W1-T150) — AND
  *                                              status.ts's dispatchesWithoutNewOwnedPr, which
@@ -572,6 +577,13 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // exists to make reachable before the disk that would otherwise swallow it fills up.
   "daemon.disk_headroom.escalated",
   "dispatch.starvation.escalated",
+  // This task: escalateStarvationCleared's (run-task.ts) own referent boundary — read alongside
+  // "dispatch.starvation.escalated" above to find the CURRENT episode's open issue (the most
+  // recent "escalated" row not yet followed by a "cleared" one). Losing it to rotation would let
+  // a stale, already-closed issue URL be re-derived from an older "escalated" row and re-closed
+  // (or worse, silently skipped as "already closed" while a genuinely NEW episode's issue stays
+  // open) — the exact referent confusion this row exists to prevent.
+  "dispatch.starvation.cleared",
   "verdict",
   "verdict.merged",
   "correction.provenance",
