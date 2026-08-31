@@ -15,69 +15,69 @@ Every `rmd <command>` this binary dispatches, rendered from the same `COMMANDS` 
 
 ```
 usage:
-  rmd run-task <task-id> [--allow-stale] [--rerun]   # dispatches from the origin/main plan blob (W1-T60), fetching first; --allow-stale proceeds on the last-fetched refs if the fetch fails instead of refusing; --rerun dispatches even when the projection already reports the task merged (W1-T319), instead of refusing at zero cost with verdict task_already_merged
-  rmd review <pr-number> [--repo <name>] [--override-capped-by <name> --override-capped-reason <text>]   # post remudero-review on a hand-opened PR; materializes a worktree at the PR head so proofs EXECUTE (W1-T185), falling back to an explicit keyword-only CAPPED verdict if materialization fails; --override-capped-by/--override-capped-reason ledgers an attributable operator override so a CAPPED verdict can arm auto-merge
-  rmd dep-review <pr-number> [--repo <name>]   # deterministic Dependabot-PR review lane (W1-T54): minor/patch -> arm auto-merge; major (or unparseable) -> escalate (needs-human, no auto-merge); source outside manifests -> refuse
-  rmd lint-plan [--plan <path>] [--base <git-ref>]   # §5C Layer A: deterministic task linter (sizing/headless-fitness/proof-shape/provenance); --base scopes to task ids NEW/CHANGED vs that ref (CI mode), omitted = whole plan; exits non-zero on any blocking violation, spawns nothing
-  rmd proof-queue-audit [--plan <path>]   # W1-T1053: resolves every OPEN, UNMERGED task's proof through the reviewer's OWN parser+resolver (lib/review.ts) against the real checkout and names every one that can never resolve — refused-parse, name-filtered-zero-match (W1-T229's shape), or grep-path-absent — split by cause with the offending task ids; a forward-referencing whole-file test path for a not-yet-written test is NEVER reported (CLAUDE.md). IT IS A REPORT, NOT A GATE (lib/proof-queue-audit.ts): exits 0 unconditionally on the analysis itself, regardless of how many offenders it names; only a malformed invocation exits non-zero. FAILS OPEN (prints nothing audited, still exit 0) on a shallow checkout, same posture as lint-plan's whole-plan split.
-  rmd preflight [--from <ref>] [--to <ref>] [--ci-parity] [--fast]   # W1-T221: the HAND route's commit gate — runs commitlint, `tsc --noEmit`, and lib/commit-message.ts's own header/body checks as three INDEPENDENT steps (each names its own pass/fail, never chained with &&) over the commit range not yet on origin/main; --from/--to override the default origin/main..HEAD range; --ci-parity (W1-T294) ADDS one or more named steps per .github/workflows/ci.yml job (lib/ci-parity.ts), computed against a freshly refreshed origin/main and CI's own coverage/diff-scoping flags, with a dedicated ci-parity:drift step that fails if a ci.yml job has no parity entry, but shells the FULL test:ci suite as part of its `ci` job mirror; --fast (W1-T373) ADDS the curated, seconds-fast, network-free deterministic npm-script gates instead (cli-reference:check, claims, learnings-budget-ratchet, jscpd, depcruise, api-client:check, no-hand-rolled-fetch:check — FAST_GATE_STEPS, lib/ci-parity.ts) and NEVER shells the test suite, so it is the mode a worker can run habitually; either or both flags may be passed; exits non-zero if any step fails, after every step has run and reported. EVERY run also writes a machine-readable verdict to `<repoRoot>/coverage/preflight-summary.json` (override with --summary-file <path>) — ok, the head sha, duration, pass/fail counts and every step — so an eight-minute result survives the container that produced it; written on FAIL as well as PASS, and a write failure never changes the exit code
-  rmd next-task-id [--plan <path>] [--offline] [--reserve]   # print the next free W1-T<n>, derived from the max across plan/tasks.yaml, EVERY plan/tasks.d/*.yaml shard, the ids OPEN plan PRs have already minted (the 2/2 collision class: W1-T256->257 #770, W1-T260->261 #775), and every id ever declared in the git history of plan/ (the fold class: an id filed then folded away, W1-T278); --offline skips the open-PR read (the mint is then a FLOOR, and says so; the history scan still runs — it is a local git read, not a network one); prints its provenance, spawns nothing W1-T1055 --reserve ATOMICALLY CLAIMS the id on origin (refs/rmd-id/<id>) instead of merely printing one, so the push IS the claim and two concurrent minters cannot leave with the same number; it calls the existing reserveTaskIdRemote, which already advances on contention under its own maxScan bound, and PRINTS THE ID IT ACTUALLY HOLDS rather than the one it first tried. Each contested candidate is reported as HELD BY ANOTHER CALLER, naming whether the holder's anchor is the fleet's (`rmd-id reservation <pid>@<container>`) or an operator hand-mint (`reserve W1-T#### <host>-<pid>-<nanotime>`), because silently advancing past a rejection is how two collisions went unnoticed. FAIL-CLOSED: an unreachable origin REFUSES and exits non-zero rather than minting optimistically — the caller has spent nothing yet. Without the flag the verb is byte-identical to before, reserving nothing, because ~50 ids are already reserved-but-unfiled and nothing releases a reservation. --reserve and --offline are contradictory and are refused by argument validation. WRITING AN EXAMPLE ID IN PROSE: use the placeholder form W1-T<n> (or W1-T<id>, W1-TNNNN), never a bare digit form -- the open-PR scan above reads a literal out of any PR body, commit message or comment, and a code span or fenced block does NOT hide it. The placeholders carry no digits, so the extractor cannot see them; `scripts/task-id-existence-check.mjs` enforces this for src/ and deploy/.
-  rmd emissions [--days N]   # which CLI verbs have written NO ledger line in the window (default 30d) — the runtime half of dead-capability detection, paired with a static call-site count so 'reachable but never typed' is distinguishable from 'unreachable'. Unions the ledger AND its rotations (reading the live file alone undercounts ~4x). READ-ONLY: writes nothing, spawns nothing
-  rmd receipt <pr> [--repo <name>]   # W1-T71 (ratifies P17): print a deterministic in-toto-style run receipt assembled purely from ledger ground truth (src/lib/receipt.ts's buildReceipt) for <pr>'s task — resolves the task id from the PR body's Remudero-Task trailer (same extractor `rmd review` uses), refusing rather than guessing when none resolves. Every field with no ledger source for this run prints null with a named reason, never a fabricated value. Sigstore signing + the published schema doc are DEFERRED v2 rungs, not this command's job. READ-ONLY: writes no ledger line, posts nothing.
-  rmd replay <since> <until> [--task <id>] [--step <prefix>]   # W1-T2296: a deterministic, plain-text narration of a LEDGER WINDOW — between two ISO-8601 instants, what did the fleet decide, in what order, and for what recorded reasons. Reuses buildReceipt's discipline (src/lib/ledger-replay.ts's buildReplay) over a WINDOW instead of a run: reads the archive∪live UNION (lib/ledger-grep.ts's resolveLedgerUnion, never the live ledger.ndjson alone), filters to [since, until] inclusive, orders by each row's own ts, and renders every row's own outcome/reason fields — a field the row does not carry prints `absent (no "<field>" field on this row)`, never a fabricated value. --task narrows to one task id; --step narrows to one step-name prefix (a family, e.g. `automerge.`). A partial ledger corpus (zero archives, or a rotation found and unreadable) is REFUSED, never narrated as a shorter story. READ-ONLY: writes no ledger line, no state file, posts nothing.
-  rmd check-proof <proof> [--allow-full-suite] [--base <ref>]   # run ONE acceptance proof through the REVIEWER'S OWN parser and executor and print what it does: parse kind, resolved candidate file(s), the exact argv, the verdict, exit code and hit count. A `grep:` pattern is a BASIC REGULAR EXPRESSION (`[ * ^ $` are metacharacters) — verifying with `grep -F` is a DIFFERENT matcher and reports a false green (PR #1071). A `unit test:` proof naming a TITLE rather than a test/<file>.test.ts PATH is resolved to its file first; when it resolves to none, the run is REFUSED rather than falling back to the whole-suite glob (--allow-full-suite overrides, time-boxed). --base <ref> (W1-T912, OPTIONAL — omitting it leaves every line and exit code above byte-identical) re-runs the SAME proof against <ref> and prints a `base:`/`discrimination:` line: a proof that ALSO matches at <ref> discriminates nothing and reports `executed_stale`, the reviewer's OWN name for the exact downgrade it applies at review time (W1-T273/W1-T362) — so a local `verdict: pass` that would count for nothing in review is visible before a PR ever opens. Only `grep:` proofs get a base blob materialized (same scope the reviewer itself has); a `unit test:` proof reports NOT COMPARABLE. EXIT CODE IS THE VERDICT: 0 pass, 1 fail (genuinely unmet — overrides the keyword floor), 2 refused (nothing executed — bad usage, an unparseable proof, or an unresolved name run declined), 3 no-match (ran and named nothing — degrades to the keyword floor, NEVER read as fail), 4 exec_error (a timeout/spawn failure/grep-exit-2 — inconclusive, also degrades), 5 executed_stale (--base only — passed on both trees, never read as fail). READ-ONLY: writes no cache, no ledger line, no state file
-  rmd reap-branches   # W1-T447 DRY RUN: classify every remote branch as deletable, guarded or held, print a sha->name manifest for the deletable set, and DELETE NOTHING. Deletable = the head of a merged PR, the head of a closed-unmerged PR, or no PR at all with a tip already an ancestor of origin/main (so every commit is in main and removing the ref loses nothing). Guarded = named in src/, scripts/, deploy/ or .github/, or listed in DECLARED_BRANCH_GUARDS; protection is evaluated FIRST and wins, so a branch that is both merged and referenced by source is never offered for deletion. EXITS NON-ZERO when a grep-guarded branch is missing from the declared list (drift), and when git ls-remote returns nothing rather than reporting empty buckets over a corpus it could not read. Deletes nothing, pushes nothing, writes no state file.
-  rmd ledger-grep <pattern>   # the deduplicated union of every state/ledger.*.ndjson.gz archive and the live state/ledger.ndjson, matched against <pattern>. Replaces the manual `grep -h '<pat>' state/ledger.*.ndjson state/ledger.ndjson | sort -u` idiom, which glob-matches ZERO gzipped archives on this host and silently answers from the live file alone (a measured 3.1x undercount). Prints the pattern, state dir and archive count BEFORE any match, then EXITS NON-ZERO, naming the globbed directory, when ZERO archive files were read — never falling back to a live-file-only count. READ-ONLY: writes no ledger line, no state file, deletes/moves nothing
-  rmd rule-efficacy [--no-escalate]   # W1-T418: the corpus repeat-incident rate — for each rule in lib/rule-efficacy.ts's signature table, the count of same-class ledger rows strictly AFTER the rule's effective (citing) date, over the ledger UNION (lib/ledger-grep.ts) rather than the live file alone; verdict is PREVENTING (0 since), REPEATING (n since, dates), or UNMEASURABLE (why) — never silently omitted. HOST-SIDE ONLY: the ledger lives on the daemon host, so this is meaningless off-host. A rule at >= 2 post-rule recurrences drafts ONE promote-to-instrument proposal into the ACTIVE-proposal registry via updateProposalRegistry, idempotent by rule id (reruns never duplicate) — the inbox's own tiering owns its fate from there; --no-escalate runs the report only, with zero writes. Otherwise READ-ONLY.
-  rmd coverage-improve [--lcov <path>]   # W1-T470 tier two of the absolute coverage gate: when this run's branch coverage (read from --lcov, default coverage/lcov.info) sits in the 85-90 pass-with-debt band, ranks the src/ files owning the most uncovered branches (a COUNT, never a percentage — computed fresh every run, lib/coverage-improvement.ts) and files ONE plan/feedback/ entry naming them via captureFeedback, never a shard written straight into plan/tasks.d/ (no such minter exists) and never one entry per file. Dedupes against the ledger UNION (lib/ledger-grep.ts, never the live file alone) keyed on the exact set of files currently owning the debt — a run whose top offenders are unchanged from the last filing is skipped; a shifted debt profile files again. >= 90% (healthy) and < 85% (tier three, a separate remediation loop) are both no-ops here. INERT until wired into the coverage CI job's own step, which is a separate PR (Rule 25 keeps this producer's diff free of any .github/workflows/ci.yml or scripts/coverage-ratchet.mjs edit).
-  rmd verdict-calibration   # W1-T424: the correctness join — joins every armed merge's ledgered review verdict (lib/verdict-calibration.ts's mineVerdictRows, over the ledger UNION, never the live file alone) to post-merge git reality, and reports per verdict class (full PASS / keyword floor / degraded arm) the revert rate and follow-up-fix rate over a stated window, each denominator NAMED (n of N armed merges) with an UNMEASURABLE arm for rows whose merge sha or verdict class could not be recovered — never a rate over a silently shrunken denominator. Below a minimum population floor a class prints its count and REFUSES the rate. The attribution window + overlap rule (lib/verdict-calibration.ts's ATTRIBUTION_POLICY) print alongside the figures, so the metric travels with its rule. HOST-SIDE ONLY: the ledger lives on the daemon host, so this is meaningless off-host. READ-ONLY: files nothing, proposes nothing in v1.
-  rmd autonomy-rate   # W1-T437: the QUANTITY figure beside W1-T424's correctness join — the zero-touch merge rate over every Remudero-Task-trailer-bearing merge on the read git history (lib/autonomy.ts's zeroTouchMergeRate, over the ledger UNION, never the live file alone), classifying each merge zero-touch (auto-armed, zero fix-rung strikes, no reframe, no operator note, no capped override, no fix-rung human evidence) or human-touched, NAMING every touch that fired — split by verdict class (full PASS / keyword floor / degraded arm / unclassified) so the class split shows where the next ratchet notch is safe. Prints the current decideAutoMergeArm arming posture beside the measured rate — proposes no policy change. Zero archive files matched under the state dir reports the whole window UNMEASURED, naming the reason, never a rate computed from the live ledger file alone. HOST-SIDE ONLY: the ledger lives on the daemon host, so this is meaningless off-host. READ-ONLY: files nothing, proposes nothing.
-  rmd check-acceptance <body-file>   # read a PR body from a file and report what the REVIEWER'S OWN parseAcceptanceBlock actually resolves from it, against what was written: header found, bullets written, criteria parsed, empty proofs. Exits non-zero when they disagree. A claim WRAPPED onto a second line silently truncates the block (any indented line that is not `proof:` ends it), and a `## Validation` heading is not an Acceptance header — both ship a body that says less than its author wrote. Run this before opening a PR over REST, which bypasses the orchestrator's house-block emitter. READ-ONLY: writes no ledger line, no state file
-  rmd retro [--dry-run]    # sync the plan from the ledger (Architect retro)
-  rmd drain [--until <id>] [--max <n>] [--repo <name>] [--curated <path>] [--dry-run] [--allow-stale]   # drain the DAG through run-task, dispatching from the origin/main plan blob (W1-T60); --repo scopes the merged-status gateway to <owner>/<name> (defaults to this checkout's own repo, like the daemon path) — the plan itself is always read from THIS checkout; --curated <path> names a JSON {taskIds, depth} file (the drain preview panel's curated selection, W1-T140) that overrides the natural DAG order entirely — dispatch honors EXACTLY that reordered/unselected subset, and --dry-run --curated previews it
-  rmd daemon --repo <name> [--plan <path>] [--max <n>] [--poll-ms <n>] [--dry-run] [--allow-self-target] [--allow-stale]   # persistent scheduler loop; --repo picks the repo to drain + its gateway (e.g. remudero-sandbox for W1-T12d). Refuses to drain its OWN source repo unattended without --allow-self-target. --dry-run previews the target + planned tasks, spawns nothing. Self-hosting reads the plan from origin/main (W1-T60); --allow-stale proceeds on the last-fetched refs if the fetch fails.
-  rmd daemon-plist --repo <name> [--poll-ms <n>] [--allow-self-target] [--write]   # generate the launchd unit for `rmd daemon`, baking in --repo so the unit drains the intended repo (commissioning is W1-T12d); a self-target unit (--repo omitted, or pointed at this checkout's own repo) is refused at generation unless --allow-self-target is also given, which bakes the same consent into the unit (W1-T109)
-  rmd deploy [--reason <text>]   # OPERATOR trigger for the deploy supervisor (human-gated): writes state/DEPLOY_REQUESTED so the supervisor fast-forwards the daemon's checkout + `launchctl kickstart -k`s the daemon at the next idle gap, health-checks it, and rolls back on failure. Deploys nothing itself — keeps Craig's control over WHEN a merged fix goes live. The daemon runs `tsx src/` loaded once + dispatches in-process, so merged fixes are inert until this restart.
-  rmd deploy-run [--dry-run]   # ONE deploy-supervisor cycle (the launchd unit runs this on its interval): no-op unless a deploy is triggered (marker or auto) AND the daemon is idle (no worker/inflight), then ff + kickstart at a re-checked idle gap, with health-check + rollback. --dry-run runs the whole sequence but SKIPS the real kickstart. Never restarts under an active task (the #559/#581 SIGKILL-orphan class).
-  rmd deploy-plist [--interval <s>] [--write]   # generate the deploy-supervisor launchd unit (a periodic `rmd deploy-run`, default every 120s). Mirrors daemon-plist: prints by default, --write installs it; `launchctl load` is an operator action. Opt into auto-on-new-main (behind the health-check) by touching state/DEPLOY_AUTO.
-  rmd install-checkout [--write]   # W1-T924: provision or refuse the daemon's DEDICATED install checkout (resolved from config.installRoot, default <config.root>/daemon-install — never the checkout the command was invoked from), the tree `rmd deploy-run` fast-forwards. Mirrors daemon-plist: prints the current state + the migration sequence by default, --write actually acts. Four states, named explicitly: ABSENT -> clone origin/main; HEALTHY -> ff-only to origin/main; DIRTY/off-main/detached/diverged -> REFUSE, mutate nothing (a local edit on the install checkout is a bug, never auto-cleaned); a non-empty non-git directory -> REFUSE, never rm -rf. Refuses first if the resolved install root and state root would nest, or if the install root would sit inside the operator's own checkout. Never runs launchctl and never regenerates a launchd unit itself (W1-T925's job).
-  rmd serve [--port <n>] [--host <addr>]   # the operator console FRONT DOOR (W1-T139, MASTER-PLAN §7/§7B): one HTTP surface (service.ts) serving the live board (board.ts), fleet-control + question/manual-approve write actions (panel-actions.ts), the feedback inbox + plan→task→PR graph (panel-graph.ts), and a minimal HTML shell at GET /; bearer tokens are generated on first run and persisted 0600 under <config.root>/state/service-tokens.json, and rotate by stopping serve, deleting that file, and starting again; the startup banner prints the READ token only (a bookmark grants view, not control) and never the write token, because stdout is commonly redirected to a log; --port defaults to 4317 (matches apps/dashboard's own default); --host defaults to 127.0.0.1, also reads RMD_SERVE_HOST, accepts a COMMA-SEPARATED list so the console can be reachable locally AND from the phone (e.g. 127.0.0.1,<tailnet-ip>), and REFUSES wildcards like 0.0.0.0 anywhere in that list; blocks until SIGINT/SIGTERM
-  rmd relay   # W1-T431: the Tier-2 relay CLIENT (MASTER-PLAN §7A/§6A, D-11) — dials OUT to the relay URL + enrollment token in per-instance config (relay.url/relay.token; never a flag, never committed) and holds a reconnecting tunnel that forwards the LOCAL rmd serve surface (REST + SSE) as a transparent byte proxy, adding no scope of its own (the console's own W1-T430 identity seam decides every grant, exactly as a direct call would). Never binds a port — outbound-only, tested invariant. Refuses (spawns nothing) when relay.url or relay.token is absent. Blocks until SIGINT/SIGTERM, same shape as `rmd serve`; `rmd serve` is a separate process and is completely unaffected whether or not this ever runs.
-  rmd console-url [--port <n>] [--host <addr>] [--write]   # print the console URL carrying the READ token — the bookmark that gets you in, one command instead of hand-extracting <config.root>/state/service-tokens.json (fb-1784772988510-da3712); prints one URL per bound interface, resolving port/host EXACTLY as `rmd serve` does (flag > RMD_SERVE_HOST > config.serve.* > 127.0.0.1:4317); --write additionally prints the WRITE token as a bare value to paste into the console (never in a URL), and REFUSES unless stdout is a TTY, because a redirected stdout becomes a file that outlives the process (R-5); reads the 0600 tokens file but never creates one — if the console has never run it says so and names the remedy; spawns nothing
-  rmd serve-plist [--port <n>] [--host <addr>] [--write]   # generate the launchd unit that runs the operator console as a background SERVICE (W1-T152, the W1-T12b generator family): KeepAlive (unconditional — `rmd serve` exits 0 on a clean SIGTERM and the console must come back from that too) + ThrottleInterval 60 (the R-1 relaunch-storm rate limit) + RunAtLoad, logs to <config.root>/state/logs/serve.{out,err}.log at 0600, and the resolved bind list in RMD_SERVE_HOST (flag > env > config serve.host > 127.0.0.1) with the port baked into ProgramArguments. Carries NO token: service-tokens.json is read at boot as today. References no daemon label or path — it installs and runs with the daemon stopped. Prints by default; --write installs it + pre-creates the 0600 logs; `launchctl bootstrap` stays the operator's step.
-  rmd down [--port <n>] [--host <addr>]   # graceful wind-down for restart/maintenance (W1-T169): unloads the daemon launchd service (waiting a bounded window for any in-flight task to reach a safe boundary, else REPORTING its run id + recoverability — has-PR = the sweep recovers it, pre-PR = it re-dispatches), stops `rmd serve` BY PORT with a reap-wait (never an argv/pattern kill), and prints a wind-down summary (in-flight state, open-PR count, needs-human count, safe-to-restart). IDEMPOTENT: already-down is a no-op honest report, zero side effects.
-  rmd up [--port <n>] [--host <addr>] [--allow-off-main]   # full resume (W1-T169): runs install-freshness FIRST (W1-T151 — a lockfile-changing pull triggers `npm ci` before anything starts), REFUSES to resume an off-main checkout unless --allow-off-main is given, loads the daemon launchd service, confirms/starts the serve launchd service, and prints a resume report (daemon pid, the console URL WITH its READ token via `rmd console-url`, the in-flight/queued head, needs-human count). IDEMPOTENT: already-up verifies + reports the running state, never a double start.
-  rmd sync [--dry-run]   # W1-T907: the sanctioned dedupe-then-pull recipe as one explicit verb, for exactly the case checkCliFreshness refuses (behind origin/main AND dirty) that W1-T446's intersect-only fix cannot unstick — three-way classifies every `git status --porcelain` path against the origin/main blob (git hash-object vs git rev-parse <ref>:<path>, the same predicate deployer.ts's sameAsIncoming/discardLocal already established): IDENTICAL (local bytes == origin/main's blob at that path, or a DECISIONS.md whose every appended `## ...` record already landed via plan/decisions.d, W1-T191) is discarded/restored as provably lossless; everything else (no origin/main counterpart, differing bytes, or an unlanded DECISIONS.md record) is COPIED ASIDE under state/sync-<timestamp>/ with a named report BEFORE any discard runs and is NEVER deleted, cleared from the working tree only if the fast-forward actually needs that path; a local commit that is not an ancestor of origin/main (BLOCKING) refuses the WHOLE verb, mutating nothing. Then `git merge --ff-only origin/main` — never merge, never rebase, never reset --hard. --dry-run prints the identical classification and mutates nothing. Off-main/detached checkouts refuse exactly as W1-T445 established for the CLI entry guard. Does not touch checkCliFreshness's own predicate (W1-T446 owns that).
-  rmd doctor [--json]   # W1-T1047: ONE local, read-only health check with a meaningful exit code (0 OK / 1 any WARN / 2 any FAIL; bad args exit 64, so exit 2 always means a check failed and never a typo). NO NETWORK and NO HEALTHY DAEMON REQUIRED — every check reads the ledger, state/, plan/, /proc or ps, so it answers from a cold ssh session while remudero-serve is down and the API budget is exhausted, which is exactly when the console-side checks are unavailable. Checks: ledger freshness (newest daemon.* row vs two poll intervals), dispatch stall (eligible pool vs THIS host's own observed cadence, reusing deriveQueueHead/deriveDispatchCadence with a LOCALLY-derived merged set), dispatch liveness (consecutive daemon.alive rows stuck in the sweep phase), pause honoured (PAUSE held while dispatch continued — W1-T1065/#2298 files the tick defect, doctor only reports), lock-vs-process divergence, lane-less workers (#2251's 7200s threshold, reused not re-derived), stale git index.lock (report only; W1-T1036 owns reclamation), disk headroom, and memory/swap from /proc/meminfo (never the cgroup limit — this container is unlimited, so memory.max reads `max` and would report unbounded headroom on a host that already froze). EVERY check prints its measured value beside its threshold; one summary line first, short enough for a cron subject. READ-ONLY: --fix is refused by name, because every repair path already has an owner and a second actor mutating state a live daemon depends on is the measured hazard.
-  rmd status [--json]   # W1-T279+W1-T280: ONE verb answering 'is it running' AND 'why is it stalled' from ONE read model. LOCAL (no network): LIVENESS (daemon/serve/deploy-supervisor running/pid/boot-time, running HEAD vs origin/main with a STALE flag, crash-loop), LATCHES (every state marker — STOP/PAUSE/QUIET_HOURS/DEPLOY_FAILED/DEPLOY_AUTO/inflight locks/pending kicks/drain-now — with its age and stated consequence), LAST CYCLE (the newest daemon.summary). DERIVED: BLOCKERS BY CLASS (circuit-broken w/ reset note, dispatch.indeterminate w/ gh-window note, blocked PRs by sweep.ts's own named reason), QUEUE HEAD (next dispatchables, perpetual-attempt tasks flagged with observed per-cycle cost), INBOX (ready/not-ready counts, head not-ready reason), HEADROOM (newest telemetry + enforcement on/off from the same switch the daemon reads) — these read a batched GitHub gateway and degrade to a stated unknown on an outage, never a gate on the local sections. Each section ends with at most one next action. --json emits the exact same read model the text renders. Read-only: writes nothing, spawns nothing, always exits 0 (bad args aside).
-  rmd sweep [--repo <name>] [--dry-run]   # level-triggered PR-pipeline reconciler (W1-T77, P22): re-derive EVERY open PR's disposition from observed state and take the ONE gated action — mergeable->arm auto-merge; blocked-fixable->W1-T76 fix rung; stale/superseded->close-with-reason; blocked-ambiguous->the W1-T78 clarification-question rung (a specific, decidable operator question to the §2 backlog + escalate() as transport, never a generic needs-human). Idempotent (a second sweep over unchanged state acts on nothing). The daemon runs this every poll; --dry-run previews dispositions and takes nothing.
-  rmd fix <pr-number> [--repo <name>]   # operator verb for the W1-T76 fix rung (W1-T95, bootstrap/manual-override — drives a block on the sweep/drain delivery ITSELF, e.g. #160): dispatches the SAME rung sweep uses; refuses (zero spawns) when the PR is merged, closed, or has no block evidence; strikes-at-cap routes to escalate naming the count, never bypassing the cap.
-  rmd wipe-test <task-id> [--repo remudero-sandbox] [--allow-non-sandbox]   # the P12 learning-utility A/B harness (W1-T86): runs <task-id> TWICE — arm A with normal learnings injection, arm B with injection MASKED (the store itself untouched) — and ledgers the deltas (wipetest.pair: turns/cost/verdict/strikes/proof_exec); SANDBOX-ONLY by default, refuses any other --repo (including the primary repo) unless --allow-non-sandbox is also passed; a single pair is an anecdote — only the aggregate over many ledgered pairs is signal
-  rmd stop [--reason <text>]    # fleet control: ONE-SHOT halt of the RUNNING drain; auto-clears when that run ends (no resume needed). No-op if nothing is running.
-  rmd pause [--reason <text>]   # fleet control: PERSISTENT drain-and-hold — in-flight completes, no new spawns; survives across runs until `rmd resume`.
-  rmd resume                    # fleet control: clear PAUSE (and any STOP); spawns resume
-  rmd away [on|off]   # P34 clause (e): set/show operator presence (default attended). AWAY batches MANUAL/HARD_STOP escalations into the W1-T163 recap for async verdict instead of a real-time page; never gates dispatch.
-  rmd correct <task-id> --pr <n> [--reason <text>]   # sanctioned operator-correction writer (P9/W1-T75): appends a correction.provenance ledger line naming the task's TRUE merged PR, SUPREME over every deriveStatus rung; prints derived status before/after
-  rmd escalate --class <BLOCKED|MANUAL|HARD_STOP> --task <id> --summary <s> [--detail <d>] [--recommendation <r>] [--option "label|detail"]...   # open a needs-human labeled GitHub issue; MANUAL/HARD_STOP also fire a real-time iMessage ping (BLOCKED collapses to digest)
-  rmd notify <message>     # real-time iMessage ping (osascript)
-  rmd digest [--since <iso>] [--dry-run]   # roll up the ledger into one daily digest message
-  rmd digest-plist [--hour <h>] [--write]   # generate the launchd unit for the daily `rmd digest` pulse (W1-T112, the W1-T12b generator pattern) — StartCalendarInterval at <h>:00 local time (default 8); commissioning (launchctl load) is an operator action
-  rmd ops [--dry-run]   # alert intake v0+v1 (W1-T55/W1-T56, §5D lane 2, §7B): poll code-scanning/Dependabot/secret-scanning alerts for this repo via gh api, fold open counts+ages into the next digest, escalate every NEW critical/high alert exactly once (needs-human, ledger-deduped so a re-poll never double-escalates), and capture a plan/feedback/<id>.yaml entry (origin: alert#<source>-<id>) for every open alert not already captured, any severity, for rmd triage to ground; id-deduped so a re-poll never double-creates; --dry-run previews, opens no issues, creates no feedback
-  rmd alert-fix [--repo <name>] [--dry-run]   # the alert-fix lane (W1-T90, ratifies P20, §5D lane 2's dep-review precedent): a deterministic policy (plan/alert-policy.yaml, data — no LLM ever) decides act-vs-escalate per open alert; act (severity medium/low, path outside the gate/containment-critical set) dispatches ONE ephemeral lane-owned fix run through the full [ci, remudero-review] gate, ledger-deduped so a re-poll never re-dispatches; escalate (critical/high/unknown severity, or a gate-critical path) opens a MANUAL needs-human issue via the SAME escalation-ledger namespace `rmd ops`'s own critical/high poll uses, so neither lane double-escalates the other's alert; never writes plan/tasks.yaml (rule 15); --dry-run previews every open alert's disposition, dispatches/escalates nothing
-  rmd issues [--dry-run]   # issues intake (W1-T57, §5D lane 3): poll open issues for every repo in .remudero/managed-repos.json via gh api, create a plan/feedback/<id>.yaml entry (origin: issue#<n>) for each one not already captured, fold an issues-reviewed count into the next digest; id-deduped so a re-poll never double-creates; --dry-run previews, creates nothing
-  rmd init [--tier <pro|max5x|max20x>] [--yes]   # headless-safe first-run tier wizard
-  rmd project init <repo> [--profile ts-node|ts-web|python|dotnet] --coverage-pct <n> --branches-pct <n> --mutation-pct <n> --dup-pct <n>   # fleet-inheritance onboarding primitive (W1-T27): generates the whole gate stack (workflows/configs/SECURITY.md/.remudero/principles.yaml) plus the branch-protection payload for a target repo; prints the file list + manual next steps, does not push/PR/arm protection itself
-  rmd onboard <target-dir> --phase inventory|recon|session|synthesize [--owner <o> --repo <r>]   # the `rmd onboard` family (MASTER-PLAN ★P24, W1-T82/83/84/85): --phase inventory is a deterministic, no-LLM repo inventory over a TARGET checkout — languages, build/CI systems, docs presence (README/CONTRIBUTING/AGENTS.md/CLAUDE.md/ADRs/ROADMAP/TODO), branch-protection state, issue/milestone counts, test-signal presence — via policy-as-data detector tables (src/lib/onboard/inventory.ts), writing ONLY <target-dir>/plan/onboarding/inventory.json; --phase recon mines existing plan artifacts (ROADMAP/TODO/ADR intents/open issues) deterministically AND consults the four read-only W2-T1 specialist lenses (security/testing/design/containment) pointed at the whole repo (src/lib/onboard/recon.ts), writing ONLY plan/onboarding/findings.md + candidates.json — every candidate cites its source verbatim and mined vs inferred stays a labeled distinction; --phase session (src/lib/onboard/session.ts) generates a §2-QUESTION-contract set from the inventory's own gaps plus a fixed goal-elicitation set — every question names its decision and candidate answers — and drives a resumable CLI answer loop, writing ONLY plan/onboarding/answers.json + appending onboard.answered lines to plan/onboarding/ledger.ndjson; a second invocation re-presents only the unanswered set; no-TTY previews the backlog and never blocks; --phase synthesize (src/lib/onboard/synthesize.ts) REFUSES (non-zero exit, naming every unanswered question id) unless phase 3's full question set is answered — goals are never guessed — then drafts MASTER-PLAN.md + plan/tasks.yaml + AGENTS.md from all four phase 1-3 artifacts, iterates the drafted tasks.yaml against the real `rmd lint-plan` linter (§5C) until clean, and opens EXACTLY ONE draft PR to `onboard/<repo>-plan`, writing nothing outside that branch (never plan/onboarding/). Phases inventory/recon/session are read-only against the target + gh api; unresolved GitHub facts render as the literal "unknown", never guessed; --phase is REQUIRED — any other value fails loud, spawning/writing nothing
-  rmd feedback <text...> [--attach <path-or-url>]... [--origin cli|ui|issue]   # durable-inbox async capture (MASTER-PLAN §7B, W1-T40): writes plan/feedback/<id>.yaml with status: new; --attach copies a local screenshot/terminal-dump into plan/feedback/attachments/<id>/ or records an http(s) link verbatim; browse the inbox with plain ls/cat/git diff, no bespoke reader
-  rmd triage <feedback-id>   # the Architect intake worker (MASTER-PLAN §7B, W1-T41): GROUNDS a plan/feedback/<id> entry against MASTER-PLAN/plan/LEARNINGS/DECISIONS, RESEARCHES via server-side WebSearch, then either reports 'already decided' (no task), GRILLS an ambiguous item by opening a needs-human GitHub issue with options + a recommendation (W1-T42, parks status 'grilling'), or opens a plan-only PR carrying origin: feedback#<id> provenance, gated by ci-gate+remudero-review like everything else
-  rmd skill list   # §5B skill-registry reader (W1-T44): resolves every .remudero/skills/<name>.yaml ({tools, permission_profile, output_contract, grounding_sources, gate, tier}); adding a skill is a config entry, no source change
-  rmd learnings export <out> | rmd learnings import <file> --pin <hash>   # the §6 knowledge-commons transport (W1-T425). PRIVACY CONTRACT: export collects ONLY project-layer entries an operator stamped `share: public` (default absent = private forever) and independently refuses any candidate matching the leak-grep tripwire, naming it -- zero opted-in entries refuses rather than writing an empty bundle. `import <file> --pin <hash>` checks the bundle's own declared hash against the operator-supplied --pin before writing anything to the RMD-GLOBAL layer the injector already reads, then defers ALL tamper enforcement to that existing hash-pinned-artifact guard -- import never re-derives or re-implements the check, only places the file where it already looks
-  rmd trace <id>   # render the provenance chain (MASTER-PLAN §7B / Standing rule 17, W1-T43): feedback → proposal PR → task(s) → run(s) → PR(s) → merge sha; <id> resolves as a task id first (reverse: task back to its origin:), else as a plan/feedback/<id> id (forward: feedback out to every task it produced)
-  rmd peek <runId> [--lines <n>] [--follow]   # W1-T945: READ-ONLY tail of one run's output — the last <n> lines (default 50, never more than the 500-line ring ceiling) of its retained state/runs/<runId>.tail (W1-T942), printed with a LIVE/FINISHED verdict from the SAME liveInflightRuns pid-checked read every other liveness decision in this fleet uses — never a second definition of 'in flight'. Works identically on a FINISHED run's retained tail, the surviving half of fb-1784821673624-321a4b (its final-message half already shipped as report_excerpt, #1584). An unknown run id or an absent tail prints a NAMED reason and still exits 0 — never silent empty output. --follow re-polls and reprints on change, stopping on its own the moment the run is no longer live — it never hangs on an already-finished run. READ-ONLY BY CONSTRUCTION: no flag here writes to, signals, resumes or kills the run — there is no steering surface in v1.
-  rmd plan --mode=create|clarify|expand [<brief>...]   # the unified Architect PLAN skill (MASTER-PLAN §5B, W1-T45) — ONE ground→research→clear-or-grill-or-propose code path shared by all three modes (Refine=clarify, Expand=expand): create scaffolds new plan/tasks.yaml task(s) for the REQUIRED <brief> initiative; clarify grills (or silently resolves) ambiguous/underspecified existing tasks, <brief> optionally narrowing the focus; expand proposes gap-filling tasks that each cite a research source. CLEAR/GRILL touch nothing and open no PR; PROPOSED opens a plan-only PR (plan/** + MASTER-PLAN.md) gated by ci-gate+remudero-review
-  rmd inbox [--dry-run]   # the ratification inbox's deterministic core (MASTER-PLAN P25(i), W1-T110): tiers the ACTIVE-proposal registry (state/inbox-proposals.json) into READY (drafted tasks' deps merged, evidence anchors grep-true on main, draft lint-plan-clean, no open conflict — carries its drafted plan/tasks.yaml fragment + stamp), not-ready (each failing predicate named), or DEFERRED-WITH-TRIGGER (an unfired named trigger — never recommended); drafts missing/stale candidates via a bounded, read-only Architect worker and caches them state-side (never committed); --dry-run classifies against whatever is already cached and spawns no worker
-  rmd approve <P##> [<P##> ...]   # one bit ratifies through the gate (MASTER-PLAN P25(ii), W1-T111): re-classifies each named <P##> live against the SAME facts `rmd inbox` would show; valid ONLY for a currently-READY proposal, refused (naming the state) with zero git/gh side effects otherwise; on READY, ships the cached draft's fragment + stamp VERBATIM into a plan PR (one branch, one PR) that rides the full gate (ci-gate + remudero-review) before auto-merge is armed — nothing auto-files without the bit; ledgers exactly one ratify.approved/ratify.approve_refused line per named proposal. NAMING TWO OR MORE ids (W1-T2471) batches them into ONE branch/commit/MASTER-PLAN block/PR instead of one PR lifecycle each — an unready member is SKIPPED (its own reason ledgered) without blocking or aborting the rest; this is an EXPLICIT set only, never an implicit approve-everything-ready
-  rmd reframe <P##> --feedback "<text>" [--supersedes <rounds>]   # the feedback path (MASTER-PLAN P25(iii), W1-T111): ledgers ratify.reframed with the feedback verbatim, invalidates <P##>'s cached draft, and appends to its reframe history so the NEXT `rmd inbox` draft-rung redrafts WITH the feedback in the Architect prompt; opens no PR, touches no git/gh — state-side only (registry + draft cache + ledger). --supersedes <rounds> (W1-T194) EXPLICITLY retracts existing round(s) — a number, comma list, range ("2-3"), or ALL — so their text is OMITTED from the next redraft while staying in reframeHistory and the ledger; never inferred from recency, and rejected with a usage error when the expression is invalid or out of range
+  rmd run-task <task-id> [--allow-stale] [--rerun]   # Dispatch one task from the origin/main plan blob, fetching first.
+  rmd review <pr-number> [--repo <name>] [--override-capped-by <name> --override-capped-reason <text>]   # Post remudero-review on a hand-opened PR, materializing a worktree at its head.
+  rmd dep-review <pr-number> [--repo <name>]   # Deterministic Dependabot-PR review lane: auto-arm minor/patch, escalate major.
+  rmd lint-plan [--plan <path>] [--base <git-ref>]   # Deterministic task linter: sizing, headless-fitness, proof-shape, provenance.
+  rmd proof-queue-audit [--plan <path>]   # Report every open task's acceptance proof that can never resolve, split by cause.
+  rmd preflight [--from <ref>] [--to <ref>] [--ci-parity] [--fast]   # The HAND route's commit gate: commitlint, tsc --noEmit, commit-message checks.
+  rmd next-task-id [--plan <path>] [--offline] [--reserve]   # Print (or --reserve atomically claim) the next free W1-T<n> task id.
+  rmd emissions [--days N]   # Which CLI verbs wrote no ledger line in the window -- dead-capability detection.
+  rmd receipt <pr> [--repo <name>]   # Print a deterministic in-toto-style run receipt from ledger ground truth.
+  rmd replay <since> <until> [--task <id>] [--step <prefix>]   # Narrate a ledger window in plain text: what the fleet decided, in order.
+  rmd check-proof <proof> [--allow-full-suite] [--base <ref>]   # Run one acceptance proof through the reviewer's own executor and print its verdict.
+  rmd reap-branches   # Dry-run classification of every remote branch as deletable, guarded or held.
+  rmd ledger-grep <pattern>   # Grep the deduplicated union of every ledger archive and the live ledger file.
+  rmd rule-efficacy [--no-escalate]   # Report each rule's post-citation repeat-incident rate over the ledger union.
+  rmd coverage-improve [--lcov <path>]   # File one feedback entry ranking src/ files by uncovered branches (85-90% band).
+  rmd verdict-calibration   # Join armed-merge review verdicts to post-merge revert/follow-up-fix rates.
+  rmd autonomy-rate   # Report the zero-touch merge rate over every Remudero-Task-trailer merge.
+  rmd check-acceptance <body-file>   # Report what the reviewer's own parser actually resolves from a PR body file.
+  rmd retro [--dry-run]   # Sync the plan from the ledger (Architect retro).
+  rmd drain [--until <id>] [--max <n>] [--repo <name>] [--curated <path>] [--dry-run] [--allow-stale]   # Drain the task DAG through run-task, dispatching from the plan blob.
+  rmd daemon --repo <name> [--plan <path>] [--max <n>] [--poll-ms <n>] [--dry-run] [--allow-self-target] [--allow-stale]   # Persistent scheduler loop draining a named repo; refuses self-target unattended.
+  rmd daemon-plist --repo <name> [--poll-ms <n>] [--allow-self-target] [--write]   # Generate the launchd unit for `rmd daemon`, baking in --repo.
+  rmd deploy [--reason <text>]   # Operator trigger for the deploy supervisor: request a fast-forward + restart.
+  rmd deploy-run [--dry-run]   # One deploy-supervisor cycle: fast-forward + kickstart the daemon when idle.
+  rmd deploy-plist [--interval <s>] [--write]   # Generate the deploy-supervisor launchd unit (periodic `rmd deploy-run`).
+  rmd install-checkout [--write]   # Provision or refuse the daemon's dedicated install checkout.
+  rmd serve [--port <n>] [--host <addr>]   # The operator console front door: board, fleet-control, feedback inbox over HTTP.
+  rmd relay   # Tier-2 relay client: tunnel the local `rmd serve` surface out to a relay URL.
+  rmd console-url [--port <n>] [--host <addr>] [--write]   # Print the console URL carrying the read token (--write also prints the write token).
+  rmd serve-plist [--port <n>] [--host <addr>] [--write]   # Generate the launchd unit that runs the operator console as a background service.
+  rmd down [--port <n>] [--host <addr>]   # Graceful wind-down of the daemon + serve services for restart or maintenance.
+  rmd up [--port <n>] [--host <addr>] [--allow-off-main]   # Full resume: install freshness, load daemon + serve, print a resume report.
+  rmd sync [--dry-run]   # The sanctioned dedupe-then-pull recipe for a behind-and-dirty checkout.
+  rmd doctor [--json]   # One local, read-only health check with a meaningful exit code (0/1/2).
+  rmd status [--json]   # One verb for 'is it running' and 'why is it stalled' from one read model.
+  rmd sweep [--repo <name>] [--dry-run]   # Level-triggered PR-pipeline reconciler: re-derive disposition, take one action.
+  rmd fix <pr-number> [--repo <name>]   # Operator verb for the fix rung: dispatch the same rung `rmd sweep` uses.
+  rmd wipe-test <task-id> [--repo remudero-sandbox] [--allow-non-sandbox]   # P12 learning-utility A/B harness: run a sandbox task twice, ledger the deltas.
+  rmd stop [--reason <text>]   # Fleet control: one-shot halt of the running drain; auto-clears when it ends.
+  rmd pause [--reason <text>]   # Fleet control: persistent drain-and-hold until `rmd resume`.
+  rmd resume   # Fleet control: clear PAUSE (and any STOP); spawns resume.
+  rmd away [on|off]   # Set/show operator presence; batches escalations into a recap while away.
+  rmd correct <task-id> --pr <n> [--reason <text>]   # Sanctioned operator-correction writer: name a task's true merged PR.
+  rmd escalate --class <BLOCKED|MANUAL|HARD_STOP> --task <id> --summary <s> [--detail <d>] [--recommendation <r>] [--option "label|detail"]...   # Open a needs-human GitHub issue; MANUAL/HARD_STOP also fire a real-time ping.
+  rmd notify <message>   # Real-time iMessage ping (osascript).
+  rmd digest [--since <iso>] [--dry-run]   # Roll up the ledger into one daily digest message.
+  rmd digest-plist [--hour <h>] [--write]   # Generate the launchd unit for the daily `rmd digest` pulse.
+  rmd ops [--dry-run]   # Alert intake: poll code-scanning/Dependabot/secret-scanning alerts, escalate criticals.
+  rmd alert-fix [--repo <name>] [--dry-run]   # The alert-fix lane: policy-decide act-vs-escalate per open security alert.
+  rmd issues [--dry-run]   # Issues intake: capture open GitHub issues into the feedback inbox.
+  rmd init [--tier <pro|max5x|max20x>] [--yes]   # Headless-safe first-run tier wizard.
+  rmd project init <repo> [--profile ts-node|ts-web|python|dotnet] --coverage-pct <n> --branches-pct <n> --mutation-pct <n> --dup-pct <n>   # Fleet-inheritance onboarding: generate the whole gate stack for a target repo.
+  rmd onboard <target-dir> --phase inventory|recon|session|synthesize [--owner <o> --repo <r>]   # The `rmd onboard` family: inventory, recon, session and synthesize phases.
+  rmd feedback <text...> [--attach <path-or-url>]... [--origin cli|ui|issue]   # Durable-inbox async capture: write a plan/feedback/<id>.yaml entry.
+  rmd triage <feedback-id>   # The Architect intake worker: ground, research, then report, grill or propose.
+  rmd skill list   # List the skill registry: every .remudero/skills/<name>.yaml entry.
+  rmd learnings export <out> | rmd learnings import <file> --pin <hash>   # The knowledge-commons transport: export/import opted-in learnings, hash-pinned.
+  rmd trace <id>   # Render the provenance chain: feedback -> proposal -> task -> run -> PR -> merge.
+  rmd peek <runId> [--lines <n>] [--follow]   # Read-only tail of one run's retained output, with a LIVE/FINISHED verdict.
+  rmd plan --mode=create|clarify|expand [<brief>...]   # The unified Architect PLAN skill: create, clarify or expand plan tasks.
+  rmd inbox [--dry-run]   # The ratification inbox's deterministic core: tier proposals READY/not-ready.
+  rmd approve <P##> [<P##> ...]   # Ratify one or more READY proposals through the gate into a plan PR.
+  rmd reframe <P##> --feedback "<text>" [--supersedes <rounds>]   # The feedback path: ledger reframe feedback, invalidate a proposal's cached draft.
 
 An UNKNOWN command, or an unrecognized argument to a command, prints this usage and exits
 NON-ZERO, spawning nothing — the control surface never falls through to a drain on bad input.
@@ -93,6 +93,8 @@ command provably read-only.
 
 ### `rmd run-task`
 
+Dispatch one task from the origin/main plan blob, fetching first.
+
 ```
 rmd run-task <task-id> [--allow-stale] [--rerun]
 ```
@@ -100,6 +102,8 @@ rmd run-task <task-id> [--allow-stale] [--rerun]
 dispatches from the origin/main plan blob (W1-T60), fetching first; --allow-stale proceeds on the last-fetched refs if the fetch fails instead of refusing; --rerun dispatches even when the projection already reports the task merged (W1-T319), instead of refusing at zero cost with verdict task_already_merged
 
 ### `rmd review`
+
+Post remudero-review on a hand-opened PR, materializing a worktree at its head.
 
 ```
 rmd review <pr-number> [--repo <name>] [--override-capped-by <name> --override-capped-reason <text>]
@@ -109,6 +113,8 @@ post remudero-review on a hand-opened PR; materializes a worktree at the PR head
 
 ### `rmd dep-review`
 
+Deterministic Dependabot-PR review lane: auto-arm minor/patch, escalate major.
+
 ```
 rmd dep-review <pr-number> [--repo <name>]
 ```
@@ -116,6 +122,8 @@ rmd dep-review <pr-number> [--repo <name>]
 deterministic Dependabot-PR review lane (W1-T54): minor/patch -> arm auto-merge; major (or unparseable) -> escalate (needs-human, no auto-merge); source outside manifests -> refuse
 
 ### `rmd lint-plan`
+
+Deterministic task linter: sizing, headless-fitness, proof-shape, provenance.
 
 ```
 rmd lint-plan [--plan <path>] [--base <git-ref>]
@@ -125,6 +133,8 @@ rmd lint-plan [--plan <path>] [--base <git-ref>]
 
 ### `rmd proof-queue-audit`
 
+Report every open task's acceptance proof that can never resolve, split by cause.
+
 ```
 rmd proof-queue-audit [--plan <path>]
 ```
@@ -132,6 +142,8 @@ rmd proof-queue-audit [--plan <path>]
 W1-T1053: resolves every OPEN, UNMERGED task's proof through the reviewer's OWN parser+resolver (lib/review.ts) against the real checkout and names every one that can never resolve — refused-parse, name-filtered-zero-match (W1-T229's shape), or grep-path-absent — split by cause with the offending task ids; a forward-referencing whole-file test path for a not-yet-written test is NEVER reported (CLAUDE.md). IT IS A REPORT, NOT A GATE (lib/proof-queue-audit.ts): exits 0 unconditionally on the analysis itself, regardless of how many offenders it names; only a malformed invocation exits non-zero. FAILS OPEN (prints nothing audited, still exit 0) on a shallow checkout, same posture as lint-plan's whole-plan split.
 
 ### `rmd preflight`
+
+The HAND route's commit gate: commitlint, tsc --noEmit, commit-message checks.
 
 ```
 rmd preflight [--from <ref>] [--to <ref>] [--ci-parity] [--fast]
@@ -141,6 +153,8 @@ W1-T221: the HAND route's commit gate — runs commitlint, `tsc --noEmit`, and l
 
 ### `rmd next-task-id`
 
+Print (or --reserve atomically claim) the next free W1-T<n> task id.
+
 ```
 rmd next-task-id [--plan <path>] [--offline] [--reserve]
 ```
@@ -148,6 +162,8 @@ rmd next-task-id [--plan <path>] [--offline] [--reserve]
 print the next free W1-T<n>, derived from the max across plan/tasks.yaml, EVERY plan/tasks.d/*.yaml shard, the ids OPEN plan PRs have already minted (the 2/2 collision class: W1-T256->257 #770, W1-T260->261 #775), and every id ever declared in the git history of plan/ (the fold class: an id filed then folded away, W1-T278); --offline skips the open-PR read (the mint is then a FLOOR, and says so; the history scan still runs — it is a local git read, not a network one); prints its provenance, spawns nothing W1-T1055 --reserve ATOMICALLY CLAIMS the id on origin (refs/rmd-id/<id>) instead of merely printing one, so the push IS the claim and two concurrent minters cannot leave with the same number; it calls the existing reserveTaskIdRemote, which already advances on contention under its own maxScan bound, and PRINTS THE ID IT ACTUALLY HOLDS rather than the one it first tried. Each contested candidate is reported as HELD BY ANOTHER CALLER, naming whether the holder's anchor is the fleet's (`rmd-id reservation <pid>@<container>`) or an operator hand-mint (`reserve W1-T#### <host>-<pid>-<nanotime>`), because silently advancing past a rejection is how two collisions went unnoticed. FAIL-CLOSED: an unreachable origin REFUSES and exits non-zero rather than minting optimistically — the caller has spent nothing yet. Without the flag the verb is byte-identical to before, reserving nothing, because ~50 ids are already reserved-but-unfiled and nothing releases a reservation. --reserve and --offline are contradictory and are refused by argument validation. WRITING AN EXAMPLE ID IN PROSE: use the placeholder form W1-T<n> (or W1-T<id>, W1-TNNNN), never a bare digit form -- the open-PR scan above reads a literal out of any PR body, commit message or comment, and a code span or fenced block does NOT hide it. The placeholders carry no digits, so the extractor cannot see them; `scripts/task-id-existence-check.mjs` enforces this for src/ and deploy/.
 
 ### `rmd emissions`
+
+Which CLI verbs wrote no ledger line in the window -- dead-capability detection.
 
 ```
 rmd emissions [--days N]
@@ -157,6 +173,8 @@ which CLI verbs have written NO ledger line in the window (default 30d) — the 
 
 ### `rmd receipt`
 
+Print a deterministic in-toto-style run receipt from ledger ground truth.
+
 ```
 rmd receipt <pr> [--repo <name>]
 ```
@@ -164,6 +182,8 @@ rmd receipt <pr> [--repo <name>]
 W1-T71 (ratifies P17): print a deterministic in-toto-style run receipt assembled purely from ledger ground truth (src/lib/receipt.ts's buildReceipt) for <pr>'s task — resolves the task id from the PR body's Remudero-Task trailer (same extractor `rmd review` uses), refusing rather than guessing when none resolves. Every field with no ledger source for this run prints null with a named reason, never a fabricated value. Sigstore signing + the published schema doc are DEFERRED v2 rungs, not this command's job. READ-ONLY: writes no ledger line, posts nothing.
 
 ### `rmd replay`
+
+Narrate a ledger window in plain text: what the fleet decided, in order.
 
 ```
 rmd replay <since> <until> [--task <id>] [--step <prefix>]
@@ -173,6 +193,8 @@ W1-T2296: a deterministic, plain-text narration of a LEDGER WINDOW — between t
 
 ### `rmd check-proof`
 
+Run one acceptance proof through the reviewer's own executor and print its verdict.
+
 ```
 rmd check-proof <proof> [--allow-full-suite] [--base <ref>]
 ```
@@ -180,6 +202,8 @@ rmd check-proof <proof> [--allow-full-suite] [--base <ref>]
 run ONE acceptance proof through the REVIEWER'S OWN parser and executor and print what it does: parse kind, resolved candidate file(s), the exact argv, the verdict, exit code and hit count. A `grep:` pattern is a BASIC REGULAR EXPRESSION (`[ * ^ $` are metacharacters) — verifying with `grep -F` is a DIFFERENT matcher and reports a false green (PR #1071). A `unit test:` proof naming a TITLE rather than a test/<file>.test.ts PATH is resolved to its file first; when it resolves to none, the run is REFUSED rather than falling back to the whole-suite glob (--allow-full-suite overrides, time-boxed). --base <ref> (W1-T912, OPTIONAL — omitting it leaves every line and exit code above byte-identical) re-runs the SAME proof against <ref> and prints a `base:`/`discrimination:` line: a proof that ALSO matches at <ref> discriminates nothing and reports `executed_stale`, the reviewer's OWN name for the exact downgrade it applies at review time (W1-T273/W1-T362) — so a local `verdict: pass` that would count for nothing in review is visible before a PR ever opens. Only `grep:` proofs get a base blob materialized (same scope the reviewer itself has); a `unit test:` proof reports NOT COMPARABLE. EXIT CODE IS THE VERDICT: 0 pass, 1 fail (genuinely unmet — overrides the keyword floor), 2 refused (nothing executed — bad usage, an unparseable proof, or an unresolved name run declined), 3 no-match (ran and named nothing — degrades to the keyword floor, NEVER read as fail), 4 exec_error (a timeout/spawn failure/grep-exit-2 — inconclusive, also degrades), 5 executed_stale (--base only — passed on both trees, never read as fail). READ-ONLY: writes no cache, no ledger line, no state file
 
 ### `rmd reap-branches`
+
+Dry-run classification of every remote branch as deletable, guarded or held.
 
 ```
 rmd reap-branches
@@ -189,6 +213,8 @@ W1-T447 DRY RUN: classify every remote branch as deletable, guarded or held, pri
 
 ### `rmd ledger-grep`
 
+Grep the deduplicated union of every ledger archive and the live ledger file.
+
 ```
 rmd ledger-grep <pattern>
 ```
@@ -196,6 +222,8 @@ rmd ledger-grep <pattern>
 the deduplicated union of every state/ledger.*.ndjson.gz archive and the live state/ledger.ndjson, matched against <pattern>. Replaces the manual `grep -h '<pat>' state/ledger.*.ndjson state/ledger.ndjson | sort -u` idiom, which glob-matches ZERO gzipped archives on this host and silently answers from the live file alone (a measured 3.1x undercount). Prints the pattern, state dir and archive count BEFORE any match, then EXITS NON-ZERO, naming the globbed directory, when ZERO archive files were read — never falling back to a live-file-only count. READ-ONLY: writes no ledger line, no state file, deletes/moves nothing
 
 ### `rmd rule-efficacy`
+
+Report each rule's post-citation repeat-incident rate over the ledger union.
 
 ```
 rmd rule-efficacy [--no-escalate]
@@ -205,6 +233,8 @@ W1-T418: the corpus repeat-incident rate — for each rule in lib/rule-efficacy.
 
 ### `rmd coverage-improve`
 
+File one feedback entry ranking src/ files by uncovered branches (85-90% band).
+
 ```
 rmd coverage-improve [--lcov <path>]
 ```
@@ -212,6 +242,8 @@ rmd coverage-improve [--lcov <path>]
 W1-T470 tier two of the absolute coverage gate: when this run's branch coverage (read from --lcov, default coverage/lcov.info) sits in the 85-90 pass-with-debt band, ranks the src/ files owning the most uncovered branches (a COUNT, never a percentage — computed fresh every run, lib/coverage-improvement.ts) and files ONE plan/feedback/ entry naming them via captureFeedback, never a shard written straight into plan/tasks.d/ (no such minter exists) and never one entry per file. Dedupes against the ledger UNION (lib/ledger-grep.ts, never the live file alone) keyed on the exact set of files currently owning the debt — a run whose top offenders are unchanged from the last filing is skipped; a shifted debt profile files again. >= 90% (healthy) and < 85% (tier three, a separate remediation loop) are both no-ops here. INERT until wired into the coverage CI job's own step, which is a separate PR (Rule 25 keeps this producer's diff free of any .github/workflows/ci.yml or scripts/coverage-ratchet.mjs edit).
 
 ### `rmd verdict-calibration`
+
+Join armed-merge review verdicts to post-merge revert/follow-up-fix rates.
 
 ```
 rmd verdict-calibration
@@ -221,6 +253,8 @@ W1-T424: the correctness join — joins every armed merge's ledgered review verd
 
 ### `rmd autonomy-rate`
 
+Report the zero-touch merge rate over every Remudero-Task-trailer merge.
+
 ```
 rmd autonomy-rate
 ```
@@ -228,6 +262,8 @@ rmd autonomy-rate
 W1-T437: the QUANTITY figure beside W1-T424's correctness join — the zero-touch merge rate over every Remudero-Task-trailer-bearing merge on the read git history (lib/autonomy.ts's zeroTouchMergeRate, over the ledger UNION, never the live file alone), classifying each merge zero-touch (auto-armed, zero fix-rung strikes, no reframe, no operator note, no capped override, no fix-rung human evidence) or human-touched, NAMING every touch that fired — split by verdict class (full PASS / keyword floor / degraded arm / unclassified) so the class split shows where the next ratchet notch is safe. Prints the current decideAutoMergeArm arming posture beside the measured rate — proposes no policy change. Zero archive files matched under the state dir reports the whole window UNMEASURED, naming the reason, never a rate computed from the live ledger file alone. HOST-SIDE ONLY: the ledger lives on the daemon host, so this is meaningless off-host. READ-ONLY: files nothing, proposes nothing.
 
 ### `rmd check-acceptance`
+
+Report what the reviewer's own parser actually resolves from a PR body file.
 
 ```
 rmd check-acceptance <body-file>
@@ -237,6 +273,8 @@ read a PR body from a file and report what the REVIEWER'S OWN parseAcceptanceBlo
 
 ### `rmd retro`
 
+Sync the plan from the ledger (Architect retro).
+
 ```
 rmd retro [--dry-run]
 ```
@@ -244,6 +282,8 @@ rmd retro [--dry-run]
 sync the plan from the ledger (Architect retro)
 
 ### `rmd drain`
+
+Drain the task DAG through run-task, dispatching from the plan blob.
 
 ```
 rmd drain [--until <id>] [--max <n>] [--repo <name>] [--curated <path>] [--dry-run] [--allow-stale]
@@ -253,6 +293,8 @@ drain the DAG through run-task, dispatching from the origin/main plan blob (W1-T
 
 ### `rmd daemon`
 
+Persistent scheduler loop draining a named repo; refuses self-target unattended.
+
 ```
 rmd daemon --repo <name> [--plan <path>] [--max <n>] [--poll-ms <n>] [--dry-run] [--allow-self-target] [--allow-stale]
 ```
@@ -260,6 +302,8 @@ rmd daemon --repo <name> [--plan <path>] [--max <n>] [--poll-ms <n>] [--dry-run]
 persistent scheduler loop; --repo picks the repo to drain + its gateway (e.g. remudero-sandbox for W1-T12d). Refuses to drain its OWN source repo unattended without --allow-self-target. --dry-run previews the target + planned tasks, spawns nothing. Self-hosting reads the plan from origin/main (W1-T60); --allow-stale proceeds on the last-fetched refs if the fetch fails.
 
 ### `rmd daemon-plist`
+
+Generate the launchd unit for `rmd daemon`, baking in --repo.
 
 ```
 rmd daemon-plist --repo <name> [--poll-ms <n>] [--allow-self-target] [--write]
@@ -269,6 +313,8 @@ generate the launchd unit for `rmd daemon`, baking in --repo so the unit drains 
 
 ### `rmd deploy`
 
+Operator trigger for the deploy supervisor: request a fast-forward + restart.
+
 ```
 rmd deploy [--reason <text>]
 ```
@@ -276,6 +322,8 @@ rmd deploy [--reason <text>]
 OPERATOR trigger for the deploy supervisor (human-gated): writes state/DEPLOY_REQUESTED so the supervisor fast-forwards the daemon's checkout + `launchctl kickstart -k`s the daemon at the next idle gap, health-checks it, and rolls back on failure. Deploys nothing itself — keeps Craig's control over WHEN a merged fix goes live. The daemon runs `tsx src/` loaded once + dispatches in-process, so merged fixes are inert until this restart.
 
 ### `rmd deploy-run`
+
+One deploy-supervisor cycle: fast-forward + kickstart the daemon when idle.
 
 ```
 rmd deploy-run [--dry-run]
@@ -285,6 +333,8 @@ ONE deploy-supervisor cycle (the launchd unit runs this on its interval): no-op 
 
 ### `rmd deploy-plist`
 
+Generate the deploy-supervisor launchd unit (periodic `rmd deploy-run`).
+
 ```
 rmd deploy-plist [--interval <s>] [--write]
 ```
@@ -292,6 +342,8 @@ rmd deploy-plist [--interval <s>] [--write]
 generate the deploy-supervisor launchd unit (a periodic `rmd deploy-run`, default every 120s). Mirrors daemon-plist: prints by default, --write installs it; `launchctl load` is an operator action. Opt into auto-on-new-main (behind the health-check) by touching state/DEPLOY_AUTO.
 
 ### `rmd install-checkout`
+
+Provision or refuse the daemon's dedicated install checkout.
 
 ```
 rmd install-checkout [--write]
@@ -301,6 +353,8 @@ W1-T924: provision or refuse the daemon's DEDICATED install checkout (resolved f
 
 ### `rmd serve`
 
+The operator console front door: board, fleet-control, feedback inbox over HTTP.
+
 ```
 rmd serve [--port <n>] [--host <addr>]
 ```
@@ -308,6 +362,8 @@ rmd serve [--port <n>] [--host <addr>]
 the operator console FRONT DOOR (W1-T139, MASTER-PLAN §7/§7B): one HTTP surface (service.ts) serving the live board (board.ts), fleet-control + question/manual-approve write actions (panel-actions.ts), the feedback inbox + plan→task→PR graph (panel-graph.ts), and a minimal HTML shell at GET /; bearer tokens are generated on first run and persisted 0600 under <config.root>/state/service-tokens.json, and rotate by stopping serve, deleting that file, and starting again; the startup banner prints the READ token only (a bookmark grants view, not control) and never the write token, because stdout is commonly redirected to a log; --port defaults to 4317 (matches apps/dashboard's own default); --host defaults to 127.0.0.1, also reads RMD_SERVE_HOST, accepts a COMMA-SEPARATED list so the console can be reachable locally AND from the phone (e.g. 127.0.0.1,<tailnet-ip>), and REFUSES wildcards like 0.0.0.0 anywhere in that list; blocks until SIGINT/SIGTERM
 
 ### `rmd relay`
+
+Tier-2 relay client: tunnel the local `rmd serve` surface out to a relay URL.
 
 ```
 rmd relay
@@ -317,6 +373,8 @@ W1-T431: the Tier-2 relay CLIENT (MASTER-PLAN §7A/§6A, D-11) — dials OUT to 
 
 ### `rmd console-url`
 
+Print the console URL carrying the read token (--write also prints the write token).
+
 ```
 rmd console-url [--port <n>] [--host <addr>] [--write]
 ```
@@ -324,6 +382,8 @@ rmd console-url [--port <n>] [--host <addr>] [--write]
 print the console URL carrying the READ token — the bookmark that gets you in, one command instead of hand-extracting <config.root>/state/service-tokens.json (fb-1784772988510-da3712); prints one URL per bound interface, resolving port/host EXACTLY as `rmd serve` does (flag > RMD_SERVE_HOST > config.serve.* > 127.0.0.1:4317); --write additionally prints the WRITE token as a bare value to paste into the console (never in a URL), and REFUSES unless stdout is a TTY, because a redirected stdout becomes a file that outlives the process (R-5); reads the 0600 tokens file but never creates one — if the console has never run it says so and names the remedy; spawns nothing
 
 ### `rmd serve-plist`
+
+Generate the launchd unit that runs the operator console as a background service.
 
 ```
 rmd serve-plist [--port <n>] [--host <addr>] [--write]
@@ -333,6 +393,8 @@ generate the launchd unit that runs the operator console as a background SERVICE
 
 ### `rmd down`
 
+Graceful wind-down of the daemon + serve services for restart or maintenance.
+
 ```
 rmd down [--port <n>] [--host <addr>]
 ```
@@ -340,6 +402,8 @@ rmd down [--port <n>] [--host <addr>]
 graceful wind-down for restart/maintenance (W1-T169): unloads the daemon launchd service (waiting a bounded window for any in-flight task to reach a safe boundary, else REPORTING its run id + recoverability — has-PR = the sweep recovers it, pre-PR = it re-dispatches), stops `rmd serve` BY PORT with a reap-wait (never an argv/pattern kill), and prints a wind-down summary (in-flight state, open-PR count, needs-human count, safe-to-restart). IDEMPOTENT: already-down is a no-op honest report, zero side effects.
 
 ### `rmd up`
+
+Full resume: install freshness, load daemon + serve, print a resume report.
 
 ```
 rmd up [--port <n>] [--host <addr>] [--allow-off-main]
@@ -349,6 +413,8 @@ full resume (W1-T169): runs install-freshness FIRST (W1-T151 — a lockfile-chan
 
 ### `rmd sync`
 
+The sanctioned dedupe-then-pull recipe for a behind-and-dirty checkout.
+
 ```
 rmd sync [--dry-run]
 ```
@@ -356,6 +422,8 @@ rmd sync [--dry-run]
 W1-T907: the sanctioned dedupe-then-pull recipe as one explicit verb, for exactly the case checkCliFreshness refuses (behind origin/main AND dirty) that W1-T446's intersect-only fix cannot unstick — three-way classifies every `git status --porcelain` path against the origin/main blob (git hash-object vs git rev-parse <ref>:<path>, the same predicate deployer.ts's sameAsIncoming/discardLocal already established): IDENTICAL (local bytes == origin/main's blob at that path, or a DECISIONS.md whose every appended `## ...` record already landed via plan/decisions.d, W1-T191) is discarded/restored as provably lossless; everything else (no origin/main counterpart, differing bytes, or an unlanded DECISIONS.md record) is COPIED ASIDE under state/sync-<timestamp>/ with a named report BEFORE any discard runs and is NEVER deleted, cleared from the working tree only if the fast-forward actually needs that path; a local commit that is not an ancestor of origin/main (BLOCKING) refuses the WHOLE verb, mutating nothing. Then `git merge --ff-only origin/main` — never merge, never rebase, never reset --hard. --dry-run prints the identical classification and mutates nothing. Off-main/detached checkouts refuse exactly as W1-T445 established for the CLI entry guard. Does not touch checkCliFreshness's own predicate (W1-T446 owns that).
 
 ### `rmd doctor`
+
+One local, read-only health check with a meaningful exit code (0/1/2).
 
 ```
 rmd doctor [--json]
@@ -365,6 +433,8 @@ W1-T1047: ONE local, read-only health check with a meaningful exit code (0 OK / 
 
 ### `rmd status`
 
+One verb for 'is it running' and 'why is it stalled' from one read model.
+
 ```
 rmd status [--json]
 ```
@@ -372,6 +442,8 @@ rmd status [--json]
 W1-T279+W1-T280: ONE verb answering 'is it running' AND 'why is it stalled' from ONE read model. LOCAL (no network): LIVENESS (daemon/serve/deploy-supervisor running/pid/boot-time, running HEAD vs origin/main with a STALE flag, crash-loop), LATCHES (every state marker — STOP/PAUSE/QUIET_HOURS/DEPLOY_FAILED/DEPLOY_AUTO/inflight locks/pending kicks/drain-now — with its age and stated consequence), LAST CYCLE (the newest daemon.summary). DERIVED: BLOCKERS BY CLASS (circuit-broken w/ reset note, dispatch.indeterminate w/ gh-window note, blocked PRs by sweep.ts's own named reason), QUEUE HEAD (next dispatchables, perpetual-attempt tasks flagged with observed per-cycle cost), INBOX (ready/not-ready counts, head not-ready reason), HEADROOM (newest telemetry + enforcement on/off from the same switch the daemon reads) — these read a batched GitHub gateway and degrade to a stated unknown on an outage, never a gate on the local sections. Each section ends with at most one next action. --json emits the exact same read model the text renders. Read-only: writes nothing, spawns nothing, always exits 0 (bad args aside).
 
 ### `rmd sweep`
+
+Level-triggered PR-pipeline reconciler: re-derive disposition, take one action.
 
 ```
 rmd sweep [--repo <name>] [--dry-run]
@@ -381,6 +453,8 @@ level-triggered PR-pipeline reconciler (W1-T77, P22): re-derive EVERY open PR's 
 
 ### `rmd fix`
 
+Operator verb for the fix rung: dispatch the same rung `rmd sweep` uses.
+
 ```
 rmd fix <pr-number> [--repo <name>]
 ```
@@ -388,6 +462,8 @@ rmd fix <pr-number> [--repo <name>]
 operator verb for the W1-T76 fix rung (W1-T95, bootstrap/manual-override — drives a block on the sweep/drain delivery ITSELF, e.g. #160): dispatches the SAME rung sweep uses; refuses (zero spawns) when the PR is merged, closed, or has no block evidence; strikes-at-cap routes to escalate naming the count, never bypassing the cap.
 
 ### `rmd wipe-test`
+
+P12 learning-utility A/B harness: run a sandbox task twice, ledger the deltas.
 
 ```
 rmd wipe-test <task-id> [--repo remudero-sandbox] [--allow-non-sandbox]
@@ -397,6 +473,8 @@ the P12 learning-utility A/B harness (W1-T86): runs <task-id> TWICE — arm A wi
 
 ### `rmd stop`
 
+Fleet control: one-shot halt of the running drain; auto-clears when it ends.
+
 ```
 rmd stop [--reason <text>]
 ```
@@ -404,6 +482,8 @@ rmd stop [--reason <text>]
 fleet control: ONE-SHOT halt of the RUNNING drain; auto-clears when that run ends (no resume needed). No-op if nothing is running.
 
 ### `rmd pause`
+
+Fleet control: persistent drain-and-hold until `rmd resume`.
 
 ```
 rmd pause [--reason <text>]
@@ -413,6 +493,8 @@ fleet control: PERSISTENT drain-and-hold — in-flight completes, no new spawns;
 
 ### `rmd resume`
 
+Fleet control: clear PAUSE (and any STOP); spawns resume.
+
 ```
 rmd resume
 ```
@@ -420,6 +502,8 @@ rmd resume
 fleet control: clear PAUSE (and any STOP); spawns resume
 
 ### `rmd away`
+
+Set/show operator presence; batches escalations into a recap while away.
 
 ```
 rmd away [on|off]
@@ -429,6 +513,8 @@ P34 clause (e): set/show operator presence (default attended). AWAY batches MANU
 
 ### `rmd correct`
 
+Sanctioned operator-correction writer: name a task's true merged PR.
+
 ```
 rmd correct <task-id> --pr <n> [--reason <text>]
 ```
@@ -436,6 +522,8 @@ rmd correct <task-id> --pr <n> [--reason <text>]
 sanctioned operator-correction writer (P9/W1-T75): appends a correction.provenance ledger line naming the task's TRUE merged PR, SUPREME over every deriveStatus rung; prints derived status before/after
 
 ### `rmd escalate`
+
+Open a needs-human GitHub issue; MANUAL/HARD_STOP also fire a real-time ping.
 
 ```
 rmd escalate --class <BLOCKED|MANUAL|HARD_STOP> --task <id> --summary <s> [--detail <d>] [--recommendation <r>] [--option "label|detail"]...
@@ -445,6 +533,8 @@ open a needs-human labeled GitHub issue; MANUAL/HARD_STOP also fire a real-time 
 
 ### `rmd notify`
 
+Real-time iMessage ping (osascript).
+
 ```
 rmd notify <message>
 ```
@@ -452,6 +542,8 @@ rmd notify <message>
 real-time iMessage ping (osascript)
 
 ### `rmd digest`
+
+Roll up the ledger into one daily digest message.
 
 ```
 rmd digest [--since <iso>] [--dry-run]
@@ -461,6 +553,8 @@ roll up the ledger into one daily digest message
 
 ### `rmd digest-plist`
 
+Generate the launchd unit for the daily `rmd digest` pulse.
+
 ```
 rmd digest-plist [--hour <h>] [--write]
 ```
@@ -468,6 +562,8 @@ rmd digest-plist [--hour <h>] [--write]
 generate the launchd unit for the daily `rmd digest` pulse (W1-T112, the W1-T12b generator pattern) — StartCalendarInterval at <h>:00 local time (default 8); commissioning (launchctl load) is an operator action
 
 ### `rmd ops`
+
+Alert intake: poll code-scanning/Dependabot/secret-scanning alerts, escalate criticals.
 
 ```
 rmd ops [--dry-run]
@@ -477,6 +573,8 @@ alert intake v0+v1 (W1-T55/W1-T56, §5D lane 2, §7B): poll code-scanning/Depend
 
 ### `rmd alert-fix`
 
+The alert-fix lane: policy-decide act-vs-escalate per open security alert.
+
 ```
 rmd alert-fix [--repo <name>] [--dry-run]
 ```
@@ -484,6 +582,8 @@ rmd alert-fix [--repo <name>] [--dry-run]
 the alert-fix lane (W1-T90, ratifies P20, §5D lane 2's dep-review precedent): a deterministic policy (plan/alert-policy.yaml, data — no LLM ever) decides act-vs-escalate per open alert; act (severity medium/low, path outside the gate/containment-critical set) dispatches ONE ephemeral lane-owned fix run through the full [ci, remudero-review] gate, ledger-deduped so a re-poll never re-dispatches; escalate (critical/high/unknown severity, or a gate-critical path) opens a MANUAL needs-human issue via the SAME escalation-ledger namespace `rmd ops`'s own critical/high poll uses, so neither lane double-escalates the other's alert; never writes plan/tasks.yaml (rule 15); --dry-run previews every open alert's disposition, dispatches/escalates nothing
 
 ### `rmd issues`
+
+Issues intake: capture open GitHub issues into the feedback inbox.
 
 ```
 rmd issues [--dry-run]
@@ -493,6 +593,8 @@ issues intake (W1-T57, §5D lane 3): poll open issues for every repo in .remuder
 
 ### `rmd init`
 
+Headless-safe first-run tier wizard.
+
 ```
 rmd init [--tier <pro|max5x|max20x>] [--yes]
 ```
@@ -500,6 +602,8 @@ rmd init [--tier <pro|max5x|max20x>] [--yes]
 headless-safe first-run tier wizard
 
 ### `rmd project`
+
+Fleet-inheritance onboarding: generate the whole gate stack for a target repo.
 
 ```
 rmd project init <repo> [--profile ts-node|ts-web|python|dotnet] --coverage-pct <n> --branches-pct <n> --mutation-pct <n> --dup-pct <n>
@@ -509,6 +613,8 @@ fleet-inheritance onboarding primitive (W1-T27): generates the whole gate stack 
 
 ### `rmd onboard`
 
+The `rmd onboard` family: inventory, recon, session and synthesize phases.
+
 ```
 rmd onboard <target-dir> --phase inventory|recon|session|synthesize [--owner <o> --repo <r>]
 ```
@@ -516,6 +622,8 @@ rmd onboard <target-dir> --phase inventory|recon|session|synthesize [--owner <o>
 the `rmd onboard` family (MASTER-PLAN ★P24, W1-T82/83/84/85): --phase inventory is a deterministic, no-LLM repo inventory over a TARGET checkout — languages, build/CI systems, docs presence (README/CONTRIBUTING/AGENTS.md/CLAUDE.md/ADRs/ROADMAP/TODO), branch-protection state, issue/milestone counts, test-signal presence — via policy-as-data detector tables (src/lib/onboard/inventory.ts), writing ONLY <target-dir>/plan/onboarding/inventory.json; --phase recon mines existing plan artifacts (ROADMAP/TODO/ADR intents/open issues) deterministically AND consults the four read-only W2-T1 specialist lenses (security/testing/design/containment) pointed at the whole repo (src/lib/onboard/recon.ts), writing ONLY plan/onboarding/findings.md + candidates.json — every candidate cites its source verbatim and mined vs inferred stays a labeled distinction; --phase session (src/lib/onboard/session.ts) generates a §2-QUESTION-contract set from the inventory's own gaps plus a fixed goal-elicitation set — every question names its decision and candidate answers — and drives a resumable CLI answer loop, writing ONLY plan/onboarding/answers.json + appending onboard.answered lines to plan/onboarding/ledger.ndjson; a second invocation re-presents only the unanswered set; no-TTY previews the backlog and never blocks; --phase synthesize (src/lib/onboard/synthesize.ts) REFUSES (non-zero exit, naming every unanswered question id) unless phase 3's full question set is answered — goals are never guessed — then drafts MASTER-PLAN.md + plan/tasks.yaml + AGENTS.md from all four phase 1-3 artifacts, iterates the drafted tasks.yaml against the real `rmd lint-plan` linter (§5C) until clean, and opens EXACTLY ONE draft PR to `onboard/<repo>-plan`, writing nothing outside that branch (never plan/onboarding/). Phases inventory/recon/session are read-only against the target + gh api; unresolved GitHub facts render as the literal "unknown", never guessed; --phase is REQUIRED — any other value fails loud, spawning/writing nothing
 
 ### `rmd feedback`
+
+Durable-inbox async capture: write a plan/feedback/<id>.yaml entry.
 
 ```
 rmd feedback <text...> [--attach <path-or-url>]... [--origin cli|ui|issue]
@@ -525,6 +633,8 @@ durable-inbox async capture (MASTER-PLAN §7B, W1-T40): writes plan/feedback/<id
 
 ### `rmd triage`
 
+The Architect intake worker: ground, research, then report, grill or propose.
+
 ```
 rmd triage <feedback-id>
 ```
@@ -532,6 +642,8 @@ rmd triage <feedback-id>
 the Architect intake worker (MASTER-PLAN §7B, W1-T41): GROUNDS a plan/feedback/<id> entry against MASTER-PLAN/plan/LEARNINGS/DECISIONS, RESEARCHES via server-side WebSearch, then either reports 'already decided' (no task), GRILLS an ambiguous item by opening a needs-human GitHub issue with options + a recommendation (W1-T42, parks status 'grilling'), or opens a plan-only PR carrying origin: feedback#<id> provenance, gated by ci-gate+remudero-review like everything else
 
 ### `rmd skill`
+
+List the skill registry: every .remudero/skills/<name>.yaml entry.
 
 ```
 rmd skill list
@@ -541,6 +653,8 @@ rmd skill list
 
 ### `rmd learnings`
 
+The knowledge-commons transport: export/import opted-in learnings, hash-pinned.
+
 ```
 rmd learnings export <out> | rmd learnings import <file> --pin <hash>
 ```
@@ -548,6 +662,8 @@ rmd learnings export <out> | rmd learnings import <file> --pin <hash>
 the §6 knowledge-commons transport (W1-T425). PRIVACY CONTRACT: export collects ONLY project-layer entries an operator stamped `share: public` (default absent = private forever) and independently refuses any candidate matching the leak-grep tripwire, naming it -- zero opted-in entries refuses rather than writing an empty bundle. `import <file> --pin <hash>` checks the bundle's own declared hash against the operator-supplied --pin before writing anything to the RMD-GLOBAL layer the injector already reads, then defers ALL tamper enforcement to that existing hash-pinned-artifact guard -- import never re-derives or re-implements the check, only places the file where it already looks
 
 ### `rmd trace`
+
+Render the provenance chain: feedback -> proposal -> task -> run -> PR -> merge.
 
 ```
 rmd trace <id>
@@ -557,6 +673,8 @@ render the provenance chain (MASTER-PLAN §7B / Standing rule 17, W1-T43): feedb
 
 ### `rmd peek`
 
+Read-only tail of one run's retained output, with a LIVE/FINISHED verdict.
+
 ```
 rmd peek <runId> [--lines <n>] [--follow]
 ```
@@ -564,6 +682,8 @@ rmd peek <runId> [--lines <n>] [--follow]
 W1-T945: READ-ONLY tail of one run's output — the last <n> lines (default 50, never more than the 500-line ring ceiling) of its retained state/runs/<runId>.tail (W1-T942), printed with a LIVE/FINISHED verdict from the SAME liveInflightRuns pid-checked read every other liveness decision in this fleet uses — never a second definition of 'in flight'. Works identically on a FINISHED run's retained tail, the surviving half of fb-1784821673624-321a4b (its final-message half already shipped as report_excerpt, #1584). An unknown run id or an absent tail prints a NAMED reason and still exits 0 — never silent empty output. --follow re-polls and reprints on change, stopping on its own the moment the run is no longer live — it never hangs on an already-finished run. READ-ONLY BY CONSTRUCTION: no flag here writes to, signals, resumes or kills the run — there is no steering surface in v1.
 
 ### `rmd plan`
+
+The unified Architect PLAN skill: create, clarify or expand plan tasks.
 
 ```
 rmd plan --mode=create|clarify|expand [<brief>...]
@@ -573,6 +693,8 @@ the unified Architect PLAN skill (MASTER-PLAN §5B, W1-T45) — ONE ground→res
 
 ### `rmd inbox`
 
+The ratification inbox's deterministic core: tier proposals READY/not-ready.
+
 ```
 rmd inbox [--dry-run]
 ```
@@ -581,6 +703,8 @@ the ratification inbox's deterministic core (MASTER-PLAN P25(i), W1-T110): tiers
 
 ### `rmd approve`
 
+Ratify one or more READY proposals through the gate into a plan PR.
+
 ```
 rmd approve <P##> [<P##> ...]
 ```
@@ -588,6 +712,8 @@ rmd approve <P##> [<P##> ...]
 one bit ratifies through the gate (MASTER-PLAN P25(ii), W1-T111): re-classifies each named <P##> live against the SAME facts `rmd inbox` would show; valid ONLY for a currently-READY proposal, refused (naming the state) with zero git/gh side effects otherwise; on READY, ships the cached draft's fragment + stamp VERBATIM into a plan PR (one branch, one PR) that rides the full gate (ci-gate + remudero-review) before auto-merge is armed — nothing auto-files without the bit; ledgers exactly one ratify.approved/ratify.approve_refused line per named proposal. NAMING TWO OR MORE ids (W1-T2471) batches them into ONE branch/commit/MASTER-PLAN block/PR instead of one PR lifecycle each — an unready member is SKIPPED (its own reason ledgered) without blocking or aborting the rest; this is an EXPLICIT set only, never an implicit approve-everything-ready
 
 ### `rmd reframe`
+
+The feedback path: ledger reframe feedback, invalidate a proposal's cached draft.
 
 ```
 rmd reframe <P##> --feedback "<text>" [--supersedes <rounds>]

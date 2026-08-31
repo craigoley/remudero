@@ -30,14 +30,6 @@ import { COMMANDS, USAGE } from "../src/run-task.ts";
 
 const DEFAULT_OUT = join("docs", "cli-reference.md");
 
-/** Split one registry usage line into its invocation shape and trailing "# description" prose. */
-export function splitUsage(usage) {
-  const parts = usage.split(/\s{2,}#\s?/);
-  const invocation = parts[0].trimEnd();
-  const description = parts.slice(1).join(" # ").trim();
-  return { invocation, description };
-}
-
 /**
  * Split a rendered reference doc into { commandName -> its "### `rmd <name>` ... " block }, keyed
  * by the section heading -- used only to NAME which command(s) drifted in a --check failure
@@ -98,15 +90,16 @@ export function renderReference(commands, usage) {
   lines.push("## Commands");
   lines.push("");
   for (const spec of commands) {
-    const { invocation, description } = splitUsage(spec.usage);
     lines.push(`### \`rmd ${spec.name}\``);
     lines.push("");
+    lines.push(spec.summary);
+    lines.push("");
     lines.push("```");
-    lines.push(invocation);
+    lines.push(spec.syntax);
     lines.push("```");
     lines.push("");
-    if (description) {
-      lines.push(description);
+    if (spec.detail) {
+      lines.push(spec.detail);
       lines.push("");
     }
   }
