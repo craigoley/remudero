@@ -1,31 +1,29 @@
 # ORIENTATION
 
-_MAINTAINED BY `rmd retro` — regenerated 2026-08-31T03:05:00.822Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
+_MAINTAINED BY `rmd retro` — regenerated 2026-08-31T16:43:32.387Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
 
 A fresh Architect session should be able to orient from THIS doc alone plus the plan index —
 not by re-deriving state from the full plan and ledger.
 
 ## Current state
 
-27 run(s) since the last retro marker. Verdicts: {"blocked":2,"blocked_ci":6,"blocked_isolation":1,"blocked_transient":1,"incomplete":9,"merged":8}.
+23 run(s) since the last retro marker. Verdicts: {"blocked_ci":17,"incomplete":3,"merged":2,"no_pr":1}.
 
 ### Shipped since marker
-- W1-T2467 → https://github.com/craigoley/remudero/pull/3327
-- W1-T2474 → https://github.com/craigoley/remudero/pull/3314
-- W1-T2475 → https://github.com/craigoley/remudero/pull/3329
-- W1-T2477 → https://github.com/craigoley/remudero/pull/3318 (gate-side merge; run ended blocked_ci)
-- W1-T2478 → https://github.com/craigoley/remudero/pull/3323
-- W1-T2481 → https://github.com/craigoley/remudero/pull/3326
-- W1-T2482 → https://github.com/craigoley/remudero/pull/3330 (gate-side merge; run ended blocked)
-- W1-T2484 → https://github.com/craigoley/remudero/pull/3343
-- W1-T2494 → https://github.com/craigoley/remudero/pull/3342
-- W1-T2495 → https://github.com/craigoley/remudero/pull/3347
+- W1-T2479 → https://github.com/craigoley/remudero/pull/3359 (gate-side merge; run ended blocked_ci)
+- W1-T2487 → https://github.com/craigoley/remudero/pull/3373 (gate-side merge; run ended blocked_ci)
+- W1-T2490 → https://github.com/craigoley/remudero/pull/3358 (gate-side merge; run ended blocked_ci)
+- W1-T2498 → https://github.com/craigoley/remudero/pull/3357 (gate-side merge; run ended blocked_ci)
+- W1-T2501 → https://github.com/craigoley/remudero/pull/3361
+- W1-T2503 → https://github.com/craigoley/remudero/pull/3365 (gate-side merge; run ended blocked_ci)
+- W1-T2504 → https://github.com/craigoley/remudero/pull/3364 (gate-side merge; run ended blocked_ci)
+- W1-T2514 → https://github.com/craigoley/remudero/pull/3404
 
 ## Next runnable task
 
-**W1-T2479** — THE DEAD-CAPABILITY DETECTOR IS BLIND TO THREE OF THE SIXTY-THREE VERBS IT CLAIMS TO COVER AND REPORTS A CONFIDENT SIXTY — deriveCliVerbs matches on INDENTATION DEPTH (four spaces exactly), so retro, resume and notify, whose registry entries are written on one line at two spaces, are invisible with no diagnostic. Fix the population and give it a control BEFORE giving it a schedule
+**W1-T2508** — CLAUDE.md IS ALREADY WRITTEN FOR PROGRESSIVE DISCLOSURE AND IS DISCLOSED ALL AT ONCE — every one of its 84 bullets is a bolded HEADLINE plus a body, the headlines are 15.7 percent of the file at a median 123 characters (an agent-skill description by any measure), and the other 84 percent is injected whether the reader needs it or not
 
-- risk: high · depends_on: (none)
+- risk: high · depends_on: W1-T2507
 
 ## Never-do invariants (MASTER-PLAN §12 Standing rules — extracted verbatim; §12 is authoritative)
 
