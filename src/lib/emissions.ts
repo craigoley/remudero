@@ -49,14 +49,36 @@ export interface DerivedVerb {
  * registry becomes a second registry, and the two drift silently. `COMMANDS` is what the binary
  * dispatches against, so a verb added tomorrow is surveyed the moment it exists.
  *
- * FALSE POSITIVES: none observed — the pattern is anchored to the array's own indentation and
- * `name:` key, and `COMMANDS` is the only such array in the file.
+ * SCOPED TO THE ARRAY'S OWN BODY, NOT INDENTATION-DEPTH. The prior pattern
+ * (`/^\s{4}name:\s*"…"/gm`) required an entry's `name:` to sit at exactly four leading spaces —
+ * true of every multi-line entry, but three registry rows (`retro`, `resume`, `notify`) are
+ * written on ONE LINE at two spaces (`{ name: "retro", usage: … }`), so that pattern silently
+ * dropped them: 60 seen of 63 declared, with nothing reporting the gap (W1-T2479). Slicing to the
+ * `COMMANDS` array's own source span first, then matching `name:` at ANY indentation within that
+ * span, reads both entry shapes and cannot pick up an unrelated `{ name: "…" }` literal elsewhere
+ * in the file (e.g. `implementPromptParts`'s prompt-part list) the way an unanchored file-wide
+ * scan would.
+ * FALSE POSITIVES: none observed — scoped to the `COMMANDS` array body, which is the only place
+ * `name:` denotes a CLI verb.
  * FALSE NEGATIVES: a verb dispatched in `main()` without a `COMMANDS` entry would be invisible.
  * That is the same drift `COMMANDS`'s own doc comment says cannot happen ("neither is
  * hand-maintained prose"), and the help output would be wrong too, so it is loud by other means.
+ * A reshape of the array itself (renamed, no longer `const COMMANDS: readonly CommandSpec[] = [`
+ * … `] as const;`) fails LOUD here rather than silently scanning zero verbs — the population must
+ * never shrink without saying so.
  */
 export function deriveCliVerbs(runTaskSource: string): string[] {
-  return [...runTaskSource.matchAll(/^\s{4}name:\s*"([a-z0-9-]+)"/gm)].map((m) => m[1]);
+  const marker = "const COMMANDS: readonly CommandSpec[] = [";
+  const start = runTaskSource.indexOf(marker);
+  if (start === -1) {
+    throw new Error(`deriveCliVerbs: could not find \`${marker}\` — has the registry been renamed or reshaped?`);
+  }
+  const end = runTaskSource.indexOf("\n] as const;", start);
+  if (end === -1) {
+    throw new Error("deriveCliVerbs: found the COMMANDS array's start but not its closing `] as const;` — has it been reshaped?");
+  }
+  const body = runTaskSource.slice(start, end);
+  return [...body.matchAll(/\bname:\s*"([a-z0-9-]+)"/g)].map((m) => m[1]);
 }
 
 /**
