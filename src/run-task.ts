@@ -181,6 +181,7 @@ import {
   sendMarkerAwareDigest,
   sendRundown,
   type DigestCadenceRunResult,
+  type GenerativeDigestItem,
 } from "./lib/digest.js";
 import { createLastSeenStore, hashToken, lastSeenPath } from "./lib/last-seen.js";
 import {
@@ -452,7 +453,9 @@ import {
   measurementCadenceCheck,
   measurementCadenceMarkerPath,
   recordMeasurementCadenceFire,
+  renderVerbCensusDigestLine,
   runMeasurementCadenceReport,
+  runVerbCensus,
   type MeasurementCadenceDecision,
   type MeasurementCadenceRunResult,
 } from "./lib/measurement-cadence.js";
@@ -17571,6 +17574,16 @@ export function buildDigestCadenceDaemonHooks(deps: {
       recordDigestCadenceFire(config.root, now);
       const ledgerPath = ledgerPathFor(config);
       const nowIso = now.toISOString();
+      // W1-T2485: the verb census's own digest line. Read FRESH here rather than threaded from
+      // measurement-cadence's own fire — this cadence runs on its OWN, independently-throttled
+      // interval (its own marker/policy row above), so a snapshot from measurement-cadence's last
+      // fire could be hours stale by the time this one sends. `runVerbCensus` is cheap (a source
+      // walk plus one ledger-union query), the same cost `runMeasurementCadenceReport` already
+      // pays for it on its own cadence — see that function's own doc for why it is exported for
+      // exactly this second caller. SELF-TARGET ONLY, same as every rung beside it: `repoRoot`/
+      // `config.root` are always THIS process's own checkout, never a drained target's.
+      const verbCensus = runVerbCensus({ checkoutDir: repoRoot, stateDir: join(config.root, "state"), ledgerUnion: resolveLedgerUnion });
+      const verbCensusSuggestion: GenerativeDigestItem = { kind: "generative", text: renderVerbCensusDigestLine(verbCensus) };
       return runDigestCadenceReport({
         ledgerPath,
         sinceIso: defaultDigestSinceIso(nowIso),
@@ -17582,6 +17595,12 @@ export function buildDigestCadenceDaemonHooks(deps: {
           channelName: "inbox",
         },
         consoleBaseUrl: consoleUrl(config),
+        // A REPORT, NEVER A MINTER (this task's own rationale): `suggestions` is the seam
+        // `runDigestCadenceReport` already offers a caller-produced item through — see that
+        // function's own doc ("if a caller wants a generative half, it must have already produced
+        // that text itself"). The line is measured, not suggested; its own text says so, since the
+        // rendered wrapper marks every entry here `[SUGGESTED]` regardless of origin.
+        suggestions: [verbCensusSuggestion],
       });
     });
   return { checkDigestCadence: check, runDigestCadence: run };

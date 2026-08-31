@@ -171,6 +171,40 @@ export const DATA_ARTIFACT_CLASSES: ReadonlyArray<DataArtifactClass> = [
   { tag: "settings-data", pathPattern: /^settings\//, extPattern: /\.(?:ya?ml|json|md)$/i },
 ];
 
+/**
+ * W1-T2543 — COMPANION path classes: a path that is not a concern OF ITS OWN when the task also
+ * declares the thing it accompanies. Distinct from {@link DATA_ARTIFACT_CLASSES}, which discounts
+ * unconditionally: a companion is discounted ONLY while some non-companion file survives, so a
+ * task declaring nothing but companions still counts them and never scores zero concerns.
+ *
+ * WHY THIS EXISTS, MEASURED ON THIS TREE. `moduleIdFromPath` derives a concern id from a BASENAME,
+ * and naming a suite after the claim it proves rather than the module it covers is the house
+ * convention here — 747 of 865 test files (86.3%) carry a basename matching no `src/` module. So a
+ * change to `src/lib/X.ts` plus the suite written to test it scored TWO concerns roughly six times
+ * in seven, and Rule 19 refused it at risk:medium. The advisory rubric fired the same way on two
+ * PRs within one hour (#3400 `sweep`/`sweep-conflicted-disposition`, #3403 `daemon`/
+ * `entrypoint-boot`), and an arm that fires on nearly every well-formed PR trains its readers to
+ * skim past it — which is where a REAL finding is lost.
+ *
+ * THIS DOES NOT WEAKEN RULE 19. Only the companion is discounted; every SOURCE stem still counts,
+ * so a task genuinely spanning two subsystems still scores two and still reports.
+ */
+export interface CompanionPathClass {
+  tag: string;
+  pathPattern: RegExp;
+}
+
+export const COMPANION_PATH_CLASSES: ReadonlyArray<CompanionPathClass> = [
+  { tag: "test-suite", pathPattern: /^test\// },
+];
+
+/** True iff `path` belongs to some companion class — see {@link COMPANION_PATH_CLASSES}. */
+export function isCompanionPath(
+  path: string,
+  classes: ReadonlyArray<CompanionPathClass> = COMPANION_PATH_CLASSES,
+): boolean {
+  return classes.some((c) => c.pathPattern.test(path));
+}
 /** True iff `path` matches BOTH the path prefix and the extension of some row in
  *  `classes` — i.e. it's a discounted data/config artifact, not a code subsystem. */
 export function isDataArtifact(
@@ -186,13 +220,23 @@ export function isDataArtifact(
 export function subsystemsOf(
   task: Task,
   dataArtifactClasses: ReadonlyArray<DataArtifactClass> = DATA_ARTIFACT_CLASSES,
+  companionClasses: ReadonlyArray<CompanionPathClass> = COMPANION_PATH_CLASSES,
 ): Set<string> {
   const ids = new Set<string>();
+  // W1-T2543: companions are collected SEPARATELY and folded in only if nothing else survives, so
+  // the discount cannot empty the tally. Two passes rather than one because whether a companion
+  // counts depends on the WHOLE file list, not on the companion itself.
+  const companions = new Set<string>();
   for (const f of task.files ?? []) {
     if (isDataArtifact(f, dataArtifactClasses)) continue; // a data/config artifact, not a concern
     const id = moduleIdFromPath(f);
-    if (id) ids.add(id);
+    if (!id) continue;
+    if (isCompanionPath(f, companionClasses)) companions.add(id);
+    else ids.add(id);
   }
+  // A task declaring ONLY companions (a test-only change) still counts them — otherwise it would
+  // score zero concerns and pass sizing vacuously, which is a worse answer than the one being fixed.
+  if (ids.size === 0) for (const id of companions) ids.add(id);
   const text = (task.acceptance ?? []).map((c) => `${c.claim ?? ""} ${c.proof ?? ""}`).join("\n");
   for (const entry of SUBSYSTEM_LEXICON) {
     if (entry.pattern.test(text)) ids.add(entry.tag);
