@@ -1,0 +1,85 @@
+- id: W1-T2534
+  title: "A CLAIM THIS BODY MERELY MENTIONS IS READ AS A CLAIM IT MAKES — `bodyContradictsDiff` anchors on syntactic POSITION and never on whether the sentence is about THIS pr, so reporting another PR's scope claim refuses yours; MEASURED on #3388, the PR whose own subject is this detector, and quoting exempts NOTHING (a quoted label fires exactly as a bare one does)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 12.00
+  files: [src/lib/review.ts, test/a-mentioned-claim-is-not-a-made-one.test.ts]
+  origin: "operator-session#how-do-we-get-it-all-green-2026-08-31"
+  plan_refs: ["W1-T274", "W1-T395", "W1-T413", "W1-T2533"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON #3388 — the PR whose entire subject is warning authors about this detector. Its
+    body described what had happened to three other PRs, and the review refused it:
+    `FAIL — body contradicts its own diff: claimed "exactly 4 files", actual changed files:
+    scripts/source-size-ratchet.mjs, test/a-source-file-cannot-outgrow-its-baseline.test.ts`.
+    The real diff was two files and the body never claimed four; it REPORTED that #3365 and #3378
+    had claimed four.
+
+    ISOLATED BY DIRECT CALLS, not read off the failure text. Same file list each time:
+
+      FIRES   quoted count AND a changeset word in the same sentence
+      silent  quoted count, no changeset word in that sentence
+      FIRES   unquoted count and a changeset word  (CORRECT — a real claim)
+      silent  quoted count, changeset word in the NEXT sentence
+
+    The trigger was one sentence: "Adding the baseline line changes the diff — so a body that said
+    'exactly 4 files' is now false". `claimsChangesetContext` scans BACKWARD to the sentence start
+    for `CHANGESET_CONTEXT_RE`, finds "changes"/"diff", and treats the count as this PR's own.
+
+    QUOTING EXEMPTS NOTHING, ON EITHER ARM, AND THIS CORRECTS A NATURAL ASSUMPTION. Measured:
+
+      FIRES   `"Plan-only": no source touched.`      (quoted label, shorthand arm)
+      FIRES   "`Plan-only`: no source touched."      (backticked label)
+      silent  `a body that said "plan-only" was refused`   (no anchor)
+      silent  `| #3373 | "plan-only" | src + test |`       (table cell, no anchor)
+
+    The label arm's own delimiter class is `/^[*_`'")\]\s]*:/` — it accepts a quote or a backtick
+    BEFORE the colon by design, so a quoted label is a label. What keeps a mention silent is the
+    ABSENCE OF AN ANCHOR, never the quotation marks. Any writing convention built on "quote it and
+    it is safe" is false.
+
+    THE UNIFIED SHAPE, AND WHY THIS IS NOT JUST W1-T2533 AGAIN. Both tasks are the detector failing
+    the USE/MENTION distinction, but on different predicates and with different fixes. W1-T2533 is
+    a body DENYING a claim ("Plan-only: no.") read as making it — the negation sits outside every
+    arm's window. This one is a body ATTRIBUTING a claim to someone else read as making it — the
+    attribution sits outside `claimsChangesetContext`'s window. Fixing either does not fix the
+    other; they share a diagnosis, not a patch.
+
+    WHY IT MATTERS AND WHY IT WILL RECUR. A retro, an incident write-up, a task filing, and any PR
+    that discusses a gate all quote the claims they are about. This repo writes those constantly.
+    The refusal names a claim the author can search their own body for and not find as their own,
+    which is the most expensive kind of gate message — the obvious response is to argue rather than
+    reword.
+
+    A CANDIDATE DISCRIMINATOR, NOT A PRESCRIPTION. Reported speech has surface markers this repo's
+    bodies already use: a preceding attribution ("#3365 claimed", "its body said", "the review
+    reported"), a table row, a fenced block. Whether a marker-based test is sound enough to gate on
+    is the build's question to answer, and the negative rows above are the floor it must hold: a
+    genuine unquoted claim in changeset context must still FIRE.
+
+    DO NOT FIX THIS BY EXEMPTING QUOTED TEXT WHOLESALE. `"Plan-only": no source touched.` is a real
+    claim in this repo's own house style (the label arm's comment cites it), and W1-T395 pinned the
+    invariant that quoting a claim must not change the verdict. An exemption keyed on quotation
+    would break that pin by construction.
+
+    RE-DERIVE BOTH TABLES BEFORE BUILDING — ten `bodyContradictsDiff` calls, seconds to run, and
+    these arms have been narrowed and re-widened twice already (W1-T395, W1-T413).
+
+  acceptance:
+    - claim: "a body reporting another PR's file-count claim is not refused as having made that claim"
+      proof: "unit test: test/a-mentioned-claim-is-not-a-made-one.test.ts"
+    - claim: "a genuine unquoted count claim in changeset context is still refused, so the floor is unmoved"
+      proof: "unit test: test/a-mentioned-claim-is-not-a-made-one.test.ts"
+    - claim: "quotation alone still changes no verdict, preserving the W1-T395 invariant"
+      proof: "unit test: test/a-mentioned-claim-is-not-a-made-one.test.ts"
+    - claim: "the label arm still refuses a quoted label that really is this body's own claim"
+      proof: "unit test: test/a-mentioned-claim-is-not-a-made-one.test.ts"
+    - claim: "#3388's verbatim trigger sentence is a fixture and passes, anchoring the fix to the observation"
+      proof: "unit test: test/a-mentioned-claim-is-not-a-made-one.test.ts"
+    - claim: "removing the mention handling makes the reported-claim fixtures refuse again"
+      proof: "unit test: test/a-mentioned-claim-is-not-a-made-one.test.ts"
