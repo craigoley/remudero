@@ -1,0 +1,130 @@
+- id: W1-T2536
+  title: "RMD HAS A MERGE-CONFLICT FIX WORKER, FULLY BUILT SINCE W1-T94/W1-T106, THAT HAS NEVER ONCE BEEN DISPATCHED — one hardcoded `false` gates it, W1-T984 left flipping it to a later task 'once the semantic predicate exists', and that predicate cannot live in sweep.ts at all: turn admission on, and stop the refusal row asserting a deletion nobody observed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: |
+    FILED FROM A LIVE TRACE at origin/main 4f1ce066, 2026-08-30, prompted by the operator asking
+    why rmd does not resolve its own merge conflicts. Every figure below was measured on that tree
+    in-process. The ledger was NOT consulted (unreachable from this host), so nothing here rests on
+    a ledger count.
+
+    (1) THE WORKER EXISTS. THE PROMPT EXISTS. THE DISPATCH EXISTS. THE ESCALATION EXISTS.
+    The chain is complete and on main today:
+      - `hydrateMergeConflictEvidence` (src/lib/open-prs-rest.ts), wired in production at
+        `buildOpenPrViews` (src/run-task.ts) — populates `OpenPrView.mergeConflict` for every
+        dirty PR from GitHub's compare API.
+      - `DISPOSITION_RULES` row 7.5a (src/lib/sweep.ts) — the `conflicted` disposition.
+      - `applyDisposition` (src/run-task.ts) — `deps.dispatchFix(pr, { mergeConflict })`.
+      - `FIX_MODE_RULES` row 1 (src/run-task.ts) — the `merge-conflict` mode.
+      - `buildFixPrompt`'s merge-conflict branch (src/run-task.ts) — a full worker prompt carrying
+        merge-not-rebase discipline, both sides' log since merge-base, and the W1-T210 fence
+        against untrusted branch content.
+      - the exhaustion escalation (src/run-task.ts): "The CONFLICTED FIX RUNG (merge-conflict
+        mode, W1-T94/W1-T106) dispatched N bounded fix worker(s)".
+    NOT ONE of those has ever run, because `DEFAULT_SWEEP_POLICY.mergeConflictAdmissionEnabled` is
+    a hardcoded `false` — not a `plan/policy.yaml` row, so there is no env var, CLI flag or config
+    override anywhere. `grep -rn 'mergeConflictAdmission' src/ test/` finds the field, its two
+    reads, and two test files that pass `true` explicitly; production has always passed the
+    default.
+
+    (2) MEASURED IN-PROCESS, ON THE SHAPE THAT ACTUALLY CONFLICTED. Driving the REAL
+    `deriveDisposition` with the real evidence shape observed on this repo overnight — two PRs each
+    ADDING one `"path": N` key to `scripts/source-size-baseline.json`, zero deletions on both
+    sides, evidence fully captured:
+        isPureConcurrentAddition: true
+        flag OFF -> blocked-ambiguous  (escalate to a human; no worker)
+        flag ON  -> conflicted         (dispatching the merge-conflict fix mode)
+    One boolean separates "wake the operator" from "dispatch the worker that already exists".
+
+    (3) THE SEMANTIC PREDICATE W1-T984 WAS WAITING FOR CANNOT LIVE IN sweep.ts, AND THAT IS WHY
+    THIS SAT. W1-T984's design note viii(b) deferred admission until "the semantic predicate
+    exists" — one that could tell a genuine disjoint addition from an add/add collision. That
+    predicate needs the two sides' actual added LINES. The evidence here has none:
+    `hydrateMergeConflictEvidence` builds from GitHub's COMPARE API, whose per-file answer is a
+    DELETION COUNT since the merge base, and whose file set is deliberately a SUPERSET of git's
+    real conflict set (that producer's own header says so). No hunk is fetched, so disjointness is
+    not derivable at this layer by any predicate anyone could write. The one component in this
+    system that holds the conflict hunks is the dispatched fix worker, which merges in a worktree
+    and reads the markers — and W1-T94's design already assigns it exactly that role ("the design
+    intends the dispatched fix worker to be the SECOND, semantic gate"). The predicate W1-T984
+    asked for IS the worker. Waiting for a textual one was waiting for something structurally
+    unavailable.
+
+    (4) WHAT MAKES ADMITTING SAFE IS THE FENCE DOWNSTREAM — the argument W1-T984 never wrote down,
+    and the reason "a wrong auto-resolution is worse than a strand" does not block this. A worker
+    that resolves WRONGLY cannot merge the result. Its push creates a NEW HEAD; `remudero-review`
+    is a required COMMIT STATUS, per-sha, and repository branch protection requires it beside
+    `ci-gate` (`.github/workflows/ci-gate.yml`'s own header states the required pair). A resolved
+    head therefore carries NO verdict and cannot merge until a fresh review posts and PASSES. A
+    resolution that clobbered the PR's own work fails that review on the PR's own proofs, which
+    must hit head. The worst case of admitting is a red PR that escalates — the SAME place a dirty
+    PR lands today, minus one strike. The rule is still enforced; it is enforced by the gate, which
+    can SEE the resolution, instead of by an admission predicate, which cannot.
+
+    (5) THE SECOND DEFECT, FOUND BY THE SAME TRACE AND FIXED HERE BECAUSE IT IS THE SAME ROW PAIR.
+    The fall-through refusal row renders one FIXED sentence: "merge conflict (mergeState dirty)
+    involves a deletion (or no file evidence was captured)". For the shape in (2) — evidence
+    captured, zero deletions on both sides — BOTH disjuncts are false, and the PR is escalated to a
+    human with a sentence that sends them hunting a deletion that is not there. This is not
+    cosmetic: it is the only text an operator gets, and it names the wrong cause. The row now
+    derives which disjunct fired, including the arm that never existed (admission disabled).
+
+    (6) SCOPE, NAMED SO IT IS NOT RE-FILED. (a) `isPureConcurrentAddition` is UNCHANGED — this
+    task changes whether it is CONSULTED, never what it admits, so the three reconstructed
+    deletion cases from W1-T984's own corpus stay refused. (b) The fix worker's prompt is
+    UNCHANGED; it already carries the refusal instruction this design relies on. (c) The strike cap
+    and the exhaustion escalation are UNCHANGED. (d) `plan/policy.yaml` is deliberately NOT
+    declared, keeping W1-T984's own choice: the flag stays a hardcoded literal in
+    `DEFAULT_SWEEP_POLICY`. (e) A conflict resolver that reasons about a STRUCTURED file's keys
+    (the size-baseline shape specifically) is a separate task and is not attempted here — the
+    general worker handles it or refuses it.
+  acceptance:
+    - claim: "a dirty PR whose conflict shows zero deletions on both sides with evidence captured is dispatched to the merge-conflict fix rung instead of escalated to a human"
+      proof: "unit test: test/sweep-conflicted-disposition.test.ts"
+    - claim: "the size-baseline shape that actually conflicted on this repo now disposes conflicted, and setting the flag false restores the old escalation so the conjunct is load-bearing in both directions"
+      proof: "unit test: test/sweep-conflicted-disposition.test.ts"
+    - claim: "every reconstructed conflict involving a deletion is still refused at the new default, so turning admission on widens nothing that isPureConcurrentAddition admits"
+      proof: "unit test: test/sweep-conflicted-disposition.test.ts"
+    - claim: "a refusal names the disjunct that actually fired and never asserts a deletion the captured evidence does not show"
+      proof: "unit test: test/sweep-conflicted-disposition.test.ts"
+    - claim: "the admission flag ships enabled rather than as a hardcoded false nothing in production could override"
+      proof: "grep: mergeConflictAdmissionEnabled: true in src/lib/sweep.ts"
+    - claim: "the refusal cause is derived by a named function rather than a fixed sentence asserting both disjuncts at once"
+      proof: "grep: conflictRefusalCause in src/lib/sweep.ts"
+  risk: high
+  band_meaning: blast-radius
+  origin: trace
+  plan_refs: ["W1-T94", "W1-T106", "W1-T984", "W1-T490"]
+  files: [src/lib/sweep.ts, test/sweep-conflicted-disposition.test.ts, scripts/source-size-baseline.json]
+  status: queued
+  attempts: 0
+  note: |
+    risk:high, band_meaning: blast-radius — NOT Rule 19 span. The span is one module and its own
+    suite. The band is about what the change DOES: it lets the fleet dispatch workers onto
+    conflicted PRs unattended for the first time. Rationale (4) is the argument that this is
+    bounded, and it rests on a fact worth re-verifying rather than trusting from this shard:
+    `remudero-review` is a REQUIRED, PER-SHA commit status, so a resolved head cannot merge on a
+    stale verdict.
+
+    `files:` DERIVED FROM SOURCE. `DEFAULT_SWEEP_POLICY`, `SweepPolicy`, `DISPOSITION_RULES`,
+    `isPureConcurrentAddition` and the refusal row are ALL in `src/lib/sweep.ts`; its declared
+    suite is `test/sweep-conflicted-disposition.test.ts`, which is where W1-T984 pinned the
+    behaviour this task changes. Nothing in `src/run-task.ts` or `src/lib/open-prs-rest.ts` needs
+    editing — the dispatch, the mode, the prompt and the producer are all already correct and are
+    reached the moment the row admits.
+
+    W1-T984's `acceptance 2` test PINNED the old default and is REWRITTEN here rather than left
+    behind: its contract ("with the flag OFF, all five dispose blocked-ambiguous") is precisely
+    what this task changes, so a stale pin would be a false green. Its three deletion cases are
+    kept, asserting the same refusal at the NEW default.
+
+    `scripts/source-size-baseline.json` IS DECLARED because the doc this change adds to
+    `src/lib/sweep.ts` grows it past its recorded ceiling (8445 -> 8501), and the ratchet's own
+    remedy text says recording is the ordinary outcome for deliberate growth. It is exempt from
+    Standing rule 25's instrument-isolation rule per W1-T2526 — a size ledger records how long a
+    file is and grades no falsifier. It adds no Rule 19 concern here either: this task's band is
+    blast-radius, which does not compute span.

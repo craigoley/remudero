@@ -362,6 +362,33 @@ export function isPureConcurrentAddition(files: readonly ConflictFileDiff[]): bo
 }
 
 /**
+ * W1-T2536 — WHICH of the refusal row's disjuncts actually fired, as a phrase for that row's own
+ * `reason`. Before this, the row said "involves a deletion (or no file evidence was captured)"
+ * UNCONDITIONALLY, so a conflict with FULL evidence and ZERO deletions on both sides — the
+ * dominant real shape on this repo, two PRs each adding a different key to
+ * `scripts/source-size-baseline.json` — was refused by a sentence in which BOTH disjuncts were
+ * false, sending every reader to look for a deletion that was not there.
+ *
+ * THE THIRD ARM IS THE ONE THAT DID NOT EXIST. A conflict can reach this row with evidence
+ * captured and no deletions anywhere, and the reason is then neither disjunct: it is that
+ * {@link SweepPolicy.mergeConflictAdmissionEnabled} is off. That arm is UNREACHABLE at the
+ * shipped default (W1-T2536 turns admission on, so the row above claims exactly this population)
+ * and is written anyway — the flag is policy DATA, an operator may set it false, and a refusal
+ * that then re-acquired the old lie is the defect this helper exists to remove.
+ */
+export function conflictRefusalCause(
+  files: readonly ConflictFileDiff[],
+  policy: Pick<SweepPolicy, "mergeConflictAdmissionEnabled">,
+): string {
+  if (files.length === 0) return "no file evidence was captured";
+  if (files.some((f) => f.oursDeleted > 0 || f.theirsDeleted > 0)) return "involves a deletion";
+  if (policy.mergeConflictAdmissionEnabled !== true) {
+    return "auto-resolution admission is disabled (mergeConflictAdmissionEnabled)";
+  }
+  return "not classifiable as a pure concurrent addition";
+}
+
+/**
  * W1-T78 policy (policy-as-data, rule 2 — never hardcoded): how many strikes a
  * fix-rung RE-DISPATCH gets once an operator answers a clarification
  * question. Nested inside {@link SweepPolicy} — the SAME config object every
@@ -599,13 +626,40 @@ export interface SweepPolicy {
    * pure-concurrent-addition from an add/add collision (two sides adding the SAME PATH with
    * DIFFERENT content, where the merge-base has no version of the file at all, so both deletion
    * counts are structurally zero — see that predicate's own doc). Admitting on that untrusted
-   * signal is a judgement call this task has no evidence to make (rationale (5)/(6)): the design
-   * intends the dispatched fix worker to be the SECOND, semantic gate, but that refusal path has
-   * never once been exercised, and the only two reconstructible admits on record are BOTH
-   * semantic collisions. `false` (the default) keeps disposition byte-for-byte what it was before
-   * evidence ever flowed: a dirty PR still falls to the `blocked-ambiguous` row beneath this one,
-   * now naming the real conflicting paths instead of "none captured", but never auto-dispatched.
-   * `true` is a LATER task's call (design note viii(b)), once the semantic predicate exists.
+   * signal is a judgement call W1-T984 had no evidence to make (rationale (5)/(6)): the design
+   * intends the dispatched fix worker to be the SECOND, semantic gate, but at that time that
+   * refusal path had never once been exercised, and the only two reconstructible admits on record
+   * were BOTH semantic collisions. W1-T984 therefore shipped the producer with this flag OFF and
+   * named turning it on "a LATER task's call (design note viii(b)), once the semantic predicate
+   * exists".
+   *
+   * W1-T2536 IS THAT TASK, AND ITS ANSWER IS THAT THE SEMANTIC PREDICATE CANNOT LIVE HERE. The
+   * discriminator W1-T984 wanted — "are the two sides' added lines disjoint" — is not derivable
+   * from this evidence at all: `hydrateMergeConflictEvidence` (lib/open-prs-rest.ts) builds it
+   * from GitHub's COMPARE API, whose per-file answer is "how many lines did each side delete
+   * since the merge base" — a SUPERSET of git's real conflict set that never carries a HUNK.
+   * Only something holding the actual conflict hunks can decide disjointness, and in this system
+   * exactly one thing does: the dispatched fix worker, which merges in a worktree and reads the
+   * markers. The predicate W1-T984 asked for IS the worker; keeping the flag off until a purely
+   * textual one appeared was waiting for something structurally unavailable.
+   *
+   * WHAT MAKES ADMITTING SAFE IS THE FENCE DOWNSTREAM, NOT THE PREDICATE UPSTREAM — the argument
+   * W1-T984 never wrote down. A worker that resolves WRONGLY cannot merge the result: its push
+   * creates a NEW HEAD, and `remudero-review` is a required COMMIT STATUS (per-sha; branch
+   * protection requires it beside `ci-gate`), so the resolved head carries no verdict at all and
+   * is blocked until a fresh review posts AND passes. A resolution that clobbered the PR's own
+   * work fails that review on the PR's own proofs, which must hit head. So the worst case of
+   * admitting is a red PR that escalates — the SAME place a dirty PR lands today, minus one
+   * strike. "A wrong auto-resolution is worse than a strand" (W1-T94 design note iii) stays true
+   * and stays enforced; it is enforced by the gate, which can SEE the resolution, rather than by
+   * an admission predicate, which cannot.
+   *
+   * THE COST OF LEAVING IT OFF WAS MEASURED, NOT ASSUMED. With the flag off, the row below is the
+   * one every dirty PR reaches, and its refusal named a deletion unconditionally. On 2026-08-30
+   * the dominant real conflict shape on this repo was two PRs each ADDING a different `"path": N`
+   * key to `scripts/source-size-baseline.json` — zero deletions on BOTH sides, full evidence
+   * captured — so every one of them was refused by a sentence whose every disjunct was false.
+   * That row now names which disjunct actually fired (see its own comment).
    *
    * NET-NEW, and deliberately NOT sourced from `plan/policy.yaml` — the same choice
    * `conceptCoexistenceEnabled` immediately above already made and recorded: a hardcoded literal
@@ -817,9 +871,11 @@ export const DEFAULT_SWEEP_POLICY: SweepPolicy = {
   // W1-T932: NOT sourced from plan/policy.yaml (see the field's own doc, above) — a hardcoded
   // literal, off, exactly like `pendingCeilingMinutes` above it in this same object.
   conceptCoexistenceEnabled: false,
-  // W1-T984: NOT sourced from plan/policy.yaml (see the field's own doc, above) — a hardcoded
-  // literal, off, the same choice `conceptCoexistenceEnabled` just above already made.
-  mergeConflictAdmissionEnabled: false,
+  // W1-T984 filed this OFF; W1-T2536 turns it ON — see the field's own doc for why the semantic
+  // predicate W1-T984 waited for cannot live here, and what fences a wrong resolution instead.
+  // Still NOT sourced from plan/policy.yaml: a hardcoded literal, the same choice
+  // `conceptCoexistenceEnabled` just above already made.
+  mergeConflictAdmissionEnabled: true,
   // W1-T2345: NOT sourced from plan/policy.yaml (see the field's own doc, above) — a hardcoded
   // literal, 50, derived against the merge-time population measured 2026-08-26 (see the field's
   // own doc for the full derivation), never a round number picked because it looked safe.
@@ -3291,12 +3347,12 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // tried".
     disposition: "blocked-ambiguous",
     when: (pr) => pr.mergeState === "dirty",
-    reason: (pr) => {
+    reason: (pr, policy) => {
       const files = pr.mergeConflict?.files ?? [];
       const fileList = files.map((f) => `${f.path} (ours -${f.oursDeleted}, theirs -${f.theirsDeleted})`).join(", ");
       return (
-        `merge conflict (mergeState dirty) involves a deletion (or no file evidence was captured) — ` +
-        `never auto-resolved — files: ${files.length > 0 ? fileList : "none captured"} — escalating`
+        `merge conflict (mergeState dirty) — ${conflictRefusalCause(files, policy)} — never auto-resolved — ` +
+        `files: ${files.length > 0 ? fileList : "none captured"} — escalating`
       );
     },
   },
