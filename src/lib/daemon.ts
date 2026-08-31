@@ -1874,6 +1874,12 @@ export const DEFAULT_MAX_SPAWN_INFRA_BACKOFF_MS = 30 * 60_000;
  * task's own real failure (any verdict other than `blocked_transient`) both strikes/escalates
  * exactly as before AND resets this streak to its floor in the same step (see the `verdict !==
  * "blocked_transient"` branch below) — a build failure is never masked as a window.
+ *
+ * KIND: BACKSTOP (`test/bound-kind-declared.test.ts`'s vocabulary, W1-T1266), not a primary
+ * control — the streak floor above is what normally stops an ordinary blip from holding
+ * anything at all, and most real windows resolve inside a few small doublings; this ceiling
+ * exists only so a window closed unusually long cannot make the hold unbounded, exactly the
+ * `DEFAULT_MAX_SPAWN_INFRA_BACKOFF_MS` cap just above does not bite on an ordinary spawn retry.
  */
 export const DEFAULT_MAX_API_WINDOW_HOLD_MS = 30 * 60_000;
 
