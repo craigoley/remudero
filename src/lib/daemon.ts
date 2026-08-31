@@ -1766,17 +1766,43 @@ function startInFlightTicker(
           // site (the top-of-iteration call cannot run again until this ticker is stopped, and
           // `runSweep`'s own cross-call mutex, cited at the top-of-iteration call site's
           // comment, serializes any theoretical overlap besides).
+          //
+          // W1-T2519 (THE REVIEW RUNG MUST HALT EXACTLY LIKE DISPATCH DOES): the retrigger above
+          // is what makes the review rung's cadence independent of a slow lane — but "independent
+          // of the lanes" must not mean "independent of the operator". `deps.checkStop`/
+          // `deps.checkPause` already gate the once-per-iteration `deps.sweep()` call at the top
+          // of this loop (a STOP/PAUSE read there is checked BEFORE that call is ever reached —
+          // see `runDaemon`'s own STOP/PAUSE checks, above `runGatedSweep`'s top-of-iteration call
+          // site). A hold requested WHILE this ticker is running previously had no equivalent: the
+          // retrigger fired on its clock alone, so an operator's STOP/PAUSE stopped new dispatch
+          // admission but left the review rung posting regardless — the exact "operator's halt
+          // stops dispatch and leaves reviews running" failure this task exists to close. Reading
+          // both here, on every tick this ticker runs (never only "dispatch" — a long "retro"
+          // phase holds the loop the same way and threads the SAME `sweepRetrigger`), closes that
+          // gap without adding a new latch: the pure predicates are read exactly as they already
+          // are elsewhere in this file. A halt withholds only a NEW full sweep this ticker would
+          // otherwise have started — it can NEVER abort the phase's own admitted/running work (the
+          // drain-and-hold guarantee `checkStop`/`checkPause` already carry everywhere else in
+          // this file is untouched: `runOne` is never touched by this ticker). `lastRunAtMs` is
+          // deliberately NOT advanced when held — the elapsed-time budget keeps accruing while
+          // halted, so the very next unhalted tick fires immediately rather than waiting out a
+          // fresh interval on top of the hold.
           if (sweepRetrigger && deps.sweep) {
             const nowMs = (deps.now ?? (() => new Date()))().getTime();
             const last = sweepRetrigger.state.lastRunAtMs;
             if (last === undefined || nowMs - last >= sweepRetrigger.intervalMs) {
-              sweepRetrigger.state.lastRunAtMs = nowMs;
-              log("daemon.sweep.retriggered", {
-                phase,
-                poll_interval_ms: pollIntervalMs,
-                interval_ms: sweepRetrigger.intervalMs,
-              });
-              await runGatedSweep(deps, pollIntervalMs, sweepRetrigger.sweepWallClockBoundMs, log, diskHeadroomLatch);
+              const halt = deps.checkStop?.() ?? deps.checkPause?.();
+              if (halt) {
+                log("daemon.sweep.retrigger_held", { phase, detail: halt });
+              } else {
+                sweepRetrigger.state.lastRunAtMs = nowMs;
+                log("daemon.sweep.retriggered", {
+                  phase,
+                  poll_interval_ms: pollIntervalMs,
+                  interval_ms: sweepRetrigger.intervalMs,
+                });
+                await runGatedSweep(deps, pollIntervalMs, sweepRetrigger.sweepWallClockBoundMs, log, diskHeadroomLatch);
+              }
             }
           }
           try {
