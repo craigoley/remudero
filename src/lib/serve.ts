@@ -761,6 +761,7 @@ export function renderShellHtml(
   .ask-type-badge.ask-type-blocked-pr {
     background: rgba(255, 107, 107, 0.14); color: var(--status-blocked); border-color: var(--status-blocked);
   }
+  /* W1-T2497: THE MAILBOX -- inline, same <style> block (no stylesheet of its own). */ .mailbox-heading { font-size: 0.85rem; margin: 0.6rem 0 0.25rem; display: flex; align-items: center; gap: 0.4em; } .mailbox-unread-count:empty { display: none; } .mailbox-unread-count { display: inline-block; min-width: 1.2em; padding: 0 0.4em; border-radius: 999px; text-align: center; font-size: 0.7rem; font-weight: 700; background: var(--status-needs-human); color: #241a02; } .mailbox { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.5rem; } .mailbox-empty { font-size: 0.85rem; opacity: 0.7; margin: 0.25rem 0; } .mailbox-thread { list-style: none; border: 1px solid var(--border, #333); border-radius: 6px; padding: 0.4rem 0.6rem; } .mailbox-thread-unread { border-color: var(--status-needs-human); } .mailbox-thread-head { display: flex; align-items: center; gap: 0.4em; } .mailbox-unread-dot { width: 0.5em; height: 0.5em; border-radius: 999px; background: var(--status-needs-human); display: inline-block; } .mailbox-messages { list-style: none; margin: 0.3rem 0; padding: 0; display: flex; flex-direction: column; gap: 0.2rem; } .mailbox-message { font-size: 0.85rem; } .mailbox-sender { font-weight: 700; margin-right: 0.4em; } .mailbox-reply { display: flex; gap: 0.4em; margin-top: 0.3rem; }
   #stale-badge {
     display: inline-block; margin: 0.25rem 0 0; padding: 0.15rem 0.5rem; border-radius: 999px;
     font-size: 0.75rem; font-weight: 600; background: var(--status-needs-human); color: #241a02;
@@ -1144,6 +1145,7 @@ export function renderShellHtml(
   </button></h2>
   <div id="needs-me-body">
     <ul id="needs-me-list" class="row-list">${skeletonRows(2)}</ul>
+    <!-- W1-T2497: THE MAILBOX -- same escalations above, as a thread; ADDITIVE, needs-me-list untouched. --><h3 class="mailbox-heading">Mailbox<span id="mailbox-unread-count" class="mailbox-unread-count" aria-label="unread threads"></span></h3><div id="mailbox" class="mailbox" aria-label="Mailbox"></div>
   </div>
 </section>
 
@@ -1487,6 +1489,7 @@ export function renderShellHtml(
   // claim - unknown is reported as unknown, never upgraded to "done".
   const WRITE_ACK = {
     "/v1/escalation/mark-handled": { kind: "done", text: "Marked handled — the escalation issue is closed. The row clears on the next refresh." },
+    "/v1/escalation/reply": { kind: "done", text: "Reply sent — filed to the thread, and now in the feedback queue for triage." }, // W1-T2497
     "/v1/feedback/decision": { kind: "done", text: "Decision recorded — the entry moves out of NEEDS ME on the next refresh." },
     "/v1/inbox/approve": { kind: "done", text: "Proposal approved — the drafted tasks are filed." },
     "/v1/inbox/reframe": { kind: "done", text: "Reframe recorded — your wording is saved against the proposal." },
@@ -2126,6 +2129,7 @@ export function renderShellHtml(
     const tasks = Array.from(tasksById.values());
     const nowIds = renderNow(tasks);
     const needsMeIds = renderNeedsMe(tasks, latestFeedbackEntries, latestInboxReady, latestInboxDrafting);
+    renderMailbox(tasks, latestFeedbackEntries);
     renderAccepted(latestFeedbackEntries);
     const upNextIds = renderUpNext(latestUpNextCards);
     const recentIds = renderRecent(latestRecentEntries);
@@ -2753,6 +2757,30 @@ export function renderShellHtml(
       \`<span class="detail">blocked-PR ledger entries unverified -- \${escapeHtml(reason)}</span>\`
     );
   }
+  // ── MAILBOX (W1-T2497): same escalations, as threads, ADDITIVE alongside needs-me-list -- no new route/file read, matched by (taskId, class) PREFIX.
+  const MAILBOX_SENDER = { escalation: "Fleet", reply: "You" };
+  function loadMailboxState() { try { const p = JSON.parse(localStorage.getItem("rmd-console-mailbox-v1")); return { read: Array.isArray(p && p.read) ? p.read : [], resolved: Array.isArray(p && p.resolved) ? p.resolved : [] }; } catch { return { read: [], resolved: [] }; /* corrupt/missing storage reads as empty, not an error */ } }
+  function saveMailboxState(state) { try { localStorage.setItem("rmd-console-mailbox-v1", JSON.stringify(state)); } catch { /* full/blocked storage must not break the click */ } }
+  function mailboxEscalationClass(title) { const m = title ? /^\\[(\\w+)\\]/.exec(title) : null; return m ? m[1] : "UNKNOWN"; // \`[CLASS]\` off \`escalationTitle\`'s prefix
+  }
+  function mailboxThreadKey(taskId, cls) { return \`thread:\${taskId}::\${cls}::\`; // the PREFIX every reply to this concern shares
+  }
+  function buildMailboxThreads(tasks, replies) { if (!Array.isArray(tasks) || (replies !== undefined && replies !== null && !Array.isArray(replies))) return null; const safeReplies = Array.isArray(replies) ? replies : []; const threads = []; for (const t of tasks) { if (!t || !t.needsHuman || !t.escalationTitle || !t.taskId) continue; const cls = mailboxEscalationClass(t.escalationTitle); const key = mailboxThreadKey(t.taskId, cls); const messages = [{ role: "escalation", sender: MAILBOX_SENDER.escalation, body: t.escalationTitle, ts: t.escalationOpenedAt || "" }]; for (const r of safeReplies) if (r && typeof r.thread_id === "string" && r.thread_id.indexOf(key) === 0) messages.push({ role: "reply", sender: MAILBOX_SENDER.reply, body: r.raw || "", ts: r.ts || "" }); messages.sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0)); threads.push({ threadId: key, taskId: t.taskId, escClass: cls, issueUrl: t.escalationIssueUrl, messages, latestTs: messages[messages.length - 1].ts }); } threads.sort((a, b) => (a.latestTs < b.latestTs ? 1 : a.latestTs > b.latestTs ? -1 : 0)); return threads; // one thread per NEEDS ME row, latest-message order; shaped-wrong returns null
+  }
+  function mailboxVisibleThreads(threads, resolvedIds, includeResolved) { if (includeResolved) return threads; const resolved = new Set(resolvedIds || []); return threads.filter((t) => !resolved.has(t.threadId)); // resolved hidden, never deleted
+  }
+  function mailboxUnreadCount(threads, readIds) { const read = new Set(readIds || []); return threads.filter((t) => !read.has(t.threadId)).length; // THREADS, not messages
+  }
+  function mailboxMarkRead(readIds, threadId) { const read = new Set(readIds || []); read.add(threadId); return Array.from(read); // pure, never mutates readIds
+  }
+  function mailboxMarkResolved(resolvedIds, threadId) { const resolved = new Set(resolvedIds || []); resolved.add(threadId); return Array.from(resolved);
+  }
+  function mailboxThreadsHtml(threads, readIds) { if (!Array.isArray(threads)) return ""; if (threads.length === 0) return \`<p class="mailbox-empty">no open threads</p>\`; const read = new Set(readIds || []); return threads.map((t) => { const unread = !read.has(t.threadId); const issueLink = t.issueUrl ? \`<a href="\${escapeHtml(t.issueUrl)}" target="_blank" rel="noopener noreferrer">view issue</a>\` : ""; const messagesHtml = t.messages.map((m) => \`<li class="mailbox-message mailbox-message-\${m.role}"><span class="mailbox-sender">\${escapeHtml(m.sender)}</span><span class="mailbox-body">\${escapeHtml(m.body)}</span></li>\`).join(""); return \`<li class="mailbox-thread\${unread ? " mailbox-thread-unread" : ""}" data-thread-id="\${escapeHtml(t.threadId)}"><div class="mailbox-thread-head"><span class="task-id">\${escapeHtml(t.taskId)}</span>\${unread ? '<span class="mailbox-unread-dot" aria-label="unread"></span>' : ""}</div><ul class="mailbox-messages">\${messagesHtml}</ul>\` + \`<span class="btn-row">\${issueLink}<button type="button" class="mailbox-open"\${unread ? "" : " disabled"} data-thread-id="\${escapeHtml(t.threadId)}">Open</button><button type="button" class="mailbox-resolve" data-thread-id="\${escapeHtml(t.threadId)}">Resolve</button></span>\` + \`<form class="mailbox-reply" data-task-id="\${escapeHtml(t.taskId)}" data-class="\${escapeHtml(t.escClass)}"><input type="text" placeholder="Reply…" /><button type="submit"\${writeGateAttrs()}>Reply</button></form></li>\`; }).join(""); // ALREADY-BUILT threads as markup; shaped-wrong draws NOTHING
+  }
+  function mailboxHtml(tasks, replies, readIds, resolvedIds, includeResolved, existingRowsHtml) { let inner = ""; try { const threads = buildMailboxThreads(tasks, replies); inner = threads === null ? "" : mailboxThreadsHtml(mailboxVisibleThreads(threads, resolvedIds, includeResolved), readIds); } catch { inner = ""; /* unreachable feeds degrade to existingRowsHtml below, never a thrown error */ } return inner || existingRowsHtml || "";
+  }
+  let mailboxState = loadMailboxState();
+  function renderMailbox(tasks, feedbackEntries) { const el = document.getElementById("mailbox"); const list = document.getElementById("needs-me-list"); if (el) el.innerHTML = mailboxHtml(tasks, feedbackEntries, mailboxState.read, mailboxState.resolved, false, list ? list.innerHTML : ""); const badge = document.getElementById("mailbox-unread-count"); if (!badge) return; const threads = buildMailboxThreads(tasks, feedbackEntries); const count = mailboxUnreadCount(threads === null ? [] : mailboxVisibleThreads(threads, mailboxState.resolved, false), mailboxState.read); badge.textContent = count > 0 ? String(count) : ""; }
   function renderNeedsMe(tasks, feedbackEntries, inboxReady, inboxDrafting) {
     const rows = [];
     const shown = new Set();
@@ -3721,6 +3749,10 @@ export function renderShellHtml(
       refreshAll();
     }
   });
+
+  // ── MAILBOX write-actions (W1-T2497) -- Open/Resolve are read-state, no write token needed. ──
+  document.getElementById("mailbox").addEventListener("click", (e) => { const openBtn = e.target.closest(".mailbox-open"); const resolveBtn = e.target.closest(".mailbox-resolve"); if (openBtn) mailboxState = { ...mailboxState, read: mailboxMarkRead(mailboxState.read, openBtn.dataset.threadId) }; else if (resolveBtn) mailboxState = { ...mailboxState, resolved: mailboxMarkResolved(mailboxState.resolved, resolveBtn.dataset.threadId) }; else return; saveMailboxState(mailboxState); renderMailbox(Array.from(tasksById.values()), latestFeedbackEntries); });
+  document.getElementById("mailbox").addEventListener("submit", async (e) => { const replyForm = e.target.closest(".mailbox-reply"); if (!replyForm) return; e.preventDefault(); if (!hasWriteScope) return; const input = replyForm.querySelector("input"); const text = input.value.trim(); if (!text) return; await postJson("/v1/escalation/reply", { taskId: replyForm.dataset.taskId, class: replyForm.dataset.class, text }); input.value = ""; refreshAll(); });
 
   // ── UP NEXT write-actions (fb-1784988460437-9daa9b): Run a queued task, Drain now ──────
   // Both reuse fleet control's OWN arm-then-confirm discipline (stop-btn, below): a single
@@ -4896,10 +4928,8 @@ export function renderShellHtml(
 </html>
 `;
 }
-
 /** What {@link resolveConsoleSha} reports when the sha genuinely cannot be resolved. */
 export const CONSOLE_SHA_UNKNOWN = "unknown";
-
 /**
  * The sha of the CODE THIS CONSOLE PROCESS LOADED — resolved ONCE, from the directory the running
  * module was loaded from (`import.meta.url`), never from cwd and NEVER re-read per request.
@@ -4931,7 +4961,6 @@ export function resolveConsoleSha(
     return CONSOLE_SHA_UNKNOWN;
   }
 }
-
 /**
  * W1-T2229: `bootSha` (captured once, {@link resolveConsoleSha}) vs `currentSha` (the SAME
  * primitive called again, fresh, at the moment this runs) — the whole trigger design (i) asks
@@ -4946,7 +4975,6 @@ export function isConsoleCodeStale(bootSha: string, currentSha: string): boolean
   if (bootSha === CONSOLE_SHA_UNKNOWN || currentSha === CONSOLE_SHA_UNKNOWN) return false;
   return bootSha !== currentSha;
 }
-
 /** {@link gateStaleCodeExit}'s constructor deps — every side effect injectable, same discipline
  *  {@link gatePrewarmOnClients} already follows for this module's other refcount gate. */
 export interface StaleCodeExitDeps {
@@ -4962,7 +4990,6 @@ export interface StaleCodeExitDeps {
   /** One ledger line naming the decision, mirroring {@link ServiceOptions.log}. */
   log?: (step: string, extra?: Record<string, unknown>) => void;
 }
-
 /** What {@link gateStaleCodeExit} hands back — a wrapper for the console's ONE SSE route and a
  *  wrapper for each HIGH-tier write route, both feeding the SAME internal decision. */
 export interface StaleCodeExitGate {
@@ -4974,7 +5001,6 @@ export interface StaleCodeExitGate {
    *  finishing or the connection closing — counts as in-flight. */
   wrapWrite(route: Route): Route;
 }
-
 /**
  * W1-T2229 design: the console notices its OWN code is stale and ends its own process — at a
  * moment that costs nothing, never on a schedule. `RestartPolicy: unless-stopped` (rationale (2),
@@ -5006,7 +5032,6 @@ export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
   const log = deps.log ?? (() => {});
   let clients = 0;
   let inFlightWrites = 0;
-
   const maybeExit = (): void => {
     if (clients !== 0 || inFlightWrites !== 0) return;
     const currentSha = resolveCurrentSha();
@@ -5014,7 +5039,6 @@ export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
     log("serve.stale_code_exit", { bootSha: deps.bootSha, currentSha, clients, inFlightWrites });
     exit(0);
   };
-
   return {
     wrapSse(route) {
       return {
@@ -5061,7 +5085,6 @@ export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
     },
   };
 }
-
 /**
  * `GET /v1/version` — read-scoped, and the value is the one captured at server start (a closure
  * over `sha`, not a fresh resolution). READ scope deliberately: a commit sha is not a secret, and
@@ -5090,7 +5113,6 @@ export function buildVersionRoute(sha: string): Route {
     },
   };
 }
-
 /**
  * The "github credential" glance chip's inner text — rendered SERVER-SIDE, the same
  * "no client-script risk" discipline the sibling "console build" chip already follows (see that
@@ -5116,7 +5138,6 @@ function renderGithubCredentialHtml(state: GithubCredentialState): string {
   }
   return `<span class="gh-credential-ok">refreshing (App)</span>`;
 }
-
 /**
  * `GET /` — the shell above, read-scoped like every other route on this surface, but ALSO
  * accepting the token via `?token=` (allowQueryToken). A browser NAVIGATION to `/?token=<read>`
@@ -5163,7 +5184,6 @@ function buildShellRoute(
     },
   };
 }
-
 /**
  * `GET /v1/auth/scope` — W1-T222's write-scope PROBE, nothing else. A plain, side-effect-free
  * GET gated `scope: "write"`: it 200s for a write-token caller and 403s (service.ts's own
@@ -5189,7 +5209,6 @@ function buildAuthScopeRoute(): Route {
     },
   };
 }
-
 /**
  * `GET /v1/console/write-grant` — W1-T2409's in-console "ask", replacing "leave the page and run
  * `rmd console-url --write` in a shell" with one in-page round trip. The write-token panel's own
@@ -5228,7 +5247,6 @@ function buildConsoleWriteGrantRoute(tokens: ServiceTokens): Route {
     },
   };
 }
-
 /**
  * W1-T945: the run-id SHAPE `readWorkerTail` (run-task.ts) validates BEFORE building a path —
  * duplicated here rather than imported, because serve.ts is a lib module and run-task.ts is the
@@ -5240,18 +5258,15 @@ function buildConsoleWriteGrantRoute(tokens: ServiceTokens): Route {
  * `/` or a `.` and therefore cannot escape `state/runs/`.
  */
 const PEEK_RUN_ID_SHAPE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,254}$/;
-
 function isValidPeekRunId(id: string): boolean {
   return PEEK_RUN_ID_SHAPE.test(id);
 }
-
 /** Mirrors run-task.ts's `WORKER_TAIL_MAX_LINES`/`WORKER_TAIL_MAX_BYTES` (duplicated for the
  *  same lib/entrypoint-direction reason as {@link PEEK_RUN_ID_SHAPE}, above) — the response is
  *  capped in BOTH dimensions regardless of what `?lines=` asks for (design note v). */
 const PEEK_MAX_LINES = 500;
 const PEEK_MAX_BYTES = 64 * 1024;
 const PEEK_DEFAULT_LINES = 50;
-
 /**
  * `GET /v1/peek?runId=<id>[&lines=<n>]` — read-scoped, W1-T945: the console's read-only tail
  * reader, the FIRST HTTP route in this codebase to serve raw worker output (design note vi).
@@ -5287,7 +5302,6 @@ export function buildPeekRoute(deps: { root: string; isLive: (runId: string) => 
       const linesRaw = url.searchParams.get("lines");
       const requested = linesRaw === null ? PEEK_DEFAULT_LINES : Number(linesRaw);
       const maxLines = Number.isInteger(requested) && requested > 0 ? Math.min(requested, PEEK_MAX_LINES) : PEEK_DEFAULT_LINES;
-
       const tailPath = join(deps.root, "state", "runs", `${runId}.tail`);
       let raw: string;
       try {
@@ -5306,7 +5320,6 @@ export function buildPeekRoute(deps: { root: string; isLive: (runId: string) => 
     },
   };
 }
-
 /**
  * W1-T493 design (i): the completeness ratchet for SCOPE, `writeRoutesMissingTier`-shaped
  * (service.ts, W1-T404) but over `scope` rather than `tier`. `scope` is REQUIRED on both `Route`
@@ -5327,7 +5340,6 @@ export function routesMissingScopeClassification(
     .filter((r) => r.scope !== "read" && r.scope !== "write")
     .map((r) => (r.method ? `${r.method} ${r.path}` : `GET ${r.path} (sse)`));
 }
-
 /**
  * design (iii-a)'s shape, copied: run {@link routesMissingScopeClassification} and FAIL THE
  * CALLER (throw) rather than merely reporting. Extracted here, callable directly, so its throw
@@ -5340,7 +5352,6 @@ export function assertRoutesScopeComplete(entries: readonly { method?: Method; p
     throw new Error(`route(s) with no declared Scope: ${missing.join(", ")}`);
   }
 }
-
 /** Every REST route `rmd serve` registers — board, panel actions (two-root split, see module header), panel graph, and the shell. Reused verbatim from each module's own exported builder. */
 export function buildServeRoutes(deps: ServeDeps): Route[] {
   // CAPTURED ONCE, HERE. buildServeRoutes runs exactly once per `rmd serve` process, so this is
@@ -5377,7 +5388,6 @@ export function buildServeRoutes(deps: ServeDeps): Route[] {
     inboxRoot: deps.fleetControlRoot,
     ratify: deps.panelGraph.ratify ?? ratifyCliGateway(deps.panelGraph.root, join(deps.fleetControlRoot, "state", "logs")),
   };
-
   const lastSeen = deps.lastSeen ?? createLastSeenStore(lastSeenPath(deps.fleetControlRoot));
   // W1-T500: SAME instance `createService`'s dispatch consults (see ServeDeps.confirmNonces's own
   // doc for why that has to be true) -- {@link buildServeServer} resolves this once and threads it
@@ -5392,7 +5402,6 @@ export function buildServeRoutes(deps: ServeDeps): Route[] {
     now: deps.daemonHealth?.now,
     defaultPollIntervalMs: deps.daemonHealth?.defaultPollIntervalMs,
   };
-
   // W1-T333: `root` defaults to the SAME fleetControlRoot every other console write surface
   // already resolves `state/` against (daemonHealthDeps.diskPath above follows the identical
   // "assembler wires the real root, a test injects its own" split).
@@ -5407,7 +5416,6 @@ export function buildServeRoutes(deps: ServeDeps): Route[] {
     root: deps.accountUsage?.root ?? deps.fleetControlRoot,
     accountFilePath: resolveAccountFilePath(deps.accountUsage?.accountFilePath),
   };
-
   const routes = [
     buildStatusRoute(deps.board, lastSeen),
     buildRecentRoute(deps.board),
@@ -5503,7 +5511,6 @@ export function buildServeRoutes(deps: ServeDeps): Route[] {
     // write token can do.
     { ...makeConfirmNonceRoute(confirmNonces), tier: "low" as const },
   ];
-
   // W1-T404 design (iii): `ci-parity:drift`-shaped completeness, run inside the PRODUCT function
   // (this one), not merely a test — a write-scoped route added here with no declared tier fails
   // the build rather than defaulting quietly. See `assertWriteTiersComplete`'s own doc.
@@ -5513,10 +5520,8 @@ export function buildServeRoutes(deps: ServeDeps): Route[] {
   // tier sibling, as the runtime backstop for whatever the compiler cannot see. See
   // `assertRoutesScopeComplete`'s own doc.
   assertRoutesScopeComplete(routes);
-
   return routes;
 }
-
 /**
  * Build (but do not `.listen()`) the full `rmd serve` HTTP server — one call, every route wired.
  * `deps.board.github`'s background TTL refresh (W1-T154) runs ONLY while at least one console is
@@ -5569,10 +5574,8 @@ export function buildServeServer(deps: ServeDeps): Server {
   server.on("close", prewarm.stop);
   return server;
 }
-
 // ── CLI glue: port + token resolution (kept here, not run-task.ts, so both are unit-testable
 // as pure/near-pure functions rather than only exercisable through the live CLI) ────────────
-
 /**
  * `--port <n>` if present, else `configPort` (the `serve.port` field an install may pin —
  * W1-T152, so the launchd unit and a hand-run `rmd serve` agree on ONE port without the
@@ -5592,12 +5595,10 @@ export function resolveServePort(rest: string[], configPort?: number): number {
   }
   return n;
 }
-
 /** Loopback. The default bind: reachable from this machine and from nothing else. UNCHANGED by
  *  this task — see {@link resolveServeHosts}'s own doc for why the default stays exactly this,
  *  containerized or not: "exposure must be typed, never inherited" (R-4) applies here too. */
 export const DEFAULT_SERVE_HOST = "127.0.0.1";
-
 /**
  * W1-T915: the one wildcard spelling {@link assertBindableHost} will accept — and ONLY when the
  * caller also names {@link CONTAINER_NETWORK_ENV} — because it is the one that matches the actual
@@ -5617,7 +5618,6 @@ export const DEFAULT_SERVE_HOST = "127.0.0.1";
  * gains an address; nothing wider does, and never silently: see {@link CONTAINER_NETWORK_ENV}.
  */
 export const CONTAINER_ALL_INTERFACES_HOST = "0.0.0.0";
-
 /**
  * The env var that must be set to exactly {@link CONTAINER_NETWORK_VALUE} before
  * {@link assertBindableHost} will accept {@link CONTAINER_ALL_INTERFACES_HOST} as a `--host`/
