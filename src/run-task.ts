@@ -126,6 +126,7 @@ import {
 import {
   daemonBoot,
   daemonExitCode,
+  daemonExitCodeForSummary,
   runDaemon,
   type CrashLoopVerdict,
   type DaemonOpts,
@@ -22102,7 +22103,10 @@ export async function daemonCommand(
     // W1-T12b) notices. Headroom exhaustion never reaches here as a
     // stopReason at all — it is an in-process idle state inside runDaemon,
     // never a process exit.
-    return daemonExitCode(summary.stopReason);
+    // W1-T2546: the SUMMARY-aware code, so an environmental refusal (a rate-limit 403, a 5xx,
+    // a transport fault) is not charged to the container crash-restart budget. Every non-`error`
+    // reason still resolves through `daemonExitCode` itself, unchanged.
+    return daemonExitCodeForSummary(summary);
   } finally {
     process.removeListener("SIGINT", onSignal);
     process.removeListener("SIGTERM", onSignal);

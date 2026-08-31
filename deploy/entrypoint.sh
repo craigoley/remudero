@@ -580,6 +580,9 @@ DAEMON_EXIT_STALE=75
 # of this file and asserts they equal the exported constants, so a drift is a red test, not a
 # silent mis-route.
 DAEMON_EXIT_BLOCKED=76
+# THE ENVIRONMENTAL EXIT CODE, DUPLICATED FROM `DAEMON_EXIT_ENVIRONMENTAL` (src/lib/daemon.ts) for
+# the same reason as the two above, and asserted equal by the same test.
+DAEMON_EXIT_ENVIRONMENTAL=77
 # ── WHY 100, MEASURED 2026-08-18 (was 20, sized against a merge rate the fleet has outgrown) ──
 # The note above sizes this budget from a freshness restart happening "ONCE PER MERGE (14 rows in
 # 24 hours)". That rate is gone. MEASURED over the eight complete UTC days ending 2026-08-18, via
@@ -650,6 +653,24 @@ case "$BLOCKED_RESTART_MAX" in
     ;;
 esac
 
+ENVIRONMENTAL_RESTART_MAX="${RMD_ENVIRONMENTAL_RESTART_MAX:-100}"
+case "$ENVIRONMENTAL_RESTART_MAX" in
+  ''|*[!0-9]*)
+    log "RMD_ENVIRONMENTAL_RESTART_MAX is not a whole number — ignoring it and using 100"
+    ENVIRONMENTAL_RESTART_MAX=100
+    ;;
+esac
+# WHY 300s AND NOT 60s: unlike a blocked pass, waiting is the ENTIRE remedy here. A GitHub primary
+# rate limit resets on the hour and a secondary limit has held this account for ~90 minutes, so
+# retrying a minute later just spends another refusal. Five minutes is short enough that a brief
+# 5xx clears quickly and long enough that a real lockout is waited out rather than hammered.
+ENVIRONMENTAL_RESTART_PAUSE_S="${RMD_ENVIRONMENTAL_RESTART_PAUSE_S:-300}"
+case "$ENVIRONMENTAL_RESTART_PAUSE_S" in
+  ''|*[!0-9]*)
+    log "RMD_ENVIRONMENTAL_RESTART_PAUSE_S is not a whole number of seconds — ignoring it and using 300"
+    ENVIRONMENTAL_RESTART_PAUSE_S=300
+    ;;
+esac
 BLOCKED_RESTART_PAUSE_S="${RMD_BLOCKED_RESTART_PAUSE_S:-60}"
 case "$BLOCKED_RESTART_PAUSE_S" in
   '' | *[!0-9]*)
@@ -708,6 +729,7 @@ trap 'forward_signal INT' INT
 # not touch.
 freshness_restarts=0
 blocked_restarts=0
+environmental_restarts=0
 while :; do
   rc=0
   child_rc=""
@@ -754,6 +776,24 @@ while :; do
     continue
   fi
 
+  # W1-T2546 — THE THIRD CASE THAT DOES NOT SPEND THE BUDGET. An environmental refusal (a GitHub
+  # rate-limit 403, a 5xx, a transport fault) is not a crash: nothing about the tree, the plan or
+  # the code is wrong, and the correct response is to WAIT. MEASURED 2026-08-31: two PRs opened
+  # successfully, the pass died reading one back on `API rate limit exceeded ... (HTTP 403)`, and
+  # docker counted the restart. During a lockout window EVERY pass can die that way, so the crash
+  # budget drains at the rate the limiter refuses and the fleet ends up dead with a red board and
+  # no failing check to explain it. Past the cap it falls through to the crash throttle below, so
+  # the bound is REPLACED, never removed.
+  if [ "$rc" -eq "$DAEMON_EXIT_ENVIRONMENTAL" ] && [ "$environmental_restarts" -lt "$ENVIRONMENTAL_RESTART_MAX" ]; then
+    environmental_restarts=$((environmental_restarts + 1))
+    log "exited $rc (environmental) — restart ${environmental_restarts}/${ENVIRONMENTAL_RESTART_MAX} IN-CONTAINER, so docker's on-failure budget is not spent"
+    log "  an environmental refusal is not a crash; sleeping ${ENVIRONMENTAL_RESTART_PAUSE_S}s to let the limit reset, then re-running the fetch/checkout"
+    sleep "$ENVIRONMENTAL_RESTART_PAUSE_S"
+    sync_tree
+    log "checkout: $(git -C "$TREE" rev-parse HEAD) ($REF)"
+    continue
+  fi
+
   # EVERYTHING ELSE EXITS, AND IS COUNTED. A crash (`error` ⇒ 1) reaches here on its first
   # attempt, so `--restart=on-failure:N` bounds a crash loop exactly as it did before this block
   # existed. A freshness storm reaches here only after exhausting the loop above, which is what
@@ -763,6 +803,9 @@ while :; do
   fi
   if [ "$rc" -eq "$DAEMON_EXIT_BLOCKED" ]; then
     log "exited $rc (blocked) — but ${BLOCKED_RESTART_MAX} in-container restarts are already spent, so this one goes to docker's count"
+  fi
+  if [ "$rc" -eq "$DAEMON_EXIT_ENVIRONMENTAL" ]; then
+    log "exited $rc (environmental) — but ${ENVIRONMENTAL_RESTART_MAX} in-container restarts are already spent, so this one goes to docker's count"
   fi
   log "exited $rc — sleeping ${RESTART_THROTTLE_S}s before exiting so the restart is rate-limited, not just counted"
   sleep "$RESTART_THROTTLE_S"
