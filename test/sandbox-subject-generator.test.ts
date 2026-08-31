@@ -74,12 +74,16 @@ test("generateSandboxTask: refuses a shard name the index does not carry", () =>
 
 test("generateSandboxTask: falls back to the per-shard isolating union when no single path reaches the combo", () => {
   const index = realIndex();
-  // architecture.yaml + ci.yaml has no single literal path that selects that exact pair in
-  // one hop (unlike ci.yaml + failures.yaml above, which does via src/lib/review.ts) — this
-  // combo forces the fallback branch design (iii) describes: one isolating path PER shard,
-  // unioned, rather than the single-path shortcut.
-  const subject = generateSandboxTask(index, ["architecture.yaml", "ci.yaml"], 0);
-  assert.deepEqual(subject.selectedShards, ["architecture.yaml", "ci.yaml"]);
+  // ci.yaml + platform.yaml has no single literal path that selects that exact pair in one
+  // hop under the real corpus — this combo forces the fallback branch design (iii)
+  // describes: one isolating path PER shard, unioned, rather than the single-path
+  // shortcut. (W1-T2507: architecture.yaml + ci.yaml, this test's pair before that task,
+  // GAINED a single-hop path — src/lib/open-prs-rest.ts, now owned by exactly those two
+  // shards — once architecture.yaml picked up path-scoped facts migrated out of CLAUDE.md,
+  // so it no longer exercises the fallback branch this test proves; re-pick a still-disjoint
+  // pair here rather than asserting a stale premise.)
+  const subject = generateSandboxTask(index, ["ci.yaml", "platform.yaml"], 0);
+  assert.deepEqual(subject.selectedShards, ["ci.yaml", "platform.yaml"]);
   assert.ok(subject.files.length >= 2, "the fallback must union one path per shard, not reuse a single hop");
 });
 
