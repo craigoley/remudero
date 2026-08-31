@@ -123,7 +123,7 @@ test("unknownArgError lives in src/lib/cli-args.ts and is self-contained (no imp
 
 test("commandSyntax stays anchored in run-task.ts — it is NOT relocated, because it reads the COMMANDS registry", () => {
   assert.match(runTaskSrc, /^function commandSyntax\(name: string\): string \{/m, "commandSyntax must remain declared in run-task.ts");
-  assert.match(runTaskSrc, /return commandSpec\(name\)\.usage/, "commandSyntax must still read the COMMANDS registry via commandSpec");
+  assert.match(runTaskSrc, /return commandSpec\(name\)\.syntax/, "commandSyntax must still read the COMMANDS registry via commandSpec");
 });
 
 // ── Criterion 4: no signature changes, no call sites rewritten ─────────────────────────────

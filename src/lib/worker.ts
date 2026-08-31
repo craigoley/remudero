@@ -2496,6 +2496,60 @@ export function worktreeAdd(
   linkWorktreeNodeModules(repoDir, worktreePath);
 }
 
+/** Does a local branch named `branch` already exist in `repoDir`? A cheap, read-only
+ *  `show-ref` check — unlike `git branch -D` it never touches a ref, so it cannot itself
+ *  contend for `.git/refs`'s lock. Used by {@link uniqueRunBranch}, below. */
+function localBranchExists(repoDir: string, branch: string): boolean {
+  try {
+    execFileSync("git", ["-C", repoDir, "show-ref", "--verify", "--quiet", `refs/heads/${branch}`], {
+      stdio: "pipe",
+    });
+    return true;
+  } catch {
+    return false; // `--quiet` folds ref-absent and any other git failure into one "not found" state
+  }
+}
+
+/**
+ * Pick a `run-<runId>` worktree branch name that is ACTUALLY FREE in `repoDir` right now,
+ * falling back to a numbered suffix (`run-<runId>-2`, `-3`, …) when the plain name is
+ * already taken (W1-T2493).
+ *
+ * WHY A RUN ID CAN BE ASKED FOR TWICE. `runId` identifies a PROCESS across every ledger row
+ * it writes — right for a run id — but a rung built ONCE at daemon boot and re-invoked on
+ * every later poll (`buildInboxDraftHook`/`draftProposalBatch`, run-task.ts) closes over that
+ * SAME string and hands it to this function again on every poll that has work. `worktreeAdd`'s
+ * `-b` correctly refuses an existing branch — that refusal is exactly what stops two lanes
+ * silently sharing a checkout — so without this, the SECOND call in one boot died on
+ * `fatal: a branch named 'run-<runId>' already exists`, deterministically, forever, because
+ * nothing about the requested name ever changed between polls.
+ *
+ * WHY A LEFTOVER BRANCH IS THE COMMON CASE, NOT THE EXCEPTION. `git worktree remove` (see
+ * `worktreeRemove`, below) never deletes the branch a worktree was checked out on — that is
+ * ordinary git, not a bug — so even a worktree that finished CLEANLY leaves `run-<runId>`
+ * behind as a local ref the very next call to this function will find. A worktree reaped after
+ * a crash leaves the identical residue. Either shape must be tolerated without assuming a
+ * clean namespace, which is exactly what re-checking existence per candidate gives for free.
+ *
+ * NEVER FORCES OR REUSES. This function only ever returns a name it just observed to be free
+ * — it does not delete, rename, or `-f` over anything. A genuine race (two lanes computing the
+ * identical candidate at the same instant) is still refused: `worktreeAdd`'s own `-b` throws
+ * if the real `git worktree add` loses that race, exactly as it always has.
+ *
+ * THE RUN ID ITSELF IS NEVER TOUCHED. Only the returned branch NAME can gain a suffix; every
+ * caller keeps passing the original `runId` to `log`/`writeRunLock` unchanged, so ledger
+ * attribution for this process's whole life is byte-identical to before this function existed.
+ */
+export function uniqueRunBranch(repoDir: string, runId: string): string {
+  const base = `run-${runId}`;
+  if (!localBranchExists(repoDir, base)) return base;
+  for (let n = 2; n < 10_000; n++) {
+    const candidate = `${base}-${n}`;
+    if (!localBranchExists(repoDir, candidate)) return candidate;
+  }
+  throw new Error(`uniqueRunBranch: exhausted numbered suffixes for run id ${runId}`);
+}
+
 export function worktreeRemove(repoDir: string, worktreePath: string): void {
   // Reap the worker's SDK scratchpad (lib/worker-scratch.ts) FIRST, while this cwd
   // still exists for the reap to realpath — the git remove below deletes it. The

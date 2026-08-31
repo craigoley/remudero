@@ -152,9 +152,9 @@ test("ACCEPTANCE #3: CHECK_PROOF_EXIT itself gives every outcome a distinct code
 test("ACCEPTANCE #3: the verb's own --help text states the verdict-to-exit-code mapping explicitly", () => {
   const spec = COMMANDS.find((c) => c.name === "check-proof");
   assert.ok(spec, "check-proof must still be a registered command");
-  assert.match(spec!.usage, /EXIT CODE IS THE VERDICT/i);
-  assert.match(spec!.usage, /0 pass/);
-  assert.match(spec!.usage, /1 fail/);
-  assert.match(spec!.usage, /3 no-match/);
-  assert.match(spec!.usage, /never read as fail/i, "the help text must say WHY the codes are kept apart");
+  assert.match(spec!.detail, /EXIT CODE IS THE VERDICT/i);
+  assert.match(spec!.detail, /0 pass/);
+  assert.match(spec!.detail, /1 fail/);
+  assert.match(spec!.detail, /3 no-match/);
+  assert.match(spec!.detail, /never read as fail/i, "the help text must say WHY the codes are kept apart");
 });
