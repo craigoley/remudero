@@ -1,0 +1,79 @@
+- id: W1-T2526
+  title: "A PER-FILE SIZE LEDGER CANNOT BE MAINTAINED WITHOUT TRIPPING STANDING RULE 25 — `scripts/source-size-baseline.json` matches `^scripts/[^/]*-baseline\\.json$` on INSTRUMENT_SURFACE, so the raise that records ordinary `src/` growth is an instrument edit shipping beside the growth it records, and `detectInstrumentEntanglement` refuses it; MEASURED on two live PRs the same hour, and the baseline went stale twice in 7 minutes on `main` itself"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 14.00
+  files: [src/lib/review.ts, test/a-size-ledger-is-not-a-score-floor.test.ts]
+  origin: "operator-session#lets-get-rmd-more-automated-2026-08-31"
+  plan_refs: ["W1-T297", "W1-T402", "W1-T2488", "W1-T2521"]
+  status: queued
+  attempts: 0
+  rationale: |
+    DISTINCT FROM W1-T2521, WHICH IS THE FIRST-COMMIT CIRCULARITY. That task is about a gate that
+    cannot REGISTER itself: one PR, once, at birth. This one recurs forever afterwards, on PRs that
+    have nothing to do with the gate.
+
+    THE MECHANISM, TRACED FROM SOURCE. `INSTRUMENT_SURFACE` (src/lib/review.ts) carries
+    `^scripts/[^/]*-baseline\.json$`, so `scripts/source-size-baseline.json` is an instrument path.
+    `detectInstrumentEntanglement` returns `entangled: true` when a diff holds at least one
+    instrument path AND at least one executable `src/` path. The ratchet's own header states the
+    only sanctioned way to move a ceiling up: "a human raising scripts/source-size-baseline.json by
+    hand, on the record". Therefore ANY PR that grows a `src/` file must contain both halves, and is
+    refused. There is no ordering that escapes it, and the obvious workaround is unsound (below).
+
+    MEASURED, TWO LIVE INSTANCES IN ONE HOUR:
+      #3331 (W1-T2488)  src/lib/ci-parity.ts 1291 -> 1310, its OWN FAST_GATE_STEPS registration
+      #3340 (W1-T2515)  src/lib/classify.ts 261 -> 409 and src/run-task.ts +12, an ordinary fix
+
+    #3340 is the one that matters: it touches neither the ratchet nor any gate. It is a plain
+    behaviour fix that would go red on `ci` for growing a file, with an in-diff remedy Rule 25
+    refuses. That is every growing PR in this repo, once #3331 lands its
+    test/a-source-file-cannot-outgrow-its-baseline.test.ts ("the shipped tree passes its own
+    recorded baseline") onto main.
+
+    AND THE LEDGER GOES STALE FAST ENOUGH THAT PRE-RAISING CANNOT WORK. MEASURED on fresh
+    worktrees: at ce496e46 four files were over their recorded ceiling; at 0b3a6300, SEVEN MINUTES
+    and one merge later, six. Recording a ceiling ahead of the code that needs it is also
+    structurally unsound, not merely awkward: `evaluateSourceSizeRatchet` writes `nextBaseline` back
+    whenever the run is otherwise clean, and a recorded value ABOVE the measured one is classified
+    `shrunk` and rewritten DOWN. So a pre-raise is silently undone by the first
+    `rmd preflight --fast` anyone runs. The ceiling must travel with the growth.
+
+    THE ASYMMETRY THAT MAKES THIS A MISCLASSIFICATION RATHER THAN A RULE TO RELAX. Rule 25's
+    premise, in its own words, is that "the code's own falsifiers were graded by the very version of
+    the instrument that shipped beside them". `scripts/mutation-baseline.json` and the coverage
+    floors are SCORE FLOORS: lowering one lets a weakened test suite pass, so a diff that lowers a
+    floor beside the code it grades is exactly the hazard. `scripts/source-size-baseline.json` is
+    not a floor at all — it is a per-file LEDGER of current size. Raising an entry cannot make any
+    falsifier pass that would otherwise fail; it can only record that a file got bigger, and the
+    growth is in the same diff, line for line, where a reviewer already sees it. The two shapes were
+    put behind one regex because both end in `-baseline.json`.
+
+    `ENTANGLEMENT_EXEMPT_INSTRUMENTS` is the existing carve-out and already holds exactly one entry,
+    `scripts/knowledge-budget-baseline.json`. Its stated reason ("No workflow job ratchets against
+    it") does NOT transfer — the fast gate does ratchet against the size ledger — so this task must
+    supply the ledger-versus-floor reason above rather than reuse that one, and say so in the entry.
+
+    NOT IN SCOPE, AND WHY: widening the exemption to any other `-baseline.json`. Every other one in
+    this repo is a score floor and must stay blocking. A change that exempted the pattern rather
+    than the path would be the gate-weakening move Rule 25 exists to refuse.
+
+    OPERATOR RATIFICATION IS THE REAL GATE HERE. This relaxes what a binding rule refuses, so the
+    build must land the reasoning in the entry itself and the falsifier must prove the OTHER
+    baselines still block.
+
+  acceptance:
+    - claim: "a diff raising the source-size ledger beside the src file whose growth it records is no longer refused for instrument entanglement"
+      proof: "unit test: test/a-size-ledger-is-not-a-score-floor.test.ts"
+    - claim: "a diff lowering a SCORE floor beside src code is still refused, so the exemption is a path and not the pattern"
+      proof: "unit test: test/a-size-ledger-is-not-a-score-floor.test.ts"
+    - claim: "the size ledger stays on INSTRUMENT_SURFACE for docs-awareness and the completeness alarm, and only the entanglement predicate subtracts it"
+      proof: "unit test: test/a-size-ledger-is-not-a-score-floor.test.ts"
+    - claim: "the exemption entry states the ledger-versus-floor reason rather than reusing the knowledge-budget entry's own reason"
+      proof: "unit test: test/a-size-ledger-is-not-a-score-floor.test.ts"
+    - claim: "removing the exemption entry makes the ordinary-growth case refuse again"
+      proof: "unit test: test/a-size-ledger-is-not-a-score-floor.test.ts"

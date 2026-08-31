@@ -16,6 +16,7 @@ import {
 import { hostname } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { gzipSync } from "node:zlib";
+import { resolveProducerIdentity, type ProducerIdentity } from "./producer-identity.js";
 
 /**
  * Append-only NDJSON ledger (MASTER-PLAN §9). Records the run's step timeline,
@@ -189,6 +190,33 @@ export function appendLedger(
   if (ledgerExceedsRotationCeiling(path, opts.ceilingBytes)) {
     rotateLedger(path, { ceilingBytes: opts.ceilingBytes });
   }
+}
+
+/**
+ * W1-T2495: append a ledger line on behalf of a PSEUDO sender — a producer that is not itself a
+ * plan task (the daemon loop, retro, drain, sweep, ... — see producer-identity.ts's closed
+ * registry for the full list) — resolving `senderId` against that registry FIRST and REFUSING to
+ * write anything at all when it is undeclared, rather than letting an unrecognised literal become
+ * a new, ungoverned key the moment some caller writes it (claim: "an undeclared sender is refused
+ * rather than silently accepted"; grep target for "the ledger write path resolves the sender
+ * rather than the registry standing alone").
+ *
+ * Resolution is a GATE ONLY: the record's `task_id` is written EXACTLY as `senderId` was passed,
+ * never replaced by the identity's canonical `id` — `DAEMON` keeps writing `"DAEMON"`, `daemon`
+ * keeps writing `"daemon"`. Nothing here rewrites, migrates, or touches a single byte any earlier
+ * call to {@link appendLedger} already wrote (claim: "no historical ledger row is rewritten by
+ * this path") — the archives stay exactly as append-only and exactly as spelled as they always
+ * were; only a BRAND NEW undeclared spelling is now impossible to introduce through this path.
+ */
+export function appendProducerLedger(
+  path: string,
+  senderId: string,
+  line: Omit<LedgerLine, "task_id">,
+  opts: { ceilingBytes?: number; identity?: () => string } = {},
+): ProducerIdentity {
+  const identity = resolveProducerIdentity(senderId);
+  appendLedger(path, { ...line, task_id: senderId } as LedgerLine, opts);
+  return identity;
 }
 
 // ── THE ACCOUNT DIMENSION (W1-T268, MASTER-PLAN §9) ─────────────────────────

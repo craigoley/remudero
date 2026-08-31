@@ -1,0 +1,66 @@
+- id: W1-T2529
+  title: "A STALE `.git/gc.log` DISABLES AUTOMATIC GC FOREVER IN THE DAEMON'S CLONE AND NO FLEET SIGNAL CARRIES IT — git refuses to auto-gc while that file exists, so loose objects accumulate unbounded; the ONLY report is a warning printed by `git worktree add`, on stderr, interleaved with worker output, which the daemon neither parses nor publishes"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 9.00
+  files: [scripts/fleet-heartbeat.sh, test/a-clone-that-can-no-longer-gc-says-so-in-the-beat.test.ts]
+  origin: "operator-session#lets-get-rmd-more-automated-2026-08-31"
+  plan_refs: ["W1-T496"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED, REPEATEDLY, IN ONE HOUR OF DAEMON LOG — six times in a single 60-minute window, once
+    before every `git worktree add`:
+
+        warning: The last gc run reported the following. Please correct the root cause
+        and remove .git/gc.log
+        Automatic cleanup will not be performed until the file is removed.
+
+        warning: There are too many unreachable loose objects; run 'git prune' to remove them.
+
+    WHAT IT MEANS. git writes `.git/gc.log` when a background `gc --auto` fails, and then REFUSES to
+    attempt another auto-gc for as long as that file is present. The condition is therefore
+    self-sustaining: the loose objects that made gc fail keep accumulating, and gc never runs again
+    to clear them. On the fleet host this clone is written by every worker worktree, every prune and
+    every fetch, so the object count only goes one way.
+
+    WHY THE EXISTING SIGNALS ALL MISS IT. `pruneStaleRuns` prunes WORKTREES and BRANCHES, not
+    objects, and reports success in both. Nothing in `src/` mentions gc at all
+    (`grep -rn 'gc.log\|prune --' src/ --include=*.ts` returns nothing). `scripts/fleet-heartbeat.sh`
+    already publishes three checkout facts (`daemon_boot_head_sha`, `install_head_sha`,
+    `image_build_sha`, the last added by W1-T496 for exactly this class of "checkable from the beat
+    rather than by shelling in" reason) and this is a fourth of the same kind: a one-line existence
+    test on a path the beat can already reach.
+
+    THIS IS THE SIGNAL, NOT THE CLEANUP. Running `git prune` on a live clone that the daemon and
+    several worktrees are writing is an operator act with real risk, and nothing here should do it
+    automatically — the task is to make the condition VISIBLE in the beat so an operator sees it
+    without reading interleaved worker stderr. A remedy line in the beat's own output is in scope; a
+    `git gc`/`git prune` invocation is NOT.
+
+    THE RISK BAND IS RULE 19'S SPAN, NOT BLAST RADIUS. `lint-plan` reads three concerns off
+    `files:` (the beat script, the daemon stem it names, and the test file's own stem) and refuses
+    risk:medium on that count alone. The actual blast radius is one shell script publishing one
+    additional field. Recorded at high because the linter's span rule says so, per W1-T2525.
+
+    THE BOUND-FIRES-ON-A-HEALTHY-CONDITION CHECK APPLIES. Do not publish a loose-object THRESHOLD:
+    this repo keeps rediscovering bounds sized against a population nobody measured (W1-T312,
+    W1-T380, W1-T382). The reportable fact is binary and unambiguous — `.git/gc.log` exists, so
+    automatic gc is off — and that is what the beat should carry, alongside the file's own first
+    line as the stated reason.
+
+  acceptance:
+    - claim: "the heartbeat reports whether the daemon clone's automatic gc is disabled, as a field beside the shas it already publishes"
+      proof: "unit test: test/a-clone-that-can-no-longer-gc-says-so-in-the-beat.test.ts"
+    - claim: "the report carries the reason git recorded, read from the file, rather than a fixed message"
+      proof: "unit test: test/a-clone-that-can-no-longer-gc-says-so-in-the-beat.test.ts"
+    - claim: "a healthy clone with no gc.log reports the healthy value, so the field is not a constant"
+      proof: "unit test: test/a-clone-that-can-no-longer-gc-says-so-in-the-beat.test.ts"
+    - claim: "no git gc, git prune or any object-writing command is invoked by the beat"
+      proof: "unit test: test/a-clone-that-can-no-longer-gc-says-so-in-the-beat.test.ts"
+    - claim: "removing the existence check makes the disabled-clone case report healthy, proving the check is what carries the signal"
+      proof: "unit test: test/a-clone-that-can-no-longer-gc-says-so-in-the-beat.test.ts"

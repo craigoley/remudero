@@ -1,0 +1,63 @@
+- id: W1-T2528
+  title: "A LANE'S `runId` IS A PER-PROCESS NAME USED AS A PER-RUNG WORKTREE BRANCH — `DAEMON-${Date.now()}` is computed ONCE at run-task.ts:21075 and four `worktreeAdd` sites build `run-${runId}` from it, so the second rung in one daemon tick dies at `fatal: a branch named 'run-DAEMON-1788127440289' already exists`; OBSERVED with the identical epoch printed twice in one log"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 12.00
+  files: [src/run-task.ts, test/two-rungs-in-one-tick-cannot-collide-on-one-branch-name.test.ts]
+  origin: "operator-session#lets-get-rmd-more-automated-2026-08-31"
+  plan_refs: ["W1-T348", "W1-T2469"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED IN THE DAEMON'S OWN LOG, 2026-08-31, verbatim and in order:
+
+        Preparing worktree (new branch 'run-DAEMON-1788127440289')
+        HEAD is now at c46e5f55 chore(plan): file ten findings ... (#3339)
+        warning: The last gc run reported the following. ...
+        Preparing worktree (new branch 'run-DAEMON-1788127440289')
+        fatal: a branch named 'run-DAEMON-1788127440289' already exists
+
+    THE SAME EPOCH, TWICE. Not two ticks racing — one process, one `Date.now()`, two rungs.
+
+    TRACED FROM SOURCE, NOT INFERRED. `daemonCommand` computes `const runId =
+    \`DAEMON-${Date.now()}\`` ONCE (src/run-task.ts:21075). Four `worktreeAdd` call sites then build
+    their branch as `const branch = \`run-${runId}\`` and pass it straight to `git worktree add -b`
+    (run-task.ts:18258 retro, :28113 triage, :28697 plan, :29024 — each with its own `writeRunLock`
+    comment naming a DIFFERENT lane, which is the tell: four distinct rungs, one name). A task lane
+    does not have this defect, because its name is `run-<taskId>-<epochMs>` and the taskId
+    disambiguates; the daemon/retro/triage lanes have no per-rung component at all.
+
+    WHY THE PRUNE DOES NOT SAVE IT. Every one of those sites calls `pruneStaleRuns` first, but the
+    first rung's worktree is LIVE (it wrote a run lock precisely so a concurrent prune skips it), so
+    the branch is still there when the second rung asks for it. The prune is working as designed;
+    the name is the defect.
+
+    WHAT THE FAILURE COSTS. `git worktree add` exits nonzero, so the second rung of that tick does
+    not run at all. Which rung is lost depends on ordering, and nothing in the log says a rung was
+    skipped — the `fatal:` line is git's, not the harness's, so there is no ledger row and no
+    escalation. That is the part that makes this worth fixing rather than tolerating: a silently
+    skipped rung.
+
+    THE FIX IS A NAME, NOT A RETRY. Adding a per-rung component (the lane name the `writeRunLock`
+    comment already states, or a monotonic counter within the process) makes the collision
+    impossible rather than recoverable. A retry-with-a-new-suffix would paper over a name that is
+    still wrong and would keep two rungs sharing one identity in the ledger. Do NOT add a retry.
+
+    RE-DERIVE THE CALL-SITE SET RATHER THAN TRUSTING THE FOUR LINE NUMBERS ABOVE — they drift. The
+    query is `grep -n 'const branch = `run-\${runId}`' src/run-task.ts`, and every hit is in scope.
+
+  acceptance:
+    - claim: "two rungs in one daemon process get distinct worktree branch names, so the second no longer collides"
+      proof: "unit test: test/two-rungs-in-one-tick-cannot-collide-on-one-branch-name.test.ts"
+    - claim: "every call site that builds a worktree branch from the lane runId carries the per-rung component, not just the one that was observed failing"
+      proof: "unit test: test/two-rungs-in-one-tick-cannot-collide-on-one-branch-name.test.ts"
+    - claim: "a task lane's run-<taskId>-<epochMs> shape is unchanged, so dispatch visibility and merge credit still resolve"
+      proof: "unit test: test/two-rungs-in-one-tick-cannot-collide-on-one-branch-name.test.ts"
+    - claim: "a worktree add that still fails is recorded rather than lost to git's own stderr, so a skipped rung is visible"
+      proof: "unit test: test/two-rungs-in-one-tick-cannot-collide-on-one-branch-name.test.ts"
+    - claim: "reverting the per-rung component reproduces the observed collision, naming the same branch twice"
+      proof: "unit test: test/two-rungs-in-one-tick-cannot-collide-on-one-branch-name.test.ts"

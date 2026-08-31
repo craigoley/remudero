@@ -935,6 +935,16 @@ export const FAST_GATE_STEPS: { job: string; script: string; reason: string; bou
     reason: "same-class — deterministic npm-script gate ci.yml's no-hand-rolled-fetch job runs unconditionally, measured 0.14s",
   },
   {
+    job: "source-size",
+    script: "source-size-ratchet",
+    reason:
+      "same-class (W1-T2488) — a deterministic npm-script gate: walks src/'s own line counts via a plain readdirSync " +
+      "sweep against scripts/source-size-baseline.json, spawns no subprocess (no test runner, no git) and opens no " +
+      "network connection, measured ~0.2s. src/run-task.ts sat at 32,119 lines against a next-largest source file of " +
+      "8,445 with no ratchet watching it, the one drift dimension the CLAUDE.md/coverage/cycle/learnings/mutation " +
+      "ratchets did not already cover",
+  },
+  {
     job: "bound-kind-census",
     script: "census:bound-kind",
     reason:
@@ -967,6 +977,15 @@ export const FAST_GATE_STEPS: { job: string; script: string; reason: string; bou
       "same-class (W1-T2478) — a census suite: walks tracked src/, scripts/, deploy/ and .github/workflows/, asserts no unexempted " +
       "depth-limiting git flag against its own EXEMPTIONS table; measured well under the bound below",
     boundMs: FAST_GATE_CENSUS_BOUND_MS,
+  },
+  {
+    job: "worker-branch-shape",
+    script: "worker-branch-shape:check",
+    reason:
+      "same-class (W1-T2491) — a deterministic, offline, sub-second gate structurally identical to claims/jscpd/depcruise: a " +
+      "plain local git+fs read (never node --test, never a network call) that refuses a branch claiming a task (by an anchored " +
+      "Remudero-Task trailer, or by filing a plan/tasks.d/ shard) whose head ref does not carry the run-<taskId>-<epochMs> shape " +
+      "seven modules read for dispatch visibility and merge credit (scripts/worker-branch-shape.mjs)",
   },
 ];
 

@@ -11067,7 +11067,19 @@ async function runTask(
 
     let driverResult: Awaited<ReturnType<typeof runDiagnoseThenRetry>>;
     try {
-      driverResult = await runDiagnoseThenRetry({ attempt: attemptImplement, diagnose: dispatchDiagnose, log });
+      // W1-T2515: SUPPLY THE BACKOFF. This was the ONLY production call site of
+      // runDiagnoseThenRetry and it passed no `sleep`, so the seam classify.ts had carried since
+      // W1-T46 — documented as 'default: no-op — tests never sleep' — was a no-op in production
+      // too. MEASURED on 2026-08-30: MAX_TRANSIENT_RETRIES spent in 3.519s (19:52:34.185Z ->
+      // 19:52:37.704Z) against a session limit whose own message said it reset at 20:50Z, 57m23s
+      // later. The schedule lives in classify.ts (transientBackoffMs, bounded); this passes only
+      // the clock, so a test can drive the whole thing without a real timer.
+      driverResult = await runDiagnoseThenRetry({
+        attempt: attemptImplement,
+        diagnose: dispatchDiagnose,
+        log,
+        sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+      });
     } catch (e) {
       if (!(e instanceof ImplementBudgetBreach)) throw e;
       // Exits the diagnose-then-retry loop immediately — `impl` (the breaching attempt) is

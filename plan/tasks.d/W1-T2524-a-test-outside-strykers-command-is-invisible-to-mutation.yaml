@@ -1,0 +1,72 @@
+- id: W1-T2524
+  title: "A TEST FOR A MUTATED FILE PLACED OUTSIDE STRYKER'S `commandRunner` IS INVISIBLE TO THE MUTATION GATE, AND THE ONLY SYMPTOM IS A COLLAPSED SCORE WITH NO REASON — `stryker.conf.json` mutates `src/lib/classify.ts` but runs ONLY `test/classify.test.ts test/block-reason.test.ts`, so 87 well-tested new lines scored 38.91% against a 75.92% baseline; the config is an INSTRUMENT path, so widening its command beside a `src/` change trips Rule 25"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 12.00
+  files: [scripts/mutation-ratchet.mjs, test/a-test-outside-strykers-command-is-invisible.test.ts]
+  origin: "operator-session#mutation-ratchet-collapsed-2026-08-30"
+  plan_refs: ["W1-T2521", "W1-T133"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED, 2026-08-30, ON A REAL PR. A change added 87 lines to `src/lib/classify.ts` with a
+    10-test suite covering every one of them — line coverage complete, both falsifiers biting. The
+    mutation gate reported:
+
+      classify.ts | 38.91 | 74 killed | 12 timeout | 135 survived
+      mutation-ratchet: BLOCKED -- mutation score 38.91% < baseline 75.92%
+
+    The survivor list included mutants in code the PR never touched (the `log("retry.success", …)`
+    call, `next.strikes > MAX_STRIKES`), which is the tell: nothing about the new code was weak —
+    the RUNNER never executed its tests. `stryker.conf.json`'s `commandRunner.command` is
+    `node --test … test/classify.test.ts test/block-reason.test.ts`, so a test for classify.ts in
+    any third file is invisible to mutation testing while being perfectly visible to every other
+    gate. Moving the assertions into `classify.test.ts` took the score to 79.62% with no change to
+    the source under test.
+
+    NOTHING SAYS SO AT THE POINT OF FAILURE. The gate reports a score and a baseline. It does not
+    say which test files it ran, and there is no way to learn from its output that your tests were
+    not among them. The author's rational next move — "my tests are weak, write more" — makes the
+    situation worse by adding more tests to the file the runner ignores.
+
+    AND THE OBVIOUS FIX IS BLOCKED. Adding the third file to `commandRunner.command` edits
+    `stryker.conf.json`, which is `^stryker\.conf\.json$` in INSTRUMENT_SURFACE, so doing it in the
+    same PR as the `src/` change it serves is refused for entanglement — the same circularity
+    W1-T2521 files from the other direction. So the author must either know the convention in
+    advance or pay two PRs to learn it.
+
+    THE CHEAP REMEDY IS A SENTENCE, NOT A REDESIGN. `scripts/mutation-ratchet.mjs` already reads the
+    Stryker report and the baseline. When it BLOCKS, it can also name the test files the run
+    actually executed and the mutated files it scored, so "your tests were not in this set" is
+    readable from the failure itself. That is a report change inside the instrument, with no `src/`
+    edit and therefore no entanglement.
+
+    RE-DERIVE RATHER THAN TRUST THE NUMBERS: re-run `npx stryker run` with a test moved out of
+    `classify.test.ts` and watch the score fall; that is also this task's own falsifier.
+
+    NOT IN SCOPE: widening the commandRunner (W1-T402 clause (v) posture applies — measure first),
+    changing the baseline, and mutating more files.
+
+    THE RISK BAND IS SET HIGH BECAUSE THE LINTER REFUSES A src+test PAIR AT medium (see W1-T2525);
+    the sentence below is the honest description of the blast radius, not the reason for the band.
+    THE RISK BAND IS RULE 19'S SPAN: one script plus a test, and the blast radius is small because
+    the change is to what a FAILURE prints, never to whether it fails.
+  acceptance:
+    - claim: "a blocking mutation run names the test files it actually executed"
+      proof: "unit test: test/a-test-outside-strykers-command-is-invisible.test.ts"
+    - claim: "it names the mutated files it scored, beside the tests that ran"
+      proof: "unit test: test/a-test-outside-strykers-command-is-invisible.test.ts"
+    - claim: "a passing run's output is unchanged"
+      proof: "unit test: test/a-test-outside-strykers-command-is-invisible.test.ts"
+    - claim: "the score and the baseline comparison are unchanged — only the explanation is added"
+      proof: "unit test: test/a-test-outside-strykers-command-is-invisible.test.ts"
+    - claim: "an unreadable or corrupt report still refuses, exactly as it does today"
+      proof: "unit test: test/a-test-outside-strykers-command-is-invisible.test.ts"
+    - claim: "no src/ path is touched, so the change cannot be refused for entanglement"
+      proof: "unit test: test/a-test-outside-strykers-command-is-invisible.test.ts"
+    - claim: "removing the named test-file list makes the explanation assertion fail"
+      proof: "unit test: test/a-test-outside-strykers-command-is-invisible.test.ts"

@@ -5,9 +5,14 @@ import {
   INITIAL_RETRY_STATE,
   MAX_STRIKES,
   MAX_TRANSIENT_RETRIES,
+  TRANSIENT_BACKOFF_BASE_MS,
+  TRANSIENT_BACKOFF_CEILING_MS,
+  USAGE_WINDOW_RESET_RE,
   classifyFailure,
+  detectUsageLimitRefusal,
   planRetry,
   runDiagnoseThenRetry,
+  transientBackoffMs,
   type AttemptOutcome,
   type FailureSignal,
 } from "../src/lib/classify.js";
@@ -234,4 +239,148 @@ test("classifyFailure: a real task failure is still a STRIKE — no api-error fa
   assert.equal(classifyFailure({ subtype: "error_max_turns" }), "strike");
   assert.equal(classifyFailure({ text: "AssertionError: expected 3 to equal 4" }), "strike");
   assert.equal(classifyFailure({ apiError: false, subtype: "success" }), "strike"); // no evidence ⇒ strike (fail-closed)
+});
+
+// ── W1-T2515: usage-window refusal + bounded backoff ────────────────────────────────────────
+//
+// THESE LIVE HERE, NOT IN THE TASK'S OWN FILE, ON PURPOSE. stryker.conf.json mutates
+// `src/lib/classify.ts` and runs ONLY `test/classify.test.ts test/block-reason.test.ts`. A test
+// for classify.ts placed in any third file is invisible to the mutation runner, so every mutant in
+// the code it covers survives and the score collapses — measured: 38.91% against a 75.92% baseline.
+// stryker.conf.json is an INSTRUMENT path (review.ts's INSTRUMENT_SURFACE), so widening its command
+// alongside a src/ change would trip Rule 25 entanglement. The tests move; the instrument does not.
+
+const REFUSAL = "Claude Code returned an error result: You've hit your session limit · resets 8:50pm (UTC)";
+const NOW = Date.parse("2026-08-30T19:52:34.185Z");
+const RESET = Date.parse("2026-08-30T20:50:00.000Z");
+
+test("detectUsageLimitRefusal: 8:50pm (UTC) resolves to 20:50Z on the same day", () => {
+  assert.equal(detectUsageLimitRefusal(REFUSAL, NOW)?.resetsAtMs, RESET);
+});
+
+// Conversion is tested from EARLY in the day so every expected time is still ahead of `now` —
+// otherwise the same-day/next-day rollover (covered separately below) would mask a bad conversion.
+const EARLY = Date.parse("2026-08-30T00:05:00.000Z");
+
+test("detectUsageLimitRefusal: pm ADDS twelve hours, and only below noon", () => {
+  // kills `hour -= 12`, `hour >= 12`, `hour <= 12`, `meridiem !== "pm"`, `if (true)`, `if (false)`
+  const at1 = detectUsageLimitRefusal("session limit reached · resets 1:00pm (UTC)", EARLY)?.resetsAtMs;
+  assert.equal(at1, Date.parse("2026-08-30T13:00:00.000Z"), "1pm is 13:00, not 01:00 and not -11:00");
+  const noon = detectUsageLimitRefusal("session limit reached · resets 12:00pm (UTC)", EARLY)?.resetsAtMs;
+  assert.equal(noon, Date.parse("2026-08-30T12:00:00.000Z"), "12pm is NOON — adding 12 would make it midnight");
+  const h23 = detectUsageLimitRefusal("session limit reached · resets 23:30 (UTC)", EARLY)?.resetsAtMs;
+  assert.equal(h23, Date.parse("2026-08-30T23:30:00.000Z"), "a 24-hour clock time is left alone");
+});
+
+test("detectUsageLimitRefusal: 12am is midnight, and no other am hour is touched", () => {
+  // kills `meridiem !== "am"`, `hour !== 12`, `if (true)`, `if (false)`, the "" string mutants
+  const midnight = detectUsageLimitRefusal("session limit reached · resets 12:15am (UTC)", EARLY)?.resetsAtMs;
+  assert.equal(midnight, Date.parse("2026-08-30T00:15:00.000Z"), "12:15am is 00:15, not 12:15");
+  const am7 = detectUsageLimitRefusal("session limit reached · resets 7:05am (UTC)", EARLY)?.resetsAtMs;
+  assert.equal(am7, Date.parse("2026-08-30T07:05:00.000Z"), "7am is 07:00, untouched");
+});
+
+test("detectUsageLimitRefusal: an out-of-range clock time yields no epoch — the reachable bound", () => {
+  // kills `hour > 23` -> `>=`/`<=`/true/false and the same family on minute
+  const badHour = detectUsageLimitRefusal("session limit reached · resets 99:00 (UTC)", NOW);
+  assert.equal(badHour?.resetsAtMs, undefined, "hour 99 is refused");
+  const badMin = detectUsageLimitRefusal("session limit reached · resets 10:99 (UTC)", NOW);
+  assert.equal(badMin?.resetsAtMs, undefined, "minute 99 is refused");
+  const ok23 = detectUsageLimitRefusal("session limit reached · resets 23:59 (UTC)", NOW);
+  assert.ok(ok23?.resetsAtMs, "23:59 is IN range — a `>=` bound would wrongly refuse it");
+});
+
+test("detectUsageLimitRefusal: the rollover adds exactly 24 hours, and the boundary is >=", () => {
+  // kills `candidate - 24*60*60*1000`, the `/` arithmetic mutants, and `>` vs `>=` vs `<`
+  const justAfter = detectUsageLimitRefusal(REFUSAL, RESET + 1);
+  assert.equal(justAfter?.resetsAtMs, RESET + 24 * 60 * 60 * 1000, "one ms past reset rolls a full day");
+  assert.equal(
+    (justAfter?.resetsAtMs ?? 0) - RESET,
+    86_400_000,
+    "exactly 86400000ms — a divide mutant would produce 1440 or 0.024",
+  );
+  const exactly = detectUsageLimitRefusal(REFUSAL, RESET);
+  assert.equal(exactly?.resetsAtMs, RESET, "AT the reset instant is not past it — the bound is >=, not >");
+});
+
+test("transientBackoffMs: doubles from the base, and the ceiling clamps it", () => {
+  // kills Math.min->Math.max, Math.max->Math.min, 2**(n-1)->2**(n+1), BASE*->BASE/
+  assert.equal(transientBackoffMs(1), TRANSIENT_BACKOFF_BASE_MS, "the first wait IS the base");
+  assert.equal(transientBackoffMs(2), TRANSIENT_BACKOFF_BASE_MS * 2, "then doubles");
+  assert.equal(transientBackoffMs(3), TRANSIENT_BACKOFF_BASE_MS * 4);
+  assert.equal(transientBackoffMs(99), TRANSIENT_BACKOFF_CEILING_MS, "and is clamped, never grows");
+  assert.ok(transientBackoffMs(99) < TRANSIENT_BACKOFF_BASE_MS * 2 ** 98, "clamped BELOW the raw value");
+  assert.equal(transientBackoffMs(0), TRANSIENT_BACKOFF_BASE_MS, "attempts below 1 clamps UP to the base");
+  assert.equal(transientBackoffMs(-5), TRANSIENT_BACKOFF_BASE_MS, "never negative, never zero");
+});
+
+test("runDiagnoseThenRetry: a shut window returns the reason and the refusal, and logs the step", () => {
+  // kills the `if (usageLimit) {}` block mutant, `if (false)`, the empty-object and "" log mutants,
+  // the `outcome: ""` mutant, and both branches of the reason ternary
+  const steps: string[] = [];
+  const payloads: Array<Record<string, unknown>> = [];
+  return runDiagnoseThenRetry({
+    attempt: async () => ({ success: false, evidence: { text: REFUSAL, apiError: true } }),
+    diagnose: async () => ({ text: "" }),
+    now: () => NOW,
+    log: (step, extra) => {
+      steps.push(step);
+      payloads.push(extra ?? {});
+    },
+  }).then((r) => {
+    assert.equal(r.outcome, "gave_up", "not an empty-string outcome");
+    assert.equal(r.usageLimit?.resetsAtMs, RESET);
+    assert.match(String(r.reason), /^usage window shut — .+ \(resets 8:50pm \(UTC\)\)$/);
+    assert.ok(steps.includes("retry.usage_limit"), "the step name is real, not an empty string");
+    const p = payloads[steps.indexOf("retry.usage_limit")];
+    assert.equal(p.resets_at_ms, RESET, "the payload carries the parsed reset, not an empty object");
+    assert.equal(p.matched, "You've hit your session limit");
+  });
+});
+
+test("runDiagnoseThenRetry: no reset time takes the OTHER branch of the reason ternary", () => {
+  return runDiagnoseThenRetry({
+    attempt: async () => ({ success: false, evidence: { text: "You've hit your session limit", apiError: true } }),
+    diagnose: async () => ({ text: "" }),
+    now: () => NOW,
+  }).then((r) => {
+    assert.equal(r.reason, "usage window shut — You've hit your session limit (no reset time stated)");
+    assert.equal(r.usageLimit?.resetsAtMs, undefined);
+  });
+});
+
+test("runDiagnoseThenRetry: the sleep seam is actually consulted between transient retries", () => {
+  // kills `if (false) await deps.sleep(...)`
+  const slept: number[] = [];
+  return runDiagnoseThenRetry({
+    attempt: async () => ({ success: false, evidence: { text: "ECONNRESET", apiError: true } }),
+    diagnose: async () => ({ text: "" }),
+    now: () => NOW,
+    sleep: async (ms) => void slept.push(ms),
+  }).then(() => {
+    assert.deepEqual(slept, [TRANSIENT_BACKOFF_BASE_MS, TRANSIENT_BACKOFF_BASE_MS * 2, TRANSIENT_BACKOFF_BASE_MS * 4]);
+  });
+});
+
+test("USAGE_WINDOW_RESET_RE: it ACCEPTS a real reset clause and REFUSES text carrying no clock time", () => {
+  // W1-T2317's negative-reachability contract: BOTH arms, named, with each outcome asserted in the
+  // invocation's own window — so the refusal is provably distinct from acceptance rather than
+  // merely present. This regex decides whether a resume time is believed at all.
+  assert.equal(
+    USAGE_WINDOW_RESET_RE.test("You've hit your session limit · resets 8:50pm (UTC)"),
+    true,
+    "the healthy arm: a real refusal's clause matches",
+  );
+  assert.equal(USAGE_WINDOW_RESET_RE.exec("resets 8:50pm (UTC)")?.[1], "8", "and the hour is captured");
+  assert.equal(USAGE_WINDOW_RESET_RE.exec("resets 8:50pm (UTC)")?.[4], "UTC", "and the zone");
+  assert.equal(
+    USAGE_WINDOW_RESET_RE.test("You've hit your session limit, try later"),
+    false,
+    "the refusing arm: a limit message with NO reset clause matches nothing, so no epoch is invented",
+  );
+  assert.equal(
+    USAGE_WINDOW_RESET_RE.test("the reset button was pressed"),
+    false,
+    "and prose containing the word reset but no time is refused too",
+  );
 });
