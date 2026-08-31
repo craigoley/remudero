@@ -105,7 +105,7 @@
   "src/lib/relay-client.ts": 312,
   "src/lib/relint.ts": 240,
   "src/lib/replay.ts": 240,
-  "src/lib/reply-interpreter.ts": 196,
+  "src/lib/reply-interpreter.ts": 198,
   "src/lib/repo-location.ts": 84,
   "src/lib/retro.ts": 4392,
   "src/lib/review.ts": 8209,
