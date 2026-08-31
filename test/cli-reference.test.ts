@@ -55,7 +55,7 @@ test("generate-cli-reference: two independent regenerations are byte-identical (
   }
 });
 
-test("generate-cli-reference: every COMMANDS registry entry's usage line appears verbatim in the generated doc", () => {
+test("generate-cli-reference: every COMMANDS registry entry's syntax + full detail appear verbatim in the generated doc", () => {
   const dir = mkdtempSync(join(tmpdir(), "cli-reference-coverage-"));
   try {
     const out = join(dir, "cli-reference.md");
@@ -64,8 +64,12 @@ test("generate-cli-reference: every COMMANDS registry entry's usage line appears
     const rendered = readFileSync(out, "utf8");
     for (const spec of COMMANDS) {
       assert.ok(
-        rendered.includes(spec.usage),
-        `generated cli-reference.md is missing the ${spec.name} registry entry's usage line -- it must be generated from COMMANDS, not hand-duplicated`,
+        rendered.includes(spec.syntax),
+        `generated cli-reference.md is missing the ${spec.name} registry entry's syntax line -- it must be generated from COMMANDS, not hand-duplicated`,
+      );
+      assert.ok(
+        rendered.includes(spec.detail),
+        `generated cli-reference.md is missing the ${spec.name} registry entry's full detail prose (W1-T2480: no character may be dropped)`,
       );
       assert.ok(
         rendered.includes(`\`rmd ${spec.name}\``),
