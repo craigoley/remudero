@@ -1,0 +1,122 @@
+- id: W1-T2537
+  title: "A BLOCKED DRAIN PASS IS CHARGED TO THE CONTAINER'S CRASH-RESTART BUDGET, SO A RED BOARD KILLS THE FLEET AND KEEPS IT RED — daemonExitCode maps `blocked` to 1, docker's on-failure:N counts it, and W1-T490 already fixed this exact defect for `stale` while writing that `blocked` keeps 1 'precisely so that a crash remains countable'"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  rationale: |
+    FILED FROM A LIVE OUTAGE at origin/main 4f1ce066, 2026-08-30. The container was observed
+    `Exited (1)` for 46+ minutes with nothing draining the board, and the daemon's own log names
+    the cause in its last four lines.
+
+    (1) THE OBSERVED INCIDENT, VERBATIM FROM THE HOST. `docker ps -a` read
+    `Exited (1) 46 minutes ago` with no restart pending. `docker logs --since 20m` was EMPTY —
+    not a hung daemon, a dead one. The tail of the last live pass:
+        attempted : W1-T2493, W1-T2500, W1-T2507
+        merged    : (none)
+        stopped   : blocked - W1-T2507 -> blocked_ci (PR 3394) - blocks W1-T2508
+        rmd-entrypoint: exited 1 - sleeping 120s before exiting so the restart is rate-limited
+    THE PASS SUCCEEDED. It dispatched three tasks, opened three PRs and posted five review
+    verdicts. It then exited 1 because ONE task ended `blocked_ci`.
+
+    (2) THE MECHANISM, AND IT IS A POSITIVE FEEDBACK LOOP. `daemonExitCode` (src/lib/daemon.ts)
+    returns 1 for `blocked`. `deploy/entrypoint.sh` treats every non-zero except
+    `DAEMON_EXIT_STALE` as a crash: sleep the throttle, exit, let docker count it. The operator's
+    `docker run` carries `--restart=on-failure:5`. So:
+        board goes red -> passes end `blocked` -> exit 1 -> one restart spent
+        -> after 5, docker stops restarting -> nothing drains -> THE BOARD STAYS RED
+    A red board is precisely the condition that produces blocked passes, so the budget is spent
+    fastest exactly when the fleet is most needed. On a green board `blocked` is rare and this is
+    invisible, which is why it survived.
+
+    (3) THE REPO ALREADY DIAGNOSED THIS DEFECT AND FIXED ONLY HALF OF IT. `daemonExitCode`'s own
+    doc records W1-T490's measurement verbatim: "docker's `--restart=on-failure:N` counts every
+    nonzero exit against N and MEASURED (Azure, 2026-08-14, docker 29.1.3) cannot read the value
+    at all - `exit 1` and `exit 42` both parked at `RestartCount=2` on `on-failure:2` ... So a
+    routine freshness restart - one per merge, 14 in 24 hours - spent the same budget as a crash,
+    and no amount of healthy running refunded it ... The measured consequence was a 2h56m outage
+    that only a human ended." W1-T490 gave `stale` code 75 and an in-container retry loop, then
+    wrote: "`blocked` and `error` keep 1 precisely so that a crash remains countable."
+
+    (4) THAT SENTENCE CONTAINS THE ERROR, AND THIS TASK IS ONLY ITS OTHER HALF. `blocked` IS NOT
+    A CRASH. It is the daemon completing a drain pass and reporting the news. The argument
+    W1-T490 made for `stale` — a routine outcome must not spend a finite crash budget — applies to
+    `blocked` word for word; only the frequency argument differs, and it differs in the WRONG
+    direction (freshness is one per merge; blocked is one per pass on a red board).
+    `deploy/entrypoint.sh` even states the false equation in its own comment: "A crash
+    (`blocked`/`error` => 1) reaches here on its first attempt". `error` genuinely is a crash and
+    KEEPS 1. Only `blocked` moves.
+
+    (5) THE DAEMON'S STOP-ON-BLOCK DOCTRINE IS NOT TOUCHED. `runDrainLanes`'
+    stop-on-block-at-pass-granularity is deliberate and stays exactly as it is: the daemon still
+    halts the pass on a genuine blocker. What changes is only how that halt is CLASSIFIED at the
+    process boundary, which is the one thing the supervisor can see.
+
+    (6) THE SPLIT SHIPS SAFELY IN EITHER ORDER, AND THE DAEMON HALF IS INERT UNTIL THE IMAGE IS
+    REBUILT. `src/lib/daemon.ts` is MOUNT-side and ships the instant it merges;
+    `deploy/entrypoint.sh` is BAKED into the image (`COPY ... /usr/local/bin/rmd-entrypoint`) and
+    is inert until an operator triggers `.github/workflows/acr-build.yml`. A container running the
+    OLD entrypoint against the NEW daemon sees an unrecognised non-zero code, falls through to the
+    same sleep-and-exit it uses today, and behaves BYTE-IDENTICALLY to now — so merging the daemon
+    half before the rebuild is a no-op, never a regression. launchd's
+    `KeepAlive{SuccessfulExit:false}` restarts on any non-zero and is likewise unaffected.
+
+    (7) NEITHER NUMBER IS PICKED. The retry cap mirrors `FRESHNESS_RESTART_MAX` (100) — the same
+    worst-case shape already ratified for the sibling path, and its bound is what hands a
+    pathological loop back to docker's count rather than replacing a bound with nothing. The pause
+    is `DEFAULT_POLL_INTERVAL_MS` (60s, src/lib/daemon.ts) — the daemon's OWN idle-poll pace,
+    documented there as "check back once a minute while nothing is runnable", which is exactly
+    what a blocked board is. It is deliberately NOT the 5s freshness pause (a blocked board needs
+    CI wall-clock to change, a stale checkout does not) and NOT the 120s crash throttle (that
+    exists to slow a boot failing the same way, which this is not).
+
+    (8) OUT OF SCOPE, NAMED. (a) `error` keeps 1 — a crash must stay countable, and this task
+    makes no claim about it. (b) The stop-on-block doctrine, per (5). (c) `plan/policy.yaml` is
+    not touched; both entrypoint knobs follow the existing `RMD_*` env-with-default shape its
+    siblings already use. (d) Raising the operator's `--restart=on-failure:N` is a host action,
+    not a code change, and is a stopgap this task exists to make unnecessary.
+  acceptance:
+    - claim: "a blocked stop is distinguishable from a crash at the process boundary instead of sharing exit code 1 with error"
+      proof: "unit test: test/daemon.test.ts"
+    - claim: "error still exits 1 so a genuine crash stays countable against docker's on-failure budget"
+      proof: "unit test: test/daemon.test.ts"
+    - claim: "the entrypoint restarts in-container on a blocked exit without spending docker's restart count, bounded by its own cap"
+      proof: "unit test: test/entrypoint-boot.test.ts"
+    - claim: "the entrypoint's blocked exit code is read from the same constant the daemon exports rather than a drifting literal"
+      proof: "unit test: test/entrypoint-boot.test.ts"
+    - claim: "a blocked exit past the cap still falls through to the crash throttle so the bound is replaced rather than removed"
+      proof: "unit test: test/entrypoint-boot.test.ts"
+    - claim: "the blocked exit code is a named export rather than an inline number"
+      proof: "grep: DAEMON_EXIT_BLOCKED in src/lib/daemon.ts"
+  risk: high
+  band_meaning: blast-radius
+  origin: incident
+  plan_refs: ["W1-T490", "W1-T126", "W1-T12b", "W1-T1067"]
+  files: [src/lib/daemon.ts, deploy/entrypoint.sh, test/daemon.test.ts, test/entrypoint-boot.test.ts, scripts/source-size-baseline.json]
+  status: queued
+  attempts: 0
+  note: |
+    risk:high, band_meaning: blast-radius — NOT Rule 19 span. This governs whether the fleet comes
+    back at all. Getting it wrong in one direction leaves the container down exactly as it is now;
+    in the other it hot-loops a daemon that cannot boot. Both knobs are therefore bounded and both
+    bounds are derived from existing, already-ratified values rather than chosen (rationale 7).
+
+    `files:` DERIVED FROM SOURCE. `daemonExitCode`, `DaemonStopReason` and `DAEMON_EXIT_STALE` are
+    in `src/lib/daemon.ts`; the exit-code dispatch, the freshness loop this mirrors and the crash
+    throttle are in `deploy/entrypoint.sh`; `test/daemon.test.ts` already imports
+    `DAEMON_EXIT_STALE` and `daemonExitCode`, and `test/entrypoint-boot.test.ts` already carries
+    the W1-T490 anti-drift test ("the entrypoint's freshness code is the SAME NUMBER as
+    DAEMON_EXIT_STALE, not a drifting literal") that the blocked code needs a sibling of.
+
+    THE ENTRYPOINT HALF DOES NOT SHIP ON MERGE. It is baked into the image, so this task is only
+    half-live until an operator runs `.github/workflows/acr-build.yml` from the Actions tab and
+    redeploys. Rationale (6) is the argument that the intervening state is safe rather than
+    merely tolerable.
+
+    `scripts/source-size-baseline.json` IS DECLARED because the doc this change adds to
+    `src/lib/daemon.ts` grows it past its recorded ceiling (3930 -> 3968), and the ratchet's own
+    remedy says recording is the ordinary outcome for deliberate growth. It is exempt from
+    Standing rule 25 per W1-T2526 — a size ledger records how long a file is and grades no
+    falsifier — and adds no Rule 19 concern, since this task's band is blast-radius.

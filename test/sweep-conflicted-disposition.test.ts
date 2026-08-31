@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DEFAULT_SWEEP_POLICY, deriveDisposition, isPureConcurrentAddition, type ConflictFileDiff, type OpenPrView } from "../src/lib/sweep.js";
+import { DEFAULT_SWEEP_POLICY, conflictRefusalCause, deriveDisposition, isPureConcurrentAddition, type ConflictFileDiff, type OpenPrView } from "../src/lib/sweep.js";
 import { hydrateMergeStates, mergeStateFromRest, MERGE_STATE_HYDRATION_CAP } from "../src/lib/open-prs-rest.js";
 
 /**
@@ -264,13 +264,21 @@ test("W1-T984 acceptance 3 — the five reconstructed conflicts reproduce their 
   );
 });
 
-test("W1-T984 acceptance 2 — with mergeConflictAdmissionEnabled OFF (the default), ALL FIVE reconstructed conflicts dispose blocked-ambiguous, including the two that read TRUE", () => {
+/* ────────────────────────────────────────────────────────────────────────────────────────────
+ * W1-T2536 — TURNING ADMISSION ON. W1-T984 shipped the evidence producer with
+ * `mergeConflictAdmissionEnabled` OFF and named turning it on "a LATER task's call ... once the
+ * semantic predicate exists". The predicate it was waiting for cannot live in `sweep.ts`: the
+ * discriminator it wanted ("are the two sides' added lines disjoint") needs the actual conflict
+ * HUNKS, and this evidence is built from GitHub's compare API, which carries per-file deletion
+ * COUNTS and no hunk at all. The only thing in this system holding hunks is the dispatched fix
+ * worker. See `SweepPolicy.mergeConflictAdmissionEnabled`'s own doc for the full argument and for
+ * what fences a wrong resolution instead (a new head carries no `remudero-review` status, so it
+ * cannot merge until a fresh review passes).
+ * ──────────────────────────────────────────────────────────────────────────────────────────── */
+
+test("W1-T2536 — a zero-deletion conflict with captured evidence is ADMITTED to the merge-conflict fix rung", () => {
+  assert.equal(DEFAULT_SWEEP_POLICY.mergeConflictAdmissionEnabled, true, "the flag now defaults ON — this is the change");
   const cases: OpenPrView[] = [
-    reconstructedConflict([{ path: "test/daemon.test.ts", oursDeleted: 0, theirsDeleted: 5 }]),
-    reconstructedConflict([
-      { path: "deploy/entrypoint.sh", oursDeleted: 0, theirsDeleted: 26 },
-      { path: "src/lib/daemon.ts", oursDeleted: 6, theirsDeleted: 1 },
-    ]),
     reconstructedConflict([
       { path: "src/lib/sweep.ts", oursDeleted: 0, theirsDeleted: 0 },
       { path: "test/sweep.test.ts", oursDeleted: 0, theirsDeleted: 0 },
@@ -278,21 +286,70 @@ test("W1-T984 acceptance 2 — with mergeConflictAdmissionEnabled OFF (the defau
     reconstructedConflict([
       { path: "plan/tasks.d/W1-T908-the-retro-body-asserts-a-changeset-it-does.yaml", oursDeleted: 0, theirsDeleted: 0 },
     ]),
-    reconstructedConflict([{ path: "plan/feedback/fb-1785775974389-e25033.yaml", oursDeleted: 2, theirsDeleted: 2 }]),
   ];
-  assert.equal(DEFAULT_SWEEP_POLICY.mergeConflictAdmissionEnabled, false, "sanity: the flag defaults off");
   for (const pr of cases) {
     const d = deriveDisposition(pr, DEFAULT_SWEEP_POLICY, NOW);
-    assert.equal(d.disposition, "blocked-ambiguous", `${pr.mergeConflict?.files.map((f) => f.path).join(",")} must refuse, never auto-admit`);
+    assert.equal(d.disposition, "conflicted", `${pr.mergeConflict?.files.map((f) => f.path).join(",")} must dispatch, not escalate`);
+    assert.match(d.reason, /dispatching the merge-conflict fix mode/);
   }
-
-  // Turning the flag ON is a LATER task's call (design note viii(b)) — proved here only so the
-  // conjunct is demonstrably load-bearing, not dead code: the #1912 fixture (a genuine TRUE) DOES
-  // admit once opted in, while the flag stays off in every other test in this suite.
-  const admitPolicy = { ...DEFAULT_SWEEP_POLICY, mergeConflictAdmissionEnabled: true };
-  assert.equal(deriveDisposition(cases[2], admitPolicy, NOW).disposition, "conflicted", "the gate is real, not inert");
 });
 
+test("W1-T2536 — THE REAL SHAPE THIS WAS COSTING: two PRs each adding a different key to the size baseline", () => {
+  // MEASURED 2026-08-30: the dominant conflict on this repo was two PRs each recording a
+  // ceiling in `scripts/source-size-baseline.json` — both sides purely ADD one `"path": N` line,
+  // so deletions are zero on both sides and the evidence is fully captured. Under W1-T984's
+  // default this escalated to a human every single time.
+  const pr = reconstructedConflict([{ path: "scripts/source-size-baseline.json", oursDeleted: 0, theirsDeleted: 0 }]);
+  assert.equal(deriveDisposition(pr, DEFAULT_SWEEP_POLICY, NOW).disposition, "conflicted");
+  // THE FALSIFIER, in the direction that matters: the conjunct is still load-bearing, so an
+  // operator who sets the flag false gets exactly W1-T984's behaviour back.
+  const off = { ...DEFAULT_SWEEP_POLICY, mergeConflictAdmissionEnabled: false };
+  assert.equal(deriveDisposition(pr, off, NOW).disposition, "blocked-ambiguous", "the gate is real in BOTH directions");
+});
+
+test("W1-T2536 — a conflict involving a deletion is still REFUSED and says so", () => {
+  // The three reconstructed cases that read FALSE stay refused at the NEW default — turning
+  // admission on must not widen what `isPureConcurrentAddition` admits, only whether it is asked.
+  const cases: OpenPrView[] = [
+    reconstructedConflict([{ path: "test/daemon.test.ts", oursDeleted: 0, theirsDeleted: 5 }]),
+    reconstructedConflict([
+      { path: "deploy/entrypoint.sh", oursDeleted: 0, theirsDeleted: 26 },
+      { path: "src/lib/daemon.ts", oursDeleted: 6, theirsDeleted: 1 },
+    ]),
+    reconstructedConflict([{ path: "plan/feedback/fb-1785775974389-e25033.yaml", oursDeleted: 2, theirsDeleted: 2 }]),
+  ];
+  for (const pr of cases) {
+    const d = deriveDisposition(pr, DEFAULT_SWEEP_POLICY, NOW);
+    assert.equal(d.disposition, "blocked-ambiguous", "a deletion is never auto-resolved, flag or no flag");
+    assert.match(d.reason, /involves a deletion/);
+  }
+});
+
+test("W1-T2536 — a refusal never claims a deletion the evidence does not show", () => {
+  // THE SECOND DEFECT. The refusal row said "involves a deletion (or no file evidence was
+  // captured)" UNCONDITIONALLY, so a zero-deletion, fully-evidenced conflict was refused by a
+  // sentence in which BOTH disjuncts were false — sending every reader to hunt a deletion that
+  // was not there. Each arm now names the reason that actually fired.
+  const noEvidence: ConflictFileDiff[] = [];
+  const zeroDeletions: ConflictFileDiff[] = [{ path: "scripts/source-size-baseline.json", oursDeleted: 0, theirsDeleted: 0 }];
+  const withDeletion: ConflictFileDiff[] = [{ path: "test/daemon.test.ts", oursDeleted: 0, theirsDeleted: 5 }];
+  const on = DEFAULT_SWEEP_POLICY;
+  const off = { ...DEFAULT_SWEEP_POLICY, mergeConflictAdmissionEnabled: false };
+
+  assert.equal(conflictRefusalCause(noEvidence, on), "no file evidence was captured");
+  assert.equal(conflictRefusalCause(withDeletion, on), "involves a deletion");
+  assert.match(conflictRefusalCause(zeroDeletions, off), /admission is disabled/);
+  assert.equal(conflictRefusalCause(zeroDeletions, on), "not classifiable as a pure concurrent addition");
+
+  // ORDER MATTERS: a file list carrying a deletion must read as a deletion even with admission
+  // off, never as "admission is disabled" — the deletion is the more fundamental refusal.
+  assert.equal(conflictRefusalCause(withDeletion, off), "involves a deletion");
+
+  // And the rendered reason for an absent-evidence PR no longer asserts a deletion.
+  const d = deriveDisposition(greenPr({ mergeState: "dirty" }), on, NOW);
+  assert.doesNotMatch(d.reason, /involves a deletion/, "no evidence was read — a deletion is not something we observed");
+  assert.match(d.reason, /no file evidence was captured/);
+});
 test("W1-T984 acceptance 4 — a dirty PR escalation names the real conflicting paths and per-side deletion counts, never 'none captured'", () => {
   const seeded = reconstructedConflict([
     { path: "deploy/entrypoint.sh", oursDeleted: 0, theirsDeleted: 26 },

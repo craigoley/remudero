@@ -1,0 +1,72 @@
+- id: W1-T2542
+  title: "A PR WHOSE BODY IS FIXED AFTER ITS VERDICT IS POSTED IS STUCK FOREVER — the sweep re-reviews only at reviewState 'none', the posted failure pins it to 'failure', and the designed remedy is A NEW HEAD that nothing in the fleet ever pushes"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  rationale: |
+    (1) THE MECHANISM. `remudero-review` is a COMMIT STATUS, so a verdict belongs to a sha. The
+    sweep's post-review row fires only at `pr.checksState === "green" && pr.reviewState === "none"`
+    (src/lib/sweep.ts), so once any verdict is posted that sha is never re-reviewed. CLAUDE.md
+    states the consequence in its own words: "the designed path for a stale verdict is A NEW HEAD.
+    A session that fixes the block and pushes nothing has fixed nothing."
+
+    (2) NOTHING PUSHES THAT HEAD. The fix rung's three modes all push a commit, but they are
+    dispatched off `blocked-fixable`, which a `reviewState: "failure"` PR with no actionable unmet
+    criteria does not reach — it falls to `blocked-ambiguous` and escalates. So the one action that
+    would clear a stale verdict is exactly the action nothing takes.
+
+    (3) OBSERVED, 2026-08-31. #3388 was refused for a body claim that contradicted its diff. The
+    body was corrected roughly twenty minutes later, ON THE SAME SHA. The PR then sat with a
+    corrected body and a stale refusal, unreachable by every rung, until a human merged origin/main
+    into it purely to mint a new head. The same shape recurred on #3356 and #3363 the same night;
+    all three needed a hand-pushed merge commit whose only purpose was to move the sha.
+
+    (4) THE REMEDY IS ALREADY LEGITIMATE AND ALREADY USED. Merging the base branch into the PR head
+    is what the repo's own conflict guidance prescribes, never a rebase or a force-push, and it is
+    what a human did three times that night. It also has an independent benefit: the fresh head is
+    judged against CURRENT main rather than a stale base.
+
+    (5) THE DISCRIMINATOR MUST BE EXACT, AND THIS IS THE WHOLE RISK. Re-heading a PR whose verdict
+    is CORRECT would loop forever, re-earning the same refusal on every new sha. The trigger must be
+    a verdict that is DEMONSTRABLY STALE — the body has been edited since the verdict was posted
+    (both timestamps are observable: the commit status carries `created_at`, the PR carries
+    `updated_at` and its body's own edit history) — and never merely "a PR whose review failed".
+    A body untouched since its refusal earns nothing here.
+
+    (6) AND IT MUST BE BOUNDED. One re-head per (PR, verdict) pair, never a standing re-try: if the
+    fresh verdict fails again, that is a real refusal on a body its author has already had a chance
+    to fix, and it escalates exactly as today. `NEVER an empty commit and never a close-and-reopen`
+    — both are explicitly forbidden ways to kick CI, and a base merge is neither.
+
+    (7) OUT OF SCOPE, NAMED. (a) Repairing the body itself — W1-T2541. This task only makes a
+    repair TAKE EFFECT. (b) Any change to what the reviewer judges. (c) The conflicted case, which
+    already has its own rung (W1-T106/W1-T2536).
+  acceptance:
+    - claim: "a PR whose body was edited after its failing verdict was posted is identified as carrying a stale verdict"
+      proof: "unit test: test/a-stale-verdict-earns-a-new-head.test.ts"
+    - claim: "a PR whose body is unchanged since its refusal is NOT identified, so a correct refusal never loops"
+      proof: "unit test: test/a-stale-verdict-earns-a-new-head.test.ts"
+    - claim: "the remedy is a base merge, never an empty commit and never a close-and-reopen"
+      proof: "unit test: test/a-stale-verdict-earns-a-new-head.test.ts"
+    - claim: "each verdict earns at most one re-head, so a second failure escalates rather than re-heading again"
+      proof: "unit test: test/a-stale-verdict-earns-a-new-head.test.ts"
+    - claim: "an unreadable timestamp on either side yields no identification, so the discriminator fails closed"
+      proof: "unit test: test/a-stale-verdict-earns-a-new-head.test.ts"
+    - claim: "the staleness finding reaches the escalation an operator actually reads, rather than sitting in a module only its own tests import"
+      proof: "grep: staleVerdictReason( in src/lib/sweep.ts"
+  risk: high
+  band_meaning: blast-radius
+  origin: incident
+  plan_refs: ["W1-T176", "W1-T2541", "W1-T106"]
+  files: [src/lib/stale-verdict.ts, src/lib/sweep.ts, test/a-stale-verdict-earns-a-new-head.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    risk:high, band_meaning: blast-radius — a predicate that causes the fleet to push commits to
+    open PRs. As with W1-T2541 the span is deliberately ONE pure module plus its suite: this task
+    builds the DISCRIMINATOR and its fail-closed refusals only, with no writer. Wiring it to
+    something that pushes is a separate, later task, so the loop risk in (5) is reviewed against a
+    predicate whose refusals are already proven.

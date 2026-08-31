@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { relative, sep } from "node:path";
 import type { AcceptanceCriterion, Plan, Task, TaskStatus } from "./plan.js";
+import { RETIREMENT_REASONS } from "./plan.js";
 import { isInPlanScope } from "./plan-architect.js";
 import {
   isDemonstrationProof,
@@ -88,6 +89,7 @@ export type LintCheck =
   | "post-merge-criterion-removed"
   | "post-merge-proof-changed"
   | "post-merge-correction-without-prompt"
+  | "blocked-task-disposition"
   | "provenance"
   | "call-site"
   | "monolith-filing"
@@ -1720,6 +1722,89 @@ export function parentDispositionStated(task: Task, _baseTask?: Task): boolean {
 }
 
 /**
+ * Context for {@link blockedDispositionViolations} (W1-T2487) — the task's whole shard as it
+ * existed at the PR's base ref, the SAME resolved value {@link PostMergeAmendmentContext.baseTask}
+ * already carries (run-task.ts's `lintPlanCommand` resolves `oldTask` once per task and can hand
+ * it to both). A dedicated context rather than folding into `PostMergeAmendmentContext`: this
+ * check has nothing to do with MERGE status (its concern fires on `status: "blocked"` regardless
+ * of whether the task was ever merged), so sharing that interface would make an unrelated
+ * concern's presence/absence gate this one by accident. Undefined ⇒ the check is silent — see
+ * {@link LintOpts.blockedDisposition}'s own doc for why that must be the whole-plan pass's
+ * behaviour, not an oversight.
+ */
+export interface BlockedDispositionContext {
+  /** Undefined when the task is new in this PR (the caller could not resolve a base version
+   *  either way — same "nothing to diff against" contract every other base-ref-shaped context
+   *  in this file already uses). */
+  baseTask?: Task;
+}
+
+/**
+ * W1-T2487: A `status: "blocked"` task must NAME its disposition — one of {@link
+ * RETIREMENT_REASONS} — the moment THIS DIFF is what puts it there. Fifty tasks on main carry
+ * `status: blocked`; twenty-six name no `retirement:` at all, and nothing before this check ever
+ * asked one to. W1-T2474 made the field LOAD-BEARING (drain now splits a retired task out of the
+ * recoverable-blocker class by reading it), so an absent field is no longer untidiness — a
+ * consumer that reads a field missing on more than half its population is not classifying, it is
+ * defaulting.
+ *
+ * TRANSITION-SCOPED, NOT A THIRD SWEEP. `opts.blockedDisposition` is populated ONLY in
+ * `lintPlanCommand`'s changed-tasks (`--base`) pass, exactly like {@link
+ * PostMergeAmendmentContext} — the whole-plan pass (no `--base`) supplies no context at all, so
+ * this function returns `[]` for EVERY task there, including the standing twenty-six. Refusing
+ * them all at once would redden every PR that merely touches the plan until an operator
+ * dispositions twenty-six pre-existing tasks — a demand this check has no standing to make (this
+ * task's own rationale). Within the changed-tasks pass, two shapes:
+ *
+ *   - `ctx.baseTask` was ALSO `status: "blocked"` (the standing population, touched but not
+ *     newly blocked by this diff) ⇒ reported, `severity: "warn"` — visible, never refused.
+ *   - `ctx.baseTask` was anything else, or absent (a brand-new task filed straight into
+ *     `blocked`) ⇒ THIS diff is what moves it into blocked ⇒ `severity: "block"`.
+ *
+ * NEVER WRITES OR INFERS A DISPOSITION — same discipline {@link parentDispositionStated}'s own
+ * doc states in terms ("a retirement is an operator act. This predicate only ..."). This function
+ * only ever READS `task.retirement`; nothing here sets it, guesses it, or defaults it, and a
+ * blocked task that already names a legal value passes silently, untouched, at either severity.
+ *
+ * A VALUE OUTSIDE {@link RETIREMENT_REASONS} IS TREATED AS ABSENT, NOT PRESENT. `plan.ts`'s own
+ * parser already throws `PlanError` on such a value at load time, so this arm is reached only by
+ * a `Task` object built directly (by a future loader, or a test) — but "present" here means
+ * "present AND legal", never merely "non-empty", so a bogus string cannot slip past as a
+ * disposition either check ever intended to accept.
+ */
+export function blockedDispositionViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
+  if (task.status !== "blocked") return [];
+  const ctx = opts.blockedDisposition;
+  if (!ctx) return []; // whole-plan pass: no base to compare against, so no opinion at all
+  const hasLegalDisposition = task.retirement !== undefined && (RETIREMENT_REASONS as readonly string[]).includes(task.retirement);
+  if (hasLegalDisposition) return [];
+  const legalValues = RETIREMENT_REASONS.join("|");
+  const wasAlreadyBlocked = ctx.baseTask?.status === "blocked";
+  if (wasAlreadyBlocked) {
+    return [
+      {
+        check: "blocked-task-disposition",
+        severity: "warn",
+        message:
+          `task ${task.id} is status: blocked with no \`retirement:\` naming its disposition (one of ` +
+          `${legalValues}) — reported, not refused: it was already blocked before this PR, and W1-T2487 ` +
+          "gates only the transition INTO blocked, never the standing population.",
+      },
+    ];
+  }
+  return [
+    {
+      check: "blocked-task-disposition",
+      severity: "block",
+      message:
+        `task ${task.id} moves to status: blocked in this PR with no \`retirement:\` naming its ` +
+        `disposition — refused. Name one of ${legalValues} (a retirement is an operator act; nothing ` +
+        "here infers one for you).",
+    },
+  ];
+}
+
+/**
  * Context the CALLER resolves via I/O and injects through {@link LintOpts} —
  * see the module comment above this section for why it cannot be fetched here.
  */
@@ -2911,6 +2996,11 @@ export interface LintOpts {
    *  judge against, e.g. the pre-dispatch call site, which never dispatches an
    *  already-merged task in the first place). */
   postMergeAmendment?: PostMergeAmendmentContext;
+  /** Injected base-ref context for {@link blockedDispositionViolations} (W1-T2487) — see that
+   *  check's own module comment for why the refusal fires ONLY in the changed-tasks (`--base`)
+   *  pass. Absent ⇒ the check is silent — the whole-plan pass (no base to compare against) must
+   *  never refuse, or even report, the standing population of already-blocked tasks. */
+  blockedDisposition?: BlockedDispositionContext;
   /** W1-T2503: diff-scoped base-ref state for {@link sizingViolation}'s risk:high
    *  `band_meaning` obligation — see {@link RiskTransitionContext} for the full contract.
    *  Absent (not diff-scoped at all — pre-dispatch, whole-plan `lintPlan`, retro, inbox,
@@ -2977,8 +3067,9 @@ export interface LintOpts {
 }
 
 /** Lint one task. Hard checks (sizing/headless-fitness/proof-shape/proof-dialect/
- *  proof-resolvability/post-merge-amendment/provenance/ruling-verify) always run —
- *  post-merge-amendment is a no-op absent `opts.postMergeAmendment` — budget-sanity
+ *  proof-resolvability/post-merge-amendment/blocked-disposition/provenance/ruling-verify) always
+ *  run — post-merge-amendment is a no-op absent `opts.postMergeAmendment`, and blocked-disposition
+ *  (W1-T2487) is likewise a no-op absent `opts.blockedDisposition` — budget-sanity
  *  runs only when `opts.mountMaxTurns` is supplied, duplicate-title (W1-T420) is a
  *  no-op absent `opts.openTaskTitles`, its narrow blocking arm (W1-T2486) is a no-op absent
  *  `opts.openTaskRecords`, proof-name-resolution (W1-T488) is a no-op
@@ -2998,6 +3089,7 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   violations.push(...proofScopeViolations(task, opts));
   violations.push(...proofNameResolutionViolations(task, opts));
   violations.push(...postMergeAmendmentViolations(task, opts));
+  violations.push(...blockedDispositionViolations(task, opts));
   violations.push(...callSiteViolations(task, opts));
   violations.push(...monolithFilingViolations(task, opts));
   violations.push(...duplicateTitleViolations(task, opts));
