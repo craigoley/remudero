@@ -180,6 +180,19 @@ export interface FeedbackEntry {
    * call that predates this task) — `raw` and every other field stay byte-identical either way.
    */
   submission_key?: string | null;
+  /**
+   * W1-T2496: the escalation thread id (`inbox-thread.ts`'s {@link deriveThreadId}) this entry
+   * REPLIES TO, when captured via `POST /v1/escalation/reply` (panel-actions.ts). This is a
+   * DIFFERENT edge than `reply_to` above — `reply_to` names another `plan/feedback/<id>.yaml`
+   * entry parked `grilling` (the W1-T2278 grill-answer flow); `thread_id` names a thread in
+   * `inbox-thread.ts`'s own JSONL store, which an ESCALATION (`escalate.ts`, never a feedback
+   * entry) opened. Carrying it as a field — not folded into `raw` prose — is what makes this
+   * entry findable by thread the same way `rmd trace`/a future console can already find one by
+   * `reply_to`/`submission_key`: a plain field scan, no bespoke parser. `null`/absent for every
+   * entry captured without one (every caller predating this task, and every entry this task's
+   * own route does not touch) — `raw` and every other field stay byte-identical either way.
+   */
+  thread_id?: string | null;
 }
 
 // ── Decision summaries (W1-T313) ─────────────────────────────────────────────
@@ -911,6 +924,16 @@ export interface CaptureFeedbackOptions {
    */
   replyTo?: string;
   /**
+   * W1-T2496: the escalation thread id (`inbox-thread.ts`'s {@link deriveThreadId}) this capture
+   * answers, ALREADY VALIDATED by the caller (panel-actions.ts's `buildEscalationReplyRoute`
+   * confirms a thread by this id already carries at least one message before this function ever
+   * runs — this function itself does no such lookup, mirroring `replyTo` above: the caller
+   * validates, this module only stores). `undefined`/omitted leaves `thread_id: null` on the
+   * written entry — a submission carrying no thread reference is byte-identical to today's shape
+   * plus this one added field.
+   */
+  threadId?: string;
+  /**
    * W1-T397 test seam ONLY — injectable `git`/`gh` for the home-repo self-check and the
    * upstream PR attempt. Real callers never set this, so they get the actual `git`/`gh` calls;
    * a test injects fakes so the routing decision (self vs. not) and the PR-open attempt are
@@ -1001,6 +1024,7 @@ export function captureFeedback(root: string, opts: CaptureFeedbackOptions): Fee
     summary: null,
     expansion: opts.expansion ?? null,
     submission_key: opts.submissionKey ?? null,
+    thread_id: opts.threadId ?? null,
   };
   writeFileSync(feedbackEntryPath(root, id), stringifyYaml(entry));
   try {
