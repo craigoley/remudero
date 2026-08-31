@@ -2411,7 +2411,7 @@ function localBranchExists(repoDir: string, branch: string): boolean {
     });
     return true;
   } catch {
-    return false;
+    return false; // `--quiet` folds ref-absent and any other git failure into one "not found" state
   }
 }
 
