@@ -1463,13 +1463,25 @@ export function pruneRatifiedProposals(
 // ── W1-T2455: THE DUPLICATE CHECK AT THE RATIFICATION SEAM ──────────────────────────────────
 //
 // `duplicateTitleViolations` (task-linter.ts) has been WIRED since W1-T1076 — `duplicateCorpusOpts`
-// (run-task.ts) supplies its corpus — but three things keep it off the ratification path: its
+// (run-task.ts) supplies its corpus — but TWO things keep it off the ratification path: its
 // severity is `warn` and `lintPlanCommand` only counts a task as failing inside
-// `if (blocking.length)`; it is scoped to the `--base` pass and returns `{}` for the whole-plan
-// one; and `lint-plan` is not a required check. So `rmd approve` can file a task for a defect that
-// already shipped, and on 2026-08-29 it would have: of 32 drafted shards across the 18 cached
-// drafts, TWO score a perfect 1.00 against a shard already on `origin/main` (W1-T2452, W1-T2453)
-// and one scores 0.57 (W1-T2451) — all three already merged.
+// `if (blocking.length)`; and it is scoped to the `--base` pass and returns `{}` for the
+// whole-plan one. So `rmd approve` can file a task for a defect that already shipped, and on
+// 2026-08-29 it would have: of 32 drafted shards across the 18 cached drafts, TWO score a perfect
+// 1.00 against a shard already on `origin/main` (W1-T2452, W1-T2453) and one scores 0.57
+// (W1-T2451) — all three already merged.
+//
+// W1-T2486 CORRECTS A THIRD REASON THIS COMMENT USED TO GIVE, WHICH WAS FALSE: it used to also
+// claim `lint-plan` is not a required check — it is (ci-gate.yml's REQUIRED list names it, and
+// has since ci-gate started aggregating it). That third reason was also never load-bearing for
+// the conclusion above: a required check only holds merge on a REAL failure, and a `warn`-severity
+// violation never enters `lintPlanCommand`'s `blocking` array in the first place (see the first
+// reason above) — so being required changes nothing about whether THIS check's warn can stop a
+// ratification. The two reasons above are sufficient on their own and are the whole of why this
+// path stays open. `duplicateTitleViolations`' own escalation, added narrowly in task-linter.ts
+// (W1-T2486, `unansweredDuplicateTitleViolations`) for an UNANSWERED near-certain match, targets
+// the PLAN-FILING path, not this ratification seam, which is why THIS module's own
+// `draftedDuplicate` check below still carries the separate burden of catching it here.
 //
 // IT KEYS ON THE DRAFTED SHARD SLUG, NEVER ON THE PROPOSAL. Eleven proposal summaries read
 // literally `board-review: #NNNN carries 1 unhandled escalation(s)` — near-identical yet
