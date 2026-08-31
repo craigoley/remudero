@@ -551,6 +551,9 @@ export function readAccountUsageProjection(path: string): AccountUsageProjection
   try {
     parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<AccountUsageProjection>;
   } catch {
+    // Missing/unparseable projection file -- fail soft to absent, same discipline as
+    // readAccountUsageFile's own catch below; never a crash for a host that hasn't spawned
+    // a worker yet.
     return undefined;
   }
   if (typeof parsed.cacheFetchedAtMs !== "number" || !Number.isFinite(parsed.cacheFetchedAtMs)) return undefined;
