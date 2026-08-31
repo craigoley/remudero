@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { parse as parseYaml } from "yaml";
+import { diagnoseBodyDefects } from "./body-repair.js";
 import { appendLedger } from "./ledger.js";
 import { readLedgerLines, readMergeCreditedTaskIds, taskIdFromRunBranch } from "./status.js";
 import { installPolicyPath, loadDefaultPolicy, PolicyError } from "./policy.js";
@@ -3298,7 +3299,17 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     when: (pr) => pr.reviewState === "failure",
     reason: (pr) =>
       pr.criteriaRecoverable === false
-        ? "review failing — criteria unrecoverable (no Remudero-Task: trailer to resolve them from) — escalating"
+        ? // W1-T2541: name the DERIVED repair, not only the defect. `diagnoseBodyDefects` reads the
+          // head ref the same way `projectPlan` already does, so the trailer it names invents
+          // nothing — and MEASURED 2026-08-31, this exact reason was posted on #3363 while NINE
+          // criteria sat unread in its own shard, and on #3400/#3403 while both were green.
+          // Diagnosis only: nothing here edits a body (see lib/body-repair.ts).
+          `review failing — criteria unrecoverable (no Remudero-Task: trailer to resolve them from) — escalating` +
+          (() => {
+            const d = diagnoseBodyDefects("", [], { headRef: pr.headRefName });
+            const repair = d.find((x) => x.kind === "no-trailer")?.repair;
+            return repair === undefined ? "" : ` — derived repair: add \`${repair}\` to the PR body`;
+          })()
         : "review failing with no actionable unmet criteria (contradictory) — escalating",
   },
   {
