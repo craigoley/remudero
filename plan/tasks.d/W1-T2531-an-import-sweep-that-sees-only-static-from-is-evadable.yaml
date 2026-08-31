@@ -1,0 +1,88 @@
+- id: W1-T2531
+  title: "EVERY IMPORT SWEEP IN test/ MATCHES ONLY A STATIC `from \"…\"`, SO A DYNAMIC `await import()` REACHES THE SAME MODULE INVISIBLY — six sweeps across four files, four of them with NO dynamic-aware backstop, and two of those are NEGATIVE boundary assertions that pass silently when the forbidden edge is taken dynamically; OBSERVED being used deliberately to clear a refusing gate within the hour"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 12.00
+  files: [test/an-import-sweep-sees-every-import-form.test.ts, test/mutation-ratchet.test.ts, test/task-linter.test.ts, test/cli-plumbing-extraction.test.ts]
+  origin: "operator-session#lets-get-rmd-more-automated-2026-08-31"
+  plan_refs: ["W1-T133", "W1-T180", "W1-T2524"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED, NOT PREDICTED. On 2026-08-31, `test/mutation-ratchet.test.ts`'s importer sweep
+    refused a new static `from "../src/lib/classify.js"` import in
+    `test/three-retries-in-three-seconds-against-a-lockout.test.ts`. A lane cleared the refusal by
+    rewriting the import as `await import("../src/lib/classify.js")` plus a
+    `type X = import("…").X` type query, with a comment saying so in as many words: "neither is a
+    static `from` import, so the grep no longer matches it". The commit message states the check
+    "correctly flagged" it. That commit (23a0cbb8) was reverted — its diagnosis had gone stale, and
+    #3349 had already made the compliant path available — but the EVASION WORKED, and that is this
+    task's subject. It is a property of the sweep, not of anyone's intent: a legitimate dynamic
+    import slips through exactly the same hole.
+
+    THE POPULATION, MEASURED AT db0c4680. Six sweeps, all `from ["']…["']` regexes over source
+    text, across four files:
+
+      test/mutation-ratchet.test.ts:312       POSITIVE census — every classify.ts importer must be
+                                              named in stryker.conf.json's commandRunner
+      test/task-linter.test.ts:1483           NEGATIVE — "must not import lib/status.ts"
+      test/cli-plumbing-extraction.test.ts:106 POSITIVE census — `importers` must come back EMPTY
+      test/cli-plumbing-extraction.test.ts:210 NEGATIVE — "must not import run-task.ts"
+      test/cli-plumbing-extraction.test.ts:211 NEGATIVE — "must not import spike.ts"
+      test/fast-lane-classifier.test.ts:66    POSITIVE — diff-class.mjs must import the canonical
+                                              predicate rather than restate the rules
+
+    A seventh of the same family sits at cli-plumbing-extraction.test.ts's
+    `assert.doesNotMatch(src, /^import /m, "cli-args.ts must import nothing")` — anchored at line
+    start, so `const x = await import(…)` does not match it either.
+
+    THE TWO SHAPES FAIL IN OPPOSITE DIRECTIONS, AND BOTH FAIL QUIETLY. A POSITIVE census silently
+    UNDERCOUNTS: the module is exercised, the sweep does not see it, and whatever the census
+    guarantees (here: that the mutation runner covers every classify test) is no longer guaranteed.
+    A NEGATIVE assertion silently PASSES: the forbidden edge is taken, and the guard reports
+    clean — which is worse, because the guard's entire value is that it fails.
+
+    WHICH ONES HAVE A BACKSTOP, CHECKED RATHER THAN ASSUMED. `dependency-cruiser` DOES follow
+    dynamic imports, so a rule in `.dependency-cruiser.cjs` is a real second opinion. It carries
+    exactly two rules: `lib-no-spike-or-cli` (`severity: "error"`) and `no-circular`
+    (`severity: "warn"`). So cli-plumbing-extraction.test.ts:210/211 ARE backstopped — the same
+    edge is an error under depcruise. The other four are not: no rule forbids
+    `task-linter -> status`, none constrains `repo-location` importers, none reaches
+    `scripts/diff-class.mjs` or the stryker scope at all.
+
+    THE FIX IS ONE PREDICATE, USED AT EVERY SITE THAT ALREADY HAS A SWEEP. "Does this source
+    reference module M by ANY import form" — static `from`, `import type … from`, a bare
+    `import "…"` side-effect import, `await import("…")`, an `import("…")` type query, and
+    `require("…")`. Repoint the six sweeps at it rather than widening six regexes independently,
+    which is how they drifted apart in the first place.
+
+    DO NOT SOLVE THIS BY BANNING DYNAMIC IMPORTS. They are legitimate and this repo uses them; a
+    lint forbidding the form would be a wrong-population bound of the kind W1-T312/W1-T380/W1-T382
+    keep producing. The sweep should SEE every form, not forbid the ones it cannot see.
+
+    THE RISK BAND IS RULE 19'S SPAN, NOT BLAST RADIUS. Four `test/` files, no `src/` path, nothing
+    a worker runs against production — but `lint-plan` reads a concern per file stem and refuses
+    risk:medium on the count. Recorded at high for that reason alone, per W1-T2525.
+
+    RE-DERIVE THE POPULATION BEFORE BUILDING. The six line numbers above drift; the query is
+    `grep -rn 'from \[\"'"'"'\]' test/ --include=*.test.ts` filtered to sweep sites (a regex over
+    file CONTENTS, not the test file's own import block), and the backstop question is answered by
+    reading `.dependency-cruiser.cjs`'s `forbidden` array, not by assuming depcruise covers an edge.
+
+  acceptance:
+    - claim: "a module reached only by a dynamic await import is seen by the sweep, exactly as a static from import is"
+      proof: "unit test: test/an-import-sweep-sees-every-import-form.test.ts"
+    - claim: "an import(...) type query and a bare side-effect import are seen too, so the erased forms cannot hide an edge"
+      proof: "unit test: test/an-import-sweep-sees-every-import-form.test.ts"
+    - claim: "a source that merely names the module in a comment or a string is NOT counted, so the widened sweep does not become a substring grep"
+      proof: "unit test: test/an-import-sweep-sees-every-import-form.test.ts"
+    - claim: "every sweep site that previously matched only a static from now resolves through the shared predicate"
+      proof: "unit test: test/an-import-sweep-sees-every-import-form.test.ts"
+    - claim: "the reverted 23a0cbb8 form is reproduced as a fixture and IS detected, so the fix is anchored to the observed evasion"
+      proof: "unit test: test/an-import-sweep-sees-every-import-form.test.ts"
+    - claim: "narrowing the predicate back to a static from makes the dynamic fixture escape again"
+      proof: "unit test: test/an-import-sweep-sees-every-import-form.test.ts"

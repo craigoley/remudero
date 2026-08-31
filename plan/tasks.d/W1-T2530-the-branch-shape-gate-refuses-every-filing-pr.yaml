@@ -1,0 +1,67 @@
+- id: W1-T2530
+  title: "THE BRANCH-SHAPE GATE REFUSES EVERY FILING PR, AND SATISFYING IT WOULD MAKE DISPATCH BELIEVE THE WORK IS UNDERWAY — `shardTaskIds` counts a newly added `plan/tasks.d/*.yaml` as CLAIMING that task, so a plan-only filing must be named `run-<id>-<epochMs>`, which is unsatisfiable for a PR filing more than one id and actively harmful for one; MEASURED the same hour W1-T2491 merged"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 10.00
+  files: [scripts/worker-branch-shape.mjs, test/a-filing-is-not-a-build.test.ts]
+  origin: "operator-session#lets-get-rmd-more-automated-2026-08-31"
+  plan_refs: ["W1-T2491"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED ON THIS FILING ITSELF, within the hour W1-T2491 (#3335) merged. A plan-only branch
+    adding four shards ran `npm run --silent worker-branch-shape:check` and got:
+
+        worker-branch-shape: REFUSED — this branch claims W1-T2526, W1-T2527, W1-T2528, W1-T2529
+        (by an anchored Remudero-Task trailer, or by filing a plan/tasks.d/ shard for it) but its
+        head ref "plan-findings-3349-session" does not carry the shape ... run-<taskId>-<epochMs>
+
+    UNSATISFIABLE BY CONSTRUCTION AT N>1. `evaluateWorkerBranchShape` refuses the moment ANY
+    claimed id fails `matchesRunBranchShape`, and one head ref cannot carry four ids. Every
+    multi-task filing in this repo's history — #3339 (ten), #3346 (seven), this one (five) — is
+    refused with no compliant rename available. The fleet's own triage rung is in the same
+    position: it files tasks from a `run-TRIAGE-<feedbackId>-<epochMs>` branch, which matches the
+    shape for TRIAGE and for none of the ids it mints.
+
+    AND COMPLYING AT N=1 WOULD BE WORSE THAN THE REFUSAL. `projectPlan` attributes an OPEN PR to a
+    task by `/^run-(.+)-\d+$/` against `headRefName`, NOT by the trailer, and `isDispatchEligible`
+    consults `opts.isOpenPr`. So renaming a filing branch to `run-W1-T2526-<epochMs>` would make
+    dispatch read the FILING as an in-flight BUILD of a task nobody has started, and suppress or
+    de-prioritise it for as long as the filing PR stays open. The gate's remedy line
+    ("Rename the branch to that shape") therefore points at a real harm, not merely an
+    inconvenience — which is why this is a defect in the predicate and not a naming convention
+    anyone should adopt.
+
+    THE DISCRIMINATOR EXISTS AND IS ALREADY IN THE DIFF. The shard limb was added to catch a BUILD
+    that files its own shard and forgets the trailer — a real case, and worth keeping. What
+    separates it from a filing is whether the diff carries anything OUTSIDE `plan/`: a build
+    changes `src/`, a filing does not. `planOnly` is the same property `judgeReview` and
+    `checkSatisfiedByGuard` already gate Standing rule 15's carve-out on, so this is a property the
+    repo already computes and trusts, not a new one to invent. The trailer limb is untouched by
+    this: a trailer is an explicit build claim whatever else the diff holds.
+
+    NOT A CI RED, WHICH IS WHY IT NEEDS FILING RATHER THAN A HOTFIX. W1-T2491 wired this into
+    `FAST_GATE_STEPS` only (`grep -n worker-branch-shape .github/workflows/*.yml` returns nothing),
+    so it fails `rmd preflight --fast` and no PR check. That makes it invisible to the board and
+    visible only to whoever runs the gate this repo's own first rule tells every session to run —
+    the worst combination for something that will be hit by every filing from now on.
+
+    RE-DERIVE THE POPULATION. The query is: for each merged plan-only PR in the last month, does
+    its head ref match `run-<id>-<epochMs>` for every id its diff adds a shard for? Report the
+    count with the sha it was taken at rather than trusting the three PRs named above.
+
+  acceptance:
+    - claim: "a plan-only branch adding shards for several tasks passes the gate, whatever its head ref"
+      proof: "unit test: test/a-filing-is-not-a-build.test.ts"
+    - claim: "a branch whose diff also changes src/ and which files its own shard is STILL refused when its head ref is unshaped, so the limb the gate was built for survives"
+      proof: "unit test: test/a-filing-is-not-a-build.test.ts"
+    - claim: "an anchored Remudero-Task trailer still claims a task on an unshaped branch regardless of whether the diff is plan-only"
+      proof: "unit test: test/a-filing-is-not-a-build.test.ts"
+    - claim: "the real four-shard filing that exposed this is reproduced as a fixture and passes, so the fix is anchored to the observation"
+      proof: "unit test: test/a-filing-is-not-a-build.test.ts"
+    - claim: "removing the plan-only condition makes the filing fixture refuse again"
+      proof: "unit test: test/a-filing-is-not-a-build.test.ts"
