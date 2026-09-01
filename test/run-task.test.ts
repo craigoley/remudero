@@ -88,6 +88,7 @@ import { readlineAsk, type GitRunner, materializeOriginShards, escalateCommand, 
   buildOpenPrViews,
   STALL_WINDOW, resolveAlreadySatisfiedWithRetry, ALREADY_SATISFIED_VERIFY_ATTEMPTS, type AlreadySatisfiedClaim, type AlreadySatisfiedResolution,
 } from "../src/run-task.js";
+import { DAEMON_DRAFT_BATCH_CAP } from "../src/lib/inbox.js";
 import { requestStop } from "../src/lib/fleet-control.js";
 import { LaunchdPlistError } from "../src/lib/launchd.js";
 import type { AlertLaneAlert } from "../src/lib/alert-lane.js";
@@ -4861,7 +4862,16 @@ test("W1-T193: buildInboxDraftHook — a REAL execution proves the in-flight fil
   assert.deepEqual(JSON.parse(readFileSync(inflightPath, "utf8")), {}, "the in-flight file must be cleared once the batch resolves");
   const drafts = JSON.parse(readFileSync(join(root, "state", "inbox-drafts.json"), "utf8"));
   assert.ok(drafts.P1, "a successful outcome must land in the draft cache");
-  assert.deepEqual(logs, [], "a clean run never ledgers inbox.draft_rung.error");
+  // W1-T2561: narrowed from `logs` to the ERROR rows this assertion's own message names. The rung
+  // now also ledgers one `inbox.draft_batch` observation per poll (the cap's deferral count), so an
+  // empty-whole-log assertion would fail on a clean run for a reason it never meant to test. The
+  // claim is unchanged and still exact: a clean run produces NO error row.
+  assert.deepEqual(logs.filter((l) => l.step === "inbox.draft_rung.error"), [], "a clean run never ledgers inbox.draft_rung.error");
+  assert.deepEqual(
+    logs.filter((l) => l.step === "inbox.draft_batch"),
+    [{ step: "inbox.draft_batch", extra: { eligible: 1, drafting: 1, deferred: 0, cap: DAEMON_DRAFT_BATCH_CAP } }],
+    "and it ledgers exactly one batch observation, reporting nothing deferred when the poll is under the cap",
+  );
 });
 
 test("W1-T193: buildInboxDraftHook — the in-flight file is cleared even when the injected batch THROWS, and the failure is caught and ledgered, never thrown up to the caller", async () => {
@@ -4878,7 +4888,11 @@ test("W1-T193: buildInboxDraftHook — the in-flight file is cleared even when t
 
   await assert.doesNotReject(hook(), "a batch failure must be caught, never thrown up into the sweep/daemon loop");
   assert.deepEqual(JSON.parse(readFileSync(inflightPath, "utf8")), {}, "the in-flight file must still be cleared on failure");
-  assert.deepEqual(logs, [{ step: "inbox.draft_rung.error", extra: { error: "simulated worktree failure" } }]);
+  assert.deepEqual(
+    logs.filter((l) => l.step === "inbox.draft_rung.error"),
+    [{ step: "inbox.draft_rung.error", extra: { error: "simulated worktree failure" } }],
+    "the failure is caught and ledgered verbatim (W1-T2561: filtered to the error step — the rung also emits inbox.draft_batch)",
+  );
 });
 
 test("W1-T193: rmd serve leaves panelGraph.ratify UNSET in its own CLI wiring — buildServeServer (lib/serve.ts) owns defaulting it to a real ratifyCliGateway, proven behaviorally in test/serve.test.ts; the console's APPROVE/REFRAME routes are reachable from the real CLI, never left with no gateway", () => {

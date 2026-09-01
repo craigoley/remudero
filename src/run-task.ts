@@ -348,6 +348,7 @@ import {
   classifyProposal,
   draftAttemptKey,
   draftsDueOnDaemon,
+  DAEMON_DRAFT_BATCH_CAP,
   gitGrepAnchorTrue,
   inboxDraftPrompt,
   isDraftStale,
@@ -30231,6 +30232,21 @@ export function buildInboxDraftHook(
 
       const due = draftsDueOnDaemon(proposals, drafts, attempts);
       if (due.length === 0) return;
+
+      // W1-T2561: NAME THE DEFERRAL, NEVER CAP SILENTLY. `draftsDueOnDaemon` now returns at most
+      // DAEMON_DRAFT_BATCH_CAP proposals per poll, so on a large registry `due` is a SLICE and the
+      // rest are still due. A cap that shows up nowhere is the "tested, inert" shape this repo has
+      // shipped before: the queue would drain at a bounded rate with no way to see the backlog or
+      // tell a paced drain from a wedged one. This is a pure observation — a count of a set already
+      // computed above, spawning nothing — and `deferred: 0` on an uncapped poll is a real reading,
+      // not silence, so the row is written unconditionally.
+      const eligible = draftsDueOnDaemon(proposals, drafts, attempts, 0);
+      log("inbox.draft_batch", {
+        eligible: eligible.length,
+        drafting: due.length,
+        deferred: eligible.length - due.length,
+        cap: DAEMON_DRAFT_BATCH_CAP,
+      });
 
       // W1-T193: the console must render a proposal as DRAFTING (with its spawn time) for the
       // whole window an Architect worker is actually running for it — "never lies about its
