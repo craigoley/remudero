@@ -1436,6 +1436,14 @@ export function materializeOriginShards(
  * (already reported via `say`) on a hard failure instead of throwing — so a caller can refuse
  * cleanly with no spawn. A successful-but-stale sync (`--allow-stale`) is also ledgered and
  * surfaced via `say`, then returned normally so the run proceeds.
+ *
+ * W1-T2513: `opts.planSnapshot`, when supplied, REPLACES the direct `syncPlanFromOrigin` call
+ * below as the source of the raw sync outcome — same throw/return contract, so every branch
+ * here (the stale-dispatch announcement, the `GitFetchError` refusal) runs UNCHANGED against
+ * whatever it returns. This is the seam a multi-lane caller uses to hand every lane of one tick
+ * the SAME fetch+load outcome instead of each lane paying for its own — see
+ * {@link createPlanSyncCoalescer}. Omitted (every caller but `drainCommand`/`daemonCommand`'s
+ * multi-lane `runOne`), this is byte-identical to before this task existed.
  */
 export function syncPlanOrRefuse(
   planPath: string,
@@ -1443,12 +1451,15 @@ export function syncPlanOrRefuse(
     allowStale: boolean;
     log: (step: string, extra?: Record<string, unknown>) => void;
     say: (msg: string) => void;
+    planSnapshot?: (o: { allowStale?: boolean }) => SyncedPlan;
   },
 ): SyncedPlan | { error: string } {
   const repoDir = dirname(dirname(planPath));
   const relPath = relative(repoDir, planPath);
   try {
-    const synced = syncPlanFromOrigin(repoDir, relPath, { allowStale: opts.allowStale });
+    const synced = opts.planSnapshot
+      ? opts.planSnapshot({ allowStale: opts.allowStale })
+      : syncPlanFromOrigin(repoDir, relPath, { allowStale: opts.allowStale });
     if (synced.staleDispatch) {
       opts.log("git.stale_dispatch", { stale_dispatch: true });
       opts.say(`WARNING: dispatching from a STALE origin/main ref (--allow-stale, fetch failed)`);
@@ -1463,6 +1474,76 @@ export function syncPlanOrRefuse(
     }
     throw e;
   }
+}
+
+/**
+ * W1-T2513 — SHARE ONE ORIGIN FETCH + ONE PLAN PARSE ACROSS EVERY LANE OF A TICK, rather than
+ * letting each lane pay for its own. `drainCommand`/`daemonCommand` build exactly ONE of these
+ * per invocation (never per tick, never per lane — see their own call sites) and hand its
+ * `sync` method to every `runTask` call via the `planSnapshot` opt (threaded to
+ * {@link syncPlanOrRefuse} above); a caller that supplies nothing gets today's behaviour,
+ * unchanged, every time.
+ *
+ * NO EXPLICIT "NEW TICK" SIGNAL IS NEEDED, because none is available: `runTask` carries ZERO
+ * `await` from its declaration to well past this call (see that function's own doc), so
+ * `Promise.allSettled(admitted.map((t) => deps.runOne(t.id)))` (drain.ts/daemon.ts) invokes
+ * every lane of ONE tick SYNCHRONOUSLY, back-to-back, in the SAME turn of the event loop —
+ * `Array.prototype.map` never yields to the microtask queue between callback invocations, and
+ * an async function's body runs synchronously up to its first `await` before returning a
+ * promise to its caller. So: lane 1 calls `sync`, finds the cache empty, computes the real
+ * result and caches it; lanes 2..N, invoked synchronously right after in the same `.map()`,
+ * find the cache already populated and reuse it. The cache is cleared on the very next
+ * microtask — by which point every lane of THIS tick has already read it — and the NEXT tick's
+ * first call cannot happen until every lane of the current one has settled (via the awaited
+ * `Promise.allSettled`), which requires at least one microtask/macrotask turn to have already
+ * elapsed. So the cache can never survive to answer a second tick's first call: the staleness
+ * budget is exactly one tick, by construction, with no counter or timer to keep honest.
+ *
+ * WHAT IS SHARED, WHAT IS NOT. Only the raw {@link syncPlanFromOrigin} outcome (the parsed
+ * `Plan` plus `staleDispatch`, or the thrown {@link GitFetchError}) is cached. Each lane's own
+ * `syncPlanOrRefuse` call still runs its own `log`/`say` against that shared outcome under its
+ * own `run_id` — so a shared fetch failure still ledgers `git_fetch_failed` for, and refuses,
+ * every lane identically, and a shared `staleDispatch` still prints the WARNING for every lane,
+ * exactly as if each had fetched for itself.
+ */
+export function createPlanSyncCoalescer(
+  planPath: string,
+  /** Injectable {@link syncPlanFromOrigin} — a test wraps the real function with a call
+   *  counter to prove the coalescing (real git, real parse, just observed); production never
+   *  overrides this. */
+  syncFn: (repoDir: string, relPath: string, opts: { allowStale?: boolean }) => SyncedPlan = syncPlanFromOrigin,
+): {
+  sync: (opts: { allowStale?: boolean }) => SyncedPlan;
+} {
+  const repoDir = dirname(dirname(planPath));
+  const relPath = relative(repoDir, planPath);
+  let pending: { key: string; result?: SyncedPlan; error?: unknown } | undefined;
+  return {
+    sync(opts) {
+      const key = opts.allowStale ? "stale" : "strict";
+      if (!pending || pending.key !== key) {
+        const slot: { key: string; result?: SyncedPlan; error?: unknown } = { key };
+        try {
+          slot.result = syncFn(repoDir, relPath, { allowStale: opts.allowStale });
+        } catch (e) {
+          // NOT erased, and NOT swallowed: the failure is memoised on the slot and RETHROWN below
+          // (`if (pending.error !== undefined) throw pending.error`) to every lane that coalesces
+          // onto this same tick, so a failed sync reaches each caller exactly as it would have if
+          // each had fetched for itself. Deliberately not rethrown HERE: the throw has to happen
+          // per-caller at the coalescer's exit, not once inside the shared fetch.
+          slot.error = e;
+        }
+        pending = slot;
+        // Clear on the very next microtask — see this function's own doc for why every lane of
+        // THIS tick has already read `slot`, synchronously, by the time this fires.
+        queueMicrotask(() => {
+          if (pending === slot) pending = undefined;
+        });
+      }
+      if (pending.error !== undefined) throw pending.error;
+      return pending.result as SyncedPlan;
+    },
+  };
 }
 
 /**
@@ -10246,6 +10327,17 @@ async function runTask(
      *  sync — the operator named an exact file, so honor it verbatim, same as the sibling
      *  guard around the daemon's own non-self clone-sync (`!flagValue(rest, "--plan")`). */
     skipGitSync?: boolean;
+    /**
+     * W1-T2513 — coalescing seam for the multi-lane dispatch path: threaded straight through
+     * to {@link syncPlanOrRefuse}'s identical param (see that function's and
+     * {@link createPlanSyncCoalescer}'s own docs for the full contract). `drainCommand` and
+     * `daemonCommand` build ONE coalescer per invocation and pass its `sync` method here for
+     * every lane's `runTask` call, so the three lanes of one tick share a single origin fetch
+     * and a single plan parse instead of paying for it three times. Omitted — every other
+     * caller (`rmd run-task`, `rmd wipe-test`, every existing test) — `runTask` fetches and
+     * loads for itself exactly as it always has.
+     */
+    planSnapshot?: (o: { allowStale?: boolean }) => SyncedPlan;
     /** W1-T319 (fb-1784773321502-86793d): the deliberate override for the ALREADY-MERGED
      *  by-id refusal below — modelled on `allowStale` above. With it unset (the default), a
      *  task the projection already reports merged refuses at zero cost, verdict
@@ -10471,7 +10563,12 @@ async function runTask(
   if (opts.skipGitSync) {
     plan = loadPlan(planPath);
   } else {
-    const synced = syncPlanOrRefuse(planPath, { allowStale: opts.allowStale ?? false, log, say });
+    const synced = syncPlanOrRefuse(planPath, {
+      allowStale: opts.allowStale ?? false,
+      log,
+      say,
+      planSnapshot: opts.planSnapshot,
+    });
     if ("error" in synced) {
       return { taskId, runId, merged: false, costUsd: 0, verdict: "blocked_git_fetch" };
     }
@@ -20889,6 +20986,15 @@ async function drainCommand(
   // so it never needed two instances for two passes of differing scope.
   const githubFactory = deps.githubFactory ?? ((o: string, r: string) => buildBatchedGithub(o, r, { log }));
 
+  // W1-T2513 — ONE COALESCER FOR THIS WHOLE `rmd drain` INVOCATION (never per tick, never per
+  // lane), handed to every dispatch lane's `runTask` call below (`runOne`) via its
+  // `planSnapshot` seam. Without it, each of the tick's concurrent lanes paid its OWN `git
+  // fetch origin` + `loadPlan` — measured 2028 ms + 837 ms per lane, synchronously, before
+  // `runTask`'s first `await` — so a 3-lane tick paid the cost 3 times for the identical
+  // answer. See `createPlanSyncCoalescer`'s own doc for why a single instance held for the
+  // drain's whole lifetime still re-fetches every tick rather than going stale.
+  const planSyncCoalescer = createPlanSyncCoalescer(planPath);
+
   // ── GIT SELF-SYNC (W1-T60): dispatch from the origin/main plan blob, never the operator's
   // working tree — see runTask's identical gate for the full rationale. FAILS CLOSED (no
   // lock taken, no spawn) on a fetch failure unless --allow-stale. `skipGitSync` (behavioral
@@ -21098,7 +21204,9 @@ async function drainCommand(
         // 23-open-PR incident): the SAME `openPrCount` closure the W1-T172 lanes budget already
         // reads (below), never a second GitHub read path — see queueGovernorGateFor's doc.
         checkQueueGovernor: queueGovernorGateFor(openPrCount, ledgerPath, runId),
-        runOne: (taskId) => runTask(taskId, { planPath, config, allowStale }),
+        // W1-T2513: `planSnapshot` is the coalescer built above — every lane of a tick shares
+        // ONE origin fetch + ONE plan parse instead of paying for it per lane.
+        runOne: (taskId) => runTask(taskId, { planPath, config, allowStale, planSnapshot: planSyncCoalescer.sync }),
         readUsage: deps.readUsage ?? (() => readUsageSnapshotPreferSdk(config)),
         checkStop: () => stopDetail(config.root),
         // W1-T1216: LOCAL FIRST (design (i)), falling through to the shared cross-host hold
@@ -21728,6 +21836,11 @@ export async function daemonCommand(
   const laneGithubFor = memoiseGatewayByRepo((o, r) =>
     deps.githubFactory ? deps.githubFactory(o, r) : buildBatchedGithub(o, r, { log }),
   );
+  // W1-T2513 — ONE COALESCER FOR THIS WHOLE DAEMON PROCESS (never per tick, never per lane),
+  // mirroring `drainCommand`'s identical construction immediately above `laneGithubFor` there —
+  // every dispatch lane's `runTask` call below shares ONE origin fetch + ONE plan parse per
+  // tick instead of paying for it per lane. See `createPlanSyncCoalescer`'s own doc.
+  const planSyncCoalescer = createPlanSyncCoalescer(target.planPath);
   const refreshMerged: () => MergedSet = () => {
     const proj = projectPlan(
       plan,
@@ -22134,6 +22247,10 @@ export async function daemonCommand(
             // and same reason as `buildInboxDraftHook`'s once-per-daemon-start construction; see
             // `laneGithubFor` for why it memoises per owner/repo rather than per drain target.
             githubFor: laneGithubFor,
+            // W1-T2513: the coalescer built above — every lane of a tick shares ONE origin
+            // fetch + ONE plan parse instead of paying for it per lane. Inert when
+            // `skipGitSync` is set (an explicit `--plan` never syncs at all, coalesced or not).
+            planSnapshot: planSyncCoalescer.sync,
           }),
         readUsage: () => readUsageSnapshotPreferSdk(config),
         // THE LEDGER IS THE DEDUP (impl-FL): seed the once-per-string bound from what previous
