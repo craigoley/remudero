@@ -1,0 +1,60 @@
+- id: W1-T2575
+  title: "NOTHING TURNS THE ROUTING EVIDENCE INTO A DECISION — the sweep prints a table a human must read and act on, so the flywheel §9 has promised since WS-8 (\"the harness learns which horse each job actually needs\") has a measurement leg and no recommendation leg at all"
+  repo: remudero
+  depends_on: ["W1-T2574"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: "span"
+  budget_usd: 15.00
+  files: [src/lib/mount-recommender.ts, src/run-task.ts, test/a-routing-recommendation-is-a-proposal-never-a-live-mutation.test.ts]
+  origin: "operator-session#codex-router-design-2026-09-01"
+  plan_refs: ["W1-T2574", "W1-T167"]
+  status: queued
+  attempts: 0
+  rationale: |
+    §9 ALREADY RULES ON THE SHAPE, AND THIS TASK IMPLEMENTS THAT RULING RATHER THAN INVENTING ONE:
+    "Routing is knowledge — golden-calibrated. mounts.yaml changes ship as PRs behind the golden
+    suite like every other knowledge change. The flywheel proposes DOWNGRADES when a cheaper mount
+    passes a task-type's goldens above threshold, and UPGRADES when strike-rate correlates with
+    mount." A recommender that edits routing live would violate that doctrine outright.
+
+    SO THE OUTPUT IS A PROPOSAL, AND THE EXISTING PATH ALREADY ACCEPTS ONE. `classifyProposal`
+    (src/lib/inbox.ts) tiers proposals, `rmd inbox` reports readiness and `rmd approve` ratifies
+    through the gate into a plan PR. This task emits into that path; it does not build a second
+    ratification mechanism, and it holds no authority to merge anything.
+
+    IT MUST REFUSE MORE OFTEN THAN IT RECOMMENDS. A recommendation carries the cell it applies to,
+    the arms compared, each arm's n, the effect size and an interval — and below a declared minimum
+    sample, or when W1-T2574 reports the arms unmatched, the answer is a REFUSAL naming what is
+    missing. "No recommendation yet, n=4 against a floor of 30" is the correct output for most
+    cells for a long time, and a recommender that always has an opinion is the failure mode, not
+    the goal.
+
+    THE TIER INVARIANT IS NOT ADVISORY TO THIS COMPONENT. §9: the flywheel "may lower workers
+    freely but can NEVER lower the Architect to or below the worker ceiling". A proposed mount that
+    would violate `enforceTierInvariant` must be refused AT PROPOSAL TIME, with the violation
+    named, rather than emitted for a human to discover when the config fails to load.
+
+    KNOWN DEPENDENCY, DECLARED RATHER THAN ASSUMED AWAY: §9's pre-merge proof is the golden suite,
+    and MASTER-PLAN's own status paragraph records that the golden-task replay suite "has no
+    `HarnessRunner` wired" so the Self-Harness leg reports no run recorded BY CONSTRUCTION. Until
+    that is wired, a routing proposal's evidence is observational only and the ratifying human is
+    the gate. This task must SAY SO in what it emits — a proposal that implies a golden run backed
+    it when none did is the exact false-confidence this repo's gates exist to prevent.
+  acceptance:
+    - claim: "the recommender is reached from a production caller, not only from its own test"
+      proof: "grep: recommendMounts( in src/run-task.ts"
+    - claim: "a recommendation emits a proposal through the existing ratification path and mutates no routing table"
+      proof: "unit test: test/a-routing-recommendation-is-a-proposal-never-a-live-mutation.test.ts"
+    - claim: "a cell below the declared minimum sample yields a REFUSAL naming the shortfall, never a recommendation"
+      proof: "unit test: test/a-routing-recommendation-is-a-proposal-never-a-live-mutation.test.ts"
+    - claim: "a cell whose arms are unmatched yields a refusal rather than an effect size"
+      proof: "unit test: test/a-routing-recommendation-is-a-proposal-never-a-live-mutation.test.ts"
+    - claim: "every recommendation carries the cell, the arms, each arm's n and an interval"
+      proof: "unit test: test/a-routing-recommendation-is-a-proposal-never-a-live-mutation.test.ts"
+    - claim: "a proposed mount that would violate the Tier Invariant is refused at proposal time with the violation named"
+      proof: "unit test: test/a-routing-recommendation-is-a-proposal-never-a-live-mutation.test.ts"
+    - claim: "the emitted proposal states that its evidence is observational while no golden run backs it"
+      proof: "unit test: test/a-routing-recommendation-is-a-proposal-never-a-live-mutation.test.ts"
