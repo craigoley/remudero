@@ -1,0 +1,77 @@
+- id: W1-T2554
+  title: "THE DAEMON'S FIRST BOARD READ OUTRUNS ITS OWN FIRST TOKEN MINT — `startInstallationTokenRefresh` (src/lib/github-app.ts) ends in a BARE `tick()` and returns `{armed: true}` before that mint resolves, so `run-task.ts`'s call site proceeds straight into the first sweep and spawns `gh api` children that inherit a `process.env.GH_TOKEN` nothing has written yet; MEASURED on this fleet 2026-09-01, the mint landed 1.899 s AFTER the first board fetch had already failed `auth`, and every boot burns the same guaranteed-to-fail calls against a rate limit this repo is already hitting"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 15.00
+  files: [src/lib/github-app.ts, src/run-task.ts, test/the-first-board-read-waits-for-the-first-mint.test.ts]
+  origin: "operator-session#the-github-auth-outage-2026-09-01"
+  plan_refs: ["W1-T2311", "W1-T2552"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THIS IS AN ORDERING DEFECT, NOT A CREDENTIAL ONE, AND THE DISTINCTION IS THE WHOLE TASK. The App
+    is configured correctly, the private key is readable, the installation id is right, and the mint
+    SUCCEEDS. It simply succeeds too late. Anyone reading only the first three log lines of a boot
+    concludes the credentials are broken and goes looking for a configuration fix that does not
+    exist — which is exactly what happened during the 2026-09-01 outage, where this symptom sat on
+    top of two genuine credential defects and made all three look like one problem.
+
+    MEASURED, FROM THIS FLEET'S OWN LEDGER, BOOT OF 2026-09-01 (host aa3aee57fd73):
+
+      01:13:42.600Z  board_gateway.fetch_failed  reason:"auth"   channel:"open"
+      01:13:43.721Z  board_gateway.fetch_failed  reason:"auth"   channel:"merged"
+      01:13:45.499Z  github_app.token_refreshed  expires_at:"2026-09-01T02:13:45Z"
+
+    The mint lands 1.899 s after the first failure and 1.778 s after the second. `docker logs` for the
+    same boot shows a THIRD failed call (the `needs-human` issue walk) and a fourth bare `gh auth`
+    error, so the per-boot cost is four wasted round trips, not two. RE-DERIVE RATHER THAN TRUST THAT
+    FIGURE: it moves with the sweep's own ordering and the container's network, and no timing survives
+    the hour it was taken in. The query is the three step names above, read in timestamp order out of
+    `state/ledger.ndjson` on a boot.
+
+    THE MECHANISM, NAMED PRECISELY. `startInstallationTokenRefresh` ends `tick(); return { armed: true }`.
+    `tick()` is async and its promise is discarded, so `armed: true` asserts only that a TIMER is
+    scheduled — never that a token exists. The daemon's call site is `startInstallationTokenRefresh({ log })`
+    in `run-task.ts`, also unawaited, so nothing between that line and the first `gh api` spawn has any
+    reason to wait. `refreshInstallationToken` mutates `process.env.GH_TOKEN` in the daemon's own
+    process and children inherit it, which is why every call AFTER the mint succeeds: the ledger shows
+    `board_gateway.fetch_ok` with `prCount: 2803` six minutes later on the same host, from the same
+    code, with nothing else changed.
+
+    WHY A RETRY IS NOT THE FIX. The failures are already survivable — `lastFetchFailed` degrades and
+    the next sweep recovers — so nothing is permanently broken and it would be easy to call this
+    cosmetic. It is not, for two reasons that have nothing to do with correctness. First, this repo
+    has been hitting GitHub's secondary rate limit, which counts CADENCE, and four guaranteed-to-fail
+    calls clustered in 1.9 s at every boot is exactly the shape that limit punishes. Second, the first
+    sweep of every boot reads nothing and therefore dispatches nothing, so the cost is a whole tick of
+    fleet latency on top of the wasted calls.
+
+    THE BAR IS "NO GITHUB CALL BEFORE THE FIRST MINT RESOLVES", NOT "FEWER FAILURES". A fix that
+    merely retries, or that sleeps a fixed interval before the first sweep, satisfies the symptom and
+    re-arms the defect the moment the mint is slower than the guess. The two shapes that actually hold
+    are awaiting the first `tick()` before returning `armed`, or gating the board read on the token
+    being PRESENT rather than on `armed` — and a bound that fires on a healthy condition is this
+    repo's recurring defect, so a timeout added here must be sized against an observed distribution of
+    mint latencies rather than picked.
+
+    IT MUST STAY NON-FATAL WHEN THE APP IS NOT CONFIGURED AT ALL. `startInstallationTokenRefresh`
+    returns `{armed: false}` on a host with no `GH_APP_*` names, by design and with no ledger row, and
+    a daemon running on a plain `GH_TOKEN` must not be made to wait for a mint that will never come.
+    Whatever waits must wait only when the App is actually armed.
+  acceptance:
+    - claim: "no GitHub call is made before the first installation-token mint resolves, when the App is armed"
+      proof: "unit test: test/the-first-board-read-waits-for-the-first-mint.test.ts"
+    - claim: "the boot ordering is asserted from the recorded sequence, so a mint that lands second fails the test"
+      proof: "unit test: test/the-first-board-read-waits-for-the-first-mint.test.ts"
+    - claim: "restoring the bare unawaited tick() makes the ordering assertion fail — the falsifier is load-bearing"
+      proof: "unit test: test/the-first-board-read-waits-for-the-first-mint.test.ts"
+    - claim: "a host with no GH_APP_* names still returns armed false and waits for nothing"
+      proof: "unit test: test/the-first-board-read-waits-for-the-first-mint.test.ts"
+    - claim: "a mint that REJECTS does not hang the daemon — it proceeds and the failure is logged, not swallowed"
+      proof: "unit test: test/the-first-board-read-waits-for-the-first-mint.test.ts"
+    - claim: "the refresh timer is still armed for subsequent renewals, exactly as before"
+      proof: "unit test: test/the-first-board-read-waits-for-the-first-mint.test.ts"
