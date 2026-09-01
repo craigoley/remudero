@@ -414,18 +414,15 @@ export function parseDraftAttemptCache(text: string | undefined): DraftAttemptCa
  * one poll's own cadence: at the measured mean it caps a poll near $26 rather than near $2,400,
  * and a genuine burst of new proposals still reaches the Architect within a few minutes.
  *
- * POLICY DATA (rule 2) — a literal here, W1-T252/W1-T253's policy file is its eventual home, the
- * same disposition {@link UNREADABLE_DEGRADED_LIMIT} in lib/headroom.ts records for its own bound.
+ * PRIMARY CONTROL: this is the normal pacing lever, not a backstop reached only after another
+ * control fails. POLICY DATA (rule 2) — a literal here, W1-T252/W1-T253's policy file is its
+ * eventual home, the same disposition {@link UNREADABLE_DEGRADED_LIMIT} in lib/headroom.ts records
+ * for its own bound.
  *
- * KIND: PRIMARY CONTROL (test/bound-kind-declared.test.ts). This is a number the system is meant
- * to run against, not one sized above its population to never bind — the discriminator
- * {@link WORKFLOW_RUN_HYDRATION_CAP} states for its own backstop kind. (Lower-case deliberately:
- * KIND_TAG_RE matches the upper-case spellings ANYWHERE in this comment block, so naming the other
- * kind in prose would keep this constant passing even if the tag above were deleted — the tag must
- * be the only token that satisfies the gate, or the gate is vacuous here.) Every poll with more than three
- * proposals due reaches it BY DESIGN: the paragraphs above choose pacing the arrival rate over
- * gating on the exhausted state precisely because the measured spend happened while the governor
- * still read healthy, so a bound that never bound would have bounded $0 of the $1,992.
+ * The tag above must be the ONLY token in this block that satisfies the gate. `KIND_TAG_RE`
+ * (test/bound-kind-declared.test.ts) matches the upper-case spellings ANYWHERE in the preceding
+ * comment block, so writing the other kind in upper case here would keep this constant passing
+ * even with the tag deleted — which is why "backstop" above is lower case, and must stay that way.
  */
 export const DAEMON_DRAFT_BATCH_CAP = 3;
 

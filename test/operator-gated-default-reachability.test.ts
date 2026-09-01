@@ -723,14 +723,10 @@ test("real tree: armIfVerdictPermits/withdrawArmIfVerdictRefuses call sites that
   // trusting this list, and re-deriving is exactly how these two shifted from :5885/:5946 to
   // :5891/:5952. W1-T2540 then added 54 lines at :3210 (merge-conflict prompt fixtures, again
   // ahead of both) and they shifted the same way, to :5945/:6006 — the SECOND time this exact
-  // re-derivation has been needed, which is that note's own point: a line number here is a QUERY
-  // over the current tree, and any diff inserting above these witnesses moves them. The THIRD
-  // witness (arm-ordering.test.ts) is untouched by any of these edits and remains unmoved.
-  // THIRD DRIFT (2026-09-01): W1-T2561's daemon draft cap (#3491) edited test/run-task.test.ts
-  // above both witnesses and they shifted again, :5945/:6006 -> :5959/:6020. Re-derived from
-  // this suite's own reported set and confirmed at the source: both new lines are the
-  // `const reviewOutcome = armIfVerdictPermits(` call this census exists to catch. Three drifts
-  // from three unrelated diffs is the pattern, not an accident.
+  // re-derivation has been needed. W1-T2561 then added fourteen lines ahead of both, moving the
+  // witnesses to :5959/:6020. This THIRD re-derivation is that note's own point: a line number is
+  // a QUERY over the current tree, and any diff inserting above these witnesses moves them. The THIRD
+  // witness (arm-ordering.test.ts) is untouched by either edit and unmoved.
   const expectedKeys = [
     "armIfVerdictPermits:test/arm-ordering.test.ts:63:ledgerLines",
     "armIfVerdictPermits:test/run-task.test.ts:5959:ledgerLines",
