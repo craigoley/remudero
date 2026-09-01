@@ -1,0 +1,81 @@
+- id: W1-T2557
+  title: "A RUNAWAY WORKER IS INVISIBLE UNTIL IT HAS FINISHED SPENDING — mid-flight the fleet samples LIVENESS every 5s (`WORKER_STATE_POLL_MS`, run-task.ts) and COST never; `worker.state` carries working/quiet/unknown and no turn count or dollar, and every cost signal there is (`scope_guard.overrun`, `budget.warning`, `cost.anomaly`) fires AFTER `implement.done`; MEASURED on W1-T2324-1787823430981 — 207 turns, $23.42, 58 minutes between `run.start` and `implement.done` with 106 `worker.state` rows saying only that the worker was alive, and `scope_guard.overrun` landing 177 MILLISECONDS after the worker had already finished"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 20.00
+  files: [src/run-task.ts, src/lib/worker.ts, test/a-runaway-worker-is-visible-before-it-finishes.test.ts]
+  origin: "operator-session#the-spend-census-2026-09-01"
+  plan_refs: ["W1-T931", "W1-T942", "W1-T2520"]
+  status: queued
+  attempts: 0
+  rationale: |
+    COST IS LINEAR IN TURNS, AND TURNS ARE THE ENTIRE VARIANCE. Deduped by `run_id` over the
+    retained ledger: 533 runs, $6.65 each, of which `implement.done` is $5.28 — 79%. That worker
+    costs $23.42/207 = $0.1131 per turn, and the $5.07 class median divided by the same rate is
+    ~45 turns. Every anomalous run is the SAME model (sonnet, capped by the Tier Invariant), the
+    SAME mount and the SAME context budget as a normal one; it simply takes 150-230 turns instead
+    of 45. RE-DERIVE RATHER THAN TRUST THESE FIGURES: they move with the plan, the model and the
+    corpus retained after rotation, and no cost figure survives the week it was taken in. The
+    query is `"step":"verdict"` deduped by `run_id` across all three rotation forms.
+
+    THE 45 ANOMALOUS RUNS ARE ~15% OF THE PIPELINE. `cost.anomaly` (W1-T931) already detects them
+    — 45 distinct runs at $16.80 against a $5.07 median, roughly $528 of excess — and it is right
+    to report rather than act. What is missing is not another detector. It is that NOTHING SEES
+    THE RUN WHILE IT IS HAPPENING.
+
+    THE MEASURED TIMELINE, FROM THIS FLEET'S OWN LEDGER (W1-T2324-1787823430981):
+
+      09:37:41.066  run.start
+                    ... 58 minutes, 207 turns, $23.42 ...
+      10:35:49.913  implement.done
+      10:35:50.090  scope_guard.overrun     <- 177 ms AFTER the worker finished
+      10:50:06.957  budget.warning          <- 14 minutes after that
+      10:50:28.175  verdict
+
+    `scope_guard.overrun` READS LIKE AN EARLY WARNING AND IS NOT ONE. It is a post-mortem on the
+    worker's OUTPUT and could never have steered the run; assuming otherwise is the trap this row
+    exists to close. Nothing in that 58-minute window observed cost at all.
+
+    AND THE HIGH-FREQUENCY SENSOR THAT DOES EXIST DELIBERATELY CARRIES NO COST. `worker.state`
+    (W1-T942) polled 106 times across that window — one row roughly every 33 seconds — and every
+    one of them says only working/quiet/unknown. Its own doc states the omission plainly:
+    "Deliberately NOT added to `DECISION_RELEVANT_LEDGER_STEPS` — nothing in THIS task decides off
+    it." That was correct for W1-T942's scope. It is what leaves the money invisible.
+
+    THE CLIFF IS CORRECT AND MUST NOT BE LOWERED. `.remudero/mounts.yaml` sets every mount's
+    `max_turns` to a flat 400 and says why in its own comment: "a RUNAWAY CLIFF, not a work
+    limit", after W1-T54b-1784149952116 was walled at 81/80 turns MID-LIVE-CAMPAIGN. A tighter cap
+    has been tried and it cost real work. 207 turns is barely half the cliff, so this run tripped
+    nothing and was, by the fleet's own definition, working normally throughout. What this task
+    adds is an EARLIER, NON-FATAL OBSERVATION, never a lower ceiling and never an automatic kill.
+
+    THE CHEAP SHAPE, NAMED SO IT IS NOT REACHED FOR TWICE. The sensor already parses EVERY stream
+    message — that is how `WorkerStateTracker` classifies working from quiet — and already writes
+    a row on a per-run sensor wired at the real spawn call site. A running message count on the
+    row it ALREADY writes is close to free. Whether that count maps cleanly onto the `num_turns`
+    that lands on `implement.done` is the one thing an implementer must MEASURE rather than
+    assume: if it does not, the row must carry what it can honestly count and say which it is.
+
+    AND A BOUND THAT FIRES ON A HEALTHY RUN IS THIS REPO'S RECURRING DEFECT. Any threshold added
+    here (e.g. "N times the class median turns") must be sized against an OBSERVED distribution of
+    turn counts per class, not picked — the same discipline `cost.anomaly` already applies by
+    comparing against a class MEDIAN with a `minSamples` floor rather than a constant.
+  acceptance:
+    - claim: "a worker's turn count is observable from the ledger WHILE the spawn is still in flight"
+      proof: "unit test: test/a-runaway-worker-is-visible-before-it-finishes.test.ts"
+    - claim: "the mid-flight row is emitted before the spawn settles, not only at implement.done"
+      proof: "unit test: test/a-runaway-worker-is-visible-before-it-finishes.test.ts"
+    - claim: "a normal-length run emits no runaway signal — the bound does not fire on a healthy population"
+      proof: "unit test: test/a-runaway-worker-is-visible-before-it-finishes.test.ts"
+    - claim: "the runaway threshold is derived from an observed class distribution, never a source literal"
+      proof: "unit test: test/a-runaway-worker-is-visible-before-it-finishes.test.ts"
+    - claim: "max_turns stays a flat 400 runaway cliff — no ceiling is lowered by this change"
+      proof: "unit test: test/a-runaway-worker-is-visible-before-it-finishes.test.ts"
+    - claim: "no worker is killed or deferred by this change: it observes and never acts"
+      proof: "unit test: test/a-runaway-worker-is-visible-before-it-finishes.test.ts"
+    - claim: "removing the mid-flight emission makes the in-flight visibility assertion fail"
+      proof: "unit test: test/a-runaway-worker-is-visible-before-it-finishes.test.ts"
