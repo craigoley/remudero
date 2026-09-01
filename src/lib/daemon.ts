@@ -1788,6 +1788,11 @@ async function sweepLightDuringRetro(
  * when a tick runs long, the gap between readings stays minutes rather than hours. A tick that
  * completes normally re-reads before this ever elapses, so on a healthy fleet it fires never.
  *
+ * BACKSTOP, not the primary control: the main loop's own per-tick read (and the enforcement
+ * decision built on it) remains the thing that normally keeps readings fresh; this constant only
+ * bounds how stale a reading may get when THAT primary control is running long, same as the four
+ * CLAUDE.md-cited bounds this task's own rationale (above) traces the defect back to.
+ *
  * POLICY DATA (rule 2) — a literal here, the same disposition `UNREADABLE_DEGRADED_LIMIT`
  * (lib/headroom.ts) records for its own bound.
  */
