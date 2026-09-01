@@ -13,6 +13,7 @@
 // mock, no shadow copy of the reduction logic.
 
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { gzipSync } from "node:zlib";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -58,6 +59,13 @@ const mod = (await import(pathToFileURL(SCRIPT).href)) as {
   parseAndDedupeLedgerLines: (rawLines: string[]) => { records: unknown[]; rawRowsWithRunId: number };
   renderMountHeadroomReport: (report: unknown) => string;
   MountHeadroomSweepError: new (message: string) => Error;
+  main: (argv: string[]) => void;
+  realMountHeadroomFs: {
+    readdirSync: (dir: string) => string[];
+    existsSync: (path: string) => boolean;
+    readFileSync: (path: string) => Buffer;
+    gunzipSync: (buf: Buffer) => Buffer;
+  };
 };
 const {
   buildMountHeadroomSweep,
@@ -65,7 +73,30 @@ const {
   redispatchedRunIds,
   renderMountHeadroomReport,
   MountHeadroomSweepError,
+  main,
+  readLedgerCorpus,
+  parseAndDedupeLedgerLines,
+  realMountHeadroomFs,
 } = mod;
+
+/** Run `main` with console + process.exitCode captured, restoring all three however it ends. */
+function captureMain(argv: string[]): { out: string; err: string; exitCode: number | undefined } {
+  const out: string[] = [];
+  const err: string[] = [];
+  const realLog = console.log;
+  const realErr = console.error;
+  const priorExit = process.exitCode;
+  console.log = (...a: unknown[]) => void out.push(a.map(String).join(" "));
+  console.error = (...a: unknown[]) => void err.push(a.map(String).join(" "));
+  try {
+    main(argv);
+    return { out: out.join("\n"), err: err.join("\n"), exitCode: process.exitCode };
+  } finally {
+    console.log = realLog;
+    console.error = realErr;
+    process.exitCode = priorExit;
+  }
+}
 
 function tmpDir(): string {
   return mkdtempSync(join(tmpdir(), "mount-headroom-sweep-"));
@@ -370,4 +401,120 @@ test("buildMountHeadroomSweep: a corpus with rows carrying no run_id at all (nev
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ── W1-T2560 COVERAGE: the CLI entrypoint and the two "found it, could not read it" arms ───────
+// The first cut of this suite exercised only the pure builders, so `main` and both catch arms had
+// ZERO covering tests and `diff-coverage` BLOCKED on 20 added lines. These reach them for real --
+// no fake stands in for the thing under test.
+
+test("main: renders the report to stdout and exits 0 over a real state dir", () => {
+  const dir = tmpDir();
+  try {
+    writeLive(dir, [
+      runLines({ runId: "M1", taskId: "TM", taskClass: "src", turns: 7, costUsd: 2.5, verdict: "merged", ts: "2026-08-04T00:00:00.000Z" }),
+    ]);
+    const { out, err, exitCode } = captureMain(["--state-dir", dir]);
+    assert.equal(exitCode, 0, `main must exit 0 on a readable corpus; stderr: ${err}`);
+    assert.equal(err, "", "nothing goes to stderr on the success path");
+    assert.match(out, /mount-headroom-sweep — per-task_class turn\/cost distributions/);
+    assert.match(out, /task_class \| settled\/total runs/, "the table header is rendered, not the JSON form");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("main --json: emits the report as parseable JSON rather than the table", () => {
+  const dir = tmpDir();
+  try {
+    writeLive(dir, [
+      runLines({ runId: "J1", taskId: "TJ", taskClass: "src", turns: 4, costUsd: 1.25, verdict: "merged", ts: "2026-08-05T00:00:00.000Z" }),
+    ]);
+    const { out, exitCode } = captureMain(["--state-dir", dir, "--json"]);
+    assert.equal(exitCode, 0);
+    const parsed = JSON.parse(out) as { corpus: { distinctRunCount: number }; classes: unknown[] };
+    assert.equal(parsed.corpus.distinctRunCount, 1, "the JSON form carries the same corpus the builder produced");
+    assert.equal(parsed.classes.length, 1);
+    assert.doesNotMatch(out, /task_class \| settled/, "and NOT the rendered table — the two forms are exclusive");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("main: a refusing corpus exits 1 with the refusal on stderr, never a zero-filled report on stdout", () => {
+  const dir = tmpDir();
+  try {
+    const { out, err, exitCode } = captureMain(["--state-dir", dir]);
+    assert.equal(exitCode, 1, "an empty state dir must exit nonzero");
+    assert.ok(err.length > 0, "the refusal reaches stderr");
+    assert.equal(out, "", "and NOTHING is printed to stdout — a caller piping stdout gets no phantom report");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the direct-execution guard actually runs main: node scripts/mount-headroom-sweep.mjs prints the report", () => {
+  const dir = tmpDir();
+  try {
+    writeLive(dir, [
+      runLines({ runId: "S1", taskId: "TS", taskClass: "src", turns: 3, costUsd: 0.5, verdict: "merged", ts: "2026-08-06T00:00:00.000Z" }),
+    ]);
+    // `--import tsx` is how this repo invokes every script that imports from src/ (ci.yml runs
+    // diff-class.mjs exactly this way); this script imports retro.ts and ledger-grep.ts, so bare
+    // `node` cannot resolve them. Spawning it the way the repo really does is the point.
+    const run = spawnSync(process.execPath, ["--import", "tsx", SCRIPT, "--state-dir", dir], { encoding: "utf8" });
+    assert.equal(run.status, 0, `the script must run standalone; stderr: ${run.stderr}`);
+    assert.match(run.stdout, /mount-headroom-sweep — per-task_class/, "the guard reached main, not merely imported the module");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("readLedgerCorpus: an archive found on disk but unreadable is NAMED in unread, never silently dropped", () => {
+  const dir = tmpDir();
+  try {
+    writeGzipArchive(dir, "2026-08-01T00-00-00-000Z", [
+      runLines({ runId: "U1", taskId: "TU", taskClass: "src", turns: 5, costUsd: 1, verdict: "merged", ts: "2026-08-01T00:00:00.000Z" }),
+    ]);
+    writeLive(dir, [
+      runLines({ runId: "U2", taskId: "TV", taskClass: "src", turns: 5, costUsd: 1, verdict: "merged", ts: "2026-08-02T00:00:00.000Z" }),
+    ]);
+    const archiveDenied = {
+      ...realMountHeadroomFs,
+      readFileSync: (path: string): Buffer => {
+        if (path.endsWith(".gz")) throw new Error("EACCES: permission denied");
+        return realMountHeadroomFs.readFileSync(path);
+      },
+    };
+    const corpus = readLedgerCorpus(dir, archiveDenied) as {
+      unread: string[];
+      formsOpened: string[];
+      rawLines: string[];
+    };
+    assert.equal(corpus.unread.length, 1, "the unreadable archive is reported, not skipped");
+    assert.match(corpus.unread[0], /\.gz$/);
+    assert.ok(!corpus.formsOpened.includes("gzip"), "a form that could not be opened is NOT claimed as opened");
+    assert.ok(corpus.formsOpened.includes("live"), "and the readable live file is still read — one bad archive does not abort the sweep");
+
+    // CONTROL: with the real fs the SAME corpus reads clean, so the assertions above are the
+    // injected failure talking and not a fixture that was broken to begin with.
+    const clean = readLedgerCorpus(dir) as { unread: string[]; formsOpened: string[] };
+    assert.deepEqual(clean.unread, [], "the fixture itself is readable");
+    assert.ok(clean.formsOpened.includes("gzip"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("parseAndDedupeLedgerLines: a line that is not JSON is skipped, and the valid rows around it still parse", () => {
+  const valid = JSON.stringify({ ts: "2026-08-01T00:00:00.000Z", run_id: "P1", task_id: "TP", step: "run.start" });
+  const alsoValid = JSON.stringify({ ts: "2026-08-01T00:00:01.000Z", run_id: "P2", task_id: "TQ", step: "run.start" });
+  const parsed = parseAndDedupeLedgerLines([valid, "{ this is not json", "", alsoValid]);
+  assert.equal(parsed.rawRowsWithRunId, 2, "both well-formed run-tagged rows counted, the malformed one neither counted nor thrown on");
+  assert.equal(parsed.records.length, 2);
+
+  // CONTROL: the malformed line is the ONLY thing dropped — a parser that silently ate a valid
+  // row would satisfy the count above if the fixture had three valid rows and one bad one.
+  const allValid = parseAndDedupeLedgerLines([valid, alsoValid]);
+  assert.equal(allValid.rawRowsWithRunId, 2, "the same two rows parse identically with the bad line removed");
 });
