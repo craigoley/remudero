@@ -5,7 +5,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  risk: medium
+  risk: high
   budget_usd: 15.00
   files: [deploy/recycle-container.sh, test/a-lock-whose-container-is-gone-is-reclaimed-not-waited-on.test.ts]
   origin: "operator-session#the-github-auth-outage-2026-09-01"
@@ -13,6 +13,12 @@
   status: queued
   attempts: 0
   rationale: |
+    THE RISK BAND IS RULE 19's SPAN, NOT BLAST RADIUS. `files:` names two entries whose stems
+    differ — recycle-container and the test file's own stem, which `subsystemsOf` counts as a
+    concern in its own right — so `sizingViolation` refuses `risk: medium` for the span alone.
+    Raised to high rather than decomposed: splitting a shell fix from the test that falsifies it
+    would leave a predicate with no falsifier. The change itself is small.
+
     THE SCRIPT STATES THE DEADLOCK IN ITS OWN OUTPUT AND DOES NOT SEE IT. It prints the lock, then:
     "A host-side script cannot tell whether the holder above names a container that is gone; the
     daemon reclaims a foreign container-shaped holder on its OWN next boot (W1-T978). This script does
