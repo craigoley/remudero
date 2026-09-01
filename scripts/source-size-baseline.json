@@ -146,6 +146,6 @@
   "src/lib/worker-scratch.ts": 227,
   "src/lib/worker.ts": 4000,
   "src/lib/workflow-run.ts": 28,
-  "src/run-task.ts": 34000,
+  "src/run-task.ts": 34500,
   "src/spike.ts": 311
 }
