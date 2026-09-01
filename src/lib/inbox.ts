@@ -530,6 +530,101 @@ export function mergeDraftCaches(
   };
 }
 
+/**
+ * W1-T2590: `<config.root>/state/inbox-draft-deferred-until.json` — the instant the account itself
+ * said its window reopens, after a draft was refused for a usage/session limit.
+ *
+ * WHY THIS EXISTS, AND WHY IT IS A PREREQUISITE RATHER THAN A NICETY. Before W1-T2564 a refused
+ * draft wrote a {@link DraftAttemptCache} key and was never retried — the work was silently LOST.
+ * After it, a refusal writes no key, stays due, and RETRIES ON THE NEXT POLL. That is the correct
+ * fix and it changed what the batch cap bounds: during a live account outage
+ * {@link DAEMON_DRAFT_BATCH_CAP} became the ONLY thing limiting a retry storm, in exactly the
+ * condition that produced 494 refusals in seven hours. Raising the cap for recovery throughput
+ * would raise the storm ceiling with it. THIS IS WHAT MAKES RAISING IT SAFE LATER.
+ *
+ * RETRYING INTO A SHUT DOOR IS THE THING BEING STOPPED. The refusal already states when the door
+ * reopens: `detectUsageLimitRefusal` (lib/classify.ts) recovers it from the provider's own text —
+ * MEASURED on the real captured string, `resetsAtMs` 2026-09-01T11:50:00.000Z, which was more
+ * accurate than the headroom governor's own belief at that instant.
+ *
+ * ⚠ AN ABSENT RESET IS NOT A LICENCE TO DEFER FOREVER, AND IT IS THE COMMON-ENOUGH CASE.
+ * `resetsAtMs` is present ONLY when the refusal stated a time AND that time carried an explicit
+ * UTC marker — a bare clock time in an unknown zone is deliberately never converted, because
+ * guessing the operator's zone would produce a confident wrong resume time. So a refusal can
+ * legitimately arrive with NO usable instant, and {@link decideDraftDeferral} must then decline to
+ * defer at all rather than invent a window. A deferral with no stated end is an outage that never
+ * ends.
+ */
+export interface DraftDeferralCache {
+  /** Epoch ms the provider said its window reopens. */
+  deferredUntilMs: number;
+  /** The refusal text that produced it — evidence, never re-derived. */
+  matched: string;
+}
+
+/** Parse a {@link DraftDeferralCache}; `undefined` for missing/malformed input (the same
+ *  fail-soft-to-nothing discipline {@link parseDraftAttemptCache} keeps — a corrupt file must
+ *  never wedge the rung shut, which is the failure direction that costs the most). */
+export function parseDraftDeferralCache(text: string | undefined): DraftDeferralCache | undefined {
+  if (!text) return undefined;
+  try {
+    const raw = JSON.parse(text) as Partial<DraftDeferralCache>;
+    if (typeof raw?.deferredUntilMs !== "number" || !Number.isFinite(raw.deferredUntilMs)) return undefined;
+    return { deferredUntilMs: raw.deferredUntilMs, matched: typeof raw.matched === "string" ? raw.matched : "" };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Should this poll's draft batch run, or is the account's own stated window still shut?
+ *
+ * PURE, so the decision is a unit fixture rather than a clock race. Returns the remaining wait
+ * when deferring, so the caller can ledger a number an operator can act on instead of a bare
+ * refusal.
+ *
+ * THE DEFERRAL IS SELF-LIMITING BY CONSTRUCTION — it is an INSTANT, not a duration or a latch. Past
+ * that instant the rung runs again with no operator action and no expiry sweep, which is what makes
+ * this safe to write from an unattended rung: the W1-T1067 failure mode (a stranded marker that
+ * suppresses a rung forever) cannot occur because there is nothing here to strand.
+ */
+export function decideDraftDeferral(
+  cache: DraftDeferralCache | undefined,
+  nowMs: number,
+): { defer: false } | { defer: true; untilMs: number; remainingMs: number; matched: string } {
+  if (!cache) return { defer: false };
+  if (nowMs >= cache.deferredUntilMs) return { defer: false };
+  return {
+    defer: true,
+    untilMs: cache.deferredUntilMs,
+    remainingMs: cache.deferredUntilMs - nowMs,
+    matched: cache.matched,
+  };
+}
+
+/**
+ * The deferral a batch's own outcomes justify, or `undefined` when they justify none.
+ *
+ * THE LATEST STATED RESET WINS. Two refusals in one batch can name different instants (a retry
+ * that crossed a window boundary); deferring to the EARLIER one would resume into a door that is
+ * still shut for the other. Taking the latest is the only choice that cannot under-wait.
+ *
+ * ⚠ A REFUSAL WITHOUT A STATED INSTANT CONTRIBUTES NOTHING — see {@link DraftDeferralCache}'s doc.
+ * A batch of nothing but zone-less refusals defers nothing at all, and that is deliberate: it
+ * retries on the next poll exactly as it does today, bounded by the batch cap, rather than
+ * stopping the rung on a window whose end nobody stated.
+ */
+export function deferralFromOutcomes(outcomes: DraftRungOutcome[]): DraftDeferralCache | undefined {
+  let best: DraftDeferralCache | undefined;
+  for (const o of outcomes) {
+    if (o.ok || !o.refused) continue;
+    const at = o.refused.resetsAtMs;
+    if (typeof at !== "number" || !Number.isFinite(at)) continue;
+    if (!best || at > best.deferredUntilMs) best = { deferredUntilMs: at, matched: o.refused.matched };
+  }
+  return best;
+}
+
 /** `<config.root>/state/inbox-draft-inflight.json` — proposal id -> ISO spawn timestamp,
  *  for whichever proposals the daemon's draft rung (buildInboxDraftHook, run-task.ts)
  *  currently has an Architect worker running for (W1-T193). Written just before the batch's
