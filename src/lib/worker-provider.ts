@@ -265,6 +265,9 @@ export function selectCodexModel(
     routing = mounts ?? loadMounts(mountsPath(process.cwd()));
     capability = providerCapabilityForModel(routing, "claude", routeModel, routeEffort);
   } catch (error) {
+    // Not erased: an invalid route becomes a NAMED unreadable capacity carrying the cause in
+    // `detail`, so routing falls back to Claude with a reason an operator can read — never a
+    // silent absence, and never a throw that would take the whole selection down.
     return {
       provider: "codex",
       readable: false,
@@ -405,6 +408,8 @@ function selectCodexCapacity(
       resolveCodexRouting(config, deps.mounts),
     );
   } catch (error) {
+    // Same discipline as the route check above: an unreadable table is a named unreadable
+    // capacity carrying its cause, not an absence and not a fatal error.
     return {
       provider: "codex",
       readable: false,
