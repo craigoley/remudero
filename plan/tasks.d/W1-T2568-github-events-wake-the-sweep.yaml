@@ -1,0 +1,213 @@
+- id: W1-T2568
+  title: "GITHUB CHANGES REACH THE QUEUE GOVERNOR ONLY ON ITS NEXT TIMER TICK — the daemon now has bounded concurrent review, fix, conflict and merge lanes, but no GitHub event enters that loop; add one signed, coalesced webhook wake that interrupts discovery latency without becoming a second policy or action engine"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 35.00
+  files:
+    - src/lib/github-event-wake.ts
+    - src/lib/service.ts
+    - src/lib/serve.ts
+    - src/lib/daemon.ts
+    - src/run-task.ts
+    - plan/policy.yaml
+    - deploy/runtime-env-vars.sh
+    - deploy/host-update.sh
+    - deploy/serve-container.sh
+    - test/github-event-sweep-wake.test.ts
+    - docs/operator-guide.md
+  origin: "operator-brief#automatic-pr-queue-github-event-response-2026-09-01"
+  plan_refs: ["W1-T463", "W1-T473", "W1-T526", "W1-T1272", "W1-T2430", "W1-T2519"]
+  status: queued
+  attempts: 0
+  rationale: |
+    ── THE LIVE GAP ────────────────────────────────────────────────────────────────────────────
+
+    The queue machinery is already broad. At origin/main 7ac00bd, `runSweep` classifies and acts
+    on mergeable, blocked-fixable, stale, blocked-ambiguous, dependency-review, post-review,
+    conflicted and wait dispositions. `runSweep` runs reviews at the independent `reviewLanes`
+    ceiling; `runSweepLightPass` admits one spawning review plus up to three deterministic plan
+    filings; `buildSweepLightHook` also admits cancelled-check requeues and a fix rung only when
+    every in-flight build is demonstrably waiting; `startInFlightTicker` re-triggers the full
+    sweep during long dispatch/retro phases. The missing piece is not another queue action.
+
+    No webhook receiver, `X-GitHub-Event`, `X-GitHub-Delivery`, `X-Hub-Signature-256`, or GitHub
+    event wake exists anywhere in `src/`, `deploy/` or `.github/workflows/`. GitHub state reaches
+    those lanes when a level-triggered REST read runs on `pollIntervalMs` (60,000 ms), or on the
+    longer full-sweep retrigger. A check completion, body/title correction, human review, push,
+    close or merge is therefore invisible until the next scheduled read even when the daemon and
+    both subscriptions are idle.
+
+    This is latency, not correctness loss: the timer poll is self-healing and must remain. The
+    event is an EARLY WAKE for the same level-triggered reconciliation, never an event-sourced
+    replacement for it. A missed webhook is recovered by the next ordinary poll; an event payload
+    is never trusted as the queue state.
+
+    ── THE ACTUAL AZURE TOPOLOGY, CHECKED 2026-09-01 ───────────────────────────────────────────
+
+    `remudero-daemon` and `remudero-serve` are separate running containers. Both mount the SAME
+    host directory, `/home/craigoleyagent/rmd-state2`, read-write at
+    `/home/node/Remudero`. A planted file with a unique `.rmd-webhook-watch-probe-*` name created
+    inside `remudero-serve` produced `{"event":"rename",...}` immediately from Node 22's
+    `fs.watch` inside `remudero-daemon`; the probe was then removed. So the existing shared state
+    mount is a working notification transport across the exact production container boundary —
+    no Docker socket, signal permission or second listener is required.
+
+    `console.remudero.com` is already routed through Cloudflare, but an unauthenticated request
+    receives a 302 to the Cloudflare Access login application. GitHub therefore CANNOT deliver a
+    repository webhook to the current protected root. Cloudflare's current application-path docs
+    say a more-specific path application takes precedence, and its webhook/public-endpoint guide
+    permits a narrowly-scoped Bypass policy for exactly that case while warning that Access
+    enforcement and logging are then absent. The exception must therefore cover ONLY the new
+    webhook path; authenticity at origin comes from GitHub's HMAC, not from a general console
+    bearer or a broad Access bypass.
+
+    Primary platform sources, checked 2026-09-01:
+      - https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries
+      - https://docs.github.com/en/webhooks/using-webhooks/best-practices-for-using-webhooks
+      - https://docs.github.com/en/webhooks/webhook-events-and-payloads
+      - https://developers.cloudflare.com/cloudflare-one/access-controls/policies/app-paths/
+      - https://developers.cloudflare.com/cloudflare-one/access-controls/policies/common-policies/
+
+    GitHub requires validation against the RAW request body with the configured secret and the
+    `X-Hub-Signature-256` SHA-256 HMAC, recommends constant-time comparison, a minimum event set,
+    checking event plus action, HTTPS, and `X-GitHub-Delivery` replay protection, and considers a
+    delivery failed when no 2xx arrives within 10 seconds. GitHub does not automatically redeliver
+    failures. Those are implementation constraints here, not optional hardening.
+
+    ── WHY THE EXISTING SERVICE TOKEN IS NOT THE ANSWER ────────────────────────────────────────
+
+    `createService` has a bearer read/write scope plus consequence tiers. The ordinary bearer
+    write token is deliberately pinned to LOW; a sweep can start paid review/fix workers and can
+    arm or merge code, so silently granting a CI job or GitHub the broad write token would violate
+    the route-tier boundary. GitHub repository webhooks send their own HMAC signature, not the
+    console bearer or the console's server-issued HIGH-tier nonce. Do not widen the bearer, mint a
+    permanent HIGH grant, put a secret in the URL, or teach GitHub a console credential.
+
+    The one public path authenticates itself with a separate high-entropy webhook secret BEFORE
+    any marker, ledger write or response that claims acceptance. Missing secret configuration,
+    missing/malformed signature, wrong repository, unsupported event/action, oversized or invalid
+    JSON all fail closed and write nothing. The secret is supplied by a host file mounted read-only
+    into `remudero-serve`; it is never committed, printed, placed in a Docker command line, exposed
+    by the console, or inherited by worker processes.
+
+  design: |
+    ONE CONCERN: shorten GitHub-state-to-sweep latency without creating a second reconciliation
+    engine. The change spans the HTTP boundary, the shared-state notification and the daemon
+    consumer because any one alone is shipped-but-unwired. It does NOT change disposition rules,
+    review/fix lane counts, provider/model selection, merge policy, operator holds, branch
+    protection, or the 60-second recovery poll.
+
+    (i) ONE SIGNED ROUTE ON THE EXISTING SERVER. Mount exactly `POST /v1/hooks/github` on the
+    existing `createService` server and port. Add a generic self-authenticated/raw-body route seam
+    to `service.ts` rather than hard-coding GitHub into the bearer provider and rather than opening
+    another listener. Bound the body before buffering it. The route verifies
+    `X-Hub-Signature-256` over the byte-identical raw body with HMAC-SHA256 and a constant-time
+    comparison, then validates JSON, repository identity, `X-GitHub-Event`, action and
+    `X-GitHub-Delivery`. No query token, console bearer, Access JWT or HIGH-tier nonce applies to
+    this one machine-to-machine route; every ordinary route keeps today's auth path byte-identical.
+
+    (ii) MINIMUM EVENT SET, EXPLICITLY ALLOWLISTED. Admit only events that can change an open PR's
+    sweep disposition: selected `pull_request` actions (including open/reopen/synchronize/edit,
+    ready/draft transitions and close), `check_run: completed`, the commit `status` event, and
+    `pull_request_review` state changes if the current classifier actually consumes them. Do not
+    subscribe to or accept `*`. A supported event for another repository is a refusal. An
+    unsupported action returns 202 ignored only AFTER signature/repository validation, so GitHub
+    does not retry a harmless future action but an attacker cannot use that response to create a
+    marker.
+
+    (iii) ACK THE DURABLE INTENT, NEVER THE SWEEP. After validation, atomically write/coalesce ONE
+    `state/SWEEP_WAKE_REQUESTED` record carrying the delivery id, event, action, repository and
+    receipt timestamp; ledger `github.wake.accepted`; return 202. Never call GitHub, run a sweep,
+    post a review, fix a PR or wait for the daemon in the request handler. This makes the 10-second
+    response bound structural and keeps the service process unable to mutate the queue directly.
+
+    (iv) DEDUP AND COALESCE. Persist a bounded recent-delivery set keyed by `X-GitHub-Delivery` so
+    a GitHub redelivery or replay of a valid captured request cannot keep waking the daemon. A burst
+    of distinct check completions for one PR collapses into one pending wake, and the debounce is
+    a bounded `plan/policy.yaml` row, not a literal beside `fs.watch`. Receipt while a sweep is
+    already running leaves a marker for one subsequent pass; it is never erased by the pass that
+    began before that receipt.
+
+    (v) THE DAEMON CONSUMES THE WAKE THROUGH ITS EXISTING FULL-SWEEP GATE. Production wiring watches
+    the shared state directory and also checks the marker at boot. On a coalesced wake it calls the
+    SAME bounded `runGatedSweep`/`deps.sweep` path the timer uses, with the SAME cross-call mutex,
+    STOP/PAUSE check, wall-clock bound, ledger effects and provider headroom rules. It never calls
+    `runSweep` through a second effect table. The watcher is closed on daemon shutdown and cannot
+    keep the process alive after normal stop.
+
+    (vi) POLLING IS THE RECOVERY CONTRACT. `pollIntervalMs`, the ordinary top-of-loop sweep, the
+    in-flight light pass and full-sweep retrigger remain. `fs.watch` failure is ledgered once and
+    degrades to timer-only behavior; a missed notification leaves the durable marker for the next
+    boot/tick. Never claim exactly-once delivery or replace a level-triggered read with payload
+    mutation.
+
+    (vii) SHIP DARK AND FAIL CLOSED. When no webhook-secret file is configured, the ordinary
+    console and daemon start exactly as today, the route returns a named unavailable/refusal, and
+    no public path is required. `deploy/runtime-env-vars.sh`, `host-update.sh` and
+    `serve-container.sh` pass only the OPTIONAL secret-file path/mount and report presence without
+    printing contents. The operator guide gives the GitHub repository-webhook event selection,
+    the exact Cloudflare Access path application for `/v1/hooks/github`, secret-file ownership and
+    a signed ping/redelivery verification. No deploy, webhook creation or Access-policy change is
+    performed by this code PR; those remain operator-gated commissioning actions.
+
+    (viii) THE OPERATOR OVERRIDE SURVIVES. The durable merge hold remains consulted inside the
+    ordinary sweep. An event can wake reconciliation but can never override a hold, force a merge,
+    choose merge method, bypass branch protection, or prevent a later manual squash.
+
+  acceptance:
+    - claim: "the production service constructs the signed GitHub event wake handler rather than leaving the new module reachable only from tests"
+      proof: "grep: createGitHubEventWakeHandler( in src/lib/serve.ts"
+    - claim: "a correctly signed allowlisted GitHub event for this repository writes one durable wake and returns within the handler without running a sweep"
+      proof: "unit test: test/github-event-sweep-wake.test.ts"
+    - claim: "a missing or invalid signature, wrong repository, invalid JSON, oversized body, unsupported event, or unconfigured secret writes no marker and names the refusal"
+      proof: "unit test: test/github-event-sweep-wake.test.ts"
+    - claim: "a repeated delivery id is deduplicated and a burst of distinct check completions coalesces to the policy bound"
+      proof: "unit test: test/github-event-sweep-wake.test.ts"
+    - claim: "the daemon consumes a boot-time marker and a live filesystem notification through the same bounded full-sweep gate"
+      proof: "unit test: test/github-event-sweep-wake.test.ts"
+    - claim: "an event arriving during an active sweep remains pending for one later pass rather than being erased"
+      proof: "unit test: test/github-event-sweep-wake.test.ts"
+    - claim: "STOP and PAUSE withhold an event-triggered sweep exactly as they withhold a timer-triggered sweep"
+      proof: "unit test: test/github-event-sweep-wake.test.ts"
+    - claim: "watcher failure and missing webhook configuration preserve the existing polling and console behavior"
+      proof: "unit test: test/github-event-sweep-wake.test.ts"
+    - claim: "the Azure scripts mount an optional secret file into remudero-serve without printing it or passing it to remudero-daemon or workers"
+      proof: "unit test: test/github-event-sweep-wake.test.ts"
+    - claim: "the operator guide keeps the Cloudflare exception scoped to the exact webhook path and retains GitHub HMAC validation at origin"
+      proof: "grep: /v1/hooks/github in docs/operator-guide.md"
+    - claim: "a webhook wake never bypasses the durable merge hold or selects a merge method"
+      proof: "unit test: test/github-event-sweep-wake.test.ts"
+
+  falsifier: |
+    Close this task without implementation if a live trace at current main shows GitHub check/title/
+    push events already causing `deps.sweep` before the next timer tick through a production-wired
+    event source. A plan record, workflow event or console SSE update is not that evidence; the
+    falsifier is an observed daemon sweep causally preceding its scheduled timer after an external
+    GitHub event.
+
+    Re-design rather than build if the production containers stop sharing a local filesystem, if
+    the public endpoint cannot preserve the raw request bytes through Cloudflare, or if a
+    path-specific Access application cannot be made more specific than the protected console root.
+    Those invalidate the transport/auth premises. They do not justify a broad Access bypass, a
+    shared console token, polling faster than the current bound, or a Docker-socket backdoor.
+
+  note: |
+    The task id was atomically reserved at `refs/rmd-id/W1-T2568` by
+    `rmd-id reservation 4817@Craigs-Mac-mini 2026-09-01T18:24:00.704Z` before this shard was
+    written. The allocator ran from origin/main 7ac00bd and advanced past existing reservations;
+    it was not minted offline or inferred from the task filenames.
+
+    `risk: high` is the rule-19 span: one concern crosses HTTP auth, daemon lifecycle, policy data,
+    deployment wiring and operator documentation. The file list names that span up front rather
+    than discovering it during implementation. The new `github-event-wake.ts` module owns HMAC,
+    event filtering, delivery dedup and marker format so neither `serve.ts` nor `daemon.ts`
+    reimplements GitHub vocabulary.
+
+    Deliberate non-overlap: `.github/workflows/ci.yml` is not declared. Repository webhooks are
+    delivered by GitHub directly and, unlike an Actions `check_run` workflow, are not the
+    self-triggering workflow pattern already rejected in `ci-gate.yml`. Branch protection,
+    `commitlint`, CI sharding and provider selection are separate concerns.
