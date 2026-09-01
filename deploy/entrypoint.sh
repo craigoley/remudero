@@ -111,12 +111,27 @@ TREE="$CONFIG_ROOT/remudero"
 # whose message says nothing about the real cause. Found by running this script, not by reading it.
 mkdir -p "$HOME"
 
-if [ -n "${GH_TOKEN:-}" ]; then
-  git config --global credential.helper \
-    '!f() { echo username=x-access-token; echo "password=$GH_TOKEN"; }; f'
-  log "git credentials: helper reads GH_TOKEN at call time (not written to disk)"
-else
-  log "GH_TOKEN is not set — a private fetch or clone will fail"
+# W1-T2552: INSTALLED UNCONDITIONALLY. The helper's whole point is that it reads $GH_TOKEN AT CALL
+# TIME, so whether the variable holds anything AT BOOT says nothing about whether it will hold
+# something when git actually runs — and since W1-T2311 the boot env deliberately carries an EMPTY
+# GH_TOKEN, so the `-n` gate that stood here was false on every boot and the helper was NEVER
+# installed. The daemon then minted a perfectly good App installation token into its own
+# `process.env.GH_TOKEN` (github-app.ts's one seam), every git child inherited it, and git ignored
+# it because nothing told git that variable was a credential. MEASURED 2026-08-30: every ref-CAS
+# write died `fatal: could not read Username for 'https://github.com': No such device or address`,
+# which `classifyPushFailure` reports as "unreachable" — while reads kept working, because this
+# repo is public and an anonymous read needs no credential at all. That split (reads fine, writes
+# dead) is what made it read like a permissions problem for an hour.
+#
+# INSTALLING IT WITH AN EMPTY GH_TOKEN IS SAFE AND IS THE POINT: the helper then answers with an
+# empty password, which is exactly what an unauthenticated push would have done anyway, and the
+# moment the App token lands in the environment the SAME helper starts answering with it. Nothing
+# is written to disk but the helper script itself, which contains `$GH_TOKEN` unexpanded.
+git config --global credential.helper \
+  '!f() { echo username=x-access-token; echo "password=$GH_TOKEN"; }; f'
+log "git credentials: helper installed; reads GH_TOKEN at call time (not written to disk)"
+if [ -z "${GH_TOKEN:-}" ]; then
+  log "GH_TOKEN is empty at boot — expected under App auth; the daemon mints one into its own env"
 fi
 
 # ── THE COMMIT IDENTITY. WITHOUT IT A WORKER WRITES FILES AND COMMITS NOTHING. ────────────────
