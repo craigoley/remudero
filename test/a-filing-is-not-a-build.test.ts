@@ -41,8 +41,9 @@ const mod = (await import(pathToFileURL(SCRIPT_PATH).href)) as {
     changedFiles?: readonly string[];
   }) => { ok: boolean; defect?: string; message: string };
   isPlanOnlyDiff: (changedFiles: readonly string[]) => boolean;
+  changedFilesSinceBase: (worktreePath: string, mergeBase: string | undefined) => string[];
 };
-const { evaluateWorkerBranchShape, isPlanOnlyDiff } = mod;
+const { evaluateWorkerBranchShape, isPlanOnlyDiff, changedFilesSinceBase } = mod;
 
 function shardYaml(id: string) {
   return `- id: ${id}\n  title: "a filed shard"\n  repo: remudero\n  status: queued\n`;
@@ -182,6 +183,29 @@ test("acceptance 5: the IDENTICAL filing fixture, once its diff also touches a f
   const result = evaluateWorkerBranchShape(filingInput({ changedFiles: [...FILING_ADDED_FILES, "src/lib/status.ts"] }));
   assert.equal(result.ok, false, "removing plan-only-ness from the SAME claim set must restore the pre-fix refusal");
   assert.equal(result.defect, "unshaped-worker-branch");
+});
+
+// ── control: changedFilesSinceBase (the population isPlanOnlyDiff walks) degrades to empty ────
+// ── rather than throwing, on both the no-mergeBase short-circuit and a failing git call ─────────
+
+test("control: changedFilesSinceBase returns [] without shelling out at all when mergeBase is undefined", () => {
+  assert.deepEqual(changedFilesSinceBase(REPO_ROOT, undefined), []);
+});
+
+test("control: changedFilesSinceBase degrades to [] rather than throwing when the git diff call itself fails", () => {
+  const bogusWorktree = join(REPO_ROOT, "this-path-does-not-exist-2530");
+  const fakeSha = "0000000000000000000000000000000000000000";
+  assert.doesNotThrow(() => changedFilesSinceBase(bogusWorktree, fakeSha));
+  assert.deepEqual(
+    changedFilesSinceBase(bogusWorktree, fakeSha),
+    [],
+    "an unreadable worktree/unresolvable sha must fail closed to an empty list, same direction as every other setup-gap degrade in this file",
+  );
+});
+
+test("control: changedFilesSinceBase never throws against this repo's real HEAD, resolved against its own base", () => {
+  const result = changedFilesSinceBase(REPO_ROOT, "HEAD");
+  assert.deepEqual(result, [], "diffing HEAD against itself changes nothing");
 });
 
 test("acceptance 5: the IDENTICAL filing fixture, with no changedFiles supplied at all (the pre-W1-T2530 caller shape), also refuses", () => {
