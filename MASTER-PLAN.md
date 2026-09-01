@@ -4990,6 +4990,45 @@ passes a task-type's goldens above threshold, and UPGRADES when strike-rate corr
 the harness learns which horse each job actually needs, with pre-merge proof it still clears the
 jumps.
 
+**Two providers, one router (W1-T2572-77, 2026-09-01).** Codex/OpenAI arriving as a second worker
+provider breaks three assumptions this section still encodes. (a) `tiers:` is a Claude-only ladder and
+`enforceTierInvariant` compares `m.tiers[mount.model]` against it, so a second vendor's models are not
+merely unranked but UNCOMPARABLE — the Tier Invariant, a safety rule, cannot be evaluated across
+providers at all. (b) The crossing itself is `codexTierForRequestedModel`, a substring match on the
+Claude model name (`haiku`->economy, `opus`->frontier, else balanced) living in CODE, which contradicts
+mounts.yaml's own "routing is a DATA edit" rule and DISCARDS `effort` entirely, so `sonnet/high` and
+`sonnet/medium` are the same Codex request. (c) `run.start` logs the requested ALIAS and nothing logs
+what actually served, which is survivable while one provider resolves aliases predictably and is not
+once `selectCodexModel` picks from an account-visible list. The remedy is a provider-neutral CAPABILITY
+ladder expressed as data, with each vendor's models mapping into it — the Tier Invariant then compares
+capability RANK and stays enforceable, and a new model is a config edit.
+
+**The flywheel's missing leg is VARIATION, not telemetry.** `run.start` already carries the full routing
+key and W1-T2560's census already reports outcome-split cost per SETTLED task. But a static table means
+every run of a (type x risk x class) cell rode the SAME mount, so no corpus however large supports a
+counterfactual. Provider selection supplies the variation for free: `selectWorkerProvider` chooses on
+WINDOW STATE, not on the task, so assignment is plausibly exogenous to difficulty — a natural experiment
+WITHIN a cell. Across cells it is not (high risk rides higher mounts by policy), so a per-model aggregate
+that does not match on (type, risk, class) measures difficulty and reports it as model. Recommendations
+are PROPOSALS through the existing `classifyProposal`/`rmd approve` path, never live mutations, and
+refuse below a declared minimum sample. NOTE the standing dependency: §9's pre-merge proof is the golden
+suite, and the replay suite still has no `HarnessRunner` wired, so a routing proposal's evidence is
+observational and the ratifying human is the gate until that changes.
+
+**Fleet-scale learning is PARTIAL POOLING, and both naive forms are harmful** — a global average lets the
+busiest repo govern every other, per-repo isolation throws the fleet's knowledge away at every
+onboarding. A cell's estimate for a repo is the pooled estimate shrunk toward that repo's own evidence in
+proportion to how much of it exists: at n=0 it inherits the fleet prior (cheap onboarding), and it
+migrates to local behaviour as local runs accumulate. An operator prior declared in `principles.yaml`
+DOMINATES a learned one rather than averaging with it.
+
+**And the objective is WINDOW SHARE, not the notional dollar.** Optimising `cost_usd` optimises a number
+this section already calls notional; the resource that runs out is the window, and with two subscriptions
+there are two independent ones. #3486 is the measured case: lanes were cut 3 -> 2 on `daemon.headroom`
+evidence (a five-hour window consumed in ~83 minutes) while no cost-shaped signal argued anything.
+Dollars stay what §9 says they are — the runaway tripwire, and the right objective under
+`billing_mode == api`, where they are real and windows are not the constraint.
+
 **Cost semantics (CORRECTED by WS-0)**: on subscription, `total_cost_usd` is NOTIONAL — it is the
 API-equivalent price, not billed spend. It is therefore used for exactly two things: the
 runaway-anomaly tripwire, and metering when `billing_mode == api`. **Subscription window tracking

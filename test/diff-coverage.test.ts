@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { spawnSync } from "node:child_process";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
 
@@ -70,6 +72,49 @@ test("diff-coverage CLI: an added line in a file lcov never saw at all (e.g. tes
   assert.equal(result.status, 0, result.stdout?.toString() + result.stderr?.toString());
 });
 
+test("diff-coverage CLI: a changed src/** file with no SF record blocks instead of passing vacuously", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-diff-coverage-missing-sf-"));
+  const lcov = join(dir, "missing-source.lcov");
+  const diff = join(dir, "changed-source.diff");
+  writeFileSync(lcov, "TN:\nSF:src/lib/other.ts\nDA:1,1\nLF:1\nLH:1\nend_of_record\n");
+  writeFileSync(
+    diff,
+    [
+      "diff --git a/src/lib/changed.ts b/src/lib/changed.ts",
+      "--- a/src/lib/changed.ts",
+      "+++ b/src/lib/changed.ts",
+      "@@ -1 +1 @@",
+      "-export const changed = 1;",
+      "+export const changed = 2;",
+      "",
+    ].join("\n"),
+  );
+  const result = spawnSync(process.execPath, [SCRIPT, "--lcov", lcov, "--diff", diff]);
+  assert.notEqual(result.status, 0, result.stdout?.toString() + result.stderr?.toString());
+  assert.match(result.stderr.toString(), /no SF record/i);
+  assert.match(result.stderr.toString(), /src\/lib\/changed\.ts/);
+});
+
+test("diff-coverage CLI: a deleted src/** file needs no SF record because no current source remains to instrument", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-diff-coverage-deleted-sf-"));
+  const lcov = join(dir, "remaining-source.lcov");
+  const diff = join(dir, "deleted-source.diff");
+  writeFileSync(lcov, "TN:\nSF:src/lib/other.ts\nDA:1,1\nLF:1\nLH:1\nend_of_record\n");
+  writeFileSync(
+    diff,
+    [
+      "diff --git a/src/lib/deleted.ts b/src/lib/deleted.ts",
+      "--- a/src/lib/deleted.ts",
+      "+++ /dev/null",
+      "@@ -1 +0,0 @@",
+      "-export const deleted = true;",
+      "",
+    ].join("\n"),
+  );
+  const result = spawnSync(process.execPath, [SCRIPT, "--lcov", lcov, "--diff", diff]);
+  assert.equal(result.status, 0, result.stdout?.toString() + result.stderr?.toString());
+});
+
 test("diff-coverage CLI: a hunk ending with a '\\ No newline at end of file' marker is not mistaken for a content line (it consumes no new-file line number)", () => {
   const result = runDiffCoverage("covered.lcov", "added-line-no-newline.diff");
   assert.equal(result.status, 0, result.stdout?.toString() + result.stderr?.toString());
@@ -87,7 +132,7 @@ test("diff-coverage CLI FALSIFIER: a second hunk's new-file line numbers are anc
 
 // ── CI wiring: the gate must actually run on every PR, unconditionally ─────
 
-test("diff-coverage CI wiring: ci.yml's coverage-ratchet job also runs diff-coverage against a full-history checkout and the PR's base..head diff", async () => {
+test("diff-coverage CI wiring: the stable coverage-ratchet aggregator checks the merged artifact against the PR diff", async () => {
   const ciYml = await readFile(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
   const jobStart = ciYml.indexOf("coverage-ratchet:");
   assert.notEqual(jobStart, -1, "ci.yml must declare a coverage-ratchet job");
@@ -95,10 +140,13 @@ test("diff-coverage CI wiring: ci.yml's coverage-ratchet job also runs diff-cove
   assert.notEqual(nextJobStart, -1, "coverage-ratchet job body must be findable in ci.yml");
   const jobBody = ciYml.slice(jobStart, nextJobStart);
 
-  // Runs UNCONDITIONALLY (same job as the always-runs aggregate ratchet -- no separate `if:`, so
-  // it can never go silently absent and deadlock merge the way a path-filtered required check
-  // would).
-  assert.doesNotMatch(jobBody, /\n\s*if:/, "diff-coverage must not be gated behind a conditional");
+  const { parse } = await import("yaml");
+  const doc = parse(ciYml) as { jobs: Record<string, { if?: string; steps?: Array<{ if?: string }> }> };
+  assert.equal(doc.jobs["coverage-ratchet"].if, undefined, "coverage shards must always register");
+  assert.equal(doc.jobs["coverage-ratchet-required"].if, "${{ always() }}", "the stable check must run even when a shard fails");
+  for (const jobId of ["coverage-ratchet", "coverage-ratchet-required"]) {
+    for (const step of doc.jobs[jobId].steps ?? []) assert.equal(step.if, undefined, `${jobId} must use shell guards, never step if:`);
+  }
   // Needs the full base..head history to diff against, not the default shallow clone.
   assert.match(jobBody, /fetch-depth:\s*0/, "coverage-ratchet's checkout must fetch full history for the diff");
   assert.match(

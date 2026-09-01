@@ -1,0 +1,67 @@
+- id: W1-T2583
+  title: "A DEDUPED REVIEW SPENDS THE LIGHT PASS'S ONLY REVIEW ADMISSION — `selectReviewAdmissions` ranks a head that `runSweep` later refuses from `reviewDelivered` or `reviewRefused`, so a zero-action winner can defer every genuinely unreviewed PR behind it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 25.00
+  files: [src/lib/sweep.ts, test/sweep.test.ts, test/review-admission-dedup.test.ts]
+  origin: "operator-session#review-admission-dedup-2026-09-01"
+  plan_refs: ["W1-T526", "W1-T1213", "W1-T2427", "W1-T2439"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED LIVE ON AZURE, 2026-09-01 19:29:34Z. PR #3512 derived `post-review` and won the
+    light pass's one spawning admission. Its own `runSweep` call then took zero action because
+    `prior.reviewDelivered` already contained
+    `W1-T1000002@728db3177315692bcb1f60af55e4519e6c02ab28`. In that same pass, green PRs
+    #3521, #3522, #3523 and #3525 had no review verdict and each stood down; #3525's ledger row
+    states `not admitted this pass: one post-review admission per light pass (#3512 won it)`.
+    The pass therefore spent its sole admission on work its own idempotence gate refused and
+    advanced the review queue by zero.
+
+    THE TWO READS DISAGREE. `selectReviewAdmissions` filters only on
+    `deriveDisposition(...).disposition === "post-review"`, splits on `isPlanFiling`, and ranks
+    those candidates. It cannot see `PriorActions`. Later, inside `runSweep`, the `post-review`
+    arm builds the exact `${taskId}@${headSha}` key and refuses it when either
+    `prior.reviewDelivered` or `prior.reviewRefused` contains that key. Selection calls a head
+    eligible that execution already knows is ineligible.
+
+    THIS IS NOT A REQUEST TO WIDEN THE BUDGET. Keep one spawning admission, keep the separately
+    bounded deterministic plan-filing lane, and keep their immutable oldest-first ordering.
+    Make the selector exclude the same delivered/refused keys the execution gate will dedup
+    before it ranks or truncates either lane. The prior-action fold already excludes a provably
+    stale closed-lifecycle refusal for a reopened PR; reuse that result rather than inventing a
+    second refusal taxonomy.
+
+    A ledger read for selection must occur once per light pass, not once per candidate. The
+    per-PR `runSweep` calls still re-read and enforce their existing idempotence guard at action
+    time; selection is an efficiency and liveness filter, never the safety boundary. A race that
+    posts a verdict after selection remains safely caught by the existing action-time guard.
+
+    WHAT MUST NOT MOVE. No review verdict is changed, no failed review is converted to success,
+    no auto-merge arm is advanced, no merge policy or operator hold is bypassed, and no time-based
+    expiry is added to delivered/refused keys. The only behavior change is that a candidate known
+    before selection to produce an idempotent zero-action stand-down cannot consume a scarce
+    admission ahead of work that can actually run.
+  acceptance:
+    - claim: "a delivered review key is excluded before the spawning lane ranks and truncates candidates, so the next genuinely unreviewed PR wins the unchanged single admission"
+      proof: "unit test: test/review-admission-dedup.test.ts"
+    - claim: "an ordinary refused review key is excluded before admission, while a reopened closed-lifecycle refusal remains eligible through the existing prior-action rule"
+      proof: "unit test: test/review-admission-dedup.test.ts"
+    - claim: "when every post-review candidate is already delivered or refused, the light pass dispatches no review and reports no other PR as losing an admission to a zero-action winner"
+      proof: "unit test: test/review-admission-dedup.test.ts"
+    - claim: "the spawning bound, plan-filing bound and immutable oldest-first ordering are unchanged for candidates not present in the dedup sets"
+      proof: "unit test: test/review-admission-dedup.test.ts"
+    - claim: "the action-time review dedup remains in place as the race-safe boundary"
+      proof: "grep: prior\\.reviewDelivered\\.has(reviewKey) in src/lib/sweep.ts"
+  falsifier: |
+    If `selectReviewAdmissions` is found consulting the same delivered/refused prior-action sets
+    before ranking at the implementation base, this filing is stale and must not be built. The
+    check must inspect the selector and its `runSweepLightPass` caller, with the later
+    `prior.reviewDelivered.has(reviewKey)` action-time lookup as the positive control. If live
+    evidence shows #3512 actually invoked `sweep.post_review.attempt` at 19:29:34Z, the claimed
+    zero-action admission is false; the ledger currently shows no attempt and names the delivered
+    verdict dedup instead.
