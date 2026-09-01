@@ -179,6 +179,37 @@ export interface Config {
    */
   headroom?: { enabled?: boolean };
   /**
+   * Worker backends the dispatcher may use. Absent means Claude only, preserving the
+   * pre-connector spawn path exactly. Codex is deliberately opt-in because it needs a
+   * separately authenticated subscription on the host.
+   *
+   * `reservePercent` is held back in every reported provider window. A provider is
+   * eligible only while all of its readable windows remain below `100 - reservePercent`.
+   * Unreadable capacity is never interpreted as unused capacity.
+   */
+  workerProviders?: {
+    enabled?: Array<"claude" | "codex">;
+    reservePercent?: number;
+    capacityCacheMs?: number;
+    /** Absolute Codex CLI path. When absent, the live PATH is resolved for each cache fill. */
+    codexBin?: string;
+    /** Codex state/auth home. Defaults to `$CODEX_HOME`, then `~/.codex`. */
+    codexHome?: string;
+    /** Codex model override. Absent lets the authenticated Codex install choose its default. */
+    codexModel?: string;
+    /**
+     * Ordered, account-checked Codex model preferences for each Remudero mount tier.
+     * Only models returned by app-server `model/list` are eligible. Omitted lists use
+     * the connector's pinned-version defaults and ultimately the account's `isDefault`
+     * model; an explicit `codexModel` above remains a hard, fail-closed override.
+     */
+    codexModels?: {
+      economy?: string[];
+      balanced?: string[];
+      frontier?: string[];
+    };
+  };
+  /**
    * Explicit override for the shared-knowledge homes (the "org brain") — see
    * {@link learningsHomes}. Optional; when absent (or a given sub-field is
    * absent), each home defaults to its historic `config.root`-derived path
@@ -222,6 +253,18 @@ export function resolveHeadroomEnabled(
   return config.headroom?.enabled ?? true;
 }
 
+export type WorkerProviderId = "claude" | "codex";
+
+/** Provider list with the backwards-compatible Claude-only default. */
+export function enabledWorkerProviders(config: Pick<Config, "workerProviders">): WorkerProviderId[] {
+  return config.workerProviders?.enabled ?? ["claude"];
+}
+
+/** True only when provider-local capacity routing replaces the Claude-only daemon gate. */
+export function providerRoutingOwnsHeadroom(config: Pick<Config, "workerProviders">): boolean {
+  return enabledWorkerProviders(config).includes("codex");
+}
+
 /**
  * Thrown by {@link validateConfig} when a config violates one of the harness's
  * cross-field invariants. Named (rather than a bare `Error`) so callers/tests can
@@ -250,6 +293,33 @@ export function validateConfig(config: Config): void {
       'invalid config: overflow: "api_key" requires a dailyCapUsd (api-mode runs must be ' +
         "hard-capped — §9 conditional cap guard); got daily_cap: none",
     );
+  }
+  const providers = enabledWorkerProviders(config);
+  if (providers.length === 0) {
+    throw new ConfigValidationError("invalid config: workerProviders.enabled must contain at least one provider");
+  }
+  if (new Set(providers).size !== providers.length) {
+    throw new ConfigValidationError("invalid config: workerProviders.enabled contains a duplicate provider");
+  }
+  if (providers.some((provider) => provider !== "claude" && provider !== "codex")) {
+    throw new ConfigValidationError('invalid config: workerProviders.enabled accepts only "claude" and "codex"');
+  }
+  const reserve = config.workerProviders?.reservePercent ?? 5;
+  if (!Number.isFinite(reserve) || reserve < 0 || reserve >= 100) {
+    throw new ConfigValidationError("invalid config: workerProviders.reservePercent must be >= 0 and < 100");
+  }
+  const cacheMs = config.workerProviders?.capacityCacheMs ?? 60_000;
+  if (!Number.isFinite(cacheMs) || cacheMs <= 0) {
+    throw new ConfigValidationError("invalid config: workerProviders.capacityCacheMs must be > 0");
+  }
+  for (const tier of ["economy", "balanced", "frontier"] as const) {
+    const models = config.workerProviders?.codexModels?.[tier];
+    if (models !== undefined && (models.length === 0 || models.some((model) => typeof model !== "string" || model.trim() === ""))) {
+      throw new ConfigValidationError(`invalid config: workerProviders.codexModels.${tier} must contain non-empty model ids`);
+    }
+    if (models && new Set(models).size !== models.length) {
+      throw new ConfigValidationError(`invalid config: workerProviders.codexModels.${tier} contains a duplicate model`);
+    }
   }
 }
 

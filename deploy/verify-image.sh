@@ -137,10 +137,16 @@ fi
 # consumers, nothing to keep in sync. Empty when the file is absent (this script is documented to
 # run on a host with no checkout), and empty means the probe reports UNKNOWN rather than a verdict.
 EXPECT_CLAUDE_VERSION="$(sed -n 's/^[[:space:]]*ARG[[:space:]]\{1,\}CLAUDE_CODE_VERSION[[:space:]]*=[[:space:]]*"\{0,1\}\([^"[:space:]#]\{1,\}\).*/\1/p' "$(dirname "$0")/Dockerfile" 2>/dev/null | head -1)"
+EXPECT_CODEX_VERSION="$(sed -n 's/^[[:space:]]*ARG[[:space:]]\{1,\}CODEX_VERSION[[:space:]]*=[[:space:]]*"\{0,1\}\([^"[:space:]#]\{1,\}\).*/\1/p' "$(dirname "$0")/Dockerfile" 2>/dev/null | head -1)"
 if [ -n "${EXPECT_CLAUDE_VERSION}" ]; then
   echo "verify-image: deploy/Dockerfile declares claude ${EXPECT_CLAUDE_VERSION}"
 else
   echo "verify-image: no CLAUDE_CODE_VERSION found in deploy/Dockerfile - version VALUE will not be compared"
+fi
+if [ -n "${EXPECT_CODEX_VERSION}" ]; then
+  echo "verify-image: deploy/Dockerfile declares codex ${EXPECT_CODEX_VERSION}"
+else
+  echo "verify-image: no CODEX_VERSION found in deploy/Dockerfile - version VALUE will not be compared"
 fi
 
 # THE BUILD SHA, read HOST-SIDE from the image LABEL so the in-image probe below can compare it
@@ -163,7 +169,7 @@ fi
 echo
 echo "verify-image: checks inside ${AFTER}"
 set +e
-docker run --rm -e EXPECT_CLAUDE_VERSION="${EXPECT_CLAUDE_VERSION}" -e EXPECT_BUILD_SHA="${LABEL_BUILD_SHA}" --entrypoint /bin/sh "${REF}" -c '
+docker run --rm -e EXPECT_CLAUDE_VERSION="${EXPECT_CLAUDE_VERSION}" -e EXPECT_CODEX_VERSION="${EXPECT_CODEX_VERSION}" -e EXPECT_BUILD_SHA="${LABEL_BUILD_SHA}" --entrypoint /bin/sh "${REF}" -c '
   fail=0
   # `if out="$(cmd)"` tests CMD, which piping into head would not: a pipeline reports the LAST
   # stage, so `cmd | head` returns head status and a missing binary would read as a pass. The
@@ -178,6 +184,7 @@ docker run --rm -e EXPECT_CLAUDE_VERSION="${EXPECT_CLAUDE_VERSION}" -e EXPECT_BU
     fi
   }
   check "claude"    claude --version
+  check "codex"     codex --version
   # BEGIN claude-version-value
   # `check` above passes on EXIT STATUS: it proves a claude binary exists and runs, and says
   # NOTHING about which one. That is the vacuous shape this file has been corrected for six times,
@@ -197,6 +204,17 @@ docker run --rm -e EXPECT_CLAUDE_VERSION="${EXPECT_CLAUDE_VERSION}" -e EXPECT_BU
     fail=1
   fi
   # END claude-version-value
+  # BEGIN codex-version-value
+  got_codex="$(codex --version 2>&1 | head -1 | awk "{print \$2}")"
+  if [ -z "${EXPECT_CODEX_VERSION:-}" ]; then
+    printf "  WARN  %-22s installed %s, no declared pin to compare against\n" "codex version" "${got_codex}"
+  elif [ "${got_codex}" = "${EXPECT_CODEX_VERSION}" ]; then
+    printf "  PASS  %-22s %s matches the declared pin\n" "codex version" "${got_codex}"
+  else
+    printf "  FAIL  %-22s image has %s but deploy/Dockerfile declares %s\n" "codex version" "${got_codex}" "${EXPECT_CODEX_VERSION}"
+    fail=1
+  fi
+  # END codex-version-value
   # BEGIN image-build-sha
   # WHAT THIS ANSWERS, and why nothing answered it before: the published image ran 108 commits
   # behind origin/main and no artifact anywhere carried its build commit, so dating it needed an

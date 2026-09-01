@@ -33,6 +33,7 @@ import {
   globalLearningsHome,
   loadConfig,
   notifyRecipient,
+  providerRoutingOwnsHeadroom,
   resolveHeadroomEnabled,
   softBudgetThreshold,
   synthesisEffort,
@@ -21461,7 +21462,11 @@ async function drainCommand(
   // HERE so the drain's new bounded-degraded-on-unreadable ceiling (lib/drain.ts) never
   // fires on a host that opted out via config `headroom.enabled: false`. Unwired before
   // this task: the ceiling did not exist, so nothing needed to consult the switch.
-  opts.headroomEnabled = resolveHeadroomEnabled(config);
+  // A Codex-enabled install gates every paid spawn against BOTH providers at the spawn
+  // chokepoint. The legacy loop-level reading is Claude-only, so enforcing it as well would
+  // park a healthy Codex subscription merely because Claude is full. Claude-only installs
+  // retain the existing loop gate exactly.
+  opts.headroomEnabled = resolveHeadroomEnabled(config) && !providerRoutingOwnsHeadroom(config);
   const planPath = deps.planPath ?? join(repoRoot, "plan", "tasks.yaml");
   const ledgerPath = ledgerPathFor(config);
   const statusPath = join(config.root, "state", "status.json");
@@ -22237,7 +22242,7 @@ export async function daemonCommand(
   // via config `headroom.enabled: false`): resolve the host posture from config/env HERE
   // and pass it explicitly, so the live daemon reads the flag while the library keeps
   // its enforcement default.
-  opts.headroomEnabled = resolveHeadroomEnabled(config);
+  opts.headroomEnabled = resolveHeadroomEnabled(config) && !providerRoutingOwnsHeadroom(config);
   const ledgerPath = ledgerPathFor(config);
   const statusPath = join(config.root, "state", "status.json");
   const self = resolveOwnerRepo();

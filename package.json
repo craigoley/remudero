@@ -1,7 +1,7 @@
 {
   "name": "remudero",
   "version": "0.1.0",
-  "description": "Plan-stewarding orchestration harness for Claude Code",
+  "description": "Plan-stewarding orchestration harness for Claude Code and Codex",
   "license": "Apache-2.0",
   "type": "module",
   "bin": {

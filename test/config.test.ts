@@ -3,7 +3,17 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { architectModel, ConfigValidationError, configPath, loadConfig, resolveHeadroomEnabled, validateConfig, type Config } from "../src/lib/config.js";
+import {
+  architectModel,
+  ConfigValidationError,
+  configPath,
+  enabledWorkerProviders,
+  loadConfig,
+  providerRoutingOwnsHeadroom,
+  resolveHeadroomEnabled,
+  validateConfig,
+  type Config,
+} from "../src/lib/config.js";
 
 // NOTE: calling loadConfig() on its CREATE path shells `which claude`, which is
 // absent in CI (LEARNINGS.md: lazy-config-in-ci). validateConfig is a pure function
@@ -65,6 +75,46 @@ test("validateConfig accepts overflow: none with no dailyCapUsd (subscription de
 
 test("validateConfig accepts a config with overflow entirely unset (default is none)", () => {
   assert.doesNotThrow(() => validateConfig(config()));
+});
+
+test("worker provider default is Claude-only and leaves the legacy daemon headroom gate in charge", () => {
+  assert.deepEqual(enabledWorkerProviders(config()), ["claude"]);
+  assert.equal(providerRoutingOwnsHeadroom(config()), false);
+});
+
+test("opting into Codex moves headroom enforcement to provider-local routing", () => {
+  const dual = config({ workerProviders: { enabled: ["claude", "codex"] } });
+  assert.deepEqual(enabledWorkerProviders(dual), ["claude", "codex"]);
+  assert.equal(providerRoutingOwnsHeadroom(dual), true);
+  assert.doesNotThrow(() => validateConfig(dual));
+});
+
+test("worker provider config rejects empty, duplicate, unknown, and invalid reserve values", () => {
+  assert.throws(() => validateConfig(config({ workerProviders: { enabled: [] } })), ConfigValidationError);
+  assert.throws(
+    () => validateConfig(config({ workerProviders: { enabled: ["claude", "claude"] } })),
+    ConfigValidationError,
+  );
+  assert.throws(
+    () => validateConfig(config({ workerProviders: { enabled: ["other" as "claude"] } })),
+    ConfigValidationError,
+  );
+  assert.throws(
+    () => validateConfig(config({ workerProviders: { reservePercent: 100 } })),
+    ConfigValidationError,
+  );
+  assert.throws(
+    () => validateConfig(config({ workerProviders: { capacityCacheMs: 0 } })),
+    ConfigValidationError,
+  );
+  assert.throws(
+    () => validateConfig(config({ workerProviders: { codexModels: { economy: [] } } })),
+    ConfigValidationError,
+  );
+  assert.throws(
+    () => validateConfig(config({ workerProviders: { codexModels: { balanced: ["gpt-5.6-terra", "gpt-5.6-terra"] } } })),
+    ConfigValidationError,
+  );
 });
 
 // ── resolveHeadroomEnabled (ruling fb-1784894405468-a4153e; DEFAULT clause reversed

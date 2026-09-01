@@ -918,6 +918,49 @@ Prerequisites, established elsewhere in this repo but not previously collected i
   (Standing rule 6: workers carry scoped PATs only, never a blanket personal token).
 - `git` and a Node/npm matching this repo's toolchain on `PATH`.
 
+Codex is optional. To add its subscription, install the pinned CLI version declared by
+`deploy/Dockerfile`, authenticate with ChatGPT sign-in, and set this in
+`~/.config/remudero/config.json` without removing the existing `claudeBin`:
+
+```json
+{
+  "workerProviders": {
+    "enabled": ["claude", "codex"],
+    "reservePercent": 5,
+    "capacityCacheMs": 60000
+  }
+}
+```
+
+Absent `workerProviders`, Remudero is Claude-only. With both enabled, each spawn reads cached live
+capacity for both subscriptions, excludes an unreadable provider and any provider with a window at
+or above 95% used, then uses the provider with more room in its tightest window. If neither is
+eligible, the spawn is refused as `blocked_toolchain`; it never treats a missing reading as 0% used.
+For Codex, the same app-server session calls `model/list` and discovers what the authenticated
+account can actually run. The requested Remudero mount maps `haiku` to economy, `sonnet` to
+balanced, and `opus`/`claude-opus-*` to frontier. The default preferences are Luna (with Spark as
+an independently metered economy alternative), Terra, and Sol respectively. Selection filters out
+models absent from the account, preserves the requested quality tier, and compares the quota bucket
+for the concrete model instead of requiring every independent Codex bucket to be healthy.
+`codexBin`, `codexHome`, and `codexModel` are optional overrides under `workerProviders`;
+`codexModel` is a hard override and fails closed when the account does not expose it. Ordered
+`codexModels.economy`, `.balanced`, and `.frontier` lists can override the defaults while retaining
+live availability and headroom checks.
+
+For the Azure daemon image, Codex is already baked in. Persist its ChatGPT login by mounting the
+host Codex home at `/home/node/.codex`; `deploy/host-update.sh --print-daemon-run` and
+`deploy/recycle-container.sh` use `${RMD_CODEX_DIR:-$HOME/.codex}`. Before enabling Codex in the
+mounted Remudero config, authenticate that directory with a one-off interactive image invocation:
+
+```sh
+sudo install -d -m 700 -o 1000 -g 1000 "${RMD_CODEX_DIR:-$HOME/.codex}"
+docker run --rm -it --user 1000:1000 -v "${RMD_CODEX_DIR:-$HOME/.codex}:/home/node/.codex" --entrypoint codex synthwatcholey0620.azurecr.io/remudero:latest login --device-auth
+docker run --rm --user 1000:1000 -v "${RMD_CODEX_DIR:-$HOME/.codex}:/home/node/.codex" --entrypoint codex synthwatcholey0620.azurecr.io/remudero:latest login status
+```
+
+The connector removes `OPENAI_API_KEY` from the Codex process environment, so this path uses the
+mounted ChatGPT subscription rather than silently switching to metered API billing.
+
 Then, in order:
 
 1. Clone the repo and run `npm install`.
