@@ -1,0 +1,105 @@
+- id: W1-T2593
+  title: "THE EVENT-DRIVEN REVIEW LANE NEVER SPAWNS A REVIEWER — the sweep's `postReview` effect calls `reviewCommand`, and that command hard-codes `spawnReviewer: false`, so a GitHub event can wake and parallelise the proof gate but every backlog PR still receives zero semantic review workers"
+  repo: remudero
+  depends_on: [W1-T2568, W1-T2584]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 15.00
+  files:
+    - src/run-task.ts
+    - src/lib/review.ts
+    - test/event-driven-semantic-review.test.ts
+    - test/review-wires-criteria-at-head.test.ts
+  origin: "operator-session#github-event-semantic-review-workers-2026-09-01"
+  plan_refs: ["W1-T63", "W1-T473", "W1-T2472", "W1-T2568", "W1-T2584"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON MAIN AT a5711696. The semantic reviewer exists and is wired only through
+    `runReview`: when `spawnReviewer !== false`, a fresh read-only worker receives the PR diff and
+    may downgrade an acceptance criterion. The normal task run reaches that arm after its own
+    implementation and CI complete.
+
+    THE BACKLOG PATH EXPLICITLY DISABLES IT. `buildSweepEffects.postReview` calls its default
+    `reviewRunner`, which calls `reviewCommand(String(prNumber), ["--repo", repo])`.
+    `reviewCommand` then passes `spawnReviewer: false`, `settingsFile: ""`, and a hard-coded
+    medium-risk placeholder mount into `runReview`. This is not a headroom refusal or a skipped
+    plan-only change: the production path is constructed never to attempt a worker on any PR.
+
+    Therefore W1-T2568 and W1-T2584 are necessary but not sufficient for the operator's request.
+    They wake review from signed GitHub events and drain all eligible heads within a fixed-size
+    pool, but the work in that pool remains the deterministic proof/status gate. Calling those
+    concurrent entries "reviewers" hides the distinction between a cheap proof executor and the
+    fresh semantic critic whose quality is the reason to spend a subscription window at all.
+
+    KEEP THE TRUST ORDER INTACT. The deterministic `judgeReview` verdict remains binding; the LLM
+    is advisory and downgrade-only, exactly as MASTER-PLAN rule 12 requires. This task enables that
+    existing semantic layer on the unattended sweep path. It does not let a model rescue a failed
+    proof, post the authoritative status itself, merge a PR, or change auto-merge policy.
+
+    KEEP THE SPEND BOUNDED. Semantic review is attempted only for a trailered task whose risk and
+    budget are resolved from the plan at the PR's own head sha. That exact risk selects the
+    `reviewer` mount; the task budget is the worker's hard cap. Plan-only changes keep W1-T2472's
+    zero-spawn shortcut. Missing task metadata, an unreadable provider, exhausted headroom or a
+    worker failure degrades visibly to the deterministic floor, as `runReview` already does; it
+    never guesses capacity or blocks the whole review queue. W1-T2584's `reviewLanes` remains the
+    concurrency ceiling and W1-T2568 remains the wake/coalescing owner.
+
+  design: |
+    Add an internal review-command execution mode rather than changing the operator CLI's default:
+    a hand-run `rmd review` remains deterministic-only unless a later product decision says
+    otherwise, while `buildSweepEffects` explicitly invokes semantic mode for its event/sweep
+    `postReview` work. Do not infer caller identity from a run id, environment variable or branch
+    name.
+
+    Extend `resolvePlanCriteriaAtHead`'s already-authoritative result with the resolved task risk
+    and budget; do not reload the current checkout's plan or duplicate a second head-sha resolver.
+    In semantic mode, use those fields to resolve the real `reviewer` mount, render and validate a
+    normal worker settings file, set `spawnReviewer: true`, and pass the task budget to `runReview`.
+    When either field is unavailable, emit one named skip row and run the deterministic floor with
+    no worker rather than choosing an invented medium/default budget.
+
+    Preserve `runReview`'s existing `planOnlyDiff` skip and provider-capacity selection. The queue
+    gets one semantic attempt per admitted code head, not a second queue or a busy wait: outcome
+    dedup stays keyed by task/head, the signed event wake remains coalesced, and the review-lane
+    pool supplies all parallelism. Existing `review.reviewer` telemetry already records provider,
+    model, effort, usage, cost and outcome; add only the mode/skip reason needed to distinguish an
+    event-driven semantic attempt from deterministic-only fallback.
+
+    Do not change the deterministic judge, review status authority, review-lane count, provider
+    routing, headroom reserve, merge policy, fix policy, daemon cadence or GitHub webhook receiver.
+
+  acceptance:
+    - claim: "the default sweep `postReview` runner explicitly requests semantic review, so an admitted code PR reaches `runReview` with `spawnReviewer: true`"
+      proof: "unit test: test/event-driven-semantic-review.test.ts"
+    - claim: "semantic review resolves the task's risk and budget from the plan at the PR head sha and uses them for the reviewer mount and worker hard cap"
+      proof: "unit test: test/review-wires-criteria-at-head.test.ts"
+    - claim: "a plan-only PR still dispatches zero reviewer workers while its deterministic verdict is unchanged"
+      proof: "unit test: test/event-driven-semantic-review.test.ts"
+    - claim: "missing head-resolved task metadata produces a named deterministic-only fallback and never invents a risk or uncapped worker budget"
+      proof: "unit test: test/event-driven-semantic-review.test.ts"
+    - claim: "an unavailable or exhausted provider cannot start a reviewer, and that failure does not prevent the deterministic status from being posted"
+      proof: "unit test: test/event-driven-semantic-review.test.ts"
+    - claim: "a manual `rmd review` call remains deterministic-only by default, so this task changes unattended event processing rather than silently adding operator-initiated spend"
+      proof: "unit test: test/event-driven-semantic-review.test.ts"
+    - claim: "the semantic reviewer remains downgrade-only and never becomes the authoritative status poster or merge decision maker"
+      proof: "unit test: test/event-driven-semantic-review.test.ts"
+
+  falsifier: |
+    Close this task without implementation if current main's default `buildSweepEffects`
+    `postReview` path can produce a `review.reviewer` worker row for a substantive code PR without
+    an injected test seam, and the row is bounded by the task's head-resolved risk/budget. A
+    same-run reviewer, a deterministic `review.posted` row, a concurrent `postReview` call, or an
+    event wake with no `review.reviewer` row is not that evidence.
+
+  note: |
+    The task id was atomically reserved at `refs/rmd-id/W1-T2593` by
+    `rmd next-task-id --reserve` before this shard was written.
+
+    `risk: high`, `band_meaning: blast-radius` reflects the trust boundary: this adds model judgment
+    to the unattended merge pipeline. The model remains advisory, the deterministic floor remains
+    authoritative, and every failure degrades to today's behavior; those are acceptance bounds,
+    not optional hardening.
