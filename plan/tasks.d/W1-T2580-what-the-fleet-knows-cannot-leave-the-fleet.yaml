@@ -1,0 +1,79 @@
+- id: W1-T2580
+  title: "WHAT THE FLEET KNOWS CANNOT LEAVE THE FLEET — the BYO-subscription ruling puts each customer on their own VM improving their own repos, the import half of knowledge transfer already ships, and no verb can produce the thing to import: one hash-pinned bundle of the doctrine, budgeted learnings and conventions a fresh deployment needs on day one"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 45.00
+  files: [src/lib/bundle.ts, src/run-task.ts, test/bundle-export.test.ts]
+  origin: "operator-brief#direction-refresh-2026-08-27"
+  plan_refs: ["W1-T992", "W1-T425", "W1-T86", "W1-T2297"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE RULING CREATES THE CONSUMER. W1-T992 records the operator's decision: bring-your-own
+    subscription, one VM per customer, the customer's own repos as the subject. Every such VM
+    boots a remudero that knows NOTHING — while this fleet's knowledge layer holds
+    provenance-tagged, lifecycle-managed learnings under a CI-budgeted injection weight
+    (`DEFAULT_KNOWLEDGE_BUDGET_CHARS`, selected by `selectLearnings` into every implement
+    prompt). The IMPORT half already ships: `learningsImportCommand` (run-task.ts) consumes a
+    global artifact and `verifyBundlePin` (src/lib/learnings.ts) hash-verifies it. The EXPORT
+    half does not exist: the queries `rmd bundle`, `buildBundle` and `bundle export` read zero
+    across src/ and plan/tasks.d/ at f2759c6ef, against W1-T425 as the positive control on the
+    adjacent territory. Nothing can produce the artifact the import was built to receive.
+
+    THE ADJACENT SHARD IS TRANSPORT AND STAYS BANKED, REFUSED BY NAME. W1-T425 is the commons
+    TRANSPORT — cross-instance sync, banked to §6's Tier 3 stateless shape by P32's own ruling.
+    This task moves no bytes between hosts: it writes ONE LOCAL FILE the operator carries to a
+    new VM by whatever channel the ruling's own credential-pasting flow already uses. Building
+    the export does not unbank the transport and must not be read as doing so.
+
+    THE MARKET CONTEXT, AS CONTEXT: the agent-memory field now ships five product memories and
+    names a sixth path — plain knowledge artifacts under the agent's own read — and this repo IS
+    the sixth path with three properties none of the products carry: per-entry provenance, a
+    lifecycle that can retire an entry, and a budget a gate enforces. The bundle is that
+    difference made portable. Per-entry provenance is also what lets a FUTURE export bar filter
+    on measured utility once the wipe-test (W1-T86) has run — noted as the designed follow-on,
+    not gated on here.
+  design: |
+    (i) THE VERB AND ITS CONTENTS. `rmd bundle export <path>` assembles: the doctrine preamble,
+    the budget-selected learnings corpus with every entry's provenance intact, and the worker
+    settings template's asserted values — the stable knowledge parts a fresh deployment's
+    prompts consume, and nothing runtime-secret: NO tokens, NO ledger, NO state/, NO customer
+    code, asserted by test. The artifact carries a manifest in the prompt-manifest discipline
+    (W1-T2297): per-part name, sha256 and byte length, plus one bundle-level pin
+    `verifyBundlePin` accepts — export and import verify the SAME pin, one primitive, no second
+    hash scheme.
+
+    (ii) DETERMINISM. Same tree in, byte-identical bundle out — no clocks, no random ids — so
+    two exports at one sha are provably the same artifact and a customer can verify what they
+    received against what the operator published.
+
+    (iii) ROUND-TRIP IS THE PROOF. The test exports from a fixture tree and drives the REAL
+    import path over the result; a bundle that the shipped importer cannot verify and load is a
+    failing test, not a documentation caveat.
+
+    (iv) WHAT MUST NOT CHANGE, REFUSED BY NAME. W1-T425's transport stays banked — this verb
+    writes a file and opens no connection. The learnings corpus itself is untouched — export
+    reads, never rewrites, and Rule 15 stands: nothing here files, mints or edits plan state.
+    The budget gate keeps its weight: an export carries the SELECTED corpus, never an
+    over-budget dump that would teach a new deployment to ignore the budget its own gate
+    enforces.
+
+    THE RISK BAND IS RULE 19's SPAN, NOT BLAST RADIUS — a new pure module, the CLI wiring and a
+    test read as two concerns; the runtime change is one read-only verb.
+  acceptance:
+    - claim: "an exported bundle round-trips through the shipped import and pin verification"
+      proof: "unit test: test/bundle-export.test.ts"
+    - claim: "identical trees export byte-identical bundles"
+      proof: "unit test: test/bundle-export.test.ts"
+    - claim: "every bundled learning keeps its provenance tag through the round trip"
+      proof: "unit test: test/bundle-export.test.ts"
+    - claim: "no token or ledger or state path can appear in a bundle"
+      proof: "unit test: test/bundle-export.test.ts"
+    - claim: "the export honors the knowledge budget rather than dumping the corpus"
+      proof: "unit test: test/bundle-export.test.ts"
+    - claim: "the cli wiring calls the pure builder rather than shipping it unreached"
+      proof: "grep: buildBundle( in src/run-task.ts"
