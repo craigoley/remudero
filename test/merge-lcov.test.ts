@@ -275,3 +275,52 @@ test('coverage merge CLI refuses an empty raw shard instead of producing a vacuo
 
   assert.throws(() => runMerger(output, empty), /contains no V8 coverage files/);
 });
+
+test('coverage merge CLI names an unreadable raw coverage directory', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'merge-node-unreadable-coverage-'));
+  const missing = join(dir, 'missing');
+  const output = join(dir, 'merged.info');
+
+  assert.throws(() => runMerger(output, missing), /cannot read raw coverage directory/);
+});
+
+test('coverage merge CLI refuses a Node runtime that differs from the repository pin', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'merge-node-version-mismatch-'));
+  const script = join(process.cwd(), 'scripts/coverage-merge-ratchet.mjs');
+  const output = join(dir, 'merged.info');
+  writeFileSync(join(dir, '.nvmrc'), '0.0.0\n');
+
+  assert.throws(
+    () => execFileSync(process.execPath, ['--expose-internals', script, '--output', output, join(dir, 'raw')], {
+      cwd: dir,
+      encoding: 'utf8',
+      stdio: 'pipe',
+    }),
+    /raw coverage merge requires the repository-pinned Node 0\.0\.0/,
+  );
+});
+
+test('coverage merge CLI names the required expose-internals process capability', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'merge-node-hidden-internals-'));
+  const output = join(dir, 'merged.info');
+
+  assert.throws(
+    () => execFileSync(
+      process.execPath,
+      ['scripts/coverage-merge-ratchet.mjs', '--output', output, join(dir, 'raw')],
+      { cwd: process.cwd(), encoding: 'utf8', stdio: 'pipe' },
+    ),
+    /pinned raw coverage merger is unavailable; invoke with node --expose-internals/,
+  );
+});
+
+test('coverage merge CLI requires exactly one output mode', () => {
+  assert.throws(
+    () => execFileSync(process.execPath, ['--expose-internals', 'scripts/coverage-merge-ratchet.mjs'], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+      stdio: 'pipe',
+    }),
+    /exactly one of --output or --compact-output is required/,
+  );
+});
