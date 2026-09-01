@@ -1,0 +1,64 @@
+- id: W1-T2586
+  title: "AN OPERATOR STOP DOES NOT STOP THE DAEMON — the entrypoint forwards TERM and exits 143, docker's on-failure policy reads any non-zero exit as a crash, and the container relaunches itself; MEASURED 2026-09-01: `docker stop remudero-daemon` was run to end a live spend leak, the container was back up 27 minutes later on its own, and the leak ran a further 24 minutes and ~$45 before an operator discovered it was never stopped"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 6.00
+  files: [deploy/entrypoint.sh, test/an-operator-stop-is-undone-by-the-restart-policy.test.ts]
+  origin: "operator-brief#stop-does-not-stop-2026-09-01"
+  plan_refs: ["W1-T1067", "W1-T2537", "W1-T1010"]
+  status: queued
+  attempts: 0
+  rationale: |
+    ── THE MECHANISM, FROM THE ENTRYPOINT'S OWN OUTPUT ──────────────────────────────────────────
+
+        rmd-entrypoint: received TERM — forwarding to pid <n> so it can release its locks before exiting
+        rmd-entrypoint: exited 143 — sleeping 120s before exiting so the restart is rate-limited, not just counted
+
+    A DELIBERATE, GRACEFUL SHUTDOWN EXITS NON-ZERO. 143 is 128+SIGTERM and 137 is 128+SIGKILL, and
+    docker's `on-failure` policy cannot tell either from a crash. The 120s sleep THROTTLES the
+    relaunch; it does not prevent it. So the container comes back, and the operator who ran
+    `docker stop` has no signal that it did.
+
+    ⚠ THE 120s SLEEP IS WHAT HIDES IT. An immediate relaunch would be obvious. A two-minute delay
+    means the operator sees `Exited`, believes the stop worked, moves on, and the container returns
+    while they are looking elsewhere. MEASURED: the operator confirmed `Exited (137) at 18:59` and
+    ledger writes ceasing at 18:58:30 — both true — and the container was `Up` again by ~19:26.
+
+    ── WHY THIS IS A CORRECTNESS BUG AND NOT AN OPERATOR ERROR ──────────────────────────────────
+
+    A graceful stop is the ONLY tool an operator has to halt a fleet that is doing harm, and on
+    2026-09-01 that is exactly what it was reached for: a draft rung re-entering itself and burning
+    roughly $105/hour. The stop was correct, timely, and did nothing. The workaround that DID hold
+    (`docker update --restart=no` first) is not documented anywhere and was derived under time
+    pressure during the incident.
+
+    ── ⚠ THE FIX IS ON A BAKED PATH AND SHIPS ONLY ON AN IMAGE REBUILD ─────────────────────────
+
+    `deploy/entrypoint.sh` is `COPY`'d into the image as `/usr/local/bin/rmd-entrypoint`. It is NOT
+    read from the bind mount, so merging this task changes NOTHING on the running host until
+    `.github/workflows/acr-build.yml` (workflow_dispatch only) is run by an operator and the new
+    image deployed. The task is not done when it merges; it is done when the image carries it. Say
+    so in the PR body, because a merged-and-green commit that has not shipped is the exact shape
+    W1-T1021 exists to catch.
+
+    THE LIKELY SHAPE: a TERM that the entrypoint handled deliberately should exit 0, which is what
+    a graceful shutdown means to every process supervisor. A crash keeps its non-zero exit and its
+    throttle. The distinction is knowable at the point the signal handler runs; it is simply not
+    made today.
+
+    ⚠ AND THE CHANGE MUST NOT MAKE A REAL CRASH LOOK CLEAN. Exiting 0 on every path would defeat
+    the restart policy the fleet depends on for genuine failures — the opposite defect, and worse,
+    because a dead daemon would stay dead silently. Only a HANDLED signal may exit 0.
+
+    NOT IN SCOPE: the drain-lock stranding on restart (W1-T1067), the crash-restart budget
+    accounting (W1-T2537), and the recycle procedure itself (W1-T1010).
+
+  acceptance:
+    - claim: "a TERM the entrypoint handles deliberately exits zero, so a graceful operator stop is not read as a crash by the restart policy"
+      proof: "unit test: test/an-operator-stop-is-undone-by-the-restart-policy.test.ts"
+    - claim: "a genuine non-signal failure still exits non-zero and keeps its restart throttle, so a crash is never reported as a clean shutdown"
+      proof: "unit test: test/an-operator-stop-is-undone-by-the-restart-policy.test.ts"
