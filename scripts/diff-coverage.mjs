@@ -267,6 +267,30 @@ export function removedLinesByFile(diffText) {
 }
 
 /**
+ * Return every non-deleted TypeScript source path in the new side of a diff. Coverage sharding
+ * makes absence material: a changed source file omitted by every shard must fail rather than
+ * reaching findUncoveredAddedLines' historical "lcov never saw this file" carve-out for test/**.
+ * @param {string} diffText
+ */
+export function changedSourceFiles(diffText) {
+  const files = new Set();
+  for (const line of diffText.split('\n')) {
+    if (!line.startsWith('+++ ')) continue;
+    const path = line.slice(4).trim();
+    if (path === '/dev/null') continue;
+    const relative = path.replace(/^b\//, '');
+    if (relative.startsWith('src/') && relative.endsWith('.ts')) files.add(relative);
+  }
+  return [...files].sort();
+}
+
+/** Changed source files absent from the merged LCOV surface. */
+export function findMissingSourceCoverage(diffText, lcov) {
+  const hits = lcov.hits ?? lcov;
+  return changedSourceFiles(diffText).filter((file) => !hits.has(file));
+}
+
+/**
  * A RELOCATION, not an addition: a contiguous run of added lines whose trimmed text matches an
  * unconsumed, equally contiguous run of removed lines in the SAME diff (W1-T2325). The header
  * comment above already settles the policy question -- "an already-uncovered pre-existing line is
@@ -617,6 +641,19 @@ function main(argv) {
   const lcovText = readFileSync(values.lcov, 'utf8');
   const diffText = values.diff ? readFileSync(values.diff, 'utf8') : readFileSync(0, 'utf8');
   const lcovHits = parseLcovHitsByFile(lcovText);
+  const missingSourceFiles = findMissingSourceCoverage(diffText, lcovHits);
+  if (missingSourceFiles.length > 0) {
+    const headline =
+      'BLOCKED -- changed source file(s) have no SF record in the coverage report; ' +
+      'coverage would otherwise pass vacuously:';
+    console.error(`diff-coverage: ${headline}`);
+    for (const file of missingSourceFiles) console.error(`  - ${file}`);
+    emitCiReport('diff-coverage', formatCiReport('diff-coverage', headline, missingSourceFiles), {
+      blocked: true,
+    });
+    process.exitCode = 1;
+    return;
+  }
   const added = addedLinesByFile(diffText);
   const removed = removedLinesByFile(diffText);
   const rawViolations = findUncoveredAddedLines(added, lcovHits);

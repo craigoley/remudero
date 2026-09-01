@@ -8,20 +8,19 @@
 # protection is armed with the OBSERVED check-run name (read from the API after
 # the first run), never a guessed string — a typo'd context deadlocks merges
 # forever. If you ever add CONDITIONAL jobs (e.g. path/`if:` filters), a SKIPPED
-# required check also deadlocks merge: the fix is a single always-runs aggregator
-# job that `needs:` the others and is the ONLY required context. Today there is
-# one unconditional job, so the job name is a safe required context.
+# required check also deadlocks merge. The sharded jobs below therefore collapse through
+# always-runs aggregators named `ci` and `coverage-ratchet`; those stable names remain the only
+# required contexts while the individual matrix checks expose which shard failed.
 name: CI
 
 on:
   pull_request:
   # W1-T1033: nothing ran the suite against `main` — `ci-gate` (a separate file, untouched here)
   # and every OTHER job below stayed `pull_request`-only for measured reasons (see this task's
-  # rationale/design). `ci` ALONE also runs on a push to `main` now, so a broken merge is
-  # observable without an unrelated PR failing first: its job body contains zero references to
-  # `github.event`/`pull_request`/`BASE_SHA`, so it is push-safe (CONTROL: `coverage-ratchet`'s
-  # body contains one, in its diff-coverage step — that is why THAT job stays PR-only below,
-  # same as every job in this file except `ci`). `ci-gate.yml` must NEVER gain this trigger: its
+  # rationale/design). The `ci` matrix and stable aggregator run fully on a push, so a broken
+  # merge is observable without an unrelated PR failing first. The coverage matrix and its stable
+  # aggregator also register on a push but shell-skip the PR-specific collection and comparison;
+  # every other job remains PR-only. `ci-gate.yml` must NEVER gain this trigger: its
   # `SHA` env reads `github.event.pull_request.head.sha`, empty on a push, and its
   # `concurrency.group` collapses every push into one cancel-in-progress group — see that file.
   push:
@@ -32,11 +31,15 @@ permissions:
 
 jobs:
   ci:
-    name: ci
-    # W1-T1033: no `if:` here — this is the one job in this file meant to run on BOTH triggers
-    # above (the newly added `push` and the pre-existing `pull_request`). Every job below this
-    # one carries `if: github.event_name == 'pull_request'` to stay off the new push trigger.
+    name: ci-shard (${{ matrix.shard }}/4)
+    # W1-T1033: no `if:` here — these shards and their stable aggregator run on BOTH triggers
+    # above. PR-only jobs retain their existing event guard; the coverage matrix registers on
+    # both and shell-skips its push-only work.
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     # W1-T1009: HEAVY band. 35m/2100s sits in the empty gap this repo's own data leaves between
     # the longest observed non-hung run (1637s, a legitimately FAILING `ci`) and the first
     # observed hang (2647s) -- and it MUST stay strictly below ci-gate.yml's own
@@ -108,7 +111,12 @@ jobs:
         # (scripts/strict-probe.ts, outside this step's `-p tsconfig.json` scope) and asserts
         # strict mode rejects it while strict-off accepts the same file unchanged -- that test
         # runs as part of `npm test` below and is the falsifier proof this step is ACTIVE.
-        run: npx tsc -p tsconfig.json --noEmit
+        run: |
+          if [ "${{ matrix.shard }}" != "1" ]; then
+            echo "CI sharding: typecheck runs once on shard 1; shard ${{ matrix.shard }} skips the duplicate invocation."
+            exit 0
+          fi
+          npx tsc -p tsconfig.json --noEmit
       - name: Determine this diff's fast-lane class (W1-T2428 — the `ci` half)
         # THE SAME STEP THE `coverage-ratchet` JOB ALREADY RUNS, and deliberately a SECOND copy
         # rather than a shared output: `needs:` would make `ci` wait on `coverage-ratchet`, turning
@@ -181,9 +189,13 @@ jobs:
         # indistinguishable from a real one, which is the defect this must not add.
         run: |
           CLASS="${{ steps.classify.outputs.class }}"
+          if [ "$CLASS" != "SOURCE" ] && [ "${{ matrix.shard }}" != "1" ]; then
+            echo "W1-T2428 fast-lane: class=${CLASS} — shard ${{ matrix.shard }} has no work; shard 1 owns the plan/docs-reading set."
+            exit 0
+          fi
           if [ "$CLASS" = "SOURCE" ]; then
-            echo "W1-T2428 fast-lane: class=SOURCE — running the FULL suite."
-            npm run test:ci
+            echo "CI sharding: class=SOURCE — running test shard ${{ matrix.shard }}/4."
+            npm run test:ci -- --test-shard=${{ matrix.shard }}/4
             exit $?
           fi
           SUITES="$(node --import tsx scripts/diff-class.mjs --list-plan-reading-suites)" || SUITES=""
@@ -204,6 +216,23 @@ jobs:
           # node-test-runner invocation in a workflow that lacks it. The fast lane changes
           # WHICH suites run, never the harness they run under.
           node --test --import tsx --import ./test/setup/tmp-hygiene.ts $SUITES
+
+  ci-required:
+    name: ci
+    runs-on: ubuntu-latest
+    needs: [ci]
+    if: ${{ always() }}
+    timeout-minutes: 10
+    steps:
+      - name: Collapse all test shards into the stable required check
+        env:
+          SHARD_RESULT: ${{ needs.ci.result }}
+        run: |
+          if [ "$SHARD_RESULT" != "success" ]; then
+            echo "ci: one or more test shards did not succeed (matrix result: ${SHARD_RESULT})."
+            exit 1
+          fi
+          echo "ci: all four test shards succeeded."
 
   commitlint:
     # W1-T31 (MASTER-PLAN §6A), relocated by W1-T129 — Conventional Commits gate. This repo
@@ -294,16 +323,19 @@ jobs:
     # new required context that could itself go silently absent): it reads the same lcov artifact
     # plus this PR's base...head diff and fails when the diff adds a source line lcov marks
     # instrumented-but-never-hit, even when the aggregate ratchet above stays green.
-    name: coverage-ratchet
+    name: coverage-shard (${{ matrix.shard }}/4)
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     # W1-T1033: deliberately NO job-level (or step-level) `if:` here — test/diff-coverage.test.ts
     # asserts this job body carries none at all (the pre-existing #729/skipped-check-deadlock
     # discipline: this job must always register a check run). So this job still REGISTERS on the
-    # new push trigger, same as every PR — but its four PR-scoped steps below (everything after
-    # the Playwright install, which must stay byte-identical to the `ci` job's own copy per
-    # test/workflow-playwright-install.test.ts) open with a plain shell guard
-    # (`[ "$GITHUB_EVENT_NAME" = pull_request ] || { …; exit 0; }`, never a YAML `if:`) that
-    # no-ops and exits 0 on anything but a pull_request event. Design (i): this job's
+    # new push trigger, same as every PR — but its coverage-collection step opens with a plain
+    # shell guard (`[ "$GITHUB_EVENT_NAME" = pull_request ] || { …; exit 0; }`, never a YAML
+    # `if:`) that no-ops on anything but a pull_request event. The later staging step uploads a
+    # skipped marker so every matrix child still produces a checkable artifact. Design (i): this job's
     # diff-coverage half reads `github.event.pull_request.base.sha`, EMPTY on a push (measured:
     # `git diff "" ...HEAD` exits 129), and even wired to the previous commit it would answer a
     # different question than "lines this PR added" — so a push run must skip the real work
@@ -317,13 +349,12 @@ jobs:
     # `npx playwright install` -- PR #2150 was `ci`'s OWN hang, on that step, five minutes after
     # PR #2148's `ci` hang on the same step; this job sits in the same band for its own reason,
     # not by repeating `ci`'s. It is NO LONGER at the same number either. Unlike `ci` it runs the
-    # whole suite under --experimental-test-coverage, and one flaky test sends that step into a
-    # RETRY -- a second full pass -- which puts it past 2100s; PR #3064 raised it to 39m/2340s as
-    # a STOPGAP while `ci` stays at 35m/2100s. THE CEILING IS THE INVARIANT, NOT EITHER NUMBER:
-    # both must stay strictly below ci-gate.yml's WAIT_CAP_SECONDS (2400s), and 39m/2340s is the
-    # largest whole minute that clears it (40m is 2400s exactly, which is not strictly below). At
-    # or above that cap ci-gate times out first and the misattribution defect returns intact; if
-    # WAIT_CAP_SECONDS is ever retuned (W1-T312), re-derive both values.
+    # whole suite under --experimental-test-coverage. This matrix now divides that collection
+    # into four independent shards, but the historical 39m/2340s ceiling is retained until real
+    # matrix runs establish a safe lower bound. THE CEILING IS THE INVARIANT: it must stay strictly
+    # below ci-gate.yml's WAIT_CAP_SECONDS (2400s). At or above that cap ci-gate times out first
+    # and the misattribution defect returns intact; if WAIT_CAP_SECONDS is ever retuned (W1-T312),
+    # re-derive this value too.
     timeout-minutes: 39
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -454,7 +485,7 @@ jobs:
           node --enable-source-maps --experimental-test-coverage --test-coverage-exclude="test/**" \
             --test-reporter=spec --test-reporter-destination=stdout \
             --test-reporter=lcov --test-reporter-destination=coverage/lcov.info \
-            --test --import tsx --import ./test/setup/tmp-hygiene.ts "test/**/*.test.ts"
+            --test --test-shard=${{ matrix.shard }}/4 --import tsx --import ./test/setup/tmp-hygiene.ts "test/**/*.test.ts"
           TEST_EXIT=$?
           set -e
           if [ "$TEST_EXIT" -ne 0 ]; then
@@ -469,6 +500,82 @@ jobs:
             exit 1
           fi
           exit 0
+      - name: Stage this coverage shard for the required-check aggregator
+        run: |
+          mkdir -p coverage-artifact
+          if [ -s coverage/lcov.info ]; then
+            cp coverage/lcov.info coverage-artifact/lcov.info
+          else
+            echo "${GITHUB_EVENT_NAME}:${{ steps.classify.outputs.class }}" > coverage-artifact/skipped
+          fi
+      - name: Upload coverage shard
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-shard-${{ matrix.shard }}
+          path: coverage-artifact
+          retention-days: 1
+          if-no-files-found: error
+
+  coverage-ratchet-required:
+    name: coverage-ratchet
+    runs-on: ubuntu-latest
+    needs: [coverage-ratchet]
+    if: ${{ always() }}
+    timeout-minutes: 10
+    steps:
+      - name: Require every coverage shard to produce an artifact
+        env:
+          SHARD_RESULT: ${{ needs.coverage-ratchet.result }}
+        run: |
+          if [ "$SHARD_RESULT" != "success" ]; then
+            echo "coverage-ratchet: one or more coverage shards did not succeed (matrix result: ${SHARD_RESULT})."
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+      - name: Install (clean, from lockfile)
+        run: npm ci
+      - name: Determine this diff's fast-lane class for the coverage aggregator
+        id: classify
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+            git diff --name-only "${BASE_SHA}"...HEAD > changed-files.txt || true
+          else
+            : > changed-files.txt
+          fi
+          CLASS="$(node --import tsx scripts/diff-class.mjs --changed-files changed-files.txt 2>diff-class.log)" || CLASS="SOURCE"
+          case "$CLASS" in
+            PLAN_ONLY|DOCS_ONLY|SOURCE) ;;
+            *) CLASS="SOURCE" ;;
+          esac
+          cat diff-class.log || true
+          echo "class=${CLASS}" >> "$GITHUB_OUTPUT"
+      - name: Download coverage shards
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: coverage-shard-*
+          path: coverage-shards
+      - name: Merge coverage shards without double-counting source denominators
+        run: |
+          [ "${GITHUB_EVENT_NAME}" = "pull_request" ] || { echo "coverage-ratchet: push event — no PR coverage merge required."; exit 0; }
+          CLASS="${{ steps.classify.outputs.class }}"
+          if [ "$CLASS" != "SOURCE" ]; then
+            echo "W1-T2428 fast-lane: class=${CLASS} — no coverage shards were collected."
+            exit 0
+          fi
+          COUNT="$(find coverage-shards -type f -name lcov.info | wc -l | tr -d ' ')"
+          if [ "$COUNT" != "4" ]; then
+            echo "coverage-ratchet: expected 4 LCOV shards, found ${COUNT}; refusing a partial merge."
+            exit 1
+          fi
+          mkdir -p coverage
+          find coverage-shards -type f -name lcov.info -print0 | sort -z | xargs -0 node scripts/merge-lcov.mjs --output coverage/lcov.info
       # ORDER IS LOAD-BEARING (2026-08-13): diff-coverage runs BEFORE the aggregate ratchet.
       # No step in this job carries an `if:`, so a failing step skips every step after it —
       # MEASURED: in five of six recent failing CI runs the ratchet step concluded `failure` and
