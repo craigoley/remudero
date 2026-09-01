@@ -7268,6 +7268,7 @@ export async function runSweepLightPass(
   // own fresh read for every scoped action below; this pass-level fold is only the liveness filter
   // that keeps a head the action-time guard already knows it will dedup from spending a scarce
   // admission. The later read remains the race-safe boundary if a verdict lands after this one.
+  // ledger-read-intent: live — this fold reads the live file only, never rotations.
   const readLedger = deps.readLedger ?? readLedgerLines;
   const selectionPrior = priorActionsFromLedger(readLedger(deps.ledgerPath));
   const outcomes: ReviewAdmissionOutcomes = {
