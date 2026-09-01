@@ -7,7 +7,7 @@
   principles: {tdd: strict}
   risk: medium
   budget_usd: 15.00
-  files: [src/lib/cost-anomaly.ts, test/an-anomaly-is-reported-once-not-on-every-sweep.test.ts]
+  files: [src/lib/cost-anomaly.ts, test/the-cost-anomaly-sentinel-re-reports-the-same-finding-forever.test.ts]
   origin: "operator-session#the-spend-census-2026-09-01"
   plan_refs: ["W1-T931", "W1-T2557"]
   status: queued
@@ -54,16 +54,16 @@
     so this is deduplication of REPORTING, never deletion of history.
   acceptance:
     - claim: "one anomalous run is reported once, not once per sweep"
-      proof: "unit test: test/an-anomaly-is-reported-once-not-on-every-sweep.test.ts"
+      proof: "unit test: test/the-cost-anomaly-sentinel-re-reports-the-same-finding-forever.test.ts"
     - claim: "a second sweep over unchanged data appends no new row for a run already reported"
-      proof: "unit test: test/an-anomaly-is-reported-once-not-on-every-sweep.test.ts"
+      proof: "unit test: test/the-cost-anomaly-sentinel-re-reports-the-same-finding-forever.test.ts"
     - claim: "a finding whose cost genuinely changed IS reported again — suppression never swallows a real change"
-      proof: "unit test: test/an-anomaly-is-reported-once-not-on-every-sweep.test.ts"
+      proof: "unit test: test/the-cost-anomaly-sentinel-re-reports-the-same-finding-forever.test.ts"
     - claim: "a run that stops being anomalous stops being reported, and is not resurrected by a later sweep"
-      proof: "unit test: test/an-anomaly-is-reported-once-not-on-every-sweep.test.ts"
+      proof: "unit test: test/the-cost-anomaly-sentinel-re-reports-the-same-finding-forever.test.ts"
     - claim: "the full flagged set stays recoverable — this dedupes reporting, never deletes history"
-      proof: "unit test: test/an-anomaly-is-reported-once-not-on-every-sweep.test.ts"
+      proof: "unit test: test/the-cost-anomaly-sentinel-re-reports-the-same-finding-forever.test.ts"
     - claim: "the module still only reports: no dispatch is deferred, no worker stopped, no merge blocked"
-      proof: "unit test: test/an-anomaly-is-reported-once-not-on-every-sweep.test.ts"
+      proof: "unit test: test/the-cost-anomaly-sentinel-re-reports-the-same-finding-forever.test.ts"
     - claim: "restoring the unconditional append makes the once-per-run assertion fail"
-      proof: "unit test: test/an-anomaly-is-reported-once-not-on-every-sweep.test.ts"
+      proof: "unit test: test/the-cost-anomaly-sentinel-re-reports-the-same-finding-forever.test.ts"
