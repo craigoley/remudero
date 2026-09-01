@@ -1533,6 +1533,22 @@ export interface WorkerStreamEvent {
    * design note iv, "the worker's recent output").
    */
   text?: string;
+  /**
+   * W1-T2557: the cumulative count of raw `assistant`-type SDK messages {@link
+   * collectWorkerResult} has seen SO FAR this spawn, as of this event — one increment per raw
+   * assistant message, regardless of how many text/tool_use blocks it carries (so a message
+   * with both fires two `WorkerStreamEvent`s that report the SAME `turnsSoFar`, never double
+   * counted). Present on every event kind, including `"message"` heartbeats, so a reader never
+   * has to guess a stale value forward across a heartbeat-only stretch.
+   *
+   * DELIBERATELY NAMED `turnsSoFar`, NOT `numTurns`: {@link WorkerResult.numTurns}'s own doc
+   * (W1-T303 ground truth) already established that the SDK's terminal `num_turns` does not
+   * reliably count "one turn = one user message + one assistant response" — an independently
+   * counted mid-flight approximation must not borrow that name and imply it is the same figure.
+   * This is the HONEST count available while the spawn is still in flight, never asserted to
+   * equal whatever `num_turns` lands on the terminal envelope.
+   */
+  turnsSoFar?: number;
 }
 
 /** Callback shape {@link collectWorkerResult}'s optional `streamObserver` accepts — see
@@ -1565,6 +1581,10 @@ export const DEFAULT_WORKER_QUIET_FLOOR_MS = 30_000;
 export class WorkerStateTracker {
   private state: WorkerState | undefined; // undefined ⇒ nothing observed yet: UNKNOWN, never a row
   private lastActivityMs: number | undefined;
+  // W1-T2557: 0 until the first event carrying `turnsSoFar` arrives — a real spawn's first
+  // observed event always carries one (collectWorkerResult populates it on every call), so this
+  // default is exercised only by a hand-built test event that omits the field on purpose.
+  private turnsSoFarValue = 0;
 
   constructor(private readonly quietFloorMs: number = DEFAULT_WORKER_QUIET_FLOOR_MS) {}
 
@@ -1576,8 +1596,26 @@ export class WorkerStateTracker {
    */
   observe(event: WorkerStreamEvent): WorkerState | undefined {
     this.lastActivityMs = event.tsMs;
+    // W1-T2557: the running turn count updates off EVERY event kind (a heartbeat carries the
+    // latest known count too), independent of whether this event is itself a state transition —
+    // see {@link turnsSoFar}'s own doc for why this is tracked here rather than folded into
+    // `state`.
+    if (event.turnsSoFar !== undefined) this.turnsSoFarValue = event.turnsSoFar;
     if (event.kind === "message") return undefined;
     return this.transitionTo(event.kind, event.tsMs);
+  }
+
+  /**
+   * W1-T2557: the running count of assistant-message "turns" observed so far THIS spawn — see
+   * {@link WorkerStreamEvent.turnsSoFar}'s own doc for the counting unit and why it is not
+   * asserted to equal the terminal envelope's `num_turns`. THE MID-FLIGHT VISIBILITY THIS TASK
+   * ADDS: unlike {@link currentState}, which only changes on a working/quiet/tool-executing
+   * TRANSITION (and can go a whole run without firing again for a continuously-`working`
+   * worker), this updates on every single observed event — the running spend signal a caller
+   * (run-task.ts's `buildWorkerStateSensor`) can ledger WHILE the spawn is still in flight.
+   */
+  turnsSoFar(): number {
+    return this.turnsSoFarValue;
   }
 
   /**
@@ -1793,6 +1831,12 @@ export async function collectWorkerResult(
   let sessionId = "";
   let costUsd = 0;
   let numTurns = 0;
+  // W1-T2557: independently counted, mid-flight approximation of "turns" — one increment per
+  // raw `assistant`-type SDK message, populated on EVERY `streamObserver` call below (including
+  // system/result heartbeats, which report the count AS OF that event without incrementing it).
+  // See `WorkerStreamEvent.turnsSoFar`'s own doc for why this is never asserted to equal the
+  // terminal envelope's own `numTurns` above.
+  let turnsSoFar = 0;
   let text = "";
   let subtype = "";
   let isError = false;
@@ -1822,7 +1866,7 @@ export async function collectWorkerResult(
         compactionFailures.push(...detectCompactionFailures([raw]));
         // W1-T942: a heartbeat — no worker-authored text, but still proof-of-life for the
         // quiet floor (design note ii, "no message of ANY kind").
-        opts.streamObserver?.({ kind: "message", tsMs: nowFn() });
+        opts.streamObserver?.({ kind: "message", tsMs: nowFn(), turnsSoFar });
       } else if (msg.type === "assistant") {
         // Anthropic-side api error mid-stream (server_error / <synthetic> model /
         // isApiErrorMessage). A TRANSIENT — the envelope may still report success.
@@ -1830,6 +1874,11 @@ export async function collectWorkerResult(
         const model = (msg.message as { model?: string })?.model;
         if (rawAny.isApiErrorMessage === true || model === "<synthetic>") apiError = true;
         const content = (msg.message as { content?: unknown }).content;
+        // W1-T2557: ONE assistant SDK message is ONE observed "turn" — incremented ONCE here,
+        // before the block loop below, so a message carrying BOTH a text and a tool_use block
+        // (the very next test case in test/worker-state-sensor.test.ts) reports the SAME
+        // `turnsSoFar` on both emitted events rather than double-counting.
+        turnsSoFar += 1;
         // W1-T942: TOOL-USE BLOCKS USED TO BE DROPPED ENTIRELY HERE — this task's whole
         // rationale. Classify EVERY block (never a second pass over `content`) so the SAME
         // loop that already extracts `text` also emits the `tool-executing` signal, with no
@@ -1841,7 +1890,7 @@ export async function collectWorkerResult(
             if (blockType === "text") {
               const text = (block as { text: string }).text;
               blocks.push(text);
-              opts.streamObserver?.({ kind: "working", tsMs: nowFn(), text });
+              opts.streamObserver?.({ kind: "working", tsMs: nowFn(), text, turnsSoFar });
               observedThisMessage = true;
             } else if (blockType === "tool_use") {
               const toolName = (block as { name?: string }).name;
@@ -1849,6 +1898,7 @@ export async function collectWorkerResult(
                 kind: "tool-executing",
                 tsMs: nowFn(),
                 text: toolName ? `[tool_use: ${toolName}]` : "[tool_use]",
+                turnsSoFar,
               });
               observedThisMessage = true;
             }
@@ -1856,7 +1906,7 @@ export async function collectWorkerResult(
         }
         // An assistant message with neither a text nor a tool_use block (e.g. thinking-only)
         // is still a heartbeat — never silently drop the quiet clock's reset.
-        if (!observedThisMessage) opts.streamObserver?.({ kind: "message", tsMs: nowFn() });
+        if (!observedThisMessage) opts.streamObserver?.({ kind: "message", tsMs: nowFn(), turnsSoFar });
       } else if (msg.type === "result") {
         const r = raw as {
           subtype: string;
@@ -1881,7 +1931,7 @@ export async function collectWorkerResult(
         // W1-T942: the terminal envelope is a heartbeat too — a run that goes straight from
         // spawn to a near-instant result (a synthetic test stream, or a genuinely trivial
         // call) still resets the quiet clock rather than leaving it unset forever.
-        opts.streamObserver?.({ kind: "message", tsMs: nowFn() });
+        opts.streamObserver?.({ kind: "message", tsMs: nowFn(), turnsSoFar });
         subtype = r.subtype;
         isError = r.is_error;
         text = r.result ?? "";
