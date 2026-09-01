@@ -1,0 +1,66 @@
+- id: W1-T2576
+  title: "ROUTING EVIDENCE IS POOLED OR IT IS PER-REPO AND BOTH ARE WRONG — a global average lets the busiest repo's quirks govern every other, while per-repo isolation makes every newly onboarded repo start from zero no matter how much the fleet already knows"
+  repo: remudero
+  depends_on: ["W1-T2575"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: "span"
+  budget_usd: 15.00
+  files: [src/lib/routing-prior.ts, src/lib/mount-recommender.ts, test/a-new-repo-starts-from-zero-and-one-repos-quirks-become-global-law.test.ts]
+  origin: "operator-session#codex-router-design-2026-09-01"
+  plan_refs: ["W1-T2575", "W1-T2574"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THIS IS THE TASK THAT MAKES THE ROUTER GET SMARTER AS THE FLEET TAKES ON MORE REPOS, AND THE
+    NAIVE FORMS OF IT ARE BOTH ACTIVELY HARMFUL. Pool everything and one high-volume repo's
+    idiosyncrasies — its language, its test latency, its gate stack — become the prior every other
+    repo inherits. Isolate per repo and the evidence never compounds: onboarding a repo throws away
+    everything the fleet learned, which is precisely the property the operator asked for and the
+    opposite of what isolation delivers.
+
+    PARTIAL POOLING IS THE RESOLUTION AND IT IS NOT A COMPROMISE, IT IS THE CORRECT ESTIMATOR. A
+    cell's estimate for a given repo is the pooled fleet-wide estimate shrunk toward that repo's
+    OWN observations in proportion to how much of its own evidence exists. At n=0 a repo inherits
+    the fleet prior outright, which is what makes onboarding cheap; as its own runs accumulate the
+    estimate migrates to its own behaviour, which is what stops the busiest repo from governing it.
+    No threshold, no cliff, no "is this repo similar enough" judgment call.
+
+    `.remudero/principles.yaml` IS ALREADY THE DECLARED HOME FOR PER-REPO PRIORS — §9: "Per-repo
+    priors live in principles.yaml (a gnarly C# repo can default Sonnet-high-thinking; a docs repo,
+    Haiku)." An OPERATOR-DECLARED prior there must dominate a learned one rather than be averaged
+    with it: a human saying "this repo is gnarly" is information the ledger does not contain, and
+    a router that quietly out-votes it is not one an operator can direct.
+
+    WHAT THE SHRINKAGE MUST NOT DO IS MANUFACTURE CONFIDENCE. The pooled prior carries its own n
+    and the shrunk estimate must report BOTH — the repo's own n and the pooled n behind it — so a
+    recommendation resting entirely on other repos' evidence is legible as such and can be refused
+    by a caller that wants local proof.
+
+    LINT NOTE, RECORDED RATHER THAN DODGED: `lint-plan` warns (never blocks) that this task's
+    call-site proof names `src/lib/mount-recommender.ts`, a file the plan does not yet contain —
+    W1-T2575 creates it, and this task declares that dependency. The warning is a SNAPSHOT
+    artifact of filing the two together and clears once W1-T2575 merges. Widening this task's
+    `files:` to reach an already-existing caller would buy the clean lint by making the task span a
+    third subsystem, which is the wrong trade: the honest shape is a component called by the
+    recommender it belongs to.
+
+    THE FALSIFIER IS THE ZERO-EVIDENCE REPO. A repo with no runs must return the pooled prior, not
+    a default constant and not an error; and a repo whose own evidence contradicts the pool must,
+    at sufficient n, end up at its own value rather than somewhere between. Both directions have to
+    be asserted or the estimator is untested in exactly the two cases it exists for.
+  acceptance:
+    - claim: "the prior is reached from the recommender, not only from its own test"
+      proof: "grep: pooledPriorFor( in src/lib/mount-recommender.ts"
+    - claim: "a repo with no runs of its own inherits the pooled fleet estimate rather than a default constant or an error"
+      proof: "unit test: test/a-new-repo-starts-from-zero-and-one-repos-quirks-become-global-law.test.ts"
+    - claim: "a repo whose own evidence contradicts the pool converges to its own value as its sample grows"
+      proof: "unit test: test/a-new-repo-starts-from-zero-and-one-repos-quirks-become-global-law.test.ts"
+    - claim: "the estimate reports the repo's own n and the pooled n behind it, separately"
+      proof: "unit test: test/a-new-repo-starts-from-zero-and-one-repos-quirks-become-global-law.test.ts"
+    - claim: "an operator prior declared in principles.yaml dominates the learned estimate rather than averaging with it"
+      proof: "unit test: test/a-new-repo-starts-from-zero-and-one-repos-quirks-become-global-law.test.ts"
+    - claim: "one repo's volume cannot move another repo's estimate once that repo has its own evidence"
+      proof: "unit test: test/a-new-repo-starts-from-zero-and-one-repos-quirks-become-global-law.test.ts"
