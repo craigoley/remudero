@@ -1,0 +1,96 @@
+- id: W1-T2582
+  title: "THE SWEEP'S WALL-CLOCK BOUND STOPS AWAITING THE WORK AND NEVER CANCELS IT, SO EVERY SWEEP-BORNE RUNG WHOSE WORK OUTLASTS THE BOUND RE-ENTERS ITSELF — the daemon abandons `await deps.sweep()` at 559s, the abandoned work keeps running detached, and the next iteration starts a fresh copy against state the first has not written yet; MEASURED 2026-09-01: six `daemon.sweep.abandoned` rows at elapsed_ms 559000 against bound_ms 559000, alternating one-for-one with draft-batch starts, three of them inside a SINGLE run_id"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 20.00
+  files: [src/lib/daemon.ts, test/a-bound-that-stops-waiting-does-not-stop-the-work.test.ts]
+  origin: "operator-brief#sweep-abandonment-is-not-cancellation-2026-09-01"
+  plan_refs: ["W1-T2261", "W1-T2569", "W1-T1044", "W1-T1272"]
+  status: queued
+  attempts: 0
+  rationale: |
+    ── THE MECHANISM, MEASURED RATHER THAN INFERRED ────────────────────────────────────────────
+
+    `DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS = 559_000` (W1-T1044) bounds `await deps.sweep()`. When it
+    fires the daemon stops WAITING. It does not stop the work. The promise is not cancelled, the
+    spawned children are not signalled, and nothing downstream is told the pass is still live — so
+    the next loop iteration begins a fresh sweep while the previous one is still executing.
+
+    OBSERVED, alternating one-for-one with draft-batch starts:
+
+        batch 17:38:13 -> abandoned 17:46:45 (+512s) -> batch 17:53:01 -> abandoned 18:01:15 (+494s)
+        batch 18:04:54 -> abandoned 18:13:41            batch 18:17:14 -> abandoned 18:25:29
+
+    Every abandoned row carries `elapsed_ms: 559000` against `bound_ms: 559000` — the bound, not a
+    coincidence. THREE OF THE ABANDONS FALL INSIDE ONE `run_id`, which is what rules out the two
+    competing explanations: the 20-minute retrigger cannot produce a ~715s cycle, and a freshness
+    restart cannot produce three cycles within one process at a 50.5-minute median lifetime.
+
+    ── THE POPULATION AT RISK, AND WHY THIS IS A CLASS ─────────────────────────────────────────
+
+        draft batch (3 sequential drafts x ~316s = ~948s) .... exceeds the bound STRUCTURALLY, always
+        review.reviewer ....................................... 1.0% of 522 observations (max 1691s)
+        recon.done ............................................ never (max 131s)
+        runFixRung ............................................ sweep-borne (buildSweepEffects), spawns workers
+
+    ⚠ THE DRAFT RUNG IS THE ONE THAT SPENDS PER RE-ENTRY, NOT THE ONLY ONE THAT RE-ENTERS.
+    `review.reviewer` already crosses the bound in one run of a hundred TODAY, silently. W1-T2569
+    fixed the draft rung with its own lock; that guard is per-rung by design and leaves every other
+    sweep-borne rung on the original semantics. This task is the class W1-T2569 is one instance of.
+
+    ⚠ AND THE BOUND IS NOT THE ONLY RE-ENTRY PATH. After W1-T2569's guard shipped, the last two
+    pre-fix batches were 20m27s apart — that is `DEFAULT_SWEEP_RETRIGGER_INTERVAL_MS` (W1-T1272),
+    not the 559s bound. A fix aimed only at the abandonment leaves the retrigger open. Both routes
+    start a second sweep while a first is live, and both must be closed or measured as harmless.
+
+    ── TWO DOC COMMENTS ASSERT THE PROPERTY THAT IS BEING VIOLATED ─────────────────────────────
+
+    `buildInboxDraftHook` claimed it is "awaited to completion by the daemon's serial sweep tick".
+    `DEFAULT_SWEEP_RETRIGGER_INTERVAL_MS`'s own comment says the constant "raises how often the gate
+    is reached, never how many run at once (see `sweep still runs one at a time`, the same
+    mutex-serialized `deps.sweep()` every other call site already awaits sequentially)".
+
+    BOTH ARE FALSE, FOR THE SAME REASON, AND BOTH READ AS TRUE. Whatever ships must correct them, or
+    the next reader re-derives this from scratch — which is exactly what happened here: the finding
+    was reported in plain words in a queue review hours before the incident and three readers passed
+    over it.
+
+    ── THE PRECEDENT, AND THE INSTRUCTIVE DIFFERENCE ───────────────────────────────────────────
+
+    W1-T2261 ("ABANDONING A SPAWN DOES NOT END IT") is the same family at a DIFFERENT site: the
+    fix-rung's bounded spawn. The contrast is the useful part. There, a kill IS attempted and fails
+    on a marker predicate that cannot match. HERE, NOTHING IS ATTEMPTED AT ALL — there is no reclaim
+    on this path to be broken. Do not treat W1-T2261 as covering this, and do not re-derive its
+    predicate bug here.
+
+    ── ⚠ THE DANGEROUS DIRECTIONS, BOTH OF WHICH ARE WORSE THAN TODAY ─────────────────────────
+
+    (a) CANCELLING BLINDLY. The abandoned pass may hold a live worker, a lock, or a half-written
+        cache. A bound that starts killing in-flight work at 559s would destroy legitimate long
+        runs and could leave state mid-write — strictly worse than a duplicate pass. Whatever the
+        fix does at the bound, a falsifier must show it does NOT terminate work that is progressing.
+
+    (b) A BOUND THAT NEVER FIRES. Removing or lengthening it until it stops mattering re-opens
+        W1-T1044, the unbounded tick this bound exists to prevent. The bound must keep bounding.
+
+    THE SHAPE THAT SATISFIES BOTH IS PROBABLY NOT CANCELLATION BUT EXCLUSION: the abandoned pass
+    stays running and the NEXT one declines to start while it is live, which is what W1-T2569 did
+    per-rung. Verify that before building it; the point of this filing is that the decision is a
+    real one and must be made once, at the seam, rather than a fourth time per rung.
+
+    NOT IN SCOPE: the draft rung's own lock (W1-T2569, shipped), the fix-rung reclaim predicate
+    (W1-T2261), and the value of the bound itself (W1-T1044).
+
+  acceptance:
+    - claim: "a pass whose work outlasts the wall-clock bound cannot have a second copy of that same pass start against it"
+      proof: "unit test: test/a-bound-that-stops-waiting-does-not-stop-the-work.test.ts"
+    - claim: "the retrigger interval is closed as a second entry route, not only the wall-clock bound, so both paths that start a concurrent pass are covered"
+      proof: "unit test: test/a-bound-that-stops-waiting-does-not-stop-the-work.test.ts"
+    - claim: "work that is still progressing is never terminated by the bound firing, so a long legitimate run is not destroyed to prevent a duplicate"
+      proof: "unit test: test/a-bound-that-stops-waiting-does-not-stop-the-work.test.ts"
+    - claim: "the bound still bounds, so the unbounded tick it was introduced to prevent cannot return"
+      proof: "unit test: test/a-bound-that-stops-waiting-does-not-stop-the-work.test.ts"
