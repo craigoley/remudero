@@ -10068,6 +10068,72 @@ export function resolveRunMounts(
   };
 }
 
+// W1-T2528 — module-scoped so it stays monotonic across EVERY lane runId this ONE process
+// mints (task/retro/triage/plan share this one process when the daemon dispatches them), never
+// reset between calls.
+//
+// THE DEFECT. `Date.now()` has 1ms resolution; a lane runId built from it (`run-<lane>-<epoch>`)
+// and handed straight to `git worktree add -b` collided when two rungs minted their runId in the
+// same millisecond — OBSERVED verbatim, the identical epoch printed twice in one daemon log
+// (`Preparing worktree (new branch 'run-DAEMON-1788127440289')` twice, then
+// `fatal: a branch named 'run-DAEMON-1788127440289' already exists`). `pruneStaleRuns` cannot
+// save it: the first rung's worktree is LIVE (that is what its run lock is FOR), so the branch
+// is still there when the second rung asks for the identical name.
+//
+// THE FIX IS A NAME, NOT A RETRY. `nextLaneEpochMs` never probes git state and never retries a
+// failed `git worktree add` — it hands back a millisecond value decided BEFORE `worktreeAdd` is
+// ever called. It compares only against the PRECEDING call's raw `Date.now()` reading, never an
+// ever-growing historical peak: two calls that read the identical raw millisecond back-to-back
+// get consecutive integers (the collision this task fixes); a call whose raw reading differs
+// from the one before it — because real time moved on, OR because a test pinned `Date.now()` to
+// an unrelated fixed value between cases — passes straight through UNCHANGED. That second half
+// matters as much as the first: this repo's own tests widely pin `Date.now()` per test case
+// (`t.mock.method(Date, "now", () => FIXED_TS)`, run-task.test.ts) and assert the exact epoch
+// echoes into the runId; an ever-growing ratchet (ANY value ever minted this process, not just
+// the immediately preceding one) would silently inflate a later, lower FIXED_TS past what that
+// test pinned, breaking determinism this task must not touch.
+let lastRawNowMs = -1;
+let lastLaneEpochMs = -1;
+export function nextLaneEpochMs(): number {
+  const now = Date.now();
+  if (now === lastRawNowMs) {
+    lastLaneEpochMs += 1;
+  } else {
+    lastRawNowMs = now;
+    lastLaneEpochMs = now;
+  }
+  return lastLaneEpochMs;
+}
+
+/**
+ * Cut a lane's `run-<runId>` worktree branch and ledger a failed add under its own step
+ * BEFORE rethrowing (W1-T2528) — the one place `retroCommand`/`triageCommand`/`planCommand`
+ * share this exact sequence, so a rung that still loses (a genuine git-level race
+ * `nextLaneEpochMs` cannot see) is visible on the ledger, not lost to `worktreeAdd`'s
+ * `stdio: "inherit"` git stderr with no row naming the branch that failed.
+ *
+ * `runTask`'s own call site (the task lane) is NOT routed through this helper — it has its
+ * own bespoke `WorktreeBaseStaleError` handling (a different terminal verdict + claim
+ * release) this generic helper cannot replicate, so it keeps its own try/catch and ledgers
+ * `worktree.add_failed` on the same fallthrough for parity.
+ */
+export function addLaneWorktree(
+  repoDir: string,
+  worktreesRoot: string,
+  runId: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): { branch: string; worktreePath: string } {
+  const branch = `run-${runId}`;
+  const worktreePath = join(worktreesRoot, branch);
+  try {
+    worktreeAdd(repoDir, worktreePath, branch, "origin/main");
+  } catch (e) {
+    log("worktree.add_failed", { branch, error: String((e as Error)?.message ?? e) });
+    throw e;
+  }
+  return { branch, worktreePath };
+}
+
 async function runTask(
   taskId: string,
   opts: {
@@ -10237,6 +10303,13 @@ async function runTask(
   // `onSpawnError`/`workerStateSensor.observer` already state for that wrapper.
   const workerAbandonMs = opts.workerAbandonMs ?? loadDefaultPolicy().values.workerAbandon;
 
+  // W1-T2528: deliberately NOT routed through `nextLaneEpochMs` (see its own doc, above) — the
+  // task lane's `taskId` is ALREADY the per-rung component (rationale: "a task lane does not
+  // have this defect, because its name is run-<taskId>-<epochMs> and the taskId disambiguates").
+  // Two rungs for the SAME taskId in the same process are refused earlier, at the dispatch
+  // claim/inflight check above — never reaching this line at all — so nothing here needs
+  // nextLaneEpochMs's collision-avoidance, and this run's `Date.now()` is left byte-identical
+  // to keep faith with the many fixtures across this suite that pin it exactly.
   const runId = `${taskId}-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, lane: "run-task", ...extra });
@@ -10792,6 +10865,11 @@ async function runTask(
       releaseDispatchClaim(task.id, claimReserver, { anchor: claimAnchor });
       return { taskId, runId, merged: false, costUsd: 0, verdict: "failed" };
     }
+    // W1-T2528: any OTHER add failure (a genuine git-level race `nextLaneEpochMs` cannot see,
+    // e.g. a branch left by something outside this process) — ledger it under its own step
+    // before rethrowing, same idiom retro/triage/plan use above, so this rung's loss is visible
+    // on the ledger rather than only as git's inherited stderr.
+    log("worktree.add_failed", { branch, error: String((e as Error)?.message ?? e) });
     throw e;
   }
   log("worktree.add", { branch, worktreePath });
@@ -18517,7 +18595,11 @@ async function retroCommand(
   const wrk = workerModel(config);
   assertArchitectAboveWorker(arch, wrk); // throws (fail-closed) on violation
 
-  const runId = `RETRO-${Date.now()}`;
+  // W1-T2528: `nextLaneEpochMs`, not bare `Date.now()` — see its own doc (above runTask). The
+  // singleton "RETRO" lane has no other per-instance component, so it depended entirely on the
+  // epoch to disambiguate two rungs in one process; this is exactly the site the observed
+  // collision named.
+  const runId = `RETRO-${nextLaneEpochMs()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: "RETRO", step, lane: "retro", ...extra });
   const say = (msg: string) => console.log(`\n### [retro] ${msg}`);
@@ -18541,9 +18623,9 @@ async function retroCommand(
   }
   const pruned = pruneStaleRuns(repoDir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
   if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
-  const branch = `run-${runId}`;
-  const worktreePath = join(worktreesDir(config), branch);
-  worktreeAdd(repoDir, worktreePath, branch, "origin/main");
+  // W1-T2528: `addLaneWorktree` mints the branch, cuts the worktree, and ledgers a failed
+  // add under its own step before rethrowing — see its own doc, above.
+  const { branch, worktreePath } = addLaneWorktree(repoDir, worktreesDir(config), runId, log);
   // Liveness token so a concurrent drain's prune skips this retro worktree. (See runTask.)
   writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
 
@@ -28476,7 +28558,10 @@ async function triageCommandLocked(
 
   const ledgerPath = ledgerPathFor(config);
   const taskId = `TRIAGE-${feedbackId}`;
-  const runId = `${taskId}-${Date.now()}`;
+  // W1-T2528: `nextLaneEpochMs`, not bare `Date.now()` — see its own doc (above runTask). Two
+  // triage runs for the SAME feedbackId minted in the same millisecond would otherwise still
+  // collide despite the feedbackId component.
+  const runId = `${taskId}-${nextLaneEpochMs()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, lane: "triage", ...extra });
   const say = (msg: string) => console.log(`\n### [triage] ${msg}`);
@@ -28499,9 +28584,9 @@ async function triageCommandLocked(
   }
   const pruned = pruneStaleRuns(repoDir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
   if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
-  const branch = `run-${runId}`;
-  const worktreePath = join(worktreesDir(config), branch);
-  worktreeAdd(repoDir, worktreePath, branch, "origin/main");
+  // W1-T2528: `addLaneWorktree` mints the branch, cuts the worktree, and ledgers a failed
+  // add under its own step before rethrowing — see its own doc, above runTask.
+  const { branch, worktreePath } = addLaneWorktree(repoDir, worktreesDir(config), runId, log);
   // Liveness token so a concurrent drain's prune skips this triage worktree.
   writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
 
@@ -29062,7 +29147,10 @@ export async function planCommand(
 
   const ledgerPath = ledgerPathFor(config);
   const taskId = `PLAN-${mode}`;
-  const runId = `${taskId}-${Date.now()}`;
+  // W1-T2528: `nextLaneEpochMs`, not bare `Date.now()` — see its own doc (above runTask). Two
+  // plan runs for the SAME mode minted in the same millisecond would otherwise still collide
+  // despite the mode component.
+  const runId = `${taskId}-${nextLaneEpochMs()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, lane: "plan", ...extra });
   const say = (msg: string) => console.log(`\n### [plan] ${msg}`);
@@ -29083,9 +29171,9 @@ export async function planCommand(
   }
   const pruned = pruneStaleRuns(repoDir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
   if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
-  const branch = `run-${runId}`;
-  const worktreePath = join(worktreesDir(config), branch);
-  worktreeAdd(repoDir, worktreePath, branch, "origin/main");
+  // W1-T2528: `addLaneWorktree` mints the branch, cuts the worktree, and ledgers a failed
+  // add under its own step before rethrowing — see its own doc, above runTask.
+  const { branch, worktreePath } = addLaneWorktree(repoDir, worktreesDir(config), runId, log);
   // Liveness token so a concurrent drain's prune skips this plan worktree.
   writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
 
