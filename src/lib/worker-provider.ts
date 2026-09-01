@@ -6,6 +6,13 @@ import { detectUsageLimitRefusal, type UsageLimitRefusal } from "./classify.js";
 import type { UsageSnapshot } from "./headroom.js";
 import type { Config, WorkerProviderId } from "./config.js";
 import {
+  loadMounts,
+  mountsPath,
+  providerCapabilityForModel,
+  providerModelsForCapability,
+  type Mounts,
+} from "./mounts.js";
+import {
   spawnDetachedGroup,
   teardownProcessGroup,
   withWorkerGroupTeardown,
@@ -196,23 +203,8 @@ interface CodexModelListResult {
   nextCursor?: string | null;
 }
 
-type CodexModelTier = "economy" | "balanced" | "frontier";
-
-const DEFAULT_CODEX_MODELS: Record<CodexModelTier, string[]> = {
-  economy: ["gpt-5.6-luna", "gpt-5.3-codex-spark", "gpt-5.4-mini"],
-  balanced: ["gpt-5.6-terra", "gpt-5.5", "gpt-5.4"],
-  frontier: ["gpt-5.6-sol", "gpt-5.5"],
-};
-
 function normalizedModelName(value: unknown): string {
   return typeof value === "string" ? value.toLowerCase().replace(/[^a-z0-9]/g, "") : "";
-}
-
-function codexTierForRequestedModel(requestedModel: string | undefined): CodexModelTier {
-  const model = requestedModel?.toLowerCase() ?? "";
-  if (model.includes("haiku")) return "economy";
-  if (model.includes("opus")) return "frontier";
-  return "balanced";
 }
 
 function codexBucketForModel(result: CodexRateLimitResult, model: CodexModelInfo): CodexRateLimitBucket | undefined {
@@ -260,19 +252,45 @@ export function selectCodexModel(
   config: Config,
   requestedModel?: string,
   requestedEffort?: string,
+  mounts?: Mounts,
 ): ProviderCapacity {
   const reading = rateLimits && typeof rateLimits === "object" ? rateLimits as CodexRateLimitResult : {};
   const visible = models.filter((model) => !model.hidden && typeof model.id === "string" && model.id !== "");
   const forced = config.workerProviders?.codexModel;
-  const tier = codexTierForRequestedModel(requestedModel);
-  const preferred = forced
-    ? [forced]
-    : [...(config.workerProviders?.codexModels?.[tier] ?? DEFAULT_CODEX_MODELS[tier])];
-  const accountDefault = visible.find((model) => model.isDefault)?.id;
-  if (!forced && accountDefault) preferred.push(accountDefault);
+  let routing: Mounts;
+  let capability: string;
+  const routeModel = requestedModel ?? "sonnet";
+  const routeEffort = requestedEffort ?? "medium";
+  try {
+    routing = mounts ?? loadMounts(mountsPath(process.cwd()));
+    capability = providerCapabilityForModel(routing, "claude", routeModel, routeEffort);
+  } catch (error) {
+    return {
+      provider: "codex",
+      readable: false,
+      windows: [],
+      detail: `Codex capability route is invalid: ${String((error as Error)?.message ?? error)}`,
+    };
+  }
+  const declared = providerModelsForCapability(routing, "codex", capability, routeEffort);
+  const configuredByCapability = config.workerProviders?.codexModels as Record<string, string[]> | undefined;
+  const configured = configuredByCapability?.[capability];
+  if (!forced && configured?.some((model) => !declared.includes(model))) {
+    return {
+      provider: "codex",
+      readable: false,
+      windows: [],
+      detail: `configured Codex model preference is not declared for capability ${capability}/${routeEffort}`,
+    };
+  }
+  const preferred = forced ? [forced] : [...(configured ?? declared)];
   const candidates = [...new Set(preferred)]
     .map((id) => visible.find((model) => model.id === id || model.model === id))
-    .filter((model): model is CodexModelInfo => model !== undefined);
+    .filter((model): model is CodexModelInfo => model !== undefined)
+    .filter((model) => {
+      if (!requestedEffort) return true;
+      return (model.supportedReasoningEfforts ?? []).some((entry) => entry.reasoningEffort === requestedEffort);
+    });
   if (candidates.length === 0) {
     return {
       provider: "codex",
@@ -280,7 +298,7 @@ export function selectCodexModel(
       windows: [],
       detail: forced
         ? `configured Codex model is not available to this account: ${forced}`
-        : `no account-visible Codex model matched the ${tier} preference set`,
+        : `no account-visible Codex model matched capability ${capability}/${routeEffort}`,
     };
   }
   const reserve = config.workerProviders?.reservePercent ?? 5;
@@ -301,7 +319,7 @@ export function selectCodexModel(
     ...selected.capacity,
     model: selected.model.model ?? selected.model.id,
     effort,
-    ...(!eligible ? { readable: false, detail: `${tier} Codex models have no reserved headroom` } : {}),
+    ...(!eligible ? { readable: false, detail: `${capability}/${routeEffort} Codex models have no reserved headroom` } : {}),
   };
 }
 
@@ -311,6 +329,8 @@ export interface CodexCapacityDeps {
   timeoutMs?: number;
   requestedModel?: string;
   requestedEffort?: string;
+  /** Validated provider-neutral routing table. Production loads `config.root/.remudero/mounts.yaml`. */
+  mounts?: Mounts;
   /** Process environment used only for PATH resolution of an unconfigured Codex binary. */
   resolveEnv?: NodeJS.ProcessEnv;
 }
@@ -356,6 +376,44 @@ function codexControlEnv(config: Config): NodeJS.ProcessEnv {
   return env;
 }
 
+function resolveCodexRouting(config: Config, supplied?: Mounts): Mounts {
+  if (supplied) return supplied;
+  try {
+    return loadMounts(mountsPath(config.root));
+  } catch (configuredRootError) {
+    // Direct library callers historically use a synthetic state root while running from the
+    // Remudero checkout. Production's configured root and cwd are the same path; this fallback
+    // preserves those callers without reintroducing any in-code model ladder.
+    const cwdPath = mountsPath(process.cwd());
+    if (cwdPath === mountsPath(config.root)) throw configuredRootError;
+    return loadMounts(cwdPath);
+  }
+}
+
+function selectCodexCapacity(
+  value: CodexRuntimeReading,
+  config: Config,
+  deps: CodexCapacityDeps,
+): ProviderCapacity {
+  try {
+    return selectCodexModel(
+      value.models,
+      value.rateLimits,
+      config,
+      deps.requestedModel,
+      deps.requestedEffort,
+      resolveCodexRouting(config, deps.mounts),
+    );
+  } catch (error) {
+    return {
+      provider: "codex",
+      readable: false,
+      windows: [],
+      detail: `Codex capability table is unreadable: ${String((error as Error)?.message ?? error)}`,
+    };
+  }
+}
+
 /** Read account-visible models and their subscription buckets through one app-server session. */
 export async function readCodexCapacity(config: Config, deps: CodexCapacityDeps = {}): Promise<ProviderCapacity> {
   let bin: string;
@@ -370,7 +428,7 @@ export async function readCodexCapacity(config: Config, deps: CodexCapacityDeps 
   const cached = codexCapacityCache.get(cacheKey);
   const cacheMs = config.workerProviders?.capacityCacheMs ?? 60_000;
   if (cached && now() - cached.at < cacheMs) {
-    return selectCodexModel(cached.value.models, cached.value.rateLimits, config, deps.requestedModel, deps.requestedEffort);
+    return selectCodexCapacity(cached.value, config, deps);
   }
 
   const spawn = deps.spawn ?? ((command, args, options) => spawnChild(command, args, { ...options, stdio: ["pipe", "pipe", "pipe"] }));
@@ -453,7 +511,7 @@ export async function readCodexCapacity(config: Config, deps: CodexCapacityDeps 
   });
   if ("provider" in value) return value;
   codexCapacityCache.set(cacheKey, { at: now(), value });
-  return selectCodexModel(value.models, value.rateLimits, config, deps.requestedModel, deps.requestedEffort);
+  return selectCodexCapacity(value, config, deps);
 }
 
 interface CodexJsonEvent {

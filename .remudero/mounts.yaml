@@ -51,6 +51,35 @@ tiers:
   opus: 3
   claude-opus-5: 4
 
+# ── Provider-neutral capability ladder (W1-T2573) ────────────────────────────
+# Routes continue to name their existing Claude model so every shipped route stays byte-for-byte
+# equivalent. The validated lookup below maps that concrete mount model + effort into one neutral
+# capability, then each enabled provider resolves the same pair to an account-visible model.
+# Declaration order within a provider is preference order; live model/list and rate-limit buckets
+# still decide availability and headroom. Adding or renaming a provider model is a data edit here.
+capabilities:
+  economy: 1
+  balanced: 2
+  frontier: 3
+
+provider_models:
+  claude:
+    haiku:          { capability: economy,  efforts: [low, medium, high] }
+    sonnet:         { capability: balanced, efforts: [low, medium, high] }
+    opus:           { capability: frontier, efforts: [low, medium, high] }
+    claude-opus-5:  { capability: frontier, efforts: [low, medium, high] }
+  codex:
+    # Current Codex families are ordered by their published role: Luna is the economical lane,
+    # Terra the everyday balanced lane, and Sol the frontier lane. Older account-visible fallbacks
+    # remain declared after each preferred family; no TypeScript edit is needed to change this list.
+    gpt-5.6-luna:         { capability: economy,  efforts: [low, medium, high] }
+    gpt-5.3-codex-spark:  { capability: economy,  efforts: [low, high] }
+    gpt-5.4-mini:         { capability: economy,  efforts: [low, medium, high] }
+    gpt-5.6-terra:        { capability: balanced, efforts: [low, medium, high] }
+    gpt-5.5:              { capability: balanced, efforts: [low, medium, high] }
+    gpt-5.4:              { capability: balanced, efforts: [low, medium, high] }
+    gpt-5.6-sol:          { capability: frontier, efforts: [low, medium, high] }
+
 # Effort ordering — same idea for the thinking-effort axis.
 efforts:
   low: 1

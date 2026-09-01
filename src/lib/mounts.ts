@@ -79,6 +79,16 @@ export interface Mount {
   contextBudget: number;
 }
 
+/** One concrete provider model's declared place on the provider-neutral capability axis. */
+export interface ProviderModelCapability {
+  capability: string;
+  /** Mount efforts this model may receive. The live provider model list remains authoritative. */
+  efforts: string[];
+}
+
+/** provider → concrete model id → declared capability/effort support, in preference order. */
+export type ProviderModelCapabilities = Record<string, Record<string, ProviderModelCapability>>;
+
 /** The three synthesis rungs (W1-T2559), exempt from the Tier Invariant — see this file's header. */
 export const SYNTHESIS_ROLES = ["retro", "triage", "inbox_draft"] as const;
 export type SynthesisRole = (typeof SYNTHESIS_ROLES)[number];
@@ -87,6 +97,12 @@ export type SynthesisRole = (typeof SYNTHESIS_ROLES)[number];
 export interface Mounts {
   /** Model-tier ordering; higher rank = higher-thinking mount (config-maintained). */
   tiers: Record<string, number>;
+  /** Provider-neutral capability ordering. Present on the shipped table; optional only so older
+   *  hand-built callers retain their exact model-as-tier behavior. */
+  capabilities?: Record<string, number>;
+  /** Concrete provider models mapped into the capability axis. Declaration order is preference
+   *  order. Present on the shipped table; optional only for legacy hand-built fixtures. */
+  providerModels?: ProviderModelCapabilities;
   /** Effort ordering; higher rank = more thinking effort. */
   efforts: Record<string, number>;
   /** The Architect (main agent) mount — strictly above every worker below. */
@@ -127,6 +143,90 @@ function parseOrdering(raw: unknown, name: string): Record<string, number> {
   return out;
 }
 
+function legacyProviderModels(
+  tiers: Record<string, number>,
+  efforts: Record<string, number>,
+): ProviderModelCapabilities {
+  return {
+    claude: Object.fromEntries(
+      Object.keys(tiers).map((model) => [model, { capability: model, efforts: Object.keys(efforts) }]),
+    ),
+  };
+}
+
+function parseProviderModels(
+  raw: unknown,
+  capabilities: Record<string, number>,
+  efforts: Record<string, number>,
+): ProviderModelCapabilities {
+  if (!isObject(raw)) throw new MountsError("'provider_models' must be a mapping of provider → model → capability declaration.");
+  const providers = Object.keys(raw);
+  if (providers.length === 0) throw new MountsError("'provider_models' must not be empty.");
+  const out: ProviderModelCapabilities = {};
+  for (const provider of providers) {
+    const models = raw[provider];
+    if (!isObject(models) || Object.keys(models).length === 0) {
+      throw new MountsError(`'provider_models.${provider}' must be a non-empty model mapping.`);
+    }
+    out[provider] = {};
+    for (const [model, declaration] of Object.entries(models)) {
+      if (!isObject(declaration)) throw new MountsError(`'provider_models.${provider}.${model}' must be a mapping.`);
+      const capability = declaration.capability;
+      const declaredEfforts = declaration.efforts;
+      if (typeof capability !== "string" || !(capability in capabilities)) {
+        throw new MountsError(
+          `'provider_models.${provider}.${model}.capability' must be one of ${Object.keys(capabilities).join(", ")}, got ${JSON.stringify(capability)}.`,
+        );
+      }
+      if (!Array.isArray(declaredEfforts) || declaredEfforts.length === 0 || declaredEfforts.some((effort) => typeof effort !== "string" || !(effort in efforts))) {
+        throw new MountsError(
+          `'provider_models.${provider}.${model}.efforts' must be a non-empty list drawn from ${Object.keys(efforts).join(", ")}.`,
+        );
+      }
+      if (new Set(declaredEfforts).size !== declaredEfforts.length) {
+        throw new MountsError(`'provider_models.${provider}.${model}.efforts' contains a duplicate effort.`);
+      }
+      out[provider][model] = { capability, efforts: [...declaredEfforts] as string[] };
+    }
+  }
+  for (const required of ["claude", "codex"]) {
+    if (!out[required]) throw new MountsError(`'provider_models.${required}' is required by the cross-provider capability ladder.`);
+  }
+  return out;
+}
+
+/** Resolve a concrete provider model + effort into the provider-neutral capability axis. */
+export function providerCapabilityForModel(
+  mounts: Mounts,
+  provider: string,
+  model: string,
+  effort: string,
+): string {
+  const declaration = mounts.providerModels?.[provider]?.[model];
+  if (declaration) {
+    if (!declaration.efforts.includes(effort)) {
+      throw new MountsError(`provider model '${provider}/${model}' does not declare effort '${effort}'.`);
+    }
+    return declaration.capability;
+  }
+  // Compatibility for older programmatic Mounts values: before W1-T2573 their concrete model
+  // name was itself the only tier axis. The shipped table never takes this branch.
+  if (!mounts.providerModels && model in mounts.tiers && effort in mounts.efforts) return model;
+  throw new MountsError(`provider model '${provider}/${model}' has no declared capability mapping.`);
+}
+
+/** Ordered concrete models declared for one provider at a capability + effort pair. */
+export function providerModelsForCapability(
+  mounts: Mounts,
+  provider: string,
+  capability: string,
+  effort: string,
+): string[] {
+  return Object.entries(mounts.providerModels?.[provider] ?? {})
+    .filter(([, declaration]) => declaration.capability === capability && declaration.efforts.includes(effort))
+    .map(([model]) => model);
+}
+
 /** Validate one mount cell, checking its model/effort resolve in the orderings. */
 function parseMount(
   raw: unknown,
@@ -158,8 +258,11 @@ function parseMount(
  *        ({@link ARCHITECT_EFFORT_FLOOR}) is enforced unconditionally.
  */
 function enforceTierInvariant(m: Mounts, thinkingDefault?: string): void {
-  const architectTier = m.tiers[m.architect.model];
-  const judgeTier = m.tiers[m.judge.model];
+  const capabilities = m.capabilities ?? m.tiers;
+  const architectCapability = providerCapabilityForModel(m, "claude", m.architect.model, m.architect.effort);
+  const judgeCapability = providerCapabilityForModel(m, "claude", m.judge.model, m.judge.effort);
+  const architectTier = capabilities[architectCapability];
+  const judgeTier = capabilities[judgeCapability];
   // architect.tier > max(worker.tier): strict model-tier dominance.
   // judge.tier > max(worker.tier): the Layer-2 flight judge (W1-T21) must ALSO
   // ride strictly above every worker it may supervise — same enforcement shape,
@@ -168,15 +271,16 @@ function enforceTierInvariant(m: Mounts, thinkingDefault?: string): void {
   for (const [type, byRisk] of Object.entries(m.routes)) {
     for (const [risk, byClass] of Object.entries(byRisk)) {
       for (const [cls, mount] of Object.entries(byClass)) {
-        const workerTier = m.tiers[mount.model];
+        const workerCapability = providerCapabilityForModel(m, "claude", mount.model, mount.effort);
+        const workerTier = capabilities[workerCapability];
         if (workerTier >= architectTier) {
           throw new TierInvariantError(
-            `Tier Invariant (G-17) violated: worker routes.${type}.${risk}.${cls} rides '${mount.model}' (tier ${workerTier}) which is not strictly below the Architect '${m.architect.model}' (tier ${architectTier}). The Architect must ride a higher tier than every worker.`,
+            `Tier Invariant (G-17) violated: worker routes.${type}.${risk}.${cls} rides '${mount.model}' at capability '${workerCapability}' (rank ${workerTier}), which is not strictly below the Architect '${m.architect.model}' at capability '${architectCapability}' (rank ${architectTier}). The Architect must ride a higher capability than every worker.`,
           );
         }
         if (workerTier >= judgeTier) {
           throw new TierInvariantError(
-            `Tier Invariant (G-17) violated: worker routes.${type}.${risk}.${cls} rides '${mount.model}' (tier ${workerTier}) which is not strictly below the flight judge '${m.judge.model}' (tier ${judgeTier}). The Layer-2 judge must ride a higher tier than every worker it supervises.`,
+            `Tier Invariant (G-17) violated: worker routes.${type}.${risk}.${cls} rides '${mount.model}' at capability '${workerCapability}' (rank ${workerTier}), which is not strictly below the flight judge '${m.judge.model}' at capability '${judgeCapability}' (rank ${judgeTier}). The Layer-2 judge must ride a higher capability than every worker it supervises.`,
           );
         }
       }
@@ -250,6 +354,10 @@ export function validateMounts(raw: unknown, opts: MountsOptions = {}): Mounts {
   if (!isObject(raw)) throw new MountsError("mounts.yaml must be a mapping.");
   const tiers = parseOrdering(raw.tiers, "tiers");
   const efforts = parseOrdering(raw.efforts, "efforts");
+  const capabilities = raw.capabilities === undefined ? { ...tiers } : parseOrdering(raw.capabilities, "capabilities");
+  const providerModels = raw.provider_models === undefined
+    ? legacyProviderModels(tiers, efforts)
+    : parseProviderModels(raw.provider_models, capabilities, efforts);
   const architect = parseMount(raw.architect, "architect", tiers, efforts);
   const judge = parseMount(raw.judge, "judge", tiers, efforts);
 
@@ -276,7 +384,15 @@ export function validateMounts(raw: unknown, opts: MountsOptions = {}): Mounts {
     }
   }
 
-  const mounts: Mounts = { tiers, efforts, architect, judge, synthesis, routes };
+  const mounts: Mounts = {
+    tiers,
+    efforts,
+    architect,
+    judge,
+    synthesis,
+    routes,
+    ...(raw.provider_models === undefined ? {} : { capabilities, providerModels }),
+  };
   enforceTierInvariant(mounts, opts.thinkingDefault);
   return mounts;
 }
