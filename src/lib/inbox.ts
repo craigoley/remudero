@@ -418,6 +418,11 @@ export function parseDraftAttemptCache(text: string | undefined): DraftAttemptCa
  * control fails. POLICY DATA (rule 2) — a literal here, W1-T252/W1-T253's policy file is its
  * eventual home, the same disposition {@link UNREADABLE_DEGRADED_LIMIT} in lib/headroom.ts records
  * for its own bound.
+ *
+ * The tag above must be the ONLY token in this block that satisfies the gate. `KIND_TAG_RE`
+ * (test/bound-kind-declared.test.ts) matches the upper-case spellings ANYWHERE in the preceding
+ * comment block, so writing the other kind in upper case here would keep this constant passing
+ * even with the tag deleted — which is why "backstop" above is lower case, and must stay that way.
  */
 export const DAEMON_DRAFT_BATCH_CAP = 3;
 

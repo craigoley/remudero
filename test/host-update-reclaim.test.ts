@@ -457,11 +457,16 @@ test("MUTANT: reinstating the omission — no check at all — lets the dead vol
 // checked "the token line is gone" would pass on an invocation missing half the mounts.
 
 /** Run `--print-daemon-run` with both host-side paths pinned, streams merged as a terminal shows. */
-function printWithPaths(stateDir: string, credDir: string, scriptPath = SCRIPT): { out: string; status: number } {
+function printWithPaths(stateDir: string, credDir: string, scriptPath = SCRIPT, codexDir?: string): { out: string; status: number } {
   const r = spawnSync("bash", ["-c", '"$0" --print-daemon-run 2>&1', scriptPath], {
     encoding: "utf8",
     cwd: REPO_ROOT,
-    env: { ...process.env, RMD_STATE_DIR: stateDir, RMD_CLAUDE_DIR: credDir },
+    env: {
+      ...process.env,
+      RMD_STATE_DIR: stateDir,
+      RMD_CLAUDE_DIR: credDir,
+      ...(codexDir ? { RMD_CODEX_DIR: codexDir } : {}),
+    },
   });
   return { out: r.stdout ?? "", status: r.status ?? -1 };
 }
@@ -531,6 +536,23 @@ test("the credential mount is the DIRECTORY and is NOT read-only — :ro can nev
   const run = printWithPaths(dead, cred);
   assert.match(run.out, new RegExp(`-v ${cred.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}:/home/node/\\.claude`));
   assert.doesNotMatch(run.out, /\.claude:ro|\.credentials\.json:/, "must not mount :ro, and must not mount the FILE");
+});
+
+test("an existing Codex home is mounted read-write into the printed daemon invocation", () => {
+  const { dead } = stateFixture();
+  const codex = mkdtempSync(join(tmpdir(), "host-update-codex-"));
+  const run = printWithPaths(dead, credFixture(8 * 3600_000), SCRIPT, codex);
+  assert.match(run.out, new RegExp(`-v ${codex.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}:/home/node/\\.codex`));
+  assert.doesNotMatch(run.out, /\.codex:ro/);
+});
+
+test("an absent Codex home leaves the Claude daemon recipe runnable and creates no empty bind mount", () => {
+  const { dead } = stateFixture();
+  const absent = join(mkdtempSync(join(tmpdir(), "host-update-no-codex-")), "absent");
+  const run = printWithPaths(dead, credFixture(8 * 3600_000), SCRIPT, absent);
+  assert.equal(run.status, 0);
+  assert.match(run.out, /printed daemon stays Claude-only/);
+  assert.doesNotMatch(run.out, /-v .*:\/home\/node\/\.codex/);
 });
 
 test("a bare CLAUDE_CODE_OAUTH_TOKEN is no longer suggested — it authenticates with NO plan context", () => {

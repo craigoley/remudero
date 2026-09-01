@@ -27,8 +27,16 @@ import { homedir } from "node:os";
 import { dirname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { query, type Options, type PermissionMode } from "@anthropic-ai/claude-agent-sdk";
-import { loadConfig, workerHomeDir, workerShell, workerZdotdir, type Config } from "./config.js";
 import { detectUsageLimitRefusal } from "./classify.js";
+import {
+  enabledWorkerProviders,
+  loadConfig,
+  workerHomeDir,
+  workerShell,
+  workerZdotdir,
+  type Config,
+} from "./config.js";
+import { usageSnapshotFromSdk } from "./headroom.js";
 import {
   detectCompactionEvents,
   detectCompactionFailures,
@@ -69,6 +77,14 @@ import {
   type ContainedProcess,
   type ContainedSpawnOptions,
 } from "./worker-containment.js";
+import {
+  claudeCapacityFromUsage,
+  readCodexCapacity,
+  selectWorkerProvider,
+  spawnCodexWorker,
+  type CodexCapacityDeps,
+  type ProviderCapacity,
+} from "./worker-provider.js";
 
 /**
  * Aggregate token usage off the SDK result envelope's `usage` field (verified
@@ -96,6 +112,8 @@ export interface ModelUsageEntry {
 
 /** Structured result of one worker run. */
 export interface WorkerResult {
+  /** Backend that executed this call. Optional only for pre-connector test fixtures. */
+  provider?: "claude" | "codex";
   sessionId: string;
   costUsd: number;
   /**
@@ -421,6 +439,7 @@ export function noPrReportExcerpt(r: Pick<WorkerResult, "text" | "blocks">): str
  * three now ride this one line, so the zero explains itself without a second query.
  */
 export function workerLedgerFields(r: WorkerResult): {
+  provider?: "claude" | "codex";
   model: string;
   effort: string;
   tokens: TokenUsage;
@@ -452,6 +471,7 @@ export function workerLedgerFields(r: WorkerResult): {
           ),
         }
       : {}),
+    ...(r.provider ? { provider: r.provider } : {}),
     model: r.model,
     effort: r.effort,
     tokens: r.tokens,
@@ -968,6 +988,15 @@ export interface SpawnWorkerArgs {
   maxTurns?: number;
   maxBudgetUsd?: number;
   config?: Config;
+  /** Capacity-reader seams for provider-routing tests; production reads both subscriptions live. */
+  providerRouting?: {
+    readClaude?: () => Promise<ProviderCapacity>;
+    readCodex?: (
+      config: Config,
+      request: Pick<CodexCapacityDeps, "requestedModel" | "requestedEffort">,
+    ) => Promise<ProviderCapacity>;
+    tieBreaker?: number;
+  };
   /**
    * Restrict the model's base built-in tool set (SDK `Options.tools`). Unset
    * ⇒ the SDK default (all Claude Code tools). Pass e.g. `["Bash"]` to make a
@@ -1161,8 +1190,58 @@ export interface SpawnWorkerArgs {
   ) => void;
 }
 
+let providerTieBreaker = 0;
+let claudeCapacityCache: { at: number; value: ProviderCapacity } | undefined;
+
+export interface ClaudeCapacityDeps {
+  now?: () => number;
+  openSession?: () => UsageProbeSession;
+}
+
+export function clearClaudeCapacityCache(): void {
+  claudeCapacityCache = undefined;
+}
+
+export async function readClaudeProviderCapacity(
+  config: Config,
+  deps: ClaudeCapacityDeps = {},
+): Promise<ProviderCapacity> {
+  const now = deps.now ?? Date.now;
+  const cacheMs = config.workerProviders?.capacityCacheMs ?? 60_000;
+  if (claudeCapacityCache && now() - claudeCapacityCache.at < cacheMs) return claudeCapacityCache.value;
+  const session = (deps.openSession ?? openUsageProbeSession)();
+  try {
+    const method = session.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET;
+    if (typeof method !== "function") {
+      const value = claudeCapacityFromUsage(undefined);
+      claudeCapacityCache = { at: now(), value };
+      return value;
+    }
+    try {
+      const value = claudeCapacityFromUsage(usageSnapshotFromSdk(await method.call(session) as never));
+      claudeCapacityCache = { at: now(), value };
+      return value;
+    } catch (error) {
+      const value: ProviderCapacity = {
+        provider: "claude",
+        readable: false,
+        windows: [],
+        detail: `capacity read failed: ${String((error as Error)?.message ?? error)}`,
+      };
+      claudeCapacityCache = { at: now(), value };
+      return value;
+    }
+  } finally {
+    try {
+      await session.return?.(undefined);
+    } catch {
+      /* capacity teardown never masks the capacity verdict */
+    }
+  }
+}
+
 /**
- * Spawn one headless Claude Code worker via the Agent SDK.
+ * Spawn one headless Claude Code worker via the Agent SDK, or an opted-in Codex worker.
  *
  * Uses the installed SDK's isolation options as ground truth (SDK 0.3.209):
  *  - `pathToClaudeCodeExecutable` → resolved FRESH at spawn time (W1-T113: env
@@ -1191,6 +1270,45 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
   validateWorkerSettingsFile(args.settingsFile);
 
   const config = args.config ?? loadConfig();
+  const providers = enabledWorkerProviders(config);
+  if (!(providers.length === 1 && providers[0] === "claude")) {
+    const capacities = await Promise.all(
+      providers.map((provider) => {
+        if (provider === "codex") {
+          return (args.providerRouting?.readCodex ?? readCodexCapacity)(config, {
+            requestedModel: args.model,
+            requestedEffort: args.effort,
+          });
+        }
+        return (args.providerRouting?.readClaude ?? (() => readClaudeProviderCapacity(config)))();
+      }),
+    );
+    const selection = selectWorkerProvider(
+      capacities,
+      config.workerProviders?.reservePercent ?? 5,
+      args.providerRouting?.tieBreaker ?? providerTieBreaker++,
+    );
+    console.error(
+      JSON.stringify({
+        event: "worker.provider.selected",
+        provider: selection.provider,
+        tightest_remaining_percent: selection.tightestRemainingPercent,
+        capacities: capacities.map((capacity) => ({
+          provider: capacity.provider,
+          readable: capacity.readable,
+          ...(capacity.model ? { model: capacity.model, effort: capacity.effort } : {}),
+          windows: capacity.windows.map((window) => ({ name: window.name, used_percent: window.usedPercent })),
+          ...(capacity.detail ? { detail: capacity.detail } : {}),
+        })),
+      }),
+    );
+    if (selection.provider === "codex") {
+      assertLiveSpawnAllowed(`spawnCodexWorker for task ${args.taskId ?? "<no taskId>"}`);
+      const result = await spawnCodexWorker(args, config, selection.capacity);
+      result.accountLabel = selection.capacity.accountLabel;
+      return result;
+    }
+  }
   // W1-T113 PREFLIGHT: resolve the real binary FRESH (see resolveClaudeExecutable's
   // doc, above) before any worker-home/keychain work runs. Throws
   // ClaudeToolchainBlockedError — never a raw ENOENT — naming every searched
@@ -1401,7 +1519,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     }
 
     try {
-      return await withWorkerGroupTeardown(
+      const result = await withWorkerGroupTeardown(
         pidRef,
         () =>
           collectWorkerResult(runQuery({ prompt: args.prompt, options }), {
@@ -1437,6 +1555,8 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
           }),
         teardownContained,
       );
+      result.provider = "claude";
+      return result;
     } catch (err) {
       // W1-T1045: runs on EVERY thrown error, but only REPLACES it when the watchdog itself
       // tripped (`abandonment` populated) — any other transport failure passes through

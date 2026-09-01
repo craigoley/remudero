@@ -1,11 +1,11 @@
 # Remudero
 
-**Plan-stewarding orchestration harness for Claude Code.**
+**Plan-stewarding orchestration harness for Claude Code and Codex.**
 
 A durable main agent runs a plan → recon → prompt → implement → review → merge →
-plan-sync loop against headless Claude Code workers in isolated git worktrees,
+plan-sync loop against subscription-backed Claude Code or opt-in Codex workers in isolated git worktrees,
 escalating to the human like a senior engineer would: rarely, batched, with
-options and a recommendation. Open source; runs on a Claude Code subscription;
+options and a recommendation. Provider routing uses only subscriptions with reported reserve headroom;
 GitHub-native.
 
 > **`remudero`** — the wrangler in charge of the *remuda*: the hand who manages

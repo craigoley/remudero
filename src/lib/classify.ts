@@ -97,12 +97,17 @@ export function classifyFailure(signal: FailureSignal): FailureClass {
  * at a STATED WALL-CLOCK TIME, typically tens of minutes out. Retrying one on the other's schedule
  * is what spent MAX_TRANSIENT_RETRIES in 3.5 seconds against a lockout with 57m23s left to run.
  *
- * NARROW BY CONSTRUCTION: these match the refusal's own phrasing, not any prose that happens to
- * mention a limit, so a worker writing ABOUT rate limiting is never classified as refused.
+ * PROVIDER-NEUTRAL AND NARROW BY CONSTRUCTION: these are the exact terminal refusal families
+ * emitted by the pinned Claude and Codex clients, not generic prose that happens to mention a
+ * limit. Callers must still apply this detector only to provider error evidence, never to a
+ * worker's ordinary response text.
  */
 const USAGE_LIMIT_TEXT_PATTERNS: RegExp[] = [
   /you'?ve hit your (?:session|usage) limit/i,
   /(?:session|usage) limit (?:reached|exceeded)\b/i,
+  /your workspace is out of credits\b/i,
+  /you hit your spend cap set (?:in|by the owner of) your workspace\b/i,
+  /to use codex with your chatgpt plan, upgrade to plus\b/i,
 ];
 
 /** Extracted from a usage-limit refusal: what it said, and when it says the window reopens. */

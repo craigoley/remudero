@@ -1,0 +1,14 @@
+# System-managed Codex worker containment. This file is copied root-owned and
+# read-only to /etc/codex/requirements.toml; the runtime uid cannot weaken it.
+# Paths name host mounts or daemon/operator state, never a worker checkout.
+
+[permissions.filesystem]
+deny_read = [
+  "/home/node/.codex/auth.json",
+  "/home/node/.claude",
+  "/home/node/.ssh",
+  "/home/node/.config/gh",
+  "/home/node/.config/remudero",
+  "/home/node/Remudero/state",
+  "/run/secrets",
+]
