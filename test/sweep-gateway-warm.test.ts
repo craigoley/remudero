@@ -309,7 +309,9 @@ test("buildSweepHook builds its board gateway ONCE per daemon start, not once pe
   // optional and trailing — omitted by every caller here, so this test's own behavior is
   // unaffected), so the exact substring gained that one extra option key.
   const ctorIdx = body.indexOf("buildBatchedGithub(owner, repo, { log, pacer })");
-  const returnIdx = body.indexOf("return async () => {");
+  // W1-T2584 added a review-admission callback to the returned closure. The invariant is the
+  // gateway's lifetime relative to that closure, not the closure's current parameter list.
+  const returnIdx = body.indexOf("return async (");
   assert.ok(ctorIdx > 0 && returnIdx > 0, "both landmarks resolve");
   assert.ok(
     ctorIdx < returnIdx,
