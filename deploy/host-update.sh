@@ -372,6 +372,15 @@ ${CODEX_MOUNT_LINE}    -v ${STATE_DIR}:${STATE_MOUNT_DEST} \\
     ${REF} \\
     ./bin/rmd serve
 
+  # W1-T2568: this printed block carries no secret-file mount at all (it never has — neither the
+  # GH_APP_* passthrough nor the account file was ever threaded back here; both landed straight
+  # in deploy/serve-container.sh, the REAL production launcher). The signed GitHub-event wake's
+  # optional secret
+  # (RMD_GITHUB_WEBHOOK_SECRET_PATH -> RMD_GITHUB_WEBHOOK_SECRET_FILE) is armed by THAT script,
+  # not this printed one — see deploy/serve-container.sh and docs/operator-guide.md's webhook
+  # commissioning section. Copy-pasting the block above still boots a console; it just ships the
+  # webhook route dark (a named refusal, never a boot failure) until commissioned the real way.
+
   # STOPPING IT FROM OUTSIDE — no exec, no console, works from a phone. Both are plain files under
   # the state root, which is the host side of the bind mount above.
   #   PAUSE  (soft) new dispatch halts within the poll, in-flight work finishes, container keeps

@@ -1,0 +1,61 @@
+- id: W1-T2597
+  title: "A TEST SHARD CAN FAIL WITH NO `# tests` SUMMARY AND CI REPORTS IT IDENTICALLY TO A REAL FAILURE SET — MEASURED 2026-09-01 on PR #3542: shard 1 produced 161 KB of log, no `# tests`/`# pass`/`# fail` line anywhere, and went straight to `Process completed with exit code 1`, so nothing downstream can tell a run that FAILED from one that never REPORTED, and the fix rung would strike against evidence that does not exist"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 6.00
+  files: [.github/workflows/ci.yml, test/a-shard-that-produced-no-summary-is-not-a-failure-set.test.ts]
+  origin: "operator-brief#shard-without-a-summary-2026-09-01"
+  plan_refs: ["W1-T2595"]
+  status: queued
+  attempts: 0
+  rationale: |
+    ── THE MEASURED INSTANCE ───────────────────────────────────────────────────────────────────
+
+    PR #3542, `ci-shard (1/4)`: 161 KB of log, `##[error]Process completed with exit code 1`, and
+    NO `# tests`, `# pass` or `# fail` line anywhere in it. Its three sibling shards each ended
+    with a complete summary and a named `FLAKE-RETRY` list.
+
+    CLAUDE.md already states the rule this violates, in its own words: *"A test run with no
+    `# tests` summary is NOT A RESULT"* — because a killed or timed-out run prints every assertion
+    it reached and no totals, so its failure set is a SUBSET BY CONSTRUCTION. That discipline is
+    written for a human reading two runs. CI applies no such distinction: exit 1 is exit 1.
+
+    ── WHY IT MATTERS BEYOND THE ONE SHARD ─────────────────────────────────────────────────────
+
+    Everything downstream treats a red shard as a failure SET. `stillRedRequiredNames` (sweep.ts)
+    decides whether the fix rung may act; the rung's ci-log mode reads the log for evidence. Given
+    a run that produced no totals, the rung is reasoning about a truncated or empty set while
+    believing it has the whole one — and its remedy (a fix worker, a strike) is priced as though
+    the failure were understood.
+
+    ⚠ IT IS ALSO INVISIBLE TO THE OPERATOR AT A GLANCE. The check name, the colour and the exit
+    code are identical. Only opening the log and noticing an ABSENCE distinguishes them, which is
+    the hardest thing for a reader to notice and the easiest for an automated one to skip.
+
+    ── A SECOND, SMALLER QUESTION TO SETTLE IN THE SAME PASS ───────────────────────────────────
+
+    MEASURED on #3535: `ci-shard (3/4)` and `ci-shard (4/4)` reported IDENTICAL eight-test
+    `FLAKE-RETRY` lists, and #3530 showed the same duplication across shards 1 and 4. Two readings
+    fit and they have different consequences: either the same suites execute in more than one
+    shard (wasted wall-clock, and a sharding split that is not disjoint), or the retry harness
+    reports the matrix-wide union rather than the shard's own (a reporting artifact, harmless but
+    misleading to anyone sizing the shards). Establish which BEFORE anyone tunes the split.
+
+    ⚠ AND DO NOT FAIL A SHARD MERELY FOR REPORTING NOTHING WHEN IT LEGITIMATELY RAN NOTHING. A
+    shard whose slice is empty is a valid state; the property is that a shard which EXECUTED tests
+    must emit totals, not that every shard must always emit them.
+
+    NOT IN SCOPE: the census family's author-time timing (W1-T2595), the escape-hatch class
+    (W1-T2596), and any change to how many shards the matrix runs.
+
+  acceptance:
+    - claim: "a shard that executed tests but emitted no totals is distinguished from one that reported a genuine failure set, rather than both surfacing as the same red"
+      proof: "unit test: test/a-shard-that-produced-no-summary-is-not-a-failure-set.test.ts"
+    - claim: "a shard whose slice legitimately ran nothing is not failed for reporting nothing"
+      proof: "unit test: test/a-shard-that-produced-no-summary-is-not-a-failure-set.test.ts"
+    - claim: "the duplicate failure lists across shards are attributed to either a non-disjoint split or a union-reporting retry harness, on evidence rather than assumption"
+      proof: "unit test: test/a-shard-that-produced-no-summary-is-not-a-failure-set.test.ts"

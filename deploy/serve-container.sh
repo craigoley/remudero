@@ -69,6 +69,7 @@
 #   TAG=<sha> ./deploy/serve-container.sh          # pin a build instead of :latest
 #   RMD_STATE_DIR=/path ./deploy/serve-container.sh    # if the bind mount is not the daemon's
 #   RMD_CLAUDE_JSON_PATH=/path ./deploy/serve-container.sh   # if ~/.claude.json is not the host's
+#   RMD_GITHUB_WEBHOOK_SECRET_PATH=/path ./deploy/serve-container.sh   # arm POST /v1/hooks/github
 #
 # W1-T2434: THE ACCOUNT FILE, MOUNTED READ-ONLY AND WIRED THROUGH THE SEAM W1-T997 ALREADY BUILT.
 # `readAccountUsageFile` (src/lib/account-usage.ts) reads `~/.claude.json` for the console's
@@ -86,6 +87,18 @@
 # NOT REFUSED: a host with no `.claude.json` yet starts and serves exactly as before this task,
 # with the ACCOUNT strip reading "unknown" rather than the console failing to boot over a
 # telemetry-only reading.
+#
+# W1-T2568: THE GITHUB WEBHOOK SECRET, MOUNTED READ-ONLY, SERVE ONLY, NEVER PRINTED (design vii).
+# `src/lib/github-event-wake.ts`'s `POST /v1/hooks/github` verifies GitHub's `X-Hub-Signature-256`
+# against a secret this script mounts read-only from the host — the SAME "mounted read-only when
+# present, never refused when absent" shape section 4c above already uses for the account file,
+# because the two failure modes are identical: a host that has not (yet) provisioned the file must
+# still boot and serve exactly as before this task, with the webhook route shipping dark (a named
+# `webhook_not_configured` refusal, never a boot failure). MOUNTED INTO THIS CONTAINER ONLY —
+# `remudero-daemon` (recycle-container.sh) and every worker/task container never receive it: the
+# daemon consumes the WAKE MARKER the shared state mount already carries, never the secret itself,
+# and a worker has no legitimate reason to hold a credential that authenticates GitHub TO this
+# fleet rather than this fleet to GitHub.
 set -euo pipefail
 
 REGISTRY="${REGISTRY:-synthwatcholey0620}"
@@ -105,6 +118,13 @@ STATE_MOUNT_DEST="/home/node/Remudero"
 # without either retyping the other's default.
 CLAUDE_JSON_PATH="${RMD_CLAUDE_JSON_PATH:-${HOME:-/root}/.claude.json}"
 CLAUDE_JSON_MOUNT_DEST="/home/node/.claude.json"
+# W1-T2568: the GitHub webhook secret — see the header note above. No default host path (unlike
+# CLAUDE_JSON_PATH's `~/.claude.json` guess): a webhook secret has no conventional dotfile
+# location, so this is opt-in ONLY, via an explicit RMD_GITHUB_WEBHOOK_SECRET_PATH — an empty
+# value here is the "not yet provisioned" state, checked the same way CLAUDE_JSON_PATH's `-f`
+# test is below.
+GITHUB_WEBHOOK_SECRET_PATH="${RMD_GITHUB_WEBHOOK_SECRET_PATH:-}"
+GITHUB_WEBHOOK_SECRET_MOUNT_DEST="/home/node/.rmd-github-webhook-secret"
 SERVE_PORT="${RMD_SERVE_PORT:-4317}"
 # The pair from part 1 of the header. Both are named here, next to each other, so a future edit
 # cannot drop one and leave a launch that boots and binds the wrong interface.
@@ -256,6 +276,21 @@ else
   echo "  if the operator's ~/.claude.json lives somewhere else on this host." >&2
 fi
 
+# ── 4d. THE GITHUB WEBHOOK SECRET — MOUNTED READ-ONLY WHEN PRESENT, NEVER REFUSED WHEN ABSENT
+# (W1-T2568) — see the header note. `-f`, matching the account-file check above: a regular file,
+# never a directory. Reports PRESENCE only — the content is never echoed by this script, by
+# `rmd serve`'s own boot banner, or by any ledger line `github-event-wake.ts` writes.
+GITHUB_WEBHOOK_SECRET_ARGS=()
+if [ -n "${GITHUB_WEBHOOK_SECRET_PATH}" ] && [ -f "${GITHUB_WEBHOOK_SECRET_PATH}" ]; then
+  GITHUB_WEBHOOK_SECRET_ARGS=(-v "${GITHUB_WEBHOOK_SECRET_PATH}:${GITHUB_WEBHOOK_SECRET_MOUNT_DEST}:ro" -e "RMD_GITHUB_WEBHOOK_SECRET_FILE=${GITHUB_WEBHOOK_SECRET_MOUNT_DEST}")
+  echo "serve-container: github webhook secret ${GITHUB_WEBHOOK_SECRET_PATH} -> ${GITHUB_WEBHOOK_SECRET_MOUNT_DEST} (read-only, content never printed)"
+else
+  echo "serve-container: NOTE — no github webhook secret mounted; POST /v1/hooks/github ships dark (webhook_not_configured)." >&2
+  echo "  Not a refusal: the console starts and serves exactly as before this task. Set" >&2
+  echo "  RMD_GITHUB_WEBHOOK_SECRET_PATH to a host file to arm the GitHub-event wake — see" >&2
+  echo "  docs/operator-guide.md's webhook commissioning section." >&2
+fi
+
 # ── 5. AN EXISTING CONTAINER IS NEVER SILENTLY REPLACED ─────────────────────────────────────────
 # Replacing the console is a deliberate act: it is frequently the only surface an operator has on a
 # fleet they are away from, and this script is also the natural thing to re-run "just to check".
@@ -293,6 +328,9 @@ RUN_ARGS=(
   # one host state it was written to tolerate. The production host is bash 5.2.21 (measured) where
   # either form works; this one works on both.
   "${ACCOUNT_FILE_ARGS[@]+"${ACCOUNT_FILE_ARGS[@]}"}"
+  # W1-T2568: same bash-3.2-safe empty-array form as ACCOUNT_FILE_ARGS immediately above — see
+  # that splice's own comment for why the bare `"${ARR[@]}"` form is unsafe under `set -u`.
+  "${GITHUB_WEBHOOK_SECRET_ARGS[@]+"${GITHUB_WEBHOOK_SECRET_ARGS[@]}"}"
   "${REF}"
   ./bin/rmd serve --host "${SERVE_BIND_HOST}"
 )
