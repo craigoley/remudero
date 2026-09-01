@@ -31,6 +31,7 @@ import {
 } from "../src/lib/task-linter.js";
 import { loadPlan, loadPlanFromYaml, type Plan, type Task } from "../src/lib/plan.js";
 import { nextRunnable, type MergedSet } from "../src/lib/drain.js";
+import { importsModule } from "./helpers/import-sweep.js";
 
 /** A minimal, otherwise-clean Task fixture — every test overrides only what it needs. */
 function task(over: Partial<Task> & { id: string }): Task {
@@ -1480,7 +1481,9 @@ test("W1-T180: an amended task whose derived status is NOT merged (still open/qu
 
 test("W1-T180 ACCEPTANCE 5: the check stays PURE — task-linter.ts imports neither status.ts nor any gh/exec surface", () => {
   const src = readFileSync(fileURLToPath(new URL("../src/lib/task-linter.ts", import.meta.url)), "utf8");
-  assert.ok(!/from ["']\.\/status\.js["']/.test(src), "must not import lib/status.ts");
+  // W1-T2531: resolved through the shared any-import-form predicate, not a static `from`-only
+  // regex -- a `await import("./status.js")` reaching the same module must refuse too.
+  assert.ok(!importsModule(src, /(^|\/)status\.js$/), "must not import lib/status.ts");
   assert.ok(!/node:child_process/.test(src), "must not import an exec surface");
   // and it is reachable purely through injection: merge state supplied via LintOpts,
   // never fetched by the check itself.
