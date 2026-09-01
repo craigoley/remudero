@@ -1757,6 +1757,42 @@ async function sweepLightDuringRetro(
  * own ticker (started BY a full-sweep call, below) never does, so a retrigger can never
  * re-enter the sweep it exists to keep light while it runs.
  */
+/**
+ * W1-T2565: the MOST STALE the account-headroom reading may be before the in-flight ticker takes
+ * one of its own.
+ *
+ * THE GOVERNOR SAMPLED ON THE LOOP WHOSE DURATION IT WAS MEANT TO BOUND. `daemon.headroom` is
+ * written once per `runOne` iteration, and the read sits AFTER `runGatedSweep` — the sweep that
+ * carries the inbox-draft rung, the fleet's largest single spender. So the more a tick spent, the
+ * longer until the next reading: sampling rate was inversely coupled to spend, which is exactly
+ * backwards.
+ *
+ * MEASURED 2026-09-01 over the three-form union: `daemon.headroom` gaps run median 158s but p95
+ * 4,400s and max 21,586s (SIX HOURS). In one 58-minute window (09:17:25 -> 10:15:26) the account
+ * went from 30% used to exhausted with the governor holding its last value throughout — 472 of the
+ * period's session-limit refusals resolve to that single stale 30% reading, and no
+ * `usage.probe_failed` row was written either, so it was silent rather than loudly failing.
+ *
+ * THE CADENCE ALREADY EXISTED AND ONE SIGNAL WAS ALREADY RIDING IT. {@link startInFlightTicker}
+ * runs every `pollIntervalMs` for the whole of a long dispatch/retro/sweep phase and already reads
+ * DISK headroom on that cadence, latch and all. MEASURED across that same 58-minute window: 43
+ * ticker passes, 43 of them carrying `disk_free_bytes`, ZERO carrying an account reading. Nothing
+ * had to be built to make sampling possible — the account signal simply was not wired to it.
+ *
+ * AND THE PROBE IS FREE, so there is no cost argument for the sparse cadence: `openUsageProbeSession`
+ * opens a control-only SDK session over `emptyUsagePrompt`, an async generator that yields NOTHING.
+ * Zero of 2,069 headroom/probe rows in the union carry a cost, against 4,332 rows that do.
+ *
+ * 300s, not `pollIntervalMs`: this BOUNDS staleness rather than setting a rate. The main loop still
+ * takes the authoritative per-tick reading and the enforcement decision; this only guarantees that
+ * when a tick runs long, the gap between readings stays minutes rather than hours. A tick that
+ * completes normally re-reads before this ever elapses, so on a healthy fleet it fires never.
+ *
+ * POLICY DATA (rule 2) — a literal here, the same disposition `UNREADABLE_DEGRADED_LIMIT`
+ * (lib/headroom.ts) records for its own bound.
+ */
+export const HEADROOM_SAMPLE_MAX_AGE_MS = 300_000;
+
 function startInFlightTicker(
   deps: DaemonDeps,
   pollIntervalMs: number,
@@ -1764,6 +1800,10 @@ function startInFlightTicker(
   phase: "dispatch" | "retro" | "sweep",
   diskHeadroomLatch: { escalated: boolean },
   sweepRetrigger?: SweepRetrigger,
+  // W1-T2565: the LAST account-headroom sample's wall clock, shared with the main loop so the two
+  // samplers cannot double-read. Optional and trailing, so every existing call site (tests
+  // included) is unchanged and simply gets no in-flight sampling.
+  headroomSampler?: { lastSampleMs: number; now: () => number; policy: HeadroomPolicy; enforced: boolean },
 ): { stop: () => Promise<void> } {
   let active = true;
   const ticker = deps.sweepLight
@@ -1796,6 +1836,46 @@ function startInFlightTicker(
             ...(holdSeen !== undefined ? { pause_seen: holdSeen } : {}),
             ...(diskHeadroom?.freeBytes !== undefined ? { disk_free_bytes: diskHeadroom.freeBytes } : {}),
           });
+          // W1-T2565: SAMPLE ACCOUNT HEADROOM WHEN THE LAST READING HAS GONE STALE. Placed AFTER
+          // the `daemon.alive` write on purpose: this tick's liveness heartbeat is already on the
+          // ledger before the probe is awaited, so a slow or hanging probe can delay the NEXT
+          // heartbeat but can never swallow this one. Wrapped in its own try/catch and gated on
+          // `readUsage` being wired at all, so an absent or throwing probe costs one skipped
+          // sample, never the ticker — the identical best-effort discipline the disk read above
+          // already follows.
+          //
+          // TELEMETRY, NOT ENFORCEMENT — deliberately. A reading taken here cannot abort work
+          // already in flight, and the main loop remains the single place that decides to idle.
+          // What this changes is that the decision, the console and every `daemon.headroom`
+          // consumer stop reading an hours-old number.
+          if (headroomSampler && deps.readUsage) {
+            const nowMs = headroomSampler.now();
+            if (nowMs - headroomSampler.lastSampleMs >= HEADROOM_SAMPLE_MAX_AGE_MS) {
+              headroomSampler.lastSampleMs = nowMs;
+              try {
+                const snap = await deps.readUsage();
+                const reading = snap ? resolveHeadroomWindows(snap, new Date(nowMs), headroomSampler.policy)[0] : undefined;
+                if (reading) {
+                  log("daemon.headroom", {
+                    phase,
+                    window: reading.window,
+                    percent_used: reading.percentUsed,
+                    limit_pct: reading.limitPct,
+                    resets_at: reading.resetsAtDisplay,
+                    enforced: headroomSampler.enforced,
+                    over_ceiling: reading.percentUsed >= reading.limitPct,
+                    poll_interval_ms: pollIntervalMs,
+                    source: "in-flight",
+                  });
+                }
+              } catch {
+                // An unreadable probe is an ABSENT sample, never a fabricated one — the same
+                // fail-soft contract `readUsage`'s own callers keep. The main loop's consecutive-
+                // unreadable counter is deliberately NOT touched from here: this sampler must not
+                // be able to push the governor into degraded mode on its own.
+              }
+            }
+          }
           // UNREADABLE (`freeBytes === undefined`) NEVER ESCALATES — an absent read is not
           // evidence of a full disk, and treating it as one would page an operator over a
           // transient `statfs` blip rather than an actual breach (design (ii)/(iv)).
@@ -1924,8 +2004,13 @@ async function runGatedSweep(
   sweepWallClockBoundMs: number,
   log: (step: string, extra?: Record<string, unknown>) => void,
   diskHeadroomLatch: { escalated: boolean },
+  // W1-T2565: threaded to the sweep's OWN ticker. THE SWEEP IS THE PHASE THAT MOTIVATED THIS —
+  // it carries the inbox-draft rung, and the measured 58-minute headroom blind window was a sweep
+  // running long while the account went from 30% used to exhausted. Optional and trailing so every
+  // existing caller and test is unchanged.
+  headroomSampler?: { lastSampleMs: number; now: () => number; policy: HeadroomPolicy; enforced: boolean },
 ): Promise<void> {
-  const stopSweepTicker = startInFlightTicker(deps, pollIntervalMs, log, "sweep", diskHeadroomLatch).stop;
+  const stopSweepTicker = startInFlightTicker(deps, pollIntervalMs, log, "sweep", diskHeadroomLatch, undefined, headroomSampler).stop;
   try {
     const sweepPromise: Promise<void | undefined> = Promise.resolve().then(() => deps.sweep!());
     const startedAtMs = Date.now();
@@ -2626,6 +2711,11 @@ export async function runDaemon(
   // passes the host posture resolved from config/env — also default TRUE since the
   // 2026-07-25 ruling, with this host opting out via `headroom.enabled: false`.
   const headroomEnabled = opts.headroomEnabled ?? true;
+  // W1-T2565: ONE sampler state shared by the main loop and every in-flight ticker, so the two can
+  // never double-read and the staleness bound is measured against whichever of them read last.
+  // Seeded to 0 so the first long phase after boot samples immediately rather than waiting out
+  // HEADROOM_SAMPLE_MAX_AGE_MS on a governor that has never read at all.
+  const headroomSampler = { lastSampleMs: 0, now: () => now().getTime(), policy: headroomPolicy, enforced: headroomEnabled };
   const unreadableDegradedLimit = opts.unreadableDegradedLimit ?? DEFAULT_UNREADABLE_DEGRADED_LIMIT;
   const parkCeilingMs = opts.headroomParkCeilingMs ?? HEADROOM_PARK_CEILING_MS;
   const now = deps.now ?? (() => new Date());
@@ -2904,7 +2994,7 @@ export async function runDaemon(
       // still fires unconditionally afterward (design (iii): the restart stays).
       if (deps.sweep) {
         sweepRetriggerState.lastRunAtMs = now().getTime();
-        await runGatedSweep(deps, pollIntervalMs, sweepWallClockBoundMs, log, diskHeadroomLatch);
+        await runGatedSweep(deps, pollIntervalMs, sweepWallClockBoundMs, log, diskHeadroomLatch, headroomSampler);
       }
       const detail =
         `origin/main advanced ${freshness.oldSha.slice(0, 7)}..${freshness.newSha.slice(0, 7)} ` +
@@ -2963,7 +3053,7 @@ export async function runDaemon(
     // check (below, in `startInFlightTicker`) measures from whichever call actually ran last.
     if (deps.sweep) {
       sweepRetriggerState.lastRunAtMs = now().getTime();
-      await runGatedSweep(deps, pollIntervalMs, sweepWallClockBoundMs, log, diskHeadroomLatch);
+      await runGatedSweep(deps, pollIntervalMs, sweepWallClockBoundMs, log, diskHeadroomLatch, headroomSampler);
     }
 
     // ORPHAN SWEEP (W1-T117 design part ii): runs alongside the PR-pipeline
@@ -3148,6 +3238,12 @@ export async function runDaemon(
     // (`headroomPolicy`, resolved once above): on a window's final day it
     // relaxes toward 100%, since anything unspent is destroyed at reset.
     if (deps.readUsage) {
+      // W1-T2565: the authoritative per-tick read STAMPS the shared sampler, so an in-flight
+      // ticker starting immediately after it waits out the full staleness bound instead of
+      // re-probing seconds later. Stamped before the `if (snap)` guard because an UNREADABLE read
+      // is still an attempt — leaving it unstamped would let a failing probe be retried by the
+      // ticker on every single pass.
+      headroomSampler.lastSampleMs = now().getTime();
       const snap = await deps.readUsage();
       if (snap) {
         // A GOOD read clears the degraded-mode counter — only CONSECUTIVE
@@ -3938,7 +4034,7 @@ export async function runDaemon(
     // aborted mid-call (a sweepLight() already in flight is allowed to finish before
     // the ticker stops). It also emits this dispatch's `daemon.alive` liveness rows —
     // see {@link startInFlightTicker} for why that row exists and why it is prefixed.
-    const stopTicker = startInFlightTicker(deps, pollIntervalMs, log, "dispatch", diskHeadroomLatch, sweepRetrigger).stop;
+    const stopTicker = startInFlightTicker(deps, pollIntervalMs, log, "dispatch", diskHeadroomLatch, sweepRetrigger, headroomSampler).stop;
 
     // CONCURRENT DISPATCH (W1-T343, mirrors `runDrainLanes` exactly): `allSettled`, never
     // `all` — a sibling lane's rejection must never abort another lane already in flight;

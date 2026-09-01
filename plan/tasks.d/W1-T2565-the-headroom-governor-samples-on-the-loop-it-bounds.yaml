@@ -1,0 +1,89 @@
+- id: W1-T2565
+  title: "THE HEADROOM GOVERNOR SAMPLES ON THE VERY LOOP WHOSE DURATION IT IS MEANT TO BOUND — daemon.headroom is written once per runOne iteration and the readUsage call sits AFTER runGatedSweep, the sweep carrying the inbox-draft rung, so the more a tick spends the longer until the next reading and the sampling rate is inversely coupled to spend; MEASURED over the three-form union: gaps run median 158s but p95 4,400s and max 21,586s, and across one 58-minute window the account went 30% used to exhausted with the governor holding its last value while 43 in-flight ticker passes carried a DISK reading and ZERO carried an account one"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 15.00
+  files: [src/lib/daemon.ts, test/headroom-blind-window.test.ts]
+  origin: "operator-brief#fix-the-headroom-blind-window-2026-09-01"
+  plan_refs: ["W1-T2564", "W1-T1082", "W1-T2561"]
+  status: queued
+  attempts: 0
+  rationale: |
+    ── THE MECHANISM, MEASURED RATHER THAN ASSUMED ──────────────────────────────────────────────
+
+    The obvious reading of a headroom gap is a FAILING PROBE. It is not that. Across the measured
+    58-minute window (2026-09-01 09:17:25 -> 10:15:26) `usage.probe_failed` reads ZERO — the
+    governor was silent, not loudly failing.
+
+    THE LOOPS ARE THE ANSWER. In that window `sweep.pass` fired 200 times and `daemon.alive` 43
+    times, while `daemon.tick` fired TWICE and `daemon.headroom` twice. The spending rungs ride the
+    sweep; the governor rides the dispatch tick. Reading the loop body settles why:
+    `log("daemon.tick")` is followed by `await runGatedSweep(...)` and only THEN by
+    `const snap = await deps.readUsage()`. The governor's sample sits DOWNSTREAM of the tick's own
+    spending, so a tick that spends for an hour is a reading an hour late.
+
+    THAT IS THE DEFECT IN ONE SENTENCE: THE SAMPLING RATE IS INVERSELY COUPLED TO THE SPEND IT
+    EXISTS TO BOUND. Across the whole retained corpus `daemon.headroom` gaps run median 158s, p95
+    4,400s and max 21,586s (SIX HOURS), so the blind window is typical rather than exceptional.
+
+    ── WHY THE FIX IS SMALL: THE CADENCE AND THE PRECEDENT BOTH ALREADY EXIST ───────────────────
+
+    `startInFlightTicker` already runs every `pollIntervalMs` for the WHOLE of a long
+    dispatch/retro/sweep phase, already writes `daemon.alive`, and ALREADY SAMPLES DISK HEADROOM
+    there with its own latch (W1-T1082). MEASURED across the same 58-minute window: 43 ticker
+    passes, 43 carrying `disk_free_bytes`, ZERO carrying an account reading. Nothing had to be
+    built to make sampling possible — the account signal simply was not wired to the cadence its
+    sibling already used.
+
+    ⚠ AND THE PROBE IS FREE, WHICH REMOVES THE ONLY DEFENSIBLE REASON FOR THE SPARSE CADENCE.
+    `openUsageProbeSession` opens a control-only SDK session over `emptyUsagePrompt` — an async
+    generator that yields NOTHING. Zero of 2,069 headroom/probe rows across the union carry a cost,
+    against a control of 4,332 rows that do. This was checked BEFORE the fix was chosen, because a
+    paid probe would have made "sample more often" the wrong answer.
+
+    ── WHAT THIS IS AND IS NOT ─────────────────────────────────────────────────────────────────
+
+    A STALENESS BOUND, NOT A RATE. `HEADROOM_SAMPLE_MAX_AGE_MS` (300s) makes the ticker take a
+    reading only when the last one has aged past it. One shared sampler state is stamped by BOTH
+    the main loop and the ticker, so the two can never double-read; the main loop stamps BEFORE its
+    `if (snap)` guard, because an unreadable read is still an attempt and leaving it unstamped would
+    let a failing probe be re-tried on every ticker pass. On a fleet whose ticks complete normally
+    the main loop re-reads first and this fires NEVER — which its own test asserts, so the bound
+    cannot silently become a per-tick probe storm.
+
+    TELEMETRY, NOT ENFORCEMENT, AND DELIBERATELY SO. A reading taken mid-sweep cannot abort work
+    already in flight, and the main loop stays the single place that decides to idle. What changes
+    is that the decision, the console and every `daemon.headroom` consumer (status-board.ts,
+    account-usage.ts, run-task.ts) stop reading an hours-old number. The row carries `source:
+    "in-flight"` and the phase so a reader can tell the two samplers apart.
+
+    ⚠ AND IT MUST NOT BE ABLE TO DEGRADE THE GOVERNOR ON ITS OWN. The sampler never touches
+    `consecutiveUnreadable`, so it can neither push the daemon into degraded mode nor clear a park
+    episode; a throwing probe is swallowed and costs exactly one skipped sample. The sample is taken
+    AFTER the `daemon.alive` write, so a slow probe can delay the NEXT heartbeat but can never
+    swallow the one already on the ledger.
+
+    ── OUT OF SCOPE, NAMED SO IT IS NOT REDISCOVERED ───────────────────────────────────────────
+
+    ⚠ THE MAIN LOOP'S OWN `await deps.readUsage()` IS UNGUARDED, on origin/main and still. A
+    throwing probe there takes the daemon loop down. Found while writing this task's own
+    throwing-probe test, which had to let the FIRST call succeed to isolate the ticker arm. It is a
+    genuine defect, it is NOT this task's, and widening scope to it here would bundle two concerns
+    with two different falsifiers.
+
+    Also untouched: the enforcement path (`enforcingIdle`, the park ceiling, `headroomExhausted`),
+    the disk-headroom latch, and `pollIntervalMs` itself.
+
+  acceptance:
+    - claim: "a long in-flight phase produces headroom readings instead of going blind for its whole duration"
+      proof: "unit test: test/headroom-blind-window.test.ts"
+    - claim: "a phase shorter than the staleness bound is not sampled, so this bounds staleness rather than setting a rate"
+      proof: "unit test: test/headroom-blind-window.test.ts"
+    - claim: "a throwing probe costs one skipped sample and never the liveness heartbeat"
+      proof: "unit test: test/headroom-blind-window.test.ts"
+    - claim: "a daemon with no usage probe wired samples nothing and still ticks"
+      proof: "unit test: test/headroom-blind-window.test.ts"

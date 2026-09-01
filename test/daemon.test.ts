@@ -3131,15 +3131,28 @@ test("W1-T513: a third startInFlightTicker call site now exists (retro, dispatch
     /startInFlightTicker\(deps, pollIntervalMs, log, "retro", diskHeadroomLatch, sweepRetrigger\)/,
     "the retro call site threads sweepRetrigger",
   );
+  // W1-T2565: both regexes now tolerate a TRAILING argument after the ones they pin, because the
+  // in-flight headroom sampler is threaded to "dispatch" and "sweep" as a 7th positional. What each
+  // assertion CLAIMS is unchanged and still exact — "dispatch" threads sweepRetrigger in the 6th
+  // slot, "sweep" passes `undefined` there and so still never receives one. Widening to `.*` would
+  // have let a real sweepRetrigger slip into the sweep site unnoticed, which is the whole point of
+  // the second assertion; `undefined` is matched literally instead.
   assert.match(
     daemonSrc,
-    /startInFlightTicker\(deps, pollIntervalMs, log, "dispatch", diskHeadroomLatch, sweepRetrigger\)\.stop/,
+    /startInFlightTicker\(deps, pollIntervalMs, log, "dispatch", diskHeadroomLatch, sweepRetrigger(, headroomSampler)?\)\.stop/,
     "the dispatch call site threads sweepRetrigger",
   );
   assert.match(
     daemonSrc,
-    /startInFlightTicker\(deps, pollIntervalMs, log, "sweep", diskHeadroomLatch\)\.stop/,
+    /startInFlightTicker\(deps, pollIntervalMs, log, "sweep", diskHeadroomLatch(, undefined, headroomSampler)?\)\.stop/,
     "the sweep-phase call site NEVER threads sweepRetrigger — it must not re-enter itself",
+  );
+  // W1-T2565: and the claim above is now ALSO pinned positively rather than only by the absence of
+  // the word — the sweep site must pass `undefined` in sweepRetrigger's own slot.
+  assert.doesNotMatch(
+    daemonSrc,
+    /startInFlightTicker\(deps, pollIntervalMs, log, "sweep", diskHeadroomLatch, sweepRetrigger/,
+    "the sweep ticker must never be handed a real sweepRetrigger, whatever follows it",
   );
 });
 
