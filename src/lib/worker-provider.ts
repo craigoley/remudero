@@ -533,6 +533,7 @@ function physicalPath(path: string): string {
   try {
     return realpathSync(path);
   } catch (error) {
+    // A not-yet-created path still has a lexical absolute form; callers separately check scope.
     return resolve(path);
   }
 }
@@ -559,6 +560,7 @@ export function codexGitWritableRoots(cwd: string, configRoot: string): string[]
     return [...new Set(output.split("\n").map((line) => line.trim()).filter(Boolean).map(physicalPath))]
       .filter((candidate) => isWithin(root, candidate));
   } catch (error) {
+    // A non-repository or unreadable Git layout earns no extra writable root, never a broad grant.
     return [];
   }
 }
