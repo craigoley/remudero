@@ -11,6 +11,14 @@ import {
   type WhitelistedProof,
 } from "./review.js";
 import {
+  COMPANION_PATH_CLASSES,
+  GENERATED_LEDGER_CLASSES,
+  isCompanionPath,
+  type CompanionPathClass,
+} from "./companion-paths.js";
+// Re-exported so every pre-existing importer of task-linter.ts is byte-identical (W1-T2547).
+export { COMPANION_PATH_CLASSES, GENERATED_LEDGER_CLASSES, isCompanionPath, type CompanionPathClass };
+import {
   bestNearDuplicate,
   DEFAULT_DUPLICATE_CUTOFF,
   DEFAULT_SHINGLE_K,
@@ -171,40 +179,6 @@ export const DATA_ARTIFACT_CLASSES: ReadonlyArray<DataArtifactClass> = [
   { tag: "settings-data", pathPattern: /^settings\//, extPattern: /\.(?:ya?ml|json|md)$/i },
 ];
 
-/**
- * W1-T2543 — COMPANION path classes: a path that is not a concern OF ITS OWN when the task also
- * declares the thing it accompanies. Distinct from {@link DATA_ARTIFACT_CLASSES}, which discounts
- * unconditionally: a companion is discounted ONLY while some non-companion file survives, so a
- * task declaring nothing but companions still counts them and never scores zero concerns.
- *
- * WHY THIS EXISTS, MEASURED ON THIS TREE. `moduleIdFromPath` derives a concern id from a BASENAME,
- * and naming a suite after the claim it proves rather than the module it covers is the house
- * convention here — 747 of 865 test files (86.3%) carry a basename matching no `src/` module. So a
- * change to `src/lib/X.ts` plus the suite written to test it scored TWO concerns roughly six times
- * in seven, and Rule 19 refused it at risk:medium. The advisory rubric fired the same way on two
- * PRs within one hour (#3400 `sweep`/`sweep-conflicted-disposition`, #3403 `daemon`/
- * `entrypoint-boot`), and an arm that fires on nearly every well-formed PR trains its readers to
- * skim past it — which is where a REAL finding is lost.
- *
- * THIS DOES NOT WEAKEN RULE 19. Only the companion is discounted; every SOURCE stem still counts,
- * so a task genuinely spanning two subsystems still scores two and still reports.
- */
-export interface CompanionPathClass {
-  tag: string;
-  pathPattern: RegExp;
-}
-
-export const COMPANION_PATH_CLASSES: ReadonlyArray<CompanionPathClass> = [
-  { tag: "test-suite", pathPattern: /^test\// },
-];
-
-/** True iff `path` belongs to some companion class — see {@link COMPANION_PATH_CLASSES}. */
-export function isCompanionPath(
-  path: string,
-  classes: ReadonlyArray<CompanionPathClass> = COMPANION_PATH_CLASSES,
-): boolean {
-  return classes.some((c) => c.pathPattern.test(path));
-}
 /** True iff `path` matches BOTH the path prefix and the extension of some row in
  *  `classes` — i.e. it's a discounted data/config artifact, not a code subsystem. */
 export function isDataArtifact(
