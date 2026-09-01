@@ -1,0 +1,80 @@
+- id: W1-T2566
+  title: "THE ATTEMPT-KEY MIGRATION IS BOUNDED WITHIN A BOOT AND UNBOUNDED ACROSS BOOTS — evictRefusalPoisonedKeys frees every keyed proposal that has no cached draft, and a proposal that keeps failing GENUINELY has no cached draft either, so every daemon start re-opens it again; MEASURED 2026-09-01: median daemon process lifetime is 50.5 minutes across 479 processes with 32% under 30 minutes, so the re-open recurs roughly 29 times a day per stuck proposal at an $8.52 draft mean, and the once-per-process closure flag cannot see across the restart that resets it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 12.00
+  files: [src/lib/inbox.ts, src/run-task.ts, test/reopened-keys-are-reopened-once.test.ts]
+  origin: "operator-brief#migration-bound-check-2026-09-01"
+  plan_refs: ["W1-T2564", "W1-T2561", "W1-T192"]
+  status: queued
+  attempts: 0
+  rationale: |
+    ── WHAT WAS CHECKED, AND WHAT IT ACTUALLY SHOWS ─────────────────────────────────────────────
+
+    The operator's concern was that "once per boot" had already collapsed into "once per poll",
+    because three `exited 75 (freshness)` restarts landed inside five hours. MEASURED, IT HAS NOT —
+    and the honest version of the number is worth recording rather than the feared one.
+
+    Daemon process lifetimes across the retained corpus, 479 processes: MEDIAN 50.5 MINUTES, p25
+    19.8 min, p75 118 min, 32% under 30 minutes, 16% under 10. Against a 60-second poll interval
+    that is roughly a 50x difference, not an approximation. The within-boot bound holds.
+
+    ⚠ AND THE MIGRATION ITSELF IS CORRECT — this is not a defect report against it. It fired ONCE
+    (`inbox.draft_attempts_reopened`, 17:38:13.344Z, `evicted: 285`) and the live caches show
+    exactly the intended state: 285 proposals with no draft and NO key (freed and due again), ZERO
+    still retired, and — the control that separates a working migration from an unreadable file —
+    32 genuinely-drafted proposals STILL KEYED, with 0 drafted-but-unkeyed. It did what it said.
+
+    ⚠ THE COLLAPSE HYPOTHESIS COULD NOT BE TESTED FROM HISTORY AND THAT IS STATED RATHER THAN
+    PAPERED OVER. #3511 merged 17:30:51Z; exactly ONE daemon boot has occurred since. A single
+    firing is one data point, not a rate. What IS measurable without waiting is the boot rate, and
+    that is what the numbers above are.
+
+    ── THE REAL DEFECT, WHICH IS SMALLER AND DIFFERENT ─────────────────────────────────────────
+
+    `evictRefusalPoisonedKeys`'s predicate is "keyed, live in the registry, no cached draft". That
+    is deliberately NOT refusal-specific — the evidence a refusal leaves is in the ledger, not in
+    either cache — and W1-T2564 recorded that it therefore also re-opens genuine failures, priced
+    at "ONE extra attempt per boot".
+
+    THAT PRICE WAS QUOTED AGAINST AN UNSTATED ASSUMPTION THAT BOOTS ARE RARE. At a 50.5-minute
+    median they are not rare; they are roughly 29 a day. A proposal that fails GENUINELY and
+    repeatedly never acquires a cached draft, so it satisfies the predicate on every single boot
+    and is re-opened forever. The loop is bounded WITHIN a process by the closure flag and
+    UNBOUNDED ACROSS processes, because a restart is precisely what resets that flag.
+
+    THE COST IS BOUNDED PER POLL AND NOT PER DAY. `DAEMON_DRAFT_BATCH_CAP` (W1-T2561) caps a poll
+    at 3 drafts, so this can never stampede; what it can do is bill ~29 re-attempts a day per stuck
+    proposal at the measured $8.52 mean. No figure for how many proposals are genuinely stuck is
+    asserted here: the 285 freed at 17:38 have barely begun draining (3 drafted, 0 errored at the
+    time of writing), so the persistent-failure population is UNMEASURED and must be read from
+    `inbox.draft_error` after the queue drains rather than extrapolated from the pre-fix rate.
+
+    ── THE FIX SHAPE, AND THE ONE THING IT MUST NOT DO ─────────────────────────────────────────
+
+    The operator named it: a PERSISTED marker rather than a closure flag, so each id is re-opened
+    AT MOST ONCE EVER rather than once per process. The natural home is beside the two existing
+    caches (`inbox-drafts.json`, `inbox-draft-attempts.json`), written through the same atomic pair
+    discipline W1-T241 established.
+
+    ⚠ IT MUST STILL RECOVER A FRESHLY-PROVISIONED HOST. The reason W1-T2564 chose a closure flag
+    over a marker file was that every boot runs it, so a host that has never seen the migration
+    still recovers. A persisted marker keyed on PROPOSAL ID preserves that — an id never seen
+    before is still re-opened on first sight — whereas a single global "migration done" flag would
+    NOT, and would reintroduce exactly the gap the closure flag was chosen to avoid. The
+    distinction is the deliverable.
+
+    NOT IN SCOPE: the eviction predicate itself, the batch cap, and W1-T192's per-cause throttle,
+    all of which are behaving as specified.
+
+  acceptance:
+    - claim: "a proposal already re-opened once is not re-opened again after a daemon restart"
+      proof: "unit test: test/reopened-keys-are-reopened-once.test.ts"
+    - claim: "a proposal never seen before is still re-opened on first sight, so a fresh host recovers"
+      proof: "unit test: test/reopened-keys-are-reopened-once.test.ts"
+    - claim: "the marker survives a process restart, which the closure flag it replaces could not"
+      proof: "unit test: test/reopened-keys-are-reopened-once.test.ts"
