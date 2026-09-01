@@ -1520,6 +1520,11 @@ export function createPlanSyncCoalescer(
         try {
           slot.result = syncFn(repoDir, relPath, { allowStale: opts.allowStale });
         } catch (e) {
+          // NOT erased, and NOT swallowed: the failure is memoised on the slot and RETHROWN below
+          // (`if (pending.error !== undefined) throw pending.error`) to every lane that coalesces
+          // onto this same tick, so a failed sync reaches each caller exactly as it would have if
+          // each had fetched for itself. Deliberately not rethrown HERE: the throw has to happen
+          // per-caller at the coalescer's exit, not once inside the shared fetch.
           slot.error = e;
         }
         pending = slot;
