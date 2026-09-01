@@ -108,6 +108,26 @@ end_of_record
   assert.match(rendered, /^FNF:1$/m);
 });
 
+test('merge-lcov preserves distinct branch keys that compare numerically equal', () => {
+  const leadingZero = `TN:
+SF:src/lib/example.ts
+BRDA:2,0,0,1
+BRDA:02,0,0,2
+BRF:2
+BRH:2
+DA:2,1
+LF:1
+LH:1
+end_of_record
+`;
+
+  const rendered = renderMergedLcov(mergeLcovReports([parseLcovReport(leadingZero)]));
+  assert.match(rendered, /^BRDA:2,0,0,1$/m);
+  assert.match(rendered, /^BRDA:02,0,0,2$/m);
+  assert.match(rendered, /^BRF:2$/m);
+  assert.match(rendered, /^BRH:2$/m);
+});
+
 test('merge-lcov CLI refuses an empty shard instead of producing a vacuous report', () => {
   const dir = mkdtempSync(join(tmpdir(), 'rmd-merge-lcov-'));
   const empty = join(dir, 'empty.info');
