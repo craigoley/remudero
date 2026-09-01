@@ -45,7 +45,7 @@
   "src/lib/flight-signals.ts": 410,
   "src/lib/fs-race-safe.ts": 608,
   "src/lib/git-push.ts": 181,
-  "src/lib/github-app.ts": 461,
+  "src/lib/github-app.ts": 500,
   "src/lib/github-posture.ts": 416,
   "src/lib/glance.ts": 85,
   "src/lib/grep-zero-cause.ts": 175,
