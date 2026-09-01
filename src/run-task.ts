@@ -30360,9 +30360,15 @@ export async function approveCommand(
       // them), so the criteria are about the filing itself (filingAcceptanceCriteria), and
       // NO Remudero-Task trailer is emitted (the correctness rule, lib/plan-pr-emitter.ts).
       const ids = filedTaskIds.length > 0 ? filedTaskIds : [id];
+      // W1-T2550: the SAME path list `filingAcceptanceCriteria` already names as its filing
+      // evidence, now ALSO handed to `changedFiles` so `buildPlanPrBody` emits the rendered
+      // `## Changed files` block (renderChangedFilesBlock, W1-T2535) instead of leaving it
+      // defined-but-never-called. One local so the two arguments can never drift apart.
+      const filedPaths = [...shardRelPaths, "MASTER-PLAN.md"];
       const body = buildPlanPrBody({
         intro,
-        criteria: filingAcceptanceCriteria(ids, [...shardRelPaths, "MASTER-PLAN.md"]),
+        criteria: filingAcceptanceCriteria(ids, filedPaths),
+        changedFiles: filedPaths,
       });
       assertLiveWriteAllowed("gh-pr-create", `opening a PR against ${owner}/${repo}`);
       // W1-T903 design (i): REST, not `gh pr create` (GraphQL) — a pure transport swap, since
@@ -30652,9 +30658,14 @@ async function approveBatchCommand(
         "gate still reviews (ci + remudero-review); nothing auto-merges without it.",
       ].join("\n");
       const filedIds = allFiledTaskIds.length > 0 ? allFiledTaskIds : ids;
+      // W1-T2550: same reasoning as the single-proposal openPlanPr above — one local list feeds
+      // both the filing-acceptance evidence and the rendered changed-files block, so the batch
+      // lane's PR body actually emits it too rather than only defining it.
+      const filedPaths = [...allShardRelPaths, "MASTER-PLAN.md"];
       const body = buildPlanPrBody({
         intro,
-        criteria: filingAcceptanceCriteria(filedIds, [...allShardRelPaths, "MASTER-PLAN.md"]),
+        criteria: filingAcceptanceCriteria(filedIds, filedPaths),
+        changedFiles: filedPaths,
       });
       assertLiveWriteAllowed("gh-pr-create", `opening a PR against ${owner}/${repo}`);
       const created = createPlanPrRest(ghJson, owner, repo, {
