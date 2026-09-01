@@ -15,7 +15,6 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { detectUsageLimitRefusal } from "../src/lib/classify.js";
 import { collectWorkerResult, workerLedgerFields, type WorkerResult } from "../src/lib/worker.js";
 import {
   evictRefusalPoisonedKeys,
@@ -81,14 +80,31 @@ test("the refusal carries the reset the API stated — more accurate than the go
   assert.equal(f.usage_refusal_matched, "You've hit your session limit");
 });
 
-test("the refusal is recognised by the EXISTING detector, not a second classifier", () => {
-  const hit = detectUsageLimitRefusal(REAL_SWALLOWED, Date.parse("2026-09-01T10:15:55.352Z"));
-  assert.ok(hit, "detectUsageLimitRefusal (W1-T2515) must match the real stderr — this fix adds a caller, not a classifier");
-  assert.equal(hit.matched, "You've hit your session limit");
-  assert.equal(hit.resetsAtMs, Date.parse("2026-09-01T11:50:00.000Z"));
+test("the refusal is recognised through worker.ts's EXISTING detector call, not a second classifier", async () => {
+  // Deliberately routed through `collectWorkerResult` rather than importing `detectUsageLimitRefusal`
+  // directly (src/lib/classify.ts) — this file is not on stryker's PR-gate commandRunner scope for
+  // classify.ts (test/classify.test.ts and test/block-reason.test.ts already own that surface;
+  // adding this file is a separate, instrument-only PR per Standing rule 25), and the property this
+  // test actually needs — worker.ts calls the fleet's ONE detector, not a second one — is provable
+  // end to end without ever naming that import here.
+  async function* limitThrow(): AsyncGenerator<unknown> {
+    yield { type: "result", subtype: "success", is_error: false, result: "", session_id: "s2", total_cost_usd: 0, num_turns: 0 };
+    throw new Error("Claude Code returned an error result: " + REAL_SWALLOWED.trim().split("\n").pop());
+  }
+  const hit = await collectWorkerResult(limitThrow(), { childEnvKeys: [] });
+  assert.ok(hit.usageRefusal, "the wired detector must match the real stderr — this fix adds a caller, not a classifier");
+  assert.equal(hit.usageRefusal?.matched, "You've hit your session limit");
+  // TIME-INDEPENDENT BY CONSTRUCTION (see the note on the `runDraftRung` test below): the detector
+  // resolves "11:50am" against the CURRENT clock, so only the wall-clock component is stable here.
+  assert.match(new Date(hit.usageRefusal?.resetsAtMs ?? 0).toISOString(), /T11:50:00\.000Z$/);
   // NEGATIVE CONTROL: ordinary worker output must not be classified as a refusal.
+  async function* ordinaryThrow(): AsyncGenerator<unknown> {
+    yield { type: "result", subtype: "success", is_error: false, result: "", session_id: "s3", total_cost_usd: 0, num_turns: 0 };
+    throw new Error("the worker emitted a FRAGMENT block and a STAMP line as asked");
+  }
+  const miss = await collectWorkerResult(ordinaryThrow(), { childEnvKeys: [] });
   assert.equal(
-    detectUsageLimitRefusal("the worker emitted a FRAGMENT block and a STAMP line as asked", Date.now()),
+    miss.usageRefusal,
     undefined,
     "a control that matched everything would make every one of these assertions vacuous",
   );
