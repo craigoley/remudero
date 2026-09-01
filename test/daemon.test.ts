@@ -3307,6 +3307,68 @@ test("W1-T1272: an over-running sweep is still abandoned when reached from the s
   void root;
 });
 
+test("W1-T2584: the daemon sweep bound closes the continuation gate handed to the still-settling sweep", async () => {
+  const REAL_SLEEP: DaemonDeps["sleep"] = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  let continuation: (() => boolean) | undefined;
+  let releaseSweep: () => void = () => {};
+  const sweepSettled = new Promise<void>((resolve) => { releaseSweep = resolve; });
+  const summary = await runDaemon(
+    fixturePlan(),
+    {
+      refreshMerged: () => NONE_MERGED,
+      runOne: async () => {
+        throw new Error("FALSIFIER: dispatch must never be reached once freshness is stale");
+      },
+      checkFreshness: () => ({ stale: true, oldSha: "aaaaaaa1111111111111111111111111111111", newSha: "bbbbbbb2222222222222222222222222222222" }),
+      sweep: async (continueReviewAdmissions) => {
+        continuation = continueReviewAdmissions;
+        await sweepSettled;
+      },
+      sleep: REAL_SLEEP,
+    },
+    { pollIntervalMs: 30, sweepWallClockBoundMs: 20 },
+  );
+
+  assert.equal(summary.stopReason, "stale");
+  assert.ok(continuation, "runGatedSweep supplies the continuation gate to the real sweep dependency");
+  assert.equal(continuation!(), false, "the same timer that abandons the await closes later review admissions");
+  releaseSweep();
+});
+
+test("W1-T2584: the continuation gate re-checks both existing STOP and PAUSE controls before later admissions", async () => {
+  let stopDetail: string | undefined;
+  let pauseDetail: string | undefined;
+  const observations: boolean[] = [];
+  const merged = new Set<string>();
+  const summary = await runDaemon(
+    fixturePlan(),
+    {
+      refreshMerged: () => (taskId) => merged.has(taskId),
+      runOne: async (taskId) => {
+        merged.add(taskId);
+        return okResult(taskId);
+      },
+      checkStop: () => stopDetail,
+      checkPause: () => pauseDetail,
+      sweep: (continueReviewAdmissions) => {
+        assert.ok(continueReviewAdmissions);
+        observations.push(continueReviewAdmissions!());
+        stopDetail = "STOP requested during sweep";
+        observations.push(continueReviewAdmissions!());
+        stopDetail = undefined;
+        pauseDetail = "PAUSE requested during sweep";
+        observations.push(continueReviewAdmissions!());
+        pauseDetail = undefined;
+      },
+      sleep: async () => {},
+    },
+    { max: 1 },
+  );
+
+  assert.deepEqual(observations, [true, false, false]);
+  assert.equal(summary.stopReason, "max_reached", "clearing the test controls leaves ordinary dispatch unchanged");
+});
+
 test("W1-T1272: the sweep still runs one at a time and no additional lane is taken", async () => {
   // Concurrency guard: across the once-per-iteration call AND every mid-flight retrigger, at
   // most ONE `deps.sweep()` may be in flight at any instant, and `runOne` is still called

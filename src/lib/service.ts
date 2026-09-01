@@ -167,6 +167,23 @@ export interface Route {
    * changing again.
    */
   sensitivity?: ReadSensitivity;
+  /**
+   * W1-T2568 (design i): marks this route SELF-AUTHENTICATED — its handler verifies the
+   * caller's identity itself (e.g. GitHub's `X-Hub-Signature-256` HMAC over the RAW request
+   * body) rather than through the bearer-token/{@link IdentityProvider} seam every other route
+   * dispatches through. That seam cannot fit here: {@link IdentityProvider.grant} is
+   * SYNCHRONOUS and receives only `req` (see its own doc — the Cloudflare Access provider's
+   * pre-populated key cache is exactly this constraint), while a raw-body HMAC check
+   * structurally requires reading (and bounding) the body first. Setting this bypasses
+   * `grantedScopes`/tier/sensitivity dispatch ENTIRELY for this one route — no 401/403 is ever
+   * produced by the framework, and the handler is SOLELY responsible for its own auth: it must
+   * verify before writing anything, fail closed on every invalid input, and use
+   * {@link readBoundedRawBody} (never the unbounded internal reader) to cap the body BEFORE
+   * buffering it. `scope`/`tier` stay declared for classification/{@link assertWriteTiersComplete}
+   * even though this flag means neither is actually enforced. NEVER set this on a route with
+   * any pre-existing bearer-token semantics — it removes that gate outright.
+   */
+  selfAuthenticated?: boolean;
 }
 
 /** Push one SSE event to a subscribed client (`event:`/`data:` framing, owned by this module). */
@@ -542,6 +559,63 @@ function readRawBody(req: IncomingMessage): Promise<string> {
       resolve(raw);
     });
     req.on("error", reject);
+  });
+}
+
+/** W1-T2568 (design i): thrown by {@link readBoundedRawBody} when a request body exceeds the
+ *  caller's bound. Later bytes are drained but never buffered, preserving the response socket so
+ *  the caller receives the route's explicit 413 instead of a connection reset. */
+export class RawBodyTooLargeError extends Error {
+  constructor(maxBytes: number) {
+    super(`request body exceeds the ${maxBytes}-byte bound`);
+    this.name = "RawBodyTooLargeError";
+  }
+}
+
+/**
+ * W1-T2568 (design i): the generic "self-authenticated/raw-body route" seam's other half —
+ * read + buffer a request body verbatim, EXACTLY like the internal {@link readRawBody} every
+ * other route's dispatch already shares (same {@link RAW_BODY_CACHE} symbol, so a route that
+ * calls this AFTER `createService`'s own dispatch already drained the body — never true for a
+ * `selfAuthenticated` route, which skips that dispatch, but true in principle — still gets the
+ * cached bytes rather than a dead stream), but BOUNDED: a body that grows past `maxBytes`
+ * rejects with {@link RawBodyTooLargeError} and drains later chunks without retaining them,
+ * instead of buffering arbitrarily much attacker-supplied data first. Exported for any self-authenticated route
+ * handler (see {@link Route.selfAuthenticated}) — `src/lib/github-event-wake.ts`'s webhook
+ * handler is the first caller.
+ */
+export function readBoundedRawBody(req: IncomingMessage, maxBytes: number): Promise<string> {
+  const cached = (req as unknown as Record<symbol, unknown>)[RAW_BODY_CACHE];
+  if (typeof cached === "string") {
+    if (Buffer.byteLength(cached, "utf8") > maxBytes) return Promise.reject(new RawBodyTooLargeError(maxBytes));
+    return Promise.resolve(cached);
+  }
+  return new Promise((resolve, reject) => {
+    let receivedBytes = 0;
+    let settled = false;
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => {
+      if (settled) return;
+      receivedBytes += chunk.length;
+      if (receivedBytes > maxBytes) {
+        settled = true;
+        reject(new RawBodyTooLargeError(maxBytes));
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => {
+      if (settled) return;
+      settled = true;
+      const raw = Buffer.concat(chunks).toString("utf8");
+      (req as unknown as Record<symbol, unknown>)[RAW_BODY_CACHE] = raw;
+      resolve(raw);
+    });
+    req.on("error", (e) => {
+      if (settled) return;
+      settled = true;
+      reject(e);
+    });
   });
 }
 
@@ -932,6 +1006,21 @@ export function createService(opts: ServiceOptions): Server {
         sendJson(res, 404, { error: "not_found" });
         return;
       }
+      // W1-T2568 (design i): a SELF-AUTHENTICATED route (see Route.selfAuthenticated's own doc)
+      // skips the grantedScopes/tier/sensitivity dispatch below ENTIRELY — its handler is the
+      // sole authenticator. Checked before any of that machinery runs, never after, so a
+      // self-authenticated route's request is never rejected/logged as `service.unauthorized`
+      // for lacking a bearer token it was never meant to carry.
+      if (route?.selfAuthenticated) {
+        try {
+          await route.handler(req, res, { params: {} });
+        } catch (e) {
+          log("service.error", { method, path, error: String((e as Error)?.message ?? e) });
+          if (!res.headersSent) sendJson(res, 500, { error: "internal_error" });
+        }
+        return;
+      }
+
       const requiredScope: Scope = (sseRoute ?? route)!.scope;
 
       // Query-param auth is honored ONLY for a plain route that opted in (the HTML shell) — never
