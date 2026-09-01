@@ -480,9 +480,9 @@ jobs:
           # comment two blocks below is what makes a plain `exit 0` here safe: no step in this job
           # carries a YAML conditional, so a FAILING step skips every step after it. Swallowing the
           # test exit code is therefore the only way to keep the coverage gates running at all.
-          mkdir -p coverage
+          mkdir -p coverage/raw
           set +e
-          node --enable-source-maps --experimental-test-coverage --test-coverage-exclude="test/**" \
+          NODE_V8_COVERAGE=coverage/raw node --enable-source-maps --experimental-test-coverage --test-coverage-exclude="test/**" \
             --test-reporter=spec --test-reporter-destination=stdout \
             --test-reporter=lcov --test-reporter-destination=coverage/lcov.info \
             --test --test-shard=${{ matrix.shard }}/4 --import tsx --import ./test/setup/tmp-hygiene.ts "test/**/*.test.ts"
@@ -499,12 +499,18 @@ jobs:
             echo "coverage-ratchet: no lcov produced — the coverage gates below would have nothing to read. FAILING."
             exit 1
           fi
+          if ! find coverage/raw -maxdepth 1 -type f -name 'coverage-*.json' -print -quit | grep -q .; then
+            echo "coverage-ratchet: no raw V8 coverage produced — cross-shard branch identities could not be merged. FAILING."
+            exit 1
+          fi
           exit 0
       - name: Stage this coverage shard for the required-check aggregator
         run: |
           mkdir -p coverage-artifact
           if [ -s coverage/lcov.info ]; then
+            mkdir -p coverage-artifact/raw
             cp coverage/lcov.info coverage-artifact/lcov.info
+            cp coverage/raw/coverage-*.json coverage-artifact/raw/
           else
             echo "${GITHUB_EVENT_NAME}:${{ steps.classify.outputs.class }}" > coverage-artifact/skipped
           fi
@@ -561,7 +567,7 @@ jobs:
         with:
           pattern: coverage-shard-*
           path: coverage-shards
-      - name: Merge coverage shards without double-counting source denominators
+      - name: Merge raw V8 coverage shards before assigning LCOV branch indexes
         run: |
           [ "${GITHUB_EVENT_NAME}" = "pull_request" ] || { echo "coverage-ratchet: push event — no PR coverage merge required."; exit 0; }
           CLASS="${{ steps.classify.outputs.class }}"
@@ -569,13 +575,17 @@ jobs:
             echo "W1-T2428 fast-lane: class=${CLASS} — no coverage shards were collected."
             exit 0
           fi
-          COUNT="$(find coverage-shards -type f -name lcov.info | wc -l | tr -d ' ')"
-          if [ "$COUNT" != "4" ]; then
-            echo "coverage-ratchet: expected 4 LCOV shards, found ${COUNT}; refusing a partial merge."
-            exit 1
-          fi
+          for SHARD in 1 2 3 4; do
+            RAW_DIR="coverage-shards/coverage-shard-${SHARD}/raw"
+            if ! find "$RAW_DIR" -maxdepth 1 -type f -name 'coverage-*.json' -print -quit 2>/dev/null | grep -q .; then
+              echo "coverage-ratchet: expected raw V8 coverage for shard ${SHARD}; refusing a partial merge."
+              exit 1
+            fi
+          done
           mkdir -p coverage
-          find coverage-shards -type f -name lcov.info -print0 | sort -z | xargs -0 node scripts/merge-lcov.mjs --output coverage/lcov.info
+          node --expose-internals scripts/merge-lcov.mjs --output coverage/lcov.info \
+            coverage-shards/coverage-shard-1/raw coverage-shards/coverage-shard-2/raw \
+            coverage-shards/coverage-shard-3/raw coverage-shards/coverage-shard-4/raw
       # ORDER IS LOAD-BEARING (2026-08-13): diff-coverage runs BEFORE the aggregate ratchet.
       # No step in this job carries an `if:`, so a failing step skips every step after it —
       # MEASURED: in five of six recent failing CI runs the ratchet step concluded `failure` and
