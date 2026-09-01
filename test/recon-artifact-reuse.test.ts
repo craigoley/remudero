@@ -53,6 +53,15 @@ function result(over: Partial<WorkerResult>): WorkerResult {
 
 const TASK_ID = "T-RECON-ARTIFACT";
 
+// W1-T2510: the task's own record now lives INSIDE the worktree's `plan/` tree too (a shard
+// under `plan/tasks.d/`), not only at the separate `opts.planPath` this fixture already used to
+// tell the orchestrator which task to select. `taskRecordSha` (the new `plan_sha` key component)
+// reads it from the WORKTREE, exactly like `planSha`/`filesDigest` always have — a fixture that
+// never committed a task record into `plan/` would make every dispatch see it as ABSENT and
+// therefore never eligible to reuse at all, which would make dispatch 2 below (same task record,
+// same files — a reuse) fail for a reason unrelated to what it is testing.
+const TASK_RECORD_SHARD_REL = "plan/tasks.d/t-recon-artifact.yaml";
+
 const FIXTURE_PLAN = [
   `- id: ${TASK_ID}`,
   "  title: recon-artifact reuse probe",
@@ -90,12 +99,12 @@ const cleanIsolationExec = (): Promise<IsolationProbeExecResult> =>
     costUsd: 0,
   });
 
-/** A real, throwaway bare "origin" + a real clone at `repoDir`, seeded with a `plan/` dir and
- *  the task's own declared `src/widget.ts` — both are the SAME worktree-relative paths
- *  `planSha`/`filesDigest` hash, so a later push through `seed` changes the exact bytes the
- *  invalidation predicate reads. Returns `seed`, a live working clone pushed straight to
- *  `origin`, so a later dispatch's `worktreeAdd` (which fetches before checkout) sees the
- *  change. */
+/** A real, throwaway bare "origin" + a real clone at `repoDir`, seeded with a `plan/` dir (an
+ *  unrelated `note.md` PLUS the task's own record shard), and the task's own declared
+ *  `src/widget.ts` — all three are the SAME worktree-relative paths `planSha`/`taskRecordSha`/
+ *  `filesDigest` hash, so a later push through `seed` changes the exact bytes the invalidation
+ *  predicate reads. Returns `seed`, a live working clone pushed straight to `origin`, so a later
+ *  dispatch's `worktreeAdd` (which fetches before checkout) sees the change. */
 function gitFixture(root: string): { repoDir: string; seed: string } {
   const originGit = mkdtempSync(join(tmpdir(), "runtask-recon-artifact-origin-"));
   execFileSync("git", ["init", "-q", "--bare", "--initial-branch=main", originGit]);
@@ -108,6 +117,8 @@ function gitFixture(root: string): { repoDir: string; seed: string } {
   writeFileSync(join(seed, "src", "widget.ts"), "export const widget = 1;\n");
   mkdirSync(join(seed, "plan"), { recursive: true });
   writeFileSync(join(seed, "plan", "note.md"), "v1\n");
+  mkdirSync(join(seed, "plan", "tasks.d"), { recursive: true });
+  writeFileSync(join(seed, TASK_RECORD_SHARD_REL), FIXTURE_PLAN);
   execFileSync("git", ["-C", seed, "add", "-A"]);
   execFileSync("git", ["-C", seed, "commit", "-q", "-m", "seed"]);
   execFileSync("git", ["-C", seed, "push", "-q", "origin", "main"]);
@@ -259,16 +270,17 @@ test("BEHAVIORAL: absent → reused → plan_sha-invalidated, across three real 
     assert.doesNotMatch(implementPrompt2, /this project ships a widget/, "INFERRED never travels — same rule as a live recon");
     assert.match(implementPrompt2, /VERIFY-AND-EXTEND/, "the artifact is framed as evidence to verify, never authority to build on unchecked");
 
-    // ── Dispatch 3: plan/ changes on main — the SAME artifact must now be INVALIDATED, not
-    // reused, and a full recon runs again.
-    pushChange(seed, "plan/note.md", "v2\n");
+    // ── Dispatch 3: the TASK'S OWN record shard changes on main (W1-T2510: narrowed plan_sha
+    // reads only this file, not the whole plan/ dir) — the SAME artifact must now be
+    // INVALIDATED, not reused, and a full recon runs again.
+    pushChange(seed, TASK_RECORD_SHARD_REL, FIXTURE_PLAN.replace("medium", "high"));
     const spawnCalls3: SpawnWorkerArgs[] = [];
     const spawn3: typeof spawnWorker = async (args) => {
       spawnCalls3.push(args);
       if (spawnCalls3.length === 1) {
         return result({
           sessionId: "s-recon-3",
-          text: "RECON REPORT\nOBSERVED: the plan now carries note.md v2\nINFERRED: nothing\nCOULDN'T-VERIFY: nothing\n",
+          text: "RECON REPORT\nOBSERVED: the task's own record now reads risk high\nINFERRED: nothing\nCOULDN'T-VERIFY: nothing\n",
         });
       }
       return result({ sessionId: "s-implement-3", text: "REPORT\nPR_URL: https://github.com/acme/remudero/pull/3\n" });
@@ -283,7 +295,7 @@ test("BEHAVIORAL: absent → reused → plan_sha-invalidated, across three real 
     assert.equal(ledger3.filter((l) => l.step === "recon.absent").length, 0, "invalidated is distinct from absent — a prior artifact DID exist");
 
     const implementPrompt3 = String(spawnCalls3[1].prompt);
-    assert.match(implementPrompt3, /the plan now carries note\.md v2/, "the FRESH recon's own OBSERVED line reaches the prompt");
+    assert.match(implementPrompt3, /the task's own record now reads risk high/, "the FRESH recon's own OBSERVED line reaches the prompt");
     assert.doesNotMatch(implementPrompt3, /VERIFY-AND-EXTEND/, "a fresh recon is not framed as a reused artifact");
   } finally {
     rmSync(root, { recursive: true, force: true });

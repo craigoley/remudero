@@ -363,6 +363,65 @@ export function isPureConcurrentAddition(files: readonly ConflictFileDiff[]): bo
 }
 
 /**
+ * W1-T2548 — THE DECLARED GENERATOR REGISTRY (rationale (3)/(4)): every conflict this repo has
+ * actually PRODUCED is a same-key VALUE change — a deleted line plus an added line under an
+ * existing key — which {@link isPureConcurrentAddition} refuses BY CONSTRUCTION (it counts
+ * deletions on both sides and same-key edits always carry one). MEASURED 2026-08-30, six
+ * conflicts in one evening, every one `scripts/source-size-baseline.json`, one JSON key, two
+ * different numbers whose merged truth matched NEITHER recorded side — a textual union would
+ * have been wrong, not merely unhelpful.
+ *
+ * For a path THIS TABLE NAMES, the file has a generator that reproduces it from the tree, so the
+ * resolution is not a merge at all: re-run the generator on the MERGED tree and its output is
+ * correct by construction (never a chosen side, never a diff heuristic — rationale (4), "the
+ * safety argument is the generator, not a heuristic"). A path absent from this table stays
+ * refused exactly as it was before this task — admission is bounded by a list a human wrote, not
+ * by an inference {@link isRegenerableArtifactConflict} (below) could get wrong.
+ *
+ * DATA (rule 2), never a code change to admit a new path: each value is the `package.json`
+ * script name that reproduces the file from the tree — the SAME identifier its own `npm run
+ * <name>[:check]` pair already carries, so a reader can reproduce this table's own claim with one
+ * command rather than trusting a private label invented only for this table.
+ */
+export const REGENERABLE_ARTIFACT_GENERATORS: Readonly<Record<string, string>> = Object.freeze({
+  "scripts/source-size-baseline.json": "source-size-ratchet",
+  "plan/plan-index.json": "plan-index",
+  "docs/docs-index.json": "docs-index",
+  "learnings/index.json": "learnings-index",
+  "docs/cli-reference.md": "cli-reference",
+  "MASTER-PLAN.md": "capability-snapshot",
+  "packages/api-client/src/schema.d.ts": "api-client:generate",
+});
+
+/**
+ * W1-T2548 — PURE, DETERMINISTIC classification (rule 2) of whether every conflicting path
+ * carries a DECLARED generator ({@link REGENERABLE_ARTIFACT_GENERATORS}) — the discriminator the
+ * `conflicted` row admits a same-key value conflict on, alongside (never instead of)
+ * {@link isPureConcurrentAddition}. Requires ALL files registered, not merely one: a conflict
+ * that touches a hand-written path alongside a regenerable one is refused WHOLE (acceptance 4)
+ * — a partial admission would still have to decide what to do with the hand-written half, which
+ * is exactly the judgment call this predicate exists to avoid. Deletions on either side are
+ * irrelevant here (unlike the pure-addition arm) — a same-key value change is expected to carry
+ * them, and the generator re-run supersedes both recorded values regardless.
+ */
+export function isRegenerableArtifactConflict(
+  files: readonly ConflictFileDiff[],
+  generators: Readonly<Record<string, string>> = REGENERABLE_ARTIFACT_GENERATORS,
+): boolean {
+  return files.length > 0 && files.every((f) => Object.hasOwn(generators, f.path));
+}
+
+/** W1-T2548 — the conflicting path(s), if any, this table declares no generator for — the
+ *  diagnosability half of acceptance 5: a refusal names WHICH path broke admission rather than
+ *  making a reader re-derive it from the registry by hand. */
+function undeclaredGeneratorPaths(
+  files: readonly ConflictFileDiff[],
+  generators: Readonly<Record<string, string>>,
+): string[] {
+  return files.filter((f) => !Object.hasOwn(generators, f.path)).map((f) => f.path);
+}
+
+/**
  * W1-T2536 — WHICH of the refusal row's disjuncts actually fired, as a phrase for that row's own
  * `reason`. Before this, the row said "involves a deletion (or no file evidence was captured)"
  * UNCONDITIONALLY, so a conflict with FULL evidence and ZERO deletions on both sides — the
@@ -376,13 +435,33 @@ export function isPureConcurrentAddition(files: readonly ConflictFileDiff[]): bo
  * shipped default (W1-T2536 turns admission on, so the row above claims exactly this population)
  * and is written anyway — the flag is policy DATA, an operator may set it false, and a refusal
  * that then re-acquired the old lie is the defect this helper exists to remove.
+ *
+ * W1-T2548 — NAMES THE MIXED CASE (acceptance 4/5): a deletion-involved conflict whose paths
+ * straddle {@link REGENERABLE_ARTIFACT_GENERATORS} — at least one declared, at least one not —
+ * now says so explicitly, so a hand-written path riding alongside a regenerable one is
+ * diagnosable without re-deriving the registry lookup by hand. A conflict where NO path is
+ * declared (the ordinary hand-written-source shape this row has always refused) keeps saying
+ * plainly "involves a deletion" — the registry is irrelevant to that population.
  */
 export function conflictRefusalCause(
   files: readonly ConflictFileDiff[],
   policy: Pick<SweepPolicy, "mergeConflictAdmissionEnabled">,
+  generators: Readonly<Record<string, string>> = REGENERABLE_ARTIFACT_GENERATORS,
 ): string {
   if (files.length === 0) return "no file evidence was captured";
-  if (files.some((f) => f.oursDeleted > 0 || f.theirsDeleted > 0)) return "involves a deletion";
+  if (files.some((f) => f.oursDeleted > 0 || f.theirsDeleted > 0)) {
+    const undeclared = undeclaredGeneratorPaths(files, generators);
+    // W1-T2548 — MIXED ONLY (acceptance 4/5): name the offending path(s) only when the
+    // conflict straddles the registry — at least one path IS declared and at least one is
+    // not — so a reader is told WHICH half broke admission rather than having to re-derive
+    // it. A conflict where NO path is declared (the dominant hand-written-source shape) keeps
+    // the plain "involves a deletion" this row has always said — the registry is irrelevant
+    // to that population, so naming its absence would tell the reader nothing new.
+    if (undeclared.length > 0 && undeclared.length < files.length) {
+      return `involves a deletion, and ${undeclared.join(", ")} ${undeclared.length === 1 ? "has" : "have"} no declared generator`;
+    }
+    return "involves a deletion";
+  }
   if (policy.mergeConflictAdmissionEnabled !== true) {
     return "auto-resolution admission is disabled (mergeConflictAdmissionEnabled)";
   }
@@ -2974,10 +3053,12 @@ export function reviewVerdictOvertakenByActivity(pr: OpenPrView): boolean {
  *   7.5. CONFLICTED (W1-T106, the #170 DIRTY strand): `mergeState === "dirty"`
  *      — ABOVE mergeable, so a conflicting PR is NEVER armed no matter how
  *      green. Two rows, in order: (a) a PURE-concurrent-addition conflict
- *      (isPureConcurrentAddition) -> `conflicted`, dispatching the W1-T94
- *      merge-conflict fix mode; (b) anything else dirty (a deletion-involved
- *      or unclassifiable conflict) -> `blocked-ambiguous`, REFUSING
- *      auto-resolution and escalating instead — never a wrong clobber.
+ *      (isPureConcurrentAddition) OR a same-key value conflict confined to
+ *      paths with a DECLARED generator (isRegenerableArtifactConflict,
+ *      W1-T2548) -> `conflicted`, dispatching the W1-T94 merge-conflict fix
+ *      mode; (b) anything else dirty (a deletion-involved conflict touching
+ *      an undeclared path, or an unclassifiable one) -> `blocked-ambiguous`,
+ *      REFUSING auto-resolution and escalating instead — never a wrong clobber.
  *   8. CI GREEN + REVIEW SUCCESS (POSITIVE match only)   -> mergeable (arm).
  *   8.5. ZERO-RUNS REQUIRED CHECK / POST-REVIEW (W1-T176 discriminator + the
  *      2026-07-22 #584 stall): checks green, remudero-review has ZERO
@@ -3323,8 +3404,13 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // never sees a dirty PR. Deterministically fixable (rule 2, never an LLM
     // judgment call) ONLY when {@link isPureConcurrentAddition} clears every
     // conflicting file — both sides purely ADDED, neither deleted anything
-    // the other still relies on. The deletion-involved / no-evidence-captured
-    // case falls through to the very next row, never here.
+    // the other still relies on — OR (W1-T2548) when {@link
+    // isRegenerableArtifactConflict} clears every conflicting file instead:
+    // every path carries a DECLARED generator, so a deletion on either side is
+    // irrelevant and the resolution is that generator's own output on the
+    // merged tree, never a chosen side. A conflict satisfying neither arm
+    // (a deletion on an undeclared path, or no evidence captured at all)
+    // falls through to the very next row, never here.
     //
     // W1-T984: gated behind `policy.mergeConflictAdmissionEnabled` (default FALSE — see that
     // field's own doc) — the SAME shape row 0's `supersessionDisposalEnabled` conjunct already
@@ -3335,11 +3421,30 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // flag off, this row never matches no matter what evidence flows, and a dirty PR falls to the
     // very next row exactly as it always has.
     disposition: "conflicted",
-    when: (pr, policy) =>
-      policy.mergeConflictAdmissionEnabled === true && pr.mergeState === "dirty" && isPureConcurrentAddition(pr.mergeConflict?.files ?? []),
-    reason: (pr) =>
-      `merge conflict (mergeState dirty) — pure concurrent addition on ` +
-      `${(pr.mergeConflict?.files ?? []).map((f) => f.path).join(", ")} — dispatching the merge-conflict fix mode`,
+    when: (pr, policy) => {
+      if (policy.mergeConflictAdmissionEnabled !== true || pr.mergeState !== "dirty") return false;
+      const files = pr.mergeConflict?.files ?? [];
+      // W1-T2548: a SECOND, independent admission arm alongside the pure-addition one below —
+      // either clears this row on its own (never required together). isRegenerableArtifactConflict
+      // is checked first only because its reason (below) is the more specific of the two when both
+      // happen to hold (e.g. a registered path that also carries zero deletions).
+      return isRegenerableArtifactConflict(files) || isPureConcurrentAddition(files);
+    },
+    reason: (pr) => {
+      const files = pr.mergeConflict?.files ?? [];
+      if (isRegenerableArtifactConflict(files)) {
+        const named = files.map((f) => `${f.path} (generator: ${REGENERABLE_ARTIFACT_GENERATORS[f.path]})`).join(", ");
+        return (
+          `merge conflict (mergeState dirty) — every conflicting path has a declared generator: ${named} — ` +
+          `dispatching the merge-conflict fix mode to RE-RUN the generator(s) on the merged tree — the ` +
+          `resolution is that output, never either side's recorded value`
+        );
+      }
+      return (
+        `merge conflict (mergeState dirty) — pure concurrent addition on ` +
+        `${files.map((f) => f.path).join(", ")} — dispatching the merge-conflict fix mode`
+      );
+    },
   },
   {
     // W1-T106: the OTHER half of the same #170 strand — a dirty PR whose
@@ -5497,6 +5602,82 @@ const ZERO_COUNTS = (): Record<Disposition, number> => ({
 const inFlightReviewKeys = new Set<string>();
 
 /**
+ * W1-T2520 — THE FIX-DISPATCH MUTEX, {@link inFlightReviewKeys}'s SIBLING FOR THE OTHER LANE:
+ * `deps.dispatchFix` — "the one lane W1-T1211 admits into the light pass that spends a worker"
+ * ({@link detachedSweepActions}'s own doc below) — never got one. `priorStrikesFor` (run-task.ts)
+ * derives `OpenPrView.priorStrikes` by COUNTING `fix.dispatch` ledger rows at OpenPrView-build
+ * time, with no exclusion between that count and the dispatch it gates: two calls in this SAME
+ * process (the daemon's full sweep racing a light-pass tick, or two overlapping light passes) can
+ * both build an `OpenPrView` off the SAME pre-dispatch ledger state and both see `priorStrikes`
+ * under the cap — OBSERVED LIVE as 13 fix-worker dispatches across two PRs against a `strikeCap`
+ * of 2, and one review posted three times to one sha (the same race showing through the review
+ * lane once three fix workers each finished and each ran a review).
+ *
+ * A CLAIM ALONE IS NOT ENOUGH, which is why this is not simply a second copy of
+ * {@link inFlightReviewKeys}: a SECOND, non-concurrent call reaching this PR after the first
+ * already dispatched would still be carrying the FIRST call's now-stale `pr.priorStrikes` — the
+ * exact "read-modify-write race" shape the counter advancing slower than the dispatch rate is the
+ * signature of. {@link claimFixDispatch} (below, inside `runSweep`) also RE-READS the ledger and
+ * RE-COUNTS strikes the instant the claim is taken, so the count two callers act on can never be
+ * the same stale snapshot — see that function's own doc for the read-under-the-claim mechanics.
+ *
+ * MODULE-SCOPED for the exact reason {@link inFlightReviewKeys} is (its own doc above): every
+ * caller builds a fresh `SweepDeps` but runs in the SAME process, so a module-level `Set` needs no
+ * new wiring outside this file.
+ *
+ * KEYED IDENTICALLY TO {@link inFlightReviewKeys} — `${taskId}@${headSha}` — "the key is the PR,
+ * or the (task, head sha) pair — whichever the review mutex already keys on, so there is one
+ * spelling of 'this PR is being worked' rather than two" (this task's own rationale). A SEPARATE
+ * `Set` from `inFlightReviewKeys`, never a shared one: the review and fix-dispatch lanes are
+ * different budgets that must never block each other's claim.
+ *
+ * NOT PROCESS-GLOBAL-FOREVER, the same discipline as {@link inFlightReviewKeys}: a key is added
+ * the instant it is claimed and removed the instant that claim's fate is decided — refused before
+ * dispatch (strikes already exhausted under the claim, or a concurrent claim already held it), or
+ * the dispatch itself SETTLES, success or throw alike. A key never outlives the single in-flight
+ * attempt that claimed it, so a legitimate later pass over the same still-open PR is never
+ * permanently locked out — only a genuinely concurrent second claim, or a real cap breach, is
+ * refused. The fix rung keeps working: a PR with strikes left still gets its strike; this adds
+ * exclusion, never a refusal.
+ */
+const inFlightFixKeys = new Set<string>();
+
+/**
+ * W1-T2520 — THE SAME PLAIN FOLD {@link priorStrikesFor} (run-task.ts) PERFORMS UNDER ITS DEFAULT
+ * `"keyword_only"` REGIME: every `fix.dispatch` row for this task counts, no amnesty. Duplicated
+ * here rather than imported, because this module is deliberately kept free of a run-task.ts
+ * dependency (see the hand-filed-repair/`armOutcomeArmed` doc comments elsewhere in this file) —
+ * and because `currentStrikeRegimeFor`'s amnesty override is explicitly NOT this task's concern: a
+ * strike a regime change later amnesties is a separate reason a strike may not count, and it is
+ * NOT the cause of the race this task fixes (the counter DID advance; it just advanced slower than
+ * the read-modify-write race let dispatches through). What this exists for is FRESHNESS, not
+ * amnesty parity: called with a ledger read taken AFTER the claim below, so two callers reading
+ * concurrently can no longer see the same stale count.
+ *
+ * COUNTS DISTINCT `strike` NUMBERS, NOT RAW ROWS — deliberately NOT `priorStrikesFor`'s own plain
+ * `n++` per matching line. A real dispatch's `strike` field is the count `priorStrikesFor` itself
+ * returned at call time (run-task.ts's own `fix.dispatch` log sites), so two GENUINE strikes for
+ * one task can never share a number; a duplicate `strike` value on two `fix.dispatch` rows is
+ * always the SAME attempt re-described (a fuller row appended after a leaner one, never a second
+ * worker spent). Rows carrying no numeric `strike` at all are each counted on their own — the
+ * ledger gives this fold nothing to dedupe them BY, so it must not silently drop one.
+ */
+function freshFixDispatchCount(lines: Array<Record<string, unknown>>, taskId: string | undefined): number {
+  if (!taskId) return 0;
+  const strikeNumbers = new Set<number>();
+  let unnumbered = 0;
+  for (const line of lines) {
+    if (line.step !== "fix.dispatch" || line.task_id !== taskId) continue;
+    if (typeof line.strike === "number") {
+      strikeNumbers.add(line.strike);
+    } else {
+      unnumbered++;
+    }
+  }
+  return strikeNumbers.size + unnumbered;
+}
+
+/**
  * W1-T2379 — THE DETACHED-WAIT REGISTRY, module-scoped for exactly the reason
  * {@link inFlightReviewKeys} above is: every caller builds a fresh `SweepDeps` but runs in the
  * SAME process, so a module-level container is visible to all of them with no wiring outside
@@ -5723,6 +5904,57 @@ export async function runSweep(
   // with no change to this function's own claim/stand-down logic below —
   // only WHERE the Set lives moved, never HOW it is consulted.
   const claimedReviewKeys = inFlightReviewKeys;
+
+  /**
+   * W1-T2520 — CLAIM THIS PR'S FIX-DISPATCH KEY (or refuse), the fix-rung twin of the review-key
+   * claim just above (`claimedReviewKeys`) but for {@link inFlightFixKeys}, the OTHER lane that
+   * spends a worker. Refuses in exactly two shapes, both SYNCHRONOUS — no `await` ever separates
+   * the check from the claim, the same guarantee `claimedReviewKeys` gives: (1) a genuinely
+   * concurrent second claim for a key already in flight, or (2) — RE-DERIVED THE INSTANT THE
+   * CLAIM IS TAKEN, never trusted off the `OpenPrView` snapshot this whole pass started from —
+   * the strike count freshly re-read off the ledger has already reached the ceiling
+   * `fixCeilingInForce` computes for this PR. Either refusal releases nothing it never held; only
+   * a successful claim's `run` releases it, in a `finally`, once the guarded call SETTLES —
+   * success or throw alike — exactly the discipline `claimedReviewKeys`'s own release site (below)
+   * documents.
+   */
+  function claimFixDispatch(
+    pr: OpenPrView,
+  ): { ok: true; run: <T>(fn: () => T | Promise<T>) => Promise<T> } | { ok: false; reason: string } {
+    const fixKey = `${pr.taskId ?? ""}@${pr.headSha}`;
+    if (inFlightFixKeys.has(fixKey)) {
+      return {
+        ok: false,
+        reason: `duplicate fix-dispatch key (${fixKey}) already claimed this pass — a concurrent sweep is already dispatching this PR's fix rung`,
+      };
+    }
+    inFlightFixKeys.add(fixKey);
+    // READ UNDER THE CLAIM: a fresh ledger read, taken only now that the claim is held, so a
+    // fix.dispatch row a concurrent caller already wrote before this instant is counted here even
+    // though this pass's own `ledgerLines` (read at the TOP of runSweep, before any claim existed)
+    // predates it.
+    const freshLines = readLedger(deps.ledgerPath);
+    const ceiling = fixCeilingInForce(pr, policy.strikeCap, policy.clarify);
+    const freshStrikes = freshFixDispatchCount(freshLines, pr.taskId);
+    if (freshStrikes >= ceiling) {
+      inFlightFixKeys.delete(fixKey);
+      return {
+        ok: false,
+        reason: `fix strikes exhausted under the claim (${freshStrikes}/${ceiling}) — refused before dispatch, never spending a strike a concurrent sweep already spent`,
+      };
+    }
+    return {
+      ok: true,
+      run: async (fn) => {
+        try {
+          return await fn();
+        } finally {
+          inFlightFixKeys.delete(fixKey);
+        }
+      },
+    };
+  }
+
   // Reviews eligible this pass, deferred out of the main walk so they can run
   // CONCURRENTLY with each other (bounded below), rather than one at a time
   // inside it — see `reviewLanes` after the loop.
@@ -6413,12 +6645,22 @@ export async function runSweep(
               const fixEvidence = isBlockedCi(pr)
                 ? { unmetCriteria: [], ciFailures: pr.ciFailures ?? [] }
                 : { unmetCriteria: pr.unmetCriteria, actionableGateFailures: pr.actionableGateFailures };
-              // W1-T2379: started either way — only the `await` moves. See `SweepDeps.detachFixWait`.
-              if (deps.detachFixWait) {
-                detachSweepAction(Promise.resolve(deps.dispatchFix(pr, fixEvidence)));
+              // W1-T2520 — THE FIX-DISPATCH CLAIM: see `claimFixDispatch`'s own doc for why a
+              // claim alone (without the fresh re-read it also performs) would not have stopped
+              // the observed race. A refusal here spends nothing — `deps.dispatchFix` is never
+              // called — and stands down exactly like any other declined disposition.
+              const fixClaim = claimFixDispatch(pr);
+              if (!fixClaim.ok) {
+                acted = false;
+                standDownReason = fixClaim.reason;
                 break;
               }
-              const dispatchOutcome = await deps.dispatchFix(pr, fixEvidence);
+              // W1-T2379: started either way — only the `await` moves. See `SweepDeps.detachFixWait`.
+              if (deps.detachFixWait) {
+                detachSweepAction(fixClaim.run(() => deps.dispatchFix(pr, fixEvidence)));
+                break;
+              }
+              const dispatchOutcome = await fixClaim.run(() => deps.dispatchFix(pr, fixEvidence));
               if (dispatchOutcome !== undefined) spent = dispatchFixSpent(dispatchOutcome);
               break;
             }
@@ -6448,12 +6690,20 @@ export async function runSweep(
               // above — REPAIR_SURFACE_DISPOSITIONS (below) treats both as dispatch-based repair
               // surfaces, so both must feed `spent` the same way.
               const conflictedEvidence = { unmetCriteria: [], mergeConflict: pr.mergeConflict };
-              // W1-T2379: the conflicted twin of the blocked-fixable arm above, same reasoning.
-              if (deps.detachFixWait) {
-                detachSweepAction(Promise.resolve(deps.dispatchFix(pr, conflictedEvidence)));
+              // W1-T2520: the conflicted twin of the blocked-fixable claim above, same reasoning
+              // — see `claimFixDispatch`'s own doc.
+              const conflictedFixClaim = claimFixDispatch(pr);
+              if (!conflictedFixClaim.ok) {
+                acted = false;
+                standDownReason = conflictedFixClaim.reason;
                 break;
               }
-              const conflictedDispatchOutcome = await deps.dispatchFix(pr, conflictedEvidence);
+              // W1-T2379: the conflicted twin of the blocked-fixable arm above, same reasoning.
+              if (deps.detachFixWait) {
+                detachSweepAction(conflictedFixClaim.run(() => deps.dispatchFix(pr, conflictedEvidence)));
+                break;
+              }
+              const conflictedDispatchOutcome = await conflictedFixClaim.run(() => deps.dispatchFix(pr, conflictedEvidence));
               if (conflictedDispatchOutcome !== undefined) spent = dispatchFixSpent(conflictedDispatchOutcome);
               break;
             }

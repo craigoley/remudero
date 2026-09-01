@@ -68,6 +68,11 @@ function runScript(opts: { containerEnv: string[]; shellEnv: Record<string, stri
     env: {
       PATH: `${dir}:${process.env.PATH}`,
       HOME: process.env.HOME ?? "/tmp",
+      // W1-T2555: this suite drives the GH_TOKEN capture/fallback branch, never the STATE_DIR-is-a-
+      // checkout predicate (that predicate has its own suite). Without this opt-in the new check
+      // would refuse before the capture logic under test ever runs, since HOME/rmd-state is not a
+      // real checkout in this test environment.
+      RMD_RECYCLE_FIRST_BOOT: "1",
       ...opts.shellEnv,
     },
   });

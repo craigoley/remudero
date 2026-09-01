@@ -461,7 +461,15 @@ const reconReuseCleanIsolationExec = (): Promise<IsolationProbeExecResult> =>
 /** A real, throwaway bare "origin" + a real clone at `repoDir` — mirrors
  *  test/recon-artifact-reuse.test.ts's own `gitFixture`, trimmed to what THIS one transition
  *  (absent → reused) needs; that file's own fixture proves the fuller absent/reused/invalidated
- *  lifecycle and is not re-proved here. */
+ *  lifecycle and is not re-proved here.
+ *
+ *  W1-T2510: the task's own record must ALSO live inside the worktree's `plan/` tree (a shard
+ *  under `plan/tasks.d/`), not only at the separate `opts.planPath` this fixture already uses to
+ *  tell the orchestrator which task to select — `plan_sha` is now `taskRecordSha`, read from the
+ *  WORKTREE, same as `filesDigest` always has been. Without a committed shard, the record reads
+ *  as ABSENT on every dispatch and can never validate a reuse, which would make the SECOND
+ *  dispatch below (same task record, same files — a reuse) fail for a reason unrelated to what
+ *  it is testing. */
 function reconReuseGitFixture(root: string): void {
   const originGit = mkdtempSync(join(tmpdir(), "rmd-t2383-recon-reuse-origin-"));
   execFileSync("git", ["init", "-q", "--bare", "--initial-branch=main", originGit]);
@@ -472,6 +480,8 @@ function reconReuseGitFixture(root: string): void {
   writeFileSync(join(seed, "README.md"), "seed\n");
   mkdirSync(join(seed, "src"), { recursive: true });
   writeFileSync(join(seed, "src", "widget.ts"), "export const widget = 1;\n");
+  mkdirSync(join(seed, "plan", "tasks.d"), { recursive: true });
+  writeFileSync(join(seed, "plan", "tasks.d", "t-t2383-recon-reuse.yaml"), RECON_REUSE_PLAN);
   execFileSync("git", ["-C", seed, "add", "-A"]);
   execFileSync("git", ["-C", seed, "commit", "-q", "-m", "seed"]);
   execFileSync("git", ["-C", seed, "push", "-q", "origin", "main"]);

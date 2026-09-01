@@ -40,13 +40,21 @@
 # inside one.
 #
 # THE LOCK IS PRINTED, NEVER DECIDED (section 2). Every lock under `state/` that would block a boot
-# is displayed in full — holder pid, host, startedAt — and this script does not delete it and does
-# not judge it. That is not a temporary gap waiting on more code: `isHolderStale`'s container branch
-# (src/lib/fs-race-safe.ts, W1-T978) answers "was this an earlier container of THIS cell" only from
-# INSIDE a container (`defaultInContainer` reads `/.dockerenv`, which is absent on the host by
-# construction) — so a host-side script can never safely decide a lock's staleness, on this sha or
-# any future one. The daemon reclaims a foreign container-shaped holder on its own next boot; this
-# script only ever reads and reports.
+# is displayed in full — holder pid, host, startedAt — and this script does not delete it. That is
+# not a temporary gap waiting on more code: `isHolderStale`'s container branch (src/lib/fs-race-safe.ts,
+# W1-T978) answers "was this an earlier container of THIS cell" only from INSIDE a container
+# (`defaultInContainer` reads `/.dockerenv`, which is absent on the host by construction) — so a
+# host-side script can never safely make THAT judgement, on this sha or any future one. `drain.lock`
+# still defers to it exactly as before: printed, never judged, left for a human or the daemon's own
+# next boot.
+#
+# `state/inflight/*.lock` IS DIFFERENT (W1-T2556), because a recycle IS the thing that produces the
+# next boot: waiting out this script's own bound and refusing on a lock whose container is provably
+# gone strands the fleet on the far side of the only remedy that could clear it. So the wait below
+# (section 5) makes ONE narrow, positive exception — never a staleness judgement, a fact `docker
+# inspect` states outright — and reclaims (moves aside, never deletes) an inflight lock whose `host`
+# is BOTH container-id-shaped and reported by docker as absent or not running. Every other lock,
+# under any name, is still only ever read and reported, exactly as this paragraph always said.
 #
 # PLAIN BASH AND DOCKER, deliberately — the same discipline as deploy/verify-image.sh and
 # deploy/host-update.sh, this script's siblings. It runs on a host that may have no node, no rmd and
@@ -66,6 +74,8 @@
 #   REGISTRY=... IMAGE=... ./deploy/recycle-container.sh     # retarget without editing this file
 #   RMD_STATE_DIR=/path ./deploy/recycle-container.sh        # if the bind mount is not ~/rmd-state
 #   RMD_RECYCLE_WAIT_S=300 ./deploy/recycle-container.sh      # widen the bounded wait for workers
+#   ./deploy/recycle-container.sh --first-boot                # RMD_STATE_DIR is a genuinely fresh
+#                                                               # host with no checkout yet (W1-T2555)
 
 set -euo pipefail
 
@@ -94,6 +104,14 @@ CONTAINER_NAME="${RMD_DAEMON_CONTAINER:-remudero-daemon}"
 # The HOST side of the state bind mount — same derivation and same default as deploy/host-update.sh,
 # so the two scripts agree on where the fleet's locks and control flags actually live.
 STATE_DIR="${RMD_STATE_DIR:-${HOME:-/root}/rmd-state}"
+# W1-T2555: HOW STATE_DIR WAS RESOLVED, NAMED — every refusal below that mentions STATE_DIR says
+# both the resolved path AND whether it came from an explicit RMD_STATE_DIR or the bare default, so
+# an operator reading the refusal never has to re-derive it by hand.
+if [ -n "${RMD_STATE_DIR:-}" ]; then
+  STATE_DIR_RESOLUTION="RMD_STATE_DIR=${RMD_STATE_DIR}"
+else
+  STATE_DIR_RESOLUTION="the default \${HOME:-/root}/rmd-state (HOME=${HOME:-<unset>})"
+fi
 STATE_MOUNT_DEST="/home/node/Remudero"
 CRED_DIR="${RMD_CLAUDE_DIR:-${HOME:-/root}/.claude}"
 CRED_MOUNT_DEST="/home/node/.claude"
@@ -126,13 +144,19 @@ HUNG_WORKER_AGE_S="${RMD_RECYCLE_HUNG_AGE_S:-7200}"
 # rewritten — this script does not read it back and does not depend on it existing.
 LEDGER_FILE="${STATE_DIR}/state/ledger.ndjson"
 
+# W1-T2555: THE OPERATOR'S OWN WORD THAT THIS IS A FRESH HOST, NEVER INFERRED. Defaults from the
+# env var so a fleet-automation caller can pass it without editing an argv list; --first-boot is the
+# same opt-in for an interactive operator. Either form is read identically below — see section 1.5.
+FIRST_BOOT="${RMD_RECYCLE_FIRST_BOOT:-0}"
+
 while [ $# -gt 0 ]; do
   case "$1" in
-    --tag)       TAG="${2:?--tag needs a value}"; shift 2 ;;
-    --registry)  REGISTRY="${2:?--registry needs a value}"; shift 2 ;;
-    --image)     IMAGE="${2:?--image needs a value}"; shift 2 ;;
-    --container) CONTAINER_NAME="${2:?--container needs a value}"; shift 2 ;;
-    -h|--help)   sed -n '1,70p' "$0"; exit 0 ;;
+    --tag)         TAG="${2:?--tag needs a value}"; shift 2 ;;
+    --registry)    REGISTRY="${2:?--registry needs a value}"; shift 2 ;;
+    --image)       IMAGE="${2:?--image needs a value}"; shift 2 ;;
+    --container)   CONTAINER_NAME="${2:?--container needs a value}"; shift 2 ;;
+    --first-boot)  FIRST_BOOT=1; shift ;;
+    -h|--help)     sed -n '1,72p' "$0"; exit 0 ;;
     *) echo "recycle-container: unknown argument '$1' (try --help)" >&2; exit 2 ;;
   esac
 done
@@ -155,6 +179,59 @@ if [ -f "${DOCKERENV_PATH}" ]; then
   exit 1
 fi
 
+# ── 1.5. STATE_DIR MUST ALREADY BE A CHECKOUT — OR THE OPERATOR MUST SAY THIS IS A FIRST BOOT ───
+# W1-T2555: MEASURED 2026-09-01. STATE_DIR was never tested for existence, and `find` over a
+# directory that is not there correctly returns nothing — so the "no blocking locks" line below
+# printed the exact wording an idle fleet produces over a path that had never been opened, and
+# `docker run -v "${STATE_DIR}:${STATE_MOUNT_DEST}"` would then have had DOCKER ITSELF create that
+# empty directory and boot a daemon with no repo, no plan and no ledger. Only an unrelated
+# `docker rm` race stopped that mount from happening on the fleet that measured this.
+#
+# THE PREDICATE IS "is this a checkout", never "is this the path an operator meant" — a typo'd or
+# inherited-default STATE_DIR has neither of the two markers below; a genuine one always has both:
+#   - STATE_DIR/state/          — the directory every lock, pause file and ledger line in this
+#                                  script already reads and writes under STATE_DIR.
+#   - STATE_DIR/remudero/.git   — the checkout deploy/entrypoint.sh clones into
+#                                  ($CONFIG_ROOT/remudero, CONFIG_ROOT == this same STATE_DIR
+#                                  mounted at ${STATE_MOUNT_DEST}), literal and hardcoded there too.
+#
+# THE FIRST-RUN CASE IS REAL: a genuinely fresh host has no state directory at all, and
+# entrypoint.sh's own clone is what creates the checkout inside it — so a blanket refusal would make
+# a first deploy impossible. FIRST_BOOT (RMD_RECYCLE_FIRST_BOOT=1 or --first-boot, above) is the
+# operator's explicit word that this run IS that first boot. It is NEVER inferred from the directory
+# being empty or absent — only this flag turns the refusal off.
+STATE_DIR_CHECKOUT_MARKER="${STATE_DIR}/state"
+STATE_DIR_REPO_MARKER="${STATE_DIR}/remudero/.git"
+if [ "${FIRST_BOOT}" != "1" ]; then
+  if [ ! -d "${STATE_DIR}" ] || [ ! -d "${STATE_DIR_CHECKOUT_MARKER}" ] || [ ! -e "${STATE_DIR_REPO_MARKER}" ]; then
+    echo "recycle-container: REFUSING — STATE_DIR resolved to ${STATE_DIR} (${STATE_DIR_RESOLUTION})," >&2
+    echo "  and this does not look like a real checkout:" >&2
+    if [ -d "${STATE_DIR}" ]; then
+      echo "    - the directory exists" >&2
+    else
+      echo "    - the directory does NOT exist" >&2
+    fi
+    if [ -d "${STATE_DIR_CHECKOUT_MARKER}" ]; then
+      echo "    - ${STATE_DIR_CHECKOUT_MARKER} is present" >&2
+    else
+      echo "    - ${STATE_DIR_CHECKOUT_MARKER} is MISSING" >&2
+    fi
+    if [ -e "${STATE_DIR_REPO_MARKER}" ]; then
+      echo "    - ${STATE_DIR_REPO_MARKER} is present" >&2
+    else
+      echo "    - ${STATE_DIR_REPO_MARKER} is MISSING" >&2
+    fi
+    echo "  Mounting this path would hand the daemon an EMPTY checkout — docker itself creates" >&2
+    echo "  whatever directory this script does not refuse first (W1-T2555). NOTHING has been" >&2
+    echo "  touched: no lock was read, no container was stopped or removed." >&2
+    echo "  If this genuinely IS a first-ever boot on a fresh host, say so explicitly — this is" >&2
+    echo "  never inferred from the directory being empty or absent:" >&2
+    echo "    RMD_RECYCLE_FIRST_BOOT=1 $0 ...   (or: $0 --first-boot ...)" >&2
+    echo "  Otherwise fix RMD_STATE_DIR to point at the real state directory and re-run." >&2
+    exit 1
+  fi
+fi
+
 # ── 2. EVERY BLOCKING LOCK IS PRINTED IN FULL — NEVER DELETED, NEVER JUDGED ─────────────────────
 # `state/drain.lock` and `state/inflight/*.lock` are read-only from here, always, regardless of what
 # happens later in this run. A host-side process cannot decide whether a lock naming a now-gone
@@ -165,7 +242,7 @@ print_blocking_locks() {
   local any=0
   if [ -f "${DRAIN_LOCK}" ]; then
     any=1
-    echo "recycle-container: state/drain.lock is PRESENT — printed in full, never deleted by this script:"
+    echo "recycle-container: ${DRAIN_LOCK} is PRESENT — printed in full, never deleted by this script:"
     sed 's/^/    /' "${DRAIN_LOCK}" 2>/dev/null || echo "    (unreadable)"
     echo "    A host-side script cannot tell whether the holder above names a container that is gone;"
     echo "    the daemon reclaims a foreign container-shaped holder on its OWN next boot (W1-T978)."
@@ -175,7 +252,7 @@ print_blocking_locks() {
     for f in "${INFLIGHT_DIR}"/*.lock; do
       [ -e "${f}" ] || continue
       any=1
-      echo "recycle-container: $(basename "${f}") is PRESENT under state/inflight/ — printed, never deleted:"
+      echo "recycle-container: ${f} is PRESENT — printed, never deleted:"
       sed 's/^/    /' "${f}" 2>/dev/null || echo "    (unreadable)"
     done
   fi
@@ -466,8 +543,91 @@ worker_lines() {
     | grep -F -- 'claude --output-format' || true
 }
 
+# ── W1-T2556: A LOCK NAMING A CONTAINER THAT NO LONGER EXISTS IS RECLAIMED, NOT WAITED ON ────────
+#
+# THIS SCRIPT IS THE THING THAT PRODUCES THE NEXT BOOT. The header above (section 2) says a
+# host-side script cannot judge a lock's staleness and defers to "the daemon's own next boot" —
+# true for `isHolderStale`'s container branch (src/lib/fs-race-safe.ts, W1-T978), which can only
+# run FROM INSIDE a container. But that deferral is unsound HERE: this recycle is what produces
+# the next boot, so a lock naming a container that is provably gone waits out the full bound,
+# refuses, and the fleet never reaches the boot that was supposed to clear it. MEASURED 2026-09-01:
+# `state/inflight/W1-T2525.lock` named `{"pid":57,"host":"8c8fc20029e2"}`; `docker ps -a` showed
+# `8c8fc20029e2` exited; the recycle refused twice and stayed down until an operator moved the file
+# by hand after reading the same id this script already had.
+#
+# THE ASYMMETRY THIS PRESERVES: killing a LIVE worker loses unrecorded spend, so anything this
+# cannot POSITIVELY classify as dead is still waited for and then refused, exactly as before. What
+# changes is narrow and one-directional — a lock's `host` moves out of the blocking set ONLY when
+# BOTH of these hold:
+#   1. `host` is SHAPED like a docker container id — `looksLikeContainerId`'s own shape
+#      (src/lib/fs-race-safe.ts): 12 or 64 lowercase hex characters. A `host` that is not
+#      container-id-shaped at all (a hand-named box, a pre-containerisation fixture, a free-form
+#      string) is something docker was never going to recognise, so asking it proves nothing —
+#      that lock's host CANNOT BE RESOLVED and is left exactly as conservative as today.
+#   2. `docker inspect --format '{{.State.Running}}' "${host}"` gives a DEFINITIVE dead answer:
+#      either the command itself FAILS (docker has no such container — ABSENT), or it succeeds
+#      and prints exactly `false` (the container exists but is NOT RUNNING — the measured
+#      incident's exact shape, `docker ps -a` reporting `exited`). Anything else — the command
+#      succeeds and prints `true` (RUNNING), or prints something this script cannot parse as
+#      `true`/`false` — is read as "still alive or unknown" and left alone. A `docker` that is
+#      simply unavailable behaves the same as any other inspect failure on a container-shaped
+#      host: read as ABSENT (rare and no worse than today, since an unavailable `docker` would
+#      already fail every OTHER docker call this script makes).
+#
+# PRINT BEFORE CLEARING, AND NEVER DELETE — the same standing discipline section 2 already applies
+# to every lock this script reads. A reclaimed lock is MOVED, never unlinked, into
+# `${INFLIGHT_DIR}/reclaimed/`, alongside a sibling `.reason` file recording exactly what docker
+# said and when — so a wrong judgement is recoverable and the evidence a lost run needs survives.
+INFLIGHT_CONTAINER_ID_RE='^[0-9a-f]{12}$|^[0-9a-f]{64}$'
+
+lock_host_field() {
+  # Same discipline as deploy/host-update.sh's `expiresAt` extraction: grep/cut, not jq — this
+  # script runs on a host that may have no node, no rmd and no jq. Empty output means unreadable,
+  # malformed, or simply carries no `host` key; every caller below treats that as "cannot resolve".
+  # `|| true` on the pipeline itself: under `set -o pipefail` a malformed lock with NO `host` key
+  # makes `grep` exit 1 (no match), which — unguarded — would abort the WHOLE SCRIPT via `set -e`
+  # the moment `host="$(lock_host_field ...)"` assigns a failed substitution, taking the conservative
+  # "leave it alone" path down with it. Guarded, a malformed lock reaches the empty-output check
+  # below exactly as intended, instead of killing the recycle outright.
+  grep -ao '"host"[[:space:]]*:[[:space:]]*"[^"]*"' "$1" 2>/dev/null \
+    | head -1 \
+    | sed -E 's/.*"([^"]*)"[[:space:]]*$/\1/' || true
+}
+
+reclaim_dead_inflight_locks() {
+  [ -d "${INFLIGHT_DIR}" ] || return 0
+  local f host verdict running reclaimed_dir reclaimed_path
+  for f in "${INFLIGHT_DIR}"/*.lock; do
+    [ -e "${f}" ] || continue
+    host="$(lock_host_field "${f}")"
+    [ -n "${host}" ] || continue # unreadable or malformed — leave alone, still blocks
+    printf '%s' "${host}" | grep -Eq "${INFLIGHT_CONTAINER_ID_RE}" || continue # host cannot be resolved — leave alone
+
+    verdict=""
+    if running="$(docker inspect --format '{{.State.Running}}' "${host}" 2>/dev/null)"; then
+      [ "${running}" = "false" ] && verdict="NOT RUNNING (docker inspect: State.Running=false)"
+    else
+      verdict="ABSENT (docker inspect: no such container)"
+    fi
+    [ -n "${verdict}" ] || continue # running, or an answer this script cannot parse — leave alone
+
+    echo "recycle-container: ${f} names host ${host}, which docker reports ${verdict}." >&2
+    echo "  RECLAIMING — printed in full below before anything acts on it, never deleted:" >&2
+    sed 's/^/    /' "${f}" >&2 2>/dev/null || echo "    (unreadable)" >&2
+
+    reclaimed_dir="${INFLIGHT_DIR}/reclaimed"
+    mkdir -p "${reclaimed_dir}"
+    reclaimed_path="${reclaimed_dir}/$(basename "${f}").recycle-$$"
+    mv "${f}" "${reclaimed_path}"
+    printf 'reclaimed by recycle-container.sh (W1-T2556) pid %s at %s\nhost: %s\nverdict: %s\n' \
+      "$$" "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "${host}" "${verdict}" > "${reclaimed_path}.reason"
+    echo "  moved aside to ${reclaimed_path} (reason recorded alongside it) — recycle proceeds" >&2
+  done
+}
+
 waited=0
 while :; do
+  reclaim_dead_inflight_locks
   n=0
   if [ -d "${INFLIGHT_DIR}" ]; then
     n="$(find "${INFLIGHT_DIR}" -maxdepth 1 -name '*.lock' 2>/dev/null | wc -l | tr -d ' ')"

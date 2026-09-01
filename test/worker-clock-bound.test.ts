@@ -260,6 +260,14 @@ function clockBoundGitFixture(root: string): { repoDir: string } {
   execFileSync("git", ["-C", seed, "config", "user.email", "clockbound-test@example.invalid"]);
   execFileSync("git", ["-C", seed, "config", "user.name", "clockbound-test"]);
   writeFileSync(join(seed, "README.md"), "seed\n");
+  // W1-T2510: the recon-reuse key's `plan_sha` is now `taskRecordSha`, resolved against the
+  // WORKTREE's own `plan/tasks.yaml` (see its call site's doc: "never the orchestrator's own
+  // possibly staler planPath"). A worktree with no plan record resolves to PLAN_RECORD_ABSENT,
+  // which is deliberately excluded from ever validating a reuse -- so without this the reuse
+  // below can never happen and the "one spawn" assertion fails for a fixture reason, not a
+  // behavioural one. Every real checkout carries this file; the fixture now does too.
+  mkdirSync(join(seed, "plan"), { recursive: true });
+  writeFileSync(join(seed, "plan", "tasks.yaml"), FIXTURE_PLAN);
   execFileSync("git", ["-C", seed, "add", "-A"]);
   execFileSync("git", ["-C", seed, "commit", "-q", "-m", "seed"]);
   execFileSync("git", ["-C", seed, "push", "-q", "origin", "main"]);

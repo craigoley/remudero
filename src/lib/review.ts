@@ -2910,6 +2910,11 @@ const CHANGESET_CONTEXT_RE =
  * in a long body must not silence every claim after it. An ODD count before the match means the
  * match sits inside an open span. Backtick and double quote only — an apostrophe is ordinary
  * English punctuation and counting it would silence half of any body that uses contractions.
+ *
+ * W1-T2549: this is the ONE predicate for "is this match quoted", shared by every arm of {@link
+ * bodyContradictsDiff} rather than copied per arm — {@link claimsChangesetContext} (count) called
+ * it first; {@link shorthandIsAboutChangeset} (label, copular, attributive) now hoists the same
+ * call rather than reimplementing it, so all four arms agree on what counts as a quotation.
  */
 function isInsideInlineQuote(report: string, index: number): boolean {
   const lineStart = report.lastIndexOf("\n", index - 1) + 1;
@@ -3110,7 +3115,25 @@ export const DENIED_LABEL_ANSWER_RE = /^[*_`'")\]\s]*:\s*(?:(?:no|nope)(?![ \t]*
  * merely shares a sentence with an unrelated negation.
  */
 export const DENIED_ATTRIBUTIVE_RE = /\b(?:not|never|isn't|aren't|wasn't)\s+(?:a|an|the)?\s*$/i;
+/**
+ * W1-T2549 — THE SAME GUARD, HOISTED, NOT REIMPLEMENTED. W1-T2534 gave the count arm
+ * ({@link claimsChangesetContext}) a check for an inline-quoted span — {@link isInsideInlineQuote}
+ * — but left this function's three arms (label, copular, attributive) uncovered, so a body that
+ * QUOTED a scope label — reporting what another PR's body said, or citing the trigger string this
+ * very detector documents — was still read as this body's own claim.
+ *
+ * MEASURED, the same 2026-08-31 session that found the count-arm gap: #3422's second body (after
+ * its first, count-arm body was fixed per W1-T2534) quoted the LABEL form and was refused for it,
+ * and #3421's measurement table — reproducing this detector's own trigger strings — was only made
+ * to pass by moving it into a FENCED block, W1-T308's block-level escape hatch. The literals were
+ * byte-identical; only the wrapper changed, which is the inconsistency this guard removes.
+ *
+ * Checked FIRST, exactly as the count arm checks it first: no amount of colon/linking-verb/head-
+ * noun shape below turns a quotation into an assertion. This is the ONE call, not a second copy —
+ * a second implementation is exactly how the count arm and this one drifted apart the first time.
+ */
 function shorthandIsAboutChangeset(report: string, index: number, length: number): boolean {
+  if (isInsideInlineQuote(report, index)) return false;
   const rest = report.slice(index + length);
   // THE LABEL FORM IS A CLAIM, and it is the one the house style actually writes: `data-only: no
   // code.` (#1025's own body) and `**Plan-only**: one file added`. A colon immediately after the
@@ -3119,13 +3142,22 @@ function shorthandIsAboutChangeset(report: string, index: number, length: number
   // often carries no changeset verb at all ("no code", "no src"). A path never continues with a
   // colon, so `test/trailer-credit-plan-only.test.ts` stays silent.
   //
+  // W1-T2549 NARROWED W1-T395's SCOPE, IT DID NOT REVERSE IT. W1-T395's invariant — a CLOSING
+  // DELIMITER merely ends a SPAN, not a sentence, so `**Plan-only**:` and `(Plan-only):` still read
+  // as a label — still holds for markdown EMPHASIS (`*`, `_`, backtick pairs used as styling) and
+  // for a bracketing aside (`(…)`). It no longer extends to a QUOTE character (`"` or a lone
+  // backtick) that leaves the span open on this line: that shape is now caught by the
+  // `isInsideInlineQuote` guard above, before this delimiter class ever runs, because that is
+  // indistinguishable from the inline quotation the count arm already exempts. See
+  // test/changeset-shorthand-anchor.test.ts for the fixtures that split on this line.
+  //
   // THE DELIMITER CLASS IS THE LABEL ARM'S OWN, not a shared helper's. W1-T395 established that a
-  // CLOSING DELIMITER (backtick, quote, paren, bracket) "merely ends a SPAN" rather than a
-  // sentence, and pinned the invariant that quoting a claim must not change the verdict
-  // (test/review-absence-anchor-delimiter.test.ts). `"Plan-only": no source touched.` satisfied
-  // that invariant only by accident until now — the emphasis-only class here never matched the
-  // quote, and the sentence-scoped arm this task removed was silently covering for it. The gap was
-  // always in this arm; removing its cover is what made it visible.
+  // CLOSING DELIMITER "merely ends a SPAN" rather than a sentence, so `**Plan-only**:` and
+  // `(Plan-only):` still reach the colon and read as a label (test/review-absence-anchor-delimiter
+  // .test.ts). A QUOTE delimiter (`"` or a lone backtick) is no longer decided down here at all —
+  // W1-T2549's guard above returns false for it before this line ever runs, because a body that
+  // opened a quote span before the shorthand is reporting, not asserting. This class therefore
+  // never needs to special-case a quote character; the guard above already removed it from view.
   if (/^[*_`'")\]\s]*:/.test(rest)) {
     // W1-T2533: ...unless the body ANSWERED the question negatively. See DENIED_LABEL_ANSWER_RE
     // for why `no <noun>` is still an assertion while `no.` and `not …` are denials.

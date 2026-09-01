@@ -782,6 +782,8 @@ import {
   runWorktreeReapRung,
   spawnWorker,
   cacheTokenLedgerFields,
+  capStderrExcerpt,
+  STDERR_EXCERPT_CAP,
   noPrReportExcerpt,
   workerLedgerFields,
   workerTranscript,
@@ -1434,6 +1436,14 @@ export function materializeOriginShards(
  * (already reported via `say`) on a hard failure instead of throwing — so a caller can refuse
  * cleanly with no spawn. A successful-but-stale sync (`--allow-stale`) is also ledgered and
  * surfaced via `say`, then returned normally so the run proceeds.
+ *
+ * W1-T2513: `opts.planSnapshot`, when supplied, REPLACES the direct `syncPlanFromOrigin` call
+ * below as the source of the raw sync outcome — same throw/return contract, so every branch
+ * here (the stale-dispatch announcement, the `GitFetchError` refusal) runs UNCHANGED against
+ * whatever it returns. This is the seam a multi-lane caller uses to hand every lane of one tick
+ * the SAME fetch+load outcome instead of each lane paying for its own — see
+ * {@link createPlanSyncCoalescer}. Omitted (every caller but `drainCommand`/`daemonCommand`'s
+ * multi-lane `runOne`), this is byte-identical to before this task existed.
  */
 export function syncPlanOrRefuse(
   planPath: string,
@@ -1441,12 +1451,15 @@ export function syncPlanOrRefuse(
     allowStale: boolean;
     log: (step: string, extra?: Record<string, unknown>) => void;
     say: (msg: string) => void;
+    planSnapshot?: (o: { allowStale?: boolean }) => SyncedPlan;
   },
 ): SyncedPlan | { error: string } {
   const repoDir = dirname(dirname(planPath));
   const relPath = relative(repoDir, planPath);
   try {
-    const synced = syncPlanFromOrigin(repoDir, relPath, { allowStale: opts.allowStale });
+    const synced = opts.planSnapshot
+      ? opts.planSnapshot({ allowStale: opts.allowStale })
+      : syncPlanFromOrigin(repoDir, relPath, { allowStale: opts.allowStale });
     if (synced.staleDispatch) {
       opts.log("git.stale_dispatch", { stale_dispatch: true });
       opts.say(`WARNING: dispatching from a STALE origin/main ref (--allow-stale, fetch failed)`);
@@ -1461,6 +1474,76 @@ export function syncPlanOrRefuse(
     }
     throw e;
   }
+}
+
+/**
+ * W1-T2513 — SHARE ONE ORIGIN FETCH + ONE PLAN PARSE ACROSS EVERY LANE OF A TICK, rather than
+ * letting each lane pay for its own. `drainCommand`/`daemonCommand` build exactly ONE of these
+ * per invocation (never per tick, never per lane — see their own call sites) and hand its
+ * `sync` method to every `runTask` call via the `planSnapshot` opt (threaded to
+ * {@link syncPlanOrRefuse} above); a caller that supplies nothing gets today's behaviour,
+ * unchanged, every time.
+ *
+ * NO EXPLICIT "NEW TICK" SIGNAL IS NEEDED, because none is available: `runTask` carries ZERO
+ * `await` from its declaration to well past this call (see that function's own doc), so
+ * `Promise.allSettled(admitted.map((t) => deps.runOne(t.id)))` (drain.ts/daemon.ts) invokes
+ * every lane of ONE tick SYNCHRONOUSLY, back-to-back, in the SAME turn of the event loop —
+ * `Array.prototype.map` never yields to the microtask queue between callback invocations, and
+ * an async function's body runs synchronously up to its first `await` before returning a
+ * promise to its caller. So: lane 1 calls `sync`, finds the cache empty, computes the real
+ * result and caches it; lanes 2..N, invoked synchronously right after in the same `.map()`,
+ * find the cache already populated and reuse it. The cache is cleared on the very next
+ * microtask — by which point every lane of THIS tick has already read it — and the NEXT tick's
+ * first call cannot happen until every lane of the current one has settled (via the awaited
+ * `Promise.allSettled`), which requires at least one microtask/macrotask turn to have already
+ * elapsed. So the cache can never survive to answer a second tick's first call: the staleness
+ * budget is exactly one tick, by construction, with no counter or timer to keep honest.
+ *
+ * WHAT IS SHARED, WHAT IS NOT. Only the raw {@link syncPlanFromOrigin} outcome (the parsed
+ * `Plan` plus `staleDispatch`, or the thrown {@link GitFetchError}) is cached. Each lane's own
+ * `syncPlanOrRefuse` call still runs its own `log`/`say` against that shared outcome under its
+ * own `run_id` — so a shared fetch failure still ledgers `git_fetch_failed` for, and refuses,
+ * every lane identically, and a shared `staleDispatch` still prints the WARNING for every lane,
+ * exactly as if each had fetched for itself.
+ */
+export function createPlanSyncCoalescer(
+  planPath: string,
+  /** Injectable {@link syncPlanFromOrigin} — a test wraps the real function with a call
+   *  counter to prove the coalescing (real git, real parse, just observed); production never
+   *  overrides this. */
+  syncFn: (repoDir: string, relPath: string, opts: { allowStale?: boolean }) => SyncedPlan = syncPlanFromOrigin,
+): {
+  sync: (opts: { allowStale?: boolean }) => SyncedPlan;
+} {
+  const repoDir = dirname(dirname(planPath));
+  const relPath = relative(repoDir, planPath);
+  let pending: { key: string; result?: SyncedPlan; error?: unknown } | undefined;
+  return {
+    sync(opts) {
+      const key = opts.allowStale ? "stale" : "strict";
+      if (!pending || pending.key !== key) {
+        const slot: { key: string; result?: SyncedPlan; error?: unknown } = { key };
+        try {
+          slot.result = syncFn(repoDir, relPath, { allowStale: opts.allowStale });
+        } catch (e) {
+          // NOT erased, and NOT swallowed: the failure is memoised on the slot and RETHROWN below
+          // (`if (pending.error !== undefined) throw pending.error`) to every lane that coalesces
+          // onto this same tick, so a failed sync reaches each caller exactly as it would have if
+          // each had fetched for itself. Deliberately not rethrown HERE: the throw has to happen
+          // per-caller at the coalescer's exit, not once inside the shared fetch.
+          slot.error = e;
+        }
+        pending = slot;
+        // Clear on the very next microtask — see this function's own doc for why every lane of
+        // THIS tick has already read `slot`, synchronously, by the time this fires.
+        queueMicrotask(() => {
+          if (pending === slot) pending = undefined;
+        });
+      }
+      if (pending.error !== undefined) throw pending.error;
+      return pending.result as SyncedPlan;
+    },
+  };
 }
 
 /**
@@ -3733,12 +3816,64 @@ export interface RemotePresenceProbeFailure {
 
 /** {@link fallbackPushCause}'s answer: the fallback always fires for the same reason
  *  (`branchOnOrigin === false`), but WHY that is true splits into four distinguishable shapes.
- *  `detail` is always populated — a cause is never reported bare (acceptance #1/#5). */
+ *  `detail` is always populated — a cause is never reported bare (acceptance #1/#5).
+ *
+ *  `evidence` (W1-T2522) is the worker/probe's OWN scrubbed, bounded failure text — added
+ *  BESIDE `detail`, never in place of it, so every existing consumer that reads `cause`/`detail`
+ *  keeps seeing exactly what it always has. Before this, `detail` was a FIXED per-class sentence
+ *  ("the worker's own transcript/stderr carries a git/gh authentication failure") repeated
+ *  verbatim on all 15 `credential_expired` ledger rows to date — the classifier had already read
+ *  the distinguishing text and threw it away. `evidence` is always populated too: a class is
+ *  never asserted from evidence nobody can now inspect (see {@link fallbackPushEvidence}'s
+ *  "names the absence" fallback for the case where there is truly nothing to carry). */
 export type FallbackPushCause =
-  | { cause: "probe_unreadable"; detail: string }
-  | { cause: "credential_expired"; detail: string }
-  | { cause: "push_not_attempted"; detail: string }
-  | { cause: "undetermined"; detail: string };
+  | { cause: "probe_unreadable"; detail: string; evidence: string }
+  | { cause: "credential_expired"; detail: string; evidence: string }
+  | { cause: "push_not_attempted"; detail: string; evidence: string }
+  | { cause: "undetermined"; detail: string; evidence: string };
+
+/** Named placeholder for {@link fallbackPushEvidence} when there is truly nothing to carry — an
+ *  absent/empty stderr or transcript must still SAY so (acceptance: "names the absence"), never a
+ *  silently blank string a future reader could mistake for a field that just wasn't populated. */
+export const FALLBACK_PUSH_EVIDENCE_ABSENT = "(no readable stderr/transcript text was captured)";
+
+/**
+ * Scrubs a git/gh credential out of failure text before {@link fallbackPushCause} ledgers it
+ * (W1-T2522 hard constraint: "must not leak a credential"). No existing scrub helper in this repo
+ * covers this shape — `scrubEntry` (lib/learnings.ts) targets PII in exported learning entries,
+ * and worker-home.ts's keychain error redacts one already-known password by exact-value `split`.
+ * Neither applies here: this text is a git/gh failure message whose secret (if any) is matched
+ * STRUCTURALLY, not by a value already in hand. Two shapes:
+ *   1. Userinfo embedded in a URL — `https://x-access-token:ghp_xxx@github.com/...` — exactly the
+ *      form a credential-helper-injected remote fails with. The whole `user[:pass]@` segment is
+ *      replaced, not just a token-shaped substring inside it.
+ *   2. A bare GitHub token by its own prefix (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`,
+ *      `github_pat_`) wherever else it appears (an env dump, a `curl -v` header echo) — outside a
+ *      URL too, so shape 1 missing it is not the only line of defense.
+ * Applied to EVERY evidence string this module ledgers, not only the `credential_expired`
+ * branch — a `probe_unreadable` or `undetermined` row's text can carry the identical shape.
+ */
+export function scrubGitCredentialText(text: string): string {
+  return text
+    .replace(/(https?:\/\/)[^\s/@]+@/gi, "$1<redacted>@")
+    .replace(/\b(?:ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]{20,}\b/g, "<redacted-token>");
+}
+
+/**
+ * {@link fallbackPushCause}'s `evidence` field: `text`, scrubbed then bounded to
+ * {@link STDERR_EXCERPT_CAP} chars — the SAME cap {@link capStderrExcerpt} already holds every
+ * other ledgered stderr/report excerpt in this file to, reused rather than a second number
+ * invented for an identical purpose (W1-T2522 hard constraint: "must bound oversized stderr").
+ * Scrub runs BEFORE bound: a credential must never survive being sliced in half at the cap
+ * boundary into something that no longer matches either pattern above but still leaks a fragment.
+ * Empty/whitespace-only input becomes {@link FALLBACK_PUSH_EVIDENCE_ABSENT} — a cause is asserted
+ * from SOMETHING, and when that something is unreadable the row must say so, not fall silent.
+ */
+export function fallbackPushEvidence(text: string): string {
+  const trimmed = text.trim();
+  if (trimmed === "") return FALLBACK_PUSH_EVIDENCE_ABSENT;
+  return capStderrExcerpt(scrubGitCredentialText(trimmed), STDERR_EXCERPT_CAP);
+}
 
 /**
  * W1-T2267 — WHY THE ORCHESTRATOR'S FALLBACK PUSH FIRED, NOT ONLY THAT IT DID (design
@@ -3771,23 +3906,35 @@ export function fallbackPushCause(
 ): FallbackPushCause {
   if (!probe || probe.status !== 2) {
     const reason = classifyGhFailure(probe?.status ?? null, probe?.stderr ?? "");
+    // `detail` is scrubbed too (not only the new `evidence` field below): it already interpolated
+    // the probe's raw stderr before this task, and a credential-bearing URL in THAT stderr would
+    // have leaked exactly the same way. Existing consumers only ever regex/substring-match `detail`
+    // (see the sibling suite's `assert.match(..., /status 128/)`) — none depend on a credential
+    // surviving inside it, so scrubbing changes no observable behavior except closing the leak.
+    const scrubbedStderr = probe?.stderr ? scrubGitCredentialText(probe.stderr) : "";
     return {
       cause: "probe_unreadable",
       detail:
         `git ls-remote could not confirm the branch is absent (status ${probe?.status ?? "none"}, ` +
-        `classified ${reason})${probe?.stderr ? `: ${probe.stderr}` : ""}`,
+        `classified ${reason})${scrubbedStderr ? `: ${scrubbedStderr}` : ""}`,
+      evidence: fallbackPushEvidence(probe?.stderr ?? ""),
     };
   }
   if (classifyGhFailure(null, workerEvidence) === "auth") {
     return {
       cause: "credential_expired",
       detail: "the worker's own transcript/stderr carries a git/gh authentication failure",
+      // THE FIX: `credential_expired`'s `detail` above stayed a fixed sentence on all 15 incidents
+      // to date — this is the text the classifier just read to reach that verdict, carried instead
+      // of discarded (W1-T2522).
+      evidence: fallbackPushEvidence(workerEvidence),
     };
   }
   if (!/\bgit\s+push\b/i.test(workerEvidence)) {
     return {
       cause: "push_not_attempted",
       detail: "no \"git push\" invocation appears anywhere in the worker's own transcript",
+      evidence: fallbackPushEvidence(workerEvidence),
     };
   }
   return {
@@ -3795,6 +3942,7 @@ export function fallbackPushCause(
     detail:
       "the branch is confirmed absent from origin but neither a credential failure nor a missing " +
       "push attempt is evident in the worker's own transcript",
+    evidence: fallbackPushEvidence(workerEvidence),
   };
 }
 
@@ -5430,6 +5578,194 @@ export function renderFixPrompt(opts: {
   ].join("\n");
 }
 
+// ── GENERATOR-BACKED GATE FIX (W1-T2551) ──────────────────────────────────────────────────────
+//
+// GROUND TRUTH this closes: every `<name>:check` npm script paired with a bare `<name>` script is
+// a GENERATOR run in verify mode (plan-index/plan-index:check, docs-index/docs-index:check,
+// learnings-index/learnings-index:check, cli-reference/cli-reference:check, capability-snapshot/
+// capability-snapshot:check, learnings-assert/learnings-assert:check, as of this writing — NEVER
+// hand-listed here, see {@link declaredGeneratorScriptFor}). Every one of those generators fails
+// `--check` with the IDENTICAL sentence, `Run 'npm run <name>' and commit the result.` (grepped
+// across scripts/generate-*.mjs and scripts/learnings-assert-check.mjs, not assumed) — a ci-log
+// fix-rung dispatch whose failing check(s) print that sentence is handed to a full worker anyway
+// today, which reaches the SAME command the gate already named at the cost of a whole worker spawn
+// and a strike against `strikeCap` for work that is entirely deterministic (this task's rationale
+// (3)). This section closes that gap with a SEPARATE mechanism from {@link FIX_MODE_RULES} — no
+// worker is spawned for the class this covers at all, so there is no prompt-rendering mode to add;
+// {@link runFixRung} short-circuits BEFORE a worker would ever be dispatched (see its own `W1-T2551
+// SITE`, before `strikes++`).
+//
+// OUT OF SCOPE, NAMED (this task's rationale (5), unchanged here): (a) any gate whose fix is not a
+// generator run — {@link generatorFixFor} returns `undefined` for it and it reaches the ordinary
+// rung exactly as before; (b) the merge-conflict rung's OWN regenerable-artifact admission
+// (`REGENERABLE_ARTIFACT_GENERATORS`, lib/sweep.ts, W1-T2548) — a hand-maintained PATH→generator
+// table for a DIFFERENT rung (the conflict rung, not this one), deliberately NOT reused or kept in
+// sync here: this class derives its pairing from package.json's own declared scripts instead (see
+// below), and the two tables answering the same question two different ways is this task's own
+// acceptance criterion, not an oversight.
+
+/**
+ * Read the generator/`:check` pairing OFF package.json's own declared `scripts` map — NEVER a
+ * hand-maintained table like {@link REGENERABLE_ARTIFACT_GENERATORS} (lib/sweep.ts, a DIFFERENT
+ * rung's admission list, out of scope here per this task's rationale (5b)). `checkOrGeneratorName`
+ * may be given either shape (`"plan-index:check"` or bare `"plan-index"`); the BASE name is
+ * returned only when BOTH the bare name and its `:check` counterpart are declared scripts — that
+ * shared declaration IS the pairing itself, not an inference drawn from it. `undefined` for any
+ * name package.json does not declare BOTH halves of, including a `:check` script with no bare
+ * counterpart at all (`api-client:check`, `task-id-existence:check`, `no-hand-rolled-fetch:check`,
+ * `worker-branch-shape:check` — measured on this repo's own package.json, 2026-08 — each of those
+ * is fixed by something other than "run the paired generator", so none belongs in this class).
+ */
+export function declaredGeneratorScriptFor(
+  scripts: Readonly<Record<string, string>>,
+  checkOrGeneratorName: string,
+): string | undefined {
+  const suffix = ":check";
+  const base = checkOrGeneratorName.endsWith(suffix) ? checkOrGeneratorName.slice(0, -suffix.length) : checkOrGeneratorName;
+  if (base.length === 0) return undefined;
+  if (!Object.prototype.hasOwnProperty.call(scripts, base)) return undefined;
+  if (!Object.prototype.hasOwnProperty.call(scripts, `${base}${suffix}`)) return undefined;
+  return base;
+}
+
+/**
+ * Extract the generator name a failing check's OWN log names as its fix — every generator this
+ * class covers fails with the IDENTICAL `Run 'npm run <name>' and commit the result.` sentence
+ * (see this section's own header doc for where that was grepped, not assumed). `undefined` when
+ * the log names no such sentence, which is the ordinary case for the vast majority of CI failures
+ * (a real test failure, a lint error, a type error) — that absence is exactly what keeps this
+ * class bounded to what it targets (rationale (5a)), never a widening net.
+ */
+export function remedyGeneratorNamedInLog(logTail: string): string | undefined {
+  const m = /Run 'npm run ([\w:@./-]+)' and commit the result\.?/.exec(logTail ?? "");
+  return m ? m[1] : undefined;
+}
+
+/**
+ * ONE failing check's declared generator fix, or `undefined` when this check is OUT of the class
+ * this task targets (acceptance criterion 3: a check with no generator counterpart still reaches
+ * the ordinary rung unchanged). Requires BOTH: the check's own log names a remedy generator (the
+ * sentence {@link remedyGeneratorNamedInLog} matches), AND that name is a REAL package.json-
+ * declared pairing ({@link declaredGeneratorScriptFor}) — never trusting the log's naming alone.
+ * The log is attacker-influenceable CI output (the SAME threat model W1-T210 fenced ci-log content
+ * for elsewhere in this rung); bounding to a script package.json itself already declares is what
+ * stops a crafted log from naming an arbitrary command and having it run.
+ */
+export function generatorFixFor(failure: Pick<CiFailure, "logTail">, scripts: Readonly<Record<string, string>>): string | undefined {
+  const named = remedyGeneratorNamedInLog(failure.logTail);
+  return named === undefined ? undefined : declaredGeneratorScriptFor(scripts, named);
+}
+
+/**
+ * TRUE only when EVERY failure in `failures` names a declared generator fix — a MIXED batch (one
+ * generator-fixable check beside an unrelated real defect) still reaches the ordinary rung
+ * unchanged (acceptance criterion 3): running only the fixable generator would leave the other
+ * failure unaddressed while looking, from the ledger, like progress was made. `false` on an empty
+ * list — there is nothing here to fix.
+ */
+export function allCiFailuresAreGeneratorFixable(
+  failures: readonly Pick<CiFailure, "logTail">[],
+  scripts: Readonly<Record<string, string>>,
+): boolean {
+  return failures.length > 0 && failures.every((f) => generatorFixFor(f, scripts) !== undefined);
+}
+
+/** One generator-fix attempt's outcome — see {@link runGeneratorFixForCiFailures}'s own doc. */
+export interface GeneratorFixResult {
+  /** `true` iff every generator ran, its own `:check` re-ran green, and (if anything changed) a commit landed. */
+  applied: boolean;
+  /** The generator script name(s) actually run, de-duplicated, first-seen order. */
+  generators: string[];
+  /** The commit this attempt produced, when one did — absent when nothing changed (already fresh) or `applied` is false. */
+  commitSha?: string;
+  /**
+   * Set ONLY when a generator ran clean but its OWN `--check` still failed afterward — a REAL
+   * failure (rationale (4)): this attempt never commits in that case, and the caller is expected
+   * to fall through to the ordinary fix rung rather than retry this same short-circuit forever.
+   */
+  escalate?: { generator: string; detail: string };
+}
+
+/**
+ * Resolve a ci-log fix-rung round WITHOUT spawning a worker — the mechanism this whole section
+ * exists to add (acceptance criterion 1). Every external interaction is injected (mirrors
+ * {@link runFixRung}'s own discipline) so this is unit-testable with fakes: no real spawn, git,
+ * or npm invocation in the test suite.
+ *
+ * SAFETY (rationale (4), acceptance criterion 4): each generator's OWN `<name>:check` is re-run
+ * AFTER regenerating and BEFORE any commit — a generator that runs clean but still leaves its
+ * check red is a real defect the next fix worker must look at, never papered over by committing a
+ * non-fix. Nothing here ever hand-composes file content (acceptance criterion 5): the only writes
+ * this function can produce are (1) whatever `deps.runScript` itself writes to the worktree by
+ * running the repo's OWN generator command, and (2) `deps.commit`, which is expected to `git add
+ * -A && git commit` whatever that generator left behind — never a diff this function authors.
+ *
+ * Returns `{ applied: false, generators: [] }` immediately, calling NOTHING, when `failures` is
+ * not entirely generator-fixable ({@link allCiFailuresAreGeneratorFixable}) — the caller's own
+ * gate before calling this, restated here so this function is safe to call unconditionally too.
+ */
+export async function runGeneratorFixForCiFailures(opts: {
+  failures: readonly CiFailure[];
+  scripts: Readonly<Record<string, string>>;
+  worktreePath: string;
+  taskId: string;
+  branch: string;
+  deps: {
+    runScript: (script: string, cwd: string) => Promise<{ status: number; stdout: string; stderr: string }>;
+    commit: (opts: { cwd: string; message: string }) => Promise<{ sha: string; changed: boolean }> | { sha: string; changed: boolean };
+    push: (opts: { cwd: string; branch: string }) => Promise<void> | void;
+  };
+}): Promise<GeneratorFixResult> {
+  if (!allCiFailuresAreGeneratorFixable(opts.failures, opts.scripts)) {
+    return { applied: false, generators: [] };
+  }
+  const generators: string[] = [];
+  for (const f of opts.failures) {
+    const g = generatorFixFor(f, opts.scripts);
+    if (g !== undefined && !generators.includes(g)) generators.push(g);
+  }
+  for (const generator of generators) {
+    const genResult = await opts.deps.runScript(generator, opts.worktreePath);
+    if (genResult.status !== 0) {
+      return {
+        applied: false,
+        generators,
+        escalate: { generator, detail: `generator itself exited ${genResult.status}: ${(genResult.stderr || genResult.stdout || "").trim()}` },
+      };
+    }
+  }
+  // The generator is the AUTHOR (rationale (4)) — re-run its OWN `:check` to confirm the fresh
+  // regeneration the loop above just wrote actually satisfies the gate, BEFORE committing
+  // anything. Never trust the generator's own exit 0 alone.
+  for (const generator of generators) {
+    const checkResult = await opts.deps.runScript(`${generator}:check`, opts.worktreePath);
+    if (checkResult.status !== 0) {
+      return {
+        applied: false,
+        generators,
+        escalate: {
+          generator,
+          detail: `regenerated output still fails '${generator}:check': ${(checkResult.stderr || checkResult.stdout || "").trim()}`,
+        },
+      };
+    }
+  }
+  const commitResult = await opts.deps.commit({
+    cwd: opts.worktreePath,
+    message: `fix(${opts.taskId}): regenerate ${generators.join(", ")}\n\nGenerator-backed gate fix (W1-T2551) — committing\n${generators
+      .map((g) => `'npm run ${g}'`)
+      .join(", ")}'s own output, never a hand edit.\n\nRemudero-Task: ${opts.taskId}`,
+  });
+  if (!commitResult.changed) {
+    // Every check re-ran green already with nothing to stage — a race (something else
+    // regenerated it between the failing read and this attempt's own re-check) or the
+    // committed artifact was already fresh. Either way, nothing to push, nothing to escalate.
+    return { applied: true, generators };
+  }
+  await opts.deps.push({ cwd: opts.worktreePath, branch: opts.branch });
+  return { applied: true, generators, commitSha: commitResult.sha };
+}
+
 /**
  * W1-T138 (the #303/#305/#292/#315 fix), reworked by W1-T1279 (the #2624 fix): render ONE
  * ci-log failure as a single, specific line — the check NAME plus its DIAGNOSTIC line, e.g.
@@ -7058,6 +7394,54 @@ export function readFixRoundCommitsViaGit(worktreePath: string, sinceSha: string
 }
 
 /**
+ * W1-T2551: the real, `npm`-backed implementation of {@link runFixRung}'s `deps.runGeneratorScript`
+ * — `npm run --silent <script>` in `cwd`, captured rather than inherited (the fix rung's own log
+ * carries the output on failure; nothing here streams to the parent process's stdio). Never throws
+ * on a non-zero exit — that IS the failing-check signal {@link runGeneratorFixForCiFailures} reads.
+ */
+export function runNpmScriptViaSpawn(script: string, cwd: string): { status: number; stdout: string; stderr: string } {
+  const result = spawnSync("npm", ["run", "--silent", script], { cwd, encoding: "utf8" });
+  if (result.error) {
+    return { status: 1, stdout: result.stdout ?? "", stderr: String(result.error.message ?? result.error) };
+  }
+  return { status: result.status ?? 1, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+}
+
+/**
+ * W1-T2551: the real, `git`-backed implementation of {@link runFixRung}'s
+ * `deps.commitGeneratorOutput` — `git add -A` then `git commit`, the ONLY write this pair ever
+ * makes to the worktree beyond whatever the generator itself already wrote (acceptance criterion
+ * 5: the rung commits the generator's OWN output, never a hand-composed edit). `changed: false`,
+ * no commit made, when `git add -A` staged nothing.
+ */
+export function commitGeneratorOutputViaGit(opts: { cwd: string; message: string }): { sha: string; changed: boolean } {
+  execFileSync("git", ["-C", opts.cwd, "add", "-A"], { stdio: "pipe" });
+  const staged = execFileSync("git", ["-C", opts.cwd, "status", "--porcelain=v1"], { encoding: "utf8" });
+  if (staged.trim().length === 0) return { sha: "", changed: false };
+  execFileSync("git", ["-C", opts.cwd, "commit", "-m", opts.message], { stdio: "pipe" });
+  const sha = execFileSync("git", ["-C", opts.cwd, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  return { sha, changed: true };
+}
+
+/**
+ * W1-T2551: this repo's OWN `package.json` `scripts` map, read fresh from `worktreePath` — the
+ * declared-pairing source {@link declaredGeneratorScriptFor} reads (rationale (2)). A missing or
+ * unparseable `package.json` reads as `{}` (fail CLOSED on this one input — see
+ * `deps.packageScripts`'s own doc for why "unreadable" must never be treated as "everything is
+ * paired").
+ */
+export function readPackageScriptsFor(worktreePath: string): Readonly<Record<string, string>> {
+  try {
+    const parsed = JSON.parse(readFileSync(join(worktreePath, "package.json"), "utf8")) as { scripts?: Record<string, string> };
+    return parsed.scripts ?? {};
+  } catch {
+    // Missing/unparseable package.json: fail CLOSED to `{}`, never throw — an unreadable scripts
+    // map must read as "no declared pairing" (this function's own doc), not crash the fix rung.
+    return {};
+  }
+}
+
+/**
  * Dispatch ONE bounded fix worker per strike, up to `strikeCap` (config,
  * default 2), on a `blocked_review` verdict. Every dispatch receives the FULL
  * unmet_criteria set + the reviewer's reasons at once (never one criterion at
@@ -7326,6 +7710,31 @@ export async function runFixRung(opts: {
      * invent a retrigger. The real call sites wire {@link readFixRoundCommitsViaGit}.
      */
     readRoundCommits?: ReadFixRoundCommits;
+    /**
+     * W1-T2551: run ONE declared generator's npm script (`npm run <name>` semantics) against this
+     * rung's own worktree — the ONLY mechanism {@link generatorFixFor}'s class of ci-log failure
+     * is resolved by (never a hand-composed edit). Optional; when EITHER this or
+     * `commitGeneratorOutput` below is absent, the generator-fix short-circuit (site
+     * `rung.generator_fix`, before `strikes++`) never fires and every ci-log round goes straight
+     * to the ordinary fix-worker path exactly as it did before this task — fail OPEN, the same
+     * discipline every other optional dep here already uses.
+     */
+    runGeneratorScript?: (script: string, cwd: string) => Promise<{ status: number; stdout: string; stderr: string }>;
+    /**
+     * W1-T2551: commit whatever the generator run above staged into the worktree's OWN working
+     * tree — `git add -A && git commit`, never a hand-composed diff (acceptance criterion 5).
+     * `changed: false` when nothing was staged (the fresh regeneration already matched what was
+     * committed).
+     */
+    commitGeneratorOutput?: (opts: { cwd: string; message: string }) => { sha: string; changed: boolean } | Promise<{ sha: string; changed: boolean }>;
+    /**
+     * W1-T2551: this repo's OWN package.json `scripts` map — the declared-pairing source
+     * (rationale (2), acceptance criterion 2): a `<name>:check` script is a generator's verify
+     * mode IFF the bare `<name>` is ALSO declared there. Optional; absent behaves as `{}`, under
+     * which {@link generatorFixFor} never matches anything — "unknown" reads as "no pairing", the
+     * one input this feature must fail CLOSED on rather than guess.
+     */
+    packageScripts?: Readonly<Record<string, string>>;
   };
 }): Promise<FixRungOutcome> {
   const { deps } = opts;
@@ -7351,6 +7760,13 @@ export async function runFixRung(opts: {
   // of targeting the check that is actually still red.
   let noReviewYet = opts.ciFailures !== undefined;
   let currentCiFailures = opts.ciFailures;
+  // W1-T2551: bounds the generator-fix short-circuit (site `rung.generator_fix`, below) to a
+  // SMALL number of attempts per invocation — every attempt already re-verifies the regenerated
+  // output against its OWN `:check` before committing anything, but this caps how many rounds a
+  // persistent CI/local environment mismatch (never observed, guarded anyway) can spend spinning
+  // this rung without ever reaching a worker that could actually diagnose it.
+  let generatorFixAttempts = 0;
+  const GENERATOR_FIX_ATTEMPT_CAP = 2;
   // W1-T1279: every check name EVER observed red across this rung's strikes — the trajectory
   // input for the exhaustion escalation's own detail text (renderCiTrajectoryLine, above).
   // Seeded from round 1's evidence and re-unioned after every refresh below (never cleared), so a
@@ -7635,6 +8051,102 @@ export async function runFixRung(opts: {
       deps.log("fix.stood_down", { site: "rung.empty_ci_failures", strike: strikes + 1, reason });
       deps.say(`fix rung: standing down before strike ${strikes + 1} — ${reason}`);
       return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason };
+    }
+
+    // W1-T2551 SITE — GENERATOR-BACKED GATE FIX, BEFORE `strikes++`/any worker spawn: a ci-log
+    // round whose EVERY failing check's own log names a declared generator fix
+    // ({@link allCiFailuresAreGeneratorFixable}) is resolved by running that generator directly —
+    // never by spawning a worker (acceptance criterion 1), and never counted as a strike (this
+    // task's rationale (3): the CURRENT behavior spends a strike reaching a command the gate
+    // already named, which is exactly the defect this site closes). Gated on BOTH
+    // `runGeneratorScript`/`commitGeneratorOutput` being wired — absent either, this whole site is
+    // a structural no-op, fail OPEN exactly like every other optional dep in this rung, so every
+    // pre-existing caller (none of which wires these) is byte-for-byte unaffected. A MIXED or
+    // unrelated failure set still reaches the ordinary strike below completely unchanged
+    // (acceptance criterion 3) — {@link allCiFailuresAreGeneratorFixable} itself is what enforces
+    // "every failure or none", never a partial run.
+    if (
+      currentMergeConflict === undefined &&
+      noReviewYet &&
+      currentCiFailures !== undefined &&
+      currentCiFailures.length > 0 &&
+      generatorFixAttempts < GENERATOR_FIX_ATTEMPT_CAP &&
+      deps.runGeneratorScript &&
+      deps.commitGeneratorOutput &&
+      allCiFailuresAreGeneratorFixable(currentCiFailures, deps.packageScripts ?? {})
+    ) {
+      generatorFixAttempts++;
+      const runGeneratorScript = deps.runGeneratorScript;
+      const commitGeneratorOutput = deps.commitGeneratorOutput;
+      const generatorResult = await runGeneratorFixForCiFailures({
+        failures: currentCiFailures,
+        scripts: deps.packageScripts ?? {},
+        worktreePath: opts.worktreePath,
+        taskId: opts.taskId,
+        branch: opts.branch,
+        deps: {
+          runScript: runGeneratorScript,
+          commit: (o) => commitGeneratorOutput(o),
+          push: (o) => deps.push(o.cwd, o.branch),
+        },
+      });
+      if (generatorResult.applied) {
+        deps.log("fix.generator_fix", {
+          strike: strikes,
+          attempt: generatorFixAttempts,
+          generators: generatorResult.generators,
+          commit_sha: generatorResult.commitSha,
+        });
+        deps.say(
+          `fix rung: generator-fix — ran ${generatorResult.generators.map((g) => `'npm run ${g}'`).join(", ")} directly ` +
+            `(W1-T2551), no strike spent` +
+            (generatorResult.commitSha ? ` — committed ${generatorResult.commitSha.slice(0, 7)}` : " — already fresh, nothing to commit"),
+        );
+        if (generatorResult.commitSha === undefined) {
+          // Nothing changed (a race, or the artifact was already fresh) — re-looping without a
+          // fresh push would spin on the exact same evidence forever; fall through to the
+          // ordinary rung this round instead of `continue`-ing.
+        } else {
+          // A commit landed — wait for CI to react to this push, same as an ordinary strike's own
+          // push. `noReviewYet` stays TRUE regardless of the wait's own outcome: this rung never
+          // ran a worker this round, so there is no fresh review report to hand `deps.runReview`
+          // the way the ordinary strike path below does — flipping to review-mode here would
+          // dispatch the NEXT round against the stale placeholder `review` this rung started with
+          // (empty `criteria`), exactly the "empty reviewer-unmet dispatch" defect W1-T2236 (the
+          // `gate-fix` mode's own rationale) measured and closed elsewhere. Refresh the ci-log
+          // evidence instead (mirrors the ordinary strike's own post-push refresh, below): if
+          // nothing is red anymore, the NEXT iteration's `rung.empty_ci_failures` guard (W1-T1282,
+          // above) stands this down cleanly with no strike spent; if something else is still red,
+          // the next iteration re-derives from THAT — either another generator-fixable round, or a
+          // real fall-through to the ordinary worker dispatch.
+          await deps.waitForCiGreen(opts.prUrl, deps.log);
+          if (deps.fetchCiFailures) {
+            try {
+              currentCiFailures = await deps.fetchCiFailures(opts.prUrl);
+              for (const f of currentCiFailures) everRedCiCheckNames.add(f.name);
+            } catch (e) {
+              deps.log("fix.ci_failures_fetch_error", { strike: strikes, error: String((e as Error)?.message ?? e) });
+            }
+          }
+          continue;
+        }
+      } else if (generatorResult.escalate) {
+        // Rationale (4): a generator whose own regeneration still fails its own check is a REAL
+        // failure — never commit a non-fix, and never silently retry forever (the attempt cap
+        // above bounds that too). Falls through to the ordinary ci-log strike below UNCHANGED:
+        // this site's own log line is diagnostic only — the rung's EXISTING strike-exhaustion
+        // escalation, unchanged, is what eventually opens the BLOCKED issue if the worker below
+        // cannot resolve it either.
+        deps.log("fix.generator_fix_escalate", {
+          strike: strikes,
+          generator: generatorResult.escalate.generator,
+          detail: generatorResult.escalate.detail,
+        });
+        deps.say(
+          `fix rung: generator-fix — 'npm run ${generatorResult.escalate.generator}' did not resolve its own check; ` +
+            `falling through to the ordinary fix rung`,
+        );
+      }
     }
 
     // W1-T1227 SITE — SCOPE GATE, BEFORE `strikes++`: a prior strike (this invocation's own, the
@@ -9584,8 +10096,16 @@ function reconMaskedContextNote(
 // plumbing calls would need a repo, not just a worktree checkout) — both are content digests
 // computed straight off the WORKTREE this dispatch already checked out fresh from
 // `origin/main`, so "current" always means "what this dispatch would itself see":
-//   - `planSha` hashes every file under `<worktree>/plan/`, sorted by repo-relative path —
-//     a proxy for "any commit to plan/", the exact invalidation trigger MASTER-PLAN:1869 names.
+//   - `taskRecordSha` (W1-T2510) hashes the ONE file that holds the task's own record — the
+//     monolith `plan/tasks.yaml` or its `plan/tasks.d/<id>-*.yaml` shard, whichever
+//     `taskRecordPath` resolves to. This is the LIVE `plan_sha` key component (see its own doc,
+//     below `filesDigest`). `planSha` (immediately below) hashes every file under
+//     `<worktree>/plan/` instead — the REJECTED coarse proxy this task narrows away from: filing
+//     any OTHER task's shard moves it too, so on a plan-heavy day it invalidates artifacts whose
+//     own record never changed (measured live: W1-T2467's `files_digest` was byte-identical
+//     either side of an invalidation whose only mover was `plan_sha`). `planSha` is kept,
+//     unchanged and still exported, only as the historical/rejected alternative a test can
+//     restore to show the unrelated-filing case invalidate again.
 //   - `filesDigest` hashes the content of the task's own declared `files:` (an absent file —
 //     e.g. a forward-referenced test path not yet created — contributes a fixed "absent"
 //     sentinel rather than throwing, so a file's later CREATION is itself a digest change).
@@ -9613,10 +10133,13 @@ function sha256Hex(s: string): string {
 }
 
 /**
- * Content digest of every file under `<worktreePath>/plan/`, sorted by repo-relative path —
- * the `plan_sha` key component. A missing `plan/` dir (should not happen in a real checkout,
- * but a test fixture may omit it) hashes to the digest of an empty file list rather than
- * throwing, so a plan-less fixture still gets a stable, comparable value.
+ * Content digest of every file under `<worktreePath>/plan/`, sorted by repo-relative path.
+ * NO LONGER the live `plan_sha` key component (W1-T2510 replaced it with {@link taskRecordSha},
+ * scoped to the task's own record) — kept, unchanged and exported, as the REJECTED coarse
+ * alternative: any commit to `plan/`, including an unrelated task's shard, moves this. A missing
+ * `plan/` dir (should not happen in a real checkout, but a test fixture may omit it) hashes to
+ * the digest of an empty file list rather than throwing, so a plan-less fixture still gets a
+ * stable, comparable value.
  */
 export function planSha(worktreePath: string): string {
   const planDir = join(worktreePath, "plan");
@@ -9662,6 +10185,82 @@ export function filesDigest(worktreePath: string, files: ReadonlyArray<string>):
   const sorted = [...files].sort();
   const combined = sorted.map((f) => `${f}:${fileDigestOrAbsent(join(worktreePath, f))}`).join("\n");
   return sha256Hex(combined);
+}
+
+/**
+ * Sentinel for "the task's own plan record could not be found or read" — {@link taskRecordSha}'s
+ * failure return. Deliberately never shaped like a real sha256 hex digest, AND deliberately
+ * excluded from ever validating a reuse in {@link decideReconArtifactReuse} — a missing or
+ * unreadable record must invalidate, never match, even against a PRIOR artifact that itself
+ * happened to record this exact same sentinel (e.g. two dispatches in a row that both raced a
+ * plan sync). "Fail closed" here means the ABSENCE itself can never be the thing two dispatches
+ * agree on.
+ */
+export const PLAN_RECORD_ABSENT = "absent";
+
+/**
+ * Content digest of the task's OWN plan record (W1-T2510) — the file {@link taskRecordPath}
+ * (`lib/plan.ts`) resolves `taskId` to: either the monolith `plan/tasks.yaml` or this task's own
+ * `plan/tasks.d/<id>-*.yaml` shard. This is the LIVE `plan_sha` key component (see the doc above
+ * `planSha`, above, for why it replaces the whole-directory hash there).
+ *
+ * FAILS CLOSED: `taskRecordPath` returning `undefined` (no file anywhere currently holds
+ * `taskId`'s record) or a resolved path that fails to read (raced away between resolution and
+ * read) both collapse to {@link PLAN_RECORD_ABSENT} — never a thrown error, matching every other
+ * digest primitive in this file (`fileDigestOrAbsent`, `loadReconArtifact`) being fail-soft by
+ * construction, and never a value a reuse decision is allowed to match against (see
+ * `decideReconArtifactReuse`).
+ */
+export function taskRecordSha(planPath: string, taskId: string): string {
+  const recordPath = taskRecordPath(planPath, taskId);
+  if (!recordPath) return PLAN_RECORD_ABSENT;
+  try {
+    return sha256Hex(readFileSync(recordPath, "utf8"));
+  } catch {
+    // A race (the resolved path vanished between taskRecordPath's read and this one) reads
+    // identically to "never resolved" — both are the same ABSENT sentinel to every consumer.
+    return PLAN_RECORD_ABSENT;
+  }
+}
+
+/**
+ * Pure reuse/invalidate decision for the `(plan_sha, files_digest)` half of the recon artifact
+ * key (`task_id` is implicit — `prior`, if given, already belongs to this task; `loadReconArtifact`
+ * is keyed by task id on disk). Extracted from the call site (W1-T2510) so the predicate itself —
+ * including WHICH component an invalidation is attributed to — is unit-testable without spinning
+ * up a real dispatch.
+ *
+ * `prior === undefined` is the `recon.absent` case (first-ever dispatch, or an artifact that
+ * never existed): always invalid, and there is no "which component moved" to report since there
+ * is nothing to compare against — an artifact with no prior record is a MISS, never a hit.
+ *
+ * Otherwise, valid requires ALL THREE: `currentPlanSha` is not {@link PLAN_RECORD_ABSENT} (a
+ * missing/unreadable task record always invalidates, per `taskRecordSha`'s own doc), AND both
+ * halves of the key still match the prior artifact's. An invalid decision names the mover:
+ * `"plan_sha"` when the task's own record changed OR is currently unreadable, `"files_digest"`
+ * otherwise (MASTER-PLAN's invalidation sentence names only these two components — never a third
+ * "why", so the attribution is exhaustive by construction, not a default/fallback guess).
+ *
+ * THE ABSENT CHECK IS ITS OWN BRANCH, CHECKED BEFORE THE STRING COMPARISON, not folded into the
+ * `!==` below: a prior artifact can itself have been written with `plan_sha: PLAN_RECORD_ABSENT`
+ * (a task record that was already unreadable when an earlier dispatch's recon still ran and
+ * persisted — the persist path never re-checks this predicate), so `prior.plan_sha` can
+ * coincidentally STRING-EQUAL today's `PLAN_RECORD_ABSENT` even though nothing "matched" in any
+ * meaningful sense. Without this branch first, that coincidence would fall through to the
+ * `prior.plan_sha !== currentPlanSha` comparison, find them equal, and misattribute the
+ * invalidation to `"files_digest"` — wrong, and exactly the kind of silently-mislabeled ledger
+ * row `recon.invalidated`'s own doc says this row exists to prevent.
+ */
+export function decideReconArtifactReuse(
+  prior: ReconArtifact | undefined,
+  currentPlanSha: string,
+  currentFilesDigest: string,
+): { valid: boolean; invalidationReason?: "plan_sha" | "files_digest" } {
+  if (!prior) return { valid: false };
+  if (currentPlanSha === PLAN_RECORD_ABSENT) return { valid: false, invalidationReason: "plan_sha" };
+  const valid = prior.plan_sha === currentPlanSha && prior.files_digest === currentFilesDigest;
+  if (valid) return { valid: true };
+  return { valid: false, invalidationReason: prior.plan_sha !== currentPlanSha ? "plan_sha" : "files_digest" };
 }
 
 function reconArtifactPath(root: string, taskId: string): string {
@@ -10092,6 +10691,17 @@ async function runTask(
      *  sync — the operator named an exact file, so honor it verbatim, same as the sibling
      *  guard around the daemon's own non-self clone-sync (`!flagValue(rest, "--plan")`). */
     skipGitSync?: boolean;
+    /**
+     * W1-T2513 — coalescing seam for the multi-lane dispatch path: threaded straight through
+     * to {@link syncPlanOrRefuse}'s identical param (see that function's and
+     * {@link createPlanSyncCoalescer}'s own docs for the full contract). `drainCommand` and
+     * `daemonCommand` build ONE coalescer per invocation and pass its `sync` method here for
+     * every lane's `runTask` call, so the three lanes of one tick share a single origin fetch
+     * and a single plan parse instead of paying for it three times. Omitted — every other
+     * caller (`rmd run-task`, `rmd wipe-test`, every existing test) — `runTask` fetches and
+     * loads for itself exactly as it always has.
+     */
+    planSnapshot?: (o: { allowStale?: boolean }) => SyncedPlan;
     /** W1-T319 (fb-1784773321502-86793d): the deliberate override for the ALREADY-MERGED
      *  by-id refusal below — modelled on `allowStale` above. With it unset (the default), a
      *  task the projection already reports merged refuses at zero cost, verdict
@@ -10317,7 +10927,12 @@ async function runTask(
   if (opts.skipGitSync) {
     plan = loadPlan(planPath);
   } else {
-    const synced = syncPlanOrRefuse(planPath, { allowStale: opts.allowStale ?? false, log, say });
+    const synced = syncPlanOrRefuse(planPath, {
+      allowStale: opts.allowStale ?? false,
+      log,
+      say,
+      planSnapshot: opts.planSnapshot,
+    });
     if ("error" in synced) {
       return { taskId, runId, merged: false, costUsd: 0, verdict: "blocked_git_fetch" };
     }
@@ -10887,15 +11502,19 @@ async function runTask(
       // artifact exists for THIS task at THIS `(plan_sha, files_digest)`. Both are computed against
       // `worktreePath`, already checked out fresh from `origin/main` above, so "current" always
       // means what THIS dispatch would itself observe — never a stale read of the orchestrator's
-      // own tree. See `planSha`/`filesDigest`/`ReconArtifact`'s doc (above `RECON_MAX_TURNS`) for
-      // the key's derivation and why it drops `head_sha`.
-      const currentPlanSha = planSha(worktreePath);
+      // own tree. See `taskRecordSha`/`filesDigest`/`ReconArtifact`'s doc (above `RECON_MAX_TURNS`)
+      // for the key's derivation and why it drops `head_sha`.
+      //
+      // W1-T2510: `plan_sha` is now `taskRecordSha` — the digest of THIS task's own plan record —
+      // not `planSha` (the whole `plan/` directory, kept above only as the rejected alternative).
+      // The record is looked up against the WORKTREE's own `plan/tasks.yaml`, the same "fresh off
+      // this dispatch's own checkout" discipline `filesDigest` already follows, never the
+      // orchestrator's own (possibly staler) `planPath`.
+      const currentPlanSha = taskRecordSha(join(worktreePath, "plan", "tasks.yaml"), taskId);
       const currentFilesDigest = filesDigest(worktreePath, task.files ?? []);
       const priorReconArtifact = loadReconArtifact(config.root, taskId);
-      const reconArtifactValid =
-        !!priorReconArtifact &&
-        priorReconArtifact.plan_sha === currentPlanSha &&
-        priorReconArtifact.files_digest === currentFilesDigest;
+      const reconDecision = decideReconArtifactReuse(priorReconArtifact, currentPlanSha, currentFilesDigest);
+      const reconArtifactValid = reconDecision.valid;
 
       if (reconArtifactValid) {
         // HIT: recon is skipped entirely this dispatch — the cost this task exists to stop
@@ -10916,7 +11535,7 @@ async function runTask(
         // `files:` has since moved past (`recon.invalidated`) — never a silent, unexplained
         // full recon (P48(ii): no silent empty).
         if (priorReconArtifact) {
-          const reason = priorReconArtifact.plan_sha !== currentPlanSha ? "plan_sha" : "files_digest";
+          const reason = reconDecision.invalidationReason!;
           say(`recon artifact invalidated (${reason} changed) — running a full recon`);
           log("recon.invalidated", {
             reason,
@@ -11496,7 +12115,11 @@ async function runTask(
       // question). This does not gate or delay the push itself (design note: "a run that cannot
       // determine WHY still pushes" — acceptance #4).
       const pushCause = fallbackPushCause(probeFailure, [workerTranscript(impl), impl.stderr].join("\n"));
-      log("fallback_push.cause", { branch, cause: pushCause.cause, detail: pushCause.detail });
+      // `evidence` (W1-T2522) rides the SAME line as `cause`/`detail`, never a second ledger step —
+      // one row per fallback push, now carrying the scrubbed/bounded text that class was read from
+      // instead of losing it, exactly what left all 15 `credential_expired` rows to date
+      // indistinguishable from one another.
+      log("fallback_push.cause", { branch, cause: pushCause.cause, detail: pushCause.detail, evidence: pushCause.evidence });
       say(`fallback push firing for ${branch} — cause: ${pushCause.cause} (${pushCause.detail})`);
       // W1-T142 SCOPE GUARD, W1-T434 PUSH-AND-FLAG — the ONE orchestrator-initiated push in this
       // file (the worker itself normally pushes from inside its own sandbox; this fallback runs on
@@ -11830,6 +12453,12 @@ async function runTask(
           // W1-T2403: the SAME local-worktree discipline as `captureWorktreeSnapshot` above — a
           // real `git` read against this rung's own checkout, never a remote call.
           readRoundCommits: readFixRoundCommitsViaGit,
+          // W1-T2551: the generator-fix short-circuit's three real, local wirings — `npm run`,
+          // `git add -A && git commit`, and this checkout's OWN package.json scripts. See each
+          // helper's own doc for why every write stays best-effort/fail-closed.
+          runGeneratorScript: async (script, cwd) => runNpmScriptViaSpawn(script, cwd),
+          commitGeneratorOutput: (o) => commitGeneratorOutputViaGit(o),
+          packageScripts: readPackageScriptsFor(worktreePath),
         },
       });
       review = rung.review;
@@ -20727,6 +21356,15 @@ async function drainCommand(
   // so it never needed two instances for two passes of differing scope.
   const githubFactory = deps.githubFactory ?? ((o: string, r: string) => buildBatchedGithub(o, r, { log }));
 
+  // W1-T2513 — ONE COALESCER FOR THIS WHOLE `rmd drain` INVOCATION (never per tick, never per
+  // lane), handed to every dispatch lane's `runTask` call below (`runOne`) via its
+  // `planSnapshot` seam. Without it, each of the tick's concurrent lanes paid its OWN `git
+  // fetch origin` + `loadPlan` — measured 2028 ms + 837 ms per lane, synchronously, before
+  // `runTask`'s first `await` — so a 3-lane tick paid the cost 3 times for the identical
+  // answer. See `createPlanSyncCoalescer`'s own doc for why a single instance held for the
+  // drain's whole lifetime still re-fetches every tick rather than going stale.
+  const planSyncCoalescer = createPlanSyncCoalescer(planPath);
+
   // ── GIT SELF-SYNC (W1-T60): dispatch from the origin/main plan blob, never the operator's
   // working tree — see runTask's identical gate for the full rationale. FAILS CLOSED (no
   // lock taken, no spawn) on a fetch failure unless --allow-stale. `skipGitSync` (behavioral
@@ -20936,7 +21574,9 @@ async function drainCommand(
         // 23-open-PR incident): the SAME `openPrCount` closure the W1-T172 lanes budget already
         // reads (below), never a second GitHub read path — see queueGovernorGateFor's doc.
         checkQueueGovernor: queueGovernorGateFor(openPrCount, ledgerPath, runId),
-        runOne: (taskId) => runTask(taskId, { planPath, config, allowStale }),
+        // W1-T2513: `planSnapshot` is the coalescer built above — every lane of a tick shares
+        // ONE origin fetch + ONE plan parse instead of paying for it per lane.
+        runOne: (taskId) => runTask(taskId, { planPath, config, allowStale, planSnapshot: planSyncCoalescer.sync }),
         readUsage: deps.readUsage ?? (() => readUsageSnapshotPreferSdk(config)),
         checkStop: () => stopDetail(config.root),
         // W1-T1216: LOCAL FIRST (design (i)), falling through to the shared cross-host hold
@@ -21566,6 +22206,11 @@ export async function daemonCommand(
   const laneGithubFor = memoiseGatewayByRepo((o, r) =>
     deps.githubFactory ? deps.githubFactory(o, r) : buildBatchedGithub(o, r, { log }),
   );
+  // W1-T2513 — ONE COALESCER FOR THIS WHOLE DAEMON PROCESS (never per tick, never per lane),
+  // mirroring `drainCommand`'s identical construction immediately above `laneGithubFor` there —
+  // every dispatch lane's `runTask` call below shares ONE origin fetch + ONE plan parse per
+  // tick instead of paying for it per lane. See `createPlanSyncCoalescer`'s own doc.
+  const planSyncCoalescer = createPlanSyncCoalescer(target.planPath);
   const refreshMerged: () => MergedSet = () => {
     const proj = projectPlan(
       plan,
@@ -21972,6 +22617,10 @@ export async function daemonCommand(
             // and same reason as `buildInboxDraftHook`'s once-per-daemon-start construction; see
             // `laneGithubFor` for why it memoises per owner/repo rather than per drain target.
             githubFor: laneGithubFor,
+            // W1-T2513: the coalescer built above — every lane of a tick shares ONE origin
+            // fetch + ONE plan parse instead of paying for it per lane. Inert when
+            // `skipGitSync` is set (an explicit `--plan` never syncs at all, coalesced or not).
+            planSnapshot: planSyncCoalescer.sync,
           }),
         readUsage: () => readUsageSnapshotPreferSdk(config),
         // THE LEDGER IS THE DEDUP (impl-FL): seed the once-per-string bound from what previous
@@ -26380,6 +27029,10 @@ export function buildSweepEffects(
             captureWorktreeSnapshot: captureWorktreeSnapshotViaGit,
             // W1-T2403: same LOCAL worktree reader as the run-loop call site above.
             readRoundCommits: readFixRoundCommitsViaGit,
+            // W1-T2551: same three real, local wirings as the run-loop call site above.
+            runGeneratorScript: async (script, cwd) => runNpmScriptViaSpawn(script, cwd),
+            commitGeneratorOutput: (o) => commitGeneratorOutputViaGit(o),
+            packageScripts: readPackageScriptsFor(worktreePath),
           },
         });
       } catch (e) {
@@ -30081,9 +30734,15 @@ export async function approveCommand(
       // them), so the criteria are about the filing itself (filingAcceptanceCriteria), and
       // NO Remudero-Task trailer is emitted (the correctness rule, lib/plan-pr-emitter.ts).
       const ids = filedTaskIds.length > 0 ? filedTaskIds : [id];
+      // W1-T2550: the SAME path list `filingAcceptanceCriteria` already names as its filing
+      // evidence, now ALSO handed to `changedFiles` so `buildPlanPrBody` emits the rendered
+      // `## Changed files` block (renderChangedFilesBlock, W1-T2535) instead of leaving it
+      // defined-but-never-called. One local so the two arguments can never drift apart.
+      const filedPaths = [...shardRelPaths, "MASTER-PLAN.md"];
       const body = buildPlanPrBody({
         intro,
-        criteria: filingAcceptanceCriteria(ids, [...shardRelPaths, "MASTER-PLAN.md"]),
+        criteria: filingAcceptanceCriteria(ids, filedPaths),
+        changedFiles: filedPaths,
       });
       assertLiveWriteAllowed("gh-pr-create", `opening a PR against ${owner}/${repo}`);
       // W1-T903 design (i): REST, not `gh pr create` (GraphQL) — a pure transport swap, since
@@ -30373,9 +31032,14 @@ async function approveBatchCommand(
         "gate still reviews (ci + remudero-review); nothing auto-merges without it.",
       ].join("\n");
       const filedIds = allFiledTaskIds.length > 0 ? allFiledTaskIds : ids;
+      // W1-T2550: same reasoning as the single-proposal openPlanPr above — one local list feeds
+      // both the filing-acceptance evidence and the rendered changed-files block, so the batch
+      // lane's PR body actually emits it too rather than only defining it.
+      const filedPaths = [...allShardRelPaths, "MASTER-PLAN.md"];
       const body = buildPlanPrBody({
         intro,
-        criteria: filingAcceptanceCriteria(filedIds, [...allShardRelPaths, "MASTER-PLAN.md"]),
+        criteria: filingAcceptanceCriteria(filedIds, filedPaths),
+        changedFiles: filedPaths,
       });
       assertLiveWriteAllowed("gh-pr-create", `opening a PR against ${owner}/${repo}`);
       const created = createPlanPrRest(ghJson, owner, repo, {

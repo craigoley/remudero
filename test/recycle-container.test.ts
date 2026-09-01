@@ -212,6 +212,14 @@ function runRecycle(mode: string, opts: RunOpts = {}): Run {
       RMD_STATE_DIR: state,
       RMD_RECYCLE_WAIT_S: "1",
       RMD_RECYCLE_POLL_S: "1",
+      // W1-T2555: this suite drives docker orchestration (stop/rm/run, locks, drift), never the
+      // STATE_DIR-is-a-checkout predicate itself — that predicate has its own dedicated suite,
+      // test/a-recycle-refuses-a-state-dir-that-is-not-a-checkout.test.ts. Every fixture directory
+      // here is a fresh mkdtemp with no state/ or remudero/.git inside it, so without this opt-in
+      // every test below would now hit the NEW refusal before reaching the behaviour it means to
+      // exercise. Passing it here is the "operator's own word" the new check requires — this suite
+      // is intentionally always running the first-boot path.
+      RMD_RECYCLE_FIRST_BOOT: "1",
       GH_TOKEN: "",
       // Points at a path that (almost certainly) does not exist, so section 1's guard does not fire
       // merely because the TEST RUNNER itself is sandboxed inside a container — that is a fact about

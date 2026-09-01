@@ -4,6 +4,7 @@ import { spawnSync } from "node:child_process";
 import { readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
+import { importsModule } from "./helpers/import-sweep.js";
 
 // ── W1-T96: mutation-testing ratchet gate (MASTER-PLAN §5 TIER 2, quality gate 2/4) ──
 //
@@ -322,8 +323,12 @@ test("the REAL PR gate config's commandRunner is scoped to exactly the test file
   // 15`, `# fail 0`, exit 0), so a leading entry costs a window in which it covers nothing, never
   // a broken mutation run.
   const testFiles = readdirSync(join(REPO_ROOT, "test")).filter((f) => f.endsWith(".test.ts"));
+  // W1-T2531: resolved through the shared any-import-form predicate rather than a static
+  // `from`-only regex -- a classify.ts consumer reachable only via `await import(...)` or a
+  // `type X = import(...).X` query must be counted too, or the census silently undercounts and
+  // this test's own "every importer is in the command" guarantee stops meaning anything.
   const classifyImporters = testFiles
-    .filter((f) => /from ["'].*classify(\.js)?["']/.test(readFileSync(join(REPO_ROOT, "test", f), "utf8")))
+    .filter((f) => importsModule(readFileSync(join(REPO_ROOT, "test", f), "utf8"), /classify(\.js)?$/))
     .sort();
   assert.ok(
     classifyImporters.includes("classify.test.ts") && classifyImporters.includes("block-reason.test.ts"),

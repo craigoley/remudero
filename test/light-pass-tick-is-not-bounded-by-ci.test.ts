@@ -230,7 +230,19 @@ test("acceptance 2 (differential): two detached passes seed the dedup EXACTLY as
     const fixPr = blockedFixablePr();
     try {
       if (detached) {
+        // W1-T2520 MADE THE TWO ARMS COMPARABLE AGAIN. Before the fix-dispatch mutex existed,
+        // concurrency was invisible here and both arms scored 2. It is visible now: the awaited arm
+        // RELEASES its first dispatch and awaits it before the second pass, so those two passes are
+        // sequential, while these two were still overlapping — the first dispatch was in flight when
+        // the second pass ran, and `inFlightFixKeys` correctly refuses a concurrent second claim. That
+        // is the race W1-T2520 exists to close, not a divergence caused by detaching, so the fixture
+        // now runs BOTH arms as two SEQUENTIAL passes and the differential property it was written to
+        // hold — detaching changes nothing — is measured over the same scenario on both sides.
+        // The concurrent case is asserted directly by acceptance 1 of
+        // test/the-fix-rung-strike-cap-does-not-bind.test.ts.
         await runSweepLightPass([fixPr], deps);
+        held.release();
+        await drainDetachedSweepActions();
         await runSweepLightPass([fixPr], deps);
       } else {
         const a = runSweep([fixPr], deps);
