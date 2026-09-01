@@ -782,6 +782,8 @@ import {
   runWorktreeReapRung,
   spawnWorker,
   cacheTokenLedgerFields,
+  capStderrExcerpt,
+  STDERR_EXCERPT_CAP,
   noPrReportExcerpt,
   workerLedgerFields,
   workerTranscript,
@@ -3733,12 +3735,64 @@ export interface RemotePresenceProbeFailure {
 
 /** {@link fallbackPushCause}'s answer: the fallback always fires for the same reason
  *  (`branchOnOrigin === false`), but WHY that is true splits into four distinguishable shapes.
- *  `detail` is always populated — a cause is never reported bare (acceptance #1/#5). */
+ *  `detail` is always populated — a cause is never reported bare (acceptance #1/#5).
+ *
+ *  `evidence` (W1-T2522) is the worker/probe's OWN scrubbed, bounded failure text — added
+ *  BESIDE `detail`, never in place of it, so every existing consumer that reads `cause`/`detail`
+ *  keeps seeing exactly what it always has. Before this, `detail` was a FIXED per-class sentence
+ *  ("the worker's own transcript/stderr carries a git/gh authentication failure") repeated
+ *  verbatim on all 15 `credential_expired` ledger rows to date — the classifier had already read
+ *  the distinguishing text and threw it away. `evidence` is always populated too: a class is
+ *  never asserted from evidence nobody can now inspect (see {@link fallbackPushEvidence}'s
+ *  "names the absence" fallback for the case where there is truly nothing to carry). */
 export type FallbackPushCause =
-  | { cause: "probe_unreadable"; detail: string }
-  | { cause: "credential_expired"; detail: string }
-  | { cause: "push_not_attempted"; detail: string }
-  | { cause: "undetermined"; detail: string };
+  | { cause: "probe_unreadable"; detail: string; evidence: string }
+  | { cause: "credential_expired"; detail: string; evidence: string }
+  | { cause: "push_not_attempted"; detail: string; evidence: string }
+  | { cause: "undetermined"; detail: string; evidence: string };
+
+/** Named placeholder for {@link fallbackPushEvidence} when there is truly nothing to carry — an
+ *  absent/empty stderr or transcript must still SAY so (acceptance: "names the absence"), never a
+ *  silently blank string a future reader could mistake for a field that just wasn't populated. */
+export const FALLBACK_PUSH_EVIDENCE_ABSENT = "(no readable stderr/transcript text was captured)";
+
+/**
+ * Scrubs a git/gh credential out of failure text before {@link fallbackPushCause} ledgers it
+ * (W1-T2522 hard constraint: "must not leak a credential"). No existing scrub helper in this repo
+ * covers this shape — `scrubEntry` (lib/learnings.ts) targets PII in exported learning entries,
+ * and worker-home.ts's keychain error redacts one already-known password by exact-value `split`.
+ * Neither applies here: this text is a git/gh failure message whose secret (if any) is matched
+ * STRUCTURALLY, not by a value already in hand. Two shapes:
+ *   1. Userinfo embedded in a URL — `https://x-access-token:ghp_xxx@github.com/...` — exactly the
+ *      form a credential-helper-injected remote fails with. The whole `user[:pass]@` segment is
+ *      replaced, not just a token-shaped substring inside it.
+ *   2. A bare GitHub token by its own prefix (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`,
+ *      `github_pat_`) wherever else it appears (an env dump, a `curl -v` header echo) — outside a
+ *      URL too, so shape 1 missing it is not the only line of defense.
+ * Applied to EVERY evidence string this module ledgers, not only the `credential_expired`
+ * branch — a `probe_unreadable` or `undetermined` row's text can carry the identical shape.
+ */
+export function scrubGitCredentialText(text: string): string {
+  return text
+    .replace(/(https?:\/\/)[^\s/@]+@/gi, "$1<redacted>@")
+    .replace(/\b(?:ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]{20,}\b/g, "<redacted-token>");
+}
+
+/**
+ * {@link fallbackPushCause}'s `evidence` field: `text`, scrubbed then bounded to
+ * {@link STDERR_EXCERPT_CAP} chars — the SAME cap {@link capStderrExcerpt} already holds every
+ * other ledgered stderr/report excerpt in this file to, reused rather than a second number
+ * invented for an identical purpose (W1-T2522 hard constraint: "must bound oversized stderr").
+ * Scrub runs BEFORE bound: a credential must never survive being sliced in half at the cap
+ * boundary into something that no longer matches either pattern above but still leaks a fragment.
+ * Empty/whitespace-only input becomes {@link FALLBACK_PUSH_EVIDENCE_ABSENT} — a cause is asserted
+ * from SOMETHING, and when that something is unreadable the row must say so, not fall silent.
+ */
+export function fallbackPushEvidence(text: string): string {
+  const trimmed = text.trim();
+  if (trimmed === "") return FALLBACK_PUSH_EVIDENCE_ABSENT;
+  return capStderrExcerpt(scrubGitCredentialText(trimmed), STDERR_EXCERPT_CAP);
+}
 
 /**
  * W1-T2267 — WHY THE ORCHESTRATOR'S FALLBACK PUSH FIRED, NOT ONLY THAT IT DID (design
@@ -3771,23 +3825,35 @@ export function fallbackPushCause(
 ): FallbackPushCause {
   if (!probe || probe.status !== 2) {
     const reason = classifyGhFailure(probe?.status ?? null, probe?.stderr ?? "");
+    // `detail` is scrubbed too (not only the new `evidence` field below): it already interpolated
+    // the probe's raw stderr before this task, and a credential-bearing URL in THAT stderr would
+    // have leaked exactly the same way. Existing consumers only ever regex/substring-match `detail`
+    // (see the sibling suite's `assert.match(..., /status 128/)`) — none depend on a credential
+    // surviving inside it, so scrubbing changes no observable behavior except closing the leak.
+    const scrubbedStderr = probe?.stderr ? scrubGitCredentialText(probe.stderr) : "";
     return {
       cause: "probe_unreadable",
       detail:
         `git ls-remote could not confirm the branch is absent (status ${probe?.status ?? "none"}, ` +
-        `classified ${reason})${probe?.stderr ? `: ${probe.stderr}` : ""}`,
+        `classified ${reason})${scrubbedStderr ? `: ${scrubbedStderr}` : ""}`,
+      evidence: fallbackPushEvidence(probe?.stderr ?? ""),
     };
   }
   if (classifyGhFailure(null, workerEvidence) === "auth") {
     return {
       cause: "credential_expired",
       detail: "the worker's own transcript/stderr carries a git/gh authentication failure",
+      // THE FIX: `credential_expired`'s `detail` above stayed a fixed sentence on all 15 incidents
+      // to date — this is the text the classifier just read to reach that verdict, carried instead
+      // of discarded (W1-T2522).
+      evidence: fallbackPushEvidence(workerEvidence),
     };
   }
   if (!/\bgit\s+push\b/i.test(workerEvidence)) {
     return {
       cause: "push_not_attempted",
       detail: "no \"git push\" invocation appears anywhere in the worker's own transcript",
+      evidence: fallbackPushEvidence(workerEvidence),
     };
   }
   return {
@@ -3795,6 +3861,7 @@ export function fallbackPushCause(
     detail:
       "the branch is confirmed absent from origin but neither a credential failure nor a missing " +
       "push attempt is evident in the worker's own transcript",
+    evidence: fallbackPushEvidence(workerEvidence),
   };
 }
 
@@ -11587,7 +11654,11 @@ async function runTask(
       // question). This does not gate or delay the push itself (design note: "a run that cannot
       // determine WHY still pushes" — acceptance #4).
       const pushCause = fallbackPushCause(probeFailure, [workerTranscript(impl), impl.stderr].join("\n"));
-      log("fallback_push.cause", { branch, cause: pushCause.cause, detail: pushCause.detail });
+      // `evidence` (W1-T2522) rides the SAME line as `cause`/`detail`, never a second ledger step —
+      // one row per fallback push, now carrying the scrubbed/bounded text that class was read from
+      // instead of losing it, exactly what left all 15 `credential_expired` rows to date
+      // indistinguishable from one another.
+      log("fallback_push.cause", { branch, cause: pushCause.cause, detail: pushCause.detail, evidence: pushCause.evidence });
       say(`fallback push firing for ${branch} — cause: ${pushCause.cause} (${pushCause.detail})`);
       // W1-T142 SCOPE GUARD, W1-T434 PUSH-AND-FLAG — the ONE orchestrator-initiated push in this
       // file (the worker itself normally pushes from inside its own sandbox; this fallback runs on
