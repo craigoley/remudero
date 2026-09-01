@@ -403,6 +403,56 @@ test("Codex JSONL preserves turn failure as an error verdict", () => {
   assert.match(parsed.errors.join(" "), /rate limit/);
 });
 
+test("Codex JSONL normalizes a pinned subscription refusal only from terminal error evidence", () => {
+  const message =
+    "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again later.";
+  const parsed = parseCodexJsonl([
+    JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: message } }),
+    JSON.stringify({ type: "error", error: { message } }),
+    JSON.stringify({ type: "turn.failed", error: { message } }),
+  ].join("\n"), Date.parse("2026-09-01T16:00:00.000Z"));
+  assert.equal(parsed.isError, true);
+  assert.equal(parsed.subtype, "error_codex");
+  assert.equal(parsed.usageRefusal?.matched, "You've hit your usage limit");
+
+  const proseOnly = parseCodexJsonl(
+    JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: message } }),
+  );
+  assert.equal(proseOnly.usageRefusal, undefined, "agent prose must never classify the account as refused");
+});
+
+test("Codex spawn carries a subscription refusal through the shared ledger seam", async () => {
+  const stdin = new PassThrough();
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+  const proc = Object.assign(new EventEmitter(), { stdin, stdout, stderr });
+  const message =
+    "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again later.";
+  stdin.on("finish", () => {
+    stdout.write(`${JSON.stringify({ type: "thread.started", thread_id: "codex-refused" })}\n`);
+    stdout.write(`${JSON.stringify({ type: "turn.started" })}\n`);
+    stdout.write(`${JSON.stringify({ type: "error", error: { message } })}\n`);
+    stdout.write(`${JSON.stringify({ type: "turn.failed", error: { message } })}\n`);
+    stdout.end();
+    queueMicrotask(() => proc.emit("exit", 1));
+  });
+  const result = await spawnCodexWorker(
+    {
+      cwd: process.cwd(),
+      prompt: "do the task",
+      containment: {
+        spawn: () => ({ process: proc as never, pid: 42_425 }),
+        teardown: () => {},
+      },
+    },
+    { claudeBin: "/unused", root: "/tmp", workerProviders: { enabled: ["codex"], codexBin: "/bin/sh" } },
+  );
+  assert.equal(result.isError, true, "Codex 0.152.0's turn.failed remains an error");
+  assert.equal(result.subtype, "error_codex");
+  assert.equal(result.usageRefusal?.matched, "You've hit your usage limit");
+  assert.equal(workerLedgerFields(result).verdict, "usage_refused");
+});
+
 test("spawnWorker routes an opted-in call to Codex, preserves containment, and ledgers the provider", async () => {
   const stdin = new PassThrough();
   const stdout = new PassThrough();

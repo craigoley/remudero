@@ -73,6 +73,7 @@ const CONTAINER_ENV_BY_MODE: Record<string, string[]> = {
   "wrong-image": containerEnvLines(),
   "hung-fixrung": containerEnvLines(),
   "busy-fixrung": containerEnvLines(),
+  "busy-codex-fixrung": containerEnvLines(),
   "hung-plus-dispatch": containerEnvLines(),
   "image-env-unknown": containerEnvLines(),
   "no-token": containerEnvLines({ drop: "GH_TOKEN" }),
@@ -163,6 +164,7 @@ function writeStubs(dir: string): void {
     '        case "$STUB_MODE" in',
     '          hung-fixrung)  echo "  363439    8970 /usr/local/bin/claude --output-format stream-json --settings /home/node/Remudero/tmp/sweep-fix-settings-W1-T446-1787173796831.json" ;;',
     '          busy-fixrung)  echo "  363439     600 /usr/local/bin/claude --output-format stream-json --settings /home/node/Remudero/tmp/sweep-fix-settings-W1-T446-1787173796831.json" ;;',
+    '          busy-codex-fixrung) echo "  363440     600 /usr/local/bin/codex exec --json --ignore-user-config --sandbox workspace-write -C /home/node/Remudero/worktrees/sweep-W1-T446-1787173796831 -" ;;',
     '          hung-plus-dispatch)',
     '            echo "  363439    8970 /usr/local/bin/claude --output-format stream-json --settings /home/node/Remudero/tmp/sweep-fix-settings-W1-T446-1787173796831.json"',
     '            echo "  501122     600 /usr/local/bin/claude --output-format stream-json --settings /home/node/Remudero/tmp/run-settings-W1-T999-1787173796831.json" ;;',
@@ -467,6 +469,18 @@ test("W1-T1046: a lane-less worker under the age bound is busy, not hung, and bl
   assert.match(run.stderr, /0 lane-holding and 1 lane-less worker\(s\) still in flight/);
   assert.match(run.stderr, /busy, not hung/, "it must be named as busy rather than silently ignored");
   assert.equal(run.calls.filter(isRm).length, 0, "the container must not be removed under a live worker");
+  assert.ok(!existsSync(join(state, "state", "PAUSE")), "the pause must not survive the refusal");
+});
+
+test("a lane-less Codex worker under the age bound blocks the recycle exactly like Claude", () => {
+  const state = mkdtempSync(join(tmpdir(), "recycle-state-"));
+  mkdirSync(join(state, "state", "inflight"), { recursive: true });
+
+  const run = runRecycle("busy-codex-fixrung", { stateDir: state });
+
+  assert.notEqual(run.status, 0, "a young lane-less Codex worker must block the recycle");
+  assert.match(run.stderr, /0 lane-holding and 1 lane-less worker\(s\) still in flight/);
+  assert.equal(run.calls.filter(isRm).length, 0, "the container must not be removed under a live Codex worker");
   assert.ok(!existsSync(join(state, "state", "PAUSE")), "the pause must not survive the refusal");
 });
 

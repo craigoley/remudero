@@ -7,7 +7,7 @@
   principles: {tdd: strict}
   risk: high
   budget_usd: 15.00
-  files: [src/lib/daemon.ts, test/headroom-blind-window.test.ts]
+  files: [src/lib/daemon.ts, test/daemon.test.ts, test/headroom-blind-window.test.ts]
   origin: "operator-brief#fix-the-headroom-blind-window-2026-09-01"
   plan_refs: ["W1-T2564", "W1-T1082", "W1-T2561"]
   status: queued

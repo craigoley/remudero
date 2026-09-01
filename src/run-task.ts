@@ -352,6 +352,7 @@ import {
   draftAttemptKey,
   draftsDueOnDaemon,
   DAEMON_DRAFT_BATCH_CAP,
+  evictRefusalPoisonedKeys,
   gitGrepAnchorTrue,
   inboxDraftPrompt,
   isDraftStale,
@@ -30379,6 +30380,8 @@ export function buildInboxDraftHook(
     log: (step: string, extra?: Record<string, unknown>) => void,
   ) => Promise<DraftRungOutcome[]> = draftProposalBatch,
 ): () => Promise<void> {
+  // W1-T2564: see the migration block below — this is the once-per-daemon-start scope it needs.
+  let attemptsMigrated = false;
   return async () => {
     try {
       const registryPath = join(config.root, "state", "inbox-proposals.json");
@@ -30389,6 +30392,29 @@ export function buildInboxDraftHook(
       const drafts: DraftCache = parseDraftCache(readFileIfExists(draftsPath));
       const attemptsPath = join(config.root, "state", "inbox-draft-attempts.json");
       const attempts: DraftAttemptCache = parseDraftAttemptCache(readFileIfExists(attemptsPath));
+
+      // W1-T2564 MIGRATION, ONCE PER DAEMON START, BEFORE `due` IS COMPUTED. Not writing a key for
+      // a refusal fixes the write path forward and repairs nothing already on disk: 267 of 353
+      // proposals were keyed with no cached draft and, their key being the literal `::0`, could
+      // never become due again.
+      //
+      // ⚠ WHY ONCE PER PROCESS RATHER THAN EVERY POLL — A TEST CAUGHT THE NAIVE FORM. Run per poll
+      // it also evicts the key W1-T192 had just written for a GENUINE failure in that same poll,
+      // re-opening it forever: an unbounded retry loop wearing a migration's clothes, and the exact
+      // opposite of the bounded one-off this is meant to be (test/run-task.test.ts's "an ORDINARY
+      // failure still writes its attempt key" reddened on precisely that). Once per daemon start
+      // keeps the property that matters — a fresh host recovers with no operator step, because
+      // every boot runs it — while bounding a re-opened genuine failure to ONE extra attempt per
+      // daemon start rather than one per poll. `buildInboxDraftHook` is constructed once per daemon
+      // start (see its own doc), so this closure flag is that scope.
+      if (!attemptsMigrated) {
+        attemptsMigrated = true;
+        const evicted = evictRefusalPoisonedKeys(attempts, drafts, new Set(proposals.map((p) => p.id)));
+        if (evicted.length > 0) {
+          writeDraftAttemptPair(draftsPath, attemptsPath, drafts, attempts);
+          log("inbox.draft_attempts_reopened", { evicted: evicted.length, evicted_ids: evicted.slice(0, 20), refused_this_batch: 0 });
+        }
+      }
 
       const due = draftsDueOnDaemon(proposals, drafts, attempts);
       if (due.length === 0) return;
@@ -30431,17 +30457,34 @@ export function buildInboxDraftHook(
 
       const nextDrafts: DraftCache = { ...drafts };
       const nextAttempts: DraftAttemptCache = { ...attempts };
+      // W1-T2564: ids left unkeyed because the account refused them — ledgered below so a refusal
+      // storm is visible as itself rather than as a run of malformed-output errors.
+      const refusedThisBatch: string[] = [];
       for (const outcome of outcomes) {
         const proposal = due.find((p) => p.id === outcome.proposalId);
         if (!proposal) continue; // unreachable — outcomes are 1:1 with `due`
         // IDEMPOTENCE (W1-T192): mark this cause ATTEMPTED whether it succeeded or failed —
         // see this function's own doc for why a failed attempt must be throttled too.
-        nextAttempts[outcome.proposalId] = draftAttemptKey(proposal);
+        //
+        // W1-T2564: EXCEPT A REFUSAL, WHICH IS NOT AN ATTEMPT. W1-T192's argument is that a cause
+        // which was TRIED and failed must not be retried every poll. A run the account turned away
+        // was never tried, so keying it does not throttle a failure — it retires work that never
+        // ran, permanently, because a routed follow-up's key is the literal `::0` and can never
+        // change. This is the ONLY arm that skips the write; an ordinary failure still keys, so
+        // W1-T192's throttle is untouched (its own test pins that).
+        if (outcome.ok || !outcome.refused) {
+          nextAttempts[outcome.proposalId] = draftAttemptKey(proposal);
+        } else {
+          refusedThisBatch.push(outcome.proposalId);
+        }
         if (outcome.ok) nextDrafts[outcome.proposalId] = outcome.candidate;
       }
       // ATOMIC PAIR (W1-T241): see lib/inbox.ts's `writeDraftAttemptPair` doc for the
       // torn-file/wedged-idempotence hazard this closes and why drafts commits before
       // attempts.
+      if (refusedThisBatch.length > 0) {
+        log("inbox.draft_attempts_reopened", { evicted: 0, refused_this_batch: refusedThisBatch.length });
+      }
       writeDraftAttemptPair(draftsPath, attemptsPath, nextDrafts, nextAttempts);
     } catch (e) {
       log("inbox.draft_rung.error", { error: String((e as Error)?.message ?? e) });
