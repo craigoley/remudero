@@ -1,0 +1,77 @@
+- id: W1-T2559
+  title: "THE SYNTHESIS RUNGS RIDE THE ARCHITECT MOUNT AND THEY ARE NOT ARCHITECTS — retro, triage and the inbox-draft rung all resolve their model through `architectModel(config, mountsTable)` (src/lib/config.ts), so the Tier Invariant's `architect.tier > max(worker.tier)` forces them onto `claude-opus-5`/high alongside PLAN AUTHORSHIP; MEASURED 2026-09-01 that is $827 across 219 invocations — 22% of the pipeline — for work that ships no code, with retro at $12.78/run against a $5.28 sonnet implement worker"
+  repo: remudero
+  depends_on: ["W1-T2560"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 20.00
+  files: [.remudero/mounts.yaml, src/lib/config.ts, src/lib/mounts.ts, src/run-task.ts, test/synthesis-rungs-ride-their-own-mount.test.ts]
+  origin: "operator-session#the-spend-census-2026-09-01"
+  plan_refs: ["W1-T2560", "W1-T9b", "W1-T21"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE INVARIANT IS RIGHT AND IS NOT WHAT THIS CHANGES. G-17's Tier Invariant
+    (`enforceTierInvariant`, src/lib/mounts.ts) requires the architect to strictly dominate every
+    worker tier, and the flight-judge the same, for a reason that still holds: a supervisor on the
+    supervised model's tier cannot catch it. Nothing here weakens that, and a fix that made the
+    invariant pass by lowering it would be the wrong change.
+
+    THE DEFECT IS THE BUNDLING. `architectModel`'s own row comment says it "governs the model the
+    Architect-tier roles (retro, triage, the inbox-draft rung) all ride" — three synthesis jobs
+    inheriting plan authorship's tier because they share one resolver, not because anything ever
+    ruled that a triage classification needs the top model. They supervise no worker, so the
+    invariant's premise does not apply to them; they are simply downstream of it.
+
+    MEASURED 2026-09-01, deduped by `run_id` across all three rotation forms:
+
+      retro.synthesized          $306.62    24 runs   $12.776/run
+      inbox.draft_synthesized    $306.57    36 runs   $ 8.516/run
+      triage.synthesized         $214.32   159 runs   $ 1.348/run
+      (implement.done, sonnet)  $2937.15   556 runs   $ 5.283/run
+
+    $827 across 219 invocations, 22% of the pipeline, none of it shipping code — and a retro costs
+    2.4x a full implement run. RE-DERIVE RATHER THAN TRUST THESE: they move with the plan, the
+    models and what rotation retained.
+
+    MODEL IS THE THIRD LEVER, NOT THE FIRST, AND THIS TASK MUST NOT PRETEND OTHERWISE. Published
+    rates at filing are opus-tier $5/$25 per MTok, sonnet-tier $2/$10, haiku-tier $1/$5, so
+    opus->sonnet is 2.5x and sonnet->haiku 2x — while this fleet's own runaway workers are 4-5x on
+    TURNS alone. The order that actually saves money is caching, then EFFORT, then model: every
+    mount in the table sits at `medium` or `high` and NOTHING is at `low`, and classification and
+    high-volume routes are exactly the workloads that do not repay high effort. A change here that
+    moves only the model, and never touches effort, has taken the smaller half.
+
+    AND COST PER COMPLETED TASK IS THE ONLY HONEST UNIT. A cheaper mount that needs more turns, a
+    retry or a re-dispatch is not cheaper; at the measured $0.1131/turn, twenty extra turns erase the
+    entire opus->sonnet saving on a run. Whatever this lands must be judged on settled runs of that
+    role, not on per-invocation price.
+
+    WHICH IS WHY THIS DEPENDS ON W1-T2560 RATHER THAN GUESSING. That task reports turn and cost
+    distributions with outcomes per class from runs already paid for. Choosing a mount before it
+    lands would be retuning a bound with no observed population — this repo's own recurring defect,
+    and the reason `.remudero/mounts.yaml` records that a tighter `max_turns` was tried once and
+    walled a live run at 81/80 turns.
+
+    THE ONE CALL SITE THAT IS ALREADY OUT OF SCOPE, NAMED SO IT IS NOT "FIXED" BY ACCIDENT. The
+    manual `rmd plan` command calls the ONE-ARGUMENT `architectModel(config)`, which resolves through
+    `config.architectModel ?? "opus"` and never reads the mounts row at all. The mounts table's own
+    comment says so in terms and cites the ruling that scoped it out (#781, MPG first-instance
+    ruling fb-1784921980488-44b355 §4). Leave it.
+  acceptance:
+    - claim: "retro, triage and the inbox-draft rung resolve their model from their OWN mount rows, not the architect row"
+      proof: "unit test: test/synthesis-rungs-ride-their-own-mount.test.ts"
+    - claim: "the Tier Invariant still holds and still refuses an architect at or below any worker tier"
+      proof: "unit test: test/synthesis-rungs-ride-their-own-mount.test.ts"
+    - claim: "plan authorship keeps the architect mount — moving the synthesis rungs does not move it"
+      proof: "unit test: test/synthesis-rungs-ride-their-own-mount.test.ts"
+    - claim: "the one-argument architectModel(config) path used by rmd plan is untouched"
+      proof: "unit test: test/synthesis-rungs-ride-their-own-mount.test.ts"
+    - claim: "each synthesis row carries its own effort, so effort is tuned rather than only the model"
+      proof: "unit test: test/synthesis-rungs-ride-their-own-mount.test.ts"
+    - claim: "a malformed or missing synthesis row REFUSES at load rather than silently falling back to a default"
+      proof: "unit test: test/synthesis-rungs-ride-their-own-mount.test.ts"
+    - claim: "restoring the architect resolver for these three rungs makes the ownership assertion fail"
+      proof: "unit test: test/synthesis-rungs-ride-their-own-mount.test.ts"
