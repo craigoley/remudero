@@ -1,0 +1,72 @@
+- id: W1-T2560
+  title: "NOTHING MEASURES WHICH TASK CLASSES COULD TAKE A CHEAPER MOUNT — every mount in `.remudero/mounts.yaml` was chosen by argument and none by an observed distribution, so a model or effort change is a guess in either direction; the ledger already holds turn counts, costs and outcomes for 706 retained runs, and no verb reads them together"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 15.00
+  files: [scripts/mount-headroom-sweep.mjs, test/mount-headroom-sweep.test.ts]
+  origin: "operator-session#the-spend-census-2026-09-01"
+  plan_refs: ["W1-T931", "W1-T2539", "W1-T2557"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THIS IS THE PREREQUISITE FOR EVERY MOUNT CHANGE, AND IT SPENDS NOTHING. The data already exists:
+    `implement.done`, `recon.done`, `review.reviewer`, `fix.done` and the probe rows all carry
+    `cost_usd`/`total_cost_usd` and `num_turns`, and `verdict` carries the run's outcome. What does
+    not exist is anything that reads them together, per class, so that "sonnet would do here" is a
+    measurement rather than an opinion. Re-running work on a candidate model would cost real money
+    and change two variables at once; this changes none.
+
+    MEASURED 2026-09-01, WHICH IS BOTH THE MOTIVATION AND THE PROOF THE DATA IS THERE. Deduped by
+    `run_id` across all three rotation forms: 706 distinct runs retained, 533 with a cost-bearing
+    verdict, $6.65 per run, `implement.done` 79% of it at $5.28. Cost is LINEAR IN TURNS at
+    $0.1131/turn ($23.42/207 on W1-T2324-1787823430981), the `src` class median is ~45 turns, and the
+    45 runs `cost.anomaly` flags run 150-230. RE-DERIVE RATHER THAN TRUST ANY OF THESE: they move
+    with the plan, the models and what rotation retained, and no cost figure survives the week it was
+    taken in. Every one is a query this task's own output should print.
+
+    WHAT IT MUST REPORT, PER `task_class`. The turn distribution (p50/p90/max, never a mean — the
+    mean is dragged by exactly the outlier being looked for, the same reasoning `cost-anomaly.ts`
+    already states for its own median), the cost distribution, the run count, and the OUTCOME split:
+    how many reached a passing verdict, how many ended `blocked_ci`, how many were re-dispatched. A
+    class that is cheap because it fails early is not a candidate for a cheaper mount; without the
+    outcome column the cost column argues the opposite of the truth.
+
+    COST PER COMPLETED TASK, NEVER PER REQUEST. A cheaper mount that needs more turns, a fix strike
+    or a re-dispatch is not cheaper, and per-request figures hide that completely. The report must
+    divide by SETTLED runs of that class, so a class whose runs routinely take two attempts shows its
+    real price.
+
+    IT MUST CARRY ITS OWN CONTROLS, BECAUSE EVERY CENSUS IN THIS REPO THAT DID NOT HAS BEEN WRONG.
+    The rotations come in three forms (`.ndjson.gz`, plain `.ndjson`, live `.ndjson`) and a glob
+    naming one answers silently from the others; archives duplicate heavily, so raw row counts
+    overstate by ~10x-22x and only a `run_id` dedup is meaningful; and a zero is not a measurement
+    until a positive control proves the query could see its corpus. This session produced a $1,279
+    figure and an $80,118 figure for the same corpus, neither correct, from queries that looked fine.
+    So the script must print, beside every number: which forms it opened, the row-to-distinct-run
+    ratio, and the corpus's newest timestamp — a census whose newest row predates the change being
+    judged is answering about the wrong window.
+
+    NOT IN SCOPE, DELIBERATELY: changing any mount (W1-T2559 owns that and depends on this), spawning
+    any worker, and recommending a model. This REPORTS a distribution. What to do about it is a
+    ruling, and a script that names a model would be making one.
+  acceptance:
+    - claim: "the sweep reports turn and cost distributions per task_class from the retained ledger, spawning nothing"
+      proof: "unit test: test/mount-headroom-sweep.test.ts"
+    - claim: "percentiles are reported, never a mean, so the outlier being looked for cannot drag the figure"
+      proof: "unit test: test/mount-headroom-sweep.test.ts"
+    - claim: "each class carries its outcome split, so a class that is cheap because it fails early is visible as such"
+      proof: "unit test: test/mount-headroom-sweep.test.ts"
+    - claim: "cost is divided by SETTLED runs, so a class needing two attempts shows its real per-completed-task price"
+      proof: "unit test: test/mount-headroom-sweep.test.ts"
+    - claim: "all three rotation forms are read, and the report names which it opened"
+      proof: "unit test: test/mount-headroom-sweep.test.ts"
+    - claim: "rows are deduped by run_id and the row-to-distinct ratio is printed, so archive duplication cannot inflate a count"
+      proof: "unit test: test/mount-headroom-sweep.test.ts"
+    - claim: "the corpus's newest timestamp is printed, so a census answering about the wrong window is visible"
+      proof: "unit test: test/mount-headroom-sweep.test.ts"
+    - claim: "an empty or unreadable corpus REFUSES rather than reporting zeros that read as a real distribution"
+      proof: "unit test: test/mount-headroom-sweep.test.ts"
