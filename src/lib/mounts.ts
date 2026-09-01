@@ -49,6 +49,16 @@ import { DEFAULT_TASK_CLASS } from "./task-class.js";
  * (W1-T2559 — retro/triage/inbox_draft) get their OWN `synthesis:` mount instead (config.ts's
  * `synthesisModel`/`synthesisEffort`): they ship no code, so the Tier Invariant does not bind
  * them, but each row is still REQUIRED and validated.
+ *
+ * ── The capability axis (W1-T2573) ──────────────────────────────────────────────
+ * `tiers` above ranks CLAUDE model names — the vocabulary every `routes`/`architect`/`judge`
+ * mount is written in. The OPTIONAL `capabilities` block is the provider-neutral axis a SECOND
+ * vendor's adapter (e.g. `codexTierForRequestedModel` in worker-provider.ts) resolves a
+ * requested Claude model + effort INTO, so cross-provider routing is a TABLE LOOKUP, never a
+ * substring match on the Claude model name, and effort survives the crossing because the lookup
+ * is keyed on (capability, effort). See {@link CapabilityLadder}. When declared, the Tier
+ * Invariant is ALSO enforced on capability rank ({@link capabilityRank}) — purely additive to
+ * the `tiers`-based check above, so a table that omits `capabilities` validates unchanged.
  */
 
 /** Base error for any structural or semantic mounts.yaml violation. */
@@ -83,12 +93,42 @@ export interface Mount {
 export const SYNTHESIS_ROLES = ["retro", "triage", "inbox_draft"] as const;
 export type SynthesisRole = (typeof SYNTHESIS_ROLES)[number];
 
+/**
+ * Provider-neutral capability axis (W1-T2573). `tiers` above ranks CLAUDE model names — the
+ * vocabulary every mount in `routes` is written in (Claude is canonical). `capabilities` is the
+ * axis a SECOND vendor's adapter (e.g. Codex) resolves a requested Claude model INTO, so that
+ * cross-provider routing is a TABLE LOOKUP, never a substring match on the Claude model name:
+ *   - `ladder`: capability name -> rank, provider-agnostic, the same shape as `tiers`.
+ *   - `claude`: Claude model name -> capability. Every `tiers` key MUST resolve here when this
+ *     block is present (checked at load), so any mount that already validated against `tiers`
+ *     also resolves a capability.
+ *   - `codex`: capability -> effort -> ordered (most-preferred-first) Codex candidate models.
+ *     Keyed on (capability, effort) so effort genuinely crosses the provider boundary instead of
+ *     being dropped: a `sonnet/high` mount and a `sonnet/medium` mount can resolve different
+ *     candidate rows.
+ * OPTIONAL at the top level — a table that omits `capabilities` entirely validates exactly as it
+ * did before this axis existed (every other fixture in the suite that predates W1-T2573 stays
+ * green); the axis only governs cross-provider routing once an operator opts in by declaring it.
+ * `.remudero/mounts.yaml` itself always declares it.
+ */
+export interface CapabilityLadder {
+  /** capability name -> rank (higher = more capable). */
+  ladder: Record<string, number>;
+  /** Claude model name -> capability; every `tiers` key must appear. */
+  claude: Record<string, string>;
+  /** capability -> effort -> ordered provider candidate model ids (non-empty per (capability, effort)). */
+  codex: Record<string, Record<string, string[]>>;
+}
+
 /** The whole parsed, validated routing table. */
 export interface Mounts {
   /** Model-tier ordering; higher rank = higher-thinking mount (config-maintained). */
   tiers: Record<string, number>;
   /** Effort ordering; higher rank = more thinking effort. */
   efforts: Record<string, number>;
+  /** The provider-neutral capability axis (W1-T2573) — see {@link CapabilityLadder}. Absent when
+   *  the table declares no `capabilities` block (backward compatible). */
+  capabilities?: CapabilityLadder;
   /** The Architect (main agent) mount — strictly above every worker below. */
   architect: Mount;
   /** The Layer-2 flight-judge mount (W1-T21) — strictly above every worker below. */
@@ -152,6 +192,21 @@ function parseMount(
 }
 
 /**
+ * Resolve a Claude model's declared capability rank (W1-T2573). Throws when the model has no
+ * row in `capabilities.claude` — unreachable for any model that already passed {@link parseMount}
+ * (`model in tiers`), because {@link parseCapabilities} requires every `tiers` key to resolve one
+ * whenever the `capabilities` block is present at all.
+ */
+function capabilityRank(capabilities: CapabilityLadder, model: string): number {
+  const capability = capabilities.claude[model];
+  const rank = capability !== undefined ? capabilities.ladder[capability] : undefined;
+  if (rank === undefined) {
+    throw new MountsError(`no declared capability for model '${model}' in 'capabilities.claude'.`);
+  }
+  return rank;
+}
+
+/**
  * Enforce the Tier Invariant (G-17) against a parsed table.
  * @param opts.thinkingDefault the operator's `thinking_default` (per-instance config, §9); when
  *        given, the Architect's effort must also meet it. The plan-authorship floor
@@ -160,6 +215,15 @@ function parseMount(
 function enforceTierInvariant(m: Mounts, thinkingDefault?: string): void {
   const architectTier = m.tiers[m.architect.model];
   const judgeTier = m.tiers[m.judge.model];
+  // W1-T2573: when the table declares a `capabilities` axis, the SAME invariant is ALSO
+  // enforced on capability RANK — the provider-neutral generalisation (rationale point 3):
+  // capability rank is what a worker riding a different vendor would be compared on, since
+  // such a worker has no place on the Claude-only `tiers` ladder at all. This is purely
+  // ADDITIVE — it never relaxes the `tiers`-based check below, only adds a second gate when
+  // capability data is present, so a table that omits `capabilities` validates exactly as it
+  // always has.
+  const architectCapabilityRank = m.capabilities ? capabilityRank(m.capabilities, m.architect.model) : undefined;
+  const judgeCapabilityRank = m.capabilities ? capabilityRank(m.capabilities, m.judge.model) : undefined;
   // architect.tier > max(worker.tier): strict model-tier dominance.
   // judge.tier > max(worker.tier): the Layer-2 flight judge (W1-T21) must ALSO
   // ride strictly above every worker it may supervise — same enforcement shape,
@@ -178,6 +242,19 @@ function enforceTierInvariant(m: Mounts, thinkingDefault?: string): void {
           throw new TierInvariantError(
             `Tier Invariant (G-17) violated: worker routes.${type}.${risk}.${cls} rides '${mount.model}' (tier ${workerTier}) which is not strictly below the flight judge '${m.judge.model}' (tier ${judgeTier}). The Layer-2 judge must ride a higher tier than every worker it supervises.`,
           );
+        }
+        if (m.capabilities && architectCapabilityRank !== undefined) {
+          const workerCapabilityRank = capabilityRank(m.capabilities, mount.model);
+          if (workerCapabilityRank >= architectCapabilityRank) {
+            throw new TierInvariantError(
+              `Tier Invariant (G-17) violated on the capability axis (W1-T2573): worker routes.${type}.${risk}.${cls} rides '${mount.model}' (capability '${m.capabilities.claude[mount.model]}', rank ${workerCapabilityRank}) which is not strictly below the Architect '${m.architect.model}' (capability '${m.capabilities.claude[m.architect.model]}', rank ${architectCapabilityRank}). This is the provider-neutral generalisation of the tiers-based check above: it must hold on capability rank too, so it stays enforceable when a worker rides a different vendor.`,
+            );
+          }
+          if (judgeCapabilityRank !== undefined && workerCapabilityRank >= judgeCapabilityRank) {
+            throw new TierInvariantError(
+              `Tier Invariant (G-17) violated on the capability axis (W1-T2573): worker routes.${type}.${risk}.${cls} rides '${mount.model}' (capability '${m.capabilities.claude[mount.model]}', rank ${workerCapabilityRank}) which is not strictly below the flight judge '${m.judge.model}' (capability '${m.capabilities.claude[m.judge.model]}', rank ${judgeCapabilityRank}).`,
+            );
+          }
         }
       }
     }
@@ -205,6 +282,67 @@ function enforceTierInvariant(m: Mounts, thinkingDefault?: string): void {
       );
     }
   }
+}
+
+/**
+ * Validate the OPTIONAL `capabilities` block (W1-T2573) — see {@link CapabilityLadder}. Only
+ * called when `raw.capabilities` is present at all; a table that omits the key entirely gets
+ * `mounts.capabilities === undefined` and validates exactly as it did before this axis existed.
+ * Once the key IS present, though, every one of its rows is REQUIRED: a `ladder` name, a
+ * `claude` mapping covering every `tiers` key, and a `codex` row for every (capability, effort)
+ * pair — this is what makes cross-provider routing a TABLE LOOKUP rather than a substring match,
+ * so a gap in the table is a load-time refusal, not a runtime guess.
+ */
+function parseCapabilities(
+  raw: unknown,
+  tiers: Record<string, number>,
+  efforts: Record<string, number>,
+): CapabilityLadder {
+  if (!isObject(raw)) throw new MountsError("'capabilities' must be a mapping of ladder/claude/codex.");
+  const ladder = parseOrdering(raw.ladder, "capabilities.ladder");
+
+  if (!isObject(raw.claude)) {
+    throw new MountsError("'capabilities.claude' must be a mapping of Claude model name -> capability.");
+  }
+  const claude: Record<string, string> = {};
+  for (const [model, capability] of Object.entries(raw.claude)) {
+    if (typeof capability !== "string" || !(capability in ladder)) {
+      throw new MountsError(
+        `'capabilities.claude.${model}' must name a capability in 'capabilities.ladder' (${Object.keys(ladder).join(", ")}), got ${JSON.stringify(capability)}.`,
+      );
+    }
+    claude[model] = capability;
+  }
+  for (const model of Object.keys(tiers)) {
+    if (!(model in claude)) {
+      throw new MountsError(
+        `'capabilities.claude' is missing a capability for '${model}' — every 'tiers' model must resolve one once 'capabilities' is declared (W1-T2573).`,
+      );
+    }
+  }
+
+  if (!isObject(raw.codex)) {
+    throw new MountsError("'capabilities.codex' must be a mapping of capability -> effort -> model list.");
+  }
+  const codex: Record<string, Record<string, string[]>> = {};
+  for (const capability of Object.keys(ladder)) {
+    const byEffort = raw.codex[capability];
+    if (!isObject(byEffort)) {
+      throw new MountsError(`'capabilities.codex.${capability}' must be a mapping of effort -> model list.`);
+    }
+    codex[capability] = {};
+    for (const effort of Object.keys(efforts)) {
+      const models = byEffort[effort];
+      if (!Array.isArray(models) || models.length === 0 || !models.every((entry) => typeof entry === "string" && entry.length > 0)) {
+        throw new MountsError(
+          `'capabilities.codex.${capability}.${effort}' must be a non-empty list of model ids, got ${JSON.stringify(models)}.`,
+        );
+      }
+      codex[capability][effort] = [...(models as string[])];
+    }
+  }
+
+  return { ladder, claude, codex };
 }
 
 /**
@@ -250,6 +388,9 @@ export function validateMounts(raw: unknown, opts: MountsOptions = {}): Mounts {
   if (!isObject(raw)) throw new MountsError("mounts.yaml must be a mapping.");
   const tiers = parseOrdering(raw.tiers, "tiers");
   const efforts = parseOrdering(raw.efforts, "efforts");
+  // W1-T2573: OPTIONAL — present in `.remudero/mounts.yaml` itself; absent in every fixture
+  // that predates this axis, which must keep validating unchanged (see parseCapabilities).
+  const capabilities = raw.capabilities === undefined ? undefined : parseCapabilities(raw.capabilities, tiers, efforts);
   const architect = parseMount(raw.architect, "architect", tiers, efforts);
   const judge = parseMount(raw.judge, "judge", tiers, efforts);
 
@@ -276,7 +417,7 @@ export function validateMounts(raw: unknown, opts: MountsOptions = {}): Mounts {
     }
   }
 
-  const mounts: Mounts = { tiers, efforts, architect, judge, synthesis, routes };
+  const mounts: Mounts = { tiers, efforts, ...(capabilities ? { capabilities } : {}), architect, judge, synthesis, routes };
   enforceTierInvariant(mounts, opts.thinkingDefault);
   return mounts;
 }
