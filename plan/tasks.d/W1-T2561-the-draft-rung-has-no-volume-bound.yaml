@@ -1,0 +1,90 @@
+- id: W1-T2561
+  title: "THE INBOX DRAFT RUNG HAS NO VOLUME BOUND — the DraftAttemptCache throttles REPETITION (one attempt per cause) and nothing bounds how many DISTINCT proposals one poll may spawn an Architect for, so `draftsDueOnDaemon` returned every due proposal into a single awaited batch at an $8.52 mean; harmless while the registry was hand-fed, and unbounded the moment `routeFollowupsToRegistry` began appending every routable harvested follow-up with no cap and no expiry — MEASURED 2026-09-01: 317 proposals, all followup-prefixed, 285 still needing a draft, ~$2,400 of latent spend behind a throttle key any reframe round invalidates"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 15.00
+  files: [src/lib/inbox.ts, src/run-task.ts, test/daemon-draft-batch-is-capped.test.ts]
+  origin: "operator-brief#seven-hour-daemon-review-2026-09-01"
+  plan_refs: ["W1-T2559", "W1-T2557", "W1-T2558", "W1-T192", "W1-T2458"]
+  status: queued
+  attempts: 0
+  rationale: |
+    ── WHAT THE SEVEN-HOUR REVIEW MEASURED ──────────────────────────────────────────────────────
+
+    Over the union of all three rotation forms at the config root (58 gz / 2 plain / 1 live,
+    418,521 deduped rows, newest 2026-09-01T11:52:28Z, so no reading here is a stale-corpus zero),
+    the seven hours to 11:52Z carried $540 of real spend. THE DRAFTING RUNG IS $401 OF IT — 74% —
+    across 537 `inbox.draft_synthesized` rows against 40 `inbox.drafted` successes.
+
+    ⚠ THE HEADLINE $831 IS WRONG AND IS NOT USED HERE. `cost.anomaly` contributes $291 of that
+    figure and is a RE-REPORT of historical runs, not new spend — the same run re-flagged at
+    06:25:46 and again at 09:29:16 at an identical $25.68. W1-T2558 owns that defect; this record
+    subtracts it rather than inheriting it.
+
+    ── THE DEFECT, AND WHY THE OBVIOUS FIX IS THE WRONG ONE ──────────────────────────────────────
+
+    `DraftAttemptCache` (W1-T192) already guarantees ONE attempt per cause; that is why the same
+    proposal is not redrafted every poll, and it is untouched here. IT BOUNDS REPETITION AND SAYS
+    NOTHING ABOUT VOLUME. `draftsDueOnDaemon` returned every due proposal, and `runDraftRung` walks
+    them sequentially in one awaited batch, each an Opus spawn at `max_turns: 400`.
+
+    That was fine while the registry was small and hand-fed. `routeFollowupsToRegistry`
+    (lib/retro.ts) then began appending every routable harvested follow-up through
+    `updateProposalRegistry` with NO CAP AND NO EXPIRY, so the registry only grows. It now holds
+    317 proposals, ALL `followup:`-prefixed — two days earlier it held 16, all `board-review:`.
+
+    ⚠ AND THE INTUITIVE REMEDY — REFUSE TO DRAFT WHILE THE GOVERNOR IS OVER ITS CEILING — WAS
+    REFUTED BY MEASUREMENT BEFORE IT WAS BUILT. Classifying every retained
+    `inbox.draft_synthesized` row against the `daemon.headroom` state in force at that instant:
+
+      spawned while over_ceiling = FALSE :  998 spawns   $1,991.95
+      spawned while over_ceiling = TRUE  :   24 spawns   $    0.00
+      control — fix.dispatch, the gated lane: 364 under / 6 over
+
+    THE RUNG DOES NOT SPEND THROUGH EXHAUSTION; IT DRIVES THE ACCOUNT THERE, entirely while the
+    governor still reads healthy. A gate on the exhausted state would have bounded $0 of the $1,992
+    actually spent. PACING THE ARRIVAL RATE IS THE LEVER; refusing at the ceiling is not. This is
+    recorded because the wrong fix is the one a reader will reach for first.
+
+    ── WHAT THIS CHANGES, AND WHAT IT DELIBERATELY DOES NOT ─────────────────────────────────────
+
+    `DAEMON_DRAFT_BATCH_CAP = 3` bounds how many proposals ONE POLL may draft. A CAP DELAYS WORK
+    AND NEVER DROPS IT: no attempt key is written for a proposal that was not attempted, so the
+    next poll takes the next batch and the queue drains at a bounded rate. At the measured mean it
+    caps a poll near $26 rather than near $2,700, and a genuine burst still reaches the Architect
+    within minutes.
+
+    The rung ledgers one `inbox.draft_batch` row per poll — eligible, drafting, deferred, cap. A
+    SILENT CAP IS THE "TESTED, INERT" SHAPE THIS REPO HAS SHIPPED BEFORE: without it the backlog is
+    invisible and a paced drain is indistinguishable from a wedged one. It is a pure count of a set
+    already computed, spawning nothing, and `deferred: 0` is a real reading rather than silence.
+
+    NOT DONE HERE, EACH OWNED ELSEWHERE OR DELIBERATELY LEFT: the MODEL TIER half is W1-T2559's
+    (the synthesis rungs riding the Architect mount at $8.52/run) and this cap is orthogonal to it —
+    both are needed and neither substitutes. `routeFollowupsToRegistry`'s missing expiry is a
+    SEPARATE defect this record NAMES but does not fix: capping the drain rate does not stop the
+    source filling, and deciding what retires a routed follow-up is its own concern with its own
+    falsifier. The `DraftAttemptCache` throttle, `runDraftRung`'s relint loop and
+    `MAX_DRAFT_LINT_ATTEMPTS` are untouched.
+
+    ⚠ TWO TEST ASSERTIONS WERE NARROWED, NOT WEAKENED. `test/run-task.test.ts`'s two
+    `buildInboxDraftHook` cases asserted `deepEqual(logs, [])` and `deepEqual(logs, [oneErrorRow])`
+    while their own messages claim only that a clean run "never ledgers inbox.draft_rung.error".
+    The new per-poll observation row makes the whole-log form fail for a reason it never meant to
+    test. Both now filter to the error step — the stated claim, unchanged and still exact — and the
+    clean-run case additionally asserts the batch row's exact contents, so the narrowing ADDS a
+    check rather than removing one.
+
+  acceptance:
+    - claim: "one poll drafts at most the cap however many proposals are due"
+      proof: "unit test: test/daemon-draft-batch-is-capped.test.ts"
+    - claim: "the cap delays work and never drops it — successive polls drain the whole queue"
+      proof: "unit test: test/daemon-draft-batch-is-capped.test.ts"
+    - claim: "a proposal deferred by the cap is not recorded as attempted, so it stays due"
+      proof: "unit test: test/daemon-draft-batch-is-capped.test.ts"
+    - claim: "the existing one-attempt-per-cause throttle still refuses an already-attempted proposal"
+      proof: "unit test: test/daemon-draft-batch-is-capped.test.ts"

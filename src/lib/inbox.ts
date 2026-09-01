@@ -382,14 +382,57 @@ export function parseDraftAttemptCache(text: string | undefined): DraftAttemptCa
   }
 }
 
+/**
+ * W1-T2561: the MOST proposals one daemon poll may spawn an Architect for.
+ *
+ * THE THROTTLE THIS SITS BESIDE BOUNDS REPETITION, NOT VOLUME. {@link DraftAttemptCache} already
+ * guarantees ONE attempt per cause — it is why the same proposal is not redrafted every poll. It
+ * says nothing about how many DISTINCT proposals may be drafted at once, and until this constant
+ * the answer was "every one that is due", sequentially, in a single awaited batch.
+ *
+ * THAT IS UNBOUNDED BY CONSTRUCTION ONCE A PRODUCER IS WIRED TO THE REGISTRY.
+ * `routeFollowupsToRegistry` (lib/retro.ts) appends every routable harvested follow-up with no cap
+ * and no expiry, so the registry only grows. MEASURED 2026-09-01: the registry holds 317
+ * proposals, all `followup:`-prefixed, 285 of them still needing a draft, against an
+ * `inbox.draft_synthesized` mean of $8.52 — roughly $2,400 of latent spend behind a throttle whose
+ * key (`anchorFingerprint::reframeCount`) any reframe round invalidates. In the seven hours to
+ * 11:52Z the drafting rung spent $401 of a $540 total, 74% of the pipeline, and $1,992 across the
+ * retained ledger.
+ *
+ * WHY A CAP RATHER THAN A HEADROOM GATE — AND THIS IS THE MEASUREMENT THAT DECIDED IT. The
+ * intuitive fix is to refuse to draft while the governor is over its ceiling. Classifying every
+ * retained `inbox.draft_synthesized` row by the `daemon.headroom` state in force at that instant
+ * REFUTES it: 998 spawns costing $1,991.95 happened while `over_ceiling` was FALSE, against 24
+ * spawns costing $0.00 while it was TRUE. The rung is not spending THROUGH exhaustion; it is what
+ * DRIVES the account there, entirely while the governor still reads healthy. A gate on the
+ * exhausted state would therefore have bounded $0 of the $1,992 actually spent. Pacing the arrival
+ * rate is the lever; refusing at the ceiling is not.
+ *
+ * A CAP DELAYS WORK, IT NEVER DROPS IT. Whatever this slice defers stays due — no attempt key is
+ * written for a proposal that was not attempted — so the next poll takes the next batch and the
+ * queue drains at a bounded rate instead of in one stampede. Three is the arrival rate at roughly
+ * one poll's own cadence: at the measured mean it caps a poll near $26 rather than near $2,400,
+ * and a genuine burst of new proposals still reaches the Architect within a few minutes.
+ *
+ * POLICY DATA (rule 2) — a literal here, W1-T252/W1-T253's policy file is its eventual home, the
+ * same disposition {@link UNREADABLE_DEGRADED_LIMIT} in lib/headroom.ts records for its own bound.
+ */
+export const DAEMON_DRAFT_BATCH_CAP = 3;
+
 /** Proposals the DAEMON-SIDE draft rung should attempt THIS poll: {@link proposalsNeedingDraft}
  *  further throttled by {@link DraftAttemptCache} so a 300s poll cadence never re-spawns the
  *  Architect for the SAME cause — a proposal is due again only once its {@link draftAttemptKey}
  *  has actually changed since the daemon's last attempt (or it has never been attempted at
  *  all). `rmd inbox` never calls this — it calls {@link proposalsNeedingDraft} directly,
  *  unthrottled, which is what makes it a genuine manual force. */
-export function draftsDueOnDaemon(proposals: Proposal[], drafts: DraftCache, attempts: DraftAttemptCache): Proposal[] {
-  return proposalsNeedingDraft(proposals, drafts).filter((p) => attempts[p.id] !== draftAttemptKey(p));
+export function draftsDueOnDaemon(
+  proposals: Proposal[],
+  drafts: DraftCache,
+  attempts: DraftAttemptCache,
+  cap: number = DAEMON_DRAFT_BATCH_CAP,
+): Proposal[] {
+  const due = proposalsNeedingDraft(proposals, drafts).filter((p) => attempts[p.id] !== draftAttemptKey(p));
+  return cap > 0 ? due.slice(0, cap) : due;
 }
 
 /** `<config.root>/state/inbox-draft-inflight.json` — proposal id -> ISO spawn timestamp,
