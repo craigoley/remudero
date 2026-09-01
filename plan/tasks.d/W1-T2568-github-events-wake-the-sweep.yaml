@@ -14,10 +14,12 @@
     - src/lib/daemon.ts
     - src/run-task.ts
     - plan/policy.yaml
+    - scripts/source-size-baseline.json
     - deploy/runtime-env-vars.sh
     - deploy/host-update.sh
     - deploy/serve-container.sh
     - test/github-event-sweep-wake.test.ts
+    - test/policy.test.ts
     - docs/operator-guide.md
   origin: "operator-brief#automatic-pr-queue-github-event-response-2026-09-01"
   plan_refs: ["W1-T463", "W1-T473", "W1-T526", "W1-T1272", "W1-T2430", "W1-T2519"]

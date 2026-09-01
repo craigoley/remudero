@@ -227,6 +227,16 @@ export interface PolicyValues {
   worktreeReapBoot: {
     enabled: boolean;
   };
+  /** W1-T2568: the GitHub-event wake's bounded recent-delivery dedup window (see
+   *  `github-event-wake.ts`'s `createDeliveryDedupStore`) — how many distinct `X-GitHub-Delivery`
+   *  ids the webhook route remembers before evicting the oldest. THE bounded row design (iv)
+   *  calls for ("the debounce is a bounded plan/policy.yaml row, not a literal beside
+   *  fs.watch"): a redelivery/replay burst is refused as a duplicate only while its delivery id
+   *  is still in this window, so the bound is a real, reviewed tuning knob, not a source
+   *  literal. OPTIONAL, absent-means-default like {@link PolicyValues.sweepWallClockBoundMs}. */
+  githubEventWake: {
+    dedupCapacity: number;
+  };
 }
 
 /** One field's provenance, as recorded on load — see this module's header. */
@@ -316,6 +326,7 @@ const EXPECTED_ORIGIN_KIND: Record<string, PolicyOriginKind> = {
   "scratchReap.enabled": "net-new",
   "scratchReap.maxAgeHours": "lifted",
   "worktreeReapBoot.enabled": "net-new",
+  "githubEventWake.dedupCapacity": "net-new",
 };
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
@@ -481,6 +492,18 @@ const DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS = 559_000;
 export const DEFAULT_FIX_SPAWN_WALL_CLOCK_BOUND_MS = 3_600_000;
 
 /**
+ * W1-T2568: DEFAULT `githubEventWake.dedupCapacity` — mirrors plan/policy.yaml's own row
+ * (net-new; derivation in that file's comment). Used ONLY when the row is ABSENT from the
+ * loaded YAML, the SAME absent-means-default shape {@link DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS}
+ * above already uses, so an existing `policy.yaml` fixture that predates this task keeps
+ * loading clean rather than failing on a missing mapping.
+ *
+ * PRIMARY CONTROL (W1-T1266): the replay ring evicts on ordinary traffic, with nothing failed
+ * when it does — this is the always-active bound on retained delivery ids, not a last resort.
+ */
+export const DEFAULT_GITHUB_EVENT_WAKE_DEDUP_CAPACITY = 500;
+
+/**
  * Validate a raw (parsed-YAML) value into a {@link Policy}. Throws {@link PolicyError} on any
  * structural violation, out-of-bound value, or origin-kind mismatch — mirrors
  * `src/lib/mounts.ts`'s `validateMounts`/`src/lib/alert-lane.ts`'s `validateAlertPolicy`
@@ -611,6 +634,14 @@ export function validatePolicy(raw: unknown): Policy {
   }
   const worktreeReapBootEnabled = booleanField("worktreeReapBoot.enabled", worktreeReapBootRaw.enabled, origin);
 
+  // W1-T2568: OPTIONAL, same absent-means-default shape as `sweepWallClockBoundMs`/
+  // `fixSpawnWallClockBoundMs` above — an existing policy.yaml missing this row still loads
+  // clean; only a PRESENT row is validated, so a typo in an opted-in row still fails loud.
+  const githubEventWakeRaw = raw.githubEventWake as Record<string, unknown> | undefined;
+  const githubEventWakeDedupCapacity = githubEventWakeRaw
+    ? numberField("githubEventWake.dedupCapacity", githubEventWakeRaw.dedupCapacity, origin, bounds)
+    : DEFAULT_GITHUB_EVENT_WAKE_DEDUP_CAPACITY;
+
   return {
     values: {
       proofTimeoutMs,
@@ -645,6 +676,7 @@ export function validatePolicy(raw: unknown): Policy {
       launchd: { throttleIntervalS },
       scratchReap: { enabled: scratchReapEnabled, maxAgeHours: scratchReapMaxAgeHours },
       worktreeReapBoot: { enabled: worktreeReapBootEnabled },
+      githubEventWake: { dedupCapacity: githubEventWakeDedupCapacity },
     },
     origin,
     bounds,
