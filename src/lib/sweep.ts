@@ -363,6 +363,65 @@ export function isPureConcurrentAddition(files: readonly ConflictFileDiff[]): bo
 }
 
 /**
+ * W1-T2548 — THE DECLARED GENERATOR REGISTRY (rationale (3)/(4)): every conflict this repo has
+ * actually PRODUCED is a same-key VALUE change — a deleted line plus an added line under an
+ * existing key — which {@link isPureConcurrentAddition} refuses BY CONSTRUCTION (it counts
+ * deletions on both sides and same-key edits always carry one). MEASURED 2026-08-30, six
+ * conflicts in one evening, every one `scripts/source-size-baseline.json`, one JSON key, two
+ * different numbers whose merged truth matched NEITHER recorded side — a textual union would
+ * have been wrong, not merely unhelpful.
+ *
+ * For a path THIS TABLE NAMES, the file has a generator that reproduces it from the tree, so the
+ * resolution is not a merge at all: re-run the generator on the MERGED tree and its output is
+ * correct by construction (never a chosen side, never a diff heuristic — rationale (4), "the
+ * safety argument is the generator, not a heuristic"). A path absent from this table stays
+ * refused exactly as it was before this task — admission is bounded by a list a human wrote, not
+ * by an inference {@link isRegenerableArtifactConflict} (below) could get wrong.
+ *
+ * DATA (rule 2), never a code change to admit a new path: each value is the `package.json`
+ * script name that reproduces the file from the tree — the SAME identifier its own `npm run
+ * <name>[:check]` pair already carries, so a reader can reproduce this table's own claim with one
+ * command rather than trusting a private label invented only for this table.
+ */
+export const REGENERABLE_ARTIFACT_GENERATORS: Readonly<Record<string, string>> = Object.freeze({
+  "scripts/source-size-baseline.json": "source-size-ratchet",
+  "plan/plan-index.json": "plan-index",
+  "docs/docs-index.json": "docs-index",
+  "learnings/index.json": "learnings-index",
+  "docs/cli-reference.md": "cli-reference",
+  "MASTER-PLAN.md": "capability-snapshot",
+  "packages/api-client/src/schema.d.ts": "api-client:generate",
+});
+
+/**
+ * W1-T2548 — PURE, DETERMINISTIC classification (rule 2) of whether every conflicting path
+ * carries a DECLARED generator ({@link REGENERABLE_ARTIFACT_GENERATORS}) — the discriminator the
+ * `conflicted` row admits a same-key value conflict on, alongside (never instead of)
+ * {@link isPureConcurrentAddition}. Requires ALL files registered, not merely one: a conflict
+ * that touches a hand-written path alongside a regenerable one is refused WHOLE (acceptance 4)
+ * — a partial admission would still have to decide what to do with the hand-written half, which
+ * is exactly the judgment call this predicate exists to avoid. Deletions on either side are
+ * irrelevant here (unlike the pure-addition arm) — a same-key value change is expected to carry
+ * them, and the generator re-run supersedes both recorded values regardless.
+ */
+export function isRegenerableArtifactConflict(
+  files: readonly ConflictFileDiff[],
+  generators: Readonly<Record<string, string>> = REGENERABLE_ARTIFACT_GENERATORS,
+): boolean {
+  return files.length > 0 && files.every((f) => Object.hasOwn(generators, f.path));
+}
+
+/** W1-T2548 — the conflicting path(s), if any, this table declares no generator for — the
+ *  diagnosability half of acceptance 5: a refusal names WHICH path broke admission rather than
+ *  making a reader re-derive it from the registry by hand. */
+function undeclaredGeneratorPaths(
+  files: readonly ConflictFileDiff[],
+  generators: Readonly<Record<string, string>>,
+): string[] {
+  return files.filter((f) => !Object.hasOwn(generators, f.path)).map((f) => f.path);
+}
+
+/**
  * W1-T2536 — WHICH of the refusal row's disjuncts actually fired, as a phrase for that row's own
  * `reason`. Before this, the row said "involves a deletion (or no file evidence was captured)"
  * UNCONDITIONALLY, so a conflict with FULL evidence and ZERO deletions on both sides — the
@@ -376,13 +435,33 @@ export function isPureConcurrentAddition(files: readonly ConflictFileDiff[]): bo
  * shipped default (W1-T2536 turns admission on, so the row above claims exactly this population)
  * and is written anyway — the flag is policy DATA, an operator may set it false, and a refusal
  * that then re-acquired the old lie is the defect this helper exists to remove.
+ *
+ * W1-T2548 — NAMES THE MIXED CASE (acceptance 4/5): a deletion-involved conflict whose paths
+ * straddle {@link REGENERABLE_ARTIFACT_GENERATORS} — at least one declared, at least one not —
+ * now says so explicitly, so a hand-written path riding alongside a regenerable one is
+ * diagnosable without re-deriving the registry lookup by hand. A conflict where NO path is
+ * declared (the ordinary hand-written-source shape this row has always refused) keeps saying
+ * plainly "involves a deletion" — the registry is irrelevant to that population.
  */
 export function conflictRefusalCause(
   files: readonly ConflictFileDiff[],
   policy: Pick<SweepPolicy, "mergeConflictAdmissionEnabled">,
+  generators: Readonly<Record<string, string>> = REGENERABLE_ARTIFACT_GENERATORS,
 ): string {
   if (files.length === 0) return "no file evidence was captured";
-  if (files.some((f) => f.oursDeleted > 0 || f.theirsDeleted > 0)) return "involves a deletion";
+  if (files.some((f) => f.oursDeleted > 0 || f.theirsDeleted > 0)) {
+    const undeclared = undeclaredGeneratorPaths(files, generators);
+    // W1-T2548 — MIXED ONLY (acceptance 4/5): name the offending path(s) only when the
+    // conflict straddles the registry — at least one path IS declared and at least one is
+    // not — so a reader is told WHICH half broke admission rather than having to re-derive
+    // it. A conflict where NO path is declared (the dominant hand-written-source shape) keeps
+    // the plain "involves a deletion" this row has always said — the registry is irrelevant
+    // to that population, so naming its absence would tell the reader nothing new.
+    if (undeclared.length > 0 && undeclared.length < files.length) {
+      return `involves a deletion, and ${undeclared.join(", ")} ${undeclared.length === 1 ? "has" : "have"} no declared generator`;
+    }
+    return "involves a deletion";
+  }
   if (policy.mergeConflictAdmissionEnabled !== true) {
     return "auto-resolution admission is disabled (mergeConflictAdmissionEnabled)";
   }
@@ -2974,10 +3053,12 @@ export function reviewVerdictOvertakenByActivity(pr: OpenPrView): boolean {
  *   7.5. CONFLICTED (W1-T106, the #170 DIRTY strand): `mergeState === "dirty"`
  *      — ABOVE mergeable, so a conflicting PR is NEVER armed no matter how
  *      green. Two rows, in order: (a) a PURE-concurrent-addition conflict
- *      (isPureConcurrentAddition) -> `conflicted`, dispatching the W1-T94
- *      merge-conflict fix mode; (b) anything else dirty (a deletion-involved
- *      or unclassifiable conflict) -> `blocked-ambiguous`, REFUSING
- *      auto-resolution and escalating instead — never a wrong clobber.
+ *      (isPureConcurrentAddition) OR a same-key value conflict confined to
+ *      paths with a DECLARED generator (isRegenerableArtifactConflict,
+ *      W1-T2548) -> `conflicted`, dispatching the W1-T94 merge-conflict fix
+ *      mode; (b) anything else dirty (a deletion-involved conflict touching
+ *      an undeclared path, or an unclassifiable one) -> `blocked-ambiguous`,
+ *      REFUSING auto-resolution and escalating instead — never a wrong clobber.
  *   8. CI GREEN + REVIEW SUCCESS (POSITIVE match only)   -> mergeable (arm).
  *   8.5. ZERO-RUNS REQUIRED CHECK / POST-REVIEW (W1-T176 discriminator + the
  *      2026-07-22 #584 stall): checks green, remudero-review has ZERO
@@ -3323,8 +3404,13 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // never sees a dirty PR. Deterministically fixable (rule 2, never an LLM
     // judgment call) ONLY when {@link isPureConcurrentAddition} clears every
     // conflicting file — both sides purely ADDED, neither deleted anything
-    // the other still relies on. The deletion-involved / no-evidence-captured
-    // case falls through to the very next row, never here.
+    // the other still relies on — OR (W1-T2548) when {@link
+    // isRegenerableArtifactConflict} clears every conflicting file instead:
+    // every path carries a DECLARED generator, so a deletion on either side is
+    // irrelevant and the resolution is that generator's own output on the
+    // merged tree, never a chosen side. A conflict satisfying neither arm
+    // (a deletion on an undeclared path, or no evidence captured at all)
+    // falls through to the very next row, never here.
     //
     // W1-T984: gated behind `policy.mergeConflictAdmissionEnabled` (default FALSE — see that
     // field's own doc) — the SAME shape row 0's `supersessionDisposalEnabled` conjunct already
@@ -3335,11 +3421,30 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // flag off, this row never matches no matter what evidence flows, and a dirty PR falls to the
     // very next row exactly as it always has.
     disposition: "conflicted",
-    when: (pr, policy) =>
-      policy.mergeConflictAdmissionEnabled === true && pr.mergeState === "dirty" && isPureConcurrentAddition(pr.mergeConflict?.files ?? []),
-    reason: (pr) =>
-      `merge conflict (mergeState dirty) — pure concurrent addition on ` +
-      `${(pr.mergeConflict?.files ?? []).map((f) => f.path).join(", ")} — dispatching the merge-conflict fix mode`,
+    when: (pr, policy) => {
+      if (policy.mergeConflictAdmissionEnabled !== true || pr.mergeState !== "dirty") return false;
+      const files = pr.mergeConflict?.files ?? [];
+      // W1-T2548: a SECOND, independent admission arm alongside the pure-addition one below —
+      // either clears this row on its own (never required together). isRegenerableArtifactConflict
+      // is checked first only because its reason (below) is the more specific of the two when both
+      // happen to hold (e.g. a registered path that also carries zero deletions).
+      return isRegenerableArtifactConflict(files) || isPureConcurrentAddition(files);
+    },
+    reason: (pr) => {
+      const files = pr.mergeConflict?.files ?? [];
+      if (isRegenerableArtifactConflict(files)) {
+        const named = files.map((f) => `${f.path} (generator: ${REGENERABLE_ARTIFACT_GENERATORS[f.path]})`).join(", ");
+        return (
+          `merge conflict (mergeState dirty) — every conflicting path has a declared generator: ${named} — ` +
+          `dispatching the merge-conflict fix mode to RE-RUN the generator(s) on the merged tree — the ` +
+          `resolution is that output, never either side's recorded value`
+        );
+      }
+      return (
+        `merge conflict (mergeState dirty) — pure concurrent addition on ` +
+        `${files.map((f) => f.path).join(", ")} — dispatching the merge-conflict fix mode`
+      );
+    },
   },
   {
     // W1-T106: the OTHER half of the same #170 strand — a dirty PR whose
