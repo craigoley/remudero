@@ -1,0 +1,74 @@
+- id: W1-T2562
+  title: "rmd serve NEVER EXITS STALE, SO THE CONSOLE RUNS ON BOOT-TIME CODE FOREVER WHILE THE CHECKOUT ADVANCES UNDER IT — the entrypoint's freshness restart fires only on DAEMON_EXIT_STALE (75), which `rmd daemon` emits and `rmd serve` never does; the two containers share ONE bind-mounted checkout, so serve's files silently become current while its loaded modules do not — MEASURED 2026-09-01: remudero-serve up 20h, 1 boot, 0 freshness restarts, booted at 1c6fa65e and serving while that same inode read a0172493, 60 commits ahead"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 12.00
+  files: [deploy/entrypoint.sh, test/serve-freshness-restart.test.ts]
+  origin: "operator-brief#seven-hour-daemon-review-2026-09-01"
+  plan_refs: ["W1-T1134", "W1-T1222", "W1-T2561"]
+  status: queued
+  attempts: 0
+  rationale: |
+    ── MEASURED ─────────────────────────────────────────────────────────────────────────────────
+
+    `remudero-serve`: up 20 hours, ONE "rmd serve — listening" boot line, ZERO freshness restarts.
+    `remudero-daemon` over the same window: ELEVEN. Serve's boot log records
+    `checkout: 1c6fa65e...` while `git rev-parse HEAD` inside that same container reads `a0172493`
+    — 60 commits ahead, dated 21 hours later.
+
+    ⚠ AND THE TWO CONTAINERS SHARE ONE CHECKOUT, WHICH IS WHAT MAKES THIS INVISIBLE.
+    `stat -c %d:%i` on `package.json` returns the IDENTICAL device:inode from both containers
+    (66310:1065640). So every file-level diagnostic run against serve reports CURRENT code — because
+    the files genuinely are current. Only the loaded modules are stale, and nothing reports those.
+    A reader checking "is serve up to date" by reading its tree gets a confident, wrong yes.
+
+    ── THE MECHANISM ────────────────────────────────────────────────────────────────────────────
+
+    `deploy/entrypoint.sh`'s freshness loop re-syncs and re-execs when the child exits
+    `DAEMON_EXIT_STALE` (75). That code is emitted by `rmd daemon` (src/lib/daemon.ts), which
+    re-checks its own head against origin and exits stale on a merge. `rmd serve` is a long-lived
+    HTTP server with no such check, so the branch never fires for it. The entrypoint is not wrong —
+    it faithfully restarts on a signal serve never sends.
+
+    THE CONSEQUENCE IS BOUNDED BUT REAL: the console is the surface an operator watches the fleet
+    through, so console fixes merge green and go unobserved for as long as the container lives. This
+    review restarted the container by hand to pick up 60 commits; a fix that needs a human to notice
+    is the defect, not the remedy.
+
+    ── WHAT THIS TASK MUST DECIDE, NOT ASSUME ───────────────────────────────────────────────────
+
+    ⚠ THE OBVIOUS FIX IS NOT OBVIOUSLY RIGHT AND THIS RECORD DELIBERATELY DOES NOT PICK ONE.
+    Making serve exit 75 on a merge would restart the console ON EVERY MERGE — measured median 63
+    merges/day (the same figure `FRESHNESS_RESTART_MAX`'s own sizing note derives), so roughly every
+    23 minutes, each restart dropping live SSE connections the console holds open. That trades a
+    stale console for a flapping one, which is plausibly worse for the same operator.
+
+    At least three dispositions are viable and the choice is the deliverable:
+      (i)   exit stale like the daemon, accepting the reconnect churn;
+      (ii)  serve the staleness as a CONSOLE BANNER — the page already owns a freshness model
+            (`resolveFreshness`, lib/console-freshness.ts) — and let a human restart deliberately;
+      (iii) restart only when the loaded code is stale AND no client is connected.
+    Whichever lands must state what it costs in reconnects, because the cheap-looking option is the
+    one that hurts most.
+
+    A REGRESSION TEST MUST NOT ASSERT "SERVE RESTARTS" UNTIL (i) IS ACTUALLY CHOSEN. The falsifiable
+    invariant available today is narrower and worth pinning either way: the entrypoint's freshness
+    branch is reachable for the verb the container actually runs. A test that encodes the remedy
+    before the remedy is decided would have to be rewritten by the task that decides it.
+
+    NOT IN SCOPE: `RMD_FRESHNESS_RESTART_MAX`, the crash throttle, and the exit-code duplication
+    between `entrypoint.sh` and `daemon.ts` (already asserted equal by its own test) all stay as
+    they are. W1-T1134 is a DIFFERENT freshness defect — the CLI gate refusing read-only verbs on a
+    detached head — and is not touched here.
+
+  acceptance:
+    - claim: "the entrypoint's freshness restart is reachable for the verb the serve container actually runs"
+      proof: "unit test: test/serve-freshness-restart.test.ts"
+    - claim: "the chosen disposition names what it costs in dropped console connections per day"
+      proof: "unit test: test/serve-freshness-restart.test.ts"
+    - claim: "a stale-code console is observable without shelling into the container and comparing inodes"
+      proof: "unit test: test/serve-freshness-restart.test.ts"
