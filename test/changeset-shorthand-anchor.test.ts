@@ -115,15 +115,23 @@ test("the COPULAR arm carries the self-referential subjects the backward arm use
   }
 });
 
-test("the LABEL form survives a CLOSING DELIMITER, which is a span ending and not a sentence ending", () => {
-  // FOUND BY THE FULL-GLOB RUN, not by the scoped one: W1-T395 pins "quoting a claim must not
-  // change the verdict" (test/review-absence-anchor-delimiter.test.ts), and `"Plan-only": …`
-  // satisfied it only by ACCIDENT — the label arm's class matched emphasis but never a quote, and
-  // the sentence-scoped arm removed here was covering for it. The gap was always in this arm.
+test("the LABEL form survives a CLOSING DELIMITER that is markdown emphasis or a bracketing aside", () => {
+  // FOUND BY THE FULL-GLOB RUN, not by the scoped one: W1-T395 pins that a CLOSING DELIMITER merely
+  // ends a SPAN, not a sentence — `**Plan-only**:` and `(Plan-only):` still reach the colon and
+  // read as a label. That still holds for emphasis (`*`/`_`/backtick pairs used as styling) and for
+  // a parenthetical aside; neither opens an unbalanced quote span on this line.
   assert.equal(fires("Plan-only: no source touched."), true, "bare");
-  assert.equal(fires('"Plan-only": no source touched.'), true, "quoted — same verdict, W1-T395's invariant");
-  assert.equal(fires("`data-only`: no code."), true, "backticked");
   assert.equal(fires("(Plan-only): one shard added."), true, "parenthesised");
+});
+
+test("W1-T2549: the LABEL form is silent when the shorthand itself sits inside an inline-quoted span", () => {
+  // SUPERSEDES the prior pinning here. `"Plan-only": …` and `` `data-only`: … `` open an unbalanced
+  // quote/backtick span immediately before the shorthand — the same shape {@link
+  // isInsideInlineQuote} already exempted on the COUNT arm (W1-T2534). #3422's second body was
+  // refused for exactly this: quoting the label form it was documenting. The label, copular and
+  // attributive arms now agree with the count arm instead of disagreeing with it.
+  assert.equal(fires('"Plan-only": no source touched.'), false, "quoted — read as a mention, not a claim");
+  assert.equal(fires("`data-only`: one shard added."), false, "backticked — same reasoning as the quoted form");
 });
 
 test("the modified noun is read on THIS line only, and never through punctuation into a path", () => {

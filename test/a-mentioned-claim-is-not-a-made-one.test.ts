@@ -45,17 +45,27 @@ test("W1-T2534 criterion 2: a genuine UNQUOTED count claim in changeset context 
   assert.equal(refused("This PR changes exactly 4 files."), true);
 });
 
-test("W1-T2534 criterion 3: quotation alone changes no verdict on the SHORTHAND arm — W1-T395 is untouched", () => {
-  // W1-T395 pinned that quoting a scope LABEL must not exempt it. This change touches only the
-  // COUNT arm's context scan, so the label arm must be byte-for-byte as it was.
+test("W1-T2534 criterion 3 (superseded by W1-T2549): the BARE label arm is untouched by the count-arm fix", () => {
+  // W1-T2534 touched only the COUNT arm's context scan, so at the time this pinned that the label
+  // arm's bare (unquoted) form was byte-for-byte as it was. That remains true; see the QUOTED forms
+  // below for what W1-T2549 changed.
   const d = ["src/lib/a.ts"];
-  assert.equal(refused('"Plan-only": no source touched.', d), true, "a quoted label still fires");
-  assert.equal(refused("Plan-only: no source touched.", d), true, "as does the bare form");
-  assert.equal(refused("`Plan-only`: one file.", d), true);
+  assert.equal(refused("Plan-only: no source touched.", d), true, "the bare form still fires");
 });
 
-test("W1-T2534 criterion 4: the label arm still refuses a quoted label that really is this body's own claim", () => {
-  assert.equal(refused('"Plan-only": one file added.', ["src/lib/a.ts"]), true);
+// W1-T2549 — the label, copular and attributive arms now share {@link isInsideInlineQuote} with the
+// count arm above, so a quoted label is a MENTION rather than this body's own claim, the same as a
+// quoted count. This is the exact shape that refused #3422's second body (rationale point 2).
+test("W1-T2549: the label arm is silent on a quoted label, matching the count arm's own inline-quote guard", () => {
+  const d = ["src/lib/a.ts"];
+  assert.equal(refused('"Plan-only": no source touched.', d), false, "a quoted label is a mention, not a claim");
+  assert.equal(refused("`Plan-only`: one file.", d), false, "backticked — same reasoning");
+});
+
+test("W1-T2549 criterion 5 (#3422's second body): the verbatim quoted-label body that was wrongly refused now passes", () => {
+  // rationale point (2): #3422's second body quoted the LABEL form it was documenting and was
+  // refused for it, after its first (count-arm) body had already been fixed per W1-T2534.
+  assert.equal(refused('"Plan-only": one file added.', ["src/lib/a.ts"]), false);
 });
 
 test("W1-T2534: the span is bounded to the match's OWN LINE", () => {
