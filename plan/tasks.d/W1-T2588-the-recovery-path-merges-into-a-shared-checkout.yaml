@@ -1,0 +1,69 @@
+- id: W1-T2588
+  title: "THE RECOVERY SCRIPT MERGES INTO A CHECKOUT SOMEONE ELSE IS EDITING, SO ANOTHER AGENT'S UNCOMMITTED WORK BLOCKS IT — deploy/recycle-container.sh updates the operator checkout before it does anything else, and git refuses the merge outright; MEASURED 2026-09-01: with a live spend leak halted and its fix already on main, the one command that restores service aborted with `Your local changes to the following files would be overwritten by merge` naming three files another lane had left modified"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 6.00
+  files: [deploy/recycle-container.sh, test/the-recovery-path-merges-into-a-shared-checkout.test.ts]
+  origin: "operator-brief#recovery-blocked-by-shared-checkout-2026-09-01"
+  plan_refs: ["W1-T1010", "W1-T2555", "W1-T191"]
+  status: queued
+  attempts: 0
+  rationale: |
+    ── WHAT HAPPENED, AND WHY THE TIMING IS THE POINT ──────────────────────────────────────────
+
+    The recovery script begins by updating the operator checkout it is invoked from. That checkout
+    is ALSO where an agent lane works, so it is routinely dirty with real, in-progress edits — not
+    a mistake, just the normal state of a directory someone is using.
+
+        error: Your local changes to the following files would be overwritten by merge:
+                scripts/source-size-baseline.json
+                src/lib/inbox.ts
+                src/run-task.ts
+        Aborting
+
+    ⚠ IT FAILED AT THE ONE MOMENT IT WAS NEEDED. Service was deliberately halted, the fix had
+    merged, and restoring service was the only remaining step. The precondition — a clean working
+    tree in a directory another process is actively writing — is unstated, unchecked, and outside
+    the operator's control.
+
+    ── THE CLASS: A RECOVERY STEP WITH AN UNSTATED PRECONDITION ────────────────────────────────
+
+    The same family has now bitten three times here. A stranded lock left the container unable to
+    boot behind its own guard (W1-T1010, W1-T1067). A state directory that did not exist was
+    mounted anyway and reported a clean zero over nothing (W1-T2555). And now a merge into a
+    shared tree. Each time, the recovery mechanism reported something true and unhelpful while the
+    operator lost time to a condition nobody had named.
+
+    ── TWO SHAPES, AND THE CHOICE IS A REAL DECISION ───────────────────────────────────────────
+
+    (a) DO NOT MERGE AT ALL. Read the target ref directly rather than updating a working tree —
+        the script needs the merged content, not a checkout in a particular state. This removes
+        the precondition instead of documenting it.
+    (b) REFUSE EARLY AND LOUDLY, naming the dirty paths and printing the exact stash command,
+        before pulling an image or touching the running container.
+
+    (a) is the stronger fix and (b) is the cheaper one; whichever ships must state which it chose.
+
+    ⚠ WHAT IT MUST NOT DO IS DISCARD THE WORK. `git checkout -- .`, `reset --hard`, or a stash it
+    never mentions would each silently destroy another lane's in-progress edits to fix a
+    convenience problem. Anything that touches those files must be reversible and must say so on
+    the terminal.
+
+    ⚠ AND A REFUSAL MUST COME BEFORE ANY SIDE EFFECT. Aborting after an image pull or after the
+    container has been paused leaves the host in a state the operator did not ask for and did not
+    expect — worse than refusing at the door.
+
+    NOT IN SCOPE: the recycle's state-dir check (W1-T2555), the lock-clearing steps (W1-T1010),
+    and the two write paths that dirty the fleet's own checkout (W1-T191).
+
+  acceptance:
+    - claim: "the recovery script no longer requires a clean working tree, or refuses at the door naming the blocking paths and the reversible command that clears them"
+      proof: "unit test: test/the-recovery-path-merges-into-a-shared-checkout.test.ts"
+    - claim: "no path in the script discards uncommitted work, so another lane's in-progress edits survive a recovery"
+      proof: "unit test: test/the-recovery-path-merges-into-a-shared-checkout.test.ts"
+    - claim: "a refusal happens before any side effect, so a blocked recovery never leaves a pulled image or a paused container behind"
+      proof: "unit test: test/the-recovery-path-merges-into-a-shared-checkout.test.ts"
