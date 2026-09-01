@@ -32,6 +32,11 @@ function fixtureMounts(): Mounts {
     efforts: { low: 1, medium: 2, high: 3 },
     architect: { model: "opus", effort: "high", max_turns: 400, context_budget: 180000 },
     judge: { model: "opus", effort: "high", max_turns: 400, context_budget: 150000 },
+    synthesis: {
+      retro: { model: "opus", effort: "high", max_turns: 400, context_budget: 180000 },
+      triage: { model: "opus", effort: "low", max_turns: 400, context_budget: 180000 },
+      inbox_draft: { model: "opus", effort: "high", max_turns: 400, context_budget: 180000 },
+    },
     routes: {
       implement: {
         low: {
@@ -118,6 +123,11 @@ test("aggregateWeeklyBurnByModelClass: changing mounts.yaml's routing row change
     efforts: { low: 1, medium: 2, high: 3 },
     architect: { model: "opus", effort: "high", max_turns: 400, context_budget: 180000 },
     judge: { model: "opus", effort: "high", max_turns: 400, context_budget: 150000 },
+    synthesis: {
+      retro: { model: "opus", effort: "high", max_turns: 400, context_budget: 180000 },
+      triage: { model: "opus", effort: "low", max_turns: 400, context_budget: 180000 },
+      inbox_draft: { model: "opus", effort: "high", max_turns: 400, context_budget: 180000 },
+    },
     routes: {
       implement: {
         // docs now rides sonnet too — a routing-table edit ALONE (no code

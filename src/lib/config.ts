@@ -296,14 +296,53 @@ export function workerModel(config: Config): string {
 }
 
 /**
- * Model the Architect-tier roles ride — retro, triage, and the inbox-draft rung (must outrank
- * workerModel — G-17). Sourced from the `.remudero/mounts.yaml` `architect:` row (the single
- * declared source of truth for the top-tier mount), so a mount-table edit governs the spawn;
- * falls back to `config.architectModel`, then the `opus` default when no mounts table is passed.
- * `mounts` is typed structurally (just the field this reads) to avoid a config↔mounts import.
+ * Model plan authorship (the Architect, `rmd plan`/`rmd retro`'s orchestration role) rides — must
+ * outrank workerModel (G-17). Sourced from the `.remudero/mounts.yaml` `architect:` row (the
+ * single declared source of truth for the top-tier mount), so a mount-table edit governs the
+ * spawn; falls back to `config.architectModel`, then the `opus` default when no mounts table is
+ * passed. `mounts` is typed structurally (just the field this reads) to avoid a config↔mounts
+ * import.
+ *
+ * W1-T2559: retro, triage, and the inbox-draft rung used to ride THIS resolver too (the row's own
+ * comment said so in terms), which meant three jobs that ship no code and supervise no worker
+ * inherited plan authorship's tier for no reason other than sharing this function. They now each
+ * resolve through their OWN `synthesis.<role>` row — see {@link synthesisModel}/
+ * {@link synthesisEffort} — never this one.
  */
 export function architectModel(config: Config, mounts?: { architect: { model: string } }): string {
   return mounts?.architect.model ?? config.architectModel ?? "opus";
+}
+
+/** The three synthesis rungs (W1-T2559) — retro, triage, the inbox-draft rung. Re-declared
+ *  structurally here, matching {@link architectModel}'s own `mounts` param, to avoid a
+ *  config↔mounts import; `src/lib/mounts.ts` exports the canonical `SynthesisRole`. */
+export type SynthesisRole = "retro" | "triage" | "inbox_draft";
+
+/**
+ * Model a synthesis rung (retro / triage / inbox-draft) rides — its OWN `.remudero/mounts.yaml`
+ * `synthesis.<role>` row, never {@link architectModel}'s `architect:` row (W1-T2559). These three
+ * ship no code and supervise no worker, so G-17's Tier Invariant — which exists to keep a
+ * supervisor strictly above what it supervises — does not bind them to plan authorship's tier;
+ * bundling them onto the Architect row forced three unrelated jobs onto its tier "for free," not
+ * because any ruling said a triage classification needs the top model.
+ *
+ * UNLIKE `architectModel`, this never defaults: `mounts.synthesis` is REQUIRED and load-time
+ * validated (`src/lib/mounts.ts`'s `validateMounts`) — a synthesis role missing its row, or
+ * malformed, REFUSES at load. A role with no mount is a config gap, not silently the Architect's.
+ */
+export function synthesisModel(mounts: { synthesis: Record<SynthesisRole, { model: string }> }, role: SynthesisRole): string {
+  return mounts.synthesis[role].model;
+}
+
+/**
+ * Reasoning effort a synthesis rung rides — same source and no-default contract as
+ * {@link synthesisModel}. Wired all the way to the spawn (`src/run-task.ts`) so effort is an
+ * actually-tuned lever for these rungs, not a `mounts.yaml` field the runtime silently never read
+ * (the pre-W1-T2559 defect: the bundled `architect.effort` was declared but never passed to any
+ * of the three rungs' spawn calls).
+ */
+export function synthesisEffort(mounts: { synthesis: Record<SynthesisRole, { effort: string }> }, role: SynthesisRole): string {
+  return mounts.synthesis[role].effort;
 }
 
 /**

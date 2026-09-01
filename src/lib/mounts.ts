@@ -46,6 +46,17 @@ import { DEFAULT_TASK_CLASS } from "./task-class.js";
  * every worker it may be asked to supervise, so it can never be talked into
  * agreement by a worker riding its own tier or higher. A table with a `judge`
  * mount that fails this is REJECTED at load, same as the Architect's check.
+ *
+ * ── The synthesis rungs (W1-T2559) ──────────────────────────────────────────────
+ * `retro` / `triage` / `inbox_draft` each get their OWN mount under `synthesis:`, resolved via
+ * `synthesisModel`/`synthesisEffort` (`src/lib/config.ts`) — never `architectModel`. They ship no
+ * code and supervise no worker, so the Tier Invariant's premise (a supervisor must strictly
+ * outrank what it supervises) does not apply to them, and none of the three is added to
+ * {@link enforceTierInvariant}'s worker loop above. What DOES apply, identically to `architect`/
+ * `judge`: every synthesis row is REQUIRED and fully validated by {@link parseMount} at load — a
+ * missing role, a missing field, or a model/effort outside the declared `tiers`/`efforts`
+ * orderings REFUSES (a {@link MountsError}) rather than silently falling back to the Architect
+ * mount or any other default.
  */
 
 /** Base error for any structural or semantic mounts.yaml violation. */
@@ -76,6 +87,17 @@ export interface Mount {
   contextBudget: number;
 }
 
+/**
+ * The three synthesis rungs (W1-T2559): retro, triage, and the inbox-draft rung. Each ships no
+ * code and supervises no worker, so none is subject to the Tier Invariant — see this file's own
+ * header. `inbox_draft` (not `inboxDraft`/`draft`) matches the snake_case field naming every other
+ * mounts.yaml key already uses, and the lane name `lib/retro.ts`'s own `inbox_draft` constant uses.
+ */
+export const SYNTHESIS_ROLES = ["retro", "triage", "inbox_draft"] as const;
+
+/** One of the three synthesis rungs — see {@link SYNTHESIS_ROLES}. */
+export type SynthesisRole = (typeof SYNTHESIS_ROLES)[number];
+
 /** The whole parsed, validated routing table. */
 export interface Mounts {
   /** Model-tier ordering; higher rank = higher-thinking mount (config-maintained). */
@@ -86,6 +108,10 @@ export interface Mounts {
   architect: Mount;
   /** The Layer-2 flight-judge mount (W1-T21) — strictly above every worker below. */
   judge: Mount;
+  /** The three synthesis rungs' OWN mounts (W1-T2559) — never the Architect's. REQUIRED: every
+   *  {@link SYNTHESIS_ROLES} entry must resolve to a fully-valid {@link Mount} or the table
+   *  refuses at load (see {@link validateMounts}). */
+  synthesis: Record<SynthesisRole, Mount>;
   /** Worker routing: task_type → risk band → class (W1-T167) → mount. Every
    *  risk band carries at least a {@link DEFAULT_TASK_CLASS} row. */
   routes: Record<string, Record<string, Record<string, Mount>>>;
@@ -258,6 +284,28 @@ export function validateMounts(raw: unknown, opts: MountsOptions = {}): Mounts {
   const architect = parseMount(raw.architect, "architect", tiers, efforts);
   const judge = parseMount(raw.judge, "judge", tiers, efforts);
 
+  // W1-T2559: the synthesis rungs (retro/triage/inbox_draft) — each REQUIRED, each its OWN
+  // mount, none folded into `architect`/`judge` above and none exempted from `parseMount`'s
+  // validation. A table missing the whole `synthesis` mapping, missing one of the three roles, or
+  // giving a role a malformed mount ALL refuse here — the same fail-loud shape `architect`/`judge`
+  // already get, never a silent fallback to the Architect mount.
+  if (!isObject(raw.synthesis)) {
+    throw new MountsError(
+      `'synthesis' must be a mapping of role → mount (${SYNTHESIS_ROLES.join(", ")}) — W1-T2559: ` +
+        `these rungs no longer inherit the Architect row.`,
+    );
+  }
+  const synthesis = {} as Record<SynthesisRole, Mount>;
+  for (const role of SYNTHESIS_ROLES) {
+    if (!(role in raw.synthesis)) {
+      throw new MountsError(
+        `'synthesis.${role}' is required — a synthesis rung with no mount is a config gap, ` +
+          `not a silent fallback to the Architect mount.`,
+      );
+    }
+    synthesis[role] = parseMount(raw.synthesis[role], `synthesis.${role}`, tiers, efforts);
+  }
+
   if (!isObject(raw.routes)) throw new MountsError("'routes' must be a mapping of task_type → risk → class → mount.");
   const routes: Record<string, Record<string, Record<string, Mount>>> = {};
   const routeTypes = Object.keys(raw.routes);
@@ -273,7 +321,7 @@ export function validateMounts(raw: unknown, opts: MountsOptions = {}): Mounts {
     }
   }
 
-  const mounts: Mounts = { tiers, efforts, architect, judge, routes };
+  const mounts: Mounts = { tiers, efforts, architect, judge, synthesis, routes };
   enforceTierInvariant(mounts, opts.thinkingDefault);
   return mounts;
 }
