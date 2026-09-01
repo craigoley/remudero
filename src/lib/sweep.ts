@@ -6976,6 +6976,13 @@ export async function runSweep(
           return undefined;
         }
       } catch (e) {
+        // NOT AN ERASING CATCH, and the reason is stated here because the ratchet cannot see it
+        // otherwise: the failure text is carried INTO `closeAdmissions` inside a TEMPLATE STRING,
+        // and `test/catch-erasure-ratchet.test.ts` has no route that recognises that — its four
+        // are a rethrow, a console/logger call, a `reason:`-style key in the RETURN SHAPE, or a
+        // comment like this one. The error is preserved verbatim in the stop reason an operator
+        // reads, and the gate FAILS CLOSED: an unreadable continuation signal stops admitting
+        // rather than admitting on an unknown, which is the whole reason it is consulted.
         closeAdmissions(
           `review admission continuation gate failed closed (${String((e as Error)?.message ?? e)}) — re-derived next pass`,
         );
