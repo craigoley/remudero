@@ -64,6 +64,13 @@ test("W1-T2594: conflicting exact-key provider claims are ambiguous, never last-
     providers: ["claude", "codex"],
     claimCount: 2,
   });
+  assert.deepEqual(reviewProviderProvenanceLedgerFields(result, { prUrl: PR, headSha: HEAD }), {
+    state: "ambiguous",
+    providers: ["claude", "codex"],
+    claim_count: 2,
+    pr_url: PR,
+    head_sha: HEAD,
+  });
 });
 
 test("W1-T2594: an unknown exact-head claim keeps its reason and join key in the review ledger", () => {
