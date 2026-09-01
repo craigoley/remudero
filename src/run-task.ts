@@ -22204,6 +22204,12 @@ export async function daemonCommand(
      *  self-target only) is exercised without spawning a real, unbounded daemon. Production never
      *  passes this. */
     runDaemon?: typeof runDaemon;
+    /** Injectable W1-T2568 wake wiring and signal re-raise for deterministic shutdown coverage.
+     * Production keeps the real filesystem watcher and `process.kill`; tests can observe that
+     * the watcher closes before the daemon re-raises SIGINT/SIGTERM without signalling the test
+     * runner itself. */
+    wireSweepWake?: typeof wireSweepWakeToDaemon;
+    processKill?: (pid: number, signal: NodeJS.Signals) => boolean;
   } = {},
 ): Promise<number> {
   // FAIL LOUD on junk args BEFORE any spawn/lock — `rmd daemon install --dry-run` silently
@@ -22495,12 +22501,13 @@ export async function daemonCommand(
   // watcher is closed on daemon shutdown and cannot keep the process alive after normal stop")
   // — wired into `onSignal` immediately below AND the ordinary `finally`, mirroring exactly how
   // `drainLock.release()`/`consumeStop` are already wired into both.
-  const githubEventWake = wireSweepWakeToDaemon(config.root, log);
+  const githubEventWake = (deps.wireSweepWake ?? wireSweepWakeToDaemon)(config.root, log);
+  const processKill = deps.processKill ?? ((pid: number, signal: NodeJS.Signals) => process.kill(pid, signal));
   const onSignal = (sig: NodeJS.Signals) => {
     githubEventWake.close();
     consumeStop(config.root); // one-shot STOP: consumed on the daemon's terminal (see drainCommand)
     drainLock.release();
-    process.kill(process.pid, sig); // re-raise with the default handler now cleared
+    processKill(process.pid, sig); // re-raise with the default handler now cleared
   };
   process.once("SIGINT", onSignal);
   process.once("SIGTERM", onSignal);

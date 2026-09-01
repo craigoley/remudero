@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import { EventEmitter } from "node:events";
 import type { FSWatcher } from "node:fs";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import type { IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -16,14 +17,16 @@ import {
   createPersistentDeliveryDedupStore,
   createSweepWakeSignal,
   isAllowlistedGithubEvent,
+  readGithubWebhookSecret,
   readSweepWakeMarker,
   sweepWakeMarkerPath,
   watchSweepWakeMarker,
   wireSweepWakeToDaemon,
   writeSweepWakeMarkerAtomic,
 } from "../src/lib/github-event-wake.js";
-import { createService, type Route } from "../src/lib/service.js";
+import { createService, readBoundedRawBody, type Route } from "../src/lib/service.js";
 import { loadPlan } from "../src/lib/plan.js";
+import { daemonCommand } from "../src/run-task.js";
 
 const SECRET = "test-webhook-secret";
 const REPOSITORY = "craigoley/remudero";
@@ -88,6 +91,40 @@ test("the bounded delivery set survives a serve-process restart", () => {
   }
 });
 
+test("the in-memory delivery window evicts its oldest accepted id at capacity", () => {
+  const store = createDeliveryDedupStore(2, ["delivery-a", "delivery-a", "delivery-b"]);
+  store.record("delivery-c");
+  assert.equal(store.has("delivery-a"), false);
+  assert.equal(store.has("delivery-b"), true);
+  assert.equal(store.has("delivery-c"), true);
+});
+
+test("persistent delivery writes remove a staged temp after rename failure without poisoning memory", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-github-dedup-rename-failure-"));
+  const path = join(root, "state", "deliveries.json");
+  mkdirSync(path, { recursive: true });
+  const store = createPersistentDeliveryDedupStore(path, 2);
+  try {
+    assert.throws(() => store.record("delivery-a"));
+    assert.equal(store.has("delivery-a"), false);
+    assert.deepEqual(readdirSync(dirname(path)).sort(), ["deliveries.json"], "the failed atomic write leaves no temp file");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("persistent delivery cleanup preserves the original write error when no temp file exists", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-github-dedup-write-failure-"));
+  const path = join(root, "x".repeat(300));
+  const store = createPersistentDeliveryDedupStore(path, 2);
+  try {
+    assert.throws(() => store.record("delivery-a"));
+    assert.equal(store.has("delivery-a"), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a marker-write failure does not poison the delivery id", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-github-marker-failure-"));
   const markerPath = sweepWakeMarkerPath(root);
@@ -139,6 +176,14 @@ test("an oversized webhook receives 413 without resetting the connection", async
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("a bounded raw-body read forwards a request-stream failure exactly once", async () => {
+  const req = new EventEmitter() as IncomingMessage;
+  const reading = readBoundedRawBody(req, 64);
+  req.emit("error", new Error("synthetic socket failure"));
+  req.emit("end");
+  await assert.rejects(reading, /synthetic socket failure/);
 });
 
 test("the signed route names every refusal and writes only an accepted allowlisted delivery", async () => {
@@ -356,6 +401,35 @@ test("watch failure is reported once and leaves the timer sleep usable", async (
   }
 });
 
+test("the marker watcher ignores other filenames and wakes only when its durable target exists", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-github-watch-filter-"));
+  const fake = new EventEmitter() as FSWatcher;
+  fake.close = () => {};
+  let callback: ((eventType: string, filename: string | Buffer | null) => void) | undefined;
+  let wakes = 0;
+  const watcher = watchSweepWakeMarker(
+    root,
+    { wake: () => { wakes++; } } as ReturnType<typeof createSweepWakeSignal>,
+    () => {},
+    ((_: string, listener: (eventType: string, filename: string | Buffer | null) => void) => {
+      callback = listener;
+      return fake;
+    }) as typeof import("node:fs").watch,
+  );
+  try {
+    assert.ok(callback);
+    callback!("rename", "not-the-marker.json");
+    callback!("rename", "SWEEP_WAKE_REQUESTED");
+    assert.equal(wakes, 0);
+    writeFileSync(sweepWakeMarkerPath(root), "{}\n");
+    callback!("rename", "SWEEP_WAKE_REQUESTED");
+    assert.equal(wakes, 1);
+  } finally {
+    watcher.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a durable marker still interrupts the poll when the filesystem watcher drops its event", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-github-missed-watch-"));
   const path = sweepWakeMarkerPath(root);
@@ -513,4 +587,57 @@ test("Azure wiring mounts the webhook secret into serve only and documents exact
   assert.match(guide, /console\.remudero\.com\/v1\/hooks\/github/);
   assert.match(guide, /more-specific Access application/);
   assert.match(guide, /operator merge hold/);
+});
+
+test("the webhook secret reader trims a configured file and fails soft for absent input", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-github-secret-reader-"));
+  const path = join(root, "secret");
+  try {
+    assert.equal(readGithubWebhookSecret(undefined), undefined);
+    assert.equal(readGithubWebhookSecret(path), undefined);
+    writeFileSync(path, "  configured-secret  \n");
+    assert.equal(readGithubWebhookSecret(path), "configured-secret");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("daemon SIGTERM cleanup closes the GitHub wake watcher before re-raising the signal", async () => {
+  const home = mkdtempSync(join(tmpdir(), "rmd-github-daemon-signal-"));
+  const oldHome = process.env.HOME;
+  const root = join(home, "Remudero");
+  const planPath = join(home, "tasks.yaml");
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  mkdirSync(join(root, "state"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
+  writeFileSync(planPath, "[]\n");
+  utimesSync(home, new Date(), new Date());
+  let closes = 0;
+  const reRaised: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+  process.env.HOME = home;
+  try {
+    const code = await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
+      wireSweepWake: () => ({
+        sleep: async () => {},
+        acknowledge: () => {},
+        close: () => { closes++; },
+      }),
+      processKill: (pid, signal) => {
+        assert.equal(closes, 1, "the signal path closes the watcher before re-raising");
+        reRaised.push({ pid, signal });
+        return true;
+      },
+      runDaemon: async () => {
+        (process as EventEmitter).emit("SIGTERM", "SIGTERM");
+        return { attempted: [], merged: [], stopReason: "stopped" as const, costUsd: 0, ticks: 0 };
+      },
+    });
+    assert.equal(code, 0);
+    assert.deepEqual(reRaised, [{ pid: process.pid, signal: "SIGTERM" }]);
+    assert.equal(closes, 2, "ordinary finalization keeps the existing idempotent close path");
+  } finally {
+    if (oldHome === undefined) delete process.env.HOME;
+    else process.env.HOME = oldHome;
+    rmSync(home, { recursive: true, force: true });
+  }
 });
