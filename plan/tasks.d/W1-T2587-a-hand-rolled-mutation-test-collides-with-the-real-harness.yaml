@@ -1,0 +1,64 @@
+- id: W1-T2587
+  title: "A TEST THAT HAND-ROLLS ITS OWN MUTATION BREAKS INSIDE THE REAL MUTATION HARNESS, AND THE NIGHTLY HAS BEEN RED EVER SINCE — test/triage-proof-dialect.test.ts reads src/lib/triage.ts as SOURCE TEXT and asserts a literal line appears exactly once, but inside the harness's sandbox that source is instrumented and the literal is gone, so the dry run aborts with ConfigError: There were failed tests in the initial test run; it is deterministic, not flaky, and fires whenever the nightly's rotation reaches that file"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 6.00
+  files: [test/triage-proof-dialect.test.ts, test/a-hand-rolled-mutation-test-collides-with-the-real-harness.test.ts]
+  origin: "operator-brief#nightly-red-root-cause-2026-09-01"
+  plan_refs: ["W1-T2521"]
+  status: queued
+  attempts: 0
+  rationale: |
+    ── DIAGNOSED 2026-09-01, ROOT CAUSE ESTABLISHED, FILED NOWHERE UNTIL NOW ────────────────────
+
+    The open issue reports only "mutation-nightly is failing". The cause was measured and is not a
+    score regression at all — the run never reaches scoring:
+
+        ConfigError: There were failed tests in the initial test run.  # fail 1
+
+    The single failure is `test/triage-proof-dialect.test.ts:244` — "triageAcceptanceProof's return
+    line must appear EXACTLY once", asserting `0 !== 1`. That test `readFileSync`s
+    `src/lib/triage.ts` and asserts a literal source line occurs once, then hand-rolls its own
+    mutation of it. Inside the harness's sandbox the source has been INSTRUMENTED, so the literal
+    it is looking for no longer exists and the count is zero.
+
+    ⚠ DETERMINISTIC, NOT FLAKY. It fires every time the rotation reaches that file. The failing
+    sandbox was named `.stryker-tmp-src-lib-triage-ts`, which is what identifies the rotation as
+    the trigger. Treating it as a flake and re-running is the one response guaranteed not to work.
+
+    ── WHY IT IS NOT CAUSED BY THE RECENT SCOPE CHANGE, ESTABLISHED BY MECHANISM ────────────────
+
+    A scope entry was appended to `stryker.conf.json`'s `commandRunner` on 2026-09-01. That is NOT
+    the cause, and the reason is mechanical rather than chronological: the config's `mutate:` field
+    names `["src/lib/classify.ts"]` and was untouched, while the failing sandbox was built for
+    `src/lib/triage.ts` — the nightly walks `src/**` independently of that field. (The issue also
+    predates the change by 28 hours, but the mechanism is what settles it.)
+
+    ── THE CLASS, WHICH IS THE REUSABLE PART ───────────────────────────────────────────────────
+
+    This is a SOURCE-TEXT-READING TEST: it asserts on the bytes of a file rather than on behaviour.
+    Such a test is invisible to a caller sweep by symbol name — `git grep -l <symbol>` cannot find
+    it, because it references none of the symbols it depends on. The same class reddened a census
+    suite twice on 2026-09-01 for two different authors, both times outside the changing task's
+    declared files. Here the second reader is the harness itself.
+
+    THE LIKELY SHAPE: assert the CONTRACT the literal stands in for, not the literal. A test that
+    must read source text has to tolerate an instrumented copy of that source, because the harness
+    is a legitimate second reader of every file in the tree.
+
+    ⚠ AND THE REPAIR MUST NOT SIMPLY SKIP UNDER THE HARNESS. A test disabled inside the sandbox
+    kills no mutants, so the file it guards silently loses its mutation coverage — trading a red
+    nightly for a quiet hole, which is the worse of the two.
+
+    NOT IN SCOPE: the mutation score baseline, the scope entries in `stryker.conf.json`
+    (instrument surface, Standing rule 25), and any other rotation failure not yet observed.
+
+  acceptance:
+    - claim: "the assertion survives an instrumented copy of the file it reads, so the nightly's initial run no longer aborts"
+      proof: "unit test: test/a-hand-rolled-mutation-test-collides-with-the-real-harness.test.ts"
+    - claim: "the guard is not disabled inside the sandbox, so the file it protects keeps its coverage rather than trading a red run for a quiet hole"
+      proof: "unit test: test/a-hand-rolled-mutation-test-collides-with-the-real-harness.test.ts"
