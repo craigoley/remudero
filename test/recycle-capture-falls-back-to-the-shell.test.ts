@@ -15,7 +15,7 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -119,8 +119,16 @@ test("with BOTH sources empty the refusal names each source it consulted, and ne
 // ── The source of the bug, pinned so a future edit cannot silently restore it ────────────────
 
 test("the container capture branch reads the shell as a fallback — the source-level lock on the deadlock", () => {
-  const sh = spawnSync("git", ["-C", REPO_ROOT, "show", "HEAD:deploy/recycle-container.sh"], { encoding: "utf8" }).stdout;
-  const source = sh && sh.length > 0 ? sh : "";
+  // READ THE WORKING TREE, NEVER `git show HEAD:`. The proof runs in the reviewer's materialized
+  // head checkout, where a git object read is not guaranteed to work — this repo already observes
+  // that shape (`verify-image.sh` reports `rmd fatal: not a git repository` inside the image). A
+  // failed `git show` returns EMPTY stdout, not an error, so `source` became "" and every
+  // assertion below failed on a tree whose script was perfectly correct: MEASURED, this file passed
+  // 4/4 locally AND in GitHub Actions while the reviewer reported all four criteria "executed and
+  // FAILED". Reading the file is also strictly STRONGER for what this test pins — an uncommitted
+  // edit that restores the bug is caught here, where `git show HEAD:` would have missed it.
+  const source = readFileSync(join(REPO_ROOT, "deploy", "recycle-container.sh"), "utf8");
+  assert.ok(source.length > 0, "the script must be readable from the working tree");
   // The capture loop that runs when a container EXISTS must consult `${!name-}` — the shell — and
   // not only CONTAINER_ENV_LINES. Sliced to the container branch so the `else` branch's own
   // long-standing shell read cannot satisfy this by accident.
