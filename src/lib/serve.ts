@@ -93,6 +93,12 @@ import {
   TOKEN_REFRESH_FAILED_STEP,
   type RefreshOptions,
 } from "./github-app.js";
+import {
+  createDeliveryDedupStore,
+  createGitHubEventWakeHandler,
+  sweepWakeMarkerPath,
+} from "./github-event-wake.js";
+import { DEFAULT_GITHUB_EVENT_WAKE_DEDUP_CAPACITY } from "./policy.js";
 
 /**
  * One escalation option's RENDER-READY affordance (W1-T2273) — what a console UI needs to draw
@@ -280,6 +286,28 @@ export interface ServeDeps {
   githubAppRefresh?: {
     start?: typeof startInstallationTokenRefresh;
     env?: NodeJS.ProcessEnv;
+  };
+  /**
+   * W1-T2568: `POST /v1/hooks/github`'s config — the signed GitHub-event wake (see
+   * `lib/github-event-wake.ts`'s module header for the full design). OPTIONAL and SHIPS DARK
+   * (design vii) when omitted, or whenever `secret` resolves to `undefined` — the route still
+   * mounts (so a probe gets a named `webhook_not_configured` refusal rather than a 404 that
+   * reads like a routing typo) but writes no marker and accepts nothing. `secret` is normally
+   * resolved by `serveCommand` (run-task.ts) from an operator-mounted file
+   * (`RMD_GITHUB_WEBHOOK_SECRET_FILE`, see `resolveGithubWebhookSecretFilePath`/
+   * `readGithubWebhookSecret`) — this field never reads the file itself, so a test can inject a
+   * literal secret without touching disk. `repository` has no default here (deliberately — the
+   * assembler, never this library, decides what "this daemon's own repo" means); `serveCommand`
+   * always supplies `${self.owner}/${self.repo}`, the SAME `resolveOwnerRepo()` result the rest
+   * of that command already uses. `dedupCapacity` defaults to
+   * `DEFAULT_GITHUB_EVENT_WAKE_DEDUP_CAPACITY` (policy.ts) when omitted — `serveCommand` reads
+   * the real `plan/policy.yaml` row so the console never carries a second, drifting copy of that
+   * bound.
+   */
+  githubEventWake?: {
+    secret?: string;
+    repository: string;
+    dedupCapacity?: number;
   };
 }
 
@@ -5510,6 +5538,19 @@ export function buildServeRoutes(deps: ServeDeps): Route[] {
     // consequence buildAuthScopeRoute above already claims for the least consequential thing a
     // write token can do.
     { ...makeConfirmNonceRoute(confirmNonces), tier: "low" as const },
+    // W1-T2568: the signed GitHub-event wake — see github-event-wake.ts's module header. Ships
+    // dark (design vii) whenever `deps.githubEventWake` is omitted or carries no `secret`: the
+    // route mounts either way, so a probe gets a named `webhook_not_configured` 503 rather than
+    // a 404 that reads like a routing typo, but writes nothing. `markerPath` is ALWAYS rooted at
+    // `fleetControlRoot` — the SAME shared state directory `wireSweepWakeToDaemon` (run-task.ts's
+    // `daemonCommand`) watches, never a second, independently-resolved root.
+    createGitHubEventWakeHandler({
+      secret: deps.githubEventWake?.secret,
+      repository: deps.githubEventWake?.repository ?? "",
+      markerPath: sweepWakeMarkerPath(deps.fleetControlRoot),
+      dedup: createDeliveryDedupStore(deps.githubEventWake?.dedupCapacity ?? DEFAULT_GITHUB_EVENT_WAKE_DEDUP_CAPACITY),
+      log: deps.log,
+    }),
   ];
   // W1-T404 design (iii): `ci-parity:drift`-shaped completeness, run inside the PRODUCT function
   // (this one), not merely a test — a write-scoped route added here with no declared tier fails

@@ -866,6 +866,11 @@ import {
   stopDetail,
 } from "./lib/fleet-control.js";
 import {
+  readGithubWebhookSecret,
+  resolveGithubWebhookSecretFilePath,
+  wireSweepWakeToDaemon,
+} from "./lib/github-event-wake.js";
+import {
   startInstallationTokenRefresh,
 } from "./lib/github-app.js";
 import {
@@ -22478,7 +22483,19 @@ export async function daemonCommand(
     }
     throw e;
   }
+  // W1-T2568 — THE GITHUB-EVENT WAKE'S ENTIRE DAEMON-SIDE WIRING. `wireSweepWakeToDaemon`
+  // (lib/github-event-wake.ts) consumes any boot-pending marker, arms an `fs.watch` on the
+  // shared state directory `remudero-serve`'s `POST /v1/hooks/github` route also writes into,
+  // and returns a drop-in replacement for `DaemonDeps.sleep` that resolves early on a wake —
+  // every idle wait in `runDaemon`'s loop (STOP/PAUSE, "nothing runnable", backoff) already
+  // funnels through that ONE dependency, so this is the entire interrupt: zero changes to
+  // lib/daemon.ts, which stays fs-free. `.close()` MUST run on every exit path (design v: "the
+  // watcher is closed on daemon shutdown and cannot keep the process alive after normal stop")
+  // — wired into `onSignal` immediately below AND the ordinary `finally`, mirroring exactly how
+  // `drainLock.release()`/`consumeStop` are already wired into both.
+  const githubEventWake = wireSweepWakeToDaemon(config.root, (ms) => new Promise((resolve) => setTimeout(resolve, ms)), log);
   const onSignal = (sig: NodeJS.Signals) => {
+    githubEventWake.close();
     consumeStop(config.root); // one-shot STOP: consumed on the daemon's terminal (see drainCommand)
     drainLock.release();
     process.kill(process.pid, sig); // re-raise with the default handler now cleared
@@ -22874,7 +22891,10 @@ export async function daemonCommand(
         pendingKicks: () => pendingKicks(config.root),
         clearKick: (taskId) => clearKick(config.root, taskId),
         consumeDrainNow: () => consumeDrainNow(config.root),
-        sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+        // W1-T2568: was a bare `setTimeout` wrapper — now the SAME wrapper wired through
+        // `wireSweepWakeToDaemon` (constructed above, alongside `onSignal`), which also
+        // resolves early on a GitHub-event wake. See that construction's own doc.
+        sleep: githubEventWake.sleep,
         // The real wall clock backing the TIME-AWARE headroom ceiling (see
         // lib/daemon.ts's HeadroomPolicy) — resolves each window's own
         // hours-to-reset. Explicit here (though `runDaemon` defaults the same
@@ -23038,6 +23058,7 @@ export async function daemonCommand(
   } finally {
     process.removeListener("SIGINT", onSignal);
     process.removeListener("SIGTERM", onSignal);
+    githubEventWake.close(); // W1-T2568: never outlives the daemon's own normal-stop path either
     consumeStop(config.root); // one-shot STOP: consumed on the daemon's terminal (see drainCommand)
     drainLock.release();
   }
@@ -24467,6 +24488,14 @@ export async function serveCommand(
   const ledgerPath = ledgerPathFor(config);
   const plan = loadPlan(planPath);
   const tokens = resolveServiceTokens(config.root);
+  // W1-T2568: the signed GitHub-event wake's config — resolved here (never inside lib/serve.ts,
+  // which stays deps-in/no-ambient-resolution) exactly like `policy`/`tokens` above. `secret` is
+  // `undefined` on an unconfigured host (no RMD_GITHUB_WEBHOOK_SECRET_FILE, or the mounted file
+  // is unreadable) — design (vii)'s ship-dark default, byte-identical to before this task.
+  // `repository` is the SAME `resolveOwnerRepo()` result every other GitHub-scoped construction
+  // in this function already uses, never a second, independently-resolved slug.
+  const githubEventWakePolicy = loadPolicy(policyPath(repoRoot));
+  const githubEventWakeSecret = readGithubWebhookSecret(resolveGithubWebhookSecretFilePath(undefined));
 
   const runId = `SERVE-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
@@ -24621,6 +24650,12 @@ export async function serveCommand(
     // same read `inflightHolder` above already wires, never a second definition of "in flight"
     // (design note ii).
     peek: { root: config.root, isLive: (runId) => liveInflightRuns(join(config.root, "state", "inflight")).some((r) => r.runId === runId) },
+    // W1-T2568: resolved above, alongside `tokens`/`policy` — see that construction's own doc.
+    githubEventWake: {
+      secret: githubEventWakeSecret,
+      repository: `${self.owner}/${self.repo}`,
+      dedupCapacity: githubEventWakePolicy.values.githubEventWake.dedupCapacity,
+    },
   });
 
   // BIND EACH NAMED INTERFACE — never the wildcard. `listen(port)` alone defaults to `::`

@@ -1026,3 +1026,32 @@ costAnomaly:
     origin: "net-new"
     min: 3
     max: 15
+
+# W1-T2568: the GitHub-event wake's bounded recent-delivery dedup window (src/lib/
+# github-event-wake.ts's `createDeliveryDedupStore`, consumed by `POST /v1/hooks/github`,
+# serve.ts). A GitHub redelivery of an already-accepted webhook, or a replay of a captured
+# request, is refused as a duplicate only while its `X-GitHub-Delivery` id is still remembered
+# here — this is THE bound design (iv) names explicitly ("the debounce is a bounded
+# plan/policy.yaml row, not a literal beside fs.watch"), so raising or lowering the dedup
+# window is a reviewed plan PR, never a source edit.
+#
+# NET-NEW: no prior source literal ever bounded this (the mechanism itself is new, W1-T2568).
+# 500 is sized off GitHub's own delivery-failure contract, not a live measurement: a delivery
+# that gets no 2xx within 10 seconds is never automatically redelivered by GitHub (this task's
+# own rationale, citing GitHub's webhook best-practices doc), so the realistic redelivery
+# volume this window must absorb is an operator's MANUAL "redeliver" click from the GitHub UI
+# after an outage, not an unbounded stream — a handful of redeliveries per incident, not
+# thousands. 500 sits comfortably above any plausible manual-redelivery burst while staying
+# small enough that the in-memory Set this backs never becomes a real footprint concern in a
+# long-lived `remudero-serve` process. min=50 keeps the window from being tuned so small a
+# single burst of distinct check-run completions across one PR's build matrix could wrap
+# around and reprocess its own oldest member; max=5000 keeps a generous raise bounded rather
+# than unbounded, mirroring every other capacity-shaped row in this file (see costAnomaly's
+# multiplier/minSamples rows immediately above for the same min/max discipline over a
+# different quantity).
+githubEventWake:
+  dedupCapacity:
+    value: 500
+    origin: "net-new"
+    min: 50
+    max: 5000
