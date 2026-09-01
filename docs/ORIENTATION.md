@@ -1,29 +1,42 @@
 # ORIENTATION
 
-_MAINTAINED BY `rmd retro` — regenerated 2026-08-31T16:43:32.387Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
+_MAINTAINED BY `rmd retro` — regenerated 2026-09-01T08:57:27.106Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
 
 A fresh Architect session should be able to orient from THIS doc alone plus the plan index —
 not by re-deriving state from the full plan and ledger.
 
 ## Current state
 
-23 run(s) since the last retro marker. Verdicts: {"blocked_ci":17,"incomplete":3,"merged":2,"no_pr":1}.
+29 run(s) since the last retro marker. Verdicts: {"blocked":2,"blocked_ci":10,"incomplete":7,"merged":8,"no_pr":2}.
 
 ### Shipped since marker
-- W1-T2479 → https://github.com/craigoley/remudero/pull/3359 (gate-side merge; run ended blocked_ci)
-- W1-T2487 → https://github.com/craigoley/remudero/pull/3373 (gate-side merge; run ended blocked_ci)
-- W1-T2490 → https://github.com/craigoley/remudero/pull/3358 (gate-side merge; run ended blocked_ci)
-- W1-T2498 → https://github.com/craigoley/remudero/pull/3357 (gate-side merge; run ended blocked_ci)
-- W1-T2501 → https://github.com/craigoley/remudero/pull/3361
-- W1-T2503 → https://github.com/craigoley/remudero/pull/3365 (gate-side merge; run ended blocked_ci)
-- W1-T2504 → https://github.com/craigoley/remudero/pull/3364 (gate-side merge; run ended blocked_ci)
-- W1-T2514 → https://github.com/craigoley/remudero/pull/3404
+- W1-T2508 → https://github.com/craigoley/remudero/pull/3428 (gate-side merge; run ended incomplete)
+- W1-T2510 → https://github.com/craigoley/remudero/pull/3437 (gate-side merge; run ended blocked_ci)
+- W1-T2512 → https://github.com/craigoley/remudero/pull/3455 (gate-side merge; run ended blocked_ci)
+- W1-T2513 → https://github.com/craigoley/remudero/pull/3448 (gate-side merge; run ended blocked_ci)
+- W1-T2518 → https://github.com/craigoley/remudero/pull/3429 (gate-side merge; run ended incomplete)
+- W1-T2519 → https://github.com/craigoley/remudero/pull/3419 (gate-side merge; run ended incomplete)
+- W1-T2521 → https://github.com/craigoley/remudero/pull/3440 (gate-side merge; run ended blocked)
+- W1-T2522 → https://github.com/craigoley/remudero/pull/3459 (gate-side merge; run ended blocked_ci)
+- W1-T2523 → https://github.com/craigoley/remudero/pull/3452
+- W1-T2524 → https://github.com/craigoley/remudero/pull/3451
+- W1-T2525 → https://github.com/craigoley/remudero/pull/3449 (gate-side merge; run ended incomplete)
+- W1-T2527 → https://github.com/craigoley/remudero/pull/3446
+- W1-T2528 → https://github.com/craigoley/remudero/pull/3465 (gate-side merge; run ended blocked_ci)
+- W1-T2529 → https://github.com/craigoley/remudero/pull/3457
+- W1-T2530 → https://github.com/craigoley/remudero/pull/3458 (gate-side merge; run ended blocked_ci)
+- W1-T2548 → https://github.com/craigoley/remudero/pull/3471
+- W1-T2549 → https://github.com/craigoley/remudero/pull/3472
+- W1-T2550 → https://github.com/craigoley/remudero/pull/3475 (gate-side merge; run ended blocked_ci)
+- W1-T2551 → https://github.com/craigoley/remudero/pull/3479
+- W1-T2555 → https://github.com/craigoley/remudero/pull/3476
+- W1-T2556 → https://github.com/craigoley/remudero/pull/3478 (gate-side merge; run ended blocked_ci)
 
 ## Next runnable task
 
-**W1-T2508** — CLAUDE.md IS ALREADY WRITTEN FOR PROGRESSIVE DISCLOSURE AND IS DISCLOSED ALL AT ONCE — every one of its 84 bullets is a bolded HEADLINE plus a body, the headlines are 15.7 percent of the file at a median 123 characters (an agent-skill description by any measure), and the other 84 percent is injected whether the reader needs it or not
+**W1-T2554** — THE DAEMON'S FIRST BOARD READ OUTRUNS ITS OWN FIRST TOKEN MINT — `startInstallationTokenRefresh` (src/lib/github-app.ts) ends in a BARE `tick()` and returns `{armed: true}` before that mint resolves, so `run-task.ts`'s call site proceeds straight into the first sweep and spawns `gh api` children that inherit a `process.env.GH_TOKEN` nothing has written yet; MEASURED on this fleet 2026-09-01, the mint landed 1.899 s AFTER the first board fetch had already failed `auth`, and every boot burns the same guaranteed-to-fail calls against a rate limit this repo is already hitting
 
-- risk: high · depends_on: W1-T2507
+- risk: high · depends_on: (none)
 
 ## Never-do invariants (MASTER-PLAN §12 Standing rules — extracted verbatim; §12 is authoritative)
 
