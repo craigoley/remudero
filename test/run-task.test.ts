@@ -8447,3 +8447,88 @@ test("W1-T2370: the bound is derived, and a smaller one still asks the question 
   assert.equal(out.attempts, 1);
   assert.equal(ALREADY_SATISFIED_VERIFY_ATTEMPTS, 3, "N=3 clears 18 of 25 observed failure runs");
 });
+
+// ── W1-T2564: a refusal must not write an attempt key ────────────────────────────────────────
+// The severity half of W1-T2564. buildInboxDraftHook wrote `nextAttempts[id]` for EVERY outcome,
+// win or lose (W1-T192, deliberately — a cause that was TRIED and failed must not be retried every
+// poll). A run the ACCOUNT REFUSED was never tried, so keying it retires work that never ran —
+// permanently, because a routed follow-up's key is the literal `::0` and can never change.
+// MEASURED: 267 of 353 proposals keyed with no cached draft, none of them ever really drafted.
+//
+// These execute the REAL hook (the same injected-draftBatch seam the W1-T193 pair above uses),
+// because the defect is which branch writes to disk — a property no source-text assertion holds.
+
+test("W1-T2564: buildInboxDraftHook writes NO attempt key for an outcome the account refused, so the proposal stays due", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-inbox-refused-"));
+  seedDueProposal(root, "P1");
+  const config = { root } as Config;
+  const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const log = (step: string, extra?: Record<string, unknown>) => logs.push({ step, extra });
+
+  const hook = buildInboxDraftHook("owner", "repo", config, "RUN-1", log, async (due) =>
+    due.map((p) => ({
+      proposalId: p.id,
+      ok: false as const,
+      error: "refused by the account before any output: You've hit your session limit",
+      refused: { matched: "You've hit your session limit", resetsAtMs: Date.parse("2026-09-01T11:50:00.000Z") },
+    })),
+  );
+  await hook();
+
+  const attempts = JSON.parse(readFileSync(join(root, "state", "inbox-draft-attempts.json"), "utf8"));
+  assert.equal(
+    attempts.P1,
+    undefined,
+    "a refusal is not an attempt — keying it is what permanently retired 267 proposals that never ran",
+  );
+  const reopened = logs.filter((l) => l.step === "inbox.draft_attempts_reopened");
+  assert.equal(reopened.length, 1, "and the refusal must be visible, not silent");
+  assert.equal((reopened[0].extra as Record<string, unknown>).refused_this_batch, 1);
+});
+
+test("W1-T2564: an ORDINARY failure still writes its attempt key — W1-T192's throttle is not weakened", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-inbox-plainfail-"));
+  seedDueProposal(root, "P1");
+  const config = { root } as Config;
+  const hook = buildInboxDraftHook("owner", "repo", config, "RUN-1", () => {}, async (due) =>
+    // No `refused` field: the worker RAN and produced unparseable output.
+    due.map((p) => ({ proposalId: p.id, ok: false as const, error: "no FRAGMENT/STAMP markers in worker output" })),
+  );
+  await hook();
+  const attempts = JSON.parse(readFileSync(join(root, "state", "inbox-draft-attempts.json"), "utf8"));
+  assert.equal(
+    attempts.P1,
+    "::0",
+    "a genuinely-attempted failure must still be throttled — this fix narrows the write to refusals ONLY",
+  );
+});
+
+test("W1-T2564: the attempt-key migration runs ONCE per daemon start, not per poll — the per-poll form is an unbounded retry loop", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-inbox-migrate-once-"));
+  seedDueProposal(root, "P1");
+  const config = { root } as Config;
+  // Pre-poison exactly the measured shape: keyed `::0`, no cached draft.
+  writeFileSync(join(root, "state", "inbox-draft-attempts.json"), JSON.stringify({ P1: "::0" }));
+  writeFileSync(join(root, "state", "inbox-drafts.json"), JSON.stringify({}));
+
+  const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  let batches = 0;
+  const hook = buildInboxDraftHook("owner", "repo", config, "RUN-1", (s, e) => logs.push({ step: s, extra: e }), async (due) => {
+    batches++;
+    // A GENUINE failure (no `refused`): W1-T192 must key it, and the migration must not undo that.
+    return due.map((p) => ({ proposalId: p.id, ok: false as const, error: "no FRAGMENT/STAMP markers in worker output" }));
+  });
+
+  await hook(); // poll 1: migration frees P1, it becomes due, the batch runs and re-keys it
+  assert.equal(batches, 1, "the poisoned key must be re-opened so the proposal is drafted once more");
+  assert.equal(JSON.parse(readFileSync(join(root, "state", "inbox-draft-attempts.json"), "utf8")).P1, "::0");
+
+  await hook(); // poll 2: the migration must NOT fire again
+  await hook();
+  assert.equal(
+    batches,
+    1,
+    "re-running the migration each poll would evict the key just written and re-attempt forever — one extra attempt per boot, not per poll",
+  );
+  assert.equal(logs.filter((l) => l.step === "inbox.draft_attempts_reopened").length, 1, "and it reports itself exactly once");
+});

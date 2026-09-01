@@ -2,6 +2,7 @@ import { execFileSync, spawn as spawnChild, type ChildProcessWithoutNullStreams 
 import { constants as fsConstants, accessSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { detectUsageLimitRefusal, type UsageLimitRefusal } from "./classify.js";
 import type { UsageSnapshot } from "./headroom.js";
 import type { Config, WorkerProviderId } from "./config.js";
 import {
@@ -48,6 +49,7 @@ interface CodexWorkerResult {
   subtype: string;
   isError: boolean;
   apiError: boolean;
+  usageRefusal?: UsageLimitRefusal;
   permissionDenials: unknown[];
   childEnvKeys: string[];
   accountLabel?: string;
@@ -471,10 +473,11 @@ export interface ParsedCodexEvents {
   isError: boolean;
   subtype: string;
   errors: string[];
+  usageRefusal?: UsageLimitRefusal;
 }
 
 /** Parse Codex exec JSONL into the existing provider-neutral worker envelope. */
-export function parseCodexJsonl(raw: string): ParsedCodexEvents {
+export function parseCodexJsonl(raw: string, nowMs = Date.now()): ParsedCodexEvents {
   let sessionId = "";
   const blocks: string[] = [];
   const errors: string[] = [];
@@ -482,6 +485,7 @@ export function parseCodexJsonl(raw: string): ParsedCodexEvents {
   let output = 0;
   let cacheRead = 0;
   let numTurns = 0;
+  let usageRefusal: UsageLimitRefusal | undefined;
   for (const line of raw.split("\n")) {
     if (!line.trim()) continue;
     let event: CodexJsonEvent;
@@ -502,7 +506,15 @@ export function parseCodexJsonl(raw: string): ParsedCodexEvents {
       output += event.usage.output_tokens ?? 0;
       cacheRead += event.usage.cached_input_tokens ?? 0;
     }
-    if (event.type === "turn.failed" || event.type === "error") errors.push(event.error?.message ?? event.type);
+    if (event.type === "turn.failed" || event.type === "error") {
+      const message = event.error?.message ?? event.type;
+      errors.push(message);
+      // Codex 0.152.0 preserves its structured UsageLimitExceeded classification inside app-server,
+      // but `codex exec --json` intentionally projects only the terminal message. Normalize at this
+      // adapter boundary while the text is known to be provider error evidence; never scan agent
+      // output, which may discuss usage limits as part of the task.
+      usageRefusal ??= detectUsageLimitRefusal(message, nowMs);
+    }
   }
   return {
     sessionId,
@@ -513,6 +525,7 @@ export function parseCodexJsonl(raw: string): ParsedCodexEvents {
     isError: errors.length > 0,
     subtype: errors.length > 0 ? "error_codex" : "success",
     errors,
+    ...(usageRefusal ? { usageRefusal } : {}),
   };
 }
 
@@ -657,6 +670,7 @@ export async function spawnCodexWorker(
       subtype: isError ? (parsed.isError ? parsed.subtype : `error_exit_${exitCode}`) : "success",
       isError,
       apiError: parsed.errors.some((error) => /rate limit|server|network/i.test(error)),
+      ...(parsed.usageRefusal ? { usageRefusal: parsed.usageRefusal } : {}),
       permissionDenials: parsed.errors.filter((error) => /permission|sandbox|denied/i.test(error)),
       childEnvKeys: Object.keys(codexSpawnEnv(config, args)),
       accountLabel: undefined,
