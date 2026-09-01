@@ -22160,7 +22160,18 @@ export async function daemonCommand(
   // needs a change to worker.ts or git-push.ts, neither of which is in this task's declared
   // files. This refresher fixes the DAEMON's own calls and every FRESHLY-spawned worker; it does
   // not retrofit an already-running one.
-  startInstallationTokenRefresh({ log });
+  //
+  // W1-T2554 — AWAIT THE FIRST MINT BEFORE THE FIRST BOARD READ. `startInstallationTokenRefresh`
+  // used to end on a bare, unawaited `tick()`, so `GH_TOKEN` was written on its own schedule while
+  // this function fell straight through into the first sweep's `gh api` calls — MEASURED landing
+  // the mint 1.899s AFTER the first board fetch had already failed `auth`. `ready` is present only
+  // when `armed` (a plain-`GH_TOKEN` host with no `GH_APP_*` names has nothing to wait for) and
+  // NEVER rejects (github-app.ts's own doc on `ready`), so this await can only delay the first
+  // sweep by the mint's own latency — it can never hang the daemon or surface a throw here.
+  const githubAppRefresh = startInstallationTokenRefresh({ log });
+  if (githubAppRefresh.ready) {
+    await githubAppRefresh.ready;
+  }
 
   // Read the plan to schedule. For a NON-self target without an explicit --plan, read it from a
   // clone of the target repo (the daemon clones it for execution anyway), SYNCED to the latest

@@ -400,6 +400,18 @@ export function nextRefreshDelayMs(expiresAtMs: number, now: number = Date.now()
  * byte-identical to before this task — zero ledger lines, zero timers, `GH_TOKEN`'s own optional
  * shape preserved — and `armed: false` says so to the caller rather than silently doing nothing.
  *
+ * W1-T2554 — `ready` IS THE FIX. The bare `tick()` this function used to end on discarded the
+ * FIRST mint's promise, so `{ armed: true }` asserted only that a TIMER was scheduled, never that
+ * `process.env.GH_TOKEN` had actually been written — the daemon's call site (`run-task.ts`) had
+ * no reason to wait and proceeded straight into the first board read on a token nothing had
+ * minted yet (MEASURED: the mint landed 1.899s after that read had already failed `auth`). The
+ * FIRST mint is now started and its settlement handed back on `ready`; every later tick (the
+ * recurring renewal loop) stays exactly as fire-and-forget as before — only the boot-time ordering
+ * changes. `ready` NEVER REJECTS: a failed or throwing mint is caught, logged and rescheduled
+ * exactly like today, so a caller that awaits `ready` can never hang or be taken down by it (see
+ * the two `catch`/`.then` reject arms below, both terminal). Absent when `armed` is false — a host
+ * with no `GH_APP_*` names has nothing to wait for.
+ *
  * Every seam is injectable and defaults to the real thing, so a test drives the reschedule
  * arithmetic without a network call or a live timer: `refresh` mints, `setTimer` schedules, `now`
  * stamps. `setTimer` returns the timer so the caller can `unref` it — an armed refresher must
@@ -411,7 +423,7 @@ export function startInstallationTokenRefresh(opts: {
   refresh?: (o: RefreshOptions) => Promise<RefreshResult>;
   setTimer?: (fn: () => void, ms: number) => { unref?: () => void };
   now?: () => number;
-}): { armed: boolean } {
+}): { armed: boolean; ready?: Promise<void> } {
   const env = opts.env ?? process.env;
   if (!env[GH_APP_ID_ENV] || !env[GH_APP_INSTALLATION_ID_ENV] || !env[GH_APP_PRIVATE_KEY_PATH_ENV]) {
     return { armed: false };
@@ -426,8 +438,11 @@ export function startInstallationTokenRefresh(opts: {
     const timer = setTimer(tick, delay);
     timer.unref?.();
   };
-  const tick = (): void => {
-    void refresh({ log: opts.log }).then(
+  // W1-T2554: the mint-and-rearm body, factored out of `tick` so its promise can be RETURNED to
+  // the very first caller (via `ready` below) while every later tick stays fire-and-forget,
+  // exactly as before — same `.then`/reject arms, same ordering, only now capturable.
+  const runOnce = (): Promise<void> =>
+    refresh({ log: opts.log }).then(
       (result) => {
         // A FAILED MINT STILL RESCHEDULES (design iv: degrade, never refuse) — a transient outage
         // keeps retrying on the margin rather than going silent.
@@ -455,7 +470,9 @@ export function startInstallationTokenRefresh(opts: {
         }
       },
     );
+  const tick = (): void => {
+    void runOnce();
   };
-  tick();
-  return { armed: true };
+  const ready = runOnce();
+  return { armed: true, ready };
 }
