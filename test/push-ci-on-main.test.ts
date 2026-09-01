@@ -68,8 +68,8 @@ test("W1-T1033: the ci workflow runs the suite on a push to main", async () => {
 
   const runs = (ci!.steps ?? []).map((s) => s.run).filter((r): r is string => typeof r === "string");
   assert.ok(
-    runs.some((r) => r.includes("npm run test:ci")),
-    "the `ci` job must still run the suite (`npm run test:ci`) — that is what a push run observes",
+    runs.some((r) => r.includes("npm run test:ci -- --test-shard=${{ matrix.shard }}/4")),
+    "the `ci` matrix must run every test shard through npm's existing retry entry point — that is what a push run observes",
   );
 
   // The job body itself must stay push-safe: zero references to PR-scoped context that would be
@@ -117,8 +117,8 @@ test("W1-T1033: ci-gate is never triggered by a push", async () => {
 // sweep.disposed line" point).
 test("W1-T1033: a red main run reaches its named reader", async () => {
   const doc = await loadCiDoc();
-  const ciJobName = doc.jobs.ci?.name;
-  assert.equal(ciJobName, "ci", "the ci job's own `name:` is the check-run name a push run on main would report under");
+  const ciJobName = Object.values(doc.jobs).find((job) => job.name === "ci")?.name;
+  assert.equal(ciJobName, "ci", "the stable shard aggregator must retain the check-run name a push run on main reports under");
 
   function ciFailure(over: Partial<CiFailure> = {}): CiFailure {
     return { name: ciJobName!, logTail: "AssertionError: expected 1 to equal 2", ...over };
@@ -195,12 +195,16 @@ test("W1-T1033: the pull request trigger is byte-for-byte unchanged", async () =
     // its job body carries no `if:` at all — see the next test) carry no gate; every other job
     // does. Either way nothing here narrows what a pull_request event registers.
     if (job.if === undefined) continue;
-    assert.equal(
-      job.if,
-      "github.event_name == 'pull_request'",
-      `job '${jobId}' carries an if: condition other than the PR-always-true guard — ` +
-        "this could skip its check run on some pull_request event, which would be a lost check",
-    );
+    if (jobId === "ci-required" || jobId === "coverage-ratchet-required") {
+      assert.equal(job.if, "${{ always() }}", `aggregator '${jobId}' must register even when its shards fail`);
+    } else {
+      assert.equal(
+        job.if,
+        "github.event_name == 'pull_request'",
+        `job '${jobId}' carries an if: condition other than the PR-always-true guard — ` +
+          "this could skip its check run on some pull_request event, which would be a lost check",
+      );
+    }
   }
 });
 
@@ -214,23 +218,22 @@ test("W1-T1033: the pull request trigger is byte-for-byte unchanged", async () =
 // test/workflow-playwright-install.test.ts) open with a plain shell guard instead — this proves
 // that mechanism is actually present, on every step design (i) says must not run for real on a
 // push, without re-deriving test/diff-coverage.test.ts's own "no if:" assertion.
-test("W1-T1033: coverage-ratchet skips its real work on a push via a shell guard, not an if:, on every PR-scoped step", async () => {
+test("W1-T1033: coverage shards and their stable aggregator skip PR-only work on a push without losing either check", async () => {
   const doc = await loadCiDoc();
   const job = doc.jobs["coverage-ratchet"];
   assert.ok(job, "ci.yml must still declare a coverage-ratchet job");
   assert.equal(job!.if, undefined, "coverage-ratchet must carry no job-level if: (see test/diff-coverage.test.ts)");
 
   const steps = job!.steps ?? [];
-  const playwrightIdx = steps.findIndex((s) => s.run?.includes("playwright install"));
-  assert.ok(playwrightIdx >= 0, "expected to find coverage-ratchet's playwright install step");
-
   const guard = '[ "${GITHUB_EVENT_NAME}" = "pull_request" ]';
-  for (const step of steps.slice(playwrightIdx + 1)) {
-    assert.ok(typeof step.run === "string", "expected every post-Playwright coverage-ratchet step to be a run: step");
-    assert.ok(
-      step.run!.includes(guard),
-      `coverage-ratchet step must open with the PR-only shell guard, got: ${step.run}`,
-    );
-    assert.doesNotMatch(step.run!, /\bif:/, "the guard must be shell, not a YAML if: key");
+  const collection = steps.find((step) => step.run?.includes("--experimental-test-coverage"));
+  assert.ok(collection?.run?.includes(guard), "each coverage shard must shell-guard its PR-only collection step");
+
+  const aggregator = doc.jobs["coverage-ratchet-required"];
+  assert.equal(aggregator.if, "${{ always() }}", "the stable coverage check must register after a failed shard");
+  for (const step of aggregator.steps ?? []) {
+    if (!step.run?.includes("GITHUB_EVENT_NAME")) continue;
+    assert.ok(step.run.includes(guard), `aggregator PR-only step must shell-guard push events, got: ${step.run}`);
+    assert.doesNotMatch(step.run, /\bif:/, "the guard must be shell, not a YAML if: key");
   }
 });

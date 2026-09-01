@@ -424,10 +424,17 @@ export function parseDraftAttemptCache(text: string | undefined): DraftAttemptCa
  * comment block, so writing the other kind in upper case here would keep this constant passing
  * even with the tag deleted — which is why "backstop" above is lower case, and must stay that way.
  */
+// W1-T2569 CORRECTION, MEASURED 2026-09-01: this is a per-batch SIZE, never a concurrency limit.
+// `runDraftRung` below is a sequential `for (const p of toDraft) { await ... }`, so a batch of 3
+// costs 3 x the per-draft duration END TO END (measured median 316s => ~948s per batch), and the
+// observed max concurrent draft workers was 2 — both of which came from two OVERLAPPING batches,
+// never from within one. The rung's real cadence was measured at a ~715s median between
+// `inbox.draft_batch` rows; the "300s poll cadence" this file used to cite was wrong on both
+// counts and is corrected above.
 export const DAEMON_DRAFT_BATCH_CAP = 3;
 
 /** Proposals the DAEMON-SIDE draft rung should attempt THIS poll: {@link proposalsNeedingDraft}
- *  further throttled by {@link DraftAttemptCache} so a 300s poll cadence never re-spawns the
+ *  further throttled by {@link DraftAttemptCache} so the rung's poll cadence never re-spawns the
  *  Architect for the SAME cause — a proposal is due again only once its {@link draftAttemptKey}
  *  has actually changed since the daemon's last attempt (or it has never been attempted at
  *  all). `rmd inbox` never calls this — it calls {@link proposalsNeedingDraft} directly,
@@ -491,6 +498,36 @@ export function evictRefusalPoisonedKeys(
     freed.push(id);
   }
   return freed;
+}
+
+/**
+ * W1-T2569: MERGE this batch's own results onto the caches AS THEY ARE ON DISK RIGHT NOW, rather
+ * than onto the snapshot this batch read when it started.
+ *
+ * THE LOST UPDATE IS INDEPENDENT OF THE RE-ENTRANCY GUARD AND MUST BE FIXED SEPARATELY.
+ * `buildInboxDraftHook` reads `drafts`/`attempts` at the top of a batch and writes
+ * `{...drafts, ...mine}` at the bottom. Any overlap at all — a guard that is bypassed, a lock
+ * reclaimed as stale while its holder is in fact alive, a second host — makes the later writer's
+ * spread silently drop everything the earlier one produced. A guard makes overlap unlikely; this
+ * makes a lost update impossible, which is the half that still holds when the guard is wrong.
+ *
+ * MEASURED 2026-09-01, the defect this closes: 16 Architect spawns over 5 distinct proposals cost
+ * $123.30 and left the drafts cache frozen at 62 entries, because each batch's write reverted the
+ * previous batch's. Eligible read 285 -> 282 and then never moved again.
+ *
+ * PRECEDENCE IS THIS BATCH'S OWN RESULTS. Where both this batch and a concurrent writer produced
+ * an entry for the SAME id, this batch's wins — it is the fresher observation, and the alternative
+ * (dropping it) is the very lost update this exists to stop. Every id THIS batch did not touch is
+ * carried through from disk verbatim.
+ */
+export function mergeDraftCaches(
+  onDisk: { drafts: DraftCache; attempts: DraftAttemptCache },
+  mine: { drafts: DraftCache; attempts: DraftAttemptCache },
+): { drafts: DraftCache; attempts: DraftAttemptCache } {
+  return {
+    drafts: { ...onDisk.drafts, ...mine.drafts },
+    attempts: { ...onDisk.attempts, ...mine.attempts },
+  };
 }
 
 /** `<config.root>/state/inbox-draft-inflight.json` — proposal id -> ISO spawn timestamp,

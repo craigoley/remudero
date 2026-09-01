@@ -1,0 +1,76 @@
+- id: W1-T2571
+  title: "VERIFY-IMAGE RENDERS AN INFRASTRUCTURE FAULT AS A PRODUCT VERDICT — check() prints FAIL <label> (<first output line>) on ANY non-zero exit, so a command that died of `no space left on device` is reported under its SEMANTIC label; MEASURED 2026-09-01: a full disk produced three confident, specific and WRONG diagnoses in one run, among them `every worker in this image writes files and commits NOTHING`, and the operator acted on the image rather than the disk"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 6.00
+  files: [deploy/verify-image.sh, test/a-check-that-could-not-run-is-reported-as-a-failed-check.test.ts]
+  origin: "operator-brief#verify-image-infra-misdiagnosis-2026-09-01"
+  plan_refs: ["W1-T1082", "W1-T320"]
+  status: queued
+  attempts: 0
+  rationale: |
+    ── THE DEFECT, AND THE FILE ALREADY KNOWS THE RULE IT BREAKS ────────────────────────────────
+
+    `check()` (deploy/verify-image.sh) is:
+
+        if out="$("$@" 2>&1)"; then
+          printf "  PASS  %-22s %s\n" "$label" "$(printf "%s" "$out" | head -1)"
+        else
+          printf "  FAIL  %-22s (%s)\n" "$label" "$(printf "%s" "$out" | head -1)"
+          fail=1
+        fi
+
+    Every non-zero exit becomes `FAIL <semantic label>`. The label names what the check MEANS, so
+    a command that never got to test anything — because the host disk was full — is reported as
+    the PRODUCT being broken in exactly that way.
+
+    ⚠ THE SCRIPT ALREADY STATES THE PRINCIPLE THAT FORBIDS THIS, TWO SCREENS UP, AND APPLIES IT IN
+    ONLY ONE DIRECTION. On an absent version pin it "reports UNKNOWN rather than a verdict",
+    because "a read that did not happen must never render as a match". A check that could not RUN
+    is the same class: it must not render as a check that ran and FAILED. The rule exists; it is
+    applied to the PASS direction and not to the FAIL direction.
+
+    ── MEASURED, AND IT COST REAL TIME ──────────────────────────────────────────────────────────
+
+    2026-09-01, host disk at 100% (29G, images alone 22.92G): one verify-image run produced THREE
+    confident, specific, WRONG diagnoses. The one that best shows the shape:
+
+        every worker in this image writes files and commits NOTHING
+
+    That is a precise claim about the image's containment and git wiring. The true cause was
+    `no space left on device` in every case. The image was fine. The operator's next moves were
+    aimed at the product, and the disk went unexamined until measured separately.
+
+    A DIAGNOSTIC THAT IS CONFIDENTLY WRONG IS WORSE THAN ONE THAT ERRORS, because its output is
+    specific enough to act on. This is the same family the repo has already named twice: a bound
+    that fires on a healthy condition, and a query that answers the wrong question with a
+    perfectly good zero.
+
+    ── THE FIX: A THIRD STATE, IN THE FILE'S OWN VOCABULARY ─────────────────────────────────────
+
+    `check()` gains an INFRA/UNKNOWN outcome for output matching an environmental fault, reported
+    as "this check did not test the image" and NEVER as a product verdict. `no space left on
+    device` is the measured instance and the one that must be covered; whichever others are added
+    must come from real captured text, never from imagination — the W1-T2567 rule, one file over.
+
+    ⚠ WHAT THE THIRD STATE MUST NOT DO IS TURN A REAL FAILURE GREEN. This carve-out sits on the
+    FAIL side of a verifier whose entire purpose is refusing a bad image, so the dangerous
+    direction here is a product failure whose text happens to mention a disk. The verdict must
+    stay non-zero — an infrastructure fault means the image is UNVERIFIED, which is not a pass. A
+    run that ends with any INFRA row must exit non-zero and say the image was not verified, so the
+    third state changes the DIAGNOSIS and never the disposition.
+
+    NOT IN SCOPE: `readDiskFreeBytes` and the daemon's own disk-pressure signals (W1-T1082), the
+    tmp sweep's age ceiling (W1-T320), and the version-pin UNKNOWN path, which is already correct.
+
+  acceptance:
+    - claim: "a check whose command died of no space left on device is reported as an infrastructure fault, not as a failure of the thing the label names"
+      proof: "unit test: test/a-check-that-could-not-run-is-reported-as-a-failed-check.test.ts"
+    - claim: "an ordinary product failure is still reported as FAIL under its own label, so the carve-out does not swallow the failures this script exists to catch"
+      proof: "unit test: test/a-check-that-could-not-run-is-reported-as-a-failed-check.test.ts"
+    - claim: "a run carrying an infrastructure fault still exits non-zero and says the image was UNVERIFIED, so the third state changes the diagnosis and never the disposition"
+      proof: "unit test: test/a-check-that-could-not-run-is-reported-as-a-failed-check.test.ts"

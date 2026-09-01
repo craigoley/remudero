@@ -1,0 +1,62 @@
+- id: W1-T2572
+  title: "THE LEDGER RECORDS THE MOUNT THAT WAS ASKED FOR, NEVER THE MODEL THAT ACTUALLY SERVED — `run.start` logs `mount.model` (an alias like `sonnet`) and nothing logs what the provider really ran, so the moment a second provider exists every row is unattributable and every later mount comparison is comparing labels rather than models"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 12.00
+  files: [src/lib/worker.ts, test/the-served-model-is-not-the-model-that-was-requested.test.ts]
+  origin: "operator-session#codex-router-design-2026-09-01"
+  plan_refs: ["W1-T167", "W1-T2560"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THIS IS THE PREREQUISITE FOR EVERY OTHER ROUTING TASK AND IT CHANGES NO ROUTING DECISION.
+    `run.start` (src/run-task.ts) already carries the complete routing KEY — repo, type, risk,
+    task_class, mount_class, and `mount: {model, effort, max_turns, context_budget}` — and outcomes
+    join to it by run_id. What it does not carry is what actually ran.
+
+    WHY THE DISTINCTION IS NOT PEDANTRY. `mount.model` is an ALIAS resolved from
+    `.remudero/mounts.yaml` (`sonnet`, `haiku`), not a model id. On the Claude path the alias and
+    the served model usually agree; on the Codex path they cannot, because `selectCodexModel`
+    (src/lib/worker-provider.ts) picks from the models the AUTHENTICATED ACCOUNT exposes, falling
+    back through a preference list and then to the account default. Two runs logging
+    `mount.model: sonnet` may have been served by different models on different days, and nothing
+    in the ledger distinguishes them. Any later per-mount aggregate silently averages across them.
+
+    THIS REPO HAS ALREADY LEARNED THIS EXACT LESSON IN ANOTHER SURFACE: a session's CONFIGURED
+    model and the model that SERVED its latest turn are separate fields precisely because a
+    runtime fallback changes one without changing the other. The ledger needs the same pair.
+
+    WHERE IT CAN BE RECORDED, WHICH IS NOT WHERE THE ROUTING KEY IS. `run.start` (run-task.ts) is
+    logged BEFORE the spawn, and `selectWorkerProvider` runs inside the spawn at
+    src/lib/worker.ts:1286 — so `run.start` structurally CANNOT know the provider or the served
+    model, and a task that tried to put them there would be unbuildable. The pair is known at the
+    worker seam and must be emitted from there, joined to the run by `run_id` exactly as every
+    other terminal row already is. `run.start` keeps the REQUEST unchanged; the request is also
+    evidence, and the interesting rows are the ones where request and served disagree.
+
+    WHAT TO RECORD: `provider` (which subscription served it) and `served_model` (the concrete id,
+    verbatim from the provider, never normalised back into a mount alias).
+
+    FAIL SOFT, NEVER FAIL THE RUN. A provider that cannot report what it served records
+    `served_model: null` and a reason. An unknown is honest; a guess poisons the corpus this task
+    exists to make trustworthy, and a throw would convert a reporting gap into a dispatch outage.
+
+    THE FALSIFIER IS THE DISAGREEMENT CASE, NOT THE AGREEING ONE. A test where request and served
+    coincide passes against an implementation that simply copies `mount.model` into `served_model`.
+    The load-bearing case is a provider that serves something OTHER than what was asked for, and
+    the assertion is that both values survive to the ledger, distinct.
+  acceptance:
+    - claim: "the provider that served a run is recorded at the worker seam, where it is first known"
+      proof: "unit test: test/the-served-model-is-not-the-model-that-was-requested.test.ts"
+    - claim: "the concrete served model id is recorded verbatim, never normalised back into the mount alias"
+      proof: "unit test: test/the-served-model-is-not-the-model-that-was-requested.test.ts"
+    - claim: "a run whose served model differs from the requested one keeps BOTH values, distinct, in the ledger"
+      proof: "unit test: test/the-served-model-is-not-the-model-that-was-requested.test.ts"
+    - claim: "a provider that cannot report what it served records an explicit unknown and a reason, never a guess"
+      proof: "unit test: test/the-served-model-is-not-the-model-that-was-requested.test.ts"
+    - claim: "an unreportable served model never fails the run, so a reporting gap cannot become a dispatch outage"
+      proof: "unit test: test/the-served-model-is-not-the-model-that-was-requested.test.ts"

@@ -174,9 +174,22 @@ export const DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS = 559_000;
  * dispatch/retro holds the loop for its own measured mean of 38.5 minutes got exactly one full
  * sweep for that whole span. 20 minutes gives ~3 passes an hour, which task design (i) prices at
  * a p90-cost of about 67 seconds an hour (under 4%) — cheap enough that FREQUENCY, not
- * concurrency, is the right lever; this constant raises how often the gate is reached, never how
- * many run at once (see `sweep still runs one at a time`, the same mutex-serialized
- * `deps.sweep()` every other call site already awaits sequentially). Same fs-free-safety-net
+ * concurrency, is the right lever; this constant raises how often the gate is reached.
+ *
+ * ⚠ W1-T2569 CORRECTION — THE CLAUSE THAT USED TO FOLLOW HERE WAS FALSE. It read "never how many
+ * run at once (see `sweep still runs one at a time`, the same mutex-serialized `deps.sweep()`
+ * every other call site already awaits sequentially)". SWEEPS DO OVERLAP, and not because of this
+ * constant: {@link DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS} immediately above stops AWAITING
+ * `deps.sweep()` at 559s and does NOT CANCEL it, so any sweep whose work exceeds that bound keeps
+ * running detached while the next iteration starts another. "Awaits sequentially" describes the
+ * call sites; it does not describe the lifetimes. MEASURED 2026-09-01: six consecutive
+ * batch/abandon alternations in the inbox-draft rung, `elapsed_ms: 559000` against
+ * `bound_ms: 559000`, costing $123.30 in duplicated Architect spawns.
+ *
+ * THIS IS A CLASS, NOT AN INSTANCE. Every sweep-borne rung whose work can exceed 559s is
+ * re-entrant by the same mechanism; drafting is merely the one that spends per re-entry. The
+ * inbox-draft rung now takes its own O_EXCL lock (run-task.ts, W1-T2569) — a per-rung remedy, not
+ * a fix to the abandonment semantics, which is filed separately. Same fs-free-safety-net
  * reasoning as {@link DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS} immediately above: this pure module
  * cannot load `plan/policy.yaml` itself, so this literal is the default for a direct/test caller
  * that supplies no `DaemonOpts.sweepRetriggerIntervalMs`.

@@ -1,0 +1,64 @@
+- id: W1-T2577
+  title: "A ROUTER THAT OPTIMISES `cost_usd` IS OPTIMISING A NUMBER §9 ALREADY CALLS NOTIONAL — on subscription the dollars are an API-equivalent price nobody is billed, while the resource that actually runs out is the subscription window, and with two providers there are now two independent windows to spend"
+  repo: remudero
+  depends_on: ["W1-T2574"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: "span"
+  budget_usd: 15.00
+  files: [src/lib/routing-objective.ts, src/lib/mount-recommender.ts, test/the-scarce-resource-is-the-window-not-the-notional-dollar.test.ts]
+  origin: "operator-session#codex-router-design-2026-09-01"
+  plan_refs: ["W1-T2574", "W1-T2560"]
+  status: queued
+  attempts: 0
+  rationale: |
+    §9 IS EXPLICIT AND THE ROUTER MUST NOT CONTRADICT IT: "on subscription, `total_cost_usd` is
+    NOTIONAL — it is the API-equivalent price, not billed spend", used for exactly two things, the
+    runaway tripwire and metering when billing is by API. Every cost figure W1-T2560's census
+    prints is therefore a PROXY. A recommender that minimises it is minimising a number the
+    operator does not pay, and it will happily trade away throughput to do so.
+
+    THE MEASURED CASE IS ALREADY ON RECORD, AND IT WENT THE OTHER WAY. #3486 cut dispatch lanes
+    3 -> 2 on WINDOW evidence — `daemon.headroom` showed a five-hour window going 30% used to 100%
+    used in 58 minutes, a window consumed in ~83 minutes — while the paragraph above that row still
+    correctly said no CORRECTNESS cost had appeared and dollar figures argued nothing. The binding
+    constraint was the window, and no cost-shaped objective would have found it.
+
+    SO THE OBJECTIVE IS WINDOW SHARE CONSUMED PER SETTLED TASK, and this is where two providers pay
+    most. Claude and Codex meter against SEPARATE subscriptions with separate resets, so the same
+    work costs a different fraction of a different scarce pool depending on where it is sent. That
+    makes provider choice worth more than model-tier micro-optimisation: routing a task to the
+    subscription with room is a real gain even when the two models are equally capable, and
+    `selectWorkerProvider` already reads both windows to make exactly that call. This task gives
+    the recommender an objective that agrees with what the provider selector already does, instead
+    of a dollar objective that quietly argues against it.
+
+    LINT NOTE, RECORDED RATHER THAN DODGED: `lint-plan` warns (never blocks) that this task's
+    call-site proof names `src/lib/mount-recommender.ts`, a file the plan does not yet contain —
+    W1-T2575 creates it, and this task declares that dependency. The warning is a SNAPSHOT
+    artifact of filing the two together and clears once W1-T2575 merges. Widening this task's
+    `files:` to reach an already-existing caller would buy the clean lint by making the task span a
+    third subsystem, which is the wrong trade: the honest shape is a component called by the
+    recommender it belongs to.
+
+    NOTIONAL DOLLARS ARE NOT DISCARDED, THEY ARE DEMOTED TO WHAT §9 SAYS THEY ARE. They remain the
+    runaway tripwire and the metering figure under `billing_mode == api`, and they remain the right
+    objective for an API-billed install — where the dollars are real and the windows are not the
+    constraint. The objective must therefore be SELECTED BY BILLING MODE rather than hardcoded, and
+    an install that cannot read its own windows must fall back to the dollar objective LOUDLY
+    rather than silently optimising a proxy it cannot justify.
+  acceptance:
+    - claim: "the objective is reached from the recommender, not only from its own test"
+      proof: "grep: routingObjectiveFor( in src/lib/mount-recommender.ts"
+    - claim: "on a subscription install the objective is window share consumed per settled task, not notional dollars"
+      proof: "unit test: test/the-scarce-resource-is-the-window-not-the-notional-dollar.test.ts"
+    - claim: "the two providers' windows are counted separately, so the same work costs a different share depending on where it is sent"
+      proof: "unit test: test/the-scarce-resource-is-the-window-not-the-notional-dollar.test.ts"
+    - claim: "an api-billed install selects the dollar objective instead, because there the dollars are real"
+      proof: "unit test: test/the-scarce-resource-is-the-window-not-the-notional-dollar.test.ts"
+    - claim: "an install that cannot read its windows falls back to the dollar objective LOUDLY rather than optimising a proxy silently"
+      proof: "unit test: test/the-scarce-resource-is-the-window-not-the-notional-dollar.test.ts"
+    - claim: "notional dollars remain available as the runaway tripwire and are never removed"
+      proof: "unit test: test/the-scarce-resource-is-the-window-not-the-notional-dollar.test.ts"

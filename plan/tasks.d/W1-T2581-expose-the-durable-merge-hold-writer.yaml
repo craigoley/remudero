@@ -1,0 +1,99 @@
+- id: W1-T2581
+  title: "THE DURABLE OPERATOR MERGE HOLD HAS PRODUCTION READERS BUT NO SUPPORTED WRITER — expose one attributable rmd command that engages or releases a fleet-wide or PR-scoped hold and verifies the decision through the same reader every merge path already consults"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 25.00
+  files:
+    - src/lib/operator-merge-hold.ts
+    - src/run-task.ts
+    - test/operator-merge-hold-command.test.ts
+    - test/help-renders-a-summary-not-a-paragraph.test.ts
+    - docs/cli-reference.md
+    - docs/operator-guide.md
+    - scripts/source-size-baseline.json
+  origin: "operator-brief#automatic-pr-queue-manual-merge-override-2026-09-01"
+  plan_refs: ["W1-T1000002", "W1-T1000003", "W1-T970"]
+  status: queued
+  attempts: 0
+  rationale: |
+    The durable merge-hold consumers are already material at current main. Commit 7485cbc0
+    (#2376) added `automergeHoldFromLedger`, the sweep refusal and converging withdrawal, the
+    at-open and feedback-landing gates, the decision-relevant ledger retention, and their tests.
+    The status board landed separately in #2541. Those readers protect a held PR across pushes,
+    daemon restarts and later sweep passes, and leave a human free to inspect or manually squash.
+
+    The operator cannot invoke that mechanism through a supported production command. A current
+    tree search for `automerge.hold_engaged` and `automerge.hold_released` finds readers, retention,
+    comments and test fixtures, but no production append site. `review.ts` even says the rows are
+    "written by an operator verb" while the command registry contains no such verb. Material
+    enforcement without an entry point does not satisfy the operator-control requirement.
+
+    This is not a request to rebuild or re-prove W1-T1000002. That task's sweep withdrawal call
+    site and the other consumers already exist at the merge base, so attaching this incremental
+    command to its old whole-task acceptance would create a non-discriminating review proof. This
+    task owns only the missing writer, its strict parser, read-back verification, help/docs and
+    source-size record.
+
+  design: |
+    Add `rmd merge-hold engage|release`. Require `--by <name>` and `--reason <text>` on both
+    actions. Omit `--pr` for a fleet-wide decision; accept a positive `--pr <number>` for one PR.
+    Accept optional `--task W1-T<n>` only with a PR scope, as board enrichment rather than as the
+    hold key. Refuse unknown, missing or malformed input before writing.
+
+    Put parsing and application in a focused `operator-merge-hold.ts` module. Append through the
+    existing atomic ledger writer using the existing `automerge.hold_engaged` and
+    `automerge.hold_released` vocabulary. Immediately read the decision back through
+    `automergeHoldFromLedger`, the same production reader the arm paths consume, and throw rather
+    than claim success if the requested state is not current. A release of an already-clear scope
+    is an idempotent success that writes no misleading row.
+
+    Preserve the established last-applicable-row semantics: a fleet hold covers every PR, and a
+    later PR-scoped release may carve one manually cleared PR out of it. Do not change sweep
+    policy, arm/disarm behavior, merge method, branch protection, review verdicts, provider
+    selection or daemon cadence. Document that the hold blocks daemon arming while manual
+    inspection and an operator-initiated squash remain available.
+
+  acceptance:
+    - claim: "the production CLI entry point calls the focused merge-hold writer module rather than leaving it reachable only from tests"
+      proof: "grep: applyOperatorMergeHold( in src/run-task.ts"
+    - claim: "the production command registry and main dispatcher expose rmd merge-hold rather than leaving the writer reachable only from tests"
+      proof: "unit test: test/operator-merge-hold-command.test.ts"
+    - claim: "engage and release both require a non-empty operator identity and reason, and malformed scope or unknown arguments are refused before any ledger append"
+      proof: "unit test: test/operator-merge-hold-command.test.ts"
+    - claim: "the command writes fleet-wide and PR-scoped decisions using the existing hold row vocabulary and the production reader immediately observes the requested state"
+      proof: "unit test: test/operator-merge-hold-command.test.ts"
+    - claim: "a fleet hold covers multiple pull requests and a later PR-scoped release clears only that pull request"
+      proof: "unit test: test/operator-merge-hold-command.test.ts"
+    - claim: "releasing an already-clear scope succeeds without appending a misleading release row"
+      proof: "unit test: test/operator-merge-hold-command.test.ts"
+    - claim: "a dropped or unreadable append is reported as a failure rather than as an engaged hold"
+      proof: "unit test: test/operator-merge-hold-command.test.ts"
+    - claim: "generated CLI reference and operator documentation describe fleet and PR scopes, attribution, explicit release, and the surviving manual-squash override"
+      proof: "grep: rmd merge-hold in docs/operator-guide.md"
+
+  falsifier: |
+    Close this task without implementation if current main exposes a supported production command
+    that can append both hold row types with who and why, scope them to the fleet or one PR, and
+    read the result back through `automergeHoldFromLedger`. A test fixture, direct ledger edit,
+    comment, board reader or daemon consumer is not that evidence.
+
+    Re-design rather than build if the existing reader does not support a PR-scoped release over a
+    fleet hold or if ledger rotation does not retain both decision rows. Those would make this a
+    hold-state repair, not the missing-writer concern filed here.
+
+  note: |
+    The task id was atomically reserved at `refs/rmd-id/W1-T2581` by
+    `rmd-id reservation 55185@Craigs-Mac-mini 2026-09-01T19:06:48.083Z` before this shard was
+    written. The allocator advanced past two fleet-held candidates; the id was not inferred from
+    filenames or minted offline.
+
+    `risk: high` is Rule 19 span, not an architectural expansion: the one writer concern crosses a
+    focused module, CLI registry/dispatcher, generated reference, operator guide, source-size
+    ratchet and their tests. The merge paths themselves are deliberately out of scope and
+    unchanged, but a false success could leave an operator believing a safety hold exists when it
+    does not, so read-back and negative tests are acceptance requirements rather than optional
+    hardening.
