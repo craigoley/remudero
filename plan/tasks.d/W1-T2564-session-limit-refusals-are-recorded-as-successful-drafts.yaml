@@ -1,0 +1,136 @@
+- id: W1-T2564
+  title: "A SESSION-LIMIT REFUSAL IS RECORDED AS A SUCCESSFUL WORKER RUN AND PERMANENTLY RETIRES THE WORK — collectWorkerResult swallows the SDK's post-error throw and sets isError, but subtype was already captured from the success envelope seen before it, so workerLedgerFields' `r.isError ? r.subtype : \"success\"` renders verdict success; MEASURED over the three-form union: 793 false successes across five rungs, 775 of them inbox.draft_synthesized, and the draft rung then writes a DraftAttemptCache key for the refusal — 267 of 317 registry proposals are keyed with no cached draft, never once really drafted, and can never be retried because their key is `::0` and never changes"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 20.00
+  files: [src/lib/worker.ts, src/run-task.ts, test/session-limit-is-a-refusal-not-a-success.test.ts]
+  origin: "operator-brief#session-limit-refusals-recorded-as-successes-2026-09-01"
+  plan_refs: ["W1-T2515", "W1-T2561", "W1-T192", "W1-T2563"]
+  status: queued
+  attempts: 0
+  rationale: |
+    ── THE MECHANISM, EXACTLY ───────────────────────────────────────────────────────────────────
+
+    `collectWorkerResult` (src/lib/worker.ts) reads the SDK stream. A `result` envelope sets
+    `subtype`, `isError`, `costUsd` and `tokens`. The SDK then THROWS its post-error-result signal.
+    The catch re-raises when no envelope was seen, and otherwise records the message on stderr and
+    sets `isError = true` — deliberately, and correctly.
+
+    IT DOES NOT TOUCH `subtype`, WHICH THE SUCCESS ENVELOPE ALREADY SET TO "success". So
+    `workerLedgerFields`'s verdict line
+
+        verdict: r.isError ? r.subtype : "success"
+
+    — right in intent, it means "when this errored, name the error" — resolves BOTH arms to
+    "success". The error is not dropped by an omission; it is erased by a derivation that assumes
+    `subtype` names the failure whenever `isError` is set, which in this path it never does.
+
+    THE CONTROL IS IN THE DATA AND CONFIRMS THE MECHANISM RATHER THAN MERELY THE SYMPTOM.
+    `recon.done` carries the SAME swallow four times and records `error_max_turns`, NOT success,
+    because there the envelope's own subtype named a real error. `containment.probe` (74),
+    `isolation.probe` (5) and `isolation_preflight_failed` (2) carry the swallow and record no
+    verdict at all — they do not call `workerLedgerFields`. The false success appears exactly where
+    a success-subtype envelope precedes the throw AND the row goes through that one line.
+
+    ── SCOPE: SHARED, NOT DRAFT-SPECIFIC ────────────────────────────────────────────────────────
+
+    Over the three-form union at the config root (58 gz / 2 plain / 1 live, 420,494 deduped rows,
+    every form contributing; newest 2026-09-01T14:09:15Z) — 878 rows carry the swallow signature,
+    793 of them recorded `verdict: success`:
+
+        inbox.draft_synthesized   775 / 775 false
+        triage.synthesized          8 /   8 false
+        implement.done              7 /   7 false
+        review.reviewer             3 /   3 false
+        recon.done                  0 /   4   (subtype named a real error)
+        containment.probe           0 /  74   (no verdict field)
+        isolation.probe             0 /   5   (no verdict field)
+
+    ⚠ THE LIVE FILE CANNOT SEE THIS. `inbox.draft_synthesized` reads 66 rows in `ledger.ndjson`
+    against 1,022 over the union — `rotateLedger` keeps 200 newest per step — so a live-file-only
+    query undercounts by 15x and would have reported a curiosity rather than a systemic defect.
+
+    ⚠ AND `$0` IS NOT A SAFE PROXY FOR THE REFUSAL, WHICH MATTERS FOR ANY DETECTOR BUILT HERE.
+    Of 1,022 `inbox.draft_synthesized` rows, 768 carry `cost_usd: 0` and ALL 768 carry the session
+    limit — but SEVEN session-limit rows carry a NON-ZERO cost, so the two sets are not equal.
+    A remedy keyed on `cost_usd === 0` would miss those seven and would also catch any genuinely
+    free run. Key on the refusal, never on the price.
+
+    ── SEVERITY: THE WORK IS LOST, NOT DEFERRED ─────────────────────────────────────────────────
+
+    `buildInboxDraftHook` (src/run-task.ts) writes `nextAttempts[id] = draftAttemptKey(proposal)`
+    for EVERY outcome, win or lose — deliberate under W1-T192, so a genuinely failed attempt is not
+    repeated every poll. A REFUSAL IS NOT AN ATTEMPT, and the cache cannot tell the difference.
+
+    MEASURED against the live caches: of 353 proposals ever drafted, 267 have NEVER ONCE been
+    really drafted (every row for them is a refusal). ALL 267 carry an attempt key. NONE has a
+    cached draft. Control: all 86 genuinely-drafted proposals are also keyed, so the cache is
+    readable and populated — the 267 is a real zero on drafts, not an unreadable file.
+
+    THEY CAN NEVER RECOVER ON THEIR OWN. `draftAttemptKey` is `anchorFingerprint::reframeCount`,
+    and a routed follow-up carries `evidenceAnchors: []` with no reframes, so every one of those
+    keys is the literal string `::0` and can never change. `draftsDueOnDaemon` filters on
+    `attempts[p.id] !== draftAttemptKey(p)` — permanently false. 267 of the registry's 317
+    proposals are silently dead, and nothing reports it.
+
+    ── THE GOVERNOR DISAGREES WITH THE API, AND THE REFUSAL TEXT IS THE BETTER SIGNAL ───────────
+
+    ⚠ THE PREMISE NEEDS ONE CORRECTION BEFORE IT IS ACTED ON. At the cited instant
+    (10:15:55.352Z) `daemon.headroom` read `over_ceiling: TRUE, used: 100%` — the governor was
+    RIGHT there. Across all 785 session-limit refusals, though, 761 fired while it read FALSE, and
+    472 of those while it read just 30% used.
+
+    THE CAUSE IS STALENESS, NOT A WRONG THRESHOLD. Those 472 all resolve to ONE reading taken at
+    09:17:25 and used for refusals through 10:15:25 — a 58-MINUTE BLIND WINDOW in which the account
+    went from 30% to exhausted with the governor holding its last value. The median `daemon.headroom`
+    gap is 158s, so this is not the normal cadence; the largest gaps in the retained ledger reach
+    SIX HOURS. No `usage.probe_failed` row was written during that window either, so the governor
+    was not merely failing loudly — it was silent.
+
+    AND THE FLEET ALREADY OWNS A BETTER READING THAN THE PROBE PRODUCES.
+    `detectUsageLimitRefusal` (src/lib/classify.ts, W1-T2515 — "A SHUT WINDOW IS NOT A FLAKE")
+    already exists and is already wired into the fix-retry loop. RUN AGAINST THE REAL STDERR IT
+    MATCHES: `matched: "You've hit your session limit"`, `resetsAtMs: 2026-09-01T11:50:00.000Z` —
+    the TRUE reset — while the governor at that instant believed `12:00:00.000Z`. A negative control
+    on ordinary worker text does not match. So the refusal text carries a more accurate reset than
+    the probe, for free, at the moment of refusal.
+
+    THIS IS A WIRING GAP, NOT A MISSING CLASSIFIER. Do not build a second detector.
+
+    ── SHAPE, AND WHAT MUST BE DECIDED RATHER THAN ASSUMED ──────────────────────────────────────
+
+    Three changes are implied and the third is the one to get right:
+      (i)   the shared seam must stop rendering a swallowed error as success — the fix belongs at
+            `collectWorkerResult`/`workerLedgerFields`, ONCE, not per rung, because five rungs share
+            it and four are already contaminated;
+      (ii)  a refusal must NOT write a `DraftAttemptCache` key — it is not an attempt;
+      (iii) the 267 already-poisoned keys are NOT repaired by (i) and (ii). Fixing the code forward
+            leaves them keyed forever. A migration is required and its shape is a real decision:
+            evicting every key whose proposal has no cached draft is the obvious move, and it would
+            also re-open genuine non-refusal failures that W1-T192 deliberately throttled. State
+            which of those it re-opens rather than claiming it re-opens none.
+
+    ⚠ DO NOT RETRY IMMEDIATELY ON REFUSAL. The measured shape is a storm — the cited proposal was
+    refused five times in three minutes, and 494 refusals landed in one seven-hour window — so a
+    retry-on-refusal would hammer an account that has already said no. W1-T2515's precedent is the
+    one to follow: stop, carry the stated reset out, and let the daemon own the resume.
+
+    NOT IN SCOPE: the batch cap (W1-T2561, merged) and the registry's missing expiry (W1-T2563)
+    are unrelated and neither fixes this. `classifyFailure`, the transient-retry budget and
+    `detectUsageLimitRefusal` itself all stay as they are.
+
+  acceptance:
+    - claim: "a worker run refused for a session limit is recorded as a refusal, not as verdict success"
+      proof: "unit test: test/session-limit-is-a-refusal-not-a-success.test.ts"
+    - claim: "the refusal is recognised by the existing detector rather than a second classifier, and carries the reset it states"
+      proof: "unit test: test/session-limit-is-a-refusal-not-a-success.test.ts"
+    - claim: "a refused draft writes no attempt key, so the proposal stays due instead of being retired"
+      proof: "unit test: test/session-limit-is-a-refusal-not-a-success.test.ts"
+    - claim: "a genuine non-refusal failure still writes its attempt key, so the existing throttle is not weakened"
+      proof: "unit test: test/session-limit-is-a-refusal-not-a-success.test.ts"
+    - claim: "the already-poisoned keys are evicted by a migration that names which genuine failures it re-opens"
+      proof: "unit test: test/session-limit-is-a-refusal-not-a-success.test.ts"
