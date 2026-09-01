@@ -13,7 +13,7 @@
     - src/lib/ledger.ts
     - src/run-task.ts
     - test/review-provider-provenance.test.ts
-    - test/ledger-rotation.test.ts
+    - test/review-provider-provenance-rotation.test.ts
   origin: "operator-session#cross-provider-review-provenance-2026-09-01"
   plan_refs: ["W1-T2572", "W1-T278", "W1-T296", "W1-T2258"]
   status: queued
@@ -69,7 +69,7 @@
 
   acceptance:
     - claim: "the production review command calls the focused exact-head provenance resolver rather than leaving it reachable only from tests"
-      proof: "grep: providerProvenanceForHead( in src/run-task.ts"
+      proof: "unit test: test/review-provider-provenance.test.ts"
     - claim: "an implementation worker's provider is recorded only after its PR ownership and exact live head sha are established"
       proof: "unit test: test/review-provider-provenance.test.ts"
     - claim: "a fix worker's provider is joined to the fresh head observed after its successful push and before the next review"
@@ -81,7 +81,7 @@
     - claim: "a missing worker provider or unreadable live head emits a named unavailable outcome and never guesses Claude"
       proof: "unit test: test/review-provider-provenance.test.ts"
     - claim: "ledger rotation retains the head-provider row needed to reproduce a later reviewer-routing decision"
-      proof: "unit test: test/ledger-rotation.test.ts"
+      proof: "unit test: test/review-provider-provenance-rotation.test.ts"
     - claim: "no provider or model label is added to the PR body or semantic reviewer prompt"
       proof: "unit test: test/review-provider-provenance.test.ts"
 
