@@ -38,6 +38,7 @@ import type { BoardReviewCadenceDecision, BoardReviewReport } from "./board-revi
 import type { DigestCadenceRunResult } from "./digest.js";
 import type { RunResult } from "./run-result.js";
 import { assertCleanBoot, type BootAssertion } from "./env.js";
+import { classifyFailure } from "./classify.js";
 import { INITIAL_RETRY_STATE, reasonAboutBlock, type RetryState } from "./block-reason.js";
 import {
   nextRunnable,
@@ -239,6 +240,33 @@ export const DAEMON_EXIT_STALE = 75;
 export const DAEMON_EXIT_BLOCKED = 76;
 
 /**
+ * W1-T2546 — A PASS KILLED BY AN ENVIRONMENTAL REFUSAL, which is a THIRD thing that is not a
+ * crash. Same argument {@link DAEMON_EXIT_BLOCKED} already won for `blocked`, one category over.
+ *
+ * OBSERVED 2026-08-31 18:42-18:44 UTC in the operator's own daemon log: two PRs (#3428, #3429)
+ * had already been opened successfully and the run died READING ONE BACK —
+ * `Command failed: gh api repos/.../pulls/3428 ... API rate limit exceeded ... (HTTP 403)`. That
+ * surfaced as `stopReason: "error"`, mapped to 1, and docker's `on-failure` counted the restart.
+ * Nothing about the tree, the plan or the code was wrong; the correct response was to WAIT, which
+ * is exactly what this container already knows how to do for the other two non-crash codes.
+ *
+ * WHY IT MATTERS BEYOND TIDINESS: this account's GraphQL budget is exhausted routinely, and a
+ * 90-minute secondary-limit lockout has already happened once. During such a window EVERY pass
+ * can die this way, so the crash budget drains at the rate the limiter refuses — and once it is
+ * gone the fleet is dead with a red board and no failing check to explain it.
+ *
+ * THE DECISION IS DELEGATED, NEVER RE-DERIVED HERE. {@link daemonExitCode} asks
+ * `classifyFailure` — the repo's ONE failure classifier, which already reads rate-limit
+ * backpressure, 5xx, transport faults and runner loss as `"transient"` — rather than carrying a
+ * fourth copy of those signatures. So a reworded provider message is a one-place fix, and this
+ * code can never disagree with the classifier the retry path already trusts.
+ *
+ * FAIL-CLOSED IN THE SAFE DIRECTION: anything the classifier does not positively call transient
+ * stays `error` ⇒ 1 and is counted, so this can only ever NARROW what counts as a crash.
+ */
+export const DAEMON_EXIT_ENVIRONMENTAL = 77;
+
+/**
  * The pure stop-reason → process-exit-code mapping (operator ruling,
  * 2026-07-21: "VERIFY from source how DaemonStopReason reaches the process
  * exit today... the deliverable is the pure stop-reason-to-exit-code
@@ -299,6 +327,36 @@ export function daemonExitCode(stopReason: DaemonStopReason): number {
   // crash stays countable against docker's on-failure budget exactly as it always was.
   if (stopReason === "blocked") return DAEMON_EXIT_BLOCKED;
   return 1;
+}
+
+/**
+ * W1-T2546 — the exit code for a WHOLE SUMMARY, which is what the real `rmd daemon` call site
+ * has and what {@link daemonExitCode} above deliberately cannot see: the stop DETAIL.
+ *
+ * A SECOND FUNCTION RATHER THAN A SECOND PARAMETER, on purpose. `daemonExitCode` is the pure
+ * reason -> code map and has callers that pass it point-free (`reasons.map(daemonExitCode)`);
+ * widening its signature would silently hand those callers an array index as a stop detail. Every
+ * non-`error` reason is delegated to it unchanged, so the two can never disagree about the three
+ * codes it already owns.
+ *
+ * WHAT THE DETAIL IS, AND WHY IT IS TEXT. `runDaemon` builds it as `${taskId}: ${message}` from
+ * a fatal error it has ALREADY stringified (`String((err as Error)?.message ?? err)`), so by the
+ * time any exit code is computed there is no status object, no headers and no endpoint left to
+ * read — the text is genuinely all there is. Rather than hand-roll a fourth copy of the rate-limit
+ * signatures, this asks {@link classifyFailure}, the repo's ONE failure classifier, which already
+ * reads rate-limit backpressure, 5xx, transport faults and runner loss as `"transient"`. So the
+ * decision here can never disagree with the classifier the retry path already trusts, a reworded
+ * provider message is a one-place fix, and this is not a rate-limit special case: any refusal that
+ * classifier already calls environmental gets the same treatment.
+ *
+ * FAIL-CLOSED: a summary with no detail, or one the classifier does not POSITIVELY call transient,
+ * stays `error` -> 1 and is counted. This can only ever narrow what counts as a crash.
+ */
+export function daemonExitCodeForSummary(summary: Pick<DaemonSummary, "stopReason" | "stopDetail">): number {
+  if (summary.stopReason !== "error") return daemonExitCode(summary.stopReason);
+  const detail = summary.stopDetail;
+  if (detail !== undefined && classifyFailure({ text: detail }) === "transient") return DAEMON_EXIT_ENVIRONMENTAL;
+  return daemonExitCode(summary.stopReason);
 }
 
 /**

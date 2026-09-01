@@ -87,24 +87,37 @@ test("runPreflightFast: run for real (unmocked, real spawn, real package.json) o
 // ═══════════════════ acceptance: "a census suite measured over the bound is refused by ═════════
 // ═══════════════════ the bound and not by an exception" ═════════════════════════════════════
 
-test("runPreflightFast: an entry whose OWN measured wall time exceeds boundMs is refused as BOUND EXCEEDED even though its command exits zero — proven against a synthetic job name the production source never mentions, so the mechanism cannot be a name-matched exception", () => {
+// W1-T2545 RETARGETED THIS TEST, and only this one. The mechanism it pins is unchanged in
+// kind — a step is still refused BY MEASURED COST, with its own exit code irrelevant, and still
+// through a synthetic job name production source never mentions. What changed is the number the
+// measurement is compared against: an ABSOLUTE ceiling ejected its own entries as the corpus they
+// walk grew (measured on main: 2509ms against 2000ms, own result "would have PASSed", whole gate
+// FAIL), so the refusal is now a multiple of the SAME RUN's cheapest census entry. The sibling
+// below supplies that population; without one there is nothing to be a multiple OF.
+test("runPreflightFast: an entry whose OWN measured wall time runs away from its siblings is refused as RUNAWAY even though its command exits zero — proven against a synthetic job name the production source never mentions, so the mechanism cannot be a name-matched exception", () => {
   const { spawn } = recordingSpawn(); // every call returns {status: 0} — the underlying command WOULD pass
-  const clockTicks = [0, 2500]; // start=0ms, elapsed reads 2500ms > FAST_GATE_CENSUS_BOUND_MS (2000ms)
+  // Two steps, four reads: cheap sibling 0->1000ms, then the runaway 1000->31000ms (30s, well
+  // over 4x the 1000ms reference).
+  const clockTicks = [0, 1000, 1000, 31000];
   let tick = 0;
   const now = () => clockTicks[tick++];
   const syntheticSteps = [
+    { job: "synthetic-cheap-census-zzq", script: "synthetic-cheap-census-zzq", reason: "test fixture only", boundMs: FAST_GATE_CENSUS_BOUND_MS },
     { job: "synthetic-slow-census-zzq", script: "synthetic-slow-census-zzq", reason: "test fixture only", boundMs: FAST_GATE_CENSUS_BOUND_MS },
   ];
-  const packageJsonText = JSON.stringify({ scripts: { "synthetic-slow-census-zzq": "echo stub" } });
+  const packageJsonText = JSON.stringify({
+    scripts: { "synthetic-cheap-census-zzq": "echo stub", "synthetic-slow-census-zzq": "echo stub" },
+  });
 
   const result = runPreflightFast(REPO_ROOT, { spawn, now, steps: syntheticSteps, packageJsonText });
-  const step = result.steps[0];
+  const step = result.steps[1];
 
   assert.equal(step.ok, false);
-  assert.match(step.detail, /BOUND EXCEEDED/);
+  assert.match(step.detail, /RUNAWAY/);
   assert.match(step.detail, /would have PASSed/, "the underlying command DID succeed — refusal is the measured bound, not the command's own exit code");
   assert.doesNotMatch(step.detail, /FAIL —/, "must not be reported as an ordinary command failure");
   assert.equal(result.ok, false);
+  assert.equal(result.steps[0].ok, true, "the cheap sibling is untouched — a refusal is per-entry, never a class ejection");
 });
 
 test("src/lib/ci-parity.ts contains no per-job-name branch deciding admission — the generic bound above fired for a job name the module's own source text never mentions", () => {

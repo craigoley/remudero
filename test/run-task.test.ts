@@ -3210,6 +3210,60 @@ test("renderFixPrompt: merge-conflict mode names the mode, the conflicting file(
   assert.doesNotMatch(prompt, /crit-reviewer|crit-coverage/, "merge-conflict must not carry any review-mode criteria");
 });
 
+// W1-T2540 — THE UNION IS ALWAYS WRONG FOR A REGENERABLE ARTIFACT, and the prompt used to say only
+// "resolve toward the UNION". MEASURED on this repo, three conflicts on scripts/source-size-
+// baseline.json: the true merged values were 3230, 32818 and 32748 against sides of 3136/3138,
+// 32692/32713 and 32743/32718 — neither side, and never the larger of the two. Both sides ADD
+// lines, so the merged file is longer than either recorded; only re-running the generator answers
+// it. A worker following the old instruction shipped a false ceiling every time.
+
+test("W1-T2540: the merge-conflict prompt refuses a TEXTUAL merge of a regenerable artifact and says to re-run its generator", () => {
+  const prompt = renderFixPrompt({
+    task: { id: "W1-TX", title: "T" },
+    round: 1,
+    branch: "run-W1-TX-1",
+    evidence: { mergeConflict: mergeConflictFixture() },
+  });
+  assert.match(prompt, /REGENERABLE ARTIFACTS ARE THE EXCEPTION/, "the carve-out is named, not implied");
+  assert.match(prompt, /do NOT merge it textually at all, in either/, "and it is a refusal, not a preference");
+  assert.match(prompt, /RE-RUN THE COMMAND/, "names the action that actually resolves it");
+  assert.match(prompt, /FUNCTION of the MERGED tree/, "and WHY, so the rule generalises past the examples");
+});
+
+test("W1-T2540: the prompt carries the measurement, so the rule is not merely asserted", () => {
+  const prompt = renderFixPrompt({
+    task: { id: "W1-TX", title: "T" },
+    round: 1,
+    branch: "run-W1-TX-1",
+    evidence: { mergeConflict: mergeConflictFixture() },
+  });
+  // The three real values and their three real pairs. A worker told "the union is wrong" without
+  // evidence will reasonably take the larger side; these numbers are what rule that out.
+  for (const n of ["3230", "32818", "32748", "3136/3138", "32692/32713", "32743/32718"]) {
+    assert.ok(prompt.includes(n), `the prompt must carry the measured value ${n}`);
+  }
+  assert.match(prompt, /or the larger of the two, would have shipped a false ceiling/);
+});
+
+test("W1-T2540: the pre-existing merge discipline is PRESERVED, not replaced by the carve-out", () => {
+  // The regression lock. This adds an exception for one file class; ordinary source must still be
+  // resolved toward the union, and a deletion or semantic conflict must still refuse into escalate.
+  const prompt = renderFixPrompt({
+    task: { id: "W1-TX", title: "T" },
+    round: 1,
+    branch: "run-W1-TX-1",
+    evidence: { mergeConflict: mergeConflictFixture() },
+  });
+  assert.match(prompt, /PURE CONCURRENT ADDITION/i, "the union condition survives");
+  assert.match(prompt, /REFUSE to resolve it yourself and escalate/i, "the refuse-into-escalate arm survives");
+  assert.match(prompt, /never rebase, never force-push/i, "the merge-not-rebase discipline survives");
+  // and the carve-out must come AFTER the general rule, so a worker reads the default first.
+  assert.ok(
+    prompt.indexOf("PURE CONCURRENT ADDITION") < prompt.indexOf("REGENERABLE ARTIFACTS"),
+    "the exception must be stated after the rule it excepts, never before it",
+  );
+});
+
 // Dedicated, narrowly-titled proof for the acceptance claim "body-coverage mode
 // instructs body-first, code-only-if-false" (plan/tasks.yaml W1-T94) — the
 // review floor's `unit test: <name>` house dialect name-filters the suite by
