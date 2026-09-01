@@ -12,7 +12,6 @@
     - src/run-task.ts
     - src/lib/review.ts
     - test/event-driven-semantic-review.test.ts
-    - test/review-wires-criteria-at-head.test.ts
   origin: "operator-session#github-event-semantic-review-workers-2026-09-01"
   plan_refs: ["W1-T63", "W1-T473", "W1-T2472", "W1-T2568", "W1-T2584"]
   status: queued
@@ -76,7 +75,7 @@
     - claim: "the default sweep `postReview` runner explicitly requests semantic review, so an admitted code PR reaches `runReview` with `spawnReviewer: true`"
       proof: "unit test: test/event-driven-semantic-review.test.ts"
     - claim: "semantic review resolves the task's risk and budget from the plan at the PR head sha and uses them for the reviewer mount and worker hard cap"
-      proof: "unit test: test/review-wires-criteria-at-head.test.ts"
+      proof: "unit test: test/event-driven-semantic-review.test.ts"
     - claim: "a plan-only PR still dispatches zero reviewer workers while its deterministic verdict is unchanged"
       proof: "unit test: test/event-driven-semantic-review.test.ts"
     - claim: "missing head-resolved task metadata produces a named deterministic-only fallback and never invents a risk or uncapped worker budget"
