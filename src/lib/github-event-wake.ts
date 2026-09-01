@@ -270,8 +270,17 @@ export function sweepWakeMarkerPath(root: string): string {
 export function writeSweepWakeMarkerAtomic(path: string, record: SweepWakeMarker): void {
   mkdirSync(dirname(path), { recursive: true });
   const tmpPath = `${path}.tmp-${process.pid}-${Math.random().toString(36).slice(2)}`;
-  writeFileSync(tmpPath, JSON.stringify(record));
-  renameSync(tmpPath, path);
+  try {
+    writeFileSync(tmpPath, JSON.stringify(record));
+    renameSync(tmpPath, path);
+  } catch (error) {
+    try {
+      unlinkSync(tmpPath);
+    } catch {
+      // The temp may never have been created; preserve the original write/rename error.
+    }
+    throw error;
+  }
 }
 
 /** `undefined` on any read/parse failure (absent, mid-write elsewhere, corrupt) — never throws;
@@ -284,20 +293,27 @@ export function readSweepWakeMarker(path: string): SweepWakeMarker | undefined {
   }
 }
 
-/** Read + delete in one step. Returns the record that was there (`undefined` if none) — the
- *  return value is what lets a caller (boot check, `wireSweepWakeToDaemon`) tell "there was
- *  nothing pending" apart from "there was, and this call just consumed it". Deleting an
- *  already-absent marker is a silent no-op, never an error — consumption is idempotent. */
+/** Atomically CLAIM the current path by renaming it, then read + delete only that claimed inode.
+ * A writer that installs a newer marker before or after the claim leaves a path this consumer
+ * never unlinks, closing the read-then-unlink race that could otherwise erase a later delivery. */
 export function consumeSweepWakeMarker(path: string): SweepWakeMarker | undefined {
-  const record = readSweepWakeMarker(path);
-  if (record === undefined) return undefined;
+  const claimedPath = `${path}.consume-${process.pid}-${Math.random().toString(36).slice(2)}`;
   try {
-    unlinkSync(path);
+    renameSync(path, claimedPath);
   } catch {
-    // Already gone (a racing consumer, or it was never really there) — consumption is
-    // idempotent by design; the record we already read is still the truthful return value.
+    return undefined;
   }
-  return record;
+  try {
+    return JSON.parse(readFileSync(claimedPath, "utf8")) as SweepWakeMarker;
+  } catch {
+    return undefined;
+  } finally {
+    try {
+      unlinkSync(claimedPath);
+    } catch {
+      // A racing cleanup is harmless; the claimed path is never the live marker path.
+    }
+  }
 }
 
 // ── (v) THE ROUTE — design (i)/(ii)/(iii)/(vii), the self-authenticated POST /v1/hooks/github ──
@@ -449,51 +465,73 @@ export function createGitHubEventWakeHandler(opts: GithubEventWakeOptions): Rout
 
 /**
  * The pure, fs-free core of the daemon-side wake — see this module's header, piece 3.
- * `wake()` marks a wake pending; `wrapSleep` makes ANY sleep function ALSO resolve the moment
+ * `wake()` marks a wake pending; `sleep` resolves the moment
  * a wake is pending (immediately, if one already was — this is what makes a boot-time pending
- * marker and a live `fs.watch` fire behave identically) while STILL racing the real timeout
+ * marker and a live `fs.watch` fire behave identically) while STILL retaining the real timeout
  * underneath, so `pollIntervalMs` recovery is never removed, only ever shortened (design vi:
- * "polling is the recovery contract"). Consuming zero filesystem state — see
+ * "polling is the recovery contract"). An early wake clears that timeout, so no abandoned
+ * 60-second timer delays a later normal shutdown. Consuming zero filesystem state — see
  * `wireSweepWakeToDaemon` for the impure half that connects this to an actual marker file.
  */
 export interface SweepWakeSignal {
   wake(): void;
-  wrapSleep(baseSleep: (ms: number) => Promise<void>): (ms: number) => Promise<void>;
+  /** Clear an already-observed wake immediately before the top-level loop runs its full sweep. */
+  acknowledge(): void;
+  sleep(ms: number): Promise<void>;
+  close(): void;
 }
 
-export function createSweepWakeSignal(initiallyPending: boolean = false): SweepWakeSignal {
+export interface SweepWakeTimerDeps {
+  setTimer(callback: () => void, ms: number): unknown;
+  clearTimer(handle: unknown): void;
+}
+
+const realSweepWakeTimers: SweepWakeTimerDeps = {
+  setTimer: (callback, ms) => setTimeout(callback, ms),
+  clearTimer: (handle) => clearTimeout(handle as NodeJS.Timeout),
+};
+
+export function createSweepWakeSignal(
+  initiallyPending: boolean = false,
+  timers: SweepWakeTimerDeps = realSweepWakeTimers,
+): SweepWakeSignal {
   let pending = initiallyPending;
-  let resolveActiveWait: (() => void) | undefined;
+  let activeWait: { timer: unknown; resolve: () => void } | undefined;
+  const finishActiveWait = () => {
+    const active = activeWait;
+    if (!active) return;
+    activeWait = undefined;
+    timers.clearTimer(active.timer);
+    active.resolve();
+  };
   return {
     wake() {
       pending = true;
-      const resolve = resolveActiveWait;
-      resolveActiveWait = undefined;
-      resolve?.();
+      if (activeWait) {
+        pending = false;
+        finishActiveWait();
+      }
     },
-    wrapSleep(baseSleep) {
-      return (ms: number) =>
-        new Promise<void>((resolve) => {
-          if (pending) {
-            pending = false;
-            resolve();
-            return;
-          }
-          let settled = false;
-          const finish = () => {
-            if (settled) return;
-            settled = true;
-            resolveActiveWait = undefined;
-            resolve();
-          };
-          resolveActiveWait = () => {
-            pending = false;
-            finish();
-          };
-          // The ORDINARY timeout still races alongside a wake — a wake only ever shortens this
-          // wait, it never replaces the timer's own recovery contract (design vi).
-          void baseSleep(ms).then(finish);
-        });
+    acknowledge() {
+      pending = false;
+    },
+    sleep(ms) {
+      if (pending) {
+        pending = false;
+        return Promise.resolve();
+      }
+      return new Promise<void>((resolve) => {
+        const timer = timers.setTimer(() => {
+          if (!activeWait) return;
+          activeWait = undefined;
+          resolve();
+        }, ms);
+        activeWait = { timer, resolve };
+      });
+    },
+    close() {
+      pending = false;
+      finishActiveWait();
     },
   };
 }
@@ -514,17 +552,21 @@ export function watchSweepWakeMarker(
   root: string,
   signal: SweepWakeSignal,
   log: (step: string, extra?: Record<string, unknown>) => void = () => {},
+  watch: typeof fsWatch = fsWatch,
 ): { close(): void } {
   const path = sweepWakeMarkerPath(root);
   const dir = dirname(path);
   const targetName = basename(path);
   try {
     mkdirSync(dir, { recursive: true });
-    const watcher = fsWatch(dir, (_eventType, filename) => {
+    const watcher = watch(dir, (_eventType, filename) => {
       if (filename !== targetName) return;
       if (existsSync(path)) signal.wake();
     });
+    let failureLogged = false;
     watcher.on("error", (e) => {
+      if (failureLogged) return;
+      failureLogged = true;
       log("github.wake.watch_failed", { error: String((e as Error)?.message ?? e) });
     });
     return { close: () => watcher.close() };
@@ -538,6 +580,8 @@ export function watchSweepWakeMarker(
  *  for `DaemonDeps.sleep` plus the one cleanup hook daemon shutdown must call. */
 export interface SweepWakeWiring {
   sleep: (ms: number) => Promise<void>;
+  /** Consume the durable marker and clear its in-memory signal immediately before a full sweep. */
+  acknowledge(): void;
   /** Closes the underlying `fs.watch` watcher — MUST be called on every daemon shutdown path
    *  (signal handler AND the ordinary `finally`), design (v): "the watcher is closed on daemon
    *  shutdown and cannot keep the process alive after normal stop." */
@@ -549,22 +593,21 @@ export interface SweepWakeWiring {
  * into the one `{ sleep, close }` pair `daemonCommand` (`run-task.ts`) swaps in for its own
  * `sleep` dependency. This is the ENTIRE production wiring on the daemon side — design (v)'s
  * "production wiring watches the shared state directory and also checks the marker at boot":
- * boot consumption happens here, once, before the daemon's first `deps.sleep` call ever runs;
- * the live watch is armed immediately after.
+ * boot detection happens here, once, before the daemon's first poll wait ever runs; the marker
+ * itself remains durable until {@link SweepWakeWiring.acknowledge} is called immediately before
+ * the ordinary full-sweep gate. The live watch is armed immediately after.
  *
- * The boot-time marker is CONSUMED (read + deleted), not merely read — the wake it represents
- * seeds `createSweepWakeSignal`'s initial pending state (so the very first sleep call resolves
- * immediately, feeding straight into `runDaemon`'s own unconditional top-of-iteration
- * `deps.sweep()` call — the exact "same gate" design (v) requires), and once consumed there is
- * nothing left on disk for a SECOND process (or a restart racing this one) to double-consume.
+ * The boot-time marker is READ but not consumed here. STOP/PAUSE are checked by `runDaemon`
+ * before acknowledgement, so a held daemon cannot erase a wake it has not reconciled. The wake
+ * seeds `createSweepWakeSignal`'s initial pending state so a paused loop notices promptly, while
+ * the durable file remains the recovery source across a stop or restart.
  */
 export function wireSweepWakeToDaemon(
   root: string,
-  baseSleep: (ms: number) => Promise<void>,
   log: (step: string, extra?: Record<string, unknown>) => void = () => {},
 ): SweepWakeWiring {
   const path = sweepWakeMarkerPath(root);
-  const bootRecord = consumeSweepWakeMarker(path);
+  const bootRecord = readSweepWakeMarker(path);
   if (bootRecord) {
     log("github.wake.boot_pending", {
       delivery_id: bootRecord.deliveryId,
@@ -574,18 +617,23 @@ export function wireSweepWakeToDaemon(
   }
   const signal = createSweepWakeSignal(bootRecord !== undefined);
   const watcher = watchSweepWakeMarker(root, signal, log);
-  const wrappedSleep = signal.wrapSleep(baseSleep);
-  const sleep = (ms: number) =>
-    wrappedSleep(ms).then(() => {
-      // Consume whatever marker exists the moment this sleep resolves — whether it resolved
-      // because of a wake OR because the ordinary timeout simply elapsed. Either way the NEXT
-      // loop iteration is about to run `deps.sweep()` unconditionally (daemon.ts's own
-      // top-of-iteration call, untouched by this task), so a marker written a moment too late
-      // to be the reason THIS sleep resolved is still picked up by that same imminent sweep —
-      // never silently dropped, only ever folded into "one later pass" (design iv).
+  // Close the consume-to-watch race: a delivery may land after the boot claim but before
+  // fs.watch is armed. The durable path is authoritative, so seed a pending wake if it exists.
+  if (readSweepWakeMarker(path)) signal.wake();
+  return {
+    sleep: signal.sleep,
+    acknowledge: () => {
+      // `runDaemon` calls this only after STOP/PAUSE have allowed the top-level full-sweep gate.
+      // Clear the in-memory edge and claim the durable level together. A delivery racing after
+      // the claim writes a new marker and raises a new edge for one later pass.
+      signal.acknowledge();
       consumeSweepWakeMarker(path);
-    });
-  return { sleep, close: () => watcher.close() };
+    },
+    close: () => {
+      watcher.close();
+      signal.close();
+    },
+  };
 }
 
 // ── (vii) ENV-VAR RESOLUTION — design (vii), ship dark until an operator configures a secret ──

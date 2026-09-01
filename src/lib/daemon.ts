@@ -1406,6 +1406,19 @@ export interface DaemonDeps {
    */
   sleep: (ms: number) => Promise<void>;
   /**
+   * W1-T2568: the top-level loop's interruptible poll wait. Unlike {@link DaemonDeps.sleep},
+   * this clock is NEVER shared with in-flight light/full-sweep tickers: a GitHub event must wake
+   * the next reconciliation iteration, not an unrelated heartbeat timer. Omitted preserves the
+   * pre-webhook clock exactly.
+   */
+  sleepUntilSweepWake?: (ms: number) => Promise<void>;
+  /**
+   * W1-T2568: acknowledge one durable event wake immediately before the ordinary full-sweep
+   * gate. Called only after STOP/PAUSE allow reconciliation, so a held daemon leaves the marker
+   * for resume or restart. This module remains filesystem-free; production injects the claim.
+   */
+  acknowledgeSweepWake?: () => void;
+  /**
    * THE INJECTED WALL CLOCK (distinct from `sleep`'s pacing clock): read once
    * per headroom check to resolve each window's hours-to-reset against the
    * TIME-AWARE ceiling (see `HeadroomPolicy`). Optional — the real command
@@ -2737,6 +2750,9 @@ export async function runDaemon(
   const unreadableDegradedLimit = opts.unreadableDegradedLimit ?? DEFAULT_UNREADABLE_DEGRADED_LIMIT;
   const parkCeilingMs = opts.headroomParkCeilingMs ?? HEADROOM_PARK_CEILING_MS;
   const now = deps.now ?? (() => new Date());
+  // W1-T2568: ONLY top-level waits that return to this reconciliation loop are interruptible.
+  // `deps.sleep` remains the unmodified clock for nested in-flight tickers.
+  const sleepUntilSweepWake = deps.sleepUntilSweepWake ?? deps.sleep;
   // W1-T343: resolved ONCE, for this process's whole lifetime — `DaemonOpts` is the daemon's
   // frozen-at-boot configuration (see `wipLimit`'s own doc on why a running daemon does not
   // live-reload `sweep.dispatchLanes`; that gap is W1-T331's, deliberately not this task's).
@@ -2983,7 +2999,7 @@ export async function runDaemon(
     if (paused) {
       ticks++;
       log("daemon.pause", { tick: ticks, detail: paused, poll_interval_ms: pollIntervalMs });
-      await deps.sleep(pollIntervalMs);
+      await sleepUntilSweepWake(pollIntervalMs);
       continue;
     }
     // SELF-FRESHNESS (W1-T126): checked directly after STOP and PAUSE (W1-T936) — both are
@@ -3011,6 +3027,9 @@ export async function runDaemon(
       // stale verdict is never suppressed by running it: `return summary("stale", ...)` below
       // still fires unconditionally afterward (design (iii): the restart stays).
       if (deps.sweep) {
+        // W1-T2568: acknowledge only inside, and immediately before, the existing full-sweep
+        // gate. A fallible operation cannot claim durable work and then fail before reconciling.
+        deps.acknowledgeSweepWake?.();
         sweepRetriggerState.lastRunAtMs = now().getTime();
         await runGatedSweep(deps, pollIntervalMs, sweepWallClockBoundMs, log, diskHeadroomLatch, headroomSampler);
       }
@@ -3070,6 +3089,9 @@ export async function runDaemon(
     // `sweepRetriggerState.lastRunAtMs` is updated here too, so a retrigger's own elapsed-time
     // check (below, in `startInFlightTicker`) measures from whichever call actually ran last.
     if (deps.sweep) {
+      // W1-T2568: STOP/PAUSE have allowed work. Claim the durable event marker at the last
+      // possible moment before this SAME level-triggered sweep; the event changes no policy.
+      deps.acknowledgeSweepWake?.();
       sweepRetriggerState.lastRunAtMs = now().getTime();
       await runGatedSweep(deps, pollIntervalMs, sweepWallClockBoundMs, log, diskHeadroomLatch, headroomSampler);
     }
@@ -3363,7 +3385,7 @@ export async function runDaemon(
               log("daemon.escalation.failed", { error: String((e as Error)?.message ?? e) });
             }
           }
-          await deps.sleep(pollIntervalMs);
+          await sleepUntilSweepWake(pollIntervalMs);
           continue;
         }
         // GOVERNOR DISABLED (operator ruling fb-1784894405468-a4153e) or simply
@@ -3403,7 +3425,7 @@ export async function runDaemon(
             park_ceiling_ms: parkCeilingMs,
             note: "usage unreadable beyond the bounded allowance — idling, not dispatching",
           });
-          await deps.sleep(pollIntervalMs);
+          await sleepUntilSweepWake(pollIntervalMs);
           continue;
         }
         if (parkGate.forced) {
@@ -3517,7 +3539,7 @@ export async function runDaemon(
     if (tickGovernor) {
       ticks++;
       logDispatchGovernorDefer(tickGovernor, ticks);
-      await deps.sleep(pollIntervalMs);
+      await sleepUntilSweepWake(pollIntervalMs);
       continue;
     }
 
@@ -3942,7 +3964,7 @@ export async function runDaemon(
       }
 
 
-      await deps.sleep(pollIntervalMs);
+      await sleepUntilSweepWake(pollIntervalMs);
       continue;
     }
 
@@ -3989,7 +4011,7 @@ export async function runDaemon(
         poll_interval_ms: pollIntervalMs,
         recheck: true,
       });
-      await deps.sleep(pollIntervalMs);
+      await sleepUntilSweepWake(pollIntervalMs);
       continue;
     }
 
@@ -4027,7 +4049,7 @@ export async function runDaemon(
     if (admitted.length === 0) {
       ticks++;
       logDispatchGovernorDefer(deferredVerdict!, ticks);
-      await deps.sleep(pollIntervalMs);
+      await sleepUntilSweepWake(pollIntervalMs);
       continue;
     }
 
@@ -4164,7 +4186,7 @@ export async function runDaemon(
         reason: "consecutive blocked_transient refusals across different tasks — the API usage window looks closed; holding dispatch instead of re-discovering it per task",
         resumes_at: new Date(resumesAtMs).toISOString(),
       });
-      await deps.sleep(apiWindowHoldMs);
+      await sleepUntilSweepWake(apiWindowHoldMs);
     }
 
     if (spawnInfraSeenThisTick && toProcess.length === 0) {
@@ -4177,7 +4199,7 @@ export async function runDaemon(
       consecutiveSpawnInfraFailures++;
       const backoffMs = Math.min(pollIntervalMs * 2 ** (consecutiveSpawnInfraFailures - 1), maxSpawnInfraBackoffMs);
       log("daemon.spawn_infra_backoff", { tick: ticks, backoff_ms: backoffMs, consecutive: consecutiveSpawnInfraFailures });
-      await deps.sleep(backoffMs);
+      await sleepUntilSweepWake(backoffMs);
     }
   }
 }

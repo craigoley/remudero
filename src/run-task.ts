@@ -22494,7 +22494,7 @@ export async function daemonCommand(
   // watcher is closed on daemon shutdown and cannot keep the process alive after normal stop")
   // — wired into `onSignal` immediately below AND the ordinary `finally`, mirroring exactly how
   // `drainLock.release()`/`consumeStop` are already wired into both.
-  const githubEventWake = wireSweepWakeToDaemon(config.root, (ms) => new Promise((resolve) => setTimeout(resolve, ms)), log);
+  const githubEventWake = wireSweepWakeToDaemon(config.root, log);
   const onSignal = (sig: NodeJS.Signals) => {
     githubEventWake.close();
     consumeStop(config.root); // one-shot STOP: consumed on the daemon's terminal (see drainCommand)
@@ -22892,10 +22892,12 @@ export async function daemonCommand(
         pendingKicks: () => pendingKicks(config.root),
         clearKick: (taskId) => clearKick(config.root, taskId),
         consumeDrainNow: () => consumeDrainNow(config.root),
-        // W1-T2568: was a bare `setTimeout` wrapper — now the SAME wrapper wired through
-        // `wireSweepWakeToDaemon` (constructed above, alongside `onSignal`), which also
-        // resolves early on a GitHub-event wake. See that construction's own doc.
-        sleep: githubEventWake.sleep,
+        // W1-T2568: keep the existing sleep clock for nested in-flight tickers, and interrupt
+        // ONLY the top-level poll waits that return to the ordinary full-sweep gate. Sharing the
+        // interruptible clock with a heartbeat ticker could consume a wake without reconciling.
+        sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+        sleepUntilSweepWake: githubEventWake.sleep,
+        acknowledgeSweepWake: githubEventWake.acknowledge,
         // The real wall clock backing the TIME-AWARE headroom ceiling (see
         // lib/daemon.ts's HeadroomPolicy) — resolves each window's own
         // hours-to-reset. Explicit here (though `runDaemon` defaults the same

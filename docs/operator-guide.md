@@ -842,6 +842,68 @@ behind it. TCP connects succeed throughout, so the container looks up and the pa
 `docker exec remudero-serve ps -eo etime,args` before concluding the console is down: if it is
 walking branch statuses, it is working, slowly.
 
+#### Commissioning the signed GitHub event wake
+
+`POST /v1/hooks/github` only shortens discovery latency. It writes one coalesced wake marker for
+the daemon's existing full sweep; it does not trust the payload as queue state, post a review, fix
+a branch, arm or merge a PR, or bypass an operator merge hold. The 60-second poll remains the
+recovery path. With no secret mounted, the route deliberately returns
+`503 {"error":"webhook_not_configured"}` and the rest of the console behaves unchanged.
+
+Create one host-only secret file as the same uid that launches the container, then replace only
+`remudero-serve` with that file mounted read-only:
+
+```sh
+WEBHOOK_SECRET_DIR="${HOME}/.config/remudero"
+WEBHOOK_SECRET_PATH="${WEBHOOK_SECRET_DIR}/github-webhook-secret"
+install -d -m 700 "${WEBHOOK_SECRET_DIR}"
+umask 077
+openssl rand -hex 32 > "${WEBHOOK_SECRET_PATH}"
+RMD_GITHUB_WEBHOOK_SECRET_PATH="${WEBHOOK_SECRET_PATH}" ./deploy/serve-container.sh --replace
+docker inspect remudero-serve --format '{{range .Mounts}}{{if eq .Destination "/home/node/.rmd-github-webhook-secret"}}{{.Source}} -> {{.Destination}} rw={{.RW}}{{end}}{{end}}'
+```
+
+The inspection must show the expected source, destination, and `rw=false`. The script reports only
+the file path and presence; it never prints the secret. The daemon and worker containers do not
+receive this mount or `RMD_GITHUB_WEBHOOK_SECRET_FILE`.
+
+In the GitHub repository's **Settings → Webhooks**, add a repository webhook with:
+
+- Payload URL: `https://console.remudero.com/v1/hooks/github`
+- Content type: `application/json`
+- Secret: the exact content of the host file
+- Events: **Pull requests**, **Check runs**, **Statuses**, and **Pull request reviews** only
+- Active: enabled
+
+Do not select “send me everything.” The accepted review actions are `submitted`, `edited`, and
+`dismissed`; check runs wake only on `completed`.
+
+Cloudflare Access currently protects the console root, so GitHub cannot reach this path until a
+more-specific Access application exists for exactly `console.remudero.com/v1/hooks/github` with a
+**Bypass** policy. Do not bypass `console.remudero.com/*` or the console root. Cloudflare's
+[application-path precedence](https://developers.cloudflare.com/cloudflare-one/access-controls/policies/app-paths/)
+makes the more-specific path win; its
+[webhook guidance](https://developers.cloudflare.com/cloudflare-one/access-controls/policies/common-policies/)
+also means Access authentication and Access logging are absent on that bypassed path. GitHub's
+`X-Hub-Signature-256` HMAC over the raw body is therefore the origin authentication boundary.
+
+Verify commissioning from GitHub's **Recent deliveries**. A signed `ping` receives
+`202 {"error":"ignored"}` because it is authenticated but deliberately not actionable. Redeliver
+an allowlisted delivery and require `202 {"accepted":true}`; then verify both the service
+acceptance and the daemon's consumption:
+
+```sh
+STATE_DIR="${RMD_STATE_DIR:-${HOME}/rmd-state2}"
+grep '"step":"github.wake.accepted"' "${STATE_DIR}/state/ledger.ndjson" | tail -1
+grep -E '"step":"daemon.tick"|"step":"sweep\.' "${STATE_DIR}/state/ledger.ndjson" | tail -10
+test ! -e "${STATE_DIR}/state/SWEEP_WAKE_REQUESTED"
+```
+
+The first line must name the delivery id, event, action, and repository without secret material.
+The marker absence is meaningful only after the daemon sweep evidence: it means the daemon
+consumed the durable wake, not that the service failed to write it. GitHub does not automatically
+redeliver a failed webhook, so use **Redeliver** after correcting a `401`, `403`, `413`, or `503`.
+
 ### Attaching a data disk to the container host
 
 The Azure host's OS disk is 30 GB and the image store fills it. Standard practice is a separate
