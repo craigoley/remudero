@@ -7,7 +7,7 @@
   principles: {tdd: strict}
   risk: high
   budget_usd: 25.00
-  files: [src/lib/sweep.ts, test/review-admission-dedup.test.ts]
+  files: [src/lib/sweep.ts, test/sweep.test.ts, test/review-admission-dedup.test.ts]
   origin: "operator-session#review-admission-dedup-2026-09-01"
   plan_refs: ["W1-T526", "W1-T1213", "W1-T2427", "W1-T2439"]
   status: queued
