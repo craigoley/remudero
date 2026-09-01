@@ -1,0 +1,64 @@
+- id: W1-T2595
+  title: "FOUR CENSUS SUITES ENFORCE AUTHOR-TIME CONVENTIONS THAT A WORKER CANNOT LEARN UNTIL CI IS RED — bound-kind-declared, catch-erasure-ratchet, config-reader-seams and route-scope-matrix each refuse a shape (an undeclared bound, a reasonless catch, an unseamed policy read, an unswept route) that nothing checks before a push; MEASURED 2026-09-01: three PRs in one evening reddened this family and every one of the seven causes was a convention the author had no way to discover, while `rmd preflight --ci-parity` — the gate that exists to shell CI's own commands — runs none of them"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 8.00
+  files: [src/lib/ci-parity.ts, test/a-convention-is-unlearnable-until-ci-says-no.test.ts]
+  origin: "operator-brief#census-family-unlearnable-2026-09-01"
+  plan_refs: ["W1-T294", "W1-T338", "W1-T1266"]
+  status: queued
+  attempts: 0
+  rationale: |
+    ── MEASURED, ONE EVENING, THREE PULL REQUESTS ──────────────────────────────────────────────
+
+      #3535  all four suites — an undeclared bound x2, four reasonless catches, an unseamed
+             policy read, a route the scope matrix had never been taught about
+      #3542  catch-erasure-ratchet — one new catch in a parse helper
+      #3541  catch-erasure-ratchet — two capability catches in a brand-new file
+
+    SEVEN causes, every one an author-time convention, every one discovered only when a shard went
+    red. In each case the reasoning the check wanted ALREADY EXISTED in the diff — in a function's
+    doc comment, in the constant's own JSDoc — just not in the position the census reads.
+
+    ── WHY THIS IS THE EXPENSIVE SHAPE, NOT MERELY AN ANNOYING ONE ─────────────────────────────
+
+    CLAUDE.md's own framing: "a rule stated ONLY here can be violated silently and repeatedly,
+    which is why several of these bullets exist at all". These four ARE enforced — that is not the
+    gap. The gap is WHEN. A convention that first speaks after a full sharded CI cycle costs the
+    whole cycle plus a fix push, per occurrence, forever, and it teaches nothing durable because
+    the next worker starts with the same blank slate.
+
+    ⚠ AND THE COST IS PAID BY EVERY PR THAT ADDS SOURCE, not by careless ones. A new `export const
+    SOMETHING_MAX`, a new `catch`, a new policy read, a new route — that is ordinary work. The
+    census population is "PRs that add code", so the toll is structural.
+
+    ── THE GATE THAT SHOULD CARRY THEM ALREADY EXISTS ──────────────────────────────────────────
+
+    `rmd preflight --ci-parity` (`src/lib/ci-parity.ts`, W1-T294) shells CI's OWN commands, one
+    entry per `.github/workflows/ci.yml` job, and CLAUDE.md already instructs every lane to run it
+    before a first push. It is the right place by construction: no new mechanism, no second copy of
+    the rules, and a worker that runs the shipped gate as instructed learns at author time.
+
+    ⚠ THE DANGEROUS DIRECTION IS MAKING THE GATE SLOW ENOUGH TO SKIP. These four suites are source
+    scans, not spawns — they must be measured, and the entry must stay inside the bound the census
+    already holds `runPreflightFast` to. A gate that doubles in wall-clock is a gate lanes stop
+    running, which would trade a visible CI failure for an invisible one.
+
+    ⚠ AND IT MUST NOT BECOME A SECOND COPY OF THE RULES. The parity entry runs the SUITES; it does
+    not re-implement their predicates. A reimplementation drifts from the census and then certifies
+    green against a rule CI no longer enforces — the vacuous-pass family, one layer up.
+
+    NOT IN SCOPE: changing what any of the four census suites accepts (W1-T2596 covers their escape
+    hatches), and the shard/summary reporting question (W1-T2597).
+
+  acceptance:
+    - claim: "the shipped local gate runs the four author-time source censuses, so their conventions are learnable before a push instead of after a full remote cycle"
+      proof: "unit test: test/a-convention-is-unlearnable-until-ci-says-no.test.ts"
+    - claim: "the gate invokes each suite itself rather than re-implementing its predicate, so a local pass cannot certify a rule the remote no longer enforces"
+      proof: "unit test: test/a-convention-is-unlearnable-until-ci-says-no.test.ts"
+    - claim: "the added entries measure under the wall-clock bound the census already holds the fast gate to, so the gate does not become slow enough to skip"
+      proof: "unit test: test/a-convention-is-unlearnable-until-ci-says-no.test.ts"
