@@ -441,8 +441,28 @@ sweep:
   # (no PR, no restart, in-flight work finishes), then move this value in a plan PR and restart —
   # restart is 1.2s median, so an override would save the PR, not the restart. Rule 26 carries the
   # full argument, the measurements and the store facts; do not re-derive them here.
+  # 2026-09-01 — MOVED 3 -> 2 ON A COST THE PRIOR EVIDENCE NEVER MEASURED. The paragraph above
+  # holds the row at 3 because "NO CONCURRENCY COST APPEARED: rejected: 0 on every settled set, and
+  # no lane has ever failed for a concurrency reason." That is still true and is not contradicted
+  # here — it measures CORRECTNESS risk (rejections, lane failures), never SUBSCRIPTION-WINDOW
+  # consumption, which no row in this file had ever looked at.
+  #
+  # MEASURED on the Azure host 2026-09-01, from daemon.headroom:
+  #     09:17:25  session (5h)   30% used   over_ceiling: false
+  #     10:15:26  session (5h)  100% used   over_ceiling: TRUE
+  # 70 points in 58 minutes. A five-hour window consumed in ~83 minutes is ~3.6x the rate the
+  # window sustains, and the fleet hit the session cap inside four hours of running while taking
+  # 17% of the weekly cap on a 20x plan. Burn rate is lanes x cost-per-run x runs-per-hour and the
+  # window is fixed, so lanes is the only term movable without a code change.
+  #
+  # PROVISIONAL AND REVERSIBLE, NOT A RULING. This is the operator running fewer lanes by the
+  # exact route the paragraph above prescribes (a plan PR, never a state/ override — Rule 26 is
+  # untouched and this committed value remains any future override FLOOR). It is a hold while the
+  # per-run cost work lands: W1-T2557 (the runaway tail, ~15% of spend in 8.4% of runs) and the
+  # opus-tier synthesis rungs ($827 across 219 invocations). Restore to 3 once burn per run is
+  # down, and record the measurement that justifies it rather than restoring on optimism.
   dispatchLanes:
-    value: 3
+    value: 2
     origin: "lifted:src/lib/sweep.ts:359 (DEFAULT_SWEEP_POLICY.dispatchLanes)"
     min: 1
     max: 4
@@ -483,8 +503,17 @@ sweep:
   # reopen (design (i): "ONE CONCERN"). `origin: "net-new"` reflects that literally — no prior
   # standalone `reviewLanes` source constant ever existed; its VALUE was borrowed from
   # `dispatchLanes` (the defect this task fixes), never a dedicated site of its own.
+  # 2026-09-01 — TRACKS dispatchLanes 3 -> 2, KEEPING W1-T1049 equality rather than splitting it.
+  # `DEFAULT_SWEEP_POLICY.reviewLanes` reads this row while `dispatchLanes` reads its own, and
+  # test/review-lane-budget.test.ts pins the two equal ("the split changes NO effective behavior by
+  # itself, only who controls the number"). Moving dispatch alone would have broken that invariant
+  # as a SIDE EFFECT of a cost hold, which is not what W1-T1049 built this field for.
+  # A DELIBERATE SPLIT IS STILL AVAILABLE AND MAY WELL BE RIGHT: a review lane is cheap ($0.63/run
+  # measured, against implement at $5.28) and the review rung is already starved (W1-T2519), so
+  # holding reviews at 3 while dispatch runs at 2 would drain the open-PR backlog faster. That is a
+  # ruling with its own evidence, not a consequence of this one — file it, do not infer it here.
   reviewLanes:
-    value: 3
+    value: 2
     origin: "net-new"
     min: 1
     max: 3
