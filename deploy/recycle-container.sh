@@ -14,10 +14,12 @@
 #
 # So THE REFUSALS BELOW ARE THE DELIVERABLE, not the happy path. Four of them, each closing one of
 # the failures above:
-#   1. NO GH_TOKEN CAPTURED -> REFUSE BEFORE TOUCHING ANYTHING. It exists only in the running
-#      container's environment (`-e GH_TOKEN=...`, never written to disk — see deploy/entrypoint.sh)
-#      and is unrecoverable afterwards without an operator, so this is the FIRST check in the file,
-#      ahead of even the pull.
+#   1. NO CREDENTIAL AT ALL -> REFUSE BEFORE TOUCHING ANYTHING. A captured GH_TOKEN exists only in
+#      the running container's environment (`-e GH_TOKEN=...`, never written to disk — see
+#      deploy/entrypoint.sh) and is unrecoverable afterwards without an operator, so this is the
+#      FIRST check in the file, ahead of even the pull. IT IS SATISFIED BY APP AUTH INSTEAD: two
+#      ids carried across plus a private-key FILE on this host outlive the container entirely, so
+#      when those are present there is nothing to lose and no token is asked for.
 #   2. WORKERS STILL RUNNING PAST A BOUNDED WAIT -> REFUSE, AND REMOVE THE PAUSE ON THE WAY OUT. A
 #      refusal that leaves the fleet paused forever is a second outage on top of the first.
 #   3. `docker pull` NON-ZERO -> REFUSE. NEVER FALL THROUGH TO A START. This is the exact 2026-08-18
@@ -397,12 +399,71 @@ else
 fi
 
 CAPTURED_TOKEN="${CAPTURED[GH_TOKEN]-}"
-if [ -z "${CAPTURED_TOKEN}" ]; then
+
+# ── APP AUTH IS A DURABLE CREDENTIAL, SO THE GH_TOKEN REFUSAL DOES NOT APPLY TO IT ──────────────
+# The refusal below exists for exactly ONE reason, stated in its own text: GH_TOKEN lives only in
+# the outgoing container's environment and is never written to disk, so removing that container
+# without having captured it DESTROYS THE ONLY COPY. THAT PREMISE IS FALSE UNDER APP AUTH. There
+# the credential the daemon actually uses is MINTED, per boot, by `refreshInstallationToken`
+# (src/lib/github-app.ts) from three inputs that all OUTLIVE the container: two ids carried across
+# by the capture loop above, and a private key that is a FILE on the operator's host, bind-mounted
+# in below. Nothing is lost by removing the container, so the refusal has nothing left to protect.
+#
+# LEFT UNFIXED IT DEMANDS A CREDENTIAL THE FLEET NO LONGER USES, AND THEN THROWS IT AWAY. W1-T2311
+# made the incoming container's GH_TOKEN deliberately EMPTY (`-e GH_TOKEN=`, see the RUN_ENV_ARGS
+# loop below), so every recycle after it captured empty from the container and refused — and the
+# value an operator typed to get past the refusal was DISCARDED by that same loop a hundred lines
+# later, never reaching the daemon. MEASURED 2026-09-01: the operator was pasting a live personal
+# token into a shell, repeatedly, for a variable whose only remaining use was satisfying this test.
+# That is the whole harm — a gate cannot be "merely redundant" when getting past it is what puts a
+# standing credential on a terminal.
+#
+# THE PROBE IS THE KEY FILE ITSELF, NOT THE VARIABLE THAT NAMES IT. `GH_APP_PRIVATE_KEY_PATH` is a
+# CONTAINER path; from this shell the file is reachable only through the bind mount, so the path is
+# translated back to its host side before being tested. Testing the variable alone would accept a
+# path pointing at nothing and hand the next daemon an unmintable config — the silent
+# `{ armed: false }` return in `startInstallationTokenRefresh` — which is precisely the failure this
+# script exists to catch BEFORE the container is removed. A path under NEITHER bind mount cannot be
+# verified from here at all and is NOT accepted: fail closed, and name which of the three inputs was
+# missing rather than reporting a bare "no".
+app_auth_host_path() {
+  # Translate a container-side path to its host side via the two bind mounts created below. Prints
+  # NOTHING when the path lies under neither, which the caller treats as unverifiable.
+  case "$1" in
+    "${CRED_MOUNT_DEST}"/*) printf '%s/%s\n' "${CRED_DIR}" "${1#"${CRED_MOUNT_DEST}"/}" ;;
+    "${STATE_MOUNT_DEST}"/*) printf '%s/%s\n' "${STATE_DIR}" "${1#"${STATE_MOUNT_DEST}"/}" ;;
+    *) : ;;
+  esac
+}
+
+APP_AUTH_MISSING=""
+APP_KEY_HOST=""
+app_auth_note() { APP_AUTH_MISSING="${APP_AUTH_MISSING}${APP_AUTH_MISSING:+; }$1"; }
+[ -n "${CAPTURED[GH_APP_ID]-}" ] || app_auth_note "GH_APP_ID is not set"
+[ -n "${CAPTURED[GH_APP_INSTALLATION_ID]-}" ] || app_auth_note "GH_APP_INSTALLATION_ID is not set"
+if [ -z "${CAPTURED[GH_APP_PRIVATE_KEY_PATH]-}" ]; then
+  app_auth_note "GH_APP_PRIVATE_KEY_PATH is not set"
+else
+  APP_KEY_HOST="$(app_auth_host_path "${CAPTURED[GH_APP_PRIVATE_KEY_PATH]}")"
+  if [ -z "${APP_KEY_HOST}" ]; then
+    app_auth_note "GH_APP_PRIVATE_KEY_PATH (${CAPTURED[GH_APP_PRIVATE_KEY_PATH]}) is under neither bind mount, so this shell cannot verify the key exists"
+  elif [ ! -s "${APP_KEY_HOST}" ]; then
+    app_auth_note "the App private key is missing or empty on this host at ${APP_KEY_HOST}"
+  fi
+fi
+
+if [ -n "${CAPTURED_TOKEN}" ]; then
+  echo "recycle-container: GH_TOKEN captured from ${CAPTURED_SOURCE[GH_TOKEN]-unknown}"
+elif [ -z "${APP_AUTH_MISSING}" ]; then
+  echo "recycle-container: no GH_TOKEN captured, and NONE IS NEEDED — App auth is fully configured."
+  echo "recycle-container:   GH_APP_ID and GH_APP_INSTALLATION_ID carried across; private key readable at ${APP_KEY_HOST}."
+  echo "recycle-container:   The daemon mints its own installation token at boot (src/lib/github-app.ts)."
+else
   # W1-T2553: NAME THE SOURCES ACTUALLY CONSULTED. The old wording asserted "and this shell has none
   # either" from the container branch, which had never read the shell at all — an unfalsifiable
   # claim in a refusal, and the reason an operator who DID export GH_TOKEN was told the export had
   # not worked. Both sources are now genuinely read above, and this names each one's own result.
-  echo "recycle-container: REFUSING — no GH_TOKEN could be captured." >&2
+  echo "recycle-container: REFUSING — no GH_TOKEN could be captured, and App auth is not usable either." >&2
   if [ "${CONTAINER_EXISTS}" -eq 1 ]; then
     echo "  Consulted ${CONTAINER_NAME}'s own environment: no GH_TOKEN (or empty)." >&2
     echo "  Consulted this shell: $([ -n "${GH_TOKEN-}" ] && echo "GH_TOKEN is set but empty" || echo "GH_TOKEN is not set")." >&2
@@ -411,10 +472,11 @@ if [ -z "${CAPTURED_TOKEN}" ]; then
   else
     echo "  Consulted this shell (${CONTAINER_NAME} does not exist yet): $([ -n "${GH_TOKEN-}" ] && echo "GH_TOKEN is set but empty" || echo "GH_TOKEN is not set")." >&2
   fi
-  echo "  Export GH_TOKEN in this shell and re-run." >&2
+  echo "  App auth was checked as the durable alternative and is unusable: ${APP_AUTH_MISSING}." >&2
+  echo "  FIX THE APP INPUTS — that is the path that needs no token in this shell, ever again." >&2
+  echo "  Or, as a one-off, export GH_TOKEN in this shell and re-run." >&2
   exit 1
 fi
-echo "recycle-container: GH_TOKEN captured from ${CAPTURED_SOURCE[GH_TOKEN]-unknown}"
 
 # ── W1-T2311: THE CAPTURE ABOVE IS READ, NEVER RE-BOOTED AS THE DAEMON'S OWN DEFAULT ────────────
 # MEASURED 2026-08-26: `docker inspect` (above) reports only the STATIC config a container was
