@@ -66,6 +66,8 @@
 #   REGISTRY=... IMAGE=... ./deploy/recycle-container.sh     # retarget without editing this file
 #   RMD_STATE_DIR=/path ./deploy/recycle-container.sh        # if the bind mount is not ~/rmd-state
 #   RMD_RECYCLE_WAIT_S=300 ./deploy/recycle-container.sh      # widen the bounded wait for workers
+#   ./deploy/recycle-container.sh --first-boot                # RMD_STATE_DIR is a genuinely fresh
+#                                                               # host with no checkout yet (W1-T2555)
 
 set -euo pipefail
 
@@ -94,6 +96,14 @@ CONTAINER_NAME="${RMD_DAEMON_CONTAINER:-remudero-daemon}"
 # The HOST side of the state bind mount — same derivation and same default as deploy/host-update.sh,
 # so the two scripts agree on where the fleet's locks and control flags actually live.
 STATE_DIR="${RMD_STATE_DIR:-${HOME:-/root}/rmd-state}"
+# W1-T2555: HOW STATE_DIR WAS RESOLVED, NAMED — every refusal below that mentions STATE_DIR says
+# both the resolved path AND whether it came from an explicit RMD_STATE_DIR or the bare default, so
+# an operator reading the refusal never has to re-derive it by hand.
+if [ -n "${RMD_STATE_DIR:-}" ]; then
+  STATE_DIR_RESOLUTION="RMD_STATE_DIR=${RMD_STATE_DIR}"
+else
+  STATE_DIR_RESOLUTION="the default \${HOME:-/root}/rmd-state (HOME=${HOME:-<unset>})"
+fi
 STATE_MOUNT_DEST="/home/node/Remudero"
 CRED_DIR="${RMD_CLAUDE_DIR:-${HOME:-/root}/.claude}"
 CRED_MOUNT_DEST="/home/node/.claude"
@@ -126,13 +136,19 @@ HUNG_WORKER_AGE_S="${RMD_RECYCLE_HUNG_AGE_S:-7200}"
 # rewritten — this script does not read it back and does not depend on it existing.
 LEDGER_FILE="${STATE_DIR}/state/ledger.ndjson"
 
+# W1-T2555: THE OPERATOR'S OWN WORD THAT THIS IS A FRESH HOST, NEVER INFERRED. Defaults from the
+# env var so a fleet-automation caller can pass it without editing an argv list; --first-boot is the
+# same opt-in for an interactive operator. Either form is read identically below — see section 1.5.
+FIRST_BOOT="${RMD_RECYCLE_FIRST_BOOT:-0}"
+
 while [ $# -gt 0 ]; do
   case "$1" in
-    --tag)       TAG="${2:?--tag needs a value}"; shift 2 ;;
-    --registry)  REGISTRY="${2:?--registry needs a value}"; shift 2 ;;
-    --image)     IMAGE="${2:?--image needs a value}"; shift 2 ;;
-    --container) CONTAINER_NAME="${2:?--container needs a value}"; shift 2 ;;
-    -h|--help)   sed -n '1,70p' "$0"; exit 0 ;;
+    --tag)         TAG="${2:?--tag needs a value}"; shift 2 ;;
+    --registry)    REGISTRY="${2:?--registry needs a value}"; shift 2 ;;
+    --image)       IMAGE="${2:?--image needs a value}"; shift 2 ;;
+    --container)   CONTAINER_NAME="${2:?--container needs a value}"; shift 2 ;;
+    --first-boot)  FIRST_BOOT=1; shift ;;
+    -h|--help)     sed -n '1,72p' "$0"; exit 0 ;;
     *) echo "recycle-container: unknown argument '$1' (try --help)" >&2; exit 2 ;;
   esac
 done
@@ -155,6 +171,59 @@ if [ -f "${DOCKERENV_PATH}" ]; then
   exit 1
 fi
 
+# ── 1.5. STATE_DIR MUST ALREADY BE A CHECKOUT — OR THE OPERATOR MUST SAY THIS IS A FIRST BOOT ───
+# W1-T2555: MEASURED 2026-09-01. STATE_DIR was never tested for existence, and `find` over a
+# directory that is not there correctly returns nothing — so the "no blocking locks" line below
+# printed the exact wording an idle fleet produces over a path that had never been opened, and
+# `docker run -v "${STATE_DIR}:${STATE_MOUNT_DEST}"` would then have had DOCKER ITSELF create that
+# empty directory and boot a daemon with no repo, no plan and no ledger. Only an unrelated
+# `docker rm` race stopped that mount from happening on the fleet that measured this.
+#
+# THE PREDICATE IS "is this a checkout", never "is this the path an operator meant" — a typo'd or
+# inherited-default STATE_DIR has neither of the two markers below; a genuine one always has both:
+#   - STATE_DIR/state/          — the directory every lock, pause file and ledger line in this
+#                                  script already reads and writes under STATE_DIR.
+#   - STATE_DIR/remudero/.git   — the checkout deploy/entrypoint.sh clones into
+#                                  ($CONFIG_ROOT/remudero, CONFIG_ROOT == this same STATE_DIR
+#                                  mounted at ${STATE_MOUNT_DEST}), literal and hardcoded there too.
+#
+# THE FIRST-RUN CASE IS REAL: a genuinely fresh host has no state directory at all, and
+# entrypoint.sh's own clone is what creates the checkout inside it — so a blanket refusal would make
+# a first deploy impossible. FIRST_BOOT (RMD_RECYCLE_FIRST_BOOT=1 or --first-boot, above) is the
+# operator's explicit word that this run IS that first boot. It is NEVER inferred from the directory
+# being empty or absent — only this flag turns the refusal off.
+STATE_DIR_CHECKOUT_MARKER="${STATE_DIR}/state"
+STATE_DIR_REPO_MARKER="${STATE_DIR}/remudero/.git"
+if [ "${FIRST_BOOT}" != "1" ]; then
+  if [ ! -d "${STATE_DIR}" ] || [ ! -d "${STATE_DIR_CHECKOUT_MARKER}" ] || [ ! -e "${STATE_DIR_REPO_MARKER}" ]; then
+    echo "recycle-container: REFUSING — STATE_DIR resolved to ${STATE_DIR} (${STATE_DIR_RESOLUTION})," >&2
+    echo "  and this does not look like a real checkout:" >&2
+    if [ -d "${STATE_DIR}" ]; then
+      echo "    - the directory exists" >&2
+    else
+      echo "    - the directory does NOT exist" >&2
+    fi
+    if [ -d "${STATE_DIR_CHECKOUT_MARKER}" ]; then
+      echo "    - ${STATE_DIR_CHECKOUT_MARKER} is present" >&2
+    else
+      echo "    - ${STATE_DIR_CHECKOUT_MARKER} is MISSING" >&2
+    fi
+    if [ -e "${STATE_DIR_REPO_MARKER}" ]; then
+      echo "    - ${STATE_DIR_REPO_MARKER} is present" >&2
+    else
+      echo "    - ${STATE_DIR_REPO_MARKER} is MISSING" >&2
+    fi
+    echo "  Mounting this path would hand the daemon an EMPTY checkout — docker itself creates" >&2
+    echo "  whatever directory this script does not refuse first (W1-T2555). NOTHING has been" >&2
+    echo "  touched: no lock was read, no container was stopped or removed." >&2
+    echo "  If this genuinely IS a first-ever boot on a fresh host, say so explicitly — this is" >&2
+    echo "  never inferred from the directory being empty or absent:" >&2
+    echo "    RMD_RECYCLE_FIRST_BOOT=1 $0 ...   (or: $0 --first-boot ...)" >&2
+    echo "  Otherwise fix RMD_STATE_DIR to point at the real state directory and re-run." >&2
+    exit 1
+  fi
+fi
+
 # ── 2. EVERY BLOCKING LOCK IS PRINTED IN FULL — NEVER DELETED, NEVER JUDGED ─────────────────────
 # `state/drain.lock` and `state/inflight/*.lock` are read-only from here, always, regardless of what
 # happens later in this run. A host-side process cannot decide whether a lock naming a now-gone
@@ -165,7 +234,7 @@ print_blocking_locks() {
   local any=0
   if [ -f "${DRAIN_LOCK}" ]; then
     any=1
-    echo "recycle-container: state/drain.lock is PRESENT — printed in full, never deleted by this script:"
+    echo "recycle-container: ${DRAIN_LOCK} is PRESENT — printed in full, never deleted by this script:"
     sed 's/^/    /' "${DRAIN_LOCK}" 2>/dev/null || echo "    (unreadable)"
     echo "    A host-side script cannot tell whether the holder above names a container that is gone;"
     echo "    the daemon reclaims a foreign container-shaped holder on its OWN next boot (W1-T978)."
@@ -175,7 +244,7 @@ print_blocking_locks() {
     for f in "${INFLIGHT_DIR}"/*.lock; do
       [ -e "${f}" ] || continue
       any=1
-      echo "recycle-container: $(basename "${f}") is PRESENT under state/inflight/ — printed, never deleted:"
+      echo "recycle-container: ${f} is PRESENT — printed, never deleted:"
       sed 's/^/    /' "${f}" 2>/dev/null || echo "    (unreadable)"
     done
   fi
