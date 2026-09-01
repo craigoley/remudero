@@ -10749,7 +10749,14 @@ async function runTask(
   const claimAnchor = claimReserver.mintAnchor();
   const claimOutcome = claimReserver.attempt(task.id, claimAnchor);
   const claimHolder = claimOutcome === "taken" ? claimReserver.holder(task.id) : undefined;
-  const claimDecision = decideDispatchClaim(claimOutcome, { taskId: task.id, holder: claimHolder });
+  // W1-T2552: the failing attempt's OWN git stderr, threaded into the refusal so an unreachable
+  // verdict names its cause instead of only its category. Optional on the interface, so a test's
+  // fake reserver that does not implement it yields today's wording byte-for-byte.
+  const claimDecision = decideDispatchClaim(claimOutcome, {
+    taskId: task.id,
+    holder: claimHolder,
+    stderr: claimOutcome === "unreachable" ? claimReserver.lastAttemptStderr?.() : undefined,
+  });
   log("dispatch.claim", {
     ref: dispatchClaimRef(task.id),
     outcome: claimOutcome,

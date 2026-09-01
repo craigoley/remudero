@@ -63,7 +63,10 @@ export interface DispatchClaimDecision {
  * loud and costs nothing — this fires before the inflight lock, before the worktree, before any
  * spawn.
  */
-export function decideDispatchClaim(outcome: DispatchClaimOutcome, ctx: { taskId: string; holder?: string }): DispatchClaimDecision {
+export function decideDispatchClaim(
+  outcome: DispatchClaimOutcome,
+  ctx: { taskId: string; holder?: string; stderr?: string },
+): DispatchClaimDecision {
   if (outcome === "created") return { proceed: true, reason: `claimed ${dispatchClaimRef(ctx.taskId)} for this run` };
   if (outcome === "taken") {
     // NAMED, NOT ANONYMOUS: the ref AND the anchor a live holder wrote — the difference between
@@ -78,11 +81,20 @@ export function decideDispatchClaim(outcome: DispatchClaimOutcome, ctx: { taskId
         `W1-T1265 branches 53.776 seconds apart, neither able to see the other's unpublished start.`,
     };
   }
+  // W1-T2552: NAME THE CAUSE, NOT JUST THE CATEGORY. `classifyPushFailure` collapses auth, DNS,
+  // proxy and timeout into one word, so "cannot reach origin" is the WIDEST true statement rather
+  // than a diagnosis — and the git stderr that would have distinguished them was discarded here.
+  // A single line of it is the difference between an operator reading the answer and bisecting for
+  // it (MEASURED 2026-08-30: the cause was a missing credential helper, and the stderr said so).
+  // Collapsed to one line and bounded, because this string lands in a ledger row and a console.
+  const detail = (ctx.stderr ?? "").replace(/\s+/g, " ").trim();
+  const named = detail ? ` git said: ${detail.slice(0, 300)}` : "";
   return {
     proceed: false,
     reason:
       `cannot reach origin to claim ${dispatchClaimRef(ctx.taskId)} — refusing rather than dispatching ` +
-      `optimistically, which is the behaviour that let two hosts each see nothing published and each spend`,
+      `optimistically, which is the behaviour that let two hosts each see nothing published and each spend.` +
+      named,
   };
 }
 
@@ -144,6 +156,20 @@ export interface DispatchClaimReserver {
   /** Delete the claim ref. `expect` makes the delete conditional on the ref still carrying THAT
    *  anchor, so the holder arm can never delete a claim that has since become someone else's. */
   drop(taskId: string, opts?: { expect?: string }): boolean;
+  /**
+   * W1-T2552: git's OWN stderr from the most recent {@link attempt}, or `undefined` when the last
+   * attempt succeeded or none has run. OPTIONAL so every existing fake still satisfies this
+   * interface unchanged — a reserver that does not implement it simply yields a refusal worded
+   * exactly as it is today.
+   *
+   * WHY THIS EXISTS. {@link classifyPushFailure} collapses every non-contention failure to the
+   * single word "unreachable", and the refusal below then said "cannot reach origin" and threw the
+   * message away. MEASURED 2026-08-30: the real stderr was `fatal: could not read Username for
+   * 'https://github.com': No such device or address` — a MISSING CREDENTIAL HELPER, not an
+   * unreachable remote — and recovering that one line took an hour of bisection precisely because
+   * the gate had already discarded it. A refusal that names its own cause is the whole fix.
+   */
+  lastAttemptStderr?(): string | undefined;
 }
 
 export interface DispatchClaimGitDeps {
@@ -163,7 +189,14 @@ export interface DispatchClaimGitDeps {
  * writers on one host in the same millisecond still differ by pid.
  */
 export function gitDispatchClaimReserver(deps: DispatchClaimGitDeps): DispatchClaimReserver {
+  // W1-T2552: the last failing attempt's git stderr, held for the refusal to name. Closure-scoped
+  // to ONE reserver, cleared on every success, so it can never describe an older attempt than the
+  // outcome it is rendered beside.
+  let lastStderr: string | undefined;
   return {
+    lastAttemptStderr() {
+      return lastStderr;
+    },
     mintAnchor() {
       if (deps.anchor) return deps.anchor();
       const tree = deps.run(["hash-object", "-t", "tree", "/dev/null"]).stdout.trim();
@@ -172,7 +205,11 @@ export function gitDispatchClaimReserver(deps: DispatchClaimGitDeps): DispatchCl
     },
     attempt(taskId, anchor) {
       const res = deps.run(["push", "origin", `${anchor}:${dispatchClaimRef(taskId)}`]);
-      if (res.status === 0) return "created";
+      if (res.status === 0) {
+        lastStderr = undefined;
+        return "created";
+      }
+      lastStderr = res.stderr;
       return classifyPushFailure(res.stderr);
     },
     holder(taskId) {
