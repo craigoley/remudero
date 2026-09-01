@@ -548,7 +548,7 @@ worker_lines() {
   # conservative direction for the *kill* decision, and harmless for the *wait* decision because the
   # lock count below is independent of it.
   docker exec "${CONTAINER_NAME}" ps -eo pid,etimes,args --no-headers 2>/dev/null \
-    | grep -F -- 'claude --output-format' || true
+    | grep -E -- 'claude --output-format|codex exec' || true
 }
 
 # ── W1-T2556: A LOCK NAMING A CONTAINER THAT NO LONGER EXISTS IS RECLAIMED, NOT WAITED ON ────────

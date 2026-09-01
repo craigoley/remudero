@@ -123,6 +123,22 @@ test("REAL probeIdle: pgrep exit 1 with both lock dirs absent is a TRUE all-zero
   });
 });
 
+test("REAL probeIdle: the worker process selector covers both Claude and Codex", () => {
+  withRoot((root) => {
+    let seen: { cmd: string; args: string[] } | undefined;
+    const p = deps(root, (cmd, args) => {
+      seen = { cmd, args };
+      return "41\n42\n";
+    }).probeIdle();
+
+    assert.equal(p.workers, 2);
+    assert.equal(seen?.cmd, "pgrep");
+    assert.equal(seen?.args[0], "-f");
+    assert.match(seen?.args[1] ?? "", /claude --output-format/);
+    assert.match(seen?.args[1] ?? "", /codex exec/);
+  });
+});
+
 test("REAL probeIdle: a pgrep that CANNOT RUN names `workers` unreadable instead of reporting zero", () => {
   withRoot((root) => {
     const p = deps(root, throwing(Object.assign(new Error("spawn pgrep ENOENT"), { code: "ENOENT" }))).probeIdle();

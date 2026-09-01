@@ -181,7 +181,7 @@ export function decideDeployTrigger(i: TriggerInputs): Decision {
 }
 
 export interface IdleProbe {
-  /** Live `claude --output-format` workers (build/review/probe). */
+  /** Live Claude or Codex workers (build/review/probe). */
   workers: number;
   /** `*.lock` files under state/inflight/. */
   inflightLocks: number;
@@ -1072,7 +1072,7 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
       const unreadable: string[] = [];
       let workers = 0;
       try {
-        workers = exec("pgrep", ["-f", "claude --output-format"]).split("\n").filter(Boolean).length;
+        workers = exec("pgrep", ["-f", "claude --output-format|codex exec"]).split("\n").filter(Boolean).length;
       } catch (err) {
         if (!pgrepFailureMeansZero(err)) unreadable.push("workers");
         workers = 0; // pgrep exits 1 when there are no matches
