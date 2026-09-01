@@ -420,6 +420,36 @@ else
   esac
 fi
 
+# ── probe: is automatic gc disabled by a stale .git/gc.log? (W1-T2529) ───────────────────────────
+# WHAT THIS CLOSES. git writes `.git/gc.log` when a background `gc --auto` fails, and REFUSES to
+# attempt another auto-gc for as long as that file exists — the condition is self-sustaining,
+# because the loose objects that made gc fail keep accumulating and gc never runs again to clear
+# them. On the fleet host this clone is written by every worker worktree, every prune and every
+# fetch, so the object count only goes one way. The ONLY existing signal is a warning
+# `git worktree add` prints to STDERR, interleaved with worker output, that the daemon neither
+# parses nor publishes.
+#
+# THIS IS THE SIGNAL, NOT THE CLEANUP. Checking whether the file exists, and reading its own first
+# line as the reason, is a one-line existence-and-read probe — the SAME kind of "checkable from
+# the beat rather than by shelling in" fact `image_build_sha` (W1-T496) already publishes above.
+# NOTHING HERE RUNS `git gc` OR `git prune`, and this probe never shells `git` at all: reading a
+# path on disk is enough, and running gc/prune unattended on a live clone several worktrees are
+# writing is an operator act with real risk that stays out of scope for a reporter.
+#
+# THE REASON IS READ, NEVER GUESSED. `gc_disabled_reason` is git's own first line from the file —
+# not a fixed string this script made up — so an operator reads the actual root cause git recorded
+# without opening a shell on the host. A healthy clone (no gc.log) reports `gc_verdict=ok` and
+# `gc_disabled_reason=none`, so the field is never a constant regardless of clone state.
+GC_LOG="${INSTALL_DIR}/.git/gc.log"
+if [ -e "$GC_LOG" ]; then
+  GC_VERDICT="DISABLED — .git/gc.log is present, automatic gc will not run until it is removed"
+  GC_DISABLED_REASON="$(head -n 1 "$GC_LOG" 2>/dev/null)"
+  [ -n "$GC_DISABLED_REASON" ] || GC_DISABLED_REASON="(gc.log exists but is empty)"
+else
+  GC_VERDICT="ok"
+  GC_DISABLED_REASON="none"
+fi
+
 # The gap the MACHINE observed since its own last successful beat. This is what makes the
 # watcher's threshold refinable later against a measured distribution instead of intuition — a
 # force-pushed single-commit branch keeps no history of its own to measure.
@@ -450,6 +480,8 @@ tsx_present=${TSX_PRESENT}
 node_modules_entries=${NODE_MODULES_ENTRIES}
 install_dir=${INSTALL_DIR}
 install_head_sha=${INSTALL_SHA}
+gc_verdict=${GC_VERDICT}
+gc_disabled_reason=${GC_DISABLED_REASON}
 config_root=${RMD_ROOT}
 config_root_source=${ROOT_SOURCE}
 ledger_state=${LEDGER_STATE}
