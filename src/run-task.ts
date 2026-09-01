@@ -20191,7 +20191,14 @@ export function escalateHeadroomReserve(
       class: "HARD_STOP",
       taskId: "daemon",
       runId: ctx.runId,
-      summary: `weekly headroom reserve reached — dispatch paused until ${info.resetsAt}`,
+      // THE WINDOW IS DATA, NEVER A LITERAL. This summary hardcoded "weekly" while the detail
+      // below has always interpolated `info.window` correctly, so every session exhaustion opened
+      // an issue TITLED weekly with a BODY reading `session (5h)`. MEASURED on #3483: the title
+      // said "weekly headroom reserve reached — dispatch paused until 2026-09-01T12:00:00.000Z"
+      // while its own body said "session (5h) is at 100% used", and the daemon telemetry for that
+      // episode named `session (5h)` throughout. The daemon could always tell the two apart
+      // (`resolveHeadroomWindows` labels them separately); only this line could not.
+      summary: `${info.window} headroom reserve reached — dispatch paused until ${info.resetsAt}`,
       detail:
         `P34 clause (c): ${info.window} is at ${info.percentUsed}% used (>= the ${info.limitPct}% operator ` +
         `reserve ceiling). Dispatch is paused — drain-and-hold, in-flight work finishes, no new spawn — until ` +

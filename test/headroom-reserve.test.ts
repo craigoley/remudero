@@ -294,3 +294,50 @@ test("escalateHeadroomReserve: a THROWING gh gateway still writes the dedup mark
   escalateHeadroomReserve(info, { owner: "o", repo: "r", ledgerPath, runId: "RUN-2", issues: counting });
   assert.equal(calls, 0, "the failed delivery still deduped the SAME episode on the next boot");
 });
+
+// ── The escalation TITLE must name the window that actually breached ──────────────────────────
+// MEASURED on issue #3483: the title read "weekly headroom reserve reached — dispatch paused
+// until 2026-09-01T12:00:00.000Z" while its own body read "session (5h) is at 100% used", and the
+// daemon's `daemon.headroom` telemetry named `session (5h)` on every tick of that episode. The
+// summary hardcoded "weekly"; the detail had always interpolated `info.window` correctly. So an
+// operator scanning issue TITLES saw a weekly cap they had not hit, on every session exhaustion.
+// The daemon could always tell them apart — `resolveHeadroomWindows` (daemon.ts) labels them
+// "session (5h)" and "weekly (<label>)" separately — and only this one line could not.
+
+test("a SESSION breach names the session window in the title, not weekly", () => {
+  const dir = mkdtempSync(join(tmpdir(), "headroom-reserve-window-"));
+  const ledgerPath = join(dir, "ledger.ndjson");
+  const info = { window: "session (5h)", percentUsed: 100, limitPct: 100, resetsAt: "2026-09-01T12:00:00.000Z" };
+  const seen: Array<{ title: string; body: string }> = [];
+  const fake = {
+    create(title: string, body: string) {
+      seen.push({ title, body });
+      return "https://github.com/o/r/issues/1";
+    },
+  };
+  escalateHeadroomReserve(info, { owner: "o", repo: "r", ledgerPath, runId: "RUN-S", issues: fake });
+  assert.equal(seen.length, 1, "the breach opens exactly one issue");
+  assert.match(seen[0]!.title, /session \(5h\)/, "the TITLE must name the window that actually breached");
+  assert.equal(
+    /weekly/.test(seen[0]!.title),
+    false,
+    `a session exhaustion must never be titled weekly — this is issue #3483's exact defect. Got: ${seen[0]!.title}`,
+  );
+  assert.match(seen[0]!.body, /session \(5h\)/, "and the detail keeps naming it too — unchanged, it was always right");
+});
+
+test("a WEEKLY breach still names the weekly window, label and all", () => {
+  const dir = mkdtempSync(join(tmpdir(), "headroom-reserve-window-w-"));
+  const ledgerPath = join(dir, "ledger.ndjson");
+  const info = { window: "weekly (all models)", percentUsed: 96, limitPct: 95, resetsAt: "Sep 7 at 12am" };
+  const seen: string[] = [];
+  const fake = {
+    create(title: string) {
+      seen.push(title);
+      return "https://github.com/o/r/issues/2";
+    },
+  };
+  escalateHeadroomReserve(info, { owner: "o", repo: "r", ledgerPath, runId: "RUN-W", issues: fake });
+  assert.equal(seen.length, 1, "the breach opens exactly one issue");
+  assert.match(seen[0]!, /weekly \(all models\)/, "a real weekly breach keeps its own label, model name included");
+});
