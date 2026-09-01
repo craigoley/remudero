@@ -440,6 +440,63 @@ test("an ABSENT declared pin is UNKNOWN — it warns, and must never render as a
   assert.equal(r.fail, "0", "and it must not fail the image either");
 });
 
+function codexVersionValueBlock(): string {
+  const src = readFileSync(SCRIPT, "utf8");
+  const begin = src.indexOf("# BEGIN codex-version-value");
+  const end = src.indexOf("# END codex-version-value");
+  assert.ok(begin >= 0 && end > begin, "the Codex sentinels must exist");
+  return src.slice(begin, end);
+}
+
+function runCodexVersionCheck(installed: string, declared: string): { out: string; fail: string } {
+  const dir = mkdtempSync(join(tmpdir(), "verify-image-codex-"));
+  writeFileSync(join(dir, "codex"), `#!/bin/sh\necho "codex-cli ${installed}"\n`, { mode: 0o755 });
+  chmodSync(join(dir, "codex"), 0o755);
+  const r = spawnSync("sh", ["-c", `fail=0\n${codexVersionValueBlock()}\nprintf "FAILVAR=%s" "$fail"`], {
+    encoding: "utf8",
+    env: { ...process.env, PATH: `${dir}:${process.env.PATH ?? ""}`, EXPECT_CODEX_VERSION: declared },
+  });
+  const out = (r.stdout ?? "") + (r.stderr ?? "");
+  return { out, fail: /FAILVAR=(\S*)/.exec(out)?.[1] ?? "?" };
+}
+
+test("the Codex version check fails a runnable binary whose value differs from the image pin", () => {
+  const r = runCodexVersionCheck("0.153.0", "0.152.0");
+  assert.match(r.out, /FAIL\s+codex version/);
+  assert.equal(r.fail, "1");
+});
+
+test("the Codex version check passes the pinned CLI value", () => {
+  const r = runCodexVersionCheck("0.152.0", "0.152.0");
+  assert.match(r.out, /PASS\s+codex version/);
+  assert.equal(r.fail, "0");
+});
+
+test("the Dockerfile installs and executes the declared Codex pin in one layer", () => {
+  const dockerfile = readFileSync(join(REPO_ROOT, "deploy", "Dockerfile"), "utf8");
+  assert.match(dockerfile, /ARG CODEX_VERSION=0\.152\.0/);
+  assert.match(dockerfile, /npm install -g "@openai\/codex@\$\{CODEX_VERSION\}"[\s\S]*?codex --version/);
+});
+
+test("the image installs an immutable Codex deny-read boundary for every mounted credential and state path", () => {
+  const dockerfile = readFileSync(join(REPO_ROOT, "deploy", "Dockerfile"), "utf8");
+  const requirements = readFileSync(join(REPO_ROOT, "deploy", "codex-requirements.toml"), "utf8");
+  assert.match(dockerfile, /COPY --chown=root:root deploy\/codex-requirements\.toml \/etc\/codex\/requirements\.toml/);
+  assert.match(dockerfile, /chmod 0444 \/etc\/codex\/requirements\.toml/);
+  assert.match(requirements, /^\[permissions\.filesystem\]$/m);
+  for (const denied of [
+    "/home/node/.codex/auth.json",
+    "/home/node/.claude",
+    "/home/node/.ssh",
+    "/home/node/.config/gh",
+    "/home/node/.config/remudero",
+    "/home/node/Remudero/state",
+    "/run/secrets",
+  ]) {
+    assert.ok(requirements.includes(`  "${denied}",`), `missing deny-read path: ${denied}`);
+  }
+});
+
 // ── THE IMAGE MUST BE ABLE TO SAY WHICH COMMIT BUILT IT (deploy/Dockerfile REQ 15) ───────────
 //
 // The published image ran 108 commits behind origin/main and no artifact carried its build

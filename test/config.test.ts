@@ -3,7 +3,17 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { architectModel, ConfigValidationError, configPath, loadConfig, resolveHeadroomEnabled, validateConfig, type Config } from "../src/lib/config.js";
+import {
+  architectModel,
+  ConfigValidationError,
+  configPath,
+  enabledWorkerProviders,
+  loadConfig,
+  providerRoutingOwnsHeadroom,
+  resolveHeadroomEnabled,
+  validateConfig,
+  type Config,
+} from "../src/lib/config.js";
 
 // NOTE: calling loadConfig() on its CREATE path shells `which claude`, which is
 // absent in CI (LEARNINGS.md: lazy-config-in-ci). validateConfig is a pure function
@@ -67,6 +77,46 @@ test("validateConfig accepts a config with overflow entirely unset (default is n
   assert.doesNotThrow(() => validateConfig(config()));
 });
 
+test("worker provider default is Claude-only and leaves the legacy daemon headroom gate in charge", () => {
+  assert.deepEqual(enabledWorkerProviders(config()), ["claude"]);
+  assert.equal(providerRoutingOwnsHeadroom(config()), false);
+});
+
+test("opting into Codex moves headroom enforcement to provider-local routing", () => {
+  const dual = config({ workerProviders: { enabled: ["claude", "codex"] } });
+  assert.deepEqual(enabledWorkerProviders(dual), ["claude", "codex"]);
+  assert.equal(providerRoutingOwnsHeadroom(dual), true);
+  assert.doesNotThrow(() => validateConfig(dual));
+});
+
+test("worker provider config rejects empty, duplicate, unknown, and invalid reserve values", () => {
+  assert.throws(() => validateConfig(config({ workerProviders: { enabled: [] } })), ConfigValidationError);
+  assert.throws(
+    () => validateConfig(config({ workerProviders: { enabled: ["claude", "claude"] } })),
+    ConfigValidationError,
+  );
+  assert.throws(
+    () => validateConfig(config({ workerProviders: { enabled: ["other" as "claude"] } })),
+    ConfigValidationError,
+  );
+  assert.throws(
+    () => validateConfig(config({ workerProviders: { reservePercent: 100 } })),
+    ConfigValidationError,
+  );
+  assert.throws(
+    () => validateConfig(config({ workerProviders: { capacityCacheMs: 0 } })),
+    ConfigValidationError,
+  );
+  assert.throws(
+    () => validateConfig(config({ workerProviders: { codexModels: { economy: [] } } })),
+    ConfigValidationError,
+  );
+  assert.throws(
+    () => validateConfig(config({ workerProviders: { codexModels: { balanced: ["gpt-5.6-terra", "gpt-5.6-terra"] } } })),
+    ConfigValidationError,
+  );
+});
+
 // ── resolveHeadroomEnabled (ruling fb-1784894405468-a4153e; DEFAULT clause reversed
 // by the operator ruling of 2026-07-25 — the flag architecture a4153e built is kept
 // verbatim, only the inherited default flips) ────────────────────────────────────
@@ -111,9 +161,11 @@ test("resolveHeadroomEnabled: an empty/whitespace env value defers to config, no
 });
 
 // ── architectModel: the Architect-tier model is governed by mounts.yaml's `architect:` row ──
-// (fb-1784921980488-44b355 §4 — the MPG first-instance ruling: opus -> Opus 5). The retro,
-// triage, and inbox-draft spawns all resolve their model through this, so the mount-table row
-// governs the spawn (validated by the next inbox-draft ledger line's model).
+// (fb-1784921980488-44b355 §4 — the MPG first-instance ruling: opus -> Opus 5). Plan authorship
+// (`rmd plan`'s orchestration) resolves its model through this. W1-T2559: retro, triage, and the
+// inbox-draft spawns used to ALSO resolve through this resolver but now ride their OWN
+// `synthesis.<role>` row instead — see test/synthesis-rungs-ride-their-own-mount.test.ts and
+// src/lib/config.ts's `synthesisModel`/`synthesisEffort`.
 test("architectModel: the mounts.yaml architect row is the source of truth, then config.architectModel, then the opus default", () => {
   // the mounts row wins when present
   assert.equal(architectModel(config(), { architect: { model: "claude-opus-5" } }), "claude-opus-5");

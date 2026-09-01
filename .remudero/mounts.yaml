@@ -58,20 +58,25 @@ efforts:
   high: 3
 
 # ── The Architect mount (the bookend: plan authorship, orchestration) ──────────
-# claude-opus-5/high — the sole top-tier mount; strictly above every worker below. This row
-# governs the model the Architect-tier roles (retro, triage, the inbox-draft rung) all ride
+# claude-opus-5/high — the sole top-tier mount; strictly above every worker below. Governs ONLY
+# plan authorship (`rmd plan`'s orchestration + the retro Architect's own worktree-DAG framing)
 # via architectModel(config, mounts) — a mount-table edit here, not a code change.
 #
-# THREE OF THE FOUR LANES `assertArchitectAboveWorker` GUARDS, NOT ALL FOUR, AND THE FOURTH IS
+# W1-T2559: this row used to ALSO govern retro, triage, and the inbox-draft rung ("the
+# Architect-tier roles"), which meant three jobs that ship no code and supervise no worker
+# inherited plan authorship's tier for no reason other than sharing one resolver. They now each
+# ride their OWN row under `synthesis:` below (`synthesisModel`/`synthesisEffort`,
+# src/lib/config.ts) — an edit HERE no longer reaches them, and an edit to a `synthesis.*` row
+# below no longer reaches plan authorship either. Nothing below weakens the Tier Invariant itself
+# (G-17): plan authorship still strictly outranks every worker, unconditionally.
+#
+# THE ONE LANE `assertArchitectAboveWorker` STILL GUARDS HERE, AND THE OTHER EXCLUSION IS
 # DELIBERATE. The manual `rmd plan` command (`planCommand`, src/run-task.ts) calls the
 # ONE-ARGUMENT `architectModel(config)`, so its spawn model resolves through
 # `config.architectModel ?? "opus"` (src/lib/config.ts) and NEVER READS THIS ROW — an edit here
 # does not reach it. That is scoped out on purpose rather than missed: #781, the commit that
-# wired the other three, says so in terms — "judge and the manual `rmd plan` command are out of
-# the ruling's scope and unchanged" (MPG first-instance ruling fb-1784921980488-44b355 §4).
-# MEASURED at 2e6a0748: this row yields claude-opus-5 for retro/triage/draft while the plan lane
-# yields opus. BOTH ARE TIER 3, so the Tier Invariant holds on either path and this divergence is
-# not load-bearing for it — do not "fix" the call site to make the invariant pass; it already does.
+# wired the (former) other three, says so in terms — "judge and the manual `rmd plan` command are
+# out of the ruling's scope and unchanged" (MPG first-instance ruling fb-1784921980488-44b355 §4).
 # And the row is NOT inert for that lane: the plan spawn still reads `max_turns` from here
 # (`mountsTable.architect.maxTurns`). Only the MODEL is config-governed there.
 #
@@ -82,6 +87,32 @@ architect:
   effort: high
   max_turns: 400
   context_budget: 180000
+
+# ── The synthesis rungs (W1-T2559) — OWN mounts, not the Architect's ────────────
+# retro, triage, and the inbox-draft rung each ship no code and supervise no worker — the Tier
+# Invariant's premise (a supervisor must strictly outrank what it supervises) does not bind them,
+# so bundling them onto the `architect:` row above (which DOES carry that premise, for plan
+# authorship) forced three unrelated jobs onto its tier "for free," never by any ruling that a
+# triage classification needs the top model. Each row below is resolved via
+# `synthesisModel`/`synthesisEffort` (src/lib/config.ts), never `architectModel`. Every one of the
+# three is REQUIRED — a missing role or a malformed mount REFUSES at load
+# (src/lib/mounts.ts's `validateMounts`), the same fail-loud shape `architect`/`judge` already
+# get; there is no fallback to the Architect mount.
+#
+# MEASURED 2026-09-01 (this task's own rationale): $827 across 219 invocations, 22% of the
+# pipeline, none of it shipping code. `triage` is CLASSIFICATION at HIGH VOLUME (159 of those 219
+# runs) — precisely the workload profile this file's own `max_turns` section already names as not
+# repaying high effort — so its effort steps down to `low` here, the first row in this table ever
+# to use it. `retro`/`inbox_draft` keep claude-opus-5/high: lower-volume (24 / 36 runs) synthesis
+# whose OUTPUT is acted on directly (a plan/LEARNINGS edit, a filed proposal a later worker
+# spends real budget implementing), so this change does not move their tier or effort absent a
+# measured reason to — model is the THIRD lever, not the first, and effort is now genuinely WIRED
+# to the spawn for all three (previously declared here but never passed to `spawnWorker`, so
+# `architect.effort: high` silently governed nothing for these lanes).
+synthesis:
+  retro:       { model: claude-opus-5, effort: high, max_turns: 400, context_budget: 180000 }
+  triage:      { model: claude-opus-5, effort: low,  max_turns: 400, context_budget: 180000 }
+  inbox_draft: { model: claude-opus-5, effort: high, max_turns: 400, context_budget: 180000 }
 
 # ── The flight-judge mount (Layer 2, W1-T21 — MASTER-PLAN §4B) ─────────────────
 # The advisory process-judge a Layer-1 trip (flight-signals.ts, W1-T20) spawns

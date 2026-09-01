@@ -1,6 +1,6 @@
 # Architecture
 
-Remudero is a headless fleet of Claude Code agents that carries plan items from
+Remudero is a headless fleet of Claude Code and opt-in Codex agents that carries plan items from
 `plan/tasks.yaml` through to a merged PR, unattended. This document is the
 conceptual map of how the pieces fit together — not a generated API reference
 (that is Tier A, §12A of `MASTER-PLAN.md`, not built yet), but the mental model
@@ -76,6 +76,15 @@ Two more structural guarantees worth knowing up front:
   (`src/lib/retro.ts`) reduces the ledger + `LEARNINGS.md` into a calibration
   gather that feeds the Architect's own plan-health sweep — the harness syncs
   its own plan, deterministically, before any LLM synthesizes a plan PR.
+- **Provider routing is capacity-aware and fail-closed** — `spawnWorker` is the one paid-spawn
+  choke point. With no `workerProviders` config it follows the existing Claude path. When Codex is
+  enabled, it reads Claude subscription usage plus Codex `account/rateLimits/read` and `model/list`,
+  excludes any unreadable or reserve-bound provider, and chooses the provider with the most room in
+  its tightest relevant window. Codex first maps the requested Claude mount tier to an account-visible
+  economy, balanced, or frontier model, then gates only that model's quota bucket; a full independent
+  Spark bucket cannot veto Terra/Sol, or vice versa. The Claude-only daemon gate is not also enforced
+  in this mode because it cannot describe Codex capacity; every actual spawn is still gated by the
+  provider-local check.
 - **The three planes do NOT refresh on the same clock, and the assurance plane
   is the frozen one.** The plan plane is re-read from `origin/main` at every
   dispatch (`syncPlanFromOrigin`); each worker gets a fresh worktree off
@@ -132,7 +141,7 @@ spawn.
 | Stop/pause/resume | `src/lib/fleet-control.ts` |
 | Merge gate + reviewer rubric | `src/lib/review.ts` |
 | Pre-dispatch plan linter | `src/lib/task-linter.ts` |
-| Worker spawn (Claude Agent SDK) | `src/lib/worker.ts` |
+| Worker spawn and provider routing | `src/lib/worker.ts`, `src/lib/worker-provider.ts` |
 | Mount routing (class-based dispatch) | [probe.md](probe.md) |
 | Sandbox containment probe | `src/lib/containment.ts` |
 | Shell isolation probe | `src/lib/isolation.ts` |

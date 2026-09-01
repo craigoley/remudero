@@ -43,6 +43,11 @@ function goodMountsRaw() {
     efforts: { low: 1, medium: 2, high: 3 },
     architect: { model: "opus", effort: "high", max_turns: 60, context_budget: 180000 },
     judge: { model: "opus", effort: "high", max_turns: 60, context_budget: 150000 },
+    synthesis: {
+      retro: { model: "opus", effort: "high", max_turns: 60, context_budget: 180000 },
+      triage: { model: "opus", effort: "low", max_turns: 60, context_budget: 180000 },
+      inbox_draft: { model: "opus", effort: "high", max_turns: 60, context_budget: 180000 },
+    },
     routes: {
       implement: {
         low: { src: { model: "sonnet", effort: "medium", max_turns: 30, context_budget: 120000 } },
@@ -417,6 +422,11 @@ test("resolveRiskJudgeMount throws MountsError when the routing table defines no
     efforts: { medium: 1 },
     architect: { model: "haiku", effort: "medium", maxTurns: 1, contextBudget: 1 },
     judge: { model: "haiku", effort: "medium", maxTurns: 1, contextBudget: 1 },
+    synthesis: {
+      retro: { model: "haiku", effort: "medium", maxTurns: 1, contextBudget: 1 },
+      triage: { model: "haiku", effort: "medium", maxTurns: 1, contextBudget: 1 },
+      inbox_draft: { model: "haiku", effort: "medium", maxTurns: 1, contextBudget: 1 },
+    },
     routes: {},
   };
   assert.throws(() => resolveRiskJudgeMount(empty), MountsError);

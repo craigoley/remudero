@@ -33,8 +33,11 @@ import {
   globalLearningsHome,
   loadConfig,
   notifyRecipient,
+  providerRoutingOwnsHeadroom,
   resolveHeadroomEnabled,
   softBudgetThreshold,
+  synthesisEffort,
+  synthesisModel,
   userOverallLearningsHome,
   workerHomeDir,
   workerModel,
@@ -19306,19 +19309,23 @@ async function retroCommand(
   // right alongside the ledger marks above (same real-run-only gate, same non-dry-run guard).
   routeFollowupsToRegistry(gather.followups, { registryPath: join(config.root, "state", "inbox-proposals.json") });
 
-  // G-17 Tier Invariant: the retro Architect MUST outrank implement workers.
-  // MOUNT-GOVERNED (§9, W1-T64 — sibling of W1-T63/P10): the retro/architect spawn's MODEL
-  // and turn budget BOTH come from mounts.yaml's `architect` row (the model is the source of
-  // truth; the flat-400 tripwire #90 is the turn cap), NEVER a hardcoded literal or a config
-  // default. Before this, a hardcoded 40-turn cap — the SAME class of cap that walled the
-  // reviewer (error_max_turns) — could wall the Architect mid-retro BEFORE it
-  // staged/committed/pushed/opened the PR, leaving an empty branch that then crashed
-  // `gh pr create --fill` (no diff to fill). `mountsTable` is the SAME table
-  // loaded above (pre-buildGather) for the weekly-burn-by-model-class gather —
-  // one load, two uses, never a second re-read of the same file.
-  const arch = architectModel(config, mountsTable); // Architect model is the mounts.yaml `architect:` row
+  // W1-T2559: retro ships no code and supervises no worker, so G-17's Tier Invariant — which
+  // exists to keep a supervisor strictly above what it reviews — does not bind it to plan
+  // authorship's tier. It rides its OWN mount (`synthesis.retro`, mounts.yaml), never
+  // `architectModel`'s `architect:` row, so a mounts-table edit to that row alone tunes retro's
+  // model/effort without moving plan authorship. `assertArchitectAboveWorker` is deliberately NOT
+  // called here any more: it fails closed when a *supervisor* is not strictly above what it
+  // supervises, and retro supervises nothing.
+  // MOUNT-GOVERNED (§9, W1-T64 heritage): the spawn's model/effort/turn budget all come from this
+  // row, NEVER a hardcoded literal or a config default. Before mount-governance, a hardcoded
+  // 40-turn cap — the SAME class of cap that walled the reviewer (error_max_turns) — could wall
+  // the Architect mid-retro BEFORE it staged/committed/pushed/opened the PR, leaving an empty
+  // branch that then crashed `gh pr create --fill` (no diff to fill). `mountsTable` is the SAME
+  // table loaded above (pre-buildGather) for the weekly-burn-by-model-class gather — one load,
+  // two uses, never a second re-read of the same file.
+  const arch = synthesisModel(mountsTable, "retro");
+  const archEffort = synthesisEffort(mountsTable, "retro");
   const wrk = workerModel(config);
-  assertArchitectAboveWorker(arch, wrk); // throws (fail-closed) on violation
 
   const runId = `RETRO-${nextLaneEpochMs()}`; // W1-T2528: the singleton lane the collision was observed on
   const log = (step: string, extra: Record<string, unknown> = {}) =>
@@ -19399,8 +19406,9 @@ async function retroCommand(
       cwd: worktreePath,
       permissionMode: "bypassPermissions",
       settingsFile,
-      model: arch, // the Architect tier
-      maxTurns: mountsTable.architect.maxTurns, // MOUNT-GOVERNED (W1-T64) — never a hardcoded literal.
+      model: arch, // W1-T2559: retro's own `synthesis.retro` mount, not the Architect's
+      effort: archEffort, // W1-T2559: this rung's own effort, now actually wired to the spawn
+      maxTurns: mountsTable.synthesis.retro.maxTurns, // MOUNT-GOVERNED (W1-T64/W1-T2559) — never a hardcoded literal.
       maxBudgetUsd: DEFAULT_BUDGET_USD,
       config,
       prompt,
@@ -21454,7 +21462,11 @@ async function drainCommand(
   // HERE so the drain's new bounded-degraded-on-unreadable ceiling (lib/drain.ts) never
   // fires on a host that opted out via config `headroom.enabled: false`. Unwired before
   // this task: the ceiling did not exist, so nothing needed to consult the switch.
-  opts.headroomEnabled = resolveHeadroomEnabled(config);
+  // A Codex-enabled install gates every paid spawn against BOTH providers at the spawn
+  // chokepoint. The legacy loop-level reading is Claude-only, so enforcing it as well would
+  // park a healthy Codex subscription merely because Claude is full. Claude-only installs
+  // retain the existing loop gate exactly.
+  opts.headroomEnabled = resolveHeadroomEnabled(config) && !providerRoutingOwnsHeadroom(config);
   const planPath = deps.planPath ?? join(repoRoot, "plan", "tasks.yaml");
   const ledgerPath = ledgerPathFor(config);
   const statusPath = join(config.root, "state", "status.json");
@@ -22230,7 +22242,7 @@ export async function daemonCommand(
   // via config `headroom.enabled: false`): resolve the host posture from config/env HERE
   // and pass it explicitly, so the live daemon reads the flag while the library keeps
   // its enforcement default.
-  opts.headroomEnabled = resolveHeadroomEnabled(config);
+  opts.headroomEnabled = resolveHeadroomEnabled(config) && !providerRoutingOwnsHeadroom(config);
   const ledgerPath = ledgerPathFor(config);
   const statusPath = join(config.root, "state", "status.json");
   const self = resolveOwnerRepo();
@@ -29311,11 +29323,15 @@ async function triageCommandLocked(
   const spawn = opts.spawn ?? spawnWorker;
   const { owner, repo } = resolveOwnerRepo();
 
-  // G-17 Tier Invariant: the triage Architect MUST outrank implement workers.
+  // W1-T2559: triage ships no code and supervises no worker, so G-17's Tier Invariant — which
+  // exists to keep a supervisor strictly above what it reviews — does not bind it to plan
+  // authorship's tier. It rides its OWN mount (`synthesis.triage`, mounts.yaml), never
+  // `architectModel`'s `architect:` row. `assertArchitectAboveWorker` is deliberately NOT called
+  // here any more — see the identical note at the retro call site.
   const mountsTable = loadMounts(mountsPath(repoRoot));
-  const arch = architectModel(config, mountsTable); // Architect model is the mounts.yaml `architect:` row
+  const arch = synthesisModel(mountsTable, "triage");
+  const archEffort = synthesisEffort(mountsTable, "triage");
   const wrk = workerModel(config);
-  assertArchitectAboveWorker(arch, wrk); // throws (fail-closed) on violation
 
   const ledgerPath = ledgerPathFor(config);
   const taskId = `TRIAGE-${feedbackId}`;
@@ -29525,8 +29541,9 @@ async function triageCommandLocked(
           cwd: worktreePath,
           permissionMode: "bypassPermissions",
           settingsFile,
-          model: arch, // the Architect tier
-          maxTurns: mountsTable.architect.maxTurns, // MOUNT-GOVERNED (§9) — never a hardcoded literal.
+          model: arch, // W1-T2559: triage's own `synthesis.triage` mount, not the Architect's
+          effort: archEffort, // W1-T2559: this rung's own effort, now actually wired to the spawn
+          maxTurns: mountsTable.synthesis.triage.maxTurns, // MOUNT-GOVERNED (§9/W1-T2559) — never a hardcoded literal.
           maxBudgetUsd: DEFAULT_BUDGET_USD,
           config,
           prompt,
@@ -30274,10 +30291,14 @@ export async function draftProposalBatch(
 ): Promise<DraftRungOutcome[]> {
   if (toDraft.length === 0) return [];
 
+  // W1-T2559: the inbox-draft rung ships no code and supervises no worker, so G-17's Tier
+  // Invariant — which exists to keep a supervisor strictly above what it reviews — does not bind
+  // it to plan authorship's tier. It rides its OWN mount (`synthesis.inbox_draft`, mounts.yaml),
+  // never `architectModel`'s `architect:` row. `assertArchitectAboveWorker` is deliberately NOT
+  // called here any more — see the identical note at the retro call site.
   const mountsTable = loadMounts(mountsPath(repoRoot));
-  const arch = architectModel(config, mountsTable); // Architect model is the mounts.yaml `architect:` row
-  const wrk = workerModel(config);
-  assertArchitectAboveWorker(arch, wrk); // throws (fail-closed) on violation
+  const arch = synthesisModel(mountsTable, "inbox_draft");
+  const archEffort = synthesisEffort(mountsTable, "inbox_draft");
 
   const settingsFile = renderWorkerSettings({
     templatePath: join(repoRoot, "settings", "worker.json"),
@@ -30304,8 +30325,9 @@ export async function draftProposalBatch(
             cwd: worktreePath,
             permissionMode: "bypassPermissions",
             settingsFile,
-            model: arch,
-            maxTurns: mountsTable.architect.maxTurns,
+            model: arch, // W1-T2559: this rung's own `synthesis.inbox_draft` mount, not the Architect's
+            effort: archEffort, // W1-T2559: this rung's own effort, now actually wired to the spawn
+            maxTurns: mountsTable.synthesis.inbox_draft.maxTurns, // MOUNT-GOVERNED (W1-T2559) — never a hardcoded literal.
             maxBudgetUsd: DEFAULT_BUDGET_USD,
             config,
             prompt,
