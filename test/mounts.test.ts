@@ -335,3 +335,90 @@ test("resolveMountForClass: a hand-built Mounts missing BOTH the class row and t
     /and no 'src' fallback either/,
   );
 });
+
+// ── W1-T2573: EVERY REFUSAL ARM IN `parseCapabilities` GETS ITS OWN CASE ────────────────────
+//
+// The `capabilities` block is what makes cross-provider routing a TABLE LOOKUP rather than a
+// substring match, so a GAP in the table has to be a load-time refusal — a silent default here
+// would put a worker on a mount nobody chose. Each arm below is exercised on its own because
+// they fail for different reasons and a single malformed fixture would reach only the first:
+// coverage-ratchet flagged all six of these lines as unreachable on this branch, which is the
+// same shape as "when every test injects a fake, each catch arm is unreachable".
+//
+// The base is a VALID capabilities block, mutated one field at a time, so every case below
+// proves its OWN arm rather than tripping an earlier one.
+function goodCapabilities() {
+  return {
+    ladder: { economy: 1, balanced: 2, frontier: 3 },
+    claude: { haiku: "economy", sonnet: "balanced", opus: "frontier" },
+    codex: {
+      economy: { low: ["e-lo"], medium: ["e-med"], high: ["e-hi"] },
+      balanced: { low: ["b-lo"], medium: ["b-med"], high: ["b-hi"] },
+      frontier: { low: ["f-lo"], medium: ["f-med"], high: ["f-hi"] },
+    },
+  };
+}
+
+test("capabilities: the VALID base block loads — without this the negative cases below could pass vacuously", () => {
+  const raw = goodRaw() as Record<string, unknown>;
+  raw.capabilities = goodCapabilities();
+  const m = validateMounts(raw);
+  assert.equal(m.capabilities?.claude.sonnet, "balanced", "a table lookup, not a substring match");
+  assert.deepEqual(m.capabilities?.codex.frontier.high, ["f-hi"]);
+});
+
+test("capabilities.claude naming a capability OUTSIDE the ladder is refused, and the message names the legal set", () => {
+  const raw = goodRaw() as Record<string, unknown>;
+  const caps = goodCapabilities();
+  caps.claude.sonnet = "supersonic"; // not a ladder key
+  raw.capabilities = caps;
+  assert.throws(
+    () => validateMounts(raw),
+    /'capabilities\.claude\.sonnet' must name a capability in 'capabilities\.ladder' \(economy, balanced, frontier\)/,
+    "an unknown capability must name the legal set, or the operator cannot fix it from the refusal",
+  );
+});
+
+test("capabilities.codex missing entirely is refused — a half-declared table would route Codex by guess", () => {
+  const raw = goodRaw() as Record<string, unknown>;
+  const caps = goodCapabilities() as Record<string, unknown>;
+  delete caps.codex;
+  raw.capabilities = caps;
+  assert.throws(() => validateMounts(raw), /'capabilities\.codex' must be a mapping of capability -> effort -> model list/);
+});
+
+test("capabilities.codex missing ONE ladder capability is refused by name — a gap is a refusal, never a fallback", () => {
+  const raw = goodRaw() as Record<string, unknown>;
+  const caps = goodCapabilities() as { codex: Record<string, unknown> };
+  delete caps.codex.balanced;
+  (raw as Record<string, unknown>).capabilities = caps;
+  assert.throws(
+    () => validateMounts(raw),
+    /'capabilities\.codex\.balanced' must be a mapping of effort -> model list/,
+    "the missing capability must be named — 'something is wrong' is not actionable",
+  );
+});
+
+test("capabilities.codex.<capability>.<effort> must be a NON-EMPTY list of model ids — each bad shape on its own", () => {
+  for (const [bad, label] of [
+    [[], "an empty list"],
+    ["f-hi", "a bare string rather than a list"],
+    [[""], "a list holding an empty id"],
+    [["ok", 7], "a list holding a non-string"],
+  ] as Array<[unknown, string]>) {
+    const raw = goodRaw() as Record<string, unknown>;
+    const caps = goodCapabilities() as { codex: Record<string, Record<string, unknown>> };
+    caps.codex.frontier.high = bad;
+    raw.capabilities = caps;
+    assert.throws(
+      () => validateMounts(raw),
+      /'capabilities\.codex\.frontier\.high' must be a non-empty list of model ids/,
+      `${label} must be refused — an empty candidate list resolves to no model at all`,
+    );
+  }
+});
+
+test("capabilities omitted ENTIRELY still validates — the axis is optional and predates nothing", () => {
+  const raw = goodRaw() as Record<string, unknown>;
+  assert.equal(validateMounts(raw).capabilities, undefined, "a table with no capabilities key validates exactly as before this axis existed");
+});
