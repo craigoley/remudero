@@ -1,0 +1,69 @@
+- id: W1-T2558
+  title: "THE COST-ANOMALY SENTINEL RE-REPORTS EVERY FINDING ON EVERY SWEEP, FOREVER — `detectCostAnomalies` (src/lib/cost-anomaly.ts) appends a `cost.anomaly` row per anomalous run per pass with no acknowledgement, expiry or dedup, so 45 genuine findings occupy 471 ledger rows and a run from FIVE DAYS AGO is re-flagged on every tick; MEASURED — W1-T2324-1787823430981 carries 26 IDENTICAL rows at $25.68, and the same five runs appear at 06:25:46, 09:29:16 and 10:18:04 with only `median_cost_usd` drifting 5.03 -> 5.10 -> 5.07"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 15.00
+  files: [src/lib/cost-anomaly.ts, test/an-anomaly-is-reported-once-not-on-every-sweep.test.ts]
+  origin: "operator-session#the-spend-census-2026-09-01"
+  plan_refs: ["W1-T931", "W1-T2557"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE SENTINEL IS RIGHT AND ITS FINDINGS ARE REAL. W1-T931 built it for a reason its own doc
+    states well: both existing cost guards are ABSOLUTE, neither measures a run against its own
+    kind, and "an expensive-but-under-both-ceilings run is only ever visible by reading the ledger
+    by hand." It compares against a class MEDIAN with a `minSamples` floor, it reports and never
+    acts, and the 45 runs it has flagged are genuinely 3-5x their class median — roughly $528 of
+    excess, about 15% of the task pipeline. NONE OF THAT IS IN QUESTION.
+
+    WHAT IS BROKEN IS THAT IT SAYS THE SAME THING FOREVER. There is no acknowledgement, no expiry
+    and no dedup, so every sweep re-appends a row for every run still inside the window. MEASURED
+    2026-09-01: 471 raw `cost.anomaly` rows collapse to 45 distinct `run_id`s — a 10x
+    amplification — and ONE run, W1-T2324-1787823430981, carries 26 IDENTICAL rows at $25.68. The
+    same five runs appear at 06:25:46Z, 09:29:16Z and 10:18:04Z, four hours apart, with nothing
+    changing but `median_cost_usd` (5.03 -> 5.10 -> 5.07) and `sample_size` (165 -> 166).
+
+    THE RUNS BEING RE-FLAGGED ARE DAYS OLD. `W1-T2324-1787823430981` started 2026-08-27T09:37:41Z
+    and was still being reported on 2026-09-01 — five days of re-reporting a run that ended in an
+    hour and can never be changed.
+
+    THE HARM IS THAT A REAL SIGNAL BECAME UNREADABLE, NOT THAT IT COSTS ANYTHING. A `cost.anomaly`
+    row is a ledger append and a `console` line: no model call, no GitHub call, no measurable
+    spend, and this task must not be filed as a cost saving. The harm is exactly the one an
+    operator experiences — 471 rows of the same 45 items is a firehose, the honest response to a
+    firehose is to stop looking, and so 45 findings worth ~$528 sat unread for days while the
+    fleet's own detector had already computed them. A detector with no dismissal mechanism trains
+    its reader to ignore it.
+
+    IT ALSO CORRUPTS EVERY COUNT TAKEN OVER THE STEP. A census that reads 471 and concludes "471
+    anomalies" is wrong by 10x, and the only thing separating the two numbers is remembering to
+    dedupe by `run_id` — which nothing in the step's own shape tells you to do. That is the same
+    hazard family CLAUDE.md catalogues for ledger queries, arriving here through the WRITER rather
+    than the reader.
+
+    WHAT A FIX MUST PRESERVE. It must stay a REPORTER (W1-T931 design note v): nothing here may
+    defer a dispatch, stop a worker or block a merge, and the runaway guards stay untouched. A
+    finding that has genuinely CHANGED — a re-run of the same task landing a different cost, or a
+    class median moving enough to change the verdict — must still be reported; suppression keyed
+    so tightly that a real change is swallowed would be worse than the noise. And a suppressed
+    finding must remain RECOVERABLE: an operator asking "what has been flagged" needs the full set,
+    so this is deduplication of REPORTING, never deletion of history.
+  acceptance:
+    - claim: "one anomalous run is reported once, not once per sweep"
+      proof: "unit test: test/an-anomaly-is-reported-once-not-on-every-sweep.test.ts"
+    - claim: "a second sweep over unchanged data appends no new row for a run already reported"
+      proof: "unit test: test/an-anomaly-is-reported-once-not-on-every-sweep.test.ts"
+    - claim: "a finding whose cost genuinely changed IS reported again — suppression never swallows a real change"
+      proof: "unit test: test/an-anomaly-is-reported-once-not-on-every-sweep.test.ts"
+    - claim: "a run that stops being anomalous stops being reported, and is not resurrected by a later sweep"
+      proof: "unit test: test/an-anomaly-is-reported-once-not-on-every-sweep.test.ts"
+    - claim: "the full flagged set stays recoverable — this dedupes reporting, never deletes history"
+      proof: "unit test: test/an-anomaly-is-reported-once-not-on-every-sweep.test.ts"
+    - claim: "the module still only reports: no dispatch is deferred, no worker stopped, no merge blocked"
+      proof: "unit test: test/an-anomaly-is-reported-once-not-on-every-sweep.test.ts"
+    - claim: "restoring the unconditional append makes the once-per-run assertion fail"
+      proof: "unit test: test/an-anomaly-is-reported-once-not-on-every-sweep.test.ts"
