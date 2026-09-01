@@ -442,6 +442,57 @@ export function draftsDueOnDaemon(
   return cap > 0 ? due.slice(0, cap) : due;
 }
 
+/**
+ * W1-T2564 MIGRATION: re-open every attempt key that never produced a draft.
+ *
+ * WHY A MIGRATION IS REQUIRED AT ALL. Not writing a key for a refusal fixes the write path
+ * FORWARD and repairs nothing already on disk. MEASURED 2026-09-01: of 353 proposals ever
+ * drafted, 267 had never once actually been drafted — every row for them a refusal — and all 267
+ * carried a key with no cached draft. `draftsDueOnDaemon` filters on
+ * `attempts[p.id] !== draftAttemptKey(p)`, and a routed follow-up's key is the literal `::0`
+ * (empty anchors, no reframes), so that comparison is false forever. Without this they stay dead.
+ *
+ * ⚠ WHAT IT RE-OPENS BESIDES REFUSALS, STATED RATHER THAN CLAIMED ABSENT. The predicate is
+ * "keyed, still live in the registry, and no cached draft" — which is NOT refusal-specific and
+ * cannot be, because the ledger evidence a refusal leaves is not on disk in either cache. So it
+ * ALSO re-opens genuine failures W1-T192 deliberately throttled: a worker that ran and emitted
+ * unparseable output, and a spawn that threw. Those get ONE more attempt each.
+ *
+ * THAT COST IS BOUNDED ONLY BECAUSE OF WHERE THE CALLER RUNS IT, AND THAT IS NOT THIS FUNCTION'S
+ * DOING. A re-opened genuine failure runs, fails the same way, and is keyed again by the unchanged
+ * W1-T192 write. Called ONCE PER DAEMON START and BEFORE the batch (buildInboxDraftHook, run-task.ts)
+ * that is one extra attempt per proposal per boot. CALLED PER POLL IT IS AN UNBOUNDED RETRY LOOP:
+ * it would evict the key W1-T192 had just written in that same poll and re-open it forever. That is
+ * not hypothetical — the per-poll form was written first and `test/run-task.test.ts`'s "an ORDINARY
+ * failure still writes its attempt key" reddened on it. A new call site must place itself the same
+ * way. `DAEMON_DRAFT_BATCH_CAP` (W1-T2561) bounds how many re-opened proposals can run per poll.
+ *
+ * THE ALTERNATIVE WAS WORSE. Keying refusals correctly going forward and leaving the 267 dead
+ * trades a bounded one-off cost for permanent silent loss.
+ *
+ * NARROWED TO LIVE PROPOSALS. A key whose proposal has left the registry is left exactly as it
+ * is: re-opening it could not schedule work (nothing selects it) and would only grow the file.
+ *
+ * IDEMPOTENT OVER UNCHANGED STATE — it mutates `attempts` in place and returns the ids it freed, so
+ * an immediate second pass returns `[]`. That is what lets the daemon run it on EVERY BOOT rather
+ * than behind a one-shot marker file a freshly-provisioned host would never have, while the
+ * caller's own once-per-process flag is what stops it re-firing within a run.
+ */
+export function evictRefusalPoisonedKeys(
+  attempts: DraftAttemptCache,
+  drafts: DraftCache,
+  liveProposalIds: ReadonlySet<string>,
+): string[] {
+  const freed: string[] = [];
+  for (const id of Object.keys(attempts)) {
+    if (!liveProposalIds.has(id)) continue;
+    if (drafts[id]) continue;
+    delete attempts[id];
+    freed.push(id);
+  }
+  return freed;
+}
+
 /** `<config.root>/state/inbox-draft-inflight.json` — proposal id -> ISO spawn timestamp,
  *  for whichever proposals the daemon's draft rung (buildInboxDraftHook, run-task.ts)
  *  currently has an Architect worker running for (W1-T193). Written just before the batch's
@@ -1058,7 +1109,16 @@ export interface DraftRungDeps {
  *  exception) without ever throwing out of {@link runDraftRung}. */
 export type DraftRungOutcome =
   | { proposalId: string; ok: true; candidate: DraftedCandidate }
-  | { proposalId: string; ok: false; error: string };
+  /**
+   * W1-T2564: `refused` marks a run the ACCOUNT turned away (a session/usage limit), as distinct
+   * from a run that happened and failed. THE DIFFERENCE IS NOT COSMETIC — it decides whether a
+   * {@link DraftAttemptCache} key is written. W1-T192 records a key on failure deliberately, so a
+   * genuinely failing cause is not retried every poll; but a REFUSAL IS NOT AN ATTEMPT, and keying
+   * it retires work that never ran. MEASURED: 267 of 353 proposals ever drafted had never once
+   * actually been drafted, all 267 keyed, none with a cached draft — and because a routed
+   * follow-up's key is the literal `::0` and never changes, none could ever become due again.
+   */
+  | { proposalId: string; ok: false; error: string; refused?: { matched: string; resetsAtMs?: number } };
 
 /**
  * Draft EVERY proposal in `toDraft` against `currentPlanText`, via {@link inboxDraftPrompt} +
@@ -1117,8 +1177,10 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
       // cc71f2 SELF-LINT: draft, lint, and on a blocking violation redraft with the failures
       // in hand — bounded — so a fired proposal reaches READY without an operator cleanup pass
       // (the P34/W1-T247 sizing gap that motivated this, and the P37-class YAMLParseError).
+      let lastWorker: Awaited<ReturnType<DraftRungDeps["spawn"]>> | undefined;
       for (let attempt = 1; attempt <= MAX_DRAFT_LINT_ATTEMPTS; attempt++) {
         const worker = await deps.spawn(proposal, prompt);
+        lastWorker = worker;
         deps.log("inbox.draft_synthesized", {
           proposal_id: proposal.id,
           attempt,
@@ -1137,9 +1199,34 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
         }
       }
       if (!parsed) {
-        const error = "no FRAGMENT/STAMP markers in worker output";
-        deps.log("inbox.draft_error", { proposal_id: proposal.id, error });
-        outcomes.push({ proposalId: proposal.id, ok: false, error });
+        // W1-T2564: A REFUSED RUN PRODUCES NO OUTPUT, SO IT LANDS HERE LOOKING LIKE MALFORMED
+        // OUTPUT. The marker absence is a SYMPTOM — the worker was turned away before it could
+        // emit anything — so the error string alone ("no FRAGMENT/STAMP markers") sent every
+        // reader toward the prompt and away from the account. `lastWorker.usageRefusal` is set at
+        // the one seam that still had the SDK's message (lib/worker.ts's swallow); reading it
+        // here re-labels the outcome without re-deriving anything.
+        const refusal = lastWorker?.usageRefusal;
+        const error = refusal
+          ? `refused by the account before any output: ${refusal.matched}`
+          : "no FRAGMENT/STAMP markers in worker output";
+        deps.log("inbox.draft_error", {
+          proposal_id: proposal.id,
+          error,
+          ...(refusal
+            ? {
+                usage_refused: true,
+                ...(refusal.resetsAtMs === undefined ? {} : { usage_resets_at: new Date(refusal.resetsAtMs).toISOString() }),
+              }
+            : {}),
+        });
+        outcomes.push({
+          proposalId: proposal.id,
+          ok: false,
+          error,
+          ...(refusal
+            ? { refused: { matched: refusal.matched, ...(refusal.resetsAtMs === undefined ? {} : { resetsAtMs: refusal.resetsAtMs }) } }
+            : {}),
+        });
         continue;
       }
       const candidate: DraftedCandidate = {

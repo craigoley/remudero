@@ -258,6 +258,31 @@ test("detectUsageLimitRefusal: 8:50pm (UTC) resolves to 20:50Z on the same day",
   assert.equal(detectUsageLimitRefusal(REFUSAL, NOW)?.resetsAtMs, RESET);
 });
 
+test("detectUsageLimitRefusal: pinned Codex subscription refusal families are provider-neutral", () => {
+  const refusals = [
+    "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again later.",
+    "Your workspace is out of credits. Add credits to continue.",
+    "Your workspace is out of credits. Ask your workspace owner to refill in order to continue.",
+    "You hit your spend cap set in your workspace. Increase your spend cap to continue.",
+    "You hit your spend cap set by the owner of your workspace. Ask an owner to increase your spend cap to continue.",
+    "To use Codex with your ChatGPT plan, upgrade to Plus: https://chatgpt.com/explore/plus.",
+  ];
+  for (const refusal of refusals) {
+    assert.ok(detectUsageLimitRefusal(refusal, NOW), refusal);
+  }
+});
+
+test("detectUsageLimitRefusal: nearby Codex prose is not a refusal", () => {
+  const controls = [
+    "The workspace credits report is ready.",
+    "Please document how spend caps work in a ChatGPT workspace.",
+    "The task discusses a usage limit without saying that this account hit it.",
+  ];
+  for (const control of controls) {
+    assert.equal(detectUsageLimitRefusal(control, NOW), undefined, control);
+  }
+});
+
 // Conversion is tested from EARLY in the day so every expected time is still ahead of `now` —
 // otherwise the same-day/next-day rollover (covered separately below) would mask a bad conversion.
 const EARLY = Date.parse("2026-08-30T00:05:00.000Z");

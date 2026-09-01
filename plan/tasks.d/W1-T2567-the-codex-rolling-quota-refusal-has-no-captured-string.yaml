@@ -1,0 +1,78 @@
+- id: W1-T2567
+  title: "THE CODEX ROLLING-QUOTA REFUSAL IS COVERED ONLY BY ACCIDENT AND NO REAL STRING EXISTS TO FIX IT WITH — all three Codex patterns #3511 added are HARD refusals (out of credits, spend cap, plan upgrade), so the high-frequency rolling-window case is caught only if Codex happens to phrase it as usage limit reached; MEASURED 2026-09-01: the corpus holds 2 rows mentioning codex and NEITHER is a refusal, zero worker tails mention it against 188 mentioning claude, and no codex binary exists on the host or in the daemon container, so the pattern cannot be written from evidence yet"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 8.00
+  files: [src/lib/classify.ts, test/codex-quota-window-refusal.test.ts]
+  origin: "operator-brief#codex-quota-window-coverage-2026-09-01"
+  plan_refs: ["W1-T2564", "W1-T2565"]
+  status: queued
+  attempts: 0
+  rationale: |
+    ── THE GAP, STATED PRECISELY ────────────────────────────────────────────────────────────────
+
+    `USAGE_LIMIT_TEXT_PATTERNS` (src/lib/classify.ts) holds five patterns. Two are generic enough
+    to catch a rolling-window refusal IF it is phrased with those words:
+
+        /you'?ve hit your (?:session|usage) limit/i
+        /(?:session|usage) limit (?:reached|exceeded)\b/i
+
+    The three Codex-specific ones are ALL HARD refusals — a workspace out of credits, a spend cap,
+    a plan that needs upgrading. None of them is the rolling quota window, which is the
+    high-frequency case and the true analogue of Claude's "You've hit your session limit · resets
+    11:50am (UTC)".
+
+    SO CODEX'S ROLLING-WINDOW REFUSAL IS COVERED ONLY BY ACCIDENT — only if its wording happens to
+    contain "usage limit". That is exactly the shape that produced 793 false successes before
+    W1-T2564: a refusal the detector does not recognise becomes an unremarked failure downstream.
+
+    ── ⚠ AND THE PATTERN CANNOT BE WRITTEN YET. THIS IS THE POINT OF THE FILING ─────────────────
+
+    MEASURED over the three-form union at the config root (59 gz / 2 plain / 1 live, 423,610
+    deduped rows, newest 2026-09-01T17:59:00Z):
+
+      rows mentioning codex ............ 2   (dispatch.open_sibling_build, review.unwired_advisory)
+      of those, refusals ............... 0
+      worker tails mentioning codex .... 0   (CONTROL: 188 tails mention claude)
+      rows mentioning claude ........... 3,282  (CONTROL for the query itself)
+      codex binary on host ............. absent
+      codex binary in the container .... absent
+
+    The Codex provider merged (#3498) but has never been refused, and there is no client here to
+    provoke one against. INVENTING THE REGEX FROM A GUESSED STRING IS THE ONE THING THIS TASK MUST
+    NOT DO: a pattern written from imagination would look like coverage, pass its own hand-made
+    fixture, and match nothing real — the "tested, inert" shape this repo has shipped before, on
+    the exact code path whose silent failure cost 793 false successes.
+
+    THE DELIVERABLE IS THEREFORE CONDITIONAL: capture a REAL Codex rolling-quota refusal, add the
+    pattern from that captured text, and pin it with the captured string as the fixture plus a
+    negative control. Until such a string exists this task is BLOCKED ON EVIDENCE, not on effort.
+
+    ── WHAT WAS CHECKED AND FOUND SOUND, SO IT IS NOT RE-INVESTIGATED ──────────────────────────
+
+    THE GUARD IS NOT ON A PATH CODEX NEVER TAKES — this was the second half of the operator's
+    question and it is answered. The Codex adapter does NOT go through `collectWorkerResult`; it
+    builds its own result in `src/lib/worker-provider.ts`. But it calls the SAME
+    `detectUsageLimitRefusal` while parsing events and sets the SAME `usageRefusal` field on the
+    result it returns, and `workerLedgerFields` reads `r.usageRefusal` FIRST. So a recognised Codex
+    refusal renders `verdict: "usage_refused"` by the identical path Claude's does. The wiring is
+    right; only the vocabulary is short.
+
+    THE FOUR KNOWN PATTERNS ALL FIRE, VERIFIED RATHER THAN ASSUMED: the real captured Claude string
+    and all three Codex hard-refusal strings match, and two negative controls do not — ordinary
+    worker prose, and "rate limit exceeded on the GitHub REST API", which must NOT be read as a
+    provider quota refusal.
+
+    NOT IN SCOPE: the existing five patterns, `classifyFailure`, and the transient-retry budget.
+
+  acceptance:
+    - claim: "a real captured Codex rolling-quota refusal is recognised as a usage-limit refusal"
+      proof: "unit test: test/codex-quota-window-refusal.test.ts"
+    - claim: "the pattern is pinned by the captured string itself, never by a hand-written approximation"
+      proof: "unit test: test/codex-quota-window-refusal.test.ts"
+    - claim: "a negative control proves the new pattern does not widen into ordinary provider prose"
+      proof: "unit test: test/codex-quota-window-refusal.test.ts"
