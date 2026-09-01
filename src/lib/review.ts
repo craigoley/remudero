@@ -12,7 +12,7 @@ import { loadPlanAtRef, visibleCriteria, type AcceptanceCriterion } from "./plan
 import { scanUnreachedExports, type UnreachedExport } from "./reachability.js";
 import { loadDefaultPolicy } from "./policy.js";
 import { readLedgerLines } from "./status.js";
-import { GENERATED_LEDGER_CLASSES, isCompanionPath } from "./task-linter.js";
+import { GENERATED_LEDGER_CLASSES, isCompanionPath } from "./companion-paths.js";
 import { ghJson } from "./worker.js";
 
 /**

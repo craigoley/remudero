@@ -15,6 +15,7 @@
   "src/lib/clone-reaper.ts": 298,
   "src/lib/commit-message.ts": 716,
   "src/lib/compaction.ts": 399,
+  "src/lib/companion-paths.ts": 500,
   "src/lib/config.ts": 707,
   "src/lib/console-freshness.ts": 111,
   "src/lib/console-url.ts": 236,
