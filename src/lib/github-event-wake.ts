@@ -605,6 +605,7 @@ export interface SweepWakeWiring {
 export function wireSweepWakeToDaemon(
   root: string,
   log: (step: string, extra?: Record<string, unknown>) => void = () => {},
+  watch: typeof fsWatch = fsWatch,
 ): SweepWakeWiring {
   const path = sweepWakeMarkerPath(root);
   const bootRecord = readSweepWakeMarker(path);
@@ -616,12 +617,19 @@ export function wireSweepWakeToDaemon(
     });
   }
   const signal = createSweepWakeSignal(bootRecord !== undefined);
-  const watcher = watchSweepWakeMarker(root, signal, log);
+  const watcher = watchSweepWakeMarker(root, signal, log, watch);
   // Close the consume-to-watch race: a delivery may land after the boot claim but before
   // fs.watch is armed. The durable path is authoritative, so seed a pending wake if it exists.
   if (readSweepWakeMarker(path)) signal.wake();
+  const sleep = (ms: number) => {
+    // `fs.watch` is an acceleration edge, never the source of truth. Re-read the durable level
+    // immediately before every top-level poll wait so a dropped/platform-delayed notification
+    // cannot strand an already-written marker until the full timer expires.
+    if (readSweepWakeMarker(path)) signal.wake();
+    return signal.sleep(ms);
+  };
   return {
-    sleep: signal.sleep,
+    sleep,
     acknowledge: () => {
       // `runDaemon` calls this only after STOP/PAUSE have allowed the top-level full-sweep gate.
       // Clear the in-memory edge and claim the durable level together. A delivery racing after

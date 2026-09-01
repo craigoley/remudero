@@ -316,7 +316,12 @@ test("a boot marker and a live marker interrupt polling but remain durable until
     writeSweepWakeMarkerAtomic(path, marker("during-active-sweep"));
     await Promise.race([
       live.sleep(60_000),
-      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("live wake did not interrupt sleep")), 250)),
+      new Promise<never>((_, reject) =>
+        setTimeout(
+          () => reject(new Error(`live wake did not interrupt sleep; marker=${JSON.stringify(readSweepWakeMarker(path))}`)),
+          250,
+        ),
+      ),
     ]);
     assert.equal(readSweepWakeMarker(path)?.deliveryId, "during-active-sweep", "a live edge also stays durable until admission");
     live.acknowledge();
@@ -347,6 +352,31 @@ test("watch failure is reported once and leaves the timer sleep usable", async (
   } finally {
     watcher.close();
     signal.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a durable marker still interrupts the poll when the filesystem watcher drops its event", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-github-missed-watch-"));
+  const path = sweepWakeMarkerPath(root);
+  const fake = new EventEmitter() as FSWatcher;
+  fake.close = () => {};
+  const wiring = wireSweepWakeToDaemon(root, () => {}, (() => fake) as typeof import("node:fs").watch);
+  try {
+    writeSweepWakeMarkerAtomic(path, {
+      deliveryId: "missed-watch-delivery",
+      event: "check_run",
+      action: "completed",
+      repository: REPOSITORY,
+      receivedAtIso: "2026-09-01T20:00:00.000Z",
+    });
+    await Promise.race([
+      wiring.sleep(60_000),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("durable marker did not backstop the missed watch")), 100)),
+    ]);
+    assert.equal(readSweepWakeMarker(path)?.deliveryId, "missed-watch-delivery");
+  } finally {
+    wiring.close();
     rmSync(root, { recursive: true, force: true });
   }
 });
