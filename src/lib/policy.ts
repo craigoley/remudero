@@ -497,6 +497,9 @@ export const DEFAULT_FIX_SPAWN_WALL_CLOCK_BOUND_MS = 3_600_000;
  * loaded YAML, the SAME absent-means-default shape {@link DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS}
  * above already uses, so an existing `policy.yaml` fixture that predates this task keeps
  * loading clean rather than failing on a missing mapping.
+ *
+ * PRIMARY CONTROL (W1-T1266): the replay ring evicts on ordinary traffic, with nothing failed
+ * when it does — this is the always-active bound on retained delivery ids, not a last resort.
  */
 export const DEFAULT_GITHUB_EVENT_WAKE_DEDUP_CAPACITY = 500;
 

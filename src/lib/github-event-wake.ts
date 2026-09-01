@@ -289,6 +289,8 @@ export function readSweepWakeMarker(path: string): SweepWakeMarker | undefined {
   try {
     return JSON.parse(readFileSync(path, "utf8")) as SweepWakeMarker;
   } catch {
+    // Fail-soft by contract (see this function's doc): absent, mid-write and corrupt are ONE
+    // outcome to every caller, so the cause is deliberately not carried out of here.
     return undefined;
   }
 }
@@ -301,11 +303,15 @@ export function consumeSweepWakeMarker(path: string): SweepWakeMarker | undefine
   try {
     renameSync(path, claimedPath);
   } catch {
+    // Nothing to claim: the marker is absent, or a racing consumer won the rename. Both mean
+    // "no delivery for me", which is exactly what `undefined` says.
     return undefined;
   }
   try {
     return JSON.parse(readFileSync(claimedPath, "utf8")) as SweepWakeMarker;
   } catch {
+    // The claimed inode is unreadable or corrupt. The `finally` below still unlinks it, so a bad
+    // marker is discarded rather than left to wedge every later consume.
     return undefined;
   } finally {
     try {
@@ -320,7 +326,10 @@ export function consumeSweepWakeMarker(path: string): SweepWakeMarker | undefine
 
 /** Bytes, not characters — GitHub's own guidance sizes real payloads in the tens of KB; 1 MiB is
  *  comfortably above any legitimate delivery and far below a DoS-shaped body. Bounded BEFORE
- *  buffering (design i), never after. */
+ *  buffering (design i), never after.
+ *
+ *  BACKSTOP (W1-T1266): no legitimate GitHub delivery approaches this, so it fires only once
+ *  something abnormal is already on the wire. It is not what paces or bounds ordinary traffic. */
 export const DEFAULT_GITHUB_WEBHOOK_MAX_BODY_BYTES = 1024 * 1024;
 
 export interface GithubEventWakeOptions {
@@ -671,6 +680,8 @@ export function readGithubWebhookSecret(secretFilePath: string | undefined): str
     const content = readFileSync(secretFilePath, "utf8").trim();
     return content.length > 0 ? content : undefined;
   } catch {
+    // Absent, unreadable and permission-denied collapse to one answer on purpose: presence is the
+    // ONLY thing a caller may observe about the secret (design vii), so no cause escapes here.
     return undefined;
   }
 }

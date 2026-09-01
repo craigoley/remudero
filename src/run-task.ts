@@ -24466,6 +24466,9 @@ export async function serveCommand(
     boardPacer?: GhCallPacer;
     loadMounts?: typeof loadMounts;
     spawn?: typeof spawnWorker;
+    // W1-T2568: the wake's policy, injectable so a test drives the rung without a plan/policy.yaml
+    // on disk — and so this read has a seam, which every other policy read in src/ already has.
+    policy?: Policy;
   } = {},
 ): Promise<number> {
   // `--host` was documented in USAGE and read by resolveServeHosts, but was NOT in this
@@ -24505,12 +24508,25 @@ export async function serveCommand(
   // is unreadable) — design (vii)'s ship-dark default, byte-identical to before this task.
   // `repository` is the SAME `resolveOwnerRepo()` result every other GitHub-scoped construction
   // in this function already uses, never a second, independently-resolved slug.
-  const githubEventWakePolicy = loadPolicy(policyPath(repoRoot));
   const githubEventWakeSecret = readGithubWebhookSecret(resolveGithubWebhookSecretFilePath(undefined));
 
   const runId = `SERVE-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: "SERVE", step, lane: "serve", ...extra });
+
+  // W1-T2568 + W1-T152: SEAMED AND NON-FATAL, and it sits below `log` so a degraded read is
+  // RECORDED rather than swallowed. `loadPolicy` THROWS on an absent or malformed
+  // plan/policy.yaml, and the SERVICE POSTURE paragraph directly below is explicit that nothing
+  // here may refuse to start: under the launchd unit this command generates, a startup refusal is
+  // a KeepAlive crash-loop (W1-T255, #726). A throwaway or partial checkout therefore still boots
+  // and the wake simply takes DEFAULT_GITHUB_EVENT_WAKE_DEDUP_CAPACITY, which is exactly what
+  // `createService` already falls back to when the field is absent.
+  let githubEventWakePolicy: Policy | undefined;
+  try {
+    githubEventWakePolicy = deps.policy ?? loadPolicy(policyPath(repoRoot));
+  } catch (e) {
+    log("serve.policy_unreadable", { error: (e as Error).message });
+  }
 
   // ── SERVICE POSTURE (W1-T152). None of these three can refuse to start: under the launchd
   // unit this command now generates, a startup refusal is a KeepAlive crash-loop, and a
@@ -24665,7 +24681,7 @@ export async function serveCommand(
     githubEventWake: {
       secret: githubEventWakeSecret,
       repository: `${self.owner}/${self.repo}`,
-      dedupCapacity: githubEventWakePolicy.values.githubEventWake.dedupCapacity,
+      dedupCapacity: githubEventWakePolicy?.values.githubEventWake.dedupCapacity,
     },
   });
 
