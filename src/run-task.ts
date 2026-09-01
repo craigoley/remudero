@@ -9584,8 +9584,16 @@ function reconMaskedContextNote(
 // plumbing calls would need a repo, not just a worktree checkout) — both are content digests
 // computed straight off the WORKTREE this dispatch already checked out fresh from
 // `origin/main`, so "current" always means "what this dispatch would itself see":
-//   - `planSha` hashes every file under `<worktree>/plan/`, sorted by repo-relative path —
-//     a proxy for "any commit to plan/", the exact invalidation trigger MASTER-PLAN:1869 names.
+//   - `taskRecordSha` (W1-T2510) hashes the ONE file that holds the task's own record — the
+//     monolith `plan/tasks.yaml` or its `plan/tasks.d/<id>-*.yaml` shard, whichever
+//     `taskRecordPath` resolves to. This is the LIVE `plan_sha` key component (see its own doc,
+//     below `filesDigest`). `planSha` (immediately below) hashes every file under
+//     `<worktree>/plan/` instead — the REJECTED coarse proxy this task narrows away from: filing
+//     any OTHER task's shard moves it too, so on a plan-heavy day it invalidates artifacts whose
+//     own record never changed (measured live: W1-T2467's `files_digest` was byte-identical
+//     either side of an invalidation whose only mover was `plan_sha`). `planSha` is kept,
+//     unchanged and still exported, only as the historical/rejected alternative a test can
+//     restore to show the unrelated-filing case invalidate again.
 //   - `filesDigest` hashes the content of the task's own declared `files:` (an absent file —
 //     e.g. a forward-referenced test path not yet created — contributes a fixed "absent"
 //     sentinel rather than throwing, so a file's later CREATION is itself a digest change).
@@ -9613,10 +9621,13 @@ function sha256Hex(s: string): string {
 }
 
 /**
- * Content digest of every file under `<worktreePath>/plan/`, sorted by repo-relative path —
- * the `plan_sha` key component. A missing `plan/` dir (should not happen in a real checkout,
- * but a test fixture may omit it) hashes to the digest of an empty file list rather than
- * throwing, so a plan-less fixture still gets a stable, comparable value.
+ * Content digest of every file under `<worktreePath>/plan/`, sorted by repo-relative path.
+ * NO LONGER the live `plan_sha` key component (W1-T2510 replaced it with {@link taskRecordSha},
+ * scoped to the task's own record) — kept, unchanged and exported, as the REJECTED coarse
+ * alternative: any commit to `plan/`, including an unrelated task's shard, moves this. A missing
+ * `plan/` dir (should not happen in a real checkout, but a test fixture may omit it) hashes to
+ * the digest of an empty file list rather than throwing, so a plan-less fixture still gets a
+ * stable, comparable value.
  */
 export function planSha(worktreePath: string): string {
   const planDir = join(worktreePath, "plan");
@@ -9662,6 +9673,82 @@ export function filesDigest(worktreePath: string, files: ReadonlyArray<string>):
   const sorted = [...files].sort();
   const combined = sorted.map((f) => `${f}:${fileDigestOrAbsent(join(worktreePath, f))}`).join("\n");
   return sha256Hex(combined);
+}
+
+/**
+ * Sentinel for "the task's own plan record could not be found or read" — {@link taskRecordSha}'s
+ * failure return. Deliberately never shaped like a real sha256 hex digest, AND deliberately
+ * excluded from ever validating a reuse in {@link decideReconArtifactReuse} — a missing or
+ * unreadable record must invalidate, never match, even against a PRIOR artifact that itself
+ * happened to record this exact same sentinel (e.g. two dispatches in a row that both raced a
+ * plan sync). "Fail closed" here means the ABSENCE itself can never be the thing two dispatches
+ * agree on.
+ */
+export const PLAN_RECORD_ABSENT = "absent";
+
+/**
+ * Content digest of the task's OWN plan record (W1-T2510) — the file {@link taskRecordPath}
+ * (`lib/plan.ts`) resolves `taskId` to: either the monolith `plan/tasks.yaml` or this task's own
+ * `plan/tasks.d/<id>-*.yaml` shard. This is the LIVE `plan_sha` key component (see the doc above
+ * `planSha`, above, for why it replaces the whole-directory hash there).
+ *
+ * FAILS CLOSED: `taskRecordPath` returning `undefined` (no file anywhere currently holds
+ * `taskId`'s record) or a resolved path that fails to read (raced away between resolution and
+ * read) both collapse to {@link PLAN_RECORD_ABSENT} — never a thrown error, matching every other
+ * digest primitive in this file (`fileDigestOrAbsent`, `loadReconArtifact`) being fail-soft by
+ * construction, and never a value a reuse decision is allowed to match against (see
+ * `decideReconArtifactReuse`).
+ */
+export function taskRecordSha(planPath: string, taskId: string): string {
+  const recordPath = taskRecordPath(planPath, taskId);
+  if (!recordPath) return PLAN_RECORD_ABSENT;
+  try {
+    return sha256Hex(readFileSync(recordPath, "utf8"));
+  } catch {
+    // A race (the resolved path vanished between taskRecordPath's read and this one) reads
+    // identically to "never resolved" — both are the same ABSENT sentinel to every consumer.
+    return PLAN_RECORD_ABSENT;
+  }
+}
+
+/**
+ * Pure reuse/invalidate decision for the `(plan_sha, files_digest)` half of the recon artifact
+ * key (`task_id` is implicit — `prior`, if given, already belongs to this task; `loadReconArtifact`
+ * is keyed by task id on disk). Extracted from the call site (W1-T2510) so the predicate itself —
+ * including WHICH component an invalidation is attributed to — is unit-testable without spinning
+ * up a real dispatch.
+ *
+ * `prior === undefined` is the `recon.absent` case (first-ever dispatch, or an artifact that
+ * never existed): always invalid, and there is no "which component moved" to report since there
+ * is nothing to compare against — an artifact with no prior record is a MISS, never a hit.
+ *
+ * Otherwise, valid requires ALL THREE: `currentPlanSha` is not {@link PLAN_RECORD_ABSENT} (a
+ * missing/unreadable task record always invalidates, per `taskRecordSha`'s own doc), AND both
+ * halves of the key still match the prior artifact's. An invalid decision names the mover:
+ * `"plan_sha"` when the task's own record changed OR is currently unreadable, `"files_digest"`
+ * otherwise (MASTER-PLAN's invalidation sentence names only these two components — never a third
+ * "why", so the attribution is exhaustive by construction, not a default/fallback guess).
+ *
+ * THE ABSENT CHECK IS ITS OWN BRANCH, CHECKED BEFORE THE STRING COMPARISON, not folded into the
+ * `!==` below: a prior artifact can itself have been written with `plan_sha: PLAN_RECORD_ABSENT`
+ * (a task record that was already unreadable when an earlier dispatch's recon still ran and
+ * persisted — the persist path never re-checks this predicate), so `prior.plan_sha` can
+ * coincidentally STRING-EQUAL today's `PLAN_RECORD_ABSENT` even though nothing "matched" in any
+ * meaningful sense. Without this branch first, that coincidence would fall through to the
+ * `prior.plan_sha !== currentPlanSha` comparison, find them equal, and misattribute the
+ * invalidation to `"files_digest"` — wrong, and exactly the kind of silently-mislabeled ledger
+ * row `recon.invalidated`'s own doc says this row exists to prevent.
+ */
+export function decideReconArtifactReuse(
+  prior: ReconArtifact | undefined,
+  currentPlanSha: string,
+  currentFilesDigest: string,
+): { valid: boolean; invalidationReason?: "plan_sha" | "files_digest" } {
+  if (!prior) return { valid: false };
+  if (currentPlanSha === PLAN_RECORD_ABSENT) return { valid: false, invalidationReason: "plan_sha" };
+  const valid = prior.plan_sha === currentPlanSha && prior.files_digest === currentFilesDigest;
+  if (valid) return { valid: true };
+  return { valid: false, invalidationReason: prior.plan_sha !== currentPlanSha ? "plan_sha" : "files_digest" };
 }
 
 function reconArtifactPath(root: string, taskId: string): string {
@@ -10887,15 +10974,19 @@ async function runTask(
       // artifact exists for THIS task at THIS `(plan_sha, files_digest)`. Both are computed against
       // `worktreePath`, already checked out fresh from `origin/main` above, so "current" always
       // means what THIS dispatch would itself observe — never a stale read of the orchestrator's
-      // own tree. See `planSha`/`filesDigest`/`ReconArtifact`'s doc (above `RECON_MAX_TURNS`) for
-      // the key's derivation and why it drops `head_sha`.
-      const currentPlanSha = planSha(worktreePath);
+      // own tree. See `taskRecordSha`/`filesDigest`/`ReconArtifact`'s doc (above `RECON_MAX_TURNS`)
+      // for the key's derivation and why it drops `head_sha`.
+      //
+      // W1-T2510: `plan_sha` is now `taskRecordSha` — the digest of THIS task's own plan record —
+      // not `planSha` (the whole `plan/` directory, kept above only as the rejected alternative).
+      // The record is looked up against the WORKTREE's own `plan/tasks.yaml`, the same "fresh off
+      // this dispatch's own checkout" discipline `filesDigest` already follows, never the
+      // orchestrator's own (possibly staler) `planPath`.
+      const currentPlanSha = taskRecordSha(join(worktreePath, "plan", "tasks.yaml"), taskId);
       const currentFilesDigest = filesDigest(worktreePath, task.files ?? []);
       const priorReconArtifact = loadReconArtifact(config.root, taskId);
-      const reconArtifactValid =
-        !!priorReconArtifact &&
-        priorReconArtifact.plan_sha === currentPlanSha &&
-        priorReconArtifact.files_digest === currentFilesDigest;
+      const reconDecision = decideReconArtifactReuse(priorReconArtifact, currentPlanSha, currentFilesDigest);
+      const reconArtifactValid = reconDecision.valid;
 
       if (reconArtifactValid) {
         // HIT: recon is skipped entirely this dispatch — the cost this task exists to stop
@@ -10916,7 +11007,7 @@ async function runTask(
         // `files:` has since moved past (`recon.invalidated`) — never a silent, unexplained
         // full recon (P48(ii): no silent empty).
         if (priorReconArtifact) {
-          const reason = priorReconArtifact.plan_sha !== currentPlanSha ? "plan_sha" : "files_digest";
+          const reason = reconDecision.invalidationReason!;
           say(`recon artifact invalidated (${reason} changed) — running a full recon`);
           log("recon.invalidated", {
             reason,
