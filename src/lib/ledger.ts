@@ -789,6 +789,19 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // (matching their pre-existing, unprotected status quo) — only this ONE step, the one
   // `rmd status` actually reads, needs the guard.
   "automerge.rate_limit_refused",
+  // W1-T2558: cost-anomaly.ts's own idempotence marker — `alreadyLedgeredCostAnomalyRunIds`/
+  // `pendingCostAnomalies` read every `cost.anomaly` row back, off the SAME live-file read
+  // `runSweep` already fed it, to decide whether a run has ALREADY been flagged (that module's
+  // own "ONE ROW PER RUN, IDEMPOTENT" design note iv). Before this line, that dedup worked only
+  // until the next rotation: PASS 1 above matched `cost.anomaly` against none of the three
+  // retention sets, so every row was archived away as noise, and the next sweep's live-only read
+  // saw no surviving row for that run id, re-derived the exact same finding as "pending", and
+  // re-appended it. MEASURED 2026-09-01: 471 raw rows collapsing to 45 distinct run ids, one run
+  // (W1-T2324-1787823430981) carrying 26 identical re-flags at $25.68, and the same five runs
+  // recurring hours apart with nothing changing but the class median (5.03 -> 5.10 -> 5.07). The
+  // line IS the dedup key, the exact "sweep.absent_repush"/"review.unwired_advisory" shape this
+  // Set exists to prevent, applied one sentinel later.
+  "cost.anomaly",
   // KEEP THE W1-T964 TRIO LAST, immediately before the Set's close: the mutation check in
   // test/ledger-rotation.test.ts anchors on those three lines followed by `]);` and asserts the
   // needle occurs EXACTLY once. A block appended after them silently breaks that anchor — this

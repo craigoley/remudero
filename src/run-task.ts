@@ -808,6 +808,12 @@ import {
   WorkerAbandonedError,
 } from "./lib/worker.js";
 import { LiveSpawnBlockedError } from "./lib/spawn-guard.js";
+// W1-T2557: reuses cost-anomaly's ALREADY-COMMITTED multiplier/minSamples policy data for the
+// runaway-turns bound below — see `deriveRunawayTurnBound`'s own doc for why this borrows that
+// row rather than inventing a second, duplicate "N times median" knob just because the unit is
+// turns instead of dollars (this task's own declared `files:` list does not include
+// `plan/policy.yaml`, so no new policy row is added here).
+import { loadDefaultCostAnomalyPolicy, type CostAnomalyPolicy } from "./lib/cost-anomaly.js";
 import { gitPushRunBranch, gitPushEmptyCommit } from "./lib/git-push.js";
 import {
   ensureWorkerKeychain,
@@ -951,6 +957,54 @@ export function ledgerPathFor(config: Config): string {
  *  enforces for every other step in that set. */
 export const WORKER_STATE_LEDGER_STEP = "worker.state";
 
+/**
+ * W1-T2557: THE MID-FLIGHT TURN-COUNT ROW — appended the instant {@link
+ * WorkerStateTracker.turnsSoFar} CHANGES, independent of `worker.state`'s own TRANSITION-only
+ * cadence (design note iii, above). A worker that stays continuously `working` for the whole
+ * run would otherwise emit exactly ONE `worker.state` row for the entire spawn — this is the row
+ * that stays fresh while the run is happening, closing the gap this task's own rationale names:
+ * "every cost signal there is fires AFTER `implement.done`". Also deliberately NOT added to
+ * `DECISION_RELEVANT_LEDGER_STEPS` — nothing decides off it, same reasoning as `worker.state`.
+ */
+export const WORKER_TURNS_LEDGER_STEP = "worker.turns";
+
+/**
+ * W1-T2557: appended AT MOST ONCE per run, the instant {@link WorkerStateTracker.turnsSoFar}
+ * first clears the bound {@link WorkerStateSensor.setRunawayBound} configured (see {@link
+ * deriveRunawayTurnBound}) — an EARLIER, NON-FATAL OBSERVATION, exactly the rationale's own
+ * words: never a lower ceiling, never an automatic kill. `buildWorkerStateSensor` has no kill or
+ * defer affordance to reach for even if it wanted to — this appends a ledger row and nothing
+ * else. Not added to `DECISION_RELEVANT_LEDGER_STEPS` for the same reason `worker.state` and
+ * `cost.anomaly` are not: this reports, nothing reads it to decide anything (yet).
+ */
+export const WORKER_RUNAWAY_TURNS_LEDGER_STEP = "worker.runaway_turns";
+
+/**
+ * W1-T2557: the turn-count bound one run is judged against, sized against an OBSERVED
+ * distribution of turn counts for the SAME task class — never a source literal (this task's own
+ * acceptance criterion). Mirrors `src/lib/cost-anomaly.ts`'s `detectCostAnomalies` median
+ * discipline exactly (design note iii there: MEDIAN, not mean, so the very outlier being
+ * detected cannot drag its own threshold) and its THIN-CLASS-IS-SILENT floor (design note ii:
+ * below `policy.minSamples` settled runs, the median is noise, so this returns `undefined`
+ * rather than a guess) — reusing `policy`'s ALREADY-COMMITTED, ALREADY-VALIDATED
+ * `multiplier`/`minSamples` (loaded via {@link loadDefaultCostAnomalyPolicy}) rather than
+ * inventing a second, duplicate "N times median" knob for turns instead of dollars.
+ *
+ * Pure — no fs, no ledger — so a test drives this against a synthetic distribution with zero
+ * real ledger history at all; `runTask`'s own call site (below) is what supplies the real
+ * per-class turn-count history off {@link gatherRuns}.
+ */
+export function deriveRunawayTurnBound(
+  historicalTurnCounts: readonly number[],
+  policy: Pick<CostAnomalyPolicy, "multiplier" | "minSamples">,
+): number | undefined {
+  if (historicalTurnCounts.length < policy.minSamples) return undefined;
+  const sorted = [...historicalTurnCounts].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  const median = sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
+  return median * policy.multiplier;
+}
+
 /** How often {@link WorkerStateSensor.startPolling}'s timer checks the quiet floor while a
  *  spawn is in flight. Cheap: the check itself is a no-op unless the floor has genuinely
  *  elapsed, so this only bounds how promptly a real silence gets ledgered, not any cost. */
@@ -1003,6 +1057,14 @@ export interface WorkerStateSensor {
    *  again for the NEXT spawn in the same run: each call owns its own timer, `unref`'d so it
    *  never keeps the process alive on its own. */
   startPolling: () => () => void;
+  /**
+   * W1-T2557: set (at most meaningfully once per run, right after `taskClass` resolves — see
+   * `runTask`'s own call site) the turn-count bound {@link deriveRunawayTurnBound} derived for
+   * this run's class. `undefined` — the default until this is called, and the value a
+   * best-effort derivation failure passes — means the mid-flight runaway signal never fires for
+   * this run: never a guessed bound standing in for one that could not be derived.
+   */
+  setRunawayBound: (bound: number | undefined) => void;
 }
 
 /**
@@ -1028,6 +1090,12 @@ export function buildWorkerStateSensor(args: {
   const tracker = new WorkerStateTracker(args.quietFloorMs ?? DEFAULT_WORKER_QUIET_FLOOR_MS);
   const tailPath = join(args.root, "state", "runs", `${args.runId}.tail`);
   let tailLines: string[] = [];
+  // W1-T2557: mutable ONLY via `setRunawayBound` below — `undefined` until `runTask`'s own call
+  // site resolves one (or a derivation failure leaves it unset), meaning the runaway signal
+  // stays silent rather than guessing.
+  let runawayBoundTurns: number | undefined;
+  let lastEmittedTurns: number | undefined;
+  let runawaySignaled = false;
 
   const recordTransition = (next: WorkerState): void => {
     try {
@@ -1045,6 +1113,51 @@ export function buildWorkerStateSensor(args: {
     }
   };
 
+  /**
+   * W1-T2557: THE MID-FLIGHT VISIBILITY THIS TASK ADDS — called on EVERY observed stream event
+   * (the observer already parses every one; this task's own rationale calls a running count on
+   * the row it already writes "close to free"), never gated behind a `worker.state` TRANSITION
+   * (which a continuously-`working` worker can go the WHOLE run without firing again — exactly
+   * the invisible-while-spending gap this task exists to close). Two independent, best-effort,
+   * NEVER-ACTING appends:
+   *   - `worker.turns`, the instant the running count CHANGES (never a duplicate row for the
+   *     same count — the same "only on change" discipline `recordTransition` already keeps).
+   *   - `worker.runaway_turns`, AT MOST ONCE per run, the instant the count first clears
+   *     `runawayBoundTurns` — a REPORT, never a kill/defer: this function has no kill/defer
+   *     affordance to reach for even if it wanted to (acceptance: "it observes and never acts").
+   */
+  const observeTurns = (): void => {
+    const current = tracker.turnsSoFar();
+    if (current !== lastEmittedTurns) {
+      lastEmittedTurns = current;
+      try {
+        appendLedger(args.ledgerPath, {
+          run_id: args.runId,
+          task_id: args.taskId,
+          step: WORKER_TURNS_LEDGER_STEP,
+          turns_so_far: current,
+        });
+      } catch {
+        // Best-effort — same discipline as `recordTransition`'s own catch above.
+      }
+    }
+    if (!runawaySignaled && runawayBoundTurns !== undefined && current > runawayBoundTurns) {
+      runawaySignaled = true;
+      try {
+        appendLedger(args.ledgerPath, {
+          run_id: args.runId,
+          task_id: args.taskId,
+          step: WORKER_RUNAWAY_TURNS_LEDGER_STEP,
+          turns_so_far: current,
+          bound_turns: runawayBoundTurns,
+        });
+      } catch {
+        // Best-effort (W1-T942 design note iv, unchanged discipline): an observability organ
+        // that can kill a worker is worse than the blindness it cures.
+      }
+    }
+  };
+
   const observer: WorkerStreamObserver = (event) => {
     if (event.text) {
       tailLines = capWorkerTailLines([...tailLines, event.text]);
@@ -1052,6 +1165,7 @@ export function buildWorkerStateSensor(args: {
     }
     const next = tracker.observe(event);
     if (next) recordTransition(next);
+    observeTurns();
   };
 
   const startPolling = (): (() => void) => {
@@ -1063,7 +1177,13 @@ export function buildWorkerStateSensor(args: {
     return () => clearInterval(timer);
   };
 
-  return { observer, startPolling };
+  return {
+    observer,
+    startPolling,
+    setRunawayBound: (bound) => {
+      runawayBoundTurns = bound;
+    },
+  };
 }
 
 /** Retention window {@link sweepStaleWorkerTails} ages a `.tail` file out on — generously above
@@ -11158,6 +11278,24 @@ async function runTask(
     mount: { model: mount.model, effort: mount.effort, max_turns: mount.maxTurns, context_budget: mount.contextBudget },
   });
   say(`run ${runId} — target ${owner}/${task.repo} · mount ${mount.model}/${mount.effort} · ${mount.maxTurns} turns (${task.type}×${task.risk}×${taskClass})`);
+
+  // W1-T2557: THE RUNAWAY BOUND — sized against THIS task's own class's OBSERVED turn-count
+  // history (see `deriveRunawayTurnBound`'s own doc), read ONCE here rather than re-derived on
+  // every poll tick. `taskClass` is only known from this point on (resolveRunMounts, above), so
+  // the sensor is built with no bound and this call configures it as soon as one is available.
+  // Best-effort and SILENT on failure (a bad/absent ledger or policy read must never block
+  // dispatch) — the SAME "cannot observe, never a guess" polarity `WorkerStateTracker`'s own
+  // UNKNOWN state already keeps, so an unresolved bound simply leaves the mid-flight runaway
+  // signal quiet for this one run rather than fabricating a threshold nothing measured.
+  try {
+    const historyNdjson = existsSync(ledgerPath) ? readFileSync(ledgerPath, "utf8") : "";
+    const classTurnHistory = gatherRuns(parseLedger(historyNdjson))
+      .filter((r) => (r.taskClass ?? "unknown") === taskClass && r.numTurns > 0)
+      .map((r) => r.numTurns);
+    workerStateSensor.setRunawayBound(deriveRunawayTurnBound(classTurnHistory, loadDefaultCostAnomalyPolicy()));
+  } catch {
+    // best-effort — see this block's own doc above.
+  }
 
   let costUsd = 0;
   let budgetWarned = false;
