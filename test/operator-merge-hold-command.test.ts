@@ -171,7 +171,7 @@ test("mergeHoldCommand routes parsed CLI input to the durable writer and reports
   }
 });
 
-// ── W1-T1000002 COVERAGE: the three refusal arms the first cut never reached ──────────────────
+// ── W1-T2581 COVERAGE: the three refusal arms the first cut never reached ─────────────────────
 // `diff-coverage` BLOCKED this PR on operator-merge-hold.ts:31, :57 and :119-120 — the invalid
 // action arm, the --task-without--pr arm, and the read-back verification throw. Each is reached
 // here for real, through the module's own seams.
