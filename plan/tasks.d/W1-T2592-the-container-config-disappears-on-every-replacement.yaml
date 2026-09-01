@@ -1,0 +1,99 @@
+- id: W1-T2592
+  title: "THE AZURE CONTAINER'S PROVIDER CONFIG DISAPPEARS ON EVERY REPLACEMENT — Codex is installed and authenticated, but both launch paths mount state, Claude credentials and Codex credentials while leaving `/home/node/.config/remudero/config.json` in the writable container layer; a recycle therefore recreates the Claude-only default and makes a healthy Codex subscription ineligible"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 8.00
+  files:
+    - deploy/recycle-container.sh
+    - deploy/host-update.sh
+    - test/container-config-mount.test.ts
+    - docs/operator-guide.md
+  origin: "operator-session#durable-azure-dual-provider-config-2026-09-01"
+  plan_refs: ["W1-T1010", "W1-T1069", "W1-T505"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED ON THE LIVE AZURE DAEMON 2026-09-01: both subscription credentials work inside the
+    image (`claude` reports a claude.ai Max subscription and `codex login status` reports ChatGPT),
+    but `docker inspect remudero-daemon` lists mounts for `/home/node/Remudero`,
+    `/home/node/.claude` and `/home/node/.codex` and NONE for `/home/node/.config/remudero`.
+    The live config is therefore a file in the disposable container layer.
+
+    THE SOURCE MATCHES THE MACHINE. `loadConfig()` resolves the provider decision only from
+    `$HOME/.config/remudero/config.json`; `enabledWorkerProviders()` returns `["claude"]` when its
+    `workerProviders` block is absent. `deploy/recycle-container.sh`'s real `docker run` and
+    `deploy/host-update.sh --print-daemon-run` both carry the three measured mounts and no config
+    mount. Installing and authenticating Codex is consequently insufficient: the router never
+    considers it, and any in-container opt-in is erased by the next replacement.
+
+    DO NOT MOUNT THE HOST CLI'S ORDINARY `~/.config/remudero` DIRECTORY. That file may legitimately
+    contain host paths such as `root` and `claudeBin`; inside the image those paths are wrong and
+    can break the Claude path that works today. Use a container-specific host directory instead:
+    `${RMD_CONTAINER_CONFIG_DIR:-${HOME:-/root}/.config/remudero-container}`, mounted read-write at
+    `/home/node/.config/remudero`. This also keeps a config that may contain relay credentials out
+    of the git checkout and its broadly readable `state/` subtree.
+
+    BACKWARDS COMPATIBILITY IS THE SAFETY BOUND. If that directory does not exist, neither script
+    may ask Docker to create a root-owned empty bind directory. Warn, omit only this new mount, and
+    leave the existing Claude-only invocation otherwise byte-for-byte in shape. Enabling Codex is
+    a separate explicit commissioning act: create the directory for uid 1000, write a container-
+    valid config with `workerProviders.enabled: ["claude", "codex"]`, and verify both login status
+    commands before the operator chooses a recycle. The scripts must not silently edit provider
+    policy, copy an unknown host config, or start/restart a container as part of configuration.
+
+  design: |
+    Give `deploy/recycle-container.sh` and `deploy/host-update.sh --print-daemon-run` the same
+    host-only `RMD_CONTAINER_CONFIG_DIR` derivation and `/home/node/.config/remudero` destination.
+    Build a conditional `-v host:container` argument only when the source is an existing directory,
+    matching the already-shipped Codex-home pattern. The mount is read-write because `loadConfig()`
+    exclusive-creates `config.json` on first use and operator changes must survive replacement.
+
+    Keep this host-only path out of `deploy/runtime-env-vars.sh`: the value selects a bind source
+    while constructing `docker run`; it is not runtime configuration passed into the container.
+    Test the executable recycle invocation and the printed operator recipe independently, then add
+    one parity assertion so they cannot drift. Document a zsh-safe commissioning sequence that
+    pre-creates the directory with uid/gid 1000 and mode 700, creates or validates a mode-600
+    container config whose paths resolve inside the image, enables both providers without deleting
+    existing fields, verifies Claude and Codex authentication in one-off containers, and makes
+    clear that only the operator decides when to recycle.
+
+    Do not change `src/lib/config.ts`, the Claude-only product default, provider selection,
+    credential mounts, image contents, restart policy, daemon lifecycle or deploy automation.
+
+  acceptance:
+    - claim: "an existing container-specific config directory is mounted read-write at `/home/node/.config/remudero` by the real recycle invocation"
+      proof: "unit test: test/container-config-mount.test.ts"
+    - claim: "the printed daemon invocation mounts that same directory at that same destination, so the documented cold-start command and recycle cannot drift"
+      proof: "unit test: test/container-config-mount.test.ts"
+    - claim: "when the container config directory is absent, both scripts warn, create nothing, and preserve the runnable Claude-only launch shape without an empty Docker-created bind mount"
+      proof: "unit test: test/container-config-mount.test.ts"
+    - claim: "the default host source is container-specific rather than the host CLI's `~/.config/remudero` or any path inside the repository state mount"
+      proof: "unit test: test/container-config-mount.test.ts"
+    - claim: "the actual and printed launch paths derive the new mount from the same environment-variable name and container destination"
+      proof: "unit test: test/container-config-mount.test.ts"
+    - claim: "the operator guide gives a complete Azure commissioning and verification sequence, preserves existing config fields, and states that configuration never starts, stops, restarts or deploys the daemon"
+      proof: "unit test: test/container-config-mount.test.ts"
+
+  falsifier: |
+    Close this task without implementation if current main already bind-mounts one durable,
+    container-specific host config directory at `/home/node/.config/remudero` in BOTH the real
+    recycle and the printed daemon invocation, and a replacement test proves a dual-provider
+    setting survives. A Codex credential mount, an in-container config file, operator prose, or a
+    host config at paths invalid inside the image is not that evidence.
+
+    Re-design rather than build if the config must live under the repository state mount to be
+    durable, because that would move relay tokens and provider policy into a worker-readable tree;
+    preserving confidentiality outranks avoiding one additional host directory.
+
+  note: |
+    The task id was atomically reserved at `refs/rmd-id/W1-T2592` by `rmd next-task-id --reserve`
+    before this shard was written; it was not inferred from filenames or minted offline.
+
+    `risk: high`, `band_meaning: span` is Rule 19's span classification: one deployment concern
+    necessarily crosses the executable recycle, its printed cold-start twin, one focused suite and
+    the operator runbook. It does not authorize a provider-policy or lifecycle change.
