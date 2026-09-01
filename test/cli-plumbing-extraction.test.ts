@@ -25,6 +25,7 @@ import { fileURLToPath } from "node:url";
 import * as repoLocation from "../src/lib/repo-location.js";
 import * as cliArgs from "../src/lib/cli-args.js";
 import { resolveRepoRoot as reExportedResolveRepoRoot, unknownArgError as reExportedUnknownArgError } from "../src/run-task.js";
+import { findImportReferences, importsModule } from "./helpers/import-sweep.js";
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 const runTaskSrc = readFileSync(join(repoRoot, "src", "run-task.ts"), "utf8");
@@ -93,6 +94,10 @@ test("repo-location.ts exports ONLY the repo-location cluster — nothing unrela
 });
 
 test("no other src/lib module imports src/lib/repo-location.ts — only run-task.ts (the CLI entrypoint) pays the argv-at-import cost", () => {
+  // W1-T2531: resolved through the shared any-import-form predicate, not a static `from`-only
+  // regex -- a module reaching repo-location.ts only via `await import(...)` would otherwise
+  // drop out of this census silently, undercounting exactly the argv-at-import-cost importers
+  // this test exists to enumerate.
   const importers: string[] = [];
   for (const file of readdirSync(libDir, { recursive: true }) as string[]) {
     if (!file.endsWith(".ts") || file === "repo-location.ts") continue;
@@ -103,7 +108,7 @@ test("no other src/lib module imports src/lib/repo-location.ts — only run-task
     } catch {
       continue; // directory entry
     }
-    if (/from ["']\.\.?\/(.*\/)?repo-location\.js["']/.test(text)) importers.push(file);
+    if (importsModule(text, /(^|\/)repo-location\.js$/)) importers.push(file);
   }
   assert.deepEqual(importers, [], `an unrelated src/lib module imports repo-location.ts and would pay the argv-at-import cost on import: ${importers.join(", ")}`);
 });
@@ -113,7 +118,11 @@ test("no other src/lib module imports src/lib/repo-location.ts — only run-task
 test("unknownArgError lives in src/lib/cli-args.ts and is self-contained (no imports at all)", () => {
   assert.equal(typeof cliArgs.unknownArgError, "function", "unknownArgError must be exported from src/lib/cli-args.ts");
   const src = readFileSync(join(libDir, "cli-args.ts"), "utf8");
-  assert.doesNotMatch(src, /^import /m, "cli-args.ts must import nothing — unknownArgError depends on nothing local");
+  // W1-T2531: `/^import /m` only ever caught line-initial static/bare `import` syntax -- a
+  // `require(...)` or a dynamic `import(...)` reaching a module from inside an expression is
+  // never line-initial and would have slipped this check entirely. Widened to the shared
+  // any-import-form predicate: cli-args.ts must have ZERO references, by any form.
+  assert.deepEqual(findImportReferences(src), [], "cli-args.ts must import nothing — unknownArgError depends on nothing local");
   assert.doesNotMatch(
     src,
     /commandSpec\(|COMMANDS\.|commandSyntax\(/,
@@ -205,10 +214,15 @@ test(".dependency-cruiser.cjs's lib-no-spike-or-cli rule is still declared at se
 });
 
 test("neither new lib module (repo-location.ts, cli-args.ts) imports src/run-task.ts or src/spike.ts", () => {
+  // W1-T2531: resolved through the shared any-import-form predicate. This is the exact
+  // dependency-cruiser-backstopped edge (lib-no-spike-or-cli, severity: error) -- but a NEGATIVE
+  // assertion that only sees a static `from` still passes silently when the forbidden edge is
+  // taken via `await import(...)`, so the text-level check must see it too, not lean solely on
+  // the second opinion.
   for (const name of ["repo-location.ts", "cli-args.ts"]) {
     const src = readFileSync(join(libDir, name), "utf8");
-    assert.doesNotMatch(src, /from ["']\.\.\/run-task\.js["']/, `${name} must not import run-task.ts`);
-    assert.doesNotMatch(src, /from ["']\.\.\/spike\.js["']/, `${name} must not import spike.ts`);
+    assert.equal(importsModule(src, /(^|\/)run-task\.js$/), false, `${name} must not import run-task.ts`);
+    assert.equal(importsModule(src, /(^|\/)spike\.js$/), false, `${name} must not import spike.ts`);
   }
 });
 
