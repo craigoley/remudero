@@ -74,6 +74,10 @@ function runScript(opts: {
   const credDir = mkdtempSync(join(tmpdir(), "rmd-appauth-cred-"));
   const stateDir = mkdtempSync(join(tmpdir(), "rmd-appauth-state-"));
   mkdirSync(join(stateDir, "state"), { recursive: true });
+  // W1-T2555 added a checkout guard (section 1.5) that refuses BEFORE any credential logic when
+  // STATE_DIR carries no `remudero/.git`. Without it the script never reaches the App-auth path
+  // under test, and every case below asserts against that refusal instead.
+  mkdirSync(join(stateDir, "remudero", ".git"), { recursive: true });
   const keyName = opts.keyName ?? "rmd-app.pem";
   if (opts.keyFile === "present") {
     // Not a real key — the script tests only that the FILE is present and non-empty.
