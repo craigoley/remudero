@@ -1,0 +1,95 @@
+- id: W1-T2584
+  title: "THE REVIEW LANE CEILING IS ALSO A PER-PASS THROUGHPUT CAP — `runSweep` starts only `reviewLanes` reviewers and defers every remaining green PR to a later full sweep, so one GitHub-event wake cannot drain the review backlog it discovered"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 30.00
+  files:
+    - src/lib/sweep.ts
+    - test/sweep.test.ts
+    - test/review-lane-budget.test.ts
+    - test/review-lane-fairness.test.ts
+    - test/event-review-backlog-drain.test.ts
+  origin: "operator-session#github-event-review-backlog-drain-2026-09-01"
+  plan_refs: ["W1-T473", "W1-T513", "W1-T1049", "W1-T1218", "W1-T2568"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED AT ORIGIN/MAIN 4d14fc5. `runSweep` orders every pending review, then executes
+    `orderedReviews.slice(0, reviewLanes)` and finalizes the remainder with
+    `review budget exhausted this pass (...) — re-derived next pass`. The W1-T473 regression
+    test pins the same behavior: three reviewable PRs with two lanes start two reviewers and the
+    third runs only on a later `runSweep` call. `reviewLanes` therefore limits both simultaneous
+    reviewer processes AND total reviews per full sweep.
+
+    OBSERVED IN THE W1-T2568 IMPLEMENTATION WORKTREE AT COMMIT f29da0ac. A signed GitHub event
+    writes one coalesced wake marker. The daemon consumes that marker while releasing one sleep,
+    then enters its ordinary full-sweep gate. The marker records that GitHub state changed; it is
+    not a queue and does not encode one wake per PR. A burst of check completions can therefore
+    coalesce to one wake, discover more eligible PRs than `reviewLanes`, start only the oldest two,
+    and leave the rest dependent on a later timer or unrelated GitHub event. That is event-driven
+    discovery with timer-paced backlog throughput, not an event-driven review queue.
+
+    THE CEILING SHOULD BOUND CONCURRENCY, NOT ELIGIBILITY OR PASS THROUGHPUT. Keep the immutable
+    oldest-first order and start no more than `Math.max(1, policy.reviewLanes)` `postReview`
+    effects at once, but continue pulling from that pass's already-derived pending set as lanes
+    settle until every eligible head has either been attempted or a named stop condition fires.
+    Use a bounded worker-pool/pull shape rather than `Promise.all` over the entire backlog, so the
+    number of live promises and provider processes is itself bounded.
+
+    HEADROOM AND OPERATOR CONTROL REMAIN HARD GATES. A provider-headroom refusal means the call
+    did not run and must stop admitting later reviews from the same snapshot; release every
+    unstarted review key and ledger those PRs as recoverable for the next event/timer pass. Do not
+    convert a temporary capacity refusal into `review.post_refused`, a failed verdict or a strike.
+    The existing cross-call review-key mutex remains authoritative. Do not change merge policy,
+    auto-merge behavior, the durable merge hold, manual squash, branch protection, review verdict
+    semantics, or provider/model selection.
+
+    THE FULL-SWEEP WALL-CLOCK BOUND MUST STAY REAL. Do not let a background review queue continue
+    admitting work after `runGatedSweep` has abandoned the pass. Thread the existing pass deadline
+    or an equivalent injected continuation gate to the review pool, and re-check it before each
+    later admission. STOP/PAUSE and a provider-capacity stop must leave unstarted heads with no
+    outcome dedup key so the ordinary level-triggered pass can recover them. Already-running
+    reviews may settle normally; never kill a reviewer at an arbitrary write boundary.
+
+    THIS DOES NOT RAISE `reviewLanes`. The shipped value remains two until provider/host telemetry
+    justifies a separate policy change. The improvement is that two lanes stay occupied while a
+    backlog exists instead of going idle after their first pair and waiting for another sweep.
+  acceptance:
+    - claim: "one full sweep over five eligible reviews with `reviewLanes: 2` attempts all five while never observing more than two `postReview` calls in flight"
+      proof: "unit test: test/event-review-backlog-drain.test.ts"
+    - claim: "reviews begin in immutable oldest-first order even when the input is GitHub's newest-first enumeration"
+      proof: "unit test: test/review-lane-fairness.test.ts"
+    - claim: "a provider-headroom stand-down stops later admissions, writes no review outcome key for unstarted heads, and leaves those heads eligible on the next pass"
+      proof: "unit test: test/event-review-backlog-drain.test.ts"
+    - claim: "the full-sweep wall-clock or continuation gate is consulted before each later admission, and once closed it starts no new reviewer while releasing every unstarted review key"
+      proof: "unit test: test/event-review-backlog-drain.test.ts"
+    - claim: "a concurrent light sweep cannot double-post a head already claimed by the draining full sweep"
+      proof: "unit test: test/event-review-backlog-drain.test.ts"
+    - claim: "a pass with zero eligible reviews starts zero reviewers, and `reviewLanes: 0` retains the existing code-level floor of one"
+      proof: "unit test: test/review-lane-budget.test.ts"
+    - claim: "the shipped `reviewLanes` value, provider/model routing, verdict rules, merge hold and merge method are unchanged"
+      proof: "unit test: test/event-review-backlog-drain.test.ts"
+  falsifier: |
+    Do not build this task if the W1-T2568 implementation that reaches main keeps one wake pending
+    and repeatedly re-enters the ordinary full-sweep gate until no review-budget deferrals remain;
+    that would already provide bounded event-driven backlog drainage. The falsifier must be an
+    implementation test showing one coalesced marker, a backlog deeper than `reviewLanes`, and the
+    final eligible PR attempted without a timer or second event. A plan statement that events
+    "wake the sweep" is not that evidence.
+
+    Re-design instead of widening concurrency if the host cannot sustain the current two review
+    processes beside dispatch. This task keeps the measured ceiling at two; dynamic provider/host
+    pooling belongs to the separately filed W1-T2572..W1-T2577 routing ladder.
+  note: |
+    W1-T2584 was atomically reserved on origin at `refs/rmd-id/W1-T2584` before this shard was
+    written. The allocator reported max 2583 across the monolith, shards, open PRs and plan
+    history, and this reservation succeeded on its first attempt.
+
+    The separate test file is deliberate: it proves the event-shaped backlog behavior without
+    coupling this task to W1-T2568's HTTP/HMAC tests. This implementation changes the existing
+    sweep's review scheduling only; the webhook remains a wake for the governor and never starts
+    Claude or Codex directly.
