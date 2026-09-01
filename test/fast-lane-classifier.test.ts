@@ -277,27 +277,34 @@ test("acceptance 6: ci.yml declares no workflow-level `paths:`/`paths-ignore:` f
   assert.doesNotMatch(ciYml, /\n\s*paths(-ignore)?:/, "a workflow-level paths filter strands ci-gate's REQUIRED wait per this task's rationale, Q4");
 });
 
-test("acceptance 6: the coverage-ratchet job body still carries no `if:` anywhere — the fast-lane class check is a step-level BASH guard, never a YAML conditional", async () => {
+test("acceptance 6: coverage collection carries no `if:` and the stable-name aggregator uses only always()", async () => {
   const { readFile } = await import("node:fs/promises");
   const ciYml = await readFile(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
   const jobStart = ciYml.indexOf("coverage-ratchet:");
   assert.notEqual(jobStart, -1, "ci.yml must declare a coverage-ratchet job");
-  const nextJobStart = ciYml.indexOf("\n  mutation-ratchet:", jobStart);
-  assert.notEqual(nextJobStart, -1, "coverage-ratchet job body must be findable in ci.yml");
-  const jobBody = ciYml.slice(jobStart, nextJobStart);
-  assert.doesNotMatch(jobBody, /\n\s*if:/, "coverage-ratchet must never gain a job- or step-level `if:` — test/diff-coverage.test.ts pins the same invariant");
+  const aggregatorStart = ciYml.indexOf("\n  coverage-ratchet-required:", jobStart);
+  assert.notEqual(aggregatorStart, -1, "coverage-ratchet aggregator must be findable in ci.yml");
+  const collectorBody = ciYml.slice(jobStart, aggregatorStart);
+  assert.doesNotMatch(collectorBody, /\n\s*if:/, "coverage shards must never be conditionally absent");
   // The class check must still be present, just expressed as bash rather than YAML.
-  assert.match(jobBody, /diff-class\.mjs/, "the job must call the classifier");
+  assert.match(collectorBody, /diff-class\.mjs/, "the job must call the classifier");
+  const doc = parseYaml(ciYml) as { jobs: Record<string, { if?: string; steps?: Array<{ if?: string }> }> };
+  assert.equal(doc.jobs["coverage-ratchet-required"].if, "${{ always() }}");
+  for (const step of doc.jobs["coverage-ratchet-required"].steps ?? []) assert.equal(step.if, undefined);
 });
 
-test("acceptance 6: no job in ci.yml gained a NEW diff-dependent job-level `if:` — every `if:` still reads only github.event_name", async () => {
+test("acceptance 6: job-level conditions are only PR guards or stable-name aggregators", async () => {
   const { readFile } = await import("node:fs/promises");
   const { parse: parseYaml } = await import("yaml");
   const ciYml = await readFile(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
   const doc = parseYaml(ciYml) as { jobs: Record<string, { if?: string }> };
   for (const [jobId, job] of Object.entries(doc.jobs)) {
     if (job.if === undefined) continue;
-    assert.match(job.if, /^github\.event_name == 'pull_request'$/, `job '${jobId}' carries an unexpected job-level if: '${job.if}'`);
+    if (jobId === "ci-required" || jobId === "coverage-ratchet-required") {
+      assert.equal(job.if, "${{ always() }}", `aggregator '${jobId}' must run even when a shard fails`);
+    } else {
+      assert.match(job.if, /^github\.event_name == 'pull_request'$/, `job '${jobId}' carries an unexpected job-level if: '${job.if}'`);
+    }
   }
 });
 
