@@ -351,6 +351,7 @@ import {
   classifyProposal,
   draftAttemptKey,
   draftsDueOnDaemon,
+  mergeDraftCaches,
   DAEMON_DRAFT_BATCH_CAP,
   evictRefusalPoisonedKeys,
   gitGrepAnchorTrue,
@@ -30441,6 +30442,43 @@ export function buildInboxDraftHook(
       // way this file can go stale (self-corrects: a stuck entry is overwritten the next time
       // ANY draft batch runs, since this rung always writes its own full `due` set, never
       // merges onto a stale one).
+      // ── W1-T2569: THE RE-ENTRANCY GUARD ───────────────────────────────────────────────────
+      // THE BOUND STOPS AWAITING; IT DOES NOT CANCEL. `DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS`
+      // (559_000, lib/daemon.ts) abandons `await deps.sweep()` at 9.3 minutes, but the sweep — and
+      // this rung inside it — KEEPS RUNNING DETACHED. A draft batch is 3 sequential drafts at a
+      // measured 316s median, ~948s end to end, so it is un-awaited EVERY time and the next loop
+      // iteration starts a fresh sweep carrying a fresh batch.
+      //
+      // MEASURED 2026-09-01, six consecutive cycles, perfect alternation:
+      //   batch 17:38:13 -> abandoned 17:46:45 (+512s) -> batch 17:53:01 -> abandoned 18:01:15 ...
+      // with `daemon.sweep.abandoned` carrying `elapsed_ms: 559000, bound_ms: 559000` exactly.
+      // Cost: 16 Architect spawns across 5 distinct proposals, $123.30, drafts cache frozen at 62.
+      //
+      // THIS IS WHY `buildInboxDraftHook`'s OWN DOC WAS WRONG to say the hook is "awaited to
+      // completion by the daemon's serial sweep tick" — corrected at that doc; see it for the
+      // wider class, which is NOT confined to this rung.
+      //
+      // O_EXCL + reclaimStaleLock, REUSED not reinvented: `acquireDrainLock` is already
+      // path-parameterised and already applies the pid+host staleness rule (`isHolderStale`) that
+      // W1-T1067 settled for `drain.lock`. A SECOND staleness rule here would be a second thing to
+      // drift. The staleness bound is load-bearing in the other direction too: without it a killed
+      // daemon strands the lock and this rung never runs again — the exact W1-T1067 failure, one
+      // file over.
+      const draftLockPath = join(config.root, "state", "inbox-draft.lock");
+      let draftLock: DrainLockHandle;
+      try {
+        draftLock = acquireDrainLock(draftLockPath);
+      } catch (e) {
+        // A LIVE holder is the expected, healthy outcome of an abandoned-but-still-running batch —
+        // it is a SKIP, never an error. Ledgered so a stuck lock is visible rather than looking
+        // like a rung that quietly stopped firing.
+        log("inbox.draft_batch.skipped", {
+          reason: "another draft batch holds the lock",
+          detail: String((e as Error)?.message ?? e),
+        });
+        return;
+      }
+      try {
       const inflightPath = join(config.root, "state", "inbox-draft-inflight.json");
       const spawnedAt = new Date().toISOString();
       writeFileSync(inflightPath, JSON.stringify(Object.fromEntries(due.map((p) => [p.id, spawnedAt])), null, 2), "utf8");
@@ -30449,9 +30487,15 @@ export function buildInboxDraftHook(
       try {
         outcomes = await draftBatch(due, config, owner, repo, runId, log);
       } finally {
-        // Only one draft rung runs at a time (this hook is awaited to completion by the
-        // daemon's own serial sweep tick before the next one can start), so it is always safe
-        // to clear the WHOLE file here rather than surgically remove just `due`'s ids.
+        // ⚠ W1-T2569 CORRECTION — THIS CLAIM WAS FALSE AND COST $123.30. It used to read "Only one
+        // draft rung runs at a time (this hook is awaited to completion by the daemon's own serial
+        // sweep tick before the next one can start)". The sweep tick does NOT await to completion:
+        // `DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS` (559_000, lib/daemon.ts) stops AWAITING at 9.3
+        // minutes and does not CANCEL, so a ~948s draft batch keeps running detached while the next
+        // iteration starts a fresh one. MEASURED: six consecutive batch/abandon alternations.
+        //
+        // Clearing the whole file is safe now for a DIFFERENT reason — the lock acquired above
+        // means this really is the only batch running. It was never safe because of serialization.
         writeFileSync(inflightPath, JSON.stringify({}, null, 2), "utf8");
       }
 
@@ -30485,7 +30529,22 @@ export function buildInboxDraftHook(
       if (refusedThisBatch.length > 0) {
         log("inbox.draft_attempts_reopened", { evicted: 0, refused_this_batch: refusedThisBatch.length });
       }
-      writeDraftAttemptPair(draftsPath, attemptsPath, nextDrafts, nextAttempts);
+      // W1-T2569: RE-READ AND MERGE IMMEDIATELY BEFORE WRITING. The guard above makes overlap
+      // unlikely; this makes a lost update impossible if one happens anyway (a reclaimed-but-live
+      // lock, a second host). `nextDrafts`/`nextAttempts` were built from a snapshot taken up to
+      // ~950s ago — an eternity on this rung — so anything another writer committed in between
+      // would be silently reverted by a plain spread. See `mergeDraftCaches`' own doc.
+      const merged = mergeDraftCaches(
+        {
+          drafts: parseDraftCache(readFileIfExists(draftsPath)),
+          attempts: parseDraftAttemptCache(readFileIfExists(attemptsPath)),
+        },
+        { drafts: nextDrafts, attempts: nextAttempts },
+      );
+      writeDraftAttemptPair(draftsPath, attemptsPath, merged.drafts, merged.attempts);
+      } finally {
+        draftLock.release();
+      }
     } catch (e) {
       log("inbox.draft_rung.error", { error: String((e as Error)?.message ?? e) });
     }
