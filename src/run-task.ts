@@ -10068,19 +10068,18 @@ export function resolveRunMounts(
   };
 }
 
-// W1-T2528 — module-scoped, monotonic across every lane runId this process mints; fixes two
-// same-millisecond rungs colliding on the identical `run-<lane>-<epoch>` worktree branch.
+// W1-T2528 — module-scoped so it's monotonic across every lane runId this ONE process mints
+// (retro/triage/plan): `Date.now()`'s 1ms resolution let two rungs collide (OBSERVED: identical
+// epoch logged twice, then `fatal: a branch ... already exists`). Bumps only off the PRECEDING
+// raw reading (never an ever-growing peak), so a differing reading passes through unchanged,
+// keeping this repo's widespread `Date.now` mocks exact.
 let lastRawNowMs = -1;
 let lastLaneEpochMs = -1;
 export function nextLaneEpochMs(): number {
   const now = Date.now();
-  if (now === lastRawNowMs) {
-    lastLaneEpochMs += 1;
-  } else {
-    lastRawNowMs = now;
-    lastLaneEpochMs = now;
-  }
-  return lastLaneEpochMs;
+  if (now === lastRawNowMs) return ++lastLaneEpochMs;
+  lastRawNowMs = now;
+  return (lastLaneEpochMs = now);
 }
 
 async function runTask(
@@ -10252,7 +10251,9 @@ async function runTask(
   // `onSpawnError`/`workerStateSensor.observer` already state for that wrapper.
   const workerAbandonMs = opts.workerAbandonMs ?? loadDefaultPolicy().values.workerAbandon;
 
-  const runId = `${taskId}-${Date.now()}`; // W1-T2528: NOT nextLaneEpochMs — taskId is already the per-rung component
+  // W1-T2528: not routed through `nextLaneEpochMs` — `taskId` is already the per-rung
+  // component, and same-taskId reruns are refused earlier by the dispatch claim/inflight check.
+  const runId = `${taskId}-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, lane: "run-task", ...extra });
 
@@ -10807,7 +10808,8 @@ async function runTask(
       releaseDispatchClaim(task.id, claimReserver, { anchor: claimAnchor });
       return { taskId, runId, merged: false, costUsd: 0, verdict: "failed" };
     }
-    log("worktree.add_failed", { branch, error: String((e as Error)?.message ?? e) }); // W1-T2528
+    // W1-T2528: any OTHER add failure — ledger it before rethrowing (same idiom as `addLaneWorktree`).
+    log("worktree.add_failed", { branch, error: String((e as Error)?.message ?? e) });
     throw e;
   }
   log("worktree.add", { branch, worktreePath });
@@ -18247,14 +18249,11 @@ export function runCitationStampPass(opts: {
   }
 }
 
-// Cut a lane's `run-<runId>` worktree branch and ledger a failed add before rethrowing (W1-T2528)
-// — shared by retro/triage/plan. Defined AFTER runTask: source-grep tests key the FIRST
-// `indexOf("worktreeAdd(...")` to runTask's own task-lane call site.
+// Cuts a lane's `run-<runId>` worktree branch, ledgering a failed add before rethrowing
+// (W1-T2528) — shared by retro/triage/plan. Defined AFTER runTask (not beside `nextLaneEpochMs`):
+// tests static-scan for the FIRST `worktreeAdd(...` match to prove runTask's own guards precede it.
 export function addLaneWorktree(
-  repoDir: string,
-  worktreesRoot: string,
-  runId: string,
-  log: (step: string, extra?: Record<string, unknown>) => void,
+  repoDir: string, worktreesRoot: string, runId: string, log: (step: string, extra?: Record<string, unknown>) => void,
 ): { branch: string; worktreePath: string } {
   const branch = `run-${runId}`;
   const worktreePath = join(worktreesRoot, branch);
@@ -18553,7 +18552,7 @@ async function retroCommand(
   const wrk = workerModel(config);
   assertArchitectAboveWorker(arch, wrk); // throws (fail-closed) on violation
 
-  const runId = `RETRO-${nextLaneEpochMs()}`; // W1-T2528: nextLaneEpochMs, not bare Date.now()
+  const runId = `RETRO-${nextLaneEpochMs()}`; // W1-T2528: the singleton lane the collision was observed on
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: "RETRO", step, lane: "retro", ...extra });
   const say = (msg: string) => console.log(`\n### [retro] ${msg}`);
@@ -28510,7 +28509,7 @@ async function triageCommandLocked(
 
   const ledgerPath = ledgerPathFor(config);
   const taskId = `TRIAGE-${feedbackId}`;
-  const runId = `${taskId}-${nextLaneEpochMs()}`; // W1-T2528: nextLaneEpochMs, not bare Date.now()
+  const runId = `${taskId}-${nextLaneEpochMs()}`; // W1-T2528: two same-feedbackId runs can still collide
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, lane: "triage", ...extra });
   const say = (msg: string) => console.log(`\n### [triage] ${msg}`);
@@ -29094,7 +29093,7 @@ export async function planCommand(
 
   const ledgerPath = ledgerPathFor(config);
   const taskId = `PLAN-${mode}`;
-  const runId = `${taskId}-${nextLaneEpochMs()}`; // W1-T2528: nextLaneEpochMs, not bare Date.now()
+  const runId = `${taskId}-${nextLaneEpochMs()}`; // W1-T2528: two same-mode runs can still collide
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, lane: "plan", ...extra });
   const say = (msg: string) => console.log(`\n### [plan] ${msg}`);
