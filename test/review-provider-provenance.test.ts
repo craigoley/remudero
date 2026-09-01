@@ -9,6 +9,7 @@ import { buildReviewPrompt } from "../src/lib/review.js";
 import {
   recordHeadProviderAfterPush,
   resolveReviewProviderProvenance,
+  reviewProviderProvenanceLedgerFields,
 } from "../src/lib/review-provider-provenance.js";
 import { reviewCommand } from "../src/run-task.js";
 import type { Config } from "../src/lib/config.js";
@@ -63,6 +64,21 @@ test("W1-T2594: conflicting exact-key provider claims are ambiguous, never last-
     providers: ["claude", "codex"],
     claimCount: 2,
   });
+});
+
+test("W1-T2594: an unknown exact-head claim keeps its reason and join key in the review ledger", () => {
+  assert.deepEqual(
+    reviewProviderProvenanceLedgerFields(
+      { state: "unknown", reason: "no-exact-claim" },
+      { prUrl: PR, headSha: HEAD },
+    ),
+    {
+      state: "unknown",
+      reason: "no-exact-claim",
+      pr_url: PR,
+      head_sha: HEAD,
+    },
+  );
 });
 
 test("W1-T2594: producer recording binds a valid worker provider to the freshly read head", () => {
