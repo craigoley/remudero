@@ -8,7 +8,7 @@
   risk: high
   band_meaning: "blast-radius"
   budget_usd: 12.00
-  files: [.remudero/mounts.yaml, src/lib/worker-provider.ts, src/lib/mounts.ts, test/a-capability-ladder-is-data-not-a-substring-match.test.ts]
+  files: [.remudero/mounts.yaml, scripts/source-size-baseline.json, src/lib/worker-provider.ts, src/lib/mounts.ts, test/a-capability-ladder-is-data-not-a-substring-match.test.ts]
   origin: "operator-session#codex-router-design-2026-09-01"
   plan_refs: ["W1-T167", "W1-T2572"]
   status: queued
@@ -64,6 +64,12 @@
     configuration or would preserve the hard-coded TypeScript model ladder this task removes. The
     routing table is therefore in scope so the production selector consumes the same validated data
     the Tier Invariant checks. This correction does not change any existing route assignment.
+
+    The implementation also crosses `src/lib/mounts.ts`'s recorded source-size ceiling: parsing and
+    validating the provider-neutral model declarations, resolving capability/effort pairs, and
+    enforcing G-17 against capability rank are deliberate production growth. The repository's own
+    source-size ratchet requires `scripts/source-size-baseline.json` to record that measured ceiling;
+    the ledger is therefore in scope rather than weakening or bypassing the gate.
   acceptance:
     - claim: "a mount resolves to a provider model through a declared capability lookup, never a substring of a Claude model name"
       proof: "unit test: test/a-capability-ladder-is-data-not-a-substring-match.test.ts"
