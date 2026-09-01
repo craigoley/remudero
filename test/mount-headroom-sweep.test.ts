@@ -80,7 +80,7 @@ const {
 } = mod;
 
 /** Run `main` with console + process.exitCode captured, restoring all three however it ends. */
-function captureMain(argv: string[]): { out: string; err: string; exitCode: number | undefined } {
+function captureMain(argv: string[]): { out: string; err: string; exitCode: typeof process.exitCode } {
   const out: string[] = [];
   const err: string[] = [];
   const realLog = console.log;
