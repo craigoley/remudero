@@ -1,0 +1,100 @@
+- id: W1-T2594
+  title: "THE REVIEWER CANNOT IDENTIFY WHICH PROVIDER PRODUCED THE CURRENT HEAD — worker rows carry `provider`, but `pr.opened` carries no head sha or provider and later fix rows are not joined to the pushed head, so an event-driven review cannot distinguish Claude-authored code, Codex-authored code, a stale earlier run or a human push without guessing"
+  repo: remudero
+  depends_on: [W1-T2572]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 12.00
+  files:
+    - src/lib/review-provider-provenance.ts
+    - src/lib/ledger.ts
+    - src/run-task.ts
+    - test/review-provider-provenance.test.ts
+    - test/ledger-rotation.test.ts
+  origin: "operator-session#cross-provider-review-provenance-2026-09-01"
+  plan_refs: ["W1-T2572", "W1-T278", "W1-T296", "W1-T2258"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON MAIN AT a5711696. `implement.done` spreads `workerLedgerFields(impl)` and therefore
+    can carry the selected provider, but the later `pr.opened` row carries only `pr_url`.
+    `fix.done` is likewise separated from the live head produced after `deps.push`. The review path
+    knows the current PR URL and head sha, yet no durable row joins either one to the provider that
+    produced that content.
+
+    A TASK-ID JOIN IS NOT PROVENANCE. One task can have multiple attempts, a fix worker can amend a
+    prior provider's branch, an empty CI retrigger can advance the commit, and a human can push to
+    the same PR. Reading the newest provider-bearing row for a task would silently attribute stale
+    work to the current head. The user's evidence rule applies inside the product too: unknown
+    authorship must stay unknown, never become "probably Claude" or "the latest worker I saw".
+
+    The immediate consumer is provider-independent semantic review: W1-T2593 gives event-driven
+    reviews a real worker, and the follow-up router can prefer Codex for a Claude-produced head and
+    Claude for a Codex-produced head. That decision is unsafe until the author side is tied to the
+    exact head. This task builds only that material provenance; it does not change reviewer routing,
+    verdicts, prompts, merge policy or provider preference.
+
+  design: |
+    Add one focused `review-provider-provenance.ts` module with a small, explicit result type:
+    `known`, `unknown` or `ambiguous`. Resolve only a row matching the exact task id, PR URL and
+    live head sha. Ignore stale heads. If two surviving rows claim different providers for the same
+    key, return ambiguous rather than applying last-write-wins to a trust decision.
+
+    Have the production review command call that resolver for the head it is about to judge and
+    ledger `review.provider_provenance` as known/unknown/ambiguous. This is telemetry only in this
+    task: do not pass the result into provider selection or into the reviewer prompt.
+
+    After the standard implementation path has pushed, verified PR ownership and read the live
+    head, append `pr.head_provider` with that exact sha, PR URL, provider, served model when W1-T2572
+    exposes it, and source `implement`. In the fix rung, append the same shape with source `fix`
+    immediately after a successful push and fresh live-head read, before CI/re-review. A worker
+    result with no provider or a failed head read emits a named unavailable row and no claim.
+
+    Do not propagate provenance across a human push, update-branch, merge conflict, generator-only
+    edit or empty retrigger in this task. Those heads resolve unknown until the actor that owns that
+    mutation explicitly writes a truthful row. Exact-but-incomplete evidence is safer than a
+    convenient lineage guess, and a later task can add propagation for a specific deterministic
+    transform with its own proof.
+
+    Add `pr.head_provider` to the ledger's decision-relevant retention set: once review routing
+    consumes it, rotating the producer row away while retaining the later review would make the
+    same head route differently after maintenance. Keep credentials, prompts and response text out
+    of the row; provider/model labels and immutable GitHub identifiers are sufficient.
+
+    Do not expose the provider label in the PR body or reviewer prompt. The point is machine routing
+    and auditability; provider-label blinding remains available to the reviewer-policy follow-up.
+
+  acceptance:
+    - claim: "the production review command calls the focused exact-head provenance resolver rather than leaving it reachable only from tests"
+      proof: "grep: providerProvenanceForHead( in src/run-task.ts"
+    - claim: "an implementation worker's provider is recorded only after its PR ownership and exact live head sha are established"
+      proof: "unit test: test/review-provider-provenance.test.ts"
+    - claim: "a fix worker's provider is joined to the fresh head observed after its successful push and before the next review"
+      proof: "unit test: test/review-provider-provenance.test.ts"
+    - claim: "a provider row for an older head or a different PR/task never identifies the current head"
+      proof: "unit test: test/review-provider-provenance.test.ts"
+    - claim: "conflicting provider claims for the same task, PR and head resolve ambiguous rather than by last-write-wins"
+      proof: "unit test: test/review-provider-provenance.test.ts"
+    - claim: "a missing worker provider or unreadable live head emits a named unavailable outcome and never guesses Claude"
+      proof: "unit test: test/review-provider-provenance.test.ts"
+    - claim: "ledger rotation retains the head-provider row needed to reproduce a later reviewer-routing decision"
+      proof: "unit test: test/ledger-rotation.test.ts"
+    - claim: "no provider or model label is added to the PR body or semantic reviewer prompt"
+      proof: "unit test: test/review-provider-provenance.test.ts"
+
+  falsifier: |
+    Close this task without implementation if current main already exposes a durable reader that,
+    for a supplied task id, PR URL and current head sha, returns the provider that produced that
+    exact head and refuses stale or conflicting evidence. A provider on `implement.done`, a GitHub
+    commit author, a branch-name convention or a latest-row-by-task query is not that evidence.
+
+  note: |
+    The task id was atomically reserved at `refs/rmd-id/W1-T2594` by
+    `rmd next-task-id --reserve` before this shard was written.
+
+    `risk: high`, `band_meaning: blast-radius` is deliberate: the new data is intended to influence
+    which independent judge is selected. This task records and resolves evidence only; the routing
+    change is a separate task so a provenance defect cannot hide inside a scheduler diff.
