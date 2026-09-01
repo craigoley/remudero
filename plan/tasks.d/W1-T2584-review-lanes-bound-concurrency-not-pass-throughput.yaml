@@ -8,7 +8,10 @@
   risk: high
   budget_usd: 30.00
   files:
+    - src/lib/daemon.ts
     - src/lib/sweep.ts
+    - src/run-task.ts
+    - test/daemon.test.ts
     - test/sweep.test.ts
     - test/review-lane-budget.test.ts
     - test/review-lane-fairness.test.ts
@@ -54,6 +57,14 @@
     later admission. STOP/PAUSE and a provider-capacity stop must leave unstarted heads with no
     outcome dedup key so the ordinary level-triggered pass can recover them. Already-running
     reviews may settle normally; never kill a reviewer at an arbitrary write boundary.
+
+    SCOPE CORRECTION AT IMPLEMENTATION. The original `files:` list named only `sweep.ts` and its
+    tests, but a continuation callback invented and exercised only inside `runSweep` would be dead
+    configuration: the daemon's production `runGatedSweep` timer could never close it. The scope
+    therefore includes `daemon.ts` and `run-task.ts` so the existing wall-clock gate supplies the
+    callback to the real daemon sweep hook, plus `daemon.test.ts` to prove the timer closes it.
+    This is the production wiring required by the already-filed acceptance criterion, not a new
+    concern or a change to W1-T2582's separate whole-sweep overlap remedy.
 
     THIS DOES NOT RAISE `reviewLanes`. The shipped value remains two until provider/host telemetry
     justifies a separate policy change. The improvement is that two lanes stay occupied while a

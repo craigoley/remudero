@@ -186,10 +186,20 @@ export const DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS = 559_000;
  * batch/abandon alternations in the inbox-draft rung, `elapsed_ms: 559000` against
  * `bound_ms: 559000`, costing $123.30 in duplicated Architect spawns.
  *
- * THIS IS A CLASS, NOT AN INSTANCE. Every sweep-borne rung whose work can exceed 559s is
- * re-entrant by the same mechanism; drafting is merely the one that spends per re-entry. The
- * inbox-draft rung now takes its own O_EXCL lock (run-task.ts, W1-T2569) — a per-rung remedy, not
- * a fix to the abandonment semantics, which is filed separately. Same fs-free-safety-net
+ * ⚠ W1-T2582 UPDATE — THE PROPERTY IS TRUE AGAIN, BUT FOR A DIFFERENT REASON THAN THIS COMMENT
+ * ONCE GAVE. It is NOT "the same mutex-serialized deps.sweep() every other call site already
+ * awaits sequentially" — that was never what serialized anything. It is {@link SweepLiveness}:
+ * `runGatedSweep` now DECLINES to start a pass while a previous one is still executing, a flag set
+ * on start and cleared on SETTLE rather than on abandon. The bound still fires and still stops
+ * awaiting; the abandoned pass still runs to completion untouched; only the duplicate is refused.
+ * THE RETRIGGER IS COVERED BY THE SAME FLAG — it was a SECOND route in, and one the bound never
+ * touched: measured, the last two pre-fix draft batches were 20m27s apart, this interval, not 559s.
+ *
+ * THE CLASS THAT WAS. Every sweep-borne rung whose work can exceed 559s used to be re-entrant by
+ * this mechanism; drafting was merely the one that spent per re-entry ($123.30 in duplicated
+ * Architect spawns, measured 2026-09-01). The inbox-draft rung ALSO holds its own O_EXCL lock
+ * (run-task.ts, W1-T2569) and keeps it: that lock additionally excludes `rmd inbox` and survives a
+ * restart, neither of which an in-process flag can do. Same fs-free-safety-net
  * reasoning as {@link DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS} immediately above: this pure module
  * cannot load `plan/policy.yaml` itself, so this literal is the default for a direct/test caller
  * that supplies no `DaemonOpts.sweepRetriggerIntervalMs`.
@@ -1970,7 +1980,7 @@ function startInFlightTicker(
                   poll_interval_ms: pollIntervalMs,
                   interval_ms: sweepRetrigger.intervalMs,
                 });
-                await runGatedSweep(deps, pollIntervalMs, sweepRetrigger.sweepWallClockBoundMs, log, diskHeadroomLatch);
+                await runGatedSweep(deps, pollIntervalMs, sweepRetrigger.sweepWallClockBoundMs, log, diskHeadroomLatch, undefined, sweepRetrigger.liveness);
               }
             }
           }
@@ -2014,6 +2024,12 @@ interface SweepRetrigger {
   intervalMs: number;
   /** SHARED across every call site — see this interface's own doc. */
   state: { lastRunAtMs: number | undefined };
+  /** W1-T2582: the SAME {@link SweepLiveness} the top-of-iteration calls hold. Carried here
+   *  because the retrigger is a SECOND route into a concurrent pass and the wall-clock bound
+   *  alone does not cover it — measured: the last two pre-fix draft batches were 20m27s apart,
+   *  the retrigger interval, not the 559s bound. Optional so a direct/test caller that predates
+   *  this is unchanged. */
+  liveness?: SweepLiveness;
 }
 
 /**
@@ -2029,6 +2045,32 @@ interface SweepRetrigger {
  * responsible for checking `deps.sweep` is defined before calling this
  * (mirrors the original `if (deps.sweep)` guard) — this function assumes it is.
  */
+/**
+ * W1-T2582: THE ONE PIECE OF STATE THAT MAKES "ONE SWEEP AT A TIME" TRUE.
+ *
+ * `inFlight` is set when a `deps.sweep()` promise STARTS and cleared when that promise SETTLES —
+ * deliberately NOT when {@link DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS} stops awaiting it. That
+ * distinction is the whole task: the bound stops WAITING and never stops the WORK, so between the
+ * abandon and the eventual settle there is a window in which the pass is still executing and
+ * nothing said so. Every re-entry the fleet observed landed in that window.
+ *
+ * EXCLUSION, NOT CANCELLATION — the shard's own conclusion, and the only option that is not worse
+ * than the defect. An abandoned pass may hold a live worker, a lock, or a half-written cache;
+ * killing it at 559s would destroy legitimate long runs and could leave state mid-write. So the
+ * abandoned pass runs to completion untouched and the NEXT one declines to start.
+ *
+ * IN-PROCESS BY DESIGN, AND THAT IS SUFFICIENT HERE. All three `runGatedSweep` call sites live in
+ * ONE daemon loop in one process, so a closure flag closes every route into it. This is NOT the
+ * cross-process case W1-T2569's file lock had to solve for the draft rung, which is also reachable
+ * from `rmd inbox` and must survive a restart; conflating the two would put a filesystem lock on a
+ * path that has no second process to exclude.
+ */
+export interface SweepLiveness {
+  /** True while a `deps.sweep()` promise is still executing, INCLUDING after its await was
+   *  abandoned by the wall-clock bound. */
+  inFlight: boolean;
+}
+
 async function runGatedSweep(
   deps: DaemonDeps,
   pollIntervalMs: number,
@@ -2040,10 +2082,33 @@ async function runGatedSweep(
   // running long while the account went from 30% used to exhausted. Optional and trailing so every
   // existing caller and test is unchanged.
   headroomSampler?: { lastSampleMs: number; now: () => number; policy: HeadroomPolicy; enforced: boolean },
+  // W1-T2582: the shared liveness flag. Optional and trailing so every existing caller and test is
+  // unchanged — omitted, this function behaves exactly as it did before, which is what keeps the
+  // W1-T1044 bound tests meaningful.
+  liveness?: SweepLiveness,
 ): Promise<void> {
+  // ── W1-T2582: DECLINE, DO NOT DUPLICATE ────────────────────────────────────────────────────
+  // Checked BEFORE the ticker starts, so a declined pass costs nothing at all — no ticker, no
+  // `deps.sweep()` call, no worker. This ONE gate closes BOTH routes into a concurrent pass,
+  // because all three `runGatedSweep` call sites pass through it: the two top-of-iteration calls
+  // AND `startInFlightTicker`'s retrigger, which is a second entry route the bound alone does not
+  // cover (measured: the last two pre-fix draft batches were 20m27s apart — the retrigger interval,
+  // not the 559s bound).
+  if (liveness?.inFlight) {
+    log("daemon.sweep.skipped_concurrent", { reason: "a previous sweep pass is still executing" });
+    return;
+  }
+  if (liveness) liveness.inFlight = true;
   const stopSweepTicker = startInFlightTicker(deps, pollIntervalMs, log, "sweep", diskHeadroomLatch, undefined, headroomSampler).stop;
   try {
     const sweepPromise: Promise<void | undefined> = Promise.resolve().then(() => deps.sweep!());
+    // W1-T2582: CLEARED ON SETTLE, NEVER ON ABANDON. Attaching this to `sweepPromise` itself —
+    // rather than to the `finally` below, which runs when the AWAIT ends — is what keeps the flag
+    // true through the abandon-to-settle window that every observed re-entry landed in.
+    // `then(onOk, onErr)` rather than `finally`: it handles a rejection here, so this derived
+    // promise can never become an unhandled rejection of its own (the real failure is still
+    // reported by the `catch` in the abandoned branch below, and by the outer `catch`).
+    if (liveness) void sweepPromise.then(() => { liveness.inFlight = false; }, () => { liveness.inFlight = false; });
     const startedAtMs = Date.now();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const bound = new Promise<"abandoned">((resolve) => {
@@ -2585,11 +2650,16 @@ export async function runDaemon(
   // reference, not a fresh object per call site, is load-bearing here. `lastRunAtMs` starts
   // `undefined`: the first sweep of this process's life runs unconditionally (unchanged from
   // before this task), never gated on an elapsed-time check against a run that never happened.
+  // W1-T2582: ONE liveness flag for this daemon's whole life, shared by every `runGatedSweep`
+  // route — the top-of-iteration calls and the in-flight ticker's retrigger alike. Per-process
+  // scope is the correct scope: see {@link SweepLiveness}.
+  const sweepLiveness: SweepLiveness = { inFlight: false };
   const sweepRetriggerState: { lastRunAtMs: number | undefined } = { lastRunAtMs: undefined };
   const sweepRetrigger: SweepRetrigger = {
     sweepWallClockBoundMs,
     intervalMs: opts.sweepRetriggerIntervalMs ?? DEFAULT_SWEEP_RETRIGGER_INTERVAL_MS,
     state: sweepRetriggerState,
+    liveness: sweepLiveness,
   };
   const log = deps.log ?? (() => {});
   // W1-T342: shared by BOTH `checkDispatchGovernors` call sites below (the tick-top one and the
@@ -3031,7 +3101,7 @@ export async function runDaemon(
         // gate. A fallible operation cannot claim durable work and then fail before reconciling.
         deps.acknowledgeSweepWake?.();
         sweepRetriggerState.lastRunAtMs = now().getTime();
-        await runGatedSweep(deps, pollIntervalMs, sweepWallClockBoundMs, log, diskHeadroomLatch, headroomSampler);
+        await runGatedSweep(deps, pollIntervalMs, sweepWallClockBoundMs, log, diskHeadroomLatch, headroomSampler, sweepLiveness);
       }
       const detail =
         `origin/main advanced ${freshness.oldSha.slice(0, 7)}..${freshness.newSha.slice(0, 7)} ` +
@@ -3093,7 +3163,7 @@ export async function runDaemon(
       // possible moment before this SAME level-triggered sweep; the event changes no policy.
       deps.acknowledgeSweepWake?.();
       sweepRetriggerState.lastRunAtMs = now().getTime();
-      await runGatedSweep(deps, pollIntervalMs, sweepWallClockBoundMs, log, diskHeadroomLatch, headroomSampler);
+      await runGatedSweep(deps, pollIntervalMs, sweepWallClockBoundMs, log, diskHeadroomLatch, headroomSampler, sweepLiveness);
     }
 
     // ORPHAN SWEEP (W1-T117 design part ii): runs alongside the PR-pipeline

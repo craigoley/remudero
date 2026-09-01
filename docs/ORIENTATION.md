@@ -1,40 +1,25 @@
 # ORIENTATION
 
-_MAINTAINED BY `rmd retro` — regenerated 2026-09-01T08:57:27.106Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
+_MAINTAINED BY `rmd retro` — regenerated 2026-09-01T20:48:22.947Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
 
 A fresh Architect session should be able to orient from THIS doc alone plus the plan index —
 not by re-deriving state from the full plan and ledger.
 
 ## Current state
 
-29 run(s) since the last retro marker. Verdicts: {"blocked":2,"blocked_ci":10,"incomplete":7,"merged":8,"no_pr":2}.
+9 run(s) since the last retro marker. Verdicts: {"blocked_ci":5,"blocked_containment":1,"incomplete":2,"no_pr":1}.
 
 ### Shipped since marker
-- W1-T2508 → https://github.com/craigoley/remudero/pull/3428 (gate-side merge; run ended incomplete)
-- W1-T2510 → https://github.com/craigoley/remudero/pull/3437 (gate-side merge; run ended blocked_ci)
-- W1-T2512 → https://github.com/craigoley/remudero/pull/3455 (gate-side merge; run ended blocked_ci)
-- W1-T2513 → https://github.com/craigoley/remudero/pull/3448 (gate-side merge; run ended blocked_ci)
-- W1-T2518 → https://github.com/craigoley/remudero/pull/3429 (gate-side merge; run ended incomplete)
-- W1-T2519 → https://github.com/craigoley/remudero/pull/3419 (gate-side merge; run ended incomplete)
-- W1-T2521 → https://github.com/craigoley/remudero/pull/3440 (gate-side merge; run ended blocked)
-- W1-T2522 → https://github.com/craigoley/remudero/pull/3459 (gate-side merge; run ended blocked_ci)
-- W1-T2523 → https://github.com/craigoley/remudero/pull/3452
-- W1-T2524 → https://github.com/craigoley/remudero/pull/3451
-- W1-T2525 → https://github.com/craigoley/remudero/pull/3449 (gate-side merge; run ended incomplete)
-- W1-T2527 → https://github.com/craigoley/remudero/pull/3446
-- W1-T2528 → https://github.com/craigoley/remudero/pull/3465 (gate-side merge; run ended blocked_ci)
-- W1-T2529 → https://github.com/craigoley/remudero/pull/3457
-- W1-T2530 → https://github.com/craigoley/remudero/pull/3458 (gate-side merge; run ended blocked_ci)
-- W1-T2548 → https://github.com/craigoley/remudero/pull/3471
-- W1-T2549 → https://github.com/craigoley/remudero/pull/3472
-- W1-T2550 → https://github.com/craigoley/remudero/pull/3475 (gate-side merge; run ended blocked_ci)
-- W1-T2551 → https://github.com/craigoley/remudero/pull/3479
-- W1-T2555 → https://github.com/craigoley/remudero/pull/3476
-- W1-T2556 → https://github.com/craigoley/remudero/pull/3478 (gate-side merge; run ended blocked_ci)
+- W1-T2554 → https://github.com/craigoley/remudero/pull/3482 (gate-side merge; run ended blocked_ci)
+- W1-T2557 → https://github.com/craigoley/remudero/pull/3492 (gate-side merge; run ended blocked_ci)
+- W1-T2558 → https://github.com/craigoley/remudero/pull/3490 (gate-side merge; run ended blocked_ci)
+- W1-T2559 → https://github.com/craigoley/remudero/pull/3500 (gate-side merge; run ended blocked_ci)
+- W1-T2560 → https://github.com/craigoley/remudero/pull/3494 (gate-side merge; run ended blocked_ci)
+- W1-T2563 → https://github.com/craigoley/remudero/pull/3497 (gate-side merge; run ended incomplete)
 
 ## Next runnable task
 
-**W1-T2554** — THE DAEMON'S FIRST BOARD READ OUTRUNS ITS OWN FIRST TOKEN MINT — `startInstallationTokenRefresh` (src/lib/github-app.ts) ends in a BARE `tick()` and returns `{armed: true}` before that mint resolves, so `run-task.ts`'s call site proceeds straight into the first sweep and spawns `gh api` children that inherit a `process.env.GH_TOKEN` nothing has written yet; MEASURED on this fleet 2026-09-01, the mint landed 1.899 s AFTER the first board fetch had already failed `auth`, and every boot burns the same guaranteed-to-fail calls against a rate limit this repo is already hitting
+**W1-T2567** — THE CODEX ROLLING-QUOTA REFUSAL IS COVERED ONLY BY ACCIDENT AND NO REAL STRING EXISTS TO FIX IT WITH — all three Codex patterns #3511 added are HARD refusals (out of credits, spend cap, plan upgrade), so the high-frequency rolling-window case is caught only if Codex happens to phrase it as usage limit reached; MEASURED 2026-09-01: the corpus holds 2 rows mentioning codex and NEITHER is a refusal, zero worker tails mention it against 188 mentioning claude, and no codex binary exists on the host or in the daemon container, so the pattern cannot be written from evidence yet
 
 - risk: high · depends_on: (none)
 
