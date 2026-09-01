@@ -28081,7 +28081,7 @@ export function buildSweepHook(
   // {@link runWorkerStallDetectorRung} below — optional and trailing so every existing caller
   // (tests included) that predates W1-T943 is unaffected; omitted ⇒ {@link DEFAULT_WORKER_STALL_MS}.
   workerStallMs?: number,
-): () => Promise<void> {
+): (continueReviewAdmissions?: () => boolean) => Promise<void> {
   // W1-T192: the daemon-side draft rung, built ONCE per daemon start (mirrors this
   // function's own once-per-daemon-start construction) — see buildInboxDraftHook's doc for
   // why it rides THIS seam rather than a second, separately-scheduled loop.
@@ -28119,7 +28119,7 @@ export function buildSweepHook(
   // no seam to receive it) and into `buildOpenPrViews` below, so both burst call sites share the
   // SAME instance for this daemon's whole life, exactly as `boardGithub` itself is shared.
   const boardGithub = github ?? buildBatchedGithub(owner, repo, { log, pacer });
-  return async () => {
+  return async (continueReviewAdmissions = () => true) => {
     try {
       const openPrs = buildOpenPrViews(owner, repo, ledgerPath, { pacer });
       // W1-T474 — the post-fix re-verification rung, on the daemon's own poll cadence and, same
@@ -28147,6 +28147,10 @@ export function buildSweepHook(
           inFlightTaskIds: new Set(liveInflightRuns(inflightDir).map((r) => r.taskId)),
           staleGateWorkflowsByPr,
           updatedForWorkflow,
+          // W1-T2584: supplied by daemon.ts's `runGatedSweep`, which closes the callback on its
+          // own wall-clock timeout and re-checks the existing STOP/PAUSE controls on every pull.
+          // Direct/tests calls omit it and receive the true default above.
+          continueReviewAdmissions,
         },
         DEFAULT_SWEEP_POLICY,
       );

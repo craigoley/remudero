@@ -59,18 +59,27 @@ function fakeDeps(overrides: Partial<SweepDeps> = {}): SweepDeps {
 
 // ── acceptance 1: the ceiling is read from reviewLanes, NOT dispatchLanes ──────────────────
 
-test("W1-T1049 acceptance 1 — the review ceiling reads policy.reviewLanes, not policy.dispatchLanes: a wide-open dispatchLanes with a tight reviewLanes still caps this pass at reviewLanes", async () => {
+test("W1-T1049/W1-T2584 acceptance 1 — reviewLanes, not dispatchLanes, bounds simultaneous reviewers while the pass drains every eligible head", async () => {
   // dispatchLanes is generous (4, its own committed max). If the pre-W1-T1049 defect (runSweep
   // reading dispatchLanes a second time) were still live, all 3 PRs below would run this pass.
   const policy: SweepPolicy = { ...DEFAULT_SWEEP_POLICY, dispatchLanes: 4, reviewLanes: 1 };
   const prs = [reviewablePr(1101), reviewablePr(1102), reviewablePr(1103)];
 
   const attempts: number[] = [];
-  const deps = fakeDeps({ postReview: (p) => { attempts.push(p.prNumber); } });
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const deps = fakeDeps({ postReview: async (p) => {
+    attempts.push(p.prNumber);
+    inFlight += 1;
+    maxInFlight = Math.max(maxInFlight, inFlight);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    inFlight -= 1;
+  } });
   const summary = await runSweep(prs, deps, policy);
 
   assert.equal(summary.byDisposition["post-review"], 3, "eligibility is unaffected — all 3 PRs still derive post-review");
-  assert.equal(attempts.length, 1, "reviewLanes (1), not dispatchLanes (4), bounds how many run this pass");
+  assert.equal(attempts.length, 3, "the pass drains all eligible reviews");
+  assert.equal(maxInFlight, 1, "reviewLanes (1), not dispatchLanes (4), bounds simultaneous reviewers");
 });
 
 // ── acceptance 2: a pass with no eligible review starts no review lanes ────────────────────
@@ -87,21 +96,30 @@ test("W1-T1049 acceptance 2 — a pass with NO post-review-eligible PRs starts Z
 
 // ── acceptance 3: a misconfigured zero still reviews one PR, never none ────────────────────
 
-test("W1-T1049 acceptance 3 — reviewLanes: 0 is a misconfiguration, not 'review nothing': the code-level Math.max(1, ...) floor still runs exactly one PR", async () => {
+test("W1-T1049/W1-T2584 acceptance 3 — reviewLanes: 0 retains a one-reviewer concurrency floor while draining the pass", async () => {
   const misconfigured: SweepPolicy = { ...DEFAULT_SWEEP_POLICY, reviewLanes: 0 };
   const prs = [reviewablePr(1201), reviewablePr(1202)];
 
   const attempts: number[] = [];
-  const deps = fakeDeps({ postReview: (p) => { attempts.push(p.prNumber); } });
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const deps = fakeDeps({ postReview: async (p) => {
+    attempts.push(p.prNumber);
+    inFlight += 1;
+    maxInFlight = Math.max(maxInFlight, inFlight);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    inFlight -= 1;
+  } });
   const summary = await runSweep(prs, deps, misconfigured);
 
   assert.equal(summary.byDisposition["post-review"], 2, "eligibility is unaffected by the misconfigured ceiling");
-  assert.equal(attempts.length, 1, "the floor of 1 survives a reviewLanes: 0 misconfiguration");
+  assert.equal(attempts.length, 2, "the floor does not become a per-pass throughput cap");
+  assert.equal(maxInFlight, 1, "the floor of 1 survives a reviewLanes: 0 misconfiguration");
 });
 
 // ── acceptance 4: dispatchLanes still governs dispatch, and no longer governs review ───────
 
-test("W1-T1049 acceptance 4 — dispatchLanes' own value is untouched by this row and no longer bounds review concurrency at all: a tight dispatchLanes with a wide reviewLanes still runs every eligible review", async () => {
+test("W1-T1049 acceptance 4 — dispatchLanes remains independent while reviewLanes alone bounds review concurrency", async () => {
   // The inverse of acceptance 1: dispatchLanes is now the TIGHT one (1, its own committed
   // floor) and reviewLanes is wide (3). If dispatchLanes still governed review (the
   // pre-W1-T1049 defect), this pass would run only 1 — it must run all 3.
@@ -109,11 +127,23 @@ test("W1-T1049 acceptance 4 — dispatchLanes' own value is untouched by this ro
   const prs = [reviewablePr(1301), reviewablePr(1302), reviewablePr(1303)];
 
   const attempts: number[] = [];
-  const deps = fakeDeps({ postReview: (p) => { attempts.push(p.prNumber); } });
+  let inFlight = 0;
+  let maxInFlight = 0;
+  let release: () => void = () => {};
+  const allStarted = new Promise<void>((resolve) => { release = resolve; });
+  const deps = fakeDeps({ postReview: async (p) => {
+    attempts.push(p.prNumber);
+    inFlight += 1;
+    maxInFlight = Math.max(maxInFlight, inFlight);
+    if (attempts.length === 3) release();
+    await allStarted;
+    inFlight -= 1;
+  } });
   const summary = await runSweep(prs, deps, policy);
 
   assert.equal(summary.byDisposition["post-review"], 3);
-  assert.equal(attempts.length, 3, "reviewLanes (3) bounds this pass, not dispatchLanes (1) — dispatchLanes is left ungoverning review");
+  assert.equal(attempts.length, 3, "the pass drains every eligible review");
+  assert.equal(maxInFlight, 3, "reviewLanes (3), not dispatchLanes (1), supplies the review concurrency width");
   // dispatchLanes' own field carries exactly what the caller set it to — this task does not
   // retune or reinterpret its MEANING, only stops runSweep consulting it for review concurrency.
   assert.equal(policy.dispatchLanes, 1, "dispatchLanes' own value is untouched — still whatever dispatch set it to");
