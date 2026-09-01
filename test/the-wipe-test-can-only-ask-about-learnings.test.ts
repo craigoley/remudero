@@ -578,9 +578,16 @@ test("wipeTestCommand: the merged pre-flight refuses a recon-factor pair exactly
     return { taskId: "W1-T86", runId: "X", merged: false, costUsd: 0, verdict: "merged" } as RunResult;
   }) as unknown as typeof import("../src/run-task.js").runTask;
 
+  // The default target is the SANDBOX, not self, so `wipeTestCommand` reaches its clone-if-absent
+  // branch before the merged pre-flight — see that branch's own doc for why the pre-flight has to
+  // read a just-synced plan. Fake the shell out the SAME way the learnings-factor counterpart in
+  // test/wipe-test.test.ts does ("so this test never shells out to a real `gh`/`git`"): without it
+  // this test dies on `spawnSync gh ENOENT` on any host with no gh on PATH, which is what CI saw.
+  const execFileSyncFn = (() => Buffer.from("")) as unknown as typeof import("node:child_process").execFileSync;
   const code = await wipeTestCommand(["W1-T86", "--factor", "recon"], {
     config,
     runTaskFn,
+    execFileSyncFn,
     resolveMergedState: () => ({ merged: true, prUrl: mergedPrUrl }),
   });
 
