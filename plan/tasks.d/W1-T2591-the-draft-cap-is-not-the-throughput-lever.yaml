@@ -1,0 +1,87 @@
+- id: W1-T2591
+  title: "RAISING DAEMON_DRAFT_BATCH_CAP BUYS ZERO THROUGHPUT AND COSTS SWEEP TIME LINEARLY — runDraftRung is a sequential for-await over ONE shared worktree, so throughput is bounded by draft DURATION not by batch size: measured 7.7 drafts/hour against a sequential ceiling of 11.2/hour at a 320s median, already 69% of the ceiling, and identical at cap 3, 6 or 12; meanwhile the batch runs INSIDE deps.sweep(), so once W1-T2582's exclusion lands a cap-3 batch blocks every other sweep-borne rung for 961s and cap 6 for 1,922s"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 15.00
+  files: [src/lib/inbox.ts, src/run-task.ts, test/the-draft-cap-is-a-batch-size-not-a-concurrency-limit.test.ts]
+  origin: "operator-request#raise-the-cap-2026-09-01"
+  plan_refs: ["W1-T2561", "W1-T2582", "W1-T2569", "W1-T2590", "W1-T192"]
+  status: queued
+  attempts: 0
+  rationale: |
+    ── THE REQUEST WAS TO RAISE THE CAP. MEASUREMENT SAYS THAT DELIVERS NOTHING ────────────────
+
+    `DAEMON_DRAFT_BATCH_CAP` is widely read — including in the request that prompted this — as a
+    CONCURRENCY limit on in-flight Architect spawns. IT IS NOT. `runDraftRung` (lib/inbox.ts) is
+
+        for (const proposal of toDraft) { ... await deps.spawn(proposal, prompt) ... }
+
+    a strictly sequential for-await, and `draftProposalBatch` materialises ONE worktree that every
+    proposal in the batch is drafted against. So a batch of N costs N x the per-draft duration END
+    TO END, and the number of drafts finished per hour is set by DURATION ALONE.
+
+    MEASURED 2026-09-01 over the three-form union, on the 28 real drafts since the refusal fix
+    (the earlier population is unusable — those returned in ~2s because they were session-limit
+    refusals, not work):
+
+        median draft duration ............ 320s   (p90 464s, max 593s)
+        observed throughput .............. 7.7 drafts/hour over 3.63h
+        SEQUENTIAL ceiling at 320s ....... 11.2 drafts/hour — AT ANY CAP
+        observed / ceiling ............... 69%
+
+    RAISING THE CAP MOVES NEITHER NUMBER. At cap 3, 6 or 12 the ceiling is 11.2/hour; only the
+    batch gets longer. That is the whole finding, and it is why this task is filed instead of a
+    one-line constant change being made.
+
+    ── ⚠ AND AFTER W1-T2582 IT IS ACTIVELY HARMFUL, WHICH IS A CONSEQUENCE OF OUR OWN FIX ──────
+
+    `await draftHook()` sits INSIDE `buildSweepHook`'s closure, so the draft batch is part of
+    `deps.sweep()`. W1-T2582 makes `runGatedSweep` DECLINE a new pass while a previous one is still
+    executing — correct, and it is what stops the duplicate passes that cost $123.30. Its
+    consequence is that a slow sweep-borne rung now BLOCKS every other one instead of being
+    duplicated by it:
+
+        cap 1:   320s of sweep occupancy   (under the 559s wall-clock bound)
+        cap 3:   961s                      (1.7x the bound — today's setting)
+        cap 6: 1,922s                      (32 minutes with dispose/review/fix stalled)
+
+    So raising the cap converts a no-op on throughput into a linear tax on the disposition, review
+    and fix rungs. ⚠ SEQUENCING, CORRECTED WHILE THIS WAS BEING FILED: at first drafting W1-T2582
+    was UNMERGED, so this was a PREDICTION. It merged at 2026-09-01T21:28:09Z (7 `SweepLiveness`
+    references now on main), so the starvation is LIVE, not predicted — today's cap of 3 already
+    occupies the sweep for 961s per batch. The prediction and its confirmation are both recorded
+    because a reader who finds this after the fact should be able to tell which parts were derived
+    and which were observed.
+
+    ── WHAT THE ACTUAL LEVER IS, AND WHY IT IS NOT A ONE-LINER ────────────────────────────────
+
+    Concurrency. Three drafts in parallel finish in ~320s rather than 961s: 3x the rate AND a batch
+    that fits under the sweep bound, removing the starvation instead of adding to it. 282 proposals
+    drain in ~8 hours instead of ~25.
+
+    ⚠ IT NEEDS A WORKTREE DECISION FIRST, AND THERE IS NO PRECEDENT HERE TO COPY. Every draft in a
+    batch currently shares ONE worktree on ONE per-attempt branch. Concurrent workers in a shared
+    cwd is unprecedented in this repo — `specialist-panel.ts` and `flight-judge.ts` both spawn one
+    worker at a time, and a sweep of `src/` finds no `Promise.all` over `spawnWorker` anywhere. So
+    "the workers only read, sharing is fine" is an ASSUMPTION, and the workers run under
+    `bypassPermissions`. Either give each concurrent draft its own worktree, or prove the shared
+    one is safe; do not assume it.
+
+    THE THIRD OPTION, NAMED SO IT IS NOT REDISCOVERED: reduce per-draft duration. That is the mount
+    /model half and belongs to W1-T2559, not here.
+
+    NOT IN SCOPE: the batch cap's VALUE (raising it is what this task shows to be pointless), the
+    re-entrancy guard (W1-T2569), the exclusion (W1-T2582) and the refusal deferral (W1-T2590), all
+    of which are correct and none of which this changes.
+
+  acceptance:
+    - claim: "a batch of N drafts finishes in about the time of one draft rather than N of them"
+      proof: "unit test: test/the-draft-cap-is-a-batch-size-not-a-concurrency-limit.test.ts"
+    - claim: "concurrent drafts do not share a worktree unless that sharing is shown to be safe"
+      proof: "unit test: test/the-draft-cap-is-a-batch-size-not-a-concurrency-limit.test.ts"
+    - claim: "the batch stays within the sweep wall-clock bound at the shipped cap, so it cannot starve the other sweep-borne rungs"
+      proof: "unit test: test/the-draft-cap-is-a-batch-size-not-a-concurrency-limit.test.ts"
