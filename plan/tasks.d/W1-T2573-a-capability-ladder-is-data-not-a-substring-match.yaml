@@ -8,7 +8,7 @@
   risk: high
   band_meaning: "blast-radius"
   budget_usd: 12.00
-  files: [src/lib/worker-provider.ts, src/lib/mounts.ts, test/a-capability-ladder-is-data-not-a-substring-match.test.ts]
+  files: [.remudero/mounts.yaml, src/lib/worker-provider.ts, src/lib/mounts.ts, test/a-capability-ladder-is-data-not-a-substring-match.test.ts]
   origin: "operator-session#codex-router-design-2026-09-01"
   plan_refs: ["W1-T167", "W1-T2572"]
   status: queued
@@ -56,6 +56,14 @@
     existing route, does not change which model any current mount resolves to, and must not weaken
     `enforceTierInvariant` — a capability ladder that cannot express the existing invariant is the
     wrong ladder, and the falsifier for that is an attempted violation that must still be REFUSED.
+
+    SCOPE CORRECTION AT IMPLEMENTATION. The original `files:` list named the parser and selector
+    but omitted `.remudero/mounts.yaml`, even though this task's first, third, and fourth criteria
+    require the capability/model lookup to be declared data and require a new provider model to be
+    addable by editing that data. A parser change without the shipped table would either be unused
+    configuration or would preserve the hard-coded TypeScript model ladder this task removes. The
+    routing table is therefore in scope so the production selector consumes the same validated data
+    the Tier Invariant checks. This correction does not change any existing route assignment.
   acceptance:
     - claim: "a mount resolves to a provider model through a declared capability lookup, never a substring of a Claude model name"
       proof: "unit test: test/a-capability-ladder-is-data-not-a-substring-match.test.ts"
