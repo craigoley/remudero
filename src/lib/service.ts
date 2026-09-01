@@ -563,8 +563,8 @@ function readRawBody(req: IncomingMessage): Promise<string> {
 }
 
 /** W1-T2568 (design i): thrown by {@link readBoundedRawBody} when a request body exceeds the
- *  caller's bound — the request stream is destroyed before this rejects, so no further bytes
- *  are read/buffered once the bound is crossed ("bound the body BEFORE buffering it"). */
+ *  caller's bound. Later bytes are drained but never buffered, preserving the response socket so
+ *  the caller receives the route's explicit 413 instead of a connection reset. */
 export class RawBodyTooLargeError extends Error {
   constructor(maxBytes: number) {
     super(`request body exceeds the ${maxBytes}-byte bound`);
@@ -579,8 +579,8 @@ export class RawBodyTooLargeError extends Error {
  * calls this AFTER `createService`'s own dispatch already drained the body — never true for a
  * `selfAuthenticated` route, which skips that dispatch, but true in principle — still gets the
  * cached bytes rather than a dead stream), but BOUNDED: a body that grows past `maxBytes`
- * destroys the socket and rejects with {@link RawBodyTooLargeError} instead of buffering
- * arbitrarily much attacker-supplied data first. Exported for any self-authenticated route
+ * rejects with {@link RawBodyTooLargeError} and drains later chunks without retaining them,
+ * instead of buffering arbitrarily much attacker-supplied data first. Exported for any self-authenticated route
  * handler (see {@link Route.selfAuthenticated}) — `src/lib/github-event-wake.ts`'s webhook
  * handler is the first caller.
  */
@@ -599,7 +599,6 @@ export function readBoundedRawBody(req: IncomingMessage, maxBytes: number): Prom
       receivedBytes += chunk.length;
       if (receivedBytes > maxBytes) {
         settled = true;
-        req.destroy();
         reject(new RawBodyTooLargeError(maxBytes));
         return;
       }

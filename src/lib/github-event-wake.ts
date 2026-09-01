@@ -87,10 +87,9 @@ const ALLOWLISTED_PULL_REQUEST_ACTIONS: ReadonlySet<string> = new Set([
  * result — design (ii)'s minimum event set. `check_run` only in its terminal `completed` state
  * (an in-progress run changes nothing a disposition reads); `status` carries no `action` field
  * at all (GitHub's Status API predates the actions convention), so its mere presence, already
- * gated by the event-name allowlist below, is the whole signal; `pull_request_review` only in
- * its one real delivered action, `submitted` (a review's terminal state — GitHub does not emit
- * separate `edited`/`dismissed` review-state deliveries the sweep's post-review disposition
- * needs to react to beyond what `submitted` already carries).
+ * gated by the event-name allowlist below, is the whole signal; `pull_request_review` on all
+ * three actions GitHub documents: `submitted`, `edited`, and `dismissed`. Each can change the
+ * review evidence the next level-triggered sweep reads.
  */
 export function isAllowlistedGithubEvent(event: string, action: string | undefined): boolean {
   switch (event) {
@@ -101,7 +100,7 @@ export function isAllowlistedGithubEvent(event: string, action: string | undefin
     case "status":
       return true;
     case "pull_request_review":
-      return action === "submitted";
+      return action === "submitted" || action === "edited" || action === "dismissed";
     default:
       return false;
   }
@@ -160,23 +159,85 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
  *  `githubEventWake.dedupCapacity`). FIFO eviction: this is a REPLAY/redelivery guard, not an
  *  audit log, so the oldest-remembered delivery id is the correct one to forget first. */
 export interface DeliveryDedupStore {
-  /** True iff `deliveryId` was already recorded (a duplicate); records it (bounded) otherwise. */
-  seen(deliveryId: string): boolean;
+  /** True iff `deliveryId` was already accepted. Pure: never records the candidate. */
+  has(deliveryId: string): boolean;
+  /** Record one successfully persisted wake, evicting the oldest id at the configured bound. */
+  record(deliveryId: string): void;
 }
 
-export function createDeliveryDedupStore(capacity: number): DeliveryDedupStore {
+export function createDeliveryDedupStore(capacity: number, initial: ReadonlyArray<string> = []): DeliveryDedupStore {
   const order: string[] = [];
   const known = new Set<string>();
+  for (const deliveryId of initial) {
+    if (known.has(deliveryId)) continue;
+    known.add(deliveryId);
+    order.push(deliveryId);
+  }
+  while (order.length > capacity) {
+    const evicted = order.shift();
+    if (evicted !== undefined) known.delete(evicted);
+  }
   return {
-    seen(deliveryId) {
-      if (known.has(deliveryId)) return true;
+    has(deliveryId) {
+      return known.has(deliveryId);
+    },
+    record(deliveryId) {
+      if (known.has(deliveryId)) return;
       known.add(deliveryId);
       order.push(deliveryId);
       while (order.length > capacity) {
         const evicted = order.shift();
         if (evicted !== undefined) known.delete(evicted);
       }
-      return false;
+    },
+  };
+}
+
+/** The serve process's durable, bounded replay window. Separate from the coalesced wake marker
+ * because accepted ids must survive marker consumption and a serve-container restart. */
+export function githubDeliveryDedupPath(root: string): string {
+  return join(root, "state", "github-webhook-deliveries.json");
+}
+
+/**
+ * Persist the recent-delivery FIFO as one atomically replaced JSON file. The disk write completes
+ * before the in-memory store changes, so a failed persistence attempt cannot poison an id and
+ * turn a legitimate retry into a false duplicate. A missing or malformed old file starts with an
+ * empty window; HMAC remains the authentication boundary and losing this secondary replay cache
+ * can cause only an extra level-triggered wake.
+ */
+export function createPersistentDeliveryDedupStore(path: string, capacity: number): DeliveryDedupStore {
+  let initial: string[] = [];
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as { deliveryIds?: unknown };
+    if (Array.isArray(parsed.deliveryIds)) initial = parsed.deliveryIds.filter((id): id is string => typeof id === "string");
+  } catch {
+    // Missing/corrupt replay state is fail-soft. The next accepted delivery replaces it.
+  }
+  let order = [...new Set(initial)].slice(-capacity);
+  let known = new Set(order);
+  return {
+    has(deliveryId) {
+      return known.has(deliveryId);
+    },
+    record(deliveryId) {
+      if (known.has(deliveryId)) return;
+      const nextOrder = [...order, deliveryId].slice(-capacity);
+      const tmpPath = `${path}.tmp-${process.pid}-${Math.random().toString(36).slice(2)}`;
+      mkdirSync(dirname(path), { recursive: true });
+      try {
+        writeFileSync(tmpPath, JSON.stringify({ deliveryIds: nextOrder }), { mode: 0o600 });
+        renameSync(tmpPath, path);
+      } catch (error) {
+        try {
+          unlinkSync(tmpPath);
+        } catch {
+          // The temp may never have been created; preserve the original persistence error.
+        }
+        throw error;
+      }
+      order = nextOrder;
+      known = new Set(order);
     },
   };
 }
@@ -286,8 +347,9 @@ export interface GithubEventWakeOptions {
  *      GitHub never marks a legitimately-uninteresting delivery "failed" and retries it; design
  *      ii: "an attacker cannot use that response to create a marker" — nothing is written here).
  *   7. missing `X-GitHub-Delivery` -> 400, refused (dedup needs it).
- *   8. a delivery id already seen -> 202 duplicate, nothing re-written.
- *   9. accepted -> marker written/coalesced, `github.wake.accepted` ledgered, 202.
+ *   8. a delivery id already recorded -> 202 duplicate, nothing re-written.
+ *   9. accepted -> marker written/coalesced, delivery id recorded,
+ *      `github.wake.accepted` ledgered, 202. A failed marker write records nothing.
  */
 export function createGitHubEventWakeHandler(opts: GithubEventWakeOptions): Route {
   const log = opts.log ?? (() => {});
@@ -362,7 +424,7 @@ export function createGitHubEventWakeHandler(opts: GithubEventWakeOptions): Rout
         sendJson(res, 400, { error: "missing_delivery_id" });
         return;
       }
-      if (opts.dedup.seen(deliveryId)) {
+      if (opts.dedup.has(deliveryId)) {
         log("github.wake.duplicate", { delivery_id: deliveryId, event, action });
         sendJson(res, 202, { duplicate: true });
         return;
@@ -376,6 +438,7 @@ export function createGitHubEventWakeHandler(opts: GithubEventWakeOptions): Rout
         receivedAtIso: now().toISOString(),
       };
       writeMarker(opts.markerPath, record);
+      opts.dedup.record(deliveryId);
       log("github.wake.accepted", { delivery_id: deliveryId, event, action, repository });
       sendJson(res, 202, { accepted: true });
     },

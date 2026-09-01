@@ -94,8 +94,9 @@ import {
   type RefreshOptions,
 } from "./github-app.js";
 import {
-  createDeliveryDedupStore,
   createGitHubEventWakeHandler,
+  createPersistentDeliveryDedupStore,
+  githubDeliveryDedupPath,
   sweepWakeMarkerPath,
 } from "./github-event-wake.js";
 import { DEFAULT_GITHUB_EVENT_WAKE_DEDUP_CAPACITY } from "./policy.js";
@@ -5548,7 +5549,10 @@ export function buildServeRoutes(deps: ServeDeps): Route[] {
       secret: deps.githubEventWake?.secret,
       repository: deps.githubEventWake?.repository ?? "",
       markerPath: sweepWakeMarkerPath(deps.fleetControlRoot),
-      dedup: createDeliveryDedupStore(deps.githubEventWake?.dedupCapacity ?? DEFAULT_GITHUB_EVENT_WAKE_DEDUP_CAPACITY),
+      dedup: createPersistentDeliveryDedupStore(
+        githubDeliveryDedupPath(deps.fleetControlRoot),
+        deps.githubEventWake?.dedupCapacity ?? DEFAULT_GITHUB_EVENT_WAKE_DEDUP_CAPACITY,
+      ),
       log: deps.log,
     }),
   ];
