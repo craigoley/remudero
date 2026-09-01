@@ -74,22 +74,31 @@ export function renderCoverageSummary(summary) {
   return `${output.join('\n')}\n`;
 }
 
-/**
- * Node's LCOV reporter numbers branches by their position in one run's branch array. Those IDs
- * are not stable across test shards. Stage every raw V8 report together, then let the exact
- * repository-pinned Node implementation merge source ranges before assigning LCOV indexes.
- */
-export function mergeRawCoverageDirectories(directories) {
+function withStagedRawCoverage(directories, sourceMaps, collect) {
   if (directories.length === 0) throw new Error('at least one raw coverage directory is required');
   assertPinnedNodeVersion();
   const TestCoverage = loadTestCoverage();
   const staging = mkdtempSync(join(tmpdir(), 'rmd-merge-node-coverage-'));
+  const sourceMapCache = Object.create(null);
+  const serializedSourceMaps = new Map();
   let rawFileCount = 0;
   try {
     for (const directory of directories) {
       const files = coverageFilesUnder(directory);
       if (files.length === 0) throw new Error(`${directory} contains no V8 coverage files`);
       for (const file of files) {
+        if (!sourceMaps) {
+          const raw = JSON.parse(readFileSync(file, 'utf8'));
+          for (const [url, sourceMap] of Object.entries(raw['source-map-cache'] ?? {})) {
+            const serialized = JSON.stringify(sourceMap);
+            const previous = serializedSourceMaps.get(url);
+            if (previous !== undefined && previous !== serialized) {
+              throw new Error(`raw coverage files disagree on the source map for ${url}`);
+            }
+            serializedSourceMaps.set(url, serialized);
+            sourceMapCache[url] = sourceMap;
+          }
+        }
         const stagedName = `coverage-${process.pid}-${Date.now()}-${rawFileCount}.json`;
         copyFileSync(file, join(staging, stagedName));
         rawFileCount += 1;
@@ -101,30 +110,69 @@ export function mergeRawCoverageDirectories(directories) {
       process.cwd(),
       ['test/**'],
       undefined,
-      true,
+      sourceMaps,
       { line: 0, branch: 0, function: 0 },
     );
-    const summary = collector.summary();
-    if (summary.files.length === 0) throw new Error('raw coverage merge produced no source records');
-    return { rawFileCount, summary };
+    return collect(collector, rawFileCount, sourceMapCache);
   } finally {
     rmSync(staging, { recursive: true, force: true });
   }
+}
+
+/**
+ * Collapse one shard's many process reports into one V8-compatible report. Unlike LCOV,
+ * the compact result retains generated-code offsets plus their source-map cache. Deferring
+ * source-map translation until the final pass preserves Node's source-line hit accounting while
+ * another TestCoverage pass merges four compact reports without multiplying branch records.
+ */
+export function compactRawCoverageDirectories(directories) {
+  return withStagedRawCoverage(directories, false, (collector, rawFileCount, sourceMapCache) => {
+    const result = collector.getCoverageFromDirectory();
+    if (result.length === 0) throw new Error('raw coverage compaction produced no source records');
+    return { rawFileCount, result, sourceMapCache };
+  });
+}
+
+/**
+ * Node's LCOV reporter numbers branches by their position in one run's branch array. Those IDs
+ * are not stable across test shards. Stage every raw V8 report together, then let the exact
+ * repository-pinned Node implementation merge source ranges before assigning LCOV indexes.
+ */
+export function mergeRawCoverageDirectories(directories) {
+  return withStagedRawCoverage(directories, true, (collector, rawFileCount) => {
+    const summary = collector.summary();
+    if (summary.files.length === 0) throw new Error('raw coverage merge produced no source records');
+    return { rawFileCount, summary };
+  });
 }
 
 function main(argv) {
   const { values, positionals } = parseArgs({
     args: argv,
     allowPositionals: true,
-    options: { output: { type: 'string', short: 'o' } },
+    options: {
+      output: { type: 'string', short: 'o' },
+      'compact-output': { type: 'string' },
+    },
   });
-  if (!values.output) throw new Error('--output is required');
-  const { rawFileCount, summary } = mergeRawCoverageDirectories(positionals);
-  writeFileSync(values.output, renderCoverageSummary(summary));
-  console.log(
-    `merge-lcov: ${positionals.length} raw shard(s), ${rawFileCount} V8 file(s), ` +
-      `${summary.files.length} source record(s) -> ${values.output}`,
-  );
+  if (Boolean(values.output) === Boolean(values['compact-output'])) {
+    throw new Error('exactly one of --output or --compact-output is required');
+  }
+  if (values['compact-output']) {
+    const { rawFileCount, result, sourceMapCache } = compactRawCoverageDirectories(positionals);
+    writeFileSync(values['compact-output'], JSON.stringify({ result, 'source-map-cache': sourceMapCache }));
+    console.log(
+      `merge-lcov: compacted ${positionals.length} raw shard(s), ${rawFileCount} V8 file(s), ` +
+        `${result.length} source record(s) -> ${values['compact-output']}`,
+    );
+  } else {
+    const { rawFileCount, summary } = mergeRawCoverageDirectories(positionals);
+    writeFileSync(values.output, renderCoverageSummary(summary));
+    console.log(
+      `merge-lcov: ${positionals.length} raw shard(s), ${rawFileCount} V8 file(s), ` +
+        `${summary.files.length} source record(s) -> ${values.output}`,
+    );
+  }
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {

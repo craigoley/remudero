@@ -508,9 +508,15 @@ jobs:
         run: |
           mkdir -p coverage-artifact
           if [ -s coverage/lcov.info ]; then
+            # The raw process reports were 514 MB for ONE shard on this PR's first live run.
+            # Merge their generated V8 ranges locally, retain one source-map cache, and upload one
+            # compact report. The aggregator maps and merges those four reports before assigning
+            # LCOV line/branch IDs, preserving Node's own source-line hit accounting.
+            mkdir -p coverage/compact
             mkdir -p coverage-artifact/raw
+            node --expose-internals scripts/merge-lcov.mjs --compact-output coverage/compact/coverage-${{ matrix.shard }}-0000000000000-0.json coverage/raw
             cp coverage/lcov.info coverage-artifact/lcov.info
-            cp coverage/raw/coverage-*.json coverage-artifact/raw/
+            cp coverage/compact/coverage-*.json coverage-artifact/raw/
           else
             echo "${GITHUB_EVENT_NAME}:${{ steps.classify.outputs.class }}" > coverage-artifact/skipped
           fi

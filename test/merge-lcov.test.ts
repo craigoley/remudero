@@ -16,6 +16,14 @@ function runMerger(output: string, ...rawDirectories: string[]): string {
   );
 }
 
+function runCompactor(output: string, ...rawDirectories: string[]): string {
+  return execFileSync(
+    process.execPath,
+    ['--expose-internals', 'scripts/merge-lcov.mjs', '--compact-output', output, ...rawDirectories],
+    { cwd: process.cwd(), encoding: 'utf8', stdio: 'pipe' },
+  );
+}
+
 function sourceRecord(lcov: string, suffix: string): string {
   const records = lcov.split('end_of_record\n');
   const record = records.find((candidate) => candidate.match(/^SF:(.*)$/m)?.[1].endsWith(suffix));
@@ -27,6 +35,16 @@ function summaryValue(record: string, key: string): number {
   const match = record.match(new RegExp(`^${key}:(\\d+)$`, 'm'));
   assert.ok(match, `expected ${key} in LCOV record`);
   return Number(match[1]);
+}
+
+function summaryTotals(lcov: string): Record<string, number> {
+  return Object.fromEntries(
+    ['FNF', 'FNH', 'BRF', 'BRH', 'LF', 'LH'].map((key) => [
+      key,
+      [...lcov.matchAll(new RegExp(`^${key}:(\\d+)$`, 'gm'))]
+        .reduce((total, match) => total + Number(match[1]), 0),
+    ]),
+  );
 }
 
 function coverageEnv(directory: string): NodeJS.ProcessEnv {
@@ -83,6 +101,9 @@ test('merge-lcov CLI merges raw V8 ranges before assigning LCOV branch indexes',
   const leftRaw = join(dir, 'raw-left');
   const rightRaw = join(dir, 'raw-right');
   const bothRaw = join(dir, 'raw-both');
+  const leftCompact = join(dir, 'compact-left');
+  const rightCompact = join(dir, 'compact-right');
+  const bothCompact = join(dir, 'compact-both');
   const leftLcov = join(dir, 'left.info');
   const rightLcov = join(dir, 'right.info');
   const bothLcov = join(dir, 'both.info');
@@ -93,6 +114,9 @@ test('merge-lcov CLI merges raw V8 ranges before assigning LCOV branch indexes',
   mkdirSync(leftRaw);
   mkdirSync(rightRaw);
   mkdirSync(bothRaw);
+  mkdirSync(leftCompact);
+  mkdirSync(rightCompact);
+  mkdirSync(bothCompact);
   writeFileSync(
     probe,
     `exports.choose = function choose(side) {\n  if (side === 'left') return 'left';\n  return 'right';\n};\n`,
@@ -119,10 +143,18 @@ test('merge-lcov CLI merges raw V8 ranges before assigning LCOV branch indexes',
     stdio: 'pipe',
   });
 
-  runMerger(leftLcov, leftRaw);
-  runMerger(rightLcov, rightRaw);
-  runMerger(bothLcov, bothRaw);
-  runMerger(mergedLcov, leftRaw, rightRaw);
+  const leftCompactFile = join(leftCompact, 'coverage-1-0000000000000-0.json');
+  const rightCompactFile = join(rightCompact, 'coverage-2-0000000000000-0.json');
+  const bothCompactFile = join(bothCompact, 'coverage-3-0000000000000-0.json');
+  runCompactor(leftCompactFile, leftRaw);
+  runCompactor(rightCompactFile, rightRaw);
+  runCompactor(bothCompactFile, bothRaw);
+  assert.ok(Array.isArray(JSON.parse(readFileSync(leftCompactFile, 'utf8')).result));
+
+  runMerger(leftLcov, leftCompact);
+  runMerger(rightLcov, rightCompact);
+  runMerger(bothLcov, bothCompact);
+  runMerger(mergedLcov, leftCompact, rightCompact);
 
   const left = sourceRecord(readFileSync(leftLcov, 'utf8'), 'opposite-branches.cjs');
   const right = sourceRecord(readFileSync(rightLcov, 'utf8'), 'opposite-branches.cjs');
@@ -141,6 +173,57 @@ test('merge-lcov CLI merges raw V8 ranges before assigning LCOV branch indexes',
   for (const key of ['BRF', 'BRH', 'LF', 'LH']) {
     assert.equal(summaryValue(merged, key), summaryValue(both, key), `${key} must match one process that covers both paths`);
   }
+});
+
+test('compact shard reports defer source-map translation and preserve every LCOV total', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'merge-node-source-map-coverage-'));
+  const leftRaw = join(dir, 'raw-left');
+  const rightRaw = join(dir, 'raw-right');
+  const leftCompact = join(dir, 'compact-left');
+  const rightCompact = join(dir, 'compact-right');
+  const directLcov = join(dir, 'direct.info');
+  const compactLcov = join(dir, 'compact.info');
+  mkdirSync(leftRaw);
+  mkdirSync(rightRaw);
+  mkdirSync(leftCompact);
+  mkdirSync(rightCompact);
+
+  const runSourceMappedCoverage = (raw: string, namePattern: string) => {
+    execFileSync(
+      process.execPath,
+      [
+        '--enable-source-maps',
+        '--experimental-test-coverage',
+        '--test-coverage-exclude=test/**',
+        '--test',
+        `--test-name-pattern=${namePattern}`,
+        '--import',
+        'tsx',
+        '--import',
+        './test/setup/tmp-hygiene.ts',
+        'test/worker-provider.test.ts',
+      ],
+      { cwd: process.cwd(), env: coverageEnv(raw), stdio: 'pipe' },
+    );
+  };
+  runSourceMappedCoverage(leftRaw, 'provider selector uses the subscription');
+  runSourceMappedCoverage(rightRaw, 'provider selector excludes an exhausted');
+
+  const leftCompactFile = join(leftCompact, 'coverage-1-0000000000000-0.json');
+  const rightCompactFile = join(rightCompact, 'coverage-2-0000000000000-0.json');
+  runMerger(directLcov, leftRaw, rightRaw);
+  runCompactor(leftCompactFile, leftRaw);
+  runCompactor(rightCompactFile, rightRaw);
+  runMerger(compactLcov, leftCompact, rightCompact);
+
+  const compactReport = JSON.parse(readFileSync(leftCompactFile, 'utf8')) as {
+    'source-map-cache'?: Record<string, unknown>;
+  };
+  assert.ok(Object.keys(compactReport['source-map-cache'] ?? {}).length > 0);
+  assert.deepEqual(
+    summaryTotals(readFileSync(compactLcov, 'utf8')),
+    summaryTotals(readFileSync(directLcov, 'utf8')),
+  );
 });
 
 test('merge-lcov CLI refuses an empty raw shard instead of producing a vacuous report', () => {

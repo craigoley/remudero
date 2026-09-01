@@ -42,6 +42,8 @@ test('coverage sharding: four complete raw V8 artifacts are required before Node
   assert.equal(shards.name, 'coverage-shard (${{ matrix.shard }}/4)');
   assert.match(runBodies('coverage-ratchet'), /--test-shard=\$\{\{ matrix\.shard \}\}\/4/);
   assert.match(runBodies('coverage-ratchet'), /NODE_V8_COVERAGE=coverage\/raw node/);
+  assert.match(runBodies('coverage-ratchet'), /scripts\/merge-lcov\.mjs --compact-output coverage\/compact\/coverage-/);
+  assert.doesNotMatch(runBodies('coverage-ratchet'), /cp coverage\/raw\/coverage-\*\.json/);
   const upload = shards.steps?.find((step) => step.name === 'Upload coverage shard');
   assert.match(upload?.uses ?? '', /^actions\/upload-artifact@[0-9a-f]{40}$/);
   assert.equal(upload?.with?.['if-no-files-found'], 'error');
