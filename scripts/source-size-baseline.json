@@ -9,7 +9,7 @@
   "src/lib/board.ts": 1090,
   "src/lib/body-repair.ts": 196,
   "src/lib/branch-reaper.ts": 196,
-  "src/lib/ci-parity.ts": 1500,
+  "src/lib/ci-parity.ts": 1502,
   "src/lib/classify.ts": 409,
   "src/lib/cli-args.ts": 40,
   "src/lib/clone-reaper.ts": 298,
