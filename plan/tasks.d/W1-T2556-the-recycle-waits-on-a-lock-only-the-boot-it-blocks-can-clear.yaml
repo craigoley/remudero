@@ -1,0 +1,69 @@
+- id: W1-T2556
+  title: "THE RECYCLE WAITS OUT, THEN REFUSES ON, AN INFLIGHT LOCK THAT ONLY THE NEXT BOOT CAN CLEAR — AND IT IS THE THING THAT PRODUCES THAT BOOT; `state/inflight/*.lock` is counted as a FILE (deploy/recycle-container.sh) with the script's own comment saying to \"let the next boot decide\" (W1-T978's reclaim), so a lock naming a container that no longer exists blocks every recycle forever, and the only escape MEASURED 2026-09-01 was an operator moving the file by hand after reading the dead container's id out of it"
+  repo: remudero
+  depends_on: ["W1-T2555"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 15.00
+  files: [deploy/recycle-container.sh, test/a-lock-whose-container-is-gone-is-reclaimed-not-waited-on.test.ts]
+  origin: "operator-session#the-github-auth-outage-2026-09-01"
+  plan_refs: ["W1-T978", "W1-T1010", "W1-T1046", "W1-T2555"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE SCRIPT STATES THE DEADLOCK IN ITS OWN OUTPUT AND DOES NOT SEE IT. It prints the lock, then:
+    "A host-side script cannot tell whether the holder above names a container that is gone; the
+    daemon reclaims a foreign container-shaped holder on its OWN next boot (W1-T978). This script does
+    not act on that — read it, or let the next boot decide." Deferring to the next boot is sound
+    reasoning from a script that cannot judge the holder. It is unsound HERE, because this script is
+    what produces the next boot. The remedy it names is downstream of the refusal that prevents it.
+
+    OBSERVED 2026-09-01. `state/inflight/W1-T2525.lock` named `{"pid": 57, "host": "8c8fc20029e2"}`.
+    `docker ps -a` reported container `8c8fc20029e2` as `exited`. The recycle waited its full bounded
+    interval and refused, twice, and the fleet stayed down until an operator read the container id out
+    of the lock, confirmed it against `docker ps -a` by hand, and moved the file aside. Every input
+    that decision needed was available to the script, from a command it already shells.
+
+    THIS IS THE THIRD GUARD OF THIS SHAPE FOUND IN ONE NIGHT, WHICH IS WHY IT IS FILED AS A DEFECT
+    RATHER THAN AN INCONVENIENCE. The other two: the capture branch that read only the container's
+    environment and refused on a value W1-T2311 forwards EMPTY by design, and the GH_TOKEN refusal
+    that demanded a credential App auth had already replaced. All three refuse on state whose only
+    remedy sits on the far side of the refusal. Each was individually defensible and collectively they
+    took the fleet down for hours.
+
+    THE ASYMMETRY THE FIX MUST PRESERVE. Killing a live worker loses unrecorded spend, so the script's
+    standing rule is that anything it cannot positively classify as dead is waited for and then
+    refused. That rule is right and this task does not weaken it. What it adds is a POSITIVE
+    classification the script does not currently attempt: a lock is reclaimable when the `host` it
+    names is a container that `docker inspect` reports as absent or not running. That is a
+    fact, not a heuristic, and it is exactly the judgement `isHolderStale`'s container branch already
+    makes for `drain.lock` — the note in this script's own header says a host-side script "cannot"
+    make it, and that claim is what this task falsifies.
+
+    A LOCK WHOSE HOST IS THE CURRENTLY-RUNNING CONTAINER IS NEVER TOUCHED, and neither is one whose
+    host cannot be resolved: an unreadable or malformed lock, or a `host` that names something docker
+    does not know about at all, stays exactly as conservative as today. THE DEFAULT DIRECTION IS
+    UNCHANGED — this only moves locks that are PROVABLY dead out of the blocking set.
+
+    PRINT BEFORE CLEARING, AND NEVER DELETE. The script's standing discipline is that a lock is
+    printed in full before anything acts on it, and the forensics that produced W1-T1046's own
+    predicate exist only because of it. Whatever this does must preserve the file — moved aside with
+    its reason recorded, never unlinked — so a wrong judgement is recoverable and the evidence of a
+    lost run survives.
+  acceptance:
+    - claim: "a lock whose named container docker reports as absent is reclaimed, not waited on"
+      proof: "unit test: test/a-lock-whose-container-is-gone-is-reclaimed-not-waited-on.test.ts"
+    - claim: "a lock whose named container is RUNNING still blocks the recycle exactly as today"
+      proof: "unit test: test/a-lock-whose-container-is-gone-is-reclaimed-not-waited-on.test.ts"
+    - claim: "a lock whose host cannot be resolved is left alone and still blocks — unchanged conservatism"
+      proof: "unit test: test/a-lock-whose-container-is-gone-is-reclaimed-not-waited-on.test.ts"
+    - claim: "an unreadable or malformed lock is left alone and still blocks"
+      proof: "unit test: test/a-lock-whose-container-is-gone-is-reclaimed-not-waited-on.test.ts"
+    - claim: "every reclaimed lock is printed in full before it is acted on"
+      proof: "unit test: test/a-lock-whose-container-is-gone-is-reclaimed-not-waited-on.test.ts"
+    - claim: "a reclaimed lock is preserved, never unlinked, so a wrong judgement is recoverable"
+      proof: "unit test: test/a-lock-whose-container-is-gone-is-reclaimed-not-waited-on.test.ts"
+    - claim: "restoring the blind file count makes a dead-container lock block again — the falsifier is load-bearing"
+      proof: "unit test: test/a-lock-whose-container-is-gone-is-reclaimed-not-waited-on.test.ts"
