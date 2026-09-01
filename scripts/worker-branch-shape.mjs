@@ -19,6 +19,22 @@
 // claim visible to the readers above. A branch that claims no task is never refused, whatever its
 // name — that is the population W1-T447's own (separate) dry-run sweep owns, not this gate.
 //
+// W1-T2530: A FILING IS NOT A BUILD. `run-<taskId>-<epochMs>` is unsatisfiable for a PR that files
+// SEVERAL shards (one head ref cannot carry N ids) and actively harmful for one that files a
+// single shard (`projectPlan`, src/lib/status.ts, attributes an OPEN PR to a task by that same
+// regex against `headRefName` — renaming a filing to it would make dispatch believe the task is
+// an in-flight BUILD nobody has started, and suppress or de-prioritise it for as long as the
+// filing PR stays open). So a task id claimed ONLY by a filed shard (never also anchored by a
+// trailer) is exempt from the shape check when this branch's own diff is PLAN-ONLY — every file it
+// changes since base is `isInPlanScope` (restated below as {@link isInPlanScope}, mirroring
+// src/lib/plan-architect.ts's own predicate, the same one `judgeReview`/`checkSatisfiedByGuard`
+// already gate Standing rule 15's carve-out on). A trailer claim is ALWAYS shape-checked regardless
+// of plan-only-ness — a trailer is an explicit build claim whatever else the diff holds — and a
+// shard claim on a diff that ALSO touches something outside plan scope (a build that files its own
+// shard and forgets the trailer, the case this gate was originally built to catch) is unaffected:
+// {@link isPlanOnlyDiff} is false the moment one changed path falls outside plan scope, so that
+// limb still refuses an unshaped branch exactly as before.
+//
 // REPORTS BEFORE IT REFUSES (rationale, same reasoning W1-T2487 states for its own standing
 // population): this gate only ever judges a NEW claim made on THIS run — it never re-litigates a
 // branch that already exists on origin, and it carries no list of the standing 52. An operator
@@ -86,6 +102,30 @@ export function trailerTaskIds(commitMessages) {
   return ids;
 }
 
+/**
+ * Mirrors `src/lib/plan-architect.ts`'s `isInPlanScope` verbatim, restated (design note above, and
+ * see the file banner's W1-T2530 paragraph) rather than imported — this stays a plain `.mjs` file
+ * with no TypeScript dependency. `MASTER-PLAN.md`, the one regenerated `docs/ORIENTATION.md`, or
+ * anything under `plan/` is in plan scope.
+ * @param {string} path
+ */
+export function isInPlanScope(path) {
+  return path === "MASTER-PLAN.md" || path === "docs/ORIENTATION.md" || path.startsWith("plan/");
+}
+
+/**
+ * Is THIS branch's diff plan-only — every file it CHANGES since base (added, modified, or
+ * deleted; the full changed-file population, never just {@link shardTaskIds}' added-file subset)
+ * is {@link isInPlanScope}? An EMPTY `changedFiles` list (an unresolvable merge-base, or a caller
+ * that never supplied one) is NOT plan-only — fails closed to `false`, the same direction
+ * `scripts/diff-class.mjs`'s own `classify()` fails closed on an empty list, so a setup gap never
+ * silently grants the W1-T2530 carve-out below.
+ * @param {readonly string[]} changedFiles
+ */
+export function isPlanOnlyDiff(changedFiles) {
+  return changedFiles.length > 0 && changedFiles.every(isInPlanScope);
+}
+
 const SHARD_FILE_RE = /^plan\/tasks\.d\/.+\.ya?ml$/;
 const SHARD_ID_RE = /^\s*-\s*id:\s*([A-Za-z0-9-]+)\s*$/m;
 
@@ -132,13 +172,22 @@ export function claimedTaskIds({ commitMessages, addedFiles, readFile }) {
  * unconditionally would fail every innocent branch in the repo (`main`, `heartbeat-mini`, an
  * operator's own scratch branch), which is exactly the wrong-population failure the rationale
  * warns against; `test/a-worker-branch-must-be-shaped-for-dispatch.test.ts` pins this directly.
- * A branch that claims one or more ids is refused the moment ANY claimed id fails
- * {@link matchesRunBranchShape} against the actual head ref — the refusal message NAMES the shape
- * dispatch expects (`run-<taskId>-<epochMs>`) rather than a bare rejection.
- * @param {{ headRef: string | undefined, commitMessages: string | undefined, addedFiles: readonly string[], readFile: (path: string) => string | undefined }} input
+ *
+ * W1-T2530: of the ids claimed, only some are REQUIRED to carry the shape. Every trailer-claimed
+ * id always is — a trailer is an explicit build claim whatever else the diff holds. An id claimed
+ * ONLY by a filed shard (never also trailered) is required ONLY when this branch's diff is NOT
+ * plan-only ({@link isPlanOnlyDiff} over `changedFiles`) — a plan-only filing declaring a shard for
+ * a task nobody has started building is not a build claim, and forcing the unsatisfiable-at-N>1,
+ * actively-harmful-at-N=1 `run-<id>-<epochMs>` rename onto it is the defect this task fixes (see
+ * the file banner). A branch with one or more ids REQUIRED to carry the shape is refused the
+ * moment ANY of them fails {@link matchesRunBranchShape} against the actual head ref — the refusal
+ * message NAMES the shape dispatch expects (`run-<taskId>-<epochMs>`) rather than a bare rejection.
+ * @param {{ headRef: string | undefined, commitMessages: string | undefined, addedFiles: readonly string[], readFile: (path: string) => string | undefined, changedFiles?: readonly string[] }} input
  */
-export function evaluateWorkerBranchShape({ headRef, commitMessages, addedFiles, readFile }) {
-  const claimed = claimedTaskIds({ commitMessages, addedFiles, readFile });
+export function evaluateWorkerBranchShape({ headRef, commitMessages, addedFiles, readFile, changedFiles = [] }) {
+  const trailerIds = new Set(trailerTaskIds(commitMessages));
+  const shardIds = new Set(shardTaskIds(addedFiles, readFile));
+  const claimed = [...new Set([...trailerIds, ...shardIds])];
   if (claimed.length === 0) {
     return {
       ok: true,
@@ -146,11 +195,26 @@ export function evaluateWorkerBranchShape({ headRef, commitMessages, addedFiles,
     };
   }
 
-  const unshaped = claimed.filter((id) => !matchesRunBranchShape(headRef, id));
+  const planOnly = isPlanOnlyDiff(changedFiles);
+  // A shard-only id (never also trailered) is exempt from the shape requirement exactly when the
+  // diff is plan-only — see this function's own doc above.
+  const requiresShape = claimed.filter((id) => trailerIds.has(id) || !planOnly);
+  const exemptByPlanOnlyFiling = claimed.filter((id) => !requiresShape.includes(id));
+
+  if (requiresShape.length === 0) {
+    return {
+      ok: true,
+      message:
+        `claims ${exemptByPlanOnlyFiling.join(", ")} only by filing a plan/tasks.d/ shard on a plan-only diff — a filing is not ` +
+        "a build, so it is exempt from the run-<taskId>-<epochMs> shape check (W1-T2530)",
+    };
+  }
+
+  const unshaped = requiresShape.filter((id) => !matchesRunBranchShape(headRef, id));
   if (unshaped.length === 0) {
     return {
       ok: true,
-      message: `head ref "${headRef}" carries the run-<taskId>-<epochMs> shape dispatch and merge-credit expect, for ${claimed.join(", ")}`,
+      message: `head ref "${headRef}" carries the run-<taskId>-<epochMs> shape dispatch and merge-credit expect, for ${requiresShape.join(", ")}`,
     };
   }
 
@@ -159,8 +223,8 @@ export function evaluateWorkerBranchShape({ headRef, commitMessages, addedFiles,
     defect: "unshaped-worker-branch",
     message:
       `REFUSED — this branch claims ${unshaped.join(", ")} (by an anchored Remudero-Task trailer, or by filing a plan/tasks.d/ ` +
-      `shard for it) but its head ref "${headRef}" does not carry the shape dispatch reads to make an in-flight task visible ` +
-      `and the shape a merge is credited by when the trailer is missing: run-<taskId>-<epochMs> ` +
+      `shard for it, on a diff that is not plan-only) but its head ref "${headRef}" does not carry the shape dispatch reads to ` +
+      `make an in-flight task visible and the shape a merge is credited by when the trailer is missing: run-<taskId>-<epochMs> ` +
       `(e.g. run-${unshaped[0]}-1787887966537). Rename the branch to that shape, or drop the claim if this build is not ${unshaped[0]}'s own.`,
   };
 }
@@ -252,6 +316,29 @@ export function addedFilesSinceBase(worktreePath, mergeBase) {
   }
 }
 
+/**
+ * Every path this branch's own diff CHANGES since `mergeBase` — added, modified, OR deleted (no
+ * `--diff-filter`, unlike {@link addedFilesSinceBase}'s added-only population) — the population
+ * {@link isPlanOnlyDiff} walks to decide whether this branch's claim is a filing or a build.
+ * `undefined` `mergeBase` (see {@link resolveMergeBase}) yields an empty list rather than
+ * throwing, which {@link isPlanOnlyDiff} itself then reads as NOT plan-only (fails closed), same
+ * direction as every other setup-gap degrade in this file.
+ * @param {string} worktreePath
+ * @param {string | undefined} mergeBase
+ */
+export function changedFilesSinceBase(worktreePath, mergeBase) {
+  if (mergeBase === undefined) return [];
+  try {
+    const out = execFileSync("git", ["-C", worktreePath, "diff", "--name-only", mergeBase, "HEAD"], { encoding: "utf8" });
+    return out
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+  } catch {
+    return [];
+  }
+}
+
 export function main(argv) {
   const { values } = parseArgs({
     args: argv,
@@ -268,6 +355,7 @@ export function main(argv) {
   const mergeBase = resolveMergeBase(worktreePath, baseRef);
   const commitMessages = commitMessagesSinceBase(worktreePath, mergeBase);
   const addedFiles = addedFilesSinceBase(worktreePath, mergeBase);
+  const changedFiles = changedFilesSinceBase(worktreePath, mergeBase);
   const readFile = (path) => {
     try {
       return readFileSync(join(worktreePath, path), "utf8");
@@ -276,7 +364,7 @@ export function main(argv) {
     }
   };
 
-  const result = evaluateWorkerBranchShape({ headRef, commitMessages, addedFiles, readFile });
+  const result = evaluateWorkerBranchShape({ headRef, commitMessages, addedFiles, readFile, changedFiles });
   if (!result.ok) {
     console.error(`worker-branch-shape: ${result.message}`);
     process.exitCode = 1;

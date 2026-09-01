@@ -571,11 +571,15 @@ import {
   ledgerWipeTestPair,
   resolveWipeTestArmOrder,
   resolveWipeTestArmPermission,
+  resolveWipeTestFactor,
   resolveWipeTestPreflight,
   resolveWipeTestTarget,
+  wipeTestFactorMasksLearnings,
+  wipeTestFactorMasksRecon,
   WIPE_TEST_PAIR_STEP,
   WIPE_TEST_SANDBOX_DEFAULT,
   type WipeTestArm,
+  type WipeTestFactor,
   type WipeTestMergedState,
   type WipeTestPair,
 } from "./lib/wipe-test.js";
@@ -9609,6 +9613,34 @@ function reconDegradedContextNote(
   return lines.join("\n");
 }
 
+/**
+ * W1-T2512: the CONTEXT block injected when recon was MASKED — arm B of a RECON-factor
+ * `rmd wipe-test` pair (`opts.maskRecon`), where the spawn was never issued at all, on
+ * purpose, for the experiment. `reconDegradedContextNote`'s sibling, not a copy: that note
+ * describes an ERROR (recon ran twice and failed both times); this describes a DELIBERATE
+ * skip, and says so — a worker reading "errored twice in a row" for a recon that was never
+ * even attempted would be told something false about its own run. Same EXPLICIT-absence
+ * discipline throughout this file: never a silently empty CONTEXT block (P48(ii)), and the
+ * same `recon#<taskId>` citation so {@link assertProvenance} treats "recon was masked" as a
+ * claim like any other.
+ */
+function reconMaskedContextNote(
+  taskId: string,
+  recordPath?: string,
+  acceptance: ReadonlyArray<AcceptanceCriterion> = [],
+): string {
+  const lines = [
+    "- RECON CONTEXT MASKED: this run is arm B of a RECON-factor wipe-test pair (W1-T2512) — " +
+      "the recon worker was deliberately never spawned, and the recon artifact store was " +
+      "neither read nor written, so no OBSERVED lines are available for this run by design; " +
+      "rely only on the CONTEXT/TASK below and your own read-only inspection. " +
+      `${citation(`recon#${taskId}`)}`,
+  ];
+  const recordLine = taskRecordContextLine(taskId, recordPath, acceptance);
+  if (recordLine) lines.push(recordLine);
+  return lines.join("\n");
+}
+
 // ── W1-T2241: RECON ARTIFACT — a recon run's TTL'd, task-scoped write-forward ───────────────
 //
 // THE DEFECT (MASTER-PLAN §5C's TASK B / P38, mint of an existing proposal, not a new one):
@@ -10117,6 +10149,20 @@ export function resolveRunMounts(
   };
 }
 
+// W1-T2528 — module-scoped so it's monotonic across every lane runId this ONE process mints
+// (retro/triage/plan): `Date.now()`'s 1ms resolution let two rungs collide (OBSERVED: identical
+// epoch logged twice, then `fatal: a branch ... already exists`). Bumps only off the PRECEDING
+// raw reading (never an ever-growing peak), so a differing reading passes through unchanged,
+// keeping this repo's widespread `Date.now` mocks exact.
+let lastRawNowMs = -1;
+let lastLaneEpochMs = -1;
+export function nextLaneEpochMs(): number {
+  const now = Date.now();
+  if (now === lastRawNowMs) return ++lastLaneEpochMs;
+  lastRawNowMs = now;
+  return (lastLaneEpochMs = now);
+}
+
 async function runTask(
   taskId: string,
   opts: {
@@ -10168,11 +10214,19 @@ async function runTask(
      * `github` above still wins when both are supplied — no existing test caller changes shape.
      */
     githubFor?: (owner: string, repo: string) => GitHub;
-    /** W1-T86 (P12 wipe-test harness): arm B of a `rmd wipe-test` pair — MASK learnings
-     *  injection for this run. Forces the rendered prompt's matched-learnings text to ""
-     *  WITHOUT reading the store (see {@link computeMatchedLearningsForArm}); never set by
-     *  any caller other than `wipeTestCommand`. */
+    /** W1-T86 (P12 wipe-test harness): arm B of a LEARNINGS-factor `rmd wipe-test` pair —
+     *  MASK learnings injection for this run. Forces the rendered prompt's matched-learnings
+     *  text to "" WITHOUT reading the store (see {@link computeMatchedLearningsForArm}); never
+     *  set by any caller other than `wipeTestCommand`. */
     maskLearnings?: boolean;
+    /** W1-T2512 (P12 wipe-test harness, RECON factor): arm B of a RECON-factor `rmd wipe-test`
+     *  pair — skip the recon spawn ENTIRELY for this run. The recon artifact store
+     *  (`loadReconArtifact`/`writeReconArtifact`) is neither read nor written — masked, not
+     *  deleted, the same discipline `maskLearnings` keeps for the learnings store — and
+     *  implement proceeds with an explicit "recon masked" context note (never a silently empty
+     *  CONTEXT block; see {@link reconMaskedContextNote}) instead of whatever recon would have
+     *  observed. Never set by any caller other than `wipeTestCommand`. */
+    maskRecon?: boolean;
     /** Injectable containment-probe executor (W1-T91) — behavioral tests drive the REAL
      *  blocked_containment catch branch (the structured guard/check/observed fields on its
      *  ledger verdict line) through this seam, the SAME shape `defaultReconRunLens`'s own
@@ -10289,6 +10343,8 @@ async function runTask(
   // `onSpawnError`/`workerStateSensor.observer` already state for that wrapper.
   const workerAbandonMs = opts.workerAbandonMs ?? loadDefaultPolicy().values.workerAbandon;
 
+  // W1-T2528: not routed through `nextLaneEpochMs` — `taskId` is already the per-rung
+  // component, and same-taskId reruns are refused earlier by the dispatch claim/inflight check.
   const runId = `${taskId}-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, lane: "run-task", ...extra });
@@ -10849,6 +10905,8 @@ async function runTask(
       releaseDispatchClaim(task.id, claimReserver, { anchor: claimAnchor });
       return { taskId, runId, merged: false, costUsd: 0, verdict: "failed" };
     }
+    // W1-T2528: any OTHER add failure — ledger it before rethrowing (same idiom as `addLaneWorktree`).
+    log("worktree.add_failed", { branch, error: String((e as Error)?.message ?? e) });
     throw e;
   }
   log("worktree.add", { branch, worktreePath });
@@ -10904,138 +10962,153 @@ async function runTask(
         prompt: renderReconPrompt(planIndexBlock, operatorNotesBlock),
       });
 
-    // W1-T2241: RECON ARTIFACT REUSE — before ever spawning recon, check whether a VALID prior
-    // artifact exists for THIS task at THIS `(plan_sha, files_digest)`. Both are computed against
-    // `worktreePath`, already checked out fresh from `origin/main` above, so "current" always
-    // means what THIS dispatch would itself observe — never a stale read of the orchestrator's
-    // own tree. See `planSha`/`filesDigest`/`ReconArtifact`'s doc (above `RECON_MAX_TURNS`) for
-    // the key's derivation and why it drops `head_sha`.
-    const currentPlanSha = planSha(worktreePath);
-    const currentFilesDigest = filesDigest(worktreePath, task.files ?? []);
-    const priorReconArtifact = loadReconArtifact(config.root, taskId);
-    const reconArtifactValid =
-      !!priorReconArtifact &&
-      priorReconArtifact.plan_sha === currentPlanSha &&
-      priorReconArtifact.files_digest === currentFilesDigest;
-
     let recon: WorkerResult | undefined;
     let reconDegradedSubtype: string | undefined;
     let reusedReconArtifact: ReconArtifact | undefined;
+    let reconMasked = false;
 
-    if (reconArtifactValid) {
-      // HIT: recon is skipped entirely this dispatch — the cost this task exists to stop
-      // paying twice. `reconArtifactToContext` (below, at the CONTEXT-render site) frames every
-      // relayed line as evidence to VERIFY-AND-EXTEND, never authority (MASTER-PLAN Q3).
-      reusedReconArtifact = priorReconArtifact;
-      say(`recon artifact reused (written ${priorReconArtifact!.written_at}) — recon skipped this dispatch`);
-      log("recon.reused", {
-        plan_sha: currentPlanSha,
-        files_digest: currentFilesDigest,
-        written_at: priorReconArtifact!.written_at,
-        source_run_id: priorReconArtifact!.run_id,
+    if (opts.maskRecon) {
+      // W1-T2512 (RECON factor, arm B): the spawn is SKIPPED ENTIRELY — never issued, not even
+      // once — and the recon artifact store is NEITHER READ NOR WRITTEN: `loadReconArtifact`/
+      // `writeReconArtifact` both sit inside the branch below, which this `if` skips outright,
+      // same as `computeMatchedLearningsForArm("B", ...)` never calls its own `deps` chain.
+      // MASKED, NOT DELETED — a later non-wipe-test dispatch of this same task still sees
+      // whatever artifact a prior real recon left behind, untouched by this run.
+      reconMasked = true;
+      say("recon masked (wipe-test RECON factor, arm B) — implement proceeds with NO recon context");
+      log("recon.masked", {
+        reason: "wipe-test RECON-factor pair, arm B (W1-T2512): recon spawn skipped, artifact store untouched",
       });
     } else {
-      // MISS: a full recon runs, exactly as before this task (MASTER-PLAN Q3 — "recon still
-      // runs when the key misses"). The MISS ITSELF is ledgered explicitly, distinguishing a
-      // first-ever dispatch (`recon.absent`) from a prior artifact this task's `plan_sha` or
-      // `files:` has since moved past (`recon.invalidated`) — never a silent, unexplained
-      // full recon (P48(ii): no silent empty).
-      if (priorReconArtifact) {
-        const reason = priorReconArtifact.plan_sha !== currentPlanSha ? "plan_sha" : "files_digest";
-        say(`recon artifact invalidated (${reason} changed) — running a full recon`);
-        log("recon.invalidated", {
-          reason,
-          prior_plan_sha: priorReconArtifact.plan_sha,
+      // W1-T2241: RECON ARTIFACT REUSE — before ever spawning recon, check whether a VALID prior
+      // artifact exists for THIS task at THIS `(plan_sha, files_digest)`. Both are computed against
+      // `worktreePath`, already checked out fresh from `origin/main` above, so "current" always
+      // means what THIS dispatch would itself observe — never a stale read of the orchestrator's
+      // own tree. See `planSha`/`filesDigest`/`ReconArtifact`'s doc (above `RECON_MAX_TURNS`) for
+      // the key's derivation and why it drops `head_sha`.
+      const currentPlanSha = planSha(worktreePath);
+      const currentFilesDigest = filesDigest(worktreePath, task.files ?? []);
+      const priorReconArtifact = loadReconArtifact(config.root, taskId);
+      const reconArtifactValid =
+        !!priorReconArtifact &&
+        priorReconArtifact.plan_sha === currentPlanSha &&
+        priorReconArtifact.files_digest === currentFilesDigest;
+
+      if (reconArtifactValid) {
+        // HIT: recon is skipped entirely this dispatch — the cost this task exists to stop
+        // paying twice. `reconArtifactToContext` (below, at the CONTEXT-render site) frames every
+        // relayed line as evidence to VERIFY-AND-EXTEND, never authority (MASTER-PLAN Q3).
+        reusedReconArtifact = priorReconArtifact;
+        say(`recon artifact reused (written ${priorReconArtifact!.written_at}) — recon skipped this dispatch`);
+        log("recon.reused", {
           plan_sha: currentPlanSha,
-          prior_files_digest: priorReconArtifact.files_digest,
           files_digest: currentFilesDigest,
+          written_at: priorReconArtifact!.written_at,
+          source_run_id: priorReconArtifact!.run_id,
         });
       } else {
-        log("recon.absent", { plan_sha: currentPlanSha, files_digest: currentFilesDigest });
-      }
-
-      recon = account(await spawnRecon());
-      log("recon.done", {
-        session_id: recon.sessionId,
-        cost_usd: recon.costUsd,
-        num_turns: recon.numTurns,
-        subtype: recon.subtype,
-        attempt: 1,
-        // W1-T6: every worker call ledgers the standard telemetry shape.
-        ...workerLedgerFields(recon),
-      });
-
-      // W1-T299: recon is a READ-ONLY preamble — a worker ERROR here (overwhelmingly
-      // `error_max_turns`; RECON_MAX_TURNS's own doc above measured 11/18 recons dying on the cap
-      // on 2026-08-03) used to be FATAL to the WHOLE RUN via failOnWorkerError, ending dispatch
-      // before implement ever spawned and burning a strike toward `dispatchesWithoutNewOwnedPr`'s
-      // per-task breaker with no PR and no chance of ever getting one. Degrade instead of abort:
-      // ONE bounded retry, and if that ALSO errors, proceed to implement anyway with an EXPLICIT
-      // "recon context absent" claim (reconDegradedContextNote, never a silently empty CONTEXT
-      // block) and a loud `recon.degraded` ledger line naming the subtype.
-      //
-      // The ONE exception is a budget breach: workerErrorVerdict's own doc says dollars are the
-      // hard backstop, never retried anywhere in this file — recon gets no special case there and
-      // stays fatal on a budget breach, unchanged from before this task.
-      //
-      // OPEN QUESTION the task file left for the implementer: should a degraded-recon run be
-      // exempted from `dispatchesWithoutNewOwnedPr`? Decided NO — `run.start` above already
-      // ledgered this dispatch before recon ever spawned, so it counts as a REAL dispatch exactly
-      // like every other run regardless of what recon does; a task whose recon can never complete
-      // must still eventually trip the breaker rather than dispatch forever for free.
-      const reconVerdict1 = workerErrorVerdict(recon, costUsd, "recon");
-      if (reconVerdict1) {
-        if (reconVerdict1.budgetBreach) {
-          const reconFail = failOnWorkerError(recon, "recon");
-          if (reconFail) return reconFail;
+        // MISS: a full recon runs, exactly as before this task (MASTER-PLAN Q3 — "recon still
+        // runs when the key misses"). The MISS ITSELF is ledgered explicitly, distinguishing a
+        // first-ever dispatch (`recon.absent`) from a prior artifact this task's `plan_sha` or
+        // `files:` has since moved past (`recon.invalidated`) — never a silent, unexplained
+        // full recon (P48(ii): no silent empty).
+        if (priorReconArtifact) {
+          const reason = priorReconArtifact.plan_sha !== currentPlanSha ? "plan_sha" : "files_digest";
+          say(`recon artifact invalidated (${reason} changed) — running a full recon`);
+          log("recon.invalidated", {
+            reason,
+            prior_plan_sha: priorReconArtifact.plan_sha,
+            plan_sha: currentPlanSha,
+            prior_files_digest: priorReconArtifact.files_digest,
+            files_digest: currentFilesDigest,
+          });
+        } else {
+          log("recon.absent", { plan_sha: currentPlanSha, files_digest: currentFilesDigest });
         }
-        say(`recon worker errored (${recon.subtype}) — one bounded retry before degrading (W1-T299)`);
-        log("recon.retry", { subtype: recon.subtype, num_turns: recon.numTurns });
+
         recon = account(await spawnRecon());
         log("recon.done", {
           session_id: recon.sessionId,
           cost_usd: recon.costUsd,
           num_turns: recon.numTurns,
           subtype: recon.subtype,
-          attempt: 2,
+          attempt: 1,
+          // W1-T6: every worker call ledgers the standard telemetry shape.
           ...workerLedgerFields(recon),
         });
-        const reconVerdict2 = workerErrorVerdict(recon, costUsd, "recon");
-        if (reconVerdict2) {
-          if (reconVerdict2.budgetBreach) {
+
+        // W1-T299: recon is a READ-ONLY preamble — a worker ERROR here (overwhelmingly
+        // `error_max_turns`; RECON_MAX_TURNS's own doc above measured 11/18 recons dying on the cap
+        // on 2026-08-03) used to be FATAL to the WHOLE RUN via failOnWorkerError, ending dispatch
+        // before implement ever spawned and burning a strike toward `dispatchesWithoutNewOwnedPr`'s
+        // per-task breaker with no PR and no chance of ever getting one. Degrade instead of abort:
+        // ONE bounded retry, and if that ALSO errors, proceed to implement anyway with an EXPLICIT
+        // "recon context absent" claim (reconDegradedContextNote, never a silently empty CONTEXT
+        // block) and a loud `recon.degraded` ledger line naming the subtype.
+        //
+        // The ONE exception is a budget breach: workerErrorVerdict's own doc says dollars are the
+        // hard backstop, never retried anywhere in this file — recon gets no special case there and
+        // stays fatal on a budget breach, unchanged from before this task.
+        //
+        // OPEN QUESTION the task file left for the implementer: should a degraded-recon run be
+        // exempted from `dispatchesWithoutNewOwnedPr`? Decided NO — `run.start` above already
+        // ledgered this dispatch before recon ever spawned, so it counts as a REAL dispatch exactly
+        // like every other run regardless of what recon does; a task whose recon can never complete
+        // must still eventually trip the breaker rather than dispatch forever for free.
+        const reconVerdict1 = workerErrorVerdict(recon, costUsd, "recon");
+        if (reconVerdict1) {
+          if (reconVerdict1.budgetBreach) {
             const reconFail = failOnWorkerError(recon, "recon");
             if (reconFail) return reconFail;
           }
-          // Second failure — DEGRADE, never abort: proceed to implement with an EMPTY recon
-          // context (reconDegradedContextNote below makes the absence explicit in the prompt).
-          reconDegradedSubtype = recon.subtype;
-          log("recon.degraded", {
-            subtype: recon.subtype,
+          say(`recon worker errored (${recon.subtype}) — one bounded retry before degrading (W1-T299)`);
+          log("recon.retry", { subtype: recon.subtype, num_turns: recon.numTurns });
+          recon = account(await spawnRecon());
+          log("recon.done", {
+            session_id: recon.sessionId,
+            cost_usd: recon.costUsd,
             num_turns: recon.numTurns,
-            reason: `recon errored twice in a row (${recon.subtype}) — bounded retry exhausted; implement proceeds with an EMPTY recon context`,
+            subtype: recon.subtype,
+            attempt: 2,
+            ...workerLedgerFields(recon),
           });
-          say(`⚠️ recon.degraded (${recon.subtype}) — implement proceeds with NO recon context`);
+          const reconVerdict2 = workerErrorVerdict(recon, costUsd, "recon");
+          if (reconVerdict2) {
+            if (reconVerdict2.budgetBreach) {
+              const reconFail = failOnWorkerError(recon, "recon");
+              if (reconFail) return reconFail;
+            }
+            // Second failure — DEGRADE, never abort: proceed to implement with an EMPTY recon
+            // context (reconDegradedContextNote below makes the absence explicit in the prompt).
+            reconDegradedSubtype = recon.subtype;
+            log("recon.degraded", {
+              subtype: recon.subtype,
+              num_turns: recon.numTurns,
+              reason: `recon errored twice in a row (${recon.subtype}) — bounded retry exhausted; implement proceeds with an EMPTY recon context`,
+            });
+            say(`⚠️ recon.degraded (${recon.subtype}) — implement proceeds with NO recon context`);
+          }
         }
-      }
 
-      // W1-T2241: persist the artifact for the NEXT dispatch of this SAME task — only on a
-      // genuine success (never on a degrade: the final attempt's text is an error envelope, not
-      // a report worth keeping) and only when the transcript actually parses as a RECON REPORT
-      // (an unparseable "success" has nothing worth persisting either — same guard
-      // `reconObservedToContext` already applies via `parseReconReport`'s `null` return).
-      if (!reconDegradedSubtype) {
-        const parsedForArtifact = parseReconReport(workerTranscript(recon));
-        if (parsedForArtifact) {
-          writeReconArtifact(config.root, {
-            task_id: taskId,
-            plan_sha: currentPlanSha,
-            files_digest: currentFilesDigest,
-            observed: parsedForArtifact.observed,
-            inferred: parsedForArtifact.inferred,
-            couldnt_verify: parsedForArtifact.couldntVerify,
-            written_at: new Date().toISOString(),
-            run_id: runId,
-          });
+        // W1-T2241: persist the artifact for the NEXT dispatch of this SAME task — only on a
+        // genuine success (never on a degrade: the final attempt's text is an error envelope, not
+        // a report worth keeping) and only when the transcript actually parses as a RECON REPORT
+        // (an unparseable "success" has nothing worth persisting either — same guard
+        // `reconObservedToContext` already applies via `parseReconReport`'s `null` return).
+        if (!reconDegradedSubtype) {
+          const parsedForArtifact = parseReconReport(workerTranscript(recon));
+          if (parsedForArtifact) {
+            writeReconArtifact(config.root, {
+              task_id: taskId,
+              plan_sha: currentPlanSha,
+              files_digest: currentFilesDigest,
+              observed: parsedForArtifact.observed,
+              inferred: parsedForArtifact.inferred,
+              couldnt_verify: parsedForArtifact.couldntVerify,
+              written_at: new Date().toISOString(),
+              run_id: runId,
+            });
+          }
         }
       }
     }
@@ -11114,14 +11187,17 @@ async function runTask(
     // resolves against the orchestrator's `planPath`, and that absolute answer is what sent
     // workers writing into the daemon's own checkout.
     const recordPath = workerVisibleRecordPath(planPath, taskRecordPath(planPath, taskId));
-    // W1-T2241: a reused artifact takes precedence — it is mutually exclusive with the other two
-    // arms (see the recon dispatch above: `reusedReconArtifact` is only ever set when recon was
-    // never spawned this dispatch, so `reconDegradedSubtype`/`recon` never apply to that arm).
-    const reconContext = reusedReconArtifact
-      ? reconArtifactToContext(reusedReconArtifact, taskId, recordPath)
-      : reconDegradedSubtype
-        ? reconDegradedContextNote(reconDegradedSubtype, taskId, recordPath, task.acceptance ?? [])
-        : reconObservedToContext(recon!, taskId, recordPath);
+    // W1-T2241/W1-T2512: exactly one of these four is ever set, mutually exclusive (see the
+    // recon dispatch above) — `reconMasked` short-circuits the WHOLE branch that could set
+    // `reusedReconArtifact`/`reconDegradedSubtype`/`recon`, so it is checked first even though
+    // it was introduced last.
+    const reconContext = reconMasked
+      ? reconMaskedContextNote(taskId, recordPath, task.acceptance ?? [])
+      : reusedReconArtifact
+        ? reconArtifactToContext(reusedReconArtifact, taskId, recordPath)
+        : reconDegradedSubtype
+          ? reconDegradedContextNote(reconDegradedSubtype, taskId, recordPath, task.acceptance ?? [])
+          : reconObservedToContext(recon!, taskId, recordPath);
     const prompt = renderImplementPrompt(task, reconContext, runId, matchedLearnings, operatorNotesBlock);
     assertProvenance(prompt); // throws ProvenanceError on any uncited CONTEXT claim
     // W1-T71: the ONE new emission this task makes — a sha256 of the fully-rendered prompt this
@@ -18270,6 +18346,23 @@ export function runCitationStampPass(opts: {
   }
 }
 
+// Cuts a lane's `run-<runId>` worktree branch, ledgering a failed add before rethrowing
+// (W1-T2528) — shared by retro/triage/plan. Defined AFTER runTask (not beside `nextLaneEpochMs`):
+// tests static-scan for the FIRST `worktreeAdd(...` match to prove runTask's own guards precede it.
+export function addLaneWorktree(
+  repoDir: string, worktreesRoot: string, runId: string, log: (step: string, extra?: Record<string, unknown>) => void,
+): { branch: string; worktreePath: string } {
+  const branch = `run-${runId}`;
+  const worktreePath = join(worktreesRoot, branch);
+  try {
+    worktreeAdd(repoDir, worktreePath, branch, "origin/main");
+  } catch (e) {
+    log("worktree.add_failed", { branch, error: String((e as Error)?.message ?? e) });
+    throw e;
+  }
+  return { branch, worktreePath };
+}
+
 async function retroCommand(
   rest: string[],
   opts: {
@@ -18556,7 +18649,7 @@ async function retroCommand(
   const wrk = workerModel(config);
   assertArchitectAboveWorker(arch, wrk); // throws (fail-closed) on violation
 
-  const runId = `RETRO-${Date.now()}`;
+  const runId = `RETRO-${nextLaneEpochMs()}`; // W1-T2528: the singleton lane the collision was observed on
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: "RETRO", step, lane: "retro", ...extra });
   const say = (msg: string) => console.log(`\n### [retro] ${msg}`);
@@ -18580,9 +18673,7 @@ async function retroCommand(
   }
   const pruned = pruneStaleRuns(repoDir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
   if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
-  const branch = `run-${runId}`;
-  const worktreePath = join(worktreesDir(config), branch);
-  worktreeAdd(repoDir, worktreePath, branch, "origin/main");
+  const { branch, worktreePath } = addLaneWorktree(repoDir, worktreesDir(config), runId, log); // W1-T2528
   // Liveness token so a concurrent drain's prune skips this retro worktree. (See runTask.)
   writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
 
@@ -27841,24 +27932,31 @@ function defaultWipeTestMergedState(taskId: string, planPath: string, config: Co
 }
 
 /**
- * `rmd wipe-test <task-id> [--repo remudero-sandbox] [--allow-non-sandbox]` — the P12
- * learning-utility A/B harness (W1-T86; see src/lib/wipe-test.ts's module doc for the
- * full design). Runs `<task-id>` TWICE through `runTask`: arm A with normal learnings
- * injection, arm B with injection MASKED (the store itself untouched — see
- * `computeMatchedLearningsForArm`) — then computes + LEDGERS the deltas between them
- * (`wipetest.pair`). SANDBOX-ONLY by default (`resolveWipeTestTarget`): a bare `--repo
- * remudero` (or any non-sandbox name) is REFUSED before either arm ever spawns.
+ * `rmd wipe-test <task-id> [--factor learnings|recon] [--repo remudero-sandbox]
+ * [--allow-non-sandbox]` — the P12 learning-utility A/B harness (W1-T86; see
+ * src/lib/wipe-test.ts's module doc for the full design). Runs `<task-id>` TWICE through
+ * `runTask`: arm A unmasked, arm B with `--factor`'s factor MASKED (the store itself
+ * untouched — see `computeMatchedLearningsForArm` for `learnings`, `opts.maskRecon` above
+ * for `recon`) — then computes + LEDGERS the deltas between them (`wipetest.pair`, now
+ * carrying WHICH factor it varied — W1-T2512). SANDBOX-ONLY by default
+ * (`resolveWipeTestTarget`): a bare `--repo remudero` (or any non-sandbox name) is REFUSED
+ * before either arm ever spawns, for EVERY factor — the guard reads only `--repo`/
+ * `--allow-non-sandbox`, never `--factor`. Omitting `--factor` defaults to `"learnings"` —
+ * byte-identical to this command's own behaviour before this task.
  *
  * A single pair is an anecdote (the design's own words) — the aggregate over many
- * ledgered pairs (`aggregateWipeTestPairs`, read back from the ledger) is what the
+ * ledgered pairs of the SAME factor (`aggregateWipeTestPairs`, read back from the ledger
+ * and filtered to one factor — it refuses to average two factors together) is what the
  * operator treats as signal; this command runs and ledgers exactly one pair per
  * invocation, by design (repeat it to accumulate pairs).
  *
- * NEVER LEDGERS A PAIR NEITHER ARM MEASURED (W1-T1252). A subject the projection already
- * reports merged is refused HERE, up front, naming the reason (`resolveWipeTestPreflight`)
- * — neither arm spawns and no `wipetest.pair` line is written. `ledgerWipeTestPair` itself
- * is the backstop for every OTHER zero-work cause: a pair whose two arms both report zero
- * turns and zero cost is never written, whatever produced it.
+ * NEVER LEDGERS A PAIR NEITHER ARM MEASURED (W1-T1252), for every factor. A subject the
+ * projection already reports merged is refused HERE, up front, naming the reason
+ * (`resolveWipeTestPreflight`) — neither arm spawns and no `wipetest.pair` line is written.
+ * `ledgerWipeTestPair` itself is the backstop for every OTHER zero-work cause: a pair whose
+ * two arms both report zero turns and zero cost is never written, whatever produced it —
+ * this backstop reads only turns/cost, never the factor, so it holds for `recon` exactly as
+ * it always has for `learnings`.
  */
 export async function wipeTestCommand(
   rest: string[],
@@ -27885,7 +27983,7 @@ export async function wipeTestCommand(
   } = {},
 ): Promise<number> {
   const taskId = rest[0];
-  const badArg = unknownArgError("wipe-test", rest.slice(1), ["--repo"], ["--allow-non-sandbox"]);
+  const badArg = unknownArgError("wipe-test", rest.slice(1), ["--repo", "--factor"], ["--allow-non-sandbox"]);
   if (!taskId || badArg) {
     if (badArg) console.error(badArg);
     console.error(`usage: ${commandSyntax("wipe-test")}\n` + USAGE);
@@ -27898,6 +27996,18 @@ export async function wipeTestCommand(
     return 2;
   }
   const { repo } = resolved.target;
+
+  // W1-T2512: WHICH FACTOR this pair varies — resolved the SAME way as `--repo` right above
+  // (a pure, validated flag lookup), refused loud on an unrecognized value rather than
+  // silently falling back to the default. Omitted defaults to "learnings" — see
+  // `resolveWipeTestFactor`'s own doc for why that keeps every pre-existing invocation
+  // byte-identical.
+  const resolvedFactor = resolveWipeTestFactor(rest.slice(1));
+  if ("error" in resolvedFactor) {
+    console.error(resolvedFactor.error + "\n" + USAGE);
+    return 2;
+  }
+  const { factor } = resolvedFactor;
 
   const config = deps.config ?? loadConfig();
   const runTaskFn = deps.runTaskFn ?? runTask;
@@ -27954,15 +28064,19 @@ export async function wipeTestCommand(
   // could ever merge.
   const rawResults: Partial<Record<WipeTestArm, RunResult>> = {};
   for (const arm of dispatchOrder) {
-    const label = arm === "A" ? "learnings ON" : "learnings MASKED";
+    const label = `${factor}${arm === "A" ? " ON" : " MASKED"}`;
     console.log(`### rmd wipe-test — ${taskId} on ${self.owner}/${repo}: arm ${arm} (${label})`);
     rawResults[arm] = await runTaskFn(taskId, {
       planPath,
       config,
       skipGitSync: true,
-      // Omitted (not `false`) for arm A — byte-identical to the pre-W1-T1256 call shape, which
-      // left `maskLearnings` unset for arm A rather than passing it explicitly false.
-      ...(arm === "B" ? { maskLearnings: true } : {}),
+      // W1-T2512: generalises the old hard-coded `arm === "B" ? { maskLearnings: true } : {}`
+      // into two independent per-factor checks — {@link wipeTestFactorMasksLearnings}/
+      // {@link wipeTestFactorMasksRecon} are each true for exactly one (factor, arm) pair, so
+      // for `factor: "learnings"` this spreads BYTE-IDENTICALLY to before (maskRecon's spread
+      // is always empty; maskLearnings is omitted, not `false`, on arm A).
+      ...(wipeTestFactorMasksLearnings(factor, arm) ? { maskLearnings: true } : {}),
+      ...(wipeTestFactorMasksRecon(factor, arm) ? { maskRecon: true } : {}),
       noMerge: true,
     });
   }
@@ -27972,6 +28086,7 @@ export async function wipeTestCommand(
   const ledgerLines = readLedgerLines(ledgerPath);
   const pair: WipeTestPair = {
     taskId,
+    factor,
     armA: deriveWipeTestRunResult(rawArmA, ledgerLines),
     armB: deriveWipeTestRunResult(rawArmB, ledgerLines),
   };
@@ -28511,7 +28626,7 @@ async function triageCommandLocked(
 
   const ledgerPath = ledgerPathFor(config);
   const taskId = `TRIAGE-${feedbackId}`;
-  const runId = `${taskId}-${Date.now()}`;
+  const runId = `${taskId}-${nextLaneEpochMs()}`; // W1-T2528: two same-feedbackId runs can still collide
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, lane: "triage", ...extra });
   const say = (msg: string) => console.log(`\n### [triage] ${msg}`);
@@ -28534,9 +28649,7 @@ async function triageCommandLocked(
   }
   const pruned = pruneStaleRuns(repoDir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
   if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
-  const branch = `run-${runId}`;
-  const worktreePath = join(worktreesDir(config), branch);
-  worktreeAdd(repoDir, worktreePath, branch, "origin/main");
+  const { branch, worktreePath } = addLaneWorktree(repoDir, worktreesDir(config), runId, log); // W1-T2528
   // Liveness token so a concurrent drain's prune skips this triage worktree.
   writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
 
@@ -29097,7 +29210,7 @@ export async function planCommand(
 
   const ledgerPath = ledgerPathFor(config);
   const taskId = `PLAN-${mode}`;
-  const runId = `${taskId}-${Date.now()}`;
+  const runId = `${taskId}-${nextLaneEpochMs()}`; // W1-T2528: two same-mode runs can still collide
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, lane: "plan", ...extra });
   const say = (msg: string) => console.log(`\n### [plan] ${msg}`);
@@ -29118,9 +29231,7 @@ export async function planCommand(
   }
   const pruned = pruneStaleRuns(repoDir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
   if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
-  const branch = `run-${runId}`;
-  const worktreePath = join(worktreesDir(config), branch);
-  worktreeAdd(repoDir, worktreePath, branch, "origin/main");
+  const { branch, worktreePath } = addLaneWorktree(repoDir, worktreesDir(config), runId, log); // W1-T2528
   // Liveness token so a concurrent drain's prune skips this plan worktree.
   writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
 
@@ -32239,9 +32350,9 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "wipe-test",
-    syntax: "rmd wipe-test <task-id> [--repo remudero-sandbox] [--allow-non-sandbox]",
-    summary: "P12 learning-utility A/B harness: run a sandbox task twice, ledger the deltas.",
-    detail: "the P12 learning-utility A/B harness (W1-T86): runs <task-id> TWICE — arm A with normal learnings injection, arm B with injection MASKED (the store itself untouched) — and ledgers the deltas (wipetest.pair: turns/cost/verdict/strikes/proof_exec); SANDBOX-ONLY by default, refuses any other --repo (including the primary repo) unless --allow-non-sandbox is also passed; a single pair is an anecdote — only the aggregate over many ledgered pairs is signal",
+    syntax: "rmd wipe-test <task-id> [--factor learnings|recon] [--repo remudero-sandbox] [--allow-non-sandbox]",
+    summary: "P12 A/B harness: run a sandbox task twice, ledger the deltas for one factor.",
+    detail: "the P12 learning-utility A/B harness (W1-T86, generalised to a named FACTOR by W1-T2512): runs <task-id> TWICE — arm A with --factor's factor ON, arm B with it MASKED (the store itself untouched, whether that store is task-matched learnings or the recon artifact) — and ledgers the deltas (wipetest.pair: turns/cost/verdict/strikes/proof_exec, now naming which factor it varied); --factor defaults to \"learnings\" (byte-identical to before W1-T2512), \"recon\" masks the recon worker spawn instead; SANDBOX-ONLY by default for every factor, refuses any other --repo (including the primary repo) unless --allow-non-sandbox is also passed; a single pair is an anecdote — only the aggregate over many ledgered pairs of the SAME factor is signal",
   },
   {
     name: "stop",

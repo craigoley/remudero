@@ -1,0 +1,73 @@
+- id: W1-T2555
+  title: "THE RECYCLE REPORTS A CLEAN ZERO OVER A DIRECTORY THAT DOES NOT EXIST, THEN MOUNTS IT AS THE DAEMON'S ENTIRE CHECKOUT — `STATE_DIR=\"${RMD_STATE_DIR:-${HOME:-/root}/rmd-state}\"` (deploy/recycle-container.sh) is never tested for existence, so an operator whose state lives elsewhere gets `no blocking locks under <path>` in the same reassuring wording an idle fleet produces, and `docker run -v \"${STATE_DIR}:/home/node/Remudero\"` then CREATES the empty directory and boots a daemon with no repo, no plan and no ledger; MEASURED 2026-09-01, only an unrelated `docker rm` race stopped this from happening"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 15.00
+  files: [deploy/recycle-container.sh, test/a-recycle-refuses-a-state-dir-that-is-not-a-checkout.test.ts]
+  origin: "operator-session#the-github-auth-outage-2026-09-01"
+  plan_refs: ["W1-T1010", "W1-T2553"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THIS IS THE ONE RECYCLE DEFECT THAT FAILS IN THE DANGEROUS DIRECTION. Every other refusal in this
+    script errs toward stopping: an uncaptured credential, live workers, a failed pull, a digest
+    mismatch. Each of those costs an operator time. THIS one proceeds when it must refuse, and what it
+    proceeds into is a daemon whose entire world — repo, plan, ledger, locks, worktrees — is an empty
+    directory docker just created. Nothing downstream can detect that: the entrypoint would clone into
+    it, the daemon would come up on an empty ledger, and every diagnostic that reads the mount would
+    truthfully report exactly what it found.
+
+    OBSERVED 2026-09-01, on this fleet, in this order:
+
+      recycle-container: no blocking locks under /home/craigoleyagent/rmd-state/state
+      recycle-container: no in-flight workers — safe to proceed
+      recycle-container: docker stop remudero-daemon
+      recycle-container: docker rm remudero-daemon
+      Error response from daemon: removal of container remudero-daemon is already in progress
+
+    The real state was at a DIFFERENT path, and an inflight lock was sitting in it at that moment. The
+    line above is not a lie and not a bug in the lock reader — `find` over a nonexistent directory
+    correctly returns nothing. It is a zero over a corpus that was never opened, reported in wording
+    indistinguishable from a genuinely idle fleet. THE ONLY REASON THE MOUNT DID NOT HAPPEN IS THAT
+    `docker rm` HIT AN UNRELATED RACE AND `set -e` KILLED THE SCRIPT one line before `docker run`.
+
+    THIS IS THE HOUSE HAZARD, IN THE PLACE IT COSTS MOST. CLAUDE.md's investigation-discipline section
+    is largely a catalogue of queries that answer confidently over the wrong or an empty corpus, and
+    the standing rule is that a zero is not a measurement until a positive control proves the query
+    could see its corpus. The recycle asserts such a zero about the single most consequential path it
+    handles, and then acts on it irreversibly.
+
+    WHAT A FIX MUST DO, AND WHAT IT MUST NOT. It must REFUSE a `STATE_DIR` that is not a real checkout
+    — the cheap, honest predicate is that the directory exists AND contains the `state/` subdirectory
+    and the repo the entrypoint expects, since an operator's genuine state dir always has both and a
+    typo has neither. It must NAME THE RESOLVED PATH in every line that reports on locks, so
+    "no blocking locks under X" always says which X it read; the path is already interpolated in one
+    place and absent from the drain-lock and inflight-lock lines beside it. It must NOT silently
+    `mkdir` the directory to make the refusal go away, and it must NOT special-case any particular
+    layout: the check is "is this a checkout", never "is this the path I expected".
+
+    THE FIRST-RUN CASE IS REAL AND MUST STAY POSSIBLE. A genuinely fresh host has no state directory
+    and the entrypoint's own clone is what creates the checkout inside it, so a blanket "must already
+    be a checkout" refusal would make a first deploy impossible. The distinction the fix has to carry
+    is between a path an operator INTENDED (empty or absent, and they said so) and one they typo'd or
+    inherited from a default — an explicit opt-in flag for the first boot is the shape that keeps both
+    honest, and it must be the operator's word, never inferred from the directory being empty.
+  acceptance:
+    - claim: "a STATE_DIR that does not exist is REFUSED before anything is stopped, removed or mounted"
+      proof: "unit test: test/a-recycle-refuses-a-state-dir-that-is-not-a-checkout.test.ts"
+    - claim: "a STATE_DIR that exists but holds no state/ directory is refused the same way"
+      proof: "unit test: test/a-recycle-refuses-a-state-dir-that-is-not-a-checkout.test.ts"
+    - claim: "the refusal names the RESOLVED path and how it was resolved, never a bare no"
+      proof: "unit test: test/a-recycle-refuses-a-state-dir-that-is-not-a-checkout.test.ts"
+    - claim: "every line reporting on locks names the directory it actually read"
+      proof: "unit test: test/a-recycle-refuses-a-state-dir-that-is-not-a-checkout.test.ts"
+    - claim: "a real state directory still proceeds exactly as it does today"
+      proof: "unit test: test/a-recycle-refuses-a-state-dir-that-is-not-a-checkout.test.ts"
+    - claim: "a deliberate first-boot on an empty path is still possible, and only by an explicit operator opt-in"
+      proof: "unit test: test/a-recycle-refuses-a-state-dir-that-is-not-a-checkout.test.ts"
+    - claim: "removing the existence check lets the run reach docker run — the falsifier is load-bearing"
+      proof: "unit test: test/a-recycle-refuses-a-state-dir-that-is-not-a-checkout.test.ts"
