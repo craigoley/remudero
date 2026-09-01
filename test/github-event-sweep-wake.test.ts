@@ -569,6 +569,81 @@ test("a delivery arriving during an active full sweep is reconciled by exactly o
   }
 });
 
+test("a delivery is not consumed when the sweep gate declines because an abandoned pass is still settling", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-github-abandoned-sweep-"));
+  const path = sweepWakeMarkerPath(root);
+  const wiring = wireSweepWakeToDaemon(root);
+  let sweeps = 0;
+  let releaseFirst!: () => void;
+  let reportFirstStarted!: () => void;
+  let reportSkipped!: () => void;
+  const firstStarted = new Promise<void>((resolve) => {
+    reportFirstStarted = resolve;
+  });
+  const holdFirst = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  const skipped = new Promise<void>((resolve) => {
+    reportSkipped = resolve;
+  });
+  try {
+    const running = runDaemon(
+      oneTaskPlan(root),
+      {
+        refreshMerged: () => () => true,
+        runOne: async () => {
+          throw new Error("a merged fixture task must never dispatch");
+        },
+        sweep: async () => {
+          sweeps++;
+          if (sweeps === 1) {
+            reportFirstStarted();
+            await holdFirst;
+          }
+        },
+        checkStop: () => (sweeps >= 2 ? "follow-up pass completed" : undefined),
+        sleep: async () => {},
+        sleepUntilSweepWake: wiring.sleep,
+        acknowledgeSweepWake: wiring.acknowledge,
+        log: (step) => {
+          if (step === "daemon.sweep.skipped_concurrent") reportSkipped();
+        },
+      },
+      { pollIntervalMs: 10, sweepWallClockBoundMs: 10 },
+    );
+    await firstStarted;
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    writeSweepWakeMarkerAtomic(path, {
+      deliveryId: "after-abandon-before-settle",
+      event: "check_run",
+      action: "completed",
+      repository: REPOSITORY,
+      receivedAtIso: "2026-09-01T20:00:00.000Z",
+    });
+    await Promise.race([
+      skipped,
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("the busy gate was not exercised")), 500)),
+    ]);
+    assert.equal(
+      readSweepWakeMarker(path)?.deliveryId,
+      "after-abandon-before-settle",
+      "a pass that never started cannot claim the event intended for its successor",
+    );
+    releaseFirst();
+    const summary = await Promise.race([
+      running,
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("the retained wake did not reach a later pass")), 500)),
+    ]);
+    assert.equal(summary.stopReason, "stopped");
+    assert.equal(sweeps, 2);
+    assert.equal(consumeSweepWakeMarker(path), undefined);
+  } finally {
+    releaseFirst?.();
+    wiring.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("Azure wiring mounts the webhook secret into serve only and documents exact-path commissioning", () => {
   const serve = readFileSync(join(REPO_ROOT, "deploy", "serve-container.sh"), "utf8");
   const recycle = readFileSync(join(REPO_ROOT, "deploy", "recycle-container.sh"), "utf8");

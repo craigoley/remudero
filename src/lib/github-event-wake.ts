@@ -626,15 +626,32 @@ export function wireSweepWakeToDaemon(
     });
   }
   const signal = createSweepWakeSignal(bootRecord !== undefined);
-  const watcher = watchSweepWakeMarker(root, signal, log, watch);
+  // Remember which durable level has already produced an in-memory edge. If a sweep attempt is
+  // declined while an older pass is still settling, that marker must remain on disk for the next
+  // accepted pass, but re-reading the same level before every sleep must not create a zero-delay
+  // busy loop. A different delivery id is a new edge and wakes immediately.
+  let observedDeliveryId = bootRecord?.deliveryId;
+  const wakeForCurrentMarker = () => {
+    const record = readSweepWakeMarker(path);
+    if (!record || record.deliveryId === observedDeliveryId) return;
+    observedDeliveryId = record.deliveryId;
+    signal.wake();
+  };
+  const watcherSignal: SweepWakeSignal = {
+    wake: wakeForCurrentMarker,
+    acknowledge: signal.acknowledge,
+    sleep: signal.sleep,
+    close: signal.close,
+  };
+  const watcher = watchSweepWakeMarker(root, watcherSignal, log, watch);
   // Close the consume-to-watch race: a delivery may land after the boot claim but before
   // fs.watch is armed. The durable path is authoritative, so seed a pending wake if it exists.
-  if (readSweepWakeMarker(path)) signal.wake();
+  wakeForCurrentMarker();
   const sleep = (ms: number) => {
     // `fs.watch` is an acceleration edge, never the source of truth. Re-read the durable level
     // immediately before every top-level poll wait so a dropped/platform-delayed notification
     // cannot strand an already-written marker until the full timer expires.
-    if (readSweepWakeMarker(path)) signal.wake();
+    wakeForCurrentMarker();
     return signal.sleep(ms);
   };
   return {
@@ -645,6 +662,9 @@ export function wireSweepWakeToDaemon(
       // the claim writes a new marker and raises a new edge for one later pass.
       signal.acknowledge();
       consumeSweepWakeMarker(path);
+      const stillPending = readSweepWakeMarker(path);
+      observedDeliveryId = stillPending?.deliveryId;
+      if (stillPending) signal.wake();
     },
     close: () => {
       watcher.close();
