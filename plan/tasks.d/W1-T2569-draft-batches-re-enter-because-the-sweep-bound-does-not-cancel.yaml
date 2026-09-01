@@ -1,0 +1,100 @@
+- id: W1-T2569
+  title: "DRAFT BATCHES RE-ENTER BECAUSE THE SWEEP BOUND STOPS AWAITING WITHOUT CANCELLING — DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS abandons await deps.sweep() at 559s but the sweep keeps running detached, and a draft batch is 3 sequential drafts at a 316s median (~948s), so every batch is un-awaited mid-flight while the next loop iteration starts a fresh one that read a pre-write cache; MEASURED 2026-09-01 across six consecutive batch/abandon alternations: 16 Architect spawns over 5 DISTINCT proposals, $123.30, drafts cache frozen at 62 entries and eligible stuck at 282"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 15.00
+  files: [src/lib/inbox.ts, src/lib/daemon.ts, src/run-task.ts, test/draft-batches-cannot-overlap.test.ts]
+  origin: "operator-brief#live-draft-leak-2026-09-01"
+  plan_refs: ["W1-T1067", "W1-T1044", "W1-T2561", "W1-T2564", "W1-T193"]
+  status: queued
+  attempts: 0
+  rationale: |
+    ── THE MECHANISM, CONFIRMED NOT ASSUMED ─────────────────────────────────────────────────────
+
+    `DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS = 559_000` (lib/daemon.ts, W1-T1044) stops AWAITING
+    `deps.sweep()` at 9.3 minutes. IT DOES NOT CANCEL IT. The sweep — and every rung inside it —
+    keeps running detached while the daemon's next loop iteration starts a fresh sweep.
+
+    A draft batch is `DAEMON_DRAFT_BATCH_CAP` (3) SEQUENTIAL drafts at a measured 316s median,
+    ~948s end to end, so it exceeds the bound by 1.7x EVERY TIME rather than occasionally.
+
+    THE CONFIRMATION IS AN EXACT ALTERNATION, six for six, not an arithmetic fit:
+
+      batch 17:38:13 -> abandoned 17:46:45 (+512s) -> batch 17:53:01 -> abandoned 18:01:15 (+494s)
+      -> batch 18:04:54 -> abandoned 18:13:41 (+527s) -> batch 18:17:14 -> abandoned 18:25:29
+      -> batch 18:29:27 -> abandoned 18:38:05 -> batch 18:41:06 -> abandoned 18:49:18
+
+    every `daemon.sweep.abandoned` carrying `elapsed_ms: 559000` against `bound_ms: 559000`, and
+    three of them inside ONE `run_id`. THE TWO OTHER CANDIDATES ARE RULED OUT BY THAT: a 20-minute
+    `DEFAULT_SWEEP_RETRIGGER_INTERVAL_MS` does not fit a ~715s cycle, and a freshness restart
+    (median process life 50.5 min) cannot produce three cycles inside one process.
+
+    COST: 16 spawns across 5 DISTINCT proposals, $123.30, 74% of it buying nothing — the drafts
+    cache sat frozen at 62 entries from 18:13:50 onward and `eligible` read 282 for four
+    consecutive batches while the same five proposals were redrafted and thrown away.
+
+    ── TWO DEFECTS, TWO REMEDIES, DELIBERATELY NOT FOLDED TOGETHER ──────────────────────────────
+
+    (1) RE-ENTRANCY. `state/inbox-draft-inflight.json` was already written before every batch and
+    simply never consulted. This does not repurpose it — the console reads it as
+    `{proposalId: ISO}` (panel-graph.ts) and that shape is unchanged. A separate
+    `state/inbox-draft.lock` is taken with `acquireDrainLock`, REUSED not reinvented: it is already
+    path-parameterised and already applies the pid+host staleness rule `isHolderStale` settles.
+    A second staleness rule here would be a second thing to drift.
+
+    ⚠ THE STALENESS BOUND IS LOAD-BEARING IN BOTH DIRECTIONS. Without it a killed daemon strands
+    the lock and the rung never runs again — the W1-T1067 `drain.lock` failure, one file over. A
+    live holder is a SKIP, ledgered as `inbox.draft_batch.skipped`, never an error and never
+    silent: a stuck lock must not look like a rung that quietly stopped firing.
+
+    (2) THE LOST UPDATE, WHICH IS INDEPENDENT OF (1) AND IS WHY BOTH SHIP. Read-at-start /
+    write-at-end reverts a concurrent writer even when only one batch is "running" — a reclaimed
+    lock whose holder was in fact alive, or a second host, still loses writes. `mergeDraftCaches`
+    re-reads and merges onto the CURRENT on-disk caches immediately before writing, so a lost
+    update is impossible rather than merely unlikely. This batch's own results win on a contested
+    id: it is the fresher observation, and dropping it would be the very defect being closed.
+
+    ── ⚠ THE CLASS IS WIDER THAN THIS RUNG, AND THIS TASK DOES NOT FIX THE CLASS ────────────────
+
+    EVERY sweep-borne rung whose work can exceed 559s is re-entrant by the identical mechanism.
+    MEASURED against the bound: the draft batch exceeds STRUCTURALLY (948s vs 559s, always);
+    `review.reviewer` exceeds on 1.0% of 522 runs (max 1691s); `recon.done` never does (max 131s).
+    `runFixRung` is sweep-borne too — it sits in `buildSweepEffects` — and spawns workers.
+
+    So drafting is the rung that SPENDS per re-entry, not the only one that re-enters. The
+    abandonment semantics are a CLASS and are filed separately, deliberately: different falsifier,
+    different blast radius, and bundling them would make neither reviewable.
+
+    ── TWO DOC COMMENTS ASSERTED THE VIOLATED PROPERTY AND ARE CORRECTED HERE ───────────────────
+
+    `buildInboxDraftHook` claimed the hook is "awaited to completion by the daemon's own serial
+    sweep tick before the next one can start". `DEFAULT_SWEEP_RETRIGGER_INTERVAL_MS` claimed the
+    retrigger raises "how often the gate is reached, never how many run at once (sweep still runs
+    one at a time)". BOTH ARE FALSE FOR THE SAME REASON — the bound stops awaiting, it does not
+    cancel — and both now say so, with the measurement, because three readers passed over this
+    exact statement in a queue review earlier today and the next reader would have re-derived it
+    from scratch. "Awaits sequentially" describes the CALL SITES; it never described the LIFETIMES.
+
+    ── A THIRD STALE CITATION, CORRECTED IN PASSING ────────────────────────────────────────────
+
+    `draftsDueOnDaemon`'s doc cited "a 300s poll cadence" and `DAEMON_DRAFT_BATCH_CAP` read as a
+    concurrency limit. Both wrong: the measured cadence between `inbox.draft_batch` rows is a ~715s
+    median, and `runDraftRung` is a sequential for-await, so the cap is a per-batch SIZE. Observed
+    max concurrent draft workers was 2, and both came from overlapping BATCHES, never within one.
+
+    NOT IN SCOPE: raising the cap (it multiplies the clobbering), the `usage_resets_at` deferral
+    (correct, but it belongs after this), and the abandonment semantics themselves.
+
+  acceptance:
+    - claim: "a second draft batch spawns no workers while another batch still holds the lock"
+      proof: "unit test: test/draft-batches-cannot-overlap.test.ts"
+    - claim: "a lock whose recorded holder pid is not alive on this host is reclaimed rather than suppressing the rung forever"
+      proof: "unit test: test/draft-batches-cannot-overlap.test.ts"
+    - claim: "no draft written by a concurrent writer is missing after a batch commits"
+      proof: "unit test: test/draft-batches-cannot-overlap.test.ts"
+    - claim: "releasing the lock lets the rung run again, so the guard is a lock and not an off switch"
+      proof: "unit test: test/draft-batches-cannot-overlap.test.ts"
