@@ -572,6 +572,9 @@ export function parseDraftDeferralCache(text: string | undefined): DraftDeferral
     if (typeof raw?.deferredUntilMs !== "number" || !Number.isFinite(raw.deferredUntilMs)) return undefined;
     return { deferredUntilMs: raw.deferredUntilMs, matched: typeof raw.matched === "string" ? raw.matched : "" };
   } catch {
+    // Fail-soft to nothing, by contract (see this function's doc): a corrupt deferral file must
+    // read as "no deferral" rather than wedging the rung shut, so the parse cause is deliberately
+    // not carried out of here — absent and malformed are ONE answer to every caller.
     return undefined;
   }
 }
