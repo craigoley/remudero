@@ -10068,9 +10068,8 @@ export function resolveRunMounts(
   };
 }
 
-// W1-T2528 — module-scoped so it stays monotonic across every lane runId this process mints.
-// `Date.now()`'s 1ms resolution let two rungs collide on the same worktree branch (OBSERVED,
-// twice in one daemon log). A NAME, NOT A RETRY: compares only against the PRECEDING raw reading, so a differing one (real time, or a test-pinned clock) passes UNCHANGED.
+// W1-T2528 — module-scoped, monotonic across every lane runId this process mints; fixes two
+// same-millisecond rungs colliding on the identical `run-<lane>-<epoch>` worktree branch.
 let lastRawNowMs = -1;
 let lastLaneEpochMs = -1;
 export function nextLaneEpochMs(): number {
@@ -10082,24 +10081,6 @@ export function nextLaneEpochMs(): number {
     lastLaneEpochMs = now;
   }
   return lastLaneEpochMs;
-}
-
-// Cuts a lane's `run-<runId>` branch, ledgers `worktree.add_failed` before rethrowing (W1-T2528).
-export function addLaneWorktree(
-  repoDir: string,
-  worktreesRoot: string,
-  runId: string,
-  log: (step: string, extra?: Record<string, unknown>) => void,
-): { branch: string; worktreePath: string } {
-  const branch = `run-${runId}`;
-  const worktreePath = join(worktreesRoot, branch);
-  try {
-    worktreeAdd(repoDir, worktreePath, branch, "origin/main");
-  } catch (e) {
-    log("worktree.add_failed", { branch, error: String((e as Error)?.message ?? e) });
-    throw e;
-  }
-  return { branch, worktreePath };
 }
 
 async function runTask(
@@ -10271,8 +10252,7 @@ async function runTask(
   // `onSpawnError`/`workerStateSensor.observer` already state for that wrapper.
   const workerAbandonMs = opts.workerAbandonMs ?? loadDefaultPolicy().values.workerAbandon;
 
-  // W1-T2528: NOT routed through `nextLaneEpochMs` — taskId is ALREADY the per-rung component.
-  const runId = `${taskId}-${Date.now()}`;
+  const runId = `${taskId}-${Date.now()}`; // W1-T2528: NOT nextLaneEpochMs — taskId is already the per-rung component
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, lane: "run-task", ...extra });
 
@@ -10827,7 +10807,7 @@ async function runTask(
       releaseDispatchClaim(task.id, claimReserver, { anchor: claimAnchor });
       return { taskId, runId, merged: false, costUsd: 0, verdict: "failed" };
     }
-    log("worktree.add_failed", { branch, error: String((e as Error)?.message ?? e) }); // W1-T2528: any OTHER add failure
+    log("worktree.add_failed", { branch, error: String((e as Error)?.message ?? e) }); // W1-T2528
     throw e;
   }
   log("worktree.add", { branch, worktreePath });
@@ -18267,6 +18247,26 @@ export function runCitationStampPass(opts: {
   }
 }
 
+// Cut a lane's `run-<runId>` worktree branch and ledger a failed add before rethrowing (W1-T2528)
+// — shared by retro/triage/plan. Defined AFTER runTask: source-grep tests key the FIRST
+// `indexOf("worktreeAdd(...")` to runTask's own task-lane call site.
+export function addLaneWorktree(
+  repoDir: string,
+  worktreesRoot: string,
+  runId: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): { branch: string; worktreePath: string } {
+  const branch = `run-${runId}`;
+  const worktreePath = join(worktreesRoot, branch);
+  try {
+    worktreeAdd(repoDir, worktreePath, branch, "origin/main");
+  } catch (e) {
+    log("worktree.add_failed", { branch, error: String((e as Error)?.message ?? e) });
+    throw e;
+  }
+  return { branch, worktreePath };
+}
+
 async function retroCommand(
   rest: string[],
   opts: {
@@ -18553,7 +18553,7 @@ async function retroCommand(
   const wrk = workerModel(config);
   assertArchitectAboveWorker(arch, wrk); // throws (fail-closed) on violation
 
-  const runId = `RETRO-${nextLaneEpochMs()}`; // W1-T2528: not bare Date.now() — no other per-rung component
+  const runId = `RETRO-${nextLaneEpochMs()}`; // W1-T2528: nextLaneEpochMs, not bare Date.now()
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: "RETRO", step, lane: "retro", ...extra });
   const say = (msg: string) => console.log(`\n### [retro] ${msg}`);
@@ -18577,7 +18577,7 @@ async function retroCommand(
   }
   const pruned = pruneStaleRuns(repoDir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
   if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
-  const { branch, worktreePath } = addLaneWorktree(repoDir, worktreesDir(config), runId, log);
+  const { branch, worktreePath } = addLaneWorktree(repoDir, worktreesDir(config), runId, log); // W1-T2528
   // Liveness token so a concurrent drain's prune skips this retro worktree. (See runTask.)
   writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
 
@@ -28510,7 +28510,7 @@ async function triageCommandLocked(
 
   const ledgerPath = ledgerPathFor(config);
   const taskId = `TRIAGE-${feedbackId}`;
-  const runId = `${taskId}-${nextLaneEpochMs()}`; // W1-T2528: not bare Date.now() — see its doc, above runTask
+  const runId = `${taskId}-${nextLaneEpochMs()}`; // W1-T2528: nextLaneEpochMs, not bare Date.now()
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, lane: "triage", ...extra });
   const say = (msg: string) => console.log(`\n### [triage] ${msg}`);
@@ -28533,7 +28533,7 @@ async function triageCommandLocked(
   }
   const pruned = pruneStaleRuns(repoDir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
   if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
-  const { branch, worktreePath } = addLaneWorktree(repoDir, worktreesDir(config), runId, log);
+  const { branch, worktreePath } = addLaneWorktree(repoDir, worktreesDir(config), runId, log); // W1-T2528
   // Liveness token so a concurrent drain's prune skips this triage worktree.
   writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
 
@@ -29094,7 +29094,7 @@ export async function planCommand(
 
   const ledgerPath = ledgerPathFor(config);
   const taskId = `PLAN-${mode}`;
-  const runId = `${taskId}-${nextLaneEpochMs()}`; // W1-T2528: not bare Date.now() — see its doc, above runTask
+  const runId = `${taskId}-${nextLaneEpochMs()}`; // W1-T2528: nextLaneEpochMs, not bare Date.now()
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, lane: "plan", ...extra });
   const say = (msg: string) => console.log(`\n### [plan] ${msg}`);
@@ -29115,7 +29115,7 @@ export async function planCommand(
   }
   const pruned = pruneStaleRuns(repoDir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
   if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
-  const { branch, worktreePath } = addLaneWorktree(repoDir, worktreesDir(config), runId, log);
+  const { branch, worktreePath } = addLaneWorktree(repoDir, worktreesDir(config), runId, log); // W1-T2528
   // Liveness token so a concurrent drain's prune skips this plan worktree.
   writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
 
