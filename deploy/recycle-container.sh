@@ -196,6 +196,10 @@ print_blocking_locks
 # variable is not.
 CONTAINER_EXISTS=0
 declare -A CAPTURED=()
+# W1-T2553: which source each captured value actually came from — "container", "shell" or
+# "neither". Exists so the refusal below can NAME what it consulted rather than assert it; the old
+# message claimed the shell had nothing without ever having read it.
+declare -A CAPTURED_SOURCE=()
 
 is_declared_runtime_var() {
   local needle="$1" candidate
@@ -264,6 +268,21 @@ if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
     exit 1
   fi
 
+  # W1-T2553: FALL BACK TO THE SHELL WHEN THE CONTAINER'S VALUE IS EMPTY. This loop used to read
+  # ONLY the container, and the shell fallback lived in the `else` branch below — reachable solely
+  # when NO container exists. That was fine while containers were started carrying a token, and
+  # became a permanent deadlock the moment W1-T2311 began creating them with `-e GH_TOKEN=` EMPTY
+  # on purpose: `val` is then "" forever, the refusal below fires on every recycle after the first,
+  # and exporting GH_TOKEN in the shell — the one remedy the refusal itself recommends — cannot
+  # help, because nothing in this branch ever looks there. The same shape applies to every declared
+  # runtime variable, GH_APP_* included, which is why the fallback is per-NAME rather than special
+  # -cased to the token.
+  #
+  # PRECEDENCE IS DELIBERATE AND UNCHANGED IN THE ONLY CASE THAT MATTERED BEFORE: a NON-EMPTY
+  # container value still wins, so a live container's own runtime value is never silently replaced
+  # by a stale shell export. The shell is consulted only where the container offers nothing.
+  # CAPTURED_SOURCE records which source each name actually came from, so the refusal below can
+  # name what it consulted instead of asserting it.
   for name in "${RMD_DAEMON_RUNTIME_ENV_VARS[@]}"; do
     val=""
     for line in "${CONTAINER_ENV_LINES[@]}"; do
@@ -271,6 +290,16 @@ if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
         "${name}="*) val="${line#*=}" ;;
       esac
     done
+    if [ -n "${val}" ]; then
+      CAPTURED_SOURCE["${name}"]="container"
+    else
+      val="${!name-}"
+      if [ -n "${val}" ]; then
+        CAPTURED_SOURCE["${name}"]="shell"
+      else
+        CAPTURED_SOURCE["${name}"]="neither"
+      fi
+    fi
     CAPTURED["${name}"]="${val}"
   done
 else
@@ -278,23 +307,29 @@ else
   # runtime variable can come from is this shell's own environment.
   for name in "${RMD_DAEMON_RUNTIME_ENV_VARS[@]}"; do
     CAPTURED["${name}"]="${!name-}"
+    CAPTURED_SOURCE["${name}"]="$([ -n "${!name-}" ] && echo shell || echo neither)"
   done
 fi
 
 CAPTURED_TOKEN="${CAPTURED[GH_TOKEN]-}"
 if [ -z "${CAPTURED_TOKEN}" ]; then
+  # W1-T2553: NAME THE SOURCES ACTUALLY CONSULTED. The old wording asserted "and this shell has none
+  # either" from the container branch, which had never read the shell at all — an unfalsifiable
+  # claim in a refusal, and the reason an operator who DID export GH_TOKEN was told the export had
+  # not worked. Both sources are now genuinely read above, and this names each one's own result.
   echo "recycle-container: REFUSING — no GH_TOKEN could be captured." >&2
   if [ "${CONTAINER_EXISTS}" -eq 1 ]; then
-    echo "  ${CONTAINER_NAME} carries no GH_TOKEN in its own environment, and this shell has none" >&2
-    echo "  either. NOTHING has been touched — removing the container now would discard the only" >&2
-    echo "  copy of a credential that is never written to disk (deploy/entrypoint.sh)." >&2
+    echo "  Consulted ${CONTAINER_NAME}'s own environment: no GH_TOKEN (or empty)." >&2
+    echo "  Consulted this shell: $([ -n "${GH_TOKEN-}" ] && echo "GH_TOKEN is set but empty" || echo "GH_TOKEN is not set")." >&2
+    echo "  NOTHING has been touched — removing the container now would discard the only copy of a" >&2
+    echo "  credential that is never written to disk (deploy/entrypoint.sh)." >&2
   else
-    echo "  ${CONTAINER_NAME} does not exist yet and this shell has no GH_TOKEN exported." >&2
+    echo "  Consulted this shell (${CONTAINER_NAME} does not exist yet): $([ -n "${GH_TOKEN-}" ] && echo "GH_TOKEN is set but empty" || echo "GH_TOKEN is not set")." >&2
   fi
   echo "  Export GH_TOKEN in this shell and re-run." >&2
   exit 1
 fi
-echo "recycle-container: GH_TOKEN captured $([ "${CONTAINER_EXISTS}" -eq 1 ] && echo "from ${CONTAINER_NAME}'s own environment" || echo "from this shell")"
+echo "recycle-container: GH_TOKEN captured from ${CAPTURED_SOURCE[GH_TOKEN]-unknown}"
 
 # ── W1-T2311: THE CAPTURE ABOVE IS READ, NEVER RE-BOOTED AS THE DAEMON'S OWN DEFAULT ────────────
 # MEASURED 2026-08-26: `docker inspect` (above) reports only the STATIC config a container was
