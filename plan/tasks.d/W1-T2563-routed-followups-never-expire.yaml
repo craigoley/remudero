@@ -1,0 +1,67 @@
+- id: W1-T2563
+  title: "A ROUTED FOLLOW-UP NEVER EXPIRES, SO THE PROPOSAL REGISTRY ONLY GROWS — routeFollowupsToRegistry (src/lib/retro.ts) appends every routable harvested candidate through updateProposalRegistry with no expiry, no retirement arm and no cap, and nothing anywhere removes a followup-prefixed proposal; MEASURED 2026-09-01: the registry holds 317 proposals, ALL followup-prefixed, against 16 two days earlier that were ALL board-review — 285 still needing a first draft at an $8.52 mean, against a mineFollowups backlog of 2,115 declared entries still upstream"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 15.00
+  files: [src/lib/retro.ts, test/routed-followups-retire.test.ts]
+  origin: "operator-brief#seven-hour-daemon-review-2026-09-01"
+  plan_refs: ["W1-T2561", "W1-T2470", "W1-T2464", "W1-T2451", "W1-T2458"]
+  status: queued
+  attempts: 0
+  rationale: |
+    ── THE SOURCE, NOT THE DRAIN ────────────────────────────────────────────────────────────────
+
+    W1-T2561 caps how fast the inbox draft rung DRAINS the registry. IT DOES NOT STOP THE SOURCE
+    FILLING, and this record exists so that distinction is not lost: a bounded drain on an unbounded
+    source is a queue that grows forever at a polite rate.
+
+    `routeFollowupsToRegistry` appends every routable candidate through `updateProposalRegistry`.
+    Its idempotence check refuses to re-add an id already present — which is correct and is NOT the
+    gap. THE GAP IS THAT NOTHING EVER REMOVES ONE. There is no expiry, no retirement arm, and no
+    consumer that retires a followup-prefixed proposal once its subject is dead.
+
+    MEASURED 2026-09-01: 317 proposals, EVERY ONE `followup:`-prefixed. Two days earlier the same
+    registry held 16, EVERY ONE `board-review:`. Upstream, `mineFollowups` has 2,115 declared
+    entries across 463 distinct task_ids, so the observed 317 is an early fraction of the eventual
+    population, not a steady state.
+
+    ── WHY THE PRECEDENT IS ALREADY IN THE PLAN ────────────────────────────────────────────────
+
+    THIS IS THE THIRD PRODUCER WITH THE SAME DEFECT, WHICH IS THE STRONGEST ARGUMENT THAT THE
+    REMEDY BELONGS TO THE WRITER RATHER THAN TO EACH CALLER. W1-T2464 records a board-review
+    finding outliving its referent forever; W1-T2470 records board-review proposals never expiring;
+    W1-T2451 built `originatingItemId` as the referent-shaped retirement for exactly that family.
+    A fourth per-producer expiry would be the fourth copy of one policy.
+
+    ⚠ AND A FOLLOW-UP CANNOT BE RETIRED THE WAY AN ANCHORED PROPOSAL CAN — THIS IS THE PART THAT
+    NEEDS DESIGN RATHER THAN A COPY. Every routed follow-up carries `evidenceAnchors: []` BY
+    DELIBERATE DESIGN (a `FollowupEntry` is free prose with no `git grep`-able pattern; synthesizing
+    one would fabricate a claim nobody asserted). So the anchor arm — "is this still true on the
+    ref" — is structurally unavailable, and an expiry built on it would read VACUOUSLY TRUE for
+    every followup and retire the whole population on its first pass. The referent it does carry
+    (`runId`/`taskId`/`prUrl`, in the summary) says only where the claim came from.
+
+    THE CANDIDATE SIGNALS, EACH WITH ITS OWN FAILURE MODE, ARE THE DELIVERABLE:
+      - the originating TASK merged (available; but a merged task can still leave real follow-up
+        work, so this retires some live candidates);
+      - the entry was superseded by a filed task (needs the paraphrase-blind title match that
+        W1-T2455 measured at 3 of 32 — weak, and must not be leaned on as though it were strong);
+      - age (honest and dumb; states plainly that nothing has picked it up).
+    Whichever lands must say which live candidates it wrongly retires, because every option here
+    has that cost and a task that claims none has not measured.
+
+    NOT IN SCOPE: the drain cap (W1-T2561, shipped separately), `FOLLOWUP_TYPE_ROUTES` and the
+    decision to route research/task and decline action, and the `evidenceAnchors: []` choice itself
+    — which is correct and must NOT be "fixed" by synthesizing a pattern.
+
+  acceptance:
+    - claim: "a routed follow-up whose originating work is settled is retired from the registry"
+      proof: "unit test: test/routed-followups-retire.test.ts"
+    - claim: "retirement does not depend on an evidence anchor, which a routed follow-up never carries"
+      proof: "unit test: test/routed-followups-retire.test.ts"
+    - claim: "the retirement names which still-live candidates it wrongly removes, rather than claiming none"
+      proof: "unit test: test/routed-followups-retire.test.ts"
