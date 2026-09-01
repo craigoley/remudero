@@ -179,6 +179,37 @@ export interface Config {
    */
   headroom?: { enabled?: boolean };
   /**
+   * Worker backends the dispatcher may use. Absent means Claude only, preserving the
+   * pre-connector spawn path exactly. Codex is deliberately opt-in because it needs a
+   * separately authenticated subscription on the host.
+   *
+   * `reservePercent` is held back in every reported provider window. A provider is
+   * eligible only while all of its readable windows remain below `100 - reservePercent`.
+   * Unreadable capacity is never interpreted as unused capacity.
+   */
+  workerProviders?: {
+    enabled?: Array<"claude" | "codex">;
+    reservePercent?: number;
+    capacityCacheMs?: number;
+    /** Absolute Codex CLI path. When absent, the live PATH is resolved for each cache fill. */
+    codexBin?: string;
+    /** Codex state/auth home. Defaults to `$CODEX_HOME`, then `~/.codex`. */
+    codexHome?: string;
+    /** Codex model override. Absent lets the authenticated Codex install choose its default. */
+    codexModel?: string;
+    /**
+     * Ordered, account-checked Codex model preferences for each Remudero mount tier.
+     * Only models returned by app-server `model/list` are eligible. Omitted lists use
+     * the connector's pinned-version defaults and ultimately the account's `isDefault`
+     * model; an explicit `codexModel` above remains a hard, fail-closed override.
+     */
+    codexModels?: {
+      economy?: string[];
+      balanced?: string[];
+      frontier?: string[];
+    };
+  };
+  /**
    * Explicit override for the shared-knowledge homes (the "org brain") — see
    * {@link learningsHomes}. Optional; when absent (or a given sub-field is
    * absent), each home defaults to its historic `config.root`-derived path
@@ -222,6 +253,18 @@ export function resolveHeadroomEnabled(
   return config.headroom?.enabled ?? true;
 }
 
+export type WorkerProviderId = "claude" | "codex";
+
+/** Provider list with the backwards-compatible Claude-only default. */
+export function enabledWorkerProviders(config: Pick<Config, "workerProviders">): WorkerProviderId[] {
+  return config.workerProviders?.enabled ?? ["claude"];
+}
+
+/** True only when provider-local capacity routing replaces the Claude-only daemon gate. */
+export function providerRoutingOwnsHeadroom(config: Pick<Config, "workerProviders">): boolean {
+  return enabledWorkerProviders(config).includes("codex");
+}
+
 /**
  * Thrown by {@link validateConfig} when a config violates one of the harness's
  * cross-field invariants. Named (rather than a bare `Error`) so callers/tests can
@@ -251,26 +294,49 @@ export function validateConfig(config: Config): void {
         "hard-capped — §9 conditional cap guard); got daily_cap: none",
     );
   }
+  const providers = enabledWorkerProviders(config);
+  if (providers.length === 0) {
+    throw new ConfigValidationError("invalid config: workerProviders.enabled must contain at least one provider");
+  }
+  if (new Set(providers).size !== providers.length) {
+    throw new ConfigValidationError("invalid config: workerProviders.enabled contains a duplicate provider");
+  }
+  if (providers.some((provider) => provider !== "claude" && provider !== "codex")) {
+    throw new ConfigValidationError('invalid config: workerProviders.enabled accepts only "claude" and "codex"');
+  }
+  const reserve = config.workerProviders?.reservePercent ?? 5;
+  if (!Number.isFinite(reserve) || reserve < 0 || reserve >= 100) {
+    throw new ConfigValidationError("invalid config: workerProviders.reservePercent must be >= 0 and < 100");
+  }
+  const cacheMs = config.workerProviders?.capacityCacheMs ?? 60_000;
+  if (!Number.isFinite(cacheMs) || cacheMs <= 0) {
+    throw new ConfigValidationError("invalid config: workerProviders.capacityCacheMs must be > 0");
+  }
+  for (const tier of ["economy", "balanced", "frontier"] as const) {
+    const models = config.workerProviders?.codexModels?.[tier];
+    if (models !== undefined && (models.length === 0 || models.some((model) => typeof model !== "string" || model.trim() === ""))) {
+      throw new ConfigValidationError(`invalid config: workerProviders.codexModels.${tier} must contain non-empty model ids`);
+    }
+    if (models && new Set(models).size !== models.length) {
+      throw new ConfigValidationError(`invalid config: workerProviders.codexModels.${tier} contains a duplicate model`);
+    }
+  }
 }
 
 /**
- * The shell Claude Code runs for a worker's Bash tool, granted via
- * `CLAUDE_CODE_SHELL`. Default `/bin/bash`.
- *
- * WHY NOT ZDOTDIR ALONE (installed-version ground truth, CLI 2.1.209): Claude
- * Code builds a shell SNAPSHOT for its Bash tool by sourcing the rc file at
- * `os.homedir()/.zshrc` — resolved from HOME, NOT `$ZDOTDIR`. Setting ZDOTDIR
- * does not redirect it. But the rc filename follows the shell: bash →
- * `$HOME/.bashrc`. Pointing the snapshot shell at bash used to work only
- * because THIS host's `$HOME/.bashrc` happened to be absent (LEARNINGS.md,
- * PR #8) — an accident, not construction; a stranger's populated `~/.bashrc`
- * would isolate nothing. W1-T18 (see {@link workerHomeDir}, `worker-home.ts`)
- * fixes the accident by redirecting the worker's `HOME` itself to a
- * Remudero-controlled scratch dir holding only empty rc files, so `bash →
- * $HOME/.bashrc` now resolves to a path the OPERATOR never wrote regardless
- * of what their real `~/.bashrc` contains. ZDOTDIR is kept alongside this as
- * defense-in-depth for any direct `zsh` a worker spawns, and never fires the
- * interactive `compinit` prompt that stalled W1-T1C.
+ * The shell Claude Code runs for a worker's Bash tool, granted via `CLAUDE_CODE_SHELL`. Default
+ * `/bin/bash`.
+ * WHY NOT ZDOTDIR ALONE (installed-version ground truth, CLI 2.1.209): Claude Code builds a shell
+ * SNAPSHOT for its Bash tool by sourcing the rc file at `os.homedir()/.zshrc` — resolved from
+ * HOME, NOT `$ZDOTDIR`. Setting ZDOTDIR does not redirect it. But the rc filename follows the
+ * shell: bash → `$HOME/.bashrc`. Pointing the snapshot shell at bash used to work only because
+ * THIS host's `$HOME/.bashrc` happened to be absent (LEARNINGS.md, PR #8) — an accident, not
+ * construction; a stranger's populated `~/.bashrc` would isolate nothing. W1-T18 (see
+ * {@link workerHomeDir}, `worker-home.ts`) fixes the accident by redirecting the worker's `HOME`
+ * itself to a Remudero-controlled scratch dir holding only empty rc files, so `bash →
+ * $HOME/.bashrc` now resolves to a path the OPERATOR never wrote regardless of what their real
+ * `~/.bashrc` contains. ZDOTDIR is kept alongside this as defense-in-depth for any direct `zsh` a
+ * worker spawns, and never fires the interactive `compinit` prompt that stalled W1-T1C.
  */
 export function workerShell(config: Config): string {
   return config.workerShell ?? "/bin/bash";
@@ -296,14 +362,41 @@ export function workerModel(config: Config): string {
 }
 
 /**
- * Model the Architect-tier roles ride — retro, triage, and the inbox-draft rung (must outrank
- * workerModel — G-17). Sourced from the `.remudero/mounts.yaml` `architect:` row (the single
- * declared source of truth for the top-tier mount), so a mount-table edit governs the spawn;
- * falls back to `config.architectModel`, then the `opus` default when no mounts table is passed.
- * `mounts` is typed structurally (just the field this reads) to avoid a config↔mounts import.
+ * Model plan authorship (the Architect, `rmd plan`/`rmd retro`'s orchestration role) rides — must
+ * outrank workerModel (G-17). Sourced from the `.remudero/mounts.yaml` `architect:` row, falling
+ * back to `config.architectModel`, then `opus`. `mounts` is typed structurally to avoid a
+ * config↔mounts import. W1-T2559: retro, triage, and the inbox-draft rung used to ride THIS
+ * resolver too; they now each resolve through their OWN `synthesis.<role>` row instead — see
+ * {@link synthesisModel}/{@link synthesisEffort} — never this one.
  */
 export function architectModel(config: Config, mounts?: { architect: { model: string } }): string {
   return mounts?.architect.model ?? config.architectModel ?? "opus";
+}
+
+/** The three synthesis rungs (W1-T2559). Re-declared structurally here to avoid a config↔mounts
+ *  import; `src/lib/mounts.ts` exports the canonical `SynthesisRole`. */
+export type SynthesisRole = "retro" | "triage" | "inbox_draft";
+
+/**
+ * Model a synthesis rung (retro / triage / inbox-draft) rides — its OWN `.remudero/mounts.yaml`
+ * `synthesis.<role>` row, never {@link architectModel}'s `architect:` row (W1-T2559). These three
+ * ship no code and supervise no worker, so G-17's Tier Invariant does not bind them to plan
+ * authorship's tier. UNLIKE `architectModel`, this never defaults: `mounts.synthesis` is REQUIRED
+ * and load-time validated (`src/lib/mounts.ts`'s `validateMounts`) — a missing/malformed role
+ * REFUSES at load rather than silently falling back to the Architect's.
+ */
+export function synthesisModel(mounts: { synthesis: Record<SynthesisRole, { model: string }> }, role: SynthesisRole): string {
+  return mounts.synthesis[role].model;
+}
+
+/**
+ * Reasoning effort a synthesis rung rides — same source and no-default contract as
+ * {@link synthesisModel}. Wired to the spawn (`src/run-task.ts`) so effort is an actually-tuned
+ * lever for these rungs (pre-W1-T2559, the bundled `architect.effort` was never passed to any of
+ * the three rungs' spawn calls).
+ */
+export function synthesisEffort(mounts: { synthesis: Record<SynthesisRole, { effort: string }> }, role: SynthesisRole): string {
+  return mounts.synthesis[role].effort;
 }
 
 /**
@@ -341,18 +434,16 @@ export function workerZdotdir(config: Config): string {
 }
 
 /**
- * The Remudero-controlled scratch directory every worker's `HOME` is
- * redirected to (W1-T18 general shell-isolation mechanism, `worker-home.ts`).
- * It holds ONLY empty rc files Remudero itself wrote, plus explicit symlinks
- * back to the real HOME for the few paths a worker legitimately needs
- * (`.claude`, `.config/gh`, `.gitconfig`) — so a worker's shell-snapshot rc
- * (`$HOME/.bashrc`, resolved off `HOME` — see {@link workerShell}) is isolated
- * from the OPERATOR's real dotfiles regardless of what they contain, not just
- * on hosts where `~/.bashrc` happens to be absent.
+ * The Remudero-controlled scratch directory every worker's `HOME` is redirected to (W1-T18 general
+ * shell-isolation mechanism, `worker-home.ts`). It holds ONLY empty rc files Remudero itself
+ * wrote, plus explicit symlinks back to the real HOME for the few paths a worker legitimately
+ * needs (`.claude`, `.config/gh`, `.gitconfig`) — so a worker's shell-snapshot rc (`$HOME/.bashrc`,
+ * resolved off `HOME` — see {@link workerShell}) is isolated from the OPERATOR's real dotfiles
+ * regardless of what they contain, not just on hosts where `~/.bashrc` happens to be absent.
  *
- * Derived from `config.root`, never a hardcoded absolute path (public-repo
- * hygiene): default `<root>/worker-home`. An instance may pin it explicitly
- * via `workerHomeRoot` in `~/.config/remudero/config.json`.
+ * Derived from `config.root`, never a hardcoded absolute path (public-repo hygiene): default
+ * `<root>/worker-home`. An instance may pin it explicitly via `workerHomeRoot` in
+ * `~/.config/remudero/config.json`.
  */
 export function workerHomeDir(config: Config): string {
   return config.workerHomeRoot ?? join(config.root, "worker-home");
@@ -485,15 +576,13 @@ function stripComments(source: string): string {
  * Census over `files` for the trap this task is filed against — see the module-level doc comment
  * above. Pure and injected (no fs of its own), so it drives against BOTH synthetic fixtures
  * (proving it fires, and proving it stays quiet on the innocent cases) and the repo's own `test/`
- * tree (proving nothing live is at risk today, W1-T2414's falsifier).
- *
- * A fixture is IN SCOPE only if it both redirects `process.env.HOME` and references
- * `loadConfig`/`configPath` — anything else cannot reach `resolveClaudeBin` through this seam by
- * construction, so it is silently skipped rather than reported (false-positive containment: a
- * `.remudero`-writing fixture that seeds a wholly different artifact, e.g. `mounts.yaml`, and
- * never calls `loadConfig` is not this defect). Within scope, only a `join(...)` call whose
- * literal tail actually ENDS in `"config.json"` counts as "seeding a config file" — a fixture
- * that never writes one is never reported (in-scope but silent, same containment).
+ * tree (proving nothing live is at risk today, W1-T2414's falsifier). A fixture is IN SCOPE only
+ * if it both redirects `process.env.HOME` and references `loadConfig`/`configPath` — anything else
+ * cannot reach `resolveClaudeBin` through this seam by construction, so it is silently skipped
+ * rather than reported (false-positive containment: a `.remudero`-writing fixture that seeds a
+ * wholly different artifact, e.g. `mounts.yaml`, and never calls `loadConfig` is not this defect).
+ * Within scope, only a `join(...)` call whose literal tail actually ENDS in `"config.json"` counts
+ * as "seeding a config file" — a fixture that never writes one is never reported (same containment).
  */
 export function findFixtureConfigPathViolations(
   files: { path: string; content: string }[],
@@ -544,21 +633,18 @@ export interface LearningsHomes {
 }
 
 /**
- * Resolve the two shared-knowledge homes (the "org brain") — P32/W1-T145's
- * layered knowledge, D-11's cell-sharing seam. This is the ONE place both
- * homes are computed; {@link userOverallLearningsHome} and
- * {@link globalLearningsHome} are thin wrappers over it, and every consumer
- * elsewhere (run-task.ts, learnings.ts) reads through those wrappers rather
- * than re-deriving a path, so an explicit `config.learningsHomes` override
- * actually reaches every call site instead of shipping green and inert.
- *
- * Each home independently defaults to its historic `config.root`-derived
- * path when `config.learningsHomes` (or the specific sub-field) is absent —
- * BYTE-FOR-BYTE the same path an unconfigured install always resolved, so
- * existing single-instance installs see no behavior change. An operator (or
- * a cell orchestrator) sets `config.learningsHomes.userOverall` /
- * `.global` to an identical path across multiple `config.root`s to make N
- * same-machine cells read one shared corpus instead of N private ones.
+ * Resolve the two shared-knowledge homes (the "org brain") — P32/W1-T145's layered knowledge,
+ * D-11's cell-sharing seam. This is the ONE place both homes are computed; {@link userOverallLearningsHome}
+ * and {@link globalLearningsHome} are thin wrappers over it, and every consumer elsewhere
+ * (run-task.ts, learnings.ts) reads through those wrappers rather than re-deriving a path, so an
+ * explicit `config.learningsHomes` override actually reaches every call site instead of shipping
+ * green and inert.
+ * Each home independently defaults to its historic `config.root`-derived path when
+ * `config.learningsHomes` (or the specific sub-field) is absent — BYTE-FOR-BYTE the same path an
+ * unconfigured install always resolved, so existing single-instance installs see no behavior
+ * change. An operator (or a cell orchestrator) sets `config.learningsHomes.userOverall` / `.global`
+ * to an identical path across multiple `config.root`s to make N same-machine cells read one
+ * shared corpus instead of N private ones.
  */
 export function learningsHomes(config: Config): LearningsHomes {
   return {
@@ -568,36 +654,30 @@ export function learningsHomes(config: Config): LearningsHomes {
 }
 
 /**
- * The USER-OVERALL learnings home (P32/W1-T145, layered knowledge): a
- * fleet-readable directory OUTSIDE any single repo checkout, so every
- * project's fleet on this instance reads the SAME cross-project corpus.
- *
- * Resolved via {@link learningsHomes}; default `<config.root>/learnings-user`
- * when unconfigured. Because the default depends ONLY on `config.root` —
- * never on a repo path, cwd, or which checkout is asking — two different repo
- * checkouts under the same instance always resolve to the identical path by
- * default, which is what made this layer cross-project by construction (same
- * pattern as {@link workerZdotdir}/{@link workerHomeDir} deriving off
- * `config.root` rather than a per-repo path). `config.learningsHomes.userOverall`
- * lets an operator make that identity hold ACROSS `config.root`s too (D-11
- * cells), not just within one.
+ * The USER-OVERALL learnings home (P32/W1-T145, layered knowledge): a fleet-readable directory
+ * OUTSIDE any single repo checkout, so every project's fleet on this instance reads the SAME
+ * cross-project corpus.
+ * Resolved via {@link learningsHomes}; default `<config.root>/learnings-user` when unconfigured.
+ * Because the default depends ONLY on `config.root` — never on a repo path, cwd, or which checkout
+ * is asking — two different repo checkouts under the same instance always resolve to the identical
+ * path by default (same pattern as {@link workerZdotdir}/{@link workerHomeDir} deriving off
+ * `config.root` rather than a per-repo path). `config.learningsHomes.userOverall` lets an operator
+ * make that identity hold ACROSS `config.root`s too (D-11 cells), not just within one.
  */
 export function userOverallLearningsHome(config: Config): string {
   return learningsHomes(config).userOverall;
 }
 
 /**
- * The RMD-GLOBAL learnings home (P32/W1-T145, layered knowledge): where the
- * versioned, hash-pinned, cross-user artifact lives once pulled onto this
- * machine (see `learnings.ts`'s `GlobalArtifact`/`loadGlobalArtifact` for the
- * artifact shape and its integrity check). The PULL itself — opt-in POST up
- * / hash-pinned artifact down, no persistent connection — is §6/Tier 3
- * (DECISIONS.md distribution-architecture) and is DEFERRED; this only names
- * where a pulled artifact is read from.
+ * The RMD-GLOBAL learnings home (P32/W1-T145, layered knowledge): where the versioned,
+ * hash-pinned, cross-user artifact lives once pulled onto this machine (see `learnings.ts`'s
+ * `GlobalArtifact`/`loadGlobalArtifact` for the artifact shape and its integrity check). The PULL
+ * itself — opt-in POST up / hash-pinned artifact down, no persistent connection — is §6/Tier 3
+ * (DECISIONS.md distribution-architecture) and is DEFERRED; this only names where a pulled
+ * artifact is read from.
  *
- * Resolved via {@link learningsHomes}; default
- * `<config.root>/learnings-global` when unconfigured, overridable via
- * `config.learningsHomes.global` so same-machine cells (D-11) share it.
+ * Resolved via {@link learningsHomes}; default `<config.root>/learnings-global` when unconfigured,
+ * overridable via `config.learningsHomes.global` so same-machine cells (D-11) share it.
  */
 export function globalLearningsHome(config: Config): string {
   return learningsHomes(config).global;
@@ -618,19 +698,16 @@ export function globalArtifactPath(config: Config): string {
 }
 
 /**
- * Resolve the real `claude` binary in a NON-shell context.
- *
- * `execFileSync('which', ...)` runs the `which` binary directly, so it never
- * sees the interactive zsh `claude` function (FIELD FINDING 3) — it returns the
- * on-disk executable that a spawned Node process would actually exec.
+ * Resolve the real `claude` binary in a NON-shell context. `execFileSync('which', ...)` runs the
+ * `which` binary directly, so it never sees the interactive zsh `claude` function (FIELD FINDING
+ * 3) — it returns the on-disk executable that a spawned Node process would actually exec.
  *
  * W1-T2414: `which` fails with a bare `Command failed: which claude` — nothing about a config
  * path, a HOME redirect or a fixture — so a test whose fixture seeds the config somewhere
- * `configPath()` doesn't resolve reads, on CI, as a missing binary rather than the wrong seam
- * that reached for it. This rethrows naming the config path this call was reached from (from
- * `configPath()` itself, not a passed-in argument — it takes none, so there is nothing to spell
- * wrong) and WHICH branch of {@link loadConfig} entered it, via `reason`. Control flow, return
- * type and the eager call itself are unchanged — this only makes the failure self-explaining.
+ * `configPath()` doesn't resolve reads, on CI, as a missing binary rather than the wrong seam that
+ * reached for it. This rethrows naming the config path this call was reached from (from
+ * `configPath()` itself, not a passed-in argument) and WHICH branch of {@link loadConfig} entered
+ * it, via `reason`. Control flow, return type and the eager call itself are unchanged.
  */
 function resolveClaudeBin(reason: string): string {
   let out: string;
@@ -638,9 +715,7 @@ function resolveClaudeBin(reason: string): string {
     out = execFileSync("which", ["claude"], { encoding: "utf8" }).trim();
   } catch (err) {
     const cause = err instanceof Error ? err.message : String(err);
-    throw new Error(
-      `could not resolve the \`claude\` binary for config at ${configPath()} (${reason}): ${cause}`,
-    );
+    throw new Error(`could not resolve the \`claude\` binary for config at ${configPath()} (${reason}): ${cause}`);
   }
   if (!out) {
     throw new Error(`\`which claude\` returned nothing for config at ${configPath()} (${reason})`);
@@ -649,39 +724,34 @@ function resolveClaudeBin(reason: string): string {
 }
 
 /**
- * Load the instance config, creating it on first run with resolved defaults.
- * `root` defaults to `~/Remudero`. Returns fully-resolved absolute paths.
+ * Load the instance config, creating it on first run with resolved defaults. `root` defaults to
+ * `~/Remudero`. Returns fully-resolved absolute paths.
  *
- * EXCLUSIVE-CREATE DISCIPLINE (CodeQL js/file-system-race): the old shape here
- * was `existsSync(p) ? read : write` — a classic TOCTOU. Between the `existsSync`
- * check and the `writeFileSync`, a second process (two workers racing their first
- * `loadConfig()` call) could create the file first; this process's unconditional
- * write would then silently clobber it. `openSync(p, "wx")` folds the check and
- * the create into one atomic syscall: it succeeds only if THIS call created the
- * file, and fails with `EEXIST` if anything else already had — no window for a
- * second writer to win a race that this branch doesn't already know about.
- * `resolveClaudeBin()` (shells `which claude`) is deliberately called only
- * *after* the exclusive create wins, and not at all on the `EEXIST` fallback
- * path unless the existing config is missing the field — same laziness as
- * before (LEARNINGS.md lazy-config-in-ci: it must stay absent from CI runs
- * where the config file already exists and the binary doesn't).
+ * EXCLUSIVE-CREATE DISCIPLINE (CodeQL js/file-system-race): the old shape here was
+ * `existsSync(p) ? read : write` — a classic TOCTOU. Between the `existsSync` check and the
+ * `writeFileSync`, a second process (two workers racing their first `loadConfig()` call) could
+ * create the file first; this process's unconditional write would then silently clobber it.
+ * `openSync(p, "wx")` folds the check and the create into one atomic syscall: it succeeds only if
+ * THIS call created the file, and fails with `EEXIST` if anything else already had — no window
+ * for a second writer to win a race that this branch doesn't already know about.
+ * `resolveClaudeBin()` (shells `which claude`) is deliberately called only *after* the exclusive
+ * create wins, and not at all on the `EEXIST` fallback path unless the existing config is missing
+ * the field — same laziness as before (LEARNINGS.md lazy-config-in-ci: it must stay absent from
+ * CI runs where the config file already exists and the binary doesn't).
  *
- * CodeQL js/file-system-race, round 2 (alert #24): the first round fixed the
- * WRITE side (the `wx` create above) but left the `EEXIST` fallback reading
- * via `readFileSync(p, ...)` — a path-string operation CodeQL's dataflow
- * still correlates back to the `wx` attempt as "checked, then used by name."
- * Same remediation the query itself recommends for the write side applies
- * here too: read through the DESCRIPTOR, not the path. `openSync(p, "r")`
- * plus `readFileSync(fd, ...)` never hands a file-name string to the read
- * sink, so there is nothing left for the query to flag as a re-check.
+ * CodeQL js/file-system-race, round 2 (alert #24): the first round fixed the WRITE side (the `wx`
+ * create above) but left the `EEXIST` fallback reading via `readFileSync(p, ...)` — a path-string
+ * operation CodeQL's dataflow still correlates back to the `wx` attempt as "checked, then used by
+ * name." Same remediation the query itself recommends for the write side applies here too: read
+ * through the DESCRIPTOR, not the path. `openSync(p, "r")` plus `readFileSync(fd, ...)` never
+ * hands a file-name string to the read sink, so there is nothing left for the query to flag.
  *
- * CodeQL js/file-system-race, round 4 (alert #60): CodeQL still correlates the
- * `wx` attempt's `p` with the fallback read's `p`, even through the descriptor
- * indirection (a false positive — see fs-race-safe.ts's header comment). Rather
- * than open-code a fourth copy of this exact create-or-read shape, both the
- * `wx` attempt and the descriptor read now live in the shared
- * `createOrReadExclusive` helper (also used by serve.ts's `resolveServiceTokens`),
- * so a fifth round reuses tested code instead of a new copy.
+ * CodeQL js/file-system-race, round 4 (alert #60): CodeQL still correlates the `wx` attempt's `p`
+ * with the fallback read's `p`, even through the descriptor indirection (a false positive — see
+ * fs-race-safe.ts's header comment). Rather than open-code a fourth copy of this exact
+ * create-or-read shape, both the `wx` attempt and the descriptor read now live in the shared
+ * `createOrReadExclusive` helper (also used by serve.ts's `resolveServiceTokens`), so a fifth
+ * round reuses tested code instead of a new copy.
  */
 export function loadConfig(): Config {
   const p = configPath();

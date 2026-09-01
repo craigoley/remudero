@@ -34,7 +34,7 @@
     {
       "path": "docs/architecture.md",
       "title": "Architecture",
-      "summary": "Remudero is a headless fleet of Claude Code agents that carries plan items from",
+      "summary": "Remudero is a headless fleet of Claude Code and opt-in Codex agents that carries plan items from",
       "grepHint": "Architecture"
     },
     {

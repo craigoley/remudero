@@ -45,7 +45,10 @@ import { DEFAULT_TASK_CLASS } from "./task-class.js";
  * invariant: `judge.tier > max(worker.tier)` — it must ride strictly above
  * every worker it may be asked to supervise, so it can never be talked into
  * agreement by a worker riding its own tier or higher. A table with a `judge`
- * mount that fails this is REJECTED at load, same as the Architect's check.
+ * mount that fails this is REJECTED at load, same as the Architect's check. The synthesis rungs
+ * (W1-T2559 — retro/triage/inbox_draft) get their OWN `synthesis:` mount instead (config.ts's
+ * `synthesisModel`/`synthesisEffort`): they ship no code, so the Tier Invariant does not bind
+ * them, but each row is still REQUIRED and validated.
  */
 
 /** Base error for any structural or semantic mounts.yaml violation. */
@@ -76,6 +79,10 @@ export interface Mount {
   contextBudget: number;
 }
 
+/** The three synthesis rungs (W1-T2559), exempt from the Tier Invariant — see this file's header. */
+export const SYNTHESIS_ROLES = ["retro", "triage", "inbox_draft"] as const;
+export type SynthesisRole = (typeof SYNTHESIS_ROLES)[number];
+
 /** The whole parsed, validated routing table. */
 export interface Mounts {
   /** Model-tier ordering; higher rank = higher-thinking mount (config-maintained). */
@@ -86,6 +93,7 @@ export interface Mounts {
   architect: Mount;
   /** The Layer-2 flight-judge mount (W1-T21) — strictly above every worker below. */
   judge: Mount;
+  synthesis: Record<SynthesisRole, Mount>; // the three synthesis rungs' OWN mounts (W1-T2559) — never the Architect's; REQUIRED
   /** Worker routing: task_type → risk band → class (W1-T167) → mount. Every
    *  risk band carries at least a {@link DEFAULT_TASK_CLASS} row. */
   routes: Record<string, Record<string, Record<string, Mount>>>;
@@ -145,11 +153,9 @@ function parseMount(
 
 /**
  * Enforce the Tier Invariant (G-17) against a parsed table.
- *
- * @param opts.thinkingDefault the operator's `thinking_default` (per-instance
- *        config, §9). When given, the Architect's effort must also meet it. The
- *        plan-authorship floor ({@link ARCHITECT_EFFORT_FLOOR}) is enforced
- *        unconditionally.
+ * @param opts.thinkingDefault the operator's `thinking_default` (per-instance config, §9); when
+ *        given, the Architect's effort must also meet it. The plan-authorship floor
+ *        ({@link ARCHITECT_EFFORT_FLOOR}) is enforced unconditionally.
  */
 function enforceTierInvariant(m: Mounts, thinkingDefault?: string): void {
   const architectTier = m.tiers[m.architect.model];
@@ -165,16 +171,12 @@ function enforceTierInvariant(m: Mounts, thinkingDefault?: string): void {
         const workerTier = m.tiers[mount.model];
         if (workerTier >= architectTier) {
           throw new TierInvariantError(
-            `Tier Invariant (G-17) violated: worker routes.${type}.${risk}.${cls} rides '${mount.model}' ` +
-              `(tier ${workerTier}) which is not strictly below the Architect '${m.architect.model}' (tier ${architectTier}). ` +
-              `The Architect must ride a higher tier than every worker.`,
+            `Tier Invariant (G-17) violated: worker routes.${type}.${risk}.${cls} rides '${mount.model}' (tier ${workerTier}) which is not strictly below the Architect '${m.architect.model}' (tier ${architectTier}). The Architect must ride a higher tier than every worker.`,
           );
         }
         if (workerTier >= judgeTier) {
           throw new TierInvariantError(
-            `Tier Invariant (G-17) violated: worker routes.${type}.${risk}.${cls} rides '${mount.model}' ` +
-              `(tier ${workerTier}) which is not strictly below the flight judge '${m.judge.model}' (tier ${judgeTier}). ` +
-              `The Layer-2 judge must ride a higher tier than every worker it supervises.`,
+            `Tier Invariant (G-17) violated: worker routes.${type}.${risk}.${cls} rides '${mount.model}' (tier ${workerTier}) which is not strictly below the flight judge '${m.judge.model}' (tier ${judgeTier}). The Layer-2 judge must ride a higher tier than every worker it supervises.`,
           );
         }
       }
@@ -188,8 +190,7 @@ function enforceTierInvariant(m: Mounts, thinkingDefault?: string): void {
   }
   if (architectEffort < floor) {
     throw new TierInvariantError(
-      `Tier Invariant (G-17) violated: Architect effort '${m.architect.effort}' is below the ` +
-        `plan-authorship floor '${ARCHITECT_EFFORT_FLOOR}'.`,
+      `Tier Invariant (G-17) violated: Architect effort '${m.architect.effort}' is below the plan-authorship floor '${ARCHITECT_EFFORT_FLOOR}'.`,
     );
   }
   // architect.effort ≥ thinking_default (when supplied by the caller).
@@ -200,23 +201,19 @@ function enforceTierInvariant(m: Mounts, thinkingDefault?: string): void {
     }
     if (architectEffort < wanted) {
       throw new TierInvariantError(
-        `Tier Invariant (G-17) violated: Architect effort '${m.architect.effort}' is below the ` +
-          `operator thinking_default '${thinkingDefault}'.`,
+        `Tier Invariant (G-17) violated: Architect effort '${m.architect.effort}' is below the operator thinking_default '${thinkingDefault}'.`,
       );
     }
   }
 }
 
 /**
- * Validate one `routes.<type>.<risk>` cell: a mapping of class → {@link Mount}
- * (W1-T167). MUST define a {@link DEFAULT_TASK_CLASS} ("src") row — the
- * fallback {@link resolveMountForClass} takes when a task's derived class has
- * no row of its own, so a table missing it could resolve nothing to fall back
- * to. A legacy FLAT mount cell (the pre-W1-T167 shape — `model`/`effort` keys
- * directly under the risk band) is REJECTED here, not silently upgraded: the
- * `model` field of such a cell fails {@link parseMount}'s own object check,
- * naming the offending path, so a stale hand-edit fails loud at load rather
- * than resolving into a nonsense class named "model".
+ * Validate one `routes.<type>.<risk>` cell: a mapping of class → {@link Mount} (W1-T167). MUST
+ * define a {@link DEFAULT_TASK_CLASS} ("src") row — the fallback {@link resolveMountForClass}
+ * takes when a task's derived class has no row of its own. A legacy FLAT mount cell (the
+ * pre-W1-T167 shape — `model`/`effort` keys directly under the risk band) is REJECTED here, not
+ * silently upgraded: its `model` field fails {@link parseMount}'s own object check, naming the
+ * offending path, rather than resolving into a nonsense class named "model".
  */
 function parseRiskCell(
   raw: unknown,
@@ -233,8 +230,7 @@ function parseRiskCell(
   }
   if (!(DEFAULT_TASK_CLASS in out)) {
     throw new MountsError(
-      `'${where}' must define a '${DEFAULT_TASK_CLASS}' class row — the fallback every other ` +
-        `class' miss resolves to (W1-T167); have classes: ${classes.join(", ")}.`,
+      `'${where}' must define a '${DEFAULT_TASK_CLASS}' class row — the fallback every other class' miss resolves to (W1-T167); have classes: ${classes.join(", ")}.`,
     );
   }
   return out;
@@ -247,9 +243,8 @@ export interface MountsOptions {
 }
 
 /**
- * Validate a raw (parsed-YAML) value into a {@link Mounts}, enforcing the Tier
- * Invariant. Throws {@link MountsError} / {@link TierInvariantError} on any
- * structural or semantic violation.
+ * Validate a raw (parsed-YAML) value into a {@link Mounts}, enforcing the Tier Invariant. Throws
+ * {@link MountsError} / {@link TierInvariantError} on any structural or semantic violation.
  */
 export function validateMounts(raw: unknown, opts: MountsOptions = {}): Mounts {
   if (!isObject(raw)) throw new MountsError("mounts.yaml must be a mapping.");
@@ -257,6 +252,14 @@ export function validateMounts(raw: unknown, opts: MountsOptions = {}): Mounts {
   const efforts = parseOrdering(raw.efforts, "efforts");
   const architect = parseMount(raw.architect, "architect", tiers, efforts);
   const judge = parseMount(raw.judge, "judge", tiers, efforts);
+
+  // W1-T2559: synthesis rungs — each REQUIRED, validated like architect/judge, never a fallback.
+  if (!isObject(raw.synthesis)) throw new MountsError(`'synthesis' must be a mapping of role → mount (${SYNTHESIS_ROLES.join(", ")}).`);
+  const synthesis = {} as Record<SynthesisRole, Mount>;
+  for (const role of SYNTHESIS_ROLES) {
+    if (!(role in raw.synthesis)) throw new MountsError(`'synthesis.${role}' is required.`);
+    synthesis[role] = parseMount(raw.synthesis[role], `synthesis.${role}`, tiers, efforts);
+  }
 
   if (!isObject(raw.routes)) throw new MountsError("'routes' must be a mapping of task_type → risk → class → mount.");
   const routes: Record<string, Record<string, Record<string, Mount>>> = {};
@@ -273,7 +276,7 @@ export function validateMounts(raw: unknown, opts: MountsOptions = {}): Mounts {
     }
   }
 
-  const mounts: Mounts = { tiers, efforts, architect, judge, routes };
+  const mounts: Mounts = { tiers, efforts, architect, judge, synthesis, routes };
   enforceTierInvariant(mounts, opts.thinkingDefault);
   return mounts;
 }
@@ -290,13 +293,11 @@ export function loadMounts(path: string, opts: MountsOptions = {}): Mounts {
 }
 
 /**
- * Resolve the mount for a (task_type, risk) at the {@link DEFAULT_TASK_CLASS}
- * — the pre-W1-T167 call shape, still used by every caller that has no class
- * to route on (the fresh reviewer, the fix rung, the Architect/judge spawns).
- * Throws {@link MountsError} when the table has no cell for that key (routing
- * is a policy, so a miss is a config gap, not a silent fallback). Equivalent to
- * `resolveMountForClass(m, taskType, risk, DEFAULT_TASK_CLASS).mount`, which
- * can never itself fall back (the default class IS the fallback target).
+ * Resolve the mount for a (task_type, risk) at the {@link DEFAULT_TASK_CLASS} — the pre-W1-T167
+ * call shape, still used by every caller that has no class to route on (the fresh reviewer, the
+ * fix rung, the Architect/judge spawns). Throws {@link MountsError} when the table has no cell for
+ * that key (a miss is a config gap, not a silent fallback). Equivalent to
+ * `resolveMountForClass(m, taskType, risk, DEFAULT_TASK_CLASS).mount`.
  */
 export function resolveMount(m: Mounts, taskType: string, risk: string): Mount {
   return resolveMountForClass(m, taskType, risk, DEFAULT_TASK_CLASS).mount;
@@ -340,8 +341,7 @@ export function resolveMountForClass(m: Mounts, taskType: string, risk: string, 
     // this row) — guarded anyway so a hand-built Mounts (a test fixture bypassing
     // validateMounts) fails loud instead of returning undefined.
     throw new MountsError(
-      `no route for task_type '${taskType}' at risk '${risk}' class '${taskClass}', and no ` +
-        `'${DEFAULT_TASK_CLASS}' fallback either (have: ${Object.keys(byClass).join(", ")}).`,
+      `no route for task_type '${taskType}' at risk '${risk}' class '${taskClass}', and no '${DEFAULT_TASK_CLASS}' fallback either (have: ${Object.keys(byClass).join(", ")}).`,
     );
   }
   return { mount: fallback, requestedClass: taskClass, resolvedClass: DEFAULT_TASK_CLASS, fellBackToDefault: true };

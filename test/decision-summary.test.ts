@@ -184,6 +184,11 @@ function goodMounts() {
     efforts: { low: 1, medium: 2, high: 3 },
     architect: { model: "opus", effort: "high", max_turns: 60, context_budget: 180000 },
     judge: { model: "opus", effort: "high", max_turns: 60, context_budget: 150000 },
+    synthesis: {
+      retro: { model: "opus", effort: "high", max_turns: 60, context_budget: 180000 },
+      triage: { model: "opus", effort: "low", max_turns: 60, context_budget: 180000 },
+      inbox_draft: { model: "opus", effort: "high", max_turns: 60, context_budget: 180000 },
+    },
     routes: {
       implement: {
         low: { src: { model: "sonnet", effort: "medium", max_turns: 30, context_budget: 120000 } },
