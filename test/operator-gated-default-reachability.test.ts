@@ -725,11 +725,16 @@ test("real tree: armIfVerdictPermits/withdrawArmIfVerdictRefuses call sites that
   // ahead of both) and they shifted the same way, to :5945/:6006 — the SECOND time this exact
   // re-derivation has been needed, which is that note's own point: a line number here is a QUERY
   // over the current tree, and any diff inserting above these witnesses moves them. The THIRD
-  // witness (arm-ordering.test.ts) is untouched by either edit and unmoved.
+  // witness (arm-ordering.test.ts) is untouched by any of these edits and remains unmoved.
+  // THIRD DRIFT (2026-09-01): W1-T2561's daemon draft cap (#3491) edited test/run-task.test.ts
+  // above both witnesses and they shifted again, :5945/:6006 -> :5959/:6020. Re-derived from
+  // this suite's own reported set and confirmed at the source: both new lines are the
+  // `const reviewOutcome = armIfVerdictPermits(` call this census exists to catch. Three drifts
+  // from three unrelated diffs is the pattern, not an accident.
   const expectedKeys = [
     "armIfVerdictPermits:test/arm-ordering.test.ts:63:ledgerLines",
-    "armIfVerdictPermits:test/run-task.test.ts:5945:ledgerLines",
-    "armIfVerdictPermits:test/run-task.test.ts:6006:ledgerLines",
+    "armIfVerdictPermits:test/run-task.test.ts:5959:ledgerLines",
+    "armIfVerdictPermits:test/run-task.test.ts:6020:ledgerLines",
   ];
   for (const key of expectedKeys) {
     assert.ok(
