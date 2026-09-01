@@ -164,7 +164,7 @@ test("PROPERTY src/lib/status.ts — the narrowing point readLedgerLines is defi
 // declaring comment sweep.ts's peers already carry, by hand, at the two sites the regex can't
 // reach, and pins here that doing so touched nothing else.
 
-test("PROPERTY sweep.ts's two value-bound readLedger call sites declare the live intent, not union", () => {
+test("PROPERTY sweep.ts's three value-bound readLedger call sites declare the live intent, not union", () => {
   const text = readFileSync(join(REPO_ROOT, "src/lib/sweep.ts"), "utf8");
   const lines = text.split("\n");
   const bindingLine = "  const readLedger = deps.readLedger ?? readLedgerLines;";
@@ -173,9 +173,11 @@ test("PROPERTY sweep.ts's two value-bound readLedger call sites declare the live
     .filter((i) => i >= 0);
   assert.equal(
     bindingLineIndexes.length,
-    2,
-    "sweep.ts must still bind readLedgerLines through the alias at exactly its two known sites " +
-      "(runSweep and runPostFixReverification) — a different count means this pin is stale",
+    3,
+    "sweep.ts must still bind readLedgerLines through the alias at exactly its three known sites " +
+      "(runSweep, runSweepLightPass and runPostFixReverification) — a different count means this " +
+      "pin is stale. W1-T2583 added the light-pass admission fold; the pin is a STALENESS ALARM, so " +
+      "raising it is the sanctioned response to a real new site, never to a site that skipped its marker",
   );
   for (const i of bindingLineIndexes) {
     const declared = lines[i - 1].match(/ledger-read-intent:\s*(live|union)\b/);
@@ -233,7 +235,13 @@ test("PROPERTY sweep.ts's new markers are documentation only — nothing paces, 
   const markerLines = lines
     .map((line, i) => (line.includes("ledger-read-intent: live") && line.includes("this fold reads") ? i : -1))
     .filter((i) => i >= 0);
-  assert.equal(markerLines.length, 2, "exactly two documentary marker lines were added by this task");
+  assert.equal(
+    markerLines.length,
+    3,
+    "three documentary marker lines now exist — the two this task added plus the light-pass " +
+      "admission fold W1-T2583 added. Both counts in this file pin the SAME population, so a new " +
+      "site must raise both or one alarm silently stops guarding",
+  );
   for (const markerLine of markerLines) {
     let start = markerLine;
     while (lines[start - 1]?.trim().startsWith("//")) start--;
