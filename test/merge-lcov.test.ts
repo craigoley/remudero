@@ -1,17 +1,17 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
 // @ts-expect-error The production coverage merger is an executable .mjs module outside tsconfig.
-import { renderCoverageSummary } from '../scripts/merge-lcov.mjs';
+import { renderCoverageSummary } from '../scripts/coverage-merge-ratchet.mjs';
 
 function runMerger(output: string, ...rawDirectories: string[]): string {
   return execFileSync(
     process.execPath,
-    ['--expose-internals', 'scripts/merge-lcov.mjs', '--output', output, ...rawDirectories],
+    ['--expose-internals', 'scripts/coverage-merge-ratchet.mjs', '--output', output, ...rawDirectories],
     { cwd: process.cwd(), encoding: 'utf8', stdio: 'pipe' },
   );
 }
@@ -19,9 +19,17 @@ function runMerger(output: string, ...rawDirectories: string[]): string {
 function runCompactor(output: string, ...rawDirectories: string[]): string {
   return execFileSync(
     process.execPath,
-    ['--expose-internals', 'scripts/merge-lcov.mjs', '--compact-output', output, ...rawDirectories],
+    ['--expose-internals', 'scripts/coverage-merge-ratchet.mjs', '--compact-output', output, ...rawDirectories],
     { cwd: process.cwd(), encoding: 'utf8', stdio: 'pipe' },
   );
+}
+
+function compactBundles(directory: string): Array<Record<string, unknown>> {
+  const names = readdirSync(directory)
+    .filter((name) => /^coverage-bundle-\d+-\d{13}-\d+\.json$/.test(name))
+    .sort();
+  assert.ok(names.length > 0, `expected compact coverage bundles in ${directory}`);
+  return names.map((name) => JSON.parse(readFileSync(join(directory, name), 'utf8')) as Record<string, unknown>);
 }
 
 function sourceRecord(lcov: string, suffix: string): string {
@@ -96,7 +104,7 @@ test('renderCoverageSummary emits Node-compatible LCOV totals from one merged su
   assert.match(rendered, /^LH:2$/m);
 });
 
-test('merge-lcov CLI merges raw V8 ranges before assigning LCOV branch indexes', () => {
+test('coverage merge CLI merges raw V8 ranges before assigning LCOV branch indexes', () => {
   const dir = mkdtempSync(join(tmpdir(), 'merge-node-coverage-'));
   const leftRaw = join(dir, 'raw-left');
   const rightRaw = join(dir, 'raw-right');
@@ -143,13 +151,10 @@ test('merge-lcov CLI merges raw V8 ranges before assigning LCOV branch indexes',
     stdio: 'pipe',
   });
 
-  const leftCompactFile = join(leftCompact, 'coverage-1-0000000000000-0.json');
-  const rightCompactFile = join(rightCompact, 'coverage-2-0000000000000-0.json');
-  const bothCompactFile = join(bothCompact, 'coverage-3-0000000000000-0.json');
-  runCompactor(leftCompactFile, leftRaw);
-  runCompactor(rightCompactFile, rightRaw);
-  runCompactor(bothCompactFile, bothRaw);
-  assert.ok(Array.isArray(JSON.parse(readFileSync(leftCompactFile, 'utf8')).result));
+  runCompactor(leftCompact, leftRaw);
+  runCompactor(rightCompact, rightRaw);
+  runCompactor(bothCompact, bothRaw);
+  assert.ok(compactBundles(leftCompact).some((bundle) => Array.isArray(bundle.reports)));
 
   runMerger(leftLcov, leftCompact);
   runMerger(rightLcov, rightCompact);
@@ -209,24 +214,60 @@ test('compact shard reports defer source-map translation and preserve every LCOV
   runSourceMappedCoverage(leftRaw, 'provider selector uses the subscription');
   runSourceMappedCoverage(rightRaw, 'provider selector excludes an exhausted');
 
-  const leftCompactFile = join(leftCompact, 'coverage-1-0000000000000-0.json');
-  const rightCompactFile = join(rightCompact, 'coverage-2-0000000000000-0.json');
   runMerger(directLcov, leftRaw, rightRaw);
-  runCompactor(leftCompactFile, leftRaw);
-  runCompactor(rightCompactFile, rightRaw);
+  runCompactor(leftCompact, leftRaw);
+  runCompactor(rightCompact, rightRaw);
   runMerger(compactLcov, leftCompact, rightCompact);
 
-  const compactReport = JSON.parse(readFileSync(leftCompactFile, 'utf8')) as {
-    'source-map-cache'?: Record<string, unknown>;
-  };
-  assert.ok(Object.keys(compactReport['source-map-cache'] ?? {}).length > 0);
+  assert.ok(compactBundles(leftCompact).some((bundle) => {
+    const sourceMaps = bundle.sourceMaps as unknown[] | undefined;
+    return (sourceMaps?.length ?? 0) > 0;
+  }));
   assert.deepEqual(
     summaryTotals(readFileSync(compactLcov, 'utf8')),
     summaryTotals(readFileSync(directLcov, 'utf8')),
   );
 });
 
-test('merge-lcov CLI refuses an empty raw shard instead of producing a vacuous report', () => {
+test('compact shard reports retain distinct source-map topologies for one script URL', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'merge-node-source-map-topologies-'));
+  const raw = join(dir, 'raw');
+  const compact = join(dir, 'compact');
+  const url = 'file:///repo/src/same-url.ts';
+  mkdirSync(raw);
+  mkdirSync(compact);
+  const result = [{
+    scriptId: '1',
+    url,
+    functions: [{
+      functionName: '',
+      ranges: [{ startOffset: 0, endOffset: 2, count: 1 }],
+      isBlockCoverage: true,
+    }],
+  }];
+  writeFileSync(
+    join(raw, 'coverage-1-0000000000000-0.json'),
+    JSON.stringify({ result, 'source-map-cache': { [url]: { marker: 'left' } } }),
+  );
+  writeFileSync(
+    join(raw, 'coverage-2-0000000000000-0.json'),
+    JSON.stringify({ result, 'source-map-cache': { [url]: { marker: 'right' } } }),
+  );
+
+  runCompactor(compact, raw);
+  const [bundle] = compactBundles(compact) as Array<{
+    sourceMaps: Array<{ marker: string }>;
+    reports: Array<{ sourceMapRefs: Record<string, number> }>;
+  }>;
+  assert.ok(bundle);
+  assert.equal(bundle.reports.length, 2);
+  assert.deepEqual(
+    bundle.reports.map((report) => bundle.sourceMaps[report.sourceMapRefs[url]].marker).sort(),
+    ['left', 'right'],
+  );
+});
+
+test('coverage merge CLI refuses an empty raw shard instead of producing a vacuous report', () => {
   const dir = mkdtempSync(join(tmpdir(), 'merge-node-coverage-'));
   const empty = join(dir, 'empty');
   const output = join(dir, 'merged.info');

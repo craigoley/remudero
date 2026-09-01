@@ -35,14 +35,14 @@ test('ci sharding: all four shards run through the retry harness and collapse to
   assert.match(runBodies('ci-required'), /exit 1/);
 });
 
-test('coverage sharding: four complete raw V8 artifacts are required before Node-range merge and both gates', () => {
+test('coverage sharding: four lossless V8 bundles are required before Node-range merge and both gates', () => {
   const shards = workflow.jobs['coverage-ratchet'];
   assert.deepEqual(shards.strategy?.matrix?.shard, [1, 2, 3, 4]);
   assert.equal(shards.strategy?.['fail-fast'], false);
   assert.equal(shards.name, 'coverage-shard (${{ matrix.shard }}/4)');
   assert.match(runBodies('coverage-ratchet'), /--test-shard=\$\{\{ matrix\.shard \}\}\/4/);
   assert.match(runBodies('coverage-ratchet'), /NODE_V8_COVERAGE=coverage\/raw node/);
-  assert.match(runBodies('coverage-ratchet'), /scripts\/merge-lcov\.mjs --compact-output coverage\/compact\/coverage-/);
+  assert.match(runBodies('coverage-ratchet'), /scripts\/coverage-merge-ratchet\.mjs --compact-output coverage\/compact/);
   assert.doesNotMatch(runBodies('coverage-ratchet'), /cp coverage\/raw\/coverage-\*\.json/);
   const upload = shards.steps?.find((step) => step.name === 'Upload coverage shard');
   assert.match(upload?.uses ?? '', /^actions\/upload-artifact@[0-9a-f]{40}$/);
@@ -55,8 +55,8 @@ test('coverage sharding: four complete raw V8 artifacts are required before Node
   const download = required.steps?.find((step) => step.name === 'Download coverage shards');
   assert.match(download?.uses ?? '', /^actions\/download-artifact@[0-9a-f]{40}$/);
   const runs = runBodies('coverage-ratchet-required');
-  assert.match(runs, /expected raw V8 coverage for shard/);
-  assert.match(runs, /node --expose-internals scripts\/merge-lcov\.mjs --output coverage\/lcov\.info/);
+  assert.match(runs, /expected compact V8 coverage for shard/);
+  assert.match(runs, /node --expose-internals scripts\/coverage-merge-ratchet\.mjs --output coverage\/lcov\.info/);
   assert.match(runs, /scripts\/diff-coverage\.mjs --lcov coverage\/lcov\.info/);
   assert.match(runs, /scripts\/coverage-ratchet\.mjs --lcov coverage\/lcov\.info/);
 });

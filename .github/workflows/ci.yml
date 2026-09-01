@@ -509,12 +509,12 @@ jobs:
           mkdir -p coverage-artifact
           if [ -s coverage/lcov.info ]; then
             # The raw process reports were 514 MB for ONE shard on this PR's first live run.
-            # Merge their generated V8 ranges locally, retain one source-map cache, and upload one
-            # compact report. The aggregator maps and merges those four reports before assigning
-            # LCOV line/branch IDs, preserving Node's own source-line hit accounting.
+            # Deduplicate repeated source maps locally while retaining every process boundary and
+            # V8 range. The aggregator reconstructs those reports, then pinned Node maps and merges
+            # all four bundles before assigning LCOV line/branch IDs.
             mkdir -p coverage/compact
             mkdir -p coverage-artifact/raw
-            node --expose-internals scripts/merge-lcov.mjs --compact-output coverage/compact/coverage-${{ matrix.shard }}-0000000000000-0.json coverage/raw
+            node --expose-internals scripts/coverage-merge-ratchet.mjs --compact-output coverage/compact coverage/raw
             cp coverage/lcov.info coverage-artifact/lcov.info
             cp coverage/compact/coverage-*.json coverage-artifact/raw/
           else
@@ -583,13 +583,13 @@ jobs:
           fi
           for SHARD in 1 2 3 4; do
             RAW_DIR="coverage-shards/coverage-shard-${SHARD}/raw"
-            if ! find "$RAW_DIR" -maxdepth 1 -type f -name 'coverage-*.json' -print -quit 2>/dev/null | grep -q .; then
-              echo "coverage-ratchet: expected raw V8 coverage for shard ${SHARD}; refusing a partial merge."
+            if ! find "$RAW_DIR" -maxdepth 1 -type f -name 'coverage-bundle-*.json' -print -quit 2>/dev/null | grep -q .; then
+              echo "coverage-ratchet: expected compact V8 coverage for shard ${SHARD}; refusing a partial merge."
               exit 1
             fi
           done
           mkdir -p coverage
-          node --expose-internals scripts/merge-lcov.mjs --output coverage/lcov.info \
+          node --expose-internals scripts/coverage-merge-ratchet.mjs --output coverage/lcov.info \
             coverage-shards/coverage-shard-1/raw coverage-shards/coverage-shard-2/raw \
             coverage-shards/coverage-shard-3/raw coverage-shards/coverage-shard-4/raw
       # ORDER IS LOAD-BEARING (2026-08-13): diff-coverage runs BEFORE the aggregate ratchet.
