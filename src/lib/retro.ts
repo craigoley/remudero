@@ -2787,6 +2787,134 @@ export function routeFollowupsToRegistry(harvest: FollowupHarvest, deps: RouteFo
   return outcomes;
 }
 
+// ── Follow-up retirement (W1-T2563) ─────────────────────────────────────────────────────────
+//
+// `routeFollowupsToRegistry` above appends every routable candidate; its own idempotence check
+// (`existingIds`) refuses to re-add one already present — correct, and NOT this gap. THE GAP IS
+// THAT NOTHING EVER REMOVES ONE. MEASURED 2026-09-01: the registry held 317 proposals, every one
+// `followup:`-prefixed, against 16 two days earlier that were all `board-review:` — the registry
+// only grows.
+//
+// W1-T2451 solved the SAME shape for board-review findings by keying retirement off a referent
+// (`Proposal.originatingItemId`, a `BoardItem.id`) whose live/resolved state a batched read
+// supplies. A routed follow-up CANNOT be retired the same way: `evidenceAnchors: []` is
+// permanent by design (a `FollowupEntry` is free prose with no git-grep-able pattern —
+// synthesizing one would fabricate a claim nobody asserted, see `routeFollowupsToRegistry`'s own
+// doc), so an anchor-drift check would read vacuously true for every followup and retire the
+// whole population on its first pass.
+//
+// THE REFERENT THIS FAMILY DOES CARRY is the originating TASK (`FollowupCandidate.taskId`) —
+// stated, verbatim, in the minted proposal's own summary (`... — from <taskId> (run ...)`),
+// never as a structured field: `Proposal.originatingItemId` is board-review's OWN referent
+// vocabulary (inbox.ts, `UnderstoodRequest.threadId`'s doc: "reusing the field would wire this
+// proposal into the board-referent-retirement mechanism for a referent it can never resolve")
+// and a follow-up's taskId is not a `BoardItem.id`. {@link followupOriginatingTaskId} recovers
+// it by PARSING THE SUMMARY AT READ TIME — the exact discipline W1-T2460's own
+// `deriveLegacyReferent` established for board-review ids minted before a structured field
+// existed — so this needs no registry migration and no change to `routeFollowupsToRegistry`'s
+// own mint shape.
+//
+// THE SIGNAL: the originating task has MERGED. Chosen because it is the one candidate already
+// AVAILABLE without new machinery — not because it is reliable. IT IS NOT: a merged task can
+// leave real follow-up work undone, so this signal retires some LIVE candidates alongside
+// genuinely settled ones. This task's own rationale weighed the other two candidates and found
+// each weaker for a first cut — title-supersession needs the paraphrase-blind match W1-T2455
+// measured at 3 of 32 (too weak to lean on as though it were strong), and bare age states only
+// "nothing has picked this up", never "resolved". EVERY RETIREMENT OUTCOME NAMES THIS RISK
+// EXPLICITLY in its own `reason` — never a silent "this one is definitely done" — because every
+// candidate signal here has a false-retirement cost and a mechanism that claims none has not
+// measured it.
+
+/**
+ * The ONE batched read this retirement pass needs: which task ids (of the routed follow-ups'
+ * OWN `taskId` referents) have merged, read ONCE per pass — never a read per proposal, mirroring
+ * inbox.ts's `BoardReferentRead` (W1-T2451). `"unreadable"` means the whole batched read failed
+ * (GitHub/ledger unavailable): every followup proposal is left exactly as it is — cannot-observe
+ * means WAIT (W1-T130), never a guessed retirement.
+ */
+export type FollowupReferentRead = { kind: "ok"; merged: ReadonlySet<string> } | { kind: "unreadable" };
+
+/**
+ * Recover a routed follow-up's originating task id from its OWN minted summary —
+ * `routeFollowupsToRegistry`'s `... — from <taskId> (run ...)` shape, parsed at read time rather
+ * than stored as a structured field (see this section's own header doc for why). Returns
+ * `undefined` for anything that is not a `followup:`-prefixed proposal, or whose summary does
+ * not match the shape this module itself mints (a hand-edited or foreign entry) — a caller must
+ * never guess a referent for either, so such a proposal is simply left alone by
+ * {@link retireSettledFollowups}, mirroring how a board-review id `deriveLegacyReferent` cannot
+ * parse falls through to "live" rather than a guessed retirement.
+ */
+export function followupOriginatingTaskId(proposal: Proposal): string | undefined {
+  if (!proposal.id.startsWith("followup:")) return undefined;
+  return /— from (\S+) \(run /.exec(proposal.summary)?.[1];
+}
+
+/** One proposal this pass actually retired, naming BOTH what settled it and the false-positive
+ *  risk that decision carries — acceptance: "the retirement names which still-live candidates it
+ *  wrongly removes, rather than claiming none". */
+export interface FollowupRetireOutcome {
+  proposalId: string;
+  taskId: string;
+  reason: string;
+}
+
+export interface RetireFollowupsDeps {
+  registryPath: string;
+  /** Injectable — production takes {@link updateProposalRegistry}, mirroring
+   *  {@link RouteFollowupsDeps.updateRegistry}'s own test seam. */
+  updateRegistry?: (
+    registryPath: string,
+    update: (current: Proposal[]) => Proposal[] | null,
+    opts?: UpdateProposalRegistryOpts,
+  ) => Proposal[] | null;
+}
+
+/**
+ * Retire every routed follow-up whose originating task has merged — the missing counterpart to
+ * `routeFollowupsToRegistry`'s append-only write, closing this task's own gap ("nothing anywhere
+ * removes a followup-prefixed proposal"). Unlike board-review's referent retirement
+ * (`classifyProposal`, inbox.ts), which keeps a resolved proposal in the registry forever as a
+ * record and only changes how it RENDERS, this ACTUALLY REMOVES the entry from the registry
+ * through the single writer — the growth this task measures (317 proposals, all followup-
+ * prefixed) is a registry-SIZE problem, not only a rendering one, so the fix has to shrink it.
+ *
+ * `read.kind === "unreadable"` retires nothing and returns `[]` — cannot-observe means WAIT, the
+ * same discipline inbox.ts's own board-referent resolution applies when its batched read fails.
+ *
+ * ONE registry write for the whole pass (never one call per proposal), mirroring
+ * `routeFollowupsToRegistry`'s own single-write discipline above.
+ */
+export function retireSettledFollowups(read: FollowupReferentRead, deps: RetireFollowupsDeps): FollowupRetireOutcome[] {
+  if (read.kind === "unreadable") return [];
+
+  const updateRegistry = deps.updateRegistry ?? updateProposalRegistry;
+  let outcomes: FollowupRetireOutcome[] = [];
+
+  updateRegistry(deps.registryPath, (current) => {
+    const settled: FollowupRetireOutcome[] = [];
+    for (const p of current) {
+      const taskId = followupOriginatingTaskId(p);
+      if (taskId === undefined || !read.merged.has(taskId)) continue;
+      settled.push({
+        proposalId: p.id,
+        taskId,
+        reason:
+          `${p.id}'s originating task (${taskId}) has merged, so this routed follow-up is retired ` +
+          `and removed from the registry. KNOWN FALSE-POSITIVE RISK, NAMED RATHER THAN CLAIMED ` +
+          `AWAY: a task can merge while leaving real follow-up work undone — this signal cannot ` +
+          `tell that still-live candidate apart from a genuinely settled one, and wrongly retires ` +
+          `it right alongside every proposal it retires correctly.`,
+      });
+    }
+    outcomes = settled;
+    if (settled.length === 0) return null;
+    const retiredIds = new Set(settled.map((o) => o.proposalId));
+    return current.filter((p) => !retiredIds.has(p.id));
+  });
+
+  return outcomes;
+}
+
 // ── Phrasing — the ONLY step where an LLM enters (W1-T87/P13) ────────────
 
 /**
