@@ -12,6 +12,7 @@ import { loadPlanAtRef, visibleCriteria, type AcceptanceCriterion } from "./plan
 import { scanUnreachedExports, type UnreachedExport } from "./reachability.js";
 import { loadDefaultPolicy } from "./policy.js";
 import { readLedgerLines } from "./status.js";
+import { GENERATED_LEDGER_CLASSES, isCompanionPath } from "./task-linter.js";
 import { ghJson } from "./worker.js";
 
 /**
@@ -7151,8 +7152,22 @@ const STATED_REASON_RE = /\bno\s+docs?\s+(?:change|update)\b[^.\n]{0,6}(?:becaus
  */
 export function checkDocsAwareness(diff: string, report?: string): RubricItemResult {
   const files = changedFiles(walkDiff(diff));
-  const surfaceTouched = files.filter((f) => USER_VISIBLE_SURFACE_RE.test(f));
+  const rawSurfaceTouched = files.filter((f) => USER_VISIBLE_SURFACE_RE.test(f));
+  // W1-T2547: a GENERATED LEDGER (e.g. scripts/source-size-baseline.json) matches the instrument
+  // surface by filename alone, same as it does for {@link detectInstrumentEntanglement}, but it
+  // records a measurement and has no user-visible surface to document — see
+  // task-linter.ts's GENERATED_LEDGER_CLASSES for the shared table and full reasoning. Subtracted
+  // here ONLY; a diff that also touches a REAL surface still reports on that surface below.
+  const ledgerTouched = rawSurfaceTouched.filter((f) => isCompanionPath(f, GENERATED_LEDGER_CLASSES));
+  const surfaceTouched = rawSurfaceTouched.filter((f) => !isCompanionPath(f, GENERATED_LEDGER_CLASSES));
   if (surfaceTouched.length === 0) {
+    if (ledgerTouched.length > 0) {
+      return {
+        key: "docs-awareness",
+        pass: true,
+        reason: `generated size ledger only (${ledgerTouched.join(", ")}) — not a user-visible surface`,
+      };
+    }
     return { key: "docs-awareness", pass: true, reason: "no CLI/config/gate/verdict surface changed" };
   }
   if (files.some(isDocsPath)) {

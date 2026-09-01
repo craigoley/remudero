@@ -205,6 +205,32 @@ export function isCompanionPath(
 ): boolean {
   return classes.some((c) => c.pathPattern.test(path));
 }
+
+/**
+ * W1-T2547 — GENERATED LEDGER path classes: a path whose whole content is a recorded
+ * measurement (a per-file size table, a knowledge-budget derivation) rather than a user-visible
+ * surface. Consumed by {@link isCompanionPath} — the SAME injected-table mechanism W1-T2543's own
+ * test already celebrates ("the discount is a TABLE, so a later path class needs no change to the
+ * counting function" — test/a-suite-is-not-a-second-concern.test.ts) — but as its OWN table, not a
+ * new row on {@link COMPANION_PATH_CLASSES}: `subsystemsOf`'s default classes stay untouched, so a
+ * size ledger keeps counting as its own Rule 19 concern exactly as pinned ("the suite no longer
+ * counts; the baseline still does", same suite). This table answers a DIFFERENT question for a
+ * DIFFERENT consumer — `checkDocsAwareness` (src/lib/review.ts): whether a path is a user-visible
+ * SURFACE a missing `docs/` update should be caught on. A generated ledger is neither.
+ *
+ * NARROW ON PURPOSE, AND CITED RATHER THAN INVENTED. Exactly the two paths this repo already
+ * treats as ledgers-not-floors elsewhere — review.ts's `ENTANGLEMENT_EXEMPT_INSTRUMENTS` (W1-T2526
+ * / W1-T941), reasoned there as recording "how long a file is" / a derivation, and grading no
+ * falsifier. A coverage/mutation/learnings-budget baseline is NOT in this table: it still grades a
+ * falsifier (lower it and a weakened suite passes), so it stays on the user-visible surface exactly
+ * as before this task.
+ */
+export const GENERATED_LEDGER_CLASSES: ReadonlyArray<CompanionPathClass> = [
+  {
+    tag: "generated-ledger",
+    pathPattern: /^scripts\/(?:source-size|knowledge-budget)-baseline\.json$/,
+  },
+];
 /** True iff `path` matches BOTH the path prefix and the extension of some row in
  *  `classes` — i.e. it's a discounted data/config artifact, not a code subsystem. */
 export function isDataArtifact(
