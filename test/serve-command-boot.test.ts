@@ -206,7 +206,14 @@ function fakeWorkerResult(text: string): WorkerResult {
  *  ("no worker mount found in mounts.yaml routes"), i.e. "an install that resolves no mount". */
 function noRouteMounts(): Mounts {
   const mount = { model: "haiku", effort: "medium", maxTurns: 1, contextBudget: 1000 };
-  return { tiers: { haiku: 0 }, efforts: { medium: 0 }, architect: mount, judge: mount, routes: {} };
+  return {
+    tiers: { haiku: 0 },
+    efforts: { medium: 0 },
+    architect: mount,
+    judge: mount,
+    synthesis: { retro: mount, triage: mount, inbox_draft: mount },
+    routes: {},
+  };
 }
 
 test("serve resolves a real feedback-expansion rung at boot: a preview backed by the stubbed spawn arms a real four-section expansion, not null", async (t) => {

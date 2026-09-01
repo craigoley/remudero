@@ -111,9 +111,11 @@ test("resolveHeadroomEnabled: an empty/whitespace env value defers to config, no
 });
 
 // ── architectModel: the Architect-tier model is governed by mounts.yaml's `architect:` row ──
-// (fb-1784921980488-44b355 §4 — the MPG first-instance ruling: opus -> Opus 5). The retro,
-// triage, and inbox-draft spawns all resolve their model through this, so the mount-table row
-// governs the spawn (validated by the next inbox-draft ledger line's model).
+// (fb-1784921980488-44b355 §4 — the MPG first-instance ruling: opus -> Opus 5). Plan authorship
+// (`rmd plan`'s orchestration) resolves its model through this. W1-T2559: retro, triage, and the
+// inbox-draft spawns used to ALSO resolve through this resolver but now ride their OWN
+// `synthesis.<role>` row instead — see test/synthesis-rungs-ride-their-own-mount.test.ts and
+// src/lib/config.ts's `synthesisModel`/`synthesisEffort`.
 test("architectModel: the mounts.yaml architect row is the source of truth, then config.architectModel, then the opus default", () => {
   // the mounts row wins when present
   assert.equal(architectModel(config(), { architect: { model: "claude-opus-5" } }), "claude-opus-5");
