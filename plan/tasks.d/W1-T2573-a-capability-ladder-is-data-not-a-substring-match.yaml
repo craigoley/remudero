@@ -5,9 +5,10 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  risk: medium
+  risk: high
+  band_meaning: "blast-radius"
   budget_usd: 12.00
-  files: [src/lib/worker-provider.ts, test/a-capability-ladder-is-data-not-a-substring-match.test.ts]
+  files: [src/lib/worker-provider.ts, src/lib/mounts.ts, test/a-capability-ladder-is-data-not-a-substring-match.test.ts]
   origin: "operator-session#codex-router-design-2026-09-01"
   plan_refs: ["W1-T167", "W1-T2572"]
   status: queued
@@ -41,6 +42,15 @@
     crosses the boundary because the lookup is keyed on (capability, effort); a new model is a
     config edit; and the Tier Invariant compares capability RANK, which is provider-agnostic and
     therefore still enforceable when workers ride two different vendors.
+
+    WHY risk:high AND band_meaning: blast-radius, DECLARED RATHER THAN INHERITED. The ladder is not
+    only read by the provider adapter: `src/lib/mounts.ts` PARSES it (`tiers: Record<string, number>`)
+    and `enforceTierInvariant` compares against it, so a capability axis this file does not know
+    about cannot be validated at load and this task's own fifth criterion — that a worker at or
+    above the Architect is still REFUSED — would be unsatisfiable from the adapter alone. The band
+    is `blast-radius`, not `span`: the reason for high is that a mistake here silently unroutes
+    every worker or weakens a safety invariant enforced at config load, which is a different and
+    worse thing than merely touching two files.
 
     SCOPE DISCIPLINE: this task owns the LOOKUP and its data shape. It does not re-tier any
     existing route, does not change which model any current mount resolves to, and must not weaken
