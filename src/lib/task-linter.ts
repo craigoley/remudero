@@ -214,13 +214,35 @@ export function isDataArtifact(
   return classes.some((c) => c.pathPattern.test(path) && c.extPattern.test(path));
 }
 
-/** The distinct module/subsystem ids a task's `files:` + acceptance criteria imply.
- *  `dataArtifactClasses` defaults to {@link DATA_ARTIFACT_CLASSES}; the param exists
- *  so the discount table can grow with ZERO changes to this function. */
+/**
+ * W1-T2525 — `ownFalsifierSlug`: THIS task's own shard filename slug (the same fact {@link
+ * LintOpts.duplicateSlug} already carries for {@link duplicateTitleViolations}), so THIS task's
+ * own falsifier can be told apart from an unrelated one: a `test/` path whose {@link
+ * moduleIdFromPath} EQUALS the slug is
+ * the task's own falsifier (the suite written to prove ITS acceptance criteria, named after the
+ * task the house convention already uses); any other `test/` path is SOMEONE ELSE's test, or an
+ * unrelated one, and now counts like an ordinary concern instead of being swept into the discount.
+ *
+ * WHY THIS EXISTS. {@link COMPANION_PATH_CLASSES}'s W1-T2543 discount is UNCONDITIONAL on path
+ * class alone: ANY `test/` path is a candidate companion the moment some non-companion file
+ * survives, with no check that the specific test belongs to THIS task's own change. That is exactly
+ * right for the dominant shape (one source stem plus the suite written to prove it) but says nothing
+ * about a task that lists a second, unrelated test file alongside — which still spans two concerns
+ * and must still be refused (W1-T2525's rationale: "a task listing SOMEONE ELSE'S test file, or
+ * several unrelated test files, is still spanning concerns").
+ *
+ * UNKNOWN SLUG (`undefined` — every caller before this task, and every caller that has no shard
+ * filename to read, e.g. the pre-dispatch call site which never threads {@link
+ * duplicateCorpusOpts}) ⇒ the W1-T2543 behaviour is kept BYTE FOR BYTE: any `test/` path is a
+ * companion candidate, discounted subject to the vacuity guard below. Passing the slug only ever
+ * NARROWS which companions are discounted — it can turn a discount into a count, never the reverse
+ * — so a caller that supplies it can only make sizing STRICTER, never looser.
+ */
 export function subsystemsOf(
   task: Task,
   dataArtifactClasses: ReadonlyArray<DataArtifactClass> = DATA_ARTIFACT_CLASSES,
   companionClasses: ReadonlyArray<CompanionPathClass> = COMPANION_PATH_CLASSES,
+  ownFalsifierSlug?: string,
 ): Set<string> {
   const ids = new Set<string>();
   // W1-T2543: companions are collected SEPARATELY and folded in only if nothing else survives, so
@@ -231,8 +253,13 @@ export function subsystemsOf(
     if (isDataArtifact(f, dataArtifactClasses)) continue; // a data/config artifact, not a concern
     const id = moduleIdFromPath(f);
     if (!id) continue;
-    if (isCompanionPath(f, companionClasses)) companions.add(id);
-    else ids.add(id);
+    if (isCompanionPath(f, companionClasses)) {
+      // W1-T2525: a known slug that this companion does NOT match means it is not the task's
+      // own falsifier — count it directly, exactly like an ordinary (non-companion) file, so it
+      // can never be swept away by the vacuity guard below either.
+      if (ownFalsifierSlug !== undefined && id !== ownFalsifierSlug) ids.add(id);
+      else companions.add(id);
+    } else ids.add(id);
   }
   // A task declaring ONLY companions (a test-only change) still counts them — otherwise it would
   // score zero concerns and pass sizing vacuously, which is a worse answer than the one being fixed.
@@ -272,8 +299,13 @@ export function subsystemsOf(
  *  warns: reported, never refused, so no existing task blocks a PR on this
  *  alone and the count reduces at whatever pace an operator chooses. */
 export function sizingViolation(task: Task, opts: LintOpts = {}): LintViolation | undefined {
+  // W1-T2525: the SAME shard-filename slug `duplicateTitleViolations` already reads (never
+  // re-derived here — this module is pure and reads no disk) narrows {@link subsystemsOf}'s
+  // companion discount to the task's OWN test, not `test/` at large. Blank/absent ⇒ `undefined`,
+  // which keeps the W1-T2543 discount exactly as it was for every caller that has no slug to give.
+  const ownFalsifierSlug = opts.duplicateSlug?.trim().toLowerCase() || undefined;
   if (task.risk !== "high") {
-    const subsystems = subsystemsOf(task);
+    const subsystems = subsystemsOf(task, undefined, undefined, ownFalsifierSlug);
     if (subsystems.size < 2) return undefined;
     return {
       check: "sizing",
@@ -287,7 +319,7 @@ export function sizingViolation(task: Task, opts: LintOpts = {}): LintViolation 
   if (task.band_meaning === "blast-radius") return undefined; // exempt, exactly as today
 
   if (task.band_meaning === "span") {
-    const subsystems = subsystemsOf(task);
+    const subsystems = subsystemsOf(task, undefined, undefined, ownFalsifierSlug);
     if (subsystems.size < 2) return undefined;
     return {
       check: "sizing",
@@ -3081,7 +3113,9 @@ export interface LintOpts {
   duplicateTitleCutoff?: number;
   /** W1-T1076: THIS task's own shard filename slug, for {@link duplicateTitleViolations} to
    *  score instead of the title. Supplied by the caller (the linter reads no disk and cannot
-   *  derive it — `Task` carries no path). Absent/blank ⇒ the title is scored, exactly as before. */
+   *  derive it — `Task` carries no path). Absent/blank ⇒ the title is scored, exactly as before.
+   *  ALSO consumed by {@link sizingViolation} (W1-T2525) to tell the task's OWN test companion
+   *  apart from an unrelated one — same fact, second reader, one value threaded once. */
   duplicateSlug?: string;
   /** W1-T1076: shingle width for {@link duplicateTitleViolations}. The live caller passes
    *  {@link DUPLICATE_SLUG_SHINGLE_K}; absent ⇒ {@link DEFAULT_SHINGLE_K}, W1-T420's original. */
