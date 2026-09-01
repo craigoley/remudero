@@ -137,12 +137,12 @@
   "src/lib/triage.ts": 864,
   "src/lib/tty.ts": 126,
   "src/lib/verdict-calibration.ts": 538,
-  "src/lib/wipe-test.ts": 578,
+  "src/lib/wipe-test.ts": 700,
   "src/lib/worker-containment.ts": 489,
   "src/lib/worker-home.ts": 1727,
   "src/lib/worker-scratch.ts": 227,
   "src/lib/worker.ts": 4000,
   "src/lib/workflow-run.ts": 28,
-  "src/run-task.ts": 33000,
+  "src/run-task.ts": 33100,
   "src/spike.ts": 311
 }

@@ -66,11 +66,62 @@ import type { ProofExecOutcome } from "./review.js";
  * `--rerun` passthrough is deliberately NOT built here (design note (iv)): it would have
  * to reach both arms atomically or it manufactures a result, and this task is scoped to
  * refusing non-measurements, not to un-blocking the harness.
+ *
+ * A FACTOR NAMES *WHAT* AN ARM VARIES (W1-T2512). `WipeTestArm` ("A"|"B") is only a POSITION;
+ * until this task, exactly one thing was ever hard-coded behind position B —
+ * {@link computeMatchedLearningsForArm}'s masked injection. `WipeTestFactor` names that
+ * choice explicitly ({@link WIPE_TEST_FACTORS}: `"learnings"` | `"recon"`) so a second
+ * factor — RECON, the single most expensive per-dispatch cost this harness can reach (a
+ * whole worker spawn, `RECON_MAX_TURNS`-capped, routed through `routes.recon`) — has a seam
+ * at every site the learnings factor already lives: {@link wipeTestFactorMasksLearnings} /
+ * {@link wipeTestFactorMasksRecon} are the pure decision `run-task.ts`'s arm dispatch consults
+ * (generalising the old `arm === "B" ? { maskLearnings: true } : {}` one-liner into two
+ * independent per-factor checks), {@link WipeTestPair}/{@link WipeTestDelta} carry `factor` so
+ * a ledgered pair says WHICH factor it varied, and {@link aggregateWipeTestPairs} REFUSES to
+ * average pairs across factors — an aggregate is only ever signal for ONE factor at a time.
+ * `factor` is OPTIONAL on {@link WipeTestPair} and read via {@link wipeTestPairFactor}
+ * (default `"learnings"`) so every pair ledgered before this task — and every hand-seeded
+ * fixture in the existing test suite — still means exactly what it meant: the only factor
+ * that existed then. THE RECON FACTOR MASKS, NEVER DELETES, same discipline as learnings: arm
+ * B of a recon-factor pair skips the recon spawn entirely (see `run-task.ts`'s `opts.maskRecon`)
+ * and never reads or writes the recon artifact store (`loadReconArtifact`/`writeReconArtifact`
+ * both sit inside the branch `maskRecon` skips outright) — masking the WORK, not the STORE.
  */
 
 // ── ARM A/B PROMPT ASSEMBLY ─────────────────────────────────────────────────
 
 export type WipeTestArm = "A" | "B";
+
+/**
+ * WHICH FACTOR a wipe-test pair varies (W1-T2512) — the thing arm B masks. `"learnings"` is
+ * the original (and, before this task, ONLY) factor: {@link computeMatchedLearningsForArm}
+ * masks task-matched learnings injection. `"recon"` is the new one this task adds: masks the
+ * recon worker spawn (`run-task.ts`'s `opts.maskRecon`) — the largest per-dispatch cost this
+ * harness can now ask about, per this task's own filing (a whole worker spawn vs. text in a
+ * prompt).
+ */
+export type WipeTestFactor = "learnings" | "recon";
+
+/** Every factor `rmd wipe-test --factor <name>` accepts — the ONE place the roster lives, so
+ *  {@link resolveWipeTestFactor}'s validation and any future listing (`rmd --help`) read the
+ *  same set rather than two hand-copies drifting apart. */
+export const WIPE_TEST_FACTORS: readonly WipeTestFactor[] = ["learnings", "recon"];
+
+/** Does arm `arm` of a `factor`-factor pair mask LEARNINGS injection? Pure — the single
+ *  decision point `run-task.ts`'s arm dispatch consults in place of the old hard-coded
+ *  `arm === "B" ? { maskLearnings: true } : {}`. True only for `factor: "learnings"`, arm
+ *  `"B"` — a recon-factor pair's arm B never touches learnings, and vice versa: EXACTLY ONE
+ *  factor is masked per pair, never both, never neither (on arm B). */
+export function wipeTestFactorMasksLearnings(factor: WipeTestFactor, arm: WipeTestArm): boolean {
+  return factor === "learnings" && arm === "B";
+}
+
+/** Does arm `arm` of a `factor`-factor pair mask RECON (skip the spawn entirely)? Pure
+ *  sibling of {@link wipeTestFactorMasksLearnings} — same shape, opposite factor. True only
+ *  for `factor: "recon"`, arm `"B"`. */
+export function wipeTestFactorMasksRecon(factor: WipeTestFactor, arm: WipeTestArm): boolean {
+  return factor === "recon" && arm === "B";
+}
 
 /** The load → select → render chain runTaskBody's real dispatch calls, as an injectable
  *  seam — so a test can spy on each function and prove arm B never calls any of them
@@ -150,14 +201,29 @@ export interface WipeTestRunResult {
 /** One wipe-test pair: the SAME task, arm A (unmasked) vs arm B (masked). */
 export interface WipeTestPair {
   taskId: string;
+  /** W1-T2512: WHICH factor this pair varied. OPTIONAL — every pair ledgered, or hand-seeded
+   *  in a test fixture, before this task never named a factor because only one existed; that
+   *  silence still means "learnings" (see {@link wipeTestPairFactor}), never a new unknown
+   *  default. Set explicitly by `wipeTestCommand`'s `--factor` resolution on every NEW pair. */
+  factor?: WipeTestFactor;
   armA: WipeTestRunResult;
   armB: WipeTestRunResult;
 }
 
+/** {@link WipeTestPair.factor}, defaulted — the ONE place "absent means learnings" is decided,
+ *  so every reader (delta computation, ledgering, aggregation) agrees rather than each
+ *  re-deriving the same `?? "learnings"`. */
+export function wipeTestPairFactor(pair: WipeTestPair): WipeTestFactor {
+  return pair.factor ?? "learnings";
+}
+
 /** The deltas one pair yields — always B minus A, so a POSITIVE turns/cost delta means
- *  masking the learnings made the run more expensive (i.e. the learnings were HELPING). */
+ *  masking the pair's factor made the run more expensive (i.e. that factor was HELPING). */
 export interface WipeTestDelta {
   taskId: string;
+  /** W1-T2512: carried through from the pair (via {@link wipeTestPairFactor}) so a delta
+   *  taken in isolation — logged, printed, ledgered — still says what it measured. */
+  factor: WipeTestFactor;
   turnsDelta: number;
   costDelta: number;
   strikesDelta: number;
@@ -181,6 +247,7 @@ function countExecutedPass(outcomes: ProofExecOutcome[]): number {
 export function computeWipeTestDelta(pair: WipeTestPair): WipeTestDelta {
   return {
     taskId: pair.taskId,
+    factor: wipeTestPairFactor(pair),
     turnsDelta: pair.armB.numTurns - pair.armA.numTurns,
     costDelta: round(pair.armB.costUsd - pair.armA.costUsd),
     strikesDelta: pair.armB.strikes - pair.armA.strikes,
@@ -230,6 +297,11 @@ export function ledgerWipeTestPair(ledgerPath: string, runId: string, pair: Wipe
     run_id: runId,
     task_id: pair.taskId,
     step: WIPE_TEST_PAIR_STEP,
+    // W1-T2512: named explicitly so a reader of the ledger — not just of the in-memory pair —
+    // knows WHICH factor this row varied. A row written before this task carries no `factor`
+    // key at all; `wipeTestPairFactor`'s "absent means learnings" default is what makes such a
+    // row still aggregate correctly (see `aggregateWipeTestPairs`'s own doc).
+    factor: delta.factor,
     arm_a_run_id: pair.armA.runId,
     arm_b_run_id: pair.armB.runId,
     verdict_a: delta.verdictA,
@@ -250,6 +322,10 @@ export function ledgerWipeTestPair(ledgerPath: string, runId: string, pair: Wipe
  *  own framing: "the WS-12 receipts thesis applied to memory"). A single pair is an
  *  anecdote; this is signal. */
 export interface WipeTestAggregate {
+  /** W1-T2512: which factor EVERY pair in this aggregate varied — `null` only for the
+   *  zero-pair empty aggregate, where no factor was observed at all. Never a mix: see
+   *  {@link aggregateWipeTestPairs}'s own doc for the refusal that makes this guarantee hold. */
+  factor: WipeTestFactor | null;
   pairs: number;
   avgTurnsDelta: number;
   avgCostDelta: number;
@@ -259,6 +335,7 @@ export interface WipeTestAggregate {
 }
 
 const EMPTY_AGGREGATE: WipeTestAggregate = {
+  factor: null,
   pairs: 0,
   avgTurnsDelta: 0,
   avgCostDelta: 0,
@@ -267,16 +344,38 @@ const EMPTY_AGGREGATE: WipeTestAggregate = {
   verdictChangedRate: 0,
 };
 
-/** Aggregate many seeded pairs into ONE report — mirrors retro.ts's
- *  `aggregateByType`/`aggregateByClass` shape (map → reduce → round). Zero pairs is a
- *  well-defined, non-throwing empty aggregate, never a NaN. */
+/**
+ * Aggregate many seeded pairs into ONE report — mirrors retro.ts's
+ * `aggregateByType`/`aggregateByClass` shape (map → reduce → round). Zero pairs is a
+ * well-defined, non-throwing empty aggregate, never a NaN.
+ *
+ * NEVER MIXES TWO FACTORS INTO ONE REPORT (W1-T2512): every pair's factor is read via
+ * {@link wipeTestPairFactor} (so a pre-this-task pair with no `factor` field reads as
+ * `"learnings"`, unchanged); if the pairs passed in name MORE THAN ONE distinct factor, this
+ * throws rather than silently averaging a learnings delta together with a recon delta — two
+ * numbers that answer different questions have no shared unit. THE AGGREGATE CAN STILL BE
+ * TAKEN PER FACTOR: filter `pairs` to one factor before calling (e.g. `pairs.filter((p) =>
+ * wipeTestPairFactor(p) === "recon")`), the same way a caller already filters by `taskId`
+ * today. Reading pairs back off the ledger and grouping by `step === WIPE_TEST_PAIR_STEP`
+ * carries this straight through: a ledger row's own `factor` cell (or its absence) is what
+ * `wipeTestPairFactor` reads.
+ */
 export function aggregateWipeTestPairs(pairs: WipeTestPair[]): WipeTestAggregate {
   if (pairs.length === 0) return EMPTY_AGGREGATE;
   const deltas = pairs.map(computeWipeTestDelta);
+  const factors = new Set(deltas.map((d) => d.factor));
+  if (factors.size > 1) {
+    throw new Error(
+      `aggregateWipeTestPairs: pairs vary more than one factor (${[...factors].sort().join(", ")}) — ` +
+        "an aggregate is only ever signal for ONE factor at a time; filter to a single factor " +
+        "(e.g. pairs.filter((p) => wipeTestPairFactor(p) === \"recon\")) before aggregating.",
+    );
+  }
   const n = deltas.length;
   const sum = (f: (d: WipeTestDelta) => number) => deltas.reduce((s, d) => s + f(d), 0);
   const verdictChangedCount = deltas.filter((d) => d.verdictChanged).length;
   return {
+    factor: deltas[0].factor,
     pairs: n,
     avgTurnsDelta: round(sum((d) => d.turnsDelta) / n),
     avgCostDelta: round(sum((d) => d.costDelta) / n),
@@ -496,6 +595,28 @@ export function resolveWipeTestTarget(
     };
   }
   return { target: { repo } };
+}
+
+/**
+ * Resolve WHICH FACTOR `rmd wipe-test --factor <name>` varies (W1-T2512) — PURE, same shape
+ * as {@link resolveWipeTestTarget} right above (a `--flag` lookup over the raw argv tail,
+ * defaulted, validated, refused loud on junk — the fail-loud-control-surface doctrine this
+ * module's other CLI-facing resolvers already keep). Omitted `--factor` defaults to
+ * `"learnings"` — the ONLY factor that existed before this task — so every existing
+ * `wipeTestCommand` invocation with no `--factor` behaves BYTE-IDENTICALLY to before. An
+ * unrecognized value is refused (never silently coerced to the default): the same command
+ * that fell through to an unattended drain on an unknown subcommand must not fall through to
+ * measuring the wrong factor on an unknown `--factor`.
+ */
+export function resolveWipeTestFactor(rest: string[]): { factor: WipeTestFactor } | { error: string } {
+  const raw = flagValue(rest, "--factor");
+  if (raw === undefined) return { factor: "learnings" };
+  if ((WIPE_TEST_FACTORS as readonly string[]).includes(raw)) return { factor: raw as WipeTestFactor };
+  return {
+    error:
+      `rmd wipe-test: unknown --factor '${raw}' — must be one of: ${WIPE_TEST_FACTORS.join(", ")}. ` +
+      `Omitting --factor defaults to "learnings".`,
+  };
 }
 
 // ── PRE-FLIGHT REFUSAL (design note (i)) ─────────────────────────────────────

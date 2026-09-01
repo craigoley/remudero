@@ -52,7 +52,7 @@ usage:
   rmd status [--json]   # One verb for 'is it running' and 'why is it stalled' from one read model.
   rmd sweep [--repo <name>] [--dry-run]   # Level-triggered PR-pipeline reconciler: re-derive disposition, take one action.
   rmd fix <pr-number> [--repo <name>]   # Operator verb for the fix rung: dispatch the same rung `rmd sweep` uses.
-  rmd wipe-test <task-id> [--repo remudero-sandbox] [--allow-non-sandbox]   # P12 learning-utility A/B harness: run a sandbox task twice, ledger the deltas.
+  rmd wipe-test <task-id> [--factor learnings|recon] [--repo remudero-sandbox] [--allow-non-sandbox]   # P12 A/B harness: run a sandbox task twice, ledger the deltas for one factor.
   rmd stop [--reason <text>]   # Fleet control: one-shot halt of the running drain; auto-clears when it ends.
   rmd pause [--reason <text>]   # Fleet control: persistent drain-and-hold until `rmd resume`.
   rmd resume   # Fleet control: clear PAUSE (and any STOP); spawns resume.
@@ -463,13 +463,13 @@ operator verb for the W1-T76 fix rung (W1-T95, bootstrap/manual-override — dri
 
 ### `rmd wipe-test`
 
-P12 learning-utility A/B harness: run a sandbox task twice, ledger the deltas.
+P12 A/B harness: run a sandbox task twice, ledger the deltas for one factor.
 
 ```
-rmd wipe-test <task-id> [--repo remudero-sandbox] [--allow-non-sandbox]
+rmd wipe-test <task-id> [--factor learnings|recon] [--repo remudero-sandbox] [--allow-non-sandbox]
 ```
 
-the P12 learning-utility A/B harness (W1-T86): runs <task-id> TWICE — arm A with normal learnings injection, arm B with injection MASKED (the store itself untouched) — and ledgers the deltas (wipetest.pair: turns/cost/verdict/strikes/proof_exec); SANDBOX-ONLY by default, refuses any other --repo (including the primary repo) unless --allow-non-sandbox is also passed; a single pair is an anecdote — only the aggregate over many ledgered pairs is signal
+the P12 learning-utility A/B harness (W1-T86, generalised to a named FACTOR by W1-T2512): runs <task-id> TWICE — arm A with --factor's factor ON, arm B with it MASKED (the store itself untouched, whether that store is task-matched learnings or the recon artifact) — and ledgers the deltas (wipetest.pair: turns/cost/verdict/strikes/proof_exec, now naming which factor it varied); --factor defaults to "learnings" (byte-identical to before W1-T2512), "recon" masks the recon worker spawn instead; SANDBOX-ONLY by default for every factor, refuses any other --repo (including the primary repo) unless --allow-non-sandbox is also passed; a single pair is an anecdote — only the aggregate over many ledgered pairs of the SAME factor is signal
 
 ### `rmd stop`
 
