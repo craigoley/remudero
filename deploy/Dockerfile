@@ -226,6 +226,28 @@ RUN npm_config_cache=/tmp/npm-build-cache \
  && rm -rf /tmp/npm-build-cache \
  && claude --version
 
+# ── THE CODEX CLI — OPT-IN SECOND SUBSCRIPTION, BAKED BUT DORMANT BY DEFAULT ─────────────────
+# `workerProviders.enabled` defaults to [`claude`], so installing this binary cannot reroute a
+# single existing worker. A host opts in only after mounting an authenticated CODEX_HOME and adding
+# `codex` to that list. Pinning makes the image reproducible; the app-server capacity contract and
+# exec JSONL adapter are verified against this exact release in src/lib/worker-provider.ts tests.
+ARG CODEX_VERSION=0.152.0
+RUN npm_config_cache=/tmp/npm-build-cache \
+      npm install -g "@openai/codex@${CODEX_VERSION}" \
+ && rm -rf /tmp/npm-build-cache \
+ && codex --version
+
+# Codex's workspace-write sandbox deliberately permits reads outside the checkout. The daemon
+# mounts both subscriptions plus operator state into this container, so the model-driven shell
+# needs a second, administrator-owned read boundary. Codex 0.152.0 reads this system requirements
+# path before every run; root ownership and mode 0444 keep uid 1000 from weakening the policy.
+RUN install -d -m 755 /etc/codex
+COPY --chown=root:root deploy/codex-requirements.toml /etc/codex/requirements.toml
+RUN chmod 0444 /etc/codex/requirements.toml \
+ && test "$(stat -c '%u:%g:%a' /etc/codex/requirements.toml)" = "0:0:444" \
+ && grep -F '"/home/node/.codex/auth.json"' /etc/codex/requirements.toml >/dev/null \
+ && grep -F '"/home/node/Remudero/state"' /etc/codex/requirements.toml >/dev/null
+
 # ── REQ 8: THE SANDBOX BINARIES — bubblewrap AND socat ───────────────────────────────────────
 # These are NOT optional hardening. `validateWorkerSettings` (src/lib/settings.ts) THROWS unless
 # `sandbox.enabled === true` AND `sandbox.failIfUnavailable === true`, with the messages "workers

@@ -115,6 +115,14 @@ fi
 STATE_MOUNT_DEST="/home/node/Remudero"
 CRED_DIR="${RMD_CLAUDE_DIR:-${HOME:-/root}/.claude}"
 CRED_MOUNT_DEST="/home/node/.claude"
+CODEX_DIR="${RMD_CODEX_DIR:-${HOME:-/root}/.codex}"
+CODEX_MOUNT_DEST="/home/node/.codex"
+CODEX_MOUNT_ARGS=()
+if [ -d "${CODEX_DIR}" ]; then
+  CODEX_MOUNT_ARGS=(-v "${CODEX_DIR}:${CODEX_MOUNT_DEST}")
+else
+  echo "recycle-container: NOTE — no Codex home at ${CODEX_DIR}; recycling without a Codex mount"
+fi
 DAEMON_REPO="${RMD_DAEMON_REPO:-remudero}"
 
 DRAIN_LOCK="${STATE_DIR}/state/drain.lock"
@@ -737,6 +745,7 @@ docker run -d --name "${CONTAINER_NAME}" \
   "${RUN_ENV_ARGS[@]}" \
   -v "${STATE_DIR}:${STATE_MOUNT_DEST}" \
   -v "${CRED_DIR}:${CRED_MOUNT_DEST}" \
+  "${CODEX_MOUNT_ARGS[@]}" \
   "${REF}" \
   ./bin/rmd daemon --repo "${DAEMON_REPO}" --allow-self-target >/dev/null
 

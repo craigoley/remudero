@@ -98,6 +98,10 @@ CRED_DIR="${RMD_CLAUDE_DIR:-${HOME:-/root}/.claude}"
 # The container-side path the credential must land on: `config.root` derives from HOME (Dockerfile
 # REQ 10), so the worker home's `.claude` symlink grant resolves to exactly this.
 CRED_MOUNT_DEST="/home/node/.claude"
+# Codex subscription OAuth state. The CLI is baked into the image but provider routing stays
+# disabled until config opts in; mounting the state here lets that opt-in survive replacement.
+CODEX_DIR="${RMD_CODEX_DIR:-${HOME:-/root}/.codex}"
+CODEX_MOUNT_DEST="/home/node/.codex"
 # The repo `rmd daemon` drains. It REFUSES without `--repo` (usage dump, exit 2), which is how a
 # containerised boot burned four restarts before anyone read the exit code — `daemon-plist` bakes
 # the same flag for the launchd path, and the printed invocation must not be weaker.
@@ -140,6 +144,14 @@ REF="${REPO_REF}:${TAG}"
 # GITIGNORED and does not survive the container that wrote it — so REQ 5 in deploy/Dockerfile
 # carries the conclusions instead, and this block carries the command.
 if [ "${PRINT_DAEMON_RUN}" -eq 1 ]; then
+  CODEX_MOUNT_LINE=""
+  if [ -d "${CODEX_DIR}" ]; then
+    printf -v CODEX_MOUNT_LINE '    -v %s:%s \\\n' "${CODEX_DIR}" "${CODEX_MOUNT_DEST}"
+    echo "host-update: Codex home present — the printed daemon mounts ${CODEX_DIR}."
+  else
+    echo "host-update: NOTE — no Codex home at ${CODEX_DIR}; the printed daemon stays Claude-only." >&2
+    echo "  Authenticate it first or set RMD_CODEX_DIR; no empty root-owned bind directory will be created." >&2
+  fi
   # ── THE PRINTED PATH IS CHECKED BEFORE IT IS PRINTED ───────────────────────────────────────
   # MEASURED 2026-08-12, and this is the failure being fixed: on the Azure host `${HOME}/rmd-state`
   # holds a ledger that STOPS ON AUG 8 (100,330 bytes) while `${HOME}/rmd-state2` is live
@@ -323,7 +335,7 @@ host-update: DAEMON-MODE INVOCATION — printed only. Nothing has been started a
     -e GH_APP_ID="\${GH_APP_ID:-}" \\
     -e GH_APP_INSTALLATION_ID="\${GH_APP_INSTALLATION_ID:-}" \\
     -e GH_APP_PRIVATE_KEY_PATH="\${GH_APP_PRIVATE_KEY_PATH:-}" \\
-    -v ${STATE_DIR}:${STATE_MOUNT_DEST} \\
+${CODEX_MOUNT_LINE}    -v ${STATE_DIR}:${STATE_MOUNT_DEST} \\
     -v ${CRED_DIR}:${CRED_MOUNT_DEST} \\
     ${REF} \\
     ./bin/rmd daemon --repo ${DAEMON_REPO} --allow-self-target

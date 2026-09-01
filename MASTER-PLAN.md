@@ -5738,7 +5738,9 @@ higher-thinking mount than the coding agents; relative, config-validated, flywhe
   D-11 (cells: one instance per codebase)** — oper#architecture-2026-08-11.
 - ClawApp inbox integration as a notifier adapter (Craig instance).
 - Plugin/skill marketplace listing once stable.
-- Cross-agent support (Codex exec) — explicitly parked; Claude-first keeps contracts tight.
+- Cross-agent support (Codex exec) — opt-in connector implemented at the worker-spawn choke point;
+  Claude remains the default, and dual-provider dispatch requires readable reserve headroom from
+  the selected subscription.
 - Tournament dispatch (two approaches, reviewer picks) for high-risk tasks — expensive, park until
   verdict calibration proves the reviewer.
 - P19 rung 2 — Tree-sitter symbol-touch locks; unbanks only when a rung-1 file-overlap ESCAPE is
