@@ -5578,6 +5578,194 @@ export function renderFixPrompt(opts: {
   ].join("\n");
 }
 
+// ── GENERATOR-BACKED GATE FIX (W1-T2551) ──────────────────────────────────────────────────────
+//
+// GROUND TRUTH this closes: every `<name>:check` npm script paired with a bare `<name>` script is
+// a GENERATOR run in verify mode (plan-index/plan-index:check, docs-index/docs-index:check,
+// learnings-index/learnings-index:check, cli-reference/cli-reference:check, capability-snapshot/
+// capability-snapshot:check, learnings-assert/learnings-assert:check, as of this writing — NEVER
+// hand-listed here, see {@link declaredGeneratorScriptFor}). Every one of those generators fails
+// `--check` with the IDENTICAL sentence, `Run 'npm run <name>' and commit the result.` (grepped
+// across scripts/generate-*.mjs and scripts/learnings-assert-check.mjs, not assumed) — a ci-log
+// fix-rung dispatch whose failing check(s) print that sentence is handed to a full worker anyway
+// today, which reaches the SAME command the gate already named at the cost of a whole worker spawn
+// and a strike against `strikeCap` for work that is entirely deterministic (this task's rationale
+// (3)). This section closes that gap with a SEPARATE mechanism from {@link FIX_MODE_RULES} — no
+// worker is spawned for the class this covers at all, so there is no prompt-rendering mode to add;
+// {@link runFixRung} short-circuits BEFORE a worker would ever be dispatched (see its own `W1-T2551
+// SITE`, before `strikes++`).
+//
+// OUT OF SCOPE, NAMED (this task's rationale (5), unchanged here): (a) any gate whose fix is not a
+// generator run — {@link generatorFixFor} returns `undefined` for it and it reaches the ordinary
+// rung exactly as before; (b) the merge-conflict rung's OWN regenerable-artifact admission
+// (`REGENERABLE_ARTIFACT_GENERATORS`, lib/sweep.ts, W1-T2548) — a hand-maintained PATH→generator
+// table for a DIFFERENT rung (the conflict rung, not this one), deliberately NOT reused or kept in
+// sync here: this class derives its pairing from package.json's own declared scripts instead (see
+// below), and the two tables answering the same question two different ways is this task's own
+// acceptance criterion, not an oversight.
+
+/**
+ * Read the generator/`:check` pairing OFF package.json's own declared `scripts` map — NEVER a
+ * hand-maintained table like {@link REGENERABLE_ARTIFACT_GENERATORS} (lib/sweep.ts, a DIFFERENT
+ * rung's admission list, out of scope here per this task's rationale (5b)). `checkOrGeneratorName`
+ * may be given either shape (`"plan-index:check"` or bare `"plan-index"`); the BASE name is
+ * returned only when BOTH the bare name and its `:check` counterpart are declared scripts — that
+ * shared declaration IS the pairing itself, not an inference drawn from it. `undefined` for any
+ * name package.json does not declare BOTH halves of, including a `:check` script with no bare
+ * counterpart at all (`api-client:check`, `task-id-existence:check`, `no-hand-rolled-fetch:check`,
+ * `worker-branch-shape:check` — measured on this repo's own package.json, 2026-08 — each of those
+ * is fixed by something other than "run the paired generator", so none belongs in this class).
+ */
+export function declaredGeneratorScriptFor(
+  scripts: Readonly<Record<string, string>>,
+  checkOrGeneratorName: string,
+): string | undefined {
+  const suffix = ":check";
+  const base = checkOrGeneratorName.endsWith(suffix) ? checkOrGeneratorName.slice(0, -suffix.length) : checkOrGeneratorName;
+  if (base.length === 0) return undefined;
+  if (!Object.prototype.hasOwnProperty.call(scripts, base)) return undefined;
+  if (!Object.prototype.hasOwnProperty.call(scripts, `${base}${suffix}`)) return undefined;
+  return base;
+}
+
+/**
+ * Extract the generator name a failing check's OWN log names as its fix — every generator this
+ * class covers fails with the IDENTICAL `Run 'npm run <name>' and commit the result.` sentence
+ * (see this section's own header doc for where that was grepped, not assumed). `undefined` when
+ * the log names no such sentence, which is the ordinary case for the vast majority of CI failures
+ * (a real test failure, a lint error, a type error) — that absence is exactly what keeps this
+ * class bounded to what it targets (rationale (5a)), never a widening net.
+ */
+export function remedyGeneratorNamedInLog(logTail: string): string | undefined {
+  const m = /Run 'npm run ([\w:@./-]+)' and commit the result\.?/.exec(logTail ?? "");
+  return m ? m[1] : undefined;
+}
+
+/**
+ * ONE failing check's declared generator fix, or `undefined` when this check is OUT of the class
+ * this task targets (acceptance criterion 3: a check with no generator counterpart still reaches
+ * the ordinary rung unchanged). Requires BOTH: the check's own log names a remedy generator (the
+ * sentence {@link remedyGeneratorNamedInLog} matches), AND that name is a REAL package.json-
+ * declared pairing ({@link declaredGeneratorScriptFor}) — never trusting the log's naming alone.
+ * The log is attacker-influenceable CI output (the SAME threat model W1-T210 fenced ci-log content
+ * for elsewhere in this rung); bounding to a script package.json itself already declares is what
+ * stops a crafted log from naming an arbitrary command and having it run.
+ */
+export function generatorFixFor(failure: Pick<CiFailure, "logTail">, scripts: Readonly<Record<string, string>>): string | undefined {
+  const named = remedyGeneratorNamedInLog(failure.logTail);
+  return named === undefined ? undefined : declaredGeneratorScriptFor(scripts, named);
+}
+
+/**
+ * TRUE only when EVERY failure in `failures` names a declared generator fix — a MIXED batch (one
+ * generator-fixable check beside an unrelated real defect) still reaches the ordinary rung
+ * unchanged (acceptance criterion 3): running only the fixable generator would leave the other
+ * failure unaddressed while looking, from the ledger, like progress was made. `false` on an empty
+ * list — there is nothing here to fix.
+ */
+export function allCiFailuresAreGeneratorFixable(
+  failures: readonly Pick<CiFailure, "logTail">[],
+  scripts: Readonly<Record<string, string>>,
+): boolean {
+  return failures.length > 0 && failures.every((f) => generatorFixFor(f, scripts) !== undefined);
+}
+
+/** One generator-fix attempt's outcome — see {@link runGeneratorFixForCiFailures}'s own doc. */
+export interface GeneratorFixResult {
+  /** `true` iff every generator ran, its own `:check` re-ran green, and (if anything changed) a commit landed. */
+  applied: boolean;
+  /** The generator script name(s) actually run, de-duplicated, first-seen order. */
+  generators: string[];
+  /** The commit this attempt produced, when one did — absent when nothing changed (already fresh) or `applied` is false. */
+  commitSha?: string;
+  /**
+   * Set ONLY when a generator ran clean but its OWN `--check` still failed afterward — a REAL
+   * failure (rationale (4)): this attempt never commits in that case, and the caller is expected
+   * to fall through to the ordinary fix rung rather than retry this same short-circuit forever.
+   */
+  escalate?: { generator: string; detail: string };
+}
+
+/**
+ * Resolve a ci-log fix-rung round WITHOUT spawning a worker — the mechanism this whole section
+ * exists to add (acceptance criterion 1). Every external interaction is injected (mirrors
+ * {@link runFixRung}'s own discipline) so this is unit-testable with fakes: no real spawn, git,
+ * or npm invocation in the test suite.
+ *
+ * SAFETY (rationale (4), acceptance criterion 4): each generator's OWN `<name>:check` is re-run
+ * AFTER regenerating and BEFORE any commit — a generator that runs clean but still leaves its
+ * check red is a real defect the next fix worker must look at, never papered over by committing a
+ * non-fix. Nothing here ever hand-composes file content (acceptance criterion 5): the only writes
+ * this function can produce are (1) whatever `deps.runScript` itself writes to the worktree by
+ * running the repo's OWN generator command, and (2) `deps.commit`, which is expected to `git add
+ * -A && git commit` whatever that generator left behind — never a diff this function authors.
+ *
+ * Returns `{ applied: false, generators: [] }` immediately, calling NOTHING, when `failures` is
+ * not entirely generator-fixable ({@link allCiFailuresAreGeneratorFixable}) — the caller's own
+ * gate before calling this, restated here so this function is safe to call unconditionally too.
+ */
+export async function runGeneratorFixForCiFailures(opts: {
+  failures: readonly CiFailure[];
+  scripts: Readonly<Record<string, string>>;
+  worktreePath: string;
+  taskId: string;
+  branch: string;
+  deps: {
+    runScript: (script: string, cwd: string) => Promise<{ status: number; stdout: string; stderr: string }>;
+    commit: (opts: { cwd: string; message: string }) => Promise<{ sha: string; changed: boolean }> | { sha: string; changed: boolean };
+    push: (opts: { cwd: string; branch: string }) => Promise<void> | void;
+  };
+}): Promise<GeneratorFixResult> {
+  if (!allCiFailuresAreGeneratorFixable(opts.failures, opts.scripts)) {
+    return { applied: false, generators: [] };
+  }
+  const generators: string[] = [];
+  for (const f of opts.failures) {
+    const g = generatorFixFor(f, opts.scripts);
+    if (g !== undefined && !generators.includes(g)) generators.push(g);
+  }
+  for (const generator of generators) {
+    const genResult = await opts.deps.runScript(generator, opts.worktreePath);
+    if (genResult.status !== 0) {
+      return {
+        applied: false,
+        generators,
+        escalate: { generator, detail: `generator itself exited ${genResult.status}: ${(genResult.stderr || genResult.stdout || "").trim()}` },
+      };
+    }
+  }
+  // The generator is the AUTHOR (rationale (4)) — re-run its OWN `:check` to confirm the fresh
+  // regeneration the loop above just wrote actually satisfies the gate, BEFORE committing
+  // anything. Never trust the generator's own exit 0 alone.
+  for (const generator of generators) {
+    const checkResult = await opts.deps.runScript(`${generator}:check`, opts.worktreePath);
+    if (checkResult.status !== 0) {
+      return {
+        applied: false,
+        generators,
+        escalate: {
+          generator,
+          detail: `regenerated output still fails '${generator}:check': ${(checkResult.stderr || checkResult.stdout || "").trim()}`,
+        },
+      };
+    }
+  }
+  const commitResult = await opts.deps.commit({
+    cwd: opts.worktreePath,
+    message: `fix(${opts.taskId}): regenerate ${generators.join(", ")}\n\nGenerator-backed gate fix (W1-T2551) — committing\n${generators
+      .map((g) => `'npm run ${g}'`)
+      .join(", ")}'s own output, never a hand edit.\n\nRemudero-Task: ${opts.taskId}`,
+  });
+  if (!commitResult.changed) {
+    // Every check re-ran green already with nothing to stage — a race (something else
+    // regenerated it between the failing read and this attempt's own re-check) or the
+    // committed artifact was already fresh. Either way, nothing to push, nothing to escalate.
+    return { applied: true, generators };
+  }
+  await opts.deps.push({ cwd: opts.worktreePath, branch: opts.branch });
+  return { applied: true, generators, commitSha: commitResult.sha };
+}
+
 /**
  * W1-T138 (the #303/#305/#292/#315 fix), reworked by W1-T1279 (the #2624 fix): render ONE
  * ci-log failure as a single, specific line — the check NAME plus its DIAGNOSTIC line, e.g.
@@ -7206,6 +7394,54 @@ export function readFixRoundCommitsViaGit(worktreePath: string, sinceSha: string
 }
 
 /**
+ * W1-T2551: the real, `npm`-backed implementation of {@link runFixRung}'s `deps.runGeneratorScript`
+ * — `npm run --silent <script>` in `cwd`, captured rather than inherited (the fix rung's own log
+ * carries the output on failure; nothing here streams to the parent process's stdio). Never throws
+ * on a non-zero exit — that IS the failing-check signal {@link runGeneratorFixForCiFailures} reads.
+ */
+export function runNpmScriptViaSpawn(script: string, cwd: string): { status: number; stdout: string; stderr: string } {
+  const result = spawnSync("npm", ["run", "--silent", script], { cwd, encoding: "utf8" });
+  if (result.error) {
+    return { status: 1, stdout: result.stdout ?? "", stderr: String(result.error.message ?? result.error) };
+  }
+  return { status: result.status ?? 1, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+}
+
+/**
+ * W1-T2551: the real, `git`-backed implementation of {@link runFixRung}'s
+ * `deps.commitGeneratorOutput` — `git add -A` then `git commit`, the ONLY write this pair ever
+ * makes to the worktree beyond whatever the generator itself already wrote (acceptance criterion
+ * 5: the rung commits the generator's OWN output, never a hand-composed edit). `changed: false`,
+ * no commit made, when `git add -A` staged nothing.
+ */
+export function commitGeneratorOutputViaGit(opts: { cwd: string; message: string }): { sha: string; changed: boolean } {
+  execFileSync("git", ["-C", opts.cwd, "add", "-A"], { stdio: "pipe" });
+  const staged = execFileSync("git", ["-C", opts.cwd, "status", "--porcelain=v1"], { encoding: "utf8" });
+  if (staged.trim().length === 0) return { sha: "", changed: false };
+  execFileSync("git", ["-C", opts.cwd, "commit", "-m", opts.message], { stdio: "pipe" });
+  const sha = execFileSync("git", ["-C", opts.cwd, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  return { sha, changed: true };
+}
+
+/**
+ * W1-T2551: this repo's OWN `package.json` `scripts` map, read fresh from `worktreePath` — the
+ * declared-pairing source {@link declaredGeneratorScriptFor} reads (rationale (2)). A missing or
+ * unparseable `package.json` reads as `{}` (fail CLOSED on this one input — see
+ * `deps.packageScripts`'s own doc for why "unreadable" must never be treated as "everything is
+ * paired").
+ */
+export function readPackageScriptsFor(worktreePath: string): Readonly<Record<string, string>> {
+  try {
+    const parsed = JSON.parse(readFileSync(join(worktreePath, "package.json"), "utf8")) as { scripts?: Record<string, string> };
+    return parsed.scripts ?? {};
+  } catch {
+    // Missing/unparseable package.json: fail CLOSED to `{}`, never throw — an unreadable scripts
+    // map must read as "no declared pairing" (this function's own doc), not crash the fix rung.
+    return {};
+  }
+}
+
+/**
  * Dispatch ONE bounded fix worker per strike, up to `strikeCap` (config,
  * default 2), on a `blocked_review` verdict. Every dispatch receives the FULL
  * unmet_criteria set + the reviewer's reasons at once (never one criterion at
@@ -7474,6 +7710,31 @@ export async function runFixRung(opts: {
      * invent a retrigger. The real call sites wire {@link readFixRoundCommitsViaGit}.
      */
     readRoundCommits?: ReadFixRoundCommits;
+    /**
+     * W1-T2551: run ONE declared generator's npm script (`npm run <name>` semantics) against this
+     * rung's own worktree — the ONLY mechanism {@link generatorFixFor}'s class of ci-log failure
+     * is resolved by (never a hand-composed edit). Optional; when EITHER this or
+     * `commitGeneratorOutput` below is absent, the generator-fix short-circuit (site
+     * `rung.generator_fix`, before `strikes++`) never fires and every ci-log round goes straight
+     * to the ordinary fix-worker path exactly as it did before this task — fail OPEN, the same
+     * discipline every other optional dep here already uses.
+     */
+    runGeneratorScript?: (script: string, cwd: string) => Promise<{ status: number; stdout: string; stderr: string }>;
+    /**
+     * W1-T2551: commit whatever the generator run above staged into the worktree's OWN working
+     * tree — `git add -A && git commit`, never a hand-composed diff (acceptance criterion 5).
+     * `changed: false` when nothing was staged (the fresh regeneration already matched what was
+     * committed).
+     */
+    commitGeneratorOutput?: (opts: { cwd: string; message: string }) => { sha: string; changed: boolean } | Promise<{ sha: string; changed: boolean }>;
+    /**
+     * W1-T2551: this repo's OWN package.json `scripts` map — the declared-pairing source
+     * (rationale (2), acceptance criterion 2): a `<name>:check` script is a generator's verify
+     * mode IFF the bare `<name>` is ALSO declared there. Optional; absent behaves as `{}`, under
+     * which {@link generatorFixFor} never matches anything — "unknown" reads as "no pairing", the
+     * one input this feature must fail CLOSED on rather than guess.
+     */
+    packageScripts?: Readonly<Record<string, string>>;
   };
 }): Promise<FixRungOutcome> {
   const { deps } = opts;
@@ -7499,6 +7760,13 @@ export async function runFixRung(opts: {
   // of targeting the check that is actually still red.
   let noReviewYet = opts.ciFailures !== undefined;
   let currentCiFailures = opts.ciFailures;
+  // W1-T2551: bounds the generator-fix short-circuit (site `rung.generator_fix`, below) to a
+  // SMALL number of attempts per invocation — every attempt already re-verifies the regenerated
+  // output against its OWN `:check` before committing anything, but this caps how many rounds a
+  // persistent CI/local environment mismatch (never observed, guarded anyway) can spend spinning
+  // this rung without ever reaching a worker that could actually diagnose it.
+  let generatorFixAttempts = 0;
+  const GENERATOR_FIX_ATTEMPT_CAP = 2;
   // W1-T1279: every check name EVER observed red across this rung's strikes — the trajectory
   // input for the exhaustion escalation's own detail text (renderCiTrajectoryLine, above).
   // Seeded from round 1's evidence and re-unioned after every refresh below (never cleared), so a
@@ -7783,6 +8051,102 @@ export async function runFixRung(opts: {
       deps.log("fix.stood_down", { site: "rung.empty_ci_failures", strike: strikes + 1, reason });
       deps.say(`fix rung: standing down before strike ${strikes + 1} — ${reason}`);
       return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason };
+    }
+
+    // W1-T2551 SITE — GENERATOR-BACKED GATE FIX, BEFORE `strikes++`/any worker spawn: a ci-log
+    // round whose EVERY failing check's own log names a declared generator fix
+    // ({@link allCiFailuresAreGeneratorFixable}) is resolved by running that generator directly —
+    // never by spawning a worker (acceptance criterion 1), and never counted as a strike (this
+    // task's rationale (3): the CURRENT behavior spends a strike reaching a command the gate
+    // already named, which is exactly the defect this site closes). Gated on BOTH
+    // `runGeneratorScript`/`commitGeneratorOutput` being wired — absent either, this whole site is
+    // a structural no-op, fail OPEN exactly like every other optional dep in this rung, so every
+    // pre-existing caller (none of which wires these) is byte-for-byte unaffected. A MIXED or
+    // unrelated failure set still reaches the ordinary strike below completely unchanged
+    // (acceptance criterion 3) — {@link allCiFailuresAreGeneratorFixable} itself is what enforces
+    // "every failure or none", never a partial run.
+    if (
+      currentMergeConflict === undefined &&
+      noReviewYet &&
+      currentCiFailures !== undefined &&
+      currentCiFailures.length > 0 &&
+      generatorFixAttempts < GENERATOR_FIX_ATTEMPT_CAP &&
+      deps.runGeneratorScript &&
+      deps.commitGeneratorOutput &&
+      allCiFailuresAreGeneratorFixable(currentCiFailures, deps.packageScripts ?? {})
+    ) {
+      generatorFixAttempts++;
+      const runGeneratorScript = deps.runGeneratorScript;
+      const commitGeneratorOutput = deps.commitGeneratorOutput;
+      const generatorResult = await runGeneratorFixForCiFailures({
+        failures: currentCiFailures,
+        scripts: deps.packageScripts ?? {},
+        worktreePath: opts.worktreePath,
+        taskId: opts.taskId,
+        branch: opts.branch,
+        deps: {
+          runScript: runGeneratorScript,
+          commit: (o) => commitGeneratorOutput(o),
+          push: (o) => deps.push(o.cwd, o.branch),
+        },
+      });
+      if (generatorResult.applied) {
+        deps.log("fix.generator_fix", {
+          strike: strikes,
+          attempt: generatorFixAttempts,
+          generators: generatorResult.generators,
+          commit_sha: generatorResult.commitSha,
+        });
+        deps.say(
+          `fix rung: generator-fix — ran ${generatorResult.generators.map((g) => `'npm run ${g}'`).join(", ")} directly ` +
+            `(W1-T2551), no strike spent` +
+            (generatorResult.commitSha ? ` — committed ${generatorResult.commitSha.slice(0, 7)}` : " — already fresh, nothing to commit"),
+        );
+        if (generatorResult.commitSha === undefined) {
+          // Nothing changed (a race, or the artifact was already fresh) — re-looping without a
+          // fresh push would spin on the exact same evidence forever; fall through to the
+          // ordinary rung this round instead of `continue`-ing.
+        } else {
+          // A commit landed — wait for CI to react to this push, same as an ordinary strike's own
+          // push. `noReviewYet` stays TRUE regardless of the wait's own outcome: this rung never
+          // ran a worker this round, so there is no fresh review report to hand `deps.runReview`
+          // the way the ordinary strike path below does — flipping to review-mode here would
+          // dispatch the NEXT round against the stale placeholder `review` this rung started with
+          // (empty `criteria`), exactly the "empty reviewer-unmet dispatch" defect W1-T2236 (the
+          // `gate-fix` mode's own rationale) measured and closed elsewhere. Refresh the ci-log
+          // evidence instead (mirrors the ordinary strike's own post-push refresh, below): if
+          // nothing is red anymore, the NEXT iteration's `rung.empty_ci_failures` guard (W1-T1282,
+          // above) stands this down cleanly with no strike spent; if something else is still red,
+          // the next iteration re-derives from THAT — either another generator-fixable round, or a
+          // real fall-through to the ordinary worker dispatch.
+          await deps.waitForCiGreen(opts.prUrl, deps.log);
+          if (deps.fetchCiFailures) {
+            try {
+              currentCiFailures = await deps.fetchCiFailures(opts.prUrl);
+              for (const f of currentCiFailures) everRedCiCheckNames.add(f.name);
+            } catch (e) {
+              deps.log("fix.ci_failures_fetch_error", { strike: strikes, error: String((e as Error)?.message ?? e) });
+            }
+          }
+          continue;
+        }
+      } else if (generatorResult.escalate) {
+        // Rationale (4): a generator whose own regeneration still fails its own check is a REAL
+        // failure — never commit a non-fix, and never silently retry forever (the attempt cap
+        // above bounds that too). Falls through to the ordinary ci-log strike below UNCHANGED:
+        // this site's own log line is diagnostic only — the rung's EXISTING strike-exhaustion
+        // escalation, unchanged, is what eventually opens the BLOCKED issue if the worker below
+        // cannot resolve it either.
+        deps.log("fix.generator_fix_escalate", {
+          strike: strikes,
+          generator: generatorResult.escalate.generator,
+          detail: generatorResult.escalate.detail,
+        });
+        deps.say(
+          `fix rung: generator-fix — 'npm run ${generatorResult.escalate.generator}' did not resolve its own check; ` +
+            `falling through to the ordinary fix rung`,
+        );
+      }
     }
 
     // W1-T1227 SITE — SCOPE GATE, BEFORE `strikes++`: a prior strike (this invocation's own, the
@@ -12089,6 +12453,12 @@ async function runTask(
           // W1-T2403: the SAME local-worktree discipline as `captureWorktreeSnapshot` above — a
           // real `git` read against this rung's own checkout, never a remote call.
           readRoundCommits: readFixRoundCommitsViaGit,
+          // W1-T2551: the generator-fix short-circuit's three real, local wirings — `npm run`,
+          // `git add -A && git commit`, and this checkout's OWN package.json scripts. See each
+          // helper's own doc for why every write stays best-effort/fail-closed.
+          runGeneratorScript: async (script, cwd) => runNpmScriptViaSpawn(script, cwd),
+          commitGeneratorOutput: (o) => commitGeneratorOutputViaGit(o),
+          packageScripts: readPackageScriptsFor(worktreePath),
         },
       });
       review = rung.review;
@@ -26659,6 +27029,10 @@ export function buildSweepEffects(
             captureWorktreeSnapshot: captureWorktreeSnapshotViaGit,
             // W1-T2403: same LOCAL worktree reader as the run-loop call site above.
             readRoundCommits: readFixRoundCommitsViaGit,
+            // W1-T2551: same three real, local wirings as the run-loop call site above.
+            runGeneratorScript: async (script, cwd) => runNpmScriptViaSpawn(script, cwd),
+            commitGeneratorOutput: (o) => commitGeneratorOutputViaGit(o),
+            packageScripts: readPackageScriptsFor(worktreePath),
           },
         });
       } catch (e) {
