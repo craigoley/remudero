@@ -18,7 +18,9 @@
  *     bare form — the anchor is narrowed, not weakened;
  *   - the count arm and the house-shorthand arms (which never call `noClaimIsAboutChangeset` at
  *     all — see the doc comment on that function) return identical verdicts with and without a
- *     delimiter present, so the change is confined to the absence anchor and nothing else moved.
+ *     NON-QUOTE delimiter present, so the change is confined to the absence anchor and nothing
+ *     else moved. (W1-T2549: a QUOTE-shaped delimiter around the shorthand label is a SEPARATE,
+ *     later change — see the dedicated test below — because it also means an inline quotation.)
  *
  * All assertions run against the real `bodyContradictsDiff` / `noClaimIsAboutChangeset`, never a
  * reimplementation, per the shard's reproduction note: "hand `bodyContradictsDiff` a body claiming
@@ -177,11 +179,22 @@ test("bodyContradictsDiff: the count arm ('exactly N files') is unaffected by de
   );
 });
 
-test("bodyContradictsDiff: the house-shorthand arms ('plan-only'/'data-only') are unaffected by delimiters", () => {
-  // Same confirmation for the shorthand arms: `shorthandIsAboutChangeset` reuses
-  // claimsChangesetContext, not noClaimIsAboutChangeset (see the doc comment on that function), so
-  // wrapping the shorthand in delimiters must not change whether it fires over a src-touching diff.
+test("bodyContradictsDiff: the house-shorthand arms ('plan-only'/'data-only') are unaffected by a NON-QUOTE delimiter", () => {
+  // Same confirmation for the shorthand arms, narrowed to delimiters that are NOT themselves a
+  // quote character: a bracketing aside must not change whether the label fires over a
+  // src-touching diff. See the QUOTE-shaped case below — W1-T2549 gave that shape its own rule.
+  const bare = bodyContradictsDiff("Plan-only: no source touched.", DIFF);
+  const parenthesised = bodyContradictsDiff("(Plan-only): no source touched.", DIFF);
+  assert.equal(bare.length, parenthesised.length, "a bracketing aside does not change the verdict");
+});
+
+// W1-T2549 — a QUOTE-shaped delimiter (`"`, a lone backtick) is no longer "just a delimiter" for
+// the shorthand arms: it also means the shorthand sits inside an inline-quoted span, the same
+// shape the count arm was already exempting (W1-T2534). Split out from the test above rather than
+// folded back in, because the two delimiter classes now produce DIFFERENT verdicts on purpose.
+test("bodyContradictsDiff: a QUOTE-shaped delimiter around the shorthand label now silences it (W1-T2549)", () => {
   const bare = bodyContradictsDiff("Plan-only: no source touched.", DIFF);
   const quoted = bodyContradictsDiff('"Plan-only": no source touched.', DIFF);
-  assert.equal(bare.length, quoted.length, "quoting the shorthand label does not change the verdict");
+  assert.equal(bare.length, 1, "the bare form is still a real claim, refused over a src-touching diff");
+  assert.deepEqual(quoted, [], "the quoted form is now read as a mention, not this body's own claim");
 });
