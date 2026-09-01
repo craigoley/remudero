@@ -3113,8 +3113,9 @@ test("runSweepLightPass: each PR still gets its own dedup/disposition/ledger lin
   assert.equal(admittedLine?.acted, true, "the admitted PR's review really ran");
   assert.equal(standingDownLine?.acted, false, "the non-admitted PR stood down rather than sharing the lane");
 
-  // A second pass over the SAME (stale) snapshot dedups the admitted PR's now-posted verdict —
-  // proving the concurrent per-PR calls did not corrupt or drop its own dedup key.
+  // A second pass over the SAME (stale) snapshot excludes the admitted PR's now-posted verdict
+  // BEFORE ranking, so the still-unreviewed PR inherits the unchanged single admission. The
+  // per-PR action-time guard still records 584's delivered stand-down independently.
   const calls2: number[] = [];
   const deps2 = fakeDeps({
     ledgerPath: lp,
@@ -3123,7 +3124,7 @@ test("runSweepLightPass: each PR still gets its own dedup/disposition/ledger lin
     },
   });
   await runSweepLightPass([a, b], deps2, DEFAULT_SWEEP_POLICY);
-  assert.deepEqual(calls2, [], "584 is already reviewed (deduped) and its fixture is still the oldest head, so it is chosen again but does nothing; 585 stands down exactly as before");
+  assert.deepEqual(calls2, [585], "584 is already reviewed and cannot spend the admission; 585 advances on the same pass");
 });
 
 // ── W1-T176: a required check with ZERO check runs is DETERMINISTIC-ACTION, ──

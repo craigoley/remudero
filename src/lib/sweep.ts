@@ -7230,9 +7230,10 @@ export async function runSweep(
  * second review lane (design (ii)/(iv) — no new mechanism, no new per-PR mutex to build): each
  * single-PR call still goes through the exact SAME dedup/disposition/ledger path `runSweep` has
  * always used, and no PR is ever handed to more than one of these concurrent calls, so there is
- * no race on any PR's own dedup key. The only cost is `readLedgerLines` now running once per
- * PR's own call rather than once for the whole batch — a few extra small, local file reads,
- * bounded by the open-PR count the light sweep already fetches every tick.
+ * no race on any PR's own dedup key. The cost is one pass-level ledger read for admission plus
+ * one fresh read per PR's own action-time call — a few extra small, local file reads, bounded by
+ * the open-PR count the light sweep already fetches every tick. W1-T2583's pass-level read keeps
+ * the scarce admission aligned with those later idempotence reads; it never replaces them.
  *
  * AN EMPTY PASS STILL GETS EXACTLY ONE `runSweep` CALL. Mapping `openPrs` directly would call
  * `runSweep` zero times on a quiet tick, silently dropping the `sweep.pass`/`sweep.summary`
@@ -7263,11 +7264,31 @@ export async function runSweepLightPass(
   // W1-T2439: the light pass now admits from BOTH lanes — the spawning one at its unchanged bound
   // of exactly one, and the non-spawning plan-filing one at its own smaller, derived bound. The
   // admitted SET is what each PR's own scoped deps are decided against; nothing else moves.
-  const { spawning, planFilings } = selectReviewAdmissions(openPrs, policy, now);
-  const admittedNumbers = new Set<number>([
+  // W1-T2583: READ THE LEDGER ONCE FOR SELECTION, BEFORE RANKING. `runSweep` still performs its
+  // own fresh read for every scoped action below; this pass-level fold is only the liveness filter
+  // that keeps a head the action-time guard already knows it will dedup from spending a scarce
+  // admission. The later read remains the race-safe boundary if a verdict lands after this one.
+  const readLedger = deps.readLedger ?? readLedgerLines;
+  const selectionPrior = priorActionsFromLedger(readLedger(deps.ledgerPath));
+  const outcomes: ReviewAdmissionOutcomes = {
+    delivered: selectionPrior.reviewDelivered,
+    refused: selectionPrior.reviewRefused,
+  };
+  const { spawning, planFilings } = selectReviewAdmissions(openPrs, policy, now, outcomes);
+  const selectedNumbers = new Set<number>([
     ...(spawning ? [spawning.prNumber] : []),
     ...planFilings.map((p) => p.prNumber),
   ]);
+  // Known outcome-deduped heads did not compete for either bound, but they must still pass through
+  // `runSweep`'s existing action-time guard so their own ledger row says DELIVERED/REFUSED instead
+  // of falsely claiming they lost an admission. This never dispatches a review: the append-only
+  // outcome row that excluded them is re-read before the action switch.
+  const outcomeDedupedNumbers = new Set(
+    openPrs
+      .filter((pr) =>
+        deriveDisposition(pr, policy, now).disposition === "post-review" && reviewAdmissionOutcomeKnown(pr, outcomes))
+      .map((pr) => pr.prNumber),
+  );
   const admitted = spawning;
   return Promise.all(
     openPrs.map((pr) => {
@@ -7277,7 +7298,7 @@ export async function runSweepLightPass(
       // pass runs inside is awaited whichever PR won the post-review admission, so the fix rung's
       // CI wait must leave the await on both branches or the defect survives on one of them.
       const scopedDeps: SweepDeps =
-        admittedNumbers.has(pr.prNumber)
+        selectedNumbers.has(pr.prNumber) || outcomeDedupedNumbers.has(pr.prNumber)
           ? { ...deps, detachFixWait: true }
           : {
               ...deps,
@@ -7299,6 +7320,22 @@ export async function runSweepLightPass(
       return runSweep([pr], scopedDeps, policy);
     }),
   );
+}
+
+/** Outcome keys already known, before admission, to make the action-time review guard stand down. */
+export interface ReviewAdmissionOutcomes {
+  delivered: ReadonlySet<string>;
+  refused: ReadonlySet<string>;
+}
+
+const EMPTY_REVIEW_ADMISSION_OUTCOMES: ReviewAdmissionOutcomes = {
+  delivered: new Set<string>(),
+  refused: new Set<string>(),
+};
+
+function reviewAdmissionOutcomeKnown(pr: OpenPrView, outcomes: ReviewAdmissionOutcomes): boolean {
+  const key = `${pr.taskId ?? ""}@${pr.headSha}`;
+  return outcomes.delivered.has(key) || outcomes.refused.has(key);
 }
 
 /**
@@ -7373,8 +7410,14 @@ export function selectReviewAdmissions(
   openPrs: readonly OpenPrView[],
   policy: SweepPolicy,
   now: number,
+  outcomes: ReviewAdmissionOutcomes = EMPTY_REVIEW_ADMISSION_OUTCOMES,
 ): { spawning: OpenPrView | undefined; planFilings: OpenPrView[] } {
-  const eligible = openPrs.filter((pr) => deriveDisposition(pr, policy, now).disposition === "post-review");
+  // W1-T2583: selection and execution must agree on outcome-keyed eligibility. The caller folds
+  // these two sets once from the same PriorActions reader `runSweep` uses; filtering here happens
+  // before either lane ranks or truncates. The action-time lookup remains in `runSweep` as the
+  // safety boundary for a verdict/refusal that races this snapshot.
+  const eligible = openPrs.filter((pr) =>
+    deriveDisposition(pr, policy, now).disposition === "post-review" && !reviewAdmissionOutcomeKnown(pr, outcomes));
   const filings = eligible.filter((pr) => pr.isPlanFiling === true);
   const rest = eligible.filter((pr) => pr.isPlanFiling !== true);
 
