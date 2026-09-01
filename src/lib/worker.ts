@@ -28,6 +28,7 @@ import { dirname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { query, type Options, type PermissionMode } from "@anthropic-ai/claude-agent-sdk";
 import { loadConfig, workerHomeDir, workerShell, workerZdotdir, type Config } from "./config.js";
+import { detectUsageLimitRefusal } from "./classify.js";
 import {
   detectCompactionEvents,
   detectCompactionFailures,
@@ -157,6 +158,24 @@ export interface WorkerResult {
    * because nothing captured it and the classifier was never wired.
    */
   apiError: boolean;
+  /**
+   * W1-T2564: THE ACCOUNT REFUSED THIS RUN FOR A SESSION/USAGE LIMIT. Same shape and same reason
+   * as {@link apiError} directly above — a condition the result ENVELOPE misreports as
+   * `subtype: "success"`, so a distinct field is the only place it can survive.
+   *
+   * THE SDK EMITS A SUCCESS ENVELOPE AND THEN THROWS. `collectWorkerResult`'s catch already
+   * swallows that throw (the envelope is real and captured) and sets `isError`, but `subtype` was
+   * written by the success envelope BEFORE the throw and nothing rewrites it — so
+   * {@link workerLedgerFields}'s `r.isError ? r.subtype : "success"` resolves BOTH arms to
+   * "success" and the refusal is erased. MEASURED over the three-form union: 793 rows across five
+   * rungs recorded `verdict: "success"` for a run the account had refused, 775 of them
+   * `inbox.draft_synthesized`.
+   *
+   * NOT DERIVED FROM COST. 768 of 1,022 draft rows carried `cost_usd: 0` and every one was a
+   * refusal — but SEVEN refusals carried a NON-ZERO cost, so the two sets are not equal and a
+   * price test both misses those and catches genuinely free runs.
+   */
+  usageRefusal?: { matched: string; resetsAtText?: string; resetsAtMs?: number };
   /** Permission denials the SDK surfaced (hook/permission blocks). */
   permissionDenials: unknown[];
   /** The exact env the child was spawned with (billing-boundary proof). */
@@ -445,7 +464,27 @@ export function workerLedgerFields(r: WorkerResult): {
     // verbatim off `WorkerResult.accountLabel`; `undefined` (never guessed) when
     // spawnWorker could not resolve one.
     account_label: r.accountLabel,
-    verdict: r.isError ? r.subtype : "success",
+    // W1-T2564: A REFUSAL OUTRANKS THE ENVELOPE'S OWN SUBTYPE. The previous form was
+    // `r.isError ? r.subtype : "success"` — right in intent ("when this errored, name the error")
+    // and defeated by the data: on the swallow path `subtype` was written by a SUCCESS envelope
+    // seen BEFORE the SDK threw, so `isError` was true, `subtype` was "success", and BOTH arms
+    // rendered "success". 793 refusals across five rungs were recorded as completed work.
+    //
+    // CHECKED FIRST, not folded into the ternary, because the ordering IS the fix: the envelope's
+    // subtype is exactly the field that lies here, so a refusal must not consult it. Every other
+    // path is byte-identical to before — `recon.done`'s `error_max_turns` (an envelope that DID
+    // name its error) still renders `error_max_turns`, and a clean run still renders "success".
+    verdict: r.usageRefusal ? "usage_refused" : r.isError ? r.subtype : "success",
+    ...(r.usageRefusal
+      ? {
+          usage_refused: true,
+          usage_refusal_matched: r.usageRefusal.matched,
+          ...(r.usageRefusal.resetsAtText === undefined ? {} : { usage_resets_at_text: r.usageRefusal.resetsAtText }),
+          ...(r.usageRefusal.resetsAtMs === undefined
+            ? {}
+            : { usage_resets_at: new Date(r.usageRefusal.resetsAtMs).toISOString() }),
+        }
+      : {}),
     quality_suspect: r.qualitySuspect,
     compaction_events: r.compactionEvents,
     // W1-T2245: default `false`/`[]` for the same "optional so the pre-existing fixture literals
@@ -1841,6 +1880,7 @@ export async function collectWorkerResult(
   let subtype = "";
   let isError = false;
   let apiError = false;
+  let usageRefusal: WorkerResult["usageRefusal"];
   let permissionDenials: unknown[] = [];
   let sawResult = false;
   let tokens: TokenUsage = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 };
@@ -1966,10 +2006,23 @@ export async function collectWorkerResult(
     if (!sawResult) throw err;
     // Otherwise the throw is the SDK's post-error-result signal; the envelope is
     // already captured. Record the message on stderr for the proof surface.
-    stderrChunks.push(
-      `\n[collectWorkerResult] error-result throw swallowed: ${String((err as Error)?.message ?? err)}\n`,
-    );
+    const swallowed = String((err as Error)?.message ?? err);
+    stderrChunks.push(`\n[collectWorkerResult] error-result throw swallowed: ${swallowed}\n`);
     isError = true;
+    // W1-T2564: CLASSIFY THE REFUSAL HERE, where the message still exists. `detectUsageLimitRefusal`
+    // is the fleet's ONE usage-limit detector (lib/classify.ts, W1-T2515 — "A SHUT WINDOW IS NOT A
+    // FLAKE"), already wired into the fix-retry loop; this is a second CALLER, never a second
+    // classifier. Verified against the real stderr: it matches "You've hit your session limit" and
+    // recovers `resetsAtMs` 2026-09-01T11:50:00.000Z — the reset the API actually stated, and MORE
+    // ACCURATE than the 12:00:00.000Z the headroom governor believed at that same instant.
+    const refusal = detectUsageLimitRefusal(swallowed, nowFn());
+    if (refusal) {
+      usageRefusal = {
+        matched: refusal.matched,
+        ...(refusal.resetsAtText === undefined ? {} : { resetsAtText: refusal.resetsAtText }),
+        ...(refusal.resetsAtMs === undefined ? {} : { resetsAtMs: refusal.resetsAtMs }),
+      };
+    }
   }
 
   return {
@@ -1984,6 +2037,7 @@ export async function collectWorkerResult(
     subtype,
     isError,
     apiError,
+    ...(usageRefusal ? { usageRefusal } : {}),
     permissionDenials,
     childEnvKeys: opts.childEnvKeys,
     accountLabel: opts.accountLabel,
