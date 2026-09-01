@@ -48,6 +48,17 @@ test("W1-T1218: when the pending set exceeds the budget the oldest eligible revi
   assert.ok(asEnumerated.length > LANES, "the fixture MUST be deeper than the budget or it cannot discriminate");
   assert.equal(asEnumerated.at(-1)?.label, "oldest", "and the oldest must sit last, where an unsorted slice never reaches");
 
+  // THE TWO ORDERINGS, WRITTEN OUT INDEPENDENTLY OF THE CODE UNDER TEST. These are hand-declared
+  // expectations, not values derived from `orderPendingReviews` — only the DEPTH of the cut
+  // follows the budget. Before #3486 the cut depth was spelled as a literal 3 here, so the
+  // operator's cost hold (reviewLanes 3 -> 2, plan/policy.yaml) reddened this test on main even
+  // though the ordering it guards was untouched. LANES is already read from the shipped policy at
+  // the top of this file; these slices now honour it, so the guard tracks the budget instead of
+  // duplicating it.
+  const OLDEST_FIRST = ["oldest", "older", "mid", "newer", "newest"];
+  const AS_ENUMERATED = ["newest", "newer", "mid", "older", "oldest"];
+  assert.deepEqual(asEnumerated.map((j) => j.label), AS_ENUMERATED, "the fixture is in the declared enumeration order");
+
   const ordered = orderPendingReviews(asEnumerated);
   const runNow = ordered.slice(0, LANES);
   const deferred = ordered.slice(LANES);
@@ -56,16 +67,19 @@ test("W1-T1218: when the pending set exceeds the budget the oldest eligible revi
   assert.ok(runNow.some((j) => j.label === "oldest"), "so it takes a lane on THIS pass");
   assert.deepEqual(
     runNow.map((j) => j.label),
-    ["oldest", "older", "mid"],
+    OLDEST_FIRST.slice(0, LANES),
     "the lanes go to the longest-waiting entries, in order",
   );
-  assert.deepEqual(deferred.map((j) => j.label), ["newer", "newest"], "and the NEWEST entries are the ones deferred");
+  assert.deepEqual(deferred.map((j) => j.label), OLDEST_FIRST.slice(LANES), "and the NEWEST entries are the ones deferred");
 
   // PAIRED POSITIVE CONTROL: the unsorted slice — the behaviour before this change — gives the
-  // lanes to the newest three and never reaches the oldest. Without this the assertions above
-  // could be satisfied by a fixture that was already in the right order.
+  // lanes to the newest entries and never reaches the oldest. Without this the assertions above
+  // could be satisfied by a fixture that was already in the right order. It discriminates at every
+  // budget this row can hold (min 1, max 3): the two orderings disagree on their FIRST element, so
+  // no legal LANES value makes the sorted and unsorted cuts coincide.
   const unsorted = asEnumerated.slice(0, LANES).map((j) => j.label);
-  assert.deepEqual(unsorted, ["newest", "newer", "mid"], "the pre-change cut, for contrast");
+  assert.deepEqual(unsorted, AS_ENUMERATED.slice(0, LANES), "the pre-change cut, for contrast");
+  assert.notDeepEqual(unsorted, runNow.map((j) => j.label), "the ordered cut is not the enumeration cut — ordering really happened");
   assert.ok(!unsorted.includes("oldest"), "which is precisely the starvation this fixes");
 });
 
@@ -158,7 +172,13 @@ test("W1-T1218: a pending entry carrying no creation timestamp still takes a det
 test("W1-T1218: the review budget and its floor are unchanged", () => {
   // THE DEFECT WAS ORDER, NOT WIDTH. This change touches neither the value nor the bound, and the
   // ordering takes no policy argument at all — it cannot widen or narrow the lane count.
-  assert.equal(DEFAULT_SWEEP_POLICY.reviewLanes, 3, "the shipped budget is unchanged");
+  //
+  // The pinned value tracks plan/policy.yaml's `sweep.reviewLanes` row, which the operator moved
+  // 3 -> 2 in #3486 as a deliberate, reversible cost hold while the per-run cost work lands. That
+  // PR updated test/review-lane-budget.test.ts's copy of this same constant and missed this one,
+  // which is why main went red. Kept as a LITERAL on purpose: reading the row here would assert a
+  // value against itself and guard nothing, so an unintended budget change must still redden this.
+  assert.equal(DEFAULT_SWEEP_POLICY.reviewLanes, 2, "the shipped budget is unchanged");
   assert.equal(validateReviewLanesRow({ value: 3, origin: "net-new", min: 1, max: 3 }), 3);
   assert.throws(() => validateReviewLanesRow({ value: 4, origin: "net-new", min: 1, max: 3 }), /reviewLanes/i,
     "a value past the bound is still a PolicyError — the ceiling still refuses");
