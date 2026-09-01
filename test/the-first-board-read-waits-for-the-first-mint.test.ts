@@ -235,3 +235,43 @@ test("W1-T2554: the refresh timer is still armed for subsequent renewals, exactl
   assert.equal(delays.length, 1, "the next renewal is still scheduled after the awaited first mint");
   assert.equal(unrefs, 1, "the scheduled renewal timer must still be unref'd so it never holds the process open");
 });
+
+// W1-T2554 — the RENEWAL itself, not just that a timer was scheduled. The test above captures the
+// delay and the unref but never INVOKES the callback the timer was handed, so `tick`'s own body
+// (`void runOnce()`) has no covering test: `diff-coverage` blocked this PR naming exactly that one
+// line, src/lib/github-app.ts's `tick` arrow. Covering it by invoking the captured callback is not
+// coverage theatre — it is the only assertion in this file that the loop RENEWS rather than minting
+// once and stopping, which is the behaviour `ready` must not have broken when it was factored out
+// of `tick` to be returnable.
+test("W1-T2554: invoking the scheduled callback mints AGAIN and re-arms — the renewal loop, not just its first turn", async () => {
+  const NOW = 1_700_000_000_000;
+  const EXPIRES = NOW + 60 * 60 * 1000;
+  let mints = 0;
+  const scheduled: Array<() => void> = [];
+
+  const res = startInstallationTokenRefresh({
+    log: () => {},
+    env: CONFIGURED_ENV,
+    refresh: async () => {
+      mints += 1;
+      return { ok: true, expiresAtMs: EXPIRES };
+    },
+    setTimer: (fn, _ms) => {
+      scheduled.push(fn);
+      return { unref: () => {} };
+    },
+    now: () => NOW,
+  });
+
+  await res.ready;
+  assert.equal(mints, 1, "the awaited first mint has happened and no more");
+  assert.equal(scheduled.length, 1, "and exactly one renewal is pending");
+
+  // Fire the timer the way the runtime would. `tick` returns void and swallows the promise, so the
+  // renewal is observed by draining the microtask queue rather than by awaiting a returned handle.
+  scheduled[0]!();
+  await new Promise((r) => setImmediate(r));
+
+  assert.equal(mints, 2, "firing the scheduled callback mints again — the loop renews");
+  assert.equal(scheduled.length, 2, "and re-arms itself, so renewal is not a one-shot");
+});
