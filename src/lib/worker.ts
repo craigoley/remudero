@@ -57,6 +57,7 @@ import {
   lostWorkerHomeGrants,
   type WorkerHomeGrantOutcome,
   type WorkerHomeReapResult,
+  type WorkerKeychainSummary,
 } from "./worker-home.js";
 import {
   buildContainedSpawnFn,
@@ -496,6 +497,46 @@ export function workerHomeReapLogFields(
  *  file's other best-effort exit-path diagnostics (e.g. `assertWorktreeBaseCurrent`'s `warn`). */
 function defaultLogHomeReap(result: WorkerHomeReapResult, spawn: { runId?: string; taskId?: string }): void {
   console.error(JSON.stringify(workerHomeReapLogFields(result, spawn)));
+}
+
+/**
+ * W1-T2518: the fields `ensureWorkerKeychain`'s {@link WorkerKeychainSummary} becomes once
+ * observed at THIS call site — `observedHeadroomMs` (worker-home.ts:1080) existed since
+ * W1-T2398 but this call site previously discarded the whole summary, chaining `.keychainPath`
+ * directly off the call and reading nothing else (`git grep -n '= ensureWorkerKeychain(' src/`
+ * read one hit, `.keychainPath` chained straight off it, before this task). Logged on EVERY
+ * darwin provisioning call, `expectedRunMs` supplied or not, so the rate the credential's
+ * expiry margin is actually exercised becomes answerable off-host — worker-home.ts's own doc
+ * names this exact gap ("the rate this shard's own rationale could not measure from a ledger
+ * becomes answerable off-host purely by a caller logging this field").
+ *
+ * Pure — {@link spawnWorker}'s darwin branch is the only real caller and the default sink
+ * ({@link defaultLogKeychainHeadroom}) is a thin `console.error` wrapper around this, matching
+ * `workerHomeReapLogFields`'s identical discipline just above.
+ */
+export function workerKeychainHeadroomLogFields(
+  summary: WorkerKeychainSummary,
+  expectedRunMs: number | undefined,
+  spawn: { runId?: string; taskId?: string },
+): Record<string, unknown> {
+  return {
+    step: "worker_keychain_headroom",
+    observed_headroom_ms: summary.observedHeadroomMs,
+    expected_run_ms: expectedRunMs,
+    provision_reason: summary.reason,
+    run_id: spawn.runId,
+    task_id: spawn.taskId,
+  };
+}
+
+/** Default {@link SpawnWorkerArgs.logKeychainHeadroom} sink — one JSON line to stderr, matching
+ *  this file's other best-effort exit-path diagnostics (e.g. `defaultLogHomeReap` above). */
+function defaultLogKeychainHeadroom(
+  summary: WorkerKeychainSummary,
+  expectedRunMs: number | undefined,
+  spawn: { runId?: string; taskId?: string },
+): void {
+  console.error(JSON.stringify(workerKeychainHeadroomLogFields(summary, expectedRunMs, spawn)));
 }
 
 // ── Toolchain resolution (W1-T113: the vanished-binary incident) ───────────
@@ -946,6 +987,21 @@ export interface SpawnWorkerArgs {
      * unchanged behavior, matching every other opt-in seam in this block.
      */
     priorSpawnCredentialExpired?: boolean;
+    /**
+     * W1-T2518: the dispatcher's own run-length estimate, forwarded VERBATIM to
+     * `ensureWorkerKeychain`'s `expectedRunMs` (worker-home.ts) — the option W1-T2398 shipped
+     * with ZERO callers (`git grep -n expectedRunMs origin/main -- src/` read 9 hits, all
+     * inside worker-home.ts itself — the declaration, its docs, and its two use sites — and
+     * none a caller). This is that first caller. Omitted ⇒ byte-identical behavior, matching
+     * `expectedRunMs`'s own doc ("never derived in here") — this call site is where a real
+     * estimate belongs, never invented inside worker-home.ts. Supplied, it widens the
+     * effective expiry skew and, after `ensureWorkerKeychain`'s own re-provision attempt,
+     * refuses the spawn (`WorkerKeychainError`, `credential-too-short-for-run`) before it
+     * starts when even a freshly re-provisioned credential still can't outlast the run — see
+     * that option's own doc for the full two-part contract. Appended LAST — no positional
+     * caller shifts.
+     */
+    expectedRunMs?: number;
   };
   /**
    * W1-T117: attribution markers threaded into the child's env
@@ -1049,6 +1105,21 @@ export interface SpawnWorkerArgs {
    * unaffected by that — it still just makes whatever `reapWorkerHome` computed observable.
    */
   logHomeReap?: (result: WorkerHomeReapResult, spawn: { runId?: string; taskId?: string }) => void;
+  /**
+   * W1-T2518: sink for the darwin keychain rung's {@link WorkerKeychainSummary}, observed at
+   * THIS call site on EVERY darwin provisioning call — `keychain.expectedRunMs` supplied or
+   * not — so the rate `observedHeadroomMs` (worker-home.ts:1080) actually gets exercised
+   * becomes answerable off-host purely by reading this line, exactly as that field's own doc
+   * anticipates. Never called on the non-darwin path: `assertWorkerCredentialFile` returns no
+   * summary carrying this field at all. Omitted ⇒ {@link defaultLogKeychainHeadroom}, one JSON
+   * line to stderr — the same best-effort diagnostic-output discipline `logHomeReap` above
+   * already uses.
+   */
+  logKeychainHeadroom?: (
+    summary: WorkerKeychainSummary,
+    expectedRunMs: number | undefined,
+    spawn: { runId?: string; taskId?: string },
+  ) => void;
 }
 
 /**
@@ -1129,7 +1200,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     // carry the account its spend is attributed to (W1-T268's ledger dimension).
     const accountId = args.keychain?.accountId ?? resolveActiveAccountId();
     if (platform === "darwin") {
-      workerKeychainPath = ensureWorkerKeychain({
+      const keychainSummary = ensureWorkerKeychain({
         ...workerKeychainPaths(join(config.root, "state")),
         loginKeychainPath: join(realHome, "Library", "Keychains", "login.keychain-db"),
         grantApps: workerKeychainGrantApps(claudeBin),
@@ -1137,7 +1208,19 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         exists: args.keychain?.exists,
         accountId,
         priorSpawnCredentialExpired: args.keychain?.priorSpawnCredentialExpired,
-      }).keychainPath;
+        // W1-T2518: this call's FIRST forwarding of expectedRunMs — see the option's own doc
+        // on `SpawnWorkerArgs.keychain`, above, and `expectedRunMs`'s doc in worker-home.ts for
+        // the full contract (widen-then-refuse) this now actually exercises.
+        expectedRunMs: args.keychain?.expectedRunMs,
+      });
+      // W1-T2518: surfaced on EVERY darwin call, regardless of whether this refused (a throw
+      // above skips this line entirely — nothing to log, the error message itself names the
+      // headroom and the estimate) or returned a summary to spawn on.
+      (args.logKeychainHeadroom ?? defaultLogKeychainHeadroom)(keychainSummary, args.keychain?.expectedRunMs, {
+        runId: args.runId,
+        taskId: args.taskId,
+      });
+      workerKeychainPath = keychainSummary.keychainPath;
     } else {
       // recon-cloud-workers-spike stop 6: the SAME refusal contract, one rung later in the
       // taxonomy and one platform over. The darwin branch above is untouched — this is an
@@ -2494,6 +2577,60 @@ export function worktreeAdd(
   // Excluding FIRST keeps the link from ever being visible to git as an untracked file.
   excludeNodeModulesFromGit(worktreePath);
   linkWorktreeNodeModules(repoDir, worktreePath);
+}
+
+/** Does a local branch named `branch` already exist in `repoDir`? A cheap, read-only
+ *  `show-ref` check — unlike `git branch -D` it never touches a ref, so it cannot itself
+ *  contend for `.git/refs`'s lock. Used by {@link uniqueRunBranch}, below. */
+function localBranchExists(repoDir: string, branch: string): boolean {
+  try {
+    execFileSync("git", ["-C", repoDir, "show-ref", "--verify", "--quiet", `refs/heads/${branch}`], {
+      stdio: "pipe",
+    });
+    return true;
+  } catch {
+    return false; // `--quiet` folds ref-absent and any other git failure into one "not found" state
+  }
+}
+
+/**
+ * Pick a `run-<runId>` worktree branch name that is ACTUALLY FREE in `repoDir` right now,
+ * falling back to a numbered suffix (`run-<runId>-2`, `-3`, …) when the plain name is
+ * already taken (W1-T2493).
+ *
+ * WHY A RUN ID CAN BE ASKED FOR TWICE. `runId` identifies a PROCESS across every ledger row
+ * it writes — right for a run id — but a rung built ONCE at daemon boot and re-invoked on
+ * every later poll (`buildInboxDraftHook`/`draftProposalBatch`, run-task.ts) closes over that
+ * SAME string and hands it to this function again on every poll that has work. `worktreeAdd`'s
+ * `-b` correctly refuses an existing branch — that refusal is exactly what stops two lanes
+ * silently sharing a checkout — so without this, the SECOND call in one boot died on
+ * `fatal: a branch named 'run-<runId>' already exists`, deterministically, forever, because
+ * nothing about the requested name ever changed between polls.
+ *
+ * WHY A LEFTOVER BRANCH IS THE COMMON CASE, NOT THE EXCEPTION. `git worktree remove` (see
+ * `worktreeRemove`, below) never deletes the branch a worktree was checked out on — that is
+ * ordinary git, not a bug — so even a worktree that finished CLEANLY leaves `run-<runId>`
+ * behind as a local ref the very next call to this function will find. A worktree reaped after
+ * a crash leaves the identical residue. Either shape must be tolerated without assuming a
+ * clean namespace, which is exactly what re-checking existence per candidate gives for free.
+ *
+ * NEVER FORCES OR REUSES. This function only ever returns a name it just observed to be free
+ * — it does not delete, rename, or `-f` over anything. A genuine race (two lanes computing the
+ * identical candidate at the same instant) is still refused: `worktreeAdd`'s own `-b` throws
+ * if the real `git worktree add` loses that race, exactly as it always has.
+ *
+ * THE RUN ID ITSELF IS NEVER TOUCHED. Only the returned branch NAME can gain a suffix; every
+ * caller keeps passing the original `runId` to `log`/`writeRunLock` unchanged, so ledger
+ * attribution for this process's whole life is byte-identical to before this function existed.
+ */
+export function uniqueRunBranch(repoDir: string, runId: string): string {
+  const base = `run-${runId}`;
+  if (!localBranchExists(repoDir, base)) return base;
+  for (let n = 2; n < 10_000; n++) {
+    const candidate = `${base}-${n}`;
+    if (!localBranchExists(repoDir, candidate)) return candidate;
+  }
+  throw new Error(`uniqueRunBranch: exhausted numbered suffixes for run id ${runId}`);
 }
 
 export function worktreeRemove(repoDir: string, worktreePath: string): void {

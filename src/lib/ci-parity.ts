@@ -898,6 +898,55 @@ export function runCiParity(repoRoot: string, deps: CiParityDeps = {}): CiParity
  *  literal value `runPreflightFast` compares an actual `Date.now()` delta against on every run. */
 export const FAST_GATE_CENSUS_BOUND_MS = 2000;
 
+/**
+ * W1-T2545 — THE BOUND ABOVE IS NOW THE *SOFT* ONE, AND THE REFUSAL IS RELATIVE.
+ *
+ * WHY THE ABSOLUTE CEILING COULD NOT HOLD. A census entry qualifies for this gate precisely
+ * BECAUSE it walks the tracked `src/` population and asserts over every file in it — so its cost
+ * is a monotonic function of a corpus that only grows. A fixed millisecond ceiling against a
+ * monotonically growing cost is a gate that ejects its own entries over time, and ejection is
+ * silent in the direction that matters: `runPreflightFast` refused the step, so the fast gate
+ * stopped running a census suite CI still enforces — restoring exactly the blindness W1-T2478
+ * existed to close. MEASURED at origin/main 05dcb050, `rmd preflight --fast` on a clean tree:
+ * `negative-reachability-census: BOUND EXCEEDED — took 2509ms`, own result "would have PASSed",
+ * with the whole gate reporting FAIL. On GitHub runners the same entry measured 2268ms and
+ * 2250ms while main's own `ci` passed, so the distribution STRADDLED the ceiling: a coin flip
+ * per run, decided by runner speed rather than by anything about the tree.
+ *
+ * THAT LAST OBSERVATION IS THE FIX. A wall-clock number conflates two things — how much work the
+ * suite does, and how fast the machine is — and only the first is a property of the repo. So the
+ * refusal is now measured against the SAME RUN's own cheapest census entry: a slow machine slows
+ * every entry together, leaving the ratio stable, while a suite genuinely doing far more work
+ * than its siblings stands out on any machine. The bound is derived from the measured population
+ * rather than written down, which is what keeps it from being outgrown.
+ *
+ * THE SOFT BOUND STILL EARNS ITS KEEP: an entry over it is REPORTED, with its cost, so growth is
+ * visible long before it is refused — the warning the absolute ceiling could only deliver by
+ * failing the gate.
+ */
+
+/** The same-run reference is floored here, so an unusually cheap entry cannot make the ratio
+ *  harsh for its siblings — with one very fast census suite, 4x its cost is not a meaningful
+ *  ceiling for a suite that legitimately walks more. */
+export const FAST_GATE_CENSUS_REFERENCE_FLOOR_MS = 1000;
+
+/** How many times the same run's cheapest census entry an entry may cost before it is refused as
+ *  RUNAWAY. Sized against the measured spread (2026-08-31, one container: 960 / 1128 / 2344 /
+ *  2615ms — a 2.7x spread across four healthy entries), so a merely-grown suite passes and one
+ *  doing several times the work of its cheapest sibling does not. */
+export const FAST_GATE_CENSUS_RUNAWAY_MULTIPLE = 4;
+
+/**
+ * The refusal threshold for THIS run, derived from the census durations THIS run measured.
+ * Returns `undefined` when no census entry ran — there is no population to derive a bound from,
+ * and inventing one would be the constant this task is removing.
+ */
+export function censusRunawayThresholdMs(durationsMs: readonly number[]): number | undefined {
+  if (durationsMs.length === 0) return undefined;
+  const reference = Math.max(FAST_GATE_CENSUS_REFERENCE_FLOOR_MS, Math.min(...durationsMs));
+  return reference * FAST_GATE_CENSUS_RUNAWAY_MULTIPLE;
+}
+
 export const FAST_GATE_STEPS: { job: string; script: string; reason: string; boundMs?: number }[] = [
   {
     job: "cli-reference",
@@ -989,6 +1038,126 @@ export const FAST_GATE_STEPS: { job: string; script: string; reason: string; bou
   },
 ];
 
+// ── W1-T2523: WHICH CENSUS SUITES DOES A CHANGED PATH JOIN? A REPORT, NEVER A GATE ────────────
+//
+// THE GAP. `git grep -l <symbol>` — the caller sweep this repo mandates before a PR — is BLIND
+// to a census suite by construction: it names none of a caller's symbols, only a population
+// (`git ls-files`, filtered to `src/`) and a property asserted over every member. A PR that adds
+// two constants and a regex to `src/lib/classify.ts` tripped BOTH `bound-kind-declared.test.ts`
+// and `negative-reachability-ratchet.test.ts` (2026-08-30) with a correctly-run sweep finding
+// neither — they surfaced only from a ~40-minute full-suite diff of both branches. This is the
+// missing QUERY: given a set of changed paths, name the known census suites those paths enter.
+//
+// WHAT THIS MUST NOT BECOME (the task's own rationale, restated here so it cannot drift from the
+// code it governs): NOT a new gate. `censusSuiteMembership`/`censusSuiteMembershipFor` below
+// return data only — no `ok`, no verdict, nothing a caller could wire into a refusal — the same
+// posture `hostCausedSuiteRedsStep` already takes for informational output in this file. And it
+// must not claim completeness it cannot have: a suite that walks the tree in some way this
+// derivation does not recognise is named in `unknownCoverage` as UNKNOWN COVERAGE, never
+// silently dropped, or it rebuilds the very blind spot this task exists to close.
+//
+// THE DERIVATION IS AN APPROXIMATION, STATED AS ONE (same posture W1-T2317's own text-proximity
+// ratchet takes about itself). `KNOWN_CENSUS_SUITES` below hand-carries the four suites
+// `FAST_GATE_STEPS`' own census entries already name, each paired with the tracked-tree path
+// prefixes its own `reason` text above already describes as what it walks — read off that text,
+// not re-derived from source, so nothing here can silently diverge from the census class this
+// file already maintains. Beyond that fixed list, `censusSuiteMembershipFor` RE-DERIVES rather
+// than trusts: it runs the same `git grep -l 'ls-files' -- 'test/*.test.ts'` shape the task
+// record names, intersected with "the hit's own text also filters on `src/`" — an approximation
+// of "walks a src population", not a proof of it — and anything that shape finds beyond the four
+// known suites is named in `unknownCoverage` rather than swallowed.
+
+/** One census suite this derivation recognises well enough to say WHICH changed paths enter it.
+ *  `walks` is the set of tracked-tree path prefixes its own `git ls-files` sweep is scoped to,
+ *  taken verbatim from its `FAST_GATE_STEPS` entry's own `reason` above. */
+interface KnownCensusSuite {
+  readonly job: string;
+  readonly testFile: string;
+  readonly walks: readonly string[];
+}
+
+export const KNOWN_CENSUS_SUITES: readonly KnownCensusSuite[] = [
+  { job: "bound-kind-census", testFile: "test/bound-kind-declared.test.ts", walks: ["src/"] },
+  { job: "catch-erasure-census", testFile: "test/catch-erasure-ratchet.test.ts", walks: ["src/"] },
+  {
+    job: "negative-reachability-census",
+    testFile: "test/negative-reachability-ratchet.test.ts",
+    walks: ["src/", "test/"],
+  },
+  {
+    job: "no-shallowing-census",
+    testFile: "test/no-shallowing-of-the-canonical-checkout.test.ts",
+    walks: ["src/", "scripts/", "deploy/", ".github/workflows/"],
+  },
+];
+
+/** One changed path paired with the {@link KNOWN_CENSUS_SUITES} job names it enters — `suites`
+ *  is `[]`, an explicit empty set, when the path joins none; never omitted, never a guess. */
+export interface CensusMembershipEntry {
+  readonly path: string;
+  readonly suites: readonly string[];
+}
+
+/** Pure, non-blocking output: no `ok`, no verdict — a report a caller prints, never a gate a
+ *  caller can fail a PR with (design constraint above). `unknownCoverage` names every test file
+ *  this run's own re-derivation found walking `git ls-files` and filtering on `src/` that
+ *  {@link KNOWN_CENSUS_SUITES} does not already model — reported because this derivation cannot
+ *  say which prefixes an unrecognised suite walks, so it refuses to guess membership for it
+ *  rather than silently omit it. */
+export interface CensusMembershipReport {
+  readonly entries: readonly CensusMembershipEntry[];
+  readonly unknownCoverage: readonly string[];
+}
+
+/** PURE core (mirrors {@link computeHostFacts}'s own split from {@link detectHostFacts}): given
+ *  the changed paths and the already-discovered, already-`src/`-filtered set of census-suite
+ *  callers (see {@link censusSuiteMembershipFor} for how that set is produced for real), decides
+ *  membership by plain prefix matching against {@link KNOWN_CENSUS_SUITES} and names every
+ *  discovered caller {@link KNOWN_CENSUS_SUITES} doesn't cover. No git, no filesystem, no spawn —
+ *  a test hands this arrays of strings directly. */
+export function censusSuiteMembership(
+  changedPaths: readonly string[],
+  srcFilteredCallers: readonly string[],
+): CensusMembershipReport {
+  const knownTestFiles = new Set(KNOWN_CENSUS_SUITES.map((s) => s.testFile));
+  const unknownCoverage = [...new Set(srcFilteredCallers.filter((f) => !knownTestFiles.has(f)))].sort();
+  const entries = changedPaths.map((path) => ({
+    path,
+    suites: KNOWN_CENSUS_SUITES.filter((s) => s.walks.some((prefix) => path.startsWith(prefix))).map((s) => s.job),
+  }));
+  return { entries, unknownCoverage };
+}
+
+/** The impure edge (mirrors {@link detectHostFacts}'s own split from {@link computeHostFacts}):
+ *  runs the task record's own re-derivation for real — `git grep -l 'ls-files' --
+ *  'test/*.test.ts'` via the injected {@link PreflightSpawn}, the SAME seam every other step in
+ *  this file uses (never a second spawn mechanism) — then reads each hit's own text (via the
+ *  injectable `readFile`, default a real `readFileSync`) and keeps only the ones that also
+ *  filter on `src/`, before handing the result to the pure {@link censusSuiteMembership}. A `git
+ *  grep` that matches nothing exits 1 — git's own documented "no match" convention, not a
+ *  failure — and reads as zero callers here exactly like everywhere else `PreflightSpawn`'s
+ *  `status` is read in this file: never thrown, always reported. A hit this process cannot read
+ *  back off disk is kept (not ruled out) rather than silently dropped, the same "unknown stays
+ *  visible" posture `unknownCoverage` itself takes. */
+export function censusSuiteMembershipFor(
+  changedPaths: readonly string[],
+  repoRoot: string,
+  spawn: PreflightSpawn,
+  readFile: (path: string) => string = (path) => readFileSync(join(repoRoot, path), "utf8"),
+): CensusMembershipReport {
+  const res = spawn("git", ["grep", "-l", "ls-files", "--", "test/*.test.ts"], { cwd: repoRoot });
+  const callers = (res.stdout ?? "").split("\n").map((s) => s.trim()).filter(Boolean);
+  const srcFilteredCallers = callers.filter((f) => {
+    try {
+      return /src\//.test(readFile(f));
+    } catch {
+      // unreadable: kept in, not ruled out — see this function's own doc comment above
+      return true;
+    }
+  });
+  return censusSuiteMembership(changedPaths, srcFilteredCallers);
+}
+
 /** The `package.json` "scripts" object's key set — read once per `runPreflightFast` call so a
  *  step whose script has been renamed or removed can be told apart from one that ran and
  *  failed (design vi), without ever spawning `npm` to find that out. `packageJsonText` is a
@@ -1074,7 +1243,11 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
   const scriptNames = fastGateScriptNames(repoRoot, deps.packageJsonText);
   const now = deps.now ?? Date.now;
   const gateSteps = deps.steps ?? FAST_GATE_STEPS;
-  const steps = gateSteps.map(({ job, script, boundMs }) =>
+  // W1-T2545 — PASS ONE: run every step and, for a census entry, keep its measured cost beside
+  // its own result. Nothing is refused on cost here, because the threshold is derived from the
+  // population and the population is not complete until the last entry has run.
+  const censusCosts = new Map<number, number>();
+  const steps = gateSteps.map(({ job, script, boundMs }, i) =>
     runStep(job, () => {
       if (!scriptNames.has(script)) {
         return { ok: false, detail: `SCRIPT MISSING — "${script}" is not defined in package.json's "scripts"; this step did not run` };
@@ -1086,17 +1259,36 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
       const startedAt = now();
       const result = withoutNodeTestContext(() => shellOut(spawn, label, "npm", ["run", "--silent", script], { cwd: repoRoot }));
       const elapsedMs = now() - startedAt;
-      if (elapsedMs > boundMs) {
-        return {
-          ok: false,
-          detail:
-            `BOUND EXCEEDED — ${label} took ${elapsedMs}ms, over the fast gate's ${boundMs}ms PRIMARY CONTROL bound ` +
-            `(own result: ${result.ok ? "would have PASSed" : "also FAILed"}); refused by measured cost, not by a written exception naming it`,
-        };
+      censusCosts.set(i, elapsedMs);
+      // The SOFT bound reports; it never refuses. A census suite's cost grows with the corpus it
+      // walks, so crossing a written number is news about the tree, not a fault in this run.
+      if (elapsedMs > boundMs && result.ok) {
+        return { ok: true, detail: `${result.detail} — COST ${elapsedMs}ms, over the ${boundMs}ms soft bound (reported, not refused)` };
       }
       return result;
     }),
   );
+
+  // PASS TWO: with every census cost measured on the SAME machine in the SAME run, a runaway
+  // entry is the one costing several times its cheapest sibling — a ratio a slow runner cannot
+  // manufacture, because it slows every entry together. An entry whose own command FAILED is
+  // left exactly as it is: a real failure is never restated as a cost refusal.
+  const threshold = censusRunawayThresholdMs([...censusCosts.values()]);
+  if (threshold !== undefined) {
+    for (const [i, elapsedMs] of censusCosts) {
+      if (elapsedMs <= threshold || !steps[i].ok) continue;
+      const { job, script } = gateSteps[i];
+      steps[i] = {
+        ...steps[i],
+        ok: false,
+        detail:
+          `${job}: RUNAWAY — npm run --silent ${script} took ${elapsedMs}ms, over ${threshold}ms ` +
+          `(${FAST_GATE_CENSUS_RUNAWAY_MULTIPLE}x this run's cheapest census entry, floored at ` +
+          `${FAST_GATE_CENSUS_REFERENCE_FLOOR_MS}ms); its own result would have PASSed. Refused by a bound ` +
+          `derived from this run's own measurements, never by a written constant a growing corpus outgrows`,
+      };
+    }
+  }
   return { steps, ok: steps.every((s) => s.ok) };
 }
 

@@ -126,6 +126,7 @@ import {
 import {
   daemonBoot,
   daemonExitCode,
+  daemonExitCodeForSummary,
   runDaemon,
   type CrashLoopVerdict,
   type DaemonOpts,
@@ -548,17 +549,20 @@ import { ContainmentError, probeContainment, type ProbeExecutor } from "./lib/co
 import { IsolationError, probeIsolation, type ProbeExecutor as IsolationProbeExecutor } from "./lib/isolation.js";
 import {
   buildExportBundle,
+  buildHeadlineIndex,
   buildPromotionJudgePrompt,
   DEFAULT_KNOWLEDGE_BUDGET_CHARS,
   loadLearningsCorpus,
   parsePromotionJudgeVerdict,
+  parseRuleHeadlines,
   projectLearningsHome,
   renderDoctrinePreamble,
   renderExportBundle,
+  retrieveRuleBodyOrDegrade,
   runPromotionPass,
   verifyBundlePin,
 } from "./lib/learnings.js";
-import type { LearningEntry, PromotionJudgeDeps } from "./lib/learnings.js";
+import type { LearningEntry, PromotionJudgeDeps, RuleHeadline } from "./lib/learnings.js";
 import { assertProvenance, citation } from "./lib/provenance.js";
 import { loadOperatorNotesForTask, renderOperatorNotes } from "./lib/operator-notes.js";
 import {
@@ -777,6 +781,7 @@ import {
   noPrReportExcerpt,
   workerLedgerFields,
   workerTranscript,
+  uniqueRunBranch,
   worktreeAdd,
   worktreeLockIsPidAlive,
   worktreeRemove,
@@ -5277,6 +5282,17 @@ export function renderFixPrompt(opts: {
       `DELETED something in a conflicting file, or the conflict is SEMANTIC rather than a safe`,
       `textual union, REFUSE to resolve it yourself and escalate instead — a wrong auto-resolution`,
       `is worse than a strand.`,
+      "",
+      `REGENERABLE ARTIFACTS ARE THE EXCEPTION, AND THE UNION IS ALWAYS WRONG FOR THEM. If a`,
+      `conflicting file is one a TOOL rewrites from the tree — a size or coverage ledger, a lockfile,`,
+      `a generated reference doc, a plan index — do NOT merge it textually at all, in either`,
+      `direction. Its correct content is a FUNCTION of the MERGED tree, so it is neither side, and`,
+      `often not the larger of the two either. Resolve the OTHER files first, then RE-RUN THE COMMAND`,
+      `THAT GENERATES IT and commit whatever that produces. Such a file names its own generator, or`,
+      `the repo has a command that rewrites it: read the refusal text, or that file's own header.`,
+      `MEASURED on this repo, three conflicts on scripts/source-size-baseline.json: the true merged`,
+      `values were 3230, 32818 and 32748 against sides of 3136/3138, 32692/32713 and 32743/32718 —`,
+      `taking either side, or the larger of the two, would have shipped a false ceiling every time.`,
       "",
       `Conflicting file(s):`,
       fileList,
@@ -9862,6 +9878,57 @@ export function renderImplementPrompt(
 }
 
 /**
+ * W1-T2508: the ON-DEMAND half of the progressive-disclosure mechanism `learnings.ts` now
+ * exposes — given a headline+body rule corpus's raw markdown (CLAUDE.md's own bullets, W1-T2507's
+ * migrated residue, or anything in the same `- **HEADLINE** body` shape) and one headline, resolve
+ * JUST that rule's body without the whole corpus sitting in context up front. `learnings.ts` owns
+ * the pure split/index/degrade logic ({@link parseRuleHeadlines}/{@link buildHeadlineIndex}/
+ * {@link retrieveRuleBodyOrDegrade}); this owns the repo-relative FILE resolution `run-task.ts`
+ * already centralises for every other repo-rooted read (`join(repoRoot, ...)`, throughout this
+ * file). `readFile` is injectable — default a real `readFileSync` — so a test can simulate an
+ * unreadable source (the retrieval path failing) without touching disk.
+ *
+ * NOT wired into {@link implementPromptParts}/{@link renderImplementPrompt}: making a worker's
+ * stable prefix carry headlines instead of CLAUDE.md's current whole-file inject is a follow-up
+ * switch-over, not this task's acceptance — W1-T2508's rationale's own "NOT IN SCOPE" names "any
+ * change to what a worker is permitted to do". What this proves is that the retrieval path exists
+ * and degrades to the full rule (never to silence) BEFORE any body is ever withheld from a live
+ * prompt — the ordering the rationale calls out as the hazard.
+ */
+export function retrieveRuleBodyOnDemand(
+  headline: string,
+  sourcePath: string,
+  readFile: (path: string) => string | undefined = (p) => {
+    try {
+      return readFileSync(p, "utf8");
+    } catch {
+      // DELIBERATE ERASURE, and the one place it is correct here: `undefined` is this seam's
+      // OWN "the rule source could not be read" value, and the sole caller below turns it into
+      // an explicit unreadable RuleHeadline that degrades to the FULL rule. Distinguishing a
+      // missing file from an unreadable one would change nothing at that call site — both must
+      // degrade, never withhold — so carrying the distinction would be dead information.
+      return undefined;
+    }
+  },
+): string {
+  const raw = readFile(sourcePath);
+  if (raw === undefined) {
+    const unreadable: RuleHeadline = {
+      headline,
+      body: ` (unavailable — could not read rule source ${sourcePath})`,
+    };
+    return retrieveRuleBodyOrDegrade(unreadable, () => undefined);
+  }
+  const rules = parseRuleHeadlines(raw);
+  const index = buildHeadlineIndex(rules);
+  const rule = rules.find((r) => r.headline === headline) ?? {
+    headline,
+    body: ` (unavailable — no headline matches "${headline}" in ${sourcePath})`,
+  };
+  return retrieveRuleBodyOrDegrade(rule, (h) => index.get(h));
+}
+
+/**
  * Default HARD budget cap (notional $) when a task omits `budget_usd`. This is a
  * RUNAWAY TRIPWIRE, not an allowance — set an order of magnitude above any observed
  * task (hello-world $0.41 · reviewer $2.26 · gate-wiring $1.28 · containment ~$2.0 ·
@@ -10590,7 +10657,14 @@ async function runTask(
   const claimAnchor = claimReserver.mintAnchor();
   const claimOutcome = claimReserver.attempt(task.id, claimAnchor);
   const claimHolder = claimOutcome === "taken" ? claimReserver.holder(task.id) : undefined;
-  const claimDecision = decideDispatchClaim(claimOutcome, { taskId: task.id, holder: claimHolder });
+  // W1-T2552: the failing attempt's OWN git stderr, threaded into the refusal so an unreachable
+  // verdict names its cause instead of only its category. Optional on the interface, so a test's
+  // fake reserver that does not implement it yields today's wording byte-for-byte.
+  const claimDecision = decideDispatchClaim(claimOutcome, {
+    taskId: task.id,
+    holder: claimHolder,
+    stderr: claimOutcome === "unreachable" ? claimReserver.lastAttemptStderr?.() : undefined,
+  });
   log("dispatch.claim", {
     ref: dispatchClaimRef(task.id),
     outcome: claimOutcome,
@@ -22047,7 +22121,10 @@ export async function daemonCommand(
     // W1-T12b) notices. Headroom exhaustion never reaches here as a
     // stopReason at all — it is an in-process idle state inside runDaemon,
     // never a process exit.
-    return daemonExitCode(summary.stopReason);
+    // W1-T2546: the SUMMARY-aware code, so an environmental refusal (a rate-limit 403, a 5xx,
+    // a transport fault) is not charged to the container crash-restart budget. Every non-`error`
+    // reason still resolves through `daemonExitCode` itself, unchanged.
+    return daemonExitCodeForSummary(summary);
   } finally {
     process.removeListener("SIGINT", onSignal);
     process.removeListener("SIGTERM", onSignal);
@@ -29222,6 +29299,50 @@ const INBOX_DRAFT_WORKER_TOOLS = ["Read", "Grep", "Glob"];
  * happens with the resulting {@link DraftRungOutcome}s. `toDraft.length === 0` short-circuits
  * before any clone/worktree — no spend for the common "nothing to draft" case.
  */
+/**
+ * Materialize the daemon lane's per-attempt worktree — extracted from `draftProposalBatch`
+ * (its one call site) purely so this exact sequence is directly unit-testable against a real
+ * repo, the same rationale `createFixRungWorktree` (above) already documents for its own
+ * extraction (W1-T1129).
+ *
+ * W1-T2493. `runId` here is `buildInboxDraftHook`'s daemon-lifetime run id — built ONCE at
+ * daemon boot and passed to `draftProposalBatch` UNCHANGED on every poll that has proposals
+ * due. Before this function existed, `draftProposalBatch` minted its branch as the bare
+ * `run-${runId}`, so the SECOND poll in one boot asked `worktreeAdd` for the identical branch
+ * the FIRST poll already created and died on `fatal: a branch named '...' already exists` —
+ * see {@link uniqueRunBranch}'s own doc (lib/worker.ts) for the full mechanism and why a
+ * leftover branch is the expected case, not an edge one. `pruneStaleRuns` still runs FIRST
+ * (unchanged position/args), so the ordinary case — a truly orphaned branch from a worktree
+ * that already finished or was reaped — gets reclaimed and this function hands `worktreeAdd`
+ * back the plain, unsuffixed name; `uniqueRunBranch` is what covers every case pruning does
+ * not (a leftover branch whose worktree is still ON DISK when this runs again, or a prune
+ * hiccup) without ever forcing or reusing a branch.
+ *
+ * A worktreeAdd failure is ledgered (`worktree.add_failed`, naming the branch it tried) and
+ * RETHROWN — never swallowed here — so a genuine two-lane collision (a race `uniqueRunBranch`
+ * could not have observed) is still visible on the SAME ledger this whole rung already writes
+ * to, not only as inherited git stderr in a separate log file.
+ */
+export function createDaemonLaneWorktree(
+  repoDir: string,
+  worktreesRoot: string,
+  runId: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): { branch: string; worktreePath: string } {
+  const pruned = pruneStaleRuns(repoDir, worktreesRoot, { graceMs: DEFAULT_PRUNE_GRACE_MS });
+  if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
+  const branch = uniqueRunBranch(repoDir, runId);
+  const worktreePath = join(worktreesRoot, branch);
+  try {
+    worktreeAdd(repoDir, worktreePath, branch, "origin/main");
+  } catch (e) {
+    log("worktree.add_failed", { branch, error: String((e as Error)?.message ?? e) });
+    throw e;
+  }
+  writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
+  return { branch, worktreePath };
+}
+
 export async function draftProposalBatch(
   toDraft: Proposal[],
   config: Config,
@@ -29249,12 +29370,7 @@ export async function draftProposalBatch(
     mkdirSync(dirname(repoDir), { recursive: true });
     execFileSync("gh", ["repo", "clone", `${owner}/${repo}`, repoDir], { stdio: "inherit" });
   }
-  const pruned = pruneStaleRuns(repoDir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
-  if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
-  const branch = `run-${runId}`;
-  const worktreePath = join(worktreesDir(config), branch);
-  worktreeAdd(repoDir, worktreePath, branch, "origin/main");
-  writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
+  const { branch, worktreePath } = createDaemonLaneWorktree(repoDir, worktreesDir(config), runId, log);
 
   try {
     const planText = readFileSync(join(worktreePath, "plan", "tasks.yaml"), "utf8");
