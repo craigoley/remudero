@@ -124,6 +124,10 @@ function runRecycle(): { status: number; stderr: string; calls: Call[] } {
       RMD_RECYCLE_POLL_S: "1",
       GH_TOKEN: "",
       RMD_RECYCLE_DOCKERENV_PATH: join(tmpdir(), "daemon-default-cred-no-such-dockerenv-marker"),
+      // W1-T2555: this suite drives the GH_TOKEN-forwarding behaviour, never the STATE_DIR-is-a-
+      // checkout predicate (which has its own dedicated suite) — the fixture state dir here is a
+      // bare mkdtemp with no state/ or remudero/.git inside it.
+      RMD_RECYCLE_FIRST_BOOT: "1",
     },
   });
   let calls: Call[] = [];
