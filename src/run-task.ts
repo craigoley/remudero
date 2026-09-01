@@ -571,6 +571,7 @@ import {
 import type { LearningEntry, PromotionJudgeDeps, RuleHeadline } from "./lib/learnings.js";
 import { assertProvenance, citation } from "./lib/provenance.js";
 import { loadOperatorNotesForTask, renderOperatorNotes } from "./lib/operator-notes.js";
+import { applyOperatorMergeHold, parseOperatorMergeHoldArgs } from "./lib/operator-merge-hold.js";
 import {
   computeMatchedLearningsForArm,
   deriveWipeTestRunResult,
@@ -28968,6 +28969,33 @@ export async function awayCommand(rest: string[]): Promise<number> {
   return 0;
 }
 
+/**
+ * The supported writer for the durable hold state already enforced by every production arm path.
+ * Omit `--pr` for a fleet-wide hold; a PR-scoped release after a fleet hold intentionally carves
+ * out only that PR, matching automergeHoldFromLedger's existing last-applicable-row semantics.
+ */
+export function mergeHoldCommand(
+  rest: string[],
+  deps: { config?: Config; ledgerPath?: string; now?: () => number } = {},
+): number {
+  const parsed = parseOperatorMergeHoldArgs(rest);
+  if (!parsed.ok) {
+    console.error(`rmd merge-hold: ${parsed.error} — usage: ${commandSyntax("merge-hold")}\n` + USAGE);
+    return 2;
+  }
+  const ledgerPath = deps.ledgerPath ?? ledgerPathFor(deps.config ?? loadConfig());
+  const result = applyOperatorMergeHold(ledgerPath, parsed.input, { now: deps.now });
+  if (!result.written) {
+    console.log(`### rmd merge-hold — ${result.scope} is already released; no ledger row written.`);
+    return 0;
+  }
+  console.log(
+    `### rmd merge-hold — ${result.action === "engage" ? "ENGAGED" : "RELEASED"} for ${result.scope}; ` +
+      `by ${parsed.input.by}: ${parsed.input.reason}. The append was read back through the production hold reader.`,
+  );
+  return 0;
+}
+
 /** `--flag value` lookup over a raw argv tail; undefined if the flag is absent. */
 function flagValue(rest: string[], flag: string): string | undefined {
   const i = rest.indexOf(flag);
@@ -32987,6 +33015,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "post remudero-review on a hand-opened PR; materializes a worktree at the PR head so proofs EXECUTE (W1-T185), falling back to an explicit keyword-only CAPPED verdict if materialization fails; --override-capped-by/--override-capped-reason ledgers an attributable operator override so a CAPPED verdict can arm auto-merge",
   },
   {
+    name: "merge-hold",
+    syntax: "rmd merge-hold <engage|release> [--pr <n> [--task <id>]] --by <name> --reason <text>",
+    summary: "Engage or release an attributable, durable PR or fleet auto-merge hold.",
+    detail: "operator writer for the durable auto-merge refusal: engage/release requires --by and --reason; --pr scopes the decision to one pull request, while omitting it scopes the decision to the whole fleet; --task is optional PR-only board enrichment and must be a W1-T<n> id; a hold survives pushes, restarts, and ledger rotation and clears only on an explicit release; while held, the daemon withdraws an existing auto-merge arm and refuses every new arm, leaving the operator free to inspect or manually squash the PR",
+  },
+  {
     name: "dep-review",
     syntax: "rmd dep-review <pr-number> [--repo <name>]",
     summary: "Deterministic Dependabot-PR review lane: auto-arm minor/patch, escalate major.",
@@ -33807,6 +33841,11 @@ export async function main(
   }
   if (cmd === "review" && arg) {
     process.exit(await reviewCommand(arg, rest.slice(1)));
+  }
+  // diff-cov: process-boundary — main() only translates mergeHoldCommand's tested return into
+  // process.exit; parsing, attribution, append, read-back and idempotent release are unit-tested.
+  if (cmd === "merge-hold") {
+    process.exit(mergeHoldCommand(rest));
   }
   if (cmd === "dep-review" && arg) {
     process.exit(await depReviewCommand(arg, rest.slice(1)));

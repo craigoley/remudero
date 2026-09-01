@@ -1,0 +1,62 @@
+- id: W1-T2585
+  title: "NOTHING EVER RECLAIMS A PULLED IMAGE, SO EVERY RECYCLE ADDS ~6GB TO A 29GB DISK — the recycle pulls a fresh image and removes none, and no rung, sweep or reaper reads the image store at all; MEASURED 2026-09-01: docker images held 22.92G of a 29G disk at 100% full, a manual `docker image prune` reclaimed 4.549GB, and while full the daemon exited 1, workers failed checkout, and verify-image emitted three confident WRONG product diagnoses"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 6.00
+  files: [deploy/recycle-container.sh, test/nothing-reclaims-the-images-the-recycle-pulls.test.ts]
+  origin: "operator-brief#image-store-unreclaimed-2026-09-01"
+  plan_refs: ["W1-T1064", "W1-T1082", "W1-T411"]
+  status: queued
+  attempts: 0
+  rationale: |
+    ── THE GAP, AND WHY THE EXISTING DISK WORK DOES NOT COVER IT ────────────────────────────────
+
+    Three shards already address disk pressure and NONE of them touches the image store:
+
+      W1-T1064  worker homes reaped on age alone at a 24h ceiling
+      W1-T1082  the daemon never reads its own free space
+      W1-T411   one-shot disk reclaim rung — MEASURED: zero mentions of docker images
+
+    `deploy/recycle-container.sh` runs `docker pull` on every recycle and removes nothing. The old
+    image is not deleted, not tagged for deletion, and not counted anywhere. A recycle is the
+    ordinary operator action after any merge to a baked path, so the store grows monotonically with
+    operator activity.
+
+    ── MEASURED 2026-09-01 ─────────────────────────────────────────────────────────────────────
+
+      disk .................. 29G, 100% full
+      docker images ......... 22.92G  (~6GB per build)
+      manual prune reclaimed  4.549GB
+      ~/rmd-state2 ........... ~1.5GB — i.e. the fleet's own state was NOT the problem
+
+    ⚠ THE FAILURE IS NOT A DISK ALARM. It surfaced as: the daemon exiting 1, workers failing
+    checkout, and `deploy/verify-image.sh` reporting three confident, specific and WRONG PRODUCT
+    diagnoses (W1-T2571 covers that misreporting separately). Nothing in the fleet said "the disk
+    is full"; every symptom pointed somewhere else.
+
+    ── THE CONSTRAINT THE FIX MUST RESPECT ─────────────────────────────────────────────────────
+
+    ⚠ NEVER REMOVE AN IMAGE THAT IS IN USE. The running container references one, and the recycle
+    itself references the one it just pulled — a prune that takes either is worse than the disk it
+    frees, because it makes the host unrecoverable rather than merely full. The reclaim must be
+    keyed on images NOT referenced by any container and not the digest under test, and must prove
+    that with a falsifier rather than trusting `docker image prune`'s own defaults.
+
+    ⚠ AND IT MUST NOT SILENTLY RECLAIM NOTHING. A prune that matches no image and exits 0 reads
+    identically to one that worked. Report bytes reclaimed, and treat a zero as a fact to state
+    rather than a success to imply.
+
+    NOT IN SCOPE: worker-home reaping (W1-T1064), the daemon's free-space read (W1-T1082), and
+    verify-image's misdiagnosis under ENOSPC (W1-T2571).
+
+  acceptance:
+    - claim: "the recycle reclaims images no container references, and reports the bytes it freed"
+      proof: "unit test: test/nothing-reclaims-the-images-the-recycle-pulls.test.ts"
+    - claim: "an image referenced by a running container is never removed, and neither is the digest the recycle just pulled"
+      proof: "unit test: test/nothing-reclaims-the-images-the-recycle-pulls.test.ts"
+    - claim: "a reclaim that frees nothing says so rather than exiting silently, so a no-op cannot read as a success"
+      proof: "unit test: test/nothing-reclaims-the-images-the-recycle-pulls.test.ts"
