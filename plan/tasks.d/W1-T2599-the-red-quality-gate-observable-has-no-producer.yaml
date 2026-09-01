@@ -1,0 +1,84 @@
+- id: W1-T2599
+  title: "THE RED QUALITY-GATE OBSERVABLE SHIPPED WITH NO PRODUCTION PRODUCER — W1-T2504 taught the fix rung to act on `OpenPrView.redRequiredChecks`, but its merge commit explicitly deferred `buildOpenPrViews` wiring; MEASURED 2026-09-01 on PR #3555, coverage-ratchet concluded failure at 22:53:12Z while the live daemon kept returning `wait — checks pending` through 23:02:10Z, so a fixable six-line coverage gap needed operator repair"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 14.00
+  files: [src/lib/ci-gate-required.ts, src/lib/sweep.ts, src/run-task.ts, scripts/source-size-baseline.json, test/red-quality-gate-producer.test.ts, test/producer-completeness.test.ts]
+  origin: "operator-brief#pr-3555-red-gate-waited-as-pending-2026-09-01"
+  plan_refs: ["W1-T2504", "W1-T977", "W1-T1282", "W1-T2430"]
+  status: queued
+  attempts: 0
+  rationale: |
+    PR #3555 is the exact production falsifier for W1-T2504's current material state. GitHub's
+    `coverage-ratchet` job concluded FAILURE at 2026-09-01T22:53:12Z and named six uncovered lines
+    in `src/lib/review-provider-provenance.ts`. The Azure ledger nevertheless disposed that PR as
+    `wait — checks pending 20m` at 23:00:37Z and `wait — checks pending 21m` at 23:02:10Z because
+    `ci-gate` and the long CI shards were still running. A human added the missing behavioral test
+    at 23:02:49Z; the daemon never admitted the actionable failure.
+
+    The information is already present in the one rollup the gateway fetched. W1-T2504 added
+    `redQualityGateNames`, widened `isBlockedCi` to read `redRequiredChecks`, and tested the exact
+    pending-aggregate/red-child state. Its own squash message records the remaining gap verbatim:
+    production wiring in `buildOpenPrViews` was outside that task's declared files and the real
+    gateway would leave the field undefined until a follow-up landed. No follow-up task or PR
+    exists as of this filing. `rg redRequiredChecks src` finds the declaration and consumers but
+    no object-literal assignment.
+
+    The static safety net also missed the omission for a concrete reason. To stay under the source
+    size ratchet, W1-T2504 placed `redRequiredChecks` after `cancelledRequiredChecks` on the same
+    TypeScript source line. `declaredViewFields` only accepts a member anchored at the start of a
+    line, so the real-tree producer-completeness test does not enumerate this field at all. This
+    task must put the declaration on its own line and prove the census now sees it; otherwise a
+    later removal of the producer can silently recreate the same dead mechanism.
+
+    Wiring only the name field is insufficient. W1-T1282 makes the fix rung stand down when
+    `ciFailures` is empty or undefined, while today's gateway populates `ciFailures` only when the
+    branch-protection aggregate reads red. The pending-aggregate path must therefore carry the
+    failing required gate's own log evidence too, filtered to the names from the ci-gate contract,
+    or the disposition changes to blocked-fixable but still dispatches no repair.
+
+    NOT IN SCOPE: changing branch protection, the ci-gate wait cap, the fix strike budget, treating
+    optional scanner failures as required, or the separate mixed cancellation/failed-aggregate
+    requeue problem observed on PR #3543.
+  design: |
+    Add one production reader for `.github/workflows/ci-gate.yml`'s
+    `jobs.ci-gate.env.REQUIRED` JSON string using the repository's pinned `yaml` package. It reads
+    the checked-out workflow that the daemon is executing against, validates a string array, and
+    fails closed to no early-fix admission when the contract is missing or malformed. The list is
+    read once per `buildOpenPrViews` call, never once per PR and never through another GitHub API
+    request.
+
+    For each already-fetched rollup, compute `redRequiredChecks` with the merged W1-T2504 helper
+    and assign it directly on the `OpenPrView` producer literal. When the normal aggregate state is
+    red, preserve today's `fetchCiFailures` behavior byte-for-byte. When the aggregate is pending
+    but `redRequiredChecks` is non-empty, fetch evidence only for rollup entries whose latest name
+    belongs to that required red set, so an informational scanner cannot enter a fix prompt merely
+    because a real gate also failed.
+
+    Put `redRequiredChecks` on its own interface line and extend producer-completeness's real-tree
+    proof to assert that the field is actually enumerated. No allowlist entry is permitted: this
+    mechanism is supposed to act now, not document a deferred producer.
+
+    The end-to-end fixture is PR #3555's state: `ci-gate` pending, `coverage-ratchet` failed, other
+    shards pending. It must build a view that is blocked-fixable, carry the exact failed check name
+    and log evidence into the fix dispatch, and spend at most the existing one bounded strike. A
+    control with every required gate pending must remain `wait` and spawn nothing.
+  acceptance:
+    - claim: "the real open-pr gateway classifies a concluded required quality-gate failure as fixable while ci-gate is still pending"
+      proof: "unit test: test/red-quality-gate-producer.test.ts"
+    - claim: "the pending aggregate path carries only the failed required gate names and log evidence into the existing fix rung"
+      proof: "unit test: test/red-quality-gate-producer.test.ts"
+    - claim: "an informational failed check outside ci-gate's REQUIRED contract cannot trigger or enter an early fix dispatch"
+      proof: "unit test: test/red-quality-gate-producer.test.ts"
+    - claim: "a pull request whose required gates are only pending remains wait and dispatches no worker"
+      proof: "unit test: test/red-quality-gate-producer.test.ts"
+    - claim: "the ci-gate REQUIRED contract is parsed from the checked-out workflow once per board read and malformed input fails closed"
+      proof: "unit test: test/red-quality-gate-producer.test.ts"
+    - claim: "the workflow-contract reader is called by the production open-pr gateway rather than existing only behind its own tests"
+      proof: "grep: readCiGateRequiredChecks( in src/run-task.ts"
+    - claim: "producer completeness enumerates redRequiredChecks and proves a real source producer assigns it"
+      proof: "unit test: test/producer-completeness.test.ts"
