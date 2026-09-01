@@ -1,0 +1,69 @@
+- id: W1-T2573
+  title: "CROSS-PROVIDER ROUTING IS A SUBSTRING MATCH ON A CLAUDE MODEL NAME, IN CODE — `codexTierForRequestedModel` reads `includes(\"haiku\")`/`includes(\"opus\")` to pick a Codex tier and DISCARDS effort entirely, so the one axis `.remudero/mounts.yaml` exists to keep as data becomes a code edit the moment a model is renamed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: "blast-radius"
+  budget_usd: 12.00
+  files: [src/lib/worker-provider.ts, src/lib/mounts.ts, test/a-capability-ladder-is-data-not-a-substring-match.test.ts]
+  origin: "operator-session#codex-router-design-2026-09-01"
+  plan_refs: ["W1-T167", "W1-T2572"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED ON MAIN, VERBATIM (src/lib/worker-provider.ts, `codexTierForRequestedModel`):
+    a lower-cased model name containing `haiku` maps to `economy`, one containing `opus` maps to
+    `frontier`, and EVERYTHING ELSE maps to `balanced`. Three consequences, none of them intended:
+
+    (1) IT IS CODE, NOT DATA. `.remudero/mounts.yaml`'s own header states the governing rule —
+    "changing a routing decision is a DATA edit here, never a code change". This function is the
+    one routing decision that violates it. Renaming a model, or adding one whose name carries
+    neither substring, silently re-routes every Codex worker to `balanced` with no diff to the
+    routing table and nothing to review.
+
+    (2) EFFORT IS DROPPED AT THE PROVIDER BOUNDARY. The mount resolves `{model, effort}` and only
+    the model reaches this function; `requestedEffort` is a parameter the tier selection never
+    consults. A `sonnet/high` mount and a `sonnet/medium` mount are the SAME Codex request. Half
+    the routing table's expressive power does not survive the crossing.
+
+    (3) CLAUDE IS THE CANONICAL VOCABULARY AND OPENAI IS A TRANSLATION OF IT. `tiers:` in
+    mounts.yaml ranks `haiku/sonnet/opus/claude-opus-5`, and `enforceTierInvariant`
+    (src/lib/mounts.ts) compares `m.tiers[mount.model]` against that single flat ladder. A second
+    vendor has nowhere to stand: its models are neither in the ladder nor comparable to it, so the
+    Tier Invariant — a load-bearing SAFETY rule, not a preference — cannot be evaluated across
+    providers at all.
+
+    THE REMEDY IS A PROVIDER-NEUTRAL CAPABILITY AXIS, EXPRESSED AS DATA. A rank-ordered
+    `capabilities:` ladder that each vendor's concrete models map INTO, so that a mount names a
+    capability and a provider resolves it. The substring function becomes a table lookup; effort
+    crosses the boundary because the lookup is keyed on (capability, effort); a new model is a
+    config edit; and the Tier Invariant compares capability RANK, which is provider-agnostic and
+    therefore still enforceable when workers ride two different vendors.
+
+    WHY risk:high AND band_meaning: blast-radius, DECLARED RATHER THAN INHERITED. The ladder is not
+    only read by the provider adapter: `src/lib/mounts.ts` PARSES it (`tiers: Record<string, number>`)
+    and `enforceTierInvariant` compares against it, so a capability axis this file does not know
+    about cannot be validated at load and this task's own fifth criterion — that a worker at or
+    above the Architect is still REFUSED — would be unsatisfiable from the adapter alone. The band
+    is `blast-radius`, not `span`: the reason for high is that a mistake here silently unroutes
+    every worker or weakens a safety invariant enforced at config load, which is a different and
+    worse thing than merely touching two files.
+
+    SCOPE DISCIPLINE: this task owns the LOOKUP and its data shape. It does not re-tier any
+    existing route, does not change which model any current mount resolves to, and must not weaken
+    `enforceTierInvariant` — a capability ladder that cannot express the existing invariant is the
+    wrong ladder, and the falsifier for that is an attempted violation that must still be REFUSED.
+  acceptance:
+    - claim: "a mount resolves to a provider model through a declared capability lookup, never a substring of a Claude model name"
+      proof: "unit test: test/a-capability-ladder-is-data-not-a-substring-match.test.ts"
+    - claim: "effort survives the provider boundary, so two mounts differing only in effort are not the same request"
+      proof: "unit test: test/a-capability-ladder-is-data-not-a-substring-match.test.ts"
+    - claim: "a model whose name carries neither haiku nor opus still resolves to its declared capability rather than silently to balanced"
+      proof: "unit test: test/a-capability-ladder-is-data-not-a-substring-match.test.ts"
+    - claim: "adding a provider model is a data edit and requires no code change to route to it"
+      proof: "unit test: test/a-capability-ladder-is-data-not-a-substring-match.test.ts"
+    - claim: "a capability assignment that would put a worker at or above the Architect is still REFUSED, so the Tier Invariant survives the generalisation"
+      proof: "unit test: test/a-capability-ladder-is-data-not-a-substring-match.test.ts"

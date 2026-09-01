@@ -1,0 +1,106 @@
+- id: W1-T2570
+  title: "THE SHARDED COVERAGE GATE BLOCKS A MODULE THAT COMPILES TO NOTHING — findMissingSourceCoverage refuses any changed src/**.ts with no SF record as a vacuous pass, but a PURE TYPE MODULE emits no SF record because there is nothing to instrument; MEASURED 2026-09-01: a synthetic type-only module produces no record while its consumer does, and four such files sit on main (workflow-run.ts, merge-state.ts, run-result.ts, supersession.ts), every one matching the gate's filter verbatim and every one existing deliberately to cut a dependency cycle"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 6.00
+  files: [scripts/diff-coverage.mjs, test/a-module-that-compiles-to-nothing-is-not-a-coverage-gap.test.ts]
+  origin: "operator-brief#type-only-false-block-2026-09-01"
+  plan_refs: ["W1-T2526"]
+  status: queued
+  attempts: 0
+  rationale: |
+    ── BLOCKED ON #3516 MERGING, WHICH INTRODUCES THE CODE THIS FIXES ──────────────────────────
+
+    `findMissingSourceCoverage` and `changedSourceFiles` do not exist on main yet; they arrive
+    with #3516 (perf(ci): shard the required test and coverage gates). This task is filed NOW
+    because the defect was found by review while that PR was open and would otherwise ship
+    silently. If #3516 folds the fix in before merging, this task is already satisfied and should
+    be retired rather than built.
+
+    ── THE DEFECT ───────────────────────────────────────────────────────────────────────────────
+
+    "No `SF:` record" has TWO causes, and the gate treats both as one:
+
+      1. no shard imported the file — the real vacuity hazard the guard exists for, and it is
+         right to fail closed on it. Sharding is exactly what makes this material: a scoped run
+         whose suites never import a changed file emits no records for it, so "every added line
+         lcov instruments is covered" is trivially true over an EMPTY SET (#1399).
+      2. THE FILE COMPILES TO NOTHING EXECUTABLE, so there is no instrumentation to emit.
+
+    A type-only module hits case 2 and receives the case 1 verdict, under a message — "coverage
+    would otherwise pass vacuously" — that is exactly backwards for it. Nothing passed vacuously;
+    there was nothing to measure.
+
+    ── MEASURED, NOT INFERRED ───────────────────────────────────────────────────────────────────
+
+    A synthetic pure-type module plus a real consumer, one test importing both, run under this
+    repo's own coverage invocation (`--experimental-test-coverage`, lcov reporter): the lcov
+    carries `SF:` for the consumer and NO record whatsoever for the type-only module.
+
+    FOUR SUCH FILES ARE ON MAIN, and all four match `startsWith('src/') && endsWith('.ts')`:
+
+      src/lib/workflow-run.ts ........ esbuild emits 0 bytes
+      src/lib/merge-state.ts ......... esbuild emits 0 bytes
+      src/lib/run-result.ts .......... esbuild emits 0 bytes
+      src/lib/supersession.ts ........ esbuild emits 0 bytes
+
+    CONTROLS, so the discriminator is not merely agreeing with itself:
+
+      src/lib/proof-grammar.ts ....... 1,423 bytes — LOOKS type-only to a naive text scan and is
+                                       NOT; it must keep requiring an SF record
+      src/lib/sweep.ts ............... 136,412 bytes
+
+    ⚠ THE proof-grammar.ts ROW IS THE POINT OF THE CONTROL. A first pass at this census by reading
+    source text for `function`/`class`/`=>` wrongly called it type-only. Transpiling is what
+    separated them; a text heuristic would have widened the carve-out to a file that genuinely
+    needs coverage.
+
+    ── WHY THESE FILES EXIST, AND WHY THAT MAKES THE BLOCK WORSE THAN AN INCONVENIENCE ─────────
+
+    They are not accidents. `src/lib/workflow-run.ts`'s own header records that it exists so
+    `lib/sweep.ts` and `lib/open-prs-rest.ts` can BOTH depend on it without closing a new module
+    cycle, and cites `.dependency-cruiser.cjs`'s `no-circular` note naming that exact pair as the
+    cheapest cycle to CUT. `src/lib/merge-state.ts` is named there as the established precedent.
+
+    So the gate as written penalises the repository's own sanctioned cycle-cutting idiom: the
+    cheapest way to satisfy it would be to move the type back into a module that has runtime code,
+    which re-closes the cycle `.dependency-cruiser.cjs` forbids. A gate that can only be satisfied
+    by violating another gate is the defect, not the file.
+
+    ── THE FIX: DERIVE IT, NEVER HAND-KEEP IT ───────────────────────────────────────────────────
+
+    esbuild is already present via `tsx`, and transpile-emptiness separates the two cases exactly
+    as the table above shows. A file whose TypeScript transpiles to zero bytes has nothing to
+    instrument, so its absence from the lcov is expected rather than vacuous.
+
+    A BASELINE OF EXEMPT PATHS IS THE WRONG SHAPE HERE, and the repo has already written down why
+    in a neighbouring census: `test/mutation-ratchet.test.ts` derives its classify.ts importer list
+    "from the real tree rather than from a hand-kept list: the pair this test used to name verbatim
+    went stale the first time a third file imported classify.ts." An exempt-path list would go
+    stale the first time a fifth leaf type module is added, and it would go stale SILENTLY —
+    reintroducing exactly the vacuous pass this guard exists to prevent.
+
+    THE GUARD MUST NOT BE WEAKENED. Case 1 stays fail-closed; only case 2 is told apart from it.
+
+    ── THE FALSIFIER THAT KEEPS THE CARVE-OUT HONEST ────────────────────────────────────────────
+
+    A carve-out with no upper bound widens itself. The load-bearing assertion is that an exempted
+    file which GAINS runtime code stops being exempt — without it, a type-only module that later
+    grows a function silently keeps its exemption and its coverage is never measured again.
+
+    NOT IN SCOPE: the merged-lcov producer (`scripts/merge-lcov.mjs`), the shard matrix in
+    `ci.yml`, and `findUncoveredAddedLines`' pre-existing test/** carve-out.
+
+  acceptance:
+    - claim: "a changed src/** module that transpiles to zero bytes does not block the coverage gate, because it has nothing to instrument"
+      proof: "unit test: test/a-module-that-compiles-to-nothing-is-not-a-coverage-gap.test.ts"
+    - claim: "a changed src/** module that DOES carry runtime code still blocks when it has no SF record, so the vacuous-pass guard is not weakened"
+      proof: "unit test: test/a-module-that-compiles-to-nothing-is-not-a-coverage-gap.test.ts"
+    - claim: "an exempted module that gains runtime code stops being exempt, so the carve-out cannot widen itself silently"
+      proof: "unit test: test/a-module-that-compiles-to-nothing-is-not-a-coverage-gap.test.ts"
+    - claim: "the exemption is derived from the tree at run time rather than read from a hand-kept list of paths"
+      proof: "unit test: test/a-module-that-compiles-to-nothing-is-not-a-coverage-gap.test.ts"

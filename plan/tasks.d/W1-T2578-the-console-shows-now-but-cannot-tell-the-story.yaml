@@ -1,0 +1,63 @@
+- id: W1-T2578
+  title: "THE CONSOLE SHOWS NOW AND CANNOT TELL THE STORY — `rmd replay` ships as a merged, deterministic window-narration verb and the console renders freshness, queue and open PRs with no surface for it, so every incident still begins with an operator hand-joining ledger rows the fleet already knows how to narrate"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 40.00
+  files: [src/lib/serve.ts, test/serve-incident-timeline.test.ts]
+  origin: "operator-brief#direction-refresh-2026-08-27"
+  plan_refs: ["W1-T2296", "W1-T2304", "W1-T915"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE VERB EXISTS AND THE SURFACE DOES NOT. W1-T2296 shipped `buildReplay` (src/lib/replay.ts):
+    a pure generator over ledger lines in `buildReceipt`'s own discipline — byte-identical output
+    for identical rows, absent-with-reason for blind rows, refusal on a partial corpus. It renders
+    to stdout for an operator who already knows to ask. The console (src/lib/serve.ts, reachable
+    fleet-wide since W1-T915) renders NOW — freshness, queue, board — and nothing renders THEN.
+    The measured cost of that gap is the board-review recon's own finding: every recorded incident
+    diagnosis is a hand-join performed from scratch under pressure, and the board-review rung
+    (W1-T2304, merged) now files findings whose evidence is exactly a window of rows a reader
+    still cannot see as a story.
+
+    THE MARKET CONTEXT, CARRIED AS CONTEXT: agent-observability consoles ship session timelines
+    as a baseline feature; this repo's ledger carries something none of them have — decision
+    provenance with reasons — and shows none of it as a sequence. The differentiator is already
+    persisted; this task is a read path.
+  design: |
+    (i) ONE PANEL, ONE ROUTE, ZERO NEW READERS. A serve route calls `buildReplay` over the same
+    ledger union the verb already uses, parameterised by window and optional task id; the panel
+    renders the narration as a time-ordered list with each row's own reason text. The route is
+    read-only, mirrors the existing v1 route conventions in serve.ts, and adds no fourth ledger
+    idiom — `resolveLedgerUnion` stays the one corpus reader.
+
+    (ii) DETERMINISM SURVIVES THE RENDER. The panel displays timestamps as the rows carry them —
+    no relative-time rendering, no client clock — so a screenshot of the panel and a paste of the
+    verb agree byte-for-byte on every line of narration.
+
+    (iii) THE CLIENT HALF FOLLOWS THE HOUSE TRAPS. serve.ts client JS lives inside a backtick
+    template literal — no backticks in client comments — and DOM behavior lands under the real
+    Playwright coverage the existing serve tests use, not a parsed-string approximation.
+
+    (iv) WHAT MUST NOT CHANGE, REFUSED BY NAME. `rmd replay` stays the canonical generator — the
+    panel formats its output and never re-derives narration, the same formatter-over-computation
+    relationship `scopeAdvisorySection` holds to its advisory. The ledger stays append-only. The
+    panel is EVIDENCE for a human and never an input any gate consumes. And a partial corpus
+    renders the verb's own refusal text, never a shorter story.
+
+    THE RISK BAND IS RULE 19's SPAN, NOT BLAST RADIUS — serve wiring plus its test read as two
+    concerns. Nothing on dispatch, review or arm paths moves.
+  acceptance:
+    - claim: "the timeline panel renders a window's narration with each row's own reason"
+      proof: "unit test: test/serve-incident-timeline.test.ts"
+    - claim: "identical rows render an identical panel body"
+      proof: "unit test: test/serve-incident-timeline.test.ts"
+    - claim: "a partial ledger corpus renders the refusal text rather than a shorter story"
+      proof: "unit test: test/serve-incident-timeline.test.ts"
+    - claim: "the panel formats the verb's output and never re-derives narration"
+      proof: "unit test: test/serve-incident-timeline.test.ts"
+    - claim: "the serve route actually calls the merged generator rather than shipping unwired"
+      proof: "grep: buildReplay( in src/lib/serve.ts"

@@ -57,7 +57,6 @@ export interface CiParityStepResult {
   ok: boolean;
   detail: string;
 }
-
 /**
  * Where a preflight run writes its verdict so the RESULT SURVIVES THE CONTAINER THAT PRODUCED IT.
  *
@@ -635,11 +634,12 @@ export function hostCausedSuiteRedsStep(facts: HostFacts): CiParityLeafResult {
 }
 
 /**
- * `CI_PARITY_TABLE` — one entry per .github/workflows/ci.yml job (fourteen, at filing time).
+ * `CI_PARITY_TABLE` — one entry per .github/workflows/ci.yml job.
  * `runCiParity`'s drift step fails the moment `parseCiJobNames` finds a job this table does not
  * name at all; a listed `mirrored: false` job is a considered, reasoned exclusion, not a gap.
  */
 export const CI_PARITY_TABLE: CiParityEntry[] = [
+  { job: "ci-required", mirrored: false, reason: "GitHub-only stable-name aggregator; the ci entry below runs the equivalent complete test surface locally" },
   {
     job: "ci",
     mirrored: true,
@@ -684,6 +684,7 @@ export const CI_PARITY_TABLE: CiParityEntry[] = [
       runStep("leak-grep", () => shellOut(spawn, "bash .github/scripts/leak-grep.sh", "bash", [join(repoRoot, ".github", "scripts", "leak-grep.sh")], { cwd: repoRoot })),
     ],
   },
+  { job: "coverage-ratchet-required", mirrored: false, reason: "GitHub-only LCOV artifact aggregator; the coverage-ratchet entry below evaluates the equivalent complete surface locally" },
   {
     job: "coverage-ratchet",
     mirrored: true,
@@ -780,7 +781,6 @@ export const CI_PARITY_TABLE: CiParityEntry[] = [
   // unconditional on every PR, and measured at ~1.1s, so it is mirrored rather than excluded.
   npmScriptEntry("task-id-existence", "task-id-existence:check"),
 ];
-
 export interface CiParityDeps {
   spawn?: PreflightSpawn;
   /** Test seam for the drift check — production reads the real ci.yml off disk. */

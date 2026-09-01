@@ -1,0 +1,75 @@
+- id: W1-T2579
+  title: "THE ARM GATE CAN FINALLY CONSULT WHAT THE FLEET MEASURES, INERT UNTIL RATIFIED — verdict-class calibration runs on a cadence and writes per-class figures nobody consults, so this shard adds the one committed seam Law 5 permits: an operator-ratified band table in policy that decideAutoMergeArm reads fail-inert, where an absent table is byte-for-byte today's behavior"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 45.00
+  files: [src/lib/review.ts, src/lib/policy.ts, test/arm-calibration-bands.test.ts]
+  origin: "operator-brief#direction-refresh-2026-08-27"
+  plan_refs: ["W1-T424", "W1-T1259", "W1-T2244", "W1-T229"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE LOOP IS OPEN BY DESIGN AND THE DESIGN SAYS WHAT CLOSES IT. `verdict-calibration.ts`
+    (W1-T424) joins armed merges to post-merge reality per class; the measurement cadence
+    (W1-T1259) runs it and ledgers per-class figures on `measurement_cadence.ran`. The arm chain —
+    `priorReviewVerdictFromLedger` into `decideArmFromLedgerVerdict`, delegating goodness to
+    `decideAutoMergeArm` — reads the verdict and the ledger and never a measured rate, confirmed
+    with an in-span negative control against a positive verdict-gate control. The calibration
+    charter defers consumption "once this metric has a baseline"; the house law is "the machine
+    never ratifies on its own judgment — it acts within a policy the operator ratified once."
+    This shard builds the ratified-policy seam and NOTHING ELSE: the mechanism ships empty.
+
+    WHY A COMMITTED TABLE AND NOT A LEDGER LOOKBACK. The counterfactual recon established that
+    no historical arm can be replayed against a figure that was not in the ledger at its moment —
+    the as-of property is unrecoverable retroactively. A band table in `plan/policy.yaml` is
+    COMMITTED: every future arm has a well-defined "what did policy say", by sha, forever. The
+    same recon fixed the denominator scoping this table inherits: bands price ONLY on the
+    calibration join (keyed on the arm event), never on `verdict.merged` credit rows and never on
+    the trailer-lossy autonomy corpus.
+  design: |
+    (i) THE SEAM, ONE RULE ONE IMPLEMENTATION. Inside `decideAutoMergeArm` — the single owner of
+    arm goodness, per its own delegation history — after the existing refusals: resolve the
+    verdict's class from the posted fields it already reads, look up `armCalibrationBands` (a new
+    policy row, `plan/policy.yaml`), and apply the band verdict. `hold` refuses the arm with
+    reason `calibration-band:<class>`; `notify` arms and carries the band note in the decision
+    reason; `arm` and every absence path change nothing.
+
+    (ii) FAIL-INERT IS THE CONTRACT, STATED AS ARITHMETIC. An absent table, an empty table, an
+    unknown class, a malformed row, or a class the table does not name each leave the decision
+    IDENTICAL to today's — the falsifier is a test asserting byte-equality of the full decision
+    object with and without the empty table across every existing refusal and approval path. This
+    is the deliberate inverse of the fail-closed-inverted shape this repo has refused.
+
+    (iii) NARROW-ONLY, AND THE CAPPED CLASS IS NOT BAND-ELIGIBLE. A band may hold or annotate
+    what today arms; it may NEVER arm what today refuses — the capped-verdict refusal (W1-T229)
+    and the operator-override path are evaluated before the band and are untouchable by it.
+    Widening is a different ratification for a different day, refused here by name.
+
+    (iv) THRESHOLDS ENTER ONLY BY A RATIFIED PR. This shard ships the table EMPTY. No cadence,
+    rung, retro or judge writes it — the cadence keeps its zero write paths; figures reach the
+    band only through a pull request the operator merges. The policy row's own comment carries
+    that sentence so the next reader cannot miss it.
+
+    (v) WHAT MUST NOT CHANGE. The risk judge's veto is untouched. The operator gates every merge
+    and deploy regardless of any band. `automerge.arm_skipped` gains one reason string and no new
+    step. And no existing bound, ceiling or cadence moves.
+
+    THE RISK BAND IS RULE 19's SPAN, NOT BLAST RADIUS — the gate file, the policy loader and the
+    test read as two concerns; with the table empty the runtime change is zero behavior.
+  acceptance:
+    - claim: "an absent or empty band table leaves every arm decision byte-identical to today"
+      proof: "unit test: test/arm-calibration-bands.test.ts"
+    - claim: "a ratified hold band refuses the arm naming its class in the reason"
+      proof: "unit test: test/arm-calibration-bands.test.ts"
+    - claim: "a notify band arms and carries the band note in the decision reason"
+      proof: "unit test: test/arm-calibration-bands.test.ts"
+    - claim: "a band can never arm a verdict the existing refusals hold"
+      proof: "unit test: test/arm-calibration-bands.test.ts"
+    - claim: "the capped class is refused band eligibility by construction"
+      proof: "unit test: test/arm-calibration-bands.test.ts"
+    - claim: "a malformed band row is inert and named rather than disarming or holding anything"
+      proof: "unit test: test/arm-calibration-bands.test.ts"

@@ -1,0 +1,60 @@
+- id: W1-T2574
+  title: "THE SWEEP AGGREGATES BY TASK CLASS AND EVERY RUN OF A CLASS RODE THE SAME MOUNT, SO IT CAN NEVER SAY WHAT A DIFFERENT MOUNT WOULD HAVE DONE — and the moment two providers make the mount vary, comparing cells that were never matched on (type, risk, class) measures task difficulty rather than model"
+  repo: remudero
+  depends_on: ["W1-T2572", "W1-T2573"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 15.00
+  files: [scripts/mount-headroom-sweep.mjs, test/a-mount-comparison-across-unmatched-populations-is-not-a-measurement.test.ts]
+  origin: "operator-session#codex-router-design-2026-09-01"
+  plan_refs: ["W1-T2560", "W1-T2572", "W1-T2573"]
+  status: queued
+  attempts: 0
+  rationale: |
+    W1-T2560 BUILT THE RIGHT CENSUS AND IT CANNOT ANSWER THE ROUTING QUESTION. It reports turn and
+    cost distributions per `task_class` with an outcome split and cost per SETTLED task — all
+    correct, and all of it describing a world where `.remudero/mounts.yaml` is static, so every run
+    of a (type x risk x class) cell rode the SAME mount. A corpus with no variation on the variable
+    of interest supports no counterfactual, however large it grows. That is not a defect in the
+    sweep; it is the reason this task exists.
+
+    WHAT CHANGES THE PICTURE IS NOT MORE ROWS, IT IS VARIATION — and a second provider supplies it
+    without anyone deliberately spending money to create it. Provider selection
+    (`selectWorkerProvider`, src/lib/worker-provider.ts) chooses the subscription with the most
+    room in its tightest window, which is a function of WINDOW STATE and not of the task. That
+    makes assignment plausibly exogenous to task difficulty: a natural experiment, arriving free,
+    for as long as both providers are enabled.
+
+    THAT SAME PROPERTY IS WHY THIS TASK MUST REFUSE UNMATCHED COMPARISONS. Provider assignment is
+    only quasi-random WITHIN a cell. Across cells it is not: high-risk work rides higher mounts by
+    policy, so a naive per-model aggregate reports that expensive mounts fail more, which is
+    difficulty talking, not model. The sweep must therefore key on (provider x served_model x
+    effort) WITHIN (type x risk x class), report each cell's n, and REFUSE — loudly, naming the
+    cell — to compare two arms that do not share a cell. A refusal is the finding; a number
+    computed across unmatched populations is worse than no number, because it will be acted on.
+
+    IT MUST ALSO CARRY W1-T2560'S OWN CONTROLS FORWARD, because they are not optional here either:
+    all three rotation forms opened and named, dedupe by run_id with the row-to-run ratio printed,
+    the corpus's newest timestamp beside every figure, and percentiles rather than means. A mount
+    comparison drawn from a window that closed before the second provider was enabled is a
+    perfectly clean query answering about a period in which the thing under study did not exist.
+
+    OUTCOME BEFORE COST, RESTATED BECAUSE THE FAILURE MODE IS SHARPER HERE: cost per settled
+    success rewards a mount that fails FAST. Every arm must carry its pass / blocked_ci /
+    re-dispatch split beside its cost, and an arm whose cost advantage disappears once
+    re-dispatches are charged to it must be reported as what it is.
+  acceptance:
+    - claim: "arms are keyed by provider, served model and effort WITHIN a type-risk-class cell, never across cells"
+      proof: "unit test: test/a-mount-comparison-across-unmatched-populations-is-not-a-measurement.test.ts"
+    - claim: "two arms that do not share a cell are REFUSED with the cell named, never silently compared"
+      proof: "unit test: test/a-mount-comparison-across-unmatched-populations-is-not-a-measurement.test.ts"
+    - claim: "every arm reports its own n, so a comparison resting on a handful of runs is visible as such"
+      proof: "unit test: test/a-mount-comparison-across-unmatched-populations-is-not-a-measurement.test.ts"
+    - claim: "each arm carries its pass, blocked_ci and re-dispatch split beside its cost"
+      proof: "unit test: test/a-mount-comparison-across-unmatched-populations-is-not-a-measurement.test.ts"
+    - claim: "an arm whose cost advantage disappears once re-dispatches are charged to it is reported as such"
+      proof: "unit test: test/a-mount-comparison-across-unmatched-populations-is-not-a-measurement.test.ts"
+    - claim: "the corpus newest timestamp is printed beside every comparison, so an answer about a window predating the second provider is visible"
+      proof: "unit test: test/a-mount-comparison-across-unmatched-populations-is-not-a-measurement.test.ts"
