@@ -11,10 +11,9 @@ import {
 //
 // `runSweep` builds `pendingReviews` by `push` inside its per-PR walk, so insertion order IS
 // enumeration order, and `openPrsRestArgs` asks for `pulls?state=open&per_page=100` with no
-// `sort` — GitHub answers newest-first. Cutting that with `slice(0, reviewLanes)` therefore gave
-// the lanes to the NEWEST entries and deferred the OLDEST tail, and "re-derived next pass"
-// re-derived the same set in the same order. While the queue stayed deeper than the budget, an
-// entry below the cut was deferred every pass, indefinitely.
+// `sort` — GitHub answers newest-first. The worker pool must therefore consume this ordered set,
+// not the enumeration order, so every start remains oldest-first even when the queue is deeper
+// than the number of live lanes.
 //
 // EVERY FIXTURE HERE IS DEEPER THAN THE BUDGET, AND THE OLDEST ENTRY IS LAST IN ITERATION ORDER.
 // That is not decoration: the starvation condition REQUIRES a queue deeper than the lanes, so a
@@ -35,7 +34,7 @@ const job = (label: string, prNumber: number, createdAt?: string): Job => ({
 /** The lane budget these fixtures are built against — read, never redefined. */
 const LANES = DEFAULT_SWEEP_POLICY.reviewLanes;
 
-test("W1-T1218: when the pending set exceeds the budget the oldest eligible review takes a lane", () => {
+test("W1-T1218/W1-T2584: a pending set deeper than the live lanes is ordered oldest-first before workers pull from it", () => {
   // NEWEST-FIRST, exactly as the unsorted enumeration hands them over — and the OLDEST entry is
   // LAST, so a slice taken without ordering can never reach it.
   const asEnumerated: Job[] = [
@@ -60,17 +59,12 @@ test("W1-T1218: when the pending set exceeds the budget the oldest eligible revi
   assert.deepEqual(asEnumerated.map((j) => j.label), AS_ENUMERATED, "the fixture is in the declared enumeration order");
 
   const ordered = orderPendingReviews(asEnumerated);
-  const runNow = ordered.slice(0, LANES);
-  const deferred = ordered.slice(LANES);
-
   assert.equal(ordered[0].label, "oldest", "the oldest entry leads the ordered set");
-  assert.ok(runNow.some((j) => j.label === "oldest"), "so it takes a lane on THIS pass");
   assert.deepEqual(
-    runNow.map((j) => j.label),
-    OLDEST_FIRST.slice(0, LANES),
-    "the lanes go to the longest-waiting entries, in order",
+    ordered.map((j) => j.label),
+    OLDEST_FIRST,
+    "the bounded workers receive the entire backlog in longest-waiting-first order",
   );
-  assert.deepEqual(deferred.map((j) => j.label), OLDEST_FIRST.slice(LANES), "and the NEWEST entries are the ones deferred");
 
   // PAIRED POSITIVE CONTROL: the unsorted slice — the behaviour before this change — gives the
   // lanes to the newest entries and never reaches the oldest. Without this the assertions above
@@ -79,7 +73,7 @@ test("W1-T1218: when the pending set exceeds the budget the oldest eligible revi
   // no legal LANES value makes the sorted and unsorted cuts coincide.
   const unsorted = asEnumerated.slice(0, LANES).map((j) => j.label);
   assert.deepEqual(unsorted, AS_ENUMERATED.slice(0, LANES), "the pre-change cut, for contrast");
-  assert.notDeepEqual(unsorted, runNow.map((j) => j.label), "the ordered cut is not the enumeration cut — ordering really happened");
+  assert.notDeepEqual(unsorted, ordered.slice(0, LANES).map((j) => j.label), "the ordered prefix is not the enumeration prefix — ordering really happened");
   assert.ok(!unsorted.includes("oldest"), "which is precisely the starvation this fixes");
 });
 
@@ -100,7 +94,7 @@ test("W1-T1218: a pending set no larger than the budget produces the same outcom
   }
 });
 
-test("W1-T1218: the deferred remainder still stands down without persisting new state", () => {
+test("W1-T1218/W1-T2584: ordering preserves every pending entry without mutating the caller", () => {
   const jobs: Job[] = [
     job("a", 10, "2026-08-22T05:00:00Z"),
     job("b", 11, "2026-08-22T04:00:00Z"),
@@ -117,17 +111,15 @@ test("W1-T1218: the deferred remainder still stands down without persisting new 
   assert.deepEqual(jobs.map((j) => j.label), before, "the input pending set is not mutated");
   assert.notEqual(ordered, jobs, "a new array is returned, never the same reference");
 
-  // AND NOTHING IS LOST: the run/defer split is a total partition of the same jobs, so every
-  // entry the pass found eligible either takes a lane or stands down — none is dropped.
-  const runNow = ordered.slice(0, LANES);
-  const deferred = ordered.slice(LANES);
-  assert.equal(runNow.length + deferred.length, jobs.length, "run + deferred accounts for every entry");
+  // AND NOTHING IS LOST: the pool will pull this whole ordered set, so it must remain a total
+  // permutation of the pending jobs rather than a budget-sized cut.
+  assert.equal(ordered.length, jobs.length, "the worker-pool input accounts for every entry");
   assert.deepEqual(
-    new Set([...runNow, ...deferred].map((j) => j.label)),
+    new Set(ordered.map((j) => j.label)),
     new Set(before),
     "and it is the same set, neither duplicated nor dropped",
   );
-  assert.equal(new Set([...runNow, ...deferred]).size, jobs.length, "each entry appears exactly once");
+  assert.equal(new Set(ordered).size, jobs.length, "each entry appears exactly once");
 });
 
 test("W1-T1218: a pending entry carrying no creation timestamp still takes a deterministic position", () => {
