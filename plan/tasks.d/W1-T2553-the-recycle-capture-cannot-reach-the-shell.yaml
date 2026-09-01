@@ -1,0 +1,86 @@
+- id: W1-T2553
+  title: "WHEN A CONTAINER EXISTS THE RECYCLE READS CREDENTIALS ONLY FROM docker inspect AND THE SHELL FALLBACK IS UNREACHABLE — it lives in the else branch taken only when NO container exists, so since W1-T2311 began creating containers with an empty GH_TOKEN on purpose the captured value is empty forever, every recycle after the first refuses, and exporting the variable cannot help because that branch never looks there; the refusal then prints and this shell has none either without having read the shell at all"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 15.00
+  files: [deploy/recycle-container.sh, test/recycle-capture-falls-back-to-the-shell.test.ts]
+  origin: "operator-brief#app-auth-dispatch-claim-refuses-2026-08-30"
+  plan_refs: ["W1-T2311", "W1-T1069", "W1-T2552"]
+  status: queued
+  attempts: 0
+  rationale: |
+    ── THE DEADLOCK ─────────────────────────────────────────────────────────────────────────────
+
+    `deploy/recycle-container.sh` captures every name in `RMD_DAEMON_RUNTIME_ENV_VARS` before it
+    replaces a container, and REFUSES if `GH_TOKEN` comes back empty — correctly, because removing
+    the container would discard the only copy of a credential that is never written to disk.
+
+    THE CAPTURE HAS TWO BRANCHES AND ONLY ONE OF THEM CAN EVER RUN FOR A LIVE HOST. When a
+    container exists, the loop reads solely `CONTAINER_ENV_LINES` (from `docker inspect`); the read
+    of the shell's own environment sits in the `else`, reached only when NO container exists at all.
+
+    That was sound while containers were started carrying a token. W1-T2311 then made them start
+    with `-e GH_TOKEN=` EMPTY on purpose — so that a stale personal token could never be re-booted
+    as the fleet's default — and the two decisions deadlock: the captured value is `""` on every
+    recycle after the first, the refusal fires forever, and the ONE remedy the refusal itself
+    recommends ("Export GH_TOKEN in this shell and re-run") CANNOT WORK, because that branch never
+    consults the shell.
+
+    ⚠ AND THE REFUSAL COMPOUNDED IT BY ASSERTING SOMETHING IT HAD NOT MEASURED. From the container
+    branch it printed "and this shell has none either" — a claim about a source it had not read. An
+    operator who HAD exported the variable was told their export had not taken, which is the worst
+    possible steer: it points away from the real cause and toward the thing they just did right.
+    That is the same class this repo already names elsewhere — a gate stating a conclusion it did
+    not derive — and it is why the remedy here is two changes rather than one.
+
+    ── THE TWO CHANGES ──────────────────────────────────────────────────────────────────────────
+
+    (1) THE CONTAINER BRANCH FALLS BACK TO THE SHELL PER NAME when the container's own value is
+    EMPTY. Per-name rather than special-cased to `GH_TOKEN`, because the identical shape applies to
+    every declared runtime variable and `GH_APP_*` is now the credential that matters.
+
+    ⚠ PRECEDENCE IS DELIBERATE AND THE ONLY CASE THAT PREVIOUSLY MATTERED IS UNCHANGED: a NON-EMPTY
+    container value still wins. A live container's own runtime value can never be silently replaced
+    by a stale shell export — the shell is consulted only where the container offers nothing, which
+    is exactly the case that used to dead-end.
+
+    (2) THE REFUSAL NAMES THE SOURCES IT ACTUALLY CONSULTED. `CAPTURED_SOURCE` records, per name,
+    whether the value came from the container, the shell, or neither, and both the refusal and the
+    success line read it. The success line now says which source won rather than inferring it from
+    `CONTAINER_EXISTS`, which was a second place the script could describe something it had not
+    checked.
+
+    ⚠ NOTHING IS WEAKENED. A genuine double-empty still refuses and still exits non-zero — pinned
+    by its own test, so the fix cannot be mistaken for a relaxation of the guard. W1-T1069's
+    undeclared-runtime-variable drift check ahead of it is untouched.
+
+    ── WHY IT IS TESTED THROUGH THE REAL SCRIPT ────────────────────────────────────────────────
+
+    The suite runs the SHIPPED script with a fake `docker` on PATH rather than re-implementing the
+    capture, because the defect was a control-flow fact (which branch is reachable) that a
+    re-implementation would not have inherited. The fake also has to report a matching IMAGE env,
+    or W1-T1069's drift guard refuses on the fixture's own `PATH` before the capture under test is
+    reached — found by running it, not by reading it. No token value appears anywhere: the fixtures
+    use an obvious placeholder and every assertion reads the script's own wording.
+
+    ── RELATION TO W1-T2552 ─────────────────────────────────────────────────────────────────────
+
+    W1-T2552 fixes `deploy/entrypoint.sh`, which is IMAGE-BAKED and therefore ships only when an
+    operator triggers a rebuild and redeploys. This task is what makes that redeploy possible
+    without a `docker rm` first, so it is a PREREQUISITE for delivering that one rather than a
+    follow-up to it. Both are the same boundary — credentials crossing into the container — and
+    they are separate PRs because they are separate concerns with separate falsifiers.
+
+  acceptance:
+    - claim: "an empty container value falls back to the shell instead of refusing, and the run names which source it used"
+      proof: "unit test: test/recycle-capture-falls-back-to-the-shell.test.ts"
+    - claim: "a non-empty container value still wins over a shell export, so precedence is unchanged"
+      proof: "unit test: test/recycle-capture-falls-back-to-the-shell.test.ts"
+    - claim: "with both sources empty the refusal still fires and names each source it actually consulted"
+      proof: "unit test: test/recycle-capture-falls-back-to-the-shell.test.ts"
+    - claim: "the container capture branch reads the shell by name, locked at the source so a future edit cannot restore the deadlock"
+      proof: "unit test: test/recycle-capture-falls-back-to-the-shell.test.ts"
