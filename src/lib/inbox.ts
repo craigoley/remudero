@@ -414,8 +414,10 @@ export function parseDraftAttemptCache(text: string | undefined): DraftAttemptCa
  * one poll's own cadence: at the measured mean it caps a poll near $26 rather than near $2,400,
  * and a genuine burst of new proposals still reaches the Architect within a few minutes.
  *
- * POLICY DATA (rule 2) — a literal here, W1-T252/W1-T253's policy file is its eventual home, the
- * same disposition {@link UNREADABLE_DEGRADED_LIMIT} in lib/headroom.ts records for its own bound.
+ * PRIMARY CONTROL: this is the normal pacing lever, not a backstop reached only after another
+ * control fails. POLICY DATA (rule 2) — a literal here, W1-T252/W1-T253's policy file is its
+ * eventual home, the same disposition {@link UNREADABLE_DEGRADED_LIMIT} in lib/headroom.ts records
+ * for its own bound.
  */
 export const DAEMON_DRAFT_BATCH_CAP = 3;
 
