@@ -40,13 +40,21 @@
 # inside one.
 #
 # THE LOCK IS PRINTED, NEVER DECIDED (section 2). Every lock under `state/` that would block a boot
-# is displayed in full — holder pid, host, startedAt — and this script does not delete it and does
-# not judge it. That is not a temporary gap waiting on more code: `isHolderStale`'s container branch
-# (src/lib/fs-race-safe.ts, W1-T978) answers "was this an earlier container of THIS cell" only from
-# INSIDE a container (`defaultInContainer` reads `/.dockerenv`, which is absent on the host by
-# construction) — so a host-side script can never safely decide a lock's staleness, on this sha or
-# any future one. The daemon reclaims a foreign container-shaped holder on its own next boot; this
-# script only ever reads and reports.
+# is displayed in full — holder pid, host, startedAt — and this script does not delete it. That is
+# not a temporary gap waiting on more code: `isHolderStale`'s container branch (src/lib/fs-race-safe.ts,
+# W1-T978) answers "was this an earlier container of THIS cell" only from INSIDE a container
+# (`defaultInContainer` reads `/.dockerenv`, which is absent on the host by construction) — so a
+# host-side script can never safely make THAT judgement, on this sha or any future one. `drain.lock`
+# still defers to it exactly as before: printed, never judged, left for a human or the daemon's own
+# next boot.
+#
+# `state/inflight/*.lock` IS DIFFERENT (W1-T2556), because a recycle IS the thing that produces the
+# next boot: waiting out this script's own bound and refusing on a lock whose container is provably
+# gone strands the fleet on the far side of the only remedy that could clear it. So the wait below
+# (section 5) makes ONE narrow, positive exception — never a staleness judgement, a fact `docker
+# inspect` states outright — and reclaims (moves aside, never deletes) an inflight lock whose `host`
+# is BOTH container-id-shaped and reported by docker as absent or not running. Every other lock,
+# under any name, is still only ever read and reported, exactly as this paragraph always said.
 #
 # PLAIN BASH AND DOCKER, deliberately — the same discipline as deploy/verify-image.sh and
 # deploy/host-update.sh, this script's siblings. It runs on a host that may have no node, no rmd and
@@ -535,8 +543,91 @@ worker_lines() {
     | grep -F -- 'claude --output-format' || true
 }
 
+# ── W1-T2556: A LOCK NAMING A CONTAINER THAT NO LONGER EXISTS IS RECLAIMED, NOT WAITED ON ────────
+#
+# THIS SCRIPT IS THE THING THAT PRODUCES THE NEXT BOOT. The header above (section 2) says a
+# host-side script cannot judge a lock's staleness and defers to "the daemon's own next boot" —
+# true for `isHolderStale`'s container branch (src/lib/fs-race-safe.ts, W1-T978), which can only
+# run FROM INSIDE a container. But that deferral is unsound HERE: this recycle is what produces
+# the next boot, so a lock naming a container that is provably gone waits out the full bound,
+# refuses, and the fleet never reaches the boot that was supposed to clear it. MEASURED 2026-09-01:
+# `state/inflight/W1-T2525.lock` named `{"pid":57,"host":"8c8fc20029e2"}`; `docker ps -a` showed
+# `8c8fc20029e2` exited; the recycle refused twice and stayed down until an operator moved the file
+# by hand after reading the same id this script already had.
+#
+# THE ASYMMETRY THIS PRESERVES: killing a LIVE worker loses unrecorded spend, so anything this
+# cannot POSITIVELY classify as dead is still waited for and then refused, exactly as before. What
+# changes is narrow and one-directional — a lock's `host` moves out of the blocking set ONLY when
+# BOTH of these hold:
+#   1. `host` is SHAPED like a docker container id — `looksLikeContainerId`'s own shape
+#      (src/lib/fs-race-safe.ts): 12 or 64 lowercase hex characters. A `host` that is not
+#      container-id-shaped at all (a hand-named box, a pre-containerisation fixture, a free-form
+#      string) is something docker was never going to recognise, so asking it proves nothing —
+#      that lock's host CANNOT BE RESOLVED and is left exactly as conservative as today.
+#   2. `docker inspect --format '{{.State.Running}}' "${host}"` gives a DEFINITIVE dead answer:
+#      either the command itself FAILS (docker has no such container — ABSENT), or it succeeds
+#      and prints exactly `false` (the container exists but is NOT RUNNING — the measured
+#      incident's exact shape, `docker ps -a` reporting `exited`). Anything else — the command
+#      succeeds and prints `true` (RUNNING), or prints something this script cannot parse as
+#      `true`/`false` — is read as "still alive or unknown" and left alone. A `docker` that is
+#      simply unavailable behaves the same as any other inspect failure on a container-shaped
+#      host: read as ABSENT (rare and no worse than today, since an unavailable `docker` would
+#      already fail every OTHER docker call this script makes).
+#
+# PRINT BEFORE CLEARING, AND NEVER DELETE — the same standing discipline section 2 already applies
+# to every lock this script reads. A reclaimed lock is MOVED, never unlinked, into
+# `${INFLIGHT_DIR}/reclaimed/`, alongside a sibling `.reason` file recording exactly what docker
+# said and when — so a wrong judgement is recoverable and the evidence a lost run needs survives.
+INFLIGHT_CONTAINER_ID_RE='^[0-9a-f]{12}$|^[0-9a-f]{64}$'
+
+lock_host_field() {
+  # Same discipline as deploy/host-update.sh's `expiresAt` extraction: grep/cut, not jq — this
+  # script runs on a host that may have no node, no rmd and no jq. Empty output means unreadable,
+  # malformed, or simply carries no `host` key; every caller below treats that as "cannot resolve".
+  # `|| true` on the pipeline itself: under `set -o pipefail` a malformed lock with NO `host` key
+  # makes `grep` exit 1 (no match), which — unguarded — would abort the WHOLE SCRIPT via `set -e`
+  # the moment `host="$(lock_host_field ...)"` assigns a failed substitution, taking the conservative
+  # "leave it alone" path down with it. Guarded, a malformed lock reaches the empty-output check
+  # below exactly as intended, instead of killing the recycle outright.
+  grep -ao '"host"[[:space:]]*:[[:space:]]*"[^"]*"' "$1" 2>/dev/null \
+    | head -1 \
+    | sed -E 's/.*"([^"]*)"[[:space:]]*$/\1/' || true
+}
+
+reclaim_dead_inflight_locks() {
+  [ -d "${INFLIGHT_DIR}" ] || return 0
+  local f host verdict running reclaimed_dir reclaimed_path
+  for f in "${INFLIGHT_DIR}"/*.lock; do
+    [ -e "${f}" ] || continue
+    host="$(lock_host_field "${f}")"
+    [ -n "${host}" ] || continue # unreadable or malformed — leave alone, still blocks
+    printf '%s' "${host}" | grep -Eq "${INFLIGHT_CONTAINER_ID_RE}" || continue # host cannot be resolved — leave alone
+
+    verdict=""
+    if running="$(docker inspect --format '{{.State.Running}}' "${host}" 2>/dev/null)"; then
+      [ "${running}" = "false" ] && verdict="NOT RUNNING (docker inspect: State.Running=false)"
+    else
+      verdict="ABSENT (docker inspect: no such container)"
+    fi
+    [ -n "${verdict}" ] || continue # running, or an answer this script cannot parse — leave alone
+
+    echo "recycle-container: ${f} names host ${host}, which docker reports ${verdict}." >&2
+    echo "  RECLAIMING — printed in full below before anything acts on it, never deleted:" >&2
+    sed 's/^/    /' "${f}" >&2 2>/dev/null || echo "    (unreadable)" >&2
+
+    reclaimed_dir="${INFLIGHT_DIR}/reclaimed"
+    mkdir -p "${reclaimed_dir}"
+    reclaimed_path="${reclaimed_dir}/$(basename "${f}").recycle-$$"
+    mv "${f}" "${reclaimed_path}"
+    printf 'reclaimed by recycle-container.sh (W1-T2556) pid %s at %s\nhost: %s\nverdict: %s\n' \
+      "$$" "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "${host}" "${verdict}" > "${reclaimed_path}.reason"
+    echo "  moved aside to ${reclaimed_path} (reason recorded alongside it) — recycle proceeds" >&2
+  done
+}
+
 waited=0
 while :; do
+  reclaim_dead_inflight_locks
   n=0
   if [ -d "${INFLIGHT_DIR}" ]; then
     n="$(find "${INFLIGHT_DIR}" -maxdepth 1 -name '*.lock' 2>/dev/null | wc -l | tr -d ' ')"
