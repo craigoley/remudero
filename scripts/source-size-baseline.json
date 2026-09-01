@@ -80,6 +80,7 @@
   "src/lib/onboard/session.ts": 472,
   "src/lib/onboard/synthesize.ts": 508,
   "src/lib/open-prs-rest.ts": 1727,
+  "src/lib/operator-merge-hold.ts": 500,
   "src/lib/operator-message.ts": 131,
   "src/lib/operator-notes.ts": 209,
   "src/lib/operator-sync.ts": 390,

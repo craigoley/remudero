@@ -136,17 +136,17 @@ const BASELINE_COMMAND_NAMES = [
   "console-url", "correct", "coverage-improve", "daemon", "daemon-plist", "dep-review",
   "deploy", "deploy-plist", "deploy-run", "digest", "digest-plist", "doctor", "down", "drain",
   "emissions", "escalate", "feedback", "fix", "inbox", "init", "install-checkout", "issues",
-  "learnings", "ledger-grep", "lint-plan", "next-task-id", "notify", "onboard", "ops", "pause",
+  "learnings", "ledger-grep", "lint-plan", "merge-hold", "next-task-id", "notify", "onboard", "ops", "pause",
   "peek", "plan", "preflight", "project", "proof-queue-audit", "reap-branches", "receipt",
   "reframe", "relay", "replay", "resume", "retro", "review", "rule-efficacy", "run-task",
   "serve", "serve-plist", "skill", "status", "stop", "sweep", "sync", "trace", "triage", "up",
   "verdict-calibration", "wipe-test",
 ].sort();
 
-test("COMMANDS carries exactly the same 63 command names as before this task's field split -- none added, none removed", () => {
-  assert.equal(BASELINE_COMMAND_NAMES.length, 63);
+test("COMMANDS carries the established command names plus the operator merge-hold writer", () => {
+  assert.equal(BASELINE_COMMAND_NAMES.length, 64);
   assert.deepEqual([...COMMANDS.map((c) => c.name)].sort(), BASELINE_COMMAND_NAMES);
-  assert.equal(COMMANDS.length, 63);
+  assert.equal(COMMANDS.length, 64);
 });
 
 // ── Regression control: this test file is where a re-widened top-level listing would show up ──
