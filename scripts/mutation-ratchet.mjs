@@ -14,9 +14,17 @@
 // baseline exits zero.
 //
 // Usage (ratchet mode -- compares a completed Stryker run against the baseline):
-//   node scripts/mutation-ratchet.mjs [--report <path>] [--baseline <path>]
+//   node scripts/mutation-ratchet.mjs [--report <path>] [--baseline <path>] [--stryker-config <path>]
 //
-// Defaults: --report reports/mutation/mutation.json, --baseline scripts/mutation-baseline.json
+// Defaults: --report reports/mutation/mutation.json, --baseline scripts/mutation-baseline.json,
+// --stryker-config stryker.conf.json
+//
+// W1-T2524: when this mode BLOCKS, it also names the mutated files the report scored and (parsed
+// from --stryker-config's own commandRunner.command) the test files the run actually executed --
+// a test for a mutated file above that is NOT in that list is invisible to mutation testing while
+// being perfectly visible to every other gate, and until this task the ONLY symptom was a
+// collapsed score with no reason. A PASSING run's output, and the score/baseline comparison
+// itself, are byte-for-byte unchanged -- this is purely additional BLOCKED-branch explanation.
 //
 // Usage (path-filter mode -- W1-T108, MASTER-PLAN §5C/§5A, decides whether the CI job needs to
 // run Stryker at all for THIS diff):
@@ -639,12 +647,52 @@ export function evaluateRatchet(actual, baseline, epsilon = 1e-9) {
   return violations;
 }
 
+// ── W1-T2524: name the BLOCKED run's blind spot ─────────────────────────────────────────────
+//
+// A test for a mutated file sitting OUTSIDE stryker.conf.json's commandRunner.command is
+// invisible to mutation testing while being perfectly visible to every other gate -- the ONLY
+// symptom, until now, was a collapsed score with no reason (MEASURED, 2026-08-30: 38.91% against
+// a 75.92% baseline, entirely explained by a third classify.ts test living in a file the runner
+// never ran). The fix is a report change, not a redesign: on BLOCKED, name the test files the
+// command runner actually executed (parsed from the SAME stryker.conf.json the CI job itself
+// invokes) beside the mutated files the report actually scored, so "your tests were not in this
+// set" is readable straight from the failure. This adds NO src/ edit and touches no evaluation
+// logic -- it only prints more when a run was already going to fail.
+
+/**
+ * Pull the individual `*.test.ts` file arguments out of a Stryker `commandRunner.command`
+ * string. PURE string parsing -- no filesystem access -- so it is directly unit-testable against
+ * any command string, real or fixture.
+ * @param {string | undefined} command
+ * @returns {string[]}
+ */
+export function extractCommandTestFiles(command) {
+  return (command ?? '').split(/\s+/).filter((token) => /\.test\.ts$/.test(token));
+}
+
+/**
+ * Read a Stryker config's `commandRunner.command` and return the test files it runs. Returns
+ * `undefined` (never throws) when the config is missing or unreadable -- a BLOCKED run must still
+ * print its score-vs-baseline verdict even if this best-effort enrichment cannot be produced.
+ * @param {string} strykerConfigPath
+ * @returns {string[] | undefined}
+ */
+export function readCommandRunnerTestFiles(strykerConfigPath) {
+  try {
+    const doc = JSON.parse(readFileSync(strykerConfigPath, 'utf8'));
+    return extractCommandTestFiles(doc.commandRunner?.command);
+  } catch {
+    return undefined;
+  }
+}
+
 function main(argv) {
   const { values } = parseArgs({
     args: argv,
     options: {
       report: { type: 'string', default: 'reports/mutation/mutation.json' },
       baseline: { type: 'string', default: 'scripts/mutation-baseline.json' },
+      'stryker-config': { type: 'string', default: 'stryker.conf.json' },
       'changed-files': { type: 'string' },
       'relevant-paths': { type: 'string' },
       'nightly-scope': { type: 'boolean', default: false },
@@ -1028,6 +1076,32 @@ function main(argv) {
   if (violations.length > 0) {
     console.error('mutation-ratchet: BLOCKED -- mutation score dropped below the recorded baseline:');
     for (const v of violations) console.error(`  - ${v}`);
+
+    // W1-T2524: name WHAT this run measured, so "the runner never ran your test" is readable from
+    // the failure itself instead of requiring the author to already know the convention.
+    const mutatedFilesScored = Object.keys(report.files ?? {});
+    console.error(
+      `mutation-ratchet: mutated files scored: ${mutatedFilesScored.length > 0 ? mutatedFilesScored.join(', ') : '(none)'}`,
+    );
+    const testFilesExecuted = readCommandRunnerTestFiles(values['stryker-config']);
+    if (testFilesExecuted && testFilesExecuted.length > 0) {
+      console.error(
+        `mutation-ratchet: test files executed (commandRunner.command in ${values['stryker-config']}): ` +
+          testFilesExecuted.join(', '),
+      );
+      console.error(
+        'mutation-ratchet: a test for a mutated file above that is NOT in that list is invisible to ' +
+          'this run -- move its assertions into a file that IS in the command, or add it there in a ' +
+          'separate, config-only PR (stryker.conf.json is on the instrument surface, so it cannot ship ' +
+          'beside a src/ change in the same PR).',
+      );
+    } else {
+      console.error(
+        `mutation-ratchet: could not read commandRunner.command from ${values['stryker-config']} -- ` +
+          'unable to name the test files this run actually executed',
+      );
+    }
+
     process.exitCode = 1;
     return;
   }
