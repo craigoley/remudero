@@ -89,6 +89,10 @@ test("Codex write workers grant only an in-root linked worktree's Git administra
   assert.ok(roots.some((candidate) => candidate.endsWith(join(".git", "worktrees", "run-fixture"))));
   assert.ok(roots.some((candidate) => candidate.endsWith(join("repos", "fixture", ".git"))));
   assert.deepEqual(codexGitWritableRoots(worktree, join(root, "unrelated")), []);
+
+  const nonRepo = join(root, "not-a-repo");
+  mkdirSync(nonRepo);
+  assert.deepEqual(codexGitWritableRoots(nonRepo, root), []);
 });
 
 test("Claude usage maps every reported subscription window", () => {
