@@ -1,0 +1,74 @@
+- id: W1-T2697
+  title: "THE OPERATOR TEACHES BY DOING AND THE FLEET NEVER WATCHES — the ledger records every rmd verb and cannot say who ran it, so the board sweep the operator ran by hand all night was invisible until a brief named it; stamp the actor on every ledger row, mine the operator's repeated verb sequences, and propose each recurrence as a routine through the inbox"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: |
+    RE-DERIVED AT f632e15fa (2026-09-02).
+
+    (1) THE BLIND SPOT, MEASURED BY ITS CONSEQUENCE. W1-T2304 exists because the operator ran a
+    board sweep by hand for a night and then wrote a brief about it. Nothing in the fleet could
+    have noticed sooner, because a ledger row carries `step`, `task_id`, `run_id` and `ts` and
+    no ACTOR: `git grep -nE 'actor|invoked_by' src/lib/ledger.ts` reads nothing at head, and
+    `rmd emissions`'s `attributeVerbs` maps verb names to step prefixes without asking who
+    invoked the verb. W1-T2240 measured the cost side of the same gap — operator sessions are
+    absent from every denominator. Workers carry `workerMarkerEnv` (src/lib/worker.ts); the
+    daemon's own rungs run in-process; an operator's `./bin/rmd` from a shell carries nothing.
+
+    (2) THE IDEA, INVERTED FROM GROK BOT. Grok Bot's routines are taught by demonstration:
+    "Teach a task (up to 10 minutes of screen, no mic), save as a reusable routine." A coding
+    harness has a better recorder than a screen: its own ledger. What it lacks is the question
+    "what does the operator keep doing by hand?" — the inverse of `rmd emissions`, which asks
+    what the fleet never does. The retro's consolidation discipline (§8A) already turns episodic
+    rows into semantic learnings; this turns operator episodes into ROUTINE PROPOSALS.
+
+    (3) RULE 15, BY CONSTRUCTION. A recurrence is a proposal, not a rung: it lands in the inbox
+    through `captureFeedback` with its evidence (the sequence, the days it recurred, the verbs'
+    ledger rows), and the operator ratifies or reframes it. Nothing here schedules anything.
+  design: |
+    (i) THE STAMP. `appendLedger` (src/lib/ledger.ts) adds `actor: "daemon" | "worker" |
+    "operator"`, derived at write time from process context: the worker marker env ⇒ worker; the
+    daemon's in-process marker ⇒ daemon; neither ⇒ operator. A row from before this task has no
+    actor and is reported as `unknown`, never guessed.
+
+    (ii) THE MINER. src/lib/hand-run-census.ts: over the ledger union (`resolveLedgerUnion`, never
+    the live file — W1-T1013), group operator rows into sessions by pid and a thirty-minute gap,
+    reduce each session to its verb sequence, and count identical sequences of length two or more
+    across distinct days. A sequence seen on at least the policy floor of distinct days is a
+    RECURRENCE with its evidence rows.
+
+    (iii) THE SEAT AND THE PROPOSAL. `runMeasurementCadenceReport` gains a hand-run member
+    (`status: refused` when the union is unreadable or carries no actor-stamped rows yet). Each
+    recurrence not already proposed — deduped by sequence hash against the union, the W1-T470
+    discipline — is captured as one feedback entry naming the sequence, the days, and the rung
+    shape it suggests. `rmd hand-runs` prints the census on demand.
+
+    (iv) WHAT DOES NOT CHANGE. No rung is created. No verb changes behaviour. Rows before the
+    stamp stay as they are.
+  acceptance:
+    - claim: "every new ledger row carries an actor derived from process context, and a pre-stamp row reports unknown rather than a guess"
+      proof: "unit test: test/hand-run-census.test.ts"
+    - claim: "the miner reads the ledger union, groups operator rows into sessions, and reports a sequence only when it recurs across the floor of distinct days"
+      proof: "unit test: test/hand-run-census.test.ts"
+    - claim: "a recurrence becomes exactly one inbox entry with its evidence, deduped against the union, and never a rung"
+      proof: "unit test: test/hand-run-census.test.ts"
+    - claim: "the measurement report carries the hand-run member"
+      proof: "grep: handRunCensus( in src/lib/measurement-cadence.ts"
+  risk: high
+  band_meaning: span
+  origin: "oper#external-scan-2026-09-02"
+  plan_refs: ["W1-T2304", "W1-T2240", "W1-T1013", "W1-T470", "W1-T2266", "§8A", "§12"]
+  files: [src/lib/ledger.ts, src/lib/hand-run-census.ts, src/lib/measurement-cadence.ts, src/run-task.ts, test/hand-run-census.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    risk:high, band_meaning:span — the ledger writer, a new miner, the measurement report and
+    the CLI under Rule 19; runtime blast radius is one new field on every row and at most one
+    inbox entry per recurrence.
+
+    SOURCE: Grok Bot routines, "Teach a task", via RongleCat/awesome-grok-bot (x.ai unreachable
+    from the filing proxy). The inversion — the ledger as the recorder, the operator as the
+    demonstrator — is this repository's own.
