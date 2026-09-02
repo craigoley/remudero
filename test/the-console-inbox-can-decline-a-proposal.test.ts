@@ -7,6 +7,7 @@ import { test } from "node:test";
 import type { AddressInfo } from "node:net";
 import { createService } from "../src/lib/service.js";
 import { buildPanelGraphRoutes, type PanelGraphDeps, type RatifyCliGateway } from "../src/lib/panel-graph.js";
+import { classifyProposal, refusalReason, renderInbox, type Proposal, type ReadinessContext } from "../src/lib/inbox.js";
 import type { TraceGithub } from "../src/lib/trace.js";
 import type { GitHub } from "../src/lib/status.js";
 
@@ -368,5 +369,51 @@ test("GET /v1/inbox: a declined proposal is healed out of `ready`/`notReady` eve
     registry.proposals.map((p) => p.id),
     ["P909"],
     "declining must never delete the proposal from the registry",
+  );
+});
+
+// ── Unit coverage for the two read-side renderers a declined classification reaches ────────
+//
+// The route-level tests above only ever observe a decline through GET /v1/inbox's `ready`/
+// `notReady` arrays, which never render a `declined` classification directly. `renderInbox`
+// (the digest/CLI text) and `refusalReason` (the 409 an approve-on-declined would surface) each
+// have their own `state === "declined"` branch that no test anywhere else exercises; both are
+// covered directly here against a `classifyProposal` result built the same way inbox.test.ts's
+// own fixtures are.
+
+function declinedClassification(reason: string | undefined): ReturnType<typeof classifyProposal> {
+  const proposal: Proposal = { id: "P-DECLINED", summary: "a proposal an operator declined", evidenceAnchors: [] };
+  const ctx: ReadinessContext = {
+    plan: { tasks: [], byId: new Map() },
+    isMerged: () => false,
+    grepAnchorTrue: () => true,
+    openProposalIds: new Set(),
+    isRatified: () => false,
+    isDeclined: () => reason,
+  };
+  return classifyProposal(proposal, undefined, ctx);
+}
+
+test("classifyProposal + renderInbox: a declined proposal is named DECLINED with its operator reason, never silently dropped", () => {
+  const result = declinedClassification("superseded by W1-T900");
+  assert.equal(result.state, "declined");
+  assert.equal(result.declinedReason, "superseded by W1-T900");
+
+  const text = renderInbox([result]);
+  assert.match(text, /1 declined\./);
+  assert.match(text, /DECLINED — P-DECLINED \(superseded by W1-T900\)/);
+});
+
+test("classifyProposal + renderInbox: a declined proposal with no recorded reason still renders a fallback, never a blank parenthetical", () => {
+  const result = declinedClassification("declined by an operator");
+  const text = renderInbox([result]);
+  assert.match(text, /DECLINED — P-DECLINED \(declined by an operator\)/);
+});
+
+test("refusalReason: a declined proposal is refused naming DECLINED and its reason, exactly like RETIRED's own sibling branch", () => {
+  const result = declinedClassification("duplicate of a proposal just ratified");
+  assert.equal(
+    refusalReason(result),
+    "P-DECLINED is DECLINED (duplicate of a proposal just ratified) — never approvable",
   );
 });
