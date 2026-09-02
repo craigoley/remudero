@@ -1,0 +1,81 @@
+- id: W1-T2728
+  title: "A RETRO CAN PUBLISH A PLAN CONTRADICTION BEFORE THE PLAN-READING SUITES RUN — #3705 introduced DR-28 without Standing rule 28, so the first deterministic diagnosis arrived five minutes later from public CI instead of inside the producing run"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: high
+  origin: "queue-hygiene#3705-retro-prepublish-validation-2026-09-02"
+  plan_refs: ["DR-28", "W1-T136", "W1-T2428", "Standing rule 28"]
+  files:
+    - src/run-task.ts
+    - src/lib/retro-preflight.ts
+    - test/retro-prepublish-validation.test.ts
+    - test/retro-marker-atomic.test.ts
+    - scripts/source-size-baseline.json
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED on PR #3705, first failing head 74010c25992cecda1e46ac3b292c13d35464659e,
+    GitHub Actions run 33671087051 job 100384588733. The retro added `DR-28` to
+    MASTER-PLAN.md but left the Standing-rules namespace ending at 27. The deterministic
+    `test/rule-citations-match-their-rule.test.ts` check failed in public CI. The repaired head
+    later exposed a separate stale-index failure only because the repair itself changed line
+    numbers; that second failure is not the retro generator defect. The original retro branch
+    already carried harness-authored orientation and plan-index regeneration commits.
+
+    At origin/main 9990bd76, `retroPrompt` tells the Architect to push and open its PR. After the
+    worker returns, `retroCommand` regenerates orientation, plan index and citation stamps, pushes
+    those commits, obtains the PR URL, repairs its body, logs `pr.opened`, advances the retro
+    marker, and only then calls `waitForCiGreen`. No local rung executes the plan-reading suite set
+    that CI derives through `scripts/diff-class.mjs --list-plan-reading-suites`. A deterministic
+    contradiction is therefore published, consumes the full source shard, and occupies the queue
+    before the producing run has even attempted the check that names it.
+
+    This is a retro finalization-order gap, not a missing plan-index generator and not a reason to
+    run the repository full suite. The plan-only CI fast lane already owns the exact, dynamically
+    enumerated suite set. Reuse that source of truth so the local producer and CI cannot drift.
+  design: |
+    Add a provider-neutral retro prepublish rung after every harness-owned regeneration and before
+    the run logs `pr.opened`, advances the marker, posts review, or arms merge. Enumerate the suite
+    paths with the same `diff-class.mjs --list-plan-reading-suites` command CI uses, then run those
+    suites through the repository test-with-retry wrapper with bounded stdout/stderr capture.
+    Never hard-code a second suite list and never run the full source suite for a plan-only diff.
+
+    On the first failure, ledger `retro.preflight_failed` with the exit class, bounded output and
+    failing test names, resume the same Architect session once with an untrusted-output-fenced
+    repair prompt, rerun all harness-owned generators, and execute the same preflight again. A
+    successful repair may proceed through the existing push/body/ownership/marker/review path.
+    A second failure is terminal for this retro: ledger it, leave the marker unchanged, post no
+    review, arm no merge, and preserve the committed branch for diagnosis. The bounded repair is
+    part of the producing retro run; it must not create a second PR or a parallel task identity.
+
+    Keep all existing GitHub ownership checks and body-repair rungs. If the Architect already
+    published despite its contract, the harness may update only that same owned branch after a
+    successful repair; it must never treat the premature PR as a successful `pr.opened` event.
+    Record elapsed time, suite count, attempt, outcome, provider/model/session provenance and
+    whether a remote PR already existed, without persisting a full transcript.
+  acceptance:
+    - claim: "the new preflight module is called from the production retro finalization path rather than only from its test"
+      proof: "grep: runRetroPrepublishPreflight( in src/run-task.ts"
+    - claim: "a retro final branch runs the exact dynamically enumerated plan-reading suite set after orientation, plan-index and citation regeneration and before `pr.opened`, marker advance, semantic review or merge arming"
+      proof: "unit test: test/retro-prepublish-validation.test.ts"
+    - claim: "the preflight reuses `diff-class.mjs --list-plan-reading-suites` and the existing test-with-retry path rather than hard-coding suites or running the full source suite"
+      proof: "unit test: test/retro-prepublish-validation.test.ts"
+    - claim: "a first failure resumes the same Architect session once with bounded, fenced evidence, reruns harness generators, and retests before any successful publication event"
+      proof: "unit test: test/retro-prepublish-validation.test.ts"
+    - claim: "a second failure leaves the retro marker unchanged and posts no review or merge arm while preserving a committed diagnostic branch"
+      proof: "unit test: test/retro-marker-atomic.test.ts"
+    - claim: "success and both failure attempts emit compact telemetry with suite count, elapsed time, outcome and provider provenance but no full worker transcript"
+      proof: "unit test: test/retro-prepublish-validation.test.ts"
+    - claim: "an already-created PR is accepted only when it belongs to this retro branch and is updated in place after a successful repair; no second PR or task identity is created"
+      proof: "unit test: test/retro-prepublish-validation.test.ts"
+  note: |
+    This task does not change ordinary implement-worker preflight, CI policy, retro cadence, review
+    concurrency, or merge authority. It closes the producing retro run around the deterministic
+    plan-only validation that already exists. Console rendering of these telemetry rows is a
+    separate dashboard concern.
+
+    The remote id reservation `refs/rmd-id/W1-T2728` was acquired before this shard was written.
