@@ -1,0 +1,72 @@
+- id: W1-T2702
+  title: "A BUNDLE CARRIES WHAT THE FLEET KNOWS AND NOT HOW IT IS ALLOWED TO ACT — the knowledge bundle exports doctrine and learnings and leaves every ratified policy row behind, so a second repo starts with the fleet's memory and none of its operating limits; export the ratified rows as proposals, and let import stage them for the inbox where the receiving operator ratifies each"
+  repo: remudero
+  depends_on: [W1-T2580]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 50.00
+  rationale: |
+    RE-DERIVED AT f632e15fa (2026-09-02).
+
+    (1) WHAT THE BUNDLE CARRIES TODAY. W1-T2580 exports doctrine, budget-selected learnings with
+    provenance and asserted template values, hash-pinned by `verifyBundlePin`, deterministic,
+    with no tokens, ledger or state by construction. It carries nothing from plan/policy.yaml —
+    the cadences, ceilings and floors the operator ratified one row at a time (each row carries
+    an `origin:` label). A second repository onboarded with `rmd project init` and the bundle
+    inherits the fleet's knowledge and starts with default limits its operator never chose.
+
+    (2) THE IDEA, FROM GROK BOT'S TEMPLATES. "You can ask a Grok Bot to pack itself, it stages a
+    private draft, you publish a share link, and the other person imports simply by clicking
+    Add to Grok Bot" — a template carrying "identity, skills, and routines (not your computer or
+    logins)". Routines are the operating limits. OpenClaw 2.0 adds the receiving side's
+    discipline: "review an external plugin's capabilities, source, version, and exact artifact
+    before install/enablement". The bundle already has the artifact and the pin; what it lacks
+    is the routines, and the receiving side's review is this repository's inbox.
+
+    (3) RULE 15 AND LAW 5, BY CONSTRUCTION. Import writes NOTHING to policy. It stages one inbox
+    proposal per exported row, carrying the source bundle's provenance and pin, for `rmd approve`
+    to ratify into a plan PR the receiving operator merges. A proposal is deduped by row hash so a
+    re-import stages nothing twice. The receiving fleet's limits are chosen by its operator; the
+    bundle only makes the sending fleet's choices legible.
+  design: |
+    (i) EXPORT. `buildBundle` (src/lib/bundle.ts) gains `policy_proposals`: every row whose
+    `origin:` is net-new or whose rung carries a ratification pin (W1-T2694, read only if
+    present), with the row's block comment carried as rationale and the value, bounds and origin
+    verbatim. Rows without an origin label are not exported.
+
+    (ii) IMPORT. `rmd bundle import` (the same verb W1-T2580 gives the reader) stages each
+    proposal through the inbox's proposal writer with `source: bundle` and the pin, and prints the
+    staged ids; `rmd inbox` tiers them as it tiers any proposal; `rmd approve` ratifies.
+
+    (iii) THE PIN COVERS THE PROPOSALS. A bundle whose policy section was edited after export
+    fails `verifyBundlePin` exactly as an edited learning does.
+
+    (iv) WHAT DOES NOT CHANGE. plan/policy.yaml, on either side, until an operator merges a plan
+    PR. The learnings half of the bundle. W1-T425's transport stays banked.
+  acceptance:
+    - claim: "export carries every labelled policy row as a proposal with its rationale and provenance and no unlabelled row"
+      proof: "unit test: test/bundle-policy-proposals.test.ts"
+    - claim: "import stages one inbox proposal per row and writes nothing to the policy file, and a re-import stages nothing twice"
+      proof: "unit test: test/bundle-policy-proposals.test.ts"
+    - claim: "an edited policy section fails the bundle pin"
+      proof: "unit test: test/bundle-policy-proposals.test.ts"
+    - claim: "the inbox proposal writer is the staging path"
+      proof: "grep: stageBundleProposals( in src/lib/inbox.ts"
+  risk: high
+  band_meaning: span
+  origin: "oper#external-scan-2026-09-02"
+  plan_refs: ["W1-T2580", "W1-T2694", "W1-T425", "W1-T988", "§6", "§12"]
+  files: [src/lib/bundle.ts, src/lib/inbox.ts, src/run-task.ts, test/bundle-policy-proposals.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    risk:high, band_meaning:span — the bundle, the inbox and the CLI under Rule 19; runtime
+    blast radius is staged proposals nobody has ratified.
+
+    Depends on W1-T2580, whose build is open as #3573 at this filing; this task reads the bundle
+    shape that build settles.
+
+    SOURCES: Grok Bot templates, via RongleCat/awesome-grok-bot ("pack itself", "Add to Grok Bot",
+    "identity, skills, and routines (not your computer or logins)"); OpenClaw v2026.8.1 release
+    note, "Plugin Trust".
