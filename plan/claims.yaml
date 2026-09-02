@@ -185,6 +185,25 @@
   assertion: 'node --test --import tsx --test-name-pattern "docs/operator-guide.md names the entry-point fast-forward and documents RMD_SELF_SYNC_DONE=1" test/docs-claims.test.ts'
   precondition_paths: ["test/docs-claims.test.ts"]
 
+# Added by W1-T2614 (origin: W1-T2457 follow-up harvest): CLAUDE.md's decoding row documented the
+# retro-proposal token as the hyphenated "P-N" metavariable notation while all 736 live citations
+# and all four live parsers (retro.ts's PROPOSAL_ID_RE, panel-graph.ts, run-task.ts's mint scan,
+# plan-proposals.test.ts's uniqueness gate) use the unhyphenated "P48" form -- `\bP\d+` requires a
+# digit immediately after the P, so a header written as the old row documented it was invisible to
+# BOTH halves of W1-T74's protection at once. BIDIRECTIONAL per local-gate-invocation-parity's own
+# precedent above: red if the literal form stops being documented, red if the hyphenated token
+# reappears. SURGICAL: the G-N and DR-N clauses' hyphens are literal and correct, so the assertion
+# also guards them against a blanket de-hyphenation.
+
+- id: retro-proposal-id-doc-form
+  claim: "CLAUDE.md's decoding row states the LITERAL retro-proposal form every live citation and
+    every live parser uses (\"P48\", plus the P29a / P40(i) variants retro.ts:4336's own parser
+    accepts), not the hyphenated \"P-N\" metavariable notation that no live citation or parser
+    recognizes -- while the G-N and DR-N clauses keep their own, literal and correct, hyphens."
+  plan_section: "CLAUDE.md#decoding-rule-citations"
+  assertion: 'grep -qF "\"P48\"" CLAUDE.md && ! grep -qF "\"P-N\"" CLAUDE.md && grep -qF "G-17" CLAUDE.md && grep -qF "\"DR-N\"" CLAUDE.md'
+  precondition_paths: ["CLAUDE.md"]
+
 - id: plan-state-claims-self-consistent
   claim: "MASTER-PLAN.md does not assert a task id BOTH shipped (the '## SHIPPED log' section, in
     either its long-form W<n>-T<n> or house-style compressed-pair T<n>/#<pr> notation) AND

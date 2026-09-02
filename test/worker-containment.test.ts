@@ -25,6 +25,8 @@ import {
   TASK_ID_ENV,
   teardownProcessGroup,
   withWorkerGroupTeardown,
+  WORKER_SCOPE_ENV,
+  workerInstallationScope,
   workerMarkerEnv,
   type ContainedProcess,
 } from "../src/lib/worker-containment.js";
@@ -513,7 +515,12 @@ test("W1-T356 wiring: the REAL daemonCommand boots with the orphan sweep wired f
     const { home, root, planPath } = fixtureHome();
     const oldHome = process.env.HOME;
     process.env.HOME = home;
-    const strayEnv = { ...process.env, [RUN_ID_ENV]: "run-ended-w1-t356", [TASK_ID_ENV]: "W1-T356-fixture" };
+    const strayEnv = {
+      ...process.env,
+      [RUN_ID_ENV]: "run-ended-w1-t356",
+      [TASK_ID_ENV]: "W1-T356-fixture",
+      [WORKER_SCOPE_ENV]: workerInstallationScope(root),
+    };
     const stray = spawnDetachedGroup({ command: "/bin/sh", args: ["-c", "sleep 300"], env: strayEnv });
     const unrelated = spawnDetachedGroup({ command: "/bin/sh", args: ["-c", "sleep 300"], env: { PATH: process.env.PATH } });
     try {

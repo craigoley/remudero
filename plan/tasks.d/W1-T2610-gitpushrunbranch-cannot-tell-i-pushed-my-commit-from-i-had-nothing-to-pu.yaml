@@ -68,7 +68,7 @@
   risk: high
   origin: architect
   plan_refs: ["§12", "§3", "W1-T1288", "W1-T130"]
-  files: [src/lib/git-push.ts, src/run-task.ts, test/git-push-head-confirmation.test.ts]
+  files: [src/lib/git-push.ts, src/run-task.ts, test/git-push-head-confirmation.test.ts, test/review-provider-provenance.test.ts]
   status: queued
   attempts: 0
   note: |

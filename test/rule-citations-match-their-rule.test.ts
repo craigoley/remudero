@@ -193,10 +193,16 @@ test("G-N and P-N citations are live, and their letter is glued to the digits --
   assert.doesNotMatch(text, /\bP\s+\d+\b/, "a proposal must never appear as a bare space-separated 'P N'");
 });
 
-test("CLAUDE.md's decoding row names all three citation families: Standing rule N, DR-N, and G-N/P-N", () => {
+test("CLAUDE.md's decoding row names all three citation families: Standing rule N, DR-N, and G-N/P48", () => {
   const text = readClaudeMd();
   assert.match(text, /"Rule N"\s*\/\s*"Standing rule N"/, "the §12 family must still be documented");
   assert.match(text, /"DR-N"/, "the renamed design-rule family must now be documented too");
   assert.match(text, /"G-N"/, "the G-N operator-directive family must still be documented");
-  assert.match(text, /"P-N"/, "the P-N retro-proposal family must still be documented");
+  // W1-T2614: the retro-proposal family is documented by its LITERAL live form ("P48", the form
+  // every citation and every parser actually uses), not the "P-N" metavariable notation -- no
+  // live citation or parser accepts a hyphen after P (`\bP\d+` requires a digit immediately after
+  // it), so a reader who followed the old "P-N" row wrote a header invisible to the mint scan
+  // (run-task.ts) and the uniqueness gate (test/plan-proposals.test.ts) alike.
+  assert.match(text, /"P48"/, "the retro-proposal family must be documented by its literal live form, not P-N");
+  assert.doesNotMatch(text, /"P-N"/, "the hyphenated P-N metavariable form must be gone -- no live parser accepts it");
 });

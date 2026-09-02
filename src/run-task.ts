@@ -157,6 +157,7 @@ import {
   defaultReadMarkers,
   killProcessGroup,
   sweepOrphanWorkers,
+  workerInstallationScope,
 } from "./lib/worker-containment.js";
 import { makeTempDir, sweepStaleTempDirs, withTempDir, type TempSweepOpts, type TempSweepSummary } from "./lib/tmp.js";
 import { reapWorkerScratch, sweepStaleWorkerScratch } from "./lib/worker-scratch.js";
@@ -226,6 +227,7 @@ import {
   type RestPullRow,
   type RestRollupEntry,
 } from "./lib/open-prs-rest.js";
+import { buildMainHealthRung } from "./lib/main-health-rung.js";
 import { imessageChannel, notify, type NotifyChannel } from "./lib/notify.js";
 import {
   alertOriginId,
@@ -840,7 +842,7 @@ import { LiveSpawnBlockedError } from "./lib/spawn-guard.js";
 // turns instead of dollars (this task's own declared `files:` list does not include
 // `plan/policy.yaml`, so no new policy row is added here).
 import { loadDefaultCostAnomalyPolicy, type CostAnomalyPolicy } from "./lib/cost-anomaly.js";
-import { gitPushRunBranch, gitPushEmptyCommit } from "./lib/git-push.js";
+import { gitPushRunBranch, gitPushEmptyCommit, LanePushForeignHeadError } from "./lib/git-push.js";
 import {
   ensureWorkerKeychain,
   materializeWorkerHome,
@@ -5973,7 +5975,10 @@ export async function runGeneratorFixForCiFailures(opts: {
   deps: {
     runScript: (script: string, cwd: string) => Promise<{ status: number; stdout: string; stderr: string }>;
     commit: (opts: { cwd: string; message: string }) => Promise<{ sha: string; changed: boolean }> | { sha: string; changed: boolean };
-    push: (opts: { cwd: string; branch: string }) => Promise<void> | void;
+    // W1-T2610: `expectedHeadSha` is the sha `commit` above just returned — threaded through so
+    // the real `gitPushRunBranch` leaf underneath (see the run-loop's `push:` closure) can
+    // confirm it actually landed rather than silently no-op'ing a rewound ref.
+    push: (opts: { cwd: string; branch: string; expectedHeadSha?: string }) => Promise<void> | void;
   };
 }): Promise<GeneratorFixResult> {
   if (!allCiFailuresAreGeneratorFixable(opts.failures, opts.scripts)) {
@@ -6022,7 +6027,9 @@ export async function runGeneratorFixForCiFailures(opts: {
     // committed artifact was already fresh. Either way, nothing to push, nothing to escalate.
     return { applied: true, generators };
   }
-  await opts.deps.push({ cwd: opts.worktreePath, branch: opts.branch });
+  // W1-T2610: pass the sha `commit` above just minted — the leaf's post-condition confirms
+  // this exact sha (not just "something") landed, rather than a rewound ref pushing nothing.
+  await opts.deps.push({ cwd: opts.worktreePath, branch: opts.branch, expectedHeadSha: commitResult.sha });
   return { applied: true, generators, commitSha: commitResult.sha };
 }
 
@@ -7889,8 +7896,13 @@ export async function runFixRung(opts: {
     updatePrBody?: (prUrl: string, body: string) => Promise<void>;
     runReview: (args: Parameters<typeof runReview>[0]) => ReturnType<typeof runReview>;
     /** Push whatever the fix worker committed. Best-effort — a worker that
-     * already pushed leaves nothing new, which is not an error. */
-    push: (worktreePath: string, branch: string) => void;
+     * already pushed leaves nothing new, which is not an error.
+     * W1-T2610: `expectedHeadSha`, when this rung can name the sha it just committed, is
+     * threaded to the leaf's post-condition (`gitPushRunBranch`'s `expectedHeadSha`) so a ref
+     * rewound between the commit and this call raises `LanePushForeignHeadError` instead of
+     * silently no-op'ing. Optional and additive — every existing test double that ignores its
+     * third argument keeps working unchanged. */
+    push: (worktreePath: string, branch: string, expectedHeadSha?: string) => void;
     /** Fresh REST head read used only after the push to bind this worker to its exact output. */
     readHeadShaForProvenance?: (prUrl: string) => string;
     issues: IssueGateway;
@@ -8350,7 +8362,7 @@ export async function runFixRung(opts: {
         deps: {
           runScript: runGeneratorScript,
           commit: (o) => commitGeneratorOutput(o),
-          push: (o) => deps.push(o.cwd, o.branch),
+          push: (o) => deps.push(o.cwd, o.branch, o.expectedHeadSha),
         },
       });
       if (generatorResult.applied) {
@@ -8960,6 +8972,24 @@ export async function runFixRung(opts: {
 
     const workerHeadCreatedLocally = workerCreatedCurrentHead(opts.worktreePath, workerHeadReflogBefore);
 
+    // W1-T2610: the sha this round believes it just committed, read as early as possible after
+    // the worker returns — BEFORE the `readRoundCommits` await, the ledger writes, and the
+    // follow-up harvest below, all of which are dead time in which the exact rewind this task
+    // is filed against (DAEMON-1788016810368 / PR #3261 — the worktree's local ref reset back
+    // to origin's tip between commit and push) can happen. Threaded to `deps.push` below so
+    // `gitPushRunBranch`'s post-condition re-reads HEAD immediately before pushing and raises
+    // if it no longer matches this snapshot, instead of silently pushing zero refs. Best-effort:
+    // an unreadable HEAD here just means this round's push runs without the guard — the same
+    // fail-open discipline every other optional read in this rung already takes.
+    let expectedHeadShaForPush: string | undefined;
+    try {
+      expectedHeadShaForPush = execFileSync("git", ["-C", opts.worktreePath, "rev-parse", "HEAD"], {
+        encoding: "utf8",
+      }).trim();
+    } catch {
+      // best-effort — see comment above.
+    }
+
     // A worker DEMONSTRABLY ran (spawn returned rather than throwing) — only now is this round
     // even CANDIDATE for a real strike.
     //
@@ -9056,7 +9086,7 @@ export async function runFixRung(opts: {
       say: deps.say,
     });
 
-    deps.push(opts.worktreePath, opts.branch);
+    deps.push(opts.worktreePath, opts.branch, expectedHeadShaForPush);
 
     recordHeadProviderAfterPush(
       {
@@ -12738,10 +12768,20 @@ async function runTask(
           },
           runReview,
           fetchPrBody: fetchPrBodyViaGh,
-          push: (wt) => {
+          // W1-T2610: `expectedHeadSha` (the sha this rung just committed) is WIRED here, not
+          // merely accepted — `gitPushRunBranch`'s post-condition re-reads this worktree's HEAD
+          // right before pushing and raises `LanePushForeignHeadError` if it no longer matches,
+          // catching a ref rewound during this rung's own dead time (readRoundCommits/ledger/
+          // follow-up-harvest, above) between the commit and this push. That raise is
+          // deliberately let through (never swallowed by the best-effort catch below): FAIL
+          // DIRECTION per this task's design — a raise parks this one fix round for the
+          // level-triggered sweep to re-derive next pass, while silence here would lose the
+          // round's entire spend and leave the PR looking fixed.
+          push: (wt, _branch, expectedHeadSha) => {
             try {
-              gitPushRunBranch(wt, { stdio: "ignore" });
-            } catch {
+              gitPushRunBranch(wt, { stdio: "ignore", expectedHeadSha });
+            } catch (err) {
+              if (err instanceof LanePushForeignHeadError) throw err;
               // best-effort — the fix worker may already have pushed itself;
               // nothing new to push is not an error.
             }
@@ -23039,8 +23079,10 @@ export async function daemonCommand(
   // `worker_orphan_killed` ledger line carries the ORPHAN's run_id/task_id (never this
   // daemon's own runId), matching `sweepOrphanWorkers`'s `ledger` dep contract.
   const inflightDir = join(config.root, "state", "inflight");
+  const orphanWorkerScope = workerInstallationScope(config.root);
   const sweepOrphans = () =>
     sweepOrphanWorkers({
+      expectedScope: orphanWorkerScope,
       listCandidates: defaultListCandidates,
       readMarkers: defaultReadMarkers,
       isRunActive: (candidateRunId) => liveInflightRuns(inflightDir).some((r) => r.runId === candidateRunId),
@@ -23049,6 +23091,7 @@ export async function daemonCommand(
         appendLedger(ledgerPath, {
           run_id: line.run_id,
           task_id: line.task_id,
+          worker_scope: line.worker_scope,
           step: "worker_orphan_killed",
           pid: line.pid,
           cmdline: line.cmdline,
@@ -23439,6 +23482,13 @@ export async function daemonCommand(
           // and plan/policy.yaml's `workerStall` row for the ~16-minute `--ci-parity` default's
           // headroom rationale.
           policy.values.workerStall,
+          buildMainHealthRung(target.owner, target.repo, {
+            fetch: ghJson,
+            issues: ghIssueGateway(target.owner, target.repo),
+            ledgerPath,
+            runId,
+            log,
+          }),
         ),
         // W1-T254 (the #707 fix): the restricted light-sweep ticker — ticks ONLY
         // the deterministic post-review re-post while `runOne` is unbounded and in
@@ -26902,6 +26952,11 @@ export function fixRungTaskFor(
   };
 }
 
+/** The synthetic lane namespaces whose PR branches are created by the orchestrator itself. */
+function isSyntheticOrchestratorLaneId(taskId: string): boolean {
+  return /^(?:RETRO(?:-.+)?|TRIAGE-.+|PLAN-.+|APPROVE-.+)$/.test(taskId);
+}
+
 /**
  * Is `head` an acceptable branch for a fix dispatch to amend?
  *
@@ -26939,12 +26994,13 @@ export function fixHeadAcceptable(head: string | undefined, taskId: string, synt
   if (!head) return false;
   const ownRunBranch = new RegExp(`^run-${taskId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-\\d+$`).test(head);
   if (!synthetic) return ownRunBranch;
+  const exactSyntheticLaneBranch = isSyntheticOrchestratorLaneId(taskId) && head === `run-${taskId}`;
   // A synthetic id covers two shapes: an agent PR with NO id at all (descriptive branch), and a
-  // LANE PR whose id is real but absent from plan.tasks (TRIAGE-*/RETRO-*/PLAN-* — 20 of the 65
-  // PRs in the measured trail). The lane PR's own `run-<id>-<ts>` head is legitimately its own, so
-  // accept it; refuse only a head claiming a DIFFERENT task, which means mis-trailered, not
-  // task-less, and amending it would push onto another task's run branch.
-  return ownRunBranch || !isDispatchedRunBranch(head);
+  // LANE PR whose id is real but absent from plan.tasks. A lane can have the ordinary
+  // `run-<id>-<dispatch epoch>` head or the exact `run-<id>` head when its id already ends in the
+  // lane's own epoch. Preserve that full id as the strike/review key; only the ownership
+  // equivalence changes. A run branch claiming a DIFFERENT task remains refused.
+  return ownRunBranch || exactSyntheticLaneBranch || !isDispatchedRunBranch(head);
 }
 
 /**
@@ -27902,10 +27958,17 @@ export function buildSweepEffects(
             },
             runReview,
             fetchPrBody: fetchPrBodyViaGh,
-            push: (wt) => {
+            // W1-T2610: same wiring as the run-loop's fix-rung `push:` closure above —
+            // `expectedHeadSha` is the sha this rung just committed, so `gitPushRunBranch`'s
+            // post-condition can catch a ref rewound between the commit and this push instead of
+            // silently no-op'ing. The resulting `LanePushForeignHeadError` is let through
+            // (never swallowed below) so the round parks rather than reporting a push that
+            // moved nothing as success.
+            push: (wt, _branch, expectedHeadSha) => {
               try {
-                gitPushRunBranch(wt, { stdio: "ignore" });
-              } catch {
+                gitPushRunBranch(wt, { stdio: "ignore", expectedHeadSha });
+              } catch (err) {
+                if (err instanceof LanePushForeignHeadError) throw err;
                 /* best-effort — the worker may already have pushed */
               }
             },
@@ -28867,6 +28930,10 @@ export function buildSweepHook(
   // {@link runWorkerStallDetectorRung} below — optional and trailing so every existing caller
   // (tests included) that predates W1-T943 is unaffected; omitted ⇒ {@link DEFAULT_WORKER_STALL_MS}.
   workerStallMs?: number,
+  // W1-T2683: main's own rollup observer, supplied only by the real daemon wiring. Trailing and
+  // optional so offline callers gain no network I/O. Its own boundary below preserves PR sweep
+  // liveness even when a test injection or future implementation accidentally throws.
+  mainHealthRung?: () => Promise<void>,
 ): (continueReviewAdmissions?: () => boolean) => Promise<void> {
   // W1-T192: the daemon-side draft rung, built ONCE per daemon start (mirrors this
   // function's own once-per-daemon-start construction) — see buildInboxDraftHook's doc for
@@ -28906,6 +28973,11 @@ export function buildSweepHook(
   // SAME instance for this daemon's whole life, exactly as `boardGithub` itself is shared.
   const boardGithub = github ?? buildBatchedGithub(owner, repo, { log, pacer });
   return async (continueReviewAdmissions = () => true) => {
+    try {
+      await mainHealthRung?.();
+    } catch (e) {
+      log("main.health.error", { error: String((e as Error)?.message ?? e) });
+    }
     try {
       const openPrs = buildOpenPrViews(owner, repo, ledgerPath, { pacer });
       // W1-T474 — the post-fix re-verification rung, on the daemon's own poll cadence and, same

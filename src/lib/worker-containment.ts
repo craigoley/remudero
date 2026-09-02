@@ -1,60 +1,30 @@
 /**
- * lib/worker-containment.ts — W1-T117: worker process-tree containment.
+ * lib/worker-containment.ts — W1-T117 worker process-tree containment.
  *
- * LIVE FINDING this closes (plan/tasks.yaml W1-T117 rationale): orphaned PID
- * 87119 — a `gh pr create --fill --base main` armed with a sleep-until-
- * exact-quota-reset, spawned from a worker's shell snapshot — was discovered
- * AFTER its run had already ended. worker.ts spawned the Claude Code CLI via
- * the Agent SDK's default local spawn, and neither worker.ts nor daemon.ts
- * contained any process-group, session, or teardown-kill logic: a background
- * process the CLI itself spawns (e.g. a Bash-tool `cmd &`) had no mechanism
- * bounding WHEN its effects stop, only what it touches WHILE the run is live.
+ * Agent SDK 0.3.217 ground truth: `Options.spawnClaudeCodeProcess` replaces
+ * the default local spawn. The SDK reads the returned stdin/stdout but a
+ * custom spawn must pipe stderr itself; `spawnDetachedGroup` preserves that.
+ * POSIX `detached: true` makes the child a group/session leader, so a negative
+ * pid signal reaches the background descendants that share its group.
  *
- * VERIFIED GROUND TRUTH (SDK 0.3.217, `node_modules/@anthropic-ai/claude-agent-sdk/{sdk.d.ts,sdk.mjs}`
- * — this task's own flagged "first question", distrust-the-prompt Standing
- * rule 7): `Options.spawnClaudeCodeProcess` is the SDK's injected
- * process-spawn surface. When supplied it REPLACES the SDK's default local
- * spawn (`ProcessTransport.spawnLocalProcess`) entirely; the SDK reads only
- * `.stdin`/`.stdout` off whatever it returns (`this.processStdin =
- * this.process.stdin; this.processStdout = this.process.stdout` — sdk.mjs)
- * and — CRITICALLY — never touches `.stderr`: that wiring
- * (`s.stderr.on("data", ...this.options.stderr?.(y))`) lives ONLY inside the
- * SDK's own default `spawnLocalProcess`, so a custom spawn that does not
- * independently pipe stderr into the caller's own sink silently blacks out
- * the WS-0 billing-boundary stderr proof. `spawnDetachedGroup` below pipes it
- * itself for exactly that reason. A real Node `ChildProcess` already
- * satisfies the SDK's `SpawnedProcess` interface (sdk.d.ts's own doc comment:
- * "ChildProcess already satisfies this interface"), so this wraps
- * `node:child_process.spawn` directly rather than hand-rolling a shim.
- *
- * `detached: true` (POSIX; Node docs) makes the spawned child BOTH a new
- * process-group leader AND a new session leader — equivalent to calling
- * `setsid()` — so its own pid becomes its pgid and `process.kill(-pid, sig)`
- * reaches the whole group with one signal. This covers the incident's actual
- * shape: a `bash -c` background job (`cmd &`) run non-interactively has no
- * job control, so it stays in the PARENT's process group rather than forking
- * into a new one — see `test/worker-containment.test.ts`'s fixture, which
- * spawns exactly that shape and proves group-kill reaches it.
- *
- * BLAST RADIUS (design part iv): every kill in this module is either (a) a
- * process-GROUP signal scoped to a pgid THIS module itself created via
- * `spawnDetachedGroup` (teardown path — never reaches the daemon, a sibling
- * run, or the operator's shell, because those live in different groups by
- * construction), or (b) gated behind an explicit attribution match in
- * `sweepOrphanWorkers` (orphan-sweep path) — an unattributable process is
- * reported, never signalled, no matter how suspicious it looks.
+ * Teardown signals only a group created here. Orphan sweeps additionally
+ * require explicit run/task attribution and, in production, an exact opaque
+ * installation scope. Missing or foreign attribution is reported, not killed.
  */
 import { accessSync, constants as fsConstants, existsSync } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
+import { resolve } from "node:path";
 import type { SpawnedProcess as SdkSpawnedProcess } from "@anthropic-ai/claude-agent-sdk";
 
-/** Env var names carrying run/task attribution into a spawned worker's
+/** Env var names carrying run/task/scope attribution into a spawned worker's
  * child process — inherited automatically by every descendant that does not
  * explicitly strip its env (the same propagation that let the incident's
  * `gh pr create` bomb survive: env flows downhill through `bash -c` by
  * default), which is exactly what makes them a reliable orphan-sweep marker. */
 export const RUN_ID_ENV = "REMUDERO_RUN_ID";
 export const TASK_ID_ENV = "REMUDERO_TASK_ID";
+export const WORKER_SCOPE_ENV = "REMUDERO_WORKER_SCOPE";
 
 /** Structural mirror of the SDK's own `SpawnOptions` (sdk.d.ts) — kept local
  *  (rather than imported) so this module's PUBLIC signature never depends on
@@ -292,13 +262,19 @@ export function teardownProcessGroup(
  * established discipline: small, directly-testable pieces around the
  * SDK-spawn boundary, e.g. `workerKeychainGrantApps`, `cacheTokenLedgerFields`)
  * so the merge logic is provable without invoking `spawnWorker` itself, which
- * cannot be unit-tested past its real `query()` call. Either id absent ⇒ that
+ * cannot be unit-tested past its real `query()` call. Any value absent ⇒ its
  * key is simply omitted, never written as `"undefined"`.
  */
-export function workerMarkerEnv(runId?: string, taskId?: string): Record<string, string> {
+/** Stable, opaque installation capability derived only from the configured root. */
+export function workerInstallationScope(root: string): string {
+  return `rmd-v1-${createHash("sha256").update(resolve(root)).digest("hex").slice(0, 32)}`;
+}
+
+export function workerMarkerEnv(runId?: string, taskId?: string, scope?: string): Record<string, string> {
   const env: Record<string, string> = {};
   if (runId) env[RUN_ID_ENV] = runId;
   if (taskId) env[TASK_ID_ENV] = taskId;
+  if (scope) env[WORKER_SCOPE_ENV] = scope;
   return env;
 }
 
@@ -363,9 +339,12 @@ export interface OrphanCandidate {
 export interface OrphanMarkers {
   runId: string;
   taskId: string;
+  scope?: string;
 }
 
 export interface OrphanSweepDeps {
+  /** When supplied, only an exact installation capability match may be signalled. */
+  expectedScope?: string;
   /** Candidate processes to consider (real: a live `ps` scan; test: seeded). */
   listCandidates: () => OrphanCandidate[];
   /**
@@ -384,20 +363,24 @@ export interface OrphanSweepDeps {
   /** Best-effort termination (real: `killProcessGroup`; test: a spy). */
   kill: (pid: number) => void;
   /** One ledger line per kill — `worker_orphan_killed` (design part ii). */
-  ledger: (line: { run_id: string; task_id: string; pid: number; cmdline: string }) => void;
+  ledger: (line: { run_id: string; task_id: string; worker_scope?: string; pid: number; cmdline: string }) => void;
 }
 
 export interface OrphanSweepReport {
-  killed: Array<{ pid: number; run_id: string; task_id: string; cmdline: string }>;
-  leftAlone: Array<{ pid: number; reason: "unattributable" | "run_active" }>;
+  killed: Array<{ pid: number; run_id: string; task_id: string; worker_scope?: string; cmdline: string }>;
+  leftAlone: Array<{
+    pid: number;
+    reason: "unattributable" | "scope_missing" | "scope_mismatch" | "run_active";
+    scope?: string;
+  }>;
 }
 
 /**
  * Daemon boot + poll orphan sweep (W1-T117 design ii/iv): terminate stray
  * processes ATTRIBUTABLE to an ENDED run, ledger each; an UNATTRIBUTABLE
  * process is reported but NEVER signalled. Attribution precedes every
- * signal — a process only dies here when `readMarkers` names a run AND
- * `isRunActive` says that run is no longer tracked as in-flight.
+ * signal — production additionally requires an exact installation scope,
+ * then kills only when that attributed run is no longer tracked in-flight.
  */
 export function sweepOrphanWorkers(deps: OrphanSweepDeps): OrphanSweepReport {
   const killed: OrphanSweepReport["killed"] = [];
@@ -408,12 +391,26 @@ export function sweepOrphanWorkers(deps: OrphanSweepDeps): OrphanSweepReport {
       leftAlone.push({ pid: candidate.pid, reason: "unattributable" });
       continue;
     }
+    if (deps.expectedScope && !markers.scope) {
+      leftAlone.push({ pid: candidate.pid, reason: "scope_missing" });
+      continue;
+    }
+    if (deps.expectedScope && markers.scope !== deps.expectedScope) {
+      leftAlone.push({ pid: candidate.pid, reason: "scope_mismatch", scope: markers.scope });
+      continue;
+    }
     if (deps.isRunActive(markers.runId)) {
-      leftAlone.push({ pid: candidate.pid, reason: "run_active" });
+      leftAlone.push({ pid: candidate.pid, reason: "run_active", ...(markers.scope ? { scope: markers.scope } : {}) });
       continue;
     }
     deps.kill(candidate.pid);
-    const line = { run_id: markers.runId, task_id: markers.taskId, pid: candidate.pid, cmdline: candidate.cmdline };
+    const line = {
+      run_id: markers.runId,
+      task_id: markers.taskId,
+      ...(markers.scope ? { worker_scope: markers.scope } : {}),
+      pid: candidate.pid,
+      cmdline: candidate.cmdline,
+    };
     killed.push(line);
     deps.ledger(line);
   }
@@ -485,5 +482,6 @@ export function defaultReadMarkers(pid: number): OrphanMarkers | undefined {
   }
   const runId = out.match(new RegExp(`(?:^|\\s)${RUN_ID_ENV}=(\\S+)`))?.[1];
   const taskId = out.match(new RegExp(`(?:^|\\s)${TASK_ID_ENV}=(\\S+)`))?.[1];
-  return runId && taskId ? { runId, taskId } : undefined;
+  const scope = out.match(new RegExp(`(?:^|\\s)${WORKER_SCOPE_ENV}=(\\S+)`))?.[1];
+  return runId && taskId ? { runId, taskId, ...(scope ? { scope } : {}) } : undefined;
 }

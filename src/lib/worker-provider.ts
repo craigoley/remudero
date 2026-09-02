@@ -10,6 +10,7 @@ import {
   spawnDetachedGroup,
   teardownProcessGroup,
   withWorkerGroupTeardown,
+  workerInstallationScope,
   workerMarkerEnv,
   type ContainedProcess,
   type ContainedSpawnOptions,
@@ -739,7 +740,7 @@ function codexSpawnEnv(config: Config, args: CodexSpawnArgs): Record<string, str
   for (const [key, value] of Object.entries(args.env ?? {})) {
     if (!/^ANTHROPIC_|^OPENAI_API_KEY$/.test(key)) env[key] = value;
   }
-  Object.assign(env, workerMarkerEnv(args.runId, args.taskId));
+  Object.assign(env, workerMarkerEnv(args.runId, args.taskId, workerInstallationScope(config.root)));
   return env;
 }
 

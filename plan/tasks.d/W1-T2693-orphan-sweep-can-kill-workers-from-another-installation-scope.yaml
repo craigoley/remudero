@@ -8,7 +8,7 @@
   risk: high
   band_meaning: "span"
   budget_usd: 12.00
-  files: [src/lib/worker-containment.ts, src/lib/worker.ts, src/lib/worker-provider.ts, src/run-task.ts, test/daemon.test.ts, test/orphan-sweep-instance-scope.test.ts]
+  files: [src/lib/worker-containment.ts, src/lib/worker.ts, src/lib/worker-provider.ts, src/run-task.ts, test/daemon.test.ts, test/worker-containment.test.ts, test/orphan-sweep-instance-scope.test.ts]
   origin: "operator-brief#self-watch-pr-queue-overnight-2026-09-02"
   plan_refs: ["W1-T117", "W1-T356", "W1-T2407"]
   status: queued

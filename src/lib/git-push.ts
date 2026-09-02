@@ -44,6 +44,29 @@ export interface PushRunBranchOpts {
   setUpstream?: boolean;
   force?: boolean;
   exec?: PushExec;
+  /**
+   * W1-T2610 — THE POST-CONDITION. The sha the CALLER believes it is landing (a fix rung
+   * passes the sha it just committed). OPTIONAL and additive: omitted, this function is
+   * byte-identical to its pre-W1-T2610 self — the seven non-fix call sites that never pass
+   * this stay untouched.
+   *
+   * WHY THIS CATCHES THE ZERO-REFS-PUSHED CASE A NON-FAST-FORWARD CHECK CANNOT (the incident
+   * behind DAEMON-1788016810368 / PR #3261): when a fix round's own worktree gets rewound
+   * back to origin's tip BETWEEN the commit and this push, the ref this push actually sends
+   * is already on the remote — `git push` sees a legal, zero-ref fast-forward and exits 0
+   * with nothing to report, especially with `stdio: "ignore"` (the two fix-rung sites this
+   * option exists for). A fast-forward check never fires there; it isn't a disagreement, it's
+   * an agreement on the WRONG sha. So this never inspects git's push output at all — it reads
+   * the worktree's OWN head with `capture` (the same seam {@link gitPushEmptyCommit} uses,
+   * never `stdio`, which the fix-rung sites throw away) right before the push runs, and
+   * compares that reading against `expectedHeadSha`. A mismatch means the local ref already
+   * drifted off the sha the caller believes it is landing — pushing it would just move the
+   * WRONG commit (or move nothing), so this raises instead of pushing.
+   */
+  expectedHeadSha?: string;
+  /** Injected by tests to observe the pre-push HEAD read without a real repo. Defaults to
+   *  {@link defaultGitCapture}. Only consulted when `expectedHeadSha` is supplied. */
+  capture?: GitCapture;
 }
 
 export function gitPushRunBranch(worktreePath: string, opts: PushRunBranchOpts = {}): void {
@@ -51,6 +74,25 @@ export function gitPushRunBranch(worktreePath: string, opts: PushRunBranchOpts =
   // single line, and it fires wherever the helper is called from — including before a
   // worker spawn, which none of the old per-site guards could do.
   assertLiveWriteAllowed("git-push", "pushing the run branch to origin");
+  if (opts.expectedHeadSha !== undefined) {
+    // THE POST-CONDITION READ (W1-T2610) — see `PushRunBranchOpts.expectedHeadSha`'s own doc
+    // for why this is a pre-push local read rather than trusting the push's own exit code or
+    // output. `capture`, never `stdio`: the two fix-rung call sites this guards run with
+    // `stdio: "ignore"`, so this must hold with the push's own output thrown away.
+    const capture = opts.capture ?? defaultGitCapture;
+    const observedHeadSha = capture("git", ["-C", worktreePath, "rev-parse", "HEAD"]).trim();
+    if (observedHeadSha !== opts.expectedHeadSha) {
+      throw new LanePushForeignHeadError(
+        `refusing to push the run branch at ${worktreePath}: it was asked to land ` +
+          `${opts.expectedHeadSha} but the worktree's HEAD now reads ${observedHeadSha} — the local ` +
+          `ref moved between the commit and this push, so pushing now would either transfer zero refs ` +
+          `(a legal, silent fast-forward no-op if HEAD was rewound back to the remote tip) or push the ` +
+          `wrong commit entirely; nothing was pushed`,
+        worktreePath,
+        opts.expectedHeadSha,
+      );
+    }
+  }
   const args = ["-C", worktreePath, "push"];
   if (opts.setUpstream) args.push("-u");
   if (opts.force) args.push("--force");

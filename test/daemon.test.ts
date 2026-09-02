@@ -35,7 +35,16 @@ import { runSweep, DEFAULT_SWEEP_POLICY } from "../src/lib/sweep.js";
 import { pauseDetail, requestPause, requestStop, resumeFleet, stopDetail } from "../src/lib/fleet-control.js";
 import type { MergedSet, OpenPrCheck } from "../src/lib/drain.js";
 import { deriveStatus, type GitHub, type PrRef } from "../src/lib/status.js";
-import { RUN_ID_ENV, TASK_ID_ENV, defaultReadMarkers, isPidAlive, killProcessGroup, spawnDetachedGroup } from "../src/lib/worker-containment.js";
+import {
+  RUN_ID_ENV,
+  TASK_ID_ENV,
+  WORKER_SCOPE_ENV,
+  defaultReadMarkers,
+  isPidAlive,
+  killProcessGroup,
+  spawnDetachedGroup,
+  workerInstallationScope,
+} from "../src/lib/worker-containment.js";
 
 // A small linear-ish plan: A → B → C (chain) + D (independent), all auto.
 const YAML = `
@@ -2335,8 +2344,23 @@ test("W1-T356 wiring: the REAL daemonCommand sets DaemonDeps.sweepOrphans to the
     const { home, root, planPath } = fixtureHome();
     const oldHome = process.env.HOME;
     process.env.HOME = home;
-    const strayEnv = { ...process.env, [RUN_ID_ENV]: "run-ended-poll-1", [TASK_ID_ENV]: "W1-T356-poll-fixture" };
+    const strayEnv = {
+      ...process.env,
+      [RUN_ID_ENV]: "run-ended-poll-1",
+      [TASK_ID_ENV]: "W1-T356-poll-fixture",
+      [WORKER_SCOPE_ENV]: workerInstallationScope(root),
+    };
     const stray = spawnDetachedGroup({ command: "/bin/sh", args: ["-c", "sleep 300"], env: strayEnv });
+    const foreign = spawnDetachedGroup({
+      command: "/bin/sh",
+      args: ["-c", "sleep 300"],
+      env: {
+        ...process.env,
+        [RUN_ID_ENV]: "run-ended-foreign",
+        [TASK_ID_ENV]: "W1-T356-foreign-control",
+        [WORKER_SCOPE_ENV]: workerInstallationScope(`${root}-foreign`),
+      },
+    });
     const unrelated = spawnDetachedGroup({ command: "/bin/sh", args: ["-c", "sleep 300"], env: { PATH: process.env.PATH } });
     let captured: DaemonDeps | undefined;
     try {
@@ -2345,6 +2369,7 @@ test("W1-T356 wiring: the REAL daemonCommand sets DaemonDeps.sweepOrphans to the
       // defaultReadMarkers test. This is the beat whose expiry produced the observed
       // `killedLine undefined`: unattributed means unkilled means unledgered.
       await waitUntilMarkersVisible(stray.pid);
+      await waitUntilMarkersVisible(foreign.pid);
       const code = await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
         runDaemon: async (_plan, deps): Promise<DaemonSummary> => {
           captured = deps;
@@ -2366,15 +2391,22 @@ test("W1-T356 wiring: the REAL daemonCommand sets DaemonDeps.sweepOrphans to the
       await waitUntilDead(stray.pid);
       assert.throws(() => process.kill(stray.pid, 0), /ESRCH/, "the attributed stray must be dead via one of the two wired call sites");
       assert.equal(isPidAlive(unrelated.pid), true, "a marker-less process must never be signalled, no matter how suspicious it looks");
+      assert.equal(isPidAlive(foreign.pid), true, "a foreign-scoped process must never be signalled");
 
       const lines = ledgerLines(root);
       const killedLine = lines.find((l) => l.step === "worker_orphan_killed" && l.pid === stray.pid);
       assert.ok(killedLine, "the real production ledger dep must record the kill");
       assert.equal(killedLine!.run_id, "run-ended-poll-1");
       assert.equal(killedLine!.task_id, "W1-T356-poll-fixture");
+      assert.equal(killedLine!.worker_scope, workerInstallationScope(root));
     } finally {
       try {
         killProcessGroup(stray.pid);
+      } catch {
+        // best-effort cleanup only
+      }
+      try {
+        killProcessGroup(foreign.pid);
       } catch {
         // best-effort cleanup only
       }

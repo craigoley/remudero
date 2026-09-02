@@ -469,7 +469,28 @@ test("armFieldsByRunId: a non-object row (malformed JSON that still parses, e.g.
   assert.equal(fields.get("R1")!.provider, "claude");
 });
 
-test("armFieldsByRunId: the FIRST matching DONE_STEPS line for a run_id wins — a later line never overwrites it", () => {
+test("armFieldsByRunId: the implementation worker wins over an earlier recon worker", () => {
+  const records = [
+    { run_id: "R1", step: "recon.done", provider: "claude", served_model: "claude-sonnet-5", effort: "medium" },
+    { run_id: "R1", step: "implement.done", provider: "claude", served_model: "claude-haiku-4-5-20251001", effort: "medium" },
+  ];
+  const fields = armFieldsByRunId(records);
+  assert.deepEqual(fields.get("R1"), {
+    provider: "claude",
+    servedModel: "claude-haiku-4-5-20251001",
+    effort: "medium",
+  });
+});
+
+test("armFieldsByRunId: recon remains the honest fallback for a recon-only run", () => {
+  const records = [
+    { run_id: "R1", step: "recon.done", provider: "claude", served_model: "claude-sonnet-5", effort: "medium" },
+  ];
+  const fields = armFieldsByRunId(records);
+  assert.equal(fields.get("R1")!.servedModel, "claude-sonnet-5");
+});
+
+test("armFieldsByRunId: the FIRST implementation line wins over a later implementation resume", () => {
   const records = [
     { run_id: "R1", step: "implement.done", provider: "claude", served_model: "claude-sonnet-4-5-20250929", effort: "medium" },
     { run_id: "R1", step: "implement.resumed", provider: "codex", served_model: "gpt-5-codex", effort: "high" },
