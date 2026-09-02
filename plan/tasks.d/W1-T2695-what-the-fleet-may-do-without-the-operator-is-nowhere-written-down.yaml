@@ -1,0 +1,79 @@
+- id: W1-T2695
+  title: "WHAT THE FLEET MAY DO WITHOUT THE OPERATOR IS NOWHERE WRITTEN DOWN — auto-merge arms, PRs open, reviews post, branches reap, drafts file, each behind a gate that lives in a different module; derive the authority table from the policy schema and the gateway's write surface, print it as rmd authority, and ratchet every new external write into it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: |
+    RE-DERIVED AT f632e15fa (2026-09-02).
+
+    (1) THE QUESTION AN OPERATOR ASKS AT 2AM. "What can this thing do to my repo overnight?"
+    The answer is true and scattered: `armAutoMergeAtOpen` arms at PR-open with no verdict gate
+    (W1-T489's documented asymmetry); `armAutoMerge` arms after `waitForCiGreen` behind two ledger
+    gates; `openPlanPr` opens ratification PRs; `postReviewStatus` writes commit statuses; the
+    dep-review lane auto-arms minor and patch bumps; auto-triage drafts shards under
+    `autoTriage.maxPerDay`; the reaper classifies branches; W1-T2658 will rename shards into an
+    archive. Every one is gated, and no single surface lists the gates. The direction refresh of
+    2026-09-01 asked the board rung to "scope its authority honestly"; this task makes that a
+    property of the fleet rather than of one shard.
+
+    (2) THE TWO PRODUCTS THIS WEEK BOTH SHIP THE TABLE. Grok Bot (xAI, launched 2026-08-11) puts
+    Auto Review rules in front of the user — Require Approval or Always Allow per action class —
+    and its own staff note reads "Do not assume Always allow means always". OpenClaw 2.0 renders
+    "typed operation-scope summaries on channel cards" before an approval. Neither derives the
+    table from code; both hand-write it. This repository can derive it, because its gates are
+    symbols: policy rows in plan/policy.yaml's schema (src/lib/policy.ts) and the closed set of
+    write methods on the GitHub gateway (src/lib/open-prs-rest.ts, src/lib/github-app.ts).
+
+    (3) WHY A RATCHET AND NOT A DOCUMENT. A hand-written table is stale the day after the next
+    write path merges — the fate of every prose inventory in this repository (W1-T2266 measured
+    it). The test that walks the gateway's write methods and requires each to appear in the
+    table with a named gate is the same shape as W1-T2317's negative-reachability ratchet: a new
+    external write that names no gate fails CI by name.
+  design: |
+    (i) ONE MODULE. src/lib/authority.ts exports `AUTHORITY_TABLE`: one row per external write
+    — action, the module and symbol that performs it, the gate kind (policy row / ledger verdict
+    / operator verb / always), the policy row if any, and the ratification pin if W1-T2694's file
+    carries one. `buildAuthorityReport(policy, pins, ledger)` joins the table to the policy values
+    and to the last time each action fired in the ledger union, with `refused` for an action the
+    union could not be read for.
+
+    (ii) THE VERB. `rmd authority [--json]` prints the report: action, gate, policy value, last
+    fired. Read-only, no network; the ledger union is the only input beyond the tree.
+
+    (iii) THE RATCHET. test/authority-ratchet.test.ts enumerates every method on the gateway
+    modules whose HTTP verb is not GET, and every git push in src/, and fails naming any that is
+    absent from `AUTHORITY_TABLE`. The baseline is empty: every current write is entered by this
+    task.
+
+    (iv) OUT OF SCOPE, AND NOT PROMISED. A console panel for the report is W1-T2660's family and
+    is not part of this task; the report's JSON shape is the contract a panel would read.
+
+    (v) WHAT DOES NOT CHANGE. No gate moves. No action gains or loses authority. The table
+    describes; the ratchet only refuses an undescribed write.
+  acceptance:
+    - claim: "the authority table names every external write in the gateway modules, and a new ungated write fails the ratchet by name"
+      proof: "unit test: test/authority-ratchet.test.ts"
+    - claim: "the report joins each action to its policy value and its last ledgered firing, refusing rather than blanking when the union is unreadable"
+      proof: "unit test: test/authority-table.test.ts"
+    - claim: "the verb is read-only and makes no network call"
+      proof: "unit test: test/authority-table.test.ts"
+    - claim: "the CLI dispatches the verb"
+      proof: "grep: authorityCommand( in src/run-task.ts"
+  risk: high
+  band_meaning: span
+  origin: "oper#external-scan-2026-09-02"
+  plan_refs: ["W1-T489", "W1-T2317", "W1-T2266", "W1-T2694", "W1-T2660", "§4", "§12"]
+  files: [src/lib/authority.ts, src/run-task.ts, test/authority-table.test.ts, test/authority-ratchet.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    risk:high, band_meaning:span — a new module, the CLI and a ratchet over two gateway modules
+    under Rule 19; runtime blast radius is one read-only verb.
+
+    SOURCES: Grok Bot Auto Review rules and the staff note, via the community reference
+    RongleCat/awesome-grok-bot (x.ai itself was unreachable from the filing session's proxy);
+    OpenClaw v2026.8.1 release note, "Approval surfaces". Neither product derives the table;
+    the derivation is this repository's own move.
