@@ -23,7 +23,8 @@
  * park against a prerequisite instead of retrying), never the no-task-PR defect above.
  */
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -129,6 +130,34 @@ test("a LANE PR whose id is real but absent from the plan keeps its own identity
   const { task, synthetic } = fixRungTaskFor(PLAN, { prNumber: 554, taskId: "TRIAGE-fb-1784732585507-04eac2" });
   assert.equal(synthetic, true, "not in plan.tasks");
   assert.equal(task.id, "TRIAGE-fb-1784732585507-04eac2", "its OWN id is preserved — never renamed to PR-554");
+});
+
+test("synthetic orchestrator lane trailers own their exact run-<full-id> branches without shortening the ledger identity", () => {
+  const laneIds = [
+    "RETRO-1788350665543",
+    "TRIAGE-fb-1784732585507-04eac2",
+    "PLAN-create-1788350665543",
+    "APPROVE-fb-1784732585507-04eac2",
+  ];
+
+  for (const [index, laneId] of laneIds.entries()) {
+    const head = `run-${laneId}`;
+    const { task, synthetic } = fixRungTaskFor(PLAN, { prNumber: 3639 + index, taskId: laneId }, "", head);
+    assert.equal(synthetic, true, `${laneId} is an orchestrator lane absent from plan.tasks`);
+    assert.equal(task.id, laneId, "the full trailer identity remains the strike/review ledger key");
+    assert.equal(fixHeadAcceptable(head, task.id, synthetic), true, `${head} is that synthetic lane's own branch`);
+  }
+
+  assert.equal(
+    fixHeadAcceptable("run-W1-T500", "W1-T500", false),
+    false,
+    "a real plan task still requires its ordinary run-<task>-<dispatch epoch> branch",
+  );
+  assert.equal(
+    fixHeadAcceptable("run-W1-T999-1785600000000", "RETRO-1788350665543", true),
+    false,
+    "a synthetic lane still cannot amend a foreign W1 task branch",
+  );
 });
 
 test("a plan-only RETRO PR without credited task derives only its lane identity from its own head", () => {
@@ -288,6 +317,124 @@ test("dispatchFix REFUSES a synthetic PR whose head claims another task, before 
   assert.equal(refusal.extra?.synthetic, true, "and the line says it was a synthetic-id dispatch");
   assert.equal(refusal.extra?.head, "run-W1-T999-1785600000000");
   assert.ok(!logs.some((l) => l.step === "fix.dispatch"), "no strike was spent");
+});
+
+test("dispatchFix sends the production RETRO trailer/head shape to a worker under the full trailer identity", async () => {
+  const owner = "acme";
+  const repo = "scratch-retro-own-head-repo";
+  const laneId = "RETRO-1788350665543";
+  const branch = `run-${laneId}`;
+  const root = mkdtempSync(join(tmpdir(), "retro-own-head-root-"));
+  const bare = mkdtempSync(join(tmpdir(), "retro-own-head-origin-"));
+  const seed = mkdtempSync(join(tmpdir(), "retro-own-head-seed-"));
+  const bin = mkdtempSync(join(tmpdir(), "retro-own-head-gh-"));
+  const gitEnv = {
+    ...process.env,
+    GIT_AUTHOR_NAME: "rmd-test",
+    GIT_AUTHOR_EMAIL: "rmd-test@example.invalid",
+    GIT_COMMITTER_NAME: "rmd-test",
+    GIT_COMMITTER_EMAIL: "rmd-test@example.invalid",
+  };
+  const git = (dir: string, ...args: string[]) =>
+    execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", env: gitEnv });
+
+  execFileSync("git", ["init", "--quiet", "--bare", "-b", "main", bare], { env: gitEnv });
+  execFileSync("git", ["init", "--quiet", "-b", "main", seed], { env: gitEnv });
+  writeFileSync(join(seed, "README.md"), "retro fixture\n");
+  git(seed, "add", "-A");
+  git(seed, "commit", "--quiet", "-m", "seed");
+  git(seed, "remote", "add", "origin", bare);
+  git(seed, "push", "--quiet", "origin", "main");
+  git(seed, "checkout", "--quiet", "-b", branch);
+  git(seed, "push", "--quiet", "origin", branch);
+  const branchSha = git(seed, "rev-parse", "HEAD").trim();
+
+  const repoDir = join(root, "repos", repo);
+  mkdirSync(join(root, "repos"), { recursive: true });
+  execFileSync("git", ["clone", "--quiet", bare, repoDir], { env: gitEnv });
+  git(repoDir, "config", "user.name", "rmd-test");
+  git(repoDir, "config", "user.email", "rmd-test@example.invalid");
+
+  writeFileSync(
+    join(bin, "gh"),
+    [
+      "#!/bin/sh",
+      'case "$*" in',
+      '  *"headRefName"*) printf \'{"headRefName":"%s","body":""}\\n\' ' + JSON.stringify(branch) + " ;;",
+      '  *"/check-runs"*) echo \'{"check_runs":[{"name":"ci","status":"completed","conclusion":"success"}]}\' ;;',
+      '  *"/commits/"*"/status"*) echo \'{"statuses":[]}\' ;;',
+      '  *"api"*"pulls/"*) echo ' + JSON.stringify(JSON.stringify({ state: "open", merged: false, head: { sha: branchSha } })) + " ;;",
+      "  *) echo '{}' ;;",
+      "esac",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${bin}:${oldPath}`;
+  const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  let spawnCalls = 0;
+  try {
+    const effects = (await import("../src/run-task.js")).buildSweepEffects(
+      owner,
+      repo,
+      { claudeBin: "/usr/bin/true", root } as never,
+      join(root, "ledger.ndjson"),
+      "SWEEP-W1-T2703",
+      { tasks: [], byId: new Map() },
+      (step, extra) => void logs.push({ step, extra }),
+      DEFAULT_SWEEP_POLICY,
+      undefined,
+      async () => {
+        spawnCalls += 1;
+        return {
+          sessionId: "W1-T2703-SESSION",
+          costUsd: 0,
+          numTurns: 1,
+          text: "REPORT\nretro repair attempted\n",
+          blocks: ["REPORT\nretro repair attempted\n"],
+          stderr: "",
+          subtype: "success",
+          isError: false,
+          apiError: false,
+          permissionDenials: [],
+          childEnvKeys: [],
+          model: "test-model",
+          effort: "high",
+          tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+          modelUsage: {},
+          compactionEvents: [],
+          qualitySuspect: false,
+        } satisfies WorkerResult;
+      },
+    );
+
+    await withLiveWritesAllowed(() =>
+      effects.dispatchFix(
+        {
+          ...AGENT_PR,
+          prNumber: 3639,
+          prUrl: `https://github.com/${owner}/${repo}/pull/3639`,
+          taskId: laneId,
+          headRefName: branch,
+          headSha: branchSha,
+          ciFailures: [{ name: "ci", logTail: "assertion failed" }],
+        } as never,
+        { unmetCriteria: [], ciFailures: [{ name: "ci", logTail: "assertion failed" }] } as never,
+      ),
+    );
+
+    assert.equal(spawnCalls, 1, "the production-shaped RETRO PR reaches the worker exactly once");
+    assert.ok(!logs.some((line) => line.step === "sweep.fix.uncreditable_head"), "its own branch is not refused as foreign");
+    assert.ok(
+      logs.some((line) => line.step === "fix.dispatch" && line.extra?.task_id === laneId),
+      `the strike keeps the full trailer identity; got ${JSON.stringify(logs)}`,
+    );
+  } finally {
+    process.env.PATH = oldPath;
+    for (const dir of [root, bare, seed, bin]) rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // ── W1-T1095: THE FIX RUNG CANNOT RESOLVE A BLOCKER THAT LIVES OUTSIDE ITS OWN DIFF ──────────
