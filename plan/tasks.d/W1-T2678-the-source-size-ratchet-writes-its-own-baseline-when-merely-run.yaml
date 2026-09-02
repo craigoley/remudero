@@ -1,0 +1,55 @@
+- id: W1-T2678
+  title: "THE SOURCE-SIZE RATCHET WRITES ITS OWN BASELINE WHEN MERELY RUN — it auto-records every newly seen file and has no check-only mode, so an agent told to run the gate gets a dirty tree and ships an unrelated artifact with the next `git add -A`"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 12.00
+  files: [scripts/source-size-ratchet.mjs, test/the-source-size-ratchet-writes-its-own-baseline-when-merely-run.test.ts]
+  origin: "operator-session#3512-misattribution-2026-09-02"
+  plan_refs: ["W1-T2488", "W1-T2526", "W1-T2653"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-01 WHILE REPAIRING #3569. `node scripts/source-size-ratchet.mjs` was run as a
+    CHECK. It printed `source-size-ratchet: OK -- 152 source file(s), none over their recorded
+    baseline.` and, on a second invocation, `recording 1 newly seen source file(s) ... -
+    src/lib/bundle.ts: 213 lines` — having WRITTEN scripts/source-size-baseline.json. The entry was
+    then swept into an unrelated commit by `git add -A` and had to be reverted out. The file it
+    recorded belonged to another PR's merge, not to the diff under repair.
+
+    EVERY SIBLING RATCHET HAS A CHECK MODE AND THIS ONE DOES NOT. package.json exposes
+    `plan-index:check`, `learnings-index:check` and `capability-snapshot:check` beside their writing
+    verbs; `source-size-ratchet` has one verb that both measures and records. Grep for `--check` in
+    scripts/source-size-ratchet.mjs returns zero.
+
+    THE AUTO-RECORD IS NOT ITSELF WRONG — W1-T2526 exempts this ledger from Standing rule 25 exactly
+    so growth can be recorded in the same PR, and W1-T2653 is fixing the case where the printed
+    remedy is unreachable. What is wrong is that RECORDING IS INDISTINGUISHABLE FROM CHECKING at the
+    call site. CI runs this gate, `rmd preflight --ci-parity` runs it, and CLAUDE.md instructs
+    agents to run the shipped gate rather than a proxy — so the repo's own guidance produces a
+    dirty tree, and the artifact it writes is invisible in a diff review that is looking at
+    something else entirely.
+
+    THE FIX IS A MODE, NOT A BEHAVIOUR CHANGE. `--check` measures and REFUSES on an unrecorded file
+    without writing; the default keeps recording exactly as today so no caller regresses and
+    W1-T2526's in-PR remedy still works. The one thing the check mode must do beyond exiting
+    non-zero is PRINT THE LINE TO WRITE, because W1-T2532 already established that a remedy an agent
+    cannot follow is the defect, not the message.
+
+    THE FALSIFIER IS THE WRITE ITSELF, ASSERTED ON THE FILE. A test that only reads exit codes
+    passes against a mode that still writes: it must compare the baseline's bytes before and after,
+    and assert UNCHANGED under `--check` and CHANGED under the default.
+  acceptance:
+    - claim: "check mode leaves the baseline file byte-identical, asserted on the file and not on an exit code"
+      proof: "unit test: test/the-source-size-ratchet-writes-its-own-baseline-when-merely-run.test.ts"
+    - claim: "check mode exits non-zero on a source file that has no recorded entry"
+      proof: "unit test: test/the-source-size-ratchet-writes-its-own-baseline-when-merely-run.test.ts"
+    - claim: "check mode prints the exact JSON line to write, so the remedy is followable"
+      proof: "unit test: test/the-source-size-ratchet-writes-its-own-baseline-when-merely-run.test.ts"
+    - claim: "the default mode still records a newly seen file, so no existing caller regresses"
+      proof: "unit test: test/the-source-size-ratchet-writes-its-own-baseline-when-merely-run.test.ts"
+    - claim: "a tree already fully recorded is unchanged by either mode"
+      proof: "unit test: test/the-source-size-ratchet-writes-its-own-baseline-when-merely-run.test.ts"

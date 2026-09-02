@@ -212,8 +212,8 @@ actually touched.
 `postMergeAmendmentViolations` (Standing rule 21, `src/lib/task-linter.ts`) is
 the only gate that fires on a post-merge edit to an already-merged task, and it
 computes violations from `acceptance` alone. The `files:` field IS REPORTED as
-post-merge-field-drift at warn severity, which no exit code reads — so the
-correction is allowed and is visible, rather than unread.
+post-merge-field-drift at warn severity, which no exit code reads — so no gate
+blocks it, and the correction is allowed and visible rather than unread.
 
 **For an unmerged task:** The post-merge amendment guard does not apply at all,
 and the correction is an ordinary plan-only human-authored amendment, just like

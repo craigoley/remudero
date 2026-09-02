@@ -1,0 +1,60 @@
+- id: W1-T2677
+  title: "A REPAIR IN FLIGHT ON AN OPEN PR IS INVISIBLE TO THE NEXT REPAIRER — dispatch has a claim and repair does not, so two agents diagnose the same red PR and push the same fix; observed THREE times in one session, each caught only by a pre-push head re-read"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 15.00
+  files: [src/lib/dispatch-claim.ts, test/a-pr-repair-in-flight-is-invisible-to-the-next-repairer.test.ts]
+  origin: "operator-session#3512-misattribution-2026-09-02"
+  plan_refs: ["W1-T509", "W1-T1268"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED, 2026-09-01, THREE INSTANCES IN ONE SESSION. (1) W1-T2589 was filed to re-attribute
+    #3512 while the operator was filing W1-T2581 for the same purpose. (2) #3569's
+    `config-reader-seams` calibration was diagnosed and fixed here while `codex/repair-pr-3569`
+    landed the identical 22->23 change. (3) #3583's `mounts-wiring` ratchet was diagnosed and fixed
+    here while `18bf1b24` landed a different and BETTER fix for it. In all three the second party
+    reached the same diagnosis independently; in all three the duplicate work was discarded.
+
+    NOTHING WAS CORRUPTED, WHICH IS WHY THIS IS EASY TO MISS. Each race was caught by re-reading the
+    PR head immediately before pushing, and the push was withheld. That is an unenforced discipline
+    of the pushing agent, not a property of the system: an agent that skips the re-read force-pushes
+    over a stranger's fix, and an agent that honours it still pays for the whole diagnosis first.
+
+    THE MECHANISM ALREADY EXISTS AND IS NOT APPLIED HERE. `refs/rmd-id/` makes id reservation
+    atomic, `refs/rmd-triage/` does the same for triage, and lib/dispatch-claim.ts is the shared
+    cross-host git-ref CAS family both belong to — the push IS the claim, and a loser advances or
+    stands down rather than colliding. Repair has no equivalent, so a red PR is an open invitation
+    to every agent that sees the board.
+
+    WHAT A REPAIR CLAIM MUST NOT BECOME IS A LOCK NOBODY CAN BREAK. A claim is EVIDENCE that someone
+    is working, not permission to stop others: it must carry who and when, it must EXPIRE (a
+    container dies mid-diagnosis and the PR must not be frozen), and a second repairer must be able
+    to see the holder and decide — exactly the disposition `refs/rmd-id/`'s own contention path
+    already takes, where the loser renumbers rather than waiting. A repair claim that blocks
+    indefinitely is worse than the races it replaces.
+
+    IT MUST ALSO COVER OUT-OF-BAND REPAIRERS, WHICH IS THE HARD HALF. Two of the three observed
+    races involved a `codex/*` branch and an operator-session agent, neither of which goes through
+    the fleet's own fix rung. A claim only the sweep writes would have caught NONE of them. The
+    claim has to be readable and writable by any agent touching a PR, which is why it belongs in the
+    shared CAS module rather than inside sweep.
+
+    THE FALSIFIER IS THE SECOND CLAIMANT. A claim that always succeeds proves nothing: the test must
+    show a second claim on the same PR observing the first, naming its holder and age, and it must
+    show an EXPIRED claim being reclaimable — otherwise the first crash freezes the PR forever.
+  acceptance:
+    - claim: "claiming repair on a PR is atomic, so two claimants cannot both believe they hold it"
+      proof: "unit test: test/a-pr-repair-in-flight-is-invisible-to-the-next-repairer.test.ts"
+    - claim: "a second claimant observes the holder and the claim's age rather than a bare refusal"
+      proof: "unit test: test/a-pr-repair-in-flight-is-invisible-to-the-next-repairer.test.ts"
+    - claim: "an expired claim is reclaimable, so a dead repairer never freezes a PR"
+      proof: "unit test: test/a-pr-repair-in-flight-is-invisible-to-the-next-repairer.test.ts"
+    - claim: "the claim is writable by any repairer, not only the fleet's own fix rung"
+      proof: "unit test: test/a-pr-repair-in-flight-is-invisible-to-the-next-repairer.test.ts"
+    - claim: "holding a claim never blocks a push, so the claim is evidence and not a lock"
+      proof: "unit test: test/a-pr-repair-in-flight-is-invisible-to-the-next-repairer.test.ts"

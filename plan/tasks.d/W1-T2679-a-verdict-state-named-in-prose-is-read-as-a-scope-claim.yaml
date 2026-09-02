@@ -1,0 +1,61 @@
+- id: W1-T2679
+  title: "A VERDICT STATE NAMED IN PROSE IS READ AS A SCOPE CLAIM — `(capped+override, capped+plan-only):` trips the label arm of `shorthandIsAboutChangeset`, so a PR whose SUBJECT is the review states is failed for claiming to be plan-only when it never claimed anything"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 15.00
+  files: [src/lib/review.ts, test/a-verdict-state-named-in-prose-is-read-as-a-scope-claim.test.ts]
+  origin: "operator-session#3512-misattribution-2026-09-02"
+  plan_refs: ["W1-T395", "W1-T2533", "W1-T2549"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED ON #3569, 2026-09-01. CI was fully green (36 checks) and remudero-review posted
+    `FAIL — body contradicts its own diff: claimed "plan-only"`. The body never claimed it. The
+    phrase occurred three times, every one of them the NAME OF A VERDICT STATE the PR's own
+    calibration logic switches on: `CAPPED+plan-only`, `capped+plan-only`. Two were harmless
+    (followed by a comma, so no arm fires). The third sat as `(capped+override, capped+plan-only):`
+    — a closing delimiter followed by a colon, which is exactly the LABEL shape
+    `shorthandIsAboutChangeset` treats as a claim. Confirmed by running `bodyContradictsDiff`
+    directly: the original body yields 1 contradiction, and the same body with the state names
+    written `planOnly` yields 0.
+
+    THE DETECTOR IS DOING WHAT IT WAS BUILT TO DO, AND THE ANCHORING IS ALREADY CAREFUL. W1-T395
+    established that a closing delimiter ends a SPAN and not a sentence, so `**Plan-only**:` and
+    `(Plan-only):` must still read as labels; W1-T2549 narrowed that away from quote characters;
+    W1-T2533 added the negation arms. Each was correct. What none of them faced is a body in which
+    the shorthand is a TERM OF ART being discussed rather than a description of the diff — the
+    exact case that arises whenever a PR's subject IS the review pipeline.
+
+    THIS WILL RECUR, WHICH IS WHY IT IS WORTH A GATE CHANGE RATHER THAN A REWORD. Every PR touching
+    verdict states, the arm gate, the calibration bands or the acceptance parser has cause to write
+    these names in prose, and the repo's house style favours naming the state exactly. #3569 was
+    resolved by rewording to `planOnly` — accurate, since that is the field name — but that remedy
+    is invisible until a green PR is failed by a gate whose message names a claim the author cannot
+    find.
+
+    WEAKENING IS THE OBVIOUS WRONG FIX AND MUST BE REFUSED. `plan-only` inside a PARENTHESISED
+    ENUMERATION of other state names is not a label; `Plan-only: one file added` still is. The
+    distinction is available without guessing — the label arm can require that what precedes the
+    shorthand is not itself an enumeration of sibling terms — and any change here must keep every
+    fixture in test/changeset-shorthand-anchor.test.ts and
+    test/review-absence-anchor-delimiter.test.ts passing.
+
+    THE FALSIFIER IS THE REAL CLAIM, NOT THE FALSE ONE. A narrowed arm that stops failing #3569's
+    body will also stop failing a genuine `plan-only:` claim unless the test pins both: the observed
+    false positive must pass, AND a body that really asserts plan-only over a src-touching diff must
+    still FAIL. Without the second, the fix is indistinguishable from deleting the arm.
+  acceptance:
+    - claim: "a state name inside a parenthesised enumeration is not read as a scope claim"
+      proof: "unit test: test/a-verdict-state-named-in-prose-is-read-as-a-scope-claim.test.ts"
+    - claim: "a genuine plan-only label over a src-touching diff still FAILS, so the arm is not deleted"
+      proof: "unit test: test/a-verdict-state-named-in-prose-is-read-as-a-scope-claim.test.ts"
+    - claim: "the copular and attributive arms are unchanged, so only the label arm's shape moves"
+      proof: "unit test: test/a-verdict-state-named-in-prose-is-read-as-a-scope-claim.test.ts"
+    - claim: "the observed #3569 body yields zero contradictions while its diff is unchanged"
+      proof: "unit test: test/a-verdict-state-named-in-prose-is-read-as-a-scope-claim.test.ts"
+    - claim: "data-only gets the identical treatment, since it is the same shape one line down"
+      proof: "unit test: test/a-verdict-state-named-in-prose-is-read-as-a-scope-claim.test.ts"

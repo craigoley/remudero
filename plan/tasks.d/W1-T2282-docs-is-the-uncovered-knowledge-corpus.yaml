@@ -110,9 +110,12 @@
     source file under `src/` is touched and no existing doc is rewritten by this task.
 
     THE SECOND CANDIDATE WAS REFUTED, AND IS RECORDED HERE SO IT IS NOT RE-FILED. CLAUDE.md is
-    injected in full on every session and measures 65324 bytes against a 65536-byte cap — 212
-    bytes of headroom — so adding a rule today requires deleting one, and Devin's split of
-    always-on `AGENTS.md` from trigger-scoped `.devin/rules/*.md` looked like it bore on that.
+    injected in full on every session — re-measure its size at implementation by running
+    `node scripts/claude-md-budget-ratchet.mjs`, which prints size AND cap together. The cap and
+    headroom are recorded in `scripts/claude-md-budget-baseline.json` and must remain the authority
+    rather than a frozen figure. So adding a rule today requires deleting one (per the cap enforcer,
+    not per a stale number), and Devin's split of always-on `AGENTS.md` from trigger-scoped
+    `.devin/rules/*.md` looked like it bore on that.
     It does not: `src/lib/plan-index.ts` records that "CLAUDE.md up front + glob/grep for
     retrieval" is a DELIBERATE choice, adopted because it "bypasses the issues of stale
     indexing". Filing against it would have argued with a recorded decision, and would have
