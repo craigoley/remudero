@@ -89,10 +89,10 @@ const REST_OPEN_ARMED = { ...REST_OPEN_EMPTY_BODY, number: 999, html_url: "https
 
 /** The SAME five PRs as `gh pr list --json …` reports them — uppercase state, `""` empty body. */
 const GRAPHQL_ROWS: BatchedPr[] = [
-  { number: 1001, url: "https://github.com/craigoley/remudero/pull/1001", state: "OPEN", headRefName: "plan/land-decisions-2", body: "", autoMergeRequest: null, title: REST_OPEN_EMPTY_BODY.title },
-  { number: 999, url: "https://github.com/craigoley/remudero/pull/999", state: "OPEN", headRefName: "plan/land-decisions-2", body: "armed and waiting\n", autoMergeRequest: GQL_AUTO_MERGE, title: "an armed PR" },
-  { number: 1000, url: "https://github.com/craigoley/remudero/pull/1000", state: "MERGED", headRefName: "run-W1-T264-1785504036808", body: MERGED_BODY, autoMergeRequest: GQL_AUTO_MERGE, title: REST_MERGED.title },
-  { number: 958, url: "https://github.com/craigoley/remudero/pull/958", state: "CLOSED", headRefName: "file/oob-writes-into-daemon-checkout", body: CLOSED_BODY, autoMergeRequest: null, title: REST_CLOSED_UNMERGED.title },
+  { number: 1001, url: "https://github.com/craigoley/remudero/pull/1001", state: "OPEN", headRefName: "plan/land-decisions-2", headRefOid: "bbbbbbb", body: "", autoMergeRequest: null, title: REST_OPEN_EMPTY_BODY.title },
+  { number: 999, url: "https://github.com/craigoley/remudero/pull/999", state: "OPEN", headRefName: "plan/land-decisions-2", headRefOid: "bbbbbbb", body: "armed and waiting\n", autoMergeRequest: GQL_AUTO_MERGE, title: "an armed PR" },
+  { number: 1000, url: "https://github.com/craigoley/remudero/pull/1000", state: "MERGED", headRefName: "run-W1-T264-1785504036808", headRefOid: "1c06625b57684e9c8a2f21ff50e9d98af5d75817", body: MERGED_BODY, autoMergeRequest: GQL_AUTO_MERGE, title: REST_MERGED.title },
+  { number: 958, url: "https://github.com/craigoley/remudero/pull/958", state: "CLOSED", headRefName: "file/oob-writes-into-daemon-checkout", headRefOid: "aaaaaaa", body: CLOSED_BODY, autoMergeRequest: null, title: REST_CLOSED_UNMERGED.title },
 ];
 
 /**

@@ -944,6 +944,8 @@ export interface BoardPrRest {
   /** UPPERCASE "OPEN" | "CLOSED" | "MERGED", via {@link prStateFromRest}. */
   state: string;
   headRefName: string;
+  /** REST's current `head.sha`; empty only when GitHub omitted it from a malformed/legacy row. */
+  headRefOid: string;
   body: string;
   autoMergeRequest: unknown;
   title: string;
@@ -975,6 +977,7 @@ export function mapBoardPr(row: RestPullRow): BoardPrRest {
     url: base.url,
     state: prStateFromRest(row),
     headRefName: base.headRefName,
+    headRefOid: base.headRefOid,
     body: base.body,
     autoMergeRequest: base.autoMergeRequest,
     title: row.title ?? "",

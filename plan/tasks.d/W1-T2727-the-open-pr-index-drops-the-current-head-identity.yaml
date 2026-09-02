@@ -13,6 +13,7 @@
     - src/lib/status.ts
     - src/lib/open-prs-rest.ts
     - test/board-pr-head-identity.test.ts
+    - test/board-prs-rest.test.ts
     - scripts/source-size-baseline.json
   status: queued
   attempts: 0
