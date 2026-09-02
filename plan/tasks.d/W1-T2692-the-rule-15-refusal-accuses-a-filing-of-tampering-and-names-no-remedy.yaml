@@ -1,0 +1,73 @@
+- id: W1-T2692
+  title: "THE RULE-15 REFUSAL ACCUSES A LEGITIMATE FILING OF TAMPERING AND NAMES NO REMEDY — `criterionFieldTampered` cannot tell a NEW shard from an EDITED criterion (its own doc says `planOnly` is the whole discriminator), so a PR that files a task and builds it reads as misconduct, and the message trails off at `a worker may never` without saying that the fix is to split the filing from the build"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 12.00
+  files: [src/lib/review.ts, test/the-rule-15-refusal-accuses-a-filing-of-tampering-and-names-no-remedy.test.ts]
+  origin: "operator-session#pr-3615-split-2026-09-02"
+  plan_refs: ["W1-T58", "W1-T399", "W1-T400", "W1-T2532"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED: THREE PRs BLOCKED BY THIS SHAPE IN ONE SESSION, each green on every check and each
+    needing a human who already knew the remedy. #3615 is the clearest: 35/35 CI green,
+    `remudero-review: FAIL — diff edits plan/tasks.yaml's (or a plan/tasks.d/ shard's) own
+    acceptance criteria — Standing rule 15 (a worker may never)`. It had not edited a criterion. It
+    FILED W1-T2666's shard (new file, 6 claim/proof lines) and implemented it in the same PR. The
+    fix was to file the shard separately (#3624) and let a forward-merge collapse the duplicate —
+    a PR-SHAPE change, with not one character of any criterion altered.
+
+    THE PREDICATE CANNOT TELL THE TWO APART AND ITS OWN DOC SAYS SO. `criterionFieldTampered`
+    (src/lib/review.ts) returns true on any added-or-removed `claim:`/`proof:`/`satisfied_by:` line
+    under plan/, and its comment states the position exactly: "this widening does not also catch an
+    ordinary task filing: a filing is nothing but added claim/proof lines, BUT IT IS PLAN-ONLY, SO
+    THE EXEMPTION — NOT THIS PREDICATE — IS WHAT KEEPS IT CLEAN". `planOnly` is the entire
+    discriminator. The moment a filing shares a diff with ONE non-plan file the exemption
+    evaporates and a legitimate filing becomes byte-indistinguishable from misconduct.
+
+    SO THE MESSAGE IS ASSERTING SOMETHING IT CANNOT KNOW. It says the diff "edits ... its own
+    acceptance criteria" when the diff may have added a brand-new shard that edits nothing, and it
+    ends mid-clause at "(a worker may never)" — a quotation of the rule's title, not a sentence.
+    An author reading it is told they did something they did not do, and is told nothing about what
+    to do next.
+
+    W1-T2532 IS THE PRECEDENT AND ITS COST IS ON THE RECORD. The source-size ratchet's remedy was
+    unfollowable — it ended "raise the entry ... by hand", the fix rung read "by hand" as "not
+    yours to edit", and FOUR consecutive `ci-log false-block` escalations landed (#3362, #3368,
+    #3369, #3374) against PRs whose only failing check was that gate. The remedy that fixed it was
+    a `TO FIX:` line printing the exact edit. This message needs the same treatment: name the
+    remedy, and name it in the words that resolve the actual case — SPLIT THE FILING FROM THE
+    BUILD, never edit a criterion.
+
+    IT MUST ALSO STOP ASSERTING THE SHAPE IT CANNOT DISTINGUISH. Where the diff ADDS a plan file
+    that did not exist at the base, the message should say what is observed — a filing sharing a
+    diff with N non-plan files — rather than "edits its own criteria". Where an EXISTING shard's
+    criterion changed, the current wording is accurate and must stay.
+
+    EXPLICITLY NOT IN SCOPE: making `criterionFieldTampered` itself distinguish the two. That is
+    the tempting fix and it is the wrong trade here. W1-T400 CLOSED the append gap deliberately
+    after PR #1295 added a criterion its own changes already satisfied, and any predicate change
+    risks reopening it. This task changes what the refusal SAYS and what evidence it carries; the
+    refusal itself must fire on exactly the same diffs as today.
+
+    THE FALSIFIER IS THE UNCHANGED REFUSAL SET. A message change that also narrows the gate is a
+    weakening dressed as a wording fix, so the test must pin BOTH: the same diffs still FAIL (a
+    genuine criterion edit, and a filing bundled with a build), and only the text differs — plus a
+    plan-only filing still PASSES, so the exemption is untouched.
+  acceptance:
+    - claim: "a filing bundled with a build is described as what it is, not as an edit to its own criteria"
+      proof: "unit test: test/the-rule-15-refusal-accuses-a-filing-of-tampering-and-names-no-remedy.test.ts"
+    - claim: "the refusal names the remedy, so an author is told to split the filing rather than left guessing"
+      proof: "unit test: test/the-rule-15-refusal-accuses-a-filing-of-tampering-and-names-no-remedy.test.ts"
+    - claim: "a genuine edit to an existing shard's criterion keeps the accurate wording it has today"
+      proof: "unit test: test/the-rule-15-refusal-accuses-a-filing-of-tampering-and-names-no-remedy.test.ts"
+    - claim: "the set of diffs that FAIL is unchanged, so the wording fix cannot narrow the gate"
+      proof: "unit test: test/the-rule-15-refusal-accuses-a-filing-of-tampering-and-names-no-remedy.test.ts"
+    - claim: "a plan-only filing still passes, so the planOnly exemption is untouched"
+      proof: "unit test: test/the-rule-15-refusal-accuses-a-filing-of-tampering-and-names-no-remedy.test.ts"
+    - claim: "the message no longer ends mid-clause on a quotation of the rule's title"
+      proof: "unit test: test/the-rule-15-refusal-accuses-a-filing-of-tampering-and-names-no-remedy.test.ts"
