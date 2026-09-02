@@ -26695,8 +26695,8 @@ export class FixRungCheckoutRefusedError extends Error {
 /**
  * W1-T2609: the fix rung's checkout onto its shared head ref (the PR's own branch, `realBranch`
  * at the one call site) — NON-DESTRUCTIVE, unlike the `checkout -B` this replaced. That branch
- * name is deliberately shared across every concurrent fix round for one task (creditability,
- * `fixHeadAcceptable`/`deriveStatus`'s `ownsBranch` — see this function's caller); only the
+ * name is deliberately shared across every concurrent fix round for one task: creditability pins the branch name.
+ * See `fixHeadAcceptable`/`deriveStatus`'s `ownsBranch` at this function's caller; only the
  * WORKTREE is per-attempt unique. A plain `checkout -B <branch> origin/<branch>` unconditionally
  * FORCE-RESETS the local ref to `origin/<branch>`, so a round that already committed locally
  * (unpushed) had that commit silently rewound by a concurrent round landing here in the same
