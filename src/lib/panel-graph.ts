@@ -125,6 +125,7 @@ import {
 } from "./policy.js";
 import {
   classifyProposal,
+  declinedReasonInLedger,
   gitGrepAnchorTrue,
   isRatifiedInLedger,
   parseDraftCache,
@@ -135,6 +136,7 @@ import {
   updateProposalRegistry,
   type DraftCache,
   type InboxClassification,
+  type PredicateFailure,
   type Proposal,
 } from "./inbox.js";
 
@@ -1189,6 +1191,23 @@ export interface InboxDraftingItem {
   spawnedAt: string;
 }
 
+/** One NOT-READY proposal, as GET /v1/inbox renders it (W1-T2604, finding (i): "the not-ready
+ *  reason is computed and not surfaced"). `reasons` is the EXACT {@link PredicateFailure}[]
+ *  classifyProposal already computed — never re-derived, never summarized to a bare
+ *  `"not_ready"` string — so an operator viewing the inbox itself sees WHY, without first
+ *  having to attempt (and be refused by) an approve. This is deliberately a SEPARATE array from
+ *  `ready`/`drafting`, never a merged/actionable card: presence here implies no affordance
+ *  (no approve/reframe/decline button is implied), so surfacing it does not reintroduce the
+ *  "approval fatigue" the READY-only list originally existed to cure (see this route's own
+ *  doc). DEFERRED-WITH-TRIGGER proposals are deliberately still excluded here — that state
+ *  names an unfired trigger, not a failing predicate, a distinct concern this finding never
+ *  targeted. */
+export interface InboxNotReadyItem {
+  proposalId: string;
+  summary: string;
+  reasons: PredicateFailure[];
+}
+
 /** The drafted fragment's task ids + titles. A READY classification's fragment has ALREADY
  *  passed classifyProposal's own parse+lint checks (a fragment that failed either would have
  *  classified not_ready instead, never ready), so this re-parse is expected to always succeed
@@ -1261,6 +1280,7 @@ function classifyAllProposals(
       grepAnchorTrue: (anchor) => gitGrepAnchorTrue(deps.root, "origin/main", anchor),
       openProposalIds: new Set([...allIds].filter((id) => id !== proposal.id)),
       isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
+      isDeclined: (id) => declinedReasonInLedger(ledgerLines, id),
       draftSpawnedAt: (id) => inflight[id],
     }),
   );
@@ -1271,14 +1291,20 @@ function classifyAllProposals(
  * GET /v1/inbox — read-scoped. The ratification inbox's (W1-T110, lib/inbox.ts) READY and
  * DRAFTING tiers — the same tiering `rmd inbox` prints, computed the SAME way
  * (classifyProposal, a pure function, over the ACTIVE-proposal registry + draft cache + a real
- * ReadinessContext), but over HTTP for the shell's NEEDS ME section. NOT-READY / DEFERRED-
- * WITH-TRIGGER proposals are deliberately never returned here (inbox.ts's whole point: only
- * what is genuinely actionable — or, since W1-T193, genuinely IN PROGRESS — is ever surfaced,
- * "the cure for approval fatigue").
+ * ReadinessContext), but over HTTP for the shell's NEEDS ME section. DEFERRED-WITH-TRIGGER
+ * proposals are deliberately never returned here (inbox.ts's whole point: only what is
+ * genuinely actionable — or, since W1-T193, genuinely IN PROGRESS — is ever surfaced, "the
+ * cure for approval fatigue"). NOT-READY proposals ride along too, as of W1-T2604, but in
+ * their OWN `notReady` array — see {@link InboxNotReadyItem}'s own doc for why that is not the
+ * same thing as re-offering them as actionable and does not reintroduce approval fatigue;
+ * `ratified`/`retired`/`declined` proposals stay excluded from every array here (each already
+ * has, or needs, no further screen real estate: ratified because it is already filed, retired/
+ * declined because an operator or the classifier has already disposed of it).
  *
- * `rmd approve <id>` / `rmd reframe <id>` (W1-T111) are wired from the card as of W1-T193 — see
- * `buildApproveProposalRoute`/`buildReframeProposalRoute` below — over the SAME write-token
- * scope every other panel write action uses, never a second auth story.
+ * `rmd approve <id>` / `rmd reframe <id>` (W1-T111) and `rmd decline` (W1-T2604) are wired from
+ * the card as of W1-T193/W1-T2604 — see `buildApproveProposalRoute`/`buildReframeProposalRoute`/
+ * `buildDeclineProposalRoute` below — over the SAME write-token scope every other panel write
+ * action uses, never a second auth story.
  */
 export function buildInboxRoute(deps: PanelGraphDeps): Route {
   return {
@@ -1290,6 +1316,7 @@ export function buildInboxRoute(deps: PanelGraphDeps): Route {
 
       const ready: InboxReadyItem[] = [];
       const drafting: InboxDraftingItem[] = [];
+      const notReady: InboxNotReadyItem[] = [];
       for (const classification of classifications) {
         const proposal = proposals.find((p) => p.id === classification.proposalId);
         if (!proposal) continue; // unreachable — classifications are 1:1 with proposals
@@ -1302,6 +1329,10 @@ export function buildInboxRoute(deps: PanelGraphDeps): Route {
           });
         } else if (classification.state === "drafting") {
           drafting.push({ proposalId: proposal.id, summary: proposal.summary, spawnedAt: classification.draftSpawnedAt ?? "" });
+        } else if (classification.state === "not_ready") {
+          // W1-T2604 (finding (i)): the failing predicate(s) classifyProposal already named,
+          // never a bare "not_ready" — see InboxNotReadyItem's own doc.
+          notReady.push({ proposalId: proposal.id, summary: proposal.summary, reasons: classification.reasons });
         }
       }
       // W1-T190 (round 2): a proposal classified "ratified" here is DETECTED off the
@@ -1329,7 +1360,7 @@ export function buildInboxRoute(deps: PanelGraphDeps): Route {
           return fresh.length === current.length ? null : fresh;
         });
       }
-      sendJson(res, 200, { ready, drafting });
+      sendJson(res, 200, { ready, drafting, notReady });
     },
   };
 }
@@ -1484,6 +1515,89 @@ export function buildReframeProposalRoute(deps: PanelGraphDeps): Route {
   };
 }
 
+interface DeclineProposalInput {
+  proposalId: string;
+  reason: string;
+}
+
+function validateDeclineProposal(body: unknown): { error: string } | DeclineProposalInput {
+  if (!isRecord(body)) return { error: "body must be a JSON object" };
+  if (typeof body.proposalId !== "string" || !body.proposalId.trim()) return { error: "proposalId is required" };
+  if (typeof body.reason !== "string" || !body.reason.trim()) return { error: "reason is required" };
+  return { proposalId: body.proposalId, reason: body.reason };
+}
+
+/**
+ * POST /v1/inbox/decline — write-scoped. W1-T2604: the console inbox's missing THIRD verb —
+ * "the console inbox can only say yes, so every proposal it cannot ratify stays forever". Until
+ * this route existed, the ONLY way a READY proposal left the registry was `rmd approve`'s own
+ * one-bit contract ("valid ONLY for a currently-READY proposal"), so a proposal that is
+ * self-withdrawn, refused, already satisfied on main, or a duplicate had no path out except
+ * being approved into a task nobody wants.
+ *
+ * THIS IS AN OPERATOR ACT, NEVER AN INFERENCE. `classifyProposal` never reads a proposal's own
+ * title/summary prose to decide this — that text is drafted by a worker and never ratified by
+ * anyone, so a keyword rule ("WITHDRAWN" in the title) would let a worker retire its own
+ * proposal by phrasing, exactly the authority boundary `rmd approve`'s design already holds.
+ * The ONLY way a proposal classifies `declined` is THIS route recording it: one ledger line,
+ * `panel.proposal_declined`, carrying the operator's own `reason` VERBATIM (never summarized,
+ * mirroring `POST /v1/inbox/reframe`'s own "captures feedback verbatim" discipline) and the
+ * panel's bearer as `origin` — the same attribution shape every other panel write uses.
+ *
+ * A DECLINE IS NOT A DELETE. Exactly like a `retired` classification (W1-T2451), the proposal
+ * stays in `state/inbox-proposals.json` untouched — {@link pruneRatifiedProposals} only ever
+ * prunes `ratified` proposals, never `declined` ones — so the registry keeps a record of the
+ * finding and why it was refused, rather than growing back the P19-shaped silent-drop problem
+ * a delete would reintroduce. `classifyProposal` (inbox.ts) checks the ledger's decline receipt
+ * immediately after its ratified check and BEFORE every other predicate, so a declined proposal
+ * can never again render ready/not_ready/deferred/drafting, no matter what its own predicates
+ * would otherwise say — see that function's own doc.
+ *
+ * NO PLAN TASK, NO BRANCH. Unlike approve/reframe, this handler never calls
+ * {@link RatifyCliGateway} at all — there is no `rmd decline` CLI to spawn, no git/gh side
+ * effect of any kind, so declining can never file the very work it is refusing.
+ *
+ * Valid for ANY proposal currently in the ACTIVE registry that is not ALREADY ratified or
+ * already declined (409 either way, naming which) — like `reframe`, a decline is not gated on
+ * the proposal currently classifying READY, since a stuck not-ready duplicate is exactly as
+ * much the "stays forever" defect as a stuck ready one.
+ */
+export function buildDeclineProposalRoute(deps: PanelGraphDeps): Route {
+  return {
+    method: "POST",
+    path: "/v1/inbox/decline",
+    scope: "write",
+    // W1-T404: LOW — bookkeeping, trivially reversible in effect (a ledger annotation; no
+    // plan/branch/PR is ever created for this route to have to undo).
+    tier: "low",
+    handler: jsonAction(validateDeclineProposal, (input, req, res) => {
+      const { proposals, classifications } = classifyAllProposals(deps);
+      if (!proposals.some((p) => p.id === input.proposalId)) {
+        sendJson(res, 404, { error: "not_found", detail: `no active proposal "${input.proposalId}"` });
+        return;
+      }
+      const classification = classifications.find((c) => c.proposalId === input.proposalId);
+      if (classification?.state === "ratified") {
+        sendJson(res, 409, {
+          error: "already_ratified",
+          detail: `${input.proposalId} is already RATIFIED — declining now cannot un-file the task it already produced`,
+        });
+        return;
+      }
+      if (classification?.state === "declined") {
+        sendJson(res, 409, {
+          error: "already_declined",
+          detail: `${input.proposalId} was already declined (${classification.declinedReason ?? "no reason recorded"})`,
+        });
+        return;
+      }
+      const origin = bearerTokenId(req);
+      appendPanelLedger(deps.ledgerPath, "panel.proposal_declined", input.proposalId, origin, { reason: input.reason });
+      sendJson(res, 200, { ok: true, proposalId: input.proposalId, declined: true });
+    }),
+  };
+}
+
 // ── POST /v1/policy/daily-cost-ceiling, POST /v1/policy/daily-cost-ceiling/clear ────────────
 // W1-T364: THE OPERATOR'S OWN WRITE CONTROL over the daily-cost-ceiling override (W1-T332's
 // store) — before this route existed, the ONLY writer of `state/DAILY_COST_CEILING_OVERRIDE`
@@ -1619,6 +1733,7 @@ export function buildPanelGraphRoutes(deps: PanelGraphDeps): Route[] {
     buildInboxRoute(deps),
     buildApproveProposalRoute(deps),
     buildReframeProposalRoute(deps),
+    buildDeclineProposalRoute(deps),
     buildSetDailyCostCeilingRoute(deps),
     buildClearDailyCostCeilingRoute(deps),
   ];
