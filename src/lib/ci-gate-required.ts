@@ -18,7 +18,8 @@ export function readCiGateRequiredChecks(
     const names = JSON.parse(encoded) as unknown;
     if (!Array.isArray(names) || names.some((name) => typeof name !== "string" || name.trim() === "")) return [];
     return [...new Set(names)];
-  } catch {
+  } catch (_error) {
+    // Fail inert: an unreadable contract yields no required names, so early-fix classification stays disabled.
     return [];
   }
 }
