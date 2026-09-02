@@ -1416,12 +1416,13 @@ export interface DaemonDeps {
    */
   sleep: (ms: number) => Promise<void>;
   /**
-   * W1-T2568: the top-level loop's interruptible poll wait. Unlike {@link DaemonDeps.sleep},
-   * this clock is NEVER shared with in-flight light/full-sweep tickers: a GitHub event must wake
-   * the next reconciliation iteration, not an unrelated heartbeat timer. Omitted preserves the
-   * pre-webhook clock exactly.
+   * W1-T2568: the daemon's interruptible reconciliation wait. The top-level loop always uses it;
+   * dispatch/retro tickers use it only when they carry the full-sweep retrigger, so a GitHub event
+   * can reach the same gated full sweep without making ordinary light/sweep heartbeats consume the
+   * event. `void` keeps existing injected clocks source-compatible; only an explicit `"wake"`
+   * bypasses the elapsed-time interval. Omitted preserves the pre-webhook clock exactly.
    */
-  sleepUntilSweepWake?: (ms: number) => Promise<void>;
+  sleepUntilSweepWake?: (ms: number) => Promise<"wake" | "timeout" | void>;
   /**
    * W1-T2656: acknowledge one durable event wake only after the ordinary full-sweep liveness
    * gate accepts a pass. STOP/PAUSE or a still-settling prior pass leaves the marker for a later
@@ -1847,10 +1848,20 @@ function startInFlightTicker(
   headroomSampler?: { lastSampleMs: number; now: () => number; policy: HeadroomPolicy; enforced: boolean },
 ): { stop: () => Promise<void> } {
   let active = true;
+  // A wake edge is consumed from the interruptible clock when it shortens a wait, but its
+  // durable marker is not claimed until `runGatedSweep` accepts a pass. Retain that intent
+  // across STOP/PAUSE and an older still-settling sweep; retry once per ordinary ticker cadence,
+  // never as a zero-delay loop.
+  let eventWakePending = false;
   const ticker = deps.sweepLight
     ? (async () => {
         while (active) {
-          await deps.sleep(pollIntervalMs);
+          // W1-T2568: dispatch/retro can hold the top-level loop for tens of minutes. Let an
+          // event wake THIS wait only when the ticker owns the same full-sweep retrigger; the
+          // nested ticker inside a full sweep deliberately stays on the ordinary clock so an
+          // event arriving during that sweep remains pending for one later accepted pass.
+          const waitResult = await (sweepRetrigger ? (deps.sleepUntilSweepWake ?? deps.sleep) : deps.sleep)(pollIntervalMs);
+          if (waitResult === "wake") eventWakePending = true;
           if (!active) break;
           // THE ACKNOWLEDGEMENT GAP (W1-T1065 design part iv). `daemon.pause` is written only
           // inside the branch that ACTS on a hold (the top-of-tick idle, or the re-check above) —
@@ -1933,9 +1944,9 @@ function startInFlightTicker(
             }
           }
           // W1-T1272 (RE-TRIGGER, design part (ii)): fires the FULL sweep — never `sweepLight`
-          // above — when `sweepRetriggerIntervalMs` has elapsed since it last actually ran,
-          // ANYWHERE (the top-of-iteration call or a prior retrigger), regardless of how long
-          // this "dispatch"/"retro" phase has held the loop. Without this, a boot whose
+          // above — when `sweepRetriggerIntervalMs` has elapsed since it last actually ran OR a
+          // GitHub event explicitly woke this dispatch/retro wait, regardless of how long this
+          // phase has held the loop. Without this, a boot whose
           // dispatch/retro holds the loop for its measured mean of 38.5 minutes got exactly one
           // full sweep (the one at the top of the iteration that started it) for that whole
           // span — the freshness exit cannot help here, it is only consulted BETWEEN
@@ -1969,18 +1980,22 @@ function startInFlightTicker(
           if (sweepRetrigger && deps.sweep) {
             const nowMs = (deps.now ?? (() => new Date()))().getTime();
             const last = sweepRetrigger.state.lastRunAtMs;
-            if (last === undefined || nowMs - last >= sweepRetrigger.intervalMs) {
+            const trigger = eventWakePending ? "github-event" : "interval";
+            if (eventWakePending || last === undefined || nowMs - last >= sweepRetrigger.intervalMs) {
               const halt = deps.checkStop?.() ?? deps.checkPause?.();
               if (halt) {
-                log("daemon.sweep.retrigger_held", { phase, detail: halt });
+                log("daemon.sweep.retrigger_held", { phase, detail: halt, trigger });
               } else {
+                const accepted = sweepRetrigger.liveness?.inFlight !== true;
                 sweepRetrigger.state.lastRunAtMs = nowMs;
                 log("daemon.sweep.retriggered", {
                   phase,
+                  trigger,
                   poll_interval_ms: pollIntervalMs,
                   interval_ms: sweepRetrigger.intervalMs,
                 });
                 await runGatedSweep(deps, pollIntervalMs, sweepRetrigger.sweepWallClockBoundMs, log, diskHeadroomLatch, undefined, sweepRetrigger.liveness);
+                if (accepted) eventWakePending = false;
               }
             }
           }
@@ -2835,8 +2850,9 @@ export async function runDaemon(
   const unreadableDegradedLimit = opts.unreadableDegradedLimit ?? DEFAULT_UNREADABLE_DEGRADED_LIMIT;
   const parkCeilingMs = opts.headroomParkCeilingMs ?? HEADROOM_PARK_CEILING_MS;
   const now = deps.now ?? (() => new Date());
-  // W1-T2568: ONLY top-level waits that return to this reconciliation loop are interruptible.
-  // `deps.sleep` remains the unmodified clock for nested in-flight tickers.
+  // W1-T2568: top-level waits are interruptible, as are dispatch/retro ticker waits
+  // that own a full-sweep retrigger. Light/sweep ticker waits remain on `deps.sleep`, so they
+  // cannot consume an event without reconciling it through the ordinary gated full sweep.
   const sleepUntilSweepWake = deps.sleepUntilSweepWake ?? deps.sleep;
   // W1-T343: resolved ONCE, for this process's whole lifetime — `DaemonOpts` is the daemon's
   // frozen-at-boot configuration (see `wipLimit`'s own doc on why a running daemon does not

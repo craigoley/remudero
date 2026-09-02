@@ -331,8 +331,26 @@ test("an early wake cancels its timer instead of leaving it alive through shutdo
   const waiting = signal.sleep(60_000);
   assert.ok(scheduled);
   signal.wake();
-  await waiting;
+  assert.equal(await waiting, "wake");
   assert.equal(cancelled, 1);
+});
+
+test("timer expiry and shutdown are not mislabeled as GitHub event wakes", async () => {
+  let expire: (() => void) | undefined;
+  const signal = createSweepWakeSignal(false, {
+    setTimer: (callback) => {
+      expire = callback;
+      return 7;
+    },
+    clearTimer: () => {},
+  });
+  const timed = signal.sleep(60_000);
+  expire!();
+  assert.equal(await timed, "timeout");
+
+  const closing = signal.sleep(60_000);
+  signal.close();
+  assert.equal(await closing, "timeout");
 });
 
 test("a boot marker and a live marker interrupt polling but remain durable until the sweep gate acknowledges them", async () => {
@@ -393,7 +411,7 @@ test("watch failure is reported once and leaves the timer sleep usable", async (
     fake.emit("error", new Error("first"));
     fake.emit("error", new Error("second"));
     assert.deepEqual(logs, ["github.wake.watch_failed"]);
-    await signal.sleep(1);
+    assert.equal(await signal.sleep(1), "timeout");
   } finally {
     watcher.close();
     signal.close();
@@ -569,6 +587,91 @@ test("a delivery arriving during an active full sweep is reconciled by exactly o
   }
 });
 
+test("a delivery arriving during dispatch bypasses the retrigger interval and runs the same gated full sweep", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-github-dispatch-wake-"));
+  const path = sweepWakeMarkerPath(root);
+  const wiring = wireSweepWakeToDaemon(root);
+  let sweeps = 0;
+  let releaseRunOne: () => void = () => {};
+  let reportRunOneStarted: () => void = () => {};
+  let reportEventSweep: () => void = () => {};
+  let pause: string | undefined;
+  let wakeHeld = false;
+  const runOneStarted = new Promise<void>((resolve) => { reportRunOneStarted = resolve; });
+  const eventSweep = new Promise<void>((resolve) => { reportEventSweep = resolve; });
+  const holdRunOne = new Promise<void>((resolve) => { releaseRunOne = resolve; });
+  const logs: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  try {
+    const running = runDaemon(
+      oneTaskPlan(root),
+      {
+        refreshMerged: () => () => false,
+        runOne: async () => {
+          reportRunOneStarted();
+          await holdRunOne;
+          return { taskId: "W1-T2568", runId: "dispatch-event-run", merged: true, costUsd: 0, verdict: "merged" };
+        },
+        sweep: async () => {
+          sweeps++;
+          if (sweeps === 2) {
+            reportEventSweep();
+            releaseRunOne();
+          }
+        },
+        sweepLight: async () => {},
+        sleep: async () => {},
+        sleepUntilSweepWake: (ms) => (wakeHeld || sweeps >= 2 ? Promise.resolve("timeout") : wiring.sleep(ms)),
+        acknowledgeSweepWake: wiring.acknowledge,
+        checkPause: () => pause,
+        now: () => new Date("2026-09-02T09:00:00.000Z"),
+        log: (step, extra = {}) => {
+          logs.push({ step, extra });
+          if (step === "daemon.sweep.retrigger_held") {
+            wakeHeld = true;
+            pause = undefined;
+          }
+        },
+      },
+      { max: 1, pollIntervalMs: 60_000, sweepRetriggerIntervalMs: 86_400_000 },
+    );
+    await runOneStarted;
+    pause = "operator pause during dispatch";
+    writeSweepWakeMarkerAtomic(path, {
+      deliveryId: "dispatch-event",
+      event: "check_run",
+      action: "completed",
+      repository: REPOSITORY,
+      receivedAtIso: "2026-09-02T09:00:01.000Z",
+    });
+    const timeout = new Promise<never>((_, reject) => {
+      const timer = setTimeout(() => reject(new Error(`dispatch wake did not retrigger; sweeps=${sweeps}`)), 2_000);
+      timer.unref();
+    });
+    await Promise.race([eventSweep, timeout]);
+    const summary = await Promise.race([running, timeout]);
+    assert.equal(summary.stopReason, "max_reached");
+    assert.equal(sweeps, 2, "one initial pass plus exactly one event-triggered pass");
+    assert.equal(readSweepWakeMarker(path), undefined, "the accepted event-triggered pass consumes the durable level");
+    const held = logs.find((row) => row.step === "daemon.sweep.retrigger_held");
+    assert.deepEqual(held?.extra, {
+      phase: "dispatch",
+      detail: "operator pause during dispatch",
+      trigger: "github-event",
+    });
+    const retrigger = logs.find((row) => row.step === "daemon.sweep.retriggered");
+    assert.deepEqual(retrigger?.extra, {
+      phase: "dispatch",
+      trigger: "github-event",
+      poll_interval_ms: 60_000,
+      interval_ms: 86_400_000,
+    });
+  } finally {
+    releaseRunOne();
+    wiring.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("Azure wiring mounts the webhook secret into serve only and documents exact-path commissioning", () => {
   const serve = readFileSync(join(REPO_ROOT, "deploy", "serve-container.sh"), "utf8");
   const recycle = readFileSync(join(REPO_ROOT, "deploy", "recycle-container.sh"), "utf8");
@@ -618,7 +721,7 @@ test("daemon SIGTERM cleanup closes the GitHub wake watcher before re-raising th
   try {
     const code = await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
       wireSweepWake: () => ({
-        sleep: async () => {},
+        sleep: async () => "timeout",
         acknowledge: () => {},
         close: () => { closes++; },
       }),
