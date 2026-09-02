@@ -86,6 +86,29 @@
     (vi) NOT IN SCOPE. Wiring the four recorded scripts (W1-T2732 owns the blanking one), fixing
     any violation they report, and any `src/` change. No `src/` path is declared and none may be
     added.
+
+    (vii) A PREREQUISITE (vi) DID NOT ANTICIPATE, MEASURED DURING THE BUILD.
+    `test/instrument-surface-completeness.test.ts` derives an instrument candidate from every
+    gate-rule-like path this tree's own workflows and `package.json` REFERENCE, and fails when one
+    is neither in `INSTRUMENT_SURFACE` nor excused in `INSTRUMENT_SURFACE_EXCLUSIONS`
+    (`src/lib/review.ts`). `scripts/unwired-gate-check.mjs` becomes such a path the moment its npm
+    script lands, so that row must exist FIRST or the suite reddens on main. It cannot ride in this
+    task's PR: `instrumentEntangled` sits directly in `judgeReview`'s `state === "failure"`
+    disjunction, and `detectInstrumentEntanglement` over the real staged diff reads
+    `entangled: true` — `.github/workflows/ci.yml` on the instrument side, `src/lib/review.ts` on
+    the product side. CONTROLLED BOTH WAYS: the identical file list without `src/lib/review.ts`
+    reads `false`, and adding an executable `src/lib/drain.ts` hunk reads `true`. So (vi) STANDS —
+    this task ships no `src/` path — and the row lands ahead of it as its own plan-free chore PR,
+    an EXCLUSION not a promotion, on the `scripts/worker-branch-shape.mjs` precedent. The two
+    trees were measured directly: 11/12 without the row, 12/12 with it.
+
+    ONE MORE THING THE BUILD FOUND, recorded because the design above states the opposite. Design
+    (i) says a script is wired if its basename APPEARS in a workflow file. That is wrong as
+    written: a text search over `.github/workflows/` credits a script named in a COMMENT, and this
+    task's own CI job comment named three sibling scripts, one of which the text form then reported
+    as newly wired. The shipped predicate PARSES each workflow with the `yaml` dependency and
+    counts only `run:`/`uses:`/`entrypoint:`/`args:`/`cmd:` values — `name:` fields are prose. A
+    comment is not an invocation.
   acceptance:
     - claim: "a gate-shaped script that no workflow and no npm script invokes is named with its path and refused, and the check exits non-zero"
       proof: "unit test: test/a-gate-shaped-instrument-that-nothing-invokes.test.ts"
