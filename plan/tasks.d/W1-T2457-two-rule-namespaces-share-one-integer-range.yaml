@@ -76,9 +76,13 @@
     ── Q3. THE THREE REMEDIES, PRICED — NONE PROPOSED AS AUTOMATIC ───────────────────────────────
 
     (a) NAME BOTH NAMESPACES IN CLAUDE.md's DECODING ROW. Documents the ambiguity; does not remove
-    it. COST MEASURED: the minimal sentence is 182 bytes and CLAUDE.md has 71 free against its cap
-    (67465 of 67536). IT DOES NOT FIT — short by 111 bytes — so it requires a fold first. Raising
-    the cap is out of scope by operator instruction.
+    it. COST MEASURED: the minimal sentence is 182 bytes. THE DOES-NOT-FIT BLOCKER IS RETIRED by W1-T2507
+    (2026-08-31), which moved capBytes downward from 67536 to 44000 by migrating content out of
+    CLAUDE.md rather than compressing what stayed. Re-measure headroom at implementation by running
+    `node scripts/claude-md-budget-ratchet.mjs` — it prints size AND cap together. The current cap is
+    recorded in `scripts/claude-md-budget-baseline.json` (capBytes field) and must remain the authority:
+    do not quote a frozen figure that goes stale on the next cap move. Raising the cap is out of scope
+    by operator instruction.
 
     (b) REQUIRE A NAMESPACE WORD AT EVERY CITATION, enforced by extending W1-T2456's guard. Removes
     the ambiguity at the point of reading. COST: 877 bare colliding citations, of which 478 are in
