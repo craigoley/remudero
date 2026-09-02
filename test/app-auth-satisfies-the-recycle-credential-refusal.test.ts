@@ -93,6 +93,7 @@ function runScript(opts: {
       HOME: process.env.HOME ?? "/tmp",
       RMD_CLAUDE_DIR: credDir,
       RMD_STATE_DIR: stateDir,
+      RMD_RECYCLE_DOCKERENV_PATH: join(stateDir, "no-dockerenv-marker"),
       ...(opts.shellEnv ?? {}),
     },
   });
