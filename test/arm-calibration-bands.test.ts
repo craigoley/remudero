@@ -1,8 +1,16 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { parse as parseYaml } from "yaml";
 
-import { decideAutoMergeArm, type ArmDecision, type CappedOverride } from "../src/lib/review.js";
-import { loadDefaultPolicy, type ArmCalibrationBandRow } from "../src/lib/policy.js";
+import { decideAutoMergeArm, resolveAutoMergeArm, type ArmDecision, type CappedOverride } from "../src/lib/review.js";
+import {
+  installPolicyPath,
+  loadDefaultPolicy,
+  PolicyError,
+  validatePolicy,
+  type ArmCalibrationBandRow,
+} from "../src/lib/policy.js";
 
 /**
  * test/arm-calibration-bands.test.ts — W1-T2579, THE ARM GATE'S OPERATOR-RATIFIED BAND TABLE.
@@ -48,6 +56,10 @@ function failedStateVerdict(): { state: "failure"; capped: boolean; planOnly: bo
 
 const SOME_OVERRIDE: CappedOverride = { by: "operator", reason: "manually reviewed, arming anyway" };
 
+function shippedPolicyRaw(): Record<string, unknown> {
+  return parseYaml(readFileSync(installPolicyPath(), "utf8")) as Record<string, unknown>;
+}
+
 // ── acceptance 1: absent/empty table ⇒ byte-identical to today, across EVERY path ────────────
 
 test("W1-T2579 acceptance 1: an absent band table (no 5th argument) is byte-identical to an explicit empty table, across every refusal and approval path", () => {
@@ -84,6 +96,25 @@ test("W1-T2579 acceptance 1 (real seam): the SHIPPED plan/policy.yaml carries an
   assert.deepEqual(withoutParam, withInjectedEmpty, "omitting the 5th argument must resolve through the real, shipped (empty) table");
 });
 
+test("W1-T2579 policy schema: malformed committed calibration-band rows fail closed with the exact offending path", () => {
+  const cases: Array<{ value: unknown; message: RegExp }> = [
+    { value: {}, message: /'armCalibrationBands' must be an array/ },
+    { value: ["full-pass"], message: /'armCalibrationBands\[0\]' must be a mapping/ },
+    { value: [{ class: "", verdict: "hold" }], message: /'armCalibrationBands\[0\]\.class' must be a non-empty string/ },
+    { value: [{ class: "full-pass", verdict: "disable" }], message: /'armCalibrationBands\[0\]\.verdict' must be "hold" or "notify"/ },
+    { value: [{ class: "full-pass", verdict: "notify", note: 42 }], message: /'armCalibrationBands\[0\]\.note' must be a string/ },
+  ];
+
+  for (const fixture of cases) {
+    const raw = shippedPolicyRaw();
+    raw.armCalibrationBands = fixture.value;
+    assert.throws(
+      () => validatePolicy(raw),
+      (error: unknown) => error instanceof PolicyError && fixture.message.test(error.message),
+    );
+  }
+});
+
 // ── acceptance 2: a ratified HOLD band refuses, naming its class ─────────────────────────────
 
 test("W1-T2579 acceptance 2: a ratified hold band on full-pass refuses the arm, naming the class", () => {
@@ -117,6 +148,15 @@ test("W1-T2579 acceptance 3: a notify band with no note still arms and names the
   const decision = decideAutoMergeArm(fullPassVerdict(), false, undefined, undefined, bands);
   assert.equal(decision.arm, true);
   assert.match(decision.reason, /calibration-band:full-pass notify\)/);
+});
+
+test("W1-T2579 acceptance 3 (real caller): resolveAutoMergeArm threads the ratified table into the single arm decision owner", () => {
+  const bands: ArmCalibrationBandRow[] = [{ class: "full-pass", verdict: "hold" }];
+  const logged: string[] = [];
+  const decision = resolveAutoMergeArm(fullPassVerdict(), false, undefined, (step) => logged.push(step), undefined, bands);
+  assert.equal(decision.arm, false);
+  assert.match(decision.reason, /calibration-band:full-pass/);
+  assert.deepEqual(logged, [], "a calibration hold is not a capped-override ledger event");
 });
 
 // ── acceptance 4: a band can never arm a verdict the existing refusals hold ──────────────────
