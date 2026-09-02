@@ -149,9 +149,11 @@
     misattribution fix and the citation guard); §12 Standing rule 21; W1-T2248.
 
     COUNT RE-MEASURED 2026-09-02 AND IT HAS DRIFTED. The title says THREE; the population is now
-    FOUR: W1-T2457 (design rule 19), W1-T2456 (design rule 15), W1-T2416 (design rule 17) and
-    W1-T2399 (design rule 8). The title is left exactly as filed — it names the incident this shard
-    was opened for, and editing it would rewrite that record rather than correct it.
+    FOUR: W1-T2457 (`design rule 19`), W1-T2456 (`design rule 15`), W1-T2416 (`design rule 17`) and
+    W1-T2399 (`design rule 8`). The title is left exactly as filed — it names the incident this shard
+    was opened for, and editing it would rewrite that record rather than correct it. These four are
+    QUOTED here on purpose, same as every other census below: an unquoted restatement would inflate
+    this shard's own self-count and desync it from the trap paragraph immediately below.
 
     ⚠ ONE TRAP FOR WHOEVER TAKES THIS, MEASURED. A naive `grep -raoE "[^\`]design rule [0-9]+"` over
     plan/ returns NINE, not four — because FIVE of the hits are inside THIS shard, which quotes the
