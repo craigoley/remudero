@@ -8,6 +8,7 @@ import { strict as assert } from "node:assert";
 import { test } from "node:test";
 
 import {
+  SUBJECT_PR_RE,
   type CreditEvidenceRow,
   gatherCreditEvidence,
   reconcileCreditEvidence,
@@ -76,6 +77,15 @@ test("the PR number is taken from the END of the subject, never a mid-sentence r
   assert.equal(subjectPrNumber("fix: follow up on #1234 after the revert (#4321)"), 4321);
   assert.equal(subjectPrNumber("chore: no pr reference here"), undefined);
   assert.equal(subjectPrNumber("fix: mentions (#12) mid-line and ends elsewhere"), undefined);
+});
+
+test("SUBJECT_PR_RE itself: the unhealthy arm (no match) is distinct from the healthy arm (a captured PR number)", () => {
+  // subjectPrNumber() wraps the regex, but that wrapper call alone leaves the regex's own two
+  // arms unexercised by identifier — drive SUBJECT_PR_RE.exec() directly, both ways.
+  // The unhealthy arm: no trailing PR reference, no match.
+  assert.equal(SUBJECT_PR_RE.exec("chore: no pr reference here"), null);
+  // The healthy arm: a captured PR number, distinguishable from the unhealthy null above.
+  assert.equal(SUBJECT_PR_RE.exec("feat(learnings): close the citation loop (W1-T419) (#1609)")?.[1], "1609");
 });
 
 test("an anchored trailer is required — a mention inside prose is not credit", () => {
