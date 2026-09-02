@@ -216,7 +216,15 @@ jobs:
           if [ "$CLASS" = "SOURCE" ]; then
             echo "CI sharding: class=SOURCE — running test shard ${{ matrix.shard }}/4."
             set +e
-            npm run test:ci -- --test-shard=${{ matrix.shard }}/4 2>&1 | tee test-shard-output.log
+            # Node stops parsing runtime options at the first positional test pattern. npm appends
+            # `--` arguments after package.json's existing `test/**/*.test.ts` pattern, so the old
+            # `npm run test:ci -- --test-shard=...` ran the WHOLE suite in every matrix member: all
+            # four live #3609 jobs reported the same 12,752 tests. Invoke the same retry wrapper
+            # directly so `--test-shard` reaches Node BEFORE the positional pattern.
+            node scripts/test-with-retry.mjs \
+              node --test --test-shard=${{ matrix.shard }}/4 \
+              --import tsx --import ./test/setup/tmp-hygiene.ts "test/**/*.test.ts" \
+              2>&1 | tee test-shard-output.log
             CODE="${PIPESTATUS[0]}"
             set -e
             if [ "$CODE" -ne 0 ] && ! grep -qE '^# tests [0-9]+' test-shard-output.log; then

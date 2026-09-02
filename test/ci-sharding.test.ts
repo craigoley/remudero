@@ -25,7 +25,13 @@ test('ci sharding: all four shards run through the retry harness and collapse to
   assert.deepEqual(shards.strategy?.matrix?.shard, [1, 2, 3, 4]);
   assert.equal(shards.strategy?.['fail-fast'], false, 'one red shard must not cancel evidence from its siblings');
   assert.equal(shards.name, 'ci-shard (${{ matrix.shard }}/4)');
-  assert.match(runBodies('ci'), /npm run test:ci -- --test-shard=\$\{\{ matrix\.shard \}\}\/4/);
+  const ciRuns = runBodies('ci');
+  assert.match(ciRuns, /node scripts\/test-with-retry\.mjs\s+\\\s+node --test --test-shard=\$\{\{ matrix\.shard \}\}\/4[\s\S]*"test\/\*\*\/\*\.test\.ts"/);
+  assert.doesNotMatch(
+    ciRuns,
+    /"test\/\*\*\/\*\.test\.ts"[^\n]*--test-shard/,
+    'Node runtime options after the positional test glob are file patterns, so every matrix member would run the full suite',
+  );
 
   const required = workflow.jobs['ci-required'];
   assert.equal(required.name, 'ci');

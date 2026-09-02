@@ -662,7 +662,7 @@ export interface PredicateFailure {
   detail: string;
 }
 
-export type InboxState = "ready" | "not_ready" | "deferred_with_trigger" | "ratified" | "drafting" | "retired";
+export type InboxState = "ready" | "not_ready" | "deferred_with_trigger" | "ratified" | "drafting" | "retired" | "declined";
 
 export interface InboxClassification {
   proposalId: string;
@@ -684,6 +684,11 @@ export interface InboxClassification {
    *  finding existed and why it went moot, never a silent drop (retirement is a state, never a
    *  deletion — the proposal itself stays in the registry unchanged). */
   retiredReason?: string;
+  /** W1-T2604: present iff state === "declined" — the operator-supplied reason a `POST
+   *  /v1/inbox/decline` call recorded, never inferred from the proposal's own title/summary
+   *  prose. Declining, like retiring, is a state, never a deletion: the proposal stays in the
+   *  registry unchanged, it just can never classify ready/not_ready/deferred/drafting again. */
+  declinedReason?: string;
   /** W1-T2451: true iff this proposal names a board-review referent (has an
    *  {@link Proposal.originatingItemId}) whose current state could not be determined this pass —
    *  either the whole batched {@link BoardReferentRead} failed, or this proposal's own id was
@@ -716,6 +721,21 @@ export interface ReadinessContext {
    * fixes is exactly a registry entry that drifted from an already-ledgered `ratify.approved`.
    */
   isRatified: (proposalId: string) => boolean;
+  /**
+   * W1-T2604: the ledger's own answer to "has an operator explicitly DECLINED this proposal,
+   * and why?" — returns the recorded reason string when a `panel.proposal_declined` ledger
+   * line already exists for this proposal id, `undefined` otherwise. Checked immediately after
+   * {@link isRatified}, for the identical reason: a decline is an OPERATOR ACT, ledgered once
+   * at decline time, and is the ONE authoritative receipt — never re-derived from the
+   * proposal's own registry entry, and NEVER inferred from its title/summary prose (a keyword
+   * rule would let a worker retire its own proposal by phrasing, exactly the authority
+   * boundary this predicate exists to hold). OPTIONAL, exactly like {@link boardReferents}/
+   * {@link draftSpawnedAt}'s own optional siblings — every existing fixture/caller that never
+   * had a reason to think about a decline is unaffected (a proposal is simply never declined
+   * from their point of view). Real implementations derive this from
+   * {@link declinedReasonInLedger} over `readLedgerLines(ledgerPath)`.
+   */
+  isDeclined?: (proposalId: string) => string | undefined;
   /**
    * W1-T2451: the ONE batched read of every board-review referent's current state this
    * classification pass — never a per-proposal read. Optional, exactly like
@@ -770,6 +790,29 @@ export interface ReadinessContext {
  */
 export function isRatifiedInLedger(ledgerLines: { step?: unknown; task_id?: unknown }[], proposalId: string): boolean {
   return ledgerLines.some((l) => l.step === "ratify.approved" && l.task_id === proposalId);
+}
+
+/**
+ * W1-T2604: the ledger's own answer to "has an operator declined this proposal, and why?" —
+ * the predicate {@link ReadinessContext.isDeclined} wraps in the real runner. `POST
+ * /v1/inbox/decline` (lib/panel-graph.ts) appends exactly one `panel.proposal_declined` line
+ * per decline, carrying the operator's `reason` verbatim; this is the ONE place that ledger
+ * line is read back. Mirrors {@link isRatifiedInLedger}'s own "the ledger is the one
+ * authoritative receipt, re-derived on every read" discipline — a decline is never trusted
+ * from (or written to) the registry's own copy of the proposal. The LATEST matching line wins
+ * on the (never expected) chance a proposal is declined more than once, so the most recent
+ * operator reason is always what renders.
+ */
+export function declinedReasonInLedger(
+  ledgerLines: { step?: unknown; task_id?: unknown; reason?: unknown }[],
+  proposalId: string,
+): string | undefined {
+  let reason: string | undefined;
+  for (const l of ledgerLines) {
+    if (l.step !== "panel.proposal_declined" || l.task_id !== proposalId) continue;
+    reason = typeof l.reason === "string" ? l.reason : "declined by an operator";
+  }
+  return reason;
 }
 
 /**
@@ -957,6 +1000,17 @@ export function classifyProposal(
   // what heals an EXISTING drifted entry, since it never trusts a stored flag at all.
   if (ctx.isRatified(proposal.id)) {
     return { proposalId: proposal.id, state: "ratified", reasons: [] };
+  }
+  // W1-T2604: an operator's decline is checked next, unconditionally, and OVERRIDES every
+  // predicate below (including the trigger check and the board-referent check that follows) —
+  // a declined proposal is deliberately never re-offered as ready/not_ready/deferred/drafting
+  // again, no matter what its own registry entry, draft cache, or evidence anchors say. This is
+  // the read-side half of "the console inbox can only say yes": the decline is recorded ONCE,
+  // in the ledger, by an explicit operator act (`POST /v1/inbox/decline`) — never inferred here
+  // from the proposal's own title/summary, which a worker writes and never ratifies.
+  const declinedReason = ctx.isDeclined?.(proposal.id);
+  if (declinedReason !== undefined) {
+    return { proposalId: proposal.id, state: "declined", reasons: [], declinedReason };
   }
   // W1-T2451: a board-review proposal's referent is checked next, before drafting/trigger/the
   // four AND-clauses below. RESOLVED (the referent left the open board) is a terminal override,
@@ -1438,10 +1492,12 @@ export function renderInbox(classifications: InboxClassification[]): string {
   const ratified = classifications.filter((c) => c.state === "ratified");
   const drafting = classifications.filter((c) => c.state === "drafting");
   const retired = classifications.filter((c) => c.state === "retired");
+  const declined = classifications.filter((c) => c.state === "declined");
 
   lines.push(
     `rmd inbox: ${ready.length} READY, ${notReady.length} not ready, ${deferred.length} deferred-with-trigger, ` +
-      `${drafting.length} drafting, ${ratified.length} already ratified, ${retired.length} retired.`,
+      `${drafting.length} drafting, ${ratified.length} already ratified, ${retired.length} retired, ` +
+      `${declined.length} declined.`,
   );
   for (const c of ready) {
     lines.push("");
@@ -1488,6 +1544,13 @@ export function renderInbox(classifications: InboxClassification[]): string {
   for (const c of retired) {
     lines.push("");
     lines.push(`RETIRED — ${c.proposalId} (${c.retiredReason ?? "referent resolved"})`);
+  }
+  // W1-T2604: a declined proposal is named here, not silently dropped — declining is a state,
+  // never a deletion, mirroring RETIRED immediately above (the two "state, never delete"
+  // families this codebase now has, each with its own reason field and its own trigger).
+  for (const c of declined) {
+    lines.push("");
+    lines.push(`DECLINED — ${c.proposalId} (${c.declinedReason ?? "declined by an operator"})`);
   }
   return lines.join("\n");
 }
@@ -2218,6 +2281,9 @@ export function refusalReason(c: InboxClassification): string {
   }
   if (c.state === "retired") {
     return `${c.proposalId} is RETIRED (${c.retiredReason ?? "referent resolved"}) — never approvable`;
+  }
+  if (c.state === "declined") {
+    return `${c.proposalId} is DECLINED (${c.declinedReason ?? "declined by an operator"}) — never approvable`;
   }
   if (c.state === "deferred_with_trigger") {
     return `${c.proposalId} is DEFERRED-WITH-TRIGGER (trigger not fired: ${c.trigger?.description ?? "unnamed trigger"}) — never approvable`;

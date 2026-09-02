@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
@@ -263,7 +263,7 @@ export function shellOut(
   label: string,
   file: string,
   args: string[],
-  opts?: { cwd?: string; input?: string; stream?: boolean },
+  opts?: { cwd?: string; input?: string; stream?: boolean; env?: NodeJS.ProcessEnv },
 ): CiParityLeafResult {
   const res = spawn(file, args, opts);
   // A child that produced NO exit status is not an ordinary failure, and rendering it as
@@ -382,9 +382,17 @@ function changedFilesListPath(repoRoot: string, spawn: PreflightSpawn): string {
  * (W1-T255) — a flaky test gets the SAME one-shot retry locally that CI gives it, instead of
  * failing a local run on a flake CI itself would have gone green on.
  */
+export function coverageScratchDir(repoRoot: string): string {
+  return join(repoRoot, "coverage", "tmp");
+}
+
 function testWithCoverageLeaf(repoRoot: string, spawn: PreflightSpawn, lcovPath: string): CiParityLeafResult {
   try {
     mkdirSync(join(repoRoot, "coverage"), { recursive: true });
+    // CLEARED, NOT JUST CREATED. The runner removes its scratch on a normal exit; this is what
+    // bounds the ABNORMAL one, so a killed run's leftovers cannot accumulate across runs.
+    rmSync(coverageScratchDir(repoRoot), { recursive: true, force: true });
+    mkdirSync(coverageScratchDir(repoRoot), { recursive: true });
   } catch {
     // best-effort — a spawn injected by a test may point repoRoot at a fixture that
     // doesn't need a real coverage/ directory at all.
@@ -415,7 +423,23 @@ function testWithCoverageLeaf(repoRoot: string, spawn: PreflightSpawn, lcovPath:
     // writing per-file progress lines the whole time and a non-streamed call would buffer every
     // one of them. Nothing reads this step's stdout as data: the lcov it produces goes to
     // `lcovPath` on disk, which every caller's later steps read from there.
-    { cwd: repoRoot, stream: true },
+    // KEEP THE RUNNER'S OWN COVERAGE SCRATCH INSIDE THE REPO. `--experimental-test-coverage` makes
+    // the test runner allocate `mkdtemp(join(tmpdir(), "node-coverage-"))` for its children and
+    // remove it only on a NORMAL exit, so every killed run leaks one. Measured on this host: 6.0G
+    // in a single leaked directory, and enough of them filled a 29G root to 100% — which then
+    // corrupted a later gate that died on ENOSPC with no `# tests` summary while reporting four
+    // failures that were artefacts of the full disk rather than of any diff.
+    //
+    // ⚠ `NODE_V8_COVERAGE` DOES NOT MOVE IT, and that is worth stating because it is the obvious
+    // guess and it is wrong: MEASURED, with the variable set to a repo path the runner STILL wrote
+    // under `/tmp` and never created the named directory — it overrides the variable for the
+    // children it spawns. `TMPDIR` is the lever that actually relocates it (same probe, control on
+    // both sides: without it 1 directory under /tmp and 0 under the target; with it, 0 and 1).
+    //
+    // Pointed at `coverage/` — already gitignored, already this step's artefact directory — a leak
+    // lands somewhere bounded, visible and owned by the repo instead of on the host's root
+    // filesystem, and `coverageScratchDir` clears it before each run so leaks cannot accumulate.
+    { cwd: repoRoot, stream: true, env: { TMPDIR: coverageScratchDir(repoRoot) } },
   );
 }
 

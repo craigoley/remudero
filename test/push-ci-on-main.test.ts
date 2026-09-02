@@ -68,8 +68,8 @@ test("W1-T1033: the ci workflow runs the suite on a push to main", async () => {
 
   const runs = (ci!.steps ?? []).map((s) => s.run).filter((r): r is string => typeof r === "string");
   assert.ok(
-    runs.some((r) => r.includes("npm run test:ci -- --test-shard=${{ matrix.shard }}/4")),
-    "the `ci` matrix must run every test shard through npm's existing retry entry point — that is what a push run observes",
+    runs.some((r) => /node scripts\/test-with-retry\.mjs\s+\\\s+node --test --test-shard=\$\{\{ matrix\.shard \}\}\/4/.test(r)),
+    "the `ci` matrix must put the shard option before the positional test glob while retaining the existing retry harness — that is what a push run observes",
   );
 
   // The job body itself must stay push-safe: zero references to PR-scoped context that would be
