@@ -286,6 +286,7 @@ test("W1-T2269: arming (or not arming) the credential refresh changes NOTHING ab
     "/v1/drain/run",
     "/v1/inbox/approve",
     "/v1/manual/approve",
+    "/v1/merge-hold",
     "/v1/policy/provider-routing",
     "/v1/policy/provider-routing/clear",
     "/v1/skills/run",

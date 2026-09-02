@@ -51,6 +51,7 @@ import { readLedgerLines, DEFAULT_LIVENESS_BOUND_MS, type LedgerReader } from ".
 import { deriveLastPoll } from "./daemon-health.js";
 import { deriveThreadId, readThread, appendThreadMessage, type ThreadIdentity } from "./inbox-thread.js";
 import { captureFeedback } from "./feedback.js";
+import { applyOperatorMergeHold, type OperatorMergeHoldAction } from "./operator-merge-hold.js";
 import {
   interpretReply,
   formatClarifyingQuestion,
@@ -961,6 +962,75 @@ export function buildDrainNowRoute(deps: Pick<PanelActionDeps, "root" | "ledgerP
   };
 }
 
+// ── POST /v1/merge-hold ─────────────────────────────────────────────────────
+
+interface ConsoleMergeHoldInput {
+  action: OperatorMergeHoldAction;
+  reason: string;
+  prNumber?: number;
+  taskId?: string;
+}
+
+/** Strict route-body parser. Identity is deliberately absent: the authenticated bearer is the
+ * only source of `by`, so a browser payload can never spoof the operator recorded by the durable
+ * production writer. */
+function validateConsoleMergeHold(body: unknown): { error: string } | ConsoleMergeHoldInput {
+  if (!isRecord(body)) return { error: "body must be a JSON object" };
+  const allowed = new Set(["action", "reason", "prNumber", "taskId"]);
+  const unknown = Object.keys(body).find((key) => !allowed.has(key));
+  if (unknown) return { error: `unknown field ${JSON.stringify(unknown)}` };
+  if (body.action !== "engage" && body.action !== "release") {
+    return { error: "action must be `engage` or `release`" };
+  }
+  if (typeof body.reason !== "string" || !body.reason.trim()) {
+    return { error: "reason must be a non-empty string" };
+  }
+  if (
+    body.prNumber !== undefined &&
+    (typeof body.prNumber !== "number" || !Number.isSafeInteger(body.prNumber) || body.prNumber <= 0)
+  ) {
+    return { error: "prNumber must be a positive integer" };
+  }
+  if (body.taskId !== undefined && (typeof body.taskId !== "string" || !/^W1-T\d+$/.test(body.taskId))) {
+    return { error: "taskId must be a W1-T<n> id" };
+  }
+  if (body.taskId !== undefined && body.prNumber === undefined) {
+    return { error: "taskId is valid only for a PR-scoped hold" };
+  }
+  return {
+    action: body.action,
+    reason: body.reason.trim(),
+    ...(body.prNumber !== undefined ? { prNumber: body.prNumber } : {}),
+    ...(body.taskId !== undefined ? { taskId: body.taskId } : {}),
+  };
+}
+
+/**
+ * Apply or release the EXISTING durable operator merge hold. HIGH tier means service.ts consumes
+ * a fresh exact-payload confirmation nonce before this handler can parse or write anything.
+ * Releasing only removes the refusal; this route never arms or performs a merge.
+ */
+export function buildMergeHoldRoute(deps: Pick<PanelActionDeps, "ledgerPath">): Route {
+  return {
+    method: "POST",
+    path: "/v1/merge-hold",
+    scope: "write",
+    tier: "high",
+    handler: jsonAction(validateConsoleMergeHold, (input, req, res) => {
+      const by = bearerTokenId(req);
+      if (by === "unknown") {
+        sendJson(res, 403, { error: "bearer_provenance_required" });
+        return;
+      }
+      const result = applyOperatorMergeHold(deps.ledgerPath, {
+        ...input,
+        by,
+      });
+      sendJson(res, 200, result);
+    }),
+  };
+}
+
 /**
  * Every panel write route, for a caller registering the full set at once.
  *
@@ -993,6 +1063,7 @@ export function buildPanelActionRoutes(deps: PanelActionDeps): Route[] {
     buildDrainFeedbackRoute(deps),
     buildKickRoute(deps),
     buildDrainNowRoute(deps),
+    buildMergeHoldRoute(deps),
   ];
 }
 

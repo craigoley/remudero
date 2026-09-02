@@ -43,7 +43,7 @@ import { bearerTokenId } from "./panel-actions.js";
 import type { LastSeenStore } from "./last-seen.js";
 import { buildRecapEvents, type RecapEvent } from "./recap.js";
 import { computeGlanceSpend, type GlanceSpend } from "./glance.js";
-import { buildStatusBoard, type BlockedPrBlocker } from "./status-board.js";
+import { buildStatusBoard, type BlockedPrBlocker, type MergeHeldRow } from "./status-board.js";
 
 /** Ledger poll pace for the SSE stream — comfortably under the 2s acceptance budget. */
 export const DEFAULT_POLL_MS = 250;
@@ -182,11 +182,17 @@ export interface BoardSnapshot {
    * the counts and rows can never disagree") rather than a second fetch the way NEEDS ME's
    * feedback/inbox rows arrive. Sourced VERBATIM from status-board.ts's `buildStatusBoard`
    * (its own `blockers.rows`, filtered to `kind === "blocked_pr"`) — see
-   * {@link deriveBoardBlockedPrs} — NEVER a second derivation over the ledger; status-board.ts
+   * {@link deriveBoardStatusSections} — NEVER a second derivation over the ledger; status-board.ts
    * itself is unread by this task. Always an array (`[]`, never `undefined`), so a render never
    * has to special-case "not fetched yet" — exactly like {@link tasks} above.
    */
   blockedPrs: BlockedPrBlocker[];
+  /**
+   * W1-T2719: the currently-standing operator merge holds from status-board.ts's production
+   * reader. They ride the same atomic snapshot and the same already-parsed ledger lines as
+   * {@link blockedPrs}; the console never re-derives a hold from checks or UI state.
+   */
+  mergeHeld: MergeHeldRow[];
   /**
    * W1-T1006 design (iii): set ONLY when live GitHub state could not be checked THIS render (no
    * reachable gateway, or the gateway's own read failed) — carried straight through from
@@ -266,10 +272,10 @@ function lastActivityByTask(lines: Array<Record<string, unknown>>): Map<string, 
  */
 const BLOCKED_PR_ROOT_SENTINEL = "/nonexistent-rmd-board-root";
 
-function deriveBoardBlockedPrs(
+function deriveBoardStatusSections(
   deps: BoardDeps,
   lines: Array<Record<string, unknown>>,
-): { blockedPrs: BlockedPrBlocker[]; blockedPrsUnverifiedReason?: string } {
+): { blockedPrs: BlockedPrBlocker[]; blockedPrsUnverifiedReason?: string; mergeHeld: MergeHeldRow[] } {
   const model = buildStatusBoard(BLOCKED_PR_ROOT_SENTINEL, deps.ledgerPath, {
     queryService: () => ({ running: false, pid: null }),
     repoDir: BLOCKED_PR_ROOT_SENTINEL,
@@ -282,7 +288,11 @@ function deriveBoardBlockedPrs(
     readDraftCache: () => ({}),
   });
   const blockedPrs = model.blockers.rows.filter((r): r is BlockedPrBlocker => r.kind === "blocked_pr");
-  return { blockedPrs, blockedPrsUnverifiedReason: model.blockers.blockedPrsUnverifiedReason };
+  return {
+    blockedPrs,
+    blockedPrsUnverifiedReason: model.blockers.blockedPrsUnverifiedReason,
+    mergeHeld: model.needsMe.mergeHeld,
+  };
 }
 
 /**
@@ -340,7 +350,7 @@ export function computeBoardSnapshot(deps: BoardDeps): BoardSnapshot {
   // so "0 merged" is never rendered as fact during an outage.
   const github_unreachable = safeReadFailed(deps.github);
   const now = deps.now ?? Date.now;
-  const { blockedPrs, blockedPrsUnverifiedReason } = deriveBoardBlockedPrs(deps, lines);
+  const { blockedPrs, blockedPrsUnverifiedReason, mergeHeld } = deriveBoardStatusSections(deps, lines);
   return {
     generated_at: new Date().toISOString(),
     github_unreachable,
@@ -349,6 +359,7 @@ export function computeBoardSnapshot(deps: BoardDeps): BoardSnapshot {
     tasks,
     blockedPrs,
     blockedPrsUnverifiedReason,
+    mergeHeld,
   };
 }
 
