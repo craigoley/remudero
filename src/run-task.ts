@@ -15,8 +15,7 @@ import {
   DISK_FAIL_BYTES,
   humanBytes,
   type MemInfo,
-  // W1-T2627 — the worktree-base arm's pure classifier and its already-classified row shape,
-  // called from the I/O shell below with a real readWorktreeBase/git read.
+  // W1-T2627 — the worktree-base arm's pure classifier, called below with a real git read.
   classifyWorktreeBase,
   type WorktreeBaseRow,
 } from "./lib/doctor.js";
@@ -24987,36 +24986,27 @@ export function readCheckoutDepth(cwd: string): { shallow: boolean; commitCount:
   }
 }
 
-/**
- * W1-T2627 — `git rev-parse HEAD` run INSIDE the worktree itself, never against `repoRoot` (the
- * canonical checkout `doctorCommand` otherwise reads from): a live run's worktree can belong to a
- * different managed repo than the one this rmd install runs from, but a linked worktree always
- * carries its own working HEAD, so scoping the read to `worktreePath` is correct for every repo at
- * once. Best-effort — `undefined` on any failure, which {@link classifyWorktreeBase} reads as
- * `base-unknown`, never as a healthy or contaminated answer.
- */
+/** W1-T2627 — `git rev-parse HEAD` run INSIDE `worktreePath`, never `repoRoot` (a live run's
+ *  worktree can belong to a different managed repo). Best-effort: {@link classifyWorktreeBase}
+ *  reads any failure as `base-unknown`, never as a healthy or contaminated answer. */
 function defaultReadWorktreeHead(worktreePath: string): string | undefined {
   try {
     return execFileSync("git", ["rev-parse", "HEAD"], { cwd: worktreePath, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
   } catch {
+    // no git, no worktree, or an unreadable HEAD — undefined, never a guessed commit (fail-safe).
     return undefined;
   }
 }
 
-/**
- * W1-T2627 — `git merge-base --is-ancestor <base> <head>`, scoped to the SAME worktree the base
- * and head were read from (a linked worktree shares its cut repo's object database, so both
- * commits are always reachable there — never `repoRoot`, for the identical multi-repo reason
- * {@link defaultReadWorktreeHead} states). Exit 0 is "yes"; exit 1 is a REAL "no", the one case
- * `classifyWorktreeBase` reports as `unrelated`; any other failure (no git, an unreadable object,
- * a base whose commit no longer exists) is `undefined` — a failed read, never promoted to
- * `unrelated`, on the fail-safe direction `classifyWorktreeBase`'s own doc names.
- */
+/** W1-T2627 — `git merge-base --is-ancestor <base> <head>`, scoped to the SAME worktree (its
+ *  object database holds both commits). Exit 0 is "yes"; exit 1 is a real "no" (`unrelated`); any
+ *  other failure is `undefined` — never promoted to `unrelated`, per `classifyWorktreeBase`. */
 function defaultIsWorktreeBaseAncestor(worktreePath: string, base: string, head: string): boolean | undefined {
   try {
     execFileSync("git", ["merge-base", "--is-ancestor", base, head], { cwd: worktreePath, stdio: ["ignore", "pipe", "pipe"] });
     return true;
   } catch (e) {
+    // exit 1 is a genuine "no"; anything else (no git, unreadable object, status: null) is unresolved.
     return (e as { status?: number | null }).status === 1 ? false : undefined;
   }
 }
@@ -25031,8 +25021,7 @@ export interface DoctorDeps {
   readLedgerLines?: (path: string) => Array<Record<string, unknown>>;
   loadPlan?: () => Plan | undefined;
   liveInflightRuns?: (dir: string) => LiveInflightRun[];
-  /** W1-T2627 — defaults to the real {@link readWorktreeBase} (worker.ts), the base record's
-   *  first production reader. */
+  /** W1-T2627 — defaults to the real {@link readWorktreeBase} (worker.ts), the base record's first production reader. */
   readWorktreeBase?: (worktreePath: string) => string | null;
   /** W1-T2627 — defaults to {@link defaultReadWorktreeHead}. */
   readWorktreeHead?: (worktreePath: string) => string | undefined;
@@ -25093,11 +25082,9 @@ export async function doctorCommand(rest: string[], deps: DoctorDeps = {}): Prom
   const liveIds = new Set(live.map((r) => r.taskId));
   const dead = lockFiles.filter((f) => !liveIds.has(f));
 
-  // W1-T2627 — the worktree-base record's first production reader. `addLaneWorktree` (this file)
-  // always names a live run's branch `run-<runId>` and its worktree `<worktreesDir>/run-<runId>`,
-  // so both are re-derived here from `runId` alone rather than threaded through LiveInflightRun.
-  // `readWorktreeBase`/the head read/the ancestry check are each scoped to THAT worktree, never to
-  // `repoRoot`, so a live run under a different managed repo classifies correctly too.
+  // W1-T2627 — the worktree-base record's first production reader. `addLaneWorktree` always names
+  // a live run's branch `run-<runId>` and worktree `<worktreesDir>/run-<runId>`, re-derived here
+  // from `runId` alone; every read below is scoped to THAT worktree, never `repoRoot`.
   const worktreeBases: WorktreeBaseRow[] = live.map((r) => {
     const branch = `run-${r.runId}`;
     const worktreePath = join(worktreesDir(config), branch);
