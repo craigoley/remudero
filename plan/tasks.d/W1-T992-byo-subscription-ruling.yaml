@@ -191,3 +191,21 @@
     refs/rmd-id/W1-T992`, readback equal and nonce matched. THE GATE WAS PROVEN ARMED ON THE SAME
     INVOCATION: a plain push of a fresh orphan at the already-taken refs/rmd-id/W1-T991 returned RC=1
     with `! [rejected]` and left that ref unchanged at 4199ec88ee408c6773b68dbe95b56244356f2d10.
+
+    PREMISE VERIFICATION, 2026-09-02 (session-recorded at the operator's instruction; not a ruling,
+    decides nothing). Both open questions in rationale (6) were re-read against Anthropic's primary
+    Claude Code pages; the quotations and their page paths live in DECISIONS.md's 2026-09-02
+    VERIFICATION entry. (b) METERING: no primary page states a separate headless/SDK pool. The
+    legal-and-compliance page says advertised Pro/Max limits "assume ordinary, individual usage of
+    Claude Code and the Agent SDK", the authentication page says a setup-token "authenticates with
+    your Claude subscription", and the SDK cost-tracking page describes subscription turns "within
+    your plan's included usage". The separate-pool premise the 2026-09-01 direction refresh boxed is
+    search-sourced only. (a) THIRD-PARTY HOST: the legal-and-compliance page now addresses it — a
+    platform may host the UNMODIFIED Claude Code binary that each end user signs into with their own
+    subscription, under the Commercial Terms, while third-party developers "may not collect, store,
+    or intermediate Claude.ai credentials or session tokens", and per the Agent SDK overview an agent
+    built on the Agent SDK needs prior approval to offer claude.ai login or rate limits. THE
+    DISTINCTION THIS SHARD DID NOT DRAW: the fleet's workers are Agent SDK calls (`query()` from
+    `@anthropic-ai/claude-agent-sdk` in src/lib/worker.ts), not the bare binary, so the customer
+    shape in (6)(a) is the prior-approval case and the docs' own pointer for it is "contact sales".
+    Both questions stay OPEN and stay the operator's to put to Anthropic; nothing here answers them.

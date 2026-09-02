@@ -1,0 +1,74 @@
+- id: W1-T2601
+  title: "THE FOLLOW-UP RETIREMENT ARM IS BUILT, TESTED AND UNCALLED, SO THE PROPOSAL REGISTRY CAN ONLY GROW — retireSettledFollowups (src/lib/retro.ts, W1-T2563) has ZERO production call sites while its producer routeFollowupsToRegistry has eleven references and runs every retro; MEASURED 2026-09-02: 351 proposals, every one followup-prefixed, against 317 two hours earlier and 16 two days before that, with 52 classified READY and never ratified"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 12.00
+  files: [src/run-task.ts, test/the-followup-retirement-arm-has-a-call-site.test.ts]
+  origin: "inbox#followup-retirement-arm-uncalled-2026-09-02"
+  plan_refs: ["W1-T2563", "W1-T2458", "W1-T2591", "W1-T2455"]
+  status: queued
+  attempts: 0
+  rationale: |
+    ── MEASURED, WITH THE CONTROL THAT MAKES THE ZERO A MEASUREMENT ────────────────────────────
+
+    `retireSettledFollowups` is exported from `src/lib/retro.ts`, carries a full doc, and has its
+    own test file. Its references in `src/` are exactly TWO: its own definition and one `{@link}`
+    inside a neighbouring comment. CONTROL: its producer `routeFollowupsToRegistry` has ELEVEN
+    references in `src/` and a live call site in `retroCommand`. So the producer runs every retro
+    and the counterpart never runs at all.
+
+    THE CONSEQUENCE IS ARITHMETIC. The registry is append-only in practice: 16 proposals on
+    2026-08-30, 317 on 2026-09-01, 351 two hours later — every one `followup:`-prefixed. 52 of them
+    now classify READY and none has been ratified, so the inbox an operator is meant to act on is
+    a list that only lengthens.
+
+    ⚠ THIS IS NOT AN OVERSIGHT TO SCOLD, AND THE FILING SAYS SO BECAUSE THE NEXT READER WILL WANT
+    TO. W1-T2563's declared `files:` are `[src/lib/retro.ts, test/routed-followups-retire.test.ts]`.
+    The call site belongs in `src/run-task.ts`, OUTSIDE that scope — a builder who added it would
+    have widened its own declared scope, which the filing gate refuses. Stopping at the seam was
+    correct. What is missing is the follow-on task, which is this one.
+
+    ── THE FAILURE DIRECTION IS THE WHOLE DESIGN ───────────────────────────────────────────────
+
+    Retirement REMOVES entries from the registry, so the read it is handed must fail toward NOT
+    retiring. `FollowupReferentRead` is `{kind:"ok", merged}` or `{kind:"unreadable"}`, and
+    `retireSettledFollowups` returns `[]` on unreadable without even opening the registry.
+
+    THE CALL SITE THEREFORE DEFAULTS TO `unreadable` AND ONLY BECOMES `ok` INSIDE THE BLOCK THAT
+    PROVES `projectPlan` RETURNED. An absent `plan/tasks.yaml`, or a projection that throws, leaves
+    it unreadable — the existing `catch` already degrades that scan to a console line, and this must
+    degrade with it rather than treating a failed scan as "nothing has merged".
+
+    THE MERGED SET IS THE ONE THE PLAN-HEALTH SWEEP ALREADY COMPUTES, never a second read of the
+    same surfaces. Two independent reads of "what has merged" is two things to drift, and the
+    projection is already the repo's own credit union (trailer, branch name, ledger).
+
+    ── PLACEMENT ──────────────────────────────────────────────────────────────────────────────
+
+    AFTER the producer, so this pass's own freshly-routed candidates are not judged against a
+    merged set derived before they existed. It sits somewhat further down `retroCommand` than the
+    producer only because `runId`/`log` are declared there and a SILENT retirement would be worse
+    than a well-placed one — the `--dry-run` branch has already returned far above, so the call is
+    still real-run-only and a preview still writes nothing.
+
+    ⚠ THE FALSE-POSITIVE RISK IS INHERITED, NAMED, AND NOT RE-LITIGATED HERE. `retireSettledFollowups`
+    already states it: a task can merge while leaving real follow-up work undone, and this signal
+    cannot tell that candidate apart from a settled one. That trade was made and documented by
+    W1-T2563; this task wires the arm, it does not re-decide the predicate.
+
+    NOT IN SCOPE: the retirement predicate itself (W1-T2563), the producer's own cap-free append
+    (W1-T2591 records that separately), and the drafted-slug dedup (W1-T2455).
+
+  acceptance:
+    - claim: "the retirement arm has a production call site and runs against the same registry as its producer"
+      proof: "unit test: test/the-followup-retirement-arm-has-a-call-site.test.ts"
+    - claim: "the referent read defaults to unreadable and becomes ok only after the projection returns"
+      proof: "unit test: test/the-followup-retirement-arm-has-a-call-site.test.ts"
+    - claim: "a routed follow-up whose originating task merged is removed while a live one stays"
+      proof: "unit test: test/the-followup-retirement-arm-has-a-call-site.test.ts"
+    - claim: "an unreadable read retires nothing and never opens the registry for writing"
+      proof: "unit test: test/the-followup-retirement-arm-has-a-call-site.test.ts"

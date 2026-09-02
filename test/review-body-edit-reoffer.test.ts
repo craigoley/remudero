@@ -111,47 +111,46 @@ test("reviewVerdictOvertakenByActivity fails CLOSED on missing or unparseable ti
   );
 });
 
-// ── acceptance 2 & 3: the shared budget, never a new threshold ───────────────────────────────
+// ── acceptance 2 & 3: an unchanged-input bound, never a lifetime PR budget ───────────────────
 
-test("the re-offer shares policy.reviewOrphanCap with the OTHER re-offer reasons — no new threshold is minted", () => {
-  // One shy of the cap — regardless of WHICH prior re-offer reason spent those orphans — still
-  // gets re-offered.
+test("the re-offer uses the existing policy threshold for repeated judgments of the same input", () => {
+  // One shy of the cap for this exact input still gets re-offered.
   const underCap = deriveDisposition(
-    failedReviewPr({ priorReviewOrphans: DEFAULT_SWEEP_POLICY.reviewOrphanCap - 1 }),
+    failedReviewPr({ priorReviewAttemptsForInput: DEFAULT_SWEEP_POLICY.reviewOrphanCap - 1 }),
     DEFAULT_SWEEP_POLICY,
     NOW,
   );
   assert.equal(underCap.disposition, "post-review");
 
-  // AT the cap, with no backoff attempt on record (reviewOrphanBackoffElapsed reads false with no
-  // reviewOrphanLastAttemptAt — see that predicate's own doc): capped, same as row 8.6.
+  // AT the cap, with no backoff attempt on record (reviewInputBackoffElapsed reads false with no
+  // reviewInputLastAttemptAt — see that predicate's own doc): capped, same as row 8.6.
   const atCap = deriveDisposition(
-    failedReviewPr({ priorReviewOrphans: DEFAULT_SWEEP_POLICY.reviewOrphanCap }),
+    failedReviewPr({ priorReviewAttemptsForInput: DEFAULT_SWEEP_POLICY.reviewOrphanCap }),
     DEFAULT_SWEEP_POLICY,
     NOW,
   );
-  assert.notEqual(atCap.disposition, "post-review", "budget shared across ALL re-offer reasons — not a fresh allowance for this one");
+  assert.notEqual(atCap.disposition, "post-review", "the unchanged input is at its retry threshold");
   assert.equal(atCap.disposition, "blocked-ambiguous");
-  assert.match(atCap.reason, new RegExp(`>= ${DEFAULT_SWEEP_POLICY.reviewOrphanCap} cap, shared across every`));
+  assert.match(atCap.reason, new RegExp(`unchanged review input.*>= ${DEFAULT_SWEEP_POLICY.reviewOrphanCap} cap`));
 });
 
-test("a head that has exhausted the shared budget is not offered again even when its body changes once more", () => {
-  const editedAgain = failedReviewPr({
-    priorReviewOrphans: DEFAULT_SWEEP_POLICY.reviewOrphanCap,
-    lastActivityAt: "2026-08-26T06:00:00Z", // a THIRD edit, later still than the verdict
+test("activity alone does not reset the cap when the producer reports the same exact review input", () => {
+  const activityOnly = failedReviewPr({
+    priorReviewAttemptsForInput: DEFAULT_SWEEP_POLICY.reviewOrphanCap,
+    lastActivityAt: "2026-08-26T06:00:00Z", // later activity, but the exact-input count is unchanged
   });
-  const d = deriveDisposition(editedAgain, DEFAULT_SWEEP_POLICY, NOW);
+  const d = deriveDisposition(activityOnly, DEFAULT_SWEEP_POLICY, NOW);
   assert.notEqual(d.disposition, "post-review");
   assert.equal(d.disposition, "blocked-ambiguous");
-  assert.match(d.reason, /re-reviewed this PR/);
+  assert.match(d.reason, /unchanged review input/);
 });
 
 test("once the shared backoff elapses, a capped head is offered again — escalate AND keep going, never one instead of the other (W1-T1018)", () => {
   const longAgo = "2026-08-01T00:00:00Z"; // well past reviewOrphanBackoffMinutes before NOW
   const d = deriveDisposition(
     failedReviewPr({
-      priorReviewOrphans: DEFAULT_SWEEP_POLICY.reviewOrphanCap,
-      reviewOrphanLastAttemptAt: longAgo,
+      priorReviewAttemptsForInput: DEFAULT_SWEEP_POLICY.reviewOrphanCap,
+      reviewInputLastAttemptAt: longAgo,
     }),
     DEFAULT_SWEEP_POLICY,
     NOW,

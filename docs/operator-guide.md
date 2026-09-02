@@ -93,6 +93,7 @@ real self-sync re-exec sets on its own child, so it skips the whole check, not e
 | `rmd reframe <P##> --feedback "<text>"` | Records feedback against a proposal and invalidates its cached draft so the next `rmd inbox` redrafts with that feedback in view. |
 | `rmd skill list` | Lists the `.remudero/skills/<name>.yaml` skill registry. |
 | `rmd learnings export <out>` / `rmd learnings import <file> --pin <hash>` | The §6 knowledge-commons transport: `export` collects only `share: public`-stamped, active project-layer entries into a hash-pinned bundle, refusing (naming the entry) if a candidate matches the leak-grep tripwire, or refusing outright if zero entries opted in; `import` checks the bundle's own hash against the operator-supplied `--pin` before writing it to the RMD-GLOBAL layer, deferring all further tamper enforcement to the existing hash-pinned-artifact guard. |
+| `rmd bundle export <path>` | The day-one knowledge bundle (W1-T2580, the BYO-subscription consumer, W1-T992): assembles the doctrine preamble, the BUDGET-SELECTED project learnings corpus (every entry's provenance intact — never filtered to `share: public`, unlike `rmd learnings export` above) and the worker-settings template's asserted values (sandbox on/off flags, the network allowlist — never its raw deny-paths) into one deterministic, hash-pinned bundle. Refuses (naming why) on zero selected entries, a leak-grep tripwire hit, or a worker-settings template that fails validation. Import a bundle with the SAME `rmd learnings import <file> --pin <hash>` transport above — there is no separate `rmd bundle import`. |
 | `rmd emissions [--days <n>]` | Reports CLI verbs that exist in the COMMANDS registry but have emitted no ledger line in the window — the declared-but-never-run class, with a reasoned allowlist for verbs that are legitimately rare. |
 | `rmd trace <id>` | Renders the provenance chain for a task or feedback id — feedback → proposal PR → task(s) → run(s) → PR(s) → merge sha. |
 | `rmd peek <runId> [--lines <n>] [--follow]` | **Read-only** tail of one run's output — the last `<n>` lines (default 50, never more than the 500-line ring ceiling) of its retained `state/runs/<runId>.tail`, printed with a LIVE/FINISHED verdict from the same in-flight-lock liveness check every other verb uses. Works identically on a **finished** run's retained tail, so the last transcript lines of a non-PR verdict are readable after the fact. An unknown run id or an absent tail prints a named reason and still exits 0 — never silent empty output. `--follow` re-polls and reprints on change, stopping on its own the moment the run is no longer live. No steering surface: no flag here writes to, signals, resumes or kills the run. The console reads the same tail through `GET /v1/peek`. |
@@ -1023,6 +1024,51 @@ docker run --rm --user 1000:1000 -v "${RMD_CODEX_DIR:-$HOME/.codex}:/home/node/.
 
 The connector removes `OPENAI_API_KEY` from the Codex process environment, so this path uses the
 mounted ChatGPT subscription rather than silently switching to metered API billing.
+
+### Azure container provider configuration
+
+The daemon needs a separate, durable container config. Do not mount the host CLI's
+`~/.config/remudero`: its `root` and executable paths can be valid on the host and wrong in the
+image. Both launch paths instead use
+`${RMD_CONTAINER_CONFIG_DIR:-${HOME:-/root}/.config/remudero-container}` and mount it read-write at
+`/home/node/.config/remudero` only when the host directory already exists.
+
+The following zsh-safe commissioning sequence creates that directory for the image's uid/gid,
+seeds a missing config at mode 600, and updates only the container-specific paths and provider
+fields. The object spreads preserve every other existing top-level and `workerProviders` field.
+Set `RMD_STATE_DIR` separately to the live state volume before using either launch script; provider
+commissioning does not infer or change it.
+
+```sh
+IMAGE_REF="synthwatcholey0620.azurecr.io/remudero:latest"
+RMD_CLAUDE_DIR="${RMD_CLAUDE_DIR:-${HOME}/.claude}"
+RMD_CODEX_DIR="${RMD_CODEX_DIR:-${HOME}/.codex}"
+RMD_CONTAINER_CONFIG_DIR="${RMD_CONTAINER_CONFIG_DIR:-${HOME}/.config/remudero-container}"
+CONFIG_FILE="${RMD_CONTAINER_CONFIG_DIR}/config.json"
+CONFIG_SEED="$(mktemp)"
+CONFIG_MOUNT="${RMD_CONTAINER_CONFIG_DIR}:/home/node/.config/remudero"
+CLAUDE_MOUNT="${RMD_CLAUDE_DIR}:/home/node/.claude"
+CODEX_MOUNT="${RMD_CODEX_DIR}:/home/node/.codex"
+CONFIG_UPDATE='const fs=require("node:fs");const p="/home/node/.config/remudero/config.json";const c=JSON.parse(fs.readFileSync(p,"utf8"));const w=c.workerProviders??{};c.root="/home/node/Remudero";c.claudeBin="/usr/local/bin/claude";c.workerProviders={...w,enabled:[...new Set([...(w.enabled??[]),"claude","codex"])],reservePercent:w.reservePercent??5,capacityCacheMs:w.capacityCacheMs??60000,codexBin:w.codexBin??"/usr/local/bin/codex",codexHome:w.codexHome??"/home/node/.codex"};fs.writeFileSync(p,JSON.stringify(c,null,2)+"\n",{mode:0o600});'
+CONFIG_VALIDATE='const fs=require("node:fs");const p="/home/node/.config/remudero/config.json";const c=JSON.parse(fs.readFileSync(p,"utf8"));const m=fs.statSync(p).mode&0o777;if(m!==0o600||c.root!=="/home/node/Remudero"||c.claudeBin!=="/usr/local/bin/claude"||!c.workerProviders.enabled.includes("claude")||!c.workerProviders.enabled.includes("codex"))process.exit(1);fs.accessSync(c.claudeBin,fs.constants.X_OK);fs.accessSync(c.workerProviders.codexBin,fs.constants.X_OK);console.log("container config and provider binaries OK");'
+sudo install -d -m 700 -o 1000 -g 1000 "${RMD_CONTAINER_CONFIG_DIR}"
+printf '%s\n' '{}' > "${CONFIG_SEED}"
+if [ ! -f "${CONFIG_FILE}" ]; then sudo install -m 600 -o 1000 -g 1000 "${CONFIG_SEED}" "${CONFIG_FILE}"; fi
+rm -f "${CONFIG_SEED}"
+sudo chown 1000:1000 "${CONFIG_FILE}"
+sudo chmod 600 "${CONFIG_FILE}"
+docker run --rm --user 1000:1000 -v "${CONFIG_MOUNT}" --entrypoint node "${IMAGE_REF}" -e "${CONFIG_UPDATE}"
+docker run --rm --user 1000:1000 -v "${CONFIG_MOUNT}" --entrypoint node "${IMAGE_REF}" -e "${CONFIG_VALIDATE}"
+docker run --rm --user 1000:1000 -v "${CLAUDE_MOUNT}" --entrypoint claude "${IMAGE_REF}" auth status
+docker run --rm --user 1000:1000 -v "${CODEX_MOUNT}" --entrypoint codex "${IMAGE_REF}" login status
+```
+
+These commands use short-lived `--rm` verification containers. Configuration does not start, stop,
+restart, recycle, or deploy the daemon. An absent container config directory remains the backwards-compatible
+Claude-only path: both launch scripts warn and omit the mount instead of asking Docker to create it.
+The operator alone decides when to use the printed launch command or recycle workflow.
+
+### First-run host commissioning
 
 Then, in order:
 

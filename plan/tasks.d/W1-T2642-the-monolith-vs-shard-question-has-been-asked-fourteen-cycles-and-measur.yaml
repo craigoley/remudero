@@ -1,0 +1,150 @@
+- id: W1-T2642
+  title: "THE MONOLITH-VS-SHARD QUESTION HAS BEEN ASKED FOURTEEN CYCLES AND MEASURED ZERO TIMES — loadPlan's MERGED view is coherent by construction, but the two registries beside it are unchecked: a shard's FILENAME id (all that shardSlugFromPath, every grep recipe and git log --grep ever read) may disagree with the record inside it, and the one-task-per-file convention monolithFilingViolations' own message asserts is verified by nothing; a PURE OFFLINE coherence rung measures both every retro and NAMES every offender, never a bare zero"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: architect
+  plan_refs: ["§5C", "§12", "W1-T122", "W1-T410", "W1-T2477"]
+  files: [src/lib/plan-coherence.ts, src/lib/retro.ts, test/plan-coherence.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    FILED FROM A RESEARCH FOLLOW-UP OF RUN W1-T2477 (PR #3318): "check plan/tasks.yaml monolith vs
+    plan/tasks.d/ shards for drift on W1-T2473/W1-T2477."
+
+    THE LITERAL QUESTION RESOLVES NEGATIVE, AND IT IS RECORDED HERE RATHER THAN BURIED — the same
+    contrary-reading discipline R19 and R21 supplied against P46, kept so no future retro claims a
+    trend from a quiet reading. MEASURED at this head: a grep for `W1-T2473` and `W1-T2477` over
+    plan/tasks.yaml returns ZERO occurrences, and each id holds exactly one shard
+    (plan/tasks.d/W1-T2473-the-adoption-report-is-computed-every-tick-and-read-by-nothing.yaml,
+    plan/tasks.d/W1-T2477-the-unresolvable-proof-audit-has-no-scheduler-and-no-consumer.yaml).
+    THERE IS NO DRIFT FOR THE TWO IDS THE FOLLOW-UP NAMES.
+
+    THE GENERAL QUESTION IS NOT RESOLVED BY THAT, AND IT IS THE REASON THIS TASK EXISTS. NET STATE
+    carries "plan/tasks.yaml and plan/tasks.d/*.yaml disagree about which tasks EXIST" tagged
+    "(harvest (a), asked a FOURTEENTH cycle)". Fourteen cycles of ASKING, zero cycles of MEASURING —
+    and each cycle the ask is re-emitted as a research follow-up, deferred, and re-asked. THAT is the
+    defect: a question a machine can answer offline in milliseconds has been carried as prose for
+    fourteen cycles because nobody owns the comparison.
+
+    WHAT IS ALREADY SAFE, VERIFIED AT SOURCE SO THIS TASK CLAIMS NO CREDIT FOR IT. loadPlan
+    (src/lib/plan.ts:402-445) throws PlanError on a duplicate id across the monolith and any shard
+    (":433"), throws on a depends_on that does not resolve WITHIN the merged view (":444"), refuses a
+    torn/short read outright (readWholeFile, ":389") and skips ONLY an ENOENT shard, deliberately
+    re-throwing every other errno (":428"). loadPlanAtRef mirrors all of it against the origin/main
+    blobs. So the MERGED VIEW is coherent by construction and needs no new guard.
+
+    WHAT IS NOT CHECKED IS THE TWO REGISTRIES BESIDE IT, and that is exactly where "which tasks
+    EXIST" can disagree without anything failing:
+    (i) THE FILENAME REGISTRY. shardSlugFromPath (src/lib/task-linter.ts:2487) derives a shard's id
+    from `plan/tasks.d/<id>-<slug>.yaml` BY PARSING THE PATH AND NEVER OPENING THE FILE, and
+    planShardSlugCorpus (":2504") keys the duplicate-title corpus by that filename id. plan.ts:326-329
+    states in its own words that the filename is "only a convention" and "the slug is not recoverable
+    from the id". So a shard whose filename id disagrees with the record inside it is INVISIBLE to the
+    duplicate-title check, to `git log --grep`, to docs/operator-guide.md:58's next-task-id recipe, to
+    CLAUDE.md:255's max-id grep, and to every human who greps a filename — while loadPlan happily
+    builds the OTHER id. Two registries, one file, no comparison.
+    (ii) THE ONE-TASK-PER-FILE CONVENTION. monolithFilingViolations' own message (":2790") tells a
+    filer to "create plan/tasks.d/<id>-<slug>.yaml holding a single-element YAML list", and NOTHING
+    VERIFIES IT: the check keys on ID SETS in `--base` mode only and is explicitly SILENT in
+    whole-plan mode (":2777-2782"). A shard holding two records passes every gate and silently
+    re-creates the shared-EOF collision surface W1-T122 deleted — the nine-PR appender train (#271,
+    437 lines of pure appends to one EOF) is what that convention exists to prevent.
+
+    STATED AS UNMEASURED RATHER THAN ASSERTED, because this plan has paid for the opposite: whether
+    any of the 773 shard files at this head actually violates (i) or (ii) IS NOT KNOWN. The filing
+    Architect had no shell and ran no census. THE FIRST OUTPUT OF THIS TASK IS THAT CENSUS, which is
+    precisely why this ships as a measured REPORT and not as a gate — a blocking filing-time lint over
+    an unmeasured 773-file corpus is how a backlog gets bricked overnight (the W1-T246 warn-then-block
+    lesson, and W1-T25's four-gate over-scope before it).
+
+    WHY A RUNG AND NOT A VERB. W1-T2473 and W1-T2477 — the very run this follow-up came from — are
+    both filed against "a signal computed on a schedule and read by nothing", and W1-T2477's
+    rationale measures proof-queue-audit's importers outside the CLI dispatch at ZERO. A coherence
+    checker with no consumer would be that defect, third instance. So it is wired to the retro or it
+    is not wired at all, and no new CLI verb is minted (W1-T2479's dead-capability class).
+
+    THE RISK BAND IS RULE 19's SPAN, NOT BLAST RADIUS: three filename stems (plan-coherence, retro,
+    the test), which sizingViolation refuses at risk:medium for the span alone. It is NOT decomposable
+    — the module with no rung is the unread-signal defect above, and the rung with no module has
+    nothing to report, so the single invariant (the fourteen-cycle question is ANSWERED by measurement
+    each cycle) is unsatisfiable piecewise. Recorded as a regrade on the merits, the same atomic-
+    coupling exit W1-T250 and W1-T2477 take, never as a workaround.
+  design: |
+    A PURE, OFFLINE module (src/lib/plan-coherence.ts) plus its ONLY consumer, a retro rung. No
+    network, no gateway, no fs inside the module — the caller hands in the monolith text and the
+    (path, text) pairs, the same "the linter is pure, the caller reads disk" seam opts.moduleExists
+    and planShardSlugCorpus already use.
+
+    THE REPORT'S SHAPE MIRRORS THE PLAN-STATE TRUTH RUNG (W1-T410, src/lib/retro.ts:4173+) rather
+    than inventing a second vocabulary: `clean` carrying the counts it examined, `findings` naming
+    EVERY offender with its path and both disagreeing values, and `unexamined` carrying a stated
+    reason (an unreadable plan directory). There is no `unavailable` state, and that is a property
+    worth stating: this rung reads no gateway, so it can never degrade for a network reason the way
+    planStateTruthRung must.
+
+    NEVER A BARE ZERO (P48). A clean corpus renders "N shards and M monolith records examined, zero
+    disagreements", never "0" — a naked zero is indistinguishable from a check that did not run.
+
+    REUSE, NEVER A SECOND OPINION. The filename id comes from shardSlugFromPath (task-linter.ts),
+    imported, never re-parsed — a second filename parser IS the drift class this task closes. The
+    record ids come from parseTasksFromYaml, never a regex over `- id:`: plan.ts:331-333 already
+    records why a text scan is wrong (it matches a commented-out line, a depends_on entry, or prose).
+    And the cross-file duplicate-id verdict must AGREE with loadPlan on the same fixture — a report
+    that can disagree with the loader is a third registry, which is the disease.
+
+    FOUR FINDINGS, ALL DETERMINISTIC: a shard whose filename id differs from its record id; a shard
+    holding more or fewer than one record; a path under tasks.d/ that shardSlugFromPath cannot parse
+    at all (undefined today, silently absent from the duplicate corpus); and an id held by BOTH the
+    monolith and a shard.
+
+    NOT IN SCOPE, EACH NAMED SO NOTHING IS ORPHANED (standing rule 14): FIXING any offender the census
+    finds — that is what the report is for, and a fix is an Architect plan edit, never this rung's
+    write; a BLOCKING filing-time lint refusing a new shard whose filename disagrees with its record
+    or holding two records — a deliberate SEPARATE successor filing, after the census says whether the
+    standing population is zero or large, reusing THIS module's predicate rather than a second one;
+    the MONOLITH-ONLY-READER class (a src-wide scan for plan reads that bypass loadPlan — the shape
+    W1-T399 fixed one site of, and triage.ts:597 records three PRs' worth of cost for), which is
+    different machinery and its own filing; and the stale-`status:`-vs-derived-state class, which is
+    P46/R32's and not this one's.
+
+    VERIFY EVERY CITATION FROM SOURCE BEFORE BUILDING — this note is a 2026-08-31 survey and line
+    numbers drift.
+  acceptance:
+    - claim: "a shard whose FILENAME id differs from the record id inside it is NAMED with both ids and its path — the disagreement shardSlugFromPath structurally cannot see, because it parses the path and never opens the file"
+      proof: "unit test: test/plan-coherence.test.ts"
+    - claim: "a shard holding two task records, and a shard holding none, are each NAMED — the one-task-per-file convention monolithFilingViolations' own message asserts and no check verifies"
+      proof: "unit test: test/plan-coherence.test.ts"
+    - claim: "an id held by BOTH the monolith and a shard is reported as a finding, and the report's verdict AGREES with loadPlan on the identical fixture — never a second opinion about what the plan contains"
+      proof: "unit test: test/plan-coherence.test.ts"
+    - claim: "a clean corpus renders the counts it examined (shards read, monolith records read, disagreements zero) and never a bare zero, so a check that did not run is distinguishable from a check that passed"
+      proof: "unit test: test/plan-coherence.test.ts"
+    - claim: "an unreadable plan directory renders `unexamined` with its stated reason, never a silent clean; and the module makes no network or gateway call, so it has no `unavailable` state to degrade into"
+      proof: "unit test: test/plan-coherence.test.ts"
+    - claim: "the rung has a LIVE CALL SITE in the retro — the fourteen-cycle question is answered every cycle by measurement rather than re-asked in prose, and this module is not a signal read by nothing"
+      proof: "grep: planCoherenceRung( in src/lib/retro.ts"
+    - claim: "the filename id is resolved by the EXISTING shardSlugFromPath predicate, never a second filename parser — one predicate, so the report and the duplicate-title corpus can never disagree about which shard belongs to which id"
+      proof: "grep: shardSlugFromPath in src/lib/plan-coherence.ts"
+  note: |
+    FILED 2026-08-31 from the W1-T2477 follow-up harvest (run W1-T2477-1788105355034, PR #3318). The
+    follow-up's NAMED question is answered in the rationale and answered NEGATIVE — neither W1-T2473
+    nor W1-T2477 appears in plan/tasks.yaml — so this task does not exist to re-check those two ids.
+    It exists because the STANDING question behind them ("harvest (a)", fourteen cycles) has never
+    been measured once, and because the measurement is offline, deterministic and cheap.
+
+    THE CENSUS IS THE FIRST DELIVERABLE AND IT MAY COME BACK EMPTY. That is an acceptable and
+    publishable outcome: a clean report carrying "773 shards examined, zero disagreements" retires
+    fourteen cycles of prose, which is the whole point. What is NOT acceptable is a fifteenth cycle of
+    asking. If the census reads clean for two consecutive cycles with no new finding, the successor
+    filing-time GATE named in `design` should be closed as unnecessary rather than built — one
+    convention nobody has ever violated does not need a gate, and this note pre-commits to that
+    reading so a future cycle cannot quietly widen the trigger to save the work.
+
+    SIBLINGS, DELIBERATELY NOT FOLDED IN: W1-T2486 (duplicate TITLE, which is two ids for one piece of
+    work — a different disagreement); W1-T399 (rule-15's path predicate, one monolith-only reader
+    already fixed); W1-T2490 (proposals have no sharded home); P46/R32 (a shard's `status:` field
+    against derived state). Each is its own concern under Rule 19.

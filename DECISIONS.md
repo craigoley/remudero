@@ -1819,3 +1819,104 @@ outstanding work on its own — and is not corrected here.
 **WHAT THIS ENTRY DOES NOT DO.** It does not close W1-T478 or W1-T1031, whose shards remain
 `status: queued`. It does not rule that the judge earns its keep, nor that it does not. It records
 that the question is currently unanswerable and names the two builds that would make it answerable.
+
+## 2026-09-02 — VERIFICATION: the bring-your-own-subscription ruling's two open questions, re-read against Anthropic's primary Claude Code pages (SESSION-RECORDED, NOT A RULING)
+
+*Operator-authored in the sense this file uses the term — recorded by hand at the operator's
+instruction ("go ahead with the follow-up work identified", 2026-09-02), not by the control plane —
+and written down by a session, so it is marked SESSION-RECORDED: not a machine auto-choose resolution
+and not a ruling. It decides nothing. It records what four pages under code.claude.com/docs said when
+read on 2026-09-02, verbatim, so the 2026-08-18 ruling's two open questions are held against primary
+text instead of search results. Every line below that is not a quotation is marked as this session's
+reading and carries no legal weight; the ruling's own answer stands — the questions are the operator's
+to put to Anthropic.*
+
+**WHY THIS WAS CHECKED.** The 2026-09-01 direction refresh found the ruling's economic premise resting
+on search results: a mid-2026 change said to move headless (`claude -p` / Agent SDK) usage out of the
+interactive subscription limits into a separate credit pool. Nothing primary had confirmed it. Both
+open questions were re-read against the pages below.
+
+**OPEN QUESTION (2), METERING — THE PREMISE IS NOT IN THE PRIMARY TEXT.** No page under
+code.claude.com/docs states a separate headless or SDK pool. What the primary pages do state:
+
+- Legal and compliance (`/docs/en/legal-and-compliance`): *"Advertised usage limits for Pro and Max
+  plans assume ordinary, individual usage of Claude Code and the Agent SDK."*
+- Authentication (`/docs/en/authentication`), on `claude setup-token`: *"This token authenticates
+  with your Claude subscription and requires a Pro, Max, Team, or Enterprise plan. It can only make
+  model requests"*; and on `CLAUDE_CODE_OAUTH_TOKEN`: *"Use this for CI pipelines and scripts where
+  browser login isn't available."*
+- Agent SDK cost tracking (`/docs/en/agent-sdk/cost-tracking`): *"On a Claude subscription within
+  your plan's included usage, you get the 1-hour TTL on your own turns … and Claude Code drops those
+  turns to the 5-minute TTL once you're drawing on usage credits."*
+- Manage costs (`/docs/en/costs`): *"Per-developer costs vary widely based on model selection,
+  codebase size, and usage patterns such as running multiple instances or automation."* and *"The
+  lifetime is an hour on a subscription and drops to five minutes once you're drawing on usage
+  credits."*
+- The Claude Code changelog (github.com/anthropics/claude-code, CHANGELOG.md, read through
+  v2.1.258) carries no entry decoupling SDK or `-p` usage from plan limits.
+
+Third-party write-ups (search-sourced, not primary) describe a June 15 2026 change to a separate
+monthly SDK credit that was announced and then paused, with SDK, `-p` and third-party-app usage
+still drawing on the subscription. This entry does not rely on them; it records only that the primary
+pages are consistent with that account and inconsistent with the premise as the refresh boxed it.
+
+SESSION READING: subscription-metered SDK and headless use is the documented shape today, and the
+advertised limits are stated to assume ordinary, individual usage. "A single subscription carries a
+fleet" is therefore a claim about headroom inside limits advertised for a different usage pattern —
+not a claim the docs make. The router and the headroom governor remain the mitigation the ruling
+names, and the 1h→5min cache-TTL cliff on usage credits is a cost the ruling's model should carry.
+
+**OPEN QUESTION (1), THE THIRD-PARTY-HOST SHAPE — THE PRIMARY TEXT NOW ADDRESSES IT, WITH CONDITIONS
+AND ONE DISTINCTION THE RULING DID NOT DRAW.** Legal and compliance (`/docs/en/legal-and-compliance`),
+verbatim:
+
+- *"Unless we've mutually agreed otherwise, preinstalling or running Claude Code in your products or
+  services (e.g. in hosted sandboxes or other agent infrastructure) requires agreeing to our
+  Commercial Terms of Service and complying with the conditions below: The Claude Code binary must
+  not be modified. … Customers may not pay for, resell, or intermediate Claude usage on their end
+  users' behalf. Each end user must authenticate with their own Anthropic API key, Claude subscription
+  plan credentials, or 3P inference provider credential … That usage is billed directly to the end
+  user under their own agreement with Anthropic"*
+- *"OAuth authentication is intended exclusively for purchasers of Claude Free, Pro, Max, Team, and
+  Enterprise subscription plans and is designed to support ordinary use of Claude Code and other
+  native Anthropic applications."*
+- *"Developers building products or services that interact with Claude's capabilities, including
+  those using the Agent SDK, should use API key authentication … Anthropic does not permit
+  third-party developers to offer Claude.ai login into their own applications, or to route requests
+  through Free, Pro, or Max plan credentials on behalf of their users. Moreover, developers may not
+  collect, store, or intermediate Claude.ai credentials or session tokens — sign-in to a Claude
+  account must complete through Anthropic's own flow."*
+- *"Nor does it prevent an end user from signing in to the unmodified Claude Code binary with their
+  own Claude subscription, including where a platform hosts Claude Code as described under Can
+  customers offer Claude Code in their products? above."*
+- *"Anthropic reserves the right to take measures to enforce these restrictions and may do so without
+  prior notice."*
+- Agent SDK overview (`/docs/en/agent-sdk/overview`): *"Unless previously approved, Anthropic does
+  not allow third party developers to offer claude.ai login or rate limits for their products,
+  including agents built on the Claude Agent SDK. Use the API key authentication methods described in
+  the Quickstart instead."*
+
+THE DISTINCTION: the hosted-platform carve-out is written for the UNMODIFIED CLAUDE CODE BINARY that
+the end user signs into themselves. The fleet's workers do not run that binary — `spawnWorker`
+(`src/lib/worker.ts`) calls `query()` from `@anthropic-ai/claude-agent-sdk` (`^0.3.241` in
+package.json at this reading) — so the fleet is an agent built on the Agent SDK, the case the SDK
+overview's note routes through prior approval. The ruling's mechanism — a customer pastes a
+`setup-token` credential into a VM the operator provisions — also has to be read against "may not
+collect, store, or intermediate Claude.ai credentials or session tokens", because the token is at rest
+on infrastructure the operator runs even when it never transits the operator's hands.
+
+SESSION READING, NOT A CONCLUSION: (i) for the OPERATOR'S OWN fleet on the operator's own
+subscription, the pages contemplate SDK use on a plan and state that the limits assume ordinary,
+individual usage — a fleet sits outside the stated assumption, not inside a stated prohibition;
+(ii) for the CUSTOMER shape the ruling describes, the primary text makes prior approval under the
+Commercial Terms the path, and the docs' own pointer for it is *"contact sales"*. Both remain the
+operator's action, exactly as the ruling recorded; what changed with this reading is that the question
+can now be put to Anthropic in Anthropic's own terms, naming the SDK rather than the binary.
+
+**WHAT THIS ENTRY DOES NOT DO.** It does not amend the ruling, retire `billing_mode`, change
+W1-T992's criteria, or move any gate. It does not assert what Anthropic would answer. The pages were
+read through the session's egress proxy on 2026-09-02; support.claude.com and anthropic.com/legal were
+not reachable from it, so the Consumer and Commercial Terms themselves are cited only by the docs' own
+links and were not read.
+
+**Rollback:** delete this entry. It changes no behaviour.

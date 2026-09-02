@@ -1,0 +1,61 @@
+- id: W1-T2639
+  title: "the status enum is the ONE validator of three that refuses a word without naming the vocabulary — `invalid status 'shipped'` says no and teaches nothing, while risk and retirement both print their permitted set, so the schema cannot tell an author the word it just rejected"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: low
+  origin: architect
+  plan_refs: ["W1-T3E", "W1-T1287", "§2"]
+  files: [src/lib/plan.ts, test/plan.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED AT SOURCE, all three in the same loader block. `loadPlan` validates three closed
+    vocabularies and two of them TEACH while one does not:
+      plan.ts:229-231  risk        -> "task <id>: invalid risk '<v>' (must be low|medium|high)"
+      plan.ts:233-235  status      -> "task <id>: invalid status '<v>'"
+      plan.ts:237-239  retirement  -> "task <id>: invalid retirement '<v>' (must be retired|closed|withdrawn)"
+    The status arm is the odd one out, and it is the arm most likely to be hit: `status:` is the field
+    machine-minted follow-ups and hand edits reach for, `TASK_STATUSES` is the longest of the three
+    vocabularies at ten members, and it is the least guessable — `shipped`, `complete` and `todo` are
+    all natural words the schema does not know.
+
+    THE COST IS A ROUND-TRIP, WHICH IS EXACTLY WHAT THE HOUSE RUBRIC EXISTS TO STOP. W1-T3E's own
+    criterion states the doctrine: a gate that says only "no" costs a human round-trip; one that names
+    the gap feeds the loop. This is that doctrine applied to the schema loader rather than the reviewer.
+
+    A LIVE INSTANCE, dated. A follow-up harvested 2026-08-30 proposed writing `status: shipped` into a
+    shard. Had it landed, the author's first signal would have been `task W1-T2473: invalid status
+    'shipped'` with no indication of what IS legal — from a validator that fail-closes the ENTIRE merged
+    plan, so the failing read is also the loudest possible one. The fix is one message and costs nothing.
+
+    THIS ADDS NO MEMBER AND WEAKENS NO REFUSAL. `shipped` stays illegal; the vocabulary is unchanged;
+    the throw stays a throw. Only the sentence changes.
+  design: |
+    Bring the status arm to the shape its two neighbours already use: append the permitted vocabulary,
+    rendered from `TASK_STATUSES` itself rather than a hand-copied literal (a second copy would rot the
+    moment the enum moves — the hand-copied array at serve.ts is the standing example of that failure,
+    and this task must not create a third). VERIFY the three message shapes at source before editing.
+
+    STATE THE DOCTRINE WHERE THE AUTHOR IS STANDING. The message should also make clear that the field
+    is DECORATIVE and initial-state only — the runner never writes it back and merge-state is derived
+    from GitHub — because the author who reaches for an illegal status value is usually reaching for a
+    behaviour the field does not have. One clause, not an essay.
+
+    OUT OF SCOPE, EXPLICITLY: no new `TASK_STATUSES` member (W1-T1287's Q1 ruled that out and its
+    reasoning stands), no change to `MERGED_STATUSES`, no change to the risk or retirement arms beyond
+    reading them for shape, and no new lint check — `post-merge-field-drift` already reports a merged
+    shard's `status:` change and is untouched.
+  acceptance:
+    - claim: "an out-of-vocabulary status is refused with the permitted set NAMED, rendered from the enum itself rather than a hand-copied literal, matching the shape the risk and retirement arms already use"
+      proof: "unit test: test/plan.test.ts"
+    - claim: "the refusal still fails closed and the vocabulary is unchanged — no member is added, merged-meaning membership is untouched, and shipped stays illegal"
+      proof: "unit test: test/plan.test.ts"
+  note: |
+    FOUND WHILE GROUNDING followup:W1-T2477-1788105355034:2026-08-30T15:58:59.564Z:0 — the follow-up
+    proposed `status: shipped`, and the schema's inability to say what IS legal is why that word looked
+    plausible to its author. Sibling of W1-T2638: W1-T2638 stops the producer minting the class, this makes
+    the schema teach anyone who reaches for it by hand. Neither depends on the other.

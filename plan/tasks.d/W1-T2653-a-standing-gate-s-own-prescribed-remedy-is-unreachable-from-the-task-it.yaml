@@ -1,0 +1,137 @@
+- id: W1-T2653
+  title: "A STANDING GATE'S OWN PRESCRIBED REMEDY IS UNREACHABLE FROM THE TASK IT BLOCKS — the source-size ratchet prints the exact `scripts/source-size-baseline.json` line to write and even states the edit is rule-25-safe in the same PR, but `fixRungScopeStandDownReason` refuses the strike that writes it and the fix prompt tells the worker it may only touch the declared files, so the repair is legible, permitted by one rule and forbidden by another; make a gate's DECLARED remedy file reachable to the rung repairing THAT gate's failure, and nothing else"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 24.00
+  origin: "retro-followup#3410"
+  plan_refs: ["P63", "W1-T1227", "W1-T2526", "W1-T2532", "W1-T2538", "W1-T2539"]
+  files: [src/lib/ci-parity.ts, src/run-task.ts, test/a-gates-own-remedy-is-reachable.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    RATIFIES P63's REACHABILITY HALF, which MASTER-PLAN names as the unbuilt one in its own words:
+    "#3377 and W1-T2538/#3407 already make the refusal FOLLOWABLE; neither makes the file REACHABLE.
+    P63 is about SCOPE, not wording: a perfectly followable instruction the worker is forbidden to
+    execute is still a deadlock."
+
+    THE MECHANISM, TRACED AT SOURCE RATHER THAN QUOTED. Three rules meet on one file and disagree.
+      (1) `scripts/source-size-ratchet.mjs` refuses a grown file, prints the exact `"path": N` line,
+          and — since W1-T2526 — states outright that recording it "is safe to do in this same PR".
+      (2) `ENTANGLEMENT_EXEMPT_INSTRUMENTS` (`src/lib/review.ts`) carries
+          `scripts/source-size-baseline.json`, so Standing rule 25 does NOT refuse the edit.
+      (3) `fixRungScopeStandDownReason` (`src/run-task.ts`) STANDS THE RUNG DOWN before the strike
+          when a repair adds a path outside `declaredFiles`, and the fix prompt's DECLARED SCOPE
+          line tells the worker "this task's PR may only touch: <declared>".
+    So the gate says do it, rule 25 permits it, and the scope rule forbids it. The work is not
+    failed; it is deadlocked.
+
+    THE REVIEWER IS NOT PART OF THE DEADLOCK, AND SAYING SO BOUNDS THIS TASK. `scopeViolationFiles`
+    (`src/lib/review.ts`) is ADVISORY by its own doc ("ADVISORY, not a refusal ... a measured
+    majority of recent trailer-bearing merges would have widened past their declared scope for
+    legitimate reasons"). Nothing in review.ts needs to change and nothing here may change it.
+
+    MEASURED POPULATION, FROM THE PLAN'S OWN GATHER: 17 of 23 runs in the R39 window ended
+    `blocked_ci`, and FIVE distinct tasks' fix rungs named this same unreachable file — W1-T2485,
+    W1-T2490, W1-T2497, W1-T2503, W1-T2504 — each in nearly identical words ("the only remaining fix
+    ... sits outside this task's declared 3-file scope"; "a human or a differently-scoped task must
+    make this one-line edit"). $117.473 bought no ledger-credited ship.
+
+    THE CLASS IS NOT ONE RATCHET, which is why the fix is a registry and not a special case.
+    W1-T2504 hit the identical wall on `src/lib/producer-completeness.ts` (a `KNOWN_UNWIRED` entry it
+    was forbidden to add) and W1-T2498 on `test/catch-erasure-ratchet.test.ts`'s hand-edited
+    baseline.
+
+    THE SIXTH MEMBER, AND ITS HONEST RESOLUTION. This task is filed from a follow-up naming
+    `src/lib/daemon.ts` on #3410 — a file NOT among the five, and NOT the "next victim" the harvest
+    predicted (`src/lib/panel-graph.ts` at 1625/1625), so the class was still spreading when it was
+    reported. THAT INSTANCE IS NOW MOOT AND MUST NOT BE BUILT: W1-T2539's bucketing shipped
+    (`CEILING_BUCKET_LINES = 500`), `ceilingFor(4059)` is 4500, and the live baseline already records
+    `"src/lib/daemon.ts": 4500` — 441 lines of headroom, no edit owed. The reported value 4059 was a
+    RAW COUNT; the gate prints the BUCKET, so writing 4059 verbatim was never what it asked for.
+    Recording this because it is the difference between ratifying a class and patching an instance.
+
+    AND BUCKETING DID NOT CLOSE THE CLASS, ONLY THINNED IT. W1-T2539's own measurement over 300
+    first-parent commits: the baseline is still touched in 19 of 300 (6.3%). One growing commit in
+    sixteen still crosses a boundary, and when it does the remedy is still unreachable. Frequency
+    fell; the deadlock did not.
+
+    WHY REMEDY (a) AND NOT (c). P63 offers three bounded remedies. Remedy (c) — "have the plan gate
+    widen `files:` automatically" — is REJECTED here on the merits, not on effort: a lane that widens
+    its own declared scope is a worker editing its own criteria to match its diff, which is exactly
+    Standing rule 15's prohibition, one field over. Remedy (b) is W1-T2532's automatic recording
+    mode, already filed; see the composition note below.
+  design: |
+    (i) DECLARE THE PAIRING WHERE THE GATE IS ALREADY DECLARED, so the exemption is a FACT ABOUT THE
+    REPO rather than a hand-list living inside the scope guard (the W1-T2551 discipline: read the
+    repo's own declaration). `FAST_GATE_STEPS` (`src/lib/ci-parity.ts`) already registers each gate
+    as `{ job, script, reason }`. Add an OPTIONAL `remedyFiles` to an entry, with the per-entry
+    REASON stated in the entry itself — never reused from a neighbour (the W1-T2526 precedent, whose
+    exemption entry had to supply its own ledger-versus-floor reason rather than borrow the
+    knowledge-budget one). Only `source-size` earns a row in this task; the producer-completeness and
+    catch-erasure members become rows when someone states their reasons, which is the point of a
+    per-entry reason field.
+
+    (ii) THE EXEMPTION IS SCOPED TO THE REPAIR, NOT GRANTED GLOBALLY. A remedy file is reachable only
+    while repairing the failure of the gate that DECLARES it. The ci-log fix mode already holds the
+    failing check names (W1-T94), so the caller computes `reachableRemedyFiles` = the declared remedy
+    files of the failing checks this strike is addressing, and passes them in. Keep
+    `fixRungScopeStandDownReason` PURE — a fourth parameter, never a module-scope read — so the
+    coupling is visible at the call site and testable without I/O.
+
+    (iii) TELL THE WORKER. The fix prompt's DECLARED SCOPE line currently states the declared files
+    and nothing else, which is why five rungs concluded the edit was not theirs to make. It must name
+    the reachable remedy file alongside them, as a permitted path with its gate named. Instruction
+    and enforcement must agree — a prompt that forbids what the guard now permits reproduces the
+    deadlock in prose (the W1-T231 lesson: an instruction contradicting enforcement is a rule that
+    will be followed somewhere the enforcement is not).
+
+    (iv) NOTHING ELSE WIDENS. The implement path's push-and-flag disposition
+    (`scopeGuardOutOfScopeFiles` at its push site) and the `scope_guard.overrun` ledger line keep
+    today's behaviour; `review.ts` is untouched; no gate's verdict, exit code or violation line
+    changes. This task changes WHO MAY WRITE ONE DECLARED FILE, never what any gate refuses.
+
+    (v) VERIFY BEFORE EDITING (distrust this note — line drift is expected):
+    `fixRungScopeStandDownReason`'s signature and its two scope regimes, the DECLARED SCOPE prompt
+    line, `FAST_GATE_STEPS`'s entry shape, and how the ci-log mode receives failing check names.
+
+    OUT OF SCOPE, NAMED. (a) W1-T2532's opt-in `--record` mode — complementary and independently
+    valuable; note that when it lands it makes the out-of-scope write AUTOMATIC on every
+    boundary-crossing PR, so this task is what keeps that safe rather than a duplicate of it.
+    (b) W1-T2551's generator rung — `source-size-ratchet` is registered in package.json with NO
+    `:check` counterpart, so that rung's declared pairing explicitly leaves it alone. (c) Standing
+    rule 25 and `ENTANGLEMENT_EXEMPT_INSTRUMENTS` — already settled by W1-T2526. (d) The bucket size,
+    the refusal wording (W1-T2538), and `bodyContradictsDiff`.
+  acceptance:
+    - claim: "a fix rung repairing a gate's failure may write that gate's DECLARED remedy file without standing down — the five-rung deadlock is gone at its enforcement point"
+      proof: "unit test: test/a-gates-own-remedy-is-reachable.test.ts"
+    - claim: "an out-of-scope path that is NOT a declared remedy file still stands the rung down with today's reason — the exemption is one named file, never a widening of declared scope"
+      proof: "unit test: test/a-gates-own-remedy-is-reachable.test.ts"
+    - claim: "the exemption is scoped to the repair — a strike addressing a failing check that does NOT declare that remedy file gets no exemption and stands down"
+      proof: "unit test: test/a-gates-own-remedy-is-reachable.test.ts"
+    - claim: "the fix prompt names the reachable remedy file and its gate alongside the declared files, so instruction and enforcement cannot disagree"
+      proof: "unit test: test/a-gates-own-remedy-is-reachable.test.ts"
+    - claim: "the pairing is declared in the gate registry with a per-entry reason of its own, not a list held inside the scope guard"
+      proof: "grep: remedyFiles in src/lib/ci-parity.ts"
+  note: |
+    risk:high with band_meaning: span — Rule 19's SPAN measure, DECLARED rather than exempted. The
+    three declared files are one gate registry, its two consumers in the fix rung, and their
+    falsifier suite; `subsystemsOf` scores them as separate concerns because the basenames differ.
+    The invariant is single and UNSATISFIABLE PIECEWISE — a declaration nothing reads permits
+    nothing, and a consumer with no declaration has nothing to permit — which is the atomic-coupling
+    exit W1-T240/W1-T250/W1-T253 already established, not a sizing dodge.
+
+    THE BLAST RADIUS IS THE REAL REASON FOR high, INDEPENDENT OF SPAN: this relaxes a guard that
+    exists to stop a worker touching files it never declared. The scoped-to-the-repair criterion and
+    the not-a-declared-remedy falsifier are load-bearing, not defensive extras — a version that
+    granted the exemption globally would convert a deadlock into an unbounded scope hole.
+
+    `files:` DERIVED FROM SOURCE, and DECLARED WIDE ENOUGH TO CONTAIN ITS OWN REMEDY — the very
+    property this task exists to give every other task. If this PR's own growth crosses a bucket
+    boundary, `scripts/source-size-baseline.json` becomes reachable to it only once this task ships;
+    until then the operator lands that one line, and the PR body must be re-derived from
+    `git diff --name-only origin/main...HEAD` afterwards (W1-T2538's warning applies to this PR too).

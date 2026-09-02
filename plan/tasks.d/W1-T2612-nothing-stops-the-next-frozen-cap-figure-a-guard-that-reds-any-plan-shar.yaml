@@ -1,0 +1,83 @@
+- id: W1-T2612
+  title: "NOTHING STOPS THE NEXT FROZEN CAP FIGURE — a guard that reds any plan shard asserting a CLAUDE.md cap disagreeing with capBytes read AT RUNTIME from scripts/claude-md-budget-baseline.json, without firing on the ratchet's own bump history, on JSON fixtures, or on a coincidental digit run inside an unrelated identifier"
+  repo: remudero
+  depends_on: [W1-T2611]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 60.00
+  files: [test/claude-md-cap-citations.test.ts]
+  origin: "followup#W1-T2457-1788020906446"
+  plan_refs: ["§8A", "W1-T2457", "W1-T2282", "W1-T1234"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE CLASS, NOT THE INSTANCE. W1-T2611 corrects two shards that froze a CLAUDE.md cap figure into
+    decision-driving prose. Correcting them closes two instances and leaves the class wide open: the
+    cap has moved four times (61046 -> 62644 -> 62733 -> 65536 -> 67536 -> 44000), and every move
+    silently retires every plan record that restated the old number. W1-T2457's case shows the cost is
+    not cosmetic — its frozen arithmetic INVERTED its own remedy ranking, and an implementer reading
+    it would have chosen the 44-edit remedy over the 1-sentence one on a dead premise.
+
+    THE PRECISION CONSTRAINT IS REAL AND IS THE HARD PART (the W1-T81 / W1-T92 linter-precision
+    family: a check matching SURFACE TEXT where it means to match a PROPERTY). Measured at HEAD, the
+    corpus that must NOT fire:
+      - W1-T1233 and W1-T1234 legitimately quote the ratchet's own bump HISTORY (61046 -> 62644 ->
+        62733 -> 65536) and test-fixture values ({"capBytes": 65536, "measuredBytes": 1}) as narrative
+        and as fixtures. Historical and fixture values are not live claims about today's cap.
+      - W1-T976 and W1-T970 contain "...1787020520545944000" and "...1787016676150344000" — PID and
+        timestamp strings that merely CONTAIN a digit run. A substring matcher fires on both.
+    A guard that reds any of those four is a false positive and fails this task.
+
+    WHY IT DEPENDS ON W1-T2611 RATHER THAN CARRYING THE CORRECTIONS ITSELF. The guard reds on W1-T2282's
+    retired 65536 sentence — correctly. If it landed first it would ship its own gate red. It cannot
+    fix that by editing the shards in this PR: declaring a plan/tasks.d/ record beside a test file is
+    the rule15-filing shape, where amending a record trips criterionFieldTampered and the out-of-scope
+    test path removes the planOnly carve-out that would forgive it, so the PR is refused however good
+    the work is. The dependency edge buys the ordering that packaging cannot.
+  design: |
+    THE GUARD, in the house's existing plan-claims style (test/docs-claims.test.ts,
+    test/state-citation-check.test.ts, test/rule-citations-match-their-rule.test.ts): a test that reads
+    capBytes from scripts/claude-md-budget-baseline.json AT RUNTIME — never a literal — and fails any
+    plan shard making a LIVE assertion about CLAUDE.md's current cap that disagrees with it.
+
+    THE DISCRIMINATOR IS THE CLAIM'S SHAPE, NOT THE PRESENCE OF A NUMBER: a live cap assertion, versus
+    a historical bump-sequence citation, a JSON fixture value, or an incidental digit run inside an
+    unrelated identifier. Hold the discriminating patterns as DATA (rule 2) so a new citation shape is
+    a row, not a code branch. FAIL-TOWARD-FLAGGING on genuine ambiguity, per W1-T118's recorded
+    default: a false positive costs a reword, a false negative costs a mis-priced remedy.
+
+    THE RUNTIME READ IS ITSELF FALSIFIABLE. A test that reads the baseline but compares against a
+    literal is indistinguishable from one that does not, until the next cap move — the exact failure
+    W1-T1234 recorded. So the seam takes the baseline path (or its parsed contents) as an argument and
+    criterion 3 drives it with a fixture whose capBytes differs from the live one, asserting the
+    verdict MOVES. A hard-coded 44000 cannot pass that.
+
+    NOT IN SCOPE: editing any plan shard (W1-T2611 owns both corrections — this PR declares no task
+    record and must not touch one), CLAUDE.md, the baseline, or the ratchet script.
+  acceptance:
+    - claim: "a queued plan shard asserting a CLAUDE.md cap that disagrees with the LIVE capBytes read at runtime from scripts/claude-md-budget-baseline.json FAILS the guard"
+      proof: "unit test: test/claude-md-cap-citations.test.ts"
+    - claim: "the precision falsifier — the guard does NOT fire on the ratchet's own bump HISTORY (W1-T1233's 61046/62644/62733/65536 sequence), on a JSON fixture value (W1-T1234's capBytes 65536 with measuredBytes 1), or on a coincidental digit run inside an unrelated identifier (W1-T976 and W1-T970's PID/timestamp strings ending 344000)"
+      proof: "unit test: test/claude-md-cap-citations.test.ts"
+    - claim: "the cap is read at runtime and never frozen into the guard: driven with a fixture baseline whose capBytes differs from the live one, the guard's verdict MOVES — so a hard-coded literal cannot pass this test"
+      proof: "unit test: test/claude-md-cap-citations.test.ts"
+    - claim: "the discriminating citation shapes are held as DATA rows rather than code branches (rule 2), so a newly-observed shape is added without editing the matcher"
+      proof: "unit test: test/claude-md-cap-citations.test.ts"
+  note: "FILED 2026-09-01, the code/test half of the rule15-filing split described in W1-T2611's note.
+    THIS TASK DECLARES NO TASK RECORD, WHICH IS THE POINT: rule15FilingViolation keys on a
+    plan/tasks.yaml or plan/tasks.d/<id>.yaml entry appearing beside an out-of-plan-scope path, and
+    with no record declared the check does not apply at any verify. The corrections it needs arrive
+    through depends_on: [W1-T2611], not through this diff.
+    SIZING, MEASURED RATHER THAN ASSERTED: files: is one test path. subsystemsOf treats a test/ path
+    as a companion and, with nothing else surviving, folds it back in rather than scoring zero — one
+    counted concern, under Rule 19's threshold of 2. risk:medium therefore needs no band_meaning
+    declaration (W1-T2503 blocks only a newly-filed risk:high task that omits one).
+    NO CALL-SITE CRITERION IS OWED AND NONE IS FAKED: this task creates no src/ module. The deliverable
+    IS the falsifier, and package.json's test script globs test/**/*.test.ts, so the guard is reached
+    by the suite the moment it exists — there is no registry file a `grep: symbol( in <caller>` proof
+    could honestly point at.
+    THE 42606-BYTE FIGURE IS A BUMP-TIME RECORD, NOT A LIVE MEASUREMENT (see W1-T2611). This guard
+    deliberately asserts nothing about the file's SIZE — only about CAP claims — because W1-T1234
+    established that a stored measurement reddens the gate for a reason no PR caused."

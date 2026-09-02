@@ -1,0 +1,114 @@
+- id: W1-T2618
+  title: "the canonical checkout is the node_modules source for EVERY worker worktree and nothing measures its distance from origin/main — the plan records ~100 commits of drift per cycle as a standing note owned by no task, so a worktree cut from CURRENT origin/main resolves its dependency tree through a checkout hundreds of commits old"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: |
+    THE RESEARCH HALF OF THE ORIGINATING FOLLOW-UP IS ALREADY DECIDED AND IS NOT RE-OPENED HERE.
+    MASTER-PLAN.md:3418 records it as a standing operational note with a measured four-cycle series:
+    "the primary checkout `~/Remudero/repos/remudero` drifts ~100 commits behind `origin/main` per
+    cycle (85 -> 155 -> 278 -> 371 ...) — any tool reading that path instead of a worktree sees a
+    stale tree." So the checkout is GENUINELY STALE, NOT intentionally pinned, and the large PR-number
+    gap that prompted the follow-up (#1485 in that tree vs #3273 on origin) is the same recorded curve
+    further along rather than a new anomaly. NO RE-RESEARCH TASK IS FILED; this task is the CONSEQUENCE
+    the note has never had an owner for, and the same passage says so in as many words — the two
+    standing notes are "kept because they belong to no task".
+    (1) THE COUPLING, MEASURED AT SOURCE. `worktreeAdd` (src/lib/worker.ts) calls
+    `linkWorktreeNodeModules(repoDir, worktreePath)` at src/lib/worker.ts:2803, and that function
+    SYMLINKS the worktree's `node_modules` at the canonical checkout's real tree. hooks/deny-floor.sh
+    states the same coupling independently: "`linkWorktreeNodeModules` (src/lib/worker.ts) symlinks
+    every worker worktree's `node_modules` to the canonical checkout's real tree ON PURPOSE, so the
+    deps are already present via the link."
+    (2) SO CODE AND DEPS COME FROM DIFFERENT COMMITS. W1-T494's own design records the other half:
+    "`worktreeAdd` cuts each from `origin/main`, so dispatched work is built from CURRENT code."
+    Composed with (1), a worker runs origin/main's CODE against the canonical checkout's DEPENDENCY
+    TREE. Nothing measures how far apart those two are, and per MASTER-PLAN:3418 the answer is
+    hundreds of commits.
+    (3) THE PLAN'S OWN BINDING RULE NAMES THE REMEDY AND ASSIGNS IT TO NOBODY. plan/tasks.yaml's
+    BINDING RULES header: "A worktree that genuinely needs newer deps is served by refreshing the
+    CANONICAL checkout, after which the symlink serves the fresh tree with no install here at all."
+    That sentence is load-bearing for the whole no-install-in-a-worktree discipline, and no task
+    refreshes or even observes that checkout.
+    (4) WHY THE TWO ADJACENT TASKS DO NOT COVER IT, checked before filing rather than assumed.
+    W1-T494 publishes a stale-pin field into scripts/fleet-heartbeat.sh and scopes itself explicitly
+    to NO FETCH, deriving from `daemon.stale_code`'s two shas; its own rationale (4) concedes "THE
+    MISSING QUANTITY IS DISTANCE FROM `origin/main`, AND THE BEAT NEVER ASKS". W1-T151 installs after
+    a PULL that changes the lockfile — but the drift persists precisely because that pull is not
+    happening on this path, so its trigger never fires. Neither measures the deps source's distance.
+    (5) HONEST LIMIT, MARKED RATHER THAN GLOSSED. The commit distance and the #1485/#3273 gap were
+    NOT re-measured while drafting this task — that drafting pass had no route to run git. Those two
+    figures are ASSUMED, carried from MASTER-PLAN:3418's series and from the originating follow-up's
+    observation. The COUPLING in (1)-(3) is a tree fact read at source and is host-independent.
+  design: |
+    (i) MEASURE, DO NOT REPAIR. This task makes the deps source's staleness an OBSERVED, recorded
+    quantity at the one moment the system already knows the coupling exists — when a worktree's
+    `node_modules` is linked to the canonical tree. What to DO about a stale canonical checkout
+    (refresh it, refuse, warn) is a later ruling and is NOT decided here.
+    (ii) REUSE THE ALREADY-FETCHED REF; VERIFY BEFORE ADDING A FETCH. Distance is a comparison against
+    the remote-tracking `origin/main`, which the dispatch path already relies on to cut worktrees.
+    READ FROM SOURCE whether that ref is already refreshed on this path before adding any network
+    call — distrust this note. If it is, the measurement is a local `rev-list`-class read and costs no
+    fetch; if it is not, say so in the report rather than silently introducing one.
+    (iii) THE BEST-EFFORT CONTRACT IS PRESERVED VERBATIM. `linkWorktreeNodeModules`' doc states
+    "Best-effort by contract: every outcome is a RETURN VALUE, never a throw. Creating a worktree must
+    not fail because its dev CLIs could not be wired up." A staleness MEASUREMENT must inherit that
+    exactly: it reports, it never throws, and it never fails worktree creation. A measurement that can
+    break dispatch is worse than the drift it measures.
+    (iv) NOT IN SCOPE, EACH FOR A STATED REASON. Auto-pulling or auto-refreshing the canonical checkout
+    (a repair, and a separate ruling). Running ANY package manager anywhere — that is the 2026-07-29 /
+    08-05 / 08-11 outage class the symlink discipline exists to prevent, and this task must not
+    reintroduce it under cover of freshness. The heartbeat surface (W1-T494 owns it) and the status
+    board's LIVENESS row (W1-T279 owns it) — this task must not grow a second copy of either.
+    (v) SEQUENCING, NOT A HARD EDGE. W1-T494 is the nearest relative and is deliberately NOT a
+    depends_on: it publishes a different quantity on a different surface, and a hard edge would strand
+    this behind an unrelated verify:human task. If both land, W1-T494's published field and this
+    measurement should agree about the same tree rather than deriving it twice.
+  acceptance:
+    - claim: "the canonical checkout's distance from origin/main is OBSERVED and recorded at the moment a worktree's node_modules is symlinked to it, rather than assumed fresh"
+      proof: "unit test: test/canonical-checkout-drift.test.ts"
+    - claim: "a canonical checkout behind origin/main is NAMED with its measured distance AND the symlink still proceeds — worktree creation never fails and never throws because the deps source is stale, preserving the best-effort return-value contract"
+      proof: "unit test: test/canonical-checkout-drift.test.ts"
+    - claim: "an up-to-date canonical checkout records no fault, so the measurement is a detector rather than a permanent red"
+      proof: "unit test: test/canonical-checkout-drift.test.ts"
+    - claim: "the measurement runs no package manager and performs no install on any path — the symlinked-node_modules outage class cannot be reintroduced by this check"
+      proof: "unit test: test/canonical-checkout-drift.test.ts"
+  origin: followup#W1-T2458-1788035402626
+  plan_refs: ["§9", "W1-T494", "W1-T151"]
+  files: [src/lib/worker.ts, test/canonical-checkout-drift.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    FILED FROM followup:W1-T2458-1788035402626:2026-08-29T20:33:15.794Z:1 (run W1-T2458-1788035402626),
+    which asked whether repos/remudero's main ref is genuinely stale or intentionally pinned. THAT
+    QUESTION IS ANSWERED AND NO TASK RE-ASKS IT: MASTER-PLAN.md:3418 records the checkout as genuinely
+    stale with a measured per-cycle series (85 -> 155 -> 278 -> 371), so the follow-up's research half
+    is closed by citation, and only its unowned consequence is filed here. A future reader tempted to
+    re-open the pinned-vs-stale question should start at that line.
+    `risk: high` IS SET UP FRONT — Rule 19 SPAN across `src/` and `test/`, and independently because
+    src/lib/worker.ts is the worktree-and-spawn path, where the honest failure direction is a
+    measurement that throws and takes dispatch down with it. Acceptance claim 2 is the guard for
+    exactly that and is load-bearing, not defensive.
+    `verify: auto` — unlike W1-T494 and W1-T491, which rank no surface and correctly defer to the
+    operator, this task's surface is already determined by the coupling it measures: the symlink site
+    is the one place the system knows the deps source. Every criterion is provable in-process over an
+    injected git runner, with no live fetch and no real worktree.
+    EVERY CRITERION IS `unit test:` WITH A PURE PATH, deliberately. The pure-path form both lint-passes
+    and EXECUTES the whole file, where a `unit test: <path> — <sentence>` shape parses as a
+    name-filtered proof whose sentence matches zero test titles and caps the implementation at
+    `proof_exec: 0/N` (the W1-T253 amendment, measured against the real executor after #901). An
+    all-`grep:` shard naming its own path additionally draws a `proof-scope` warning that blocks in
+    CI's changed-tasks pass.
+    `files:` IS TWO PATHS. `src/run-task.ts` is NOT declared — nothing here touches it, and naming it
+    serialises this task against every other that does (W1-T471). `scripts/fleet-heartbeat.sh` is NOT
+    declared: that file is W1-T494's, and declaring it would both duplicate that task and trip
+    file-overlap serialisation (W1-T171) for no edit.
+    PROVENANCE. The `linkWorktreeNodeModules` call at src/lib/worker.ts:2803, its best-effort doc
+    contract, the deny-floor's independent statement of the same coupling, the tasks.yaml
+    refresh-the-canonical-checkout binding rule, W1-T494's NO-FETCH scope and its "the beat never asks"
+    concession are ALL tree facts read at source while drafting. The commit distance and the
+    #1485/#3273 PR gap are ASSUMED, carried from MASTER-PLAN:3418 and the originating follow-up — that
+    drafting pass had no route to run git and does not pretend otherwise.

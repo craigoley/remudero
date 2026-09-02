@@ -1,0 +1,108 @@
+- id: W1-T2644
+  title: "THE CENSUS POPULATION IS A NUMBER WITH NO NAMES — the shipped admission predicate wires FOUR suites while its own rationale counted SIX and measured FIVE under the bound, the fifth is named nowhere in src, test or CLAUDE.md, and the observable `git ls-files`-walking population under test/*.test.ts is EIGHTEEN; enumerate the roster as evidenced data so admission and the caller-sweep report read one source instead of an unsourced integer"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 14.00
+  files: [src/lib/ci-parity.ts, test/the-census-roster-is-named-not-numbered.test.ts]
+  origin: "followup#W1-T2478-census-membership"
+  plan_refs: ["W1-T2478", "W1-T2523", "W1-T1266"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE PREDICATE ALREADY SHIPPED, WHICH CHANGES THIS FROM A PRECAUTION INTO A RECONCILIATION.
+    The follow-up asked for the census membership to be derived BEFORE the admission predicate was
+    written. It was not, and the predicate is now at head, so the question is no longer hypothetical:
+    the set it was written against is unrecorded, and three numbers about it disagree.
+
+    MEASURED AT HEAD, EVERY FIGURE READ FROM SOURCE RATHER THAN CARRIED FROM THE BRIEF:
+    SURFACE 1 census entries wired in `FAST_GATE_STEPS` (each carrying `boundMs`) = 4 —
+      bound-kind-census, catch-erasure-census, negative-reachability-census, no-shallowing-census,
+      wired through four `census:*` scripts (package.json:61-64), each naming exactly one file.
+    SURFACE 2 the count W1-T2478's rationale asserted as the population = 6.
+    SURFACE 3 the count that same rationale measured UNDER the 2000ms bound = 5, itemised only as
+      five runtimes (548, 769, 1078, 1196, 1781 ms; their stated sum, 5372, is arithmetically five
+      values) — so FOUR of FIVE under-bound suites were wired and the fifth is accounted for nowhere.
+    SURFACE 4 files in `test/` matching a tracked-tree walk (`ls-files`) = 18.
+    SURFACE 5 places in the repo naming which suites the six are = 0. `src/lib/ci-parity.ts`,
+      `test/fast-gate-admits-the-census-class.test.ts` and `CLAUDE.md` were each read; the number
+      survives only as prose in an assertion message ("exactly four of the six measured census
+      suites") with no roster behind it.
+
+    A COUNT IS NOT A POPULATION, AND THIS ONE IS ALREADY LOAD-BEARING TWICE. W1-T2478's own header
+    states the admitted set is "defined by a predicate ... never by an enumerated list somebody
+    extends later without re-measuring" — correct, and this task does not weaken it. But a predicate
+    still has to be APPLIED to a candidate population, and that population was never written down.
+    The consequence is not theoretical: the shipped assertion pins the admitted count against a
+    denominator no reader can check, so a fifth under-bound suite going unwired is indistinguishable
+    from a fifth that was refused for cause. That is the same shape as a bare non-zero exit — a
+    verdict with its reason discarded — which this repo's own fast-gate work exists to remove.
+
+    THE SECOND CONSUMER IS ALREADY QUEUED AND ALREADY DOUBTS THE NUMBER. W1-T2523 builds the report
+    that names which census suites a changed path enters, and its own rationale says "RE-DERIVE
+    RATHER THAN TRUST THE TWO", proposing `git grep -l 'ls-files'` intersected with `src/` filters
+    as an approximation it explicitly declines to call complete. Without a roster, admission and
+    that report derive membership twice, from two approximations, and are free to disagree — the
+    two-derivations class this repo has paid for in the projection layer and the board layer already.
+
+    WHAT THIS IS NOT. Not a new gate: the roster refuses nothing by itself, and a wrong derivation
+    that BLOCKED a PR would be the bound-fires-on-a-healthy-condition defect. Not an override of the
+    2000ms bound, which stays the primary control deciding admission. Not a re-audit of the seven
+    non-census steps. Not a change to what any census suite asserts, and not an argument for wiring
+    the over-bound member, which stays out on the bound's own terms.
+
+    COMPLETENESS IS CLAIMED HONESTLY OR NOT AT ALL. The `ls-files` derivation is an approximation:
+    a suite that walks the tree by some other means is invisible to it. So every observed walker
+    resolves to one of three recorded states — a roster member with its measurement, a
+    non-member with its stated reason, or UNCLASSIFIED — because a silent omission rebuilds the
+    same blind spot one layer up, which is precisely how the eighteen-versus-six gap survived.
+
+    THE RISK BAND IS RULE 19'S SPAN, NOT BLAST RADIUS: one src stem plus its test is a src+test pair
+    the sizing check refuses at risk:medium (the same regrade W1-T2523 records for the identical
+    shape). The blast radius is genuinely small — the deliverable is evidenced data plus the
+    consistency assertions over it, and it changes no admission decision that the bound does not
+    already make.
+  acceptance:
+    - claim: "the census population is enumerated as data — every member named, with its measured runtime and its admission verdict — never as a bare count"
+      proof: "unit test: test/the-census-roster-is-named-not-numbered.test.ts"
+    - claim: "the roster and FAST_GATE_STEPS cannot disagree: every wired census entry is a roster member, and every roster member the bound admits is wired"
+      proof: "unit test: test/the-census-roster-is-named-not-numbered.test.ts"
+    - claim: "the under-bound member counted by the shipped rationale but absent from the wired four is NAMED with its measurement and an explicit admitted-or-refused verdict"
+      proof: "unit test: test/the-census-roster-is-named-not-numbered.test.ts"
+    - claim: "a tracked test file that walks the src population and is absent from the roster resolves to UNCLASSIFIED with its path reported, never silent omission"
+      proof: "unit test: test/the-census-roster-is-named-not-numbered.test.ts"
+    - claim: "a census entry added to FAST_GATE_STEPS with no roster entry FAILS — the roster cannot be bypassed by extending the step list"
+      proof: "unit test: test/the-census-roster-is-named-not-numbered.test.ts"
+    - claim: "the roster refuses nothing on its own and cannot fail a preflight run by itself — admission stays the measured bound's decision"
+      proof: "unit test: test/the-census-roster-is-named-not-numbered.test.ts"
+    - claim: "replacing the roster with a bare count makes the named-members assertion fail"
+      proof: "unit test: test/the-census-roster-is-named-not-numbered.test.ts"
+    - claim: "the roster is stated once, as data, beside the step table it governs"
+      proof: "grep: CENSUS_SUITE_ROSTER in src/lib/ci-parity.ts"
+  note: |
+    FILED 2026-08-31 from the W1-T2478 follow-up harvest. Every figure in the rationale was read at
+    head before filing rather than inherited: the four wired entries and their `census:*` scripts
+    (package.json:61-64), the shipped `CENSUS_STEPS.length === 4` assertion and its "four of the six"
+    message, the five itemised sub-bound runtimes in W1-T2478's rationale, the eighteen `ls-files`
+    walkers under `test/`, and the zero places naming the six.
+
+    NO depends_on EDGE ON W1-T2478, DELIBERATELY AND FOR A RECORDED REASON. Its code is at head
+    (`FAST_GATE_CENSUS_BOUND_MS` and the four entries are live in `src/lib/ci-parity.ts`) but its
+    shard still reads `status: queued, attempts: 0`, so it may derive as un-credited. A hard edge on
+    a task in that state strands this one behind exactly the crediting gap it does not fix — the
+    W1-T75/assertRunnable class this plan already paid for. Sequencing is stated here instead, the
+    same instrument W1-T233 and W1-T177 use: this task is meaningless before W1-T2478's predicate
+    exists, and that predicate already does.
+
+    SEQUENCING WITH W1-T2523, stated so nothing is orphaned: that task's report needs this exact
+    membership and currently plans to re-derive it as a self-declared approximation. Whichever lands
+    second should READ the roster rather than growing a second derivation; this task does not edit
+    W1-T2523's criteria, and its own criteria are satisfiable with W1-T2523 unbuilt. Both declare
+    `src/lib/ci-parity.ts`, so W1-T171's overlap check serialises them, which is the wanted outcome.
+
+    THE OVER-BOUND MEMBER STAYS OUT. Naming it is in scope; wiring it is not — it is refused by the
+    bound on the bound's own terms, and arguing its cost is a separate filing, exactly as W1-T2478
+    scoped it.

@@ -1,0 +1,113 @@
+- id: W1-T2616
+  title: "THE GUARD THAT ENFORCES THE DR-N RENAME READS ONLY MASTER-PLAN.md AND CLAUDE.md WHILE EVERY NEW SHARD IS AUTHORED IN plan/tasks.d/ — its `no bare design rule N phrasing survives` test is true of MASTER-PLAN and silent about the corpus that GROWS, so the next filing that cites the retired spelling lands green and mints a fourth dangling pointer"
+  repo: remudero
+  depends_on: [W1-T2615]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 95.00
+  files: [test/rule-citations-match-their-rule.test.ts]
+  origin: architect
+  plan_refs: ["W1-T2457", "§12", "§5C"]
+  status: queued
+  attempts: 0
+  rationale: |
+    HALF TWO OF A SPLIT FILING (W1-T2615 is the plan-only record edit). This half touches NO task record
+    and declares none — that is what keeps it a plain code task the reviewer can judge on its diff.
+
+    THE BLIND SPOT. `test/rule-citations-match-their-rule.test.ts` reads exactly two files at head
+    (`MASTER_PLAN_PATH`, `CLAUDE_MD_PATH`, lines 29-30). Its `no bare 'design rule N' phrasing
+    survives` test is therefore true of MASTER-PLAN and SILENT about `plan/tasks.d/`, which is where
+    every new shard is authored and where all five surviving numbered mentions actually live. Fixing
+    three lines without extending the guard leaves the corpus that grows unprotected: the finding
+    recurs the first time an author reaches for the retired spelling, and nothing refuses it.
+
+    WHY THE GUARD IS NOT FOLDED INTO THE EDIT. The linter refused the combined filing under
+    `rule15FilingViolation`, and the deeper reason is the one worth recording: mixing a task-record
+    path into a code diff makes `planOnly` false in `judgeReview`, which is the exemption the record
+    edit depends on. Two PRs cost one extra lifecycle and remove that coupling entirely.
+
+    ORDER. `depends_on: [W1-T2615]` is not sequencing hygiene — it is correctness. This guard asserts the
+    corpus carries no unquoted citation. Landing it before W1-T2615's edit lands it RED on the required
+    `ci` context and reds every PR queued behind it until reverted.
+
+    ── RULE 19 AND THE BAND ────────────────────────────────────────────────────────────────────
+
+    SPAN IS ONE. The only declared file is this task's own companion test, so `subsystemsOf` resolves a
+    single concern and `sizingViolation` has nothing to report at any band. The #588 merits test is not
+    reached: there is no multi-subsystem span to decompose, and decomposing a one-file guard would
+    produce halves that cannot assert anything on their own.
+
+    `band_meaning: blast-radius`, NOT span, and it is the honest reason for the band: the deliverable
+    puts a CORPUS-WIDE assertion inside `npm test`, which rides the required `ci` context. An
+    over-broad pattern does not fail this task — it reds EVERY subsequent PR until reverted, and the
+    specific way it would over-match is by flagging the historical excerpts, whose remedy would be to
+    delete the record of the defect this whole arc exists to document. That failure direction is
+    fleet-wide and self-erasing, which is what the band is for; effort and risk are different axes (the
+    W1-T218 precedent, graded up on exactly this argument for an hour of hygiene).
+  design: |
+    (i) ONE HOME, NEVER A SECOND COPY. Extend the EXISTING
+    `test/rule-citations-match-their-rule.test.ts` rather than minting a parallel guard — that file is
+    already the namespace's home and its module comment already states the doctrine. No new module,
+    no new src/ file: this task creates nothing under src/, so it owes no call-site proof, and adding
+    a fake one would be noise.
+
+    (ii) THE DISCRIMINATOR IS CONTENT SHAPE, NEVER A TASK-ID ALLOWLIST (an id allowlist rots — the
+    W1-T81 / W1-T118 precision lesson, twice-learned on this very linter):
+      REFUSE   a numbered `design rule <digits>` mention that is NOT inside a quoted or backticked span.
+      PERMIT   the same mention when quoted or backticked — a quoted excerpt under discussion, not a
+               citation. This is exactly the FALSE-POSITIVE #2 rule the headless-fitness lexicon
+               already uses (a hit fully inside a quoted span is a quoted excerpt under discussion,
+               not an instruction), reused rather than reinvented: `isQuoted` in
+               src/lib/task-linter.ts is the shape to follow.
+      IGNORE   the unnumbered form entirely. `design rules are cited only inside...` (W1-T2457:54) and
+               `design rule (i)` (W1-T1082:56) are prose and a different sense; a guard that ate them
+               would fail on records it has no business touching.
+
+    (iii) DERIVE THE CORPUS FROM DISK. List `plan/tasks.d/` with `readdirSync` and filter to `.yaml` —
+    never a hardcoded file list — so a shard added tomorrow is covered the day it lands. Criterion 3
+    pins the mechanism (`readdirSync(`) precisely because a hardcoded list would pass criteria 1 and 2
+    on the day it is written and rot silently after.
+
+    (iv) BOTH DIRECTIONS GET A TEST, WRITTEN FIRST (tdd: strict). The refusal test is worthless without
+    its complement: a guard that also flags the quoted excerpts would force their deletion, which
+    destroys the evidence of the very defect the rename fixed. Write the PERMIT case as a fixture
+    string in the test, not by mutating a real shard.
+
+    (v) SCOPE FENCE, so nothing is orphaned by silence. This guard is a TEST, so it refuses at CI time.
+    Moving the refusal earlier — a §5C `task-linter.ts` check that refuses at AUTHOR time, pre-dispatch
+    — is a real option and is deliberately NOT built here: it is a second enforcement home for one
+    rule, it needs its own severity ruling (warn vs block, and the legacy-backlog question every proof
+    check has had to answer), and the corpus this protects is small and slow-growing. If the operator
+    wants it, it is a separate filing; this task must not grow one.
+
+    (vi) IF THE CORPUS IS STILL DIRTY WHEN THIS DISPATCHES, STOP — DO NOT FIX IT HERE. W1-T2615 has not
+    landed. Editing a shard from this task re-creates the exact mixed-diff shape the split exists to
+    prevent, and `plan/tasks.d/` is deliberately absent from this task's `files:`. Halt and escalate.
+
+    (vii) NOT IN SCOPE, EACH FOR A STATED REASON: renaming any `Standing rule N`, renumbering or
+    deleting a §12 entry, touching CLAUDE.md (its decoding row already names all three families and
+    W1-T2457 measured its headroom), re-opening whether the collision is a live defect (W1-T2457 ruled
+    it a hazard record), and extending the guard to `src/`, `docs/` or `test/fixtures/` (the fixtures
+    corpus is historical text, not a citation surface — per W1-T2457's own pricing).
+  acceptance:
+    - claim: "the guard now reads the plan-record corpus, not just MASTER-PLAN.md and CLAUDE.md: an UNQUOTED numbered design-rule citation anywhere under plan/tasks.d/ is refused, and the corpus at head carries none"
+      proof: "unit test: test/rule-citations-match-their-rule.test.ts"
+    - claim: "the historical record survives the rename — a quoted or backticked excerpt of the retired spelling is PERMITTED, and the unnumbered different-sense usage is ignored entirely, so the guard can never demand the deletion of the evidence of the defect it protects against"
+      proof: "unit test: test/rule-citations-match-their-rule.test.ts"
+    - claim: "the corpus is derived from disk rather than a hardcoded file list, so a shard added tomorrow is covered the day it lands instead of rotting the guard silently"
+      proof: "grep: readdirSync( in test/rule-citations-match-their-rule.test.ts"
+  note: |
+    FILED as the ratification of the follow-up W1-T2457's own run harvested:
+    `followup:W1-T2457-1788020906446:2026-08-29T16:47:03.560Z:1` (run W1-T2457-1788020906446, PR #3272).
+    SPLIT FROM W1-T2615 under `rule15FilingViolation` (src/lib/task-linter.ts): a task declaring a
+    `plan/tasks.d/*.yaml` record alongside a path outside plan scope at `verify: auto` is refused,
+    because the mixed diff destroys the `planOnly` carve-out `judgeReview` needs to review a record
+    edit — and a dispatched worker gets ONE PR and cannot split it. This half therefore declares NO
+    plan path at all.
+    DEPENDENCY IS CORRECTNESS, NOT TASTE: this guard lands red if it lands before W1-T2615's edit.
+    SIBLINGS, CITED AND NOT RE-OPENED: W1-T2457 (#3272, the rename and the guard this extends);
+    W1-T2456 (#3265, the misattribution fix and the citation guard); W1-T81 / W1-T118 (the
+    id-allowlist precision lesson); §12 Standing rule 21.

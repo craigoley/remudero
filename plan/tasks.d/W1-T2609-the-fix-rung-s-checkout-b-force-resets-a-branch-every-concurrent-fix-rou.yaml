@@ -1,0 +1,98 @@
+- id: W1-T2609
+  title: "the fix rung's `checkout -B` FORCE-RESETS a branch every concurrent fix round for that task shares — per-attempt uniqueness belongs to the WORKTREE (it already has it) and to an EXCLUSIVE CLAIM on the head ref, never to the branch NAME, which creditability pins"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: |
+    OBSERVED (run DAEMON-1788016810368, PR #3261): multiple concurrent fix-worker sweeps for the same
+    task were checked out onto the IDENTICAL branch name in separate worktrees at once, and a local
+    commit was silently rewound between `git commit` and `git push`. The follow-up that filed this
+    asked whether the branch-naming/worktree-allocation scheme needs per-attempt uniqueness. VERIFIED
+    AT SOURCE, and the answer splits: the WORKTREE ALREADY HAS per-attempt uniqueness and the BRANCH
+    MUST NOT.
+    (a) THE WORKTREE IS ALREADY UNIQUE PER ATTEMPT. `buildSweepEffects`'s fix dispatch computes
+    `worktreePath = join(worktreesDir(config), \`sweep-${task.id}-${Date.now()}\`)` (src/run-task.ts,
+    the line immediately above its `createFixRungWorktree` call). Two concurrent rounds get two
+    directories. So "allocate a unique worktree" is ALREADY DONE and is not the defect.
+    (b) THE BRANCH IS SHARED BY CONSTRUCTION, AND THAT IS CORRECT. The same call site passes
+    `realBranch = headRef.headRefName` — the PR's OWN head. It must: W1-T76's rung amends the SAME run
+    PR because `deriveStatus`'s ownership assert credits only a `^run-<taskId>-\d+$` head
+    (`isRunBranchFor`, src/lib/status.ts), so a per-attempt branch NAME would open a second PR, credit
+    nothing, and leave the rung looping on a task it already fixed — the exact W1-T76 cascade
+    ("creditability is LOAD-BEARING, not just anti-orphan"). PER-ATTEMPT BRANCH UNIQUENESS IS
+    THEREFORE REFUSED BY THIS TASK, ON THE MERITS, and the refusal is recorded so the follow-up's
+    open question is CLOSED rather than re-asked.
+    (c) THE ACTUAL DEFECT IS THAT THE CHECKOUT IS DESTRUCTIVE. `createFixRungWorktree`
+    (src/run-task.ts) runs, unconditionally:
+      git -C <repoDir>       worktree add <path> origin/<branch>      # detached
+      git -C <worktreePath>  checkout -B <branch> origin/<branch> --no-track
+    `-B` FORCE-CREATES-OR-RESETS the local ref to `origin/<branch>`. Round A checks out, commits
+    locally (local ref -> sha1, unpushed); round B, arriving in that window, resets the SAME local ref
+    back to the origin tip. A's commit is now unreferenced — rewound with no error, between commit and
+    push, verbatim as reported. `--no-track` (W1-T1129) removed the `.git/config` write from this
+    sequence; it did NOT make the ref update non-destructive, and that is the half still live.
+    (d) WHY THE OBVIOUS OBJECTION DOES NOT SAVE IT. Git refuses `checkout -B` for a branch another
+    worktree HOLDS — but `worktree add <path> origin/<branch>` lands DETACHED (verified by hand in
+    W1-T232's own note: "Preparing worktree (detached HEAD ...)"), so between the two commands no
+    worktree holds the ref at all, and a torn-down/pruned sibling worktree leaves the ref held by
+    nobody while its commits are still only local. The refusal is a RACE-DEPENDENT accident, not a
+    guarantee — and W1-T2444 measured `checkout-B` as a live fix-error class on exactly this surface.
+  design: |
+    TWO CHANGES AT ONE SITE, one concern: a fix round must never discard another round's local work.
+    (i) NON-DESTRUCTIVE CHECKOUT. `createFixRungWorktree` stops force-resetting. If the local ref does
+    not exist, create it at `origin/<branch>` exactly as today. If it EXISTS and is an ancestor of (or
+    equal to) `origin/<branch>`, fast-forward — behaviour unchanged. If it EXISTS and is AHEAD of
+    `origin/<branch>` (unpushed local work), REFUSE with a named error carrying both shas; the caller
+    declines the round the same way it already declines on `sweep.fix.uncreditable_head`, and ledgers
+    it. Refusing a round costs one poll; resetting it costs the round's whole spend, silently.
+    (ii) EXCLUSIVE CLAIM ON THE HEAD REF. Serialize the checkout->commit->push window per
+    (repo, branch) with the O_EXCL lock discipline this codebase already uses for the inflight and
+    drain locks (src/lib/inflight-lock.ts) — REUSE it, never a second locking discipline (the W1-T228
+    instruction, verbatim). A round that cannot take the claim DECLINES this poll and is re-derived
+    next pass; the sweep is level-triggered, so a decline is a deferral, not a loss.
+    FAIL DIRECTION, stated: both halves fail toward DOING NOTHING. A bug here parks a fix round, which
+    the next sweep pass retries; the defect being fixed silently destroys committed work. Those are not
+    symmetric, and the asymmetry is why refusal is the default.
+    VERIFY FROM SOURCE FIRST (distrust this note): `createFixRungWorktree`'s exact argv, the fix
+    dispatch call site's `worktreePath`/`realBranch` derivation, and `inflight-lock.ts`'s claim/release
+    shape. Line numbers drift.
+    NOT IN SCOPE: `gitPushRunBranch`'s inability to tell "pushed my commit" from "had nothing to push"
+    is the DETECTION half and is W1-T2610. This task removes the cause; that one makes the class loud.
+  acceptance:
+    - claim: "a fix-round checkout onto a branch whose local ref is AHEAD of origin/<branch> REFUSES with both shas named and leaves the local ref untouched — the reported rewind (a local commit discarded between commit and push) is impossible against this checkout"
+      proof: "unit test: test/fix-branch-checkout-serialization.test.ts"
+    - claim: "no unconditional force-reset of the shared head ref remains at the fix-rung checkout site"
+      proof: "grep: checkoutFixHeadRef in src/run-task.ts"
+    - claim: "the unchanged cases are byte-identical: an absent local ref is created at origin/<branch>, and a local ref at or behind origin/<branch> fast-forwards, exactly as the current sequence leaves them"
+      proof: "unit test: test/fix-branch-checkout-serialization.test.ts"
+    - claim: "two concurrent fix rounds for the SAME task serialize on a per-(repo, branch) O_EXCL claim reusing the existing inflight-lock discipline — the loser DECLINES the poll and ledgers it, and no second locking discipline is introduced"
+      proof: "unit test: test/fix-branch-checkout-serialization.test.ts"
+    - claim: "per-attempt BRANCH uniqueness is refused on the merits and the refusal is recorded where the next reader finds it — the worktree path is already per-attempt unique, and a per-attempt branch name would break the run-branch creditability assert deriveStatus enforces"
+      proof: "grep: creditability pins the branch name in src/run-task.ts"
+  risk: high
+  origin: architect
+  plan_refs: ["§3", "§5C", "W1-T76", "W1-T1129"]
+  files: [src/run-task.ts, test/fix-branch-checkout-serialization.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    FILED 2026-08-30 from the follow-up harvest of W1-T2441 (run DAEMON-1788016810368,
+    https://github.com/craigoley/remudero/pull/3261), verbatim id
+    followup:DAEMON-1788016810368:2026-08-29T15:50:53.273Z:0.
+    THE FOLLOW-UP'S OWN ANALOGY IS HALF RIGHT AND THE HALF THAT IS WRONG IS THE LOAD-BEARING ONE.
+    W1-T2441 concerns the WORKER-HOME directory, which is keyed on `runId` and where per-spawn
+    uniqueness IS the remedy (W1-T2463 owns that remedy; W1-T2441 is instrumentation-only by its own
+    constraint). The fix rung's analogue is the WORKTREE — and it is already unique per attempt. The
+    branch is a DIFFERENT kind of object: it is the PR's head, an identity other machinery reads, so
+    uniqueness there is not a safety property but a credit-destroying one. Same class of bug
+    (unsynchronised shared mutable resource), OPPOSITE remedy (exclusion, not uniqueness). Recorded
+    because the follow-up invites the reader to copy the wrong half.
+    risk:high — this edits the fix rung's commit/push path, and Rule 19's sizing exemption is not why:
+    a defect here either parks the fix rung fleet-wide or admits the silent work loss it exists to
+    remove. The refuse-rather-than-reset criterion is the guard, and it is load-bearing.
+    SEQUENCING, not a hard dep: W1-T2610 touches src/run-task.ts too, so W1-T171's overlap check will
+    serialize the pair. Deliberately expressed as file overlap rather than depends_on — both are
+    independently valuable, and a hard edge would strand the detection half if this one stalls.

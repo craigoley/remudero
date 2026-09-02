@@ -1,0 +1,119 @@
+- id: W1-T2630
+  title: "the checkout's local `main` ref is ~1500 commits behind and NOTHING moves it — prove no gate, script or dispatch path resolves a diff base from it, record the enumeration, and guard the class so nothing quietly starts"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "FOLLOW-UP HARVEST from run W1-T2463 (2026-08-30): the local `main` ref in the run
+    checkout measured 1556 commits behind, and the question filed was whether tooling or scripts
+    that assume `main` is current — diff-against-main checks in CI gates were the named example —
+    are silently reading it.
+    THE DRIFT IS RECORDED AND STRUCTURAL, NOT ANOMALOUS. MASTER-PLAN's standing operational note
+    (1) already states the primary checkout drifts about 100 commits behind origin/main PER CYCLE
+    (85 -> 155 -> 278 -> 371 ...) and warns that any tool reading that path instead of a worktree
+    sees a stale tree. Nothing fast-forwards the ref and nothing is supposed to: self-sync REFUSES
+    off-main (W1-T445's guard: never move a ref that is not the checked-out main), the install-root
+    inspector marks off-main UNFIT rather than mutating, and W1-T405 established that the target
+    clone is created clone-once-if-absent with NOTHING ever updating its local branches afterwards —
+    only remote-tracking refs move, via the fetch inside worktreeAdd. So 1556 is the expected steady
+    state of a ref nobody owns, and it will keep growing.
+    PRELIMINARY GROUNDING SAYS THE ANSWER IS PROBABLY NO, AND THAT IS THE POINT OF FILING RATHER
+    THAN ASSUMING. A read of the tree at filing time found every base resolving from origin/main, an
+    explicit --base argument, or a REMOTE read: CI's ci job derives its base from GITHUB_BASE_REF
+    after an explicit `git fetch --no-tags origin` and every other job from the pull_request event's
+    BASE_SHA; lint-plan takes --base as a required argument with no default; worker-branch-shape
+    defaults to origin/main and DEGRADES to a skip when that ref cannot be resolved; worktreeAdd
+    fetches fail-closed, bases on origin/main, and then asserts base currency against a fresh
+    ls-remote (W1-T405, shipped). The bare-`main` occurrences in src are branch-NAME comparisons,
+    `gh pr create --base main`, `clone -b main`, and GitHub-API branch arguments — none of them a
+    local ref read.
+    A NEGATIVE RESULT IS THE DELIVERABLE, NOT A FAILED SEARCH, and it is worth paying for twice
+    over. First, this repo has already shipped exactly this defect once: test/moving-base-changed-
+    files.test.ts records worktreeChangedFiles running a BARE-ref diff, which is the same class one
+    step removed. Second, the current answer is held together entirely by authorial habit — CLAUDE.md
+    teaches the three-dot origin/main form, nothing ENFORCES it, and the drift means the day someone
+    writes a bare `main` base the gate does not go red, it goes CONFIDENTLY WRONG across 1500
+    commits of history. An unenforced convention plus a monotonically growing stale ref is a defect
+    with a fuse, not a non-issue.
+    WHAT IS NOT ESTABLISHED and is this task's actual work: the enumeration above was a bounded
+    read with head limits, over src, scripts and .github/workflows only. hooks/, deploy/, the
+    remaining workflow files, and any base derived from a repository default_branch value were NOT
+    swept, and no artefact anywhere records the contract or the search."
+  design: |
+    THREE DELIVERABLES, ONE CONCERN: the stale local `main` ref is proven non-load-bearing, the
+    proof is written down, and the class cannot be reintroduced silently.
+    (1) THE SWEEP. Enumerate every base-ref position across the EXECUTABLE surface — src/, scripts/,
+    hooks/, .github/ — and classify each as origin-tracking (origin/main), event-supplied (a PR
+    BASE_SHA or GITHUB_BASE_REF after an explicit fetch), caller-supplied (an explicit --base
+    argument), remote-API (a branch name passed to a forge read, which never touches a local ref),
+    or LOCAL-REF. Report the local-ref set even when it is EMPTY: an audit concluding none-found
+    without naming what it searched is unfalsifiable and is refused by criterion 3.
+    (2) THE RECORD. docs/base-ref-contract.md states the contract in one line beginning
+    BASE-REF CONTRACT, carries the classified enumeration with a path per entry, and states the
+    ruling on the ref itself.
+    (3) THE GUARD. A static source scan, as a test, so it rides the required `ci` context with no
+    workflow edit and therefore no gate-config change.
+    THE DISCRIMINATOR IS POSITION, NEVER THE WORD, and getting this wrong is the whole risk. The
+    guard matches a bare `main` in a git BASE position — the ref operand of diff, log, merge-base,
+    rev-list, rev-parse and show — and must NOT fire on a branch-name comparison, a forge --base
+    argument, a clone -b, or a branch name handed to a remote API. Those legitimate shapes live in
+    an ALLOWLIST HELD AS DATA with a stated reason per row, so a new legitimate use is a row rather
+    than a loosened pattern (the rule-2 shape, and the W1-T81 lesson that a check matching surface
+    text where it means to match a property produces false positives that train authors to write
+    around it).
+    SCOPE IS EXECUTABLE SURFACE ONLY. plan/ and docs/ prose legitimately discusses `main` at length —
+    this very task does — and gating on prose would redden every plan PR. The guard's own seeded
+    fixture lives in a string or a temp dir, never as a tracked file inside its own scan scope.
+    THE GUARD READS FILES AND NEVER INVOKES GIT. It cannot move, delete or observe a ref, so it
+    cannot disturb the state it exists to reason about and it works in a fresh checkout with no
+    origin configured.
+    RULING ON THE REF ITSELF, DECIDED HERE: LEAVE IT. Nothing in this task moves, deletes or renames
+    the local `main` ref. W1-T405's note (i) settled the principle for this class — a run worktree is
+    ephemeral and created fresh from a remote ref each dispatch, and the long-lived ref belongs to a
+    checkout that self-sync deliberately refuses to touch while off main. A stale ref nothing reads
+    is inert; the remedy for a ref nobody reads is to prove nobody reads it, not to start maintaining
+    it.
+    IF THE SWEEP FINDS A LIVE CONSUMER, it is NAMED in the doc and FILED as a separate corrective
+    task — never fixed inside the audit. A behaviour change smuggled into an evidence task is a
+    second concern, and its correct base is a judgement the finding has to be read before making.
+  acceptance:
+    - claim: "a bare local main ref in a git base position anywhere on the executable surface FAILS the guard — a seeded fixture using a two-dot or three-dot diff against the bare ref is refused with the offending path and position named, and the repository as it stands PASSES"
+      proof: "unit test: test/no-consumer-resolves-a-base-from-the-local-main-ref.test.ts"
+    - claim: "the guard does NOT fire on the legitimate non-ref uses of the word — a forge base argument, a branch-name comparison, a clone branch flag and a remote-API branch argument each pass — and the allowlist is DATA carrying a reason per row, so admitting a new legitimate shape is a row edit rather than a widened pattern"
+      proof: "unit test: test/no-consumer-resolves-a-base-from-the-local-main-ref.test.ts"
+    - claim: "the guard is a static source scan that invokes no git command and needs no origin remote, so it can neither disturb nor depend on the ref state it reasons about"
+      proof: "unit test: test/no-consumer-resolves-a-base-from-the-local-main-ref.test.ts"
+    - claim: "the finding is RECORDED with what was searched, including the negative result — the contract line, the classified enumeration with a path per entry, and the explicit ruling that the stale ref is left unmoved; an audit asserting none-found without naming its search scope is refused"
+      proof: "grep: BASE-REF CONTRACT in docs/base-ref-contract.md"
+  risk: high
+  origin: architect
+  plan_refs: ["§5C", "§10"]
+  files: [test/no-consumer-resolves-a-base-from-the-local-main-ref.test.ts, docs/base-ref-contract.md]
+  status: queued
+  attempts: 0
+  note: "FILED from the follow-up harvest of run W1-T2463 (proposal
+    followup:W1-T2463-1788065942887:2026-08-30T05:01:42.981Z:1, filed 2026-08-30, ratified
+    2026-09-01). Framed there as research; it ships a DIFF deliberately, because an
+    evidence-without-diff task can never derive merged — the lesson W1-T24b recorded in its own note
+    after being shaped that way, and the same reason W1-T129's docs-only re-run could not satisfy an
+    open criterion. The sweep is the research, the doc and the guard are what make it durable.
+    risk:high is a RECORDED REGRADE, not a claim that a docs-and-test task is dangerous work, and
+    the honest reading supports it on two axes the effort axis does not capture. (a) Rule 19: the
+    declared files span a test and a doc, which the sizing check counts mechanically (W1-T92, which
+    would discount non-code artefacts, is unbuilt) — the same regrade W1-T218 recorded for a
+    40-dollar hygiene task, verbatim: effort and risk are different axes. (b) The genuine failure
+    direction: this wires a repository-wide pattern scan into the required `ci` context, and a
+    sloppy discriminator reds EVERY PR in the repo. This fleet has paid for a false-positive gate
+    four separate times (W1-T405's own note (iii) enumerates them) and for a linter matching surface
+    text instead of a property (W1-T81). Criterion 2 is the guard against that and is load-bearing,
+    not defensive.
+    NOT A RE-DECISION of W1-T405, which shipped the DISPATCH-side assertion (a worktree base behind
+    the remote head refuses before any worker runs) and established that a stale local main cannot by
+    itself produce a stale worktree base, since worktreeAdd fetches and bases on origin/main. That
+    task answered whether the RUN path is exposed. This answers whether anything ELSE is, and makes
+    the answer hold.
+    DELIBERATELY NOT DEPENDED ON: W1-T92 (sizing precision) and W1-T81 (headless-fitness precision).
+    Both would make this task's own lint cleaner; neither is a prerequisite for the work, and hitching
+    an audit to two queued linter-precision tasks would strand it behind them."

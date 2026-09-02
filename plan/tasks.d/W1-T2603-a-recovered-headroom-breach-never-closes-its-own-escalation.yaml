@@ -1,0 +1,68 @@
+- id: W1-T2603
+  title: "A RECOVERED HEADROOM BREACH NEVER CLOSES ITS OWN ESCALATION, SO THE CONDITION CLEARS AND THE ISSUE DOES NOT — escalateHeadroomReserve raises a HARD_STOP issue once per breach episode and NOTHING retires it when headroom recovers; buildEscalationReconcileCandidates resolves TASK-referent escalations by plan id, and a headroom breach has no task referent to resolve against, so the class falls through every retirement path; MEASURED 2026-09-02: three identical open HARD_STOP issues (#3334, #3384, #3483) against a weekly window reading 11% used with over_ceiling false, one of them already annotated stale by an operator days earlier and still open"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 12.00
+  files: [src/run-task.ts, test/a-recovered-headroom-breach-closes-its-own-escalation.test.ts]
+  origin: "inbox#stale-headroom-escalations-2026-09-02"
+  plan_refs: ["W1-T2565", "W1-T2516", "W1-T249"]
+  status: queued
+  attempts: 0
+  rationale: |
+    ── THE GAP, AND WHY THE EXISTING RECONCILER CANNOT COVER IT ────────────────────────────────
+
+    `escalateHeadroomReserve` (src/run-task.ts) raises ONE `[HARD_STOP]` issue per breach episode —
+    correctly, and `headroomReserveEscalated` is what stops it raising one per tick. Nothing closes
+    it. The breach is a TRANSIENT condition on a wall-clock window: it clears on its own at the
+    reset instant, with no code change, no operator action, and no new evidence.
+
+    ⚠ THE REPO ALREADY HAS AN ESCALATION RECONCILER AND IT STRUCTURALLY CANNOT REACH THIS CLASS.
+    `buildEscalationReconcileCandidates` resolves an open escalation by looking its TASK ID up in
+    the plan (`plan.byId.get(taskId)`) and retiring it when that task is credited. A headroom breach
+    has NO task referent — it is a property of the ACCOUNT, not of any task — so it falls through
+    every arm of that reconciler rather than being missed by a bug in it. This is a missing
+    retirement PATH, not a broken one, and a fix that tries to route it through the task-referent
+    reconciler will be building on a predicate that cannot apply.
+
+    ── MEASURED ───────────────────────────────────────────────────────────────────────────────
+
+    THREE identical open `[HARD_STOP] weekly headroom reserve reached` issues on 2026-09-02:
+    #3334 (2026-08-30), #3384 (2026-08-31), #3483 (2026-09-01) — while `daemon.headroom` reads
+    `weekly (all models) 11% used, over_ceiling: false`, resetting 2026-09-06. The escalated
+    condition is not in breach and has not been for days.
+
+    ⚠ THE THIRD ONE IS THE PROOF THAT A HUMAN NOTICING IS NOT A MECHANISM. #3483 was annotated
+    "Closing as stale" by an operator on 2026-09-01T18:46 — and was still OPEN when this task was
+    filed, because writing the comment is not closing the issue. All three have now been closed by
+    hand; that hand is exactly what this task exists to remove.
+
+    ── WHAT A FIX MUST GET RIGHT ──────────────────────────────────────────────────────────────
+
+    RETIRE ON AN OBSERVED RECOVERY, NEVER ON A TIMER OR AN ABSENCE. The signal is a `daemon.headroom`
+    reading for the SAME window at `over_ceiling: false` — a positive observation that the door is
+    open again. "No breach row lately" is an absence and must not be read as recovery: a daemon that
+    stopped reading headroom entirely (the W1-T2565 blind window, up to six hours) produces exactly
+    that absence while the account may still be exhausted.
+
+    ⚠ MATCH THE WINDOW, NOT JUST THE CLASS. The session (5h) and weekly windows breach independently,
+    and #3483's own title said "weekly" while its body said `session (5h)` — a defect fixed
+    separately. A recovery in the session window must not retire a genuine weekly breach; the
+    retirement has to compare the window the issue names against the window that recovered.
+
+    NOT IN SCOPE: the escalation's own wording (already corrected), the headroom governor's sampling
+    cadence (W1-T2565), and `buildEscalationReconcileCandidates`' task-referent arm, which is
+    correct for its own class and must keep working unchanged.
+
+  acceptance:
+    - claim: "an open headroom escalation is retired once a reading for the same window is observed under its ceiling"
+      proof: "unit test: test/a-recovered-headroom-breach-closes-its-own-escalation.test.ts"
+    - claim: "a recovery in one window never retires an escalation raised for a different window"
+      proof: "unit test: test/a-recovered-headroom-breach-closes-its-own-escalation.test.ts"
+    - claim: "an absence of breach readings is not treated as recovery, so a blind governor retires nothing"
+      proof: "unit test: test/a-recovered-headroom-breach-closes-its-own-escalation.test.ts"
+    - claim: "the task-referent reconciler's own arm is unchanged and still retires what it always did"
+      proof: "unit test: test/a-recovered-headroom-breach-closes-its-own-escalation.test.ts"

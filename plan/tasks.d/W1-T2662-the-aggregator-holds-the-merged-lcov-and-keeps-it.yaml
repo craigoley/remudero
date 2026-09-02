@@ -1,0 +1,53 @@
+- id: W1-T2662
+  title: "THE COVERAGE AGGREGATOR HOLDS THE MERGED LCOV AND KEEPS IT TO ITSELF — publish it as one more workflow artifact so the daemon-side tier-two reader has something to read; the one-line step W1-T470 deferred, filed as its own instrument-surface change under Rule 25"
+  repo: remudero
+  depends_on: [W1-T2661]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  rationale: |
+    RE-DERIVED AT 74e130251 (2026-09-02). The `coverage-ratchet` aggregator job in
+    .github/workflows/ci.yml downloads the four `coverage-shard-<n>` artifacts, reconstructs and
+    merges their V8 reports (scripts/coverage-merge-ratchet.mjs), and runs the ratchet against the
+    merged total. The merged lcov it produces is discarded with the runner. W1-T2661's reader needs
+    it as an artifact named `coverage-merged`, uploaded by the aggregator on pull-request runs
+    (on a push to main the matrix skips collection, so there is nothing to publish and the step
+    must skip with the same `skipped` marker discipline the shards use). This is INSTRUMENT_SURFACE
+    (`detectInstrumentEntanglement`, src/lib/review.ts, treats `^.github/workflows/` as the
+    instrument), which is why it is a separate shard from the product-path reader — the same split
+    W1-T470's rationale prescribed for its own step and then never filed.
+  design: |
+    (i) One `actions/upload-artifact` step in the aggregator, pinned by sha like the shard upload
+    step already is, publishing the merged lcov as `coverage-merged` with a short retention. It
+    runs after the merge and the ratchet, so a ratchet failure still publishes the lcov that failed
+    it (the reader wants the coverage, not the verdict).
+    (ii) On a push event, or when every shard uploaded a `skipped` marker, the step uploads a
+    `skipped` marker under the same artifact name so the reader's "no artifact" and "skipped"
+    refusals stay distinguishable.
+    (iii) A new test/coverage-merged-artifact.test.ts, in the shape of test/coverage-ratchet.test.ts's
+    CI-wiring tests, asserts: the step exists in the aggregator, is pinned, names `coverage-merged`,
+    and follows the ratchet step. A new file, not an addition to the existing one, so the proof
+    discriminates head from base (W1-T362) instead of passing on both.
+    (iv) Nothing else in the workflow moves: no timeout, no matrix, no required-check name.
+  acceptance:
+    - claim: "the aggregator publishes the merged lcov as a pinned artifact named coverage-merged after the ratchet step"
+      proof: "unit test: test/coverage-merged-artifact.test.ts"
+    - claim: "a push run or an all-skipped matrix publishes a skipped marker under the same artifact name"
+      proof: "unit test: test/coverage-merged-artifact.test.ts"
+    - claim: "the workflow names the artifact the reader looks for"
+      proof: "grep: coverage-merged in .github/workflows/ci.yml"
+  risk: high
+  band_meaning: span
+  origin: "oper#follow-up-brief-2026-09-02"
+  plan_refs: ["W1-T2661", "W1-T470", "§12"]
+  files: [.github/workflows/ci.yml, test/coverage-merged-artifact.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    risk:high, band_meaning:span — Rule 19 counts the workflow and its test as two concerns even
+    for a one-step change (the sizing gate refuses two concerns at risk:medium, so the band is set
+    up front and records the SPAN, not blast radius: one upload step). Rule 25 keeps it out of
+    W1-T2661's diff.
+    Depends on W1-T2661 only so the artifact has a reader on the day it first appears; the step is
+    harmless without one.

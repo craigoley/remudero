@@ -1,0 +1,190 @@
+- id: W1-T2619
+  title: "THE FOLLOW-UP DEDUP CORPUS DOES NOT CONTAIN THE POPULATION IT NOW HAS TO DEDUP AGAINST — `mineFollowups` scores each entry against `openTitles` (`run-task.ts`: plan task titles + MASTER-PLAN `P\\d+` bullets) and NEVER against `state/inbox-proposals.json`, so of the 317 routed `followup:` proposals measured 2026-09-01 not one was compared to another, and entries are never compared to each other within a pass either; MEASURE the duplicate rate in that routed population and publish what the shipped 0.6 containment arm and a 0.2 shingle-Jaccard each CATCH and each WRONGLY COLLAPSE — no refusal mechanism is built or wired here"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 25.00
+  files: [src/lib/followup-dedup-census.ts, test/followup-dedup-census.test.ts]
+  origin: "followup#W1-T2458-1788035402626:2026-08-29T20:43:52.284Z:0"
+  plan_refs: ["P25", "§7", "W1-T2458", "W1-T2455", "W1-T2563", "W1-T420"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE ASK, VERBATIM, AND ITS PRECONDITION IS NOW MET. The routed follow-up this ratifies reads:
+    "`mineFollowups`'s own `followupMatchesTitle` dedup is a weak word-overlap check ... once routed
+    candidates start accumulating in the registry, whether a stronger near-duplicate check (e.g.
+    W1-T2455's shingle-Jaccard mechanism, applied here rather than only at ratification) is worth
+    adding is worth measuring against real registry volume." THE VOLUME ARRIVED: W1-T2563 measured
+    the registry at 317 proposals on 2026-09-01, EVERY ONE `followup:`-prefixed, against 16 two days
+    earlier that were ALL `board-review:` — with 2,115 declared entries still upstream, so 317 is an
+    early fraction, not a steady state. The question is answerable now and was not two days ago.
+
+    ⚠ AND THE PROPOSAL'S OWN FRAMING IS TOO NARROW — THE CORRECTION IS THE REASON THIS RECORD EXISTS.
+    "Weak word-overlap check" describes the PREDICATE. Read at head, the larger defect is the CORPUS.
+    `mineFollowups(records, openTitles)` scores every entry against `openTitles` ALONE, and the sole
+    production caller builds that as `[...openTaskTitles, ...openProposalLines]` — plan task titles
+    (`loadPlan`, which does merge `tasks.d/` shards) plus MASTER-PLAN bullets matching
+    `^-\s+(?:\*\*)?(?:★\s*)?P\d+[A-Za-z]?\b`. `state/inbox-proposals.json` IS NOT IN IT. So:
+
+      (a) a harvested entry is NEVER compared against a follow-up ALREADY ROUTED to the registry;
+      (b) entries are never compared to EACH OTHER inside a pass — the loop scores candidate-vs-title
+          only, and the other dedup arm (`processed`) is keyed on `run_id:ts:index`, which suppresses
+          RE-harvest of the same entry and says nothing about two distinct entries stating one fact.
+
+    NO CUTOFF FIXES A CORPUS THAT OMITS THE POPULATION. Swapping containment for Jaccard while the
+    corpus stays the same would be a stronger predicate pointed at the wrong set — which is why this
+    task measures the corpus gap and the predicate gap SEPARATELY rather than assuming the second is
+    the whole story.
+
+    ⚠ SECOND CORRECTION, INHERITED FROM A LESSON THIS REPO ALREADY PAID FOR: DO NOT SCORE THE PROPOSAL
+    SUMMARIES. Every routed proposal is minted as
+    `follow-up harvest [<type>]: <text> — from <taskId> (run <runId>, <prUrl>)`, so all 317 share a
+    boilerplate prefix AND suffix. Under `normalizeTokens` + 3-shingles those affixes contribute
+    identical shingles to every pair and inflate every score. `inbox.ts` already records exactly this
+    hazard for the sibling family — eleven proposal summaries reading literally
+    `board-review: #NNNN carries 1 unhandled escalation(s)`, "near-identical yet LEGITIMATELY
+    DISTINCT, one per PR", which is why the ratification-seam check keys on the drafted SHARD SLUG and
+    never on the proposal. The census scores the ENTRY TEXT, which the ledger's own
+    `report.followups`/`followup.harvested` rows carry verbatim as `text`.
+
+    WHY MEASURE RATHER THAN BUILD, STATED AS THIS REPO'S OWN EVIDENCE AND NOT AS CAUTION. W1-T2455
+    measured its slug-Jaccard at the shipped cutoff and published the miss: 3 of 32 caught; the ~21
+    drafts describing the SAME defect in different words score 0.08-0.18 and are NOT caught; and — the
+    part that forbids guessing a number here — "there is no clean separation between 0.18 and 0.10 in
+    the measured set, and lowering it would refuse sibling tasks in one arc." A cutoff chosen for the
+    follow-up corpus without measuring THAT corpus would be W1-T2455's residue re-inherited blind.
+    W1-T2458's own recon reached the same wall from the other side and stopped there deliberately: the
+    honest bound is "NEARLY ALL OF IT" survives a refusal built on today's mechanism, and "NO NUMBER IS
+    ASSERTED BEYOND THAT BOUND, because measuring the real survival rate requires running the refusal
+    over the entries, which is a build step, not a recon one." THIS IS THAT BUILD STEP.
+
+    WHAT IS AT STAKE IS NOT TIDINESS. W1-T2563 records 285 registry proposals still needing a first
+    draft at an $8.52 mean, so a duplicate is not a cosmetic row — it is a drafting spend against work
+    already queued, repeated at whatever rate the population duplicates. That is what makes the
+    measurement worth its own task and what the number will price.
+
+    ── RULE 19, DERIVED RATHER THAN ASSERTED ─────────────────────────────────────────────────────
+    `moduleIdFromPath` takes the basename, strips a trailing `.test` and lowercases, so
+    `src/lib/followup-dedup-census.ts` and `test/followup-dedup-census.test.ts` BOTH resolve to the
+    id `followup-dedup-census` — `subsystemsOf` yields ONE, and `risk: medium` passes sizing honestly
+    rather than by inflation. THE TWO STEMS MUST STAY MATCHED: renaming one file alone would split the
+    tally into two ids and trip the sizing check on a task whose concern never changed.
+
+    ── WHY A CALL-SITE CRITERION IS PRESENT (impl-DO) ────────────────────────────────────────────
+    This task CREATES a src/ module, and the eleven measured instances of code merging green and
+    unreached (`console-freshness.ts`: 111 lines, 83 lines of tests, `serve.ts` never imported it, the
+    bug still on screen) are the reason a criterion below proves `followupDedupCensus(` is CALLED from
+    `test/followup-dedup-census.test.ts` — a DIFFERENT file from the module. The open paren is load-
+    bearing: `grep: followupDedupCensus in <path>` would pass on a COMMENT, which is how a proof once
+    exited 0 against entirely unbuilt work. The test IS the intended consumer here and the design says
+    so out loud — this instrument is deliberately not wired into a runtime path, so the honest reach
+    proof is the test that runs it, not a production seam this task is forbidden to touch.
+
+  design: |
+    ONE CONCERN: an instrument, and the number it publishes. NOTHING IS WIRED INTO A RUNTIME PATH.
+
+    (i) A NEW PURE MODULE `src/lib/followup-dedup-census.ts`, whose entry point is the exported
+        `followupDedupCensus(...)`. It imports `bestNearDuplicate` from `src/lib/knowledge-dedup.ts`
+        and REUSES it verbatim — never a second scorer, the same one-module-many-consumers discipline
+        `duplicateTitleViolations` / `learningDuplicateViolation` / `draftedDuplicate` already follow.
+        It does NOT live inside `knowledge-dedup.ts`: that module states as its own contract that it
+        "never knows which corpus it is looking at", and follow-up specific affix-stripping would
+        break that purity. This module is pure too — no `node:fs`, no network, corpus supplied by the
+        caller.
+
+    (ii) IT SCORES ENTRY TEXT. Strip the minted affixes (`follow-up harvest [<type>]: ` and
+        ` — from <taskId> (run <runId>[, <prUrl>])`) before scoring, or read `text` directly off the
+        ledger's `report.followups` / `followup.harvested` rows, which carry it verbatim. VERIFY the
+        exact affix shape from `routeFollowupsToRegistry` at head before writing the stripper —
+        matching a summary format by memory is how a census silently scores boilerplate.
+
+    (iii) IT REPORTS BOTH ARMS, PER CANDIDATE CUTOFF. Recall alone is half a measurement: for each
+        cutoff the census reports how many pairs it would refuse AND which pairs it would collapse
+        that are legitimately distinct. A follow-up naming the same subsystem twice for two different
+        reasons is the sibling-pair shape W1-T2455's ceiling had to clear, and the same hazard applies
+        here. Report the score DISTRIBUTION (ceiling, bands) the way `DEFAULT_DUPLICATE_CUTOFF`'s own
+        doc block does, not a single pass/fail.
+
+    (iv) IT SCORES THE TWO MECHANISMS OVER ONE CORPUS so they are comparable: the SHIPPED arm
+        (`followupMatchesTitle`, asymmetric significant-word containment at 0.6) and the candidate arm
+        (`bestNearDuplicate`, k-shingle Jaccard at `DEFAULT_DUPLICATE_CUTOFF`). NOTE THE IMPORT
+        ASYMMETRY, verified at head: `bestNearDuplicate` is exported and MUST be reused, but
+        `followupMatchesTitle` is module-PRIVATE in `src/lib/retro.ts` (line ~2501) and cannot be
+        imported. Re-read it at head and mirror it in this module as an explicitly-labelled replica,
+        with a test that pins the replica against the shipped arm's behaviour on the fixture — a
+        drifting replica would silently mis-price the very mechanism under measurement. Do NOT widen
+        `retro.ts`'s exports; that is a production-surface change this task is out of scope for.
+
+    (v) IT MEASURES THE CORPUS GAP AS ITS OWN NUMBER, distinct from the predicate comparison: how many
+        entry-vs-ROUTED-PROPOSAL and entry-vs-entry duplicates exist that TODAY'S corpus
+        (`openTitles`) cannot see at ANY cutoff, because the registry is not in it.
+
+    (vi) THE MEASUREMENT RIDES IN SOURCE, DATED, under the exported name
+        `FOLLOWUP_DEDUP_CENSUS_MEASURED` — the corpus size, the date, the distribution, and the
+        verdict — the exact precedent `DEFAULT_DUPLICATE_CUTOFF`'s "MEASURED, not asserted" block set.
+        A number that lives only in a PR body is unqueryable a week later, which is the evidence-erasure
+        shape W1-T220 already named.
+
+    (vii) THE TEST IS THE CONSUMER, so this is not another built-and-unread organ (the defect W1-T2458,
+        W1-T1076 and W1-T2473 each record). `test/followup-dedup-census.test.ts` CALLS
+        `followupDedupCensus(...)` — that call is what the call-site criterion below greps for, and it
+        must be a real invocation, not a mention in a comment. The corpus fixture is EMBEDDED IN THE
+        TEST FILE — no separate fixture path, so the file list and the sizing tally stay as declared —
+        and derived from the routed population's real shape. The test pins the published verdict, so a
+        later population shift that changes the answer surfaces as a failing assertion rather than
+        silence.
+
+    (viii) THE VERDICT MAY BE DECLINE, AND MAY BE UNMEASURED. If the duplicate band and the sibling
+        band do not separate, the census says so and names the residue — the discipline the retro rows
+        already follow in publishing `UNMEASURED` rather than a fabricated average. Inventing a cutoff
+        to reach a satisfying number is the one outcome this task forbids.
+
+    OUT OF SCOPE, DELIBERATELY: wiring any refusal into `mineFollowups`, `routeFollowupsToRegistry`,
+    the ratification seam or `lint-plan`; changing `openTitles`' construction; changing
+    `FOLLOWUP_TYPE_ROUTES`; exporting `followupMatchesTitle` from `retro.ts`; the `evidenceAnchors: []`
+    choice, which is correct and must not be "fixed" by synthesizing a pattern; and follow-up
+    RETIREMENT, which is W1-T2563's. A build that ships a refusal here has answered a question this
+    task exists to ask.
+
+  acceptance:
+    - claim: "the census scores the follow-up ENTRY TEXT, never a routed proposal's summary verbatim — the shared minted affix every routed proposal carries is stripped before scoring, so two unrelated follow-ups cannot score as similar on boilerplate alone"
+      proof: "unit test: test/followup-dedup-census.test.ts"
+    - claim: "every reported cutoff carries BOTH arms — the pairs it would refuse AND the legitimately-distinct pairs it would collapse — so no recall figure is published without its false-positive cost"
+      proof: "unit test: test/followup-dedup-census.test.ts"
+    - claim: "the census is REACHED, not merely built: its entry point is invoked from the test that consumes it, which is the only consumer this deliberately-unwired instrument has"
+      proof: "grep: followupDedupCensus( in test/followup-dedup-census.test.ts"
+    - claim: "the shipped containment arm and the candidate shingle-Jaccard arm are scored over the SAME corpus so the two are comparable, and the census reuses the existing scorer rather than adding a second one"
+      proof: "grep: bestNearDuplicate( in src/lib/followup-dedup-census.ts"
+    - claim: "the corpus gap is counted as its own number: duplicates between a candidate and an ALREADY-ROUTED proposal, and between two candidates in one pass, which today's dedup corpus cannot see at any cutoff"
+      proof: "unit test: test/followup-dedup-census.test.ts"
+    - claim: "a corpus with no clean separation between the duplicate band and the sibling band publishes that verdict rather than a cutoff invented to reach a number"
+      proof: "unit test: test/followup-dedup-census.test.ts"
+    - claim: "the measured distribution, its corpus size and its date ride in source as a named block, so a later population shift is re-measured rather than re-argued"
+      proof: "grep: FOLLOWUP_DEDUP_CENSUS_MEASURED in src/lib/followup-dedup-census.ts"
+
+  note: |
+    RATIFIES the routed follow-up `followup:W1-T2458-1788035402626:2026-08-29T20:43:52.284Z:0` — a
+    proposal minted BY the very mechanism it asks about, which is itself one of the 317 rows this task
+    measures. TWO CORRECTIONS to the proposal's framing are carried in the rationale rather than
+    silently applied: the defect is the CORPUS as much as the predicate (`openTitles` excludes
+    `state/inbox-proposals.json`, verified at `run-task.ts`'s `buildGather` call), and scoring proposal
+    SUMMARIES would inflate every pair on the shared minted affix — the hazard `inbox.ts` already
+    records for the eleven near-identical `board-review:` summaries.
+    NO MECHANISM IS FILED AS A SUCCESSOR, AND THAT IS THE POINT. The proposal asked whether the check
+    is WORTH adding; filing its implementation alongside would answer the question before measuring it
+    and would leave a zombie to withdraw if the verdict is DECLINE (the W1-T324 sweep's whole subject).
+    The successor is a DECISION the census's own verdict makes, in the shape W1-T171 used for its
+    banked rung 2 and W1-T52 for its unminted golden.
+    depends_on IS EMPTY DELIBERATELY. `routeFollowupsToRegistry` and `followupProposalId` are present
+    in `src/lib/retro.ts` at head, so W1-T2458's routing is built; its shard nonetheless still reads
+    `status: queued`, and a hard edge onto a task whose derived credit is uncertain fails the linter
+    closed — the same reasoning W1-T233 recorded when it expressed its W1-T232 relationship as
+    sequencing. The relationship is real and is stated here instead: this measures the population
+    W1-T2458's routing creates and W1-T2563's retirement drains.
+    budget_usd 25.00 is a RUNAWAY TRIPWIRE, not an allowance, set above the follow-up family's
+    15.00-20.00 because the census may re-run over a corpus growing toward 2,115 entries — never
+    lowered toward the work's expected cost, which is the failure W1-T3 recorded at $3.57 against a
+    guessed $4 cap.
