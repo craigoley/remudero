@@ -9,6 +9,7 @@ import type { WorkerProviderId } from "./config.js";
 import type { ProviderCapacity, ProviderSelection } from "./worker-provider.js";
 
 export const PROVIDER_ROUTING_STATUS_VERSION = 1;
+/** BACKSTOP: field-count and string-length projection limits are the normal size controls. */
 export const MAX_PROVIDER_ROUTING_SNAPSHOT_BYTES = 16 * 1024;
 const MAX_WINDOWS_PER_PROVIDER = 8;
 const SAFE_LABEL = /^[A-Za-z0-9][A-Za-z0-9 ._()+:@-]{0,95}$/;
@@ -97,6 +98,7 @@ function isoTime(value: unknown): string | undefined {
   try {
     return new Date(millis).toISOString();
   } catch {
+    // Invalid or out-of-range timestamps are omitted, never rewritten as the current time.
     return undefined;
   }
 }
@@ -298,6 +300,7 @@ export function readProviderRoutingStatus(
   try {
     raw = (deps.readFile ?? readFileSync)(providerRoutingStatusPath(root), "utf8");
   } catch (error) {
+    // ENOENT is absence; every other read failure is explicitly unreadable.
     return unknown((error as NodeJS.ErrnoException)?.code === "ENOENT" ? "absent" : "unreadable");
   }
   if (Buffer.byteLength(raw) > MAX_PROVIDER_ROUTING_SNAPSHOT_BYTES) return unknown("malformed");
@@ -306,6 +309,7 @@ export function readProviderRoutingStatus(
     if (parsed.version !== PROVIDER_ROUTING_STATUS_VERSION) return unknown("unsupported-version");
     return parseSnapshot(parsed, (deps.now ?? Date.now)()) ?? unknown("malformed");
   } catch {
+    // JSON/schema/clock failures are malformed, distinct from absent and unreadable state.
     return unknown("malformed");
   }
 }
