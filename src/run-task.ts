@@ -23,7 +23,7 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { createServer, type Server } from "node:http";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   architectModel,
   configPath as instanceConfigPath,
@@ -524,6 +524,7 @@ import {
 } from "./lib/task-linter.js";
 import { classifyGrepZeroHit } from "./lib/grep-zero-cause.js";
 import { loadMounts, mountsPath, resolveMount, resolveMountForClass, type Mount } from "./lib/mounts.js";
+import { mountRecommendationProposalCandidate, recommendMounts, type MountHeadroomCell } from "./lib/mount-recommender.js";
 import {
   DEFAULT_FIX_SPAWN_WALL_CLOCK_BOUND_MS,
   loadDefaultPolicy,
@@ -28042,6 +28043,71 @@ export function runFeedbackDocketRung(
 }
 
 /**
+ * W1-T2575 — the missing RECOMMENDATION leg (MASTER-PLAN §9, WS-8). `scripts/mount-headroom-
+ * sweep.mjs` (W1-T2560, extended W1-T2574) already MEASURES: it groups retained ledger runs into
+ * (type, risk, class) cells and, within each, into (provider, served_model, effort) arms — a
+ * printed table a human had to read and act on, with nothing that turned it into a decision. This
+ * rung is that missing leg: it reads the sweep's own `cells` via a dynamic import (the script
+ * sits outside tsconfig's `include`, the SAME "dynamic import at the call site, cast to an
+ * explicit shape" discipline `test/a-mount-comparison-across-unmatched-populations-is-not-a-
+ * measurement.test.ts` already established for consuming it from typed code), hands them to
+ * {@link recommendMounts} (lib/mount-recommender.ts) alongside the CURRENTLY LOADED
+ * `.remudero/mounts.yaml` table (so the Tier Invariant, G-17, is checked against what is actually
+ * committed), and files every cleared recommendation through `updateProposalRegistry` — the SAME
+ * W1-T240 single-writer the feedback-docket rung immediately above uses, idempotent by
+ * `mountRecommendationProposalId` so a re-poll before ratification never duplicates. A REFUSAL
+ * (the expected, common outcome — see mount-recommender.ts's own header, "refuse more often than
+ * recommend") is counted and logged, never filed: it asserts nothing an inbox proposal could
+ * ratify. `recommendMounts` and `mountRecommendationProposalCandidate` are BOTH pure (no I/O,
+ * mutate no routing table) — every read (the ledger corpus, `mounts.yaml`) and every write (the
+ * proposal registry) happens here, in this rung, exactly once. Own try/catch: an empty/missing
+ * ledger corpus (`buildMountHeadroomSweep` throws on zero runs) or a malformed `mounts.yaml` must
+ * never take down the sweep composite this rides inside, same discipline as every other rung on
+ * this cadence.
+ */
+export async function runMountRecommenderRung(
+  config: Config,
+  runId: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  deps: { root?: string } = {},
+): Promise<{ filed: number; refused: number }> {
+  const root = deps.root ?? repoRoot;
+  try {
+    const scriptUrl = pathToFileURL(join(root, "scripts", "mount-headroom-sweep.mjs")).href;
+    const { buildMountHeadroomSweep } = (await import(scriptUrl)) as {
+      buildMountHeadroomSweep: (stateDir: string) => { cells: MountHeadroomCell[] };
+    };
+    const stateDir = join(config.root, "state");
+    const sweep = buildMountHeadroomSweep(stateDir);
+    const mounts = loadMounts(mountsPath(root));
+    const outcomes = recommendMounts(sweep.cells, mounts);
+
+    const registryPath = join(config.root, "state", "inbox-proposals.json");
+    let filed = 0;
+    let refused = 0;
+    for (const outcome of outcomes) {
+      if (outcome.kind === "refusal") {
+        refused++;
+        continue;
+      }
+      const candidate = mountRecommendationProposalCandidate(outcome);
+      updateProposalRegistry(registryPath, (current) => {
+        if (current.some((p) => p.id === candidate.id)) return null; // already filed, idempotent
+        filed++;
+        const proposal: Proposal = { id: candidate.id, summary: candidate.summary, evidenceAnchors: candidate.evidenceAnchors };
+        return [...current, proposal];
+      });
+    }
+
+    log("mount_recommendation.swept", { run_id: runId, filed, refused, cells: sweep.cells.length });
+    return { filed, refused };
+  } catch (e) {
+    log("mount_recommendation.error", { error: String((e as Error)?.message ?? e) });
+    return { filed: 0, refused: 0 };
+  }
+}
+
+/**
  * The daemon's per-poll WORKER-TAIL retention rung (W1-T942 design note v) — ages out stale
  * `<config.root>/state/runs/*.tail` files via {@link sweepStaleWorkerTails}, on the SAME
  * per-poll cadence `runWorktreeReapRung`/`runInflightLockSweepRung`/`runTmpSweepRung` already
@@ -28418,6 +28484,11 @@ export function buildSweepHook(
       // try/catch inside the rung; a `state/last-feedback-docket.json` marker keeps this a
       // no-op on every poll but the first one due each week.
       runFeedbackDocketRung(config, ledgerPath, runId, log);
+      // W1-T2575 — the mount-headroom sweep's missing recommendation leg: turns
+      // scripts/mount-headroom-sweep.mjs's measured (type, risk, class) cells into ratifiable
+      // inbox proposals (or, far more often, a named refusal) via `recommendMounts`. Own
+      // try/catch inside the rung; never mutates `.remudero/mounts.yaml` itself.
+      await runMountRecommenderRung(config, runId, log);
     } catch (e) {
       log("sweep.error", { error: String((e as Error)?.message ?? e) });
     }
