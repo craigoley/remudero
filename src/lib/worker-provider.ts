@@ -385,6 +385,8 @@ function resolveCapabilityLadder(config: Config, deps: CodexCapacityDeps): Capab
   try {
     return loadMounts(mountsPath(config.root)).capabilities;
   } catch (error) {
+    // Deliberate compatibility fallback: a missing/malformed optional table preserves the
+    // pre-capability balanced routing path; callers already treat `undefined` as that state.
     return undefined;
   }
 }
