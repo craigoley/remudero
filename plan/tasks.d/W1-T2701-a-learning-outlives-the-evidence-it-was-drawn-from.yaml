@@ -1,0 +1,74 @@
+- id: W1-T2701
+  title: "A LEARNING OUTLIVES THE EVIDENCE IT WAS DRAWN FROM — the corpus has lifecycle, provenance and a citation meter, and no transition fires when a learning's source PR is reverted or when a candidate was drawn from text an outsider wrote; add the two gates the retro cannot see, taint at promotion and revert recall on the cadence, flipping to contested and never deleting"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 55.00
+  rationale: |
+    RE-DERIVED AT f632e15fa (2026-09-02).
+
+    (1) WHAT THE CORPUS ALREADY KNOWS ABOUT ITSELF. Every learning carries `lifecycle: active |
+    superseded | quarantined | contested`, a `src` provenance and a `cited` date
+    (src/lib/learnings.ts header; learnings/architecture.yaml). W1-T1248 wired the citation
+    miners over the ledger union so `cited` is stamped from real recall — `learnings.injected`
+    rows carry `matched_ids` per spawn — and both consumers (ranking, compression candidates)
+    key on it. The wipe test (W1-T86, W1-T2659) measures whether injection helps at all.
+
+    (2) THE TWO TRANSITIONS NOTHING FIRES. FIRST, TAINT AT PROMOTION: the retro consolidates
+    episodic rows into learnings (§8A's consolidation loop). A candidate drawn from an issue
+    body, a PR comment or a webhook payload — the sources W1-T2700 envelopes — is promoted on the
+    same footing as one drawn from a run the fleet performed. OpenClaw's dreaming, the
+    equivalent loop, "removes candidates whose indexed provenance is untrusted or system" before
+    the consolidation prompt is built, as a gate independent of scoring. SECOND, REVERT RECALL:
+    verdict-calibration (W1-T424) already mines the reverts and follow-up fixes of merged PRs;
+    a learning whose `src` cites a PR that was later reverted keeps `active` forever. OpenClaw's
+    memory-provenance keeps "entry origins" per source session and lets `memory forget` remove
+    derived entries by origin while preserving transcripts; this repository's lifecycle
+    vocabulary already has the honest state for it — `contested` — and its rule that a
+    superseded entry stays in its shard for provenance.
+
+    (3) WHAT THIS IS NOT. Not a scorer, not a budget change, not deletion. The knowledge budget
+    ratchet and the `cited` ranking stand; the wipe test remains the utility measure. Both gates
+    are Architect-gated by construction: taint refuses a promotion the retro would otherwise
+    propose; revert recall proposes a flip in the retro's own plan PR, never writes a shard.
+  design: |
+    (i) TAINT. `promotionTaint(candidate)` in src/lib/learnings.ts: a candidate whose provenance
+    resolves to an external-text source class is refused with `learning.refused_tainted` and the
+    class named; the retro's consolidation calls it before ranking, the OpenClaw order.
+
+    (ii) REVERT RECALL. `revertRecall(learnings, verdictRows)` joins each active entry's `src`
+    PR references against the revert set `mineVerdictRows` (src/lib/verdict-calibration.ts)
+    already produces; a hit yields a proposed transition to `contested` with the reverting PR
+    named, carried into the retro's plan PR as a diff the operator gates. The measurement report
+    gains the count of proposed flips; refused when the union is unreadable.
+
+    (iii) NEVER DELETE. A contested entry stays in its shard with its provenance, exactly as a
+    superseded one does; `selectLearnings` already filters contested entries from injection.
+
+    (iv) WHAT DOES NOT CHANGE. The budget. The ranking. The `cited` stamp. The wipe test.
+  acceptance:
+    - claim: "a candidate drawn from an external-text source is refused at promotion with the source class named, and one drawn from a fleet run is not"
+      proof: "unit test: test/learnings-provenance-gates.test.ts"
+    - claim: "an active learning whose source PR appears in the revert set is proposed contested with the reverting PR named, and nothing is deleted"
+      proof: "unit test: test/learnings-provenance-gates.test.ts"
+    - claim: "an unreadable ledger union yields a refused report member rather than zero proposed flips"
+      proof: "unit test: test/learnings-provenance-gates.test.ts"
+    - claim: "the retro's consolidation calls the taint gate before ranking"
+      proof: "grep: promotionTaint( in src/lib/retro.ts"
+  risk: high
+  band_meaning: span
+  origin: "oper#external-scan-2026-09-02"
+  plan_refs: ["W1-T1248", "W1-T424", "W1-T2700", "W1-T2659", "W1-T86", "§8A", "§12"]
+  files: [src/lib/learnings.ts, src/lib/retro.ts, src/lib/measurement-cadence.ts, test/learnings-provenance-gates.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    risk:high, band_meaning:span — the learnings module, the retro and the measurement report
+    under Rule 19; runtime blast radius is a refused promotion and a proposed flip, both gated.
+
+    SOURCES: OpenClaw docs/concepts/dreaming.md (the taint gate before the consolidation prompt,
+    deterministic thresholds, exclusions), docs/concepts/memory-provenance.md (entry origins,
+    forget by origin, transcripts preserved); v2026.8.1 release note ("Grounded Dreaming",
+    "Memory Ownership & Forget").
