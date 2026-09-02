@@ -1212,9 +1212,10 @@ export interface OpenPrView {
   /**
    * Failing required-check name+log-tail evidence — the W1-T94 ci-log fix
    * mode's input (W1-T100, the #170 fix). Populated when `checksState ===
-   * "red"`; `[]`/undefined when checks aren't red or no failing-check detail
-   * could be captured (the fix prompt then degrades to "no detail captured",
-   * `renderFixPrompt`, never a crash).
+   * "red"`, or when a child named by ci-gate's checked-in REQUIRED contract
+   * has already concluded red while the aggregate is pending; `[]`/undefined
+   * when no failing-check detail could be captured (the fix prompt then
+   * degrades to "no detail captured", `renderFixPrompt`, never a crash).
    */
   ciFailures?: CiFailure[];
   /**
@@ -1225,7 +1226,9 @@ export interface OpenPrView {
    * verdict. Never makes `checksState` anything but "red" — see {@link CancelledRequiredCheck}'s
    * own doc.
    */
-  cancelledRequiredChecks?: CancelledRequiredCheck[]; redRequiredChecks?: string[]; // W1-T2504 — {@link redQualityGateNames}'s output; separate observable, never touches checksState.
+  cancelledRequiredChecks?: CancelledRequiredCheck[];
+  /** W1-T2504/W1-T2599 — concluded red children from ci-gate's checked-in REQUIRED contract. */
+  redRequiredChecks?: string[];
   /**
    * W1-T2340 — this head's own workflow runs (`actions/runs` filtered by head sha), each with
    * its jobs' OWN status — the raw input {@link stalledRunReason} reads. `undefined` when the
