@@ -750,7 +750,7 @@ test("spawnWorker routes an opted-in call to Codex, preserves containment, and l
   assert.match(prompt, /read and follow.*CLAUDE\.md/s);
   assert.equal(workerLedgerFields(result).provider, "codex");
   assert.deepEqual(codexCapacityRequests, [
-    { requestedModel: undefined, requestedEffort: undefined },
+    { requestedModel: undefined, requestedEffort: undefined, reservePercent: 5 },
     { requestedModel: undefined, requestedEffort: undefined, forceRefresh: true, selectedModel: "gpt-5.6-terra" },
     { requestedModel: undefined, requestedEffort: undefined, forceRefresh: true, selectedModel: "gpt-5.6-terra" },
   ]);

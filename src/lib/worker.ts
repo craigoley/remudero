@@ -1078,7 +1078,7 @@ export interface SpawnWorkerArgs {
     readClaude?: (request?: Pick<ClaudeCapacityDeps, "forceRefresh">) => Promise<ProviderCapacity>;
     readCodex?: (
       config: Config,
-      request: Pick<CodexCapacityDeps, "requestedModel" | "requestedEffort" | "forceRefresh" | "selectedModel">,
+      request: Pick<CodexCapacityDeps, "requestedModel" | "requestedEffort" | "forceRefresh" | "selectedModel" | "preferredModel" | "reservePercent">,
     ) => Promise<ProviderCapacity>;
     tieBreaker?: number;
     /** Best-effort durable projection for the console; never allowed to change spawn outcome. */
@@ -1437,6 +1437,8 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
           return (args.providerRouting?.readCodex ?? readCodexCapacity)(config, {
             requestedModel: args.model,
             requestedEffort: args.effort,
+            ...(routingPolicy.codexModelPreference ? { preferredModel: routingPolicy.codexModelPreference } : {}),
+            reservePercent: routingPolicy.reservePercent,
           });
         }
         return (args.providerRouting?.readClaude ?? (() => readClaudeProviderCapacity(config)))();

@@ -83,6 +83,45 @@ export interface ProviderCapacity {
   model?: string;
   /** Concrete reasoning effort supported by that model. */
   effort?: string;
+  /** Bounded account-visible Codex broker decision captured by the same app-server read. */
+  modelDecision?: CodexModelDecision;
+}
+
+export type CodexModelTier = "economy" | "balanced" | "frontier";
+export type CodexModelIneligibleReason =
+  | "unmapped"
+  | "unsupported-effort"
+  | "quota-unreadable"
+  | "below-reserve";
+export type CodexModelPreferenceBypassReason = CodexModelIneligibleReason | "not-visible";
+
+export interface CodexModelPreference {
+  capability: CodexModelTier;
+  effort: string;
+  model: string;
+}
+
+export interface CodexModelDecisionOption {
+  id: string;
+  displayName?: string;
+  supportedEfforts: string[];
+  accountDefault: boolean;
+  mapped: boolean;
+  eligible: boolean;
+  selected: boolean;
+  windows: ProviderCapacityWindow[];
+  reason?: CodexModelIneligibleReason;
+}
+
+export interface CodexModelDecision {
+  requestedCapability: CodexModelTier;
+  requestedEffort: string;
+  mappedCandidates: string[];
+  options: CodexModelDecisionOption[];
+  selectedModel?: string;
+  selectedEffort?: string;
+  preferredModel?: string;
+  preferenceBypass?: CodexModelPreferenceBypassReason;
 }
 
 export interface ProviderSelection {
@@ -315,8 +354,6 @@ interface CodexModelListResult {
   nextCursor?: string | null;
 }
 
-type CodexModelTier = "economy" | "balanced" | "frontier";
-
 /**
  * Last-resort Codex candidates (W1-T2573), used ONLY when `.remudero/mounts.yaml`'s
  * `capabilities` axis is unavailable — the routing table failed to load, or a caller (e.g. a
@@ -329,6 +366,21 @@ const FALLBACK_CODEX_MODELS: Record<CodexModelTier, string[]> = {
   balanced: ["gpt-5.6-terra", "gpt-5.5", "gpt-5.4"],
   frontier: ["gpt-5.6-sol", "gpt-5.5"],
 };
+const SAFE_CODEX_MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,95}$/;
+const SAFE_CODEX_MODEL_LABEL = /^[A-Za-z0-9][A-Za-z0-9 ._()+:@-]{0,95}$/;
+const SAFE_CODEX_EFFORT = /^[a-z][a-z0-9-]{0,31}$/;
+
+function safeCodexModelLabel(value: unknown): string | undefined {
+  return typeof value === "string" && SAFE_CODEX_MODEL_LABEL.test(value) ? value : undefined;
+}
+
+function canonicalCodexModelId(model: CodexModelInfo): string | undefined {
+  return typeof model.model === "string" && SAFE_CODEX_MODEL_ID.test(model.model)
+    ? model.model
+    : typeof model.id === "string" && SAFE_CODEX_MODEL_ID.test(model.id)
+      ? model.id
+      : undefined;
+}
 
 function normalizedModelName(value: unknown): string {
   return typeof value === "string" ? value.toLowerCase().replace(/[^a-z0-9]/g, "") : "";
@@ -385,7 +437,7 @@ function codexBucketForModel(result: CodexRateLimitResult, model: CodexModelInfo
 
 function capacityFromBucket(bucket: CodexRateLimitBucket | undefined, accountLabel?: string): ProviderCapacity {
   if (!bucket) return { provider: "codex", readable: false, windows: [], detail: "rate-limit response missing" };
-  const label = typeof bucket.limitName === "string" && bucket.limitName ? bucket.limitName : String(bucket.limitId ?? "codex");
+  const label = safeCodexModelLabel(bucket.limitName) ?? safeCodexModelLabel(bucket.limitId) ?? "codex";
   const windows: ProviderCapacityWindow[] = [];
   for (const [kind, window] of [["primary", bucket.primary], ["secondary", bucket.secondary]] as const) {
     if (!window || typeof window.usedPercent !== "number" || !Number.isFinite(window.usedPercent)) continue;
@@ -430,48 +482,145 @@ export function selectCodexModel(
   requestedModel?: string,
   requestedEffort?: string,
   capabilities?: CapabilityLadder,
+  policy: { preferredModel?: CodexModelPreference; reservePercent?: number } = {},
 ): ProviderCapacity {
   const reading = rateLimits && typeof rateLimits === "object" ? rateLimits as CodexRateLimitResult : {};
-  const visible = models.filter((model) => !model.hidden && typeof model.id === "string" && model.id !== "");
+  const visible: CodexModelInfo[] = [];
+  const visibleIds = new Set<string>();
+  for (const model of models) {
+    const id = canonicalCodexModelId(model);
+    if (model.hidden || !id || visibleIds.has(id)) continue;
+    visibleIds.add(id);
+    visible.push(model);
+    if (visible.length === 100) break;
+  }
   const forced = config.workerProviders?.codexModel;
   const tier = codexCapabilityForRequestedModel(capabilities, requestedModel);
   const preferred = forced
     ? [forced]
     : [...(config.workerProviders?.codexModels?.[tier] ?? codexCandidatesForCapability(capabilities, tier, requestedEffort))];
-  const accountDefault = visible.find((model) => model.isDefault)?.id;
-  if (!forced && accountDefault) preferred.push(accountDefault);
-  const candidates = [...new Set(preferred)]
+  const mappedCandidates = [...new Set(preferred)];
+  const candidates = mappedCandidates
     .map((id) => visible.find((model) => model.id === id || model.model === id))
     .filter((model): model is CodexModelInfo => model !== undefined);
-  if (candidates.length === 0) {
+  const reserve = policy.reservePercent ?? config.workerProviders?.reservePercent ?? 5;
+  const requestedEffortLabel = requestedEffort ?? "default";
+  const mappedIds = new Set(candidates.flatMap((model) => [model.id, model.model]
+    .filter((id): id is string => typeof id === "string" && SAFE_CODEX_MODEL_ID.test(id))));
+  const options = visible.map((model): CodexModelDecisionOption => {
+    const supportedEfforts = [...new Set((model.supportedReasoningEfforts ?? [])
+      .map((entry) => entry.reasoningEffort)
+      .filter((effort): effort is string => typeof effort === "string" && SAFE_CODEX_EFFORT.test(effort)))].slice(0, 8);
+    const mapped = mappedIds.has(model.id) || (typeof model.model === "string" && mappedIds.has(model.model));
+    const capacity = capacityFromBucket(codexBucketForModel(reading, model));
+    const effortSupported = !requestedEffort || supportedEfforts.includes(requestedEffort);
+    const hasHeadroom = capacity.readable && capacity.windows.length > 0 && capacity.windows.every((window) =>
+      Number.isFinite(window.usedPercent) && window.usedPercent >= 0 && window.usedPercent <= 100 && window.usedPercent < 100 - reserve);
+    const reason: CodexModelIneligibleReason | undefined = !mapped
+      ? "unmapped"
+      : !effortSupported
+        ? "unsupported-effort"
+        : !capacity.readable
+          ? "quota-unreadable"
+          : !hasHeadroom
+            ? "below-reserve"
+            : undefined;
+    return {
+      id: canonicalCodexModelId(model)!,
+      ...(safeCodexModelLabel(model.displayName) ? { displayName: safeCodexModelLabel(model.displayName) } : {}),
+      supportedEfforts,
+      accountDefault: model.isDefault === true,
+      mapped,
+      eligible: reason === undefined,
+      selected: false,
+      windows: capacity.windows.map((window) => ({ ...window })),
+      ...(reason ? { reason } : {}),
+    };
+  });
+  const ranked = candidates.map((model, preference) => {
+    const option = options.find((candidate) => candidate.id === canonicalCodexModelId(model));
+    const capacity = capacityFromBucket(codexBucketForModel(reading, model));
+    return { model, capacity, option, preference, remaining: tightestRemaining(capacity) };
+  }).filter((candidate) => candidate.option?.eligible)
+    .sort((a, b) => b.remaining - a.remaining || a.preference - b.preference);
+  const scopedPreference = policy.preferredModel &&
+    policy.preferredModel.capability === tier &&
+    policy.preferredModel.effort === requestedEffortLabel
+      ? policy.preferredModel
+      : undefined;
+  let preferenceBypass: CodexModelPreferenceBypassReason | undefined;
+  let selected = scopedPreference
+    ? ranked.find((candidate) => candidate.option?.id === scopedPreference.model)
+    : undefined;
+  if (scopedPreference && !selected) {
+    const preferredOption = options.find((option) => option.id === scopedPreference.model);
+    preferenceBypass = preferredOption?.reason ?? "not-visible";
+  }
+  selected ??= ranked[0];
+  const decisionBase: CodexModelDecision = {
+    requestedCapability: tier,
+    requestedEffort: requestedEffortLabel,
+    mappedCandidates,
+    options,
+    ...(scopedPreference ? { preferredModel: scopedPreference.model } : {}),
+    ...(preferenceBypass ? { preferenceBypass } : {}),
+  };
+  if (!selected) {
     return {
       provider: "codex",
       readable: false,
       windows: [],
       detail: forced
-        ? `configured Codex model is not available to this account: ${forced}`
-        : `no account-visible Codex model matched the ${tier} preference set`,
+        ? `configured Codex model is not available or eligible for this account: ${forced}`
+        : `no account-visible Codex model is eligible for ${tier}/${requestedEffortLabel}`,
+      modelDecision: decisionBase,
     };
   }
-  const reserve = config.workerProviders?.reservePercent ?? 5;
-  const ranked = candidates.map((model, preference) => {
-    const capacity = capacityFromBucket(codexBucketForModel(reading, model));
-    return { model, capacity, preference, remaining: tightestRemaining(capacity) };
-  }).sort((a, b) => b.remaining - a.remaining || a.preference - b.preference);
-  const eligible = ranked.find(({ capacity }) =>
-    capacity.readable && capacity.windows.every((window) =>
-      Number.isFinite(window.usedPercent) && window.usedPercent >= 0 && window.usedPercent <= 100 && window.usedPercent < 100 - reserve));
-  const selected = eligible ?? ranked[0];
-  const efforts = (selected.model.supportedReasoningEfforts ?? [])
-    .map((entry) => entry.reasoningEffort)
-    .filter((effort): effort is string => typeof effort === "string");
-  const requested = requestedEffort && efforts.includes(requestedEffort) ? requestedEffort : undefined;
-  const effort = requested ?? selected.model.defaultReasoningEffort ?? efforts[0] ?? "default";
+  const efforts = selected.option?.supportedEfforts ?? [];
+  const effort = requestedEffort ?? selected.model.defaultReasoningEffort ?? efforts[0] ?? "default";
+  const selectedModel = canonicalCodexModelId(selected.model)!;
+  for (const option of options) option.selected = option.id === selectedModel;
   return {
     ...selected.capacity,
-    model: selected.model.model ?? selected.model.id,
+    model: selectedModel,
     effort,
-    ...(!eligible ? { readable: false, detail: `${tier} Codex models have no reserved headroom` } : {}),
+    modelDecision: {
+      ...decisionBase,
+      options,
+      selectedModel,
+      selectedEffort: effort,
+    },
+  };
+}
+
+/**
+ * Re-read the quota bucket for the concrete model that already crossed a worker attribution
+ * boundary. This is measurement, not another routing decision: a model that was eligible when
+ * selected must remain attributable if its reserve or supported-effort state changes while the
+ * worker is running.
+ */
+function selectCodexAttributionModel(
+  models: CodexModelInfo[],
+  rateLimits: unknown,
+  selectedModel: string,
+): ProviderCapacity {
+  const reading = rateLimits && typeof rateLimits === "object" ? rateLimits as CodexRateLimitResult : {};
+  const model = models.find((candidate) =>
+    !candidate.hidden && canonicalCodexModelId(candidate) !== undefined &&
+    (candidate.id === selectedModel || candidate.model === selectedModel));
+  if (!model) {
+    return {
+      provider: "codex",
+      readable: false,
+      windows: [],
+      detail: `selected Codex model is no longer visible to this account: ${selectedModel}`,
+      model: selectedModel,
+    };
+  }
+  return {
+    ...capacityFromBucket(codexBucketForModel(reading, model)),
+    model: canonicalCodexModelId(model),
+    effort: model.defaultReasoningEffort ?? model.supportedReasoningEfforts?.[0]?.reasoningEffort ?? "default",
   };
 }
 
@@ -487,6 +636,9 @@ export interface CodexCapacityDeps {
   forceRefresh?: boolean;
   /** Re-read the exact concrete model selected at the start of an attribution interval. */
   selectedModel?: string;
+  /** Live model preference and reserve from the provider policy; revalidated against this read. */
+  preferredModel?: CodexModelPreference;
+  reservePercent?: number;
   /**
    * Injected capability ladder (W1-T2573), bypassing the `loadMounts` disk read below — for a
    * caller that already holds a validated Mounts table, and for tests. When omitted,
@@ -566,13 +718,14 @@ export async function readCodexCapacity(config: Config, deps: CodexCapacityDeps 
   const capabilities = resolveCapabilityLadder(config, deps);
   const now = deps.now ?? Date.now;
   const cacheKey = `${bin}\0${codexHome(config)}`;
-  const selectionConfig = deps.selectedModel
-    ? { ...config, workerProviders: { ...config.workerProviders, codexModel: deps.selectedModel } }
-    : config;
   const cached = codexCapacityCache.get(cacheKey);
   const cacheMs = config.workerProviders?.capacityCacheMs ?? 60_000;
   if (!deps.forceRefresh && cached && now() - cached.at < cacheMs) {
-    return selectCodexModel(cached.value.models, cached.value.rateLimits, selectionConfig, deps.requestedModel, deps.requestedEffort, capabilities);
+    if (deps.selectedModel) return selectCodexAttributionModel(cached.value.models, cached.value.rateLimits, deps.selectedModel);
+    return selectCodexModel(cached.value.models, cached.value.rateLimits, config, deps.requestedModel, deps.requestedEffort, capabilities, {
+      preferredModel: deps.preferredModel,
+      reservePercent: deps.reservePercent,
+    });
   }
 
   const spawn = deps.spawn ?? ((command, args, options) => spawnChild(command, args, { ...options, stdio: ["pipe", "pipe", "pipe"] }));
@@ -655,7 +808,11 @@ export async function readCodexCapacity(config: Config, deps: CodexCapacityDeps 
   });
   if ("provider" in value) return value;
   codexCapacityCache.set(cacheKey, { at: now(), value });
-  return selectCodexModel(value.models, value.rateLimits, selectionConfig, deps.requestedModel, deps.requestedEffort, capabilities);
+  if (deps.selectedModel) return selectCodexAttributionModel(value.models, value.rateLimits, deps.selectedModel);
+  return selectCodexModel(value.models, value.rateLimits, config, deps.requestedModel, deps.requestedEffort, capabilities, {
+    preferredModel: deps.preferredModel,
+    reservePercent: deps.reservePercent,
+  });
 }
 
 interface CodexJsonEvent {

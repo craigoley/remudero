@@ -18,6 +18,7 @@ export const PROVIDER_ROUTING_STATUS_VERSION = 1;
 /** BACKSTOP: field-count and string-length projection limits are the normal size controls. */
 export const MAX_PROVIDER_ROUTING_SNAPSHOT_BYTES = 16 * 1024;
 const MAX_WINDOWS_PER_PROVIDER = 8;
+const MAX_CODEX_MODEL_OPTIONS = 32;
 const SAFE_LABEL = /^[A-Za-z0-9][A-Za-z0-9 ._()+:@-]{0,95}$/;
 
 export type ProviderRoutingUnknownReason = "absent" | "unreadable" | "malformed" | "unsupported-version";
@@ -37,6 +38,30 @@ export interface ProviderRoutingProviderStatus {
   accountLabel?: string;
   model?: string;
   effort?: string;
+  modelDecision?: CodexModelDecisionStatus;
+}
+
+export interface CodexModelDecisionOptionStatus {
+  id: string;
+  displayName?: string;
+  supportedEfforts: string[];
+  accountDefault: boolean;
+  mapped: boolean;
+  eligible: boolean;
+  selected: boolean;
+  windows: ProviderRoutingWindowStatus[];
+  reason?: "unmapped" | "unsupported-effort" | "quota-unreadable" | "below-reserve";
+}
+
+export interface CodexModelDecisionStatus {
+  requestedCapability: "economy" | "balanced" | "frontier";
+  requestedEffort: string;
+  mappedCandidates: string[];
+  options: CodexModelDecisionOptionStatus[];
+  selectedModel?: string;
+  selectedEffort?: string;
+  preferredModel?: string;
+  preferenceBypass?: "unmapped" | "unsupported-effort" | "quota-unreadable" | "below-reserve" | "not-visible";
 }
 
 export interface ProviderRoutingSelectedStatus {
@@ -54,12 +79,14 @@ export interface ProviderRoutingPolicyStatus {
     preference: "automatic";
     reservePercent: number;
     parks: [];
+    codexModelPreference: null;
   };
   enabledProviders: WorkerProviderId[];
   routableProviders: WorkerProviderId[];
   preference: ProviderRoutingPreference;
   reservePercent: number;
   parks: ProviderPark[];
+  codexModelPreference?: { capability: "economy" | "balanced" | "frontier"; effort: string; model: string };
   overrideExpiresAt?: string;
   writtenAt?: string;
   writerFingerprint?: string;
@@ -144,6 +171,56 @@ function closedUnreadableReason(detail: unknown): ProviderRoutingProviderStatus[
   return "capacity-unreadable";
 }
 
+function projectModelDecision(capacity: ProviderCapacity): CodexModelDecisionStatus | undefined {
+  const decision = capacity.modelDecision;
+  if (!decision) return undefined;
+  if (
+    decision.requestedCapability !== "economy" &&
+    decision.requestedCapability !== "balanced" &&
+    decision.requestedCapability !== "frontier"
+  ) return undefined;
+  const requestedEffort = safeLabel(decision.requestedEffort);
+  if (!requestedEffort) return undefined;
+  const mappedCandidates = decision.mappedCandidates.slice(0, MAX_CODEX_MODEL_OPTIONS)
+    .map(safeLabel).filter((value): value is string => value !== undefined);
+  const options: CodexModelDecisionOptionStatus[] = [];
+  for (const option of decision.options.slice(0, MAX_CODEX_MODEL_OPTIONS)) {
+    const id = safeLabel(option.id);
+    if (!id) continue;
+    const supportedEfforts = option.supportedEfforts.slice(0, 8)
+      .map(safeLabel).filter((value): value is string => value !== undefined);
+    const windows: ProviderRoutingWindowStatus[] = [];
+    for (const window of option.windows.slice(0, MAX_WINDOWS_PER_PROVIDER)) {
+      const name = safeLabel(window.name);
+      const usedPercent = safePercent(window.usedPercent);
+      if (!name || usedPercent === undefined) continue;
+      const resetsAt = isoTime(window.resetsAt);
+      windows.push({ name, usedPercent, ...(resetsAt ? { resetsAt } : {}) });
+    }
+    options.push({
+      id,
+      ...(safeLabel(option.displayName) ? { displayName: safeLabel(option.displayName) } : {}),
+      supportedEfforts,
+      accountDefault: option.accountDefault === true,
+      mapped: option.mapped === true,
+      eligible: option.eligible === true,
+      selected: option.selected === true,
+      windows,
+      ...(option.reason ? { reason: option.reason } : {}),
+    });
+  }
+  return {
+    requestedCapability: decision.requestedCapability,
+    requestedEffort,
+    mappedCandidates,
+    options,
+    ...(safeLabel(decision.selectedModel) ? { selectedModel: safeLabel(decision.selectedModel) } : {}),
+    ...(safeLabel(decision.selectedEffort) ? { selectedEffort: safeLabel(decision.selectedEffort) } : {}),
+    ...(safeLabel(decision.preferredModel) ? { preferredModel: safeLabel(decision.preferredModel) } : {}),
+    ...(decision.preferenceBypass ? { preferenceBypass: decision.preferenceBypass } : {}),
+  };
+}
+
 function projectCapacity(capacity: ProviderCapacity): ProviderRoutingProviderStatus | undefined {
   const provider = providerId(capacity.provider);
   if (!provider) return undefined;
@@ -155,6 +232,7 @@ function projectCapacity(capacity: ProviderCapacity): ProviderRoutingProviderSta
     const resetsAt = isoTime(candidate.resetsAt);
     windows.push({ name, usedPercent, ...(resetsAt ? { resetsAt } : {}) });
   }
+  const modelDecision = projectModelDecision(capacity);
   return {
     provider,
     readable: capacity.readable === true,
@@ -163,6 +241,7 @@ function projectCapacity(capacity: ProviderCapacity): ProviderRoutingProviderSta
     ...(safeLabel(capacity.accountLabel) ? { accountLabel: safeLabel(capacity.accountLabel) } : {}),
     ...(safeLabel(capacity.model) ? { model: safeLabel(capacity.model) } : {}),
     ...(safeLabel(capacity.effort) ? { effort: safeLabel(capacity.effort) } : {}),
+    ...(modelDecision ? { modelDecision } : {}),
   };
 }
 
@@ -187,12 +266,14 @@ function projectPolicy(policy: EffectiveProviderRoutingPolicy): ProviderRoutingP
       preference: "automatic",
       reservePercent: policy.committed.reservePercent,
       parks: [],
+      codexModelPreference: null,
     },
     enabledProviders: [...policy.enabledProviders],
     routableProviders: [...policy.routableProviders],
     preference: policy.preference,
     reservePercent: policy.reservePercent,
     parks: policy.parks.map((park) => ({ ...park })),
+    ...(policy.codexModelPreference ? { codexModelPreference: { ...policy.codexModelPreference } } : {}),
     ...(policy.overrideExpiresAt ? { overrideExpiresAt: policy.overrideExpiresAt } : {}),
     ...(policy.writtenAt ? { writtenAt: policy.writtenAt } : {}),
     ...(policy.writerFingerprint ? { writerFingerprint: policy.writerFingerprint } : {}),
@@ -278,6 +359,102 @@ function parseProviderList(value: unknown, allowEmpty = false): WorkerProviderId
   return providers;
 }
 
+function parseCodexPreference(value: unknown): ProviderRoutingPolicyStatus["codexModelPreference"] | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const raw = value as Record<string, unknown>;
+  const capability = raw.capability;
+  const effort = safeLabel(raw.effort);
+  const model = safeLabel(raw.model);
+  if (
+    (capability !== "economy" && capability !== "balanced" && capability !== "frontier") ||
+    !effort ||
+    !model
+  ) return undefined;
+  return { capability, effort, model };
+}
+
+function parseModelDecision(value: unknown): CodexModelDecisionStatus | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const raw = value as Record<string, unknown>;
+  const requestedCapability = raw.requestedCapability;
+  const requestedEffort = safeLabel(raw.requestedEffort);
+  if (
+    (requestedCapability !== "economy" && requestedCapability !== "balanced" && requestedCapability !== "frontier") ||
+    !requestedEffort ||
+    !Array.isArray(raw.mappedCandidates) ||
+    !Array.isArray(raw.options)
+  ) return undefined;
+  const mappedCandidates = raw.mappedCandidates.slice(0, MAX_CODEX_MODEL_OPTIONS)
+    .map(safeLabel).filter((candidate): candidate is string => candidate !== undefined);
+  if (mappedCandidates.length !== Math.min(raw.mappedCandidates.length, MAX_CODEX_MODEL_OPTIONS)) return undefined;
+  const options: CodexModelDecisionOptionStatus[] = [];
+  for (const candidate of raw.options.slice(0, MAX_CODEX_MODEL_OPTIONS)) {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return undefined;
+    const option = candidate as Record<string, unknown>;
+    const id = safeLabel(option.id);
+    if (
+      !id ||
+      !Array.isArray(option.supportedEfforts) ||
+      typeof option.accountDefault !== "boolean" ||
+      typeof option.mapped !== "boolean" ||
+      typeof option.eligible !== "boolean" ||
+      typeof option.selected !== "boolean" ||
+      !Array.isArray(option.windows)
+    ) return undefined;
+    const supportedEfforts = option.supportedEfforts.slice(0, 8)
+      .map(safeLabel).filter((effort): effort is string => effort !== undefined);
+    if (supportedEfforts.length !== Math.min(option.supportedEfforts.length, 8)) return undefined;
+    const windows: ProviderRoutingWindowStatus[] = [];
+    for (const rawWindow of option.windows.slice(0, MAX_WINDOWS_PER_PROVIDER)) {
+      if (!rawWindow || typeof rawWindow !== "object" || Array.isArray(rawWindow)) return undefined;
+      const window = rawWindow as Record<string, unknown>;
+      const name = safeLabel(window.name);
+      const usedPercent = safePercent(window.usedPercent);
+      const resetsAt = window.resetsAt === undefined ? undefined : isoTime(window.resetsAt);
+      if (!name || usedPercent === undefined || (window.resetsAt !== undefined && !resetsAt)) return undefined;
+      windows.push({ name, usedPercent, ...(resetsAt ? { resetsAt } : {}) });
+    }
+    const reason = option.reason;
+    if (
+      reason !== undefined &&
+      reason !== "unmapped" &&
+      reason !== "unsupported-effort" &&
+      reason !== "quota-unreadable" &&
+      reason !== "below-reserve"
+    ) return undefined;
+    options.push({
+      id,
+      ...(safeLabel(option.displayName) ? { displayName: safeLabel(option.displayName) } : {}),
+      supportedEfforts,
+      accountDefault: option.accountDefault,
+      mapped: option.mapped,
+      eligible: option.eligible,
+      selected: option.selected,
+      windows,
+      ...(reason ? { reason } : {}),
+    });
+  }
+  const preferenceBypass = raw.preferenceBypass;
+  if (
+    preferenceBypass !== undefined &&
+    preferenceBypass !== "unmapped" &&
+    preferenceBypass !== "unsupported-effort" &&
+    preferenceBypass !== "quota-unreadable" &&
+    preferenceBypass !== "below-reserve" &&
+    preferenceBypass !== "not-visible"
+  ) return undefined;
+  return {
+    requestedCapability,
+    requestedEffort,
+    mappedCandidates,
+    options,
+    ...(safeLabel(raw.selectedModel) ? { selectedModel: safeLabel(raw.selectedModel) } : {}),
+    ...(safeLabel(raw.selectedEffort) ? { selectedEffort: safeLabel(raw.selectedEffort) } : {}),
+    ...(safeLabel(raw.preferredModel) ? { preferredModel: safeLabel(raw.preferredModel) } : {}),
+    ...(preferenceBypass ? { preferenceBypass } : {}),
+  };
+}
+
 function parsePolicy(value: unknown): ProviderRoutingPolicyStatus | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const raw = value as Record<string, unknown>;
@@ -292,7 +469,8 @@ function parsePolicy(value: unknown): ProviderRoutingPolicyStatus | undefined {
     !Array.isArray(committedRaw.parks) ||
     committedRaw.parks.length !== 0 ||
     committedReserve === undefined ||
-    committedReserve >= 100
+    committedReserve >= 100 ||
+    (committedRaw.codexModelPreference !== undefined && committedRaw.codexModelPreference !== null)
   ) return undefined;
   const enabledProviders = parseProviderList(raw.enabledProviders);
   const routableProviders = parseProviderList(raw.routableProviders);
@@ -339,6 +517,10 @@ function parsePolicy(value: unknown): ProviderRoutingPolicyStatus | undefined {
     ) return undefined;
     fallback = { reason };
   }
+  const codexModelPreference = raw.codexModelPreference === undefined
+    ? undefined
+    : parseCodexPreference(raw.codexModelPreference);
+  if (raw.codexModelPreference !== undefined && !codexModelPreference) return undefined;
   return {
     provenance: raw.provenance,
     committed: {
@@ -346,12 +528,14 @@ function parsePolicy(value: unknown): ProviderRoutingPolicyStatus | undefined {
       preference: "automatic",
       reservePercent: committedReserve,
       parks: [],
+      codexModelPreference: null,
     },
     enabledProviders,
     routableProviders,
     preference,
     reservePercent,
     parks,
+    ...(codexModelPreference ? { codexModelPreference } : {}),
     ...(overrideExpiresAt ? { overrideExpiresAt } : {}),
     ...(writtenAt ? { writtenAt } : {}),
     ...(writerFingerprint ? { writerFingerprint } : {}),
@@ -388,6 +572,8 @@ function parseSnapshot(value: unknown, nowMs: number): ProviderRoutingStatus | u
       const resetsAt = isoTime(window.resetsAt);
       windows.push({ name, usedPercent, ...(resetsAt ? { resetsAt } : {}) });
     }
+    const modelDecision = row.modelDecision === undefined ? undefined : parseModelDecision(row.modelDecision);
+    if (row.modelDecision !== undefined && !modelDecision) return undefined;
     providers.push({
       provider,
       readable: row.readable,
@@ -398,6 +584,7 @@ function parseSnapshot(value: unknown, nowMs: number): ProviderRoutingStatus | u
       ...(safeLabel(row.accountLabel) ? { accountLabel: safeLabel(row.accountLabel) } : {}),
       ...(safeLabel(row.model) ? { model: safeLabel(row.model) } : {}),
       ...(safeLabel(row.effort) ? { effort: safeLabel(row.effort) } : {}),
+      ...(modelDecision ? { modelDecision } : {}),
     });
   }
   const freshness: ProviderRoutingFreshness =

@@ -12,10 +12,12 @@ import {
   ProviderCapacityBlockedError,
   selectWorkerProvider,
   type ProviderCapacity,
+  type CodexModelPreference,
   type ProviderSelection,
 } from "./worker-provider.js";
 
-export const PROVIDER_ROUTING_POLICY_VERSION = 1;
+export const PROVIDER_ROUTING_POLICY_VERSION = 2;
+const LEGACY_PROVIDER_ROUTING_POLICY_VERSION = 1;
 /** BACKSTOP: ordinary records are under 1 KiB; this caps hostile/corrupt state before parsing. */
 export const MAX_PROVIDER_ROUTING_POLICY_BYTES = 16 * 1024;
 /** PRIMARY CONTROL: every live override expires within one day even if no worker runs. */
@@ -41,11 +43,17 @@ export interface ProviderRoutingPolicyOverrideInput {
   preference: ProviderRoutingPreference;
   reservePercent: number;
   parks: ProviderPark[];
+  /** Omitted legacy payloads are equivalent to automatic model selection. */
+  codexModelPreference?: CodexModelPreference | null;
   expiresAt: string;
 }
 
-export interface ProviderRoutingPolicyOverrideRecord extends ProviderRoutingPolicyOverrideInput {
-  version: typeof PROVIDER_ROUTING_POLICY_VERSION;
+type ValidatedProviderRoutingPolicyOverride = Omit<ProviderRoutingPolicyOverrideInput, "codexModelPreference"> & {
+  codexModelPreference: CodexModelPreference | null;
+};
+
+export interface ProviderRoutingPolicyOverrideRecord extends ValidatedProviderRoutingPolicyOverride {
+  version: number;
   writtenAt: string;
   writerFingerprint: string;
 }
@@ -55,6 +63,7 @@ export interface CommittedProviderRoutingPolicy {
   preference: "automatic";
   reservePercent: number;
   parks: [];
+  codexModelPreference: null;
 }
 
 export interface EffectiveProviderRoutingPolicy {
@@ -66,6 +75,7 @@ export interface EffectiveProviderRoutingPolicy {
   preference: ProviderRoutingPreference;
   reservePercent: number;
   parks: ProviderPark[];
+  codexModelPreference?: CodexModelPreference;
   overrideExpiresAt?: string;
   writtenAt?: string;
   writerFingerprint?: string;
@@ -137,6 +147,7 @@ function committedPolicy(config: Pick<Config, "workerProviders">): CommittedProv
     preference: "automatic",
     reservePercent: config.workerProviders?.reservePercent ?? 5,
     parks: [],
+    codexModelPreference: null,
   };
 }
 
@@ -160,9 +171,17 @@ function validateInput(
   value: unknown,
   committed: CommittedProviderRoutingPolicy,
   nowMs: number,
-): ProviderRoutingPolicyOverrideInput {
+): ValidatedProviderRoutingPolicyOverride {
   if (!isRecord(value)) throw new ProviderRoutingPolicyError("provider routing policy must be a JSON object");
-  exactKeys(value, ["enabledProviders", "preference", "reservePercent", "parks", "expiresAt"], "provider routing policy");
+  const inputKeys = Object.keys(value).sort();
+  const legacyKeys = ["enabledProviders", "preference", "reservePercent", "parks", "expiresAt"].sort();
+  const currentKeys = [...legacyKeys, "codexModelPreference"].sort();
+  if (
+    (inputKeys.length !== legacyKeys.length || inputKeys.some((key, index) => key !== legacyKeys[index])) &&
+    (inputKeys.length !== currentKeys.length || inputKeys.some((key, index) => key !== currentKeys[index]))
+  ) {
+    throw new ProviderRoutingPolicyError("provider routing policy has unknown or missing keys");
+  }
 
   if (!Array.isArray(value.enabledProviders) || value.enabledProviders.length === 0) {
     throw new ProviderRoutingPolicyError("enabledProviders must contain at least one provider");
@@ -232,11 +251,34 @@ function validateInput(
     throw new ProviderRoutingPolicyError("preferred provider cannot be actively parked");
   }
 
+  let codexModelPreference: CodexModelPreference | null = null;
+  if (value.codexModelPreference !== null && value.codexModelPreference !== undefined) {
+    if (!isRecord(value.codexModelPreference)) {
+      throw new ProviderRoutingPolicyError("codexModelPreference must be a JSON object or null");
+    }
+    exactKeys(value.codexModelPreference, ["capability", "effort", "model"], "Codex model preference");
+    const { capability, effort, model } = value.codexModelPreference;
+    if (capability !== "economy" && capability !== "balanced" && capability !== "frontier") {
+      throw new ProviderRoutingPolicyError("Codex model preference capability is invalid");
+    }
+    if (typeof effort !== "string" || !/^[a-z][a-z0-9-]{0,31}$/.test(effort)) {
+      throw new ProviderRoutingPolicyError("Codex model preference effort is invalid");
+    }
+    if (typeof model !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:@-]{0,95}$/.test(model)) {
+      throw new ProviderRoutingPolicyError("Codex model preference model is invalid");
+    }
+    if (!routableProviders.includes("codex")) {
+      throw new ProviderRoutingPolicyError("Codex model preference requires Codex to be enabled and unparked");
+    }
+    codexModelPreference = { capability, effort, model };
+  }
+
   return {
     enabledProviders: closedEnabled,
     preference,
     reservePercent,
     parks,
+    codexModelPreference,
     expiresAt: value.expiresAt as string,
   };
 }
@@ -246,14 +288,17 @@ function validateRecord(
   committed: CommittedProviderRoutingPolicy,
 ): ProviderRoutingPolicyOverrideRecord {
   if (!isRecord(value)) throw new ProviderRoutingPolicyError("provider routing policy record must be a JSON object");
-  exactKeys(
-    value,
-    ["version", "enabledProviders", "preference", "reservePercent", "parks", "expiresAt", "writtenAt", "writerFingerprint"],
-    "provider routing policy record",
-  );
-  if (value.version !== PROVIDER_ROUTING_POLICY_VERSION) {
+  if (value.version !== PROVIDER_ROUTING_POLICY_VERSION && value.version !== LEGACY_PROVIDER_ROUTING_POLICY_VERSION) {
     throw new ProviderRoutingPolicyError("unsupported provider routing policy version");
   }
+  const legacy = value.version === LEGACY_PROVIDER_ROUTING_POLICY_VERSION;
+  exactKeys(
+    value,
+    legacy
+      ? ["version", "enabledProviders", "preference", "reservePercent", "parks", "expiresAt", "writtenAt", "writerFingerprint"]
+      : ["version", "enabledProviders", "preference", "reservePercent", "parks", "codexModelPreference", "expiresAt", "writtenAt", "writerFingerprint"],
+    "provider routing policy record",
+  );
   const writtenAtMs = parseTime(value.writtenAt, "writtenAt");
   if (typeof value.writerFingerprint !== "string" || !isSafeWriterFingerprint(value.writerFingerprint)) {
     throw new ProviderRoutingPolicyError("writerFingerprint must be a redacted token fingerprint or unknown");
@@ -264,6 +309,7 @@ function validateRecord(
       preference: value.preference,
       reservePercent: value.reservePercent,
       parks: value.parks,
+      codexModelPreference: legacy ? null : value.codexModelPreference,
       expiresAt: value.expiresAt,
     },
     committed,
@@ -357,7 +403,11 @@ export function resolveProviderRoutingPolicy(
     // A present but invalid JSON record is malformed, never equivalent to an absent override.
     return defaultPolicy(committed, "malformed");
   }
-  if (isRecord(parsed) && parsed.version !== PROVIDER_ROUTING_POLICY_VERSION) {
+  if (
+    isRecord(parsed) &&
+    parsed.version !== PROVIDER_ROUTING_POLICY_VERSION &&
+    parsed.version !== LEGACY_PROVIDER_ROUTING_POLICY_VERSION
+  ) {
     return defaultPolicy(committed, "unsupported-version");
   }
   let record: ProviderRoutingPolicyOverrideRecord;
@@ -388,6 +438,7 @@ export function resolveProviderRoutingPolicy(
     preference,
     reservePercent: record.reservePercent,
     parks: activeParks,
+    ...(record.codexModelPreference ? { codexModelPreference: { ...record.codexModelPreference } } : {}),
     overrideExpiresAt: record.expiresAt,
     writtenAt: record.writtenAt,
     writerFingerprint: record.writerFingerprint,

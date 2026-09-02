@@ -59,6 +59,7 @@ function input(over: Partial<ProviderRoutingPolicyOverrideInput> = {}): Provider
     parks: [{ provider: "claude", until: new Date(NOW + 30 * 60_000).toISOString() }],
     expiresAt: new Date(NOW + 60 * 60_000).toISOString(),
     ...over,
+    codexModelPreference: over.codexModelPreference ?? null,
   };
 }
 
@@ -89,6 +90,7 @@ test("policy store is bounded, atomic, mode-0600, live, expiring, clearable and 
   assert.equal(statSync(target).mode & 0o777, 0o600);
   assert.doesNotMatch(raw, /provider-policy-write-token|Authorization|request body|\/Users\/|\/home\//);
   assert.deepEqual(Object.keys(JSON.parse(raw)).sort(), [
+    "codexModelPreference",
     "enabledProviders",
     "expiresAt",
     "parks",
@@ -159,6 +161,20 @@ test("unsafe or unknown policy input is refused before any file is written", () 
     /not enabled by the committed host config/,
     "the console may disable a configured provider but never invent/enable an unconfigured one",
   );
+});
+
+test("a legacy policy payload without a model field preserves automatic Codex selection", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-provider-policy-legacy-input-"));
+  const legacy = { ...input({ parks: [] }) };
+  delete legacy.codexModelPreference;
+  const record = writeProviderRoutingPolicyOverride(root, legacy, {
+    config: config(root),
+    writerFingerprint: "0123456789ab",
+    now: () => NOW,
+  });
+  assert.equal(record.version, 2);
+  assert.equal(record.codexModelPreference, null);
+  assert.equal(resolveProviderRoutingPolicy(root, config(root), { now: () => NOW + 1 }).codexModelPreference, undefined);
 });
 
 test("preference rides the existing reserve/readability selector and falls back without relabelling its blocked error", () => {
