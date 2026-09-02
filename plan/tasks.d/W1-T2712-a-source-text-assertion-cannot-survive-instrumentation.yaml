@@ -1,0 +1,110 @@
+- id: W1-T2712
+  title: "THE NIGHTLY IS RED ON A ROTATION AND THE FILED REMEDY FIXES ONE FILE OF TWENTY-SIX — a test that asserts on the SOURCE TEXT of the module Stryker is mutating cannot pass in the sandbox, because Stryker must rewrite that text to mutate it; the plan must decline to measure such a module and NAME why, and the failure issue must stop truncating away the one line that says which config errored"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: "span"
+  budget_usd: 12.00
+  files:
+    - scripts/mutation-ratchet.mjs
+    - scripts/needs-human-issue.mjs
+    - .github/workflows/mutation-nightly.yml
+    - test/a-source-text-assertion-cannot-survive-instrumentation.test.ts
+  origin: "operator-brief#issue-3387-mutation-nightly-red-2026-09-02"
+  plan_refs: ["W1-T2587", "W1-T2514", "W1-T2524", "W1-T133"]
+  status: queued
+  attempts: 0
+  note: |
+    BAND. `risk: high` with `band_meaning: span` is Rule 19 SIZING, not blast radius: the `files:`
+    list crosses the plan script, the delivery script and the workflow because the defect is one
+    fact observed at three seams — a hazard the plan cannot see, a diagnostic the delivery drops,
+    and a step id the workflow never had. Splitting them would ship a fix whose evidence is
+    unreadable in the very issue that reports it.
+
+    WHY THIS IS NOT MORE W1-T2587. That task has the right diagnosis and the wrong scope: its
+    `files:` is `[test/triage-proof-dialect.test.ts, <its own falsifier>]`, one instance. MEASURED
+    across the three most recent scheduled failures — 2026-08-29 `cli-args.ts`/`repo-location.ts`,
+    08-31 `triage.ts`, 09-02 `cli-args.ts` — only 08-31 is inside that scope, so building it as
+    filed leaves the nightly red. 26 of this tree's 150 mutation candidates have a direct test
+    importer that reads their own source.
+  rationale: |
+    THE MECHANISM. Stryker mutates a file by REWRITING it. Verified in the 09-02 sandbox log:
+
+      export function unknownArgError(..., boolFlags: string[] =
+        stryMutAct_9fa48("0") ? ["Stryker was here"] : (
+
+    `test/cli-plumbing-extraction.test.ts` asserts that signature is byte-identical to the pre-move
+    declaration, reading `src/lib/cli-args.ts` with `readFileSync`. In the sandbox that text is
+    gone, so the DRY RUN aborts the config before a single mutant is scored:
+    `ERROR DryRunExecutor One or more tests failed in the initial test run`.
+
+    NEITHER SIDE IS WRONG, which is why this is an exclusion and not a repair. A byte-identical
+    signature pin is a legitimate assertion; instrumentation is how mutation testing works at all.
+
+    WHY THE EXISTING PRE-CHECK CANNOT SEE IT. `planNightlyRun` already excludes a module whose
+    importers "do not pass on unmutated source" — and they DO pass: verified, the cli-args test is
+    green on the real file. The call site's comment claimed that measurement was "Stryker's dry run
+    in all but name". It is not: this runs the REAL file, Stryker's runs an INSTRUMENTED copy. That
+    false premise is why three scheduled failures went undiagnosed, and correcting it is part of
+    the remedy.
+
+    THE DELIVERY HALF. Issue #3387's body is 65,538 chars — GitHub's cap — and its visible tail is
+    entirely `ok` lines from a later, passing config. `truncateBody` keeps the log's TAIL, and the
+    notify step wrote `failing step: … stryker_failed_configs=…` at the HEAD of the file it passed,
+    so the one actionable line was the first thing dropped. The same line carried
+    `scope=${steps.scope.outcome}`, naming a step id this job has never had (it is `plan`), so that
+    field rendered EMPTY in every delivery since it was written.
+
+  design: |
+    (i) A FOURTH NAMED EXCLUSION, in the shape the job already has. `planNightlyRun` excludes and
+    NAMES three cases; this adds a fourth for a module whose direct importer asserts on its own
+    source text, naming the importer. The workflow's own contract is "measures the files it can
+    measure and NAMES the ones it cannot"; this is that sentence applied to a case it did not know.
+
+    (ii) THE DISCRIMINATOR IS THE EXTENSION, exact here rather than heuristic: an import resolves
+    through the compiled specifier (`../src/lib/cli-args.js`), a source read names the TypeScript
+    file (`"cli-args.ts"`). The check is anchored on the quote so a longer sibling literal cannot
+    satisfy a shorter module's name.
+
+    (iii) BEFORE `measure`, NOT AFTER. A string scan costs nothing; `measure` spends a real test
+    command to learn nothing, because it cannot observe an instrumentation-sensitive failure.
+
+    (iv) ERRS TOWARD MEASURING LESS. A dynamically-built path is a false negative and still aborts
+    its config; a stray `<name>.ts` literal is a false positive and costs one unmeasured module.
+    Both under-measure, which is the safe direction for a score this job already calls a lower
+    bound. Never relaxes a gate: the ratchet's vacuous/invalid refusals are untouched.
+
+    (v) THE DIAGNOSTIC RIDES THE ENVELOPE. `buildBody` gains an optional `preamble` above the
+    `<details>`, never truncated, and the workflow passes the failing configs and per-step outcomes
+    through it instead of prepending them to the log. `truncateBody` keeps its tail-preserving
+    behaviour for the log itself, which is correct for every other caller.
+
+  acceptance:
+    - claim: "a module whose direct test importer asserts on its own source text is excluded from the nightly plan and the reason names that importer"
+      proof: "unit test: test/a-source-text-assertion-cannot-survive-instrumentation.test.ts"
+    - claim: "the check is decided before the expensive per-file measurement, which cannot observe an instrumentation-sensitive failure at all"
+      proof: "unit test: test/a-source-text-assertion-cannot-survive-instrumentation.test.ts"
+    - claim: "an importer that merely imports the module is still measured and included, so the check cannot empty the night into a vacuous score"
+      proof: "unit test: test/a-source-text-assertion-cannot-survive-instrumentation.test.ts"
+    - claim: "the three modules that reddened the scheduled runs are all caught against this repository's real test corpus"
+      proof: "unit test: test/a-source-text-assertion-cannot-survive-instrumentation.test.ts"
+    - claim: "the failing-config diagnostic survives a log far past GitHub's issue-body cap, and the workflow no longer reports a step id it does not have"
+      proof: "unit test: test/a-source-text-assertion-cannot-survive-instrumentation.test.ts"
+
+  falsifier: |
+    Close this task without implementation if a scheduled mutation-nightly run aborts a config with
+    `ERROR DryRunExecutor` for a reason OTHER than an importer asserting on the mutated file's
+    source text — that would mean the diagnosis is wrong rather than incomplete, and the exclusion
+    would be excluding the wrong population.
+
+    Re-design rather than build if Stryker gains a way to expose the ORIGINAL source to a test in
+    the sandbox: the incompatibility would then be removable rather than structural, and excluding
+    26 modules would be a permanent under-measurement bought for nothing.
+
+    Do NOT resolve this by relaxing the ratchet's vacuous-run or invalid-run refusals, and do NOT
+    resolve it by editing the 26 tests to tolerate instrumentation: the first is the weakening
+    W1-T2521 already forbids, and the second scales with the corpus and reds the nightly again the
+    next time anyone pins a signature.
