@@ -6192,8 +6192,15 @@ export interface PlanCriteriaAtHeadDivergence {
 }
 
 /** {@link resolvePlanCriteriaAtHead}'s result — same shape as run-task.ts's
- *  `resolvePlanCriteriaForReview` (criteria/source/taskDeclaredFiles/divergence) so swapping one
- *  call for the other at a future call site is a like-for-like replacement, not a rewrite. */
+ *  `resolvePlanCriteriaForReview` for FOUR of its five declared fields
+ *  (criteria/source/taskDeclaredFiles/divergence), so swapping one call for the other at a future
+ *  call site is a like-for-like replacement for those four, not a rewrite. The fifth,
+ *  `openTaskIds`, is NOT produced here — W1-T2623 proves-and-locks that omission as behaviorally
+ *  identical to the replaced resolver's own projection-less (empty-set) value at its one consumer,
+ *  rather than restoring it (see resolvePlanCriteriaForReview's own comment on why: a real value
+ *  would need a second, independent GitHub read this reviewer does not otherwise need). See
+ *  test/resolver-swap-field-parity.test.ts for the mechanical guard over ALL five fields, never
+ *  just these four. */
 export interface PlanCriteriaAtHeadResult {
   criteria: AcceptanceCriterion[];
   /** The `Remudero-Task:` trailer's id, when the body carried one. `undefined` when it did not
@@ -6238,6 +6245,50 @@ export interface PlanCriteriaAtHeadResult {
  * blob {@link loadPlanAtRef} needs is read exactly once (one `git show` per file, one
  * `git ls-tree` for the shard directory), never re-fetched.
  */
+/**
+ * W1-T2623: the OBJECT IDENTITY of the plan bytes THIS resolve actually read — restoring, on the
+ * at-head path, the read-identity assertion {@link "./task-linter.js".formatReadIdentity} already
+ * prints for the working-tree path (run-task.ts's `resolvePlanCriteriaForReview`, and lint-plan
+ * alongside it). Without this, the operator-visible `criteria from …` line named a task id and a
+ * count but never WHICH plan bytes were actually gated — a `source` string that looked like a
+ * read-identity assertion but was not one.
+ *
+ * At a fixed sha the plan is a content-addressed git object, so identity is the git OID rather
+ * than a hash of a working-tree file: `git rev-parse <sha>:<path>` answers it in one LOCAL call,
+ * on objects the caller's own hoisted fetch (W1-T2511) already arranged to be present — the same
+ * cheapest-sound-form this task's own design note names. The shard set `loadPlanAtRef` also
+ * consults is named too, as ONE tree oid (`git rev-parse <sha>:<tasks.d dir>`) rather than one
+ * blob oid per shard — a tree oid already hashes every shard's name AND content in a single call,
+ * cheaper than enumerating shards and exactly as sensitive to a shard changing.
+ *
+ * NEVER THROWS: an unreadable object here should not happen — {@link loadPlanAtRef} above already
+ * read these same bytes successfully — but a probe failure degrades to `undefined` rather than
+ * losing the whole `source` line over a legibility extra; the caller falls back to the
+ * task-id/count form. No `tasks.d/` at this ref (the pre-sharding case `loadPlanAtRef` itself
+ * tolerates) degrades the same way: the shard segment is simply omitted, never fabricated.
+ */
+function formatPlanReadIdentityAtHead(
+  runGit: (args: string[]) => string,
+  headSha: string,
+  planRelPath: string,
+): string | undefined {
+  let blobOid: string;
+  try {
+    blobOid = runGit(["rev-parse", `${headSha}:${planRelPath}`]).trim();
+  } catch {
+    return undefined;
+  }
+  const shardRelDir = join(dirname(planRelPath), "tasks.d");
+  let shardSuffix = "";
+  try {
+    const treeOid = runGit(["rev-parse", `${headSha}:${shardRelDir}`]).trim();
+    shardSuffix = ` + ${shardRelDir}/@${treeOid.slice(0, 12)}`;
+  } catch {
+    // No tasks.d/ at this ref — the same tolerance loadPlanAtRef itself applies to the shard dir.
+  }
+  return `${planRelPath}@${blobOid.slice(0, 12)}${shardSuffix}`;
+}
+
 export function resolvePlanCriteriaAtHead(
   body: string,
   repoRoot: string,
@@ -6252,6 +6303,12 @@ export function resolvePlanCriteriaAtHead(
   if (!trailerMatch) return { criteria: [] };
   const taskId = trailerMatch[1];
 
+  // Mirrors loadPlanAtRef's OWN default (plan.ts) exactly, including its `maxBuffer` — never a
+  // second, differently-configured git runner for the read-identity probes below.
+  const gitRunner =
+    runGit ??
+    ((args: string[]) => execFileSync("git", ["-C", repoRoot, ...args], { encoding: "utf8", maxBuffer: 1 << 26 }));
+
   try {
     const plan = runGit === undefined ? loadPlanAtRef(repoRoot, planRelPath, headSha) : loadPlanAtRef(repoRoot, planRelPath, headSha, runGit);
     const t = plan.byId.get(taskId);
@@ -6259,13 +6316,18 @@ export function resolvePlanCriteriaAtHead(
     // id resolves nowhere in the plan at this head — both read as `criteria: []`, same fail-closed
     // shape `judgeReview` already refuses to pass (claim 3 is proven at that composition, not here).
     const criteria = t?.acceptance?.length ? t.acceptance : [];
+    // W1-T2623: the read-identity probes only run when there is a `source` line to append them
+    // to — no extra git calls spent naming bytes nobody is about to be told were read.
+    const identity = criteria.length ? formatPlanReadIdentityAtHead(gitRunner, headSha, planRelPath) : undefined;
     return {
       criteria,
       taskId,
       taskDeclaredFiles: t?.files,
       taskRisk: t?.risk,
       taskBudgetUsd: t?.budget_usd,
-      source: criteria.length ? `plan at ${headSha} task ${taskId} (${criteria.length} criteria)` : undefined,
+      source: criteria.length
+        ? `plan at ${headSha} task ${taskId} (${criteria.length} criteria)` + (identity ? ` — read: ${identity}` : "")
+        : undefined,
     };
   } catch (e) {
     // A duplicate id or an unreadable git object at headSha — named, never swallowed into a

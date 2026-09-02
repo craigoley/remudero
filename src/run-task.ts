@@ -14078,13 +14078,22 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   let source = "NONE (fail closed — nothing to judge is never a pass)";
   const taskId = reviewTaskIdFromBody(body);
   // W1-T322: the same plan lookup this block already does for `criteria` also carries the
-  // task's declared scope + the plan's open-id set — advisory-only inputs judgeReview needs.
-  // Both stay `undefined` on ANY read/parse failure (see the catch below), exactly like
-  // `criteria` degrading to the body's Acceptance: block — never a reason to fail the review.
+  // task's declared scope — an advisory-only input judgeReview needs. Stays `undefined` on ANY
+  // read/parse failure (see the catch below), exactly like `criteria` degrading to the body's
+  // Acceptance: block — never a reason to fail the review.
   let taskDeclaredFiles: string[] | undefined;
   let taskRisk: TaskRisk | undefined;
   let taskBudgetUsd: number | undefined;
-  let openTaskIds: Set<string> | undefined;
+  // W1-T2623: PERMANENTLY `undefined` on THIS path, deliberately — `resolvePlanCriteriaAtHead`
+  // (lib/review.ts) has no `openTaskIds` field to assign from (the field the resolver it replaced,
+  // `resolvePlanCriteriaForReview`, DID carry — see that function's own comment on why: computing
+  // it here would be "a second, independent GitHub read this reviewer does not otherwise need").
+  // This is NOT a leftover of the swap: an absent set reaches `judgeReview`'s
+  // `openTaskIds ?? new Set()` exactly like the replaced resolver's own projection-less
+  // `openTaskIdsFromPlan(plan)` did (that function degrades to the empty set with no projection,
+  // documented on its own declaration) — the two are proven and LOCKED equivalent by
+  // test/resolver-swap-field-parity.test.ts, never restored to a real computed value here.
+  const openTaskIds: Set<string> | undefined = undefined;
   // W1-T2462: `resolvePlanCriteriaAtHead` (lib/review.ts) resolves this trailered PR's criteria
   // from the plan AS IT STANDS AT `view.headRefOid` rather than `resolvePlanCriteriaForReview`'s
   // `loadPlan(planPath)` read of the container's checked-out working tree. That working-tree read
