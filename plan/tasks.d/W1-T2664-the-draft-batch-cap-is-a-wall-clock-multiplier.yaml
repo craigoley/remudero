@@ -1,0 +1,63 @@
+- id: W1-T2664
+  title: "THE DRAFT BATCH CAP IS ALSO A WALL-CLOCK MULTIPLIER — runDraftRung awaits independent read-only Architect drafts sequentially, so the three-proposal safety cap turns a measured 316-second median proposal into a roughly 948-second sweep occupant and structurally crosses the daemon's 559-second await bound"
+  repo: remudero
+  depends_on: [W1-T2561, W1-T2569, W1-T2582]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 5.00
+  files:
+    - src/lib/inbox.ts
+    - test/inbox.test.ts
+  origin: "operator-session#overnight-sweep-wall-clock-review-2026-09-02"
+  plan_refs: ["W1-T192", "W1-T2561", "W1-T2569", "W1-T2582"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED IN SOURCE AND THE AZURE LEDGER ON 2026-09-02. `runDraftRung` uses a `for` loop and
+    awaits each proposal's complete spawn, parse, and bounded relint cycle before starting the next.
+    The workers are independent and restricted to Read/Grep/Glob in one read-only worktree.
+
+    The full sweep retriggered at 03:24:52Z, reached `inbox.draft_batch{drafting:3}` at 03:25:42Z,
+    and recorded one proposal at 03:31:35Z after 347,375ms. At 03:34:11Z the daemon emitted
+    `daemon.sweep.abandoned{elapsed_ms:559001,bound_ms:559000}` while the same batch was still
+    running. W1-T2569's retained corpus measured a 316-second median proposal and documented the
+    arithmetic explicitly: three sequential drafts occupy about 948 seconds. W1-T2582 correctly
+    prevents a second full sweep from overlapping the still-running first one, but that exclusion
+    also means the PR-reconciliation lane stays unavailable until the draft batch settles.
+
+    The falsifier was executed before implementation: a five-proposal fixture held the first spawn
+    open, flushed the microtask queue, and observed only one started proposal. If current main had
+    already run independent proposals concurrently, that count would have been three and this task
+    would have closed without a code change.
+
+    This is not permission to remove the volume bound. W1-T2561's cap remains the hard maximum on
+    active draft workers, including the manual inbox path that may present hundreds of proposals.
+    Provider/model selection and its headroom checks remain inside each existing `spawnWorker`
+    call; this task changes only scheduling among work the caller already admitted.
+  design: |
+    Factor the existing per-proposal body into one isolated async operation. Run those operations
+    through a three-lane indexed pool bounded by the existing `DAEMON_DRAFT_BATCH_CAP`, and write
+    each outcome into its input index so callers retain deterministic ordering. Keep retries for
+    one proposal serial and keep its existing try/catch, refusal classification, linting, and
+    ledger shapes unchanged.
+  acceptance:
+    - claim: "three independent proposals start before any one proposal finishes"
+      proof: "unit test: test/inbox.test.ts"
+    - claim: "a batch larger than the daemon cap never has more than three active draft workers"
+      proof: "unit test: test/inbox.test.ts"
+    - claim: "concurrent completion preserves the caller's proposal order in the returned outcomes"
+      proof: "unit test: test/inbox.test.ts"
+    - claim: "one proposal's exception remains isolated and does not strand the rest of the batch"
+      proof: "unit test: test/inbox.test.ts"
+    - claim: "one proposal's self-lint retries remain bounded and serial"
+      proof: "unit test: test/inbox.test.ts"
+  falsifier: |
+    Close without implementation if current main starts three held `runDraftRung` proposal spawns
+    before any of them resolves, or if the existing volume cap was intentionally documented as a
+    serial execution requirement rather than a maximum admitted count. The pre-change fixture
+    observed one started proposal, and W1-T2561 defines the cap as a volume bound, not serialization.
+  note: |
+    The id was atomically reserved at `refs/rmd-id/W1-T2664` before this shard was written.

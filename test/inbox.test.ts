@@ -1108,6 +1108,38 @@ test("runDraftRung: one proposal's spawn THROWING never strands the rest of the 
   assert.ok(logLines.some((l) => l.step === "inbox.draft_error" && l.extra?.proposal_id === "P-BAD"));
 });
 
+test("runDraftRung: independent proposals fill but never exceed the draft concurrency cap", async () => {
+  const anchor: EvidenceAnchor = { description: "x", pattern: "landed" };
+  const proposals: Proposal[] = ["P1", "P2", "P3", "P4", "P5"].map((id) => ({ id, summary: id, evidenceAnchors: [anchor] }));
+  let release!: () => void;
+  const barrier = new Promise<void>((resolve) => { release = resolve; });
+  let active = 0;
+  let maxActive = 0;
+  let started = 0;
+  const spawn: DraftSpawn = async () => {
+    started += 1;
+    active += 1;
+    maxActive = Math.max(maxActive, active);
+    await barrier;
+    active -= 1;
+    return fakeWorkerResult(VALID_DRAFT_TEXT);
+  };
+
+  const run = runDraftRung(proposals, "plan text", { spawn, log: () => {} }, "run-parallel");
+  await Promise.resolve();
+  await Promise.resolve();
+  try {
+    assert.equal(started, 3, "the pool fills the existing cap before any one proposal finishes");
+    assert.equal(maxActive, 3, "a larger manual batch cannot exceed the daemon's existing cap");
+  } finally {
+    release();
+  }
+  const outcomes = await run;
+  assert.deepEqual(outcomes.map((outcome) => outcome.proposalId), ["P1", "P2", "P3", "P4", "P5"], "results keep input order despite concurrent execution");
+  assert.equal(maxActive, 3, "later proposals reuse a lane instead of widening concurrency");
+  assert.ok(outcomes.every((outcome) => outcome.ok), "every independent proposal still completes");
+});
+
 test("W1-T192 acceptance fixture: a proposal with a fired trigger and an invalidated (reframed) draft is redrafted by the DAEMON path within two polls — `rmd inbox` is never referenced", async () => {
   // Mirrors the live fixture at filing: P34's reframe invalidated its cached draft
   // (state/inbox-drafts.json held zero P34 entries) and its trigger had already fired; the

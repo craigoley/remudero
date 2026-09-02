@@ -1257,7 +1257,10 @@ export type DraftRungOutcome =
 
 /**
  * Draft EVERY proposal in `toDraft` against `currentPlanText`, via {@link inboxDraftPrompt} +
- * {@link parseDraftedCandidate}. Each proposal's spawn+parse is isolated in its OWN try/catch
+ * {@link parseDraftedCandidate}. Independent proposals run concurrently up to
+ * {@link DAEMON_DRAFT_BATCH_CAP}; a single proposal's bounded self-lint retries remain serial.
+ * The same ceiling also protects the manual, unthrottled inbox caller from turning a large queue
+ * into unbounded simultaneous subscription use. Each proposal's spawn+parse is isolated in its OWN try/catch
  * — W1-T192's fail-soft requirement: a genuine spawn-level exception for one proposal (a
  * network hiccup, an API error — distinct from the "no FRAGMENT/STAMP markers" malformed-
  * output case, which was already tolerated pre-W1-T192) never prevents the REST of the batch
@@ -1303,8 +1306,7 @@ export function inboxDraftRelintPrompt(proposal: Proposal, fragmentYaml: string,
 }
 
 export async function runDraftRung(toDraft: Proposal[], currentPlanText: string, deps: DraftRungDeps, runId: string): Promise<DraftRungOutcome[]> {
-  const outcomes: DraftRungOutcome[] = [];
-  for (const proposal of toDraft) {
+  const draftOne = async (proposal: Proposal): Promise<DraftRungOutcome> => {
     try {
       let prompt = inboxDraftPrompt(proposal, currentPlanText, runId);
       let parsed: ReturnType<typeof parseDraftedCandidate> = null;
@@ -1354,15 +1356,14 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
               }
             : {}),
         });
-        outcomes.push({
+        return {
           proposalId: proposal.id,
           ok: false,
           error,
           ...(refusal
             ? { refused: { matched: refusal.matched, ...(refusal.resetsAtMs === undefined ? {} : { resetsAtMs: refusal.resetsAtMs }) } }
             : {}),
-        });
-        continue;
+        };
       }
       const candidate: DraftedCandidate = {
         proposalId: proposal.id,
@@ -1374,13 +1375,29 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
       // surface it NOT-READY, exactly as before this rung existed) — but the unresolved set is
       // named on the ledger so the retro/operator sees the rung tried and what it could not fix.
       deps.log("inbox.drafted", { proposal_id: proposal.id, lint_clean: violations.length === 0, unresolved_violations: violations.map((v) => v.message) });
-      outcomes.push({ proposalId: proposal.id, ok: true, candidate });
+      return { proposalId: proposal.id, ok: true, candidate };
     } catch (e) {
       const error = String((e as Error)?.message ?? e);
       deps.log("inbox.draft_error", { proposal_id: proposal.id, error });
-      outcomes.push({ proposalId: proposal.id, ok: false, error });
+      return { proposalId: proposal.id, ok: false, error };
     }
-  }
+  };
+
+  // W1-T2664: the daemon's volume cap was also an accidental wall-clock multiplier. Live
+  // evidence on 2026-09-02 showed three independent drafts starting sequentially inside one full
+  // sweep; one completed after 347s and the batch crossed the sweep's 559s await bound. A tiny
+  // indexed worker pool makes elapsed time approach the slowest proposal instead of their sum,
+  // while preserving input order and keeping the existing cap as the hard concurrency ceiling.
+  const outcomes = new Array<DraftRungOutcome>(toDraft.length);
+  let nextIndex = 0;
+  const runLane = async (): Promise<void> => {
+    while (nextIndex < toDraft.length) {
+      const index = nextIndex++;
+      outcomes[index] = await draftOne(toDraft[index]);
+    }
+  };
+  const concurrency = Math.min(DAEMON_DRAFT_BATCH_CAP, toDraft.length);
+  await Promise.all(Array.from({ length: concurrency }, () => runLane()));
   return outcomes;
 }
 
