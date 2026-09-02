@@ -1,0 +1,99 @@
+- id: W1-T2714
+  title: "AN ARMED GREEN PR IS REPORTED AS `blocked_ci` WHILE GITHUB IS MERGING IT — #3662's last poll named every check successful and `pending: []`, five unchanged clean polls then emitted a CI failure verdict, and the already-armed PR merged 30 seconds later"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 40.00
+  files: [src/run-task.ts, src/lib/run-result.ts, src/lib/block-reason.ts, src/lib/drain.ts, src/lib/daemon.ts, src/lib/retro.ts, test/green-pr-awaiting-merge.test.ts]
+  origin: "operator-session#green-pr-falsely-blocked-ci-2026-09-02"
+  plan_refs: ["W1-T125", "W1-T382", "W1-T976", "W1-T1211", "W1-T2274"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED LIVE ON #3662 / W1-T2618, 2026-09-02. The run's `pr.polling` row at
+    14:13:52.884Z listed every check terminal: required checks were `SUCCESS`, `osv-scanner` was
+    `NEUTRAL`, and `remudero-review` was `SUCCESS`. The next terminal row at 14:14:23.717Z was
+    `pr.stalled` with `pending: []`, immediately followed by `verdict: blocked_ci (no progress for
+    5 consecutive polls)`. GitHub records the same already-armed head merged at 14:14:53Z, thirty
+    seconds after the false block. No check failed and no check was pending.
+
+    OBSERVED MECHANISM ON MAIN AT 7e563e61. `pollToGate` runs only after CI, review, the capped
+    gate and risk judge passed and `armAutoMergeAtOpen` was called. It asks
+    `checkWaitStalled` whether the last five rollups are unchanged. That predicate correctly
+    reports a quiescent rollup as stalled and returns the still-pending names. The caller loses
+    the distinction: when `pending` is empty, it still returns `merged: false`; `runTask` maps
+    every non-merged `GateOutcome` to `blocked_ci`. Therefore "GitHub has not materialized the
+    armed merge yet" and "CI cannot finish" share one terminal verdict even though the evidence
+    already distinguishes them.
+
+    THIS IS NOT A REQUEST TO CLAIM A MERGE EARLY. A green, armed, open PR is not merged, must not
+    receive merge credit, must not release dependent tasks, and must stay visible to the sweep.
+    It is also not a CI failure and must not spend the blocked-CI fix rung. The honest state is a
+    distinct `awaiting_merge` run outcome: this worker has finished useful work, GitHub owns the
+    already-authorized material transition, and the next ordinary projection/sweep will confirm
+    whether that transition actually happened.
+
+    KEEP THE PROGRESS BOUND. `STALL_WINDOW = 5` and `checkWaitStalled` are not widened. Five
+    identical polls with a genuinely pending check still return `blocked_ci` naming that check;
+    any terminal failure still returns `blocked_ci` immediately. Only the already-derived empty
+    pending set after the post-arm poll changes class. This releases the expensive worker lane
+    instead of waiting indefinitely on GitHub and avoids inventing a second time limit.
+
+    THE NEW OUTCOME NEEDS END-TO-END SEMANTICS, NOT A STRING RENAME. It is non-crediting and
+    non-halting. Drain must continue past it without re-offering the same task in that pass.
+    Daemon block reasoning must neither retry the implementation nor spend a strike/fix worker;
+    the next fresh open-PR/merged projection owns the disposition. If the PR later merges,
+    existing W1-T976 merge-credit correction is the only authority that may promote it. If the
+    PR later becomes red or loses its arm, the ordinary sweep sees that material state and acts.
+
+    PRESERVE OPERATOR CONTROL. This task never force-merges, re-arms, disarms, closes, deploys,
+    starts, stops or recycles anything. Manual squash/override remains available. The change is
+    classification and lane release after an arm already passed every existing gate.
+  design: |
+    Extend `GateOutcome` so the stalled branch preserves whether any check is actually pending.
+    In the post-arm `pollToGate` caller, an unchanged rollup with `pending.length === 0` returns a
+    closed `awaiting_merge` outcome; a non-empty pending list and every red conclusion preserve
+    today's blocked-CI outcome. Ledger the PR URL, head SHA, arm outcome, terminal check summary
+    and the exact reason, bounded and credential-free.
+
+    Add `awaiting_merge` to `RunResult` as a first-class non-merged verdict. Thread one explicit
+    non-failure disposition through block reasoning, the single- and multi-lane drain paths and
+    daemon result processing. It consumes no retry or fix strike, does not mutate the plan task to
+    blocked, does not credit merge, and does not re-dispatch the same task in the current pass.
+    The next tick re-derives open/merged state through the existing projection; no new GitHub read
+    path is added. Include the verdict in the bounded run/retro vocabulary so telemetry can count
+    it separately from real blocked CI.
+
+    Keep all current fail-closed controls: a missing/unknown conclusion never becomes green, a
+    genuinely pending quiescent rollup still stalls as blocked CI, a terminal red check still
+    blocks immediately, and a closed-unmerged PR is not awaiting merge. Do not infer material
+    merge from auto-merge being armed.
+  acceptance:
+    - claim: "five unchanged post-arm polls with every observed check terminal green and no pending names end as awaiting_merge rather than blocked_ci"
+      proof: "unit test: test/green-pr-awaiting-merge.test.ts"
+    - claim: "awaiting_merge remains merged false and receives no task merge credit until a later material merged projection says otherwise"
+      proof: "unit test: test/green-pr-awaiting-merge.test.ts"
+    - claim: "a quiescent rollup with a genuinely pending check still returns blocked_ci naming that check, and a terminal failure still blocks immediately"
+      proof: "unit test: test/green-pr-awaiting-merge.test.ts"
+    - claim: "single-lane drain, parallel drain and daemon processing neither halt, retry implementation nor spend a fix strike for awaiting_merge"
+      proof: "unit test: test/green-pr-awaiting-merge.test.ts"
+    - claim: "the current pass does not re-offer the same awaiting-merge task and the next tick re-derives open or merged state through the existing projection"
+      proof: "unit test: test/green-pr-awaiting-merge.test.ts"
+    - claim: "the ledger distinguishes awaiting_merge from blocked_ci with bounded PR/head/check evidence and records no credential, token or raw API payload"
+      proof: "unit test: test/green-pr-awaiting-merge.test.ts"
+    - claim: "the change performs no merge, arm, disarm, close or daemon/container lifecycle action"
+      proof: "unit test: test/green-pr-awaiting-merge.test.ts"
+  falsifier: |
+    Close without implementation if current main already emits a distinct non-crediting,
+    non-striking outcome when `pollToGate` reaches an unchanged post-arm rollup with no pending or
+    failing checks, and the daemon/drain wait for a later material merge projection. A later sweep
+    correcting a false `blocked_ci` row after it was emitted does not falsify the task.
+  note: |
+    W1-T2714 was atomically reserved at `refs/rmd-id/W1-T2714` before this file was written.
+    `risk: high`, `band_meaning: span` reflects one verdict crossing the run, drain, daemon and
+    telemetry state machines. The production change should remain small at each site; omitting a
+    consumer would be more dangerous than declaring the full span.
