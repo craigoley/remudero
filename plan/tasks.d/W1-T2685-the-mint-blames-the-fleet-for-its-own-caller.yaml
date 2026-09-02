@@ -1,0 +1,55 @@
+- id: W1-T2685
+  title: "THE MINT ATTRIBUTES EVERY RESERVATION IT DID NOT MAKE TO `the fleet`, INCLUDING THE CALLER'S OWN PRIOR ONES, AND ITS ADVISORY LINE NEVER MOVES — MEASURED 2026-09-02: four sequential `--reserve` calls each re-printed the SAME advisory id while walking to the 8th attempt, and every id the operator had reserved seconds earlier was reported as held by another caller"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 10.00
+  files: [src/run-task.ts, test/the-mint-blames-the-fleet-for-its-own-caller.test.ts]
+  origin: "operator-session#mint-misattributes-its-own-reservations-2026-09-02"
+  plan_refs: ["W1-T1055"]
+  status: queued
+  attempts: 0
+  rationale: |
+    W1-T1055 FIXED THE RACE AND LEFT THE REPORTING. `--reserve` shipped as #2312 and the push IS
+    the claim, so the ids are correct. What this task fixes is what the verb SAYS while claiming
+    them, which is wrong in two independent ways.
+
+    ONE: THE ATTRIBUTION IS A GUESS DRESSED AS A FACT. The holder branch classifies an anchor it
+    did not write as `HELD BY ANOTHER CALLER — the fleet (an `rmd-id reservation <pid>@<container>`
+    anchor)`. It reads the anchor SHAPE, never the identity inside it, so an id this same operator
+    reserved four seconds ago on this same host reads as the fleet's. MEASURED 2026-09-02, a
+    four-iteration loop: call 2 reported W1-T2685 — reserved by call 1 of the same loop — as held
+    by the fleet, and calls 3 and 4 did the same for 2686 and 2687. CLAUDE.md already records the
+    underlying gap from the other direction: "Only the message's pid+host+time named the winner;
+    the ref has no identity field." The data to answer this is in the anchor and unread.
+
+    TWO: THE ADVISORY LINE IS FROZEN AT THE FIRST FREE ID. Every one of the four calls printed
+    `W1-T2681 (max 2680 across ...)` while the ids actually held marched 2685, 2686, 2687, 2688.
+    The `(note: the advisory mint printed X; Y is the id actually HELD)` line exists precisely
+    because the first line is wrong — a correction printed beneath a figure rather than a figure
+    that is right. An operator reading the top line of the last call would take an id four behind
+    the frontier.
+
+    THE COST IS A WRONG DECISION, NOT AN UGLY LOG. "Held by the fleet" is what an operator reads
+    before deciding whether an id is contested — and a contested reservation is never deleted while
+    an abandoned one is an operator decision. Telling someone the fleet holds an id they hold
+    themselves points that decision the wrong way.
+
+    THE FIX IS TO READ WHAT IS ALREADY WRITTEN. The anchor carries the writer; compare it against
+    this process before naming a holder, and say `HELD BY THIS CALLER` when it matches. Recompute
+    the advisory figure per attempt so the printed id is the one the next attempt would take.
+    Neither changes which id is reserved.
+  acceptance:
+    - claim: "an anchor written by this same caller is reported as held by this caller, never attributed elsewhere"
+      proof: "unit test: test/the-mint-blames-the-fleet-for-its-own-caller.test.ts"
+    - claim: "an anchor written by a different caller is still reported as another caller's, unchanged"
+      proof: "unit test: test/the-mint-blames-the-fleet-for-its-own-caller.test.ts"
+    - claim: "an anchor whose holder cannot be read still reports the unreadable-shape case, never a guess"
+      proof: "unit test: test/the-mint-blames-the-fleet-for-its-own-caller.test.ts"
+    - claim: "the advisory figure is recomputed per attempt, so it names the id the next attempt would take"
+      proof: "unit test: test/the-mint-blames-the-fleet-for-its-own-caller.test.ts"
+    - claim: "the id actually reserved is unchanged by either correction"
+      proof: "unit test: test/the-mint-blames-the-fleet-for-its-own-caller.test.ts"
