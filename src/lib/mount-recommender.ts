@@ -92,12 +92,16 @@ export interface MountHeadroomArm {
   costMax: number | null;
   costPerCompletedTaskUsd: number | null;
   /** This arm's OWN window-share evidence (W1-T2577) — see routing-objective.ts. Optional and
-   *  structural, same discipline as every other field here: the production sweep does not emit
-   *  this yet, so this PR is the objective/recommender PRECURSOR rather than a claim that live
-   *  routing already consumes window evidence. A caller that has not wired material evidence
-   *  through omits it, and {@link routingObjectiveFor} falls back to the dollar objective loudly,
-   *  exactly as it does for any other unreadable window. */
+   *  structural, same discipline as every other field here. */
   windowShare?: ArmWindowShare;
+  /** Material coverage behind `windowShare`; absent on older/hand-built callers. */
+  windowEvidence?: {
+    eligibleCalls: number;
+    measuredCalls: number;
+    unreadableCalls: number;
+    reasons: string[];
+    newestMeasurementTs?: string;
+  };
 }
 
 /** The `scripts/mount-headroom-sweep.mjs` comparison shape — see {@link MountHeadroomArm}'s own
@@ -175,7 +179,14 @@ export interface MountRecommendation {
    *  when a subscription's window could not be read (a LOUD fallback, never silent — see
    *  {@link routingObjectiveFor}). `cheaperValue`/`costlierValue` are in `unit`, never dollars
    *  when `kind` is `"window-share"`. */
-  objective: { kind: RoutingObjectiveKind; unit: string; cheaperValue: number; costlierValue: number };
+  objective: {
+    kind: RoutingObjectiveKind;
+    unit: string;
+    cheaperValue: number;
+    costlierValue: number;
+    /** Present only when a subscription comparison could not use complete window evidence. */
+    fallbackReasons?: string[];
+  };
   note: string;
 }
 
@@ -360,6 +371,15 @@ function evaluateComparison(
     return refuse(cell, "tier-invariant", `${cheaperArm.armKey} in cell ${cell.cellKey}: ${violation}`);
   }
 
+  if (cheaperArm.costPerCompletedTaskUsd === null || costlierArm.costPerCompletedTaskUsd === null) {
+    return refuse(
+      cell,
+      "insufficient-cost-data",
+      `${cheaperArm.armKey} vs ${costlierArm.armKey} in cell ${cell.cellKey}: one or both arms have no settled ` +
+        `cost-per-completed-task figure to compare.`,
+    );
+  }
+
   // THE REAL OBJECTIVE (W1-T2577, routing-objective.ts): the sweep above judged "cheaper" purely
   // on notional dollars. Under billing_mode == "subscription" the resource that actually runs out
   // is the WINDOW, and with two providers there are two independent ones — so re-judge each arm
@@ -376,11 +396,8 @@ function evaluateComparison(
     billingMode,
     { warn },
   );
-  if (
-    cheaperObjective?.kind === "window-share" &&
-    costlierObjective?.kind === "window-share" &&
-    cheaperObjective.value >= costlierObjective.value
-  ) {
+  const bothWindow = cheaperObjective?.kind === "window-share" && costlierObjective?.kind === "window-share";
+  if (bothWindow && cheaperObjective.value >= costlierObjective.value) {
     return refuse(
       cell,
       "objective-disagreement",
@@ -392,12 +409,18 @@ function evaluateComparison(
     );
   }
 
-  if (cheaperArm.costPerCompletedTaskUsd === null || costlierArm.costPerCompletedTaskUsd === null) {
-    return refuse(
-      cell,
-      "insufficient-cost-data",
-      `${cheaperArm.armKey} vs ${costlierArm.armKey} in cell ${cell.cellKey}: one or both arms have no settled ` +
-        `cost-per-completed-task figure to compare.`,
+  // A comparison has ONE unit. If either subscription arm lacks a complete provider-owned
+  // window reading, compare both arms in notional dollars and name the fallback; never label one
+  // arm's dollars as the other arm's percent. API billing always uses dollars outright.
+  const fallbackReasons = billingMode === "subscription" && !bothWindow
+    ? [cheaperObjective?.fallbackReason, costlierObjective?.fallbackReason]
+        .filter((reason): reason is string => typeof reason === "string")
+    : [];
+  if (billingMode === "subscription" && !bothWindow && fallbackReasons.length < 2) {
+    fallbackReasons.push("both compared arms need complete window-share evidence; mixed objective units are refused");
+    warn?.(
+      `${cheaperArm.armKey} vs ${costlierArm.armKey} in cell ${cell.cellKey}: both arms do not have comparable ` +
+        `window-share evidence — using notional dollars for BOTH arms rather than mixing percent and USD.`,
     );
   }
 
@@ -422,16 +445,10 @@ function evaluateComparison(
 
   const effectSizeUsd = round2(costlierArm.costPerCompletedTaskUsd - cheaperArm.costPerCompletedTaskUsd);
 
-  // cheaperObjective is guaranteed defined here: costPerCompletedTaskUsd is non-null on both arms
-  // (just checked above), so routingObjectiveFor's dollar branch (direct under billing_mode ==
-  // "api", or the loud fallback under "subscription") always resolves.
-  const objective = cheaperObjective ?? {
-    kind: "notional-dollar" as const,
-    value: cheaperArm.costPerCompletedTaskUsd,
-    provider: cheaperArm.provider,
-    unit: "usd-per-completed-task" as const,
-  };
-  const objectiveCostlierValue = costlierObjective?.kind === objective.kind ? costlierObjective.value : costlierArm.costPerCompletedTaskUsd;
+  const objectiveKind: RoutingObjectiveKind = bothWindow ? "window-share" : "notional-dollar";
+  const objectiveUnit = bothWindow ? "percent-per-completed-task" : "usd-per-completed-task";
+  const objectiveCheaperValue = bothWindow ? cheaperObjective.value : cheaperArm.costPerCompletedTaskUsd;
+  const objectiveCostlierValue = bothWindow ? costlierObjective.value : costlierArm.costPerCompletedTaskUsd;
 
   return {
     kind: "recommendation",
@@ -443,13 +460,20 @@ function evaluateComparison(
     currentArm: armSummary(costlierArm, costlierArm.costPerCompletedTaskUsd),
     effectSizeUsd,
     interval,
-    objective: { kind: objective.kind, unit: objective.unit, cheaperValue: objective.value, costlierValue: objectiveCostlierValue },
+    objective: {
+      kind: objectiveKind,
+      unit: objectiveUnit,
+      cheaperValue: objectiveCheaperValue,
+      costlierValue: objectiveCostlierValue,
+      ...(fallbackReasons.length ? { fallbackReasons } : {}),
+    },
     note:
       `cell ${cell.cellKey} (type=${cell.type}, risk=${cell.risk}, class=${cell.taskClass}): ${cheaperArm.armKey} ` +
       `(n=${cheaperArm.n}) costs $${cheaperArm.costPerCompletedTaskUsd}/completed task vs ${costlierArm.armKey} ` +
       `(n=${costlierArm.n}) at $${costlierArm.costPerCompletedTaskUsd} — effect size $${effectSizeUsd} ` +
       `(interval [$${interval.lowUsd}, $${interval.highUsd}]), advantage holds under re-dispatch, pass rate ` +
-      `does not regress, Tier Invariant clears, objective=${objective.kind} (§9). ${OBSERVATIONAL_EVIDENCE_NOTICE}`,
+      `does not regress, Tier Invariant clears, objective=${objectiveKind} (§9)` +
+      `${fallbackReasons.length ? `; fallback=${fallbackReasons.join(" | ")}` : ""}. ${OBSERVATIONAL_EVIDENCE_NOTICE}`,
   };
 }
 
@@ -555,6 +579,7 @@ export function mountRecommendationProposalCandidate(rec: MountRecommendation): 
       `$${rec.interval.highUsd}]).\n` +
       `Objective: ${rec.objective.kind} (${rec.objective.cheaperValue} vs ${rec.objective.costlierValue} ${rec.objective.unit}) — ` +
       `§9: the scarce resource on subscription is the window, not the notional dollar.\n` +
+      `${rec.objective.fallbackReasons?.length ? `Fallback: ${rec.objective.fallbackReasons.join(" | ")}\n` : ""}` +
       `Tier Invariant (G-17) checked and clears for '${rec.recommendedArm.servedModel}'.\n` +
       `${OBSERVATIONAL_EVIDENCE_NOTICE}\n` +
       `This proposal changes nothing by itself — ratifying it (\`rmd approve\`) is what opens the ` +
