@@ -1,0 +1,113 @@
+- id: W1-T2738
+  title: "A NEW ci.yml JOB CANNOT SHIP ITS OWN REGISTRATION, AND W1-T2521's CARVE-OUT CANNOT REACH IT — `isIntroducingCensusGate` requires the INSTRUMENT PATH itself to be a brand-new file, so a job added to the EXISTING `.github/workflows/ci.yml` is refused however new the job, its script and its `CI_PARITY_TABLE` entry are; and `test/preflight-ci-parity.test.ts` asserts the table in BOTH directions, so neither split ordering lands either — three orderings, three refusals"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 16.00
+  files: [src/lib/review.ts, test/a-new-ci-yml-job-cannot-ship-its-own-registration.test.ts]
+  origin: "operator-session#unwired-gate-class-2026-09-02"
+  plan_refs: ["W1-T2521", "W1-T402", "W1-T2491", "W1-T2488", "W1-T2735"]
+  status: queued
+  attempts: 0
+  rationale: |
+    W1-T2521 SHIPPED A CARVE-OUT FOR THIS CIRCULARITY. IT DOES NOT REACH A ci.yml JOB, AND THE
+    MEASUREMENT SEPARATES THE TWO CASES BY ONE FACT: WHETHER THE INSTRUMENT PATH IS A NEW FILE.
+    Three calls to the SHIPPED `detectInstrumentEntanglement`, at origin/main:
+
+      CONTROL   new scripts/foo-ratchet.mjs + a CI_PARITY_TABLE add naming its stem
+                -> entangled: FALSE          (W1-T2521's carve-out fires — it works)
+      THE GAP   a new ci.yml JOB + new scripts/unwired-gate-check.mjs + its parity entry
+                -> entangled: TRUE           (instrumentPaths: [.github/workflows/ci.yml])
+      NEGATIVE  ci.yml edited beside an ordinary src/lib/drain.ts statement
+                -> entangled: TRUE           (the carve-out is not simply always-on)
+
+    THE MECHANISM, EXACTLY. `isIntroducingCensusGate(diff, diffFiles, scriptFile)` is applied
+    PER INSTRUMENT PATH (`instrumentPaths.filter(...)`) and its second condition is
+    `fileIsNewInDiff(diff, scriptFile)` — the INSTRUMENT path must carry git's `new file mode` /
+    `--- /dev/null` marker. A job added to `.github/workflows/ci.yml` is an EDIT of a file that has
+    existed since the repo did, so that condition is false no matter how new the job, the script
+    and the registration are. The carve-out's own doc names the shapes it deliberately excludes
+    ("an existing script re-registered", "a new script whose registration is not part of this
+    diff", "a new script alongside an unrelated `src/` edit"); THIS shape is none of them, and is
+    excluded only as a side effect of keying newness on the instrument FILE rather than on the
+    REGISTERED UNIT.
+
+    AND THE SPLIT ORDERINGS ARE CLOSED FROM A SECOND DIRECTION W1-T2521's RATIONALE DOES NOT NAME.
+    It states the alternative ordering's blocker as instrument-surface-completeness. For a ci.yml
+    JOB the blocker is stronger and symmetric — `test/preflight-ci-parity.test.ts` asserts the
+    table BOTH ways:
+      entry BEFORE the job : "ci-parity table: carries no entry for a job ci.yml does not define
+                             (the table cannot silently grow ahead of the workflow either)"
+      entry AFTER the job  : "every REAL ci.yml job has an entry, either mirrored (with a run())
+                             or excluded (with a reason) — no entry is silently absent"
+    Both fail on `main`, not merely on the PR, so neither half can land alone. With entanglement
+    closing the third ordering, a new ci.yml job has NO admissible sequence.
+
+    OBSERVED, NOT THEORISED. W1-T2735 hit this building the unwired-gate guard on 2026-09-02 and
+    shipped into `.github/workflows/unwired-gate.yml` instead, leaving ci.yml byte-identical to
+    main. That route works and needs no parity entry (`CI_PARITY_TABLE` is scoped to ci.yml by
+    design), and it is the direction `ci-gate.yml`'s own header already states. But it is a
+    WORKAROUND CHOSEN UNDER DURESS, and it has a cost the next author will pay silently: a gate
+    outside ci.yml is outside `--ci-parity`'s mirror, so `rmd preflight --ci-parity` no longer
+    shells every gate CI runs. The local gate drifts from CI one file at a time, which is the
+    exact property W1-T294 built it for.
+
+    THIS IS THE SAME CLASS AS W1-T2735 ONE LEVEL UP. That task refuses gate-shaped instruments
+    nothing invokes; the fence that manufactured them also refuses the ordinary way to wire a new
+    one. A repository whose remedy for an unwired gate is "wire it" must leave wiring reachable.
+  design: |
+    (i) NOT PRE-JUDGED, deliberately, on W1-T2521's own precedent — that shard named a candidate
+    remedy and left the decision to the build, and the same discipline applies here because the
+    predicate being edited is the one that refuses PRs for entanglement.
+
+    (ii) THE CANDIDATE, STATED SO IT CAN BE ARGUED WITH. Key the carve-out on the REGISTERED UNIT
+    being new rather than on the instrument FILE being new: for `.github/workflows/*.yml`, a job
+    whose name appears only in ADDED lines of that file, whose `CI_PARITY_TABLE` entry is also an
+    ADD in the same diff, and whose script is brand-new, is an introducing commit by the same
+    argument W1-T2521 already accepted — there is no prior version of that job for anything to have
+    been mis-graded against. This is narrower than exempting workflow edits wholesale, and it must
+    NOT admit a diff that edits an EXISTING job's steps.
+
+    (iii) THE NEGATIVE CONTROL IS THE POINT, NOT A FORMALITY. W1-T2521's own risk note is the right
+    one here: too wide a carve-out silently retires Rule 25. The build must pin, with a failing
+    fixture, that an existing ci.yml job edited beside ordinary `src/` code is STILL refused, and
+    that a new job added beside an UNRELATED `src/` change gets no carve-out.
+
+    (iv) VERIFY AGAINST THE SHIPPED PREDICATE, WITH A REAL DIFF, AND CONTROL BOTH WAYS. A synthetic
+    hunk is not evidence here — twice while measuring this, a hand-written diff gave the wrong
+    answer: once for lacking a `diff --git` header (so its `src/` side never registered as
+    executable), once for a parity add line that did not cite the script's stem, which made the
+    POSITIVE CONTROL read `entangled: true` and briefly looked like the carve-out was broken. Every
+    claim needs a positive control that fires and a negative control that does not.
+
+    (v) NOT IN SCOPE. Changing `CI_PARITY_TABLE`'s ci.yml scoping, relaxing either direction of
+    `test/preflight-ci-parity.test.ts` (both are correct and neither should be weakened to make
+    this pass), adding any gate, and migrating W1-T2735's workflow file back into ci.yml.
+  acceptance:
+    - claim: "a diff that adds a new ci.yml job, its brand-new script, and its CI_PARITY_TABLE entry together is not refused as entangled"
+      proof: "unit test: test/a-new-ci-yml-job-cannot-ship-its-own-registration.test.ts"
+    - claim: "the positive control W1-T2521 already carves out still reads not-entangled, so this change extends that carve-out rather than replacing it"
+      proof: "unit test: test/a-new-ci-yml-job-cannot-ship-its-own-registration.test.ts"
+    - claim: "an EXISTING ci.yml job whose steps are edited beside ordinary src code is still refused, so Rule 25 is not retired by the widening"
+      proof: "unit test: test/a-new-ci-yml-job-cannot-ship-its-own-registration.test.ts"
+    - claim: "a new ci.yml job beside an unrelated src change, with no matching parity entry added, gets no carve-out"
+      proof: "unit test: test/a-new-ci-yml-job-cannot-ship-its-own-registration.test.ts"
+    - claim: "every fixture is a real diff carrying git's own new-file and hunk headers, and each claim runs against both a control that fires and one that does not"
+      proof: "unit test: test/a-new-ci-yml-job-cannot-ship-its-own-registration.test.ts"
+  falsifier: |
+    Close without implementation if `detectInstrumentEntanglement` at origin/main already reads
+    `entangled: false` for a diff adding a ci.yml job, its new script and its parity entry together
+    — that is the exact call the rationale measures as TRUE, so re-run it before building. Also
+    close if `test/preflight-ci-parity.test.ts` no longer asserts the table in both directions, since
+    the split orderings would then be open and no carve-out would be needed. Relaxing either parity
+    direction, or exempting `.github/workflows/` from the instrument surface, does NOT falsify this
+    task: both remove the refusal by removing the check, which is the failure mode design (iii)
+    exists to prevent.
+  note: |
+    W1-T2738 was atomically reserved at `refs/rmd-id/W1-T2738` by the operator (1 attempt). The
+    advisory mint printed W1-T2736; W1-T2738 is the id actually HELD, and W1-T2736/W1-T2737 are
+    held by other reservations. Sibling to W1-T2735, not a re-file: that task refuses gate-shaped
+    instruments nothing invokes, this one restores the ability to wire one into ci.yml.
