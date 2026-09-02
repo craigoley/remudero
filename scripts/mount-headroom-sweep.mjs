@@ -310,21 +310,28 @@ const ARM_DONE_STEPS = new Set(["recon.done", "implement.done", "implement.resum
  *     provider named nothing, W1-T2572's own honest-unknown) and `"unknown"` only when the key is
  *     absent altogether (a ledger line predating W1-T2572).
  *   - `provider` reads `"unknown"` when absent (a line predating provider ledgering).
- * The FIRST matching line for a run_id wins — the same worker-call boundary `numTurns` already
- * sums over, and constant in practice across a run's own resumes (same mount, same call).
+ * The FIRST IMPLEMENTATION line for a run_id wins. `recon.done` is only a fallback for a
+ * recon-only run. The mount being measured routes the implementation worker, so allowing an
+ * earlier recon row to win would label the implementation outcome with the recon model. Within
+ * implementation resumes, first still wins: the retained production corpus has no run whose
+ * implementation resumes disagree on provider/model/effort, and silently switching attribution
+ * on a later resume would be no more honest than silently taking the earlier recon row.
  */
 export function armFieldsByRunId(records) {
   const out = new Map();
+  const priorities = new Map();
   for (const r of records) {
     if (!r || typeof r !== "object") continue;
     if (typeof r.run_id !== "string" || typeof r.step !== "string" || !ARM_DONE_STEPS.has(r.step)) continue;
-    if (out.has(r.run_id)) continue;
+    const priority = r.step === "recon.done" ? 0 : 1;
+    if ((priorities.get(r.run_id) ?? -1) >= priority) continue;
     out.set(r.run_id, {
       provider: typeof r.provider === "string" ? r.provider : "unknown",
       servedModel:
         typeof r.served_model === "string" ? r.served_model : r.served_model === null ? "unreported" : "unknown",
       effort: typeof r.effort === "string" ? r.effort : "unknown",
     });
+    priorities.set(r.run_id, priority);
   }
   return out;
 }
