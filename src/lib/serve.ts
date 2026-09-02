@@ -66,6 +66,7 @@ import {
   buildEscalationMarkHandledRoute,
   buildEscalationReplyRoute,
   buildKickRoute,
+  buildMergeHoldRoute,
   buildPauseRoute,
   buildQuietHoursRoute,
   buildResumeRoute,
@@ -819,6 +820,9 @@ export function renderShellHtml(
   .ask-type-badge.ask-type-blocked-pr {
     background: rgba(255, 107, 107, 0.14); color: var(--status-blocked); border-color: var(--status-blocked);
   }
+  .merge-hold-action { display: inline-flex; flex-wrap: wrap; gap: 0.35rem; align-items: center; margin-left: auto; }
+  .merge-hold-action input { min-width: 15rem; }
+  .merge-hold-current { margin: 0.45rem 0; }
   /* W1-T2497: THE MAILBOX -- inline, same <style> block (no stylesheet of its own). */ .mailbox-heading { font-size: 0.85rem; margin: 0.6rem 0 0.25rem; display: flex; align-items: center; gap: 0.4em; } .mailbox-unread-count:empty { display: none; } .mailbox-unread-count { display: inline-block; min-width: 1.2em; padding: 0 0.4em; border-radius: 999px; text-align: center; font-size: 0.7rem; font-weight: 700; background: var(--status-needs-human); color: #241a02; } .mailbox { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.5rem; } .mailbox-empty { font-size: 0.85rem; opacity: 0.7; margin: 0.25rem 0; } .mailbox-thread { list-style: none; border: 1px solid var(--border, #333); border-radius: 6px; padding: 0.4rem 0.6rem; } .mailbox-thread-unread { border-color: var(--status-needs-human); } .mailbox-thread-head { display: flex; align-items: center; gap: 0.4em; } .mailbox-unread-dot { width: 0.5em; height: 0.5em; border-radius: 999px; background: var(--status-needs-human); display: inline-block; } .mailbox-messages { list-style: none; margin: 0.3rem 0; padding: 0; display: flex; flex-direction: column; gap: 0.2rem; } .mailbox-message { font-size: 0.85rem; } .mailbox-sender { font-weight: 700; margin-right: 0.4em; } .mailbox-reply { display: flex; gap: 0.4em; margin-top: 0.3rem; }
   #stale-badge {
     display: inline-block; margin: 0.25rem 0 0; padding: 0.15rem 0.5rem; border-radius: 999px;
@@ -1380,6 +1384,17 @@ export function renderShellHtml(
     </div>
     <p class="counts">A valid change is effective on the next dispatch. It does not start, stop, restart, recycle or deploy either container, and it cannot bypass provider readability or reserve. Account-visible unmapped Codex models remain read-only proposal seeds until a git-reviewed <code>.remudero/mounts.yaml</code> PR assigns their capability.</p>
   </fieldset>
+  <fieldset id="merge-hold-fleet">
+    <legend>Automatic merge hold</legend>
+    <p id="merge-hold-fleet-status" role="status" aria-live="polite" class="counts">Waiting for the atomic hold projection…</p>
+    <form class="merge-hold-action" data-scope="the whole fleet">
+      <label for="merge-hold-fleet-reason">Reason</label>
+      <input id="merge-hold-fleet-reason" type="text" required placeholder="why automatic merges should be held or released" disabled title="Read-only — enter a write token to enable this action" />
+      <button id="merge-hold-fleet-btn" class="danger" type="submit" data-action="engage" data-confirming="false" aria-pressed="false" disabled title="Read-only — enter a write token to enable this action">Engage fleet hold</button>
+    </form>
+    <ul id="merge-hold-current" class="row-list merge-hold-current"></ul>
+    <p class="counts">This only engages or releases the daemon's existing automatic-merge refusal. Release returns the PR to the ordinary sweep; it does not merge, select a merge method, bypass protection, or start, stop, restart, recycle, or deploy anything.</p>
+  </fieldset>
 </section>
 
 <section id="more" class="panel-section" aria-label="More tools" data-owner-tab="feed">
@@ -1618,6 +1633,7 @@ export function renderShellHtml(
     "/v1/policy/daily-cost-ceiling/clear": { kind: "done", text: "Daily cost ceiling override cleared — reverted to the committed default, effective on the daemon's next tick, no restart needed." },
     "/v1/policy/provider-routing": { kind: "done", text: "Provider routing override saved — effective on the next dispatch; no daemon or container restart is performed." },
     "/v1/policy/provider-routing/clear": { kind: "done", text: "Provider routing override cleared — the committed host policy returns on the next dispatch; no daemon or container restart is performed." },
+    "/v1/merge-hold": { kind: "done", text: "Automatic-merge hold updated and read back from the durable ledger. The next snapshot shows the current decision." },
     // W1-T435: the ledger write (appendPanelLedger) completes before the route replies -- "done" is
     // accurate. A wrong/needs-follow-up verdict's note also steers the fix rung's next attempt
     // (operatorVerdictEvidence, lib/sweep.ts); a good verdict is recorded for the learning limb only.
@@ -1654,7 +1670,7 @@ export function renderShellHtml(
     // all twelve OTHER write controls, and even the opted-out call still clears a stale error and
     // still runs showWriteError on failure (design (iv) -- suppressing an ack must never suppress the
     // error path a 401/500 needs).
-    // impl-W1-T500: the five paths below are the console's own HIGH-tier write routes (service.ts's
+    // impl-W1-T500: the paths below are the console's own HIGH-tier write routes (service.ts's
     // Route.tier "high", declared at panel-actions.ts's /v1/manual/approve + /v1/drain/kick +
     // /v1/drain/run, panel-graph.ts's /v1/inbox/approve, panel-skill-run.ts's /v1/skills/run). A
     // HIGH-tier call now costs one extra round trip -- POST the exact method+path+payload to
@@ -1662,7 +1678,7 @@ export function renderShellHtml(
     // design (ii)'s client half of W1-T404's second factor. Declared INSIDE this function, not as a
     // module-level const, so postJson stays the one self-contained unit
     // test/serve-write-errors.test.ts already extracts and sandboxes.
-    var HIGH_TIER_WRITE_PATHS = ["/v1/manual/approve", "/v1/drain/kick", "/v1/drain/run", "/v1/inbox/approve", "/v1/skills/run", "/v1/policy/provider-routing", "/v1/policy/provider-routing/clear"];
+    var HIGH_TIER_WRITE_PATHS = ["/v1/manual/approve", "/v1/drain/kick", "/v1/drain/run", "/v1/inbox/approve", "/v1/skills/run", "/v1/policy/provider-routing", "/v1/policy/provider-routing/clear", "/v1/merge-hold"];
     var payload = JSON.stringify(body ?? {});
     var doWrite = function (nonce) {
       var headers = { ...writeAuthHeaders(), "content-type": "application/json" };
@@ -2010,6 +2026,7 @@ export function renderShellHtml(
   // renderNeedsMe parameter, so its existing call sites are untouched.
   let latestBlockedPrs = [];
   let latestBlockedPrsUnverifiedReason;
+  let latestMergeHeld = []; // same atomic /v1/status projection; never inferred from UI/check state
   let latestNeedsMeRows = []; // set by renderNeedsMe -- the SAME combined NEEDS ME rows the section itself renders
   let latestDaemonHealth = null; // GET /v1/daemon-health's body
   let latestAccountUsage = null; // GET /v1/account-usage's body (account-usage.ts's AccountUsageSnapshot)
@@ -2239,6 +2256,7 @@ export function renderShellHtml(
     const tasks = Array.from(tasksById.values());
     const nowIds = renderNow(tasks);
     const needsMeIds = renderNeedsMe(tasks, latestFeedbackEntries, latestInboxReady, latestInboxDrafting);
+    renderMergeHoldControls();
     renderMailbox(tasks, latestFeedbackEntries);
     renderAccepted(latestFeedbackEntries);
     const upNextIds = renderUpNext(latestUpNextCards);
@@ -2699,6 +2717,7 @@ export function renderShellHtml(
     tasksSnapshotKnown = true; // W1-T2218: a cache-restored snapshot is real data, not a guess
     latestBlockedPrs = snapshot.blockedPrs ?? [];
     latestBlockedPrsUnverifiedReason = snapshot.blockedPrsUnverifiedReason;
+    latestMergeHeld = snapshot.mergeHeld ?? [];
     latestFeedbackEntries = snapshot.feedbackEntries ?? [];
     latestInboxReady = snapshot.inboxReady ?? [];
     latestInboxDrafting = snapshot.inboxDrafting ?? [];
@@ -2976,16 +2995,68 @@ export function renderShellHtml(
       \`<span class="task-id">\${escapeHtml(t.taskId)}</span><span class="detail">awaiting human verification -- filed verify: human, never auto-dispatched</span>\`
     );
   }
+  function fleetMergeHold() {
+    return latestMergeHeld.find((r) => r.prNumber === undefined);
+  }
+  function mergeHoldForPr(prNumber) {
+    return latestMergeHeld.find((r) => r.prNumber === prNumber) || fleetMergeHold();
+  }
+  /** One PR-scoped control. Its action is derived only from the atomic mergeHeld projection;
+   * neither branch performs a merge. */
+  function mergeHoldActionHtml(prNumber, taskId) {
+    const action = mergeHoldForPr(prNumber) ? "release" : "engage";
+    const label = action === "release" ? "Release hold" : "Hold automatic merge";
+    return (
+      \`<form class="merge-hold-action" data-scope="PR #\${prNumber}" data-pr-number="\${prNumber}"\${taskId ? \` data-task-id="\${escapeHtml(taskId)}"\` : ""}>\` +
+      \`<input type="text" required aria-label="Reason for \${action} on PR #\${prNumber}" placeholder="reason required"\${writeGateAttrs()} />\` +
+      \`<button type="submit" data-action="\${action}" data-confirming="false" aria-pressed="false"\${writeGateAttrs()}>\${label}</button></form>\`
+    );
+  }
+  /** Every currently-standing PR hold gets an attributable row and release affordance. The
+   * fleet hold is rendered by the permanent fleet control immediately below this list. */
+  function needsMeMergeHeldRowHtml(r) {
+    const scope = r.prNumber === undefined ? "the whole fleet" : \`PR #\${r.prNumber}\`;
+    return (
+      \`\${statusBadge("needs-human")}<span class="ask-type-badge ask-type-action">Hold</span>\` +
+      \`<span class="task-id">\${escapeHtml(scope)}</span><span class="detail">held by \${escapeHtml(r.by)} — \${escapeHtml(r.reason)}</span>\` +
+      (r.prNumber === undefined ? "" : mergeHoldActionHtml(r.prNumber, r.taskId))
+    );
+  }
+  function renderMergeHoldControls() {
+    const fleet = fleetMergeHold();
+    const status = document.getElementById("merge-hold-fleet-status");
+    const reason = document.getElementById("merge-hold-fleet-reason");
+    const button = document.getElementById("merge-hold-fleet-btn");
+    const locked = !hasWriteScope;
+    if (status) status.textContent = fleet
+      ? \`HELD by \${fleet.by} — \${fleet.reason}\`
+      : "No fleet-wide automatic-merge hold is standing.";
+    if (reason) { reason.disabled = locked; reason.title = locked ? "Read-only — enter a write token to enable this action" : ""; }
+    if (button) {
+      button.disabled = locked;
+      button.title = locked ? "Read-only — enter a write token to enable this action" : "";
+      button.dataset.action = fleet ? "release" : "engage";
+      button.textContent = fleet ? "Release fleet hold" : "Engage fleet hold";
+      button.dataset.confirming = "false";
+      button.setAttribute("aria-pressed", "false");
+    }
+    const list = document.getElementById("merge-hold-current");
+    if (list) {
+      const prHolds = latestMergeHeld.filter((r) => r.prNumber !== undefined);
+      list.innerHTML = prHolds.length
+        ? prHolds.map((r) => \`<li class="row" data-pr-number="\${r.prNumber}">\${needsMeMergeHeldRowHtml(r)}</li>\`).join("")
+        : '<li class="empty">no PR-scoped holds</li>';
+    }
+  }
   // W1-T1006: THE SIXTH NEEDS-ME KIND -- a PR the sweep reconciler already disposed into a
   // non-progressing class (blocked-fixable/blocked-ambiguous/conflicted/stale), with no
   // escalation issue required for it to be visible here at all (design (1)/(6): that gate is
   // the whole defect this task closes). disposition and reason render VERBATIM off the
   // ledger's own sweep.disposed line (design (ii), the W1-T186 named-reason doctrine --
   // status-board.ts's BlockedPrBlocker doc) -- no new taxonomy, no rewording, no collapsing
-  // distinct families down to the disposition word alone. No action affordance renders here,
-  // same discipline as needsMeVerifyRowHtml just above: nothing in src/ offers a console verb
-  // for this row yet (design note (vii), an operator ruling, not this task's to make). No card
-  // link either (design (v)): computeTaskCard 404s for any id the plan does not hold, and this
+  // distinct families down to the disposition word alone. W1-T2719 adds only the existing
+  // merge-hold engage/release verb; it does not add a merge action. No card link renders here
+  // (design (v)): computeTaskCard 404s for any id the plan does not hold, and this
   // row's own taskId (when the ledger line even carried one) is not known to be one of the ones
   // that do -- so the pushed row below deliberately carries no taskId field at all (see
   // reconcileRows' own row.taskId !== undefined gate), which is what keeps this row un-
@@ -3066,7 +3137,7 @@ export function renderShellHtml(
     // W1-T1006: the sixth group, its OWN pass exactly like verifyHumanPending's above -- never
     // folded into the needsHuman loop, and reached via module state (latestBlockedPrs) rather
     // than a new parameter here, so every existing caller of renderNeedsMe is untouched.
-    for (const r of latestBlockedPrs ?? []) rows.push({ key: \`blocked-pr:\${r.prNumber}\`, html: needsMeBlockedPrRowHtml(r) });
+    for (const r of latestBlockedPrs ?? []) rows.push({ key: \`blocked-pr:\${r.prNumber}\`, html: needsMeBlockedPrRowHtml(r) + mergeHoldActionHtml(r.prNumber) });
     if (latestBlockedPrsUnverifiedReason) {
       rows.push({ key: "blocked-pr-unverified", html: needsMeBlockedPrUnverifiedHtml(latestBlockedPrsUnverifiedReason) });
     }
@@ -4005,6 +4076,42 @@ export function renderShellHtml(
   // ── MAILBOX write-actions (W1-T2497) -- Open/Resolve are read-state, no write token needed. ──
   document.getElementById("mailbox").addEventListener("click", (e) => { const openBtn = e.target.closest(".mailbox-open"); const resolveBtn = e.target.closest(".mailbox-resolve"); if (openBtn) mailboxState = { ...mailboxState, read: mailboxMarkRead(mailboxState.read, openBtn.dataset.threadId) }; else if (resolveBtn) mailboxState = { ...mailboxState, resolved: mailboxMarkResolved(mailboxState.resolved, resolveBtn.dataset.threadId) }; else return; saveMailboxState(mailboxState); renderMailbox(Array.from(tasksById.values()), latestFeedbackEntries); });
   document.getElementById("mailbox").addEventListener("submit", async (e) => { const replyForm = e.target.closest(".mailbox-reply"); if (!replyForm) return; e.preventDefault(); if (!hasWriteScope) return; const input = replyForm.querySelector("input"); const text = input.value.trim(); if (!text) return; await postJson("/v1/escalation/reply", { taskId: replyForm.dataset.taskId, class: replyForm.dataset.class, text }); input.value = ""; refreshAll(); });
+
+  // ── W1-T2719: durable automatic-merge hold controls. One delegated listener serves the
+  // permanent fleet form, current-held rows, and live blocked-PR rows. Confirmation text names
+  // the exact action, scope and reason before the high-tier nonce round trip starts.
+  function mergeHoldConfirmationText(action, scope, reason) {
+    return \`Confirm \${action.toUpperCase()} automatic-merge hold for \${scope} — reason: \${reason}?\`;
+  }
+  document.addEventListener("submit", async (e) => {
+    const form = e.target.closest && e.target.closest(".merge-hold-action");
+    if (!form) return;
+    e.preventDefault();
+    if (!hasWriteScope) return;
+    const input = form.querySelector("input");
+    const reason = input && input.value.trim();
+    if (!reason) {
+      if (input) { input.setCustomValidity("A reason is required."); input.reportValidity(); }
+      return;
+    }
+    input.setCustomValidity("");
+    const button = form.querySelector("button[type=submit]");
+    const action = button.dataset.action;
+    const scope = form.dataset.scope;
+    if (!window.confirm(mergeHoldConfirmationText(action, scope, reason))) return;
+    const prNumber = form.dataset.prNumber ? Number(form.dataset.prNumber) : undefined;
+    const taskId = form.dataset.taskId || undefined;
+    const response = await postJson("/v1/merge-hold", {
+      action,
+      reason,
+      ...(prNumber !== undefined ? { prNumber } : {}),
+      ...(taskId ? { taskId } : {}),
+    });
+    if (response && response.ok) {
+      input.value = "";
+      await refreshAll();
+    }
+  });
 
   // ── UP NEXT write-actions (fb-1784988460437-9daa9b): Run a queued task, Drain now ──────
   // Both reuse fleet control's OWN arm-then-confirm discipline (stop-btn, below): a single
@@ -5063,6 +5170,7 @@ export function renderShellHtml(
     // BoardSnapshot.blockedPrs/blockedPrsUnverifiedReason) -- no second fetch, one snapshot.
     latestBlockedPrs = statusSnap.blockedPrs ?? [];
     latestBlockedPrsUnverifiedReason = statusSnap.blockedPrsUnverifiedReason;
+    latestMergeHeld = statusSnap.mergeHeld ?? [];
     paintFromTasksById();
     // W1-T163: ONE-TIME, off this load's first snapshot only -- see renderRecapSection's doc for
     // why re-rendering off every later poll's own (by-then-mostly-consumed) recap would be wrong.
@@ -5143,6 +5251,7 @@ export function renderShellHtml(
         spend: latestSpend,
         blockedPrs: latestBlockedPrs,
         blockedPrsUnverifiedReason: latestBlockedPrsUnverifiedReason,
+        mergeHeld: latestMergeHeld,
         recentEntries: latestRecentEntries,
         upNextCards: latestUpNextCards,
         feedbackEntries: latestFeedbackEntries,
@@ -6139,6 +6248,8 @@ export function buildServeRoutes(deps: ServeDeps): Route[] {
     // Console UP NEXT write-actions (fb-1784988460437-9daa9b): Run a queued task, Drain now.
     buildKickRoute(fleetControlDeps),
     buildDrainNowRoute(fleetControlDeps),
+    // W1-T2719: existing durable refusal, exposed without any merge/lifecycle primitive.
+    buildMergeHoldRoute(fleetControlDeps),
     // recon-ER: the post-drain rundown's one-tap verdict (W1-T141). Declared, aggregated into
     // buildPanelActionRoutes, and covered by six tests that stand up a REAL server and get real
     // 200s from it -- but never mounted here, so POST /v1/drain/feedback 404'd on every running
