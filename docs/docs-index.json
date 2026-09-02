@@ -50,6 +50,12 @@
       "grepHint": "Remudero — Production Readiness Review (fresh-eyes recon)"
     },
     {
+      "path": "docs/audits/worktree-base-provisioning-2026-09.md",
+      "title": "Worktree base provisioning — a read-only forensic pass (2026-09-02)",
+      "summary": "Scope: W1-T2625. Read-only. No source changed. The trigger is the follow-up harvest from run",
+      "grepHint": "Worktree base provisioning — a read-only forensic pass (2026-09-02)"
+    },
+    {
       "path": "docs/cli-reference.md",
       "title": "rmd CLI reference",
       "summary": "Every `rmd <command>` this binary dispatches, rendered from the same `COMMANDS` registry `rmd --help` and `rmd <cmd> --help` render from (W1-T47) -- this file…",
