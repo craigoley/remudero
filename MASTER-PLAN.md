@@ -6326,6 +6326,16 @@ a second project on the harness; **WS-12 (site) is independent — separate repo
    load-bearing, not less. `rule15FilingViolation` is likewise untouched — it is a task-record SHAPE
    check and never had anything to do with who may file.
 
+28. **A VERDICT CLASS IS NOT A FAILURE CLASS UNTIL YOU CHECK WHICH OF ITS MEMBERS MERGED.** [R44 retro,
+   RETRO-1788374498685] The MAST census reads its input from the verdict column alone and restates that
+   column's errors as a taxonomy: R44 found the `verification` × 8 reading (+4 on the prior cycle) was
+   **87.5% wrong** — seven of those eight `blocked_ci` tasks are this cycle's own SHIPPED gate-side
+   merges (W1-T2613/#3651, T2617/#3661, T2618/#3662, T2620/#3673, T2621/#3680, T2625/#3672,
+   T2629/#3681), and the eighth (W1-T2623/#3692) merged ten minutes past the gather's newest ledger row
+   — a straddler, not a failure. The failure distribution therefore had NO confirmed member, and only a
+   REST read performed by hand caught it. Any verdict-sourced census (MAST or its successors) must cross
+   the verdict against the live merge state before it is trusted as a failure count.
+
 - Lives at repo root. Header carries sync date + focus, his-house style.
 - Humans and agents edit via commits/PRs; the Architect does narrative syncs at workstream
   boundaries; the control plane flips task statuses only.
