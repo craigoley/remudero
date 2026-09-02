@@ -1,0 +1,44 @@
+- id: W1-T2665
+  title: "MOUNT SWEEP ATTRIBUTES AN IMPLEMENTATION OUTCOME TO THE EARLIER RECON MODEL — select the implementation worker's provider/model/effort, with recon only as a recon-only fallback"
+  repo: remudero
+  depends_on: [W1-T2574]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  rationale: |
+    OBSERVED AT 773871792 (2026-09-02). `armFieldsByRunId` takes the first of `recon.done`,
+    `implement.done`, and `implement.resumed`. Live run W1-T2608 recorded recon as
+    claude-sonnet-5/medium and implementation as claude-haiku-4-5-20251001/medium, so the sweep
+    assigned the implementation outcome to Sonnet. Both calls used medium effort; the model
+    mismatch alone is enough to corrupt the attribution. The mount being evaluated routes the
+    implementation worker. This corrupts every provider/model comparison and must be corrected
+    before the sweep consumes per-provider subscription-window data.
+
+    The retained union ledger was checked before filing: no run has implementation done/resume
+    rows that disagree on provider/model/effort. Therefore the smallest evidence-backed rule is
+    first implementation row wins; recon is retained only for a genuinely recon-only run.
+  design: |
+    (i) Give implementation done/resumed rows precedence over recon.done regardless of ledger
+    order. (ii) Preserve first-wins within the implementation rows. (iii) Preserve the existing
+    unknown/unreported field semantics and recon-only fallback. (iv) Change no routing, mount,
+    provider selection, report shape, or daemon lifecycle behavior.
+  acceptance:
+    - claim: "an implementation worker's provider/model/effort replaces an earlier recon worker for the same run"
+      proof: "unit test: test/a-mount-comparison-across-unmatched-populations-is-not-a-measurement.test.ts"
+    - claim: "a recon-only run remains attributable instead of becoming unknown"
+      proof: "unit test: test/a-mount-comparison-across-unmatched-populations-is-not-a-measurement.test.ts"
+    - claim: "the first implementation call remains stable across later implementation resumes"
+      proof: "unit test: test/a-mount-comparison-across-unmatched-populations-is-not-a-measurement.test.ts"
+  risk: high
+  band_meaning: span
+  origin: "oper#overnight-steward-2026-09-02"
+  plan_refs: ["W1-T2574", "W1-T2577"]
+  files: [scripts/mount-headroom-sweep.mjs, test/a-mount-comparison-across-unmatched-populations-is-not-a-measurement.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    risk:high, band_meaning:span — Rule 19 treats the script and its separately named test
+    subsystem as two concerns, so this records the span up front. The change itself is one pure
+    analytics attribution rule and its direct test. It changes no mount and dispatches no worker.
+    The later subscription-window consumer is deliberately a separate task and PR.
