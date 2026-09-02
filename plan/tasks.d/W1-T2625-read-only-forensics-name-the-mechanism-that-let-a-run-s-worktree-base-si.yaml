@@ -86,10 +86,10 @@
       proof: "grep: assertWorktreeBaseCurrent in docs/audits/worktree-base-provisioning-2026-09.md"
     - claim: "anything needing a code change is named as a SUCCESSOR FILING in the artifact rather than built here — this pass is read-only by construction"
       proof: "grep: SUCCESSOR FILING in docs/audits/worktree-base-provisioning-2026-09.md"
-  risk: medium
+  risk: high
   origin: "followup#W1-T2460-1788054755234"
   plan_refs: ["W1-T405", "W1-T2501", "W1-T496", "§4B"]
-  files: [docs/audits/worktree-base-provisioning-2026-09.md]
+  files: [docs/audits/worktree-base-provisioning-2026-09.md, docs/docs-index.json]
   status: queued
   attempts: 0
   note: |

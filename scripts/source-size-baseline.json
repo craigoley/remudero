@@ -46,6 +46,7 @@
   "src/lib/fleet-control.ts": 542,
   "src/lib/flight-judge.ts": 556,
   "src/lib/flight-signals.ts": 410,
+  "src/lib/followup-dedup-census.ts": 500,
   "src/lib/fs-race-safe.ts": 608,
   "src/lib/git-push.ts": 500,
   "src/lib/github-app.ts": 500,
