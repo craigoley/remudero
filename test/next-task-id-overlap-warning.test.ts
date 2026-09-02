@@ -80,16 +80,21 @@ test("W1-T917: the overlap warning never changes the minted id", () => {
   assert.equal(swept, 0, "no candidate paths ⇒ not a single open-PR read is spent");
 });
 
-test("W1-T917: an unreadable open pull request list degrades to silence", () => {
-  // An advisory that can break the verb it advises is worse than none. Each seam is failed
-  // INDEPENDENTLY, so a passing result cannot come from the other one short-circuiting.
+test("W1-T2606: an unreadable open pull request list degrades to ONE NAMED OUTAGE LINE, never silence", () => {
+  // SUPERSEDES the old "degrades to silence" contract (W1-T917's original assertion here): silence
+  // is indistinguishable from a genuine clean read, which is the defect W1-T2606 fixes. The
+  // successor contract is zero OVERLAP lines plus one named outage line — never a bare [], and
+  // never any output at all being accepted. Each seam is failed INDEPENDENTLY, so a passing result
+  // cannot come from the other one short-circuiting, and neither arm throws.
   const scopeThrow = overlapWarningLinesFor(["src/lib/plan.ts"], "o", "r", PLAN_PATH, {
     plan: () => planFixture(),
     scopes: () => {
       throw new Error("API rate limit already exceeded");
     },
   });
-  assert.deepEqual(scopeThrow, [], "an unreadable open-PR list must print nothing, not throw");
+  assert.equal(scopeThrow.length, 1, "an unreadable open-PR list must say so, not go silent");
+  assert.match(scopeThrow[0]!, /could not be read/);
+  assert.match(scopeThrow[0]!, /API rate limit already exceeded/, "names the underlying reason verbatim");
 
   const planThrow = overlapWarningLinesFor(["src/lib/plan.ts"], "o", "r", PLAN_PATH, {
     plan: () => {
@@ -97,7 +102,9 @@ test("W1-T917: an unreadable open pull request list degrades to silence", () => 
     },
     scopes: () => [{ id: "#1", files: ["src/lib/plan.ts"] }],
   });
-  assert.deepEqual(planThrow, [], "an unreadable plan must print nothing, not throw");
+  assert.equal(planThrow.length, 1, "an unreadable plan must say so, not go silent");
+  assert.match(planThrow[0]!, /could not be read/);
+  assert.match(planThrow[0]!, /ENOENT: plan\/tasks\.yaml/);
 });
 
 test("W1-T917: the warning line names the pull request and the rare path", () => {
@@ -119,19 +126,29 @@ test("W1-T917: the files flag parses into candidate paths", () => {
   assert.deepEqual(candidateFilesFromArgs(["--files", " , ,"]), [], "blank entries are dropped, not passed through");
 });
 
-test("W1-T917: the offline flag suppresses the advisory entirely", () => {
+test("W1-T917/W1-T2606: the offline flag suppresses the READ but announces the suppression", () => {
   const scopes = [{ id: "#1873", files: ["src/lib/plan.ts"] }];
   let swept = 0;
   const deps = { plan: () => planFixture(), scopes: () => { swept++; return scopes; } };
-  assert.deepEqual(
-    overlapAdvisoryLines(["--files", "src/lib/plan.ts"], true, "o", "r", PLAN_PATH, deps),
-    [],
-    "--offline must read no open PR and print nothing",
-  );
-  assert.equal(swept, 0, "and must not spend a single REST call");
+  const offlineLines = overlapAdvisoryLines(["--files", "src/lib/plan.ts"], true, "o", "r", PLAN_PATH, deps);
+  // W1-T2606: --offline still spends nothing (unchanged), but it may no longer read as a clean
+  // check — it must say plainly that the surface was not consulted, matching the id line's own
+  // "(--offline: ... floor, not a guarantee)" wording one screen above it.
+  assert.equal(offlineLines.length, 1, "--offline with a requested check must say it did not check, not go silent");
+  assert.match(offlineLines[0]!, /--offline/);
+  assert.match(offlineLines[0]!, /NOT read/);
+  assert.equal(swept, 0, "and must still not spend a single REST call");
   assert.equal(
     overlapAdvisoryLines(["--files", "src/lib/plan.ts"], false, "o", "r", PLAN_PATH, deps).length,
     1,
     "while the same call online does warn — the falsifier for the suppression",
+  );
+  // And when there is nothing to check in the first place (no --files), --offline still prints
+  // nothing — it has nothing to announce not-having-read, exactly like the online arm's own
+  // empty-candidate short circuit above.
+  assert.deepEqual(
+    overlapAdvisoryLines([], true, "o", "r", PLAN_PATH, deps),
+    [],
+    "no --files ⇒ nothing was ever going to be checked, offline or not",
   );
 });
