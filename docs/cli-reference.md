@@ -20,6 +20,7 @@ usage:
   rmd merge-hold <engage|release> [--pr <n> [--task <id>]] --by <name> --reason <text>   # Engage or release an attributable, durable PR or fleet auto-merge hold.
   rmd dep-review <pr-number> [--repo <name>]   # Deterministic Dependabot-PR review lane: auto-arm minor/patch, escalate major.
   rmd lint-plan [--plan <path>] [--base <git-ref>]   # Deterministic task linter: sizing, headless-fitness, proof-shape, provenance.
+  rmd credit-audit [--plan <path>]   # Report every open task the dispatch and lint credit surfaces disagree about.
   rmd proof-queue-audit [--plan <path>]   # Report every open task's acceptance proof that can never resolve, split by cause.
   rmd preflight [--from <ref>] [--to <ref>] [--ci-parity] [--fast]   # The HAND route's commit gate: commitlint, tsc --noEmit, commit-message checks.
   rmd next-task-id [--plan <path>] [--offline] [--reserve]   # Print (or --reserve atomically claim) the next free W1-T<n> task id.
@@ -142,6 +143,16 @@ rmd lint-plan [--plan <path>] [--base <git-ref>]
 ```
 
 §5C Layer A: deterministic task linter (sizing/headless-fitness/proof-shape/provenance); --base scopes to task ids NEW/CHANGED vs that ref (CI mode), omitted = whole plan; exits non-zero on any blocking violation, spawns nothing
+
+### `rmd credit-audit`
+
+Report every open task the dispatch and lint credit surfaces disagree about.
+
+```
+rmd credit-audit [--plan <path>]
+```
+
+W1-T2729: dispatch credits the trailer + a run- head branch; lint credits the trailer + a non-filing commit subject. Neither is a superset, so a task can read implemented to one surface and unbuilt to the other. Proposes the `rmd correct` for each disagreement and writes nothing.
 
 ### `rmd proof-queue-audit`
 

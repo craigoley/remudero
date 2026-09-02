@@ -673,6 +673,12 @@ import {
   type CreditedAmendmentReport,
   type ProofQueueAuditReport,
 } from "./lib/proof-queue-audit.js";
+import {
+  type CreditEvidenceDeps,
+  gatherCreditEvidence,
+  reconcileCreditEvidence,
+  renderCreditReconciliation,
+} from "./lib/credit-evidence-reconcile.js";
 import { buildReceipt, resolveReceiptLedgerLines, type ReceiptLedgerRead } from "./lib/receipt.js";
 import { buildReplay, resolveReplayLedgerLines, type ReplayLedgerRead } from "./lib/ledger-replay.js";
 import { buildDepReviewArmUnreachableEscalation, buildDepReviewEscalation, decideDepReview } from "./lib/dep-review.js";
@@ -17755,6 +17761,36 @@ export function creditedProofVisibility(
  * resolver): ~207ms per name-filtered proof — acceptable for an operator running this by hand,
  * which is the only place it is wired; nothing in the daemon/CI/arm path calls it.
  */
+/**
+ * `rmd credit-audit` — W1-T2729's call site. The dispatch surface (status.ts's rungs) and the lint
+ * surface ({@link classifyFailingMergeEvidence}) read overlapping-but-different evidence, so this
+ * reports where they disagree and proposes the `rmd correct` that would settle each. It WRITES
+ * NOTHING: subject evidence over-credits by construction, and a task credited in error is never
+ * built again. Always exits 0 — a report, not a gate.
+ */
+export async function creditAuditCommand(rest: string[], deps: Partial<CreditEvidenceDeps> = {}): Promise<number> {
+  const badArg = unknownArgError("credit-audit", rest, ["--plan"], []);
+  if (badArg) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+  const planPathArg = flagValue(rest, "--plan");
+  const planPath = planPathArg !== undefined ? resolve(planPathArg) : join(repoRoot, "plan", "tasks.yaml");
+  const plan = loadPlan(planPath);
+  const open = plan.tasks.filter((t) => isOpenLintTask(t)).map((t) => t.id);
+  const git = (format: string): string =>
+    execFileSync("git", ["log", "origin/main", `--format=${format}`], { encoding: "utf8", maxBuffer: 1 << 29 });
+  const rows = gatherCreditEvidence(open, {
+    trailerLog: () => git("%B"),
+    subjectLog: () => git("%h %s"),
+    evidenceDump: () => git("%s%x00%b%x01"),
+    classify: (ids, dump) => classifyFailingMergeEvidence([...ids], dump),
+    ...deps,
+  });
+  console.log(renderCreditReconciliation(reconcileCreditEvidence(rows)));
+  return 0;
+}
+
 export async function proofQueueAuditCommand(rest: string[], deps: ProofQueueAuditDeps = {}): Promise<number> {
   const badArg = unknownArgError("proof-queue-audit", rest, ["--plan"], ["--credited"]);
   if (badArg) {
@@ -34369,6 +34405,13 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "§5C Layer A: deterministic task linter (sizing/headless-fitness/proof-shape/provenance); --base scopes to task ids NEW/CHANGED vs that ref (CI mode), omitted = whole plan; exits non-zero on any blocking violation, spawns nothing",
   },
   {
+    name: "credit-audit",
+    syntax: "rmd credit-audit [--plan <path>]",
+    summary: "Report every open task the dispatch and lint credit surfaces disagree about.",
+    detail:
+      "W1-T2729: dispatch credits the trailer + a run- head branch; lint credits the trailer + a non-filing commit subject. Neither is a superset, so a task can read implemented to one surface and unbuilt to the other. Proposes the `rmd correct` for each disagreement and writes nothing.",
+  },
+  {
     name: "proof-queue-audit",
     syntax: "rmd proof-queue-audit [--plan <path>]",
     summary: "Report every open task's acceptance proof that can never resolve, split by cause.",
@@ -35204,6 +35247,9 @@ export async function main(
     process.exit(await lintPlanCommand(rest));
   }
   // diff-cov: process-boundary — main() CLI dispatch: process.exit(await proofQueueAuditCommand(rest)) cannot carry a DA hit without forking the process; proofQueueAuditCommand's own logic — arg validation, the open+unmerged population derivation, and the report render — is unit-tested in test/proof-queue-audit.test.ts (same irreducible-glue shape as the sibling lint-plan/emissions dispatch cases).
+  if (cmd === "credit-audit") {
+    process.exit(await creditAuditCommand(rest));
+  }
   if (cmd === "proof-queue-audit") {
     process.exit(await proofQueueAuditCommand(rest));
   }
