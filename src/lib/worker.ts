@@ -29,7 +29,6 @@ import { fileURLToPath } from "node:url";
 import { query, type Options, type PermissionMode } from "@anthropic-ai/claude-agent-sdk";
 import { detectUsageLimitRefusal } from "./classify.js";
 import {
-  enabledWorkerProviders,
   loadConfig,
   workerHomeDir,
   workerShell,
@@ -84,7 +83,6 @@ import {
   claudeCapacityFromUsage,
   finishProviderWindowMeasurement,
   readCodexCapacity,
-  selectWorkerProvider,
   spawnCodexWorker,
   type CodexCapacityDeps,
   type ProviderCapacity,
@@ -92,6 +90,7 @@ import {
   type ProviderWindowConsumption,
   type ProviderWindowMeasurement,
 } from "./worker-provider.js";
+import { resolveProviderRoutingPolicy, selectWorkerProviderForPolicy } from "./provider-routing-policy.js";
 import { writeProviderRoutingStatus, type ProviderRoutingWriteInput } from "./provider-routing-status.js";
 
 /**
@@ -1408,8 +1407,29 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
   validateWorkerSettingsFile(args.settingsFile);
 
   const config = args.config ?? loadConfig();
-  const providers = enabledWorkerProviders(config);
+  const routingPolicy = resolveProviderRoutingPolicy(config.root, config, { now: args.providerRouting?.now });
+  if (routingPolicy.fallback) {
+    console.error(JSON.stringify({
+      event: "worker.provider_routing_policy_fallback",
+      reason: routingPolicy.fallback.reason,
+    }));
+  }
+  const providers = routingPolicy.routableProviders;
   let routedClaudeSelection: ProviderSelection | undefined;
+  if (providers.length === 1 && providers[0] === "claude" && (routingPolicy.provenance === "overridden" || routingPolicy.fallback)) {
+    try {
+      (args.providerRouting?.writeStatus ?? writeProviderRoutingStatus)(config.root, {
+        state: "not-probed",
+        enabledProviders: providers,
+        reservePercent: routingPolicy.reservePercent,
+        observedAtMs: (args.providerRouting?.now ?? Date.now)(),
+        cacheValidMs: config.workerProviders?.capacityCacheMs ?? 60_000,
+        policy: routingPolicy,
+      });
+    } catch {
+      console.error(JSON.stringify({ event: "worker.provider_routing_status_write_failed", reason: "write-failed" }));
+    }
+  }
   if (!(providers.length === 1 && providers[0] === "claude")) {
     const capacities = await Promise.all(
       providers.map((provider) => {
@@ -1422,12 +1442,13 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         return (args.providerRouting?.readClaude ?? (() => readClaudeProviderCapacity(config)))();
       }),
     );
-    const reservePercent = config.workerProviders?.reservePercent ?? 5;
+    const reservePercent = routingPolicy.reservePercent;
     const statusBase = {
       enabledProviders: providers,
       reservePercent,
       observedAtMs: (args.providerRouting?.now ?? Date.now)(),
       cacheValidMs: config.workerProviders?.capacityCacheMs ?? 60_000,
+      policy: routingPolicy,
     };
     const publishProviderRoutingStatus = (input: ProviderRoutingWriteInput): void => {
       try {
@@ -1437,21 +1458,26 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       }
     };
     let selection: ProviderSelection;
+    let preferenceBypass: ProviderRoutingWriteInput["preferenceBypass"];
     try {
-      selection = selectWorkerProvider(
+      const routed = selectWorkerProviderForPolicy(
         capacities,
-        reservePercent,
+        routingPolicy,
         args.providerRouting?.tieBreaker ?? providerTieBreaker++,
       );
+      selection = routed.selection;
+      preferenceBypass = routed.preferenceBypass;
     } catch (error) {
       publishProviderRoutingStatus({ ...statusBase, state: "blocked", capacities });
       throw error;
     }
-    publishProviderRoutingStatus({ ...statusBase, state: "selected", capacities, selection });
+    publishProviderRoutingStatus({ ...statusBase, state: "selected", capacities, selection, preferenceBypass });
     console.error(
       JSON.stringify({
         event: "worker.provider.selected",
         provider: selection.provider,
+        preference: routingPolicy.preference,
+        ...(preferenceBypass ? { preference_bypass: preferenceBypass } : {}),
         tightest_remaining_percent: selection.tightestRemainingPercent,
         capacities: capacities.map((capacity) => ({
           provider: capacity.provider,

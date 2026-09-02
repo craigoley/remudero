@@ -6,6 +6,12 @@
 import { chmodSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { WorkerProviderId } from "./config.js";
+import type {
+  EffectiveProviderRoutingPolicy,
+  ProviderPark,
+  ProviderRoutingPolicyFallbackReason,
+  ProviderRoutingPreference,
+} from "./provider-routing-policy.js";
 import type { ProviderCapacity, ProviderSelection } from "./worker-provider.js";
 
 export const PROVIDER_ROUTING_STATUS_VERSION = 1;
@@ -41,6 +47,30 @@ export interface ProviderRoutingSelectedStatus {
   effort?: string;
 }
 
+export interface ProviderRoutingPolicyStatus {
+  provenance: "default" | "overridden";
+  committed: {
+    enabledProviders: WorkerProviderId[];
+    preference: "automatic";
+    reservePercent: number;
+    parks: [];
+  };
+  enabledProviders: WorkerProviderId[];
+  routableProviders: WorkerProviderId[];
+  preference: ProviderRoutingPreference;
+  reservePercent: number;
+  parks: ProviderPark[];
+  overrideExpiresAt?: string;
+  writtenAt?: string;
+  writerFingerprint?: string;
+  fallback?: { reason: ProviderRoutingPolicyFallbackReason };
+}
+
+export interface ProviderRoutingPreferenceBypass {
+  provider: WorkerProviderId;
+  reason: "unreadable" | "below-reserve";
+}
+
 export interface ProviderRoutingStatus {
   version: number;
   state: "unknown" | "not-probed" | "selected" | "blocked";
@@ -53,6 +83,8 @@ export interface ProviderRoutingStatus {
   providers?: ProviderRoutingProviderStatus[];
   selected?: ProviderRoutingSelectedStatus;
   blockedReason?: "no-provider-headroom";
+  policy?: ProviderRoutingPolicyStatus;
+  preferenceBypass?: ProviderRoutingPreferenceBypass;
 }
 
 interface ProviderRoutingWriteBase {
@@ -60,6 +92,8 @@ interface ProviderRoutingWriteBase {
   reservePercent: number;
   observedAtMs: number;
   cacheValidMs: number;
+  policy?: EffectiveProviderRoutingPolicy;
+  preferenceBypass?: ProviderRoutingPreferenceBypass;
 }
 
 export type ProviderRoutingWriteInput = ProviderRoutingWriteBase &
@@ -145,6 +179,27 @@ function projectCapacities(capacities: readonly ProviderCapacity[]): ProviderRou
   return projected;
 }
 
+function projectPolicy(policy: EffectiveProviderRoutingPolicy): ProviderRoutingPolicyStatus {
+  return {
+    provenance: policy.provenance,
+    committed: {
+      enabledProviders: [...policy.committed.enabledProviders],
+      preference: "automatic",
+      reservePercent: policy.committed.reservePercent,
+      parks: [],
+    },
+    enabledProviders: [...policy.enabledProviders],
+    routableProviders: [...policy.routableProviders],
+    preference: policy.preference,
+    reservePercent: policy.reservePercent,
+    parks: policy.parks.map((park) => ({ ...park })),
+    ...(policy.overrideExpiresAt ? { overrideExpiresAt: policy.overrideExpiresAt } : {}),
+    ...(policy.writtenAt ? { writtenAt: policy.writtenAt } : {}),
+    ...(policy.writerFingerprint ? { writerFingerprint: policy.writerFingerprint } : {}),
+    ...(policy.fallback ? { fallback: { ...policy.fallback } } : {}),
+  };
+}
+
 function projectWrite(input: ProviderRoutingWriteInput): ProviderRoutingStatus {
   if (!Number.isFinite(input.observedAtMs)) throw new Error("provider routing observation time is invalid");
   if (!Number.isFinite(input.cacheValidMs) || input.cacheValidMs <= 0) {
@@ -161,6 +216,8 @@ function projectWrite(input: ProviderRoutingWriteInput): ProviderRoutingStatus {
     reservePercent,
     observedAt: new Date(observedAtMs).toISOString(),
     freshUntil: new Date(observedAtMs + cacheValidMs).toISOString(),
+    ...(input.policy ? { policy: projectPolicy(input.policy) } : {}),
+    ...(input.preferenceBypass ? { preferenceBypass: { ...input.preferenceBypass } } : {}),
   };
   if (input.state === "not-probed") {
     return { ...base, state: "not-probed", freshness: "not-probed", providers: [] };
@@ -212,6 +269,94 @@ export function writeProviderRoutingStatus(root: string, input: ProviderRoutingW
 
 function unknown(reason: ProviderRoutingUnknownReason): ProviderRoutingStatus {
   return { version: PROVIDER_ROUTING_STATUS_VERSION, state: "unknown", freshness: "unknown", reason };
+}
+
+function parseProviderList(value: unknown, allowEmpty = false): WorkerProviderId[] | undefined {
+  if (!Array.isArray(value) || (!allowEmpty && value.length === 0)) return undefined;
+  const providers = value.map(providerId).filter((provider): provider is WorkerProviderId => provider !== undefined);
+  if (providers.length !== value.length || new Set(providers).size !== providers.length) return undefined;
+  return providers;
+}
+
+function parsePolicy(value: unknown): ProviderRoutingPolicyStatus | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const raw = value as Record<string, unknown>;
+  if (raw.provenance !== "default" && raw.provenance !== "overridden") return undefined;
+  if (!raw.committed || typeof raw.committed !== "object" || Array.isArray(raw.committed)) return undefined;
+  const committedRaw = raw.committed as Record<string, unknown>;
+  const committedProviders = parseProviderList(committedRaw.enabledProviders);
+  const committedReserve = safePercent(committedRaw.reservePercent);
+  if (
+    !committedProviders ||
+    committedRaw.preference !== "automatic" ||
+    !Array.isArray(committedRaw.parks) ||
+    committedRaw.parks.length !== 0 ||
+    committedReserve === undefined ||
+    committedReserve >= 100
+  ) return undefined;
+  const enabledProviders = parseProviderList(raw.enabledProviders);
+  const routableProviders = parseProviderList(raw.routableProviders);
+  const preference = raw.preference;
+  const reservePercent = safePercent(raw.reservePercent);
+  if (
+    !enabledProviders ||
+    !routableProviders ||
+    (preference !== "automatic" && preference !== "claude" && preference !== "codex") ||
+    reservePercent === undefined ||
+    reservePercent >= 100 ||
+    !Array.isArray(raw.parks)
+  ) return undefined;
+  const parks: ProviderPark[] = [];
+  for (const candidate of raw.parks.slice(0, 2)) {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return undefined;
+    const park = candidate as Record<string, unknown>;
+    const provider = providerId(park.provider);
+    const until = isoTime(park.until);
+    if (!provider || !until) return undefined;
+    parks.push({ provider, until });
+  }
+  const overrideExpiresAt = raw.overrideExpiresAt === undefined ? undefined : isoTime(raw.overrideExpiresAt);
+  const writtenAt = raw.writtenAt === undefined ? undefined : isoTime(raw.writtenAt);
+  const writerFingerprint =
+    typeof raw.writerFingerprint === "string" &&
+    (raw.writerFingerprint === "unknown" || /^[a-f0-9]{12}$/.test(raw.writerFingerprint))
+      ? raw.writerFingerprint
+      : undefined;
+  if (raw.overrideExpiresAt !== undefined && !overrideExpiresAt) return undefined;
+  if (raw.writtenAt !== undefined && !writtenAt) return undefined;
+  if (raw.writerFingerprint !== undefined && !writerFingerprint) return undefined;
+  const fallbackRaw = raw.fallback;
+  let fallback: ProviderRoutingPolicyStatus["fallback"];
+  if (fallbackRaw !== undefined) {
+    if (!fallbackRaw || typeof fallbackRaw !== "object" || Array.isArray(fallbackRaw)) return undefined;
+    const reason = (fallbackRaw as Record<string, unknown>).reason;
+    if (
+      reason !== "unreadable" &&
+      reason !== "malformed" &&
+      reason !== "unsupported-version" &&
+      reason !== "expired" &&
+      reason !== "incompatible-with-config"
+    ) return undefined;
+    fallback = { reason };
+  }
+  return {
+    provenance: raw.provenance,
+    committed: {
+      enabledProviders: committedProviders,
+      preference: "automatic",
+      reservePercent: committedReserve,
+      parks: [],
+    },
+    enabledProviders,
+    routableProviders,
+    preference,
+    reservePercent,
+    parks,
+    ...(overrideExpiresAt ? { overrideExpiresAt } : {}),
+    ...(writtenAt ? { writtenAt } : {}),
+    ...(writerFingerprint ? { writerFingerprint } : {}),
+    ...(fallback ? { fallback } : {}),
+  };
 }
 
 function parseSnapshot(value: unknown, nowMs: number): ProviderRoutingStatus | undefined {
@@ -267,6 +412,18 @@ function parseSnapshot(value: unknown, nowMs: number): ProviderRoutingStatus | u
     freshUntil,
     providers,
   };
+  if (raw.policy !== undefined) {
+    const policy = parsePolicy(raw.policy);
+    if (!policy) return undefined;
+    base.policy = policy;
+  }
+  if (raw.preferenceBypass !== undefined) {
+    if (!raw.preferenceBypass || typeof raw.preferenceBypass !== "object" || Array.isArray(raw.preferenceBypass)) return undefined;
+    const bypass = raw.preferenceBypass as Record<string, unknown>;
+    const provider = providerId(bypass.provider);
+    if (!provider || (bypass.reason !== "unreadable" && bypass.reason !== "below-reserve")) return undefined;
+    base.preferenceBypass = { provider, reason: bypass.reason };
+  }
   if (raw.state === "blocked") {
     if (raw.blockedReason !== "no-provider-headroom") return undefined;
     return { ...base, blockedReason: "no-provider-headroom" };

@@ -28,7 +28,6 @@ import {
   architectModel,
   configPath as instanceConfigPath,
   consoleUrl,
-  enabledWorkerProviders,
   fixStrikeCap,
   globalArtifactPath,
   globalLearningsHome,
@@ -46,6 +45,7 @@ import {
   workerZdotdir,
   type Config,
 } from "./lib/config.js";
+import { resolveProviderRoutingPolicy } from "./lib/provider-routing-policy.js";
 import { writeProviderRoutingStatus, type ProviderRoutingWriteInput } from "./lib/provider-routing-status.js";
 import { readFileIfExists } from "./lib/fs-race-safe.js";
 import { buildPromptManifest } from "./lib/prompt-manifest.js";
@@ -23038,13 +23038,18 @@ export async function daemonCommand(
   // Publish only after this process owns the shared daemon/drain lock. Dry-run returned above,
   // and a refused second daemon returned from the catch, so neither can replace material state.
   // This is telemetry only: disk failure must not change whether the daemon starts.
+  const bootProviderRoutingPolicy = resolveProviderRoutingPolicy(config.root, config);
+  if (bootProviderRoutingPolicy.fallback) {
+    log("daemon.provider_routing_policy_fallback", { reason: bootProviderRoutingPolicy.fallback.reason });
+  }
   try {
     (deps.writeProviderRoutingStatus ?? writeProviderRoutingStatus)(config.root, {
       state: "not-probed",
-      enabledProviders: enabledWorkerProviders(config),
-      reservePercent: config.workerProviders?.reservePercent ?? 5,
+      enabledProviders: bootProviderRoutingPolicy.routableProviders,
+      reservePercent: bootProviderRoutingPolicy.reservePercent,
       observedAtMs: Date.now(),
       cacheValidMs: config.workerProviders?.capacityCacheMs ?? 60_000,
+      policy: bootProviderRoutingPolicy,
     });
   } catch {
     log("daemon.provider_routing_status_write_failed", { reason: "write-failed" });
