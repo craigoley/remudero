@@ -2711,7 +2711,7 @@ export type FollowupRouteOutcome =
 // action-verb check (`re-run`/`verify`/`close`/`check`/`audit`) keeps it routed: it
 // names real work, not a bare dispatch ask.
 //
-// A cross-task ask ("W1-T900 needs picked up") is NOT this arm's shape and stays routed — the
+// A cross-task ask ("W1-T<n> needs picked up") is NOT this arm's shape and stays routed — the
 // claim here is narrowly about an entry's OWN already-filed referent, never about a task the
 // entry merely mentions in passing.
 //
