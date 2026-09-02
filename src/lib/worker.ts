@@ -2843,6 +2843,11 @@ export class WorktreeBaseStaleError extends Error {
     public readonly base: string,
     public readonly remoteHead: string,
     public readonly ref: string,
+    /** W1-T2621: commit distance `base..remoteHead`, local objects only (never a second
+     *  network read) — "unknown" when the remote head's object is not present locally, the
+     *  "fetch did not move the ref" shape this task exists to surface. Lets a caller's ledger
+     *  line (`worktree.stale_base`) tell a one-commit race from a broken provisioning path. */
+    public readonly behind: number | "unknown" = "unknown",
   ) {
     super(
       `worktree base ${base} is BEHIND ${ref}'s remote head ${remoteHead} — the base is stale ` +
@@ -2878,7 +2883,15 @@ export class WorktreeBaseStaleError extends Error {
  * still surfaces so an operator can tell the check ran and could not measure, rather than
  * silently skipping it.
  *
- * PURE aside from the two injected callbacks — no git/network call of its own — so a test
+ * W1-T2621: the SAME unreadable branch also ledgers `worktree.base_uncheckable` (carrying
+ * `ref`, `base`, and the error) through `deps.log` when one is supplied, IN ADDITION to the
+ * `warn` above — `warn`'s only channel in production is `console.error` (a worktreeAdd
+ * caller with no `worktreeBaseDeps` gets the default), which is neither durable nor read by
+ * anything; `log`, when supplied, is the run's own ledger, so the fail-open leaves a trace
+ * an operator can find after the fact instead of only at the moment it happened. Polarity is
+ * unchanged: this still returns (proceeds) rather than throwing.
+ *
+ * PURE aside from the injected callbacks — no git/network call of its own — so a test
  * drives every branch (stale / current / unreadable) without a second real remote.
  */
 export function assertWorktreeBaseCurrent(
@@ -2887,22 +2900,37 @@ export function assertWorktreeBaseCurrent(
   deps: {
     readRemoteHead: () => string;
     warn?: (message: string) => void;
+    /** W1-T2621: the run's ledger logger — see the function doc's "ledgers
+     *  worktree.base_uncheckable" note. Optional; absent means no ledger line, exactly as
+     *  before this option existed. */
+    log?: (step: string, extra?: Record<string, unknown>) => void;
+    /** W1-T2621: commit distance `base..remoteHead`, invoked ONLY on the stale branch (the
+     *  current/unreadable branches have a trivial distance — 0 / "unknown" — that needs no
+     *  git call at all). Local objects only, never a second network read; the caller
+     *  (`worktreeAdd`) is the one with a `repoDir` to read them from, so it supplies this —
+     *  omitting it here keeps this function itself free of any real git/network call.
+     *  Default: "unknown", never a guessed number. */
+    countBehind?: (base: string, remoteHead: string) => number | "unknown";
   },
-): void {
+): { remoteHead: string; behind: number | "unknown" } {
   let remoteHead: string;
   try {
     remoteHead = deps.readRemoteHead();
   } catch (e) {
+    const errorMessage = String((e as Error)?.message ?? e);
     (deps.warn ?? ((m: string) => console.error(m)))(
       `worktree base currency: remote head for ${ref} could not be read ` +
-        `(${String((e as Error)?.message ?? e)}) — proceeding without the check rather than ` +
+        `(${errorMessage}) — proceeding without the check rather than ` +
         "refusing on an unmeasurable condition",
     );
-    return;
+    deps.log?.("worktree.base_uncheckable", { ref, base, error: errorMessage });
+    return { remoteHead: "unreadable", behind: "unknown" };
   }
   if (remoteHead !== base) {
-    throw new WorktreeBaseStaleError(base, remoteHead, ref);
+    const behind = (deps.countBehind ?? (() => "unknown" as const))(base, remoteHead);
+    throw new WorktreeBaseStaleError(base, remoteHead, ref, behind);
   }
+  return { remoteHead, behind: 0 };
 }
 
 /**
@@ -3066,6 +3094,45 @@ function defaultReadRemoteHead(repoDir: string, ref: string): string {
   return sha;
 }
 
+/** W1-T2621: the LOCAL `origin/<ref>` tracking ref, read immediately after `worktreeAdd`'s own
+ *  `git fetch` — one of the three readings the `worktree.add` ledger line needs (the other two
+ *  are the created base and {@link defaultReadRemoteHead}'s independent remote read) to tell
+ *  "the add cut from a ref other than the one it was told to" apart from "the fetch did not
+ *  move the ref" after the fact. No network call of its own — purely local, right after a
+ *  fetch that already succeeded (fail-closed), so failure here is not expected; it degrades to
+ *  the literal `"unreadable"` rather than aborting worktree creation over a sensor read. */
+function readLocalOriginRefHead(repoDir: string, ref: string): string {
+  try {
+    return execFileSync("git", ["-C", repoDir, "rev-parse", `refs/remotes/origin/${ref}`], {
+      encoding: "utf8",
+    }).trim();
+  } catch {
+    // This is a best-effort observability read after the fail-closed fetch; "unreadable" keeps
+    // sensor failure distinct from an absent or current ref without blocking worktree creation.
+    return "unreadable";
+  }
+}
+
+/** W1-T2621: `assertWorktreeBaseCurrent`'s `countBehind` for a real repo — commits
+ *  `base..remoteHead`, LOCAL OBJECTS ONLY (`git rev-list --count`), never a second network
+ *  call. Returns `"unknown"`, never a guessed number, when the count cannot be produced — most
+ *  notably when `remoteHead`'s object is not present locally at all, which is exactly the "the
+ *  fetch did not move the ref" shape this task exists to surface rather than silently render
+ *  as `behind: 0`. */
+function defaultCountBehind(repoDir: string, base: string, remoteHead: string): number | "unknown" {
+  try {
+    const out = execFileSync("git", ["-C", repoDir, "rev-list", "--count", `${base}..${remoteHead}`], {
+      encoding: "utf8",
+    });
+    const n = Number.parseInt(out.trim(), 10);
+    return Number.isInteger(n) && n >= 0 ? n : "unknown";
+  } catch {
+    // The remote object may not exist locally; preserve that unmeasurable state explicitly rather
+    // than aborting creation or manufacturing a zero distance.
+    return "unknown";
+  }
+}
+
 /** `git worktree add` a fresh branch off origin/<base> for a repo checkout. */
 export function worktreeAdd(
   repoDir: string,
@@ -3082,9 +3149,23 @@ export function worktreeAdd(
      *  (iii)) AND (W1-T2618) the "canonical checkout is behind" drift warning. Default:
      *  `console.error` for both. */
     warn?: (message: string) => void;
+    /** W1-T2621: the run's ledger logger. Absent (the default) leaves behaviour BYTE-IDENTICAL
+     *  to before this option existed — `spike.ts` and any other caller with no ledger are
+     *  unchanged. Present, this emits ONE `worktree.add` line per creation carrying the
+     *  three-way base reading (`base`, `local_ref_head`, `remote_head`) plus `ref` and
+     *  `behind`, and — on the currency check's fail-open branch — `worktree.base_uncheckable`
+     *  (see {@link assertWorktreeBaseCurrent}). `run-task.ts`'s call sites supply it; a
+     *  refusal (`WorktreeBaseStaleError`) is still the caller's own to ledger, since only the
+     *  caller decides what a refusal means for its dispatch. */
+    log?: (step: string, extra?: Record<string, unknown>) => void;
   } = {},
 ): void {
   execFileSync("git", ["-C", repoDir, "fetch", "origin", "--quiet"], { stdio: "inherit" });
+  const ref = base.replace(/^origin\//, "");
+  // W1-T2621: read the LOCAL tracking ref right after the fetch, before the worktree is cut
+  // from it — see readLocalOriginRefHead's own doc for why this reading, not just the
+  // created base and the independent remote head, is needed to discriminate the mechanism.
+  const localRefHead = readLocalOriginRefHead(repoDir, ref);
   // W1-T1129: `base` (e.g. "origin/main") is a remote-tracking start point, so plain
   // `-b <branch>` would ALSO write `branch.<branch>.remote`/`.merge` into the repo's ONE
   // shared `.git/config` — a write every other concurrent worktreeAdd/checkout -B call
@@ -3103,10 +3184,23 @@ export function worktreeAdd(
     encoding: "utf8",
   }).trim();
   recordWorktreeBase(worktreePath, createdBase);
-  const ref = base.replace(/^origin\//, "");
-  assertWorktreeBaseCurrent(createdBase, ref, {
+  const currency = assertWorktreeBaseCurrent(createdBase, ref, {
     readRemoteHead: () => (deps.readRemoteHead ?? defaultReadRemoteHead)(repoDir, ref),
     warn: deps.warn,
+    log: deps.log,
+    countBehind: (b, remoteHead) => defaultCountBehind(repoDir, b, remoteHead),
+  });
+  // W1-T2621: ONE line per creation, THREE readings plus the distance (design note (ii)) — a
+  // stale base never reaches here (assertWorktreeBaseCurrent above throws first), so this is
+  // the "currency check passed or degraded-but-proceeded" line, never emitted for a refusal.
+  deps.log?.("worktree.add", {
+    branch,
+    worktreePath,
+    base: createdBase,
+    local_ref_head: localRefHead,
+    remote_head: currency.remoteHead,
+    ref,
+    behind: currency.behind,
   });
   // W1-T137: point this worktree at the repo's tracked hooks/ dir so its real git
   // commit-msg hook (hooks/commit-msg) fires on every commit the worker authors
