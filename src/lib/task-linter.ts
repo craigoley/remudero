@@ -98,6 +98,7 @@ export type LintCheck =
   | "post-merge-proof-changed"
   | "post-merge-correction-without-prompt"
   | "blocked-task-disposition"
+  | "blocked-record-unruled"
   | "provenance"
   | "call-site"
   | "monolith-filing"
@@ -1854,6 +1855,68 @@ export function blockedDispositionViolations(task: Task, opts: LintOpts = {}): L
   ];
 }
 
+// ── BLOCKED-RECORD DISPOSITION CENSUS (W1-T2634) ────────────────────────────────────────────────
+//
+// {@link blockedDispositionViolations} (W1-T2487, above) fires ONLY inside the changed-tasks
+// (`--base`) pass, and even there only for a task THIS diff actually touches (its own module
+// comment: "the whole-plan pass ... supplies no context at all, so this function returns [] for
+// EVERY task there, including the standing twenty-six"). By design — refusing the whole standing
+// population at once is the exact wedge W1-T2481 measured (13 permanently uneditable tombstones
+// after PR #3305). But the result is that the STANDING population — every blocked record nobody's
+// PR happens to touch this week — is invisible to every lint pass, and W1-T391, W1-T2474 and
+// W1-T2481 each re-derived it BY HAND at three different shas and got three different numbers
+// (31/32, 46/50, 13 wedged). A population that must be re-measured by a human to be discussed is a
+// population nothing is tracking, and it silently regrows after every backfill.
+//
+// This check closes that gap without reopening the one the check above exists to avoid: it runs
+// UNCONDITIONALLY, in EVERY lint pass — no `LintOpts` field, no base-ref context, so it fires just
+// as well over `lintPlan`'s whole-plan sweep (the retro's periodic plan-health pass, W1-T20d, or
+// `rmd lint-plan --all`) as it does inside a diff. It reads the LOADED `Task` object's own
+// `status`/`retirement` fields — never raw plan text — so it measures the population the way a
+// consumer (drain.ts's dispatch filter, daemon.ts's starvation census) actually sees it, not the
+// way a grep over plan/tasks.yaml plus every tasks.d/*.yaml shard approximates it.
+//
+// WARN-ONLY BY CONSTRUCTION, exactly like {@link advisoryRoutingViolations}: there is no `LintOpts`
+// knob anywhere to escalate this to `block`, and none should ever be added — this task's own
+// rationale is explicit that a blocking arm over this exact population reproduces the W1-T2481
+// wedge one field over, this time catching the legitimate `status: blocked` records too (W1-T391
+// and W1-T10 are both correct as they stand, with no retirement).
+//
+// IT NAMES; IT DOES NOT RULE — it reads ONLY `task.status` and `task.retirement`, the two
+// structured fields, and infers nothing from `note:`/`rationale:`/title prose. That lexicon-over-
+// prose shortcut is the exact move W1-T391's withdrawn first implementation made (inferring a
+// disposition from a 31-of-32 regularity), and it misfiled a legitimate operator-block that was
+// already a fixture in that suite. The ruling belongs to an operator (W1-T2635); this check only
+// names the record and stops.
+
+/** A `status: "blocked"` task carrying no LEGAL `retirement:` value (absent, or a value outside
+ *  {@link RETIREMENT_REASONS} — "present" here means "present AND legal", the same reading {@link
+ *  blockedDispositionViolations} uses) is NAMED, unconditionally, in every lint pass — see the
+ *  module comment above for why this exists ALONGSIDE that diff-scoped check rather than replacing
+ *  it. Length is always 0 or 1: a task whose `status` is not `"blocked"` emits nothing regardless
+ *  of `retirement`, and a `"blocked"` task that already names a legal disposition emits nothing
+ *  either. WARN-ONLY BY CONSTRUCTION — no `opts` parameter, so no caller can ever run this
+ *  blocking (mirrors {@link advisoryRoutingViolations}'s own "no knob, ever" shape). The message
+ *  names the two legitimate remedies (record a `retirement:` ruling, or state in prose why the
+ *  record is waiting rather than retired) so the fix is discoverable from the failure itself,
+ *  never only from this task's own shard. */
+export function blockedRecordUnruledViolations(task: Task): LintViolation[] {
+  if (task.status !== "blocked") return [];
+  const hasLegalDisposition = task.retirement !== undefined && (RETIREMENT_REASONS as readonly string[]).includes(task.retirement);
+  if (hasLegalDisposition) return [];
+  return [
+    {
+      check: "blocked-record-unruled",
+      severity: "warn",
+      message:
+        `task ${task.id} is status: blocked with no \`retirement:\` naming its disposition — named, ` +
+        `never ruled on (W1-T2634 only reports; it does not decide for you). Either record a ` +
+        `\`retirement:\` ruling (one of ${RETIREMENT_REASONS.join("|")}), or state in prose why the ` +
+        "record is waiting rather than retired.",
+    },
+  ];
+}
+
 /**
  * Context the CALLER resolves via I/O and injects through {@link LintOpts} —
  * see the module comment above this section for why it cannot be fetched here.
@@ -3128,7 +3191,11 @@ export interface LintOpts {
  *  absent `opts.resolveNameFilteredCandidates`, and dispatch-priority (W1-T422) and
  *  advisory-routing (W1-T519) always run — advisory-routing is a no-op (empty array) only
  *  when the task's title/rationale/note match none of {@link ADVISORY_ROUTING_LEXICON}, and
- *  can never block (see {@link advisoryRoutingViolations}'s module comment). */
+ *  can never block (see {@link advisoryRoutingViolations}'s module comment). blocked-record-
+ *  unruled (W1-T2634) also always runs, unconditionally, with no `opts` field at all — it names
+ *  every `status: "blocked"` task lacking a legal `retirement:`, in every pass including a
+ *  whole-plan `lintPlan` sweep, and — like advisory-routing — can never block (see {@link
+ *  blockedRecordUnruledViolations}'s module comment). */
 export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   const violations: LintViolation[] = [];
   const sizing = sizingViolation(task, opts);
@@ -3142,6 +3209,7 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   violations.push(...proofNameResolutionViolations(task, opts));
   violations.push(...postMergeAmendmentViolations(task, opts));
   violations.push(...blockedDispositionViolations(task, opts));
+  violations.push(...blockedRecordUnruledViolations(task));
   violations.push(...callSiteViolations(task, opts));
   violations.push(...monolithFilingViolations(task, opts));
   violations.push(...duplicateTitleViolations(task, opts));
