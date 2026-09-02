@@ -3,7 +3,8 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { buildOpenPrViews } from "../src/run-task.js";
+import { buildOpenPrViews, reviewAttemptsForInput } from "../src/run-task.js";
+import { reviewInputDigest } from "../src/lib/review.js";
 import {
   DEFAULT_SWEEP_POLICY,
   deriveDisposition,
@@ -22,8 +23,9 @@ import { appendLedger } from "../src/lib/ledger.js";
  * body that verdict judged was corrected. These tests drive the THIRD admitting arm added to
  * that row: a `reviewState === "failure"` head that has seen activity (per
  * {@link OpenPrView.lastActivityAt}, the PR's own `updated_at`) AFTER its verdict was posted
- * (per {@link OpenPrView.reviewVerdictPostedAt}), bounded by the SAME `reviewOrphanCap`/
- * `reviewOrphanBackoffMinutes` budget the orphaned-by-a-push arm already shares.
+ * (per {@link OpenPrView.reviewVerdictPostedAt}) only when the current exact head+body digest has
+ * ZERO completed judgments. A real body/head correction resets that digest's counter; coarse
+ * activity that leaves the input unchanged does not reopen the review lane.
  */
 
 const NOW = Date.parse("2026-08-26T12:00:00Z");
@@ -53,6 +55,7 @@ function failedReviewPr(over: Partial<OpenPrView> = {}): OpenPrView {
     checksState: "green",
     unmetCriteria: [],
     criteriaRecoverable: false,
+    priorReviewAttemptsForInput: 0,
     reviewVerdictPostedAt: VERDICT_AT,
     lastActivityAt: ACTIVITY_AFTER,
     ...over,
@@ -111,51 +114,83 @@ test("reviewVerdictOvertakenByActivity fails CLOSED on missing or unparseable ti
   );
 });
 
-// ── acceptance 2 & 3: an unchanged-input bound, never a lifetime PR budget ───────────────────
+// ── acceptance 2 & 3: exact-input reset, never a lifetime PR budget ──────────────────────────
 
-test("the re-offer uses the existing policy threshold for repeated judgments of the same input", () => {
-  // One shy of the cap for this exact input still gets re-offered.
-  const underCap = deriveDisposition(
-    failedReviewPr({ priorReviewAttemptsForInput: DEFAULT_SWEEP_POLICY.reviewOrphanCap - 1 }),
-    DEFAULT_SWEEP_POLICY,
-    NOW,
-  );
-  assert.equal(underCap.disposition, "post-review");
-
-  // AT the cap, with no backoff attempt on record (reviewInputBackoffElapsed reads false with no
-  // reviewInputLastAttemptAt — see that predicate's own doc): capped, same as row 8.6.
-  const atCap = deriveDisposition(
-    failedReviewPr({ priorReviewAttemptsForInput: DEFAULT_SWEEP_POLICY.reviewOrphanCap }),
-    DEFAULT_SWEEP_POLICY,
-    NOW,
-  );
-  assert.notEqual(atCap.disposition, "post-review", "the unchanged input is at its retry threshold");
-  assert.equal(atCap.disposition, "blocked-ambiguous");
-  assert.match(atCap.reason, new RegExp(`unchanged review input.*>= ${DEFAULT_SWEEP_POLICY.reviewOrphanCap} cap`));
-});
-
-test("activity alone does not reset the cap when the producer reports the same exact review input", () => {
+test("activity cannot re-offer an exact input that already has one completed judgment", () => {
   const activityOnly = failedReviewPr({
-    priorReviewAttemptsForInput: DEFAULT_SWEEP_POLICY.reviewOrphanCap,
+    priorReviewAttemptsForInput: 1,
     lastActivityAt: "2026-08-26T06:00:00Z", // later activity, but the exact-input count is unchanged
   });
   const d = deriveDisposition(activityOnly, DEFAULT_SWEEP_POLICY, NOW);
-  assert.notEqual(d.disposition, "post-review");
+  assert.notEqual(d.disposition, "post-review", "same-input activity falls through instead of fighting delivery dedup forever");
   assert.equal(d.disposition, "blocked-ambiguous");
-  assert.match(d.reason, /unchanged review input/);
+  assert.match(d.reason, /criteria unrecoverable/);
 });
 
-test("once the shared backoff elapses, a capped head is offered again — escalate AND keep going, never one instead of the other (W1-T1018)", () => {
-  const longAgo = "2026-08-01T00:00:00Z"; // well past reviewOrphanBackoffMinutes before NOW
+test("missing exact-input attempt data fails closed instead of manufacturing review permission", () => {
   const d = deriveDisposition(
-    failedReviewPr({
+    failedReviewPr({ priorReviewAttemptsForInput: undefined }),
+    DEFAULT_SWEEP_POLICY,
+    NOW,
+  );
+  assert.notEqual(d.disposition, "post-review");
+  assert.equal(d.disposition, "blocked-ambiguous");
+  assert.match(d.reason, /criteria unrecoverable/);
+});
+
+test("a body or head correction creates a fresh exact input and resets review admission immediately", () => {
+  const head = "cafe700cafe700cafe700cafe700cafe700cafe";
+  const oldBody = "old acceptance";
+  const oldDigest = reviewInputDigest(head, oldBody);
+  const ledger = [
+    {
+      ts: "2026-08-24T12:00:00Z",
+      step: "review.posted",
+      task_id: "W1-T700",
+      pr_url: "https://github.com/o/r/pull/700",
+      head_sha: head,
+      review_input_digest: oldDigest,
+    },
+  ];
+
+  const unchanged = reviewAttemptsForInput(ledger, "W1-T700", "https://github.com/o/r/pull/700", head, oldDigest);
+  assert.equal(unchanged.attempts, 1, "the already-judged digest stays closed despite coarse PR activity");
+
+  const correctedDigest = reviewInputDigest(head, "corrected acceptance");
+  const corrected = reviewAttemptsForInput(ledger, "W1-T700", "https://github.com/o/r/pull/700", head, correctedDigest);
+  assert.equal(corrected.attempts, 0, "a body edit resets the exact-input count");
+  assert.equal(
+    deriveDisposition(failedReviewPr({ priorReviewAttemptsForInput: corrected.attempts }), DEFAULT_SWEEP_POLICY, NOW).disposition,
+    "post-review",
+    "the corrected input is admitted without waiting for a lifetime or wall-clock cap reset",
+  );
+});
+
+test("the review-orphan cap and stuck-pending clock retain their independent recovery behavior", () => {
+  const cappedOrphan = deriveDisposition(
+    pr({
+      reviewState: "none",
+      checksState: "green",
+      reviewOrphanedByPush: true,
       priorReviewAttemptsForInput: DEFAULT_SWEEP_POLICY.reviewOrphanCap,
-      reviewInputLastAttemptAt: longAgo,
     }),
     DEFAULT_SWEEP_POLICY,
     NOW,
   );
-  assert.equal(d.disposition, "post-review", "the backoff elapsed — the lane resumes rather than walling the PR off permanently");
+  assert.equal(cappedOrphan.disposition, "blocked-ambiguous");
+  assert.match(cappedOrphan.reason, /orphaned by a push, again/);
+
+  const stalePending = deriveDisposition(
+    pr({
+      reviewState: "pending",
+      checksState: "green",
+      reviewPendingSince: "2026-08-26T08:00:00Z",
+    }),
+    DEFAULT_SWEEP_POLICY,
+    NOW,
+  );
+  assert.equal(stalePending.disposition, "post-review");
+  assert.match(stalePending.reason, /treating the stuck pending as unattended/);
 });
 
 // ── acceptance 4: the reason is its own distinguishable cause ────────────────────────────────
