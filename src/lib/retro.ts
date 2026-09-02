@@ -2681,15 +2681,51 @@ export const FOLLOWUP_TYPE_ROUTES: Readonly<Record<FollowupCandidate["type"], "p
 
 /** One candidate's routing outcome. A decline always NAMES the arm that declined it — never a
  *  bare boolean — so a reader can tell "already covered by the existing title dedup" from
- *  "not plan-shaped work" without re-deriving either from `harvest` by hand. */
+ *  "not plan-shaped work" from "restates its own declaring task" without re-deriving any of the
+ *  three from `harvest` by hand. */
 export type FollowupRouteOutcome =
   | { candidate: FollowupCandidate; routed: true; proposalId: string }
   | {
       candidate: FollowupCandidate;
       routed: false;
-      arm: "title-dedup" | "type-not-plan-shaped";
+      arm: "title-dedup" | "type-not-plan-shaped" | "self-referential";
       reason: string;
     };
+
+/**
+ * True when `text`'s own ask IS "implement `taskId`" — the shape W1-T2617's own recon measured
+ * in 23 of 317 live registry rows (2026-09-01): a follow-up minted by a run declaring task X
+ * whose text simply restates "implement X" back at the plan, so routing it would duplicate a
+ * plan record (task or shipped PR) that already exists on whichever side of the merge X falls.
+ *
+ * DELIBERATELY NARROW, matching only a LEADING "implement <taskId>" claim (case-insensitive,
+ * word-bounded): the entry's ask must literally BE its own declaring task, not merely mention it.
+ * A follow-up that cites its own task id while asking for DIFFERENT work — "W1-T2530's fix should
+ * also cover X" — does not start with this shape and is left untouched; per this task's own
+ * design note, the dangerous direction is silently dropping a genuine discovery, not admitting a
+ * duplicate the registry already tolerates today, so this predicate refuses the narrower set,
+ * never the wider one.
+ *
+ * Shared verbatim by {@link isSelfReferentialFollowup} (candidate-shaped, admission time) and
+ * {@link pruneSelfReferentialFollowups} (proposal-shaped, parsed back off an already-minted
+ * summary) — ONE predicate, not two copies that could drift apart.
+ */
+function textAsksToImplementItsOwnTask(text: string, taskId: string): boolean {
+  const trimmed = taskId.trim();
+  if (!trimmed || trimmed === "?") return false;
+  const escaped = trimmed.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^\\s*implement\\s+${escaped}\\b`, "i").test(text);
+}
+
+/** Admission-time self-reference check: does `candidate.text` simply ask to implement
+ *  `candidate.taskId` — the SAME task that declared the candidate? Both fields already ride on
+ *  every `FollowupCandidate` (`mineFollowups` sets them), so this needs no new read and no
+ *  merged/queued distinction at all — it holds identically whether the declaring task is queued,
+ *  merged, or anything else, which is exactly why it reaches the still-queued majority
+ *  `retireSettledFollowups`'s merged-only signal cannot (W1-T2563). */
+export function isSelfReferentialFollowup(candidate: FollowupCandidate): boolean {
+  return textAsksToImplementItsOwnTask(candidate.text, candidate.taskId);
+}
 
 export interface RouteFollowupsDeps {
   registryPath: string;
@@ -2717,11 +2753,17 @@ export function followupProposalId(candidate: FollowupCandidate): string {
  * (inbox.ts's `updateProposalRegistry`) board-review.ts/rule-efficacy.ts/feedback-docket.ts
  * already use — replacing "nobody reads this markdown section" with an actual consumer.
  *
- * TWO REFUSAL ARMS, each named on its own outcome, neither re-implemented here:
+ * THREE REFUSAL ARMS, each named on its own outcome, neither re-implemented here:
  *   - `"title-dedup"`: `harvest.deduped` — `mineFollowups`'s OWN `followupMatchesTitle` arm,
  *     the existing duplicate refusal this function reuses verbatim rather than re-scoring.
  *   - `"type-not-plan-shaped"`: {@link FOLLOWUP_TYPE_ROUTES} says the entry's type is not
  *     routable — the type definition decided above, cited, never re-guessed per call.
+ *   - `"self-referential"` (W1-T2617): {@link isSelfReferentialFollowup} says the entry's own
+ *     ask IS the task that declared it ("implement <taskId>" naming its own `taskId`) — routing
+ *     it would mint a duplicate of a plan record (task or shipped PR) that already exists on
+ *     whichever side of the merge the declaring task falls. Checked BEFORE the type route below:
+ *     a self-referential "task" entry is the exact shape 21-of-23 measured rows carried, and
+ *     would otherwise sail through `FOLLOWUP_TYPE_ROUTES`'s "task" -> "propose" branch unchecked.
  *
  * EVERY MINTED PROPOSAL CARRIES `evidenceAnchors: []`, STATED, NEVER SYNTHESIZED. A
  * `FollowupEntry` is free prose with no `git grep`-able pattern (Q2 of this task's own
@@ -2751,7 +2793,17 @@ export function routeFollowupsToRegistry(harvest: FollowupHarvest, deps: RouteFo
 
   const routable: FollowupCandidate[] = [];
   for (const candidate of harvest.candidates) {
-    if (FOLLOWUP_TYPE_ROUTES[candidate.type] === "propose") {
+    if (isSelfReferentialFollowup(candidate)) {
+      outcomes.push({
+        candidate,
+        routed: false,
+        arm: "self-referential",
+        reason:
+          `this entry's own text asks to implement ${candidate.taskId} — the SAME task that ` +
+          `declared it — so routing it would duplicate a plan record that already exists on ` +
+          `whichever side of the merge ${candidate.taskId} falls (isSelfReferentialFollowup)`,
+      });
+    } else if (FOLLOWUP_TYPE_ROUTES[candidate.type] === "propose") {
       routable.push(candidate);
     } else {
       outcomes.push({
@@ -2910,6 +2962,94 @@ export function retireSettledFollowups(read: FollowupReferentRead, deps: RetireF
     if (settled.length === 0) return null;
     const retiredIds = new Set(settled.map((o) => o.proposalId));
     return current.filter((p) => !retiredIds.has(p.id));
+  });
+
+  return outcomes;
+}
+
+// ── Self-referential follow-up prune (W1-T2617) ─────────────────────────────────────────────
+//
+// `isSelfReferentialFollowup` above (the admission-time arm `routeFollowupsToRegistry` now
+// checks) stops FUTURE self-referential mints. It does nothing for the 21-of-23 rows already
+// minted before this task, sitting in the registry today (2026-09-01 measurement, this task's
+// own rationale). THE W1-T190 DOCTRINE, verbatim: heal existing drift, not only future mints.
+// This section is that heal — a ONE-TIME pass any caller (a script, a test, a future retro run)
+// can invoke, through the SAME single writer `routeFollowupsToRegistry` and
+// `retireSettledFollowups` both use, in ONE write for the whole pass.
+
+/** Parse a routed follow-up's own free-text `text` back out of its minted `summary` —
+ *  `routeFollowupsToRegistry`'s `follow-up harvest [type]: <text> — from <taskId> (run ...)`
+ *  shape, the SAME string this whole followup family already parses for its `taskId` referent
+ *  (see {@link followupOriginatingTaskId}'s own doc for why a structured field is never used).
+ *  Returns `undefined` for anything that does not match the shape this module itself mints. */
+function followupSummaryText(summary: string): string | undefined {
+  return /^follow-up harvest \[[a-z]+\]: ([\s\S]*) — from \S+ \(run /.exec(summary)?.[1];
+}
+
+/** One proposal this pass actually removed, naming what it matched — mirrors
+ *  {@link FollowupRetireOutcome}'s shape so a caller already familiar with retirement outcomes
+ *  reads this one for free. */
+export interface FollowupPruneOutcome {
+  proposalId: string;
+  taskId: string;
+  reason: string;
+}
+
+export interface PruneFollowupsDeps {
+  registryPath: string;
+  /** Injectable — production takes {@link updateProposalRegistry}, mirroring
+   *  {@link RouteFollowupsDeps.updateRegistry} and {@link RetireFollowupsDeps.updateRegistry}'s
+   *  own test seam. */
+  updateRegistry?: (
+    registryPath: string,
+    update: (current: Proposal[]) => Proposal[] | null,
+    opts?: UpdateProposalRegistryOpts,
+  ) => Proposal[] | null;
+}
+
+/**
+ * Apply {@link isSelfReferentialFollowup}'s own predicate — parsed back off each already-minted
+ * `followup:`-prefixed proposal's `summary` rather than a `FollowupCandidate`, since the
+ * population this heals predates the admission arm and was never re-offered as a candidate — to
+ * every proposal currently in the registry, and remove every match through the single writer in
+ * ONE write for the whole pass, exactly as {@link retireSettledFollowups} does for its own signal.
+ *
+ * NEEDS NO BATCHED READ AT ALL: unlike `retireSettledFollowups`'s merged-task set (one read per
+ * pass, `"unreadable"` means wait), this predicate is local to each proposal's own summary text —
+ * the same "no referent read" property {@link isSelfReferentialFollowup} carries at admission
+ * time — so it runs identically for a still-queued declaring task and a merged one, and a second
+ * pass over an already-pruned registry finds nothing left to remove (idempotent).
+ *
+ * A proposal outside the `followup:` family, or a hand-authored/foreign summary this module did
+ * not mint, is left exactly alone — {@link followupOriginatingTaskId} and
+ * {@link followupSummaryText} both return `undefined` for either, and neither is ever guessed.
+ */
+export function pruneSelfReferentialFollowups(deps: PruneFollowupsDeps): FollowupPruneOutcome[] {
+  const updateRegistry = deps.updateRegistry ?? updateProposalRegistry;
+  let outcomes: FollowupPruneOutcome[] = [];
+
+  updateRegistry(deps.registryPath, (current) => {
+    const matched: FollowupPruneOutcome[] = [];
+    for (const p of current) {
+      const taskId = followupOriginatingTaskId(p);
+      if (taskId === undefined) continue;
+      const text = followupSummaryText(p.summary);
+      if (text === undefined) continue;
+      if (!textAsksToImplementItsOwnTask(text, taskId)) continue;
+      matched.push({
+        proposalId: p.id,
+        taskId,
+        reason:
+          `${p.id}'s own text asks to implement ${taskId} — the SAME task that declared it — so ` +
+          `it duplicates a plan record that already exists on whichever side of the merge ` +
+          `${taskId} falls. Pruned by the SAME predicate (isSelfReferentialFollowup /` +
+          `textAsksToImplementItsOwnTask) routeFollowupsToRegistry now refuses at admission time.`,
+      });
+    }
+    outcomes = matched;
+    if (matched.length === 0) return null;
+    const prunedIds = new Set(matched.map((o) => o.proposalId));
+    return current.filter((p) => !prunedIds.has(p.id));
   });
 
   return outcomes;
