@@ -667,9 +667,12 @@ import { buildReceipt, resolveReceiptLedgerLines, type ReceiptLedgerRead } from 
 import { buildReplay, resolveReplayLedgerLines, type ReplayLedgerRead } from "./lib/ledger-replay.js";
 import { buildDepReviewArmUnreachableEscalation, buildDepReviewEscalation, decideDepReview } from "./lib/dep-review.js";
 import {
+  headWasCreatedAfterReflogSnapshot,
+  parseHeadReflog,
   recordHeadProviderAfterPush,
   resolveReviewProviderProvenance,
   reviewProviderProvenanceLedgerFields,
+  type HeadReflogEntry,
 } from "./lib/review-provider-provenance.js";
 import { decideAutoTriage, newFeedbackIdsOldestFirst, oldestFeedbackAgeMs, readAutoTriageMarker, recordAutoTriageFire, autoTriageMarkerPath, triageLockPath, claimTriageWithLogging, releaseTriageClaimWithLogging, gitTriageClaimReserver, type AutoTriageDecision, type TriageClaimReserver, type TriageClaimResult } from "./lib/auto-triage.js";
 import { decideDispatchClaim, releaseDispatchClaim, gitDispatchClaimReserver, dispatchClaimRef, type DispatchClaimReserver } from "./lib/dispatch-claim.js";
@@ -1429,6 +1432,35 @@ export function stripRepoRootFlag(argv: string[]): string[] {
   const i = argv.indexOf("--repo-root");
   if (i < 0) return argv;
   return [...argv.slice(0, i), ...argv.slice(i + 2)];
+}
+
+function readWorktreeHeadReflog(worktreePath: string): HeadReflogEntry[] | undefined {
+  try {
+    return parseHeadReflog(
+      execFileSync("git", ["-C", worktreePath, "reflog", "show", "--format=%H%x09%gs", "HEAD"], {
+        encoding: "utf8",
+      }),
+    );
+  } catch {
+    // Provenance is optional evidence: an unreadable worktree reflog must suppress attribution,
+    // never block the worker or manufacture ownership from matching local/live head SHAs.
+    return undefined;
+  }
+}
+
+function workerCreatedCurrentHead(
+  worktreePath: string,
+  before: ReadonlyArray<HeadReflogEntry> | undefined,
+): boolean {
+  if (!before) return false;
+  try {
+    const headSha = execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    const after = readWorktreeHeadReflog(worktreePath);
+    return after ? headWasCreatedAfterReflogSnapshot(before, after, headSha) : false;
+  } catch {
+    // The same fail-closed provenance contract as the snapshot read above.
+    return false;
+  }
 }
 
 /** Owner org, read from THIS repo's origin — no hardcoded account in the tree. */
@@ -8819,6 +8851,7 @@ export async function runFixRung(opts: {
       taskId: opts.taskId,
     };
 
+    const workerHeadReflogBefore = readWorktreeHeadReflog(opts.worktreePath);
     let fixResult: WorkerResult;
     // W1-T1219: the spawn's own elapsed milliseconds on the SUCCESS path — the same field
     // `fix.spawn_abandoned` already carries on the failure path (below), folded into
@@ -8864,6 +8897,8 @@ export async function runFixRung(opts: {
       );
       throw e;
     }
+
+    const workerHeadCreatedLocally = workerCreatedCurrentHead(opts.worktreePath, workerHeadReflogBefore);
 
     // A worker DEMONSTRABLY ran (spawn returned rather than throwing) — only now is this round
     // even CANDIDATE for a real strike.
@@ -8969,6 +9004,7 @@ export async function runFixRung(opts: {
         prUrl: opts.prUrl,
         source: "fix",
         worker: fixResult,
+        workerHeadCreatedLocally,
         priorHeadSha,
       },
       {
@@ -11990,6 +12026,7 @@ async function runTask(
     // worker (mount steps UP, §9) runs BEFORE any third patch attempt — that third attempt's
     // prompt carries the diagnose findings verbatim, never a third blind patch (acceptance #1).
     say("implement worker");
+    const workerHeadReflogBefore = readWorktreeHeadReflog(worktreePath);
     let impl!: WorkerResult;
     const attemptImplement = async (findings?: string): Promise<AttemptOutcome> => {
       impl = account(
@@ -12212,6 +12249,8 @@ async function runTask(
         question: question.question.slice(0, 120),
       });
     }
+
+    const workerHeadCreatedLocally = workerCreatedCurrentHead(worktreePath, workerHeadReflogBefore);
 
     // ── PR (worker REPORT or orchestrator fallback).
     let prUrl = parseReport(fullText(impl))?.prUrl;
@@ -12486,7 +12525,7 @@ async function runTask(
     // Stamp the provenance trailer (deriveStatus source (c)) before gating.
     ensureTaskTrailer(prUrl, taskId, log);
     recordHeadProviderAfterPush(
-      { taskId, prUrl, source: "implement", worker: impl },
+      { taskId, prUrl, source: "implement", worker: impl, workerHeadCreatedLocally },
       {
         readProducedHeadSha: () =>
           execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(),

@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { appendLedger, type LedgerLine } from "../src/lib/ledger.js";
 import { buildReviewPrompt } from "../src/lib/review.js";
 import {
+  headWasCreatedAfterReflogSnapshot,
+  parseHeadReflog,
   recordHeadProviderAfterPush,
   resolveReviewProviderProvenance,
   reviewProviderProvenanceLedgerFields,
@@ -96,6 +98,7 @@ test("W1-T2594: producer recording binds a valid worker provider to the freshly 
       prUrl: PR,
       source: "fix",
       worker: { provider: "claude", model: "claude-opus-4-1" },
+      workerHeadCreatedLocally: true,
       priorHeadSha: "prior",
     },
     {
@@ -126,6 +129,7 @@ test("W1-T2594: missing, unreadable, unchanged, or mismatched producer evidence 
   const cases = [
     {
       worker: { model: "unknown" },
+      workerHeadCreatedLocally: false,
       readProducedHeadSha: () => {
         throw new Error("must not read a produced head without a provider");
       },
@@ -136,7 +140,20 @@ test("W1-T2594: missing, unreadable, unchanged, or mismatched producer evidence 
       reason: "worker-provider-unavailable",
     },
     {
+      worker: { provider: "claude", model: "claude-sonnet-5" },
+      workerHeadCreatedLocally: false,
+      readProducedHeadSha: () => {
+        throw new Error("must not trust a head reached only by reset/fetch");
+      },
+      readHeadSha: () => {
+        throw new Error("must not read a live head without local creation evidence");
+      },
+      priorHeadSha: "prior",
+      reason: "worker-head-not-created-locally",
+    },
+    {
       worker: { provider: "codex", model: "gpt-5.6-sol" },
+      workerHeadCreatedLocally: true,
       readProducedHeadSha: () => HEAD,
       readHeadSha: () => {
         throw new Error("REST unavailable");
@@ -146,6 +163,7 @@ test("W1-T2594: missing, unreadable, unchanged, or mismatched producer evidence 
     },
     {
       worker: { provider: "codex", model: "gpt-5.6-sol" },
+      workerHeadCreatedLocally: true,
       readProducedHeadSha: () => HEAD,
       readHeadSha: () => HEAD,
       priorHeadSha: HEAD,
@@ -153,6 +171,7 @@ test("W1-T2594: missing, unreadable, unchanged, or mismatched producer evidence 
     },
     {
       worker: { provider: "codex", model: "gpt-5.6-sol" },
+      workerHeadCreatedLocally: true,
       readProducedHeadSha: () => {
         throw new Error("local head unreadable");
       },
@@ -164,6 +183,7 @@ test("W1-T2594: missing, unreadable, unchanged, or mismatched producer evidence 
     },
     {
       worker: { provider: "codex", model: "gpt-5.6-sol" },
+      workerHeadCreatedLocally: true,
       readProducedHeadSha: () => "worker-head",
       readHeadSha: () => HEAD,
       priorHeadSha: "prior",
@@ -174,7 +194,14 @@ test("W1-T2594: missing, unreadable, unchanged, or mismatched producer evidence 
   for (const c of cases) {
     const rows: Array<{ step: string; fields: Record<string, unknown> }> = [];
     const result = recordHeadProviderAfterPush(
-      { taskId: "W1-T2594", prUrl: PR, source: "fix", worker: c.worker, priorHeadSha: c.priorHeadSha },
+      {
+        taskId: "W1-T2594",
+        prUrl: PR,
+        source: "fix",
+        worker: c.worker,
+        workerHeadCreatedLocally: c.workerHeadCreatedLocally,
+        priorHeadSha: c.priorHeadSha,
+      },
       {
         readProducedHeadSha: c.readProducedHeadSha,
         readHeadSha: c.readHeadSha,
@@ -188,6 +215,41 @@ test("W1-T2594: missing, unreadable, unchanged, or mismatched producer evidence 
     assert.equal(rows[0].fields.reason, c.reason);
     assert.ok(!("provider" in rows[0].fields), `${c.reason}: unavailable row must not claim a provider`);
     assert.ok(!("head_sha" in rows[0].fields), `${c.reason}: unavailable row must not claim a head`);
+  }
+});
+
+test("W1-T2594 regression: only a post-spawn commit-creating reflog action proves the worker produced the head", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-head-provenance-"));
+  const git = (args: string[]) => execFileSync("git", ["-C", root, ...args], { encoding: "utf8" }).trim();
+  const reflog = () => parseHeadReflog(git(["reflog", "show", "--format=%H%x09%gs", "HEAD"]));
+  try {
+    git(["init", "--quiet", "-b", "main"]);
+    git(["config", "user.email", "test@example.com"]);
+    git(["config", "user.name", "Test"]);
+    writeFileSync(join(root, "evidence.txt"), "base\n");
+    git(["add", "evidence.txt"]);
+    git(["commit", "--quiet", "-m", "base"]);
+    const base = git(["rev-parse", "HEAD"]);
+
+    writeFileSync(join(root, "evidence.txt"), "foreign\n");
+    git(["commit", "--quiet", "-am", "foreign commit"]);
+    const foreign = git(["rev-parse", "HEAD"]);
+    git(["reset", "--hard", "--quiet", base]);
+    const before = reflog();
+
+    git(["reset", "--hard", "--quiet", foreign]);
+    assert.equal(
+      headWasCreatedAfterReflogSnapshot(before, reflog(), foreign),
+      false,
+      "resetting to an exact hash committed before the worker snapshot is not new authorship",
+    );
+
+    writeFileSync(join(root, "evidence.txt"), "worker\n");
+    git(["commit", "--quiet", "-am", "worker commit"]);
+    const workerHead = git(["rev-parse", "HEAD"]);
+    assert.equal(headWasCreatedAfterReflogSnapshot(before, reflog(), workerHead), true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
 
@@ -251,15 +313,33 @@ test("W1-T2594: the production review command resolves and ledgers provenance fo
 test("W1-T2594: production ordering records only after ownership/push and before the next gate", () => {
   const source = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
 
+  const implementStart = source.indexOf('say("implement worker")');
+  const implementSnapshot = source.indexOf("const workerHeadReflogBefore = readWorktreeHeadReflog(worktreePath)", implementStart);
+  const implementSpawn = source.indexOf("await spawn({", implementSnapshot);
+  const implementEvidence = source.indexOf("const workerHeadCreatedLocally = workerCreatedCurrentHead(worktreePath", implementSpawn);
+  assert.ok(
+    implementStart >= 0 && implementStart < implementSnapshot && implementSnapshot < implementSpawn && implementSpawn < implementEvidence,
+  );
+
   const ownership = source.indexOf("const ownership = checkPrOwnership(prUrl, branch");
   const implementationClaim = source.indexOf("recordHeadProviderAfterPush(", ownership);
   const opened = source.indexOf('log("pr.opened"', ownership);
-  assert.ok(ownership >= 0 && ownership < implementationClaim && implementationClaim < opened);
+  assert.ok(implementEvidence < ownership && ownership < implementationClaim && implementationClaim < opened);
 
+  const fixSnapshot = source.indexOf("const workerHeadReflogBefore = readWorktreeHeadReflog(opts.worktreePath)");
+  const fixSpawn = source.indexOf("const spawnOutcome = await spawnFixWorkerBounded", fixSnapshot);
+  const fixEvidence = source.indexOf("const workerHeadCreatedLocally = workerCreatedCurrentHead(opts.worktreePath", fixSpawn);
   const fixPush = source.indexOf("deps.push(opts.worktreePath, opts.branch);");
   const fixClaim = source.indexOf("recordHeadProviderAfterPush(", fixPush);
   const fixCi = source.indexOf("deps.waitForCiGreen(opts.prUrl", fixPush);
-  assert.ok(fixPush >= 0 && fixPush < fixClaim && fixClaim < fixCi);
+  assert.ok(
+    fixSnapshot >= 0 &&
+      fixSnapshot < fixSpawn &&
+      fixSpawn < fixEvidence &&
+      fixEvidence < fixPush &&
+      fixPush < fixClaim &&
+      fixClaim < fixCi,
+  );
 });
 
 test("W1-T2594: provider and model labels stay out of the semantic reviewer prompt", () => {

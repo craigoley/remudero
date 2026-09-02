@@ -87,6 +87,7 @@ export type HeadProviderRecordResult =
       state: "unavailable";
       reason:
         | "worker-provider-unavailable"
+        | "worker-head-not-created-locally"
         | "produced-head-unreadable"
         | "live-head-unreadable"
         | "head-unchanged-after-push"
@@ -94,8 +95,10 @@ export type HeadProviderRecordResult =
     };
 
 /**
- * Read the producer worktree and live PR heads after a push and append one
- * truthful claim only when they are identical.
+ * Read the producer worktree and live PR heads after a push and append one truthful claim only
+ * when they are identical and the caller observed a commit-creating action in this worktree
+ * after the worker began. Matching SHAs alone do not prove authorship: a stale worker can fetch
+ * and reset to a head another actor pushed while it was running.
  *
  * Unavailable evidence gets a named row with neither provider nor head_sha. That
  * makes an operational gap visible without manufacturing an attribution a later
@@ -107,6 +110,7 @@ export function recordHeadProviderAfterPush(
     prUrl: string;
     source: HeadProviderSource;
     worker: { provider?: unknown; model?: unknown };
+    workerHeadCreatedLocally: boolean;
     priorHeadSha?: string;
   },
   deps: {
@@ -118,6 +122,18 @@ export function recordHeadProviderAfterPush(
   const provider = workerProvider(input.worker.provider);
   if (!provider) {
     const reason = "worker-provider-unavailable" as const;
+    deps.log("pr.head_provider", {
+      task_id: input.taskId,
+      pr_url: input.prUrl,
+      source: input.source,
+      availability: "unavailable",
+      reason,
+    });
+    return { state: "unavailable", reason };
+  }
+
+  if (!input.workerHeadCreatedLocally) {
+    const reason = "worker-head-not-created-locally" as const;
     deps.log("pr.head_provider", {
       task_id: input.taskId,
       pr_url: input.prUrl,
@@ -200,6 +216,51 @@ export function recordHeadProviderAfterPush(
     availability: "known",
   });
   return { state: "recorded", headSha };
+}
+
+export interface HeadReflogEntry {
+  headSha: string;
+  action: string;
+}
+
+/** Parse `git reflog show --format=%H%x09%gs HEAD` without trusting action prose as a SHA. */
+export function parseHeadReflog(text: string): HeadReflogEntry[] {
+  return text
+    .split("\n")
+    .filter(Boolean)
+    .flatMap((line) => {
+      const separator = line.indexOf("\t");
+      if (separator < 0) return [];
+      const headSha = line.slice(0, separator).trim();
+      return headSha ? [{ headSha, action: line.slice(separator + 1).trim() }] : [];
+    });
+}
+
+const LOCAL_HEAD_CREATION_ACTION = /^(?:commit(?: \([^)]*\))?|merge|rebase(?: \([^)]*\))?|cherry-pick|revert)(?::|$)/;
+
+/**
+ * Prove that `headSha` entered this worktree through a commit-creating Git action after the
+ * worker's pre-spawn reflog snapshot. A fetch/reset/checkout to somebody else's exact head does
+ * not qualify, even when the worktree and live PR now agree byte-for-byte.
+ */
+export function headWasCreatedAfterReflogSnapshot(
+  before: ReadonlyArray<HeadReflogEntry>,
+  after: ReadonlyArray<HeadReflogEntry>,
+  headSha: string,
+): boolean {
+  if (before.length === 0 || after.length <= before.length) return false;
+  const addedCount = after.length - before.length;
+  const retained = after.slice(addedCount);
+  if (
+    retained.some(
+      (entry, index) => entry.headSha !== before[index]?.headSha || entry.action !== before[index]?.action,
+    )
+  ) {
+    return false;
+  }
+  return after
+    .slice(0, addedCount)
+    .some((entry) => entry.headSha === headSha && LOCAL_HEAD_CREATION_ACTION.test(entry.action));
 }
 
 /** Stable ledger shape for the review-side observation; never part of a prompt. */
