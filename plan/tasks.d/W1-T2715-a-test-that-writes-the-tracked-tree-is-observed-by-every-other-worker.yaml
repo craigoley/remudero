@@ -1,0 +1,89 @@
+- id: W1-T2715
+  title: "A TEST THAT WRITES INTO THE TRACKED TREE LEAVES DEBRIS THAT READS AS A REGRESSION — three instances in one session, each surviving into an unrelated worktree and one of them reported as a four-file failure that did not exist; the suite needs a gate that refuses a tracked write rather than one more per-file repair"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 14.00
+  files:
+    - test/setup/tmp-hygiene.ts
+    - test/a-test-that-writes-the-tracked-tree-is-observed-by-every-other-worker.test.ts
+  origin: "operator-session#session-audit-2026-09-02"
+  plan_refs: ["W1-T2291", "W1-T131", "W1-T1217"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED, THREE INSTANCES IN ONE SESSION (2026-09-02), each found by accident rather than by a
+    gate:
+
+      1. `scripts/source-size-baseline.json` — the shipped-tree check ran the REAL ratchet against
+         the REAL baseline, and that script RECORDS a newly-seen source file and writes. Twice it
+         added `src/lib/followup-dedup-census.ts` and left the tree dirty. Fixed for that one call
+         site in #3683; the CLASS is untouched.
+      2. `test/fixtures/live-plan-writers/wiring/tasks.d/zzz-w1-t1225-wiring-probe.yaml` — written
+         by `task-linter-wiring.test.ts`, removed only in a `finally`. A run killed mid-flight left
+         it behind, and the NEXT run failed on that suite's own
+         `assert.equal(existsSync(shardPath), false, "the probe shard must not already exist")`.
+      3. `test/fixtures/live-plan-writers/changed-tasks/tasks.d/FIXTURE-C2-design-block.yaml` —
+         left modified after a suite run, in a different worktree again.
+
+    WHY THIS IS NOT THREE PAPER CUTS. Instance 2 reads as a REGRESSION: a suite green on origin/main
+    and red on a branch, which is the exact signature of a real defect. One session lost time
+    diagnosing it as one, and separately came within one report of naming four failures that were
+    artefacts of leftover state rather than of any diff. Debris does not announce itself as debris.
+
+    THE INVARIANT IS ALREADY WRITTEN DOWN AND ALREADY UNENFORCED.
+    `test/a-source-file-cannot-outgrow-its-baseline.test.ts`'s own header states it verbatim: "EVERY
+    FIXTURE IS WRITTEN UNDER `mkdtemp`, NEVER INTO THE TRACKED TREE: a test that rewrites a tracked
+    file is observed by every other worker in the same concurrent run (W1-T2291)". That file was
+    itself the violator. A rule stated only in a comment is the class of rule this repo already
+    knows gets violated silently and repeatedly.
+
+    THE SECOND-ORDER HARM IS WORSE THAN A DIRTY TREE. Instance 1 did not merely dirty a file: it
+    RECORDED a new baseline entry, silently pre-approving source growth the ratchet exists to make a
+    human decide about. A test that writes a gate's own baseline moves the gate.
+
+  design: |
+    (i) A GATE, NOT A FOURTH REPAIR. `tmp-hygiene.ts` already wraps `mkdtempSync` per test process
+    (W1-T131) and already disables git's background gc for spawned children (W1-T1217), so it is the
+    established seam for suite-wide hygiene and needs no new one. It gains a post-run check: after a
+    test file's process exits, `git status --porcelain` over the repo must report no CHANGE this
+    process caused, and the failure names the paths.
+
+    (ii) SNAPSHOT-AND-COMPARE, NEVER A BARE `git status`. The suite runs in parallel and against
+    worktrees that may legitimately be dirty when the run starts, so an absolute "clean tree"
+    assertion would fire on state the process did not create. Take the porcelain set BEFORE and
+    AFTER and diff the two; only paths appearing in the after-set are attributable.
+
+    (iii) UNTRACKED DEBRIS COUNTS. Instance 2 was an UNTRACKED file, and it still broke the next
+    run — so `??` entries are in scope, not just modifications.
+
+    (iv) IT MUST NOT BECOME THE FOURTH SELF-WRITING TEST. The check reads git; it writes nothing,
+    creates no fixture under the tracked tree, and degrades to silence when git is unavailable
+    rather than failing a suite for an environment fact.
+
+  acceptance:
+    - claim: "a test process that leaves a tracked file modified fails, and the failure names the path"
+      proof: "unit test: test/a-test-that-writes-the-tracked-tree-is-observed-by-every-other-worker.test.ts"
+    - claim: "a test process that leaves an untracked file behind fails too, because the probe-shard leak was untracked and still broke the next run"
+      proof: "unit test: test/a-test-that-writes-the-tracked-tree-is-observed-by-every-other-worker.test.ts"
+    - claim: "a tree already dirty when the process started does not fail it — only paths this process introduced are attributed"
+      proof: "unit test: test/a-test-that-writes-the-tracked-tree-is-observed-by-every-other-worker.test.ts"
+    - claim: "the check writes nothing itself and degrades to silence when git cannot be read, so it never becomes the defect it detects"
+      proof: "unit test: test/a-test-that-writes-the-tracked-tree-is-observed-by-every-other-worker.test.ts"
+
+  falsifier: |
+    Close this without implementation if a run of the full suite on a clean checkout, killed at a
+    random point and repeated ten times, leaves the tracked tree clean every time — that would mean
+    the three observed instances were the last of their kind and a permanent gate buys nothing.
+
+    Re-design rather than build if the check proves unable to attribute a path to the process that
+    made it under parallel execution: a hygiene gate that blames the wrong test file would cost more
+    diagnosis than the debris does.
+
+    Do NOT resolve this by deleting the offending fixtures' `finally` blocks, or by making the suite
+    tolerate leftover state: instance 2's assertion (`the probe shard must not already exist`) is
+    CORRECT and is the only reason that leak was ever noticed.

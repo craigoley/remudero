@@ -1,0 +1,91 @@
+- id: W1-T2723
+  title: "A PERMANENTLY UNCREDITABLE HEAD IS RE-CLASSIFIED FIXABLE FOREVER — 178 `sweep.fix.uncreditable_head` rows over 13 days, one PR repeating 73 times, each repeat spending a GraphQL `gh pr view` to re-learn a fact that can never change and leaving the strike count frozen so nothing ever escalates"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 16.00
+  files:
+    - src/run-task.ts
+    - test/a-permanently-uncreditable-head-is-re-dispatched-forever.test.ts
+  origin: "operator-session#session-audit-2026-09-02"
+  plan_refs: ["W1-T2703", "W1-T522", "W1-T523", "W1-T468"]
+  status: queued
+  attempts: 0
+  note: |
+    NOT W1-T2703, WHICH IS THE OPPOSITE CASE. That task fixes a head that SHOULD be creditable and
+    is misread — `taskIdFromRunBranch(run-RETRO-<epoch>)` yielding `RETRO`. This one is the head
+    that is CORRECTLY judged foreign and will never become creditable: a `codex/*` or `claude/*`
+    branch a human or another agent opened. Fixing the parse does not terminate this loop, and
+    terminating this loop does not fix the parse.
+  rationale: |
+    MEASURED over the ledger's three-form union, 2026-08-20 to 2026-09-02: 178 distinct
+    `sweep.fix.uncreditable_head` rows. The distribution is the point — this is not one stuck PR:
+
+      PR 2908: 73 repeats     PR 3309: 18     PR 3551: 16     PR 2518: 14     PR 3126: 14
+
+    THE LOOP, READ AT SOURCE. `runSweep` classifies a red PR `blocked-fixable`, then the fix rung
+    calls `gh pr view <url> --json headRefName,body` and asks `fixHeadAcceptable`. For a
+    non-`run-<id>-<epoch>` head that is not synthetic the answer is NO, it logs
+    `sweep.fix.uncreditable_head` with `reason: not_a_run_branch`, and returns. Nothing records that
+    this PR can never be fixed by this rung, so the next sweep re-derives the identical verdict.
+
+    THE CODE ALREADY PREDICTS THIS IN SO MANY WORDS. The comment immediately above the guard reads:
+    "Creditability is load-bearing (status.ts ownsBranch): a fix must amend THIS task's own
+    run-branch (run-<id>-<epochMs>), never a foreign/fix-* head — a fix on an uncreditable head
+    LOOPS FOREVER + strands dependents." The guard was added; the loop it names was not closed.
+
+    TWO COSTS, BOTH MEASURED THIS SESSION. Each repeat spends one GraphQL `gh pr view`, and this
+    account exhausted its 5,000-call budget three times in one day with the operator's own reads
+    denied — while `rmd review` and `gh pr view` are themselves GraphQL, so an exhausted budget
+    blocks the very verbs that would diagnose it (W1-T522/523 already carry that surface). And the
+    disposition is `acted: true` with the strike count unchanged, so the PR is never escalated,
+    never stood down from, and never reaches a human by any path other than someone noticing.
+
+    THIS IS THE BOUND-THAT-NEVER-FIRES SHAPE, INVERTED. This repo's recurring defect is a bound that
+    fires on a healthy condition. Here a terminal condition has NO bound at all: the rung declines,
+    logs, and returns, with nothing counting the declines.
+
+  design: |
+    (i) A DECLINE THAT CANNOT CHANGE ITS ANSWER IS TERMINAL, AND MUST BE RECORDED AS ONE. When
+    `fixHeadAcceptable` refuses for `not_a_run_branch` — a property of the head ref itself, not of
+    CI, the diff, or any transient state — the sweep must stop re-offering that PR to the fix rung
+    for that head sha, rather than re-deriving the same refusal every pass.
+
+    (ii) KEYED ON THE HEAD SHA, NEVER THE PR. A new push is a new fact and must be re-judged: an
+    author can move the PR onto a run branch, and the next head must get a fresh answer. This is
+    the same polarity `sweep.fix.uncreditable_head`'s own `head` field already records.
+
+    (iii) IT MUST REACH A HUMAN ONCE, NOT NEVER AND NOT NIGHTLY. A red PR the fleet structurally
+    cannot fix is exactly the escalation case — but the delivery must dedupe on the head sha, or
+    this trades 73 silent GraphQL calls for 73 comments, which is the failure the needs-human
+    issue path already exists to avoid.
+
+    (iv) THE REFUSAL ITSELF IS UNCHANGED. `fixHeadAcceptable` is not widened and a foreign head is
+    still never amended. Only the RE-ASKING stops.
+
+  acceptance:
+    - claim: "a head refused as not_a_run_branch is not re-offered to the fix rung on a later sweep of the same head sha"
+      proof: "unit test: test/a-permanently-uncreditable-head-is-re-dispatched-forever.test.ts"
+    - claim: "a NEW head sha on the same PR is judged afresh, so moving the work onto a run branch is picked up"
+      proof: "unit test: test/a-permanently-uncreditable-head-is-re-dispatched-forever.test.ts"
+    - claim: "the terminal decline reaches a human exactly once per head sha rather than never or once per poll"
+      proof: "unit test: test/a-permanently-uncreditable-head-is-re-dispatched-forever.test.ts"
+    - claim: "fixHeadAcceptable still refuses every foreign head it refuses today — the gate is not widened, only the re-asking stops"
+      proof: "unit test: test/a-permanently-uncreditable-head-is-re-dispatched-forever.test.ts"
+
+  falsifier: |
+    Close this without implementation if a fresh three-form ledger sweep shows `uncreditable_head`
+    rows are already bounded per head sha — that would mean the repeats measured here came from
+    genuinely new heads and there is no loop to close.
+
+    Re-design rather than build if suppressing the re-offer would hide a PR the fix rung could
+    legitimately act on later without a new push: correctness of the fix lane outranks the budget
+    this saves.
+
+    Do NOT resolve this by widening `fixHeadAcceptable` to accept a foreign head. Amending a branch
+    this fleet does not own is the defect the guard exists to prevent, and its own comment names
+    stranded dependents as the cost.
