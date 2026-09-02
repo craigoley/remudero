@@ -642,6 +642,8 @@ import {
   reviewerOutcome,
   reviewerVerdictContract,
   reviewEvidenceStrength,
+  claimReviewDecision,
+  reviewDecisionDigest,
   reviewInputDigest,
   cappedReason,
   reviewLedgerLegibilityFields,
@@ -658,6 +660,7 @@ import {
   type CappedOverride,
   type CriterionVerdict,
   type ReviewVerdict,
+  type ReviewEvaluatorProvenance,
   type NameFilterResolution,
 } from "./lib/review.js";
 import {
@@ -4684,6 +4687,14 @@ function reviewerSemanticVerdicts(
  * FIELD FINDING 12 self-updater race) never blocks the gate — the deterministic
  * floor still posts, fail-closed.
  */
+export type ReviewRunResult = ReviewVerdict & {
+  headSha: string;
+  reviewerOutcome: string;
+  reviewDecisionDigest?: string;
+  decisionDisposition?: "computed" | "replayed" | "in_flight" | "conflict";
+  evaluatorProvenance?: ReviewEvaluatorProvenance;
+};
+
 async function runReview(args: {
   owner: string;
   repo: string;
@@ -4799,7 +4810,7 @@ async function runReview(args: {
    * predates this task needs no update.
    */
   openTaskIds?: ReadonlySet<string>;
-}): Promise<ReviewVerdict & { headSha: string; reviewerOutcome: string }> {
+}): Promise<ReviewRunResult> {
   const { owner, repo, prUrl, task, report, log, say } = args;
   const headSha = readHeadShaRest(prUrl);
   // A substituted worker transcript is not a material PR input. Production fix-rung callers
@@ -4835,6 +4846,30 @@ async function runReview(args: {
   }
   const diff = execFileSync("gh", ["pr", "diff", prUrl], { encoding: "utf8", maxBuffer: 1 << 26 });
   const criteria = task.acceptance ?? [];
+  const decisionDigest = reviewDecisionDigest({
+    headSha, diff, report, body: inputBody, acceptance: criteria, declaredFiles: task.files,
+  });
+  const decisionClaim = await claimReviewDecision({
+    ledgerPath: args.ledgerPath, taskId: task.id, prUrl, digest: decisionDigest,
+  });
+  if (decisionClaim.kind === "replay") {
+    return {
+      ...decisionClaim.terminal.verdict, headSha,
+      reviewerOutcome: decisionClaim.terminal.reviewerOutcome,
+      evaluatorProvenance: decisionClaim.terminal.evaluatorProvenance,
+      reviewDecisionDigest: decisionDigest, decisionDisposition: "replayed",
+    };
+  }
+  if (decisionClaim.kind === "in_flight") {
+    const held: ReviewVerdict = {
+      state: "failure",
+      criteria: criteria.map((c) => ({ ...c, met: false, floorMet: false, reason: "identical review decision is already in flight", proof_exec: "not_executable" })),
+      testTheater: false, summary: "identical review decision is already in flight",
+      floorDegraded: false, capped: true, keywordOnly: true, planOnly: planOnlyDiff(diff),
+    };
+    return { ...held, headSha, reviewerOutcome: "not_attempted_decision_in_flight", reviewDecisionDigest: decisionDigest, decisionDisposition: "in_flight" };
+  }
+  try {
 
   // Advisory semantic layer — a FRESH read-only reviewer (no session inheritance),
   // in a throwaway cwd so it cannot touch the worktree/diff under review.
@@ -4856,6 +4891,13 @@ async function runReview(args: {
     model: args.reviewerMount.model,
     effort: args.reviewerMount.effort,
     maxTurns: args.reviewerMount.maxTurns,
+  };
+  let evaluatorProvenance: ReviewEvaluatorProvenance = {
+    provider: null,
+    requestedModel: reviewerSpawnMount?.model ?? null,
+    servedModel: null,
+    effort: reviewerSpawnMount?.effort ?? null,
+    sessionId: null,
   };
   const attemptReviewer = args.spawnReviewer !== false && reviewerSpawnMount !== undefined && criteria.length > 0 && !planOnlySkip;
   let reviewerSubtype: string | undefined;
@@ -4898,13 +4940,21 @@ async function runReview(args: {
         );
         semantic = reviewerSemanticVerdicts(reviewer, criteria.length);
         reviewerSubtype = reviewer.subtype;
+        const reviewerFields = workerLedgerFields(reviewer);
+        evaluatorProvenance = {
+          provider: reviewerFields.provider ?? null,
+          requestedModel: reviewerFields.model,
+          servedModel: reviewerFields.served_model,
+          effort: reviewerFields.effort,
+          sessionId: reviewer.sessionId ?? null,
+        };
         log("review.reviewer", {
           session_id: reviewer.sessionId,
           subtype: reviewer.subtype,
           downgrades: semantic.filter((s) => s === false).length,
           // W1-T6: the advisory reviewer is a BRAIN-PLANE call — same telemetry
           // shape as a worker call, so ledger lines are queryable uniformly.
-          ...workerLedgerFields(reviewer),
+          ...reviewerFields,
         });
         // The reviewer is fresh (no resume) — reap its SDK scratchpad now, before
         // withTempDir removes reviewCwd. Best-effort, guarded (lib/worker-scratch).
@@ -4990,7 +5040,8 @@ async function runReview(args: {
   const prior = args.ledgerPath
     ? priorReviewVerdictFromLedger(readLedgerLines(args.ledgerPath), task.id)
     : undefined;
-  const { verdict, suppressed } = applyVerdictStability(computed, headSha, prior);
+  let { verdict, suppressed } = applyVerdictStability(computed, headSha, prior);
+  let decisionDisposition: "computed" | "conflict" = "computed";
   if (suppressed) {
     // VISIBLE, not silently swallowed: names the sha + both verdicts + the
     // floor result a suppression relied on, distinct from the review.posted
@@ -5056,9 +5107,27 @@ async function runReview(args: {
     runId: args.runId,
     prUrl,
     reviewInputDigest: inputDigest,
+    reviewDecisionDigest: decisionDigest,
+    evaluatorProvenance,
     fetchLifecycle: () => fetchPrLifecycle(prUrl),
   });
-  if (!posted.posted) {
+  if (posted.conflict) {
+    decisionDisposition = "conflict";
+    verdict = {
+      ...verdict,
+      state: "failure",
+      summary: `review verdict conflict for decision ${decisionDigest.slice(0, 11)} — operator adjudication required`,
+    };
+    withdrawArmIfVerdictRefuses(
+      verdict,
+      { prUrl, taskId: task.id, headSha, ledgerPath: args.ledgerPath, log },
+      { disarm: args.disarm },
+    );
+    if (!posted.posted) {
+      say(`remudero-review: conflict hold FAILED to post for ${headSha.slice(0, 7)} — ${posted.reason}`);
+      return { ...verdict, headSha, reviewerOutcome: outcome, reviewDecisionDigest: decisionDigest, decisionDisposition, evaluatorProvenance };
+    }
+  } else if (!posted.posted) {
     // REFUSED, NOT SWALLOWED: postReviewStatusGuarded already ledgered
     // `review.post_refused` with the full reason; this is the loud console
     // twin so a refusal is as visible as an ordinary posted verdict is.
@@ -5066,7 +5135,7 @@ async function runReview(args: {
       `remudero-review: post REFUSED for ${headSha.slice(0, 7)} (verdict computed: ${verdict.state}) — ` +
         `${posted.reason} (W1-T228 — see the review.post_refused ledger line)`,
     );
-    return { ...verdict, headSha, reviewerOutcome: outcome };
+    return { ...verdict, headSha, reviewerOutcome: outcome, reviewDecisionDigest: decisionDigest, decisionDisposition, evaluatorProvenance };
   }
   const unmet = verdict.criteria.filter((c) => !c.met);
   // W1-T166: holdout criteria are reviewer-visible but WORKER-hidden. `verdict.state`
@@ -5095,6 +5164,9 @@ async function runReview(args: {
     head_sha: headSha,
     pr_url: prUrl,
     ...(inputDigest !== undefined ? { review_input_digest: inputDigest } : {}),
+    review_decision_digest: decisionDigest,
+    decision_verdict: verdict,
+    evaluator_provenance: evaluatorProvenance,
     test_theater: verdict.testTheater,
     unmet_criteria: unmetClaims,
     reasons,
@@ -5280,7 +5352,13 @@ async function runReview(args: {
     `remudero-review=${verdict.state} posted to ${headSha.slice(0, 7)} — ${verdict.summary} ` +
       `(reviewer_outcome: ${outcome}; proof_exec: ${executed}/${proofExec.length} observed on the PR head)`,
   );
-  return { ...verdict, headSha, reviewerOutcome: outcome };
+  return {
+    ...verdict, headSha, reviewerOutcome: outcome,
+    reviewDecisionDigest: decisionDigest, decisionDisposition, evaluatorProvenance,
+  };
+  } finally {
+    decisionClaim.release();
+  }
 }
 
 // ── THE blocked_review FIX RUNG (W1-T76, absorbs P21; MASTER-PLAN §3's fixing
@@ -6165,7 +6243,7 @@ export interface FixRungOutcome {
   /** The last review computed — passing when `outcome === "fixed"`. Unchanged from the PRIOR
    *  round's own verdict when `outcome === "spawn_abandoned"` (W1-T1044): the strike that
    *  abandoned never produced a new head to re-review. */
-  review: ReviewVerdict & { headSha: string; reviewerOutcome: string };
+  review: ReviewRunResult;
   strikes: number;
   /**
    * W1-T2403: how many rounds this invocation spent on a RETRIGGER-SHAPED outcome (see
@@ -7300,7 +7378,7 @@ async function parkOrResumeOnPrerequisite(
   prerequisitePr: number,
   ctx: {
     prUrl: string;
-    review: ReviewVerdict & { headSha: string; reviewerOutcome: string };
+    review: ReviewRunResult;
     strikes: number;
     retriggers: number;
   },
@@ -7756,7 +7834,7 @@ export async function runFixRung(opts: {
    */
   retriggerCap?: number;
   /** The blocked_review verdict that triggered this rung. */
-  initialReview: ReviewVerdict & { headSha: string; reviewerOutcome: string };
+  initialReview: ReviewRunResult;
   reviewBase: { owner: string; repo: string; headCheckoutDir: string; reviewerMount: Mount };
   /** W1-T322: threaded straight through to every re-review this rung runs — see runReview's own
    *  `openTaskIds` doc. Optional; absent behaves exactly as every pre-W1-T322 caller already does. */
@@ -9356,6 +9434,35 @@ export async function runFixRung(opts: {
       state: review.state,
       unmet: review.criteria.filter((c) => !c.met).length,
     });
+
+    if (review.decisionDisposition === "in_flight") {
+      const reason = `identical review decision ${review.reviewDecisionDigest ?? "unknown"} is already in flight`;
+      deps.log("fix.stood_down", { site: "rung.review_decision", strikes, reason });
+      return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason };
+    }
+    if (review.decisionDisposition === "conflict") {
+      const digest = review.reviewDecisionDigest ?? "unknown";
+      const issueUrl = escalate(
+        {
+          class: "BLOCKED",
+          taskId: opts.taskId,
+          runId: opts.runId,
+          summary: `conflicting terminal review verdicts for ${digest} — ${opts.prUrl}`,
+          detail:
+            `Two evaluators produced contradictory states for the identical content-addressed review decision ` +
+            `${digest}. Remudero held the effective state at failure and withheld merge. Evaluator provenance: ` +
+            `${JSON.stringify(review.evaluatorProvenance ?? null)}. No prompt, transcript or credential is stored.`,
+          options: [
+            { label: "re-judge", detail: "inspect the two evaluator records and post an operator decision" },
+            { label: "hold", detail: "leave the PR blocked until a material decision input changes" },
+          ],
+          recommendation: "re-judge",
+        },
+        { issues: deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId },
+      );
+      deps.log("review.decision_conflict_escalated", { strike: strikes, review_decision_digest: digest, issue_url: issueUrl });
+      return { outcome: "escalated", review, strikes, retriggers, reason: "review_decision_conflict", issueUrl };
+    }
 
     // W1-T168 (the #349/#360 stuck class): a review FALSE-BLOCK this rung
     // cannot fix by dispatching more code escalates for RE-JUDGMENT right
