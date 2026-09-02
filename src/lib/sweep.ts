@@ -4759,6 +4759,19 @@ export interface SweepDeps {
    */
   postReview?: (pr: OpenPrView) => void | Promise<void>;
   /**
+   * W1-T2584 — MAY THE BOUNDED REVIEW POOL ADMIT ANOTHER HEAD FROM THIS PASS'S ALREADY-DERIVED
+   * pending set? Consulted synchronously immediately before each worker pulls its next job.
+   * Optional means `true`, preserving direct `rmd sweep` and every pre-existing fixture.
+   *
+   * The daemon's real full-sweep wiring supplies one callback owned by `runGatedSweep`: it turns
+   * false when the wall-clock bound abandons the pass, or whenever the existing STOP/PAUSE gates
+   * become active. This does not interrupt a reviewer already running; it stops only later
+   * admissions, whose review keys are released and whose heads re-derive next pass. Keeping the
+   * callback here, beside `postReview`, makes the boundary explicit and avoids turning a timer
+   * expiry into cancellation at an arbitrary GitHub-write boundary.
+   */
+  continueReviewAdmissions?: () => boolean;
+  /**
    * Dispatch the W1-T76 fix rung carrying the mode-appropriate evidence at
    * once (W1-T94/W1-T100) — the FULL unmet set for a review-mode dispatch, or
    * ci-log evidence (failing check names + log tails) for a blocked_ci
@@ -5749,20 +5762,22 @@ export function detachedSweepActionCount(): number {
  * W1-T473 — REVIEW CONCURRENCY: every disposition EXCEPT `post-review` still
  * runs exactly as before, one PR at a time, in `openPrs` order. `post-review`
  * PRs are instead collected and run in a SECOND, bounded-concurrency phase
- * after the walk — up to `Math.max(1, policy.reviewLanes)` `postReview`
- * calls in flight at once (the review lane's OWN budget as of W1-T1049 —
- * no longer `policy.dispatchLanes`), each against
+ * after the walk — a fixed-size pull pool keeps up to `Math.max(1, policy.reviewLanes)`
+ * `postReview` calls in flight at once (the review lane's OWN budget as of W1-T1049 — no longer
+ * `policy.dispatchLanes`) until the already-derived pending set is drained or a named admission
+ * stop fires, each against
  * a DISTINCT `${taskId}@${headSha}` key claimed synchronously during the walk
  * (real mutual exclusion the single-threaded walk used to supply for free —
- * see `PriorActions.reviewDelivered`/`reviewRefused`'s docs). A review beyond budget stands down
- * this pass and is re-derived on the next one — a ceiling, never a target: a
- * pass with zero eligible reviews starts zero lanes. `summary.actions` still
+ * see `PriorActions.reviewDelivered`/`reviewRefused`'s docs). The lane count bounds simultaneous
+ * reviewers, never total pass throughput. A provider-capacity stop or a false
+ * `continueReviewAdmissions` leaves every unstarted head recoverable on the next pass — a ceiling,
+ * never a target: a pass with zero eligible reviews starts zero lanes. `summary.actions` still
  * comes back in `openPrs` order regardless of which phase finalized each PR.
  */
 /**
  * W1-T1218 — THE REVIEW LANE'S ORDER, AS A PURE FUNCTION. Returns a NEW array ordered
- * OLDEST-FIRST, so `slice(0, reviewLanes)` hands the lanes to the entries that have waited
- * longest instead of to whichever ones the enumeration happened to list first.
+ * OLDEST-FIRST, so the bounded workers pull entries that have waited longest instead of whichever
+ * ones the enumeration happened to list first.
  *
  * WHY THIS EXISTS. `runSweep` builds its pending set by `push` inside the per-PR walk, so
  * insertion order is enumeration order, and `openPrsRestArgs` asks for
@@ -6932,63 +6947,55 @@ export async function runSweep(
   // `dispatchLanes` — a misconfigured `reviewLanes: 0` must never silently
   // mean "review nothing".
   //
-  // A CEILING, NOT A TARGET: `reviewLanes` only ever bounds `pendingReviews`
-  // — the reviews THIS PASS already found eligible, above. It never goes
-  // looking for work: a pass with zero eligible reviews runs `Promise.all([])`
-  // and starts zero lanes (acceptance 3).
+  // A CEILING, NOT A TARGET OR A THROUGHPUT CAP: `reviewLanes` bounds only the number of
+  // `postReview` calls live at once. Workers keep pulling from `pendingReviews` — the reviews
+  // THIS PASS already found eligible — until that finite set drains or a named admission stop
+  // fires. It never goes looking for work: a pass with zero eligible reviews starts zero workers.
   const reviewLanes = Math.max(1, policy.reviewLanes);
-  // W1-T1218: ORDER BEFORE THE CUT. `pendingReviews` is built by `push` inside the per-PR walk
+  // W1-T1218/W1-T2584: ORDER BEFORE THE PULL. `pendingReviews` is built by `push` inside the per-PR walk
   // above, so its order IS the enumeration order, and `openPrsRestArgs` requests
   // `pulls?state=open&per_page=100` with no `sort` — GitHub answers newest-first. Slicing that by
-  // position gave the lanes to the NEWEST entries and deferred the same oldest tail every pass,
-  // for as long as the queue stayed deeper than the budget. {@link orderPendingReviews} is the
-  // whole fix; nothing else in this lane changes.
+  // position gave the lanes to the NEWEST entries and deferred the same oldest tail every pass.
+  // The pull pool consumes this immutable oldest-first array by monotonically increasing index, so
+  // completion order cannot reorder later starts.
   const orderedReviews = orderPendingReviews(pendingReviews);
-  const runNow = orderedReviews.slice(0, reviewLanes);
-  const deferredToNextPass = orderedReviews.slice(reviewLanes);
-
-  // SKIP, NOT QUEUE OR BLOCK (design (iii)): a review beyond budget stands
-  // down THIS pass, `acted:false`, with no new persisted state — its ledger
-  // dedup key is untouched, so `deriveDisposition` reclassifies it
-  // "post-review" again next pass, typically within one poll interval
-  // (measured ~60s median). Queueing would survive past the pass that built
-  // it; blocking would risk this tick outrunning its own interval.
-  //
-  // W1-T513: also RELEASES this job's `reviewKey` from the module-level
-  // {@link inFlightReviewKeys} mutex — it was claimed above to keep two
-  // callers from BOTH queueing it this pass, but it is never actually run
-  // this pass, so holding the claim any longer would wrongly block a
-  // legitimately concurrent NEXT pass (or a concurrent full sweep) from
-  // picking it up.
-  for (const job of deferredToNextPass) {
-    claimedReviewKeys.delete(job.reviewKey);
-    finalizeDisposition(
-      job.index,
-      job.pr,
-      "post-review",
-      job.reason,
-      job.question,
-      false,
-      false,
-      undefined,
-      `review budget exhausted this pass (${reviewLanes} lane(s) in use) — re-derived next pass`,
-      undefined,
-      undefined,
-      undefined,
-    );
-  }
-
-  // BOUNDED CONCURRENCY: at most `reviewLanes` calls in flight, each against a
-  // DISTINCT `taskId@headSha` key (mutual exclusion already enforced above,
-  // synchronously, before any of these were queued) — so running them
-  // together is safe, never a double-post race. `Promise.all`, not
-  // `allSettled`: each job's own try/catch below already turns a throw into
-  // `acted:false` + its own `sweep.action_failed` line, the SAME per-PR throw
-  // containment (W1-T254) every other disposition gets — nothing here can
-  // reject the outer promise.
   const postReview = deps.postReview;
-  await Promise.all(
-    runNow.map(async (job) => {
+  let nextReviewIndex = 0;
+  let admissionStopReason: string | undefined;
+
+  const closeAdmissions = (reason: string): void => {
+    admissionStopReason ??= reason;
+  };
+
+  const takeNextReview = (): (typeof orderedReviews)[number] | undefined => {
+    if (admissionStopReason !== undefined) return undefined;
+    if (deps.continueReviewAdmissions) {
+      try {
+        if (!deps.continueReviewAdmissions()) {
+          closeAdmissions("review admission continuation gate closed — re-derived next pass");
+          return undefined;
+        }
+      } catch (e) {
+        // NOT AN ERASING CATCH, and the reason is stated here because the ratchet cannot see it
+        // otherwise: the failure text is carried INTO `closeAdmissions` inside a TEMPLATE STRING,
+        // and `test/catch-erasure-ratchet.test.ts` has no route that recognises that — its four
+        // are a rethrow, a console/logger call, a `reason:`-style key in the RETURN SHAPE, or a
+        // comment like this one. The error is preserved verbatim in the stop reason an operator
+        // reads, and the gate FAILS CLOSED: an unreadable continuation signal stops admitting
+        // rather than admitting on an unknown, which is the whole reason it is consulted.
+        closeAdmissions(
+          `review admission continuation gate failed closed (${String((e as Error)?.message ?? e)}) — re-derived next pass`,
+        );
+        return undefined;
+      }
+    }
+    const job = orderedReviews[nextReviewIndex];
+    if (job === undefined) return undefined;
+    nextReviewIndex += 1;
+    return job;
+  };
+
+  const runReview = async (job: (typeof orderedReviews)[number]): Promise<void> => {
       let acted = true;
       let actionError: string | undefined;
       // W1-T529 (iv): set INSTEAD of `actionError` when the throw is a budget floor stand-down —
@@ -7024,6 +7031,10 @@ export async function runSweep(
             const floorStandDown = budgetFloorStandDown(e, "post-review");
             if (floorStandDown !== undefined) {
               standDownReason = floorStandDown;
+              // W1-T2584: capacity is provider/account-wide, not a verdict about this PR. Once
+              // one worker observes the floor, no worker may pull a later head from this same
+              // snapshot. Jobs already admitted may settle; every unstarted key is released below.
+              closeAdmissions("review admissions stopped after provider capacity stand-down — re-derived next pass");
             } else {
               actionError = String((e as Error)?.message ?? e);
               appendLine(deps.ledgerPath, {
@@ -7095,8 +7106,46 @@ export async function runSweep(
         undefined,
         undefined,
       );
+  };
+
+  // W1-T2584 — FIXED-SIZE PULL POOL. There are at most `reviewLanes` worker promises and at most
+  // that many live `postReview` effects. Each pull increments `nextReviewIndex` synchronously
+  // before its first await, which preserves `orderedReviews`' oldest-first start order even when
+  // reviewers settle out of order. The whole already-derived set drains in one pass unless
+  // capacity or the injected daemon/operator continuation gate closes admissions.
+  const workerCount = Math.min(reviewLanes, orderedReviews.length);
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (true) {
+        const job = takeNextReview();
+        if (job === undefined) return;
+        await runReview(job);
+      }
     }),
   );
+
+  // Only a named admission stop can leave an unstarted tail. Release its module-level mutex keys
+  // and ledger `acted:false` with no `review.posted`/`review.post_refused` outcome key, so the
+  // ordinary level-triggered next pass can claim every head again. The keys stay held until all
+  // admitted workers settle, preventing a concurrent light pass from overtaking this snapshot.
+  const unstartedReviews = orderedReviews.slice(nextReviewIndex);
+  for (const job of unstartedReviews) {
+    claimedReviewKeys.delete(job.reviewKey);
+    finalizeDisposition(
+      job.index,
+      job.pr,
+      "post-review",
+      job.reason,
+      job.question,
+      false,
+      false,
+      undefined,
+      admissionStopReason ?? "review admissions stopped — re-derived next pass",
+      undefined,
+      undefined,
+      undefined,
+    );
+  }
 
   const summary: SweepSummary = {
     total: openPrs.length,

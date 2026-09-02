@@ -351,6 +351,9 @@ import {
   classifyProposal,
   draftAttemptKey,
   draftsDueOnDaemon,
+  decideDraftDeferral,
+  deferralFromOutcomes,
+  parseDraftDeferralCache,
   mergeDraftCaches,
   DAEMON_DRAFT_BATCH_CAP,
   evictRefusalPoisonedKeys,
@@ -867,6 +870,11 @@ import {
   sharedPauseRef,
   stopDetail,
 } from "./lib/fleet-control.js";
+import {
+  readGithubWebhookSecret,
+  resolveGithubWebhookSecretFilePath,
+  wireSweepWakeToDaemon,
+} from "./lib/github-event-wake.js";
 import {
   startInstallationTokenRefresh,
 } from "./lib/github-app.js";
@@ -22199,6 +22207,12 @@ export async function daemonCommand(
      *  self-target only) is exercised without spawning a real, unbounded daemon. Production never
      *  passes this. */
     runDaemon?: typeof runDaemon;
+    /** Injectable W1-T2568 wake wiring and signal re-raise for deterministic shutdown coverage.
+     * Production keeps the real filesystem watcher and `process.kill`; tests can observe that
+     * the watcher closes before the daemon re-raises SIGINT/SIGTERM without signalling the test
+     * runner itself. */
+    wireSweepWake?: typeof wireSweepWakeToDaemon;
+    processKill?: (pid: number, signal: NodeJS.Signals) => boolean;
   } = {},
 ): Promise<number> {
   // FAIL LOUD on junk args BEFORE any spawn/lock — `rmd daemon install --dry-run` silently
@@ -22480,10 +22494,23 @@ export async function daemonCommand(
     }
     throw e;
   }
+  // W1-T2568 — THE GITHUB-EVENT WAKE'S ENTIRE DAEMON-SIDE WIRING. `wireSweepWakeToDaemon`
+  // (lib/github-event-wake.ts) consumes any boot-pending marker, arms an `fs.watch` on the
+  // shared state directory `remudero-serve`'s `POST /v1/hooks/github` route also writes into,
+  // and returns a drop-in replacement for `DaemonDeps.sleep` that resolves early on a wake —
+  // every idle wait in `runDaemon`'s loop (STOP/PAUSE, "nothing runnable", backoff) already
+  // funnels through that ONE dependency, so this is the entire interrupt: zero changes to
+  // lib/daemon.ts, which stays fs-free. `.close()` MUST run on every exit path (design v: "the
+  // watcher is closed on daemon shutdown and cannot keep the process alive after normal stop")
+  // — wired into `onSignal` immediately below AND the ordinary `finally`, mirroring exactly how
+  // `drainLock.release()`/`consumeStop` are already wired into both.
+  const githubEventWake = (deps.wireSweepWake ?? wireSweepWakeToDaemon)(config.root, log);
+  const processKill = deps.processKill ?? ((pid: number, signal: NodeJS.Signals) => process.kill(pid, signal));
   const onSignal = (sig: NodeJS.Signals) => {
+    githubEventWake.close();
     consumeStop(config.root); // one-shot STOP: consumed on the daemon's terminal (see drainCommand)
     drainLock.release();
-    process.kill(process.pid, sig); // re-raise with the default handler now cleared
+    processKill(process.pid, sig); // re-raise with the default handler now cleared
   };
   process.once("SIGINT", onSignal);
   process.once("SIGTERM", onSignal);
@@ -22876,7 +22903,12 @@ export async function daemonCommand(
         pendingKicks: () => pendingKicks(config.root),
         clearKick: (taskId) => clearKick(config.root, taskId),
         consumeDrainNow: () => consumeDrainNow(config.root),
+        // W1-T2568: keep the existing sleep clock for nested in-flight tickers, and interrupt
+        // ONLY the top-level poll waits that return to the ordinary full-sweep gate. Sharing the
+        // interruptible clock with a heartbeat ticker could consume a wake without reconciling.
         sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+        sleepUntilSweepWake: githubEventWake.sleep,
+        acknowledgeSweepWake: githubEventWake.acknowledge,
         // The real wall clock backing the TIME-AWARE headroom ceiling (see
         // lib/daemon.ts's HeadroomPolicy) — resolves each window's own
         // hours-to-reset. Explicit here (though `runDaemon` defaults the same
@@ -23040,6 +23072,7 @@ export async function daemonCommand(
   } finally {
     process.removeListener("SIGINT", onSignal);
     process.removeListener("SIGTERM", onSignal);
+    githubEventWake.close(); // W1-T2568: never outlives the daemon's own normal-stop path either
     consumeStop(config.root); // one-shot STOP: consumed on the daemon's terminal (see drainCommand)
     drainLock.release();
   }
@@ -24436,6 +24469,9 @@ export async function serveCommand(
     boardPacer?: GhCallPacer;
     loadMounts?: typeof loadMounts;
     spawn?: typeof spawnWorker;
+    // W1-T2568: the wake's policy, injectable so a test drives the rung without a plan/policy.yaml
+    // on disk — and so this read has a seam, which every other policy read in src/ already has.
+    policy?: Policy;
   } = {},
 ): Promise<number> {
   // `--host` was documented in USAGE and read by resolveServeHosts, but was NOT in this
@@ -24469,10 +24505,31 @@ export async function serveCommand(
   const ledgerPath = ledgerPathFor(config);
   const plan = loadPlan(planPath);
   const tokens = resolveServiceTokens(config.root);
+  // W1-T2568: the signed GitHub-event wake's config — resolved here (never inside lib/serve.ts,
+  // which stays deps-in/no-ambient-resolution) exactly like `policy`/`tokens` above. `secret` is
+  // `undefined` on an unconfigured host (no RMD_GITHUB_WEBHOOK_SECRET_FILE, or the mounted file
+  // is unreadable) — design (vii)'s ship-dark default, byte-identical to before this task.
+  // `repository` is the SAME `resolveOwnerRepo()` result every other GitHub-scoped construction
+  // in this function already uses, never a second, independently-resolved slug.
+  const githubEventWakeSecret = readGithubWebhookSecret(resolveGithubWebhookSecretFilePath(undefined));
 
   const runId = `SERVE-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: "SERVE", step, lane: "serve", ...extra });
+
+  // W1-T2568 + W1-T152: SEAMED AND NON-FATAL, and it sits below `log` so a degraded read is
+  // RECORDED rather than swallowed. `loadPolicy` THROWS on an absent or malformed
+  // plan/policy.yaml, and the SERVICE POSTURE paragraph directly below is explicit that nothing
+  // here may refuse to start: under the launchd unit this command generates, a startup refusal is
+  // a KeepAlive crash-loop (W1-T255, #726). A throwaway or partial checkout therefore still boots
+  // and the wake simply takes DEFAULT_GITHUB_EVENT_WAKE_DEDUP_CAPACITY, which is exactly what
+  // `createService` already falls back to when the field is absent.
+  let githubEventWakePolicy: Policy | undefined;
+  try {
+    githubEventWakePolicy = deps.policy ?? loadPolicy(policyPath(repoRoot));
+  } catch (e) {
+    log("serve.policy_unreadable", { error: (e as Error).message });
+  }
 
   // ── SERVICE POSTURE (W1-T152). None of these three can refuse to start: under the launchd
   // unit this command now generates, a startup refusal is a KeepAlive crash-loop, and a
@@ -24623,6 +24680,12 @@ export async function serveCommand(
     // same read `inflightHolder` above already wires, never a second definition of "in flight"
     // (design note ii).
     peek: { root: config.root, isLive: (runId) => liveInflightRuns(join(config.root, "state", "inflight")).some((r) => r.runId === runId) },
+    // W1-T2568: resolved above, alongside `tokens`/`policy` — see that construction's own doc.
+    githubEventWake: {
+      secret: githubEventWakeSecret,
+      repository: `${self.owner}/${self.repo}`,
+      dedupCapacity: githubEventWakePolicy?.values.githubEventWake.dedupCapacity,
+    },
   });
 
   // BIND EACH NAMED INTERFACE — never the wildcard. `listen(port)` alone defaults to `::`
@@ -28021,7 +28084,7 @@ export function buildSweepHook(
   // {@link runWorkerStallDetectorRung} below — optional and trailing so every existing caller
   // (tests included) that predates W1-T943 is unaffected; omitted ⇒ {@link DEFAULT_WORKER_STALL_MS}.
   workerStallMs?: number,
-): () => Promise<void> {
+): (continueReviewAdmissions?: () => boolean) => Promise<void> {
   // W1-T192: the daemon-side draft rung, built ONCE per daemon start (mirrors this
   // function's own once-per-daemon-start construction) — see buildInboxDraftHook's doc for
   // why it rides THIS seam rather than a second, separately-scheduled loop.
@@ -28059,7 +28122,7 @@ export function buildSweepHook(
   // no seam to receive it) and into `buildOpenPrViews` below, so both burst call sites share the
   // SAME instance for this daemon's whole life, exactly as `boardGithub` itself is shared.
   const boardGithub = github ?? buildBatchedGithub(owner, repo, { log, pacer });
-  return async () => {
+  return async (continueReviewAdmissions = () => true) => {
     try {
       const openPrs = buildOpenPrViews(owner, repo, ledgerPath, { pacer });
       // W1-T474 — the post-fix re-verification rung, on the daemon's own poll cadence and, same
@@ -28087,6 +28150,10 @@ export function buildSweepHook(
           inFlightTaskIds: new Set(liveInflightRuns(inflightDir).map((r) => r.taskId)),
           staleGateWorkflowsByPr,
           updatedForWorkflow,
+          // W1-T2584: supplied by daemon.ts's `runGatedSweep`, which closes the callback on its
+          // own wall-clock timeout and re-checks the existing STOP/PAUSE controls on every pull.
+          // Direct/tests calls omit it and receive the true default above.
+          continueReviewAdmissions,
         },
         DEFAULT_SWEEP_POLICY,
       );
@@ -30492,6 +30559,28 @@ export function buildInboxDraftHook(
       // drift. The staleness bound is load-bearing in the other direction too: without it a killed
       // daemon strands the lock and this rung never runs again — the exact W1-T1067 failure, one
       // file over.
+      // ── W1-T2590: DO NOT RETRY INTO A SHUT DOOR ───────────────────────────────────────────
+      // Checked FIRST — before the lock, before the registry is even consulted — so a deferred
+      // poll costs nothing: no lock churn, no `deps.spawn`, no Architect. The instant comes from
+      // the provider's OWN refusal text (`detectUsageLimitRefusal`, lib/classify.ts), which on the
+      // measured real string was more accurate than the headroom governor's belief at that moment.
+      //
+      // THIS IS WHAT MAKES RAISING `DAEMON_DRAFT_BATCH_CAP` SAFE LATER. W1-T2564 correctly stopped
+      // a refusal from writing an attempt key, so a refused draft now stays due and retries next
+      // poll; that left the cap as the ONLY bound on a retry storm during a live outage — the exact
+      // condition that produced 494 refusals in seven hours. Bounding the retry by the account's
+      // own stated window is the prerequisite, not a nicety.
+      const deferralPath = join(config.root, "state", "inbox-draft-deferred-until.json");
+      const deferral = decideDraftDeferral(parseDraftDeferralCache(readFileIfExists(deferralPath)), Date.now());
+      if (deferral.defer) {
+        log("inbox.draft_batch.deferred", {
+          until: new Date(deferral.untilMs).toISOString(),
+          remaining_ms: deferral.remainingMs,
+          matched: deferral.matched,
+        });
+        return;
+      }
+
       const draftLockPath = join(config.root, "state", "inbox-draft.lock");
       let draftLock: DrainLockHandle;
       try {
@@ -30556,6 +30645,19 @@ export function buildInboxDraftHook(
       // attempts.
       if (refusedThisBatch.length > 0) {
         log("inbox.draft_attempts_reopened", { evicted: 0, refused_this_batch: refusedThisBatch.length });
+      }
+      // W1-T2590: record the window the account itself stated, so the NEXT poll waits it out
+      // instead of spending against a door that is still shut. `deferralFromOutcomes` returns
+      // nothing when no refusal carried a usable instant — a zone-less refusal must not stop the
+      // rung on a window whose end nobody stated (see its own doc), so that case falls through to
+      // today's behaviour: retry next poll, bounded by the batch cap.
+      const nextDeferral = deferralFromOutcomes(outcomes);
+      if (nextDeferral) {
+        writeFileSync(deferralPath, JSON.stringify(nextDeferral, null, 2), "utf8");
+        log("inbox.draft_deferral_recorded", {
+          until: new Date(nextDeferral.deferredUntilMs).toISOString(),
+          matched: nextDeferral.matched,
+        });
       }
       // W1-T2569: RE-READ AND MERGE IMMEDIATELY BEFORE WRITING. The guard above makes overlap
       // unlikely; this makes a lost update impossible if one happens anyway (a reclaimed-but-live

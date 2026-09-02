@@ -233,7 +233,7 @@ test("the SHIPPED plan/policy.yaml loads, and every row's value sits within its 
     "workerAbandon",
     "sweepWallClockBoundMs",
     "fixSpawnWallClockBoundMs",
-    "sweep", "drain", "retro", "autoTriage", "boardReview", "measurementCadence", "digestCadence", "headroom", "launchd", "scratchReap", "worktreeReapBoot",
+    "sweep", "drain", "retro", "autoTriage", "boardReview", "measurementCadence", "digestCadence", "headroom", "launchd", "scratchReap", "worktreeReapBoot", "githubEventWake",
   ];
   assert.deepEqual(Object.keys(p.values).sort(), expectedTopLevelKeys.sort());
 
@@ -557,6 +557,9 @@ test("every LIFTED field records origin=lifted:<source-site> — the net-new fie
     "boardReview.enabled",
     "boardReview.minIntervalMinutes",
     "boardReview.maxPerDay",
+    // W1-T2568: delivery replay protection is new with the webhook wake. No pre-existing source
+    // constant bounded this persistent set, so its capacity is intentionally net-new policy data.
+    "githubEventWake.dedupCapacity",
   ]);
   const liftedPaths = Object.keys(p.origin).filter((path) => !NET_NEW.has(path));
   assert.ok(liftedPaths.length > 0);

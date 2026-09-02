@@ -171,13 +171,54 @@ echo "verify-image: checks inside ${AFTER}"
 set +e
 docker run --rm -e EXPECT_CLAUDE_VERSION="${EXPECT_CLAUDE_VERSION}" -e EXPECT_CODEX_VERSION="${EXPECT_CODEX_VERSION}" -e EXPECT_BUILD_SHA="${LABEL_BUILD_SHA}" --entrypoint /bin/sh "${REF}" -c '
   fail=0
+  # W1-T2571: infrastructure faults are counted SEPARATELY from product failures so the two can
+  # be told apart in the summary; both still exit non-zero (see `exit` at the end of this probe).
+  infra=0
   # `if out="$(cmd)"` tests CMD, which piping into head would not: a pipeline reports the LAST
   # stage, so `cmd | head` returns head status and a missing binary would read as a pass. The
   # first line is taken afterwards, from the captured text, never from a pipe in the test.
+  # W1-T2571: A CHECK THAT COULD NOT RUN IS NOT A CHECK THAT FAILED, and this file already states
+  # the rule two screens up — on an absent version pin it "reports UNKNOWN rather than a verdict",
+  # because "a read that did not happen must never render as a match". That rule was applied only
+  # to the PASS direction. A command the HOST could not run is the same class in the FAIL
+  # direction: it must not render as the thing the label names being broken.
+  #
+  # MEASURED 2026-09-01, host disk at 100%: one run produced THREE confident, specific, WRONG
+  # diagnoses — the sharpest being "every worker in this image writes files and commits NOTHING",
+  # a precise claim about containment and git wiring. Every one was `no space left on device`. The
+  # image was fine, and the next operator moves were aimed at the product while the disk went
+  # unexamined. A DIAGNOSTIC THAT IS CONFIDENTLY WRONG IS WORSE THAN ONE THAT ERRORS, because its
+  # output is specific enough to act on.
+  #
+  # ⚠ NO APOSTROPHES ANYWHERE IN THIS PROBE, INCLUDING COMMENTS. This whole block is a
+  # single-quoted `sh -c` payload: one apostrophe closes the string, and every word after it
+  # becomes a stray argv entry to docker. `bash -n` stays CLEAN when that happens because the
+  # quotes merely re-balance — the first draft of this very comment did it, and only
+  # test/verify-image-probes.test.ts caught it.
+  #
+  # NARROW BY CONSTRUCTION. Only signatures that CANNOT be produced by the image being wrong count
+  # — a full disk, a read-only filesystem, an exhausted fd/process table. Anything else stays a
+  # product FAIL, because widening this would silence the failures the script exists to catch.
+  infra_fault() {
+    case "$1" in
+      *"No space left on device"*|*"no space left on device"*) return 0 ;;
+      *"Read-only file system"*|*"read-only file system"*)     return 0 ;;
+      *"Too many open files"*|*"too many open files"*)         return 0 ;;
+      *"Cannot allocate memory"*|*"cannot allocate memory"*)   return 0 ;;
+      *"Resource temporarily unavailable"*)                    return 0 ;;
+    esac
+    return 1
+  }
   check() {
     label="$1"; shift
     if out="$("$@" 2>&1)"; then
       printf "  PASS  %-22s %s\n" "$label" "$(printf "%s" "$out" | head -1)"
+    elif infra_fault "$out"; then
+      # THE THIRD STATE CHANGES THE DIAGNOSIS AND NEVER THE DISPOSITION: `infra=1` still exits
+      # non-zero below, so an unverifiable image is never reported as a verified one. What changes
+      # is that the label is named as UNVERIFIED rather than accused.
+      printf "  INFRA %-22s (could not run: %s)\n" "$label" "$(printf "%s" "$out" | head -1)"
+      infra=1
     else
       printf "  FAIL  %-22s (%s)\n" "$label" "$(printf "%s" "$out" | head -1)"
       fail=1
@@ -426,9 +467,21 @@ docker run --rm -e EXPECT_CLAUDE_VERSION="${EXPECT_CLAUDE_VERSION}" -e EXPECT_CO
     printf "  PASS  %-22s /app has no .git, as expected (hence the startup clone)\n" "snapshot"
   fi
 
+  # W1-T2571: an unverifiable run must NEVER read as a verified one, so infra exits non-zero too.
+  # The disposition is unchanged; only the diagnosis above distinguishes them.
+  if [ "$infra" -ne 0 ]; then
+    printf "  ----  %-22s the checks above marked INFRA could not run — this image is UNVERIFIED,\n" ""
+    printf "        %-22s  not verified-and-broken. Fix the host fault and re-run before reading\n" ""
+    printf "        %-22s  any verdict above as a statement about the image.\n" ""
+    [ "$fail" -ne 0 ] || exit 2
+  fi
   exit $fail
 '
 RC=$?
+# W1-T2571: exit 2 from the checks probe means "could not run", not "ran and failed" — carried out
+# here so the summary at the foot of this script can say UNVERIFIED rather than accusing the image.
+# Any other non-zero stays an ordinary failure.
+if [ "$RC" -eq 2 ]; then UNVERIFIED=1; RC=1; fi
 set -e
 
 # ── 6. THE ENTRYPOINT ITSELF, EXERCISED RATHER THAN INSPECTED ────────────────────────────────
@@ -675,6 +728,14 @@ fi
 echo
 if [ "${RC}" -eq 0 ]; then
   echo "verify-image: OK — every check passed on ${AFTER}"
+elif [ "${UNVERIFIED:-0}" -ne 0 ]; then
+  # W1-T2571: the third state. Still non-zero, still refuses to certify — but it does NOT tell the
+  # operator the image is broken, because nothing here established that. The 2026-09-01 run said
+  # "every worker in this image writes files and commits NOTHING" when the true cause was a full
+  # disk; that sentence is the one this branch exists to stop being printed.
+  echo "verify-image: UNVERIFIED on ${AFTER} — one or more checks COULD NOT RUN (see INFRA above)" >&2
+  echo "  This is a fault on the HOST running this script, not a finding about the image." >&2
+  echo "  Nothing above should be read as a statement about the image until it is re-run clean." >&2
 else
   echo "verify-image: FAILURES above, on ${AFTER}" >&2
   echo "  This digest was pulled during THIS run, so a stale image is not the explanation." >&2

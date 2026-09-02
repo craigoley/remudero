@@ -252,7 +252,23 @@ test("CALIBRATION: the detection finds the readers recon-EJ measured, and no mor
   // The file set is UNCHANGED by it (`src/run-task.ts` already carried the other two), so the
   // `files` assertion below needed no edit — itself the check that this reader landed where its
   // siblings live rather than opening a new unredirectable surface.
-  assert.equal(readers.length, 21, `expected 21 unredirectable policy reads; saw:\n${readers.map((r) => `  ${r.file}:${r.line} ${r.text}`).join("\n")}`);
+  // TWENTY-TWO since `serveCommand`'s own `githubEventWakePolicy` (run-task.ts, W1-T2568) landed —
+  // a NINETEENTH consumer, also SEAMED (`deps.policy ?? loadPolicy(policyPath(repoRoot))`),
+  // resolving the `githubEventWake` row that sizes the signed-webhook replay ring. It is NOT a
+  // fourth hook-builder sibling: it reads once at command entry, like the older `const` readers
+  // above, not per call.
+  // ⚠ AND IT IS THE FIRST READER ON A PATH THAT MAY NOT REFUSE TO START. `loadPolicy` THROWS on an
+  // absent or malformed plan/policy.yaml, and serveCommand's SERVICE POSTURE paragraph (W1-T152,
+  // W1-T255, #726) forbids a startup refusal there — under launchd it is a KeepAlive crash-loop. So
+  // this read is wrapped and RECORDED (`serve.policy_unreadable`), and the wake falls back to
+  // DEFAULT_GITHUB_EVENT_WAKE_DEDUP_CAPACITY, which `createService` already defaults to when the
+  // field is absent. The seam alone would have satisfied test 2 while still killing the console on
+  // a checkout with no policy.yaml; test/install-symlink-refusal.test.ts is what caught that.
+  // IT PASSED TEST 2 BEFORE THIS NUMBER MOVED, which is the order this comment requires: the
+  // calibration failed at 22-vs-21 while test 2 stayed green, so the reader arrived already seamed
+  // and is NOT allowlisted — adding it to ALLOWED would fail test 3's STALE-ENTRY LOCK and test 5.
+  // The file set is UNCHANGED by it (`src/run-task.ts` already carried the other three).
+  assert.equal(readers.length, 22, `expected 22 unredirectable policy reads; saw:\n${readers.map((r) => `  ${r.file}:${r.line} ${r.text}`).join("\n")}`);
 
   // `symbolise` labels the LAST bare `const policy = loadPolicy(...)` as daemonCommand's, because that
   // reader carries no distinctive identifier of its own. Today exactly ONE such line survives —

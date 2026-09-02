@@ -103,13 +103,32 @@ interface MatrixEntry {
   method?: Method;
   path: string;
   scope: Scope;
+  selfAuthenticated?: boolean;
 }
 
 function realMatrix(deps: ServeDeps): MatrixEntry[] {
-  const rest: MatrixEntry[] = buildServeRoutes(deps).map((r) => ({ method: r.method, path: r.path, scope: r.scope }));
+  const rest: MatrixEntry[] = buildServeRoutes(deps).map((r) => ({
+    method: r.method,
+    path: r.path,
+    scope: r.scope,
+    selfAuthenticated: r.selfAuthenticated,
+  }));
   const sse = buildStatusStream(deps.board);
   return [...rest, { path: sse.path, scope: sse.scope }];
 }
+
+/** W1-T2568: routes that carry their OWN credential and so cannot be probed with a bearer token.
+ *  HAND-ENUMERATED WITH A REASON, never derived from the flag alone — otherwise setting
+ *  `selfAuthenticated: true` would be a silent way OUT of this audit, which is the one thing a
+ *  scope ratchet must not offer. Each entry states what refuses the request instead, and that
+ *  refusal is asserted by the route's own suite (named below), not taken on trust here. */
+const SELF_AUTHENTICATED: ReadonlyArray<{ path: string; refusedBy: string; provenBy: string }> = [
+  {
+    path: "/v1/hooks/github",
+    refusedBy: "an HMAC signature over the raw body (x-hub-signature-256) plus a repository match",
+    provenBy: "test/github-event-sweep-wake.test.ts — invalid signature -> 401, wrong repository -> 403",
+  },
+];
 
 // ── design (i): "assert, for every route it finds: a declared scope" — every entry in the REAL
 // table (REST + SSE) carries one of the two real Scope values. `Route.scope`/`SseRoute.scope` are
@@ -190,9 +209,23 @@ test("every route in the REAL table is refused without its scope, over the REAL 
     await control.arrayBuffer();
     assert.equal(control.status, 404, "an absent path must 404 for the 401-vs-404 split to mean anything");
 
+    // The self-authenticated set must be exactly what this suite has reviewed. A NEW route setting
+    // the flag fails HERE, before it can quietly disappear from the sweep below.
+    assert.deepEqual(
+      matrix.filter((e) => e.selfAuthenticated).map((e) => e.path).sort(),
+      SELF_AUTHENTICATED.map((e) => e.path).sort(),
+      "a route set `selfAuthenticated` without a reviewed entry in SELF_AUTHENTICATED — it would " +
+        "otherwise leave this audit silently. Add it with what refuses the request instead, and the " +
+        "suite that proves that refusal.",
+    );
+
     const failures: string[] = [];
     for (const entry of matrix) {
       const method = entry.method ?? "GET";
+      // A self-authenticated route carries no bearer semantics at all (Route.selfAuthenticated's
+      // own doc), so a 401/403 probe measures nothing about it. Its refusal is proven by the suite
+      // named in SELF_AUTHENTICATED above.
+      if (entry.selfAuthenticated) continue;
 
       // No credential at all: every scope (read AND write) must refuse this — 401, never 200,
       // never a bare 404 (404 would mean the route this audit found isn't actually mounted).

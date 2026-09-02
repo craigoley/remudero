@@ -3,7 +3,7 @@
   "packageManager": "npm",
   "testRunner": "command",
   "commandRunner": {
-    "command": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/classify.test.ts test/block-reason.test.ts test/three-retries-in-three-seconds-against-a-lockout.test.ts test/session-limit-is-a-refusal-not-a-success.test.ts"
+    "command": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/classify.test.ts test/block-reason.test.ts test/three-retries-in-three-seconds-against-a-lockout.test.ts test/session-limit-is-a-refusal-not-a-success.test.ts test/codex-quota-window-refusal.test.ts"
   },
   "mutate": ["src/lib/classify.ts"],
   "tsconfigFile": "tsconfig.stryker-unused.json",

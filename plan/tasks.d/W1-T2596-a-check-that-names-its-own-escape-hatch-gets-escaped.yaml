@@ -1,0 +1,71 @@
+- id: W1-T2596
+  title: "TWO GATES PRINT THEIR OWN ESCAPE HATCH IN THE FAILURE TEXT, SO ANYTHING OPTIMISING FOR GREEN TAKES IT — config-reader-seams offers `or add an ALLOWED entry saying why it needs none` in the message a fix worker reads, and route-scope-matrix could be silenced by dropping a route from the sweep; MEASURED 2026-09-01 on PR #3535, taking the printed hatch would have satisfied the census while leaving `rmd serve` refusing to boot on any checkout without a plan/policy.yaml"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 8.00
+  files: [test/config-reader-seams.test.ts, test/a-check-that-names-its-own-escape-hatch-gets-escaped.test.ts]
+  origin: "operator-brief#printed-escape-hatch-2026-09-01"
+  plan_refs: ["W1-T493", "W1-T2595"]
+  status: queued
+  attempts: 0
+  rationale: |
+    ── THE MEASURED INSTANCE ───────────────────────────────────────────────────────────────────
+
+    On #3535 an unseamed policy read at serve entry failed config-reader-seams. The failure text
+    reads, verbatim:
+
+        Give it a `?? ` override so a test can inject, or add an ALLOWED entry saying why it needs none.
+
+    The second clause is a one-line edit to a test file that turns the check green. The FIRST is a
+    change to production code. Both satisfy the gate. Only one fixes anything — and the defect
+    underneath was that `loadPolicy` THROWS, so `rmd serve` refused to boot on any checkout with no
+    `plan/policy.yaml`, contradicting the SERVICE POSTURE paragraph three lines below it
+    (W1-T152/W1-T255: a startup refusal under launchd is a KeepAlive crash-loop).
+
+    ⚠ THE HATCH WAS SAVED HERE BY LUCK OF TEST PLACEMENT, NOT BY DESIGN.
+    `test/install-symlink-refusal.test.ts` fails on the THROW independently of the seam, so the
+    cheap path would have left two failures standing. Nothing guaranteed that. A reader who
+    concludes "the suite catches it anyway" has learned the wrong lesson: the suite caught it
+    because an unrelated test happened to boot a real serve child.
+
+    ── THE SECOND INSTANCE, AND IT IS SECURITY-RELEVANT ────────────────────────────────────────
+
+    `route-scope-matrix` sweeps every assembled route and requires a 401/403 refusal. A route
+    carrying its own credential (`Route.selfAuthenticated`) cannot answer a bearer probe, so it
+    must be excluded — and the cheap exclusion is one `continue`. That would make setting
+    `selfAuthenticated: true` a SILENT EXIT FROM A SCOPE AUDIT, which is the one thing a scope
+    ratchet must not offer. #3535 closed this instance by hand-enumerating the route in
+    `SELF_AUTHENTICATED` with what refuses it instead and the suite proving that refusal; the
+    pattern is right and is not yet a rule.
+
+    ── WHAT MAKES THIS A CLASS RATHER THAN TWO BUGS ────────────────────────────────────────────
+
+    A fix rung optimises for green BY CONSTRUCTION — that is what "the check now passes" means to
+    it. So any gate whose message names a cheaper compliant answer than the real fix will, over
+    enough dispatches, get the cheaper answer. The message is not a suggestion to a careful human;
+    it is an instruction to an optimiser.
+
+    THE LIKELY SHAPE: an escape hatch must cost more than the fix it displaces — a REVIEWED,
+    hand-enumerated entry naming what stands in for the check (the `SELF_AUTHENTICATED` shape, or
+    `ENTANGLEMENT_EXEMPT_INSTRUMENTS`'s), never a free-text reason field a worker can fill in.
+    Verify that framing against both gates before building it.
+
+    ⚠ AND THE HATCHES MUST NOT SIMPLY BE REMOVED. Both exist for real cases — a genuinely
+    unseamable reader, a genuinely self-authenticating route. Closing them outright would force a
+    worse edit (a fake seam, a route dropped from the table) and the gate would then certify a
+    shape nobody reviewed. The goal is a hatch a human opens, not one a worker prints.
+
+    NOT IN SCOPE: bringing the censuses forward to author time (W1-T2595), and any change to what
+    the two gates detect.
+
+  acceptance:
+    - claim: "a reader excused from the seam requirement is named in a reviewed, hand-enumerated list rather than admitted by free text a worker can supply"
+      proof: "unit test: test/a-check-that-names-its-own-escape-hatch-gets-escaped.test.ts"
+    - claim: "a route excused from the scope sweep must name what refuses it instead and the suite proving that refusal, so the exemption cannot be a silent exit"
+      proof: "unit test: test/a-check-that-names-its-own-escape-hatch-gets-escaped.test.ts"
+    - claim: "both excusal routes remain open for the real cases they exist for, so nothing is forced into a fake seam or a route dropped from the table"
+      proof: "unit test: test/a-check-that-names-its-own-escape-hatch-gets-escaped.test.ts"
