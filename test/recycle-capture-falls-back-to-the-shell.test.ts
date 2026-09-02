@@ -73,6 +73,13 @@ function runScript(opts: { containerEnv: string[]; shellEnv: Record<string, stri
       // would refuse before the capture logic under test ever runs, since HOME/rmd-state is not a
       // real checkout in this test environment.
       RMD_RECYCLE_FIRST_BOOT: "1",
+      // PRE-EXISTING, not introduced by this PR: section 1 refuses outright on `/.dockerenv`
+      // before any capture logic, so wherever this suite runs inside a container — which is where
+      // the reviewer executes proofs — all three behavioural cases below assert against
+      // "REFUSING — this is running INSIDE a container" instead. MEASURED in the daemon container
+      // at origin/main: 1/4 passing (only the source-level case, which never spawns the script);
+      // with this override, 4/4. Sibling recycle suites already pass it for the same reason.
+      RMD_RECYCLE_DOCKERENV_PATH: join(tmpdir(), "recycle-capture-no-such-dockerenv-marker"),
       ...opts.shellEnv,
     },
   });
