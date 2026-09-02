@@ -1,0 +1,71 @@
+- id: W1-T2800
+  title: "THE LANE-RESTORE CONDITION RESTS ON A BASELINE THAT NAMES NO STATISTIC, SO IT CANNOT BE COMPARED TO THE INSTRUMENT BUILT TO ANSWER IT — `dispatchLanes` says \"restore to 3 once burn per run is down\" against `$5.28` implement / `$0.63` review recorded 2026-09-01 in a DIFFERENT row, with no mean-or-median stated, no corpus window and no command; `mount-headroom-sweep` reports p50/p90/max by design, so the two cannot be put side by side and the condition is unanswerable in both directions"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 10.00
+  files: [scripts/mount-headroom-sweep.mjs, plan/policy.yaml, test/a-recorded-baseline-that-names-no-statistic-cannot-be-compared.test.ts]
+  origin: "operator-session#lane-restore-unanswerable-2026-09-02"
+  plan_refs: ["W1-T1049", "W1-T2557", "W1-T2560", "W1-T2668"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE CONDITION IS ALREADY WRITTEN AND ALREADY UNANSWERABLE. `dispatchLanes`' own comment holds
+    the fleet at 2 lanes and states the release: "Restore to 3 once burn per run is down, and
+    record the measurement that justifies it rather than restoring on optimism." That is the right
+    posture. What it lacks is a comparable left-hand side.
+
+    THE BASELINE EXISTS BUT IS NOT WHERE THE CONDITION IS, AND NAMES NO STATISTIC. The only
+    per-run figures in the table sit in the `reviewLanes` block: "a review lane is cheap
+    ($0.63/run measured, against implement at $5.28)", dated 2026-09-01. Neither says whether it
+    is a MEAN or a MEDIAN, over WHICH window, from WHICH command.
+
+    THAT AMBIGUITY IS NOT PEDANTRY — IT FLIPS THE ANSWER. MEASURED 2026-09-02 via
+    `node --import tsx scripts/mount-headroom-sweep.mjs --state-dir <mount>/state` over 67
+    archives, all three rotation forms, 801,987 raw rows deduped to 749 distinct runs, newest row
+    2026-09-02T14:00:27.894Z:
+
+        src | 658/728 settled | turns 69/136/333 | cost p50 4.94 / p90 11.34 / max 38.46
+            | passing 240 | blocked_ci 218 | re-dispatched 156 | $7.11 per completed task
+
+    If `$5.28` was a MEDIAN, today's p50 of `$4.94` is a 6.4% improvement and the condition is met.
+    If it was a MEAN, today's mean is necessarily ABOVE `$4.94` — a p90 of `$11.34` and a max of
+    `$38.46` guarantee it — and burn per run may well be UP. The same two numbers support opposite
+    rulings, and nothing recorded decides between them.
+
+    THIS ALREADY MISLED A READER, TWICE IN ONE SITTING. Asked whether to restore the third lane,
+    an operator session first reported that NO per-run baseline existed (it does, one row down),
+    then came within a step of comparing `$5.28` against a p50 as though the statistics matched.
+    A figure that can be read two ways is worse than none: it invites exactly the optimism the
+    condition was written to refuse.
+
+    RECORD THE QUERY, NOT ONLY THE ANSWER — the standing rule this violates. CLAUDE.md's own
+    instruction is to name the query rather than its answer, because no count survives the hour it
+    was taken in; and `mount-headroom-sweep`'s header already commits to "PERCENTILES, NEVER A
+    MEAN ... the mean is dragged by exactly the outlier a headroom sweep exists to find." The
+    baseline predates that instrument and was never restated in its terms.
+
+    THE DELIVERABLE IS A COMPUTED CONDITION, NOT A BETTER SENTENCE. Restate the baseline in the
+    sweep's own vocabulary — statistic, class, corpus window, and the exact command — beside the
+    condition it releases, and have the sweep print the current reading against it so "is burn per
+    run down" is READ OFF THE TOOL rather than argued. A prose figure re-copied into the right row
+    is the same defect one row over.
+
+    OUT OF SCOPE, DELIBERATELY: whether to restore the lane. This task makes the question
+    answerable and rules on nothing. The memory ceiling that also bears on it (measured 2026-09-02:
+    5.3 GiB available, 654 MiB swap already in use at 2+2) is a separate constraint and not
+    reopened here.
+  acceptance:
+    - claim: "the recorded baseline names its statistic, its class, its corpus window and the command that produced it"
+      proof: "unit test: test/a-recorded-baseline-that-names-no-statistic-cannot-be-compared.test.ts"
+    - claim: "the sweep prints the current reading against the recorded baseline, in the same statistic"
+      proof: "unit test: test/a-recorded-baseline-that-names-no-statistic-cannot-be-compared.test.ts"
+    - claim: "a baseline missing any of those four fields is refused loudly rather than compared anyway"
+      proof: "unit test: test/a-recorded-baseline-that-names-no-statistic-cannot-be-compared.test.ts"
+    - claim: "the comparison uses a percentile on both sides — a mean on either side is refused"
+      proof: "unit test: test/a-recorded-baseline-that-names-no-statistic-cannot-be-compared.test.ts"
+    - claim: "the sweep still changes no lane count and rules on no restore — it reports only"
+      proof: "unit test: test/a-recorded-baseline-that-names-no-statistic-cannot-be-compared.test.ts"
