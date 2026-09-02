@@ -1,3 +1,17 @@
+/**
+ * W1-T2656 — a durable GitHub-event wake must not be consumed by a sweep that never ran.
+ *
+ * THE RACE (observed after #3535 merged). `runDaemon` acknowledged the wake marker immediately
+ * BEFORE calling `runGatedSweep`, but that gate can decline: when an earlier pass has exceeded the
+ * wall-clock await bound and is still settling, W1-T2582's liveness check correctly refuses the
+ * overlapping attempt and logs `daemon.sweep.skipped_concurrent`. The acknowledge had already
+ * deleted the marker, so the delivery was owned by a pass that never started and no later pass
+ * ever reconciled it.
+ *
+ * This lives in its OWN file rather than appended to test/github-event-sweep-wake.test.ts because
+ * that file already exists and passes on the merge-base: a proof naming it would match head AND
+ * base and grade `executed_stale`, substantiating nothing. A new file discriminates.
+ */
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
