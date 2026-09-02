@@ -1,0 +1,71 @@
+- id: W1-T2703
+  title: "THE FIX RUNG REJECTS A RETRO PR'S OWN BRANCH AS FOREIGN — the trailer carries `RETRO-<epoch>` while `taskIdFromRunBranch(run-RETRO-<epoch>)` yields `RETRO`, so a red retro PR is classified fixable and then spends no worker"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 12.00
+  files: [src/run-task.ts, test/fix-rung-no-task.test.ts]
+  origin: "operator-session#autonomous-pr-queue-2026-09-02"
+  plan_refs: ["W1-T78", "W1-T385", "W1-T1127", "W1-T2609"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON AZURE, 2026-09-02. PR #3639 opened from `run-RETRO-1788350665543`
+    with trailer `Remudero-Task: RETRO-1788350665543`. After CI shard 1 failed, the daemon
+    correctly derived `blocked-fixable` and entered `dispatchFix`. The ledger then wrote, in
+    order, `sweep.fix.synthetic_task` and `sweep.fix.uncreditable_head` with
+    `reason: foreign_run_branch`; no `fix.dispatch` row followed. The daemon therefore reported
+    `acted: true` while deliberately spawning no repair worker. A hand repair changed only three
+    stale rule citations and made the failing assertion pass.
+
+    THE SOURCE EXPLAINS THE MEASUREMENT. `fixRungTaskFor` prefers `pr.taskId` over the lane id
+    recovered from the branch. For this RETRO shape that chooses `RETRO-1788350665543`.
+    `fixHeadAcceptable` then accepts `run-${taskId}-<another epoch>` or a non-run descriptive
+    branch, but the real branch is exactly `run-${taskId}`. `isDispatchedRunBranch` classifies it
+    as a run branch, so the synthetic fallback refuses it as foreign. The existing unit test
+    covers only the no-trailer call (`pr.taskId` absent), where the derived id is `RETRO` and the
+    predicate passes; it does not cover the production payload.
+
+    THIS IS NOT PERMISSION TO AMEND A W1 TASK'S FOREIGN BRANCH. The creditability rule remains
+    strict for real plan tasks and for a synthetic PR whose run branch names a W1 task it does
+    not own. The exception is the orchestrator lane identity already accepted by
+    `fixRungTaskFor`: RETRO, TRIAGE, PLAN and APPROVE. Those PRs have no plan task or dependent to
+    credit, and the fix remains on the already-open PR branch.
+  design: |
+    Add the production-shaped regression first: `{taskId: "RETRO-<epoch>",
+    headRefName: "run-RETRO-<epoch>"}` must preserve the trailer identity used by strike/review
+    ledger keys and must pass the ownership guard. Drive it through `buildSweepEffects` far enough
+    to observe `fix.dispatch`, not only through the pure predicate.
+
+    Teach the ownership predicate one narrow equivalence: for a synthetic orchestrator-lane id,
+    its exact `run-${taskId}` head is its own branch. Keep the existing `run-${taskId}-<epoch>`
+    form and descriptive-branch behavior unchanged. Do not weaken the non-synthetic predicate,
+    derive identity from an arbitrary `run-W1-*` head, change strike ceilings, or alter the
+    disposition router.
+
+    Preserve `pr.taskId` as the synthetic task id. Replacing it with the shorter branch-derived
+    `RETRO` would make the repair reachable but split one PR across two ledger identities and
+    reset its cumulative strike accounting. The branch predicate, not the identity key, is the
+    defect.
+  acceptance:
+    - claim: "a production-shaped RETRO PR with trailer `RETRO-<epoch>` and head `run-RETRO-<epoch>` reaches `fix.dispatch` instead of `sweep.fix.uncreditable_head`"
+      proof: "unit test: test/fix-rung-no-task.test.ts"
+    - claim: "the repair keeps the full trailer identity for review and cumulative strike accounting rather than renaming the PR to `RETRO`"
+      proof: "unit test: test/fix-rung-no-task.test.ts"
+    - claim: "TRIAGE, PLAN and APPROVE synthetic lane branches retain their accepted own-branch forms"
+      proof: "unit test: test/fix-rung-no-task.test.ts"
+    - claim: "a synthetic PR on a foreign `run-W1-*` branch and every real plan task on a non-owned branch remain refused before any strike"
+      proof: "unit test: test/fix-rung-no-task.test.ts"
+  falsifier: |
+    Close without implementation if current main, when driven with the exact PR #3639 trailer
+    and head shapes above, reaches `fix.dispatch`. A pure test with `pr.taskId` absent does not
+    falsify this task because that is the fixture gap being corrected.
+  note: |
+    W1-T2703 was atomically reserved at `refs/rmd-id/W1-T2703` before this file was written.
+    `risk: high`, `band_meaning: span` is Rule 19's span classification for the shared sweep/fix
+    assembler plus its real-closure test. Runtime blast radius is the synthetic orchestrator-lane
+    branch predicate only.
