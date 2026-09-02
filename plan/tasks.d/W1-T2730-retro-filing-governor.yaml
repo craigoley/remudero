@@ -1,0 +1,53 @@
+- id: W1-T2730
+  title: "§8A SAYS RETROS MUST DELETE AND NOTHING MEASURES WHETHER THEY DO — the retro is a task PRODUCER with no compression obligation it can fail, so the open set only grows: 1227 tasks filed, 585 uncredited, median buildable W1-T351 while filing has reached W1-T2730"
+  repo: remudero
+  depends_on: [W1-T2729]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 14.00
+  files: [src/lib/retro.ts, test/retro-filing-governor.test.ts]
+  origin: "operator-session#plan-review-2026-09-02"
+  plan_refs: ["W1-T2729", "W1-T121"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE DOCTRINE ALREADY EXISTS AND IS UNENFORCED. MASTER-PLAN §8A states it in one line: "Retros
+    must also DELETE — compression is a deliverable, not just accretion." Nothing reads that
+    sentence. It is the exact shape CLAUDE.md's own preamble warns about — a rule stated only in
+    prose can be violated silently and repeatedly — and it has been.
+
+    MEASURED AT origin/main 3daee37f: 1227 tasks in the plan, 585 with no trailer credit, 537 of
+    those machine-buildable. The median uncredited buildable task is W1-T351 while filing has
+    reached W1-T2730. 365 of the 585 sit in the W1-T0-499 cohort — the first things ever filed.
+    Every retro adds; nothing subtracts.
+
+    A RATE CAP IS THE WRONG INSTRUMENT AND IS REFUSED HERE. Refusing to record a real finding
+    loses knowledge, which is worse than a long backlog: the finding recurs and is re-derived at
+    full cost. So the governor must never drop a finding. Instead, once the open set exceeds its
+    ceiling, a retro that files must ALSO retire or credit — the addition is paid for with
+    compression rather than declined. That is what §8A already asks for, made failable.
+
+    RETIREMENT ALREADY HAS A CONVENTION TO REUSE, NOT INVENT: W3-T3's title begins
+    "RETIRED (web-only console decision, 2026-07-20)" — a marked title with a dated reason. The
+    governor should count that existing form, never introduce a second one.
+
+    WHY THIS DEPENDS ON W1-T2729. The open-set figure is currently phantom-inflated: 380 of the
+    584 trailer-uncredited tasks carry non-filing commit-subject evidence, so they are built and
+    invisible to the dispatcher. A ceiling calibrated against today's number would be calibrated
+    against a count that is roughly two-thirds wrong, and would throttle filing to protect a
+    backlog that mostly does not exist. W1-T2729 reconciles the credit signals; this task measures
+    what is left. Filed with the dependency rather than the guess.
+
+    THE BOUND MUST SEPARATE A POPULATION THAT HAS BEEN OBSERVED. This repo's recurring defect is a
+    bound that fires on a healthy condition (W1-T312's wait cap, W1-T380's deploy ceiling,
+    W1-T382's check-wait bound). So the ceiling is derived from measured build throughput, not
+    chosen as a literal, and the first cycle must REPORT the net figures before anything refuses.
+  acceptance:
+    - claim: "the retro report names its net effect on the open backlog for that cycle — how many it filed, retired and credited"
+      proof: "unit test: test/retro-filing-governor.test.ts"
+    - claim: "once the open set is over the ceiling a retro that files must also retire or credit, so a finding is paid for with compression and never dropped"
+      proof: "unit test: test/retro-filing-governor.test.ts"
+    - claim: "the ceiling is derived from measured build throughput rather than a source literal, and reports before it refuses"
+      proof: "unit test: test/retro-filing-governor.test.ts"
