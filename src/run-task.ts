@@ -11764,10 +11764,16 @@ async function runTask(
   // branch below); this task moves WHEN that refusal fires and WHAT it says, not what verdict
   // it carries, so drain.ts's existing halt/continue classification needs no new case.
   try {
-    worktreeAdd(repoDir, worktreePath, branch, "origin/main", opts.worktreeBaseDeps);
+    // W1-T2621: `log` threaded through last so it always wins over any test-supplied
+    // `worktreeBaseDeps` override (`readRemoteHead`/`warn` for `test/dispatch-claim.test.ts`'s
+    // stale-base injection) — this run's real ledger is never something a currency-check test
+    // double should be able to silently swallow. `worktreeAdd` itself now emits the
+    // `worktree.add` line (three-way base reading + `behind`) and, on the fail-open branch,
+    // `worktree.base_uncheckable` — see both functions' own docs in lib/worker.ts.
+    worktreeAdd(repoDir, worktreePath, branch, "origin/main", { ...opts.worktreeBaseDeps, log });
   } catch (e) {
     if (e instanceof WorktreeBaseStaleError) {
-      log("worktree.stale_base", { base: e.base, remote_head: e.remoteHead, ref: e.ref });
+      log("worktree.stale_base", { base: e.base, remote_head: e.remoteHead, ref: e.ref, behind: e.behind });
       say(
         `REFUSED: worktree base ${e.base} is behind origin/${e.ref}'s remote head ${e.remoteHead} — ` +
           "refusing before recon/implement/commit spend anything",
@@ -11782,7 +11788,6 @@ async function runTask(
     log("worktree.add_failed", { branch, error: String((e as Error)?.message ?? e) });
     throw e;
   }
-  log("worktree.add", { branch, worktreePath });
   // LIVENESS TOKEN: mark this worktree ALIVE so a concurrent pruneStaleRuns (another
   // drain, a manual run-task) skips it instead of `--force`-removing it mid-run. The
   // lock is a SIBLING file (never inside the worktree ⇒ never committed into the PR),
@@ -19382,7 +19387,9 @@ export function addLaneWorktree(
   const branch = `run-${runId}`;
   const worktreePath = join(worktreesRoot, branch);
   try {
-    worktreeAdd(repoDir, worktreePath, branch, "origin/main");
+    // W1-T2621: thread the caller's own ledger through — `worktreeAdd` now emits the
+    // `worktree.add` three-way base reading itself; see its doc in lib/worker.ts.
+    worktreeAdd(repoDir, worktreePath, branch, "origin/main", { log });
   } catch (e) {
     log("worktree.add_failed", { branch, error: String((e as Error)?.message ?? e) });
     throw e;
@@ -31252,7 +31259,9 @@ export function createDaemonLaneWorktree(
   const branch = uniqueRunBranch(repoDir, runId);
   const worktreePath = join(worktreesRoot, branch);
   try {
-    worktreeAdd(repoDir, worktreePath, branch, "origin/main");
+    // W1-T2621: see addLaneWorktree's identical note, above — worktreeAdd itself emits
+    // worktree.add now, given a ledger to emit it through.
+    worktreeAdd(repoDir, worktreePath, branch, "origin/main", { log });
   } catch (e) {
     log("worktree.add_failed", { branch, error: String((e as Error)?.message ?? e) });
     throw e;
@@ -31912,7 +31921,9 @@ export async function approveCommand(
       const pruned = pruneStaleRuns(dir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
       if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
       worktreePath = join(worktreesDir(config), branch);
-      worktreeAdd(dir, worktreePath, branch, `origin/${branch}`);
+      // W1-T2621: thread this call's own ledger through — worktreeAdd now emits worktree.add
+      // (and, on the currency check's fail-open, worktree.base_uncheckable) itself.
+      worktreeAdd(dir, worktreePath, branch, `origin/${branch}`, { log });
       writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
       // The merge-base diff isolates ONLY what this branch added to plan/tasks.yaml, unaffected
       // by anything origin/main gained afterward (a plain two-dot diff would not be) — same
@@ -31942,7 +31953,8 @@ export async function approveCommand(
       // WORKTREE DIRECTORY on the next line, which is derived from this string.
       const branch = approveRunBranch(runId);
       worktreePath = join(worktreesDir(config), branch);
-      worktreeAdd(dir, worktreePath, branch, "origin/main");
+      // W1-T2621: see completeRatificationBranch's identical note, above.
+      worktreeAdd(dir, worktreePath, branch, "origin/main", { log });
       writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
 
       // W1-T311: MINT + RESERVE the drafted fragment's placeholder (`NEW-<n>`) ids from the
@@ -32256,7 +32268,9 @@ async function approveBatchCommand(
       if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
       const branch = approveRunBranch(runId);
       worktreePath = join(worktreesDir(config), branch);
-      worktreeAdd(dir, worktreePath, branch, "origin/main");
+      // W1-T2621: see the single-approve gateway's identical note (createRatificationBranch,
+      // above) — this ledger is the batch lane's own.
+      worktreeAdd(dir, worktreePath, branch, "origin/main", { log });
       writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
 
       // Q3: ONE mint/reserve/write pass PER ACCEPTED PAYLOAD, sequentially, in the SAME
@@ -32739,7 +32753,17 @@ function alertFixPrompt(alert: AlertLaneAlert, taskId: string): string {
  * `defaultReconRunLens`'s injected `spawn`/`probeExec` already use in this file).
  */
 export interface AlertFixDispatchDeps {
-  worktreeAdd: (repoDir: string, worktreePath: string, branch: string, startPoint: string) => void;
+  /** W1-T2621: the optional 5th positional matches `worktreeAdd`'s own (lib/worker.ts) — this
+   *  lane threads its `log` through it below so the fail-open's `worktree.base_uncheckable`
+   *  and the `worktree.add` three-way base reading land on the SAME ledger every other row
+   *  this lane writes goes to, not nowhere. */
+  worktreeAdd: (
+    repoDir: string,
+    worktreePath: string,
+    branch: string,
+    startPoint: string,
+    deps?: { log?: (step: string, extra?: Record<string, unknown>) => void },
+  ) => void;
   worktreeRemove: (repoDir: string, worktreePath: string) => void;
   renderWorkerSettings: typeof renderWorkerSettings;
   loadMounts: typeof loadMounts;
@@ -32815,7 +32839,7 @@ export async function dispatchAlertFixRun(
   const branch = `alert-fix-${originId}-${Date.now()}`;
   const worktreePath = join(worktreesDir(config), branch);
   try {
-    deps.worktreeAdd(repoDir, worktreePath, branch, "origin/main");
+    deps.worktreeAdd(repoDir, worktreePath, branch, "origin/main", { log });
     const settingsFile = deps.renderWorkerSettings({
       templatePath: join(repoRoot, "settings", "worker.json"),
       hooksDir: join(repoRoot, "hooks"),
