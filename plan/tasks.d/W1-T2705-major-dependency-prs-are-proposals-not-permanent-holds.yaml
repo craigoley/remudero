@@ -1,0 +1,98 @@
+- id: W1-T2705
+  title: "A RED MAJOR DEPENDENCY PR IS A PERMANENT HOLD, NOT A MIGRATION PROPOSAL — dep-review checks red gates before semver, so #3654 never reached the major path; the same incompatible @types/node 22-to-26 proposal already required manual closure as #81 and recurred because no durable migration or suppression decision survived"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 45.00
+  files: [src/lib/dep-review.ts, src/run-task.ts, test/dep-review.test.ts, docs/dep-review.md]
+  origin: "operator-session#autonomous-pr-queue-2026-09-02"
+  plan_refs: ["W1-T54", "W1-T54b", "W1-T243", "W1-T905", "W1-T2427"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED LIVE, TWICE. Dependabot PR #81 proposed @types/node 22.20.1 to 26.1.1. The
+    deterministic lane escalated it, then the operator closed both the PR and its MANUAL issue on
+    2026-07-15. PR #3654 proposed the same runtime-major mismatch again, 22.20.1 to 26.4.0. The
+    repository and every CI setup-node site remain pinned by .nvmrc to Node 22.22.3. The new Node
+    26 declarations made ci-shard 1 fail TypeScript in dozens of existing tests; no application
+    source changed.
+
+    THE SECOND PR NEVER REACHED THE MAJOR DECISION. `decideDepReview` computes semver first but
+    returns `hold` on any red check before its major/unknown branch. Azure ledger rows for #3654
+    record `dep_review_outcome: hold` on the red head. A check that is deterministically red under
+    the proposed major cannot become green without source migration, but the dep-review lane
+    requires a manifest-only diff and no worker owns Dependabot's branch. Polling therefore
+    preserves the same red PR forever; it neither repairs, closes, nor files buildable work.
+
+    MANUAL ESCALATION IS ALSO NOT A DURABLE MIGRATION QUEUE. The first occurrence proves it: #81
+    and issue #89 were closed, but nothing represented "upgrade the runtime and its type surface
+    together" and nothing suppressed the already-decided version proposal, so Dependabot opened
+    #3654 again. `docs/dep-review.md` still describes #81 as open, which is declarative history,
+    not material state.
+
+    A MAJOR BUMP IS A PROPOSAL FOR MIGRATION, NOT A PATCH TO RUBBER-STAMP OR A BOT BRANCH TO
+    REWRITE. Convert a parseable major proposal into the existing durable feedback-to-triage
+    pipeline, then close and suppress that version-major proposal. The resulting rmd-owned task
+    can change manifests, runtime pins, source and tests together on an ordinary task branch. The
+    original PR stays recoverable and the operator can reopen it to override the decision.
+
+    VERIFIED AGAINST CURRENT GITHUB DEPENDABOT DOCUMENTATION ON 2026-09-02: an `ignore` rule with
+    `version-update:semver-major` affects version updates, not security updates. Dependabot's own
+    PR command contract says `@dependabot ignore this major version` closes/suppresses that major
+    proposal until the PR is reopened or the repository upgrades to it directly. This preserves
+    security intake while stopping a weekly version-update loop.
+  design: |
+    Add a pure `migrate` decision for a parseable major Dependabot proposal. Evaluate it before
+    the red-check hold: red checks are migration evidence for a major, not a reason to wait for
+    the impossible. Keep `unknown` fail-closed on the existing MANUAL escalation because no
+    dependency/target identity can be safely deduplicated from an unparseable proposal. Keep
+    minor and patch red/pending behavior unchanged.
+
+    Parse Dependabot's own anchored summary lines into dependency, from-version and to-version
+    facts, never release-note prose. Build a stable submission key from owner/repo plus the sorted
+    dependency-and-target-major set, so #81 and #3654 class proposals converge on one migration
+    record even when the PR number, patch version or release notes change. Capture through the
+    existing `captureFeedback` plus landing bridge; include PR URL, versions, release notes and red
+    checks in the raw evidence. A repeated proposal returns the existing feedback entry rather
+    than creating another plan queue.
+
+    Only after durable capture succeeds, comment the exact Dependabot command
+    `@dependabot ignore this major version` and close the PR without deleting its branch. Ledger
+    capture, command, close and every refusal separately. If capture fails, perform neither
+    outward action and leave the PR open. If the comment or close fails, retain the captured
+    migration and name the incomplete action so the next level-triggered pass retries it; never
+    report the PR resolved merely because feedback exists.
+
+    The migrate path posts no successful remudero-review status and never calls auto-merge. Reopen
+    is the operator override: the branch is preserved, and Dependabot documents reopening as the
+    escape from its ignore preference. The feedback item remains independently triageable and can
+    be rejected or superseded from the console. Update docs from the old four-way/manual-major
+    description to the material five-way lifecycle.
+  acceptance:
+    - claim: "a parseable major proposal reaches migrate even when required checks are red, while a minor or patch with the same checks remains hold"
+      proof: "unit test: test/dep-review.test.ts"
+    - claim: "two PRs for the same dependency target major produce one stable feedback submission key and retain both PR observations without two migration tasks"
+      proof: "unit test: test/dep-review.test.ts"
+    - claim: "durable feedback capture completes before the ignore command or close, and capture failure leaves the PR open with no outward mutation"
+      proof: "unit test: test/dep-review.test.ts"
+    - claim: "the migrate path issues the exact major-ignore command, closes without deleting the branch, posts no successful review and never arms auto-merge"
+      proof: "unit test: test/dep-review.test.ts"
+    - claim: "a failed comment or close is ledgered as incomplete and is retryable on the next pass rather than falsely deduped as resolved"
+      proof: "unit test: test/dep-review.test.ts"
+    - claim: "unknown versions retain the existing MANUAL escalation, non-Dependabot/source-riding PRs remain refused, and green minor/patch bumps retain the existing arm path"
+      proof: "unit test: test/dep-review.test.ts"
+  falsifier: |
+    Close without implementation if current main turns a red parseable major Dependabot PR into a
+    durable, deduplicated migration record and closes/suppresses the original proposal. A `hold`
+    row, a MANUAL issue, or a closed prior PR does not falsify this task because #81/#3654 prove
+    those states do not survive as a self-improving migration queue.
+  note: |
+    W1-T2705 was atomically reserved at `refs/rmd-id/W1-T2705` before this file was written.
+    `risk: high`, `band_meaning: span` is Rule 19's span classification across the pure dependency
+    judge, command effects, tests and operator documentation. The outward actions are reversible:
+    the branch is never deleted and the operator can reopen the PR; merge and deploy authority do
+    not change.
