@@ -9,7 +9,7 @@ import { reclaimStaleLock } from "./fs-race-safe.js";
 import { appendLedger } from "./ledger.js";
 import { liveStateFromRest, type GhApiFetcher } from "./open-prs-rest.js";
 import { isInPlanScope } from "./plan-architect.js";
-import { loadPlanAtRef, visibleCriteria, type AcceptanceCriterion } from "./plan.js";
+import { loadPlanAtRef, visibleCriteria, type AcceptanceCriterion, type TaskRisk } from "./plan.js";
 import { scanUnreachedExports, type UnreachedExport } from "./reachability.js";
 import { loadDefaultPolicy } from "./policy.js";
 import { readLedgerLines } from "./status.js";
@@ -6059,6 +6059,9 @@ export interface PlanCriteriaAtHeadResult {
    *  (claim 4: an untrailered body is unchanged — this function never touches git for it). */
   taskId?: string;
   taskDeclaredFiles?: string[];
+  /** Routing/spend metadata from the same task record at the same head as {@link criteria}. */
+  taskRisk?: TaskRisk;
+  taskBudgetUsd?: number;
   source?: string;
   divergence?: PlanCriteriaAtHeadDivergence;
 }
@@ -6119,6 +6122,8 @@ export function resolvePlanCriteriaAtHead(
       criteria,
       taskId,
       taskDeclaredFiles: t?.files,
+      taskRisk: t?.risk,
+      taskBudgetUsd: t?.budget_usd,
       source: criteria.length ? `plan at ${headSha} task ${taskId} (${criteria.length} criteria)` : undefined,
     };
   } catch (e) {
