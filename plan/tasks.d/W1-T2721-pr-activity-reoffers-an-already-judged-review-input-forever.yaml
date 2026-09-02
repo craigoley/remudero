@@ -1,0 +1,66 @@
+- id: W1-T2721
+  title: "PR ACTIVITY RE-OFFERS AN ALREADY-JUDGED REVIEW INPUT FOREVER — the sweep correctly counts completed judgments by exact task/PR/head/body digest, but its activity-after-verdict row ignores that count until the old cap, so comments or status churn repeatedly select post-review while delivery dedup refuses the identical input"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  origin: "incident#3681-post-review-dedup-loop-2026-09-02"
+  plan_refs: ["W1-T2299", "W1-T2443", "W1-T254", "W1-T1018"]
+  files: [src/lib/sweep.ts, test/review-body-edit-reoffer.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON #3681 AT HEAD 7932adb9. A failing `review.posted` row at
+    2026-09-02T17:52:16.172Z carried input digest
+    `v1:b536f42443d4d3d684b535f76653f5ea3c5493e8fb28c343cf2b1d3b79cbd38b`.
+    The next four light-pass observations at 17:54, 17:55, 17:56 and 17:58 selected post-review
+    because GitHub's coarse PR `updated_at` was later than the verdict. Every attempt then stood
+    down because a verdict was already delivered for the exact same task, PR, head and digest.
+    No body or head change occurred.
+
+    The underlying exact-input machinery already shipped in #3568. `reviewInputDigest` hashes the
+    head plus exact body, and `reviewAttemptsForInput` populates
+    `OpenPrView.priorReviewAttemptsForInput` from completed `review.posted` rows matching task or
+    synthetic key, PR URL, head SHA and digest. A body edit or new commit therefore reads as zero
+    attempts immediately. The remaining defect is one predicate: W1-T2299's
+    activity-after-verdict disposition admits the PR without requiring that exact-input count to
+    be zero, then a later delivery guard correctly refuses the duplicate. Selection and delivery
+    disagree forever.
+
+    The old cap is the wrong boundary for this arm. It answers how often an unchanged input may be
+    retried, while a completed verdict means the content has already been judged. A new digest is
+    the reset signal the operator selected; comments, labels, titles and status updates are not.
+    This does not remove cap/backoff from orphaned, pending or refused delivery recovery paths.
+  design: |
+    Make the W1-T2299 activity-after-verdict row require explicit
+    `priorReviewAttemptsForInput === 0`. Remove its preceding same-input cap/backoff disposition:
+    once the exact input has one completed judgment, ordinary failure/fix handling should own it
+    immediately rather than waiting for a higher count or a clock. Keep
+    `reviewVerdictOvertakenByActivity` honest about its coarse timestamp; it is only a candidate
+    signal, and the digest count is the discriminator.
+
+    Preserve exact-input reset behavior: a changed body or head has a different digest, its count
+    is zero, and it is re-offered without waiting for backoff. A comment, label, title edit or
+    status update leaves the digest and count unchanged and cannot reopen the lane. Require an
+    explicit zero rather than treating missing producer data as zero; the real gateway is wired,
+    while an unreadable/legacy view must not manufacture permission to overwrite a verdict.
+  acceptance:
+    - claim: "activity after a failing verdict admits post-review only when the exact current task/PR/head/body input has zero completed judgments"
+      proof: "unit test: test/review-body-edit-reoffer.test.ts"
+    - claim: "one completed judgment for the exact input falls through to ordinary failure handling on the first pass, regardless of cap or backoff time, so selection no longer fights delivery dedup"
+      proof: "unit test: test/review-body-edit-reoffer.test.ts"
+    - claim: "a body edit or new head changes the digest, resets the exact-input count to zero and is admitted immediately without a lifetime budget or timer reset"
+      proof: "unit test: test/review-body-edit-reoffer.test.ts"
+    - claim: "coarse PR activity that does not change the head or body cannot reset admission"
+      proof: "unit test: test/review-body-edit-reoffer.test.ts"
+    - claim: "the existing cap/backoff remains available to the review-orphan and stuck-pending recovery paths; this task removes it only from completed activity-overtaken judgments"
+      proof: "unit test: test/review-body-edit-reoffer.test.ts"
+    - claim: "missing exact-input producer data fails closed and does not re-offer an already-posted failure"
+      proof: "unit test: test/review-body-edit-reoffer.test.ts"
+  note: |
+    This applies the operator's ruling that retries reset when the PR input changes. It does not
+    decide whether two semantic reviewers may contradict each other on one exact input; that
+    separate fix-rung/arming defect is filed independently.
