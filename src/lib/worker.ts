@@ -2855,6 +2855,106 @@ export function assertWorktreeBaseCurrent(
 }
 
 /**
+ * Result of {@link measureCanonicalCheckoutDrift}: how far the canonical checkout's `HEAD`
+ * sits behind the `origin/<ref>` a worktree was just cut from.
+ */
+export type CanonicalCheckoutDriftResult =
+  | { status: "current" }
+  | { status: "behind"; commits: number }
+  | { status: "unknown"; reason: string };
+
+/** Real (non-test) local read: commits reachable from `origin/<ref>` but not `HEAD`, i.e.
+ *  how far `repoDir`'s checked-out branch is behind. No fetch of its own — see the doc on
+ *  {@link measureCanonicalCheckoutDrift} for why none is needed here. */
+function defaultRevListCanonicalBehind(repoDir: string, ref: string): string {
+  return execFileSync("git", ["-C", repoDir, "rev-list", "--count", `HEAD..origin/${ref}`], {
+    encoding: "utf8",
+  });
+}
+
+/**
+ * Measure how many commits the CANONICAL CHECKOUT's `HEAD` sits behind `origin/<ref>` — the
+ * deps SOURCE every worker worktree's `node_modules` is symlinked to by
+ * {@link linkWorktreeNodeModules} (W1-T2618). Read at the exact moment that link is made, so
+ * the staleness of the tree a fresh worktree resolves its dev CLIs through becomes an
+ * OBSERVED quantity instead of an assumed-fresh one.
+ *
+ * MEASURE, NEVER REPAIR (design note (i)). This does not fetch, pull, or install anything to
+ * fix a stale checkout — what to DO about one (refresh it, refuse, warn) is a later ruling,
+ * not decided here. It runs no package manager and performs no install on any path: the only
+ * subprocess it launches is `git rev-list --count`, never `npm`/`yarn`/`pnpm` — the exact
+ * outage class (an install emptying the shared `node_modules` under a live daemon) the
+ * symlink discipline exists to prevent.
+ *
+ * REUSES THE ALREADY-FETCHED REF (design note (ii)), NO NEW FETCH. Every `worktreeAdd` call
+ * site runs `git fetch origin --quiet` in `repoDir` before this ever runs (see the `fetch`
+ * line above the `linkWorktreeNodeModules` call below), which already moves `repoDir`'s
+ * local `origin/<ref>` tracking ref to the current remote head. So `origin/<ref>` here is
+ * already current, and the `rev-list` below is a purely LOCAL, no-network read comparing two
+ * refs already on disk — it does not re-fetch.
+ *
+ * BEST-EFFORT, LIKE ITS SIBLING (design note (iii)): mirrors `linkWorktreeNodeModules`'s own
+ * "every outcome is a RETURN VALUE, never a throw" contract exactly. An unreadable repo, a
+ * missing `origin/<ref>`, or unparseable `rev-list` output all degrade to `"unknown"`, never
+ * a thrown error — a staleness measurement that could itself break dispatch would be worse
+ * than the drift it measures.
+ *
+ * PURE aside from the injected callback — no git call of its own beyond the default — so a
+ * test drives every branch (current / behind / unknown) without a second real remote.
+ */
+export function measureCanonicalCheckoutDrift(
+  repoDir: string,
+  ref: string,
+  deps: {
+    /** Commits `HEAD..origin/<ref>` in `repoDir`, as raw `rev-list --count` text. Default: a
+     *  local `git rev-list --count`, no fetch. Injectable so a test can simulate current /
+     *  behind / unreadable without a second real remote. */
+    revListCount?: (repoDir: string, ref: string) => string;
+  } = {},
+): CanonicalCheckoutDriftResult {
+  let raw: string;
+  try {
+    raw = (deps.revListCount ?? defaultRevListCanonicalBehind)(repoDir, ref);
+  } catch (e) {
+    return { status: "unknown", reason: String((e as Error)?.message ?? e) };
+  }
+  const commits = Number.parseInt(raw.trim(), 10);
+  if (!Number.isInteger(commits) || commits < 0) {
+    return { status: "unknown", reason: `unparseable rev-list --count output: ${JSON.stringify(raw)}` };
+  }
+  return commits === 0 ? { status: "current" } : { status: "behind", commits };
+}
+
+/**
+ * Report {@link measureCanonicalCheckoutDrift}'s result the way {@link assertWorktreeBaseCurrent}
+ * reports an unreadable remote head: NAME the checkout and its measured distance via `warn`
+ * when it is behind (acceptance claim 2), and stay silent when it is current — a detector,
+ * not a permanent red (acceptance claim 3). NEVER THROWS regardless of outcome: the symlink
+ * this runs right after is best-effort by contract, and a stale deps source must never fail
+ * worktree creation (acceptance claim 2, design note (iii)). Called from `worktreeAdd`
+ * immediately after `linkWorktreeNodeModules` — the one place the system already knows a
+ * worktree's deps source.
+ */
+export function recordCanonicalCheckoutDrift(
+  repoDir: string,
+  ref: string,
+  deps: {
+    measure?: (repoDir: string, ref: string) => CanonicalCheckoutDriftResult;
+    warn?: (message: string) => void;
+  } = {},
+): CanonicalCheckoutDriftResult {
+  const result = (deps.measure ?? measureCanonicalCheckoutDrift)(repoDir, ref);
+  if (result.status === "behind") {
+    (deps.warn ?? ((m: string) => console.error(m)))(
+      `canonical checkout drift: ${repoDir} is ${result.commits} commit(s) behind origin/${ref} — ` +
+        "the node_modules just symlinked into this worktree comes from that stale tree; " +
+        "proceeding anyway (best-effort — see linkWorktreeNodeModules)",
+    );
+  }
+  return result;
+}
+
+/**
  * Sibling path recording the commit a worktree was created from — OUTSIDE the working
  * tree, same convention as {@link runLockPath}'s liveness token — so it is never committed
  * and a later refusal can name the base without re-deriving it via `git merge-base`.
@@ -2928,7 +3028,8 @@ export function worktreeAdd(
      *  unreachable without standing up a second real remote. */
     readRemoteHead?: (repoDir: string, ref: string) => string;
     /** Surfaces the "remote head unreadable, proceeding anyway" warning (design note
-     *  (iii)). Default: `console.error`. */
+     *  (iii)) AND (W1-T2618) the "canonical checkout is behind" drift warning. Default:
+     *  `console.error` for both. */
     warn?: (message: string) => void;
   } = {},
 ): void {
@@ -2975,6 +3076,10 @@ export function worktreeAdd(
   // Excluding FIRST keeps the link from ever being visible to git as an untracked file.
   excludeNodeModulesFromGit(worktreePath);
   linkWorktreeNodeModules(repoDir, worktreePath);
+  // W1-T2618: the link just above ties this worktree's node_modules to repoDir's own tree
+  // — measure how far THAT tree sits behind the origin/<ref> the fetch above just moved,
+  // right here where the coupling is real. `ref` is already computed above; no new fetch.
+  recordCanonicalCheckoutDrift(repoDir, ref, { warn: deps.warn });
 }
 
 /** Does a local branch named `branch` already exist in `repoDir`? A cheap, read-only
