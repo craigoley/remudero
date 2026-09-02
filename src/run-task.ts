@@ -26952,6 +26952,11 @@ export function fixRungTaskFor(
   };
 }
 
+/** The synthetic lane namespaces whose PR branches are created by the orchestrator itself. */
+function isSyntheticOrchestratorLaneId(taskId: string): boolean {
+  return /^(?:RETRO(?:-.+)?|TRIAGE-.+|PLAN-.+|APPROVE-.+)$/.test(taskId);
+}
+
 /**
  * Is `head` an acceptable branch for a fix dispatch to amend?
  *
@@ -26989,12 +26994,13 @@ export function fixHeadAcceptable(head: string | undefined, taskId: string, synt
   if (!head) return false;
   const ownRunBranch = new RegExp(`^run-${taskId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-\\d+$`).test(head);
   if (!synthetic) return ownRunBranch;
+  const exactSyntheticLaneBranch = isSyntheticOrchestratorLaneId(taskId) && head === `run-${taskId}`;
   // A synthetic id covers two shapes: an agent PR with NO id at all (descriptive branch), and a
-  // LANE PR whose id is real but absent from plan.tasks (TRIAGE-*/RETRO-*/PLAN-* — 20 of the 65
-  // PRs in the measured trail). The lane PR's own `run-<id>-<ts>` head is legitimately its own, so
-  // accept it; refuse only a head claiming a DIFFERENT task, which means mis-trailered, not
-  // task-less, and amending it would push onto another task's run branch.
-  return ownRunBranch || !isDispatchedRunBranch(head);
+  // LANE PR whose id is real but absent from plan.tasks. A lane can have the ordinary
+  // `run-<id>-<dispatch epoch>` head or the exact `run-<id>` head when its id already ends in the
+  // lane's own epoch. Preserve that full id as the strike/review key; only the ownership
+  // equivalence changes. A run branch claiming a DIFFERENT task remains refused.
+  return ownRunBranch || exactSyntheticLaneBranch || !isDispatchedRunBranch(head);
 }
 
 /**
