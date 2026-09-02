@@ -1,0 +1,67 @@
+- id: W1-T2710
+  title: "THE MINT DROPS ITS ONLY CURRENT SOURCE WHEN THE LOCAL HALF IS STALE, THEN WALKS THE GAP ONE NETWORK PUSH AT A TIME — MEASURED 2026-09-02: `shards` read 2598 from a checkout 107 ids behind while `origin/main` carried 2705, so `MAX_MENTION_LEAD` computed the open-PR lead as 109 > 100 and DISCARDED the accurate source as \"uncorroborated\", leaving history 2690 as the ceiling and 20 sequential `refs/rmd-id/` pushes to reach a free id"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 12.00
+  files: [src/lib/task-id.ts, test/the-mint-discards-its-only-current-source-when-the-local-half-is-stale.test.ts]
+  origin: "operator-session#mint-walked-twenty-ids-2026-09-02"
+  plan_refs: ["W1-T509", "W1-T518", "W1-T1039", "W1-T1055", "W1-T2685"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE GUARD FIRED ON THE HEALTHY SOURCE. `MAX_MENTION_LEAD` exists for W1-T1039's defect — a
+    prose mention burning an id and becoming a permanent ceiling — so it drops an open-PR figure
+    that leads the plan's own ceiling by more than 100. That is right when the plan ceiling is
+    current. It inverts when the plan ceiling is STALE: the open-PR scan is then the only source
+    telling the truth, and the guard throws it away precisely because the stale half disagrees.
+
+    MEASURED 2026-09-02, one invocation, every number from its own output and from origin:
+
+        W1-T2691 (max 2690 across tasks.yaml 280, shards 2598, open PRs not enumerated,
+                  history 2690) — DEGRADED: open-prs ... leads the plan's own ceiling by 109 (> 100)
+        ... 20 attempts ...
+        RESERVED W1-T2710 after 20 attempt(s)
+
+    Against `origin/main` at the same moment: the highest filed shard is 2705, not 2598 — the
+    checkout the mint read was 107 ids behind. So the lead of 109 was almost entirely the
+    STALENESS, not a prose mention. Had `shards` been current, the lead would have been ~2, well
+    inside the bound, and the open-PR ceiling would have stood.
+
+    AND THE WALK IS THE SECOND COST. With every current source discarded or unread, the ceiling
+    fell back to history 2690 and the verb attempted 2691, 2692, ... 2710 — TWENTY sequential
+    pushes into `refs/rmd-id/`. CLAUDE.md records a ninety-minute lockout caused by request
+    CADENCE rather than volume; a burst of twenty ref pushes, several times a session, is that
+    shape.
+
+    THE ATTRIBUTION IS ALSO WRONG IN A WAY THAT HIDES THIS, and it is why the walk reads as
+    contention rather than staleness: five of the ids stepped over — 2691, 2692, 2693, 2704, 2705
+    — are FILED SHARDS ON MAIN, each reported as "HELD BY ANOTHER CALLER — the fleet". A reader
+    watching twenty fleet reservations scroll past concludes the fleet is busy, not that their own
+    checkout is behind. W1-T2685 owns the attribution text; this task owns why the walk is twenty
+    long in the first place, and neither fixes the other.
+
+    THE FIX IS THE SOURCE, NOT THE BOUND. Do not widen `MAX_MENTION_LEAD` — that re-opens
+    W1-T1039 exactly as its own rationale warns. Read the plan ceiling from a source that cannot
+    silently lag (the remote's own tree, or the reservation namespace `refs/rmd-id/` that
+    `--reserve` already writes to and no max source reads today), and when the local half IS
+    behind, say so in the provenance line rather than reporting a figure derived from it. A
+    degraded source should name which half it distrusted and why.
+
+    A CONTROL BELONGS IN THE FIX. W1-T1039's own defect must still be caught: a genuine prose
+    mention far above a CURRENT plan ceiling is still dropped. The discriminator is whether the
+    plan half is current, which is checkable, not whether the numbers differ.
+  acceptance:
+    - claim: "a plan ceiling read from a checkout behind the remote is detected and named in the provenance line"
+      proof: "unit test: test/the-mint-discards-its-only-current-source-when-the-local-half-is-stale.test.ts"
+    - claim: "an open-PR figure is not discarded as over-leading when the lead is explained by that staleness"
+      proof: "unit test: test/the-mint-discards-its-only-current-source-when-the-local-half-is-stale.test.ts"
+    - claim: "a genuine over-lead against a CURRENT plan ceiling is still dropped — W1-T1039's defect stays caught"
+      proof: "unit test: test/the-mint-discards-its-only-current-source-when-the-local-half-is-stale.test.ts"
+    - claim: "the bound itself is unchanged — the fix is which sources are trusted, never a wider tolerance"
+      proof: "unit test: test/the-mint-discards-its-only-current-source-when-the-local-half-is-stale.test.ts"
+    - claim: "with a current ceiling the reservation walk is short, so a burst of sequential pushes is not the normal path"
+      proof: "unit test: test/the-mint-discards-its-only-current-source-when-the-local-half-is-stale.test.ts"
