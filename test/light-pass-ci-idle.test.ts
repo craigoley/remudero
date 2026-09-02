@@ -13,13 +13,14 @@
  * a temp dir — no `gh`, no spawn, no `runSweep`, no clock.
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readdirSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readdirSync, existsSync, readFileSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
 import {
   AWAITING_EXTERNAL_LEDGER_STEP,
+  fixBranchClaimKey,
   fixRungAllowedBesideInFlight,
   inFlightTaskIdsFrom,
   lightPassActionable,
@@ -107,4 +108,25 @@ test("W1-T1211: no lock is released or aged out by this path", () => {
 
   // A missing directory is empty, never an error — and still releases nothing.
   assert.deepEqual(inFlightTaskIdsFrom(join(dir, "absent")), []);
+});
+
+test("W1-T2726: a fix-branch claim beside task locks never suppresses the repair arm", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-mixed-inflight-"));
+  const inflight = join(dir, "inflight");
+  mkdirSync(inflight);
+  const claimKey = fixBranchClaimKey("craigoley", "remudero", "run/W1-TWAIT");
+  const claimPath = join(inflight, `${claimKey}.lock`);
+  writeFileSync(claimPath, "not-json: proving this reader never inspects lock content");
+  utimesSync(claimPath, new Date(0), new Date(0));
+  writeFileSync(join(inflight, `${TASK}.lock`), JSON.stringify({ pid: 2 }));
+  writeFileSync(join(inflight, "custom-task.lock"), JSON.stringify({ pid: 3 }));
+
+  const ids = inFlightTaskIdsFrom(inflight).sort();
+  assert.deepEqual(ids, [TASK, "custom-task"].sort(), "only the reserved claim namespace is excluded");
+  const customWaiting = WAITING.map((line) => ({ ...line, task_id: "custom-task" }));
+  assert.equal(fixRungAllowedBesideInFlight([...WAITING, ...customWaiting], ids), true, "waiting tasks permit repair beside the branch claim");
+  assert.equal(fixRungAllowedBesideInFlight([...WORKING, ...customWaiting], ids), false, "a spending task still suppresses repair");
+  assert.match(claimKey, /^fix-branch--craigoley--remudero--run__W1-TWAIT$/);
+  assert.equal(readFileSync(claimPath, "utf8"), "not-json: proving this reader never inspects lock content");
+  assert.ok(existsSync(claimPath), "the old branch claim is neither released nor aged out");
 });

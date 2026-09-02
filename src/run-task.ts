@@ -26927,8 +26927,10 @@ export function createFixRungWorktree(repoDir: string, worktreePath: string, bra
  * name) — replaced so the lock file always lands directly inside `inflightDir`, never in an
  * implied, possibly-missing subdirectory.
  */
+const FIX_BRANCH_CLAIM_PREFIX = "fix-branch--";
+
 export function fixBranchClaimKey(owner: string, repo: string, branch: string): string {
-  return `fix-branch--${owner}--${repo}--${branch}`.replace(/[/\\]/g, "__");
+  return `${FIX_BRANCH_CLAIM_PREFIX}${owner}--${repo}--${branch}`.replace(/[/\\]/g, "__");
 }
 
 /**
@@ -29388,14 +29390,16 @@ export function fixRungAllowedBesideInFlight(
  * W1-T1211: the in-flight TASK ids, read from `state/inflight/*.lock` FILENAMES.
  *
  * A directory read, never a pid probe — see {@link runIsAwaitingExternal}'s doc for why
- * `liveInflightRuns` is refused here. This reads no lock CONTENT, releases nothing, and ages
- * nothing out: W1-T1067's stranded `drain.lock` is the precedent for what a clock-shaped release
- * does when its signal never arrives, and this path has no clock at all.
+ * `liveInflightRuns` is refused here. The shared directory also holds namespaced fix-branch
+ * serialization claims, which are not task runs and therefore never enter the task-phase join.
+ * This reads no lock CONTENT, releases nothing, and ages nothing out: W1-T1067's stranded
+ * `drain.lock` is the precedent for what a clock-shaped release does when its signal never
+ * arrives, and this path has no clock at all.
  */
 export function inFlightTaskIdsFrom(inflightDir: string): string[] {
   if (!existsSync(inflightDir)) return [];
   return readdirSync(inflightDir)
-    .filter((entry) => entry.endsWith(".lock"))
+    .filter((entry) => entry.endsWith(".lock") && !entry.startsWith(FIX_BRANCH_CLAIM_PREFIX))
     .map((entry) => entry.slice(0, -".lock".length));
 }
 
