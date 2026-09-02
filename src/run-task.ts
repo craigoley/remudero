@@ -27380,6 +27380,8 @@ export function buildSweepEffects(
   | "escalateCancelledCheck"
   | "readCiGateRollup"
   | "reaggregateCiGate"
+  | "readMainTip"
+  | "releaseBaseCausedStandDown"
 > {
   const repoDir = repo === resolveOwnerRepo().repo ? repoRoot : join(config.root, "repos", repo);
   // W1-T2609: the SAME per-task lock directory `liveInflightRuns`/`acquireInflightLock` already
@@ -28099,6 +28101,40 @@ export function buildSweepEffects(
     // W1-T905 — "repair the instance, FILE THE CLASS". `runSweep` calls this AT MOST ONCE per
     // due surface, best-effort — see `SweepDeps.captureRepairFeedback`'s own doc.
     captureRepairFeedback: (filing) => captureRepairFeedbackImpl(filing),
+
+    // W1-T2620 (design i) — ONE read per pass: `origin/main`'s CURRENT tip sha, via the SAME
+    // non-blocking `readJsonImpl` seam (W1-T2300) `readCiGateRollup`/`reaggregateCiGate` above
+    // already drive — never a local `git rev-parse`, which can lag behind a fetch this process
+    // never ran. Best-effort: an indeterminate read (no `sha`, or a throw) returns `undefined`,
+    // byte-identical to omitting this dep — see `SweepDeps.readMainTip`'s own doc.
+    readMainTip: async () => {
+      try {
+        const commit = (await readJsonImpl(["api", `repos/${owner}/${repo}/commits/main`])) as { sha?: string };
+        return typeof commit?.sha === "string" ? commit.sha : undefined;
+      } catch {
+        return undefined;
+      }
+    },
+
+    // W1-T2620 (design iv) — THE LEAF IS THE ONE THAT EXISTS: the SAME `pushEmptyCommit` leaf
+    // `repushAbsent` (above) and `sweepPostFixReverification`'s own redrive (this file) already
+    // use — never a second outward path, and never `updateBranchImpl` (`armedButStalled`'s own
+    // population is disjoint — green, armed, `behind` — from a base-caused PR, which is red by
+    // construction; see `SweepDeps.releaseBaseCausedStandDown`'s own doc).
+    releaseBaseCausedStandDown: async (pr, mainTipSha) => {
+      if (!pr.headRefName) return;
+      pushEmptyCommit(
+        repoRoot,
+        pr.headRefName,
+        pr.headSha,
+        `chore(ci): re-trigger checks on #${pr.prNumber}\n\n` +
+          `This PR's red was base-caused — the one required check failing on every open PR the ` +
+          `pass that stood it down last observed. Main has advanced to ${mainTipSha} since this ` +
+          `head last stood down against an earlier tip. This empty commit mints a fresh head sha ` +
+          `so the required checks recompute against CURRENT main. Automated by the base-caused ` +
+          `release rung (W1-T2620).`,
+      );
+    },
   };
 }
 
