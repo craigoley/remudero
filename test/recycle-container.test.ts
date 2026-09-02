@@ -264,12 +264,15 @@ test("W1-T1010: a recycle with no captured credential refuses before mutating", 
 });
 
 test("W1-T1010: MUTANT: dropping the credential refusal lets the run reach the pull, and the guard catches it", () => {
+  // The anchor tracks the refusal’s LAST line, which moved when App auth became an accepted
+  // credential: the refusal now names what it checked about the App before offering a token as a
+  // one-off. The mutation itself is unchanged — drop the `exit 1` and the run must reach the pull.
   const src = readFileSync(SCRIPT, "utf8");
-  const anchor = '  echo "  Export GH_TOKEN in this shell and re-run." >&2\n  exit 1\nfi\n';
+  const anchor = '  echo "  Or, as a one-off, export GH_TOKEN in this shell and re-run." >&2\n  exit 1\nfi\n';
   assert.equal(src.split(anchor).length - 1, 1, "the mutation target must be unique");
   const dir = mkdtempSync(join(tmpdir(), "recycle-mutant-"));
   const mutant = join(dir, "recycle-container.sh");
-  writeFileSync(mutant, src.replace(anchor, '  echo "  Export GH_TOKEN in this shell and re-run." >&2\nfi\n'), { mode: 0o755 });
+  writeFileSync(mutant, src.replace(anchor, '  echo "  Or, as a one-off, export GH_TOKEN in this shell and re-run." >&2\nfi\n'), { mode: 0o755 });
   chmodSync(mutant, 0o755);
 
   const run = runRecycle("no-token", { scriptPath: mutant });
