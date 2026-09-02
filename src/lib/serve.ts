@@ -70,6 +70,8 @@ import {
   buildQuietHoursRoute,
   buildResumeRoute,
   buildStopRoute,
+  bearerTokenId,
+  jsonAction,
   sendJson,
   type ControlStatusDeps,
   type IssueCloser,
@@ -84,6 +86,14 @@ import { createLastSeenStore, lastSeenPath, type LastSeenStore } from "./last-se
 import { buildDaemonHealthRoute, type DaemonHealthDeps } from "./daemon-health.js";
 import { buildAccountUsageRoute, type AccountUsageDeps } from "./account-usage.js";
 import { readProviderRoutingStatus, type ProviderRoutingStatus } from "./provider-routing-status.js";
+import {
+  ProviderRoutingPolicyError,
+  clearProviderRoutingPolicyOverride,
+  resolveProviderRoutingPolicy,
+  writeProviderRoutingPolicyOverride,
+  type ProviderRoutingPolicyOverrideInput,
+} from "./provider-routing-policy.js";
+import { appendLedger } from "./ledger.js";
 import { buildAnalyticsRoute, type AnalyticsRouteDeps } from "./analytics-route.js";
 import { resolveFreshness } from "./console-freshness.js";
 import { readIdleReasons, renderIdleReasonsHtml } from "./idle-reasons-panel.js";
@@ -102,6 +112,7 @@ import {
   sweepWakeMarkerPath,
 } from "./github-event-wake.js";
 import { DEFAULT_GITHUB_EVENT_WAKE_DEDUP_CAPACITY } from "./policy.js";
+import type { WorkerProviderId } from "./config.js";
 
 /**
  * One escalation option's RENDER-READY affordance (W1-T2273) — what a console UI needs to draw
@@ -1093,6 +1104,9 @@ export function renderShellHtml(
     <span class="glance-item"><span class="glance-label">reserve</span><span class="glance-value" id="pr-reserve">…</span></span>
     <span class="glance-item"><span class="glance-label">selected</span><span class="glance-value" id="pr-selected">…</span></span>
     <span class="glance-item"><span class="glance-label">providers</span><span class="glance-value" id="pr-providers">…</span></span>
+    <span class="glance-item"><span class="glance-label">policy</span><span class="glance-value" id="pr-policy">…</span></span>
+    <span class="glance-item"><span class="glance-label">preference bypass</span><span class="glance-value" id="pr-bypass">…</span></span>
+    <span class="glance-item"><span class="glance-label">override expires</span><span class="glance-value" id="pr-expires">…</span></span>
     <span class="glance-item"><span class="glance-label">routing as of</span><span class="glance-value" id="pr-as-of">…</span></span>
   </section>
   <!-- Rendered SERVER-SIDE from the sha captured at start: a static span, deliberately NOT a
@@ -1330,6 +1344,39 @@ export function renderShellHtml(
     <button id="cost-ceiling-clear-btn" type="button" data-confirming="false" aria-pressed="false" disabled title="Read-only — enter a write token to enable this action">Clear override</button>
   </div>
   <p id="cost-ceiling-status" role="status" aria-live="polite" class="counts"></p>
+  <fieldset id="provider-policy-controls">
+    <legend>Provider routing policy</legend>
+    <p id="provider-policy-status" role="status" aria-live="polite" class="counts">Waiting for the daemon policy projection…</p>
+    <div class="btn-row">
+      <label><input id="provider-policy-enabled-claude" type="checkbox" disabled /> Claude enabled</label>
+      <label><input id="provider-policy-enabled-codex" type="checkbox" disabled /> Codex enabled</label>
+      <label for="provider-policy-preference">Preference</label>
+      <select id="provider-policy-preference" disabled>
+        <option value="automatic">Automatic</option>
+        <option value="claude">Prefer Claude</option>
+        <option value="codex">Prefer Codex</option>
+      </select>
+      <label for="provider-policy-reserve">Reserve (%)</label>
+      <input id="provider-policy-reserve" type="number" min="0" max="50" step="1" disabled />
+    </div>
+    <div class="btn-row">
+      <label for="provider-policy-park-claude">Park Claude</label>
+      <select id="provider-policy-park-claude" disabled>
+        <option value="0">Not parked</option><option value="15">15 minutes</option><option value="60">1 hour</option><option value="240">4 hours</option>
+      </select>
+      <label for="provider-policy-park-codex">Park Codex</label>
+      <select id="provider-policy-park-codex" disabled>
+        <option value="0">Not parked</option><option value="15">15 minutes</option><option value="60">1 hour</option><option value="240">4 hours</option>
+      </select>
+      <label for="provider-policy-expiry">Override duration</label>
+      <select id="provider-policy-expiry" disabled>
+        <option value="60">1 hour</option><option value="240">4 hours</option><option value="1440">24 hours</option>
+      </select>
+      <button id="provider-policy-apply-btn" type="button" data-confirming="false" aria-pressed="false" disabled>Apply policy</button>
+      <button id="provider-policy-clear-btn" type="button" data-confirming="false" aria-pressed="false" disabled>Clear provider override</button>
+    </div>
+    <p class="counts">A valid change is effective on the next dispatch. It does not start, stop, restart, recycle or deploy either container, and it cannot bypass provider readability or reserve.</p>
+  </fieldset>
 </section>
 
 <section id="more" class="panel-section" aria-label="More tools" data-owner-tab="feed">
@@ -1566,6 +1613,8 @@ export function renderShellHtml(
     // leaving the operator to guess whether a live daemon needs a restart to see it.
     "/v1/policy/daily-cost-ceiling": { kind: "done", text: "Daily cost ceiling updated — effective on the daemon's next tick, no restart needed." },
     "/v1/policy/daily-cost-ceiling/clear": { kind: "done", text: "Daily cost ceiling override cleared — reverted to the committed default, effective on the daemon's next tick, no restart needed." },
+    "/v1/policy/provider-routing": { kind: "done", text: "Provider routing override saved — effective on the next dispatch; no daemon or container restart is performed." },
+    "/v1/policy/provider-routing/clear": { kind: "done", text: "Provider routing override cleared — the committed host policy returns on the next dispatch; no daemon or container restart is performed." },
     // W1-T435: the ledger write (appendPanelLedger) completes before the route replies -- "done" is
     // accurate. A wrong/needs-follow-up verdict's note also steers the fix rung's next attempt
     // (operatorVerdictEvidence, lib/sweep.ts); a good verdict is recorded for the learning limb only.
@@ -1610,7 +1659,7 @@ export function renderShellHtml(
     // design (ii)'s client half of W1-T404's second factor. Declared INSIDE this function, not as a
     // module-level const, so postJson stays the one self-contained unit
     // test/serve-write-errors.test.ts already extracts and sandboxes.
-    var HIGH_TIER_WRITE_PATHS = ["/v1/manual/approve", "/v1/drain/kick", "/v1/drain/run", "/v1/inbox/approve", "/v1/skills/run"];
+    var HIGH_TIER_WRITE_PATHS = ["/v1/manual/approve", "/v1/drain/kick", "/v1/drain/run", "/v1/inbox/approve", "/v1/skills/run", "/v1/policy/provider-routing", "/v1/policy/provider-routing/clear"];
     var payload = JSON.stringify(body ?? {});
     var doWrite = function (nonce) {
       var headers = { ...writeAuthHeaders(), "content-type": "application/json" };
@@ -1961,6 +2010,7 @@ export function renderShellHtml(
   let latestNeedsMeRows = []; // set by renderNeedsMe -- the SAME combined NEEDS ME rows the section itself renders
   let latestDaemonHealth = null; // GET /v1/daemon-health's body
   let latestAccountUsage = null; // GET /v1/account-usage's body (account-usage.ts's AccountUsageSnapshot)
+  let latestProviderRouting = null; // daemon-written routing decision + effective/default policy projection
   let latestPlanView = null; // GET /v1/plan/view's body (panel-graph.ts's { progress, sections, frontier }, W1-T315 + W1-T376)
   const BASE_TITLE = document.title;
   const NEEDS_ME_STALE_MS = 24 * 60 * 60 * 1000; // criterion 3's ">24h" anomaly-emphasis bound
@@ -2472,6 +2522,61 @@ export function renderShellHtml(
           : enabled,
     );
     setGlanceValue("pr-as-of", p.observedAt ? formatTimestamp(p.observedAt) : "unknown");
+    const policy = p.policy;
+    setGlanceValue(
+      "pr-policy",
+      policy
+        ? [policy.provenance, policy.preference, policy.reservePercent + "% reserve", "routing " + (policy.routableProviders || []).join(", ")]
+            .join(" · ") + (policy.fallback ? " · fallback " + policy.fallback.reason : "")
+        : "unknown (daemon has not published policy)",
+    );
+    setGlanceValue(
+      "pr-bypass",
+      p.preferenceBypass ? p.preferenceBypass.provider + " · " + p.preferenceBypass.reason : "none",
+    );
+    setGlanceValue("pr-expires", policy && policy.overrideExpiresAt ? formatTimestamp(policy.overrideExpiresAt) : "not overridden");
+  }
+
+  function applyProviderPolicyControlGate() {
+    const policy = latestProviderRouting && latestProviderRouting.policy;
+    const committed = policy && policy.committed;
+    const allowed = committed && Array.isArray(committed.enabledProviders) ? committed.enabledProviders : [];
+    const locked = !hasWriteScope || !policy;
+    const ids = [
+      "provider-policy-preference",
+      "provider-policy-reserve",
+      "provider-policy-park-claude",
+      "provider-policy-park-codex",
+      "provider-policy-expiry",
+      "provider-policy-apply-btn",
+      "provider-policy-clear-btn",
+    ];
+    ids.forEach(function (id) {
+      const element = document.getElementById(id);
+      if (element) element.disabled = locked;
+    });
+    ["claude", "codex"].forEach(function (provider) {
+      const element = document.getElementById("provider-policy-enabled-" + provider);
+      if (element) element.disabled = locked || allowed.indexOf(provider) === -1;
+    });
+  }
+
+  function renderProviderPolicyControl(p) {
+    const status = document.getElementById("provider-policy-status");
+    const policy = p && p.policy;
+    if (!status || !policy) {
+      if (status) status.textContent = "Policy unavailable — no override can be written until the daemon publishes its committed policy.";
+      applyProviderPolicyControlGate();
+      return;
+    }
+    status.textContent = policy.provenance === "overridden"
+      ? "Current override: " + policy.preference + " · " + policy.reservePercent + "% reserve · expires " + formatTimestamp(policy.overrideExpiresAt)
+      : "Current policy: committed default" + (policy.fallback ? " (override ignored: " + policy.fallback.reason + ")" : "");
+    document.getElementById("provider-policy-enabled-claude").checked = (policy.enabledProviders || []).indexOf("claude") !== -1;
+    document.getElementById("provider-policy-enabled-codex").checked = (policy.enabledProviders || []).indexOf("codex") !== -1;
+    document.getElementById("provider-policy-preference").value = policy.preference || "automatic";
+    document.getElementById("provider-policy-reserve").value = String(policy.reservePercent);
+    applyProviderPolicyControlGate();
   }
 
   /** W1-T364: the daily-cost-ceiling WRITE control's own current-state readout, in the "Fleet
@@ -3988,6 +4093,124 @@ export function renderShellHtml(
     postJson("/v1/policy/daily-cost-ceiling/clear").then(refreshAll);
   });
 
+  // ── live provider-routing policy — a bounded state override consumed by spawnWorker on each
+  // dispatch. These controls never call provider capacity readers and never own daemon/container
+  // lifecycle. The first click arms an exact payload; the second spends the high-tier nonce.
+  function providerPolicyFormSignature() {
+    return JSON.stringify({
+      claude: document.getElementById("provider-policy-enabled-claude").checked,
+      codex: document.getElementById("provider-policy-enabled-codex").checked,
+      preference: document.getElementById("provider-policy-preference").value,
+      reserve: document.getElementById("provider-policy-reserve").value,
+      parkClaude: document.getElementById("provider-policy-park-claude").value,
+      parkCodex: document.getElementById("provider-policy-park-codex").value,
+      expiry: document.getElementById("provider-policy-expiry").value,
+    });
+  }
+  function buildProviderPolicyPayload() {
+    const enabledProviders = [];
+    if (document.getElementById("provider-policy-enabled-claude").checked) enabledProviders.push("claude");
+    if (document.getElementById("provider-policy-enabled-codex").checked) enabledProviders.push("codex");
+    const preference = document.getElementById("provider-policy-preference").value;
+    const reservePercent = Number(document.getElementById("provider-policy-reserve").value);
+    const expiryMinutes = Number(document.getElementById("provider-policy-expiry").value);
+    const status = document.getElementById("provider-policy-status");
+    if (!enabledProviders.length) { status.textContent = "Refused locally: keep at least one configured provider enabled."; return null; }
+    if (preference !== "automatic" && enabledProviders.indexOf(preference) === -1) {
+      status.textContent = "Refused locally: the preferred provider must remain enabled.";
+      return null;
+    }
+    if (!Number.isFinite(reservePercent) || reservePercent < 0 || reservePercent > 50) {
+      status.textContent = "Refused locally: reserve must be between 0% and 50%.";
+      return null;
+    }
+    const now = Date.now();
+    const expiresAt = new Date(now + expiryMinutes * 60 * 1000).toISOString();
+    const parks = [];
+    [["claude", "provider-policy-park-claude"], ["codex", "provider-policy-park-codex"]].forEach(function (entry) {
+      const provider = entry[0];
+      const minutes = Number(document.getElementById(entry[1]).value);
+      if (minutes > 0 && enabledProviders.indexOf(provider) !== -1) {
+        parks.push({ provider: provider, until: new Date(now + Math.min(minutes, expiryMinutes) * 60 * 1000).toISOString() });
+      }
+    });
+    if (parks.length === enabledProviders.length) {
+      status.textContent = "Refused locally: an override cannot park every enabled provider.";
+      return null;
+    }
+    if (preference !== "automatic" && parks.some(function (park) { return park.provider === preference; })) {
+      status.textContent = "Refused locally: the preferred provider cannot also be parked.";
+      return null;
+    }
+    return { enabledProviders, preference, reservePercent, parks, expiresAt };
+  }
+  function applyProviderPolicyResponse(response) {
+    if (!response || !response.policy || !latestProviderRouting) return;
+    latestProviderRouting = Object.assign({}, latestProviderRouting, { policy: response.policy });
+    renderProviderRouting(latestProviderRouting);
+    renderProviderPolicyControl(latestProviderRouting);
+  }
+  let providerPolicyConfirmTimer;
+  function resetProviderPolicyApplyButton() {
+    const btn = document.getElementById("provider-policy-apply-btn");
+    btn.dataset.confirming = "false";
+    btn.dataset.armedSignature = "";
+    btn.dataset.armedPayload = "";
+    btn.setAttribute("aria-pressed", "false");
+    btn.classList.remove("confirming");
+    btn.textContent = "Apply policy";
+    clearTimeout(providerPolicyConfirmTimer);
+  }
+  document.getElementById("provider-policy-apply-btn").addEventListener("click", () => {
+    if (!hasWriteScope) return;
+    const btn = document.getElementById("provider-policy-apply-btn");
+    const signature = providerPolicyFormSignature();
+    if (btn.dataset.confirming !== "true" || btn.dataset.armedSignature !== signature) {
+      const payload = buildProviderPolicyPayload();
+      if (!payload) return;
+      btn.dataset.confirming = "true";
+      btn.dataset.armedSignature = signature;
+      btn.dataset.armedPayload = JSON.stringify(payload);
+      btn.setAttribute("aria-pressed", "true");
+      btn.classList.add("confirming");
+      btn.textContent = "Confirm provider policy — effective next dispatch; no restart, recycle or deploy?";
+      clearTimeout(providerPolicyConfirmTimer);
+      providerPolicyConfirmTimer = setTimeout(() => resetProviderPolicyApplyButton(), 15000);
+      return;
+    }
+    const payload = JSON.parse(btn.dataset.armedPayload);
+    resetProviderPolicyApplyButton();
+    postJson("/v1/policy/provider-routing", payload).then(function (res) {
+      return res && res.ok ? res.json().then(applyProviderPolicyResponse) : undefined;
+    });
+  });
+  let providerPolicyClearConfirmTimer;
+  function resetProviderPolicyClearButton() {
+    const btn = document.getElementById("provider-policy-clear-btn");
+    btn.dataset.confirming = "false";
+    btn.setAttribute("aria-pressed", "false");
+    btn.classList.remove("confirming");
+    btn.textContent = "Clear provider override";
+    clearTimeout(providerPolicyClearConfirmTimer);
+  }
+  document.getElementById("provider-policy-clear-btn").addEventListener("click", () => {
+    if (!hasWriteScope) return;
+    const btn = document.getElementById("provider-policy-clear-btn");
+    if (btn.dataset.confirming !== "true") {
+      btn.dataset.confirming = "true";
+      btn.setAttribute("aria-pressed", "true");
+      btn.classList.add("confirming");
+      btn.textContent = "Confirm clear — committed host policy returns next dispatch; no restart?";
+      clearTimeout(providerPolicyClearConfirmTimer);
+      providerPolicyClearConfirmTimer = setTimeout(() => resetProviderPolicyClearButton(), 15000);
+      return;
+    }
+    resetProviderPolicyClearButton();
+    postJson("/v1/policy/provider-routing/clear", {}).then(function (res) {
+      return res && res.ok ? res.json().then(applyProviderPolicyResponse) : undefined;
+    });
+  });
+
   // ── fleet control READ-BACK (W1-T153): render the ACTIVE mode, never stateless buttons ──
   // W1-T202: ALSO the write-lock read-back for these five controls -- 'locked' composes with the
   // mode-derived disable so a write-scope flip (probeWriteScope, below) and a mode flip (a real
@@ -4167,6 +4390,7 @@ export function renderShellHtml(
     document.body.dataset.writeScopeResolved = "1";
     updateWriteTokenUi();
     applyControlStatus(lastControlStatus);
+    applyProviderPolicyControlGate();
     if (firstStatusLoaded) paintFromTasksById(); // else: the W1-T200 skeleton is already correct — see firstStatusLoaded's own doc
   }
   document.getElementById("write-token-form").addEventListener("submit", (e) => {
@@ -4832,7 +5056,11 @@ export function renderShellHtml(
         renderAccountUsage(accountUsage);
         renderCostCeilingControl(accountUsage);
       }
-      if (providerRouting) renderProviderRouting(providerRouting);
+      if (providerRouting) {
+        latestProviderRouting = providerRouting;
+        renderProviderRouting(providerRouting);
+        renderProviderPolicyControl(providerRouting);
+      }
       if (planView) {
         latestPlanView = planView;
         renderPlanView(planView);
@@ -5394,8 +5622,154 @@ export function buildProviderRoutingRoute(deps: {
     scope: "read",
     handler: (_req, res) => {
       const read = deps.read ?? readProviderRoutingStatus;
-      sendJson(res, 200, read(deps.root, { now: deps.now }));
+      const status = read(deps.root, { now: deps.now });
+      const config = providerPolicyConfigFromStatus(status);
+      const policy = config ? resolveProviderRoutingPolicy(deps.root, config, { now: deps.now }) : status.policy;
+      // The status remains the daemon's last material routing decision. Overlay only the live
+      // policy projection so a successful console write, expiry, or clear stays visible before
+      // the next dispatch refreshes capacities/selection; Serve still performs no provider probe.
+      sendJson(res, 200, policy ? { ...status, policy } : status);
     },
+  };
+}
+
+interface ProviderRoutingPolicyRouteDeps {
+  root: string;
+  ledgerPath: string;
+  now?: () => number;
+  readStatus?: typeof readProviderRoutingStatus;
+  writeOverride?: typeof writeProviderRoutingPolicyOverride;
+  clearOverride?: typeof clearProviderRoutingPolicyOverride;
+}
+
+function validateProviderRoutingPolicyBody(body: unknown): { error: string } | { value: ProviderRoutingPolicyOverrideInput } {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    return { error: "body must be a JSON object" };
+  }
+  // The store is the one schema authority. Keep the unknown object wrapped so a hostile `error`
+  // key cannot be mistaken for jsonAction's own validation-error envelope.
+  return { value: body as ProviderRoutingPolicyOverrideInput };
+}
+
+function providerPolicyConfigFromStatus(status: ProviderRoutingStatus): { workerProviders: { enabled: WorkerProviderId[]; reservePercent: number } } | undefined {
+  const committed = status.policy?.committed;
+  if (!committed) return undefined;
+  return {
+    workerProviders: {
+      enabled: [...committed.enabledProviders],
+      reservePercent: committed.reservePercent,
+    },
+  };
+}
+
+function providerPolicyAuditProjection(policy: ReturnType<typeof resolveProviderRoutingPolicy>): Record<string, unknown> {
+  return {
+    provenance: policy.provenance,
+    enabled_providers: policy.enabledProviders,
+    routable_providers: policy.routableProviders,
+    preference: policy.preference,
+    reserve_percent: policy.reservePercent,
+    parks: policy.parks,
+    expires_at: policy.overrideExpiresAt ?? null,
+    ...(policy.fallback ? { fallback: policy.fallback.reason } : {}),
+  };
+}
+
+function appendProviderPolicyAudit(
+  deps: ProviderRoutingPolicyRouteDeps,
+  req: import("node:http").IncomingMessage,
+  before: ReturnType<typeof resolveProviderRoutingPolicy>,
+  after: ReturnType<typeof resolveProviderRoutingPolicy>,
+): void {
+  appendLedger(deps.ledgerPath, {
+    run_id: `PROVIDER-POLICY-${(deps.now ?? Date.now)()}`,
+    task_id: "SERVE",
+    step: "console.provider_routing_policy_written",
+    who: bearerTokenId(req),
+    from: before.provenance,
+    to: after.provenance,
+    from_policy: providerPolicyAuditProjection(before),
+    to_policy: providerPolicyAuditProjection(after),
+    expires_at: after.overrideExpiresAt ?? null,
+    effective: "next dispatch",
+  });
+}
+
+function providerPolicyContext(
+  deps: ProviderRoutingPolicyRouteDeps,
+): { status: ProviderRoutingStatus; config: { workerProviders: { enabled: WorkerProviderId[]; reservePercent: number } } } | undefined {
+  const status = (deps.readStatus ?? readProviderRoutingStatus)(deps.root, { now: deps.now });
+  const config = providerPolicyConfigFromStatus(status);
+  return config ? { status, config } : undefined;
+}
+
+/** Set one bounded live provider-policy override. The daemon consumes it on its next dispatch. */
+export function buildSetProviderRoutingPolicyRoute(deps: ProviderRoutingPolicyRouteDeps): Route {
+  return {
+    method: "POST",
+    path: "/v1/policy/provider-routing",
+    scope: "write",
+    tier: "high",
+    handler: jsonAction(validateProviderRoutingPolicyBody, ({ value }, req, res) => {
+      const context = providerPolicyContext(deps);
+      if (!context) {
+        sendJson(res, 409, {
+          error: "provider_policy_unavailable",
+          detail: "the daemon has not published a committed provider-policy projection; no override was written",
+        });
+        return;
+      }
+      const now = deps.now ?? Date.now;
+      const before = resolveProviderRoutingPolicy(deps.root, context.config, { now });
+      try {
+        (deps.writeOverride ?? writeProviderRoutingPolicyOverride)(deps.root, value, {
+          config: context.config,
+          writerFingerprint: bearerTokenId(req),
+          now,
+        });
+      } catch (error) {
+        if (error instanceof ProviderRoutingPolicyError) {
+          sendJson(res, 400, { error: "invalid_request", detail: error.message });
+          return;
+        }
+        throw error;
+      }
+      const after = resolveProviderRoutingPolicy(deps.root, context.config, { now });
+      appendProviderPolicyAudit(deps, req, before, after);
+      sendJson(res, 200, { ok: true, effective: "next dispatch", policy: after });
+    }),
+  };
+}
+
+/** Clear the live override and return to the committed host policy on the next dispatch. */
+export function buildClearProviderRoutingPolicyRoute(deps: ProviderRoutingPolicyRouteDeps): Route {
+  return {
+    method: "POST",
+    path: "/v1/policy/provider-routing/clear",
+    scope: "write",
+    tier: "high",
+    handler: jsonAction(
+      (body) =>
+        typeof body === "object" && body !== null && !Array.isArray(body) && Object.keys(body).length === 0
+          ? { value: true }
+          : { error: "body must be an empty JSON object" },
+      (_input, req, res) => {
+        const context = providerPolicyContext(deps);
+        if (!context) {
+          sendJson(res, 409, {
+            error: "provider_policy_unavailable",
+            detail: "the daemon has not published a committed provider-policy projection; no override was cleared",
+          });
+          return;
+        }
+        const now = deps.now ?? Date.now;
+        const before = resolveProviderRoutingPolicy(deps.root, context.config, { now });
+        (deps.clearOverride ?? clearProviderRoutingPolicyOverride)(deps.root);
+        const after = resolveProviderRoutingPolicy(deps.root, context.config, { now });
+        appendProviderPolicyAudit(deps, req, before, after);
+        sendJson(res, 200, { ok: true, effective: "next dispatch", policy: after });
+      },
+    ),
   };
 }
 
@@ -5649,6 +6023,16 @@ export function buildServeRoutes(deps: ServeDeps): Route[] {
     buildDaemonHealthRoute(daemonHealthDeps),
     buildAccountUsageRoute(accountUsageDeps),
     buildProviderRoutingRoute({ root: deps.fleetControlRoot, ...deps.providerRouting }),
+    buildSetProviderRoutingPolicyRoute({
+      root: deps.fleetControlRoot,
+      ledgerPath: deps.ledgerPath,
+      now: deps.providerRouting?.now,
+    }),
+    buildClearProviderRoutingPolicyRoute({
+      root: deps.fleetControlRoot,
+      ledgerPath: deps.ledgerPath,
+      now: deps.providerRouting?.now,
+    }),
     buildControlStatusRoute(controlStatusDeps),
     buildPauseRoute(fleetControlDeps),
     buildResumeRoute(fleetControlDeps),

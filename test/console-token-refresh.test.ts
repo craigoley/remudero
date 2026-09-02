@@ -281,7 +281,15 @@ test("W1-T2269: arming (or not arming) the credential refresh changes NOTHING ab
   assert.deepEqual(configured, unconfigured, "the route table's method/path/scope/tier must be identical either way");
   // Sanity: the write tiers this shard must NOT touch are still present and still HIGH.
   const highPaths = configured.filter((r) => r.tier === "high").map((r) => r.path).sort();
-  assert.deepEqual(highPaths, ["/v1/drain/kick", "/v1/drain/run", "/v1/inbox/approve", "/v1/manual/approve", "/v1/skills/run"].sort());
+  assert.deepEqual(highPaths, [
+    "/v1/drain/kick",
+    "/v1/drain/run",
+    "/v1/inbox/approve",
+    "/v1/manual/approve",
+    "/v1/policy/provider-routing",
+    "/v1/policy/provider-routing/clear",
+    "/v1/skills/run",
+  ].sort());
 });
 
 // ── (4) THE CONSOLE STARTS AND SERVES WHEN THE DAEMON IS ABSENT ─────────────────────────────────
