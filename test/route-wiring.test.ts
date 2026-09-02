@@ -90,6 +90,7 @@ const COVERAGE_DEBT: ReadonlyMap<string, string> = new Map([
   ["POST /v1/skills/run", "covered by test/skill-run-route-registered.test.ts"],
   ["POST /v1/policy/provider-routing", "W1-T2709: bounded live-policy write/root/audit/nonce behavior is covered by test/provider-routing-console-controls.test.ts"],
   ["POST /v1/policy/provider-routing/clear", "W1-T2709: live-policy clear/root/audit/nonce behavior is covered by test/provider-routing-console-controls.test.ts"],
+  ["POST /v1/merge-hold", "W1-T2719: engage/release write the shared merge-hold ledger writer, not fleetControlRoot or questionsRoot — tier/nonce/scope/read-back behavior is covered by test/console-merge-hold-control.test.ts"],
 ]);
 
 const COVERED: ReadonlySet<string> = new Set([
