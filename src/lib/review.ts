@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, unlinkSync, writeSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { dirname, join } from "node:path";
@@ -55,6 +56,18 @@ export type ReviewState = "success" | "failure";
  * judged-verdict exhaustiveness.
  */
 export type PostableReviewState = ReviewState | "pending";
+
+/**
+ * Stable identity for the material a review actually judges. The PR head binds the code/diff and
+ * the exact body binds the authored acceptance claims and evidence. A new commit OR body edit
+ * therefore earns a fresh retry budget, while comments, labels and other `updated_at` churn do
+ * not. The version prefix makes a future input expansion an explicit reset instead of silently
+ * colliding with rows written under this contract.
+ */
+export function reviewInputDigest(headSha: string, body: string): string {
+  const encoded = JSON.stringify({ version: 1, headSha, body });
+  return `v1:${createHash("sha256").update(encoded, "utf8").digest("hex")}`;
+}
 
 /**
  * Observed outcome of executing a criterion's proof against the PR head (W1-T65,
@@ -7932,6 +7945,14 @@ export interface PostedReviewStatusRecord {
   evidence: ReviewEvidenceStrength;
 }
 
+function postedReviewStatusRecord(line: Record<string, unknown>): PostedReviewStatusRecord | undefined {
+  if (typeof line.head_sha !== "string") return undefined;
+  if (line.state !== "success" && line.state !== "failure") return undefined;
+  const proofExec: unknown[] = Array.isArray(line.proof_exec) ? (line.proof_exec as unknown[]) : [];
+  const executed = proofExec.some((p) => p === "executed_pass" || p === "executed_fail");
+  return { headSha: line.head_sha, state: line.state, evidence: executed ? "executed" : "no_evidence" };
+}
+
 export function lastPostedReviewStatusFromLedger(
   lines: ReadonlyArray<Record<string, unknown>>,
   taskId: string,
@@ -7939,11 +7960,30 @@ export function lastPostedReviewStatusFromLedger(
   let prior: PostedReviewStatusRecord | undefined;
   for (const line of lines) {
     if (line.step !== "review.posted" || line.task_id !== taskId) continue;
-    if (typeof line.head_sha !== "string") continue;
-    if (line.state !== "success" && line.state !== "failure") continue;
-    const proofExec: unknown[] = Array.isArray(line.proof_exec) ? (line.proof_exec as unknown[]) : [];
-    const executed = proofExec.some((p) => p === "executed_pass" || p === "executed_fail");
-    prior = { headSha: line.head_sha, state: line.state, evidence: executed ? "executed" : "no_evidence" };
+    prior = postedReviewStatusRecord(line) ?? prior;
+  }
+  return prior;
+}
+
+function lastPostedReviewStatusForInput(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  taskId: string,
+  prUrl: string,
+  headSha: string,
+  inputDigest: string,
+): PostedReviewStatusRecord | undefined {
+  let prior: PostedReviewStatusRecord | undefined;
+  for (const line of lines) {
+    if (
+      line.step !== "review.posted" ||
+      line.task_id !== taskId ||
+      line.pr_url !== prUrl ||
+      line.head_sha !== headSha ||
+      line.review_input_digest !== inputDigest
+    ) {
+      continue;
+    }
+    prior = postedReviewStatusRecord(line) ?? prior;
   }
   return prior;
 }
@@ -8341,6 +8381,10 @@ export interface PostReviewStatusGuardedOpts {
   evidence: ReviewEvidenceStrength;
   ledgerPath: string;
   runId: string;
+  /** Optional review-input attribution copied onto refusal/failure rows. Callers that know the
+   * PR body supply both fields so retry dedup can distinguish changed input on an unchanged sha. */
+  prUrl?: string;
+  reviewInputDigest?: string;
   /**
    * Fresh lifecycle read for THIS attempt — real callers pass
    * `() => fetchPrLifecycle(prUrl)`; tests inject a fake. Called INSIDE the
@@ -8396,7 +8440,11 @@ export async function postReviewStatusGuarded(
   try {
     // READ BEFORE WRITE, INSIDE THE LOCK — a read taken before acquiring the
     // lock would leave open exactly the TOCTOU gap the lock exists to close.
-    const prior = lastPostedReviewStatusFromLedger(readLedgerLines(opts.ledgerPath), opts.taskId);
+    const lines = readLedgerLines(opts.ledgerPath);
+    const prior =
+      opts.prUrl !== undefined && opts.reviewInputDigest !== undefined
+        ? lastPostedReviewStatusForInput(lines, opts.taskId, opts.prUrl, opts.sha, opts.reviewInputDigest)
+        : lastPostedReviewStatusFromLedger(lines, opts.taskId);
     const lifecycle = opts.fetchLifecycle();
     const decision = decideReviewStatusPost(
       { headSha: opts.sha, state: opts.state, evidence: opts.evidence },
@@ -8412,6 +8460,8 @@ export async function postReviewStatusGuarded(
         attempted_state: opts.state,
         evidence: opts.evidence,
         reason: decision.reason,
+        ...(opts.prUrl !== undefined ? { pr_url: opts.prUrl } : {}),
+        ...(opts.reviewInputDigest !== undefined ? { review_input_digest: opts.reviewInputDigest } : {}),
       });
       return { posted: false, reason: decision.reason };
     }
@@ -8429,6 +8479,8 @@ export async function postReviewStatusGuarded(
         evidence: opts.evidence,
         description: opts.description,
         error: message,
+        ...(opts.prUrl !== undefined ? { pr_url: opts.prUrl } : {}),
+        ...(opts.reviewInputDigest !== undefined ? { review_input_digest: opts.reviewInputDigest } : {}),
       });
       return {
         posted: false,
@@ -8451,6 +8503,8 @@ export interface PostReviewPendingOpts {
   taskId: string;
   runId: string;
   ledgerPath: string;
+  prUrl?: string;
+  reviewInputDigest?: string;
   fetchLifecycle: () => PrLifecycleState;
   /** Injected raw poster (tests) — forwarded to {@link postReviewStatusGuarded} unchanged. */
   post?: PostReviewStatusGuardedOpts["post"];
@@ -8474,15 +8528,15 @@ export interface PostReviewPendingResult {
  * TWO REFUSALS, BOTH DECIDED HERE (before ever touching the lock/network), NEITHER a decision
  * {@link postReviewStatusGuarded}'s own precedence rule can make on its own:
  *
- *   1. NEVER REGRESS A TERMINAL VERDICT TO PENDING. {@link decideReviewStatusPost}'s precedence
+ *   1. NEVER REGRESS A TERMINAL VERDICT FOR THE SAME REVIEW INPUT TO PENDING. {@link decideReviewStatusPost}'s precedence
  *      rule only refuses `executed -> no_evidence` on the SAME head; a pending attempt is always
  *      `no_evidence`, so a prior `no_evidence` TERMINAL verdict (a keyword-only/CAPPED success or
  *      failure) for this exact head would sail through that rule and get overwritten by a pending
  *      — a real posted verdict regressing to "in progress" on the SAME sha it already judged. This
- *      function refuses that itself: ANY terminal `review.posted` for this head is left standing.
- *   2. IDEMPOTENT PER HEAD (design (c)): a `review.pending_posted` line already recorded for this
- *      exact head is a no-op — no status churn, no second `gh api` call — REGARDLESS of which run
- *      owns it. A dead owner's stuck pending is re-driven by the SWEEP recognizing the pending is
+ *      function refuses that itself when head+body identity matches. A changed body on the same
+ *      head is a fresh input and may post pending again.
+ *   2. IDEMPOTENT PER INPUT: a `review.pending_posted` line already recorded for this exact
+ *      head+body digest is a no-op, regardless of which run owns it. A dead owner's stuck pending is re-driven by the sweep recognizing the pending is
  *      stale (see `sweep.ts`'s `reviewPendingIsStale`/the extended post-review disposition row),
  *      never by this function racing a second pending post against the first.
  *
@@ -8494,7 +8548,10 @@ export interface PostReviewPendingResult {
  */
 export async function postReviewPending(opts: PostReviewPendingOpts): Promise<PostReviewPendingResult> {
   const lines = readLedgerLines(opts.ledgerPath);
-  const priorTerminal = lastPostedReviewStatusFromLedger(lines, opts.taskId);
+  const hasInputIdentity = opts.prUrl !== undefined && opts.reviewInputDigest !== undefined;
+  const priorTerminal = hasInputIdentity
+    ? lastPostedReviewStatusForInput(lines, opts.taskId, opts.prUrl!, opts.sha, opts.reviewInputDigest!)
+    : lastPostedReviewStatusFromLedger(lines, opts.taskId);
   if (priorTerminal && priorTerminal.headSha === opts.sha) {
     return {
       posted: false,
@@ -8503,13 +8560,33 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
         "regressing it to pending (W1-T913)",
     };
   }
-  const priorPending = lastPendingReviewStatusFromLedger(lines, opts.taskId);
+  let priorPending = hasInputIdentity ? undefined : lastPendingReviewStatusFromLedger(lines, opts.taskId);
+  if (hasInputIdentity) {
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const line = lines[i]!;
+      if (
+        line.step !== "review.pending_posted" ||
+        line.task_id !== opts.taskId ||
+        line.pr_url !== opts.prUrl ||
+        line.head_sha !== opts.sha ||
+        line.review_input_digest !== opts.reviewInputDigest
+      ) {
+        continue;
+      }
+      priorPending = {
+        headSha: opts.sha,
+        runId: typeof line.run_id === "string" ? line.run_id : "",
+        postedAt: typeof line.ts === "string" ? line.ts : "",
+      };
+      break;
+    }
+  }
   if (priorPending && priorPending.headSha === opts.sha) {
     return {
       posted: false,
       reason:
         `remudero-review is already pending for ${opts.sha.slice(0, 7)} (owned by run ${priorPending.runId}) ` +
-        "— no-op (W1-T913 idempotent-per-head)",
+        "— no-op (W1-T913 idempotent-per-input)",
     };
   }
   const description = `remudero-review: review in progress (owned by run ${opts.runId})`.slice(0, 140);
@@ -8524,6 +8601,8 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
     evidence: "no_evidence",
     ledgerPath: opts.ledgerPath,
     runId: opts.runId,
+    prUrl: opts.prUrl,
+    reviewInputDigest: opts.reviewInputDigest,
     fetchLifecycle: opts.fetchLifecycle,
     post: opts.post,
     lockOpts: opts.lockOpts,
@@ -8534,6 +8613,8 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
       task_id: opts.taskId,
       step: "review.pending_posted",
       head_sha: opts.sha,
+      ...(opts.prUrl !== undefined ? { pr_url: opts.prUrl } : {}),
+      ...(opts.reviewInputDigest !== undefined ? { review_input_digest: opts.reviewInputDigest } : {}),
     });
   }
   return result;

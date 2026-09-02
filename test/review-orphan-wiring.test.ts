@@ -4,12 +4,13 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { buildOpenPrViews, buildSweepEffects, reviewOrphansFor } from "../src/run-task.js";
+import { buildOpenPrViews, buildSweepEffects, reviewAttemptsForInput, reviewOrphansFor } from "../src/run-task.js";
+import { reviewInputDigest } from "../src/lib/review.js";
 import {
   DEFAULT_SWEEP_POLICY,
   deriveDisposition,
   isCappedReviewOrphanEscalation,
-  reviewOrphanBackoffElapsed,
+  reviewInputBackoffElapsed,
   type OpenPrView,
 } from "../src/lib/sweep.js";
 import type { IssueGateway } from "../src/lib/escalate.js";
@@ -79,9 +80,9 @@ test("a PR with no task id is never orphaned — there is nothing to key the led
   });
 });
 
-test("priorReviewOrphans counts DISTINCT prior heads, not posted lines", () => {
-  // The doc specifies "counting the distinct prior heads it found" — a head re-reviewed twice is
-  // ONE orphan, not two, or the cap of 2 would trip on a single push that got re-reviewed.
+test("reviewOrphansFor diagnostic counts DISTINCT prior heads, not posted lines", () => {
+  // This historical diagnostic asks whether a push orphaned an earlier review. A head reviewed
+  // twice is one prior head; the exact-input retry cap is computed separately.
   const ledger = [
     ledgerLine("review.posted", "W1-A", PRIOR_A),
     ledgerLine("review.posted", "W1-A", PRIOR_A), // same head again
@@ -99,16 +100,34 @@ test("a refused post also proves the PR was reviewed before", () => {
   assert.equal(facts.orphanedByPush, true, "the review lane ran for that sha; the verdict is still stale");
 });
 
-test("buildOpenPrViews POPULATES both fields, so the orphan arm can finally execute", async () => {
+test("buildOpenPrViews keeps prior-head detection separate from the exact-input retry count", async () => {
   // THE END-TO-END DRIVE. This exercises the producer literal itself — not a fixture — which is
   // what makes the falsifier below land on a test that proves population rather than fabrication.
   const dir = mkdtempSync(join(tmpdir(), "rmd-orphan-"));
   const ledgerPath = join(dir, "ledger.ndjson");
+  const prUrl = "https://github.com/craigoley/remudero/pull/477";
+  const body = "Remudero-Task: W1-T225";
+  const inputDigest = reviewInputDigest(CURRENT, body);
   writeFileSync(
     ledgerPath,
     [
       JSON.stringify(ledgerLine("review.posted", "W1-T225", PRIOR_A)),
-      JSON.stringify(ledgerLine("review.posted", "W1-T225", PRIOR_B)),
+      JSON.stringify({
+        ts: "2026-08-01T17:58:00.000Z",
+        step: "review.posted",
+        task_id: "W1-T225",
+        head_sha: CURRENT,
+        pr_url: prUrl,
+        review_input_digest: inputDigest,
+      }),
+      JSON.stringify({
+        ts: "2026-08-01T17:59:00.000Z",
+        step: "review.posted",
+        task_id: "W1-T225",
+        head_sha: CURRENT,
+        pr_url: prUrl,
+        review_input_digest: inputDigest,
+      }),
     ].join("\n") + "\n",
   );
 
@@ -118,10 +137,10 @@ test("buildOpenPrViews POPULATES both fields, so the orphan arm can finally exec
       return [
         {
           number: 477,
-          html_url: "https://github.com/craigoley/remudero/pull/477",
+          html_url: prUrl,
           head: { ref: "feat/x", sha: CURRENT },
           updated_at: "2026-08-01T18:00:00.000Z",
-          body: "Remudero-Task: W1-T225",
+          body,
           auto_merge: null,
           state: "open",
         },
@@ -134,7 +153,45 @@ test("buildOpenPrViews POPULATES both fields, so the orphan arm can finally exec
   const views = buildOpenPrViews("craigoley", "remudero", ledgerPath, { fetch, requiredContexts: () => ["ci-gate"] });
   assert.equal(views.length, 1);
   assert.equal(views[0].reviewOrphanedByPush, true, "the producer sets it — it is no longer always undefined");
-  assert.equal(views[0].priorReviewOrphans, 2, "and the distinct-head count comes from the same scan");
+  assert.equal(views[0].priorReviewAttemptsForInput, 2, "only the two completed judgments of this exact input spend its cap");
+  assert.equal(views[0].reviewInputLastAttemptAt, "2026-08-01T17:59:00.000Z");
+  assert.equal(views[0].reviewInputDigest, inputDigest, "the sweep's outcome dedup receives the same exact-input key");
+});
+
+test("the retry counter resets on either a new commit or a PR-body edit and ignores refusals", () => {
+  const taskId = "W1-T225";
+  const prUrl = "https://github.com/craigoley/remudero/pull/477";
+  const oldBody = "old acceptance";
+  const oldDigest = reviewInputDigest(CURRENT, oldBody);
+  const ledger = [
+    { ts: "2026-08-01T17:00:00Z", step: "review.posted", task_id: taskId, head_sha: CURRENT, pr_url: prUrl, review_input_digest: oldDigest },
+    { ts: "2026-08-01T17:01:00Z", step: "review.posted", task_id: taskId, head_sha: CURRENT, pr_url: prUrl, review_input_digest: oldDigest },
+    { ts: "2026-08-01T17:02:00Z", step: "review.post_refused", task_id: taskId, head_sha: CURRENT, pr_url: prUrl, review_input_digest: oldDigest },
+  ];
+
+  assert.equal(reviewAttemptsForInput(ledger, taskId, prUrl, CURRENT, oldDigest).attempts, 2, "unchanged input reaches the cap");
+  assert.equal(
+    reviewAttemptsForInput(ledger, taskId, prUrl, CURRENT, reviewInputDigest(CURRENT, "corrected acceptance")).attempts,
+    0,
+    "a body edit resets immediately on the same head",
+  );
+  assert.equal(
+    reviewAttemptsForInput(ledger, taskId, prUrl, PRIOR_B, reviewInputDigest(PRIOR_B, oldBody)).attempts,
+    0,
+    "a new commit resets immediately",
+  );
+});
+
+test("legacy rows without an input identity and infrastructure refusals never consume the content-review cap", () => {
+  const taskId = "W1-T225";
+  const prUrl = "https://github.com/craigoley/remudero/pull/477";
+  const digest = reviewInputDigest(CURRENT, "body");
+  const ledger = [
+    { step: "review.posted", task_id: taskId, head_sha: CURRENT },
+    { step: "review.post_refused", task_id: taskId, head_sha: CURRENT, pr_url: prUrl, review_input_digest: digest },
+    { step: "review.posted", task_id: "OTHER", head_sha: CURRENT, pr_url: prUrl, review_input_digest: digest },
+  ];
+  assert.deepEqual(reviewAttemptsForInput(ledger, taskId, prUrl, CURRENT, digest), { attempts: 0 });
 });
 
 test("the orphan REASON arm renders once the field is populated, where before it could not", () => {
@@ -156,7 +213,7 @@ test("the orphan REASON arm renders once the field is populated, where before it
   // Derived, never hand-set: one prior head ⇒ orphaned, and below the cap of 2.
   const facts = reviewOrphansFor([ledgerLine("review.posted", "W1-T225", PRIOR_A)], "W1-T225", CURRENT);
   const d = deriveDisposition(
-    { ...base, reviewOrphanedByPush: facts.orphanedByPush, priorReviewOrphans: facts.priorOrphans },
+    { ...base, reviewOrphanedByPush: facts.orphanedByPush, priorReviewAttemptsForInput: facts.priorOrphans },
     DEFAULT_SWEEP_POLICY,
     Date.parse("2026-08-01T18:05:00.000Z"),
   );
@@ -166,7 +223,7 @@ test("the orphan REASON arm renders once the field is populated, where before it
   // And the never-reviewed PR still gets the original sentence.
   const none = reviewOrphansFor([], "W1-T225", CURRENT);
   const d2 = deriveDisposition(
-    { ...base, reviewOrphanedByPush: none.orphanedByPush, priorReviewOrphans: none.priorOrphans },
+    { ...base, reviewOrphanedByPush: none.orphanedByPush, priorReviewAttemptsForInput: none.priorOrphans },
     DEFAULT_SWEEP_POLICY,
     Date.parse("2026-08-01T18:05:00.000Z"),
   );
@@ -212,12 +269,12 @@ test("the cap row escalates only once the DERIVED count reaches policy.reviewOrp
 });
 
 function renamed(f: { orphanedByPush: boolean; priorOrphans: number }): Partial<OpenPrView> {
-  return { reviewOrphanedByPush: f.orphanedByPush, priorReviewOrphans: f.priorOrphans };
+  return { reviewOrphanedByPush: f.orphanedByPush, priorReviewAttemptsForInput: f.priorOrphans };
 }
 
 // ── W1-T983: THE ESCALATION-TIER RECLASSIFICATION ──────────────────────────────────────────
 //
-// The cap row above (`priorReviewOrphans` at `policy.reviewOrphanCap`) is correct — it stops the
+// The cap row above (`priorReviewAttemptsForInput` at `policy.reviewOrphanCap`) is correct — it stops the
 // sweep re-reviewing a PR indefinitely and genuinely does mean a human is needed. But every
 // blocked-ambiguous escalation the sweep opens, this disposition included, used to pass
 // `class: "BLOCKED"` to `buildSweepEffects`'s `escalate` closure (run-task.ts) — a class the
@@ -310,7 +367,7 @@ test("W1-T983: a capped green review-orphaned PR escalates at the reaching class
       reviewState: "none",
       checksState: "green",
       reviewOrphanedByPush: true,
-      priorReviewOrphans: DEFAULT_SWEEP_POLICY.reviewOrphanCap,
+      priorReviewAttemptsForInput: DEFAULT_SWEEP_POLICY.reviewOrphanCap,
     });
     // Sanity: this fixture really is the shape the predicate keys on — otherwise the assertion
     // below would pass for the wrong reason.
@@ -337,7 +394,7 @@ test("W1-T983: an ordinary blocked-ambiguous escalation keeps its class", () => 
       reviewState: "none",
       checksState: "red",
       reviewOrphanedByPush: false,
-      priorReviewOrphans: 0,
+      priorReviewAttemptsForInput: 0,
     });
     assert.equal(isCappedReviewOrphanEscalation(pr, DEFAULT_SWEEP_POLICY), false);
 
@@ -358,7 +415,7 @@ test("W1-T983: the class decision is pure and callable without a spawn", () => {
     reviewState: "none",
     checksState: "green",
     reviewOrphanedByPush: true,
-    priorReviewOrphans: DEFAULT_SWEEP_POLICY.reviewOrphanCap,
+    priorReviewAttemptsForInput: DEFAULT_SWEEP_POLICY.reviewOrphanCap,
   });
   assert.equal(isCappedReviewOrphanEscalation(capped, DEFAULT_SWEEP_POLICY), true);
 
@@ -367,7 +424,7 @@ test("W1-T983: the class decision is pure and callable without a spawn", () => {
     reviewState: "none",
     checksState: "green",
     reviewOrphanedByPush: true,
-    priorReviewOrphans: DEFAULT_SWEEP_POLICY.reviewOrphanCap - 1,
+    priorReviewAttemptsForInput: DEFAULT_SWEEP_POLICY.reviewOrphanCap - 1,
   });
   assert.equal(isCappedReviewOrphanEscalation(belowCap, DEFAULT_SWEEP_POLICY), false);
 
@@ -377,7 +434,7 @@ test("W1-T983: the class decision is pure and callable without a spawn", () => {
     reviewState: "none",
     checksState: "green",
     reviewOrphanedByPush: false,
-    priorReviewOrphans: 0,
+    priorReviewAttemptsForInput: 0,
   });
   assert.equal(isCappedReviewOrphanEscalation(neverReviewed, DEFAULT_SWEEP_POLICY), false);
 });
@@ -409,13 +466,13 @@ test("W1-T983: inverting the predicate fails the paired control", () => {
       reviewState: "none",
       checksState: "green",
       reviewOrphanedByPush: true,
-      priorReviewOrphans: DEFAULT_SWEEP_POLICY.reviewOrphanCap,
+      priorReviewAttemptsForInput: DEFAULT_SWEEP_POLICY.reviewOrphanCap,
     });
     const ordinary = fullPr({
       reviewState: "none",
       checksState: "red",
       reviewOrphanedByPush: false,
-      priorReviewOrphans: 0,
+      priorReviewAttemptsForInput: 0,
     });
 
     // THE PAIRED CONTROL FAILS BOTH WAYS under the inverted predicate: the capped-green PR that
@@ -446,14 +503,14 @@ test("W1-T983: inverting the predicate fails the paired control", () => {
 // ── W1-T1018: BACKOFF, NOT A BUDGET ─────────────────────────────────────────────────────────
 //
 // Operator ruling, 2026-08-19: "I don't really like the idea of a review budget. We just need
-// back off." `priorReviewOrphans` used to count DISTINCT PUSHED HEADS — so a base-repair merge
+// back off." The historical `reviewOrphansFor` diagnostic counts DISTINCT PUSHED HEADS — so a base-repair merge
 // (the remedy this system itself prescribes on a base-recovered notice) spent the SAME budget a
 // genuine failing retry did, and reaching `policy.reviewOrphanCap` was a PERMANENT wall (rationale
 // (1)-(4), PR #2159). Two independent changes, both required:
 //   (iv) `reviewOrphansFor` (run-task.ts) now counts DISTINCT REVIEWABLE DIFFS, not distinct
 //        heads, when a `diffDigestForHead` fetcher is supplied — two heads with a byte-identical
 //        PR-own diff are ONE orphan, never two.
-//   (i)/(ii)/(iii) `reviewOrphanBackoffElapsed` (lib/sweep.ts) replaces the cap's old PERMANENT
+//   (i)/(ii)/(iii) `reviewInputBackoffElapsed` (lib/sweep.ts) replaces the cap's old PERMANENT
 //        cessation with an ELAPSED-TIME backoff — the cap row still escalates for visibility, but
 //        yields back to post-review once enough wall-clock time has passed since the lane's last
 //        real attempt, so the lane never stops trying outright.
@@ -521,7 +578,7 @@ function backoffPr(overrides: Partial<OpenPrView>): OpenPrView {
     autoMergeArmed: false,
     isDependabot: false,
     reviewOrphanedByPush: true,
-    priorReviewOrphans: DEFAULT_SWEEP_POLICY.reviewOrphanCap,
+    priorReviewAttemptsForInput: DEFAULT_SWEEP_POLICY.reviewOrphanCap,
     ...overrides,
   } as OpenPrView;
 }
@@ -531,7 +588,7 @@ const BACKOFF_NOW = Date.parse("2026-08-01T18:05:00.000Z");
 test("W1-T1018: the escalation still fires at the threshold", () => {
   // No prior attempt on record yet (undefined) — byte-identical to the pre-W1-T1018 permanent
   // cap: the FIRST time the threshold is reached, it escalates for visibility.
-  const firstReach = backoffPr({ reviewOrphanLastAttemptAt: undefined });
+  const firstReach = backoffPr({ reviewInputLastAttemptAt: undefined });
   const d1 = deriveDisposition(firstReach, DEFAULT_SWEEP_POLICY, BACKOFF_NOW);
   assert.equal(d1.disposition, "blocked-ambiguous", "the cap is met — escalate for visibility");
   assert.match(d1.reason, /orphaned by a push, again/);
@@ -539,7 +596,7 @@ test("W1-T1018: the escalation still fires at the threshold", () => {
 
   // A RECENT attempt (5 minutes ago, well inside the 120m backoff window) — still escalates;
   // hammering the lane again this soon would be the exact loop this task exists to prevent.
-  const recentAttempt = backoffPr({ reviewOrphanLastAttemptAt: "2026-08-01T18:00:00.000Z" });
+  const recentAttempt = backoffPr({ reviewInputLastAttemptAt: "2026-08-01T18:00:00.000Z" });
   const d2 = deriveDisposition(recentAttempt, DEFAULT_SWEEP_POLICY, BACKOFF_NOW);
   assert.equal(d2.disposition, "blocked-ambiguous", "still within the backoff window — escalate, not retry");
 });
@@ -547,9 +604,9 @@ test("W1-T1018: the escalation still fires at the threshold", () => {
 test("W1-T1018: a PR past the threshold is re-reviewed after the interval", () => {
   // The SAME capped PR as above, but its last real attempt was 8 hours ago — well past the
   // 120-minute default backoff. Design (ii): "escalate AND keep going" — the lane resumes.
-  const pastBackoff = backoffPr({ reviewOrphanLastAttemptAt: "2026-08-01T10:00:00.000Z" });
+  const pastBackoff = backoffPr({ reviewInputLastAttemptAt: "2026-08-01T10:00:00.000Z" });
   assert.equal(
-    reviewOrphanBackoffElapsed(pastBackoff, DEFAULT_SWEEP_POLICY, BACKOFF_NOW),
+    reviewInputBackoffElapsed(pastBackoff, DEFAULT_SWEEP_POLICY, BACKOFF_NOW),
     true,
     "sanity: this fixture really is past the backoff window",
   );
@@ -566,9 +623,9 @@ test("W1-T1018: removing the backoff reset fails the re-review test", () => {
   const sweepUrl = new URL("../src/lib/sweep.ts", import.meta.url);
   const src = readFileSync(sweepUrl, "utf8");
   const target =
-    "export function reviewOrphanBackoffElapsed(pr: OpenPrView, policy: SweepPolicy, now: number): boolean {\n" +
-    "  if (!pr.reviewOrphanLastAttemptAt) return false;\n" +
-    "  const last = Date.parse(pr.reviewOrphanLastAttemptAt);\n" +
+    "export function reviewInputBackoffElapsed(pr: OpenPrView, policy: SweepPolicy, now: number): boolean {\n" +
+    "  if (!pr.reviewInputLastAttemptAt) return false;\n" +
+    "  const last = Date.parse(pr.reviewInputLastAttemptAt);\n" +
     "  if (Number.isNaN(last)) return false;\n" +
     "  return now - last >= policy.reviewOrphanBackoffMinutes * 60_000;\n" +
     "}";
@@ -582,7 +639,7 @@ test("W1-T1018: removing the backoff reset fails the re-review test", () => {
   // is exactly the pre-W1-T1018 permanent cap this task's own risk note names as the dangerous
   // direction to regress toward, so a falsifier that catches it is load-bearing, not decorative.
   const removed =
-    "export function reviewOrphanBackoffElapsed(pr: OpenPrView, policy: SweepPolicy, now: number): boolean {\n" +
+    "export function reviewInputBackoffElapsed(pr: OpenPrView, policy: SweepPolicy, now: number): boolean {\n" +
     "  return false;\n" +
     "}";
   const mutatedSrc = src.replace(target, removed);
@@ -593,7 +650,7 @@ test("W1-T1018: removing the backoff reset fails the re-review test", () => {
   return (async () => {
     const mutant = (await import(mutantPath)) as typeof import("../src/lib/sweep.js");
 
-    const pastBackoff = backoffPr({ reviewOrphanLastAttemptAt: "2026-08-01T10:00:00.000Z" });
+    const pastBackoff = backoffPr({ reviewInputLastAttemptAt: "2026-08-01T10:00:00.000Z" });
     const derived = mutant.deriveDisposition(pastBackoff, DEFAULT_SWEEP_POLICY, BACKOFF_NOW);
     assert.equal(
       derived.disposition,

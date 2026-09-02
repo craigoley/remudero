@@ -428,7 +428,9 @@ import {
   renderPromotionProposals,
   renderPlanStateTruth,
   resolveMarkerForGather,
+  retireSettledFollowups,
   routeFollowupsToRegistry,
+  type FollowupReferentRead,
   runlessMergesSince,
   saveMarker,
   shippedSince,
@@ -632,6 +634,7 @@ import {
   reviewerOutcome,
   reviewerVerdictContract,
   reviewEvidenceStrength,
+  reviewInputDigest,
   cappedReason,
   reviewLedgerLegibilityFields,
   reviewLedgerReasons,
@@ -661,6 +664,11 @@ import {
 import { buildReceipt, resolveReceiptLedgerLines, type ReceiptLedgerRead } from "./lib/receipt.js";
 import { buildReplay, resolveReplayLedgerLines, type ReplayLedgerRead } from "./lib/ledger-replay.js";
 import { buildDepReviewArmUnreachableEscalation, buildDepReviewEscalation, decideDepReview } from "./lib/dep-review.js";
+import {
+  recordHeadProviderAfterPush,
+  resolveReviewProviderProvenance,
+  reviewProviderProvenanceLedgerFields,
+} from "./lib/review-provider-provenance.js";
 import { decideAutoTriage, newFeedbackIdsOldestFirst, oldestFeedbackAgeMs, readAutoTriageMarker, recordAutoTriageFire, autoTriageMarkerPath, triageLockPath, claimTriageWithLogging, releaseTriageClaimWithLogging, gitTriageClaimReserver, type AutoTriageDecision, type TriageClaimReserver, type TriageClaimResult } from "./lib/auto-triage.js";
 import { decideDispatchClaim, releaseDispatchClaim, gitDispatchClaimReserver, dispatchClaimRef, type DispatchClaimReserver } from "./lib/dispatch-claim.js";
 import {
@@ -4620,6 +4628,11 @@ async function runReview(args: {
    * this task already gets.
    */
   reportIsSubstitute?: boolean;
+  /** Actual PR body snapshot used only to key retry/backoff state. This stays separate from
+   * `report`: several fix modes intentionally review a worker transcript, but that substitute is
+   * not a material PR input. When omitted, a non-substitute report remains the body-compatible
+   * fallback for existing callers. */
+  reviewInputBody?: string;
   /** (2026-08-25) WHY it is a substitute, threaded into `judgeReview`'s evidence so the refusal
    *  can name the never-fetched case instead of asserting a fetch failure that did not happen. */
   reportSubstituteCause?: import("./lib/review.js").ReportSubstituteCause;
@@ -4717,6 +4730,11 @@ async function runReview(args: {
 }): Promise<ReviewVerdict & { headSha: string; reviewerOutcome: string }> {
   const { owner, repo, prUrl, task, report, log, say } = args;
   const headSha = readHeadShaRest(prUrl);
+  // A substituted worker transcript is not a material PR input. Production fix-rung callers
+  // supply the independently fetched body; a degraded caller with neither fails open toward
+  // retrying rather than letting unrelated worker prose consume the cap.
+  const inputBody = args.reviewInputBody ?? (args.reportIsSubstitute ? undefined : report);
+  const inputDigest = inputBody === undefined ? undefined : reviewInputDigest(headSha, inputBody);
   // W1-T913 (fb-1784901239119-1be356, PR #707): post `remudero-review=pending` the MOMENT this
   // head is detected as needing review — before the diff fetch, the advisory reviewer spawn or
   // worktree materialization consume the review's own latency budget. Before this, the required
@@ -4736,6 +4754,8 @@ async function runReview(args: {
       taskId: task.id,
       runId: args.runId,
       ledgerPath: args.ledgerPath,
+      prUrl,
+      reviewInputDigest: inputDigest,
       fetchLifecycle: () => fetchPrLifecycle(prUrl),
     });
   } catch (e) {
@@ -4953,6 +4973,8 @@ async function runReview(args: {
     evidence: reviewEvidenceStrength(verdict.criteria),
     ledgerPath: args.ledgerPath,
     runId: args.runId,
+    prUrl,
+    reviewInputDigest: inputDigest,
     fetchLifecycle: () => fetchPrLifecycle(prUrl),
   });
   if (!posted.posted) {
@@ -4990,6 +5012,8 @@ async function runReview(args: {
     context: REVIEW_CONTEXT,
     state: verdict.state,
     head_sha: headSha,
+    pr_url: prUrl,
+    ...(inputDigest !== undefined ? { review_input_digest: inputDigest } : {}),
     test_theater: verdict.testTheater,
     unmet_criteria: unmetClaims,
     reasons,
@@ -7730,16 +7754,17 @@ export async function runFixRung(opts: {
      */
     readCiRollup?: (prUrl: string) => RollupCheckEntry[] | Promise<RollupCheckEntry[]>;
     /**
-     * W1-T256: fetch THIS PR's current body. Consulted ONLY in `body-coverage`
+     * W1-T256: fetch THIS PR's current body. Used as the review report in `body-coverage`
      * fix mode, where the fix worker was told (renderFixPrompt) that the review
      * floor judges the PR BODY, and the authoritative `reviewCommand`/`post-review`
      * path DOES judge the body (`report: body`). Without it, this re-review judges
      * the fix worker's CHAT TEXT instead, so a correct body substantiation is
      * invisible and the rung can never heal a keyword-floor block — it keeps
-     * posting a worker-text verdict that shadows the body. Injected only by tests;
-     * in production it DEFAULTS to {@link fetchPrBodyViaGh} (the real `gh pr view`
-     * read). Best-effort: a throwing fetcher falls back to the worker-text report,
-     * exactly the pre-W1-T256 behavior; only body-coverage strikes ever consult it.
+     * posting a worker-text verdict that shadows the body. Tests may inject it; production call
+     * sites wire {@link fetchPrBodyViaGh} explicitly. Every fix mode also uses the fetched
+     * snapshot only as its retry/backoff identity, so a worker transcript never masquerades as PR
+     * input. Best-effort: a throwing fetcher falls back to the worker-text report for judgment
+     * and leaves the exact-input identity unset.
      */
     fetchPrBody?: (prUrl: string) => Promise<string>;
     /**
@@ -7765,6 +7790,8 @@ export async function runFixRung(opts: {
     /** Push whatever the fix worker committed. Best-effort — a worker that
      * already pushed leaves nothing new, which is not an error. */
     push: (worktreePath: string, branch: string) => void;
+    /** Fresh REST head read used only after the push to bind this worker to its exact output. */
+    readHeadShaForProvenance?: (prUrl: string) => string;
     issues: IssueGateway;
     ledgerPath: string;
     log: (step: string, extra?: Record<string, unknown>) => void;
@@ -8923,6 +8950,22 @@ export async function runFixRung(opts: {
 
     deps.push(opts.worktreePath, opts.branch);
 
+    recordHeadProviderAfterPush(
+      {
+        taskId: opts.taskId,
+        prUrl: opts.prUrl,
+        source: "fix",
+        worker: fixResult,
+        priorHeadSha,
+      },
+      {
+        readProducedHeadSha: () =>
+          execFileSync("git", ["-C", opts.worktreePath, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+        readHeadSha: deps.readHeadShaForProvenance ?? readHeadShaRest,
+        log: deps.log,
+      },
+    );
+
     const ci = await deps.waitForCiGreen(opts.prUrl, deps.log);
     if (ci !== "green") {
       deps.log("fix.ci_not_green", { strike: strikes, ci });
@@ -9045,6 +9088,8 @@ export async function runFixRung(opts: {
     // a live one; re-check the CURRENT body/criteria coverage directly before assuming
     // the reported reason still holds.
     let reviewReport = workerTranscript(fixResult);
+    let reviewInputBody: string | undefined;
+    let reviewInputBodyFetchAttempted = false;
     // W1-T1254: `reviewReport` above is the WORKER'S OWN NARRATIVE, and the body is fetched only
     // in `body-coverage` below — so `reviewer-unmet`, `ci-log` and `merge-conflict` hand the
     // reviewer prose that was never a claim about the changeset. `judgeReview` skips
@@ -9063,7 +9108,9 @@ export async function runFixRung(opts: {
     if (fixMode === "body-coverage") {
       const fetchBody = deps.fetchPrBody ?? fetchPrBodyViaGh;
       try {
+        reviewInputBodyFetchAttempted = true;
         reviewReport = await fetchBody(opts.prUrl);
+        reviewInputBody = reviewReport;
         // Only HERE is `reviewReport` the real PR body. A throw leaves the assignment undone and
         // the flag true, which is the honest reading: the catch below logs and falls through.
         reviewReportIsSubstitute = false;
@@ -9107,6 +9154,7 @@ export async function runFixRung(opts: {
               `changeset claim to match before re-review`,
           );
           reviewReport = updatedBody;
+          reviewInputBody = updatedBody;
           // W1-T1254 design (ii): this arm just WROTE `updatedBody` to the PR, so the report IS
           // the body and must be scored as one. Leaving the flag true here would disable the
           // changeset check on the exact strike that repaired a stale claim — the fix becoming a
@@ -9118,6 +9166,16 @@ export async function runFixRung(opts: {
         deps.log("fix.body_claim_update_error", { strike: strikes, error: String((e as Error)?.message ?? e) });
       }
     }
+    // The other fix modes deliberately judge worker prose, but retry/backoff still belongs to
+    // material PR input. Fetch the body independently without changing the report the established
+    // reviewer path consumes. Failure leaves identity unset and therefore cannot spend the cap.
+    if (reviewInputBody === undefined && !reviewInputBodyFetchAttempted && deps.fetchPrBody !== undefined) {
+      try {
+        reviewInputBody = await deps.fetchPrBody(opts.prUrl);
+      } catch (e) {
+        deps.log("review.input_body_fetch_error", { strike: strikes, error: String((e as Error)?.message ?? e) });
+      }
+    }
     review = await deps.runReview({
       owner: opts.reviewBase.owner,
       repo: opts.reviewBase.repo,
@@ -9126,6 +9184,7 @@ export async function runFixRung(opts: {
       report: reviewReport,
       reportIsSubstitute: reviewReportIsSubstitute,
       reportSubstituteCause: reviewReportSubstituteCause,
+      reviewInputBody,
       settingsFile: opts.settingsFile,
       config: opts.config,
       budgetUsd: opts.budgetUsd,
@@ -10909,6 +10968,8 @@ async function runTask(
      * worker-text report, i.e. exactly the pre-fix behaviour.
      */
     fetchPrBody?: (prUrl: string) => Promise<string>;
+    /** Fresh REST read for the exact-head producer claim; injectable for offline runTask tests. */
+    readHeadShaForProvenance?: (prUrl: string) => string;
     /** Injectable decision-record writer+lander (W1-T191, write site 1) — lets a behavioral
      *  test drive a REAL runTask() through the DECISION_REQUEST auto-choose branch and assert
      *  exactly what it writes/lands, without ever shelling out to a real git/gh. Default: the
@@ -12411,6 +12472,15 @@ async function runTask(
     }
     // Stamp the provenance trailer (deriveStatus source (c)) before gating.
     ensureTaskTrailer(prUrl, taskId, log);
+    recordHeadProviderAfterPush(
+      { taskId, prUrl, source: "implement", worker: impl },
+      {
+        readProducedHeadSha: () =>
+          execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+        readHeadSha: opts.readHeadShaForProvenance ?? readHeadShaRest,
+        log,
+      },
+    );
     log("pr.opened", { pr_url: prUrl });
     say(`PR: ${prUrl}`);
 
@@ -12555,6 +12625,7 @@ async function runTask(
             return v.statusCheckRollup ?? [];
           },
           runReview,
+          fetchPrBody: fetchPrBodyViaGh,
           push: (wt) => {
             try {
               gitPushRunBranch(wt, { stdio: "ignore" });
@@ -12563,6 +12634,7 @@ async function runTask(
               // nothing new to push is not an error.
             }
           },
+          readHeadShaForProvenance: readHeadShaRest,
           issues: ghIssueGateway(owner, task.repo),
           ledgerPath,
           log: (s, extra) => log(s, extra),
@@ -13841,6 +13913,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
     number: number;
   };
   const body = view.body ?? "";
+  const inputDigest = reviewInputDigest(view.headRefOid, body);
 
   // Criteria: task trailer → tasks.yaml; else the PR body's Acceptance: block.
   let criteria: AcceptanceCriterion[] = [];
@@ -13902,6 +13975,10 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: taskId ?? `PR-${view.number}`, step, lane: "review", ...extra });
 
+  const provenanceKey = { taskId: taskId ?? `PR-${view.number}`, prUrl: view.url, headSha: view.headRefOid };
+  const provenance = resolveReviewProviderProvenance(readLedgerLines(ledgerPath), provenanceKey);
+  log("review.provider_provenance", reviewProviderProvenanceLedgerFields(provenance, provenanceKey));
+
   // W1-T2315: name the divergence rather than let it pass silently into the body fallback above —
   // a trailer that resolved nothing because the plan could not be LOADED is a different fact, with
   // a different remedy, than a body carrying no trailer at all. Ledgered (never a reason to fail
@@ -13920,7 +13997,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   // W1-T913: `rmd review`'s OWN START posts remudero-review=pending — before this line, the
   // command posted nothing until it had judged, so the worktree materialization below (its own
   // measurable latency) sat behind the SAME absent-required-context window `runReview`'s own
-  // pending post (see its call site) closes for the run lane. Idempotent per head
+  // pending post (see its call site) closes for the run lane. Idempotent per exact input
   // (`postReviewPending`'s own no-op guard): `runReviewDep` below reaches the SAME call a second
   // time and finds it already posted, so this is never a duplicate API call, only earlier
   // coverage of a latency window unique to this manual/sweep-dispatched path. A throw (e.g. a
@@ -13934,6 +14011,8 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
       taskId: taskId ?? `PR-${view.number}`,
       runId,
       ledgerPath,
+      prUrl: view.url,
+      reviewInputDigest: inputDigest,
       fetchLifecycle: () => fetchPrLifecycle(view.url),
     });
   } catch (e) {
@@ -14124,6 +14203,7 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     statusCheckRollup?: RollupEntry[];
   };
   const diff = (deps.prDiff ?? ((u: string) => execFileSync("gh", ["pr", "diff", u], { encoding: "utf8", maxBuffer: 1 << 26 })))(view.url);
+  const inputDigest = reviewInputDigest(view.headRefOid, view.body ?? "");
 
   const config = deps.config ?? loadConfig();
   const ledgerPath = ledgerPathFor(config);
@@ -14165,6 +14245,8 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
       evidence: "no_evidence",
       ledgerPath,
       runId,
+      prUrl: view.url,
+      reviewInputDigest: inputDigest,
       fetchLifecycle: () => fetchPrLifecycle(view.url),
     });
     if (!posted.posted) {
@@ -14180,6 +14262,8 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
       context: REVIEW_CONTEXT,
       state: "success",
       head_sha: view.headRefOid,
+      pr_url: view.url,
+      review_input_digest: inputDigest,
       dep_review: true,
       proof_exec: [], // W1-T228: never executes a proof — explicit so lastPostedReviewStatusFromLedger reads "no_evidence"
     });
@@ -14236,6 +14320,8 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     evidence: "no_evidence",
     ledgerPath,
     runId,
+    prUrl: view.url,
+    reviewInputDigest: inputDigest,
     fetchLifecycle: () => fetchPrLifecycle(view.url),
   });
   if (postedFailure.posted) {
@@ -14246,6 +14332,8 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
       context: REVIEW_CONTEXT,
       state: "failure",
       head_sha: view.headRefOid,
+      pr_url: view.url,
+      review_input_digest: inputDigest,
       dep_review: true,
       proof_exec: [],
     });
@@ -19230,6 +19318,11 @@ async function retroCommand(
   // task at all) for the plan-state truth rung below. One projection, two consumers — no
   // second `projectPlan` call.
   let planStateResolver: PlanStateTruthResolver | undefined;
+  // W1-T2601: the merged-task set `retireSettledFollowups` needs, derived from the SAME projection
+  // the plan-health sweep already computes rather than a second read of the same surfaces. Starts
+  // `unreadable` and only becomes `ok` on a projection that actually completed — so an absent plan
+  // file or a throwing scan retires NOTHING, which is the direction that cannot lose work.
+  let followupReferentRead: FollowupReferentRead = { kind: "unreadable" };
   try {
     const planHealthPlanPath = join(repoRoot, "plan", "tasks.yaml");
     if (existsSync(planHealthPlanPath)) {
@@ -19239,6 +19332,10 @@ async function retroCommand(
         { ledgerPath, github: opts.github ?? buildBatchedGithub(owner, repo) },
         join(config.root, "state", "status.json"),
       );
+      followupReferentRead = {
+        kind: "ok",
+        merged: new Set([...planHealthProjection].filter(([, v]) => v.merged).map(([id]) => id)),
+      };
       isTaskMerged = (task) => planHealthProjection.get(task.id)?.merged ?? false;
       planStateResolver = (taskId) => {
         const projection = planHealthProjection.get(taskId);
@@ -19318,7 +19415,8 @@ async function retroCommand(
   // site: every routable candidate this pass mined is filed through the SAME single writer
   // (`updateProposalRegistry`) board-review.ts/rule-efficacy.ts/feedback-docket.ts already use,
   // right alongside the ledger marks above (same real-run-only gate, same non-dry-run guard).
-  routeFollowupsToRegistry(gather.followups, { registryPath: join(config.root, "state", "inbox-proposals.json") });
+  const followupRegistryPath = join(config.root, "state", "inbox-proposals.json");
+  routeFollowupsToRegistry(gather.followups, { registryPath: followupRegistryPath });
 
   // W1-T2559: retro ships no code and supervises no worker, so G-17's Tier Invariant — which
   // exists to keep a supervisor strictly above what it reviews — does not bind it to plan
@@ -19342,6 +19440,34 @@ async function retroCommand(
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: "RETRO", step, lane: "retro", ...extra });
   const say = (msg: string) => console.log(`\n### [retro] ${msg}`);
+  // W1-T2601: THE RETIREMENT ARM'S ONE CALL SITE. `retireSettledFollowups` (lib/retro.ts) shipped
+  // with W1-T2563, tested, and with ZERO production callers — the producer above was wired and its
+  // counterpart was not, so the registry could only ever GROW. MEASURED 2026-09-01: 351 proposals,
+  // every one `followup:`-prefixed, against 317 two hours earlier and 16 two days before that.
+  //
+  // ⚠ IT COULD NOT HAVE BEEN WIRED BY THE TASK THAT BUILT IT. W1-T2563's declared `files:` are
+  // `[src/lib/retro.ts, test/routed-followups-retire.test.ts]` — this call site is in run-task.ts,
+  // outside that scope, so the builder was right to stop at the seam rather than widen. That is why
+  // a separate task exists rather than this being an oversight to scold.
+  //
+  // AFTER THE PRODUCER, DELIBERATELY: retiring first would judge this pass's own freshly-routed
+  // candidates against a merged set derived before they existed. It sits a little further down the
+  // function than the producer only because `runId`/`log` are declared here and a silent retirement
+  // would be worse than a well-placed one — the `--dry-run` branch has already returned far above,
+  // so this is still real-run-only and still writes nothing on a preview.
+  const retired = retireSettledFollowups(followupReferentRead, { registryPath: followupRegistryPath });
+  if (retired.length > 0) {
+    appendLedger(ledgerPath, {
+      run_id: runId,
+      task_id: "RETRO",
+      step: "followup.retired",
+      lane: "retro",
+      count: retired.length,
+      proposal_ids: retired.slice(0, 20).map((o) => o.proposalId),
+      task_ids: [...new Set(retired.map((o) => o.taskId))].slice(0, 20),
+    });
+  }
+
   // W1-T2383 rank 3: the lane's own dispatch row, BESIDE its existing start row rather than
   // replacing it — `retro.start` carries this lane's own fields and has its own readers.
   log("run.start", laneRunStartFields({ lane: "retro", repo, architect: arch, worker: wrk }));
@@ -24888,19 +25014,60 @@ function reviewVerdictPostedAtFromRollup(rollup: RollupCheck[] | undefined): str
 }
 
 /**
- * W1-T176: has the deterministic `rmd review` post already been ATTEMPTED
- * and REFUSED for this exact `taskId@headSha`? Scans for a `review.post_refused`
- * ledger line matching both fields — deliberately NOT `review.post_failed`
+ * Has the deterministic `rmd review` post already been attempted and refused for this exact
+ * task/synthetic key + PR URL + head + body digest? Deliberately not `review.post_failed`
  * (a transient `gh` error, which must keep retrying, never escalate on a
  * mere network hiccup) and NOT `review.posted` (a real post always flips
  * GitHub's live rollup away from "zero runs," so `reviewStateFromRollup`
  * itself carries that outcome on the next read — no ledger check needed).
- * `taskId` undefined (no `Remudero-Task:` trailer) can never have a
- * matching ledger line — returns `false`, never a crash.
+ * A commit or body edit changes the identity and resets this refusal dedup immediately.
  */
-function reviewPostRefusedFor(ledger: Array<Record<string, unknown>>, taskId: string | undefined, headSha: string): boolean {
-  if (!taskId) return false;
-  return ledger.some((l) => l.step === "review.post_refused" && l.task_id === taskId && l.head_sha === headSha);
+function reviewPostRefusedFor(
+  ledger: Array<Record<string, unknown>>,
+  taskId: string,
+  prUrl: string,
+  headSha: string,
+  inputDigest: string,
+): boolean {
+  return ledger.some(
+    (l) =>
+      l.step === "review.post_refused" &&
+      l.task_id === taskId &&
+      l.pr_url === prUrl &&
+      l.head_sha === headSha &&
+      l.review_input_digest === inputDigest,
+  );
+}
+
+/** Completed review judgments for one exact, current review input. Unlike the historical orphan
+ * scan below, this is the retry/backoff counter: only `review.posted` counts, and only when task,
+ * PR, head and body digest all match. A refusal did not judge the input; a legacy row without the
+ * identity cannot safely block it; and a commit or body edit changes the digest and resets both
+ * the count and its clock immediately. */
+export interface ReviewInputAttemptFacts {
+  attempts: number;
+  lastAttemptAt?: string;
+}
+
+export function reviewAttemptsForInput(
+  ledger: Array<Record<string, unknown>>,
+  taskId: string,
+  prUrl: string,
+  headSha: string,
+  inputDigest: string,
+): ReviewInputAttemptFacts {
+  let attempts = 0;
+  let latestTs = -Infinity;
+  for (const line of ledger) {
+    if (line.step !== "review.posted") continue;
+    if (line.task_id !== taskId || line.pr_url !== prUrl) continue;
+    if (line.head_sha !== headSha || line.review_input_digest !== inputDigest) continue;
+    attempts++;
+    const parsed = typeof line.ts === "string" ? Date.parse(line.ts) : NaN;
+    if (!Number.isNaN(parsed) && parsed > latestTs) latestTs = parsed;
+  }
+  const lastAttemptAt = Number.isFinite(latestTs) ? new Date(latestTs).toISOString() : undefined;
+  return lastAttemptAt === undefined ? { attempts } : { attempts, lastAttemptAt };
 }
 
 /**
@@ -24908,8 +25075,9 @@ function reviewPostRefusedFor(ledger: Array<Record<string, unknown>>, taskId: st
  * guard. `test/ledger-rotation.test.ts` derives the expected `DECISION_RELEVANT_LEDGER_STEPS`
  * membership by scanning consumer source for `/\.step\s*(?:===|!==)\s*["']…["']/`, so this shape
  * makes the dependency VISIBLE to the very check that exists to find it. Both steps are already in
- * that set (`ledger.ts:337`), which is what stops a rotation from archiving the lines and silently
- * resetting `priorReviewOrphans` to zero — the line IS the bound.
+ * that set (`ledger.ts:337`), which stops rotation from erasing the historical-head evidence used
+ * to explain an orphaned status. The retry bound itself is produced separately by
+ * {@link reviewAttemptsForInput} and counts only completed postings for the exact current input.
  *
  * The first draft guarded with a `typeof` check against the step field and CI caught it: the
  * scanner read that guard's own type literal as a step name and failed. That was a false positive,
@@ -24921,22 +25089,20 @@ function isReviewPostedStep(step: unknown): boolean {
   return step === "review.posted" || step === "review.post_refused";
 }
 
-/** What {@link reviewOrphansFor} derived — the two halves of the W1-T225 pair, from one scan,
- *  plus W1-T1018's elapsed-time-backoff clock. */
+/** Historical-head facts used to distinguish an orphaned review from a first review. */
 interface ReviewOrphanFacts {
   /** True iff this PR was reviewed on a head that is no longer the current one. */
   orphanedByPush: boolean;
   /**
-   * How many DISTINCT REVIEWABLE prior heads carry a posted review — the escalation threshold's
-   * count. W1-T1018 design (iv): when `diffDigestForHead` is supplied, two prior heads whose
+   * How many distinct reviewable prior heads carry an outcome. Retained as diagnostic history;
+   * it no longer feeds the retry cap. When `diffDigestForHead` is supplied, two prior heads whose
    * digest matches count as ONE, never two — a base-repair merge that leaves the PR's own diff
    * unchanged is housekeeping, not a retry, and must not spend the same budget one does.
    */
   priorOrphans: number;
   /**
-   * W1-T1018 — the LATEST ledger timestamp (ISO string) among every qualifying prior-head line
-   * this scan found, whether or not that head's diff counted toward `priorOrphans` above. Feeds
-   * {@link "./lib/sweep.js".reviewOrphanBackoffElapsed} via `OpenPrView.reviewOrphanLastAttemptAt`.
+   * The latest ledger timestamp among qualifying historical-head outcomes. Diagnostic only; the
+   * live backoff clock comes from {@link reviewAttemptsForInput} for the exact current input.
    * `undefined` when no qualifying line carried a parseable `ts` (including the empty-prior-heads
    * case, where this key is omitted entirely rather than set to `undefined` — see the early return
    * below).
@@ -24953,8 +25119,8 @@ interface ReviewOrphanFacts {
  * REST requests. That is the shape the field's own SCOPE note asked for: "buildOpenPrViews would
  * derive it the SAME way it already derives `reviewPostRefused`: scan the ledger for a prior
  * `review.posted`/`review.post_refused` line for this `taskId` at a head sha OTHER than the current
- * one." This is that scan, plus the distinct-head count `priorReviewOrphans`' doc specifies
- * ("counting the distinct prior heads it found").
+ * one." This is that historical scan. The action-bearing retry count is intentionally separate:
+ * {@link reviewAttemptsForInput} cannot let old heads or refused posts spend a new input's budget.
  *
  * ── THE FALSE-POSITIVE BOUNDARY, which is the whole risk surface ────────────────────────────────
  * Three states must NOT read as orphaned, and each is excluded by construction:
@@ -24976,11 +25142,9 @@ interface ReviewOrphanFacts {
  * other head" would manufacture an orphan out of missing information — the same
  * unknown-as-a-definite-answer mistake `mergeable` taught today in the other direction.
  *
- * BLAST RADIUS IF WRONG, measured against the consumers rather than assumed: the post-review row's
- * `when` clause does NOT reference either field, so a false positive there changes only which
- * REASON STRING is logged, never whether the review lane runs. The one action-bearing consumer is
- * the cap row, which escalates once `priorOrphans >= policy.reviewOrphanCap` (2). So the real
- * false-positive cost is a premature needs-human issue, NOT a paid re-review.
+ * BLAST RADIUS IF WRONG: `buildOpenPrViews` consumes only `orphanedByPush`; the count and timestamp
+ * are retained for compatibility/tests and do not drive a disposition. A false positive therefore
+ * changes the reason string, not whether the lane runs or whether the exact-input cap is spent.
  *
  * W1-T1018 design (iv), ADDED ON TOP OF THE ABOVE, NEVER REPLACING IT (operator ruling
  * 2026-08-19): `diffDigestForHead` is OPTIONAL. Supplied, it counts DISTINCT DIGESTS among the
@@ -24988,9 +25152,7 @@ interface ReviewOrphanFacts {
  * digests identically (rationale (2)'s #2159 base-repair merges: "own diff: 2 files +212/-8" on
  * both) are ONE orphan, not two, because the second push changed nothing reviewable. A digest read
  * as `undefined` (an unreadable/best-effort-failed compare, or simply no fetcher wired) is NEVER
- * merged with anything else; it counts on its own — the SAME fail-toward-escalating default
- * {@link "./lib/sweep.js".reviewOrphanBackoffElapsed}'s own doc names: missing information must
- * never silently discount a possibly-genuine retry.
+ * merged with anything else; it counts on its own within this diagnostic history.
  *
  * SCOPE (honest, mirrors how `pendingAnswer`/`reviewOrphanedByPush` themselves shipped their
  * mechanism ahead of their producer — see those fields' own SCOPE notes, lib/sweep.ts): this
@@ -24998,16 +25160,8 @@ interface ReviewOrphanFacts {
  * here — but `buildOpenPrViews` below does not pass a digest fetcher yet (that needs a bounded,
  * best-effort GitHub compare call per prior head, the SAME shape `hydrateMergeConflictEvidence`,
  * lib/open-prs-rest.ts, already uses for merge-conflict evidence, scoped to the small set of
- * already-orphaned PRs). Until that wiring lands, every prior head still counts individually,
- * IDENTICAL to this function's pre-W1-T1018 behaviour — housekeeping pushes still spend the
- * budget for now, but design (i)/(ii)'s elapsed-time backoff (which IS fully wired below) already
- * means that budget is no longer a permanent wall either way.
- *
- * `lastAttemptAt` is the max `ts` across EVERY qualifying line, REGARDLESS of whether its head's
- * digest counted — a housekeeping push still runs the review lane and still proves the PR is
- * alive, so it still resets the backoff clock (design iii: "reset on a real signal change"). This
- * half IS fully wired below (`buildOpenPrViews` reads it off the SAME scan unconditionally, no
- * extra fetch required).
+ * already-orphaned PRs). Until that wiring lands, every prior head still counts individually in
+ * this diagnostic result. That limitation no longer affects retry/backoff behavior.
  */
 export function reviewOrphansFor(
   ledger: Array<Record<string, unknown>>,
@@ -25662,6 +25816,8 @@ export function buildOpenPrViews(
 
   return raw.map((pr) => {
     const taskId = resolveOpenPrTaskId(pr, ledger);
+    const reviewLedgerKey = taskId ?? `PR-${pr.number}`;
+    const inputDigest = reviewInputDigest(pr.headRefOid, pr.body ?? "");
     const peers = taskId ? (byTask.get(taskId) ?? []) : [];
     const newest = peers.length ? Math.max(...peers) : pr.number;
     const supersededBy = newest > pr.number ? newest : undefined;
@@ -25670,10 +25826,10 @@ export function buildOpenPrViews(
     // `OpenPrView.reviewVerdictPostedAt`'s own doc for the disposition row this feeds.
     const reviewVerdictPostedAt = reviewVerdictPostedAtFromRollup(pr.statusCheckRollup);
     const checksState = checksStateFromRollup(pr.statusCheckRollup, requiredContexts);
-    // W1-T1018: no `diffDigestForHead` passed here yet — see `reviewOrphansFor`'s own SCOPE note
-    // for why (housekeeping-push detection is a bounded follow-up fetch, not yet wired). The
-    // elapsed-time backoff below (`reviewOrphanLastAttemptAt`) IS fully wired off this SAME scan.
+    // Historical heads explain why a status is absent. The separate exact-input scan below owns
+    // retry count/backoff, so prior heads and infrastructure refusals cannot spend its budget.
     const reviewOrphans = reviewOrphansFor(ledger, taskId, pr.headRefOid);
+    const reviewAttempts = reviewAttemptsForInput(ledger, reviewLedgerKey, pr.url, pr.headRefOid, inputDigest);
     // W1-T456 (DEFECT B): a plan-only filing PR deliberately carries no `Remudero-Task:`
     // trailer (#1527's correctness rule) — `taskId` above is `undefined` for it BY DESIGN, so
     // `unmetCriteria` below used to stay `[]` unconditionally and every failing filing fell
@@ -25783,16 +25939,16 @@ export function buildOpenPrViews(
       // W1-T176: only meaningful in the zero-runs shape post-review routes on;
       // cheap to compute unconditionally rather than re-deriving checksState
       // green/reviewState none here just to gate the ledger scan.
-      reviewPostRefused: reviewPostRefusedFor(ledger, taskId, pr.headRefOid),
-      // W1-T225: both halves from ONE ledger scan, off the ledger this function already holds —
-      // no extra request. Assigned INSIDE this literal deliberately: PR #1083's
+      reviewPostRefused: reviewPostRefusedFor(ledger, reviewLedgerKey, pr.url, pr.headRefOid, inputDigest),
+      // Historical-head reason plus exact-input retry facts, both from the ledger already held —
+      // no extra request. Assigned inside this literal deliberately: PR #1083's
       // producer-completeness test anchors on an object literal assigning every required
       // OpenPrView field, so an assignment made anywhere else would still read as unwired.
       reviewOrphanedByPush: reviewOrphans.orphanedByPush,
-      priorReviewOrphans: reviewOrphans.priorOrphans,
-      // W1-T1018: the elapsed-time-backoff clock, off the SAME scan the two fields above already
-      // read — no extra request. See `reviewOrphanBackoffElapsed` (lib/sweep.ts) for the consumer.
-      reviewOrphanLastAttemptAt: reviewOrphans.lastAttemptAt,
+      priorReviewAttemptsForInput: reviewAttempts.attempts,
+      // Exact-input elapsed-time-backoff clock; see `reviewInputBackoffElapsed`.
+      reviewInputLastAttemptAt: reviewAttempts.lastAttemptAt,
+      reviewInputDigest: inputDigest,
       // W1-T176 (design boundary (ii)): `ghRequiredStatusCheckContexts` fails
       // SOFT to undefined/empty on an unreadable protection rule — that same
       // signal must gate the zero-runs discriminator OFF (never assume
@@ -26999,10 +27155,10 @@ export function buildSweepEffects(
         question: question.question.slice(0, 120),
       });
       // W1-T983 — THE ONE CLASS CHANGE THIS TASK MAKES: a capped review-orphaned PR (green
-      // checks, no review posted, `priorReviewOrphans` at `policy.reviewOrphanCap`) reaches THIS
+      // checks, no review posted, `priorReviewAttemptsForInput` at `policy.reviewOrphanCap`) reaches THIS
       // escalation path with nothing ELSE going to move it in the meantime — the sweep will not
       // re-dispatch the review lane again until W1-T1018's elapsed-time backoff
-      // (`reviewOrphanBackoffElapsed`, lib/sweep.ts) lapses — so it escalates MANUAL instead of the
+      // (`reviewInputBackoffElapsed`, lib/sweep.ts) lapses — so it escalates MANUAL instead of the
       // silent BLOCKED default every other blocked-ambiguous disposition still gets. Read off
       // the SAME `pr`/`policy` this closure already has in scope, via the pure predicate in
       // sweep.ts (never re-derived here) so the two conditions cannot drift apart. W1-T1018 (2026-
@@ -27204,6 +27360,7 @@ export function buildSweepEffects(
               return v.statusCheckRollup ?? [];
             },
             runReview,
+            fetchPrBody: fetchPrBodyViaGh,
             push: (wt) => {
               try {
                 gitPushRunBranch(wt, { stdio: "ignore" });
@@ -27211,6 +27368,7 @@ export function buildSweepEffects(
                 /* best-effort — the worker may already have pushed */
               }
             },
+            readHeadShaForProvenance: readHeadShaRest,
             issues,
             ledgerPath,
             // W1-T78: the OUTER `log` stamps every line `task_id: "SWEEP"`/`"FIX"`

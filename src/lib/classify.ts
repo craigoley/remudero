@@ -101,6 +101,18 @@ export function classifyFailure(signal: FailureSignal): FailureClass {
  * emitted by the pinned Claude and Codex clients, not generic prose that happens to mention a
  * limit. Callers must still apply this detector only to provider error evidence, never to a
  * worker's ordinary response text.
+ *
+ * THE FIRST PATTERN ALSO COVERS CODEX'S ROLLING-QUOTA WINDOW, CONFIRMED NOT ACCIDENTAL (W1-T2567):
+ * the three Codex-specific patterns below are all HARD refusals (out of credits, spend cap, plan
+ * upgrade) — none is the high-frequency rolling window, Codex's analogue of Claude's "session
+ * limit". Remudero's own corpus has never observed one to capture a string from (no codex binary
+ * on this host or in the daemon container either), so this is pinned against the alternative
+ * authoritative source instead: the `codex` CLI's own upstream `UsageLimitReachedError` Display
+ * impl (openai/codex, codex-rs/protocol/src/error.rs) — every branch that is not one of the three
+ * hard-refusal `RateLimitReachedType` variants, INCLUDING `RateLimitReachedType::RateLimitReached`
+ * itself, starts with "You've hit your usage limit", which the first pattern below already
+ * matches. See test/codex-quota-window-refusal.test.ts, pinned by the codex team's own captured
+ * fixture string (codex-rs/protocol/src/error_tests.rs), not a hand-written approximation.
  */
 const USAGE_LIMIT_TEXT_PATTERNS: RegExp[] = [
   /you'?ve hit your (?:session|usage) limit/i,

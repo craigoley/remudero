@@ -129,14 +129,13 @@ export type { WorkflowRunObservation } from "./workflow-run.js";
  *                        `OpenPrView.reviewOrphanedByPush` distinguishes this from a
  *                        PR awaiting its FIRST review (the reason string differs;
  *                        the dispatch is identical: run the review lane, posting a
- *                        FRESH verdict, never the prior one carried forward). BOUNDED
- *                        (design note, "same discipline as CI re-runs"): once
- *                        `priorReviewOrphans` reaches `policy.reviewOrphanCap`, the
- *                        row above escalates for visibility — a PR that pushes
- *                        repeatedly (or whose re-review itself keeps failing to
- *                        stick) surfaces to an operator instead of looping silently.
+ *                        FRESH verdict, never the prior one carried forward). Repeated
+ *                        judgments of the SAME head+body input are bounded: once
+ *                        `priorReviewAttemptsForInput` reaches `policy.reviewOrphanCap`, the
+ *                        row above escalates for visibility. A new commit or body edit is a new
+ *                        input and resets this count immediately.
  *                        W1-T1018 (operator ruling 2026-08-19): this is no longer a
- *                        PERMANENT wall — {@link reviewOrphanBackoffElapsed} lets the
+ *                        PERMANENT wall — {@link reviewInputBackoffElapsed} lets the
  *                        row above yield back to THIS row once enough wall-clock time
  *                        has passed since the lane's last attempt, so a PR that heals
  *                        (a repaired base, a fixed contradiction) keeps getting
@@ -607,15 +606,11 @@ export interface SweepPolicy {
    */
   absentCeilingMinutes: number;
   /**
-   * W1-T225 (the 2026-07-21 PRs #477/#484 jam) — the ESCALATION THRESHOLD for the
-   * review-orphaned-by-push remedy: once a PR's `priorReviewOrphans` count
-   * (prior DISTINCT REVIEWABLE DIFFS — W1-T1018 design (iv); see `priorReviewOrphans`'
-   * own doc — that already spent one orphan re-review) reaches this cap, the sweep
-   * escalates for visibility. A ROW in this table (rule 2, policy-as-data), never a
-   * constant buried in the predicate. Set at the SAME default as `strikeCap` —
-   * bounded enough to catch a genuinely looping push/re-review cycle, generous
-   * enough that ordinary iteration (a handful of legitimate follow-up pushes) never
-   * trips it by accident.
+   * Retry threshold for one unchanged review input. The field name is retained for configuration
+   * compatibility, but the counter is no longer a lifetime budget over historical heads: only
+   * completed `review.posted` judgments for the exact PR URL + head + body digest count. A new
+   * commit or body edit resets it to zero; refusals and legacy rows without an input identity do
+   * not consume it. A row in this policy table, never a constant buried in the predicate.
    *
    * W1-T1018 (operator ruling 2026-08-19 — "I don't really like the idea of a review
    * budget. We just need back off."): reaching this cap NO LONGER stops the sweep
@@ -627,12 +622,11 @@ export interface SweepPolicy {
   reviewOrphanCap: number;
   /**
    * W1-T1018 (design (i)/(ii)) — THE ELAPSED-TIME BACKOFF that replaces the old
-   * permanent cessation `reviewOrphanCap` alone used to enforce. Once `priorReviewOrphans`
-   * reaches `reviewOrphanCap` the sweep still escalates (visibility never goes away —
-   * design's own words: "the cap's one genuine virtue is that it asks a human for
-   * help"), but the review lane resumes dispatching once this many minutes have
-   * elapsed since the lane's last real attempt ({@link OpenPrView.reviewOrphanLastAttemptAt}
-   * — see {@link reviewOrphanBackoffElapsed}, the predicate this row feeds). KEYED TO
+   * permanent cessation `reviewOrphanCap` alone used to enforce. Once an unchanged input's
+   * completed-attempt count reaches `reviewOrphanCap`, the sweep still escalates, but the review
+   * lane resumes dispatching once this many minutes have elapsed since that exact input's last
+   * completed judgment ({@link OpenPrView.reviewInputLastAttemptAt}
+   * — see {@link reviewInputBackoffElapsed}, the predicate this row feeds). KEYED TO
    * ELAPSED TIME, NEVER ATTEMPT COUNT (design note verbatim: "a delay keyed to the
    * number of attempts is a budget with pauses — it still exhausts monotonically and
    * still ends in permanent silence"). A ROW in this table (rule 2, policy-as-data).
@@ -1010,7 +1004,7 @@ export interface OpenPrView {
    * the line, or the record belongs to a DIFFERENT head than the one currently observed) —
    * deliberately read as STALE, never as fresh, by {@link reviewPendingIsStale}: the safe
    * direction here is re-driving an already-finished review (idempotent — see
-   * `postReviewPending`'s own no-op-per-head guard), never stranding one whose state we can't
+   * `postReviewPending`'s own exact-input guard, with a legacy per-head fallback), never stranding one whose state we can't
    * date.
    */
   reviewPendingSince?: string;
@@ -1306,21 +1300,21 @@ export interface OpenPrView {
   pendingAnswer?: { constraint: string; resetStrikeCounter?: boolean };
   /**
    * W1-T176 (the #393/#391 fixture): true when the ledger already carries a
-   * `review.post_refused` outcome for THIS EXACT head (`taskId@headSha`) —
+   * `review.post_refused` outcome for this exact task/PR/head/body input —
    * the deterministic `rmd review` post (the post-review disposition, row
    * below) was already attempted once for this push and DECLINED, so
    * GitHub's live rollup still shows zero check runs for the required
    * review context. Distinguishes a FIRST-SEEN zero-runs required check
    * (still routes to post-review — the deterministic-action lane, since an
    * absent required check is mechanically decidable: "post it") from a
-   * SECOND absence at the SAME sha, which the discriminator below escalates
+   * SECOND absence for the unchanged input, which the discriminator below escalates
    * instead of retrying — `postReviewStatusGuarded`'s own guard never
    * self-retries a refusal, so a second poll observing this true means the
-   * one deterministic remedy already ran its course for this exact push;
+   * one deterministic remedy already ran its course for this exact input;
    * looping would just re-invoke a lane that has already declined once.
    * `review.post_failed` (a transient `gh` error, not a refusal) deliberately
    * does NOT set this — that case must keep retrying, never escalate on a
-   * mere network hiccup. A NEW push mints a new head sha, so this reverts to
+   * mere network hiccup. A new commit or body edit changes the input, so this reverts to
    * `false`/`undefined` and the PR re-earns one fresh deterministic attempt.
    * Populated by the real gateway (run-task.ts's `buildOpenPrViews`) from the
    * SAME ledger read it already does for `unmetCriteria`/`priorStrikes`;
@@ -1365,65 +1359,32 @@ export interface OpenPrView {
    * (`undefined`/`false` — every existing caller/fixture that hasn't wired
    * this reads exactly as before: the post-review row still dispatches, just
    * with the original "review never posted" reason). Only changes the REASON
-   * string the post-review row states and gates the {@link priorReviewOrphans}
-   * cap row above it — never the dispatch itself: either way the remedy is
+   * string the post-review row states — never the dispatch itself: either way the remedy is
    * "run the review lane and post a fresh verdict for this head," and a
    * verdict from an earlier, now-superseded head is NEVER copied forward
    * (push-invalidates-review is not weakened by this field).
    *
-   * SCOPE (honest, mirrors how `pendingAnswer` shipped its mechanism ahead of
-   * its producer): this field, its {@link DISPOSITION_RULES} rows, and the
-   * reason-string branch are the full MECHANISM, wired end-to-end and
-   * unit-tested here — but nothing in `run-task.ts` populates it yet
-   * (`buildOpenPrViews` would derive it the SAME way it already derives
-   * `reviewPostRefused`: scan the ledger for a prior `review.posted`/
-   * `review.post_refused` line for this `taskId` at a head sha OTHER than
-   * the current one). Until that wiring lands, this is always `undefined` in
-   * the real gateway, so every orphaned-by-push PR still reaches post-review
-   * (correctly — the dispatch never depended on this field) with the
-   * "review never posted" reason rather than the more specific one; it never
-   * silently misclassifies as ambiguous or mergeable.
+   * The real gateway populates this from historical posted/refused rows. It is deliberately
+   * separate from the retry counter below: old heads explain why a status is absent, but never
+   * spend the current input's budget.
    */
   reviewOrphanedByPush?: boolean;
   /**
-   * W1-T225 — THE LOOP FALSIFIER: how many PRIOR heads for this task already
-   * spent one review-orphaned-by-push re-dispatch (i.e. reached `post-review`
-   * with {@link reviewOrphanedByPush} true on an earlier push). Mirrors
-   * `priorStrikes`'s shape exactly — a running ledger-derived count, never a
-   * per-pass toggle — so a PR that keeps getting pushed, or whose re-review
-   * keeps failing to stick, cannot re-dispatch the review lane unboundedly:
-   * once this reaches `policy.reviewOrphanCap` the sweep escalates instead of
-   * retrying (see the cap row in {@link DISPOSITION_RULES}, ordered before
-   * post-review). `undefined` reads as `0` — a caller that hasn't wired this
-   * yet (e.g. `rmd fix`'s single-PR build, or `run-task.ts` before its own
-   * follow-up wiring lands — see {@link reviewOrphanedByPush}'s SCOPE note)
-   * behaves exactly as before this field existed: the cap never trips on
-   * missing information, fail-open toward "keep re-reviewing," never
-   * fail-closed toward "escalate a PR that was never actually looping." The
-   * real gateway would derive this from the SAME ledger scan that derives
-   * `reviewOrphanedByPush`, counting the distinct prior heads it found.
-   *
-   * W1-T1018 (design iv): the real gateway (`run-task.ts`'s `reviewOrphansFor`) now counts
-   * DISTINCT REVIEWABLE DIFFS among those prior heads, not distinct pushed heads — two heads
-   * whose PR-own diff (against `main`) is byte-identical (a base-repair merge, the remedy this
-   * system itself prescribes on a base-recovered notice) count as ONE, never two, so housekeeping
-   * never spends the same budget a genuine retry does.
+   * Number of completed review judgments for the exact current input: task/synthetic PR key,
+   * PR URL, head sha and versioned head+body digest. A new commit or body edit resets this to zero.
+   * `review.post_refused`, legacy rows without the identity and other PRs never count. Undefined
+   * reads as zero so an unwired caller fails open toward reviewing, not blocking.
    */
-  priorReviewOrphans?: number;
+  priorReviewAttemptsForInput?: number;
   /**
-   * W1-T1018 (design i/ii/iii) — WHEN the review-orphan lane last actually ATTEMPTED this PR: the
-   * most recent `review.posted`/`review.post_refused` ledger timestamp among the heads
-   * `priorReviewOrphans` scanned (ISO string), across EVERY attempt whether or not that head's
-   * diff counted toward the budget — a housekeeping push still runs the lane and still advances
-   * this clock, which is what keeps the elapsed-time backoff ({@link reviewOrphanBackoffElapsed})
-   * from decaying into the permanent cap it replaces (design iii: "reset on a real signal
-   * change"). `undefined` reads as "no attempt on record" — {@link reviewOrphanBackoffElapsed}
-   * treats that as backoff NOT elapsed, the SAME fail-toward-escalating default every other field
-   * on this SCOPE-lagged surface uses (e.g. `priorReviewOrphans` reading `undefined` as `0`): a
-   * caller that hasn't wired this yet (every caller today) behaves exactly like the pre-W1-T1018
-   * permanent cap until a real timestamp exists to back off from.
+   * Most recent completed `review.posted` timestamp for the same exact input counted above.
+   * Refusals do not move this clock because they never judged the content. Undefined means no
+   * completed attempt is known; {@link reviewInputBackoffElapsed} then fails toward escalation.
    */
-  reviewOrphanLastAttemptAt?: string;
+  reviewInputLastAttemptAt?: string;
+  /** Versioned digest of the current head+body review input. Real gateway views always populate
+   * it; omitted test/legacy callers retain the historical per-head outcome-dedup behavior. */
+  reviewInputDigest?: string;
 }
 
 /** The disposition derived for one PR, plus a stated human reason. */
@@ -2886,8 +2847,8 @@ function reviewPendingAgeMinutes(pr: OpenPrView, now: number): number | undefine
  * UNDATED READS STALE — the OPPOSITE error direction from {@link absentChecksRepushDecision}'s
  * own "never re-push on state we cannot date" refusal: that remedy's caution exists because a
  * wrong re-push discards a real, in-flight check run. Re-offering this head to the post-review
- * lane risks no such loss — {@link "./review.js".postReviewPending}'s own idempotent-per-head
- * guard makes a redundant pending post a no-op, and a redundant `reviewCommand` re-run simply
+ * lane risks no such loss — {@link "./review.js".postReviewPending}'s own exact-input guard
+ * (with a legacy per-head fallback) makes a redundant pending post a no-op, and a redundant `reviewCommand` re-run simply
  * re-posts the SAME terminal verdict once it judges. "a pending that no path can re-drive does
  * not ship" (the task's own design note) means the unreadable case must lean toward actionable,
  * never toward silently stranding a PR whose owning run died mid-review.
@@ -2901,34 +2862,29 @@ function reviewPendingIsStale(pr: OpenPrView, policy: SweepPolicy, now: number):
  * W1-T1018 (operator ruling 2026-08-19, "I don't really like the idea of a review budget. We just
  * need back off.") — design (i)/(ii)/(iii)'s ELAPSED-TIME BACKOFF, replacing the permanent
  * cessation the cap row used to enforce alone. Has ENOUGH WALL-CLOCK TIME passed since the
- * review-orphan lane's last real attempt on this PR ({@link OpenPrView.reviewOrphanLastAttemptAt}
- * — the most recent `review.posted`/`review.post_refused` ledger timestamp among the heads
- * `priorReviewOrphans` scanned; see `reviewOrphansFor`, run-task.ts) that the cap row below should
+ * exact review input's last completed judgment ({@link OpenPrView.reviewInputLastAttemptAt}) that
+ * the cap row below should
  * YIELD back to the ordinary post-review dispatch instead of escalating again?
  *
  * "ESCALATE AND KEEP GOING, NEVER ESCALATE INSTEAD OF GOING" (design ii): the cap still fires the
- * FIRST time `priorReviewOrphans` reaches `policy.reviewOrphanCap` (this reads `false` with no
- * attempt timestamp on record yet, so the cap row matches exactly as it always has). Once that
- * escalation's own attempt is on record and `policy.reviewOrphanBackoffMinutes` has elapsed with
+ * FIRST time `priorReviewAttemptsForInput` reaches `policy.reviewOrphanCap` (this reads `false` with no
+ * attempt timestamp on record yet, so the cap row matches exactly as it always has). Once the
+ * completed judgment that reached the cap is on record and `policy.reviewOrphanBackoffMinutes` has elapsed with
  * no NEWER attempt superseding it, this flips `true` and the lane resumes — never a permanent
  * wall, only a paced one.
  *
- * THE RESET (design iii, "or the backoff decays into the cap it replaces"): `reviewOrphanLastAttemptAt`
- * is the max timestamp across EVERY review-lane attempt on this PR, whether or not that attempt's
- * head counted toward `priorReviewOrphans` (a diff-unchanged housekeeping push still reviews and
- * still advances the clock — see `reviewOrphansFor`'s design (iv) note). So the backoff clock
- * restarts on ANY real activity, never accumulating toward a slow-motion version of the old
- * unconditional cap.
+ * The reset is structural: a new head or body creates another digest, so both the count and clock
+ * become empty immediately. Activity that does not change review input keeps the existing clock.
  *
  * FAILS TOWARD ESCALATING, never toward silent retrying — this task's own risk note names that as
  * the dangerous direction ("retry forever, never escalate... is silent"). A missing or unparseable
- * timestamp (every caller that has not wired {@link OpenPrView.reviewOrphanLastAttemptAt} yet, e.g.
+ * timestamp (every caller that has not wired {@link OpenPrView.reviewInputLastAttemptAt} yet, e.g.
  * `rmd fix`'s single-PR build) reads `false` — byte-identical to today's permanent-cap behaviour
  * until a real attempt timestamp exists to back off from.
  */
-export function reviewOrphanBackoffElapsed(pr: OpenPrView, policy: SweepPolicy, now: number): boolean {
-  if (!pr.reviewOrphanLastAttemptAt) return false;
-  const last = Date.parse(pr.reviewOrphanLastAttemptAt);
+export function reviewInputBackoffElapsed(pr: OpenPrView, policy: SweepPolicy, now: number): boolean {
+  if (!pr.reviewInputLastAttemptAt) return false;
+  const last = Date.parse(pr.reviewInputLastAttemptAt);
   if (Number.isNaN(last)) return false;
   return now - last >= policy.reviewOrphanBackoffMinutes * 60_000;
 }
@@ -2997,7 +2953,7 @@ export function reviewVerdictOvertakenByActivity(pr: OpenPrView): boolean {
  *      ORIGINAL strikeCap was already hit — this is what makes an answer actually
  *      re-arm the rung instead of landing straight back on row 4's escalate.
  *   3.5. SUPERSEDED-VERDICT CAP (W1-T2299) — a `remudero-review` FAILURE that has seen activity
- *      since it posted ({@link reviewVerdictOvertakenByActivity}), but `priorReviewOrphans` has
+ *      since it posted ({@link reviewVerdictOvertakenByActivity}), but `priorReviewAttemptsForInput` has
  *      already reached `policy.reviewOrphanCap` and the backoff has not yet elapsed -> blocked-
  *      ambiguous (escalate). SHARES the review-orphan budget with rows 8.6/9 rather than minting
  *      a third threshold — one head's total re-reviews are capped across every re-offer reason.
@@ -3063,16 +3019,16 @@ export function reviewVerdictOvertakenByActivity(pr: OpenPrView): boolean {
  *   8.5. ZERO-RUNS REQUIRED CHECK / POST-REVIEW (W1-T176 discriminator + the
  *      2026-07-22 #584 stall): checks green, remudero-review has ZERO
  *      observed check runs -> DETERMINISTIC-ACTION on its FIRST sighting for
- *      this head sha: `post-review`, running the SAME `rmd review` an
+ *      this exact review input: `post-review`, running the SAME `rmd review` an
  *      operator would run rather than asking — an absent required check is
  *      mechanically decidable (the #393/#391 fixture: every other check
  *      SUCCESS, remudero-review absent, escalated with two mis-framed
  *      options while `rmd review` was the one-command remedy). A SECOND
- *      absence at the SAME head sha — a prior deterministic attempt already
+ *      absence for the SAME head+body input — a prior deterministic attempt already
  *      came back REFUSED — is the one shape here that still escalates ->
  *      blocked-ambiguous, checked FIRST (ordered before the post-review row
  *      in the table) so a refused head never re-reaches the dispatch and
- *      loops; the FAIL-CLOSED boundary is "at most one attempt per head sha,"
+ *      loops; the FAIL-CLOSED boundary is "at most one refused attempt per unchanged input,"
  *      never zero and never unbounded.
  *   8.6. REVIEW ORPHANED BY A PUSH, BOUNDED (W1-T225; the 2026-07-21
  *      #477/#484 jam): the SAME zero-observed-runs shape, but this PR WAS
@@ -3082,7 +3038,7 @@ export function reviewVerdictOvertakenByActivity(pr: OpenPrView): boolean {
  *      auto-merge waited forever. Ordered BEFORE the post-review row (same
  *      dispatch, `post-review`, just a reason that names the orphaning
  *      rather than "review never posted," so an operator can tell the two
- *      shapes apart) and, when `priorReviewOrphans` has already reached
+ *      shapes apart) and, when `priorReviewAttemptsForInput` has already reached
  *      `policy.reviewOrphanCap`, checked as its OWN row here (ordered before
  *      post-review) so a PR that keeps getting pushed — or whose re-review
  *      keeps failing to stick — escalates instead of re-dispatching forever;
@@ -3090,7 +3046,7 @@ export function reviewVerdictOvertakenByActivity(pr: OpenPrView): boolean {
  *      is not weakened). W1-T1018 (operator ruling 2026-08-19 — "I don't
  *      really like the idea of a review budget. We just need back off."):
  *      reaching the cap no longer WALLS the PR off — it ALSO requires
- *      {@link reviewOrphanBackoffElapsed} to read `false` (i.e. not enough
+ *      {@link reviewInputBackoffElapsed} to read `false` (i.e. not enough
  *      wall-clock time has passed since the last real attempt). Once the
  *      backoff interval elapses this row yields and the post-review row
  *      below dispatches again — escalate for visibility, AND keep retrying,
@@ -3228,12 +3184,9 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // verdict posted ({@link reviewVerdictOvertakenByActivity}) re-earns the review lane below —
     // but not unboundedly. Ordered STRICTLY BEFORE that row, and BEFORE rows 4/6/7 (which would
     // otherwise claim EVERY `reviewState === "failure"` PR first and this arm would never fire),
-    // so a head that has already spent `policy.reviewOrphanCap` re-reviews across ALL re-offer
-    // reasons combined — never reviewed, orphaned by a push, stuck pending, AND this one — escalates
-    // instead of re-dispatching forever. SHARES the budget rather than minting a third threshold
-    // (design v): `priorReviewOrphans`/`reviewOrphanLastAttemptAt` are the SAME fields row 8.6
-    // reads, off the SAME ledger scan (`reviewOrphansFor`, run-task.ts) — one counter, three
-    // triggers. `reviewOrphanBackoffElapsed` YIELDS this row back once enough wall-clock time has
+    // so an unchanged input that has already spent `policy.reviewOrphanCap` completed judgments
+    // escalates instead of re-dispatching forever. A commit or body edit resets the counter before
+    // this predicate runs. `reviewInputBackoffElapsed` yields this row once enough wall-clock time has
     // passed with no newer attempt (the SAME "escalate AND keep going" discipline W1-T1018 gave
     // row 8.6), so this is a pace, never a permanent wall.
     disposition: "blocked-ambiguous",
@@ -3242,12 +3195,12 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
       pr.requiredContextsUnreadable !== true &&
       pr.reviewState === "failure" &&
       reviewVerdictOvertakenByActivity(pr) &&
-      (pr.priorReviewOrphans ?? 0) >= policy.reviewOrphanCap &&
-      !reviewOrphanBackoffElapsed(pr, policy, now),
+      (pr.priorReviewAttemptsForInput ?? 0) >= policy.reviewOrphanCap &&
+      !reviewInputBackoffElapsed(pr, policy, now),
     reason: (pr, policy) =>
-      `remudero-review failed but the PR has seen activity since — the sweep has already re-reviewed ` +
-      `this PR ${pr.priorReviewOrphans} time(s) (>= ${policy.reviewOrphanCap} cap, shared across every ` +
-      `re-offer reason) — escalating; re-reviewing again after ${policy.reviewOrphanBackoffMinutes}m of backoff, ` +
+      `remudero-review failed but the PR has seen activity since — the sweep has already judged ` +
+      `this unchanged review input ${pr.priorReviewAttemptsForInput} time(s) (>= ${policy.reviewOrphanCap} cap) — ` +
+      `escalating; re-reviewing again after ${policy.reviewOrphanBackoffMinutes}m of backoff, ` +
       `never stopping outright`,
   },
   {
@@ -3500,38 +3453,34 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
       pr.requiredContextsUnreadable !== true,
     reason: () =>
       "required check (remudero-review) has zero observed check runs and the one deterministic post " +
-      "attempt for this head was refused — escalating rather than retrying indefinitely",
+      "attempt for this exact review input was refused — escalating rather than retrying indefinitely",
   },
   {
     // W1-T225 (the 2026-07-21 PRs #477/#484 jam) — THE LOOP FALSIFIER: a PR
     // whose review was orphaned by a push re-earns the review lane (the row
-    // below), but not unboundedly. Ordered STRICTLY BEFORE that row so a PR
-    // that has already spent `policy.reviewOrphanCap` orphan re-reviews never
-    // re-reaches its dispatch — repeated pushes (or a re-review that itself
-    // keeps failing to stick) must eventually ask an operator, the SAME
+    // below), but not unboundedly for the SAME current head+body input. Ordered strictly before
+    // that row so a status that repeatedly disappears after completed judgments eventually asks
+    // an operator. A new push or body edit resets the exact-input counter immediately. This is the SAME
     // discipline the fix-rung strike ladder (row 4) and the CI re-run cap
     // (W1-T224) already hold elsewhere. `reviewOrphanedByPush !== true` (a PR
     // awaiting its FIRST review) never matches this row — only a PR that has
     // demonstrably been reviewed before can exhaust this cap.
     //
     // W1-T1018 (operator ruling 2026-08-19 — "we just need back off", not a budget): reaching the
-    // cap is no longer a PERMANENT wall. `reviewOrphanBackoffElapsed` must ALSO read `false` for
+    // cap is no longer a PERMANENT wall. `reviewInputBackoffElapsed` must ALSO read `false` for
     // this row to match — once `policy.reviewOrphanBackoffMinutes` has elapsed since the lane's
     // last real attempt with no resolution, this row yields and the post-review row below
-    // dispatches again (design ii: "escalate AND keep going"). This ALSO fixes rationale (2)/(4):
-    // `priorReviewOrphans` (run-task.ts's `reviewOrphansFor`) now counts DISTINCT REVIEWABLE
-    // DIFFS among prior heads, not distinct pushed heads — a base-repair merge that leaves the
-    // PR's own diff unchanged (the remedy this system itself prescribes) never spends this budget.
+    // dispatches again (design ii: "escalate AND keep going").
     disposition: "blocked-ambiguous",
     when: (pr, policy, _ageDays, now) =>
       pr.checksState === "green" &&
       pr.reviewState === "none" &&
       pr.reviewOrphanedByPush === true &&
-      (pr.priorReviewOrphans ?? 0) >= policy.reviewOrphanCap &&
+      (pr.priorReviewAttemptsForInput ?? 0) >= policy.reviewOrphanCap &&
       pr.requiredContextsUnreadable !== true &&
-      !reviewOrphanBackoffElapsed(pr, policy, now),
+      !reviewInputBackoffElapsed(pr, policy, now),
     reason: (pr, policy) =>
-      `review orphaned by a push, again — the sweep has already re-reviewed this PR ${pr.priorReviewOrphans} ` +
+      `review orphaned by a push, again — the sweep has already judged this unchanged review input ${pr.priorReviewAttemptsForInput} ` +
       `time(s) (>= ${policy.reviewOrphanCap} cap) — escalating; re-reviewing again after ` +
       `${policy.reviewOrphanBackoffMinutes}m of backoff, never stopping outright`,
   },
@@ -3545,7 +3494,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // fixture, #393/#391) an operator round-trip was spent on a decision the
     // machine could already make: an ABSENT required check is mechanically
     // decidable ("post it"), never ambiguous, on its FIRST sighting. Route it
-    // to the SAME reviewCommand the operator verb runs (dedup per head, like
+    // to the SAME reviewCommand the operator verb runs (dedup per exact input, like
     // dep-review): the posted verdict then drives the NEXT pass — success ->
     // mergeable/arm, failure -> the fix/escalate rows. A PR with no criteria
     // (no trailer, no Acceptance block) posts FAIL fail-closed, which is a
@@ -3793,7 +3742,7 @@ export function deriveDisposition(
  * callable with no spawn and no GitHub — every input is a field {@link OpenPrView} already
  * carries plus {@link SweepPolicy.reviewOrphanCap}, mirrored EXACTLY off the SAME four
  * conditions the review-orphan-cap row of {@link DISPOSITION_RULES} above already reads
- * (`checksState`, `reviewState`, `reviewOrphanedByPush`, `priorReviewOrphans` against the cap,
+ * (`checksState`, `reviewState`, `reviewOrphanedByPush`, `priorReviewAttemptsForInput` against the cap,
  * `requiredContextsUnreadable`), never re-derived independently — so this predicate and that
  * row's `when` clause cannot drift apart.
  *
@@ -3805,7 +3754,7 @@ export function deriveDisposition(
  * reinstate (rationale (4)).
  *
  * W1-T1018: DELIBERATELY still four conditions, no fifth `now`/backoff check added here. The
- * elapsed-time backoff ({@link reviewOrphanBackoffElapsed}) gates the DISPOSITION_RULES cap row
+ * elapsed-time backoff ({@link reviewInputBackoffElapsed}) gates the DISPOSITION_RULES cap row
  * itself — a PR only ever REACHES this predicate (via the escalate closure) when that row already
  * matched at the SAME sweep pass's `deriveDisposition` call, which means backoff had already read
  * un-elapsed a moment earlier. Threading `now` through here too would only rewiden the surface the
@@ -3816,7 +3765,7 @@ export function isCappedReviewOrphanEscalation(pr: OpenPrView, policy: SweepPoli
     pr.checksState === "green" &&
     pr.reviewState === "none" &&
     pr.reviewOrphanedByPush === true &&
-    (pr.priorReviewOrphans ?? 0) >= policy.reviewOrphanCap &&
+    (pr.priorReviewAttemptsForInput ?? 0) >= policy.reviewOrphanCap &&
     pr.requiredContextsUnreadable !== true
   );
 }
@@ -3938,8 +3887,8 @@ export type UpdateBranchOutcome = "updated" | "conflict" | "error";
  * EIGHT OF NINE open PRs read `behind` and SEVEN of those were armed, unchanged
  * for hours. But this predicate is deliberately INERT about that — it reports
  * and does not act, because acting means minting a NEW HEAD, and a verdict is
- * sha-pinned (`priorActionsFromLedger` keys `reviewDelivered` on
- * `${taskId}@${headSha}`), so every update discards the verdict it was waiting
+ * input-pinned (`priorActionsFromLedger` keys `reviewDelivered` on task + PR URL + head + body
+ * digest), so every update discards the verdict it was waiting
  * on. Clearing N that way costs N+(N-1)+…+1 reviews. The action half needs a
  * selection rule and its own ruling; this shard scopes it OUT.
  *
@@ -3974,7 +3923,7 @@ export function armedButStalled(prs: readonly OpenPrView[]): ArmedStalledPr[] {
  * OWN SET, NEVER A SECOND PREDICATE COMPUTING THE SAME TWO FACTS (design note i).
  *
  * ONE PER PASS, OLDEST HEAD FIRST (design ii): updating mints a NEW head and a verdict is
- * sha-pinned (`priorActionsFromLedger` keys `reviewDelivered` on `${taskId}@${headSha}`), so every
+ * input-pinned (`priorActionsFromLedger` includes the head in its exact-input key), so every
  * update discards the verdict it was waiting on — updating the WHOLE stalled set each pass costs
  * N+(N-1)+…+1 reviews (observed: updating one put four others behind and the fleet re-updated
  * them itself). {@link oldestActivityFirst} is the SAME comparator {@link selectReviewAdmission}
@@ -4749,9 +4698,9 @@ export interface SweepDeps {
    * the next. Concurrency is bounded (`policy.reviewLanes` — its own row as
    * of W1-T1049, no longer `policy.dispatchLanes`) and every concurrent call
    * is guaranteed a DISTINCT
-   * `${taskId}@${headSha}` key — `runSweep` claims each key synchronously
+   * exact review-input key — `runSweep` claims each key synchronously
    * before scheduling its call, so this function is never asked to run twice
-   * for the same task+head at once. A caller wiring a real effect here (e.g.
+   * for the same task+PR+head+body at once. A caller wiring a real effect here (e.g.
    * spawning a reviewer worker) needs no locking of its own for THAT — it may
    * still want its own guard against unrelated concurrent posters (see
    * `postReviewStatusGuarded`'s `acquireReviewStatusLock`, which this dep's
@@ -4871,7 +4820,7 @@ export interface SweepDeps {
    * described the WHOLE pass being single-threaded — post-review calls
    * WITHIN one pass now run concurrently with each other too (bounded by
    * `policy.reviewLanes` as of W1-T1049 — its own row, no longer
-   * `policy.dispatchLanes` — real per-`taskId@headSha` mutual exclusion —
+   * `policy.dispatchLanes` — real per-input mutual exclusion —
    * see `runSweep`'s own doc), so it is no longer accurate to call this ONE
    * lane serialized; it is the one lane safe to run alongside `runOne`.
    */
@@ -5089,11 +5038,12 @@ interface PriorActions {
   /** `pr@head` keys whose dep-review reached a TERMINAL outcome (arm/escalate/refuse). */
   depReviewed: Set<string>;
   /**
-   * `taskId@head` keys with a DELIVERED `review.posted` verdict for that exact head
+   * exact-input keys with a DELIVERED `review.posted` verdict. Fully attributed rows key on
+   * task + PR URL + head + body digest; legacy rows retain `taskId@head`
    * (W1-T254/W1-T1213). NOT keyed off `sweep.disposed acted:true` like every other set
    * here: an `acted:true` post-review dispose only proves the LANE WAS INVOKED, never
    * that it reached a verdict (e.g. `postReviewStatusGuarded` can refuse internally
-   * without throwing) — keying dedup on the attempt used to suppress the SAME head
+   * without throwing) — keying dedup on the attempt used to suppress the same input
    * forever after a single no-op invocation (a latent sibling of the #707 bug). A
    * posted verdict ALSO flips the PR's live `reviewState` away from "none" on the next
    * `buildOpenPrViews` read, so the row stops matching the post-review disposition rule
@@ -5105,12 +5055,12 @@ interface PriorActions {
    */
   reviewDelivered: Set<string>;
   /**
-   * `taskId@head` keys with an explicit `review.post_refused` refusal (W1-T254) that
-   * still suppresses this head — i.e. every refusal EXCEPT the one class
+   * Exact-input keys with an explicit `review.post_refused` refusal (W1-T254) that
+   * still suppresses this input — i.e. every refusal EXCEPT the one class
    * {@link isReopenedClosedLifecycleRefusal} names as provably stale. A refusal leaves
    * GitHub's live status untouched (unlike a posted verdict — see `reviewDelivered`'s
    * doc), so without a key here the post-review lane would re-route to, and re-invoke,
-   * the SAME declined head every single pass.
+   * the same unchanged input every single pass.
    *
    * W1-T1213: `priorActionsFromLedger` (below) never admits the "PR is already closed"
    * lifecycle refusal into this set. That refusal's own named condition — the PR being
@@ -5153,6 +5103,26 @@ interface PriorActions {
    * chain of empty commits on a PR GitHub never schedules.
    */
   absentRepushes: Map<number, { count: number; shas: Set<string> }>;
+}
+
+/** One review outcome key. Fully attributed rows use the material input; legacy rows and
+ * unwired fixtures retain the historical task+head key so migration does not change their local
+ * semantics. A real current view always carries `reviewInputDigest`, so a legacy row cannot pin a
+ * changed body forever. */
+function reviewOutcomeKey(
+  taskId: string,
+  prUrl: string | undefined,
+  headSha: string,
+  inputDigest: string | undefined,
+): string {
+  return prUrl !== undefined && inputDigest !== undefined
+    ? `input:${JSON.stringify([taskId, prUrl, headSha, inputDigest])}`
+    : `${taskId}@${headSha}`;
+}
+
+function reviewOutcomeKeyForPr(pr: OpenPrView): string {
+  const taskId = pr.reviewInputDigest !== undefined ? (pr.taskId ?? `PR-${pr.prNumber}`) : (pr.taskId ?? "");
+  return reviewOutcomeKey(taskId, pr.prUrl, pr.headSha, pr.reviewInputDigest);
 }
 
 /**
@@ -5198,10 +5168,10 @@ const BUDGET_FLOOR_LANE_COST: Partial<Record<Disposition, string>> = {
  * ran, nothing about THIS PR was observed, and nothing about it is known to be wrong. Routing it
  * through `actionError` would (a) count it in `actionsFailed`, and (b) in the post-review lane
  * write a `review.post_refused` row — and that row is not a diagnostic, it is a VERDICT.
- * {@link OpenPrView.reviewPostRefused}'s own doc says a second absence at the same sha is
+ * {@link OpenPrView.reviewPostRefused}'s own doc says a second absence for the same input is
  * escalated rather than retried, because "the one deterministic remedy already ran its course for
- * this exact push"; `reviewPostRefusedFor` (run-task.ts) keys it `taskId@headSha`, so a head
- * marked that way is never re-reviewed until a NEW PUSH mints a new sha. A PR that was merely
+ * this exact input"; `reviewPostRefusedFor` (run-task.ts) keys task + PR URL + head + body digest,
+ * so a changed commit or body immediately clears it. A PR that was merely
  * unaffordable for one tick would be deduped permanently and then escalated as ambiguous. That
  * same doc already draws exactly this line for the transient case: `review.post_failed` "does NOT
  * set this — that case must keep retrying, never escalate on a mere network hiccup." An exhausted
@@ -5249,7 +5219,12 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
     // `sweep.disposed`. See PriorActions.reviewDelivered/reviewRefused's docs.
     if (line.step === "review.posted" || line.step === "review.post_refused") {
       if (typeof line.task_id === "string" && typeof line.head_sha === "string") {
-        const key = `${line.task_id}@${line.head_sha}`;
+        const key = reviewOutcomeKey(
+          line.task_id,
+          typeof line.pr_url === "string" ? line.pr_url : undefined,
+          line.head_sha,
+          typeof line.review_input_digest === "string" ? line.review_input_digest : undefined,
+        );
         if (line.step === "review.posted") {
           reviewDelivered.add(key);
         } else if (!isReopenedClosedLifecycleRefusal(line.reason)) {
@@ -6350,7 +6325,7 @@ export async function runSweep(
         // this very check already proves the PR is open again, and the head is offered to the
         // post-review lane once more (which re-tests `decideReviewStatusPost` fresh — see that
         // set's own doc; this clears the dedup, it does not post a verdict or arm anything).
-        const reviewKey = `${pr.taskId ?? ""}@${pr.headSha}`;
+        const reviewKey = reviewOutcomeKeyForPr(pr);
         const reviewDelivered = prior.reviewDelivered.has(reviewKey);
         alreadyDone = reviewDelivered || prior.reviewRefused.has(reviewKey);
         // W1-T2427 — THE SENTENCE MUST SEPARATE FOUR STATES THAT LOOK IDENTICAL TODAY (W1-T1110's
@@ -6896,7 +6871,7 @@ export async function runSweep(
       // `deferredToNextPass` loop below (budget exhausted, never scheduled)
       // or the `runNow` lane's own `finally` further down (scheduled and
       // settled) — never both, and never neither.
-      const reviewKey = `${pr.taskId ?? ""}@${pr.headSha}`;
+      const reviewKey = reviewOutcomeKeyForPr(pr);
       if (claimedReviewKeys.has(reviewKey)) {
         finalizeDisposition(
           prIndex,
@@ -7014,8 +6989,9 @@ export async function runSweep(
             //
             // A floor stand-down says nothing about this PR — the guarded call never ran — while
             // `review.post_refused` is read by `reviewPostRefusedFor` (run-task.ts) as a VERDICT
-            // that ESCALATES this head rather than retrying it, keyed `taskId@headSha` so only a
-            // NEW PUSH ever clears it. Writing it here converts "unaffordable for one tick" into
+            // that ESCALATES unchanged input rather than retrying it, keyed by task + PR URL +
+            // head + body digest so a commit or body edit clears it. Writing it here converts
+            // "unaffordable for one tick" into
             // "permanently refused, then escalated as blocked-ambiguous" — for a PR nothing ever
             // looked at. Design (iv) names the correct cost instead: "a green PR is left unmerged,
             // visible, recoverable next pass", and RECOVERABLE is only true if no key is written.
@@ -7062,17 +7038,18 @@ export async function runSweep(
               // `acted:true`-gated dedup (design iv) — a different lane, a different set.
               appendLine(deps.ledgerPath, {
                 run_id: deps.runId,
-                // W1-T529 (v) — THE EMPTY STRING, NEVER THE "SWEEP" PLACEHOLDER, AND THE DIFFERENCE
-                // IS THE WHOLE DEDUP. The consult site reads
-                // `prior.reviewRefused.has(`${pr.taskId ?? ""}@${pr.headSha}`)`, so a task-id-less PR
-                // looks up `@<sha>`. Writing "SWEEP" here produced `SWEEP@<sha>`: a row that reads
-                // correctly in the ledger, matches nothing, and left the attempt repeating every
-                // pass — MEASURED against this file before the fix, 3 attempts across 3 passes for a
-                // PR carrying no task id. The `sweep.action_failed` line above is diagnostic and may
-                // keep its placeholder; this one is a KEY and must match its lookup exactly.
-                task_id: job.pr.taskId ?? "",
+                // This row is an outcome key, not only a diagnostic. Fully attributed views use
+                // the same task/PR/head/body identity as delivered/refused posts; legacy callers
+                // retain the historical empty-task fallback.
+                task_id:
+                  job.pr.reviewInputDigest !== undefined
+                    ? (job.pr.taskId ?? `PR-${job.pr.prNumber}`)
+                    : (job.pr.taskId ?? ""),
                 step: "review.post_refused",
                 head_sha: job.pr.headSha,
+                ...(job.pr.reviewInputDigest !== undefined
+                  ? { pr_url: job.pr.prUrl, review_input_digest: job.pr.reviewInputDigest }
+                  : {}),
                 reason: `post-review attempt threw — standing down rather than retrying this head unbounded: ${actionError}`,
               });
             }
@@ -7384,7 +7361,7 @@ const EMPTY_REVIEW_ADMISSION_OUTCOMES: ReviewAdmissionOutcomes = {
 };
 
 function reviewAdmissionOutcomeKnown(pr: OpenPrView, outcomes: ReviewAdmissionOutcomes): boolean {
-  const key = `${pr.taskId ?? ""}@${pr.headSha}`;
+  const key = reviewOutcomeKeyForPr(pr);
   return outcomes.delivered.has(key) || outcomes.refused.has(key);
 }
 
