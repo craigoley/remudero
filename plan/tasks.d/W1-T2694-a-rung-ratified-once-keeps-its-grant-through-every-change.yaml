@@ -1,0 +1,85 @@
+- id: W1-T2694
+  title: "A RUNG RATIFIED ONCE KEEPS ITS GRANT THROUGH EVERY CHANGE TO WHAT IT DOES — Law 5 binds the operator's ratification to a policy row, and nothing binds it to the operation the row enables; pin each gated rung's operation to the hash the operator ratified and refuse to fire on drift, naming the diff"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: |
+    RE-DERIVED AT f632e15fa (2026-09-02).
+
+    (1) WHAT THE OPERATOR RATIFIES TODAY, AND WHAT IT BINDS. Every unattended rung reads an
+    `enabled` row in plan/policy.yaml (`autoTriage`, `measurementCadence`, `digestCadence`,
+    `boardReview`, `costAnomaly`, `githubEventWake`, `headroom`; `grep -cE '^  enabled:'
+    plan/policy.yaml` reads the count at head). Law 5 says the machine acts within a policy the
+    operator ratified once, and the row is that ratification. But the row is a boolean and two
+    numbers; the OPERATION it enables is code, and code moves sixty merges a day. A PR that
+    widens what the board rung may do, or changes which PRs auto-triage drafts against, leaves
+    the row untouched and the ratification intact. W1-T489's ruling recorded one such
+    asymmetry — implementation PRs arm auto-merge at open with fewer gates than triage PRs —
+    documented rather than changed, because nothing ties a grant to an operation.
+
+    (2) THE IDEA, TAKEN FROM OPENCLAW 2.0 (v2026.8.1, release note, 2026-08-31): "Grant an
+    automation permission for an exact operation, inspect or revoke that permission later, and
+    require fresh approval when job/operation changes." That is Law 5 with a signature on it. The
+    house already has the primitive: `verifyBundlePin` (src/lib/learnings.ts) hash-pins a corpus
+    so an import refuses on drift. A rung's operation can be pinned the same way.
+
+    (3) WHAT THE OPERATION HASH COVERS. The policy block's values, and a CONTRACT VERSION constant
+    each gated rung exports beside its entry point — a string the rung's author bumps when the
+    rung's behaviour changes in a way a ratifier would want to re-read. The constant is the
+    honest part: a hash over source text would fire on every comment edit and be muted in a
+    week (the W1-T2254 lesson on reported fields), while a constant fires only when an author
+    says the operation changed. The reviewer's changed-tasks pass and W1-T2295's catch-erasure
+    ratchet are the models for keeping such a declaration honest: a diff to a gated rung's module
+    that leaves its contract constant unchanged is REPORTED, not refused.
+  design: |
+    (i) THE PIN FILE IS PLAN STATE, WRITTEN BY THE OPERATOR. `plan/ratifications.yaml`: one row
+    per rung — rung name, operation hash, ratified-at, ratified-by. `rmd ratify <rung>` computes
+    the live hash and prints the row for the operator to commit in a plan PR; it writes nothing
+    itself (Rule 15: a ratification is an operator act). An ABSENT file or an absent row means
+    "no pin": today's behaviour, byte-identical, so this task ships inert — the W1-T2579 shape.
+
+    (ii) THE CHECK, AT THE TICK. `ratificationPinCheck(rung, policy, contractVersion, pins)` in
+    a new src/lib/ratification.ts returns fire or refuse with the diff (which values moved, or
+    which contract version). Every policy-gated rung consults it after its `enabled` read and
+    before its cadence check; a refusal ledgers `rung.unratified` with the diff and the rung
+    fires nothing. The operator sees one refusal per tick per drifted rung, never a silent skip.
+
+    (iii) THE CONTRACT VERSION IS DECLARED, NOT INFERRED. Each gated rung's module exports a
+    contract version constant; a test enumerates the gated rungs from policy.ts's schema and
+    fails if one lacks the export, so a new gated rung cannot ship unpinnable.
+
+    (iv) `rmd authority` (W1-T2695) reads the same pins to show which grants are current; that
+    task depends on nothing here and reads the file only if present.
+
+    (v) WHAT DOES NOT CHANGE. No rung's behaviour while the file is absent. No policy value. No
+    threshold. The pin never widens anything: it can only refuse.
+  acceptance:
+    - claim: "with no ratifications file every gated rung fires exactly as before, proven by decision-object equality"
+      proof: "unit test: test/ratification-pin.test.ts"
+    - claim: "a pinned rung whose policy values or contract version moved refuses to fire and ledgers the diff it found"
+      proof: "unit test: test/ratification-pin.test.ts"
+    - claim: "the ratify verb prints the row and writes nothing"
+      proof: "unit test: test/ratification-pin.test.ts"
+    - claim: "every policy-gated rung exports a contract version, enforced by a test over the policy schema"
+      proof: "unit test: test/ratification-pin.test.ts"
+    - claim: "the daemon tick consults the pin check"
+      proof: "grep: ratificationPinCheck( in src/run-task.ts"
+  risk: high
+  band_meaning: span
+  origin: "oper#external-scan-2026-09-02"
+  plan_refs: ["W1-T2579", "W1-T489", "W1-T2254", "W1-T2295", "§4", "§12"]
+  files: [src/lib/ratification.ts, src/lib/policy.ts, src/run-task.ts, test/ratification-pin.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    risk:high, band_meaning:span — a new module, the policy schema and the daemon tick under
+    Rule 19. Blast radius with the file absent: none; with a pin present: one refusal per tick
+    for a drifted rung, which is the feature.
+
+    SOURCE, PRIMARY: github.com/openclaw/openclaw releases, tag v2026.8.1 (2026-08-31), Highlights,
+    the automations approval paragraph quoted in rationale (2). OpenClaw's own docs make
+    "standing orders" prose in AGENTS.md with a weekly log review; the exact-operation grant is the
+    release note's mechanism, not the doc's, and it is the mechanism this shard takes.
