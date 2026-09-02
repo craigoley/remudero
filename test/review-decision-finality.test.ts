@@ -191,12 +191,11 @@ test("W1-T2722: production claims before spawn, replays before post/comment, and
   assert.match(reviewBody, /review_decision_digest: decisionDigest/);
   assert.match(reviewBody, /decision_verdict: verdict/);
 
-  const fixStart = source.indexOf("export async function runFixRung(");
-  const fixBody = source.slice(fixStart, source.indexOf("export function", fixStart + 30));
-  const conflictAt = fixBody.indexOf('review.decisionDisposition === "conflict"');
-  assert.ok(conflictAt >= 0 && conflictAt < fixBody.indexOf('if (review.state === "success")'));
-  assert.match(fixBody.slice(conflictAt), /outcome: "escalated"/);
-  assert.doesNotMatch(fixBody.slice(conflictAt, fixBody.indexOf('if (review.state === "success")')), /outcome: "fixed"/);
+  // The runFixRung half of this test asserted, by `indexOf` position, that the conflict divert
+  // appeared before the `outcome: "fixed"` return. Source position is not reachability: it would
+  // read identically whether the divert were reachable or dead, and inverting one condition into a
+  // guard clause breaks it while making the behaviour stricter. The obligation is proven by
+  // driving the real function instead — see the conflict-hold test below and its falsifier.
 });
 
 test("W1-T2722: a conflicting computed success is held at failure and the fix rung escalates once without resolving or arming", async () => {
@@ -309,4 +308,81 @@ test("W1-T2722: terminal reader ignores a different digest", () => {
     { step: "review.posted", task_id: TASK, pr_url: PR, review_decision_digest: "other", decision_verdict: verdict("success") },
   ], TASK, PR, reviewDecisionDigest(digestInput));
   assert.equal(terminal, undefined);
+});
+
+test("W1-T2722 (FALSIFIER): the SAME fixture without the conflict disposition never takes the conflict path", async () => {
+  // The conflict-hold test above proves the conflict path fires. It cannot, on its own, show that
+  // the DISPOSITION is what fires it — every assertion there would also pass on a rung that
+  // escalated unconditionally. This varies that one field and nothing else.
+  const dir = mkdtempSync(join(tmpdir(), "rmd-decision-fix-rung-control-"));
+  const worktreePath = fileURLToPath(new URL("..", import.meta.url));
+  const events: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const opened: Array<{ title: string; body: string }> = [];
+  const mount: Mount = { model: "sonnet", effort: "medium", maxTurns: 100, contextBudget: 120000 };
+  const issues: IssueGateway = {
+    create(title, body) {
+      opened.push({ title, body });
+      return "https://github.com/o/r/issues/2722";
+    },
+  };
+  const worker: WorkerResult = {
+    sessionId: "fix-session", costUsd: 0, numTurns: 1, text: "", blocks: [], stderr: "",
+    subtype: "success", isError: false, apiError: false, permissionDenials: [], childEnvKeys: [],
+    model: "sonnet", effort: "medium",
+    tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+    modelUsage: {}, compactionEvents: [], qualitySuspect: false,
+  };
+  const initialReview: ReviewRunResult = {
+    ...verdict("failure"),
+    criteria: [{ claim: "production is wired", proof: "unit test", met: false, reason: "missing", proof_exec: "executed_fail" }],
+    headSha: "prior-head",
+    reviewerOutcome: "reviewer_completed",
+  };
+  // IDENTICAL to the conflict fixture above except `decisionDisposition`.
+  const computedReview: ReviewRunResult = {
+    ...verdict("failure"),
+    criteria: [{ claim: "production is wired", proof: "unit test", met: true, floorMet: true, reason: "passed", proof_exec: "executed_pass" }],
+    summary: "no conflict — an ordinary recomputed verdict",
+    headSha: "fixed-head",
+    reviewerOutcome: "reviewer_completed",
+    reviewDecisionDigest: "v1:conflicting-decision",
+    decisionDisposition: "computed",
+    evaluatorProvenance: provenance("conflicting-session"),
+  };
+
+  try {
+    const outcome = await runFixRung({
+      taskId: TASK,
+      runId: `${TASK}-run`,
+      task: { id: TASK, title: "content-address review decisions" },
+      prUrl: PR,
+      branch: `run-${TASK}-1`,
+      worktreePath,
+      initialSessionId: "implement-session",
+      mount,
+      settingsFile: join(dir, "settings.json"),
+      config: {} as Config,
+      budgetUsd: 10,
+      strikeCap: 2,
+      initialReview,
+      reviewBase: { owner: "o", repo: "r", headCheckoutDir: worktreePath, reviewerMount: mount },
+      deps: {
+        spawn: async () => worker,
+        waitForCiGreen: async () => "green",
+        runReview: async () => computedReview,
+        push: () => {},
+        issues,
+        ledgerPath: join(dir, "ledger.ndjson"),
+        log: (step, extra) => events.push({ step, extra }),
+        say: () => {},
+        account: (result) => result,
+      },
+    });
+
+    assert.notEqual(outcome.reason, "review_decision_conflict", "only the conflict disposition may take the conflict path");
+    assert.equal(events.filter((event) => event.step === "review.decision_conflict_escalated").length, 0);
+    assert.equal(opened.filter((issue) => /conflicting terminal review verdicts/.test(issue.body)).length, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
