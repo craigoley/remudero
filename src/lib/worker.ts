@@ -2951,6 +2951,14 @@ export function assertWorktreeBaseCurrent(
  * already use in `plan/policy.yaml` — rules out one flaky `ls-remote` (noise the existing
  * warn/fail-open already fully absorbs on its own) while still catching a persistently
  * unreachable remote well before an entire session passes under a guard that silently never ran.
+ *
+ * BACKSTOP (W1-T1266's bound-kind tag). The PRIMARY CONTROL for a base that cannot be read is
+ * `assertWorktreeBaseCurrent`'s own warn/fail-open branch: it runs on every add, decides every
+ * ordinary case, and is what deliberately absorbs a single flaky `ls-remote`. This constant decides
+ * nothing on that path and never fires while that control is working. It exists only for the case
+ * the primary handles SILENTLY and indefinitely — a remote unreachable run after run, which reads
+ * exactly like a guard that is passing. That is the backstop shape: it catches the failure of the
+ * control above it, not the condition that control was written for.
  */
 export const WORKTREE_BASE_UNCHECKABLE_STREAK_BOUND = 3;
 
