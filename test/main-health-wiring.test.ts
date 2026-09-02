@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { buildMainHealthRung, MAIN_HEALTH_TASK_ID } from "../src/lib/main-health-rung.js";
+import { buildMainHealthRung, escalationFor, MAIN_HEALTH_TASK_ID } from "../src/lib/main-health-rung.js";
 import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";
 import type { GhApiFetcher } from "../src/lib/open-prs-rest.js";
 import { buildSweepHook } from "../src/run-task.js";
@@ -80,8 +80,45 @@ function fixture() {
     failReads: () => {
       throwOnRepoRead = true;
     },
+    disableResolution: () => {
+      delete issues.listOpen;
+      delete issues.closeWithComment;
+    },
   };
 }
+
+test("malformed GitHub metadata is named and swallowed instead of inventing a branch", async () => {
+  const logs: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const rung = buildMainHealthRung(OWNER, REPO, {
+    fetch: (() => ({})) as GhApiFetcher,
+    issues: { create: () => "unused" },
+    ledgerPath: join(mkdtempSync(join(tmpdir(), "rmd-main-health-malformed-")), "ledger.ndjson"),
+    runId: "DAEMON-MALFORMED",
+    log: (step, extra = {}) => logs.push({ step, extra }),
+  });
+
+  await assert.doesNotReject(rung());
+  assert.equal(logs.at(-1)?.step, "main.health.error");
+  assert.match(String(logs.at(-1)?.extra.error), /omitted default_branch/);
+});
+
+test("a non-red observation cannot be converted into a main-health escalation", () => {
+  assert.throws(
+    () =>
+      escalationFor(
+        {
+          state: "green",
+          sha: GREEN_SHA,
+          reason: "passing",
+          failingChecks: [],
+          pendingChecks: [],
+          nonEvidenceChecks: [],
+        },
+        "main",
+      ),
+    /refusing to build a main-health escalation for green/,
+  );
+});
 
 test("a red default-branch rollup is observed and escalated once without gating or reverting anything", async () => {
   const f = fixture();
@@ -116,6 +153,17 @@ test("a later genuinely green head closes the MAIN-HEALTH escalation with eviden
   assert.match(f.closed[0]?.comment ?? "", new RegExp(GREEN_SHA));
   assert.equal(f.logs.at(-1)?.step, "main.health.observed");
   assert.equal(f.logs.filter((entry) => entry.step === "main.health.resolved").length, 1);
+});
+
+test("green resolution without issue list and close support is explicit and fail-soft", async () => {
+  const f = fixture();
+  f.green();
+  f.disableResolution();
+
+  await assert.doesNotReject(f.rung());
+
+  assert.equal(f.logs.at(-1)?.step, "main.health.error");
+  assert.match(String(f.logs.at(-1)?.extra.error), /resolution requires issue list and close support/);
 });
 
 test("an undetermined rollup observes but neither escalates nor closes an existing incident", async () => {

@@ -38,7 +38,7 @@ function requiredString(value: unknown, field: string): string {
   return value;
 }
 
-function escalationFor(observation: MainHealthObservation, branch: string): Escalation {
+export function escalationFor(observation: MainHealthObservation, branch: string): Escalation {
   const decision = mainHealthEscalationDecision(observation);
   if (!decision.escalate || !decision.class) {
     throw new Error(`refusing to build a main-health escalation for ${observation.state}`);
