@@ -1,0 +1,78 @@
+- id: W1-T2717
+  title: "THE SUBSCRIPTION ROUTING OBJECTIVE NEVER RECEIVES A WINDOW MEASUREMENT — worker verdict rows already carry reset-stable, provider-owned `window_consumption`, but the retained-ledger sweep drops it before `recommendMounts`, while the production caller also omits the configured billing mode and therefore defaults every install to subscription"
+  repo: remudero
+  depends_on: [W1-T2577]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 20.00
+  files: [scripts/mount-headroom-sweep.mjs, src/lib/mount-recommender.ts, src/run-task.ts, test/window-share-recommender-input.test.ts, scripts/source-size-baseline.json]
+  origin: "operator-session#material-window-share-producer-2026-09-02"
+  plan_refs: ["W1-T2572", "W1-T2573", "W1-T2574", "W1-T2575", "W1-T2577", "G-17"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON MAIN AT fc5087ec. `workerLedgerFields` writes `window_consumption` on the SAME
+    `recon.done`, `implement.done` or `implement.resumed` row that names provider, requested and
+    served model, effort, billing mode and verdict. Its `percent_consumed` is numeric only when
+    the provider probe established an exclusive, reset-stable delta; an unreadable, overlapping
+    or reset-crossing measurement is explicitly `null` with a reason. The material sensor exists.
+
+    OBSERVED GAP. `scripts/mount-headroom-sweep.mjs` reads those same done rows only for
+    provider/model/effort. It never reads `window_consumption`, so every production arm omits
+    `windowShare`. `routingObjectiveFor` therefore takes its documented loud notional-dollar
+    fallback on every subscription comparison. W1-T2577 is implemented as an API seam but not as
+    material production behavior.
+
+    OBSERVED SECOND GAP AT THE SAME DECISION BOUNDARY. `runMountRecommenderRung` calls
+    `recommendMounts(sweep.cells, mounts)` without `billingMode`. The recommender defaults an
+    omitted mode to `subscription`, so an API-billed daemon would also choose the wrong objective
+    even after window evidence is joined. The caller already has the sanctioned configuration
+    and imports `billingMode`; it must pass the material mode rather than rely on a default.
+
+    MEASURE THE ARM THAT THE MOUNT CONTROLS. A mount recommendation changes the implementation
+    worker, not reconnaissance. Attribute window consumption from `implement.done` and
+    `implement.resumed` rows whose provider/model/effort match the run's selected implementation
+    arm. A recon-only run can retain a recon arm for existing census visibility, but it cannot
+    manufacture implementation-window evidence for a mount change. A resumed implementation
+    that changes provider/model/effort is mixed-arm evidence and must be named unreadable rather
+    than charged to whichever row happened to win attribution.
+
+    PARTIAL COVERAGE WOULD BIAS THE LEARNING. For a settled arm, sum numeric nonnegative
+    `percent_consumed` across every attributed implementation call and divide by the SAME
+    distinct-settled-task denominator used by `costPerCompletedTaskUsd`. If any eligible call is
+    absent, null, malformed, provider-mismatched, reset/overlap unreadable or mixed-arm, the arm's
+    `percentConsumedPerCompletedTask` is `null`, never a partial underestimate. Carry measured
+    and eligible call counts, unreadable count/reasons and newest measurement timestamp so the
+    refusal is actionable and the console/proposal can show when enough evidence exists.
+
+    THIS IS A READ-ONLY LEARNING INPUT. It reads only the retained bounded ledger union already
+    used by the sweep, makes no new provider calls, writes no live policy and does not change
+    dispatch. Recommendations remain proposal-only and still require the existing reviewed
+    mounts-table path and golden gates.
+  acceptance:
+    - claim: "the retained-ledger producer joins each implementation call's reset-stable `window_consumption` to the same provider/model/effort arm and never borrows another provider's measurement"
+      proof: "unit test: test/window-share-recommender-input.test.ts"
+    - claim: "numeric nonnegative implementation deltas are summed per arm and divided by that arm's distinct settled task count, matching the cost-per-completed-task denominator across redispatches"
+      proof: "unit test: test/window-share-recommender-input.test.ts"
+    - claim: "missing, null, malformed, negative, provider-mismatched, reset/overlap-unreadable and mixed-resume evidence make the whole arm window share unreadable rather than zero or a partial underestimate"
+      proof: "unit test: test/window-share-recommender-input.test.ts"
+    - claim: "each arm exposes bounded measurement coverage, unreadable count and reasons plus the newest measurement timestamp, and recommendation evidence names whether the real window objective or a loud fallback governed it"
+      proof: "unit test: test/window-share-recommender-input.test.ts"
+    - claim: "the production recommender passes the daemon's material billing mode: subscription uses complete provider-owned window share when both compared arms have it, while API uses real dollars even if window evidence exists"
+      proof: "unit test: test/window-share-recommender-input.test.ts"
+    - claim: "the sweep remains a bounded read of the existing retained ledger and performs no provider call, child spawn, live routing mutation or policy write"
+      proof: "unit test: test/window-share-recommender-input.test.ts"
+  falsifier: |
+    Close without implementation if current main already projects material `window_consumption`
+    from implementation done rows into every production arm, rejects incomplete or cross-provider
+    evidence, exposes coverage and freshness, and passes the configured billing mode into the live
+    recommender. A typed optional `windowShare` field or a unit fixture that hand-injects one does
+    not falsify this task; the retained-ledger producer and production caller must be wired.
+  note: |
+    W1-T2717 was atomically reserved at `refs/rmd-id/W1-T2717` before this file was written.
+    `risk: high`, `band_meaning: span` records Rule 19 sizing across the retained-ledger
+    producer, pure recommender seam and production caller; these are one objective decision and
+    splitting them would allow an API shape to merge again without material runtime wiring.
