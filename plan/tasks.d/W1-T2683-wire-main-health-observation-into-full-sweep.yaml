@@ -53,7 +53,7 @@
     - claim: "daemonCommand supplies the real REST reader and issue gateway to the full-sweep observer; offline callers remain unchanged because the seam is optional"
       proof: "unit test: test/main-health-wiring.test.ts"
     - claim: "the new main-health rung has a production caller outside its own module and tests"
-      proof: "grep: buildMainHealthRung( in src/run-task.ts"
+      proof: "unit test: test/main-health-wiring.test.ts"
   falsifier: |
     Remove `buildMainHealthRung(...)` from `daemonCommand`'s `buildSweepHook` call and the production
     wiring assertion fails while the pure W1-T2204 suite remains green — the exact dormant-feature
