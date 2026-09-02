@@ -101,6 +101,15 @@ function runRecycle(opts: RunOpts): Run {
     RMD_RECYCLE_WAIT_S: "1",
     RMD_RECYCLE_POLL_S: "1",
     GH_TOKEN: "",
+    // App auth is a CREDENTIAL as of PR #3559, and this fixture spreads `...process.env`, so an
+    // ambient `GH_APP_*` trio makes the script stop refusing and exit 0 — turning the negative
+    // controls below into vacuous passes. The daemon container, where the reviewer executes
+    // proofs, carries all three: MEASURED there, this suite went 12/12 on main to 11/12 on that
+    // branch while staying green on a host and on CI (neither sets them). Neutralise them exactly
+    // as GH_TOKEN above already is.
+    GH_APP_ID: "",
+    GH_APP_INSTALLATION_ID: "",
+    GH_APP_PRIVATE_KEY_PATH: "",
     // Points at a path that (almost certainly) does not exist, so the "never run inside a
     // container" guard does not fire merely because the TEST RUNNER itself is sandboxed.
     RMD_RECYCLE_DOCKERENV_PATH: join(tmpdir(), "a-recycle-checkout-no-such-dockerenv-marker"),

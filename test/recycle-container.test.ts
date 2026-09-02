@@ -223,6 +223,16 @@ function runRecycle(mode: string, opts: RunOpts = {}): Run {
       // is intentionally always running the first-boot path.
       RMD_RECYCLE_FIRST_BOOT: "1",
       GH_TOKEN: "",
+      // App auth is a CREDENTIAL as of this PR, and these fixtures spread `...process.env`, so an
+      // ambient `GH_APP_*` trio makes the script stop refusing and exit 0 — silently converting
+      // every negative control below into a vacuous pass. The daemon container really does carry
+      // all three, which is where the reviewer executes proofs: MEASURED there, this suite went
+      // 26/26 on main to 25/26 on this branch, and the checkout suite 12/12 to 11/12, while both
+      // stayed green on a host and on CI (neither sets them). Neutralise them exactly as GH_TOKEN
+      // above already is, so the credential inputs are the fixture's to state, never the runner's.
+      GH_APP_ID: "",
+      GH_APP_INSTALLATION_ID: "",
+      GH_APP_PRIVATE_KEY_PATH: "",
       // Points at a path that (almost certainly) does not exist, so section 1's guard does not fire
       // merely because the TEST RUNNER itself is sandboxed inside a container — that is a fact about
       // this suite's own environment, not about the script under test. The dedicated guard test below
