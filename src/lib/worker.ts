@@ -73,6 +73,7 @@ import {
   spawnDetachedGroup,
   teardownProcessGroup,
   withWorkerGroupTeardown,
+  workerInstallationScope,
   workerMarkerEnv,
   type ContainedProcess,
   type ContainedSpawnOptions,
@@ -1567,8 +1568,8 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     });
     // W1-T117: attribution markers merged in AFTER the allowlist/extras above —
     // authoritative regardless of whatever `args.env` happens to contain (no
-    // caller has a legitimate reason to set REMUDERO_RUN_ID/TASK_ID itself).
-    Object.assign(childEnv, workerMarkerEnv(args.runId, args.taskId));
+    // caller has a legitimate reason to set REMUDERO_RUN_ID/TASK_ID/SCOPE itself).
+    Object.assign(childEnv, workerMarkerEnv(args.runId, args.taskId, workerInstallationScope(config.root)));
 
     const stderrChunks: string[] = [];
     const blocks: string[] = [];

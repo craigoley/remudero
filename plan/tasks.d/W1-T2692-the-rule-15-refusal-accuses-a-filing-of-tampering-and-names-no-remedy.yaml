@@ -58,6 +58,30 @@
     weakening dressed as a wording fix, so the test must pin BOTH: the same diffs still FAIL (a
     genuine criterion edit, and a filing bundled with a build), and only the text differs — plus a
     plan-only filing still PASSES, so the exemption is untouched.
+
+    ── NOTE ADDED 2026-09-02 (operator session): WHAT THE REMEDY MUST ALSO SAY ──────────────────
+    Rationale only; no criterion is added or changed. Naming the remedy is criterion 2 above, and
+    the split is only HALF of it: authors who split correctly then write the SECOND failure.
+
+    MEASURED, two instances the same afternoon. #3626 (files W1-T2683) and #3631 (files W1-T2693)
+    both split the filing out exactly as the remedy asks, and both then FAILED — with acceptance
+    claims about the SPLIT rather than about the shard. #3626's read "W1-T2683 is filed as a
+    standalone plan shard before its implementation PR, so the build cannot edit the acceptance
+    criteria used to judge it".
+
+    THAT IS NOT A GATE DEFECT AND MUST NOT BE FIXED AS ONE. A plan-only filing is already exempt
+    from semantic downgrades (unmetForState resolves to floorUnmet when planOnly, src/lib/review.ts),
+    so the only thing left to fail is the KEYWORD FLOOR — and the floor was right. Its diff is one
+    shard file; the claim's distinctive words appear in it ZERO times ("standalone" 0,
+    "implementation PR" 0, "six production-wiring" 0, "proof dialects" 0, against a control of
+    "W1-T2683" at 4). A claim about the ACT of filing has no support in the thing filed, and the
+    floor is the last honest signal on a diff with nothing executable. Relaxing it would be the
+    weakening this task's own falsifier already forbids.
+
+    SO THE REMEDY TEXT OWES A SECOND SENTENCE. Telling an author to split the filing, without also
+    telling them what the filing PR should then CLAIM, converts one refusal into another. The
+    remedy should say: claim what the shard CONTAINS, never that it was filed separately — the
+    latter is unfalsifiable from a diff that is the shard itself.
   acceptance:
     - claim: "a filing bundled with a build is described as what it is, not as an edit to its own criteria"
       proof: "unit test: test/the-rule-15-refusal-accuses-a-filing-of-tampering-and-names-no-remedy.test.ts"

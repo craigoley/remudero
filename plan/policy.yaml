@@ -801,8 +801,15 @@ measurementCadence:
     min: 1
     max: 24
   escalate:
-    value: false
-    origin: "net-new"   # opt-in, off — see the block comment above
+    value: true
+    origin: "net-new"   # opt-in, ON since 2026-09-02 — turned on by operator instruction.
+    # SPEND-BEARING, and that is why it was off: each escalated rule lands a proposal in
+    # state/inbox-proposals.json, which is the SAME registry buildInboxDraftHook reads
+    # ("if (proposals.length === 0) return; // no active proposals — no spend"), so every
+    # escalation becomes a draft target at the inbox_draft mount. Bounded by the cadence above
+    # (360m/4-per-day), by DAEMON_DRAFT_BATCH_CAP, and by idempotence: a rule escalates ONCE,
+    # keyed by ruleEfficacyProposalId, so this is a one-off cost per repeating rule, not a
+    # recurring one. Still never files a task — Law 5.
     # rule-efficacy's ONE write (a promote-to-instrument proposal); verdict-calibration and
     # autonomy-rate never consult this field at all.
 
