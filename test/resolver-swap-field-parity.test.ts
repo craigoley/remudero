@@ -257,6 +257,35 @@ test("resolver-swap-field-parity: the restored source names the head sha, the pl
   }
 });
 
+test("resolver-swap-field-parity: an unreadable identity probe preserves resolved criteria and falls back to the pre-change source", () => {
+  const { dir, run, commit } = gitPlanRepo();
+  try {
+    writeFileSync(join(dir, "plan", "tasks.yaml"), task("W1-T1", ["the thing works"]) + "\n");
+    const headSha = commit("plan whose identity probe will fail");
+    const runGit = (args: string[]): string => {
+      if (args[0] === "rev-parse") throw new Error("simulated local object-identity probe failure");
+      return run(args);
+    };
+
+    const resolved = resolvePlanCriteriaAtHead(
+      TRAILERED_BODY("W1-T1"),
+      dir,
+      "plan/tasks.yaml",
+      headSha,
+      runGit,
+    );
+
+    assert.deepEqual(resolved.criteria.map((criterion) => criterion.claim), ["the thing works"]);
+    assert.equal(
+      resolved.source,
+      `plan at ${headSha} task W1-T1 (1 criteria)`,
+      "the optional identity suffix may disappear, but the already-resolved review input must not",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ── claim 4: no verdict semantics move ───────────────────────────────────────────────────────
 //
 // The read-identity change only APPENDS to `source` when criteria resolved — it must never

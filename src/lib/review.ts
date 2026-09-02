@@ -6276,6 +6276,8 @@ function formatPlanReadIdentityAtHead(
   try {
     blobOid = runGit(["rev-parse", `${headSha}:${planRelPath}`]).trim();
   } catch {
+    // Identity is optional legibility: the criteria bytes already resolved, so preserve the
+    // pre-W1-T2623 source string instead of turning a failed local OID probe into review failure.
     return undefined;
   }
   const shardRelDir = join(dirname(planRelPath), "tasks.d");
