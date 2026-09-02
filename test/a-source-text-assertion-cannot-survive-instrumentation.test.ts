@@ -130,6 +130,30 @@ test("omitting readFile leaves planNightlyRun byte-identical to before this chec
   assert.deepEqual(plan.excluded, []);
 });
 
+test("an importer readFile cannot read is treated as NOT a source reader, not excluded on the failure", () => {
+  // The read failure itself contributed an edge (the importer exists), so guessing "not a reader"
+  // costs at most one aborted Stryker config — the state before this check existed — rather than
+  // silently dropping a real module from the night on a filesystem hiccup.
+  let measured = 0;
+  const plan = planNightlyRun(
+    ["src/lib/cli-args.ts"],
+    new Map([["src/lib/cli-args.ts", ["test/unreadable.test.ts"]]]),
+    {
+      commandBudgetMs: 1000,
+      measure: () => {
+        measured += 1;
+        return { ms: 1, ok: true, timedOut: false };
+      },
+      readFile: () => {
+        throw new Error("ENOENT: no such file");
+      },
+    },
+  );
+  assert.equal(plan.excluded.length, 0, "an unreadable importer must not exclude the module");
+  assert.equal(measured, 1, "having guessed 'not a reader', the plan still measures the module");
+  assert.deepEqual(plan.included.map((i: { file: string }) => i.file), ["src/lib/cli-args.ts"]);
+});
+
 // ── the real corpus: the three modules that actually reddened the job ──────────────────────────
 
 test("the three modules that reddened scheduled runs are all caught against the REAL test corpus", () => {
