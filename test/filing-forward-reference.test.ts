@@ -239,11 +239,11 @@ test("acceptance 3 — buildOpenPrViews resolves a plan-only filing PR's unmet c
   assert.equal(disposition, "blocked-fixable", "resolvable by the fix rung without a task-id trailer");
 });
 
-test("acceptance 3 — an ordinary (non-filing) task-id-less PR is UNCHANGED: still no ledger read, still criteria-unrecoverable", () => {
+test("ordinary task-id-less PRs recover their own synthetic-key review evidence (PR #3559 regression)", () => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-w456-b-control-"));
   const lp = ledgerPath(dir);
   const sha = "c".repeat(40);
-  // No `pr.opened{plan_only:true}` line for this PR — never positively marked a filing.
+  // No `pr.opened{plan_only:true}` line for this PR — it is an ordinary agent-authored PR.
   writeLedger(lp, [
     { step: "review.posted", task_id: "PR-901", state: "failure", unmet_criteria: ["would-be unmet"], reasons: ["x"] },
   ]);
@@ -257,11 +257,36 @@ test("acceptance 3 — an ordinary (non-filing) task-id-less PR is UNCHANGED: st
 
   assert.equal(views.length, 1);
   assert.equal(views[0].taskId, undefined);
-  assert.deepEqual(views[0].unmetCriteria, [], "no positive filing signal ⇒ the synthetic-key fallback never fires");
-  assert.equal(views[0].criteriaRecoverable, false);
+  assert.equal(views[0].unmetCriteria.length, 1, "the PR-<n> identity written by reviewCommand is read back without a filing marker");
+  assert.equal(views[0].unmetCriteria[0].claim, "would-be unmet");
+  assert.equal(views[0].criteriaRecoverable, false, "synthetic review evidence never invents plan-task attribution");
 
   const { disposition } = deriveDisposition(views[0], DEFAULT_SWEEP_POLICY, Date.parse("2026-08-13T20:00:00Z"));
-  assert.equal(disposition, "blocked-ambiguous", "unchanged — this class is not this task's concern");
+  assert.equal(disposition, "blocked-fixable", "the existing synthetic fix rung receives the observed unmet criterion");
+});
+
+test("an ordinary task-id-less PR with no matching synthetic review evidence invents no fix input", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-w2663-control-"));
+  const lp = ledgerPath(dir);
+  const sha = "d".repeat(40);
+  writeLedger(lp, [
+    { step: "review.posted", task_id: "PR-999", state: "failure", unmet_criteria: ["belongs elsewhere"], reasons: ["x"] },
+  ]);
+  const prs = [restPr({ number: 902, headRefName: "some-agent-branch", body: "no trailer", sha })];
+  const reviewStatusesBySha = { [sha]: [{ context: "remudero-review", state: "failure" }] };
+
+  const views = buildOpenPrViews("craigoley", "remudero", lp, {
+    fetch: fetchFor(prs, reviewStatusesBySha),
+    requiredContexts: () => [],
+  });
+
+  assert.deepEqual(views[0].unmetCriteria, [], "another PR's synthetic evidence is never borrowed");
+  assert.equal(views[0].criteriaRecoverable, false);
+  assert.equal(
+    deriveDisposition(views[0], DEFAULT_SWEEP_POLICY, Date.parse("2026-08-13T20:00:00Z")).disposition,
+    "blocked-ambiguous",
+    "without observed fix evidence, the sweep retains its bounded escalation path",
+  );
 });
 
 test("acceptance 3 — deriveDisposition (pure): a task-id-less PR with real unmet criteria routes blocked-fixable, never criteria-unrecoverable", () => {
