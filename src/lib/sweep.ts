@@ -1033,29 +1033,26 @@ export interface OpenPrView {
    */
   reviewVerdictPostedAt?: string;
   /**
-   * The unmet acceptance criteria from a failing review ([] otherwise). W1-T456: for a
-   * task-id-less PLAN-FILING PR (no `Remudero-Task:` trailer, #1527) `buildOpenPrViews` can
-   * ALSO populate this from the ledger, keyed by the same synthetic `PR-<n>` id
-   * `reviewCommand`/`escalationTaskIdFor` already use for every task-id-less review — see that
-   * function's own doc. A non-empty list here is what lets row 6 below route a filing's REAL
-   * failure to `blocked-fixable` (resolvable by the fix rung) instead of always falling to row
-   * 7's escalate-only "criteria unrecoverable" — WITHOUT widening what `criteriaRecoverable`
-   * (right below) means: that field stays keyed strictly to a resolved `taskId`, on purpose.
+   * The unmet acceptance criteria from a failing review ([] otherwise). For any task-id-less PR,
+   * `buildOpenPrViews` can populate this from the ledger under the same synthetic `PR-<n>` id
+   * `reviewCommand`/`escalationTaskIdFor` already use. A non-empty list routes the observed
+   * failure to `blocked-fixable` and the existing synthetic fix task; it does not make the PR
+   * attributable to a plan task or widen `criteriaRecoverable` below.
    */
   unmetCriteria: CriterionVerdict[];
   /**
    * W1-T440: true when a `Remudero-Task:` trailer resolved a task id, so `unmetCriteria`
-   * above reflects an ACTUAL ledger read (`unmetFromLedger` was consulted — see
-   * `buildOpenPrViews`); false when no trailer resolved, so `unmetCriteria` is `[]` BY
-   * CONSTRUCTION and was never checked at all. Row 7 of {@link DISPOSITION_RULES} reads this
+   * above is attributable to a plan task. False means no trailer resolved; `unmetCriteria` may
+   * still contain the task-id-less review's own evidence via its synthetic `PR-<n>` key. Row 7
+   * of {@link DISPOSITION_RULES} reads this only after both structured fixable lists are empty,
    * to say which empty a failing review with no unmet criteria actually is — a genuine
    * contradiction (criteria WERE checked and none came back unmet) versus an unrecoverable
    * one (there was no trailer to check them against). `undefined` (no producer has set it,
    * e.g. an older fixture) is treated the SAME as `true` — the pre-existing "contradictory"
    * wording — so this is additive, never a silent behavior change for an unset field.
    *
-   * DELIBERATELY NOT WIDENED by W1-T456's filing-PR ledger read above: that read can populate
-   * `unmetCriteria` for a task-id-less PR too, but this field still answers ONLY "did a
+   * DELIBERATELY NOT WIDENED by the synthetic-key ledger read above: that read can populate
+   * `unmetCriteria` for any task-id-less PR, but this field still answers ONLY "did a
    * `Remudero-Task:` trailer resolve a task id" — test/openpr-taskid-resolver.test.ts locks a
    * plan-only filing PR to `criteriaRecoverable: false` regardless, so widening this field's
    * meaning would read as silently crediting an unattributed PR, which #1527 forbids.

@@ -1,0 +1,72 @@
+- id: W1-T2663
+  title: "A TASKLESS REVIEW WRITES FIX EVIDENCE THE SWEEP REFUSES TO READ — PR #3559 carried four executed-fail unmet criteria under the synthetic PR-3559 identity, but buildOpenPrViews consulted that identity only for plan filings, manufactured an empty list for this ordinary agent PR, and escalated instead of dispatching the existing synthetic fix rung"
+  repo: remudero
+  depends_on: [W1-T456, W1-T923]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 8.00
+  files:
+    - src/run-task.ts
+    - src/lib/sweep.ts
+    - test/filing-forward-reference.test.ts
+    - test/openpr-taskid-resolver.test.ts
+  origin: "operator-session#taskless-pr-review-evidence-recovery-2026-09-02"
+  plan_refs: ["W1-T100", "W1-T440", "W1-T456", "W1-T923"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED IN THE AZURE LEDGER ON 2026-09-02. PR #3559 had no resolvable plan task, so the
+    review lane correctly used its established synthetic identity `PR-3559`. At head
+    `a826a6e83ca8ad36381fee0596f77309b23281d7`, two `review.posted` rows under that identity
+    recorded `state: failure`, four `unmet_criteria`, four corresponding reasons, and
+    `proof_exec: [executed_fail, executed_fail, executed_fail, executed_fail, executed_pass]`.
+    The evidence was structured, current, and directly actionable.
+
+    THE NEXT SWEEP THREW IT AWAY. At 2026-09-02T01:49:20.696Z, the same head was dispositioned
+    `blocked-ambiguous` with the false reason `criteria unrecoverable (no Remudero-Task: trailer
+    to resolve them from)` and an escalation issue was opened. Five more passes repeated that
+    disposition. The fix rung received no criterion until the operator repaired the branch.
+
+    THE ASYMMETRY IS ONE CONDITIONAL. `reviewCommand`, `runReview`, `escalationTaskIdFor`, and
+    `fixRungTaskFor` already share `PR-<n>` as the identity for every task-id-less PR. However,
+    `buildOpenPrViews` creates `filingUnmetKey` only when `isPlanOnlyFilingPr` is true. Ordinary
+    agent-authored taskless PRs therefore write review evidence that their sweep reader refuses
+    to consume. W1-T456 deliberately preserved that ordinary population because it addressed a
+    filing-only incident; #3559 is the direct falsifier that now justifies widening the reader.
+
+    This task does not invent a plan-task identity or weaken task credit. `taskId` remains absent
+    and `criteriaRecoverable` remains false for taskless PRs. It only reads the synthetic identity
+    the review producer already wrote. A missing or successful ledger outcome still produces no
+    unmet criteria, and the existing ambiguous/gate-failure rows retain their order.
+  design: |
+    Replace the filing-only unmet-key fallback with the same unconditional `taskId ?? PR-<n>`
+    identity already used by the pending-review, escalation, gate-failure, and synthetic-fix
+    paths. Consult `unmetFromLedger` only when the live review status is failure, as today.
+
+    Keep `resolveOpenPrTaskId`, plan-filing attribution, `criteriaRecoverable`, strike policy,
+    review authority, and fix-rung construction unchanged. Update the nearby type documentation
+    so it no longer claims every taskless empty list proves the ledger was never consulted.
+  acceptance:
+    - claim: "an ordinary task-id-less PR with a failing live review recovers the unmet criteria written under its own synthetic PR-number identity"
+      proof: "unit test: test/filing-forward-reference.test.ts"
+    - claim: "that recovered evidence routes the PR to blocked-fixable so the existing synthetic fix rung can act without a plan task"
+      proof: "unit test: test/filing-forward-reference.test.ts"
+    - claim: "synthetic review evidence never invents plan-task attribution or makes the PR creditable to a task"
+      proof: "unit test: test/filing-forward-reference.test.ts"
+    - claim: "a task-id-less PR with no matching synthetic review evidence still produces no unmet criteria and cannot manufacture a fix dispatch"
+      proof: "unit test: test/filing-forward-reference.test.ts"
+    - claim: "the existing plan-filing recovery remains unchanged"
+      proof: "unit test: test/filing-forward-reference.test.ts"
+    - claim: "task-backed task-id resolution remains unchanged"
+      proof: "unit test: test/openpr-taskid-resolver.test.ts"
+  falsifier: |
+    Close without implementation if current main's `buildOpenPrViews` reads a failing ordinary
+    task-id-less PR's `review.posted{task_id: PR-<n>}` unmet criteria and derives
+    `blocked-fixable`. A review writer, escalation key, or synthetic fix task using that identity
+    is not sufficient; the real open-PR gateway must carry the structured criteria into the
+    disposition.
+  note: |
+    The id was atomically reserved at `refs/rmd-id/W1-T2663` before this shard was written.

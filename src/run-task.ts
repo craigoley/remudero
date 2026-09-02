@@ -25850,30 +25850,22 @@ export function buildOpenPrViews(
     // retry count/backoff, so prior heads and infrastructure refusals cannot spend its budget.
     const reviewOrphans = reviewOrphansFor(ledger, taskId, pr.headRefOid);
     const reviewAttempts = reviewAttemptsForInput(ledger, reviewLedgerKey, pr.url, pr.headRefOid, inputDigest);
-    // W1-T456 (DEFECT B): a plan-only filing PR deliberately carries no `Remudero-Task:`
-    // trailer (#1527's correctness rule) — `taskId` above is `undefined` for it BY DESIGN, so
-    // `unmetCriteria` below used to stay `[]` unconditionally and every failing filing fell
-    // straight to sweep.ts's row 7 ("criteria unrecoverable... escalating"), no matter how
-    // fixable the actual failure was. `reviewCommand`/`escalationTaskIdFor` already key EVERY
-    // task-id-less PR's `review.posted` ledger line with the SAME synthetic `PR-<n>` id (see
-    // unmetFromLedger's caller doc there) — reading unmet criteria back through that key for a
-    // POSITIVELY-marked filing PR (`isPlanOnlyFilingPr`, the SAME emitter signal
-    // `resolveOpenPrTaskId` already consults two lines above, never inferred from the absent
-    // trailer alone) lets a REAL failure reach sweep.ts's row 6 (`unmetCriteria.length > 0` ->
-    // blocked-fixable, which `fixRungTaskFor`'s synthetic-task branch already knows how to
-    // dispatch against with no plan task at all) instead of always falling through to row 7.
-    // `criteriaRecoverable` below is DELIBERATELY untouched (see its own doc and W1-T453's
-    // regression lock, test/openpr-taskid-resolver.test.ts) — this widens WHERE unmet criteria
-    // can be READ FROM, never what "recoverable" means.
-    const filingUnmetKey = !taskId && isPlanOnlyFilingPr(ledger, pr.url) ? `PR-${pr.number}` : undefined;
-    const unmetKey = taskId ?? filingUnmetKey;
+    // Every task-id-less review is written under `PR-<n>` by reviewCommand/runReview, and the
+    // escalation + synthetic fix-task paths use that exact identity too. W1-T456 originally
+    // read it back only for positively marked plan filings. That left ordinary agent-authored
+    // PRs blind to their own structured review evidence: PR #3559 carried four executed-fail
+    // `unmet_criteria` values under `PR-3559`, yet the sweep manufactured `[]`, escalated
+    // "criteria unrecoverable", and never dispatched the already-supported synthetic fix rung.
+    // Read the identity the producer actually wrote for every PR; an absent row still returns
+    // `[]`, and this does not invent a creditable plan task or widen `criteriaRecoverable`.
+    const unmetKey = taskId ?? `PR-${pr.number}`;
     // W1-T913: the SAME synthetic `PR-<n>` fallback `reviewCommand`/`runReview` already key every
     // `review.pending_posted`/`review.posted` ledger line with (task.id there, `taskId ?? PR-<n>`
     // here) — never a second, independently-derived key. Only consulted when the LIVE rollup
     // itself reads "pending" (never speculatively), and only trusted when the ledger's own
     // `head_sha` still matches the CURRENT head — an older pending record surviving under a
     // superseded head must never be read as dating the head observed right now.
-    const pendingRecord = reviewState === "pending" ? lastPendingReviewStatusFromLedger(ledger, unmetKey ?? `PR-${pr.number}`) : undefined;
+    const pendingRecord = reviewState === "pending" ? lastPendingReviewStatusFromLedger(ledger, unmetKey) : undefined;
     const reviewPendingSince = pendingRecord && pendingRecord.headSha === pr.headRefOid ? pendingRecord.postedAt : undefined;
     // W1-T923 (design note ii): the SAME synthetic `PR-<n>` fallback {@link escalationTaskIdFor}
     // already mints, but WITH NO `isPlanOnlyFilingPr` restriction — that restriction is what
@@ -25889,13 +25881,11 @@ export function buildOpenPrViews(
       reviewPendingSince,
       reviewVerdictPostedAt,
       checksState,
-      unmetCriteria: reviewState === "failure" && unmetKey ? unmetFromLedger(ledger, unmetKey) : [],
+      unmetCriteria: reviewState === "failure" ? unmetFromLedger(ledger, unmetKey) : [],
       // W1-T440: whether a `Remudero-Task:` trailer resolved a task id AT ALL — i.e. whether
-      // `unmetCriteria` above reflects a real ledger read or is `[]` only because there was
-      // never a task id to read against. sweep.ts's row 7 reads this to name which empty a
-      // failing review with no unmet criteria actually is. NOTE (W1-T456): `unmetCriteria` can
-      // now ALSO be populated for a task-id-less PR (the `filingUnmetKey` fallback above) — this
-      // stays `false` even then, on purpose (see the note above `filingUnmetKey`).
+      // `unmetCriteria` above is attributable to a plan task. The synthetic key can populate it
+      // for a task-id-less PR too, but that does not make the PR creditable to a plan task; this
+      // stays `false` for that population on purpose.
       criteriaRecoverable: taskId !== undefined,
       // W1-T2439 (half one) — THE PRODUCER `isPlanFiling` HAS BEEN WAITING FOR. Its declaration
       // (lib/sweep.ts) shipped the mechanism end-to-end and said so in its own SCOPE note:
