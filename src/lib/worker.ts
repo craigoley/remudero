@@ -78,12 +78,18 @@ import {
   type ContainedSpawnOptions,
 } from "./worker-containment.js";
 import {
+  abandonProviderWindowMeasurement,
+  beginProviderWindowMeasurement,
   claudeCapacityFromUsage,
+  finishProviderWindowMeasurement,
   readCodexCapacity,
   selectWorkerProvider,
   spawnCodexWorker,
   type CodexCapacityDeps,
   type ProviderCapacity,
+  type ProviderSelection,
+  type ProviderWindowConsumption,
+  type ProviderWindowMeasurement,
 } from "./worker-provider.js";
 
 /**
@@ -318,6 +324,12 @@ export interface WorkerResult {
    * and no duration at all (see the rationale this task was filed from).
    */
   workerDurationMs?: number;
+  /**
+   * Reset-stable subscription-window percentage points consumed while this worker exclusively
+   * owned its selected provider. Present only on the opt-in multi-provider path; the default
+   * Claude-only path performs no extra capacity reads and omits this field byte-for-byte.
+   */
+  windowConsumption?: ProviderWindowConsumption;
 }
 
 /** `model`/`effort` label logged when a call rides no explicit mount override
@@ -504,6 +516,13 @@ export function workerLedgerFields(r: WorkerResult): {
   stderr_excerpt?: string;
   lost_grants?: string[];
   worker_duration_ms?: number;
+  window_consumption?: {
+    provider: "claude" | "codex";
+    percent_consumed: number | null;
+    window?: string;
+    resets_at?: number | string;
+    reason?: string;
+  };
 } {
   const stderrExcerpt = workerFailureExcerpt(r);
   return {
@@ -573,6 +592,17 @@ export function workerLedgerFields(r: WorkerResult): {
     // ledger line simply carries no `worker_duration_ms` key at all, the same "absent, never
     // guessed" discipline `max_turns` above already keeps.
     worker_duration_ms: r.workerDurationMs,
+    ...(r.windowConsumption
+      ? {
+          window_consumption: {
+            provider: r.windowConsumption.provider,
+            percent_consumed: r.windowConsumption.percentConsumed,
+            ...(r.windowConsumption.windowName ? { window: r.windowConsumption.windowName } : {}),
+            ...(r.windowConsumption.resetsAt !== undefined ? { resets_at: r.windowConsumption.resetsAt } : {}),
+            ...(r.windowConsumption.reason ? { reason: r.windowConsumption.reason } : {}),
+          },
+        }
+      : {}),
   };
 }
 
@@ -1044,10 +1074,10 @@ export interface SpawnWorkerArgs {
   config?: Config;
   /** Capacity-reader seams for provider-routing tests; production reads both subscriptions live. */
   providerRouting?: {
-    readClaude?: () => Promise<ProviderCapacity>;
+    readClaude?: (request?: Pick<ClaudeCapacityDeps, "forceRefresh">) => Promise<ProviderCapacity>;
     readCodex?: (
       config: Config,
-      request: Pick<CodexCapacityDeps, "requestedModel" | "requestedEffort">,
+      request: Pick<CodexCapacityDeps, "requestedModel" | "requestedEffort" | "forceRefresh" | "selectedModel">,
     ) => Promise<ProviderCapacity>;
     tieBreaker?: number;
   };
@@ -1250,6 +1280,8 @@ let claudeCapacityCache: { at: number; value: ProviderCapacity } | undefined;
 export interface ClaudeCapacityDeps {
   now?: () => number;
   openSession?: () => UsageProbeSession;
+  /** Bypass the routing cache at an attribution boundary. */
+  forceRefresh?: boolean;
 }
 
 export function clearClaudeCapacityCache(): void {
@@ -1262,7 +1294,7 @@ export async function readClaudeProviderCapacity(
 ): Promise<ProviderCapacity> {
   const now = deps.now ?? Date.now;
   const cacheMs = config.workerProviders?.capacityCacheMs ?? 60_000;
-  if (claudeCapacityCache && now() - claudeCapacityCache.at < cacheMs) return claudeCapacityCache.value;
+  if (!deps.forceRefresh && claudeCapacityCache && now() - claudeCapacityCache.at < cacheMs) return claudeCapacityCache.value;
   const session = (deps.openSession ?? openUsageProbeSession)();
   try {
     const method = session.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET;
@@ -1291,6 +1323,53 @@ export async function readClaudeProviderCapacity(
     } catch {
       /* capacity teardown never masks the capacity verdict */
     }
+  }
+}
+
+async function readFreshSelectedCapacity(
+  args: SpawnWorkerArgs,
+  config: Config,
+  selection: ProviderSelection,
+): Promise<ProviderCapacity> {
+  if (selection.provider === "codex") {
+    return (args.providerRouting?.readCodex ?? readCodexCapacity)(config, {
+      requestedModel: args.model,
+      requestedEffort: args.effort,
+      forceRefresh: true,
+      selectedModel: selection.capacity.model,
+    });
+  }
+  return (args.providerRouting?.readClaude ?? ((request) => readClaudeProviderCapacity(config, request)))({
+    forceRefresh: true,
+  });
+}
+
+async function beginSelectedCapacityMeasurement(
+  args: SpawnWorkerArgs,
+  config: Config,
+  selection: ProviderSelection,
+): Promise<ProviderWindowMeasurement | undefined> {
+  try {
+    return beginProviderWindowMeasurement(await readFreshSelectedCapacity(args, config, selection));
+  } catch {
+    // Attribution telemetry is best-effort: an unreadable boundary omits consumption rather than
+    // blocking an otherwise available subscription worker before its model call begins.
+    return undefined;
+  }
+}
+
+async function finishSelectedCapacityMeasurement(
+  args: SpawnWorkerArgs,
+  config: Config,
+  selection: ProviderSelection,
+  measurement: ProviderWindowMeasurement | undefined,
+): Promise<ProviderWindowConsumption | undefined> {
+  if (!measurement) return undefined;
+  try {
+    return finishProviderWindowMeasurement(measurement, await readFreshSelectedCapacity(args, config, selection));
+  } catch {
+    abandonProviderWindowMeasurement(measurement);
+    return { provider: selection.provider, percentConsumed: null, reason: "capacity-unreadable" };
   }
 }
 
@@ -1325,6 +1404,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
 
   const config = args.config ?? loadConfig();
   const providers = enabledWorkerProviders(config);
+  let routedClaudeSelection: ProviderSelection | undefined;
   if (!(providers.length === 1 && providers[0] === "claude")) {
     const capacities = await Promise.all(
       providers.map((provider) => {
@@ -1358,10 +1438,18 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     );
     if (selection.provider === "codex") {
       assertLiveSpawnAllowed(`spawnCodexWorker for task ${args.taskId ?? "<no taskId>"}`);
-      const result = await spawnCodexWorker(args, config, selection.capacity);
-      result.accountLabel = selection.capacity.accountLabel;
-      return result;
+      const measurement = await beginSelectedCapacityMeasurement(args, config, selection);
+      try {
+        const result = await spawnCodexWorker(args, config, selection.capacity);
+        result.accountLabel = selection.capacity.accountLabel;
+        result.windowConsumption = await finishSelectedCapacityMeasurement(args, config, selection, measurement);
+        return result;
+      } catch (error) {
+        if (measurement) abandonProviderWindowMeasurement(measurement);
+        throw error;
+      }
     }
+    routedClaudeSelection = selection;
   }
   // W1-T113 PREFLIGHT: resolve the real binary FRESH (see resolveClaudeExecutable's
   // doc, above) before any worker-home/keychain work runs. Throws
@@ -1532,8 +1620,8 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     if (typeof args.maxBudgetUsd === "number") options.maxBudgetUsd = args.maxBudgetUsd;
     if (args.tools) options.tools = args.tools;
 
-    // impl-EM LIVE-SPAWN GUARD — the last statement before the SDK is invoked, and the SDK call is
-    // what creates the paid worker. Everything above this line is local and free (config load, binary
+    // impl-EM LIVE-SPAWN GUARD — the final authority gate before the optional attribution boundary
+    // and the SDK invocation; only the SDK call creates the paid worker. Everything above this line is local and free (config load, binary
     // resolve, worker-home materialisation, keychain unlock, env construction) and pushes nothing,
     // reaches no network and spends nothing — verified over the whole range. Those steps ALSO refuse
     // on their own for bad input (an invalid settings file, an absent toolchain, a locked keychain),
@@ -1544,7 +1632,8 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     // a test injecting it creates no process and is not what this refuses. What it stops is the shape
     // that actually cost money — a test reaching the real SDK through an un-stubbed dep or an
     // `as never` cast, which is how test/mounts-wiring.test.ts once spent $1.42+ and left six ghost
-    // branches behind.
+    // branches behind. The multi-provider capacity read below is control-plane telemetry, not a
+    // model spawn, and catches its own failure without weakening this guard.
     if (args.queryFn === undefined) {
       assertLiveSpawnAllowed(`spawnWorker for task ${args.taskId ?? "<no taskId>"}`);
     }
@@ -1571,6 +1660,12 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         controller.abort();
       });
     }
+
+    // Multi-provider installs take fresh, reset-aware boundaries only after every local Claude
+    // preflight has cleared. Claude-only installs preserve the existing zero-extra-read path.
+    const measurement = routedClaudeSelection
+      ? await beginSelectedCapacityMeasurement(args, config, routedClaudeSelection)
+      : undefined;
 
     try {
       const result = await withWorkerGroupTeardown(
@@ -1610,8 +1705,12 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         teardownContained,
       );
       result.provider = "claude";
+      result.windowConsumption = routedClaudeSelection
+        ? await finishSelectedCapacityMeasurement(args, config, routedClaudeSelection, measurement)
+        : undefined;
       return result;
     } catch (err) {
+      if (measurement) abandonProviderWindowMeasurement(measurement);
       // W1-T1045: runs on EVERY thrown error, but only REPLACES it when the watchdog itself
       // tripped (`abandonment` populated) — any other transport failure passes through
       // unchanged, exactly as before this task. Replacing rather than adding a second reject

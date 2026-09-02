@@ -667,9 +667,12 @@ import { buildReceipt, resolveReceiptLedgerLines, type ReceiptLedgerRead } from 
 import { buildReplay, resolveReplayLedgerLines, type ReplayLedgerRead } from "./lib/ledger-replay.js";
 import { buildDepReviewArmUnreachableEscalation, buildDepReviewEscalation, decideDepReview } from "./lib/dep-review.js";
 import {
+  headWasCreatedAfterReflogSnapshot,
+  parseHeadReflog,
   recordHeadProviderAfterPush,
   resolveReviewProviderProvenance,
   reviewProviderProvenanceLedgerFields,
+  type HeadReflogEntry,
 } from "./lib/review-provider-provenance.js";
 import { decideAutoTriage, newFeedbackIdsOldestFirst, oldestFeedbackAgeMs, readAutoTriageMarker, recordAutoTriageFire, autoTriageMarkerPath, triageLockPath, claimTriageWithLogging, releaseTriageClaimWithLogging, gitTriageClaimReserver, type AutoTriageDecision, type TriageClaimReserver, type TriageClaimResult } from "./lib/auto-triage.js";
 import { decideDispatchClaim, releaseDispatchClaim, gitDispatchClaimReserver, dispatchClaimRef, type DispatchClaimReserver } from "./lib/dispatch-claim.js";
@@ -1429,6 +1432,35 @@ export function stripRepoRootFlag(argv: string[]): string[] {
   const i = argv.indexOf("--repo-root");
   if (i < 0) return argv;
   return [...argv.slice(0, i), ...argv.slice(i + 2)];
+}
+
+function readWorktreeHeadReflog(worktreePath: string): HeadReflogEntry[] | undefined {
+  try {
+    return parseHeadReflog(
+      execFileSync("git", ["-C", worktreePath, "reflog", "show", "--format=%H%x09%gs", "HEAD"], {
+        encoding: "utf8",
+      }),
+    );
+  } catch {
+    // Provenance is optional evidence: an unreadable worktree reflog must suppress attribution,
+    // never block the worker or manufacture ownership from matching local/live head SHAs.
+    return undefined;
+  }
+}
+
+function workerCreatedCurrentHead(
+  worktreePath: string,
+  before: ReadonlyArray<HeadReflogEntry> | undefined,
+): boolean {
+  if (!before) return false;
+  try {
+    const headSha = execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    const after = readWorktreeHeadReflog(worktreePath);
+    return after ? headWasCreatedAfterReflogSnapshot(before, after, headSha) : false;
+  } catch {
+    // The same fail-closed provenance contract as the snapshot read above.
+    return false;
+  }
 }
 
 /** Owner org, read from THIS repo's origin — no hardcoded account in the tree. */
@@ -4094,6 +4126,34 @@ export function fallbackPushCause(
 }
 
 /**
+ * The scope-regime SELECTION {@link fixRungScopeStandDownReason} needs twice (once for the
+ * current diff, once for the baseline it stands down against) and {@link renderFixPrompt}'s
+ * INHERITED SCOPE line (W1-T2607) needs a third time, applied to that SAME baseline — factored
+ * out here so every caller reads ONE implementation of "which regime, which predicate" rather
+ * than a second copy that could drift (design note (i), W1-T2607). Plan-only tasks (every
+ * declared file itself plan-scoped, {@link isInPlanScope}) are graded by plan-scope membership
+ * ({@link outOfPlanScopeFiles}); everything else by exact declared-file membership
+ * ({@link scopeGuardOutOfScopeFiles} — the SAME function the implement path's push-and-flag
+ * disposition already uses, never a parallel reimplementation).
+ *
+ * Returns `[]` when `declaredFiles` is empty/undefined — a task with no declared scope gives
+ * this predicate nothing to compare against, matching {@link fixRungScopeStandDownReason}'s own
+ * silent (fail-OPEN) contract for that case. A caller that needs FAIL-CLOSED semantics on an
+ * undeclared scope (the implement path) calls {@link scopeGuardOutOfScopeFiles} directly instead.
+ *
+ * PURE: no I/O, both inputs are the caller's own reads.
+ */
+export function outOfDeclaredScopeFiles(
+  files: readonly string[],
+  declaredFiles: readonly string[] | undefined,
+): string[] {
+  if (!declaredFiles || declaredFiles.length === 0) return [];
+  return declaredFiles.every(isInPlanScope)
+    ? outOfPlanScopeFiles([...files])
+    : scopeGuardOutOfScopeFiles(files, declaredFiles);
+}
+
+/**
  * W1-T1227 (THE FIX RUNG'S OWN REPAIR BREAKS ITS OWN PR'S REVIEWABILITY): the fix rung's
  * pre-strike scope gate. `currentDiffFiles` is the PR's live changed-file list as of RIGHT NOW
  * (before the next strike); `baselineDiffFiles` is the SAME list captured before this
@@ -4125,10 +4185,10 @@ export function fixRungScopeStandDownReason(
 ): { reason: string; scopeKind: "files" | "plan"; newOutOfScopePaths: string[] } | undefined {
   if (!declaredFiles || declaredFiles.length === 0) return undefined;
   const planOnlyTask = declaredFiles.every(isInPlanScope);
-  const outOfScope = (files: readonly string[]): string[] =>
-    planOnlyTask ? outOfPlanScopeFiles([...files]) : scopeGuardOutOfScopeFiles(files, declaredFiles);
-  const alreadyOutOfScope = new Set(outOfScope(baselineDiffFiles));
-  const newOutOfScopePaths = outOfScope(currentDiffFiles).filter((f) => !alreadyOutOfScope.has(f));
+  const alreadyOutOfScope = new Set(outOfDeclaredScopeFiles(baselineDiffFiles, declaredFiles));
+  const newOutOfScopePaths = outOfDeclaredScopeFiles(currentDiffFiles, declaredFiles).filter(
+    (f) => !alreadyOutOfScope.has(f),
+  );
   if (newOutOfScopePaths.length === 0) return undefined;
   const scopeKind: "files" | "plan" = planOnlyTask ? "plan" : "files";
   const reason =
@@ -5521,6 +5581,11 @@ export function renderFixPrompt(opts: {
   round: number;
   branch: string;
   evidence: FixEvidence;
+  // W1-T2607: the changed-file list as it stood BEFORE this invocation's first strike — the SAME
+  // baseline {@link fixRungScopeStandDownReason} exempts. Optional and best-effort: omitted (or
+  // simply undefined, matching that guard's own fail-OPEN contract for an unreadable baseline)
+  // means no inherited-scope line renders at all, never a guessed baseline.
+  baselineDiffFiles?: readonly string[];
 }): string {
   const mode = deriveFixMode(opts.evidence);
   const header = `You are a FIX worker for task ${opts.task.id} (${opts.task.title}) — round ${opts.round}.\nMODE: ${mode}.`;
@@ -5536,15 +5601,35 @@ export function renderFixPrompt(opts: {
   // W1-T1227: named EXPLICITLY, mode-agnostic (every branch below splices this in), so the fix
   // worker cannot claim it was never told. Omitted only when the task declares no `files` scope
   // at all — silence here is never a licence, it is simply nothing to report.
+  //
+  // W1-T2607: paths this branch already carried before this invocation's first strike, that fall
+  // outside the declared scope, computed with the SAME predicate {@link fixRungScopeStandDownReason}
+  // exempts them by ({@link outOfDeclaredScopeFiles}) — never a second judgment on the same facts.
+  // Empty whenever `baselineDiffFiles` was never captured (fail OPEN, matching that guard's own
+  // discipline) or simply carries nothing out of scope; either way the block below renders no
+  // INHERITED SCOPE line, matching the clean path's existing shape.
+  const inheritedOutOfScope =
+    opts.task.files && opts.task.files.length > 0 && opts.baselineDiffFiles
+      ? outOfDeclaredScopeFiles(opts.baselineDiffFiles, opts.task.files)
+      : [];
   const scopeBlock =
     opts.task.files && opts.task.files.length > 0
       ? [
           "",
           `DECLARED SCOPE (W1-T1227): this task's PR may only touch: ${opts.task.files.join(", ")}. If the ` +
             `genuine fix requires a path outside that list, do NOT push it — say so in your REPORT's ` +
-            `'## Follow-ups' section instead and leave the branch as-is. A commit outside declared scope makes ` +
-            `the WHOLE PR unreviewable (Standing rule 15/25 refuse the next round on the file this fix itself ` +
-            `wrote, and only a human can undo it), not merely this one fix.`,
+            `'## Follow-ups' section instead and leave the branch as-is; this task's declared scope is not ` +
+            `yours to widen. A commit outside declared scope is PUSHED AND FLAGGED (\`scope_guard.overrun\`), ` +
+            `not blocked — but the NEXT round's fix rung stands down on any NEW out-of-scope path THIS rung ` +
+            `adds, so treat "do not push it" as the real rule, not a formality.`,
+          ...(inheritedOutOfScope.length > 0
+            ? [
+                `INHERITED SCOPE (W1-T2607): this branch already carries path(s) outside the declared list ` +
+                  `from an earlier round: ${inheritedOutOfScope.join(", ")}. They predate this invocation, ` +
+                  `this rung is judged only on what IT adds, and neither removing them nor reporting them ` +
+                  `again is required of this round.`,
+              ]
+            : []),
         ]
       : [];
   const footer = [
@@ -8782,6 +8867,10 @@ export async function runFixRung(opts: {
       round: attempt,
       branch: opts.branch,
       evidence,
+      // W1-T2607: the SAME baseline captured above (before this invocation's first strike) that
+      // fixRungScopeStandDownReason's pre-strike gate already exempts — so the worker is told
+      // which of its own branch's out-of-scope paths are inherited, not re-derived a second way.
+      baselineDiffFiles,
     });
     // W1-T199: TAG THE STRIKE WITH THE VERDICT REGIME IT WAS SPENT AGAINST. A strike
     // spent when no proof could execute is a strike against KEYWORD NOISE; one spent
@@ -8819,6 +8908,7 @@ export async function runFixRung(opts: {
       taskId: opts.taskId,
     };
 
+    const workerHeadReflogBefore = readWorktreeHeadReflog(opts.worktreePath);
     let fixResult: WorkerResult;
     // W1-T1219: the spawn's own elapsed milliseconds on the SUCCESS path — the same field
     // `fix.spawn_abandoned` already carries on the failure path (below), folded into
@@ -8864,6 +8954,8 @@ export async function runFixRung(opts: {
       );
       throw e;
     }
+
+    const workerHeadCreatedLocally = workerCreatedCurrentHead(opts.worktreePath, workerHeadReflogBefore);
 
     // A worker DEMONSTRABLY ran (spawn returned rather than throwing) — only now is this round
     // even CANDIDATE for a real strike.
@@ -8969,6 +9061,7 @@ export async function runFixRung(opts: {
         prUrl: opts.prUrl,
         source: "fix",
         worker: fixResult,
+        workerHeadCreatedLocally,
         priorHeadSha,
       },
       {
@@ -11990,6 +12083,7 @@ async function runTask(
     // worker (mount steps UP, §9) runs BEFORE any third patch attempt — that third attempt's
     // prompt carries the diagnose findings verbatim, never a third blind patch (acceptance #1).
     say("implement worker");
+    const workerHeadReflogBefore = readWorktreeHeadReflog(worktreePath);
     let impl!: WorkerResult;
     const attemptImplement = async (findings?: string): Promise<AttemptOutcome> => {
       impl = account(
@@ -12212,6 +12306,8 @@ async function runTask(
         question: question.question.slice(0, 120),
       });
     }
+
+    const workerHeadCreatedLocally = workerCreatedCurrentHead(worktreePath, workerHeadReflogBefore);
 
     // ── PR (worker REPORT or orchestrator fallback).
     let prUrl = parseReport(fullText(impl))?.prUrl;
@@ -12486,7 +12582,7 @@ async function runTask(
     // Stamp the provenance trailer (deriveStatus source (c)) before gating.
     ensureTaskTrailer(prUrl, taskId, log);
     recordHeadProviderAfterPush(
-      { taskId, prUrl, source: "implement", worker: impl },
+      { taskId, prUrl, source: "implement", worker: impl, workerHeadCreatedLocally },
       {
         readProducedHeadSha: () =>
           execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
@@ -16491,6 +16587,28 @@ export type OverlapWarningDeps = {
 };
 
 /**
+ * W1-T2606 — the overlap advisory's OWN failure arm, in {@link MintDegradation}'s own shape so a
+ * reader comparing it against `openPrSurfaceOutage`'s (the ID half of this same outage, W1-T2324)
+ * sees ONE vocabulary rather than two, per design (iii). `source` is always `"open-prs"` — the
+ * only surface this reader touches — and `reason` carries the caught failure verbatim.
+ *
+ * NEVER the {@link UNTRUSTED_SOURCE_REASON_PREFIX} arm: that prefix marks a source that READ FINE
+ * and answered something no other source corroborates, which is a different fact from this one — a
+ * read that did not complete at all. This type exists only for the latter.
+ */
+export type ScopeReadOutage = MintDegradation;
+
+/**
+ * W1-T2606 — the human-facing line for a {@link ScopeReadOutage}. Deliberately worded so it cannot
+ * be mistaken for either a clean zero-overlap read (which still returns zero lines) or a
+ * rare-overlap warning (which names a PR and a path): "could not check" and "checked, clean" must
+ * never collapse onto the same empty output.
+ */
+export function scopeReadOutageLine(outage: ScopeReadOutage): string {
+  return `(overlap check incomplete: the open-PR file scope could not be read — ${outage.reason} — this candidate was NOT checked for overlap, not confirmed clean)`;
+}
+
+/**
  * W1-T917 — THE READER. `rareOverlapWarnings` shipped with W1-T533/#1968 and had ZERO callers
  * outside its own module; W1-T533's design (iv) forbids exactly that ("this must print where a
  * filer already reads, or it is not worth building"). This is the call site, and the mint path is
@@ -16501,9 +16619,11 @@ export type OverlapWarningDeps = {
  * adjacent work would be worse than the duplication it prevents.
  *
  * AND IT DEGRADES RATHER THAN THROWS. This puts network I/O into the verb an operator runs before
- * every filing; an advisory that can break the verb it advises is worse than none. Any failure —
- * unreachable, rate-limited, malformed — yields NO lines, exactly as the reservation notice below
- * already degrades to silence.
+ * every filing; an advisory that can break the verb it advises is worse than none. But degrading
+ * must not mean going MUTE (W1-T2606): a genuine failure — unreachable, rate-limited, malformed —
+ * now yields exactly ONE {@link scopeReadOutageLine}, never the bare `[]` a clean no-overlap read
+ * also produces. The two are distinguishable in the OUTPUT, not merely internally. This still never
+ * throws, so it cannot break the verb it advises.
  */
 export function overlapWarningLinesFor(
   candidateFiles: readonly string[],
@@ -16525,8 +16645,8 @@ export function overlapWarningLinesFor(
       DEFAULT_OVERLAP_WARNING_POLICY,
     );
     return rareOverlapWarningLines(warnings);
-  } catch {
-    return [];
+  } catch (e) {
+    return [scopeReadOutageLine({ source: "open-prs", reason: (e as Error).message })];
   }
 }
 
@@ -16543,10 +16663,23 @@ export function candidateFilesFromArgs(rest: readonly string[]): string[] {
 }
 
 /**
+ * W1-T2606 — `--offline`'s own suppression line, matching the id surface's existing
+ * floor-not-guarantee wording (`nextTaskIdCommand`, just below): deliberate suppression and an
+ * inability to read are different facts, and neither may read as "checked, clean".
+ */
+const OFFLINE_SCOPE_NOT_READ_LINE =
+  "(--offline: open-PR files were NOT read — the overlap check above did not run, not confirmed clean)";
+
+/**
  * W1-T917 — the ENTIRE advisory decision, including the `--offline` suppression, as one pure-ish
  * exported function. Pushed out of `nextTaskIdCommand` deliberately: what stays in the command is a
  * two-line print loop, and everything a test could meaningfully assert lives here instead of behind
  * a coverage exemption the gate would (correctly) refuse.
+ *
+ * `--offline` still spends nothing (W1-T2606 changes what is SAID, never what is SPENT): with no
+ * candidate files there was never anything to check, online or off, so nothing is printed either —
+ * exactly as `overlapWarningLinesFor`'s own empty-candidate short circuit already does. Only when a
+ * check was actually requested (`--files` present) does suppressing it need announcing.
  */
 export function overlapAdvisoryLines(
   rest: readonly string[],
@@ -16556,8 +16689,9 @@ export function overlapAdvisoryLines(
   planPath: string,
   deps: OverlapWarningDeps = {},
 ): string[] {
-  if (offline) return [];
-  return overlapWarningLinesFor(candidateFilesFromArgs(rest), owner, repo, planPath, deps);
+  const candidateFiles = candidateFilesFromArgs(rest);
+  if (offline) return candidateFiles.length === 0 ? [] : [OFFLINE_SCOPE_NOT_READ_LINE];
+  return overlapWarningLinesFor(candidateFiles, owner, repo, planPath, deps);
 }
 
 /**

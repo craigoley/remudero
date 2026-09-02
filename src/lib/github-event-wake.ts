@@ -486,7 +486,9 @@ export interface SweepWakeSignal {
   wake(): void;
   /** Clear an already-observed wake immediately before the top-level loop runs its full sweep. */
   acknowledge(): void;
-  sleep(ms: number): Promise<void>;
+  /** Distinguish an event edge from ordinary timer expiry so in-flight work can bypass only
+   * the full-sweep cadence interval, without turning every heartbeat into a full sweep. */
+  sleep(ms: number): Promise<"wake" | "timeout">;
   close(): void;
 }
 
@@ -505,20 +507,20 @@ export function createSweepWakeSignal(
   timers: SweepWakeTimerDeps = realSweepWakeTimers,
 ): SweepWakeSignal {
   let pending = initiallyPending;
-  let activeWait: { timer: unknown; resolve: () => void } | undefined;
-  const finishActiveWait = () => {
+  let activeWait: { timer: unknown; resolve: (result: "wake" | "timeout") => void } | undefined;
+  const finishActiveWait = (result: "wake" | "timeout") => {
     const active = activeWait;
     if (!active) return;
     activeWait = undefined;
     timers.clearTimer(active.timer);
-    active.resolve();
+    active.resolve(result);
   };
   return {
     wake() {
       pending = true;
       if (activeWait) {
         pending = false;
-        finishActiveWait();
+        finishActiveWait("wake");
       }
     },
     acknowledge() {
@@ -527,20 +529,20 @@ export function createSweepWakeSignal(
     sleep(ms) {
       if (pending) {
         pending = false;
-        return Promise.resolve();
+        return Promise.resolve("wake");
       }
-      return new Promise<void>((resolve) => {
+      return new Promise<"wake" | "timeout">((resolve) => {
         const timer = timers.setTimer(() => {
           if (!activeWait) return;
           activeWait = undefined;
-          resolve();
+          resolve("timeout");
         }, ms);
         activeWait = { timer, resolve };
       });
     },
     close() {
       pending = false;
-      finishActiveWait();
+      finishActiveWait("timeout");
     },
   };
 }
@@ -588,7 +590,7 @@ export function watchSweepWakeMarker(
 /** What `wireSweepWakeToDaemon` hands `run-task.ts`'s `daemonCommand` — a drop-in replacement
  *  for `DaemonDeps.sleep` plus the one cleanup hook daemon shutdown must call. */
 export interface SweepWakeWiring {
-  sleep: (ms: number) => Promise<void>;
+  sleep: (ms: number) => Promise<"wake" | "timeout">;
   /** Consume the durable marker and clear its in-memory signal immediately before a full sweep. */
   acknowledge(): void;
   /** Closes the underlying `fs.watch` watcher — MUST be called on every daemon shutdown path
@@ -649,7 +651,7 @@ export function wireSweepWakeToDaemon(
   wakeForCurrentMarker();
   const sleep = (ms: number) => {
     // `fs.watch` is an acceleration edge, never the source of truth. Re-read the durable level
-    // immediately before every top-level poll wait so a dropped/platform-delayed notification
+    // immediately before every daemon poll wait so a dropped/platform-delayed notification
     // cannot strand an already-written marker until the full timer expires.
     wakeForCurrentMarker();
     return signal.sleep(ms);
