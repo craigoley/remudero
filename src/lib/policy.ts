@@ -43,6 +43,26 @@ export interface PolicyHeadroomRung {
   limitPct: number;
 }
 
+/**
+ * One OPERATOR-RATIFIED row of {@link PolicyValues.armCalibrationBands} (W1-T2579) — see that
+ * field's own doc for the seam this feeds. `class` names a {@link
+ * import("./verdict-calibration.js").VerdictClass} `decideAutoMergeArm` (src/lib/review.ts) may
+ * band: only `"full-pass"`/`"keyword-floor"` are ever consulted — `"degraded-arm"` (the CAPPED
+ * class) is refused eligibility BY CONSTRUCTION, at the call site, never by validation here, so
+ * a row naming it simply never matches anything. `verdict: "hold"` refuses the arm; `"notify"`
+ * arms and carries `note` in the decision reason. Loaded STRICTLY (a row that fails this shape
+ * check throws {@link PolicyError} at load, same as every other policy row) — the fail-INERT
+ * half of this feature lives entirely in `decideAutoMergeArm`'s own runtime consult (a
+ * shape-valid row naming a class the caller does not resolve, or a bands array injected directly
+ * by a caller that bypassed this loader, is what stays inert there), not in tolerating a
+ * malformed COMMITTED ratification.
+ */
+export interface ArmCalibrationBandRow {
+  class: string;
+  verdict: "hold" | "notify";
+  note?: string;
+}
+
 /** The plain, consumer-facing values every W1-T253 read site will resolve against. */
 export interface PolicyValues {
   proofTimeoutMs: number;
@@ -237,6 +257,20 @@ export interface PolicyValues {
   githubEventWake: {
     dedupCapacity: number;
   };
+  /**
+   * W1-T2579 — THE ARM GATE'S OPERATOR-RATIFIED BAND TABLE. `decideAutoMergeArm`
+   * (src/lib/review.ts) consults this AFTER its existing refusals, on the already-arming
+   * `full-pass`/`keyword-floor` path only — it can hold or annotate what today arms, never
+   * arm what today refuses (the CAPPED class and the operator-override path are evaluated
+   * before this table and are untouchable by it). SHIPS EMPTY, deliberately (design (iv)):
+   * `verdict-calibration.ts` (W1-T424) and `measurement_cadence` (W1-T1259) MEASURE per-class
+   * outcomes but never WRITE this table — a figure reaches a band only through a plan PR an
+   * operator merges. OPTIONAL, same absent-means-default shape as every other cadence row in
+   * this file, but the default is `[]` (not a triplet) — an absent table and an empty table are
+   * BYTE-IDENTICAL to no table at all, the fail-inert contract this row's whole existence rests
+   * on (test/arm-calibration-bands.test.ts).
+   */
+  armCalibrationBands: ArmCalibrationBandRow[];
 }
 
 /** One field's provenance, as recorded on load — see this module's header. */
@@ -471,6 +505,39 @@ function validateHeadroomCurve(
 }
 
 /**
+ * Validate `armCalibrationBands` (W1-T2579) — OPTIONAL, absent means `[]`, matching every
+ * other optional row's absent-means-default shape (`autoTriage` etc., above). UNLIKE those,
+ * there is no single `{value, origin}` wrapper: this is a plain array of rows, each own its
+ * own shape — so a PRESENT row is validated STRICTLY (a malformed COMMITTED row throws, same
+ * as any other policy field) while the fail-INERT half of this feature lives at the consult
+ * site ({@link import("./review.js").decideAutoMergeArm}), not here — see {@link
+ * ArmCalibrationBandRow}'s own doc for why that split is deliberate.
+ */
+function validateArmCalibrationBands(raw: unknown): ArmCalibrationBandRow[] {
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw)) {
+    throw new PolicyError("policy.yaml: 'armCalibrationBands' must be an array of band rows.");
+  }
+  return raw.map((row, i) => {
+    const path = `armCalibrationBands[${i}]`;
+    if (!isPlainObject(row)) {
+      throw new PolicyError(`policy.yaml: '${path}' must be a mapping of class/verdict/note.`);
+    }
+    const { class: cls, verdict, note } = row as Record<string, unknown>;
+    if (typeof cls !== "string" || cls.length === 0) {
+      throw new PolicyError(`policy.yaml: '${path}.class' must be a non-empty string, got ${JSON.stringify(cls)}.`);
+    }
+    if (verdict !== "hold" && verdict !== "notify") {
+      throw new PolicyError(`policy.yaml: '${path}.verdict' must be "hold" or "notify", got ${JSON.stringify(verdict)}.`);
+    }
+    if (note !== undefined && typeof note !== "string") {
+      throw new PolicyError(`policy.yaml: '${path}.note' must be a string when present, got ${JSON.stringify(note)}.`);
+    }
+    return { class: cls, verdict, ...(typeof note === "string" ? { note } : {}) };
+  });
+}
+
+/**
  * W1-T1044: DEFAULT `sweepWallClockBoundMs` — mirrors plan/policy.yaml's own row (net-new;
  * derivation in that file's comment). Used ONLY when the row is ABSENT from the loaded YAML —
  * the SAME absent-means-default shape `autoTriage`'s optional block already uses just below,
@@ -642,6 +709,11 @@ export function validatePolicy(raw: unknown): Policy {
     ? numberField("githubEventWake.dedupCapacity", githubEventWakeRaw.dedupCapacity, origin, bounds)
     : DEFAULT_GITHUB_EVENT_WAKE_DEDUP_CAPACITY;
 
+  // W1-T2579: OPTIONAL, absent means `[]` — see validateArmCalibrationBands's own doc for why
+  // this row's validation is stricter-at-load/inert-at-consult rather than the absent-means-
+  // default TRIPLET shape every numeric/boolean cadence row above uses.
+  const armCalibrationBands = validateArmCalibrationBands(raw.armCalibrationBands);
+
   return {
     values: {
       proofTimeoutMs,
@@ -677,6 +749,7 @@ export function validatePolicy(raw: unknown): Policy {
       scratchReap: { enabled: scratchReapEnabled, maxAgeHours: scratchReapMaxAgeHours },
       worktreeReapBoot: { enabled: worktreeReapBootEnabled },
       githubEventWake: { dedupCapacity: githubEventWakeDedupCapacity },
+      armCalibrationBands,
     },
     origin,
     bounds,

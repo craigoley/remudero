@@ -234,6 +234,7 @@ test("the SHIPPED plan/policy.yaml loads, and every row's value sits within its 
     "sweepWallClockBoundMs",
     "fixSpawnWallClockBoundMs",
     "sweep", "drain", "retro", "autoTriage", "boardReview", "measurementCadence", "digestCadence", "headroom", "launchd", "scratchReap", "worktreeReapBoot", "githubEventWake",
+    "armCalibrationBands",
   ];
   assert.deepEqual(Object.keys(p.values).sort(), expectedTopLevelKeys.sort());
 
