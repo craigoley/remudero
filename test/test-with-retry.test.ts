@@ -140,10 +140,11 @@ test("test-with-retry: FLAKE-RETRY evidence is also appended to $GITHUB_STEP_SUM
 // which is the gate working.
 //
 // THE REPLACEMENT READS EXECUTABLE CONTENT ONLY, AND IN BOTH DIRECTIONS, so it discriminates
-// whichever way the wiring moves: `ci` must still reach the wrapper, and no `run:` step may name it
-// again. Re-adding it to coverage-ratchet turns this red on the second assertion; dropping it from
-// `ci` turns it red on the first.
-test("test-with-retry: the ci job reaches the wrapper through `npm run test:ci` while no run: step names it directly, and `npm test` stays retry-free for Stryker", async () => {
+// whichever way the wiring moves: SOURCE shards must reach the wrapper directly so their Node
+// option can precede the test glob; the plan/docs fallback still reaches it through `npm run
+// test:ci`; and coverage-ratchet must not gain a retry. Dropping either ci route or adding a second
+// direct wrapper invocation turns this red.
+test("test-with-retry: ci's SOURCE shard reaches the wrapper with its option before the glob, the fast-lane fallback retains npm test:ci, and coverage does not retry", async () => {
   const ciYaml = await readFile(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
   // A `#` line comment is the only comment form a YAML workflow has, and every surviving mention of
   // the wrapper in this file sits on one. Dropping those lines leaves the executable content.
@@ -152,19 +153,16 @@ test("test-with-retry: the ci job reaches the wrapper through `npm run test:ci` 
     .filter((line) => !/^\s*#/.test(line))
     .join("\n");
 
-  // POSITIVE CONTROL ON THE STRIPPER ITSELF, and it is load-bearing rather than decorative: an
-  // over-eager filter that emptied `executable` would make the doesNotMatch below vacuously true —
-  // the "zero is not a measurement until a control proves the query could see its corpus" shape.
+  assert.match(executable, /npm run test:ci/, "the plan/docs fail-closed fallback must still reach the retry wrapper through package.json");
   assert.match(
     executable,
-    /npm run test:ci/,
-    "the ci job's Test step must still invoke the wrapper via `npm run test:ci` (and if this line is gone, the assertion below proves nothing)",
+    /node scripts\/test-with-retry\.mjs\s+\\\s+node --test --test-shard=\$\{\{ matrix\.shard \}\}\/4[\s\S]*"test\/\*\*\/\*\.test\.ts"/,
+    "the SOURCE matrix must invoke the retry wrapper directly with Node's shard option before the positional glob",
   );
-
-  assert.doesNotMatch(
-    executable,
-    /test-with-retry/,
-    "no run: step may name the wrapper directly: `ci` reaches it through `npm run test:ci`, and coverage-ratchet must not retry at all (2026-08-28 ruling — of six two-pass runs on record, four were cancelled against timeout-minutes: 39, and a cancellation names no failing test)",
+  assert.equal(
+    executable.match(/node scripts\/test-with-retry\.mjs/g)?.length,
+    1,
+    "only ci's SOURCE lane may name the wrapper directly; coverage-ratchet must not retry (2026-08-28 ruling)",
   );
 
   const pkg = JSON.parse(await readFile(join(REPO_ROOT, "package.json"), "utf8"));
