@@ -1,0 +1,101 @@
+- id: W1-T2648
+  title: "the 13-failing measurement is cited to a MUTABLE pointer — W1-T2481's rationale names PR #3305 with no sha, no merge state and no date, so no later reader can re-derive it or falsify it; re-anchor the citation to an immutable sha carrying the PR's verified state, and say on the record whether the number still holds"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: off}
+  budget_usd: 100.00
+  risk: medium
+  origin: "followup#W1-T2481-1788113218856"
+  plan_refs: ["§5C", "W1-T2481"]
+  files: [plan/tasks.d/W1-T2481-a-scope-rule-fires-on-records-dispatch-can-never-reach.yaml]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE CITATION, VERBATIM. W1-T2481's rationale reads "Measured on #3305: applying the retirement
+    ruling to every anchored tombstone reddened lint-plan with 13 failing, all of them this class,
+    and the backfill had to ship 20 of 33 to stay green. Thirteen tombstones are therefore
+    PERMANENTLY UNEDITABLE while the vacuous arm stands." A PR NUMBER IS A MUTABLE POINTER. It
+    names no sha, no merge state and no date, so the measurement cannot be re-derived, cannot be
+    falsified, and cannot be told apart from a branch state that never entered main.
+
+    THE WORK IT MOTIVATED HAS SHIPPED, WHICH IS WHY THIS IS A FOLLOW-UP AND NOT A RE-OPEN.
+    `declaredScopeViolation` (src/lib/task-linter.ts) now returns undefined on `task.status ===
+    "blocked"`, with W1-T2481 named in the comment. Standing rule 21 governs: an amendment to a
+    merged record spawns nothing, so the amender owes the follow-up. This is it.
+
+    THE NUMBER IS NOT LOAD-BEARING ON ANYTHING THAT MERGED — stated plainly so this task is not
+    over-sold. None of W1-T2481's seven acceptance criteria assert 13, or 20, or 33. The criterion
+    the figure motivates ("editing a tombstone that has no declared scope no longer fails a
+    changed-tasks pass") is proven by a synthetic in-memory fixture built from `task()`,
+    `changedTaskIds` and `lintPlan` — it never reads #3305. So a stale citation falsifies no
+    shipped claim. THE COST IS ENTIRELY TO THE NEXT READER, and it is real: the rationale asserts a
+    live consequence ("thirteen tombstones are PERMANENTLY UNEDITABLE") that the merged exemption
+    may have already retired, and a census-shaped four-line surface count (100 / 14 / 86 / 13) that
+    a reader has no way to date.
+
+    THIS DEPARTS FROM A CONVENTION THE PLAN ALREADY KEEPS, so nothing new is being decided here.
+    Measured over this checkout: 54 sha-anchored measurement citations across 51 files — "MEASURED
+    AT `c709493`, re-derived rather than carried forward" (standing rule 25), "taken by hand on a
+    scratch clone of origin/main a9ef3b9" (W1-T227), "verified at origin/main a18fdeb rather than
+    assumed" (W1-T230). Even the PR-number citations mostly carry the anchor with them: "observed
+    on #591 at 1f990d2", "observed on #1399 (judgeRubric advisory wiring, merged 64e5d4c)",
+    "measured on #1372 (W1-T348, merged ...)". #3305's does not. It is the outlier, and nothing in
+    the gate stack notices.
+
+    WHAT THIS TASK DOES NOT KNOW, recorded because pretending otherwise would reproduce the defect
+    it fixes: the drafting Architect had no shell and could not read #3305's live merge or CI
+    state. THIS TASK THEREFORE ASSERTS NO REPLACEMENT NUMBER. Reading that state is the worker's
+    first act, and whatever it finds is what gets written down.
+  design: |
+    PLAN-ONLY, AND THE SPLIT IS FORCED BY A GATE RATHER THAN CHOSEN. `rule15FilingViolation`
+    (src/lib/task-linter.ts) blocks any open verify:auto task that declares a `plan/tasks.d/<id>.yaml`
+    record ALONGSIDE a path outside plan scope, because the reviewer's planOnly carve-out is gone the
+    moment one declared path falls outside it and `criteriaTampered` then refuses the PR however good
+    the work is. So `files:` is the single shard and nothing else.
+
+    STEP 1 — READ THE LIVE STATE. Resolve #3305's merge state, its merge or head sha, and its CI
+    outcome from GitHub. Then re-derive the measurement on today's origin/main: how many task records
+    the `declared-scope` check now fails under a changed-tasks pass, and how many anchored tombstones
+    remain unmarked. VERIFY BOTH FROM SOURCE — do not carry either number forward from the rationale,
+    which is precisely the habit being corrected.
+
+    STEP 2 — REWRITE THE CITATION, KEEPING THE OLD NUMBER. The corrected block carries, as literal
+    text a grep can find: the marker `CITATION RE-ANCHORED`, the sha the original measurement is now
+    anchored to, #3305's state as read, the verification date, and a line beginning `MEASUREMENT
+    STATUS:` reading either STILL-CURRENT or SUPERSEDED with the re-derived figure beside it.
+
+    NOTHING IS DELETED. The original "13 failing" and "20 of 33" survive verbatim as the historical
+    measurement (rule 16: no claim dropped or weakened, only redistributed). If the exemption's own
+    merge has since made those thirteen records editable, the correct edit says SUPERSEDED and says
+    what replaced it — never a silent deletion, which would erase the evidence that motivated a
+    shipped change.
+
+    THE EDIT IS CONFINED TO PROSE. No `claim:` or `proof:` line of the merged record is touched, no
+    `files:`, `status:`, `origin:` or `depends_on:` field is altered. Rule 15 forbids moving
+    goalposts and rule 16 reserves task re-specification to the Architect; this is a provenance
+    repair to a rationale on a record that can never dispatch again, and criterion 4 is the
+    executable falsifier that it stayed that way.
+
+    KNOWN RESIDUE, NAMED RATHER THAN SMUGGLED IN: `test/declared-scope-exempts-what-dispatch-cannot-reach.test.ts`
+    carries a comment quoting this same citation. Correcting it would drag a non-plan path into this
+    PR and trip `rule15-filing`, so it is deliberately left. It is a comment quoting a rationale, not
+    an assertion any test evaluates.
+  acceptance:
+    - claim: "the #3305 citation carries an IMMUTABLE anchor plus the PR's state as read at verification time, so a later reader can re-derive the measurement instead of trusting a mutable pointer"
+      proof: "grep: CITATION RE-ANCHORED in plan/tasks.d/W1-T2481-a-scope-rule-fires-on-records-dispatch-can-never-reach.yaml"
+    - claim: "the record states whether the measurement is STILL-CURRENT or SUPERSEDED on today's main, with the re-derived figure and the verification date beside it"
+      proof: "grep: MEASUREMENT STATUS: in plan/tasks.d/W1-T2481-a-scope-rule-fires-on-records-dispatch-can-never-reach.yaml"
+    - claim: "the original figure survives VERBATIM rather than being deleted — a superseded measurement is marked, never erased, so the evidence that motivated a shipped change stays readable"
+      proof: "grep: 13 failing in plan/tasks.d/W1-T2481-a-scope-rule-fires-on-records-dispatch-can-never-reach.yaml"
+    - claim: "no acceptance criterion of the merged record is touched — the falsifier against repairing a citation by moving a goalpost"
+      proof: "grep: a blocked task with no declared scope emits no declared-scope violation in plan/tasks.d/W1-T2481-a-scope-rule-fires-on-records-dispatch-can-never-reach.yaml"
+  note: "Filed from the follow-up harvest of run W1-T2481-1788113218856. The harvest's own words: recon
+    did not verify #3305, so the number must not be cited as still-current until someone reads the PR.
+    NOT NEAR THE FRONT, and deliberately so — the kick order is security-first (W1-T24 -> W1-T23 ->
+    plan-health) and a provenance repair to a merged record's prose earns no place ahead of it.
+    SIBLING W1-T2649 measures whether this is one outlier or a class; sequencing is recorded there rather
+    than as a depends_on edge, so neither strands the other. Cross-ref W1-T1048 (a cited id resolving
+    to nothing) — adjacent in spirit, distinct in surface: that one is about task ids in shipped
+    source, this is about a measurement's anchor in plan prose."

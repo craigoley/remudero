@@ -1,0 +1,171 @@
+- id: W1-T2631
+  title: "AN UNRESOLVABLE TASK-RECORD POINTER RENDERS NOTHING AT ALL, SO A SPEC-BLIND WORKER IS NEVER TOLD IT IS SPEC-BLIND — `taskRecordContextLine` (src/run-task.ts:10012) returns the empty string whenever `taskRecordPath`/`workerVisibleRecordPath` cannot resolve the record, and that bullet is the ONLY transport by which a task's design, rationale and acceptance criteria reach a worker at all, while the output contract still demands the worker substantiate EVERY criterion it was neither shown nor told where to find; recon absence is already announced explicitly and record absence is not"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 100.00
+  files: [src/run-task.ts, test/recon-degrade.test.ts]
+  origin: architect
+  plan_refs: ["§8A", "§8B", "W1-T501", "W1-T166"]
+  status: queued
+  attempts: 0
+  rationale: |
+    HOW THIS WAS FOUND, AND WHAT IS AND IS NOT PROVEN. A follow-up harvested from run
+    W1-T2463-1788065942887 asked someone to "locate and read the actual task prompt/spec for
+    W1-T2463 (likely under `.claude/` or referenced by PR #3287) to confirm this worktree's
+    mandate before any implementation work proceeds". That errand is ANSWERED and is not what
+    this task builds: W1-T2463's spec is
+    `plan/tasks.d/W1-T2463-every-spawn-in-a-run-shares-one-home-and-tears-it-down.yaml` — 108
+    lines carrying seven acceptance criteria — and it sits in the worker's OWN worktree. It was
+    never under `.claude/`, which holds exactly one file (`settings.json`, the W1-T1066
+    interactive-lane deny floor, whose own comment states it never reaches a worker), and it was
+    never PR #3287.
+    ⚠ WHY THAT PARTICULAR RUN WENT HUNTING IS UNPROVEN AND MUST NOT BE LAUNDERED INTO THE
+    FIXTURE. No transcript for it was read here. The errand is what prompted the audit; the
+    mechanism below is what the audit found at head, and it stands on its own source evidence
+    regardless of whether that one run tripped it. An implementer who justifies this task on
+    "W1-T2463 hit this" has overclaimed — justify it on the code.
+
+    THE DEFECT, READ AT HEAD RATHER THAN TRUSTED FROM THE BRIEF. `taskRecordContextLine`
+    (src/run-task.ts:10012) renders ONE cited CONTEXT bullet — `- YOUR TASK'S OWN RECORD IS AT
+    <path> — READ IT FIRST` — and returns the EMPTY STRING when the path it is handed is
+    `undefined`. Two upstream resolvers produce that `undefined`:
+      (a) `taskRecordPath` (src/lib/plan.ts:369-386) returns `undefined` when neither the
+          monolith nor any shard readable at dispatch time holds the id. Its per-file guard is
+          `catch { return false }` (plan.ts:373-375), so an UNPARSEABLE-BUT-PRESENT shard reads
+          as "this file does not hold the task" and is indistinguishable from absence.
+      (b) `workerVisibleRecordPath` (src/run-task.ts:9993) returns `undefined` when the relative
+          form would escape the tree root.
+    The resulting behaviour is pinned by a shipped assertion, quoted verbatim from
+    test/recon-degrade.test.ts:478-481: "an unresolved record renders nothing at all — no
+    bullet, no criteria, no throw."
+
+    WHY AN OMITTED ADVISORY LINE IS NOT A SMALL THING HERE: IT IS THE ONLY TRANSPORT. The code
+    says so itself at src/run-task.ts:10162-10170 — `renderImplementPrompt` renders
+    `task.prompt ?? task.title` (MEASURED there: zero task records carry `prompt:`, so it is
+    always the title), `design:` is read by nothing in `src/` at all, and `task.acceptance` is
+    consumed by `runReview` — THE REVIEWER, NOT THE WORKER. The same comment records the
+    measured cost of losing that transport: on W1-T399, implement burned 138 turns and produced
+    ZERO commits from a one-line title.
+
+    AND THE PROMPT STILL DEMANDS WHAT IT WITHHELD. `outputContractLines`
+    (src/lib/compaction.ts:340) tells every implement worker: "Your PR body MUST substantiate
+    EVERY task acceptance criterion … a body that does not engage each proof is scored UNMET
+    even when the work is correct." On the omission path the worker is instructed to engage a
+    list it was neither shown nor pointed at. Sharper still, the asymmetry inverts with
+    compaction: `renderAnchorBlock` (compaction.ts:364-385) DOES render a `## ACCEPTANCE
+    CRITERIA` section, so a run that compacts is handed the criteria and a run that does not
+    never sees them.
+
+    THE DOCTRINE ALREADY EXISTS IN THIS FILE'S OWN TEST SUITE, ONE FIELD OVER. RECON absence is
+    announced loudly and is ledgered: test/recon-degrade.test.ts:208 is titled "the implement
+    prompt gets an EXPLICIT recon-absence claim on degrade, never a silent omission", and :201
+    asserts "recon.degraded is ledgered in src/run-task.ts, naming the subtype". This task
+    applies that settled pattern to the one absence still rendered as silence — the task's own
+    record. Nothing new is being argued for; an existing rule is being applied where it was
+    skipped.
+
+    THE CRITERIA ARE IN HAND WHILE THE POINTER IS GONE, WHICH IS WHY THE FALLBACK CAN BE REAL.
+    A task only dispatches because `loadPlan` resolved it, so `task.acceptance` is in memory
+    even when `taskRecordPath` cannot re-locate the file on disk. The current call sites carry
+    criteria ONLY when recon FAILED — src/run-task.ts:10174 and :10202 pass `acceptance`, while
+    the HEALTHY path (:10134) and the artifact-reuse path (:10453) pass two arguments and no
+    criteria. That healthy-path shape is DEFENSIBLE and IS NOT TOUCHED HERE: when the pointer
+    exists, pointing is enough, and inlining criteria into every prompt would grow the stable
+    cache prefix for no gain (W1-T35 ordering). The gap this task closes is only the case where
+    there is no pointer to follow.
+
+    ⚠ HOLDOUT CRITERIA: FILTER ON THE NEW PATH, AND DO NOT PRETEND TO FIX THE OLD ONE. W1-T166
+    requires that a `holdout: true` criterion never reach a worker. Any criteria this task adds
+    on the absent-pointer path MUST go through `visibleCriteria` (the same filter
+    `renderAnchorBlock` uses at compaction.ts:369). SEPARATELY AND NOT FIXED HERE:
+    test/plan-contract-no-worktree-install.test.ts:21-23 already records that the DEGRADED-recon
+    call site passes the RAW `task.acceptance` array rather than `visibleCriteria()`'s output,
+    "so a holdout criterion's text is NOT guaranteed hidden from a worker in practice." That is
+    a real live leak on someone else's call site; folding it in would make this two concerns.
+    NAME IT IN THE REPORT AS A FOLLOW-UP; DO NOT SILENTLY WIDEN THE DIFF TO CATCH IT.
+
+    RELATION TO W1-T501, CHECKED RATHER THAN ASSUMED. W1-T501 owns ANCHORING — which tree the
+    emitted path names — and it CHOSE omission deliberately, in its own words: "Omitting one
+    advisory line is strictly better than emitting a path that points outside the worker's
+    tree, which is the defect itself." That ranking is correct and is NOT reversed here: the
+    third option W1-T501 never weighed is to SAY SO. Its criterion 2 ("a worker whose shard is
+    absent from its worktree still gets a usable instruction", test at
+    test/recon-degrade.test.ts:555) covers a DIFFERENT case — the path resolves but the file is
+    absent in the worktree — and is untouched.
+    ⚠ THE HAZARD CHECK W1-T2463 TEACHES, PERFORMED: this task EDITS a shipped assertion, the
+    test at test/recon-degrade.test.ts:472 titled "the record line is omitted, not thrown, when
+    the record cannot be resolved". Its title names TWO properties; the "not thrown" half is
+    PRESERVED VERBATIM and the "omitted" half is what changes. All four of W1-T501's acceptance
+    criteria were read: NONE of them cites that test or asserts the empty-string rendering, so
+    no other task's criterion reddens. That is a TEST edit, never a plan-criteria edit
+    (Standing rule 15 is not in play).
+    ⚠ NO HARD `depends_on` ON W1-T501, DELIBERATELY. W1-T501's shard reads `status: queued,
+    attempts: 0` while its CODE IS LIVE ON MAIN (`workerVisibleRecordPath` and
+    `taskRecordContextLine` both exist at head, with its tests). A hard edge onto a
+    queued-but-already-shipped task would strand this behind `assertRunnable` — the same
+    bootstrap seam W1-T75 records. This task builds on code verified present at head, so the
+    edge is recorded here as provenance rather than as a gate.
+
+    RISK BAND IS RULE 19's SPAN, NOT BLAST RADIUS, AND IS SET UP FRONT. `files:` spans `src/`
+    and `test/`, whose differing stems `subsystemsOf` counts as separate concerns, so
+    `sizingViolation` refuses `risk: medium` for the span alone. W1-T501 carries the IDENTICAL
+    two-file list at `risk: high` for exactly this reason. The change itself is small.
+  design: |
+    (i) SAY IT, DO NOT RENDER SILENCE. When the record path is unresolvable,
+    `taskRecordContextLine` emits an EXPLICIT bullet instead of `""`: it names the task id,
+    states plainly that the task's own record could not be located at dispatch, names where
+    records live (`plan/tasks.yaml` and `plan/tasks.d/<id>-<slug>.yaml`), and instructs the
+    worker to locate it IN ITS OWN TREE. It must NOT interpolate any absolute path and must not
+    guess a filename — naming the CLASS of location is the point; naming a specific wrong file
+    is the W1-T501 defect returning.
+    (ii) CARRY THE CRITERIA ON THAT PATH, FILTERED. Since `task.acceptance` is in memory
+    whenever the task dispatched, the absent-pointer bullet renders the criteria as the same
+    NON-BULLET continuation lines the resolved path already uses (so `contextBlocks` absorbs
+    them and no uncited block is opened), passed through `visibleCriteria` so a `holdout: true`
+    criterion never leaks. Callers that today pass no criteria on this path must be given them.
+    (iii) THE RENDERER STAYS PURE; THE CALL SITE LEDGERS. `taskRecordContextLine` performs no
+    I/O. The context-build call site — which already holds the ledger — appends ONE line, step
+    `task_record.absent`, carrying the task id and which resolver failed, so spec-blind
+    dispatches are COUNTABLE rather than merely visible in one prompt. This mirrors the existing
+    `recon.degraded` pairing (test/recon-degrade.test.ts:201) rather than inventing a shape.
+    (iv) THE HEALTHY PATH DOES NOT MOVE. A resolvable record must render BYTE-IDENTICALLY to
+    today, criteria included or omitted exactly as now — this task changes only what happens
+    when there is nothing to point at. The stable cache prefix (W1-T35) is untouched.
+    (v) NEVER THROW. The bullet is advisory; one malformed or unlocatable plan file must still
+    never fail a run. That half of test/recon-degrade.test.ts:472 is preserved.
+    (vi) NOT IN SCOPE, NAMED SO IT IS NOT SMUGGLED: the raw-`task.acceptance` holdout leak at
+    the existing degraded call site (W1-T166 / test/plan-contract-no-worktree-install.test.ts);
+    any change to `taskRecordPath`'s per-file `catch` (making an unparseable shard
+    distinguishable from an absent one is a real and separate improvement); and any change to
+    what a worker is permitted to do.
+  acceptance:
+    - claim: "an unresolvable task record renders an EXPLICIT, cited absence bullet naming the task id and where records live — never the empty string, and never an absolute or guessed path"
+      proof: "unit test: test/recon-degrade.test.ts"
+    - claim: "the absence bullet still never throws, stays provenance-clean for assertProvenance, and renders any criteria as non-bullet continuation lines so it opens no uncited block"
+      proof: "unit test: test/recon-degrade.test.ts"
+    - claim: "the task's acceptance criteria travel on the absent-pointer path, filtered through visibleCriteria so a holdout criterion's text never reaches the worker"
+      proof: "unit test: test/recon-degrade.test.ts"
+    - claim: "a RESOLVABLE record renders byte-identically to today on both the healthy and the degraded call sites — the falsifier proving this changed only the nothing-to-point-at case"
+      proof: "unit test: test/recon-degrade.test.ts"
+    - claim: "an unresolvable record is ledgered once by the call site, so spec-blind dispatches are countable rather than visible only inside one prompt"
+      proof: "grep: task_record.absent in src/run-task.ts"
+  note: "PROVENANCE (Standing rule 17): filed from the follow-up harvest
+    `followup:W1-T2463-1788065942887:2026-08-30T05:01:42.981Z:2` — 'Locate and read the actual
+    task prompt/spec for W1-T2463 (likely under `.claude/` or referenced by PR #3287) to confirm
+    this worktree's mandate before any implementation work proceeds.' THE ERRAND ITSELF IS NOT
+    RATIFIED AND MUST NOT BE RE-FILED: it is answered above (the spec is
+    plan/tasks.d/W1-T2463-every-spawn-in-a-run-shares-one-home-and-tears-it-down.yaml, in the
+    worker's own tree; `.claude/` holds only the W1-T1066 deny-floor settings.json; #3287 is not
+    the spec). What is ratified is the MECHANISM whose silent failure makes that class of errand
+    possible at all.
+    `budget_usd: 100.00` per this plan file's own binding header — the cap is a RUNAWAY TRIPWIRE
+    set an order of magnitude above any observed task, never an allowance sized to the work
+    (the W1-T3 lesson: a limit set NEAR the work's cost acts as a WORK limit).
+    ⚠ FOR WHOEVER SEQUENCES THIS: it edits `src/run-task.ts`, the file every other task contends
+    for, so it collides on the W1-T171 file-overlap check with any concurrently-dispatched task
+    declaring that path — W1-T501 in particular declares the IDENTICAL two-file list and touches
+    the SAME helper. Land one, then the other; do not co-dispatch them."

@@ -1,0 +1,185 @@
+- id: W1-T2624
+  title: "TWO TIE-BREAKS ANSWER 'WHICH ID DOES THIS BODY NAME' AND THEY DISAGREE — `TASK_TRAILER_RE.exec` takes the FIRST anchored trailer for both the author-time gate and `resolvePlanCriteriaAtHead`, while `reviewTaskIdFromBody` takes the LAST per W1-T70's ratified contract, and `ensureTaskTrailer` appends at the END, so on a two-trailer body the harness's own stamp always loses to whatever was written earlier"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 45.00
+  origin: followup#W1-T2462-trailer-tiebreak-divergence
+  plan_refs: ["W1-T70", "W1-T2432", "W1-T2297", "W1-T2315"]
+  files: [src/lib/review.ts, src/run-task.ts, test/trailer-tiebreak-one-spelling.test.ts, test/acceptance-author-gate.test.ts, test/acceptance-gate-plan-resolver.test.ts, test/review-resolves-criteria-at-the-prs-own-head.test.ts, test/trailer-exemption-must-resolve.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    HARVESTED FROM W1-T2462 (run W1-T2462-1788054829616, PR #3285), whose own `note` forbade editing
+    the trailer-matching spelling — so the divergence was recorded and deliberately not touched. This
+    is that dedicated look. Every symbol below was re-read at source before filing; the harvest note
+    named two of the three spellings and understated the mechanism.
+
+    (0) THE DIVERGENCE, AS THREE FUNCTIONS THAT ARE EACH INTERNALLY COHERENT.
+
+    `TASK_TRAILER_RE` (src/lib/review.ts) is `/^Remudero-Task:\s*(\S+)\s*$/m` — anchored, and with
+    NO `g` flag, so `.exec()` returns the FIRST anchored match and nothing else. It has TWO call
+    sites in that file: `acceptanceAuthorTimeCheck` and `resolvePlanCriteriaAtHead`.
+
+    `reviewTaskIdFromBody` (src/run-task.ts) is `[...body.matchAll(/^Remudero-Task:\s*(\S+)\s*$/gm)]`
+    keeping `matches[matches.length - 1]` — the LAST. Its own doc states the reason and cites the
+    ruling: the worker prompt DICTATES "Include this exact trailer as the LAST line of the PR body",
+    so LAST-LINE-WINS "because that is the contract's own phrasing" (W1-T70).
+
+    So on a body carrying two anchored trailers the two readers name DIFFERENT tasks, and the
+    last-wins one is the one the contract and the ratified ruling endorse.
+
+    ⚠ AND THE RESOLVER'S OWN DOC ASSERTS THE OPPOSITE OF WHAT IT DOES. `resolvePlanCriteriaAtHead`
+    documents its extraction as using "the SAME anchored TASK_TRAILER_RE ... rather than by a
+    separate caller-side `reviewTaskIdFromBody` — one spelling of 'find the trailer', not two."
+    Same ANCHOR, opposite TIE-BREAK. It is a second spelling, and the comment claiming otherwise is
+    why this survived review. Correcting that comment is part of the deliverable.
+
+    (1) THE GENERATOR IS IN-TREE AND IT BIASES THE ERROR IN ONE DIRECTION — the half the harvest
+    note did not have.
+
+    `ensureTaskTrailer` (src/run-task.ts) guards with `body.includes(trailer)` for THIS task's id
+    and, on a miss, APPENDS `\n\n${trailer}\n` to the END of the body. So:
+      - it cannot duplicate its OWN id, and
+      - when a body already carries some OTHER id's anchored trailer, it appends a second one, and
+      - the harness-stamped id is LAST by construction, every time.
+    Therefore first-wins does not fail randomly. It systematically prefers whatever a human, a
+    worker, or a template wrote EARLIER over the id the orchestrator itself stamped.
+
+    (2) WHAT IT COSTS, STATED IN BOTH DIRECTIONS RATHER THAN AT ITS WORST.
+
+    FAIL-CLOSED ARM (noisy, safe). `acceptanceAuthorTimeCheck` takes an optional `trailerResolves`
+    that `scripts/acceptance-author-gate.mjs` supplies (W1-T2297/#2934: a trailer naming an id the
+    plan does not declare stops buying an exemption). If the FIRST id is stale or foreign and does
+    not resolve, the gate refuses the exemption and demands an Acceptance block from a PR whose
+    genuine LAST trailer resolves perfectly. A false refusal, not a false pass.
+
+    FAIL-OPEN ARM, and this is the one that justifies the task. If the FIRST id RESOLVES but is the
+    wrong task, the gate grants the exemption on task A's authority while the body belongs to task
+    B — and `resolvePlanCriteriaAtHead` would hand the judge task A's `acceptance` list. A PR judged
+    green against another task's criteria is the shape the whole author-time gate exists to prevent.
+
+    (3) THE SCOPING FACT THAT MAKES THIS CHEAP NOW AND EXPENSIVE LATER, recorded honestly.
+
+    `resolvePlanCriteriaAtHead` IS NOT WIRED to a live review yet — its own doc says so ("NEVER
+    WIRED HERE, on purpose ... swapping `reviewCommand`'s call ... is a follow-up"). So the LIVE
+    consumer of first-wins today is the GATE, whose exposure is the fail-closed arm plus the
+    wrong-task-exemption case. The fail-open judging arm is ARMED AND UNFIRED, and it fires the
+    moment the wiring follow-up lands. Fixing the tie-break before that wiring costs one predicate;
+    fixing it after costs a live judging incident first.
+
+    (4) TWO FURTHER SPELLINGS EXIST AND ARE CORRECT — DO NOT UNIFY THEM.
+
+    `scripts/worker-branch-shape.mjs` uses a `gm` scan collecting EVERY id, documented as a union
+    "never only the first", because it asks WHICH IDS DOES THIS BRANCH CLAIM. `scripts/credit-
+    surface-gate.mjs` uses a bare `.test()` for any id at all, so no tie-break is reachable. Neither
+    answers "which single id does this body name", and folding them into this change would break a
+    union the branch-shape gate depends on.
+
+    (5) NO COUNT IS ASSERTED HERE. How many live bodies carry two anchored trailers was NOT
+    measured at filing, and a number invented now would be quoted forward as if it were evidence.
+    The mechanism in (1) is read from source and is what warrants the task; the population is the
+    build's first measurement, with a control both ways (see design (iv)).
+  design: |
+    (i) ONE PREDICATE, AND IT KEEPS W1-T70's ANSWER. Add a single exported extractor to
+    src/lib/review.ts answering "which single id does this body name" as ANCHORED, LAST-WINS.
+    Last-wins is not a new decision — it is W1-T70's ratified reading of the prompt contract, and it
+    is what the harness's own append-at-end stamper produces. The change is that the gate and the
+    resolver stop disagreeing with it.
+
+    (ii) DIRECTION OF THE IMPORT IS FIXED AND MUST NOT INVERT. `TASK_TRAILER_RE`'s own comment
+    states why it was duplicated: "review.ts is the leaf; run-task.ts already imports FROM it". So
+    the canonical extractor lives in review.ts and `reviewTaskIdFromBody` becomes a thin wrapper or
+    re-export over it. review.ts must not grow an import of run-task.ts.
+
+    (iii) THE THREE EDITS. Both `TASK_TRAILER_RE.exec` sites in review.ts adopt the extractor;
+    `reviewTaskIdFromBody` delegates to it; and the false "one spelling ... not two" comment on
+    `resolvePlanCriteriaAtHead` is corrected to say what the code now actually does. Leave
+    `TASK_TRAILER_RE` itself in place if `acceptanceAuthorTimeCheck` still needs the raw regex for
+    anything else — the deliverable is one TIE-BREAK, not necessarily one regex literal.
+
+    (iv) MEASURE THE POPULATION, WITH A CONTROL BOTH WAYS, AND REPORT IT. Over merged PR bodies,
+    count how many carry MORE THAN ONE anchored `^Remudero-Task: <id>$` line, and of those, how many
+    have a first id differing from the last. Control the instrument in both directions: a body known
+    to carry exactly one must report one, and a body known to carry two must report two — a scan
+    that returns zero everywhere is unfalsified, not clean. Report the number in the PR; do not
+    tune the fix to it.
+
+    (v) REPORT-ONLY, NOT FIXED HERE: `ensureTaskTrailer`'s guard is `body.includes(trailer)`, an
+    UNANCHORED substring test. A body that merely QUOTES `Remudero-Task: <thisId>` mid-prose
+    therefore suppresses the genuine stamp entirely — the same first-match/prose-mention family
+    W1-T70 closed on the read side, still open on the write side. That is a different function, a
+    different failure (a MISSING trailer, not a wrong one), and folding it in would be fixing the
+    generator inside a task filed against the readers. State findings either way in the PR.
+
+    (vi) NOT IN SCOPE, EXPLICITLY: the union scan in scripts/worker-branch-shape.mjs, the existence
+    test in scripts/credit-surface-gate.mjs (see rationale 4), the plan-load-vs-line-scan divergence
+    W1-T2315 owns, the multi-hit-across-different-PRs preference W1-T441 owns, and the wiring of
+    `resolvePlanCriteriaAtHead` into `reviewCommand`. This task changes WHICH trailer is read, never
+    which resolver reads it, which PR is credited, or where criteria come from.
+  acceptance:
+    - claim: "a body carrying two anchored trailers resolves to the SAME id at the author-time gate, at the plan-criteria resolver, and at the review-command extractor — and that id is the LAST, per the prompt contract W1-T70 ratified"
+      proof: "unit test: test/trailer-tiebreak-one-spelling.test.ts"
+    - claim: "a body carrying exactly one anchored trailer resolves identically to today at all three sites, so the overwhelming majority of bodies see no behaviour change"
+      proof: "unit test: test/trailer-tiebreak-one-spelling.test.ts"
+    - claim: "a body carrying no anchored trailer is unchanged — the gate's exemption still does not apply, the resolver still returns empty criteria without touching a git object, and the extractor still returns undefined so the caller falls through to the body's own Acceptance block"
+      proof: "unit test: test/trailer-tiebreak-one-spelling.test.ts"
+    - claim: "a mid-prose quotation of the trailer format never outranks the genuine anchored final line — W1-T70's original regression stays closed at every site, including the two that previously read first-wins"
+      proof: "unit test: test/trailer-tiebreak-one-spelling.test.ts"
+    - claim: "the question 'which single id does this body name' has exactly ONE implementation, review.ts remains the leaf module, and no import of run-task.ts is introduced into it"
+      proof: "unit test: test/trailer-tiebreak-one-spelling.test.ts"
+    - claim: "the deliberately different trailer questions are untouched — the branch-shape scan still returns EVERY id a branch claims as a union rather than a single winner, and the credit-surface check still answers any-id existence"
+      proof: "unit test: test/trailer-tiebreak-one-spelling.test.ts"
+  note: |
+    SIZING BAND: risk:high is Rule 19's SPAN, not blast radius — the same reading W1-T441's note
+    records. `files:` crosses src/lib, src/ and test/, which `subsystemsOf` counts as >=2 subsystems
+    and which would be a sizing violation at any lower band, so it is raised UP FRONT rather than
+    shipped as one (the W1-T400/W1-T407 lesson). The actual change is one predicate and three call
+    sites.
+
+    AND THE HONEST VERSION OF THE COUPLING, since the atomic-coupling exit is easy to overclaim: the
+    BEHAVIOURAL divergence could be closed in review.ts alone, because run-task.ts is already
+    correct. What needs both files is the INVARIANT the fifth criterion states — one implementation,
+    not two that happen to agree today and drift tomorrow. That is the reason both are declared, and
+    it is a weaker claim than "unsatisfiable piecewise". Stated plainly so a reviewer can hold the
+    task to the right standard.
+
+    WHAT MUST NOT CHANGE.
+
+    LAST-WINS IS NOT RE-LITIGATED HERE. W1-T70 already decided it against the prompt contract, and
+    the harness's own append-at-end stamper produces it. A build that "unifies" on first-wins would
+    be reversing a ratified ruling inside a follow-up, and would additionally make the orchestrator's
+    own trailer the one that loses.
+
+    THE GATE KEEPS ITS FAIL-OPEN CONTRACT ON AN UNREADABLE PLAN. `trailerResolves` OMITTED must stay
+    byte-for-byte the pre-#2934 verdict — that omission is a deliberate contract, and the
+    plan-load-vs-line-scan reconciliation is W1-T2315's, not this task's. This change adds no second
+    refusal.
+
+    NO MERGED PR IS RE-REVIEWED and no merged acceptance record is amended (Rule 21). If the
+    measurement in design (iv) finds merged bodies that were judged under the wrong id, that is
+    evidence of exposure and nothing more.
+
+    NOTHING PACES, SLEEPS, RETRIES OR BACKS OFF on any review path — W1-T1066 stands.
+
+    SEQUENCING, RECORDED RATHER THAN HARD-EDGED. W1-T2315 also edits the reviewer's resolution site
+    in src/run-task.ts, so these two overlap under W1-T171's declared-files serialization and should
+    not run in the same pass. Expressed as sequencing rather than a `depends_on` edge deliberately:
+    every symbol this task touches is already on main, W1-T2315 is queued at risk:high, and a hard
+    edge would strand a cheap correctness fix behind a large one for a prerequisite that does not
+    exist. Whichever lands second re-reads the other's call site rather than re-introducing a second
+    tie-break.
+
+    THE DECLARED TEST SUITES ARE DELIBERATE, NOT DEFENSIVE. `acceptance-author-gate`,
+    `acceptance-gate-plan-resolver`, `review-resolves-criteria-at-the-prs-own-head` and
+    `trailer-exemption-must-resolve` each construct PR-body fixtures and assert on trailer-derived
+    verdicts, so they are the suites a tie-break change turns red; a `files:` omitting them is the
+    refusal-at-push that cost W1-T407 three dispatches. Verify by invocation before trusting this
+    list — it was derived by symbol search at filing, and the suite set moves.
+
+    ALL SIX PROOFS NAME ONE FORWARD-REFERENCED PATH. A path forward-reference is safe; a symbol one
+    is a guess, and a `grep:` proof naming an existing symbol would match the merge base as well as
+    the head and be downgraded as stale.

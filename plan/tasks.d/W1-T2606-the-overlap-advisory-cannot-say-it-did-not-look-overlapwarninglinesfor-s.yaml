@@ -1,0 +1,184 @@
+- id: W1-T2606
+  title: "THE OVERLAP ADVISORY CANNOT SAY IT DID NOT LOOK — `overlapWarningLinesFor`'s `catch { return [] }` renders a rate-limited open-PR read as 'no overlap', which is the one condition under which a filer most needs it, while the SAME command names that identical outage and REFUSES `--reserve` on it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  files: [src/run-task.ts, test/overlap-advisory-outage.test.ts, test/next-task-id-overlap-warning.test.ts]
+  origin: architect
+  plan_refs: ["W1-T917", "W1-T985", "W1-T2324", "W1-T181", "W1-T119"]
+  status: queued
+  attempts: 0
+  rationale: |
+    ONE COMMAND TREATS ONE OUTAGE TWO OPPOSITE WAYS, AND BOTH ARMS ARE ON MAIN TODAY.
+    `nextTaskIdCommand` (`src/run-task.ts`) reads the open-PR surface twice in a single invocation:
+
+      - FOR THE ID, `openPrSurfaceOutage` finds a `MintDegradation` whose `source` is `open-prs` and
+        whose reason is a genuine read failure, and `--reserve` REFUSES, printing the outage reason
+        verbatim: "the open-PR surface is degraded (...). Nothing was claimed." That is W1-T2324, and
+        it is correct.
+      - FOR THE FILES, ~300 lines earlier, `overlapWarningLinesFor` wraps the plan read, the scope
+        read and the comparison in one `try { ... } catch { return []; }`. Its own doc states the
+        contract: "Any failure — unreachable, rate-limited, malformed — yields NO lines."
+
+    SO THE SAME RATE LIMIT THAT MAKES THE VERB REFUSE TO CLAIM AN ID MAKES IT SILENTLY REPORT NO
+    OVERLAP. Zero lines is also exactly what a clean read of a genuinely non-overlapping candidate
+    returns, so the caller cannot tell "checked, nothing overlaps" from "could not check".
+
+    THE FIXTURE IS THE FILING THAT PROMPTED THIS, AND IT IS RECORDED IN ITS OWN SHARD.
+    `plan/tasks.d/W1-T2442-*.yaml` carries a ⚠ block stating that surfaces 4 and 5 — OPEN-PR TITLES
+    AND BODIES — COULD NOT BE READ, with the measurement: `gh api user -i` reporting
+    `X-Ratelimit-Remaining: 0`, `X-Ratelimit-Resource: core`, reset 2026-08-28T16:27:03Z. That shard
+    declared `files: [src/lib/review.ts, ...]`, which is precisely the input this advisory takes. The
+    filer then swept 146 remote heads with git alone, found 0 carrying a W1-T2442 shard against a
+    control of 5 carrying W1-T2427, and wrote the residue down as prose: "that residue is stated, not
+    closed." The advisory that exists to answer that question said nothing, and nothing recorded that
+    it had said nothing because it could not look.
+
+    THE SILENCE IS A SHIPPED, TESTED CONTRACT — NOT AN OVERSIGHT — WHICH IS WHY THIS IS A FOLLOW-UP
+    AND NOT AN AMENDMENT. W1-T917 (#1986, MERGED) carries the acceptance criterion "an unreadable
+    open pull request list degrades to silence", and W1-T985's design clause (v) re-affirms the
+    fail-to-silence contract for the three lanes it wires. Standing rule 21 therefore binds: a merged
+    task is not editable, and the amender owes a successor. THIS TASK IS THAT SUCCESSOR.
+
+    AND THE ORIGINAL REASONING WAS RIGHT ABOUT THREE THINGS AND WRONG ABOUT ONE. W1-T917 design (iii)
+    and W1-T985 clause (v) both argue that an advisory must not refuse a mint, must not change an id,
+    must not alter an exit code, and must not throw inside a lane that spends money. ALL FOUR OF THOSE
+    SURVIVE THIS TASK UNCHANGED. What does not survive is the fifth, unexamined consequence: that
+    not-throwing was implemented as not-SAYING. Those are different properties, and this repo has
+    already paid for conflating them at the gateway layer — W1-T181's own words for the identical code
+    shape are that it "converts 'I could not read GitHub' into 'GitHub says there are zero PRs'".
+
+    THE POLARITY FAMILY IS DOCTRINE HERE, NOT AN ANALOGY: W1-T119 (throttled must be distinguishable
+    from absent), W1-T130 (cannot-observe means WAIT, never spend), W1-T181 (a failed batched read
+    returns a MARKED failure, never a bare `[]`), W1-T197 criterion 3 (an unreadable budget is never
+    rendered as proceed-as-if-unlimited). This is the last unconverted instance in the mint path, and
+    it is the one a human filer reads before every hand filing.
+
+    ⚠ THE DELIBERATE SUPPRESSION IS UNANNOUNCED TOO, WHICH IS THE CHEAPEST HALF OF THE DEFECT. For the
+    id, `--offline` prints "(--offline: open plan PRs were NOT read — this id is a floor, not a
+    guarantee)". For the files, `overlapAdvisoryLines` returns `[]` and says nothing at all. So even
+    the case where the caller ASKED not to look is indistinguishable from a clean result.
+  design: |
+    MAKE THE SILENCE LEGIBLE. CHANGE NOTHING ELSE. The advisory keeps every property its authors
+    argued for and gains exactly one: it can say that it did not look.
+
+    (i) THE ONE BEHAVIOUR CHANGE. `overlapWarningLinesFor`'s failure arm stops returning a bare `[]`
+    and instead yields ONE named line reporting that the open-PR scope could not be read, carrying the
+    underlying reason. A SUCCESSFUL read that finds no overlap still returns zero lines — the two
+    cases must be distinguishable in the OUTPUT, not merely internally, or nothing has been fixed.
+
+    (ii) ADVISORY STAYS ADVISORY, AND THIS IS THE LOAD-BEARING CONSTRAINT. It still cannot refuse a
+    mint, cannot change or withhold an id, cannot alter an exit code, and cannot throw. The printed id,
+    the reservation notice and the exit status must be byte-identical whether the advisory warns,
+    reports an outage, or succeeds. A false BLOCK on legitimately adjacent work remains worse than the
+    duplication it prevents (W1-T917 design iii), and a lane at a median of $0.96 must never be broken
+    by its own advice (W1-T985 clause v). VERIFY both of those docs from source before editing.
+
+    (iii) REUSE THE VOCABULARY THAT ALREADY EXISTS — DO NOT MINT A SECOND. The same file already
+    models this exact fact as `MintDegradation` `{source, reason}` and already tells a genuine read
+    failure apart from the "read fine but uncorroborated" arm via `UNTRUSTED_SOURCE_REASON_PREFIX`.
+    The advisory's outage must be carried in that shape, exported as `ScopeReadOutage`, so a reader
+    comparing the two arms of this verb sees one vocabulary rather than two. A second parallel
+    reason-shape is the drift W1-T181 was filed as the PRODUCER to prevent.
+
+    (iv) `--offline` ANNOUNCES ITSELF ON THIS SURFACE TOO, matching the id surface's existing
+    floor-not-guarantee line. Deliberate suppression and inability are different facts and must read
+    differently; neither may read as "checked, clean".
+
+    (v) THE SUPERSEDED ASSERTION IS RATIFIED HERE, IN THE PLAN, AND NOT LEFT FOR A WORKER TO IMPROVISE.
+    W1-T917's shipped test asserts the old contract ("degrades to silence") and will go red against
+    this change. That test is UPDATED to the successor contract — zero OVERLAP lines plus one named
+    outage line — and NEVER weakened to accept any output at all. This is stated as an Architect
+    decision precisely because a worker discovering a red merged-task test mid-run is one strike away
+    from either editing criteria to match its diff (Standing rule 15) or quietly gutting a guard.
+    `test/next-task-id-overlap-warning.test.ts` is therefore DECLARED in `files:` rather than touched
+    off-scope — an undeclared edit there is exactly the phantom-scope class W1-T142 exists to refuse.
+
+    (vi) THREE THINGS THIS TASK MUST NOT DO. It must not change `openPrFileScopes`'s provenance — that
+    read of an open PR's ACTUAL changed files is deliberate and W1-T985 clause (i) says a builder who
+    edits it has left the task. It must not retune `DEFAULT_OVERLAP_WARNING_POLICY`; W1-T985 rationale
+    (6) measured the ratio ceiling and found the threshold was never the obstacle. And it must not add
+    a ledger row or a new console route: this reports through the lines a shipped function already
+    returns (W1-T985 clause vi — a signal with no consumer is the class this repo keeps paying for).
+
+    (vii) ORDERING WITH W1-T985, RECORDED RATHER THAN HARD-GATED. Both tasks touch this one advisory
+    and will serialise under `overlappingPaths`, which is correct. `depends_on` is deliberately EMPTY:
+    a hard edge would strand an honesty fix behind a three-lane wiring task, and the two compose in
+    EITHER order because all four call sites funnel through `overlapWarningLinesFor` — whichever lands
+    second inherits the other's work for free. This is the W1-T177/W1-T136 soft-ordering precedent.
+  acceptance:
+    - claim: "an open-PR scope read that FAILED yields one named outage line carrying its reason, while a read that SUCCEEDED and found no overlap still yields zero lines — the two are distinguishable in the output, not merely internally"
+      proof: "unit test: test/overlap-advisory-outage.test.ts"
+    - claim: "the advisory stays advisory — the printed id, the reservation notice and the exit code are identical across the succeeded, no-overlap and could-not-read arms, and no arm throws"
+      proof: "unit test: test/overlap-advisory-outage.test.ts"
+    - claim: "the outage reuses the existing degradation vocabulary rather than a second parallel reason-shape, and a read that answered but was merely uncorroborated is NOT reported as an outage"
+      proof: "grep: ScopeReadOutage in src/run-task.ts"
+    - claim: "--offline announces that the open-PR files surface was not consulted, so deliberate suppression never reads as a clean check"
+      proof: "unit test: test/overlap-advisory-outage.test.ts"
+    - claim: "W1-T917's shipped suite passes under the successor contract by asserting zero overlap lines plus one named outage line, never by accepting any output"
+      proof: "unit test: test/next-task-id-overlap-warning.test.ts"
+  risk: high
+  note: |
+    PROVENANCE. Filed from follow-up harvest
+    `followup:W1-T2442-1788013045176:2026-08-29T14:20:28.858Z:0` (run W1-T2442-1788013045176), which
+    asked whether an open PR already touched `src/lib/review.ts` carrying W1-T2442.
+
+    ⚠ THAT QUESTION IS ANSWERED AND THE TASK IT WORRIED ABOUT IS MOOT — recorded here so no one
+    re-opens it. W1-T2442 MERGED at #3263 (gate-side; `MASTER-PLAN.md:642`, `docs/ORIENTATION.md:13`),
+    its implementation is on main (`src/lib/review.ts` carries the `THE PIN PRECONDITION (W1-T2442)`
+    block) and `test/required-gate-pin-precondition.test.ts` carries all five of its criteria as test
+    titles. There was no in-flight duplicate and the $20 was not wasted. NO TASK IS FILED FOR THE
+    RESEARCH QUESTION. What IS filed is the reason the question had to be asked by hand a day after
+    the work had already merged: the surface built to answer it could not say that it had not looked.
+
+    TWO ADJACENT SURFACES ARE ALREADY OWNED AND ARE DELIBERATELY NOT RE-DECIDED HERE.
+      W1-T2324  the ID half of this same outage — `openPrSurfaceOutage` + the `--reserve` refusal.
+                Built, on main, correct. This task copies its polarity; it does not touch it.
+      W1-T985   the advisory's UNREACHED LANES (triage/plan/approve never type `--files`). Queued.
+                Different concern — that is WHO reads the advisory, this is WHETHER the advisory can
+                admit it did not look. Cited so the overlap is visible rather than rediscovered.
+
+    ⚠ AND ONE NAMED, DELIBERATELY-DEFERRED OPERATOR RULING IS FLAGGED, NOT SMUGGLED IN. W1-T985's
+    design clause (ii) states plainly that it does not close the duplicate-WORK case: a filing PR's
+    diff contains a feedback entry and a shard, never the implementation files the shard DECLARES, so
+    two filings against the same module stay invisible to each other under the current scope source no
+    matter where the call site sits. Making that pair visible means reading `files:` out of a shard
+    inside an open PR's diff — the very provenance `openPrFileScopes` rejected — and W1-T985 records
+    that as "a separate operator ruling, not a line of this task." THIS TASK DOES NOT CLOSE IT EITHER,
+    and must not be read as doing so. It is surfaced for the operator because the W1-T2442 filing is
+    now the second piece of evidence bearing on that ruling, and because an honest outage line makes
+    the residue legible where prose in one shard's rationale never was.
+
+    RULE 19 / risk:high IS SET UP FRONT AND IT IS SPAN, NOT BLAST RADIUS. `subsystemsOf` derives a
+    module id per `files:` entry from the basename (`moduleIdFromPath`, `src/lib/task-linter.ts`), so
+    three declared paths resolve to three ids and `sizingViolation` blocks any band below high. The
+    change itself is additive: one failure arm, one exported type, one suppression notice.
+
+    THE INVARIANT IS ATOMIC ACROSS THE THREE FILES AND UNSATISFIABLE PIECEWISE, which is why this is a
+    re-risk rather than a decomposition (the W1-T240/W1-T250/W1-T253 exit). The advisory change alone
+    leaves W1-T917's merged suite asserting the superseded silence and therefore red at its own gate;
+    the test update alone asserts a contract no code produces; and a new test file alone proves
+    nothing about the shipped one. One property, three files, one pass.
+
+    src/run-task.ts IS DECLARED AND THE SERIALISATION COST IS ACCEPTED IN WRITING. It is the
+    most-declared path in the plan, so this shard will serialise against a large share of the queue
+    under `overlappingPaths` — including W1-T985, which is CORRECT because both touch this one
+    advisory. That is the price of the advisory living where it lives, and it is recorded rather than
+    dodged by under-declaring. `src/lib/dispatch-overlap.ts` is NOT declared: the predicate and its
+    ratio policy are correct per W1-T985 rationale (6) and must not move.
+
+    PROOF NOTES. Four criteria use the PURE-PATH `unit test: test/<file>.test.ts` form, which
+    lint-passes and executes the whole file. The name-filtered sentence form was avoided deliberately:
+    W1-T253's note records that `unit test: test/x.test.ts — <sentence>` parses as a name-filtered
+    proof, matches ZERO test titles, and returns CAPPED at 0/N — which is exactly how sibling W1-T252
+    burned a risk:high run on #901. The fifth criterion is a single-line `grep:` whose path IS declared
+    in `files:`, because W1-T985's note records that a grep naming a file the changeset does not touch
+    reads 0 hits and `executed_fail`, failing the review outright.
+
+    ID PROVENANCE. This entry is drafted with the PLACEHOLDER id W1-T2606 under the ratification-inbox
+    convention; `rmd approve` mints and reserves the real id. No id was guessed, and no reservation was
+    taken by the drafting pass — W1-T74 exists because a synthesis rung minted a colliding number
+    without deriving next-unused.

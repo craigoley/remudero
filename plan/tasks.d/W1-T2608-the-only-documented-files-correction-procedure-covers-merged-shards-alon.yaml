@@ -1,0 +1,79 @@
+- id: W1-T2608
+  title: "THE ONLY DOCUMENTED files: CORRECTION PROCEDURE COVERS MERGED SHARDS ALONE AND STATES A RULE-21 FACT THAT W1-T2254 FALSIFIED — the operator guide says Rule 21 'never reads files:, title, or status: at all', which the merged-field drift check contradicts, and it is silent on the far commoner case: an OPEN task whose own live branch already contradicts its declaration"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 10.00
+  files: [docs/operator-guide.md]
+  origin: "followup:DAEMON-1788016810368:2026-08-29T15:26:29.026Z:1"
+  plan_refs: ["W1-T2248", "W1-T2254", "W1-T2286", "W1-T434"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE SECTION, READ AT HEAD. docs/operator-guide.md:204 is titled "Correcting a merged shard's
+    wrong `files:` declaration" and states at :210 that Rule 21 "never reads `files:`, `title`, or
+    `status:` at all", concluding at :232-233 that "a rung that notices a wrong `files:` may at most
+    report it, and a human authors the amendment."
+
+    TWO GAPS, ONE ALREADY ORPHANED IN WRITING.
+
+    (a) THE RULE-21 CLAIM IS SPECIFICALLY FALSE, and W1-T2286's own note says so and declines to fix
+    it: W1-T2254 landed `mergedFieldChangeViolations` the same day, whose reported-field list
+    includes `files`, `status`, `depends_on`, `risk` and others, so a widened `files:` on a merged
+    task now reports drift at `warn`. W1-T2286 records the correction verbatim — "The guide is
+    DIRECTIONALLY RIGHT … and SPECIFICALLY FALSE on 'never reads'" — and explicitly leaves it "for
+    whoever owns the guide", because carrying it there would have widened that task's own `files:`.
+    This task is that owner. DIRECTION MATTERS AND IS NOT REVERSED: a `warn` never reaches
+    `lint-plan`'s exit code, so no gate blocks a correction; the guide must say WHICH check reports
+    it and at what severity, rather than that nothing reads the field.
+
+    (b) THE OPEN CASE IS UNDOCUMENTED, AND IT IS THE COMMON ONE. A task's declaration is most often
+    found wrong WHILE THE TASK IS STILL OPEN, by its own branch — which is the condition the
+    follow-up this ratifies reports (run DAEMON-1788016810368, W1-T2441, PR #3261). On an unmerged
+    task the correction is strictly simpler: Rule 21's post-merge amendment guard does not apply at
+    all, so the amendment is an ordinary plan-only human-authored edit. The guide's title and every
+    sentence in it says "merged", so an author in the commoner situation finds no procedure and
+    reasons from a section written for a different lifecycle stage.
+
+    AND THE READER NEEDS THE DISPOSITION, NOT ONLY THE PROCEDURE. An overrun does not block
+    anything: the implement path logs `scope_guard.overrun` and pushes (W1-T434's push-and-flag),
+    and the fix rung exempts paths that predate its invocation. A reader who believes an overrun has
+    stalled a PR acts on a wrong premise.
+  design: |
+    A documentation-only correction to the existing section, changing no code and no gate.
+    (i) State the real Rule-21 position: acceptance stays blocked; `files:` is REPORTED as
+    post-merge field drift at warn severity, which no exit code reads — so the correction is allowed
+    and is visible, rather than unread.
+    (ii) Add the OPEN/unmerged case: on an unmerged task the post-merge amendment guard does not
+    apply, and the amendment is the same plan-only human-authored plan PR. The evidence bar the
+    section already sets, and its "a rung may at most report it" rule, apply unchanged to both
+    stages — neither is weakened here.
+    (iii) State the disposition an overrun actually produces (`scope_guard.overrun`: pushed and
+    flagged, never refused), so a reader knows a wrong declaration is not a stalled PR.
+    Retitle the section to cover both stages. Nothing else in the guide is touched.
+  acceptance:
+    - claim: "the section names the merged-field drift report and its warn severity instead of claiming that no gate reads the declaration at all"
+      proof: "grep: post-merge-field-drift in docs/operator-guide.md"
+    - claim: "the procedure covers an unmerged task, where the post-merge amendment guard does not apply and the amendment is an ordinary plan-only human-authored edit"
+      proof: "grep: an unmerged task in docs/operator-guide.md"
+    - claim: "the section states the disposition an out-of-scope push actually produces, so a reader does not mistake a wrong declaration for a stalled PR"
+      proof: "grep: scope_guard.overrun in docs/operator-guide.md"
+  note: |
+    SIZING BAND: `risk: medium` is honest here — `files:` is one path and every criterion names only
+    that same path, so `subsystemsOf` sees one concern. The band was chosen, not discovered: no
+    source symbol or second module is named in any criterion, deliberately, so the doc fix does not
+    acquire a span it does not have.
+
+    ALL THREE PROOFS ARE RED AT FILING, VERIFIED: `post-merge-field-drift`, `an unmerged task` and
+    `scope_guard.overrun` each match zero times in docs/operator-guide.md at origin/main, so none of
+    them can pass without the work. (A `grep:` proof is a BASIC regular expression — the `.` in
+    `scope_guard.overrun` is a wildcard that still matches the literal.)
+
+    WEAKENS NOTHING. The acceptance guard, the reproducible-failure evidence bar, and the
+    report-only rule for rungs are all preserved verbatim; this adds the second lifecycle stage and
+    corrects one false sentence. RE-FILES NOTHING: W1-T2248 wrote the section, W1-T2254 shipped the
+    check that falsified its Rule-21 sentence, W1-T2286 recorded the correction and explicitly did
+    not carry it, W1-T434 shipped the push-and-flag disposition.

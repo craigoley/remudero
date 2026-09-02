@@ -1,0 +1,84 @@
+- id: W1-T2637
+  title: "the status board's refusal renderer is exhaustive over the dispatch-filter reasons — today any reason but the breaker inherits the hardcoded 'run branch already pushed' sentence, so the next widening of the refused list mislabels silently (the trap W1-T2415 already sprang once)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: |
+    OBSERVED AT SOURCE 2026-08-31 (line refs verified this session; expect drift and re-read before
+    editing). The rendered REFUSED line is a two-way ternary (src/lib/status-board.ts:2715-2718):
+    the breaker reason gets breaker wording, and EVERYTHING ELSE gets the literal sentence
+    "run branch already pushed to origin".
+    THIS IS LATENT, NOT LIVE, AND THE DISTINCTION IS THE POINT. The derivation guards the list at
+    :1935 with `if (reason !== "run-branch-already-pushed") return;`, so no other reason reaches the
+    renderer today and nothing is currently mislabelled on the board. Claiming otherwise would be
+    exactly the claimed-versus-evidenced failure this repo has paid for twice; the honest statement
+    is that the renderer is a loaded trap, not a firing one.
+    THE TRAP HAS ALREADY SPRUNG ONCE, WHICH IS THE ARGUMENT. W1-T2415 widened this surface by one
+    reason — the circuit breaker — and its own change note records that the line "used to hardcode
+    the run-branch wording for every row, so a breaker refusal pushed here would have been
+    mislabelled as a stale branch — a worse failure than the silence it replaces." It had to fix
+    the ternary as part of adding an arm, and the NEXT-ACTION rules at :2006 and :2020 needed the
+    same treatment so a breaker refusal would not be handed run-branch advice. The pattern is a
+    two-way branch that must be repaired by whoever widens it, and the repair is easy to forget
+    because the wrong label reads plausibly.
+    THE NEXT WIDENING IS INVITED IN WRITING. `QueueHeadSection.refused`'s own doc says the other
+    filter reasons are "deliberately not duplicated here" and that widening the surface to them "is
+    a different, unfiled change" — so a future task doing exactly that inherits an else-branch that
+    tells the operator to run `rmd reap-branches` for a task with no branch to reap. A wrong remedy
+    is worse than no remedy: it spends the operator's trust and their time.
+    WHY NOW RATHER THAN WITH THAT FUTURE TASK: the filter union has grown an arm since this
+    renderer was written, so the gap between what the union can carry and what this surface can
+    say is now demonstrable rather than speculative, and closing it costs one mapping table.
+  design: |
+    (i) A LABEL TABLE, EXHAUSTIVE BY CONSTRUCTION. Replace the ternary with a mapping from the row's
+    reason — the dispatch-filter union PLUS the breaker literal this row type already carries — to
+    its wording, typed so the type-checker names this site when a new arm lands rather than letting
+    it inherit a neighbour's sentence. VERIFY the union's current membership and the row type's own
+    widening from source before writing the table; do not trust this note's enumeration.
+    (ii) THE TWO SHIPPED WORDINGS ARE PRESERVED VERBATIM. The run-branch sentence and the breaker
+    sentence (including its reset-note fallback) must render byte-identically to today. This task
+    changes what an UNHANDLED reason does; it changes nothing an operator currently reads.
+    (iii) DO NOT WIDEN THE DERIVATION. The `if (reason !== "run-branch-already-pushed") return;`
+    scope guard stays exactly as it is. Admitting more reasons onto this surface is the separate,
+    unfiled change that doc names, and folding it in here would be a second concern smuggled into a
+    hygiene fix — and would change what the board shows without anyone having decided it should.
+    The point of this task is that WHEN that change is made, it cannot mislabel.
+    (iv) THE NEXT-ACTION RULES STAY REASON-SCOPED. Both existing rules select their rows by reason
+    before speaking, which is why the breaker widening did not hand out run-branch advice. Nothing
+    here may relax that into an any-refused-row predicate, and the labels this task adds must not
+    become advice: a label says what happened, an action says what to do, and only the second
+    belongs in that table.
+  acceptance:
+    - claim: "a refused row carrying a reason other than the run-branch and breaker cases renders wording derived from that reason — never the hardcoded run-branch sentence it inherits today"
+      proof: "unit test: test/status-board.test.ts"
+    - claim: "the two reasons that reach this surface today render byte-identically, breaker reset-note fallback included — the falsifier proving the trap was closed without changing what an operator currently reads"
+      proof: "unit test: test/status-board.test.ts"
+    - claim: "the refused list is NOT widened: a task refused for any other reason still produces no refused row at all, so the scope guard stands and this task smuggles in no surface change"
+      proof: "unit test: test/status-board.test.ts"
+    - claim: "the next-action rules stay scoped to their own reasons — a refusal of any other kind draws no run-branch remedy and no breaker remedy, so a new label can never become wrong advice"
+      proof: "unit test: test/status-board.test.ts"
+  risk: medium
+  origin: feedback#followup-W1-T2474
+  plan_refs: ["§7", "§5D"]
+  files: [src/lib/status-board.ts, test/status-board.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    FILED 2026-08-31 from the follow-up harvest of W1-T2474 (run W1-T2474-1788101371246, PR #3314).
+    THE HARVEST'S PREMISE IS CORRECTED HERE, NOT INHERITED. It reads that a retired task "passed
+    through either today would mislabel"; for this consumer that is true only counterfactually,
+    because the derivation's scope guard (:1935) means nothing but the run-branch reason reaches
+    the renderer at all. The live mislabel is in the plan frontier and is filed as the sibling
+    task; this one closes a latent trap with a demonstrated history of springing.
+    SIBLING, NOT DUPLICATE, AND DELIBERATELY NOT MERGED WITH IT: the two fixes are satisfiable
+    PIECEWISE — each module's mapper can be made exhaustive with no change to the other, and each
+    is independently testable — so Rule 19 decomposes rather than granting the atomic-coupling
+    exit. They also touch disjoint files, so nothing serializes them.
+    depends_on IS EMPTY: nothing here waits on unbuilt work; the union arm this generalises over is
+    already merged and readable in src/lib/drain.ts on this head.
+    risk:medium: one module, read-path rendering, no gate/dispatch/spend/merge semantics, and the
+    guard against the one genuinely dangerous direction — silently widening what the board shows —
+    is criterion 3 rather than a note.

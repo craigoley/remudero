@@ -1,0 +1,94 @@
+- id: W1-T2636
+  title: "the plan frontier names a RETIRED task as retired — today `frontierFilterReason`'s trailing catch-all classifies every retirement record as `unmet-dependency` reading 'blocked on unmet dependencies: (none resolved)', and the fallthrough is removed so a future filter arm cannot inherit it silently"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: |
+    OBSERVED AT SOURCE 2026-08-31 (line refs verified this session against the live head; expect
+    drift and re-read before editing). The dispatch filter gained a `"retired"` reason — a
+    `status: "blocked"` task ALSO carrying a `retirement:` ruling is a deliberate record that will
+    never be built, split at the filter from a dependency-stalled task waiting to clear
+    (src/lib/drain.ts:594, emitted BEFORE the unmet-dependency check at :597). The plan-frontier
+    reason mapper was never taught that arm.
+    THE MECHANISM, exactly: `frontierFilterReason` (src/lib/panel-graph.ts:859-877) is an if/else
+    chain — `already-merged` -> undefined, `verify-not-auto` -> undefined, `blocked` -> the blocked
+    kind — and then an UNCONDITIONAL return under a bare `// "unmet-deps"` comment. So `"retired"`
+    falls through it, `unmetDependencies` is walked for a task nothing is waiting on, and the row
+    renders `reasonKind: "unmet-dependency"` with the text `blocked on unmet dependencies:
+    (none resolved)`.
+    THE POPULATION IS REAL, NOT HYPOTHETICAL: plan/tasks.yaml carries retirement records with
+    `retirement: withdrawn` and empty or satisfied `depends_on` — W1-T229, W1-T9a, W1-T9b, W1-T9c,
+    W1-T53, W1-T61, W1-T202 at filing — and each is classified this way in `heldReasons`. Whether a
+    given one reaches the truncated rendered window depends on file order and the frontier limit,
+    but the classification is wrong for all of them, which is what the console reads.
+    WHY IT MATTERS BEYOND TIDINESS: the two populations are exactly the ones an operator must read
+    apart. "Waiting on a dependency" invites patience — it will clear on its own when the dep lands.
+    A retirement record will NEVER clear, because nothing is coming. Rendering the second as the
+    first tells the operator to wait for an event that cannot happen, on the surface whose entire
+    job is answering "what's next". This is the named-reason doctrine (W1-T186) applied one layer
+    down: the board RENDERS the vocabulary the system itself minted, and mints none of its own.
+    THE CATCH-ALL IS THE DEFECT, NOT THE MISSING ARM. `"retired"` is the arm that happens to have
+    landed; `"continued-this-pass"` and `"run-branch-already-pushed"` sit in the same union and
+    would inherit the same wrong branch if a caller ever supplied the options that produce them.
+    A fix that adds one `if` and leaves the trailing fallthrough has fixed today's instance and
+    left the class.
+  design: |
+    (i) NAME IT. `"retired"` gets its own `FrontierReasonKind` arm and its own reason text, derived
+    from the SAME fact that classified the row — the task's `retirement:` ruling (plan.ts's
+    `RETIREMENT_REASONS`, W1-T1287) — never a hand-written blurb that can drift from it, per that
+    section's own standing rule. The text must say the row will not clear on its own; that is the
+    whole distinction being drawn.
+    (ii) REMOVE THE FALLTHROUGH. The mapper becomes exhaustive over the dispatch-filter reason
+    union so the type-checker names this call site when a future arm lands, instead of the new arm
+    silently inheriting the unmet-dependency branch. VERIFY the union's current membership from
+    source before writing the mapping — do not trust this note's enumeration.
+    (iii) THE TWO UNREACHABLE ARMS RETURN undefined, NOT A ROW. `"continued-this-pass"` and
+    `"run-branch-already-pushed"` cannot fire from this caller today (it supplies neither the
+    continued set nor the pushed-branch predicate), and `buildPlanFrontier`'s own doc already
+    states that a task neither eligible nor named by a handled reason is skipped here "never
+    guessed at". Returning undefined honours that; inventing a row for a state this view cannot
+    observe would be the guess the doc forbids. Zero live behaviour change either way — this is
+    about what the NEXT arm inherits.
+    (iv) NOT IN SCOPE, deliberately: `verify:human` exclusion, the frontier's ordering and row
+    budget, and the pinned-header panel's own reason subset (which carries a DIFFERENT defect —
+    silent omission rather than mislabel — recorded in this task's note and not fixed here).
+  acceptance:
+    - claim: "a task the dispatch filter refuses as RETIRED renders a frontier row of its own kind naming the retirement ruling, and its text no longer reads as a dependency it is waiting on"
+      proof: "unit test: test/panel-graph.test.ts"
+    - claim: "a genuinely dependency-held task still renders the unmet-dependency kind naming its unmet ids — the falsifier proving the population was SPLIT rather than both arms relabelled"
+      proof: "unit test: test/panel-graph.test.ts"
+    - claim: "a blocked task carrying NO retirement ruling still renders the blocked kind with its existing text, byte-identically"
+      proof: "unit test: test/panel-graph.test.ts"
+    - claim: "the unmet-dependency kind is returned ONLY for the unmet-dependency reason — every other reason in the filter union yields its own kind or no row at all, so the trailing catch-all a future arm would inherit is gone"
+      proof: "unit test: test/panel-graph.test.ts"
+  risk: medium
+  origin: feedback#followup-W1-T2474
+  plan_refs: ["§7", "§7B"]
+  files: [src/lib/panel-graph.ts, test/panel-graph.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    FILED 2026-08-31 from the follow-up harvest of W1-T2474 (run W1-T2474-1788101371246, PR #3314),
+    which flagged this as out of that task's two-file scope. Verified at source before filing rather
+    than inherited: the `"retired"` arm exists and is emitted (drain.ts:594), the mapper's trailing
+    catch-all exists (panel-graph.ts:859-877), and the retirement-record population is non-empty in
+    the live plan.
+    depends_on IS DELIBERATELY EMPTY. The only precondition — the `"retired"` filter arm — is
+    ALREADY MERGED and readable in src/lib/drain.ts on this head, so a hard edge to the task that
+    shipped it buys nothing and risks a dangling-edge refusal (that task is a tasks.d shard, and the
+    linter fails closed on an unresolvable edge).
+    SIBLING, NOT DUPLICATE: the status-board refusal renderer carries the same non-exhaustive shape
+    and is filed separately. They are satisfiable PIECEWISE — this frontier fix needs no change to
+    that renderer and vice versa — so Rule 19 decomposes them rather than taking the
+    atomic-coupling re-risk-to-high exit that W1-T240/W1-T250/W1-T253 legitimately used.
+    A THIRD CONSUMER FOUND WHILE GROUNDING, CITED AND NOT FILED (the operator's call, not smuggled
+    into a ratification): src/lib/idle-reasons-panel.ts:45 declares its OWN four-member
+    `IDLE_REASON_ORDER` subset of the same union, so a retired task is OMITTED from that strip
+    entirely rather than mislabelled. Different failure shape, different remedy, predates the
+    `"retired"` arm (the subset was already short of the union before it landed).
+    risk:medium matches the console-honesty read-path precedent (W1-T182, W1-T190): a rendering-
+    layer label fix on one module, no gate, dispatch, spend or merge semantics touched, and the
+    failure direction is a wrong word on a row rather than wrong work.

@@ -1,0 +1,156 @@
+- id: W1-T2632
+  title: "RECON IS NEVER TOLD WHICH TASK IT IS RECONNING — renderReconPrompt takes a plan index and an operator-notes block and nothing else, so a recon faithfully executes its literal instructions (git remote -v, git log, ls) and reports repo state with no task content, while the sibling read-only rung renderDiagnosePrompt one screen away already emits TASK id and title: pass the task id, the title, and the ALREADY-COMPUTED worker-visible record path into the recon prompt"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 100.00
+  origin: recon#w1-t2474-recon-confirmed-repo-state-not-task-content-2026-08-30
+  plan_refs: ["§8B", "§2", "W1-T501", "W1-T2241", "W1-T37"]
+  files: [src/run-task.ts, test/recon-mount-routing.test.ts, test/recon-names-its-task.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE RECON DID NOT FAIL. IT OBEYED. A recon on run W1-T2474-1788101371246 filed the follow-up
+    "recon here only confirmed repo state, not task content". That is not an incident and no retry
+    changes it: `renderReconPrompt` (src/run-task.ts:9723) has the signature
+    `(planIndexBlock: string, operatorNotesBlock = "")` and its instruction text is, verbatim,
+    "Inspect the current git repository read-only (git remote -v, git log --oneline -5, ls)".
+    Repo state is the ONLY thing that prompt asks for. No task id, no title, no record path reaches
+    the worker, so relaying task content is not a thing it can fail at — it is a thing it was never
+    asked to do.
+
+    THE ASYMMETRY IS IN ONE FILE, ONE SCREEN APART, AND SETTLES THE DESIGN QUESTION. The sibling
+    read-only rung `renderDiagnosePrompt` (src/run-task.ts:9754) takes `task: Pick<Task,"id"|"title">`
+    and emits `TASK: ${task.id} — ${task.title}`. Same module, same no-write contract, same
+    investigate-and-report shape. Diagnose is told what it is diagnosing; recon is not told what it
+    is reconning. There is no recorded ruling that recon should be blind — only an absent argument.
+
+    THE CODE ALREADY DOCUMENTS THIS AS A STANDING GAP. The doc block above `reconObservedToContext`
+    (src/run-task.ts:9368) states it as finding (1) in its own words: "RECON IS NEVER TOLD WHICH TASK
+    IT IS RECONNING. `renderReconPrompt` takes only a plan index and an operator-notes block — no task
+    id, no title, no record path". That comment was written to justify injecting the record pointer on
+    the IMPLEMENT path in both success and degraded modes — the right fix for the implement prompt,
+    and it leaves recon exactly as it found it. This task closes the half that comment names and does
+    not touch the half it fixed.
+
+    THE FOLLOW-UP'S OWN INSTRUCTION WOULD HAVE FAILED, AND THAT IS THE SHARPEST EVIDENCE. It says to
+    look the task up "in plan/tasks.yaml". W1-T2474 is not there — it is
+    plan/tasks.d/W1-T2474-a-retired-task-counts-as-a-recoverable-blocker.yaml, one of 773 shards. A
+    worker told only "read the plan" guesses the monolith, finds nothing, and reports nothing, which
+    is indistinguishable from a task with no content. `taskRecordPath` (src/lib/plan.ts) ALREADY
+    resolves monolith-vs-shard correctly — it returns `planPath` for a monolith entry and
+    `<plan dir>/tasks.d/<file>` for a shard — so handing recon the resolved path removes the guess by
+    construction rather than by instruction. Naming the file is strictly stronger than naming the
+    directory and telling a worker to search it.
+
+    THE WIRING IS ONE HOP AND EVERY PART OF IT ALREADY EXISTS. At the recon spawn
+    (src/run-task.ts:10729) `taskId` and `task` are already in scope — `operatorNotesBlock` passed on
+    the same call is documented as "scoped strictly to this task's own id". The worker-visible path is
+    already built one line at src/run-task.ts:10941,
+    `workerVisibleRecordPath(planPath, taskRecordPath(planPath, taskId))`, which is AFTER the recon
+    spawn: the change is to hoist that single existing line above the spawn and pass its result in.
+    Nothing new is computed and no second anchoring rule is introduced.
+
+    WHY THE EMPTINESS PERSISTS RATHER THAN SELF-CORRECTING. W1-T2241 caches recon output per task at
+    `state/recon-artifacts/<task_id>.json`, keyed `(task_id, plan_sha, files_digest)`. A content-free
+    recon is therefore written forward and REUSED on the next dispatch of the same task ("recon
+    artifact reused — recon skipped this dispatch", src/run-task.ts:10755). The blind recon is not one
+    wasted spawn; it is a cached one.
+
+    NOT IN SCOPE, DELIBERATELY. This does not raise `RECON_MAX_TURNS` (20 at this sha, and the mount
+    row is pinned to sonnet by test/recon-mount-routing.test.ts for a recorded reason), does not add a
+    report section, does not change `parseReconReport`, does not touch either CONTEXT path
+    (`reconObservedToContext` / `reconDegradedContextNote`), and does not ship the plan BODY: the
+    retrieve-don't-inject doctrine that governs `planIndexBlock` (name the retrievable thing, do not
+    copy it) governs the record pointer identically.
+  design: |
+    Give `renderReconPrompt` the task it is reconning and the path to that task's own record, then
+    pass them at the single call site.
+
+    (i) SIGNATURE. `renderReconPrompt` additionally takes the task id, the title, and the
+    worker-visible record path. VERIFY the current signature and call site from source before editing
+    — this note is a 2026-08-31 survey and the file is the one every task contends for.
+
+    (ii) REUSE THE ANCHORING, NEVER RE-DERIVE IT. The path handed in is
+    `workerVisibleRecordPath(planPath, taskRecordPath(planPath, taskId))` — the existing line at
+    src/run-task.ts:10941, HOISTED above the recon spawn so both consumers read one computation. Do
+    not call `taskRecordPath` directly and do not build a second relative-path rule: that function
+    returns the ORCHESTRATOR's absolute path, which is wrong for the process that reads it, and
+    `workerVisibleRecordPath` is the seam that already fixes it.
+
+    (iii) FAIL-SOFT, THE WAY THE NEIGHBOURING BULLET ALREADY DOES. `workerVisibleRecordPath` returns
+    `undefined` when the record cannot be resolved or would escape the worker's tree. In that case
+    OMIT the pointer and still run the recon. One absent advisory line is strictly better than a path
+    pointing outside the worker's tree, and a malformed plan file must never fail a dispatch.
+
+    (iv) NAME IT, DO NOT INLINE IT. The prompt gains a pointer, not a copy: the record's design,
+    rationale and criteria stay on disk one `Read` away. This is the same rule `planIndexBlock`
+    already obeys for MASTER-PLAN, and inlining a shard would put the plan body back into every
+    dispatch's context by the side door.
+
+    (v) THE EXISTING ANCHOR TEST BREAKS SILENTLY AND MUST BE REPAIRED IN THE SAME DIFF — this is the
+    trap. test/recon-mount-routing.test.ts lines 100-101 and 111-112 locate the recon spawn with
+    `SRC.indexOf("renderReconPrompt(planIndexBlock, operatorNotesBlock)")` and slice a 1400-character
+    window back from it. Changing the call's arguments makes that `indexOf` return -1, `slice(-1401)`
+    quietly returns the tail of the file, and the mount/maxTurns assertions then run against an
+    unrelated window. Re-anchor both to the new call text. A run that changes the signature and leaves
+    those anchors is the failure this clause exists to prevent.
+
+    (vi) SEPARATE FILE FOR THE NEW TESTS. The new behaviour lands in
+    test/recon-names-its-task.test.ts; test/recon-mount-routing.test.ts is edited ONLY to repair its
+    two anchors, so an anchor repair and a behaviour claim never share a failure.
+  acceptance:
+    - claim: "the rendered recon prompt names the task id and title it is reconning"
+      proof: "unit test: the recon prompt names the task it is reconning"
+    - claim: "the rendered recon prompt names the task's own record path so no worker has to guess where the spec lives"
+      proof: "unit test: the recon prompt points at the task record path"
+    - claim: "for a task filed as a shard the named path is that shard file and never plan/tasks.yaml"
+      proof: "unit test: a sharded task record path is the shard not the monolith"
+    - claim: "an unresolvable or tree-escaping record path omits the pointer and the recon still runs"
+      proof: "unit test: an unresolvable record path omits the pointer"
+    - claim: "the record is named and never inlined so the prompt gains a pointer rather than the plan body"
+      proof: "unit test: the record is named never inlined into the recon prompt"
+    - claim: "the mount and turn-budget anchors still locate the recon spawn after the signature change"
+      proof: "unit test: test/recon-mount-routing.test.ts"
+  note: |
+    FILED 2026-08-31 from the follow-up harvested off run W1-T2474-1788101371246. The proposal as
+    harvested is a per-task action ("look up W1-T2474 before implementation work starts"); it is
+    ratified as the CLASS instead, for two source-verified reasons. First, its referent already
+    shipped — src/lib/drain.ts:483-592 carries W1-T2474's `"retired"` filter split by name, so the
+    action is moot. Second, and more useful, the action would not have worked: it directs a worker to
+    plan/tasks.yaml, and W1-T2474 lives in plan/tasks.d/. A per-task remedy that is itself wrong about
+    where the task lives is the strongest possible argument for fixing the pointer at the prompt.
+
+    depends_on IS DELIBERATELY EMPTY, AND THE REASON IS AN OBSERVATION THE OPERATOR SHOULD SEE.
+    W1-T501 (worker-is-told-to-write-the-wrong-tree) is the natural ancestor — it owns
+    `workerVisibleRecordPath`, which this task reuses. Its shard reads `status: queued`, but its
+    mechanism is present at this sha: `workerVisibleRecordPath` is exported at src/run-task.ts:9314
+    with a doc citing W1-T501 by id, and test/recon-degrade.test.ts:384 carries a W1-T501 comment
+    reading "the pointer is now TREE-RELATIVE". That is an apparently-merged-but-uncredited record,
+    not a dependency to wait on. A hard edge onto a queued shard whose work is already in the tree
+    would strand this task on a gap that no longer exists (the W1-T177 reasoning: soft ordering by
+    note, never a hard gate). Whether W1-T501's record should be corrected is `rmd correct`'s job and
+    an operator decision — it is deliberately NOT smuggled into this filing.
+
+    risk:high IS A RULE 19 SPAN REGRADE, RECORDED RATHER THAN WORKED AROUND. The change is small — one
+    signature, one hoisted line, one call site — but `files:` names three stems across src/ and test/,
+    which `sizingViolation` refuses at risk:medium on the span alone. Decomposing would be worse: the
+    signature change and the anchor repair in test/recon-mount-routing.test.ts MUST land together or
+    that suite's `SRC.indexOf` window silently retargets, so the two halves are atomically coupled.
+    Same exit W1-T2474's own note took, and the W1-T180 / W1-T7B / W1-T501 precedent.
+
+    PROOF DIALECT. Five criteria are name-filtered on short distinctive titles (each under 100
+    characters, no comma, so `looksLikeScenarioNarrative` does not fire) rather than pure paths, so no
+    behaviour claim is coupled to an unrelated failure elsewhere in its file — the shape recorded in
+    W1-T501's note. The sixth is deliberately a PURE PATH onto test/recon-mount-routing.test.ts,
+    because there the whole file IS the claim: every test in it anchors on the recon spawn's call
+    text, and running it whole is exactly the regression lock wanted.
+
+    NOT FILED, AND WHY. The harvest minted a candidate whose referent had already shipped, which
+    suggests nothing checks a follow-up's referent state before it becomes a proposal. That is a
+    second concern with a single instance behind it, it belongs to the harvest and not to the recon
+    prompt, and W1-T1013 already owns a different harvest defect (the ledger-union/rotation corpus).
+    Recorded here as an observation rather than folded in.

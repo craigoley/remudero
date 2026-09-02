@@ -1,0 +1,81 @@
+- id: W1-T2622
+  title: "worktree-provisioning coverage census — every `git worktree add` in src/ either routes through worktreeAdd (base recorded, currency asserted) or is a NAMED exemption carrying its reason, enforced by a BIDIRECTIONAL static guard so a new raw site cannot appear silently and a rotted exemption cannot outlive the site it excused"
+  repo: remudero
+  depends_on: [W1-T2621]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: |
+    THE SECOND HALF OF THE HARVEST'S QUESTION — "if this is systemic across fresh worktree
+    provisioning" — is unanswerable today because nothing enumerates the provisioning paths, and it will
+    be unanswerable again the next time it is asked unless the enumeration is enforced rather than
+    performed by hand.
+    THE PATHS ARE NOT UNIFORM, VERIFIED AT THIS SHA. `addLaneWorktree` (src/run-task.ts:19029-19035,
+    shared by the retro/triage/plan lanes) and `spike.ts:80` both route through `worktreeAdd`, so both
+    record a base and assert currency. `runTask` (run-task.ts:11557) routes through it too and is the
+    only site that catches `WorktreeBaseStaleError` specially. But run-task.ts:13229 cuts a REVIEW
+    worktree with a raw `execFileSync("git", ["-C", repoDir, "worktree", "add", worktreePath,
+    \`origin/${branch}\`])` — no base record, no currency assert, and no ledger line naming either.
+    THE REVIEW SITE IS A LEGITIMATE EXEMPTION, NOT A BUG, and saying so precisely is the point. It
+    materializes at a PR HEAD, so "is this behind origin/main" is not its question; W1-T232 already owns
+    that path's detached-materialization and tip-mismatch guard. What is wrong is that the exemption is
+    INVISIBLE: a reader auditing provisioning cannot tell a deliberate carve-out from an oversight, and
+    the next raw `git worktree add` added anywhere in src/ will be equally silent.
+    THE PRECEDENT IS THE HOUSE'S OWN. `ci-gate`'s IGNORE list, the sweep's DISPOSITION_RULES, the
+    scanner-gate config assertion (W1-T211) and the awareness surface (W1-T212) all encode the same
+    move: a hole that is a NAMED ROW is a finding; a hole that is merely absent from a list is a
+    silence. This applies it to worktree provisioning, which currently has no list at all.
+  design: |
+    (i) A REGISTRY AS DATA (src/lib/worktree-sites.ts): one row per worktree-creation site in src/,
+    each naming the file, what it creates, and either `routes-through: worktreeAdd` or
+    `exempt-because: <reason>`. Adding a site is a row, never a code branch.
+    (ii) A BIDIRECTIONAL STATIC GUARD over the SHIPPED SOURCE, not a hand-maintained duplicate. It
+    scans src/ for raw `git worktree add` invocations and requires each to be either inside
+    `worktreeAdd` itself or present in the registry. BOTH directions fail: a raw site with no row fails
+    (a new hole cannot appear silently), and a row whose site no longer exists fails (a rotted
+    exemption is a lie about coverage, and an exemption list that outlives its subject is how a census
+    stops being evidence).
+    (iii) AN EXEMPTION WITH NO REASON FAILS. A blank `exempt-because` is how a hole becomes permanent —
+    the row has to state what makes origin/main currency the wrong question for that site.
+    (iv) SCOPE FENCE, hard: this task CHANGES NO PROVISIONING BEHAVIOUR. It does not convert the review
+    site, does not add a base record to it, and does not touch run-task.ts at all. Recording a base for
+    the review materialization is a real and separate candidate and belongs beside W1-T232, which
+    already declares that file and owns that path's freshness guard — folding it in here would put two
+    concerns in one shard and would collide with a queued task's declared scope.
+    (v) THE CENSUS ANSWERS THE HARVEST'S QUESTION ONCE AND KEEPS IT ANSWERED. Its output is the list a
+    future reader needs: which provisioning paths assert currency, which do not, and why not.
+    VERIFY FROM SOURCE before writing rows (distrust this note): re-scan src/ for every `worktree`,
+    `add` invocation rather than trusting the three sites enumerated in the rationale — the value of a
+    census is that it is derived, and a census that inherits its inventory from a prose note is not one.
+  acceptance:
+    - claim: "every raw `git worktree add` invocation in src/ is either inside worktreeAdd or carries a registry row, and a NEW raw site added anywhere in src/ with no row FAILS the guard — so a provisioning path that skips the base record and the currency assert cannot appear silently again"
+      proof: "unit test: test/worktree-creation-census.test.ts"
+    - claim: "the guard is BIDIRECTIONAL — a registry row whose site no longer exists in src/ also FAILS, so a rotted exemption cannot outlive the site it excused and the census stays evidence rather than becoming folklore"
+      proof: "unit test: test/worktree-creation-census.test.ts"
+    - claim: "an exemption with no stated reason FAILS, and the review-materialization site (a worktree cut at a PR head, where currency against origin/main is not the question) is present as a NAMED row rather than as an absence"
+      proof: "unit test: test/worktree-creation-census.test.ts"
+    - claim: "the census changes no provisioning behaviour — it adds no base record, no assert and no ledger line to any exempt site, and the sites that route through worktreeAdd behave exactly as they do today"
+      proof: "unit test: test/worktree-creation-census.test.ts"
+  risk: high
+  origin: architect
+  plan_refs: ["§8A", "§5"]
+  files: [src/lib/worktree-sites.ts, test/worktree-creation-census.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    FILED 2026-09-01 alongside W1-T2621, from the same follow-up harvest of run
+    W1-T2460-1788054755234. W1-T2621 answers "why did THIS base go stale" by recording the reading;
+    this answers "is it systemic" by enumerating the paths and keeping the enumeration honest. They are
+    separable concerns with separate falsifiers, so they are two tasks rather than one.
+    depends_on W1-T2621 is SEQUENCING as much as dependency: W1-T2621 changes worktreeAdd's dep shape and its
+    call sites, and a census asserting what routes through worktreeAdd should be written against the
+    landed version rather than racing it. It also keeps the two out of each other's declared files.
+    DELIBERATELY NOT DEPENDED ON: W1-T232 (the review path's detached materialization and stale-fetch
+    guard) and W1-T233 (its teardown and named reason). This census RENDERS whatever those paths are
+    today and records the review site as an exemption with its reason; when they land, the row's reason
+    is updated by whoever lands them, not by this task holding itself hostage to unbuilt siblings.
+    risk:high is a recorded regrade, not a workaround: the file set (a new registry module plus its
+    guard test) reads as a span to the sizing check, and decomposing a census into per-site tasks would
+    destroy the one property that makes it worth having — that it is complete. Same regrade rationale
+    as W1-T218 and W1-T180.

@@ -1,0 +1,108 @@
+- id: W1-T2638
+  title: "A FOLLOW-UP WHOSE WHOLE ACTION IS FLIPPING THE DECORATIVE yaml `status:` FIELD IS MINTED AS WORK — the refutation exists (W1-T367: dispatch eligibility and dependency satisfaction are GitHub-derived, so a stale `queued` can neither re-offer nor block) but it lives in a shard rationale the follow-up producer never reads, so the class recurred a fourth time and consumed a drafting slot; refuse it at harvest with the refutation stated, exactly scoped so `blocked` and retirement follow-ups still land"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: medium
+  origin: "followup#W1-T2477-1788105355034"
+  plan_refs: ["W1-T367", "W1-T105", "W1-T2455", "§12"]
+  files: [src/lib/retro.ts, test/retro.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE FIXTURE IS THE FOLLOW-UP THAT PRODUCED THIS TASK, and it is the fourth of its kind.
+    Follow-up `followup:W1-T2477-1788105355034:2026-08-30T15:58:59.564Z:0` asked to sync
+    `plan/tasks.d/W1-T2473-*.yaml`'s `status:` from `queued` to `shipped`, on the stated ground that
+    "stale status could cause a scheduler to re-offer already-completed work or block dependents
+    unnecessarily". BOTH HALVES OF THAT GROUND ARE FALSE, and the refutation was already written down.
+
+    VERIFIED AT SOURCE, NOT ASSUMED. (i) `isDispatchEligible` (drain.ts:558+) reads `t.status` for
+    exactly one comparison, `=== "blocked"`, and that read sits BEHIND `isMerged(t.id)`, which resolves
+    through the GitHub-derived projection and never consults `task.status` — so no `queued` row can be
+    re-offered on account of the field. (ii) dependency satisfaction runs through an injected
+    `MergedResolver`; the yaml-trusting `yamlStatusMerged` (plan.ts:554) is a DEFAULT PARAMETER whose own
+    doc scopes it to "pure unit tests over fixtures" — so no dependent is blocked by the field either.
+    (iii) `shipped` IS NOT A WORD THE SCHEMA KNOWS: `TASK_STATUSES` (plan.ts:15-26) is
+    queued|recon|prompted|running|review|fixing|diagnosing|blocked|merged|done, and `loadPlan`
+    (plan.ts:232-235) throws `PlanError: task <id>: invalid status 'shipped'` over the MERGED view — one
+    shard carrying it fail-closes the plan for the daemon, the drain, the review resolution and
+    main-plan-guard alike. The requested edit is not a harmless no-op; it is an outage-shaped one.
+
+    THE RECURRENCE IS THE DEFECT, NOT THE INSTANCE. W1-T367's rationale already carries this exact
+    refutation, in its own words: "THREE SESSIONS HAVE NOW INFERRED A HAZARD FROM THIS FIELD THAT DOES
+    NOT EXIST, so the refutation is recorded here to stop a fourth." It did not stop a fourth, and the
+    reason is structural rather than a lapse: the refutation is recorded in a SHARD RATIONALE, and the
+    follow-up harvest reads worker report text and open task titles — never a shard's prose. A
+    refutation filed where the producer cannot see it stops nothing.
+
+    WHY THE EXISTING DEDUP ARMS DO NOT CATCH IT, read rather than assumed. `mineFollowups` (retro.ts)
+    refuses a candidate only two ways: an entry already carrying a harvest mark, and
+    `followupMatchesTitle`, a title-word overlap against OPEN task titles. This entry matches no open
+    title and carries no mark, so it mints. W1-T2455's drafted-slug refusal is a 3-shingle Jaccard at a
+    0.2 cutoff with measured recall of 3 in 32 and cannot be leaned on here either. Nothing in the path
+    knows the difference between work and a doctrine-forbidden edit.
+
+    WHAT THIS COSTS TODAY. One Architect drafting slot per recurrence, at the tier a ratification
+    candidate rides, to re-derive a refutation the plan already contains — plus the standing risk that
+    a future recurrence is drafted by something less careful and lands `shipped` in a shard.
+  design: |
+    REFUSE AT HARVEST, NOT AT CLASSIFICATION. The narrowest place the class dies is `mineFollowups`
+    (retro.ts), before a candidate becomes a proposal id at all — one predicate, one reason string, no
+    new surface downstream. VERIFY the current `mineFollowups` refusal arms and the exact harvest-mark
+    shape from source before editing; this note is a survey and the line numbers will drift.
+
+    REUSE THE EXISTING MARK, MINT NO NEW STEP. The refusal records itself with the SAME harvest mark
+    the title-dedup arm already writes, carrying a distinct reason value. That keeps the change
+    retro-local: no new step name, no edit to the decision-relevant retention set, no second idempotence
+    story. A second harvest over unchanged records must refuse identically and mint nothing.
+
+    THE PREDICATE IS NARROW BY CONSTRUCTION, AND THE SCOPE FENCE IS THE HALF MOST LIKELY TO BE GOT
+    WRONG. Refuse ONLY an entry whose action is editing a task's yaml `status:` field toward a
+    merged-meaning value (`merged`, `done`) or toward a value outside the schema's vocabulary. DO NOT
+    refuse: an entry about `blocked` (the ONE value that genuinely gates dispatch, and the vocabulary
+    every retirement record uses), an entry about the `retirement:` field, or an entry about the DERIVED
+    projection. Ambiguity resolves toward HARVESTING — a false refusal silently drops real work, which
+    is strictly worse than a candidate an Architect can decline in a sentence.
+
+    THE REASON MUST TEACH, NEVER JUST DECLINE. The recorded reason states the refutation itself —
+    dispatch eligibility and dependency satisfaction are GitHub-derived, the field is decorative by the
+    plan header's own binding rule, and a value outside the schema fail-closes the whole merged plan —
+    and names the sanctioned remedy for the case where a task is GENUINELY uncredited: an operator
+    correction (`rmd correct <id> --pr <n>`, W1-T75), which is ledger-supreme, never a yaml edit. An
+    operator reading the refusal must not have to re-derive any of this.
+
+    OWNED ELSEWHERE, CLAIMED BY NOTHING HERE: the READER side (which consumers still touch the
+    decorative field) is W1-T367's and is neither built nor weakened by this task; the schema's own
+    error message is W1-T2639's; `post-merge-field-drift` (task-linter.ts) already reports a `status:`
+    change on a merged shard as a WARN and stays exactly as it is.
+  acceptance:
+    - claim: "a follow-up entry whose whole action is flipping a task's decorative yaml status field toward a merged-meaning or out-of-vocabulary value is REFUSED at harvest and never becomes a candidate"
+      proof: "unit test: test/retro.test.ts"
+    - claim: "the recorded reason states the refutation and names the sanctioned correction remedy, rather than declining silently"
+      proof: "unit test: test/retro.test.ts"
+    - claim: "the scope fence holds: an entry about the blocked value, about a retirement record, or about the derived projection is still harvested normally, and an ambiguous entry harvests rather than being dropped"
+      proof: "unit test: test/retro.test.ts"
+    - claim: "the refusal reuses the existing harvest mark with a distinct reason and mints no new step, so a second pass over unchanged records refuses again and mints nothing"
+      proof: "unit test: test/retro.test.ts"
+    - claim: "the canonical fixture is the originating entry itself — the ask to sync W1-T2473 from queued to shipped is refused, while an ordinary work follow-up in the same batch still mints"
+      proof: "unit test: test/retro.test.ts"
+  note: |
+    FILED FROM followup:W1-T2477-1788105355034:2026-08-30T15:58:59.564Z:0, whose literal ask is REFUSED
+    on the merits and reframed here. THE ORIGINAL ASK, PRESERVED VERBATIM so a future reader needs no
+    archaeology: "sync `plan/tasks.d/W1-T2473-*.yaml` `status:` field from `queued` to `shipped` (PR
+    #3304 already merged) — stale status could cause a scheduler to re-offer already-completed work or
+    block dependents unnecessarily."
+    THREE INDEPENDENT REASONS IT IS REFUSED, each checked at source rather than argued: `shipped` is not
+    a TASK_STATUSES member so the edit fail-closes loadPlan over the whole merged plan; the field is
+    decorative by the plan header's binding rule and the runner never writes it back; and neither stated
+    harm is reachable, because dispatch eligibility and dependency satisfaction both resolve through the
+    GitHub-derived projection.
+    IF W1-T2473 IS GENUINELY UNCREDITED — which this task does NOT assert, having no GitHub read — the
+    remedy is `rmd correct W1-T2473 --pr 3304` (W1-T75, corrections-supreme), an operator action, not a
+    plan edit and not a task. Deliberately not smuggled in here.
+    NO HARD EDGE ON W1-T367, deliberately: that task is queued and unbuilt, and its files span three
+    modules, so a depends_on would strand this producer-side refusal behind a reader-side task it does
+    not need. Cited in plan_refs instead.

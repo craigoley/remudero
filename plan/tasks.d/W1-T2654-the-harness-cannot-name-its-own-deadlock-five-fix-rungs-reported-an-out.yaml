@@ -1,0 +1,96 @@
+- id: W1-T2654
+  title: "THE HARNESS CANNOT NAME ITS OWN DEADLOCK — five fix rungs reported an out-of-scope gate remedy independently, in nearly identical words, and NOTHING counted them as one class, so P63's own falsifier (a window with zero members) and its kill trigger (three consecutive cycles at zero) are unmeasurable; give the stand-down a named disposition, an escalation that names gate + file + declaring entry, and a countable ledger line"
+  repo: remudero
+  depends_on: [W1-T2653]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 18.00
+  origin: "retro-followup#3410"
+  plan_refs: ["P63", "W1-T1227", "W1-T186", "W1-T2532"]
+  files: [src/run-task.ts, test/a-deadlock-the-harness-cannot-count.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE OBSERVABILITY HALF OF P63, and the plan states the defect in one clause of its own:
+    "Five fix rungs reported this independently, in nearly identical words, and NONE COULD NAME IT AS
+    A PATTERN." Five correct reports, zero aggregation. The pattern was found by a human reading five
+    prose paragraphs across five PRs a cycle later.
+
+    WHY THIS IS NOT SATISFIED BY W1-T2653. W1-T2653 makes the DECLARED remedy files reachable. It cannot
+    make the NEXT undeclared one reachable, because nobody knows what it is until it fires — the
+    class already reached three distinct gates (the size ratchet, `producer-completeness`'s
+    `KNOWN_UNWIRED`, the catch-erasure baseline) and the sixth instance landed on a file the harvest
+    had not predicted. A registry with no detector for its own gaps rots silently: the first
+    unregistered member reproduces the full deadlock and is again reported as five paragraphs of
+    prose. This is the guard against that, and it stays valuable precisely BECAUSE W1-T2653 ships.
+
+    AND P63 CANNOT BE SCORED WITHOUT IT. P63's FALSIFIER is "a window in which NO `blocked_ci` run's
+    fix rung names an out-of-scope remedy file" and its KILL TRIGGER is "three consecutive cycles at
+    zero members". Both are counts of a population nothing counts. Today the only way to score them
+    is to re-read every fix rung's prose by hand — which is how the class was found and is not a
+    method that survives a retro running unattended. A proposal whose own falsifier is unmeasurable
+    cannot be honestly retired OR honestly held.
+
+    THE EMITTER DISCIPLINE IS ALREADY HOUSE LAW. W1-T186 requires the system to name the OBSERVED
+    blocker rather than an inferred symptom. A rung that stands down saying "a fix worker added
+    path(s) outside the declared scope" has named the symptom; the observed blocker is "the failing
+    gate <name> prescribes <file> as its own remedy and this task's scope does not contain it." One
+    sentence an operator can act on, instead of five they must correlate.
+  design: |
+    (i) A NAMED DISPOSITION, DERIVED NOT GUESSED. When the rung stands down and at least one
+    new out-of-scope path is a remedy file DECLARED by a currently-failing gate (W1-T2653's registry
+    read), classify the stand-down as the gate-remedy class rather than generic scope drift. The
+    classification is deterministic — a set intersection over facts the rung already holds — and
+    involves no model call.
+
+    (ii) AND CATCH THE UNDECLARED MEMBER, which is the durable half. A stand-down whose out-of-scope
+    path is named by the failing check's own output as the fix — the ratchet's `TO FIX: ... edit
+    <path>` shape — but which carries NO registry entry, is surfaced as the class WITH the missing
+    entry named, so the registry's gap is reported by the first case that hits it rather than by the
+    next retro. VERIFY FROM SOURCE what the failing-check text the rung already receives actually
+    contains before choosing the match; if the text cannot be matched reliably, report the class from
+    the stand-down alone and say so — an honest partial detector beats a brittle parse.
+
+    (iii) THE ESCALATION NAMES ALL THREE THINGS: the gate, the file, and whether a declaring entry
+    exists. That is what turns five prose reports into one decidable operator question.
+
+    (iv) COUNTABLE, NOT MERELY LEGIBLE. The ledger line carries the class, the gate and the file, so
+    a window's member count is a ledger read. Emitting a line nobody can aggregate would reproduce
+    the defect one layer down.
+
+    (v) NOTHING ABOUT WHAT THE RUNG REFUSES CHANGES. The stand-down still stands down (W1-T2653 governs
+    what is permitted); this changes only how it is NAMED, ESCALATED and COUNTED. A version that
+    also altered the refusal would entangle a measurement with the thing it measures.
+
+    OUT OF SCOPE, NAMED. (a) Any change to what the scope guard permits — that is W1-T2653's, and this
+    task must be verifiable with W1-T2653's exemption disabled, so it measures the class rather than
+    depending on the class being fixed. (b) Retro-side reporting of the count — this task emits the
+    countable line; whether the retro renders it is that rung's decision. (c) The escalation
+    transport itself.
+  acceptance:
+    - claim: "a stand-down whose new out-of-scope path is a remedy file declared by a currently-failing gate is classified under the gate-remedy class, not generic scope drift"
+      proof: "unit test: test/a-deadlock-the-harness-cannot-count.test.ts"
+    - claim: "an ordinary out-of-scope path keeps today's generic stand-down reason — the class is a named subset, never a relabelling of every scope refusal"
+      proof: "unit test: test/a-deadlock-the-harness-cannot-count.test.ts"
+    - claim: "the escalation names the gate, the file, and whether a declaring registry entry exists, so one sentence replaces the five prose reports"
+      proof: "unit test: test/a-deadlock-the-harness-cannot-count.test.ts"
+    - claim: "an out-of-scope remedy with NO registry entry is still reported as the class, with the missing entry named — the registry cannot rot silently"
+      proof: "unit test: test/a-deadlock-the-harness-cannot-count.test.ts"
+    - claim: "the class is COUNTABLE from the ledger alone: a seeded window yields its member count, so P63's zero-member falsifier and three-cycle kill trigger are measurable rather than prose"
+      proof: "unit test: test/a-deadlock-the-harness-cannot-count.test.ts"
+  note: |
+    risk:high with band_meaning: span — the two declared files are one consumer and its falsifier
+    suite, scored as two concerns by basename; the change itself is one concern (naming, escalating
+    and counting one stand-down class) and alters no verdict, exit code or refusal.
+
+    depends_on W1-T2653 is a REAL dependency, not ordering courtesy: this task keys its classification
+    on W1-T2653's declared remedy-file registry. Without it, the detector would have to mint a second,
+    divergent list of the same files — the drift W1-T2551's "read the repo's own declaration"
+    discipline exists to prevent. Both tasks declare `src/run-task.ts`, so `overlappingPaths` would
+    serialise them regardless; the edge makes the order deliberate rather than incidental.
+
+    THE MEASUREMENT MUST NOT DEPEND ON THE FIX. Criterion 4 is the one that keeps this task alive
+    after W1-T2653 ships, and criterion 5 is what makes P63 scorable at all.
