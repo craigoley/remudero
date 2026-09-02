@@ -1,0 +1,66 @@
+- id: W1-T2706
+  title: "A PARITY FIXTURE PINS A CANDIDATE SET THAT ANY FILE IN THE REPO CAN CHANGE BY NAMING ONE SYMBOL IN A COMMENT — check-proof-executor-parity assembles its fixture as [\"fixHead\",\"Acceptable\"].join(\"\") so the file cannot match itself, but nothing protects the assertion from a THIRD file, and two unrelated diffs broke it in one afternoon"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 12.00
+  files: [test/check-proof-executor-parity.test.ts]
+  origin: "operator-session#pr-3619-candidate-set-2026-09-02"
+  plan_refs: ["W1-T2387", "W1-T2574"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED, TWICE IN ONE AFTERNOON, FROM TWO UNRELATED DIFFS. The suite's two ACCEPTANCE tests pin
+    the fixture proof's resolved candidate set EXACTLY — `candidates: 1 file(s) — test/fix-rung-no-
+    task.test.ts` and an argv line naming the same single file. `resolveNameFilteredCandidates`
+    resolves by grepping test SOURCES for the literal symbol, so ANY file that merely NAMES it
+    becomes a candidate. (1) #3619 added test/fix-branch-checkout-serialization.test.ts, whose
+    header comment cites the symbol while explaining why the fix rung's branch is shared — a doc
+    comment, not a use — and the set went 1 -> 2, reddening both assertions on a PR that never
+    touched check-proof. (2) The repair comment written INTO this suite then spelled the symbol
+    again, making the suite its own THIRD candidate and the assertion unmatchable.
+
+    THE FILE ALREADY DEFENDS ITSELF AND ONLY ITSELF. `NAME_FILTERED_FIXTURE` is assembled as
+    ["fixHead","Acceptable"].join("") precisely so this file never contains the literal. That is a
+    deliberate, correct defence against case (2) — and it is INVISIBLE from outside: three files in
+    the tree now name the symbol, no doc outside this suite says that naming it reddens an unrelated
+    test, and the failure an author sees is an opaque regex mismatch on a `candidates:` line, in a
+    suite their diff has nothing to do with.
+
+    THE INVARIANT IS NOT THE COUNT. What these tests exist to prove is that a proof resolving to a
+    real file but matching NO test title still collapses to `no-match` — the raw child genuinely
+    exits 0, the historical false-green. That property held at every count observed: measured at
+    two candidates, exit 0, hits 24, verdict no-match. The count is scaffolding that makes the
+    scenario concrete, and it is the only part any outside diff can move.
+
+    SO THE FIX IS TO MAKE THE DEPENDENCY EXPLICIT AND SELF-DIAGNOSING, not to loosen the assertion
+    into a substring match that would stop proving the set at all. The suite should state the
+    property it needs — the fixture's symbol is named by a known set of files — assert it directly,
+    and FAIL WITH THE REMEDY when a new file joins: name the offending file, say that a comment
+    mentioning the symbol is enough to do it, and say whether the fix is to re-derive the pinned set
+    or to stop naming the symbol. W1-T2532 is the standing precedent for a gate whose remedy must be
+    followable by whoever trips it; here the person tripping it is an author with no connection to
+    check-proof at all.
+
+    NOT IN SCOPE: changing `resolveNameFilteredCandidates`. Grepping sources for the literal is what
+    makes a name-filtered proof resolvable at all, and a comment-aware resolver would be a change to
+    proof resolution for every proof in the repo, to fix one suite's fixture. The narrower, honest
+    fix lives in the suite that holds the assumption.
+
+    THE FALSIFIER IS A THIRD FILE. A guard that only re-pins today's two files is the same brittle
+    assertion with a longer list, so the test must prove the DIAGNOSIS: with a simulated extra
+    naming file the suite fails naming that file and the remedy, and with the real tree it passes.
+  acceptance:
+    - claim: "the suite states the uniqueness property it depends on rather than leaving it implicit in a regex"
+      proof: "unit test: test/check-proof-executor-parity.test.ts"
+    - claim: "a new file naming the fixture's symbol fails with that file named, not an opaque candidates mismatch"
+      proof: "unit test: test/check-proof-executor-parity.test.ts"
+    - claim: "the failure states the remedy, so an author with no connection to check-proof can act on it"
+      proof: "unit test: test/check-proof-executor-parity.test.ts"
+    - claim: "the no-match invariant is still asserted, so the fix does not loosen what the suite proves"
+      proof: "unit test: test/check-proof-executor-parity.test.ts"
+    - claim: "the fixture stays assembled so this suite can never become its own candidate"
+      proof: "unit test: test/check-proof-executor-parity.test.ts"
