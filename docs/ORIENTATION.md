@@ -1,35 +1,31 @@
 # ORIENTATION
 
-_MAINTAINED BY `rmd retro` — regenerated 2026-09-02T12:29:15.668Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
+_MAINTAINED BY `rmd retro` — regenerated 2026-09-02T19:04:14.555Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
 
 A fresh Architect session should be able to orient from THIS doc alone plus the plan index —
 not by re-deriving state from the full plan and ledger.
 
 ## Current state
 
-16 run(s) since the last retro marker. Verdicts: {"blocked_ci":4,"merged":12}.
+11 run(s) since the last retro marker. Verdicts: {"blocked_ci":8,"merged":3}.
 
 ### Shipped since marker
-- W1-T2576 → https://github.com/craigoley/remudero/pull/3596
-- W1-T2577 → https://github.com/craigoley/remudero/pull/3597 (gate-side merge; run ended blocked_ci)
-- W1-T2587 → https://github.com/craigoley/remudero/pull/3593
-- W1-T2588 → https://github.com/craigoley/remudero/pull/3598
-- W1-T2596 → https://github.com/craigoley/remudero/pull/3600
-- W1-T2597 → https://github.com/craigoley/remudero/pull/3601
-- W1-T2598 → https://github.com/craigoley/remudero/pull/3603
-- W1-T2603 → https://github.com/craigoley/remudero/pull/3605
-- W1-T2604 → https://github.com/craigoley/remudero/pull/3608 (gate-side merge; run ended blocked_ci)
-- W1-T2606 → https://github.com/craigoley/remudero/pull/3607
-- W1-T2607 → https://github.com/craigoley/remudero/pull/3612
-- W1-T2608 → https://github.com/craigoley/remudero/pull/3611
-- W1-T2611 → https://github.com/craigoley/remudero/pull/3614
-- W1-T2612 → https://github.com/craigoley/remudero/pull/3627
+- W1-T2613 → https://github.com/craigoley/remudero/pull/3651 (gate-side merge; run ended blocked_ci)
+- W1-T2614 → https://github.com/craigoley/remudero/pull/3659
+- W1-T2617 → https://github.com/craigoley/remudero/pull/3661 (gate-side merge; run ended blocked_ci)
+- W1-T2618 → https://github.com/craigoley/remudero/pull/3662 (gate-side merge; run ended blocked_ci)
+- W1-T2619 → https://github.com/craigoley/remudero/pull/3666
+- W1-T2620 → https://github.com/craigoley/remudero/pull/3673 (gate-side merge; run ended blocked_ci)
+- W1-T2621 → https://github.com/craigoley/remudero/pull/3680 (gate-side merge; run ended blocked_ci)
+- W1-T2625 → https://github.com/craigoley/remudero/pull/3672 (gate-side merge; run ended blocked_ci)
+- W1-T2628 → https://github.com/craigoley/remudero/pull/3697
+- W1-T2629 → https://github.com/craigoley/remudero/pull/3681 (gate-side merge; run ended blocked_ci)
 
 ## Next runnable task
 
-**W1-T2613** — A ROUTED FOLLOW-UP CAN ASK FOR NOTHING BUT A DISPATCH THE DRAIN ALREADY OWNS — routeFollowupsToRegistry (src/lib/retro.ts) has exactly two refusal arms, title-dedup and type-not-plan-shaped, and neither declines an entry whose whole content is "task X is ready, hand it off"; MEASURED 2026-09-01 over the live 317-proposal registry, 2 such proposals are routed, one of them for W1-T2457 which the ordinary drain had already merged as #3272 and one for W1-T2482 which is still status: queued, so each was minted as a ratifiable operator decision that could only duplicate an already-filed task
+**W1-T2622** — worktree-provisioning coverage census — every `git worktree add` in src/ either routes through worktreeAdd (base recorded, currency asserted) or is a NAMED exemption carrying its reason, enforced by a BIDIRECTIONAL static guard so a new raw site cannot appear silently and a rotted exemption cannot outlive the site it excused
 
-- risk: high · depends_on: (none)
+- risk: high · depends_on: W1-T2621
 
 ## Never-do invariants (MASTER-PLAN §12 Standing rules — extracted verbatim; §12 is authoritative)
 
