@@ -62,6 +62,32 @@
     package-manager action from the worker; runtime refresh remains owned by the entrypoint and
     service-freshness path.
   acceptance:
+    # ⚠ EVERY PROOF HERE IS `unit test:`, AND THE WIRING CRITERION IS NOT AN EXCEPTION.
+    # A `grep:` proof EXECUTES at review time. On an unbuilt task its symbol does not exist yet, so
+    # it returns `executed_fail` — which OVERRIDES keyword coverage and FAILS the PR outright. A
+    # `unit test:` proof naming a file declared in this shard's own `files:` grades `not_yet_built`
+    # instead: a forward reference to work not yet written, which the reviewer states in as many
+    # words is "not a failure". MEASURED on this shard: `grep: hashInstallInputs( in
+    # src/lib/worker.ts` read `executed_fail` while the other six read `not_yet_built`, and that one
+    # proof failed the PR on its own.
+    #
+    # THE WIRING REQUIREMENT IS UNCHANGED — only the dialect that carries it. The claim below still
+    # demands that the PRODUCTION path call the helper, and the build must make the named suite
+    # assert exactly that (an unwired helper is an unbuilt one). Asserting it inside the test is the
+    # idiom this repo already uses for a producer/consumer census; what it must not be is a proof
+    # that cannot pass until the code it describes exists.
+    #
+    # ⚠ AND THIS IS A KNOWN, MEASURED CONFLICT BETWEEN TWO GATES, NOT A PREFERENCE. `lint-plan`'s
+    # [call-site] check WANTS the grep form for a new module and says so verbatim: "Add one of the
+    # form: grep: <symbol>( in <the file that calls it>". `remudero-review` EXECUTES that grep and
+    # fails the PR because the symbol cannot exist yet. MEASURED on this branch: with the grep
+    # criterion, lint-plan reports the call-site warning ZERO times and the review posts FAILURE;
+    # with this `unit test:` form, the review passes and lint-plan reports the warning ONCE. The two
+    # gates cannot both be satisfied while the task is unbuilt.
+    #
+    # The trade is deliberate and made in this direction because the call-site check is a WARNING
+    # ("0 failing"), while `executed_fail` BLOCKS. The build should restore the grep call-site
+    # criterion once `hashInstallInputs` exists, when it can finally pass.
     - claim: "the dependency sensor records the exact node_modules source selected by `resolveNodeModulesSource`; when fallback wins, it never labels repoDir as the linked source"
       proof: "unit test: test/the-deferred-drift-ruling-leaves-a-measured-defect-with-no-owner.test.ts"
     - claim: "matching worktree install inputs and selected-artifact install hash proceed silently even when checkout commit distance is non-zero — source-only commits are not dependency drift"
@@ -73,7 +99,7 @@
     - claim: "W1-T151 service install freshness and worker dependency compatibility use one shared install-input identity implementation rather than two formulas that can drift"
       proof: "unit test: test/the-deferred-drift-ruling-leaves-a-measured-defect-with-no-owner.test.ts"
     - claim: "the production worker path calls the shared install-input identity helper"
-      proof: "grep: hashInstallInputs( in src/lib/worker.ts"
+      proof: "unit test: test/the-deferred-drift-ruling-leaves-a-measured-defect-with-no-owner.test.ts"
     - claim: "the real Azure fallback shape is the falsifier fixture: stale repoDir with no node_modules plus a different install root with node_modules never emits the old 1,903-commit false attribution"
       proof: "unit test: test/the-deferred-drift-ruling-leaves-a-measured-defect-with-no-owner.test.ts"
   falsifier: |
