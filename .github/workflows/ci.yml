@@ -1148,6 +1148,56 @@ jobs:
       - name: No-hand-rolled-fetch grep gate (apps/**, packages/** except packages/api-client)
         run: npm run --silent no-hand-rolled-fetch:check
 
+  unwired-gate:
+    # UNWIRED-GATE guard (W1-T2735). A gate-shaped instrument that nothing invokes is not a gate:
+    # it reads like enforcement to every later session, answers correctly when a human runs it by
+    # hand, and refuses nothing. Measured 2026-09-02: 10 of 38 tracked `scripts/` executables are
+    # gate-shaped (`-check`/`-gate` in the basename) and FOUR of those were invoked by no workflow
+    # and no npm script -- among them the author-time credit-surface gate, which exists to refuse an
+    # implementation PR credited on neither the `Remudero-Task:` trailer nor a run-shaped head, and
+    # which was unwired on the day #3704 reached review with a bare `Task:` trailer and a `codex/`
+    # head. (Sibling scripts are described here, never named by path: a path in a workflow COMMENT
+    # is prose, but test/instrument-surface-completeness.test.ts derives its candidates by text, so
+    # naming one here enrols it as a referenced instrument -- the `deploy/recycle-container.sh`
+    # exclusion in src/lib/review.ts records the same accident from the task-id-existence job.)
+    #
+    # THE MECHANISM IS A CORRECT RULE WITH NO SECOND HALF, which is why this is a class and not two
+    # accidents: Rule 25's instrument isolation refuses a PR editing both a detector and the
+    # workflow invoking it, so a producer task must fence the wiring out. W1-T2292 criterion 7 ("no
+    # caller is edited by this task") and W1-T1214 design (v) (defers "wiring this script into a CI
+    # workflow step (a separate PR ...)") each did, correctly and in writing. Neither successor was
+    # ever filed, and nothing noticed. This job's check refuses the class instead:
+    # the four current offenders are recorded in its inline ALLOWANCE with a reason each so it is
+    # green on the tree it lands in, a newly added gate-shaped script enters at ZERO allowance and
+    # is refused immediately, and a recorded entry whose script has since been wired is itself
+    # reported so the allowance can only shrink. The check is gate-shaped by its own predicate, so
+    # this job is what keeps it from being the defect it names. See
+    # test/a-gate-shaped-instrument-that-nothing-invokes.test.ts for the falsifier proof this is
+    # ACTIVE (a planted unwired gate-shaped script is REJECTED, one wired by either surface alone is
+    # ACCEPTED, a non-gate-shaped script is never reported however it is invoked, and a stale
+    # allowance row is REJECTED), driving the real module rather than a shadow copy.
+    #
+    # Runs UNCONDITIONALLY on every PR (no path filter, no job `if:` beyond the PR gate) -- same
+    # fail-closed shape as `claims`/`no-hand-rolled-fetch`/`task-id-existence` above: a
+    # path-filtered REQUIRED check that can go silently absent is the synthwatch #102 deadlock class
+    # ci-gate.yml exists to avoid. It is also the exact failure this job guards against, one level
+    # up: a gate that is present but never reached.
+    name: unwired-gate
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' # W1-T1033: PR-only — only `ci` runs on the new push trigger; see the `on:` block comment above.
+    # W1-T1009: LIGHT band, prophylactic -- see the `commitlint` job's comment above for the
+    # derivation. The check is a single `git ls-files` plus a handful of file reads.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+      - name: Install (clean, from lockfile)
+        run: npm ci
+      - name: Unwired-gate guard (every gate-shaped scripts/ executable is invoked by a workflow or an npm script)
+        run: npm run --silent unwired-gate:check
+
   task-id-existence:
     # TASK-ID EXISTENCE gate (W1-T1048). #2251 cited an id as its OWN task id in shipped code
     # (two comments in deploy/recycle-container.sh, five references in
