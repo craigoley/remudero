@@ -488,6 +488,12 @@ test("workerLedgerFields: success call ⇒ {model, effort, tokens, cache_read_in
   const { worker_duration_ms: _workerDurationMs, ...fieldsWithoutDuration } = fields;
   assert.deepEqual(fieldsWithoutDuration, {
     model: "claude-opus-4",
+    // W1-T2572: `usageStream()`'s assistant message carries no `model` field, so the
+    // provider reported nothing this call could attribute a served model to — an
+    // ALWAYS-present explicit `null` (never an omitted key) plus the reason naming why.
+    // See WorkerResult.servedModel/workerLedgerFields' own docs for the full contract.
+    served_model: null,
+    served_model_reason: "no assistant message in the stream reported a real model before the call ended",
     effort: "high",
     tokens: { input: 1000, output: 200, cacheRead: 500, cacheCreation: 50 },
     cache_read_input_tokens: 500,

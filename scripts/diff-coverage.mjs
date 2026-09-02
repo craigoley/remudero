@@ -40,7 +40,11 @@
 
 import { appendFileSync, readFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
+import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
+
+// W1-T2570: esbuild is CJS-only here; `createRequire` is how an .mjs module reaches it.
+const require = createRequire(import.meta.url);
 
 /**
  * Parse an lcov report into `Map<filePath, Map<lineNumber, hitCount>>` -- one inner map per
@@ -284,10 +288,56 @@ export function changedSourceFiles(diffText) {
   return [...files].sort();
 }
 
-/** Changed source files absent from the merged LCOV surface. */
-export function findMissingSourceCoverage(diffText, lcov) {
+/**
+ * W1-T2570: does this file transpile to NOTHING EXECUTABLE?
+ *
+ * "No `SF:` record" has TWO causes and the gate used to treat them as one:
+ *   1. no shard imported the file — the real vacuity hazard, and failing closed on it is right;
+ *      sharding is exactly what makes it material (#1399).
+ *   2. THE FILE COMPILES TO NOTHING, so there was no instrumentation to emit.
+ * A pure type module hits case 2 and got case 1's verdict, under a message — "coverage would
+ * otherwise pass vacuously" — that is exactly backwards for it. Nothing passed vacuously; there
+ * was nothing to measure.
+ *
+ * ⚠ TRANSPILED, NEVER TEXT-SCANNED, AND THAT DISTINCTION IS LOAD-BEARING. A first pass at this
+ * census read source text for `function`/`class`/`=>` and wrongly called `src/lib/proof-grammar.ts`
+ * type-only; it is 1,423 bytes of real emitted code and must keep requiring an SF record. Only
+ * transpiling separates them. MEASURED on main: `workflow-run.ts`, `merge-state.ts`,
+ * `run-result.ts` and `supersession.ts` all emit 0 bytes, against `proof-grammar.ts` at 1,423 and
+ * `sweep.ts` at 136,412.
+ *
+ * FAILS CLOSED ON ANY DOUBT. An unreadable file, a syntax error, or an esbuild that cannot load
+ * all answer "not type-only", so the file keeps its coverage requirement. A carve-out that widened
+ * itself on an error would be strictly worse than the false block it exists to remove.
+ */
+export function isTypeOnlyModule(file, readSource = (f) => readFileSync(f, 'utf8')) {
+  let source;
+  try {
+    source = readSource(file);
+  } catch {
+    return false; // unreadable ⇒ not exempt
+  }
+  try {
+    // Lazily required so a caller that never reaches this path does not pay for the import, and so
+    // an environment without esbuild degrades to "not type-only" rather than crashing the gate.
+    const { transformSync } = require('esbuild');
+    return transformSync(source, { loader: 'ts' }).code.trim().length === 0;
+  } catch {
+    return false; // cannot transpile ⇒ not exempt
+  }
+}
+
+/**
+ * Changed source files absent from the merged LCOV surface, EXCLUDING those that emit no runtime
+ * code at all (W1-T2570 — see {@link isTypeOnlyModule} for why a text scan cannot do this).
+ *
+ * The type-only files on main exist deliberately to cut dependency cycles (.dependency-cruiser.cjs
+ * `no-circular`), so this is not a rare shape that could be refactored away — it is a pattern the
+ * repo's own architecture rules produce.
+ */
+export function findMissingSourceCoverage(diffText, lcov, isTypeOnly = isTypeOnlyModule) {
   const hits = lcov.hits ?? lcov;
-  return changedSourceFiles(diffText).filter((file) => !hits.has(file));
+  return changedSourceFiles(diffText).filter((file) => !hits.has(file) && !isTypeOnly(file));
 }
 
 /**

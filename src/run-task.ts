@@ -351,6 +351,9 @@ import {
   classifyProposal,
   draftAttemptKey,
   draftsDueOnDaemon,
+  decideDraftDeferral,
+  deferralFromOutcomes,
+  parseDraftDeferralCache,
   mergeDraftCaches,
   DAEMON_DRAFT_BATCH_CAP,
   evictRefusalPoisonedKeys,
@@ -30596,6 +30599,28 @@ export function buildInboxDraftHook(
       // drift. The staleness bound is load-bearing in the other direction too: without it a killed
       // daemon strands the lock and this rung never runs again — the exact W1-T1067 failure, one
       // file over.
+      // ── W1-T2590: DO NOT RETRY INTO A SHUT DOOR ───────────────────────────────────────────
+      // Checked FIRST — before the lock, before the registry is even consulted — so a deferred
+      // poll costs nothing: no lock churn, no `deps.spawn`, no Architect. The instant comes from
+      // the provider's OWN refusal text (`detectUsageLimitRefusal`, lib/classify.ts), which on the
+      // measured real string was more accurate than the headroom governor's belief at that moment.
+      //
+      // THIS IS WHAT MAKES RAISING `DAEMON_DRAFT_BATCH_CAP` SAFE LATER. W1-T2564 correctly stopped
+      // a refusal from writing an attempt key, so a refused draft now stays due and retries next
+      // poll; that left the cap as the ONLY bound on a retry storm during a live outage — the exact
+      // condition that produced 494 refusals in seven hours. Bounding the retry by the account's
+      // own stated window is the prerequisite, not a nicety.
+      const deferralPath = join(config.root, "state", "inbox-draft-deferred-until.json");
+      const deferral = decideDraftDeferral(parseDraftDeferralCache(readFileIfExists(deferralPath)), Date.now());
+      if (deferral.defer) {
+        log("inbox.draft_batch.deferred", {
+          until: new Date(deferral.untilMs).toISOString(),
+          remaining_ms: deferral.remainingMs,
+          matched: deferral.matched,
+        });
+        return;
+      }
+
       const draftLockPath = join(config.root, "state", "inbox-draft.lock");
       let draftLock: DrainLockHandle;
       try {
@@ -30660,6 +30685,19 @@ export function buildInboxDraftHook(
       // attempts.
       if (refusedThisBatch.length > 0) {
         log("inbox.draft_attempts_reopened", { evicted: 0, refused_this_batch: refusedThisBatch.length });
+      }
+      // W1-T2590: record the window the account itself stated, so the NEXT poll waits it out
+      // instead of spending against a door that is still shut. `deferralFromOutcomes` returns
+      // nothing when no refusal carried a usable instant — a zone-less refusal must not stop the
+      // rung on a window whose end nobody stated (see its own doc), so that case falls through to
+      // today's behaviour: retry next poll, bounded by the batch cap.
+      const nextDeferral = deferralFromOutcomes(outcomes);
+      if (nextDeferral) {
+        writeFileSync(deferralPath, JSON.stringify(nextDeferral, null, 2), "utf8");
+        log("inbox.draft_deferral_recorded", {
+          until: new Date(nextDeferral.deferredUntilMs).toISOString(),
+          matched: nextDeferral.matched,
+        });
       }
       // W1-T2569: RE-READ AND MERGE IMMEDIATELY BEFORE WRITING. The guard above makes overlap
       // unlikely; this makes a lost update impossible if one happens anyway (a reclaimed-but-live
