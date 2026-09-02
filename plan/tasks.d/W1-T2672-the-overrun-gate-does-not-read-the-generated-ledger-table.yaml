@@ -1,0 +1,49 @@
+- id: W1-T2672
+  title: "THE SCOPE-OVERRUN GATE FLAGS A FILE THE REPO ALREADY DECIDED IS NOT A CONCERN — `GENERATED_LEDGER_CLASSES` (src/lib/companion-paths.ts) names `scripts/source-size-baseline.json` exactly, and the linter discounts it, but the overrun check in src/run-task.ts never consults that table, so every task adding a src file is flagged for the baseline bump its own gate forces"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 8.00
+  files: [src/run-task.ts, test/the-overrun-gate-does-not-read-the-generated-ledger-table.test.ts]
+  origin: "operator-session#baseline-bump-reads-as-overrun-2026-09-02"
+  plan_refs: ["W1-T2547"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE ANSWER IS ALREADY IN THE TREE, IN A TABLE BUILT FOR EXACTLY THIS. W1-T2547 added
+    `GENERATED_LEDGER_CLASSES` whose single row is
+    `/^scripts\/(?:source-size|knowledge-budget)-baseline\.json$/`, described as "a path whose whole
+    content is a recorded measurement rather than a user-visible surface." `subsystemsOf` reads it
+    and the linter does not count such a path as a concern.
+
+    THE OVERRUN GATE DOES NOT READ IT. The check that prints `SCOPE OVERRUN: branch <b>'s diff
+    against its merge base with origin/main touches file(s) outside task <id>'s declared scope`
+    compares paths directly against `files:`. MEASURED 2026-09-02: W1-T2576 was flagged, and the
+    single named path was `scripts/source-size-baseline.json`.
+
+    THE FLAG IS UNAVOIDABLE BY CONSTRUCTION, WHICH IS WHAT MAKES IT A DEFECT RATHER THAN NOISE. A
+    task that adds a new `src/**.ts` file MUST bump that baseline or the source-size ratchet fails
+    it. So the gate forces the edit and then flags the edit. The only ways out are declaring a
+    generated measurement file in `files:` — which is what the table exists to say is wrong — or
+    living with a standing false flag on every such task, which is how a real overrun gets lost.
+
+    THIS IS A FALSE POSITIVE ON A SIGNAL WHOSE WHOLE VALUE IS ITS RARITY. The overrun line is
+    printed and carried onto the PR for a human; one that fires on routine, mandatory work trains
+    the reader to skip it, and the next genuine overrun is skipped with it.
+
+    THE FIX IS ONE SHARED READ, NOT A SECOND LIST. Consult the existing table from the overrun
+    computation, so a later generated-measurement path needs no second edit. Any path NOT in the
+    table is flagged exactly as today — this narrows the gate by the rows the repo has already
+    ratified, and by nothing else.
+  acceptance:
+    - claim: "a diff whose only out-of-scope path is a generated-ledger measurement file is not reported as a scope overrun"
+      proof: "unit test: test/the-overrun-gate-does-not-read-the-generated-ledger-table.test.ts"
+    - claim: "a diff touching a genuinely undeclared source file is still reported, naming that file"
+      proof: "unit test: test/the-overrun-gate-does-not-read-the-generated-ledger-table.test.ts"
+    - claim: "a diff carrying BOTH is still reported, and names only the genuine path"
+      proof: "unit test: test/the-overrun-gate-does-not-read-the-generated-ledger-table.test.ts"
+    - claim: "the discount reads the shared table rather than a second copy of the pattern"
+      proof: "unit test: test/the-overrun-gate-does-not-read-the-generated-ledger-table.test.ts"

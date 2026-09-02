@@ -1,0 +1,54 @@
+- id: W1-T2670
+  title: "THE CATCH-ERASURE RATCHET MISSES THIS REPO'S OWN DOMINANT RECORDING IDIOM AND FLAGS IT AS ERASURE — `RECORD_RE` requires `log.<name>(` while the house seam is `deps.log(`, and `DISTINCTION_KEY_RE` requires a key with a COLON while the house shape is `const reason = \"...\"` passed as shorthand `reason,`, so a catch that genuinely records reads as bare"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 8.00
+  files: [test/catch-erasure-ratchet.test.ts]
+  origin: "operator-session#erasure-ratchet-misses-deps-log-2026-09-02"
+  plan_refs: ["W1-T2295"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-02 ON PR #3555. `src/lib/review-provider-provenance.ts` entered the tree with
+    two catches that each log `pr.head_provider` with a named reason. The ratchet reported
+    `2 bare catch(es) > baseline 0` and reddened the PR. Both catches record; the detector cannot
+    see it, by two near-misses in its own patterns:
+
+      - `RECORD_RE` matches `console.*`, `logger.\w+`, `log.\w+` — a call on a PROPERTY named log.
+        This repo's seam is an injected `deps.log(...)`, a call on `log` itself. No match.
+      - `DISTINCTION_KEY_RE` matches a house vocabulary key followed by a COLON. The house shape
+        writes `const reason = "produced-head-unreadable" as const` (an equals) and then passes it
+        into the log object as ES shorthand `reason,` (no colon). No match.
+
+    SO THE RATCHET IS PRECISE AGAINST A STYLE THIS REPO DOES NOT WRITE. Its census (755 catch
+    sites, 227 erasing) is sound and this task does not reopen it. What is wrong is that the
+    seam-injected logger — the pattern every testable module here uses, and the one the coverage
+    guidance actively pushes authors toward — reads as erasure, so the gate charges its
+    one-sentence price to code that already paid it.
+
+    THE COST IS NOT ONE CYCLE. It recurs on EVERY new file using the seam, and the cheapest way
+    past it is to add a baseline row, which is precisely the population growth W1-T2295 exists to
+    stop. A detector that mis-flags the house idiom teaches authors to buy the exemption.
+
+    KEEP THE RATCHET'S DIRECTION AND ITS PRICE. Do not widen `isBareErasingCatch` into "anything
+    with a function call passes" — that empties it. Recognise the two specific house forms: a call
+    on an injected `log` binding, and a reason bound by `const` in the catch body and carried into
+    a recorded object. Both are structural, both are checkable, and neither admits a catch that
+    returns a bare value.
+
+    A CONTROL IS PART OF THE DELIVERABLE, not decoration: this file's existing negative fixtures
+    must still be counted as erasing after the change, or the fix has traded a false positive for a
+    false negative and the gate is worse than before.
+  acceptance:
+    - claim: "a catch recording through an injected log binding is not counted as bare"
+      proof: "unit test: test/catch-erasure-ratchet.test.ts"
+    - claim: "a catch binding its reason by const and carrying it into a recorded object is not counted as bare"
+      proof: "unit test: test/catch-erasure-ratchet.test.ts"
+    - claim: "a catch returning a bare value with no record, reason or marker is STILL counted — the direction is unchanged"
+      proof: "unit test: test/catch-erasure-ratchet.test.ts"
+    - claim: "the existing baseline population is unchanged: no file's count moves except by this recognition"
+      proof: "unit test: test/catch-erasure-ratchet.test.ts"
