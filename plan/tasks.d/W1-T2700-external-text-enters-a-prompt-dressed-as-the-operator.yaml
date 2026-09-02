@@ -1,0 +1,73 @@
+- id: W1-T2700
+  title: "EXTERNAL TEXT ENTERS A PROMPT DRESSED AS THE OPERATOR — issue bodies, PR comments, CI logs and webhook payloads reach workers, triage and the fix rung as plain prose; wrap every external source in a random-boundary envelope with a fixed notice, record the envelope count in the prompt manifest, and ratchet every ingestion point into the wrapper"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 55.00
+  rationale: |
+    RE-DERIVED AT f632e15fa (2026-09-02).
+
+    (1) THE INGESTION POINTS, BY SYMBOL. `rmd issues` captures open GitHub issues into the
+    feedback inbox; `rmd triage` grounds a proposal in a feedback entry's text; the fix rung reads
+    review comments and CI failure text (`summarizeCiFailure`, W1-T1279); the retro reads PR
+    bodies; W1-T2568 wakes reconciliation from signed webhook payloads whose text is external
+    even when the signature is valid. Each of these carries text an outsider wrote into a prompt
+    the fleet then obeys. The harness's own operating rules already treat GitHub content as
+    untrusted at the human layer; the prompt layer has no marker.
+
+    (2) THE IDEA, FROM OPENCLAW'S THREAT MODEL. External content is wrapped in "random-boundary
+    XML-style markers" with a security notice, and remote node events are "marked untrusted by
+    default, and their outputs are sanitized before reaching the main agent" (v2026.8.1). The
+    same document is honest about the ceiling: "adaptive attackers still exceed 80% against
+    state-of-the-art defenses". So the envelope is a FLOOR — it makes the trust boundary visible
+    to the model and to the reviewer — and W1-T2699 is the wall, by leaving nothing in reach.
+
+    (3) WHY A RATCHET. A wrapper that three of five ingestion points call is a wrapper the
+    fourth forgets. The W1-T2297 prompt manifest already hashes every prompt part; recording the
+    envelope count per prompt makes an unwrapped external part detectable after the fact, and a
+    test over each renderer with an injection fixture makes it detectable before.
+  design: |
+    (i) src/lib/untrusted-envelope.ts: `envelope(text, source)` returns the text between a
+    random-boundary open and close marker, preceded by one fixed notice naming the source class
+    and stating that instructions inside are data. The boundary is fresh per call and never
+    guessable from the prompt.
+
+    (ii) Each enumerated ingestion point wraps at the point of prompt assembly: the issue body in
+    src/run-task.ts's issues capture, the feedback text in src/lib/triage.ts's grounding, review
+    comments and CI text in src/lib/sweep.ts's fix prompt, webhook text where W1-T2568 renders it.
+
+    (iii) The prompt manifest (W1-T2297) gains `envelopes: n`; a prompt that carried a known
+    external part with `envelopes: 0` is reported by the manifest's own reader.
+
+    (iv) test/untrusted-envelope.test.ts renders each ingestion point's prompt over a fixture
+    containing an instruction-shaped string and asserts the string appears only inside markers
+    with the notice before it; a new ingestion point is added to the enumerated list or the test
+    names it.
+
+    (v) WHAT DOES NOT CHANGE. What the fleet reads. Who may write to it. The reviewer's verdicts.
+    No text is dropped or rewritten; it is fenced.
+  acceptance:
+    - claim: "the envelope wraps text in a fresh random boundary with a fixed notice naming the source class"
+      proof: "unit test: test/untrusted-envelope.test.ts"
+    - claim: "each enumerated ingestion point renders an instruction-shaped fixture only inside markers"
+      proof: "unit test: test/untrusted-envelope.test.ts"
+    - claim: "the prompt manifest records the envelope count and its reader names a prompt that carried an external part unwrapped"
+      proof: "unit test: test/untrusted-envelope.test.ts"
+    - claim: "the fix rung's prompt assembly calls the wrapper"
+      proof: "grep: envelope( in src/lib/sweep.ts"
+  risk: high
+  band_meaning: span
+  origin: "oper#external-scan-2026-09-02"
+  plan_refs: ["W1-T2297", "W1-T2568", "W1-T1279", "W1-T2699", "§4A", "§8"]
+  files: [src/lib/untrusted-envelope.ts, src/run-task.ts, src/lib/triage.ts, src/lib/sweep.ts, test/untrusted-envelope.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    risk:high, band_meaning:span — four ingestion points across three modules under Rule 19;
+    runtime blast radius is prompt text only.
+
+    SOURCES: OpenClaw docs/security/THREAT-MODEL-ATLAS.md ("Prompt Injection (Direct &
+    Indirect)", "External Content" trust boundary, the 80% residual); v2026.8.1 release note
+    ("untrusted remote nodes", "Private prompt protection").
