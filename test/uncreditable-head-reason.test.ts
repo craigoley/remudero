@@ -192,7 +192,7 @@ test("an ACCEPTABLE head is not declined at all — the guard is unchanged", asy
   assert.match(String((threw as Error)?.message ?? threw), /git/, `expected a git failure, got ${String(threw)}`);
 });
 
-test("the real dispatch wiring accepts a no-trailer RETRO PR under the lane identity, not PR-N", async () => {
+test("the real dispatch wiring accepts a plan-only RETRO PR under the lane identity, not PR-N", async () => {
   const { logs, threw } = await driveDispatchFix("run-RETRO-1788324628827", undefined);
   const synthetic = logs.find((l) => l.step === "sweep.fix.synthetic_task");
   assert.equal(synthetic?.extra?.task_id, "RETRO", "the branch fallback is wired into the dispatched synthetic task");

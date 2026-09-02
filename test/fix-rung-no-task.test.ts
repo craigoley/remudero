@@ -131,7 +131,7 @@ test("a LANE PR whose id is real but absent from the plan keeps its own identity
   assert.equal(task.id, "TRIAGE-fb-1784732585507-04eac2", "its OWN id is preserved — never renamed to PR-554");
 });
 
-test("a plan-only RETRO PR with no trailer derives only its lane identity from its own head", () => {
+test("a plan-only RETRO PR without credited task derives only its lane identity from its own head", () => {
   const head = "run-RETRO-1788324628827";
   const { task, synthetic } = fixRungTaskFor(PLAN, { prNumber: 3591 }, "", head);
   assert.equal(synthetic, true, "RETRO is an orchestrator lane, not a plan task to credit");
@@ -139,7 +139,7 @@ test("a plan-only RETRO PR with no trailer derives only its lane identity from i
   assert.equal(fixHeadAcceptable(head, task.id, synthetic), true, "the fix rung can amend its own RETRO branch");
 });
 
-test("a no-trailer PR on a W1 task branch never derives that task from the head", () => {
+test("a PR without credited task on a W1 task branch never derives that task from the head", () => {
   const head = "run-W1-T999-1785600000000";
   const { task, synthetic } = fixRungTaskFor(PLAN, { prNumber: 3591 }, "", head);
   assert.equal(synthetic, true);

@@ -26478,8 +26478,8 @@ export function fixRungTaskFor(
     : undefined;
   return {
     task: {
-      // A plan-only lane PR deliberately has no task trailer, so `buildOpenPrViews` withholds
-      // branch-derived task credit. The fix rung still needs the lane identity to recognize that
+      // A plan-only lane PR deliberately has no credited task, even when its body carries a lane
+      // trailer. The fix rung still needs the lane identity to recognize that
       // `run-RETRO-*`/TRIAGE/PLAN/APPROVE is its own head. Restrict this fallback to the four
       // orchestrator lane namespaces; a synthetic PR on `run-W1-T*` remains foreign and refused.
       id: pr.taskId ?? syntheticLaneId ?? escalationTaskIdFor(pr),
