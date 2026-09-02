@@ -3107,6 +3107,8 @@ function readLocalOriginRefHead(repoDir: string, ref: string): string {
       encoding: "utf8",
     }).trim();
   } catch {
+    // This is a best-effort observability read after the fail-closed fetch; "unreadable" keeps
+    // sensor failure distinct from an absent or current ref without blocking worktree creation.
     return "unreadable";
   }
 }
@@ -3125,6 +3127,8 @@ function defaultCountBehind(repoDir: string, base: string, remoteHead: string): 
     const n = Number.parseInt(out.trim(), 10);
     return Number.isInteger(n) && n >= 0 ? n : "unknown";
   } catch {
+    // The remote object may not exist locally; preserve that unmeasurable state explicitly rather
+    // than aborting creation or manufacturing a zero distance.
     return "unknown";
   }
 }
