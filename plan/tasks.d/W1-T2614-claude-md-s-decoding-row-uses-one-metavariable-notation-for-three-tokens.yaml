@@ -1,0 +1,142 @@
+- id: W1-T2614
+  title: "CLAUDE.md's decoding row uses ONE metavariable notation for THREE tokens whose LITERAL forms differ — retro proposals are documented `P-N` while all 736 live citations and all four live parsers use `P48`, so a reader who follows the row writes a header invisible to BOTH the next-unused mint scan and the uniqueness gate"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: "followup#W1-T2457-1788020906446"
+  plan_refs: ["§12A", "W1-T2457", "W1-T74"]
+  files: [CLAUDE.md, test/docs-claims.test.ts, plan/claims.yaml]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE HARVEST'S OWN FRAMING IS CORRECTED HERE, and that correction is the reason this is worth
+    filing. W1-T2457's follow-up recorded the mismatch as "a separate doc/usage mismatch, out of
+    scope here since it doesn't collide with anything." Measured at source 2026-09-01, it collides
+    with FOUR live surfaces, and two of them are the halves of a gate that exists to prevent a
+    specific past incident.
+
+    ── MEASURED: THE HYPHENATED FORM IS DOCUMENTED BY ONE ROW AND USED BY NOTHING ────────────────
+
+    `\bP-[0-9]+\b` over the repo returns FOUR hits, ALL of them in `test/inbox.test.ts`
+    (`P-1`..`P-4`, lines 843-846) as opaque registry-key fixture strings — and ZERO in
+    MASTER-PLAN.md. Against that, W1-T2457's own recon measured 736 retro-proposal citations across
+    59 distinct numbers, every one of them unhyphenated. The live active headers run to P55 and the
+    live citations to P64. So the plan's convention is uniform and the row is the outlier.
+
+    ── THE FOUR PARSERS, EVERY ONE NO-HYPHEN, CITED AT FILE AND LINE ─────────────────────────────
+
+      src/lib/retro.ts:4336        `PROPOSAL_ID_RE = /\bP\d+[A-Za-z]?(?:\([ivxlc]+\))?/i`
+      src/lib/panel-graph.ts:1020  `if (/^P\d+$/.test(ref)) return { kind: "retro-proposal" }`
+      src/run-task.ts:19164        `/^-\s+(?:\*\*)?(?:★\s*)?P\d+[A-Za-z]?\b.*$/gm`  (the mint scan)
+      test/plan-proposals.test.ts:33 `PROPOSAL_HEADER_RE = /^-\s+\*\*(?:★\s+)?P(\d+)(?=[\s—)*])/gm`
+
+    `\bP\d+` requires a digit immediately after the P, so `P-65` matches NONE of them.
+
+    ── THE CONSEQUENCE CHAIN, AND WHY IT IS NOT COSMETIC ────────────────────────────────────────
+
+    A header written as the row documents it — `- **P-65 ...` — is invisible to run-task.ts:19164,
+    which is the scan the mint discipline uses to derive the next-unused number, AND invisible to
+    test/plan-proposals.test.ts:33, which is the uniqueness gate that runs in `npm test` on every
+    PR. So following the documented form defeats BOTH halves of W1-T74's protection at once: the
+    prevention half would skip the existing id and the guarantee half would not catch the resulting
+    duplicate. That is precisely the #125/#118 P21 collision class W1-T74 was filed for. The two
+    softer consequences: a hyphenated citation is unresolvable to retro.ts's PROPOSAL_ID_RE, and the
+    console does not classify the reference as a retro-proposal at panel-graph.ts:1020.
+
+    HONEST LIMIT, stated rather than glossed: this is a LATENT hazard, not a fired one. Zero
+    hyphenated proposal ids exist anywhere in the plan today, so nothing has yet followed the row.
+    The cost of the fix is one clause; the cost of the incident it enables was two hours of
+    ambiguous cross-references and a hand-authored plan PR (#128).
+
+    ── WHY THE ROW IS DEFENSIBLE-BUT-AMBIGUOUS, WHICH CHANGES THE FIX ───────────────────────────
+
+    `P-N` reads naturally as METAVARIABLE notation — a letter, a separator, a number placeholder —
+    and the row applies the same `X-N` shape to three tokens. For two of them the hyphen is LITERAL
+    and correct: `G-17` appears as a literal example inside the row's own G clause (47 live
+    citations), and DR- is hyphenated 73 times in MASTER-PLAN with the row's own DR clause stating
+    the reason ("hyphen avoids the §12 clash"). W1-T2457's recon used `P-N` the same notational way.
+    So the defect is not that the row lies about one token; it is that ONE notation covers THREE
+    tokens whose literal forms differ, and a reader cannot tell which hyphens are real.
+    THE FIX IS THEREFORE PER-TOKEN LITERALNESS, NEVER A BLANKET DE-HYPHENATION — de-hyphenating the
+    row wholesale would corrupt two clauses that are right.
+  design: |
+    (i) THE CORRECTION, in the shape the row ALREADY uses for G. The G clause carries its literal
+    example inline (`G-17 = enforceTierInvariant`); the P clause carries none. Give the P clause the
+    same treatment: state the literal form with an example, and the variants the live parser at
+    retro.ts:4336 actually accepts (`P48`, `P29a`, `P40(i)`). Leave the `G-N` and `DR-N` clauses,
+    including DR's "hyphen avoids the §12 clash" note, untouched.
+
+    (ii) THE GUARANTEE — REUSE THE HOUSE PATTERN VERBATIM, do not invent a second one. W1-T488
+    already established the exact shape for a CLAUDE.md-vs-code claim in test/docs-claims.test.ts:
+    an exported PURE check returning `{ ok, reason }`, one test asserting the real doc holds, and a
+    FALSIFIER test asserting the pre-fix wording (quoted verbatim) fails the check. Then wire it in
+    as its own row in plan/claims.yaml with id `retro-proposal-id-doc-form`, `plan_section` naming
+    the decoding row, and `precondition_paths: ["CLAUDE.md"]`, so a drift fails CI BY NAME instead
+    of surviving in prose. BIDIRECTIONAL, per W1-T986's `local-gate-invocation-parity` precedent in
+    the same file: red if the literal form stops being documented, AND red if the hyphenated token
+    reappears — the correction must not be able to drift back in either direction.
+
+    ⚠ SHELL HAZARD IN THE ASSERTION: plan/claims.yaml assertions are shell. Do NOT put backticks in
+    the pattern — they are command substitution. W1-T986's shape is the safe template:
+    `grep -qF "<literal>" CLAUDE.md && ! grep -qE "<hyphenated>" CLAUDE.md`.
+
+    (iii) THE BYTE BUDGET IS A HARD CONSTRAINT, AND THE FIGURE YOU MAY HAVE READ IS STALE.
+    W1-T2457's recon priced its own remedy against "71 free bytes of 67536" — that was true at
+    f3f9ca76 and is NOT true now: scripts/claude-md-budget-baseline.json records capBytes LOWERED to
+    44000 by W1-T2507 on 2026-08-31, with the file at 42606 after its migrations, i.e. roughly 1400
+    bytes of deliberate headroom. MEASURE FRESH with `node scripts/claude-md-budget-ratchet.mjs`
+    rather than inheriting either number. Prefer a byte-NEUTRAL or net-negative in-place edit of the
+    clause: the ratchet's own recorded design intent is to force a fold-or-migrate decision on the
+    next addition, and raising capBytes is out of scope by standing instruction.
+
+    (iv) PRE-EDIT CHECK, the baseline's own instruction: grep `test/*.test.ts` for the row's
+    distinctive phrases before editing, because several suites pin CLAUDE.md prose verbatim
+    (test/docs-claims.test.ts, test/rule-citations-match-their-rule.test.ts). Verified at drafting:
+    NO test pins `P-N`, `G-N` or `DR-N` from this row — the repo's `P-N*` hits are `P-NEW`,
+    `P-NOPE`, `P-NO-SIGNAL` fixture strings — so this edit reds no existing suite. RE-VERIFY; do not
+    inherit that finding.
+
+    (v) DELIBERATELY NOT FOLDED IN — three seams, each a separate concern, none of them minted here:
+    (a) exporting ONE shared proposal-id predicate so retro.ts, panel-graph.ts, the mint scan and the
+    uniqueness gate stop carrying four private copies of the same regex — the
+    one-predicate-never-a-reimplementation endgame, which touches src/ and would widen this to three
+    subsystems; (b) test/inbox.test.ts's `P-1`..`P-4` fixture strings, verified harmless (the
+    registry key is an unvalidated string at that layer, not an id any gate parses); (c) W1-T2457's
+    remedy (a), the namespace sentence for the two colliding RULE namespaces, which lands in this
+    same row and is that task's to write.
+
+    (vi) VERIFY FROM SOURCE. Every line reference above is a 2026-09-01 survey of a repo that moves
+    daily. Re-read each site before editing and correct this record in the report if it has drifted.
+  acceptance:
+    - claim: "the decoding row states the LITERAL retro-proposal form every live citation and every live parser uses (`P48`, plus the `P29a` / `P40(i)` variants retro.ts's own parser accepts), the hyphenated `P-N` token is gone from that clause, and an exported check with its own falsifier holds the wording so it cannot drift back"
+      proof: "unit test: test/docs-claims.test.ts"
+    - claim: "the correction is SURGICAL — the `G-N` and `DR-N` clauses keep their hyphens, which are literal and correct (`G-17` is the row's own example; DR- is hyphenated 73 times in MASTER-PLAN), so a blanket de-hyphenation of the row FAILS the check"
+      proof: "unit test: test/docs-claims.test.ts"
+    - claim: "the guarantee is registered as its own gated claim `retro-proposal-id-doc-form` in plan/claims.yaml and is BIDIRECTIONAL, so a drift fails CI by name in either direction instead of surviving in prose"
+      proof: "grep: retro-proposal-id-doc-form in plan/claims.yaml"
+  note: |
+    FILED 2026-09-01 from the W1-T2457 follow-up harvest (run W1-T2457-1788020906446, PR #3272).
+    depends_on is EMPTY deliberately: W1-T2457 is queued, risk:high, and declares CLAUDE.md in its
+    own files:, so a hard edge would strand a one-clause doc fix behind a large task — the same
+    judgement recorded on W1-T177/W1-T136. What the two DO share is the paragraph itself, so this is
+    a FILE-OVERLAP SERIALIZATION (W1-T171, itself unbuilt): whichever lands second must re-read the
+    row rather than replaying a remembered version of it, and this task's edit is held
+    byte-neutral-or-negative precisely so it does not consume headroom W1-T2457's 182-byte namespace
+    sentence may need.
+
+    risk:medium is the honest band, not a sizing dodge. Span is ONE subsystem: `plan/claims.yaml` is
+    a discounted plan-data artifact and `test/docs-claims.test.ts` is the task's companion suite
+    (DATA_ARTIFACT_CLASSES / COMPANION_PATH_CLASSES, src/lib/task-linter.ts), leaving `CLAUDE.md`
+    alone in the tally — so no Rule 19 regrade is needed and none is claimed. Blast radius is a
+    claims row whose only failure mode is a red claims-check on a doc edit, recoverable in one line,
+    the band W1-T107 and W1-T129 already occupy. No dispatch path, no merge arm, no gate config.
+
+    MINT RECORD, following the discipline at run-task.ts:19679 rather than guessing: the highest
+    existing proposal number was grepped before stamping — active headers reach P55, live citations
+    reach P64, and P65+ appears nowhere in the plan (the single P65-P89 hit repo-wide is a
+    board-review test fixture). P65 is therefore the next unused. Stated here because minting a
+    colliding P-number would be this very task's defect, committed while fixing it.

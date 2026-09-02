@@ -1,0 +1,146 @@
+- id: W1-T2627
+  title: "THE WORKTREE BASE RECORD HAS NO READER — `recordWorktreeBase` writes `<worktree>.base` on every create and `removeWorktreeBase` deletes it on teardown, but `readWorktreeBase` has ZERO production callers, so the one datum that distinguishes `my HEAD is the base I was cut from` from `my HEAD is something else` is written, deleted, and never once consulted; give it a live reader on `rmd doctor` so a fresh worktree stops reading as an anomaly"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 100.00
+  files: [src/lib/doctor.ts, src/run-task.ts, test/doctor.test.ts]
+  origin: architect
+  plan_refs: ["§9", "W1-T405", "W1-T1047", "W1-T2461", "W1-T2463"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE QUESTION THAT PRODUCED THIS FILING IS ALREADY ANSWERED, AND THE ANSWER IS BENIGN. A
+    follow-up from run W1-T2461-1788065869447 asked which task its worktree corresponded to,
+    because the branch named W1-T2461 while HEAD's own commit belonged to W1-T2463. Resolved
+    from source, three facts, none inferred from the brief:
+      (1) `plan/tasks.d/W1-T2461-a-rendered-count-and-its-body-disagree-on-screen.yaml` EXISTS,
+          `status: queued`, `attempts: 0`. The branch name is correct and the worktree
+          corresponds to exactly the task it names.
+      (2) `worktreeAdd` (src/lib/worker.ts:2768-2779) runs `git worktree add -b <branch>
+          --no-track <path> origin/main` and then records `rev-parse HEAD` as the base. So
+          BEFORE A RUN'S FIRST COMMIT, HEAD IS MAIN'S TIP, and the commit sitting there belongs
+          to whichever task merged last. That is the whole mechanism.
+      (3) W1-T2463's remedy is on main at this head — `perSpawn` reads 14 across `src/`
+          (worker.ts 3, worker-home.ts 5, digest.ts 6) against W1-T2463's own filing-time
+          reading of 0, and `test/worker-home-per-spawn.test.ts` is present. So W1-T2463 is
+          exactly the kind of recent merge whose commit a fresh W1-T2461 worktree would sit on.
+    ⚠ HONEST LIMIT ON (3): this was read from SOURCE PRESENCE, not from a git log — the
+    session that filed this had read-only tools and could not run git. The presence of the
+    remedy and its test is strong evidence W1-T2463 merged; it is not a direct read of the
+    commit graph, and it is recorded that way rather than dressed up.
+
+    NOTHING WAS MIS-CREDITED, AND NO ATTRIBUTION GUARD IS WANTED HERE. Credit keys on the HEAD
+    BRANCH (`ownsBranch`'s `^run-<taskId>-\d+$`, src/lib/status.ts) and on the
+    `Remudero-Task:` trailer — never on the message of the commit HEAD happens to point at. So
+    a W1-T2461 branch sitting on a W1-T2463 commit credits nobody wrongly. W1-T62 and W1-T69
+    already own attribution integrity; this filing does not reopen them and must not add a
+    second guard over a case that is not an attribution failure.
+
+    THE REAL DEFECT IS THAT THE ANSWER WAS UNREADABLE. `recordWorktreeBase`
+    (src/lib/worker.ts:2698) writes `<worktreePath>.base` on EVERY worktree create, and
+    `readWorktreeBase` (:2708) reads it back — and `readWorktreeBase` HAS ZERO PRODUCTION
+    CALLERS. Swept across the whole tree: the only occurrences of `readWorktreeBase` outside
+    its own definition are in `test/worktree-base-recorded.test.ts`. The only other code that
+    touches the record is the code that DELETES it (`removeWorktreeBase` at worker.ts:2869 and
+    :3653). A fact is written on every create, deleted on every teardown, and consulted by
+    nothing.
+
+    WHAT THAT COSTS, MEASURED BY THIS INCIDENT RATHER THAN ARGUED. With one read of that file
+    the question is a comparison, not an investigation: HEAD equals the recorded base ⇒ no
+    commits yet, this is main's tip and nothing is wrong; HEAD descends from the base ⇒ these
+    are the run's own commits; HEAD is unrelated to the base ⇒ genuinely anomalous and worth a
+    human. Instead the question consumed a follow-up filing and an Architect run to answer from
+    first principles — and the same question is asked by every reader who walks into a
+    pre-commit worktree, so the cost recurs rather than amortises.
+  design: |
+    A PURE JUDGE PLUS A LIVE CALL SITE — the call site IS the deliverable (Standing rule 14),
+    because an exported reader with no caller is precisely the defect being fixed and adding a
+    second one would be the same bug wearing a fix.
+
+    THE HOME IS `rmd doctor`, WHICH ALREADY HAS THE SHAPE AND THE INPUT. `doctorCommand`
+    (src/run-task.ts) is documented as the I/O shell that MEASURES and delegates every
+    judgement to a pure function in `src/lib/doctor.ts`; `DoctorDeps` already carries
+    `liveInflightRuns?: (dir: string) => LiveInflightRun[]`, so the set of worktrees to speak
+    about is already enumerated and already injectable. The read
+    (`readWorktreeBase`, imported from worker.ts) belongs in the shell; the classification
+    belongs in doctor.ts as a pure arm beside the existing `judge*` functions. VERIFY that
+    architecture and the `LiveInflightRun` shape from source before wiring — this note is a
+    survey and the seam names may have drifted.
+
+    FOUR STATES, NOT A BOOLEAN, and the third is the one that matters:
+      - `at-base`      — HEAD equals the recorded base. NOT A FINDING. This is the state that
+                         produced this filing and it must render as ordinary.
+      - `own-commits`  — HEAD descends from the recorded base. NOT a finding.
+      - `unrelated`    — HEAD does not descend from its recorded base. The ONLY state reported
+                         as a finding.
+      - `base-unknown` — no record, or unreadable. NOT a finding.
+    ⚠ THE FAIL-SAFE DIRECTION IS EXPLICIT AND IS THE OPPOSITE OF THE OBVIOUS ONE. An absent or
+    unreadable base record must classify as `base-unknown`, NEVER as `unrelated`. This repo has
+    fixed the same polarity twice on the read path (W1-T119's throttled-is-not-absent, W1-T130's
+    cannot-observe-means-wait); rendering "I could not look" as "this worktree is contaminated"
+    would manufacture exactly the false alarm this task exists to remove. `readWorktreeBase`
+    already returns `null` rather than throwing, so the degraded value is available for free —
+    the discipline is in refusing to promote it to a finding.
+
+    ANCESTRY IS AN INJECTED SEAM, so the judge stays pure and testable without a real git
+    repository, and so the doctor's own no-network / read-only contract is preserved.
+    `git merge-base --is-ancestor` is the natural default; an ancestry read that FAILS resolves
+    to `base-unknown`, never to `unrelated`, for the reason above.
+
+    REUSE, NEVER RESPELL, the branch-to-task extractor. `taskIdFromRunBranch` (src/lib/status.ts)
+    is the ONE named extractor for `run-<taskId>-<epochMs>` and its own doc records that three
+    other spellings of that regex already existed before it was lifted. The arm imports it; a
+    fourth inline regex fails the spirit of that consolidation.
+
+    THE OUTPUT IS ONE LINE PER LIVE RUN carrying the task id the BRANCH claims beside the head
+    classification, so "the branch says W1-T2461 and HEAD is at-base" is legible at a glance
+    instead of being reconstructed. That single line is the whole remedy for the incident.
+
+    WHAT MUST NOT CHANGE. Nothing writes: the arm is read-only and network-free like every other
+    doctor arm. No worktree is reaped, moved, or refused on the strength of this classification —
+    a diagnostic that started acting would be a far worse defect than the blindness it replaces.
+    `at-base`, `own-commits` and `base-unknown` must not move the exit code.
+  acceptance:
+    - claim: "a worktree whose HEAD equals its recorded base classifies as at-base and is NOT reported as a finding — the exact state that produced this filing renders as ordinary"
+      proof: "unit test: test/doctor.test.ts"
+    - claim: "a HEAD that descends from its recorded base classifies as own-commits, and a HEAD that does not descend from it classifies as unrelated — the only state reported as a finding"
+      proof: "unit test: test/doctor.test.ts"
+    - claim: "an ABSENT or UNREADABLE base record, and a FAILED ancestry read, each classify as base-unknown and never as unrelated — cannot-observe is never rendered as contamination"
+      proof: "unit test: test/doctor.test.ts"
+    - claim: "the arm renders, per live in-flight run, the task id the BRANCH claims beside the head classification, using the existing run-branch extractor rather than a fresh regex"
+      proof: "unit test: test/doctor.test.ts"
+    - claim: "the base record gains a PRODUCTION reader — readWorktreeBase is called from the doctor I/O shell, outside its own module and outside its own test, for the first time"
+      proof: "grep: readWorktreeBase in src/run-task.ts"
+    - claim: "the arm is read-only and acts on nothing — no worktree is removed or refused on this classification, and at-base, own-commits and base-unknown never move the exit code"
+      proof: "unit test: test/doctor.test.ts"
+  note: |
+    PROVENANCE, verbatim: follow-up harvest proposal
+    `followup:W1-T2461-1788065869447:2026-08-30T05:00:54.119Z:0` — "Read plan/tasks.yaml / grep
+    MASTER-PLAN for W1-T2461 to confirm what task this worktree corresponds to, since the branch
+    name references it but HEAD's own commit belongs to a different task id (W1-T2463)."
+    `origin:` is `architect` because that is the legal enum value for a task authored in an
+    Architect plan PR; the follow-up id is recorded here rather than smuggled into the field.
+
+    ⚠ THE RESEARCH IS DONE AND MUST NOT BE RE-COMMISSIONED. The proposal asked for a
+    confirmation pass. That pass is IN the rationale above, with its own honest limit stated.
+    Filing a research task to redo it would spend a run to re-derive a written answer. What is
+    filed instead is the mechanism that made the question expensive.
+
+    RISK BAND IS RULE 19'S SPAN, SET UP FRONT rather than discovered at lint time. `files:`
+    carries two distinct runtime stems — `doctor` and `run-task` — which `subsystemsOf` counts
+    as two concerns, so `sizingViolation` refuses `risk: medium` for the span alone. The test
+    file is deliberately the EXISTING `test/doctor.test.ts` rather than a new suite named after
+    this defect: `moduleIdFromPath` folds it to the same `doctor` id, where a differently-named
+    file would have read as a third concern for no benefit. The change itself is small.
+
+    DELIBERATELY NOT WIDENED. `src/lib/worker.ts` is READ (for the imported `readWorktreeBase`)
+    and never edited here — its own lifetime defect is W1-T2628's subject, and the two share no
+    file, so they can run in either order without the file-overlap serialization W1-T171
+    describes. The status board's LIVENESS/LATCHES panes (W1-T279/W1-T280) are the obvious
+    SECOND consumer of this classification and are deliberately NOT a dependency: both are
+    queued and unbuilt, and hitching a small diagnostic to them would strand it. The judge is
+    written pure so that board can call the same arm rather than growing a second spelling.

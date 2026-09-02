@@ -1,0 +1,92 @@
+- id: W1-T2649
+  title: "census the plan's PR-number citations for an immutable anchor — measure whether the #3305 citation is one outlier or a class, declare the classifier's precision before the number is trusted, and mint NO gate until the number says one is earned"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: medium
+  origin: "followup#W1-T2481-1788113218856"
+  plan_refs: ["§5C", "W1-T2481"]
+  files: [scripts/citation-anchor-census.mjs, test/citation-anchor-census.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    ONE REPAIRED CITATION ANSWERS NOTHING ABOUT THE REST. W1-T2648 fixes #3305's citation in
+    W1-T2481's rationale. It cannot say whether that citation was a lapse or the visible edge of a
+    habit, and the plan's own doctrine is that a class-level fix beats N per-instance patches
+    (W1-T20d: mine for a CLASS-level fix, not N per-task patches). The cheap way to know is to
+    count.
+
+    THE EVIDENCE SO FAR POINTS BOTH WAYS, WHICH IS EXACTLY WHY IT NEEDS MEASURING RATHER THAN
+    ASSERTING. Anchoring is plainly the dominant house habit: 54 sha-anchored measurement citations
+    across 51 files in this checkout. And the PR-number citations sampled during drafting mostly
+    carried an anchor with them ("observed on #591 at 1f990d2", "merged 64e5d4c"). But that sample
+    was a handful of grep hits read by eye, not a census, and #3305's citation shows the habit is
+    not universal. NEITHER "one lapse" NOR "a widespread class" IS ESTABLISHED, and this task
+    refuses to assert either before counting.
+
+    WHY THIS SHIPS A CENSUS AND NOT A LINT CHECK. Standing rule 20 requires a new sizing or fitness
+    rule to retroactively re-grade the open queue, and a BLOCKING check over rationale PROSE across
+    every task record is a large move whose false-positive cost is paid by every future filer —
+    the exact failure the linter-precision family (W1-T81, W1-T92, W1-T101, W1-T118) was filed to
+    undo, four times over. This repo's own answer to that risk is to bank the enforcement until
+    evidence triggers it (W1-T171's rung 2, banked until a rung-1 escape appears in the ledger).
+    So: measure first, and let the number decide whether anything further is warranted.
+
+    A HEURISTIC OVER PROSE MUST DECLARE ITS PRECISION OR ITS NUMBER IS NOISE. The precedent is in
+    the linter already: ADVISORY_ROUTING_LEXICON earned its table by publishing a measured 5/546
+    versus 345/546 comparison against a naive scan. The same standard binds here — a classifier
+    that reports a count without a labelled sample has produced a feeling, not a measurement.
+  design: |
+    A SCRIPT PLUS ITS TEST, ONE CONCERN. `scripts/citation-anchor-census.mjs` reads the plan's task
+    records (the monolith and every `plan/tasks.d/` shard), finds each `#NNNN` PR-number citation in
+    rationale, design and note prose, and classifies it ANCHORED or ANCHORLESS. It prints a report:
+    the total, the split, and the anchorless citations with their record id and surrounding line so
+    the operator can read them rather than take a number on trust.
+
+    ANCHORED means the citation is accompanied, within a bounded window of the same passage, by
+    something IMMUTABLE — a hex sha of at least seven characters, or an explicit merge-state word
+    together with a date. ANCHORLESS means neither. The forms live in a DATA table, one row per
+    anchor shape, so adding a shape is a row and never an engine edit (rule 2, and the same table
+    discipline SUBSYSTEM_LEXICON, DATA_ARTIFACT_CLASSES and PROOF_PAYLOAD_SHAPES already use).
+
+    PRECISION IS DECLARED BEFORE THE COUNT IS TRUSTED. The test carries a fixture set lifted
+    VERBATIM from the live corpus and hand-labelled in advance, in both directions: known-anchored
+    ("observed on #591 at 1f990d2", "merged 64e5d4c") and known-anchorless (#3305's original form).
+    A classifier that cannot separate those has not earned the right to report a total, and the
+    report states its own labelled-sample result beside the count.
+
+    IT REPORTS AND IT DOES NOT GATE. Exit status is zero however many anchorless citations exist.
+    No lint check is added, no name enters the required-check set, and no existing check changes
+    behaviour. That restraint is a criterion, not a footnote — a census that quietly grows teeth is
+    a blocking prose rule nobody ratified.
+
+    THE OUTCOME MAY LEGITIMATELY BE "NOTHING FURTHER". If the anchorless population is a handful,
+    the honest response is to repair those by hand and file no rule at all; only a large or growing
+    population argues for enforcement, and that call is the operator's, made on the number. Either
+    way the census stays as the meter that makes the question answerable next time.
+
+    OUT OF SCOPE: repairing the citations the census finds (W1-T2648 repairs the one this follow-up
+    named), any change to `src/lib/task-linter.ts`, and any change to what a required check means.
+  acceptance:
+    - claim: "every PR-number citation in the plan's task records is enumerated and classified anchored or anchorless, and the report names each anchorless one with its record id and its surrounding line"
+      proof: "unit test: test/citation-anchor-census.test.ts"
+    - claim: "precision is DECLARED before the number is trusted — a hand-labelled fixture set lifted verbatim from the live corpus classifies correctly in BOTH directions, so a count without a labelled sample is never presented as a measurement"
+      proof: "unit test: test/citation-anchor-census.test.ts"
+    - claim: "the census REPORTS and never gates — a corpus carrying anchorless citations still exits zero, no lint check is added, and no existing check changes behaviour for any task"
+      proof: "unit test: test/citation-anchor-census.test.ts"
+    - claim: "the anchor forms are a DATA table — adding one shape is a row that reclassifies a seeded citation with zero engine change"
+      proof: "unit test: test/citation-anchor-census.test.ts"
+  note: "SEQUENCING, EXPRESSED AS ORDERING RATHER THAN A depends_on EDGE, on the W1-T233 precedent: W1-T2648
+    writes down the anchored form on a real record and is the natural known-good fixture, so running it
+    first is better — but a hard edge would strand this measurement behind a plan-only edit that may sit,
+    and each is independently useful. The classifier's fixtures are taken from the corpus, not from W1-T2648,
+    so neither blocks the other.
+    NOT NEAR THE FRONT: this is a meter, not an outage. The kick order is security-first and this earns no
+    place ahead of it.
+    THE RESTRAINT IS THE POINT. Four linter-precision tasks (W1-T81, W1-T92, W1-T101, W1-T118) exist because
+    a check matched surface text where it meant to match a property. A blocking rule over rationale prose is
+    that hazard at its worst, so this task measures and stops. Whether enforcement follows is a separate
+    decision on real numbers, and is deliberately not smuggled in here."

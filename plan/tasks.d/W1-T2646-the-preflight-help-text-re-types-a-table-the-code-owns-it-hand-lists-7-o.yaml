@@ -1,0 +1,155 @@
+- id: W1-T2646
+  title: "the preflight help text RE-TYPES a table the code owns — it hand-lists 7 of FAST_GATE_STEPS's 13 scripts, still asserts the mechanism rule W1-T2478 replaced with a measured bound, and omits an accepted flag; docs/cli-reference.md is GENERATED from that same stale entry, so cli-reference:check cannot see the drift"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: |
+    FILED FROM the W1-T2478 follow-up harvest (run W1-T2478-1788108376050, PR #3323), whose own note
+    called this "cosmetic staleness, not covered by any test, out of scope for this task's declared
+    files". The first half is understated and the second half is exactly why it recurs. Measured in
+    this checkout rather than inherited from the report:
+
+    DRIFT 1 — THE LIST IS 7 OF 13. `FAST_GATE_STEPS` (src/lib/ci-parity.ts:901) carries THIRTEEN
+    entries. The usage string (src/run-task.ts:31606) names SEVEN: cli-reference:check, claims,
+    learnings-budget-ratchet, jscpd, depcruise, api-client:check, no-hand-rolled-fetch:check. The six
+    it cannot see are source-size-ratchet (W1-T2488), worker-branch-shape:check (W1-T2491), and the
+    four census entries census:bound-kind / census:catch-erasure / census:negative-reachability /
+    census:no-shallowing (W1-T2478). THREE SEPARATE MERGED TASKS added a row to that table and none
+    touched the string, which is the load-bearing fact: this is not one missed edit, it is a
+    hand-maintained duplicate of a table the code owns, and it has now rotted once per addition.
+
+    DRIFT 2 — IT STATES A SUPERSEDED RULE, WHICH IS WORSE THAN AN INCOMPLETE ONE. The string tells the
+    reader `--fast` "NEVER shells the test suite", presenting the old admission rule as current. W1-T2478
+    REPLACED that mechanism proxy: ci-parity.ts:856-875 records, in its own words, that design (iii)
+    used to read "never spawns node --test" and that this was "a MECHANISM proxy for the real concern
+    (cost)", now replaced by `FAST_GATE_CENSUS_BOUND_MS` (2000ms) as a PRIMARY CONTROL that times each
+    census step's own invocation and refuses it as BOUND EXCEEDED. So the four census entries DO invoke
+    `node --test` on one named file, by design and under a measured ceiling. An operator reading the
+    help learns a rule the code no longer applies, and cannot look up `BOUND EXCEEDED` — the one
+    failure mode `--fast` can now emit that no other mode can.
+
+    DRIFT 3 — AN ACCEPTED FLAG IS ABSENT FROM THE SIGNATURE. `unknownArgError` at src/run-task.ts:16743
+    accepts `--coverage` (W1-T1074, dispatched at :16756), and the JSDoc at :16711 names it. The usage
+    signature reads `[--from <ref>] [--to <ref>] [--ci-parity] [--fast]` and the prose never mentions
+    it; the JSDoc's OWN signature line at :16702 omits it too. A shipped mode is unreachable from the
+    verb's help.
+
+    WHY THE DOC GATE CANNOT SEE ANY OF THIS, AND WHY THAT IS THE FINDING. docs/cli-reference.md is
+    GENERATED from this COMMANDS registry (its own header, line 3) and `cli-reference:check` fails CI
+    when the file disagrees with the registry. It asserts DOC == REGISTRY and never REGISTRY == CODE, so
+    a stale registry entry propagates into the published reference with the drift gate green — and
+    `cli-reference:check` is itself a FAST_GATE_STEPS entry, so the fast gate reads out a list of its own
+    members that is missing six of them. Verified by search: no test anywhere asserts a verb's usage
+    string against its accepted-flag set or against FAST_GATE_STEPS.
+
+    CORROBORATING, AND DELIBERATELY OUT OF SCOPE: the same hand-counted-prose rot is already visible in
+    the test titles — test/fast-gate-admits-the-census-class.test.ts:142 says "all twelve
+    FAST_GATE_STEPS" while its assertion uses `FAST_GATE_STEPS.length` and passes at thirteen. The
+    assertion derives and survived; the sentence beside it did not. Titles are not in this task's
+    files: and are not corrected here; they are cited because they are the same defect in the same
+    week, and they argue for deriving rather than re-typing.
+
+    NOT A RE-DECISION OF W1-T986, which ruled that `rmd preflight --fast` and the cli-reference parity
+    hole belong to W1-T373 (merged, so the residue is unowned) and confined itself to CLAUDE.md.
+  design: |
+    ONE CONCERN: the preflight help stops re-typing facts the code owns. DERIVE WHAT IS DERIVABLE,
+    GATE WHAT IS NOT — a prose patch is refused by construction, because a prose patch is what has
+    already failed three times.
+
+    (i) THE SCRIPT LIST IS RENDERED FROM THE TABLE, NEVER RE-TYPED. The preflight COMMANDS entry
+    composes its fast-gate script list from `FAST_GATE_STEPS` itself (rule 2, policy-as-data; the
+    W1-T279 discipline that a later addition is a ROW, not an edit). src/run-task.ts ALREADY imports
+    from ./lib/ci-parity.js (line 268, verified), so this adds no dependency edge and depcruise is
+    unaffected. RENDER THE SCRIPT NAMES ONLY — never each entry's `reason`, which runs to paragraphs
+    and would flood the generated reference.
+
+    (ii) THE DOCTRINE SENTENCE IS HAND-WRITTEN AND THEREFORE GATED. The admission rule cannot be
+    derived, so it is asserted by a falsifier instead: the string must stop claiming the superseded
+    "never shells the test suite" mechanism rule as the admission basis, and must name what actually
+    governs now — the measured per-step ceiling and the BOUND EXCEEDED refusal an operator will meet.
+    Read ci-parity.ts:856-899 and state the bound as the code states it; do not paraphrase it into a
+    new number.
+
+    (iii) EVERY ACCEPTED FLAG IS NAMED. The signature carries what `unknownArgError` accepts at
+    :16743 — `--coverage` and `--summary-file` included. Fix the JSDoc signature at :16702 in the
+    same pass; it is the same omission one screen away, and leaving it is the half-fix this task
+    exists to end.
+
+    (iv) REGENERATE THE PUBLISHED SURFACE. Run the generator so docs/cli-reference.md matches and
+    `cli-reference:check` is green. STATE THE CONSEQUENCE IN THE PR BODY rather than discovering it
+    later: once the string is derived, a future task adding a FAST_GATE_STEPS row will red
+    `cli-reference:check` until it regenerates the doc. That is the intended coupling — the doc now
+    tracks the table — but it is a real change to a merge-gating check and must be named.
+
+    (v) MEASURE THE SOURCE-SIZE RATCHET. src/run-task.ts is the file scripts/source-size-ratchet.mjs
+    watches (W1-T2488, and itself a fast-gate entry). Deriving a list should be net-neutral or
+    net-negative; record the measured before/after in the PR body rather than asserting it.
+
+    (vi) NOT IN SCOPE, EACH FOR A STATED REASON. (a) Generalising this to EVERY verb — a census gate
+    asserting that every accepted flag appears in its own usage string — is the obvious successor and
+    is DELIBERATELY BANKED, not filed: the evidence today is one string, and the repo's own discipline
+    is to build on observed instances rather than anticipation. A second instance makes it filable.
+    (b) The stale test TITLES cited in the rationale. (c) Any change to FAST_GATE_STEPS itself, to the
+    bound, or to which steps are admitted — this task reports the table, it does not edit it.
+    (d) `cli-reference:check`'s registry-vs-code blindness as a general gate; naming it here is a
+    finding for the PR body, and closing it is (a).
+  acceptance:
+    - claim: "the fast-gate script list in the preflight usage is DERIVED from FAST_GATE_STEPS — adding a synthetic entry to the table changes the rendered usage with no edit to the string, and every one of the table's current entries is named (the falsifier: today's hand-typed list names 7 of 13, having survived three merged tasks that each added a row)"
+      proof: "unit test: test/preflight-help-is-derived-not-retyped.test.ts"
+    - claim: "the usage no longer asserts the mechanism rule W1-T2478 superseded, and instead names the measured per-step ceiling and the BOUND EXCEEDED refusal that actually governs admission — so the one failure mode unique to --fast is documented where an operator would look"
+      proof: "unit test: test/preflight-help-is-derived-not-retyped.test.ts"
+    - claim: "every flag the preflight arg validator ACCEPTS appears in the usage signature — a flag accepted at the parser and absent from the help FAILS, which is the state --coverage is in today"
+      proof: "unit test: test/preflight-help-is-derived-not-retyped.test.ts"
+    - claim: "the generated reference agrees with the derived entry so cli-reference:check is green, and the preflight section of docs/cli-reference.md carries the full derived list rather than inheriting the stale seven"
+      proof: "unit test: test/preflight-help-is-derived-not-retyped.test.ts"
+  risk: high
+  origin: feedback#followup-W1-T2478
+  plan_refs: ["§12A", "§5C", "W1-T373", "W1-T2478", "W1-T48"]
+  files: [src/run-task.ts, test/preflight-help-is-derived-not-retyped.test.ts, docs/cli-reference.md]
+  status: queued
+  attempts: 0
+  note: |
+    FILED FROM the W1-T2478 follow-up harvest (PR #3323). The harvest called it cosmetic; the
+    grounding pass found three drifts in one string and a structural reason none of them is caught,
+    so it is filed as a derive-the-list task rather than a prose correction.
+
+    risk:high IS A RECORDED REGRADE, NOT A WORKAROUND, AND IT IS DEFENSIBLE ON MERITS AS WELL AS ON
+    SIZING. The declared set resolves to three subsystems (run-task, the new test file, cli-reference),
+    and `sizingViolation` fires below risk:high — the W1-T189/W1-T200/W1-T218 precedent, where a small
+    task is graded UP rather than fragmented, because effort and risk are different axes. The merits
+    half is real and is the reason this is not merely a linter artifact: making the usage string
+    computed couples docs/cli-reference.md to FAST_GATE_STEPS through `cli-reference:check`, which is
+    both a CI job and a fast-gate entry, so a wrong render reds a merge-gating check fleet-wide. That
+    coupling is the point (design iv) and is exactly why it is named rather than discovered.
+
+    BUDGET 100.00 PER THE FILE HEADER'S BINDING RULE — budget_usd is a runaway tripwire, not an
+    allowance, and lowering it near the work's expected cost is the W1-T3 defect (died blocked_budget
+    at $3.57 against a guessed $4 cap while still working). The work here is small; the cap is not a
+    statement about its size.
+
+    depends_on IS EMPTY DELIBERATELY. W1-T373 (--fast) and W1-T2478 (the census class) are merged, so
+    both premises are on main. W1-T48 (the cli-reference drift gate) still reads queued in the plan
+    while its code is demonstrably live — docs/cli-reference.md's own header names `cli-reference:check`
+    and W1-T48 — so a hard edge to it would strand this behind a phantom, the W1-T75 bootstrap lesson.
+    The gate is READ by this task and never edited.
+
+    ON THE PROOFS — all four are the PURE-PATH `unit test:` form against one dedicated file, and that
+    shape is chosen on evidence: W1-T253's amendment records that
+    `unit test: test/x.test.ts — <sentence>` parses as NAME-FILTERED, so the sentence becomes a
+    test-name pattern matching ZERO titles and the run CAPs at 0/N (measured on sibling W1-T252 /
+    #901, a risk:high run refused for lack of observation and then rescued by hand). Neither authoring
+    linter blocks that shape. The pure path lint-passes AND executes the whole file. The test path is
+    INSIDE files:, so `proofScopeViolations` is silent and the scope guard cannot refuse the branch
+    after the work is done (the W1-T309 postmortem). No `grep:` proof is used and that is deliberate:
+    the obvious candidate, `grep: FAST_GATE_STEPS in src/run-task.ts`, ALREADY matches at head
+    (:16718 and :31606 both mention it), so it would not discriminate head from base and would resolve
+    executed_stale.
+
+    WHY A FALSIFIER AND NOT JUST AN UPDATED SENTENCE: the string was correct when written and has been
+    wrong three times since, each time silently, because nothing ties it to the table it describes.
+    An edit restores it to correct-for-now; deriving it removes the class. The banked generalisation
+    (every verb's accepted-flag set gated against its own usage) is named in design (vi) and is not
+    filed here — one observed instance is not a census.

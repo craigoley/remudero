@@ -1,0 +1,94 @@
+- id: W1-T2650
+  title: "THE SIZE BASELINE IS THE ONE FILE A GROWING TASK MUST EDIT AND THE ONE ITS DECLARED SCOPE FORBIDS — source-size-ratchet prints a remedy naming scripts/source-size-baseline.json, but that path is in no task's declared files:, so the exact-membership scope guard and the reviewer's scope check refuse the fix the gate just demanded"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: |
+    TWO LIVE GATES CONTRADICT EACH OTHER, and a stale follow-up is the fixture.
+
+    THE REMEDY THE GATE PRINTS. On a breach, scripts/source-size-ratchet.mjs prints the exact edit
+    that clears it — `edit scripts/source-size-baseline.json and set: "<path>": <bucket>,` — and
+    states in its own text that "Recording is the ordinary outcome for deliberate growth and is safe
+    to do in this same PR", citing the W1-T2526 exemption from Standing rule 25's
+    instrument-isolation rule.
+
+    THE SCOPE GUARD THAT REFUSES IT. That exemption is about INSTRUMENT ISOLATION and nothing else.
+    The declared-files regime is separate and, verified at source, admits no such path:
+      run-task.ts:3799  `scopeGuardOutOfScopeFiles` — exact membership in the task's `files:`,
+                        fail-closed on an empty scope, with no exemption list of any kind.
+      run-task.ts:3976  `fixRungScopeStandDownReason` — stands the fix rung DOWN on any NEW
+                        out-of-scope path the rung itself adds.
+      review.ts:3592    `scopeViolationFiles` — the reviewer's counterpart over the same idea.
+    So a task that legitimately grows a source file is told by one gate to edit a file a second gate
+    refuses, and the rung that would repair it stands down instead. The author's only outs are a
+    scope amendment or a follow-up — which is exactly what W1-T2516 hit and filed.
+
+    WHY A FOLLOW-UP IS THE WRONG INSTRUMENT, MEASURED ON THE FOLLOW-UP ITSELF. The harvested item
+    (followup:DAEMON-1788192519316:2026-08-31T16:38:07.971Z:0) asked for two baseline entries. One
+    day later, on origin/main, `wc -l` semantics — the count `countLines` implements:
+      src/lib/account-usage.ts   baseline 740   file 740 (last content line 740)   ALREADY RECORDED
+      src/lib/worker.ts          baseline 4000  file 3684 (last content line 3684) 316 SPARE
+    The first half was already landed by someone else. The second half has gone TOXIC: writing the
+    requested 3547 would LOWER the ceiling beneath a 3684-line file and red the gate by 137 lines.
+    A deferred baseline edit is a number with a shelf life, and this one expired in under 24 hours
+    while W1-T2539's 500-line bucketing was concurrently rewriting the same entries. Deferral is not
+    a safe disposition for this artifact; admitting the edit in the PR that causes it is.
+
+    NOT A LICENCE TO WIDEN THE GUARD. The guard is load-bearing and its fail-closed direction is
+    correct: an empty declared scope refuses every non-empty diff, and that must survive. What ships
+    is an ENUMERATED artifact set, not a pattern and not a relaxation — every path outside it is
+    refused exactly as today, which is criterion 2 and the whole safety argument.
+
+    ATOMIC ACROSS TWO STEMS, RE-RISKED RATHER THAN SPLIT (Rule 19's own exit, the W1-T240/T250/T253
+    precedent). The invariant is ONE property — a PR admitted by the push/fix-rung guard is never
+    refused by the reviewer for the same path — and it is UNSATISFIABLE PIECEWISE: exempting only
+    run-task.ts still fails the PR at review, and exempting only review.ts still stands the fix rung
+    down. Two tasks, neither independently testable. Hence risk:high with the reason recorded, not a
+    per-subsystem decomposition.
+
+    OUT OF SCOPE, NAMED SO THE NEXT READER DOES NOT RE-DERIVE THEM: applying a printed generator
+    remedy automatically (W1-T2551); the body-claim collision that recording a ceiling then triggers
+    (W1-T2538); the conflict rung's admission of regenerable artifacts (W1-T2548); and the bucketing
+    policy itself (W1-T2539), which is working and is not what failed.
+  acceptance:
+    - claim: "a task whose diff touches scripts/source-size-baseline.json alongside its own declared files is admitted by the push/fix-rung scope guard, so it records its own ceiling in the PR that caused the growth instead of deferring it to a follow-up"
+      proof: "unit test: test/a-growing-task-cannot-record-its-own-ceiling.test.ts"
+    - claim: "THE FALSIFIER — a non-exempt out-of-scope path is still refused exactly as today, and an empty or absent declared scope still refuses every non-empty diff: the exemption admits an enumerated artifact set and never widens the guard"
+      proof: "unit test: test/a-growing-task-cannot-record-its-own-ceiling.test.ts"
+    - claim: "the reviewer's scope check and the push/fix-rung scope guard consult the SAME exemption set, so a PR admitted by one is never refused by the other — the invariant is unsatisfiable piecewise, which is why this is one task"
+      proof: "unit test: test/a-growing-task-cannot-record-its-own-ceiling.test.ts"
+    - claim: "the exemption is DATA — adding an artifact is a row edit in one enumerated set with no new code branch and no second copy in the reviewer"
+      proof: "grep: SCOPE_EXEMPT_GENERATED_ARTIFACTS in src/run-task.ts"
+  risk: high
+  band_meaning: blast-radius
+  origin: architect
+  plan_refs: ["§5C", "§3"]
+  files: [src/run-task.ts, src/lib/review.ts, test/a-growing-task-cannot-record-its-own-ceiling.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    FILED 2026-09-01 from followup:DAEMON-1788192519316:2026-08-31T16:38:07.971Z:0 (harvested from
+    W1-T2516, run DAEMON-1788192519316, PR #3409). THE FOLLOW-UP'S LITERAL ASK IS DELIBERATELY NOT
+    FILED, and the measurement that retires it is recorded here verbatim so no future reader
+    re-derives it or re-files it:
+      src/lib/account-usage.ts — the requested `740` is ALREADY on main, matching the file exactly
+        (last content line 740). Nothing to do.
+      src/lib/worker.ts — the requested `3547` is now BELOW the file, which measures 3684 lines
+        (last content line 3684) against a recorded 4000 bucket. Ratifying it literally would have
+        turned a green gate RED by 137 lines. This is the W1-T137 "PREMISE CORRECTED" shape: the
+        harvested numbers were true when observed and false when read.
+    The `source-size-ratchet` check the follow-up calls "still-red" is GREEN for both named files on
+    main today, so the proposal's premise no longer holds and its remedy would regress the gate.
+    WHAT SURVIVES is the follow-up's second clause — "outside W1-T2516's declared file scope, so it
+    needs either a scope amendment or a separate small task" — generalised past the two stale
+    numbers into the structural contradiction that produced them. This task is that clause.
+    VERIFY-FROM-SOURCE OBLIGATION ON THE IMPLEMENTER, and it is load-bearing rather than a formality:
+    read `scopeGuardOutOfScopeFiles` (run-task.ts:3799), `fixRungScopeStandDownReason` (:3976) and
+    `scopeViolationFiles` (review.ts:3592) and establish each one's ACTUAL disposition — the
+    implement path is documented at run-task.ts:3954 as "push-and-flag" rather than a hard refusal,
+    while the reviewer's check is described at review.ts:383 as fail-closed. If the measured
+    dispositions differ from this note, correct the note in the PR body rather than building to it;
+    line numbers are a 2026-09-01 survey and drift is expected.

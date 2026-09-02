@@ -1,0 +1,105 @@
+- id: W1-T2628
+  title: "pruneStaleRuns WIDOWS THE BASE RECORD IT NEVER REMOVES — worker.ts:3230-3234 removes a worktree and calls removeRunLock but NOT removeWorktreeBase, and the widowed-sibling sweep at :3667 filters `.lock` only, so every prune strands a `<name>.base` file permanently in the worktrees dir; the record's own test already asserts it must die with its worktree, and one removal path out of three does not"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 100.00
+  files: [src/lib/worker.ts, test/worktree-base-recorded.test.ts]
+  origin: architect
+  plan_refs: ["§9", "W1-T405", "W1-T406", "W1-T175"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE CONTRACT IS ALREADY WRITTEN DOWN AND ALREADY TESTED. `removeWorktreeBase`'s own doc
+    (src/lib/worker.ts:2717-2721) states it plainly: "The record's lifetime is its worktree's …
+    it must die when the corpse does — a removal that leaves it behind fails the guard suite's
+    'cleans up' contract … and would hand the reaper one orphaned file per pass."
+    `test/worktree-base-recorded.test.ts` asserts exactly that ("the sibling record must die
+    with its worktree") — against `worktreeRemove`.
+
+    ONE OF THE THREE REMOVAL PATHS DOES NOT HOLD IT, verified at head by reading all three:
+      - `worktreeRemove` (:2869) calls `removeWorktreeBase`. HOLDS.
+      - `reapStaleWorktrees` (:3653) calls `removeWorktreeBase`, correctly INSIDE the
+        `if (!dryRun)` guard. HOLDS.
+      - `pruneStaleRuns` (:3230-3234) runs `git worktree remove --force`, then
+        `removeRunLock(curPath)` — and NOTHING removes the base record. LEAKS.
+    So the leak is not an exotic path. `pruneStaleRuns` fires at the START of every run, which
+    makes this a routine automated leak of one file per pruned worktree rather than the
+    manual-`rm -rf` case the code already anticipates elsewhere.
+
+    AND NOTHING SWEEPS THE WIDOWS AFTERWARDS. `reapStaleWorktrees`'s widowed-sibling pass
+    (:3667-3677) opens `if (!name.endsWith(".lock")) continue;` — `.lock` only. Its own comment
+    (:3661-3666) states the reasoning that applies verbatim to `.base`: a sibling "orphaned by
+    any OTHER path … lingers forever", and "No age gate is owed here: the owning directory is
+    already gone, so nothing in flight can be harmed." The `.base` record was added later
+    (W1-T405) and never joined that pass. The main reap loop cannot pick them up either — it
+    skips non-directories at :3599 — so a widowed `.base` is invisible to every sweep and
+    accumulates without bound in the worktrees dir.
+
+    THE HARM IS SMALL AND REAL, AND IS STATED AS SUCH. This is residue, not a correctness
+    failure: nothing reads the record today, so a stale one currently misleads nobody. That
+    changes the moment it gains a reader (W1-T2627), and it is already the exact "one orphaned file
+    per pass" outcome `removeWorktreeBase`'s doc names as the thing to avoid. Filed at its true
+    size rather than inflated.
+  design: |
+    TWO HALVES, ONE CONCERN — the record's lifetime contract — and they mirror the `.lock`
+    precedent already in this file rather than inventing a second discipline.
+
+    (i) STOP THE PRODUCER. `pruneStaleRuns` calls `removeWorktreeBase(curPath)` beside its
+    existing `removeRunLock(curPath)`, on the successful-removal path only. `removeWorktreeBase`
+    is internally guarded and never throws, so this cannot newly break a prune pass.
+
+    (ii) SWEEP THE EXISTING WIDOWS. Extend `reapStaleWorktrees`'s widowed-sibling pass to
+    `.base` alongside `.lock`, keeping its exact predicate: a sibling whose owning worktree
+    DIRECTORY IS GONE is removed; one whose directory is still present is never touched. No age
+    gate, for the reason that pass already records — the owner is already gone.
+
+    ⚠ THE SURVEY MUST STAY A SURVEY. `dryRun` already exists on this path and the file already
+    carries the scar: the W1-T406 × W1-T405 merge-resolution comment at :3649-3653 records that
+    `removeWorktreeBase` belongs INSIDE the `dryRun` guard because "removing it during a survey
+    would be destroying state while claiming to only look". The new widow removal inherits that
+    rule exactly, and it carries its own falsifier below rather than being left to the reader.
+
+    WEAKEN NOTHING. The `.lock` widow behaviour is unchanged and is locked by a regression
+    criterion. No worktree DIRECTORY becomes reapable that was not reapable before — this pass
+    only ever removes sibling FILES whose directory is already absent. The main reap loop's
+    non-directory skip at :3599 is untouched, so a `.base` file can never be mistaken for a
+    worktree entry.
+  acceptance:
+    - claim: "a worktree removed by pruneStaleRuns leaves NO widowed base record — the record dies with its worktree on the prune path exactly as it already does on worktreeRemove"
+      proof: "unit test: test/worktree-base-recorded.test.ts"
+    - claim: "a base record whose owning worktree directory is already gone is swept by the same widowed-sibling pass that already sweeps a widowed lock, with no age gate"
+      proof: "unit test: test/worktree-base-recorded.test.ts"
+    - claim: "a base record whose owning worktree directory is still PRESENT is never removed by that pass — the falsifier proving the sweep keys on widowhood and not on the suffix"
+      proof: "unit test: test/worktree-base-recorded.test.ts"
+    - claim: "a dry-run pass removes no base record and no lock — the survey still only surveys, per the guard the reap path already carries"
+      proof: "unit test: test/worktree-base-recorded.test.ts"
+    - claim: "the existing widowed-lock behaviour and the existing worktreeRemove and reap cleanups are unchanged"
+      proof: "unit test: test/worktree-base-recorded.test.ts"
+  note: |
+    PROVENANCE: found while grounding the follow-up harvest proposal
+    `followup:W1-T2461-1788065869447:2026-08-30T05:00:54.119Z:0` — checking the base record's
+    lifetime in order to answer whether a worktree's HEAD could be trusted surfaced that one of
+    its three removal paths does not hold the contract. `origin:` is `architect` because that is
+    the legal enum value for a task authored in an Architect plan PR.
+
+    ⚠ SEPARATE FROM W1-T2627 ON PURPOSE, AND NOT FOLDED IN. W1-T2627 gives the record a READER
+    (legibility); this fixes the record's LIFETIME (residue). Different mechanisms, different
+    falsifiers, different files — W1-T2627 touches doctor.ts and run-task.ts, this touches
+    worker.ts — so they share no file and neither serializes behind the other under W1-T171.
+    Folding them would produce two tasks wearing one id.
+
+    RISK BAND IS RULE 19'S SPAN, SET UP FRONT. `files:` carries two stems — `worker` and the
+    test file's own `worktree-base-recorded` — which `subsystemsOf` counts as two concerns, so
+    `sizingViolation` refuses `risk: medium` for the span alone. The test home is deliberately
+    the EXISTING `test/worktree-base-recorded.test.ts`: that file already owns the record's
+    lifetime contract and already asserts it for `worktreeRemove`, so the new cases belong
+    beside their siblings even though a `test/worker.test.ts` home would have folded the stems
+    and bought a lower band. Choosing the honest home over the cheaper lint band is the trade,
+    and it is recorded rather than left to be re-litigated.
+
+    THE DIFF IS SMALL — one added call and one widened suffix test in an existing loop. The band
+    reflects span, never effort.

@@ -1,0 +1,120 @@
+- id: W1-T2634
+  title: "A BLOCKED RECORD THAT NAMES NO DISPOSITION IS INVISIBLE UNTIL SOMEONE RE-READS THE SHARDS — the retirement field now drives dispatch filtering and the starvation census, but nothing NAMES the records still missing it, so the population is re-derived by hand every time and silently regrows after each backfill. Report it at lint time, WARN-only, and never rule on any record"
+  repo: remudero
+  depends_on: [W1-T2481]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 10.00
+  files: [src/lib/task-linter.ts, test/blocked-record-without-a-ruling-is-named.test.ts]
+  origin: followup#W1-T2474-1788101371246
+  plan_refs: ["W1-T1287", "W1-T2474", "W1-T2481", "W1-T391", "§5C"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE FIELD BECAME LOAD-BEARING AND NOTHING REPORTS ITS ABSENCE. W1-T2474 shipped: drain.ts now
+    files a blocked task under the `retired` DispatchFilterReason when `t.retirement !== undefined`
+    and under `blocked` otherwise, and daemon.ts excludes the retired bucket from the starved
+    verdict in its own words ("a queue whose only remaining blockers are retired is NOT starved").
+    So a MISSING retirement ruling is now a behavioural fact — it decides whether a record counts
+    as recoverable work a human is being told to resolve. Nothing names the records that lack it.
+
+    THE COST IS THE ARCHAEOLOGY, AND IT HAS ALREADY BEEN PAID THREE TIMES. W1-T1287's own filing
+    states the harm — "the operator re-reads the shards to tell them apart" — and then three
+    separate filings re-derived the same population by hand at three different shas and got three
+    different numbers: W1-T391 measured 31 of 32, W1-T2474 measured 46 of 50, W1-T2481 measured 13
+    wedged tombstones. Each was correct at its sha; none is recoverable from the record afterwards.
+    A population that must be re-measured to be discussed is a population nothing is tracking.
+
+    RE-DERIVED AT THIS SHA, AND STATED AS APPROXIMATE ON PURPOSE. A grep over plan/tasks.yaml plus
+    every plan/tasks.d shard reads 50 `status: blocked` occurrences against 24 `retirement:` lines,
+    i.e. roughly 26 blocked records carrying no ruling. THAT FIGURE IS A GREP AND MUST NOT BE
+    INHERITED: W1-T391's note records an earlier draft that "counted over the one file it happened
+    to open and understated the population by two thirds", so this check MUST measure over the
+    LOADED plan (the merged monolith-plus-shards view loadPlan already returns), never over text.
+    The build re-deriving a different number is expected and is not a defect in this filing.
+
+    WARN, NEVER BLOCK, AND THE REASON IS MEASURED RATHER THAN CAUTIOUS. W1-T2481 records what a
+    blocking arm does to this exact population: applying the retirement ruling on #3305 reddened
+    lint-plan with 13 failures and forced the backfill to ship 20 of 33, leaving thirteen records
+    permanently uneditable. A BLOCKING "every blocked record must name a disposition" check would
+    rebuild that wedge one field over, and would wedge it around the legitimate cases as well —
+    W1-T391 and W1-T10 are both `status: blocked` with no retirement and both are correct as they
+    stand. So this check reports and never refuses.
+
+    IT NAMES; IT DOES NOT RULE. W1-T1287's criterion 6 pins that no code path sets the field, and
+    its ruling (x) gives the reason: "an assertion can re-verify a fact, and nothing can re-verify
+    an operator's judgement that a task should not be built". W1-T391 is the demonstration — its
+    first implementation inferred the discriminator from the 31-of-32 regularity, misfiled the
+    legitimate operator-block its own suite already contained as a fixture, and was withdrawn. This
+    check therefore emits a name and a count and stops there; the ruling is W1-T2635's, and W1-T2635 is
+    an operator act.
+
+    WHY THE HARD DEPENDENCY ON W1-T2481. Both edit src/lib/task-linter.ts, so W1-T171's file-overlap
+    rule serializes them regardless; taking the edge makes the ordering legible rather than
+    emergent. The stronger reason is that a check naming records nobody can edit is a check that
+    trains its reader to ignore it — W1-T2481 is what makes the named records actionable, and it is
+    already filed, queued and small ($8), so the stall risk a hard gate normally carries is low.
+
+    RISK BAND IS RULE 19's SPAN, NOT BLAST RADIUS. `files:` names two stems (task-linter and the
+    test's own) and sizingViolation measures span, so risk:medium is refused. Recorded rather than
+    worked around — W1-T2481 made the same correction on the same file and named renaming the test
+    to collapse the stem count as "gaming a gate rather than sizing a task".
+  design: |
+    A new lint-plan check emitting at severity WARN: for each task in the loaded plan with
+    `status === "blocked"` and `retirement === undefined`, emit one violation naming the task id and
+    stating that a blocked record carries no disposition ruling, with the two legitimate answers
+    named in the message (record a `retirement:` ruling, or state in prose why the record is waiting
+    rather than retired) so the fix is discoverable from the failure rather than only from this
+    shard.
+
+    NEVER BLOCKING, AT ANY SEVERITY PLUMBING LEVEL. `ok` must stay true for a plan whose only
+    violations are this class, and a `--base` changed-tasks pass over such a record must stay green.
+    That is the whole difference between this check and the wedge W1-T2481 exists to remove; do not
+    add a `block` mode "for later", because the next reader will turn it on.
+
+    NEVER WRITES, NEVER INFERS, NEVER GUESSES FROM PROSE. No lexicon over `note:`/`rationale:` — that
+    is "the same statistical guess in a different costume" (W1-T391 design (ii)) and it is the exact
+    move that produced the withdrawn implementation. The check reads two structured fields and
+    nothing else.
+
+    VERIFY FROM SOURCE BEFORE BUILDING, distrust this note: how lintTask/LintOpts express a warn-only
+    severity today (W1-T246's `proofDialect` warn|block plumbing is the nearest in-repo shape), and
+    where the merged plan view is loaded for the whole-plan pass. Do NOT re-invent a second severity
+    mechanism beside the existing one.
+
+    NOT IN SCOPE: ruling on any record, editing any plan file, touching the `blocked` exclusion at
+    any of its enforcement points, adding a TASK_STATUSES member (W1-T1287's Q1 ruled that out), and
+    the 86 dispatchable no-scope tasks W1-T2481 names as a separate larger filing.
+  acceptance:
+    - claim: "a blocked task carrying no retirement ruling is NAMED by the check, measured over the loaded plan rather than over file text"
+      proof: "unit test: test/blocked-record-without-a-ruling-is-named.test.ts"
+    - claim: "a blocked task that carries a retirement ruling emits nothing"
+      proof: "unit test: test/blocked-record-without-a-ruling-is-named.test.ts"
+    - claim: "the check NEVER blocks — a plan whose only violations are this class still reports ok, so the plan lane cannot wedge the way the declared-scope arm wedged thirteen tombstones"
+      proof: "unit test: test/blocked-record-without-a-ruling-is-named.test.ts"
+    - claim: "a changed-tasks base pass over a blocked record carrying no ruling stays green"
+      proof: "unit test: test/blocked-record-without-a-ruling-is-named.test.ts"
+    - claim: "a task whose status is not blocked emits nothing, whether or not it carries the field"
+      proof: "unit test: test/blocked-record-without-a-ruling-is-named.test.ts"
+    - claim: "the check writes and infers nothing — no retirement value is derived from prose, a title prefix, or any signal other than the two structured fields"
+      proof: "unit test: test/blocked-record-without-a-ruling-is-named.test.ts"
+    - claim: "deleting the check makes the population unnamed again, so the report is doing the work rather than an unrelated pass"
+      proof: "unit test: test/blocked-record-without-a-ruling-is-named.test.ts"
+  note: |
+    FILED FROM W1-T2474's OWN FOLLOW-UP, WITH ITS FIGURE CORRECTED. That harvest asked to "backfill
+    retirement across the 46 blocked shards that lack it". Two corrections, both measured: the
+    backfill has already partly happened (PR #3305, 20 of 33 per W1-T2481), and it CANNOT complete
+    while W1-T2481 stands — so the residue is smaller than 46 and is blocked on a filed task rather
+    than on authoring effort.
+
+    THIS TASK IS THE DURABLE HALF ONLY. It makes the population legible and stops it regrowing
+    unobserved; it closes nothing on issue #3207 by itself. The ruling that does is W1-T2635, and it is
+    deliberately a separate task with a separate verification mode because a machine may measure this
+    population and may not adjudicate it.
+  queue_note: |
+    NOT PROMOTED, and the position is the operator's call. Filed as a shard, which sorts after every
+    tasks.yaml entry in the drain (the W1-T179 lesson: shards are the right default for conflict-free
+    FILING and the wrong choice for anything needing PRIORITY). Flagged rather than silently
+    reordered.

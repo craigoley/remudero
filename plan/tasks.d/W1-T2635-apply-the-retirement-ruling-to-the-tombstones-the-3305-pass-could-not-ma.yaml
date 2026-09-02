@@ -1,0 +1,138 @@
+- id: W1-T2635
+  title: "APPLY THE RETIREMENT RULING TO THE TOMBSTONES THE #3305 PASS COULD NOT MARK — a per-record operator adjudication, in a plan-only PR, that marks what is genuinely retired and DELIBERATELY LEAVES the records that are merely waiting unmarked; the objective is an escalation naming only what a human can act on, never a silent zero"
+  repo: remudero
+  depends_on: [W1-T2481]
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 20.00
+  files: [plan/tasks.yaml, plan/tasks.d/*.yaml, test/every-tombstone-names-its-disposition.test.ts]
+  origin: followup#W1-T2474-1788101371246
+  plan_refs: ["W1-T1287", "W1-T2474", "W1-T2481", "W1-T391", "W1-T324"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THIS IS THE ACTUAL REMAINING STEP, AND ITS OBJECTIVE IS NOT THE ONE THE FOLLOW-UP STATED. The
+    harvest that produced this task says the backfill "is the actual remaining step to make issue
+    #3207 go quiet". The first half is right; the second half is the wrong target and adopting it
+    would produce a bad change. Some blocked records carrying no retirement are GENUINELY
+    recoverable and the escalation naming them is CORRECT: W1-T10 is blocked on an operator enabling
+    fine-grained PATs on the org, which is precisely a class "a human resolves". Silencing that is a
+    regression dressed as a cleanup. The objective is that the escalation name only records a human
+    can act on — which for some records means marking them retired and for others means leaving them
+    exactly as they are.
+
+    THE POPULATION IS SMALLER THAN THE HARVEST SAYS AND ITS RESIDUE IS WEDGED, NOT UNAUTHORED. PR
+    #3305 already applied this ruling once; W1-T2481 records the outcome verbatim — "applying the
+    retirement ruling to every anchored tombstone reddened lint-plan with 13 failing, all of them
+    this class, and the backfill had to ship 20 of 33 to stay green", leaving thirteen records
+    "PERMANENTLY UNEDITABLE while the vacuous arm stands, including the records W1-T2474's census
+    most needs marked". So the remaining work is gated on W1-T2481 by construction, which is why
+    that edge is HARD here rather than advisory: this task cannot be completed before it lands, and
+    attempting it reds a required check.
+
+    A BLANKET MARK IS REFUSED ON EVIDENCE, NOT ON CAUTION, AND THE EVIDENCE IS A FAILED BUILD.
+    W1-T391 records that a session implemented exactly the inferred discriminator, that
+    `test/queue-starvation.test.ts`'s first claim already seeds the legitimate operator-block as a
+    fixture, and that "the implemented discriminator reclassified it as withdrawn and that test
+    FAILED. The failure is the proof." Its note then states the sharpest available counter-example:
+    W1-T391 is ITSELF a `status: blocked` record that is not a retirement, waiting on a ruling — "a
+    live counter-example to reading the 31-of-32 regularity as structural". Any pass here that marks
+    W1-T391 retired has misread this task.
+
+    WHICH IS WHY THIS IS verify: human, AND WHY THAT IS A MECHANISM RATHER THAN A LABEL. W1-T1287's
+    ruling (x) is explicit that nothing retires automatically and that a retirement is an operator
+    ruling with evidence, and its criterion 6 pins the absence of any writer. W1-T391 records the
+    second effect, which is the load-bearing one here: `isDispatchEligible` refuses a non-auto task
+    BEFORE the linter is consulted, so verify:human is what stops a worker being handed this and
+    rediscovering the wall by inferring rulings from prose. The mode is doing work, not describing
+    intent.
+
+    THE RECORD IS EDITED, NEVER DELETED, AND THE STATUS FIELD IS NOT TOUCHED. W1-T1287 ruling (a):
+    deletion "stops the id resolving, which promotes a trailer to a bare body claim and re-opens the
+    id-collision class that cost three renames on 2026-08-26". Ruling (c): the vocabulary collapses
+    to one value, `retired`; `closed` and `withdrawn` stay parseable as display-only synonyms with no
+    behavioural difference, so the reason goes in prose BESIDE the field. Ruling (b): prose alone is
+    refused because it is invisible to every instrument.
+
+    RULE 15 IS SATISFIED BY THE INSTRUMENT, NOT BY ASSERTION. W1-T2474 refused to fold this in
+    because "a shard that edits the very records its own gate reads is the shape rule 15 exists to
+    refuse" — true of a WORKER-authored implement diff. The sanctioned instrument for exactly this is
+    the plan-only, human-ratified PR the file header already describes for `satisfied_by` and
+    `origin:`. This task rides that lane and no other.
+
+    RISK BAND IS SPAN. `files:` spans the monolith, the shard set and the test's own stem, so Rule 19
+    refuses medium on the count alone. The change itself adds one field and prose per adjudicated
+    record and perturbs no predicate.
+  design: |
+    (i) BUILD THE DOCKET FROM THE LOADED PLAN, NEVER FROM GREP. Enumerate every task with
+    `status === "blocked"` and no `retirement:` over the merged monolith-plus-shards view (W1-T2634's
+    check produces this list if it has landed; if it has not, derive it the same way — do not wait on
+    it, and do not substitute a text search, which understated the population by two thirds once
+    already per W1-T391's note).
+
+    (ii) ADJUDICATE EACH RECORD INDIVIDUALLY, ON WHAT THE RECORD ITSELF STATES. A retirement is
+    recognisable from the record's own explicit disposition — a design block that says the work is
+    not to be built and is left as a record, a superseding shard named in prose, a withdrawal
+    rationale. A WAIT is recognisable from the record stating what it is waiting FOR. Where the
+    record states neither clearly enough to rule on, it is NOT marked; an unresolved record stays as
+    it is and is named in the PR body as unresolved. Guessing is the failure mode this task exists to
+    avoid, and an honest gap is cheaper than a wrong mark.
+
+    (iii) MARK ONLY THE RETIREMENTS. Add `retirement: retired` plus one line of prose beside it
+    naming WHY, per W1-T1287 ruling (c). Change nothing else on the record: not `status:`, not
+    `acceptance:`, not `files:`, not `depends_on:`. W1-T2254 made `status` the first entry in
+    REPORTED_MERGED_FIELDS, so a status edit here would be detected and would also be wrong — these
+    records are already correctly excluded and the field adds an attribute to that exclusion rather
+    than changing it.
+
+    (iv) LEAVE THE WAITS ALONE, AND NAME THEM. The PR body lists every record deliberately left
+    unmarked with the thing it is waiting for, so the residual escalation is legible as correct
+    rather than as leftover noise. W1-T391 and W1-T10 are the two the record already names; the pass
+    is expected to find others and must not force them.
+
+    (v) THE PROOFS ARE PROPERTIES OVER THE LOADED PLAN, NOT AN INVENTED DIALECT. W1-T391 records that
+    a first pass wrote `operator ruling:` proofs and that proof-dialect correctly refused them —
+    there is no such dialect. What is testable is the OUTCOME: the adjudicated tombstones carry the
+    field, the adjudicated waits do not, and the exclusion semantics are unmoved.
+
+    NOT IN SCOPE: any predicate, any enum member, any schema change, any change to the census or the
+    dispatch filter (both shipped with W1-T2474), and the `declared-scope` exemption itself (W1-T2481).
+  acceptance:
+    - claim: "every record this pass adjudicated as retired carries a retirement ruling, measured over the loaded plan rather than over file text"
+      proof: "unit test: test/every-tombstone-names-its-disposition.test.ts"
+    - claim: "the records adjudicated as waiting still carry NO retirement ruling — the falsifier proving the pass adjudicated per record rather than blanket-marking the bucket, with the known counter-examples named"
+      proof: "unit test: test/every-tombstone-names-its-disposition.test.ts"
+    - claim: "no task's status, acceptance, files or depends_on changed in this pass — only the retirement field and prose beside it"
+      proof: "unit test: test/every-tombstone-names-its-disposition.test.ts"
+    - claim: "the blocked exclusion is unmoved — a blocked task carrying the field and one without it are still refused dispatch identically"
+      proof: "unit test: test/every-tombstone-names-its-disposition.test.ts"
+    - claim: "the starvation census after this pass reports as recoverable only records that are genuinely waiting on a human, and reports no recoverable blocker for a queue whose remaining blockers are all retired"
+      proof: "unit test: test/every-tombstone-names-its-disposition.test.ts"
+    - claim: "no id was deleted and no record became unresolvable, so no trailer degrades to a bare body claim"
+      proof: "unit test: test/every-tombstone-names-its-disposition.test.ts"
+  note: |
+    verify: human IS LOAD-BEARING, NOT DECORATIVE, and it is the same construction W1-T391 uses for
+    the same reason: `isDispatchEligible` refuses a non-auto task before the linter is consulted, so
+    this cannot be handed to a worker who would infer rulings from prose — which is the specific
+    failure that withdrew W1-T391's first implementation. Do not flip it to auto to make it
+    dispatchable.
+
+    budget_usd 20.00 IS NOMINAL. A verify:human task is never auto-dispatched, so the figure is a
+    tripwire shape rather than an allowance, carried for schema completeness.
+
+    ISSUE #3207 WILL NOT GO TO ZERO, AND THAT IS THE CORRECT OUTCOME. If every remaining blocked
+    record after this pass is one a human genuinely must act on, the escalation should keep naming
+    them — that is the detector working. A pass measured by whether the issue closes would be
+    optimising for silence, which is how the original bound came to fire on a healthy condition in
+    the first place.
+
+    SEQUENCING WITH W1-T2634 IS SOFT, DELIBERATELY. W1-T2634 makes the docket derivable and keeps it from
+    regrowing, so running it first is the convenient order — but it is NOT a hard edge here, because
+    hitching the step that actually quiets the escalation to a linter change would strand it if that
+    change stalls. The hard edge is W1-T2481 alone, and that one is unavoidable rather than chosen.
+  queue_note: |
+    NOT PROMOTED. Filed as a shard and therefore sorted after every tasks.yaml entry; position is the
+    operator's dial. Note that shard position matters less than usual here — verify:human means the
+    drain will refuse it regardless, so this task is picked up by an operator, not by a queue.

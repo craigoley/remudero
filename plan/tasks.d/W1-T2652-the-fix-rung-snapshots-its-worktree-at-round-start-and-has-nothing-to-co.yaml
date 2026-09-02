@@ -1,0 +1,140 @@
+- id: W1-T2652
+  title: "THE FIX RUNG SNAPSHOTS ITS WORKTREE AT ROUND START AND HAS NOTHING TO COMPARE ROUND 1 AGAINST — a worktree that arrives already carrying staged content nobody in the session authored is captured, ignored, and then committed by the rung's own terminal act; take the BIRTH snapshot at materialization so a pre-first-turn deviation is a named, escalated, never-committed condition"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: |
+    OBSERVED (follow-up harvest from W1-T2516, run DAEMON-1788192519316, PR #3409): a stray STAGED
+    revert of commit 9312f018's three-line fix was sitting uncommitted in the worker's worktree AT
+    ROUND START, and the worker states it came from no command it ran that session. The harvest's own
+    ask is the right one and this task is its answerable half: if some other process is writing into a
+    run's worktree, that must stop being an anecdote a worker happens to notice.
+    RENDERS, NEVER SENSES — every input already exists. `captureWorktreeSnapshotViaGit`
+    (src/run-task.ts, W1-T1284) already reads exactly the three fields this needs — `git status
+    --porcelain=v1 -z --no-renames`, `git diff --no-ext-diff --binary HEAD`, and a sha256 over every
+    untracked file's own bytes — and `runFixRung` already calls it through `deps.captureWorktreeSnapshot`
+    at the TOP OF EVERY ROUND, before the pre-strike gate. No new sensor is proposed and none is needed.
+    THE GAP IS THE COMPARISON, NOT THE CAPTURE, and it is a documented contract rather than a bug.
+    `unchangedTreeStandDownReason` opens `if (!previousFailure) return undefined; // first round, or
+    the prior capture was unreadable`, and `runFixRung` sets `lastGateSnapshot` only AFTER that check.
+    So round 1's snapshot is taken, recorded for round 2, and never compared to anything. Its own suite
+    pins this deliberately — `test/fix-rung-unchanged-tree-stand-down.test.ts` carries
+    "a FIRST round (no prior failure recorded) is never a match, no matter the snapshot". That
+    contract is CORRECT for its own purpose (never stand down for lack of a comparison) and it is
+    precisely why an already-dirty birth state is invisible: there is no baseline, so there is no
+    deviation to see.
+    A BIRTH BASELINE IS MECHANICALLY AVAILABLE, which is what makes this a decidable signal rather than
+    a heuristic. `createFixRungWorktree` (src/run-task.ts) runs exactly three commands — `git fetch
+    origin --quiet`, `git worktree add <path> origin/<branch>`, then `git checkout -B <branch>
+    origin/<branch> --no-track`. Both of the last two reset index AND working tree to that commit, so a
+    freshly materialized fix-rung worktree is byte-clean with respect to its own HEAD BY CONSTRUCTION.
+    A non-empty snapshot taken at that instant, or a round-1 snapshot that differs from it before any
+    worker turn has run, is not a judgement call — it is content the harness did not put there.
+    THE HARM IS CERTAIN, NOT SPECULATIVE, and it is what the harvest names. The output contract's
+    terminal act is "stage the changed file(s) and commit" (src/lib/compaction.ts), and `git commit`
+    commits THE INDEX — so pre-existing staged content rides into the rung's own commit and onto the PR
+    branch whatever the worker itself touched. The observed artifact was a revert of a merged fix.
+    W1-T142 (queued, unbuilt) guards the PUSH by DECLARED-FILE SCOPE, so a revert of a file the task
+    legitimately declares passes that guard untouched. The two are complementary, not duplicative.
+    THE SIBLING ASYMMETRY IS THE ARGUMENT FOR THE DISPOSITION. `branchAuthorshipStandDownReason`
+    (W1-T296) already detects a live head this invocation did not produce and ESCALATES rather than
+    ledgering silently, on the stated ground that it "carries an operator-decidable question (yield, or
+    confirm the takeover)". A foreign WORKING TREE carries the same question plus a destructive default,
+    and today has no detector at all: the rung watches who moved its BRANCH and is blind to who edited
+    its CHECKOUT.
+    NOT A RE-DECISION OF P62. P62 (active, PROPOSED rank 3) refuses a duplicate `run-<taskId>-*` spawn
+    while an earlier run is live, and its own worker-side witness is this same family — "multiple
+    `sweep-W1-T2491-*` worktrees ... simultaneously checked out to the same branch and raced concurrent
+    commits/pushes onto it" and "another process wrote two commits to this same branch/worktree". P62
+    would remove ONE candidate producer and would still have left this event unnamed and uncounted.
+    This task is deliberately NOT dependent on it: the gate must report whatever is true today, and a
+    hard edge onto an unratified proposal would strand it (the W1-T177 stranding lesson).
+    WHAT IS NOT ESTABLISHED, STATED RATHER THAN GUESSED: the harvest line does not establish WHICH
+    process wrote the index, and this task mints no culprit. That is the point — the row it adds is the
+    first artifact from which the question is answerable at all.
+  design: |
+    ONE SITE, ONE INVARIANT: a fix-rung worktree is byte-clean at birth, and any deviation observed
+    BEFORE the first worker turn of round 1 is FOREIGN.
+    (i) BIRTH CAPTURE. Immediately after `createFixRungWorktree` returns — before any settings are
+    rendered and before any spawn — capture a snapshot with the SAME reader the rung already uses
+    (`captureWorktreeSnapshotViaGit`), and thread it into `runFixRung` as the round-1 baseline. VERIFY
+    the exact wiring points from source first (`dispatchFix`'s materialization site, and `runFixRung`'s
+    two live `deps.captureWorktreeSnapshot` call sites at the run-loop and sweep entries) — distrust
+    this note, the line numbers WILL have moved.
+    (ii) ROUND-1 COMPARISON. `unchangedTreeStandDownReason`'s `previousFailure` contract is UNCHANGED;
+    this adds a SEPARATE, pure reason source composed into the SAME `fixRungStandDownReason` gate
+    (never a parallel early return — the composition discipline W1-T296/W1-T1278/W1-T1284 already
+    follow). It fires only on round 1 and only against the birth baseline. From round 2 on, the
+    existing unchanged-tree logic owns the comparison and is untouched.
+    (iii) DISPOSITION — ESCALATE, DO NOT COMMIT. The round does NOT spend a strike, does NOT spawn, and
+    does NOT commit or push; it ledgers `rung.foreign_tree` and escalates, mirroring the `foreignHead`
+    branch's shape rather than inventing a second one. The escalation names the observed condition and
+    asks the operator's decidable question (adopt this content, or discard it), because the harness
+    cannot know which is correct.
+    (iv) ATTRIBUTION IS BOUNDED AND OBSERVED-ONLY (the W1-T186 emitter discipline). The row carries the
+    porcelain paths, staged-versus-unstaged per path, a diffstat, and the OTHER worktrees git currently
+    registers on the same branch — the last read through the EXISTING `git worktree list --porcelain`
+    reader in src/lib/worker.ts, never a second spelling. It names no writer it did not observe.
+    (v) FAIL TOWARD RUNNING. An absent, unreadable, or throwing birth capture yields NO foreign-tree
+    claim and the rung proceeds exactly as today — the same direction `worktreeSnapshotsEqual` already
+    documents ("a read failure can only ever cause the caller to spend the strike, never to silently
+    withhold one"). A guard that refuses on an unreadable read would stall the fix lane fleet-wide,
+    which is a worse failure than the one being closed.
+    (vi) NEVER MUTATE. No `reset`, `checkout`, `stash`, `clean` or discard on this path. The tree is
+    evidence; a guard that repairs a tree it does not understand is exactly the destructive direction
+    W1-T142's own reset-soft near-miss records.
+    (vii) SCOPE FENCE, DELIBERATE. The IMPLEMENT path (`runTask`'s `worktreeAdd` materialization) has
+    neither a per-round gate nor an existing capture call, so covering it would be a second mechanism
+    at a second site. It is a SEPARATE successor filing, to be made on evidence rather than
+    anticipation, and is named here so it is not lost.
+  acceptance:
+    - claim: "a fix-rung round 1 whose worktree already differs from its BIRTH snapshot — content present before the first worker turn — stands down and escalates instead of spending a strike; FALSIFIER, from source: `unchangedTreeStandDownReason` returns undefined on `!previousFailure`, a contract its own suite pins as 'a FIRST round is never a match, no matter the snapshot', so today that same worktree is snapshotted and ignored"
+      proof: "unit test: test/fix-rung-birth-snapshot.test.ts"
+    - claim: "on the foreign-tree disposition the rung makes NO commit and NO push, so pre-existing staged content cannot ride into the rung's own commit; FALSIFIER: the output contract's terminal act is 'stage the changed file(s) and commit' and `git commit` commits the INDEX, and W1-T142's scope guard passes any revert of a file the task legitimately declares"
+      proof: "unit test: test/fix-rung-birth-snapshot.test.ts"
+    - claim: "the `rung.foreign_tree` row and its escalation name ONLY observed facts — the porcelain paths, staged-versus-unstaged per path, a diffstat, and the other worktrees git currently registers on the same branch — and mint no culprit the harness did not observe"
+      proof: "unit test: test/fix-rung-birth-snapshot.test.ts"
+    - claim: "an absent, unreadable, or throwing birth capture never manufactures a stand-down — the rung proceeds exactly as it does today, the same fail-toward-running direction `worktreeSnapshotsEqual` already documents"
+      proof: "unit test: test/fix-rung-birth-snapshot.test.ts"
+    - claim: "the guard NEVER mutates the worktree it inspects — no reset, checkout, stash, clean or discard is issued on the foreign-tree path, so the evidence survives for the operator's decision"
+      proof: "unit test: test/fix-rung-birth-snapshot.test.ts"
+    - claim: "the shipped W1-T1284 contracts are unchanged — rounds from 2 on still compare against the previous same-gate snapshot, a different gate key still reads as real ground moving, and an unwired capture still spends every strike"
+      proof: "unit test: test/fix-rung-unchanged-tree-stand-down.test.ts"
+  risk: high
+  origin: feedback#followup-daemon-1788192519316-stray-staged-revert
+  plan_refs: ["§3", "§4A", "P62", "W1-T1284"]
+  files: [src/run-task.ts, test/fix-rung-birth-snapshot.test.ts, test/fix-rung-unchanged-tree-stand-down.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    FILED from follow-up harvest id followup:DAEMON-1788192519316:2026-08-31T16:40:10.873Z:1 (research),
+    reported by W1-T2516's worker on PR #3409. The reporting run's exact lane is NOT established from
+    the harvest line alone — "round start" is fix-rung vocabulary, which is why this task is scoped to
+    the fix rung and why the row it adds names its lane.
+    risk:high is Rule 19's SPAN, recorded as a regrade rather than worked around, following the
+    W1-T180/W1-T446 precedent: `subsystemsOf` reads `files:` plus acceptance text and this set crosses
+    `src/run-task.ts` and `test/`, which reds the sizing check at any lower risk. The work is ONE
+    concern — make a foreign write into a run's worktree non-silent — and is not decomposable into
+    independently testable halves, so raising the grade is the honest reading, not a dodge.
+    `test/fix-rung-unchanged-tree-stand-down.test.ts` IS DECLARED ON PURPOSE and the reason is measured:
+    it is the suite that pins the round-1-never-matches contract this task builds beside, so it is the
+    suite that moves if the new reason source is composed wrongly. Declaring only the new file would
+    repeat the omission W1-T446's note records five consecutive times.
+    THE PROOFS MUST DRIVE A REAL GIT WORKTREE for the birth-capture cases, never a stubbed runner
+    alone — `captureWorktreeSnapshotViaGit`'s own suite already builds real repos and asserts real
+    `status`/`diff`/untracked behaviour, and a birth baseline proven only against a fake `git` would
+    pass while the real commands disagreed.
+    SIBLING, NOT DEPENDENCY — P62 (active, PROPOSED rank 3): its remedy (a) would refuse one duplicate
+    dispatch and would remove ONE candidate producer of a cross-worktree write; it would still leave
+    this event unnamed. No hard edge, deliberately, so an unratified proposal cannot strand a guard.
+    ADJACENT AND DISTINCT — W1-T142 (queued) guards the PUSH by declared-file scope and does not fire
+    on a revert inside those files; W1-T1129/W1-T232 concern `checkout -B` contention and the review
+    lane's own materialization, neither of which observes tree CONTENT.
+    NOT FOLDED IN, named so it is not lost: the IMPLEMENT path's materialization (`worktreeAdd` in
+    `runTask`) has no per-round gate and no existing capture call, so its birth assertion is a separate
+    successor filing to be made on evidence.
+    POSITION IS THE OPERATOR'S CALL and is not asserted here. This is appended at the tail; whether a
+    guard against silently reverting a merged fix outranks queued work is the operator's dial.

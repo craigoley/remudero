@@ -1,0 +1,134 @@
+- id: W1-T2641
+  title: "THE PROOF-DEBT PRODUCER IS AN OPT NOBODY SUPPLIES — `MeasurementCadenceReportOpts.proofDebt` has ZERO production callers, its one production call site passes four keys and none of them is this one, so seventy-nine unresolvable proofs still reach a minter only when a human types the verb; and the one predicate the opt makes MANDATORY (`shardPathFor`) resolves to an ABSOLUTE path while the anchor it feeds is documented repo-relative, a mismatch no unit test can see because every test supplies its own resolver"
+  repo: remudero
+  depends_on: [W1-T2477]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 14.00
+  files: [src/run-task.ts, src/lib/daemon.ts, test/the-proof-debt-producer-reaches-production.test.ts]
+  origin: "followup#W1-T2477"
+  plan_refs: ["W1-T2477", "W1-T2502", "W1-T2485", "W1-T1053", "§4B"]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ AT HEAD BEFORE FILING, NOT INFERRED FROM THE HARVEST LINE. W1-T2477 built the second
+    producer and its minter and deliberately excluded the wiring from its own `files:` — so the
+    module ACCEPTS `opts.proofDebt` and nothing SUPPLIES it. That is the exact defect W1-T2477 was
+    itself filed against, moved one layer out: a producer with no consumer became a consumer with
+    no producer.
+    SURFACE 1 production call sites of `runMeasurementCadenceReport` = 1 (src/run-task.ts:17229)
+    SURFACE 2 keys that call site passes = 4 (stateDir, cwd, escalate, checkoutDir)
+    SURFACE 3 production suppliers of `opts.proofDebt` = 0 (every caller is a test)
+    SURFACE 4 members named on the daemon's `measurement_cadence.ran` row = 4
+    SURFACE 5 predicates `proofQueueAuditCommand` binds on its default path = 2
+      (`resolveNameFilteredCandidates`, `pathExists`) over a merge-evidence-FILTERED population
+    SURFACE 6 mandatory fields on `opts.proofDebt` = 2 (`tasks`, `shardPathFor`); the other four
+      resolvers are optional and the verb binds none of them
+    SURFACE 7 `taskRecordPath` return shape = ABSOLUTE; `EvidenceAnchor.path` documented shape =
+      "repo-relative path to grep within" (src/lib/inbox.ts)
+
+    A SIBLING SHARD ALREADY BELIEVES THIS IS DONE, WHICH IS WHY THE GAP IS WORTH ITS OWN TASK.
+    W1-T2485's NOT-IN-SCOPE section excuses `proof-queue-audit` as "already wired by W1-T2477".
+    That is true of the OPT and false of the PRODUCTION PATH, and a scope note resting on the
+    false half is how an organ stays dark while every shard that touches it assumes otherwise —
+    the ships-unwired class MASTER-PLAN §12's rule 14 discussion names by that name.
+
+    THE ANCHOR-PATH MISMATCH IS THE PART UNIT TESTS STRUCTURALLY CANNOT CATCH, and it is the
+    reason this is not a two-line edit. `mintProofDebtProposals` writes `path: shardPath` verbatim
+    into the anchor and never inspects it — correct, it takes no opinion it was not given. Every
+    existing test supplies its own `shardPathFor`, so the shape is whatever the test chose. The
+    ONLY resolver production has is `lib/plan.ts`'s `taskRecordPath`, which anchors at
+    `dirname(planPath)` and hands back an ABSOLUTE path. Passed through unchanged, every minted
+    proof-debt proposal would carry an anchor the drift predicate cannot evaluate against the
+    ref — so either every proposal classifies not_ready on arrival (the whole family dead on
+    delivery, silently), or the anchor names a path in the ORCHESTRATOR's tree, which is the
+    W1-T501 lesson repeated in a proposal instead of a prompt. The relativisation belongs at this
+    binding, because this binding is where an absolute path first exists.
+
+    THE POPULATION IS THE VERB'S POPULATION OR IT IS NOTHING. `proofQueueAuditCommand` audits
+    `plan.tasks.filter(isOpenLintTask)` narrowed by `classifyFailingMergeEvidence` over a real
+    `git log` read, and FAILS OPEN when that read is unavailable — it prints "nothing audited this
+    run" and exits 0. The cadence must take the SAME fail direction and SKIP the producer
+    entirely, never fall back to the unfiltered open set: a wider population names tasks whose
+    debt a merge already retired, and minting a proposal for retired debt is worse than minting
+    none. Cannot-observe-the-merge-evidence means audit nothing (W1-T130's polarity), not audit
+    more.
+
+    IT COSTS NOTHING TODAY AND THAT IS MEASURED, NOT ASSUMED. `measurementCadence.escalate` ships
+    `false` in plan/policy.yaml, and `runMeasurementCadenceReport` gates BOTH mint paths on it, so
+    a wired producer reports a MEASURED clear/backlog status and touches the registry zero times
+    until an operator makes a separate, reviewed policy edit. The cadence fires at most
+    `maxPerDay` = 4 times a day. What the fire does add is real and must be bounded rather than
+    waved through: a second full-history `git log` read (`defaultMergeEvidenceLog` reads
+    `%s%x00%b%x01`, a DIFFERENT framing from the `--name-only` dump the cadence already holds for
+    verdict-calibration — whether that dump can be reparsed instead is the implementer's call and
+    must be VERIFIED from source, never assumed), plus `taskRecordPath`'s scan, which re-parses
+    the monolith and then every shard in `plan/tasks.d/` PER offending task id.
+
+    NOT IN SCOPE: changing what the audit reports (its causes, its relocated arm, its
+    exit-0-unconditionally contract — it is a REPORT, not a gate, and stays one); fixing any of
+    the unresolvable proofs, which is what the proposals it mints are FOR; the `--credited`
+    population (W1-T2280's, a different population with its own resolvers); the verb census
+    (W1-T2485); and generalising the log row itself, which is W1-T2502's whole task and is
+    composed with here rather than duplicated.
+
+    THE RISK BAND IS RULE 19's SPAN PLUS ATOMIC COUPLING, NOT BLAST RADIUS: two src stems, and the
+    invariant is UNSATISFIABLE PIECEWISE — a binding whose outcome no row names is a signal read
+    by nothing (the defect W1-T2473 and W1-T2477 both exist to refuse), and a row naming an
+    outcome nothing produces names `undefined`. One concern, two files, one guard test.
+  design: |
+    (i) ONE NAMED, INJECTABLE INPUT BUILDER, mirroring `defaultBoardReviewItems`'s own
+    reader/mapper split rather than inlining reads into the hook: an exported
+    `defaultProofDebtCadenceInput(...)` that resolves the population and the predicates and
+    returns the `opts.proofDebt` value (or `undefined`), called from
+    `buildMeasurementCadenceDaemonHooks`'s `run`. The grep-shaped call-site criterion below binds
+    to that symbol, so the wire is provable and not merely asserted.
+    (ii) BIND WHAT THE VERB BINDS, AND NOTHING MORE: `resolveNameFilteredCandidates(repoRoot, …)`
+    and `existsSync(join(repoRoot, rel))`, over the merge-evidence-filtered open+unmerged
+    population. Leave `creditedIds`/`symbolFoundAt` unbound, exactly as the verb's default path
+    does, so the cadence and `rmd proof-queue-audit` cannot report different offenders on one
+    checkout. SELF-TARGET ONLY, per this hook's own header: `repoRoot`/`config.root`, never a
+    drained target's tree.
+    (iii) `shardPathFor` = `taskRecordPath(planPath, id)` RELATIVISED against the repo root before
+    it leaves the builder, because `EvidenceAnchor.path` is repo-relative and `taskRecordPath` is
+    not. An id that resolves to nothing stays `undefined` and is simply never minted — the "no
+    predicate, no opinion" contract `ProofQueueAuditOpts` already keeps.
+    (iv) LAZY, INSIDE `run`. Nothing here may read git, the plan or the filesystem at hook
+    construction or on a tick that decides `fire: false` — the cadence's own bound is what keeps
+    this cheap, and a read hoisted to construction defeats it on every poll.
+    (v) FAIL DIRECTIONS, both stated: unreadable merge evidence ⇒ omit `opts.proofDebt` and say so
+    in the row (never a wider population); any throw inside the builder ⇒ the cadence still runs
+    its other verbs and the tick survives, matching `deps.runMeasurementCadence`'s existing
+    best-effort contract in daemon.ts.
+    (vi) THE ROW, COMPOSED NOT DUPLICATED. If W1-T2502's derived row has landed, the new members
+    are named by construction and this task adds NO hand-enumerated key; if it has not, add one
+    named key and leave it for that task's own "a member already reported by its own row is not
+    duplicated" criterion to subsume. Either way the acceptance below pins the OUTCOME being
+    recoverable from the ledger, never a particular hand-written line.
+    (vii) FILE OVERLAP IS EXPECTED AND CORRECT: this task and W1-T2502 both declare
+    src/lib/daemon.ts, so W1-T171's partition serialises them rather than co-dispatching them.
+    Whichever lands second reads the other's shape from source before editing.
+    (viii) NO POLICY EDIT. `escalate` stays whatever plan/policy.yaml says; plan/policy.yaml is
+    deliberately absent from `files:` so this wiring cannot turn writes on as a side effect of
+    turning the producer on.
+  acceptance:
+    - claim: "the daemon path actually constructs the proof-debt input and hands it to the cadence — a LIVE call site, not a tested-but-unreached builder"
+      proof: "grep: defaultProofDebtCadenceInput( in src/run-task.ts"
+    - claim: "the cadence audits the SAME open-plus-unmerged population over the SAME two predicates the verb binds, so the cadence and rmd proof-queue-audit cannot name different offenders on one checkout"
+      proof: "unit test: test/the-proof-debt-producer-reaches-production.test.ts"
+    - claim: "unavailable merge evidence SKIPS the producer entirely rather than auditing the unfiltered open population — a wider population would name debt a merge already retired"
+      proof: "unit test: test/the-proof-debt-producer-reaches-production.test.ts"
+    - claim: "every anchor path this binding produces is repo-relative, so taskRecordPath's absolute answer can never reach an EvidenceAnchor, and an unresolvable id is omitted rather than invented"
+      proof: "unit test: test/the-proof-debt-producer-reaches-production.test.ts"
+    - claim: "a tick that does not fire performs no git, plan or filesystem read for this producer — the binding is lazy inside run, never at hook construction"
+      proof: "unit test: test/the-proof-debt-producer-reaches-production.test.ts"
+    - claim: "with escalate at its shipped false the fire writes nothing to the proposal registry and still reports a measured clear or backlog rather than a bare zero"
+      proof: "unit test: test/the-proof-debt-producer-reaches-production.test.ts"
+    - claim: "a fired cadence makes the proof-debt outcome recoverable from the measurement_cadence.ran row, named exactly once rather than duplicated alongside a derived row"
+      proof: "unit test: test/the-proof-debt-producer-reaches-production.test.ts"
+    - claim: "a throw anywhere in this producer costs one logged row and never the daemon tick that hosts it, and never the cadence's other verbs"
+      proof: "unit test: test/the-proof-debt-producer-reaches-production.test.ts"
+    - claim: "no path here files a task, approves a proposal, edits an acceptance criterion, or changes what the audit reports"
+      proof: "unit test: test/the-proof-debt-producer-reaches-production.test.ts"

@@ -1,0 +1,149 @@
+- id: W1-T2615
+  title: "THREE UNQUOTED `design rule N` CITATIONS SURVIVED THE DR-N RENAME INSIDE plan/tasks.d/ — W1-T2399 cites `design rule 8`, W1-T2416 `design rule 17`, and W1-T2457's own shard `design rule 19`, each pointing at a namespace spelling that exists nowhere in the corpus, and two of the three records are queued so a dispatched worker will read the rationale and follow the dangling pointer"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  budget_usd: 5.00
+  files: [plan/tasks.d/W1-T2399-one-unreadable-protection-read-escalates-every-green-pr.yaml, plan/tasks.d/W1-T2416-a-rejected-recurrence-refiles-every-window.yaml, plan/tasks.d/W1-T2457-two-rule-namespaces-share-one-integer-range.yaml]
+  origin: architect
+  plan_refs: ["W1-T2457", "§12", "§5C"]
+  status: queued
+  attempts: 0
+  rationale: |
+    HALF ONE OF A SPLIT FILING. The follow-up W1-T2457 harvested one finding; the linter refused it as
+    ONE task and it is filed as two. This record is the PLAN-ONLY half: three prose tokens in three
+    already-authored shards. W1-T2616 is the code half (the guard that stops a fourth being minted). The
+    split is not cosmetic and is not a formality — see "WHY TWO TASKS" below, which is the correction
+    the linter forced and the one thing this pair says that the single-task draft could not.
+
+    ── CORRECTION 1: IT IS THREE UNQUOTED CITATIONS, NOT TWO ─────────────────────────────────────
+
+    A repo-wide sweep for the numbered form (`design rules? <digits>`, case-insensitive) returns FIVE
+    lines at head, ALL under `plan/tasks.d/` and NONE in MASTER-PLAN.md — the rename holds where the
+    guard reads. Split by SHAPE, which is the whole finding:
+
+      UNQUOTED — a live citation, pointing at a spelling that no longer exists:
+        W1-T2399:112  MASTER-PLAN design rule 8 already counts an infrastructure event ONCE
+        W1-T2416:63   and why design rule 17 had to be written
+        W1-T2457:60   in a file where `rule 19` otherwise means design rule 19   <- THE THIRD
+
+      QUOTED or BACKTICKED — a historical excerpt describing the pre-rename namespace, CORRECT AS IS:
+        W1-T2456:73   MASTER-PLAN's own 'design rule N' (40 citations, including a DIFFERENT
+                      'design rule 15')
+        W1-T2457:38   Unambiguous by form: `Standing rule 15` and `design rule 15` each carry a
+                      namespace word
+
+    The harvest counted citations in OTHER records and so missed the one in W1-T2457's own shard. Both
+    numbers it did name resolve cleanly: MASTER-PLAN carries `DR-8` and `DR-17` today, so the mapping is
+    mechanical and verifiable, not a judgement call. Re-measured at the head this was drafted against:
+    `DR-8`, `DR-17` and `DR-19` appear ZERO times anywhere under plan/tasks.d/, which is what makes all
+    three acceptance greps falsifiable now and satisfiable only by the edit.
+
+    ── CORRECTION 2: RULE 21 DOES NOT FORBID THIS EDIT ──────────────────────────────────────────
+
+    The harvest's phrase was that amending a merged record is Rule 21 territory. Rule 21 governs a
+    criterion added to a task whose IMPLEMENTATION merged, because MERGED is terminal and the criterion
+    would orphan. Three facts read from source say this edit is not that:
+
+      (a) All three shards read `status: queued`. The FILES are on main; the TASKS are not merged.
+          (Decorative per the tasks.yaml header — the operator re-derives real merge state before
+          editing, and the edit stands either way for the reason below.)
+      (b) The enforcing check is CLAIM-KEYED. `criterionKey` (task-linter.ts) normalises the CLAIM
+          ALONE — W1-T1098 narrowed it off claim+proof precisely so a non-contract edit stops reading
+          as an amendment. A rationale citation rewrite adds, removes and changes NO claim, so
+          `postMergeAmendmentViolations` has nothing to fire on.
+      (c) `mergedFieldChangeViolations` is `severity: "warn"`, never block, and says why in its own
+          message: a merged shard's declared fields can still be corrected (W1-T2248) — this makes the
+          correction a declared, visible act instead of a silent one.
+
+    So the constraint is narrower than "cannot touch": the correction is permitted, and owes visibility.
+    What Rule 21 DID correctly demand is that #3272 not smuggle it in — hence this record.
+
+    ── WHY TWO TASKS, AND WHY THIS HALF IS verify: human ────────────────────────────────────────
+
+    `rule15FilingViolation` (src/lib/task-linter.ts) BLOCKS a task that declares a task-record path
+    (`plan/tasks.yaml` or a `plan/tasks.d/*.yaml` shard) alongside any path outside plan scope at a
+    `verify` the operator will not be asked to judge. The single-task draft declared three shards
+    NEXT TO test/rule-citations-match-their-rule.test.ts, which is W1-T324's and W1-T369's exact
+    shape. The consequence is downstream and unfixable by the worker: `judgeReview` computes
+    `criteriaTampered = !planOnly && criterionFieldTampered(diff)` (review.ts), and `planOnly` is
+    false the instant one test file joins the diff — so the plan-only carve-out that makes a record
+    edit reviewable is GONE, and a dispatched worker gets ONE PR and cannot split it.
+
+    BE PRECISE ABOUT THE MECHANISM, because the remedy depends on it: `criterionFieldTampered` keys on
+    ADDED or REMOVED `claim:`/`proof:`/`satisfied_by:` LINES, and a pure rationale edit touches none of
+    them, so the mixed diff would probably not have tripped it. That is an argument for why the check
+    is CONSERVATIVE, not an argument for ignoring it — one stray reflow of an acceptance block inside
+    those three shards flips a green PR to an unappealable refusal, and the whole exposure disappears
+    for free by not mixing the diffs. The split is the cheap side of that trade.
+
+    verify: human on top of the split, deliberately. The split ALONE clears the linter (this half's
+    files are entirely in plan scope, so the rule cannot fire at any verify). `verify: human` is the
+    second remedy the reviewer offered and is taken because: the deliverable is three tokens; a whole
+    PR lifecycle for three tokens is the cost W1-T2471 already named; and a worker rewriting OTHER
+    tasks' records is the shape Rule 15 exists to distrust, even when the edit is provably outside the
+    criteria. THE COST IS REAL AND IS STATED: `isDispatchEligible` parks a `verify: human` task until
+    the operator acts, and W1-T2616 depends on this one — so if the operator would rather not hand-edit,
+    flip THIS record to `verify: auto` (it is plan-only; the filing rule does not fire either way) and
+    the pair proceeds unchanged. The split is what makes that a free choice instead of a rewrite.
+
+    ── WHAT IS ACTUALLY BROKEN, STATED HONESTLY ─────────────────────────────────────────────────
+
+    NOT ambiguity. W1-T2457 already measured that the collision was a HAZARD RECORD rather than a live
+    defect, and this task does not re-open that. What these three lines are is DANGLING POINTERS: a
+    reader following `design rule 8` searches the corpus and finds nothing spelled that way, because the
+    only index for that namespace is CLAUDE.md's decoding row and it maps `DR-N`. The cost is small and
+    real, and it is strictly worse here than for a merged record, because the records are QUEUED — a
+    dispatched worker will read that rationale and follow that citation.
+  design: |
+    (i) THE THREE CITATIONS BECOME `DR-N`. W1-T2399:112 `design rule 8` -> `DR-8`; W1-T2416:63
+    `design rule 17` -> `DR-17`; W1-T2457:60 `design rule 19` -> `DR-19`. Nothing else in any of the
+    three lines changes — same sentence, same meaning, a token that now resolves via CLAUDE.md's
+    decoding row and MASTER-PLAN's live `DR-N` tokens.
+
+    (ii) BINDING CONSTRAINT, VERIFY IT IN THE DIFF BEFORE PUSHING: the diff touches `rationale` prose
+    ONLY. It adds, removes, reorders and rewords NO acceptance criterion, and changes no `files:`,
+    `risk:`, `depends_on:`, `status:` or any other declared field, on any of the three records. That is
+    what keeps this a citation correction rather than an amendment, and it is why the claim-keyed
+    post-merge check stays silent. A diff that touches an `acceptance:` block has misread this task.
+
+    (iii) THE HISTORICAL RECORD IS NOT REWRITTEN — the constraint this task can most easily fail.
+    W1-T2456:73 and W1-T2457:38 QUOTE the old spelling in order to describe the namespace that had it.
+    Rewriting them to `DR-N` would make each sentence false (they document a form that no longer
+    exists, which is the point) and would erase the evidence of the defect. Leave them byte-identical;
+    criterion 4 is the executable guard on exactly that, and it matches at head, so a run that breaks
+    it breaks a proof that was already green. W1-T2456's shard is NOT in `files:` for the same reason —
+    nothing in it is to be touched. Likewise W1-T1082:56's `design rule (i)` is an entirely different
+    sense (a numbered design item inside one task's own design block) and W1-T2438:62's unnumbered
+    DESIGN RULES is generic English. Neither is in scope.
+
+    (iv) ORDER IS LOAD-BEARING. This half MUST land before W1-T2616. W1-T2616's guard asserts the corpus
+    carries no unquoted citation; if the guard lands first it lands RED, on the required `ci` context,
+    for every PR behind it. That is the whole reason the spine points this way and not the other.
+  acceptance:
+    - claim: "W1-T2399's citation resolves BY FORM — its rationale reads DR-8, the token CLAUDE.md's decoding row maps, instead of a spelling that exists nowhere in the corpus"
+      proof: "grep: DR-8 in plan/tasks.d/W1-T2399-one-unreadable-protection-read-escalates-every-green-pr.yaml"
+    - claim: "W1-T2416's citation resolves BY FORM — its rationale reads DR-17"
+      proof: "grep: DR-17 in plan/tasks.d/W1-T2416-a-rejected-recurrence-refiles-every-window.yaml"
+    - claim: "the third citation resolves too — the one in W1-T2457's own shard that the follow-up harvest did not count, because it counted citations in other records only: that rationale now reads DR-19"
+      proof: "grep: DR-19 in plan/tasks.d/W1-T2457-two-rule-namespaces-share-one-integer-range.yaml"
+    - claim: "the historical record survives the correction — W1-T2457's backticked excerpt of the old spelling is left byte-identical, so the rename cannot erase the evidence of the defect it fixed; this proof MATCHES at head and must still match after"
+      proof: "grep: design rule 15 in plan/tasks.d/W1-T2457-two-rule-namespaces-share-one-integer-range.yaml"
+  note: |
+    FILED as the ratification of the follow-up W1-T2457's own run harvested:
+    `followup:W1-T2457-1788020906446:2026-08-29T16:47:03.560Z:1` (run W1-T2457-1788020906446, PR #3272).
+    TWO of that harvest's framing claims are corrected here by measurement at head, not inherited: the
+    count is three unquoted citations rather than two (the third is in W1-T2457's own shard), and Rule
+    21 permits the correction rather than forbidding it (claim-keyed amendment check + W1-T2248's
+    ruling that a merged shard's fields stay correctable, both read from src/lib/task-linter.ts). The
+    harvest was RIGHT that #3272 should not have smuggled the edit in; it was WRONG that the edit is
+    blocked.
+    SPLIT FROM W1-T2616 under `rule15FilingViolation`: a task record plus an out-of-plan-scope path at a
+    non-human verify is refused, and the worker holding that PR could not have split it itself.
+    THE COUNT IS A MEASUREMENT WITH A DATE, NOT A CONSTANT. Five numbered mentions, three unquoted, at
+    the head this was drafted against. Re-run the sweep before editing: if the corpus has moved, the
+    line list moves with it and W1-T2616's guard is still the deliverable.
+    SIBLINGS, CITED AND NOT RE-OPENED: W1-T2457 (#3272, the rename); W1-T2456 (#3265, the
+    misattribution fix and the citation guard); §12 Standing rule 21; W1-T2248.

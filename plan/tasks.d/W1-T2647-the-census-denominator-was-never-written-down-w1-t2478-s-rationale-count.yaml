@@ -1,0 +1,145 @@
+- id: W1-T2647
+  title: "THE CENSUS DENOMINATOR WAS NEVER WRITTEN DOWN — W1-T2478's rationale counted six census suites and five under the bound, head admits FOUR, the fifth candidate (test/enforcement-data-carveout.test.ts, ~2.1s alone) straddles the 2000ms bound and the sixth was never named: ship the QUERY that enumerates the census population from the live tree and give every derived member a recorded disposition, instead of a count nobody can reproduce"
+  repo: remudero
+  depends_on: ["W1-T2478"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 100.00
+  files: [src/lib/ci-parity.ts, test/census-population-is-derived-not-counted.test.ts]
+  origin: "followup#W1-T2478-census-denominator-pr-3323"
+  plan_refs: ["W1-T2478", "W1-T2523", "P48", "§5C"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE SHARD'S OWN NUMBERS DO NOT RECONCILE WITH HEAD, AND THAT IS THE WHOLE FINDING. W1-T2478's
+    rationale records its census as bare surfaces: SURFACE 1 "census suites that walk the src
+    population = 6", SURFACE 2 "of those under a two-second per-step bound = 5", SURFACE 3 "combined
+    milliseconds of those five = 5372", SURFACE 4 "milliseconds of the one suite that bound excludes
+    = 6371". What SHIPPED admits FOUR. `src/lib/ci-parity.ts` carries exactly four entries bearing
+    `boundMs` — `census:bound-kind`, `census:catch-erasure`, `census:negative-reachability`,
+    `census:no-shallowing` — and its own header states it twice, in its own words: "`boundMs` below
+    (present ONLY on the four census entries this task adds)" and "WHY ONLY THESE FOUR, STATED AS A
+    PREDICATE SO THE LIST CANNOT DRIFT". Five were claimed under the bound; four are admitted. The
+    missing member is not recorded anywhere, and neither is the sixth.
+
+    THE FIFTH CANDIDATE IS REAL, IS CENSUS-SHAPED, AND STRADDLES THE BOUND — WHICH IS PRECISELY WHY A
+    REMEMBERED NUMBER CANNOT SETTLE IT. `test/enforcement-data-carveout.test.ts` satisfies the shipped
+    predicate's clauses (a) through (c) on inspection at head: it reads the tracked tree
+    (`deriveEnforcementDataCandidates` calls `git(["ls-files"])`), it asserts over the whole derived
+    population, and it carries reasoned baseline/exclusion tables (`ENFORCEMENT_DATA`,
+    `ENFORCEMENT_DATA_EXCLUSIONS`) whose gaps are REPORTED rather than silently passed
+    (`findUnexplainedGaps`). Clause (d) — "measures comfortably under `boundMs` when run alone" — is
+    the only clause in doubt, and at roughly 2.1 seconds against `FAST_GATE_CENSUS_BOUND_MS = 2000` it
+    is not comfortably under OR comfortably over. A candidate sitting on the line is exactly the case
+    that must be decided by a written, re-runnable derivation rather than by whichever host happened
+    to time it last.
+
+    AND THE SIXTH CANNOT BE RECONSTRUCTED FROM THE NUMBERS THAT SURVIVE. SURFACE 4 names one suite at
+    6371ms, "more than the other five together" — that is plainly not the ~2.1s candidate above, so
+    the two figures describe two different suites and neither identifies the sixth member of the six.
+    The population is unrecoverable from the record as written.
+
+    THE HOUSE HAS ALREADY RULED ON THIS EXACT CLASS, AND THE RULING IS APPLIED HERE VERBATIM RATHER
+    THAN RE-ARGUED. P48's re-founding (MASTER-PLAN's retro-proposal entry, loss established
+    2026-08-11, re-founded 2026-08-12 at `4c25957` by operator ruling) says of its own lost census:
+    "#1587 recorded OUTPUTS and never the QUERY, and its numbers did not reconcile with themselves";
+    "the PREDICATES are the durable artifact, because anyone can re-run them"; "deleting the counts
+    costs nothing while deleting the queries would have cost everything"; and, binding on any
+    re-derivation, "the fact that six can be named is a COINCIDENCE OF COUNT, not evidence of identity
+    with the census's six — no future reader may treat the two lists as the same." W1-T2478 recorded
+    six surfaces and zero queries, and its numbers did not reconcile with its own shipped table. This
+    is P48's defect one level down, inside the census that argued the fast gate's admission rule.
+
+    WHAT THIS TASK IS NOT. It is NOT a re-decision of W1-T2478. The per-step bound stays a PRIMARY
+    CONTROL, its value is untouched, and no entry is added to or removed from `FAST_GATE_STEPS` here —
+    whether the fifth candidate should be admitted, or made cheaper, is a COST argument this task
+    makes ANSWERABLE and deliberately does not settle. It is also not a second gate: the derivation
+    refuses nothing on its own.
+  design: |
+    (i) SHIP THE QUERY, NOT A COUNT. An exported census-population derivation lives beside
+    `FAST_GATE_STEPS` and `FAST_GATE_CENSUS_BOUND_MS` in `src/lib/ci-parity.ts`, stating its predicate
+    IN FULL at its definition (walks the tracked tree, filters to `test/*.test.ts`, keeps suites that
+    read the population via `git ls-files` and assert over it against a baseline/exemption table).
+    VERIFY the current `FAST_GATE_STEPS` shape, the `boundMs` field and `runPreflightFast`'s timing
+    seam from source before writing — this note is a 2026-08-31 reading and the table moves.
+
+    (ii) EVERY DERIVED CANDIDATE CARRIES A DISPOSITION AND A REASON: admitted (it appears in
+    `FAST_GATE_STEPS` with `boundMs`), over-bound (census-shaped, refused by the same bound rather
+    than by an exception written for it), or unclassified. A candidate with no disposition is a FAILURE
+    of the derivation, never a silent omission — that omission is the blind spot this task exists to
+    close, and rebuilding it one layer up would be worse than leaving it.
+
+    (iii) UNKNOWN IS A REPORTED OUTCOME. The predicate is a TEXT APPROXIMATION and must say so in the
+    same breath it states itself, the posture P48's own faces take ("this half UNDER-COUNTS and must
+    never be quoted as a closed set") and the posture W1-T2523 takes about its own heuristic. A suite
+    that walks the tree in a way this derivation does not recognise is reported UNKNOWN COVERAGE.
+
+    (iv) NO WALL-CLOCK NUMBER IS ASSERTED AS A LIVE FACT BY THIS TASK'S TESTS. `runPreflightFast`'s
+    `boundMs` comparison stays the ONLY timing judgment in the system. A unit test asserting a
+    millisecond figure would be a bound firing on a healthy condition the first time it ran on a loaded
+    host — this repo's recurring defect, and one W1-T2478 was careful to incur deliberately in exactly
+    one place. The derivation is a query over the tree, so it is deterministic and re-runnable; the
+    ~2.1s and 6371ms figures are cited as PROVENANCE in the disposition reasons, never re-asserted.
+
+    (v) ONE CENSUS PREDICATE, NEVER TWO. The derivation is exported and marked as the single
+    census-population predicate so a later consumer calls it instead of minting a rival (the W1-T246
+    reuse-the-one-predicate discipline). SEQUENCING, stated so nothing is orphaned: W1-T2523 needs the
+    same population for its change-to-suite report and declares `src/lib/ci-parity.ts` too. Whichever
+    lands FIRST owns the predicate and the second CONSUMES it — a second derivation of the same
+    population is a defect in either order, and the file overlap means these two must not run
+    concurrently (W1-T171's rule, applied by hand until it ships).
+
+    NOT IN SCOPE: the bound's value, the membership of `FAST_GATE_STEPS`, what any census suite
+    ASSERTS, and making the fifth candidate cheaper.
+  acceptance:
+    - claim: "every FAST_GATE_STEPS entry carrying boundMs is a member of the derived census population — the admitted set finally has a denominator a reader can check rather than a surface number"
+      proof: "unit test: test/census-population-is-derived-not-counted.test.ts"
+    - claim: "every derived candidate carries a disposition AND a reason; a candidate with neither FAILS rather than being silently omitted"
+      proof: "unit test: test/census-population-is-derived-not-counted.test.ts"
+    - claim: "test/enforcement-data-carveout.test.ts is NAMED by the derivation and carries an explicit disposition, so the candidate that straddles the bound is decided in writing instead of by whichever host timed it last"
+      proof: "unit test: test/census-population-is-derived-not-counted.test.ts"
+    - claim: "a census-shaped suite the derivation cannot classify is reported as UNKNOWN COVERAGE, never dropped — the blind spot is not rebuilt one layer up"
+      proof: "unit test: test/census-population-is-derived-not-counted.test.ts"
+    - claim: "the derivation claims no identity with the six of W1-T2478's rationale on a coincidence of count — the sixth member is either named by the query or recorded unrecoverable, per the P48 re-founding method"
+      proof: "unit test: test/census-population-is-derived-not-counted.test.ts"
+    - claim: "the derivation is deterministic over an unchanged tree — two calls yield the same population and the same dispositions, so it is a query anyone can re-run and not a measurement taken once"
+      proof: "unit test: test/census-population-is-derived-not-counted.test.ts"
+    - claim: "the derivation refuses nothing by itself and changes no FAST_GATE_STEPS membership — the four admitted census entries are still admitted and the per-step bound is unchanged"
+      proof: "unit test: test/census-population-is-derived-not-counted.test.ts"
+    - claim: "the predicate is stated in full at its definition and marked as the single census-population derivation, so a rival is not minted beside it"
+      proof: "grep: ONE CENSUS PREDICATE in src/lib/ci-parity.ts"
+    - claim: "removing the derivation makes the denominator assertion fail — the falsifier proving the query does the work rather than a restated count"
+      proof: "unit test: test/census-population-is-derived-not-counted.test.ts"
+  note: |
+    FILED 2026-08-31 from the W1-T2478 follow-up harvest (run W1-T2478-1788108376050, PR #3323).
+    Every fact above was re-verified at head before filing rather than inherited from the harvest
+    line: the four `boundMs` entries and the "WHY ONLY THESE FOUR" header in src/lib/ci-parity.ts;
+    `FAST_GATE_CENSUS_BOUND_MS = 2000`; W1-T2478's SURFACE 1-6 block verbatim in its shard; and
+    `test/enforcement-data-carveout.test.ts`'s `git(["ls-files"])` derivation plus its
+    ENFORCEMENT_DATA / ENFORCEMENT_DATA_EXCLUSIONS / findUnexplainedGaps tables.
+
+    SEQUENCING WITH W1-T2523, EXPRESSED AS A NOTE RATHER THAN A HARD EDGE (the W1-T233 precedent:
+    "expressed as sequencing rather than a depends_on edge ... the two are independently valuable").
+    W1-T2523 builds a change-to-suite REPORT over the same population and declares the same source
+    file; this task audits the fast gate's ADMISSION against that population, which W1-T2523 lists as
+    explicitly out of its own scope. A hard dep either way would strand one behind the other for a
+    predicate neither has built yet. What is BINDING is the one-predicate rule in design (v): the
+    second to land consumes the first's derivation and never mints a second.
+
+    depends_on is W1-T2478 alone, which is MERGED — its census entries and `FAST_GATE_CENSUS_BOUND_MS`
+    are live in src/lib/ci-parity.ts at this sha, which is also what makes the four-versus-five
+    discrepancy checkable rather than alleged.
+
+    risk:high is a RECORDED REGRADE, not blast radius. The deliverable is a derivation that refuses
+    nothing, so the honest blast radius is small — but `files:` is a src+test pair, which
+    sizingViolation refuses at risk:medium (the same band and the same reason W1-T2523 records for
+    the identical pair, citing W1-T2525). Stated here so a reader does not mistake the band for a
+    danger claim.
+
+    budget_usd is 100.00 per this file's own header doctrine — the cap is a RUNAWAY TRIPWIRE set an
+    order of magnitude above observed cost, never an allowance, and W1-T3 died blocked_budget at
+    $3.57 against a guessed $4. The sibling census shards W1-T2478 and W1-T2523 carry 14.00; that is
+    noted rather than copied, because a cap set near the work's own cost is the failure the header
+    names by name.

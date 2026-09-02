@@ -1,0 +1,89 @@
+- id: W1-T2610
+  title: "`gitPushRunBranch` cannot tell 'I pushed my commit' from 'I had nothing to push' — a rewound fix round pushes zero refs and reports success, so the push leaf must confirm the head it was told to land"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: |
+    THE DETECTION HALF of the same 2026-08-29 incident (run DAEMON-1788016810368, PR #3261): a local
+    commit went missing BETWEEN `git commit` AND `git push`, and the push raised nothing. That silence
+    is structural, not incidental.
+    VERIFIED AT SOURCE. `gitPushRunBranch` (src/lib/git-push.ts) builds
+    `git -C <worktree> push [-u] [--force] origin HEAD` and returns void. Its two fix-rung call sites
+    pass `stdio: "ignore"` (the helper's own doc names them "the two best-effort fix-rung sites"), so
+    even git's own "Everything up-to-date" is discarded. A round whose local ref was reset back to the
+    origin tip therefore pushes a ref that is ALREADY there: exit 0, nothing transferred, no output
+    read, and the rung proceeds as though its work had landed.
+    THIS IS THE CANNOT-OBSERVE-RENDERED-AS-SUCCESS POLARITY (W1-T130 / W1-T181 / W1-T119), at the
+    write side. Those tasks fixed READS that turned "I could not see it" into "it is not there"; this
+    is a WRITE that turns "I moved nothing" into "I moved what I intended". Same inversion, opposite
+    direction, and strictly worse here because the evidence is destroyed rather than merely unread.
+    THE PRECEDENT IS ALREADY IN THIS FILE AND WAS NOT EXTENDED. `gitPushEmptyCommit` in the SAME
+    module pushes `--force-with-lease=refs/heads/<branch>:<headSha>` and raises
+    `LanePushForeignHeadError`, filed against oper#lane-push-clobbered-a-shared-branch-2026-08-23
+    (PR #2668) for the neighbouring case where a lane's push silently replaced a concurrent lane's
+    work. `gitPushRunBranch` — the leaf every fix round actually pushes through — got no such
+    post-condition. The lease reasoning was correct and was applied to one of the two pushers.
+    WHY IT EARNS ITS OWN TASK RATHER THAN RIDING W1-T2609. W1-T2609 removes ONE mechanism that can rewind a
+    ref. This makes ANY future rewind — a mechanism nobody has enumerated yet, an operator's own stray
+    checkout, a reaper racing a live worktree — LOUD instead of silent. A cause fix without a detector
+    is a bet that the enumerated cause was the only one; this repo has paid for that bet before.
+  design: |
+    GIVE THE LEAF A POST-CONDITION. `gitPushRunBranch` gains an OPTIONAL expected head: the caller
+    passes the sha it believes it is landing (the fix rung already has it — it just committed). The
+    leaf resolves the worktree's HEAD before pushing, pushes, and RAISES a named error when the ref it
+    was asked to land is not the ref it landed. Omitted expected head => behaviour byte-identical to
+    today, so the seven non-fix call sites are untouched by this task.
+    REUSE, DO NOT MINT. The failure shape is `LanePushForeignHeadError`, already exported from this
+    module for precisely "the branch is not where the lane believed it was" — extend its use rather
+    than adding a second error class for the same fact. Whether the confirmation is expressed as a
+    `--force-with-lease` PRECONDITION (matching `gitPushEmptyCommit`) or as a post-push read is the
+    implementer's call FROM SOURCE, with one constraint: it must catch the ZERO-REFS-PUSHED case,
+    which a plain non-fast-forward check does NOT — the whole point is that pushing nothing is a
+    legal fast-forward.
+    STOP DISCARDING THE EVIDENCE. The two fix-rung sites pass `stdio: "ignore"`. Whatever the leaf
+    needs to decide must not depend on output it threw away; capture what it needs (the existing
+    `GitCapture` seam in this module is the shape to use) rather than widening stdio and re-litigating
+    why those sites are quiet.
+    FAIL DIRECTION: a raise parks one fix round and the level-triggered sweep re-derives it next pass.
+    Silence loses the round's entire spend AND leaves the PR looking fixed. The asymmetry is the
+    justification.
+    VERIFY FROM SOURCE FIRST (distrust this note): `gitPushRunBranch`'s current argv and options,
+    which call sites pass `stdio: "ignore"`, `gitPushEmptyCommit`'s lease construction, and
+    `LanePushForeignHeadError`'s fields. This module states that a structural test fails the build if
+    a raw inlined push reappears in src/ — keep every change inside the leaf.
+  acceptance:
+    - claim: "a push that lands ZERO refs because the local head was rewound to the remote tip RAISES with the expected and observed shas named — it does not return void, and 'nothing to push' is never reported as 'pushed'"
+      proof: "unit test: test/git-push-head-confirmation.test.ts"
+    - claim: "a push that genuinely lands the caller's committed sha returns exactly as today, and every call site that supplies no expected head is byte-identical to the pre-change behaviour"
+      proof: "unit test: test/git-push-head-confirmation.test.ts"
+    - claim: "the failure reuses the module's existing LanePushForeignHeadError rather than minting a second error class for the same fact"
+      proof: "grep: LanePushForeignHeadError in src/lib/git-push.ts"
+    - claim: "the two fix-rung call sites pass the sha they just committed as the expected head, so the confirmation is WIRED and not merely available — an unwired guard is an unbuilt one"
+      proof: "unit test: test/git-push-head-confirmation.test.ts"
+    - claim: "the confirmation does not depend on output the fix-rung sites discard — it holds with stdio ignored, asserted against those sites' own options"
+      proof: "unit test: test/git-push-head-confirmation.test.ts"
+  risk: high
+  origin: architect
+  plan_refs: ["§12", "§3", "W1-T1288", "W1-T130"]
+  files: [src/lib/git-push.ts, src/run-task.ts, test/git-push-head-confirmation.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    FILED 2026-08-30 from the same follow-up as W1-T2609
+    (followup:DAEMON-1788016810368:2026-08-29T15:50:53.273Z:0, run DAEMON-1788016810368, PR #3261).
+    W1-T2609 REMOVES THE CAUSE, THIS MAKES THE CLASS LOUD. Deliberately not folded together and
+    deliberately not hard-dep'd: either alone is worth having, and the pair is serialized by file
+    overlap on src/run-task.ts under W1-T171 rather than by a depends_on edge that would strand the
+    detector if the cause fix stalls. If both land, the incident is impossible AND observable; if only
+    this one lands, the incident is still observable, which is what the 2026-08-29 report did not have.
+    THE INHERITED SIBLING, named so it is not re-derived: `gitPushEmptyCommit` already carries the
+    lease this task asks for, filed against oper#lane-push-clobbered-a-shared-branch-2026-08-23 (PR
+    #2668). That incident's own lesson — git's non-fast-forward check "only fires when the ref EXISTS
+    and disagrees" — is why this task's first criterion targets the ZERO-REFS-PUSHED case explicitly
+    rather than trusting a fast-forward check to catch it.
+    risk:high — it edits THE single guarded push leaf every lane in the system routes through, and the
+    dangerous direction is a post-condition that misfires and parks pushes fleet-wide. The
+    unchanged-when-omitted criterion is the regression lock, not a formality.
