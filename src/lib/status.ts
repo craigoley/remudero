@@ -255,6 +255,11 @@ export interface PrRef {
    */
   headRefName?: string;
   /**
+   * The exact current head commit from the same board fetch (W1-T2727). Optional for legacy and
+   * injected rows; omitted means unknown and must never be treated as an exact-head match.
+   */
+  headRefOid?: string;
+  /**
    * The PR's raw body text (W1-T2392) — rides the SAME batched `gh pr list` fetch `title` and
    * `headRefName` already ride, at zero extra cost (see `buildBatchedGithub`'s own `prBody`
    * comment: "`body`/`headRefName`/`title`" all come off the one list call, unlike
@@ -4866,6 +4871,8 @@ export interface BatchedPr {
   url: string;
   state: string;
   headRefName?: string;
+  /** The exact current head commit; see {@link PrRef.headRefOid}. */
+  headRefOid?: string;
   body?: string;
   /**
    * GitHub's raw `autoMergeRequest` field (W1-T155): `null`/absent when auto-merge is not
@@ -5456,9 +5463,9 @@ export function buildBatchedGithub(
       // tasks stayed pinned at the head of UP NEXT until the hourly reset. See
       // state/recon-BV-console-visibility.md Q5/Q6, and lib/open-prs-rest.ts for the delta.
       //
-      // `autoMergeRequest` (W1-T155) and `title` (W1-T184) still ride along on the SAME fetch —
-      // `mapBoardPr` carries both — so the O(1)-per-projection invariant this gateway exists for
-      // is unchanged; only the transport and the re-read volume moved.
+      // `autoMergeRequest` (W1-T155), `title` (W1-T184) and `headRefOid` (W1-T2727) still ride
+      // along on the SAME fetch — `mapBoardPr` carries all three — so the O(1)-per-projection
+      // invariant this gateway exists for is unchanged; only the transport and re-read volume moved.
       let bytes = 0;
       const fetchJson = (args: string[]): unknown => {
         const raw = run(args);
@@ -5864,7 +5871,15 @@ export function buildBatchedGithub(
   };
 
   // W1-T2392: `body` rides along for the prose index — already on the row, no extra fetch.
-  const asRef = (p: BatchedPr): PrRef => ({ number: p.number, url: p.url, state: p.state, title: p.title, headRefName: p.headRefName, body: p.body });
+  const asRef = (p: BatchedPr): PrRef => ({
+    number: p.number,
+    url: p.url,
+    state: p.state,
+    title: p.title,
+    headRefName: p.headRefName,
+    ...(p.headRefOid ? { headRefOid: p.headRefOid } : {}),
+    body: p.body,
+  });
   // W1-T2387 — the COMMIT surface, memoized and lazy; mirrors {@link ghGateway}'s own fallback
   // exactly (same doc, same precedence). Built at most ONCE per gateway instance and only after a
   // task has actually missed on the body index, so a board whose PRs all carry the body trailer
