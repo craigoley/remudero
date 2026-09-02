@@ -171,10 +171,16 @@ function writeRepeatingRuleFixture(stateDir: string): void {
 
 const NO_GIT = () => ({ dump: "", ref: "test" });
 
-test("shipped plan/policy.yaml defaults the base cadence ON, read-only — the escalating form stays OFF", () => {
+test("shipped plan/policy.yaml has the base cadence ON and the escalating form ON since 2026-09-02 — both pinned", () => {
   const p = loadPolicy(policyPath(REPO_ROOT));
   assert.equal(p.values.measurementCadence.enabled, true, "the cadence itself must be safe-on out of the box");
-  assert.equal(p.values.measurementCadence.escalate, false, "the ONE write path must ship opted-in-and-off");
+  // 2026-09-02, OPERATOR RULING: the escalating form is ON. It shipped off because it is the one
+  // WRITE path, and the file asked for "a separate, reviewed policy edit" rather than a silent
+  // flip -- this pin moving is that edit, not a weakened guard. The assertion is INVERTED, never
+  // removed: an unreviewed flip back to false now reddens here exactly as a flip to true used to.
+  // What the write costs is recorded beside the value in plan/policy.yaml: an escalated rule lands
+  // a proposal in the same registry buildInboxDraftHook reads, so it becomes a draft target.
+  assert.equal(p.values.measurementCadence.escalate, true, "the ONE write path is opted in as of the 2026-09-02 ruling");
   assert.ok(p.values.measurementCadence.minIntervalMinutes > 0);
   assert.ok(p.values.measurementCadence.maxPerDay > 0);
 });
