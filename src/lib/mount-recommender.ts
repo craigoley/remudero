@@ -1,4 +1,5 @@
 import type { Mounts } from "./mounts.js";
+import { pooledPriorFor, type PoolableEvidence } from "./routing-prior.js";
 
 /**
  * THE RECOMMENDATION LEG (W1-T2575, MASTER-PLAN §9, WS-8).
@@ -265,6 +266,7 @@ function evaluateComparison(
   arms: Map<string, MountHeadroomArm>,
   mounts: Mounts,
   minSampleN: number,
+  armPassRateEvidence: PoolableEvidence[],
 ): MountRecommendationOutcome {
   const armA = arms.get(cmp.armKeyA);
   const armB = arms.get(cmp.armKeyB);
@@ -299,15 +301,29 @@ function evaluateComparison(
 
   // OUTCOME BEFORE COST (scripts/mount-headroom-sweep.mjs's own rule, restated for a
   // recommendation): a cheaper arm that also fails more often is never recommended.
-  const cheaperPassRate = cheaperArm.n > 0 ? cheaperArm.outcomes.passing / cheaperArm.n : 0;
-  const costlierPassRate = costlierArm.n > 0 ? costlierArm.outcomes.passing / costlierArm.n : 0;
+  //
+  // W1-T2576: this cell's OWN slice of an arm's history can be thin even when that SAME arm
+  // (same provider/servedModel/effort) has plenty of runs in the OTHER cells this call was handed
+  // — a rare cell type should not judge an arm purely on its own noisy few runs, any more than a
+  // newly onboarded repo should start from zero (this task's own framing, one join key up: here
+  // the pooled entity is the ARM across cells, not a repo across the fleet, because
+  // MountHeadroomArm/-Cell carry no repo dimension of their own to pool by). pooledPriorFor
+  // shrinks each arm's raw within-cell pass rate toward its own pooled-across-cells rate in
+  // proportion to how much of ITS OWN evidence this cell holds — an arm with a full sample in this
+  // cell is barely moved; an arm with almost none here rides mostly on its fleet-wide record
+  // instead of this cell's few (possibly unlucky) runs. The raw counts still drive every OTHER
+  // gate and the emitted `RecommendedArmSummary` (never overwritten) — only this comparison uses
+  // the pooled estimate.
+  const cheaperPassRate = pooledPriorFor(cheaperArm.armKey, armPassRateEvidence).estimate;
+  const costlierPassRate = pooledPriorFor(costlierArm.armKey, armPassRateEvidence).estimate;
   if (cheaperPassRate < costlierPassRate) {
     return refuse(
       cell,
       "quality-regression",
-      `${cheaperArm.armKey} is cheaper but its observed pass rate (${cheaperArm.outcomes.passing}/${cheaperArm.n}) is ` +
-        `lower than ${costlierArm.armKey}'s (${costlierArm.outcomes.passing}/${costlierArm.n}) in cell ${cell.cellKey} ` +
-        `— outcome before cost, refusing.`,
+      `${cheaperArm.armKey} is cheaper but its observed pass rate (${cheaperArm.outcomes.passing}/${cheaperArm.n}, ` +
+        `pooled-across-cells estimate ${round2(cheaperPassRate)}) is lower than ${costlierArm.armKey}'s ` +
+        `(${costlierArm.outcomes.passing}/${costlierArm.n}, pooled-across-cells estimate ${round2(costlierPassRate)}) ` +
+        `in cell ${cell.cellKey} — outcome before cost, refusing.`,
     );
   }
 
@@ -370,6 +386,25 @@ export interface RecommendMountsOptions {
   minSampleN?: number;
 }
 
+/** Pools every arm's pass rate ACROSS every cell in this same call, keyed by `armKey` — the join
+ *  key {@link evaluateComparison}'s quality-regression gate shrinks a single cell's own noisy
+ *  sample toward (see that gate's own comment for why the entity pooled here is the arm, not a
+ *  repo: these fixtures carry no repo dimension of their own). One entry's `n`/`value` is the SUM
+ *  of that armKey's `n`/passing across every cell, so an arm appearing in many cells pools its
+ *  whole cross-cell history, not just one cell's slice of it. */
+function poolArmPassRates(cells: MountHeadroomCell[]): PoolableEvidence[] {
+  const totals = new Map<string, { n: number; passing: number }>();
+  for (const cell of cells) {
+    for (const a of cell.arms) {
+      const t = totals.get(a.armKey) ?? { n: 0, passing: 0 };
+      t.n += a.n;
+      t.passing += a.outcomes.passing;
+      totals.set(a.armKey, t);
+    }
+  }
+  return Array.from(totals.entries()).map(([id, t]) => ({ id, n: t.n, value: t.n > 0 ? t.passing / t.n : 0 }));
+}
+
 /**
  * Turn `scripts/mount-headroom-sweep.mjs`'s cells into a recommendation or refusal per pairwise
  * within-cell comparison — see this module's own header for the full gate order. PURE: no I/O, no
@@ -379,6 +414,7 @@ export interface RecommendMountsOptions {
  */
 export function recommendMounts(cells: MountHeadroomCell[], mounts: Mounts, opts: RecommendMountsOptions = {}): MountRecommendationOutcome[] {
   const minSampleN = opts.minSampleN ?? DEFAULT_MIN_SAMPLE_N;
+  const armPassRateEvidence = poolArmPassRates(cells);
   const out: MountRecommendationOutcome[] = [];
   for (const cell of cells) {
     if (cell.arms.length < 2) {
@@ -394,7 +430,7 @@ export function recommendMounts(cells: MountHeadroomCell[], mounts: Mounts, opts
     }
     const arms = new Map(cell.arms.map((a) => [a.armKey, a] as const));
     for (const cmp of cell.comparisons) {
-      out.push(evaluateComparison(cell, cmp, arms, mounts, minSampleN));
+      out.push(evaluateComparison(cell, cmp, arms, mounts, minSampleN, armPassRateEvidence));
     }
   }
   return out;
