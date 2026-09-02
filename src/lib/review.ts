@@ -69,6 +69,106 @@ export function reviewInputDigest(headSha: string, body: string): string {
   return `v1:${createHash("sha256").update(encoded, "utf8").digest("hex")}`;
 }
 
+export const REVIEW_DECISION_POLICY_REVISION = "review-policy-v1";
+
+export interface ReviewDecisionDigestInput {
+  headSha: string;
+  diff: string;
+  report: string;
+  body?: string;
+  acceptance: readonly AcceptanceCriterion[];
+  declaredFiles?: readonly string[];
+  policyRevision?: string;
+}
+
+/** Content address of every material input to one review decision; model output is excluded. */
+export function reviewDecisionDigest(input: ReviewDecisionDigestInput): string {
+  const acceptance = input.acceptance.map((c) => ({
+    claim: c.claim,
+    proof: c.proof,
+    satisfied_by: c.satisfied_by ?? null,
+    holdout: c.holdout === true,
+  }));
+  const encoded = JSON.stringify({
+    version: 1,
+    policyRevision: input.policyRevision ?? REVIEW_DECISION_POLICY_REVISION,
+    headSha: input.headSha,
+    diff: input.diff,
+    report: input.report,
+    body: input.body ?? null,
+    acceptance,
+    declaredFiles: input.declaredFiles ?? [],
+  });
+  return `v1:${createHash("sha256").update(encoded, "utf8").digest("hex")}`;
+}
+
+export interface ReviewEvaluatorProvenance {
+  provider: string | null;
+  requestedModel: string | null;
+  servedModel: string | null;
+  effort: string | null;
+  sessionId: string | null;
+}
+
+export interface ReviewDecisionTerminal {
+  state: ReviewState;
+  verdict: ReviewVerdict;
+  reviewerOutcome: string;
+  evaluatorProvenance: ReviewEvaluatorProvenance;
+}
+
+export function lastReviewDecisionTerminal(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  taskId: string,
+  prUrl: string,
+  digest: string,
+): ReviewDecisionTerminal | undefined {
+  let terminal: ReviewDecisionTerminal | undefined;
+  for (const line of lines) {
+    if (line.step !== "review.posted" || line.task_id !== taskId || line.pr_url !== prUrl || line.review_decision_digest !== digest) continue;
+    const verdict = line.decision_verdict as ReviewVerdict | undefined;
+    if (!verdict || (verdict.state !== "success" && verdict.state !== "failure") || !Array.isArray(verdict.criteria)) continue;
+    terminal = {
+      state: verdict.state,
+      verdict,
+      reviewerOutcome: typeof line.reviewer_outcome === "string" ? line.reviewer_outcome : "unknown",
+      evaluatorProvenance: (line.evaluator_provenance as ReviewEvaluatorProvenance | undefined) ?? {
+        provider: null, requestedModel: null, servedModel: null, effort: null, sessionId: null,
+      },
+    };
+  }
+  return terminal;
+}
+
+export type ReviewDecisionClaim =
+  | { kind: "owned"; release: () => void }
+  | { kind: "in_flight" }
+  | { kind: "replay"; terminal: ReviewDecisionTerminal };
+
+/** Acquire-before-read closes the terminal-check/create race; a live owner makes the loser stand down. */
+export async function claimReviewDecision(opts: {
+  ledgerPath: string;
+  taskId: string;
+  prUrl: string;
+  digest: string;
+  lockOpts?: AcquireReviewStatusLockOpts;
+}): Promise<ReviewDecisionClaim> {
+  const lockPath = join(dirname(opts.ledgerPath), "review-decision-claims", `${opts.digest.replace(":", "-")}.lock`);
+  let handle: ReviewStatusLockHandle;
+  try {
+    handle = await acquireReviewStatusLock(lockPath, { timeoutMs: 0, ...opts.lockOpts });
+  } catch (error) {
+    if (error instanceof ReviewStatusLockTimeoutError) return { kind: "in_flight" };
+    throw error;
+  }
+  const terminal = lastReviewDecisionTerminal(readLedgerLines(opts.ledgerPath), opts.taskId, opts.prUrl, opts.digest);
+  if (terminal) {
+    handle.release();
+    return { kind: "replay", terminal };
+  }
+  return { kind: "owned", release: () => handle.release() };
+}
+
 /**
  * Observed outcome of executing a criterion's proof against the PR head (W1-T65,
  * ratifies P15). Recorded per-criterion on {@link CriterionVerdict} and surfaced on
@@ -8615,6 +8715,8 @@ export interface PostReviewStatusGuardedOpts {
    * PR body supply both fields so retry dedup can distinguish changed input on an unchanged sha. */
   prUrl?: string;
   reviewInputDigest?: string;
+  reviewDecisionDigest?: string;
+  evaluatorProvenance?: ReviewEvaluatorProvenance;
   /**
    * Fresh lifecycle read for THIS attempt — real callers pass
    * `() => fetchPrLifecycle(prUrl)`; tests inject a fake. Called INSIDE the
@@ -8637,6 +8739,9 @@ export interface PostReviewStatusGuardedOpts {
 
 export interface PostReviewStatusGuardedResult {
   posted: boolean;
+  conflict?: boolean;
+  replayed?: boolean;
+  effectiveState?: ReviewState;
   /** Present only when `posted` is false — either {@link decideReviewStatusPost}
    * refused the write (see `review.post_refused`), or the post itself failed
    * after retries/as a permanent error (see `review.post_failed`, W1-T135). */
@@ -8676,6 +8781,29 @@ export async function postReviewStatusGuarded(
         ? lastPostedReviewStatusForInput(lines, opts.taskId, opts.prUrl, opts.sha, opts.reviewInputDigest)
         : lastPostedReviewStatusFromLedger(lines, opts.taskId);
     const lifecycle = opts.fetchLifecycle();
+    const priorDecision = opts.prUrl !== undefined && opts.reviewDecisionDigest !== undefined
+      ? lastReviewDecisionTerminal(lines, opts.taskId, opts.prUrl, opts.reviewDecisionDigest)
+      : undefined;
+    if (!lifecycle.merged && !lifecycle.closed && priorDecision) {
+      if (priorDecision.state === opts.state) {
+        return { posted: false, replayed: true, effectiveState: priorDecision.state, reason: "terminal verdict already exists for this review decision" };
+      }
+      const reason = `contradictory ${opts.state} attempted after terminal ${priorDecision.state} for review decision ${opts.reviewDecisionDigest}`;
+      appendLedger(opts.ledgerPath, {
+        run_id: opts.runId, task_id: opts.taskId, step: "review.verdict_conflict",
+        pr_url: opts.prUrl, head_sha: opts.sha, review_decision_digest: opts.reviewDecisionDigest,
+        prior_state: priorDecision.state, attempted_state: opts.state,
+        prior_evaluator: priorDecision.evaluatorProvenance,
+        attempted_evaluator: opts.evaluatorProvenance ?? null,
+      });
+      try {
+        await post({ owner: opts.owner, repo: opts.repo, sha: opts.sha, state: "failure", description: "remudero-review: conflicting verdicts for identical decision input — operator adjudication required" });
+        return { posted: true, conflict: true, effectiveState: "failure", reason };
+      } catch (error) {
+        appendLedger(opts.ledgerPath, { run_id: opts.runId, task_id: opts.taskId, step: "review.post_failed", head_sha: opts.sha, attempted_state: "failure", review_decision_digest: opts.reviewDecisionDigest, error: String(error) });
+      }
+      return { posted: false, conflict: true, effectiveState: "failure", reason };
+    }
     const decision = decideReviewStatusPost(
       { headSha: opts.sha, state: opts.state, evidence: opts.evidence },
       prior,
