@@ -556,6 +556,7 @@ import {
   type RiskJudgeVerdict,
 } from "./lib/risk-judge.js";
 import { loadSkillRegistry, renderSkillList, skillsDir, SkillError } from "./lib/skill.js";
+import { buildBundle, renderBundle } from "./lib/bundle.js";
 import { ContainmentError, probeContainment, type ProbeExecutor } from "./lib/containment.js";
 import { IsolationError, probeIsolation, type ProbeExecutor as IsolationProbeExecutor } from "./lib/isolation.js";
 import {
@@ -33119,6 +33120,95 @@ export function learningsImportCommand(rest: string[]): number {
   return 0;
 }
 
+/**
+ * `rmd bundle export|...` — dispatches the day-one knowledge bundle verb (W1-T2580). Only
+ * `export` exists today; there is deliberately no `rmd bundle import` — the shipped `rmd
+ * learnings import <file> --pin <hash>` (W1-T425, above) already consumes a bundle this
+ * produces, since a {@link Bundle} is the exact `GlobalArtifact` shape that command already
+ * writes to the RMD-GLOBAL layer.
+ */
+export function bundleCommand(rest: string[]): number {
+  const sub = rest[0];
+  if (sub === "export") return bundleExportCommand(rest.slice(1));
+  console.error(
+    `rmd bundle: unknown subcommand '${sub ?? ""}' — usage: rmd bundle export <path>\n` + USAGE,
+  );
+  return 2;
+}
+
+/**
+ * `rmd bundle export <path>` — THE MISSING EXPORT HALF (W1-T2580): assembles this checkout's
+ * doctrine preamble, its BUDGET-SELECTED project learnings corpus (every entry's provenance
+ * intact — never filtered to `share: public`, unlike `rmd learnings export`'s §6 commons
+ * transport), and the committed worker-settings template's ASSERTED values into one
+ * deterministic, hash-pinned bundle ({@link buildBundle}, src/lib/bundle.ts) written to
+ * `<path>`. Refuses (writes nothing) when the corpus selects zero entries, a candidate matches
+ * the leak-grep tripwire, or the worker-settings template itself fails validation — every
+ * refusal is reported via the SAME {@link buildBundle} this command is a thin wrapper over,
+ * never reimplemented here.
+ *
+ * `opts.projectDir`/`opts.headSha`/`opts.settingsPath`/`opts.now` are injectable, same seam
+ * `learningsExportCommand` uses for `projectDir`/`headSha` — so a test can drive the real
+ * success path over a fixture corpus and a fixture settings template, and can assert
+ * byte-identical output across two calls by pinning `now`/`headSha` rather than reading the
+ * real clock/git history.
+ */
+export function bundleExportCommand(
+  rest: string[],
+  opts: { projectDir?: string; headSha?: () => string; settingsPath?: string; now?: () => string } = {},
+): number {
+  const out = rest[0];
+  const badArg = unknownArgError("bundle export", rest.slice(1), [], []);
+  if (badArg) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+  if (!out) {
+    console.error(`rmd bundle export: <path> is required — usage: rmd bundle export <path>\n` + USAGE);
+    return 2;
+  }
+  const settingsPath = opts.settingsPath ?? join(repoRoot, "settings", "worker.json");
+  let rawSettings: unknown;
+  try {
+    rawSettings = JSON.parse(readFileSync(settingsPath, "utf8"));
+  } catch (e) {
+    console.error(`rmd bundle export: cannot read worker-settings template ${settingsPath}: ${String((e as Error)?.message ?? e)}`);
+    return 1;
+  }
+  const entries = loadLearningsCorpus(opts.projectDir ?? projectLearningsHome(repoRoot));
+  let sourceRepo = "unknown";
+  try {
+    const { owner, repo } = resolveOwnerRepo();
+    sourceRepo = `${owner}/${repo}`;
+  } catch {
+    // no origin remote configured — provenance degrades to "unknown", never a crash.
+  }
+  const readHeadSha =
+    opts.headSha ?? (() => execFileSync("git", ["-C", repoRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).trim());
+  let sourceSha = "unknown";
+  try {
+    sourceSha = readHeadSha() || "unknown";
+  } catch {
+    // no git history readable — same degrade-to-"unknown" as above.
+  }
+  const readNow = opts.now ?? (() => new Date().toISOString());
+  const result = buildBundle(entries, rawSettings, { sourceRepo, sourceSha, exportedAt: readNow() });
+  if (!result.ok) {
+    console.error(`rmd bundle export: ${result.reason}`);
+    return 1;
+  }
+  writeFileSync(out, renderBundle(result.bundle), "utf8");
+  const n = result.bundle.entries.length;
+  console.log(
+    `### rmd bundle export — wrote ${out}: ${n} learning${n === 1 ? "" : "s"} + doctrine + worker-settings ` +
+      `conventions from ${sourceRepo}@${sourceSha.slice(0, 12)}.\n` +
+      `hash=${result.bundle.hash}\n` +
+      `Carry this file to a fresh deployment and load it via the EXISTING transport: ` +
+      `rmd learnings import ${out} --pin ${result.bundle.hash}`,
+  );
+  return 0;
+}
+
 /** `before`/`after` line for `rmd correct` — the operator-facing flip. */
 function describeProjection(label: string, proj: StatusProjection): string {
   const pr = proj.prUrl ? `${proj.prUrl}${proj.prState ? ` (${proj.prState})` : ""}` : "none";
@@ -33614,6 +33704,12 @@ const COMMANDS: readonly CommandSpec[] = [
     syntax: "rmd learnings export <out> | rmd learnings import <file> --pin <hash>",
     summary: "The knowledge-commons transport: export/import opted-in learnings, hash-pinned.",
     detail: "the §6 knowledge-commons transport (W1-T425). PRIVACY CONTRACT: export collects ONLY project-layer entries an operator stamped `share: public` (default absent = private forever) and independently refuses any candidate matching the leak-grep tripwire, naming it -- zero opted-in entries refuses rather than writing an empty bundle. `import <file> --pin <hash>` checks the bundle's own declared hash against the operator-supplied --pin before writing anything to the RMD-GLOBAL layer the injector already reads, then defers ALL tamper enforcement to that existing hash-pinned-artifact guard -- import never re-derives or re-implements the check, only places the file where it already looks",
+  },
+  {
+    name: "bundle",
+    syntax: "rmd bundle export <path>",
+    summary: "Export one hash-pinned bundle of doctrine, budgeted learnings and worker-settings conventions.",
+    detail: "the day-one knowledge bundle (W1-T2580, W1-T992's BYO-subscription consumer): assembles the two mandatory doctrine lines, the BUDGET-SELECTED project learnings corpus (DEFAULT_KNOWLEDGE_BUDGET_CHARS, every entry's provenance intact -- never filtered to `share: public`, unlike `rmd learnings export`'s separate §6 commons transport which stays banked and unchanged), and the committed worker-settings template's ASSERTED values (sandbox.enabled/failIfUnavailable/autoAllowBashIfSandboxed, sandbox.network.allowedDomains -- never its raw deny-paths) into ONE deterministic, hash-pinned bundle a fresh deployment loads via the EXISTING `rmd learnings import <file> --pin <hash>` transport (W1-T425) -- no new import path, no tokens/ledger/state/customer code ever read. Refuses (writes nothing) on zero selected entries, a leak-grep tripwire hit (naming the entry), or a worker-settings template that fails validation.",
   },
   {
     name: "trace",
@@ -34308,6 +34404,12 @@ export async function main(
   // diff-cov: process-boundary — main() CLI dispatch: process.exit(learningsCommand(rest)) cannot carry a DA hit without forking the process; learningsCommand's own logic — the export/import subcommand routing, arg validation, the privacy/tripwire refusals, and the pin-verified write — is unit-tested directly in test/learnings-commons.test.ts (same irreducible-glue shape as the sibling check-proof/emissions/ledger-grep dispatch cases).
   if (cmd === "learnings") {
     process.exit(learningsCommand(rest));
+  }
+  // diff-cov: process-boundary — same irreducible-glue shape as the `learnings` dispatch just
+  // above: bundleCommand's own subcommand routing, arg validation, and the pure-builder call are
+  // unit-tested directly in test/bundle-export.test.ts.
+  if (cmd === "bundle") {
+    process.exit(bundleCommand(rest));
   }
   if (cmd === "trace") {
     process.exit(await traceCommand(rest));

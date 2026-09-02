@@ -1,0 +1,116 @@
+- id: W1-T2613
+  title: "A ROUTED FOLLOW-UP CAN ASK FOR NOTHING BUT A DISPATCH THE DRAIN ALREADY OWNS — routeFollowupsToRegistry (src/lib/retro.ts) has exactly two refusal arms, title-dedup and type-not-plan-shaped, and neither declines an entry whose whole content is \"task X is ready, hand it off\"; MEASURED 2026-09-01 over the live 317-proposal registry, 2 such proposals are routed, one of them for W1-T2457 which the ordinary drain had already merged as #3272 and one for W1-T2482 which is still status: queued, so each was minted as a ratifiable operator decision that could only duplicate an already-filed task"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 15.00
+  files: [src/lib/retro.ts, test/followup-names-work.test.ts]
+  origin: "followup#W1-T2457-1788020906446:2026-08-29T16:31:22.354Z:1"
+  plan_refs: ["§7B", "W1-T2458", "W1-T2563", "W1-T2455"]
+  status: queued
+  attempts: 0
+  rationale: |
+    ── THE FIXTURE IS THIS TASK'S OWN PROVENANCE, AND IT IS CONSUMED ────────────────────────────
+
+    The follow-up that produced this filing reads, verbatim from the registry at
+    `state/inbox-proposals.json`:
+
+      "follow-up harvest [task]: This recon confirms W1-T2457 is ready to implement (task file
+       complete, clean worktree, no blockers) — hand off to the implement worker. — from W1-T2457"
+
+    EVERY CLAUSE IS A STATEMENT ABOUT DISPATCH STATE. It proposes no change to any file, gate,
+    doctrine or task. The task it names already existed, already carried `status: queued`, and was
+    already dispatchable. W1-T2457 then MERGED AS #3272 ($6.826) — recorded in MASTER-PLAN's retro
+    `Shipped (rule 13)` line — WITHOUT this proposal ever being ratified. The ordinary loop did the
+    only thing the entry asked for, and the proposal outlived the work by two days.
+
+    ⚠ SO THE ORIGINATING PROPOSAL IS NOT BUILDABLE AND MUST NOT BE BUILT. It is recorded here as a
+    fixture and should be rejected or retired, never filed as a task; filing "dispatch W1-T2457"
+    would re-dispatch merged work, which is the W1-T1 149x class this plan already paid for.
+
+    ── Q1. WHAT THE ROUTER ACTUALLY REFUSES, READ AT HEAD ───────────────────────────────────────
+
+    `routeFollowupsToRegistry` (src/lib/retro.ts) declines on exactly TWO arms, each naming itself
+    on its own outcome: `"title-dedup"` (mineFollowups' own `followupMatchesTitle`) and
+    `"type-not-plan-shaped"` (`FOLLOWUP_TYPE_ROUTES`, which routes research/task and declines
+    action). THERE IS NO ARM FOR "THE ENTRY NAMES NO WORK". A recon reporting queue readiness types
+    its line `task:`, `FOLLOWUP_TYPE_ROUTES` says `propose`, and it is minted.
+
+    ── Q2. THE MEASUREMENT, AND IT IS SMALL — STATED AS SMALL ───────────────────────────────────
+
+    The live registry holds 317 proposals, EVERY ONE `followup:`-prefixed (independently confirming
+    W1-T2563's same-day count of 317 against 16 board-review two days earlier). A vocabulary probe
+    over it returned SIX summary lines, and the honest split is:
+
+      2  DISPATCH REQUESTS NAMING AN ALREADY-FILED TASK — this class:
+           W1-T2457 "ready to implement ... hand off to the implement worker"
+           W1-T2482 "Implement W1-T2482 per its acceptance criteria ... ready to implement"
+      1  A LEGITIMATE ASK THAT MUST KEEP ROUTING — W1-T2470's "re-run this task's own falsifier
+         check ... the task must be closed rather than built if that's confirmed". It mentions a
+         task id AND names real work. IT IS THE CONTROL FOR CRITERION 2 AND MUST NOT BE DECLINED.
+      2  DUPLICATE research entries (W1-T2530, twice) — W1-T2455's paraphrase-blind dedup gap,
+         CITED, NOT RE-OPENED HERE.
+
+    ⚠ 2 OF 317 IS 0.6%, AND THIS RECORD DOES NOT INFLATE IT. The argument for filing is cost per
+    instance and direction of travel, not volume: `mineFollowups` has 2,115 declared entries still
+    upstream of the 317 routed, so the observed 2 is an early fraction on the same curve W1-T2563
+    measured, not a steady state.
+
+    ── Q3. THE COST IS THIS RUN ────────────────────────────────────────────────────────────────
+
+    A routed proposal is not inert. It is drafted by a bounded Architect worker (W1-T2563 measures
+    the first-draft mean at $8.52) and then presented to the operator as a ratification decision.
+    THE PROOF OF COST IS THAT THIS RECORD EXISTS: a G-17-tier Architect was spent drafting a
+    ratification candidate for a task that had already merged. Two instances is roughly two drafts
+    and two operator decisions, one of them for work that no longer exists.
+
+    ── Q4. WHY W1-T2563 DOES NOT SUBSUME THIS, PROVEN RATHER THAN ARGUED ────────────────────────
+
+    W1-T2563 owns RETIREMENT and names "the originating TASK merged" as a candidate signal. That
+    signal WOULD have retired the W1-T2457 proposal — after the draft was already paid for.
+
+    ⚠ IT CANNOT TOUCH THE SECOND INSTANCE AT ALL. W1-T2482 is `status: queued` and unmerged at
+    head, so its referent is live and the merged-referent arm never fires; that proposal will be
+    drafted and put to the operator, where approving it could only duplicate a task already in the
+    plan. SOURCE AND SINK ARE DIFFERENT ORGANS and the second fixture is the falsifier for anyone
+    later proposing to fold them.
+
+    AND THE TWO ARMS DIFFER IN HONESTY, WHICH IS THE BETTER ARGUMENT. W1-T2563's own rationale
+    concedes its signal "retires some live candidates", because a merged task can still leave real
+    follow-up work. AN ENTRY THAT ASKS ONLY FOR AN EXISTING TASK'S DISPATCH PROPOSES NOTHING, so
+    declining it cannot lose work — a strictly safer filter over its subset, which also shrinks the
+    population T2563's lossy arm must guess about.
+
+    ── THE MECHANISM IS NOT DECIDED HERE, AND MUST BE VERIFIED FROM SOURCE ──────────────────────
+
+    The available signal is that the entry names an id ALREADY PRESENT in the merged plan view and
+    asks only for its dispatch. VERIFY `loadPlan`'s merged view (tasks.yaml + tasks.d/*, W1-T122),
+    `FollowupCandidate`'s shape and the existing two-arm outcome contract FROM SOURCE before
+    designing — distrust this note. A predicate over free prose WILL misfire in both directions,
+    which is why criterion 4 requires it to say so rather than claim it does not.
+
+    NOT PROPOSED, BY SCOPE: changing `FOLLOWUP_TYPE_ROUTES`; touching `evidenceAnchors: []`, which
+    is correct by design and must never be "fixed" by synthesizing a git-grep pattern; re-opening
+    the title-dedup arm (W1-T2455's); adding a judge, a timer or pacing; and RETIREMENT of any
+    already-routed proposal, which is W1-T2563's and is cited, not duplicated.
+
+    ── RULE 19 ─────────────────────────────────────────────────────────────────────────────────
+
+    `risk: high` IS SET UP FRONT AND IS RULE 19's SPAN, NOT BLAST RADIUS. `subsystemsOf` derives one
+    module id per `files:` entry from its basename and a test's own stem counts, so `src/lib/retro.ts`
+    and `test/followup-names-work.test.ts` resolve to two distinct ids and `sizingViolation` blocks
+    any band below high. The change is one refusal arm and its outcome, additive to an existing
+    two-arm contract.
+
+  acceptance:
+    - claim: "an entry whose whole content is a dispatch request naming an already-filed task is declined, and the outcome names the arm that declined it"
+      proof: "unit test: test/followup-names-work.test.ts"
+    - claim: "an entry that mentions a task id AND names real work is still routed — the W1-T2470 re-verification control, so the arm is not a blanket decline of task-typed entries"
+      proof: "unit test: test/followup-names-work.test.ts"
+    - claim: "the decline happens at routing, before any proposal is minted, so the declined entry never reaches the registry and no draft can be spawned for it"
+      proof: "unit test: test/followup-names-work.test.ts"
+    - claim: "the arm states which live entries it wrongly declines rather than claiming none"
+      proof: "unit test: test/followup-names-work.test.ts"

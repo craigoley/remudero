@@ -1423,9 +1423,9 @@ export interface DaemonDeps {
    */
   sleepUntilSweepWake?: (ms: number) => Promise<void>;
   /**
-   * W1-T2568: acknowledge one durable event wake immediately before the ordinary full-sweep
-   * gate. Called only after STOP/PAUSE allow reconciliation, so a held daemon leaves the marker
-   * for resume or restart. This module remains filesystem-free; production injects the claim.
+   * W1-T2656: acknowledge one durable event wake only after the ordinary full-sweep liveness
+   * gate accepts a pass. STOP/PAUSE or a still-settling prior pass leaves the marker for a later
+   * accepted pass. This module remains filesystem-free; production injects the claim.
    */
   acknowledgeSweepWake?: () => void;
   /**
@@ -2102,6 +2102,11 @@ async function runGatedSweep(
     log("daemon.sweep.skipped_concurrent", { reason: "a previous sweep pass is still executing" });
     return;
   }
+  // W1-T2656: claim a durable GitHub-event wake only after the liveness gate accepts this
+  // pass. A marker received after an earlier pass was abandoned-but-still-running belongs to
+  // the later pass that actually starts; consuming it before this check erased that intent when
+  // W1-T2582 correctly declined the overlapping attempt.
+  deps.acknowledgeSweepWake?.();
   if (liveness) liveness.inFlight = true;
   const stopSweepTicker = startInFlightTicker(deps, pollIntervalMs, log, "sweep", diskHeadroomLatch, undefined, headroomSampler).stop;
   try {
@@ -3107,9 +3112,6 @@ export async function runDaemon(
       // stale verdict is never suppressed by running it: `return summary("stale", ...)` below
       // still fires unconditionally afterward (design (iii): the restart stays).
       if (deps.sweep) {
-        // W1-T2568: acknowledge only inside, and immediately before, the existing full-sweep
-        // gate. A fallible operation cannot claim durable work and then fail before reconciling.
-        deps.acknowledgeSweepWake?.();
         sweepRetriggerState.lastRunAtMs = now().getTime();
         await runGatedSweep(deps, pollIntervalMs, sweepWallClockBoundMs, log, diskHeadroomLatch, headroomSampler, sweepLiveness);
       }
@@ -3169,9 +3171,6 @@ export async function runDaemon(
     // `sweepRetriggerState.lastRunAtMs` is updated here too, so a retrigger's own elapsed-time
     // check (below, in `startInFlightTicker`) measures from whichever call actually ran last.
     if (deps.sweep) {
-      // W1-T2568: STOP/PAUSE have allowed work. Claim the durable event marker at the last
-      // possible moment before this SAME level-triggered sweep; the event changes no policy.
-      deps.acknowledgeSweepWake?.();
       sweepRetriggerState.lastRunAtMs = now().getTime();
       await runGatedSweep(deps, pollIntervalMs, sweepWallClockBoundMs, log, diskHeadroomLatch, headroomSampler, sweepLiveness);
     }

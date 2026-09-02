@@ -1,0 +1,127 @@
+- id: W1-T2640
+  title: "§2 IS THE PLAN-FORMAT CONTRACT AND IT DOCUMENTS A FORMAT THE GATE NOW REFUSES — it names only plan/tasks.yaml while triage and the linter both REQUIRE a new task to be its own plan/tasks.d/ shard, so 773 of ~1042 task records live in a form the contract never describes; amend §2 to state the sharded form and the merge/duplicate rule, and pin it with a plan/claims.yaml assertion so it cannot rot back"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 14.00
+  files: [MASTER-PLAN.md, plan/claims.yaml, test/claims-check.test.ts]
+  origin: "followup#W1-T2477-1788105355034"
+  plan_refs: ["§2", "§12A", "§5C"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED AT HEAD, NOT INFERRED. Every figure below was read from the tree while filing.
+
+    SURFACE 1 mentions of `tasks.d` inside MASTER-PLAN §2 (lines 4024-4076) = 0
+    SURFACE 2 mentions of `tasks.d` anywhere in MASTER-PLAN.md = 11 (all in NET STATE / SHIPPED /
+              proposals; none in the format contract)
+    SURFACE 3 occurrences of the word `monolith` in MASTER-PLAN.md = 0
+    SURFACE 4 `- id:` records in plan/tasks.yaml = 269
+    SURFACE 5 shard files under plan/tasks.d/ = 773
+    SURFACE 6 occurrences of `kebab-slug` in MASTER-PLAN.md = 0
+    SURFACE 7 claims in plan/claims.yaml mentioning shards or the plan format = 0
+
+    THE CONTRACT AND THE GATE DISAGREE, AND ONLY THE GATE IS ENFORCED. §2 shows exactly one machine-
+    state block, `# plan/tasks.yaml (schema v1)`, and its write-discipline paragraph names
+    `tasks.yaml` alone. The machine requires the opposite: `src/lib/triage.ts` instructs that a NEW
+    task MUST be created as its own `plan/tasks.d/` shard and that a filer must NEVER append a new
+    task to the monolith, and `src/lib/task-linter.ts` FAILS a new task filed into `plan/tasks.yaml`
+    with a message telling the author to create the shard instead. So a reader who grounds on the
+    plan's own format section learns a filing home the plan gate refuses, and the refusal is the
+    only place that rule is written down.
+
+    THIS IS WHY THE HARVEST KEEPS RECURRING. NET STATE records `plan/tasks.yaml` and
+    `plan/tasks.d/*.yaml` disagreeing about which tasks EXIST as harvest (a), asked a FOURTEENTH
+    cycle, and P49's R24 update names the same shape one level up: the plan disagreeing with itself
+    in a way only the machine-readable half resolves. The question cannot be closed by any single
+    run because the contract it would be checked against does not describe the second surface —
+    every reader, including the run that filed this task, re-derives the sharding rules from source.
+
+    THE EXISTENCE HALF IS ALREADY GUARDED, AND SAYING SO IS PART OF THE DELIVERABLE. `loadPlan`
+    parses the monolith, merges every shard, and throws `duplicate task id` across the MERGED view,
+    so one id cannot be declared on both surfaces — verified by reading the loader, and by the
+    control case this task was filed from: W1-T2473 and W1-T2477 each resolve in exactly one shard
+    and appear zero times in the monolith. That fact belongs in §2 rather than in a loader comment,
+    because its absence is what makes the harvest re-askable: a reader cannot tell a guarded
+    invariant from an unchecked hope.
+
+    NOT A DOC-TIDYING TASK — IT IS THE AWARENESS LAYER APPLIED TO THE PLAN'S OWN FORMAT. §12A's
+    doctrine is that a prose claim about the system is unverifiable until a command proves it, and
+    `plan/claims.yaml` is that machine, already shipped with a runner and a falsifier fixture on
+    disk. An amendment with no assertion is precisely the prose that rots — the class P49 mines and
+    the class this section already demonstrates. So the amendment and the assertion ship together.
+
+    NOT IN SCOPE, STATED RATHER THAN OMITTED: changing ANY sharding behaviour — the loader, the
+    linter's monolith-filing refusal, the id minter and dispatch order all stay exactly as they are;
+    migrating the 269 monolith records into shards (a codemod W1-T122 already deferred); and the
+    blast radius of the duplicate-id guard, which is a different concern and is named in the note as
+    an unverified follow-up rather than smuggled in here.
+
+    THE RISK BAND IS RULE 19's #588 MERITS TEST, NOT BLAST RADIUS. Acceptance asserts ONE cross-file
+    invariant — the contract states the sharded form AND an assertion keeps that statement honest —
+    and it is unsatisfiable piecewise: an amendment with no assertion is the rot this task exists to
+    end, and an assertion with an unamended §2 fails on arrival. Atomic coupling, so risk:high with
+    the rationale recorded, never a per-file split.
+  design: |
+    (i) AMEND §2 to describe BOTH surfaces of the machine state it already claims to specify: a task
+    record lives either in `plan/tasks.yaml` or in its own `plan/tasks.d/<id>-<kebab-slug>.yaml`
+    shard holding a single-element YAML list; a NEW task goes in a shard and appending one to the
+    monolith is refused by the plan gate; `loadPlan` merges the two into one view and FAILS LOUD on a
+    duplicate id across them, which is why the two surfaces cannot disagree about which tasks exist.
+    State it in §2's own voice, beside the schema block, so the format section is self-contained.
+    VERIFY the current wording of the triage instruction and the linter's refusal message FROM SOURCE
+    before writing the paragraph — distrust this note; both are quoted here from a read taken at
+    filing time and either may have moved.
+    (ii) PIN IT with one `plan/claims.yaml` entry, using the file's existing four-field schema plus
+    `precondition_paths`. The assertion must be cheap, offline and deterministic (no network, no live
+    GitHub state) and must go RED if §2 stops naming the sharded form. Declare `MASTER-PLAN.md` in
+    `precondition_paths` — a negated grep against a missing file exits 0 and passes silently, which
+    is the fail-open hole that field exists to close.
+    (iii) The falsifier fixture proves the assertion actually fails rather than merely parsing,
+    beside the runner's existing fixtures.
+    (iv) NOTHING ELSE MOVES. No src/ change, no schema change, no behaviour change: the sharded form
+    is being DOCUMENTED, not introduced.
+  acceptance:
+    - claim: "§2 names the sharded filing home for a NEW task, so the plan's own format contract describes the surface that holds most of its records"
+      proof: "grep: kebab-slug in MASTER-PLAN.md"
+    - claim: "§2 states that appending a NEW task to the monolith is refused, so the rule the plan gate enforces is written where a reader grounds on it rather than only in a refusal message"
+      proof: "grep: NEVER append a new task to plan/tasks.yaml in MASTER-PLAN.md"
+    - claim: "§2 records that the two surfaces are merged into one view and that a duplicate id across them fails loud, so a reader can tell the guarded invariant from an unchecked hope"
+      proof: "grep: duplicate task id in MASTER-PLAN.md"
+    - claim: "a claims assertion pins the amended contract, so §2 losing the sharded form turns the claims job red instead of rotting unnoticed"
+      proof: "grep: plan-format-covers-shards in plan/claims.yaml"
+    - claim: "the new assertion is exercised by the runner's falsifier fixture — a broken assertion fails and names its claim, and a missing precondition path reports could-not-run rather than a silent pass"
+      proof: "unit test: test/claims-check.test.ts"
+  note: |
+    FILED 2026-08-31 from the follow-up harvest of run W1-T2477-1788105355034, whose research item
+    asked whether `plan/tasks.yaml` and `plan/tasks.d/` had drifted on W1-T2473/W1-T2477 per the §2
+    plan-format contract.
+
+    THE ASKED CHECK IS ANSWERED AND THE ANSWER IS CLEAN — recorded here so the next cycle does not
+    re-run it. Both ids resolve in exactly one shard each and appear ZERO times in the monolith, and
+    the duplicate-across-surfaces class is structurally impossible because `loadPlan` throws on a
+    duplicate id over the MERGED view. The residue is not drift in the DATA; it is that the CONTRACT
+    the check cites does not describe the second surface, which is what this task fixes.
+
+    depends_on IS DELIBERATELY EMPTY, and the reason matters. The claims machinery this task
+    consumes — `plan/claims.yaml` with its documented schema, `scripts/claims-check.mjs`, and
+    `test/claims-check.test.ts` — was verified PRESENT ON DISK at filing. Its plan record (W1-T29)
+    still reads `status: queued`, which is the stale-status class R16 and R32 both name, so a hard
+    `depends_on` on it would block this task forever on a record that is wrong rather than on work
+    that is missing (the W1-T75 bootstrap lesson: never gate a task behind a crediting defect).
+
+    A SEPARATE FINDING, NAMED AND NOT FILED, because it is a different concern and I verified only
+    half of it: the duplicate-id guard is loud but its failure mode is fleet-wide. `run-task.ts`
+    records verbatim that when a duplicate DID land on main, `loadPlan` refused the base tree and
+    turned the REQUIRED lint-plan check red on EVERY open PR at once — including the repair PR — and
+    the only exit was an admin merge. That was degraded for the base-ref comparison specifically;
+    whether the other `loadPlan` callers (dispatch, review criteria resolution, retro) still hard-
+    fail on one duplicate id is UNVERIFIED here. Filing it on a half-read would be exactly the P46
+    rot this repo keeps paying for, so it is named for whoever picks it up rather than smuggled into
+    this task's scope.
+
+    BUDGET: 14.00 matches the sibling shard this follow-up came from and sits well above the observed
+    cost of a docs-plus-data task. It is a runaway tripwire, not an allowance — do not lower it.

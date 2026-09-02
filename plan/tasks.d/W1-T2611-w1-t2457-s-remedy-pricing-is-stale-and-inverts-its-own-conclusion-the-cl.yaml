@@ -1,0 +1,146 @@
+- id: W1-T2611
+  title: "W1-T2457's remedy pricing is STALE and inverts its own conclusion — the CLAUDE.md cap moved 67536 -> 44000 (W1-T2507, 2026-08-31) so remedy (a) now FITS with ~1200 bytes to spare; re-derive the arithmetic in both stale shards from the live enforcer. PLAN-ONLY: rationale prose of two queued records, no code, no criteria touched"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 20.00
+  files: [plan/tasks.d/W1-T2457-two-rule-namespaces-share-one-integer-range.yaml, plan/tasks.d/W1-T2282-docs-is-the-uncovered-knowledge-corpus.yaml]
+  origin: "followup#W1-T2457-1788020906446"
+  plan_refs: ["§8A", "W1-T2457", "W1-T2282", "W1-T1234"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE FOLLOW-UP THIS RATIFIES ASKED A RESEARCH QUESTION THAT IS ALREADY ANSWERED, AND THE ANSWER
+    RETIRES W1-T2457's CONCLUSION. The harvest asked for CLAUDE.md's actual byte cap and current usage
+    "via whatever linter/script enforces it (referenced in task rationale but not located here)",
+    needed before choosing remedy (a) vs (c). Grounded at HEAD before filing:
+
+      THE ENFORCER IS LOCATED. scripts/claude-md-budget-ratchet.mjs measures Buffer.length of
+      CLAUDE.md and compares it to capBytes in scripts/claude-md-budget-baseline.json; it is wired
+      UNCONDITIONALLY into .github/workflows/ci.yml as `npm run --silent claude-md-budget-ratchet`.
+      It prints BOTH figures the follow-up wanted, in one line. It was not missing when W1-T2457 was
+      filed on 2026-08-29 either — W1-T503 built it, and its 2026-08-22 and 2026-08-28 bumps both
+      predate that filing. The recon quoted byte figures without citing the thing that enforces them,
+      which is the durable defect this task closes.
+
+      THE CAP MOVED AFTER W1-T2457 WAS WRITTEN, AND DOWNWARD. W1-T2507 LOWERED it 67536 -> 44000 on
+      2026-08-31 — the first downward move in the ratchet's history — by migrating content OUT of
+      CLAUDE.md rather than compressing what stayed (19 path-naming bullets to
+      learnings/architecture.yaml, the "Operating this host" section to docs/operator-guide.md, five
+      dated "Lessons from" sections folded topically). The baseline records the file at 42606 bytes
+      after those moves, with 44000 chosen to restore ~1400 bytes of deliberate headroom. Re-verified
+      at HEAD on 2026-09-01: capBytes is 44000, capturedAt 2026-08-31.
+
+    ⚠ SO W1-T2457's REMEDY PRICING IS FALSE AT HEAD, AND IT IS THE DECISION-DRIVING NUMBER. Its Q3
+    (shard line 80) reads: "(a) ... COST MEASURED: the minimal sentence is 182 bytes and CLAUDE.md has
+    71 free against its cap (67465 of 67536). IT DOES NOT FIT — short by 111 bytes — so it requires a
+    fold first." Against 44000/42606 the same 182-byte sentence fits with roughly 1200 bytes to spare.
+    The task's own recorded punchline — "the one that sounds smallest does not fit in the byte budget"
+    — is no longer true, and an implementer reading that rationale would choose remedy (c) (44
+    citation edits across 3 files) over remedy (a) on a retired premise.
+
+    ⚠ THIS DOES NOT RAISE THE CAP AND DOES NOT TOUCH THE OPERATOR INSTRUCTION. W1-T2457 records
+    "Raising the cap is out of scope by operator instruction". Nothing here raises it: the cap was
+    LOWERED by someone else, and the headroom appeared from content MIGRATION, not from a bump. That
+    instruction is untouched and still binding.
+
+    THE MEASURED FIGURE IS A BUMP-TIME RECORD, NOT A LIVE READ — SAID PLAINLY RATHER THAN LAUNDERED.
+    42606 comes from the baseline's bumpRationale prose on 2026-08-31. The baseline deliberately
+    stores NO measured size, because W1-T1234 established that a stored measurement goes stale on
+    every CLAUDE.md edit and reddens the gate for a reason no PR caused. So headroom is ~1394 AS OF
+    THAT BUMP and must be RE-MEASURED at implementation by running the ratchet. This task supplies the
+    corrected method and the command; it does NOT pre-decide (a) vs (c), which stays W1-T2457's
+    implementer's call on a fresh read.
+
+    A SECOND QUEUED SHARD IS STALE THE SAME WAY, AND BOTH CORRECTIONS RIDE HERE TOGETHER. W1-T2282
+    (queued, attempts 0, shard line 113) reads "injected in full on every session and measures 65324
+    bytes against a 65536-byte cap — 212 [free]". Both the cap and the size are retired. The guard
+    filed as W1-T2612 would red on W1-T2282 the moment it landed, so the two corrections must precede it
+    — which is exactly what W1-T2612's depends_on records.
+
+    WHY THIS IS PLAN-ONLY AND THE GUARD IS NOT (the split this filing exists to make). rule15FilingViolation
+    (src/lib/task-linter.ts) fires when a task declares a plan/tasks.d/ shard ALONGSIDE a path outside
+    isInPlanScope. Amending a record necessarily deletes and rewrites claim:/proof: lines, which is
+    precisely what criterionFieldTampered fires on; the reviewer's planOnly carve-out is the only
+    thing that forgives it, and one out-of-scope path (a test file) destroys the carve-out for the
+    whole PR. Every file here is under plan/, so this PR is planOnly by construction and the carve-out
+    holds. The test work lives in W1-T2612, which declares no shard at all.
+  design: |
+    ONE CONCERN: a plan record's claim about CLAUDE.md's byte budget must be derived from the enforcer,
+    never frozen into prose where it silently steers a remedy choice.
+
+    (i) CORRECT W1-T2457's Q3(a) PRICING IN PLACE. Replace the frozen "71 free (67465 of 67536) ...
+    short by 111 bytes" arithmetic with the CURRENT cap read from scripts/claude-md-budget-baseline.json
+    and an explicit instruction to re-measure via `node scripts/claude-md-budget-ratchet.mjs` (which
+    prints size AND cap together), plus the one-line statement that the (a)-does-not-fit blocker is
+    RETIRED and why (W1-T2507's downward move and content migration). Cite the ENFORCER PATH rather
+    than restating a number that will go stale the same way — that is the whole point, and a
+    correction that hard-codes 44000 into the prose reproduces the defect one cap-move later. Name
+    W1-T2507 and its date so the reader can date the change and re-derive it.
+
+    (ii) CORRECT W1-T2282's stale cap sentence the same way, pointing at the baseline as the authority
+    rather than restating 65536/65324.
+
+    (iii) RULE 15 AND RULE 21, BOTH HONOURED AND BOTH ASSERTED. W1-T2457 and W1-T2282 are QUEUED with
+    attempts 0 — zero merged PRs carry their trailers — so AMENDMENT is the correct instrument and
+    Rule 21 does not apply (the W1-T197 / W1-T175 precedent, which cleared those two for amendment and
+    blocked W1-T30 / W1-T48). This is an Architect plan-only correction of RATIONALE; NEITHER task's
+    acceptance criteria are touched. Criteria 4 and 5 pin that with a grep against surviving criterion
+    text in each shard rather than promising it in prose — and they are DELIBERATELY base-matching
+    (a preservation proof is non-discriminating by construction, W1-T273), which may cap the verdict.
+    That is harmless here and only here: a planOnly CAPPED verdict still arms under the W1-T205
+    carve-out, which is a second reason this half had to be split out rather than filed verify:human.
+
+    (iv) NOT IN SCOPE, deliberately: choosing remedy (a) or (c) for W1-T2457 (its implementer's call on
+    a fresh measurement); raising or lowering capBytes; editing CLAUDE.md itself; the namespace
+    collision W1-T2457 exists to fix; and the guard, which is W1-T2612. This task changes what W1-T2457
+    KNOWS, never what it DOES.
+
+    VERIFY FROM SOURCE before editing (distrust this note — it is a 2026-09-01 grounding): the
+    baseline's current capBytes, the ratchet's CLI output shape, the exact Q3(a) sentence in
+    W1-T2457, the cap sentence in W1-T2282, and both shards' status/attempts fields.
+  acceptance:
+    - claim: "W1-T2457's remedy-(a) pricing cites the ENFORCER SCRIPT instead of the retired 67465-of-67536 arithmetic, so an implementer re-measures rather than trusting a frozen figure"
+      proof: "grep: scripts/claude-md-budget-ratchet.mjs in plan/tasks.d/W1-T2457-two-rule-namespaces-share-one-integer-range.yaml"
+    - claim: "W1-T2457 names the change that retired the does-not-fit blocker, so the correction is datable and re-derivable rather than an unattributed edit"
+      proof: "grep: W1-T2507 in plan/tasks.d/W1-T2457-two-rule-namespaces-share-one-integer-range.yaml"
+    - claim: "W1-T2282's stale cap sentence points at the baseline as the authority rather than restating a number that goes stale on the next cap move"
+      proof: "grep: scripts/claude-md-budget-baseline.json in plan/tasks.d/W1-T2282-docs-is-the-uncovered-knowledge-corpus.yaml"
+    - claim: "W1-T2457's acceptance criteria survive the amendment — the edit touches rationale only, so Rule 15 is undisturbed and no criterion is dropped, weakened or reworded (Rule 16)"
+      proof: "grep: a colliding integer that carries no namespace word in plan/tasks.d/W1-T2457-two-rule-namespaces-share-one-integer-range.yaml"
+    - claim: "W1-T2282's acceptance criteria survive the amendment for the same reason and on the same evidence"
+      proof: "grep: the index excludes itself, so generating it does not create an entry in plan/tasks.d/W1-T2282-docs-is-the-uncovered-knowledge-corpus.yaml"
+  note: "FILED 2026-09-01 from the follow-up harvest of W1-T2457 (run W1-T2457-1788020906446). SPLIT
+    FROM A SINGLE DRAFT ON rule15-filing: the original declared both shards AND test/claude-md-cap-citations.test.ts
+    at verify:auto, which is exactly the W1-T324 / W1-T369 shape the reviewer can only refuse. The two
+    halves are W1-T2611 (this, plan-only) and W1-T2612 (the guard), with W1-T2612 depending on W1-T2611 so the
+    guard never lands against a shard this task has not yet corrected. verify:human was the other
+    sanctioned remedy and was REJECTED: it parks a mechanical prose correction on the operator and
+    forfeits the planOnly carve-out's whole purpose, when a scope split costs one extra PR and keeps
+    both halves dispatchable.
+    THE RESEARCH ITSELF IS NOT RE-FILED: the harvest asked where the enforcer is and what the cap is,
+    and grounding answered both before this task was drafted. Filing a research task to rediscover
+    that would spend a run on a settled question — the 'already decided, see §X' discipline.
+    depends_on IS DELIBERATELY EMPTY. W1-T2457 is NOT a dependency: this task corrects W1-T2457's
+    record and must be able to land BEFORE it. A hard edge would strand the correction behind the very
+    task the correction exists to inform — the stranding trap recorded on W1-T177 and W1-T128.
+    RISK REGRADED high -> medium ON A CORRECTED MEASUREMENT, and the earlier draft's sizing note was
+    simply WRONG. It claimed subsystemsOf 'derives one module id per files: entry from its basename,
+    so two shard filenames plus the test stem resolve to three distinct ids'. It does not:
+    DATA_ARTIFACT_CLASSES discounts ^plan/ paths with a .ya?ml extension from the concern tally
+    BEFORE any id is derived, so both shards contribute ZERO. This half spans no counted subsystem,
+    which puts it under Rule 19's threshold at any band — and risk:high would itself have BLOCKED,
+    since W1-T2503 refuses a newly-filed high-band task that declares no band_meaning. medium is the
+    honest band and the lint-clean one.
+    ORIGIN PREFIX FLAGGED FOR THE OPERATOR: `followup#<proposal-id>` follows the observed tolerance for
+    free-form `<kind>#<id>` origins (W1-T2457 itself carries `recon#rule-namespace-collision-2026-08-29`,
+    verified at HEAD) and the provenance check only requires origin to be non-empty. If lint-plan is
+    ever made stricter than the observed practice, swap to `architect` — the provenance is recorded
+    here either way.
+    ONE THING THIS TASK CANNOT DO, STATED RATHER THAN GLOSSED: no Bash was available at filing, so the
+    42606-byte figure is the baseline's own bump-time record, not a live measurement, and the ~1394
+    headroom follows from it. The first act of the implementing run should be to run the ratchet and
+    put the real numbers in the correction."

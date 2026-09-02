@@ -73,6 +73,7 @@ usage:
   rmd triage <feedback-id>   # The Architect intake worker: ground, research, then report, grill or propose.
   rmd skill list   # List the skill registry: every .remudero/skills/<name>.yaml entry.
   rmd learnings export <out> | rmd learnings import <file> --pin <hash>   # The knowledge-commons transport: export/import opted-in learnings, hash-pinned.
+  rmd bundle export <path>   # Export one hash-pinned bundle of doctrine, budgeted learnings and worker-settings conventions.
   rmd trace <id>   # Render the provenance chain: feedback -> proposal -> task -> run -> PR -> merge.
   rmd peek <runId> [--lines <n>] [--follow]   # Read-only tail of one run's retained output, with a LIVE/FINISHED verdict.
   rmd plan --mode=create|clarify|expand [<brief>...]   # The unified Architect PLAN skill: create, clarify or expand plan tasks.
@@ -671,6 +672,16 @@ rmd learnings export <out> | rmd learnings import <file> --pin <hash>
 ```
 
 the §6 knowledge-commons transport (W1-T425). PRIVACY CONTRACT: export collects ONLY project-layer entries an operator stamped `share: public` (default absent = private forever) and independently refuses any candidate matching the leak-grep tripwire, naming it -- zero opted-in entries refuses rather than writing an empty bundle. `import <file> --pin <hash>` checks the bundle's own declared hash against the operator-supplied --pin before writing anything to the RMD-GLOBAL layer the injector already reads, then defers ALL tamper enforcement to that existing hash-pinned-artifact guard -- import never re-derives or re-implements the check, only places the file where it already looks
+
+### `rmd bundle`
+
+Export one hash-pinned bundle of doctrine, budgeted learnings and worker-settings conventions.
+
+```
+rmd bundle export <path>
+```
+
+the day-one knowledge bundle (W1-T2580, W1-T992's BYO-subscription consumer): assembles the two mandatory doctrine lines, the BUDGET-SELECTED project learnings corpus (DEFAULT_KNOWLEDGE_BUDGET_CHARS, every entry's provenance intact -- never filtered to `share: public`, unlike `rmd learnings export`'s separate §6 commons transport which stays banked and unchanged), and the committed worker-settings template's ASSERTED values (sandbox.enabled/failIfUnavailable/autoAllowBashIfSandboxed, sandbox.network.allowedDomains -- never its raw deny-paths) into ONE deterministic, hash-pinned bundle a fresh deployment loads via the EXISTING `rmd learnings import <file> --pin <hash>` transport (W1-T425) -- no new import path, no tokens/ledger/state/customer code ever read. Refuses (writes nothing) on zero selected entries, a leak-grep tripwire hit (naming the entry), or a worker-settings template that fails validation.
 
 ### `rmd trace`
 

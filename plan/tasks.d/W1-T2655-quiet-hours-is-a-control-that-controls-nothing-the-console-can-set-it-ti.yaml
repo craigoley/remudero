@@ -1,0 +1,162 @@
+- id: W1-T2655
+  title: "QUIET_HOURS IS A CONTROL THAT CONTROLS NOTHING — the console can set it (tier:middle), the board renders it, and NO dispatch path reads it; wire it as a DISPATCH-DEFERRAL governor arm (never `checkPause`, which halts drainage too), fail-OPEN on an unreadable read, and byte-identical with the flag absent"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: |
+    VERIFIED AT SOURCE 2026-09-01, and the shape of the defect is a LIVE, REACHABLE, ARMED-LOOKING
+    CONTROL THAT CHANGES NOTHING. `state/QUIET_HOURS` is writable from the console today —
+    `panel-actions.ts:461-470` mounts `POST /v1/quiet-hours` at `tier: "middle"` ("an operator
+    preference that changes fleet behaviour", W1-T2277 cites it as exactly that precedent) — and
+    `panel-actions.ts:374` reports `quietHours` back on `GET /v1/control/status` so the shell renders
+    its button state from real flag files (W1-T153's read-back rule). But `grep isQuietHours src/`
+    returns THREE consumers and none of them is a dispatch path: the panel route that writes it, the
+    control-status route that reports it, and `status-board.ts:1208-1210`, whose latch row states the
+    consequence out loud — "quiet-hours preference is set (an optional throttle a future scheduler
+    consumer reads)". `fleet-control.ts:22-29` says the same in the module doc: the flag exists, "the
+    scheduler that reads it to throttle spawns is later work". `src/lib/daemon.ts` and `src/run-task.ts`
+    contain ZERO references to it. So an operator can toggle a middle-tier control, watch the board
+    confirm it is set, and have nothing whatsoever happen — the wrong-affordance class W1-T182 removes
+    from NEEDS ME (an action offered that the backend will not honour), here with the affordance
+    working and the BEHAVIOUR missing.
+    THE STANDING RECORD ALREADY NAMES THE GAP RATHER THAN CONTRADICTING THE FIX. DECISIONS.md's
+    overnight-posture entry is unusually careful about this: "NOTE from source (lib/fleet-control.ts:24):
+    `setQuietHours` 'only flips the flag a future consumer reads' — nothing consumes it today, so quiet
+    hours is currently a no-op in either position. The posture is recorded as intent; it is not yet an
+    enforced control." The recorded posture is RUN FREE with the flag ABSENT, and G-14 (§9) fixes quiet
+    hours as "optional/off" with "Pause (drain-and-hold) in the control set" as the real hold. Both
+    survive this task untouched, because the flag stays default-OFF and an absent marker must leave a
+    tick byte-identical — that is criterion 2, not a hope.
+    THE FOLLOW-UP'S CHEAP ROUTE IS REAL, AND THIS CANDIDATE REJECTS IT ON EVIDENCE. W1-T2519/#3419
+    genuinely did make the halt content-agnostic: `daemon.ts:1852` reads `deps.checkStop?.() ??
+    deps.checkPause?.()` and logs whatever truthy string it gets, so folding quiet hours into
+    `checkPause`'s supplier (`run-task.ts:22665`, `checkSharedPause`) would light the whole daemon up
+    with ZERO further `daemon.ts` edits. It would also be wrong. `checkPause` is read at
+    `daemon.ts:2874-2880` and `continue`s the tick BEFORE `runGatedSweep` (`:2907`, `:2966`), so a
+    "quiet" daemon performs no sweep, arms no mergeable PR, runs no fix rung and files no escalation —
+    a green PR would sit unmerged for the whole window. That is precisely the asymmetry W1-T121 exists
+    to defend ("flow control throttles intake, never drainage") and which the two governors already
+    state in their own contracts, verbatim, twice: "Never consulted from `deps.sweep`/`deps.sweepLight`
+    — drainage of already-open PRs is a separate code path this predicate is never wired into"
+    (`daemon.ts:1081-1083`, `:1128-1129`). A schedule preference must not be able to strand in-flight
+    drainage; "stranding in-flight work to save money is a worse failure than the spend itself" is the
+    same ruling one motive over.
+    THE RIGHT HOME ALREADY EXISTS AND NEEDS NO NEW DOCTRINE. `src/lib/dispatch-governor.ts`'s
+    `checkDispatchGovernors` is a pure, filesystem-free module with a discriminated
+    `DispatchGovernorVerdict` (`cost` | `queue` | `memory` | `unreadable`), a shared
+    `governorDeferPayload`, and TWO call sites per tick (tick-top and immediately before `runOne`,
+    W1-T342) — consulted by `runDaemon` and `runDrainLanes` alike so one rule lives in one place. A
+    deferral there is an in-process idle heartbeat that resumes on its own, dispatch-only by
+    construction. Quiet hours is a fourth arm of that gate, not a fourth kind of hold.
+  design: |
+    ONE ARM, ONE HOME, WIRED AT ONE CALL SITE. VERIFY every reference below from source before
+    editing — this note is a 2026-09-01 survey and line numbers drift.
+    (i) THE GATE ARM. `dispatch-governor.ts` gains `checkQuietHours?: () => QuietHoursHoldResult |
+        undefined` on `DispatchGovernorDeps` and a `{ kind: "quiet_hours"; result }` member of
+        `DispatchGovernorVerdict`, with its own `governorDeferPayload` branch. It is consulted in the
+        same chain as the existing arms, so both existing call sites (tick-top and pre-dispatch) and
+        both callers (`runDaemon`, `runDrainLanes`) inherit it with no second predicate anywhere —
+        the module's own "two copies of one rule is a defect this repo has paid for twice".
+    (ii) FAIL **OPEN**, DELIBERATELY INVERTING COST/QUEUE. A throw from `checkQuietHours` is caught and
+        DISCARDED — it never becomes `{kind: "unreadable"}` — falling through exactly as an admitting
+        reading would, mirroring `checkMemoryGovernor`'s arm verbatim and `escalate.ts:571-573`'s AWAY
+        flag ("a corrupt/unreadable state dir still fails to the SAFE default … never silently goes
+        quiet"). Cost and queue fail closed because unbounded spend and unbounded WIP are worse than
+        one held dispatch; here the worse outcome is a preference flag no one can read silently
+        halting the fleet, which is the W1-T197 relaunch-storm/W1-T249 lesson applied to a toggle.
+    (iii) THE DAEMON SIDE IS A LOG ARM AND A DEP DECLARATION, NOTHING ELSE. `DaemonDeps` declares
+        `checkQuietHours?` (optional — omitted, dispatch behaves exactly as before, the contract every
+        other guard in that file carries) and `logDispatchGovernorDefer` gains a `quiet_hours` branch
+        emitting `daemon.quiet_hours`. NO new `continue`, no new stop reason, no touch to `checkPause`,
+        `checkStop` or the sweep. The idle heartbeat and the resume-on-its-own behaviour come free from
+        the existing deferral shape.
+    (iv) THE WIRING. `run-task.ts`'s `rmd daemon` call site supplies
+        `checkQuietHours: () => isQuietHours(config.root) ? {…} : undefined`, ledgering the deferral
+        beside the existing `logCostGovernorDeferral`/`logQueueGovernorDeferral` pattern. The `rmd drain`
+        call site is DELIBERATELY NOT WIRED: an operator who typed `rmd drain` has asked explicitly, and
+        an unsupplied optional dep is a provable no-op. Whether to wire it later is a one-line decision,
+        recorded here rather than smuggled in.
+    (v) NAME THE BLOCKER (W1-T186). The verdict kind, the payload and the ledger row all say quiet
+        hours. A quiet-hours hold must never render as a cost, queue or memory deferral, and never as
+        `daemon.pause` — an operator reading the row must not have to guess which control halted them.
+    (vi) THE CONSEQUENCE STRINGS ARE PART OF THE DELIVERABLE, NOT DECORATION. `status-board.ts`'s
+        `QUIET_HOURS` latch row and `fleet-control.ts`'s module doc both currently assert the flag is
+        inert; the moment this ships, both are false, and a board that describes a live control as
+        dormant is the W1-T262/W1-T279 honesty defect on the very surface built to end it. The board row
+        states what actually happens (new dispatch deferred; drainage unaffected; in-flight completes),
+        and the module doc names `dispatch-governor.ts` as the consumer so the next reader is not sent
+        looking for a scheduler that never existed.
+    (vii) REACH IS INHERITED, NOT EXTENDED. The tick-top gate already governs the retro rung, the
+        auto-triage rung, pending kicks and `nextRunnable`; quiet hours gets exactly that reach — no
+        more, no less, and no carve-out invented here. An operator who wants a kick honoured turns the
+        toggle off, which is one already-shipped console action.
+    (viii) OUT OF SCOPE, STATED SO NOTHING IS ORPHANED: no time-window SCHEDULE (the flag is a boolean
+        latch today; a windowed schedule is policy data under P37's `plan/policy.yaml` and is a separate
+        filing); no change to escalation DELIVERY or notification quieting (that is the AWAY flag and
+        P34 clause (e)/W1-T251 — quiet hours means "do not spend", away mode means "do not wake me", and
+        conflating them is how one control ends up doing two jobs badly); no change to STOP, PAUSE,
+        `checkSharedPause`, or the sweep.
+  acceptance:
+    - claim: "with an injected quiet-hours hold the tick opens NO new run AND still runs its sweep in the same tick — dispatch is deferred, drainage is not (the W1-T121 asymmetry the two existing governors already state in their own contracts)"
+      proof: "unit test: test/quiet-hours-dispatch-gate.test.ts"
+    - claim: "with no quiet-hours hold the tick is byte-identical to today — same dispatch, no deferral, no extra ledger row — so the recorded RUN-FREE posture and G-14's default-OFF are untouched by this task existing"
+      proof: "unit test: test/quiet-hours-dispatch-gate.test.ts"
+    - claim: "a quiet-hours hold NAMES itself — its own verdict kind, its own payload and its own ledger step — and is never rendered as a cost, queue, memory or unreadable deferral, and never as `daemon.pause`"
+      proof: "unit test: test/quiet-hours-dispatch-gate.test.ts"
+    - claim: "an unreadable quiet-hours read ADMITS the dispatch (fail-open, the memory-governor arm's polarity), so a preference flag that cannot be read can never silently halt the fleet — the falsifier being a fail-closed arm that converts one filesystem hiccup into a fleet-wide hold"
+      proof: "unit test: test/quiet-hours-dispatch-gate.test.ts"
+    - claim: "a quiet-hours hold never routes through the pause path — `checkPause`, `checkStop` and the sweep gating are unchanged, and an in-flight run reaches its verdict exactly as before"
+      proof: "unit test: test/daemon.test.ts"
+    - claim: "the gate is WIRED at the real `rmd daemon` call site — an unwired gate is an unbuilt one (the W1-T51 drift class this plan has already paid for once)"
+      proof: "grep: checkQuietHours in src/run-task.ts"
+    - claim: "the status board's QUIET_HOURS latch row states the SHIPPED consequence, not the stale 'a future scheduler consumer reads'"
+      proof: "unit test: test/status-board.test.ts"
+    - claim: "fleet-control.ts's module doc no longer describes the consumer as later work and names the module that reads the flag"
+      proof: "grep: dispatch-governor in src/lib/fleet-control.ts"
+  risk: high
+  origin: "feedback#followup:W1-T2519-1788196324559"
+  plan_refs: ["§4B", "§9", "§7"]
+  files: [src/lib/dispatch-governor.ts, src/lib/daemon.ts, src/run-task.ts, src/lib/fleet-control.ts, src/lib/status-board.ts, test/quiet-hours-dispatch-gate.test.ts, test/status-board.test.ts, test/daemon.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    RATIFIED 2026-09-01 from the W1-T2519 follow-up harvest (run W1-T2519-1788196324559, PR #3419),
+    REDIRECTED at ratification rather than taken verbatim. The follow-up asked for
+    `deps.checkPause`; that route is genuinely free of `daemon.ts` edits (W1-T2519 made the halt
+    content-agnostic) and genuinely halts drainage, because `checkPause` `continue`s the tick before
+    the sweep. The redirection is recorded rather than silently applied: the ASK (quiet hours must
+    finally gate something) is honoured in full; the MECHANISM moves to the dispatch-governor seam so
+    the gate cannot strand a mergeable PR. Cost of the redirect, stated: `daemon.ts` does change (a dep
+    declaration and a log arm), so the follow-up's "zero further daemon.ts changes" property is
+    deliberately spent.
+    RULE 19 — RE-RISK TO HIGH, NOT DECOMPOSE, on the merits (the W1-T240/W1-T250/W1-T253 atomic-coupling
+    exit). The files span dispatch-governor, daemon, run-task, fleet-control and status-board, but the
+    acceptance asserts ONE invariant — quiet hours defers dispatch, only dispatch, and every surface
+    that states its consequence says so — and that invariant is UNSATISFIABLE PIECEWISE: a gate arm with
+    no wiring is unbuilt by this repo's own measured precedent (W1-T51 shipped `shippedSince` and it sat
+    unplugged for weeks while the defect it fixed kept happening), wiring with no arm has nothing to
+    call, and a consequence string edited alone would describe behaviour that does not exist. risk:high
+    also reflects the real failure direction: this adds a gate to the autonomous dispatch path, where a
+    fail-closed mistake is a silently halted fleet — which is exactly why criterion 4 (fail-OPEN) and
+    criterion 2 (byte-identical when absent) are load-bearing rather than defensive.
+    depends_on IS DELIBERATELY EMPTY. Every prerequisite is already on main and was read at source
+    before filing: `dispatch-governor.ts` with its two call sites and shared payload, `isQuietHours` /
+    `quietHoursFilePath` (fleet-control.ts:51-53, :116-118), the `POST /v1/quiet-hours` route and the
+    control-status read-back (panel-actions.ts:461-470, :374), and status-board's latch table row
+    (:1207-1210). W1-T121 is cited for its DOCTRINE, never depended on — the governor asymmetry this
+    task obeys is already written into `checkCostGovernor`/`checkQueueGovernor`'s live contracts, so a
+    hard edge onto an unbuilt task would strand this one for a property that already holds (the same
+    judgement recorded on W1-T177/W1-T178).
+    NOT A RE-DECISION OF THE OVERNIGHT POSTURE. DECISIONS.md's RUN-FREE entry is preserved by
+    construction: this host carries no `state/QUIET_HOURS` marker, and criterion 2 makes an absent
+    marker byte-identical. What the entry records as an admitted gap — "not yet an enforced control" —
+    is what this closes. Turning the toggle ON remains the operator's deliberate act, and G-14's
+    "quiet-hours optional/off, Pause in the control set" is untouched: Pause is still the emergency
+    hold, quiet hours is now an intake throttle.
+    NAMED SUCCESSOR, NOT FOLDED IN: a quiet-hours TIME WINDOW (a schedule rather than a boolean latch —
+    §9's wizard gathers quiet hours as a per-instance operator param) belongs in `plan/policy.yaml` under
+    P37's bounded-policy discipline and is a separate filing. Whether to file it is the operator's call
+    and is deliberately not smuggled into this ratification.

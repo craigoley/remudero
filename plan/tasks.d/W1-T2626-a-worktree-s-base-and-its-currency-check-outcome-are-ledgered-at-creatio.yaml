@@ -1,0 +1,106 @@
+- id: W1-T2626
+  title: "A WORKTREE'S BASE AND ITS CURRENCY-CHECK OUTCOME ARE LEDGERED AT CREATION — today only the REFUSAL is recorded, an unreadable remote head warns to console.error and proceeds silently, and the success path logs no base at all, so 'what base did this run build on' is archaeology over a sibling file that dies with the worktree"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: |
+    VERIFIED AT SOURCE, three facts that together make systemic base staleness invisible:
+      (1) THE SUCCESS PATH RECORDS NO BASE. `worktreeAdd` writes the created base to a SIBLING file
+          (`recordWorktreeBase` → `<worktreePath>.base`, deliberately outside the working tree), and
+          `removeWorktreeBase` deletes it when the worktree is reaped — its own doc says the record's
+          "lifetime is its worktree's". The dispatch site then logs
+          `worktree.add {branch, worktreePath}` (src/run-task.ts:11580) with NO base. So once a run
+          ends, the base it built on is GONE from every durable surface.
+      (2) THE UNREADABLE BRANCH IS SILENT. `assertWorktreeBaseCurrent` catches a throwing
+          `readRemoteHead`, calls `deps.warn ?? console.error`, and returns. Production supplies no
+          `warn` (`opts.worktreeBaseDeps` is undefined on the dispatch path), so the one signal that
+          the guard could not run lands on the daemon's stdout and nowhere else — no ledger step, no
+          counter, nothing the retro, the console or a later audit can read. A host where
+          `git ls-remote origin` fails at that instant has its base-currency guard disabled on EVERY
+          dispatch, indefinitely, and the record is byte-identical to a host where every check passed.
+      (3) ONLY THE REFUSAL IS LEDGERED. `worktree.stale_base` is written on the throw path
+          (src/run-task.ts:11565) and `worktree.add_failed` on other add failures. Current and
+          unreadable — the two outcomes that let a run PROCEED — write nothing distinguishable.
+
+    THIS IS THE CANNOT-OBSERVE-RENDERED-AS-HEALTHY CLASS, at the dispatch path. The repo has paid
+    for it repeatedly: the headroom read continuing best-effort on 197 of 253 checks (W1-T197), the
+    batched gateway's catch returning `[]` so a failed read read as "no PRs exist" (W1-T181), the
+    projection regressing credited tasks to queued under darkness (W1-T179). Each time the remedy
+    was the same and it is the remedy here: an unknown must be MARKED, never rendered as a pass.
+
+    IT IS ALSO WHY THE 1553-COMMIT FINDING COST AN ARCHAEOLOGY DIG. A follow-up had to be filed to
+    ask why a base was stale, on a repo whose guard for exactly that condition is live and whose
+    ledger holds 30k+ lines, because the one fact needed — what base this run was cut from, and
+    whether the check that would have refused it actually ran — was never written down.
+
+    WHAT MUST NOT CHANGE, and it is the load-bearing constraint: an unreadable remote head STILL
+    PROCEEDS. W1-T405 design note (iii) is right — refusing on an unmeasurable condition converts a
+    transport blip into a stalled queue — and `test/worktree-base-currency-unreadable.test.ts`
+    already locks that behaviour in four tests. This task makes the degradation LEGIBLE and
+    BOUNDED, never stricter.
+  design: |
+    ONE CHOKE POINT, ONE CONSUMER — and the coupling is real, not incidental.
+    (i) OUTCOME, NOT A SIDE EFFECT. `assertWorktreeBaseCurrent` (or a thin wrapper `worktreeAdd`
+        owns) yields a structured outcome — `current` | `unreadable` (with the ref and the reason
+        string) | `stale` (which still throws `WorktreeBaseStaleError`, unchanged) — instead of
+        signalling "could not measure" through a `console.error` default nobody reads. The outcome
+        is produced INSIDE `worktreeAdd`, so a seventh call site inherits it without remembering to
+        pass a `warn`; a per-call-site fix is the shape that already failed here.
+    (ii) THE DISPATCH SITE LEDGERS IT. `worktree.add`'s payload gains the base sha and the check
+        outcome, so `what base did run X build on, and did the guard actually run` is a ledger read.
+        The refusal line (`worktree.stale_base`) and `worktree.add_failed` are untouched.
+    (iii) BOUNDED DEGRADED MODE, the W1-T197 shape. N CONSECUTIVE unreadable outcomes are surfaced
+        as a distinguishable condition rather than continuing forever as though the check were
+        running. N is policy DATA (plan/policy.yaml's home when W1-T252/W1-T253 land; a single
+        named constant with its bound stated until then) — never a scattered literal.
+    (iv) DISTANCE IS OPTIONAL AND MUST NOT BECOME A NETWORK CALL PER DISPATCH. If the count of
+        commits between base and the observed head can be derived from data already fetched, record
+        it; if it costs another round trip, record the two shas and let a reader compute it. The
+        criterion is the shas and the outcome, not the arithmetic.
+    VERIFY EVERY LINE REFERENCE FROM SOURCE FIRST — this design is a 2026-09-01 reading and line
+    numbers drift; `worktreeAdd`, `assertWorktreeBaseCurrent`, `recordWorktreeBase`,
+    `removeWorktreeBase` and the dispatch catch are the anchors, by symbol.
+    RULE 19: this spans src/lib/worker.ts and src/run-task.ts because the invariant — no
+    provisioning path may proceed on an unverified base without saying so — is UNSATISFIABLE
+    PIECEWISE: an outcome nothing consumes changes no record, and a ledger field with no producer
+    has nothing to write. Same atomic-coupling exit W1-T240/W1-T250/W1-T253 record; risk:high with
+    the rationale stated, not a per-file split.
+  acceptance:
+    - claim: "every worktree creation ledgers the base sha it was cut from AND the currency check's outcome, so the base a run built on survives the worktree's reaping — a creation whose ledger line carries no base FAILS"
+      proof: "unit test: test/worktree-base-observability.test.ts"
+    - claim: "an UNREADABLE remote-head read is ledgered by name with the ref and the reason and still PROCEEDS — cannot-measure is marked, never rendered identically to a check that passed"
+      proof: "unit test: test/worktree-base-observability.test.ts"
+    - claim: "N consecutive unreadable outcomes are surfaced as a distinguishable degraded posture rather than continuing indefinitely as though the guard were running, and N is data with a stated bound, not a scattered literal"
+      proof: "unit test: test/worktree-base-observability.test.ts"
+    - claim: "the outcome is produced inside worktreeAdd and consumed at the dispatch site, so an additional worktreeAdd call site inherits the record without passing anything — a call site that must remember FAILS"
+      proof: "unit test: test/worktree-base-observability.test.ts"
+    - claim: "the shipped W1-T405 behaviour is unchanged: a stale base still throws and still ledgers worktree.stale_base, and an unreadable read still never refuses"
+      proof: "unit test: test/worktree-base-currency-unreadable.test.ts"
+  risk: high
+  origin: "followup#W1-T2460-1788054755234"
+  plan_refs: ["W1-T405", "W1-T197", "W1-T181", "§4B", "§9"]
+  files: [src/lib/worker.ts, src/run-task.ts, test/worktree-base-observability.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    FILED 2026-09-01 alongside W1-T2625 from the same follow-up harvest, but justified INDEPENDENTLY
+    of whatever that audit concludes: the three facts in the rationale are true at this sha whether
+    the 1553-commit base turns out to be a fail-open read, an upstream that was itself stale, or the
+    known primary-checkout drift. In all three worlds the ledger cannot currently tell them apart,
+    and that is what this task fixes.
+    risk:high is a RECORDED JUDGEMENT, not sizing pressure. Two reasons, both honest: the Rule 19
+    atomic-coupling exit (one invariant across worker.ts and run-task.ts, unsatisfiable piecewise —
+    the W1-T240/W1-T250/W1-T253 precedent), and blast radius — this edits the dispatch path every
+    run passes through, where the dangerous direction is a change that turns the unreadable branch
+    into a refusal and stalls the fleet on a transport blip. The fifth criterion, pointed at the
+    EXISTING W1-T405 suite, is the guard against exactly that and is load-bearing rather than
+    ceremonial.
+    NOT IN SCOPE, deliberately, each with its owner: the boot fetch failing open onto a stale tree
+    is W1-T2501; stale git lock reclamation is W1-T1036; a merged change to an image-baked path
+    shipping nothing is W1-T496; the primary-checkout drift recorded in MASTER-PLAN's standing
+    operational note (1) is an operational fact this task makes VISIBLE at dispatch, not one it
+    repairs. This task adds no refusal, no policy and no repair — only the record that makes all
+    four answerable.

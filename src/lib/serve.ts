@@ -87,6 +87,7 @@ import { buildAnalyticsRoute, type AnalyticsRouteDeps } from "./analytics-route.
 import { resolveFreshness } from "./console-freshness.js";
 import { readIdleReasons, renderIdleReasonsHtml } from "./idle-reasons-panel.js";
 import { readLedgerLines } from "./status.js";
+import { buildReplay, resolveReplayLedgerLines, type ReplayLedgerRead } from "./ledger-replay.js";
 import {
   startInstallationTokenRefresh,
   TOKEN_REFRESHED_STEP,
@@ -270,6 +271,14 @@ export interface ServeDeps {
    * codebase uses (design note ii), never a second definition of "in flight" declared here.
    */
   peek?: { root?: string; isLive?: (runId: string) => boolean };
+  /**
+   * W1-T2578: `GET /v1/replay`'s ledger-corpus read. `stateDir` defaults to
+   * `dirname(deps.ledgerPath)` — the SAME derivation `replayCommand`'s own CLI wiring uses
+   * (run-task.ts: `dirname(ledgerPathFor(loadConfig()))`), never a second root. Both fields are
+   * injectable so a test drives the resolved-lines and refused (`ok: false`) paths without a
+   * real state dir — the same seam `ReplayRouteDeps` (below) and `peek` (above) both use.
+   */
+  replay?: { stateDir?: string; resolveReplayLedgerLines?: (stateDir: string) => ReplayLedgerRead };
   /**
    * W1-T2269: the console's OWN installation-token refresh loop — the SAME mechanism
    * `run-task.ts`'s `serveCommand` already arms for the daemon (`github-app.ts`'s
@@ -5350,6 +5359,101 @@ export function buildPeekRoute(deps: { root: string; isLive: (runId: string) => 
   };
 }
 /**
+ * `GET /v1/replay?since=<iso>&until=<iso>[&task=<id>][&step=<prefix>]` — W1-T2578's incident
+ * TIMELINE panel: the console's read surface over `rmd replay` (src/lib/ledger-replay.ts,
+ * W1-T2296). ONE PANEL, ONE ROUTE, ZERO NEW READERS (design i): this handler reads the SAME
+ * archive∪live union `buildReplay` already resolves through ({@link resolveReplayLedgerLines} —
+ * `resolveLedgerUnion`, ledger-grep.ts) and calls {@link buildReplay} itself for the narration; it
+ * never re-filters, re-orders or re-derives a row field on its own — the panel formats the verb's
+ * output and never re-derives the story (design iv, the same formatter-over-computation
+ * relationship `scopeAdvisorySection` (review.ts) holds to its own advisory).
+ *
+ * `since`/`until` are REQUIRED — the same usage `replayCommand` (run-task.ts) enforces before it
+ * will narrate anything; `task`/`step` narrow exactly as `--task`/`--step` do on the CLI.
+ * `scope: "read"`, header-only auth like every other `/v1/*` data route — NEVER `allowQueryToken`
+ * ({@link Route.allowQueryToken}'s own doc: that flag is reserved for the static HTML shell alone,
+ * an API/data route stays header-only or a pasted URL leaks the bearer via `Referer` and logs).
+ *
+ * A PARTIAL CORPUS REFUSES, NEVER A SHORTER STORY (design iv): when
+ * {@link resolveReplayLedgerLines} reports `ok: false` (an unread rotation, or zero archives under
+ * `stateDir`), this renders that SAME refusal text — never a narration built from whatever
+ * fraction of the corpus was readable.
+ */
+function escapeReplayHtml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+/**
+ * The panel body, as a server-rendered HTML fragment — SERVER-SIDE ON PURPOSE, the same reason
+ * {@link renderIdleReasonsHtml} is: this touches no part of the client script that lives inside
+ * this file's own template literal (`buildShellRoute`'s own note: that script "has broken the
+ * last five PRs that edited it").
+ *
+ * FORMATS, NEVER RE-DERIVES (design iv): `narration` is {@link buildReplay}'s own return value,
+ * read here as an OPAQUE string. This splits it only on the "\n" convention `buildReplay`'s own
+ * doc declares — one summary line, then zero or more row lines — and escapes each line UNCHANGED
+ * into a list item; it never re-parses a row's `ts`/`run_id`/`task_id`/`step`/`outcome`/`reason`
+ * fields, which stay exactly as `buildReplay`'s own `renderRow` wrote them. DETERMINISM SURVIVES
+ * THE RENDER (design ii): every row's `ts` rides through byte-for-byte — no relative-time
+ * rendering, no client clock — so a screenshot of this panel and a `rmd replay` paste of the same
+ * window agree on every line, and identical `narration` in always renders identical HTML out.
+ */
+export function renderReplayPanelHtml(narration: string): string {
+  const [summary, ...rows] = narration.split("\n");
+  const items = rows.map((row) => `<li class="replay-row">${escapeReplayHtml(row)}</li>`).join("");
+  return (
+    '<div class="replay-panel" data-replay="ok">' +
+    `<p class="replay-summary">${escapeReplayHtml(summary)}</p>` +
+    `<ol class="replay-rows">${items}</ol>` +
+    "</div>"
+  );
+}
+/**
+ * Design (iv): "a partial corpus renders the verb's own refusal text, never a shorter story" —
+ * `reason` is {@link ReplayLedgerRead}'s own `ok: false` text, the SAME string `rmd replay` prints
+ * to stderr (`replayCommand`, run-task.ts), formatted here and never softened or summarized.
+ */
+export function renderReplayRefusalHtml(reason: string): string {
+  return (
+    '<div class="replay-panel replay-refused" data-replay="refused">' +
+    `<p class="replay-refusal">rmd replay: ${escapeReplayHtml(reason)}</p>` +
+    "</div>"
+  );
+}
+export interface ReplayRouteDeps {
+  /** The ledger STATE DIR {@link resolveReplayLedgerLines} reads the archive∪live union under —
+   *  the SAME directory `rmd replay`'s own CLI wiring resolves, never a second derivation. */
+  stateDir: string;
+  /** Injectable so a test drives the resolved-lines and refused (`ok: false`) paths without a
+   *  real state dir — same seam `replayCommand`'s own `opts.resolveReplayLedgerLines` uses. */
+  resolveReplayLedgerLines?: (stateDir: string) => ReplayLedgerRead;
+}
+export function buildReplayRoute(deps: ReplayRouteDeps): Route {
+  return {
+    method: "GET",
+    path: "/v1/replay",
+    scope: "read",
+    handler: (req, res) => {
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const since = url.searchParams.get("since");
+      const until = url.searchParams.get("until");
+      if (!since || !until) {
+        sendJson(res, 400, { error: "invalid_request", detail: "?since=<iso> and ?until=<iso> are required" });
+        return;
+      }
+      const taskId = url.searchParams.get("task") ?? undefined;
+      const stepPrefix = url.searchParams.get("step") ?? undefined;
+      const resolve = deps.resolveReplayLedgerLines ?? resolveReplayLedgerLines;
+      const resolved = resolve(deps.stateDir);
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      if (!resolved.ok) {
+        res.end(renderReplayRefusalHtml(resolved.reason));
+        return;
+      }
+      res.end(renderReplayPanelHtml(buildReplay(resolved.lines, { since, until, taskId, stepPrefix })));
+    },
+  };
+}
+/**
  * W1-T493 design (i): the completeness ratchet for SCOPE, `writeRoutesMissingTier`-shaped
  * (service.ts, W1-T404) but over `scope` rather than `tier`. `scope` is REQUIRED on both `Route`
  * and `SseRoute` (service.ts), so a TypeScript-checked route literal can never appear here — an
@@ -5529,6 +5633,13 @@ export function buildServeRoutes(deps: ServeDeps): Route[] {
     // same root the tail writer resolves state/runs/<runId>.tail against); isLive defaults to
     // "never live" so a caller that omits it (a bare test) never fabricates liveness.
     buildPeekRoute({ root: deps.peek?.root ?? deps.fleetControlRoot, isLive: deps.peek?.isLive ?? (() => false) }),
+    // W1-T2578: the incident timeline panel over `rmd replay` (ledger-replay.ts). `stateDir`
+    // defaults to `dirname(deps.ledgerPath)` -- the SAME derivation `replayCommand`'s own CLI
+    // wiring uses (run-task.ts), never a second root.
+    buildReplayRoute({
+      stateDir: deps.replay?.stateDir ?? dirname(deps.ledgerPath),
+      resolveReplayLedgerLines: deps.replay?.resolveReplayLedgerLines,
+    }),
     // W1-T500: the nonce-issuance route design (iv)'s second factor needs to exist AT ALL -- built
     // (service.ts, W1-T404) and exported, but mounted nowhere until now, which is why every
     // HIGH-tier write was one flag flip away from a `confirm_nonce_required` with no way to

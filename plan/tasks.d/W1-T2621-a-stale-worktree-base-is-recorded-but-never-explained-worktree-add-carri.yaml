@@ -1,0 +1,123 @@
+- id: W1-T2621
+  title: "a stale worktree base is RECORDED but never EXPLAINED — worktree.add carries neither the local origin/<ref> it cut from nor the independent remote head, and the currency check's one documented fail-open is console-only, so a run on an UNVERIFIED base is indistinguishable in the ledger from a verified one (the 1553-behind base that needed an archaeology dig)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: |
+    OBSERVED 2026-08-30 (follow-up harvest from run W1-T2460-1788054755234): a fresh worktree's base
+    `e9454618` sat 1553 commits behind current `main`. The question the harvest asked — WHY, and is it
+    systemic across fresh worktree provisioning — cannot be answered from the record the fleet keeps,
+    and that is the defect this task fixes. The mechanism is unreconstructable after the fact for the
+    same reason W1-T405's own filing had to say "SO THE MECHANISM IS UNMEASURED": nothing writes down
+    what was observed at creation time.
+    RE-DERIVED FROM SOURCE AT THIS SHA, each citation read rather than recalled.
+    (1) `worktreeAdd` (src/lib/worker.ts:2745-2804) runs `git fetch origin --quiet`, cuts the worktree
+    from the REMOTE-TRACKING ref `origin/main`, records the created base via `recordWorktreeBase`, and
+    then calls `assertWorktreeBaseCurrent`. The fetch is `execFileSync`, so it is fail-closed.
+    (2) `assertWorktreeBaseCurrent` (worker.ts:2659-2681) has exactly ONE fail-open, documented in its
+    own header as deliberate: an unreadable remote head WARNS and PROCEEDS, because refusing on an
+    unmeasurable condition would turn a network blip into a stalled queue. That polarity is CORRECT and
+    this task does not touch it. What is wrong is where the warning goes: `deps.warn ?? console.error`.
+    In production `opts.worktreeBaseDeps` is undefined — run-task.ts:10965-10974 documents it as a
+    COVERAGE SEAM — so the warning is a `console.error`, the channel W1-T143 was filed against for
+    being empty under launchd's non-TTY stdout, and in any case NOT the ledger every other dispatch
+    decision is recorded in.
+    (3) The ledger lines carry the wrong fields. `log("worktree.add", { branch, worktreePath })`
+    (run-task.ts:11575) names neither the base nor any remote reading, and it is emitted identically
+    whether the currency check PASSED or merely DEGRADED — so a run on an unverified base is
+    byte-identical in the record to a run on a verified-current one. `worktree.stale_base`
+    (run-task.ts:11560) carries `{base, remote_head, ref}` and NO DISTANCE, so a base one commit behind
+    (a race with a merge landing mid-dispatch, benign) and a base 1553 commits behind (a broken
+    provisioning path) render as the same line.
+    THE THREE-WAY READING IS WHAT MAKES THE QUESTION SELF-ANSWERING, and it is why this is a sensor
+    task rather than a research task. Three quantities are available at creation time for the cost of
+    reads already being made, and together they DISCRIMINATE the candidate mechanisms outright:
+    the created base; the LOCAL `origin/<ref>` immediately after the fetch; and the INDEPENDENT remote
+    head the assert already reads. base != local tracking ref means the add did not cut from the ref it
+    was told to (a genuine surprise, impossible from source as written). base == local tracking ref
+    while BOTH sit behind the independent remote head means THE FETCH IS NOT MOVING THE REF — a
+    narrowed refspec, a mirror, a ref-lock the fetch survived — which is the systemic-provisioning
+    answer the harvest was asking for. An unreadable remote head means the documented fail-open fired,
+    which today leaves no trace at all. One ledger line distinguishes all three; no dig distinguishes
+    them a week later.
+    NOT A RE-DECISION OF W1-T405. That task decided assert-and-refuse over fast-forward, decided that
+    stale means behind by any commit, and decided that an unreadable head proceeds. All three stand
+    unchanged here. This task only makes the check's OWN OUTCOME legible, which W1-T405 did not carry a
+    criterion for.
+  design: |
+    ONE LINE PER CREATION, THREE READINGS, PLUS A DISTANCE.
+    (i) `worktreeAdd` gains an OPTIONAL injected `log` dep (the same shape its existing `readRemoteHead`
+    and `warn` deps already use). Absent, behaviour is byte-identical to today — spike.ts and any caller
+    with no ledger are unchanged. Present, the run's ledger logger is passed by run-task.ts's call sites.
+    (ii) `worktree.add` gains `base`, `local_ref_head` (the local `origin/<ref>` read immediately after
+    the fetch), `remote_head` (the independent `ls-remote` value, or the literal `unreadable`), `ref`,
+    and `behind` — the commit distance from the created base to the observed remote head.
+    (iii) THE DISTANCE IS COMPUTED FROM LOCAL OBJECTS ONLY, and renders `unknown` rather than a guess.
+    `git rev-list --count <base>..<remote_head>` needs the remote head OBJECT to be present locally; on
+    a fetch that did not move the ref it will not be. Absent object ⇒ `behind: "unknown"`, never zero —
+    a cannot-measure rendered as healthy is the exact polarity this repo keeps re-learning (W1-T130,
+    W1-T119, W1-T181). NO SECOND NETWORK CALL: the `ls-remote` the assert already makes is the only
+    remote read, and nothing here adds one.
+    (iv) THE FAIL-OPEN BECOMES A LEDGER LINE. `assertWorktreeBaseCurrent`'s unreadable branch emits
+    `worktree.base_uncheckable` carrying `{ref, base, error}` through the injected logger, IN ADDITION
+    to the existing warning (the warning is not removed — an operator reading a log should still see it).
+    The step name lives in src/lib/worker.ts so an operator's grep handle is where the emission is.
+    (v) `worktree.stale_base` gains the same `behind` field, so the REFUSAL path also distinguishes a
+    race from a broken provisioning path.
+    (vi) POLARITY IS UNTOUCHED, and this is a hard fence: an unreadable remote head still PROCEEDS
+    (W1-T405 design note (iii)), a current base still proceeds untouched, and a behind base still throws
+    `WorktreeBaseStaleError` exactly as it does today. This task changes only what is WRITTEN DOWN.
+    (vii) SCOPE FENCE: no console/board surface is built here. The status board's LATCHES/LIVENESS
+    sections (W1-T279/W1-T280) are the intended renderer and their own design states a marker added
+    later is a ROW, not a code branch — so this task ships the row's data and files no UI.
+    VERIFY FROM SOURCE before editing (distrust this note, it is a 2026-09-01 survey): worktreeAdd's dep
+    object shape, both `worktree.add` emission sites, the `WorktreeBaseStaleError` catch at
+    run-task.ts:11556-11574, and `addLaneWorktree` (run-task.ts:19029) which passes NO deps today.
+  acceptance:
+    - claim: "every worktree creation ledgers the THREE-WAY reading — created base, the LOCAL origin/<ref> after the fetch, and the INDEPENDENT remote head — plus a commit distance, so a fixture whose local tracking ref did not move names THE FETCH as the mechanism instead of leaving it undetermined. FALSIFIER: today's line is log('worktree.add', { branch, worktreePath }) (run-task.ts:11575) and carries none of the four"
+      proof: "unit test: test/worktree-base-observability.test.ts"
+    - claim: "the currency check's documented fail-open is a LEDGER LINE — an unreadable remote head emits worktree.base_uncheckable with the ref, the base and the error, and the resulting worktree.add records the head as unreadable rather than as verified. FALSIFIER: today the unreadable branch calls deps.warn (defaulting to console.error, worker.ts:2671) and RETURNS, so the run logs a plain worktree.add and is indistinguishable in the ledger from a verified-current one"
+      proof: "unit test: test/worktree-base-observability.test.ts"
+    - claim: "the refusal path carries the distance too — worktree.stale_base names how far behind, so a base one commit behind (a merge landing mid-dispatch) and a base 1553 commits behind (a broken provisioning path) are no longer the same line"
+      proof: "unit test: test/worktree-base-observability.test.ts"
+    - claim: "the fail-open POLARITY and the network cost are unchanged — an unreadable remote head still PROCEEDS rather than refusing, a current base still proceeds untouched, a behind base still throws, exactly ONE ls-remote is issued per creation, and a distance whose remote-head object is absent locally renders unknown rather than zero"
+      proof: "unit test: test/worktree-base-observability.test.ts"
+    - claim: "the fail-open's step name lives where it is emitted, so an operator's grep handle and the emission site are the same file"
+      proof: "grep: base_uncheckable in src/lib/worker.ts"
+  risk: high
+  origin: architect
+  plan_refs: ["§8A", "§9"]
+  files: [src/lib/worker.ts, src/run-task.ts, test/worktree-base-observability.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    FILED 2026-09-01 by an Architect plan PR, from the follow-up harvest of run
+    W1-T2460-1788054755234 (proposal followup:...:2026-08-30T01:56:15.532Z:1, which asked why a fresh
+    worktree's base e9454618 sat 1553 commits behind main and whether that is systemic). The harvest
+    asked a research question; this ratifies it as a MEASUREMENT, because the honest answer to "why"
+    is that the record does not say, and a second dig would leave the third instance equally blind.
+    NO HARD depends_on ON W1-T405, deliberately, and the reason is worth recording. W1-T405's mechanism
+    is LIVE IN SOURCE at this sha — assertWorktreeBaseCurrent, recordWorktreeBase and
+    WorktreeBaseStaleError all cite it by name in worker.ts — while
+    plan/tasks.d/W1-T405-stale-base-is-only-detected-after-a-full-run.yaml still reads status: queued.
+    A hard edge would therefore strand this task behind a CREDITING artifact rather than behind unbuilt
+    work, which is the W1-T75 bootstrap seam in a new place. Expressed as a source citation instead
+    (W1-T233's own precedent for exactly this). Whether that shard is a crediting zombie is a separate
+    question and is deliberately NOT smuggled into this filing.
+    HYPOTHESIS CHECKED AND REJECTED RATHER THAN FILED, recorded so nobody re-derives it: the container
+    entrypoint's sync_tree (deploy/entrypoint.sh) REFUSES to sync on any tracked modification and then
+    continues, and the freshness/blocked/environmental restart loops re-enter that same refusal — so a
+    single tracked edit in the bind-mounted checkout can pin the container's CODE indefinitely while
+    every boot reports a checkout line. That is a real hazard and the entrypoint's own comments already
+    name the shape. It is NOT this defect: worktreeAdd fetches and cuts from the remote-tracking ref, so
+    a pinned checkout does not by itself produce a stale worktree base. If the ledger line this task
+    adds ever shows base == local_ref_head with both behind the remote head, THAT is when the
+    provisioning path becomes the suspect — which is the whole point of recording it.
+    risk:high is Rule 19's span (worker.ts + run-task.ts), recorded as a regrade rather than worked
+    around: the assertion and the distance belong in the worktree helper, the ledger call sites belong
+    in the dispatcher, and splitting them yields a sensor that measures with nowhere to write and a
+    ledger line with nothing to write. Same atomic-coupling exit as W1-T240/W1-T250. The behaviour
+    change itself is additive fields on lines that already exist.

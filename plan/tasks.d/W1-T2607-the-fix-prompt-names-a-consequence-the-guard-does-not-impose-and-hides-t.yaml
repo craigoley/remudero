@@ -1,0 +1,110 @@
+- id: W1-T2607
+  title: "THE FIX PROMPT NAMES A CONSEQUENCE THE GUARD DOES NOT IMPOSE AND HIDES THE EXEMPTION IT DOES — renderFixPrompt's DECLARED SCOPE block tells a round-N worker that any commit outside the declared list makes the WHOLE PR unreviewable and only a human can undo it, while the implement path PUSHES AND FLAGS (scope_guard.overrun) and fixRungScopeStandDownReason deliberately exempts every out-of-scope path already in the branch baseline; the worker is never told which paths its own branch already carries, so it re-litigates an inherited file and spends a follow-up proposal on a non-decision"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 25.00
+  files: [src/run-task.ts, test/fix-prompt-inherited-scope.test.ts]
+  origin: "followup:DAEMON-1788016810368:2026-08-29T15:26:29.026Z:1"
+  plan_refs: ["W1-T1227", "W1-T2287", "W1-T2286", "W1-T2248", "W1-T434", "W1-T105"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE TWO SITES, READ AT HEAD RATHER THAN RECALLED.
+
+    (1) THE INSTRUCTION. `renderFixPrompt`'s scope block (src/run-task.ts:5201-5211, W1-T1227)
+    renders, verbatim: "DECLARED SCOPE (W1-T1227): this task's PR may only touch: <files>. If the
+    genuine fix requires a path outside that list, do NOT push it — say so in your REPORT's
+    '## Follow-ups' section instead and leave the branch as-is. A commit outside declared scope
+    makes the WHOLE PR unreviewable (Standing rule 15/25 refuse the next round on the file this fix
+    itself wrote, and only a human can undo it), not merely this one fix."
+
+    (2) THE ENFORCEMENT. `fixRungScopeStandDownReason` (src/run-task.ts:3808-3831) computes
+    `alreadyOutOfScope` from `baselineDiffFiles` at :3817 and subtracts it at :3818, and its own doc
+    at :3787-3790 says why: "anything out-of-scope already present there predates the rung … and is
+    deliberately NEVER re-flagged here: this guard is about what the FIX RUNG ITSELF adds, never a
+    retroactive judgment on the diff it inherited." The implement path agrees in the other
+    direction: `scopeGuardOutOfScopeFiles` (:3698) is pure, and its call site (:11383-11404) logs
+    `scope_guard.overrun` and PUSHES — the push-and-flag disposition W1-T434 shipped.
+
+    SO THE INSTRUCTION IS WRONG IN BOTH DIRECTIONS AT ONCE. It threatens a refusal-shaped outcome
+    ("the WHOLE PR unreviewable … only a human can undo it") that neither guard imposes, and it
+    withholds the one fact a round-N worker actually needs — that its branch's INHERITED
+    out-of-scope paths are already exempt and are nobody's decision this round. `baselineDiffFiles`
+    is captured at :7363-7370, before the rung's first strike, in the same function that renders the
+    prompt, so the fact is IN SCOPE AT THE RENDER SITE and simply never reaches the worker.
+
+    THIS IS W1-T2287's CLASS ON A SECOND SURFACE, AND W1-T2287 CANNOT REACH IT. That task's own
+    words: the `proof-scope` warning "says the consequence is that the scope guard … will refuse a
+    branch touching it" and "THAT CONSEQUENCE DOES NOT HAPPEN". Identical defect, identical cause,
+    different artifact — W1-T2287 declares `files: [src/lib/task-linter.ts,
+    test/proof-scope-consequence.test.ts]` and touches no prompt. Cited, NOT re-filed.
+
+    THE FIXTURE, AND ITS HONEST LIMIT. The follow-up that produced this task
+    (run DAEMON-1788016810368, W1-T2441, PR #3261) reads: a test file "was added by round 1 of this
+    same branch but is not in this task's DECLARED SCOPE list … adding a fourth file now would
+    itself be an out-of-scope change". That is EXACTLY the behaviour the block instructs, and it is
+    a non-decision: the file predated the invocation, so `alreadyOutOfScope` already exempted it and
+    no strike was ever at risk. THE LIMIT, RECORDED RATHER THAN SMOOTHED: the filename the follow-up
+    cites (`test/worker-home-per-spawn-uniqueness.test.ts`) does not exist at origin/main today; the
+    file present is `test/worker-home-per-spawn.test.ts`, declared by W1-T2463, and W1-T2463's own
+    shard records #3261 merging with `changed_files=0`. THE INSTANCE IS SPENT. The CLASS is what is
+    filed, and the class fires on every branch whose earlier round left an undeclared path behind —
+    which W1-T2286 measured at 177 of 368 trailered commits (48.1%).
+
+    WHAT THIS IS NOT. It is not the declaration corrector: W1-T2286 owns the dispatch-time observed
+    union, W1-T2287 owns the review-time grade, W1-T2248 shipped the human-authored amendment
+    procedure, and W1-T2286 records that feeding observed paths to the risk judge "would delete the
+    signal rather than improve it". Nothing here edits any declaration, at runtime or otherwise.
+  design: |
+    (i) COMPUTE THE INHERITED SET WITH THE PREDICATE THAT ALREADY EXISTS, never a second one: the
+    same `scopeGuardOutOfScopeFiles` / `outOfPlanScopeFiles` pair `fixRungScopeStandDownReason`
+    selects between at :3815-3816, applied to `baselineDiffFiles`. Prefer factoring that selection
+    out of the guard so both callers read one implementation.
+    (ii) RENDER IT. When the set is non-empty, the scope block gains an INHERITED SCOPE line naming
+    those paths and stating the three facts the guard already enforces: they predate this
+    invocation, this rung is judged only on what IT adds, and neither removing them nor reporting
+    them again is required of this round.
+    (iii) CORRECT THE CONSEQUENCE SENTENCE to what the code does — an out-of-scope commit is pushed
+    and flagged (`scope_guard.overrun`), and the next round stands down only on paths this rung
+    itself added. The rule-15/rule-25 refusal is real but is about a worker editing a plan/task
+    record inside its own implementing diff; the sentence must stop generalising it to any
+    out-of-scope path.
+    (iv) FAIL OPEN, AND SILENCE IS NEVER A LICENCE. `deps.fetchPrDiffFiles` absent or throwing
+    leaves `baselineDiffFiles` undefined (:7363-7370); with no baseline read there is no inherited
+    line at all, matching the block's own existing discipline for a task that declares no scope.
+    (v) WEAKEN NOTHING. `fixRungScopeStandDownReason` keeps standing the rung down on a NEWLY added
+    out-of-scope path, and the block keeps forbidding one. The worker is still told it may not widen
+    its own `files:` — an amendment is plan-only and human-authored (docs/operator-guide.md), so the
+    most a rung may do is report.
+  acceptance:
+    - claim: "an out-of-scope path already present in the branch baseline is NAMED in the rendered fix prompt as inherited and exempt, so a round-N worker is not left inferring whether it must act on a file an earlier round shipped"
+      proof: "unit test: test/fix-prompt-inherited-scope.test.ts"
+    - claim: "the block states the consequence the code actually imposes — an out-of-scope commit is pushed and flagged — and no longer claims the whole PR becomes unreviewable and only a human can undo it"
+      proof: "unit test: test/fix-prompt-inherited-scope.test.ts"
+    - claim: "the exemption is not a licence: the prompt still forbids adding a NEW out-of-scope path, and a newly added one still stands the rung down exactly as it does today"
+      proof: "unit test: test/fix-prompt-inherited-scope.test.ts"
+    - claim: "the prompt still tells the worker it may not widen its own declared scope, so the sanctioned response to a wrong declaration remains a report and never a self-edit"
+      proof: "unit test: test/fix-prompt-inherited-scope.test.ts"
+    - claim: "a branch with no inherited out-of-scope paths, and a round with no readable baseline, both render with no inherited line at all — the clean path is unchanged"
+      proof: "unit test: test/fix-prompt-inherited-scope.test.ts"
+  note: |
+    SIZING BAND: `risk: high` is set UP FRONT and the band is Rule 19's SPAN, not blast radius —
+    `files:` spans two stems (`run-task`, `fix-prompt-inherited-scope`), which `sizingViolation`
+    refuses at `medium`. The change itself is one prompt block, one factored predicate and a test.
+    A task about an under-declared `files:` that under-declared its own would be its own
+    counter-example, so both paths are declared.
+
+    RE-FILES NOTHING. W1-T1227 shipped the block; W1-T434 shipped the push-and-flag disposition;
+    W1-T2287 owns the identical wrong-consequence defect on the LINTER message and declares no
+    prompt path; W1-T2286 owns the dispatch-time observed union and explicitly cannot reach a
+    declaration at authoring time; W1-T2248 owns the human-authored amendment procedure.
+
+    WHY THIS AND NOT A RECONCILIATION EMITTER. Minting a correction candidate per observed overrun
+    was considered and rejected on W1-T2286's own measurement: at a 48.1% base rate that is a
+    proposal storm (the W1-T114 shape), and the field's noisy consumer is already being corrected
+    automatically. The cost this task removes is real and bounded — a worker's reasoning, a
+    follow-up, and an Architect cycle spent on a condition the guard had already decided.

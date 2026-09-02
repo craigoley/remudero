@@ -1,0 +1,104 @@
+- id: W1-T2633
+  title: "THE WORKER-HOME PLACEMENT INVARIANT IS INCIDENTAL, NOT ASSERTED — the untracked dotfiles are expected scaffolding (15 worker-home-<runId>.<uuid> siblings of the checkout, each holding exactly the eight WORKER_HOME_RC_FILES plus .claude.json, zero of them inside a work tree), but workerHomeDir returns an OPERATOR-SETTABLE config.workerHomeRoot with no guard, so one config value would materialize home scaffolding INTO a tracked tree; refuse a home that resolves inside any git work tree, ignore the two editor directories, and write the answer down"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: medium
+  origin: architect
+  plan_refs: ["§4A", "§2"]
+  files: [src/lib/worker-home.ts, test/worker-home.test.ts, .gitignore]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE QUESTION IS ANSWERED, AND THE ANSWER IS "EXPECTED SCAFFOLDING". Measured on the live root
+    while drafting, not inferred:
+      SURFACE 1  15 directories matching `<root>/worker-home-<runId>.<uuid>/`, each carrying
+                 EXACTLY the eight names in WORKER_HOME_RC_FILES (worker-home.ts:75 — .bashrc,
+                 .bash_profile, .bash_login, .profile, .zshrc, .zshenv, .zprofile, .zlogin) plus
+                 .claude.json. That is the W1-T18 mechanism working as designed: HOME is redirected
+                 to a Remudero-written scratch dir so an operator's real dotfiles can never be
+                 sourced, and the rc files are zero-byte files Remudero itself wrote.
+      SURFACE 2  perRunWorkerHomeDir (worker-home.ts:582) returns `<workerHomeRoot>-<id>` — a
+                 SIBLING of the worker-home root, and on this host the root is a sibling of both the
+                 checkout and the worktrees directory. So no worker home is inside any git work tree.
+      SURFACE 3  the checkout root's own dotfiles are .dockerignore, .nvmrc, .jscpd.json, .gitignore
+                 and .dependency-cruiser.cjs. There is no .bashrc, no .gitconfig, no .idea and no
+                 .vscode anywhere in the checkout or in this run's worktree.
+    So the reported files are NOT repo pollution and they cannot reach a PR diff from where they sit.
+    THE REASON THIS IS STILL A TASK IS THE SECOND HALF OF THE REPORT — "they could leak into a PR
+    diff by mistake" — which turns out to be reachable through ONE unguarded field. workerHomeDir
+    (config.ts:357) is `config.workerHomeRoot ?? join(config.root, "worker-home")`. `workerHomeRoot`
+    is an operator-settable config field, and nothing in the materialization path asks whether the
+    resolved home lands inside a git work tree. Point it at the checkout — or run with a root that IS
+    a checkout — and every spawn writes eight rc files plus .claude.json into a tracked tree, silently.
+    NOTHING DOWNSTREAM WOULD REFUSE THAT. The diff-to-declared refusal (scopeGuardOutOfScopeFiles,
+    run-task.ts) fires only on the orchestrator's fallback push path, behind `if (!branchOnOrigin)`;
+    the review-time equivalent (scopeViolationFiles, review.ts) is documented ADVISORY, not a refusal,
+    precisely because a measured majority of recent trailer-bearing merges widen past their declared
+    scope for legitimate reasons. And .gitignore's own "os / editor" section holds exactly one entry,
+    .DS_Store — the two editor directories the report names, .idea and .vscode, are not ignored at all.
+    THE PLACEMENT IS THEREFORE A PROPERTY OF THIS HOST'S CONFIGURATION RATHER THAN OF THE CODE, which
+    is the same shape as the defect W1-T18 exists to close one layer down: isolation held only because
+    THIS host happened to have no ~/.bashrc, until the mechanism manufactured it instead of hoping.
+    This task manufactures the placement guarantee the same way, instead of hoping the root stays a
+    sibling.
+  design: |
+    (i) REFUSE A HOME INSIDE A WORK TREE, at materialization. A pure predicate walks up from the
+    RESOLVED per-run home path looking for a `.git` entry (a directory for a clone, a FILE for a
+    linked worktree — both must be detected) before the filesystem root. Found => materializeWorkerHome
+    REFUSES with a named reason carrying both the offending home path and the `.git` ancestor that
+    disqualified it, and materializes nothing. Not found => today's behaviour, byte-identical.
+    FAIL DIRECTION, stated: refusing is the loud failure and writing is the silent one. A home nested
+    inside a repo is exactly the pollution this task was filed about, and root == checkout is not a
+    supported shape (the default derivation makes the checkout a CHILD of the root), so a refusal here
+    cannot brick a supported configuration. VERIFY materializeWorkerHome's current opts and whether
+    the resolved home path is already available at that call site before adding any parameter — the
+    predicate must need no repo path threaded through it, which is the whole point of walking ancestors.
+    (ii) IGNORE THE TWO EDITOR DIRECTORIES the report names, in .gitignore's existing "os / editor"
+    section: `.idea/` and `.vscode/`. They are never legitimate repo content and today nothing refuses
+    them at any layer.
+    DELIBERATELY NOT IGNORED, and this is a decision rather than an omission: the eight rc names and
+    .claude.json stay UN-ignored. An ignore entry for `.bashrc` would MASK the very defect (i) exists
+    to make loud — a home materialized into the work tree would then be invisible instead of refused,
+    which is strictly worse than the status quo.
+    (iii) WRITE THE ANSWER DOWN where the next reader looks. worker-home.ts's header block already
+    explains WHY the home is redirected; it never states WHERE the home may live. Add the invariant to
+    it in plain words, so the next reader who sees these files in a directory listing reads the answer
+    instead of re-running this investigation.
+    OUT OF SCOPE, named so nothing is orphaned: worker homes ACCUMULATING (15 present, including ones
+    whose runs ended) is W1-T1064's remit and is not touched here; sweepStaleWorkerHomes and
+    isReapableWorkerHome are read, never edited.
+  acceptance:
+    - claim: "a per-run worker home that resolves INSIDE a git work tree is REFUSED at materialization, naming both the offending home path and the .git ancestor that disqualified it, and nothing is written — asserted for a clone (.git directory) and for a linked worktree (.git file) alike"
+      proof: "unit test: test/worker-home.test.ts"
+    - claim: "a per-run worker home that resolves OUTSIDE every git work tree materializes exactly as it does today — the sibling shape and every existing grant are unchanged, so the guard adds a refusal and moves no other behaviour"
+      proof: "unit test: test/worker-home.test.ts"
+    - claim: "the guard fires on a home reached through the settable workerHomeRoot config field, not only on the default root derivation — the one unguarded path by which home scaffolding could reach a tracked tree"
+      proof: "unit test: test/worker-home.test.ts"
+    - claim: "the two editor directories named in the report are ignored at the repo root, so a stray one can never be staged into a PR diff by accident"
+      proof: "grep: .idea/ in .gitignore"
+    - claim: "the rc names and .claude.json are NOT ignored — the guard makes a misplaced home loud, and an ignore entry for them would hide exactly what the guard exists to surface"
+      proof: "unit test: test/worker-home.test.ts"
+    - claim: "the placement invariant is stated in the module that owns it, so the next reader who finds these files in a directory listing reads the answer rather than re-investigating"
+      proof: "grep: never inside a git work tree in src/lib/worker-home.ts"
+  note: |
+    FILED 2026-08-31 from the follow-up harvest of run W1-T2474-1788101371246
+    (followup:W1-T2474-1788101371246:2026-08-30T14:52:51.287Z:1), which asked whether the untracked
+    home dotfiles are expected worker-home scaffolding or accidental repo pollution. THE RESEARCH HALF
+    IS ANSWERED IN THE RATIONALE FROM MEASUREMENT — expected scaffolding, sibling of the checkout,
+    outside every work tree — so this task is deliberately NOT a research task: the only part left
+    undone is that the answer is true by configuration rather than by construction, and is written
+    down nowhere.
+    SIZING: files names one src stem and its OWN test file (moduleIdFromPath strips `.test`, so both
+    resolve to `worker-home`) plus .gitignore, which yields no module id at all — one concern, one
+    subsystem, so risk:medium is the honest band rather than a Rule 19 regrade.
+    CROSS-REFERENCES, none of them re-filed here: W1-T18 (the redirection mechanism this asserts the
+    placement of), W1-T1064 (worker homes outliving their runs — the accumulation the census also
+    showed, already filed), W1-T142 (the diff-scope push guard whose narrow call site is why this
+    cannot rely on a downstream refusal), and W1-T401's review-time scope advisory (advisory by
+    measurement, so also not a backstop).
+    NOT A RE-DECISION of the redirection design: the symlink allowlist, the keychain grant and the rc
+    file set are untouched. This adds one refusal, two ignore lines, and a sentence.

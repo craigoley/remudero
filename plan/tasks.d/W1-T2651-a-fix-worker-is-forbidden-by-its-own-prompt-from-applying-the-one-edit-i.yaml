@@ -1,0 +1,149 @@
+- id: W1-T2651
+  title: "A FIX WORKER IS FORBIDDEN, BY ITS OWN PROMPT, FROM APPLYING THE ONE EDIT ITS FAILING GATE JUST PRINTED — renderFixPrompt's DECLARED SCOPE block refuses any path outside `files:` while the source-size ratchet's refusal says recording the ceiling is safe in this same PR, and the pre-strike scope gate stands the rung down if the worker obeys the gate instead of the prompt, so a required `ci` check is left with no lane in the fleet that can clear it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  rationale: |
+    THE PROPOSAL THIS RATIFIES IS ALREADY SATISFIED, AND THAT IS THE FINDING. The follow-up asked a
+    human (or a round with authority over `scripts/source-size-baseline.json`) to record
+    `src/lib/account-usage.ts: 740` and `src/lib/worker.ts: 3547`, calling it the only remaining
+    blocker for the required `ci` check on PR #3409. VERIFIED IN THE CHECKOUT THIS WAS DRAFTED FROM,
+    not inherited from the report:
+      - `scripts/source-size-baseline.json` line 2 already reads `"src/lib/account-usage.ts": 740`,
+        and that file measures 740 lines, so `lines > recorded` is false — nothing to record.
+      - `src/lib/worker.ts` measures 3684 lines against a recorded 4000 — 316 lines UNDER its
+        ceiling, so it cannot violate either.
+    Re-derivable in one command: `node scripts/source-size-ratchet.mjs` must print `OK`.
+
+    AND RECORDING THE LITERAL 3547 TODAY WOULD BE A REGRESSION, which is why this must not be
+    ratified as written. W1-T2539 replaced exact counts with 500-line BUCKETS precisely because an
+    exact count forces every growing PR to edit the SAME JSON line — the conflict class that
+    `isPureConcurrentAddition` refuses by construction. `ceilingFor(3547)` is 4000, which is exactly
+    what the tree already carries, and the refusal text itself now prints the bucket rather than the
+    raw count (scripts/source-size-ratchet.mjs, the `TO FIX` block). Writing 3547 would re-introduce
+    a line the next single-line growth immediately breaches.
+
+    WHAT REMAINS IS THE REASON A HUMAN WAS ASKED AT ALL, quoted verbatim from the follow-up: "it is
+    out of W1-T2516's declared 3-file scope so I could not push it myself." That is not a mistake by
+    that worker. It is the system's own instruction, and it directly contradicts the gate's:
+
+      (1) `scripts/source-size-ratchet.mjs`, on failure, prints the exact `"path": N` line to write
+          and then says recording it is "the ordinary outcome for deliberate growth and is safe to do
+          in this same PR", citing W1-T2526's standing exemption. That exemption is real and live:
+          `scripts/source-size-baseline.json` is a named entry in review.ts's Standing-rule-25
+          instrument-isolation carve-out (src/lib/review.ts:6908), and the review-side scope check is
+          ADVISORY, not a refusal, whose own doc names "a generator-gate artifact" as a legitimate
+          widening (`scopeViolationFiles`, src/lib/review.ts:3592).
+      (2) `renderFixPrompt` hands EVERY fix worker, mode-agnostically, the opposite instruction
+          (src/run-task.ts:5367-5377, W1-T1227): "this task's PR may only touch: <files>. If the
+          genuine fix requires a path outside that list, do NOT push it — say so in your REPORT's
+          '## Follow-ups' section instead and leave the branch as-is."
+
+    THE PROMPT WINS, AND THE OBSERVED OUTPUT IS EXACTLY WHAT IT PRESCRIBES: a `## Follow-ups` entry
+    and an untouched branch — this very proposal, with the PR left red on a required check whose fix
+    the gate had already composed.
+
+    AND IT IS A CLOSED LOOP, NOT A NEAR-MISS. A fix worker that ignores the prompt and follows the
+    gate is caught by the belt-and-suspenders half: `fixRungScopeStandDownReason`
+    (src/run-task.ts:3974-3996) compares the live diff against the declared `files:` via the same
+    `scopeGuardOutOfScopeFiles`, finds the newly added baseline path, and STANDS THE RUNG DOWN
+    ("dispatching another strike would compound on a PR the next round's rule-15/rule-25 refusal
+    already can't recover from"). So obedience files a follow-up and disobedience halts the rung:
+    no automated lane can clear this gate, by construction.
+
+    MEASURED SIGNATURE OF THAT LOOP, from W1-T2532's own record: the sweep DID dispatch ci-log fix
+    workers at these PRs, they pushed, the finding did not move, and the rung escalated
+    `ci-log false-block` FOUR times — issues #3362, #3368, #3369, #3374 — while 6 of 9 open PRs sat
+    blocked on this one gate. Each was cleared only by a session editing the file by hand. This
+    proposal is the fifth instance of the same shape, one month later.
+
+    WHY THE FILED SIBLINGS DO NOT COVER IT, checked rather than assumed:
+      - W1-T2532 (queued) asks for an AUTOMATIC opt-in recording mode on the authoring path — a
+        MECHANISM that writes the file. Complementary, not a substitute: the write still lands in a
+        diff somebody must be PERMITTED to push, and a recording made during a FIX round is exactly
+        the case both halves above refuse. Deliberately NOT a dependency (either may land first).
+      - W1-T2538 (shipped) made the refusal warn about `bodyContradictsDiff`. It changed what the
+        message SAYS; it never touched what the worker is ALLOWED to do.
+      - W1-T2551 bounds its generator rung to package.json's declared `<name>` / `<name>:check`
+        pairing. package.json:60 declares `"source-size-ratchet"` with NO `:check` counterpart, so
+        that rung leaves this gate to the ordinary fix rung by its own design.
+      - W1-T1227 AUTHORED the DECLARED SCOPE block. It is the source of the contradiction, and a
+        merged task cannot be amended (Standing rule 21) — hence this follow-up.
+  design: |
+    ONE PROPERTY, TWO HALVES THAT MUST AGREE: a fix worker may commit the artifact its own failing
+    gate named, and the pre-strike gate must not punish it for doing so. Either half alone is worse
+    than neither — a permission the next gate refuses is a trap, and a relaxed gate with a prompt
+    that still forbids the edit changes nothing.
+
+    (i) THE PERMITTED SET IS A FACT ABOUT THE REPO, NEVER A NEW HAND-MAINTAINED LIST. Source it from
+    `REGENERABLE_ARTIFACT_GENERATORS` (src/lib/sweep.ts:386), which already names
+    `scripts/source-size-baseline.json` alongside plan-index/docs-index/learnings-index/cli-reference
+    and pairs each with the command that reproduces it. That is the same discipline W1-T2548 and
+    W1-T2551 use, and it means a sixth regenerable artifact inherits the carve-out without a second
+    table to drift.
+
+    (ii) THE PROMPT CARVE-OUT IS BOUNDED AND EXPLICIT. `renderFixPrompt`'s DECLARED SCOPE block keeps
+    today's sentence VERBATIM for every other path, and gains one clause: a registry-named artifact
+    may be committed alongside the declared scope when a failing gate calls for it, and the PR body's
+    file claim must be re-derived afterwards (the W1-T2538 warning the ratchet already prints).
+    Silence stays what it is today — a task declaring no `files:` gets no block and no licence.
+
+    (iii) THE PRE-STRIKE GATE MUST MATCH. `fixRungScopeStandDownReason` treats a newly added
+    registry-named artifact as in-scope rather than as new out-of-scope work. Everything else about
+    that guard is untouched: the baseline-diff exemption, the two scope regimes (`files` vs `plan`),
+    the fail-open on an absent declared scope, and its refusal of any genuinely unrelated path.
+
+    (iv) VERIFY BEFORE BUILDING. Read the import direction between run-task.ts and sweep.ts first; if
+    lifting the frozen table into its own module is the honest move, that is a review-ratified
+    widening recorded in the PR body, never a shard edit (a verify:auto task cannot amend its own
+    record — the constraint W1-T2532 states for itself).
+
+    NOT IN SCOPE, NAMED. (a) The IMPLEMENT path. The literal DECLARED SCOPE sentence appears at
+    exactly one site (run-task.ts:5371, the fix prompt) — verified by grep — so an implement worker's
+    refusal is a belief formed from the task record, and widening implement-path permission is a
+    larger change that deserves its own review. (b) What the ratchet refuses, its exit code, or its
+    violation lines. (c) `bodyContradictsDiff`'s predicates (W1-T2533/W1-T2534 carry those).
+    (d) Recording the two ceilings this proposal named — verified unnecessary; see the rationale.
+  acceptance:
+    - claim: "a fix worker whose failing gate names a registry artifact is TOLD it may commit that path alongside its declared scope, so the edit the gate printed is applicable by the lane that reads it"
+      proof: "unit test: test/a-worker-may-not-apply-the-edit-its-gate-printed.test.ts"
+    - claim: "the carve-out is BOUNDED — any out-of-scope path the registry does not name still carries today's do-NOT-push-say-so-in-Follow-ups sentence verbatim, so this is never a general licence to widen scope"
+      proof: "unit test: test/a-worker-may-not-apply-the-edit-its-gate-printed.test.ts"
+    - claim: "the permitted set is read from the repo's OWN declared registry rather than a second list that can drift from it"
+      proof: "grep: REGENERABLE_ARTIFACT_GENERATORS in src/run-task.ts"
+    - claim: "the pre-strike gate AGREES with the prompt — a fix round that adds only a registry-named artifact does not stand the rung down or spend a strike, so obeying the gate is not punished by the next one"
+      proof: "unit test: test/a-worker-may-not-apply-the-edit-its-gate-printed.test.ts"
+    - claim: "THE FALSIFIER — a fix round that adds a genuinely unrelated out-of-scope path still stands the rung down exactly as today, in both the `files` and the plan-only regime"
+      proof: "unit test: test/a-worker-may-not-apply-the-edit-its-gate-printed.test.ts"
+  risk: high
+  band_meaning: blast-radius
+  origin: "retro-followup#3409"
+  plan_refs: ["W1-T1227", "W1-T2532", "W1-T2538", "W1-T2526", "W1-T2488"]
+  files: [src/run-task.ts, test/a-worker-may-not-apply-the-edit-its-gate-printed.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    risk:high, band_meaning: blast-radius — honest on both axes, and recorded rather than exempted.
+    BLAST RADIUS: widening what a fix worker may commit reaches every PR the rung touches, so the
+    bounded-registry criterion and the unrelated-path falsifier are load-bearing, not defensive
+    extras. SPAN: `subsystemsOf` also scores the two declared files (an instrument and its own
+    falsifier suite) as two concerns because their basenames differ, which would flag [sizing] at
+    medium; the change is one concern (a fix worker may apply the edit its gate printed) and is
+    unsatisfiable piecewise — a prompt carve-out whose pre-strike gate still refuses is a trap, and a
+    relaxed gate under a prompt that still forbids the edit changes nothing. Same regrade shape as
+    W1-T2538 and W1-T2551.
+
+    THE PROPOSAL'S LITERAL ASK IS NOT DROPPED, IT IS ANSWERED (Standing rule 16): both ceilings were
+    verified already satisfied in the checkout this was drafted from — `src/lib/account-usage.ts` at
+    740 lines against a recorded 740, `src/lib/worker.ts` at 3684 against a recorded 4000 — so no
+    task is filed to perform an edit whose own gate would report it as a no-op, and the requested
+    `3547` is stale against W1-T2539's bucketing. If a later tree disagrees, the check is one
+    command: `node scripts/source-size-ratchet.mjs`.
+
+    depends_on IS EMPTY DELIBERATELY. W1-T2532's automatic recording mode is a sibling, not a
+    prerequisite: an automatic write still produces a diff a lane must be permitted to push, and its
+    own design leaves the CI path never writing, so the fix-round case this task owns survives it.
+    File-overlap serialization (W1-T171) applies — both declare `src/run-task.ts`.

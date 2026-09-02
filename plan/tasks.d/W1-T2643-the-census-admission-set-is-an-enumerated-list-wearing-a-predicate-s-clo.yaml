@@ -1,0 +1,162 @@
+- id: W1-T2643
+  title: "THE CENSUS ADMISSION SET IS AN ENUMERATED LIST WEARING A PREDICATE'S CLOTHES — W1-T2478 measured six census suites and five under the bound, shipped four, and named neither the fifth nor the over-bound sixth anywhere a reader can check; the refusal it claims in prose is evidenced nowhere, so the population is unauditable and the count can drift again in silence"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 100.00
+  files: [src/lib/ci-parity.ts, package.json, test/the-census-admission-set-is-derived-not-enumerated.test.ts]
+  origin: architect
+  plan_refs: ["W1-T2478", "W1-T2523", "W1-T1266"]
+  status: queued
+  attempts: 0
+  rationale: |
+    FILED AS THE RULE-21 FOLLOW-UP TO A PROPOSAL THAT WAS ALREADY SATISFIED, and that framing is
+    the first finding rather than a preamble. The follow-up harvest
+    `followup:W1-T2478-1788108376050:2026-08-30T16:49:17.177Z:0` asked to IMPLEMENT W1-T2478 on the
+    ground that the run was a recon whose deliverable was only a report. Verified at this checkout,
+    the implementation is present in tracked source: `src/lib/ci-parity.ts:856-990` carries the
+    W1-T2478 block, `FAST_GATE_CENSUS_BOUND_MS = 2000` at `:899`, four `boundMs`-bearing census
+    entries at `:948-980`; `package.json:61-64` carries `census:bound-kind`,
+    `census:catch-erasure`, `census:negative-reachability` and `census:no-shallowing`; and
+    `test/fast-gate-admits-the-census-class.test.ts` exists and asserts the admission set. Ratifying
+    the proposal as written would dispatch a worker to rebuild shipped work — the already-satisfied
+    class W1-T229 and W1-T202 were each retired for.
+
+    THE ONE SURFACE THAT IS STATED AND NOT SHIPPED, WHICH IS WHAT THIS TASK CLOSES. W1-T2478's own
+    ratified measurement reads: census suites that walk the src population = 6; of those under the
+    two-second bound = 5; combined milliseconds of those five = 5372; milliseconds of the one that
+    bound excludes = 6371. The shipped set is FOUR —
+    `test/fast-gate-admits-the-census-class.test.ts:66` asserts `CENSUS_STEPS.length === 4` and its
+    own comment calls them "four of the six measured census suites". So TWO of the six are
+    unaccounted for in any artifact a reader can open: the fifth that the ratified measurement
+    placed UNDER the bound, and the sixth the bound excludes. Neither is named in `src`, in
+    `package.json`, or in the test.
+
+    THE REFUSAL IS CLAIMED AND EVIDENCED NOWHERE (standing rule 22, applied to the gate's own
+    admission record). `ci-parity.ts:884-886` states, of an unnamed member: "A suite that fits shape
+    (a)-(c) but fails (d) is not added here and is not exempted either — it stays out until it is
+    made cheaper or its own cost is argued separately." That sentence names no suite and carries no
+    number, so nobody can re-measure it, re-argue it, or notice when it becomes cheap enough to
+    admit. A refusal that cannot be checked is indistinguishable from a forgotten entry, and this
+    task exists because the artifact cannot presently tell those two apart.
+
+    THE TASK'S OWN DOCTRINE IS WHAT INDICTS THIS, WHICH IS WHY IT IS A FOLLOW-UP AND NOT A
+    RE-ARGUMENT. W1-T2478 required admission "decided by a stated predicate rather than an
+    enumerated list", refusal "by the SAME bound rather than by an exception written for it", and a
+    set "never defined by an enumerated list somebody extends later without re-measuring". Four
+    names in a table with no population beside them IS an enumerated list; the predicate lives in a
+    comment. And a SILENT omission is strictly worse than the written exception the task forbade —
+    an exception is at least visible and arguable, where an absence is neither.
+
+    THE CONSEQUENCE IS THE ORIGINAL DEFECT, RE-ACQUIRED ONE SUITE AT A TIME. The next author who
+    writes a census-shaped suite has nothing to check membership against, so the fast gate goes
+    blind to it exactly the way it was blind to `test/bound-kind-declared.test.ts` when a single
+    undeclared bound-shaped constant reddened #3304 after a clean fast run. The sibling shard
+    W1-T2523 (queued) reasons from "the population is enumerable from the same data the fast gate
+    already keeps" — true today only of the four admitted members, false of the other two, so the
+    gap propagates into work not yet built.
+
+    HONEST LIMITS OF THIS FILING, STATED SO THE IMPLEMENTER DOES NOT INHERIT THEM AS FACTS. This
+    was drafted from a read-only seat with no shell and no GitHub read, so: (i) the merged state of
+    W1-T2478 is asserted from tracked-file contents at this checkout, not from a PR read; and (ii)
+    the six / five / four counts are re-read from W1-T2478's ratified rationale and the shipped
+    test's own assertion, NOT re-measured. The implementer RE-MEASURES rather than trusting either
+    number — distrust the prompt over the installed version. If the fifth suite now measures OVER
+    the bound, that is a legitimate outcome and not a failure of this task: the deliverable is that
+    its refusal is NAMED and NUMBERED, never that it is admitted.
+
+    THE RISK BAND IS RULE 19's SPAN, NOT BLAST RADIUS: the population and the step table sit in one
+    stem, the census npm-script surface is a second and the test a third, so `files:` spans
+    independent acceptance concerns and sizingViolation refuses risk:medium for the span alone —
+    the same recorded regrade W1-T2478 itself carries for the same three paths.
+  design: |
+    ENUMERATE THE POPULATION, DERIVE THE ADMISSION. Add one exported census population beside
+    `FAST_GATE_STEPS` in `src/lib/ci-parity.ts`: every suite satisfying the shipped predicate's
+    clauses (a) walks the tracked src population via `git ls-files`, (b) asserts something about
+    every file it walks, (c) carries a baseline or exemption table — each member carrying its own
+    re-measured milliseconds and a verdict that is either ADMITTED (and therefore present in
+    `FAST_GATE_STEPS` with `boundMs`) or REFUSED with a reason that is a NUMBER (measured ms
+    against `FAST_GATE_CENSUS_BOUND_MS`) or a NAMED failing clause of (a)-(c).
+
+    THE STEP TABLE BECOMES A PROJECTION, NOT A PARALLEL LIST. `FAST_GATE_STEPS`' census entries are
+    derived from the population's admitted members, so the two cannot disagree and a hand-added
+    census step with no population member is impossible rather than merely discouraged.
+
+    THE DRIFT GUARD IS A CENSUS OF THE CENSUS, AND IT IS APPROXIMATE BY CONSTRUCTION. A suite in the
+    tree satisfying (a)-(c) and absent from the population FAILS. The recogniser is a heuristic and
+    must say so in its own words — the posture W1-T2523 records for its own derivation — so a suite
+    it cannot classify is carried as UNKNOWN and reviewed, never omitted silently, which would
+    rebuild the same blind spot one layer up.
+
+    MEASURE, DO NOT COPY. Re-measure each member's own `npm run --silent <script>`-shaped
+    invocation at head rather than transcribing the 2026-08-30 figures from W1-T2478's rationale;
+    the numbers are a property of the tree at a moment and this task's whole complaint is about
+    numbers that nobody can re-derive.
+
+    POLARITY UNCHANGED, SAID PLAINLY BECAUSE THIS REPO KEEPS REDISCOVERING IT.
+    `FAST_GATE_CENSUS_BOUND_MS` stays a PRIMARY CONTROL in W1-T1266's sense — it decides admission
+    on an ordinary run, before anything has failed — and the refusal record is documentation of a
+    measurement, never a backstop and never documented as one.
+
+    NOT IN SCOPE: changing what any census suite ASSERTS; changing the value of
+    `FAST_GATE_CENSUS_BOUND_MS`; `--ci-parity`, which already shells the full suite and is
+    unchanged; adding a third preflight mode; and W1-T2523's changed-path-to-suite report.
+
+    SEQUENCING FENCE, STATED SO NOTHING IS ORPHANED (standing rule 14). W1-T2523 is queued, builds
+    the changed-path-to-census-suite REPORT, and declares `src/lib/ci-parity.ts` too. Whichever
+    lands second READS this population rather than growing a second enumeration, and neither may
+    hard-code a parallel list. Recorded as sequencing rather than a `depends_on` edge for the reason
+    this plan already records twice (W1-T233, W1-T177): a hard edge onto a queued sibling strands
+    independently valuable work if that sibling stalls.
+
+    VERIFY FROM SOURCE BEFORE EDITING, DISTRUSTING THIS NOTE — line numbers drift:
+    `ci-parity.ts:856-990` (the W1-T2478 block and its four entries), `:899` (the bound), the
+    per-entry timing in `runPreflightFast`, `package.json`'s `census:*` scripts, and
+    `test/fast-gate-admits-the-census-class.test.ts:65-66`, whose four-entry assertion this task
+    must UPDATE against the derived population rather than contradict.
+  acceptance:
+    - claim: "every census-shaped suite in the tree appears in ONE enumerated population carrying a verdict — admitted, or refused with a measured number or a named failing predicate clause — and no member is absent from it"
+      proof: "unit test: test/the-census-admission-set-is-derived-not-enumerated.test.ts"
+    - claim: "the fifth suite W1-T2478 measured under the bound is accounted for BY NAME — admitted, or refused with its own re-measured milliseconds — and the over-bound sixth is named too, so the population matches its own measurement instead of the shipped table's four"
+      proof: "unit test: test/the-census-admission-set-is-derived-not-enumerated.test.ts"
+    - claim: "a refusal for cost carries the measured milliseconds it was refused at, so over-the-bound is a number a later reader can re-derive and re-argue rather than a prose assertion naming no suite"
+      proof: "unit test: test/the-census-admission-set-is-derived-not-enumerated.test.ts"
+    - claim: "the drift guard holds: a census-shaped suite present in the tree and absent from the population FAILS, and a suite the recogniser cannot classify is carried as UNKNOWN rather than silently omitted"
+      proof: "unit test: test/the-census-admission-set-is-derived-not-enumerated.test.ts"
+    - claim: "the fast gate's census steps are the population's ADMITTED projection — a census step with no population member, and a member marked admitted with no step, each FAIL"
+      proof: "unit test: test/the-census-admission-set-is-derived-not-enumerated.test.ts"
+    - claim: "the enumerated population is a real exported artifact inside the gate's own module, not a comment"
+      proof: "grep: CENSUS_POPULATION in src/lib/ci-parity.ts"
+    - claim: "regression lock: every step admitted before this task is still admitted, the bound value is unchanged and still stated as a primary control, and the fast gate still never shells the full suite"
+      proof: "unit test: test/the-census-admission-set-is-derived-not-enumerated.test.ts"
+  note: |
+    PROVENANCE: filed from the follow-up harvest
+    `followup:W1-T2478-1788108376050:2026-08-30T16:49:17.177Z:0`, which asked to implement W1-T2478.
+    Verified at this checkout that W1-T2478's implementation is already in tracked source
+    (ci-parity.ts:856-990, package.json:61-64, test/fast-gate-admits-the-census-class.test.ts), so
+    the proposal is ratified as the STANDING RULE 21 FOLLOW-UP to that merged work rather than as a
+    re-implementation — a dispatched re-build would spend a run reconstructing shipped code, the
+    class W1-T229 and W1-T202 were each retired for.
+
+    DELIBERATELY NOT FILED HERE, and both are the operator's call rather than smuggled into a
+    ratification: (i) whether W1-T2478's shard should be closed or corrected — its `status: queued`
+    is decorative per this file's own header, real merge-state derives from GitHub, and this seat
+    could not read GitHub to say whether the trailer credited it; if it is UNCREDITED it will be
+    re-dispatched at its own budget against work already on main, which is worth an `rmd correct`
+    rather than a task. (ii) whether the sixth, over-bound suite should be made cheaper and
+    admitted — W1-T2478 put that out of scope on its own terms and this task keeps it there,
+    requiring only that the refusal be named and numbered.
+
+    budget_usd is 100.00 per this file's binding tripwire doctrine — a cap set NEAR the work's
+    expected cost is a WORK limit wearing a runaway limit's name (the W1-T3 blocked_budget fixture
+    at $3.57/36 turns against a guessed $4). The siblings' 14.00 is not followed here for that
+    reason; lowering it later is the operator's call, not a worker's.
+
+    depends_on is empty on purpose. W1-T2478 is the parent and appears in plan_refs, but a hard edge
+    onto it would strand this task indefinitely if that task is not credited on GitHub — precisely
+    the bootstrap stranding W1-T75's note records — and the sibling W1-T2523 is queued, where a hard
+    edge would strand it behind unbuilt work. The real relationship with W1-T2523 is a file-overlap
+    sequencing fence on `src/lib/ci-parity.ts`, stated in `design`.

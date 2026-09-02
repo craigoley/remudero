@@ -1,0 +1,112 @@
+- id: W1-T2625
+  title: "READ-ONLY FORENSICS — name the mechanism that let a run's worktree base sit 1553 commits behind origin/main while W1-T405's shipped base-currency guard was live, and answer the SYSTEMIC question (every dispatch, or one incident) with a measured count rather than an anecdote"
+  repo: remudero
+  depends_on: []
+  type: diagnose
+  verify: auto
+  principles: {tdd: encouraged}
+  budget_usd: 100.00
+  rationale: |
+    FOLLOW-UP HARVEST from run W1-T2460 (run W1-T2460-1788054755234, PR #3286): that run's worktree
+    base `e9454618` sat 1553 commits behind `origin/main`. The harvest's own words are the question
+    worth answering: if worktree provisioning is systemically stale, every task builds against
+    outdated code — and nothing downstream would say so, because a stale base and a scope violation
+    produce the SAME diff shape (W1-T405's own rationale records that the out-of-scope scope guard
+    cannot tell them apart once the distinguishing evidence is gone).
+
+    WHY THIS IS NOT ALREADY ANSWERED, verified at source rather than assumed. W1-T405 SHIPPED an
+    assert-and-refuse: `worktreeAdd` (src/lib/worker.ts) records the created base, then calls
+    `assertWorktreeBaseCurrent`, which throws `WorktreeBaseStaleError` when an INDEPENDENT
+    `git ls-remote` head differs from the base by any commit, and the dispatch site
+    (src/run-task.ts:11553-11579) catches it, ledgers `worktree.stale_base`, releases the claim and
+    returns `verdict: "failed"` before recon/implement/commit spend anything. So a base 1553 commits
+    behind is EXACTLY the condition a live guard exists to refuse, and the run happened anyway. One
+    of the following is true and NOBODY KNOWS WHICH — that is the whole task:
+
+      (a) THE READ FAILED OPEN. `assertWorktreeBaseCurrent`'s unreadable branch warns and RETURNS
+          (design note (iii), and it is correct — refusing on an unmeasurable condition converts a
+          transport blip into a stalled queue). Production passes no `warn`, so it lands on
+          `console.error` with NO ledger line and NO counter. A host where `git ls-remote origin`
+          cannot resolve — an App token absent at that instant, a private-visibility flip, a DNS
+          blip — silently disables the guard on EVERY dispatch, indefinitely, and the ledger cannot
+          distinguish "checked and current" from "could not check". W1-T197 already measured this
+          exact fail-open shape on the neighbouring headroom read: 197 unreadable of 253 checks.
+      (b) THE BASE WAS NEVER THE SUBJECT OF THE CHECK. `worktreeAdd` is one provisioning path among
+          several (its own doc comment names six call sites); a reclaimed/reused worktree branch, a
+          non-`worktreeAdd` clone, or a container tree checked out by `deploy/entrypoint.sh` is a
+          different object, and the reported "worktree base" may be the repo CHECKOUT rather than a
+          run worktree.
+      (c) THE UPSTREAM WAS ALREADY STALE, so base and remote head AGREED while both were behind —
+          the shape W1-T494 records verbatim ("they AGREED, while both were ten commits behind").
+          `deploy/entrypoint.sh`'s own comment names W1-T405's scenario "arriving one layer
+          upstream", W1-T2501 records a boot fetch failing open onto a stale tree TWICE, and
+          W1-T496 measured a running image 124 commits behind.
+      (d) IT IS THE KNOWN CHECKOUT DRIFT AND NOT A WORKTREE AT ALL. MASTER-PLAN's standing
+          operational note (1) records `~/Remudero/repos/remudero` drifting ~100 commits behind per
+          cycle (85 → 155 → 278 → 371 …). 1553 is on that curve.
+
+    THE COUNT IS THE POINT. "One run built on a stale base" is a bad afternoon; "every dispatch on
+    this host has been building on a stale base" is a fleet-wide correctness failure that silently
+    invalidates recent merges, and the two are indistinguishable from the harvest line alone.
+  design: |
+    A BOUNDED READ-ONLY FORENSIC PASS. It reads: `worktreeAdd`/`assertWorktreeBaseCurrent`/
+    `recordWorktreeBase` and every one of `worktreeAdd`'s call sites; the dispatch catch at
+    src/run-task.ts:11553; `deploy/entrypoint.sh`'s ref-resolution and boot-fetch blocks; and the
+    LEDGER already on disk — `worktree.add`, `worktree.stale_base`, `worktree.add_failed`,
+    `worktree.reclaimed`-class lines and the run records around run W1-T2460-1788054755234. It
+    writes ONE artifact, `docs/audits/worktree-base-provisioning-2026-09.md`, in the shape
+    docs/audits/ already uses.
+
+    IT MUST DISCRIMINATE, NOT NARRATE. Every candidate (a)-(d) above is marked RULED IN or RULED
+    OUT with the evidence that decided it, cited by file and symbol so a later reader re-derives
+    the verdict instead of trusting it. A candidate the available evidence cannot decide is marked
+    UNDECIDED with the specific observation that would decide it — an honest UNDECIDED is a
+    finding; a confident guess is the failure mode this pass exists to replace.
+
+    THE SYSTEMIC QUESTION IS ANSWERED WITH A NUMBER. Over the ledger window it examines, the audit
+    reports how many worktree creations it can show carried a base equal to the then-current remote
+    head, how many it can show did not, and — the honest third bucket, which is likely the largest
+    — how many it CANNOT TELL, because the success path ledgers no base at all. That third number
+    is itself the headline result if it dominates.
+
+    IT SHIPS NO FIX AND EDITS NO SOURCE. Anything that needs building is named as a SUCCESSOR
+    FILING in the artifact (W1-T2626 is already filed for the observability half; further findings are
+    separate filings). Smuggling a src/ change into a forensic pass is the scope violation this
+    repo already refuses at the guard.
+
+    HONEST LIMIT, STATED IN THE ARTIFACT ITSELF: this pass reads records, not a live host. If the
+    deciding evidence was never written down — which is precisely W1-T2626's premise — the audit says
+    so and stops, rather than inferring a mechanism from an absence.
+  acceptance:
+    - claim: "each enumerated candidate mechanism is marked RULED IN, RULED OUT or UNDECIDED with the evidence that decided it — a narrative that names one cause without disposing of the others FAILS"
+      proof: "grep: RULED OUT in docs/audits/worktree-base-provisioning-2026-09.md"
+    - claim: "the systemic question is answered with a MEASURED count over a named ledger window — creations shown current, shown stale, and NOT DETERMINABLE — never a single-incident anecdote"
+      proof: "grep: NOT DETERMINABLE in docs/audits/worktree-base-provisioning-2026-09.md"
+    - claim: "every verdict cites its source anchor by symbol, so the reasoning is re-derivable rather than asserted — the guard under examination is named, not paraphrased"
+      proof: "grep: assertWorktreeBaseCurrent in docs/audits/worktree-base-provisioning-2026-09.md"
+    - claim: "anything needing a code change is named as a SUCCESSOR FILING in the artifact rather than built here — this pass is read-only by construction"
+      proof: "grep: SUCCESSOR FILING in docs/audits/worktree-base-provisioning-2026-09.md"
+  risk: medium
+  origin: "followup#W1-T2460-1788054755234"
+  plan_refs: ["W1-T405", "W1-T2501", "W1-T496", "§4B"]
+  files: [docs/audits/worktree-base-provisioning-2026-09.md]
+  status: queued
+  attempts: 0
+  note: |
+    FILED 2026-09-01 from follow-up harvest followup:W1-T2460-1788054755234 (run
+    W1-T2460-1788054755234, PR #3286). Every mechanism in the rationale was verified at source
+    before filing rather than inherited from the harvest line: the guard is live
+    (assertWorktreeBaseCurrent, src/lib/worker.ts), its refusal is ledgered
+    (worktree.stale_base, src/run-task.ts:11565), its unreadable branch warns to console.error with
+    no ledger line, and the success path's `worktree.add` payload carries `{branch, worktreePath}`
+    and NOT the base sha.
+    PROOF-SHAPE HONESTY, stated rather than hidden: four `grep:` proofs over an artifact this task
+    itself authors are a WEAKER instrument than an executed test — they prove the artifact has the
+    required structure, not that its verdicts are right. That is the correct instrument for a
+    forensic pass (there is no code deliverable to test), and it is why the criteria demand
+    disposal of every candidate and a measured third bucket rather than a conclusion: a pass that
+    cannot decide must SAY so in the same structure, which a grep can see.
+    SEQUENCING, NOT A HARD EDGE: W1-T2626 (the observability half) is filed alongside and is
+    independently justified from source. It is deliberately NOT a depends_on — a hard edge would
+    strand this forensic pass behind a risk:high dispatch-path change, and the audit's most likely
+    headline finding is precisely that W1-T2626's telemetry did not exist.

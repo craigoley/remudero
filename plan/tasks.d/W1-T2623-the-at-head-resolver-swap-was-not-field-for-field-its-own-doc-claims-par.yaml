@@ -1,0 +1,163 @@
+- id: W1-T2623
+  title: "THE AT-HEAD RESOLVER SWAP WAS NOT FIELD-FOR-FIELD — its own doc claims parity over FOUR fields while the resolver it replaced returns FIVE, so `reviewCommand` declares `openTaskIds` at run-task.ts:13846, never assigns it, and still hands it to `runReview` at :13996; and the operator-visible `criteria from …` line lost the read-identity assertion the old `source` string carried, so a review no longer says WHICH plan bytes it gated"
+  repo: remudero
+  depends_on: [W1-T2462]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: |
+    FILED AS A RETROSPECTIVE FOLLOW-UP, and the ordering is the first honest thing to record. The
+    harvested item asked to "confirm result-shape compatibility between `resolvePlanCriteriaForReview`
+    and `resolvePlanCriteriaAtHead` BEFORE wiring, since the task's acceptance criteria depend on it
+    being a like-for-like replacement, not a rewrite." THE WIRING ALREADY MERGED — W1-T2462/#3285,
+    credited in MASTER-PLAN's shipped line, and `reviewCommand` calls the at-head resolver today at
+    run-task.ts:13877. W1-T2462 is merged and therefore unamendable (Standing rule 21: the amender owes
+    a follow-up, not an edit), so the confirmation is filed here and CLOSES what it finds rather than
+    only reporting it.
+
+    THE PARITY CLAIM IS TRUE OF THE FIELDS IT LISTS, AND THE LIST IS SHORT BY ONE. review.ts:6040-6042,
+    verbatim: "same shape as run-task.ts's `resolvePlanCriteriaForReview` (criteria/source/
+    taskDeclaredFiles/divergence) so swapping one call for the other at a future call site is a
+    like-for-like replacement, not a rewrite." That enumerates FOUR fields. The replaced resolver's
+    return type (run-task.ts:13753-13757) declares FIVE:
+
+      criteria · source · taskDeclaredFiles · openTaskIds · divergence
+
+    `PlanCriteriaAtHeadResult` (review.ts:6043-6051) carries criteria/taskId/taskDeclaredFiles/source/
+    divergence — no `openTaskIds`. So the shape claim was never wrong about what it said; it was
+    incomplete about what it compared, and the fifth field went out of the call site with it.
+
+    DIVERGENCE 1 — `openTaskIds`, MEASURED BENIGN, AND THAT IS EXACTLY WHY IT MUST BE LOCKED.
+    `reviewCommand` still declares `let openTaskIds: Set<string> | undefined;` (run-task.ts:13846) and
+    still passes `openTaskIds` into `runReview` (:13996), but the `if (taskId)` block that replaced the
+    old resolver (:13876-13882) assigns criteria, source, taskDeclaredFiles and divergence and NEVER
+    assigns it. Read on this head it is permanently `undefined` on the manual/live review path. The
+    one consumer found reads `const knownOpenIds = openTaskIds ?? new Set<string>();`
+    (review.ts:3677), and the old producer's own comment (run-task.ts:13775-13781) records that
+    `openTaskIdsFromPlan(plan)` with no projection ALREADY "degrades to the EMPTY set... so every
+    `SHIPS-UNWIRED:` marker is FLAGGED rather than wrongly honoured". Empty set and `undefined` are the
+    same input there, so the SHIPS-UNWIRED floor (W1-T367) is fail-closed either way and NOTHING
+    OBSERVABLE CHANGED. The defect is that no assertion anywhere records that equivalence: the first
+    consumer that distinguishes an absent set from an empty one silently moves a merge-gate floor, and
+    the next reader has no way to tell a deliberate no-op from an unfinished swap.
+
+    DIVERGENCE 2 — THE READ-IDENTITY ASSERTION WENT DARK ON THE REVIEW PATH, and this one is a real
+    loss of a shipped guarantee. The old resolver built its `source` as
+    `plan/tasks.yaml task <id> (<n> criteria) — read: <abs path> <hash>` via `formatReadIdentity`
+    (run-task.ts:13784-13786; the helper at task-linter.ts:3279). The at-head resolver builds
+    `plan at <headSha> task <id> (<n> criteria)` (review.ts:6109). That string is not internal: it is
+    printed at run-task.ts:13910 as `### rmd review PR #<n> — criteria from <source>`, the same line
+    the W1-T2511 shard quotes verbatim out of the live daemon log. lint-plan still carries its half of
+    the assertion (run-task.ts:17709); review no longer carries its own. A gate proving WHICH input it
+    read is the W1-T120 class — an active gate pointed at the wrong bytes is still green and still
+    wrong — and it was removed by a swap whose own doc called itself like-for-like.
+
+    THE RE-EXPRESSION IS AVAILABLE AND MAY BE STRONGER, NOT WEAKER. At a fixed sha the plan is a
+    content-addressed git object, so identity is the blob oid rather than a hash of a working-tree
+    file: `git rev-parse <headSha>:plan/tasks.yaml` answers it in one LOCAL call, on objects the
+    W1-T2511 hoisted fetch has already arranged to be present. `loadPlanAtRef` (plan.ts:505) also
+    reads the sibling `plan/tasks.d/` via `git ls-tree`, so the shard set is part of what was gated and
+    must not be silently omitted from whatever identity is printed. VERIFY the cheapest sound form
+    from source and from git's own documentation before choosing one.
+
+    NOT IN SCOPE, each fenced deliberately so nothing is orphaned and nothing is re-decided:
+    (a) `PlanCriteriaAtHeadDivergence.cause` (review.ts:6029-6037) is computed and then dropped by
+        `reviewCommand`'s ledger line at :13903 — that belongs to W1-T2511's own claim 10 ("the
+        divergence message distinguishes an unfetched object from a path genuinely absent at that
+        sha"), which is queued; duplicating it here would re-decide a filed task.
+    (b) `resolvePlanCriteriaForReview`'s remaining ZERO call sites — already locked at zero by
+        test/resolver-divergence-detector.test.ts:194, and that suite exercises the function directly.
+        This task does not delete it and does not re-wire it.
+    (c) the residual window W1-T2432 already named and priced (a shard merging AFTER the PR's own head
+        is invisible by construction).
+  design: |
+    VERIFY EVERY LINE REFERENCE ABOVE FROM SOURCE BEFORE EDITING — this rationale is a 2026-09-01
+    survey of a 27k-line file and drift is expected; the facts are the field lists, the unassigned
+    variable, and the two `source` builders, not the numbers.
+
+    (i) THE PARITY GUARD IS THE DELIVERABLE, not a side effect. A test enumerates the fields of
+        `resolvePlanCriteriaForReview`'s declared result type and asserts, per field, that
+        `reviewCommand`'s at-head call site either PRODUCES it or is proven behaviorally identical
+        without it. A field added to either resolver later, or dropped at the call site later, must
+        make that test fail — the swap's own doc could claim parity precisely because nothing
+        mechanical checked it.
+
+    (ii) `openTaskIds`: PROVE-AND-LOCK, do not restore. Restoring it would need a real projection to be
+        worth anything, and run-task.ts:13775-13781 states why the reviewer does not have one —
+        computing it here is "a second, independent GitHub read this reviewer does not otherwise need",
+        and without a projection the produced value is the empty set, i.e. identical to `undefined` at
+        `review.ts`'s `?? new Set()`. So the correct close is an assertion that the two are the same
+        input, plus a guard that fails if any consumer starts distinguishing them. If the
+        implementer's own reading of source contradicts this, REPORT that and restore the field
+        instead — but do not add a GitHub read to this path silently.
+
+    (iii) READ IDENTITY: produce it where the objects are read (`resolvePlanCriteriaAtHead`, review.ts)
+        and let the call site consume it unchanged — run-task.ts:13879 is already
+        `if (resolved.source) source = resolved.source`, so no second rendering path is created. The
+        identity must name the sha, the plan path, and the object identity of what was actually read,
+        including the shard set `loadPlanAtRef` also consults.
+
+    (iv) NO VERDICT SEMANTICS MOVE. Criteria resolution, the body `## Acceptance` fallback, the
+        fail-closed shape, and the divergence arm are untouched. A trailer that resolves nothing still
+        fails closed; a source string is legibility, never evidence.
+
+    (v) EXISTING TESTS ASSERT THE CURRENT SOURCE STRING — test/review-resolves-criteria-at-the-prs-own-head.test.ts
+        and test/review-wires-criteria-at-head.test.ts both pin `plan at <sha> task <id> (<n> criteria)`.
+        Updating them is EXPECTED work inside this task's declared scope, not scope creep; they are
+        listed in `files:` for exactly that reason. Do not weaken what they assert — extend it.
+
+    RULE 19 EXIT — RE-RISK TO HIGH, NOT DECOMPOSE, recorded on the merits (the W1-T240/W1-T250/W1-T253
+    atomic-coupling precedent): this spans `src/lib/review.ts` and `src/run-task.ts`, but its acceptance
+    asserts ONE invariant — no field the replaced resolver supplied is silently lost at the new call
+    site — and that invariant is UNSATISFIABLE PIECEWISE. The parity guard must read BOTH the old
+    result type (run-task.ts) and the new one (review.ts) to compare them at all, and the read identity
+    must be produced in review.ts to be consumed by run-task.ts's printed line. A split yields two
+    tasks, neither independently testable. Blast radius reinforces the band, as it did for W1-T2511:
+    this is the preamble of the command that judges every PR.
+  acceptance:
+    - claim: "a parity guard enumerates the replaced resolver's declared result fields and asserts, per field, that the at-head call site either PRODUCES it or is proven behaviorally identical without it — a field silently dropped at the call site FAILS, which is the check whose absence let the swap's own doc claim parity over four of five fields"
+      proof: "unit test: test/resolver-swap-field-parity.test.ts"
+    - claim: "the `openTaskIds` equivalence is LOCKED — an absent set and the empty set the replaced resolver produced with no projection reach the SHIPS-UNWIRED floor as the same input, and a consumer that begins distinguishing them FAILS the guard rather than silently moving a merge-gate floor"
+      proof: "unit test: test/resolver-swap-field-parity.test.ts"
+    - claim: "the review path's read-identity assertion is restored — the resolved source names the head sha, the plan path, and the object identity of the plan bytes actually read (shard set included), so the printed `criteria from …` line says WHAT was gated instead of only a task id and a count"
+      proof: "unit test: test/resolver-swap-field-parity.test.ts"
+    - claim: "restoring the identity moves NO verdict semantics — criteria resolution, the PR-body Acceptance fallback and the fail-closed shape are unchanged, and a trailer that resolves nothing still fails closed"
+      proof: "unit test: test/review-resolves-criteria-at-the-prs-own-head.test.ts"
+    - claim: "lint-plan's own half of the read-identity assertion is untouched — the regression lock proving this task restored the review surface rather than relocating the lint one"
+      proof: "grep: formatReadIdentity in src/run-task.ts"
+  risk: high
+  origin: architect
+  plan_refs: ["§5", "§5C", "W1-T2462", "W1-T2432", "W1-T120", "W1-T367"]
+  files: [src/lib/review.ts, src/run-task.ts, test/resolver-swap-field-parity.test.ts, test/review-resolves-criteria-at-the-prs-own-head.test.ts, test/review-wires-criteria-at-head.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    RATIFIES the follow-up harvest `followup:W1-T2462-1788054829616:2026-08-30T01:56:18.209Z:1` —
+    "confirm result-shape compatibility between `resolvePlanCriteriaForReview` (src/run-task.ts) and
+    `resolvePlanCriteriaAtHead` (src/lib/review.ts) before wiring, since the task's acceptance criteria
+    depend on it being a like-for-like replacement, not a rewrite." The confirmation was PERFORMED at
+    filing rather than deferred to the worker: the answer is that parity holds for four fields and
+    fails for two facts — a fifth field (`openTaskIds`) the doc's enumeration omitted, and the read
+    identity inside `source`. Both are carried above as criteria; neither is asserted as a defect
+    without a source citation.
+
+    SEQUENCING FENCE, NOT A HARD EDGE (the W1-T233 precedent). W1-T2511 is queued and declares
+    `src/run-task.ts`, so it and this task overlap on the same file and should not run concurrently
+    (the W1-T171 overlap class, still unbuilt — so the fence is stated here rather than enforced).
+    It is DELIBERATELY not a `depends_on`: a hard edge would strand a legibility repair behind a
+    risk:high reordering of the review preamble, and neither task needs the other to be correct.
+    Whichever lands second must preserve the other's work: W1-T2511 owns the divergence CAUSE reaching
+    the ledger/console, this task owns the SOURCE string's read identity, and they touch adjacent lines
+    of the same block.
+
+    `depends_on: [W1-T2462]` is the true ancestor and is already merged (#3285), so it gates nothing —
+    it is recorded because this task exists ONLY as that task's follow-up and would be an orphan
+    without it (Standing rule 17).
+
+    HONEST LIMIT ON DIVERGENCE 1, stated so the implementer does not over-trust this row: the
+    `?? new Set()` equivalence was verified at ONE consumer (review.ts:3677, reached from :3928 via
+    `evidence.openTaskIds`). The guard must ENUMERATE the consumers rather than inherit that count —
+    if a second consumer exists that distinguishes an absent set from an empty one, the correct close
+    flips from prove-and-lock to restore, and the PR should say so rather than quietly proving the
+    weaker claim.

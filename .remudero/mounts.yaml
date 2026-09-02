@@ -57,6 +57,50 @@ efforts:
   medium: 2
   high: 3
 
+# ── The capability axis (W1-T2573) — provider-neutral, DATA not a substring match ──────────────
+# `tiers` above ranks CLAUDE model names — the vocabulary every mount in this file is written
+# in. `capabilities` is the axis a SECOND vendor's adapter resolves a requested Claude model +
+# effort INTO, so a cross-provider worker (today: Codex, via codexTierForRequestedModel in
+# src/lib/worker-provider.ts) performs a TABLE LOOKUP here rather than a substring match on the
+# Claude model name — renaming a Claude model, or adding a Codex model, is a data edit to this
+# block, never a code change. Three parts:
+#   `ladder`  — capability name -> rank, provider-agnostic, same shape as `tiers` above.
+#   `claude`  — Claude model name -> capability. Every `tiers` key MUST appear here (checked at
+#               load, src/lib/mounts.ts's parseCapabilities) — including a Claude model whose
+#               name carries neither "haiku" nor "opus", which the OLD substring function could
+#               only route by accident (it silently fell through to "balanced"); here it resolves
+#               by its DECLARED capability instead.
+#   `codex`   — capability -> effort -> ordered (most-preferred-first) Codex candidate models.
+#               Keyed on (capability, effort) so effort genuinely crosses the provider boundary:
+#               a `sonnet/high` mount and a `sonnet/medium` mount both resolve capability
+#               "balanced", but prefer DIFFERENT rows below — they are not the same request.
+# The Tier Invariant (below) is enforced on capability rank too once this block is declared
+# (src/lib/mounts.ts's enforceTierInvariant) — purely additive to the tiers-based check, so it
+# stays enforceable even for a worker mount that names a model from a second vendor.
+capabilities:
+  ladder:
+    economy: 1
+    balanced: 2
+    frontier: 3
+  claude:
+    haiku: economy
+    sonnet: balanced
+    opus: frontier
+    claude-opus-5: frontier
+  codex:
+    economy:
+      low:    [gpt-5.4-mini]
+      medium: [gpt-5.6-luna, gpt-5.3-codex-spark, gpt-5.4-mini]
+      high:   [gpt-5.3-codex-spark, gpt-5.6-luna, gpt-5.4-mini]
+    balanced:
+      low:    [gpt-5.4]
+      medium: [gpt-5.6-terra, gpt-5.5, gpt-5.4]
+      high:   [gpt-5.5, gpt-5.6-terra, gpt-5.4]
+    frontier:
+      low:    [gpt-5.5]
+      medium: [gpt-5.6-sol, gpt-5.5]
+      high:   [gpt-5.6-sol, gpt-5.5]
+
 # ── The Architect mount (the bookend: plan authorship, orchestration) ──────────
 # claude-opus-5/high — the sole top-tier mount; strictly above every worker below. Governs ONLY
 # plan authorship (`rmd plan`'s orchestration + the retro Architect's own worktree-DAG framing)

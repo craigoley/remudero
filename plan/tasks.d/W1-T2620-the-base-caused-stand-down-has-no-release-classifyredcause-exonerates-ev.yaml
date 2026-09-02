@@ -1,0 +1,177 @@
+- id: W1-T2620
+  title: "THE BASE-CAUSED STAND-DOWN HAS NO RELEASE — classifyRedCause exonerates every open PR at once and redCauseStandsDown breaks out of the dispatch loop ahead of every downstream remedy, but nothing ever asks whether the cause has since LANDED on main, so the fleet stands down identically before and after the fix merges; the built redrive remedy is reachable only through three hand-authored DEFAULT_FIX_CLASSES rows and a newly-merged base fix has none"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 100.00
+  files: [src/lib/sweep.ts, src/run-task.ts, test/base-caused-release.test.ts]
+  origin: "feedback#followup-pr3278-base-commit-fix-needs-a-fleet-release"
+  plan_refs: ["W1-T527", "W1-T124", "W1-T474", "W1-T977", "W1-T1033", "W1-T1275", "W1-T528", "W1-T2304"]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ AT SOURCE 2026-09-01 — every line reference is a SNAPSHOT and must be re-derived, never
+    quoted (CLAUDE.md: name the query, never its answer).
+
+    (1) THE DETECTOR EXISTS AND IS CORRECT. `baseCausedCheckName(pr, allPrs)` (src/lib/sweep.ts,
+    ~:2434) returns the one required check failing on EVERY open PR this pass, with a vacuity guard
+    below two PRs and `undefined` the moment one survivor exists. `classifyRedCause` (~:2499) asks
+    it FIRST, deliberately, "because it exonerates every diff in the pass at once".
+    `redCauseStandsDown` (~:2514) returns true for it, and the single consumer (~:6517-6522) sets
+    `acted = false`, writes `describeRedCause`'s reason onto the EXISTING `sweep.disposed` line, and
+    `break`s. No strike is spent. THAT IS THE RIGHT BEHAVIOUR WHILE THE BASE IS STILL BROKEN and
+    this task does not weaken one clause of it.
+
+    (2) THE STAND-DOWN CARRIES NO STATE, SO IT CANNOT END. `redCauseStandsDown`'s own doc records
+    why: a stand-down leaves `acted:false`, and `priorActionsFromLedger` skips every row where
+    `line.acted !== true`, so "the PR is re-derived fresh next pass". Fresh each pass is exactly
+    the property that makes the wait unbounded — the pass after a base fix merges reads the same
+    unchanged `ciFailures`, computes the same `base-caused`, and stands down again. THE STATE
+    BEFORE THE FIX LANDS AND THE STATE AFTER IT LANDS ARE BYTE-IDENTICAL TO THIS RUNG.
+
+    (3) THE PRECEDENCE MAKES IT TOTAL, NOT PARTIAL. The stand-down `break`s BEFORE the W1-T1275
+    stale-ci-gate re-aggregate lane and before `dispatchFix`. So a base-caused PR does not merely
+    skip the fix rung — it is unreachable by every remedy downstream of that line in the same loop.
+
+    (4) THE REMEDY IS BUILT, WIRED, AND UNREACHABLE FROM HERE. `runPostFixReverification`
+    (~:8632) re-drives a PR whose CURRENTLY-recorded failure matches a `FixClass` row whose
+    `fixPrNumber` has merged; `sweepPostFixReverification` (src/run-task.ts, ~:27484) supplies the
+    real leaf, `pushEmptyCommitImpl` (~:27555). But the gate is `DEFAULT_FIX_CLASSES` (~:8539) —
+    exactly THREE rows (`CI_GATE_TIMEOUT_FIX_CLASS` 820, `COVERAGE_TIER_FIX_CLASS` 1758,
+    `CAPABILITY_SNAPSHOT_FIX_CLASS` 1762), each pinning a merged PR number and a log-tail regex by
+    hand. A newly-merged base fix has no row, and rows arrive only by a filed, ratified, merged plan
+    task — W1-T474 was that task, for two of them. So the detector's finding is thrown away into a
+    reason string while the remedy waits on a table nobody fills.
+
+    (5) THE HARM IS THE ONE THE FOLLOW-UP NAMES. A base fix merging into `main` clears `main` and
+    clears nothing else: each open PR's checks last ran against the pre-fix base, and nothing
+    re-runs them. The sweep keeps standing down, the fix rung is never reached, no strike is spent
+    and no escalation fires — a SILENT, UNBOUNDED, FLEET-WIDE HOLD whose only surface is a sentence
+    on `sweep.disposed`. The condition is self-sustaining: `baseCausedCheckName` requires the check
+    to fail on every open PR, and it keeps doing so precisely because nothing re-ran any of them.
+
+    (6) ★ THE OBVIOUS RELEASE CONDITION IS WRONG AND IS REFUSED HERE BY NAME, so no implementer
+    reaches for it. `OpenPrView.mergeState` carries GitHub's raw `mergeable_state`, and W1-T520/
+    W1-T528 already key `armedButStalled` on `mergeState === "behind"`. IT CANNOT BE USED FOR THIS
+    POPULATION: `selectUpdateBranchTarget`'s own design note states that "an armed PR whose checks
+    are red cannot itself read `mergeState: 'behind'`" — GitHub's `mergeable_state` precedence puts
+    `blocked` above `behind`, and a base-caused PR is red BY CONSTRUCTION. A release keyed on
+    `behind` would therefore never fire, and would look built. VERIFY that precedence from GitHub's
+    own documentation before designing, and if it reads otherwise, say so rather than assuming this
+    paragraph.
+  design: |
+    THE ONE CONCERN: give the base-caused stand-down an EXIT CONDITION. Nothing else in the
+    classifier, the reason text, the strike accounting or the fix rung moves.
+
+    (i) THE RELEASE CONDITION IS "MAIN HAS MOVED SINCE THIS PR LAST STOOD DOWN", not "the cause is
+    known". Naming the cause needs the class table this task refuses to depend on; asking whether
+    the base has advanced needs one sha. An injected, OPTIONAL per-PASS reader of `origin/main`'s
+    current tip — supplied by `run-task.ts`, because this module states three times that it never
+    calls `gh`/git directly — is ONE read per pass, never per PR. OMITTED (the default), the pass
+    is BYTE-IDENTICAL to today and every existing caller and fixture is untouched (criterion 6).
+
+    (ii) ★ THE DEDUP KEY IS `(prNumber, mainTipSha)` AND MUST NOT BE HEAD-KEYED. Every other rung
+    in this file keys on `pr@headSha` (`ciGateReaggregateKey`, the redrive's own `pr@headSha@class`)
+    and that is exactly wrong here: THE RELEASE MINTS A NEW HEAD BY CONSTRUCTION, so a head-keyed
+    entry can never be hit twice and the same PR would be released again on the same unchanged main
+    tip, once per pass, forever. Keying on the PR and the tip bounds it to at most one release per
+    PR per advance of `main`. Criterion 3 is that falsifier.
+
+    (iii) AT MOST ONE PR PER PASS, OLDEST HEAD FIRST — the ratified W1-T528 cost argument, reused
+    verbatim rather than re-derived: a verdict is sha-pinned (`priorActionsFromLedger` keys
+    `reviewDelivered` on `${taskId}@${headSha}`), so minting a new head discards the review the PR
+    was waiting on, and releasing the whole stalled set each pass costs N+(N-1)+…+1 reviews. Use
+    `oldestActivityFirst`, the SAME comparator `selectUpdateBranchTarget` and `selectReviewAdmission`
+    already use, so a loser this pass is strictly older next pass and cannot starve.
+
+    (iv) THE LEAF IS THE ONE THAT EXISTS. Re-drive through the SAME effect
+    `sweepPostFixReverification` already wires (`pushEmptyCommit`) — never a second leaf, and never
+    `updateBranchViaGh`. A new head is sufficient HERE, and the reason is structural rather than
+    convenient: `ci.yml` is `on: pull_request`, whose checkout is the merge ref recomputed against
+    the CURRENT base tip, and `ciFailures` can only ever carry checks that `checksStateFromRollup`
+    includes — which excludes the `remudero-review` commit status by construction (W1-T394), the one
+    required context that reads the PR HEAD tree rather than the merge ref. So the base-caused
+    population is merge-ref checks only. RE-VERIFY BOTH FACTS FROM SOURCE; if either fails, the leaf
+    choice must be re-argued in the PR body rather than silently swapped.
+
+    (v) LEDGER BEFORE THE CALL, the ordering `sweep.check_requeued` and the W1-T1275 lane already
+    use for the identical reason: a crash between the write and the real push must bound the NEXT
+    pass toward standing down, never toward re-releasing. The row rides an EXISTING step with a
+    release marker rather than minting a fourth signal — this repo already carries nine mechanisms
+    that merged green with no reader.
+
+    (vi) FAIL QUIET, AND NEVER LAUNDER A RED. A failed release leaves the PR standing down with no
+    strike spent. A release that does not clear the check is not a defeat: the next pass re-reads
+    the fresh failure, and if the base is genuinely still broken every open PR is still red on it,
+    `base-caused` is re-derived and the PR stands down again — one release per main advance, which
+    is the bound. If instead only THIS PR is now red, `classifyRedCause` returns `in-diff` and the
+    fix rung owns it exactly as it does today.
+
+    (vii) EXPLICITLY OUT OF SCOPE, each named because each has an owner or a reason.
+      - A PRODUCER FOR `DEFAULT_FIX_CLASSES`. The release deliberately needs no row; minting rows
+        from evidence is the board rung's registry-proposal path (W1-T2304), under operator
+        ratification (rule 15). Not re-filed here.
+      - ESCALATING AN UNBOUNDED STAND-DOWN while `main` genuinely stays broken. W1-T1033 supplies
+        the first-party signal and W1-T2304's depth triggers read the board; a third owner would be
+        the reactive-diagnosis anti-pattern.
+      - ANY CHANGE TO `baseCausedCheckName`, `classifyRedCause`, `redCauseStandsDown` or
+        `describeRedCause`'s TEXT, to the strike accounting, or to what `buildOpenPrViews`
+        populates.
+      - `updateBranchViaGh` AND THE `armedButStalled` LANE, which serve a disjoint population
+        (armed, green, `behind`) — see rationale (6).
+  acceptance:
+    - claim: "a base-caused red whose main tip is unchanged since its last stand-down stands down again with no release, no push and no strike spent"
+      proof: "unit test: test/base-caused-release.test.ts"
+    - claim: "a base-caused red whose main tip has advanced is released exactly once through the existing redrive leaf rather than standing down a second time"
+      proof: "unit test: test/base-caused-release.test.ts"
+    - claim: "the release dedup is keyed on the pull request and the main tip and never on the head sha which the release itself replaces"
+      proof: "unit test: test/base-caused-release.test.ts"
+    - claim: "at most one pull request is released per pass and the oldest head goes first so no sha pinned verdict set is discarded wholesale"
+      proof: "unit test: test/base-caused-release.test.ts"
+    - claim: "an in diff red and a gate conflict red are untouched and a failed release leaves the pull request standing down with no strike spent"
+      proof: "unit test: test/base-caused-release.test.ts"
+    - claim: "omitting the injected main tip reader leaves the pass byte identical to today so every existing caller and fixture is untouched"
+      proof: "unit test: test/base-caused-release.test.ts"
+  note: |
+    WHY THIS IS NOT AN EXISTING ENTRY, each neighbour read before filing rather than assumed.
+    W1-T527 built the stand-down and owns the no-strike guarantee; it never proposed an exit.
+    W1-T124/W1-T474 built the remedy and its class table; W1-T977 fixed WHEN that rung can see its
+    trigger. All three are downstream of a hand-authored row and none fires without one.
+    W1-T1033 supplies a first-party base-cause INPUT (a push run on `main`) and its own note states
+    the attribution surface "is not built here"; it changes what the classifier can know, never what
+    the stand-down then does. W1-T2304's board rung is READ-ONLY BY CONSTRUCTION — it "pushes to no
+    branch" — and files registry proposals. W1-T528/W1-T1208 own `update-branch` for a disjoint,
+    green, armed, `behind` population. NOTHING RELEASES A BASE-CAUSED STAND-DOWN.
+
+    THE PROVOKING INSTANCE IS EVIDENCE, NOT THE DELIVERABLE. The follow-up was raised off a base-
+    commit fix merging at its source while sibling PRs kept failing on the identical unrelated cause.
+    This task builds NO row for that PR and hardcodes no PR number: a release keyed on "main has
+    moved" covers that instance and every future one without a per-incident filing, which is the
+    whole reason to prefer it over a fourth `FixClass` row.
+
+    `src/run-task.ts` IS DECLARED AND THE COST IS ACCEPTED IN WRITING. Design (i) and (iv) both need
+    the caller to supply real effects, because `src/lib/sweep.ts` states repeatedly that it never
+    talks to GitHub. W1-T471 serializes every task naming `run-task.ts`, so this shard will not batch
+    with any of them, and a sweep-only change would leave the reader permanently undefined and the
+    stand-down exactly as unbounded as it is today.
+
+    `risk: high` IS SET UP FRONT AND IS RULE 19's SPAN, NOT BLAST RADIUS. `moduleIdFromPath` strips
+    `.test`, so the three declared paths resolve to `sweep`, `run-task` and `base-caused-release` —
+    three, above the sizing threshold, so no file list satisfying this task's own scope passes at
+    medium. Blast radius argues DOWN: one optional dep, one bounded release, and the omitted-dep
+    path byte-identical to today (criterion 6).
+
+    PROOF NOTES. All six criteria use the PURE-PATH form against a file this task creates, so the
+    proof executes the whole suite and every test in it belongs to this change — the same shape
+    W1-T1033 and W1-T2304 use for their own new files. No `grep:` criterion is offered: the only
+    tokens that would discriminate head from base are identifiers this task has not written yet, and
+    forward-referencing a SYMBOL is a guess where forward-referencing a PATH is not.
+    `test/base-caused-release.test.ts` does not exist today — a forward-referenced path, kept out of
+    a shared suite per the house rule.
+
+    ID PROVENANCE IS DELIBERATELY ABSENT. The `id:` here is the placeholder `W1-T2620`; `rmd approve`
+    mints and reserves the real id at ratification, so no id is guessed and no reservation is
+    claimed by this draft.

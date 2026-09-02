@@ -1,0 +1,136 @@
+- id: W1-T2617
+  title: "A RECON RUN'S FOLLOW-UP THAT RESTATES ITS OWN TASK IS ADMITTED AS A PROPOSAL — routeFollowupsToRegistry (src/lib/retro.ts) has two refusal arms (harvest.deduped, FOLLOWUP_TYPE_ROUTES) and neither asks whether the entry's subject is its OWN declaring task, so 23 of the 317 live registry proposals read `[task]: Implement <the task that declared them>`; three name work MASTER-PLAN already records SHIPPED (W1-T2442/#3263, W1-T2458/#3275, W1-T2460/#3286) and the rest name tasks the plan already holds, while W1-T2563's merged-signal retirement cannot reach a single one whose task is still queued"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 20.00
+  files: [src/lib/retro.ts, test/a-recon-cannot-propose-its-own-task.test.ts]
+  origin: "inbox#followup:W1-T2458-1788035402626:2026-08-29T20:33:15.794Z:0"
+  plan_refs: ["W1-T2458", "W1-T2563", "W1-T2561", "W1-T2455", "W1-T190"]
+  status: queued
+  attempts: 0
+  rationale: |
+    ── THE PROPOSAL THAT PRODUCED THIS RECORD IS ITS OWN FIXTURE ────────────────────────────────
+
+    The inbox proposal `followup:W1-T2458-1788035402626:2026-08-29T20:33:15.794Z:0` reads, verbatim:
+    "Implement W1-T2458 per its acceptance criteria (...) — this recon confirms the repo is clean
+    and ready; that's the actual queued work. — from W1-T2458 (run W1-T2458-1788035402626)".
+
+    ⚠ ITS ASK WAS ALREADY SHIPPED BEFORE IT WAS DRAFTED, AND NO TASK IS FILED FOR IT. MASTER-PLAN's
+    own R-cycle shipped line carries `W1-T2458/#3275 ($6.012)`, and the code is on main:
+    `routeFollowupsToRegistry`, `FOLLOWUP_TYPE_ROUTES` and `followupProposalId` all resolve in
+    `src/lib/retro.ts`, with `test/followup-routing-has-a-consumer.test.ts` present. The shard still
+    reads `status: queued`, which is DECORATIVE by this file's own header — merge state derives from
+    GitHub. Filing "implement W1-T2458" would file merged work, the defect W1-T229 and W1-T202's
+    withdrawal records exist to stop. What is ratified here is the class the proposal EVIDENCES.
+
+    ── THE CLASS, MEASURED ──────────────────────────────────────────────────────────────────────
+
+    Read from the live registry (`state/inbox-proposals.json` at the config root, 2026-09-01): 317
+    proposals — the same population W1-T2561 and W1-T2563 measured, so this is not a stale corpus.
+    317 carry the `follow-up harvest [type]: ` shape. OF THOSE, 23 ARE `[task]: Implement W1-T…`.
+
+    ⚠ 21 OF THE 23 ARE VERIFIED SELF-REFERENTIAL BY DIRECT INSPECTION OF THE id/summary PAIR, and
+    the honest limit is stated rather than rounded away: 2 rows were truncated in the read and are
+    UNVERIFIED, so the count is 21 confirmed of 23 candidates, never a flat 23. Every confirmed row
+    has the same shape — the id's run prefix names the task the summary asks to implement:
+    W1-T2442, W1-T2458, W1-T2460, W1-T2473, W1-T2478, W1-T2482, W1-T2486, W1-T2489, W1-T2490,
+    W1-T2495, W1-T2498, W1-T2503, W1-T2504, W1-T2487, W1-T2512, W1-T2521, W1-T2522, W1-T2523,
+    W1-T2529, W1-T2530, W1-T2476.
+
+    THREE OF THEM NAME WORK THE PLAN ALREADY RECORDS AS SHIPPED — W1-T2442/#3263, W1-T2458/#3275,
+    W1-T2460/#3286, all on MASTER-PLAN's own shipped line. The remainder name tasks the plan HOLDS
+    AS TASKS. So the routed entry is a duplicate of a plan record on the day it is minted, whichever
+    side of the merge it falls on.
+
+    THE COST IS THE DRAFT, NOT THE ROW. At W1-T2561's MEASURED $8.52 draft mean the class is ~$196
+    of Architect drafting for zero new plan work, plus one ratification pass each — this one being
+    the twenty-third instance's. THAT FIGURE IS W1-T2561's AND IS CITED, NOT RE-DERIVED HERE.
+
+    ── WHY THE THREE SHIPPED ARMS DO NOT COVER IT, EACH CHECKED AT SOURCE ───────────────────────
+
+    `harvest.deduped` (`followupMatchesTitle`) compares free prose to OPEN TASK TITLES by shingle
+    overlap — the paraphrase-blind match W1-T2455 measured at 3 of 32. A sentence beginning
+    "Implement W1-T2530 itself — add a planOnly-gated exception to …" does not resemble that task's
+    title, so the arm does not fire; the 23 rows in the registry are the observation that it did not.
+
+    `FOLLOWUP_TYPE_ROUTES` declines `action` only. Every one of the 23 is typed `task`, the most
+    routable type there is — which is correct: a worker naming concrete work IS the type's
+    definition. The type says nothing about WHOSE work it is.
+
+    `retireSettledFollowups` (W1-T2563, also on main) keys on ONE signal: the originating task has
+    MERGED. ⚠ THAT SIGNAL CANNOT REACH THE STILL-QUEUED CASE BY CONSTRUCTION, WHICH IS THE MAJORITY
+    HERE. A self-referential entry filed against a queued task is never retired, sits in the
+    registry indefinitely, and is drafted at the next poll. Even where the task later merges,
+    retirement is an after-the-fact removal that runs AFTER the draft spend it was minted to cause.
+    Retirement and admission are different moments, and only admission prevents the spend.
+
+    ── WHY THIS IS NOT A FOURTH COPY OF ONE POLICY ──────────────────────────────────────────────
+
+    W1-T2563's own rationale warns that a fourth per-producer expiry would be the fourth copy of one
+    policy, and that warning is respected: THIS TASK ADDS NO EXPIRY. It adds an ADMISSION predicate
+    that needs no referent read at all — the declaring task id is already on the candidate
+    (`FollowupCandidate.taskId`) and the subject is in the entry's own text, so the check is local,
+    offline and deterministic where retirement needs a batched merged-set read that can come back
+    `unreadable`.
+
+  design: |
+    ONE NEW REFUSAL ARM IN `routeFollowupsToRegistry`, named on its own outcome exactly as the two
+    existing arms are. Extend `FollowupRouteOutcome`'s `arm` union with a self-referential member
+    and refuse before the mint; the entry stays HARVESTED and ledgered by `recordFollowupHarvest`
+    (untouched) — it is simply never promoted to a `Proposal`, which is the same shape
+    `type-not-plan-shaped` already has.
+
+    THE PREDICATE IS LOCAL AND NEEDS NO NEW READ: the candidate already carries `taskId`, and the
+    subject is in `text`. VERIFY `FollowupCandidate`'s current shape and the routable loop at source
+    before editing — this note is a 2026-09-01 survey and the file moves.
+
+    ⚠ REFUSE NARROWLY, AND WHEN IN DOUBT LET IT THROUGH. The dangerous direction is not admitting a
+    duplicate — the registry survives that today — it is SILENTLY DROPPING a genuine discovery,
+    because the harvest is the only channel a worker's out-of-scope finding has into the plan. A
+    follow-up that merely CITES its own task id while asking for DIFFERENT work ("W1-T2530's fix
+    should also cover X") must still route. Both directions are pinned by the criteria below, and a
+    builder that cannot separate them refuses the narrower set, never the wider one.
+
+    HEAL THE EXISTING DRIFT, NOT ONLY FUTURE MINTS (the W1-T190 doctrine, verbatim): the same
+    predicate prunes the population already in the registry, through the SAME single writer
+    (`updateProposalRegistry`), in ONE write for the pass, mirroring `routeFollowupsToRegistry`'s
+    and `retireSettledFollowups`' own single-write discipline. The pass STATES its count — a silent
+    prune is the tested-and-inert shape this repo has shipped before.
+
+    NOT IN SCOPE, EACH OWNED ELSEWHERE OR DELIBERATELY LEFT:
+      - retirement of routed follow-ups (W1-T2563, shipped) — this adds no expiry and no age rule;
+      - the per-poll draft cap (W1-T2561) — a cap paces the drain, it does not refuse the row;
+      - `evidenceAnchors: []`, which is CORRECT by design and must NOT be "fixed" by synthesizing a
+        git-grep pattern nobody asserted;
+      - `followupMatchesTitle` and `FOLLOWUP_TYPE_ROUTES`, reused verbatim and never re-scored;
+      - THE INSTRUCTIONAL HALF. The upstream cause is that a recon worker's OUTPUT CONTRACT invites
+        follow-ups without saying that its own task is not one. Instructions shape and gates
+        guarantee (W1-T231); the gate is built here and the prompt line is NAMED, not folded in.
+
+  acceptance:
+    - claim: "a follow-up whose text names its own declaring task as the work to do is refused at the routing gate with the arm named on its outcome, and no proposal is minted for it"
+      proof: "unit test: test/a-recon-cannot-propose-its-own-task.test.ts"
+    - claim: "the refusal is bounded in the direction that matters — a follow-up that cites its own task id while asking for different work is still routed, so a genuine discovery is never silently dropped"
+      proof: "unit test: test/a-recon-cannot-propose-its-own-task.test.ts"
+    - claim: "the entries already in the registry are pruned by the SAME predicate through the SAME single writer in one write, the pass states how many it removed, and a second pass removes nothing"
+      proof: "unit test: test/a-recon-cannot-propose-its-own-task.test.ts"
+    - claim: "the refusal holds with no merged-state read available at all, so it covers the still-queued originating task the merged-signal retirement cannot reach"
+      proof: "unit test: test/a-recon-cannot-propose-its-own-task.test.ts"
+
+  note: "FILED 2026-09-01 from the inbox proposal named in origin, whose OWN ask is already shipped
+    (#3275) and is therefore recorded as satisfied rather than re-filed — the stamp carries that
+    finding. Corpus and counts are stated with their limits: 317 registry proposals, 23 candidate
+    rows, 21 verified self-referential, 2 truncated and unverified; the $8.52 draft mean is
+    W1-T2561's measurement, cited. band_meaning: blast-radius rather than span — the file span here
+    is `src/lib/retro.ts` plus this task's own falsifier, which the W1-T2543 companion discount
+    treats as one concern; the band is carried because the fail direction is an over-refusing
+    predicate silently dropping the only channel a worker's out-of-scope discovery has into the
+    plan, which is danger unrelated to span. NAMED, NOT FILED, and the operator's call: W1-T965
+    (queued) proposes routing harvested follow-ups into plan/feedback/ for the triage lane — the
+    same 'give the harvest a consumer' problem W1-T2458 shipped a different answer to. It looks
+    superseded, but retiring another task is not this record's to do."

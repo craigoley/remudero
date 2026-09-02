@@ -1,0 +1,135 @@
+- id: W1-T2629
+  title: "THE REAPER'S RESIDUE CANNOT READ A TASK ID A BRANCH NAME ALREADY DECLARES — every task-claim predicate in the tree requires the `run-` prefix, so `w1t1060-instrument-declare` files under `no_pr_ever` (\"needs adjudication\", ~$6-9 of worker judgement) for a question a grep answers: split that one reason by the NAMED task's state — credited elsewhere versus still open — while changing no disposition, because a task shipping by another route does not prove THIS branch's commits are in main"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: architect
+  plan_refs: ["W1-T2247", "W1-T2246", "W1-T2445", "W1-T2429", "W1-T447", "§5C"]
+  files: [src/lib/status.ts, test/slug-branch-task-resolution.test.ts]
+  rationale: |
+    FILED FROM A RESEARCH FOLLOW-UP THAT ASKED ABOUT ONE BRANCH, AND ANSWERED AT THE CLASS. The
+    harvest asked whether `w1t1060-instrument-declare` (reported 841 commits behind origin/main) is
+    abandoned residue worth pruning, or a flag on a stuck task. Both halves are answerable, and the
+    answering is what exposed the gap.
+
+    (1) THE PER-INSTANCE ANSWER, GREP-CHECKABLE: SUPERSEDED, NOT STUCK. The branch names W1-T1060,
+    whose shard (`plan/tasks.d/W1-T1060-the-acceptance-check-runs-too-late.yaml`) declares exactly
+    `files: [.github/workflows/ci.yml, scripts/acceptance-author-gate.mjs,
+    test/acceptance-author-gate.test.ts]`. All three of the gate's artifacts exist in the tree —
+    `.github/workflows/acceptance-author-gate.yml` opens with "Acceptance author-time gate
+    (W1-T1060)", `scripts/acceptance-author-gate.mjs` cites the same id at line 5, and
+    `test/acceptance-author-gate.test.ts` carries six `W1-T1060:` test titles. THE WORK LANDED BY
+    ANOTHER ROUTE. So the branch flags nothing; it is residue.
+
+    (2) ⚠ THE HONEST LIMITS OF THAT ANSWER, STATED RATHER THAN GLOSSED. This was read with no
+    network: the branch's `prState` was NOT measured, its presence on origin right now was NOT
+    re-checked, and the 841-behind figure is the harvest's, not re-derived. The tree evidence in (1)
+    is what is checkable from here, and it is deliberately the STRONGER claim anyway — this repo's
+    own doctrine is that a `status:` field is decorative and the tree is truth.
+
+    (3) PRUNING IS ALREADY OWNED, AND RE-FILING IT WOULD BE THE ANTI-PATTERN THIS PLAN NAMES.
+    W1-T2445 measured that NO DELETION PATH EXISTS ANYWHERE IN `src/` — the reaper reports and
+    deletes nothing. W1-T2246 measured that the hold bucket is over-full because the PR walk is
+    paginated; W1-T2247 measured the residue that genuinely needs judgement at 20, not 75, and owns
+    adjudicating it. This task adds none of that and must not drift into it.
+
+    (4) THE UNOWNED GAP, BY SYMBOL. `w1t1060-instrument-declare` DECLARES ITS TASK IN ITS OWN NAME
+    and the fleet cannot read it. Every extractor and every claim predicate in the tree requires the
+    `run-` prefix: `taskIdFromRunBranch` is `/^run-(.+)-\d+$/` (`src/lib/status.ts:2377`),
+    `ownsBranch` is `^run-<taskId>-\d+$` (:2403), `isOwnedSlugBranch` is
+    `head.startsWith("run-<taskId>-")` (:2716), and `branchClaimsOtherTask` returns false outright
+    for any head not starting `run-` (:2746). So a slug branch resolves to NO task anywhere, and
+    `planBranchReap` files it under `no_pr_ever` — labelled, in this repo's own words, "no PR ever
+    opened and no commit proven landed — the residue that needs adjudication"
+    (`BRANCH_REAP_REASON_LABEL`). W1-T2247 then costs that residue at roughly $6-9 of worker
+    judgement per branch to answer, for a subset where the branch's own name plus a ledger read
+    already decides it.
+
+    (5) WHY THIS COMPOSES WITH W1-T2247 RATHER THAN COMPETING. That task's whole size argument is
+    that mechanical rungs (PR state, patch-id) shrank the judgement set from 75 to 20 before any
+    model was spawned. This is one more mechanical rung of exactly that kind, and it is additive in
+    both orders: land first and the residue W1-T2247 pays for is smaller; land second and it still
+    pays on whatever accumulates next. Hence `depends_on: []` — a hard edge would strand a cheap
+    deterministic rung behind a risk:high judgement task.
+
+    (6) SIBLING, CITED NOT RE-FILED. W1-T2429 owns the OPEN half of the same naming gap — a build on
+    a `feat/…` head is invisible to dispatch for as long as its PR is open. This is the CLOSED half:
+    the same unreadable name, after there is no PR left to read. They share a cause and no code path.
+  design: |
+    ONE PURE RUNG, ADDING NO NETWORK CALL AND NO DISPOSITION CHANGE.
+
+    (i) THE RESOLVER, AND ITS BOUNDARY GUARD IS THE WHOLE SAFETY ARGUMENT. Add an exported PURE
+    `taskIdFromSlugBranch(head, candidateIds)` to `src/lib/status.ts`: lower-case and strip
+    non-alphanumerics from BOTH the head and each candidate id (so `w1t1060`, `w1-t1060` and
+    `W1-T1060` all normalise together), then accept a candidate only where the character following
+    the match IS NOT A DIGIT and the character preceding it is not alphanumeric; longest match wins.
+    THIS IS TRAP 1 IN THIS TREE'S OWN WORDS, not a new invention: `isOwnedSlugBranch`'s doc
+    (`status.ts:2701-2704`) records that a bare `startsWith(taskId)` would let `W1-T15` credit from
+    `run-W1-T152-…`, and that the boundary character is what makes prefix matching safe. READ THAT
+    COMMENT FIRST and reuse its reasoning rather than writing a second, divergent guard. Concretely:
+    `w1t1060-instrument-declare` must resolve W1-T1060 and must REFUSE W1-T106, whose match is
+    followed by the digit `0`.
+
+    (ii) FACTS GAIN TWO OPTIONAL FIELDS, ABSENT ⇒ TODAY'S BEHAVIOUR. `BranchFacts` gains
+    `namedTaskId?` and `namedTaskCredited?`. Both optional and both conservative when omitted —
+    the same discipline `patchIdEquivalentInMain` already documents ("an absent measurement can
+    never manufacture a resolution the caller never proved").
+
+    (iii) THE REASON SPLITS; THE BUCKETS DO NOT MOVE. `planBranchReap` splits ONLY the `no_pr_ever`
+    reason into `named_task_credited` (the branch names a task whose work is already on main) and
+    `named_task_open` (it names a task that is not credited — the stuck-task flag the follow-up
+    asked for), each with its own `BRANCH_REAP_REASON_LABEL` entry. Every branch stays in the exact
+    bucket it lands in today.
+
+    ⚠ NEITHER NEW REASON MAY BECOME A DELETABLE DISJUNCT, AND THIS IS LOAD-BEARING. The four
+    existing disjuncts all mean "removing the ref cannot lose information" — merged head, closed
+    PR, tip already an ancestor, patch-id equivalent. "The named task shipped by another route"
+    means NO SUCH THING: the branch may hold an approach that was abandoned in favour of a different
+    implementation, and for a branch with no PR its commit may be the only copy of that work
+    (W1-T2247 §4). The rung supplies the mechanically-checkable CITATION W1-T2247's adjudication
+    already demands ("a plan task id the change would serve"); it never pre-empts the verdict.
+
+    (iv) THE CREDITED FACT COMES FROM THE EXISTING LEDGER READER, INJECTED. `readMergeCreditedTaskIds`
+    (`src/lib/status.ts:1264`) already resolves merge credit from the ledger and takes a `candidates`
+    set. The CALLER performs that read and passes the answer in; `planBranchReap` stays pure, with no
+    git, no network and no second definition of merge credit.
+
+    (v) OUT OF SCOPE, NAMED SO IT IS NOT DRIFTED INTO: printing or ledgering the reasons (W1-T2445),
+    deleting anything (no deletion path exists in `src/` at all — W1-T2445 measured it), adjudicating
+    the remaining residue (W1-T2247), and any change to the run-branch claim predicates, which the
+    2026-07-30 operator ruling settled and which this task must leave exactly as it found them.
+  acceptance:
+    - claim: "the live fixture resolves and the digit boundary vetoes: `w1t1060-instrument-declare` resolves W1-T1060 against a candidate set containing BOTH W1-T1060 and W1-T106, and W1-T106 is REFUSED because its match is followed by a digit — the prefix-collision trap this tree already documents at isOwnedSlugBranch"
+      proof: "unit test: test/slug-branch-task-resolution.test.ts"
+    - claim: "the no_pr_ever reason splits three ways: a slug branch whose named task is merge-credited reads named_task_credited, one whose named task is NOT credited reads named_task_open, and a branch naming no resolvable task keeps no_pr_ever unchanged"
+      proof: "unit test: test/slug-branch-task-resolution.test.ts"
+    - claim: "THE DISPOSITION FALSIFIER — over one fact set, deletable/guarded/hold/undetermined are IDENTICAL with the new fields present and absent; neither new reason ever moves a branch into deletable or out of hold, because a named task shipping elsewhere does not prove this branch's commits are in main"
+      proof: "unit test: test/slug-branch-task-resolution.test.ts"
+    - claim: "the resolver is the ONE new extractor and planBranchReap stays pure — the credited fact arrives through the caller's existing readMergeCreditedTaskIds read, never a new git or network call inside the classifier"
+      proof: "grep: taskIdFromSlugBranch in src/lib/status.ts"
+  status: queued
+  attempts: 0
+  note: |
+    FILED 2026-09-01 from follow-up harvest `followup:W1-T2463-1788065942887:2026-08-30T05:01:42.981Z:0`
+    (run W1-T2463-1788065942887), which asked whether `w1t1060-instrument-declare` is abandoned or a
+    stuck-task flag. THE RESEARCH IS ANSWERED IN THE RATIONALE, not deferred into this task: superseded
+    residue, not a stuck task, on tree evidence (W1-T1060's three declared artifacts are all present).
+    NO PER-BRANCH CHORE WAS FILED, deliberately. Deleting one branch is owned by nobody yet because NO
+    DELETION PATH EXISTS IN `src/` (W1-T2445's measurement), and a per-instance filing is the
+    reactive-diagnosis anti-pattern this plan names repeatedly. What is filed is the class the instance
+    exposed: the reaper's residue cannot read a task id a branch name already declares.
+    risk:high IS BLAST RADIUS, NOT RULE 19 SIZING. This edits `planBranchReap`, the classifier that
+    decides what any future deletion path would be allowed to delete. Today a wrong reason is a wrong
+    label; once W1-T2445's deletion work lands, a wrong reason that had drifted into `deletable` would
+    delete the only copy of somebody's work. The third acceptance criterion is the guard against exactly
+    that, and it is load-bearing rather than defensive.
+    FILE OVERLAP CHECKED BEFORE FILING (the W1-T171 discipline, applied by hand since that check is
+    unbuilt): W1-T2445 declares `files: [src/run-task.ts, …]` and W1-T2429 declares
+    `files: [src/lib/status.ts, test/run-branch-claim-is-unenforced.test.ts]`. So this task does NOT
+    collide with W1-T2445 at all, and DOES share `src/lib/status.ts` with W1-T2429 — those two should
+    not be co-dispatched, and whichever lands second rebases rather than re-deriving the other's
+    predicates. Recorded here because it is the kind of thing that is invisible until it conflicts.

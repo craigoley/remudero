@@ -1,0 +1,134 @@
+- id: W1-T2645
+  title: "THE FOLLOW-UP ROUTER MINTS A PROPOSAL THAT RE-DECIDES A SETTLED QUESTION — routeFollowupsToRegistry has exactly two refusal arms (a lexical title-dedup with measured recall 3-in-32, and the type route), neither of which consults the decided record, so a candidate whose remedy contradicts a documented decision reaches a drafting slot before anything can say no; add a THIRD named arm driven by a settled-question DATA table, seeded with the one row four instances already justify"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: architect
+  plan_refs: ["§7B", "§12", "P46", "P56"]
+  files: [src/lib/retro.ts, test/followup-settled-question-arm.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    RE-SCOPED FROM followup:DAEMON-1788107419932:2026-08-30T16:56:33.630Z:1, whose literal remedy —
+    "sync plan/tasks.d/W1-T2473-*.yaml status: from queued to shipped (PR #3304 already merged it),
+    stale status could cause a scheduler to re-offer completed work" — is REFUSED on three
+    independent grounds, each read from source at head rather than assumed. The proposal is not
+    dropped: it is the regression corpus for the arm below.
+
+    (1) THE REMEDY IS NOT REPRESENTABLE, AND AN EXISTING GATE ALREADY REFUSES IT. TASK_STATUSES
+    (src/lib/plan.ts:15-26) is queued|recon|prompted|running|review|fixing|diagnosing|blocked|
+    merged|done. `shipped` is not a member, and plan.ts:232-235 THROWS PlanError on a non-member —
+    not for that task, for the WHOLE load. Every consumer of loadPlan (drain, lint, review, the
+    daemon) would red, and main-plan-guard runs loadPlan on every PR precisely so that cannot
+    reach main. So the proposed edit is already fail-closed; nothing needs building to stop it.
+
+    (2) THE STATED MECHANISM IS FALSE, AND ITS FALSITY IS MEASURED. drain.ts:34-35 defines the
+    dispatch predicate as "a merged predicate — DERIVED FROM GITHUB in the real runner
+    (status.ts)", and plan/tasks.yaml's own header states that `status:` is DECORATIVE /
+    initial-state only and that the runner never writes it back. W1-T367 measured 248 of 359 tasks
+    (69%) carrying `status: queued` while their PR was MERGED. If the field drove dispatch the
+    fleet would be re-offering two thirds of its plan continuously. It is not, and the field
+    changes no dispatch decision.
+
+    (3) THE CLASS IS OWNED, AND THIS WOULD BE THE PER-INSTANCE PATCH OF IT. P46 clause (i) already
+    owns "a shard whose status: is stale against DERIVED state is a premise wrong at dispatch
+    time" — widened by R16 on six shards and by R32 on three more (W1-T2318 dispatched THREE
+    times; five runs, 21% of a 24-run window). P56 owns the downstream half. W1-T367 owns the
+    readers. W1-T410 owns the retro-gather plan-state truth rung. Hand-syncing one shard's field
+    is the reactive-diagnosis anti-pattern this plan names repeatedly.
+
+    AND THE PROPOSAL IS THE FOURTH RECORDED INSTANCE OF ONE MISDIAGNOSIS, WHICH IS THE ACTUAL
+    FINDING. DECISIONS.md carries at least three auto-choose no-op rationales — W1-T1, W1-T12a,
+    W1-T99 — each concluding, in near-identical words, that "a dispatcher keying off
+    plan/tasks.yaml's decorative status: queued field instead of GitHub-derived status re-queues an
+    already-merged task". MASTER-PLAN R32 then supplies the MEASURED cause instead: those merges
+    carry no Remudero-Task trailer, so the DERIVED state cannot see them either — premise-rot with
+    no derivable ground truth to check the premise against. Four independent producers reached a
+    hypothesis the record had already answered, and nothing between the producer and a drafting
+    slot consults that record.
+
+    THE RESIDUE NOTHING OWNS IS THE PRODUCER, NOT THE FIELD. `rmd triage` (W1-T41) GROUNDS a
+    feedback entry against plan/learnings/ledger/DECISIONS before proposing, on the stated ground
+    that re-deciding a settled question is a failure. routeFollowupsToRegistry (src/lib/retro.ts)
+    has no such rung. Its doc names exactly two refusal arms — "title-dedup" (mineFollowups'
+    followupMatchesTitle word-overlap) and "type-not-plan-shaped" (FOLLOWUP_TYPE_ROUTES) — and the
+    sibling lexical dedup this family relies on measured recall of 3 in 32 (W1-T2455, cited at
+    W1-T2473's Q3), so a re-decided question is not caught by similarity either. The asymmetry
+    between the two intake lanes is the defect, and it is small: the outcome union already models
+    "a decline always NAMES the arm that declined it", so the third arm is an addition to a shape
+    that exists, not a new lane.
+
+    WHAT WAS NOT VERIFIABLE FROM THIS SEAT, STATED RATHER THAN GUESSED. Whether PR #3304 credits
+    W1-T2473 could not be checked here (no network verb in this seat), and it does not change the
+    disposition either way: if #3304 carries the trailer or a run-W1-T2473-* head, derivation
+    already credits the task and the field is inert; if it does not, the MISSING TRAILER is the
+    defect, which is R32's measured cause under P46 with P56's remedy — never a field sync.
+
+    WHAT THIS TASK DOES NOT DO, EXPLICITLY. It edits no shard. It changes no dispatch path, no
+    status model, and no enum. It annexes nothing from P46 or P56 — those keep the dispatch-premise
+    and false-credit halves untouched. It does not touch classifyProposal, mineFollowups' dedup, or
+    FOLLOWUP_TYPE_ROUTES' existing semantics, and it never files a task.
+  design: |
+    ONE NEW REFUSAL ARM IN routeFollowupsToRegistry (src/lib/retro.ts), matching the two that are
+    already there. VERIFY the function, its FollowupRouteOutcome union, FOLLOWUP_TYPE_ROUTES and
+    followupProposalId from source before editing — this note is a 2026-08-31 reading and the shape
+    may have moved.
+
+    (i) THE TABLE IS DATA, NOT BRANCHES (rule 2). Export a small settled-question table whose rows
+    carry {id, a predicate over the candidate text, decidedIn (the citation), reason}. SEED IT WITH
+    EXACTLY ONE ROW: a candidate proposing to WRITE a task's `status:` field, decided against by
+    plan/tasks.yaml's header status model (derived from GitHub; never machine-rewritten, because a
+    machine writer would race the human editor) and by src/lib/plan.ts's TASK_STATUSES enum. A
+    second settled question later is a ROW, never a code branch — the W1-T81/W1-T92/W1-T101
+    precision-family discipline.
+
+    (ii) THE ARM DECLINES PROMOTION ONLY, NEVER THE HARVEST. A matched candidate is still
+    harvested and still ledgered (recordFollowupHarvest is untouched, exactly as the existing
+    "action" decline leaves its entry harvested); only the mint into the registry is refused. The
+    outcome gains arm "settled-question" and a reason that NAMES the deciding record, so a reader
+    can tell it from "already covered by the title dedup" without re-deriving either.
+
+    (iii) FAIL-OPEN IS THE CORRECT POLARITY HERE AND IS THE OPPOSITE OF THIS REPO'S USUAL DEFAULT.
+    Refusing a genuine follow-up LOSES work permanently; minting a redundant one costs one
+    ratification that says no. So the predicate must be NARROW and ambiguity must ROUTE: it matches
+    the proposed-WRITE property, never the mere appearance of the word. This is W1-T118's lesson —
+    a check that matches surface text where it means to match a property — applied at filing time
+    instead of at lint time.
+
+    (iv) THE EXISTING ARMS AND IDEMPOTENCE ARE UNTOUCHED. title-dedup and type-not-plan-shaped keep
+    their current outcomes verbatim, and a second pass over an already-routed candidate still adds
+    nothing (updateRegistry's own existing-id check, unchanged).
+  acceptance:
+    - claim: "the verbatim summary text of the follow-up that occasioned this task is declined with arm settled-question and a reason naming the deciding record, and the candidate is still harvested rather than dropped"
+      proof: "unit test: test/followup-settled-question-arm.test.ts"
+    - claim: "the false-positive falsifier holds: a candidate that merely mentions status, or that proposes work on the status board, still ROUTES and mints its proposal — the arm matches a proposed write to the status field, never the word"
+      proof: "unit test: test/followup-settled-question-arm.test.ts"
+    - claim: "the settled-question rows are DATA — adding a row declines a seeded candidate with no change to the router, and an empty table routes every candidate exactly as the pre-change function did"
+      proof: "unit test: test/followup-settled-question-arm.test.ts"
+    - claim: "the two existing arms are unchanged and idempotence holds — a title-deduped and a not-plan-shaped candidate produce their current outcomes, and a second pass over an already-routed candidate adds nothing"
+      proof: "unit test: test/followup-settled-question-arm.test.ts"
+    - claim: "the new arm is a named member of the routing outcome, so a decline is legible as a settled question rather than a bare boolean"
+      proof: "grep: settled-question in src/lib/retro.ts"
+  note: |
+    RE-SCOPED, NOT INVENTED. The occasioning proposal
+    (followup:DAEMON-1788107419932:2026-08-30T16:56:33.630Z:1, from W1-T2477, run
+    DAEMON-1788107419932) asked for a one-field shard edit. That edit is refused on the three
+    grounds in the rationale, and its own text is criterion 1's regression corpus — the strongest
+    available form of the test, since the arm must decline the exact input that produced it.
+    NO SHARD EDIT IS FILED ALONGSIDE THIS, DELIBERATELY. plan/tasks.d/W1-T2473-*.yaml keeps
+    `status: queued`; correcting it per-instance is P46 clause (i)'s dispatch-premise half, and
+    the credit half is P56's. Neither is annexed here.
+    risk:high IS RULE 19's SPAN, NOT BLAST RADIUS — the change is one refusal arm plus a
+    one-row table. files: names src/lib/retro.ts and a test whose stem differs, which the sizing
+    check reads as two subsystems (the W1-T189 precedent, graded UP for the same reason and
+    recorded as a regrade rather than worked around). Decomposing a single arm into two tasks
+    would be the dishonest move.
+    depends_on IS EMPTY ON PURPOSE. W1-T105 (the follow-up harvest) reads queued in the plan, but
+    routeFollowupsToRegistry, FOLLOWUP_TYPE_ROUTES and followupProposalId are all present at head
+    and the harvester demonstrably runs — this proposal is its output. A dependency on a task
+    whose code is already there would gate real work behind a stale record, which is the very
+    class this task exists to stop propagating.
