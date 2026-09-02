@@ -225,6 +225,37 @@ export interface WorkerResult {
   /** Per-model breakdown off the envelope's `modelUsage` map (`{}` if none seen). */
   modelUsage: Record<string, ModelUsageEntry>;
   /**
+   * W1-T2572 (THE SERVED HALF OF THE PAIR): the concrete model id the PROVIDER itself
+   * reported serving this call — on the Claude path, read verbatim off the live SDK
+   * assistant stream's own `msg.message.model` field (never the `modelUsage` map keys,
+   * which are a post-hoc cost breakdown, not a live per-turn report), the LAST real
+   * (non-`<synthetic>`) value seen before the stream ended. `model` above is the
+   * REQUEST — an INPUT, mount-resolved BEFORE the spawn, unchanged by whatever the
+   * provider actually ran. The two ride the SAME row so a run where they disagree (a
+   * routed alias resolving to a different concrete snapshot, a Codex account serving
+   * off its own preference list) is directly queryable without a second join, and a
+   * later per-mount aggregate never silently averages across models it never named.
+   *
+   * `null` when the provider's own output carried no field naming what it served —
+   * paired with {@link servedModelReason}. VERIFIED, not assumed: `codex exec --json`
+   * (codex-cli 0.152.0) was probed live and its `thread.started` / `turn.started` /
+   * `turn.completed` / `item.completed` / `error` events carry no served-model field at
+   * all, so the Codex path records this pair honestly rather than echoing back the
+   * `--model` flag it was given — echoing the ASK back as the SERVED value is exactly
+   * the guess this field exists to refuse.
+   *
+   * Optional only so every hand-built `WorkerResult` fixture across test/ that predates
+   * this task keeps typechecking unmodified; {@link workerLedgerFields} treats an absent
+   * value identically to an explicit `null`.
+   */
+  servedModel?: string | null;
+  /**
+   * W1-T2572: present only when {@link servedModel} could not be resolved to a real id
+   * — names WHY, so a `null` row reads as "checked, unreportable" rather than "forgot
+   * to check". Absent (never a blank string) whenever `servedModel` is a real id.
+   */
+  servedModelReason?: string;
+  /**
    * Compaction events observed in this call's stream (MASTER-PLAN §8B),
    * detected LIVE off `type:"system", subtype:"compact_boundary"` messages
    * (`detectCompactionEvents`, compaction.ts) — `[]` when the call never
@@ -437,10 +468,26 @@ export function noPrReportExcerpt(r: Pick<WorkerResult, "text" | "blocks">): str
  * tell DISABLED (compaction never configured) from NEVER-NEEDED (configured, just never fired)
  * from FAILED (attempted, and the SDK's own `compact_result: 'failed'` channel went unread). All
  * three now ride this one line, so the zero explains itself without a second query.
+ *
+ * `served_model`/`served_model_reason` (W1-T2572) ride the SAME line beside `model` for the
+ * reason {@link WorkerResult.servedModel}'s own doc gives in full: `model` is the REQUEST (an
+ * alias like `sonnet`, resolved before the spawn), `served_model` is what the provider actually
+ * ran, and only logging both on the SAME row lets a later reader see the two disagree instead of
+ * silently collapsing them into one label. ALWAYS present (never omitted, unlike the optional
+ * fields above) — defaulted to `null` off an absent `r.servedModel` so a fixture that predates
+ * this task, or a provider that reports nothing, renders the SAME honest "unknown" a real
+ * unreportable call would, never a key that looks forgotten. `served_model_reason` rides beside
+ * it ONLY when the id is `null`, falling back to a generic "provider reported no served model"
+ * when `r.servedModelReason` itself was not set (the Codex path today: {@link spawnCodexWorker}
+ * sets neither field, verified empirically against codex-cli 0.152.0's `--json` event stream) —
+ * fail-soft per this task's own constraint: an unreportable served model must never fail the run,
+ * so this function itself never throws over a missing one.
  */
 export function workerLedgerFields(r: WorkerResult): {
   provider?: "claude" | "codex";
   model: string;
+  served_model: string | null;
+  served_model_reason?: string;
   effort: string;
   tokens: TokenUsage;
   cache_read_input_tokens: number;
@@ -473,6 +520,13 @@ export function workerLedgerFields(r: WorkerResult): {
       : {}),
     ...(r.provider ? { provider: r.provider } : {}),
     model: r.model,
+    // W1-T2572: ALWAYS present, unlike the optional fields above — `null` is the honest,
+    // explicit value for "unreportable", never an omitted key that reads as forgotten. See
+    // this function's own doc and {@link WorkerResult.servedModel} for the full contract.
+    served_model: r.servedModel ?? null,
+    ...(r.servedModel == null
+      ? { served_model_reason: r.servedModelReason ?? "the provider reported no served model for this call" }
+      : {}),
     effort: r.effort,
     tokens: r.tokens,
     ...cacheTokenLedgerFields(r.tokens),
@@ -2005,6 +2059,11 @@ export async function collectWorkerResult(
   let sawResult = false;
   let tokens: TokenUsage = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 };
   let modelUsage: Record<string, ModelUsageEntry> = {};
+  // W1-T2572: the LAST real (non-`<synthetic>`) `msg.message.model` seen on the live
+  // assistant stream — see {@link WorkerResult.servedModel}'s own doc. `undefined` until
+  // (unless) a genuine value is observed, so a stream that never carries one falls
+  // through to the explicit-unknown branch in the return below, never a guess.
+  let servedModel: string | undefined;
   const compactionEvents: CompactionEvent[] = [];
   const compactionFailures: CompactionFailure[] = [];
   const nowFn = opts.now ?? Date.now;
@@ -2033,6 +2092,13 @@ export async function collectWorkerResult(
         const rawAny = raw as { isApiErrorMessage?: boolean; error?: unknown };
         const model = (msg.message as { model?: string })?.model;
         if (rawAny.isApiErrorMessage === true || model === "<synthetic>") apiError = true;
+        // W1-T2572: verbatim off the SAME per-message field `apiError` above already reads —
+        // the ONE place the live Claude stream names what actually generated this turn. Never
+        // `modelUsage` (a post-hoc cost breakdown keyed by whatever the envelope reports at the
+        // END, not a live per-turn signal) and never `<synthetic>` (that value marks an
+        // Anthropic-side error placeholder, not a model that served anything). Last real value
+        // wins, matching `text`/`subtype` below overwriting on each new message.
+        if (typeof model === "string" && model.length > 0 && model !== "<synthetic>") servedModel = model;
         const content = (msg.message as { content?: unknown }).content;
         // W1-T2557: ONE assistant SDK message is ONE observed "turn" — incremented ONCE here,
         // before the block loop below, so a message carrying BOTH a text and a tool_use block
@@ -2162,6 +2228,14 @@ export async function collectWorkerResult(
     childEnvKeys: opts.childEnvKeys,
     accountLabel: opts.accountLabel,
     model: opts.model ?? DEFAULT_MODEL_LABEL,
+    // W1-T2572: `null` (never a guess) when the live stream never carried a real model
+    // field — e.g. no assistant message at all, or every one was a `<synthetic>`
+    // placeholder. `servedModelReason` names WHY only in that branch; see
+    // {@link WorkerResult.servedModel}'s own doc for the full contract.
+    servedModel: servedModel ?? null,
+    ...(servedModel === undefined
+      ? { servedModelReason: "no assistant message in the stream reported a real model before the call ended" }
+      : {}),
     effort: opts.effort ?? DEFAULT_EFFORT_LABEL,
     tokens,
     modelUsage,
