@@ -367,6 +367,18 @@ test("capabilities: the VALID base block loads — without this the negative cas
   assert.deepEqual(m.capabilities?.codex.frontier.high, ["f-hi"]);
 });
 
+test("capabilities.claude that is not a mapping at all is refused BEFORE any per-model check — the shape arm, not the contents arm", () => {
+  const raw = goodRaw() as Record<string, unknown>;
+  const caps = goodCapabilities() as unknown as Record<string, unknown>;
+  caps.claude = ["haiku", "sonnet", "opus"]; // a LIST of model names, not model -> capability
+  raw.capabilities = caps;
+  assert.throws(
+    () => validateMounts(raw),
+    /'capabilities\.claude' must be a mapping of Claude model name -> capability/,
+    "a list cannot express model -> capability, so it must be refused on SHAPE; falling through to the per-model loop would iterate array indices and refuse with a misleading 'capabilities.claude.0' message",
+  );
+});
+
 test("capabilities.claude naming a capability OUTSIDE the ladder is refused, and the message names the legal set", () => {
   const raw = goodRaw() as Record<string, unknown>;
   const caps = goodCapabilities();

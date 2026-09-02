@@ -192,18 +192,18 @@ function parseMount(
 }
 
 /**
- * Resolve a Claude model's declared capability rank (W1-T2573). Throws when the model has no
- * row in `capabilities.claude` — unreachable for any model that already passed {@link parseMount}
- * (`model in tiers`), because {@link parseCapabilities} requires every `tiers` key to resolve one
- * whenever the `capabilities` block is present at all.
+ * Resolve a Claude model's declared capability rank (W1-T2573). TOTAL for every model that can
+ * reach it, so it asserts nothing of its own: the invariant it would otherwise re-check is
+ * already enforced — and tested — at the two places that actually own it. {@link parseMount}
+ * refuses a `model` absent from `tiers` ("'model' must be one of …"), and
+ * {@link parseCapabilities} refuses a `tiers` key absent from `capabilities.claude`
+ * ("'capabilities.claude' is missing a capability for '<model>'"). Every caller below passes a
+ * model that came through `parseMount` against the SAME `tiers` object `parseCapabilities` was
+ * given, so both lookups always resolve. A third copy of the rule here could never execute; the
+ * two above are where a regression is caught, by name.
  */
 function capabilityRank(capabilities: CapabilityLadder, model: string): number {
-  const capability = capabilities.claude[model];
-  const rank = capability !== undefined ? capabilities.ladder[capability] : undefined;
-  if (rank === undefined) {
-    throw new MountsError(`no declared capability for model '${model}' in 'capabilities.claude'.`);
-  }
-  return rank;
+  return capabilities.ladder[capabilities.claude[model]];
 }
 
 /**
