@@ -31,8 +31,9 @@ function norm(text: string): string {
   return text.replace(/\s+/g, " ");
 }
 
-/** The guide must state a merged shard's `files:` is correctable and name the gate
- *  (`postMergeAmendmentViolations`, the Rule 21 guard) that does not block the correction. */
+/** The guide must state a merged shard's `files:` is correctable, name the gate
+ *  (`postMergeAmendmentViolations`, the Rule 21 guard), and state the concrete non-blocking
+ *  behavior: `post-merge-field-drift` is warning-only and no exit code reads it. */
 export function checkCorrectableAndGateNamed(guideText: string): { ok: boolean; reason?: string } {
   const text = norm(guideText);
   if (!/`files:`[\s\S]{0,200}\b(can be wrong|correctable|correcting it is allowed)\b/i.test(text)) {
@@ -47,10 +48,11 @@ export function checkCorrectableAndGateNamed(guideText: string): { ok: boolean; 
       reason: "operator-guide.md never names postMergeAmendmentViolations as the gate that does not block it",
     };
   }
-  if (!/no gate blocks it/i.test(text)) {
+  if (!/post-merge-field-drift[\s\S]{0,160}warn severity[\s\S]{0,160}no exit code reads/i.test(text)) {
     return {
       ok: false,
-      reason: "operator-guide.md never states plainly that no gate blocks the files: correction",
+      reason:
+        "operator-guide.md never states that post-merge-field-drift is a warning no exit code reads",
     };
   }
   return { ok: true };
@@ -151,6 +153,13 @@ test("declared-files-correction-exit falsifier: a guide never mentioning correct
 test("declared-files-correction-exit falsifier: correctable wording present but the gate unnamed turns the gate-named check RED", () => {
   const missingGate = "A merged shard's `files:` can be wrong; correcting it is allowed. No gate blocks it.\n";
   assert.equal(checkCorrectableAndGateNamed(missingGate).ok, false);
+});
+
+test("declared-files-correction-exit falsifier: a vague no-gate claim without the real warning behavior turns RED", () => {
+  const vague =
+    "A merged shard's `files:` can be wrong; correcting it is allowed. " +
+    "postMergeAmendmentViolations applies, but no gate blocks it.\n";
+  assert.equal(checkCorrectableAndGateNamed(vague).ok, false);
 });
 
 test("declared-files-correction-exit falsifier: a guide silent on acceptance turns the acceptance-guarded check RED", () => {
