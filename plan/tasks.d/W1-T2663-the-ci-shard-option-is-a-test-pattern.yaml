@@ -1,0 +1,38 @@
+- id: W1-T2663
+  title: "THE FOUR CI TEST SHARDS EACH RUN THE FULL 12,752-TEST SUITE — MEASURED 2026-09-02 on PR #3609: every shard started and ended on the same tests and reported exactly `# tests 12752`, because npm appends `--test-shard` after the positional `test/**/*.test.ts` glob and Node treats it as another test pattern rather than a runtime option"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 4.00
+  files: [.github/workflows/ci.yml, test/a-shard-that-produced-no-summary-is-not-a-failure-set.test.ts, test/ci-sharding.test.ts, test/push-ci-on-main.test.ts, test/test-with-retry.test.ts]
+  origin: "operator-overnight-steward#ci-shards-run-the-full-suite-2026-09-02"
+  plan_refs: ["W1-T2597"]
+  status: queued
+  attempts: 0
+  rationale: |
+    GitHub job logs from PR #3609 are the material measurement: ci-shards 1/4, 2/4, 3/4 and
+    4/4 each reported the same first tests, the same last test and exactly 12,752 tests. Each
+    therefore ran the whole suite for roughly 13-14 minutes; the matrix multiplied compute by
+    four without reducing the review gate's wall time.
+
+    The local falsifier on the repository's pinned Node 22.22.3 runtime isolates the cause.
+    `node --test --import tsx <test-file> --test-shard=1000/1000` refuses because it reads the
+    shard token as a test-file pattern, while placing `--test-shard=1000/1000` before the file
+    completes successfully with `# tests 0`. The workflow's npm command has the same ordering:
+    npm appends arguments after package.json's already-present positional glob.
+
+    Keep the retry wrapper and the stable required-check aggregator unchanged. Change only the
+    SOURCE lane's invocation so the matrix shard option reaches Node before the positional glob.
+    Coverage shards already use the correct order and are the control. Plan/docs fast lanes do
+    not use this branch and remain unchanged.
+
+  acceptance:
+    - claim: "the SOURCE ci matrix passes `--test-shard=N/4` to Node before the positional test glob, so the four jobs select disjoint deterministic slices instead of each running the full suite"
+      proof: "unit test: test/ci-sharding.test.ts"
+    - claim: "the sharded command still runs through the bounded whole-command retry harness on pull-request and main-push events"
+      proof: "unit test: test/push-ci-on-main.test.ts"
+    - claim: "coverage sharding, plan/docs fast lanes, matrix cardinality and the stable `ci` aggregator are unchanged"
+      proof: "unit test: test/ci-sharding.test.ts"
