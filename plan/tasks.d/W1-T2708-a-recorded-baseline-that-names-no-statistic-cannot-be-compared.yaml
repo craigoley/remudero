@@ -1,4 +1,4 @@
-- id: W1-T2800
+- id: W1-T2708
   title: "THE LANE-RESTORE CONDITION RESTS ON A BASELINE THAT NAMES NO STATISTIC, SO IT CANNOT BE COMPARED TO THE INSTRUMENT BUILT TO ANSWER IT — `dispatchLanes` says \"restore to 3 once burn per run is down\" against `$5.28` implement / `$0.63` review recorded 2026-09-01 in a DIFFERENT row, with no mean-or-median stated, no corpus window and no command; `mount-headroom-sweep` reports p50/p90/max by design, so the two cannot be put side by side and the condition is unanswerable in both directions"
   repo: remudero
   depends_on: []
