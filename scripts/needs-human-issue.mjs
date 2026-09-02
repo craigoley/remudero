@@ -22,7 +22,7 @@
 //
 // Usage:
 //   node scripts/needs-human-issue.mjs \
-//     --source mutation-nightly --title "<title>" --body-file <path> [--label needs-human]
+//     --source mutation-nightly --title "<title>" --body-file <path> [--preamble <text>] [--label needs-human]
 //
 // Exits 0 when delivered. Exits 1 when delivery FAILED -- a failure to notify must itself be
 // loud, never a silent pass, or the job reports success while the human hears nothing.
@@ -51,6 +51,14 @@ export function decideDelivery(openIssues, marker) {
 // Pure. Keep the TAIL of the log: for every failure mode in scope the diagnosis is the last thing
 // written (the ratchet prints its violations after the score line; a crashing step's stack is at
 // the end), so trimming the head preserves the actionable part.
+//
+// ⚠ WHICH IS WHY A CALLER'S OWN DIAGNOSTIC MUST NOT RIDE INSIDE THE LOG. mutation-nightly wrote a
+// `failing step: … stryker_failed_configs=…` line at the TOP of the file it passed as --body-file,
+// and that line — the single most actionable thing in the delivery, naming which Stryker config
+// errored — is the FIRST thing this function drops. MEASURED on issue #3387: a 65,538-char body
+// (the cap) whose visible tail was entirely `ok` lines from a later, passing config, while the
+// failure and the failing config's name had both been trimmed away. `buildBody`'s `preamble` sits
+// in the ENVELOPE instead, outside the log and above the <details>, so it survives any log size.
 export function truncateBody(body, max = MAX_BODY) {
   if (body.length <= max) return body;
   const notice = '\n\n_[log truncated -- earlier lines dropped to fit GitHub\'s issue-body limit; the full log is in the run and the uploaded artifact]_\n';
@@ -69,7 +77,7 @@ export function truncateBody(body, max = MAX_BODY) {
 // mutant, and mutation-nightly reports over 27,000 survivors -- its captured log is orders of
 // magnitude past MAX_BODY, so the FIRST truncated delivery would have broken idempotency. Trimming
 // the log alone keeps the envelope -- marker, headline, run URL -- intact at any log size.
-export function buildBody({ source, marker, runUrl, log, when }) {
+export function buildBody({ source, marker, runUrl, log, when, preamble }) {
   const render = (logText) =>
     [
       marker,
@@ -78,6 +86,7 @@ export function buildBody({ source, marker, runUrl, log, when }) {
       'This is the delivery of record for a job with no PR to attach to -- it is not a duplicate of a check you have already seen.',
       '',
       `Run: ${runUrl || '(unknown)'}`,
+      ...(preamble ? ['', preamble.trimEnd()] : []),
       '',
       '<details><summary>Captured output (stdout + stderr)</summary>',
       '',
@@ -149,6 +158,9 @@ export function main({
       source: { type: 'string' },
       title: { type: 'string' },
       'body-file': { type: 'string' },
+      // Sits in the ENVELOPE, above the <details>, and is never truncated — see truncateBody's
+      // own note for the delivery this exists to stop losing.
+      preamble: { type: 'string' },
       label: { type: 'string', default: 'needs-human' },
       repo: { type: 'string' },
     },
@@ -164,6 +176,7 @@ export function main({
     marker: markerFor(values.source),
     runUrl: env.RUN_URL,
     log: values['body-file'] ? readFile(values['body-file']) : '',
+    preamble: values.preamble,
     when: env.RUN_WHEN,
   });
 

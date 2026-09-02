@@ -524,6 +524,47 @@ export function deriveDirectImporters(srcModules, testFiles, readFile) {
  * @param {{commandBudgetMs: number, measure: (testFiles: readonly string[]) => {ms: number, ok: boolean, timedOut: boolean}}} opts
  * @returns {{included: Array<{file: string, testFiles: string[], ms: number}>, excluded: Array<{file: string, reason: string}>}}
  */
+/**
+ * Does `testSource` read the mutated module's OWN SOURCE TEXT?
+ *
+ * WHY THIS IS AN EXCLUSION AND NOT A BUG TO FIX IN THE TEST. Stryker mutates a file by REWRITING
+ * it: the sandbox copy carries `stryMutAct_*` switches, and a default parameter becomes
+ * `= stryMutAct_9fa48("0") ? ["Stryker was here"] : (...)`. A test that asserts on that file's
+ * literal text therefore CANNOT pass in the sandbox, by construction and for every mutant --
+ * Stryker's dry run aborts the whole config before a single mutant is scored. Nothing about the
+ * test is wrong; a byte-identical-signature pin is a legitimate thing to assert. The two facts are
+ * simply incompatible, so the honest move is to decline to measure the module and NAME why.
+ *
+ * MEASURED, the incident this closes: mutation-nightly failed 2026-08-29, 08-31 and 09-02 on
+ * `cli-args.ts`, `triage.ts` and `cli-args.ts` again -- three nights, two modules, one shape. The
+ * job alternated red/green because the nightly sample rotates by day-of-year, so the failure fired
+ * whenever the rotation reached an affected file. 26 of this tree's 150 mutation candidates have a
+ * direct test importer that reads their own source.
+ *
+ * THE DISCRIMINATOR IS THE EXTENSION, and it is exact in this codebase rather than a guess: an
+ * IMPORT resolves through the compiled specifier (`../src/lib/cli-args.js`), while a SOURCE READ
+ * names the TypeScript file (`join(libDir, "cli-args.ts")`). Measured on the three known-failing
+ * pairs: `.ts` literals 3, 2 and 2; on a control importer that does not read source, 0.
+ *
+ * RESIDUE, stated rather than implied. This is a text check, not a parser -- the same posture the
+ * rest of this file's heuristics already take. A test that builds the path dynamically is a FALSE
+ * NEGATIVE and would still abort its config; a test that merely mentions `<name>.ts` in a string
+ * is a FALSE POSITIVE and costs an unmeasured module. Both err toward measuring LESS, which is the
+ * safe direction for a score this workflow already documents as a lower bound.
+ *
+ * @param {string} modulePath repo-relative path of the module being mutated
+ * @param {string} testSource the importing test file's source
+ * @returns {boolean}
+ */
+export function readsMutatedModuleSource(modulePath, testSource) {
+  const base = modulePath.replace(/^.*\//, '');
+  if (!base.endsWith('.ts')) return false;
+  // The basename as a STRING LITERAL, in either quote style. Anchored on the quote so `a-b.ts`
+  // cannot be matched by a longer sibling literal that merely ends with it.
+  const escaped = base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`["'\`]${escaped}["'\`]`).test(testSource);
+}
+
 export function planNightlyRun(sample, importers, opts) {
   const included = [];
   const excluded = [];
@@ -531,6 +572,33 @@ export function planNightlyRun(sample, importers, opts) {
     const testFiles = importers.get(file) ?? [];
     if (testFiles.length === 0) {
       excluded.push({ file, reason: 'no test file imports it directly — nothing could kill a mutant in it' });
+      continue;
+    }
+    // BEFORE `measure`, deliberately: this costs a string scan, `measure` costs a real test run.
+    // It is also the only exclusion that `measure` structurally CANNOT reach -- see
+    // `readsMutatedModuleSource` and the corrected comment at the --nightly-plan call site.
+    const sourceReaders = opts.readFile
+      ? testFiles.filter((t) => {
+          let src;
+          try {
+            src = opts.readFile(t);
+          } catch {
+            // Unreadable importer: it contributed an edge, so it exists; treat it as NOT a source
+            // reader rather than excluding the module on a read failure. A wrong guess here costs
+            // one aborted config, which is the state before this check existed.
+            return false;
+          }
+          return readsMutatedModuleSource(file, src);
+        })
+      : [];
+    if (sourceReaders.length > 0) {
+      excluded.push({
+        file,
+        reason:
+          `${sourceReaders.length} of its ${testFiles.length} direct importer(s) assert on its own SOURCE TEXT ` +
+          `(${sourceReaders.join(', ')}) — Stryker must rewrite that text to mutate it, so the dry run ` +
+          'aborts the config before any mutant is scored; the tests are correct and this file cannot be measured',
+      });
       continue;
     }
     const result = opts.measure(testFiles);
@@ -805,7 +873,14 @@ function main(argv) {
     );
 
     // The measurement is a REAL run of the candidate's own test command on unmutated source, killed
-    // at the budget. That is also Stryker's dry run in all but name, so nothing is spent twice.
+    // at the budget.
+    //
+    // ⚠ IT IS NOT STRYKER'S DRY RUN. This comment used to claim it was "Stryker's dry run in all but
+    // name", and that false premise is exactly why the source-text hazard stayed invisible for three
+    // scheduled failures: this runs against the REAL file, while Stryker's dry run runs against an
+    // INSTRUMENTED copy in a sandbox. A test asserting on the module's literal source passes here
+    // and fails there, every time. `readsMutatedModuleSource` (above) is the check this one cannot
+    // be: an un-instrumented run can never observe an instrumentation-sensitive failure.
     const measure = (files) => {
       const started = Date.now();
       const result = spawnSync(
@@ -820,7 +895,11 @@ function main(argv) {
       };
     };
 
-    const plan = planNightlyRun(sample, importers, { commandBudgetMs, measure });
+    const plan = planNightlyRun(sample, importers, {
+      commandBudgetMs,
+      measure,
+      readFile: (p) => readFileSync(join(repoRoot, p), 'utf8'),
+    });
 
     console.log(
       `mutation-nightly-plan: night-index ${nightIndex} -> group ${groupIndex + 1}/${groupCount} -- ` +
