@@ -1,0 +1,57 @@
+- id: W1-T2676
+  title: "THE MINT PREVENTS AN ID COLLISION AND NOTHING PREVENTS A DUPLICATE SURFACE — two shards can declare the same `files:` and both sit dispatch-eligible, so the fleet builds the same work twice; `lint-plan` does not flag the pair"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 15.00
+  files: [src/lib/task-linter.ts, test/the-mint-prevents-an-id-collision-and-nothing-prevents-a-duplicate-surface.test.ts]
+  origin: "operator-session#3512-misattribution-2026-09-02"
+  plan_refs: ["W1-T2581", "W1-T2589"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED ON 2026-09-01, IN THIS FILE'S OWN PLAN TREE. W1-T2589 was filed for "the durable merge
+    hold has no CLI writer" while W1-T2581 ("expose the durable merge-hold writer") already existed
+    for the same work. W1-T2589's four declared files were a STRICT SUBSET of W1-T2581's seven.
+    Both read `status: queued` with `depends_on: []`, so both were dispatch-eligible, and
+    `lint-plan` flagged NOTHING about the pair — the only row naming W1-T2589 was its own declared
+    sizing warning. It was retired manually before a tick could spend an implement run rebuilding
+    work an open PR already delivered.
+
+    THE MINT CANNOT SEE THIS AND IS NOT SUPPOSED TO. `next-task-id --reserve` answers "is this
+    NUMBER free", scanning tasks.yaml, the shards, open PRs and plan history, and it does that job
+    correctly — it refused fail-closed in a container that could not read the open-PR surface. What
+    no verb answers is "is this WORK already filed". Those are different questions and only the
+    first has a gate.
+
+    `duplicate-title` IS THE NEAR NEIGHBOUR AND IT IS THE WRONG KEY. Two shards describing one
+    surface will rarely share a title — these two did not, and the house style actively rewards
+    distinct phrasings of the same defect. The key that actually collides is `files:`: a task is
+    identified by the surface it changes, which is also what makes the overlap costly (two workers
+    editing the same files produce conflicting PRs, not merely redundant ones).
+
+    SEVERITY IS `warn`, NOT `block`, AND THAT IS DELIBERATE. Legitimate overlaps exist — a wiring
+    task and the module it wires, a filing and its later amendment, the create-and-wire shape Rule
+    19 already pushes to risk:high. A blocking check would refuse those, so this names the pair and
+    the shared files and leaves the ruling to a human, the same disposition `scope_violation`
+    already takes for review-ratified widenings.
+
+    THE FALSIFIER IS THE LEGITIMATE OVERLAP. Any check that fires on shared files will fire on the
+    create-and-wire pair too, so the test must assert BOTH: an identical/subset `files:` set on two
+    queued shards is reported with both ids and the overlap named, AND a pair whose overlap is a
+    single shared module with different concerns is not reported — or, if it is, that the report is
+    a warning a human can ratify rather than a refusal.
+  acceptance:
+    - claim: "two queued shards declaring the same files are reported, naming both ids and the overlap"
+      proof: "unit test: test/the-mint-prevents-an-id-collision-and-nothing-prevents-a-duplicate-surface.test.ts"
+    - claim: "a subset overlap is caught, not only an exact match, because that is the shape observed"
+      proof: "unit test: test/the-mint-prevents-an-id-collision-and-nothing-prevents-a-duplicate-surface.test.ts"
+    - claim: "the finding is a warning rather than a refusal, so a legitimate overlap is not blocked"
+      proof: "unit test: test/the-mint-prevents-an-id-collision-and-nothing-prevents-a-duplicate-surface.test.ts"
+    - claim: "a shard whose files overlap nothing is never reported, so the check is not vacuous"
+      proof: "unit test: test/the-mint-prevents-an-id-collision-and-nothing-prevents-a-duplicate-surface.test.ts"
+    - claim: "a shard already credited as merged is not counted as a duplicate of live work"
+      proof: "unit test: test/the-mint-prevents-an-id-collision-and-nothing-prevents-a-duplicate-surface.test.ts"
