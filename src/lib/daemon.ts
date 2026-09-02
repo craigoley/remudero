@@ -1423,9 +1423,9 @@ export interface DaemonDeps {
    */
   sleepUntilSweepWake?: (ms: number) => Promise<void>;
   /**
-   * W1-T2568: acknowledge one durable event wake immediately before the ordinary full-sweep
-   * gate. Called only after STOP/PAUSE allow reconciliation, so a held daemon leaves the marker
-   * for resume or restart. This module remains filesystem-free; production injects the claim.
+   * W1-T2656: acknowledge one durable event wake only after the ordinary full-sweep liveness
+   * gate accepts a pass. STOP/PAUSE or a still-settling prior pass leaves the marker for a later
+   * accepted pass. This module remains filesystem-free; production injects the claim.
    */
   acknowledgeSweepWake?: () => void;
   /**
@@ -2102,7 +2102,7 @@ async function runGatedSweep(
     log("daemon.sweep.skipped_concurrent", { reason: "a previous sweep pass is still executing" });
     return;
   }
-  // W1-T2568: claim a durable GitHub-event wake only after the liveness gate accepts this
+  // W1-T2656: claim a durable GitHub-event wake only after the liveness gate accepts this
   // pass. A marker received after an earlier pass was abandoned-but-still-running belongs to
   // the later pass that actually starts; consuming it before this check erased that intent when
   // W1-T2582 correctly declined the overlapping attempt.

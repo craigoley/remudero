@@ -626,7 +626,7 @@ export function wireSweepWakeToDaemon(
     });
   }
   const signal = createSweepWakeSignal(bootRecord !== undefined);
-  // Remember which durable level has already produced an in-memory edge. If a sweep attempt is
+  // W1-T2656: remember which durable level has already produced an in-memory edge. If a sweep attempt is
   // declined while an older pass is still settling, that marker must remain on disk for the next
   // accepted pass, but re-reading the same level before every sleep must not create a zero-delay
   // busy loop. A different delivery id is a new edge and wakes immediately.
@@ -657,7 +657,7 @@ export function wireSweepWakeToDaemon(
   return {
     sleep,
     acknowledge: () => {
-      // `runDaemon` calls this only after STOP/PAUSE have allowed the top-level full-sweep gate.
+      // `runDaemon` calls this only after STOP/PAUSE and the full-sweep liveness gate accept a pass.
       // Clear the in-memory edge and claim the durable level together. A delivery racing after
       // the claim writes a new marker and raises a new edge for one later pass.
       signal.acknowledge();
