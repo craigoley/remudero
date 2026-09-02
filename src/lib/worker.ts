@@ -1352,6 +1352,8 @@ async function beginSelectedCapacityMeasurement(
   try {
     return beginProviderWindowMeasurement(await readFreshSelectedCapacity(args, config, selection));
   } catch {
+    // Attribution telemetry is best-effort: an unreadable boundary omits consumption rather than
+    // blocking an otherwise available subscription worker before its model call begins.
     return undefined;
   }
 }
