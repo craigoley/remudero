@@ -101,6 +101,61 @@ export function checkUnitTestLiteralMatchClaim(claudeMdText: string): { ok: bool
 }
 
 /**
+ * W1-T2614: CLAUDE.md's decoding row must state the LITERAL retro-proposal form ("P48", plus the
+ * `P29a`/`P40(i)` variants retro.ts:4336's own `PROPOSAL_ID_RE` parser accepts) instead of the
+ * hyphenated `"P-N"` metavariable notation — no live citation (736 measured) or live parser
+ * (retro.ts, panel-graph.ts, run-task.ts's mint scan, plan-proposals.test.ts's uniqueness gate)
+ * recognizes a hyphen after P (`\bP\d+` requires a digit immediately after it), so a header
+ * written as the old row documented it was invisible to both the mint scan AND the uniqueness
+ * gate at once. BIDIRECTIONAL, per W1-T986's `local-gate-invocation-parity` precedent in
+ * plan/claims.yaml: red if the literal form stops being documented, red if the hyphenated token
+ * reappears. SURGICAL, not a blanket de-hyphenation: the `"G-N"` and `"DR-N"` clauses' hyphens are
+ * literal and correct (G-17 is the row's own example; DR- is hyphenated 73 times in MASTER-PLAN),
+ * so this also checks those two survive untouched — a wholesale de-hyphenation of the row fails.
+ */
+export function checkRetroProposalIdDocFormClaim(claudeMdText: string): { ok: boolean; reason?: string } {
+  if (/"P-N"/.test(claudeMdText)) {
+    return {
+      ok: false,
+      reason:
+        'CLAUDE.md still documents the retro-proposal token as the hyphenated "P-N" -- no live ' +
+        "citation or parser (retro.ts, panel-graph.ts, run-task.ts's mint scan, " +
+        "plan-proposals.test.ts's uniqueness gate) accepts a hyphen after P",
+    };
+  }
+  if (!/"P48"/.test(claudeMdText)) {
+    return {
+      ok: false,
+      reason:
+        'CLAUDE.md never states the literal retro-proposal form "P48" -- the decoding row must ' +
+        "name the form every live citation and every live parser actually uses",
+    };
+  }
+  if (!/P29a/.test(claudeMdText) || !/P40\(i\)/.test(claudeMdText)) {
+    return {
+      ok: false,
+      reason:
+        "CLAUDE.md does not name the P29a / P40(i) variants retro.ts:4336's own PROPOSAL_ID_RE " +
+        "parser accepts",
+    };
+  }
+  if (!/G-17/.test(claudeMdText)) {
+    return {
+      ok: false,
+      reason: "CLAUDE.md lost the G-17 literal example -- the G-N clause's hyphen is correct and must stay untouched",
+    };
+  }
+  if (!/"DR-N"/.test(claudeMdText)) {
+    return {
+      ok: false,
+      reason:
+        'CLAUDE.md lost the "DR-N" literal form -- DR- is hyphenated 73 times in MASTER-PLAN and must stay untouched',
+    };
+  }
+  return { ok: true };
+}
+
+/**
  * W1-T2334: derive, from the COMMANDS registry (never a hand-written list — the whole point,
  * mirroring `checkVerbCoverage` above), every verb whose OWN blurb claims read-only-ness
  * (`READ-ONLY`/`Read-only`, case-insensitive). This is the population `checkCliFreshness`
@@ -199,6 +254,12 @@ test("docs-claims: CLAUDE.md states a unit test: proof body is matched LITERALLY
   assert.ok(result.ok, result.reason);
 });
 
+test("docs-claims: CLAUDE.md's decoding row states the literal retro-proposal form P48, not P-N, while G-N/DR-N keep their hyphens", async () => {
+  const claudeMd = await readFile(join(REPO_ROOT, "CLAUDE.md"), "utf8");
+  const result = checkRetroProposalIdDocFormClaim(claudeMd);
+  assert.ok(result.ok, result.reason);
+});
+
 // ── Falsifiers: each check must actually go RED, not just parse ─────────────────────────────
 
 test("docs-claims falsifier: a reverted README.md (stale WS-0-only wording) turns the WS-stage check RED", () => {
@@ -271,4 +332,35 @@ test("docs-claims falsifier: LITERAL substring and BASIC REGEX far apart (differ
     "x".repeat(500) +
     "\nElsewhere, a grep: pattern is a BASIC REGEX.\n";
   assert.equal(checkUnitTestLiteralMatchClaim(farApart).ok, false);
+});
+
+test("docs-claims falsifier: the PRE-FIX wording (quoted verbatim, hyphenated P-N) turns the retro-proposal-id check RED", () => {
+  const preFix =
+    '"G-N" = operator directives indexed in MASTER-PLAN §14\'s "Grill RESOLVED" paragraph ' +
+    "(G-17 = `enforceTierInvariant`, `src/lib/mounts.ts`). \"P-N\" = retro proposals in " +
+    "MASTER-PLAN's Retro-proposals ledger; retired ones are tombstones whose full text is " +
+    'git-archaeology only. "DR-N" = design rules (retro ledger); hyphen avoids the §12 clash.';
+  const result = checkRetroProposalIdDocFormClaim(preFix);
+  assert.equal(result.ok, false);
+  assert.match(result.reason ?? "", /P-N/);
+});
+
+test("docs-claims falsifier: the hyphenated P-N token reappearing ALONGSIDE the literal P48 form still turns the check RED", () => {
+  const bothForms = '"P48" (also written "P-N") = retro proposals in MASTER-PLAN\'s retro ledger.';
+  assert.equal(checkRetroProposalIdDocFormClaim(bothForms).ok, false);
+});
+
+test("docs-claims falsifier: P48 present without the P29a / P40(i) parser variants turns the check RED", () => {
+  const noVariants = '"G-17" = `enforceTierInvariant`. "P48" = retro proposals. "DR-N" = design rules.';
+  const result = checkRetroProposalIdDocFormClaim(noVariants);
+  assert.equal(result.ok, false);
+  assert.match(result.reason ?? "", /P29a/);
+});
+
+test("docs-claims falsifier: a BLANKET de-hyphenation (G17/DRN stripped too) turns the check RED, not just the P clause", () => {
+  const blanket =
+    '"G17" = operator directives (G17 = `enforceTierInvariant`). "P48" = retro proposals ' +
+    '(also `P29a`, `P40(i)`). "DRN" = design rules.';
+  const result = checkRetroProposalIdDocFormClaim(blanket);
+  assert.equal(result.ok, false, "stripping G-17's and DR-N's literal hyphens must also fail the check");
 });
