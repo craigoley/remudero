@@ -1,0 +1,84 @@
+- id: W1-T2716
+  title: "W1-T2618 SHIPPED THE DETECTOR AND DEFERRED THE RULING IN ITS OWN WORDS — `(refresh it, refuse, warn) is a later ruling and is NOT decided here` — so the canonical checkout every worker's node_modules is symlinked to is now MEASURED and acted on by nothing; MEASURED 2026-09-02 it read 1859 then 1863 commits behind origin/main INSIDE ONE SESSION, a 25-day window carrying 44 commits that touched package.json/package-lock.json, the most recent merged the same day"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 12.00
+  files: [src/lib/worker.ts, test/the-deferred-drift-ruling-leaves-a-measured-defect-with-no-owner.test.ts]
+  origin: "operator-session#drift-measured-and-unowned-2026-09-02"
+  plan_refs: ["W1-T2618", "W1-T2625", "W1-T2626", "W1-T2312", "W1-T2333"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE DEFERRAL IS EXPLICIT AND CORRECT; WHAT IS MISSING IS THE SUCCESSOR. W1-T2618 built
+    `measureCanonicalCheckoutDrift`/`recordCanonicalCheckoutDrift` and drew the scope line in its
+    own text: "(refresh it, refuse, warn) is a later ruling and is NOT decided here", and
+    "(iv) NOT IN SCOPE ... Auto-pulling or auto-refreshing the canonical checkout". That was the
+    right call for a measure-only task. No task was filed to make the ruling, so the detector now
+    reports a real defect every worktree creation and nothing consumes it.
+
+    MEASURED 2026-09-02, from the detector's OWN live output on the production host:
+
+        canonical checkout drift: /home/node/Remudero/repos/remudero is 1859 commit(s) behind
+        canonical checkout drift: /home/node/Remudero/repos/remudero is 1863 commit(s) behind
+
+    Two readings, one session, four commits apart — the number GROWS while nothing acts. The
+    figure is `git rev-list --count HEAD..origin/main` in that checkout (see
+    `defaultRevListCanonicalBehind`), so it is the working tree's real distance from the remote,
+    not a comparison against a local branch. W1-T2625's forensic pass independently reached the
+    same root by a different route: `repos/remudero`'s local `main` has ONE reflog entry,
+    `clone`, and has never moved since.
+
+    THE WINDOW HAS REAL DEPENDENCY CONTENT. `git log --oneline -1863 -- package.json
+    package-lock.json` counts 44 commits, and the window's far end is 2026-08-08 — 25 days. The
+    most recent of those, #3653, merged the same day this was measured. So a worktree cut from a
+    CURRENT origin/main resolves its dev CLIs and its test runtime through a tree that predates
+    44 manifest changes.
+
+    WHAT THIS IS NOT, MEASURED. It is NOT a cause of red CI: CI runs on GitHub runners that
+    install from the lockfile in the PR's own tree, and #3672/#3673 both went green on this
+    host's work while the drift stood. The exposure is worker-LOCAL and quieter — a worker's own
+    test run, its `tsc`, and its lint resolve through the stale tree, so a green it observes and
+    a green CI observes are not the same measurement. That divergence is the thing to rule on.
+
+    THE REMEDY IS ALREADY NAMED IN A COMMENT AND OWNED BY NOTHING. `ensureInstallFresh`'s binding
+    rules say it: "A worktree that genuinely needs newer deps is served by refreshing the
+    CANONICAL checkout ... after which the symlink serves the fresh tree with no install here at
+    all." A rule stated only in prose is unenforced by construction — which is exactly why this
+    condition has stood for 25 days while a detector watched it.
+
+    THE RULING IS NOT OBVIOUSLY "PULL", AND THAT IS WHY IT NEEDS A TASK. Refreshing that checkout
+    mutates the dependency tree that live worktrees hold open symlinks INTO. `ensureInstallFresh`
+    already refuses to install through such a symlink because npm's clear phase FOLLOWS the link
+    and empties the shared tree — the 2026-07-29 outage, re-measured forensically 2026-08-11. So
+    a refresh needs a window in which no worker is holding that tree, or it reproduces the outage
+    it was meant to avoid. Refusing to cut a worktree while the source is behind, or warning
+    louder, are legitimate rulings too. This task decides and implements ONE of them; it does not
+    presume the answer.
+
+    THE HEALTHY PATH MUST STAY SILENT AND FREE. W1-T2618 made the detector a detector, not a
+    permanent red, on purpose. A current checkout must remain untouched and unmentioned, or this
+    becomes the bound-fires-on-a-healthy-condition shape CLAUDE.md already records three times.
+  acceptance:
+    - claim: "the ruling W1-T2618 deferred is decided and expressed in source — refresh, refuse or warn — rather than left as prose in a comment that nothing enforces"
+      proof: "unit test: test/the-deferred-drift-ruling-leaves-a-measured-defect-with-no-owner.test.ts"
+    - claim: "a checkout measured behind is acted on by that ruling, and the action taken is recorded alongside the measured distance that triggered it"
+      proof: "unit test: test/the-deferred-drift-ruling-leaves-a-measured-defect-with-no-owner.test.ts"
+    - claim: "no package manager is launched on the canonical path and nothing installs through a worktree's symlinked dependency tree — the 2026-07-29 outage class stays impossible"
+      proof: "unit test: test/the-deferred-drift-ruling-leaves-a-measured-defect-with-no-owner.test.ts"
+    - claim: "a refresh cannot mutate the shared dependency tree while a worktree holds a live link into it — that window is refused rather than raced"
+      proof: "unit test: test/the-deferred-drift-ruling-leaves-a-measured-defect-with-no-owner.test.ts"
+    - claim: "a current checkout stays untouched and silent, so the ruling adds no work and no noise on the healthy path"
+      proof: "unit test: test/the-deferred-drift-ruling-leaves-a-measured-defect-with-no-owner.test.ts"
+  falsifier: |
+    Close without implementation if a task already owns what to DO about a canonical checkout
+    measured behind, or if the checkout is refreshed by some path outside this repo such that the
+    detector reads 0 in steady state. A change that only reports the drift more loudly, without
+    deciding the ruling, does not falsify this task — that is what already exists.
+  note: |
+    W1-T2716 was atomically reserved at `refs/rmd-id/W1-T2716` before this file was written.
+    Successor to W1-T2618's stated deferral; distinct from W1-T2626, which ledgers a worktree's
+    base and currency-check outcome rather than ruling on the deps source.
