@@ -195,7 +195,7 @@ test("acceptance 6: arming and merge-eligibility decisions read the unchanged fi
     checksState: "green",
     reviewState: "none",
     reviewOrphanedByPush: true,
-    priorReviewOrphans: 5,
+    priorReviewAttemptsForInput: 5,
     requiredContextsUnreadable: false,
   });
   // Same PR, but now carrying a (contrived) non-empty redRequiredChecks — the arm/merge-adjacent

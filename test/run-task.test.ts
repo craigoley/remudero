@@ -110,7 +110,7 @@ import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import type { Config } from "../src/lib/config.js";
 import type { ProbeExecResult } from "../src/lib/containment.js";
 import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/isolation.js";
-import { judgeReview } from "../src/lib/review.js";
+import { judgeReview, reviewInputDigest } from "../src/lib/review.js";
 import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
 import { buildBatchedGithub, type GitHub, type StatusProjection } from "../src/lib/status.js";
 import type { AcceptanceCriterion, Plan, Task } from "../src/lib/plan.js";
@@ -8285,14 +8285,24 @@ function withGhStub<T>(script: string, fn: () => T): T {
   }
 }
 
-test("buildOpenPrViews: a zero-runs required check (ci-gate green, remudero-review absent) with a PRIOR review.post_refused ledger line for this exact taskId@headSha sets reviewPostRefused true — the second-absence discriminator's real gateway input (W1-T176)", () => {
+test("buildOpenPrViews: a zero-runs required check with a refusal for this exact review input sets reviewPostRefused true", () => {
   const sha = "deadbeef0000000000000000000000000000000";
   const taskId = "W1-T900";
+  const prUrl = "https://github.com/o/r/pull/900";
+  const body = `Remudero-Task: ${taskId}\n`;
   const root = mkdtempSync(join(tmpdir(), "rmd-openprviews-"));
   const ledgerPath = join(root, "ledger.ndjson");
   writeFileSync(
     ledgerPath,
-    JSON.stringify({ ts: "2026-07-30T00:00:00Z", run_id: "SWEEP-0", task_id: taskId, step: "review.post_refused", head_sha: sha }) + "\n",
+    JSON.stringify({
+      ts: "2026-07-30T00:00:00Z",
+      run_id: "SWEEP-0",
+      task_id: taskId,
+      step: "review.post_refused",
+      head_sha: sha,
+      pr_url: prUrl,
+      review_input_digest: reviewInputDigest(sha, body),
+    }) + "\n",
   );
   try {
     const views = withGhStub(ghStubForOpenPrViews({ sha, taskId }), () => buildOpenPrViews("o", "r", ledgerPath));
@@ -8300,8 +8310,34 @@ test("buildOpenPrViews: a zero-runs required check (ci-gate green, remudero-revi
     assert.equal(views[0].taskId, taskId);
     assert.equal(views[0].checksState, "green", "ci-gate success, remudero-review absent — every REQUIRED context present reports SUCCESS");
     assert.equal(views[0].reviewState, "none", "no remudero-review entry in either check-runs or the combined status");
-    assert.equal(views[0].reviewPostRefused, true, "the ledger already carries a refusal for this exact taskId@headSha");
+    assert.equal(views[0].reviewPostRefused, true, "the ledger already carries a refusal for this exact task/PR/head/body input");
     assert.equal(views[0].requiredContextsUnreadable, false, "the branch-protection read succeeded");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("buildOpenPrViews: a body edit on the same head resets an older refusal immediately", () => {
+  const sha = "deadbeef0000000000000000000000000000000";
+  const taskId = "W1-T900";
+  const prUrl = "https://github.com/o/r/pull/900";
+  const root = mkdtempSync(join(tmpdir(), "rmd-openprviews-"));
+  const ledgerPath = join(root, "ledger.ndjson");
+  writeFileSync(
+    ledgerPath,
+    JSON.stringify({
+      ts: "2026-07-30T00:00:00Z",
+      run_id: "SWEEP-0",
+      task_id: taskId,
+      step: "review.post_refused",
+      head_sha: sha,
+      pr_url: prUrl,
+      review_input_digest: reviewInputDigest(sha, "the old body"),
+    }) + "\n",
+  );
+  try {
+    const views = withGhStub(ghStubForOpenPrViews({ sha, taskId }), () => buildOpenPrViews("o", "r", ledgerPath));
+    assert.equal(views[0].reviewPostRefused, false, "the current body has a different input digest and is eligible again");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
