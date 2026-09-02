@@ -184,8 +184,12 @@ function walk(dir: string, out: string[] = []): string[] {
 }
 
 /** The literal raw `git worktree add` invocation shape — any quoting, any following args, e.g.
- *  `["-C", repoDir, "worktree", "add", worktreePath, ...]`. */
-const RAW_WORKTREE_ADD_RE = /["']worktree["']\s*,\s*["']add["']/;
+ *  `["-C", repoDir, "worktree", "add", worktreePath, ...]`. Exported (not just used via
+ *  {@link findRawWorktreeAddSites}) so `test/worktree-creation-census.test.ts` can drive both its
+ *  accepting and rejecting arms directly by identifier — see the W1-T2317 negative-reachability
+ *  ratchet, which counts a module-scope `_RE` validator against its file's baseline unless a test
+ *  exercises it that way. */
+export const RAW_WORKTREE_ADD_RE = /["']worktree["']\s*,\s*["']add["']/;
 
 /** One matched site: where it was found and what it is called. */
 export interface ScannedSite {

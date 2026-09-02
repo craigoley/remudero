@@ -34,6 +34,7 @@ import {
   censusWorktreeSites,
   enclosingSiteName,
   findRawWorktreeAddSites,
+  RAW_WORKTREE_ADD_RE,
   renderWorktreeCensusFailure,
   WORKTREE_SITE_REGISTRY,
   type WorktreeSiteRow,
@@ -248,6 +249,11 @@ test("routes-through sites route through worktreeAdd exactly as they do today �
       assert.deepEqual(Object.keys(row.disposition), ["kind"]);
     }
   }
+});
+
+test("RAW_WORKTREE_ADD_RE accepts a real raw invocation's argv shape and rejects ordinary prose — both arms driven directly by identifier (W1-T2317 negative-reachability ratchet)", () => {
+  assert.equal(RAW_WORKTREE_ADD_RE.test('["-C", repoDir, "worktree", "add", worktreePath]'), true);
+  assert.equal(RAW_WORKTREE_ADD_RE.test("this line just talks about worktrees, never adding one"), false);
 });
 
 // ── SUPPORTING UNIT: enclosingSiteName / findRawWorktreeAddSites, the primitives above lean on ──
