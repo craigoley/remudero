@@ -313,18 +313,20 @@ import {
   type MintSources,
 } from "./lib/task-id.js";
 import {
-  firstUnreservedAtOrAbove,
-  reserveTaskIdBlock,
-  reserveTaskIdBlockRemote,
-  gitRemoteRefReserver,
-  reserveTaskIdRemote,
-  taskIdReservationRef,
-  withIdReservationLogging,
   type RemoteRefReserver,
-  type TaskIdReservationError,
   type RemoteReservationBlock,
   type TaskIdReservationBlock,
+  type TaskIdReservationError,
+  firstUnreservedAtOrAbove,
+  gitRemoteRefReserver,
+  remoteReservedTaskIds,
+  reservationFloorFrom,
+  reserveTaskIdBlock,
+  reserveTaskIdBlockRemote,
+  reserveTaskIdRemote,
+  taskIdReservationRef,
   taskIdReservationsDir,
+  withIdReservationLogging,
 } from "./lib/task-id-reservation.js";
 import {
   applyPlanProposalCommit,
@@ -16961,6 +16963,25 @@ export async function nextTaskIdCommand(
   } catch {
     /* no readable reservation store ⇒ report the mint alone, exactly as before this existed */
   }
+  // THE SAME BLIND SPOT THE RESERVE PATH HAD, ON THE PATH A HUMAN READS. The mint's four surfaces
+  // (tasks.yaml, shards, open PRs, plan history) do not include `refs/rmd-id/`, so the number
+  // printed above can sit well below every id the fleet already holds — measured here, an advisory
+  // W1-T<n> against a namespace whose real floor was three higher. That number is what an operator
+  // COPIES into a new shard, so a silent understatement is a collision waiting to be filed, not a
+  // cosmetic gap. Best-effort and `--offline`-respecting, exactly like the local notice above: this
+  // verb PRINTS, so an unreadable namespace degrades to saying nothing.
+  if (!offline) {
+    try {
+      // `gitRunAdapter` is the SAME normaliser the reserve path below uses — `spawnSync` reports
+      // `status: null` for a signalled child, and a raw null would read as success here.
+      const advisoryRun = gitRunAdapter(deps.runGit ?? ((args: string[]) => spawnSync("git", args, { cwd: repoRoot, encoding: "utf8" })));
+      const floor = reservationFloorFrom(remoteReservedTaskIds(advisoryRun));
+      if (floor !== "unknown" && floor > mint.n)
+        console.log(`(origin's refs/rmd-id/ namespace already holds ids up to W1-T${floor - 1} — the first id no reservation holds is W1-T${floor})`);
+    } catch {
+      /* unreadable namespace ⇒ report the mint alone */
+    }
+  }
   if (offline) console.log("(--offline: open plan PRs were NOT read — this id is a floor, not a guarantee)");
   // W1-T917 — the rare-overlap advisory. Printed AFTER the id, never instead of it: the mint's own
   // output is byte-identical whether this warns, stays silent, or fails outright. `--offline`
@@ -16998,11 +17019,18 @@ export async function nextTaskIdCommand(
     const contested: string[] = [];
     const run = deps.runGit ?? ((args: string[]) => spawnSync("git", args, { cwd: repoRoot, encoding: "utf8" }));
     const base = deps.reserver ?? gitRemoteRefReserver({ run: gitRunAdapter(run) });
-    // Decorate rather than modify: `src/lib/task-id-reservation.ts` is deliberately NOT declared by
-    // this task and nothing in it changes. The decorator only OBSERVES each attempt, so a `taken`
-    // outcome is reported instead of silently skipped.
+    // Decorate rather than modify: the decorator only OBSERVES each attempt, so a `taken` outcome
+    // is reported instead of silently skipped.
+    //
+    // ⚠ SPREAD `base` RATHER THAN RE-LISTING ITS MEMBERS. The re-listed form named `mintAnchor` and
+    // `attempt` explicitly, so when `RemoteRefReserver` grew `reservedFloor` this decorator kept
+    // type-checking and silently dropped it — the reserve path then walked from the advisory number
+    // as if the seeding did not exist, and the only symptom was an attempt count one higher than it
+    // should be. A decorator that enumerates an interface it does not own is wrong the moment that
+    // interface grows; spreading forwards every member, present and future, and the override below
+    // is the one thing this wrapper actually means to change.
     const reserver: RemoteRefReserver = {
-      mintAnchor: () => base.mintAnchor(),
+      ...base,
       attempt: (taskId: string, anchor: string) => {
         const outcome = base.attempt(taskId, anchor);
         if (outcome === "taken") contested.push(describeContestedId(taskId, (deps.holderOf ?? readReservationHolder)(taskId, run)));
