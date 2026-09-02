@@ -1104,6 +1104,7 @@ export function renderShellHtml(
     <span class="glance-item"><span class="glance-label">reserve</span><span class="glance-value" id="pr-reserve">…</span></span>
     <span class="glance-item"><span class="glance-label">selected</span><span class="glance-value" id="pr-selected">…</span></span>
     <span class="glance-item"><span class="glance-label">providers</span><span class="glance-value" id="pr-providers">…</span></span>
+    <span class="glance-item"><span class="glance-label">Codex model broker</span><span class="glance-value" id="pr-codex-models">…</span></span>
     <span class="glance-item"><span class="glance-label">policy</span><span class="glance-value" id="pr-policy">…</span></span>
     <span class="glance-item"><span class="glance-label">preference bypass</span><span class="glance-value" id="pr-bypass">…</span></span>
     <span class="glance-item"><span class="glance-label">override expires</span><span class="glance-value" id="pr-expires">…</span></span>
@@ -1358,6 +1359,8 @@ export function renderShellHtml(
       </select>
       <label for="provider-policy-reserve">Reserve (%)</label>
       <input id="provider-policy-reserve" type="number" min="0" max="50" step="1" disabled />
+      <label for="provider-policy-codex-model">Codex model</label>
+      <select id="provider-policy-codex-model" disabled><option value="">Automatic mapped choice</option></select>
     </div>
     <div class="btn-row">
       <label for="provider-policy-park-claude">Park Claude</label>
@@ -1375,7 +1378,7 @@ export function renderShellHtml(
       <button id="provider-policy-apply-btn" type="button" data-confirming="false" aria-pressed="false" disabled>Apply policy</button>
       <button id="provider-policy-clear-btn" type="button" data-confirming="false" aria-pressed="false" disabled>Clear provider override</button>
     </div>
-    <p class="counts">A valid change is effective on the next dispatch. It does not start, stop, restart, recycle or deploy either container, and it cannot bypass provider readability or reserve.</p>
+    <p class="counts">A valid change is effective on the next dispatch. It does not start, stop, restart, recycle or deploy either container, and it cannot bypass provider readability or reserve. Account-visible unmapped Codex models remain read-only proposal seeds until a git-reviewed <code>.remudero/mounts.yaml</code> PR assigns their capability.</p>
   </fieldset>
 </section>
 
@@ -2519,7 +2522,25 @@ export function renderShellHtml(
             .join(" | ")
         : p.state === "not-probed"
           ? enabled + " · not probed"
-          : enabled,
+        : enabled,
+    );
+    const codex = providers.find(function (provider) { return provider.provider === "codex"; });
+    const decision = codex && codex.modelDecision;
+    setGlanceValue(
+      "pr-codex-models",
+      decision
+        ? decision.requestedCapability + "/" + decision.requestedEffort + " · " +
+          (decision.options || []).map(function (option) {
+            const headroom = (option.windows || []).length
+              ? Math.min.apply(null, option.windows.map(function (window) { return 100 - window.usedPercent; })) + "% remaining"
+              : "headroom unknown";
+            return option.id + " " + (option.selected ? "selected" : option.eligible ? "eligible" : option.reason || "ineligible") +
+              " · " + headroom + (option.accountDefault ? " · account default" : "") +
+              (option.reason === "unmapped" ? " · promotion requires .remudero/mounts.yaml PR (proposal seed: " + option.id + ")" : "");
+          }).join(" | ") + (decision.preferenceBypass ? " · preference bypass " + decision.preferenceBypass : "")
+        : codex && !codex.readable
+          ? "unavailable (" + (codex.reason || "capacity-unreadable") + ")"
+          : "not observed",
     );
     setGlanceValue("pr-as-of", p.observedAt ? formatTimestamp(p.observedAt) : "unknown");
     const policy = p.policy;
@@ -2527,7 +2548,11 @@ export function renderShellHtml(
       "pr-policy",
       policy
         ? [policy.provenance, policy.preference, policy.reservePercent + "% reserve", "routing " + (policy.routableProviders || []).join(", ")]
-            .join(" · ") + (policy.fallback ? " · fallback " + policy.fallback.reason : "")
+            .join(" · ") +
+            (policy.codexModelPreference
+              ? " · Codex " + policy.codexModelPreference.capability + "/" + policy.codexModelPreference.effort + "=" + policy.codexModelPreference.model
+              : " · Codex model automatic") +
+            (policy.fallback ? " · fallback " + policy.fallback.reason : "")
         : "unknown (daemon has not published policy)",
     );
     setGlanceValue(
@@ -2545,6 +2570,7 @@ export function renderShellHtml(
     const ids = [
       "provider-policy-preference",
       "provider-policy-reserve",
+      "provider-policy-codex-model",
       "provider-policy-park-claude",
       "provider-policy-park-codex",
       "provider-policy-expiry",
@@ -2569,13 +2595,29 @@ export function renderShellHtml(
       applyProviderPolicyControlGate();
       return;
     }
+    const modelPolicy = policy.codexModelPreference
+      ? " · Codex " + policy.codexModelPreference.capability + "/" + policy.codexModelPreference.effort + "=" + policy.codexModelPreference.model
+      : " · Codex model automatic";
     status.textContent = policy.provenance === "overridden"
-      ? "Current override: " + policy.preference + " · " + policy.reservePercent + "% reserve · expires " + formatTimestamp(policy.overrideExpiresAt)
+      ? "Current override: " + policy.preference + " · " + policy.reservePercent + "% reserve" + modelPolicy + " · expires " + formatTimestamp(policy.overrideExpiresAt)
       : "Current policy: committed default" + (policy.fallback ? " (override ignored: " + policy.fallback.reason + ")" : "");
     document.getElementById("provider-policy-enabled-claude").checked = (policy.enabledProviders || []).indexOf("claude") !== -1;
     document.getElementById("provider-policy-enabled-codex").checked = (policy.enabledProviders || []).indexOf("codex") !== -1;
     document.getElementById("provider-policy-preference").value = policy.preference || "automatic";
     document.getElementById("provider-policy-reserve").value = String(policy.reservePercent);
+    const modelSelect = document.getElementById("provider-policy-codex-model");
+    const codex = Array.isArray(p.providers) ? p.providers.find(function (provider) { return provider.provider === "codex"; }) : null;
+    const decision = codex && codex.modelDecision;
+    modelSelect.replaceChildren(new Option("Automatic mapped choice", ""));
+    if (p.freshness === "fresh" && decision) {
+      (decision.options || []).filter(function (option) { return option.mapped && option.eligible; }).forEach(function (option) {
+        modelSelect.add(new Option(option.id + (option.selected ? " (selected)" : ""), option.id));
+      });
+    }
+    if (policy.codexModelPreference && !Array.from(modelSelect.options).some(function (option) { return option.value === policy.codexModelPreference.model; })) {
+      modelSelect.add(new Option(policy.codexModelPreference.model + " (current; inventory is not fresh/eligible)", policy.codexModelPreference.model));
+    }
+    modelSelect.value = policy.codexModelPreference ? policy.codexModelPreference.model : "";
     applyProviderPolicyControlGate();
   }
 
@@ -4102,6 +4144,7 @@ export function renderShellHtml(
       codex: document.getElementById("provider-policy-enabled-codex").checked,
       preference: document.getElementById("provider-policy-preference").value,
       reserve: document.getElementById("provider-policy-reserve").value,
+      codexModel: document.getElementById("provider-policy-codex-model").value,
       parkClaude: document.getElementById("provider-policy-park-claude").value,
       parkCodex: document.getElementById("provider-policy-park-codex").value,
       expiry: document.getElementById("provider-policy-expiry").value,
@@ -4142,7 +4185,21 @@ export function renderShellHtml(
       status.textContent = "Refused locally: the preferred provider cannot also be parked.";
       return null;
     }
-    return { enabledProviders, preference, reservePercent, parks, expiresAt };
+    const model = document.getElementById("provider-policy-codex-model").value;
+    let codexModelPreference = null;
+    if (model) {
+      const codex = latestProviderRouting && Array.isArray(latestProviderRouting.providers)
+        ? latestProviderRouting.providers.find(function (provider) { return provider.provider === "codex"; })
+        : null;
+      const decision = codex && codex.modelDecision;
+      const option = decision && (decision.options || []).find(function (candidate) { return candidate.id === model; });
+      if (latestProviderRouting.freshness !== "fresh" || !decision || !option || !option.mapped || !option.eligible) {
+        status.textContent = "Refused locally: choose only a fresh, mapped Codex model with headroom.";
+        return null;
+      }
+      codexModelPreference = { capability: decision.requestedCapability, effort: decision.requestedEffort, model: model };
+    }
+    return { enabledProviders, preference, reservePercent, parks, codexModelPreference, expiresAt };
   }
   function applyProviderPolicyResponse(response) {
     if (!response || !response.policy || !latestProviderRouting) return;
@@ -5670,6 +5727,7 @@ function providerPolicyAuditProjection(policy: ReturnType<typeof resolveProvider
     preference: policy.preference,
     reserve_percent: policy.reservePercent,
     parks: policy.parks,
+    codex_model_preference: policy.codexModelPreference ?? null,
     expires_at: policy.overrideExpiresAt ?? null,
     ...(policy.fallback ? { fallback: policy.fallback.reason } : {}),
   };
@@ -5721,6 +5779,31 @@ export function buildSetProviderRoutingPolicyRoute(deps: ProviderRoutingPolicyRo
       }
       const now = deps.now ?? Date.now;
       const before = resolveProviderRoutingPolicy(deps.root, context.config, { now });
+      if (value.codexModelPreference) {
+        const codex = context.status.providers?.find((provider) => provider.provider === "codex");
+        const decision = codex?.modelDecision;
+        if (context.status.freshness !== "fresh" || !decision) {
+          sendJson(res, 409, {
+            error: "codex_model_inventory_stale",
+            detail: "a fresh daemon-written Codex model inventory is required; no override was written",
+          });
+          return;
+        }
+        const option = decision.options.find((candidate) => candidate.id === value.codexModelPreference?.model);
+        if (
+          decision.requestedCapability !== value.codexModelPreference.capability ||
+          decision.requestedEffort !== value.codexModelPreference.effort ||
+          !option ||
+          !option.mapped ||
+          !option.eligible
+        ) {
+          sendJson(res, 400, {
+            error: "codex_model_not_eligible",
+            detail: "the requested model is not a fresh mapped eligible option; no override was written",
+          });
+          return;
+        }
+      }
       try {
         (deps.writeOverride ?? writeProviderRoutingPolicyOverride)(deps.root, value, {
           config: context.config,
