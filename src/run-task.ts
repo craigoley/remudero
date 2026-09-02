@@ -4777,7 +4777,16 @@ async function runReview(args: {
   // floor, lint-plan, the plan-PR emitter and the plan-index checks — is untouched and still runs.
   // The predicate is review.ts's own `planOnlyDiff`, never a second copy of the expression.
   const planOnlySkip = planOnlyDiff(diff);
-  const attemptReviewer = args.spawnReviewer !== false && args.reviewerMount !== undefined && criteria.length > 0 && !planOnlySkip;
+  // Snapshot the optional mount before entering the async temp-dir callback. Besides making the
+  // optional semantic-sweep path type-safe, this keeps the spawn's three controls visibly sourced
+  // from the resolved reviewer mount — the mount-wiring ratchet intentionally checks these exact
+  // assignments so a future edit cannot smuggle hardcoded model/effort/turn values back in.
+  const reviewerSpawnMount = args.reviewerMount === undefined ? undefined : {
+    model: args.reviewerMount.model,
+    effort: args.reviewerMount.effort,
+    maxTurns: args.reviewerMount.maxTurns,
+  };
+  const attemptReviewer = args.spawnReviewer !== false && reviewerSpawnMount !== undefined && criteria.length > 0 && !planOnlySkip;
   let reviewerSubtype: string | undefined;
   let reviewerSpawnFailed = false;
   if (planOnlySkip) {
@@ -4807,9 +4816,9 @@ async function runReview(args: {
             // undeclared 12-turn cap with no model/effort override walled
             // `error_max_turns` on every substantive code PR — a floor-only PASS silently masquerading
             // as a completed review (P10-a; reviewerOutcome below makes it legible).
-            model: args.reviewerMount!.model,
-            effort: args.reviewerMount!.effort,
-            maxTurns: args.reviewerMount!.maxTurns,
+            model: reviewerSpawnMount!.model,
+            effort: reviewerSpawnMount!.effort,
+            maxTurns: reviewerSpawnMount!.maxTurns,
             maxBudgetUsd: args.budgetUsd,
             config: args.config,
             queryFn: args.reviewerQueryFn, // W1-T2205: absent ⇒ the real SDK query(), unchanged.
