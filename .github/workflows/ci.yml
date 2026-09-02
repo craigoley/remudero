@@ -187,6 +187,26 @@ jobs:
         # AND THE SKIP NAMES ITSELF (criterion 7 / Q4): the class, the suite count and the total go
         # to the log AND to $GITHUB_STEP_SUMMARY. A 0-second green that says nothing is
         # indistinguishable from a real one, which is the defect this must not add.
+        #
+        # W1-T2597: MEASURED on PR #3542 — `ci-shard (1/4)` exited 1 with 161 KB of log and NO
+        # `# tests`/`# pass`/`# fail` trailing summary anywhere in it, while its three sibling
+        # shards each ended with a complete summary. A killed/timed-out run prints only the
+        # assertions it reached before dying and never reaches node's OWN trailing summary block
+        # (written once, at the very end — the same discriminator src/lib/review.ts's
+        # `hasFinalSummary` already keys on for a name-filtered proof run). CI reported that
+        # identically to a shard whose summary named a genuine, complete failure set, so nothing
+        # downstream could tell "failed" from "never reported". The block below distinguishes
+        # them WITHOUT changing whether the job is red — a shard that dies mid-run is still a
+        # failing check — it only makes the difference legible: `test-shard-output.log` is what
+        # the summary line is grepped from, so this must run under `tee`, and `set +e`/
+        # `PIPESTATUS` (never a bare `$?`) is required because this step's shell already runs
+        # under GitHub Actions' own default `-eo pipefail` — piping through `tee` would otherwise
+        # abort the script on the very line that captures the exit code, the same reason the
+        # `coverage-ratchet` job's "Test with coverage" step above brackets its own test run in
+        # `set +e`/`set -e`. A shard whose slice legitimately runs nothing still runs to
+        # completion and prints a summary (`# tests 0`, exit 0, MEASURED locally against a real
+        # `node --test --test-shard=` invocation over an empty slice) — so the check below is
+        # gated on a NON-ZERO exit and never fires on an empty-but-honest shard.
         run: |
           CLASS="${{ steps.classify.outputs.class }}"
           if [ "$CLASS" != "SOURCE" ] && [ "${{ matrix.shard }}" != "1" ]; then
@@ -195,8 +215,15 @@ jobs:
           fi
           if [ "$CLASS" = "SOURCE" ]; then
             echo "CI sharding: class=SOURCE — running test shard ${{ matrix.shard }}/4."
-            npm run test:ci -- --test-shard=${{ matrix.shard }}/4
-            exit $?
+            set +e
+            npm run test:ci -- --test-shard=${{ matrix.shard }}/4 2>&1 | tee test-shard-output.log
+            CODE="${PIPESTATUS[0]}"
+            set -e
+            if [ "$CODE" -ne 0 ] && ! grep -qE '^# tests [0-9]+' test-shard-output.log; then
+              echo "::error::ci-shard ${{ matrix.shard }}/4 exited ${CODE} with NO node-test-runner summary ('# tests'/'# pass'/'# fail') anywhere in its output. A killed or timed-out run prints only the assertions it reached and no totals, so its failure set is a SUBSET BY CONSTRUCTION — this red is UNVERIFIED, not a diagnosed failure set (W1-T2597)."
+              echo "- **W1-T2597: NO-SUMMARY SHARD** — ci-shard (${{ matrix.shard }}/4) exited ${CODE} with no trailing \`# tests\` summary. Its failure set is UNVERIFIED (truncated evidence), distinct from a shard that reported a complete, genuine failure set." >> "$GITHUB_STEP_SUMMARY"
+            fi
+            exit "$CODE"
           fi
           SUITES="$(node --import tsx scripts/diff-class.mjs --list-plan-reading-suites)" || SUITES=""
           if [ -z "$SUITES" ]; then
