@@ -1,4 +1,7 @@
 import { strict as assert } from "node:assert";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import {
   DEFAULT_SWEEP_POLICY,
@@ -7,6 +10,7 @@ import {
   type CiFailure,
   type OpenPrView,
 } from "../src/lib/sweep.js";
+import { buildSweepEffects } from "../src/run-task.js";
 
 /**
  * W1-T2620 — THE BASE-CAUSED STAND-DOWN'S EXIT CONDITION.
@@ -294,4 +298,126 @@ test("W1-T2620 acceptance 6: omitting the injected main tip reader leaves the pa
     assert.doesNotMatch(String(line.stand_down_reason), /released/, "the release lane must never fire with no reader wired");
     assert.equal(line.main_tip_sha, undefined, "no main_tip_sha field at all — the disposed line shape is untouched");
   }
+});
+
+// ── GUARDED SITE — the REAL buildSweepEffects wiring, never the hand-rolled harness above ───────
+// Every acceptance test above drives `sweepOnce`'s own fake `readMainTip`/`releaseBaseCausedStandDown`
+// closures, proving `runSweep`'s fold and dedup. It proves nothing about `buildSweepEffects`
+// (src/run-task.ts) — the ONE place production actually builds those two closures. The tests below
+// drive THAT real wiring, the same discipline test/stale-ci-gate-wiring.test.ts's own GUARDED SITE
+// suite uses for `readCiGateRollup`/`reaggregateCiGate`: a stubbed async JSON reader (never a real
+// `gh`) and a recorder in place of the real `pushEmptyCommit` (never a real git push).
+
+function releasePr(over: Partial<OpenPrView> = {}): OpenPrView {
+  return {
+    prNumber: 9501,
+    prUrl: "https://github.com/craigoley/remudero/pull/9501",
+    taskId: "W1-TZ",
+    reviewState: "success",
+    checksState: "red",
+    unmetCriteria: [],
+    priorStrikes: 0,
+    lastActivityAt: RECENT,
+    headSha: "realwiringhead",
+    headRefName: "run-W1-TZ-9501",
+    autoMergeArmed: false,
+    ...over,
+  };
+}
+
+/** `buildSweepEffects` with every optional dep left at its default EXCEPT `pushEmptyCommit`
+ *  (param 11) and `readJsonImpl` (param 22, the newest) — the exact positional gap
+ *  `test/stale-ci-gate-wiring.test.ts`'s own `buildEffects` helper already establishes for
+ *  `ghRunImpl`/`readJsonImpl`. */
+function buildRealEffects(
+  pushEmptyCommit: (repoDir: string, branch: string, head: string, message: string) => string,
+  readJsonImpl: (args: string[]) => Promise<unknown>,
+) {
+  return buildSweepEffects(
+    "craigoley",
+    "remudero",
+    { claudeBin: "/usr/bin/true", root: mkdtempSync(join(tmpdir(), "w1t2620-real-wiring-root-")) } as never,
+    join(mkdtempSync(join(tmpdir(), "w1t2620-real-wiring-")), "ledger.ndjson"),
+    "SWEEP-T2620-REAL-1",
+    { tasks: [], byId: new Map() } as never,
+    () => {},
+    DEFAULT_SWEEP_POLICY,
+    undefined,
+    undefined,
+    pushEmptyCommit,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    readJsonImpl,
+  );
+}
+
+test("W1-T2620 GUARDED SITE: buildSweepEffects wires readMainTip and releaseBaseCausedStandDown — both callable, not undefined", () => {
+  const effects = buildRealEffects(
+    () => "unused",
+    async () => ({ sha: TIP_B }),
+  );
+  assert.equal(typeof effects.readMainTip, "function", "readMainTip must be reachable from the real gateway builder");
+  assert.equal(typeof effects.releaseBaseCausedStandDown, "function", "releaseBaseCausedStandDown must be reachable from the real gateway builder");
+});
+
+test("W1-T2620 GUARDED SITE: readMainTip's real implementation returns the sha the REST commit read carries", async () => {
+  const effects = buildRealEffects(() => "unused", async (args) => {
+    assert.deepEqual(args, ["api", "repos/craigoley/remudero/commits/main"], "reads main's own tip, never a branch or a local git ref");
+    return { sha: TIP_B };
+  });
+  assert.equal(await effects.readMainTip!(), TIP_B);
+});
+
+test("W1-T2620 GUARDED SITE: readMainTip's real implementation returns undefined on a shapeless response, never a thrown crash", async () => {
+  const effects = buildRealEffects(
+    () => "unused",
+    async () => ({}) as unknown, // no `sha` field at all
+  );
+  assert.equal(await effects.readMainTip!(), undefined);
+});
+
+test("W1-T2620 GUARDED SITE: readMainTip's real implementation returns undefined when the underlying read throws, never propagating", async () => {
+  const effects = buildRealEffects(
+    () => "unused",
+    async () => {
+      throw new Error("gh api: rate limited");
+    },
+  );
+  assert.equal(await effects.readMainTip!(), undefined);
+});
+
+test("W1-T2620 GUARDED SITE: releaseBaseCausedStandDown's real implementation pushes an empty commit to the PR's own branch and head, naming the PR and the main tip", async () => {
+  const calls: Array<{ repoDir: string; branch: string; head: string; message: string }> = [];
+  const effects = buildRealEffects((repoDir, branch, head, message) => {
+    calls.push({ repoDir, branch, head, message });
+    return "mintedsha";
+  }, async () => ({ sha: TIP_B }));
+
+  await effects.releaseBaseCausedStandDown!(releasePr(), TIP_B);
+
+  assert.equal(calls.length, 1, "exactly one push for one release");
+  assert.equal(calls[0]!.branch, "run-W1-TZ-9501", "pushes to the PR's OWN branch, never a fresh one");
+  assert.equal(calls[0]!.head, "realwiringhead", "parented on the CURRENT head — a fast-forward, never a stale one");
+  assert.match(calls[0]!.message, /#9501/, "the commit message names the PR it re-triggers");
+  assert.match(calls[0]!.message, new RegExp(TIP_B), "the commit message names the main tip that justified the release");
+});
+
+test("W1-T2620 GUARDED SITE: releaseBaseCausedStandDown's real implementation is a named no-op when the PR carries no head branch, never a guessed target", async () => {
+  let pushes = 0;
+  const effects = buildRealEffects(() => {
+    pushes++;
+    return "never";
+  }, async () => ({ sha: TIP_B }));
+
+  await effects.releaseBaseCausedStandDown!(releasePr({ headRefName: undefined as unknown as string }), TIP_B);
+
+  assert.equal(pushes, 0, "no head branch means no push — never a guessed target");
 });
