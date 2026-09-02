@@ -1,0 +1,85 @@
+- id: W1-T2713
+  title: "THE ONE LANE THAT CAN FAIL A PLAN-ONLY FILING SCORES VOCABULARY OVERLAP BETWEEN TWO TEXTS THE AUTHOR WRITES INDEPENDENTLY — `judgeCriterion` takes `proofKeywords(criterion.proof)` from the SHARD but `reportTokens` from the PR BODY, so a filing passes or fails on whether its test FILENAME happens to echo its own prose; MEASURED 2026-09-02: #3665 cleared `MIN_COVERAGE` at 4/6 = 0.667 only because `provider-routing-console-controls` repeats words its body already used, while the same body scores 0 on any test path named differently"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 10.00
+  files: [src/lib/review.ts, test/a-plan-only-filing-passes-on-naming-coincidence-not-evidence.test.ts]
+  origin: "operator-session#floor-scores-naming-coincidence-2026-09-02"
+  plan_refs: ["W1-T205", "W1-T178", "W1-T219", "W1-T1100", "W1-T2221"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE FLOOR IS THE ONLY THING THAT CAN FAIL A PLAN-ONLY FILING, AND IT IS MEASURING THE WRONG
+    PAIR OF TEXTS. `judgeReview` sets `unmetForState = planOnly ? floorUnmet : unmet`, so a
+    filing is exempt from every semantic downgrade and rests entirely on the mechanical keyword
+    floor. That floor, in `judgeCriterion`, is:
+
+        const kws     = proofKeywords(criterion.proof);      // from the SHARD
+        const covered = kws.filter((k) => reportTokens.has(k)); // from the PR BODY
+        if (covered.length / kws.length < MIN_COVERAGE) -> unmet   // MIN_COVERAGE = 0.6
+
+    When a PR carries a `Remudero-Task:` trailer the CRITERIA are resolved from the shard, but
+    `reportTokens` is still tokenized from `evidence.report` — the PR body. Nothing requires the
+    body to mention the proof at all. So the one gate standing between a filing and `main` is
+    scoring how much vocabulary two independently-written texts happen to share.
+
+    MEASURED 2026-09-02, both sides scored with `review.ts`'s own `tokenize`/`proofKeywords`
+    against its own `STOPWORDS` lifted from source, with a paired control:
+
+        #3665  proof `unit test: test/provider-routing-console-controls.test.ts`
+               kws(6) unit test provider routing console controls
+               covered(4) provider routing console controls        = 0.667  PASSES (floor 0.6)
+               MISSING: unit, test
+
+        #3667  proof `unit test: test/the-mint-...-local-half-is-stale.test.ts`
+               kws(11) ... covered(11)                              = 1.000  PASSES
+
+    #3665 clears the bound by ONE TOKEN, and only because someone happened to name the test file
+    after the same four words its body already used. `unit` and `test` — present in EVERY
+    `unit test:` proof and in almost no PR body — are dead weight in every denominator.
+
+    THE FAILURE IS SILENT AND FALLS ON THE CORRECT AUTHOR. A shard can be perfect, its proofs
+    forward-only and pure-path, its acceptance block parsing 5/5 — and it fails because the test
+    path was named for the DEFECT (this repo's own convention) while the body was written about
+    the EVIDENCE. Rename the file and the same PR passes. Nothing in the verdict says the cause
+    was vocabulary; it reads `report does not substantiate it (matched N/M proof keywords)`,
+    which invites the author to rewrite a body that was never wrong.
+
+    THIS IS NOT A BOUND TO TUNE. CLAUDE.md already records three instances of a bound firing on
+    a healthy condition, and moving 0.6 is exactly that move: lower it and the floor stops
+    discriminating at all (it is the ONLY lane on this path); raise it and correct filings fail
+    faster. The defect is WHICH TEXT IS SCORED. When the criteria were resolved from the shard,
+    the responsiveness question the floor is asking — "is this proof pasted into the thing the
+    reviewer read?" — is already answered by construction, and the reviewer's own PASS text says
+    a plan-only PR is "gated deterministically (lint-plan + the plan-PR emitter + plan-index
+    checks)". Score the text the criteria actually came from, or stop resting the plan-only lane
+    on body-vocabulary overlap.
+
+    A CONTROL BELONGS IN THE FIX, AND IT IS THE HALF THAT MATTERS. Making plan-only filings
+    unfailable is not the deliverable and would be worse than the defect: W1-T219 already had to
+    close a fail-OPEN hole in this same floor, where a proof with no distinctive anchors passed
+    unconditionally. A body that genuinely does not substantiate its criteria must still fail.
+  acceptance:
+    - claim: "when a PR's criteria resolve from its shard, the floor scores the proof against the text those criteria came from rather than a body that need never mention it"
+      proof: "unit test: test/a-plan-only-filing-passes-on-naming-coincidence-not-evidence.test.ts"
+    - claim: "a filing whose test path shares no vocabulary with its own prose is no longer failed for that alone, and the reported reason never blames a body that was correct"
+      proof: "unit test: test/a-plan-only-filing-passes-on-naming-coincidence-not-evidence.test.ts"
+    - claim: "a filing that genuinely fails to substantiate its criteria still fails — W1-T219's fail-open hole is not reopened and the lane is not made unfailable"
+      proof: "unit test: test/a-plan-only-filing-passes-on-naming-coincidence-not-evidence.test.ts"
+    - claim: "MIN_COVERAGE is unchanged at 0.6 — the fix is which text is scored, never a wider tolerance"
+      proof: "unit test: test/a-plan-only-filing-passes-on-naming-coincidence-not-evidence.test.ts"
+    - claim: "the measured 4-of-6 margin is pinned as a falsifier, so a later change that restores naming-coincidence scoring fails a test rather than passing quietly"
+      proof: "unit test: test/a-plan-only-filing-passes-on-naming-coincidence-not-evidence.test.ts"
+  falsifier: |
+    Close without implementation if the mechanical floor on a criteria-from-shard PR already
+    scores the proof against the shard's own text, or if the plan-only lane no longer rests on
+    `floorUnmet` alone. A change that only moves MIN_COVERAGE, or that exempts plan-only PRs from
+    the floor entirely without a control proving an unsubstantiated filing still fails, does not
+    falsify this task.
+  note: |
+    W1-T2713 was atomically reserved at `refs/rmd-id/W1-T2713` before this file was written
+    (23 attempts, itself another instance of the walk W1-T2710 records).

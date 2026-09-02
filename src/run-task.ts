@@ -28,6 +28,7 @@ import {
   architectModel,
   configPath as instanceConfigPath,
   consoleUrl,
+  enabledWorkerProviders,
   fixStrikeCap,
   globalArtifactPath,
   globalLearningsHome,
@@ -45,6 +46,7 @@ import {
   workerZdotdir,
   type Config,
 } from "./lib/config.js";
+import { writeProviderRoutingStatus, type ProviderRoutingWriteInput } from "./lib/provider-routing-status.js";
 import { readFileIfExists } from "./lib/fs-race-safe.js";
 import { buildPromptManifest } from "./lib/prompt-manifest.js";
 import { buildWorkerEnv, billingMode, readBinaryPin, type BillingMode, type BinaryPinReading } from "./lib/env.js";
@@ -22750,6 +22752,8 @@ export async function daemonCommand(
      * runner itself. */
     wireSweepWake?: typeof wireSweepWakeToDaemon;
     processKill?: (pid: number, signal: NodeJS.Signals) => boolean;
+    /** Best-effort boot projection for provider routing; production writes one bounded state file. */
+    writeProviderRoutingStatus?: (root: string, input: ProviderRoutingWriteInput) => void;
   } = {},
 ): Promise<number> {
   // FAIL LOUD on junk args BEFORE any spawn/lock — `rmd daemon install --dry-run` silently
@@ -23030,6 +23034,20 @@ export async function daemonCommand(
       return 1;
     }
     throw e;
+  }
+  // Publish only after this process owns the shared daemon/drain lock. Dry-run returned above,
+  // and a refused second daemon returned from the catch, so neither can replace material state.
+  // This is telemetry only: disk failure must not change whether the daemon starts.
+  try {
+    (deps.writeProviderRoutingStatus ?? writeProviderRoutingStatus)(config.root, {
+      state: "not-probed",
+      enabledProviders: enabledWorkerProviders(config),
+      reservePercent: config.workerProviders?.reservePercent ?? 5,
+      observedAtMs: Date.now(),
+      cacheValidMs: config.workerProviders?.capacityCacheMs ?? 60_000,
+    });
+  } catch {
+    log("daemon.provider_routing_status_write_failed", { reason: "write-failed" });
   }
   // W1-T2568 — THE GITHUB-EVENT WAKE'S ENTIRE DAEMON-SIDE WIRING. `wireSweepWakeToDaemon`
   // (lib/github-event-wake.ts) consumes any boot-pending marker, arms an `fs.watch` on the
