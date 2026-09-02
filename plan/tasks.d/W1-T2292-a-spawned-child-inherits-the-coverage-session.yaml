@@ -130,6 +130,26 @@
     merged `Remudero-Task:` trailers and merged subjects — each match anchored and each zero paired
     with a control that fires on its own surface, every merged-surface control drawn from an
     actually-merged id. Surface 1 reads the reservation ref as PRESENT; the other seven read zero.
+    ── SHIPPED — RECORDED 2026-09-02 (evidence only; `status:` is deliberately unchanged) ──
+
+    THIS TASK IS BUILT. Every path in its declared `files:` exists on origin/main and a merged
+    commit carries its `Remudero-Task:` trailer:
+      32010beb test(coverage): add a scan for the coverage-session-blanking no-op (#2926)
+
+    `status: queued` BELOW IS STALE AND IS LEFT ALONE ON PURPOSE. The field is decorative by
+    documented design — the plan monolith header states the runner never writes it back — and the
+    operator ruled LEAVE THEM on 2026-08-05 rather than correct it in place. Nothing mechanical is
+    misled: MEASURED 2026-09-02, `runnableCandidates` over the trailer-built merged set offers 347
+    tasks and this id is NOT among them (merged=true, offered-as-runnable=false). The credit
+    projection, never this field, is the completion signal.
+
+    NO `retirement:` IS APPLIED, AND IT WOULD BE THE WRONG FIELD IF IT WERE. `RETIREMENT_REASONS`
+    records work that will NEVER be built; this was built. It is also operator-only (W1-T1287).
+
+    THIS BLOCK EXISTS BECAUSE A READER WAS MISLED, NOT A MACHINE. A session picking parallel build
+    candidates read `status: queued` here and proposed already-shipped work. Recording the fact
+    where a human reads it closes that gap without touching either the decorative field or an
+    operator-only one.
   acceptance:
     - claim: "a delete of the coverage variable from a child env is reported as a defect wherever it appears"
       proof: "unit test: test/coverage-session-blanking.test.ts"
