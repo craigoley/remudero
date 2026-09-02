@@ -63,6 +63,7 @@ interface CodexWorkerResult {
   compactionConfigured: false;
   qualitySuspect: false;
   workerDurationMs: number;
+  windowConsumption?: ProviderWindowConsumption;
 }
 
 export interface ProviderCapacityWindow {
@@ -87,6 +88,122 @@ export interface ProviderSelection {
   provider: WorkerProviderId;
   capacity: ProviderCapacity;
   tightestRemainingPercent: number;
+}
+
+export interface ProviderWindowConsumption {
+  provider: WorkerProviderId;
+  percentConsumed: number | null;
+  windowName?: string;
+  resetsAt?: number | string;
+  reason?:
+    | "provider-mismatch"
+    | "capacity-unreadable"
+    | "no-reset-stable-window"
+    | "counter-regressed"
+    | "overlapping-provider-work";
+}
+
+export interface ProviderWindowMeasurement {
+  readonly provider: WorkerProviderId;
+  readonly before: ProviderCapacity;
+  overlapped: boolean;
+}
+
+const activeProviderWindowMeasurements = new Map<WorkerProviderId, Set<ProviderWindowMeasurement>>();
+
+export function clearProviderWindowMeasurements(): void {
+  activeProviderWindowMeasurements.clear();
+}
+
+/** Begin a per-worker attribution interval, contaminating every same-provider peer already live. */
+export function beginProviderWindowMeasurement(before: ProviderCapacity): ProviderWindowMeasurement {
+  const active = activeProviderWindowMeasurements.get(before.provider) ?? new Set<ProviderWindowMeasurement>();
+  for (const measurement of active) measurement.overlapped = true;
+  const measurement: ProviderWindowMeasurement = {
+    provider: before.provider,
+    before,
+    overlapped: active.size > 0,
+  };
+  active.add(measurement);
+  activeProviderWindowMeasurements.set(before.provider, active);
+  return measurement;
+}
+
+function removeProviderWindowMeasurement(measurement: ProviderWindowMeasurement): void {
+  const active = activeProviderWindowMeasurements.get(measurement.provider);
+  active?.delete(measurement);
+  if (active?.size === 0) activeProviderWindowMeasurements.delete(measurement.provider);
+}
+
+export function abandonProviderWindowMeasurement(measurement: ProviderWindowMeasurement): void {
+  removeProviderWindowMeasurement(measurement);
+}
+
+/** Finish an interval only when one worker owned that provider for the full observation. */
+export function finishProviderWindowMeasurement(
+  measurement: ProviderWindowMeasurement,
+  after: ProviderCapacity,
+): ProviderWindowConsumption {
+  removeProviderWindowMeasurement(measurement);
+  if (measurement.overlapped) {
+    return { provider: measurement.provider, percentConsumed: null, reason: "overlapping-provider-work" };
+  }
+  return providerWindowConsumption(measurement.before, after);
+}
+
+/**
+ * Measure one provider's largest percentage-point burn across windows whose reset identity stayed
+ * stable for the whole observation. A changed/absent reset is not comparable, and a regressed
+ * counter is refused rather than turned into a negative consumption credit. This function does
+ * attribution only between two already-captured readings; callers must separately prove that no
+ * same-provider work overlapped the observation before attaching the result to one worker.
+ */
+export function providerWindowConsumption(
+  before: ProviderCapacity,
+  after: ProviderCapacity,
+): ProviderWindowConsumption {
+  if (before.provider !== after.provider) {
+    return { provider: before.provider, percentConsumed: null, reason: "provider-mismatch" };
+  }
+  if (!before.readable || !after.readable) {
+    return { provider: before.provider, percentConsumed: null, reason: "capacity-unreadable" };
+  }
+
+  const candidates: Array<{ percentConsumed: number; windowName: string; resetsAt: number | string }> = [];
+  let regressed = false;
+  for (const start of before.windows) {
+    if (start.resetsAt === undefined) continue;
+    const end = after.windows.find(
+      (window) =>
+        window.name === start.name &&
+        window.resetsAt !== undefined &&
+        typeof window.resetsAt === typeof start.resetsAt &&
+        window.resetsAt === start.resetsAt,
+    );
+    if (!end) continue;
+    if (
+      !Number.isFinite(start.usedPercent) ||
+      !Number.isFinite(end.usedPercent) ||
+      start.usedPercent < 0 ||
+      start.usedPercent > 100 ||
+      end.usedPercent < 0 ||
+      end.usedPercent > 100
+    ) {
+      continue;
+    }
+    const delta = end.usedPercent - start.usedPercent;
+    if (delta < 0) {
+      regressed = true;
+      continue;
+    }
+    candidates.push({ percentConsumed: delta, windowName: start.name, resetsAt: start.resetsAt });
+  }
+  if (regressed) return { provider: before.provider, percentConsumed: null, reason: "counter-regressed" };
+  if (candidates.length === 0) {
+    return { provider: before.provider, percentConsumed: null, reason: "no-reset-stable-window" };
+  }
+  candidates.sort((a, b) => b.percentConsumed - a.percentConsumed || a.windowName.localeCompare(b.windowName));
+  return { provider: before.provider, ...candidates[0] };
 }
 
 export class ProviderCapacityBlockedError extends Error {
@@ -365,6 +482,10 @@ export interface CodexCapacityDeps {
   requestedEffort?: string;
   /** Process environment used only for PATH resolution of an unconfigured Codex binary. */
   resolveEnv?: NodeJS.ProcessEnv;
+  /** Bypass the routing cache at an attribution boundary. */
+  forceRefresh?: boolean;
+  /** Re-read the exact concrete model selected at the start of an attribution interval. */
+  selectedModel?: string;
   /**
    * Injected capability ladder (W1-T2573), bypassing the `loadMounts` disk read below — for a
    * caller that already holds a validated Mounts table, and for tests. When omitted,
@@ -444,10 +565,13 @@ export async function readCodexCapacity(config: Config, deps: CodexCapacityDeps 
   const capabilities = resolveCapabilityLadder(config, deps);
   const now = deps.now ?? Date.now;
   const cacheKey = `${bin}\0${codexHome(config)}`;
+  const selectionConfig = deps.selectedModel
+    ? { ...config, workerProviders: { ...config.workerProviders, codexModel: deps.selectedModel } }
+    : config;
   const cached = codexCapacityCache.get(cacheKey);
   const cacheMs = config.workerProviders?.capacityCacheMs ?? 60_000;
-  if (cached && now() - cached.at < cacheMs) {
-    return selectCodexModel(cached.value.models, cached.value.rateLimits, config, deps.requestedModel, deps.requestedEffort, capabilities);
+  if (!deps.forceRefresh && cached && now() - cached.at < cacheMs) {
+    return selectCodexModel(cached.value.models, cached.value.rateLimits, selectionConfig, deps.requestedModel, deps.requestedEffort, capabilities);
   }
 
   const spawn = deps.spawn ?? ((command, args, options) => spawnChild(command, args, { ...options, stdio: ["pipe", "pipe", "pipe"] }));
@@ -530,7 +654,7 @@ export async function readCodexCapacity(config: Config, deps: CodexCapacityDeps 
   });
   if ("provider" in value) return value;
   codexCapacityCache.set(cacheKey, { at: now(), value });
-  return selectCodexModel(value.models, value.rateLimits, config, deps.requestedModel, deps.requestedEffort, capabilities);
+  return selectCodexModel(value.models, value.rateLimits, selectionConfig, deps.requestedModel, deps.requestedEffort, capabilities);
 }
 
 interface CodexJsonEvent {
