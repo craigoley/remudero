@@ -268,7 +268,13 @@ test("CALIBRATION: the detection finds the readers recon-EJ measured, and no mor
   // calibration failed at 22-vs-21 while test 2 stayed green, so the reader arrived already seamed
   // and is NOT allowlisted — adding it to ALLOWED would fail test 3's STALE-ENTRY LOCK and test 5.
   // The file set is UNCHANGED by it (`src/run-task.ts` already carried the other three).
-  assert.equal(readers.length, 22, `expected 22 unredirectable policy reads; saw:\n${readers.map((r) => `  ${r.file}:${r.line} ${r.text}`).join("\n")}`);
+  // TWENTY-THREE since `decideAutoMergeArm`'s `resolvedBands` (review.ts, W1-T2579) landed —
+  // a TWENTIETH consumer, also SEAMED (`bands ?? loadDefaultPolicy()`), resolving the committed
+  // operator-ratified arm-calibration table only when the caller did not inject one. It passed
+  // test 2 before this number moved, so it is not allowlisted; adding it to ALLOWED would fail
+  // test 3's STALE-ENTRY LOCK and test 5. The task's file declaration names this calibration
+  // lock because adding a policy consumer without updating its measured corpus is incomplete.
+  assert.equal(readers.length, 23, `expected 23 unredirectable policy reads; saw:\n${readers.map((r) => `  ${r.file}:${r.line} ${r.text}`).join("\n")}`);
 
   // `symbolise` labels the LAST bare `const policy = loadPolicy(...)` as daemonCommand's, because that
   // reader carries no distinctive identifier of its own. Today exactly ONE such line survives —

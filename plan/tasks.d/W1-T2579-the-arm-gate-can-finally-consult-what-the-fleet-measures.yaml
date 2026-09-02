@@ -7,7 +7,7 @@
   principles: {tdd: strict}
   risk: high
   budget_usd: 45.00
-  files: [src/lib/review.ts, src/lib/policy.ts, test/arm-calibration-bands.test.ts]
+  files: [plan/policy.yaml, src/lib/review.ts, src/lib/policy.ts, test/arm-calibration-bands.test.ts, test/config-reader-seams.test.ts, test/policy.test.ts, test/unexecutable-proof-visibility.test.ts]
   origin: "operator-brief#direction-refresh-2026-08-27"
   plan_refs: ["W1-T424", "W1-T1259", "W1-T2244", "W1-T229"]
   status: queued
