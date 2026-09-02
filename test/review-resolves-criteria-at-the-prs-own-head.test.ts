@@ -71,6 +71,20 @@ test("criteria resolve from the plan as it stands at the pull request's own head
     "the criterion committed at headSha must resolve",
   );
   assert.equal(result.taskId, "W1-T1");
+  // W1-T2623: the operator-visible source names the head sha, the task, the count, AND (the
+  // restored read-identity assertion) the object identity of the plan bytes actually read — WHICH
+  // plan bytes this review gated, not only which task id and how many criteria it found.
+  assert.equal(
+    result.source,
+    `plan at ${headSha} task W1-T1 (1 criteria) — read: plan/tasks.yaml@${execFileSync(
+      "git",
+      ["-C", dir, "rev-parse", `${headSha}:plan/tasks.yaml`],
+      { encoding: "utf8" },
+    )
+      .trim()
+      .slice(0, 12)}`,
+    "with no tasks.d/ at this head, the identity names only the monolith — never a fabricated shard reference",
+  );
 });
 
 // (2) A SHARD MERGED AFTER THE REVIEWER BOOTED IS STILL FOUND WHEN PRESENT AT THAT HEAD.
@@ -165,9 +179,21 @@ test("nothing added fetches twice or waits between resolving and judging", () =>
 
   const result = resolvePlanCriteriaAtHead(TRAILERED_BODY("W1-T1"), dir, "plan/tasks.yaml", headSha, runGit);
   // Exactly: one `git show` for the monolith, one `git ls-tree` for tasks.d/, one `git show` per
-  // shard (one shard here) — never a retry, never doubled.
-  assert.equal(calls, 3, "the monolith, the shard listing, and the one shard must each be read exactly once");
+  // shard (one shard here), plus (W1-T2623) the read-identity probes over the SAME objects — one
+  // `git rev-parse` for the monolith's blob oid, one for tasks.d/'s tree oid — never a retry,
+  // never doubled, and never more than one probe per object even though both the content read
+  // and the identity read touch it.
+  assert.equal(
+    calls,
+    5,
+    "the monolith, the shard listing, the one shard, and the two read-identity rev-parse probes must each run exactly once",
+  );
   assert.deepEqual(result.criteria.map((c) => c.claim), ["criterion one"]);
+  assert.match(
+    result.source ?? "",
+    /— read: plan\/tasks\.yaml@[0-9a-f]{12} \+ plan\/tasks\.d\/@[0-9a-f]{12}$/,
+    "the restored read-identity assertion (W1-T2623) must name both the monolith and the shard set",
+  );
 
   // SYNCHRONOUS BY CONSTRUCTION: nothing to await between resolving and judging — the function's
   // own return value is never a Promise/thenable, so a caller can compose it with judgeReview in
