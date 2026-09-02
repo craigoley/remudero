@@ -203,15 +203,21 @@ as code** — see [plan-sync.md](plan-sync.md). A plan-only PR needs an
 <pr-number>` can post the required status; there is no separate "plan admin"
 bypass.
 
-## Correcting a merged shard's wrong `files:` declaration
+## Correcting a task's wrong `files:` declaration
 
-A merged shard's `files:` declaration can be wrong — narrower than what the
-build actually touched — and correcting it is allowed: `postMergeAmendmentViolations`
-(Standing rule 21, `src/lib/task-linter.ts`) is the only gate that fires on a
-post-merge edit to an already-merged task, and it computes violations from
-`acceptance` alone. It never reads `files:`, `title`, or `status:` at all. So a
-plan-only edit that corrects a merged shard's `files:` line passes Rule 21
-today; no gate blocks it, and no gate needs to be built or weakened to allow it.
+A task's `files:` declaration can be wrong — narrower than what the build
+actually touched.
+
+**For a merged task (already on main):** Correcting it is allowed:
+`postMergeAmendmentViolations` (Standing rule 21, `src/lib/task-linter.ts`) is
+the only gate that fires on a post-merge edit to an already-merged task, and it
+computes violations from `acceptance` alone. The `files:` field IS REPORTED as
+post-merge-field-drift at warn severity, which no exit code reads — so the
+correction is allowed and is visible, rather than unread.
+
+**For an unmerged task:** The post-merge amendment guard does not apply at all,
+and the correction is an ordinary plan-only human-authored amendment, just like
+any other field edit.
 
 **Acceptance stays guarded.** Rule 21 still blocks any added or changed
 acceptance criterion on a merged task that has no follow-up task filed in the
@@ -233,6 +239,12 @@ plan-only PR that edits only the `files:` line, exactly like any other plan
 amendment — never a rung editing its own declaration mid-build. No rung
 applies a correction to its own declaration: a rung that notices a wrong
 `files:` may at most report it, and a human authors the amendment.
+
+**If a task's scope is found to be wrong while the build is running,** the
+implement path logs `scope_guard.overrun` and pushes anyway — reported and
+flagged rather than refused. The branch is the only evidence that separates a
+phantom revert from an under-declared `files:`, and is preserved; the overrun
+does not halt the PR or block a merge.
 
 ## An instrument-entangled PR now gets a prerequisite PR, not an escalation issue (W1-T2436)
 
