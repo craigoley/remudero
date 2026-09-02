@@ -1,0 +1,58 @@
+- id: W1-T2726
+  title: "A FIX-BRANCH SERIALIZATION CLAIM SUPPRESSES THE ENTIRE REPAIR ARM — W1-T2609 deliberately stores `fix-branch--...` claims beside task locks, while W1-T1211 treats every `.lock` filename as a task id and therefore can never find an `awaiting_external` ledger phase for the claim"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high
+  origin: "incident#3692-repair-arm-starvation-2026-09-02"
+  plan_refs: ["W1-T2609", "W1-T1211", "W1-T1209"]
+  files: [src/run-task.ts, test/light-pass-ci-idle.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON THE AZURE HOST WHILE PR #3692 WAS RED. Repeated light passes classified #3692 as
+    `blocked-fixable` but recorded `deferred to full sweep (light pass)`. During that interval,
+    `state/inflight/` contained one lock named
+    `fix-branch--craigoley--remudero--run-W1-T2623-1788370885806.lock`; the real task in flight was
+    already waiting on CI. The repair worker did not dispatch until later intervention repaired the
+    PR branch.
+
+    The producer is now traced. W1-T2609/#3619 added `fixBranchClaimKey` and deliberately passes
+    that namespaced key to `acquireInflightLock` in the shared `state/inflight/` directory. That
+    claim protects one PR branch's checkout-to-push window and is not a task run. W1-T1211's
+    `inFlightTaskIdsFrom` independently maps every `.lock` basename to a task id. Its consumer then
+    calls `runIsAwaitingExternal` for every result. No ledger row can use the fix-branch claim key
+    as its task id, so the predicate returns false and the light pass suppresses the repair arm.
+
+    This is a cross-feature identity mismatch: both mechanisms are correct in isolation, but the
+    shared directory contains two lock classes and its reader assumes one. W1-T1209 observes repair
+    liveness but does not repair this admission input.
+  design: |
+    Teach `inFlightTaskIdsFrom` to exclude only the reserved `fix-branch--` claim namespace before
+    it derives task ids. Keep every other `.lock` basename, including non-W1 task ids, so this does
+    not invent a task-id grammar or weaken the conservative handling of unknown task locks.
+
+    Do not read, release, age, or relocate either lock class. The branch claim must continue to
+    serialize checkout-to-push, and real task locks must continue to suppress a fix worker unless
+    every corresponding task's latest retained row is `run.awaiting_external`. Add a mixed-lock
+    test that reproduces the live shape and proves the repair decision, not merely the filtered
+    list.
+  acceptance:
+    - claim: "a `fix-branch--` serialization claim is excluded from the task-phase admission input and cannot by itself suppress the light-pass repair arm"
+      proof: "unit test: test/light-pass-ci-idle.test.ts"
+    - claim: "a real task lock remains in the admission input and still suppresses repair when that task is spending"
+      proof: "unit test: test/light-pass-ci-idle.test.ts"
+    - claim: "a real task lock whose latest retained phase is awaiting external permits repair even when a fix-branch claim is present beside it"
+      proof: "unit test: test/light-pass-ci-idle.test.ts"
+    - claim: "the reader does not inspect, release, age, or relocate either lock class"
+      proof: "unit test: test/light-pass-ci-idle.test.ts"
+    - claim: "the existing fix-branch claim namespace remains produced for the shared branch checkout-to-push window"
+      proof: "unit test: test/light-pass-ci-idle.test.ts"
+  note: |
+    The narrow namespace exclusion is intentional. Filtering by a W1 task-id regex would silently
+    discard valid task families and turn an unknown spending lock into permission to spawn. Moving
+    the claim to another directory would widen this repair into deploy, status, and reaper readers;
+    none needs to change to make W1-T1211 consume only task-phase identities.
