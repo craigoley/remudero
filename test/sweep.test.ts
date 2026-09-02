@@ -3347,7 +3347,7 @@ test("W1-T473 — post-review PRs run CONCURRENTLY within one pass, not one at a
   assert.deepEqual(finished.sort(), [901, 902]);
 });
 
-test("W1-T473 acceptance 2 — the review budget bounds CONCURRENCY, never ELIGIBILITY: 3 post-review PRs under a 2-lane budget run only 2 THIS pass, and the 3rd is picked up (untouched, still eligible) on the very next pass", async () => {
+test("W1-T473/W1-T2584 acceptance 2 — the review budget bounds CONCURRENCY, never eligibility or pass throughput", async () => {
   const lp = ledgerPath();
   // W1-T1049: the review lane now has its OWN policy field (`reviewLanes`) — `dispatchLanes`
   // no longer governs review concurrency, so the tight budget below is set on the right field.
@@ -3369,22 +3369,13 @@ test("W1-T473 acceptance 2 — the review budget bounds CONCURRENCY, never ELIGI
   const summary1 = await runSweep(prs, deps1, tightPolicy);
 
   assert.equal(summary1.byDisposition["post-review"], 3, "ELIGIBILITY is unchanged — all 3 PRs still derive the post-review disposition");
-  assert.equal(attempts1.length, 2, "the 2-lane budget bounds how many actually run THIS pass");
-  const skipped = prs.map((p) => p.prNumber).filter((n) => !attempts1.includes(n));
-  assert.equal(skipped.length, 1, "exactly one PR stood down on this pass, budget-exhausted, never dropped");
+  assert.equal(attempts1.length, 3, "the 2-lane worker pool drains all three heads during this pass");
 
-  const disposed1 = readLedgerLines(lp).filter((l) => l.step === "sweep.disposed");
-  const skippedLine = disposed1.find((l) => l.pr_number === skipped[0]);
-  assert.equal(skippedLine?.acted, false);
-  assert.match(String(skippedLine?.stand_down_reason ?? ""), /review budget exhausted/);
-
-  // The very next pass: the two ALREADY-reviewed PRs dedup (outcome-keyed,
-  // W1-T254) and the deferred PR — never attempted, never ledgered an
-  // outcome — is exactly the one that gets its turn.
+  // The very next pass: all three ALREADY-reviewed PRs dedup outcome-keyed (W1-T254).
   const attempts2: number[] = [];
   const deps2 = fakeDeps({ ledgerPath: lp, postReview: (p) => { attempts2.push(p.prNumber); } });
   const summary2 = await runSweep(prs, deps2, tightPolicy);
-  assert.deepEqual(attempts2, skipped, "the deferred PR — and only it — is retried; nothing was permanently dropped");
+  assert.deepEqual(attempts2, [], "every head was attempted in pass one and its posted outcome dedupes pass two");
   assert.equal(summary2.byDisposition["post-review"], 3, "eligibility is STILL unchanged on the follow-up pass");
 });
 

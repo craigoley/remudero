@@ -1449,7 +1449,7 @@ export interface DaemonDeps {
    * (the real wiring swallows its own errors) so a sweep hiccup never halts the
    * scheduler. Called alongside dispatch, NOT a replacement for it.
    */
-  sweep?: () => Promise<void> | void;
+  sweep?: (continueReviewAdmissions?: () => boolean) => Promise<void> | void;
   /**
    * W1-T462: run ONE security-alert poll. Best-effort by the same contract as `sweep` above — a
    * throw costs the daemon one logged tick, never its life. Returns the ISO of the poll so the
@@ -2042,7 +2042,11 @@ interface SweepRetrigger {
  * real `setTimeout` (never `deps.sleep` — see the original comment this carries forward), the
  * SAME `daemon.sweep.abandoned`/`daemon.sweep.failed` log shapes, and the SAME in-flight-ticker
  * wrapping (phase "sweep") so `sweepLight` keeps ticking while a full sweep runs. Callers are
- * responsible for checking `deps.sweep` is defined before calling this
+ * W1-T2584 adds one boundary without changing abandonment itself: the sweep receives a synchronous
+ * continuation callback that stays true while this gate is live and STOP/PAUSE are clear. The
+ * timeout flips it before resolving the `"abandoned"` arm, so a still-settling sweep can finish
+ * already-running reviewers but cannot admit another one after the daemon stopped awaiting it.
+ * Callers are responsible for checking `deps.sweep` is defined before calling this
  * (mirrors the original `if (deps.sweep)` guard) — this function assumes it is.
  */
 /**
@@ -2101,7 +2105,10 @@ async function runGatedSweep(
   if (liveness) liveness.inFlight = true;
   const stopSweepTicker = startInFlightTicker(deps, pollIntervalMs, log, "sweep", diskHeadroomLatch, undefined, headroomSampler).stop;
   try {
-    const sweepPromise: Promise<void | undefined> = Promise.resolve().then(() => deps.sweep!());
+    let reviewAdmissionsOpen = true;
+    const continueReviewAdmissions = (): boolean =>
+      reviewAdmissionsOpen && deps.checkStop?.() === undefined && deps.checkPause?.() === undefined;
+    const sweepPromise: Promise<void | undefined> = Promise.resolve().then(() => deps.sweep!(continueReviewAdmissions));
     // W1-T2582: CLEARED ON SETTLE, NEVER ON ABANDON. Attaching this to `sweepPromise` itself —
     // rather than to the `finally` below, which runs when the AWAIT ends — is what keeps the flag
     // true through the abandon-to-settle window that every observed re-entry landed in.
@@ -2112,7 +2119,10 @@ async function runGatedSweep(
     const startedAtMs = Date.now();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const bound = new Promise<"abandoned">((resolve) => {
-      timer = setTimeout(() => resolve("abandoned"), sweepWallClockBoundMs);
+      timer = setTimeout(() => {
+        reviewAdmissionsOpen = false;
+        resolve("abandoned");
+      }, sweepWallClockBoundMs);
     });
     try {
       const winner = await Promise.race([sweepPromise, bound]);
