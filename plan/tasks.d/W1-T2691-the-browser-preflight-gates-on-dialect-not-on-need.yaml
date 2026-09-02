@@ -1,0 +1,58 @@
+- id: W1-T2691
+  title: "THE BROWSER PREFLIGHT GATES ON PROOF DIALECT, NOT ON WHETHER THE RESOLVED FILES NEED A BROWSER — every `unit test:` proof pays an install attempt even when it resolves to a source-only suite, and on a host that cannot reach the CDN the handled failure prints 15 STACK-TRACE LINES before the verdict; MEASURED 2026-09-02: 6s wall and 15 trace lines on `test/ci-sharding.test.ts`, which imports no Playwright"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 6.00
+  files: [src/lib/review.ts, test/the-browser-preflight-gates-on-dialect-not-on-need.test.ts]
+  origin: "operator-session#preflight-noise-on-source-only-proofs-2026-09-02"
+  plan_refs: []
+  status: queued
+  attempts: 0
+  rationale: |
+    THIS IS A LATENCY AND LEGIBILITY DEFECT, NOT A CORRECTNESS ONE, AND THE SHARD SAYS SO UP FRONT
+    SO IT IS NOT BUILT AS SOMETHING BIGGER. MEASURED 2026-09-02 on a host whose proxy refuses
+    cdn.playwright.dev: `rmd check-proof 'unit test: test/ci-sharding.test.ts'` exits 0 with
+    `verdict: pass` and `hits: 28`. The degradation is correct and this task does not change it.
+    What it costs is 6 seconds of wall time and 15 lines of stack trace printed ahead of the
+    answer.
+
+    THE EXISTING GATE IS ALREADY HALF-RIGHT AND ITS COMMENT SAYS WHY. The call sits under
+    `if (whitelisted.kind === "test")` beside `ensureDeps`, with the note "a `grep` proof never
+    launches a browser." Correct — a grep proof is exempt today. But the gate is on the DIALECT,
+    while the thing that decides whether a browser is needed is the resolved FILES, and those are
+    already in hand at that point: the name-filtered path computes `resolution.files` immediately
+    above. A `unit test:` proof over a suite importing no Playwright pays the preflight for the
+    sole reason that it is a test proof.
+
+    THE SECOND HALF IS THE LOG LINE, AND IT IS THE LOUDER HALF. `ensureBrowsers` catches the
+    install failure and logs `String((e as Error)?.message ?? e)`. For this error the MESSAGE
+    ITSELF is multi-line and carries the stack, so a handled, anticipated, correctly-degraded
+    failure renders as a wall of `at IncomingMessage...` frames. A reader scanning for `verdict:`
+    sees a crash. A caught error that the code goes on to handle should print one line naming the
+    cause, not the frames of an exception nobody needs to debug.
+
+    WHY IT IS WORTH ANYTHING AT ALL. `check-proof` exists so an author can see, before opening a
+    PR, that a proof would count for nothing in review. A verb whose output is dominated by
+    unrelated stack traces on an offline or sandboxed host is a verb people stop reading, and the
+    proof-shape discipline this repo enforces at review depends on authors running it.
+
+    KEEP THE PREFLIGHT WHERE IT EARNS ITS PLACE. A proof resolving to a suite that DOES import
+    Playwright must still prime the browsers — PR #892's false-FAIL is the incident that put this
+    call here, and this task must not re-open it. Narrow the trigger to proofs whose resolved files
+    need a browser; where the resolution is unknown, preflight exactly as today, because the safe
+    direction is to install.
+  acceptance:
+    - claim: "a test proof resolving only to suites that import no browser driver skips the preflight"
+      proof: "unit test: test/the-browser-preflight-gates-on-dialect-not-on-need.test.ts"
+    - claim: "a test proof resolving to a suite that does import one still preflights, unchanged"
+      proof: "unit test: test/the-browser-preflight-gates-on-dialect-not-on-need.test.ts"
+    - claim: "an unresolved or unknown file set still preflights — the safe direction is to install"
+      proof: "unit test: test/the-browser-preflight-gates-on-dialect-not-on-need.test.ts"
+    - claim: "a handled install failure logs one line naming the cause, never the exception's frames"
+      proof: "unit test: test/the-browser-preflight-gates-on-dialect-not-on-need.test.ts"
+    - claim: "the verdict, exit code and hit count are unchanged whether the preflight ran or was skipped"
+      proof: "unit test: test/the-browser-preflight-gates-on-dialect-not-on-need.test.ts"
