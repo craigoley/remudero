@@ -5556,7 +5556,18 @@ export function failSummary(
 ): string {
   if (noCriteria) return `${FAIL_PREFIX}no acceptance criteria to judge (fail closed)`;
   if (criteriaTampered) {
-    return `${FAIL_PREFIX}diff edits plan/tasks.yaml's (or a plan/tasks.d/ shard's) own acceptance criteria — Standing rule 15 (a worker may never)`;
+    // ⚠ THIS STRING IS CAPPED AT 140 CHARS BY THE COMMIT-STATUS API (`description.slice(0, 140)`,
+    // `postCommitStatus` below), and the message it replaces was 145. That is the whole reason the
+    // refusal "named no remedy": the remedy was never absent from the source, it was SLICED OFF —
+    // GitHub rendered `… Standing rule 15 (a worker may n`, cut mid-word. Appending a remedy to the
+    // old text would therefore have been invisible, which is the same defect stated twice.
+    //
+    // So this branch says the ONE thing that fits and is actionable — the PR SHAPE to change — and
+    // the full two-part remedy rides `checkSatisfiedByGuard`'s advisory `reason`, which has no cap
+    // and whose own doc already commits to reaching the operator verbatim. MEASURED: this renders
+    // at 133 characters, so it arrives whole. It keeps the rule's CANONICAL name — five suites
+    // pin `Standing rule 15`, and shortening it to `rule 15` broke all five.
+    return `${FAIL_PREFIX}Standing rule 15: a criterion was added/edited beside non-plan files — file the shard in its own plan-only PR`;
   }
   if (changesetContradictions.length > 0) {
     const first = changesetContradictions[0];
@@ -7612,12 +7623,32 @@ export function checkSatisfiedByGuard(diff: string, meta: RubricPrMeta = {}): Ru
     "plan/tasks.yaml's (or a plan/tasks.d/ shard's) acceptance criteria were added/edited (an added " +
     "claim/proof/satisfied_by field — including a whole new criterion appended after the existing ones — " +
     "or an edited/removed one)";
+  // THE FULL REMEDY LIVES HERE, and deliberately not in `failSummary` above: that string is the
+  // commit-status description and is cut at 140 characters, while this `reason` has no cap and this
+  // function's own doc already commits to it reaching the operator verbatim.
+  //
+  // IT HAS TWO HALVES BECAUSE ONE IS NOT ENOUGH, and that is measured rather than assumed. Telling
+  // an author only to SPLIT the filing converts one refusal into another: #3626, #3631, #3636 and
+  // #3669 each split correctly and were then refused anyway, because a filing PR's proofs name a
+  // test the implementation has not written yet, grade `not_yet_built`, and leave the KEYWORD FLOOR
+  // to judge the body against each proof's own text. #3669 scored 2 of 5 proof keywords against
+  // MIN_COVERAGE 0.6 and all seven of its criteria read UNMET on a shard nothing was wrong with.
+  //
+  // The floor was RIGHT in every one of those cases and must not be relaxed to accommodate them: a
+  // claim about the ACT of filing has no support in a diff that IS the shard. What the author needs
+  // is the second sentence — substantiate each criterion by NAMING the proof that will carry it.
+  const remedy =
+    "REMEDY: file the shard in its own plan-only PR (no src/ or test/ file in that diff), then build " +
+    "it in a second PR. In the filing PR's body, substantiate each criterion by NAMING the proof that " +
+    "will carry it (e.g. `unit test: test/<file>.test.ts`) — its proofs are not yet built, so the " +
+    "keyword floor judges your body against each proof's own text, and a body that describes the act " +
+    "of filing instead of the shard's contents is refused on a shard nothing is wrong with.";
   return {
     key: "satisfied-by-guard",
     pass: false,
     reason: meta.planOnly
-      ? `${edit} on a dispatched run branch — a worker editing its own criteria to match the diff (Standing rule 15)`
-      : `${edit} in a PR that is not plan-only, so the Architect carve-out does not apply (Standing rule 15)`,
+      ? `${edit} on a dispatched run branch — a worker editing its own criteria to match the diff (Standing rule 15). ${remedy}`
+      : `${edit} in a PR that is not plan-only, so the Architect carve-out does not apply (Standing rule 15). ${remedy}`,
   };
 }
 
