@@ -396,9 +396,10 @@ test("W1-T1020: reverting the reason change fails the partial reason test", () =
   // asserting a full PASS. Reverted here to reproduce EXACTLY the defect this task closes.
   const needle =
     '  if (!verdict.capped) {\n' +
+    '    const resolvedBands = bands ?? loadDefaultPolicy().values.armCalibrationBands;\n' +
     '    if (verdict.partiallyExecuted) {\n' +
     '      const hasCounts = typeof verdict.executedProofCount === "number" && typeof verdict.executableProofCount === "number";\n' +
-    '      return {\n' +
+    '      const base: ArmDecision = {\n' +
     '        arm: true,\n' +
     '        reason: hasCounts\n' +
     '          ? `verdict is a PARTIAL PASS (${verdict.executedProofCount}/${verdict.executableProofCount} executable ` +\n' +
@@ -406,8 +407,9 @@ test("W1-T1020: reverting the reason change fails the partial reason test", () =
     '          : "verdict is a PARTIAL PASS (some, not all, executable criteria executed) — arms unchanged; " +\n' +
     '            "legibility never becomes a refusal (W1-T1020)",\n' +
     '      };\n' +
+    '      return applyCalibrationBand(base, "keyword-floor", resolvedBands);\n' +
     '    }\n' +
-    '    return { arm: true, reason: "verdict is a full PASS" };\n' +
+    '    return applyCalibrationBand({ arm: true, reason: "verdict is a full PASS" }, "full-pass", resolvedBands);\n' +
     '  }';
   const occurrences = original.split(needle).length - 1;
   assert.equal(

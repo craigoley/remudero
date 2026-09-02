@@ -716,6 +716,27 @@ esac
 # `wait "$child_pid"` below is a FRESH call, issued once the forward has already been sent and no
 # further signal is pending, so it blocks for the child's genuine completion and records it in
 # `child_rc` — which the main loop then prefers over whatever the interrupted `wait` returned.
+#
+# ── W1-T2586: A HANDLED TERM MUST EXIT 0, OR THE STOP NEVER STICKS ─────────────────────────────
+# MEASURED 2026-09-01: `docker stop remudero-daemon` forwards TERM here, the daemon releases its
+# locks and dies, and the process it dies AS still carries a non-zero code — the daemon re-raises
+# the signal against itself once its own cleanup is done (`daemonCommand`'s `onSignal`,
+# src/run-task.ts), so a killed-by-SIGTERM wait status is 128+15=143. `on-failure` cannot tell
+# 143 from a crash, and the 120s throttle below THROTTLES the relaunch rather than preventing it —
+# so the operator sees `Exited`, believes the stop worked, and the container comes back 27 minutes
+# later on its own. A leak that `docker stop` was reached for specifically to end then ran for a
+# further 24 minutes and ~$45 before anyone noticed it was never stopped.
+#
+# `signal_forwarded` IS THE DISTINCTION `daemonExitCode` (src/lib/daemon.ts) CANNOT MAKE FROM
+# INSIDE THE CONTAINER. That function already maps a real `stopped` reason to exit 0; the defect
+# is that a SIGNAL-DRIVEN stop never reaches it as `stopped` — Node dies BY the re-raised signal,
+# which has no reason string at all, only a wait status. But this shell does not need the
+# daemon's own classification: it knows an operator/supervisor signal arrived, because IT is what
+# received TERM/INT and chose to forward it. That fact alone is what "handled deliberately"
+# means here, and it is set exactly once, only inside this handler, only after a live child was
+# actually signalled — never inferred from the resulting exit code, which is what would risk
+# calling an UNRELATED crash a clean stop (the ⚠ this task's own rationale warns against).
+signal_forwarded=""
 child_pid=""
 child_rc=""
 forward_signal() {
@@ -725,6 +746,7 @@ forward_signal() {
     kill "-$sig" "$child_pid" 2>/dev/null || true
     child_rc=0
     wait "$child_pid" 2>/dev/null || child_rc=$?
+    signal_forwarded=1
   fi
 }
 trap 'forward_signal TERM' TERM
@@ -748,6 +770,7 @@ environmental_restarts=0
 while :; do
   rc=0
   child_rc=""
+  signal_forwarded=""
   "$@" &
   child_pid=$!
   wait "$child_pid" || rc=$?
@@ -755,6 +778,20 @@ while :; do
     rc=$child_rc
   fi
   child_pid=""
+
+  # W1-T2586: A SIGNAL THIS SHELL ITSELF FORWARDED OUTRANKS EVERY OTHER CLASSIFICATION BELOW.
+  # `signal_forwarded` is set ONLY inside `forward_signal`, ONLY after TERM/INT was actually sent
+  # to a live child — so reaching here with it set means an operator (or a supervisor's `docker
+  # stop`) asked this container to shut down, the daemon was told, and it exited AS A RESULT,
+  # whatever its raw wait status ($rc, typically 143 — 128+SIGTERM). That is what a graceful
+  # operator stop means to every process supervisor: exit 0, and RIGHT NOW, never after the crash
+  # throttle below. THE UNSIGNALED PATHS ARE ALL LEFT ALONE: this branch cannot fire without a
+  # real forwarded signal, so a genuine crash (no signal, non-zero $rc) still falls through to
+  # the non-zero handling further down and is still counted by docker exactly as before.
+  if [ -n "$signal_forwarded" ]; then
+    log "operator stop handled: $sig was forwarded and the daemon exited $rc as a result — reporting a CLEAN exit (0) so on-failure does not read a deliberate stop as a crash"
+    exit 0
+  fi
 
   if [ "$rc" -eq 0 ]; then
     log "exited 0 — not throttled (a STOP is a clean stop; --restart=on-failure leaves the container down)"

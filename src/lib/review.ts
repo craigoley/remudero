@@ -11,7 +11,7 @@ import { liveStateFromRest, type GhApiFetcher } from "./open-prs-rest.js";
 import { isInPlanScope } from "./plan-architect.js";
 import { loadPlanAtRef, visibleCriteria, type AcceptanceCriterion, type TaskRisk } from "./plan.js";
 import { scanUnreachedExports, type UnreachedExport } from "./reachability.js";
-import { loadDefaultPolicy } from "./policy.js";
+import { loadDefaultPolicy, type ArmCalibrationBandRow } from "./policy.js";
 import { readLedgerLines } from "./status.js";
 import { GENERATED_LEDGER_CLASSES, isCompanionPath } from "./companion-paths.js";
 import { ghJson } from "./worker.js";
@@ -4487,6 +4487,82 @@ export interface CappedOverride {
 export interface ArmDecision {
   arm: boolean;
   reason: string;
+  /** W1-T2579 — set ONLY when a band row that matched the resolved verdict class was itself
+   *  malformed (an unrecognized `verdict`, never a missing/mismatched `class` — that is simply
+   *  "no matching row", not malformed). `arm`/`reason` are left EXACTLY as the band table had
+   *  never been consulted at all (the fail-inert arithmetic contract, design (ii)) — this field
+   *  is the "named" half of "a malformed band row is inert and NAMED rather than disarming or
+   *  holding anything", carried out-of-band so it can never perturb the byte-equality the
+   *  absent/empty-table falsifier checks on `arm`/`reason` alone. */
+  bandWarning?: string;
+}
+
+/**
+ * W1-T2579 — resolve which {@link ArmCalibrationBandRow} class an already-arming (uncapped)
+ * verdict belongs to, mirroring `verdict-calibration.ts`'s own {@link
+ * import("./verdict-calibration.js").VerdictClass} split (this file never imports that module —
+ * these two string literals are the same taxonomy, kept independent so this arming seam never
+ * takes a dependency on the measurement module it is deliberately downstream of, not coupled to).
+ * The THIRD class, `"degraded-arm"` (CAPPED), is never returned here — {@link
+ * decideAutoMergeArm} never calls this resolver on the capped branch at all (design (iii): the
+ * capped class is refused band eligibility BY CONSTRUCTION, at the call site).
+ */
+type BandEligibleVerdictClass = "full-pass" | "keyword-floor";
+
+/**
+ * W1-T2579 — apply an operator-ratified {@link PolicyValues.armCalibrationBands} table to an
+ * ALREADY-ARMING decision. Pure: never mutates `base`, never consults anything but its own
+ * arguments. `bands` is treated defensively (typed as an array of the shape policy.ts's loader
+ * produces, but a caller — including this module's own unit fixtures — may hand it a row the
+ * loader would have refused) — see the malformed-row branch below for exactly what "defensive"
+ * means here.
+ *
+ * - No row names `verdictClass` (table absent, empty, every row a different class, or a class
+ *   the table does not name at all) → `base` returns UNCHANGED, byte-for-byte — the arithmetic
+ *   contract this whole feature is gated on.
+ * - The first matching row's `verdict === "hold"` → refuses, naming the class in the reason
+ *   (`calibration-band:<class>`) — an operator-ratified hold is a REFUSAL, not a mere note, so
+ *   the reason states it as one, exactly like every other refusal reason in this file.
+ * - `verdict === "notify"` → `base.arm` is untouched (band ⊆ {hold, notify}; notify only ever
+ *   narrows an already-true `arm` to "true, annotated" — it can never flip a refusal to an arm,
+ *   which design (iii) forbids); the reason gains the band's class and, when present, its `note`.
+ * - Anything else (a `verdict` that is neither `"hold"` nor `"notify"` — reachable only via a
+ *   caller-injected `bands` array, since policy.ts's own loader refuses this shape at load) is a
+ *   MALFORMED row: `base` returns UNCHANGED (arm AND reason, matching the absent/empty case
+ *   exactly), but `bandWarning` names which class's row was ignored and why — inert, never
+ *   disarming or holding, but never silent either.
+ */
+function applyCalibrationBand(
+  base: ArmDecision,
+  verdictClass: BandEligibleVerdictClass,
+  bands: readonly ArmCalibrationBandRow[],
+): ArmDecision {
+  const row = bands.find((r) => r && typeof r === "object" && (r as { class?: unknown }).class === verdictClass);
+  if (!row) return base;
+  if (row.verdict === "hold") {
+    return {
+      arm: false,
+      reason:
+        `calibration-band:${verdictClass} — an operator-ratified band holds this class ` +
+        `(underlying verdict: ${base.reason})`,
+    };
+  }
+  if (row.verdict === "notify") {
+    const note = typeof row.note === "string" && row.note.trim().length > 0 ? ` — ${row.note}` : "";
+    return {
+      arm: base.arm,
+      reason: `${base.reason} (calibration-band:${verdictClass} notify${note})`,
+    };
+  }
+  // Malformed: a row matched this class but its `verdict` is neither "hold" nor "notify" — only
+  // reachable when a caller hands decideAutoMergeArm a `bands` array that bypassed policy.ts's
+  // own loader (which refuses this shape at load, per ArmCalibrationBandRow's own doc).
+  return {
+    ...base,
+    bandWarning:
+      `calibration-band:${verdictClass} row is malformed (verdict must be "hold" or "notify", ` +
+      `got ${JSON.stringify((row as { verdict?: unknown }).verdict)}) — ignored, decision unchanged`,
+  };
 }
 
 /**
@@ -4533,6 +4609,18 @@ export interface ArmDecision {
  *   keeps today's unqualified "verdict is a full PASS" — absent means
  *   unknown, and unknown must never regress to a WORSE (refusing) outcome,
  *   matching every other absent-field default in this file.
+ * - W1-T2579: AFTER the full-pass/partial-pass decision is computed (i.e. only on the
+ *   already-arming, uncapped path — the CAPPED branch below, including its `planOnly`/
+ *   `override` arms, is NEVER reached by the band table; design (iii)'s "the capped class is
+ *   not band-eligible"), the resolved verdict class (`full-pass`/`keyword-floor`) is looked up
+ *   in `bands` (an operator-ratified {@link PolicyValues.armCalibrationBands} row) via {@link
+ *   applyCalibrationBand}. A `hold` band refuses; a `notify` band arms and annotates; no match
+ *   (table absent, empty, or naming a different class) leaves the decision UNCHANGED. `bands`
+ *   defaults to the COMMITTED `plan/policy.yaml` table ({@link loadDefaultPolicy}) — ships
+ *   empty, so every call site that omits this parameter keeps today's behavior byte-for-byte
+ *   (test/arm-calibration-bands.test.ts) — but stays directly injectable (same "defaulted
+ *   parameter, `?? loadDefaultPolicy()`" seam this file's `proofTimeoutMs` default already
+ *   uses) so a unit fixture never touches disk to exercise a ratified band.
  */
 export function decideAutoMergeArm(
   verdict: Pick<ReviewVerdict, "state" | "capped" | "planOnly"> &
@@ -4545,6 +4633,12 @@ export function decideAutoMergeArm(
   // like `override` above, so no positional caller shifts — every existing call site that omits
   // it keeps today's behavior byte-for-byte.
   irreversible?: boolean,
+  // W1-T2579: THE RATIFIED BAND TABLE. Appended LAST, exactly like `irreversible` above, so no
+  // positional caller shifts. `undefined` (every existing call site) resolves to the COMMITTED
+  // `plan/policy.yaml` row via `loadDefaultPolicy()` — ships `[]`, so omitting this parameter
+  // keeps today's behavior byte-for-byte. A caller (this file's own unit fixtures included) that
+  // wants a specific table injects one directly, never touching disk.
+  bands?: readonly ArmCalibrationBandRow[],
 ): ArmDecision {
   // Checked BEFORE `state`, `capped` and `override` — irreversibility is a hard refusal an
   // operator override can never buy back (the CAPPED override two branches down answers "was
@@ -4561,9 +4655,10 @@ export function decideAutoMergeArm(
     return { arm: false, reason: "remudero-review is not success" };
   }
   if (!verdict.capped) {
+    const resolvedBands = bands ?? loadDefaultPolicy().values.armCalibrationBands;
     if (verdict.partiallyExecuted) {
       const hasCounts = typeof verdict.executedProofCount === "number" && typeof verdict.executableProofCount === "number";
-      return {
+      const base: ArmDecision = {
         arm: true,
         reason: hasCounts
           ? `verdict is a PARTIAL PASS (${verdict.executedProofCount}/${verdict.executableProofCount} executable ` +
@@ -4571,8 +4666,9 @@ export function decideAutoMergeArm(
           : "verdict is a PARTIAL PASS (some, not all, executable criteria executed) — arms unchanged; " +
             "legibility never becomes a refusal (W1-T1020)",
       };
+      return applyCalibrationBand(base, "keyword-floor", resolvedBands);
     }
-    return { arm: true, reason: "verdict is a full PASS" };
+    return applyCalibrationBand({ arm: true, reason: "verdict is a full PASS" }, "full-pass", resolvedBands);
   }
   if (verdict.planOnly) {
     return {
@@ -4614,8 +4710,10 @@ export function resolveAutoMergeArm(
   log: (step: string, extra?: Record<string, unknown>) => void,
   // W1-T947: threaded straight through to {@link decideAutoMergeArm} — see its own doc.
   irreversible?: boolean,
+  // W1-T2579: threaded straight through to {@link decideAutoMergeArm} — see its own doc.
+  bands?: readonly ArmCalibrationBandRow[],
 ): ArmDecision {
-  const decision = decideAutoMergeArm(verdict, tddStrict, override, irreversible);
+  const decision = decideAutoMergeArm(verdict, tddStrict, override, irreversible, bands);
   // W1-T205: excludes `planOnly` — decideAutoMergeArm checks the carve-out BEFORE the
   // override branch, so a planOnly arm never actually consulted `override` even when one
   // happens to be present; logging "override used" here would misattribute the decision.

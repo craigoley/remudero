@@ -1,5 +1,5 @@
 import { strict as assert } from "node:assert";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -136,6 +136,14 @@ test("a spread inside a producer literal is reported as unresolvable rather than
 });
 
 test("OpenPrView's producer completeness holds on the real tree", () => {
+  const declared = declaredViewFields(
+    readFileSync(join(REPO, "src", "lib", "sweep.ts"), "utf8"),
+    "OpenPrView",
+  );
+  assert.ok(
+    declared.some((field) => field.name === "redRequiredChecks"),
+    "redRequiredChecks must occupy its own declaration line so the producer census cannot miss it",
+  );
   const r = auditProducerCompleteness({
     srcRoot: join(REPO, "src"),
     interfaceFile: join(REPO, "src", "lib", "sweep.ts"),

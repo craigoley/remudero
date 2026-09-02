@@ -28,6 +28,7 @@ import {
   workerLedgerFields,
 } from "../src/lib/worker.js";
 import { withLiveSpawnAllowed } from "../src/lib/spawn-guard.js";
+import type { CapabilityLadder } from "../src/lib/mounts.js";
 
 function capacity(provider: "claude" | "codex", ...usedPercent: number[]): ProviderCapacity {
   return {
@@ -207,6 +208,31 @@ const splitCodexLimits = {
   },
 };
 
+// A capability ladder fixture (W1-T2573) equivalent, per (capability, effort), to the retired
+// hardcoded DEFAULT_CODEX_MODELS table — so tests exercise the new TABLE LOOKUP mechanism while
+// keeping the old tier-resolution expectations intact for models these fixture rows cover.
+const CAPABILITY_FIXTURE: CapabilityLadder = {
+  ladder: { economy: 1, balanced: 2, frontier: 3 },
+  claude: { haiku: "economy", sonnet: "balanced", opus: "frontier", "claude-opus-5": "frontier" },
+  codex: {
+    economy: {
+      low: ["gpt-5.6-luna", "gpt-5.3-codex-spark", "gpt-5.4-mini"],
+      medium: ["gpt-5.6-luna", "gpt-5.3-codex-spark", "gpt-5.4-mini"],
+      high: ["gpt-5.6-luna", "gpt-5.3-codex-spark", "gpt-5.4-mini"],
+    },
+    balanced: {
+      low: ["gpt-5.6-terra", "gpt-5.5", "gpt-5.4"],
+      medium: ["gpt-5.6-terra", "gpt-5.5", "gpt-5.4"],
+      high: ["gpt-5.6-terra", "gpt-5.5", "gpt-5.4"],
+    },
+    frontier: {
+      low: ["gpt-5.6-sol", "gpt-5.5"],
+      medium: ["gpt-5.6-sol", "gpt-5.5"],
+      high: ["gpt-5.6-sol", "gpt-5.5"],
+    },
+  },
+};
+
 type RpcRequest = { id?: number; method?: string };
 
 function fakeAppServer(
@@ -234,6 +260,7 @@ test("Codex model selector uses independent model headroom for economy mounts", 
     { claudeBin: "/unused", root: "/tmp", workerProviders: { enabled: ["codex"] } },
     "haiku",
     "low",
+    CAPABILITY_FIXTURE,
   );
   assert.equal(selected.model, "gpt-5.3-codex-spark");
   assert.equal(selected.effort, "low");
@@ -242,8 +269,32 @@ test("Codex model selector uses independent model headroom for economy mounts", 
 
 test("Codex model selector preserves balanced and frontier quality tiers", () => {
   const config = { claudeBin: "/unused", root: "/tmp", workerProviders: { enabled: ["codex"] as Array<"codex"> } };
-  assert.equal(selectCodexModel(visibleCodexModels, splitCodexLimits, config, "sonnet", "high").model, "gpt-5.6-terra");
-  assert.equal(selectCodexModel(visibleCodexModels, splitCodexLimits, config, "claude-opus-5", "high").model, "gpt-5.6-sol");
+  assert.equal(selectCodexModel(visibleCodexModels, splitCodexLimits, config, "sonnet", "high", CAPABILITY_FIXTURE).model, "gpt-5.6-terra");
+  assert.equal(selectCodexModel(visibleCodexModels, splitCodexLimits, config, "claude-opus-5", "high", CAPABILITY_FIXTURE).model, "gpt-5.6-sol");
+});
+
+test("Codex model selector resolves a model whose name carries neither 'haiku' nor 'opus' by its DECLARED capability, not a substring guess (W1-T2573)", () => {
+  const config = { claudeBin: "/unused", root: "/tmp", workerProviders: { enabled: ["codex"] as Array<"codex"> } };
+  // "sonnet" contains neither "haiku" nor "opus" — the retired substring function silently fell
+  // through to "balanced" for it by ACCIDENT (the same fallback every unmatched name got). Here
+  // it resolves through the SAME declared capability row, on purpose, via the table.
+  assert.equal(selectCodexModel(visibleCodexModels, splitCodexLimits, config, "sonnet", "medium", CAPABILITY_FIXTURE).model, "gpt-5.6-terra");
+});
+
+test("Codex model selector: effort changes the resolved candidates when the table declares different rows (W1-T2573)", () => {
+  const config = { claudeBin: "/unused", root: "/tmp", workerProviders: { enabled: ["codex"] as Array<"codex"> } };
+  const effortAwareFixture: CapabilityLadder = {
+    ...CAPABILITY_FIXTURE,
+    codex: {
+      ...CAPABILITY_FIXTURE.codex,
+      balanced: { low: ["gpt-5.6-terra"], medium: ["gpt-5.6-terra"], high: ["gpt-5.6-sol"] },
+    },
+  };
+  const mediumSelection = selectCodexModel(visibleCodexModels, splitCodexLimits, config, "sonnet", "medium", effortAwareFixture);
+  const highSelection = selectCodexModel(visibleCodexModels, splitCodexLimits, config, "sonnet", "high", effortAwareFixture);
+  assert.equal(mediumSelection.model, "gpt-5.6-terra");
+  assert.equal(highSelection.model, "gpt-5.6-sol");
+  assert.notEqual(mediumSelection.model, highSelection.model, "a sonnet/high mount must not resolve the same Codex request as sonnet/medium");
 });
 
 test("Codex model override fails closed when the account does not expose it", () => {
@@ -274,14 +325,14 @@ test("Codex capacity RPC discovers models and selects the matching independent b
   });
   const selected = await readCodexCapacity(
     { claudeBin: "/unused", root: "/tmp", workerProviders: { enabled: ["codex"], codexBin: "/bin/sh" } },
-    { requestedModel: "haiku", requestedEffort: "low", spawn: () => proc as never },
+    { requestedModel: "haiku", requestedEffort: "low", spawn: () => proc as never, capabilities: CAPABILITY_FIXTURE },
   );
   assert.equal(selected.model, "gpt-5.3-codex-spark");
   assert.deepEqual(requests, ["initialize", "initialized", "account/rateLimits/read", "model/list"]);
 
   const cached = await readCodexCapacity(
     { claudeBin: "/unused", root: "/tmp", workerProviders: { enabled: ["codex"], codexBin: "/bin/sh" } },
-    { requestedModel: "haiku", requestedEffort: "low", spawn: () => { throw new Error("cache miss"); } },
+    { requestedModel: "haiku", requestedEffort: "low", spawn: () => { throw new Error("cache miss"); }, capabilities: CAPABILITY_FIXTURE },
   );
   assert.equal(cached.model, selected.model);
 });
