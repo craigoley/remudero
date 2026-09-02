@@ -1,0 +1,53 @@
+- id: W1-T2687
+  title: "A SHARD THAT DEFERS WORK TO `a second PR` OR `a follow-up` NAMES NO FILED ID, SO THE DEFERRED HALF IS OWNED BY NOBODY — met three times in one session: W1-T470 deferred its CI step to a second PR that was never filed, one PR body carried three prose follow-ups with no shard between them, and a coverage step sat unwired for three weeks"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 10.00
+  files: [src/lib/task-linter.ts, test/a-deferred-follow-up-names-no-filed-id.test.ts]
+  origin: "operator-session#prose-followups-own-nothing-2026-09-02"
+  plan_refs: ["W1-T470"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE SHAPE IS ALWAYS THE SAME AND ALWAYS INVISIBLE. A shard's design or note says the rest
+    "lands in a follow-up", "is left to a second PR", or "is deferred" — and then no id is minted,
+    no shard is filed, and the deferral survives only as a sentence in a merged rationale that no
+    selector, no linter and no census reads. The task ships, its verdict is `merged`, and the
+    remainder is indistinguishable from work nobody ever intended.
+
+    THREE INSTANCES IN ONE SESSION is what makes this a rule rather than an anecdote: W1-T470's CI
+    step deferred to a second PR that does not exist; a PR body carrying three prose follow-ups
+    with no shard behind any of them; and a coverage step left unwired for three weeks because the
+    wiring was somebody's next PR.
+
+    REPORT-ONLY, PERMANENTLY — THIS IS PART OF THE DESIGN, NOT A ROLLOUT PHASE. The detector is a
+    heuristic over PROSE: it cannot tell a genuine deferral from a rationale merely discussing one,
+    and a shard is often right to describe scope it deliberately excluded. A blocking gate here
+    would refuse honest filings for their wording and teach authors to launder the sentence, which
+    is precisely the failure this task exists to name. The acceptance below binds it: no exit code
+    moves because of this check, on any input.
+
+    WHAT IT SHOULD SAY. Name the sentence and ask for an id in it. A deferral that cites a filed id
+    is complete and silent; one that does not is reported with the line quoted, so the author sees
+    the exact prose and can either mint an id or reword to make the exclusion explicit rather than
+    promissory.
+
+    THE FALSE-POSITIVE RATE IS THE MEASUREMENT THIS OWES. A report nobody can act on is noise, and
+    noise beside a real signal is how the overrun line already fails. Count the hits across the
+    tracked shard corpus at head and state it; if the detector fires on a large fraction of
+    well-formed shards, the pattern is wrong and narrowing it is the deliverable.
+  acceptance:
+    - claim: "a shard deferring work to a later PR without naming a filed id is reported, with the deferring line quoted"
+      proof: "unit test: test/a-deferred-follow-up-names-no-filed-id.test.ts"
+    - claim: "a deferral that names a filed id is silent"
+      proof: "unit test: test/a-deferred-follow-up-names-no-filed-id.test.ts"
+    - claim: "no exit code changes on any input — the check is report-only by construction, not by configuration"
+      proof: "unit test: test/a-deferred-follow-up-names-no-filed-id.test.ts"
+    - claim: "the hit count across the tracked shard corpus at head is measured and stated, not assumed"
+      proof: "unit test: test/a-deferred-follow-up-names-no-filed-id.test.ts"
+    - claim: "a shard describing excluded scope without promising a later PR is silent"
+      proof: "unit test: test/a-deferred-follow-up-names-no-filed-id.test.ts"

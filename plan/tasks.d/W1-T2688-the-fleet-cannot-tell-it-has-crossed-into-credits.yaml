@@ -1,0 +1,53 @@
+- id: W1-T2688
+  title: "NOTHING TELLS THE FLEET IT HAS CROSSED FROM SUBSCRIPTION INTO USAGE CREDITS, AND THE PROMPT-CACHE LIFETIME COLLAPSES FROM AN HOUR TO FIVE MINUTES WHEN IT DOES — every worker's cache economics change under it, `account-usage.ts` reads window utilisation and knows nothing of the credit state, and no row records the transition"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 12.00
+  files: [src/lib/account-usage.ts, test/the-fleet-cannot-tell-it-has-crossed-into-credits.test.ts]
+  origin: "operator-session#credit-state-is-unobserved-2026-09-02"
+  plan_refs: []
+  status: queued
+  attempts: 0
+  rationale: |
+    THE ECONOMICS CHANGE UNDER THE FLEET WITHOUT A SIGNAL. A subscription drawing on usage credits
+    drops the prompt-cache lifetime from an hour to five minutes. Every rung here is built on long
+    conversations with reused prefixes, so the same worker, on the same task, at the same mount,
+    costs materially more after that transition than before it — and nothing observes it. Cost per
+    completed task moves for a reason no row explains.
+
+    THE EXISTING READER STOPS ONE FIELD SHORT. `src/lib/account-usage.ts` already projects
+    `cachedUsageUtilization` out of `~/.claude.json` and carries a `GovernorState`, window readings
+    and staleness handling. It reads how FULL the window is; it does not read whether the account
+    is spending subscription or credits. The reader, the staleness discipline and the refusal
+    vocabulary all exist — this is one dimension added to a module already built for it.
+
+    SCOPE THIS AS DETECT-OR-REFUSE, NEVER AS A PROMISE. The task must first establish whether the
+    surface exposes the credit state at all; that file's own comment already records what
+    `cachedUsageUtilization` and `/usage` do NOT attribute. If the field exists, read and ledger
+    it. If it does not, the deliverable is a LOUD, recorded "cannot determine" — the same
+    `UsageUnknownReason` shape the module already uses — never an inferred flag. An inferred credit
+    state is worse than none: it would move policy on a guess.
+
+    LEDGER THE TRANSITION, NOT THE LEVEL. What matters is the EDGE — the tick where the state
+    changes — because that is what makes a cost step explicable after the fact. A level sampled
+    every tick is noise; an edge is one row a later census can join against spend.
+
+    POLICY IS NOT IN SCOPE AND MUST NOT BE. What to do when credits engage — hold dispatch, lower a
+    mount, warn only — is an operator ruling, and the mount table's own rule is that a routing
+    decision is a data edit. This task makes the state observable and recorded. It changes no
+    mount, holds no dispatch and reads no policy.
+  acceptance:
+    - claim: "the credit state is read from the existing usage surface when that surface exposes it"
+      proof: "unit test: test/the-fleet-cannot-tell-it-has-crossed-into-credits.test.ts"
+    - claim: "a surface that does not expose it yields a recorded cannot-determine reason, never an inferred flag"
+      proof: "unit test: test/the-fleet-cannot-tell-it-has-crossed-into-credits.test.ts"
+    - claim: "the transition edge writes one row; an unchanged state writes none"
+      proof: "unit test: test/the-fleet-cannot-tell-it-has-crossed-into-credits.test.ts"
+    - claim: "the existing window readings, staleness handling and governor state are unchanged"
+      proof: "unit test: test/the-fleet-cannot-tell-it-has-crossed-into-credits.test.ts"
+    - claim: "no mount is changed and no dispatch is held — this observes and records only"
+      proof: "unit test: test/the-fleet-cannot-tell-it-has-crossed-into-credits.test.ts"
