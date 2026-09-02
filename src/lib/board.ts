@@ -362,15 +362,17 @@ function queueClass(disposition: string, reviewState: PrQueueRow["reviewState"],
 function safeQueueFailureReason(github: BoardDeps["github"]): string {
   try {
     return github.readFailureReason?.() ?? "unknown";
-  } catch {
-    return "unknown";
+  } catch (error) {
+    // Preserve the thrown-vs-absent distinction in the returned operator-facing reason.
+    return `failure-reason-read-threw: ${String((error as Error)?.message ?? error).slice(0, 240)}`;
   }
 }
 
 function safeQueueTruncated(github: BoardDeps["github"]): boolean {
   try {
     return github.readTruncated?.() ?? false;
-  } catch {
+  } catch (error) {
+    void error; // the separate failure-reason read preserves its own classified cause
     return true;
   }
 }
@@ -383,17 +385,20 @@ function readPrQueueIndex(github: BoardDeps["github"]): PrQueueIndexRead {
   }
   let open: PrRef[] | null;
   let threw = false;
+  let thrownReason: string | undefined;
   try {
     open = github.listOpenHeadBranches();
-  } catch {
+  } catch (error) {
+    // Preserve this exact failure below; null alone would conflate it with an unavailable read.
     open = null;
     threw = true;
+    thrownReason = `open-index-read-threw: ${String((error as Error)?.message ?? error).slice(0, 240)}`;
   }
   return {
     open,
     failed: threw || safeReadFailed(github) || open === null,
     truncated: safeQueueTruncated(github),
-    failureReason: safeQueueFailureReason(github),
+    failureReason: thrownReason ?? safeQueueFailureReason(github),
   };
 }
 
