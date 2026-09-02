@@ -7,7 +7,7 @@
   principles: {tdd: strict}
   risk: high
   budget_usd: 100.00
-  files: [src/lib/sweep.ts, src/run-task.ts, test/base-caused-release.test.ts]
+  files: [src/lib/sweep.ts, src/run-task.ts, test/base-caused-release.test.ts, scripts/source-size-baseline.json]
   origin: "feedback#followup-pr3278-base-commit-fix-needs-a-fleet-release"
   plan_refs: ["W1-T527", "W1-T124", "W1-T474", "W1-T977", "W1-T1033", "W1-T1275", "W1-T528", "W1-T2304"]
   status: queued
