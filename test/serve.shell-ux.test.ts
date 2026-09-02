@@ -640,15 +640,15 @@ test("clearing the stored write token returns the console to the read-only rende
   });
 });
 
-// ── W1-T334/T336: the four-tab console bar -- scaffolded flat, now AUTHORITATIVE ────────────
+// ── W1-T334/T336/T2718: the console tab bar -- scaffolded flat, now AUTHORITATIVE ────────────
 
-test("console tab bar: exactly four tabs (Decisions, Now, Plan, Feed), pinned under the glance strip, and every section renders under exactly one tab, visible only while that tab is active", async () => {
+test("console tab bar: exactly five tabs (Decisions, Queue, Now, Plan, Feed), pinned under the glance strip, and every section renders under exactly one tab, visible only while that tab is active", async () => {
   const root = tmpRoot();
   await withShell(fixtureDeps(root), async (base) => {
     const page = await openShell(base);
     try {
       const tabLabels = await page.$$eval("#console-tabs .tab-btn", (els) => els.map((el) => el.textContent?.trim()));
-      assert.deepEqual(tabLabels, ["Decisions", "Now", "Plan", "Feed"]);
+      assert.deepEqual(tabLabels, ["Decisions", "Queue", "Now", "Plan", "Feed"]);
 
       // the glance strip (#glance) sits OUTSIDE the tab bar and BEFORE it in document order --
       // "pinned above," never a descendant of one and never reparented into one -- UNCHANGED by
@@ -673,33 +673,40 @@ test("console tab bar: exactly four tabs (Decisions, Now, Plan, Feed), pinned un
       assert.doesNotMatch(plan.text, /not built yet/i);
       assert.match(plan.text, /Frontier/i);
 
-      // ADD, REMOVE NOTHING, BUT NOW GATED: every one of the nine sections is still in the
+      // ADD, REMOVE NOTHING, BUT NOW GATED: every operational section is still in the
       // document (never deleted -- W1-T314's "a missing tab reads as a missing capability," and
       // this task's own "the falsifier is any firehose row reachable today that cannot be
       // reached after the change"), but each is visible on EXACTLY the one tab that owns it.
       const isVisible = (id: string) => page.$eval(id, (el) => (el as HTMLElement).offsetParent !== null);
       const inDocument = (id: string) => page.$eval(id, (el) => document.body.contains(el));
-      const ALL_SECTIONS = ["#needs-me", "#now", "#up-next", "#controls", "#accepted", "#recent", "#rest", "#more"];
+      const ALL_SECTIONS = ["#needs-me", "#pr-queue", "#now", "#up-next", "#controls", "#accepted", "#recent", "#rest", "#more"];
       for (const sel of ALL_SECTIONS) assert.equal(await inDocument(sel), true, `${sel} missing from the document`);
 
       // Decisions is the default active tab -- only its own section (needs-me) is visible.
       await page.click("#tab-decisions");
       assert.equal(await isVisible("#needs-me"), true);
-      for (const sel of ["#now", "#up-next", "#controls", "#accepted", "#recent", "#rest", "#more"]) {
+      for (const sel of ["#pr-queue", "#now", "#up-next", "#controls", "#accepted", "#recent", "#rest", "#more"]) {
         assert.equal(await isVisible(sel), false, `${sel} must be hidden while Decisions is active`);
+      }
+
+      // Queue owns the whole live open-PR cockpit and no task/firehose section.
+      await page.click("#tab-queue");
+      assert.equal(await isVisible("#pr-queue"), true);
+      for (const sel of ["#needs-me", "#now", "#up-next", "#controls", "#accepted", "#recent", "#rest", "#more"]) {
+        assert.equal(await isVisible(sel), false, `${sel} must be hidden while Queue is active`);
       }
 
       // Now owns now/up-next/controls.
       await page.click("#tab-now");
       for (const sel of ["#now", "#up-next", "#controls"]) assert.equal(await isVisible(sel), true, `${sel} must be visible on the Now tab`);
-      for (const sel of ["#needs-me", "#accepted", "#recent", "#rest", "#more"]) {
+      for (const sel of ["#needs-me", "#pr-queue", "#accepted", "#recent", "#rest", "#more"]) {
         assert.equal(await isVisible(sel), false, `${sel} must be hidden while Now is active`);
       }
 
       // Feed owns accepted/recent/rest/more (recap is content-gated separately, not asserted here).
       await page.click("#tab-feed");
       for (const sel of ["#accepted", "#recent", "#rest", "#more"]) assert.equal(await isVisible(sel), true, `${sel} must be visible on the Feed tab`);
-      for (const sel of ["#needs-me", "#now", "#up-next", "#controls"]) {
+      for (const sel of ["#needs-me", "#pr-queue", "#now", "#up-next", "#controls"]) {
         assert.equal(await isVisible(sel), false, `${sel} must be hidden while Feed is active`);
       }
     } finally {
@@ -789,7 +796,7 @@ test("W1-T336: reachSection activates the real owning tab for a real section, an
       // "needs-me" lives under Decisions, the default active tab -- a genuine no-op, no click.
       await reachSection(page, "needs-me");
       assert.equal(await page.$eval("#tab-decisions", (el) => el.getAttribute("aria-selected")), "true");
-      for (const tab of ["tab-now", "tab-plan", "tab-feed"]) {
+      for (const tab of ["tab-queue", "tab-now", "tab-plan", "tab-feed"]) {
         assert.equal(await page.$eval(`#${tab}`, (el) => el.getAttribute("aria-selected")), "false");
       }
 
