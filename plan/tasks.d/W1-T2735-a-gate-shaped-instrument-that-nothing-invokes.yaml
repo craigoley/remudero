@@ -8,7 +8,7 @@
   risk: high
   band_meaning: span
   budget_usd: 18.00
-  files: [scripts/unwired-gate-check.mjs, .github/workflows/ci.yml, package.json, test/a-gate-shaped-instrument-that-nothing-invokes.test.ts]
+  files: [scripts/unwired-gate-check.mjs, .github/workflows/unwired-gate.yml, package.json, test/a-gate-shaped-instrument-that-nothing-invokes.test.ts]
   origin: "operator-session#unwired-gate-class-2026-09-02"
   plan_refs: ["W1-T2732", "W1-T2292", "W1-T1214", "W1-T2291", "W1-T1263"]
   status: queued
@@ -101,6 +101,18 @@
     this task ships no `src/` path — and the row lands ahead of it as its own plan-free chore PR,
     an EXCLUSION not a promotion, on the `scripts/worker-branch-shape.mjs` precedent. The two
     trees were measured directly: 11/12 without the row, 12/12 with it.
+
+    (viii) AND A NEW ci.yml JOB IS UNREACHABLE, WHICH IS WHY `files:` NAMES ITS OWN WORKFLOW FILE.
+    A ci.yml job needs a `CI_PARITY_TABLE` entry (`src/lib/ci-parity.ts`), and that entry is refused
+    in EVERY ordering — MEASURED, all three: BEFORE the job by `test/preflight-ci-parity.test.ts`
+    ("the table cannot silently grow ahead of the workflow either"), AFTER it by the same file's
+    forward direction ("every REAL ci.yml job has an entry"), and WITH it by Rule 25, where
+    `detectInstrumentEntanglement` over that exact diff reads `entangled: true`. A separate workflow
+    file needs no parity entry (`CI_PARITY_TABLE` is scoped to ci.yml by design) and is the
+    direction `ci-gate.yml`'s own header already states: "remudero's required checks will live in
+    SEPARATE workflow files". ci.yml is left byte-identical to origin/main. THIS DEADLOCK IS ITSELF
+    THE CLASS ONE LEVEL UP — the fence that manufactured unwired gates also refuses the ordinary way
+    to wire a new one — and it is a finding for a separate task, not this one.
 
     ONE MORE THING THE BUILD FOUND, recorded because the design above states the opposite. Design
     (i) says a script is wired if its basename APPEARS in a workflow file. That is wrong as
