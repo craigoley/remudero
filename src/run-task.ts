@@ -26701,6 +26701,14 @@ export function latestPriorVerdictSuppresses(priorEntriesForOrigin: readonly Fee
 }
 
 /**
+ * A suppressed repair filing has no file to satisfy the normal same-window `existsSync` guard.
+ * Keep the telemetry level-triggered without writing the same row on every daemon poll: one row
+ * per process for each `(root, window id, rejecting verdict, evidence count)`. A daemon restart
+ * logs the still-active suppression once again, and genuinely new evidence logs a fresh row.
+ */
+const repairFilingSuppressionsLogged = new Set<string>();
+
+/**
  * W1-T2416 — the SAME per-window dedup {@link buildSweepEffects}'s `captureRepairFeedbackImpl`
  * default has always used (the `existsSync` check, first, unchanged), PLUS the prior-verdict read
  * design (i) puts at this exact site: a surface whose most recent `repair#<surface>` entry was
@@ -26733,12 +26741,17 @@ export function captureRepairFeedbackWithPriorVerdict(
     suppressedBy = undefined; // fail OPEN — file it, never silenced by a read error
   }
   if (suppressedBy) {
-    log("sweep.repair_filing_suppressed", {
-      surface: filing.origin.replace(/^repair#/, ""),
-      distinct_pr_count: (filing.raw.match(/^- PR #\d+/gm) ?? []).length,
-      rejected_entry_id: suppressedBy.id,
-      id: filing.id,
-    });
+    const distinctPrCount = (filing.raw.match(/^- PR #\d+/gm) ?? []).length;
+    const suppressionKey = `${root}\0${filing.id}\0${suppressedBy.id}\0${distinctPrCount}`;
+    if (!repairFilingSuppressionsLogged.has(suppressionKey)) {
+      log("sweep.repair_filing_suppressed", {
+        surface: filing.origin.replace(/^repair#/, ""),
+        distinct_pr_count: distinctPrCount,
+        rejected_entry_id: suppressedBy.id,
+        id: filing.id,
+      });
+      repairFilingSuppressionsLogged.add(suppressionKey);
+    }
     return;
   }
   captureFeedback(root, { id: filing.id, raw: filing.raw, origin: filing.origin as FeedbackOrigin });
