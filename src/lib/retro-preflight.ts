@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 
-/** Maximum combined stdout/stderr bytes retained for one preflight attempt. */
+/** PRIMARY CONTROL: maximum combined stdout/stderr bytes retained for one preflight attempt. */
 export const RETRO_PREFLIGHT_CAPTURE_BYTES = 16 * 1024;
 const RETRO_PREFLIGHT_MAX_BUFFER_BYTES = 32 * 1024 * 1024;
 const RETRO_PREFLIGHT_TIMEOUT_MS = 20 * 60 * 1000;
@@ -73,7 +73,8 @@ export interface RunRetroPrepublishPreflightOptions {
   };
 }
 
-function defaultRunner(
+/** Run one bounded prepublish subprocess. Exported so its real process controls stay regression-tested. */
+export function runRetroPrepublishCommand(
   command: string,
   args: string[],
   options: Parameters<RetroPrepublishRunner>[2],
@@ -325,7 +326,7 @@ function syntheticFailure(exitClassName: string, error: unknown): AttemptFailure
 export async function runRetroPrepublishPreflight(
   opts: RunRetroPrepublishPreflightOptions,
 ): Promise<RetroPrepublishResult> {
-  const run = opts.deps?.run ?? defaultRunner;
+  const run = opts.deps?.run ?? runRetroPrepublishCommand;
   const now = opts.deps?.now ?? Date.now;
   const first = await runAttempt(opts.worktreePath, run, now);
   logAttempt(opts, 1, first);

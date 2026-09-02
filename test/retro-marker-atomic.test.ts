@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 // intercepts the REAL fs.writeFileSync/fs.renameSync calls saveMarker makes, never a
 // reimplementation.
 import fsDefault from "node:fs";
-import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
@@ -536,6 +536,8 @@ function setupFakeRetroFixture(
     preflightResult?: RetroPrepublishResult;
     /** Drive the production repair callback once before returning a passing second attempt. */
     preflightExercisesRepair?: boolean;
+    /** Override the resumed repair result to exercise publication-gate invariants. */
+    repairWorkerResult?: Partial<WorkerResult>;
   } = {},
 ): FakeRetroFixture {
   const fakeHome = mkdtempSync(join(tmpdir(), "rmd-retro-success-home-"));
@@ -618,7 +620,7 @@ function setupFakeRetroFixture(
       // itself legitimately contain words like "diff" (ensureJudgeableBody's own proof
       // text does), which a whole-string substring match would misfire on.
       // repo clone <slug> <dest>  (repoDir absent) -- a REAL local clone, never a stub.
-      `if [[ "$1" == 'repo' && "$2" == 'clone' ]]; then git clone -q ${JSON.stringify(originGit)} "$4"; exit 0; fi`,
+      `if [[ "$1" == 'repo' && "$2" == 'clone' ]]; then git clone -q ${JSON.stringify(originGit)} "$4"; git -C "$4" config user.email retro-test@example.invalid; git -C "$4" config user.name retro-test; exit 0; fi`,
       // pr view <url> --json <field>
       `if [[ "$1" == 'pr' && "$2" == 'view' ]]; then`,
       // --json body  (ensureTaskTrailer + the acceptance-repair check) -- or a response
@@ -669,7 +671,7 @@ function setupFakeRetroFixture(
   const spawnArgs: SpawnWorkerArgs[] = [];
   const fakeSpawn = async (args?: SpawnWorkerArgs): Promise<WorkerResult> => {
     if (args) spawnArgs.push(args);
-    return {
+    const result: WorkerResult = {
     provider: "claude",
     sessionId: "s-retro-fixture",
     costUsd: 0.01,
@@ -689,6 +691,7 @@ function setupFakeRetroFixture(
     compactionEvents: [],
     qualitySuspect: false,
     };
+    return args?.resumeSessionId ? { ...result, ...opts.repairWorkerResult } : result;
   };
 
   const prepublishPreflight = async (preflight: RunRetroPrepublishPreflightOptions): Promise<RetroPrepublishResult> => {
@@ -826,6 +829,46 @@ test("retroCommand: the one repair resumes the producing session on its original
     assert.equal(repair?.resumed_session_id, "s-retro-fixture");
   });
 });
+
+for (const repairCase of [
+  {
+    name: "a different resumed session",
+    result: { sessionId: "replacement-session" },
+    error: /returned a different session/,
+  },
+  {
+    name: "a provider switch",
+    result: { provider: "codex" as const },
+    error: /switched provider from claude to codex/,
+  },
+  {
+    name: "a worker error",
+    result: { isError: true, subtype: "error_during_execution" },
+    error: /repair failed: error_during_execution/,
+  },
+]) {
+  test(`retroCommand: ${repairCase.name} fails the prepublish repair closed`, async (t) => {
+    const fx = setupFakeRetroFixture(t, {
+      repairWorkerResult: repairCase.result,
+    });
+    await fx.run(async () => {
+      const exitCode = await withLiveWritesAllowed(() => retroCommand([], {
+        spawn: fx.fakeSpawn,
+        github: offlineGh,
+        prepublishPreflight: async (preflight) => {
+          await assert.rejects(preflight.repair("bounded fenced fixture evidence"), repairCase.error);
+          return { ok: false, attempts: 2, suiteCount: 2, repaired: false };
+        },
+      }));
+      assert.equal(exitCode, 1);
+      assert.equal(
+        existsSync(join(fx.root, "state", "last-retro.json")),
+        false,
+        "a rejected repair must not advance the marker",
+      );
+    });
+  });
+}
 
 // ── W1-T160: the INTEGRITY GATE — a HARD precondition INSIDE the automated
 // (daemon-triggered) path only. `opts.automated` claims the TRIGGER observed real

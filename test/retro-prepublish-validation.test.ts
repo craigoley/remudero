@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   RETRO_PREFLIGHT_CAPTURE_BYTES,
+  runRetroPrepublishCommand,
   runRetroPrepublishPreflight,
   type RetroPrepublishRunner,
 } from "../src/lib/retro-preflight.js";
@@ -17,6 +18,64 @@ const provenance = {
 function commandResult(status: number, stdout = "", stderr = "") {
   return { status, signal: null, stdout, stderr };
 }
+
+function subprocessOptions(maxBuffer = 64 * 1024, timeout = 5_000) {
+  return {
+    cwd: process.cwd(),
+    encoding: "utf8" as const,
+    maxBuffer,
+    timeout,
+    env: { ...process.env },
+  };
+}
+
+test("the default runner captures a real subprocess exit and both output streams", async () => {
+  const result = await runRetroPrepublishCommand(
+    process.execPath,
+    ["-e", "process.stdout.write('out'); process.stderr.write('err'); process.exitCode = 7"],
+    subprocessOptions(),
+  );
+
+  assert.equal(result.status, 7);
+  assert.equal(result.signal, null);
+  assert.equal(result.stdout, "out");
+  assert.equal(result.stderr, "err");
+  assert.equal(result.error, undefined);
+});
+
+test("the default runner terminates a subprocess that exceeds its output ceiling", async () => {
+  const result = await runRetroPrepublishCommand(
+    process.execPath,
+    ["-e", "process.stdout.write('x'.repeat(4096)); setInterval(() => {}, 1000)"],
+    subprocessOptions(32),
+  );
+
+  assert.equal((result.error as NodeJS.ErrnoException | undefined)?.code, "ENOBUFS");
+  assert.equal(Buffer.byteLength(result.stdout), 32);
+  assert.equal(result.signal, "SIGTERM");
+});
+
+test("the default runner terminates a subprocess at its deadline", async () => {
+  const result = await runRetroPrepublishCommand(
+    process.execPath,
+    ["-e", "setInterval(() => {}, 1000)"],
+    subprocessOptions(64 * 1024, 20),
+  );
+
+  assert.equal((result.error as NodeJS.ErrnoException | undefined)?.code, "ETIMEDOUT");
+  assert.equal(result.signal, "SIGTERM");
+});
+
+test("the default runner returns a spawn error instead of rejecting", async () => {
+  const result = await runRetroPrepublishCommand(
+    `rmd-retro-preflight-command-that-does-not-exist-${process.pid}`,
+    [],
+    subprocessOptions(),
+  );
+
+  assert.equal((result.error as NodeJS.ErrnoException | undefined)?.code, "ENOENT");
+  assert.equal(result.status, -2);
+});
 
 test("retro prepublish runs the dynamically enumerated plan-reading suites through test-with-retry", async () => {
   const calls: Array<{ command: string; args: string[]; cwd: string }> = [];
@@ -217,4 +276,46 @@ test("an output ceiling breach is classified distinctly from a spawn failure", a
 
   assert.equal(result.ok, false);
   assert.deepEqual(rows.map((row) => row.extra.exit_class), ["output_limit_exceeded", "output_limit_exceeded"]);
+});
+
+test("a failed repair is terminal and records a compact synthetic second attempt", async () => {
+  const rows: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const run: RetroPrepublishRunner = (_command, args) => args.includes("--list-plan-reading-suites")
+    ? commandResult(0, "test/plan.test.ts\n")
+    : commandResult(1, "not ok 1 - repair me\n");
+
+  const result = await runRetroPrepublishPreflight({
+    worktreePath: "/tmp/retro-worktree",
+    provenance,
+    remotePrExisted: false,
+    repair: async () => { throw new Error("repair worker unavailable"); },
+    regenerateHarnessArtifacts: async () => assert.fail("regeneration must wait for a successful repair"),
+    log: (step, extra) => rows.push({ step, extra }),
+    deps: { run },
+  });
+
+  assert.deepEqual(result, { ok: false, attempts: 2, suiteCount: 1, repaired: false });
+  assert.deepEqual(rows.map((row) => row.extra.exit_class), ["tests_failed", "repair_spawn_failed"]);
+  assert.equal(rows[1].extra.stderr_excerpt, "repair worker unavailable");
+});
+
+test("a failed harness regeneration is terminal after a successful repair", async () => {
+  const rows: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const run: RetroPrepublishRunner = (_command, args) => args.includes("--list-plan-reading-suites")
+    ? commandResult(0, "test/plan.test.ts\n")
+    : commandResult(1, "not ok 1 - regenerate me\n");
+
+  const result = await runRetroPrepublishPreflight({
+    worktreePath: "/tmp/retro-worktree",
+    provenance,
+    remotePrExisted: false,
+    repair: async () => {},
+    regenerateHarnessArtifacts: async () => { throw "generator unavailable"; },
+    log: (step, extra) => rows.push({ step, extra }),
+    deps: { run },
+  });
+
+  assert.deepEqual(result, { ok: false, attempts: 2, suiteCount: 1, repaired: true });
+  assert.deepEqual(rows.map((row) => row.extra.exit_class), ["tests_failed", "harness_regeneration_failed"]);
+  assert.equal(rows[1].extra.stderr_excerpt, "generator unavailable");
 });
