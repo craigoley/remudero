@@ -121,4 +121,4 @@
     push-triggered workflows, the three `DEFAULT_FIX_CLASSES` rows and every timestamp are GitHub API
     or tree facts at e8bcaf60, taken 2026-08-14 from the mac mini. NO LEDGER FIGURE IS USED, so
     nothing here is a claim about either host's ledger, and the mini and Azure keep separate ones
-    with no route between them."
+    with no route between them. SHIPPED, RECORDED 2026-09-02 (evidence only). THIS TASK IS BUILT: a merged commit on origin/main carries its own Remudero-Task trailer -- 07d4e44b feat(ci): fail a check on main when the plan no longer loads (#1897). status: queued and verify: human are BOTH left alone: the status field is decorative by documented design and the operator ruled LEAVE THEM on 2026-08-05, and the human gate is this shard's own deliberate parking choice, not this block's to revoke. Nothing mechanical was misled either, since isDispatchEligible refuses a non-auto task before any probe. This record exists because a READER picking build candidates was misled, not a machine."
