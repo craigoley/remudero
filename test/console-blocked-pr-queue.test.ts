@@ -76,7 +76,7 @@ test("W1-T1006: a disposed PR with no escalation issue reaches the console queue
       pr_number: 2097,
       pr_url: "https://github.com/o/r/pull/2097",
       disposition: "blocked-ambiguous",
-      reason: "review orphaned by a push, again -- the sweep has already re-reviewed this PR 2 time(s) (>= 2 cap) -- escalating",
+      reason: "review orphaned by a push, again -- the sweep has already reviewed this unchanged input 2 time(s) (>= 2 cap) -- escalating",
     }),
   ]);
   const deps: BoardDeps = { plan: planOf([]), ledgerPath, github: fakeGitHub() };
