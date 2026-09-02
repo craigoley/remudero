@@ -523,6 +523,9 @@ export type RiskOverrideDisposition = (typeof RISK_OVERRIDE_DISPOSITIONS)[number
 export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "run.start",
   "pr.opened",
+  // W1-T2594: provider-diverse reviewer routing resolves this row by exact task + PR + head.
+  // Rotating it away would make an unchanged head route differently after maintenance.
+  "pr.head_provider",
   // W1-T2425: the breaker's own REFUSAL row, joining the ESCALATION row immediately below it.
   // Same prefix, same writer, and until now opposite retention: `.escalated` was decision-relevant
   // and survived (measured 2 live / 2 union on the fleet) while this one belonged to none of the

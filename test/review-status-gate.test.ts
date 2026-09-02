@@ -14,6 +14,7 @@ import {
   postReviewStatusGuarded,
   POST_REVIEW_STATUS_MAX_ATTEMPTS,
   reviewEvidenceStrength,
+  reviewInputDigest,
   ReviewStatusLockTimeoutError,
   type PostedReviewStatusRecord,
   type PrLifecycleState,
@@ -313,7 +314,14 @@ test("W1-T522: an indeterminate read stays indeterminate and never reads termina
 
 // ── postReviewStatusGuarded — THE single guarded post site ──────────────────
 
-function seedPosted(ledgerPath: string, taskId: string, headSha: string, state: "success" | "failure", proofExec: string[]) {
+function seedPosted(
+  ledgerPath: string,
+  taskId: string,
+  headSha: string,
+  state: "success" | "failure",
+  proofExec: string[],
+  input?: { prUrl: string; digest: string },
+) {
   appendLedger(ledgerPath, {
     run_id: "seed",
     task_id: taskId,
@@ -321,6 +329,7 @@ function seedPosted(ledgerPath: string, taskId: string, headSha: string, state: 
     head_sha: headSha,
     state,
     proof_exec: proofExec,
+    ...(input ? { pr_url: input.prUrl, review_input_digest: input.digest } : {}),
   });
 }
 
@@ -328,7 +337,12 @@ test("postReviewStatusGuarded: ACCEPTANCE 1 — a CAPPED success posted over an 
   const dir = tmpDir();
   try {
     const ledgerPath = join(dir, "ledger.ndjson");
-    seedPosted(ledgerPath, "W1-T449", "833561d", "failure", ["executed_fail", "not_executable"]);
+    const prUrl = "https://github.com/o/r/pull/449";
+    const digest = reviewInputDigest("833561d", "corrected body");
+    seedPosted(ledgerPath, "W1-T449", "833561d", "failure", ["executed_fail", "not_executable"], {
+      prUrl,
+      digest,
+    });
 
     const posts: Array<{ state: string }> = [];
     const result = await postReviewStatusGuarded({
@@ -341,6 +355,8 @@ test("postReviewStatusGuarded: ACCEPTANCE 1 — a CAPPED success posted over an 
       evidence: "no_evidence",
       ledgerPath,
       runId: "run-2",
+      prUrl,
+      reviewInputDigest: digest,
       fetchLifecycle: () => NOT_MERGED,
       post: (o) => {
         posts.push(o);
@@ -357,11 +373,49 @@ test("postReviewStatusGuarded: ACCEPTANCE 1 — a CAPPED success posted over an 
     assert.equal(refusal?.head_sha, "833561d");
     assert.equal(refusal?.attempted_state, "success");
     assert.equal(refusal?.evidence, "no_evidence");
+    assert.equal(refusal?.pr_url, prUrl);
+    assert.equal(refusal?.review_input_digest, digest);
 
     // "prior status intact": the seeded executed failure is still the most
     // recent review.posted verdict — nothing overwrote it.
     const prior = lastPostedReviewStatusFromLedger(lines, "W1-T449");
     assert.deepEqual(prior, { headSha: "833561d", state: "failure", evidence: "executed" });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("postReviewStatusGuarded: a body edit on the same sha resets prior-evidence precedence", async () => {
+  const dir = tmpDir();
+  try {
+    const ledgerPath = join(dir, "ledger.ndjson");
+    const prUrl = "https://github.com/o/r/pull/449";
+    seedPosted(ledgerPath, "W1-T449", "833561d", "failure", ["executed_fail"], {
+      prUrl,
+      digest: reviewInputDigest("833561d", "old body"),
+    });
+    const posts: unknown[] = [];
+
+    const result = await postReviewStatusGuarded({
+      owner: "o",
+      repo: "r",
+      sha: "833561d",
+      state: "success",
+      taskId: "W1-T449",
+      evidence: "no_evidence",
+      ledgerPath,
+      runId: "run-after-edit",
+      prUrl,
+      reviewInputDigest: reviewInputDigest("833561d", "corrected body"),
+      fetchLifecycle: () => NOT_MERGED,
+      post: (o) => {
+        posts.push(o);
+      },
+    });
+
+    assert.equal(result.posted, true);
+    assert.equal(posts.length, 1, "the prior executed verdict belongs to the old body, not this input");
+    assert.equal(readLedgerLines(ledgerPath).some((line) => line.step === "review.post_refused"), false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

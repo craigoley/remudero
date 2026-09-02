@@ -125,6 +125,18 @@ if [ -d "${CODEX_DIR}" ]; then
 else
   echo "recycle-container: NOTE — no Codex home at ${CODEX_DIR}; recycling without a Codex mount"
 fi
+# Provider policy and container-valid executable paths belong to the container, not to the host
+# CLI's ordinary ~/.config/remudero/config.json. Keep this source separate and conditional: asking
+# Docker to bind a missing source would create an empty root-owned directory on the host and turn a
+# backwards-compatible Claude-only recycle into a partially commissioned dual-provider one.
+CONTAINER_CONFIG_DIR="${RMD_CONTAINER_CONFIG_DIR:-${HOME:-/root}/.config/remudero-container}"
+CONTAINER_CONFIG_MOUNT_DEST="/home/node/.config/remudero"
+CONTAINER_CONFIG_MOUNT_ARGS=()
+if [ -d "${CONTAINER_CONFIG_DIR}" ]; then
+  CONTAINER_CONFIG_MOUNT_ARGS=(-v "${CONTAINER_CONFIG_DIR}:${CONTAINER_CONFIG_MOUNT_DEST}")
+else
+  echo "recycle-container: NOTE — no container config directory at ${CONTAINER_CONFIG_DIR}; recycling without a Remudero config mount" >&2
+fi
 DAEMON_REPO="${RMD_DAEMON_REPO:-remudero}"
 
 DRAIN_LOCK="${STATE_DIR}/state/drain.lock"
@@ -808,6 +820,7 @@ docker run -d --name "${CONTAINER_NAME}" \
   -v "${STATE_DIR}:${STATE_MOUNT_DEST}" \
   -v "${CRED_DIR}:${CRED_MOUNT_DEST}" \
   "${CODEX_MOUNT_ARGS[@]}" \
+  "${CONTAINER_CONFIG_MOUNT_ARGS[@]}" \
   "${REF}" \
   ./bin/rmd daemon --repo "${DAEMON_REPO}" --allow-self-target >/dev/null
 

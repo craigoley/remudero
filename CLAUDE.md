@@ -74,10 +74,10 @@ forensic detail, so the narrative does not need to live here.
   **GUARD THE FETCH ON STRUCTURE, NEVER ON SIZE**: reject a non-200 or a missing/null `.body` before
   judging — a rate-limit payload reads as `DEFECTIVE: no Acceptance header`. A size floor cannot
   tell a short body from an error payload; the key can. *(2026-08-14)*
-  **AND REPAIRING THE BODY CLEARS NOTHING ON ITS OWN.** The sweep's post-review row fires only at
-  `pr.checksState === "green" && pr.reviewState === "none"` (`src/lib/sweep.ts`), so once a verdict
-  is posted that sha is never re-reviewed — the designed path for a stale verdict is A NEW HEAD. A
-  session that fixes the block and pushes nothing has fixed nothing. *(#1598, #1714, #1721)*
+  **A BODY REPAIR IS A NEW REVIEW INPUT.** Review retries, refusals, pending posts and outcome
+  dedup all key on the versioned digest of the PR head plus exact body. A body edit therefore
+  re-earns review on the same commit; comments, labels and title churn do not. Unchanged input
+  remains bounded by the configured cap/backoff. *(#1598, #1714, #1721; 2026-09-01 correction)*
 - **EVERY proof needs a dialect prefix — `unit test:` or `grep:`. A bare title is PROSE and never
   executes.** `rmd check-proof` refuses it in as many words: *"a proof with no dialect prefix at all
   is prose and never executes."* It does not fail loudly; it silently contributes nothing and the
