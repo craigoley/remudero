@@ -574,6 +574,52 @@ test("deriveDisposition: failing review with NO actionable criteria -> blocked-a
   assert.match(r.reason, /contradictory/);
 });
 
+test("deriveDisposition: a failure status with no completed exact-input review is re-reviewed to recover authoritative evidence", () => {
+  const p = pr({
+    reviewState: "failure",
+    checksState: "green",
+    unmetCriteria: [],
+    priorStrikes: 0,
+    priorReviewAttemptsForInput: 0,
+    reviewInputDigest: "v1:unowned-failure",
+    reviewPostRefused: false,
+  });
+  const r = deriveDisposition(p, DEFAULT_SWEEP_POLICY, NOW);
+  assert.equal(r.disposition, "post-review");
+  assert.match(r.reason, /no matching completed review\.posted evidence/);
+  assert.match(r.reason, /authoritative evidence/);
+});
+
+test("deriveDisposition: an unowned failure status is not re-reviewed after an exact-input post refusal", () => {
+  const p = pr({
+    reviewState: "failure",
+    checksState: "green",
+    unmetCriteria: [],
+    priorStrikes: 0,
+    priorReviewAttemptsForInput: 0,
+    reviewInputDigest: "v1:unowned-failure",
+    reviewPostRefused: true,
+  });
+  const r = deriveDisposition(p, DEFAULT_SWEEP_POLICY, NOW);
+  assert.equal(r.disposition, "blocked-ambiguous");
+  assert.match(r.reason, /contradictory/);
+});
+
+test("runSweep: unowned failure recovery invokes the review lane and does not escalate", async () => {
+  const p = pr({
+    reviewState: "failure",
+    checksState: "green",
+    priorReviewAttemptsForInput: 0,
+    reviewInputDigest: "v1:unowned-failure",
+  });
+  const posted: number[] = [];
+  const deps = fakeDeps({ postReview: (candidate) => { posted.push(candidate.prNumber); } });
+  const summary = await runSweep([p], deps, DEFAULT_SWEEP_POLICY);
+  assert.deepEqual(posted, [p.prNumber]);
+  assert.equal(summary.byDisposition["post-review"], 1);
+  assert.equal(deps.escalated.length, 0);
+});
+
 // W1-T440: the SAME empty (unmetCriteria === []) has two causes — a trailer resolved a task id
 // and the ledger genuinely came back with nothing unmet (contradictory, above), versus no
 // trailer at all so unmetFromLedger was never consulted (unrecoverable, here). Same
