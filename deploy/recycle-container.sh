@@ -146,8 +146,28 @@ PAUSE_FILE="${STATE_DIR}/state/PAUSE"
 # How long to wait for in-flight workers before refusing, and how often to re-check while waiting.
 # Bounded deliberately: an unbounded wait is a hang with no visible cause, and the whole point of a
 # BOUNDED wait is that it can time out and refuse rather than block a recycle forever.
-WAIT_SECONDS="${RMD_RECYCLE_WAIT_S:-120}"
+#
+# W1-T2598: DERIVED FROM THE SAME OBSERVED DISTRIBUTION AS `HUNG_WORKER_AGE_S` BELOW, NOT PICKED
+# SEPARATELY — the file already carried the correction for this constant, twenty lines below,
+# applied to a different one. Over the identical 115 `implement.done` rows carrying
+# `worker_duration_ms` (see HUNG_WORKER_AGE_S's own comment for the full provenance), a legitimate
+# implement runs 19.3 min median (1158s), 36.0 p90 (2160s), 46.7 p95 (2802s) and 98.5 max (5910s).
+# The PRIOR literal, 120, sat under even the fastest quartile of that population, so this wait
+# refused on HEALTHY, still-running implement work BY CONSTRUCTION — not because anything had
+# actually hung. MEASURED 2026-09-01, BOTH DIRECTIONS: at the 120 default the recycle refused on a
+# lane-holding worker that was healthy throughout; re-run with RMD_RECYCLE_WAIT_S=3000 it printed
+# "1 lane-holding + 0 lane-less worker(s) still in flight, waited 440s/3000s — polling" and then
+# converged on its own. 3000s clears p95 (2802s) with margin, stays short of the observed max
+# (5910s), and remains a full 2.4x under HUNG_WORKER_AGE_S (7200s) — so this widens ONLY how long a
+# HEALTHY run is waited for before refusing; it does not move what this script treats as hung, and
+# `RMD_RECYCLE_WAIT_S` still overrides it exactly as before.
+WAIT_SECONDS="${RMD_RECYCLE_WAIT_S:-3000}"
 POLL_INTERVAL_S="${RMD_RECYCLE_POLL_S:-5}"
+
+# The distribution above, in the exact words a refusal below reuses — an operator reading a timeout
+# refusal sees the population the bound was sized against, not just a bare "waited Ns" they have to
+# take on faith.
+RECYCLE_WAIT_DISTRIBUTION_NOTE="115 implement.done rows carrying worker_duration_ms: 19.3 min median (1158s), 36.0 p90 (2160s), 46.7 p95 (2802s), 98.5 max (5910s)"
 
 # THE AGE ABOVE WHICH A LANE-LESS WORKER IS TREATED AS HUNG RATHER THAN BUSY (W1-T1046).
 #
@@ -753,6 +773,15 @@ lock_host_field() {
     | sed -E 's/.*"([^"]*)"[[:space:]]*$/\1/' || true
 }
 
+lock_started_at_field() {
+  # Same discipline as lock_host_field just above, for the same reason: grep/cut, not jq, and the
+  # pipeline is guarded with `|| true` so a lock with no `startedAt` key does not abort the whole
+  # script under `set -e` the moment its (failed) result is assigned.
+  grep -ao '"startedAt"[[:space:]]*:[[:space:]]*"[^"]*"' "$1" 2>/dev/null \
+    | head -1 \
+    | sed -E 's/.*"([^"]*)"[[:space:]]*$/\1/' || true
+}
+
 reclaim_dead_inflight_locks() {
   [ -d "${INFLIGHT_DIR}" ] || return 0
   local f host verdict running reclaimed_dir reclaimed_path
@@ -782,6 +811,38 @@ reclaim_dead_inflight_locks() {
       "$$" "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "${host}" "${verdict}" > "${reclaimed_path}.reason"
     echo "  moved aside to ${reclaimed_path} (reason recorded alongside it) — recycle proceeds" >&2
   done
+}
+
+# ── W1-T2598: THE OLDEST IN-FLIGHT WORK THIS RUN ACTUALLY OBSERVED, NAMED IN A TIMEOUT REFUSAL ────
+# A refusal that says only "waited 3000s" makes the operator take the bound's sizing on faith. This
+# reads every blocking lock's own `startedAt` and every lane-less worker's own age (`ps -eo etimes`,
+# already read by worker_lines above) and returns the single oldest age observed, in seconds — the
+# wait that would have been JUST enough to cover the oldest thing this run actually saw, a fact
+# about THIS run rather than a property of the distribution above. Best-effort throughout: a lock
+# this shell cannot parse a `startedAt` out of, or a `date` that cannot parse it, is skipped rather
+# than aborting the refusal it feeds.
+oldest_inflight_age_s() {
+  local max=0 f started_at started_epoch age now_epoch wpid wage wargs
+  now_epoch="$(date -u +%s 2>/dev/null || true)"
+  [ -n "${now_epoch}" ] || return 0
+  if [ -d "${INFLIGHT_DIR}" ]; then
+    for f in "${INFLIGHT_DIR}"/*.lock; do
+      [ -e "${f}" ] || continue
+      started_at="$(lock_started_at_field "${f}")"
+      [ -n "${started_at}" ] || continue
+      started_epoch="$(date -u -d "${started_at}" +%s 2>/dev/null || true)"
+      [ -n "${started_epoch}" ] || continue
+      age=$((now_epoch - started_epoch))
+      if [ "${age}" -gt "${max}" ] 2>/dev/null; then max="${age}"; fi
+    done
+  fi
+  while read -r wpid wage wargs; do
+    [ -n "${wpid:-}" ] || continue
+    if [ "${wage}" -gt "${max}" ] 2>/dev/null; then max="${wage}"; fi
+  done <<WORKERS
+$(worker_lines)
+WORKERS
+  printf '%s' "${max}"
 }
 
 waited=0
@@ -838,7 +899,13 @@ WORKERS
     break
   fi
   if [ "${waited}" -ge "${WAIT_SECONDS}" ]; then
+    OLDEST_AGE_S="$(oldest_inflight_age_s)"
     echo "recycle-container: REFUSING — ${n} lane-holding and ${lane_less_busy} lane-less worker(s) still in flight after ${WAIT_SECONDS}s." >&2
+    echo "  WAIT_SECONDS=${WAIT_SECONDS} was sized against ${RECYCLE_WAIT_DISTRIBUTION_NOTE}." >&2
+    if [ -n "${OLDEST_AGE_S}" ] && [ "${OLDEST_AGE_S}" -gt 0 ] 2>/dev/null; then
+      echo "  the oldest in-flight work this run observed was ${OLDEST_AGE_S}s old — a wait of at" >&2
+      echo "  least ${OLDEST_AGE_S}s (RMD_RECYCLE_WAIT_S=${OLDEST_AGE_S}) would have covered it." >&2
+    fi
     if [ -d "${INFLIGHT_DIR}" ]; then
       for f in "${INFLIGHT_DIR}"/*.lock; do
         [ -e "${f}" ] || continue
