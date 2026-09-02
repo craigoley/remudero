@@ -67,6 +67,14 @@ function runCheckProof(argv: string[], cwd: string = REPO_ROOT): { code: number;
   }
 }
 
+function resolvedCandidateFiles(out: string): string[] {
+  const match = out.match(/^candidates:\s+(\d+) file\(s\)\s+—\s+(.+)\s*$/m);
+  assert.ok(match, "check-proof must report the resolved candidate files");
+  const files = match[2]!.split(/\s*,\s*/).filter(Boolean);
+  assert.equal(files.length, Number(match[1]), "the reported candidate count must match the file list");
+  return files;
+}
+
 // ── Acceptance #1: SAME verdict as the review executor, never a green exit code ─────────────────
 
 test("ACCEPTANCE #1 baseline: the review executor itself reports no-match for the rationale's exact fixture, confirming the divergence is still live at this sha", () => {
@@ -96,10 +104,14 @@ test("ACCEPTANCE #1: check-proof reports the SAME no-match verdict as the review
   // NAMES the fixture's symbol — even inside a doc comment — becomes a candidate. THIS FILE MUST
   // THEREFORE NEVER SPELL THAT SYMBOL OUTSIDE THE FIXTURE CONSTANT: writing it in a comment here
   // makes this suite its own third candidate and the assertion below can never match. Still pinned
-  // EXACTLY, both files named: the count is scaffolding and the invariant is the three assertions
-  // below — the raw child still exits 0 (the historical false-green) and the collapsed verdict must
-  // still read no-match. Measured at this head: candidates 2, exit 0, hits 24, verdict no-match.
-  assert.match(out, /^candidates:\s+2 file\(s\)\s+—\s+test\/fix-branch-checkout-serialization\.test\.ts,\s+test\/fix-rung-no-task\.test\.ts\s*$/m);
+  // EXACTLY, both files named: grep does not promise traversal order, so compare the candidate SET
+  // while still pinning both paths and the count. The invariant is the three assertions below — the
+  // raw child still exits 0 (the historical false-green) and the collapsed verdict must still read
+  // no-match. Measured at this head: candidates 2, exit 0, hits 24, verdict no-match.
+  assert.deepEqual(resolvedCandidateFiles(out).sort(), [
+    "test/fix-branch-checkout-serialization.test.ts",
+    "test/fix-rung-no-task.test.ts",
+  ]);
   assert.match(out, /^exit:\s+0\s*$/m, "the RAW child process exit code is genuinely 0 — the historical false-green");
   assert.match(out, /^verdict:\s+no-match\s*$/m, "the collapsed verdict must read no-match, not pass");
 
@@ -113,11 +125,15 @@ test("ACCEPTANCE #2: check-proof still prints parse kind, resolved candidates, t
   const { out } = runCheckProof(["unit test:", NAME_FILTERED_FIXTURE]);
   assert.match(out, new RegExp(`^proof:\\s+unit test: ${NAME_FILTERED_FIXTURE}\\s*$`, "m"));
   assert.match(out, /^parse:\s+OK — kind=test \(name-filtered\)\s*$/m);
-  assert.match(out, /^candidates:\s+2 file\(s\)/m);
-  assert.match(
-    out,
-    new RegExp(`^argv:\\s+node --test .*--test-name-pattern ${NAME_FILTERED_FIXTURE} test/fix-branch-checkout-serialization\\.test\\.ts test/fix-rung-no-task\\.test\\.ts\\s*$`, "m"),
-  );
+  const candidates = resolvedCandidateFiles(out);
+  assert.deepEqual(candidates.slice().sort(), [
+    "test/fix-branch-checkout-serialization.test.ts",
+    "test/fix-rung-no-task.test.ts",
+  ]);
+  const argv = out.match(/^argv:\s+(.+)\s*$/m)?.[1];
+  assert.ok(argv, "check-proof must report the executor argv");
+  assert.match(argv, new RegExp(`^node --test .*--test-name-pattern ${NAME_FILTERED_FIXTURE} `));
+  assert.ok(argv.endsWith(candidates.join(" ")), "the executor argv must preserve the reported candidate list");
   assert.doesNotMatch(out, /test\/\*\*\/\*\.test\.ts/, "narrowed to the one candidate file, not the whole-suite glob");
   assert.match(out, /^hits:\s+\d+\s*$/m, "a hit count is still printed — collapsing the executor costs no diagnostics");
 });
