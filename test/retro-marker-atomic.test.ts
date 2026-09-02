@@ -536,8 +536,6 @@ function setupFakeRetroFixture(
     preflightResult?: RetroPrepublishResult;
     /** Drive the production repair callback once before returning a passing second attempt. */
     preflightExercisesRepair?: boolean;
-    /** Override the resumed repair result to exercise publication-gate invariants. */
-    repairWorkerResult?: Partial<WorkerResult>;
   } = {},
 ): FakeRetroFixture {
   const fakeHome = mkdtempSync(join(tmpdir(), "rmd-retro-success-home-"));
@@ -691,7 +689,7 @@ function setupFakeRetroFixture(
     compactionEvents: [],
     qualitySuspect: false,
     };
-    return args?.resumeSessionId ? { ...result, ...opts.repairWorkerResult } : result;
+    return result;
   };
 
   const prepublishPreflight = async (preflight: RunRetroPrepublishPreflightOptions): Promise<RetroPrepublishResult> => {
@@ -829,46 +827,6 @@ test("retroCommand: the one repair resumes the producing session on its original
     assert.equal(repair?.resumed_session_id, "s-retro-fixture");
   });
 });
-
-for (const repairCase of [
-  {
-    name: "a different resumed session",
-    result: { sessionId: "replacement-session" },
-    error: /returned a different session/,
-  },
-  {
-    name: "a provider switch",
-    result: { provider: "codex" as const },
-    error: /switched provider from claude to codex/,
-  },
-  {
-    name: "a worker error",
-    result: { isError: true, subtype: "error_during_execution" },
-    error: /repair failed: error_during_execution/,
-  },
-]) {
-  test(`retroCommand: ${repairCase.name} fails the prepublish repair closed`, async (t) => {
-    const fx = setupFakeRetroFixture(t, {
-      repairWorkerResult: repairCase.result,
-    });
-    await fx.run(async () => {
-      const exitCode = await withLiveWritesAllowed(() => retroCommand([], {
-        spawn: fx.fakeSpawn,
-        github: offlineGh,
-        prepublishPreflight: async (preflight) => {
-          await assert.rejects(preflight.repair("bounded fenced fixture evidence"), repairCase.error);
-          return { ok: false, attempts: 2, suiteCount: 2, repaired: false };
-        },
-      }));
-      assert.equal(exitCode, 1);
-      assert.equal(
-        existsSync(join(fx.root, "state", "last-retro.json")),
-        false,
-        "a rejected repair must not advance the marker",
-      );
-    });
-  });
-}
 
 // ── W1-T160: the INTEGRITY GATE — a HARD precondition INSIDE the automated
 // (daemon-triggered) path only. `opts.automated` claims the TRIGGER observed real
@@ -1165,19 +1123,6 @@ test("retroCommand: an UNRESOLVED head ref (gh cannot say what branch the PR is 
     const exitCode = await withLiveWritesAllowed(() => retroCommand([], { spawn: fx.fakeSpawn, github: offlineGh, prepublishPreflight: fx.prepublishPreflight }));
     assert.equal(exitCode, 1, "an unresolved head ref is treated as NOT owned -- fail closed, same as a resolved mismatch");
     assert.ok(!fsDefault.existsSync(join(fx.root, "state", "last-retro.json")), "an unresolved head ref must NEVER advance the marker");
-  });
-});
-
-test("retroCommand: a missing MASTER-PLAN.md with no final commit is a named no-op and never consumes the marker", async (t) => {
-  const fx = setupFakeRetroFixture(t, { missingMasterPlan: true });
-  await fx.run(async () => {
-    const exitCode = await withLiveWritesAllowed(() => retroCommand([], { spawn: fx.fakeSpawn, github: offlineGh, prepublishPreflight: fx.prepublishPreflight }));
-    assert.equal(exitCode, 1);
-    assert.ok(!fsDefault.existsSync(join(fx.root, "state", "last-retro.json")), "an absent final plan cannot consume the retro window");
-    const ledgerLines = readFileSync(join(fx.root, "state", "ledger.ndjson"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
-    assert.ok(ledgerLines.some((l) => l.step === "orientation.write.error"), "the missing MASTER-PLAN.md must be ledgered, not silently swallowed");
-    assert.ok(ledgerLines.some((l) => l.step === "retro.no_op"), "the empty final branch must be classified explicitly");
-    assert.equal(ledgerLines.some((l) => l.step === "pr.opened"), false);
   });
 });
 

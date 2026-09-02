@@ -449,6 +449,7 @@ import {
 } from "./lib/retro.js";
 import {
   runRetroPrepublishPreflight,
+  type RunRetroPrepublishPreflightOptions,
   type RetroPrepublishProvenance,
 } from "./lib/retro-preflight.js";
 import { regenerateOrientation } from "./lib/orientation.js";
@@ -20093,7 +20094,7 @@ async function retroCommand(
       effort: worker.effort,
       sessionId: worker.sessionId,
     };
-    const preflight = await (opts.prepublishPreflight ?? runRetroPrepublishPreflight)({
+    const preflightOptions: RunRetroPrepublishPreflightOptions = {
       worktreePath,
       provenance,
       remotePrExisted,
@@ -20139,7 +20140,10 @@ async function retroCommand(
       regenerateHarnessArtifacts: () => {
         regenerateHarnessArtifacts();
       },
-    });
+    };
+    const preflight = opts.prepublishPreflight
+      ? await opts.prepublishPreflight(preflightOptions)
+      : await runRetroPrepublishPreflight(preflightOptions);
     if (!preflight.ok) {
       say(
         `prepublish validation failed after ${preflight.attempts} attempt(s) — marker unchanged; ` +

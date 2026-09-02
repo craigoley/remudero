@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import {
   RETRO_PREFLIGHT_CAPTURE_BYTES,
@@ -28,6 +29,53 @@ function subprocessOptions(maxBuffer = 64 * 1024, timeout = 5_000) {
     env: { ...process.env },
   };
 }
+
+function retroProductionSource(): string {
+  const source = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
+  const start = source.indexOf("async function retroCommand(");
+  const end = source.indexOf("\n/**\n * The retro's OWN Acceptance-block", start);
+  assert.ok(start >= 0 && end > start, "the production retroCommand source must remain locatable");
+  return source.slice(start, end);
+}
+
+function assertOrdered(source: string, fragments: readonly string[]): void {
+  let prior = -1;
+  for (const fragment of fragments) {
+    const index = source.indexOf(fragment, prior + 1);
+    assert.ok(index > prior, `expected production fragment after its predecessor: ${fragment}`);
+    prior = index;
+  }
+}
+
+test("production retro finalization regenerates, calls the real preflight, then publishes, marks, reviews, and arms", () => {
+  const source = retroProductionSource();
+  assertOrdered(source, [
+    "regenerateHarnessArtifacts();",
+    "const preflightOptions: RunRetroPrepublishPreflightOptions = {",
+    "await runRetroPrepublishPreflight(preflightOptions)",
+    "gitPushRunBranch(worktreePath);",
+    'log("pr.opened"',
+    "saveMarker(markerPath, nextMarker);",
+    "const reviewCode = await reviewCommand(prNum);",
+    "armAndLogOutcome(prUrl, runId",
+  ]);
+});
+
+test("production recovers and owns an existing exact-head PR before provider-sticky repair and never creates a second PR", () => {
+  const source = retroProductionSource();
+  assertOrdered(source, [
+    "probeExistingPlanPr(ghJson, owner, repo, branch)",
+    "const remotePrExisted = Boolean(prUrl);",
+    "checkPrOwnership(prUrl, branch",
+    "const preflightOptions: RunRetroPrepublishPreflightOptions = {",
+    "gitPushRunBranch(worktreePath);",
+    "if (!prUrl) {\n      const prCreate",
+  ]);
+  assert.match(source, /workerProviders: \{ \.\.\.config\.workerProviders, enabled: \[worker\.provider\] \}/);
+  assert.match(source, /resumeSessionId: worker\.sessionId/);
+  assert.match(source, /repaired\.sessionId !== worker\.sessionId/);
+  assert.match(source, /repaired\.provider !== worker\.provider/);
+});
 
 test("the default runner captures a real subprocess exit and both output streams", async () => {
   const result = await runRetroPrepublishCommand(
