@@ -1,0 +1,54 @@
+- id: W1-T2707
+  title: "D-10 HAS BEEN UNANSWERABLE FOR SIX CYCLES FOR WANT OF ONE CALL SITE — every reader of `mutation.ratchet_verdict` is built and tested; `scripts/mutation-ratchet.mjs`, the only process holding a real Stryker report, never emits it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 12.00
+  files: [scripts/mutation-ratchet.mjs, test/mutation-gate-verdict-emission.test.ts]
+  origin: "operator-session#plan-review-2026-09-02"
+  plan_refs: ["W1-T393", "W1-T133"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED AT origin/main 2ff7d9a1, WITH A POSITIVE CONTROL. `grep -c 'ratchet_verdict'
+    scripts/mutation-ratchet.mjs` reads 0 while `grep -c 'mutation'` on the SAME file reads 84 — so the
+    zero is the query working, not the query failing. The symbol resolves in exactly two places in
+    src/: `ledger.ts` registers the step name and `retro.ts` exports MUTATION_GATE_VERDICT_STEP,
+    MutationGateVerdictInput and mutationGateVerdictLine. `replay.ts` and `cost-anomaly.ts` each read
+    it. `test/mutation-gate-lifetime.test.ts` calls the line builder four times. THE ENTIRE READER
+    SIDE IS BUILT, TESTED AND WIRED. Nothing writes.
+
+    THE CONSEQUENCE IS A DECISION THAT CANNOT BE TAKEN. MASTER-PLAN D-10 asks whether the mutation
+    gate has EVER caught a real escape, and its lifetime line has read `N=0 verdicts, NO POSITIVE
+    CONTROL` — in those words, never as "zero escapes" — for six consecutive retro cycles. D-10's own
+    text already names this the cleanest instance in the file of Rule 14's "the call site is a
+    deliverable", and states the disposition it is waiting to execute: the gate justifies itself with
+    data or has its scope cut into the nightly full-scope run (W1-T133). Six cycles of restatement
+    have cost more than the emission would.
+
+    WHY IT MUST BE EMITTED FROM THE SCRIPT AND NOWHERE ELSE. `mutation-ratchet.mjs` is the only
+    process that holds a parsed Stryker report: `parseMutationTotals` and `tallyMutants` compute the
+    totals in-process, and by the time CI has exited, the report is gone. A verdict reconstructed
+    later from logs would be a different claim with a different failure mode.
+
+    SCOPE DISCIPLINE — ONE REAL RUN ONLY. retro.ts's own comment on MUTATION_GATE_VERDICT_STEP fixes
+    the contract: "One line per REAL Stryker run (a diff-scoped skip never calls
+    mutationGateVerdictLine — there is no report to summarize)." A skip that emitted a line would
+    manufacture verdicts out of runs that scored nothing, which is the vacuous-pass family this repo
+    already refuses elsewhere. The falsifier must therefore run in BOTH directions: a real run emits
+    exactly one line carrying the conclusion clause and the totals, and a diff-scoped skip emits
+    NONE.
+
+    NOT A SCOPE WIDENING. This task does not answer D-10, rule on the gate, or touch W1-T133's
+    nightly split. It ships the emission so that the lifetime line has a population to report, and
+    leaves the judgement to the operator with data in front of them.
+  acceptance:
+    - claim: "a real Stryker run emits exactly one mutation.ratchet_verdict ledger line carrying the run's conclusion and its computed totals"
+      proof: "unit test: test/mutation-gate-verdict-emission.test.ts"
+    - claim: "a diff-scoped skip emits no verdict line at all, because it has no report to summarize"
+      proof: "unit test: test/mutation-gate-verdict-emission.test.ts"
+    - claim: "the emission is made from scripts/mutation-ratchet.mjs, the only process holding the parsed report"
+      proof: "grep: ratchet_verdict in scripts/mutation-ratchet.mjs"

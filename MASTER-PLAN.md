@@ -6015,7 +6015,7 @@ a second project on the harness; **WS-12 (site) is independent — separate repo
   with the PR gate staying the fast diff-only check.
 
 - **D-11 Instance topology — CELLS: one rmd instance per codebase; nothing mutable shared between
-  cells — OPEN, RECOMMENDED, awaiting operator ratification.** Promoted from the Banked queue's
+  cells — RATIFIED 2026-09-02 by the operator.** Promoted from the Banked queue's
   "Load/scale story: multiple products, one daemon vs. daemon-per-product" by the operator's
   architecture brief (oper#architecture-2026-08-11: same container or one per codebase, and
   remudero.com as the login-and-control surface). **THE RECOMMENDATION: daemon-per-product, where
@@ -6043,8 +6043,15 @@ a second project on the harness; **WS-12 (site) is independent — separate repo
   transport (Tier 3). **THE ARC**: W1-T429 (repo-scoped keys) → W1-T430 (identity seam, the §6A
   before-any-Pro-code obligation) → W1-T431 (outbound relay client, loopback-tested) → W1-T432
   (shared knowledge homes) → W1-T433 (wild-trails cell pilot, gated on ratifying THIS entry and
-  the operator's WS-2 deferral judgment). Per the P48 norm this is a recommendation — the
-  operator ratifies; the pilot dispatches nothing until then.
+  the operator's WS-2 deferral judgment). Per the P48 norm this WAS a recommendation until
+  2026-09-02, when the operator ratified it in session; the arc is now dispatchable and W1-T433's
+  pilot is no longer gated on this entry. **RATIFICATION RECORD:** ratified AS WRITTEN — cells,
+  accounts at the relay only, the instance dialing OUT, the relay a transparent proxy over the
+  §7A console contract — with NO amendment to the recommendation's text; everything above this
+  record is preserved verbatim as the reasoning that was ratified, never rewritten after the
+  fact. STILL OPEN, and NOT decided by this ratification: D-8's monetization shape, per-account
+  resource accounting (which is not merely a pricing question — it is what stops one account's
+  drain consuming another's ceiling), and which identity provider W1-T430's seam is pointed at.
 
 
 ## 12. Standing rules
