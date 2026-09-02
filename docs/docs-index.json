@@ -56,6 +56,12 @@
       "grepHint": "Worktree base provisioning — a read-only forensic pass (2026-09-02)"
     },
     {
+      "path": "docs/base-ref-contract.md",
+      "title": "Base-ref contract",
+      "summary": "BASE-REF CONTRACT: every diff base this repository's executable surface resolves is",
+      "grepHint": "Base-ref contract"
+    },
+    {
       "path": "docs/cli-reference.md",
       "title": "rmd CLI reference",
       "summary": "Every `rmd <command>` this binary dispatches, rendered from the same `COMMANDS` registry `rmd --help` and `rmd <cmd> --help` render from (W1-T47) -- this file…",
