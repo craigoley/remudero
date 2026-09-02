@@ -373,6 +373,9 @@ export const LEDGER_ROTATION_CEILING_BYTES = 4 * 1024 * 1024; // 4 MiB
  *                                              breaker's own escalation, for alerts instead.
  *   - "ratify.approved" / "ratify.reframed" → inbox.ts's isRatifiedInLedger and its
  *                                              reframe-once bookkeeping.
+ *   - "panel.proposal_declined"             → inbox.ts's declinedReasonInLedger (W1-T2604) —
+ *                                              the decline's own one-bit receipt, mirroring
+ *                                              "ratify.approved" immediately above.
  *   - "fix.dispatch" / "fix.review"         → run-task.ts's deriveStrikeHistory and the
  *                                              fix rung's own strike cap.
  *   - "fix.ci_not_green" / "fix.resolved"   → sweep.ts's fixRungStalledWithoutNewHead (W1-T1110)
@@ -609,6 +612,13 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "ops.feedback_reconciled",
   "ratify.approved",
   "ratify.reframed",
+  // W1-T2604: inbox.ts's `declinedReasonInLedger` (wrapped by `ReadinessContext.isDeclined`)
+  // reads this row to decide whether an operator has already declined a proposal — the
+  // decline's ONE authoritative receipt, mirroring `ratify.approved` immediately above.
+  // Rotating it away would un-decline a proposal: `classifyProposal` would go back to
+  // computing ready/not_ready/deferred/drafting from its ordinary predicates, silently
+  // re-offering the ratify affordance on something an operator already refused.
+  "panel.proposal_declined",
   "fix.dispatch",
   "fix.review",
   // W1-T1110: sweep.ts's `fixRungStalledWithoutNewHead` reads these two (alongside "fix.review"

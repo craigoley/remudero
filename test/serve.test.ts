@@ -1143,7 +1143,7 @@ test("GET /v1/inbox (assembled server): the W1-T110 ratification inbox's READY t
     // no state/inbox-proposals.json yet -> an empty registry, not an error (inbox.ts's own fail-soft convention).
     const res = await get(base, "/v1/inbox", READ_TOKEN);
     assert.equal(res.status, 200);
-    assert.deepEqual(await res.json(), { ready: [], drafting: [] });
+    assert.deepEqual(await res.json(), { ready: [], drafting: [], notReady: [] });
     assert.equal((await navigate(base, "/v1/inbox")).status, 401); // header-only, same discipline as every other panel route
   });
 });
