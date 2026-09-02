@@ -28684,7 +28684,7 @@ export async function runMountRecommenderRung(
   config: Config,
   runId: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
-  deps: { root?: string } = {},
+  deps: { root?: string; env?: NodeJS.ProcessEnv } = {},
 ): Promise<{ filed: number; refused: number }> {
   const root = deps.root ?? repoRoot;
   try {
@@ -28695,7 +28695,21 @@ export async function runMountRecommenderRung(
     const stateDir = join(config.root, "state");
     const sweep = buildMountHeadroomSweep(stateDir);
     const mounts = loadMounts(mountsPath(root));
-    const outcomes = recommendMounts(sweep.cells, mounts);
+    // Derive the objective from the SAME sanctioned environment boundary a real worker crosses:
+    // API only when config opts in AND the key is materially present; otherwise subscription.
+    // Only key names reach `billingMode`, and neither names nor values are retained below.
+    const materialWorkerEnv = buildWorkerEnv({}, deps.env ?? process.env, {
+      allowApiKey: config.overflow === "api_key",
+    });
+    const materialBillingMode = billingMode(Object.keys(materialWorkerEnv));
+    let objectiveFallbacks = 0;
+    const outcomes = recommendMounts(sweep.cells, mounts, {
+      billingMode: materialBillingMode,
+      warn: (message) => {
+        objectiveFallbacks++;
+        log("mount_recommendation.objective_fallback", { run_id: runId, detail: message.slice(0, 500) });
+      },
+    });
 
     const registryPath = join(config.root, "state", "inbox-proposals.json");
     let filed = 0;
@@ -28714,7 +28728,14 @@ export async function runMountRecommenderRung(
       });
     }
 
-    log("mount_recommendation.swept", { run_id: runId, filed, refused, cells: sweep.cells.length });
+    log("mount_recommendation.swept", {
+      run_id: runId,
+      filed,
+      refused,
+      cells: sweep.cells.length,
+      billing_mode: materialBillingMode,
+      objective_fallbacks: objectiveFallbacks,
+    });
     return { filed, refused };
   } catch (e) {
     log("mount_recommendation.error", { error: String((e as Error)?.message ?? e) });

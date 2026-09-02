@@ -299,6 +299,9 @@ export function computeClassSweep(runs) {
  *  field (nothing in this task adds one), so this script reads those three fields itself, off
  *  the same lines, rather than widening retro.ts to carry them. */
 const ARM_DONE_STEPS = new Set(["recon.done", "implement.done", "implement.resumed"]);
+const IMPLEMENTATION_DONE_STEPS = new Set(["implement.done", "implement.resumed"]);
+const WINDOW_REASON_CAP = 8;
+const WINDOW_REASON_LENGTH_CAP = 96;
 
 /**
  * provider / served_model / effort per run_id, read directly off the raw (pre-`gatherRuns`)
@@ -332,6 +335,80 @@ export function armFieldsByRunId(records) {
       effort: typeof r.effort === "string" ? r.effort : "unknown",
     });
     priorities.set(r.run_id, priority);
+  }
+  return out;
+}
+
+function fieldsFromDoneRow(r) {
+  return {
+    provider: typeof r.provider === "string" ? r.provider : "unknown",
+    servedModel:
+      typeof r.served_model === "string" ? r.served_model : r.served_model === null ? "unreported" : "unknown",
+    effort: typeof r.effort === "string" ? r.effort : "unknown",
+  };
+}
+
+function boundedWindowReason(value, fallback) {
+  if (typeof value !== "string" || value.length === 0) return fallback;
+  const safe = value.replace(/[^A-Za-z0-9 ._:@/-]/g, "_").slice(0, WINDOW_REASON_LENGTH_CAP);
+  return safe || fallback;
+}
+
+/**
+ * Reduce the material per-call `window_consumption` sensor into one record per run, but only for
+ * implementation calls — the worker a mounts-table change controls. Each call stays attached to
+ * the provider/model/effort on its OWN done row and must match the run's selected implementation
+ * arm. A mixed resume or cross-provider window is unreadable, never silently charged to the
+ * first row. Subtotals remain visible, but a caller may use them only when `unreadableCalls == 0`.
+ */
+export function windowEvidenceByRunId(records, armFields) {
+  const out = new Map();
+  for (const r of records) {
+    if (!r || typeof r !== "object" || typeof r.run_id !== "string" || !IMPLEMENTATION_DONE_STEPS.has(r.step)) continue;
+    const evidence = out.get(r.run_id) ?? {
+      eligibleCalls: 0,
+      measuredCalls: 0,
+      unreadableCalls: 0,
+      totalPercentConsumed: 0,
+      reasons: [],
+    };
+    evidence.eligibleCalls++;
+    const reason = (value, fallback) => {
+      evidence.unreadableCalls++;
+      const bounded = boundedWindowReason(value, fallback);
+      if (!evidence.reasons.includes(bounded) && evidence.reasons.length < WINDOW_REASON_CAP) evidence.reasons.push(bounded);
+    };
+    const selected = armFields.get(r.run_id);
+    const rowFields = fieldsFromDoneRow(r);
+    if (!selected || armKeyOf(selected) !== armKeyOf(rowFields)) {
+      reason(undefined, "mixed-implementation-arm");
+      out.set(r.run_id, evidence);
+      continue;
+    }
+    const window = r.window_consumption;
+    if (!window || typeof window !== "object") {
+      reason(undefined, "missing-window-consumption");
+      out.set(r.run_id, evidence);
+      continue;
+    }
+    if (typeof r.ts === "string" &&
+      (evidence.newestMeasurementTs === undefined || r.ts > evidence.newestMeasurementTs)) {
+      evidence.newestMeasurementTs = r.ts;
+    }
+    if (window.provider !== selected.provider) {
+      reason(undefined, "window-provider-mismatch");
+      out.set(r.run_id, evidence);
+      continue;
+    }
+    const percent = window.percent_consumed;
+    if (typeof percent !== "number" || !Number.isFinite(percent) || percent < 0) {
+      reason(window.reason, "invalid-percent-consumed");
+      out.set(r.run_id, evidence);
+      continue;
+    }
+    evidence.measuredCalls++;
+    evidence.totalPercentConsumed += percent;
+    out.set(r.run_id, evidence);
   }
   return out;
 }
@@ -428,7 +505,7 @@ export function compareArms(armA, armB) {
  * {@link compareArms} comparison, scoped structurally to that one cell's own arm list, so a
  * cross-cell comparison is never even attempted.
  */
-export function computeArmSweep(runs, armFields, newestTs) {
+export function computeArmSweep(runs, armFields, newestTs, windowEvidence = new Map()) {
   const redispatched = redispatchedRunIds(runs);
   const cellsByKey = new Map();
   for (const r of runs) {
@@ -466,6 +543,29 @@ export function computeArmSweep(runs, armFields, newestTs) {
       const redispatchedCount = settled.filter((r) => redispatched.has(r.runId)).length;
       const totalSettledCostUsd = round2(costs.reduce((s, c) => s + c, 0));
       const distinctSettledTasks = new Set(settled.map((r) => r.taskId)).size;
+      let eligibleCalls = 0;
+      let measuredCalls = 0;
+      let unreadableCalls = 0;
+      let totalPercentConsumed = 0;
+      let newestMeasurementTs;
+      const windowReasons = [];
+      for (const run of settled) {
+        const evidence = windowEvidence.get(run.runId);
+        if (!evidence) continue;
+        eligibleCalls += evidence.eligibleCalls;
+        measuredCalls += evidence.measuredCalls;
+        unreadableCalls += evidence.unreadableCalls;
+        totalPercentConsumed += evidence.totalPercentConsumed;
+        if (evidence.newestMeasurementTs &&
+          (newestMeasurementTs === undefined || evidence.newestMeasurementTs > newestMeasurementTs)) {
+          newestMeasurementTs = evidence.newestMeasurementTs;
+        }
+        for (const reason of evidence.reasons) {
+          if (!windowReasons.includes(reason) && windowReasons.length < WINDOW_REASON_CAP) windowReasons.push(reason);
+        }
+      }
+      if (eligibleCalls === 0) windowReasons.push("no-implementation-window-calls");
+      const completeWindowEvidence = eligibleCalls > 0 && measuredCalls === eligibleCalls && unreadableCalls === 0;
       arms.push({
         cellKey: cell.cellKey,
         armKey: arm.armKey,
@@ -486,6 +586,18 @@ export function computeArmSweep(runs, armFields, newestTs) {
         distinctSettledTasks,
         costPerCompletedTaskUsd:
           distinctSettledTasks === 0 ? null : round2(totalSettledCostUsd / distinctSettledTasks),
+        windowShare: {
+          provider: arm.provider,
+          percentConsumedPerCompletedTask:
+            completeWindowEvidence && distinctSettledTasks > 0 ? round2(totalPercentConsumed / distinctSettledTasks) : null,
+        },
+        windowEvidence: {
+          eligibleCalls,
+          measuredCalls,
+          unreadableCalls,
+          reasons: windowReasons,
+          ...(newestMeasurementTs ? { newestMeasurementTs } : {}),
+        },
         newestTs,
       });
     }
@@ -530,6 +642,7 @@ export function buildMountHeadroomSweep(stateDir, fsDeps = realMountHeadroomFs) 
   }
 
   const armFields = armFieldsByRunId(records);
+  const windowEvidence = windowEvidenceByRunId(records, armFields);
 
   return {
     corpus: {
@@ -546,7 +659,7 @@ export function buildMountHeadroomSweep(stateDir, fsDeps = realMountHeadroomFs) 
     classes: computeClassSweep(runs),
     // W1-T2574: (type x risk x class) cells, each carrying its own (provider x served_model x
     // effort) arms and every WITHIN-cell pairwise comparison — see this script's own header.
-    cells: computeArmSweep(runs, armFields, newestTs),
+    cells: computeArmSweep(runs, armFields, newestTs, windowEvidence),
   };
 }
 
@@ -599,7 +712,15 @@ export function renderMountHeadroomReport(report) {
           `n=${arm.n} (${arm.settledRuns}/${arm.totalRuns} settled/total) | cost p50/p90/max ($): ` +
           `${arm.costP50 ?? "-"}/${arm.costP90 ?? "-"}/${arm.costMax ?? "-"} | passing ${arm.outcomes.passing}, ` +
           `blocked_ci ${arm.outcomes.blockedCi}, re-dispatched ${arm.outcomes.redispatched} | ` +
-          `$/completed task ${arm.costPerCompletedTaskUsd ?? "-"} | newest row seen: ${arm.newestTs ?? "(none)"}`,
+          `$/completed task ${arm.costPerCompletedTaskUsd ?? "-"} | ` +
+          `window=${arm.windowShare.percentConsumedPerCompletedTask === null
+            ? "unreadable"
+            : `${arm.windowShare.percentConsumedPerCompletedTask}%`}/completed-task; ` +
+          `coverage=${arm.windowEvidence.measuredCalls}/${arm.windowEvidence.eligibleCalls}; ` +
+          `unreadable=${arm.windowEvidence.unreadableCalls}; ` +
+          `newest=${arm.windowEvidence.newestMeasurementTs ?? "(none)"}` +
+          `${arm.windowEvidence.reasons.length ? `; reasons=${arm.windowEvidence.reasons.join(",")}` : ""} | ` +
+          `newest row seen: ${arm.newestTs ?? "(none)"}`,
       );
     }
     if (cell.arms.length < 2) {
