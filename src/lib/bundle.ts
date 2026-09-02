@@ -12,7 +12,13 @@ import { buildPromptManifest, type PromptManifestPart } from "./prompt-manifest.
 import { validateWorkerSettings, WorkerSettingsError } from "./settings.js";
 
 /**
- * `rmd bundle export <path>` — THE MISSING EXPORT HALF (W1-T2580).
+ * `rmd bundle export <path>` — THE MISSING EXPORT HALF (W1-T2580). Acceptance is exercised in
+ * test/bundle-export.test.ts: round trip through the shipped importer + `verifyBundlePin`,
+ * determinism across two exports of the same tree, provenance surviving the round trip, the
+ * committed worker-settings template's deny-paths never surviving into a bundle, and the
+ * budget trimming an over-budget corpus instead of dumping it whole. The CLI wiring itself
+ * (`bundleCommand`/`bundleExportCommand`, run-task.ts) calls {@link buildBundle} directly —
+ * `grep buildBundle( src/run-task.ts` is the sixth acceptance proof.
  *
  * THE RULING CREATES THE CONSUMER (W1-T992): bring-your-own-subscription puts each customer on
  * their own VM improving their OWN repos. Every such VM boots a remudero that knows NOTHING,
