@@ -215,14 +215,23 @@ jobs:
           # T2514: this line now also names WHICH config(s) errored (stryker_failed_configs),
           # rather than only the step-level `stryker=failure` two issues shipped with neither
           # answering.
-          {
-            echo "failing step: install=${{ steps.install.outcome }} scope=${{ steps.scope.outcome }} stryker=${{ steps.stryker.outcome }} ratchet=${{ steps.ratchet.outcome }} stryker_failed_configs=${{ steps.stryker.outputs.failed_configs }}"
-            echo
-          } > nightly-notify.log
-          cat nightly-failure.log >> nightly-notify.log 2>/dev/null || echo "(no output captured -- the run failed before the mutation steps)" >> nightly-notify.log
+          # ⚠ THE DIAGNOSTIC RIDES THE ENVELOPE, NOT THE LOG. It used to be written to the TOP of
+          # --body-file, and needs-human-issue.mjs's truncateBody keeps the log's TAIL — so on any
+          # run whose log exceeded the 65536-char cap this line was the FIRST thing dropped.
+          # MEASURED on issue #3387: a 65,538-char body whose visible tail was all `ok` lines from a
+          # later passing config, with the failure and the failing config's name both trimmed away.
+          # `--preamble` sits above the <details> and survives any log size.
+          #
+          # `scope=` named a step id that has never existed (this job's step is `plan`), so that
+          # field rendered EMPTY in every delivery since it was written — including the two issues
+          # whose whole purpose was to say which step failed.
+          PREAMBLE="failing step: install=${{ steps.install.outcome }} plan=${{ steps.plan.outcome }} stryker=${{ steps.stryker.outcome }} ratchet=${{ steps.ratchet.outcome }}"
+          PREAMBLE="$PREAMBLE"$'\n'"stryker_failed_configs: ${{ steps.stryker.outputs.failed_configs }}"
+          cat nightly-failure.log > nightly-notify.log 2>/dev/null || echo "(no output captured -- the run failed before the mutation steps)" > nightly-notify.log
           node scripts/needs-human-issue.mjs \
             --source mutation-nightly \
             --title "mutation-nightly is failing" \
+            --preamble "$PREAMBLE" \
             --body-file nightly-notify.log
       - name: Upload the full Stryker JSON report (for a human ratchet-up decision)
         if: always()
