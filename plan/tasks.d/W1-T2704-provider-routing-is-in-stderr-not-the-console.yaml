@@ -1,0 +1,113 @@
+- id: W1-T2704
+  title: "PROVIDER ROUTING EXISTS ONLY IN WORKER STDERR — `worker.provider.selected` records Claude and Codex windows, the selected provider, concrete Codex model and effort, but no durable reader or console surface exists, so the operator cannot see which subscription has headroom or why routing stopped"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 55.00
+  files: [src/lib/provider-routing-status.ts, src/lib/worker.ts, src/run-task.ts, src/lib/serve.ts, test/provider-routing-console.test.ts]
+  origin: "operator-session#console-provider-routing-2026-09-02"
+  plan_refs: ["W1-T2572", "W1-T2573", "W1-T2577", "W1-T2592", "W1-T2434", "W1-T2660"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON MAIN AT e3a54bc0. `spawnWorker` is the only producer of
+    `worker.provider.selected`; it writes one JSON object to stderr after reading every enabled
+    provider's capacity and calling `selectWorkerProvider`. That object carries the selected
+    provider, tightest remaining percentage, each provider's readability and windows, and the
+    concrete Codex model and effort returned by the authenticated CLI. No reader exists in
+    src/lib/serve.ts, and the account strip at `GET /v1/account-usage` is deliberately
+    Anthropic-specific. A container log is therefore the only operator surface for a decision
+    that can stop all worker dispatch.
+
+    THE CONSOLE MUST NOT BECOME A SECOND PROVIDER CLIENT. The deployed console is a separate
+    `remudero-serve` container. It shares `config.root` state with the daemon but intentionally
+    receives neither the Codex credential home nor the durable provider configuration mount; its
+    Claude access is a separately constrained read-only account-usage projection. Mounting both
+    provider credentials into serve, or importing `readCodexCapacity` and
+    `readClaudeProviderCapacity` there, would erase that boundary and create two probes whose
+    caching, failures and routing views can disagree.
+
+    THE WORKER ALREADY OWNS THE AUTHORITATIVE OBSERVATION. Publish that one observation as a
+    bounded, versioned snapshot under `<config.root>/state`, which both containers already share,
+    and let serve remain a read-only projection. This is routing telemetry, not a new polling
+    loop: one fixed file is atomically replaced at daemon boot and when a worker makes a routing
+    decision, so it cannot grow the ledger or disk in proportion to refresh traffic.
+
+    MODEL INVENTORY IS RUNTIME DATA. Current OpenAI documentation distinguishes the concrete
+    GPT-5.6 Sol, Terra and Luna choices and their reasoning-effort tradeoffs, but availability is
+    account- and CLI-dependent. The console must display the concrete model and effort the
+    authenticated Codex capacity reader returned; it must not ship a hard-coded model catalog or
+    infer a model from a Claude mount alias. W1-T2572 and W1-T2573 remain the owners of durable
+    served-model attribution and the provider-neutral capability ladder respectively.
+
+    THIS TASK IS READ-ONLY. The withdrawn W1-T270 record concerned live multi-account switching
+    under an earlier one-account ruling. This task neither revives it nor adds provider controls:
+    parking a provider, changing reserve, or forcing a model changes dispatch policy and belongs
+    in a separate write-scoped, audited task after this truthful read surface exists.
+  design: |
+    Add a versioned `ProviderRoutingStatus` shape plus bounded atomic writer/reader in
+    src/lib/provider-routing-status.ts. Store exactly one
+    `<root>/state/provider-routing-status.json` using temp-file plus rename. Closed provider ids,
+    at most the enabled Claude/Codex rows, bounded window/detail/account-label/model/effort strings,
+    and no command, path, environment value, token, auth payload or raw CLI response may cross the
+    projection boundary. An absent or malformed file returns an explicit `unknown` result with a
+    reason; it never becomes zero usage or healthy.
+
+    On a real daemon start, after `--dry-run` has returned and after the single-instance drain lock
+    is acquired, write a boot snapshot containing enabled providers, configured reserve and
+    `state: not-probed`. A refused second daemon and a dry run write nothing, so neither can replace
+    the live daemon's last decision. Do not add filesystem work to `daemonBoot`, which remains the
+    fs-free policy core.
+
+    At the existing multi-provider seam in `spawnWorker`, write the capacities and decision that
+    were already read. A successful decision records the selected provider, concrete model,
+    effort, tightest remaining percentage and observation time. If every provider is unreadable
+    or below reserve, write a `blocked` snapshot before rethrowing the selector's existing error,
+    preserving that error and dispatch behavior exactly. Snapshot-write failure is telemetry-only:
+    it may produce one bounded diagnostic but must never change the selected provider, fail a
+    worker or turn a blocked decision into success. Keep the single-Claude spawn path unchanged
+    except for the daemon boot snapshot; do not add a second Claude capacity probe to it.
+
+    Capacity values describe the last routing observation, not an evergreen subscription reading.
+    Carry `observed_at` and the capacity cache validity used for the decision. The console labels
+    an expired observation `stale last decision`, retains its historical values, and never calls it
+    current headroom. A boot-only snapshot renders `not probed`; an unreadable provider renders its
+    refusal/detail rather than 0% used.
+
+    Add read-scoped `GET /v1/provider-routing`, rooted at the existing `fleetControlRoot`, and a
+    compact Provider routing panel beside the account/daemon surfaces. Render enabled providers,
+    reserve, each readable window's used percentage and reset, unreadable reason, last selected
+    provider/model/effort, blocked reason, as-of and staleness. Wire the real route and exercise the
+    rendered panel deterministically. Serve must not import or call either provider capacity
+    reader, and deploy/host-update.sh must gain no console credential/config mount.
+  acceptance:
+    - claim: "a real daemon writes a not-probed provider snapshot only after acquiring the single-instance lock; dry-run and refused-second-daemon paths do not replace it"
+      proof: "unit test: test/provider-routing-console.test.ts"
+    - claim: "a successful multi-provider selection atomically publishes the exact capacities, selected provider, concrete Codex model and effort already used by the worker"
+      proof: "unit test: test/provider-routing-console.test.ts"
+    - claim: "an all-providers-blocked selection publishes the refusal before preserving and throwing the selector's original error"
+      proof: "unit test: test/provider-routing-console.test.ts"
+    - claim: "snapshot failure never changes routing or worker outcome, and the legacy single-Claude spawn path performs no new capacity probe"
+      proof: "unit test: test/provider-routing-console.test.ts"
+    - claim: "the fixed snapshot is bounded and redacted, and absent, malformed, unreadable, not-probed and stale states never render as zero or healthy"
+      proof: "unit test: test/provider-routing-console.test.ts"
+    - claim: "the real read-scoped route and console panel render provider windows, reset, reserve, selected model/effort, refusal and as-of from `fleetControlRoot`"
+      proof: "unit test: test/provider-routing-console.test.ts"
+    - claim: "the production console calls the shared provider-routing snapshot reader rather than leaving the new module reachable only from tests"
+      proof: "unit test: test/provider-routing-console.test.ts"
+    - claim: "the console neither invokes provider capacity readers nor receives new provider credential or durable-config mounts"
+      proof: "structural assertion: test/provider-routing-console.test.ts"
+  falsifier: |
+    Close without implementation if current main has a bounded durable provider-routing state
+    under the shared fleet root and the real console renders both providers' last capacity
+    observation, selected concrete model/effort, refusal, as-of and staleness. Transient stderr,
+    after-call ledger attribution, or the Anthropic-only account strip does not falsify the task.
+  note: |
+    W1-T2704 was atomically reserved at `refs/rmd-id/W1-T2704` before this file was written.
+    `risk: high`, `band_meaning: span` is Rule 19's classification for the worker, daemon-command
+    wiring and serve subsystems. Runtime blast radius stays read-only telemetry; provider-policy
+    controls are deliberately excluded.
