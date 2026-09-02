@@ -1,0 +1,77 @@
+- id: W1-T2693
+  title: "the orphan sweep is machine-wide but its liveness proof is root-local, so a real daemonCommand test or a second rmd installation can classify another installation's live worker as ended and SIGKILL it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: "span"
+  budget_usd: 12.00
+  files: [src/lib/worker-containment.ts, src/lib/worker.ts, src/lib/worker-provider.ts, src/run-task.ts, test/daemon.test.ts, test/orphan-sweep-instance-scope.test.ts]
+  origin: "operator-brief#self-watch-pr-queue-overnight-2026-09-02"
+  plan_refs: ["W1-T117", "W1-T356", "W1-T2407"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON AZURE 2026-09-02, NOT INFERRED FROM A RED CHECK. Seven sweep fix workers across
+    PRs #3608, #3613 and #3619 terminated by SIGKILL between 10:53:33Z and 11:00:16Z. Two pairs
+    died within 108ms of one another. The daemon container did not restart, its cgroup recorded
+    zero oom/oom_kill events, the kernel journal recorded no OOM kill, and systemd-oomd was
+    inactive. Neither the 559-second sweep bound nor the 3,600-second fix-spawn bound had elapsed.
+
+    THE CROSS-ROOT KILL CAPABILITY IS DIRECTLY OBSERVED IN SOURCE. `defaultListCandidates` walks
+    the machine process table. `sweepOrphanWorkers` authorizes SIGKILL from only a run/task marker
+    plus `isRunActive`. `daemonCommand` binds that liveness read to its own `config.root` inflight
+    directory. The W1-T356 test then invokes that real command with a temporary root and the real
+    list/read/kill primitives. A production worker from another root is therefore visible and
+    attributable but necessarily absent from the test root's inflight directory.
+
+    THE TIMING CORRELATION IS STRONG BUT THE HISTORICAL SENDER IS NOT CLAIMED AS FACT. While all
+    seven deaths occurred, a host-side `npm run test:ci` emitted its CLI fixtures into the shared
+    production ledger. That test process ran in a user-session cgroup while the daemon ran in a
+    Docker cgroup, proving two execution scopes shared one host process table. Linux retained no
+    signal-sender audit record, and deliberately reproducing the kill against a live worker would
+    be destructive. The historical sender therefore remains HYPOTHESIS; the unsafe capability is
+    sufficient to require removal.
+
+    REMEDY: ADD INSTALLATION SCOPE TO ATTRIBUTION, NOT ANOTHER FILE LOCK. Derive one opaque,
+    deterministic scope id from the configured root through a shared function. Claude and Codex
+    workers carry it beside run/task. The production orphan sweep supplies its own expected scope
+    and may signal only an exact match. A missing or foreign scope is reported and left alive.
+    Same-scope ended workers still die; same-scope active workers still stand down. Existing
+    callers that omit expected scope retain their current pure/test behavior, while every real
+    daemon supplies it.
+
+    THIS IS ALSO THE MULTI-INSTALLATION CONTRACT. A machine can run a host checkout, one or more
+    containers, CI fixtures and operator sessions concurrently. PID visibility is not ownership.
+    Root-scoped capability makes cleanup composable across those installations and preserves
+    provider parity: enabling Codex must not create workers the Claude-era reaper cannot safely
+    attribute.
+  acceptance:
+    - claim: "one shared pure function derives a stable opaque worker scope from the configured root, and different roots produce different scopes"
+      proof: "unit test: test/orphan-sweep-instance-scope.test.ts"
+    - claim: "both Claude and Codex child environments carry the same scope marker contract beside run and task attribution"
+      proof: "unit test: test/orphan-sweep-instance-scope.test.ts"
+    - claim: "a sweep with expected scope B leaves a live or ended candidate from scope A untouched and reports the scope mismatch"
+      proof: "unit test: test/orphan-sweep-instance-scope.test.ts"
+    - claim: "a same-scope ended candidate reaches the injected termination and ledger sinks, while a same-scope active candidate reaches neither sink"
+      proof: "unit test: test/orphan-sweep-instance-scope.test.ts"
+    - claim: "daemonCommand supplies the scope derived from its own config root to both boot-time and per-poll orphan sweeps"
+      proof: "unit test: test/orphan-sweep-instance-scope.test.ts"
+    - claim: "the existing real W1-T356 daemonCommand fixture marks its own stray with the fixture root scope and cannot kill a foreign-scope control process"
+      proof: "unit test: test/daemon.test.ts"
+    - claim: "production still invokes the real process table and signal primitives; the remedy narrows authorization rather than replacing the I/O with fakes"
+      proof: "grep: defaultListCandidates in src/run-task.ts"
+  falsifier: |
+    Spawn two real throwaway process groups carrying valid run/task markers but scopes derived from
+    different temporary roots. Invoke the real daemonCommand wiring for one root with both visible.
+    If it signals the foreign-scope group, installation isolation is false. If it fails to signal
+    the same-scope ended group, the remedy disabled orphan cleanup rather than scoping it. The
+    foreign group is unconditionally cleaned up by the test after the assertion; no production
+    worker is used as a fixture.
+  note: |
+    This does not start, stop, restart, deploy or reconfigure the daemon. It does not alter review,
+    merge, headroom or provider-selection policy. W1-T2407 remains the owner of test-fixture lock
+    coverage and diagnostics; this task owns the missing production authorization dimension that
+    a lock between test files cannot supply.
