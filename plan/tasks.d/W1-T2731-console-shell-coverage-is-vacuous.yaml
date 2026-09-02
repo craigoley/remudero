@@ -1,0 +1,60 @@
+- id: W1-T2731
+  title: "70% OF serve.ts IS CREDITED AS COVERED BY ONE FUNCTION CALL — renderShellHtml returns a 4860-line template literal, every line of it scores hits the moment the function runs, and `diff-coverage` therefore cannot flag ANY change to the console shell"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 20.00
+  files: [src/lib/serve.ts, src/lib/console-shell-script.ts, test/console-shell-coverage-is-vacuous.test.ts]
+  origin: "operator-session#plan-review-2026-09-02"
+  plan_refs: ["W1-T153", "W1-T2489"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED AT origin/main 4d631f4c, WITH THE COVERAGE INSTRUMENT ITSELF. `renderShellHtml`
+    (src/lib/serve.ts) is 4860 of the file's 6853 lines — 70% — and it is ONE `return` of ONE
+    template literal. Running two console suites under --experimental-test-coverage and reading the
+    lcov for src/lib/serve.ts:
+
+      DA records inside the template (L600-L5459): 4860
+      of those with ZERO hits:                        0
+      4838 lines read exactly hits=4                     <- the call count, not execution
+      DA records elsewhere in serve.ts:            1992
+      of those with ZERO hits:                      915   <- honest coverage, for comparison
+
+    Every line of the template is credited the instant the function is called. The 915 genuinely
+    uncovered lines in the same file prove the instrument is working; the contrast is the finding.
+
+    THE GATE THIS DISARMS IS THE ONE THAT BLOCKS ON A SINGLE LINE. `diff-coverage` refuses a PR
+    that "adds source line(s) with zero covering tests" — it caught exactly one line in
+    scripts/mutation-ratchet.mjs earlier today. It can NEVER fire inside renderShellHtml, because
+    no added line there can score zero. This is the vacuous-pass family CLAUDE.md already names:
+    a gate reporting OK over a set where failure is unreachable.
+
+    WHAT IS NOT WRONG, MEASURED BEFORE ASSUMING. The client code is NOT untested: about 14 suites
+    extract the script with /<script\b[^>]*>([\s\S]*?)<\/script>/ and evaluate it, and 36 test
+    files carry DOM capability. The defect is not absent tests. It is that the coverage instrument
+    cannot tell an exercised line in that region from an unexercised one, so nothing enforces that
+    those suites keep pace with the shell — and the harness itself is coupled to the template's
+    textual shape rather than to a module boundary.
+
+    THE CEILING IS THE DEADLINE, NOT THE REASON. serve.ts is 6852 lines against a recorded
+    source-size ceiling of 7000 — 148 lines of headroom, and it grew this session (#3711). The
+    next console feature trips that gate. Raising the baseline would buy silence and leave the
+    coverage blindness intact; that is the same move as reaching for risk:high to pass sizing.
+
+    THE PRECEDENT IS ESTABLISHED, NOT INVENTED. Nine modules totalling ~7150 lines have already
+    been extracted from serve.ts — status-board.ts (2927), panel-graph.ts (1740),
+    panel-actions.ts (1077), specialist-panel.ts (504), console-url.ts (236),
+    idle-reasons-panel.ts (203), panel-skill-run.ts (278), console-freshness.ts (111),
+    panel-skills.ts (73). This continues that pattern with the largest remaining unit.
+  acceptance:
+    - claim: "the console shell's client code executes from a real module rather than a script block a test regex must first cut out of a template literal"
+      proof: "unit test: test/console-shell-coverage-is-vacuous.test.ts"
+    - claim: "a line of shell client code that no test exercises reads ZERO hits in lcov, where today every template line is credited by the call alone"
+      proof: "unit test: test/console-shell-coverage-is-vacuous.test.ts"
+    - claim: "serve.ts renders the shell by CALLING the extracted module, so the extraction is wired rather than a second copy left beside a still-inline original"
+      proof: "grep: renderConsoleShellScript( in src/lib/serve.ts"
