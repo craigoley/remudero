@@ -5,6 +5,7 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { detectUsageLimitRefusal, type UsageLimitRefusal } from "./classify.js";
 import type { UsageSnapshot } from "./headroom.js";
 import type { Config, WorkerProviderId } from "./config.js";
+import { loadMounts, mountsPath, type CapabilityLadder } from "./mounts.js";
 import {
   spawnDetachedGroup,
   teardownProcessGroup,
@@ -198,7 +199,14 @@ interface CodexModelListResult {
 
 type CodexModelTier = "economy" | "balanced" | "frontier";
 
-const DEFAULT_CODEX_MODELS: Record<CodexModelTier, string[]> = {
+/**
+ * Last-resort Codex candidates (W1-T2573), used ONLY when `.remudero/mounts.yaml`'s
+ * `capabilities` axis is unavailable — the routing table failed to load, or a caller (e.g. a
+ * unit test) omitted it. Real routing always resolves through {@link CapabilityLadder.codex}
+ * (mounts.ts); this is a documented degenerate fallback, not the primary source of truth, so a
+ * missing routing table degrades no further than it always has rather than blocking dispatch.
+ */
+const FALLBACK_CODEX_MODELS: Record<CodexModelTier, string[]> = {
   economy: ["gpt-5.6-luna", "gpt-5.3-codex-spark", "gpt-5.4-mini"],
   balanced: ["gpt-5.6-terra", "gpt-5.5", "gpt-5.4"],
   frontier: ["gpt-5.6-sol", "gpt-5.5"],
@@ -208,11 +216,46 @@ function normalizedModelName(value: unknown): string {
   return typeof value === "string" ? value.toLowerCase().replace(/[^a-z0-9]/g, "") : "";
 }
 
-function codexTierForRequestedModel(requestedModel: string | undefined): CodexModelTier {
+function isCodexModelTier(value: unknown): value is CodexModelTier {
+  return value === "economy" || value === "balanced" || value === "frontier";
+}
+
+/**
+ * Resolve the requested Claude model's capability (W1-T2573): a TABLE LOOKUP against
+ * `.remudero/mounts.yaml`'s `capabilities.claude` map (src/lib/mounts.ts), never a substring
+ * match on the model name. A model with no declared capability — or no capability data at all —
+ * resolves to "balanced", the SAME degenerate default the old substring function fell through to
+ * for "everything else"; here it is an explicit, documented fallback rather than the silent
+ * result of an `.includes()` miss, and any model this table DOES declare (including one whose
+ * name carries neither "haiku" nor "opus") resolves correctly regardless of its spelling.
+ */
+export function codexCapabilityForRequestedModel(
+  capabilities: CapabilityLadder | undefined,
+  requestedModel: string | undefined,
+): CodexModelTier {
   const model = requestedModel?.toLowerCase() ?? "";
-  if (model.includes("haiku")) return "economy";
-  if (model.includes("opus")) return "frontier";
-  return "balanced";
+  const capability = capabilities?.claude[model];
+  return isCodexModelTier(capability) ? capability : "balanced";
+}
+
+/**
+ * Resolve the ordered Codex candidate models for a (capability, effort) pair — the table lookup
+ * that replaces the old tier function's dropped-effort selection (W1-T2573, rationale point 2).
+ * `requestedEffort` now genuinely changes which candidates are preferred: whenever the table
+ * declares different rows for two efforts under the same capability, a `sonnet/high` mount and a
+ * `sonnet/medium` mount resolve DIFFERENT candidate lists — they are not the same Codex request.
+ * An effort the table has no row for falls back to "medium"; capability data unavailable at all
+ * falls back to {@link FALLBACK_CODEX_MODELS}.
+ */
+export function codexCandidatesForCapability(
+  capabilities: CapabilityLadder | undefined,
+  tier: CodexModelTier,
+  requestedEffort: string | undefined,
+): string[] {
+  const byEffort = capabilities?.codex[tier];
+  if (!byEffort) return FALLBACK_CODEX_MODELS[tier];
+  const row = (requestedEffort && byEffort[requestedEffort]) || byEffort.medium;
+  return row ?? FALLBACK_CODEX_MODELS[tier];
 }
 
 function codexBucketForModel(result: CodexRateLimitResult, model: CodexModelInfo): CodexRateLimitBucket | undefined {
@@ -253,6 +296,14 @@ export function codexCapacityFromRateLimits(result: unknown): ProviderCapacity {
 /**
  * Pick an account-visible model for the requested Remudero mount and attach only
  * that model's quota bucket. Independent model buckets must not veto each other.
+ *
+ * `capabilities` (W1-T2573) is the `.remudero/mounts.yaml` capability ladder — see
+ * {@link codexCapabilityForRequestedModel} / {@link codexCandidatesForCapability}. It resolves
+ * BOTH the capability tier (a table lookup on the Claude model name, never a substring match)
+ * and, keyed also on `requestedEffort`, the ordered default candidates for that tier — so effort
+ * now genuinely reaches the candidate pool instead of being dropped at the provider boundary. An
+ * operator's `workerProviders.codexModels` override, when present, still wins outright per tier
+ * (unchanged — it is not effort-keyed) exactly as it did before this axis existed.
  */
 export function selectCodexModel(
   models: CodexModelInfo[],
@@ -260,14 +311,15 @@ export function selectCodexModel(
   config: Config,
   requestedModel?: string,
   requestedEffort?: string,
+  capabilities?: CapabilityLadder,
 ): ProviderCapacity {
   const reading = rateLimits && typeof rateLimits === "object" ? rateLimits as CodexRateLimitResult : {};
   const visible = models.filter((model) => !model.hidden && typeof model.id === "string" && model.id !== "");
   const forced = config.workerProviders?.codexModel;
-  const tier = codexTierForRequestedModel(requestedModel);
+  const tier = codexCapabilityForRequestedModel(capabilities, requestedModel);
   const preferred = forced
     ? [forced]
-    : [...(config.workerProviders?.codexModels?.[tier] ?? DEFAULT_CODEX_MODELS[tier])];
+    : [...(config.workerProviders?.codexModels?.[tier] ?? codexCandidatesForCapability(capabilities, tier, requestedEffort))];
   const accountDefault = visible.find((model) => model.isDefault)?.id;
   if (!forced && accountDefault) preferred.push(accountDefault);
   const candidates = [...new Set(preferred)]
@@ -313,6 +365,30 @@ export interface CodexCapacityDeps {
   requestedEffort?: string;
   /** Process environment used only for PATH resolution of an unconfigured Codex binary. */
   resolveEnv?: NodeJS.ProcessEnv;
+  /**
+   * Injected capability ladder (W1-T2573), bypassing the `loadMounts` disk read below — for a
+   * caller that already holds a validated Mounts table, and for tests. When omitted,
+   * `readCodexCapacity` loads `.remudero/mounts.yaml` itself via `config.root`.
+   */
+  capabilities?: CapabilityLadder;
+}
+
+/**
+ * Resolve the capability ladder `readCodexCapacity` routes through (W1-T2573): the caller's
+ * injected `deps.capabilities` when supplied, else `.remudero/mounts.yaml`'s own `capabilities`
+ * block via `config.root`. A missing/malformed routing table degrades to `undefined` — the same
+ * documented fallback {@link codexCapabilityForRequestedModel} / {@link codexCandidatesForCapability}
+ * already define — rather than blocking a capacity read on a routing-table hiccup.
+ */
+function resolveCapabilityLadder(config: Config, deps: CodexCapacityDeps): CapabilityLadder | undefined {
+  if (deps.capabilities) return deps.capabilities;
+  try {
+    return loadMounts(mountsPath(config.root)).capabilities;
+  } catch (error) {
+    // Deliberate compatibility fallback: a missing/malformed optional table preserves the
+    // pre-capability balanced routing path; callers already treat `undefined` as that state.
+    return undefined;
+  }
 }
 
 interface CodexRuntimeReading {
@@ -365,12 +441,13 @@ export async function readCodexCapacity(config: Config, deps: CodexCapacityDeps 
     // Toolchain absence is a named unreadable capacity, so routing can still use Claude.
     return { provider: "codex", readable: false, windows: [], detail: (error as Error).message };
   }
+  const capabilities = resolveCapabilityLadder(config, deps);
   const now = deps.now ?? Date.now;
   const cacheKey = `${bin}\0${codexHome(config)}`;
   const cached = codexCapacityCache.get(cacheKey);
   const cacheMs = config.workerProviders?.capacityCacheMs ?? 60_000;
   if (cached && now() - cached.at < cacheMs) {
-    return selectCodexModel(cached.value.models, cached.value.rateLimits, config, deps.requestedModel, deps.requestedEffort);
+    return selectCodexModel(cached.value.models, cached.value.rateLimits, config, deps.requestedModel, deps.requestedEffort, capabilities);
   }
 
   const spawn = deps.spawn ?? ((command, args, options) => spawnChild(command, args, { ...options, stdio: ["pipe", "pipe", "pipe"] }));
@@ -453,7 +530,7 @@ export async function readCodexCapacity(config: Config, deps: CodexCapacityDeps 
   });
   if ("provider" in value) return value;
   codexCapacityCache.set(cacheKey, { at: now(), value });
-  return selectCodexModel(value.models, value.rateLimits, config, deps.requestedModel, deps.requestedEffort);
+  return selectCodexModel(value.models, value.rateLimits, config, deps.requestedModel, deps.requestedEffort, capabilities);
 }
 
 interface CodexJsonEvent {
