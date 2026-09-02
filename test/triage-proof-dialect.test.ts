@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { writeMutantModule } from "./helpers/mutant-module.js";
+import { mutateTriageProofSource } from "./helpers/triage-proof-needle.js";
 import {
   COMMIT_BODY_MAX_LINE,
   acceptanceCriterionLines,
@@ -231,6 +232,13 @@ test("W1-T963: the triage proof fails at base and passes at head", () => {
 // pattern becomes the bare, always-present `status:` and matches the base fixture too. A REAL
 // child `node --test` process, narrowed to ONLY the test above by name, must then FAIL: the
 // base-side "must FAIL at the merge base" assertion observes a match it should not.
+//
+// W1-T2587: the needle is `TRIAGE_PROOF_NEEDLE` — the template-literal EXPRESSION alone, not the
+// full `return ...;` STATEMENT — because inside Stryker's mutation sandbox `src/lib/triage.ts` is
+// instrumented and the statement's exact text is gone even though the expression's own text is
+// not. See `test/helpers/triage-proof-needle.ts` and
+// `test/a-hand-rolled-mutation-test-collides-with-the-real-harness.test.ts` for the mechanism and
+// the proof that this survives an instrumented copy.
 test("W1-T963: removing the discrimination makes the proof match the BASE too", async () => {
   const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
   const triageTsPath = join(repoRoot, "src", "lib", "triage.ts");
@@ -239,15 +247,12 @@ test("W1-T963: removing the discrimination makes the proof match the BASE too", 
   const original = readFileSync(triageTsPath, "utf8");
   const originalSha = sha256(original);
 
-  const needle = "  return `grep: status: ${status} in ${feedbackEntryRepoPath(feedbackId)}`;\n";
+  const { matchCount, mutated } = mutateTriageProofSource(original);
   assert.equal(
-    original.split(needle).length - 1,
+    matchCount,
     1,
-    "sanity: triageAcceptanceProof's return line must appear EXACTLY once, or this mutation is not targeting the real emitter",
-  );
-  const mutated = original.replace(
-    needle,
-    "  return `grep: status: in ${feedbackEntryRepoPath(feedbackId)}`; // W1-T963 MUTATION: destination-state interpolation removed\n",
+    "sanity: triageAcceptanceProof's discriminating template literal must appear EXACTLY once, or " +
+      "this mutation is not targeting the real emitter (W1-T2587: must hold on an instrumented copy too)",
   );
   assert.notEqual(sha256(mutated), originalSha, "the mutation must actually change the bytes it is applied to");
 
