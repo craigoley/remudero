@@ -541,8 +541,8 @@ export function selectCodexModel(
     const option = options.find((candidate) => candidate.id === canonicalCodexModelId(model));
     const capacity = capacityFromBucket(codexBucketForModel(reading, model));
     return { model, capacity, option, preference, remaining: tightestRemaining(capacity) };
-  }).filter((candidate) => candidate.option?.eligible)
-    .sort((a, b) => b.remaining - a.remaining || a.preference - b.preference);
+  }).sort((a, b) => b.remaining - a.remaining || a.preference - b.preference);
+  const eligible = ranked.filter((candidate) => candidate.option?.eligible);
   const scopedPreference = policy.preferredModel &&
     policy.preferredModel.capability === tier &&
     policy.preferredModel.effort === requestedEffortLabel
@@ -550,13 +550,13 @@ export function selectCodexModel(
       : undefined;
   let preferenceBypass: CodexModelPreferenceBypassReason | undefined;
   let selected = scopedPreference
-    ? ranked.find((candidate) => candidate.option?.id === scopedPreference.model)
+    ? eligible.find((candidate) => candidate.option?.id === scopedPreference.model)
     : undefined;
   if (scopedPreference && !selected) {
     const preferredOption = options.find((option) => option.id === scopedPreference.model);
     preferenceBypass = preferredOption?.reason ?? "not-visible";
   }
-  selected ??= ranked[0];
+  selected ??= eligible[0];
   const decisionBase: CodexModelDecision = {
     requestedCapability: tier,
     requestedEffort: requestedEffortLabel,
@@ -566,6 +566,24 @@ export function selectCodexModel(
     ...(preferenceBypass ? { preferenceBypass } : {}),
   };
   if (!selected) {
+    // Preserve W1-T2573's fail-closed attribution contract: when mapped models are visible but
+    // their quota cannot authorize dispatch, return the first ranked concrete model alongside
+    // `readable:false`. The provider selector still refuses Codex (there is no proved headroom),
+    // while callers that explain the capability mapping do not lose which candidate the table
+    // resolved to. It is deliberately NOT marked selected in `modelDecision`: no worker can run.
+    const fallback = ranked[0];
+    if (fallback) {
+      const fallbackEfforts = fallback.option?.supportedEfforts ?? [];
+      const fallbackEffort = requestedEffort ?? fallback.model.defaultReasoningEffort ?? fallbackEfforts[0] ?? "default";
+      return {
+        ...fallback.capacity,
+        readable: false,
+        detail: `${tier} Codex models have no reserved headroom`,
+        model: canonicalCodexModelId(fallback.model),
+        effort: fallbackEffort,
+        modelDecision: decisionBase,
+      };
+    }
     return {
       provider: "codex",
       readable: false,
