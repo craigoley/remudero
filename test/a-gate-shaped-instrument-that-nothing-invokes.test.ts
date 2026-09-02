@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { parse as parseYaml } from "yaml";
 
@@ -338,16 +338,25 @@ test("W1-T2735: a stale row alone makes the check exit non-zero and name the row
 
 // ── criterion 6: it wires itself ─────────────────────────────────────────────────────────────
 
-test("W1-T2735: the check is itself invoked by an npm script AND a ci.yml run step", () => {
+test("W1-T2735: the check is itself invoked by an npm script AND a workflow run step", () => {
   const pkg = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")) as { scripts: Record<string, string> };
   const npmEntry = Object.entries(pkg.scripts).find(([, v]) => v.includes("scripts/unwired-gate-check.mjs"));
   assert.ok(npmEntry, "package.json must carry an npm script that runs the check");
 
-  const ci = parseYaml(readFileSync(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8")) as unknown;
-  const executing = mod.collectExecutingStrings(ci);
+  // Scanned across EVERY workflow file, not `ci.yml` alone: a new ci.yml job needs a
+  // CI_PARITY_TABLE entry that is refused in every ordering (before the job and after it by
+  // test/preflight-ci-parity.test.ts's two directions, with it by Rule 25), so this gate lives in
+  // its own file -- and an assertion naming one workflow would have to be rewritten for the next
+  // gate that does the same.
+  const wfDir = join(REPO_ROOT, ".github", "workflows");
+  const executing: string[] = [];
+  for (const name of readdirSync(wfDir)) {
+    if (!/\.ya?ml$/.test(name)) continue;
+    executing.push(...mod.collectExecutingStrings(parseYaml(readFileSync(join(wfDir, name), "utf8"))));
+  }
   assert.ok(
     executing.some((s) => s.includes(npmEntry![0]) || s.includes("scripts/unwired-gate-check.mjs")),
-    "ci.yml must RUN it -- a comment naming it is exactly the shape this guard refuses",
+    "a workflow must RUN it -- a comment naming it is exactly the shape this guard refuses",
   );
 });
 
