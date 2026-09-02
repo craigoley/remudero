@@ -1,0 +1,92 @@
+- id: W1-T2725
+  title: "THE HOST RECLAIMS DISK ONLY WHEN AN OPERATOR REMEMBERS TO — host-update.sh's own header says the disk fills `on a schedule nobody sets`, then makes itself unschedulable by refusing whenever a fleet container is running, and `rmd` cannot substitute because the daemon container has no docker binary and no socket"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 10.00
+  files:
+    - deploy/host-update.sh
+    - test/a-disk-reclaim-that-refuses-while-the-fleet-is-up-can-never-be-scheduled.test.ts
+  origin: "operator-session#prune-and-automate-2026-09-02"
+  plan_refs: ["W1-T2568", "W1-T496"]
+  status: queued
+  attempts: 0
+  note: |
+    BAND. `risk: high` with `band_meaning: blast-radius` is about WHAT THE CHANGE CAN DESTROY, not
+    its size: the diff is one flag, and the flag governs `docker` commands that remove things. The
+    ONE command that can destroy work — `docker container prune` — is deliberately excluded from
+    the new mode, and the exclusion is the design rather than an omission.
+  rationale: |
+    MEASURED ON THE AZURE HOST, 2026-09-02. `/mnt/rmd` stood at 44G used with six images: three
+    superseded ACR tags at 3.43GB each, a `remudero-codex-connector` tag, a `node:22-bookworm-slim`
+    base, and the two actually in use. A manual `docker image prune -a -f` reclaimed 5.775GB and
+    took the volume to 25G used / 95G free.
+
+    THE SCRIPT ALREADY KNOWS HOW, AND ALREADY SAYS WHY THAT IS NOT ENOUGH. `deploy/host-update.sh`
+    reclaims correctly and its header states the problem verbatim: every ACR build produces a new
+    image, the old ones are never removed, and "that will recur on a schedule nobody sets".
+
+    AND IT CANNOT BE SCHEDULED AS IT STANDS, for two independent reasons:
+      1. Section 1 REFUSES whenever a fleet container is running. On a timer that is always, so a
+         cron entry pointed at it would refuse every night and reclaim nothing.
+      2. It PULLS and RESTARTS after reclaiming. Unattended that is a redeploy on a cadence, which
+         restarts the daemon mid-run with no operator watching.
+
+    ⚠ AND `rmd` CANNOT DO IT FROM INSIDE, which is why this lives in a deploy script rather than in
+    the daemon's own housekeeping. VERIFIED on this host: the daemon container has NO docker binary
+    and NO /var/run/docker.sock. That is deliberate — W1-T2568 chose a shared-mount notification
+    transport specifically to avoid needing a socket — so image reclaim is structurally host-side.
+
+    WHY THE REFUSAL IS RIGHT AND MUST SURVIVE. It protects against `docker container prune`, which
+    removes STOPPED containers; an ad-hoc worker that has exited is indistinguishable from junk from
+    outside, and removing it discards work. The refusal is not the defect. The defect is that the
+    only mode the script offers bundles that command with two that cannot destroy anything.
+
+  design: |
+    (i) A SUBSET, CHOSEN ON WHAT EACH COMMAND CAN DESTROY. `--reclaim-only` runs
+    `docker image prune -a` and `docker builder prune -a` and NOT `docker container prune`. A
+    RUNNING container holds a reference to its own image, so the first two cannot reach anything the
+    fleet is using — measured: that prune with all three fleet containers UP reclaimed 5.775GB and
+    left all three running. The third can remove a stopped worker, so it stays out and the mode says
+    so in its own output.
+
+    (ii) THE REFUSAL IS CARVED OUT, NEVER RELAXED. The ordinary path still reaches section 1's
+    refusal and still exits non-zero with the fleet up. Only `--reclaim-only` proceeds, and only
+    because its blast radius no longer includes the thing that refusal protects.
+
+    (iii) NO LOGIN. The registry login exists to bound the imageless window before a PULL. This mode
+    pulls nothing, so a short-lived ACR token must not be able to fail a disk reclaim on a timer.
+
+    (iv) STOPS BEFORE THE PULL AND THE RESTART. A schedule must never redeploy.
+
+    (v) THE DRY RUN REPORTS WHAT IT SKIPS. Listing commands the real run will not execute is the
+    printed-remedy-never-applied shape; the dry run names the skips instead.
+
+  acceptance:
+    - claim: "the fleet-up refusal still fires and still exits non-zero in the ordinary mode, so the guard is carved out rather than weakened"
+      proof: "unit test: test/a-disk-reclaim-that-refuses-while-the-fleet-is-up-can-never-be-scheduled.test.ts"
+    - claim: "reclaim-only never runs docker container prune, the one command in the trio that can destroy a stopped worker's work"
+      proof: "unit test: test/a-disk-reclaim-that-refuses-while-the-fleet-is-up-can-never-be-scheduled.test.ts"
+    - claim: "reclaim-only skips the registry login, so an expired token cannot fail a disk reclaim that contacts no registry"
+      proof: "unit test: test/a-disk-reclaim-that-refuses-while-the-fleet-is-up-can-never-be-scheduled.test.ts"
+    - claim: "reclaim-only exits before the pull and the restart, so a timer can never redeploy the host"
+      proof: "unit test: test/a-disk-reclaim-that-refuses-while-the-fleet-is-up-can-never-be-scheduled.test.ts"
+    - claim: "the dry run reports what reclaim-only skips rather than listing commands it will not execute"
+      proof: "unit test: test/a-disk-reclaim-that-refuses-while-the-fleet-is-up-can-never-be-scheduled.test.ts"
+
+  falsifier: |
+    Close this without implementation if the daemon container is given a docker socket: image
+    reclaim would then be available to `rmd`'s own housekeeping cadence, and a deploy-script flag
+    plus a host cron would be the wrong home for it.
+
+    Re-design rather than build if `docker image prune -a` is ever observed removing an image a
+    RUNNING container references — that would invalidate the whole safety argument for running this
+    mode with the fleet up, and the mode would have to stop the fleet after all.
+
+    Do NOT resolve this by relaxing section 1's refusal for the ordinary path, and do NOT add
+    `docker container prune` to the scheduled subset: the refusal protects a mid-implement worktree,
+    and the measured cost of losing one is hours of work and real money.
