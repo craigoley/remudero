@@ -1,0 +1,62 @@
+- id: W1-T2690
+  title: "THE MANUAL-REAP RULING WAS COSTED AGAINST 51 BRANCHES AND THE POPULATION HAS TRIPLED UNRE-MEASURED — MEASURED 2026-09-02: 155 heads, 95 `run-<id>-<epoch>` shaped, 91 of those with neither an open PR nor a place in main's history, 66 older than two weeks and the oldest 45 days; W1-T448 priced a full REAP at 8 REST pages and 6.4s and concluded manual, but nobody priced the COUNT, which is one `ls-remote` at 670ms"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 10.00
+  files: [src/lib/branch-reaper.ts, test/the-manual-reap-was-costed-against-a-population-that-tripled.test.ts]
+  origin: "operator-session#reap-population-tripled-2026-09-02"
+  plan_refs: ["W1-T447", "W1-T448", "W1-T2246"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THIS DOES NOT RE-LITIGATE W1-T448, AND MUST NOT. That ruling rejected wiring the reap into the
+    sweep's per-pass loop, on numbers: one reap is ~8 REST requests and several seconds, the poll
+    is ~60s, so per-pass wiring costs ~480 requests/hour "for an answer that only changes when a
+    branch is created or merged." That reasoning is sound and this task leaves the verb manual.
+
+    WHAT THE RULING PRICED WAS THE REAP. WHAT NOBODY PRICED WAS THE COUNT. Deciding whether it is
+    TIME to run a manual verb does not need the 8-page enumeration the ruling costed. MEASURED
+    2026-09-02: `git ls-remote --heads origin` answers in 670ms as ONE request. The cheap
+    observation the decision implicitly rejected was never the expensive one it measured.
+
+    THE POPULATION THE RULING RESTED ON HAS TRIPLED. W1-T448's own re-measurement, 2026-08-12,
+    read 51 branches. Today:
+
+      155  remote heads in total
+       95  matching the `run-<taskId>-<epochMs>` dispatch shape
+       91  of those with NO open PR and NOT in main's history — orphaned by both credit paths
+       66  older than 14 days; oldest `run-W1-T1-1784457601815`, 2026-07-19, 45 days
+
+    AND ANCESTRY IS THE WRONG REAPABILITY TEST HERE, which is worth recording because it makes the
+    orphan count look reassuring when it is not. Every merge on main is a SQUASH (measured: eight
+    consecutive commits, one parent each), so a merged branch is never an ancestor of main —
+    `--merged origin/main` returns 2 of 95 and tells you almost nothing. Separately, GitHub's
+    delete-on-merge IS working: every task merged in the 2026-09-02 session had its head deleted.
+    So these 91 are not undeleted merges. They are runs that never merged, and nothing else
+    removes them.
+
+    A MANUAL VERB WITH NO SIGNAL IS A DECISION THAT QUIETLY STOPS BEING EXECUTED. Nothing reports
+    the number anywhere an operator looks, so the only bound on the population is someone
+    remembering — and the measurement above is what remembering has actually achieved. This is the
+    repo's own recurring shape from CLAUDE.md, one level up: a count taken once and then carried,
+    where "no count of this queue survives the hour it was taken in."
+
+    THE DELIVERABLE IS THE NUMBER, NOT A CADENCE. Publish the orphaned-head count where the fleet's
+    other standing figures already appear, at one `ls-remote`. That gives the manual verb a trigger
+    and gives W1-T448 a re-measurement path, so a future ruling on cadence rests on a live figure
+    rather than on 51. It deletes nothing, changes no verb, and adds no per-pass REST cost.
+  acceptance:
+    - claim: "the orphaned-head count is computed from one remote listing, never an eight-page enumeration"
+      proof: "unit test: test/the-manual-reap-was-costed-against-a-population-that-tripled.test.ts"
+    - claim: "a head with an open PR is excluded from the count, and one whose commits are absent from the base is included"
+      proof: "unit test: test/the-manual-reap-was-costed-against-a-population-that-tripled.test.ts"
+    - claim: "the count does not use ancestry as the reapability test, because a squash merge leaves no ancestor"
+      proof: "unit test: test/the-manual-reap-was-costed-against-a-population-that-tripled.test.ts"
+    - claim: "nothing is deleted and no existing verb changes behaviour — this reports only"
+      proof: "unit test: test/the-manual-reap-was-costed-against-a-population-that-tripled.test.ts"
+    - claim: "an unreadable remote listing yields a named cannot-determine, never a zero read as healthy"
+      proof: "unit test: test/the-manual-reap-was-costed-against-a-population-that-tripled.test.ts"
