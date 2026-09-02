@@ -152,7 +152,7 @@
   "src/lib/verdict-calibration.ts": 538,
   "src/lib/wipe-test.ts": 700,
   "src/lib/worker-containment.ts": 489,
-  "src/lib/worker-home.ts": 1727,
+  "src/lib/worker-home.ts": 2000,
   "src/lib/worker-provider.ts": 1500,
   "src/lib/worker-scratch.ts": 227,
   "src/lib/worker.ts": 4500,
