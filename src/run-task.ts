@@ -226,6 +226,7 @@ import {
   type RestPullRow,
   type RestRollupEntry,
 } from "./lib/open-prs-rest.js";
+import { buildMainHealthRung } from "./lib/main-health-rung.js";
 import { imessageChannel, notify, type NotifyChannel } from "./lib/notify.js";
 import {
   alertOriginId,
@@ -23438,6 +23439,13 @@ export async function daemonCommand(
           // and plan/policy.yaml's `workerStall` row for the ~16-minute `--ci-parity` default's
           // headroom rationale.
           policy.values.workerStall,
+          buildMainHealthRung(target.owner, target.repo, {
+            fetch: ghJson,
+            issues: ghIssueGateway(target.owner, target.repo),
+            ledgerPath,
+            runId,
+            log,
+          }),
         ),
         // W1-T254 (the #707 fix): the restricted light-sweep ticker — ticks ONLY
         // the deterministic post-review re-post while `runOne` is unbounded and in
@@ -28722,6 +28730,10 @@ export function buildSweepHook(
   // {@link runWorkerStallDetectorRung} below — optional and trailing so every existing caller
   // (tests included) that predates W1-T943 is unaffected; omitted ⇒ {@link DEFAULT_WORKER_STALL_MS}.
   workerStallMs?: number,
+  // W1-T2683: main's own rollup observer, supplied only by the real daemon wiring. Trailing and
+  // optional so offline callers gain no network I/O. Its own boundary below preserves PR sweep
+  // liveness even when a test injection or future implementation accidentally throws.
+  mainHealthRung?: () => Promise<void>,
 ): (continueReviewAdmissions?: () => boolean) => Promise<void> {
   // W1-T192: the daemon-side draft rung, built ONCE per daemon start (mirrors this
   // function's own once-per-daemon-start construction) — see buildInboxDraftHook's doc for
@@ -28761,6 +28773,11 @@ export function buildSweepHook(
   // SAME instance for this daemon's whole life, exactly as `boardGithub` itself is shared.
   const boardGithub = github ?? buildBatchedGithub(owner, repo, { log, pacer });
   return async (continueReviewAdmissions = () => true) => {
+    try {
+      await mainHealthRung?.();
+    } catch (e) {
+      log("main.health.error", { error: String((e as Error)?.message ?? e) });
+    }
     try {
       const openPrs = buildOpenPrViews(owner, repo, ledgerPath, { pacer });
       // W1-T474 — the post-fix re-verification rung, on the daemon's own poll cadence and, same
