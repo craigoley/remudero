@@ -92,6 +92,7 @@ import {
   type ProviderWindowConsumption,
   type ProviderWindowMeasurement,
 } from "./worker-provider.js";
+import { writeProviderRoutingStatus, type ProviderRoutingWriteInput } from "./provider-routing-status.js";
 
 /**
  * Aggregate token usage off the SDK result envelope's `usage` field (verified
@@ -1081,6 +1082,9 @@ export interface SpawnWorkerArgs {
       request: Pick<CodexCapacityDeps, "requestedModel" | "requestedEffort" | "forceRefresh" | "selectedModel">,
     ) => Promise<ProviderCapacity>;
     tieBreaker?: number;
+    /** Best-effort durable projection for the console; never allowed to change spawn outcome. */
+    writeStatus?: typeof writeProviderRoutingStatus;
+    now?: () => number;
   };
   /**
    * Restrict the model's base built-in tool set (SDK `Options.tools`). Unset
@@ -1418,11 +1422,32 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         return (args.providerRouting?.readClaude ?? (() => readClaudeProviderCapacity(config)))();
       }),
     );
-    const selection = selectWorkerProvider(
-      capacities,
-      config.workerProviders?.reservePercent ?? 5,
-      args.providerRouting?.tieBreaker ?? providerTieBreaker++,
-    );
+    const reservePercent = config.workerProviders?.reservePercent ?? 5;
+    const statusBase = {
+      enabledProviders: providers,
+      reservePercent,
+      observedAtMs: (args.providerRouting?.now ?? Date.now)(),
+      cacheValidMs: config.workerProviders?.capacityCacheMs ?? 60_000,
+    };
+    const publishProviderRoutingStatus = (input: ProviderRoutingWriteInput): void => {
+      try {
+        (args.providerRouting?.writeStatus ?? writeProviderRoutingStatus)(config.root, input);
+      } catch {
+        console.error(JSON.stringify({ event: "worker.provider_routing_status_write_failed", reason: "write-failed" }));
+      }
+    };
+    let selection: ProviderSelection;
+    try {
+      selection = selectWorkerProvider(
+        capacities,
+        reservePercent,
+        args.providerRouting?.tieBreaker ?? providerTieBreaker++,
+      );
+    } catch (error) {
+      publishProviderRoutingStatus({ ...statusBase, state: "blocked", capacities });
+      throw error;
+    }
+    publishProviderRoutingStatus({ ...statusBase, state: "selected", capacities, selection });
     console.error(
       JSON.stringify({
         event: "worker.provider.selected",

@@ -83,6 +83,7 @@ import { buildAddOperatorNoteRoute, buildListOperatorNotesRoute } from "./operat
 import { createLastSeenStore, lastSeenPath, type LastSeenStore } from "./last-seen.js";
 import { buildDaemonHealthRoute, type DaemonHealthDeps } from "./daemon-health.js";
 import { buildAccountUsageRoute, type AccountUsageDeps } from "./account-usage.js";
+import { readProviderRoutingStatus, type ProviderRoutingStatus } from "./provider-routing-status.js";
 import { buildAnalyticsRoute, type AnalyticsRouteDeps } from "./analytics-route.js";
 import { resolveFreshness } from "./console-freshness.js";
 import { readIdleReasons, renderIdleReasonsHtml } from "./idle-reasons-panel.js";
@@ -233,6 +234,14 @@ export interface ServeDeps {
    * rest of the page.
    */
   accountUsage?: Omit<AccountUsageDeps, "ledgerPath">;
+  /**
+   * Read-only provider-routing projection. The real reader is rooted at `fleetControlRoot`;
+   * tests may inject a clock/reader without giving the console any provider credentials.
+   */
+  providerRouting?: {
+    now?: () => number;
+    read?: (root: string, deps?: { now?: () => number }) => ProviderRoutingStatus;
+  };
   /**
    * W1-T477: `GET /v1/analytics`'s deps (see analytics-route.ts's header). OPTIONAL and defaults
    * to a real rotation-union read against the real filesystem, the same "the assembler wires the
@@ -1075,6 +1084,16 @@ export function renderShellHtml(
     <span class="glance-item"><span class="glance-label">ceiling override</span><span class="glance-value" id="au-cost-ceiling-audit">…</span></span>
     <span class="glance-item"><span class="glance-label">usage as of</span><span class="glance-value" id="au-as-of">…</span></span>
     <span class="glance-item glance-scope"><span class="glance-label" id="au-measures"></span></span>
+  </section>
+  <!-- Provider routing is a projection of the daemon's last durable decision. The console reads
+       no provider credentials and runs no capacity probes; unknown/not-probed/stale remain
+       explicit instead of being rendered as healthy or zero usage. -->
+  <section id="provider-routing" class="daemon-health" aria-label="Provider routing">
+    <span class="glance-item"><span class="glance-label">routing</span><span class="glance-value" id="pr-state">…</span></span>
+    <span class="glance-item"><span class="glance-label">reserve</span><span class="glance-value" id="pr-reserve">…</span></span>
+    <span class="glance-item"><span class="glance-label">selected</span><span class="glance-value" id="pr-selected">…</span></span>
+    <span class="glance-item"><span class="glance-label">providers</span><span class="glance-value" id="pr-providers">…</span></span>
+    <span class="glance-item"><span class="glance-label">routing as of</span><span class="glance-value" id="pr-as-of">…</span></span>
   </section>
   <!-- Rendered SERVER-SIDE from the sha captured at start: a static span, deliberately NOT a
        client-script field, so this carries no risk to the template literal below. -->
@@ -2405,6 +2424,54 @@ export function renderShellHtml(
       a.usageUnknownReason ? \`unknown (\${a.usageUnknownReason})\` : formatTimestamp(a.usageAsOf),
     );
     setGlanceValue("au-measures", a.measures || "");
+  }
+
+  /** Render the daemon's last provider-routing decision. Missing, unreadable and stale data are
+   *  named states; this panel never treats absent capacity as zero usage or available headroom. */
+  function renderProviderRouting(p) {
+    if (!p) return;
+    let state = "unknown";
+    if (p.state === "not-probed") state = "not probed";
+    else if (p.state === "blocked") state = "blocked · " + (p.blockedReason || "unknown reason");
+    else if (p.state === "selected") state = p.freshness === "stale" ? "stale last decision" : "selected";
+    else if (p.reason) state = "unknown (" + p.reason + ")";
+    setGlanceValue("pr-state", state);
+    setGlanceValue("pr-reserve", typeof p.reservePercent === "number" ? p.reservePercent + "%" : "unknown");
+
+    const selected = p.selected;
+    setGlanceValue(
+      "pr-selected",
+      selected
+        ? [selected.provider, selected.accountLabel, selected.model, selected.effort, selected.tightestRemainingPercent + "% remaining"]
+            .filter(Boolean)
+            .join(" · ")
+        : p.state === "blocked"
+          ? "none (headroom refusal)"
+          : "unknown",
+    );
+
+    const providers = Array.isArray(p.providers) ? p.providers : [];
+    const enabled = Array.isArray(p.enabledProviders) && p.enabledProviders.length
+      ? "enabled " + p.enabledProviders.join(", ")
+      : "unknown";
+    setGlanceValue(
+      "pr-providers",
+      providers.length
+        ? providers
+            .map(function (provider) {
+              const identity = [provider.provider, provider.accountLabel, provider.model, provider.effort].filter(Boolean).join(" ");
+              if (!provider.readable) return identity + " unavailable (" + (provider.reason || "capacity-unreadable") + ")";
+              const windows = (provider.windows || []).map(function (window) {
+                return window.name + " " + window.usedPercent + "%" + (window.resetsAt ? " reset " + formatClock(window.resetsAt) : "");
+              });
+              return identity + (windows.length ? " · " + windows.join(", ") : " · no readable windows");
+            })
+            .join(" | ")
+        : p.state === "not-probed"
+          ? enabled + " · not probed"
+          : enabled,
+    );
+    setGlanceValue("pr-as-of", p.observedAt ? formatTimestamp(p.observedAt) : "unknown");
   }
 
   /** W1-T364: the daily-cost-ceiling WRITE control's own current-state readout, in the "Fleet
@@ -4724,7 +4791,7 @@ export function renderShellHtml(
     }
 
     try {
-      const [recentSnap, upNextSnap, feedbackSnap, inboxSnap, controlStatus, daemonHealth, accountUsage, planView] = await Promise.all([
+      const [recentSnap, upNextSnap, feedbackSnap, inboxSnap, controlStatus, daemonHealth, accountUsage, providerRouting, planView] = await Promise.all([
         getJson("/v1/recent").catch(() => ({ entries: [] })),
         getJson("/v1/drain/preview?max=5").catch(() => ({ cards: [] })),
         getJson("/v1/feedback").catch(() => ({ entries: [] })),
@@ -4738,6 +4805,14 @@ export function renderShellHtml(
         // catch-and-degrade convention as every sibling above: a failure here leaves the strip
         // showing its last-known values (or "…" pre-first-success) and never breaks the refresh.
         getJson("/v1/account-usage").catch(() => null),
+        // Routing is a daemon-written projection. A read failure is isolated from every sibling
+        // panel and leaves the last decision visible rather than inventing fresh headroom.
+        getJson("/v1/provider-routing").catch(() => ({
+          version: 1,
+          state: "unknown",
+          freshness: "unknown",
+          reason: "unreadable",
+        })),
         // W1-T315: the Plan tab's one fetch -- same catch-and-degrade convention as every
         // sibling above; a failure here leaves the tab showing its last-known values (or "…"
         // pre-first-success) and never breaks the rest of the refresh.
@@ -4757,6 +4832,7 @@ export function renderShellHtml(
         renderAccountUsage(accountUsage);
         renderCostCeilingControl(accountUsage);
       }
+      if (providerRouting) renderProviderRouting(providerRouting);
       if (planView) {
         latestPlanView = planView;
         renderPlanView(planView);
@@ -5305,6 +5381,24 @@ function isValidPeekRunId(id: string): boolean {
 const PEEK_MAX_LINES = 500;
 const PEEK_MAX_BYTES = 64 * 1024;
 const PEEK_DEFAULT_LINES = 50;
+
+/** Read-scoped console projection of the daemon's last provider-routing decision. */
+export function buildProviderRoutingRoute(deps: {
+  root: string;
+  now?: () => number;
+  read?: (root: string, deps?: { now?: () => number }) => ProviderRoutingStatus;
+}): Route {
+  return {
+    method: "GET",
+    path: "/v1/provider-routing",
+    scope: "read",
+    handler: (_req, res) => {
+      const read = deps.read ?? readProviderRoutingStatus;
+      sendJson(res, 200, read(deps.root, { now: deps.now }));
+    },
+  };
+}
+
 /**
  * `GET /v1/peek?runId=<id>[&lines=<n>]` — read-scoped, W1-T945: the console's read-only tail
  * reader, the FIRST HTTP route in this codebase to serve raw worker output (design note vi).
@@ -5554,6 +5648,7 @@ export function buildServeRoutes(deps: ServeDeps): Route[] {
     buildRecentRoute(deps.board),
     buildDaemonHealthRoute(daemonHealthDeps),
     buildAccountUsageRoute(accountUsageDeps),
+    buildProviderRoutingRoute({ root: deps.fleetControlRoot, ...deps.providerRouting }),
     buildControlStatusRoute(controlStatusDeps),
     buildPauseRoute(fleetControlDeps),
     buildResumeRoute(fleetControlDeps),
