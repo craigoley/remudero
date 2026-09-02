@@ -25,11 +25,11 @@
     provider selection, report shape, or daemon lifecycle behavior.
   acceptance:
     - claim: "an implementation worker's provider/model/effort replaces an earlier recon worker for the same run"
-      proof: "unit test: armFieldsByRunId: the implementation worker wins over an earlier recon worker"
+      proof: "unit test: test/a-mount-comparison-across-unmatched-populations-is-not-a-measurement.test.ts"
     - claim: "a recon-only run remains attributable instead of becoming unknown"
-      proof: "unit test: armFieldsByRunId: recon remains the honest fallback for a recon-only run"
+      proof: "unit test: test/a-mount-comparison-across-unmatched-populations-is-not-a-measurement.test.ts"
     - claim: "the first implementation call remains stable across later implementation resumes"
-      proof: "unit test: armFieldsByRunId: the FIRST implementation line wins over a later implementation resume"
+      proof: "unit test: test/a-mount-comparison-across-unmatched-populations-is-not-a-measurement.test.ts"
   risk: high
   band_meaning: span
   origin: "oper#overnight-steward-2026-09-02"
