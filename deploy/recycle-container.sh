@@ -254,6 +254,83 @@ if [ "${FIRST_BOOT}" != "1" ]; then
   fi
 fi
 
+# ── 1.6. THE SHARED CHECKOUT deploy/entrypoint.sh WILL CHECK OUT MUST NOT BLOCK THAT CHECKOUT
+#        (W1-T2588) ─────────────────────────────────────────────────────────────────────────────
+# MEASURED 2026-09-01: this script itself never merges or checks out anything — it only STARTS a
+# container — but the container it starts immediately runs `deploy/entrypoint.sh`, whose
+# `checkout_target` does `git checkout --detach origin/main` against THIS SAME bind-mounted
+# checkout (`${STATE_DIR}/remudero`, the marker section 1.5 above already requires). That checkout
+# is shared with whatever else writes to it between recycles, so it is routinely dirty with real,
+# in-progress edits — not a mistake, just the normal state of a directory something else is using.
+# When a locally-modified TRACKED path also differs on origin/main, that in-container checkout
+# refuses with git's own "Your local changes to the following files would be overwritten by
+# merge" (git's checkout-vs-merge wording is the same collision, same remedy) and dies — but by
+# then THIS script has already pulled a new image, paused the fleet, waited out in-flight workers,
+# and stopped and removed the OLD container. The operator is left with the old container GONE and
+# the new one crash-looping on a checkout it can never complete, which is strictly worse than
+# refusing at the door.
+#
+# DESIGN (b) FROM THE TASK RECORD, NOT (a): "read the target ref directly" does not fit here — the
+# working tree that would be overwritten belongs to `checkout_target`, which runs INSIDE the
+# container this script is about to start, not to any git operation this script performs itself.
+# So this refuses early and loudly instead, naming the blocking paths and the exact reversible
+# command that clears them, before the pull/pause/stop/rm below ever run.
+#
+# SCOPED, NOT "any dirty path" — the same discipline W1-T446 established for
+# `checkCliFreshness`/`treeFfSafe` (src/lib/self-sync.ts, src/lib/deployer.ts): a locally dirty
+# path the incoming checkout would never touch is not a hazard, and refusing on it would block a
+# routine recycle for no reason. A dirty path only blocks here when it ALSO appears in
+# `git diff --name-only HEAD..origin/main` — the exact set `checkout_target`'s own checkout is
+# about to write.
+#
+# READ-ONLY, ALWAYS. One `fetch` (moves only remote-tracking refs, exactly like every other fetch
+# in this codebase — never the working tree or a local branch), one `diff --name-only HEAD` (dirty
+# tracked paths), one `diff --name-only HEAD..origin/main` (the incoming set). Nothing here writes,
+# stashes, or deletes a single byte of whatever another lane left in this checkout.
+#
+# DEGRADES OPEN ON A FETCH FAILURE, deliberately, the same posture `checkCliFreshness` itself takes
+# (its own module doc: "a best-effort ... check ... degrades ... rather than refusing"): a host
+# with no network to origin right now is not proof the checkout is safe, but this script cannot
+# tell the difference between that and a git that is simply absent, and refusing on undecidable
+# input would turn a network hiccup into a self-inflicted outage this guard exists to prevent.
+DAEMON_TREE="${STATE_DIR}/remudero"
+if [ -e "${DAEMON_TREE}/.git" ]; then
+  if git -C "${DAEMON_TREE}" fetch --quiet origin >/dev/null 2>&1; then
+    readarray -t DIRTY_TRACKED_PATHS < <(git -C "${DAEMON_TREE}" diff --name-only HEAD 2>/dev/null | sed '/^$/d')
+    if [ "${#DIRTY_TRACKED_PATHS[@]}" -gt 0 ]; then
+      readarray -t INCOMING_PATHS < <(git -C "${DAEMON_TREE}" diff --name-only HEAD..origin/main 2>/dev/null | sed '/^$/d')
+      BLOCKING_PATHS=()
+      for dirty_path in "${DIRTY_TRACKED_PATHS[@]}"; do
+        for incoming_path in "${INCOMING_PATHS[@]}"; do
+          if [ "${dirty_path}" = "${incoming_path}" ]; then
+            BLOCKING_PATHS+=("${dirty_path}")
+            break
+          fi
+        done
+      done
+      if [ "${#BLOCKING_PATHS[@]}" -gt 0 ]; then
+        echo "recycle-container: REFUSING — ${DAEMON_TREE} has local changes that origin/main's own" >&2
+        echo "  checkout (deploy/entrypoint.sh, inside the container this run is about to start)" >&2
+        echo "  would be overwritten by:" >&2
+        for blocking_path in "${BLOCKING_PATHS[@]}"; do
+          echo "    ${blocking_path}" >&2
+        done
+        echo "  NOTHING has been touched — no image pulled, no pause set, no container stopped or" >&2
+        echo "  removed. This is reversible and this script never discards it itself: stash it" >&2
+        echo "  yourself, then re-run:" >&2
+        printf '    git -C %s stash push --' "${DAEMON_TREE}" >&2
+        for blocking_path in "${BLOCKING_PATHS[@]}"; do
+          printf ' %s' "${blocking_path}" >&2
+        done
+        printf '\n' >&2
+        exit 1
+      fi
+    fi
+  else
+    echo "recycle-container: NOTE — could not fetch origin in ${DAEMON_TREE}; the shared-checkout guard (W1-T2588) is skipped this run." >&2
+  fi
+fi
+
 # ── 2. EVERY BLOCKING LOCK IS PRINTED IN FULL — NEVER DELETED, NEVER JUDGED ─────────────────────
 # `state/drain.lock` and `state/inflight/*.lock` are read-only from here, always, regardless of what
 # happens later in this run. A host-side process cannot decide whether a lock naming a now-gone
