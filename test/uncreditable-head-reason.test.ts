@@ -192,6 +192,18 @@ test("an ACCEPTABLE head is not declined at all — the guard is unchanged", asy
   assert.match(String((threw as Error)?.message ?? threw), /git/, `expected a git failure, got ${String(threw)}`);
 });
 
+test("the real dispatch wiring accepts a no-trailer RETRO PR under the lane identity, not PR-N", async () => {
+  const { logs, threw } = await driveDispatchFix("run-RETRO-1788324628827", undefined);
+  const synthetic = logs.find((l) => l.step === "sweep.fix.synthetic_task");
+  assert.equal(synthetic?.extra?.task_id, "RETRO", "the branch fallback is wired into the dispatched synthetic task");
+  assert.ok(
+    !logs.some((l) => l.step === "sweep.fix.uncreditable_head"),
+    `the RETRO lane must reach the worktree step; got ${JSON.stringify(logs.map((l) => l.step))}`,
+  );
+  assert.ok(threw, "acceptance is proven by reaching the first git side effect in this repository-free harness");
+  assert.match(String((threw as Error)?.message ?? threw), /git/);
+});
+
 // ── the catch-all, and the two properties no per-case test can see ────────────
 
 test("the catch-all fires ONLY on a disagreement with the acceptability predicate", async () => {
