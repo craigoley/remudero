@@ -129,6 +129,14 @@ test("window consumption refuses a reset, unreadable source, provider mismatch, 
     }).reason,
     "counter-regressed",
   );
+  assert.equal(
+    providerWindowConsumption(
+      { ...before, windows: [{ name: "5h", usedPercent: 101, resetsAt: "09:00" }] },
+      { ...before, windows: [{ name: "5h", usedPercent: 100, resetsAt: "09:00" }] },
+    ).reason,
+    "no-reset-stable-window",
+    "invalid percentages must not become attribution candidates",
+  );
 });
 
 test("window attribution refuses overlapping work on the same provider but not another provider", () => {
@@ -491,11 +499,12 @@ test("Codex capacity RPC discovers models and selects the matching independent b
       requestedModel: "haiku",
       requestedEffort: "low",
       forceRefresh: true,
+      selectedModel: "gpt-5.6-terra",
       spawn: () => refreshedProc as never,
       capabilities: CAPABILITY_FIXTURE,
     },
   );
-  assert.equal(refreshed.model, selected.model);
+  assert.equal(refreshed.model, "gpt-5.6-terra", "an attribution boundary must pin the model selected before the worker ran");
 });
 
 test("Codex capacity makes toolchain and synchronous spawn failures unreadable", async () => {
@@ -793,10 +802,11 @@ test("the unchanged Claude spawn path labels its successful provider", async () 
   assert.equal(result.windowConsumption, undefined, "Claude-only installs must perform no attribution reads");
 });
 
-test("a multi-provider Claude call ledgers reset-stable exclusive window consumption", async () => {
+async function spawnMeasuredClaude(
+  readClaude: (request?: { forceRefresh?: boolean }) => Promise<ProviderCapacity>,
+) {
   const root = mkdtempSync(join(tmpdir(), "rmd-claude-window-consumption-"));
-  const claudeRequests: Array<{ forceRefresh?: boolean } | undefined> = [];
-  const result = await spawnWorker({
+  return spawnWorker({
     cwd: process.cwd(),
     permissionMode: "bypassPermissions",
     settingsFile: join(process.cwd(), "settings", "worker.json"),
@@ -807,15 +817,7 @@ test("a multi-provider Claude call ledgers reset-stable exclusive window consump
       workerProviders: { enabled: ["claude", "codex"], codexBin: "/bin/sh" },
     },
     providerRouting: {
-      readClaude: async (request) => {
-        claudeRequests.push(request);
-        const usedPercent = claudeRequests.length === 3 ? 11.5 : 10;
-        return {
-          provider: "claude",
-          readable: true,
-          windows: [{ name: "session (5h)", usedPercent, resetsAt: "09:00" }],
-        };
-      },
+      readClaude,
       readCodex: async () => capacity("codex", 80),
     },
     claudeExecutable: {
@@ -845,6 +847,19 @@ test("a multi-provider Claude call ledgers reset-stable exclusive window consump
       };
     })()) as never,
   });
+}
+
+test("a multi-provider Claude call ledgers reset-stable exclusive window consumption", async () => {
+  const claudeRequests: Array<{ forceRefresh?: boolean } | undefined> = [];
+  const result = await spawnMeasuredClaude(async (request) => {
+    claudeRequests.push(request);
+    const usedPercent = claudeRequests.length === 3 ? 11.5 : 10;
+    return {
+      provider: "claude",
+      readable: true,
+      windows: [{ name: "session (5h)", usedPercent, resetsAt: "09:00" }],
+    };
+  });
   assert.deepEqual(claudeRequests, [undefined, { forceRefresh: true }, { forceRefresh: true }]);
   assert.deepEqual(workerLedgerFields(result).window_consumption, {
     provider: "claude",
@@ -852,6 +867,58 @@ test("a multi-provider Claude call ledgers reset-stable exclusive window consump
     window: "session (5h)",
     resets_at: "09:00",
   });
+});
+
+test("an unreadable opening boundary does not prevent a selected worker from running", async () => {
+  clearProviderWindowMeasurements();
+  let reads = 0;
+  const result = await spawnMeasuredClaude(async () => {
+    reads += 1;
+    if (reads === 2) throw new Error("opening boundary offline");
+    return {
+      provider: "claude",
+      readable: true,
+      windows: [{ name: "session (5h)", usedPercent: 10, resetsAt: "09:00" }],
+    };
+  });
+  assert.equal(reads, 2, "no closing read is possible without an opening measurement");
+  assert.equal(result.text, "done");
+  assert.equal(result.windowConsumption, undefined);
+});
+
+test("an unreadable closing boundary is explicit and releases the provider measurement", async () => {
+  clearProviderWindowMeasurements();
+  let reads = 0;
+  const result = await spawnMeasuredClaude(async () => {
+    reads += 1;
+    if (reads === 3) throw new Error("closing boundary offline");
+    return {
+      provider: "claude",
+      readable: true,
+      windows: [{ name: "session (5h)", usedPercent: 10, resetsAt: "09:00" }],
+    };
+  });
+  assert.equal(reads, 3);
+  assert.deepEqual(workerLedgerFields(result).window_consumption, {
+    provider: "claude",
+    percent_consumed: null,
+    reason: "capacity-unreadable",
+  });
+
+  const next = beginProviderWindowMeasurement({
+    provider: "claude",
+    readable: true,
+    windows: [{ name: "session (5h)", usedPercent: 10, resetsAt: "09:00" }],
+  });
+  assert.equal(
+    finishProviderWindowMeasurement(next, {
+      provider: "claude",
+      readable: true,
+      windows: [{ name: "session (5h)", usedPercent: 11, resetsAt: "09:00" }],
+    }).percentConsumed,
+    1,
+    "failed closing telemetry must not poison later attribution",
+  );
 });
 
 test("Codex worker clock bound tears down the contained process and fails the run", async () => {
