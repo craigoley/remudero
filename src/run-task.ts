@@ -313,18 +313,20 @@ import {
   type MintSources,
 } from "./lib/task-id.js";
 import {
-  firstUnreservedAtOrAbove,
-  reserveTaskIdBlock,
-  reserveTaskIdBlockRemote,
-  gitRemoteRefReserver,
-  reserveTaskIdRemote,
-  taskIdReservationRef,
-  withIdReservationLogging,
   type RemoteRefReserver,
-  type TaskIdReservationError,
   type RemoteReservationBlock,
   type TaskIdReservationBlock,
+  type TaskIdReservationError,
+  firstUnreservedAtOrAbove,
+  gitRemoteRefReserver,
+  remoteReservedTaskIds,
+  reservationFloorFrom,
+  reserveTaskIdBlock,
+  reserveTaskIdBlockRemote,
+  reserveTaskIdRemote,
+  taskIdReservationRef,
   taskIdReservationsDir,
+  withIdReservationLogging,
 } from "./lib/task-id-reservation.js";
 import {
   applyPlanProposalCommit,
@@ -855,6 +857,7 @@ import {
   InflightLockError,
   readInflightLock,
   sweepStaleInflightLocks,
+  type InflightLockHandle,
   type InflightSweepResult,
 } from "./lib/inflight-lock.js";
 import {
@@ -16961,6 +16964,25 @@ export async function nextTaskIdCommand(
   } catch {
     /* no readable reservation store ⇒ report the mint alone, exactly as before this existed */
   }
+  // THE SAME BLIND SPOT THE RESERVE PATH HAD, ON THE PATH A HUMAN READS. The mint's four surfaces
+  // (tasks.yaml, shards, open PRs, plan history) do not include `refs/rmd-id/`, so the number
+  // printed above can sit well below every id the fleet already holds — measured here, an advisory
+  // W1-T<n> against a namespace whose real floor was three higher. That number is what an operator
+  // COPIES into a new shard, so a silent understatement is a collision waiting to be filed, not a
+  // cosmetic gap. Best-effort and `--offline`-respecting, exactly like the local notice above: this
+  // verb PRINTS, so an unreadable namespace degrades to saying nothing.
+  if (!offline) {
+    try {
+      // `gitRunAdapter` is the SAME normaliser the reserve path below uses — `spawnSync` reports
+      // `status: null` for a signalled child, and a raw null would read as success here.
+      const advisoryRun = gitRunAdapter(deps.runGit ?? ((args: string[]) => spawnSync("git", args, { cwd: repoRoot, encoding: "utf8" })));
+      const floor = reservationFloorFrom(remoteReservedTaskIds(advisoryRun));
+      if (floor !== "unknown" && floor > mint.n)
+        console.log(`(origin's refs/rmd-id/ namespace already holds ids up to W1-T${floor - 1} — the first id no reservation holds is W1-T${floor})`);
+    } catch {
+      /* unreadable namespace ⇒ report the mint alone */
+    }
+  }
   if (offline) console.log("(--offline: open plan PRs were NOT read — this id is a floor, not a guarantee)");
   // W1-T917 — the rare-overlap advisory. Printed AFTER the id, never instead of it: the mint's own
   // output is byte-identical whether this warns, stays silent, or fails outright. `--offline`
@@ -16998,11 +17020,18 @@ export async function nextTaskIdCommand(
     const contested: string[] = [];
     const run = deps.runGit ?? ((args: string[]) => spawnSync("git", args, { cwd: repoRoot, encoding: "utf8" }));
     const base = deps.reserver ?? gitRemoteRefReserver({ run: gitRunAdapter(run) });
-    // Decorate rather than modify: `src/lib/task-id-reservation.ts` is deliberately NOT declared by
-    // this task and nothing in it changes. The decorator only OBSERVES each attempt, so a `taken`
-    // outcome is reported instead of silently skipped.
+    // Decorate rather than modify: the decorator only OBSERVES each attempt, so a `taken` outcome
+    // is reported instead of silently skipped.
+    //
+    // ⚠ SPREAD `base` RATHER THAN RE-LISTING ITS MEMBERS. The re-listed form named `mintAnchor` and
+    // `attempt` explicitly, so when `RemoteRefReserver` grew `reservedFloor` this decorator kept
+    // type-checking and silently dropped it — the reserve path then walked from the advisory number
+    // as if the seeding did not exist, and the only symptom was an attempt count one higher than it
+    // should be. A decorator that enumerates an interface it does not own is wrong the moment that
+    // interface grows; spreading forwards every member, present and future, and the override below
+    // is the one thing this wrapper actually means to change.
     const reserver: RemoteRefReserver = {
-      mintAnchor: () => base.mintAnchor(),
+      ...base,
       attempt: (taskId: string, anchor: string) => {
         const outcome = base.attempt(taskId, anchor);
         if (outcome === "taken") contested.push(describeContestedId(taskId, (deps.holderOf ?? readReservationHolder)(taskId, run)));
@@ -26643,6 +26672,79 @@ export function buildFixRungDispatchArgs(args: {
 }
 
 /**
+ * W1-T2609: thrown by {@link checkoutFixHeadRef} when the branch's local ref is AHEAD of
+ * `origin/<branch>` — i.e. it carries a commit `origin/<branch>` does not. Resetting it would
+ * silently discard that commit (the OBSERVED defect: a fix round's local commit rewound between
+ * `git commit` and `git push` by a concurrent round sharing the same branch name). Both shas are
+ * carried so the caller's decline row is diagnosable without a second git call.
+ */
+export class FixRungCheckoutRefusedError extends Error {
+  constructor(
+    public readonly branch: string,
+    public readonly localSha: string,
+    public readonly originSha: string,
+  ) {
+    super(
+      `refusing to reset local branch ${branch} (${localSha}) to origin/${branch} (${originSha}): ` +
+        `the local ref is ahead of origin and would lose unpushed work`,
+    );
+    this.name = "FixRungCheckoutRefusedError";
+  }
+}
+
+/**
+ * W1-T2609: the fix rung's checkout onto its shared head ref (the PR's own branch, `realBranch`
+ * at the one call site) — NON-DESTRUCTIVE, unlike the `checkout -B` this replaced. That branch
+ * name is deliberately shared across every concurrent fix round for one task: creditability pins the branch name.
+ * See `fixHeadAcceptable`/`deriveStatus`'s `ownsBranch` at this function's caller; only the
+ * WORKTREE is per-attempt unique. A plain `checkout -B <branch> origin/<branch>` unconditionally
+ * FORCE-RESETS the local ref to `origin/<branch>`, so a round that already committed locally
+ * (unpushed) had that commit silently rewound by a concurrent round landing here in the same
+ * window (PR #3261's reported incident).
+ *
+ * Three cases, by comparing the local ref (if any) against `origin/<branch>`:
+ *  - no local ref yet: create it at `origin/<branch>` — byte-identical to the old sequence.
+ *  - local ref is an ancestor of (or equal to) `origin/<branch>` (at or behind): fast-forward —
+ *    also byte-identical to the old sequence, since nothing local is lost.
+ *  - local ref is NOT an ancestor of `origin/<branch>` (ahead, or diverged — either way it holds
+ *    a commit `origin/<branch>` lacks): REFUSE with {@link FixRungCheckoutRefusedError} and leave
+ *    the local ref untouched. The caller (`dispatchFix`) declines this round the same way it
+ *    already declines `sweep.fix.uncreditable_head` — one lost poll, not a lost commit.
+ */
+export function checkoutFixHeadRef(repoDir: string, worktreePath: string, branch: string): void {
+  const originSha = execFileSync("git", ["-C", repoDir, "rev-parse", `origin/${branch}`], { stdio: "pipe" })
+    .toString()
+    .trim();
+  let localSha: string | null = null;
+  try {
+    localSha = execFileSync("git", ["-C", repoDir, "rev-parse", "--verify", `refs/heads/${branch}`], {
+      stdio: "pipe",
+    })
+      .toString()
+      .trim();
+  } catch {
+    localSha = null; // no local ref yet — the "create fresh" case below.
+  }
+
+  if (localSha !== null && localSha !== originSha) {
+    let localIsAncestor = false;
+    try {
+      execFileSync("git", ["-C", repoDir, "merge-base", "--is-ancestor", localSha, originSha], { stdio: "pipe" });
+      localIsAncestor = true;
+    } catch {
+      localIsAncestor = false; // non-zero exit ⇒ NOT an ancestor (ahead, or diverged) — refuse below.
+    }
+    if (!localIsAncestor) throw new FixRungCheckoutRefusedError(branch, localSha, originSha);
+  }
+
+  execFileSync(
+    "git",
+    ["-C", worktreePath, "checkout", "-B", branch, `origin/${branch}`, "--no-track"],
+    { stdio: "pipe" },
+  );
+}
+
+/**
  * W1-T1129: the fix rung's throwaway worktree AND its named local branch, extracted from
  * `dispatchFix` (its one call site) purely so this exact git sequence is directly unit-testable
  * against a real repo, with no behaviour change beyond the `--no-track` below.
@@ -26659,15 +26761,31 @@ export function buildFixRungDispatchArgs(args: {
  * PUSHES, and a detached HEAD has no branch for `git push origin HEAD` to resolve (rationale
  * (7)). `--no-track` keeps the named local branch — still landing at `origin/<branch>`'s
  * commit, still pushable — while dropping only the tracking-config write.
+ *
+ * W1-T2609: the checkout step itself is now {@link checkoutFixHeadRef} — non-destructive,
+ * where this used to run an unconditional `checkout -B`. See that function's own doc.
  */
 export function createFixRungWorktree(repoDir: string, worktreePath: string, branch: string): void {
   execFileSync("git", ["-C", repoDir, "fetch", "origin", "--quiet"], { stdio: "pipe" });
   execFileSync("git", ["-C", repoDir, "worktree", "add", worktreePath, `origin/${branch}`], { stdio: "pipe" });
-  execFileSync(
-    "git",
-    ["-C", worktreePath, "checkout", "-B", branch, `origin/${branch}`, "--no-track"],
-    { stdio: "pipe" },
-  );
+  checkoutFixHeadRef(repoDir, worktreePath, branch);
+}
+
+/**
+ * W1-T2609: the lock KEY for the fix rung's exclusive claim on one (repo, branch)'s
+ * checkout→commit→push window — reusing `src/lib/inflight-lock.ts`'s O_EXCL discipline
+ * (`acquireInflightLock`) rather than a second locking mechanism (the W1-T228 instruction). That
+ * module keys its lock file on an arbitrary string id (it calls it `taskId`, but never inspects
+ * its shape); this is that string for this claim, namespaced so it can never collide with a REAL
+ * task id's own inflight lock in the same directory. Keyed on branch, not task id: a synthetic
+ * (no-task) PR still shares one branch across every concurrent fix round the same way a real
+ * task's PR does (`fixRungTaskFor`), so branch is the identity that actually needs exclusion.
+ * `branch` itself may contain `/` (an accepted synthetic head can be a plain `feat/…`-shaped
+ * name) — replaced so the lock file always lands directly inside `inflightDir`, never in an
+ * implied, possibly-missing subdirectory.
+ */
+export function fixBranchClaimKey(owner: string, repo: string, branch: string): string {
+  return `fix-branch--${owner}--${repo}--${branch}`.replace(/[/\\]/g, "__");
 }
 
 /**
@@ -27185,6 +27303,11 @@ export function buildSweepEffects(
   | "reaggregateCiGate"
 > {
   const repoDir = repo === resolveOwnerRepo().repo ? repoRoot : join(config.root, "repos", repo);
+  // W1-T2609: the SAME per-task lock directory `liveInflightRuns`/`acquireInflightLock` already
+  // use everywhere else in this file (see e.g. sweepCommand's own `inflightDir`, above) — the fix
+  // rung's per-(repo, branch) exclusive claim (dispatchFix, below) reuses this directory rather
+  // than a second lock location.
+  const inflightDir = join(config.root, "state", "inflight");
   const issues = issuesImpl ?? ghIssueGateway(owner, repo);
   const say = (msg: string) => console.error(`### rmd sweep — ${msg}`);
   // Defaults to the LIVE `plan/policy.yaml` flag (`loadDefaultPolicy`, the same memoized-per-
@@ -27576,6 +27699,10 @@ export function buildSweepEffects(
 
     dispatchFix: async (pr, evidence) => {
       let worktreePath = "";
+      // W1-T2609: released in the SAME `finally` below that cleans up `worktreePath` — held for
+      // this round's whole checkout→commit→push window (acquired just before the worktree is
+      // created, released once `runFixRung` returns/throws), never a narrower slice.
+      let branchClaim: InflightLockHandle | undefined;
       // W1-T1127: TRUE only once `runFixRung` has demonstrably spent a real strike — i.e. its
       // OWN `fix.dispatch` line below has been written. `runSweep`'s `sweep.disposed` dedup seed
       // (`prior.fixed`, sweep.ts) is keyed off THAT line's later effect (an `acted:true` row),
@@ -27671,8 +27798,50 @@ export function buildSweepEffects(
           });
           return;
         }
+
+        // W1-T2609 (design ii): an EXCLUSIVE claim on this (repo, branch) pair, taken BEFORE any
+        // worktree/git side effect — the same "declines before touching git" discipline the
+        // preflight/ceiling checks above already keep. Reuses `acquireInflightLock`'s O_EXCL
+        // discipline (never a second locking mechanism, W1-T228) keyed by `fixBranchClaimKey`
+        // rather than `task.id`, because the thing being protected is the BRANCH two concurrent
+        // rounds for the same task share, not the task id alone. A round that loses the race
+        // DECLINES this poll — ledgered exactly like `sweep.fix.uncreditable_head` above — and
+        // the sweep is level-triggered, so the next pass simply retries it.
+        try {
+          branchClaim = acquireInflightLock(inflightDir, fixBranchClaimKey(owner, repo, realBranch), { run_id: runId });
+        } catch (e) {
+          if (e instanceof InflightLockError) {
+            log("sweep.fix.checkout_claim_declined", {
+              pr_number: pr.prNumber,
+              task_id: task.id,
+              branch: realBranch,
+              holder_run_id: e.holder.run_id,
+              holder_pid: e.holder.pid,
+            });
+            return;
+          }
+          throw e;
+        }
+
         worktreePath = join(worktreesDir(config), `sweep-${task.id}-${Date.now()}`);
-        createFixRungWorktree(repoDir, worktreePath, realBranch);
+        try {
+          createFixRungWorktree(repoDir, worktreePath, realBranch);
+        } catch (e) {
+          if (e instanceof FixRungCheckoutRefusedError) {
+            // W1-T2609 (design i): the local ref is ahead of origin/<branch> — a concurrent
+            // round's unpushed commit sits there. Decline this round rather than reset it away;
+            // the local ref (and that commit) is left exactly as `checkoutFixHeadRef` found it.
+            log("sweep.fix.checkout_refused", {
+              pr_number: pr.prNumber,
+              task_id: task.id,
+              branch: realBranch,
+              local_sha: e.localSha,
+              origin_sha: e.originSha,
+            });
+            return;
+          }
+          throw e;
+        }
 
         const mountsTable = loadMounts(mountsPath(repoRoot));
         const fixMount: Mount = resolveMount(mountsTable, "fix", task.risk);
@@ -27825,6 +27994,10 @@ export function buildSweepEffects(
             /* best-effort cleanup */
           }
         }
+        // W1-T2609: release the branch claim LAST, on every exit path (return, decline, throw) —
+        // symmetric with the worktree cleanup just above, so a lost race or a mid-round crash
+        // never strands the claim past this round's own dispatch.
+        branchClaim?.release();
       }
     },
 

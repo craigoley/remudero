@@ -2,6 +2,7 @@ import { closeSync, mkdirSync, openSync, readFileSync, readdirSync, unlinkSync, 
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { defaultIsPidAlive } from "./drain-lock.js";
+import { isAllocatableTaskId } from "./task-id.js";
 
 /**
  * ATOMIC RESERVATION of a minted task id — the half `mintNextTaskIdWithHistory` does not do.
@@ -397,6 +398,59 @@ export function taskIdReservationRef(taskId: string): string {
  *  is a failed READ of the world and must never be read as "free" — the fail-closed direction. */
 export type RemoteReserveOutcome = "created" | "taken" | "unreachable";
 
+/** Matches a DEFAULT-FAMILY reservation ref and captures its number. Anchored at both ends so a
+ *  suffixed id (`W1-T1B`, which {@link taskIdReservationRef} deliberately keeps distinct) is NOT
+ *  read as the bare number, and `[0-9]` rather than `\d` because a POSIX engine drops the latter
+ *  silently. */
+export const RESERVATION_REF_RE = /(?:^|\s)refs\/rmd-id\/W1-T([0-9]+)$/;
+
+/**
+ * Every ALLOCATABLE id the `refs/rmd-id/` namespace already holds on origin, from ONE `ls-remote`
+ * — the whole namespace in a single round trip, against one failed push per taken id.
+ *
+ * ⚠ THE ALLOCATABLE FILTER IS LOAD-BEARING, NOT TIDINESS. Measured on this repo's origin: 793
+ * reservation refs, whose highest numbers are 1000002 and 1000003 — far above
+ * {@link MAX_ALLOCATABLE_TASK_ID}. Seeding from a raw maximum would move every future mint to
+ * 1000004 and keep it there permanently, converting a slow allocator into a broken one. The same
+ * bound `mintNextTaskId` applies per source applies here, for the same reason.
+ *
+ * `"unknown"` on any failure: this is an optimisation, so a remote that cannot be enumerated
+ * degrades to today's walk rather than refusing. That is the opposite of {@link
+ * RemoteRefReserver.attempt}'s fail-closed posture, and deliberately so — a bad READ here costs
+ * attempts, while a bad read THERE would skip a live id.
+ */
+export function remoteReservedTaskIds(
+  run: (args: string[]) => { status: number; stdout: string; stderr: string },
+): number[] | "unknown" {
+  let res: { status: number; stdout: string; stderr: string };
+  try {
+    res = run(["ls-remote", "origin", "refs/rmd-id/*"]);
+  } catch {
+    // A THROWN runner (spawn failure, missing git) is the same answer as a non-zero exit below:
+    // the namespace could not be read. Deliberately NOT distinguished, because both lead to the
+    // identical caller behaviour — fall back to the linear walk — and inventing a second outcome
+    // here would imply a decision no caller makes.
+    return "unknown";
+  }
+  if (res.status !== 0) return "unknown";
+  const ids: number[] = [];
+  for (const line of (res.stdout ?? "").split("\n")) {
+    const m = RESERVATION_REF_RE.exec(line.trimEnd());
+    if (!m) continue;
+    const n = Number(m[1]);
+    if (isAllocatableTaskId(n)) ids.push(n);
+  }
+  return ids;
+}
+
+/** The lowest id no listed reservation holds. `"unknown"` when the namespace could not be read OR
+ *  carries no allocatable id — both mean "no floor to raise to", and neither may LOWER a caller's
+ *  own start, which {@link reserveTaskIdRemote} enforces with its own `Math.max`. */
+export function reservationFloorFrom(ids: number[] | "unknown"): number | "unknown" {
+  if (ids === "unknown" || ids.length === 0) return "unknown";
+  return Math.max(...ids) + 1;
+}
+
 export interface RemoteRefReserver {
   /** A payload unique to THIS writer. Two writers must never produce the same value, or
    *  falsification (1) returns and the lock silently stops locking. */
@@ -404,6 +458,16 @@ export interface RemoteRefReserver {
   /** Create-if-absent of {@link taskIdReservationRef}. Never throws — an unreachable remote is an
    *  OUTCOME, because a thrown error at this seam reads identically to contention at the caller. */
   attempt(taskId: string, anchor: string): RemoteReserveOutcome;
+  /**
+   * OPTIONAL, and an OPTIMISATION ONLY: the lowest id above every reservation this remote already
+   * holds, or `"unknown"`. {@link reserveTaskIdRemote} starts there instead of re-probing ids the
+   * namespace already answered for — one `ls-remote` in place of one failed push per taken id.
+   *
+   * IT IS NEVER A CORRECTNESS INPUT. The push is still the claim, so a floor that is too LOW only
+   * costs the attempts it was meant to save, and one that is too HIGH only skips ids that were
+   * already burned. A reserver that omits this is byte-identical to before it existed.
+   */
+  reservedFloor?(): number | "unknown";
 }
 
 /** Distinguishes CONTENTION from an unreachable remote. git exits 1 for both, so the only signal
@@ -431,7 +495,16 @@ export interface RemoteReserveDeps {
  * source — two writers on one host in the same millisecond still differ by pid.
  */
 export function gitRemoteRefReserver(deps: RemoteReserveDeps): RemoteRefReserver {
+  // ONE lookup per reserver INSTANCE, not per attempt: `reserveTaskIdBlockRemote` calls
+  // `reserveTaskIdRemote` once per id in the block, and re-reading 793 refs for each would trade
+  // one round trip for another. A cached floor cannot go stale in a harmful direction — the push
+  // is still the claim, so a floor overtaken mid-block just costs the walk it always cost.
+  let floor: number | "unknown" | undefined;
   return {
+    reservedFloor() {
+      if (floor === undefined) floor = reservationFloorFrom(remoteReservedTaskIds(deps.run));
+      return floor;
+    },
     mintAnchor() {
       if (deps.anchor) return deps.anchor();
       const tree = deps.run(["hash-object", "-t", "tree", "/dev/null"]).stdout.trim();
@@ -528,9 +601,21 @@ export function reserveTaskIdRemote(
 ): RemoteReservationHandle {
   const maxScan = opts.maxScan ?? 50;
   const idFor = opts.idFor ?? ((n: number) => `W1-T${n}`);
+  // SEED FROM THE NAMESPACE THIS FUNCTION ALREADY OWNS. The advisory mint derives its number from
+  // plan/tasks.yaml, the shards, open PRs and plan history — four surfaces, none of which is
+  // `refs/rmd-id/`. So the reservations THIS function created are invisible to the number it is
+  // handed, and it rediscovered them one failed push at a time: measured on this host, 15 attempts
+  // and 13.50s for a single id, growing by one with every id the fleet takes.
+  //
+  // ONLY EVER UPWARDS (`Math.max`): a floor below the caller's own start would hand back an id a
+  // plan surface already owns, which is the collision this allocator exists to prevent. And only
+  // for the DEFAULT id family — a caller supplying `idFor` is minting in some other namespace that
+  // `refs/rmd-id/W1-T<n>` says nothing about.
+  const floor = opts.idFor ? "unknown" : (reserver.reservedFloor?.() ?? "unknown");
+  const from = floor === "unknown" ? startId : Math.max(startId, floor);
   const anchor = reserver.mintAnchor();
   let attempts = 0;
-  for (let n = startId; n < startId + maxScan; n++) {
+  for (let n = from; n < from + maxScan; n++) {
     attempts++;
     const outcome = reserver.attempt(idFor(n), anchor);
     if (outcome === "created") return { id: n, taskId: idFor(n), ref: taskIdReservationRef(idFor(n)), anchor, attempts };
@@ -543,9 +628,9 @@ export function reserveTaskIdRemote(
     }
   }
   throw new TaskIdReservationError(
-    `no free task id in ${idFor(startId)}..${idFor(startId + maxScan - 1)} — ` +
+    `no free task id in ${idFor(from)}..${idFor(from + maxScan - 1)} — ` +
       `${maxScan} consecutive ids are reserved on origin (attempted ${attempts})`,
-    { taskId: idFor(startId), outcome: "exhausted" },
+    { taskId: idFor(from), outcome: "exhausted" },
   );
 }
 
