@@ -1,0 +1,59 @@
+- id: W1-T2729
+  title: "THE TWO CREDIT SURFACES READ DIFFERENT EVIDENCE AND NEITHER IS A SUPERSET — a task can be `implemented` to lint-plan and `unbuilt` to the dispatcher, simultaneously and permanently, and 380 of 584 uncredited tasks are in exactly that state"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 18.00
+  files: [src/lib/credit-evidence-reconcile.ts, src/run-task.ts, test/credit-evidence-reconcile.test.ts]
+  origin: "operator-session#plan-review-2026-09-02"
+  plan_refs: ["W1-T130", "W1-T1257"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED AT origin/main cf379a34. The repo computes merge credit in two places, from two
+    different evidence sets, and neither contains the other:
+
+      DISPATCH (status.ts rungs (c)/(c2), what isMerged and therefore isDispatchEligible see):
+        Remudero-Task trailer  UNION  a structured run-<id>-<digits> head branch.
+      LINT (classifyFailingMergeEvidence, run-task.ts, what lint-plan's failing-split reports):
+        Remudero-Task trailer  UNION  the task id named in a NON-FILING commit subject
+        (LINT_FILING_SUBJECT_RE excludes chore(plan)/docs(plan)/plan:/docs:/chore: so a filing
+        commit is never read as implementation evidence).
+
+    Head-branch evidence is invisible to the linter; subject evidence is invisible to the
+    dispatcher. So the two surfaces disagree, permanently, with no reconciler and no alarm.
+
+    THE DISAGREEMENT IS LARGE. Of 584 tasks with no trailer, 380 are named by a non-filing commit
+    subject and 204 are not. lint-plan's own summary independently reports 169 open failing tasks,
+    166 of them "with a merged implementation".
+
+    THE FRONTIER IS THE PROOF. Exactly four shards in the plan carry a `priority`, and ALL FOUR ARE
+    BUILT. W1-T418 and W1-T2276 are trailer-credited. W1-T419 and W1-T420 — both priority 1, both
+    depends_on [] — are built with subject evidence and NO trailer, so compareDispatch keeps sorting
+    them to the very head of the queue and isDispatchEligible keeps saying yes. The two
+    highest-priority slots in the entire plan are occupied by finished work, and nothing can notice.
+
+    WHY NOT A MERGE GATE. Refusing a merge that carries no trailer or run- branch was the obvious
+    fix and it is wrong: it would refuse legitimately untrailered PRs. A plan FILING must not carry
+    its own task's trailer — that would credit the task as merged when only its shard landed — so
+    the gate would block the very PRs that are correct. #3710 is one.
+
+    WHY NOT AUTO-CREDIT. Subject matching over-credits by construction: a subject may name a task
+    it discusses rather than implements, which is why LINT_FILING_SUBJECT_RE exists at all. A wrong
+    credit is worse than a missing one — a task credited in error is never built. So this task
+    REPORTS and PROPOSES; it never writes credit.
+
+    THE WRITER ALREADY EXISTS. `rmd correct <task-id> --pr <n>` is the sanctioned operator-correction
+    writer and `classifyFailingMergeEvidence` is the detector. Nothing connects them. This is that
+    connection, and nothing more.
+  acceptance:
+    - claim: "for each open task the reconciler reports which credit signals fire and flags the ones where the dispatch set and the lint set disagree"
+      proof: "unit test: test/credit-evidence-reconcile.test.ts"
+    - claim: "a disagreement is emitted as an operator-confirmable rmd correct candidate and the reconciler never writes credit itself"
+      proof: "unit test: test/credit-evidence-reconcile.test.ts"
+    - claim: "the CLI wiring exists, so the module is reachable rather than an inert producer"
+      proof: "grep: reconcileCreditEvidence( in src/run-task.ts"
