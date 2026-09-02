@@ -157,6 +157,7 @@ import {
   defaultReadMarkers,
   killProcessGroup,
   sweepOrphanWorkers,
+  workerInstallationScope,
 } from "./lib/worker-containment.js";
 import { makeTempDir, sweepStaleTempDirs, withTempDir, type TempSweepOpts, type TempSweepSummary } from "./lib/tmp.js";
 import { reapWorkerScratch, sweepStaleWorkerScratch } from "./lib/worker-scratch.js";
@@ -23039,8 +23040,10 @@ export async function daemonCommand(
   // `worker_orphan_killed` ledger line carries the ORPHAN's run_id/task_id (never this
   // daemon's own runId), matching `sweepOrphanWorkers`'s `ledger` dep contract.
   const inflightDir = join(config.root, "state", "inflight");
+  const orphanWorkerScope = workerInstallationScope(config.root);
   const sweepOrphans = () =>
     sweepOrphanWorkers({
+      expectedScope: orphanWorkerScope,
       listCandidates: defaultListCandidates,
       readMarkers: defaultReadMarkers,
       isRunActive: (candidateRunId) => liveInflightRuns(inflightDir).some((r) => r.runId === candidateRunId),
@@ -23049,6 +23052,7 @@ export async function daemonCommand(
         appendLedger(ledgerPath, {
           run_id: line.run_id,
           task_id: line.task_id,
+          worker_scope: line.worker_scope,
           step: "worker_orphan_killed",
           pid: line.pid,
           cmdline: line.cmdline,
