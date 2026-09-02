@@ -1,0 +1,73 @@
+- id: W1-T2696
+  title: "THE FLEET CAN ASK AND CANNOT HEAR — a MANUAL or HARD_STOP escalation pings the operator's phone with prose, and answering means opening the console; carry one signed, single-use link per executable option in the ping so the answer is one tap, bound to the escalation and consumed by the route the console already serves"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: |
+    RE-DERIVED AT f632e15fa (2026-09-02).
+
+    (1) THE LOOP IS HALF BUILT. `rmd escalate` opens a needs-human issue with options; W1-T2273
+    gave each option a machine-readable KIND from a closed set, executable by the console through
+    a closed route map (src/lib/escalate.ts); src/lib/panel-actions.ts serves
+    `buildEscalationReplyRoute` and `buildEscalationMarkHandledRoute`. `notify()` (src/lib/notify.ts)
+    fires an iMessage for MANUAL and HARD_STOP only, as prose. The operator reads the ping on a
+    phone and must open the console to act. W1-T507 measured the human-owed queue reaching no
+    human surface; W1-T2604 found the console inbox "can only say yes". The pattern is the same
+    in each: the fleet's questions are well-typed and its answer path is the longest one.
+
+    (2) THE IDEA, FROM GROK BOT. Its whole interaction model is "completes multi-step tasks 24/7,
+    returning only when it needs your approval" — and the return is answerable where it lands.
+    OpenClaw 2.0 ships "native Teams approve/deny controls" on its approval cards. This repository
+    does not need a new channel to get there: the option kinds and the routes exist; what is
+    missing is a link that carries the operator's authority for exactly one option, once.
+
+    (3) WHY LINKS AND NOT A BOT. A Telegram or Slack bot is a new channel with its own identity
+    verification, the OpenClaw threat model's "channel spoofing" class. A signed link inherits
+    the console's existing token model and W1-T2211's lesson that a worker must never read the
+    write token: the link's signature is minted by the daemon from a secret the worker tree
+    never sees, scoped to one escalation id and one option kind, single-use, and expiring.
+  design: |
+    (i) THE LINK. `mintOptionLink(escalationId, optionKind, secret, now)` in src/lib/escalate.ts:
+    an HMAC over id, kind and expiry, rendered as a console URL through the existing
+    `console-url` resolution (or the relay URL when configured, so it works off-LAN). The ping
+    text for MANUAL and HARD_STOP carries one link per EXECUTABLE option and none for
+    operator-only prose options, which stay prose.
+
+    (ii) THE ROUTE. A GET on the link renders a one-line confirm page; the POST it submits is the
+    existing reply route with the option's payload, after the signature, expiry and single-use
+    marker are verified. A reused, expired or forged link is refused and ledgered
+    `escalation.link_refused` with the reason; a consumed link ledgers `escalation.answered_by_link`.
+
+    (iii) THE SECRET. Minted and held by the daemon under the STATE root the worker tree cannot
+    reach (W1-T2211's boundary), never placed in a worktree or a prompt.
+
+    (iv) WHAT DOES NOT CHANGE. Option kinds, the route map, the console's own controls, which
+    classes ping. A BLOCKED escalation still opens its issue and pings nothing, as today.
+  acceptance:
+    - claim: "a MANUAL or HARD_STOP ping carries one signed link per executable option and none for prose options"
+      proof: "unit test: test/escalation-answer-links.test.ts"
+    - claim: "a valid link answers the escalation through the existing reply route exactly once, and a reused or expired or forged link is refused with a ledgered reason"
+      proof: "unit test: test/escalation-answer-links.test.ts"
+    - claim: "the signing secret lives under the state root and never enters a worker environment or prompt"
+      proof: "unit test: test/escalation-answer-links.test.ts"
+    - claim: "the notifier renders the links"
+      proof: "grep: mintOptionLink( in src/lib/notify.ts"
+  risk: high
+  band_meaning: span
+  origin: "oper#external-scan-2026-09-02"
+  plan_refs: ["W1-T2273", "W1-T507", "W1-T2604", "W1-T2211", "§7", "§8"]
+  files: [src/lib/escalate.ts, src/lib/notify.ts, src/lib/panel-actions.ts, src/lib/serve.ts, test/escalation-answer-links.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    risk:high, band_meaning:span — the escalation module, the notifier, the panel routes and the
+    console under Rule 19; runtime blast radius is one new authenticated route. src/lib/serve.ts
+    is also declared by W1-T2578 and W1-T2660; the overlap partition serializes them.
+
+    SOURCES: Grok Bot's return-on-approval model (xAI announcement of 2026-08-11 as mirrored by
+    RongleCat/awesome-grok-bot; x.ai unreachable from the filing proxy); OpenClaw v2026.8.1
+    "Approval surfaces"; OpenClaw THREAT-MODEL-ATLAS.md, "Unauthorized Access via Channel
+    Spoofing" — the reason this task mints links instead of a bot.
