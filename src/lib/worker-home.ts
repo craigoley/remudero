@@ -65,6 +65,18 @@ import { parseInflightLockInfo } from "./inflight-lock.js";
  * file is granted — never the whole `~/Library`. Verified live: a trivial task
  * completes under the redirect, the containment probe passes, isolation stays
  * 0/0. See LEARNINGS.md and the drill (W1-T12e), now a real spawn-under-redirect.
+ *
+ * WHERE THE HOME MAY LIVE (W1-T2633). Every per-run home this module has ever produced has
+ * landed as a SIBLING of the worker-home root (see {@link perRunWorkerHomeDir}) — but until this
+ * task that was incidental, not asserted: `workerHomeDir` (config.ts) resolves an
+ * OPERATOR-SETTABLE `config.workerHomeRoot` with no guard, so pointing it (or `config.root`) at a
+ * path inside a tracked checkout would have written the rc files and symlinks straight into a repo.
+ *
+ * THE INVARIANT, STATED PLAINLY: a worker home is never inside a git work tree. It is now
+ * enforced, not hoped for — {@link materializeWorkerHome} refuses (via
+ * {@link gitWorkTreeAncestor}, throwing {@link WorkerHomePlacementError}) before writing anything,
+ * whether the offending ancestor is a plain clone's `.git` DIRECTORY or a linked worktree's `.git`
+ * FILE.
  */
 
 /** Empty-by-construction rc files a worker's HOME must hold — bash AND zsh
@@ -410,6 +422,58 @@ export function sweepClaudeConfigBackups(
 }
 
 /**
+ * W1-T2633: PURE — walks `homePath`'s own ancestors (starting at `homePath` itself, ending at
+ * the filesystem root) looking for a `.git` entry. Returns the first ancestor `.git` path found,
+ * or `undefined` if none exists all the way to `/`. Needs no repo path threaded through it — the
+ * whole point of walking ancestors instead of taking one — so every caller of
+ * {@link materializeWorkerHome} gets the guard for free regardless of how `workerHome` was
+ * derived (the default `<root>/worker-home` shape, or an operator-set `config.workerHomeRoot`
+ * alike).
+ *
+ * A `.git` ENTRY IS EITHER A DIRECTORY (a plain clone) OR A FILE (a linked worktree's `gitdir:`
+ * pointer, `git worktree add`'s own shape) — both disqualify the home equally, and `exists`
+ * (default `existsSync`) is agnostic to which: it answers only "is something there", which is
+ * exactly the question this predicate needs answered.
+ */
+export function gitWorkTreeAncestor(
+  homePath: string,
+  exists: (path: string) => boolean = existsSync,
+): string | undefined {
+  let dir = resolve(homePath);
+  for (;;) {
+    const gitEntry = join(dir, ".git");
+    if (exists(gitEntry)) return gitEntry;
+    const parent = dirname(dir);
+    if (parent === dir) return undefined; // reached the filesystem root — no work tree found
+    dir = parent;
+  }
+}
+
+/**
+ * W1-T2633: thrown by {@link materializeWorkerHome} BEFORE anything is written, when the
+ * resolved worker home would land inside a git work tree (see {@link gitWorkTreeAncestor}).
+ * Named after {@link WorkerKeychainError} — this module's own precedent for "throw before any
+ * I/O, name the reason class" — except the reason here is a single, unambiguous fact rather than
+ * a taxonomy: refusing is the loud failure and writing is the silent one, and a home nested
+ * inside a repo is exactly the pollution this guard exists to make impossible. `workerHome` and
+ * `gitAncestor` are both carried on the error, not just interpolated into the message, so a
+ * caller can log or assert on them directly.
+ */
+export class WorkerHomePlacementError extends Error {
+  override name = "WorkerHomePlacementError";
+  constructor(
+    public readonly workerHome: string,
+    public readonly gitAncestor: string,
+  ) {
+    super(
+      `worker home ${workerHome} resolves inside a git work tree (found ${gitAncestor}) — refusing ` +
+        "to materialize rc files or symlinks into a tracked tree. A worker home must never be " +
+        "inside a git work tree; point workerHomeRoot (or root) somewhere outside every checkout.",
+    );
+  }
+}
+
+/**
  * Materialize a {@link WorkerHomePlan} on disk: guarantee every rc file exists
  * and is EMPTY (truncating a stale one — this directory is Remudero-owned, so
  * a prior run's leftovers are debris, never operator content to preserve), and
@@ -421,6 +485,11 @@ export function sweepClaudeConfigBackups(
  * An existing symlink already pointing at the right target is left alone
  * (idempotent across repeated spawns in the same run); one pointing anywhere
  * else is replaced (self-healing if the real HOME path moved).
+ *
+ * W1-T2633: REFUSES before writing anything if `opts.workerHome` resolves inside a git work
+ * tree (see {@link gitWorkTreeAncestor}) — throws {@link WorkerHomePlacementError} naming both
+ * the offending home path and the `.git` ancestor that disqualified it. A home outside every
+ * work tree is unaffected: this check adds a refusal and moves no other behaviour.
  */
 export function materializeWorkerHome(opts: {
   workerHome: string;
@@ -430,6 +499,11 @@ export function materializeWorkerHome(opts: {
   /** See {@link workerHomePlan} — injectable for the W1-T505 `.claude` narrowing's tests. */
   exists?: (path: string) => boolean;
 }): WorkerHomePlan {
+  const gitAncestor = gitWorkTreeAncestor(opts.workerHome, opts.exists ?? existsSync);
+  if (gitAncestor) {
+    throw new WorkerHomePlacementError(opts.workerHome, gitAncestor);
+  }
+
   const plan = workerHomePlan(opts);
 
   mkdirSync(plan.workerHome, { recursive: true });
