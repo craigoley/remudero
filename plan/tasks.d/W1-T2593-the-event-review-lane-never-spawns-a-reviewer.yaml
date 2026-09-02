@@ -11,6 +11,7 @@
   files:
     - src/run-task.ts
     - src/lib/review.ts
+    - scripts/source-size-baseline.json
     - test/event-driven-semantic-review.test.ts
   origin: "operator-session#github-event-semantic-review-workers-2026-09-01"
   plan_refs: ["W1-T63", "W1-T473", "W1-T2472", "W1-T2568", "W1-T2584"]

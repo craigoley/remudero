@@ -9,6 +9,7 @@
   "src/lib/board.ts": 1090,
   "src/lib/body-repair.ts": 196,
   "src/lib/branch-reaper.ts": 196,
+  "src/lib/bundle.ts": 500,
   "src/lib/ci-gate-required.ts": 500,
   "src/lib/ci-parity.ts": 1502,
   "src/lib/classify.ts": 500,
@@ -149,6 +150,6 @@
   "src/lib/worker-scratch.ts": 227,
   "src/lib/worker.ts": 4000,
   "src/lib/workflow-run.ts": 28,
-  "src/run-task.ts": 34500,
+  "src/run-task.ts": 35000,
   "src/spike.ts": 311
 }
