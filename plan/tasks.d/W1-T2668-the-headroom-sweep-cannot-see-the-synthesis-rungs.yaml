@@ -1,0 +1,53 @@
+- id: W1-T2668
+  title: "THE ONE INSTRUMENT BUILT TO PRICE A MOUNT CANNOT SEE THE THREE ROWS MOST WORTH PRICING — scripts/mount-headroom-sweep.mjs groups by `task_class` over runs gathered from `implement.done`/`recon.done`, and retro/triage/inbox_draft are neither, so the $827-across-219-invocations figure in .remudero/mounts.yaml came from a hand query and NOTHING re-measures it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 10.00
+  files: [scripts/mount-headroom-sweep.mjs, test/the-headroom-sweep-cannot-see-the-synthesis-rungs.test.ts]
+  origin: "operator-session#synthesis-mounts-unmeasured-2026-09-02"
+  plan_refs: ["W1-T2559", "W1-T2560"]
+  status: queued
+  attempts: 0
+  rationale: |
+    W1-T2559 BUILT THE LEVER AND PULLED IT ONCE. It split retro, triage and inbox_draft out of the
+    `architect:` row into their own `synthesis:` rows, wired effort to the spawn, and stepped
+    triage down to `low` on a measured volume argument. retro and inbox_draft stayed at
+    claude-opus-5/high — correctly, because nothing measured them. That is still true today.
+
+    W1-T2560 BUILT THE INSTRUMENT AND IT DOES NOT REACH THEM. Its header states the purpose in
+    terms: "NOTHING MEASURES WHICH TASK CLASSES COULD TAKE A CHEAPER MOUNT ... so 'sonnet would do
+    here' becomes a measurement instead of an opinion." But `buildMountHeadroomSweep` groups by
+    `task_class` over runs from `gatherRuns`, which reads `implement.done`/`recon.done`. The three
+    synthesis rungs are not task runs, carry no `task_class`, and so land in `"unknown"` or are
+    absent entirely. The one verb that exists to turn this into a measurement is blind to exactly
+    the rows an operator would act on.
+
+    SO THE FIGURE IN THE MOUNT TABLE IS UNREPEATABLE. `.remudero/mounts.yaml`'s own comment records
+    "$827 across 219 invocations, 22% of the pipeline, none of it shipping code" as MEASURED
+    2026-09-01, and splits it 159 triage / 24 retro / 36 inbox_draft. That came from a hand query
+    written once. No verb re-derives it, so nobody can tell today whether the split moved, whether
+    triage's step-down helped, or whether either remaining row has headroom.
+
+    KEEP THE DISCIPLINES THE SCRIPT ALREADY CARRIES — they are the reason to extend this file
+    rather than write a second one: all three rotation forms, dedup by run_id with the raw-to-run
+    ratio printed, percentiles never means, outcome before cost, and cost per COMPLETED unit rather
+    than per request. A synthesis rung has no `task_id`, so the per-completed-task divisor needs a
+    stated equivalent (per invocation, named as such) rather than a silent reuse.
+
+    IT REPORTS; IT CHANGES NO MOUNT. The existing header's last line is binding on this change too:
+    the ruling on any row belongs to a human. This task adds rows to a report.
+  acceptance:
+    - claim: "the sweep reports the three synthesis rungs as their own rows, not folded into unknown"
+      proof: "unit test: test/the-headroom-sweep-cannot-see-the-synthesis-rungs.test.ts"
+    - claim: "each rung's row carries turn and cost percentiles, never a mean"
+      proof: "unit test: test/the-headroom-sweep-cannot-see-the-synthesis-rungs.test.ts"
+    - claim: "a rung with no divisor for completed work names its per-invocation basis rather than reusing a task divisor silently"
+      proof: "unit test: test/the-headroom-sweep-cannot-see-the-synthesis-rungs.test.ts"
+    - claim: "the existing per-task_class rows and the corpus controls are unchanged"
+      proof: "unit test: test/the-headroom-sweep-cannot-see-the-synthesis-rungs.test.ts"
+    - claim: "the script still recommends no model and changes no mount"
+      proof: "unit test: test/the-headroom-sweep-cannot-see-the-synthesis-rungs.test.ts"
