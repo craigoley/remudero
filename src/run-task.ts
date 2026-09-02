@@ -26468,12 +26468,21 @@ export function fixRungTaskFor(
   plan: Plan,
   pr: { prNumber: number; taskId?: string },
   body?: string,
+  headRefName?: string,
 ): { task: { id: string; title: string; risk: TaskRisk; acceptance: AcceptanceCriterion[]; budget_usd?: number }; synthetic: boolean } {
   const found = pr.taskId ? plan.tasks.find((t) => t.id === pr.taskId) : undefined;
   if (found) return { task: found as never, synthetic: false };
+  const branchTaskId = taskIdFromRunBranch(headRefName);
+  const syntheticLaneId = branchTaskId && /^(?:RETRO|TRIAGE-.+|PLAN-.+|APPROVE-.+)$/.test(branchTaskId)
+    ? branchTaskId
+    : undefined;
   return {
     task: {
-      id: escalationTaskIdFor(pr),
+      // A plan-only lane PR deliberately has no credited task, even when its body carries a lane
+      // trailer. The fix rung still needs the lane identity to recognize that
+      // `run-RETRO-*`/TRIAGE/PLAN/APPROVE is its own head. Restrict this fallback to the four
+      // orchestrator lane namespaces; a synthetic PR on `run-W1-T*` remains foreign and refused.
+      id: pr.taskId ?? syntheticLaneId ?? escalationTaskIdFor(pr),
       title: `PR #${pr.prNumber}`,
       risk: DEFAULT_RISK,
       acceptance: body ? parseAcceptanceBlock(body) : [],
@@ -27349,12 +27358,12 @@ export function buildSweepEffects(
           headRefName?: string;
           body?: string;
         };
+        const realBranch = headRef.headRefName;
         // impl-FY: a PR with no plan task is STILL repairable — see fixRungTaskFor. The rung used to
         // log `sweep.fix.no_task` and return here, which is why seven agent-authored PRs were
         // classified fixable and then silently skipped every poll.
-        const { task, synthetic } = fixRungTaskFor(plan, pr, headRef.body);
+        const { task, synthetic } = fixRungTaskFor(plan, pr, headRef.body, realBranch);
         if (synthetic) log("sweep.fix.synthetic_task", { pr_number: pr.prNumber, task_id: task.id });
-        const realBranch = headRef.headRefName;
         if (!realBranch || !fixHeadAcceptable(realBranch, task.id, synthetic)) {
           // The guard above is UNCHANGED — this decides nothing, it only explains the decline
           // that already happened. `reason` matches the field `sweep.fix.not_open` already uses

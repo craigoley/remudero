@@ -131,6 +131,22 @@ test("a LANE PR whose id is real but absent from the plan keeps its own identity
   assert.equal(task.id, "TRIAGE-fb-1784732585507-04eac2", "its OWN id is preserved — never renamed to PR-554");
 });
 
+test("a plan-only RETRO PR without credited task derives only its lane identity from its own head", () => {
+  const head = "run-RETRO-1788324628827";
+  const { task, synthetic } = fixRungTaskFor(PLAN, { prNumber: 3591 }, "", head);
+  assert.equal(synthetic, true, "RETRO is an orchestrator lane, not a plan task to credit");
+  assert.equal(task.id, "RETRO", "the fix identity matches the lane id embedded in its own run branch");
+  assert.equal(fixHeadAcceptable(head, task.id, synthetic), true, "the fix rung can amend its own RETRO branch");
+});
+
+test("a PR without credited task on a W1 task branch never derives that task from the head", () => {
+  const head = "run-W1-T999-1785600000000";
+  const { task, synthetic } = fixRungTaskFor(PLAN, { prNumber: 3591 }, "", head);
+  assert.equal(synthetic, true);
+  assert.equal(task.id, "PR-3591", "a task identity still requires the trailer/body resolver, never the branch fallback");
+  assert.equal(fixHeadAcceptable(head, task.id, synthetic), false, "the foreign task branch remains protected");
+});
+
 // ── (7) THE DISPOSITION SET IS UNCHANGED ─────────────────────────────────────
 
 test("AGGREGATE: no PR becomes fixable that was not before — every disposition is byte-identical", () => {
