@@ -1055,3 +1055,25 @@ githubEventWake:
     origin: "net-new"
     min: 50
     max: 5000
+
+# W1-T2579 — THE ARM GATE'S OPERATOR-RATIFIED BAND TABLE. `decideAutoMergeArm` (src/lib/
+# review.ts) reads this table AFTER its existing refusals, on the already-arming full-pass/
+# keyword-floor path only: a `hold` row refuses the arm naming its class
+# (`calibration-band:<class>`); a `notify` row arms and carries its `note` in the decision
+# reason. It can never arm a verdict the CAPPED-class refusal or an operator override already
+# holds — those are evaluated first and this table is never consulted for them.
+#
+# SHIPS EMPTY, ON PURPOSE. `verdict-calibration.ts` (W1-T424) and `measurement_cadence`
+# (W1-T1259) run on a cadence and MEASURE the per-class merge/revert rate this table would
+# gate on — but neither one, nor any other cadence, rung or retro, ever WRITES a row here. A
+# figure enters this table ONLY through a plan PR an operator reads and merges (Law 5: the
+# machine never ratifies on its own judgment). Until that PR lands, this stays `[]`, and an
+# empty table is BYTE-IDENTICAL, at every arm decision, to no table existing at all
+# (test/arm-calibration-bands.test.ts) — the fail-inert contract this row exists to prove.
+#
+# A row here would look like:
+#   armCalibrationBands:
+#     - class: keyword-floor
+#       verdict: notify
+#       note: "the class the operator is watching, once measured"
+armCalibrationBands: []
