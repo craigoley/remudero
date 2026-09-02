@@ -400,6 +400,22 @@ export type PreflightSpawn = (
     cwd?: string;
     input?: string;
     /**
+     * Extra environment for this child, merged OVER `process.env`.
+     *
+     * THE DEFECT THIS EXISTS FOR. `--experimental-test-coverage` makes the test runner allocate
+     * its coverage scratch under `os.tmpdir()` and remove it only on a NORMAL exit, so every
+     * killed run leaks one. Measured on this host: 6.0G in a single leaked directory, and enough
+     * of them filled a 29G root filesystem to 100% — which then corrupted a later gate that died
+     * on ENOSPC with no `# tests` summary while reporting four failures that were artefacts of the
+     * full disk rather than of any diff. The coverage leaf now points `TMPDIR` at a repo-local
+     * directory it clears each run, and it had no way to say so without this.
+     *
+     * ⚠ `NODE_V8_COVERAGE` is the obvious guess and it is WRONG: measured, with it set to a repo
+     * path the runner still wrote under `/tmp` and never created the named directory — it
+     * overrides that variable for the children it spawns. `TMPDIR` is what relocates the scratch.
+     */
+    env?: NodeJS.ProcessEnv;
+    /**
      * STREAM this child's output to the operator's terminal instead of capturing it.
      *
      * THE DEFECT THIS EXISTS FOR: `spawnSync` below pipes stdout/stderr into a buffer, so NOTHING
@@ -467,11 +483,15 @@ const PREFLIGHT_SPAWN_MAX_BUFFER = 64 * 1024 * 1024;
 export function defaultPreflightSpawn(
   file: string,
   args: string[],
-  opts: { cwd?: string; input?: string; stream?: boolean } = {},
+  opts: { cwd?: string; input?: string; stream?: boolean; env?: NodeJS.ProcessEnv } = {},
 ): { status: number | null; stdout: string; stderr: string; error?: string; signal?: string } {
   const res = spawnSync(file, args, {
     cwd: opts.cwd,
     input: opts.input,
+    // MERGED OVER `process.env`, never replacing it: a bare `env` would drop PATH, HOME and the
+    // toolchain pins every step here depends on. Omitting `env` entirely leaves inheritance
+    // byte-identical to before this hook existed.
+    ...(opts.env ? { env: { ...process.env, ...opts.env } } : {}),
     encoding: "utf8",
     maxBuffer: PREFLIGHT_SPAWN_MAX_BUFFER,
     // `stdio[0]` stays a pipe in BOTH modes so `opts.input` keeps working; only the output
