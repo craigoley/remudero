@@ -16491,6 +16491,28 @@ export type OverlapWarningDeps = {
 };
 
 /**
+ * W1-T2606 — the overlap advisory's OWN failure arm, in {@link MintDegradation}'s own shape so a
+ * reader comparing it against `openPrSurfaceOutage`'s (the ID half of this same outage, W1-T2324)
+ * sees ONE vocabulary rather than two, per design (iii). `source` is always `"open-prs"` — the
+ * only surface this reader touches — and `reason` carries the caught failure verbatim.
+ *
+ * NEVER the {@link UNTRUSTED_SOURCE_REASON_PREFIX} arm: that prefix marks a source that READ FINE
+ * and answered something no other source corroborates, which is a different fact from this one — a
+ * read that did not complete at all. This type exists only for the latter.
+ */
+export type ScopeReadOutage = MintDegradation;
+
+/**
+ * W1-T2606 — the human-facing line for a {@link ScopeReadOutage}. Deliberately worded so it cannot
+ * be mistaken for either a clean zero-overlap read (which still returns zero lines) or a
+ * rare-overlap warning (which names a PR and a path): "could not check" and "checked, clean" must
+ * never collapse onto the same empty output.
+ */
+export function scopeReadOutageLine(outage: ScopeReadOutage): string {
+  return `(overlap check incomplete: the open-PR file scope could not be read — ${outage.reason} — this candidate was NOT checked for overlap, not confirmed clean)`;
+}
+
+/**
  * W1-T917 — THE READER. `rareOverlapWarnings` shipped with W1-T533/#1968 and had ZERO callers
  * outside its own module; W1-T533's design (iv) forbids exactly that ("this must print where a
  * filer already reads, or it is not worth building"). This is the call site, and the mint path is
@@ -16501,9 +16523,11 @@ export type OverlapWarningDeps = {
  * adjacent work would be worse than the duplication it prevents.
  *
  * AND IT DEGRADES RATHER THAN THROWS. This puts network I/O into the verb an operator runs before
- * every filing; an advisory that can break the verb it advises is worse than none. Any failure —
- * unreachable, rate-limited, malformed — yields NO lines, exactly as the reservation notice below
- * already degrades to silence.
+ * every filing; an advisory that can break the verb it advises is worse than none. But degrading
+ * must not mean going MUTE (W1-T2606): a genuine failure — unreachable, rate-limited, malformed —
+ * now yields exactly ONE {@link scopeReadOutageLine}, never the bare `[]` a clean no-overlap read
+ * also produces. The two are distinguishable in the OUTPUT, not merely internally. This still never
+ * throws, so it cannot break the verb it advises.
  */
 export function overlapWarningLinesFor(
   candidateFiles: readonly string[],
@@ -16525,8 +16549,8 @@ export function overlapWarningLinesFor(
       DEFAULT_OVERLAP_WARNING_POLICY,
     );
     return rareOverlapWarningLines(warnings);
-  } catch {
-    return [];
+  } catch (e) {
+    return [scopeReadOutageLine({ source: "open-prs", reason: (e as Error).message })];
   }
 }
 
@@ -16543,10 +16567,23 @@ export function candidateFilesFromArgs(rest: readonly string[]): string[] {
 }
 
 /**
+ * W1-T2606 — `--offline`'s own suppression line, matching the id surface's existing
+ * floor-not-guarantee wording (`nextTaskIdCommand`, just below): deliberate suppression and an
+ * inability to read are different facts, and neither may read as "checked, clean".
+ */
+const OFFLINE_SCOPE_NOT_READ_LINE =
+  "(--offline: open-PR files were NOT read — the overlap check above did not run, not confirmed clean)";
+
+/**
  * W1-T917 — the ENTIRE advisory decision, including the `--offline` suppression, as one pure-ish
  * exported function. Pushed out of `nextTaskIdCommand` deliberately: what stays in the command is a
  * two-line print loop, and everything a test could meaningfully assert lives here instead of behind
  * a coverage exemption the gate would (correctly) refuse.
+ *
+ * `--offline` still spends nothing (W1-T2606 changes what is SAID, never what is SPENT): with no
+ * candidate files there was never anything to check, online or off, so nothing is printed either —
+ * exactly as `overlapWarningLinesFor`'s own empty-candidate short circuit already does. Only when a
+ * check was actually requested (`--files` present) does suppressing it need announcing.
  */
 export function overlapAdvisoryLines(
   rest: readonly string[],
@@ -16556,8 +16593,9 @@ export function overlapAdvisoryLines(
   planPath: string,
   deps: OverlapWarningDeps = {},
 ): string[] {
-  if (offline) return [];
-  return overlapWarningLinesFor(candidateFilesFromArgs(rest), owner, repo, planPath, deps);
+  const candidateFiles = candidateFilesFromArgs(rest);
+  if (offline) return candidateFiles.length === 0 ? [] : [OFFLINE_SCOPE_NOT_READ_LINE];
+  return overlapWarningLinesFor(candidateFiles, owner, repo, planPath, deps);
 }
 
 /**
