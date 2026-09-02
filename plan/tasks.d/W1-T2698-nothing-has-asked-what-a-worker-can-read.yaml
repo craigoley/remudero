@@ -1,0 +1,81 @@
+- id: W1-T2698
+  title: "NOTHING HAS ASKED WHAT A WORKER CAN READ — the daemon strips ANTHROPIC_* from a worker's env, moved itself off the operator's PAT, and gates a credential helper on a boot token that no longer exists, and no probe has ever run inside a worker's containment and listed the secrets it can reach; run one, record the reach as a baseline, and refuse any widening by name"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 50.00
+  rationale: |
+    RE-DERIVED AT f632e15fa (2026-09-02).
+
+    (1) THE BOUNDARY IS DESCRIBED IN FOUR PLACES AND MEASURED IN NONE. `buildWorkerEnv`
+    (src/lib/worker.ts) allowlists a worker's env and strips `ANTHROPIC_*` (W1-T1). W1-T2311
+    moved the daemon's default credential off the operator's 93-character PAT onto App
+    installation tokens refreshed in-process. W1-T2552 found the git credential helper installed
+    only when the boot env carries a token, which since W1-T2311 it never does. W1-T2211 found a
+    worker could read the console's write token under the state root. Each is a true statement
+    about one seam. None answers the operator's question: from inside a worker's containment, with
+    the tools a worker has, what secrets can a single tool call read? The subscription login the
+    SDK subprocess authenticates with lives in the daemon user's credentials file; whether a
+    worker's Bash can `cat` it is a fact about the mount set, and the mount set is per host
+    (CLAUDE.md, "Container-scoped").
+
+    (2) THE IDEA, FROM OPENCLAW'S THREAT MODEL. Its THREAT-MODEL-ATLAS names credential
+    exfiltration as a primary class and admits the residual in terms — "tokens stored in
+    plaintext", "no execution sandboxing for skills at runtime" — and its release note moves
+    secrets behind "process-local sentinels" injected "only at final network/provider boundary".
+    Before this repository can take that second step (W1-T2699), it needs the first: a probe that
+    says what is reachable today, on each host class, and turns that into a ratchet — the
+    W1-T2295 and W1-T2317 shape, a baseline that may only shrink.
+
+    (3) WHY A PROBE AND NOT A READING. The 2026-08-13 lesson: an environmental fact reproduces
+    exactly and a reading taken the same way twice is one measurement. The probe runs inside the
+    real spawn path, not beside it.
+  design: |
+    (i) THE PROBE. test/credential-reach-probe.test.ts spawns a worker-shaped subprocess through
+    the same env builder and containment wrapper `spawnWorker` uses, running a fixed script that
+    attempts, and reports as a list: read the credentials file paths the CLI documents; scan its
+    own env for token-shaped values; read the state root and the console token path W1-T2211
+    names; invoke the git credential helper for github.com; open one connection to a host outside
+    the allowlist in settings/worker.json. Each attempt yields reachable / refused / absent with
+    the reason, never a bare boolean.
+
+    (ii) THE BASELINE. scripts/credential-reach-baseline.json records the reachable set per host
+    class (ci-ubuntu, mini, azure-container — the class is derived from the probe's environment,
+    not asserted). A reachable secret absent from the baseline fails the test by name; a baseline
+    entry the probe now refuses is removed by the PR that closed it. The first run writes the
+    baseline for the class it ran on, exactly as W1-T2295's first run did.
+
+    (iii) THE HELPER LIVES BESIDE THE CONTAINMENT. `containmentProbeScript()` in
+    src/lib/containment.ts renders the probe script from the same allowlist and paths the
+    containment reads, so the probe cannot drift from the boundary it measures.
+
+    (iv) WHAT DOES NOT CHANGE. No secret moves. No mount changes. The probe describes; the
+    ratchet refuses only a widening.
+  acceptance:
+    - claim: "the probe runs inside the real spawn env and containment and reports each reach attempt as reachable, refused or absent with a reason"
+      proof: "unit test: test/credential-reach-probe.test.ts"
+    - claim: "a reachable secret absent from the baseline for the host class fails by name, and a refused baseline entry is reported as closable"
+      proof: "unit test: test/credential-reach-probe.test.ts"
+    - claim: "the probe script is rendered from the containment module's own allowlist and paths"
+      proof: "grep: containmentProbeScript( in src/lib/containment.ts"
+  risk: high
+  band_meaning: blast-radius
+  origin: "oper#external-scan-2026-09-02"
+  plan_refs: ["W1-T2311", "W1-T2552", "W1-T2211", "W1-T1289", "W1-T1265", "W1-T2295", "W1-T2317", "W1-T2699", "§4A", "§8"]
+  files: [src/lib/containment.ts, scripts/credential-reach-baseline.json, test/credential-reach-probe.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    risk:high, band_meaning:blast-radius — the probe touches the spawn path's env builder and
+    containment wrapper, the one seam a typo silently drops (FIELD FINDING 10a); the span is one
+    module and one test.
+
+    THE PROBE MAY FIND THE CREDENTIALS FILE REACHABLE ON THE FIRST RUN. That is a finding, not a
+    failure: it lands in the baseline, and W1-T2699 — filed beside this task, not promised in
+    prose — is the shard that shrinks it. Under Rule 25 a new CI job to run the probe on the
+    ubuntu class would be instrument surface; this task runs it under the existing suite.
+
+    SOURCES: OpenClaw docs/security/THREAT-MODEL-ATLAS.md (credential exfiltration, residual
+    risks) and the v2026.8.1 release note ("SecretRef model credentials").
