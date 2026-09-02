@@ -2380,6 +2380,57 @@ export function taskIdFromRunBranch(head: string | undefined): string | undefine
 }
 
 /**
+ * Extract the task id a SLUG branch declares in its own name, for the shape
+ * {@link taskIdFromRunBranch} cannot read at all: no `run-` prefix, e.g.
+ * `w1t1060-instrument-declare` (W1-T2629 rationale (4)). PURE, and the ONE new extractor this
+ * task adds — no git, no network, no second definition of merge credit; the caller decides
+ * separately (via {@link readMergeCreditedTaskIds}) whether the resolved id is credited.
+ *
+ * TRAP 1, REUSED RATHER THAN REINVENTED: {@link isOwnedSlugBranch}'s doc records that a bare
+ * `startsWith(taskId)` would let `W1-T15` credit from `run-W1-T152-…`, and that a boundary
+ * character is what makes prefix matching safe. This resolver faces the same trap in a harder
+ * shape — `candidateIds` is not one known id to VERIFY, it is the whole plan to search — so the
+ * guard cannot rely on a literal `-` the way {@link isOwnedSlugBranch} does: both `head` and
+ * every candidate id are first lower-cased and stripped of every non-alphanumeric character
+ * (`w1t1060`, `w1-t1060` and `W1-T1060` all normalise to the same `w1t1060`), which DELETES the
+ * hyphen boundary along with the case and punctuation noise. What survives is a single check —
+ * a candidate is accepted only when it matches at the START of the normalised head (the
+ * stripped string has no separators left, so "the character before the match is not
+ * alphanumeric" can only ever be true at position zero) AND the character immediately after the
+ * match is NOT A DIGIT. That second half is the trap: `w1t1060instrumentdeclare` starts with
+ * both `w1t1060` (W1-T1060, next char `i` — accepted) and `w1t106` (W1-T106, next char `0` — a
+ * digit, REFUSED) — the digit boundary is what {@link isOwnedSlugBranch}'s `-\d+$` anchor did
+ * for the timestamped form, replayed here without a literal separator to anchor on.
+ *
+ * LONGEST MATCH WINS: `candidateIds` is unordered (it is every task id in the plan, not a
+ * ranked list), so ties are broken by preferring the longer normalised id — the more specific
+ * candidate — rather than by iteration order.
+ */
+export function taskIdFromSlugBranch(
+  head: string | undefined,
+  candidateIds: Iterable<string>,
+): string | undefined {
+  if (!head) return undefined;
+  const normalize = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const normalizedHead = normalize(head);
+  if (!normalizedHead) return undefined;
+  let best: string | undefined;
+  let bestLength = -1;
+  for (const candidateId of candidateIds) {
+    const normalizedCandidate = normalize(candidateId);
+    if (!normalizedCandidate) continue;
+    if (!normalizedHead.startsWith(normalizedCandidate)) continue;
+    const after = normalizedHead[normalizedCandidate.length];
+    if (after !== undefined && /[0-9]/.test(after)) continue; // TRAP 1: digit boundary veto
+    if (normalizedCandidate.length > bestLength) {
+      best = candidateId;
+      bestLength = normalizedCandidate.length;
+    }
+  }
+  return best;
+}
+
+/**
  * RUNG (c) OWNERSHIP-ASSERT (MASTER-PLAN P16 / W1-T69, ratifying the same class
  * W1-T62 fixed on the write side and W1-T51 on the retro read side): a trailer
  * credit is only trustworthy if the PR was opened from THIS task's own branch
@@ -2438,6 +2489,24 @@ export interface BranchFacts {
    * measurement can never manufacture a resolution the caller never proved.
    */
   patchIdEquivalentInMain?: boolean;
+  /**
+   * TASK ID THE BRANCH NAME ITSELF DECLARES (W1-T2629), resolved by the caller via
+   * {@link taskIdFromSlugBranch} against the plan's known task ids — e.g.
+   * `w1t1060-instrument-declare` resolves to `"W1-T1060"`. Omitted, exactly like
+   * {@link patchIdEquivalentInMain}, means "never resolved" — NOT "resolves to nothing" — so an
+   * absent measurement can never manufacture a split {@link planBranchReap} never proved.
+   */
+  namedTaskId?: string;
+  /**
+   * WHETHER {@link namedTaskId}'s task is merge-credited, per the caller's OWN existing
+   * {@link readMergeCreditedTaskIds} read — never a second definition of merge credit, and
+   * never computed inside this module. Meaningless (and ignored by {@link planBranchReap}) when
+   * `namedTaskId` is absent. Omitted while `namedTaskId` is present is the SAME conservative
+   * default as omitting it entirely elsewhere in this interface: it can never be read as
+   * "credited", only ever as "not proven credited" — see `planBranchReap`'s `named_task_open`
+   * split.
+   */
+  namedTaskCredited?: boolean;
 }
 
 /**
@@ -2448,6 +2517,13 @@ export interface BranchFacts {
  * were the SAME thing as a genuine `no_pr_ever` — the disposition is identical (deletable) but
  * the reason a reader would grep for is not, and collapsing the two back into one string is
  * exactly the mislabel this task ends.
+ *
+ * `named_task_credited` and `named_task_open` (W1-T2629) split `no_pr_ever` one step further,
+ * for the branch names {@link taskIdFromSlugBranch} can read that the `run-`-anchored
+ * `no_pr_ever` never could: the branch's own name declares a task id, and that task's
+ * merge-credit state (read by the caller, never here) says whether the named work shipped by
+ * another route. NEITHER is a sixth deletable disjunct — see `planBranchReap`'s own comment on
+ * why a task shipping elsewhere proves nothing about THIS branch's commits.
  */
 export type BranchReapReason =
   | "protected"
@@ -2458,6 +2534,8 @@ export type BranchReapReason =
   | "patch_id_equivalent"
   | "open"
   | "no_pr_ever"
+  | "named_task_credited"
+  | "named_task_open"
   | "state_undetermined";
 
 /** Operator-facing label for each {@link BranchReapReason} — never printed as one shared string. */
@@ -2471,6 +2549,10 @@ export const BRANCH_REAP_REASON_LABEL: Readonly<Record<BranchReapReason, string>
   patch_id_equivalent: "no PR — every commit patch-id equivalent to a commit already in main, resolved without judgement",
   open: "PR open — in use, not swept",
   no_pr_ever: "no PR ever opened and no commit proven landed — the residue that needs adjudication",
+  named_task_credited:
+    "no PR — branch names a task already merge-credited elsewhere, but that does not prove THIS branch's own commits are in main — still needs adjudication",
+  named_task_open:
+    "no PR — branch names a task that is not merge-credited — a candidate stuck-task flag, still needs adjudication",
   state_undetermined: "could not be proven either way — state undetermined, not a confirmed no-PR hold",
 };
 
@@ -2616,9 +2698,22 @@ export function planBranchReap(
       plan.reasons[f.name] = "state_undetermined";
     } else if (f.prState === "open") {
       plan.reasons[f.name] = "open";
+    } else if (f.namedTaskId !== undefined) {
+      // W1-T2629: the branch's own name declares a task id `taskIdFromRunBranch` cannot read
+      // (no `run-` prefix) — the caller resolved it via `taskIdFromSlugBranch` and, separately,
+      // whether that task is merge-credited (its own `readMergeCreditedTaskIds` read). NEITHER
+      // outcome moves this branch out of `hold` or into `deletable`: a task shipping by another
+      // route does not prove THIS branch's commits are in main, so `named_task_credited` still
+      // needs the same adjudication `no_pr_ever` always did — it is only a mechanically-checkable
+      // CITATION for that adjudication (W1-T2247 rationale §4), never a verdict this function
+      // renders itself. `namedTaskCredited` omitted degrades to `named_task_open`, the same
+      // conservative default `patchIdEquivalentInMain` documents: an absent measurement can
+      // never manufacture a resolution the caller never proved.
+      plan.reasons[f.name] = f.namedTaskCredited === true ? "named_task_credited" : "named_task_open";
     } else {
-      // Confirmed: no PR ever, tip not an ancestor, and not patch-id equivalent either — this is
-      // the residue W1-T2247 exists to size correctly (rationale §4: 20, not 75).
+      // Confirmed: no PR ever, tip not an ancestor, not patch-id equivalent, and the branch names
+      // no resolvable task either — this is the residue W1-T2247 exists to size correctly
+      // (rationale §4: 20, not 75).
       plan.reasons[f.name] = "no_pr_ever";
     }
   }
