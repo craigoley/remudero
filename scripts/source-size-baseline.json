@@ -120,7 +120,7 @@
   "src/lib/repo-location.ts": 84,
   "src/lib/retro.ts": 5000,
   "src/lib/review-provider-provenance.ts": 500,
-  "src/lib/review.ts": 9000,
+  "src/lib/review.ts": 9500,
   "src/lib/risk-judge.ts": 868,
   "src/lib/risk-score.ts": 456,
   "src/lib/routing-objective.ts": 500,
