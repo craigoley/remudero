@@ -1,0 +1,50 @@
+- id: W1-T2733
+  title: "THE GENERATOR FIX RUNG READS ONLY THE LAST 60 CI LOG LINES — #3716 PRINTED THE EXACT DOCS-INDEX REMEDY THOUSANDS OF LINES EARLIER, SO RMD SPENT BOTH WORKER STRIKES ON A COMMAND IT COULD HAVE RUN DETERMINISTICALLY"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 18.00
+  files:
+    - src/run-task.ts
+    - test/ci-log-generator-remedy-retention.test.ts
+  origin: "operator-session#pr-3716-generator-fix-miss-2026-09-02"
+  plan_refs: ["W1-T2551", "W1-T2298", "W1-T1282"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON PR #3716 HEAD 2ff348e5. ci-shard (3/4) printed
+    `Run 'npm run docs-index' and commit the result.` beside the one failing assertion, but the
+    job continued through 3,253 tests and a retry. `fetchCiFailures` reads the complete
+    `gh run view --log-failed` output and then retains only its final 60 lines. The remedy was
+    thousands of lines before that slice, so `allCiFailuresAreGeneratorFixable` received a tail
+    with no remedy and the W1-T2551 pre-strike generator rung could not fire.
+
+    THE MATERIAL OUTCOME IS IN THE LEDGER. RMD dispatched two ci-log workers, both named
+    `npm run docs-index` as the only repair, both declined it because docs/docs-index.json was
+    outside W1-T2630's declared scope, then exhausted the strike cap and opened escalation #3722.
+    The generator rung would have run the declared package.json generator before the scope gate,
+    committed only generator output, pushed, and spent zero strikes.
+
+    Preserve exact, declared generator-remedy lines from anywhere in the already-fetched job log
+    alongside the ordinary tail. Bound and deduplicate that retained evidence so a hostile or
+    repetitive log cannot grow the fix prompt. Do not widen the recognizer beyond the existing
+    `Run 'npm run <name>' and commit the result.` grammar, and keep package.json pairing as the
+    execution allowlist. Ordinary logs with no recognized remedy must remain byte-identical.
+  acceptance:
+    - claim: "a declared generator remedy more than 60 lines before the end of a failing job remains visible to generatorFixFor after fetchCiFailures builds its evidence"
+      proof: "unit test: test/ci-log-generator-remedy-retention.test.ts"
+    - claim: "a long #3716-shaped log reaches the pre-strike generator fix path, spawns no worker and spends no strike"
+      proof: "unit test: test/ci-log-generator-remedy-retention.test.ts"
+    - claim: "retained remedies are deduplicated and bounded, while a log with no recognized remedy keeps the existing final-tail bytes"
+      proof: "unit test: test/ci-log-generator-remedy-retention.test.ts"
+  note: |
+    This is evidence retention for the existing deterministic generator rung. It does not weaken
+    task scope, auto-run arbitrary commands, increase the worker prompt's untrusted surface, or
+    change the two-strike cap. `declaredGeneratorScriptFor` remains the command authority.
+
+    ID PROVENANCE: `rmd next-task-id --reserve` atomically reserved refs/rmd-id/W1-T2733 against
+    tasks.yaml, shards, open PRs and history before this shard was written.
