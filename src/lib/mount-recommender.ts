@@ -1,5 +1,7 @@
 import type { Mounts } from "./mounts.js";
+import type { BillingMode } from "./env.js";
 import { pooledPriorFor, type PoolableEvidence } from "./routing-prior.js";
+import { routingObjectiveFor, type ArmWindowShare, type RoutingObjectiveKind } from "./routing-objective.js";
 
 /**
  * THE RECOMMENDATION LEG (W1-T2575, MASTER-PLAN §9, WS-8).
@@ -48,12 +50,21 @@ import { pooledPriorFor, type PoolableEvidence } from "./routing-prior.js";
  *                           edits it), so the check below is a deliberately small, read-only
  *                           re-statement of the SAME two ANDed conditions `enforceTierInvariant`
  *                           already enforces at load — see {@link tierInvariantViolation}.
- *   6. `insufficient-cost-data` / `inconclusive-interval` — the arms' own cost percentiles do not
+ *   6. `objective-disagreement` (W1-T2577) — `routingObjectiveFor` (routing-objective.ts) is the
+ *                           REAL objective: notional dollars under `billing_mode == "api"`, or
+ *                           window share consumed per settled task under `"subscription"` when
+ *                           BOTH arms' windows are readable (falling back to dollars, loudly,
+ *                           when they are not — never silently). When the sweep's dollar-cheaper
+ *                           arm is not ALSO the window-share-cheaper arm, this refuses rather than
+ *                           recommending a mount that optimises a number nobody is billed against
+ *                           the resource that actually runs out (§9, this task's own title).
+ *   7. `insufficient-cost-data` / `inconclusive-interval` — the arms' own cost percentiles do not
  *                           support a defensible effect-size interval (see {@link buildInterval}).
  *
  * ONLY once every gate above clears does a cell produce a {@link MountRecommendation} — every
- * recommendation carries the cell, both arms compared, each arm's own `n`, an effect size, and an
- * interval (this task's own acceptance).
+ * recommendation carries the cell, both arms compared, each arm's own `n`, an effect size, an
+ * interval, and the {@link RoutingObjectiveKind} that ultimately governed it (this task's own
+ * acceptance).
  *
  * OBSERVATIONAL EVIDENCE, NAMED AS SUCH. MASTER-PLAN's own status paragraph records that the
  * golden-task replay suite "has no `HarnessRunner` wired" (the Self-Harness leg reports no run
@@ -80,6 +91,12 @@ export interface MountHeadroomArm {
   costP90: number | null;
   costMax: number | null;
   costPerCompletedTaskUsd: number | null;
+  /** This arm's OWN window-share evidence (W1-T2577) — see routing-objective.ts. Optional and
+   *  structural, same discipline as every other field here: the sweep's own `.mjs` emission is
+   *  out of this task's file scope, so a caller that has not yet wired window evidence through
+   *  simply omits this, and {@link routingObjectiveFor} falls back to the dollar objective,
+   *  loudly, exactly as it does for any other unreadable window. */
+  windowShare?: ArmWindowShare;
 }
 
 /** The `scripts/mount-headroom-sweep.mjs` comparison shape — see {@link MountHeadroomArm}'s own
@@ -151,6 +168,13 @@ export interface MountRecommendation {
    *  aggregate (percentiles only, no retained per-run values) supports. Always `lowUsd > 0` — an
    *  interval that reaches zero or below is refused (`inconclusive-interval`), never recommended. */
    interval: { lowUsd: number; highUsd: number };
+  /** The REAL objective that governed this recommendation (W1-T2577, routing-objective.ts) —
+   *  `"window-share"` on a subscription install whose windows were readable for BOTH arms
+   *  compared, `"notional-dollar"` when `billing_mode == "api"` (the dollars are real there) or
+   *  when a subscription's window could not be read (a LOUD fallback, never silent — see
+   *  {@link routingObjectiveFor}). `cheaperValue`/`costlierValue` are in `unit`, never dollars
+   *  when `kind` is `"window-share"`. */
+  objective: { kind: RoutingObjectiveKind; unit: string; cheaperValue: number; costlierValue: number };
   note: string;
 }
 
@@ -162,6 +186,7 @@ export type MountRefusalReason =
   | "no-stable-advantage"
   | "quality-regression"
   | "tier-invariant"
+  | "objective-disagreement"
   | "insufficient-cost-data"
   | "inconclusive-interval";
 
@@ -267,6 +292,8 @@ function evaluateComparison(
   mounts: Mounts,
   minSampleN: number,
   armPassRateEvidence: PoolableEvidence[],
+  billingMode: BillingMode,
+  warn: ((message: string) => void) | undefined,
 ): MountRecommendationOutcome {
   const armA = arms.get(cmp.armKeyA);
   const armB = arms.get(cmp.armKeyB);
@@ -332,6 +359,38 @@ function evaluateComparison(
     return refuse(cell, "tier-invariant", `${cheaperArm.armKey} in cell ${cell.cellKey}: ${violation}`);
   }
 
+  // THE REAL OBJECTIVE (W1-T2577, routing-objective.ts): the sweep above judged "cheaper" purely
+  // on notional dollars. Under billing_mode == "subscription" the resource that actually runs out
+  // is the WINDOW, and with two providers there are two independent ones — so re-judge each arm
+  // on its OWN provider's window share per completed task, when both arms' windows are readable.
+  // An unreadable window falls back to the dollar objective LOUDLY (routingObjectiveFor's own
+  // `warn`), never silently — this call site never swallows that.
+  const cheaperObjective = routingObjectiveFor(
+    { provider: cheaperArm.provider, costPerCompletedTaskUsd: cheaperArm.costPerCompletedTaskUsd, windowShare: cheaperArm.windowShare },
+    billingMode,
+    { warn },
+  );
+  const costlierObjective = routingObjectiveFor(
+    { provider: costlierArm.provider, costPerCompletedTaskUsd: costlierArm.costPerCompletedTaskUsd, windowShare: costlierArm.windowShare },
+    billingMode,
+    { warn },
+  );
+  if (
+    cheaperObjective?.kind === "window-share" &&
+    costlierObjective?.kind === "window-share" &&
+    cheaperObjective.value >= costlierObjective.value
+  ) {
+    return refuse(
+      cell,
+      "objective-disagreement",
+      `${cheaperArm.armKey} is cheaper in notional dollars ($${cheaperArm.costPerCompletedTaskUsd}/completed task) ` +
+        `in cell ${cell.cellKey}, but consumes ${cheaperObjective.value}% of provider '${cheaperArm.provider}'s window ` +
+        `per completed task versus ${costlierArm.armKey}'s ${costlierObjective.value}% of provider ` +
+        `'${costlierArm.provider}'s window — the scarce resource on subscription is the window, not the notional ` +
+        `dollar (§9); refusing rather than recommending against the resource that actually runs out.`,
+    );
+  }
+
   if (cheaperArm.costPerCompletedTaskUsd === null || costlierArm.costPerCompletedTaskUsd === null) {
     return refuse(
       cell,
@@ -362,6 +421,17 @@ function evaluateComparison(
 
   const effectSizeUsd = round2(costlierArm.costPerCompletedTaskUsd - cheaperArm.costPerCompletedTaskUsd);
 
+  // cheaperObjective is guaranteed defined here: costPerCompletedTaskUsd is non-null on both arms
+  // (just checked above), so routingObjectiveFor's dollar branch (direct under billing_mode ==
+  // "api", or the loud fallback under "subscription") always resolves.
+  const objective = cheaperObjective ?? {
+    kind: "notional-dollar" as const,
+    value: cheaperArm.costPerCompletedTaskUsd,
+    provider: cheaperArm.provider,
+    unit: "usd-per-completed-task" as const,
+  };
+  const objectiveCostlierValue = costlierObjective?.kind === objective.kind ? costlierObjective.value : costlierArm.costPerCompletedTaskUsd;
+
   return {
     kind: "recommendation",
     cellKey: cell.cellKey,
@@ -372,18 +442,28 @@ function evaluateComparison(
     currentArm: armSummary(costlierArm, costlierArm.costPerCompletedTaskUsd),
     effectSizeUsd,
     interval,
+    objective: { kind: objective.kind, unit: objective.unit, cheaperValue: objective.value, costlierValue: objectiveCostlierValue },
     note:
       `cell ${cell.cellKey} (type=${cell.type}, risk=${cell.risk}, class=${cell.taskClass}): ${cheaperArm.armKey} ` +
       `(n=${cheaperArm.n}) costs $${cheaperArm.costPerCompletedTaskUsd}/completed task vs ${costlierArm.armKey} ` +
       `(n=${costlierArm.n}) at $${costlierArm.costPerCompletedTaskUsd} — effect size $${effectSizeUsd} ` +
       `(interval [$${interval.lowUsd}, $${interval.highUsd}]), advantage holds under re-dispatch, pass rate ` +
-      `does not regress, Tier Invariant clears. ${OBSERVATIONAL_EVIDENCE_NOTICE}`,
+      `does not regress, Tier Invariant clears, objective=${objective.kind} (§9). ${OBSERVATIONAL_EVIDENCE_NOTICE}`,
   };
 }
 
 export interface RecommendMountsOptions {
   /** Overrides {@link DEFAULT_MIN_SAMPLE_N}. */
   minSampleN?: number;
+  /** How this install is billed (§9) — selects {@link routingObjectiveFor}'s objective. Defaults
+   *  to `"subscription"`, matching `billingMode`'s own documented default (env.ts): absent the
+   *  sanctioned `ANTHROPIC_API_KEY` valve, an install bills to subscription, and that is where the
+   *  window — not the notional dollar — is the real constraint (this task's own title). */
+  billingMode?: BillingMode;
+  /** Called (never silently swallowed) whenever {@link routingObjectiveFor} falls back to the
+   *  dollar objective on a subscription install because a window could not be read. Defaults to
+   *  `routingObjectiveFor`'s own `console.warn`. */
+  warn?: (message: string) => void;
 }
 
 /** Pools every arm's pass rate ACROSS every cell in this same call, keyed by `armKey` — the join
@@ -414,6 +494,7 @@ function poolArmPassRates(cells: MountHeadroomCell[]): PoolableEvidence[] {
  */
 export function recommendMounts(cells: MountHeadroomCell[], mounts: Mounts, opts: RecommendMountsOptions = {}): MountRecommendationOutcome[] {
   const minSampleN = opts.minSampleN ?? DEFAULT_MIN_SAMPLE_N;
+  const billingMode = opts.billingMode ?? "subscription";
   const armPassRateEvidence = poolArmPassRates(cells);
   const out: MountRecommendationOutcome[] = [];
   for (const cell of cells) {
@@ -430,7 +511,7 @@ export function recommendMounts(cells: MountHeadroomCell[], mounts: Mounts, opts
     }
     const arms = new Map(cell.arms.map((a) => [a.armKey, a] as const));
     for (const cmp of cell.comparisons) {
-      out.push(evaluateComparison(cell, cmp, arms, mounts, minSampleN, armPassRateEvidence));
+      out.push(evaluateComparison(cell, cmp, arms, mounts, minSampleN, armPassRateEvidence, billingMode, opts.warn));
     }
   }
   return out;
@@ -471,6 +552,8 @@ export function mountRecommendationProposalCandidate(rec: MountRecommendation): 
       `${rec.currentArm.armKey} (n=${rec.currentArm.n}, $${rec.currentArm.costPerCompletedTaskUsd}/completed task).\n` +
       `Effect size: $${rec.effectSizeUsd}/completed task (interval [$${rec.interval.lowUsd}, ` +
       `$${rec.interval.highUsd}]).\n` +
+      `Objective: ${rec.objective.kind} (${rec.objective.cheaperValue} vs ${rec.objective.costlierValue} ${rec.objective.unit}) — ` +
+      `§9: the scarce resource on subscription is the window, not the notional dollar.\n` +
       `Tier Invariant (G-17) checked and clears for '${rec.recommendedArm.servedModel}'.\n` +
       `${OBSERVATIONAL_EVIDENCE_NOTICE}\n` +
       `This proposal changes nothing by itself — ratifying it (\`rmd approve\`) is what opens the ` +
