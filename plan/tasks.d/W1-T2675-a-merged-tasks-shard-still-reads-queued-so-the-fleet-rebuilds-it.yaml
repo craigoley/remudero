@@ -1,0 +1,59 @@
+- id: W1-T2675
+  title: "A MERGED TASK'S SHARD STILL READS `status: queued`, AND NOTHING AT DISPATCH CONSULTS THE CREDIT PROJECTION — so the fleet re-dispatches work that already shipped, and the rebuild cannot pass review because the shard's criteria describe a diff that is already on main"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 15.00
+  files: [src/lib/drain.ts, test/a-merged-tasks-shard-still-reads-queued-so-the-fleet-rebuilds-it.test.ts]
+  origin: "operator-session#3512-misattribution-2026-09-02"
+  plan_refs: ["W1-T1000002", "W1-T2581"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED, AND IT COST A FULL PR LIFECYCLE ON 2026-09-01. W1-T1000002 merged as #2376 on
+    2026-08-22 carrying BOTH credit paths — a `Remudero-Task: W1-T1000002` trailer AND the head ref
+    `run-W1-T1000002-1787310737460`. Its shard on main still reads `status: queued, attempts: 0`.
+    The task was re-dispatched, produced #3512, and #3512 could not pass review by construction:
+    remudero-review judged it against that shard's eight criteria, whose proofs read IDENTICALLY at
+    #3512's head and base (`disarmAutoMerge(` 3/3 in sweep.ts, `automerge.hold` 4/4 in ledger.ts,
+    test/automerge-hold.test.ts 17/17 either side) because the work they name shipped ten days
+    earlier. Resolving it took a new task id (W1-T2581), a re-attribution, and a retired duplicate.
+
+    THE STATUS FIELD IS NOT THE BUG AND MUST NOT BE THE FIX. CLAUDE.md already states the rule —
+    "a shard's `status:` field is not a completion signal — it stays `queued` on tasks that shipped"
+    — and names the credit projection (the `Remudero-Task:` trailer UNIONED with the
+    `run-<id>-<digits>` head-ref path, `findMergedByHeadBranch` in status.ts) as the ONLY completion
+    signal. `status:` records what the FILING wrote and nothing updates it on merge, by design.
+    Back-filling it would put a derived value in a hand-authored file and create a second, staler
+    source of truth. The defect is that DISPATCH does not consult the projection that already exists.
+
+    SO THE REFUSAL BELONGS AT `isDispatchEligible` (src/lib/drain.ts), which already takes
+    `opts.isOpenPr` for the in-flight case and simply has no equivalent for the ALREADY-CREDITED
+    case. A task whose id is credited as merged must be refused BEFORE a worker spawns, naming which
+    credit path matched and the PR number, so the operator sees "already shipped as #N" rather than
+    a rebuild that fails review an hour later.
+
+    THIS IS THE ENFORCEMENT HALF OF A RULE THAT IS TODAY UNENFORCED PROSE. CLAUDE.md's own preamble
+    says a rule stated only there "can be violated silently and repeatedly, which is why several of
+    these bullets exist at all", and that the remedy is to make something refuse it. This one has
+    now been violated at least three times in a single day's board.
+
+    THE FALSIFIER IS A CREDITED ID, NOT A MISSING ONE. A task with no merge evidence must still
+    dispatch — a check that refuses everything is not a check — so the test must assert BOTH
+    directions: a credited id is refused with its evidence named, and an uncredited id of the same
+    shape still passes. Both credit paths need their own case, because the union is the point: #1657
+    carries ZERO trailers and is credited purely by its head ref.
+  acceptance:
+    - claim: "a task whose id is credited as merged is refused at dispatch, before any worker spawns"
+      proof: "unit test: test/a-merged-tasks-shard-still-reads-queued-so-the-fleet-rebuilds-it.test.ts"
+    - claim: "the refusal names which credit path matched and the PR that carried it"
+      proof: "unit test: test/a-merged-tasks-shard-still-reads-queued-so-the-fleet-rebuilds-it.test.ts"
+    - claim: "credit by head-ref alone is honoured, so a merge carrying no trailer still counts"
+      proof: "unit test: test/a-merged-tasks-shard-still-reads-queued-so-the-fleet-rebuilds-it.test.ts"
+    - claim: "an uncredited task of the same shape still dispatches, so the check is not a blanket refusal"
+      proof: "unit test: test/a-merged-tasks-shard-still-reads-queued-so-the-fleet-rebuilds-it.test.ts"
+    - claim: "the shard's own status field is neither read nor written by the check"
+      proof: "unit test: test/a-merged-tasks-shard-still-reads-queued-so-the-fleet-rebuilds-it.test.ts"

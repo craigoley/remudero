@@ -1,0 +1,54 @@
+- id: W1-T2674
+  title: "A PR CAN BE RED WITH NOTHING TO HAND A FIX WORKER, AND THE RUNG'S ONLY MOVE IS TO STAND DOWN — the checks-red rollup and the ci-log evidence miner disagree, so `blocked_ci` dispatch reports zero enumerable failing checks, spends no strike, and the PR stays red with no diagnosis and no owner"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 12.00
+  files: [src/run-task.ts, test/a-red-pr-with-no-enumerable-check-hands-nothing-to-a-fixer.test.ts]
+  origin: "operator-session#rollup-and-miner-disagree-2026-09-02"
+  plan_refs: []
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-02 IN THE OPERATOR'S OWN LOG:
+
+        fix rung: standing down before strike 2 — blocked_ci dispatch with zero enumerable failing
+        check(s) — the checks-red rollup and the ci-log evidence miner disagree, so there is nothing
+        to hand a fix worker; standing down rather than spending a strike on empty evidence
+
+    THE STAND-DOWN IS THE RIGHT LOCAL DECISION. Spending a strike on empty evidence would buy a
+    worker with nothing to read. The defect is not the refusal; it is that the disagreement is
+    terminal. The PR is red by the rollup, unexplainable by the miner, and the run ends with no
+    diagnosis, no strike spent, and no one holding it. The next tick reaches the same state.
+
+    THE DISAGREEMENT IS THE FINDING AND IT IS NOT RECORDED AS ONE. Two instruments read the same
+    PR and return incompatible answers: one says a required check failed, the other cannot name a
+    failing check. Exactly one of them is wrong, and which one matters — a rollup that reddens on a
+    check the miner cannot see hides real failures, while a miner blind to a real red hides them
+    from every fix worker. Today the pair is reconciled nowhere and the discrepancy leaves no row
+    a later census could count.
+
+    THIS IS A BOUND-SHAPED FAMILY THE REPO ALREADY TRACKS, in its second direction. CLAUDE.md's
+    recurring defect is a bound that fires on a HEALTHY condition; this is an instrument that
+    reports NOTHING on an unhealthy one. Both end the same way: a decision taken on evidence that
+    was never there.
+
+    WHAT THIS TASK OWES. Record the disagreement as its own ledgered event carrying both sides —
+    what the rollup called red, and what the miner enumerated — so the population becomes
+    countable and the wrong instrument becomes identifiable from history rather than from a live
+    reproduction. The stand-down itself stays: this task does not spend a strike on empty evidence
+    either, and does not change when a fix worker is dispatched.
+  acceptance:
+    - claim: "a red rollup with zero enumerable failing checks writes one row carrying both sides of the disagreement"
+      proof: "unit test: test/a-red-pr-with-no-enumerable-check-hands-nothing-to-a-fixer.test.ts"
+    - claim: "the row names what the rollup called red and what the miner could enumerate, never one alone"
+      proof: "unit test: test/a-red-pr-with-no-enumerable-check-hands-nothing-to-a-fixer.test.ts"
+    - claim: "the stand-down is unchanged: no strike is spent on empty evidence"
+      proof: "unit test: test/a-red-pr-with-no-enumerable-check-hands-nothing-to-a-fixer.test.ts"
+    - claim: "a red PR whose failing checks ARE enumerable dispatches exactly as today and writes no such row"
+      proof: "unit test: test/a-red-pr-with-no-enumerable-check-hands-nothing-to-a-fixer.test.ts"
+    - claim: "the row's reason comes from the decision that produced it, never from a neighbouring gate"
+      proof: "unit test: test/a-red-pr-with-no-enumerable-check-hands-nothing-to-a-fixer.test.ts"

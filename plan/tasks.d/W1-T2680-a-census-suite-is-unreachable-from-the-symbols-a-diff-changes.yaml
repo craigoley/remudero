@@ -1,0 +1,58 @@
+- id: W1-T2680
+  title: "A CENSUS SUITE IS UNREACHABLE FROM THE SYMBOLS A DIFF CHANGES, SO THE PRESCRIBED CALLER SWEEP RUNS GREEN WHILE CI GOES RED — `diff-class.mjs` can enumerate plan-reading suites and has no equivalent for the suites that WALK a population the diff joins"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 15.00
+  files: [scripts/diff-class.mjs, test/a-census-suite-is-unreachable-from-the-symbols-a-diff-changes.test.ts]
+  origin: "operator-session#3512-misattribution-2026-09-02"
+  plan_refs: ["W1-T2428", "W1-T2521", "W1-T2639"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED TWICE IN ONE SESSION, 2026-09-01, ON TWO DIFFERENT PRs. #3569 added ONE seamed policy
+    read and reddened test/config-reader-seams.test.ts (a calibration over every unredirectable
+    policy reader under src/**); the caller sweep prescribed by CLAUDE.md — `git grep -l` for the
+    changed symbols, then run every suite that names them — ran 153 suites and 2738/2738 GREEN while
+    that census stayed red. #3583 made `reviewerMount` optional and reddened
+    test/mounts-wiring.test.ts (a source-shape ratchet over run-task.ts); the same sweep ran 44
+    suites and 1099/1099 green. In both cases CI found it and the local discipline could not.
+
+    THE BLINDNESS IS STRUCTURAL, NOT A SWEEP DONE BADLY. A census suite asserts the SIZE or SHAPE of
+    a population — every policy reader, every bound-shaped constant, every command name, every
+    source file's line count. It therefore names none of the symbols any particular diff touches,
+    and `git grep -l <symbol>` cannot reach it BY CONSTRUCTION. CLAUDE.md records the hazard
+    (#2639 reddened this same config-reader-seams file for the same reason) and the record has not
+    prevented a recurrence, because a hazard an agent must REMEMBER is not a mechanism.
+
+    THE ENUMERATION ALREADY EXISTS FOR THE ADJACENT CASE. W1-T2428 built
+    `diff-class.mjs --list-plan-reading-suites`, which enumerates AT RUN TIME from the tree — never
+    a frozen list, so a suite added in the same commit is picked up by the run that adds it — and
+    CI's fast lane depends on it. The same shape answers this question: given a set of changed
+    files, which suites WALK a population those files belong to. That is a different query from
+    "which suites import this module", and it is the one no verb answers.
+
+    ENUMERATE FROM THE TREE, NEVER FROM A LIST. A hardcoded census registry rots the moment someone
+    adds a census, which is the failure mode W1-T2521 already names for census gates. The detection
+    must be structural — a suite that reads a directory tree, globs src/**, or spawns a repo-wide
+    scan — so a census added tomorrow is found tomorrow.
+
+    THE FALSIFIER IS A SUITE THAT MUST NOT BE LISTED. Any detector loose enough to catch every
+    census will also catch ordinary suites and hand the agent the whole test directory, which is the
+    same as no answer. The test must pin both directions on the REAL tree: the two suites that
+    actually caught these regressions are listed for a src/lib change, and an ordinary unit suite
+    that merely imports one module is not.
+  acceptance:
+    - claim: "the verb lists census suites for a given changed-file set, enumerated from the tree"
+      proof: "unit test: test/a-census-suite-is-unreachable-from-the-symbols-a-diff-changes.test.ts"
+    - claim: "config-reader-seams and mounts-wiring are both listed for a src/lib change, the two that caught real regressions"
+      proof: "unit test: test/a-census-suite-is-unreachable-from-the-symbols-a-diff-changes.test.ts"
+    - claim: "an ordinary suite that merely imports a changed module is NOT listed, so the answer is not the whole directory"
+      proof: "unit test: test/a-census-suite-is-unreachable-from-the-symbols-a-diff-changes.test.ts"
+    - claim: "a census suite added to the tree is found without editing any registry"
+      proof: "unit test: test/a-census-suite-is-unreachable-from-the-symbols-a-diff-changes.test.ts"
+    - claim: "an empty changed-file set yields an empty list rather than every suite"
+      proof: "unit test: test/a-census-suite-is-unreachable-from-the-symbols-a-diff-changes.test.ts"
