@@ -6,7 +6,7 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 100.00
-  risk: medium
+  risk: high
   origin: "followup#W1-T2457-1788020906446"
   plan_refs: ["§12A", "W1-T2457", "W1-T74"]
   files: [CLAUDE.md, test/docs-claims.test.ts, plan/claims.yaml]
