@@ -4662,7 +4662,7 @@ async function runReview(args: {
   /** The (task_type="reviewer" × the under-review task's risk) mount (§9,
    * W1-T63) — MOUNT-GOVERNED, never a hardcoded literal. Only consulted when a
    * reviewer is actually spawned (spawnReviewer!==false && criteria.length>0). */
-  reviewerMount: Mount;
+  reviewerMount?: Mount;
   /**
    * PR-HEAD checkout dir the deterministic FLOOR executes whitelisted proofs in
    * (W1-T65, ratifies P15 — HEAD DISCIPLINE: never the operator's working
@@ -4779,7 +4779,16 @@ async function runReview(args: {
   // floor, lint-plan, the plan-PR emitter and the plan-index checks — is untouched and still runs.
   // The predicate is review.ts's own `planOnlyDiff`, never a second copy of the expression.
   const planOnlySkip = planOnlyDiff(diff);
-  const attemptReviewer = args.spawnReviewer !== false && criteria.length > 0 && !planOnlySkip;
+  // Snapshot the optional mount before entering the async temp-dir callback. Besides making the
+  // optional semantic-sweep path type-safe, this keeps the spawn's three controls visibly sourced
+  // from the resolved reviewer mount — the mount-wiring ratchet intentionally checks these exact
+  // assignments so a future edit cannot smuggle hardcoded model/effort/turn values back in.
+  const reviewerSpawnMount = args.reviewerMount === undefined ? undefined : {
+    model: args.reviewerMount.model,
+    effort: args.reviewerMount.effort,
+    maxTurns: args.reviewerMount.maxTurns,
+  };
+  const attemptReviewer = args.spawnReviewer !== false && reviewerSpawnMount !== undefined && criteria.length > 0 && !planOnlySkip;
   let reviewerSubtype: string | undefined;
   let reviewerSpawnFailed = false;
   if (planOnlySkip) {
@@ -4809,9 +4818,9 @@ async function runReview(args: {
             // undeclared 12-turn cap with no model/effort override walled
             // `error_max_turns` on every substantive code PR — a floor-only PASS silently masquerading
             // as a completed review (P10-a; reviewerOutcome below makes it legible).
-            model: args.reviewerMount.model,
-            effort: args.reviewerMount.effort,
-            maxTurns: args.reviewerMount.maxTurns,
+            model: reviewerSpawnMount!.model,
+            effort: reviewerSpawnMount!.effort,
+            maxTurns: reviewerSpawnMount!.maxTurns,
             maxBudgetUsd: args.budgetUsd,
             config: args.config,
             queryFn: args.reviewerQueryFn, // W1-T2205: absent ⇒ the real SDK query(), unchanged.
@@ -13678,6 +13687,8 @@ interface ReviewCommandDeps {
    *  ordering guarantee rather than a second network cost. Injectable so a test can drive the
    *  unfetched-sha case without a network. */
   fetchHead?: (repoDir: string) => void;
+  /** Operator CLI remains deterministic; only internal unattended callers opt in. */
+  executionMode?: "deterministic" | "semantic";
 }
 
 /**
@@ -13885,6 +13896,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
     runReview: runReviewDep,
     postReviewPending: postReviewPendingDep,
     fetchHead,
+    executionMode,
   } = {
     fetchView: ghJson,
     loadConfig,
@@ -13892,6 +13904,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
     runReview,
     postReviewPending,
     fetchHead: realReviewWorktreeDeps.fetch,
+    executionMode: "deterministic" as const,
     ...deps,
   };
 
@@ -13927,6 +13940,8 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   // Both stay `undefined` on ANY read/parse failure (see the catch below), exactly like
   // `criteria` degrading to the body's Acceptance: block — never a reason to fail the review.
   let taskDeclaredFiles: string[] | undefined;
+  let taskRisk: TaskRisk | undefined;
+  let taskBudgetUsd: number | undefined;
   let openTaskIds: Set<string> | undefined;
   // W1-T2462: `resolvePlanCriteriaAtHead` (lib/review.ts) resolves this trailered PR's criteria
   // from the plan AS IT STANDS AT `view.headRefOid` rather than `resolvePlanCriteriaForReview`'s
@@ -13962,6 +13977,8 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
     criteria = resolved.criteria;
     if (resolved.source) source = resolved.source;
     taskDeclaredFiles = resolved.taskDeclaredFiles;
+    taskRisk = resolved.taskRisk;
+    taskBudgetUsd = resolved.taskBudgetUsd;
     resolverDivergence = resolved.divergence;
   }
   if (criteria.length === 0) {
@@ -13981,6 +13998,36 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   const provenanceKey = { taskId: taskId ?? `PR-${view.number}`, prUrl: view.url, headSha: view.headRefOid };
   const provenance = resolveReviewProviderProvenance(readLedgerLines(ledgerPath), provenanceKey);
   log("review.provider_provenance", reviewProviderProvenanceLedgerFields(provenance, provenanceKey));
+
+  let spawnReviewer = false, reviewerMount: Mount | undefined;
+  let settingsFile = "";
+  if (executionMode === "semantic") {
+    if (taskRisk === undefined || taskBudgetUsd === undefined) {
+      log("review.reviewer.skipped", {
+        reason: "head-task-metadata-unavailable",
+        missing: [taskRisk === undefined ? "risk" : undefined, taskBudgetUsd === undefined ? "budget_usd" : undefined].filter(Boolean),
+      });
+    } else {
+      try {
+        reviewerMount = resolveMount(loadMounts(mountsPath(repoRoot)), "reviewer", taskRisk);
+        settingsFile = renderWorkerSettings({
+          templatePath: join(repoRoot, "settings", "worker.json"),
+          hooksDir: join(repoRoot, "hooks"),
+          outPath: join(config.root, "tmp", `reviewer-settings-${runId}.json`),
+        });
+        validateWorkerSettingsFile(settingsFile);
+        spawnReviewer = true;
+        log("review.semantic_mode", { task_risk: taskRisk, hard_cap_usd: taskBudgetUsd });
+      } catch (e) {
+        reviewerMount = undefined;
+        settingsFile = "";
+        log("review.reviewer.skipped", {
+          reason: "semantic-setup-unavailable",
+          error: String((e as Error)?.message ?? e),
+        });
+      }
+    }
+  }
 
   // W1-T2315: name the divergence rather than let it pass silently into the body fallback above —
   // a trailer that resolved nothing because the plan could not be LOADED is a different fact, with
@@ -14050,16 +14097,14 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
       headRefName: view.headRefName,
       task: { id: taskId ?? `PR-${view.number}`, acceptance: criteria, files: taskDeclaredFiles },
       report: body, // the PR body is the manual author's REPORT (proofs are pasted here)
-      settingsFile: "",
+      settingsFile,
       config,
+      budgetUsd: spawnReviewer ? taskBudgetUsd : undefined,
       log,
       say: (m) => console.log(m),
       account: (r) => r,
-      spawnReviewer: false, // deterministic binding path — the same judge, by hand
-      // spawnReviewer:false ⇒ never actually consulted (no spawn happens); "medium"
-      // is a safe, always-resolvable placeholder — a manual `rmd review` PR carries
-      // no plan task risk of its own to key a real one off.
-      reviewerMount: resolveMount(loadMounts(mountsPath(repoRoot)), "reviewer", "medium"),
+      spawnReviewer,
+      reviewerMount,
       // W1-T185 (Gap 2): the materialized worktree above when available — the
       // SAME `headCheckoutDir` wiring the autonomous path uses, so whitelisted
       // proofs execute here too. `undefined` (materialization unavailable)
@@ -26719,7 +26764,7 @@ export function buildSweepEffects(
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
   // W1-T254: injectable review runner so the post-review effect's attempt/
   // done/failed logging path is unit-covered without spawning a real review.
-  reviewRunner: (prNumber: number) => Promise<number> = (prNumber) => reviewCommand(String(prNumber), ["--repo", repo]),
+  reviewRunner: (prNumber: number) => Promise<number> = (prNumber) => reviewCommand(String(prNumber), ["--repo", repo], { executionMode: "semantic" }),
   // Injectable worker spawn, same shape and rationale as `reviewRunner` directly above: the
   // fix rung's own effects (including its best-effort push) were unreachable from any offline
   // test because the adapter below hardcoded `spawnWorker`. Optional with no default body, so
