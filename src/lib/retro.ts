@@ -2681,14 +2681,14 @@ export const FOLLOWUP_TYPE_ROUTES: Readonly<Record<FollowupCandidate["type"], "p
 
 /** One candidate's routing outcome. A decline always NAMES the arm that declined it — never a
  *  bare boolean — so a reader can tell "already covered by the existing title dedup" from
- *  "not plan-shaped work" from "restates its own declaring task" without re-deriving any of the
- *  three from `harvest` by hand. */
+ *  "not plan-shaped work" from "restates its own declaring task" or "dispatch-only" without
+ *  re-deriving any of the four from `harvest` by hand. */
 export type FollowupRouteOutcome =
   | { candidate: FollowupCandidate; routed: true; proposalId: string }
   | {
       candidate: FollowupCandidate;
       routed: false;
-      arm: "title-dedup" | "type-not-plan-shaped" | "self-referential";
+      arm: "title-dedup" | "type-not-plan-shaped" | "self-referential" | "dispatch-only";
       reason: string;
     };
 
@@ -2727,6 +2727,62 @@ export function isSelfReferentialFollowup(candidate: FollowupCandidate): boolean
   return textAsksToImplementItsOwnTask(candidate.text, candidate.taskId);
 }
 
+// ── W1-T2613: the third refusal arm — "dispatch-only" ──────────────────────────────────────────
+//
+// MEASURED 2026-09-01 over the live 317-proposal registry: 2 routed proposals asked for NOTHING
+// but "task X is ready, hand it off" — W1-T2457 (the ordinary drain had already merged it as
+// #3272, so ratifying the proposal could only re-dispatch merged work) and W1-T2482 (status:
+// queued — already dispatchable through the ordinary drain, so ratifying it could only duplicate
+// a task already in the plan). Neither the title-dedup arm nor type-not-plan-shaped arm above
+// declines either: both are typed `task:` (FOLLOWUP_TYPE_ROUTES says "propose") and neither
+// title-matches an open task/proposal.
+//
+// THE SIGNAL THIS ARM USES, deliberately narrow: the entry names its OWN originating task
+// (`FollowupCandidate.taskId` — by construction always an already-filed id; a `report.followups`
+// row is only ever emitted by a run dispatched AGAINST a filed task, so no live plan re-read is
+// needed to confirm "already-filed") AND its text carries a bare-dispatch marker phrase ("ready to
+// implement", "hand off") AND carries NO OTHER action-verb marker. The W1-T2470 control this
+// task's own rationale names — "re-run this task's own falsifier check ... the task must be
+// closed rather than built if that's confirmed" — also mentions its own task id, but the
+// action-verb check (`re-run`/`verify`/`close`/`check`/`audit`) keeps it routed: it
+// names real work, not a bare dispatch ask.
+//
+// A cross-task ask ("W1-T<n> needs picked up") is NOT this arm's shape and stays routed — the
+// claim here is narrowly about an entry's OWN already-filed referent, never about a task the
+// entry merely mentions in passing.
+//
+// HEURISTIC OVER FREE PROSE, NOT A PARSER — stated, never claimed otherwise (this task's own
+// rationale, Q on the mechanism: "a predicate over free prose WILL misfire in both directions").
+// A live entry that pairs a bare-dispatch marker phrase with real follow-up work worded outside
+// this arm's action-verb list (a phrasing this arm does not recognize as "real work") is WRONGLY
+// DECLINED here, right alongside every entry it declines correctly — named in every declined
+// outcome's own `reason`, never hidden behind a "0 false declines" claim this predicate cannot
+// back.
+
+/** Marker phrases signalling a followup's text is a BARE DISPATCH ask ("this task is ready,
+ *  hand it off") rather than a description of work still to be done. Free prose, so this is a
+ *  heuristic — see the arm's own doc above for the false-decline risk it knowingly accepts. */
+const DISPATCH_ONLY_MARKERS: RegExp[] = [/\bready to implement\b/i, /\bready to build\b/i, /\bhand(?: it)? off\b/i];
+
+/** Verbs that mean the entry names REAL follow-up work of its own, not only a dispatch ask — ANY
+ *  match here overrides {@link DISPATCH_ONLY_MARKERS}, keeping the W1-T2470 control ("re-run this
+ *  task's own falsifier check ... must be closed rather than built") routed rather than declined. */
+const NAMES_REAL_WORK_MARKERS: RegExp[] = [/\bre-?run\b/i, /\bverify\b/i, /\bclose[ds]?\b/i, /\bcheck\b/i, /\baudit\b/i];
+
+/**
+ * `undefined` unless `candidate` is a BARE dispatch ask for its own already-filed originating
+ * task — see the arm's doc above for the exact three-part test. When it returns a task id, that
+ * id is always `candidate.taskId` itself (never a different, merely-mentioned id).
+ */
+function dispatchOnlyReferent(candidate: FollowupCandidate): string | undefined {
+  if (candidate.taskId === "?" || candidate.taskId === "") return undefined;
+  const escapedId = candidate.taskId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  if (!new RegExp(`\\b${escapedId}\\b`).test(candidate.text)) return undefined;
+  if (!DISPATCH_ONLY_MARKERS.some((re) => re.test(candidate.text))) return undefined;
+  if (NAMES_REAL_WORK_MARKERS.some((re) => re.test(candidate.text))) return undefined;
+  return candidate.taskId;
+}
+
 export interface RouteFollowupsDeps {
   registryPath: string;
   /** Injectable — production takes `updateProposalRegistry` (the W1-T240 single writer),
@@ -2753,7 +2809,7 @@ export function followupProposalId(candidate: FollowupCandidate): string {
  * (inbox.ts's `updateProposalRegistry`) board-review.ts/rule-efficacy.ts/feedback-docket.ts
  * already use — replacing "nobody reads this markdown section" with an actual consumer.
  *
- * THREE REFUSAL ARMS, each named on its own outcome, neither re-implemented here:
+ * FOUR REFUSAL ARMS, each named on its own outcome, neither re-implemented here:
  *   - `"title-dedup"`: `harvest.deduped` — `mineFollowups`'s OWN `followupMatchesTitle` arm,
  *     the existing duplicate refusal this function reuses verbatim rather than re-scoring.
  *   - `"type-not-plan-shaped"`: {@link FOLLOWUP_TYPE_ROUTES} says the entry's type is not
@@ -2761,9 +2817,13 @@ export function followupProposalId(candidate: FollowupCandidate): string {
  *   - `"self-referential"` (W1-T2617): {@link isSelfReferentialFollowup} says the entry's own
  *     ask IS the task that declared it ("implement <taskId>" naming its own `taskId`) — routing
  *     it would mint a duplicate of a plan record (task or shipped PR) that already exists on
- *     whichever side of the merge the declaring task falls. Checked BEFORE the type route below:
- *     a self-referential "task" entry is the exact shape 21-of-23 measured rows carried, and
- *     would otherwise sail through `FOLLOWUP_TYPE_ROUTES`'s "task" -> "propose" branch unchecked.
+ *     whichever side of the merge the declaring task falls. Checked after the more-specific
+ *     type and dispatch-only refusals but before minting: a self-referential "task" entry is the
+ *     exact shape 21-of-23 measured rows carried and would otherwise be proposed unchecked.
+ *   - `"dispatch-only"` (W1-T2613): the entry's whole content is a bare ask to dispatch its own
+ *     already-filed originating task ({@link dispatchOnlyReferent}) — no other action-verb marker,
+ *     so ratifying it could only duplicate a task already in the plan. See that function's own
+ *     doc for the exact test and the false-decline risk it knowingly accepts.
  *
  * EVERY MINTED PROPOSAL CARRIES `evidenceAnchors: []`, STATED, NEVER SYNTHESIZED. A
  * `FollowupEntry` is free prose with no `git grep`-able pattern (Q2 of this task's own
@@ -2793,6 +2853,32 @@ export function routeFollowupsToRegistry(harvest: FollowupHarvest, deps: RouteFo
 
   const routable: FollowupCandidate[] = [];
   for (const candidate of harvest.candidates) {
+    if (FOLLOWUP_TYPE_ROUTES[candidate.type] !== "propose") {
+      outcomes.push({
+        candidate,
+        routed: false,
+        arm: "type-not-plan-shaped",
+        reason: `"${candidate.type}" is an operator ask, not plan-shaped work (FOLLOWUP_TYPE_ROUTES)`,
+      });
+      continue;
+    }
+    const dispatchOnlyId = dispatchOnlyReferent(candidate);
+    if (dispatchOnlyId !== undefined) {
+      outcomes.push({
+        candidate,
+        routed: false,
+        arm: "dispatch-only",
+        reason:
+          `text asks only to dispatch its own already-filed task (${dispatchOnlyId}) — a bare-` +
+          `dispatch marker phrase with no other action-verb marker — so ratifying this as a ` +
+          `proposal could only duplicate a task already in the plan (W1-T2613). HEURISTIC OVER ` +
+          `FREE PROSE, NOT A PARSER: a live entry that pairs a dispatch marker with real ` +
+          `follow-up work worded outside this arm's action-verb list (re-run/verify/close/` +
+          `check/audit) is wrongly declined here, right alongside every entry it declines ` +
+          `correctly.`,
+      });
+      continue;
+    }
     if (isSelfReferentialFollowup(candidate)) {
       outcomes.push({
         candidate,
@@ -2803,16 +2889,9 @@ export function routeFollowupsToRegistry(harvest: FollowupHarvest, deps: RouteFo
           `declared it — so routing it would duplicate a plan record that already exists on ` +
           `whichever side of the merge ${candidate.taskId} falls (isSelfReferentialFollowup)`,
       });
-    } else if (FOLLOWUP_TYPE_ROUTES[candidate.type] === "propose") {
-      routable.push(candidate);
-    } else {
-      outcomes.push({
-        candidate,
-        routed: false,
-        arm: "type-not-plan-shaped",
-        reason: `"${candidate.type}" is an operator ask, not plan-shaped work (FOLLOWUP_TYPE_ROUTES)`,
-      });
+      continue;
     }
+    routable.push(candidate);
   }
 
   if (routable.length > 0) {
