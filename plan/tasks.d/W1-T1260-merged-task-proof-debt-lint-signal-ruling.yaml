@@ -10,7 +10,8 @@
   files: [DECISIONS.md]
   origin: oper#lint-open-failing-ruling-2026-08-23
   plan_refs: ["W1-T370", "W1-T367", "W1-T369", "W1-T1053", "W1-T1078", "W1-T456", "W1-T409", "W1-T410"]
-  status: queued
+  status: blocked
+  retirement: closed
   attempts: 0
   rationale: |
     THE RULING ON THE SPEND IS ALREADY FILED AND UNRUN — W1-T370, `verify: human`, `status: queued`,
@@ -155,6 +156,14 @@
     not pre-budgeted here for an outcome that may not be chosen.
     NO depends_on. It is rulable today. W1-T370 owns the SPEND question on retiring proofs; this owns
     the SIGNAL question on the whole-plan pass. Ruling either does not require ruling the other.
+    RULED 2026-09-02 — NONE OF THE THREE, on operator authorization. The ruling and its reasoning,
+    the measured residue and the credit paths each id was checked against, are recorded in
+    DECISIONS.md under "OPERATOR RULING (W1-T1260)". Per design (iv) this task closes as a recorded
+    decision with the measurement preserved and NO CODE WRITTEN. Design (ii)'s question — widen the
+    split's evidence, exempt ruling-shaped tasks from the filing exclusion, or simply NAME the
+    computed-then-discarded residue ids — is explicitly NOT settled by this ruling and remains the
+    operator's call.
+
   acceptance:
     - claim: "the operator's ruling among annotate-on-credit, archive-on-credit, scope-on-credit and none is recorded with its reasoning"
       proof: "demonstration: operator records the ruling and its reasoning in this task's record and in DECISIONS.md"
