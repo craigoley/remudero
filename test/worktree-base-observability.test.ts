@@ -89,6 +89,32 @@ test("worktreeAdd with NO log dep behaves byte-identically to before this option
   }
 });
 
+test("a `base` that is NOT an origin/<ref> tracking start point (a raw sha, here) has no refs/remotes/origin/<ref> to read at all -- local_ref_head degrades to the literal 'unreadable' (readLocalOriginRefHead's own catch), never a crash, independent of whatever the (also-unreadable, same reason) remote-head reading does", () => {
+  const root = tmp("rmd-wt-obs-local-ref-unreadable-");
+  const clone = join(root, "clone");
+  const wt = join(root, "wt");
+  try {
+    seedClone(clone);
+    const sha = execFileSync("git", ["-C", clone, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    const { log, events } = captureLog();
+    // `base` here is a raw commit sha, not "origin/<ref>" -- a valid `git worktree add`
+    // start point, but `ref` (base with no "origin/" prefix to strip) is then the sha
+    // itself, which neither `refs/remotes/origin/<sha>` (readLocalOriginRefHead) nor
+    // `refs/heads/<sha>` (defaultReadRemoteHead's ls-remote) ever resolves to -- both
+    // readings degrade independently, and the run still proceeds (fail-open).
+    assert.doesNotThrow(() =>
+      worktreeAdd(clone, wt, "run-obs-local-ref-unreadable-probe", sha, { warn: () => {}, log }),
+    );
+
+    const addLine = events.find((e) => e.step === "worktree.add");
+    assert.ok(addLine, "worktreeAdd still proceeds and still ledgers -- a missing tracking ref is not a refusal");
+    assert.equal(addLine!.extra!.local_ref_head, "unreadable", "no refs/remotes/origin/<sha> exists to read");
+    assert.equal(addLine!.extra!.base, sha, "the created base reading is unaffected");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 // ── Part 2: the fail-open becomes a ledger line, IN ADDITION to the existing warning ────────
 
 test("an unreadable remote head ledgers worktree.base_uncheckable (ref, base, error) through the injected logger, on top of the unchanged warn, and the resulting worktree.add records the head as unreadable -- never as verified", () => {
