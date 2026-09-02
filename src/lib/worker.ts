@@ -2936,6 +2936,77 @@ export function assertWorktreeBaseCurrent(
 }
 
 /**
+ * How many CONSECUTIVE `worktree.add` lines with an UNREADABLE `remote_head` — the shape
+ * {@link assertWorktreeBaseCurrent}'s fail-open branch produces, see its own doc — turn "the
+ * currency check could not run this once" into a DEGRADED POSTURE worth naming, rather than
+ * continuing indefinitely, one `console.error` at a time, exactly as though the guard were
+ * still running (W1-T2626 design note (iii)).
+ *
+ * A NAMED CONSTANT, NOT YET POLICY DATA. `plan/policy.yaml` is this value's eventual home — the
+ * same substrate `fixStrikeCap`/`sweep.strikeCap` already ride — but wiring a NEW field through
+ * there means editing `src/lib/policy.ts`'s schema too, outside this task's declared scope
+ * (`src/lib/worker.ts` + `src/run-task.ts` + this feature's own test). Design note (iii)'s own
+ * parenthetical covers exactly this: "a single named constant with its bound stated until
+ * then". 3 — the same "three strikes" order of magnitude `fixStrikeCap`/`sweep.strikeCap`
+ * already use in `plan/policy.yaml` — rules out one flaky `ls-remote` (noise the existing
+ * warn/fail-open already fully absorbs on its own) while still catching a persistently
+ * unreachable remote well before an entire session passes under a guard that silently never ran.
+ */
+export const WORKTREE_BASE_UNCHECKABLE_STREAK_BOUND = 3;
+
+/** {@link detectWorktreeBaseUncheckableStreak}'s verdict. */
+export interface WorktreeBaseUncheckableStreakVerdict {
+  /** true once the CURRENT run of consecutive unreadable outcomes reaches the threshold. */
+  degraded: boolean;
+  /** Length of the CURRENT run (0 when the newest `worktree.add` line was itself readable). */
+  consecutiveUnreadable: number;
+  /** `ts` of the newest unreadable line in the run, so a caller can name how long it has run. */
+  newestTs?: string;
+  /** `ts` of the oldest unreadable line in the run. */
+  oldestTs?: string;
+}
+
+/**
+ * Is the worktree-base currency check currently DEGRADED — has its remote-head read failed N
+ * times running, with no intervening readable creation? Pure over ledger lines, oldest-first,
+ * the SAME "current-run-only, a success resets it" shape {@link detectPostReviewStall}
+ * (`lib/sweep.ts`) already established for the sweep's post-review path — a success (or, here, a
+ * readable head) resets the count rather than letting one good day forgive a permanent latch.
+ *
+ * READS `worktree.add` LINES ONLY. Every worktree creation that reaches the point of being
+ * ledgered emits exactly one — a refusal (`WorktreeBaseStaleError`) never does, `worktreeAdd`
+ * throws before that log call runs — so this single step name can't double-count a creation
+ * whose `worktree.base_uncheckable` companion line rotated out independently; `remote_head` on
+ * that one line already tells "readable" (a real sha) from "unreadable" (the literal string)
+ * without needing the companion line at all.
+ *
+ * ORTHOGONAL TO STALENESS: a `worktree.stale_base` refusal (a READABLE remote head that simply
+ * differs from the base) neither resets nor extends this run — base currency and base
+ * READABILITY are different questions, and design note (iii) is scoped to the unreadable branch
+ * only.
+ */
+export function detectWorktreeBaseUncheckableStreak(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  threshold: number = WORKTREE_BASE_UNCHECKABLE_STREAK_BOUND,
+): WorktreeBaseUncheckableStreakVerdict {
+  const run: Record<string, unknown>[] = [];
+  for (const l of lines) {
+    if (l.step !== "worktree.add") continue;
+    if (l.remote_head === "unreadable") run.push(l);
+    else run.length = 0;
+  }
+  if (run.length === 0) return { degraded: false, consecutiveUnreadable: 0 };
+  const newest = run[run.length - 1];
+  const oldest = run[0];
+  return {
+    degraded: run.length >= threshold,
+    consecutiveUnreadable: run.length,
+    newestTs: typeof newest?.ts === "string" ? newest.ts : undefined,
+    oldestTs: typeof oldest?.ts === "string" ? oldest.ts : undefined,
+  };
+}
+
+/**
  * Result of {@link measureCanonicalCheckoutDrift}: how far the canonical checkout's `HEAD`
  * sits behind the `origin/<ref>` a worktree was just cut from.
  */
