@@ -2495,6 +2495,60 @@ export function describeRedCause(cause: RedCause, pr: OpenPrView, allPrs: readon
 }
 
 /**
+ * W1-T2620 (design i/v) — per PR, the `main_tip_sha` most recently recorded on a base-caused
+ * `sweep.disposed` ROW — the marker this task rides on the EXISTING step (never a fourth ledger
+ * signal). `undefined` for a PR never yet observed base-caused: nothing has "advanced" without a
+ * baseline to compare against (see {@link selectBaseCausedRelease}'s own doc for why that PR is
+ * therefore never release-eligible on its first observation).
+ *
+ * Reads `main_tip_sha` alone — never `stand_down_reason`'s prose — because the field is written
+ * ONLY from the base-caused branch below; no other disposition ever sets it, so no text match is
+ * needed to tell base-caused rows apart from any other `sweep.disposed` row.
+ */
+export function lastBaseCausedTipFromLedger(lines: readonly Record<string, unknown>[]): Map<number, string> {
+  const out = new Map<number, string>();
+  for (const line of lines) {
+    if (line.step !== "sweep.disposed") continue;
+    if (typeof line.pr_number !== "number") continue;
+    if (typeof line.main_tip_sha !== "string") continue;
+    // Ledger lines are append-ordered — the LAST match for a given PR is its most recent.
+    out.set(line.pr_number, line.main_tip_sha);
+  }
+  return out;
+}
+
+/**
+ * W1-T2620 (design ii/iii) — AT MOST ONE base-caused PR to release THIS pass, oldest activity
+ * first. THE RELEASE CONDITION IS "main has moved since this PR last stood down", never "the
+ * cause is known" (design note i) — so eligibility never touches {@link DEFAULT_FIX_CLASSES}.
+ *
+ * Eligible: {@link classifyRedCause} reads `"base-caused"` for this PR against `prs` THIS pass,
+ * AND {@link lastBaseCausedTipFromLedger}'s own record for this PR is DEFINED and differs from
+ * `mainTipSha` — main has advanced since the last pass that observed this exact PR base-caused.
+ * A PR with no prior record is NOT eligible: with no baseline, nothing has "advanced" yet, so it
+ * stands down (exactly as before this task existed) and gets its first tip recorded instead.
+ *
+ * {@link oldestActivityFirst} is the SAME comparator {@link selectUpdateBranchTarget}/
+ * {@link selectReviewAdmission} already use for the identical "a loser this pass is strictly
+ * older next pass, so it cannot starve" argument (design note iii, the ratified W1-T528 cost
+ * argument reused verbatim) — never a second, independently-invented ordering.
+ */
+export function selectBaseCausedRelease(
+  prs: readonly OpenPrView[],
+  mainTipSha: string,
+  lastBaseCausedTipByPr: ReadonlyMap<number, string>,
+  now: number,
+): OpenPrView | undefined {
+  const eligible = prs.filter((pr) => {
+    if (classifyRedCause(pr, prs) !== "base-caused") return false;
+    const lastTip = lastBaseCausedTipByPr.get(pr.prNumber);
+    return lastTip !== undefined && lastTip !== mainTipSha;
+  });
+  if (eligible.length === 0) return undefined;
+  return oldestActivityFirst(eligible, now);
+}
+
+/**
  * The four named "why is this actually blocked" states an escalation must distinguish
  * (W1-T186) — never a single overloaded `checksState`/`reviewState` pair. Exactly one applies
  * (or none, for an ordinary review-failure/contradictory block, where these four facts say
@@ -4939,6 +4993,37 @@ export interface SweepDeps {
    * Omitted ⇒ empty set ⇒ every stale pair stays eligible, exactly as before this field existed.
    */
   updatedForWorkflow?: ReadonlySet<string>;
+  /**
+   * W1-T2620 (design i) — an OPTIONAL, per-PASS read of `origin/main`'s CURRENT tip sha, consulted
+   * ONCE before the per-PR walk below (never per PR) — this module never calls `gh`/git directly,
+   * so the read is entirely the caller's own (intended as one `gh api repos/.../commits/main`
+   * read, run-task.ts). Feeds {@link selectBaseCausedRelease}'s "main has moved since this PR
+   * last stood down" release condition for the base-caused stand-down (never the `mergeState:
+   * "behind"` GitHub already reports — see that classifier's own doc for why a base-caused PR,
+   * red by construction, cannot itself read `"behind"`).
+   *
+   * OMITTED (the default, every pre-existing fixture) ⇒ `undefined` ⇒ the release lane below
+   * never fires and this pass is BYTE-IDENTICAL to before this task existed (criterion 6) — a
+   * base-caused stand-down behaves exactly as it always has.
+   */
+  readMainTip?: () => string | undefined | Promise<string | undefined>;
+  /**
+   * W1-T2620 (design iv) — RELEASE the one base-caused stand-down {@link selectBaseCausedRelease}
+   * chose this pass (never a loop, never a second attempt on the same target — the SAME "AT MOST
+   * ONCE per pass" shape {@link SweepDeps.updateBranch}'s own doc uses). `mainTipSha` is the tip
+   * that made this PR eligible, carried through so the effect can narrate it.
+   *
+   * THE LEAF IS THE ONE THAT EXISTS (design note iv): intended as the SAME `pushEmptyCommit` leaf
+   * `sweepPostFixReverification` already wires (run-task.ts) — never a second outward path, and
+   * never `updateBranchViaGh` (that lane's own `armedButStalled` population is disjoint — green,
+   * armed, `behind` — from a base-caused PR, which is red by construction).
+   *
+   * Optional: omitted, a selected release target still stands down with the ordinary
+   * `describeRedCause` sentence and no push is attempted — never a silent no-op, exactly like
+   * {@link SweepDeps.requeueCheck}'s own contract. A THROW is caught by the caller and treated
+   * identically (design vi, FAIL QUIET: never launder a red into a false "released" ledger line).
+   */
+  releaseBaseCausedStandDown?: (pr: OpenPrView, mainTipSha: string) => void | Promise<void>;
   /** Absolute path to state/ledger.ndjson — dedup source + sweep.disposed sink. */
   ledgerPath: string;
   /** The sweep's run id (e.g. SWEEP-<epochMs> / DAEMON-<epochMs>). */
@@ -5855,6 +5940,19 @@ export async function runSweep(
   // W1-T2345 — the SAME fresh-every-pass, ledger-only fold as `requeuedCheckKeys`/
   // `reaggregatedCiGateKeys` above. See `repeatDispositionStreaksFromLedger`'s own doc.
   const priorRepeatRuns = repeatDispositionStreaksFromLedger(ledgerLines);
+  // W1-T2620 (design i) — ONE read per pass, never per PR: see `SweepDeps.readMainTip`'s own doc
+  // for why this module still never calls `gh`/git directly. Omitted (the default) ⇒ `undefined`
+  // ⇒ `baseCausedReleaseTarget` stays `undefined` and the base-caused branch below is
+  // BYTE-IDENTICAL to before this task existed (criterion 6).
+  const mainTipSha = deps.readMainTip ? await deps.readMainTip() : undefined;
+  // W1-T2620 (design ii/iii) — AT MOST ONE base-caused PR selected for release THIS pass, oldest
+  // activity first, computed ONCE before the per-PR walk (never re-derived per PR — the SAME
+  // shape `selectUpdateBranchTarget` already uses for its own single-winner selection). See
+  // `selectBaseCausedRelease`'s own doc for the eligibility rule.
+  const baseCausedReleaseTarget =
+    mainTipSha === undefined
+      ? undefined
+      : selectBaseCausedRelease(openPrs, mainTipSha, lastBaseCausedTipFromLedger(ledgerLines), now);
   // `prIndex` -> this PASS's own streak (+ whether the one-time repeat escalation fires this
   // pass), populated in the per-PR walk below and read back by `finalizeDisposition` — a Map
   // keyed by index rather than two new positional parameters threaded through every one of that
@@ -6017,6 +6115,11 @@ export async function runSweep(
     // W1-T2231: {@link SweepAction.spent}'s own doc — `undefined` for every call site except the
     // main per-PR walk's "blocked-fixable"/"conflicted" arms below.
     spent: boolean | undefined,
+    // W1-T2620 (design v): the release marker riding the EXISTING `sweep.disposed` step — see
+    // `lastBaseCausedTipFromLedger`'s own doc. `undefined` for every call site except the main
+    // per-PR walk's "blocked-fixable" arm, and even there ONLY when this pass classified the PR
+    // base-caused AND a main tip was actually read (`SweepDeps.readMainTip` wired).
+    baseCausedMainTipSha: string | undefined = undefined,
   ): void {
     if (standDownReason) {
       // The site the TASK names ("a sweep disposition"), naming the state —
@@ -6096,6 +6199,11 @@ export async function runSweep(
         // dispatch-based repair surface's row is an actual repair.
         ...(spent !== undefined ? { spent } : {}),
         ...(question ? { question: question.question } : {}),
+        // W1-T2620 (design v) — rides this EXISTING step rather than minting a fourth ledger
+        // signal: present ONLY when this pass classified the PR base-caused AND a main tip was
+        // actually read (`SweepDeps.readMainTip` wired) — see `lastBaseCausedTipFromLedger`'s own
+        // doc for the fold that reads it back next pass.
+        ...(baseCausedMainTipSha !== undefined ? { main_tip_sha: baseCausedMainTipSha } : {}),
       };
       appendLine(deps.ledgerPath, disposedLine);
       // W1-T905: mirrored in-memory, with THIS PASS'S OWN `ts` (never re-read off disk — see
@@ -6419,6 +6527,11 @@ export async function runSweep(
     // doc. Every other disposition, and a dispatch whose fake/real wiring still returns nothing,
     // leaves this `undefined` so `finalizeDisposition` writes no `spent` field at all.
     let spent: boolean | undefined;
+    // W1-T2620 (design v): set ONLY by the "blocked-fixable" case's base-caused branch below,
+    // when this pass classified the PR base-caused AND a main tip was actually read — see
+    // `SweepDeps.readMainTip`'s own doc. Every other disposition leaves this `undefined` so
+    // `finalizeDisposition` writes no `main_tip_sha` field at all.
+    let baseCausedMainTipSha: string | undefined;
     // W1-T254 — PER-PR THROW CONTAINMENT: a thrown action used to propagate
     // straight out of `runSweep` as one un-attributed `sweep.error`, aborting
     // the WHOLE pass (every later PR in `openPrs` went unreconciled this
@@ -6537,6 +6650,45 @@ export async function runSweep(
               if (redCauseStandsDown(redCause)) {
                 acted = false;
                 standDownReason = describeRedCause(redCause, pr, openPrs);
+                // W1-T2620 — THE BASE-CAUSED STAND-DOWN'S EXIT CONDITION. Nothing else about this
+                // branch moves: `classifyRedCause`/`redCauseStandsDown`/`describeRedCause`'s TEXT
+                // and the strike accounting (`acted` stays false either way) are all untouched —
+                // see this task's own design note (vii)'s "explicitly out of scope" list.
+                //
+                // `main_tip_sha` rides THIS PR's own disposed line whenever this pass classified
+                // it base-caused AND a tip was actually read — recorded on the ORDINARY stand-down
+                // path too (not only a release) so the NEXT pass's `lastBaseCausedTipFromLedger`
+                // fold has a baseline to compare against (design i: "main has moved SINCE THIS PR
+                // LAST STOOD DOWN", never "the cause is known").
+                if (redCause === "base-caused" && mainTipSha !== undefined) {
+                  baseCausedMainTipSha = mainTipSha;
+                  // `selectBaseCausedRelease` already picked AT MOST ONE PR for this pass, oldest
+                  // activity first (design iii) — this PR releases only if it IS that winner.
+                  if (baseCausedReleaseTarget?.prNumber === pr.prNumber && deps.releaseBaseCausedStandDown) {
+                    // The "released" sentence is set ONLY once the effect is actually about to be
+                    // (or has been) attempted — omitted (`SweepDeps.releaseBaseCausedStandDown`'s
+                    // own doc), this PR falls through to the ordinary `describeRedCause` sentence
+                    // set above, exactly like every other stood-down PR: never a silent no-op, and
+                    // never a "released" claim with no push behind it.
+                    try {
+                      await deps.releaseBaseCausedStandDown(pr, mainTipSha);
+                      standDownReason =
+                        `red cause: base-caused — released: main has advanced to ${mainTipSha} since ` +
+                        `this head last stood down against an earlier tip; redriving through the ` +
+                        `existing post-fix leaf (no strike spent)`;
+                    } catch (e) {
+                      // FAIL QUIET (design vi) — NEVER LAUNDER A RED: a failed release leaves
+                      // this PR standing down exactly like the ordinary base-caused sentence,
+                      // never a false "released" ledger line. Retried next pass exactly like
+                      // any other stood-down PR — no strike was ever at stake here either way.
+                      log("sweep.base_caused_release.error", {
+                        pr_number: pr.prNumber,
+                        main_tip_sha: mainTipSha,
+                        error: String((e as Error)?.message ?? e),
+                      });
+                    }
+                  }
+                }
                 break;
               }
               // W1-T1275 (design i/ii/iii/iv/v) — CI-GATE'S OWN CONCLUDED VERDICT CAN GO STALE: a
@@ -6936,6 +7088,7 @@ export async function runSweep(
       depReviewOutcome,
       armOutcome,
       spent,
+      baseCausedMainTipSha,
     );
   }
 
