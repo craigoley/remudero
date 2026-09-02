@@ -28733,7 +28733,7 @@ export async function runMountRecommenderRung(
       filed,
       refused,
       cells: sweep.cells.length,
-      billing_mode: materialBillingMode,
+      billing_mode: billingMode(Object.keys(materialWorkerEnv)),
       objective_fallbacks: objectiveFallbacks,
     });
     return { filed, refused };
