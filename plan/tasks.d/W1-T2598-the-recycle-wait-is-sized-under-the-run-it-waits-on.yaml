@@ -1,0 +1,77 @@
+- id: W1-T2598
+  title: "THE RECYCLE'S BOUNDED WAIT DEFAULTS TO 120s AGAINST A POPULATION WHOSE MEDIAN IS 1158s, SO IT REFUSES ON HEALTHY IN-FLIGHT WORK BY CONSTRUCTION — and the correct derivation is already in the SAME FILE twenty lines below, applied to a different constant (`HUNG_WORKER_AGE_S`, from 115 `implement.done` rows: 19.3 min median, 36.0 p90, 46.7 p95, 98.5 max), so `deploy/recycle-container.sh` refuses roughly ten times too early while carrying, verbatim, the numbers that say it will"
+  repo: remudero
+  depends_on: ["W1-T2556"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 10.00
+  files: [deploy/recycle-container.sh, test/the-recycle-wait-is-sized-under-the-run-it-waits-on.test.ts]
+  origin: "operator-session#recycle-refused-on-healthy-work-2026-09-01"
+  plan_refs: ["W1-T312", "W1-T380", "W1-T382", "W1-T1046", "W1-T2555", "W1-T2556"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE FILE CONTAINS ITS OWN CORRECTION AND DOES NOT APPLY IT. `WAIT_SECONDS` reads
+    `"${RMD_RECYCLE_WAIT_S:-120}"`. Twenty lines below, `HUNG_WORKER_AGE_S` carries a derivation
+    written out in full: "Over 115 `implement.done` rows carrying `worker_duration_ms`, a legitimate
+    implement runs 19.3 min median, 36.0 p90, 46.7 p95 and 98.5 max." The median is 1158 seconds.
+    The wait that decides whether to give up on such a run is 120. Nothing in the file reconciles
+    the two numbers, and the 120 predates the derivation rather than disagreeing with it.
+
+    THIS IS THE FOURTH INSTANCE OF A DEFECT THIS REPO HAS ALREADY NAMED, which is why it is filed
+    rather than tuned in passing: a bound that fires on a HEALTHY condition. The prior three are the
+    ci-gate wait cap sized under the real required-check wall-clock (W1-T312), a deploy ceiling
+    consumed by a dry-run that delivered nothing (W1-T380), and a check-wait bound under which 21 of
+    21 booked PRs later merged (W1-T382). This one is the sharpest of the four: the other three had
+    to go and find the population they were meant to separate, and this one is already quoted in the
+    same file, in a comment that ends "re-derive from `implement.done` before you do."
+
+    MEASURED 2026-09-01, BOTH DIRECTIONS. At the default the recycle refused on a lane-holding
+    worker. Re-run with the wait widened, it printed
+    `1 lane-holding + 0 lane-less worker(s) still in flight, waited 440s/3000s — polling`, then
+    `no in-flight workers — safe to proceed`, and completed. 440 seconds is 3.7x the default: the
+    120 could not have reached that convergence on any schedule, and the worker it was waiting for
+    was healthy throughout and finished on its own. That is the whole defect in one pair of runs —
+    the same fleet, the same worker, refused at one bound and served at another.
+
+    A SHORT BOUND DOES NOT BUY BACK THE FREEZE IT LOOKS LIKE IT SAVES. The pause goes on before the
+    wait and comes off on the way out of a refusal, so a refused recycle costs its own wait AND the
+    wait of the re-run that follows it, plus the operator round-trip between them. The 120 therefore
+    does not cap dispatch downtime; it caps it per ATTEMPT while raising the attempt count. Today's
+    successful run froze dispatch for 440 seconds once. Under the default the same outcome costs 120
+    seconds, a refusal, a human, and then the real wait anyway.
+
+    WHAT THIS DOES NOT TOUCH. The wait stays BOUNDED — the header's reasoning that an unbounded wait
+    is a hang with no visible cause is correct and unchanged, and `RMD_RECYCLE_WAIT_S` still
+    overrides. The kill/wait asymmetry is untouched: anything not positively classified as hung is
+    still waited for and then refused, and `HUNG_WORKER_AGE_S` is not moved. This changes ONE
+    default and what the refusal says about it.
+
+    DISTINCT FROM W1-T2556, WHICH IS MERGED AND WHOSE FIX RAN IN THIS SAME SESSION. That task moved
+    a lock naming a PROVABLY DEAD container out of the blocking set. This one is about a lock naming
+    a LIVE worker, which the script is right to wait for and wrong to give up on this early. Neither
+    covers the other: W1-T2556's reclaim fires only on a container docker reports absent or stopped,
+    and it fired correctly today before this bound refused anyway.
+
+    THE REFUSAL MUST STATE ITS OWN PROVENANCE, the discipline W1-T2555 already established for
+    `STATE_DIR`. A refusal reading "waited 120s" invites the operator to conclude a worker is stuck;
+    the same refusal naming the distribution it was sized against, and the wait that would have
+    covered the oldest worker it actually observed, is a number the operator can act on instead of a
+    verdict they have to disbelieve.
+  acceptance:
+    - claim: "the wait's default is derived from the observed run-duration distribution rather than a bare literal, and the derivation is stated where the constant is set"
+      proof: "unit test: test/the-recycle-wait-is-sized-under-the-run-it-waits-on.test.ts"
+    - claim: "an explicit RMD_RECYCLE_WAIT_S still overrides the derived default, unchanged"
+      proof: "unit test: test/the-recycle-wait-is-sized-under-the-run-it-waits-on.test.ts"
+    - claim: "the wait stays bounded — it still times out and refuses rather than blocking forever"
+      proof: "unit test: test/the-recycle-wait-is-sized-under-the-run-it-waits-on.test.ts"
+    - claim: "a refusal names the distribution the bound was sized against, not just the seconds elapsed"
+      proof: "unit test: test/the-recycle-wait-is-sized-under-the-run-it-waits-on.test.ts"
+    - claim: "a refusal names the wait that would have covered the oldest in-flight work it observed"
+      proof: "unit test: test/the-recycle-wait-is-sized-under-the-run-it-waits-on.test.ts"
+    - claim: "the hung-work age threshold is not moved, and work past it is still classified exactly as today"
+      proof: "unit test: test/the-recycle-wait-is-sized-under-the-run-it-waits-on.test.ts"
+    - claim: "restoring the 120 literal makes a healthy run at the observed median refuse again — the falsifier is load-bearing"
+      proof: "unit test: test/the-recycle-wait-is-sized-under-the-run-it-waits-on.test.ts"
