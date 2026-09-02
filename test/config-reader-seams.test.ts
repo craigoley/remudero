@@ -315,7 +315,12 @@ test("every unredirectable policy reader has a seam or a reasoned allowlist entr
     [],
     "a config reader with no injection seam and no allowlist entry:\n" +
       unexplained.map((r) => `  ${r.file}:${r.line}  ${r.text}`).join("\n") +
-      "\nGive it a `?? ` override so a test can inject, or add an ALLOWED entry saying why it needs none.",
+      "\nGive it a `?? ` override so a test can inject, or add a reviewed ALLOWED entry that names the " +
+      "CONCRETE, checkable EVIDENCE making a seam unnecessary — a test file that already drives the value " +
+      "(test/*.test.ts), the call-site argument that already injects it, a measurement pinning the shipped " +
+      "default as inert, or (only for loadDefaultPolicy's own body) that this IS the mechanism. A reason a " +
+      "reviewer cannot check by opening a named file is not an entry, it is a free pass — see " +
+      "test/a-check-that-names-its-own-escape-hatch-gets-escaped.test.ts (W1-T2596).",
   );
 });
 
