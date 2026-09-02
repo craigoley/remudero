@@ -14,6 +14,7 @@ import {
   lastPostedReviewStatusFromLedger,
   postReviewPending,
   postReviewStatusGuarded,
+  reviewInputDigest,
   resolveReviewProvenance,
   type PrLifecycleState,
 } from "../src/lib/review.js";
@@ -161,16 +162,19 @@ esac
       })();
     }) as unknown as Parameters<typeof runReview>[0]["reviewerQueryFn"];
 
+    const reviewEvents: Array<{ step: string; extra?: Record<string, unknown> }> = [];
     const verdict = await runReview({
       owner: "acme",
       repo: "remudero",
       prUrl: "https://github.com/acme/remudero/pull/1",
       task: { id: "W1-T913", acceptance: [{ claim: "a claim the report never substantiates", proof: "unit test: no-such-test-title-xyzzy" }] },
       report: "This report deliberately substantiates nothing.",
+      reviewInputBody: "The actual PR body snapshot used only for retry identity.",
       settingsFile: join(root, "settings.json"),
       config: { claudeBin: "/bin/true", root } as never,
       // The spawn's OWN outcome line, whichever way it went — the second observer.
-      log: (step: string) => {
+      log: (step: string, extra?: Record<string, unknown>) => {
+        reviewEvents.push({ step, extra });
         if (step === "review.reviewer" || step === "review.reviewer.error") snapshotGhCalls();
       },
       say: () => {},
@@ -204,6 +208,17 @@ esac
     const pending = readLedgerLines(ledgerPath).filter((l) => l.step === "review.pending_posted");
     assert.equal(pending.length, 1, "exactly one review.pending_posted line for this head");
     assert.equal(pending[0]?.head_sha, "cafebabe0002");
+    assert.equal(pending[0]?.pr_url, "https://github.com/acme/remudero/pull/1");
+    assert.equal(
+      pending[0]?.review_input_digest,
+      reviewInputDigest("cafebabe0002", "The actual PR body snapshot used only for retry identity."),
+    );
+    const terminal = reviewEvents.find((event) => event.step === "review.posted");
+    assert.equal(terminal?.extra?.pr_url, "https://github.com/acme/remudero/pull/1");
+    assert.equal(
+      terminal?.extra?.review_input_digest,
+      reviewInputDigest("cafebabe0002", "The actual PR body snapshot used only for retry identity."),
+    );
   } finally {
     process.env.PATH = oldPath;
     if (oldClaudeBinOverride === undefined) delete process.env[CLAUDE_BIN_ENV_OVERRIDE];
@@ -326,7 +341,7 @@ test("W1-T913 criterion 3: a second pending post for the SAME head is a no-op �
   }
 });
 
-test("W1-T913: a pending post for a NEW head (a push landed) is NOT a no-op — idempotency is per-head, not per-task", async () => {
+test("W1-T913: a pending post for a NEW head (a push landed) is NOT a no-op — exact-input idempotency resets", async () => {
   const dir = tmpDir();
   try {
     const ledgerPath = join(dir, "ledger.ndjson");
@@ -361,6 +376,59 @@ test("W1-T913: a pending post for a NEW head (a push landed) is NOT a no-op — 
       posts.map((p) => p.sha),
       ["aaa1111", "bbb2222"],
     );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a PR-body edit on the same head is a new pending-review input, not a deduped repeat", async () => {
+  const dir = tmpDir();
+  try {
+    const ledgerPath = join(dir, "ledger.ndjson");
+    const sha = "abc1234";
+    const prUrl = "https://github.com/o/r/pull/913";
+    const posts: unknown[] = [];
+    const post = (o: unknown) => {
+      posts.push(o);
+    };
+
+    await postReviewPending({
+      owner: "o",
+      repo: "r",
+      sha,
+      taskId: "W1-T913",
+      runId: "run-before-edit",
+      ledgerPath,
+      prUrl,
+      reviewInputDigest: reviewInputDigest(sha, "old body"),
+      fetchLifecycle: () => NOT_MERGED,
+      post,
+    });
+    appendLedger(ledgerPath, {
+      run_id: "run-before-edit",
+      task_id: "W1-T913",
+      step: "review.posted",
+      head_sha: sha,
+      pr_url: prUrl,
+      review_input_digest: reviewInputDigest(sha, "old body"),
+      state: "failure",
+      proof_exec: ["executed_fail"],
+    });
+    const afterEdit = await postReviewPending({
+      owner: "o",
+      repo: "r",
+      sha,
+      taskId: "W1-T913",
+      runId: "run-after-edit",
+      ledgerPath,
+      prUrl,
+      reviewInputDigest: reviewInputDigest(sha, "corrected body"),
+      fetchLifecycle: () => NOT_MERGED,
+      post,
+    });
+
+    assert.equal(afterEdit.posted, true);
+    assert.equal(posts.length, 2, "even an executed terminal verdict for the old body cannot suppress the changed input");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

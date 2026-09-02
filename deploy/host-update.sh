@@ -102,6 +102,11 @@ CRED_MOUNT_DEST="/home/node/.claude"
 # disabled until config opts in; mounting the state here lets that opt-in survive replacement.
 CODEX_DIR="${RMD_CODEX_DIR:-${HOME:-/root}/.codex}"
 CODEX_MOUNT_DEST="/home/node/.codex"
+# Deliberately NOT the host CLI's ~/.config/remudero: that config can carry host-only root and
+# executable paths. This host-only variable selects a bind source and therefore does not belong in
+# deploy/runtime-env-vars.sh or the container environment.
+CONTAINER_CONFIG_DIR="${RMD_CONTAINER_CONFIG_DIR:-${HOME:-/root}/.config/remudero-container}"
+CONTAINER_CONFIG_MOUNT_DEST="/home/node/.config/remudero"
 # The repo `rmd daemon` drains. It REFUSES without `--repo` (usage dump, exit 2), which is how a
 # containerised boot burned four restarts before anyone read the exit code — `daemon-plist` bakes
 # the same flag for the launchd path, and the printed invocation must not be weaker.
@@ -151,6 +156,14 @@ if [ "${PRINT_DAEMON_RUN}" -eq 1 ]; then
   else
     echo "host-update: NOTE — no Codex home at ${CODEX_DIR}; the printed daemon stays Claude-only." >&2
     echo "  Authenticate it first or set RMD_CODEX_DIR; no empty root-owned bind directory will be created." >&2
+  fi
+  CONTAINER_CONFIG_MOUNT_LINE=""
+  if [ -d "${CONTAINER_CONFIG_DIR}" ]; then
+    printf -v CONTAINER_CONFIG_MOUNT_LINE '    -v %s:%s \\\n' "${CONTAINER_CONFIG_DIR}" "${CONTAINER_CONFIG_MOUNT_DEST}"
+    echo "host-update: container config present — the printed daemon mounts ${CONTAINER_CONFIG_DIR}."
+  else
+    echo "host-update: NOTE — no container config directory at ${CONTAINER_CONFIG_DIR}; the printed daemon keeps its existing Claude-only provider policy." >&2
+    echo "  Commission it first or set RMD_CONTAINER_CONFIG_DIR; no empty root-owned bind directory will be created." >&2
   fi
   # ── THE PRINTED PATH IS CHECKED BEFORE IT IS PRINTED ───────────────────────────────────────
   # MEASURED 2026-08-12, and this is the failure being fixed: on the Azure host `${HOME}/rmd-state`
@@ -335,7 +348,7 @@ host-update: DAEMON-MODE INVOCATION — printed only. Nothing has been started a
     -e GH_APP_ID="\${GH_APP_ID:-}" \\
     -e GH_APP_INSTALLATION_ID="\${GH_APP_INSTALLATION_ID:-}" \\
     -e GH_APP_PRIVATE_KEY_PATH="\${GH_APP_PRIVATE_KEY_PATH:-}" \\
-${CODEX_MOUNT_LINE}    -v ${STATE_DIR}:${STATE_MOUNT_DEST} \\
+${CODEX_MOUNT_LINE}${CONTAINER_CONFIG_MOUNT_LINE}    -v ${STATE_DIR}:${STATE_MOUNT_DEST} \\
     -v ${CRED_DIR}:${CRED_MOUNT_DEST} \\
     ${REF} \\
     ./bin/rmd daemon --repo ${DAEMON_REPO} --allow-self-target

@@ -3212,10 +3212,9 @@ test("W1-T176 acceptance 4 — posting the missing check cannot loop: a SECOND a
 });
 
 test("W1-T176 — a FRESH push (new head sha) after a refusal re-earns exactly one fresh deterministic attempt", () => {
-  // reviewPostRefused is per-headSha ground truth (buildOpenPrViews scans the
-  // ledger for THIS exact taskId@headSha) — a new push mints a new head, so a
-  // caller building the NEXT OpenPrView for the new sha naturally omits the
-  // flag rather than carrying a stale refusal forward.
+  // reviewPostRefused is exact-input ground truth (buildOpenPrViews scans the ledger for this
+  // task, PR, head, and body digest). A new push mints a new input, so the next OpenPrView omits
+  // the flag rather than carrying a stale refusal forward. A body edit gets the same reset.
   const freshPush = ungatedGreenPr({ headSha: "bbbb222", reviewPostRefused: undefined });
   assert.equal(deriveDisposition(freshPush, DEFAULT_SWEEP_POLICY, NOW).disposition, "post-review");
 });
@@ -3279,8 +3278,8 @@ test("W1-T225 acceptance 3 — the re-review posts a FRESH verdict for the new h
   assert.equal(summary.byDisposition["post-review"], 1, "the old head's success never reclassified this pass as mergeable");
 });
 
-test("W1-T225 acceptance 4 (THE LOOP FALSIFIER) — repeated orphaning is BOUNDED: once priorReviewOrphans reaches the cap, the sweep escalates instead of re-dispatching indefinitely", async () => {
-  const capped = orphanedGreenPr({ priorReviewOrphans: DEFAULT_SWEEP_POLICY.reviewOrphanCap });
+test("W1-T225 acceptance 4 (THE LOOP FALSIFIER) — repeated attempts on unchanged input are BOUNDED: once priorReviewAttemptsForInput reaches the cap, the sweep escalates instead of re-dispatching indefinitely", async () => {
+  const capped = orphanedGreenPr({ priorReviewAttemptsForInput: DEFAULT_SWEEP_POLICY.reviewOrphanCap });
   const derived = deriveDisposition(capped, DEFAULT_SWEEP_POLICY, NOW);
   assert.equal(derived.disposition, "blocked-ambiguous", "the cap is met — escalate rather than retry forever");
   assert.match(derived.reason, /orphaned by a push, again/);
@@ -3290,18 +3289,18 @@ test("W1-T225 acceptance 4 (THE LOOP FALSIFIER) — repeated orphaning is BOUNDE
   const deps = fakeDeps({ postReview: (p) => { posted.push(p.prNumber); } });
   await runSweep([capped], deps, DEFAULT_SWEEP_POLICY);
   assert.deepEqual(posted, [], "FALSIFIER guard: an unbounded re-review loop would re-invoke postReview here — it must not");
-  assert.equal(deps.escalated.length, 1, "a repeatedly-orphaned PR surfaces to an operator instead of looping silently");
+  assert.equal(deps.escalated.length, 1, "an unchanged input surfaces to an operator instead of looping silently");
 });
 
 test("W1-T225 — one strike BELOW the cap still re-dispatches (the bound is inclusive, not off-by-one)", () => {
-  const almostCapped = orphanedGreenPr({ priorReviewOrphans: DEFAULT_SWEEP_POLICY.reviewOrphanCap - 1 });
+  const almostCapped = orphanedGreenPr({ priorReviewAttemptsForInput: DEFAULT_SWEEP_POLICY.reviewOrphanCap - 1 });
   assert.equal(deriveDisposition(almostCapped, DEFAULT_SWEEP_POLICY, NOW).disposition, "post-review");
 });
 
-test("W1-T225 — a PR awaiting its FIRST review is never bound by the orphan cap, no matter what priorReviewOrphans carries stale/undefined as", () => {
+test("W1-T225 — a PR awaiting its FIRST review is never bound by the orphan cap, no matter what priorReviewAttemptsForInput carries stale/undefined as", () => {
   // reviewOrphanedByPush undefined -> this row must never match, even if some
-  // future caller populated priorReviewOrphans incorrectly for a never-reviewed PR.
-  const neverReviewed = ungatedGreenPr({ priorReviewOrphans: 99 });
+  // future caller populated priorReviewAttemptsForInput incorrectly for a never-reviewed PR.
+  const neverReviewed = ungatedGreenPr({ priorReviewAttemptsForInput: 99 });
   assert.equal(deriveDisposition(neverReviewed, DEFAULT_SWEEP_POLICY, NOW).disposition, "post-review");
 });
 

@@ -1073,8 +1073,8 @@ test("W1-T529: a floor stand-down leaves the fix strike unspent", async () => {
 // before (iv) existed to tell the two apart.
 //
 // `review.post_refused` is not a diagnostic. `reviewPostRefusedFor` (run-task.ts) reads it as a
-// VERDICT — a second absence at the same sha ESCALATES rather than retries — keyed
-// `taskId@headSha`, so only a NEW PUSH clears it. A budget stand-down never even ran the call, so
+// VERDICT — a second absence for the same exact input ESCALATES rather than retries — keyed by
+// task + PR URL + head + body digest, so a commit or body edit clears it. A budget stand-down never even ran the call, so
 // that key would strand a green PR as permanently-refused-then-escalated over one unaffordable
 // tick. The precedent is already in the same doc: `review.post_failed` (a transient `gh` error)
 // deliberately does not set it either.

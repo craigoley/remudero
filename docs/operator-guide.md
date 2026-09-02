@@ -1024,6 +1024,51 @@ docker run --rm --user 1000:1000 -v "${RMD_CODEX_DIR:-$HOME/.codex}:/home/node/.
 The connector removes `OPENAI_API_KEY` from the Codex process environment, so this path uses the
 mounted ChatGPT subscription rather than silently switching to metered API billing.
 
+### Azure container provider configuration
+
+The daemon needs a separate, durable container config. Do not mount the host CLI's
+`~/.config/remudero`: its `root` and executable paths can be valid on the host and wrong in the
+image. Both launch paths instead use
+`${RMD_CONTAINER_CONFIG_DIR:-${HOME:-/root}/.config/remudero-container}` and mount it read-write at
+`/home/node/.config/remudero` only when the host directory already exists.
+
+The following zsh-safe commissioning sequence creates that directory for the image's uid/gid,
+seeds a missing config at mode 600, and updates only the container-specific paths and provider
+fields. The object spreads preserve every other existing top-level and `workerProviders` field.
+Set `RMD_STATE_DIR` separately to the live state volume before using either launch script; provider
+commissioning does not infer or change it.
+
+```sh
+IMAGE_REF="synthwatcholey0620.azurecr.io/remudero:latest"
+RMD_CLAUDE_DIR="${RMD_CLAUDE_DIR:-${HOME}/.claude}"
+RMD_CODEX_DIR="${RMD_CODEX_DIR:-${HOME}/.codex}"
+RMD_CONTAINER_CONFIG_DIR="${RMD_CONTAINER_CONFIG_DIR:-${HOME}/.config/remudero-container}"
+CONFIG_FILE="${RMD_CONTAINER_CONFIG_DIR}/config.json"
+CONFIG_SEED="$(mktemp)"
+CONFIG_MOUNT="${RMD_CONTAINER_CONFIG_DIR}:/home/node/.config/remudero"
+CLAUDE_MOUNT="${RMD_CLAUDE_DIR}:/home/node/.claude"
+CODEX_MOUNT="${RMD_CODEX_DIR}:/home/node/.codex"
+CONFIG_UPDATE='const fs=require("node:fs");const p="/home/node/.config/remudero/config.json";const c=JSON.parse(fs.readFileSync(p,"utf8"));const w=c.workerProviders??{};c.root="/home/node/Remudero";c.claudeBin="/usr/local/bin/claude";c.workerProviders={...w,enabled:[...new Set([...(w.enabled??[]),"claude","codex"])],reservePercent:w.reservePercent??5,capacityCacheMs:w.capacityCacheMs??60000,codexBin:w.codexBin??"/usr/local/bin/codex",codexHome:w.codexHome??"/home/node/.codex"};fs.writeFileSync(p,JSON.stringify(c,null,2)+"\n",{mode:0o600});'
+CONFIG_VALIDATE='const fs=require("node:fs");const p="/home/node/.config/remudero/config.json";const c=JSON.parse(fs.readFileSync(p,"utf8"));const m=fs.statSync(p).mode&0o777;if(m!==0o600||c.root!=="/home/node/Remudero"||c.claudeBin!=="/usr/local/bin/claude"||!c.workerProviders.enabled.includes("claude")||!c.workerProviders.enabled.includes("codex"))process.exit(1);fs.accessSync(c.claudeBin,fs.constants.X_OK);fs.accessSync(c.workerProviders.codexBin,fs.constants.X_OK);console.log("container config and provider binaries OK");'
+sudo install -d -m 700 -o 1000 -g 1000 "${RMD_CONTAINER_CONFIG_DIR}"
+printf '%s\n' '{}' > "${CONFIG_SEED}"
+if [ ! -f "${CONFIG_FILE}" ]; then sudo install -m 600 -o 1000 -g 1000 "${CONFIG_SEED}" "${CONFIG_FILE}"; fi
+rm -f "${CONFIG_SEED}"
+sudo chown 1000:1000 "${CONFIG_FILE}"
+sudo chmod 600 "${CONFIG_FILE}"
+docker run --rm --user 1000:1000 -v "${CONFIG_MOUNT}" --entrypoint node "${IMAGE_REF}" -e "${CONFIG_UPDATE}"
+docker run --rm --user 1000:1000 -v "${CONFIG_MOUNT}" --entrypoint node "${IMAGE_REF}" -e "${CONFIG_VALIDATE}"
+docker run --rm --user 1000:1000 -v "${CLAUDE_MOUNT}" --entrypoint claude "${IMAGE_REF}" auth status
+docker run --rm --user 1000:1000 -v "${CODEX_MOUNT}" --entrypoint codex "${IMAGE_REF}" login status
+```
+
+These commands use short-lived `--rm` verification containers. Configuration does not start, stop,
+restart, recycle, or deploy the daemon. An absent container config directory remains the backwards-compatible
+Claude-only path: both launch scripts warn and omit the mount instead of asking Docker to create it.
+The operator alone decides when to use the printed launch command or recycle workflow.
+
+### First-run host commissioning
+
 Then, in order:
 
 1. Clone the repo and run `npm install`.
