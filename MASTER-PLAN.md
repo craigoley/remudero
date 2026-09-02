@@ -4614,6 +4614,85 @@ decision** — the merge gate is a GitHub-enforced contract, always. No judge-of
 **Build order.** Layer 1 = **W1-T20**, Layer 2 = **W1-T21**, Layer 3 = **W1-T22** (T20→T21→T22, all
 after the enforced gate W1-T1D); Layer 4 = **W2-T1** (after the reviewer W1-T1D + risk scoring W1-T22).
 
+## 4C. External scan (2026-09-02): OpenClaw 2.0 and Grok Bot — taken, refused, already held
+
+Two agent products shipped their biggest releases in the same fortnight — OpenClaw 2.0 (v2026.8.1,
+2026-08-31; its release coverage counts 933 contributors and 16,000 PRs) and xAI's Grok Bot (2026-08-11, reported to run on
+Cursor's infrastructure) with Grok Build open-sourced under Apache-2.0 on
+2026-08-07 — and the operator asked what to take. This block records what was read, what this
+harness already holds, what it took as shards, and what it refused, so the next scan starts from
+here rather than from a search box. [research: openclaw-2026.8.1, grok-bot-2026-08-11]
+
+**SOURCES, BY REACHABILITY.** Primary and read: the OpenClaw v2026.8.1 release note and CHANGELOG
+on GitHub; its docs `concepts/dreaming.md`, `concepts/memory-provenance.md`,
+`concepts/standing-intents.md`, `concepts/usage-tracking.md`, `security/network-proxy.md`,
+`security/THREAT-MODEL-ATLAS.md`, `automation/standing-orders.md`, `automation/tasks.md`; Grok
+Build's open-source README (xai-org/grok-build). Mirrored, not primary: Grok Bot's announcement and
+docs via the community reference RongleCat/awesome-grok-bot — x.ai and docs.x.ai were unreachable
+from the filing session's egress proxy, as were InfoQ, InfoWorld and Composio. Every Grok Bot
+mechanism cited below is therefore a mirror's quotation and is marked so in its shard.
+
+**WHAT THIS HARNESS ALREADY HOLDS, AND THEY DO NOT.** Six contrasts, each a symbol here against a
+published mechanism there:
+- **Compaction doctrine (§8B) against "no compact / new session; full transcript is sent each
+  turn"** — Grok Bot carries the whole thread every turn; the ledger here records every compaction
+  and re-verifies proofs after one.
+- **One worktree and one containment per worker against one cloud computer per account** — Grok
+  Bot's "isolation is per user not per Bot": every bot on an account shares files, logins and
+  browser sessions. `worktreeAdd` and the deny-floor give each run its own tree.
+- **Executable acceptance proofs and ledger receipts against evidence as a user rule** — Grok
+  Bot's guidance is "require evidence after every external action"; here `execWhitelistedProof`
+  and `buildReceipt` are the evidence, and W1-T362 makes discrimination the bar.
+- **Policy rows with `origin:` labels against OpenClaw's configuration history "with writer
+  labels"** — parity, already shipped: every value in plan/policy.yaml names where it came from.
+- **The retro's consolidation against Grounded Dreaming** — parity in shape (episodic to
+  semantic, Architect-gated, nightly there and per twenty-five merges here); the delta is
+  dreaming's taint gate, which this scan takes.
+- **Verdict calibration, the adoption report and the verb census against a ten-scenario benchmark
+  pack with no cadence** — OpenClaw's personal-agent benchmark runs on demand and compares nothing
+  across versions; the measurement cadence here runs four times a day. Its consumer gap is
+  W1-T2660, filed hours before this scan.
+
+**TAKEN — NINE SHARDS, FILED 2026-09-02, EACH NAMING ITS SOURCE.**
+- **W1-T2694 ratification pins** — OpenClaw's "grant an automation permission for an exact
+  operation … require fresh approval when job/operation changes", as Law 5 with a signature: each
+  gated rung's operation hash pinned in plan/ratifications.yaml, refusing to fire on drift. Inert
+  while the file is absent.
+- **W1-T2695 the authority table** — Grok Bot's Auto Review rules and OpenClaw's typed
+  operation-scope summaries, DERIVED rather than hand-written: `rmd authority` from the policy
+  schema and the gateway's write surface, with a ratchet over every new external write.
+- **W1-T2696 the fleet can ask and cannot hear** — Grok Bot's return-on-approval loop closed with
+  signed single-use option links in the escalation ping, consumed by the console's existing reply
+  route; links, not a bot, per OpenClaw's channel-spoofing threat class.
+- **W1-T2697 the operator teaches by doing** — Grok Bot's demonstrated routines inverted: an
+  actor stamp on every ledger row, a miner over the operator's repeated verb sequences, proposals
+  through the inbox. The board sweep run by hand all night is its origin.
+- **W1-T2698 the credential-reach probe** — a probe inside the real spawn path listing what a
+  worker can read, held as a shrink-only baseline per host class.
+- **W1-T2699 secrets at the boundary** — OpenClaw's process-local sentinels injected only at the
+  provider boundary: a sentinel bearer and loopback base URL for the model, a socket credential
+  helper for git, a value-free ledger of destination and decision. Depends on the probe.
+- **W1-T2700 the untrusted envelope** — OpenClaw's random-boundary external-content wrapping at
+  every ingestion point, counted in the W1-T2297 prompt manifest and ratcheted; a floor whose wall
+  is W1-T2699.
+- **W1-T2701 learning provenance gates** — dreaming's taint gate at promotion and
+  memory-provenance's forget-by-origin as a revert-recall transition to `contested`, never
+  deletion.
+- **W1-T2702 a bundle carries the routines** — Grok Bot templates ("identity, skills, and
+  routines") applied to W1-T2580's bundle: ratified policy rows travel as proposals and import
+  stages them for the receiving operator's inbox.
+
+**REFUSED, WITH THE REASON.** Shared multi-user sessions with view/suggest/contribute roles: the
+2026-08-18 ruling is one operator per VM, and the console inbox (W1-T2604) must learn to say no
+before it learns a second voice. Desktop egress routing and Chrome-profile import: this harness
+drives no browser. Screen-recorded skills: the ledger is the better recorder (W1-T2697). Widget
+dashboards with per-widget action grants: the console is the surface and W1-T2660 is its next
+panel; per-action grants are W1-T2695's table first. An xAI provider rung: the ruling defers
+pay-as-you-go; a SuperGrok subscription lane would follow the Codex pattern (W1-T2572 to W1-T2577)
+if the operator ever holds one, and no shard is filed on a plan nobody has. Standing intents
+(event-conditioned reminders with fire budgets): noted; merge holds and typed escalation options
+cover the first cases, and a shard waits for a measured need.
+
 ## 5. Principles engine
 
 Remudero's CI today is typecheck + tests. That is the FLOOR, not the bar. The operator's fleet
