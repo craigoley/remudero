@@ -19830,11 +19830,13 @@ export const RETRO_ACCEPTANCE_BLOCK_GRAMMAR: readonly string[] = [
   "  Every <proof> must OPEN with a recognised dialect, or the reviewer CAPS the PR even though the",
   "  block itself parsed fine — a wrap and a missing dialect are two SEPARATE failures; fixing one",
   "  never fixes the other. Two forms:",
-  '    proof: "grep: <pattern> in <path>"                — greps LITERAL text THIS diff adds to',
+  "    grep: <pattern> in <path>                         — greps LITERAL text THIS diff adds to",
   "      MASTER-PLAN.md (a SHIPPED entry's PR link, the calibration table's own header row, NET",
   "      STATE's refreshed line)",
-  '    proof: "demonstration: <what a human can check>"  — for a claim with nothing stable to grep,',
+  "    demonstration: <what a human can check>           — for a claim with nothing stable to grep,",
   "      e.g. naming the section a COMPRESSION pass deleted (a negative diff has nothing new to match)",
+  "  Write that form directly after the bullet's `|`. Do not add a `proof:` label and do not wrap",
+  "  the pattern or proof in quotes/backticks — those delimiters become literal grep characters.",
 ];
 
 /** The Architect retro prompt — fed ONLY the deterministic gather + current plan. */
