@@ -78,6 +78,13 @@
 
     (v) WHAT DOES NOT CHANGE. No shard's text. No status field. plan/tasks.yaml. Credit derivation.
     The retro's own PR. Auto-merge policy.
+    WITHDRAWN 2026-09-02 — this task implements candidate (b), archive-on-credit, which the
+    W1-T1260 ruling did not authorise (recorded in DECISIONS.md, 2026-09-02). W1-T1260 records (b) as
+    undecided in either direction, needing a blast-radius measurement over every plan_refs /
+    satisfied_by pointer, loadPlan's corpus and the id-mint sweep that no shard has taken. Withdrawn
+    unbuilt, not refuted: if that measurement is taken and the operator ratifies (b), this is the
+    design to revive.
+
   acceptance:
     - claim: "the mover selects only shards the projection reports merged with a GitHub-confirmed PR state or an operator correction, never from the yaml status field"
       proof: "unit test: test/archive-merged.test.ts"
@@ -96,7 +103,8 @@
   origin: "oper#follow-up-brief-2026-09-02"
   plan_refs: ["W1-T2657", "W1-T367", "W1-T2579", "W1-T2296", "W1-T1287", "§8A", "§12"]
   files: [src/lib/archive-merged.ts, src/run-task.ts, src/lib/policy.ts, test/archive-merged.test.ts]
-  status: queued
+  status: blocked
+  retirement: withdrawn
   attempts: 0
   note: |
     risk:high, band_meaning:span — a new module plus the daemon tick plus a policy schema row are
