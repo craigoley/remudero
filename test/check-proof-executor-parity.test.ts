@@ -91,7 +91,15 @@ test("ACCEPTANCE #1: check-proof reports the SAME no-match verdict as the review
   // The trap this whole task exists to close: the RAW child process genuinely exits 0 and prints
   // real output (the file's own trivial TAP wrapper line among others) — an exit-code-only check
   // reads this as green. check-proof must not be that check any more.
-  assert.match(out, /^candidates:\s+1 file\(s\)\s+—\s+test\/fix-rung-no-task\.test\.ts\s*$/m);
+  // W1-T2609: the resolved SET grew to two files and the fixture's property is unchanged.
+  // `resolveNameFilteredCandidates` greps test SOURCES for the literal, so any file that merely
+  // NAMES the fixture's symbol — even inside a doc comment — becomes a candidate. THIS FILE MUST
+  // THEREFORE NEVER SPELL THAT SYMBOL OUTSIDE THE FIXTURE CONSTANT: writing it in a comment here
+  // makes this suite its own third candidate and the assertion below can never match. Still pinned
+  // EXACTLY, both files named: the count is scaffolding and the invariant is the three assertions
+  // below — the raw child still exits 0 (the historical false-green) and the collapsed verdict must
+  // still read no-match. Measured at this head: candidates 2, exit 0, hits 24, verdict no-match.
+  assert.match(out, /^candidates:\s+2 file\(s\)\s+—\s+test\/fix-branch-checkout-serialization\.test\.ts,\s+test\/fix-rung-no-task\.test\.ts\s*$/m);
   assert.match(out, /^exit:\s+0\s*$/m, "the RAW child process exit code is genuinely 0 — the historical false-green");
   assert.match(out, /^verdict:\s+no-match\s*$/m, "the collapsed verdict must read no-match, not pass");
 
@@ -105,10 +113,10 @@ test("ACCEPTANCE #2: check-proof still prints parse kind, resolved candidates, t
   const { out } = runCheckProof(["unit test:", NAME_FILTERED_FIXTURE]);
   assert.match(out, new RegExp(`^proof:\\s+unit test: ${NAME_FILTERED_FIXTURE}\\s*$`, "m"));
   assert.match(out, /^parse:\s+OK — kind=test \(name-filtered\)\s*$/m);
-  assert.match(out, /^candidates:\s+1 file\(s\)/m);
+  assert.match(out, /^candidates:\s+2 file\(s\)/m);
   assert.match(
     out,
-    new RegExp(`^argv:\\s+node --test .*--test-name-pattern ${NAME_FILTERED_FIXTURE} test/fix-rung-no-task\\.test\\.ts\\s*$`, "m"),
+    new RegExp(`^argv:\\s+node --test .*--test-name-pattern ${NAME_FILTERED_FIXTURE} test/fix-branch-checkout-serialization\\.test\\.ts test/fix-rung-no-task\\.test\\.ts\\s*$`, "m"),
   );
   assert.doesNotMatch(out, /test\/\*\*\/\*\.test\.ts/, "narrowed to the one candidate file, not the whole-suite glob");
   assert.match(out, /^hits:\s+\d+\s*$/m, "a hit count is still printed — collapsing the executor costs no diagnostics");
