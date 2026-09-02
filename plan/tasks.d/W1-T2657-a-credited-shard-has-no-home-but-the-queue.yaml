@@ -94,6 +94,13 @@
     take it up). The credit projection (`projectPlan`, `findMergedByHeadBranch`) — location never
     feeds credit; credit is what later JUSTIFIES a location, in W1-T2658. No shard moves in this
     task's own diff.
+    WITHDRAWN 2026-09-02 — this task implements candidate (b), archive-on-credit, which the
+    W1-T1260 ruling did not authorise (recorded in DECISIONS.md, 2026-09-02). W1-T1260 records (b) as
+    undecided in either direction, needing a blast-radius measurement over every plan_refs /
+    satisfied_by pointer, loadPlan's corpus and the id-mint sweep that no shard has taken. Withdrawn
+    unbuilt, not refuted: if that measurement is taken and the operator ratifies (b), this is the
+    design to revive.
+
   acceptance:
     - claim: "an absent plan/merged.d reads as empty in every loader, so every existing fixture and unsharded plan loads unchanged"
       proof: "unit test: test/plan-merged-dir.test.ts"
@@ -114,7 +121,8 @@
   origin: "oper#follow-up-brief-2026-09-02"
   plan_refs: ["W1-T367", "W1-T122", "W1-T2295", "§8A", "§12"]
   files: [src/lib/plan.ts, src/lib/task-id.ts, src/lib/drain.ts, src/run-task.ts, scripts/task-id-existence-check.mjs, scripts/acceptance-author-gate.mjs, docs/task-lifecycle.md, test/plan-merged-dir.test.ts, test/plan-dir-readers-ratchet.test.ts]
-  status: queued
+  status: blocked
+  retirement: withdrawn
   attempts: 0
   note: |
     risk:high, band_meaning:span — Rule 19's SPAN measure: the loader, the id minter, the dispatch
