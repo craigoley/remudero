@@ -1,0 +1,67 @@
+- id: W1-T2720
+  title: "THE SLUG-TASK CLASSIFIER IS NOT WIRED INTO THE PRODUCTION REAPER — #3681 shipped taskIdFromSlugBranch and the named_task_credited/named_task_open reasons, but reapBranchesCommand still constructs every BranchFacts object without namedTaskId or namedTaskCredited, so rmd reap-branches can only emit the old no_pr_ever result"
+  repo: remudero
+  depends_on: [W1-T2629]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: high
+  origin: "incident#3681-semantic-review-overruled-2026-09-02"
+  plan_refs: ["W1-T2629", "W1-T2247", "W1-T2246", "W1-T2280"]
+  files: [src/run-task.ts, test/slug-branch-task-resolution.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED AT origin/main 1c274bf6. W1-T2629's implementation merged as #3681. The pure
+    `taskIdFromSlugBranch` resolver, the optional BranchFacts fields and the two reason labels are
+    present in `src/lib/status.ts`, and their isolated tests pass. The production caller is not
+    connected: `reapBranchesCommand` maps each remote branch to exactly `{ name, prState,
+    tipInMain, namedInSource }`, then immediately calls `planBranchReap`. It neither imports nor
+    calls `taskIdFromSlugBranch`, and it never calls `readMergeCreditedTaskIds` for this report.
+    Therefore neither named-task reason is reachable from `rmd reap-branches`.
+
+    The owning worker independently emitted the same follow-up in the fleet ledger at
+    2026-09-02T16:55:39.928Z. The first semantic review then failed W1-T2629 criterion 4 for this
+    exact omission. A fix-rung re-review of the identical head and identical
+    `review_input_digest` contradicted that result, posted success and armed the merge. That
+    verdict-replacement defect is separate work; this task closes only the material production
+    wiring gap that escaped through it.
+
+    This is not a deletion-policy change. `planBranchReap` continues to keep both named-task
+    reasons in `hold`; W1-T2247 still owns adjudication and W1-T2445 still owns any future deletion
+    path. It is also not a second definition of task credit: the caller must use the existing
+    shard-aware `loadPlan` and rotation-aware `readMergeCreditedTaskIds` already imported by
+    `src/run-task.ts`.
+  design: |
+    In `reapBranchesCommand`, load the current plan once and derive its task-id candidates once.
+    Read merge credit once from the configured ledger corpus with
+    `readMergeCreditedTaskIds(ledgerPath, { candidates })`. For each remote branch, call the one
+    resolver `taskIdFromSlugBranch(name, candidates)` and, when it resolves, populate
+    `namedTaskId` plus `namedTaskCredited: credited.has(namedTaskId)` on the BranchFacts object
+    before the existing `planBranchReap` call.
+
+    Keep the existing batched I/O shape: no per-branch plan read, ledger read, git call or network
+    request. Add injectable seams only where the production defaults need a deterministic test;
+    the real CLI path must use the same `plan/tasks.yaml` plus `tasks.d` view and the same state
+    ledger location as the rest of rmd. A plan or ledger read that cannot support the enrichment
+    must be reported explicitly and must not manufacture a credited result. Preserve all current
+    bucket membership, output, dry-run behavior, drift checks and the optional caller-supplied
+    ledger sink.
+  acceptance:
+    - claim: "the production reapBranchesCommand path populates namedTaskId and namedTaskCredited before its one planBranchReap call, using taskIdFromSlugBranch and readMergeCreditedTaskIds rather than a second resolver or credit predicate"
+      proof: "unit test: test/slug-branch-task-resolution.test.ts"
+    - claim: "one command invocation loads the plan once and reads merge credit once for the whole remote-branch corpus, never once per branch"
+      proof: "unit test: test/slug-branch-task-resolution.test.ts"
+    - claim: "the live fixture w1t1060-instrument-declare reaches named_task_credited when W1-T1060 is credited and named_task_open when it is not, while an unrelated branch remains no_pr_ever"
+      proof: "unit test: test/slug-branch-task-resolution.test.ts"
+    - claim: "deletable, guarded, hold and undetermined membership remain byte-for-byte identical with the enrichment enabled; only the reason label changes"
+      proof: "unit test: test/slug-branch-task-resolution.test.ts"
+    - claim: "an unreadable enrichment input never manufactures named_task_credited and the command reports the degraded read instead of silently presenting it as complete"
+      proof: "unit test: test/slug-branch-task-resolution.test.ts"
+  note: |
+    Filed as a follow-up rather than amending W1-T2629 because #3681 has merged and merge credit is
+    terminal evidence. `lint-plan` correctly refused adding a new acceptance obligation to that
+    merged task. The two-file span is one production seam plus its existing focused test; risk is
+    high because the output is an input to future branch adjudication, even though this task does
+    not change any disposition or delete anything.
