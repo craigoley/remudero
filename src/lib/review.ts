@@ -2439,6 +2439,14 @@ export function judgeCriterion(
   /** WHY `reportSubstituted` is true -- consulted ONLY for the refusal's wording, never for the
    *  verdict. See {@link ReviewEvidence.reportSubstituteCause}. */
   reportSubstituteCause?: ReportSubstituteCause,
+  /**
+   * W1-T2713: which authoritative text the mechanical responsiveness floor is checking. A
+   * plan-only criterion already resolved from its task shard is present by construction, so
+   * comparing its proof with independently-written PR prose makes filename vocabulary decide the
+   * verdict. All existing/direct callers default to `report`; only {@link judgeReview}'s narrow
+   * resolved-shard + plan-only arm selects `criterion`.
+   */
+  floorSource: "report" | "criterion" = "report",
 ): CriterionVerdict {
   const base = { claim: criterion.claim, proof: criterion.proof };
 
@@ -2457,8 +2465,12 @@ export function judgeCriterion(
   }
 
   const kws = proofKeywords(criterion.proof);
+  const floorTokens =
+    floorSource === "criterion"
+      ? new Set(tokenize(`${criterion.claim}\n${criterion.proof}`))
+      : reportTokens;
 
-  // Mechanical floor: is the proof responsively pasted into the report?
+  // Mechanical floor: is the proof responsively present in the authoritative source?
   let met: boolean;
   let reason: string;
   if (kws.length === 0) {
@@ -2476,12 +2488,15 @@ export function judgeCriterion(
     // OBSERVED repo-state evidence, never vibes.
     met = false;
     reason =
-      "proof unmet: INDETERMINATE — no mechanical anchors in proof text to check the report " +
-      "against (a claim with nothing distinctive to verify is not evidence; requires an executable proof)";
+      floorSource === "criterion"
+        ? "proof unmet: INDETERMINATE — no mechanical anchors in proof text to check the authoritative criterion source against " +
+          "(a claim with nothing distinctive to verify is not evidence; requires an executable proof)"
+        : "proof unmet: INDETERMINATE — no mechanical anchors in proof text to check the report " +
+          "against (a claim with nothing distinctive to verify is not evidence; requires an executable proof)";
   } else {
-    const covered = kws.filter((k) => reportTokens.has(k));
+    const covered = kws.filter((k) => floorTokens.has(k));
     const coverage = covered.length / kws.length;
-    if (reportSubstituted) {
+    if (floorSource === "report" && reportSubstituted) {
       // W1-T1100 (design (iii)): the floor may not report substantiation off a substitute, in
       // EITHER direction of coverage — a high-coverage substitute is the #2395 fail-OPEN case
       // (the worker describes its own change in the proof's own words), not evidence the body
@@ -2506,10 +2521,16 @@ export function judgeCriterion(
       }
     } else if (coverage < MIN_COVERAGE) {
       met = false;
-      reason = `proof unmet: report does not substantiate it (matched ${covered.length}/${kws.length} proof keywords)`;
+      reason =
+        floorSource === "criterion"
+          ? `proof unmet: authoritative criterion source does not contain it (matched ${covered.length}/${kws.length} proof keywords)`
+          : `proof unmet: report does not substantiate it (matched ${covered.length}/${kws.length} proof keywords)`;
     } else {
       met = true;
-      reason = `proof substantiated in report (matched ${covered.length}/${kws.length} proof keywords)`;
+      reason =
+        floorSource === "criterion"
+          ? `proof present in authoritative criterion source (matched ${covered.length}/${kws.length} proof keywords)`
+          : `proof substantiated in report (matched ${covered.length}/${kws.length} proof keywords)`;
     }
   }
 
@@ -3858,6 +3879,17 @@ export function judgeReview(
   evidence: ReviewEvidence,
 ): ReviewVerdict {
   const reportTokens = new Set(tokenize(evidence.report));
+  // W1-T205/W1-T427/W1-T2472: compute plan-only before grading so W1-T2713 can choose the
+  // floor's authoritative source. The predicate and inputs are unchanged; this is only a move
+  // ahead of the consumer that now needs them.
+  const diffFiles = changedFiles(walkDiff(evidence.diff));
+  const enforcementData = enforcementDataInDiff(diffFiles);
+  const planOnly = planOnlyFromFiles(diffFiles, enforcementData);
+  // `taskDeclaredFiles` is the existing resolved-task signal throughout this module. On the only
+  // arm changed here — a plan-only diff — it means the criteria were loaded from the task shard,
+  // not parsed from the PR body. Implementing PRs and unresolved/body-derived filings retain the
+  // report floor byte-for-byte.
+  const floorSource = planOnly && (evidence.taskDeclaredFiles?.length ?? 0) > 0 ? "criterion" : "report";
   // W1-T456 (DEFECT A): read straight off THIS diff, never off a resolved task id — see
   // shardDeclaredFilesInDiff's doc for why a filing PR (no Remudero-Task: trailer, #1527) has
   // no task id to look `files:` up against otherwise. Union'd with a resolved task's own
@@ -3876,25 +3908,18 @@ export function judgeReview(
       }
     : undefined;
   const verdicts = criteria.map((c, i) =>
-    judgeCriterion(c, reportTokens, evidence.semantic?.[i], execCtx, evidence.reportIsSubstitute, evidence.semanticClauses?.[i], evidence.reportSubstituteCause),
+    judgeCriterion(
+      c,
+      reportTokens,
+      evidence.semantic?.[i],
+      execCtx,
+      evidence.reportIsSubstitute,
+      evidence.semanticClauses?.[i],
+      evidence.reportSubstituteCause,
+      floorSource,
+    ),
   );
   const testTheater = detectTestTheater(evidence.diff);
-
-  // W1-T205's own planOnly, computed EARLY (moved up from below) so the W1-T58
-  // guard right below it can consult it before `state` is rolled up.
-  //
-  // W1-T427: plan scope is NOT all paperwork. `isInPlanScope` is deliberately left alone (it
-  // feeds triage, filing rules and scope classification besides this line); the CARVE-OUT is
-  // what refuses the category — a diff touching {@link ENFORCEMENT_DATA} is not plan-only,
-  // whatever else it touches, because an edit to a self-check must clear the bar the self-check
-  // exists to hold up. Everything else about a plan-scope diff is unchanged.
-  const diffFiles = changedFiles(walkDiff(evidence.diff));
-  const enforcementData = enforcementDataInDiff(diffFiles);
-  // W1-T2472: the boolean now lives in {@link planOnlyFromFiles} so the reviewer-spawn gate in
-  // run-task.ts can consult THE SAME definition instead of re-deriving it. The expression is
-  // unchanged and `enforcementData` is still computed here because {@link cappedSummary} needs the
-  // ARRAY, not the boolean — sharing the predicate must not cost a second walk of the diff.
-  const planOnly = planOnlyFromFiles(diffFiles, enforcementData);
 
   // W1-T58 (Standing rule 15 — RATIFIES P3): see {@link ReviewVerdict.criteriaTampered}'s
   // doc for the full design. `!planOnly` is the exemption — a genuine Architect
