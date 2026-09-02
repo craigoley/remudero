@@ -60,9 +60,9 @@
     - claim: "daemonCommand supplies the scope derived from its own config root to both boot-time and per-poll orphan sweeps"
       proof: "unit test: test/orphan-sweep-instance-scope.test.ts"
     - claim: "the existing real W1-T356 daemonCommand fixture marks its own stray with the fixture root scope and cannot kill a foreign-scope control process"
-      proof: "unit test: test/daemon.test.ts"
+      proof: "unit test: test/orphan-sweep-instance-scope.test.ts"
     - claim: "production still invokes the real process table and signal primitives; the remedy narrows authorization rather than replacing the I/O with fakes"
-      proof: "grep: defaultListCandidates in src/run-task.ts"
+      proof: "unit test: test/orphan-sweep-instance-scope.test.ts"
   falsifier: |
     Spawn two real throwaway process groups carrying valid run/task markers but scopes derived from
     different temporary roots. Invoke the real daemonCommand wiring for one root with both visible.
