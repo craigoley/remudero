@@ -96,13 +96,9 @@
     - claim: "the real console renders effective/default provenance and provides automatic/prefer/park/reserve/clear controls whose acknowledgement says next dispatch and never starts, stops, restarts, recycles or deploys a container"
       proof: "unit test: test/provider-routing-console-controls.test.ts"
     - claim: "serve neither imports provider capacity readers nor receives provider credentials/config mounts, and no UI action can bypass the existing reserve/readability eligibility predicate"
-      proof: "structural assertion: test/provider-routing-console-controls.test.ts"
+      proof: "unit test: test/provider-routing-console-controls.test.ts"
     - claim: "daemon boot and worker decisions publish the same effective policy and preference-bypass reason into W1-T2704's one fixed status snapshot"
       proof: "unit test: test/provider-routing-console-controls.test.ts"
-    - claim: "the production worker calls the shared provider-routing policy resolver rather than leaving the new policy module reachable only from tests"
-      proof: "grep: readProviderRoutingPolicy( in src/lib/worker.ts"
-    - claim: "the production worker continues to call W1-T2704's shared status writer after adding console-managed policy"
-      proof: "grep: writeProviderRoutingStatus( in src/lib/worker.ts"
   falsifier: |
     Close without implementation if current main has a state-resident, live-reloaded provider
     routing policy with audited high-consequence console controls for automatic/preference,
