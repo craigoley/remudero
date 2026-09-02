@@ -11,7 +11,8 @@
   files: [src/lib/credit-evidence-reconcile.ts, src/run-task.ts, test/credit-evidence-reconcile.test.ts]
   origin: "operator-session#plan-review-2026-09-02"
   plan_refs: ["W1-T130", "W1-T1257"]
-  status: queued
+  status: blocked
+  retirement: withdrawn
   attempts: 0
   rationale: |
     MEASURED AT origin/main cf379a34. The repo computes merge credit in two places, from two
@@ -80,7 +81,7 @@
     where lint credits and dispatch would RE-DISPATCH, is TWO tasks: W1-T1261 (status blocked, no
     `retirement:` — the record gap W1-T1287 already owns) and W1-T2326. Population: one.
 
-    RECOMMENDED: RETIRE (`status: blocked` + `retirement: withdrawn`). A CLI verb, a module, its
+    RETIRED 2026-09-02 on operator authorization (`status: blocked` + `retirement: withdrawn`). A CLI verb, a module, its
     tests and its docs to surface one task is the bound-fires-on-a-healthy-condition defect this
     repo keeps hitting, and which this filing itself cites. Per `rule15FilingViolation`'s own doc,
     "a retirement is an operator act" — so this entry recommends and does not perform it. The

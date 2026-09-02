@@ -10,7 +10,8 @@
   files: [src/lib/retro.ts, test/retro-filing-governor.test.ts]
   origin: "operator-session#plan-review-2026-09-02"
   plan_refs: ["W1-T2729", "W1-T121"]
-  status: queued
+  status: blocked
+  retirement: withdrawn
   attempts: 0
   rationale: |
     THE DOCTRINE ALREADY EXISTS AND IS UNENFORCED. MASTER-PLAN §8A states it in one line: "Retros
@@ -55,7 +56,7 @@
     small. §8A's "retros must also DELETE" remains sound doctrine and remains unenforced, but the
     evidence that it is being VIOLATED is gone.
 
-    RECOMMENDED: RETIRE (`status: blocked` + `retirement: withdrawn`). A governor calibrated to
+    RETIRED 2026-09-02 on operator authorization (`status: blocked` + `retirement: withdrawn`). A governor calibrated to
     throttle filing against a 132-task open set would be a bound firing on a healthy condition —
     the exact defect this filing's own final paragraph warns about, citing W1-T312, W1-T380 and
     W1-T382. Per `rule15FilingViolation`'s doc, "a retirement is an operator act": this entry
