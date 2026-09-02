@@ -132,7 +132,9 @@ export function recordHeadProviderAfterPush(
   try {
     producedHeadSha = deps.readProducedHeadSha().trim();
     if (!producedHeadSha) throw new Error("empty produced head");
-  } catch {
+  } catch (e) {
+    // Reading the worktree HEAD the worker just produced FAILING is not the same as it being absent — both arrive here as one
+    // "unavailable", so carry the cause rather than erasing it into the reason alone.
     const reason = "produced-head-unreadable" as const;
     deps.log("pr.head_provider", {
       task_id: input.taskId,
@@ -140,6 +142,7 @@ export function recordHeadProviderAfterPush(
       source: input.source,
       availability: "unavailable",
       reason,
+      error: e instanceof Error ? e.message : String(e),
     });
     return { state: "unavailable", reason };
   }
@@ -160,7 +163,9 @@ export function recordHeadProviderAfterPush(
   try {
     headSha = deps.readHeadSha(input.prUrl).trim();
     if (!headSha) throw new Error("empty live head");
-  } catch {
+  } catch (e) {
+    // Reading the PR head live FAILING is not the same as it being absent — both arrive here as one
+    // "unavailable", so carry the cause rather than erasing it into the reason alone.
     const reason = "live-head-unreadable" as const;
     deps.log("pr.head_provider", {
       task_id: input.taskId,
@@ -168,6 +173,7 @@ export function recordHeadProviderAfterPush(
       source: input.source,
       availability: "unavailable",
       reason,
+      error: e instanceof Error ? e.message : String(e),
     });
     return { state: "unavailable", reason };
   }
