@@ -6068,10 +6068,24 @@ export function acceptanceBlockDiagnostics(body: string): AcceptanceBlockDiagnos
 
 // ── AUTHOR-TIME acceptance check (W1-T952) ──────────────────────────────────
 
-/** Anchored, same shape run-task.ts's own trailer readers use (`reviewTaskIdFromBody`,
- *  `Remudero-Task:` extraction) — duplicated here rather than imported so this module never
- *  depends on run-task.ts (review.ts is the leaf; run-task.ts already imports FROM it). */
-const TASK_TRAILER_RE = /^Remudero-Task:\s*(\S+)\s*$/m;
+/**
+ * W1-T2624: THE SINGLE ANSWER to "which id does this body name" — anchored, LAST-WINS. Last-wins
+ * is not a new decision here: it is W1-T70's ratified reading of the worker prompt's own contract
+ * ("Include this exact trailer as the LAST line of the PR body"), and it is what `ensureTaskTrailer`
+ * (run-task.ts) — which appends its stamp at the END of the body, unconditionally — produces by
+ * construction. Before this change, `acceptanceAuthorTimeCheck` and `resolvePlanCriteriaAtHead`
+ * below each ran their OWN anchored-but-first-wins `.exec()`, disagreeing with run-task.ts's
+ * `reviewTaskIdFromBody` (last-wins) on any body carrying two anchored trailers — this function
+ * replaces all three call sites so there is exactly one implementation of the tie-break.
+ *
+ * review.ts is the leaf; run-task.ts already imports FROM it (never the reverse), so this lives
+ * here and `reviewTaskIdFromBody` becomes a thin re-export over it rather than a second,
+ * independently-drifting regex.
+ */
+export function extractTaskTrailerId(body: string): string | undefined {
+  const matches = [...(body ?? "").matchAll(/^Remudero-Task:\s*(\S+)\s*$/gm)];
+  return matches.length ? matches[matches.length - 1][1] : undefined;
+}
 
 /** The four defects {@link acceptanceAuthorTimeCheck} names — design item (iii), W1-T952:
  *  "the diagnostic must say WHICH of the four it is", never a generic refusal. */
@@ -6121,10 +6135,10 @@ export function acceptanceAuthorTimeCheck(
   opts: { expectedTaskId?: string; trailerResolves?: (taskId: string) => boolean } = {},
 ): AcceptanceAuthorTimeResult {
   const text = body ?? "";
-  const trailerMatch = TASK_TRAILER_RE.exec(text);
+  const trailerId = extractTaskTrailerId(text);
 
   if (opts.expectedTaskId !== undefined) {
-    if (trailerMatch?.[1] === opts.expectedTaskId) {
+    if (trailerId === opts.expectedTaskId) {
       return { ok: true, message: `Remudero-Task: ${opts.expectedTaskId} trailer present — credits this task on merge` };
     }
     return {
@@ -6132,7 +6146,7 @@ export function acceptanceAuthorTimeCheck(
       defect: "no-trailer",
       message:
         `no "Remudero-Task: ${opts.expectedTaskId}" trailer line (` +
-        (trailerMatch ? `found "Remudero-Task: ${trailerMatch[1]}" instead` : "none found") +
+        (trailerId !== undefined ? `found "Remudero-Task: ${trailerId}" instead` : "none found") +
         `) — findMergedByTrailer will never credit ${opts.expectedTaskId} on merge, even if review itself ` +
         "passes off a body-level Acceptance block.",
     };
@@ -6153,8 +6167,8 @@ export function acceptanceAuthorTimeCheck(
   // the plan trusts the trailer exactly as it always has, and only a caller that CAN resolve gets
   // the stricter reading. Falling through re-uses the diagnostics arms below verbatim rather than
   // adding a second spelling of "this block is unreadable" — two spellings of one fact drift.
-  if (trailerMatch && (opts.trailerResolves === undefined || opts.trailerResolves(trailerMatch[1]))) {
-    return { ok: true, message: `Remudero-Task: ${trailerMatch[1]} trailer present — criteria resolve from plan/tasks.yaml` };
+  if (trailerId !== undefined && (opts.trailerResolves === undefined || opts.trailerResolves(trailerId))) {
+    return { ok: true, message: `Remudero-Task: ${trailerId} trailer present — criteria resolve from plan/tasks.yaml` };
   }
 
   const d = acceptanceBlockDiagnostics(text);
@@ -6330,9 +6344,12 @@ export interface PlanCriteriaAtHeadResult {
  * still invisible here — a strictly smaller window than today's boot-to-boot one, never zero
  * (rationale (3)). That residual window is NOT this task's concern.
  *
- * The `Remudero-Task:` trailer is extracted HERE, via the SAME anchored {@link TASK_TRAILER_RE}
- * {@link acceptanceAuthorTimeCheck} above already uses, rather than by a separate caller-side
- * `reviewTaskIdFromBody` — one spelling of "find the trailer", not two.
+ * The `Remudero-Task:` trailer is extracted HERE via {@link extractTaskTrailerId} — the SAME
+ * anchored, last-wins extractor {@link acceptanceAuthorTimeCheck} above uses and run-task.ts's
+ * `reviewTaskIdFromBody` re-exports (W1-T2624 corrected this comment: it used to claim this read
+ * the trailer via the same ANCHOR as `reviewTaskIdFromBody` while actually taking the FIRST match
+ * against that function's LAST — same anchor, opposite tie-break, two spellings of "find the
+ * trailer" rather than the one this sentence claimed. It is now genuinely one spelling, not two.)
  *
  * NEVER WIRED HERE, on purpose. Standing rule — one concern per PR — and this task's own file
  * list (`src/lib/review.ts` + its unit test) deliberately excludes `src/run-task.ts`: swapping
@@ -6398,12 +6415,11 @@ export function resolvePlanCriteriaAtHead(
   headSha: string,
   runGit?: (args: string[]) => string,
 ): PlanCriteriaAtHeadResult {
-  const trailerMatch = TASK_TRAILER_RE.exec(body ?? "");
+  const taskId = extractTaskTrailerId(body ?? "");
   // CLAIM 4: no anchored trailer ⇒ unchanged — nothing to resolve, and no git object is ever
   // touched to find that out. The caller's existing PR-body `## Acceptance` fallback (unchanged
   // by this function) is what recovers criteria here, exactly as it does today.
-  if (!trailerMatch) return { criteria: [] };
-  const taskId = trailerMatch[1];
+  if (taskId === undefined) return { criteria: [] };
 
   // Mirrors loadPlanAtRef's OWN default (plan.ts) exactly, including its `maxBuffer` — never a
   // second, differently-configured git runner for the read-identity probes below.

@@ -630,6 +630,7 @@ import {
   keywordOnlyAnnotation,
   acceptanceBlockDiagnostics,
   acceptanceAuthorTimeCheck,
+  extractTaskTrailerId,
   type AcceptanceAuthorTimeResult,
   parseAcceptanceBlock,
   parseReviewerVerdicts,
@@ -7685,8 +7686,8 @@ export interface FixRoundCommit {
  *
  * The three word-match regexes are declared HERE, inside the function body, rather than at
  * module scope — a plain implementation detail of the one function that owns them (this
- * codebase's own idiom for a validator regex, e.g. `TASK_TRAILER_RE` in lib/review.ts), never a
- * shared or exported surface.
+ * codebase's own idiom for a validator regex, e.g. the trailer regex inside
+ * `extractTaskTrailerId` in lib/review.ts), never a shared or exported surface.
  */
 export function isRetriggerShapedCommit(commit: FixRoundCommit): boolean {
   if (commit.changedFiles === 0) return true;
@@ -13910,9 +13911,15 @@ export function repairRetroChangesetClaim(
   }
 }
 
+/**
+ * W1-T2624: a thin re-export over {@link "./lib/review.js".extractTaskTrailerId} — review.ts is
+ * the leaf module (it never imports from run-task.ts), and this repo already imports FROM it here,
+ * so the canonical anchored/last-wins extractor lives there and this name survives as every
+ * existing call site's stable import. Kept exported (never inlined away) because this is the
+ * single spelling `acceptanceAuthorTimeCheck` and `resolvePlanCriteriaAtHead` (review.ts) also use.
+ */
 export function reviewTaskIdFromBody(body: string): string | undefined {
-  const matches = [...body.matchAll(/^Remudero-Task:\s*(\S+)\s*$/gm)];
-  return matches.length ? matches[matches.length - 1][1] : undefined;
+  return extractTaskTrailerId(body);
 }
 
 /**
