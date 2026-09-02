@@ -121,6 +121,42 @@ test("runSweep post-review dedup: a DELIVERED verdict and a REFUSED attempt are 
   );
 });
 
+test("runSweep post-review dedup resets on a body edit at the same head", async () => {
+  const lp = ledgerPath();
+  const prUrl = "https://github.com/o/r/pull/1213";
+  appendLedger(lp, {
+    run_id: "SWEEP-OLD-BODY",
+    task_id: "W1-T1213",
+    step: "review.posted",
+    head_sha: "cafefeed",
+    pr_url: prUrl,
+    review_input_digest: "v1:old-body",
+    state: "failure",
+  });
+  const calls: number[] = [];
+  const deps = fakeDeps({
+    ledgerPath: lp,
+    postReview: (pr) => {
+      calls.push(pr.prNumber);
+    },
+  });
+
+  await runSweep(
+    [greenUngatedPr({ taskId: "W1-T1213", prUrl, reviewInputDigest: "v1:corrected-body" })],
+    deps,
+    DEFAULT_SWEEP_POLICY,
+  );
+  assert.deepEqual(calls, [1213], "an old-body outcome cannot dedup the corrected body on the same commit");
+
+  calls.length = 0;
+  await runSweep(
+    [greenUngatedPr({ taskId: "W1-T1213", prUrl, reviewInputDigest: "v1:old-body" })],
+    deps,
+    DEFAULT_SWEEP_POLICY,
+  );
+  assert.deepEqual(calls, [], "the unchanged exact input remains deduped");
+});
+
 // ── acceptance: a refusal whose named condition has provably ended stops suppressing its head ──
 
 test("runSweep post-review dedup: a 'PR is already closed' refusal stops suppressing its head once the PR is read open again — no timer, the reopened OpenPrView is the falsifier", async () => {

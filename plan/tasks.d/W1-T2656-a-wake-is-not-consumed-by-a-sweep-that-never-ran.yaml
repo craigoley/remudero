@@ -1,0 +1,72 @@
+- id: W1-T2656
+  title: "A DURABLE GITHUB-EVENT WAKE IS CONSUMED BY A SWEEP THAT NEVER RAN — `runDaemon` acknowledges (and DELETES) the wake marker immediately BEFORE `runGatedSweep`, but that gate declines an overlapping pass while an abandoned-but-still-settling one holds liveness, so the delivery is claimed by a pass that never started and no later pass ever reconciles it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: "span"
+  budget_usd: 8.00
+  files: [src/lib/daemon.ts, src/lib/github-event-wake.ts, test/a-wake-is-not-consumed-by-a-sweep-that-never-ran.test.ts]
+  origin: "operator-decision#refile-3551-off-a-completed-task-2026-09-02"
+  plan_refs: ["W1-T2568", "W1-T2582"]
+  status: queued
+  attempts: 0
+  note: |
+    BAND. `risk: high` with `band_meaning: span` is Rule 19 SIZING, not blast radius: the `files:`
+    list crosses two source modules (the daemon loop and the wake wiring) because the acknowledge
+    MOVES from one to inside a callee in the other, which cannot be decomposed into two shippable
+    halves — a PR that moved the call without the dedup guard would convert the retained marker
+    into a zero-delay poll spin.
+
+    WHY THIS IS A NEW TASK AND NOT MORE W1-T2568. W1-T2568 shipped and merged as #3535 and is
+    credited. Its eleven criteria describe the ORIGINAL feature and are all satisfied on `main`,
+    so a follow-up PR carrying its trailer inherits proofs that match the merge-base, grade
+    `executed_stale`, and fail the review while substantiating nothing — MEASURED on PR #3551 at
+    head 3eb32b5c: `proof_exec: 9/11`, both unmet criteria annotated "proof also matches the PR's
+    merge-base ... non-discriminating, positive override withdrawn". The remedy the gate itself
+    names is to add the missing work or escalate, never to edit criteria to fit a diff; the work
+    is not missing, it is merged, so this defect gets its own record and #3551 is re-trailered.
+  rationale: |
+    THE RACE, IN ORDER. `runGatedSweep` (src/lib/daemon.ts) opens by consulting sweep liveness and
+    returning early with `daemon.sweep.skipped_concurrent` when a previous pass is still executing
+    — W1-T2582's gate, and it is correct. But both `runDaemon` call sites invoked
+    `deps.acknowledgeSweepWake?.()` BEFORE that call. Acknowledge is not a read: it deletes the
+    durable marker. So the sequence is (1) an earlier sweep exceeds the wall-clock await bound and
+    is abandoned but still settling, (2) a signed GitHub event writes the durable marker, (3) the
+    next loop acknowledges and deletes it, (4) the liveness gate declines the overlapping pass.
+    The delivery is now owned by a pass that never started. Nothing re-raises it; recovery falls
+    back to the ordinary poll interval, which is the latency the webhook exists to remove.
+
+    WHY IT SURVIVED #3535's SUITE. The existing active-sweep coverage exercises a sweep that is
+    genuinely RUNNING, not one abandoned past its bound and still settling. Those two states reach
+    different arms of the gate, and only the second loses the marker.
+
+    THE REMEDY IS AN ORDERING PLUS A GUARD, AND THE GUARD IS NOT OPTIONAL. Move the acknowledge
+    INSIDE `runGatedSweep`, after the liveness gate accepts the pass, so a declined attempt claims
+    nothing. That alone regresses a different way: `wireSweepWakeToDaemon` re-reads the durable
+    level before every poll wait (deliberately — `fs.watch` is an acceleration edge, never the
+    source of truth), so a marker legitimately retained behind a busy gate would raise an edge on
+    every iteration and spin the loop at zero delay. The wiring therefore remembers which delivery
+    id has already produced an in-memory edge; a repeat of the SAME level is silent, a DIFFERENT
+    delivery id still wakes immediately, and `acknowledge` re-arms the edge when a newer marker
+    landed while the consumed one was being reconciled.
+
+    SCOPE DISCIPLINE. STOP, PAUSE, sweep liveness itself, the wall-clock bound, webhook
+    authentication, the delivery dedup store, queue policy, merge policy and daemon lifecycle are
+    all unchanged. This task owns WHEN the marker is claimed and the edge-dedup that ordering
+    requires — nothing about WHETHER a sweep is allowed to run.
+  acceptance:
+    - claim: "a durable wake that arrives while an abandoned pass is still settling is RETAINED when the liveness gate declines the overlapping sweep, so no delivery is owned by a pass that never started"
+      proof: "unit test: test/a-wake-is-not-consumed-by-a-sweep-that-never-ran.test.ts"
+    - claim: "the retained wake is reconciled by exactly one later accepted pass and is consumed once, leaving no marker behind"
+      proof: "unit test: test/a-wake-is-not-consumed-by-a-sweep-that-never-ran.test.ts"
+    - claim: "retaining a marker behind a busy gate does not turn the poll loop into a zero-delay spin, because a repeat of the same delivery level raises no new edge"
+      proof: "unit test: test/a-wake-is-not-consumed-by-a-sweep-that-never-ran.test.ts"
+  falsifier: |
+    Restore the acknowledge to its pre-fix position (immediately before `runGatedSweep` in both
+    `runDaemon` call sites) and the named test fails with the marker absent right after
+    `daemon.sweep.skipped_concurrent`. MEASURED 2026-09-02 against clean origin/main at 652d14b5:
+    the test file reports `# fail 1`; against the fixed head it reports `# pass 1`. That delta is
+    the evidence the proof discriminates rather than passing on both sides.
