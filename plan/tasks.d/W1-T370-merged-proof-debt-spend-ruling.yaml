@@ -60,6 +60,37 @@
     so the technique is proven on the 39 that actually matter first.
     NOT IN SCOPE: reopening the `status:` ruling or W1-T367 design (iii); changing what the linter
     checks; and the 39 open tasks (W1-T369).
+    ── RE-MEASURED 2026-09-02 at origin/main 31288519 (evidence only; NO RULING IS MADE HERE) ──
+
+    The figures above are dated 2026-08-05 (cdf885a3) and this shard's own acceptance asks that
+    the population a ruling is made on be recorded alongside it. Re-derived 28 days later from
+    `rmd lint-plan` over the whole plan, streams captured separately (violations land on stderr,
+    the summary on stdout — reading them merged is how a count gets lost):
+
+        1178 task(s) checked (open only) — 169 open failing, of which 166 CARRY A MERGED
+        IMPLEMENTATION and 3 do not. 499 blocking violation lines.
+
+    AND THE LIKE-FOR-LIKE COMPARISON IS NOT 391 -> 499, BECAUSE TWO RULE CLASSES POSTDATE THE
+    ORIGINAL MEASUREMENT. `declared-scope` first appears in `src/lib/task-linter.ts` on
+    2026-08-15 and `ruling-verify` on 2026-08-05 at 19:21 — after the 08:12 commit the original
+    was taken at. Excluding both (57 + 1 = 58 lines):
+
+        proof-dialect 265 + proof-resolvability 170 + headless-fitness 5 = 440   (was 391)
+
+    So the comparable debt grew +49 (+12.5%) in 28 days, about +1.75 lines/day — not the +28% a
+    raw total-to-total comparison reports. Tasks: 136 -> 166 merged (+22%).
+
+    WHAT THAT BEARS ON. The recommendation recorded above is attrition — "fix a row only when a
+    diff already touches it, and let the pool drain". Attrition has been the de facto policy for
+    those 28 days and the comparable population GREW rather than drained. That does not make the
+    recommendation wrong: the cost is still latent, paid only by whoever next edits one of those
+    rows, and nothing here re-opens either of the two declined levers. It does mean the ruling
+    should be made against "let it grow slowly at ~1.75 lines/day" rather than against "let it
+    drain", which is what the original framing implied.
+
+    NO RULING IS RECORDED HERE AND NONE IS IMPLIED. This repo's standing rule is that an agent may
+    RECOMMEND but never RECORD a spend decision (fb-1785882211812-bafd8f); the recommendation above
+    is unchanged and unendorsed, and this block adds only the measurement.
   acceptance:
     - claim: "the operator's ruling between attrition, bulk retirement and gate-scoping is recorded with its reasoning, and the measured population it was ruled on is recorded alongside it"
       proof: "demonstration: operator records the ruling and the measured counts in this task's record and in DECISIONS.md"
