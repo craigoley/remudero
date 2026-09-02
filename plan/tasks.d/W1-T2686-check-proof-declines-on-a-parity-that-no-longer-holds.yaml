@@ -1,0 +1,54 @@
+- id: W1-T2686
+  title: "`check-proof --base` REFUSES TO SCORE A `unit test:` PROOF'S DISCRIMINATION AND JUSTIFIES IT AS `same scope the reviewer itself has` — W1-T362 FALSIFIED THAT: the reviewer extended `executed_stale` to `unit test:` proofs, so the operator's own verb now declines on a parity claim that is stale, and a proof that would score nothing at review reads `verdict: pass` locally"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 12.00
+  files: [src/run-task.ts, test/check-proof-declines-on-a-parity-that-no-longer-holds.test.ts]
+  origin: "operator-session#check-proof-lags-w1-t362-2026-09-02"
+  plan_refs: ["W1-T273", "W1-T362", "W1-T912"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE VERB IS NOT MISSING THE FEATURE — IT DECLINES, ON A STATED GROUND THAT HAS EXPIRED.
+    `--base` (W1-T912) already re-runs a proof against a ref and prints `base:`/`discrimination:`,
+    already knows `executed_stale`, and already exits 5 for it. For a `unit test:` proof it prints:
+
+        base:       NOT COMPARABLE — only `grep:` proofs get a base blob materialized today
+
+    and the verb's own help justifies the limit as "(same scope the reviewer itself has)".
+
+    THAT PARITY WAS TRUE AND IS NOT. `src/lib/review.ts` records `executed_stale` as
+    "(W1-T273, extended to `unit test:` proofs by W1-T362)" and applies the downgrade to that
+    dialect at review time. So the reviewer's scope is strictly larger than the verb's, and the
+    sentence explaining why the verb stops is a description of the world before W1-T362.
+
+    THE FAILURE IS SILENT AND POINTS THE WRONG WAY. A `unit test:` proof that passes identically
+    at head and at base substantiates nothing and is downgraded at review — but locally it reads
+    `verdict: pass` with a `NOT COMPARABLE` note that looks like a tooling limitation rather than
+    an unanswered question. The whole point of the verb is that "a local `verdict: pass` that would
+    count for nothing in review is visible before a PR ever opens." For the dominant dialect it
+    is not.
+
+    MEASURED IN PRACTICE, this session: every `grep:` proof filed tonight was verified head-versus-
+    base BY HAND because the verb would not answer it, and the `unit test:` proofs were not
+    verified for discrimination at all — only for execution. That is exactly the gap.
+
+    KEEP THE REFUSAL SHAPE WHERE IT IS HONEST. If a base blob genuinely cannot be materialized for
+    some proof, `NOT COMPARABLE` remains the right answer — but it must name THAT reason, not a
+    parity with the reviewer that no longer exists. A stale justification is worse than none: it
+    tells the reader the gap is intentional and closed.
+  acceptance:
+    - claim: "a unit-test proof passing identically at head and base is reported as discriminating nothing, not as NOT COMPARABLE"
+      proof: "unit test: test/check-proof-declines-on-a-parity-that-no-longer-holds.test.ts"
+    - claim: "a unit-test proof that passes at head and fails or is absent at base reports discrimination, verdict unchanged"
+      proof: "unit test: test/check-proof-declines-on-a-parity-that-no-longer-holds.test.ts"
+    - claim: "grep proofs keep their existing base behaviour and exit codes byte-identical"
+      proof: "unit test: test/check-proof-declines-on-a-parity-that-no-longer-holds.test.ts"
+    - claim: "omitting --base leaves every line and exit code unchanged, as W1-T912 promises"
+      proof: "unit test: test/check-proof-declines-on-a-parity-that-no-longer-holds.test.ts"
+    - claim: "any remaining NOT COMPARABLE names its own cause and never cites parity with the reviewer"
+      proof: "unit test: test/check-proof-declines-on-a-parity-that-no-longer-holds.test.ts"
