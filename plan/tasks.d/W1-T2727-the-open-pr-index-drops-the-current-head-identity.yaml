@@ -1,0 +1,63 @@
+- id: W1-T2727
+  title: "THE OPEN-PR INDEX DROPS THE CURRENT HEAD IDENTITY — REST already returns `head.sha`, but `mapBoardPr`, `BatchedPr` and `asRef` discard it, so an exact-head console queue cannot prove whether a `sweep.disposed` row describes the PR's current head"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  origin: "prerequisite#W1-T2718-exact-head-queue-join-2026-09-02"
+  plan_refs: ["W1-T2718", "W1-T377", "W1-T2323"]
+  files:
+    - src/lib/status.ts
+    - src/lib/open-prs-rest.ts
+    - test/board-pr-head-identity.test.ts
+    - scripts/source-size-baseline.json
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED AT origin/main e1eb5261. `mapRestPr` already reads the current pull-request head SHA
+    from REST's `head.sha` into `headRefOid`. The board-specific `mapBoardPr` immediately narrows
+    that row to number, URL, state, head branch, body, auto-merge, title and update time, dropping
+    the SHA. `buildBatchedGithub` then narrows its internal row again through `asRef`; public
+    `PrRef` has no head-identity field. `listOpenHeadBranches()` therefore supplies every current
+    open PR but cannot tell an exact-head consumer which commit is current.
+
+    W1-T2718 requires the console queue to attach a `sweep.disposed` disposition only when its
+    `head_sha` equals the current open PR head. Branch name cannot prove this: a push retains the
+    branch and changes the SHA. Using the newest disposal without that comparison would render a
+    red, waiting or successful decision from an old head as if it described the new one.
+
+    This is a projection-field gap, not a request gap. The source value is already present in the
+    one REST response the open board walk pays for. Exposing it adds no GitHub call and makes exact
+    head identity available to every read-only consumer of the existing cached index.
+  design: |
+    Carry `headRefOid` through `BoardPrRest`, the batched gateway's internal row, `PrRef`, and
+    `asRef`. Make the public field optional because the repository has many injected and legacy
+    `PrRef` fixtures that predate it; absence remains explicitly unknown and must never be treated
+    as a match.
+
+    Preserve the current open/closed cache, pagination, failure, truncation and lazy-fetch paths.
+    Prove that `listOpenHeadBranches()` returns the REST head SHA from the same fetch, that a pushed
+    row returns the new SHA after refresh, and that an older injected row without the field remains
+    accepted but cannot manufacture an identity.
+  acceptance:
+    - claim: "the batched gateway's open-PR row carries the exact current REST `head.sha` as `headRefOid`"
+      proof: "unit test: test/board-pr-head-identity.test.ts"
+    - claim: "a refresh after a push replaces the prior head identity with the new SHA while the branch name remains unchanged"
+      proof: "unit test: test/board-pr-head-identity.test.ts"
+    - claim: "the head identity rides the existing board fetch and adds no REST, GraphQL or per-PR request"
+      proof: "unit test: test/board-pr-head-identity.test.ts"
+    - claim: "legacy or injected `PrRef` rows may omit the optional field and remain source-compatible, with absence distinct from a matched SHA"
+      proof: "unit test: test/board-pr-head-identity.test.ts"
+    - claim: "gateway failure and truncation signals remain unchanged and never fabricate a head identity"
+      proof: "unit test: test/board-pr-head-identity.test.ts"
+  note: |
+    This task does not build the console queue and does not interpret a head SHA. W1-T2718 owns
+    the exact-head join and all rendering. This task only preserves evidence the existing fetch
+    already has so that downstream code can make that decision without another GitHub walk.
+
+    RULE 19: risk is high for declared span, not behavioral blast radius. The one optional field
+    crosses the REST mapper, public gateway projection, focused proof and source-size ratchet;
+    it changes no fetch count, cache decision, merge state, sweep disposition or write path.
