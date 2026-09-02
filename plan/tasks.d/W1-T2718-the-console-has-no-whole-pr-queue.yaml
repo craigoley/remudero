@@ -1,0 +1,83 @@
+- id: W1-T2718
+  title: "THE CONSOLE HAS TASK ROWS AND A BLOCKED-PR EXCEPTION LIST BUT NO WHOLE OPEN-PR QUEUE — give the operator one live, ordered cockpit that shows every open head's current sweep disposition, review state, exact wait reason and freshness without a second GitHub walk"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 70.00
+  files:
+    - src/lib/board.ts
+    - src/lib/serve.ts
+    - test/console-pr-queue-cockpit.test.ts
+    - scripts/source-size-baseline.json
+  origin: oper#beautiful-operational-pr-queue-2026-09-02
+  plan_refs: ["P22", "W1-T914", "W1-T1006", "W1-T2568", "W1-T2584"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED AT origin/main 4cc3efde. `BoardSnapshot.tasks` is one row per PLAN task, not one row
+    per open pull request. W1-T914 decorates a task row's PR link with the current
+    `remudero-review` state, and W1-T1006 adds only PRs whose latest sweep disposition is already
+    non-progressing. The shell has Decisions, Now, Plan and Feed tabs; it has no view whose
+    population is "every live open PR". A green head waiting for review, an active reviewer, an
+    auto-merge-ready head, a held head and a red head therefore cannot be inspected as one queue.
+    The operator has to reconcile the GitHub board, daemon log and ledger by hand. That is the
+    queue-hygiene work the daemon is meant to own.
+
+    THE INPUTS ALREADY EXIST; THIS TASK IS A PROJECTION, NOT ANOTHER POLLER. The production
+    `buildBatchedGithub` gateway's `listOpenHeadBranches()` returns every live open PR from its
+    existing cached open-half walk, including number, URL, title, head ref and body. The same
+    `computeBoardSnapshot` call already reads the ledger once and already projects task-backed
+    review state. `sweep.disposed` records PR number, task id, head sha, disposition and the exact
+    reason the reconciler derived. Join those three existing inputs. Do not call `gh` from the
+    browser, do not add a second REST/GraphQL walk, and do not invent a console-only disposition
+    taxonomy.
+
+    BUILD ONE `PrQueueRow` PER CURRENT OPEN PR. Identity comes from the live open index. The newest
+    same-head `sweep.disposed` row supplies disposition and exact reason. A task-backed row may
+    reuse the review state already projected for that PR. A live PR with no task credit or no
+    same-head disposal still renders, explicitly as unattributed or not-yet-observed; absence is
+    information, never a reason to omit it. A disposal for an old head must never describe a new
+    head. If the open index is failed or truncated, withhold the claimed-complete queue and expose
+    the gateway's classified reason plus the last good snapshot age rather than drawing an empty,
+    healthy-looking board.
+
+    ADD A QUEUE TAB TO THE EXISTING CONSOLE SHELL. Default order is actionable first, then active,
+    ready/held, waiting and unknown, stable by PR number inside a class. Each compact row shows PR,
+    title, task attribution, head abbreviation, disposition, review state, exact reason and
+    snapshot freshness; expanding it shows the latest known queue transition without replacing
+    the existing task journey. Filters for actionability, review state and task id operate only on
+    the already-loaded snapshot. The existing SSE/status refresh paints this field atomically with
+    the rest of `BoardSnapshot`; there is no new polling loop.
+
+    THIS TASK IS READ-ONLY. It does not start a review, fix, merge, close, deploy or daemon action;
+    those remain the sweep's responsibility and the operator's existing controls. Console
+    merge-hold controls are a separate write concern and must not be smuggled into this PR.
+
+    RULE 19: risk is high for span, not blast radius. The change crosses the board model, the
+    inline console shell, its focused proof and the board source-size ratchet. It changes no gate,
+    routing decision, provider call or worker admission.
+  acceptance:
+    - claim: "every live open PR appears exactly once, including taskless and not-yet-disposed heads, while closed and stale ledger-only PRs do not appear"
+      proof: "unit test: test/console-pr-queue-cockpit.test.ts"
+    - claim: "a queue row uses only a same-head latest sweep disposal and never carries an old head's disposition or reason onto a pushed head"
+      proof: "unit test: test/console-pr-queue-cockpit.test.ts"
+    - claim: "the queue reuses the batched gateway's open index, the board's one ledger read and its existing review vocabulary without a second GitHub walk or browser-side fetch"
+      proof: "unit test: test/console-pr-queue-cockpit.test.ts"
+    - claim: "an unreachable or truncated open index is rendered as an incomplete unreadable queue with reason and freshness, never as an empty healthy queue"
+      proof: "unit test: test/console-pr-queue-cockpit.test.ts"
+    - claim: "the console queue orders actionable, active, ready or held, waiting and unknown rows deterministically and exposes filters without hiding an unclassified row"
+      proof: "unit test: test/console-pr-queue-cockpit.test.ts"
+    - claim: "the queue is repainted from the existing atomic status snapshot and adds no polling loop, write route or operational side effect"
+      proof: "unit test: test/console-pr-queue-cockpit.test.ts"
+  note: |
+    W1-T914 already renders review state on task rows and W1-T1006 already renders the blocked-PR
+    exception list. Both are reused, not re-filed. W1-T2568 owns event-triggered wake commissioning
+    and W1-T2584 owns review-lane backlog concurrency; this task visualises their material outcome
+    and does not alter either policy. The separate operator merge-hold writer already ships as
+    `rmd merge-hold`; exposing that write in the console requires its own nonce-protected task.
+
+    ID PROVENANCE: `rmd next-task-id --reserve` atomically reserved refs/rmd-id/W1-T2718 against
+    current origin and the open-PR/history surfaces before this shard was written.
