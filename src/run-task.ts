@@ -504,6 +504,14 @@ import {
   taskRecordPath,
 } from "./lib/plan.js";
 import {
+  LINT_FILING_SUBJECT_RE,
+  lintCreditSignalsForTasks,
+  reconcileCreditEvidence,
+  renderCreditEvidenceReport,
+  type CreditEvidenceReport,
+} from "./lib/credit-evidence-reconcile.js";
+export { LINT_FILING_SUBJECT_RE } from "./lib/credit-evidence-reconcile.js";
+import {
   DEFAULT_OVERLAP_WARNING_POLICY,
   declarationCountsByPath,
   rareOverlapWarnings,
@@ -17446,9 +17454,6 @@ export function duplicateCorpusOpts(
  *  (`chore(plan)`/`chore(triage)`/`chore(feedback)`/`docs(plan)`) AND the older bare `plan:`/
  *  `docs:`/`chore:` convention this repo used before them (W1-T1078) — without the bare forms,
  *  filing commits predating the scoped convention read as implementation evidence. */
-export const LINT_FILING_SUBJECT_RE =
-  /^(chore\(plan\)|chore\(triage\)|chore\(feedback\)|docs\(plan\)|plan:|docs:|chore:)/i;
-
 /** Splits lint-plan's failing tasks by MERGE EVIDENCE in a `git log` dump (`%s%x00%b%x01`
  *  format): a task "has a merged implementation" when any non-filing commit carries its id as a
  *  `Remudero-Task:` trailer or cites it in the subject. Pure over its inputs — the impure read
@@ -17459,22 +17464,12 @@ export function classifyFailingMergeEvidence(
   failingIds: string[],
   gitLogDump: string,
 ): { withImpl: string[]; without: string[] } {
-  const nonFiling = gitLogDump
-    .split("\x01")
-    .map((entry) => entry.split("\x00"))
-    .filter((parts) => parts[0]?.trim() && !LINT_FILING_SUBJECT_RE.test(parts[0].trim()));
-  const subjects = nonFiling.map((parts) => ` ${parts[0].toLowerCase()} `);
-  const bodies = nonFiling.map((parts) => (parts[1] ?? "").toLowerCase());
   const withImpl: string[] = [];
   const without: string[] = [];
+  const signalsByTask = lintCreditSignalsForTasks(failingIds, gitLogDump);
   for (const id of failingIds) {
-    const t = id.toLowerCase();
-    const escaped = t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const subjectRe = new RegExp(`[(\\s,:]${escaped}[)\\s,:.]`);
-    const trailer = `remudero-task: ${t}`;
-    const hit =
-      subjects.some((s) => subjectRe.test(s)) ||
-      bodies.some((b) => b.includes(`${trailer}\n`) || b.trimEnd().endsWith(trailer));
+    const signals = signalsByTask.get(id) ?? { lintSubject: false, lintTrailer: false };
+    const hit = signals.lintSubject || signals.lintTrailer;
     (hit ? withImpl : without).push(id);
   }
   return { withImpl, without };
@@ -24848,6 +24843,10 @@ export interface StatusDeps {
   buildBatchedGithub?: typeof buildBatchedGithub;
   buildStatusBoard?: typeof buildStatusBoard;
   renderStatusBoardText?: typeof renderStatusBoardText;
+  /** W1-T2729: injectable read-only credit-evidence edges for the status sibling section. */
+  loadPlan?: typeof loadPlan;
+  readMergeEvidenceLog?: typeof defaultMergeEvidenceLog;
+  reconcileCreditEvidence?: typeof reconcileCreditEvidence;
   /** W1-T1235: the GITHUB BUCKETS section's own ledger read — defaults to the real
    *  `readLedgerLines`, injectable so a test drives it without touching a real file. */
   readLedgerLines?: (path: string) => Array<Record<string, unknown>>;
@@ -25179,10 +25178,28 @@ export async function statusCommand(rest: string[], deps: StatusDeps = {}): Prom
   // costs `rmd status` no additional network request.
   const readLedger = deps.readLedgerLines ?? ((pth: string) => readLedgerLines(pth) as Array<Record<string, unknown>>);
   const ghBucketRefusals = latestGhRateLimitRefusalsFromLedger(readLedger(ledgerPath));
+  let creditEvidence: { available: true; ref: string; report: CreditEvidenceReport } | { available: false; reason: string };
+  try {
+    const plan = (deps.loadPlan ?? loadPlan)(join(repoDir, "plan", "tasks.yaml"));
+    const openIds = plan.tasks.filter(isOpenLintTask).map((task) => task.id);
+    const { dump, ref } = (deps.readMergeEvidenceLog ?? defaultMergeEvidenceLog)(repoDir);
+    if (!github || !github.listMergedHeadBranches) throw new Error("no GitHub gateway");
+    const mergedPrs = github.listMergedHeadBranches();
+    if (mergedPrs === null) throw new Error("merged pull request evidence is unreadable");
+    const report = deps.reconcileCreditEvidence
+      ? deps.reconcileCreditEvidence(openIds, dump, mergedPrs ?? [])
+      : reconcileCreditEvidence(openIds, dump, mergedPrs ?? []);
+    creditEvidence = { available: true, ref, report };
+  } catch (e) {
+    creditEvidence = { available: false, reason: e instanceof Error ? e.message : String(e) };
+  }
   if (rest.includes("--json")) {
-    out(JSON.stringify({ ...model, ghBucketRefusals }, null, 2));
+    out(JSON.stringify({ ...model, ghBucketRefusals, creditEvidence }, null, 2));
   } else {
-    out(`${render(model)}\n\n${renderGhBucketsSection(ghBucketRefusals)}`);
+    const creditSection = creditEvidence.available
+      ? renderCreditEvidenceReport(creditEvidence.report, creditEvidence.ref)
+      : `── CREDIT EVIDENCE ─────────────────────────────────────\n  unavailable: ${creditEvidence.reason}`;
+    out(`${render(model)}\n\n${renderGhBucketsSection(ghBucketRefusals)}\n\n${creditSection}`);
   }
   return 0;
 }

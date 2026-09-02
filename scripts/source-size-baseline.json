@@ -25,6 +25,7 @@
   "src/lib/correct.ts": 71,
   "src/lib/cost-anomaly.ts": 270,
   "src/lib/coverage-improvement.ts": 337,
+  "src/lib/credit-evidence-reconcile.ts": 500,
   "src/lib/daemon-health.ts": 351,
   "src/lib/daemon.ts": 4500,
   "src/lib/dep-review.ts": 399,
@@ -138,7 +139,7 @@
   "src/lib/status-board.ts": 2927,
   "src/lib/status.ts": 6500,
   "src/lib/supersession.ts": 65,
-  "src/lib/sweep.ts": 9500,
+  "src/lib/sweep.ts": 9000,
   "src/lib/task-card.ts": 162,
   "src/lib/task-class.ts": 68,
   "src/lib/task-id-reservation.ts": 1000,
@@ -157,6 +158,7 @@
   "src/lib/worker-scratch.ts": 227,
   "src/lib/worker.ts": 4500,
   "src/lib/workflow-run.ts": 28,
+  "src/lib/worktree-sites.ts": 500,
   "src/run-task.ts": 35500,
   "src/spike.ts": 311
 }
