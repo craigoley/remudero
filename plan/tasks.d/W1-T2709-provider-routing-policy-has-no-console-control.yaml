@@ -1,0 +1,113 @@
+- id: W1-T2709
+  title: "PROVIDER ROUTING POLICY IS BOOT CONFIG ONLY — the console can observe the last Claude/Codex decision after W1-T2704 but cannot safely prefer, park, re-enable or change the reserve without editing the host config and recycling the operator-owned daemon"
+  repo: remudero
+  depends_on: [W1-T2704]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 65.00
+  files: [src/lib/provider-routing-policy.ts, src/lib/provider-routing-status.ts, src/lib/worker.ts, src/run-task.ts, src/lib/serve.ts, test/provider-routing-console-controls.test.ts, scripts/source-size-baseline.json]
+  origin: "operator-session#console-provider-routing-management-2026-09-02"
+  plan_refs: ["W1-T2704", "W1-T2572", "W1-T2573", "W1-T2592", "W1-T332", "W1-T364", "W1-T404", "W1-T500"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON MAIN AT c28595e3. Provider routing is resolved from `Config.workerProviders`:
+    `enabledWorkerProviders` returns the configured list (or the legacy `[claude]` default), and
+    `spawnWorker` passes the configured reserve to `selectWorkerProvider`. `daemonCommand` loads
+    that config once at process start. No state-resident provider-policy override, route or console
+    control exists. Therefore changing provider posture still requires editing the host's durable
+    config and recycling the daemon — an operation the operator explicitly owns and that must not
+    be hidden behind an ordinary console click.
+
+    OBSERVED PRECEDENT. The daily-cost ceiling already has the correct live-control architecture:
+    a bounded atomic file below `config.root/state`, committed-policy fallback, validation at the
+    writer, per-tick reload, a write-scoped console route, effective/default provenance, and a
+    who/from/to ledger line. Production serve enforces route consequence tiers; high-tier actions
+    additionally use a single-use, action-and-payload-bound confirmation nonce. Reuse those trust
+    and audit primitives instead of teaching serve to edit the host config mount.
+
+    CONTROL MUST NOT MEAN BYPASS. A preferred provider may win only if its already-read capacity
+    is readable and above the effective reserve. An unavailable or exhausted preference falls
+    back to another enabled eligible provider; if none is eligible, the existing
+    `ProviderCapacityBlockedError` still wins. The console must have no force-through-headroom
+    control and no provider credential or capacity-probe access. This preserves the requirement
+    that each subscription is used only while it is materially available.
+
+    PRESERVE THE OPERATOR/DAEMON BOUNDARY. Applying a valid override on the next dispatch requires
+    no process or container lifecycle action. The console must not start, stop, restart, recycle or
+    deploy either container. An absent, expired, malformed or cleared override falls back to the
+    committed host config and says why; it never silently disables Claude or invents a provider.
+
+    THIS TASK CONTROLS PROVIDER POLICY, NOT THE MODEL CATALOG. It may choose automatic/Claude/Codex
+    preference, effective enabled providers, reserve and bounded parking. It must not hard-code an
+    OpenAI model list or accept a free-text model id. Account-visible Codex model/effort inventory
+    and model-policy management require the authenticated worker to publish a separate bounded
+    inventory and remain a follow-up concern; W1-T2704 continues to display the concrete model and
+    effort actually selected.
+  design: |
+    Add a versioned `ProviderRoutingPolicyOverride` store at one fixed
+    `<config.root>/state/provider-routing-policy.json`. The schema carries only closed provider ids,
+    `preference: automatic|claude|codex`, a validated reserve percentage, optional provider parks
+    with an absolute expiry, and writer provenance (`writtenAt`, token fingerprint). Write through
+    a mode-0600 temp file plus rename and cap the payload. Reject duplicates, no-enabled-provider,
+    non-finite/out-of-range reserve, preference outside the effective enabled set, unbounded parks,
+    expiry outside a committed maximum, unknown keys and malformed input. A read failure returns
+    a named fallback reason and the unmodified config-derived default; expiration lapses without a
+    daemon restart.
+
+    Resolve the effective policy at each multi-provider `spawnWorker` decision, before capacity
+    reads. An absent override is byte-equivalent to current behavior, including the zero-probe
+    single-Claude fast path. Read only effective enabled providers. Selection first applies the
+    existing readability/reserve eligibility predicate. `automatic` preserves current
+    most-headroom/tie-break behavior. A provider preference chooses that provider only when it is
+    eligible, otherwise selects from the remaining eligible set; it never changes capacity values
+    or catches/relabels the selector's existing blocked error. A park excludes only that provider
+    until its expiry, and a lapsed park is ignored. Read/store failure fails closed to the durable
+    config and emits one bounded diagnostic without blocking dispatch.
+
+    Extend W1-T2704's status projection with effective policy, provenance/fallback, preference,
+    parks and the reason a preferred provider was bypassed. The daemon boot snapshot resolves the
+    same effective policy after acquiring the single-instance lock. The console reads this shared
+    projection and never calls the policy resolver separately for display, so one screen cannot
+    disagree with the worker decision it describes.
+
+    Add high-consequence, write-scoped set and clear routes rooted at `fleetControlRoot`, mounted in
+    the real route table. Bind each set/clear to the existing confirmation-nonce flow. On success,
+    append a bounded ledger event with token fingerprint, before/after effective policy, expiry and
+    `effective: next dispatch`; never record raw auth, paths or request bodies. Refused validation
+    writes neither file nor audit line. The console panel shows committed versus overridden
+    provenance and offers Automatic, Prefer Claude, Prefer Codex, reserve, bounded Park/Unpark and
+    Clear override controls only with write scope. Every action says that it affects the next
+    dispatch and does not restart/recycle/deploy the daemon.
+  acceptance:
+    - claim: "an absent override preserves the current single-Claude zero-probe path and current multi-provider automatic most-headroom selection byte-for-byte"
+      proof: "unit test: test/provider-routing-console-controls.test.ts"
+    - claim: "a preferred provider is selected only while readable and above reserve; an ineligible preference falls back to another eligible provider and all-ineligible still throws the original blocked error"
+      proof: "unit test: test/provider-routing-console-controls.test.ts"
+    - claim: "enabled-provider, reserve and bounded park overrides take effect on the next dispatch without a daemon restart, while expiry/clear/malformed/unreadable state names its fallback to durable config"
+      proof: "unit test: test/provider-routing-console-controls.test.ts"
+    - claim: "the versioned policy store is bounded, mode-0600 and atomic, rejects unknown/unsafe input before writing, and records no credential, path, token or raw request body"
+      proof: "unit test: test/provider-routing-console-controls.test.ts"
+    - claim: "the real set/clear routes are write-scoped high-consequence actions using the existing single-use payload-bound confirmation nonce and append one who/from/to/expiry audit line only after success"
+      proof: "unit test: test/provider-routing-console-controls.test.ts"
+    - claim: "the real console renders effective/default provenance and provides automatic/prefer/park/reserve/clear controls whose acknowledgement says next dispatch and never starts, stops, restarts, recycles or deploys a container"
+      proof: "unit test: test/provider-routing-console-controls.test.ts"
+    - claim: "serve neither imports provider capacity readers nor receives provider credentials/config mounts, and no UI action can bypass the existing reserve/readability eligibility predicate"
+      proof: "unit test: test/provider-routing-console-controls.test.ts"
+    - claim: "daemon boot and worker decisions publish the same effective policy and preference-bypass reason into W1-T2704's one fixed status snapshot"
+      proof: "unit test: test/provider-routing-console-controls.test.ts"
+  falsifier: |
+    Close without implementation if current main has a state-resident, live-reloaded provider
+    routing policy with audited high-consequence console controls for automatic/preference,
+    enabled providers, reserve and bounded parking; selection still enforces existing capacity
+    eligibility; and applying it requires no daemon/container lifecycle action. A config form that
+    edits a host file, a control that bypasses reserve, or a UI without a real worker consumer does
+    not falsify the task.
+  note: |
+    W1-T2709 was atomically reserved at `refs/rmd-id/W1-T2709` before this file was written.
+    `risk: high`, `band_meaning: span` reflects the worker selection, daemon boot and authenticated
+    console-write surfaces. W1-T2704 remains independently useful and read-only; this task depends
+    on it rather than widening its implementation PR.
