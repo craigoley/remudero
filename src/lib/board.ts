@@ -37,6 +37,8 @@ import {
   type DeriveDeps,
   type LedgerTailCache,
   type StatusProjection,
+  type PrRef,
+  taskIdFromRunBranch,
 } from "./status.js";
 import type { Route, SseRoute, SseSend } from "./service.js";
 import { bearerTokenId } from "./panel-actions.js";
@@ -193,6 +195,10 @@ export interface BoardSnapshot {
    * {@link blockedPrs}; the console never re-derives a hold from checks or UI state.
    */
   mergeHeld: MergeHeldRow[];
+  /** Every CURRENT open PR, projected from the batched gateway's existing open half and the
+   * same parsed ledger used by {@link tasks}. An unreadable/partial index is represented by an
+   * incomplete, empty queue rather than stale rows wearing a current timestamp. */
+  prQueue: PrQueueSnapshot;
   /**
    * W1-T1006 design (iii): set ONLY when live GitHub state could not be checked THIS render (no
    * reachable gateway, or the gateway's own read failed) — carried straight through from
@@ -206,6 +212,46 @@ export interface BoardSnapshot {
 
 export interface BoardDeps extends DeriveDeps {
   plan: Plan;
+}
+
+export type PrQueueClass = "actionable" | "active" | "ready-held" | "waiting" | "unknown";
+
+export interface PrQueueRow {
+  prNumber: number;
+  prUrl: string;
+  title: string;
+  headRefName?: string;
+  headSha?: string;
+  taskId?: string;
+  disposition: string;
+  reason: string;
+  reviewState: NonNullable<BoardRow["reviewState"]>;
+  queueClass: PrQueueClass;
+  held: boolean;
+  snapshotAt: string;
+  observedAt?: string;
+}
+
+export interface PrQueueSnapshot {
+  complete: boolean;
+  rows: PrQueueRow[];
+  unavailableReason?: string;
+  /** Timestamp of the newest prior complete queue held by this route cache. Absent until this
+   * process has observed one successfully. */
+  lastGoodAt?: string;
+}
+
+interface BoardComputeOptions {
+  lastGoodPrQueueAt?: string;
+  /** A cache-key read handed into the projection so one snapshot uses one immutable open index. */
+  prQueueIndex?: PrQueueIndexRead;
+}
+
+interface PrQueueIndexRead {
+  open: PrRef[] | null | undefined;
+  failed: boolean;
+  truncated: boolean;
+  failureReason: string;
 }
 
 /**
@@ -295,6 +341,162 @@ function deriveBoardStatusSections(
   };
 }
 
+const QUEUE_CLASS_ORDER: Record<PrQueueClass, number> = {
+  actionable: 0,
+  active: 1,
+  "ready-held": 2,
+  waiting: 3,
+  unknown: 4,
+};
+const ACTIONABLE_DISPOSITIONS = new Set(["blocked-fixable", "blocked-ambiguous", "conflicted", "stale"]);
+const ACTIVE_DISPOSITIONS = new Set(["post-review", "dep-review"]);
+
+function queueClass(disposition: string, reviewState: PrQueueRow["reviewState"], held: boolean): PrQueueClass {
+  if (ACTIONABLE_DISPOSITIONS.has(disposition) || reviewState === "failure") return "actionable";
+  if (ACTIVE_DISPOSITIONS.has(disposition) || reviewState === "pending") return "active";
+  if (held || disposition === "mergeable") return "ready-held";
+  if (disposition === "wait") return "waiting";
+  return "unknown";
+}
+
+function safeQueueFailureReason(github: BoardDeps["github"]): string {
+  try {
+    return github.readFailureReason?.() ?? "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+function safeQueueTruncated(github: BoardDeps["github"]): boolean {
+  try {
+    return github.readTruncated?.() ?? false;
+  } catch {
+    return true;
+  }
+}
+
+/** Read the live open half once. The resulting value is both a board-cache input and the exact
+ * immutable list used by every open-PR consumer during the recompute it triggers. */
+function readPrQueueIndex(github: BoardDeps["github"]): PrQueueIndexRead {
+  if (!github.listOpenHeadBranches) {
+    return { open: undefined, failed: false, truncated: false, failureReason: "unavailable" };
+  }
+  let open: PrRef[] | null;
+  let threw = false;
+  try {
+    open = github.listOpenHeadBranches();
+  } catch {
+    open = null;
+    threw = true;
+  }
+  return {
+    open,
+    failed: threw || safeReadFailed(github) || open === null,
+    truncated: safeQueueTruncated(github),
+    failureReason: safeQueueFailureReason(github),
+  };
+}
+
+/** Stable material fingerprint for GitHub-only queue changes. Body is included because anchored
+ * task attribution is a queue field; title and head identity are rendered facts. */
+function prQueueIndexFingerprint(index: PrQueueIndexRead): string {
+  const rows = index.open === undefined
+    ? "method-unavailable"
+    : index.open === null
+      ? "read-unavailable"
+      : [...index.open]
+          .map((pr) => [pr.number, pr.url, pr.state, pr.title ?? "", pr.headRefName ?? "", pr.headRefOid ?? "", pr.body ?? ""])
+          .sort((a, b) => Number(a[0]) - Number(b[0]));
+  return JSON.stringify([index.failed, index.truncated, index.failureReason, rows]);
+}
+
+function planTaskFromOpenPr(pr: PrRef, plan: Plan): string | undefined {
+  const bodyMatch = /^Remudero-Task:\s*(\S+)\s*$/m.exec(pr.body ?? "");
+  if (bodyMatch && plan.byId.has(bodyMatch[1])) return bodyMatch[1];
+  const branchTask = taskIdFromRunBranch(pr.headRefName);
+  return branchTask && plan.byId.has(branchTask) ? branchTask : undefined;
+}
+
+/** Project every current open head from the gateway's existing open-half cache. The ledger join
+ * is exact-head only: a push turns the row back into `not-yet-observed` until sweep writes a
+ * disposition for that new commit. */
+function derivePrQueue(
+  deps: BoardDeps,
+  lines: Array<Record<string, unknown>>,
+  tasks: BoardRow[],
+  mergeHeld: MergeHeldRow[],
+  snapshotAt: string,
+  lastGoodAt?: string,
+  index: PrQueueIndexRead = readPrQueueIndex(deps.github),
+): PrQueueSnapshot {
+  if (index.open === undefined) {
+    return {
+      complete: false,
+      rows: [],
+      unavailableReason: "GitHub open-PR index is unavailable on this gateway",
+      ...(lastGoodAt ? { lastGoodAt } : {}),
+    };
+  }
+
+  if (index.failed || index.truncated) {
+    const unavailableReason = index.truncated
+      ? "GitHub open-PR index was truncated at its configured page ceiling — the whole queue is withheld"
+      : `GitHub open-PR index could not be read (${index.failureReason}) — the whole queue is withheld`;
+    return {
+      complete: false,
+      rows: [],
+      unavailableReason,
+      ...(lastGoodAt ? { lastGoodAt } : {}),
+    };
+  }
+
+  const taskByPr = new Map<number, BoardRow>();
+  for (const task of tasks) if (task.prNumber !== undefined) taskByPr.set(task.prNumber, task);
+  const fleetHeld = mergeHeld.some((hold) => hold.prNumber === undefined);
+  const unique = new Map<number, PrRef>();
+  for (const pr of index.open ?? []) if (pr.state.toUpperCase() === "OPEN" && !unique.has(pr.number)) unique.set(pr.number, pr);
+
+  const rows: PrQueueRow[] = [];
+  for (const pr of unique.values()) {
+    let transition: Record<string, unknown> | undefined;
+    if (pr.headRefOid) {
+      for (const line of lines) {
+        if (line.step !== "sweep.disposed" || line.pr_number !== pr.number || line.head_sha !== pr.headRefOid) continue;
+        transition = line;
+      }
+    }
+    const taskRow = taskByPr.get(pr.number);
+    const transitionTask = typeof transition?.task_id === "string" && deps.plan.byId.has(transition.task_id) ? transition.task_id : undefined;
+    const taskId = taskRow?.taskId ?? planTaskFromOpenPr(pr, deps.plan) ?? transitionTask;
+    const reviewState = taskRow?.reviewState ?? deriveReviewState(pr.url, deps.github) ?? "none";
+    const disposition = typeof transition?.disposition === "string" ? transition.disposition : "not-yet-observed";
+    const reason =
+      typeof transition?.reason === "string" && transition.reason.trim().length > 0
+        ? transition.reason
+        : transition
+          ? "reason not named"
+          : "the sweep has not yet observed this current head";
+    const held = fleetHeld || mergeHeld.some((hold) => hold.prNumber === pr.number);
+    rows.push({
+      prNumber: pr.number,
+      prUrl: pr.url,
+      title: pr.title ?? `PR #${pr.number}`,
+      ...(pr.headRefName ? { headRefName: pr.headRefName } : {}),
+      ...(pr.headRefOid ? { headSha: pr.headRefOid } : {}),
+      ...(taskId ? { taskId } : {}),
+      disposition,
+      reason,
+      reviewState,
+      queueClass: queueClass(disposition, reviewState, held),
+      held,
+      snapshotAt,
+      ...(typeof transition?.ts === "string" ? { observedAt: transition.ts } : {}),
+    });
+  }
+  rows.sort((a, b) => QUEUE_CLASS_ORDER[a.queueClass] - QUEUE_CLASS_ORDER[b.queueClass] || a.prNumber - b.prNumber);
+  return { complete: true, rows };
+}
+
 /**
  * The board snapshot, reusing {@link projectPlan} verbatim for the merge-state — no new
  * derivation logic. W1-T155's full status taxonomy (in-flight `phase`, `startedAt`/`elapsedMs`,
@@ -303,7 +505,7 @@ function deriveBoardStatusSections(
  * projection with its plan `Task`'s `title`/`risk` and the ledger's `lastActivityAt` to produce
  * a {@link BoardRow} (see that interface's note for why the join lives here, not on the shared type).
  */
-export function computeBoardSnapshot(deps: BoardDeps): BoardSnapshot {
+export function computeBoardSnapshot(deps: BoardDeps, options: BoardComputeOptions = {}): BoardSnapshot {
   // READ THE LEDGER ONCE (W1-T184, extending W1-T187's same discipline): this function used
   // to read+parse the ledger TWICE — once inside `projectPlan` (itself already amortized to a
   // single read across every task, per that task's own header) and once more here for
@@ -312,7 +514,15 @@ export function computeBoardSnapshot(deps: BoardDeps): BoardSnapshot {
   // already-parsed array, rather than re-reading a file that cannot have changed mid-call.
   const readLedger = deps.readLedger ?? readLedgerLines;
   const lines = readLedger(deps.ledgerPath);
-  const effectiveDeps: BoardDeps = { ...deps, readLedger: () => lines };
+  const prQueueIndex = options.prQueueIndex ?? readPrQueueIndex(deps.github);
+  // projectPlan also consumes the open index for task attribution. Override only that one method
+  // with this snapshot's captured answer so task rows and queue rows cannot observe two different
+  // GitHub moments inside one response (and no second gateway walk is introduced).
+  const snapshotGithub: BoardDeps["github"] =
+    prQueueIndex.open === undefined
+      ? deps.github
+      : { ...deps.github, listOpenHeadBranches: () => prQueueIndex.open ?? null };
+  const effectiveDeps: BoardDeps = { ...deps, github: snapshotGithub, readLedger: () => lines };
   const byId = projectPlan(deps.plan, effectiveDeps);
   const lastActivity = lastActivityByTask(lines);
   const tasks: BoardRow[] = [...byId.values()].map((p) => {
@@ -340,7 +550,7 @@ export function computeBoardSnapshot(deps: BoardDeps): BoardSnapshot {
         row.liveSpendPending = true;
       }
     }
-    const reviewState = deriveReviewState(p.prUrl, deps.github);
+    const reviewState = deriveReviewState(p.prUrl, effectiveDeps.github);
     if (reviewState) row.reviewState = reviewState;
     return row;
   });
@@ -348,11 +558,13 @@ export function computeBoardSnapshot(deps: BoardDeps): BoardSnapshot {
   // from the SAME `tasks` the rows render (never a second predicate that can disagree), and the
   // merge tally is flagged UNKNOWN when the GitHub read that backs merge-state was unreachable —
   // so "0 merged" is never rendered as fact during an outage.
-  const github_unreachable = safeReadFailed(deps.github);
+  const github_unreachable = safeReadFailed(effectiveDeps.github);
   const now = deps.now ?? Date.now;
-  const { blockedPrs, blockedPrsUnverifiedReason, mergeHeld } = deriveBoardStatusSections(deps, lines);
+  const generatedAt = new Date().toISOString();
+  const { blockedPrs, blockedPrsUnverifiedReason, mergeHeld } = deriveBoardStatusSections(effectiveDeps, lines);
+  const prQueue = derivePrQueue(effectiveDeps, lines, tasks, mergeHeld, generatedAt, options.lastGoodPrQueueAt, prQueueIndex);
   return {
-    generated_at: new Date().toISOString(),
+    generated_at: generatedAt,
     github_unreachable,
     counts: summarizeCounts(tasks, github_unreachable),
     spend: computeGlanceSpend(lines, now()),
@@ -360,6 +572,7 @@ export function computeBoardSnapshot(deps: BoardDeps): BoardSnapshot {
     blockedPrs,
     blockedPrsUnverifiedReason,
     mergeHeld,
+    prQueue,
   };
 }
 
@@ -486,13 +699,14 @@ function liveRunSpend(lines: Array<Record<string, unknown>>, taskId: string): { 
  * defeats the whole point across a burst of poll ticks spaced at or above that TTL) or too
  * rarely (a TTL long enough to survive a poll burst misses a GitHub-only change for that whole
  * window) — and either way makes the cache's behavior a function of WALL-CLOCK TIMING, which a
- * test has no reliable way to pin down. The actual second input `derivePrPrecedence`'s rungs
- * (b)/(c) depend on is the live {@link GitHub} gateway's OBSERVABLE HEALTH — `readFailed()` —
- * which can flip with NO new ledger line at all (the gateway itself recovers/fails). So the
- * cache key is `(ledger line count, readFailed())`: unchanged on BOTH -> cache hit, no matter how
- * much time passes or how many ticks land; either one changes -> exactly one fresh recompute. A
- * test proves exactly the GitHub-only case (a GitHub-outage banner that must clear on the
- * gateway's next successful read, ledger untouched throughout) deterministically, with no sleep.
+ * test has no reliable way to pin down. The other material inputs are the live {@link GitHub}
+ * gateway's OBSERVABLE HEALTH — `readFailed()`/`readTruncated()` — and W1-T2718's current open-PR
+ * index. Any of them can change with NO new ledger line at all: the gateway can recover/fail, or
+ * a PR can open, close or receive a new head before sweep records it. So the cache key is
+ * `(ledger line count, gateway health, material open-index fingerprint)`: unchanged on all three
+ * -> cache hit, no matter how much time passes or how many ticks land; any change -> exactly one
+ * fresh recompute. Tests prove both GitHub-only cases (health recovery and an open-index change,
+ * ledger untouched throughout) deterministically, with no sleep.
  */
 export interface BoardSnapshotCache {
   get(deps: BoardDeps): BoardSnapshot;
@@ -552,7 +766,8 @@ export function deriveReviewState(
 }
 
 export function createBoardSnapshotCache(): BoardSnapshotCache {
-  let cached: { ledgerLen: number; ghFailed: boolean; snapshot: BoardSnapshot } | undefined;
+  let cached: { ledgerLen: number; ghFailed: boolean; ghTruncated: boolean; prQueueIndexKey: string; snapshot: BoardSnapshot } | undefined;
+  let lastGoodPrQueueAt: string | undefined;
   // ONE persistent tail cursor for this route's whole lifetime (never reconstructed per request,
   // mirroring RecentActivityCache/the SSE stream's own `lastLineCount`) — see readLedgerTail's
   // own doc for why this is the fix for a cache HIT still paying a full ledger re-read+re-parse
@@ -563,16 +778,28 @@ export function createBoardSnapshotCache(): BoardSnapshotCache {
     get(deps: BoardDeps): BoardSnapshot {
       const readLedger = deps.readLedger ?? ((path: string) => readLedgerTail(path, tail));
       const ledgerLen = readLedger(deps.ledgerPath).length;
+      // The queue's live identity can change before the sweep appends anything. Read the existing
+      // batched open half for the cache key, then hand this SAME capture into the recompute below.
+      const prQueueIndex = readPrQueueIndex(deps.github);
+      const prQueueIndexKey = prQueueIndexFingerprint(prQueueIndex);
       // readFailed() is itself cheap/idempotent here: ghGateway's is a sticky flag read (no `gh`
       // call), and buildBatchedGithub's own index() is already TTL-cached internally — neither
       // gateway shells out again just because THIS check asked.
       const ghFailed = safeReadFailed(deps.github);
-      if (cached && cached.ledgerLen === ledgerLen && cached.ghFailed === ghFailed) return cached.snapshot;
+      const ghTruncated = safeQueueTruncated(deps.github);
+      if (
+        cached &&
+        cached.ledgerLen === ledgerLen &&
+        cached.ghFailed === ghFailed &&
+        cached.ghTruncated === ghTruncated &&
+        cached.prQueueIndexKey === prQueueIndexKey
+      ) return cached.snapshot;
       // Hand computeBoardSnapshot the SAME already-resolved reader (and, on the default path, the
       // SAME already-read `lines` array `readLedger` above just produced) rather than letting it
       // re-resolve `deps.readLedger ?? readLedgerLines` on its own — one read, not two.
-      const snapshot = computeBoardSnapshot({ ...deps, readLedger });
-      cached = { ledgerLen, ghFailed, snapshot };
+      const snapshot = computeBoardSnapshot({ ...deps, readLedger }, { lastGoodPrQueueAt, prQueueIndex });
+      if (snapshot.prQueue.complete) lastGoodPrQueueAt = snapshot.generated_at;
+      cached = { ledgerLen, ghFailed, ghTruncated, prQueueIndexKey, snapshot };
       return snapshot;
     },
   };
