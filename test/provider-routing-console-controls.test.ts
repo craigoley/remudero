@@ -231,7 +231,7 @@ function workerArgs(root: string, cfg: Config, probes: { count: number }) {
   };
 }
 
-test("worker resolves the override on each dispatch, reads only effective providers, and keeps legacy Claude zero-probe", async () => {
+test("worker resolves the override on each dispatch, reads only effective providers, and keeps legacy Claude zero-probe", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "rmd-provider-policy-worker-"));
   const cfg = config(root);
   writeProviderRoutingPolicyOverride(root, input({
@@ -271,6 +271,29 @@ test("worker resolves the override on each dispatch, reads only effective provid
   const legacy = await spawnWorker(workerArgs(legacyRoot, config(legacyRoot, ["claude"]), legacyProbes));
   assert.equal(legacy.provider, "claude");
   assert.equal(legacyProbes.count, 0, "absent override preserves the current single-Claude zero-probe path");
+
+  const fallbackRoot = mkdtempSync(join(tmpdir(), "rmd-provider-policy-fallback-"));
+  const fallbackConfig = config(fallbackRoot, ["claude"]);
+  writeProviderRoutingPolicyOverride(fallbackRoot, input({
+    enabledProviders: ["claude"],
+    preference: "claude",
+    parks: [],
+    expiresAt: new Date(NOW - 60_000).toISOString(),
+  }), {
+    config: fallbackConfig,
+    writerFingerprint: "0123456789ab",
+    now: () => NOW - 120_000,
+  });
+  const diagnostics: string[] = [];
+  t.mock.method(console, "error", (...parts: unknown[]) => diagnostics.push(parts.map(String).join(" ")));
+  const fallbackProbes = { count: 0 };
+  const fallback = await spawnWorker(workerArgs(fallbackRoot, fallbackConfig, fallbackProbes));
+  assert.equal(fallback.provider, "claude");
+  assert.equal(fallbackProbes.count, 0, "fallback preserves the committed single-Claude zero-probe path");
+  assert.ok(
+    diagnostics.some((line) => line.includes('\"event\":\"worker.provider_routing_policy_fallback\"') && line.includes('\"reason\":\"expired\"')),
+    "a fallback is bounded and named instead of silently pretending the override applied",
+  );
 });
 
 test("status projection carries the exact effective/default policy and preference bypass, without capacity readers", () => {

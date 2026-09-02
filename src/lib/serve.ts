@@ -5683,7 +5683,7 @@ function appendProviderPolicyAudit(
 ): void {
   appendLedger(deps.ledgerPath, {
     run_id: `PROVIDER-POLICY-${(deps.now ?? Date.now)()}`,
-    task_id: "_console",
+    task_id: "SERVE",
     step: "console.provider_routing_policy_written",
     who: bearerTokenId(req),
     from: before.provenance,

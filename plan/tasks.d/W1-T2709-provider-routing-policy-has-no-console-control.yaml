@@ -8,7 +8,7 @@
   risk: high
   band_meaning: span
   budget_usd: 65.00
-  files: [src/lib/provider-routing-policy.ts, src/lib/provider-routing-status.ts, src/lib/worker.ts, src/run-task.ts, src/lib/serve.ts, test/provider-routing-console-controls.test.ts, test/route-wiring.test.ts, scripts/source-size-baseline.json]
+  files: [src/lib/provider-routing-policy.ts, src/lib/provider-routing-status.ts, src/lib/worker.ts, src/run-task.ts, src/lib/serve.ts, test/provider-routing-console-controls.test.ts, test/route-wiring.test.ts, test/console-token-refresh.test.ts, scripts/source-size-baseline.json]
   origin: "operator-session#console-provider-routing-management-2026-09-02"
   plan_refs: ["W1-T2704", "W1-T2572", "W1-T2573", "W1-T2592", "W1-T332", "W1-T364", "W1-T404", "W1-T500"]
   status: queued
