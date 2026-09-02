@@ -37,6 +37,7 @@ import {
   isDialectPrefixed,
   parseAcceptanceBlock,
   parseWhitelistedProof,
+  wrappedGrepPattern,
 } from "../src/lib/review.js";
 import { buildPlanPrBody, renderAcceptanceBlock } from "../src/lib/plan-pr-emitter.js";
 
@@ -77,13 +78,13 @@ test("the grammar this task adds is a TEMPLATE only — it supplies no filled-in
 
 // ── 2. the two proof forms the grammar teaches parse under the real dialect predicates ──────
 
-/** Every `proof: "..."` template the grammar shows, lifted OUT of the text itself (mirrors
+/** Every proof template the grammar shows, lifted OUT of the text itself (mirrors
  *  test/proof-grammar.test.ts's `proofFormsInGrammar`) — so a rewording is checked against
  *  itself, never against a copy that can silently go stale. */
 function proofFormsInGrammar(): string[] {
   const forms: string[] = [];
   for (const line of RETRO_ACCEPTANCE_BLOCK_GRAMMAR) {
-    const m = /proof:\s*"((?:grep|demonstration):[^"]+)"/.exec(line);
+    const m = /^\s*((?:grep|demonstration):.+?)\s+—/.exec(line);
     if (m) forms.push(m[1]);
   }
   return forms;
@@ -109,6 +110,16 @@ test("the grammar's grep form parses under the real parseWhitelistedProof and ca
   assert.equal(parsed!.kind, "grep");
 });
 
+test("the grammar never teaches the literal quote wrapper that made PR #3591 fail 10 executed proofs", () => {
+  const forms = proofFormsInGrammar();
+  const grepForm = instantiate(forms.find((f) => f.startsWith("grep:"))!);
+  assert.equal(wrappedGrepPattern(grepForm), undefined, `retro prompt still wraps its grep pattern: ${grepForm}`);
+  assert.ok(
+    RETRO_ACCEPTANCE_BLOCK_GRAMMAR.join("\n").includes("do not wrap"),
+    "the producer must name the delimiter consequence, not rely on an example alone",
+  );
+});
+
 test("the grammar's demonstration form is dialect-recognised but never executed, by design (W1-T277)", () => {
   const forms = proofFormsInGrammar();
   const demoForm = instantiate(forms.find((f) => f.startsWith("demonstration:"))!);
@@ -128,26 +139,26 @@ const WRAPPED_BODY = `Acceptance:
 
 - claim: SHIPPED log entries added for every PR merged since the last marker, each carrying
   its own working link back to that PR
-  proof: grep: "SHIPPED" in MASTER-PLAN.md
+  proof: grep: SHIPPED in MASTER-PLAN.md
 - claim: NET STATE section refreshed
-  proof: grep: "as of" in MASTER-PLAN.md
+  proof: grep: as of in MASTER-PLAN.md
 - claim: calibration table added with the observed counts
-  proof: grep: "CALIBRATION TABLE" in MASTER-PLAN.md
+  proof: grep: CALIBRATION TABLE in MASTER-PLAN.md
 `;
 
 /** One criterion per PHYSICAL LINE, exactly what RETRO_ACCEPTANCE_BLOCK_GRAMMAR requires — no
  *  wrap anywhere, and every proof opens with a recognised dialect. */
 const COMPLIANT_BODY = `Acceptance:
-- SHIPPED log entries added for every PR merged since the last marker | grep: "SHIPPED" in MASTER-PLAN.md
-- NET STATE section refreshed | grep: "as of" in MASTER-PLAN.md
-- calibration table added with the observed counts | grep: "CALIBRATION TABLE" in MASTER-PLAN.md
+- SHIPPED log entries added for every PR merged since the last marker | grep: SHIPPED in MASTER-PLAN.md
+- NET STATE section refreshed | grep: as of in MASTER-PLAN.md
+- calibration table added with the observed counts | grep: CALIBRATION TABLE in MASTER-PLAN.md
 - COMPRESSION: folded the stale W1-T900 note into its successor | demonstration: MASTER-PLAN.md's diff removes the superseded W1-T900 paragraph
 `;
 
 /** Same one-bullet-per-line SHAPE as COMPLIANT_BODY (so the author-time gate has nothing shape-
  *  wise to object to) but the second proof is ordinary prose, carrying no dialect prefix at all. */
 const NO_DIALECT_BODY = `Acceptance:
-- SHIPPED log entries added for every PR merged since the last marker | grep: "SHIPPED" in MASTER-PLAN.md
+- SHIPPED log entries added for every PR merged since the last marker | grep: SHIPPED in MASTER-PLAN.md
 - NET STATE section refreshed | the section now describes the fleet as it actually is today
 `;
 
@@ -165,6 +176,7 @@ test("the block a compliant retro produces round-trips through the parser the re
   for (const c of parsed) {
     assert.ok(c.proof.length > 0, `criterion "${c.claim}" resolved with an empty proof`);
     assert.ok(isDialectPrefixed(c.proof), `criterion "${c.claim}"'s proof carries no recognised dialect: "${c.proof}"`);
+    assert.equal(wrappedGrepPattern(c.proof), undefined, `criterion "${c.claim}" copied a literal proof wrapper`);
   }
 });
 
