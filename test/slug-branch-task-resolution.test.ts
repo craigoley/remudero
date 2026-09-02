@@ -15,6 +15,7 @@
  * today (design (iii), and this file's own falsifier test proves it directly).
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import {
   planBranchReap,
@@ -22,7 +23,7 @@ import {
   type BranchFacts,
   type BranchReapPlan,
 } from "../src/lib/status.js";
-import { DECLARED_BRANCH_GUARDS } from "../src/run-task.js";
+import { DECLARED_BRANCH_GUARDS, reapBranchesCommand } from "../src/run-task.js";
 
 const f = (name: string, over: Partial<BranchFacts> = {}): BranchFacts => ({
   name,
@@ -198,4 +199,110 @@ test("W1-T2629(3): named_task_credited on an already-merged branch never overrid
 test("W1-T2629(4): taskIdFromSlugBranch is importable from src/lib/status.js alongside planBranchReap", () => {
   assert.equal(typeof taskIdFromSlugBranch, "function");
   assert.equal(typeof planBranchReap, "function");
+});
+
+// ── W1-T2720: the production command supplies the two facts W1-T2629 consumes ───────────────
+
+function slugCorpusExec(cmd: string, args: string[]): string {
+  if (args[0] === "ls-remote") {
+    return [
+      "a1\trefs/heads/main",
+      "b2\trefs/heads/w1t1060-instrument-declare",
+      "c3\trefs/heads/w1t2999-stuck-maybe",
+      "d4\trefs/heads/tmp-check-branch",
+    ].join("\n");
+  }
+  if (cmd === "gh") return ""; // bulk and exact-head reads both prove no PR
+  if (args[0] === "merge-base") throw new Error("not an ancestor");
+  if (args[0] === "grep" && args.includes("-o")) {
+    return DECLARED_BRANCH_GUARDS.map((name) => `src/run-task.ts:1:${name}`).join("\n");
+  }
+  if (args[0] === "grep") throw new Error("exit 1: no match");
+  return "";
+}
+
+test("W1-T2720: reapBranchesCommand loads one merged plan and reads credit once for every slug branch", () => {
+  let planReads = 0;
+  let creditReads = 0;
+  let readCandidates: string[] = [];
+  const logs: string[] = [];
+  const realLog = console.log;
+  console.log = (...args: unknown[]) => void logs.push(args.map(String).join(" "));
+  let code: number;
+  try {
+    code = reapBranchesCommand([], {
+      exec: slugCorpusExec,
+      creditLedgerPath: "/fixture/state/ledger.ndjson",
+      loadPlan: () => {
+        planReads += 1;
+        return {
+          tasks: [{ id: "W1-T1060" }, { id: "W1-T2999" }],
+          byId: new Map(),
+        } as never;
+      },
+      readMergeCreditedTaskIds: (_path, opts) => {
+        creditReads += 1;
+        readCandidates = [...(opts?.candidates ?? [])];
+        return { credited: new Set(["W1-T1060"]), filesRead: 1, complete: false };
+      },
+    });
+  } finally {
+    console.log = realLog;
+  }
+  assert.equal(code, 0);
+  assert.equal(planReads, 1, "the plan view is shared by the whole branch corpus");
+  assert.equal(creditReads, 1, "merge credit is read once, never once per resolved branch");
+  assert.deepEqual(readCandidates, ["W1-T1060", "W1-T2999"]);
+  assert.match(logs.join("\n"), /guarded:\s+1/);
+  assert.match(logs.join("\n"), /hold:\s+3/);
+});
+
+test("W1-T2720: production maps resolver and credit outputs into BranchFacts before classification", () => {
+  const source = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
+  const start = source.indexOf("export function reapBranchesCommand(");
+  const end = source.indexOf("export function ledgerGrepCommand(", start);
+  assert.ok(start >= 0 && end > start, "production command source must be locatable");
+  const body = source.slice(start, end);
+  assert.match(body, /taskIdFromSlugBranch\(name, candidates\)/);
+  assert.match(body, /namedTaskId = namedTaskByBranch\.get\(name\)/);
+  assert.match(body, /namedTaskCredited: creditedTaskIds\.has\(namedTaskId\)/);
+  assert.ok(
+    body.indexOf("namedTaskCredited: creditedTaskIds.has(namedTaskId)") < body.indexOf("planBranchReap(facts"),
+    "both facts must be populated before the command's one classifier call",
+  );
+  assert.equal(body.match(/planBranchReap\(facts/g)?.length, 1);
+});
+
+test("W1-T2720: an unreadable credit corpus reports degradation and never marks credit as measured", () => {
+  const errors: string[] = [];
+  const realError = console.error;
+  const realLog = console.log;
+  console.error = (...args: unknown[]) => void errors.push(args.map(String).join(" "));
+  console.log = () => {};
+  try {
+    const code = reapBranchesCommand([], {
+      exec: slugCorpusExec,
+      creditLedgerPath: "/fixture/state/ledger.ndjson",
+      loadPlan: () => ({
+        tasks: [{ id: "W1-T1060" }, { id: "W1-T2999" }],
+        byId: new Map(),
+      }) as never,
+      readMergeCreditedTaskIds: () => {
+        throw new Error("fixture ledger unreadable");
+      },
+    });
+    assert.equal(code, 0, "enrichment is diagnostic and cannot change reaper disposition");
+  } finally {
+    console.error = realError;
+    console.log = realLog;
+  }
+  assert.match(errors.join("\n"), /slug-task enrichment degraded: merge-credit read failed/);
+  assert.match(errors.join("\n"), /fixture ledger unreadable/);
+
+  const degraded = planBranchReap(
+    [f("w1t1060-instrument-declare", { namedTaskId: "W1-T1060" })],
+    DECLARED_BRANCH_GUARDS,
+  );
+  assert.equal(degraded.reasons["w1t1060-instrument-declare"], "named_task_open");
+  assert.deepEqual(degraded.deletable, [], "an unreadable credit source cannot manufacture credited deletion");
 });
