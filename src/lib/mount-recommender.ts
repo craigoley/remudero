@@ -92,10 +92,11 @@ export interface MountHeadroomArm {
   costMax: number | null;
   costPerCompletedTaskUsd: number | null;
   /** This arm's OWN window-share evidence (W1-T2577) — see routing-objective.ts. Optional and
-   *  structural, same discipline as every other field here: the sweep's own `.mjs` emission is
-   *  out of this task's file scope, so a caller that has not yet wired window evidence through
-   *  simply omits this, and {@link routingObjectiveFor} falls back to the dollar objective,
-   *  loudly, exactly as it does for any other unreadable window. */
+   *  structural, same discipline as every other field here: the production sweep does not emit
+   *  this yet, so this PR is the objective/recommender PRECURSOR rather than a claim that live
+   *  routing already consumes window evidence. A caller that has not wired material evidence
+   *  through omits it, and {@link routingObjectiveFor} falls back to the dollar objective loudly,
+   *  exactly as it does for any other unreadable window. */
   windowShare?: ArmWindowShare;
 }
 

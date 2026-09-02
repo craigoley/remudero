@@ -1,6 +1,14 @@
 import type { BillingMode } from "./env.js";
 
 /**
+ * Objective-selection precursor. This module and the recommender call site define how material
+ * per-arm window-consumption evidence is judged; they do not manufacture that evidence. Until a
+ * retained-ledger producer supplies `ArmWindowShare` to the production sweep, subscription calls
+ * take the deliberately loud notional-dollar fallback below. Keeping that boundary explicit
+ * prevents an API seam from being mistaken for a live routing claim.
+ */
+
+/**
  * THE ROUTING OBJECTIVE (W1-T2577, MASTER-PLAN §9).
  *
  * §9 IS EXPLICIT AND EVERY ROUTER MUST AGREE WITH IT: "on subscription, `total_cost_usd` is
