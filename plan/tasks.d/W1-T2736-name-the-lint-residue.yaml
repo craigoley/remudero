@@ -1,0 +1,68 @@
+- id: W1-T2736
+  title: "LINT-PLAN COMPUTES THE IDS OF THE ONLY REAL WORK IT FOUND AND THROWS THEM AWAY — `lintPlanCommand` destructures `{ withImpl, without }` and uses `.length` on both, so the headline says how many failures are real and never which, and locating them costs a re-implementation of the split"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 10.00
+  files: [src/run-task.ts, test/name-the-lint-residue.test.ts]
+  origin: "operator-session#w1-t1260-ruling-2026-09-02"
+  plan_refs: ["W1-T1260", "W1-T367"]
+  status: queued
+  attempts: 0
+  rationale: |
+    AUTHORISED BY THE W1-T1260 RULING, AND BY NOTHING ELSE. That ruling (DECISIONS.md, 2026-09-02)
+    refused all three candidates it was given — annotate-on-credit, archive-on-credit,
+    scope-the-open-set-to-credit — and recorded, as design (ii), that "WHAT THE EVIDENCE DOES DECIDE
+    IS NOT ON THAT LIST": the measured defect is in the SPLIT's presentation, not the linter's scope.
+    It filed no follow-up and left the call to the operator, who ruled it warranted on 2026-09-02.
+    THIS TASK IS THAT ONE CALL AND NOTHING ADJACENT TO IT.
+
+    THE DEFECT, AT ITS OWN LINES. `src/run-task.ts`:
+
+      const { withImpl, without } = classifyFailingMergeEvidence(failingTaskIds, dump);
+      failingSplit = ` (${withImpl.length} with a merged implementation, ${without.length} with none)`;
+
+    Both arrays are computed in-process and only `.length` survives. The whole-plan headline therefore
+    reports, today, `169 open failing (166 with a merged implementation, 3 with none)` — it knows the
+    residue is three ids and cannot say which three. W1-T1260's own rationale records what that costs:
+    its (b) "THE CHECK NAME IS NOT A LOCATOR EITHER" (57 tasks carry a blocking `[declared-scope]`;
+    two of those 57 are the residue, so filtering on the most discriminating check returns 55 rows of
+    archaeology for two of signal) and its (d) "SO LOCATING THEM COSTS A RE-IMPLEMENTATION" —
+    reproducing the verb's own split by hand was the only way to name them.
+
+    THE SCALE IS WHY IT MATTERS. Re-measured 2026-09-02 against the credit paths the dispatcher
+    actually uses: of the 160 ids a whole-plan run names, 159 are already credited and ONE is
+    genuinely open and failing. The instrument's signal-to-noise on its own rows is under one
+    percent, and the number that would locate the signal already exists in memory.
+
+    THE LIST MUST CARRY ITS OWN UNRELIABILITY OR IT IS WORSE THAN NO LIST — the register the code
+    already sets, verbatim: "On ANY evidence failure the line says so explicitly — a wrong split is
+    worse than no split." The split reads TWO of the four credit paths (a commit-subject citation and
+    a commit-body trailer) and misses the two W1-T1260 measured as load-bearing (the PR-body trailer
+    and the `run-<id>-<epoch>` head ref). On the three ids it examined it was wrong on two: W1-T2 and
+    W1-T326 are both credited. So the named ids are a STARTING POINT for a credit check, never a
+    verdict that work remains, and the output must say so in those terms.
+
+    NAMING THEM ALSO CLOSES THE STREAM SPLIT W1-T1260 RECORDED. The summary is one `console.log`
+    (stdout) while every violation row goes to stderr, so today the count and the rows land in
+    different streams and `cmd 2>&1 > f` separates them. Ids printed WITH the count inherit the
+    count's stream, and the operator reads one place.
+
+    NOT IN SCOPE, EACH REFUSED BY NAME: widening the split's evidence; exempting ruling-shaped tasks
+    from `LINT_FILING_SUBJECT_RE` (W1-T1260 design (ii) lists both as separate calls, unruled);
+    changing what the linter CHECKS; changing the failing count, the exit code, or any pre-existing
+    summary substring; and reopening W1-T367 design (iii).
+
+    THE CENSUS SUITES THIS TOUCHES, NAMED SO THE BUILDER RUNS THEM: `test/lint-plan-merge-evidence.test.ts`
+    and `test/plan-proof-debt.test.ts` both pin the whole-plan summary line and are invisible to a
+    symbol-keyed caller sweep.
+  acceptance:
+    - claim: "the whole-plan summary names the residue ids beside the count that summarises them, capped with a truncation count when there are more than the cap"
+      proof: "unit test: test/name-the-lint-residue.test.ts"
+    - claim: "the named ids carry the split's own two-of-four-credit-paths limit, so the list reads as a starting point for a credit check and never as a verdict that work remains"
+      proof: "unit test: test/name-the-lint-residue.test.ts"
+    - claim: "display only: the failing count, the exit code and every pre-existing summary substring are byte-identical with and without the naming"
+      proof: "unit test: test/name-the-lint-residue.test.ts"
