@@ -11,7 +11,8 @@
   files: [src/lib/credit-evidence-reconcile.ts, src/run-task.ts, test/credit-evidence-reconcile.test.ts]
   origin: "operator-session#plan-review-2026-09-02"
   plan_refs: ["W1-T130", "W1-T1257"]
-  status: queued
+  status: blocked
+  retirement: withdrawn
   attempts: 0
   rationale: |
     MEASURED AT origin/main cf379a34. The repo computes merge credit in two places, from two
@@ -50,6 +51,42 @@
     THE WRITER ALREADY EXISTS. `rmd correct <task-id> --pr <n>` is the sanctioned operator-correction
     writer and `classifyFailingMergeEvidence` is the detector. Nothing connects them. This is that
     connection, and nothing more.
+    MEASUREMENT CORRECTED 2026-09-02 — THIS TASK'S OWN EVIDENCE WAS WRONG AND THE CORRECTION
+    REFUTES IT. The figures above were derived from `git log origin/main --format=%B`, used as a
+    proxy for the dispatch credit surface. That proxy is invalid: status.ts's rungs resolve credit
+    from the GITHUB API — the merged PR's BODY trailer and its `run-<id>-<digits>` HEAD REF —
+    neither of which appears in a squashed commit message. CLAUDE.md names this exact failure ("a
+    trailer-only set UNDER-CREDITS, because the BRANCH NAME is a second, independent credit path")
+    and the filing quoted that rule while violating it.
+
+    RE-MEASURED over all 2912 merged PRs, reading body trailers and head refs the way the rungs do:
+
+      credited by merged-PR body trailer        1068
+      credited by run-<id>-<digits> head ref    1032
+      UNION — what `isMerged` actually sees      1100  of 1232 tasks
+      the old commit-message proxy saw            649  — it missed 465
+
+      genuinely uncredited      132   (this filing claimed 585)
+      uncredited & verify:auto   88   (claimed 537)
+      W1-T0-499 cohort open      32   (claimed 365)
+
+    The frontier is FRESH, not ageing: 64 eligible tasks, median W1-T2669, with one pre-500 task
+    (W1-T201) at the head. "The two priority-1 slots are occupied by finished work" is FALSE —
+    `rmd correct` reported W1-T419 already credited source=head-branch and W1-T420 source=trailer.
+
+    THE TWO-SURFACE SPLIT IS REAL AND THE POPULATION IS ONE. Dispatch (PR body ∪ head ref) versus
+    lint (`classifyFailingMergeEvidence` over commit subjects) disagree on 100 of 1232 tasks (8.1%),
+    but 98 of those are DISPATCH-only — the dispatcher credits them and only lint-plan's report
+    disagrees, which is a reporting artifact and not a re-dispatch risk. The actionable direction,
+    where lint credits and dispatch would RE-DISPATCH, is TWO tasks: W1-T1261 (status blocked, no
+    `retirement:` — the record gap W1-T1287 already owns) and W1-T2326. Population: one.
+
+    RETIRED 2026-09-02 on operator authorization (`status: blocked` + `retirement: withdrawn`). A CLI verb, a module, its
+    tests and its docs to surface one task is the bound-fires-on-a-healthy-condition defect this
+    repo keeps hitting, and which this filing itself cites. Per `rule15FilingViolation`'s own doc,
+    "a retirement is an operator act" — so this entry recommends and does not perform it. The
+    implementation attempt is craigoley/remudero#3728, closed as defective for the same reason.
+
   acceptance:
     - claim: "for each open task the reconciler reports which credit signals fire and flags the ones where the dispatch set and the lint set disagree"
       proof: "unit test: test/credit-evidence-reconcile.test.ts"

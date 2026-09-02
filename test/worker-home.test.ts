@@ -13,9 +13,10 @@ import fs, {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative, sep } from "node:path";
+import { dirname, join, relative, sep } from "node:path";
 import { test } from "node:test";
 
+import { workerHomeDir, type Config } from "../src/lib/config.js";
 import { playwrightCacheRoot } from "../src/lib/review.js";
 import {
   CLAUDE_CONFIG_BACKUP_PREFIX,
@@ -23,9 +24,12 @@ import {
   WORKER_CLAUDE_CREDENTIAL_DIR_RELPATH,
   WORKER_HOME_RC_FILES,
   WORKER_HOME_SYMLINKS,
+  WorkerHomePlacementError,
   ensureWorkerKeychain,
+  gitWorkTreeAncestor,
   keychainProvisionLockPath,
   materializeWorkerHome,
+  perRunWorkerHomeDir,
   playwrightCacheRelPath,
   sweepClaudeConfigBackups,
   workerHomePlan,
@@ -599,6 +603,161 @@ test("worker home: the cache grant adds no writable path", () => {
   const linkPath = join(workerHome, rel);
   assert.equal(lstatSync(linkPath).isSymbolicLink(), true, "the grant is a SYMLINK, never a copied tree");
   assert.equal(realpathSync(linkPath), realpathSync(join(realHome, rel)), "and it resolves to the real home's cache");
+});
+
+// ── W1-T2633: the placement invariant — a worker home may never resolve inside a git work tree ──
+//
+// workerHomeDir (config.ts) resolves an OPERATOR-SETTABLE config.workerHomeRoot with no guard.
+// These tests pin the refusal at BOTH layers: the pure predicate in isolation, and
+// materializeWorkerHome's call to it — for a clone's .git DIRECTORY and a linked worktree's .git
+// FILE alike, and reached through the settable config field, not only the default derivation.
+
+test("gitWorkTreeAncestor: finds a .git DIRECTORY ancestor (a plain clone)", () => {
+  const found = gitWorkTreeAncestor("/repo/nested/worker-home-x", (p) => p === "/repo/.git");
+  assert.equal(found, "/repo/.git");
+});
+
+test("gitWorkTreeAncestor: finds a .git FILE ancestor (a linked worktree's gitdir pointer)", () => {
+  const found = gitWorkTreeAncestor("/worktrees/run-1/worker-home-x", (p) => p === "/worktrees/run-1/.git");
+  assert.equal(found, "/worktrees/run-1/.git");
+});
+
+test("gitWorkTreeAncestor: undefined when no ancestor up to the filesystem root carries a .git entry", () => {
+  assert.equal(gitWorkTreeAncestor("/scratch/worker-home-x", () => false), undefined);
+});
+
+test("materializeWorkerHome: refuses a worker home inside a git CLONE (.git directory), naming both paths, and writes nothing", () => {
+  const root = tmp();
+  const realHome = tmp();
+  try {
+    const repo = join(root, "repo");
+    mkdirSync(join(repo, ".git"), { recursive: true });
+    const workerHome = join(repo, "worker-home-RUN1");
+
+    assert.throws(
+      () => materializeWorkerHome({ workerHome, realHome }),
+      (err: unknown) => {
+        assert.ok(err instanceof WorkerHomePlacementError, "must throw the named placement error");
+        assert.equal(err.workerHome, workerHome, "the error must name the offending home path");
+        assert.equal(err.gitAncestor, join(repo, ".git"), "the error must name the .git ancestor that disqualified it");
+        return true;
+      },
+    );
+    assert.equal(existsSync(workerHome), false, "nothing is written when the guard refuses");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(realHome, { recursive: true, force: true });
+  }
+});
+
+test("materializeWorkerHome: refuses a worker home inside a linked WORKTREE (.git file), same as a clone's .git directory", () => {
+  const root = tmp();
+  const realHome = tmp();
+  try {
+    const worktree = join(root, "worktree");
+    mkdirSync(worktree, { recursive: true });
+    writeFileSync(join(worktree, ".git"), "gitdir: /elsewhere/repo/.git/worktrees/worktree\n");
+    const workerHome = join(worktree, "worker-home-RUN1");
+
+    assert.throws(
+      () => materializeWorkerHome({ workerHome, realHome }),
+      (err: unknown) => {
+        assert.ok(err instanceof WorkerHomePlacementError, "a .git FILE must be detected the same as a .git directory");
+        assert.equal(err.gitAncestor, join(worktree, ".git"));
+        return true;
+      },
+    );
+    assert.equal(existsSync(workerHome), false, "nothing is written when the guard refuses");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(realHome, { recursive: true, force: true });
+  }
+});
+
+test("materializeWorkerHome: a worker home OUTSIDE every git work tree materializes exactly as before — the guard adds a refusal and moves no other behaviour", () => {
+  const workerHomeRoot = tmp();
+  const workerHome = perRunWorkerHomeDir(workerHomeRoot, "RUN1");
+  const realHome = tmp();
+  try {
+    mkdirSync(join(realHome, ".claude"), { recursive: true });
+
+    const plan = materializeWorkerHome({ workerHome, realHome });
+
+    assert.equal(plan.workerHome, workerHome);
+    for (const rc of WORKER_HOME_RC_FILES) {
+      assert.equal(readFileSync(join(workerHome, rc), "utf8"), "", `${rc} still materializes empty`);
+    }
+    assert.ok(lstatSync(join(workerHome, ".claude")).isSymbolicLink(), "the existing grants still materialize");
+    // the sibling shape is unchanged: workerHome sits BESIDE workerHomeRoot, never nested under it.
+    assert.equal(dirname(workerHome), dirname(workerHomeRoot));
+  } finally {
+    rmSync(workerHomeRoot, { recursive: true, force: true });
+    rmSync(workerHome, { recursive: true, force: true });
+    rmSync(realHome, { recursive: true, force: true });
+  }
+});
+
+test("materializeWorkerHome: the guard fires through config.ts's settable workerHomeRoot field, not only the default root derivation", () => {
+  const root = tmp();
+  const configRoot = tmp();
+  const realHome = tmp();
+  try {
+    // An operator points workerHomeRoot at a path INSIDE a tracked checkout — the one unguarded
+    // path by which home scaffolding could reach a tracked tree (this task's filing).
+    const trackedCheckout = join(root, "tracked-checkout");
+    mkdirSync(join(trackedCheckout, ".git"), { recursive: true });
+    const configuredRoot = join(trackedCheckout, "scratch");
+    const config = { claudeBin: "/bin/true", root: configRoot, workerHomeRoot: configuredRoot } as unknown as Config;
+
+    const workerHome = perRunWorkerHomeDir(workerHomeDir(config), "RUN1");
+
+    assert.throws(() => materializeWorkerHome({ workerHome, realHome }), WorkerHomePlacementError);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(configRoot, { recursive: true, force: true });
+    rmSync(realHome, { recursive: true, force: true });
+  }
+});
+
+test("materializeWorkerHome: the guard also fires on the DEFAULT root derivation when config.root itself is a checkout", () => {
+  const root = tmp();
+  const realHome = tmp();
+  try {
+    // root == checkout is not a supported shape, but the default derivation (`<root>/worker-home`)
+    // nests the home directly under it, so this must refuse rather than silently materialize.
+    mkdirSync(join(root, ".git"), { recursive: true });
+    const config = { claudeBin: "/bin/true", root } as unknown as Config;
+
+    const workerHome = perRunWorkerHomeDir(workerHomeDir(config), "RUN1");
+
+    assert.throws(() => materializeWorkerHome({ workerHome, realHome }), WorkerHomePlacementError);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(realHome, { recursive: true, force: true });
+  }
+});
+
+// ── W1-T2633: the ignore list stays narrow — see .gitignore's own "os / editor" section ──
+
+test("W1-T2633: .gitignore ignores the two editor directories, and does NOT ignore the rc file names or .claude.json", () => {
+  const ignore = readFileSync(new URL("../.gitignore", import.meta.url), "utf8");
+  const lines = ignore.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
+
+  // The two editor directories the report named — never legitimate repo content, so a stray one
+  // can never be staged into a PR diff by accident.
+  assert.ok(lines.includes(".idea/"), ".idea/ must be ignored");
+  assert.ok(lines.includes(".vscode/"), ".vscode/ must be ignored");
+
+  // DELIBERATELY NOT IGNORED: an ignore entry for these would MASK the very defect the placement
+  // guard above exists to make loud — a home materialized into a work tree would then be
+  // invisible instead of refused, which is strictly worse than the status quo.
+  for (const rc of WORKER_HOME_RC_FILES) {
+    assert.ok(!lines.includes(rc), `${rc} must stay UN-ignored — an ignore entry would hide the guard's own defect`);
+  }
+  assert.ok(
+    !lines.includes(CLAUDE_CONFIG_REL),
+    ".claude.json must stay UN-ignored — same reasoning as the rc files above",
+  );
 });
 
 test("worker home: the existing grants are unchanged", () => {

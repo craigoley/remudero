@@ -823,6 +823,18 @@ export function renderShellHtml(
   .merge-hold-action { display: inline-flex; flex-wrap: wrap; gap: 0.35rem; align-items: center; margin-left: auto; }
   .merge-hold-action input { min-width: 15rem; }
   .merge-hold-current { margin: 0.45rem 0; }
+  .pr-queue-toolbar { display: grid; grid-template-columns: repeat(3, minmax(9rem, 1fr)); gap: 0.5rem; margin: 0.35rem 0 0.55rem; }
+  .pr-queue-toolbar label { margin: 0; }
+  .pr-queue-toolbar select { width: 100%; margin-top: 0.15rem; }
+  .pr-queue-row { display: block; width: 100%; padding: 0; border-left: 3px solid var(--status-queued); }
+  .pr-queue-row.queue-actionable { border-left-color: var(--status-blocked); }
+  .pr-queue-row.queue-active { border-left-color: var(--status-running); }
+  .pr-queue-row.queue-ready-held { border-left-color: var(--status-merged); }
+  .pr-queue-row summary { cursor: pointer; display: flex; align-items: center; gap: 0.45rem; padding: 0.35rem 0.55rem; overflow: hidden; }
+  .pr-queue-row summary .detail { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pr-queue-transition { border-top: 1px solid var(--border); padding: 0.45rem 0.65rem; color: var(--text-dim); font-size: 0.82rem; display: grid; gap: 0.2rem; }
+  .pr-queue-transition strong { color: var(--text); }
+  @media (max-width: 620px) { .pr-queue-toolbar { grid-template-columns: 1fr; } }
   /* W1-T2497: THE MAILBOX -- inline, same <style> block (no stylesheet of its own). */ .mailbox-heading { font-size: 0.85rem; margin: 0.6rem 0 0.25rem; display: flex; align-items: center; gap: 0.4em; } .mailbox-unread-count:empty { display: none; } .mailbox-unread-count { display: inline-block; min-width: 1.2em; padding: 0 0.4em; border-radius: 999px; text-align: center; font-size: 0.7rem; font-weight: 700; background: var(--status-needs-human); color: #241a02; } .mailbox { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.5rem; } .mailbox-empty { font-size: 0.85rem; opacity: 0.7; margin: 0.25rem 0; } .mailbox-thread { list-style: none; border: 1px solid var(--border, #333); border-radius: 6px; padding: 0.4rem 0.6rem; } .mailbox-thread-unread { border-color: var(--status-needs-human); } .mailbox-thread-head { display: flex; align-items: center; gap: 0.4em; } .mailbox-unread-dot { width: 0.5em; height: 0.5em; border-radius: 999px; background: var(--status-needs-human); display: inline-block; } .mailbox-messages { list-style: none; margin: 0.3rem 0; padding: 0; display: flex; flex-direction: column; gap: 0.2rem; } .mailbox-message { font-size: 0.85rem; } .mailbox-sender { font-weight: 700; margin-right: 0.4em; } .mailbox-reply { display: flex; gap: 0.4em; margin-top: 0.3rem; }
   #stale-badge {
     display: inline-block; margin: 0.25rem 0 0; padding: 0.15rem 0.5rem; border-radius: 999px;
@@ -1168,6 +1180,7 @@ export function renderShellHtml(
      it, or wraps it in new DOM. -->
 <div id="console-tabs" class="console-tabs" role="tablist" aria-label="Console view">
   <button type="button" class="tab-btn" id="tab-decisions" role="tab" data-tab="decisions" aria-selected="true">Decisions</button>
+  <button type="button" class="tab-btn" id="tab-queue" role="tab" data-tab="queue" aria-selected="false">Queue</button>
   <button type="button" class="tab-btn" id="tab-now" role="tab" data-tab="now" aria-selected="false">Now</button>
   <button type="button" class="tab-btn" id="tab-plan" role="tab" data-tab="plan" aria-selected="false" aria-controls="tab-plan-panel">Plan</button>
   <button type="button" class="tab-btn" id="tab-feed" role="tab" data-tab="feed" aria-selected="false">Feed</button>
@@ -1223,6 +1236,29 @@ export function renderShellHtml(
     <ul id="needs-me-list" class="row-list">${skeletonRows(2)}</ul>
     <!-- W1-T2497: THE MAILBOX -- same escalations above, as a thread; ADDITIVE, needs-me-list untouched. --><h3 class="mailbox-heading">Mailbox<span id="mailbox-unread-count" class="mailbox-unread-count" aria-label="unread threads"></span></h3><div id="mailbox" class="mailbox" aria-label="Mailbox"></div>
   </div>
+</section>
+
+<section id="pr-queue" class="panel-section" aria-label="Pull request queue" data-owner-tab="queue" hidden>
+  <h2><span>Pull request queue</span><span class="section-summary" id="pr-queue-summary">…</span></h2>
+  <div id="pr-queue-unavailable" class="gh-banner" hidden role="status" aria-live="polite"></div>
+  <div class="pr-queue-toolbar" role="group" aria-label="Pull request queue filters">
+    <label for="pr-queue-actionability">Actionability
+      <select id="pr-queue-actionability">
+        <option value="all">All</option><option value="actionable">Actionable</option><option value="active">Active</option>
+        <option value="ready-held">Ready or held</option><option value="waiting">Waiting</option><option value="unknown">Unknown</option>
+      </select>
+    </label>
+    <label for="pr-queue-review">Review state
+      <select id="pr-queue-review">
+        <option value="all">All</option><option value="success">Passed</option><option value="failure">Failed</option>
+        <option value="pending">Pending</option><option value="none">Not yet reviewed</option><option value="unreadable">Unreadable</option>
+      </select>
+    </label>
+    <label for="pr-queue-task">Task
+      <select id="pr-queue-task"><option value="all">All tasks</option><option value="unattributed">Unattributed</option></select>
+    </label>
+  </div>
+  <ol id="pr-queue-list" class="row-list">${skeletonRows(3)}</ol>
 </section>
 
 <!-- W1-T285: "accepted" is a real feedback status (set by NEEDS ME's own Accept button AND by a
@@ -2027,6 +2063,8 @@ export function renderShellHtml(
   let latestBlockedPrs = [];
   let latestBlockedPrsUnverifiedReason;
   let latestMergeHeld = []; // same atomic /v1/status projection; never inferred from UI/check state
+  let latestPrQueue = { complete: false, rows: [], unavailableReason: "waiting for the first open-PR snapshot" };
+  const prQueueFilters = { actionability: "all", review: "all", task: "all" };
   let latestNeedsMeRows = []; // set by renderNeedsMe -- the SAME combined NEEDS ME rows the section itself renders
   let latestDaemonHealth = null; // GET /v1/daemon-health's body
   let latestAccountUsage = null; // GET /v1/account-usage's body (account-usage.ts's AccountUsageSnapshot)
@@ -2257,6 +2295,7 @@ export function renderShellHtml(
     const nowIds = renderNow(tasks);
     const needsMeIds = renderNeedsMe(tasks, latestFeedbackEntries, latestInboxReady, latestInboxDrafting);
     renderMergeHoldControls();
+    renderPrQueue(latestPrQueue);
     renderMailbox(tasks, latestFeedbackEntries);
     renderAccepted(latestFeedbackEntries);
     const upNextIds = renderUpNext(latestUpNextCards);
@@ -2718,6 +2757,7 @@ export function renderShellHtml(
     latestBlockedPrs = snapshot.blockedPrs ?? [];
     latestBlockedPrsUnverifiedReason = snapshot.blockedPrsUnverifiedReason;
     latestMergeHeld = snapshot.mergeHeld ?? [];
+    latestPrQueue = snapshot.prQueue ?? { complete: false, rows: [], unavailableReason: "queue snapshot unavailable" };
     latestFeedbackEntries = snapshot.feedbackEntries ?? [];
     latestInboxReady = snapshot.inboxReady ?? [];
     latestInboxDrafting = snapshot.inboxDrafting ?? [];
@@ -3079,6 +3119,76 @@ export function renderShellHtml(
       \`\${statusBadge("needs-human")}<span class="ask-type-badge ask-type-blocked-pr">Blocked</span>\` +
       \`<span class="detail">blocked-PR ledger entries unverified -- \${escapeHtml(reason)}</span>\`
     );
+  }
+  // ── W1-T2718: one operator row per CURRENT open PR, rendered from BoardSnapshot.prQueue.
+  // The queue class, disposition and reason are server facts from the atomic status snapshot;
+  // this client only filters the rows already loaded and never re-derives actionability.
+  const PR_QUEUE_CLASS_LABELS = {
+    actionable: "actionable",
+    active: "active",
+    "ready-held": "ready or held",
+    waiting: "waiting",
+    unknown: "unknown",
+  };
+  function prQueueStatusBadge(row) {
+    const color = row.queueClass === "actionable" ? "blocked" : row.queueClass === "active" ? "running" : row.queueClass === "ready-held" ? "merged" : row.queueClass === "unknown" ? "needs-human" : "queued";
+    const label = PR_QUEUE_CLASS_LABELS[row.queueClass] || "unknown";
+    return \`<span class="status-dot status-\${color}" aria-hidden="true"></span><span class="status-label status-\${color}">\${escapeHtml(label)}</span>\`;
+  }
+  function prQueueRowHtml(row) {
+    const pr = \`<a href="\${escapeHtml(row.prUrl)}" target="_blank" rel="noreferrer">PR #\${row.prNumber}</a>\`;
+    const task = row.taskId ? \`<span class="task-id">\${escapeHtml(row.taskId)}</span>\` : '<span class="task-id">unattributed</span>';
+    const held = row.held ? '<span class="ask-type-badge ask-type-blocked-pr">merge held</span>' : "";
+    const head = row.headSha ? row.headSha.slice(0, 12) : "head unavailable";
+    const branch = row.headRefName ? \` · branch <strong>\${escapeHtml(row.headRefName)}</strong>\` : "";
+    const observed = row.observedAt ? formatTimestamp(row.observedAt) : "not observed at the current head";
+    return (
+      \`<details class="pr-queue-row queue-\${escapeHtml(row.queueClass)}"><summary>\${prQueueStatusBadge(row)}<span class="task-id">\${pr}</span><span class="detail">\${escapeHtml(row.title)} · \${task} · \${escapeHtml(row.disposition)} — \${escapeHtml(row.reason)}</span>\${reviewBadge(row.reviewState)}\${held}</summary>\` +
+      \`<div class="pr-queue-transition"><span><strong>Latest exact-head transition:</strong> \${escapeHtml(row.disposition)} — \${escapeHtml(row.reason)}</span><span><strong>Observed:</strong> \${escapeHtml(observed)} · <strong>snapshot:</strong> \${escapeHtml(formatTimestamp(row.snapshotAt))}</span><span><strong>Head:</strong> \${escapeHtml(head)}\${branch}</span></div></details>\`
+    );
+  }
+  function filteredPrQueueRows(rows) {
+    return rows.filter((row) => {
+      // An unknown classification is itself actionable evidence. It remains visible under every
+      // filter so a narrow client-side view can never hide a row the server could not classify.
+      if (row.queueClass === "unknown") return true;
+      if (prQueueFilters.actionability !== "all" && row.queueClass !== prQueueFilters.actionability) return false;
+      if (prQueueFilters.review !== "all" && row.reviewState !== prQueueFilters.review) return false;
+      if (prQueueFilters.task === "unattributed" && row.taskId) return false;
+      if (prQueueFilters.task !== "all" && prQueueFilters.task !== "unattributed" && row.taskId !== prQueueFilters.task) return false;
+      return true;
+    });
+  }
+  function syncPrQueueTaskFilter(rows) {
+    const select = document.getElementById("pr-queue-task");
+    if (!select) return;
+    const taskIds = Array.from(new Set(rows.map((row) => row.taskId).filter(Boolean))).sort();
+    select.innerHTML = '<option value="all">All tasks</option><option value="unattributed">Unattributed</option>' + taskIds.map((id) => \`<option value="\${escapeHtml(id)}">\${escapeHtml(id)}</option>\`).join("");
+    if (prQueueFilters.task !== "all" && prQueueFilters.task !== "unattributed" && taskIds.indexOf(prQueueFilters.task) === -1) prQueueFilters.task = "all";
+    select.value = prQueueFilters.task;
+  }
+  function renderPrQueue(queue) {
+    const snapshot = queue && typeof queue === "object" ? queue : { complete: false, rows: [], unavailableReason: "queue snapshot unavailable" };
+    const rows = Array.isArray(snapshot.rows) ? snapshot.rows : [];
+    const list = document.getElementById("pr-queue-list");
+    const banner = document.getElementById("pr-queue-unavailable");
+    const summary = document.getElementById("pr-queue-summary");
+    if (!list || !banner || !summary) return;
+    if (!snapshot.complete) {
+      const lastGood = snapshot.lastGoodAt ? \` Last complete snapshot: \${formatTimestamp(snapshot.lastGoodAt)}.\` : " No complete snapshot has been observed yet.";
+      banner.hidden = false;
+      banner.textContent = \`Open-PR queue unavailable — \${snapshot.unavailableReason || "live GitHub state could not be verified"}.\${lastGood}\`;
+      summary.textContent = "unverified";
+      reconcileRows(list, [{ key: "queue-unavailable", html: '<span class="detail">Current queue withheld until a complete GitHub read succeeds.</span>' }]);
+      return;
+    }
+    banner.hidden = true;
+    banner.textContent = "";
+    syncPrQueueTaskFilter(rows);
+    const shown = filteredPrQueueRows(rows);
+    const counts = rows.reduce((acc, row) => { acc[row.queueClass] = (acc[row.queueClass] || 0) + 1; return acc; }, {});
+    summary.textContent = \`\${shown.length} of \${rows.length} · \${counts.actionable || 0} actionable · \${counts.active || 0} active · \${counts["ready-held"] || 0} ready/held · as of \${rows[0] ? formatTimestamp(rows[0].snapshotAt) : "now"}\`;
+    reconcileRows(list, shown.length ? shown.map((row) => ({ key: \`pr:\${row.prNumber}:\${row.headSha || row.headRefName || "unknown"}\`, html: prQueueRowHtml(row) })) : [{ key: "queue-empty", html: '<span class="detail">No pull requests match these filters.</span>' }]);
   }
   // ── MAILBOX (W1-T2497): same escalations, as threads, ADDITIVE alongside needs-me-list -- no new route/file read, matched by (taskId, class) PREFIX.
   const MAILBOX_SENDER = { escalation: "Fleet", reply: "You" };
@@ -3619,6 +3729,21 @@ export function renderShellHtml(
     applyFindState();
   });
 
+  // Queue filters are a view over the already-loaded atomic /v1/status snapshot. They trigger
+  // no fetch and no write; the next ordinary snapshot simply reuses the selected view.
+  document.getElementById("pr-queue-actionability").addEventListener("change", (e) => {
+    prQueueFilters.actionability = e.target.value;
+    renderPrQueue(latestPrQueue);
+  });
+  document.getElementById("pr-queue-review").addEventListener("change", (e) => {
+    prQueueFilters.review = e.target.value;
+    renderPrQueue(latestPrQueue);
+  });
+  document.getElementById("pr-queue-task").addEventListener("change", (e) => {
+    prQueueFilters.task = e.target.value;
+    renderPrQueue(latestPrQueue);
+  });
+
   // Restore FIND state from the URL BEFORE first paint, so a fresh navigation to a shared URL
   // renders that exact view with no interaction (and auto-expands the section so its rows show).
   readFindStateFromUrl();
@@ -3626,7 +3751,7 @@ export function renderShellHtml(
   renderSortHeaders();
   if (findHasUrlState()) expandRest();
 
-  // ── W1-T336: the four-tab console bar is now AUTHORITATIVE -- its OWN url state ────────────
+  // ── W1-T336/W1-T2718: the console tab bar is AUTHORITATIVE -- its OWN url state ────────────
   // Same idiom as FIND's round-trip just above -- URLSearchParams read fresh off
   // window.location.search, one key set, history.replaceState preserving token + every other
   // existing param -- a SEPARATE key ("tab") riding the page's ONE existing view-state
@@ -3634,7 +3759,7 @@ export function renderShellHtml(
   // issues no fetch, poll or gateway call -- it only flips each owned section's own \`hidden\`;
   // every section's own data keeps flowing (and its own badge/title effects keep firing)
   // regardless of which sections are currently shown.
-  const CONSOLE_TABS = ["decisions", "now", "plan", "feed"];
+  const CONSOLE_TABS = ["decisions", "queue", "now", "plan", "feed"];
   // Which tab owns each section, now that the tabs govern layout -- the single table the markup
   // above is a concrete rendering of (each owned section carries the SAME value as its own
   // data-owner-tab attribute). Kept here (not inferred from the DOM) so a reveal path
@@ -3642,6 +3767,7 @@ export function renderShellHtml(
   // section's owning tab without walking the tree.
   const SECTION_TAB_OWNER = {
     "needs-me": "decisions",
+    "pr-queue": "queue",
     now: "now",
     "up-next": "now",
     controls: "now",
@@ -5171,6 +5297,7 @@ export function renderShellHtml(
     latestBlockedPrs = statusSnap.blockedPrs ?? [];
     latestBlockedPrsUnverifiedReason = statusSnap.blockedPrsUnverifiedReason;
     latestMergeHeld = statusSnap.mergeHeld ?? [];
+    latestPrQueue = statusSnap.prQueue ?? { complete: false, rows: [], unavailableReason: "queue snapshot unavailable" };
     paintFromTasksById();
     // W1-T163: ONE-TIME, off this load's first snapshot only -- see renderRecapSection's doc for
     // why re-rendering off every later poll's own (by-then-mostly-consumed) recap would be wrong.
@@ -5252,6 +5379,7 @@ export function renderShellHtml(
         blockedPrs: latestBlockedPrs,
         blockedPrsUnverifiedReason: latestBlockedPrsUnverifiedReason,
         mergeHeld: latestMergeHeld,
+        prQueue: latestPrQueue,
         recentEntries: latestRecentEntries,
         upNextCards: latestUpNextCards,
         feedbackEntries: latestFeedbackEntries,
