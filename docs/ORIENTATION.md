@@ -1,27 +1,30 @@
 # ORIENTATION
 
-_MAINTAINED BY `rmd retro` — regenerated 2026-09-01T20:48:22.947Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
+_MAINTAINED BY `rmd retro` — regenerated 2026-09-02T05:11:21.497Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
 
 A fresh Architect session should be able to orient from THIS doc alone plus the plan index —
 not by re-deriving state from the full plan and ledger.
 
 ## Current state
 
-9 run(s) since the last retro marker. Verdicts: {"blocked_ci":5,"blocked_containment":1,"incomplete":2,"no_pr":1}.
+11 run(s) since the last retro marker. Verdicts: {"blocked_ci":3,"incomplete":1,"merged":6,"no_pr":1}.
 
 ### Shipped since marker
-- W1-T2554 → https://github.com/craigoley/remudero/pull/3482 (gate-side merge; run ended blocked_ci)
-- W1-T2557 → https://github.com/craigoley/remudero/pull/3492 (gate-side merge; run ended blocked_ci)
-- W1-T2558 → https://github.com/craigoley/remudero/pull/3490 (gate-side merge; run ended blocked_ci)
-- W1-T2559 → https://github.com/craigoley/remudero/pull/3500 (gate-side merge; run ended blocked_ci)
-- W1-T2560 → https://github.com/craigoley/remudero/pull/3494 (gate-side merge; run ended blocked_ci)
-- W1-T2563 → https://github.com/craigoley/remudero/pull/3497 (gate-side merge; run ended incomplete)
+- W1-T2567 → https://github.com/craigoley/remudero/pull/3553 (gate-side merge; run ended blocked_ci)
+- W1-T2572 → https://github.com/craigoley/remudero/pull/3562
+- W1-T2573 → https://github.com/craigoley/remudero/pull/3561 (gate-side merge; run ended blocked_ci)
+- W1-T2574 → https://github.com/craigoley/remudero/pull/3585
+- W1-T2575 → https://github.com/craigoley/remudero/pull/3589
+- W1-T2578 → https://github.com/craigoley/remudero/pull/3574
+- W1-T2579 → https://github.com/craigoley/remudero/pull/3569 (gate-side merge; run ended blocked_ci)
+- W1-T2580 → https://github.com/craigoley/remudero/pull/3573
+- W1-T2586 → https://github.com/craigoley/remudero/pull/3584
 
 ## Next runnable task
 
-**W1-T2567** — THE CODEX ROLLING-QUOTA REFUSAL IS COVERED ONLY BY ACCIDENT AND NO REAL STRING EXISTS TO FIX IT WITH — all three Codex patterns #3511 added are HARD refusals (out of credits, spend cap, plan upgrade), so the high-frequency rolling-window case is caught only if Codex happens to phrase it as usage limit reached; MEASURED 2026-09-01: the corpus holds 2 rows mentioning codex and NEITHER is a refusal, zero worker tails mention it against 188 mentioning claude, and no codex binary exists on the host or in the daemon container, so the pattern cannot be written from evidence yet
+**W1-T2576** — ROUTING EVIDENCE IS POOLED OR IT IS PER-REPO AND BOTH ARE WRONG — a global average lets the busiest repo's quirks govern every other, while per-repo isolation makes every newly onboarded repo start from zero no matter how much the fleet already knows
 
-- risk: high · depends_on: (none)
+- risk: high · depends_on: W1-T2575
 
 ## Never-do invariants (MASTER-PLAN §12 Standing rules — extracted verbatim; §12 is authoritative)
 
