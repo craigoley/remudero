@@ -1,0 +1,80 @@
+- id: W1-T2604
+  title: "THE CONSOLE INBOX CAN ONLY SAY YES, SO EVERY PROPOSAL IT CANNOT RATIFY STAYS FOREVER — /v1/inbox exposes exactly TWO actions, approve and reframe, and there is no decline, retire or dismiss anywhere in panel-graph.ts; a proposal that is self-withdrawn, refused at ratification, already satisfied on main, or a duplicate of one just ratified is READY by every predicate and has no path out except being approved into a task nobody wants — MEASURED 2026-09-02: of 52 READY proposals, 5 declared themselves WITHDRAWN/REFUSED/ALREADY-SATISFIED in their own titles and 3 more were duplicates of work already shipped"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 15.00
+  files: [src/lib/panel-graph.ts, src/lib/inbox.ts, test/the-console-inbox-can-decline-a-proposal.test.ts]
+  origin: "operator-request#make-the-console-inbox-amazing-2026-09-02"
+  plan_refs: ["W1-T2563", "W1-T2601", "W1-T2455", "W1-T110", "W1-T111"]
+  status: queued
+  attempts: 0
+  rationale: |
+    ── MEASURED, WITH THE CONTROL ──────────────────────────────────────────────────────────────
+
+    The console's inbox surface is three routes: `GET /v1/inbox`, `POST /v1/inbox/approve`,
+    `POST /v1/inbox/reframe`. There is no fourth. A sweep of `src/lib/panel-graph.ts` for
+    `retire|decline|dismiss` returns 2 incidental mentions and no route, no gateway verb, no button.
+    CONTROL: `approve` and `reframe` both resolve to real routes with real gateways, so the query
+    can see the surface it is reporting on.
+
+    THE CONSEQUENCE IS A ONE-WAY DOOR. `rmd approve`'s own contract is "valid ONLY for a currently-
+    READY proposal" — so the only way a READY proposal leaves the registry is by being ratified into
+    a plan task. W1-T2601 wires `retireSettledFollowups`, which removes a routed follow-up once its
+    ORIGINATING TASK merges — a different and narrower condition that never fires for a proposal
+    whose own content is the reason it should go.
+
+    MEASURED on the 52 READY proposals of 2026-09-02: FIVE announce their own disposition in their
+    titles — two `WITHDRAWN`, one `REFUSED`, one `DECLINED`, one `IS ALREADY SATISFIED ON MAIN` —
+    and THREE more restate work already shipped. Every one classifies READY, because readiness asks
+    "are the deps merged, the anchors grep-true, the draft lint-clean" and none of those predicates
+    can read a title that says the work is not wanted.
+
+    ⚠ THE OPERATOR IS THE ONLY GARBAGE COLLECTOR, AND THAT IS THE DEFECT. The batch ratified on
+    2026-09-02 needed a human to read 52 titles and hand-exclude 12 before running `rmd approve`.
+    That screening left no record, is not repeatable, and does not survive the next 300 proposals.
+
+    ── WHAT A FIX MUST NOT DO ─────────────────────────────────────────────────────────────────
+
+    ⚠ IT MUST NOT INFER A DECLINE FROM THE TITLE. "WITHDRAWN"/"REFUSED" in a drafted title is prose
+    a worker wrote, not a decision anyone ratified — a keyword rule would let a worker retire its own
+    proposal by phrasing, which is exactly the authority boundary `rmd approve`'s one-bit design
+    exists to hold. The decline must be an OPERATOR ACT, recorded like the approve it mirrors:
+    one ledger row, a named reason, and no plan write.
+
+    ⚠ AND A DECLINE IS NOT A DELETE. `classifyProposal` already keeps a resolved board-review finding
+    in the registry as a record and changes only how it RENDERS; `retireSettledFollowups`
+    deliberately does the opposite for the followup family, because that growth was a registry-SIZE
+    problem. A decline needs its own answer to that question stated up front, not inherited by
+    accident from whichever neighbour the implementer reads first.
+
+    ── WHAT WOULD MAKE THE SURFACE ACTUALLY USABLE, BEYOND THE MISSING VERB ────────────────────
+
+    Recorded as findings from the same measurement, each cheap and each independently checkable:
+
+      (i)   THE NOT-READY REASON IS COMPUTED AND NOT SURFACED. `classifyProposal` names every
+            failing predicate; the console renders `error: "not_ready"`. 299 of 351 proposals sit in
+            that state with the reason one field away from the screen.
+      (ii)  THERE IS NO BULK SELECT. `rmd approve` accepts many ids and batches them into ONE PR
+            (W1-T2471), so the CLI can do what the console cannot; the console offers one
+            affordance per proposal.
+      (iii) NEAR-DUPLICATES ARE INVISIBLE UNTIL RATIFICATION REFUSES THEM. The drafted-slug dedup
+            (W1-T2455) fired correctly on 6 of 44 in the 2026-09-02 batch — but only at approve
+            time, after a human had already decided to include them.
+
+    NOT IN SCOPE: the readiness predicates themselves (W1-T110), the one-bit ratification contract
+    (W1-T111), and the follow-up retirement arm (W1-T2563/W1-T2601), all of which are correct and
+    none of which this replaces.
+
+  acceptance:
+    - claim: "an operator can decline a READY proposal from the console, and it leaves the ready queue"
+      proof: "unit test: test/the-console-inbox-can-decline-a-proposal.test.ts"
+    - claim: "a decline is an operator act recorded with its reason, never inferred from the proposal's own wording"
+      proof: "unit test: test/the-console-inbox-can-decline-a-proposal.test.ts"
+    - claim: "declining writes no plan task and no branch, so it can never file the work it is refusing"
+      proof: "unit test: test/the-console-inbox-can-decline-a-proposal.test.ts"
+    - claim: "a not-ready proposal shows the failing predicate the classifier already names rather than a bare not_ready"
+      proof: "unit test: test/the-console-inbox-can-decline-a-proposal.test.ts"
