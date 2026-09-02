@@ -44,6 +44,23 @@
     bound that fires on a healthy condition (W1-T312's wait cap, W1-T380's deploy ceiling,
     W1-T382's check-wait bound). So the ceiling is derived from measured build throughput, not
     chosen as a literal, and the first cycle must REPORT the net figures before anything refuses.
+    MEASUREMENT CORRECTED 2026-09-02 — THE PREMISE IS REFUTED. The backlog figures above came from
+    the same invalid commit-message proxy corrected in W1-T2729's record. Re-measured against the
+    real dispatch rungs over all 2912 merged PRs: 1100 of 1232 tasks are credited, leaving 132 open
+    (not 585) of which 88 are machine-buildable (not 537), and 32 sit in the W1-T0-499 cohort (not
+    365). The frontier's median id is W1-T2669, not W1-T351 — the fleet is working RECENT findings.
+
+    "Every retro adds; nothing subtracts" is not supported by that. Filing has reached ~W1-T2731 and
+    1100 tasks are credited: production and consumption are of the same order, and the open set is
+    small. §8A's "retros must also DELETE" remains sound doctrine and remains unenforced, but the
+    evidence that it is being VIOLATED is gone.
+
+    RECOMMENDED: RETIRE (`status: blocked` + `retirement: withdrawn`). A governor calibrated to
+    throttle filing against a 132-task open set would be a bound firing on a healthy condition —
+    the exact defect this filing's own final paragraph warns about, citing W1-T312, W1-T380 and
+    W1-T382. Per `rule15FilingViolation`'s doc, "a retirement is an operator act": this entry
+    recommends, and does not perform, that disposition.
+
   acceptance:
     - claim: "the retro report names its net effect on the open backlog for that cycle — how many it filed, retired and credited"
       proof: "unit test: test/retro-filing-governor.test.ts"
