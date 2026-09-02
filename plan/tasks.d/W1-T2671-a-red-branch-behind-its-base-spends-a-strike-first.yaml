@@ -1,0 +1,54 @@
+- id: W1-T2671
+  title: "A `blocked_ci` PR THAT IS MERELY BEHIND ITS BASE SPENDS A FIX STRIKE BEFORE ANYONE TRIES THE MERGE — three PRs on 2026-09-02 were red ONLY because they carried the pre-#3556 test against a post-#3556 source signature, 5 to 13 commits behind, and a base merge cleared all three with no change to their own diffs"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 12.00
+  files: [src/run-task.ts, test/a-red-branch-behind-its-base-spends-a-strike-first.test.ts]
+  origin: "operator-session#stale-base-reds-2026-09-02"
+  plan_refs: ["W1-T2597"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-02, THREE INSTANCES OF ONE CAUSE. #3556 changed `src/run-task.ts` and
+    `test/sweep-gateway-warm.test.ts` TOGETHER — the closure signature and the landmark assertion
+    that reads it. Every branch cut before that merge carries the old test against the new source
+    and fails `buildSweepHook builds its board gateway ONCE per daemon start` on its landmark:
+
+      - #3555 (run-W1-T2594), 5 behind — failed; merged base, 10/10.
+      - #3559, 13 behind — pre-merge head failed the suite, merged head 25/25.
+      - #3541, 8 behind — same suite named in its own FLAKE-RETRY line.
+
+    NONE of the three had a defect in its diff. The failure is entirely a property of the merge
+    base, and it is cheap to detect: the branch is N commits behind and the failing test's file was
+    touched by a commit in that gap.
+
+    THE FIX RUNG SPENDS A STRIKE ON THIS TODAY. A `blocked_ci` verdict dispatches a ci-log fix
+    worker at real cost, to diagnose a red that a base merge clears deterministically. The strike
+    budget is small and the diagnosis is wasted: the worker reads a failing assertion in a file the
+    branch never touched.
+
+    ORDER THE CHEAP CHECK FIRST, AND DO NOT MAKE IT A GUESS. Before spending a strike on a
+    `blocked_ci` PR, compute the behind-count against the base and whether any failing test's file
+    changed in that gap. When both hold, refresh the base and let CI re-run instead of dispatching.
+    A merge commit is the correct instrument here — never a rebase, because the branch may be
+    another worker's and rewriting its history invalidates their checkout.
+
+    WHAT MUST NOT CHANGE. A branch that is current, or whose failing files are untouched in the
+    gap, still goes to the fix rung exactly as today. This adds one ordered precondition; it
+    removes no path. And a base refresh that does NOT clear the red must fall through to the strike
+    rather than counting as a fix — otherwise a stale base becomes a way to skip diagnosis.
+  acceptance:
+    - claim: "a red PR that is behind its base and whose failing files changed in that gap gets a base refresh before any strike is spent"
+      proof: "unit test: test/a-red-branch-behind-its-base-spends-a-strike-first.test.ts"
+    - claim: "a red PR that is current with its base still goes straight to the fix rung, unchanged"
+      proof: "unit test: test/a-red-branch-behind-its-base-spends-a-strike-first.test.ts"
+    - claim: "a red PR behind its base whose failing files were NOT touched in the gap still goes to the fix rung"
+      proof: "unit test: test/a-red-branch-behind-its-base-spends-a-strike-first.test.ts"
+    - claim: "the refresh is a merge, never a rebase, so another worker's checkout stays valid"
+      proof: "unit test: test/a-red-branch-behind-its-base-spends-a-strike-first.test.ts"
+    - claim: "a refresh that does not clear the red falls through to the strike rather than counting as a fix"
+      proof: "unit test: test/a-red-branch-behind-its-base-spends-a-strike-first.test.ts"

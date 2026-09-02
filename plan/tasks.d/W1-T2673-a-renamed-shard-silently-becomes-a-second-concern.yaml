@@ -1,0 +1,50 @@
+- id: W1-T2673
+  title: "RULE 19's COMPANION DISCOUNT TURNS ON A FILENAME STEM MATCHING THE SHARD SLUG, AND NOTHING SAYS SO WHEN IT MISSES — rename either the shard or its falsifier and `ownFalsifierSlug` stops matching, the test counts as a second concern, and the task is refused for a sizing violation whose real cause is a filename"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 8.00
+  files: [src/lib/task-linter.ts, test/a-renamed-shard-silently-becomes-a-second-concern.test.ts]
+  origin: "operator-session#slug-match-is-unenforced-prose-2026-09-02"
+  plan_refs: ["W1-T2525", "W1-T2543"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE COUPLING IS REAL AND INVISIBLE. `subsystemsOf` discounts a `test/` companion only when
+    `moduleIdFromPath(f) === ownFalsifierSlug`, and `ownFalsifierSlug` is the shard's own filename
+    slug. So `plan/tasks.d/W1-T9999-does-a-thing.yaml` plus `test/does-a-thing.test.ts` counts ONE
+    concern, while the same pair renamed on either side counts TWO and a `risk: medium` task is
+    refused by `sizingViolation`.
+
+    THE REFUSAL NAMES THE WRONG THING. It reports a subsystem count and a sizing violation. The
+    author reads that as "this task is over-scoped" and either raises the band or decomposes a task
+    that was correctly sized all along. Nothing in the message mentions the slug, the filename, or
+    the near-match that would have been discounted.
+
+    MEASURED IN THIS SESSION, AS AN AUTHOR-SIDE WORKAROUND. Filing W1-T2598 required naming the
+    falsifier `test/the-recycle-wait-is-sized-under-the-run-it-waits-on.test.ts` to match the shard
+    slug exactly, and the PR body had to carry a warning to whoever renames it later. That warning
+    is UNENFORCED PROSE — the shape CLAUDE.md's own preamble says binds only because someone read
+    it, and names as the reason several of its rules exist at all.
+
+    THE FIX IS A NAMED NEAR-MISS, NOT A LOOSER RULE. When a sizing violation would clear had a
+    declared `test/` companion's stem matched the slug, say so in the violation: name the stem, the
+    slug, and that renaming either to match discounts it. Rule 19's arithmetic does not change and
+    no task passes that would have failed — the count and the refusal are identical; only the
+    explanation gains the one fact the author cannot see.
+
+    DO NOT MATCH FUZZILY. Discounting on a near-match would let an unrelated suite ride in on a
+    similar name, which is exactly what W1-T2525 tightened. Exact match stays the rule; the
+    near-miss is reported, never honoured.
+  acceptance:
+    - claim: "a sizing violation that would clear on an exact slug match names the stem, the slug, and the rename that would discount it"
+      proof: "unit test: test/a-renamed-shard-silently-becomes-a-second-concern.test.ts"
+    - claim: "the subsystem count and the refusal itself are byte-identical — no task passes that failed before"
+      proof: "unit test: test/a-renamed-shard-silently-becomes-a-second-concern.test.ts"
+    - claim: "a near-matching stem is REPORTED but never discounted, so an unrelated suite cannot ride in on a similar name"
+      proof: "unit test: test/a-renamed-shard-silently-becomes-a-second-concern.test.ts"
+    - claim: "a sizing violation with no test companion at all is unchanged and gains no such note"
+      proof: "unit test: test/a-renamed-shard-silently-becomes-a-second-concern.test.ts"
