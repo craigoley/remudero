@@ -3657,6 +3657,7 @@ export function pruneStaleRuns(
             stdio: "pipe",
           });
           removeRunLock(curPath); // clear the dead sibling lock so it can't linger
+          removeWorktreeBase(curPath); // the sibling base record dies with its worktree too
           removedWorktrees.push(curPath);
         } catch {
           // best-effort
@@ -3824,7 +3825,8 @@ export interface WorktreeReapSummary {
   /** Worktree directories force-removed (git-invisible, detached-HEAD orphan, or a
    *  registered branch confirmed merged/deleted upstream — always past the age gate). */
   reaped: string[];
-  /** Widowed `<name>.lock` files removed because `<name>/` no longer exists. */
+  /** Widowed `<name>.lock` AND `<name>.base` files removed because `<name>/` no longer
+   *  exists (W1-T2628 widened this sweep from `.lock`-only to include `.base`). */
   reapedLocks: string[];
   /** Entries deliberately left: a live pid, a branch still live upstream, or too young. */
   kept: string[];
@@ -4084,15 +4086,20 @@ export function reapStaleWorktrees(root: string, opts: WorktreeReapOpts = {}): W
     }
   }
 
-  // Widowed `.lock` siblings whose worktree dir is already gone (hole 3):
-  // removeRunLock only ever fires INSIDE a successful removal (worktreeRemove,
-  // pruneStaleRuns, or the reap above), so a lock orphaned by any OTHER path —
-  // e.g. a manual `rm -rf` of the worktree dir — lingers forever and makes a dead
-  // run read as live to anything that trusts the lock. No age gate is owed here:
-  // the owning directory is already gone, so nothing in flight can be harmed.
+  // Widowed `.lock`/`.base` siblings whose worktree dir is already gone (hole 3):
+  // removeRunLock/removeWorktreeBase only ever fire INSIDE a successful removal
+  // (worktreeRemove, pruneStaleRuns, or the reap above), so a sibling orphaned by any
+  // OTHER path — e.g. a manual `rm -rf` of the worktree dir — lingers forever: a `.lock`
+  // makes a dead run read as live to anything that trusts it, and a `.base` accumulates
+  // without bound (W1-T2628 — pruneStaleRuns is one such other path, now closed above,
+  // but this sweep still owes any widow left by causes this file cannot enumerate). No
+  // age gate is owed here: the owning directory is already gone, so nothing in flight
+  // can be harmed.
+  const widowSuffixes = [".lock", ".base"];
   for (const name of entries) {
-    if (!name.endsWith(".lock")) continue;
-    const dirPath = join(root, name.slice(0, -".lock".length));
+    const suffix = widowSuffixes.find((s) => name.endsWith(s));
+    if (!suffix) continue;
+    const dirPath = join(root, name.slice(0, -suffix.length));
     if (existsSync(dirPath)) continue; // owning worktree still present — not widowed
     try {
       if (!dryRun) unlinkSync(join(root, name));
