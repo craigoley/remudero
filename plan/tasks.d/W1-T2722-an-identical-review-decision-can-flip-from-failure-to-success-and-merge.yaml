@@ -1,0 +1,82 @@
+- id: W1-T2722
+  title: "AN IDENTICAL REVIEW DECISION CAN FLIP FROM FAILURE TO SUCCESS AND MERGE — #3681's review lane correctly rejected missing production wiring, then the fix rung spawned a second semantic reviewer for the same head and body digest, overwrote failure with success and armed the PR four seconds later"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 55.00
+  risk: high
+  origin: "incident#3681-identical-input-verdict-replacement-2026-09-02"
+  plan_refs: ["W1-T178", "W1-T228", "W1-T2443", "W1-T2299", "W1-T168"]
+  files: [src/lib/review.ts, src/run-task.ts, test/review-decision-finality.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED IN THE FLEET LEDGER AND GITHUB, NOT INFERRED. For #3681 at head 7932adb9, run
+    `review-PR3681-1788371308185` posted failure at 17:52:16Z for
+    `review_input_digest=v1:b536f424...`: its semantic reviewer downgraded criterion 4 because
+    `reapBranchesCommand` did not supply the named-task facts. At 18:00:11Z the fix rung recorded a
+    second reviewer with zero downgrades. At 18:00:22Z it posted success for the identical head and
+    identical digest; at 18:00:27Z it ledgered `automerge.armed` with "verdict is a full PASS";
+    GitHub merged at 18:00:26Z as app/remudero-fleet. The missing caller wiring remains absent on
+    main and is separately owned.
+
+    Existing safety is asymmetric. `applyVerdictStability` suppresses success-to-failure semantic
+    movement on one head, but explicitly allows failure-to-success because a body-only correction
+    must be able to clear a stale verdict. That rule predates the versioned head+body input digest.
+    `postReviewStatusGuarded` now selects prior evidence by exact digest, but it refuses only an
+    executed verdict being replaced by a no-evidence verdict; two executed but contradictory
+    semantic results may overwrite one another. The fix rung then treats its locally computed
+    success as resolved even if the guarded post should have refused it.
+
+    A head+body digest is also not the whole decision input. The gate judges the current PR diff,
+    task acceptance record and review-policy implementation. Base advancement can change the diff
+    without changing the head or body; a task correction or deliberate policy revision can also
+    change the justified answer. Finality must bind the material decision, not freeze a SHA.
+  design: |
+    Keep `review_input_digest` as the inexpensive admission/pending key: head plus exact body.
+    Add a versioned `review_decision_digest` computed inside `runReview` after materialization from
+    the exact head SHA, PR diff bytes, report/body bytes, ordered task acceptance criteria,
+    task-declared files and an explicit review-policy revision. This is the content-addressed
+    decision envelope. A changed commit, body, base-derived diff, acceptance record or deliberate
+    policy revision creates a new decision; comments, labels, scheduling and a different random
+    model sample do not.
+
+    Before spawning the semantic reviewer, atomically claim that decision digest. A completed
+    terminal row for it is replayed/returned without a second model call; an in-flight owner makes
+    another caller stand down rather than duplicate work. Under the existing guarded post lock,
+    a prior terminal state for the same decision digest is final: an attempted contradictory state
+    is refused, ledgered as `review.verdict_conflict` with both states and both evaluator
+    provenance records, and leaves the effective verdict at failure/hold. No path may select the
+    convenient answer, last writer, or stronger evidence tier.
+
+    Thread the effective outcome back to every caller. A refused/conflicting computed success must
+    not make `runFixRung` return `fixed`, must not post a success comment and must not reach any arm
+    site. It escalates once for adjudication with the decision digest and provenance, while the
+    operator's existing manual merge/squash authority remains the override. A genuinely new
+    decision digest is judged normally and may replace the old status, which preserves body-only
+    corrections and base/task/policy changes without relying on timestamps.
+
+    Record provider, served model, effort and reviewer session already available from
+    `review.reviewer` beside the conflict so model-routing quality can later be calibrated. Do not
+    put credentials, prompts or full model transcripts in the ledger.
+  acceptance:
+    - claim: "the decision digest changes for a changed head, body, base-derived diff, acceptance record, declared-file scope or explicit policy revision, and remains identical for comments, labels, scheduling and repeated model samples"
+      proof: "unit test: test/review-decision-finality.test.ts"
+    - claim: "two concurrent callers for one decision digest produce at most one semantic-review spawn; the loser stands down on the atomic in-flight claim"
+      proof: "unit test: test/review-decision-finality.test.ts"
+    - claim: "a completed terminal verdict for one decision digest is replayed without another reviewer spawn, status post or duplicate comment"
+      proof: "unit test: test/review-decision-finality.test.ts"
+    - claim: "failure followed by computed success, and success followed by computed failure, on one decision digest both produce a verdict-conflict hold rather than last-writer-wins replacement"
+      proof: "unit test: test/review-decision-finality.test.ts"
+    - claim: "a conflicting computed success cannot make runFixRung report fixed and cannot reach automerge.armed; the effective result remains non-success and escalates once with the digest and evaluator provenance"
+      proof: "unit test: test/review-decision-finality.test.ts"
+    - claim: "a changed decision digest is judged and posted normally, preserving same-head body corrections and base/task/policy changes"
+      proof: "unit test: test/review-decision-finality.test.ts"
+    - claim: "conflict telemetry names provider, served model, effort and session identifiers but stores no credential, prompt or transcript"
+      proof: "unit test: test/review-decision-finality.test.ts"
+  note: |
+    This is one concern: content-addressed review finality. It deliberately does not repair the
+    missing #3681 production caller and does not change sweep admission. Those material gaps are
+    filed separately so an implementation of this safety boundary cannot hide them.
