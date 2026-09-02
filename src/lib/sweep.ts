@@ -1373,7 +1373,9 @@ export interface OpenPrView {
    * Number of completed review judgments for the exact current input: task/synthetic PR key,
    * PR URL, head sha and versioned head+body digest. A new commit or body edit resets this to zero.
    * `review.post_refused`, legacy rows without the identity and other PRs never count. Undefined
-   * reads as zero so an unwired caller fails open toward reviewing, not blocking.
+   * reads as zero for the existing orphan retry budget. Recovery from a GitHub FAILURE with no
+   * matching ledger judgment additionally requires an explicit zero and {@link reviewInputDigest},
+   * so legacy/unwired callers cannot be mistaken for evidence that the ledger is missing a run.
    */
   priorReviewAttemptsForInput?: number;
   /**
@@ -2966,6 +2968,11 @@ export function reviewVerdictOvertakenByActivity(pr: OpenPrView): boolean {
  *      the review lane so a corrected input can reach a fresh judgement. Nothing about the verdict
  *      range changes — `runReview` posts fresh every time, so this can still fail. Ordered ahead
  *      of rows 4/6/7 (which otherwise claim every failing review first) and after row 3.5's cap.
+ *   3.7. UNOWNED FAILURE RECOVERY — GitHub reports a `remudero-review` FAILURE for the exact
+ *      current input, but the local ledger has zero matching completed `review.posted` judgments.
+ *      Re-run the authoritative reviewer once so its structured evidence can drive rows 4/6/7.
+ *      Requires the real gateway's explicit zero plus versioned input digest; legacy fixtures do
+ *      not move. A prior exact-input post refusal also makes this row yield, bounding the recovery.
  *   4. FAILING + strikes exhausted (>= cap)              -> blocked-ambiguous (escalate).
  *      GENERALIZED (W1-T100, the #170 fix): "strikes exhausted" also covers the
  *      blocked_ci shape (checks red) — ci-log strikes share the SAME counter and
@@ -3238,6 +3245,28 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
       `(GitHub's PR object carries no body-specific timestamp, so this is activity-after-a-verdict, not ` +
       `provably a body edit) — re-running the review lane on #${pr.prNumber} to judge the current input; ` +
       `a fresh verdict is posted and the prior one is never carried forward`,
+  },
+  {
+    // 2026-09-02 #3597 incident: GitHub can carry an exact-head remudero-review FAILURE that this
+    // daemon did not ledger (for example an externally posted status, lost/rotated state, or a
+    // host move). The generic failure rows can only recover structured reasons from
+    // `review.posted`; with no matching row they escalated "contradictory" forever and never ran
+    // the reviewer that could recreate authoritative evidence. The real gateway explicitly
+    // produces BOTH identity signals below. Requiring strict zero (not undefined) keeps every
+    // legacy/unwired caller byte-identical. `reviewPostRefused` makes the deterministic recovery
+    // one-shot for unchanged input: a refusal falls through to the ordinary escalation path.
+    disposition: "post-review",
+    when: (pr) =>
+      pr.checksState === "green" &&
+      pr.requiredContextsUnreadable !== true &&
+      pr.reviewState === "failure" &&
+      pr.reviewInputDigest !== undefined &&
+      pr.priorReviewAttemptsForInput === 0 &&
+      pr.reviewPostRefused !== true,
+    reason: (pr) =>
+      `checks green, remudero-review reports failure but the ledger has no matching completed ` +
+      `review.posted evidence for this exact input — re-running the authoritative reviewer on ` +
+      `#${pr.prNumber} to restore authoritative evidence in structured form; one exact-input post refusal stops retries`,
   },
   {
     // W1-T100: the exhaustion check now covers BOTH failure shapes — a failing
