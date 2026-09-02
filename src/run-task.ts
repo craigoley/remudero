@@ -35246,10 +35246,11 @@ export async function main(
   if (cmd === "lint-plan") {
     process.exit(await lintPlanCommand(rest));
   }
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(await proofQueueAuditCommand(rest)) cannot carry a DA hit without forking the process; proofQueueAuditCommand's own logic — arg validation, the open+unmerged population derivation, and the report render — is unit-tested in test/proof-queue-audit.test.ts (same irreducible-glue shape as the sibling lint-plan/emissions dispatch cases).
+  // diff-cov: process-boundary — main() CLI dispatch: process.exit(await creditAuditCommand(rest)) cannot carry a DA hit without forking the process; creditAuditCommand's own logic — arg validation, the open-task population derivation, the seam wiring and the report render — is unit-tested in test/credit-evidence-reconcile.test.ts, including one run with NO injected seams so the real git path is not dead code (same irreducible-glue shape as the sibling lint-plan/proof-queue-audit dispatch cases).
   if (cmd === "credit-audit") {
     process.exit(await creditAuditCommand(rest));
   }
+  // diff-cov: process-boundary — main() CLI dispatch: process.exit(await proofQueueAuditCommand(rest)) cannot carry a DA hit without forking the process; proofQueueAuditCommand's own logic — arg validation, the open+unmerged population derivation, and the report render — is unit-tested in test/proof-queue-audit.test.ts (same irreducible-glue shape as the sibling lint-plan/emissions dispatch cases).
   if (cmd === "proof-queue-audit") {
     process.exit(await proofQueueAuditCommand(rest));
   }
