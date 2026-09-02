@@ -1,0 +1,75 @@
+- id: W1-T2689
+  title: "THE GOLDEN SUITE HAS EVERY PIECE EXCEPT A PRODUCER, SO THE SELF-HARNESS LEG HAS REPORTED `no replay run recorded` SINCE THE DAY IT SHIPPED — corpus, seam, driver, emitter and retro consumer all exist and `replayGoldens` has ZERO production callers, which is why §9's pre-merge proof for a routing change is doctrine with no mechanism behind it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: "span"
+  budget_usd: 25.00
+  files: [src/lib/replay-harness.ts, src/run-task.ts, test/the-golden-suite-has-every-piece-except-a-producer.test.ts]
+  origin: "operator-session#dropped-findings-2026-09-02"
+  plan_refs: ["W1-T165", "W1-T423", "W1-T2575"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED AT acde3777. `git grep 'replayGoldens('` over `src/` returns ONE hit, and it is
+    replay.ts calling its own `replayGolden` in a loop — no caller outside that file, in production
+    or anywhere else. Every `HarnessRunner` in the tree is a test fixture (`unchangedHarness`,
+    `degradedHarness`, `noHealHarness`). MASTER-PLAN's own status paragraph says the same thing:
+    the golden-task replay suite "has no `HarnessRunner` wired" so the Self-Harness leg reports
+    *no run recorded* BY CONSTRUCTION.
+
+    THE MISSING PIECE IS EXACTLY ONE, WHICH IS WHY THIS IS WORTH FILING RATHER THAN RE-DESIGNING.
+    The corpus exists (`SEEDED_GOLDENS`), the seam exists (`HarnessRunner`), the driver exists
+    (`replayGoldens`), the emitter exists with an injectable writer (`recordReplayResults` ->
+    `REPLAY_RESULT_STEP`), and the CONSUMER exists and is correct: retro.ts's
+    `replayPassRateForCycle` folds those ledger lines and `renderReplayCalibration` renders the
+    section. Only a producer is absent.
+
+    IT IS INVISIBLE BECAUSE THE CONSUMER DEGRADES HONESTLY. `renderReplayCalibration` prints "No
+    replay run recorded this cycle — NOT a confirmed 0% (P48: no naked zero)". That is the right
+    behaviour and it has been printed every cycle since the leg shipped, so nothing ever reads as
+    broken. A silent-but-correct degradation is harder to notice than a red.
+
+    AND IT IS NOW LOAD-BEARING, WHICH IT WAS NOT WHEN IT WAS DEFERRED. W1-T2575 shipped: 
+    src/lib/mount-recommender.ts is on main and exports `OBSERVATIONAL_EVIDENCE_NOTICE`, printed
+    VERBATIM inside every emitted routing recommendation — "no golden-suite run backs this
+    recommendation (the golden-task replay suite has no HarnessRunner wired yet) ... This is a
+    measurement, not a proof". §9 rules that mounts.yaml changes "ship as PRs behind the golden
+    suite like every other knowledge change"; the flywheel is live and shipping a disclaimer where
+    that proof should be. The gap has stopped being latent.
+
+    THE COST DECISION IS THE REASON THIS WAS DEFERRED AND IT MUST BE WRITTEN INTO THE DESIGN, NOT
+    DISCOVERED BY SPENDING. A genuine runner EXECUTES a golden through the harness: it spawns
+    workers and costs real money, unlike every other rung the retro folds, all of which are
+    read-only over the ledger. So the producer must be OPT-IN and operator-gated — never automatic
+    on a retro tick, which would attach an unbounded spend to a reporting pass — and the corpus it
+    runs must be bounded per invocation. The retro rung's own comment already states its discipline
+    ("READ ONLY, like the mutation-gate rung above: never runs a golden, never touches sandbox");
+    this task must not violate it by making the retro the caller.
+
+    NOT IN SCOPE: changing the golden corpus, the pass/fail comparison, `recordReplayResults`'s
+    ledger shape, or retro.ts's reducer and renderer. All four are shipped and correct, and the
+    renderer's non-run path is the P48 discipline this task must leave intact — a producer that
+    ran zero goldens must still render "no run recorded", never 0%.
+
+    THE FALSIFIER IS THE UNRUN CYCLE. A producer that always writes lines makes the consumer's
+    honest-degradation path dead code, and a test that only asserts the happy path cannot tell a
+    real replay from a fabricated row. Both directions have to be pinned: a real run writes one
+    `REPLAY_RESULT_STEP` line per golden and the retro section reports the rate, AND an invocation
+    that runs nothing writes NO line, leaving the section on its "not a confirmed 0%" text.
+  acceptance:
+    - claim: "a production caller drives the replay through the existing HarnessRunner seam, so the driver is no longer test-only"
+      proof: "grep: replayGoldens( in src/run-task.ts"
+    - claim: "a real replay writes one ledger line per golden and the retro section reports the cycle's rate"
+      proof: "unit test: test/the-golden-suite-has-every-piece-except-a-producer.test.ts"
+    - claim: "an invocation that runs no golden writes NO line, so the no-naked-zero path stays reachable"
+      proof: "unit test: test/the-golden-suite-has-every-piece-except-a-producer.test.ts"
+    - claim: "the runner is opt-in and never fires on a retro tick, so a reporting pass cannot spawn workers"
+      proof: "unit test: test/the-golden-suite-has-every-piece-except-a-producer.test.ts"
+    - claim: "the corpus run in one invocation is bounded, and the bound is declared rather than implicit"
+      proof: "unit test: test/the-golden-suite-has-every-piece-except-a-producer.test.ts"
+    - claim: "the ledger shape and the retro reducer are unchanged, so the existing consumer reads the new lines untouched"
+      proof: "unit test: test/the-golden-suite-has-every-piece-except-a-producer.test.ts"
