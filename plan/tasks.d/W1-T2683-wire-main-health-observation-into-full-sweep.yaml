@@ -1,0 +1,68 @@
+- id: W1-T2683
+  title: "main-health judgment is implemented but DORMANT — the pure reader and escalation policy merged in #2691, yet no production path imports or invokes them, so the daemon records zero trunk-health observations and cannot notice or retire a red-main incident"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: "span"
+  budget_usd: 8.00
+  files: [src/lib/main-health-rung.ts, src/run-task.ts, scripts/source-size-baseline.json, test/main-health-wiring.test.ts]
+  origin: "operator-brief#self-watch-the-pr-queue-overnight-2026-09-02"
+  plan_refs: ["W1-T2204", "W1-T1275"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED AT `e2b9c012`, NOT INFERRED FROM THE PLAN RECORD. `mainHealthFromRollup`,
+    `mainHealthEscalationDecision` and `mainHealthShouldStandDownDispatch` exist in
+    `src/lib/sweep.ts`, and `test/main-health-watch.test.ts` passes 13/13. A production-use search
+    finds no caller outside their definitions and tests. The live Azure ledger likewise carried
+    zero `main.health.*` rows while the same daemon run carried 55 `sweep.disposed` rows. The
+    implementation merged, but the machine never executes it.
+
+    THE SIGNAL MUST BE MAIN'S SIGNAL, NOT PR PROTECTION COPIED SIDEWAYS. The default branch does
+    not run every PR-only required context (`remudero-review` is a commit status produced by the
+    daemon, and `ci-gate` is PR-shaped). Passing that required-context set to
+    `mainHealthFromRollup` would filter out the push checks this observer is meant to judge. The
+    production rung therefore supplies `requiredContexts = undefined`: every reported main-head
+    check counts, while the merged reader still excludes `remudero-review`, SKIPPED entries and
+    the named vacuous `coverage-ratchet` success.
+
+    THE RUNG IS LEVEL-TRIGGERED AND FAIL-SOFT. It caches only the repository's default-branch NAME
+    for one daemon process, then re-reads the branch head and both REST rollup halves on every FULL
+    sweep. Red opens or deduplicates one `MANUAL` incident; genuine green closes that incident
+    with the resolving SHA; undetermined changes nothing. A stable state is latched in-process so
+    it does not append one duplicate comment per poll. Any GitHub or issue failure is named on
+    `main.health.error` and swallowed before the existing open-PR sweep starts.
+
+    Q3'S ASYMMETRY REMAINS LOAD-BEARING. Observing a red default branch never auto-reverts a merge
+    and never pauses unrelated dispatch. The escalation explicitly offers the operator-owned queue
+    hold, preserving the operator's manual override while recommending that automatic repair and
+    update paths continue. This task adds observation and incident lifecycle only; it changes no
+    merge policy, branch protection, worker selection, provider routing or daemon lifecycle.
+  acceptance:
+    - claim: "each production full sweep reads the repository's current default-branch head and its REST check rollup, then records a named green, red or undetermined observation"
+      proof: "unit test: test/main-health-wiring.test.ts"
+    - claim: "a stable red head opens or deduplicates one MANUAL MAIN-HEALTH incident, never one issue or comment per daemon poll"
+      proof: "unit test: test/main-health-wiring.test.ts"
+    - claim: "genuine passing evidence closes the open MAIN-HEALTH incident with the resolving SHA, while an undetermined rollup closes nothing"
+      proof: "unit test: test/main-health-wiring.test.ts"
+    - claim: "a main-health read or issue-transport failure is logged and cannot prevent the existing PR sweep from continuing"
+      proof: "unit test: test/main-health-wiring.test.ts"
+    - claim: "daemonCommand supplies the real REST reader and issue gateway to the full-sweep observer; offline callers remain unchanged because the seam is optional"
+      proof: "unit test: test/main-health-wiring.test.ts"
+    - claim: "the new main-health rung has a production caller outside its own module and tests"
+      proof: "grep: buildMainHealthRung( in src/run-task.ts"
+  falsifier: |
+    Remove `buildMainHealthRung(...)` from `daemonCommand`'s `buildSweepHook` call and the production
+    wiring assertion fails while the pure W1-T2204 suite remains green — the exact dormant-feature
+    defect. Move the observer inside the PR sweep's shared try/catch and make its injected rung
+    throw: the containment test then observes `sweep.error`, proving an auxiliary trunk read can
+    suppress queue reconciliation. Either result falsifies this change.
+  note: |
+    NEW FOLLOW-UP, NOT A REOPEN OF W1-T2204. That task's pure judgment shipped in #2691 and its
+    criteria remain useful; this task owns the missing I/O and production seam. The task id was
+    reserved remotely as `refs/rmd-id/W1-T2683` before this shard was written. The generated
+    source-size ledger is included because the new module records at the shared 500-line bucket;
+    it is measurement metadata for that module, not a second behavior change.
