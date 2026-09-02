@@ -6,10 +6,10 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 100.00
-  risk: high
+  risk: medium
   origin: architect
   plan_refs: ["§4A", "§2"]
-  files: [src/lib/worker-home.ts, test/worker-home.test.ts, .gitignore, scripts/source-size-baseline.json]
+  files: [src/lib/worker-home.ts, test/worker-home.test.ts, .gitignore]
   status: queued
   attempts: 0
   rationale: |
@@ -79,7 +79,7 @@
     - claim: "the guard fires on a home reached through the settable workerHomeRoot config field, not only on the default root derivation — the one unguarded path by which home scaffolding could reach a tracked tree"
       proof: "unit test: test/worker-home.test.ts"
     - claim: "the two editor directories named in the report are ignored at the repo root, so a stray one can never be staged into a PR diff by accident"
-      proof: "grep: \\.idea/ in .gitignore"
+      proof: "grep: .idea/ in .gitignore"
     - claim: "the rc names and .claude.json are NOT ignored — the guard makes a misplaced home loud, and an ignore entry for them would hide exactly what the guard exists to surface"
       proof: "unit test: test/worker-home.test.ts"
     - claim: "the placement invariant is stated in the module that owns it, so the next reader who finds these files in a directory listing reads the answer rather than re-investigating"
@@ -92,15 +92,13 @@
     outside every work tree — so this task is deliberately NOT a research task: the only part left
     undone is that the answer is true by configuration rather than by construction, and is written
     down nowhere.
-    SIZING: the implementation owns one src stem and its own test plus .gitignore. The existing
-    source-size gate also requires its baseline file, which the plan linter counts as a second
-    subsystem; risk:high records that mechanical cross-cutting edit rather than hiding it.
+    SIZING: files names one src stem and its OWN test file (moduleIdFromPath strips `.test`, so both
+    resolve to `worker-home`) plus .gitignore, which yields no module id at all — one concern, one
+    subsystem, so risk:medium is the honest band rather than a Rule 19 regrade.
     CROSS-REFERENCES, none of them re-filed here: W1-T18 (the redirection mechanism this asserts the
     placement of), W1-T1064 (worker homes outliving their runs — the accumulation the census also
     showed, already filed), W1-T142 (the diff-scope push guard whose narrow call site is why this
     cannot rely on a downstream refusal), and W1-T401's review-time scope advisory (advisory by
     measurement, so also not a backstop).
     NOT A RE-DECISION of the redirection design: the symlink allowlist, the keychain grant and the rc
-    file set are untouched. The implementation also carries the source-size ratchet's prescribed
-    one-line bucket update for worker-home.ts; W1-T2734 separately owns replacing that mechanical
-    merge gate with an advisory signal.
+    file set are untouched. This adds one refusal, two ignore lines, and a sentence.
