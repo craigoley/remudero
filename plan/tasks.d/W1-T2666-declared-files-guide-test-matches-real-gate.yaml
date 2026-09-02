@@ -1,0 +1,39 @@
+- id: W1-T2666
+  title: "REAL CI SHARDING EXPOSES A STALE GUIDE ASSERTION — test the warning-only gate behavior that #3611 actually documents instead of requiring the retired literal 'no gate blocks it'"
+  repo: remudero
+  depends_on: [W1-T2608]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  rationale: |
+    OBSERVED AT E2B9C0125 (2026-09-02). PR #3611 corrected docs/operator-guide.md to the actual
+    Rule 21 behavior: postMergeAmendmentViolations reports a files: amendment as
+    post-merge-field-drift at warn severity, and no exit code reads that warning. The existing
+    test still requires the retired literal sentence "no gate blocks it". The test passes inside
+    the old all-files suite but fails both alone and under #3613's real Node shard, masking a red
+    main branch until sharding became effective.
+
+    The guide is accurate. The stale assertion is the defect. This task changes only that test's
+    predicate so it verifies the named, concrete warning behavior instead of a vague literal.
+  design: |
+    Replace the literal `no gate blocks it` check with a bounded-order check for the actual
+    `post-merge-field-drift` / `warn severity` / `no exit code reads` behavior already documented.
+    Add a falsifier proving that merely restoring the vague old sentence cannot satisfy the test.
+    Change no operator guidance, linter behavior, workflow, queue state, or daemon behavior.
+  acceptance:
+    - claim: "the current accurate operator guide passes the declared-files correction contract when the test runs alone"
+      proof: "unit test: test/declared-files-correction-exit.test.ts"
+    - claim: "a guide that merely says no gate blocks the edit, without naming the warning behavior, fails the contract"
+      proof: "unit test: test/declared-files-correction-exit.test.ts"
+    - claim: "the acceptance, reproducible-evidence, human-authorship, and no-self-application checks remain green"
+      proof: "unit test: test/declared-files-correction-exit.test.ts"
+  risk: medium
+  band_meaning: blast-radius
+  origin: "oper#overnight-steward-2026-09-02"
+  plan_refs: ["W1-T2248", "W1-T2608", "W1-T2663"]
+  files: [test/declared-files-correction-exit.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    One stale test predicate and its falsifier. #3613 remains a separate CI-wiring concern.
