@@ -1,0 +1,111 @@
+- id: W1-T2735
+  title: "A GATE-SHAPED INSTRUMENT THAT NOTHING INVOKES IS NOT A GATE, AND THE REPO'S OWN SCOPE FENCE MANUFACTURES THEM — MEASURED 2026-09-02: 8 of 38 tracked `scripts/` executables are referenced by no workflow and no npm script, FOUR of them named `-check`/`-gate`, and the producer tasks for two of those (W1-T2292 criterion 7, W1-T1214 design (v)) each DEFERRED the wiring to a successor PR that was never filed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 18.00
+  files: [scripts/unwired-gate-check.mjs, .github/workflows/ci.yml, package.json, test/a-gate-shaped-instrument-that-nothing-invokes.test.ts]
+  origin: "operator-session#unwired-gate-class-2026-09-02"
+  plan_refs: ["W1-T2732", "W1-T2292", "W1-T1214", "W1-T2291", "W1-T1263"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE CLASS, MEASURED, NOT INFERRED FROM TWO ANECDOTES. Census at origin/main of every tracked
+    executable under `scripts/`, against every file in `.github/workflows/` and every entry in
+    `package.json`'s `scripts` map:
+
+        38 executables    30 wired    8 UNWIRED
+
+    Four of the eight are GATE-SHAPED (`-check`/`-gate` in the name) and none is wired:
+
+        coverage-session-blanking-check.mjs   exit 1   3 defects + 16 findings, LIVE
+        credit-surface-gate.mjs               exit 1   REFUSED: no head ref
+        tracked-source-write-check.mjs        exit 0   clean; nothing stops a regression
+        state-citation-check.mjs              exit 0   clean; nothing stops a regression
+
+    ⚠ THE OTHER FOUR ARE NOT DEFECTS, AND ARE NAMED SO THIS COUNT IS NOT OVER-READ.
+    `host-parity.ts` is imported programmatically by `ci-parity.ts`; `mount-headroom-sweep.mjs`
+    and `plan-state-claims.mjs` are operator-run analysis tools; `shell-screenshot.mjs` is a dev
+    utility. None is gate-shaped and none should be a required check. THE PREDICATE IS THE NAME,
+    NOT THE DIRECTORY.
+
+    THE MECHANISM IS A CORRECT RULE WITH NO SECOND HALF. A producer PR that also edits
+    `.github/workflows/` trips Rule 25's instrument isolation, so both producer tasks fenced the
+    wiring out — correctly, and in writing:
+        W1-T2292 criterion 7: "no caller is edited by this task."
+        W1-T1214 design (v): defers "wiring this script into a CI workflow step (a separate PR ...)".
+    Neither successor was ever filed. The fence is right; the follow-through is what is missing,
+    and nothing in the repo notices when it does not happen.
+
+    THE COST IS NOT HYPOTHETICAL. `credit-surface-gate.mjs` exists to refuse an implementation PR
+    credited on NEITHER surface, and its own suite covers exactly that case ("W1-T1214: an
+    implementation pr credited on neither surface is refused"). On 2026-09-02 PR #3704 was opened
+    from `codex/W1-T2720-wire-slug-reaper` with a body ending `Task: W1-T2720` rather than
+    `Remudero-Task:`, so the trailer regex matched nothing and the branch carried no run-shaped
+    credit either. W1-T2720 would have merged credited by neither path. A human caught it by
+    reading the body. THE GATE BUILT FOR THAT DEFECT WAS UNWIRED WHILE IT HAPPENED.
+
+    WHY A META-GATE RATHER THAN FOUR WIRING PRs. Wiring the four leaves the fifth to the same
+    fate, because the fence that produced them is unchanged and correct. CLAUDE.md's own preamble
+    states the remedy for a rule violated silently and repeatedly: make something REFUSE it.
+  design: |
+    (i) THE PREDICATE. A tracked `scripts/` executable whose basename matches `-check` or `-gate`
+    before its extension is GATE-SHAPED. It is WIRED if its basename or stem appears in any file
+    under `.github/workflows/` or in any value of `package.json`'s `scripts` map. Anything else in
+    `scripts/` is out of scope: the name is the claim, and a tool that never claimed to be a gate
+    is not one.
+
+    (ii) A RECORDED ALLOWANCE, NOT A CLEAN-TREE REQUIREMENT — the `catch-erasure-ratchet` idiom,
+    not a big-bang. Wiring all four at once is a different task with a different blast radius (the
+    blanking check alone is 19 live violations, which W1-T2732 owns). This gate ships with the four
+    CURRENT unwired gate-shaped scripts recorded inline WITH A REASON EACH, so it is green on the
+    tree it lands in, and a NEWLY ADDED gate-shaped script enters at zero allowance and is refused
+    immediately. The population drains as each recorded entry is wired and its row deleted.
+
+    (iii) THE ALLOWANCE MUST SHRINK ONLY. An entry whose script has since been wired is itself a
+    violation — a stale allowance is how a ratchet quietly stops ratcheting. Report it as such.
+
+    (iv) IT MUST WIRE ITSELF, OR IT IS THE DEFECT IT NAMES. `scripts/unwired-gate-check.mjs` is
+    gate-shaped by its own predicate, so an unwired version of it fails its own check. The npm
+    script plus the ci.yml step are therefore part of this task, not a successor — the exact fence
+    that produced the class is not re-created here.
+
+    (v) RULE 25 AND RULE 19, DERIVED EMPIRICALLY. A probe shard carrying this `files:` list linted
+    with NO rule-25 entanglement violation (`scripts/*-check.mjs` is not in `INSTRUMENT_SURFACE`;
+    only `-ratchet.mjs`, `diff-coverage.mjs`, `-baseline.json`, `mutation-relevant-paths.json`,
+    `stryker.conf.json` and `task-id-existence-check.mjs` are). The same probe read "spans 3
+    distinct subsystems (ci, package, unwired-gate-check) at risk:medium — raise to risk:high or
+    decompose"; decomposing would re-create the wiring fence this task exists to close, so the band
+    is `high` with `band_meaning: span`. The test companion is slug-matched to this shard so
+    `ownFalsifierSlug` discounts it — measured: 5 subsystems before the rename, 3 after.
+
+    (vi) NOT IN SCOPE. Wiring the four recorded scripts (W1-T2732 owns the blanking one), fixing
+    any violation they report, and any `src/` change. No `src/` path is declared and none may be
+    added.
+  acceptance:
+    - claim: "a gate-shaped script that no workflow and no npm script invokes is named with its path and refused, and the check exits non-zero"
+      proof: "unit test: test/a-gate-shaped-instrument-that-nothing-invokes.test.ts"
+    - claim: "a script wired by either surface alone is accepted, and a non-gate-shaped script is never reported however it is invoked"
+      proof: "unit test: test/a-gate-shaped-instrument-that-nothing-invokes.test.ts"
+    - claim: "the four currently-unwired gate-shaped scripts are recorded with a reason each, so the check is green on the tree it lands in"
+      proof: "unit test: test/a-gate-shaped-instrument-that-nothing-invokes.test.ts"
+    - claim: "a NEWLY added gate-shaped script enters at zero allowance and is refused immediately, with no allowlist entry to add it to"
+      proof: "unit test: test/a-gate-shaped-instrument-that-nothing-invokes.test.ts"
+    - claim: "a recorded entry whose script has since been wired is itself reported, so the allowance can only shrink"
+      proof: "unit test: test/a-gate-shaped-instrument-that-nothing-invokes.test.ts"
+    - claim: "the check invokes itself through the same npm script and CI step it requires of every other gate, so it cannot be the defect it names"
+      proof: "unit test: test/a-gate-shaped-instrument-that-nothing-invokes.test.ts"
+  falsifier: |
+    Close without implementation if every gate-shaped script under `scripts/` is already invoked by
+    a workflow or an npm script on origin/main, or if a check already refuses an unwired one. A
+    change that wires the four current scripts WITHOUT adding the refusal does not falsify this
+    task: that is the same one-at-a-time remedy whose omission produced the class.
+  note: |
+    W1-T2735 was atomically reserved at `refs/rmd-id/W1-T2735` before this file was written (1
+    attempt; every mint source agreed and no DEGRADED line was printed). Sibling to W1-T2732, not a
+    re-file of it: that task wires ONE detector and clears its 19 live violations; this one refuses
+    the CLASS so a fifth cannot be added silently.
