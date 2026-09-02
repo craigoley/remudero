@@ -664,6 +664,11 @@ import {
 import { buildReceipt, resolveReceiptLedgerLines, type ReceiptLedgerRead } from "./lib/receipt.js";
 import { buildReplay, resolveReplayLedgerLines, type ReplayLedgerRead } from "./lib/ledger-replay.js";
 import { buildDepReviewArmUnreachableEscalation, buildDepReviewEscalation, decideDepReview } from "./lib/dep-review.js";
+import {
+  recordHeadProviderAfterPush,
+  resolveReviewProviderProvenance,
+  reviewProviderProvenanceLedgerFields,
+} from "./lib/review-provider-provenance.js";
 import { decideAutoTriage, newFeedbackIdsOldestFirst, oldestFeedbackAgeMs, readAutoTriageMarker, recordAutoTriageFire, autoTriageMarkerPath, triageLockPath, claimTriageWithLogging, releaseTriageClaimWithLogging, gitTriageClaimReserver, type AutoTriageDecision, type TriageClaimReserver, type TriageClaimResult } from "./lib/auto-triage.js";
 import { decideDispatchClaim, releaseDispatchClaim, gitDispatchClaimReserver, dispatchClaimRef, type DispatchClaimReserver } from "./lib/dispatch-claim.js";
 import {
@@ -7785,6 +7790,8 @@ export async function runFixRung(opts: {
     /** Push whatever the fix worker committed. Best-effort — a worker that
      * already pushed leaves nothing new, which is not an error. */
     push: (worktreePath: string, branch: string) => void;
+    /** Fresh REST head read used only after the push to bind this worker to its exact output. */
+    readHeadShaForProvenance?: (prUrl: string) => string;
     issues: IssueGateway;
     ledgerPath: string;
     log: (step: string, extra?: Record<string, unknown>) => void;
@@ -8942,6 +8949,22 @@ export async function runFixRung(opts: {
     });
 
     deps.push(opts.worktreePath, opts.branch);
+
+    recordHeadProviderAfterPush(
+      {
+        taskId: opts.taskId,
+        prUrl: opts.prUrl,
+        source: "fix",
+        worker: fixResult,
+        priorHeadSha,
+      },
+      {
+        readProducedHeadSha: () =>
+          execFileSync("git", ["-C", opts.worktreePath, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+        readHeadSha: deps.readHeadShaForProvenance ?? readHeadShaRest,
+        log: deps.log,
+      },
+    );
 
     const ci = await deps.waitForCiGreen(opts.prUrl, deps.log);
     if (ci !== "green") {
@@ -10945,6 +10968,8 @@ async function runTask(
      * worker-text report, i.e. exactly the pre-fix behaviour.
      */
     fetchPrBody?: (prUrl: string) => Promise<string>;
+    /** Fresh REST read for the exact-head producer claim; injectable for offline runTask tests. */
+    readHeadShaForProvenance?: (prUrl: string) => string;
     /** Injectable decision-record writer+lander (W1-T191, write site 1) — lets a behavioral
      *  test drive a REAL runTask() through the DECISION_REQUEST auto-choose branch and assert
      *  exactly what it writes/lands, without ever shelling out to a real git/gh. Default: the
@@ -12447,6 +12472,15 @@ async function runTask(
     }
     // Stamp the provenance trailer (deriveStatus source (c)) before gating.
     ensureTaskTrailer(prUrl, taskId, log);
+    recordHeadProviderAfterPush(
+      { taskId, prUrl, source: "implement", worker: impl },
+      {
+        readProducedHeadSha: () =>
+          execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+        readHeadSha: opts.readHeadShaForProvenance ?? readHeadShaRest,
+        log,
+      },
+    );
     log("pr.opened", { pr_url: prUrl });
     say(`PR: ${prUrl}`);
 
@@ -12600,6 +12634,7 @@ async function runTask(
               // nothing new to push is not an error.
             }
           },
+          readHeadShaForProvenance: readHeadShaRest,
           issues: ghIssueGateway(owner, task.repo),
           ledgerPath,
           log: (s, extra) => log(s, extra),
@@ -13939,6 +13974,10 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   const runId = `review-PR${view.number}-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: taskId ?? `PR-${view.number}`, step, lane: "review", ...extra });
+
+  const provenanceKey = { taskId: taskId ?? `PR-${view.number}`, prUrl: view.url, headSha: view.headRefOid };
+  const provenance = resolveReviewProviderProvenance(readLedgerLines(ledgerPath), provenanceKey);
+  log("review.provider_provenance", reviewProviderProvenanceLedgerFields(provenance, provenanceKey));
 
   // W1-T2315: name the divergence rather than let it pass silently into the body fallback above —
   // a trailer that resolved nothing because the plan could not be LOADED is a different fact, with
@@ -27329,6 +27368,7 @@ export function buildSweepEffects(
                 /* best-effort — the worker may already have pushed */
               }
             },
+            readHeadShaForProvenance: readHeadShaRest,
             issues,
             ledgerPath,
             // W1-T78: the OUTER `log` stamps every line `task_id: "SWEEP"`/`"FIX"`
