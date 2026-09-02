@@ -76,6 +76,7 @@ REGISTRY="${REGISTRY:-synthwatcholey0620}"
 IMAGE="${IMAGE:-remudero}"
 TAG="${TAG:-latest}"
 DRY_RUN=0
+RECLAIM_ONLY=0
 PRINT_DAEMON_RUN=0
 
 # The HOST side of the state bind mount. The CONTAINER side is /home/node/Remudero (config.root
@@ -126,6 +127,10 @@ while [ $# -gt 0 ]; do
     --registry) REGISTRY="${2:?--registry needs a value}"; shift 2 ;;
     --image)    IMAGE="${2:?--image needs a value}"; shift 2 ;;
     --dry-run)  DRY_RUN=1; shift ;;
+    # W1-T2725: the SCHEDULABLE SUBSET — image and build-cache prune only, then stop. See
+    # section 1's `RECLAIM_ONLY` branch for why this mode is allowed to run with the fleet UP and
+    # why `docker container prune` is deliberately NOT part of it.
+    --reclaim-only) RECLAIM_ONLY=1; shift ;;
     --print-daemon-run) PRINT_DAEMON_RUN=1; shift ;;
     -h|--help)  sed -n '1,60p' "$0"; exit 0 ;;
     *) echo "host-update: unknown argument '$1' (try --help)" >&2; exit 2 ;;
@@ -464,7 +469,27 @@ fleet_containers() {
   done
 }
 LIVE="$(fleet_containers)"
-if [ -n "${LIVE}" ]; then
+# W1-T2725 — THE ONE CARVE-OUT, AND WHY IT DOES NOT WEAKEN THE REFUSAL ABOVE.
+# That refusal exists because `docker container prune` removes STOPPED containers, and an ad-hoc
+# worker that has exited is indistinguishable from junk from outside. `--reclaim-only` DOES NOT RUN
+# `docker container prune` for exactly that reason (see section 4), so the work it could destroy is
+# not in its blast radius at all.
+#
+# What it does run is `docker image prune -a` and `docker builder prune -a`, and a RUNNING container
+# holds a reference to its own image, so neither can remove an image the fleet is using. MEASURED
+# 2026-09-02 on this host: `docker image prune -a -f` with remudero-daemon, remudero-serve and
+# cloudflared all UP reclaimed 5.775GB and left all three running — the three old ACR tags went, the
+# in-use ones did not.
+#
+# This is the whole reason the mode exists: a reclaim that refuses whenever the fleet is up can
+# never run on a schedule, and this script's own header says the disk fills "on a schedule nobody
+# sets".
+if [ -n "${LIVE}" ] && [ "${RECLAIM_ONLY}" -eq 1 ]; then
+  echo "host-update: fleet container(s) RUNNING — proceeding anyway under --reclaim-only"
+  printf '%s\n' "${LIVE}" | sed 's/^/  /'
+  echo "  Only image and build-cache prunes run in this mode; a running container's own image is"
+  echo "  referenced and therefore untouchable, and 'docker container prune' is not run at all."
+elif [ -n "${LIVE}" ]; then
   echo "host-update: REFUSING — a fleet container is RUNNING." >&2
   printf '%s\n' "${LIVE}" | sed 's/^/  /' >&2
   echo "  Reclaiming under a live run risks discarding a worktree mid-implement, which costs the" >&2
@@ -484,10 +509,13 @@ fi
 echo "host-update: no fleet container running"
 
 # ── 2. AUTHENTICATE BEFORE DESTROYING ANYTHING ───────────────────────────────────────────────
+# W1-T2725: skipped under --reclaim-only. The login exists to bound the imageless window before a
+# PULL; that mode pulls nothing, so an expired ACR token must not fail a disk reclaim. Doing it
+# anyway would make the schedule depend on a short-lived credential it never uses.
 # ACR tokens are short-lived and the pull failed with "authentication required" once today. Doing
 # the login HERE — before the reclaim — is what bounds the imageless window described in the header:
 # the likeliest failure is caught while the old image is still on disk.
-if [ "${DRY_RUN}" -eq 0 ]; then
+if [ "${DRY_RUN}" -eq 0 ] && [ "${RECLAIM_ONLY}" -eq 0 ]; then
   if command -v az >/dev/null 2>&1; then
     echo "host-update: az acr login -n ${REGISTRY}"
     if ! az acr login -n "${REGISTRY}" >/dev/null; then
@@ -575,10 +603,10 @@ fi
 if [ "${DRY_RUN}" -eq 1 ]; then
   echo
   echo "host-update: DRY RUN — would run, in this order:"
-  echo "    docker container prune -f"
+  if [ "${RECLAIM_ONLY}" -eq 0 ]; then echo "    docker container prune -f"; else echo "    (docker container prune -f SKIPPED under --reclaim-only)"; fi
   echo "    docker image prune -af"
   echo "    docker builder prune -af"
-  echo "    docker pull ${REF}"
+  if [ "${RECLAIM_ONLY}" -eq 0 ]; then echo "    docker pull ${REF}"; else echo "    (no pull, no restart under --reclaim-only)"; fi
   echo "  The RECLAIMABLE column in 'docker system df' above is docker's own estimate of what those"
   echo "  would free. No volume prune, ever. ${STATE_DIR} is MEASURED above and never written to,"
   echo "  moved or removed — by this branch or any other."
@@ -590,9 +618,34 @@ else
   # partial reclaim is visible rather than silent. Aborting here would skip the pull and leave the
   # host on an old image because a cache prune complained — the wrong failure direction, since the
   # pull is the part the operator came for.
-  docker container prune -f 2>&1 | sed 's/^/  /' || true
+  # W1-T2725: `container prune` is the ONE command in this trio that can destroy work — it removes
+  # STOPPED containers, and an ad-hoc worker that has exited looks identical to junk from here.
+  # That is what section 1's refusal protects, so `--reclaim-only` (which runs with the fleet UP)
+  # must not run it. The other two cannot reach a running container's image or cache.
+  if [ "${RECLAIM_ONLY}" -eq 0 ]; then
+    docker container prune -f 2>&1 | sed 's/^/  /' || true
+  else
+    echo "  (skipping 'docker container prune' — --reclaim-only never removes a container)"
+  fi
   docker image     prune -af 2>&1 | tail -1 | sed 's/^/  /' || true
   docker builder   prune -af 2>&1 | tail -1 | sed 's/^/  /' || true
+fi
+
+# ── 4b. RECLAIM-ONLY STOPS HERE (W1-T2725) ───────────────────────────────────────────────────
+# Everything below pulls an image and restarts a container. On a timer that is exactly wrong: it
+# would restart the daemon mid-run, on a cadence, with no operator watching. Reclaim alone is safe
+# to repeat — it removes only what no container references — so this mode returns after section 4
+# and reports the space it freed.
+#
+# ⚠ WHY THIS MODE HAS TO EXIST AT ALL, rather than the daemon doing its own housekeeping: the
+# daemon container has NO docker binary and NO /var/run/docker.sock (verified 2026-09-02), which is
+# a deliberate security posture, not an oversight. `rmd` therefore cannot reclaim images from
+# inside; only the host can, so the schedule has to live here.
+if [ "${RECLAIM_ONLY}" -eq 1 ]; then
+  AFTER_AVAIL="$(df -Pk / | awk 'NR==2 {print $4}')"
+  echo
+  echo "host-update: reclaim-only — no pull, no restart. Free on / : ${AFTER_AVAIL} KiB"
+  exit 0
 fi
 
 # ── 5. PULL, AFTER THE SPACE EXISTS ──────────────────────────────────────────────────────────
