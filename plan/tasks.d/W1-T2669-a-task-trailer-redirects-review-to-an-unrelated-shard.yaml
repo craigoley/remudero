@@ -1,0 +1,56 @@
+- id: W1-T2669
+  title: "A `Remudero-Task:` TRAILER SILENTLY REDIRECTS THE REVIEW TO ANOTHER TASK'S ACCEPTANCE, WITH NO CHECK THAT THE NAMED TASK RELATES TO THE DIFF — a PR whose body carries a well-formed Acceptance block is judged against the TRAILER's shard instead, so it can fail on proofs over files it never touches while its own criteria go unread"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 10.00
+  files: [src/run-task.ts, test/a-task-trailer-redirects-review-to-an-unrelated-shard.test.ts]
+  origin: "operator-session#trailer-redirects-criteria-2026-09-02"
+  plan_refs: ["W1-T205"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-02 ON A REAL BODY, caught before it shipped. PR #3559 fixes the recycle's
+    credential refusal and carries a five-bullet Acceptance block whose proofs all execute and pass.
+    Its first draft also carried `Remudero-Task: W1-T2311`, because W1-T2311 is the shipped change
+    it REACTS TO — the one that made the incoming container's GH_TOKEN deliberately empty.
+    `rmd check-acceptance` over the stored body reported:
+
+        criteria source: W1-T2311's shard via the body trailer
+        criteria parsed: 8
+
+    Those eight include `grep: REFRESH_MARGIN_MS in src/lib/github-app.ts` and
+    `grep: operator read path in deploy/recycle-container.sh` — proofs over a file #3559 does not
+    touch. The PR would have been judged on another task's acceptance, failed on it, and its own
+    five criteria would never have been read. Removing the trailer restored
+    `criteria source: the body Acceptance: block`.
+
+    THE TRAILER IS LOAD-BEARING AND MUST STAY. It is one of the two credit paths the merged-set
+    projection depends on, and preferring a shard's criteria over a body block is correct for a
+    task build — the shard is the author-time contract. What is missing is any check that the named
+    task has ANYTHING to do with the diff.
+
+    THE CHEAP DISCRIMINATOR ALREADY EXISTS IN THE DATA. A task build's diff intersects its shard's
+    declared `files:` essentially by construction — that is what the scope guard already measures
+    from the other direction. A trailer naming a task whose `files:` share NO path with the diff is
+    the shape this catches. Report it where the source is already printed, so the operator reading
+    `criteria source:` sees the mismatch at the same moment.
+
+    ADVISORY, NOT A REFUSAL, and deliberately so: a legitimate build can widen beyond its declared
+    files (the reviewer's own `scope_violation` names review-ratified widenings legitimate), so
+    refusing here would block honest work to catch a mislabelled body. A named warning beside the
+    criteria source is enough — the failure mode is SILENCE, not permissiveness.
+  acceptance:
+    - claim: "a trailer naming a task whose declared files share no path with the diff is reported beside the criteria source"
+      proof: "unit test: test/a-task-trailer-redirects-review-to-an-unrelated-shard.test.ts"
+    - claim: "a trailer whose task does intersect the diff is unchanged and silent"
+      proof: "unit test: test/a-task-trailer-redirects-review-to-an-unrelated-shard.test.ts"
+    - claim: "the criteria still resolve from the shard — this reports, it never switches the source"
+      proof: "unit test: test/a-task-trailer-redirects-review-to-an-unrelated-shard.test.ts"
+    - claim: "a body with no trailer at all still resolves from its own Acceptance block, unchanged"
+      proof: "unit test: test/a-task-trailer-redirects-review-to-an-unrelated-shard.test.ts"
+    - claim: "the report is advisory: no exit code and no verdict changes because of it"
+      proof: "unit test: test/a-task-trailer-redirects-review-to-an-unrelated-shard.test.ts"

@@ -1,0 +1,52 @@
+- id: W1-T2667
+  title: "THE PLAN/DOCS FAST LANE SKIPS EIGHT SUITES THAT DO READ A `docs/` FILE — `namesPlanOrDocsPath` (scripts/diff-class.mjs) requires a QUOTED literal beginning `plan/` or `docs/`, so a suite reading `join(REPO_ROOT, \"docs\", \"operator-guide.md\")` names no such literal and drops out of the 185-file set; MEASURED 2026-09-02, #3611 was classified docs, edited docs/operator-guide.md, merged GREEN, and left test/declared-files-correction-exit.test.ts red on main"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 10.00
+  files: [scripts/diff-class.mjs, test/the-fast-lane-cannot-see-a-suite-that-joins-its-docs-path.test.ts]
+  origin: "operator-session#docs-lane-merged-a-red-2026-09-02"
+  plan_refs: ["W1-T2428"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE FILE STATES THE PROPERTY IT VIOLATES. `namesPlanOrDocsPath`'s own doc comment says the
+    over-inclusive design is deliberate because "under-including would silently drop a suite that
+    CAN fail, which is the failure mode this whole classifier exists to avoid." It under-includes.
+
+    THE MECHANISM IS THE LITERAL, NOT THE INTENT. The predicate is
+    `/["'`](?:\.\.\/)*(?:plan\/|docs\/)/` — a quoted string that BEGINS a plan-or-docs path. The
+    idiomatic way a suite reads a repo file is `join(REPO_ROOT, "docs", "operator-guide.md")`,
+    where `"docs"` is its own quoted segment with no trailing slash, so the pattern never matches.
+    This is the same shape CLAUDE.md already records for proofs: a string assembled from joined
+    literals exists verbatim in no file, so a literal scan reads zero.
+
+    MEASURED 2026-09-02, over the tracked tree: EIGHT suites read a `docs/` path through
+    `join(..., "docs", ...)` and are invisible to the enumerator —
+    claude-md-rules-reach-their-scope, cli-reference, container-config-mount,
+    declared-files-correction-exit, github-event-sweep-wake, operator-message-standard,
+    orientation, reap-cadence. The enumerated set is 185 files and contains none of them.
+
+    THE CONSEQUENCE IS ALREADY ON MAIN, not hypothetical. PR #3611 (`docs` class, haiku mount)
+    rewrote docs/operator-guide.md's files-correction section and dropped the phrase
+    "no gate blocks it". test/declared-files-correction-exit.test.ts asserts that phrase and reads
+    that exact file. It never ran on the PR, the PR merged green, and the test is red on main —
+    where it then reddens the SOURCE shard of every unrelated PR that follows.
+
+    THE FIX IS THE PREDICATE, NEVER A HAND-LIST. Adding these eight by name re-creates the
+    hand-copied list the task's own rationale (criterion 5) refuses. Recognise the joined form —
+    a quoted segment `"docs"`/`"plan"` adjacent to a path join — so a suite written the ordinary
+    way is enumerated without anyone remembering to add it. Over-inclusion stays the safe
+    direction and costs one extra fast suite.
+  acceptance:
+    - claim: "a suite that reads a docs path through joined quoted segments is enumerated by the fast lane, not dropped"
+      proof: "unit test: test/the-fast-lane-cannot-see-a-suite-that-joins-its-docs-path.test.ts"
+    - claim: "the eight measured suites all appear in the enumerated set after the change"
+      proof: "unit test: test/the-fast-lane-cannot-see-a-suite-that-joins-its-docs-path.test.ts"
+    - claim: "a pure-source suite with no repo-root constant is still NOT enumerated — the discount did not widen to everything"
+      proof: "unit test: test/the-fast-lane-cannot-see-a-suite-that-joins-its-docs-path.test.ts"
+    - claim: "restoring the literal-only predicate drops those suites again, so the falsifier is load-bearing"
+      proof: "unit test: test/the-fast-lane-cannot-see-a-suite-that-joins-its-docs-path.test.ts"
