@@ -174,6 +174,34 @@ test("captureRepairFeedbackWithPriorVerdict: a suppressed filing ledgers sweep.r
   assert.equal(rec.calls[0].extra?.id, "fb-repair-blocked-fixable-2956");
 });
 
+test("captureRepairFeedbackWithPriorVerdict: an unchanged suppressed filing logs once per process instead of once per daemon poll", () => {
+  const r = root();
+  seedEntry(r, feedbackEntry({ id: "fb-repair-stale-2955", origin: "repair#stale", status: "rejected", ts: "2026-08-20T00:00:00.000Z" }));
+  const rec = recorder();
+  const f = filing({ id: "fb-repair-stale-2956", origin: "repair#stale" });
+
+  captureRepairFeedbackWithPriorVerdict(r, f, rec.log);
+  captureRepairFeedbackWithPriorVerdict(r, f, rec.log);
+  captureRepairFeedbackWithPriorVerdict(r, f, rec.log);
+
+  assert.equal(rec.calls.length, 1, "three identical daemon polls must emit one suppression row, not three");
+  assert.equal(existsSync(feedbackEntryPath(r, f.id)), false, "telemetry dedup must not turn a rejected filing into a file");
+});
+
+test("captureRepairFeedbackWithPriorVerdict: new distinct-PR evidence logs a fresh suppression row in the same window", () => {
+  const r = root();
+  seedEntry(r, feedbackEntry({ id: "fb-repair-stale-2955", origin: "repair#stale", status: "rejected", ts: "2026-08-20T00:00:00.000Z" }));
+  const rec = recorder();
+  const first = filing({ id: "fb-repair-stale-2956", origin: "repair#stale" });
+  const fourthEvidenceLine = "- PR #104 (https://github.com/o/r/pull/104) at ddd4444: stale -- updated branch";
+
+  captureRepairFeedbackWithPriorVerdict(r, first, rec.log);
+  captureRepairFeedbackWithPriorVerdict(r, { ...first, raw: `${first.raw}\n${fourthEvidenceLine}` }, rec.log);
+
+  assert.equal(rec.calls.length, 2, "a changed evidence count is signal, not a duplicate poll");
+  assert.deepEqual(rec.calls.map((call) => call.extra?.distinct_pr_count), [3, 4]);
+});
+
 test("captureRepairFeedbackWithPriorVerdict: an unreadable/malformed prior entry FAILS OPEN -- the filing still happens (acceptance 7)", () => {
   const r = root();
   mkdirSync(feedbackDir(r), { recursive: true });
