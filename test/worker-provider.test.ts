@@ -505,6 +505,28 @@ test("Codex capacity RPC discovers models and selects the matching independent b
     },
   );
   assert.equal(refreshed.model, "gpt-5.6-terra", "an attribution boundary must pin the model selected before the worker ran");
+
+  const disappearedProc = fakeAppServer((request, { stdout }) => {
+    if (request.id === 1) stdout.write(`${JSON.stringify({ id: 1, result: {} })}\n`);
+    if (request.id === 2) stdout.write(`${JSON.stringify({ id: 2, result: splitCodexLimits })}\n`);
+    if (request.id === 3) stdout.write(`${JSON.stringify({ id: 3, result: { data: visibleCodexModels, nextCursor: null } })}\n`);
+  });
+  const disappeared = await readCodexCapacity(
+    { claudeBin: "/unused", root: "/tmp", workerProviders: { enabled: ["codex"], codexBin: "/bin/sh" } },
+    {
+      forceRefresh: true,
+      selectedModel: "gpt-no-longer-visible",
+      spawn: () => disappearedProc as never,
+      capabilities: CAPABILITY_FIXTURE,
+    },
+  );
+  assert.deepEqual(disappeared, {
+    provider: "codex",
+    readable: false,
+    windows: [],
+    detail: "selected Codex model is no longer visible to this account: gpt-no-longer-visible",
+    model: "gpt-no-longer-visible",
+  });
 });
 
 test("Codex capacity makes toolchain and synchronous spawn failures unreadable", async () => {
