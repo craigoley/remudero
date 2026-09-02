@@ -19,8 +19,9 @@
 // Drives the REAL `ci.yml` `Test` step body, extracted at test time (never a copy-pasted fixture —
 // same convention as test/ci-sharding.test.ts and test/push-ci-on-main.test.ts), through the exact
 // shell GitHub Actions itself uses for a multi-line `run:` step on a Linux runner
-// (`bash --noprofile --norc -eo pipefail <script>`), with a stub `npm` on `$PATH` standing in for
-// `npm run test:ci` so each scenario's TAP-shaped output and exit code are fully controlled.
+// (`bash --noprofile --norc -eo pipefail <script>`), with a stub `node` on `$PATH` that lets the
+// real retry wrapper boot and then stands in for its child test process, so each scenario's
+// TAP-shaped output and exit code are fully controlled.
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -76,27 +77,41 @@ function freshTestProcessEnv(): NodeJS.ProcessEnv {
 }
 
 /** Executes an already-rendered step body through the SAME shell invocation GitHub Actions uses
- * for a multi-line Linux `run:` step, with a stub `npm` standing in for `npm run test:ci`. */
-function runRenderedStep(runText: string, npmStubScript: string): { status: number | null; stdout: string; stderr: string; summary: string } {
+ * for a multi-line Linux `run:` step. The node stub delegates the outer wrapper invocation to the
+ * real binary and controls only the wrapper's child `node --test` process. */
+function runRenderedStep(runText: string, nodeStubScript: string): { status: number | null; stdout: string; stderr: string; summary: string } {
   const dir = mkdtempSync(join(tmpdir(), "rmd-shard-summary-"));
   const binDir = join(dir, "bin");
   mkdirSync(binDir);
-  const npmStubPath = join(binDir, "npm");
-  writeFileSync(npmStubPath, npmStubScript);
-  chmodSync(npmStubPath, 0o755); // owner digit 7 -- outside test/host-capability-fixtures.test.ts's ratchet
+  const nodeStubPath = join(binDir, "node");
+  writeFileSync(nodeStubPath, nodeStubScript);
+  chmodSync(nodeStubPath, 0o755); // owner digit 7 -- outside test/host-capability-fixtures.test.ts's ratchet
   const scriptPath = join(dir, "run.sh");
   writeFileSync(scriptPath, runText);
   const summaryPath = join(dir, "summary.md");
   const result = spawnSync("bash", ["--noprofile", "--norc", "-eo", "pipefail", scriptPath], {
     cwd: dir,
     encoding: "utf8",
-    env: { ...process.env, PATH: `${binDir}:${process.env.PATH}`, GITHUB_STEP_SUMMARY: summaryPath },
+    env: {
+      ...process.env,
+      PATH: `${binDir}:${process.env.PATH}`,
+      GITHUB_STEP_SUMMARY: summaryPath,
+      RMD_REAL_NODE: process.execPath,
+      RMD_TEST_WITH_RETRY_SCRIPT: TEST_WITH_RETRY_SCRIPT,
+    },
   });
   const summary = existsSync(summaryPath) ? readFileSync(summaryPath, "utf8") : "";
   return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "", summary };
 }
 
-const TRUNCATED_NO_SUMMARY_NPM = `#!/usr/bin/env bash
+const DELEGATE_WRAPPER = `if [ "$1" = "scripts/test-with-retry.mjs" ]; then
+  shift
+  exec "$RMD_REAL_NODE" "$RMD_TEST_WITH_RETRY_SCRIPT" "$@"
+fi
+`;
+
+const TRUNCATED_NO_SUMMARY_NODE = `#!/usr/bin/env bash
+${DELEGATE_WRAPPER}
 # Simulates PR #3542 shard 1: a killed/timed-out run prints the assertions it reached and dies
 # before node's OWN trailing summary block is ever written.
 echo "TAP version 13"
@@ -105,7 +120,8 @@ echo "not ok 1 - something mid-flight"
 exit 1
 `;
 
-const GENUINE_FAILURE_NPM = `#!/usr/bin/env bash
+const GENUINE_FAILURE_NODE = `#!/usr/bin/env bash
+${DELEGATE_WRAPPER}
 # A run that reached its own trailing summary and named a genuine, complete failure set.
 echo "TAP version 13"
 echo "# Subtest: a real failing test"
@@ -122,7 +138,8 @@ echo "# duration_ms 12.3"
 exit 1
 `;
 
-const EMPTY_SLICE_NPM = `#!/usr/bin/env bash
+const EMPTY_SLICE_NODE = `#!/usr/bin/env bash
+${DELEGATE_WRAPPER}
 # A shard whose slice legitimately contains zero test files -- MEASURED against a real
 # 'node --test --test-shard=' invocation below: it still runs to completion and prints a full,
 # zero-count summary, exit 0.
@@ -143,7 +160,7 @@ exit 0
 
 test("acceptance 1: a shard that exits non-zero with NO `# tests` summary anywhere in its output is marked NO-SUMMARY SHARD in $GITHUB_STEP_SUMMARY, with a greppable ::error:: naming the shard", () => {
   const runText = renderForShard(loadTestStepRun(), 1, "SOURCE");
-  const r = runRenderedStep(runText, TRUNCATED_NO_SUMMARY_NPM);
+  const r = runRenderedStep(runText, TRUNCATED_NO_SUMMARY_NODE);
   assert.equal(r.status, 1, `the shard must still be RED -- this must never turn a real failure green: ${r.stdout}${r.stderr}`);
   assert.match(r.summary, /NO-SUMMARY SHARD/, `the step summary must flag the truncated run: ${JSON.stringify(r.summary)}`);
   assert.match(
@@ -155,7 +172,7 @@ test("acceptance 1: a shard that exits non-zero with NO `# tests` summary anywhe
 
 test("acceptance 1: a shard that exits non-zero WITH a genuine `# tests`/`# pass`/`# fail` summary is NOT flagged NO-SUMMARY -- same exit code, distinguished evidence", () => {
   const runText = renderForShard(loadTestStepRun(), 1, "SOURCE");
-  const r = runRenderedStep(runText, GENUINE_FAILURE_NPM);
+  const r = runRenderedStep(runText, GENUINE_FAILURE_NODE);
   assert.equal(r.status, 1, "a genuine failure must still be RED");
   assert.doesNotMatch(r.summary, /NO-SUMMARY SHARD/, `a run with a real summary must never be flagged unverified: ${JSON.stringify(r.summary)}`);
   assert.doesNotMatch(r.stdout + r.stderr, /::error::ci-shard/, "no NO-SUMMARY annotation belongs on a genuinely diagnosed red");
@@ -165,7 +182,7 @@ test("acceptance 1: a shard that exits non-zero WITH a genuine `# tests`/`# pass
 
 test("acceptance 2: a shard whose slice legitimately runs nothing (a zero-count summary, exit 0) stays GREEN and is never flagged NO-SUMMARY", () => {
   const runText = renderForShard(loadTestStepRun(), 1, "SOURCE");
-  const r = runRenderedStep(runText, EMPTY_SLICE_NPM);
+  const r = runRenderedStep(runText, EMPTY_SLICE_NODE);
   assert.equal(r.status, 0, `an honest, empty slice must stay GREEN: ${r.stdout}${r.stderr}`);
   assert.doesNotMatch(r.summary, /NO-SUMMARY SHARD/);
 });
