@@ -190,29 +190,53 @@ test("the board cache invalidates when the live open-PR index changes without a 
 });
 
 test("queue order is actionable, active, ready or held, waiting, then unknown; numeric inside each class", () => {
-  const rows = [80, 71, 70, 61, 60, 51, 50, 40].map((number) => openPr(number));
+  const rows = [80, 71, 70, 62, 61, 60, 51, 50, 40].map((number) => openPr(number));
   const lines = [
     disposed(80, "head-80", "mystery", "unknown", "2026-09-02T10:00:00.000Z"),
     disposed(71, "head-71", "wait", "checks", "2026-09-02T10:00:00.000Z"),
     disposed(70, "head-70", "wait", "checks", "2026-09-02T10:00:00.000Z"),
     disposed(61, "head-61", "mergeable", "ready", "2026-09-02T10:00:00.000Z"),
     disposed(60, "head-60", "mergeable", "ready", "2026-09-02T10:00:00.000Z"),
+    { step: "automerge.hold_engaged", task_id: "W1-T62", pr_number: 62, by: "craig", reason: "manual inspection" },
     disposed(51, "head-51", "post-review", "reviewing", "2026-09-02T10:00:00.000Z"),
     disposed(50, "head-50", "post-review", "reviewing", "2026-09-02T10:00:00.000Z"),
     disposed(40, "head-40", "conflicted", "conflict", "2026-09-02T10:00:00.000Z"),
   ];
   const queue = computeBoardSnapshot(deps({ rows }, lines)).prQueue.rows;
-  assert.deepEqual(queue.map((row) => row.prNumber), [40, 50, 51, 60, 61, 70, 71, 80]);
+  assert.deepEqual(queue.map((row) => row.prNumber), [40, 50, 51, 60, 61, 62, 70, 71, 80]);
   assert.deepEqual(queue.map((row) => row.queueClass), [
     "actionable",
     "active",
     "active",
     "ready-held",
     "ready-held",
+    "ready-held",
     "waiting",
     "waiting",
     "unknown",
   ]);
+  assert.equal(queue.find((row) => row.prNumber === 62)?.held, true, "an operator-held PR is represented in the ready/held class");
+});
+
+test("the rendered queue filters execute against loaded rows and never hide an unknown classification", () => {
+  const html = renderShellHtml();
+  const functionSource = html.match(/function filteredPrQueueRows\(rows\) \{[\s\S]*?\n  \}/)?.[0];
+  assert.ok(functionSource, "the consuming client filter function is present");
+  const buildFilter = (filters: { actionability: string; review: string; task: string }) =>
+    new Function("prQueueFilters", `${functionSource}; return filteredPrQueueRows;`)(filters) as (rows: unknown[]) => Array<{ prNumber: number }>;
+  const rows = [
+    { prNumber: 40, queueClass: "actionable", reviewState: "failure", taskId: "W1-T40" },
+    { prNumber: 50, queueClass: "active", reviewState: "pending", taskId: "W1-T50" },
+    { prNumber: 60, queueClass: "ready-held", reviewState: "success", taskId: "W1-T60" },
+    { prNumber: 70, queueClass: "waiting", reviewState: "none", taskId: undefined },
+    { prNumber: 80, queueClass: "unknown", reviewState: "none", taskId: "W1-T80" },
+  ];
+
+  const numbers = (filtered: Array<{ prNumber: number }>) => filtered.map((row) => row.prNumber);
+  assert.deepEqual(numbers(buildFilter({ actionability: "actionable", review: "all", task: "all" })(rows)), [40, 80]);
+  assert.deepEqual(numbers(buildFilter({ actionability: "all", review: "success", task: "all" })(rows)), [60, 80]);
+  assert.deepEqual(numbers(buildFilter({ actionability: "all", review: "all", task: "unattributed" })(rows)), [70, 80]);
+  assert.deepEqual(numbers(buildFilter({ actionability: "all", review: "all", task: "W1-T60" })(rows)), [60, 80]);
 });
 
 test("the Queue tab filters the already-loaded atomic snapshot and adds no write or polling route", () => {

@@ -11,6 +11,7 @@
     - src/lib/board.ts
     - src/lib/serve.ts
     - test/console-pr-queue-cockpit.test.ts
+    - test/serve.shell-ux.test.ts
     - scripts/source-size-baseline.json
   origin: oper#beautiful-operational-pr-queue-2026-09-02
   plan_refs: ["P22", "W1-T914", "W1-T1006", "W1-T2568", "W1-T2584"]
@@ -78,6 +79,11 @@
     and W1-T2584 owns review-lane backlog concurrency; this task visualises their material outcome
     and does not alter either policy. The separate operator merge-hold writer already ships as
     `rmd merge-hold`; exposing that write in the console requires its own nonce-protected task.
+
+    OWNERSHIP CORRECTION: the Queue tab necessarily changes the shell's exact-tab browser contract
+    in `test/serve.shell-ux.test.ts`; that material regression test is part of this implementation's
+    declared scope. The correction is filed plan-only so Rule 15 never mixes criteria edits into
+    the implementation PR.
 
     ID PROVENANCE: `rmd next-task-id --reserve` atomically reserved refs/rmd-id/W1-T2718 against
     current origin and the open-PR/history surfaces before this shard was written.
