@@ -428,7 +428,9 @@ import {
   renderPromotionProposals,
   renderPlanStateTruth,
   resolveMarkerForGather,
+  retireSettledFollowups,
   routeFollowupsToRegistry,
+  type FollowupReferentRead,
   runlessMergesSince,
   saveMarker,
   shippedSince,
@@ -19230,6 +19232,11 @@ async function retroCommand(
   // task at all) for the plan-state truth rung below. One projection, two consumers — no
   // second `projectPlan` call.
   let planStateResolver: PlanStateTruthResolver | undefined;
+  // W1-T2601: the merged-task set `retireSettledFollowups` needs, derived from the SAME projection
+  // the plan-health sweep already computes rather than a second read of the same surfaces. Starts
+  // `unreadable` and only becomes `ok` on a projection that actually completed — so an absent plan
+  // file or a throwing scan retires NOTHING, which is the direction that cannot lose work.
+  let followupReferentRead: FollowupReferentRead = { kind: "unreadable" };
   try {
     const planHealthPlanPath = join(repoRoot, "plan", "tasks.yaml");
     if (existsSync(planHealthPlanPath)) {
@@ -19239,6 +19246,10 @@ async function retroCommand(
         { ledgerPath, github: opts.github ?? buildBatchedGithub(owner, repo) },
         join(config.root, "state", "status.json"),
       );
+      followupReferentRead = {
+        kind: "ok",
+        merged: new Set([...planHealthProjection].filter(([, v]) => v.merged).map(([id]) => id)),
+      };
       isTaskMerged = (task) => planHealthProjection.get(task.id)?.merged ?? false;
       planStateResolver = (taskId) => {
         const projection = planHealthProjection.get(taskId);
@@ -19318,7 +19329,8 @@ async function retroCommand(
   // site: every routable candidate this pass mined is filed through the SAME single writer
   // (`updateProposalRegistry`) board-review.ts/rule-efficacy.ts/feedback-docket.ts already use,
   // right alongside the ledger marks above (same real-run-only gate, same non-dry-run guard).
-  routeFollowupsToRegistry(gather.followups, { registryPath: join(config.root, "state", "inbox-proposals.json") });
+  const followupRegistryPath = join(config.root, "state", "inbox-proposals.json");
+  routeFollowupsToRegistry(gather.followups, { registryPath: followupRegistryPath });
 
   // W1-T2559: retro ships no code and supervises no worker, so G-17's Tier Invariant — which
   // exists to keep a supervisor strictly above what it reviews — does not bind it to plan
@@ -19342,6 +19354,34 @@ async function retroCommand(
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: "RETRO", step, lane: "retro", ...extra });
   const say = (msg: string) => console.log(`\n### [retro] ${msg}`);
+  // W1-T2601: THE RETIREMENT ARM'S ONE CALL SITE. `retireSettledFollowups` (lib/retro.ts) shipped
+  // with W1-T2563, tested, and with ZERO production callers — the producer above was wired and its
+  // counterpart was not, so the registry could only ever GROW. MEASURED 2026-09-01: 351 proposals,
+  // every one `followup:`-prefixed, against 317 two hours earlier and 16 two days before that.
+  //
+  // ⚠ IT COULD NOT HAVE BEEN WIRED BY THE TASK THAT BUILT IT. W1-T2563's declared `files:` are
+  // `[src/lib/retro.ts, test/routed-followups-retire.test.ts]` — this call site is in run-task.ts,
+  // outside that scope, so the builder was right to stop at the seam rather than widen. That is why
+  // a separate task exists rather than this being an oversight to scold.
+  //
+  // AFTER THE PRODUCER, DELIBERATELY: retiring first would judge this pass's own freshly-routed
+  // candidates against a merged set derived before they existed. It sits a little further down the
+  // function than the producer only because `runId`/`log` are declared here and a silent retirement
+  // would be worse than a well-placed one — the `--dry-run` branch has already returned far above,
+  // so this is still real-run-only and still writes nothing on a preview.
+  const retired = retireSettledFollowups(followupReferentRead, { registryPath: followupRegistryPath });
+  if (retired.length > 0) {
+    appendLedger(ledgerPath, {
+      run_id: runId,
+      task_id: "RETRO",
+      step: "followup.retired",
+      lane: "retro",
+      count: retired.length,
+      proposal_ids: retired.slice(0, 20).map((o) => o.proposalId),
+      task_ids: [...new Set(retired.map((o) => o.taskId))].slice(0, 20),
+    });
+  }
+
   // W1-T2383 rank 3: the lane's own dispatch row, BESIDE its existing start row rather than
   // replacing it — `retro.start` carries this lane's own fields and has its own readers.
   log("run.start", laneRunStartFields({ lane: "retro", repo, architect: arch, worker: wrk }));
