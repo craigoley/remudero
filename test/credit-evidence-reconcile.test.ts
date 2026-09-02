@@ -167,3 +167,53 @@ test("the module exports no writer — reconciliation cannot append a ledger lin
   );
   assert.ok(!/appendLedger|writeFileSync|correction\.provenance"/.test(src), "and no write call site");
 });
+
+// ── the CLI call site (Rule 14: the call site is a deliverable) ───
+
+test("creditAuditCommand renders the report through the injected seams and exits 0", async () => {
+  const { creditAuditCommand } = await import("../src/run-task.js");
+  const said: string[] = [];
+  const log = console.log;
+  console.log = (...a: unknown[]) => void said.push(a.map(String).join(" "));
+  try {
+    const code = await creditAuditCommand([], {
+      trailerLog: () => "",
+      subjectLog: () => "a1 feat: something real (W1-T2729) (#3721)",
+      evidenceDump: () => "DUMP",
+      classify: (ids) => ({ withImpl: ids.filter((i) => i === "W1-T2729"), without: [] as string[] }),
+    });
+    assert.equal(code, 0, "a report never gates");
+  } finally {
+    console.log = log;
+  }
+  const text = said.join("\n");
+  assert.match(text, /rmd credit-audit — \d+ open task\(s\)/, "it renders the real report over the real plan");
+  assert.match(text, /Nothing above was written/);
+});
+
+test("creditAuditCommand refuses an unknown flag with exit 2 rather than reporting over a typo", async () => {
+  const { creditAuditCommand } = await import("../src/run-task.js");
+  const err = console.error;
+  console.error = () => {};
+  try {
+    assert.equal(await creditAuditCommand(["--no-such-flag"]), 2);
+  } finally {
+    console.error = err;
+  }
+});
+
+test("with NO injected seams the command reads real git — the default path is not dead code", async () => {
+  // The mirror of the all-fakes trap: every test above supplies its own seams, so the `git`
+  // closure that the shipped command actually uses would never execute and its first real
+  // failure would be in production.
+  const { creditAuditCommand } = await import("../src/run-task.js");
+  const said: string[] = [];
+  const log = console.log;
+  console.log = (...a: unknown[]) => void said.push(a.map(String).join(" "));
+  try {
+    assert.equal(await creditAuditCommand([]), 0);
+  } finally {
+    console.log = log;
+  }
+  assert.match(said.join("\n"), /open task\(s\): \d+ agreed, \d+ disagreed, \d+ correctable/);
+});
