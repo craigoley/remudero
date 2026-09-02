@@ -714,6 +714,7 @@ import {
   type BranchFacts,
   readLedgerUnionBounded,
   taskIdFromRunBranch,
+  taskIdFromSlugBranch,
   readMergeCreditedTaskIds,
   isMergeCreditLine,
   readRequiredStatusCheckContexts,
@@ -15567,6 +15568,10 @@ export function reapBranchesCommand(
     exec?: (cmd: string, args: string[]) => string;
     ledgerPath?: string;
     readFile?: (path: string) => string;
+    loadPlan?: (path: string) => Plan;
+    readMergeCreditedTaskIds?: typeof readMergeCreditedTaskIds;
+    /** Overrides only the merge-credit source. `ledgerPath` remains the optional report sink. */
+    creditLedgerPath?: string;
   } = {},
 ): number {
   const badArg = unknownArgError("reap-branches", rest, [], []);
@@ -15584,6 +15589,45 @@ export function reapBranchesCommand(
   if (names.length === 0) {
     console.error("rmd reap-branches: `git ls-remote --heads origin` returned NO branches — refusing to report on a corpus it could not read");
     return 1;
+  }
+
+  // W1-T2720: the slug-task reason split shipped in planBranchReap before its production caller
+  // supplied either input. Read the merged plan view ONCE, resolve every branch against the same
+  // candidate corpus, then read merge credit ONCE for the whole command. This enrichment can
+  // change only `plan.reasons`: both named-task outcomes remain held by planBranchReap.
+  const namedTaskByBranch = new Map<string, string>();
+  let creditedTaskIds = new Set<string>();
+  let creditReadSucceeded = false;
+  try {
+    const taskPlan = (opts.loadPlan ?? loadPlan)(join(repoRoot, "plan", "tasks.yaml"));
+    const candidates = taskPlan.tasks.map((task) => task.id);
+    for (const name of names) {
+      const taskId = taskIdFromSlugBranch(name, candidates);
+      if (taskId !== undefined) namedTaskByBranch.set(name, taskId);
+    }
+    // No resolved slug means there is no credit question to ask. Keeping this lazy avoids a
+    // bounded archive walk on repositories whose branch corpus cannot use the answer.
+    if (namedTaskByBranch.size > 0) {
+      let creditPath = opts.creditLedgerPath ?? opts.ledgerPath;
+      if (creditPath === undefined) {
+        try {
+          creditPath = ledgerPathFor(loadConfig());
+        } catch (err) {
+          console.error(`rmd reap-branches: slug-task enrichment degraded: ledger path unavailable (${String(err)})`);
+        }
+      }
+      if (creditPath !== undefined) {
+        try {
+          const creditRead = (opts.readMergeCreditedTaskIds ?? readMergeCreditedTaskIds)(creditPath, { candidates });
+          creditedTaskIds = creditRead.credited;
+          creditReadSucceeded = true;
+        } catch (err) {
+          console.error(`rmd reap-branches: slug-task enrichment degraded: merge-credit read failed (${String(err)})`);
+        }
+      }
+    }
+  } catch (err) {
+    console.error(`rmd reap-branches: slug-task enrichment degraded: plan read failed (${String(err)})`);
   }
 
   // ONE batched PR fetch for the whole corpus, never one call per branch. The per-branch shape
@@ -15649,7 +15693,17 @@ export function reapBranchesCommand(
     } catch {
       namedInSource = false; // git grep exits 1 on no match — a real "not named", not a failure
     }
-    return { name, prState: state, tipInMain, namedInSource };
+    const namedTaskId = namedTaskByBranch.get(name);
+    return {
+      name,
+      prState: state,
+      tipInMain,
+      namedInSource,
+      ...(namedTaskId === undefined ? {} : { namedTaskId }),
+      ...(namedTaskId === undefined || !creditReadSucceeded
+        ? {}
+        : { namedTaskCredited: creditedTaskIds.has(namedTaskId) }),
+    };
   });
 
   const plan = planBranchReap(facts, DECLARED_BRANCH_GUARDS);
