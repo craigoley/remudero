@@ -1,0 +1,74 @@
+- id: W1-T2719
+  title: "THE DURABLE MERGE HOLD IS ENFORCED AND CLI-WRITABLE BUT THE CONSOLE CANNOT SEE OR OPERATE IT — expose the existing refusal as a nonce-protected fleet or PR control without giving the dashboard a new merge primitive"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 60.00
+  files:
+    - src/lib/board.ts
+    - src/lib/panel-actions.ts
+    - src/lib/serve.ts
+    - test/console-merge-hold-control.test.ts
+    - scripts/source-size-baseline.json
+  origin: oper#console-operator-merge-override-2026-09-02
+  plan_refs: ["P22", "W1-T2581", "W1-T1000002", "W1-T1000003"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED AT origin/main 4cc3efde. `rmd merge-hold engage|release` already calls
+    `applyOperatorMergeHold`, appends an attributable durable decision, reads it back through
+    `automergeHoldFromLedger`, and is enforced by every auto-merge path. `buildStatusBoard` already
+    derives the currently-standing fleet and PR holds into `needsMe.mergeHeld`. The console mounts
+    no merge-hold route, renders no standing hold, and offers no engage/release control. An
+    operator using the dashboard therefore has to leave it for the CLI at exactly the moment a PR
+    queue needs an override.
+
+    REUSE THE EXISTING DECISION AND WRITER. Project `needsMe.mergeHeld` into the existing atomic
+    `BoardSnapshot` from the same `buildStatusBoard` result and same already-parsed ledger lines
+    `board.ts` uses for blocked PRs. Do not re-derive hold state from check, review or UI state.
+    Add one exact-match write route accepting `action: engage|release`, mandatory non-empty
+    `reason`, optional positive `prNumber`, and optional matching `taskId` only for PR scope. The
+    authenticated bearer-derived actor is the `by` value; the browser never supplies or spoofs an
+    identity. The handler calls `applyOperatorMergeHold` and returns its read-back result.
+
+    THIS IS HIGH CONSEQUENCE. Register the route at the existing high tier so the service requires
+    the same fresh confirmation nonce used by other high-tier console controls. Malformed input,
+    missing reason, invalid PR/task scope, stale nonce or read-back mismatch writes nothing. An
+    already-clear release remains the existing idempotent no-op. Render a fleet control plus one
+    action on each live PR queue row; every confirmation names the exact scope, action and reason.
+
+    PRESERVE THE OPERATOR OVERRIDE BOUNDARY. Engaging a hold withdraws or prevents daemon auto-merge
+    only because the existing sweep reader already does so. Releasing it merely removes that
+    refusal and lets the next ordinary sweep re-derive the PR. This route never arms auto-merge,
+    selects a merge method, bypasses branch protection, presses GitHub merge, starts or stops the
+    daemon, or deploys anything. Manual squash stays an operator action through the PR link, which
+    preserves the users stated escape hatch when the queue is stuck.
+
+    RULE 19: risk is high for span and consequence. The change crosses the board projection,
+    panel write route, inline console and proof, but delegates the material decision to the
+    existing production writer and reader rather than making a parallel control plane.
+  acceptance:
+    - claim: "the console renders every currently-standing fleet or PR hold from the same production ledger reader the sweep enforces, and a release disappears on the next atomic snapshot"
+      proof: "unit test: test/console-merge-hold-control.test.ts"
+    - claim: "engage and release call the existing merge-hold writer with bearer-derived actor, mandatory reason and exact fleet or PR scope rather than appending a console-only decision"
+      proof: "unit test: test/console-merge-hold-control.test.ts"
+    - claim: "the route is high-tier and a missing or stale confirmation nonce performs no write"
+      proof: "unit test: test/console-merge-hold-control.test.ts"
+    - claim: "malformed action, reason, PR or task scope is refused before any ledger append, while releasing an already-clear scope is an idempotent no-op"
+      proof: "unit test: test/console-merge-hold-control.test.ts"
+    - claim: "the UI confirmation names action, scope and reason and refreshes from the read-back snapshot rather than assuming the write succeeded"
+      proof: "unit test: test/console-merge-hold-control.test.ts"
+    - claim: "the console adds no auto-merge arm, merge-method selection, GitHub merge, branch-protection bypass, daemon lifecycle or deploy action"
+      proof: "unit test: test/console-merge-hold-control.test.ts"
+  note: |
+    W1-T2581 already shipped the supported writer, W1-T1000002 already shipped enforcement, and
+    W1-T1000003 already shipped the status-board read. This task wires those existing mechanisms
+    to the console and does not re-file them. W1-T2718 owns the read-only whole-PR queue cockpit;
+    neither task depends on the other at the model level, though the controls are most useful when
+    rendered beside those rows.
+
+    ID PROVENANCE: `rmd next-task-id --reserve` atomically reserved refs/rmd-id/W1-T2719 against
+    current origin and the open-PR/history surfaces before this shard was written.
