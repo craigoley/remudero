@@ -1822,12 +1822,14 @@ that the question is currently unanswerable and names the two builds that would 
 
 ## 2026-09-02 — VERIFICATION: the bring-your-own-subscription ruling's two open questions, re-read against Anthropic's primary Claude Code pages (SESSION-RECORDED, NOT A RULING)
 
-*Session-recorded at the operator's instruction ("go ahead with the follow-up work identified",
-2026-09-02) — not a machine auto-choose resolution and not a ruling. It decides nothing. It records
-what four pages under code.claude.com/docs said when read on 2026-09-02, verbatim, so the 2026-08-18
-ruling's two open questions are held against primary text instead of search results. Every line below
-that is not a quotation is marked as this session's reading and carries no legal weight; the ruling's
-own answer stands — the questions are the operator's to put to Anthropic.*
+*Operator-authored in the sense this file uses the term — recorded by hand at the operator's
+instruction ("go ahead with the follow-up work identified", 2026-09-02), not by the control plane —
+and written down by a session, so it is marked SESSION-RECORDED: not a machine auto-choose resolution
+and not a ruling. It decides nothing. It records what four pages under code.claude.com/docs said when
+read on 2026-09-02, verbatim, so the 2026-08-18 ruling's two open questions are held against primary
+text instead of search results. Every line below that is not a quotation is marked as this session's
+reading and carries no legal weight; the ruling's own answer stands — the questions are the operator's
+to put to Anthropic.*
 
 **WHY THIS WAS CHECKED.** The 2026-09-01 direction refresh found the ruling's economic premise resting
 on search results: a mid-2026 change said to move headless (`claude -p` / Agent SDK) usage out of the
