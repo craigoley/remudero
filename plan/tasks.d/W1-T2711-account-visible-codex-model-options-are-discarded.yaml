@@ -1,0 +1,102 @@
+- id: W1-T2711
+  title: "ACCOUNT-VISIBLE CODEX MODEL OPTIONS ARE DISCARDED AFTER SELECTION — the runtime broker intersects `model/list`, capability/effort policy and quota headroom correctly, but the console sees only the winner and cannot explain or safely prefer another mapped eligible option"
+  repo: remudero
+  depends_on: [W1-T2704, W1-T2709]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 60.00
+  files: [src/lib/worker-provider.ts, src/lib/provider-routing-policy.ts, src/lib/provider-routing-status.ts, src/lib/worker.ts, src/lib/serve.ts, test/codex-model-console.test.ts, test/provider-routing-console-controls.test.ts, test/worker-provider.test.ts, scripts/source-size-baseline.json]
+  origin: "operator-session#console-codex-model-management-2026-09-02"
+  plan_refs: ["W1-T2572", "W1-T2573", "W1-T2704", "W1-T2709", "G-17"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON MAIN AT c28595e3. `readCodexCapacity` starts one authenticated Codex app-server,
+    reads `account/rateLimits/read` and `model/list`, excludes hidden models, intersects the
+    account-visible list with `.remudero/mounts.yaml`'s provider-neutral capability+effort
+    candidates, ranks those candidates by the matching quota bucket's tightest remaining
+    percentage, and returns the selected concrete model and supported/default effort. The spawn
+    then passes those exact values to `codex exec`. This is already the correct smart-selection
+    architecture: semantic policy is reviewed data, availability is authenticated runtime data,
+    and quota is a live eligibility input.
+
+    OBSERVED GAP. The capacity result retains only the winning model/effort. Every other visible
+    model, supported effort, policy-candidate relationship, quota eligibility and fallback reason
+    is discarded. W1-T2704 can therefore show the winner but cannot answer why Terra lost to 5.5,
+    whether Sol is visible to this account, or whether a requested effort was unsupported.
+    W1-T2709 intentionally excludes model controls because a free-text model field or hard-coded UI
+    catalog would bypass both the authenticated inventory and the capability ladder.
+
+    DO NOT TURN DISCOVERY INTO UNSUPERVISED PROMOTION. `model/list` says a model is visible and
+    names supported efforts; it does not establish that the model belongs in Remudero's economy,
+    balanced or frontier capability. An account-visible model absent from the reviewed
+    `.remudero/mounts.yaml` candidate table must render `unmapped`, not be inferred from its name or
+    silently activated. Adding a new model-to-capability mapping remains a normal git-reviewed
+    mounts-table PR. The console may immediately prefer only a model already mapped for the active
+    capability+effort pair and still above reserve.
+
+    THIS IS A BROKER CONSOLE, NOT A SECOND BROKER. Publish the model inventory captured by the same
+    app-server read the worker already made. Serve must not run `codex`, mount `CODEX_HOME`, read
+    auth, call `model/list`, hard-code an OpenAI catalog or independently rank candidates. A stale
+    inventory stays visible as a stale last observation and cannot authorize a new preference.
+  design: |
+    Extend the Codex capacity result with one bounded `modelDecision` projection derived inside
+    `readCodexCapacity` from the already-read `model/list`, rate-limit buckets and capability table.
+    Carry the requested capability/effort, ordered mapped candidates, selected model/effort, and at
+    most the supported app-server page of account-visible non-hidden models. Each option has a safe
+    id/display label, supported efforts, account-default marker, mapping state, eligibility,
+    bounded quota windows where a matching bucket exists, and a closed reason such as
+    `unmapped`, `unsupported-effort`, `quota-unreadable` or `below-reserve`. Do not retain raw RPC,
+    auth/account ids, paths, prompts or command arguments. The existing 100-model page refusal and
+    capacity-cache freshness remain the hard bounds; do not add a second model-list call.
+
+    Project that decision into W1-T2704's one fixed provider-routing snapshot. Bound count, string
+    length and total bytes, preserve observation/freshness, and redact before disk. The selected
+    row must be the exact model/effort passed to the worker, never recomputed by serve. Extend the
+    console panel with a compact model broker view: requested capability/effort, mapped preference
+    order, available/eligible/selected state, headroom/reset and named fallbacks. The option list
+    comes only from the snapshot; absent/unreadable/stale never becomes an empty healthy catalog.
+
+    Extend W1-T2709's provider policy override with an optional Codex preferred-model choice scoped
+    to one capability+effort pair. The write route accepts a closed option selected from the fresh
+    snapshot, then revalidates at the next worker decision against the freshly authenticated
+    inventory, mapping and reserve. A missing/stale/unmapped/unsupported/below-reserve preference
+    is never forced: record a closed bypass reason and continue the existing ranked fallback. Clear
+    restores the mounts-table order. The route is high-consequence, uses the existing payload-bound
+    confirmation nonce, and ledgers who/from/to/capability/effort without raw auth or RPC data.
+
+    The console must not offer an activate button for `unmapped` options. It should label the exact
+    reviewed policy file that owns promotion and expose the model id in a copyable, bounded proposal
+    seed; filing/approving the mapping remains the existing git/PR workflow rather than an immediate
+    runtime mutation. This preserves G-17 and makes the boundary understandable without pretending
+    that visibility proves capability.
+  acceptance:
+    - claim: "one authenticated app-server session and one `model/list` response produce both selection and the bounded model-decision inventory; opening or refreshing the console performs zero Codex calls"
+      proof: "unit test: test/codex-model-console.test.ts"
+    - claim: "the inventory distinguishes visible, mapped, eligible, selected, unsupported-effort, quota-unreadable, below-reserve and unmapped options without exposing auth, account ids, paths, raw RPC or command arguments"
+      proof: "unit test: test/codex-model-console.test.ts"
+    - claim: "a fresh preference can select only a model mapped for the active capability+effort and above reserve; stale/unmapped/unsupported/exhausted preferences record a bypass reason and preserve the existing ranked fallback"
+      proof: "unit test: test/codex-model-console.test.ts"
+    - claim: "the concrete model and effort in the status snapshot are exactly those passed to `codex exec`, while the model list, strings and total snapshot remain bounded and atomically replaced"
+      proof: "unit test: test/codex-model-console.test.ts"
+    - claim: "the real console renders requested capability/effort, mapped order, model eligibility, headroom/reset, selected result, preference provenance and staleness from the shared snapshot rather than a hard-coded catalog"
+      proof: "unit test: test/codex-model-console.test.ts"
+    - claim: "the real preference set/clear action is high-consequence, confirmation-nonce protected and audited; free-text, stale-snapshot and unmapped model activation are refused before policy changes"
+      proof: "unit test: test/codex-model-console.test.ts"
+    - claim: "an unmapped account-visible model is never assigned a capability by name and is presented only as a git-reviewed mounts-policy proposal seed"
+      proof: "unit test: test/codex-model-console.test.ts"
+  falsifier: |
+    Close without implementation if current main publishes the authenticated account-visible Codex
+    inventory and candidate eligibility into the shared console snapshot, renders why each model
+    won/lost, and lets the operator prefer only a fresh mapped eligible choice with audited safe
+    fallback. Seeing only the selected model, a hard-coded docs catalog, a free-text `--model`
+    field, or an unreviewed capability inference does not falsify the task.
+  note: |
+    W1-T2711 was atomically reserved at `refs/rmd-id/W1-T2711` before this file was written.
+    `risk: high`, `band_meaning: span` reflects that authenticated model discovery, selection,
+    durable projection and console policy are one end-to-end broker decision. It depends on the
+    read-only W1-T2704 projection and W1-T2709's audited control store instead of widening either
+    in-flight PR.
