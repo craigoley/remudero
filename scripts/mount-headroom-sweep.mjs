@@ -1,7 +1,29 @@
 #!/usr/bin/env node
 // scripts/mount-headroom-sweep.mjs
 //
-// MOUNT HEADROOM SWEEP (W1-T2560).
+// MOUNT HEADROOM SWEEP (W1-T2560, extended W1-T2574).
+//
+// W1-T2574 — A MOUNT COMPARISON ACROSS UNMATCHED POPULATIONS IS NOT A MEASUREMENT. The per-class
+// census below (W1-T2560) reports turn/cost distributions per `task_class`, and that is correct
+// for what it answers, but every run of a class rode the SAME mount for as long as
+// `.remudero/mounts.yaml` was static — a corpus with no variation on the variable of interest
+// supports no counterfactual about a DIFFERENT mount, however large it grows. A second provider
+// (W1-T2572/W1-T2573) supplies that variation for free: `selectWorkerProvider` picks the
+// subscription with the most headroom in its tightest window, a function of WINDOW STATE rather
+// than task difficulty, so provider assignment is plausibly exogenous — but ONLY WITHIN a
+// (type, risk, class) cell. High-risk work rides a higher mount BY POLICY, so aggregating across
+// cells reports "expensive mounts fail more" when difficulty, not model, is talking.
+//
+// `computeArmSweep`/`compareArms` below are the fix: runs are grouped into CELLS
+// (type x risk x class) and, WITHIN each cell only, into ARMS (provider x served_model x effort —
+// `served_model` is `workerLedgerFields`'s own field, W1-T2572; `provider`/`effort` ride the same
+// line). Every arm reports its own `n`. `compareArms` REFUSES — throwing `MountHeadroomSweepError`
+// and naming BOTH cells — the moment it is asked to compare two arms that do not share a cell; the
+// per-cell `comparisons` array below never attempts one (comparisons are built pairwise WITHIN one
+// cell's own arm list), so the refusal is structural, not merely a check someone could skip.
+// Every comparison also carries the corpus's own `newestTs` (see below), and reports whether the
+// cheaper-looking arm's advantage HOLDS or DISAPPEARS once a re-dispatch's cost is charged to the
+// one completed task it belongs to (`costPerCompletedTaskUsd`, not the naive per-run `costP50`).
 //
 // NOTHING MEASURES WHICH TASK CLASSES COULD TAKE A CHEAPER MOUNT. Every row in
 // `.remudero/mounts.yaml` was chosen BY ARGUMENT, never by an observed distribution, so a model or
@@ -268,6 +290,210 @@ export function computeClassSweep(runs) {
   return out;
 }
 
+// ── W1-T2574: CELLS (type x risk x class) and, WITHIN each, ARMS (provider x served_model x
+// effort) — never the reverse, and never compared across cells. ────────────────────────────────
+
+/** The SAME three worker-call steps src/lib/retro.ts's own (unexported) `DONE_STEPS` sums turns
+ *  from. Duplicated here, deliberately, rather than imported: this task's own file scope is
+ *  [this script, its test] — retro.ts's `RunSummary` carries no provider/served_model/effort
+ *  field (nothing in this task adds one), so this script reads those three fields itself, off
+ *  the same lines, rather than widening retro.ts to carry them. */
+const ARM_DONE_STEPS = new Set(["recon.done", "implement.done", "implement.resumed"]);
+
+/**
+ * provider / served_model / effort per run_id, read directly off the raw (pre-`gatherRuns`)
+ * ledger records. `workerLedgerFields` (src/lib/worker.ts, W1-T2572) writes `served_model` and
+ * `effort` UNCONDITIONALLY on every {@link ARM_DONE_STEPS} line (`served_model` defaults to the
+ * literal `null`, never an omitted key) and `provider` only when `WorkerResult.provider` was set.
+ * So:
+ *   - `servedModel` reads `"unreported"` for an explicit `served_model: null` (checked — the
+ *     provider named nothing, W1-T2572's own honest-unknown) and `"unknown"` only when the key is
+ *     absent altogether (a ledger line predating W1-T2572).
+ *   - `provider` reads `"unknown"` when absent (a line predating provider ledgering).
+ * The FIRST matching line for a run_id wins — the same worker-call boundary `numTurns` already
+ * sums over, and constant in practice across a run's own resumes (same mount, same call).
+ */
+export function armFieldsByRunId(records) {
+  const out = new Map();
+  for (const r of records) {
+    if (!r || typeof r !== "object") continue;
+    if (typeof r.run_id !== "string" || typeof r.step !== "string" || !ARM_DONE_STEPS.has(r.step)) continue;
+    if (out.has(r.run_id)) continue;
+    out.set(r.run_id, {
+      provider: typeof r.provider === "string" ? r.provider : "unknown",
+      servedModel:
+        typeof r.served_model === "string" ? r.served_model : r.served_model === null ? "unreported" : "unknown",
+      effort: typeof r.effort === "string" ? r.effort : "unknown",
+    });
+  }
+  return out;
+}
+
+/** The (type, risk, class) CELL key — the SAME three axes `.remudero/mounts.yaml` routes on. */
+export function cellKeyOf(run) {
+  return `${run.type ?? "unknown"}::${run.risk ?? "unknown"}::${run.taskClass ?? "unknown"}`;
+}
+
+/** The (provider, served_model, effort) ARM key, WITHIN one cell. */
+export function armKeyOf(fields) {
+  return `${fields.provider}::${fields.servedModel}::${fields.effort}`;
+}
+
+/** The cheaper of two numeric figures' owning arm key, or `null` on a tie or missing data —
+ *  never a guess when either side has nothing to compare. */
+function cheaperArmKey(keyA, valA, keyB, valB) {
+  if (typeof valA !== "number" || typeof valB !== "number") return null;
+  if (valA === valB) return null;
+  return valA < valB ? keyA : keyB;
+}
+
+/**
+ * Compare TWO ARMS and REFUSE — loudly, naming BOTH cells — when they do not share the SAME
+ * (type, risk, class) cell: provider assignment is only quasi-random WITHIN a cell
+ * (`selectWorkerProvider` picks off window headroom, not task difficulty); across cells it tracks
+ * POLICY (high-risk work rides a higher mount on purpose), so a cross-cell comparison reports
+ * difficulty talking, not model — see this script's own header. This is the ONE function that
+ * compares two arms, so it is the ONE place the refusal has to hold.
+ *
+ * OUTCOME BEFORE COST, restated for a pair: `cheaperByCostP50` is the NAIVE per-settled-run
+ * figure (a re-dispatch's second run reads as just another row, same as any other run's).
+ * `cheaperByCostPerCompletedTask` is the CHARGED figure ({@link computeArmSweep}'s
+ * `costPerCompletedTaskUsd`, which already sums BOTH of a re-dispatched task's attempts over its
+ * ONE completion). When the two disagree, the arm that looked cheaper per run is NOT actually
+ * cheaper once its re-dispatches are charged to it: `advantageHoldsUnderRedispatch: false`, and
+ * `note` names which arm's advantage disappeared.
+ */
+export function compareArms(armA, armB) {
+  if (armA.cellKey !== armB.cellKey) {
+    throw new MountHeadroomSweepError(
+      `mount-headroom-sweep: REFUSED — arm "${armA.armKey}" (cell ${armA.cellKey}) and arm ` +
+        `"${armB.armKey}" (cell ${armB.cellKey}) do not share a (type, risk, class) cell. Comparing ` +
+        `arms that were never matched on (type, risk, class) measures task difficulty, not model — ` +
+        `see this script's own header. Compare arms only WITHIN a shared cell.`,
+    );
+  }
+
+  const cheaperByCostP50 = cheaperArmKey(armA.armKey, armA.costP50, armB.armKey, armB.costP50);
+  const cheaperByCostPerCompletedTask = cheaperArmKey(
+    armA.armKey,
+    armA.costPerCompletedTaskUsd,
+    armB.armKey,
+    armB.costPerCompletedTaskUsd,
+  );
+  const advantageHoldsUnderRedispatch =
+    cheaperByCostP50 && cheaperByCostPerCompletedTask ? cheaperByCostP50 === cheaperByCostPerCompletedTask : null;
+
+  let note;
+  if (cheaperByCostP50 && cheaperByCostPerCompletedTask && cheaperByCostP50 !== cheaperByCostPerCompletedTask) {
+    note =
+      `${cheaperByCostP50} looked cheaper per settled run, but ${cheaperByCostPerCompletedTask} is cheaper per ` +
+      `COMPLETED task once re-dispatch cost is charged to it — ${cheaperByCostP50}'s cost advantage disappears ` +
+      `under the charged metric.`;
+  } else if (cheaperByCostP50 && cheaperByCostP50 === cheaperByCostPerCompletedTask) {
+    note =
+      `${cheaperByCostP50} is cheaper both per settled run and per completed task — its cost advantage holds ` +
+      `once re-dispatch cost is charged.`;
+  } else {
+    note = "insufficient settled cost data in one or both arms to compare";
+  }
+
+  return {
+    cellKey: armA.cellKey,
+    armKeyA: armA.armKey,
+    armKeyB: armB.armKey,
+    nA: armA.n,
+    nB: armB.n,
+    cheaperByCostP50,
+    cheaperByCostPerCompletedTask,
+    advantageHoldsUnderRedispatch,
+    note,
+    newestTs: armA.newestTs ?? armB.newestTs,
+  };
+}
+
+/**
+ * Group runs into (type, risk, class) CELLS and, WITHIN each cell, into (provider, served_model,
+ * effort) ARMS. `redispatchedRunIds` runs over the WHOLE corpus first (a re-dispatch can resolve
+ * to a different class than its first attempt — see that function's own doc), so an arm's
+ * re-dispatch count is correct even though the grouping below is scoped per cell/arm. Every arm
+ * carries its own `n` (settled run count) beside every figure — a comparison resting on a handful
+ * of runs is visible as such. Every cell with two or more arms gets EVERY pairwise
+ * {@link compareArms} comparison, scoped structurally to that one cell's own arm list, so a
+ * cross-cell comparison is never even attempted.
+ */
+export function computeArmSweep(runs, armFields, newestTs) {
+  const redispatched = redispatchedRunIds(runs);
+  const cellsByKey = new Map();
+  for (const r of runs) {
+    const cellKey = cellKeyOf(r);
+    const fields = armFields.get(r.runId) ?? { provider: "unknown", servedModel: "unknown", effort: "unknown" };
+    const armKey = armKeyOf(fields);
+    let cell = cellsByKey.get(cellKey);
+    if (!cell) {
+      cell = {
+        cellKey,
+        type: r.type ?? "unknown",
+        risk: r.risk ?? "unknown",
+        taskClass: r.taskClass ?? "unknown",
+        armsByKey: new Map(),
+      };
+      cellsByKey.set(cellKey, cell);
+    }
+    let arm = cell.armsByKey.get(armKey);
+    if (!arm) {
+      arm = { cellKey, armKey, provider: fields.provider, servedModel: fields.servedModel, effort: fields.effort, runs: [] };
+      cell.armsByKey.set(armKey, arm);
+    }
+    arm.runs.push(r);
+  }
+
+  const cells = [];
+  for (const cell of cellsByKey.values()) {
+    const arms = [];
+    for (const arm of cell.armsByKey.values()) {
+      const settled = arm.runs.filter(isSettled);
+      const turns = settled.map((r) => r.numTurns);
+      const costs = settled.map((r) => r.costUsd);
+      const passing = settled.filter((r) => r.verdict === PASSING_VERDICT).length;
+      const blockedCi = settled.filter((r) => r.verdict === BLOCKED_CI_VERDICT).length;
+      const redispatchedCount = settled.filter((r) => redispatched.has(r.runId)).length;
+      const totalSettledCostUsd = round2(costs.reduce((s, c) => s + c, 0));
+      const distinctSettledTasks = new Set(settled.map((r) => r.taskId)).size;
+      arms.push({
+        cellKey: cell.cellKey,
+        armKey: arm.armKey,
+        provider: arm.provider,
+        servedModel: arm.servedModel,
+        effort: arm.effort,
+        n: settled.length,
+        totalRuns: arm.runs.length,
+        settledRuns: settled.length,
+        turnsP50: percentile(turns, 50),
+        turnsP90: percentile(turns, 90),
+        turnsMax: turns.length ? Math.max(...turns) : null,
+        costP50: costs.length ? round2(percentile(costs, 50)) : null,
+        costP90: costs.length ? round2(percentile(costs, 90)) : null,
+        costMax: costs.length ? round2(Math.max(...costs)) : null,
+        outcomes: { passing, blockedCi, redispatched: redispatchedCount },
+        totalSettledCostUsd,
+        distinctSettledTasks,
+        costPerCompletedTaskUsd:
+          distinctSettledTasks === 0 ? null : round2(totalSettledCostUsd / distinctSettledTasks),
+        newestTs,
+      });
+    }
+    arms.sort((a, b) => (a.armKey < b.armKey ? -1 : a.armKey > b.armKey ? 1 : 0));
+
+    const comparisons = [];
+    for (let i = 0; i < arms.length; i++) {
+      for (let j = i + 1; j < arms.length; j++) comparisons.push(compareArms(arms[i], arms[j]));
+    }
+    cells.push({ cellKey: cell.cellKey, type: cell.type, risk: cell.risk, taskClass: cell.taskClass, arms, comparisons });
+  }
+  cells.sort((a, b) => (a.cellKey < b.cellKey ? -1 : a.cellKey > b.cellKey ? 1 : 0));
+  return cells;
+}
+
 /**
  * THE ONE ENTRY POINT: read the union corpus, dedup, reduce into per-run summaries
  * (`gatherRuns`), and build the per-class sweep. Throws {@link MountHeadroomSweepError} when the
@@ -296,6 +522,8 @@ export function buildMountHeadroomSweep(stateDir, fsDeps = realMountHeadroomFs) 
     if (typeof r.ts === "string" && (newestTs === undefined || r.ts > newestTs)) newestTs = r.ts;
   }
 
+  const armFields = armFieldsByRunId(records);
+
   return {
     corpus: {
       stateDir: corpus.stateDir,
@@ -309,6 +537,9 @@ export function buildMountHeadroomSweep(stateDir, fsDeps = realMountHeadroomFs) 
       newestTs,
     },
     classes: computeClassSweep(runs),
+    // W1-T2574: (type x risk x class) cells, each carrying its own (provider x served_model x
+    // effort) arms and every WITHIN-cell pairwise comparison — see this script's own header.
+    cells: computeArmSweep(runs, armFields, newestTs),
   };
 }
 
@@ -344,6 +575,35 @@ export function renderMountHeadroomReport(report) {
         `${row.outcomes.passing} | ${row.outcomes.blockedCi} | ${row.outcomes.redispatched} | ` +
         `${row.costPerCompletedTaskUsd ?? "-"}`,
     );
+  }
+
+  // W1-T2574: cells (type x risk x class), each carrying its own provider x served_model x
+  // effort arms and every WITHIN-cell comparison — NEVER a cross-cell one (see this script's own
+  // header, and compareArms's own refusal).
+  lines.push("");
+  lines.push(
+    "cells (type x risk x class) — arms keyed by provider x served_model x effort, compared ONLY within their own cell",
+  );
+  for (const cell of report.cells) {
+    lines.push(`cell ${cell.cellKey} (type=${cell.type}, risk=${cell.risk}, class=${cell.taskClass}):`);
+    for (const arm of cell.arms) {
+      lines.push(
+        `  arm ${arm.armKey} (provider=${arm.provider}, served_model=${arm.servedModel}, effort=${arm.effort}) — ` +
+          `n=${arm.n} (${arm.settledRuns}/${arm.totalRuns} settled/total) | cost p50/p90/max ($): ` +
+          `${arm.costP50 ?? "-"}/${arm.costP90 ?? "-"}/${arm.costMax ?? "-"} | passing ${arm.outcomes.passing}, ` +
+          `blocked_ci ${arm.outcomes.blockedCi}, re-dispatched ${arm.outcomes.redispatched} | ` +
+          `$/completed task ${arm.costPerCompletedTaskUsd ?? "-"} | newest row seen: ${arm.newestTs ?? "(none)"}`,
+      );
+    }
+    if (cell.arms.length < 2) {
+      lines.push(`  only ${cell.arms.length} arm(s) in this cell — no within-cell comparison is possible`);
+    }
+    for (const cmp of cell.comparisons) {
+      lines.push(
+        `  compare ${cmp.armKeyA} (n=${cmp.nA}) vs ${cmp.armKeyB} (n=${cmp.nB}): ${cmp.note} ` +
+          `(newest row seen: ${cmp.newestTs ?? "(none)"})`,
+      );
+    }
   }
   return lines.join("\n");
 }
