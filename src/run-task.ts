@@ -738,6 +738,7 @@ import {
   runPostFixReverification,
   runSweep,
   runSweepLightPass,
+  redQualityGateNames,
   stillRedRequiredNames,
   terminalStateReason,
   toQuestionEntry,
@@ -778,6 +779,7 @@ import {
   type ArmAttemptOutcome,
   type ArmOutcomeName,
 } from "./lib/sweep.js";
+import { readCiGateRequiredChecks } from "./lib/ci-gate-required.js";
 import { applyCorrection } from "./lib/correct.js";
 import {
   DEFAULT_PRUNE_GRACE_MS,
@@ -25724,6 +25726,9 @@ export function buildOpenPrViews(
      * threads one through, sharing the SAME instance `buildBatchedGithub` is given there.
      */
     pacer?: GhCallPacer;
+    /** Injectable seams for the checked-in ci-gate contract and its already-fetched red evidence. */
+    readCiGateRequired?: (root: string) => string[];
+    fetchCiFailureEvidence?: typeof fetchCiFailures;
   } = {},
 ): OpenPrView[] {
   const fetch = deps.fetch ?? ghJson;
@@ -25754,6 +25759,10 @@ export function buildOpenPrViews(
   // not be used. `undefined` for every read that succeeded, which is every existing fixture.
   const requiredContextsReadFailure =
     requiredRead.kind === "unreadable" ? { branch: requiredRead.branch, reason: requiredRead.reason } : undefined;
+  // W1-T2599: one checked-out contract read per board build, never one filesystem or API read per PR.
+  const ciGateRequired = deps.readCiGateRequired
+    ? deps.readCiGateRequired(repoRoot)
+    : readCiGateRequiredChecks(repoRoot);
 
   // MERGE STATE: one bounded follow-up fetch per PR, because the LIST endpoint omits
   // `mergeable_state` (see hydrateMergeStates' doc for the live verification and the incident).
@@ -25826,6 +25835,16 @@ export function buildOpenPrViews(
     // `OpenPrView.reviewVerdictPostedAt`'s own doc for the disposition row this feeds.
     const reviewVerdictPostedAt = reviewVerdictPostedAtFromRollup(pr.statusCheckRollup);
     const checksState = checksStateFromRollup(pr.statusCheckRollup, requiredContexts);
+    const redRequiredChecks = redQualityGateNames(pr.statusCheckRollup, ciGateRequired);
+    const redRequiredSet = new Set(redRequiredChecks);
+    const earlyRedRollup = pr.statusCheckRollup?.filter(
+      (check) => redRequiredSet.has(check.name ?? check.context ?? ""),
+    );
+    const ciFailures = checksState === "red"
+      ? (deps.fetchCiFailureEvidence ?? fetchCiFailures)(owner, repo, pr.statusCheckRollup)
+      : redRequiredChecks.length > 0
+        ? (deps.fetchCiFailureEvidence ?? fetchCiFailures)(owner, repo, earlyRedRollup)
+        : undefined;
     // Historical heads explain why a status is absent. The separate exact-input scan below owns
     // retry count/backoff, so prior heads and infrastructure refusals cannot spend its budget.
     const reviewOrphans = reviewOrphansFor(ledger, taskId, pr.headRefOid);
@@ -25918,9 +25937,10 @@ export function buildOpenPrViews(
       // `selectUpdateBranchTarget`'s draft exclusion would be permanently inert in production.
       isDraft: pr.isDraft,
       reviewSummary: undefined,
-      // W1-T100: the ci-log fix mode's input — only worth fetching when checks
-      // are actually red (a PR gate that already needs blocked_ci's rung).
-      ciFailures: checksState === "red" ? fetchCiFailures(owner, repo, pr.statusCheckRollup) : undefined,
+      // W1-T100/W1-T2599: ci-log fix evidence for the ordinary red aggregate, or for a red
+      // REQUIRED child already visible while that aggregate is still pending.
+      ciFailures,
+      redRequiredChecks,
       // W1-T1223 — the "absence of a verdict" observable, populated alongside `ciFailures`
       // above off the SAME rollup read (no extra request); see `cancelledRequiredChecks`'s own
       // doc.
