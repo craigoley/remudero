@@ -830,6 +830,8 @@ import {
   worktreesDir,
   writeRunLock,
   WorktreeBaseStaleError,
+  detectWorktreeBaseUncheckableStreak,
+  WORKTREE_BASE_UNCHECKABLE_STREAK_BOUND,
   type RunLockInfo,
   type SpawnWorkerArgs,
   type WorkerResult,
@@ -11896,6 +11898,24 @@ async function runTask(
     // W1-T2528: any OTHER add failure — ledger it before rethrowing (same idiom as `addLaneWorktree`).
     log("worktree.add_failed", { branch, error: String((e as Error)?.message ?? e) });
     throw e;
+  }
+  // W1-T2626 (design note (iii)): a single unreadable remote head is already ledgered --
+  // `worktree.add`'s `remote_head: "unreadable"` plus its `worktree.base_uncheckable`
+  // companion, both from worktreeAdd itself -- but nothing yet distinguished "this happened
+  // once" from "this guard has not actually measured anything in N creations running". Read
+  // the ledger back and name that run explicitly, once it crosses the bound, so an operator
+  // (or the retro) finds ONE line rather than reconstructing a streak by counting warnings
+  // across a session. Never refuses, never repairs -- only the record (see this task's
+  // rationale: "no refusal, no policy, no repair").
+  const uncheckableStreak = detectWorktreeBaseUncheckableStreak(readLedgerLines(ledgerPath));
+  if (uncheckableStreak.degraded) {
+    log("worktree.base_check_degraded", {
+      ref: "main",
+      consecutive_unreadable: uncheckableStreak.consecutiveUnreadable,
+      threshold: WORKTREE_BASE_UNCHECKABLE_STREAK_BOUND,
+      oldest_ts: uncheckableStreak.oldestTs,
+      newest_ts: uncheckableStreak.newestTs,
+    });
   }
   // LIVENESS TOKEN: mark this worktree ALIVE so a concurrent pruneStaleRuns (another
   // drain, a manual run-task) skips it instead of `--force`-removing it mid-run. The
