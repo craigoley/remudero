@@ -4094,6 +4094,34 @@ export function fallbackPushCause(
 }
 
 /**
+ * The scope-regime SELECTION {@link fixRungScopeStandDownReason} needs twice (once for the
+ * current diff, once for the baseline it stands down against) and {@link renderFixPrompt}'s
+ * INHERITED SCOPE line (W1-T2607) needs a third time, applied to that SAME baseline — factored
+ * out here so every caller reads ONE implementation of "which regime, which predicate" rather
+ * than a second copy that could drift (design note (i), W1-T2607). Plan-only tasks (every
+ * declared file itself plan-scoped, {@link isInPlanScope}) are graded by plan-scope membership
+ * ({@link outOfPlanScopeFiles}); everything else by exact declared-file membership
+ * ({@link scopeGuardOutOfScopeFiles} — the SAME function the implement path's push-and-flag
+ * disposition already uses, never a parallel reimplementation).
+ *
+ * Returns `[]` when `declaredFiles` is empty/undefined — a task with no declared scope gives
+ * this predicate nothing to compare against, matching {@link fixRungScopeStandDownReason}'s own
+ * silent (fail-OPEN) contract for that case. A caller that needs FAIL-CLOSED semantics on an
+ * undeclared scope (the implement path) calls {@link scopeGuardOutOfScopeFiles} directly instead.
+ *
+ * PURE: no I/O, both inputs are the caller's own reads.
+ */
+export function outOfDeclaredScopeFiles(
+  files: readonly string[],
+  declaredFiles: readonly string[] | undefined,
+): string[] {
+  if (!declaredFiles || declaredFiles.length === 0) return [];
+  return declaredFiles.every(isInPlanScope)
+    ? outOfPlanScopeFiles([...files])
+    : scopeGuardOutOfScopeFiles(files, declaredFiles);
+}
+
+/**
  * W1-T1227 (THE FIX RUNG'S OWN REPAIR BREAKS ITS OWN PR'S REVIEWABILITY): the fix rung's
  * pre-strike scope gate. `currentDiffFiles` is the PR's live changed-file list as of RIGHT NOW
  * (before the next strike); `baselineDiffFiles` is the SAME list captured before this
@@ -4125,10 +4153,10 @@ export function fixRungScopeStandDownReason(
 ): { reason: string; scopeKind: "files" | "plan"; newOutOfScopePaths: string[] } | undefined {
   if (!declaredFiles || declaredFiles.length === 0) return undefined;
   const planOnlyTask = declaredFiles.every(isInPlanScope);
-  const outOfScope = (files: readonly string[]): string[] =>
-    planOnlyTask ? outOfPlanScopeFiles([...files]) : scopeGuardOutOfScopeFiles(files, declaredFiles);
-  const alreadyOutOfScope = new Set(outOfScope(baselineDiffFiles));
-  const newOutOfScopePaths = outOfScope(currentDiffFiles).filter((f) => !alreadyOutOfScope.has(f));
+  const alreadyOutOfScope = new Set(outOfDeclaredScopeFiles(baselineDiffFiles, declaredFiles));
+  const newOutOfScopePaths = outOfDeclaredScopeFiles(currentDiffFiles, declaredFiles).filter(
+    (f) => !alreadyOutOfScope.has(f),
+  );
   if (newOutOfScopePaths.length === 0) return undefined;
   const scopeKind: "files" | "plan" = planOnlyTask ? "plan" : "files";
   const reason =
@@ -5521,6 +5549,11 @@ export function renderFixPrompt(opts: {
   round: number;
   branch: string;
   evidence: FixEvidence;
+  // W1-T2607: the changed-file list as it stood BEFORE this invocation's first strike — the SAME
+  // baseline {@link fixRungScopeStandDownReason} exempts. Optional and best-effort: omitted (or
+  // simply undefined, matching that guard's own fail-OPEN contract for an unreadable baseline)
+  // means no inherited-scope line renders at all, never a guessed baseline.
+  baselineDiffFiles?: readonly string[];
 }): string {
   const mode = deriveFixMode(opts.evidence);
   const header = `You are a FIX worker for task ${opts.task.id} (${opts.task.title}) — round ${opts.round}.\nMODE: ${mode}.`;
@@ -5536,15 +5569,35 @@ export function renderFixPrompt(opts: {
   // W1-T1227: named EXPLICITLY, mode-agnostic (every branch below splices this in), so the fix
   // worker cannot claim it was never told. Omitted only when the task declares no `files` scope
   // at all — silence here is never a licence, it is simply nothing to report.
+  //
+  // W1-T2607: paths this branch already carried before this invocation's first strike, that fall
+  // outside the declared scope, computed with the SAME predicate {@link fixRungScopeStandDownReason}
+  // exempts them by ({@link outOfDeclaredScopeFiles}) — never a second judgment on the same facts.
+  // Empty whenever `baselineDiffFiles` was never captured (fail OPEN, matching that guard's own
+  // discipline) or simply carries nothing out of scope; either way the block below renders no
+  // INHERITED SCOPE line, matching the clean path's existing shape.
+  const inheritedOutOfScope =
+    opts.task.files && opts.task.files.length > 0 && opts.baselineDiffFiles
+      ? outOfDeclaredScopeFiles(opts.baselineDiffFiles, opts.task.files)
+      : [];
   const scopeBlock =
     opts.task.files && opts.task.files.length > 0
       ? [
           "",
           `DECLARED SCOPE (W1-T1227): this task's PR may only touch: ${opts.task.files.join(", ")}. If the ` +
             `genuine fix requires a path outside that list, do NOT push it — say so in your REPORT's ` +
-            `'## Follow-ups' section instead and leave the branch as-is. A commit outside declared scope makes ` +
-            `the WHOLE PR unreviewable (Standing rule 15/25 refuse the next round on the file this fix itself ` +
-            `wrote, and only a human can undo it), not merely this one fix.`,
+            `'## Follow-ups' section instead and leave the branch as-is; this task's declared scope is not ` +
+            `yours to widen. A commit outside declared scope is PUSHED AND FLAGGED (\`scope_guard.overrun\`), ` +
+            `not blocked — but the NEXT round's fix rung stands down on any NEW out-of-scope path THIS rung ` +
+            `adds, so treat "do not push it" as the real rule, not a formality.`,
+          ...(inheritedOutOfScope.length > 0
+            ? [
+                `INHERITED SCOPE (W1-T2607): this branch already carries path(s) outside the declared list ` +
+                  `from an earlier round: ${inheritedOutOfScope.join(", ")}. They predate this invocation, ` +
+                  `this rung is judged only on what IT adds, and neither removing them nor reporting them ` +
+                  `again is required of this round.`,
+              ]
+            : []),
         ]
       : [];
   const footer = [
@@ -8782,6 +8835,10 @@ export async function runFixRung(opts: {
       round: attempt,
       branch: opts.branch,
       evidence,
+      // W1-T2607: the SAME baseline captured above (before this invocation's first strike) that
+      // fixRungScopeStandDownReason's pre-strike gate already exempts — so the worker is told
+      // which of its own branch's out-of-scope paths are inherited, not re-derived a second way.
+      baselineDiffFiles,
     });
     // W1-T199: TAG THE STRIKE WITH THE VERDICT REGIME IT WAS SPENT AGAINST. A strike
     // spent when no proof could execute is a strike against KEYWORD NOISE; one spent
