@@ -1,0 +1,98 @@
+- id: W1-T2661
+  title: "TIER TWO OF THE COVERAGE GATE HAS NEVER FIRED — W1-T470 shipped the producer in #1783 and deferred its one-line CI step to a second PR that was never opened, and that step could not have landed an entry anyway under a read-only workflow token; give the producer a daemon-side rung that reads CI's merged coverage from the workflow artifact and lands the entry where every other feedback entry lands"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: |
+    RE-DERIVED AT 74e130251 (2026-09-02).
+
+    (1) BUILT, CREDITED, UNCALLED. W1-T470 is credited (#1783, 2026-08-13). `git show --stat
+    66ef336b5` lists src/lib/coverage-improvement.ts and its test and NO workflow file; the shard's
+    own rationale split the work in two because Rule 25 reads a product path plus
+    `.github/workflows/` as entangled, and named the second half — "the one-line step that invokes
+    it in the coverage job" — as a follow-up. Three weeks on: `grep -c coverage-improve
+    .github/workflows/ci.yml` reads 0, scripts/coverage-ratchet.mjs still says "(once tier two
+    ships) inject ONE coverage-improvement task" and "tier two, not yet wired", and
+    `coverageImproveCommand` has one caller, the CLI dispatch. Control: `proofQueueAudit` from the
+    sibling module is imported by src/lib/measurement-cadence.ts. This is the prose-follow-up shape
+    the 2026-09-01 synthesis measured: a designed second half with no shard of its own evaporates.
+
+    (2) THE PLANNED STEP COULD NOT HAVE WORKED WHERE IT WAS PLANNED. The producer files its entry
+    through `captureFeedback` (src/lib/feedback.ts), which lands it through `landFeedback`
+    (src/lib/feedback-landing.ts) — a rebuild from origin/main force-pushed to the shared
+    feedback-landing branch and PR. ci.yml declares `permissions: contents: read` at the workflow
+    and the coverage jobs, and no workflow mints the fleet App's token (`grep -l
+    create-github-app-token .github/workflows/*.yml` reads nothing). A step in the coverage job
+    would write plan/feedback/<id>.yaml into a checkout that cannot push and is discarded minutes
+    later. The landing has to happen on the host that lands everything else: the daemon.
+
+    (3) THE INPUT EXISTS, AS AN ARTIFACT. Since #3516 the coverage matrix runs four shards, each
+    uploading `coverage-shard-<n>` (lcov.info plus raw V8 compact reports) with
+    actions/upload-artifact, and the `coverage-ratchet` aggregator downloads them and merges the
+    branch identities (scripts/coverage-merge-ratchet.mjs) before the ratchet reads the total. On a
+    push to main the matrix shell-skips collection and uploads a `skipped` marker, so there is NO
+    main-branch lcov; the merged lcov of a PR's last green aggregator run is the freshest coverage
+    the repository has, and the daemon already knows which PRs merged and at which head.
+
+    (4) WHY A RUNG AND NOT A CI STEP. The measurement cadence (W1-T1259) already runs four times a
+    day on the fleet host with the credentials and the landing path the entry needs; tier two is a
+    measurement with a consumer, which is exactly what that spine carries. The CI half that remains
+    — the aggregator publishing the merged lcov it already holds as one more artifact — is
+    INSTRUMENT_SURFACE and is its own shard (W1-T2662), depending on this one for the reader.
+  design: |
+    (i) THE READER. `fetchMergedCoverageArtifact(deps)` in src/lib/coverage-improvement.ts: for the
+    most recently merged PR whose head has a completed `coverage-ratchet` aggregator run, list that
+    run's artifacts and download the one W1-T2662 publishes (`coverage-merged`), returning the lcov
+    text plus the run id and head sha it came from. Every failure is a named refusal, never an
+    empty lcov: no merged PR with a run, no artifact on the run (W1-T2662 not yet merged), an
+    artifact the token cannot read (the App lacks `actions: read` — the refusal names the
+    permission), or a download that is not lcov.
+
+    (ii) THE SEAT IN THE REPORT. `runMeasurementCadenceReport` gains a coverage-improvement
+    member: on a readable lcov it calls the existing `injectCoverageImprovementTask` — the
+    85-90-band decision, the attribution, the union-read dedupe against
+    `COVERAGE_IMPROVEMENT_FILED_STEP`, the `captureFeedback` write — unchanged, and reports
+    `status: "measured"` with the tier and the run it read; on a refusal it reports `status:
+    "refused"` with the reason. No new threshold: the band and the dedupe are the producer's.
+
+    (iii) THE VERB. `rmd coverage-improve` keeps `--lcov <path>` for the operator's hand route and
+    gains `--from-ci`, which calls the same reader and then the same producer — one path, two
+    entry points.
+
+    (iv) LEDGER ROWS. `coverage_improvement.read` (run id, head sha, artifact id),
+    `coverage_improvement.refused` (the reader's own reason); the producer's existing rows are
+    unchanged.
+
+    (v) WHAT DOES NOT CHANGE. The band cuts, the attribution, the dedupe, the one-entry-per-run
+    rule, scripts/coverage-ratchet.mjs, and ci.yml — W1-T2662 owns the workflow.
+  acceptance:
+    - claim: "the reader resolves the newest merged PR with a completed aggregator run and returns its merged lcov with the run and head it came from"
+      proof: "unit test: test/coverage-improvement-cadence.test.ts"
+    - claim: "a missing run, a missing artifact, an unreadable artifact or a non-lcov download each refuse with a named reason and never yield an empty lcov"
+      proof: "unit test: test/coverage-improvement-cadence.test.ts"
+    - claim: "the measurement report carries the coverage-improvement member, measured on a readable lcov through the unchanged producer and refused otherwise"
+      proof: "unit test: test/coverage-improvement-cadence.test.ts"
+    - claim: "the CLI verb's from-ci route and the cadence member share one reader and one producer"
+      proof: "unit test: test/coverage-improvement-cadence.test.ts"
+    - claim: "the measurement report calls the artifact reader"
+      proof: "grep: fetchMergedCoverageArtifact( in src/lib/measurement-cadence.ts"
+  risk: high
+  band_meaning: span
+  origin: "oper#follow-up-brief-2026-09-02"
+  plan_refs: ["W1-T470", "W1-T466", "W1-T1259", "W1-T2266", "§12"]
+  files: [src/lib/coverage-improvement.ts, src/run-task.ts, src/lib/measurement-cadence.ts, test/coverage-improvement-cadence.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    risk:high, band_meaning:span — the producer module, the measurement report and the CLI verb
+    are three concerns under Rule 19; the runtime blast radius is unchanged from W1-T470's own
+    statement: one plan/feedback entry per red-band reading, deduped by the union read.
+
+    UNTIL W1-T2662 MERGES THIS MEMBER REFUSES EVERY RUN, BY DESIGN, and the refusal says why
+    ("no coverage-merged artifact on run <id>"). That is the correct order under Rule 25: the reader
+    ships first and refuses honestly; the instrument step ships second and turns the refusal into a
+    measurement. A refusal that names the missing half is the self-measurement panel's business
+    (W1-T2660), not a silent zero.
