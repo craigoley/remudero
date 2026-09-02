@@ -841,7 +841,7 @@ import { LiveSpawnBlockedError } from "./lib/spawn-guard.js";
 // turns instead of dollars (this task's own declared `files:` list does not include
 // `plan/policy.yaml`, so no new policy row is added here).
 import { loadDefaultCostAnomalyPolicy, type CostAnomalyPolicy } from "./lib/cost-anomaly.js";
-import { gitPushRunBranch, gitPushEmptyCommit } from "./lib/git-push.js";
+import { gitPushRunBranch, gitPushEmptyCommit, LanePushForeignHeadError } from "./lib/git-push.js";
 import {
   ensureWorkerKeychain,
   materializeWorkerHome,
@@ -5974,7 +5974,10 @@ export async function runGeneratorFixForCiFailures(opts: {
   deps: {
     runScript: (script: string, cwd: string) => Promise<{ status: number; stdout: string; stderr: string }>;
     commit: (opts: { cwd: string; message: string }) => Promise<{ sha: string; changed: boolean }> | { sha: string; changed: boolean };
-    push: (opts: { cwd: string; branch: string }) => Promise<void> | void;
+    // W1-T2610: `expectedHeadSha` is the sha `commit` above just returned — threaded through so
+    // the real `gitPushRunBranch` leaf underneath (see the run-loop's `push:` closure) can
+    // confirm it actually landed rather than silently no-op'ing a rewound ref.
+    push: (opts: { cwd: string; branch: string; expectedHeadSha?: string }) => Promise<void> | void;
   };
 }): Promise<GeneratorFixResult> {
   if (!allCiFailuresAreGeneratorFixable(opts.failures, opts.scripts)) {
@@ -6023,7 +6026,9 @@ export async function runGeneratorFixForCiFailures(opts: {
     // committed artifact was already fresh. Either way, nothing to push, nothing to escalate.
     return { applied: true, generators };
   }
-  await opts.deps.push({ cwd: opts.worktreePath, branch: opts.branch });
+  // W1-T2610: pass the sha `commit` above just minted — the leaf's post-condition confirms
+  // this exact sha (not just "something") landed, rather than a rewound ref pushing nothing.
+  await opts.deps.push({ cwd: opts.worktreePath, branch: opts.branch, expectedHeadSha: commitResult.sha });
   return { applied: true, generators, commitSha: commitResult.sha };
 }
 
@@ -7890,8 +7895,13 @@ export async function runFixRung(opts: {
     updatePrBody?: (prUrl: string, body: string) => Promise<void>;
     runReview: (args: Parameters<typeof runReview>[0]) => ReturnType<typeof runReview>;
     /** Push whatever the fix worker committed. Best-effort — a worker that
-     * already pushed leaves nothing new, which is not an error. */
-    push: (worktreePath: string, branch: string) => void;
+     * already pushed leaves nothing new, which is not an error.
+     * W1-T2610: `expectedHeadSha`, when this rung can name the sha it just committed, is
+     * threaded to the leaf's post-condition (`gitPushRunBranch`'s `expectedHeadSha`) so a ref
+     * rewound between the commit and this call raises `LanePushForeignHeadError` instead of
+     * silently no-op'ing. Optional and additive — every existing test double that ignores its
+     * third argument keeps working unchanged. */
+    push: (worktreePath: string, branch: string, expectedHeadSha?: string) => void;
     /** Fresh REST head read used only after the push to bind this worker to its exact output. */
     readHeadShaForProvenance?: (prUrl: string) => string;
     issues: IssueGateway;
@@ -8351,7 +8361,7 @@ export async function runFixRung(opts: {
         deps: {
           runScript: runGeneratorScript,
           commit: (o) => commitGeneratorOutput(o),
-          push: (o) => deps.push(o.cwd, o.branch),
+          push: (o) => deps.push(o.cwd, o.branch, o.expectedHeadSha),
         },
       });
       if (generatorResult.applied) {
@@ -8961,6 +8971,24 @@ export async function runFixRung(opts: {
 
     const workerHeadCreatedLocally = workerCreatedCurrentHead(opts.worktreePath, workerHeadReflogBefore);
 
+    // W1-T2610: the sha this round believes it just committed, read as early as possible after
+    // the worker returns — BEFORE the `readRoundCommits` await, the ledger writes, and the
+    // follow-up harvest below, all of which are dead time in which the exact rewind this task
+    // is filed against (DAEMON-1788016810368 / PR #3261 — the worktree's local ref reset back
+    // to origin's tip between commit and push) can happen. Threaded to `deps.push` below so
+    // `gitPushRunBranch`'s post-condition re-reads HEAD immediately before pushing and raises
+    // if it no longer matches this snapshot, instead of silently pushing zero refs. Best-effort:
+    // an unreadable HEAD here just means this round's push runs without the guard — the same
+    // fail-open discipline every other optional read in this rung already takes.
+    let expectedHeadShaForPush: string | undefined;
+    try {
+      expectedHeadShaForPush = execFileSync("git", ["-C", opts.worktreePath, "rev-parse", "HEAD"], {
+        encoding: "utf8",
+      }).trim();
+    } catch {
+      // best-effort — see comment above.
+    }
+
     // A worker DEMONSTRABLY ran (spawn returned rather than throwing) — only now is this round
     // even CANDIDATE for a real strike.
     //
@@ -9057,7 +9085,7 @@ export async function runFixRung(opts: {
       say: deps.say,
     });
 
-    deps.push(opts.worktreePath, opts.branch);
+    deps.push(opts.worktreePath, opts.branch, expectedHeadShaForPush);
 
     recordHeadProviderAfterPush(
       {
@@ -12739,10 +12767,20 @@ async function runTask(
           },
           runReview,
           fetchPrBody: fetchPrBodyViaGh,
-          push: (wt) => {
+          // W1-T2610: `expectedHeadSha` (the sha this rung just committed) is WIRED here, not
+          // merely accepted — `gitPushRunBranch`'s post-condition re-reads this worktree's HEAD
+          // right before pushing and raises `LanePushForeignHeadError` if it no longer matches,
+          // catching a ref rewound during this rung's own dead time (readRoundCommits/ledger/
+          // follow-up-harvest, above) between the commit and this push. That raise is
+          // deliberately let through (never swallowed by the best-effort catch below): FAIL
+          // DIRECTION per this task's design — a raise parks this one fix round for the
+          // level-triggered sweep to re-derive next pass, while silence here would lose the
+          // round's entire spend and leave the PR looking fixed.
+          push: (wt, _branch, expectedHeadSha) => {
             try {
-              gitPushRunBranch(wt, { stdio: "ignore" });
-            } catch {
+              gitPushRunBranch(wt, { stdio: "ignore", expectedHeadSha });
+            } catch (err) {
+              if (err instanceof LanePushForeignHeadError) throw err;
               // best-effort — the fix worker may already have pushed itself;
               // nothing new to push is not an error.
             }
@@ -27906,10 +27944,17 @@ export function buildSweepEffects(
             },
             runReview,
             fetchPrBody: fetchPrBodyViaGh,
-            push: (wt) => {
+            // W1-T2610: same wiring as the run-loop's fix-rung `push:` closure above —
+            // `expectedHeadSha` is the sha this rung just committed, so `gitPushRunBranch`'s
+            // post-condition can catch a ref rewound between the commit and this push instead of
+            // silently no-op'ing. The resulting `LanePushForeignHeadError` is let through
+            // (never swallowed below) so the round parks rather than reporting a push that
+            // moved nothing as success.
+            push: (wt, _branch, expectedHeadSha) => {
               try {
-                gitPushRunBranch(wt, { stdio: "ignore" });
-              } catch {
+                gitPushRunBranch(wt, { stdio: "ignore", expectedHeadSha });
+              } catch (err) {
+                if (err instanceof LanePushForeignHeadError) throw err;
                 /* best-effort — the worker may already have pushed */
               }
             },
