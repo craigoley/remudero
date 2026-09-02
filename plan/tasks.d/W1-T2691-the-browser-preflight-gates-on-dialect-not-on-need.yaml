@@ -1,4 +1,4 @@
-- id: W1-T2701
+- id: W1-T2691
   title: "THE BROWSER PREFLIGHT GATES ON PROOF DIALECT, NOT ON WHETHER THE RESOLVED FILES NEED A BROWSER — every `unit test:` proof pays an install attempt even when it resolves to a source-only suite, and on a host that cannot reach the CDN the handled failure prints 15 STACK-TRACE LINES before the verdict; MEASURED 2026-09-02: 6s wall and 15 trace lines on `test/ci-sharding.test.ts`, which imports no Playwright"
   repo: remudero
   depends_on: []
