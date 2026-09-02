@@ -9,12 +9,17 @@ import { test } from "node:test";
 import {
   CodexToolchainBlockedError,
   ProviderCapacityBlockedError,
+  abandonProviderWindowMeasurement,
+  beginProviderWindowMeasurement,
   claudeCapacityFromUsage,
   clearCodexCapacityCache,
+  clearProviderWindowMeasurements,
   codexCapacityFromRateLimits,
   codexGitWritableRoots,
   parseCodexJsonl,
   readCodexCapacity,
+  providerWindowConsumption,
+  finishProviderWindowMeasurement,
   selectCodexModel,
   selectWorkerProvider,
   spawnCodexWorker,
@@ -70,6 +75,121 @@ test("provider selector alternates exact ties using its supplied tie breaker", (
   const values = [capacity("claude", 10), capacity("codex", 10)];
   assert.equal(selectWorkerProvider(values, 5, 0).provider, "claude");
   assert.equal(selectWorkerProvider(values, 5, 1).provider, "codex");
+});
+
+test("window consumption uses the largest reset-stable provider-window delta", () => {
+  const before: ProviderCapacity = {
+    provider: "codex",
+    readable: true,
+    windows: [
+      { name: "5h", usedPercent: 10, resetsAt: 100 },
+      { name: "7d", usedPercent: 20, resetsAt: 200 },
+    ],
+  };
+  const after: ProviderCapacity = {
+    provider: "codex",
+    readable: true,
+    windows: [
+      { name: "5h", usedPercent: 12.5, resetsAt: 100 },
+      { name: "7d", usedPercent: 21, resetsAt: 200 },
+    ],
+  };
+  assert.deepEqual(providerWindowConsumption(before, after), {
+    provider: "codex",
+    percentConsumed: 2.5,
+    windowName: "5h",
+    resetsAt: 100,
+  });
+});
+
+test("window consumption refuses a reset, unreadable source, provider mismatch, or counter regression", () => {
+  const before: ProviderCapacity = {
+    provider: "claude",
+    readable: true,
+    windows: [{ name: "5h", usedPercent: 80, resetsAt: "09:00" }],
+  };
+  assert.equal(
+    providerWindowConsumption(before, {
+      provider: "claude",
+      readable: true,
+      windows: [{ name: "5h", usedPercent: 2, resetsAt: "14:00" }],
+    }).reason,
+    "no-reset-stable-window",
+  );
+  assert.equal(
+    providerWindowConsumption(before, { provider: "claude", readable: false, windows: [], detail: "offline" }).reason,
+    "capacity-unreadable",
+  );
+  assert.equal(providerWindowConsumption(before, capacity("codex", 82)).reason, "provider-mismatch");
+  assert.equal(
+    providerWindowConsumption(before, {
+      provider: "claude",
+      readable: true,
+      windows: [{ name: "5h", usedPercent: 79, resetsAt: "09:00" }],
+    }).reason,
+    "counter-regressed",
+  );
+});
+
+test("window attribution refuses overlapping work on the same provider but not another provider", () => {
+  clearProviderWindowMeasurements();
+  const claudeBefore: ProviderCapacity = {
+    provider: "claude",
+    readable: true,
+    windows: [{ name: "5h", usedPercent: 10, resetsAt: "09:00" }],
+  };
+  const codexBefore: ProviderCapacity = {
+    provider: "codex",
+    readable: true,
+    windows: [{ name: "5h", usedPercent: 20, resetsAt: 123 }],
+  };
+  const first = beginProviderWindowMeasurement(claudeBefore);
+  const codex = beginProviderWindowMeasurement(codexBefore);
+  assert.equal(
+    finishProviderWindowMeasurement(codex, {
+      provider: "codex",
+      readable: true,
+      windows: [{ name: "5h", usedPercent: 21, resetsAt: 123 }],
+    }).percentConsumed,
+    1,
+  );
+  const second = beginProviderWindowMeasurement(claudeBefore);
+  assert.equal(
+    finishProviderWindowMeasurement(first, {
+      provider: "claude",
+      readable: true,
+      windows: [{ name: "5h", usedPercent: 12, resetsAt: "09:00" }],
+    }).reason,
+    "overlapping-provider-work",
+  );
+  assert.equal(
+    finishProviderWindowMeasurement(second, {
+      provider: "claude",
+      readable: true,
+      windows: [{ name: "5h", usedPercent: 12, resetsAt: "09:00" }],
+    }).reason,
+    "overlapping-provider-work",
+  );
+});
+
+test("abandoning a window measurement removes it from future overlap accounting", () => {
+  clearProviderWindowMeasurements();
+  const before: ProviderCapacity = {
+    provider: "claude",
+    readable: true,
+    windows: [{ name: "5h", usedPercent: 10, resetsAt: "09:00" }],
+  };
+  const abandoned = beginProviderWindowMeasurement(before);
+  abandonProviderWindowMeasurement(abandoned);
+  const next = beginProviderWindowMeasurement(before);
+  assert.equal(
+    finishProviderWindowMeasurement(next, {
+      provider: "claude",
+      readable: true,
+      windows: [{ name: "5h", usedPercent: 11, resetsAt: "09:00" }],
+    }).percentConsumed,
+    1,
+  );
 });
 
 test("Codex write workers grant only an in-root linked worktree's Git administrative directories", () => {
@@ -141,6 +261,30 @@ test("Claude capacity reads, caches, and tears down a control-only SDK session",
   assert.deepEqual(cached, first);
   assert.equal(opens, 1);
   assert.equal(returns, 1);
+
+  const refreshed = await readClaudeProviderCapacity(config, {
+    now: () => 102,
+    forceRefresh: true,
+    openSession: () => {
+      opens += 1;
+      return {
+        usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET: async () => ({
+          subscription_type: "max",
+          rate_limits_available: true,
+          rate_limits: {
+            five_hour: { utilization: 21 },
+            seven_day: { utilization: 31 },
+          },
+        }),
+        return: async () => {
+          returns += 1;
+        },
+      };
+    },
+  });
+  assert.deepEqual(refreshed.windows.map((window) => window.usedPercent), [21, 31]);
+  assert.equal(opens, 2, "an attribution boundary must bypass the routing cache");
+  assert.equal(returns, 2);
 });
 
 test("Claude capacity distinguishes an absent SDK method from a thrown reading", async () => {
@@ -335,6 +479,23 @@ test("Codex capacity RPC discovers models and selects the matching independent b
     { requestedModel: "haiku", requestedEffort: "low", spawn: () => { throw new Error("cache miss"); }, capabilities: CAPABILITY_FIXTURE },
   );
   assert.equal(cached.model, selected.model);
+
+  const refreshedProc = fakeAppServer((request, { stdout }) => {
+    if (request.id === 1) stdout.write(`${JSON.stringify({ id: 1, result: {} })}\n`);
+    if (request.id === 2) stdout.write(`${JSON.stringify({ id: 2, result: splitCodexLimits })}\n`);
+    if (request.id === 3) stdout.write(`${JSON.stringify({ id: 3, result: { data: visibleCodexModels, nextCursor: null } })}\n`);
+  });
+  const refreshed = await readCodexCapacity(
+    { claudeBin: "/unused", root: "/tmp", workerProviders: { enabled: ["codex"], codexBin: "/bin/sh" } },
+    {
+      requestedModel: "haiku",
+      requestedEffort: "low",
+      forceRefresh: true,
+      spawn: () => refreshedProc as never,
+      capabilities: CAPABILITY_FIXTURE,
+    },
+  );
+  assert.equal(refreshed.model, selected.model);
 });
 
 test("Codex capacity makes toolchain and synchronous spawn failures unreadable", async () => {
@@ -513,6 +674,7 @@ test("spawnWorker routes an opted-in call to Codex, preserves containment, and l
   let tornDown = 0;
   let spawnedArgs: string[] = [];
   let spawnedEnv: Record<string, string | undefined> = {};
+  const codexCapacityRequests: Array<{ forceRefresh?: boolean; selectedModel?: string }> = [];
   stdin.on("data", (chunk: Buffer) => {
     prompt += chunk.toString("utf8");
   });
@@ -539,12 +701,18 @@ test("spawnWorker routes an opted-in call to Codex, preserves containment, and l
       },
       providerRouting: {
         readClaude: async () => capacity("claude", 80),
-        readCodex: async () => ({
-          ...capacity("codex", 10),
-          accountLabel: "codex-account",
-          model: "gpt-5.6-terra",
-          effort: "high",
-        }),
+        readCodex: async (_config, request) => {
+          codexCapacityRequests.push(request);
+          const usedPercent = codexCapacityRequests.length === 3 ? 12 : 10;
+          return {
+            provider: "codex",
+            readable: true,
+            windows: [{ name: "codex 7d", usedPercent, resetsAt: 123 }],
+            accountLabel: "codex-account",
+            model: "gpt-5.6-terra",
+            effort: "high",
+          };
+        },
         tieBreaker: 0,
       },
       containment: {
@@ -572,6 +740,17 @@ test("spawnWorker routes an opted-in call to Codex, preserves containment, and l
   assert.equal(tornDown, 1);
   assert.match(prompt, /read and follow.*CLAUDE\.md/s);
   assert.equal(workerLedgerFields(result).provider, "codex");
+  assert.deepEqual(codexCapacityRequests, [
+    { requestedModel: undefined, requestedEffort: undefined },
+    { requestedModel: undefined, requestedEffort: undefined, forceRefresh: true, selectedModel: "gpt-5.6-terra" },
+    { requestedModel: undefined, requestedEffort: undefined, forceRefresh: true, selectedModel: "gpt-5.6-terra" },
+  ]);
+  assert.deepEqual(workerLedgerFields(result).window_consumption, {
+    provider: "codex",
+    percent_consumed: 2,
+    window: "codex 7d",
+    resets_at: 123,
+  });
 });
 
 test("the unchanged Claude spawn path labels its successful provider", async () => {
@@ -611,6 +790,68 @@ test("the unchanged Claude spawn path labels its successful provider", async () 
   });
   assert.equal(result.provider, "claude");
   assert.equal(result.text, "done");
+  assert.equal(result.windowConsumption, undefined, "Claude-only installs must perform no attribution reads");
+});
+
+test("a multi-provider Claude call ledgers reset-stable exclusive window consumption", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-claude-window-consumption-"));
+  const claudeRequests: Array<{ forceRefresh?: boolean } | undefined> = [];
+  const result = await spawnWorker({
+    cwd: process.cwd(),
+    permissionMode: "bypassPermissions",
+    settingsFile: join(process.cwd(), "settings", "worker.json"),
+    prompt: "measure Claude",
+    config: {
+      claudeBin: "/unused",
+      root,
+      workerProviders: { enabled: ["claude", "codex"], codexBin: "/bin/sh" },
+    },
+    providerRouting: {
+      readClaude: async (request) => {
+        claudeRequests.push(request);
+        const usedPercent = claudeRequests.length === 3 ? 11.5 : 10;
+        return {
+          provider: "claude",
+          readable: true,
+          windows: [{ name: "session (5h)", usedPercent, resetsAt: "09:00" }],
+        };
+      },
+      readCodex: async () => capacity("codex", 80),
+    },
+    claudeExecutable: {
+      cache: createClaudeExecutableCache(),
+      deps: {
+        env: { RMD_CLAUDE_BIN: "/fake/claude" },
+        home: root,
+        exists: () => true,
+        which: () => "/fake/claude",
+        canExecute: () => true,
+        locations: [],
+      },
+    },
+    keychain: {
+      platform: "linux",
+      readCredentialFile: () => JSON.stringify({ claudeAiOauth: { accessToken: "stub", expiresAt: 4_102_444_800_000 } }),
+    },
+    queryFn: (() => (async function* () {
+      yield {
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        result: "done",
+        session_id: "claude-session",
+        total_cost_usd: 0,
+        num_turns: 1,
+      };
+    })()) as never,
+  });
+  assert.deepEqual(claudeRequests, [undefined, { forceRefresh: true }, { forceRefresh: true }]);
+  assert.deepEqual(workerLedgerFields(result).window_consumption, {
+    provider: "claude",
+    percent_consumed: 1.5,
+    window: "session (5h)",
+    resets_at: "09:00",
+  });
 });
 
 test("Codex worker clock bound tears down the contained process and fails the run", async () => {
