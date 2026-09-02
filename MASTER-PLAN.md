@@ -6326,6 +6326,12 @@ a second project on the harness; **WS-12 (site) is independent — separate repo
    load-bearing, not less. `rule15FilingViolation` is likewise untouched — it is a task-record SHAPE
    check and never had anything to do with who may file.
 
+28. **A VERDICT CLASS IS NOT A FAILURE CLASS UNTIL YOU CHECK WHICH OF ITS MEMBERS MERGED.** A
+   terminal run verdict records what the orchestrator observed at that instant; it is not material
+   proof that the pull request ultimately failed. Any failure census or taxonomy must join each
+   member to live merge state before classifying it, and an unreadable member remains unconfirmed
+   rather than being counted as a failure. [RETRO-1788374498685; DR-28; P47; 2026-09-02]
+
 - Lives at repo root. Header carries sync date + focus, his-house style.
 - Humans and agents edit via commits/PRs; the Architect does narrative syncs at workstream
   boundaries; the control plane flips task statuses only.
