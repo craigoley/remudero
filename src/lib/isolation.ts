@@ -417,9 +417,18 @@ export async function probeIsolation(opts: {
   if (r.functionNames) evidence.functionNames = r.functionNames;
   const verdict = assessIsolation(evidence);
   const costUsd = r.costUsd ?? 0;
+  // W1-T2755: pick the reason from the signal that actually produced this outcome, BEFORE the
+  // first ledger row is written. Hoisted above `isolation.probe` on purpose: that row is
+  // written on EVERY probe, so it is the one a reader scanning probe history sees, and leaving
+  // it saying "counts could not be parsed" on a spawn failure would recreate this task's own
+  // defect on the forensic surface it did its damage on. TOTAL and SAFE to call
+  // unconditionally: `isolationFailureReason` returns `verdict.reason` untouched whenever the
+  // counts parsed, which covers every isolated (0/0) and proven-broken (nonzero) outcome — only
+  // the unparseable-counts paths can differ, and those are exactly the misattributed ones.
+  const failureReason = isolationFailureReason(evidence, verdict, r);
   log("isolation.probe", {
     isolated: verdict.isolated,
-    reason: verdict.reason,
+    reason: failureReason,
     alias_count: evidence.aliasCount,
     function_count: evidence.functionCount,
     alias_names: evidence.aliasNames ?? null,
@@ -431,10 +440,6 @@ export async function probeIsolation(opts: {
     ...(r.isError ? { stderr_excerpt: capStderrExcerpt(r.transcript) } : {}),
   });
   if (!verdict.isolated) {
-    // W1-T2755: pick the reason from the signal that actually produced this failure — an
-    // errored spawn is reported as such instead of being misattributed to the report parser.
-    // The verdict itself is `assessIsolation`'s and is not revisited here.
-    const failureReason = isolationFailureReason(evidence, verdict, r);
     // Named error carrying the OBSERVED count (W1-T17 acceptance #1) AND, when the
     // probe reported them, the OBSERVED names — logged as its own ledger event,
     // distinct from the run-level `verdict` line the caller (run-task.ts) appends

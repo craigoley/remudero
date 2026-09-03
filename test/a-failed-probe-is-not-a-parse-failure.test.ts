@@ -95,6 +95,46 @@ test("W1-T2755: a probe whose SPAWN failed is reported as a spawn failure, carry
   assert.match(msg, /FAIL CLOSED, the run does not proceed/, "the fail-closed posture is unchanged");
 });
 
+// ── (1b) THE LEDGER SURFACE — where this defect actually did its damage ───────────────────────
+// CLAUDE.md's #981 rule is about LEDGER lines carrying the reason from the decision that
+// produced their outcome. A fix that only corrected the thrown message would leave the forensic
+// surface lying: `isolation.probe` is written on EVERY probe, so it is the row a reader scanning
+// probe history sees. Both rows are asserted here.
+
+test("W1-T2755: BOTH ledger rows — isolation.probe and isolation_preflight_failed — carry the spawn-failure reason, not the parse-failure wording", async () => {
+  const rows: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const probeResult: ProbeExecResult = {
+    transcript: "Codex CLI: refusing to start — cwd is not a git repository",
+    aliasCount: NaN,
+    functionCount: NaN,
+    isError: true,
+  };
+
+  await assert.rejects(
+    () =>
+      probeIsolation({
+        settingsFile: "unused",
+        exec: async () => probeResult,
+        log: (step, extra) => rows.push({ step, extra }),
+      }),
+    IsolationError,
+  );
+
+  const probeRow = rows.find((r) => r.step === "isolation.probe");
+  const verdictRow = rows.find((r) => r.step === "isolation_preflight_failed");
+  assert.ok(probeRow, "the observation row must still be written");
+  assert.ok(verdictRow, "the verdict row must still be written");
+
+  for (const [name, row] of [["isolation.probe", probeRow], ["isolation_preflight_failed", verdictRow]] as const) {
+    const reason = String(row!.extra?.reason ?? "");
+    assert.match(reason, /probe spawn itself FAILED/, `${name} must name the spawn failure`);
+    assert.ok(!reason.includes(PARSE_FAILURE_WORDING), `${name} must not blame the parser; got: ${reason}`);
+  }
+
+  // The observation row still reports the VERDICT accurately — only its reason string changed.
+  assert.equal(probeRow!.extra?.isolated, false, "the probe row still reports the unproven verdict");
+});
+
 // ── (2) the parse-failure branch keeps the message it exists for ──────────────────────────────
 
 test("W1-T2755: a probe that RAN CLEAN but returned an unreadable report still reports a parse failure", () => {
