@@ -70,7 +70,7 @@ test("W1-T2583: a delivered oldest head cannot spend the spawning admission", as
   const posted: number[] = [];
   await runSweepLightPass([delivered, unreviewed], deps(path, posted));
 
-  assert.deepEqual(posted, [20], "the genuinely unreviewed PR wins the unchanged single spawning admission");
+  assert.deepEqual(posted, [20], "the genuinely unreviewed PR wins without the delivered head spending semantic capacity");
   const disposed = readLedgerLines(path).filter((line) => line.step === "sweep.disposed");
   const deliveredRow = disposed.find((line) => line.pr_number === 10);
   assert.match(String(deliveredRow?.stand_down_reason), /verdict was already DELIVERED/,
@@ -100,8 +100,8 @@ test("W1-T2583: an ordinary refusal is excluded but a reopened closed-lifecycle 
   const posted: number[] = [];
   await runSweepLightPass([ordinary, reopened, younger], deps(path, posted));
 
-  assert.deepEqual(posted, [20],
-    "the ordinary refusal cannot win; the existing prior-action fold re-arms the reopened refusal and oldest-first selects it");
+  assert.deepEqual(posted.sort((a, b) => a - b), [20, 30],
+    "the ordinary refusal cannot win; the reopened refusal and next eligible head fill the two semantic lanes");
 });
 
 test("W1-T2583: a pass containing only delivered or refused heads dispatches no review and invents no admission loser", async () => {
@@ -151,9 +151,37 @@ test("W1-T2583: dedup filtering preserves both bounds and immutable oldest-first
 
   const selected = selectReviewAdmissions([...filings].reverse().concat([...builds].reverse()), DEFAULT_SWEEP_POLICY, NOW, outcomes);
 
-  assert.equal(selected.spawning?.prNumber, 2, "one spawning slot remains and the oldest non-deduped build wins");
+  assert.deepEqual(selected.spawning.map((pr) => pr.prNumber), [2, 3],
+    "both spawning slots go to the oldest non-deduped builds");
   assert.deepEqual(selected.planFilings.map((pr) => pr.prNumber), [4, 5, 6],
     "the plan-filing bound remains three and ordering remains immutable oldest-first");
+});
+
+test("W1-T2792: after the first pair delivers, the next pass admits the next pair", async () => {
+  const path = ledgerPath();
+  const prs = [1, 2, 3, 4].map((n) => reviewPr(n, `2026-08-2${n}T00:00:00Z`));
+  const firstPosted: number[] = [];
+  await runSweepLightPass(
+    [...prs].reverse(),
+    deps(path, firstPosted, {
+      postReview: (pr) => {
+        firstPosted.push(pr.prNumber);
+        appendLedger(path, {
+          run_id: "REVIEW-FIRST-PAIR",
+          task_id: pr.taskId ?? "",
+          step: "review.posted",
+          head_sha: pr.headSha,
+          state: "success",
+        });
+      },
+    }),
+  );
+  assert.deepEqual(firstPosted.sort((a, b) => a - b), [1, 2]);
+
+  const secondPosted: number[] = [];
+  await runSweepLightPass([...prs].reverse(), deps(path, secondPosted, { runId: "REVIEW-SECOND-PAIR" }));
+  assert.deepEqual(secondPosted.sort((a, b) => a - b), [3, 4],
+    "delivered outcomes are excluded before ranking and spend no slot on the next pass");
 });
 
 test("W1-T2583/W1-T2771: selection reads once, per-PR guards re-read, and an admitted review re-reads at claim time", async () => {

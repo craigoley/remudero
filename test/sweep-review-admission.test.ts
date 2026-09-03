@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DEFAULT_SWEEP_POLICY, runSweepLightPass, selectReviewAdmission, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
+import { DEFAULT_SWEEP_POLICY, runSweepLightPass, selectReviewAdmission, selectReviewAdmissions, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import { appendLedger } from "../src/lib/ledger.js";
 
@@ -18,8 +18,9 @@ import { appendLedger } from "../src/lib/ledger.js";
 // discarding whatever verdict `runSweepLightPass` just spent a review posting. Before this
 // task, `runSweepLightPass` fanned every post-review-eligible PR out to its own concurrent
 // `runSweep` call every ~60s tick, so a queue of N such PRs cost N + (N-1) + … + 1 reviews to
-// land N merges — quadratic in queue depth. These fixtures pin the fix: at most ONE
-// post-review-eligible PR is admitted per pass, chosen oldest-head-first (never starves), and
+// land N merges — quadratic in queue depth. W1-T2792 keeps the admission bounded but uses the
+// configured reviewLanes width: at most that many post-review-eligible PRs are admitted per pass,
+// chosen oldest-head-first (never starves), and
 // only a genuinely post-review-eligible PR is ever a candidate (never held up by one that
 // cannot merge).
 
@@ -106,7 +107,19 @@ function fakeDeps(overrides: Partial<SweepDeps> = {}): SweepDeps & {
   };
 }
 
-test("W1-T526: one pass reviews a single eligible pull request", async () => {
+test("W1-T2792: reviewLanes one preserves the original single semantic admission", () => {
+  const older = postReviewPr({ prNumber: 10, createdAt: "2026-07-10T00:00:00Z" });
+  const middle = postReviewPr({ prNumber: 20, createdAt: "2026-07-11T00:00:00Z" });
+  const younger = postReviewPr({ prNumber: 30, createdAt: "2026-07-12T00:00:00Z" });
+  const selected = selectReviewAdmissions(
+    [younger, middle, older],
+    { ...DEFAULT_SWEEP_POLICY, reviewLanes: 1 },
+    NOW,
+  );
+  assert.deepEqual(selected.spawning.map((candidate) => candidate.prNumber), [10]);
+});
+
+test("W1-T2792: one light pass reviews up to the configured semantic width", async () => {
   const lp = ledgerPath();
   const posted: number[] = [];
   const deps = fakeDeps({
@@ -121,7 +134,7 @@ test("W1-T526: one pass reviews a single eligible pull request", async () => {
 
   const summaries = await runSweepLightPass([older, younger], deps, DEFAULT_SWEEP_POLICY);
 
-  assert.deepEqual(posted, [10], "only the older-head PR's review actually ran, even though both were eligible");
+  assert.deepEqual(posted.sort((a, b) => a - b), [10, 20], "both eligible reviews fit the configured two lanes");
   assert.equal(summaries.length, 2, "the standing-down PR is still reconciled this pass, never silently dropped");
 
   const disposed = readLedgerLines(lp).filter((l) => l.step === "sweep.disposed");
@@ -130,7 +143,7 @@ test("W1-T526: one pass reviews a single eligible pull request", async () => {
   assert.equal(olderLine?.disposition, "post-review");
   assert.equal(olderLine?.acted, true, "the admitted PR's review really ran");
   assert.equal(youngerLine?.disposition, "post-review", "the losing PR's OWN disposition is unchanged — still post-review, just not admitted");
-  assert.equal(youngerLine?.acted, false, "the losing PR never shares the one admitted slot");
+  assert.equal(youngerLine?.acted, true, "the second PR uses the second configured review lane");
 });
 
 test("W1-T526: the loser of one pass wins a later pass", async () => {
@@ -147,7 +160,7 @@ test("W1-T526: the loser of one pass wins a later pass", async () => {
   const younger = postReviewPr({ prNumber: 20, prUrl: "url/20", taskId: "W1-T20", headSha: "sha20", lastActivityAt: "2026-07-15T00:00:00Z" });
 
   await runSweepLightPass([older, younger], deps1, DEFAULT_SWEEP_POLICY);
-  assert.deepEqual(postedPass1, [10], "pass 1: the older head wins the queue");
+  assert.deepEqual(postedPass1.sort((a, b) => a - b), [10, 20], "pass 1: both heads fit the configured width");
 
   // A fresh read of #10's own live state (`buildOpenPrViews`, the real gateway) now reflects
   // the review it just posted — it is no longer `post-review`-eligible AT ALL, exactly as a
@@ -162,7 +175,7 @@ test("W1-T526: the loser of one pass wins a later pass", async () => {
     },
   });
   await runSweepLightPass([olderNowReviewed, younger], deps2, DEFAULT_SWEEP_POLICY);
-  assert.deepEqual(postedPass2, [20], "pass 2: the PR that lost pass 1 wins this one — nothing starves forever");
+  assert.deepEqual(postedPass2, [], "pass 2: both prior outcomes are deduped before ranking");
 });
 
 test("W1-T526: an unmergeable pull request never holds the queue", async () => {
@@ -210,5 +223,5 @@ test("W1-T526: arming and fixing still act on every pull request", async () => {
 
   assert.deepEqual(deps.armed.map((p) => p.prNumber), [40], "the mergeable PR still arms — the review-admission rule is a review-only lane");
   assert.deepEqual(deps.fixed.map((p) => p.prNumber), [41], "the blocked-fixable PR still dispatches a fix, in the SAME pass");
-  assert.deepEqual(posted, [10], "of the two post-review-eligible PRs, only ONE is admitted — the other's disposition still runs, it just never acts");
+  assert.deepEqual(posted.sort((a, b) => a - b), [10, 20], "both post-review PRs use the two configured lanes while other dispositions still act");
 });

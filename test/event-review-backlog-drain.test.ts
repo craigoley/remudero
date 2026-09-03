@@ -8,6 +8,7 @@ import { appendLedger } from "../src/lib/ledger.js";
 import {
   DEFAULT_SWEEP_POLICY,
   runSweep,
+  runSweepLightPass,
   type OpenPrView,
   type SweepDeps,
   type SweepPolicy,
@@ -54,6 +55,82 @@ const OLDEST_FIRST = [
   reviewablePr(4, "2026-09-01T18:00:00Z"),
   reviewablePr(5, "2026-09-01T19:00:00Z"),
 ];
+
+test("W1-T2792: one light/event pass starts the oldest two semantic reviews before either settles", async () => {
+  const path = ledgerPath();
+  const policy: SweepPolicy = { ...DEFAULT_SWEEP_POLICY, reviewLanes: 2 };
+  const started: number[] = [];
+  let inFlight = 0;
+  let maxInFlight = 0;
+  let releaseReviews: () => void = () => {};
+  const gate = new Promise<void>((resolve) => {
+    releaseReviews = resolve;
+  });
+  const pending = runSweepLightPass(
+    [...OLDEST_FIRST.slice(0, 4)].reverse(),
+    fakeDeps(path, {
+      postReview: async (pr) => {
+        started.push(pr.prNumber);
+        inFlight += 1;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        await gate;
+        inFlight -= 1;
+      },
+    }),
+    policy,
+  );
+
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  try {
+    assert.deepEqual(
+      [...started].sort((a, b) => a - b),
+      [1, 2],
+      "the oldest two heads both start without waiting for another ticker cycle",
+    );
+    assert.equal(maxInFlight, 2);
+  } finally {
+    releaseReviews();
+    await pending;
+  }
+  const losers = readLedgerLines(path).filter(
+    (line) => line.step === "sweep.disposed" && [3, 4].includes(Number(line.pr_number)),
+  );
+  assert.equal(losers.length, 2);
+  assert.ok(losers.every((line) => line.acted === false));
+  assert.ok(losers.every((line) => /bound 2/.test(String(line.stand_down_reason))));
+  assert.ok(losers.every((line) => /#1, #2/.test(String(line.stand_down_reason))));
+});
+
+test("W1-T2792: an event-pass capacity refusal writes no terminal outcome and retries next pass", async () => {
+  const path = ledgerPath();
+  const policy: SweepPolicy = { ...DEFAULT_SWEEP_POLICY, reviewLanes: 1 };
+  const prs = OLDEST_FIRST.slice(0, 2);
+  const refusedAttempts: number[] = [];
+  await runSweepLightPass(
+    prs,
+    fakeDeps(path, {
+      postReview: (pr) => {
+        refusedAttempts.push(pr.prNumber);
+        throw new GhPaceFloorStandDownError({ resource: "core", remaining: 20, limit: 5000 });
+      },
+    }),
+    policy,
+  );
+  assert.deepEqual(refusedAttempts, [1]);
+  assert.equal(
+    readLedgerLines(path).some((line) => line.step === "review.posted" || line.step === "review.post_refused"),
+    false,
+    "provider capacity never manufactures a delivered or refused outcome key",
+  );
+
+  const recovered: number[] = [];
+  await runSweepLightPass(
+    prs,
+    fakeDeps(path, { runId: "W1-T2792-RECOVERED", postReview: (pr) => { recovered.push(pr.prNumber); } }),
+    policy,
+  );
+  assert.deepEqual(recovered, [1], "the refused oldest head remains eligible on the next level-triggered pass");
+});
 
 test("W1-T2584: one full sweep drains five eligible reviews through two lanes without exceeding two in flight", async () => {
   let inFlight = 0;
@@ -165,15 +242,15 @@ test("W1-T2584/W1-T2771: an active review remains exclusive while an unstarted q
   );
   await firstStarted;
 
-  const activeLightSummary = await runSweep(
+  const activeLightSummary = await runSweepLightPass(
     [OLDEST_FIRST[0]],
     fakeDeps(path, { runId: "W1-T2584-LIGHT-ACTIVE", postReview: (pr) => { lightAttempts.push(pr.prNumber); } }),
     policy,
   );
   assert.equal(lightAttempts.length, 0, "the concurrent pass cannot double-post the actively running first head");
-  assert.equal(activeLightSummary.actions[0].acted, false);
+  assert.equal(activeLightSummary[0].actions[0].acted, false);
 
-  const pendingLightSummary = await runSweep(
+  const pendingLightSummary = await runSweepLightPass(
     [OLDEST_FIRST[1]],
     fakeDeps(path, {
       runId: "W1-T2584-LIGHT-PENDING",
@@ -191,7 +268,7 @@ test("W1-T2584/W1-T2771: an active review remains exclusive while an unstarted q
     policy,
   );
   assert.deepEqual(lightAttempts, [2], "the queued second head owns no mutex until the full sweep starts it");
-  assert.equal(pendingLightSummary.actions[0].acted, true);
+  assert.equal(pendingLightSummary[0].actions[0].acted, true);
 
   releaseFirst();
   await fullPass;

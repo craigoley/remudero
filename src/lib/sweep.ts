@@ -793,7 +793,8 @@ export interface SweepPolicy {
   repeatDispositionBound: number;
   /**
    * W1-T2439 (half two) — HOW MANY PLAN-FILING PRs THE NON-SPAWNING REVIEW LANE MAY ADMIT PER
-   * LIGHT PASS. The spawning lane stays at exactly ONE (see {@link selectReviewAdmission}); this
+   * LIGHT PASS. The spawning lane is bounded by {@link SweepPolicy.reviewLanes} (see
+   * {@link selectReviewAdmissions}); this
    * governs only PRs whose {@link OpenPrView.isPlanFiling} reads `true`, whose review takes the
    * deterministic path and spawns no judge in 98 percent of cases.
    *
@@ -7473,15 +7474,13 @@ export async function runSweepLightPass(
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
 ): Promise<SweepSummary[]> {
   if (openPrs.length === 0) return [await runSweep([], deps, policy)];
-  // W1-T526 — THE QUEUE-ADMISSION RULE (see {@link selectReviewAdmission}'s own doc for the
-  // full diagnosis and the starvation/holding falsifiers it exists to satisfy). At most ONE
-  // open PR is admitted to `post-review` THIS pass; every other PR's own `deps.actionable` is
-  // wrapped so a `post-review` disposition it would otherwise win stands down with the SAME
-  // "deferred to full sweep (light pass)" reason every other gated disposition already gets
-  // from this restricted caller — never a new reason string, never a new mechanism.
+  // W1-T526/W1-T2792 — THE QUEUE-ADMISSION RULE (see {@link selectReviewAdmissions}'s own doc).
+  // The light/event pass admits at most the existing `reviewLanes` semantic width, never the old
+  // hidden hard-coded one. Every other PR's own `deps.actionable` is wrapped so its disposition is
+  // still reconciled and its admission loss is attributable.
   const now = deps.now ? deps.now() : Date.now();
-  // W1-T2439: the light pass now admits from BOTH lanes — the spawning one at its unchanged bound
-  // of exactly one, and the non-spawning plan-filing one at its own smaller, derived bound. The
+  // W1-T2439/W1-T2792: the light pass admits from BOTH lanes — the spawning one at the existing
+  // policy review width, and the non-spawning plan-filing one at its own smaller, derived bound. The
   // admitted SET is what each PR's own scoped deps are decided against; nothing else moves.
   // W1-T2583: READ THE LEDGER ONCE FOR SELECTION, BEFORE RANKING. `runSweep` still performs its
   // own fresh read for every scoped action below; this pass-level fold is only the liveness filter
@@ -7496,7 +7495,7 @@ export async function runSweepLightPass(
   };
   const { spawning, planFilings } = selectReviewAdmissions(openPrs, policy, now, outcomes);
   const selectedNumbers = new Set<number>([
-    ...(spawning ? [spawning.prNumber] : []),
+    ...spawning.map((p) => p.prNumber),
     ...planFilings.map((p) => p.prNumber),
   ]);
   // Known outcome-deduped heads did not compete for either bound, but they must still pass through
@@ -7509,7 +7508,8 @@ export async function runSweepLightPass(
         deriveDisposition(pr, policy, now).disposition === "post-review" && reviewAdmissionOutcomeKnown(pr, outcomes))
       .map((pr) => pr.prNumber),
   );
-  const admitted = spawning;
+  const admittedNumbers = spawning.map((p) => `#${p.prNumber}`).join(", ");
+  const semanticBound = Math.max(1, policy.reviewLanes);
   return Promise.all(
     openPrs.map((pr) => {
       const baseActionable = deps.actionable;
@@ -7525,16 +7525,16 @@ export async function runSweepLightPass(
               detachFixWait: true,
               actionable: (d) => (d === "post-review" ? false : baseActionable ? baseActionable(d) : true),
               // W1-T2426 (criterion 7): name the mechanism, not just the fact. A `post-review`
-              // refused HERE was eligible and lost this pass's single admission — a different
+              // refused HERE was eligible and lost this pass's bounded admission — a different
               // event from a lane the light pass never runs, and until now both wrote the same
-              // sentence. The bound itself is untouched: this records the refusal, never makes one.
+              // sentence. The configured bound itself is untouched: this records the refusal.
               standDownReasonFor: (d) =>
                 d === "post-review"
                   ? (pr.isPlanFiling === true
                       ? `not admitted this pass: at most ${policy.planFilingAdmissionBound} plan-filing ` +
                         "post-review admissions per light pass"
-                      : "not admitted this pass: one post-review admission per light pass" +
-                        (admitted ? ` (#${admitted.prNumber} won it)` : ""))
+                      : `not admitted this pass: semantic post-review admission bound ${semanticBound}` +
+                        (admittedNumbers ? `; admitted ${admittedNumbers} ahead` : ""))
                   : baseStandDownReasonFor?.(d),
             };
       return runSweep([pr], scopedDeps, policy);
@@ -7559,14 +7559,16 @@ function reviewAdmissionOutcomeKnown(pr: OpenPrView, outcomes: ReviewAdmissionOu
 }
 
 /**
- * W1-T526 — WHICH ONE OPEN PR, IF ANY, {@link runSweepLightPass} admits into `post-review` this
+ * W1-T526 — WHICH OPEN PRS, IF ANY, {@link runSweepLightPass} admits into `post-review` this
  * pass. Branch protection's `strict: true` means only ONE open PR can merge before every OTHER
  * one reads `behind`, and a `behind` PR's next push mints a NEW head sha — `reviewDelivered`
  * (`priorActionsFromLedger`, above) is sha-pinned, so that push throws away the very verdict
  * this lane just posted. Before this task `runSweepLightPass` fanned every post-review-eligible
  * PR out to its own concurrent `runSweep` call (design note, its own doc above), so a queue of N
  * such PRs cost N + (N-1) + … + 1 reviews to land N merges instead of N — quadratic in queue
- * depth, and the eight-open-PR incident this task fixes measured 36 reviews to land 8.
+ * depth, and the eight-open-PR incident this task fixes measured 36 reviews to land 8. W1-T2792
+ * keeps that protection bounded but removes the unrelated hard-coded one-at-a-time bottleneck:
+ * the light path now uses the same configured `reviewLanes` ceiling as the full sweep.
  *
  * PURE, OVER THE WHOLE SNAPSHOT, USING THE SAME CLASSIFIER `runSweep` ITSELF USES:
  * {@link deriveDisposition} decides eligibility — a red, conflicted, blocked-ambiguous, or
@@ -7595,7 +7597,7 @@ export function selectReviewAdmission(
   policy: SweepPolicy,
   now: number,
 ): OpenPrView | undefined {
-  return selectReviewAdmissions(openPrs, policy, now).spawning;
+  return selectReviewAdmissions(openPrs, policy, now).spawning[0];
 }
 
 /**
@@ -7608,20 +7610,20 @@ export function selectReviewAdmission(
  * admission, which is exactly why this task's half one wired its producer first.
  *
  * TWO LANES, AND ONLY ONE OF THEM CAN SPAWN:
- *   - SPAWNING — every PR whose `isPlanFiling` is not `true`. Bound UNCHANGED at exactly one, the
- *     same `oldestByKey` over the same key, byte-identical to what W1-T526 always ran.
+ *   - SPAWNING — every PR whose `isPlanFiling` is not `true`. W1-T2792 bounds this lane at
+ *     `max(1, policy.reviewLanes)`, using the same oldest-first ordering W1-T526 established.
  *   - NON-SPAWNING — PRs whose `isPlanFiling` is `true`, whose review takes the deterministic path.
  *     Bounded by {@link SweepPolicy.planFilingAdmissionBound}, whose number is derived in its own
  *     doc rather than picked.
  *
  * ⚠ FAIL-OPEN ON AN UNPOPULATED SIGNAL. `isPlanFiling === undefined` — every fixture that predates
  * half one, and any gateway that does not populate it — is treated as SPAWNING, so it competes for
- * the single slot exactly as it does today. The split can only ever ADD throughput on a positive
+ * the semantic lane exactly as it does today. The split can only ever ADD throughput on a positive
  * signal; an absent one changes nothing.
  *
  * ⚠ AND THE 2 PERCENT THAT DO REACH THE JUDGE ARE CHARGED TO THE SPAWNING SIDE, BY CONSTRUCTION
- * RATHER THAN BY DETECTION: this split never RAISES the spawning bound, so a plan filing whose
- * review turns out to spawn consumes judge capacity that was never expanded to accommodate it.
+ * RATHER THAN BY DETECTION: this split never exceeds the configured spawning bound, so a plan
+ * filing whose review turns out to spawn consumes judge capacity that was never expanded for it.
  * That is the honest guarantee available at admission time — the shard's Q1 establishes that
  * detecting the outcome beforehand is unbuildable, so the design charges it instead of predicting
  * it.
@@ -7631,7 +7633,7 @@ export function selectReviewAdmissions(
   policy: SweepPolicy,
   now: number,
   outcomes: ReviewAdmissionOutcomes = EMPTY_REVIEW_ADMISSION_OUTCOMES,
-): { spawning: OpenPrView | undefined; planFilings: OpenPrView[] } {
+): { spawning: OpenPrView[]; planFilings: OpenPrView[] } {
   // W1-T2583: selection and execution must agree on outcome-keyed eligibility. The caller folds
   // these two sets once from the same PriorActions reader `runSweep` uses; filtering here happens
   // before either lane ranks or truncates. The action-time lookup remains in `runSweep` as the
@@ -7641,20 +7643,23 @@ export function selectReviewAdmissions(
   const filings = eligible.filter((pr) => pr.isPlanFiling === true);
   const rest = eligible.filter((pr) => pr.isPlanFiling !== true);
 
+  const oldestFirst = (a: OpenPrView, b: OpenPrView): number => {
+    const ka = Date.parse(reviewAdmissionKey(a));
+    const kb = Date.parse(reviewAdmissionKey(b));
+    const aa = Number.isNaN(ka) ? -Infinity : now - ka;
+    const ab = Number.isNaN(kb) ? -Infinity : now - kb;
+    return ab !== aa ? ab - aa : a.prNumber - b.prNumber;
+  };
+
   // The cheap lane, oldest-first on the SAME immutable key, truncated at its own bound. Sorting
   // by the key rather than repeatedly calling `oldestByKey` keeps one ordering definition.
   const bound = Math.max(0, policy.planFilingAdmissionBound);
   const planFilings = [...filings]
-    .sort((a, b) => {
-      const ka = Date.parse(reviewAdmissionKey(a));
-      const kb = Date.parse(reviewAdmissionKey(b));
-      const aa = Number.isNaN(ka) ? -Infinity : now - ka;
-      const ab = Number.isNaN(kb) ? -Infinity : now - kb;
-      return ab !== aa ? ab - aa : a.prNumber - b.prNumber;
-    })
+    .sort(oldestFirst)
     .slice(0, bound);
 
-  return { spawning: oldestByKey(rest, now, reviewAdmissionKey), planFilings };
+  const spawning = [...rest].sort(oldestFirst).slice(0, Math.max(1, policy.reviewLanes));
+  return { spawning, planFilings };
 }
 
 /**

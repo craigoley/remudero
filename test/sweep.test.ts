@@ -3171,8 +3171,9 @@ test("runSweep: no postReview dep wired -> ledgered stand-down, no crash, no esc
 //    `runSweepLightPass` fires one `runSweep` call PER open PR, concurrently, so this file's
 //    #584 fixture PR is never starved behind a slower sibling in the same pass again.
 //
-//    W1-T526 caps `post-review` admission at ONE PR per pass (see test/sweep-review-admission
-//    .test.ts for that rule's own acceptance fixtures) — the two tests below now prove the
+//    W1-T526 bounded `post-review` admission; W1-T2792 makes that bound the configured two review
+//    lanes (see test/sweep-review-admission.test.ts for that rule's own acceptance fixtures).
+//    The two tests below prove the
 //    CONCURRENT-FAN-OUT property this section is actually about using a DIFFERENT disposition
 //    (`blocked-fixable`) that W1-T526 leaves untouched (design (i): every disposition other
 //    than post-review is unchanged), so they stay a regression lock for the #707-adjacent
@@ -3228,24 +3229,23 @@ test("runSweepLightPass: each PR still gets its own dedup/disposition/ledger lin
       appendLedger(lp, { run_id: "SWEEP-1", task_id: p.taskId ?? "", step: "review.posted", head_sha: p.headSha, state: "success" });
     },
   });
-  // Both derive `post-review`; `a` carries the OLDER head, so W1-T526 admits it and `b` stands
-  // down — but BOTH still get their own dedup/disposition/ledger line, never a merged/lossy
+  // Both derive `post-review` and fit W1-T2792's configured width. BOTH still get their own
+  // dedup/disposition/ledger line, never a merged/lossy
   // aggregate, which is this test's own point.
   const a = ungatedGreenPr({ headSha: "aaaa584", lastActivityAt: "2026-07-15T00:00:00Z" }); // prNumber 584, taskId W1-T584
   const b = ungatedGreenPr({ prNumber: 585, prUrl: "url/585", taskId: "W1-T585", headSha: "bbbb585", lastActivityAt: "2026-07-16T00:00:00Z" });
   const summaries = await runSweepLightPass([a, b], deps, DEFAULT_SWEEP_POLICY);
-  assert.deepEqual(calls, [584], "only the ONE admitted (oldest-head) PR's post-review action fired this pass");
-  assert.equal(summaries.length, 2, "one summary per PR — no merged/lossy aggregate, even for the standing-down PR");
+  assert.deepEqual(calls.sort((x, y) => x - y), [584, 585], "both configured review lanes fire in the same pass");
+  assert.equal(summaries.length, 2, "one summary per PR — no merged/lossy aggregate");
   const disposed = readLedgerLines(lp).filter((l) => l.step === "sweep.disposed");
   assert.equal(disposed.length, 2, "each PR still writes its own sweep.disposed line");
   const admittedLine = disposed.find((l) => l.pr_number === 584);
-  const standingDownLine = disposed.find((l) => l.pr_number === 585);
+  const secondAdmittedLine = disposed.find((l) => l.pr_number === 585);
   assert.equal(admittedLine?.acted, true, "the admitted PR's review really ran");
-  assert.equal(standingDownLine?.acted, false, "the non-admitted PR stood down rather than sharing the lane");
+  assert.equal(secondAdmittedLine?.acted, true, "the second PR used the second configured lane");
 
-  // A second pass over the SAME (stale) snapshot excludes the admitted PR's now-posted verdict
-  // BEFORE ranking, so the still-unreviewed PR inherits the unchanged single admission. The
-  // per-PR action-time guard still records 584's delivered stand-down independently.
+  // A second pass over the SAME stale snapshot excludes both posted verdicts BEFORE ranking.
+  // Each per-PR action-time guard still records its delivered stand-down independently.
   const calls2: number[] = [];
   const deps2 = fakeDeps({
     ledgerPath: lp,
@@ -3254,7 +3254,7 @@ test("runSweepLightPass: each PR still gets its own dedup/disposition/ledger lin
     },
   });
   await runSweepLightPass([a, b], deps2, DEFAULT_SWEEP_POLICY);
-  assert.deepEqual(calls2, [585], "584 is already reviewed and cannot spend the admission; 585 advances on the same pass");
+  assert.deepEqual(calls2, [], "both delivered heads are excluded before ranking and neither is reposted");
 });
 
 // ── W1-T176: a required check with ZERO check runs is DETERMINISTIC-ACTION, ──
