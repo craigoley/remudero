@@ -350,7 +350,11 @@ test("resolveMountForClass: a hand-built Mounts missing BOTH the class row and t
 function goodCapabilities() {
   return {
     ladder: { economy: 1, balanced: 2, frontier: 3 },
-    claude: { haiku: "economy", sonnet: "balanced", opus: "frontier" },
+    claude: {
+      haiku: "economy", sonnet: "balanced", opus: "frontier",
+      "claude-haiku-1": "economy", "claude-sonnet-1": "balanced", "claude-opus-1": "frontier",
+    },
+    claude_candidates: { economy: ["claude-haiku-1"], balanced: ["claude-sonnet-1"], frontier: ["claude-opus-1"] },
     codex: {
       economy: { low: ["e-lo"], medium: ["e-med"], high: ["e-hi"] },
       balanced: { low: ["b-lo"], medium: ["b-med"], high: ["b-hi"] },

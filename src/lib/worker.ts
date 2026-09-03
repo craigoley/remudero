@@ -47,6 +47,15 @@ import { defaultIsPidAlive } from "./drain-lock.js";
 import { pgrepFailureMeansZero } from "./deployer.js";
 import { isHolderStale, type IsHolderStaleOpts } from "./fs-race-safe.js";
 import { buildWorkerEnv, billingMode, type BillingMode } from "./env.js";
+import {
+  readClaudeModelHealth,
+  resolveClaudeModelHealth,
+  type ClaudeModelHealthReading,
+  type ClaudeModelHealthRoute,
+  type ClaudeModelHealthSource,
+  type ClaudeModelHealthState,
+} from "./claude-model-health.js";
+import { loadMounts, mountsPath, type CapabilityLadder } from "./mounts.js";
 import { loadDefaultPolicy } from "./policy.js";
 import { assertLiveSpawnAllowed } from "./spawn-guard.js";
 import { validateWorkerSettingsFile } from "./settings.js";
@@ -86,6 +95,7 @@ import {
   spawnCodexWorker,
   type CodexCapacityDeps,
   type ProviderCapacity,
+  ProviderCapacityBlockedError,
   type ProviderSelection,
   type ProviderWindowConsumption,
   type ProviderWindowMeasurement,
@@ -221,6 +231,12 @@ export interface WorkerResult {
    * never a read-back off the envelope (`DEFAULT_MODEL_LABEL` when unspecified).
    */
   model: string;
+  /** Concrete provider model selected after health/capability routing. */
+  routedModel?: string;
+  /** Health of the originally preferred Claude candidate when Claude was considered. */
+  modelHealthState?: ClaudeModelHealthState;
+  /** Whether the health decision used a live/fresh read, bounded stale evidence, or no evidence. */
+  modelHealthSource?: ClaudeModelHealthSource;
   /**
    * The reasoning effort this call was CONFIGURED to run. Same INPUT-not-output
    * rule as `model`: effort is NOT in the SDK result envelope (LEARNINGS — the
@@ -499,6 +515,9 @@ export function noPrReportExcerpt(r: Pick<WorkerResult, "text" | "blocks">): str
 export function workerLedgerFields(r: WorkerResult): {
   provider?: "claude" | "codex";
   model: string;
+  routed_model?: string;
+  model_health_state?: ClaudeModelHealthState;
+  model_health_source?: ClaudeModelHealthSource;
   served_model: string | null;
   served_model_reason?: string;
   effort: string;
@@ -540,6 +559,9 @@ export function workerLedgerFields(r: WorkerResult): {
       : {}),
     ...(r.provider ? { provider: r.provider } : {}),
     model: r.model,
+    ...(r.routedModel ? { routed_model: r.routedModel } : {}),
+    ...(r.modelHealthState ? { model_health_state: r.modelHealthState } : {}),
+    ...(r.modelHealthSource ? { model_health_source: r.modelHealthSource } : {}),
     // W1-T2572: ALWAYS present, unlike the optional fields above — `null` is the honest,
     // explicit value for "unreportable", never an omitted key that reads as forgotten. See
     // this function's own doc and {@link WorkerResult.servedModel} for the full contract.
@@ -1075,11 +1097,18 @@ export interface SpawnWorkerArgs {
   config?: Config;
   /** Capacity-reader seams for provider-routing tests; production reads both subscriptions live. */
   providerRouting?: {
+    readClaudeHealth?: () => Promise<ClaudeModelHealthReading>;
     readClaude?: (request?: Pick<ClaudeCapacityDeps, "forceRefresh">) => Promise<ProviderCapacity>;
     readCodex?: (
       config: Config,
-      request: Pick<CodexCapacityDeps, "requestedModel" | "requestedEffort" | "forceRefresh" | "selectedModel" | "preferredModel" | "reservePercent">,
+      request: Pick<CodexCapacityDeps, "requestedModel" | "requestedEffort" | "forceRefresh" | "selectedModel" | "preferredModel" | "reservePercent" | "capabilities">,
     ) => Promise<ProviderCapacity>;
+    /** Test seam for the selected Codex spawn; production uses the real contained CLI adapter. */
+    spawnCodex?: (
+      args: SpawnWorkerArgs,
+      config: Config,
+      selection?: Pick<ProviderCapacity, "model" | "effort">,
+    ) => Promise<WorkerResult>;
     tieBreaker?: number;
     /** Best-effort durable projection for the console; never allowed to change spawn outcome. */
     writeStatus?: typeof writeProviderRoutingStatus;
@@ -1330,10 +1359,84 @@ export async function readClaudeProviderCapacity(
   }
 }
 
+/**
+ * Worker checkouts carry the repository-owned capability policy. `config.root` is the daemon
+ * state root on the Azure fleet (`/home/node/Remudero`), not the repository root, so resolving
+ * from it silently misses `.remudero/mounts.yaml`. Task workers use their checkout `cwd`; early
+ * isolation probes use a scratch cwd before that worktree exists, so they fall back to the
+ * module's installed repository root. Neither path guesses from the state-root directory.
+ */
+function resolveWorkerCapabilities(cwd: string): CapabilityLadder | undefined {
+  const installRoot = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
+  for (const root of new Set([cwd, installRoot])) {
+    try {
+      return loadMounts(mountsPath(root)).capabilities;
+    } catch {
+      // Try the next repository-owned location; a missing/malformed table remains fail-soft.
+    }
+  }
+  return undefined;
+}
+
+async function resolveWorkerClaudeHealth(
+  args: SpawnWorkerArgs,
+  capabilities: CapabilityLadder | undefined,
+): Promise<ClaudeModelHealthRoute> {
+  let reading: ClaudeModelHealthReading;
+  const requestedCapability = args.model ? capabilities?.claude[args.model.toLowerCase()] : undefined;
+  if (!args.model) {
+    reading = { degradedModels: [], source: "unknown", detail: "no concrete or aliased Claude model was requested" };
+  } else if (!capabilities) {
+    reading = { degradedModels: [], source: "unknown", detail: "worker capability table is unavailable" };
+  } else if (!requestedCapability) {
+    reading = { degradedModels: [], source: "unknown", detail: `requested model '${args.model}' is absent from the capability table` };
+  } else if (args.providerRouting?.readClaudeHealth) {
+    try {
+      reading = await args.providerRouting.readClaudeHealth();
+    } catch (error) {
+      // Advisory status failure is preserved as unknown health; it must not disable Claude.
+      reading = { degradedModels: [], source: "unknown", detail: String((error as Error)?.message ?? error) };
+    }
+  } else if (args.queryFn !== undefined) {
+    // A synthetic Claude query is the established paid-spawn test seam. Keep older worker tests
+    // network-free unless they explicitly inject health evidence; the resolver itself still runs.
+    reading = { degradedModels: [], source: "unknown", detail: "model health not injected for synthetic query" };
+  } else {
+    reading = await readClaudeModelHealth(capabilities, { now: args.providerRouting?.now });
+  }
+  return resolveClaudeModelHealth(args.model, capabilities, reading);
+}
+
+function unavailableClaudeCapacity(route: ClaudeModelHealthRoute): ProviderCapacity {
+  return {
+    provider: "claude",
+    readable: false,
+    windows: [],
+    detail: route.detail ?? "every same-capability Claude candidate is named in an unresolved incident",
+  };
+}
+
+function annotateClaudeCapacity(
+  capacity: ProviderCapacity,
+  route: ClaudeModelHealthRoute,
+  effort: string | undefined,
+): ProviderCapacity {
+  const healthDetail = route.state === "degraded" && route.routedModel
+    ? `model-health fallback ${route.requestedModel ?? "default"} -> ${route.routedModel} (${route.source})`
+    : undefined;
+  return {
+    ...capacity,
+    ...(route.routedModel ? { model: route.routedModel } : {}),
+    ...(effort ? { effort } : {}),
+    ...(healthDetail ? { detail: capacity.detail ? `${capacity.detail}; ${healthDetail}` : healthDetail } : {}),
+  };
+}
+
 async function readFreshSelectedCapacity(
   args: SpawnWorkerArgs,
   config: Config,
   selection: ProviderSelection,
+  capabilities?: CapabilityLadder,
 ): Promise<ProviderCapacity> {
   if (selection.provider === "codex") {
     return (args.providerRouting?.readCodex ?? readCodexCapacity)(config, {
@@ -1341,6 +1444,7 @@ async function readFreshSelectedCapacity(
       requestedEffort: args.effort,
       forceRefresh: true,
       selectedModel: selection.capacity.model,
+      ...(args.model && capabilities ? { capabilities } : {}),
     });
   }
   return (args.providerRouting?.readClaude ?? ((request) => readClaudeProviderCapacity(config, request)))({
@@ -1352,9 +1456,10 @@ async function beginSelectedCapacityMeasurement(
   args: SpawnWorkerArgs,
   config: Config,
   selection: ProviderSelection,
+  capabilities?: CapabilityLadder,
 ): Promise<ProviderWindowMeasurement | undefined> {
   try {
-    return beginProviderWindowMeasurement(await readFreshSelectedCapacity(args, config, selection));
+    return beginProviderWindowMeasurement(await readFreshSelectedCapacity(args, config, selection, capabilities));
   } catch {
     // Attribution telemetry is best-effort: an unreadable boundary omits consumption rather than
     // blocking an otherwise available subscription worker before its model call begins.
@@ -1367,10 +1472,11 @@ async function finishSelectedCapacityMeasurement(
   config: Config,
   selection: ProviderSelection,
   measurement: ProviderWindowMeasurement | undefined,
+  capabilities?: CapabilityLadder,
 ): Promise<ProviderWindowConsumption | undefined> {
   if (!measurement) return undefined;
   try {
-    return finishProviderWindowMeasurement(measurement, await readFreshSelectedCapacity(args, config, selection));
+    return finishProviderWindowMeasurement(measurement, await readFreshSelectedCapacity(args, config, selection, capabilities));
   } catch {
     abandonProviderWindowMeasurement(measurement);
     return { provider: selection.provider, percentConsumed: null, reason: "capacity-unreadable" };
@@ -1406,6 +1512,9 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
   // on the first bad/misplaced key — no unsandboxed worker is ever launched.
   validateWorkerSettingsFile(args.settingsFile);
 
+  // Capture process-global HOME before the first await. Test harnesses and embedders may vary it
+  // between concurrent calls; one worker's advisory status read must not switch another's home.
+  const realHome = process.env.HOME ?? homedir();
   const config = args.config ?? loadConfig();
   const routingPolicy = resolveProviderRoutingPolicy(config.root, config, { now: args.providerRouting?.now });
   if (routingPolicy.fallback) {
@@ -1415,8 +1524,45 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     }));
   }
   const providers = routingPolicy.routableProviders;
+  const capabilities = resolveWorkerCapabilities(args.cwd);
+  const claudeHealthRoute = providers.includes("claude")
+    ? await resolveWorkerClaudeHealth(args, capabilities)
+    : undefined;
+  if (claudeHealthRoute) {
+    console.error(JSON.stringify({
+      event: "worker.model_health.resolved",
+      requested_model: args.model ?? DEFAULT_MODEL_LABEL,
+      ...(claudeHealthRoute.routedModel ? { routed_model: claudeHealthRoute.routedModel } : {}),
+      state: claudeHealthRoute.state,
+      source: claudeHealthRoute.source,
+      eligible: claudeHealthRoute.eligible,
+      ...(claudeHealthRoute.detail ? { detail: claudeHealthRoute.detail } : {}),
+    }));
+  }
   let routedClaudeSelection: ProviderSelection | undefined;
-  if (providers.length === 1 && providers[0] === "claude" && (routingPolicy.provenance === "overridden" || routingPolicy.fallback)) {
+  if (providers.length === 1 && providers[0] === "claude" && claudeHealthRoute && !claudeHealthRoute.eligible) {
+    const capacity = unavailableClaudeCapacity(claudeHealthRoute);
+    try {
+      (args.providerRouting?.writeStatus ?? writeProviderRoutingStatus)(config.root, {
+        state: "blocked",
+        enabledProviders: providers,
+        reservePercent: routingPolicy.reservePercent,
+        observedAtMs: (args.providerRouting?.now ?? Date.now)(),
+        cacheValidMs: config.workerProviders?.capacityCacheMs ?? 60_000,
+        policy: routingPolicy,
+        modelHealth: claudeHealthRoute,
+        capacities: [capacity],
+      });
+    } catch {
+      console.error(JSON.stringify({ event: "worker.provider_routing_status_write_failed", reason: "write-failed" }));
+    }
+    throw new ProviderCapacityBlockedError([capacity]);
+  }
+  if (
+    providers.length === 1 &&
+    providers[0] === "claude" &&
+    (args.model !== undefined || routingPolicy.provenance === "overridden" || routingPolicy.fallback)
+  ) {
     try {
       (args.providerRouting?.writeStatus ?? writeProviderRoutingStatus)(config.root, {
         state: "not-probed",
@@ -1425,6 +1571,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         observedAtMs: (args.providerRouting?.now ?? Date.now)(),
         cacheValidMs: config.workerProviders?.capacityCacheMs ?? 60_000,
         policy: routingPolicy,
+        ...(claudeHealthRoute ? { modelHealth: claudeHealthRoute } : {}),
       });
     } catch {
       console.error(JSON.stringify({ event: "worker.provider_routing_status_write_failed", reason: "write-failed" }));
@@ -1439,9 +1586,14 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
             requestedEffort: args.effort,
             ...(routingPolicy.codexModelPreference ? { preferredModel: routingPolicy.codexModelPreference } : {}),
             reservePercent: routingPolicy.reservePercent,
+            ...(args.model && capabilities ? { capabilities } : {}),
           });
         }
-        return (args.providerRouting?.readClaude ?? (() => readClaudeProviderCapacity(config)))();
+        if (claudeHealthRoute && !claudeHealthRoute.eligible) return unavailableClaudeCapacity(claudeHealthRoute);
+        return (args.providerRouting?.readClaude ?? (() => readClaudeProviderCapacity(config)))()
+          .then((capacity) => claudeHealthRoute
+            ? annotateClaudeCapacity(capacity, claudeHealthRoute, args.effort)
+            : capacity);
       }),
     );
     const reservePercent = routingPolicy.reservePercent;
@@ -1451,6 +1603,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       observedAtMs: (args.providerRouting?.now ?? Date.now)(),
       cacheValidMs: config.workerProviders?.capacityCacheMs ?? 60_000,
       policy: routingPolicy,
+      ...(claudeHealthRoute ? { modelHealth: claudeHealthRoute } : {}),
     };
     const publishProviderRoutingStatus = (input: ProviderRoutingWriteInput): void => {
       try {
@@ -1491,12 +1644,22 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       }),
     );
     if (selection.provider === "codex") {
-      assertLiveSpawnAllowed(`spawnCodexWorker for task ${args.taskId ?? "<no taskId>"}`);
-      const measurement = await beginSelectedCapacityMeasurement(args, config, selection);
+      const runCodex: NonNullable<NonNullable<SpawnWorkerArgs["providerRouting"]>["spawnCodex"]> =
+        args.providerRouting?.spawnCodex ?? spawnCodexWorker;
+      if (args.providerRouting?.spawnCodex === undefined) {
+        assertLiveSpawnAllowed(`spawnCodexWorker for task ${args.taskId ?? "<no taskId>"}`);
+      }
+      const measurement = await beginSelectedCapacityMeasurement(args, config, selection, capabilities);
       try {
-        const result = await spawnCodexWorker(args, config, selection.capacity);
+        const result = await runCodex(args, config, selection.capacity);
+        result.routedModel = selection.capacity.model ?? result.model;
+        if (args.model) result.model = args.model;
+        if (claudeHealthRoute) {
+          result.modelHealthState = claudeHealthRoute.state;
+          result.modelHealthSource = claudeHealthRoute.source;
+        }
         result.accountLabel = selection.capacity.accountLabel;
-        result.windowConsumption = await finishSelectedCapacityMeasurement(args, config, selection, measurement);
+        result.windowConsumption = await finishSelectedCapacityMeasurement(args, config, selection, measurement, capabilities);
         return result;
       } catch (error) {
         if (measurement) abandonProviderWindowMeasurement(measurement);
@@ -1533,7 +1696,6 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
   // caller in src/ (run-task.ts's readUsageSnapshot, "usage-probe") does not, so its
   // stable, non-per-call home is unchanged.
   const workerHome = perRunWorkerHomeDir(workerHomeRoot, args.runId, { perSpawn: true });
-  const realHome = process.env.HOME ?? homedir();
   try {
     // W1-T235 (WS-7 keychain-unlock gate, macOS only): guarantee the DEDICATED
     // always-unlocked worker keychain before any spawn, and point the redirected
@@ -1668,7 +1830,9 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       ),
     };
     if (args.resumeSessionId) options.resume = args.resumeSessionId;
+    const routedClaudeModel = claudeHealthRoute?.routedModel ?? args.model;
     if (args.model) options.model = args.model;
+    if (routedClaudeModel && routedClaudeModel !== args.model) options.model = routedClaudeModel;
     if (args.effort) options.effort = args.effort as Options["effort"];
     if (typeof args.maxTurns === "number") options.maxTurns = args.maxTurns;
     if (typeof args.maxBudgetUsd === "number") options.maxBudgetUsd = args.maxBudgetUsd;
@@ -1718,7 +1882,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     // Multi-provider installs take fresh, reset-aware boundaries only after every local Claude
     // preflight has cleared. Claude-only installs preserve the existing zero-extra-read path.
     const measurement = routedClaudeSelection
-      ? await beginSelectedCapacityMeasurement(args, config, routedClaudeSelection)
+      ? await beginSelectedCapacityMeasurement(args, config, routedClaudeSelection, capabilities)
       : undefined;
 
     try {
@@ -1759,8 +1923,13 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         teardownContained,
       );
       result.provider = "claude";
+      result.routedModel = routedClaudeModel;
+      if (claudeHealthRoute) {
+        result.modelHealthState = claudeHealthRoute.state;
+        result.modelHealthSource = claudeHealthRoute.source;
+      }
       result.windowConsumption = routedClaudeSelection
-        ? await finishSelectedCapacityMeasurement(args, config, routedClaudeSelection, measurement)
+        ? await finishSelectedCapacityMeasurement(args, config, routedClaudeSelection, measurement, capabilities)
         : undefined;
       return result;
     } catch (err) {
