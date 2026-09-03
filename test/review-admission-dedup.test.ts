@@ -156,7 +156,7 @@ test("W1-T2583: dedup filtering preserves both bounds and immutable oldest-first
     "the plan-filing bound remains three and ordering remains immutable oldest-first");
 });
 
-test("W1-T2583: selection reads the ledger once and every per-PR action guard still re-reads it", async () => {
+test("W1-T2583/W1-T2771: selection reads once, per-PR guards re-read, and an admitted review re-reads at claim time", async () => {
   const path = ledgerPath();
   const prs = [reviewPr(10, "2026-08-25T00:00:00Z"), reviewPr(20, "2026-08-26T00:00:00Z")];
   appendLedger(path, {
@@ -175,8 +175,8 @@ test("W1-T2583: selection reads the ledger once and every per-PR action guard st
     },
   }));
 
-  assert.equal(reads, prs.length + 1,
-    "one pass-level selection read plus one action-time read per scoped runSweep call; never one selection read per candidate");
+  assert.equal(reads, prs.length + 2,
+    "one selection read, one guard read per scoped runSweep call, and one fresh action-time read for the admitted review");
   assert.deepEqual(posted, [20]);
 });
 

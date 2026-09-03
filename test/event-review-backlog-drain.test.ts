@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { GhPaceFloorStandDownError } from "../src/lib/open-prs-rest.js";
+import { appendLedger } from "../src/lib/ledger.js";
 import {
   DEFAULT_SWEEP_POLICY,
   runSweep,
@@ -139,7 +140,7 @@ test("W1-T2584: the continuation gate is checked before every later admission an
   assert.deepEqual(recovered, [1, 2, 3], "released keys let the ordinary next pass recover every head");
 });
 
-test("W1-T2584: a concurrent light-shaped sweep cannot double-post a head claimed by the draining full sweep", async () => {
+test("W1-T2584/W1-T2771: an active review remains exclusive while an unstarted queued review may be overtaken", async () => {
   const path = ledgerPath();
   const policy: SweepPolicy = { ...DEFAULT_SWEEP_POLICY, reviewLanes: 1 };
   let releaseFirst: () => void = () => {};
@@ -164,17 +165,37 @@ test("W1-T2584: a concurrent light-shaped sweep cannot double-post a head claime
   );
   await firstStarted;
 
-  const lightSummary = await runSweep(
-    [OLDEST_FIRST[1]],
-    fakeDeps(path, { runId: "W1-T2584-LIGHT", postReview: (pr) => { lightAttempts.push(pr.prNumber); } }),
+  const activeLightSummary = await runSweep(
+    [OLDEST_FIRST[0]],
+    fakeDeps(path, { runId: "W1-T2584-LIGHT-ACTIVE", postReview: (pr) => { lightAttempts.push(pr.prNumber); } }),
     policy,
   );
-  assert.deepEqual(lightAttempts, [], "the concurrent pass cannot post the already-claimed second head");
-  assert.equal(lightSummary.actions[0].acted, false);
+  assert.equal(lightAttempts.length, 0, "the concurrent pass cannot double-post the actively running first head");
+  assert.equal(activeLightSummary.actions[0].acted, false);
+
+  const pendingLightSummary = await runSweep(
+    [OLDEST_FIRST[1]],
+    fakeDeps(path, {
+      runId: "W1-T2584-LIGHT-PENDING",
+      postReview: (pr) => {
+        lightAttempts.push(pr.prNumber);
+        appendLedger(path, {
+          run_id: "W1-T2584-LIGHT-PENDING",
+          task_id: pr.taskId ?? "",
+          step: "review.posted",
+          head_sha: pr.headSha,
+          state: "success",
+        });
+      },
+    }),
+    policy,
+  );
+  assert.deepEqual(lightAttempts, [2], "the queued second head owns no mutex until the full sweep starts it");
+  assert.equal(pendingLightSummary.actions[0].acted, true);
 
   releaseFirst();
   await fullPass;
-  assert.deepEqual(fullAttempts, [1, 2], "the owning full pass drains the head exactly once");
+  assert.deepEqual(fullAttempts, [1], "the full sweep re-reads the overtaking pass's durable outcome and never double-posts");
 });
 
 test("W1-T2584: the shipped review width remains two", () => {
