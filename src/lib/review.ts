@@ -2093,6 +2093,17 @@ export function execWhitelistedProof(
     return "pass";
   } catch (e) {
     const err = e as NodeJS.ErrnoException & { status?: number | null; stdout?: string | Buffer | null };
+    // W1-T2742: A TIMEOUT IS NOT A VERDICT, AND THE GUARD BELOW CANNOT SEE ONE. `execFileSync`
+    // kills the child with SIGTERM at `timeoutMs`, but `node --test` TRAPS SIGTERM and shuts down
+    // cleanly, so the error carries `status: 1`, `signal: null`, `killed: undefined` — MEASURED —
+    // and reads as an ordinary nonzero exit. The line below therefore did not fire, and a proof
+    // that merely ran longer than `proofTimeoutMs` was graded `executed_fail`, which OVERRIDES
+    // keyword coverage and fails the PR on a criterion whose test passes. Node does set
+    // `code: "ETIMEDOUT"` on the timeout error regardless of how the child exited, and that is the
+    // one field that discriminates it, so it is checked FIRST and independently of `status`.
+    // This restores what the doc comment above already promises: a timeout yields `exec_error` —
+    // no conclusion at all — never a false `executed_fail`.
+    if (err.code === "ETIMEDOUT") throw err; // ⇒ exec_error: ran out of time, concluded nothing
     if (typeof err.status !== "number") throw err; // killed by signal (timeout) / spawn error (ENOENT, …) ⇒ exec_error
     // A clean nonzero exit. For a name-filtered proof this does NOT necessarily
     // mean OUR named test failed (see the doc comment above) — read the TAP

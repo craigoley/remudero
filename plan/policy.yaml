@@ -38,8 +38,16 @@
 # rewires review.ts/worker.ts/daemon.ts/sweep.ts/drain.ts/launchd.ts to read every
 # field below instead of their current source literals.
 
+# W1-T2742: RAISED 60000 -> 180000, inside this row's own declared max (300000). The bound is a
+# HANG GUARD ("a hanging test must never stall the required check into the absent-check deadlock
+# class", src/lib/review.ts) — it is not a performance budget, and 60s was separating nothing:
+# test/retro-marker-atomic.test.ts is a real, PASSING integration suite that measured 52.9s on a
+# dev host and still exceeded 60s on the reviewer host, so the bound was firing on the healthy
+# population it exists to spare. The floor stays 60000 (the binding 30000 rejection below is
+# untouched); only the operating value moves. Paired with the ETIMEDOUT fix in the same change:
+# raising the ceiling alone would only have made a misgraded timeout rarer, not correct.
 proofTimeoutMs:
-  value: 60000
+  value: 180000
   origin: "lifted:src/lib/review.ts:675 (DEFAULT_PROOF_TIMEOUT_MS)"
   # Floor = the CURRENT live source value. Never regress below it (the 30000 rejection).
   min: 60000
