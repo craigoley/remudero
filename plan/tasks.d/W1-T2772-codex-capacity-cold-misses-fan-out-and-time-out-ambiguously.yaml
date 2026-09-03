@@ -1,0 +1,94 @@
+- id: W1-T2772
+  title: "Codex capacity cold misses fan out duplicate app-server probes, cache no failure posture, and report either unfinished RPC as a rate-limit timeout"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 24.00
+  files:
+    - src/lib/worker-provider.ts
+    - test/codex-capacity-singleflight.test.ts
+  origin: "operator-session#codex-capacity-timeout-2026-09-03"
+  plan_refs: ["W1-T2572", "W1-T2573", "W1-T2704", "W1-T2711", "W1-T2756"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON THE AZURE FLEET HOST. In the 24 hours ending 2026-09-03T13:45Z, the daemon
+    logged 17 Codex capacity failures as `rate-limit read timed out after 10000ms`. Several
+    failures arrived in same-second pairs at 02:24, 03:21, 03:29, 03:39, 03:49 and 11:06 UTC.
+    Successful reads were interleaved on the same account, including a success four seconds after
+    a timeout at 02:15. Three fresh read-only controls against the deployed pinned
+    `codex-cli 0.152.0` then completed in 1318ms, 688ms and 684ms and returned the same readable
+    `gpt-5.6-terra` capacity. The normal latency is therefore not proved to exceed ten seconds;
+    blindly raising the timeout would hide the burst mechanism and lengthen every false-negative.
+
+    OBSERVED IN SOURCE. `spawnWorker` can begin multiple provider reads concurrently.
+    `readCodexCapacity` caches only a completed successful raw reading and has no in-flight
+    promise per `codexBin + codexHome`. Concurrent cold callers therefore start duplicate
+    `codex app-server` processes and send duplicate initialize, rate-limit and model-list RPCs.
+    A timeout is not cached at all, so the next dispatch immediately repeats the cold probe.
+
+    THE CURRENT ERROR ATTRIBUTION IS UNPROVEN. One timer covers initialization,
+    `account/rateLimits/read` and `model/list`, and the function resolves only after both RPCs.
+    Its timeout text always says `rate-limit read timed out`, even when rate limits arrived and
+    model discovery is the missing response. Production logs cannot identify which phase stalled.
+
+    Preserve fail-closed routing. An unreadable or backed-off Codex probe is never spare capacity,
+    never inherits an old quota percentage, and never forces Codex. Claude remains eligible only
+    through its own independently readable headroom. Attribution-boundary `forceRefresh` calls
+    must remain fresh so per-worker window-consumption measurements are not smeared across
+    concurrent workers.
+  design: |
+    Refactor the app-server exchange into a raw-reading promise keyed by the already-existing
+    `codexBin + codexHome` identity. Ordinary routing calls on the same cold key share exactly
+    one in-flight exchange. After that exchange resolves, each caller independently applies its
+    requested capability, model, effort, preference and reserve to the shared raw model/rate-limit
+    reading; single-flight must not collapse different caller policy.
+
+    Keep the existing successful-reading cache and add a short, bounded failure backoff no longer
+    than ten seconds and no longer than `capacityCacheMs`. Cache only the explicit unreadable
+    result during that backoff. A backoff hit returns unreadable with its provenance and age; it
+    never returns the last successful quota as current headroom. Once the backoff expires, one
+    ordinary caller starts one new probe and concurrent peers join it.
+
+    `forceRefresh` is an attribution boundary: it bypasses the success cache, failure backoff and
+    ordinary in-flight exchange and performs its own fresh read. This preserves the existing
+    before/after measurement contract even if an ordinary routing probe is active.
+
+    Track whether initialize, `account/rateLimits/read` and `model/list` completed. On timeout,
+    name exactly the still-pending phase or phases and the bound. Do not call a model-list stall a
+    rate-limit timeout. Kill each spawned app-server exactly once on every success, error, exit and
+    timeout path, and keep malformed/error/pagination outcomes unreadable.
+
+    Extend `clearCodexCapacityCache` to clear successful and failure caches plus the in-flight
+    registry for deterministic tests. Do not add a retry, persistent daemon, stale-while-revalidate
+    quota, new config field, provider-policy change, or Claude-path change in this concern. The
+    phase-specific evidence will tell a later task whether the bound or protocol needs tuning.
+  acceptance:
+    - claim: "three concurrent ordinary cold reads for one Codex installation spawn exactly one app-server exchange and each caller applies its own model and effort policy to the shared raw result"
+      proof: "unit test: test/codex-capacity-singleflight.test.ts"
+    - claim: "a failed ordinary probe is returned as unreadable from a bounded short backoff without another spawn, and the first call after expiry starts one new probe that concurrent peers share"
+      proof: "unit test: test/codex-capacity-singleflight.test.ts"
+    - claim: "neither a prior successful reading nor a failure backoff is ever presented as current Codex headroom after failure"
+      proof: "unit test: test/codex-capacity-singleflight.test.ts"
+    - claim: "forceRefresh bypasses success, failure and in-flight ordinary state so provider-window attribution retains a genuinely fresh boundary"
+      proof: "unit test: test/codex-capacity-singleflight.test.ts"
+    - claim: "timeout diagnostics name exactly initialize, account/rateLimits/read, model/list, or the unfinished combination observed at the bound rather than always blaming rate limits"
+      proof: "unit test: test/codex-capacity-singleflight.test.ts"
+    - claim: "every spawned app-server is torn down once and existing malformed, error, exit, pagination, model-selection and Claude-routing behavior remains fail-closed"
+      proof: "unit test: test/codex-capacity-singleflight.test.ts"
+  falsifier: |
+    Do not build single-flight if the current implementation already shares an in-flight raw
+    reading per Codex installation, or if production timeouts are exclusively isolated sequential
+    probes whose measured normal latency exceeds the configured bound. Neither falsifier holds:
+    source has only a settled-success cache, production contains repeated same-second failures,
+    and three fresh controls all completed below 1.4 seconds. Do not infer which RPC is slow until
+    the phase-specific diagnostic observes it.
+  note: |
+    `rmd next-task-id --reserve` reported `RESERVED W1-T2772 on origin`; the reservation must be
+    independently present at `refs/rmd-id/W1-T2772` before publication. This task improves the
+    capacity control plane but does not authorize adding Codex back to
+    `workerProviders.enabled`. Commissioning still requires W1-T2754, W1-T2756, this task, and an
+    explicit operator-approved production validation.
