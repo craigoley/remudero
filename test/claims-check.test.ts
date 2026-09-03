@@ -70,6 +70,28 @@ test("claims-check CLI: an unreadable --file path -> non-zero exit (no crash-wit
   assert.notEqual(result.status, 0, result.stdout + result.stderr);
 });
 
+// ── W1-T2640: falsifier fixture for plan/claims.yaml's `plan-format-covers-shards` claim ────────
+//
+// plan/claims.yaml's new claim pins MASTER-PLAN.md §2 documenting the sharded filing home (a NEW
+// task's plan/tasks.d/<id>-<kebab-slug>.yaml shard), the monolith-append refusal, and the
+// loadPlan merge/duplicate-id rule. This fixture mirrors that assertion's exact shape against two
+// synthetic §2 fragments -- one carrying the amended wording, one carrying only the pre-amendment
+// (monolith-only) wording -- proving the assertion actually FAILS on the wording it is meant to
+// catch, not merely that plan/claims.yaml parses.
+
+test("claims-check CLI: plan-format-covers-shards falsifier fixture -- the amended §2 wording PASSES, the pre-amendment (monolith-only) wording FAILS and is named, and a missing input fixture reports COULD-NOT-RUN", () => {
+  const result = runCli("plan-format-covers-shards.yaml");
+  const output = result.stdout + result.stderr;
+  assert.notEqual(result.status, 0, output);
+  assert.match(output, /PASS {2}fixture-plan-format-amended/);
+  assert.match(output, /FAIL {2}fixture-plan-format-pre-amendment-planted-lie/);
+  assert.match(output, /THE PLAN IS LYING ABOUT THE SYSTEM/);
+  assert.match(output, /\[fixture-plan-format-pre-amendment-planted-lie\]/);
+  assert.match(output, /COULD-NOT-RUN {2}fixture-plan-format-could-not-run/);
+  assert.doesNotMatch(output, /PASS {2}fixture-plan-format-could-not-run/);
+  assert.doesNotMatch(output, /FAIL {2}fixture-plan-format-could-not-run/);
+});
+
 // ── The real plan/claims.yaml: seeded, green, and wired into CI ─────────────
 
 test("claims-check: the real plan/claims.yaml is seeded with (at least) the six W1-T29 checkable claims and every assertion currently holds", async () => {
