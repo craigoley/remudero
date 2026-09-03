@@ -314,6 +314,41 @@ fi
 DISK_FREE_KB="$(df -Pk "$RMD_ROOT" 2>/dev/null | awk 'NR==2 {print $4}')"
 [ -n "$DISK_FREE_KB" ] || DISK_FREE_KB="unknown"
 
+# W1-T2767: PER-DEVICE, BECAUSE THE ONE NUMBER ABOVE HAS NEVER ONCE MEASURED THE DISK THAT FILLS.
+#
+# On 2026-09-02 the 29G OS disk hit 100% and the host ran wedged ~25h. `disk_free_kb` read ~102GB
+# green throughout, and correctly: `RMD_ROOT` is a MOUNT of the 126G data disk (dev 66310) while
+# `/` is dev 66306. Three instruments shared that blind spot — this beat, `readDiskHeadroom`
+# (config.root, W1-T2757) and `host-update.sh --reclaim-only` (prunes the docker root, prints
+# `df /`, W1-T2758) — so the pattern, not any one of them, is the finding.
+#
+# WHY THE HOST SIDE HAS TO PUBLISH THIS. The daemon runs INSIDE a container whose `/` is a docker
+# overlay on the data disk; host `/` reaches it only via the `.claude`/`.codex` bind mounts, i.e.
+# incidentally, because those happen to live under /home. An in-container enumeration that reads
+# green today would go silently blind the moment those binds moved. The beat runs on the host and
+# can name the host's own root directly, so this is the reading that cannot be undermined.
+#
+# DEDUPED BY DEVICE, NOT BY PATH: `df -Pk` column 1 is the backing device, so two paths on one
+# filesystem collapse to one row instead of double-reporting the same free space. Every value is
+# `unknown` rather than 0 when unreadable — an unreadable filesystem is never reported as a full
+# one, matching `readDiskFreeBytes`'s own fail-soft discipline.
+df_field() { df -Pk "$1" 2>/dev/null | awk -v c="$2" 'NR==2 {print $c}'; }
+ROOT_FS_FREE_KB="$(df_field / 4)"; [ -n "$ROOT_FS_FREE_KB" ] || ROOT_FS_FREE_KB="unknown"
+ROOT_FS_DEVICE="$(df_field / 1)";  [ -n "$ROOT_FS_DEVICE" ]  || ROOT_FS_DEVICE="unknown"
+STATE_FS_DEVICE="$(df_field "$RMD_ROOT" 1)"; [ -n "$STATE_FS_DEVICE" ] || STATE_FS_DEVICE="unknown"
+
+# The smallest READABLE headroom across the distinct devices — the number a reader should alarm on,
+# since any one of them filling halts the fleet. `unknown` only when nothing was readable; a single
+# unreadable device never drags a readable minimum to `unknown`, and never invents a 0.
+DISK_MIN_FREE_KB="unknown"
+for _kb in "$DISK_FREE_KB" "$ROOT_FS_FREE_KB"; do
+  case "$_kb" in ''|*[!0-9]*) continue ;; esac
+  case "$DISK_MIN_FREE_KB" in
+    unknown) DISK_MIN_FREE_KB="$_kb" ;;
+    *) [ "$_kb" -lt "$DISK_MIN_FREE_KB" ] && DISK_MIN_FREE_KB="$_kb" ;;
+  esac
+done
+
 LEDGER_BYTES="unknown"
 if [ -r "$LEDGER" ]; then
   LEDGER_BYTES="$(wc -c < "$LEDGER" 2>/dev/null | tr -d ' ')"
@@ -487,6 +522,11 @@ config_root_source=${ROOT_SOURCE}
 ledger_state=${LEDGER_STATE}
 ledger_bytes=${LEDGER_BYTES}
 disk_free_kb=${DISK_FREE_KB}
+state_fs_device=${STATE_FS_DEVICE}
+state_fs_free_kb=${DISK_FREE_KB}
+root_fs_device=${ROOT_FS_DEVICE}
+root_fs_free_kb=${ROOT_FS_FREE_KB}
+disk_min_free_kb=${DISK_MIN_FREE_KB}
 prev_beat_ts=${PREV_BEAT_TS:-none}
 since_prev_beat_s=${SINCE_PREV_S:-unknown}
 restart_source=${RESTART_SOURCE}
