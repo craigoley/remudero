@@ -20,15 +20,34 @@ import test from "node:test";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");
 const SCRIPT = join(REPO_ROOT, "scripts", "mkdtemp-callsite-check.mjs");
+type ScanSummary = {
+  refused: Array<{ file: string; line: number; arg: string; classification: string }>;
+  scanned: number;
+  allowedCount: number;
+};
 const mod = (await import(pathToFileURL(SCRIPT).href)) as {
   ALLOWLIST_PATH: string;
   RMD_TMP_PREFIX: string;
+  checkMkdtempCallsites: (repoRoot: string, opts?: { scan?: (root: string) => ScanSummary }) => ScanSummary;
   classifyMkdtempFirstArg: (expr: string) => string;
   formatRefusal: (row: { file: string; line: number; arg: string; classification: string }) => string;
-  main: (opts?: { repoRoot?: string; out?: (s: string) => void; err?: (s: string) => void }) => number;
+  main: (opts?: {
+    repoRoot?: string;
+    out?: (s: string) => void;
+    err?: (s: string) => void;
+    scan?: (root: string) => ScanSummary;
+  }) => number;
   scanFile: (text: string) => Array<{ line: number; arg: string; classification: string }>;
 };
-const { ALLOWLIST_PATH, RMD_TMP_PREFIX, classifyMkdtempFirstArg, formatRefusal, main, scanFile } = mod;
+const {
+  ALLOWLIST_PATH,
+  RMD_TMP_PREFIX,
+  checkMkdtempCallsites,
+  classifyMkdtempFirstArg,
+  formatRefusal,
+  main,
+  scanFile,
+} = mod;
 
 // ── classification: the rule's pure heart ───────────────────────────────────────────────────
 
@@ -117,6 +136,30 @@ test("W1-T2773 scanFile: reports the line, the raw arg, and the classification f
   assert.equal(rows[2].line, 4);
 });
 
+test("W1-T2773 scanFile: strings, comments, and unbalanced calls cannot confuse delimiter matching", () => {
+  const balanced = [
+    "const line = mkdtempSync(join(tmpdir(), 'rmd-line-') // comment with ) and ,",
+    ");",
+    "const block = mkdtempSync(join(tmpdir(), 'rmd-block-') /* comment with ) and , */);",
+  ].join("\n");
+  assert.deepEqual(
+    scanFile(balanced).map((row) => row.classification),
+    ["sanctioned-literal", "sanctioned-literal"],
+    "delimiters inside comments must not close or split a real call",
+  );
+
+  assert.deepEqual(
+    scanFile("const unfinished = mkdtempSync(join(tmpdir(), 'rmd-open-')"),
+    [],
+    "an unclosed outer call is ignored rather than parsed past EOF",
+  );
+  assert.deepEqual(
+    scanFile("const prose = \"unterminated mkdtempSync(join(tmpdir(), 'bare-'))"),
+    [],
+    "an unterminated string remains an exclusion through EOF",
+  );
+});
+
 // ── main(): the exit-code contract, driven through the same argv path pre-commit will use ───
 
 function makeFixtureRepo(files: Record<string, string>): string {
@@ -194,6 +237,31 @@ test("W1-T2773 main: an allowlisted `<file>:<line>` bypasses the rule (the migra
   const out: string[] = [], err: string[] = [];
   const rc = main({ repoRoot: root, out: (s: string) => out.push(s), err: (s: string) => err.push(s) });
   assert.equal(rc, 0, `allowlisted callsite must not red; err:\n${err.join("\n")}`);
+});
+
+test("W1-T2773 programmatic and CLI boundaries preserve the scanner's success and failure contracts", () => {
+  const expected: ScanSummary = { refused: [], scanned: 3, allowedCount: 2 };
+  const roots: string[] = [];
+  assert.deepEqual(
+    checkMkdtempCallsites("/fixture", {
+      scan: (root) => {
+        roots.push(root);
+        return expected;
+      },
+    }),
+    expected,
+  );
+  assert.deepEqual(roots, ["/fixture"], "the programmatic wrapper passes its requested root to the scanner");
+
+  const notRepo = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}mkdtemp-lint-not-a-repo-`));
+  const errors: string[] = [];
+  assert.equal(main({ repoRoot: notRepo, out: () => {}, err: (s) => errors.push(s) }), 2);
+  assert.match(errors.join("\n"), /git ls-files failed/);
+
+  // This child inherits NODE_V8_COVERAGE in CI, so the raw shard includes the direct-execution
+  // guard and process.exit boundary rather than treating a successful import as equivalent.
+  const stdout = execFileSync(process.execPath, [SCRIPT], { cwd: REPO_ROOT, encoding: "utf8" });
+  assert.match(stdout, /mkdtemp-callsite-check: clean/);
 });
 
 test("W1-T2773 formatRefusal: the message text NAMES THE FIX, not just the rule", () => {
