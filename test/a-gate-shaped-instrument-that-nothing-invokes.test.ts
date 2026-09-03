@@ -55,7 +55,7 @@ const mod = (await import(pathToFileURL(SCRIPT).href)) as {
  *  needs. `git add` is enough for `git ls-files` -- no commit, so no author identity is required
  *  and the fixture cannot fail on a runner that has none configured (the #1971 shape). */
 function fixtureRepo(opts: { scripts?: Record<string, string>; workflows?: Record<string, string>; pkgScripts?: Record<string, string> }): string {
-  const root = mkdtempSync(join(tmpdir(), "unwired-gate-"));
+  const root = mkdtempSync(join(tmpdir(), "rmd-unwired-gate-"));
   const env = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" };
   execFileSync("git", ["init", "-q"], { cwd: root, env });
   mkdirSync(join(root, "scripts"), { recursive: true });
@@ -391,7 +391,7 @@ test("W1-T2735: listTrackedScripts really shells git and returns only executable
 });
 
 test("W1-T2735: listTrackedScripts throws, rather than reporting an empty corpus, when git fails", () => {
-  const notARepo = mkdtempSync(join(tmpdir(), "unwired-gate-nogit-"));
+  const notARepo = mkdtempSync(join(tmpdir(), "rmd-unwired-gate-nogit-"));
   try {
     assert.throws(() => mod.listTrackedScripts(notARepo), /git ls-files/, "a silent empty list would report every gate as absent");
   } finally {
@@ -422,7 +422,7 @@ test("W1-T2735: listTrackedScripts gives up and throws after repeated failures, 
 });
 
 test("W1-T2735: collectWiringText tolerates a missing workflows dir and an unreadable package.json", () => {
-  const bare = mkdtempSync(join(tmpdir(), "unwired-gate-bare-"));
+  const bare = mkdtempSync(join(tmpdir(), "rmd-unwired-gate-bare-"));
   try {
     assert.equal(mod.collectWiringText(bare).trim(), "", "no workflows dir and no package.json yields no wiring, not a throw");
     writeFileSync(join(bare, "package.json"), "{ not json");

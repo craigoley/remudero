@@ -94,8 +94,8 @@ test("W1-T2587: the guard is not disabled inside the sandbox — an unmutated in
 
   const feedbackId = "fb-1784766956423-6635d1";
   const relPath = feedbackEntryRepoPath(feedbackId);
-  const baseDir = mkdtempSync(join(tmpdir(), "w1-t2587-instr-base-"));
-  const headDir = mkdtempSync(join(tmpdir(), "w1-t2587-instr-head-"));
+  const baseDir = mkdtempSync(join(tmpdir(), "rmd-w1-t2587-instr-base-"));
+  const headDir = mkdtempSync(join(tmpdir(), "rmd-w1-t2587-instr-head-"));
   try {
     writeFeedbackEntry(baseDir, relPath, "new");
     writeFeedbackEntry(headDir, relPath, "rejected");
@@ -130,8 +130,8 @@ test("W1-T2587: the guard is not disabled inside the sandbox — the mutation is
 
   const feedbackId = "fb-1784766956423-6635d1";
   const relPath = feedbackEntryRepoPath(feedbackId);
-  const baseDir = mkdtempSync(join(tmpdir(), "w1-t2587-mut-base-"));
-  const headDir = mkdtempSync(join(tmpdir(), "w1-t2587-mut-head-"));
+  const baseDir = mkdtempSync(join(tmpdir(), "rmd-w1-t2587-mut-base-"));
+  const headDir = mkdtempSync(join(tmpdir(), "rmd-w1-t2587-mut-head-"));
   try {
     writeFeedbackEntry(baseDir, relPath, "new");
     writeFeedbackEntry(headDir, relPath, "rejected");

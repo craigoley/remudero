@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# hooks/pre-commit — refuse a commit that introduces a bare-prefix mkdtempSync callsite
+# (W1-T2773).
+#
+# Wired via `core.hooksPath hooks` (src/lib/worker.ts's worktreeAdd, W1-T137) — every worker
+# worktree and the operator's own checkout inherit this hook with no bootstrap, exactly the way
+# `hooks/commit-msg` and `hooks/deny-floor.sh` already do.
+#
+# HOW IT SCANS. `git diff --cached --name-only` lists everything about to land; any `.ts`/`.mjs`
+# under src/, scripts/, or test/ that ADDS a bare-prefix `mkdtempSync(join(tmpdir(), '<bare>'))`
+# call fails the commit. The check itself is `scripts/mkdtemp-callsite-check.mjs` — the same
+# script CI runs — so a PR whose commits pass this hook cannot then fail the same rule in CI.
+#
+# WHAT THIS DOES NOT DO. It does not scan for OTHER mkdtemp defects (leaks, races, permission
+# holes). It does not rewrite anything for you. And it does not run on the CI runner — CI runs
+# the same script directly, not this shell wrapper. This hook is the LOCAL half; the CI job is
+# the OTHER half; together they close the "developer machines run things CI never sees" gap.
+set -eu
+
+# `git diff --cached` fails outside a repo — that is not our problem, silently succeed there so
+# the hook never breaks a merge/rebase/cherry-pick that ran outside the normal flow.
+if ! REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"; then
+  exit 0
+fi
+
+# Only run if a staged file is a candidate — mkdtempSync-free commits pay nothing.
+STAGED="$(git diff --cached --name-only --diff-filter=ACMR | grep -E '\.(ts|mjs)$' | grep -E '^(src|scripts|test)/' || true)"
+if [ -z "$STAGED" ]; then
+  exit 0
+fi
+
+# Fast reject: no staged file even mentions mkdtempSync => nothing to check.
+if ! git diff --cached --unified=0 -- $STAGED | grep -qE '^\+.*\bmkdtempSync\s*\('; then
+  exit 0
+fi
+
+# Real scan — same script CI runs. It reads the whole tree (not just the diff) so a callsite
+# a prior commit slipped through can still be caught here.
+if ! node "$REPO_ROOT/scripts/mkdtemp-callsite-check.mjs"; then
+  echo "" >&2
+  echo "pre-commit refused: at least one mkdtempSync callsite would produce a dir the boot sweep" >&2
+  echo "cannot reap. Fix each site named above, or add its \`<file>:<line>\` to" >&2
+  echo "hooks/mkdtemp-allowlist.txt with a reason." >&2
+  exit 1
+fi

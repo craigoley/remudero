@@ -83,7 +83,7 @@ interface BeatOpts {
 }
 
 function runBeat(opts: BeatOpts = {}): Beat {
-  const dir = mkdtempSync(join(tmpdir(), "fleet-heartbeat-gclog-"));
+  const dir = mkdtempSync(join(tmpdir(), "rmd-fleet-heartbeat-gclog-"));
   const binDir = join(dir, "stubbin");
   const scriptsDir = join(dir, "scripts");
   const root = join(dir, "root");

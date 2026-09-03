@@ -156,7 +156,11 @@ function unreachable(reason) {
 export function withFixtureDir(prefix, body) {
   let dir;
   try {
-    dir = mkdtempSync(join(tmpdir(), prefix));
+    // W1-T2773: normalize the variable prefix to the reapable RMD_TMP_PREFIX form so the boot
+    // sweep in src/lib/tmp.ts's sweepStaleTempDirs can reclaim a dir this drill leaves behind on
+    // SIGKILL — the exact defect W1-T2773's lint rule refuses at callsite authoring time.
+    const reapablePrefix = prefix.startsWith("rmd-") ? prefix : "rmd-" + prefix;
+    dir = mkdtempSync(join(tmpdir(), reapablePrefix));
   } catch (e) {
     return unreachable(`could not create the fixture directory: ${String(e?.message ?? e)}`);
   }
