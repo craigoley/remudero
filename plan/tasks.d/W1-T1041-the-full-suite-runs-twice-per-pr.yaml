@@ -287,6 +287,64 @@
     while "seven unrelated branches" counts BRANCHES, so the eighth name may be a second run on a
     branch already counted, or the word may simply be wrong. THIS AMENDMENT DOES NOT RESOLVE IT —
     it records that the list and the prose disagree, so a reader does not take either as measured.
+    ────────────────────────────────────────────────────────────────────────────────────────
+    AMENDED 2026-09-02 (third) — THE MECHANISM IS GONE, AND TWO PREMISES MOVED UNDER THIS
+    SHARD. EVIDENCE ONLY: NO RULING IS MADE HERE AND NO HARNESS IS RECOMMENDED.
+    ────────────────────────────────────────────────────────────────────────────────────────
+
+    (13) THE RACE §(8) NAMES AS THE CAUSE HAS BEEN ELIMINATED, AND ITS ABSENCE IS PROVEN BY A
+    LIVE FALSIFIER RATHER THAN BY A BARE ZERO. §(8) attributes the disagreement to a harness race:
+    node runs test FILES concurrently against one on-disk tree, a source-mutating check writes the
+    real checked-out file, and instrumentation widens the overlap window until another file's
+    import lands inside it. THE PRECONDITION IS SOURCE MUTATION. W1-T2291 shipped
+    `scripts/tracked-source-write-check.mjs`, and on origin/main 5094fa05 it reports:
+
+        tracked-source-write-check: clean -- 0 tracked-src writes across 1011 tracked test/**/*.ts files.
+
+    POSITIVE CONTROL, because a zero decides nothing on its own: that guard's own falsifier suite
+    (`test/tracked-source-write-guard.test.ts`) passes 24/24 and includes real detection arms — "a
+    writeFileSync target resolving under the tracked src/ tree is named with its file, line",
+    "renameSync flags EITHER end that resolves under tracked src/". The check can see its corpus.
+    No mutation, so the named mechanism cannot fire.
+
+    (14) A BOUNDED REPRODUCTION ATTEMPT FOUND NO DISAGREEMENT — AND ITS LIMIT IS STATED. Both
+    harnesses were run over the SAME 14-file concurrent batch, including `test/daemon.test.ts`
+    (which carries the standing coverage-only failure §(8) tracks across eight days) and
+    `test/acceptance-block-diagnostics.test.ts` (the file whose line 424 records the race):
+
+        plain          node --test --import tsx --import ./test/setup/tmp-hygiene.ts <14 files>
+                       -> # tests 95  # pass 95  # fail 0   exit 0
+        instrumented   node --enable-source-maps --experimental-test-coverage
+                       --test-coverage-exclude="test/**" --test-reporter=spec ... <same 14 files>
+                       -> tests 95  pass 95  fail 0         exit 0
+
+    ⚠ THIS IS 95 TESTS, NOT 12,958. A race is probabilistic in the width of an overlap window, so a
+    bounded batch CANNOT prove absence and this is not offered as doing so. It is corroboration
+    beside (13), which is the load-bearing evidence; (13) is a precondition argument and does not
+    depend on reproduction at all.
+
+    (15) TWO PREMISES MOVED UNDER §(4)'s ARITHMETIC AFTER IT WAS TAKEN, BOTH REDUCING THE COST.
+      (a) W1-T2428's FAST LANE. Both jobs now classify the diff and SKIP the suite when it is not
+          SOURCE class — ci.yml carries `W1-T2428 fast-lane: class=${CLASS} — skipping Test with
+          coverage (no src/**/test/** path in this diff, so coverage cannot newly move)`. The
+          duplication §(4) prices at every push is therefore paid only on SOURCE-class diffs now,
+          not on all 115 runs/day.
+      (b) W1-T255'S RETRY IS GONE FROM THE COVERAGE JOB, reversed 2026-08-28; ci.yml says so in its
+          own words ("`scripts/test-with-retry.mjs` is GONE from this invocation and STAYS in the
+          `ci` job"). §(1)'s "four full suite executions per failing PR" and §(8)'s doubling
+          amplifier no longer apply to that half.
+
+    RE-PRICED ON ONE CURRENT SOURCE-CLASS RUN (#3711, head 7826bc5, all eight shards green):
+    ci-shard 1090s + coverage-shard 1719s = 2809s billed per head, against §(4)'s 1,178s — the
+    figure ROSE 2.4x because the suite grew from ~7,900 to 12,958 tests, even as (a) and (b) cut
+    the number of runs that pay it.
+
+    (16) WHAT THIS CHANGES FOR THE OPEN RULING, STATED WITHOUT MAKING IT. §(3)'s objection to
+    merging is explicit: "merging the two runs means DELETING ONE OF TWO VERDICTS THAT HAVE BEEN
+    MEASURED TO DIFFER." On the evidence above that objection no longer stands on current code —
+    the difference had a named cause and that cause is gone. Option (b)'s OTHER blocker, recorded
+    at §(10), is untouched: something must still run instrumented to produce an lcov at all. NO
+    OPTION IS RECOMMENDED HERE and §(9)'s detection-terms table is unrevised.
   acceptance:
     - claim: "the shard establishes the duplication from both commands and names the difference that is not instrumentation"
       proof: "grep: tmp-hygiene is loaded by ci and NOT by coverage-ratchet in plan/tasks.d/W1-T1041-the-full-suite-runs-twice-per-pr.yaml"

@@ -1,0 +1,96 @@
+- id: W1-T2741
+  title: "GITHUB CHECK FANOUT IS A FULL-SWEEP STORM — the signed webhook coalesces bytes on disk but every distinct terminal check still interrupts the daemon, producing up to sixteen complete sweep passes in one minute and hundreds of accepted wake rows during one CI wave"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 14.00
+  files:
+    - src/lib/github-event-wake.ts
+    - src/lib/policy.ts
+    - src/run-task.ts
+    - plan/policy.yaml
+    - test/a-github-check-fanout-is-a-sweep-storm.test.ts
+  origin: "operator-session#github-event-review-throughput-2026-09-03"
+  plan_refs: ["W1-T2568", "W1-T2656", "W1-T2582", "W1-T1272"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON THE LIVE AZURE DAEMON AFTER THE SIGNED WEBHOOK LANDED. The ledger recorded full
+    `sweep.pass`/`sweep.summary` pairs eight to sixteen times per minute from 23:17 through 23:29,
+    including sixteen pairs in each of 23:21, 23:22 and 23:26. Inside 23:21:01 alone, seven
+    complete pairs landed about 50-80 milliseconds apart. Later CI waves produced 51 accepted
+    `check_run:completed` wakes in minute 00:28, 44 in 00:30 and 43 in 00:32. These are distinct
+    GitHub delivery ids, so the replay-dedup ring correctly accepts all of them.
+
+    THE EXISTING COALESCENCE IS DURABLE BUT NOT TEMPORAL. `writeSweepWakeMarkerAtomic` replaces a
+    single marker with the latest delivery, which bounds disk state. `createDeliveryDedupStore`
+    bounds replay memory. But `createSweepWakeSignal.wake()` resolves the active daemon wait on
+    every new marker edge. Once a fast sweep acknowledges one marker, the next completed matrix
+    check writes another and immediately starts another repository-wide reconciliation. The
+    policy comment calls `githubEventWake.dedupCapacity` a debounce, but capacity answers only
+    "have I seen this delivery id?"; it places no time bound on distinct deliveries.
+
+    THIS DOES NOT REQUIRE FEWER REVIEW WORKERS. The waste happens before review admission: every
+    matrix job, security scan and aggregate check can re-read the same queue while the useful
+    state is still settling. The App's 15,000-request installation budget remained healthy during
+    the observation because downstream caching absorbed much of the traffic, but CPU, ledger
+    volume and reconciliation contention still scale with GitHub's check fanout. A cache keeping
+    the quota green is not evidence that repeated sweeps are free.
+
+    EVENT CLASSES HAVE DIFFERENT LATENCY NEEDS. A pull-request synchronize/open/reopen/close or a
+    submitted review is a low-fanout structural transition and should continue to interrupt the
+    poll immediately. `check_run:completed` and legacy `status` are high-fanout settlement
+    streams. Waiting for a short quiet period before reconciling them avoids reading a half-built
+    verdict repeatedly. The ordinary poll deadline remains the hard backstop, so a continuous
+    event stream can never postpone reconciliation indefinitely.
+  design: |
+    Add a bounded `githubEventWake.checkSettleMs` row to `plan/policy.yaml`, loaded by
+    `src/lib/policy.ts` and passed from `daemonCommand` into `wireSweepWakeToDaemon`. Size the
+    default at 10 seconds: the measured 00:55 check wave delivered terminal checks across about
+    26 seconds with no ten-second quiet gap, while ten seconds remains six times faster than the
+    ordinary 60-second poll. Give the row reviewed min/max bounds; do not hide a new timer literal
+    beside `fs.watch`.
+
+    Keep pull-request and pull-request-review wakes immediate. For `check_run` and `status`, retain
+    the latest durable marker but use trailing-edge settlement: a new high-fanout marker resets
+    the short settle timer. Race that timer with the existing ordinary poll timer rather than
+    replacing it. If events never go quiet, the ordinary timer wins and the same full sweep runs;
+    no webhook can starve reconciliation beyond the pre-existing poll bound.
+
+    Preserve W1-T2656's ownership rule exactly: settling a wake does not consume its marker.
+    `runGatedSweep` acknowledges only after STOP, PAUSE and the sweep-liveness gate accept a real
+    pass. A newer marker racing with acknowledgement remains pending for one later pass. Watcher
+    failure continues to degrade to the ordinary poll.
+
+    Emit one bounded daemon ledger fact when a check/status burst is collapsed, carrying only the
+    event class, coalesced edge count and settle duration. Do not persist webhook bodies or grow a
+    per-delivery queue. Existing ingress acceptance/refusal rows remain the delivery audit; this
+    task changes scheduling, not authentication or replay protection.
+  acceptance:
+    - claim: "many distinct check-run or status deliveries inside one settle window produce one trailing daemon wake rather than one wake per delivery"
+      proof: "unit test: test/a-github-check-fanout-is-a-sweep-storm.test.ts"
+    - claim: "pull-request structural events and submitted review events still interrupt the current poll immediately"
+      proof: "unit test: test/a-github-check-fanout-is-a-sweep-storm.test.ts"
+    - claim: "a continuous high-fanout event stream cannot postpone reconciliation beyond the ordinary poll deadline"
+      proof: "unit test: test/a-github-check-fanout-is-a-sweep-storm.test.ts"
+    - claim: "a settled wake remains durable until an accepted sweep owns it, including across STOP, PAUSE, an overlapping sweep and daemon restart"
+      proof: "unit test: test/a-github-check-fanout-is-a-sweep-storm.test.ts"
+    - claim: "the settle duration is bounded policy data and a collapsed burst emits one bounded count without recording webhook bodies"
+      proof: "unit test: test/a-github-check-fanout-is-a-sweep-storm.test.ts"
+  falsifier: |
+    Close without implementation if a live ledger query shows at most one `sweep.pass` per
+    ordinary poll interval during a check-run wave, or if distinct accepted check deliveries do
+    not reach `createSweepWakeSignal`. The observed rows falsify both alternatives: sixteen full
+    passes landed within one minute, seven within one second, and the allowlist accepts every
+    terminal check with a distinct delivery id. Also close if a temporal settle already exists in
+    policy or wake wiring; `githubEventWake` currently carries only `dedupCapacity`.
+  note: |
+    W1-T2741 was atomically reserved at `refs/rmd-id/W1-T2741` before this file was written. This
+    is deliberately a scheduling/backpressure task, not the later event-indexed incremental-queue
+    design: it changes when the existing full reconciliation runs while preserving its authority.
+    The policy loader, daemon wiring and wake primitive must land together, so the five-path band
+    is `risk: high` with `band_meaning: span` rather than a partially wired policy PR.

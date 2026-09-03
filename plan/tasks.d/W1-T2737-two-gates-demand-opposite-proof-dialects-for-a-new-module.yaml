@@ -1,0 +1,114 @@
+- id: W1-T2737
+  title: "TWO GATES DEMAND OPPOSITE PROOF DIALECTS FOR A NEW MODULE, SO A FILING THAT CREATES ONE CANNOT SATISFY BOTH — `proofEngineDivergenceViolations` requires a `grep: <symbol>( in <caller>` call-site criterion, and `remudero-review` executes that grep against source the task has not written yet and fails the PR on it; the `not_yet_built` carve-out that exists for exactly this problem covers only `unit test:` proofs"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 14.00
+  files:
+    - src/lib/review.ts
+    - test/two-gates-demand-opposite-proof-dialects-for-a-new-module.test.ts
+  origin: "operator-session#pr-3733-dialect-conflict-2026-09-02"
+  plan_refs: ["W1-T456", "W1-T2292", "W1-T1214", "W1-T2716"]
+  status: queued
+  attempts: 0
+  note: |
+    BAND. `risk: high` with `band_meaning: span` is Rule 19 SIZING. The change is small and lands in
+    one module, but it edits the PROOF GRADER — the thing every PR in this repo is judged by — so
+    the falsifier set below is deliberately weighted toward what must NOT change.
+  rationale: |
+    MEASURED ON PR #3733, BOTH DIRECTIONS, SAME BRANCH, 2026-09-02. W1-T2716's shard creates a new
+    module (`src/lib/install-inputs.ts`) and carries a criterion for the wiring:
+
+        claim: "the production worker path calls the shared install-input identity helper"
+        proof: "grep: hashInstallInputs( in src/lib/worker.ts"
+
+    With that criterion the PR read:
+        lint-plan  [call-site] warnings: 0        remudero-review: FAILURE
+    With the same claim carried by the shard's own `unit test:` proof instead:
+        lint-plan  [call-site] warnings: 1        remudero-review: passes
+
+    The review's reason names the mechanism exactly: "proof executed and FAILED on the PR head
+    (grep: hashInstallInputs( in src/lib/worker.ts) — overrides any keyword coverage". Six sibling
+    proofs on the same shard read `not_yet_built` and passed. ONE DIALECT DECIDED THE VERDICT.
+
+    THE TWO DEMANDS, AT SOURCE.
+      * `proofEngineDivergenceViolations` (src/lib/task-linter.ts) emits a `call-site` violation
+        when a task CREATES a module and no criterion proves a caller, and prescribes the form
+        verbatim: "Add one of the form: grep: <symbol>( in <the file that calls it> — the open paren
+        is required". It is asking for the only dialect that can express "a DIFFERENT file calls
+        this symbol".
+      * `remudero-review` EXECUTES a `grep:` proof at review time. On a filing the symbol does not
+        exist, so the grep finds nothing and grades `executed_fail`, which by its own doc "OVERRIDES
+        any keyword coverage" and blocks.
+
+    ⚠ THE CARVE-OUT FOR THIS EXACT PROBLEM ALREADY EXISTS AND DOES NOT COVER THE MANDATED DIALECT.
+    `not_yet_built` (W1-T456) was built because a missing test file "HARD BLOCK[ED] a plan-filing PR
+    whose acceptance criteria cite a test the IMPLEMENTATION, a later PR, will create" — the
+    identical situation, one dialect over. Its own doc scopes it: "an exact-path `unit test:` proof
+    names a file that does not exist on the PR head, but the SAME diff declares that exact path in a
+    plan shard's own `files:` list — a FORWARD REFERENCE, not a failure." A `grep:` proof naming a
+    symbol in a file that same shard declares in `files:` is the same forward reference and gets no
+    such treatment.
+
+    SO THE AUTHOR IS FORCED TO CHOOSE, AND EITHER CHOICE LOSES SOMETHING. Carrying the grep satisfies
+    the linter and fails the review; dropping it passes the review and loses the only criterion that
+    proves the module is WIRED — which is the defect W1-T2292 and W1-T1214 both already produced
+    (each deferred its own wiring to a successor PR nobody filed, and W1-T2732's census found four
+    gate-shaped scripts shipped unwired as a result). The gate that would have caught the most
+    recent instance was itself one of the four.
+
+  design: |
+    (i) EXTEND THE EXISTING CARVE-OUT, DO NOT INVENT A SECOND ONE. `not_yet_built` already encodes
+    the right judgement — a proof naming work this same diff declares in a shard's `files:` is a
+    forward reference, not a failure. The change is to let a `grep:` proof qualify on the SAME
+    terms, so there is one rule with two dialects rather than two rules.
+
+    (ii) THE QUALIFYING TEST IS THE `files:` DECLARATION, NOT THE DIALECT. A `grep:` proof grades
+    `not_yet_built` only when its target PATH is declared in the same diff's shard `files:` AND the
+    symbol is absent from that path on the head. Both halves are required: the path check is what
+    makes it a forward reference rather than a typo, exactly as `shardDeclaredFilesInDiff` already
+    decides for `unit test:`.
+
+    (iii) AN UNDECLARED PATH STAYS `executed_fail`, VERBATIM. W1-T456's own doc draws this line —
+    "NEVER assigned when the named path is simply absent and UNDECLARED" — and it is the whole
+    reason the carve-out is not a hole. A grep at a file no shard in the diff claims is an authoring
+    error and must keep blocking.
+
+    (iv) A BUILT TASK IS UNAFFECTED. Once the symbol exists the grep executes and passes or fails on
+    its merits; nothing about a code PR's grading changes. This only reaches the case where the
+    target path is declared-but-unwritten in the same diff.
+
+    (v) THE LINTER IS NOT TOUCHED. `proofEngineDivergenceViolations` keeps asking for the call-site
+    criterion in the form that can actually express a call site. The fix is to stop the reviewer
+    punishing the author for supplying it.
+
+  acceptance:
+    - claim: "a grep proof whose target path is declared in the same diff's shard files: and whose symbol is absent there grades not_yet_built rather than executed_fail"
+      proof: "unit test: test/two-gates-demand-opposite-proof-dialects-for-a-new-module.test.ts"
+    - claim: "a grep proof naming a path no shard in the diff declares still grades executed_fail, so the carve-out is not a hole"
+      proof: "unit test: test/two-gates-demand-opposite-proof-dialects-for-a-new-module.test.ts"
+    - claim: "a grep proof whose symbol IS present on the head still executes and passes on its merits, so a built task's grading is unchanged"
+      proof: "unit test: test/two-gates-demand-opposite-proof-dialects-for-a-new-module.test.ts"
+    - claim: "the call-site criterion the linter prescribes can be carried by a filing PR without failing review, demonstrated on the shape measured in PR #3733"
+      proof: "unit test: test/two-gates-demand-opposite-proof-dialects-for-a-new-module.test.ts"
+    - claim: "unit test: proof grading is byte-identical to before this change, so W1-T456's existing carve-out is extended rather than rewritten"
+      proof: "unit test: test/two-gates-demand-opposite-proof-dialects-for-a-new-module.test.ts"
+
+  falsifier: |
+    Close this without implementation if `proofEngineDivergenceViolations` stops prescribing the
+    grep form, or gains its own forward-reference exemption — the conflict would then be resolved on
+    the linter's side and a reviewer change would be redundant.
+
+    Re-design rather than build if extending `not_yet_built` to `grep:` proves unable to tell a
+    forward reference from a typo: the path-declaration test is the whole safety argument, and a
+    carve-out that cannot make that distinction would let a misspelled symbol pass as pending work.
+
+    Do NOT resolve this by relaxing `executed_fail`'s override of keyword coverage, and do NOT
+    resolve it by dropping the call-site criterion from filings. The first is the weakening that
+    lets a red proof pass; the second reproduces the unwired-instrument class W1-T2732 measured —
+    four gate-shaped scripts shipped and wired to nothing, one of which would have caught the very
+    defect that shipped past it.

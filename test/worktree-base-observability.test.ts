@@ -4,7 +4,13 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { assertWorktreeBaseCurrent, WorktreeBaseStaleError, worktreeAdd } from "../src/lib/worker.js";
+import {
+  assertWorktreeBaseCurrent,
+  detectWorktreeBaseUncheckableStreak,
+  WORKTREE_BASE_UNCHECKABLE_STREAK_BOUND,
+  WorktreeBaseStaleError,
+  worktreeAdd,
+} from "../src/lib/worker.js";
 import { runTask } from "../src/run-task.js";
 import type { Config } from "../src/lib/config.js";
 import type { ProbeExecResult } from "../src/lib/containment.js";
@@ -151,6 +157,77 @@ test("an unreadable remote head ledgers worktree.base_uncheckable (ref, base, er
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+// ── Part 2b: N consecutive unreadable outcomes are a DISTINGUISHABLE degraded posture -----
+// (design note (iii)) -- pure unit coverage of detectWorktreeBaseUncheckableStreak, the
+// ledger-derived detector, before Part 5 below proves runTask's own dispatch site wires it.
+
+function addLine(remoteHead: string, ts = "2026-01-01T00:00:00.000Z"): LoggedEvent {
+  return { step: "worktree.add", extra: { remote_head: remoteHead, ts } };
+}
+
+/** {@link detectWorktreeBaseUncheckableStreak} reads plain ledger-shaped records, so the ledger's
+ *  own top-level `ts` (see appendLedger) is folded into `extra` here to keep this file's one
+ *  `LoggedEvent` shape -- the function itself only cares about `step`/`remote_head`/`ts` being
+ *  present on the SAME object, which `flattenForDetector` below reproduces. */
+function flattenForDetector(events: LoggedEvent[]): Array<Record<string, unknown>> {
+  return events.map((e) => ({ step: e.step, ...e.extra }));
+}
+
+test("detectWorktreeBaseUncheckableStreak: an empty ledger is not degraded and counts zero", () => {
+  const verdict = detectWorktreeBaseUncheckableStreak([]);
+  assert.equal(verdict.degraded, false);
+  assert.equal(verdict.consecutiveUnreadable, 0);
+  assert.equal(verdict.newestTs, undefined);
+  assert.equal(verdict.oldestTs, undefined);
+});
+
+test("detectWorktreeBaseUncheckableStreak: fewer than the bound consecutive unreadable creations count but do not degrade -- N is a stated bound, never a hair-trigger on one flaky read", () => {
+  const lines = flattenForDetector([addLine("unreadable", "t1"), addLine("unreadable", "t2")]);
+  const verdict = detectWorktreeBaseUncheckableStreak(lines);
+  assert.equal(WORKTREE_BASE_UNCHECKABLE_STREAK_BOUND, 3, "the stated bound this test asserts against");
+  assert.equal(verdict.degraded, false, "2 < the stated bound of 3");
+  assert.equal(verdict.consecutiveUnreadable, 2);
+});
+
+test("detectWorktreeBaseUncheckableStreak: exactly N consecutive unreadable creations ARE a distinguishable degraded posture, naming the oldest and newest timestamps in the run", () => {
+  const lines = flattenForDetector([addLine("unreadable", "t1"), addLine("unreadable", "t2"), addLine("unreadable", "t3")]);
+  const verdict = detectWorktreeBaseUncheckableStreak(lines);
+  assert.equal(verdict.degraded, true);
+  assert.equal(verdict.consecutiveUnreadable, 3);
+  assert.equal(verdict.oldestTs, "t1");
+  assert.equal(verdict.newestTs, "t3");
+});
+
+test("detectWorktreeBaseUncheckableStreak: a single READABLE creation resets the run -- this is 'is it degraded NOW', never a lifetime tally that latches after one bad day", () => {
+  const lines = flattenForDetector([
+    addLine("unreadable", "t1"),
+    addLine("unreadable", "t2"),
+    addLine("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "t3"), // a real, readable sha
+    addLine("unreadable", "t4"),
+  ]);
+  const verdict = detectWorktreeBaseUncheckableStreak(lines);
+  assert.equal(verdict.degraded, false, "only ONE unreadable creation since the readable reset at t3");
+  assert.equal(verdict.consecutiveUnreadable, 1);
+  assert.equal(verdict.oldestTs, "t4");
+  assert.equal(verdict.newestTs, "t4");
+});
+
+test("detectWorktreeBaseUncheckableStreak: non-worktree.add lines (including its own worktree.base_uncheckable companion) never count -- one creation's fail-open is not two", () => {
+  const lines: Array<Record<string, unknown>> = [
+    { step: "worktree.base_uncheckable", ref: "main", base: "x", error: "ETIMEDOUT", ts: "t0" },
+    ...flattenForDetector([addLine("unreadable", "t1"), addLine("unreadable", "t2")]),
+    { step: "worktree.stale_base", base: "x", remote_head: "y", ts: "t3" },
+  ];
+  const verdict = detectWorktreeBaseUncheckableStreak(lines);
+  assert.equal(verdict.consecutiveUnreadable, 2, "exactly the 2 worktree.add lines -- the sibling steps are ignored");
+});
+
+test("detectWorktreeBaseUncheckableStreak: the threshold is an injectable parameter, not hardwired to the exported bound", () => {
+  const lines = flattenForDetector([addLine("unreadable", "t1"), addLine("unreadable", "t2")]);
+  assert.equal(detectWorktreeBaseUncheckableStreak(lines, 2).degraded, true, "a caller-supplied lower bound still degrades");
+  assert.equal(detectWorktreeBaseUncheckableStreak(lines, 5).degraded, false, "a caller-supplied higher bound still does not");
 });
 
 // ── Part 3: the refusal path names a REAL distance when it can, "unknown" -- never zero --
@@ -480,6 +557,64 @@ test("BEHAVIORAL: a REAL runTask() refusal ledgers worktree.stale_base WITH a be
     const staleLine = ledger.find((l) => l.step === "worktree.stale_base");
     assert.ok(staleLine, "the refusal must still ledger worktree.stale_base");
     assert.ok("behind" in (staleLine ?? {}), "the refusal path must carry the distance too (design note (v))");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("BEHAVIORAL: a REAL runTask(), dispatched for 3 DIFFERENT tasks sharing one host ledger, each with an unreadable remote head, ledgers worktree.base_check_degraded on the 3rd creation -- never on the 1st or 2nd -- proving run-task.ts's own dispatch site (not just the library function) wires design note (iii)", async () => {
+  const root = mkdtempSync(join(tmpdir(), "worktree-obs-degraded-root-"));
+  const TASK_IDS = ["T-WORKTREE-OBS-DEGRADED-1", "T-WORKTREE-OBS-DEGRADED-2", "T-WORKTREE-OBS-DEGRADED-3"];
+  const planPath = join(root, "tasks.yaml");
+  writeFileSync(planPath, TASK_IDS.map(behavioralPlan).join(""));
+  const config: Config = { claudeBin: "/bin/true", root };
+  behavioralGitFixture(root);
+
+  const CREDIT_PR: PrRef = { number: 7, url: "https://github.com/acme/remudero/pull/7", state: "MERGED" };
+  // A running counter ACROSS all 3 runTask() calls below (recon, then implement, per call) --
+  // deliberately not reset per call, since the point of this test is that the DEGRADED verdict
+  // itself accumulates across separately-dispatched tasks sharing one host's ledger.
+  let spawnCount = 0;
+  const spawn: typeof spawnWorker = async () => {
+    spawnCount += 1;
+    if (spawnCount % 2 === 1) return workerResult({ sessionId: "s-recon", text: RECON_TEXT });
+    // ALREADY_SATISFIED needs no PR open/push -- same technique the healthy test above uses.
+    return workerResult({ sessionId: "s-implement", text: "REPORT\nALREADY_SATISFIED: #7\n" });
+  };
+
+  try {
+    for (const [i, taskId] of TASK_IDS.entries()) {
+      const res = await withLiveWritesAllowed(() =>
+        runTask(taskId, {
+          skipGitSync: true,
+          planPath,
+          config,
+          github: creditingGithub(taskId, CREDIT_PR),
+          spawn,
+          containmentExec: behavioralHoldingContainmentExec,
+          isolationExec: behavioralCleanIsolationExec,
+          worktreeBaseDeps: {
+            // The FAIL-OPEN branch, not the refusal one: readRemoteHead throws, so
+            // assertWorktreeBaseCurrent's catch fires and worktreeAdd still proceeds --
+            // "unreadable" every time, never "stale".
+            readRemoteHead: () => {
+              throw new Error("ETIMEDOUT: forge unreachable");
+            },
+          },
+        }),
+      );
+      assert.equal(res.verdict, "already_satisfied");
+
+      const ledger = readLedger(root);
+      const degradedLines = ledger.filter((l) => l.step === "worktree.base_check_degraded");
+      if (i < 2) {
+        assert.equal(degradedLines.length, 0, `no degraded line expected after only ${i + 1} unreadable creation(s)`);
+      } else {
+        assert.equal(degradedLines.length, 1, "exactly one degraded line, ledgered on the 3rd unreadable creation");
+        assert.equal(degradedLines[0]?.consecutive_unreadable, 3);
+        assert.equal(degradedLines[0]?.threshold, WORKTREE_BASE_UNCHECKABLE_STREAK_BOUND);
+      }
+    }
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

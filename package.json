@@ -47,6 +47,7 @@
     "api-client:generate": "node scripts/generate-api-client.mjs",
     "api-client:check": "node scripts/generate-api-client.mjs --check",
     "no-hand-rolled-fetch:check": "node scripts/no-hand-rolled-fetch-check.mjs",
+    "unwired-gate:check": "node scripts/unwired-gate-check.mjs",
     "task-id-existence:check": "node scripts/task-id-existence-check.mjs --base origin/main",
     "learnings-assert": "node scripts/learnings-assert-check.mjs",
     "learnings-assert:check": "node scripts/learnings-assert-check.mjs --check",

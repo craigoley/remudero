@@ -1,0 +1,35 @@
+id: fb-repair-blocked-fixable-2957
+ts: 2026-09-03T00:30:14.519Z
+raw: >-
+  SWEEP REPAIR RECURRENCE: the "blocked-fixable" surface was repaired for 3
+  distinct PRs between 2026-09-03T00:00:00.000Z and 2026-09-10T00:00:00.000Z
+  (threshold 3, window 7d).
+
+
+  Root cause is UNOBSERVED — this is a recurrence report, not a diagnosis: the
+  sweep classifies and repairs the INSTANCE (each PR below), it does not
+  investigate why the CLASS keeps recurring.
+
+
+  EVIDENCE (read verbatim off each PR's own sweep.disposed ledger row, never
+  invented):
+
+  - PR #3719 (https://github.com/craigoley/remudero/pull/3719) at 51d4958,
+  2026-09-03T00:27:42.170Z: 1 unmet criterion — strike 1/2
+
+  - PR #3744 (https://github.com/craigoley/remudero/pull/3744) at 44e0d88,
+  2026-09-03T00:29:46.174Z: coverage-ratchet failed on 44e0d88 — ci-log fix,
+  strike 1/2
+
+  - PR #3749 (https://github.com/craigoley/remudero/pull/3749) at 89e4fe5,
+  2026-09-03T00:27:38.126Z: coverage-ratchet failed on 89e4fe5; ci failed on
+  89e4fe5 — ci-log fix, strike 1/2
+attachments: []
+origin: repair#blocked-fixable
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

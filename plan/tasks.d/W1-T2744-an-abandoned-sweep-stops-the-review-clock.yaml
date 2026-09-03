@@ -1,0 +1,103 @@
+- id: W1-T2744
+  title: "AN ABANDONED FULL SWEEP STOPS THE REVIEW CLOCK UNTIL DETACHED FIX WORK FINISHES — MEASURED 2026-09-03: `daemon.sweep.abandoned` FIRED AT 00:36:15, BUT `runGatedSweep` THEN AWAITED `stopSweepTicker()`, WHOSE `drainDetachedSweepActions()` HELD THE CONTROL LOOP BEHIND ONE FIX WORKER; AT 01:11 SIX GREEN MERGEABLE PR HEADS HAD NO REVIEW AND THE LAST DAEMON CONTROL ROW WAS 25 MINUTES OLD WHILE THE CONTAINER USED 393% CPU"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 18.00
+  files: [src/lib/daemon.ts, src/lib/sweep.ts, test/an-abandoned-sweep-does-not-stop-the-review-clock.test.ts]
+  origin: "operator-session#review-outage-2026-09-03"
+  plan_refs: ["W1-T2379", "W1-T2582", "W1-T1272", "W1-T2565"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE OUTAGE IS MEASURED AT BOTH ENDS. The live Azure daemon wrote
+    `daemon.sweep.abandoned` at 00:36:15Z after the configured 559000 ms bound. At 01:11Z its
+    container was still up and CPU-active (`docker stats`: 393.34%, 4.301 GiB), with two test
+    trees seven and ten minutes old, but its last DAEMON control-loop row was the 00:45:59 GitHub
+    App token refresh. During that silence GitHub held SIX heads that were simultaneously open,
+    non-draft, mergeable, all-checks-green, and missing `remudero-review`: #3749, #3751, #3752,
+    #3753, #3755, and #3756. Signed webhook rows continued through 01:09Z. The input arrived; the
+    review clock did not consume it.
+
+    THE BOUND RETURNS FROM THE RACE BUT NOT FROM THE FUNCTION. `runGatedSweep` races the full
+    sweep against `sweepWallClockBoundMs`, closes new review admissions, and records
+    `daemon.sweep.abandoned` when the timer wins. Its unconditional `finally` then awaits
+    `stopSweepTicker()`. That stop sets its local ticker inactive, waits for the current tick, and
+    then awaits the MODULE-GLOBAL `drainDetachedSweepActions()`. W1-T2379 deliberately puts each
+    light-pass fix worker's CI wait in that registry. Therefore one detached fix can keep the
+    bounded call unresolved after the bound fires, while the only ticker assigned to that phase
+    has already been turned off. The wall-clock bound becomes a ledger message, not a liveness
+    boundary.
+
+    THIS IS NOT A REQUEST TO ABORT THE FIX. W1-T2379's durable action row, strike dedup and
+    eventual settlement are correct. The broken invariant is OWNERSHIP: a phase-local ticker stop
+    also owns a process-global drain, so leaving one phase waits for work that was intentionally
+    detached from that phase. The review scheduler must remain live while admitted repair work
+    finishes, without spawning a duplicate repair for the same PR head.
+  design: |
+    (i) SEPARATE CLOCK LIFETIME FROM ACTION LIFETIME. Stopping a phase-local timer must prevent
+    another tick from that timer and await only a tick already executing. It must not wait for
+    every process-global detached action merely because `runGatedSweep` reached its bound.
+    Detached fixes retain one daemon-lifetime owner until they settle.
+
+    (ii) THE WALL-CLOCK BOUND MUST BE MATERIAL. After `daemon.sweep.abandoned`, `runGatedSweep`
+    returns control within a small scheduler margin even when a detached fix promise remains
+    unresolved. The ordinary poll/event-wake path can then derive the queue and post reviews for
+    other green heads. Do not solve this by raising 559 seconds or by adding another timeout
+    around the same drain.
+
+    (iii) EXACTLY ONE LIGHT-REVIEW CLOCK. A phase transition must not leave the old ticker active
+    beside a new one. Stop the timer, preserve detached actions, and let the next daemon phase own
+    the next timer. If the implementation instead chooses one daemon-lifetime ticker, prove that
+    dispatch, retro, sweep, STOP and PAUSE still share one admission gate.
+
+    (iv) SETTLEMENT AND DEDUP STAY INTACT. An already-admitted fix is not killed at the sweep
+    bound; it may finish its CI wait and write its existing success/failure rows. While it is in
+    flight, later light passes must not dispatch a second fix for the same PR head. A rejected
+    detached action remains handled and attributable rather than becoming an unhandled promise.
+
+    (v) OPERATOR HALTS REMAIN AUTHORITATIVE. STOP/PAUSE still prevent new review/fix admission
+    while allowing work already admitted to settle under the existing contract. This task must
+    not turn a liveness repair into an unbounded shutdown wait or an orphaned worker; place any
+    process-final drain at the daemon-lifetime boundary rather than a phase boundary if one is
+    required.
+
+    (vi) TELEMETRY MUST EXPOSE THE INVARIANT WITHOUT A HOT LOOP. Preserve `daemon.alive` on the
+    configured cadence through the abandon-to-settle interval, and record bounded state sufficient
+    to distinguish an abandoned full sweep, an active detached action, and a live review clock.
+    Do not emit one row per promise poll or per GitHub event.
+
+    (vii) NOT IN SCOPE. Changing the review verdict, proof executor, GitHub event debounce,
+    provider selection, merge policy, or the sweep wall-clock value. Those are separately owned.
+  acceptance:
+    - claim: "when a full sweep reaches its wall-clock bound while one detached fix remains unresolved, the bounded call returns without waiting for that fix"
+      proof: "unit test: test/an-abandoned-sweep-does-not-stop-the-review-clock.test.ts"
+    - claim: "after the abandon, a distinct green PR head is admitted to the light review rung within the next configured poll or event wake"
+      proof: "unit test: test/an-abandoned-sweep-does-not-stop-the-review-clock.test.ts"
+    - claim: "the detached fix continues to settlement and writes its existing outcome while no second fix is dispatched for the same PR head"
+      proof: "unit test: test/an-abandoned-sweep-does-not-stop-the-review-clock.test.ts"
+    - claim: "phase transition leaves exactly one light ticker active, with no overlapping sweepLight calls"
+      proof: "unit test: test/an-abandoned-sweep-does-not-stop-the-review-clock.test.ts"
+    - claim: "daemon.alive continues at the configured cadence during the abandon-to-settle interval and telemetry reports bounded detached-action state"
+      proof: "unit test: test/an-abandoned-sweep-does-not-stop-the-review-clock.test.ts"
+    - claim: "STOP and PAUSE withhold new review and fix admission without aborting already-admitted work or leaving an unhandled rejection"
+      proof: "unit test: test/an-abandoned-sweep-does-not-stop-the-review-clock.test.ts"
+  falsifier: |
+    Close without implementation if the production `runGatedSweep` in the deployed image returns
+    promptly after its `daemon.sweep.abandoned` row while a detached light-pass fix remains
+    unresolved, OR if a `daemon.alive`/light-review row exists after 00:45:59Z in the same live run.
+    Both checks were run before filing: the deployed source unconditionally awaits
+    `stopSweepTicker()` in `runGatedSweep`'s `finally`; that stop unconditionally awaits
+    `drainDetachedSweepActions()`; and the ledger contained neither control-loop heartbeat nor
+    review activity after 00:45:59Z despite accepted webhook rows through 01:09:40Z. A container
+    that remains up, or a worker that remains CPU-active, does not falsify the defect — those are
+    the measured shape of the wedge.
+  note: |
+    W1-T2744 was atomically reserved at `refs/rmd-id/W1-T2744` before this file was written. This
+    is a sibling to W1-T2741, not a re-file: W1-T2741 settles event bursts before waking the
+    daemon; this task ensures a correctly-delivered wake still has a live review clock to consume
+    it. One concern only: the phase-stop/process-drain lifetime mismatch.

@@ -101,4 +101,4 @@
     63% of UNTRIAGED entries mention one too. (2) A first `minted_id` sweep returned a FALSE ZERO
     because `task_id` on those rows holds the TRIAGE RUN id (`TRIAGE-fb-…`), with the task in
     `minted_id`; checking the row's keys caught it. Both are the query-shape false-zero class this
-    repo has now measured ten times this week."
+    repo has now measured ten times this week. SHIPPED, RECORDED 2026-09-02 (evidence only). THIS TASK IS BUILT: a merged commit on origin/main carries its own Remudero-Task trailer -- 1eaf6381 fix(auto-triage): gate the rung on a deferred pairing, not on idleness (W1-T469) (#1822). status: queued and verify: human are BOTH left alone: the status field is decorative by documented design and the operator ruled LEAVE THEM on 2026-08-05, and the human gate is this shard's own deliberate parking choice, not this block's to revoke. Nothing mechanical was misled either, since isDispatchEligible refuses a non-auto task before any probe. This record exists because a READER picking build candidates was misled, not a machine."

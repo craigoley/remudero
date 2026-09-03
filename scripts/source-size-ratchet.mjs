@@ -42,7 +42,8 @@
 // paths `git ls-files -- src` would, with no process spawned to get it.
 //
 // Usage:
-//   node scripts/source-size-ratchet.mjs                          # check the real tree in place
+//   node scripts/source-size-ratchet.mjs                          # enforce growth; record non-growth drift
+//   node scripts/source-size-ratchet.mjs --check                  # report baseline drift; never write
 //   node scripts/source-size-ratchet.mjs --root <dir>              # check a different checkout
 //   node scripts/source-size-ratchet.mjs --baseline <path>         # non-default baseline (tests use this)
 //
@@ -246,6 +247,7 @@ function main(argv) {
     options: {
       root: { type: "string", default: "." },
       baseline: { type: "string" },
+      check: { type: "boolean", default: false },
     },
   });
 
@@ -316,6 +318,27 @@ function main(argv) {
   }
 
   console.log(`source-size-ratchet: OK -- ${files.length} source file(s), none over their recorded baseline.`);
+  const baselineDrift = verdict.shrunk.length + verdict.added.length + verdict.removed.length;
+  if (values.check && baselineDrift > 0) {
+    console.error(
+      `source-size-ratchet: CHECK FAILED -- ${baselineDrift} baseline change(s) are required; ` +
+        `${baselinePath} was left byte-identical:`,
+    );
+    if (verdict.added.length > 0) {
+      console.error("  add these exact JSON entries:");
+      for (const a of verdict.added) console.error(`    "${a.path}": ${ceilingFor(a.lines)},`);
+    }
+    if (verdict.shrunk.length > 0) {
+      console.error("  lower these recorded ceilings:");
+      for (const s of verdict.shrunk) console.error(`    ${s.path}: ${s.from} -> ${s.to}`);
+    }
+    if (verdict.removed.length > 0) {
+      console.error("  remove entries for source files that no longer exist:");
+      for (const path of verdict.removed) console.error(`    remove "${path}"`);
+    }
+    console.error("  Re-run without --check to record these non-growth baseline changes.");
+    return 1;
+  }
   if (verdict.shrunk.length > 0) {
     console.log(`source-size-ratchet: ratcheting ${baselinePath} DOWN for ${verdict.shrunk.length} shrunk file(s):`);
     for (const s of verdict.shrunk) console.log(`  - ${s.path}: ${s.from} -> ${s.to} lines`);

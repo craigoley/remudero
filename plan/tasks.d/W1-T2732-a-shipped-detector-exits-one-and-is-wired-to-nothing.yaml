@@ -1,0 +1,139 @@
+- id: W1-T2732
+  title: "W1-T2292 SHIPPED A WORKING DETECTOR AND NOTHING RUNS IT — `scripts/coverage-session-blanking-check.mjs` exits 1 on the current tree naming 3 delete-is-noop defects and 16 unblanked findings across 18 files, yet `grep -rn coverage-session-blanking .github/workflows/ package.json` returns EMPTY: the only two files in the repo that reference it are the script itself and its own unit test"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 20.00
+  files: [.github/workflows/ci.yml, package.json, test/a-shipped-detector-exits-one-and-is-wired-to-nothing.test.ts, test/a-shard-that-produced-no-summary-is-not-a-failure-set.test.ts, test/acceptance-block-diagnostics.test.ts, test/base-blob-read-failure.test.ts, test/coverage-session-blanking.test.ts, test/dispatch-lifetime-breaker.test.ts, test/fast-gate-admits-the-census-class.test.ts, test/git-fixture-gc-hygiene.test.ts, test/ledger-rotation.test.ts, test/merge-lcov.test.ts, test/reapable-prefix.test.ts, test/review-wires-criteria-at-head.test.ts, test/route-scope-matrix.test.ts, test/serve-browser-teardown.test.ts, test/task-id-reservation.test.ts, test/temp-hygiene-suite.test.ts, test/the-local-gate-writes-coverage-where-ci-does.test.ts, test/tracked-source-write-guard.test.ts, test/unexecutable-proof-visibility.test.ts]
+  origin: "operator-session#detector-shipped-unwired-2026-09-02"
+  plan_refs: ["W1-T2292", "W1-T2291", "W1-T1041", "W1-T2716", "W1-T2276"]
+  status: queued
+  attempts: 0
+  rationale: |
+    A DETECTOR NOBODY RUNS IS NOT A GATE. W1-T2292 built
+    `scripts/coverage-session-blanking-check.mjs` (332 lines) and
+    `test/coverage-session-blanking.test.ts` (375 lines, 25/25 passing). Its scope deliberately
+    stopped there — criterion 7 reads "no caller is edited by this task" — so the wiring was never
+    in its remit and no successor was filed. MEASURED 2026-09-02 at origin/main:
+
+        $ node scripts/coverage-session-blanking-check.mjs   -> exit 1
+        FAILED -- 3 delete-is-noop defect(s), 16 unblanked-NODE_TEST_CONTEXT finding(s)
+
+        $ grep -rn "coverage-session-blanking" .github/workflows/ package.json
+        (no output)
+
+    CONTROL ON THAT ZERO: a repo-wide grep for the same string returns exactly TWO files — the
+    script and its own test — so the empty workflow/package result is real absence, not a
+    query-shape zero.
+
+    THE DEFECT IT NAMES IS LIVE AND WIDE. `delete env.NODE_V8_COVERAGE` is a NO-OP: node's
+    child_process force-injects the variable into every spawned child regardless of the env
+    option, so the child stays enrolled in the parent's coverage session and its function table
+    merges into the parent's report keyed on the absolute path. 3 sites use exactly that form.
+    Repo-wide, 284 of 289 spawning test files blank nothing at all — the scan reports the 16 it
+    can see textually and says so.
+
+    WHY IT MATTERS BEYOND TIDINESS. W1-T1041's amendment names two harms at different layers and
+    warns that a ruling conflating them will price one wrong: instrumentation makes test OUTCOMES
+    noisier, while ENROLMENT makes coverage OUTPUT less trustworthy. This is the second one. A
+    silently enrolled child corrupts the lcov `diff-coverage` then grades, which is the job whose
+    unique signal W1-T1041 measured as 30 of 52 single-sided failures.
+
+    THIS IS THE W1-T2716 SHAPE AGAIN, AND THAT IS THE POINT. A correct instrument ships, reports a
+    real condition, and is consumed by nothing. CLAUDE.md's own preamble says the fix for a rule
+    that matters is to make something REFUSE it — not to write the rule down more firmly.
+  design: |
+    (i) CLEAR THE POPULATION FIRST, THEN WIRE. Wiring a check that exits 1 reddens every PR at
+    once. The 3 defects take the documented remedy the scan itself prints
+    (`env.NODE_V8_COVERAGE = undefined` or `= ""`, never `delete`); the 16 findings take the
+    same blanking.
+
+    (ii) THE WIRING IS AN npm SCRIPT PLUS ONE ci.yml JOB, matching how `source-size-ratchet` and
+    `census:catch-erasure` are already wired. It must be a REQUIRED check or it is decorative
+    again.
+
+    (iii) RULE 25, RE-DERIVED EMPIRICALLY RATHER THAN ASSUMED. `INSTRUMENT_SURFACE` leads with
+    `^\.github/workflows/`, so a `src/` path may not ride with this diff. MEASURED: a probe shard
+    carrying exactly this `files:` list linted with NO rule-25 violation — only sizing and
+    proof-scope — so ci.yml, package.json and `test/` may ride together. No `src/` path is
+    declared and none may be added.
+
+    (iv) RULE 19 IS SATISFIED BY BANDING, NOT BY PRETENDING THE SPAN IS SMALL. The same probe read
+    "spans 20 distinct subsystems/concerns ... at risk:medium — raise to risk:high or decompose".
+    Decomposing is wrong here: clearing the sites without wiring leaves the detector unread, and
+    wiring without clearing reddens CI. `risk: high` with `band_meaning: span` is the shape
+    W1-T1041 already uses for a cross-cutting workflow change that ships no product code.
+
+    (v) WHAT THIS MUST NOT DO. It must not edit `scripts/coverage-session-blanking-check.mjs` or
+    its test — W1-T2292 owns those and they pass. It must not widen the scan to the "spawn with no
+    env option" shape the script explicitly names as unreachable. It must not touch `src/`.
+    ── CLASS CENSUS, MEASURED 2026-09-02 (evidence only; this shard's scope is UNCHANGED) ──
+
+    THIS IS NOT ONE UNWIRED DETECTOR. IT IS A CLASS, AND THE REPO'S OWN CONVENTION PRODUCES IT.
+    Census of every tracked executable under `scripts/` at origin/main, against every workflow in
+    `.github/workflows/` and every `package.json` script:
+
+        38 executables   30 wired   8 UNWIRED
+
+    Four of the eight are GATE-SHAPED (named `-check` or `-gate`), and NONE of the four is wired:
+
+        scripts/coverage-session-blanking-check.mjs   exit 1  — 3 defects + 16 findings, LIVE
+        scripts/credit-surface-gate.mjs               exit 1  — REFUSED: no head ref
+        scripts/tracked-source-write-check.mjs         exit 0  — clean; nothing stops a regression
+        scripts/state-citation-check.mjs               exit 0  — clean; nothing stops a regression
+
+    ⚠ THE OTHER FOUR ARE NOT DEFECTS AND ARE NAMED SO THIS CENSUS IS NOT OVER-READ.
+    `host-parity.ts` is imported by `ci-parity.ts` programmatically, `mount-headroom-sweep.mjs` is
+    an operator-run analysis tool, `plan-state-claims.mjs` likewise, and `shell-screenshot.mjs` is a
+    dev utility. None is gate-shaped and none should be a required check.
+
+    THE CONVENTION IS WRITTEN DOWN TWICE, AND BOTH TIMES THE SECOND HALF NEVER SHIPPED.
+    W1-T2292's criterion 7: "no caller is edited by this task."
+    W1-T1214's design (v), on `credit-surface-gate.mjs`, is even more explicit — it defers
+    "wiring this script into a CI workflow step (a separate PR, same pattern
+    `scripts/acceptance-author-gate.mjs`/the coverage-ratchet producer already follow)".
+    Each fence is correct in isolation: a producer PR that also edits `.github/workflows/` trips
+    Rule 25's instrument-isolation. What neither task owns is the successor, and no successor was
+    filed in either case.
+
+    AND THE COST IS NOT HYPOTHETICAL — IT WAS PAID TODAY. `credit-surface-gate.mjs` exists to refuse
+    an implementation PR credited on NEITHER surface (no `Remudero-Task:` trailer, no
+    `run-<taskId>-<epochMs>` head ref). Its own suite covers exactly that case:
+    "W1-T1214: an implementation pr credited on neither surface is refused". On 2026-09-02, PR #3704
+    was opened from `codex/W1-T2720-wire-slug-reaper` with a body ending `Task: W1-T2720` — not
+    `Remudero-Task:` — so `TASK_TRAILER_RE` matched nothing and the branch carried no run-shaped
+    credit either. W1-T2720 would have merged credited by neither path. It was caught by a human
+    reading the body and fixed by hand. THE GATE BUILT FOR THAT EXACT DEFECT WAS SITTING UNWIRED
+    WHILE IT HAPPENED.
+
+    A RECOMMENDATION, RECORDED AS A RECOMMENDATION AND NOT AS A RULING OR A SCOPE CHANGE. Wiring
+    four scripts one at a time leaves the fifth to the same fate, because the convention that
+    produced them is unchanged. The shape that would actually close it is a META-GATE: a check that
+    refuses a tracked `scripts/*-check|*-gate` executable which no workflow and no npm script
+    invokes — the same "make something refuse it" move CLAUDE.md's own preamble prescribes for a
+    rule that keeps being violated silently. That is a SEPARATE task and is not filed here; this
+    shard's scope, files and acceptance are untouched by this block.
+  acceptance:
+    - claim: "the check runs in CI as a required gate rather than existing unread, and the wiring names it by the same script path the repository already uses for its sibling gates"
+      proof: "unit test: test/a-shipped-detector-exits-one-and-is-wired-to-nothing.test.ts"
+    - claim: "every delete-is-noop site is converted to real blanking, so the form the scan calls a no-op no longer appears in any tracked test file"
+      proof: "unit test: test/a-shipped-detector-exits-one-and-is-wired-to-nothing.test.ts"
+    - claim: "the check exits zero on the cleared tree, and a deliberately reintroduced violation makes it exit non-zero naming that file and line"
+      proof: "unit test: test/a-shipped-detector-exits-one-and-is-wired-to-nothing.test.ts"
+    - claim: "the scan's own declared blind spots are unchanged — no new shape is claimed to be covered and its refusal to prove absence still prints"
+      proof: "unit test: test/a-shipped-detector-exits-one-and-is-wired-to-nothing.test.ts"
+    - claim: "neither the detector script nor its W1-T2292 test is edited, and no src path is added to this diff"
+      proof: "unit test: test/a-shipped-detector-exits-one-and-is-wired-to-nothing.test.ts"
+  falsifier: |
+    Close without implementation if the check is already invoked by a workflow or an npm script on
+    origin/main, or if it exits 0 on a fresh checkout. A change that clears the 3 + 16
+    sites WITHOUT wiring the check does not falsify this task: an uncleared tree and an unread
+    detector are the same defect one step apart.
+  note: |
+    W1-T2732 was atomically reserved at `refs/rmd-id/W1-T2732` before this file was written.
+    Successor to W1-T2292's stated scope fence, not a re-file of it: that task's deliverable (the
+    detector) shipped and passes; this one is that detector's missing consumer.

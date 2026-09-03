@@ -25,6 +25,9 @@ reports/stryker-incremental.json
 
 # os / editor
 .DS_Store
+# W1-T2633: never legitimate repo content, and nothing refused them at any layer before this.
+.idea/
+.vscode/
 
 # runtime exhaust (W1-T256): the daemon/serve write these into their OWN working tree every run —
 # pure append-only/derived state (the ledger, status/marker caches, the clarification-question
