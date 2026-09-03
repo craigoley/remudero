@@ -7030,6 +7030,17 @@ export const INSTRUMENT_SURFACE_EXCLUSIONS: Readonly<Record<string, string>> = {
   "scripts/recovery-drill.mjs": "ops drill script for recovery-drill.yml, not a quality/measurement gate",
   "scripts/generate-capability-snapshot.mjs": "its :check mode is not wired into any CI workflow",
   // ── known gap, widening deferred: real gate-rule logic, not yet promoted to the BLOCKING list ──
+  "scripts/unwired-gate-check.mjs":
+    "KNOWN GAP, WIDENING DEFERRED (W1-T2735) — genuinely gate-rule logic: it refuses a tracked " +
+    "`scripts/` executable whose basename claims to be a gate (`-check`/`-gate`) while no " +
+    ".github/workflows/ `run:` step and no package.json script invokes it, holding its inline " +
+    "ALLOWANCE to shrink-only so a recorded row cannot outlive the wiring it defers. It is NOT " +
+    "promoted to INSTRUMENT_SURFACE here for the same reason scripts/worker-branch-shape.mjs above " +
+    "is not: W1-T402 design clause (v) requires measuring a widening against real merged diffs " +
+    "first, and promoting it in the PR that introduces it would entangle that PR with its own " +
+    "registration. The circularity is sharper here than anywhere else on this list — this script's " +
+    "whole subject is instruments that no surface invokes, so a promotion would put it on the " +
+    "surface it polices.",
   "scripts/worker-branch-shape.mjs":
     "KNOWN GAP, WIDENING DEFERRED (W1-T2491) — genuinely gate-rule logic: it refuses a branch that " +
     "CLAIMS a task without carrying the run-<taskId>-<epochMs> shape seven modules read for dispatch " +
