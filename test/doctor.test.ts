@@ -42,7 +42,11 @@ import {
   renderDoctor,
   SWEEP_LIVENESS_STEPS,
   worstVerdict,
+  // W1-T2627 — the worktree-base arm: the pure classifier and the row-composing judge.
+  classifyWorktreeBase,
+  judgeWorktreeBases,
   type Check,
+  type WorktreeBaseRow,
 } from "../src/lib/doctor.js";
 
 const MIN = 60_000;
@@ -191,10 +195,11 @@ test("W1-T1209: the existing doctor arms are unchanged", () => {
   }
   assert.equal(report.worst, "OK");
   assert.equal(report.exitCode, 0);
-  // +3, not +2: W1-T1236 lands a SECOND new arm (sweep-liveness) after this test's own baseline,
-  // and W1-T2332 a THIRD (checkout-depth) later still — this file's own baseInputs() carries a
-  // healthy sweep.pass/sweep.summary pair and a full checkoutDepth, so both read OK.
-  assert.equal(report.checks.length, preExisting.length + 3, "repair-stall, sweep-liveness and checkout-depth all joined the report");
+  // +4, not +3: W1-T1236 lands a SECOND new arm (sweep-liveness) after this test's own baseline,
+  // W1-T2332 a THIRD (checkout-depth), and W1-T2627 a FOURTH (worktree-base) later still — this
+  // file's own baseInputs() carries a healthy sweep.pass/sweep.summary pair, a full checkoutDepth
+  // and no live worktrees, so all four read OK.
+  assert.equal(report.checks.length, preExisting.length + 4, "repair-stall, sweep-liveness, checkout-depth and worktree-base all joined the report");
 });
 
 // ── W1-T1236 — sweep liveness: a reader for `sweep.pass`, the per-pass heartbeat nothing read ──
@@ -339,9 +344,10 @@ test("W1-T1236: the existing doctor arms are unchanged", () => {
   }
   assert.equal(report.worst, "OK");
   assert.equal(report.exitCode, 0);
-  // +2, not +1: W1-T2332 lands a further new arm (checkout-depth) after this test's own baseline —
-  // this file's own baseInputs() carries a healthy, full checkoutDepth, so it reads OK.
-  assert.equal(report.checks.length, preExisting.length + 2, "sweep-liveness and checkout-depth both joined the report");
+  // +3, not +1: W1-T2332 lands a further new arm (checkout-depth) after this test's own baseline,
+  // and W1-T2627 a further one still (worktree-base) — this file's own baseInputs() carries a
+  // healthy, full checkoutDepth and no live worktrees, so both read OK.
+  assert.equal(report.checks.length, preExisting.length + 3, "sweep-liveness, checkout-depth and worktree-base all joined the report");
 });
 
 // ── criterion 2 — dispatch starvation, a reader for a field nothing read ───────────────────────
@@ -617,7 +623,12 @@ test("W1-T1109: a live run's lock is not reported as stale", async () => {
   assert.equal(code, 0, "a live run's lock must not fail the health check");
   const text = lines.join("\n");
   assert.match(text, /1 lock\(s\), 0 with no live pid/);
-  assert.equal(text.includes("W1-T1100"), false, "a live lock must not be NAMED as stale");
+  // Scoped to the lock-vs-process line itself: this test is about THAT arm, not about whether
+  // W1-T1100 appears anywhere in the report at all — W1-T2627's worktree-base arm legitimately
+  // names the SAME live run's branch-claimed task id on its own line, which is not this defect.
+  const lockLine = text.split("\n").find((l) => l.includes("lock-vs-process"))!;
+  assert.ok(lockLine, "the lock-vs-process line must be present");
+  assert.equal(lockLine.includes("W1-T1100"), false, "a live lock must not be NAMED as stale");
 });
 
 test("W1-T1109: a lock with no live run is still reported as stale", async () => {
@@ -951,4 +962,223 @@ test("W1-T2332: readCheckoutDepth's shared try/catch returns undefined on an unr
   const missing = join(tmpdir(), `rmd-t2332-absent-${process.pid}`);
   assert.equal(existsSync(missing), false, "CONTROL: the directory really is absent, so git really will fail");
   assert.equal(readCheckoutDepth(missing), undefined, "a failed read is undefined, never a guessed depth");
+});
+
+// ── W1-T2627 — worktree-base: readWorktreeBase gets its first production reader ────────────────
+//
+// `recordWorktreeBase` (worker.ts) writes `<worktree>.base` on every create, `removeWorktreeBase`
+// deletes it on teardown, and until this arm `readWorktreeBase` had ZERO production callers. Each
+// test below is one of the shard's six named acceptance claims.
+
+test("W1-T2627: classifyWorktreeBase — the four states, and the fail-safe direction on every degraded read", () => {
+  // at-base: HEAD equals the recorded base exactly — the state that produced the incident this
+  // task is named for, and it must classify as ordinary. The ancestry read is never even called.
+  assert.equal(
+    classifyWorktreeBase("abc123", "abc123", () => {
+      throw new Error("must not be called — base===head short-circuits before any ancestry read");
+    }),
+    "at-base",
+  );
+
+  // own-commits vs. unrelated — the SAME shape (base !== head), discriminated ONLY by the injected
+  // ancestry read, never by string comparison.
+  assert.equal(classifyWorktreeBase("base1", "head1", () => true), "own-commits");
+  assert.equal(classifyWorktreeBase("base1", "head1", () => false), "unrelated", "the ONLY state reported as a finding");
+
+  // base-unknown, three distinct ways to arrive there — an absent record, an unreadable HEAD, and a
+  // FAILED ancestry read — NONE of them ever promoted to "unrelated" (W1-T119/W1-T130's own
+  // fail-safe direction, restated for this read path).
+  assert.equal(
+    classifyWorktreeBase(null, "head1", () => {
+      throw new Error("must not be called — no base to compare");
+    }),
+    "base-unknown",
+    "an absent record is base-unknown, never unrelated",
+  );
+  assert.equal(
+    classifyWorktreeBase("base1", undefined, () => {
+      throw new Error("must not be called — no head to compare");
+    }),
+    "base-unknown",
+    "an unreadable HEAD is base-unknown, never unrelated",
+  );
+  assert.equal(classifyWorktreeBase("base1", "head1", () => undefined), "base-unknown", "a FAILED ancestry read is base-unknown, never unrelated");
+});
+
+test("W1-T2627: judgeWorktreeBases renders one line per live run with its branch-claimed task id, and only 'unrelated' is a finding", () => {
+  const rows: WorktreeBaseRow[] = [
+    { runId: "W1-T2461-1788065869447", taskId: "W1-T2461", state: "at-base" },
+    { runId: "W1-T900-1700000000000", taskId: "W1-T900", state: "own-commits" },
+    { runId: "RETRO-1700000000001", taskId: undefined, state: "base-unknown" },
+  ];
+  const healthy = judgeWorktreeBases(rows);
+  assert.equal(healthy.verdict, "OK", "at-base, own-commits and base-unknown are none of them findings");
+  assert.match(healthy.measured, /W1-T2461-1788065869447 \(W1-T2461\): at-base/, "the branch-claimed task id renders beside the classification");
+  assert.match(healthy.measured, /W1-T900-1700000000000 \(W1-T900\): own-commits/);
+  assert.match(healthy.measured, /RETRO-1700000000001 \(unknown task\): base-unknown/, "no branch-claimed task id prints as named, not blank");
+
+  // POSITIVE CONTROL: an "unrelated" row is the only shape that trips a finding — WARN, never FAIL
+  // (report-only, unlike e.g. judgeLedgerFreshness's daemon-is-down severity).
+  const withFinding = judgeWorktreeBases([...rows, { runId: "W1-T1-1700000000002", taskId: "W1-T1", state: "unrelated" }]);
+  assert.equal(withFinding.verdict, "WARN");
+  assert.match(withFinding.detail!, /W1-T1-1700000000002/);
+  assert.notEqual(withFinding.verdict, "FAIL");
+
+  // zero live runs is OK, not a finding.
+  assert.equal(judgeWorktreeBases([]).verdict, "OK");
+  assert.match(judgeWorktreeBases([]).measured, /0 live worktree/);
+});
+
+test("W1-T2627: the worktree-base arm performs no action of its own", () => {
+  const rows: WorktreeBaseRow[] = [{ runId: "W1-T1-1700000000002", taskId: "W1-T1", state: "unrelated" }];
+  const finding = judgeWorktreeBases(rows);
+  // PURITY AS THE PROOF OF "NO ACTION" (mirrors judgeRepairStall's/judgeSweepLiveness's own tests):
+  // a function with a side effect (a reap, a move, a refusal) is not idempotent on identical
+  // inputs. Calling it twice with the same rows yields a byte-identical Check both times.
+  assert.deepEqual(judgeWorktreeBases(rows), finding);
+  assert.deepEqual(judgeWorktreeBases(rows), finding);
+  assert.match(finding.detail!, /report only/);
+  assert.match(finding.detail!, /nothing here reaps, moves or refuses a worktree/);
+});
+
+test("W1-T2627: buildDoctorReport wires worktree-base into the composed report, and only 'unrelated' moves the exit code", () => {
+  const healthy = buildDoctorReport(baseInputs());
+  const healthyCheck = healthy.checks.find((c) => c.name === "worktree-base");
+  assert.ok(healthyCheck, "worktree-base must actually appear in the composed report, not merely be defined and unreached");
+  assert.equal(healthyCheck!.verdict, "OK", "baseInputs()'s default (no live worktrees) reads OK");
+  assert.equal(healthy.worst, "OK");
+
+  // CONTROL: swap in an "unrelated" row and the SAME composed report reads WARN end to end —
+  // proving buildDoctorReport really threads worktreeBases through, never a stub.
+  const finding = buildDoctorReport(baseInputs({ worktreeBases: [{ runId: "W1-T1-1700000000002", taskId: "W1-T1", state: "unrelated" }] }));
+  assert.equal(finding.checks.find((c) => c.name === "worktree-base")!.verdict, "WARN");
+  assert.equal(finding.worst, "WARN");
+  assert.equal(finding.exitCode, 1);
+
+  // CONTROL: at-base, own-commits and base-unknown together never move the exit code — the
+  // acceptance's own words, exercised through the composed report rather than the bare Check.
+  const noFinding = buildDoctorReport(
+    baseInputs({
+      worktreeBases: [
+        { runId: "a", taskId: "W1-T1", state: "at-base" },
+        { runId: "b", taskId: "W1-T2", state: "own-commits" },
+        { runId: "c", taskId: undefined, state: "base-unknown" },
+      ],
+    }),
+  );
+  assert.equal(noFinding.checks.find((c) => c.name === "worktree-base")!.verdict, "OK");
+  assert.equal(noFinding.worst, "OK");
+  assert.equal(noFinding.exitCode, 0);
+});
+
+test("W1-T2627: doctorCommand calls readWorktreeBase for each live run's worktree, and renders the BRANCH-claimed task id", async () => {
+  // THE PRODUCTION READER, DRIVEN. The lock file's own taskId is deliberately DIFFERENT from what
+  // the branch (`run-<runId>`) claims via taskIdFromRunBranch — a render that used the lock file's
+  // id rather than the branch extractor would print "LOCK-FILE-TASK-ID" here instead.
+  const { doctorCommand } = await import("../src/run-task.js");
+  const lines: string[] = [];
+  const readWorktreeBaseCalls: string[] = [];
+  const readWorktreeHeadCalls: string[] = [];
+  const worktreePath = join("/nonexistent-doctor-root", "worktrees", "run-W1-T2627-1788390258104");
+  const code = await doctorCommand(
+    [],
+    doctorDoctorDeps({
+      out: (l: string) => lines.push(l),
+      err: (l: string) => lines.push(l),
+      liveInflightRuns: () => [{ taskId: "LOCK-FILE-TASK-ID", runId: "W1-T2627-1788390258104", pid: 4242 }],
+      readLockFiles: () => ({ locks: [] }),
+      readWorktreeBase: (p: string) => {
+        readWorktreeBaseCalls.push(p);
+        return "base-sha";
+      },
+      readWorktreeHead: (p: string) => {
+        readWorktreeHeadCalls.push(p);
+        return "base-sha"; // HEAD equals base ⇒ at-base, so the ancestry seam below must not fire
+      },
+      isWorktreeBaseAncestor: () => {
+        throw new Error("must not be called when HEAD already equals base");
+      },
+    }),
+  );
+  assert.equal(code, 0, "at-base is not a finding");
+  assert.deepEqual(readWorktreeBaseCalls, [worktreePath], "readWorktreeBase is called exactly once, on the live run's own worktree path");
+  assert.deepEqual(readWorktreeHeadCalls, [worktreePath], "the HEAD read is scoped to the SAME worktree the base was read from");
+  const text = lines.join("\n");
+  assert.match(text, /worktree-base/);
+  assert.match(
+    text,
+    /W1-T2627-1788390258104 \(W1-T2627\): at-base/,
+    "the rendered task id is the BRANCH-claimed one (taskIdFromRunBranch), never the lock file's own taskId",
+  );
+});
+
+test("W1-T2627: doctorCommand end to end — unrelated is a WARN naming the run; a failed ancestry read and an absent record both degrade to base-unknown, never unrelated", async () => {
+  const { doctorCommand } = await import("../src/run-task.js");
+
+  // unrelated: HEAD differs from base and the injected ancestry read genuinely says "no".
+  {
+    const lines: string[] = [];
+    const code = await doctorCommand(
+      [],
+      doctorDoctorDeps({
+        out: (l: string) => lines.push(l),
+        err: (l: string) => lines.push(l),
+        liveInflightRuns: () => [{ taskId: "W1-T9001", runId: "W1-T9001-1700000000000", pid: 1 }],
+        readLockFiles: () => ({ locks: [] }),
+        readWorktreeBase: () => "base-sha",
+        readWorktreeHead: () => "other-sha",
+        isWorktreeBaseAncestor: (_p: string, base: string, head: string) => {
+          assert.equal(base, "base-sha");
+          assert.equal(head, "other-sha");
+          return false;
+        },
+      }),
+    );
+    assert.equal(code, 1, "an unrelated worktree base is a WARN, exit 1 — never FAIL, never silent");
+    assert.match(lines.join("\n"), /W1-T9001-1700000000000 \(W1-T9001\): unrelated/);
+  }
+
+  // base-unknown: a FAILED ancestry read (undefined, not false) must NEVER render as unrelated.
+  {
+    const lines: string[] = [];
+    const code = await doctorCommand(
+      [],
+      doctorDoctorDeps({
+        out: (l: string) => lines.push(l),
+        err: (l: string) => lines.push(l),
+        liveInflightRuns: () => [{ taskId: "W1-T9002", runId: "W1-T9002-1700000000000", pid: 1 }],
+        readLockFiles: () => ({ locks: [] }),
+        readWorktreeBase: () => "base-sha",
+        readWorktreeHead: () => "other-sha",
+        isWorktreeBaseAncestor: () => undefined,
+      }),
+    );
+    assert.equal(code, 0, "a FAILED ancestry read must never fail the health check — cannot-observe is not contamination");
+    const text = lines.join("\n");
+    assert.match(text, /base-unknown/);
+    assert.equal(text.includes("unrelated"), false);
+  }
+
+  // base-unknown: an ABSENT record (readWorktreeBase → null, exactly what a pre-W1-T405 worktree
+  // or one whose sibling file was cleaned up degrades to) also never promotes to unrelated, and the
+  // ancestry seam is never even reached.
+  {
+    const lines: string[] = [];
+    const code = await doctorCommand(
+      [],
+      doctorDoctorDeps({
+        out: (l: string) => lines.push(l),
+        err: (l: string) => lines.push(l),
+        liveInflightRuns: () => [{ taskId: "W1-T9003", runId: "W1-T9003-1700000000000", pid: 1 }],
+        readLockFiles: () => ({ locks: [] }),
+        readWorktreeBase: () => null,
+        readWorktreeHead: () => "other-sha",
+        isWorktreeBaseAncestor: () => {
+          throw new Error("must not be called — no base to compare an absent record against");
+        },
+      }),
+    );
+    assert.equal(code, 0);
+    assert.match(lines.join("\n"), /base-unknown/);
+  }
 });

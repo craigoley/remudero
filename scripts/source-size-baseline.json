@@ -33,7 +33,7 @@
   "src/lib/dispatch-claim.ts": 500,
   "src/lib/dispatch-governor.ts": 170,
   "src/lib/dispatch-overlap.ts": 532,
-  "src/lib/doctor.ts": 798,
+  "src/lib/doctor.ts": 1000,
   "src/lib/drain-lock.ts": 156,
   "src/lib/drain.ts": 2363,
   "src/lib/emissions.ts": 205,
@@ -157,6 +157,6 @@
   "src/lib/worker-scratch.ts": 227,
   "src/lib/worker.ts": 4500,
   "src/lib/workflow-run.ts": 28,
-  "src/run-task.ts": 35500,
+  "src/run-task.ts": 36000,
   "src/spike.ts": 311
 }

@@ -15,6 +15,8 @@ import {
   DISK_FAIL_BYTES,
   humanBytes,
   type MemInfo,
+  classifyWorktreeBase,
+  type WorktreeBaseRow,
 } from "./lib/doctor.js";
 import { execFile, execFileSync, spawnSync } from "node:child_process";
 import { promisify } from "node:util";
@@ -843,6 +845,8 @@ import {
   type WorkerState,
   type WorkerStreamObserver,
   WorkerAbandonedError,
+  // W1-T2627 — the worktree-base record's first production reader: doctor's I/O shell below.
+  readWorktreeBase,
 } from "./lib/worker.js";
 import { LiveSpawnBlockedError } from "./lib/spawn-guard.js";
 // W1-T2557: reuses cost-anomaly's ALREADY-COMMITTED multiplier/minSamples policy data for the
@@ -24981,6 +24985,35 @@ export function readCheckoutDepth(cwd: string): { shallow: boolean; commitCount:
   }
 }
 
+function defaultReadWorktreeHead(worktreePath: string): string | undefined {
+  try {
+    return execFileSync("git", ["rev-parse", "HEAD"], { cwd: worktreePath, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+  } catch {
+    // W1-T2627: `undefined` is the ABSENT reading, not a swallowed failure. A worktree can
+    // legitimately have no resolvable HEAD — freshly added and not yet checked out, or its
+    // directory reaped from under the admin record — and `rev-parse` exits non-zero for all of
+    // them alike. `doctor` is READ-ONLY and reports what it could and could not observe, so an
+    // unreadable head must degrade to "not observed" rather than throw and take the whole health
+    // check down over one worktree.
+    return undefined;
+  }
+}
+
+function defaultIsWorktreeBaseAncestor(worktreePath: string, base: string, head: string): boolean | undefined {
+  try {
+    execFileSync("git", ["merge-base", "--is-ancestor", base, head], { cwd: worktreePath, stdio: ["ignore", "pipe", "pipe"] });
+    return true;
+  } catch (e) {
+    // W1-T2627: `git merge-base --is-ancestor` ANSWERS THROUGH ITS EXIT CODE, so a throw here is
+    // two different events wearing one shape. Exit 1 is a real answer — "base is not an ancestor
+    // of head" — and must read as `false`. ANY OTHER status (128 for a bad revision or a corrupt
+    // worktree, or a spawn error with no status at all) means git could not decide, which is
+    // `undefined` = not observed. Collapsing the second case into `false` would report a healthy
+    // worktree as diverged on nothing more than an unreadable ref.
+    return (e as { status?: number | null }).status === 1 ? false : undefined;
+  }
+}
+
 /** Injectable seams for {@link doctorCommand} — every reader it drives, so the whole command is
  *  exercisable without a real /proc, a real ledger, or a live daemon. */
 export interface DoctorDeps {
@@ -24991,6 +25024,9 @@ export interface DoctorDeps {
   readLedgerLines?: (path: string) => Array<Record<string, unknown>>;
   loadPlan?: () => Plan | undefined;
   liveInflightRuns?: (dir: string) => LiveInflightRun[];
+  readWorktreeBase?: (worktreePath: string) => string | null;
+  readWorktreeHead?: (worktreePath: string) => string | undefined;
+  isWorktreeBaseAncestor?: (worktreePath: string, base: string, head: string) => boolean | undefined;
   readMemInfo?: () => MemInfo;
   readDiskFreeBytes?: (path: string) => number | undefined;
   readPauseAgeMs?: (root: string, nowMs: number) => number | undefined;
@@ -25046,6 +25082,15 @@ export async function doctorCommand(rest: string[], deps: DoctorDeps = {}): Prom
   const liveIds = new Set(live.map((r) => r.taskId));
   const dead = lockFiles.filter((f) => !liveIds.has(f));
 
+  const worktreeBases: WorktreeBaseRow[] = live.map((r) => {
+    const branch = `run-${r.runId}`;
+    const worktreePath = join(worktreesDir(config), branch);
+    const base = (deps.readWorktreeBase ?? readWorktreeBase)(worktreePath);
+    const head = (deps.readWorktreeHead ?? defaultReadWorktreeHead)(worktreePath);
+    const isAncestor = (b: string, h: string) => (deps.isWorktreeBaseAncestor ?? defaultIsWorktreeBaseAncestor)(worktreePath, b, h);
+    return { runId: r.runId, taskId: taskIdFromRunBranch(branch), state: classifyWorktreeBase(base, head, isAncestor) };
+  });
+
   const report = buildDoctorReport({
     nowMs,
     ledgerLines: ledgerLines as Array<Record<string, unknown>>,
@@ -25062,6 +25107,7 @@ export async function doctorCommand(rest: string[], deps: DoctorDeps = {}): Prom
     gitLocks: (deps.readGitLocks ?? readGitLocks)(repoRoot, nowMs),
     workerCount: 0,
     ...(((v) => (v === undefined ? {} : { checkoutDepth: v }))((deps.readCheckoutDepth ?? readCheckoutDepth)(repoRoot))),
+    worktreeBases,
   });
 
   if (rest.includes("--json")) out(JSON.stringify({ worst: report.worst, checks: report.checks }, null, 2));
