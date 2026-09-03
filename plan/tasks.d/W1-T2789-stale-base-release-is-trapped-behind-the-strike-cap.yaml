@@ -1,0 +1,84 @@
+- id: W1-T2789
+  title: "STALE-BASE RELEASE IS TRAPPED BEHIND THE STRIKE CAP — exact evidence that newer main owns a red path exists only inside runFixRung, so an exhausted PR can never reach the zero-strike update that would clear it"
+  repo: remudero
+  depends_on: [W1-T2620, W1-T2671, W1-T2782]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 18.00
+  risk: high
+  files:
+    - src/lib/sweep.ts
+    - src/run-task.ts
+    - test/base-caused-release.test.ts
+    - test/a-red-branch-behind-its-base-spends-a-strike-first.test.ts
+    - test/stale-base-release-before-exhaustion.test.ts
+  origin: "operator-session#red-prs-remain-stuck-after-main-repairs-them-2026-09-03"
+  plan_refs: ["W1-T527", "W1-T2520", "W1-T2620", "W1-T2671", "W1-T2782"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED after #3840 repaired the repository-wide mkdtemp scanner baseline: PRs #3837,
+    #3838 and #3839 still carried CI failures naming paths repaired on newer main, but the daemon
+    repeatedly classified them `blocked-ambiguous` at 2/2 strikes and took no update-branch
+    action. A manual empty commit was needed to re-run #3837.
+
+    The source explains both blind spots. `selectBaseCausedRelease` is eligible only when
+    `classifyRedCause` says the same required check fails on every open PR in the current pass;
+    green, pending, or differently-red PRs dilute that cohort. Its effect also lives only inside
+    the `blocked-fixable` case, while an exhausted PR is classified `blocked-ambiguous` before
+    reaching that case. Separately, W1-T2671's stronger evidence — a positive behind count plus an
+    exact failing path changed on newer main — is evaluated only inside `runFixRung`, which an
+    exhausted PR can no longer enter. Older exhausted PRs also predate W1-T2620's
+    `main_tip_sha` baseline, so advancing main cannot release them through that path.
+
+    The falsifying observation would be an exact base-gap check before disposition/strike
+    exhaustion, or an exhausted branch reaching `decideRedBaseRefresh`. Neither exists. This is
+    not grounds to relabel red CI as green or to weaken fail-closed review; it is a missing
+    zero-strike queue-maintenance lane around an already-proven two-signal decision.
+  design: |
+    Lift the existing W1-T2671/W1-T2782 decision into one reusable seam and invoke it from the
+    sweep before a red PR is made terminal by strike exhaustion. Eligibility still requires both
+    a positively observed behind count and an exact repository path from the failing test or
+    genuine diff-coverage report intersecting the base-only changed-file list. Reuse GitHub's
+    update-branch merge endpoint; never rebase locally and never spend or refund a fix strike.
+
+    Bound the lane to at most one oldest eligible candidate per pass and a successful release at
+    most once per `(PR, input head, main tip)`. Re-read terminal state immediately before the
+    write. An unreadable comparison, malformed log, current branch, unrelated base change,
+    closed/merged PR, or failed update request must never be reported as released. A failed or
+    indeterminate attempt remains visible and retryable under the existing GitHub pacer rather
+    than poisoning the head forever.
+
+    Preserve W1-T2620's cohort-wide base-caused shortcut and every red-cause classifier verbatim;
+    the exact-path lane is an additional evidence route, not a broader definition of base-caused.
+    Keep Serve free of GitHub reads and add no lifecycle, merge, review-posting, or provider action.
+  acceptance:
+    - claim: "an exhausted red PR that is positively behind and whose failing test or diff-coverage source path changed on newer main requests update-branch before blocked-ambiguous disposition and spends zero strikes"
+      proof: "unit test: test/stale-base-release-before-exhaustion.test.ts"
+    - claim: "the exact-path release works in a mixed open-PR cohort where classifyRedCause is not base-caused, so unrelated green or differently-red PRs cannot suppress it"
+      proof: "unit test: test/stale-base-release-before-exhaustion.test.ts"
+    - claim: "current, unreadable, malformed and unrelated-base cases preserve their existing disposition and never request an update"
+      proof: "unit test: test/a-red-branch-behind-its-base-spends-a-strike-first.test.ts"
+    - claim: "one pass releases at most one candidate in oldest-activity order, and a successful release is deduplicated for the same PR, input head and main tip"
+      proof: "unit test: test/stale-base-release-before-exhaustion.test.ts"
+    - claim: "the write rechecks live state and never claims release for a closed, merged, moved-head, failed or indeterminate target"
+      proof: "unit test: test/stale-base-release-before-exhaustion.test.ts"
+    - claim: "the existing cohort-wide base-caused selector, wording, main-tip ledger baseline and no-strike behavior remain intact"
+      proof: "unit test: test/base-caused-release.test.ts"
+    - claim: "Serve gains no GitHub reader and the lane performs no worker spawn, review post, merge, or lifecycle action"
+      proof: "unit test: test/stale-base-release-before-exhaustion.test.ts"
+  falsifier: |
+    Seed an exhausted checks-red PR whose CI tail names a path present in the reversed base compare,
+    place it beside a green PR so the cohort classifier cannot return base-caused, and give it no
+    historical main_tip_sha. Before implementation the sweep emits blocked-ambiguous and makes no
+    update request. After implementation it makes exactly one update-branch request, emits an
+    attributable zero-strike release, and spawns no worker. Change the compare to an unrelated
+    path or behind_by to zero and the old blocked disposition must return unchanged.
+  note: |
+    ID PROVENANCE: the first mint advisory repeated W1-T2788 because the reservation namespace had
+    just advanced; `rmd next-task-id --reserve` then atomically held `refs/rmd-id/W1-T2789` and
+    explicitly reported W1-T2789 as the authoritative held id.
+
+    This task repairs queue progression only. It does not change the configured strike cap; the
+    separate W1-T2788 task makes cap accounting head-generation-bound.
