@@ -519,6 +519,19 @@ export interface HostFacts {
    *  must not guess a verdict either way. */
   bashMajorVersion: number | undefined;
   hasProcMeminfo: boolean;
+  /**
+   * W1-T2770: THIS PROCESS's own Node version string (`process.versions.node`), and the version
+   * `.nvmrc` pins. Both carried, so `appliesTo` predicates can decide EXACTLY the "running
+   * differs from pinned" question the merge-lcov cluster keys off — never a proxy like "not
+   * exactly 22.22.3" that would rot the day `.nvmrc` moves.
+   *
+   * `pinnedNodeVersion` is `undefined` when `.nvmrc` is absent or unreadable: a probe that
+   * cannot tell must not guess "differs" and cannot guess "matches", and every predicate that
+   * keys off this field must handle the absent case the same way — "does not apply, silently".
+   * Same discipline as `bashMajorVersion`'s undefined case above.
+   */
+  nodeVersion: string;
+  pinnedNodeVersion: string | undefined;
 }
 
 /** The leading `\d+` before the first `.` in either `$BASH_VERSION` shape ("3.2.57(1)-release")
@@ -531,11 +544,23 @@ export function parseBashMajorVersion(bashVersionText: string): number | undefin
 
 /** PURE — see {@link buildPreflightSummary}'s own precedent for why: a test hands this raw
  *  strings/booleans and asserts the derived facts, no spawn or filesystem involved. */
-export function computeHostFacts(input: { platform: NodeJS.Platform; bashVersionText: string; hasProcMeminfo: boolean }): HostFacts {
+export function computeHostFacts(input: {
+  platform: NodeJS.Platform;
+  bashVersionText: string;
+  hasProcMeminfo: boolean;
+  nodeVersion: string;
+  nvmrcText: string | undefined;
+}): HostFacts {
   return {
     platform: input.platform,
     bashMajorVersion: parseBashMajorVersion(input.bashVersionText),
     hasProcMeminfo: input.hasProcMeminfo,
+    // W1-T2770: STRIP A LEADING `v`. `process.versions.node` reads `"22.22.3"` while `.nvmrc`
+    // may carry either shape; the compare must not read them as different for that reason
+    // alone. Trailing whitespace stripped too — a trailing newline in `.nvmrc` is normal.
+    nodeVersion: input.nodeVersion.replace(/^v/, "").trim(),
+    pinnedNodeVersion:
+      input.nvmrcText === undefined ? undefined : input.nvmrcText.replace(/^v/, "").trim() || undefined,
   };
 }
 
@@ -552,7 +577,28 @@ export function detectHostFacts(repoRoot: string, spawn: PreflightSpawn, hasFile
   } catch {
     bashVersionText = "";
   }
-  return computeHostFacts({ platform: process.platform, bashVersionText, hasProcMeminfo: hasFile("/proc/meminfo") });
+  // W1-T2770: `.nvmrc` read directly here rather than via the `spawn` seam because it is a
+  // plain file read, not a subprocess — same shape as `hasFile` two lines up. Absent/unreadable
+  // is `undefined`, NOT the empty string: the field's contract is "the pin, if we could read
+  // it", and `undefined` is what every predicate that consults it already treats as "cannot
+  // tell — silently skip".
+  let nvmrcText: string | undefined;
+  try {
+    nvmrcText = readFileSync(join(repoRoot, ".nvmrc"), "utf8");
+  } catch {
+    // Absent-or-unreadable is REPRESENTED as `undefined` — every predicate keying off
+    // `pinnedNodeVersion` (see the merge-lcov cluster's `appliesTo`) treats undefined as
+    // "cannot tell, does not apply", the same discipline `bashMajorVersion: undefined` already
+    // establishes. Never guess "matches" or "differs" from a read that did not happen.
+    nvmrcText = undefined;
+  }
+  return computeHostFacts({
+    platform: process.platform,
+    bashVersionText,
+    hasProcMeminfo: hasFile("/proc/meminfo"),
+    nodeVersion: process.versions.node,
+    nvmrcText,
+  });
 }
 
 /** One of the census's six causes (the `recovery-drill` pair is its own entry, undiagnosed,
@@ -621,6 +667,50 @@ export const HOST_CAUSED_SUITE_REDS: HostCausedSuiteRedEntry[] = [
     count: 1,
     note: "the e2e's CLAUDE_CODE_OAUTH_TOKEN determinism bypass (worker-home.ts) exists only on non-darwin; darwin has no token bypass at all",
     appliesTo: (f) => f.platform === "darwin",
+  },
+  {
+    // W1-T2770: `test/merge-lcov.test.ts`'s six coverage-merge-CLI tests call
+    // `scripts/coverage-merge-ratchet.mjs` with `--expose-internals`, and its
+    // `assertPinnedNodeVersion` throws `raw coverage merge requires the repository-pinned Node
+    // <.nvmrc>; running <process.versions.node>` on ANY string-mismatch — the tests catch that
+    // throw and read it as their own failure. The cause is not the diff, and it is not the pin
+    // being wrong; it is that Node's built-in test-runner coverage internals moved between
+    // patch versions and this ratchet reaches into them, so a rebuild whose base tag
+    // (`node:22-bookworm-slim`) resolved to a newer 22.x than `.nvmrc` produces this exact
+    // six-test bloom until either the pin advances or the image is aligned to it. THE FIX IS
+    // IMAGE-SIDE: pin `deploy/Dockerfile`'s FROM to the exact `.nvmrc` version, and dispatch
+    // `.github/workflows/acr-build.yml`. Until it lands this cluster keeps a diff-caused break
+    // in these files from reading as this cluster instead — the cluster's `appliesTo` self-
+    // expires the moment the running Node matches the pin, so there is no window in which real
+    // failures here are suppressed. The image is 30 commits behind at time of writing but zero
+    // of those touch `deploy/Dockerfile`; 22.23.2 arrived through the floating base tag with
+    // no edit to any file, which is why "an unrelated rebuild can move Node silently" belongs
+    // in the filing itself.
+    file: "test/merge-lcov.test.ts",
+    cause: "node-version-drift-from-pin",
+    count: 6,
+    note: "scripts/coverage-merge-ratchet.mjs's assertPinnedNodeVersion throws when process.versions.node !== .nvmrc string — same shape whether Node is ahead or behind the pin",
+    appliesTo: (f) =>
+      // W1-T2770: A guarded self-expiring predicate. Every clause must be true for the cluster
+      // to apply, and any one absent/matching turns it off silently — the mirror of
+      // bashMajorVersion's undefined-does-not-apply discipline above.
+      //
+      // (a) The RUNNING Node was read (`process.versions.node` never returns an empty string in
+      //     practice, but the field's type admits a bare read failure — never trust it blindly).
+      // (b) The pinned Node was READABLE. A missing `.nvmrc` is `pinnedNodeVersion === undefined`
+      //     — treat that as "cannot tell", not as "matches". `!!` narrows the type from
+      //     `string | undefined` to `string` for the compare below without duplicating the
+      //     check; TypeScript reads the truthy pass-through as narrowing.
+      // (c) They DIFFER. The failure is an exact string mismatch, so the appliesTo check is
+      //     the same exact string mismatch — no numeric-range guess, no "close enough".
+      //
+      // THIS IS THE SELF-EXPIRY MECHANISM. The moment the image lands at .nvmrc's version, (c)
+      // becomes false and the cluster stops applying with no follow-up edit here — a cluster
+      // that outlives its cause is a permanent suppression of six working tests, which reads
+      // exactly like six tests that broke. The design comment at the top of this file inviting
+      // readers to "subtract them" is what makes that suppression harmful; the guard here is
+      // what stops it from being possible.
+      Boolean(f.nodeVersion) && Boolean(f.pinnedNodeVersion) && f.nodeVersion !== f.pinnedNodeVersion,
   },
 ];
 
