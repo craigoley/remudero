@@ -1,0 +1,53 @@
+- id: W1-T2783
+  title: "THREE NEW TEST FIXTURES BYPASS THE MKDTEMP REAPABILITY CONTRACT — current main fails its own pre-commit hook, blocking every subsequent verified commit"
+  repo: remudero
+  depends_on: [W1-T2773]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 2.00
+  risk: high
+  band_meaning: "span"
+  files: [test/open-prs-rest.test.ts, test/retro.test.ts, test/mkdtemp-callsite-check.test.ts]
+  origin: "operator-session#post-w1-t2773-mkdtemp-regression-2026-09-03"
+  plan_refs: ["W1-T2773", "W1-T2775", "W1-T2781"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED on current origin/main 990b1e98: `npm run --silent mkdtemp-callsite-check`
+    exits 1 and names exactly three new bare-prefix callsites: `fix-cmd-rest-` in
+    `test/open-prs-rest.test.ts`, plus `plan-health-section-` and
+    `plan-health-section-projection-` in `test/retro.test.ts`. The pre-commit hook invokes
+    that checker, so an unrelated clean change cannot be committed with hooks enabled.
+
+    The falsifying observation would be a clean checker run on unmodified current main. The
+    command instead reported 3 refused callsites and 998 grandfathered allowlist entries. These
+    three are absent from the allowlist because they landed after W1-T2773's baseline snapshot.
+  design: |
+    Import the production `RMD_TMP_PREFIX` constant in each affected test module and prepend it
+    to only the three newly refused fixture prefixes. Do not change the boot sweep, checker,
+    pre-commit hook, or allowlist. Existing fixture-specific suffixes stay intact, while a killed
+    test process now leaves directories the production boot sweep can identify and reap.
+
+    The already-shipped W1-T2773 checker is the load-bearing regression test for this task. No
+    duplicate test is added: it scans every tracked TypeScript callsite and fails closed when a
+    future bare prefix appears.
+  acceptance:
+    - claim: "all three post-W1-T2773 fixtures use the sanctioned RMD_TMP_PREFIX and the repository-wide mkdtemp callsite checker exits zero"
+      proof: "unit test: test/mkdtemp-callsite-check.test.ts"
+    - claim: "the shipped checker still refuses a bare prefix before commit and accepts the sanctioned repair"
+      proof: "unit test: test/mkdtemp-callsite-check.test.ts"
+    - claim: "the affected REST and retro test modules still pass with their real fixture setup and cleanup paths"
+      proof: "unit tests: test/open-prs-rest.test.ts and test/retro.test.ts"
+  falsifier: |
+    Before implementation, the repository-wide checker exits 1 with exactly the three named
+    refused callsites. Remove any one `${RMD_TMP_PREFIX}` interpolation after the fix and rerun
+    the same checker; it returns to nonzero and names that precise file and line. Restore all
+    three prefixes and it exits zero. The command is also the pre-commit hook's production path.
+  note: |
+    ID PROVENANCE: `rmd next-task-id --reserve` atomically held W1-T2783 at
+    `refs/rmd-id/W1-T2783` on the first attempt.
+
+    This task repairs a regression that otherwise blocks every verified commit from current
+    main. It does not implement W1-T2775's broad allowlist retirement or W1-T2781's CI wiring,
+    and it makes no daemon, Serve, ACR, provider, subscription, or deployment change.
