@@ -1,0 +1,143 @@
+- id: W1-T2769
+  title: "CLAUDE.md's first rule prescribes `rmd preflight --ci-parity` before a first push, but on a feature branch the bare invocation is refused by `main()`'s freshness gate and the documented workaround (`RMD_SELF_SYNC_DONE=1`) crosses into `ci:test`'s own child suite and turns 45 of its self-sync tests red"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high  # Rule 19: two subsystems (commit-message, run-task) span the same defect — the
+              # exemption in run-task.ts removes the NEED for the guard var; the scrub in
+              # commit-message.ts removes the RISK of it regardless. Reverting either half leaves
+              # the other unable to close the failure alone (see the falsifier in note: below);
+              # they must land together, so the shard cannot decompose without splitting one
+              # atomic fix into two half-fixes each of which is a false claim of resolution.
+  files:
+    - src/run-task.ts
+    - src/lib/commit-message.ts
+    - test/preflight-is-freshness-exempt-and-scrubs-the-guard-from-children.test.ts
+    - test/self-sync-refusal-names-the-guard-env.test.ts
+  origin: "oper#gate-rule-invalidated-2026-09-03"
+  plan_refs: ["W1-T79", "W1-T1134", "W1-T2248", "W1-T2449"]
+  status: queued
+  attempts: 0
+  rationale: |
+    CLAUDE.md'S OWN FIRST RULE: "Run the shipped local gate before your FIRST push, not every
+    commit. `rmd preflight --ci-parity`". Off-main is always "diverged", never "behind" (off-main
+    is decided BEFORE behind-ness, in `checkCliFreshness`'s branch check), so on any feature
+    branch — which is where a first push comes from, by construction — the bare invocation is
+    refused outright:
+
+      rmd has diverged from origin/main (aebf442..7775b99) -- not a fast-forward, refusing to
+      auto-sync (never merging or rebasing on your behalf).
+
+    THE OFFICIAL WORKAROUND POISONS THE SUITE IT WOULD RUN. `RMD_SELF_SYNC_DONE=1` is documented
+    in `self-sync.ts` as guarding "every call" a shell makes for the session, deliberately —
+    that IS what `defaultReexec` needs on the loop-guard's own re-exec child, and correct there.
+    But `alreadySelfSynced` (self-sync.ts) reads `process.env` a second time, in addition to the
+    injected `env` argument — the W1-T2248 fix, correct for its own case — so a var an operator
+    exported into their shell for one purpose (getting the gate to run at all) crosses into
+    EVERY child that inherits their env. `ci:test` runs `npm run test:ci`, whose child is the
+    full `test/**/*.test.ts` glob — which of course contains `test/self-sync*.test.ts`. MEASURED:
+    an otherwise-green feature branch produced `# tests 13204 / # pass 13152 / # fail 51`; the
+    two-way falsifier (`env -u RMD_SELF_SYNC_DONE` vs `RMD_SELF_SYNC_DONE=1`) attributed 45 of
+    the 51 to the export alone, the remaining 6 to a Node pin (W1-T2770, filed separately).
+
+    THE FALLBACK GUARD (`CI=1`) IS SAME-SHAPE AS THE BUG. `isCiEnv(env)` reads only the injected
+    `env`, so `CI=1` in the operator's shell suppresses `main()`'s gate at the entry point
+    without crossing into children, and MEASURED restores `# tests 13204 / # pass 13197 / # fail
+    6`. But prescribing `CI=1` as the documented invocation would keep the exact defect: an
+    operator exports a variable into their shell that silently changes what the suite measures.
+    Different var, same class. That is not a fix; it is at best an interim workaround, useful in
+    the window between this task landing and every operator machine picking up the change.
+
+    THE PATTERN IS THE FINDING, NOT EITHER HALF. `process.env` vs an injected `env` argument is a
+    SCOPING decision — does this guard apply to descendants? CLAUDE.md already records one edge
+    of this defect class ("(l): `isCiEnv({})` reads a parameter it can never receive"); this task
+    puts the opposite edge on the record. Some guards MUST reach descendants (a re-exec's loop
+    guard has no other way); some must NOT (an operator-facing bypass). The two edges look
+    identical at the call site, and the difference is entirely a policy question the reader must
+    hold in their head. That is why this fix has TWO halves: the exemption removes the NEED for
+    the bypass; the spawn scrub removes the RISK of it regardless.
+  design: |
+    TWO CHANGES, EACH ISOLATED, EACH LOAD-BEARING. Reverting either half fails a distinct subset
+    of the guards in the new test file, proven in this task's own falsifier run.
+
+    (A) `preflight` joins `READ_ONLY_FRESHNESS_EXEMPT_VERBS` (run-task.ts). Its case is STRONGER
+    than `doctor`/`status`'s, not merely a weaker copy: auto-syncing before a `doctor` run would
+    be harmless; before a `preflight` run it would be actively wrong. Every preflight mode
+    (`--fast`, `--coverage`, `--ci-parity`) exists to test THIS checkout against CI's own
+    commands; fast-forwarding origin/main underneath it first would silently swap in code the
+    operator never asked to test, defeating the verb's whole purpose even when the fast-forward
+    itself is safe. Its writes (coverage/, lcov, temp scratch) are machine-owned build/test
+    artifacts, same footing as `status`'s state/status.json cache. The declared-reason paragraph
+    in run-task.ts spells this out at each member of the set, per the file's existing convention.
+
+    (B) `defaultPreflightSpawn` (lib/commit-message.ts) unconditionally deletes
+    `SELF_SYNC_GUARD_ENV` from the child's environment. This is the ONE place every preflight
+    child is spawned — `ci:test`, `ci:cli-reference-check`, the typecheck leaf, the coverage
+    leaf, all of them. None of them is a re-exec of `rmd` itself, so the guard has no legitimate
+    meaning for any of them. `alreadySelfSynced` reads BOTH the injected `env` argument AND its
+    own `process.env`; deleting the key in the ONE place every preflight child is spawned closes
+    the crossing at the child boundary, so an operator's shell carrying the var for an unrelated
+    reason (a stale export from another session, a script that set it and did not unset it) no
+    longer poisons anything. (A) makes the export unnecessary; (B) makes it inert.
+
+    REGRESSION LOCK: a plan-reading verb (`lint-plan`) still refuses on the same off-main shape.
+    The gate was narrowed to admit one more verb, not removed — the sibling lock every prior
+    widening of this set (W1-T1134's `doctor`/`status`, W1-T907's `sync`, W1-T2725's
+    `deploy-run`) has carried.
+
+    W1-T2449's set-identity guard (test/self-sync-refusal-names-the-guard-env.test.ts) is updated
+    from `{doctor, status}` to `{doctor, status, preflight}` — that guard's job is to catch an
+    UNREVIEWED widening, not to freeze the set at any particular size, and its own paragraph in
+    that file already reserved widenings to their own reasoned tasks. This IS such a task; the
+    reasoning is in run-task.ts.
+
+    CLAUDE.md'S TEXT NEEDS UPDATING TOO — but not by this task. The rule as written prescribes an
+    unusable invocation, and until it names the exempt behavior explicitly, every session
+    regenerates the bug. This task's changes MAKE the rule usable; the wording is prose-only and
+    belongs in a docs sweep that can also incorporate the "interim CI=1" note.
+  acceptance:
+    - claim: "`rmd preflight` on an off-main, diverged checkout is not refused by `main()`'s freshness gate — execution reaches the verb's own dispatch, and no other verb is exempted"
+      proof: "unit test: test/preflight-is-freshness-exempt-and-scrubs-the-guard-from-children.test.ts"
+    - claim: "`READ_ONLY_FRESHNESS_EXEMPT_VERBS` is exactly {doctor, status, preflight} — an unreviewed fourth member fails this guard, not passes silently"
+      proof: "unit test: test/preflight-is-freshness-exempt-and-scrubs-the-guard-from-children.test.ts"
+    - claim: "`defaultPreflightSpawn` deletes `RMD_SELF_SYNC_DONE` from the child's environment, even when the calling shell has it set and even when a caller merges its own env forward"
+      proof: "unit test: test/preflight-is-freshness-exempt-and-scrubs-the-guard-from-children.test.ts"
+    - claim: "unrelated environment (PATH) is unaffected by the scrub — only the one key is removed"
+      proof: "unit test: test/preflight-is-freshness-exempt-and-scrubs-the-guard-from-children.test.ts"
+    - claim: "`checkCliFreshness` running inside a spawned child still refuses a diverged checkout, even though the parent process has `RMD_SELF_SYNC_DONE=1` set — the (A)+(B) integration"
+      proof: "unit test: test/preflight-is-freshness-exempt-and-scrubs-the-guard-from-children.test.ts"
+  note: |
+    ID PROVENANCE: W1-T2769 was reserved and supplied directly by the operator. Both scope-time
+    checks ran clean at branch-out: `git ls-remote --heads origin 'run-W1-T2769-*'` returned 0
+    and the anchored trailer scan returned `[]`, each qualified by a positive control on
+    W1-T2749 -> [3773,3771,3768] because a freshly minted id reads zero against every surface
+    for query-shape reasons alone.
+
+    FALSIFIERS, EACH HALF, PROVEN INDEPENDENTLY. Reverting only the exempt-set addition
+    (`{doctor, status, preflight}` back to `{doctor, status}`) failed tests 1 and 3; reverting
+    only the spawn scrub failed tests 4, 5, and 7. Restoring both returned `# fail 0`. Test 6
+    (unrelated PATH inheritance) stayed green in both falsifier states — proving it is not
+    accidentally coupled to either half and would catch a scrub that grew broader than one key.
+
+    CALLER + CENSUS SWEEP: 25 files — `git grep -l` on every symbol this diff touches
+    (`defaultPreflightSpawn`, `READ_ONLY_FRESHNESS_EXEMPT_VERBS`, `SELF_SYNC_GUARD_ENV`) unioned
+    with the census suites walking populations these join (`test/install-checkout-command.test.ts`,
+    `test/sync-freshness-exempt.test.ts`) — ran together as `# tests 574 # pass 574 # fail 0`.
+
+    NOT IN SCOPE: the wording change to CLAUDE.md itself. This task closes the CODE side —
+    invocation and spawn behavior — that the rule assumes; a docs sweep that folds the rule
+    into the new behavior (and can mention `CI=1` as an interim workaround) is the natural
+    follow-up but touches only prose and would drag this shard into `verify: human` for no
+    corresponding correctness gain.
+
+    NOT USED HERE: the (A)-only reproduction inside `node --test`, because Node's own test
+    runner refuses a recursive `node --test` invocation ("run() is being called recursively
+    within a test file"), which would have made the integration test always report zero tests
+    regardless of this fix — a real Node behavior unrelated to this defect. Test 7 drives
+    `checkCliFreshness` directly in a child through `defaultPreflightSpawn` with a fake `git`
+    dep, which is the actual production integration point poisoned in the incident; `node
+    --test` is merely how the incident was FIRST noticed, not what the guard needs to invoke to
+    prove the fix.
