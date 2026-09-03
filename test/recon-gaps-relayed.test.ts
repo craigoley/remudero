@@ -279,21 +279,34 @@ test("BEHAVIOURAL: INFERRED is still NOT relayed — a conclusion recon drew but
   );
 });
 
-// ── RECON IS BYTE-IDENTICAL ──────────────────────────────────────────────────────────────────
+// ── RECON'S FIXED INSTRUCTION TEXT IS BYTE-IDENTICAL ─────────────────────────────────────────
+//
+// W1-T2632 gave `renderReconPrompt` two new OPTIONAL parameters (task, recordPath) so the recon
+// spawn can finally be told which task it is reconning — the function's SIGNATURE and its
+// returned ARRAY necessarily changed. What must still hold, and what this test now proves, is
+// that the FIXED instruction string every recon has always received (the role sentence, the
+// three read-only commands, the report format, the optional Follow-ups section) is untouched —
+// this is still an implement/other-lane concern, not a rewrite of what recon is asked to do.
 
-test("the RECON prompt is byte-identical to origin/main's — this changes the implement side only", () => {
+test("the RECON prompt's fixed instruction text is byte-identical to origin/main's — only an optional task/record pointer was added (W1-T2632)", () => {
   const mainSrc = execFileSync("git", ["show", "origin/main:src/run-task.ts"], {
     cwd: fileURLToPath(new URL("..", import.meta.url)),
     encoding: "utf8",
     maxBuffer: 1 << 28,
   });
-  const body = (src: string): string => {
-    const start = src.indexOf("export function renderReconPrompt");
-    assert.notEqual(start, -1, "renderReconPrompt must be findable in both trees");
-    const end = src.indexOf("\n}", start);
-    return src.slice(start, end);
+  const fixedInstructionText = (src: string): string => {
+    const start = src.indexOf('"You are a RECON worker. Do NOT modify anything.');
+    assert.notEqual(start, -1, "the RECON role sentence must be findable in both trees");
+    const endMarker = "for anything discovered that is out of THIS recon's scope.\",";
+    const endIdx = src.indexOf(endMarker, start);
+    assert.notEqual(endIdx, -1, "the Follow-ups sentence must be findable in both trees");
+    return src.slice(start, endIdx + endMarker.length);
   };
-  assert.equal(body(SRC), body(mainSrc), "renderReconPrompt's source must be unchanged, byte for byte");
+  assert.equal(
+    fixedInstructionText(SRC),
+    fixedInstructionText(mainSrc),
+    "recon's fixed instruction text must be unchanged, byte for byte",
+  );
 
   // …and the rendered text really carries none of the new label, so the equality above is not the
   // only thing standing between recon and a leak.

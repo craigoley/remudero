@@ -97,8 +97,8 @@ test("INERTNESS LOCK: undefined is a SUPPORTED spawn value — worker.ts leaves 
 
 // ── 3: the spawn actually receives the resolved values ──────────────────────────────
 test("the recon spawn passes the mount's model and effort, and the implement spawn is unchanged", () => {
-  const recon = SRC.slice(SRC.indexOf("renderReconPrompt(planIndexBlock, operatorNotesBlock)") - 1400);
-  const reconCall = recon.slice(0, recon.indexOf("renderReconPrompt(planIndexBlock, operatorNotesBlock)"));
+  const recon = SRC.slice(SRC.indexOf("renderReconPrompt(planIndexBlock, operatorNotesBlock, task, recordPath)") - 1400);
+  const reconCall = recon.slice(0, recon.indexOf("renderReconPrompt(planIndexBlock, operatorNotesBlock, task, recordPath)"));
 
   assert.match(reconCall, /model:\s*reconMount\?\.model/, "recon passes the mount's model");
   assert.match(reconCall, /effort:\s*reconMount\?\.effort/, "recon passes the mount's effort");
@@ -108,8 +108,8 @@ test("the recon spawn passes the mount's model and effort, and the implement spa
 
 // ── 4: maxTurns — the code and the ROW agree, on ONE constant (operator ruling, impl-BS) ──
 test("maxTurns on the recon spawn is the bounded RECON_MAX_TURNS, and every recon row cell agrees", () => {
-  const recon = SRC.slice(SRC.indexOf("renderReconPrompt(planIndexBlock, operatorNotesBlock)") - 1400);
-  const reconCall = recon.slice(0, recon.indexOf("renderReconPrompt(planIndexBlock, operatorNotesBlock)"));
+  const recon = SRC.slice(SRC.indexOf("renderReconPrompt(planIndexBlock, operatorNotesBlock, task, recordPath)") - 1400);
+  const reconCall = recon.slice(0, recon.indexOf("renderReconPrompt(planIndexBlock, operatorNotesBlock, task, recordPath)"));
   const mounts = readFileSync(new URL("../.remudero/mounts.yaml", import.meta.url), "utf8");
   const reconRow = mounts.slice(mounts.indexOf("\n  recon:"), mounts.indexOf("\n  implement:"));
 
