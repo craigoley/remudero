@@ -163,6 +163,8 @@ function acknowledgeLandedQueueCopies(
       .filter(Boolean)
       .sort();
   } catch {
+    // A failed best-effort enumeration and an empty inbox both mean there is no proved
+    // acknowledgement to publish.
     return undefined;
   }
 
