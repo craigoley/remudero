@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import {
   CodexToolchainBlockedError,
   ProviderCapacityBlockedError,
@@ -41,6 +41,17 @@ function capacity(provider: "claude" | "codex", ...usedPercent: number[]): Provi
     readable: true,
     windows: usedPercent.map((value, index) => ({ name: `window-${index}`, usedPercent: value })),
   };
+}
+
+/**
+ * The worker-home guard intentionally refuses any path below a `.git` marker. Test sandboxes can
+ * mount one at `/tmp/.git`, so use the Linux shared-memory filesystem for fixtures that exercise
+ * the real Claude spawn path rather than accidentally testing that unrelated placement refusal.
+ */
+function isolatedWorkerHomeRoot(context: TestContext): string {
+  const fixture = mkdtempSync("/dev/shm/rmd-worker-home-");
+  context.after(() => rmSync(fixture, { recursive: true, force: true }));
+  return join(fixture, "worker-home");
 }
 
 test("provider selector uses the subscription with the most tight-window headroom", () => {
@@ -784,14 +795,14 @@ test("spawnWorker routes an opted-in call to Codex, preserves containment, and l
   });
 });
 
-test("the unchanged Claude spawn path labels its successful provider", async () => {
+test("the unchanged Claude spawn path labels its successful provider", async (context) => {
   const root = mkdtempSync(join(tmpdir(), "rmd-claude-provider-"));
   const result = await spawnWorker({
     cwd: process.cwd(),
     permissionMode: "bypassPermissions",
     settingsFile: join(process.cwd(), "settings", "worker.json"),
     prompt: "legacy Claude path",
-    config: { claudeBin: "/unused", root },
+    config: { claudeBin: "/unused", root, workerHomeRoot: isolatedWorkerHomeRoot(context) },
     claudeExecutable: {
       cache: createClaudeExecutableCache(),
       deps: {
@@ -825,6 +836,7 @@ test("the unchanged Claude spawn path labels its successful provider", async () 
 });
 
 async function spawnMeasuredClaude(
+  context: TestContext,
   readClaude: (request?: { forceRefresh?: boolean }) => Promise<ProviderCapacity>,
 ) {
   const root = mkdtempSync(join(tmpdir(), "rmd-claude-window-consumption-"));
@@ -836,6 +848,7 @@ async function spawnMeasuredClaude(
     config: {
       claudeBin: "/unused",
       root,
+      workerHomeRoot: isolatedWorkerHomeRoot(context),
       workerProviders: { enabled: ["claude", "codex"], codexBin: "/bin/sh" },
     },
     providerRouting: {
@@ -871,9 +884,9 @@ async function spawnMeasuredClaude(
   });
 }
 
-test("a multi-provider Claude call ledgers reset-stable exclusive window consumption", async () => {
+test("a multi-provider Claude call ledgers reset-stable exclusive window consumption", async (context) => {
   const claudeRequests: Array<{ forceRefresh?: boolean } | undefined> = [];
-  const result = await spawnMeasuredClaude(async (request) => {
+  const result = await spawnMeasuredClaude(context, async (request) => {
     claudeRequests.push(request);
     const usedPercent = claudeRequests.length === 3 ? 11.5 : 10;
     return {
@@ -891,10 +904,10 @@ test("a multi-provider Claude call ledgers reset-stable exclusive window consump
   });
 });
 
-test("an unreadable opening boundary does not prevent a selected worker from running", async () => {
+test("an unreadable opening boundary does not prevent a selected worker from running", async (context) => {
   clearProviderWindowMeasurements();
   let reads = 0;
-  const result = await spawnMeasuredClaude(async () => {
+  const result = await spawnMeasuredClaude(context, async () => {
     reads += 1;
     if (reads === 2) throw new Error("opening boundary offline");
     return {
@@ -908,10 +921,10 @@ test("an unreadable opening boundary does not prevent a selected worker from run
   assert.equal(result.windowConsumption, undefined);
 });
 
-test("an unreadable closing boundary is explicit and releases the provider measurement", async () => {
+test("an unreadable closing boundary is explicit and releases the provider measurement", async (context) => {
   clearProviderWindowMeasurements();
   let reads = 0;
-  const result = await spawnMeasuredClaude(async () => {
+  const result = await spawnMeasuredClaude(context, async () => {
     reads += 1;
     if (reads === 3) throw new Error("closing boundary offline");
     return {
