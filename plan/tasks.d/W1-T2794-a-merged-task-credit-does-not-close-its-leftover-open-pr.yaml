@@ -1,0 +1,90 @@
+- id: W1-T2794
+  title: "a durable merged-task credit does not close a leftover open implementation PR — W1-T2786 was credited merged by #3874, but #3877 stayed open, was reviewed PASS, then escalated every sweep as an ambiguous merge conflict"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: "span"
+  budget_usd: 8.00
+  files: [src/lib/sweep.ts, src/run-task.ts, test/merged-task-open-pr-supersession.test.ts]
+  origin: "operator-session#pr-3877-left-open-after-w1-t2786-merged-2026-09-03"
+  plan_refs: ["W1-T77", "W1-T150", "W1-T920", "W1-T2779"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED INCIDENT. PR #3874 merged W1-T2786 at 2026-09-03T21:52:52Z. The level-triggered
+    credit rung then wrote an authoritative `verdict.merged` for W1-T2786/#3874 at
+    2026-09-03T22:00:34.348Z. Despite that durable fact, the sweep reviewed competing PR #3877
+    PASS at 22:17:49 and, from 22:22 through 22:25, repeatedly derived `blocked-ambiguous` for its
+    conflict with main. The operator had to close it as superseded.
+
+    THE INFORMATION WAS NOT MISSING. `buildOpenPrViews` already reads the ledger, and the same
+    full-sweep composition already calls `buildCreditCandidates`, whose ownership-asserted
+    projection returns `{taskId, prNumber, prUrl, merged:true}` for each task GitHub proves merged.
+    The gap is ordering and composition: `runSweep(openPrs)` runs BEFORE those candidates are built,
+    while `supersededBy` is computed only from the current OPEN-PR array. Once #3874 left that
+    array, the peer relation disappeared even though stronger merged evidence existed.
+
+    FIX THE COMPOSITION, NOT THE CONFLICT CLASSIFIER. Build the existing credit-candidate set once
+    before open-PR disposition, project its positively merged task/PR identities onto the open
+    views, run the existing stale/close effect, then reuse that SAME candidate set for credit
+    backfill. Both the one-shot sweep and daemon sweep hook take the same path. This spends no new
+    GitHub call and does not teach the conflict resolver to clobber a second implementation.
+
+    REPRESENT THE CAUSE EXPLICITLY. A task already merged by PR N is stronger than the existing
+    `supersededBy` arithmetic (which means only that a higher-numbered OPEN peer shares the trailer).
+    Carry a distinct `taskMergedBy` field and give it its own first-match stale row/reason. Do not
+    overload the open-peer number or infer completion from YAML `status:`. The only authority is
+    the ownership-asserted merged projection the credit rung already trusts.
+
+    FAIL OPEN ON DARKNESS. No candidate, an unreadable GitHub projection, a taskless PR, or a
+    candidate that does not read `merged:true` must leave the PR's existing disposition unchanged.
+    Closing is destructive queue hygiene and therefore requires positive evidence. The existing
+    close effect remains reversible and does not delete branches.
+
+    PLAN/IMPLEMENTATION COMPLEMENTS STAY INTACT. W1-T2779 prevents two OPEN stages (a plan filing
+    and its implementation) from superseding each other. This task does not weaken that rule. A
+    plan filing is not an ownership-asserted merged implementation candidate; without a positive
+    merged task candidate the new row cannot match. Once the implementation itself is credited,
+    any leftover PR reusing that completed task id is stale and should close.
+
+    OPERATOR CONTROL IS PRESERVED. This does not arm, merge, squash, delete a branch, or change an
+    auto-merge decision. It removes only a losing duplicate after another owned PR has already
+    completed the task. An intentional follow-up must mint its own task id, keeping both the audit
+    trail and the operator's manual merge/squash override unambiguous.
+
+    ROOT-CAUSE CLASS. Event-driven concurrency makes simultaneous implementations more likely; a
+    mature queue manager must therefore reconcile the losing branch when the winner merges. The
+    moat is not merely faster agents. It is causal queue convergence: durable task identity plus a
+    positive completion event deterministically retires redundant work without asking a model to
+    rediscover the relationship or burning a review/fix worker on it.
+
+    ID PROVENANCE. `rmd next-task-id --reserve` scanned the merged plan, open PRs and history,
+    reported max 2793, and atomically RESERVED W1-T2794 at `refs/rmd-id/W1-T2794` on the first
+    attempt. The advisory count reported 280 tasks in tasks.yaml and 2793 across shards.
+  acceptance:
+    - claim: "an open implementation PR whose task has a positive owned merged candidate is disposed stale and closed with a reason naming the merged PR"
+      proof: "unit test: test/merged-task-open-pr-supersession.test.ts"
+    - claim: "the one-shot sweep and daemon sweep hook both build the existing credit candidates before disposition and reuse the same candidates for backfill"
+      proof: "unit test: test/merged-task-open-pr-supersession.test.ts"
+    - claim: "the new path adds no GitHub or ledger read: one existing credit-candidate build per full sweep supplies both supersession and credit backfill"
+      proof: "unit test: test/merged-task-open-pr-supersession.test.ts"
+    - claim: "no merged candidate, an unreadable/absent task identity, and an unrelated merged task all preserve the prior disposition and never close"
+      proof: "unit test: test/merged-task-open-pr-supersession.test.ts"
+    - claim: "the merged-task cause is explicit and distinct from higher-numbered open-peer supersession, while W1-T2779 plan/implementation complement behavior remains unchanged"
+      proof: "unit test: test/merged-task-open-pr-supersession.test.ts"
+    - claim: "closing a merged-task duplicate remains reversible: the existing close effect is used and no branch deletion, merge, arm, or lifecycle command is added"
+      proof: "unit test: test/merged-task-open-pr-supersession.test.ts"
+  falsifier: |
+    First, remove only the merged-candidate projection before `runSweep`. The incident fixture must
+    stop closing #3877 while every ordinary open-peer supersession and W1-T2779 complement control
+    still passes. If it still closes, the test is proving an older row and is not load-bearing.
+
+    Second, make the merged-candidate input absent/indeterminate. The PR must not close. If absence
+    closes it, the implementation laundered a failed read into completion and must not ship.
+
+    Third, count the real composition's `buildCreditCandidates` calls. Moving it before disposition
+    must leave exactly one call per full sweep, with the returned array reused by backfill. Two calls
+    would buy queue hygiene by doubling GitHub work and violate the stated mechanism.
