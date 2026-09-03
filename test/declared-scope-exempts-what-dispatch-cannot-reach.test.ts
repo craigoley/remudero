@@ -133,13 +133,24 @@ test("W1-T2481: no other linter check changes behaviour for any task in either s
   const blocked = task({ id: "W1-T2481-PARITY", status: "blocked", ...shared });
   const queued: Task = { ...blocked, status: "queued" };
 
-  const blockedChecks = lintTask(blocked).violations.map((v) => v.check).sort();
+  // W1-T2634 (filed AFTER this test): `blockedRecordUnruledViolations` is a SECOND, deliberate
+  // status:blocked-keyed check — it names every `status: "blocked"` record with no `retirement:`
+  // ruling, unconditionally, precisely so that fact stops being invisible outside a diff. That is
+  // a real, intended divergence between the blocked and queued fixtures above (neither carries
+  // `retirement:`), not a regression of THIS check's own declared-scope exemption — so it is
+  // excluded from the parity comparison below, by name, rather than silently widening the
+  // assertion for every future status-keyed check.
+  const blockedChecks = lintTask(blocked)
+    .violations.map((v) => v.check)
+    .filter((c) => c !== "blocked-record-unruled")
+    .sort();
   const queuedChecks = lintTask(queued).violations.map((v) => v.check).sort();
   assert.deepEqual(
     blockedChecks,
     queuedChecks,
-    "with a declared scope present, the exemption never engages, so blocked and unblocked must " +
-      "draw identical violation sets from every other check",
+    "with a declared scope present, the declared-scope exemption never engages, so blocked and " +
+      "unblocked must draw identical violation sets from every OTHER check (blocked-record-unruled " +
+      "excepted, per W1-T2634, above)",
   );
 });
 
