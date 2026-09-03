@@ -5665,13 +5665,12 @@ const ZERO_COUNTS = (): Record<Disposition, number> => ({
  * but run in the SAME process — a module-level `Set` is therefore visible to all of them with no
  * change needed outside this file.
  *
- * NOT PROCESS-GLOBAL-FOREVER: a key is added the instant it is claimed (synchronously, no
- * `await` between the check and the add — unchanged from before this task) and REMOVED the
- * instant that claim's fate is decided, in `runSweep` below — either the scheduled `postReview`
- * call settles (success or failure) or the job stands down this pass (review budget exhausted).
- * A key never survives past the single in-flight attempt that claimed it, so a LEGITIMATE later
- * pass over the same still-unreviewed head is never permanently locked out — only a genuinely
- * CONCURRENT second claim for a key already in flight is refused.
+ * NOT PROCESS-GLOBAL-FOREVER: a key is added synchronously when a pool worker is ready to START
+ * that review, not while the earlier disposition walk merely discovers it. It is removed the
+ * instant that attempt settles. A pending job therefore owns no mutex while an unrelated action
+ * later in the walk stalls, and a continuation-gated unstarted tail owns nothing to release.
+ * A legitimate later pass over the same still-unreviewed head is never permanently locked out —
+ * only a genuinely concurrent second action-time claim is refused.
  */
 const inFlightReviewKeys = new Set<string>();
 
@@ -5977,25 +5976,67 @@ export async function runSweep(
   let noneCount = 0;
 
   // ── W1-T473/W1-T513 — REVIEW CONCURRENCY BUDGET STATE ──────────────────────
-  // `claimedReviewKeys` is the REAL mutual exclusion concurrency needs and
-  // never had before W1-T473: `prior.reviewDelivered`/`prior.reviewRefused` (built once, above,
-  // from the ledger) are a snapshot taken BEFORE this pass's own postReview calls
-  // can write anything back — safe under a single-threaded walk (no second
-  // reader exists between that read and a ledger write), unsafe the moment
-  // two `post-review` PRs are handled at once. This set is consulted and
-  // updated SYNCHRONOUSLY, in the loop below, before any `postReview` call is
-  // even scheduled — no `await` ever separates a key's check from its claim,
-  // so two PRs sharing a `${taskId}@${headSha}` key can never both schedule a
-  // concurrent call for it.
+  // `claimedReviewKeys` is the REAL mutual exclusion concurrency needs. A pool worker consults
+  // and updates it synchronously immediately before its `postReview` attempt, so two workers
+  // sharing a `${taskId}@${headSha}` key can never run that effect concurrently. Discovery alone
+  // does not claim: the pass-level `prior.reviewDelivered`/`prior.reviewRefused` snapshot may be
+  // stale by worker start, so `claimReview` also re-reads those durable outcomes under the claim.
   //
   // W1-T513: now the module-level {@link inFlightReviewKeys}, not a fresh
   // per-call `Set` — a fresh Set only ever arbitrated between PRs inside THIS
   // one call, never between two SEPARATE, genuinely concurrent `runSweep`
   // calls (the daemon's full sweep racing a light-pass tick, or two
   // overlapping light passes). Sharing the module-level Set closes that gap
-  // with no change to this function's own claim/stand-down logic below —
-  // only WHERE the Set lives moved, never HOW it is consulted.
+  // with no change to the exact-input exclusion boundary.
   const claimedReviewKeys = inFlightReviewKeys;
+
+  /**
+   * W1-T2771 — CLAIM AT ACTION TIME, THEN RE-READ THE OUTCOME UNDER THE CLAIM. The old placement
+   * added the key while the sequential disposition walk was still running. A later fix action
+   * could then hold a review candidate's key for minutes before the pool existed; every light
+   * pass saw a duplicate for that candidate while the candidate itself monopolised the light
+   * pass's scarce admission. No review was in flight.
+   *
+   * The fresh ledger read is the other half of moving the claim. A light pass may now review this
+   * input while an older full sweep is still walking. The older pass's top-of-function `prior`
+   * snapshot predates that verdict, so claiming without re-reading would spend a second review
+   * after the light pass released its mutex. The read happens synchronously after `add`, making
+   * the mutex plus durable outcome one atomic decision boundary inside this process.
+   */
+  function claimReview(
+    reviewKey: string,
+  ): { ok: true; release: () => void } | { ok: false; deduped: boolean; reason: string } {
+    if (claimedReviewKeys.has(reviewKey)) {
+      return {
+        ok: false,
+        deduped: true,
+        reason: `duplicate review key (${reviewKey}) already claimed this pass — see PriorActions.reviewDelivered/reviewRefused's docs`,
+      };
+    }
+    claimedReviewKeys.add(reviewKey);
+    try {
+      const fresh = priorActionsFromLedger(readLedger(deps.ledgerPath));
+      const delivered = fresh.reviewDelivered.has(reviewKey);
+      if (delivered || fresh.reviewRefused.has(reviewKey)) {
+        claimedReviewKeys.delete(reviewKey);
+        return {
+          ok: false,
+          deduped: true,
+          reason: delivered
+            ? `a verdict was already DELIVERED for ${reviewKey} — the action-time re-read deduped the re-post`
+            : `a review post was already REFUSED for ${reviewKey} — the action-time re-read deduped the re-post`,
+        };
+      }
+    } catch (e) {
+      claimedReviewKeys.delete(reviewKey);
+      return {
+        ok: false,
+        deduped: false,
+        reason: `review action-time outcome read failed closed (${String((e as Error)?.message ?? e)}) — re-derived next pass`,
+      };
+    }
+    return { ok: true, release: () => claimedReviewKeys.delete(reviewKey) };
+  }
 
   /**
    * W1-T2520 — CLAIM THIS PR'S FIX-DISPATCH KEY (or refuse), the fix-rung twin of the review-key
@@ -7016,37 +7057,12 @@ export async function runSweep(
     }
 
     if (deferredReview) {
-      // W1-T473/W1-T513 — THE MUTEX: claim (or refuse) this PR's review key
-      // SYNCHRONOUSLY, right here, with no `await` between the `has` check
-      // and the `add` — that is the entire guarantee two PRs (or, since
-      // W1-T513, two genuinely CONCURRENT `runSweep` calls anywhere in this
-      // process) sharing a `${taskId}@${headSha}` key can never both queue a
-      // concurrent `postReview` call for it. A duplicate stands down exactly
-      // like any other dedup, never a crash or a silent drop. Released in
-      // EXACTLY one of two places once this claim's fate is decided: the
-      // `deferredToNextPass` loop below (budget exhausted, never scheduled)
-      // or the `runNow` lane's own `finally` further down (scheduled and
-      // settled) — never both, and never neither.
+      // W1-T2771: discovery is not execution and therefore owns no mutex. Carry the stable key
+      // into the pool, where `claimReview` atomically claims it immediately before the attempt.
+      // This lets a concurrent light pass review the head while this walk is stalled later on an
+      // unrelated effect, without weakening the one-live-attempt invariant.
       const reviewKey = reviewOutcomeKeyForPr(pr);
-      if (claimedReviewKeys.has(reviewKey)) {
-        finalizeDisposition(
-          prIndex,
-          pr,
-          disposition,
-          reason,
-          question,
-          false,
-          true,
-          undefined,
-          `duplicate review key (${reviewKey}) already claimed this pass — see PriorActions.reviewDelivered/reviewRefused's docs`,
-          undefined,
-          undefined,
-          undefined,
-        );
-      } else {
-        claimedReviewKeys.add(reviewKey);
-        pendingReviews.push({ index: prIndex, pr, reason, question, reviewKey });
-      }
+      pendingReviews.push({ index: prIndex, pr, reason, question, reviewKey });
       continue;
     }
 
@@ -7128,6 +7144,24 @@ export async function runSweep(
   };
 
   const runReview = async (job: (typeof orderedReviews)[number]): Promise<void> => {
+    const claim = claimReview(job.reviewKey);
+    if (!claim.ok) {
+      finalizeDisposition(
+        job.index,
+        job.pr,
+        "post-review",
+        job.reason,
+        job.question,
+        false,
+        claim.deduped,
+        undefined,
+        claim.reason,
+        undefined,
+        undefined,
+        undefined,
+      );
+      return;
+    }
       let acted = true;
       let actionError: string | undefined;
       // W1-T529 (iv): set INSTEAD of `actionError` when the throw is a budget floor stand-down —
@@ -7224,7 +7258,7 @@ export async function runSweep(
         // re-claim the SAME key next pass, so releasing it here costs nothing and
         // holding it any longer than the attempt itself would only block work,
         // never protect any.
-        claimedReviewKeys.delete(job.reviewKey);
+        claim.release();
       }
       finalizeDisposition(
         job.index,
@@ -7258,13 +7292,12 @@ export async function runSweep(
     }),
   );
 
-  // Only a named admission stop can leave an unstarted tail. Release its module-level mutex keys
-  // and ledger `acted:false` with no `review.posted`/`review.post_refused` outcome key, so the
-  // ordinary level-triggered next pass can claim every head again. The keys stay held until all
-  // admitted workers settle, preventing a concurrent light pass from overtaking this snapshot.
+  // Only a named admission stop can leave an unstarted tail. W1-T2771: these jobs were discovered
+  // but never pulled, so they own NO module-level mutex key. In particular, do not `delete` their
+  // key here: a concurrent pass may own it for a real active review. Ledger `acted:false` with no
+  // outcome key so the ordinary level-triggered next pass can derive the head again.
   const unstartedReviews = orderedReviews.slice(nextReviewIndex);
   for (const job of unstartedReviews) {
-    claimedReviewKeys.delete(job.reviewKey);
     finalizeDisposition(
       job.index,
       job.pr,
