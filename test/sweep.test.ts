@@ -414,6 +414,90 @@ function supersededVerdict(over: Partial<SupersessionVerdict> = {}): Supersessio
   };
 }
 
+function complementaryVerdict(over: Partial<NonNullable<SupersessionVerdict["complement"]>> = {}): SupersessionVerdict {
+  return {
+    status: "complementary",
+    complement: {
+      planPrNumber: 3826,
+      implementationPrNumber: 3818,
+      taskId: "W1-T2777",
+      planPathCount: 1,
+      implementationPathCount: 4,
+      ...over,
+    },
+    detail: "#3826 is plan-only and #3818 contains implementation paths",
+  } as SupersessionVerdict;
+}
+
+test("W1-T2779: a positive plan-plus-implementation complement is never disposed by bare-number supersession", () => {
+  const result = deriveDisposition(
+    pr({
+      prNumber: 3818,
+      taskId: "W1-T2777",
+      supersededBy: 3826,
+      supersessionVerdict: complementaryVerdict(),
+      checksState: "green",
+      reviewState: "success",
+    }),
+    DEFAULT_SWEEP_POLICY,
+    NOW,
+  );
+  assert.equal(result.disposition, "mergeable", "the implementation remains independently gateable");
+  assert.doesNotMatch(result.reason, /supersed/i);
+});
+
+test("W1-T2779: an older plan filing and its newer implementation both survive inverse numbering", () => {
+  const plan = deriveDisposition(
+    pr({
+      prNumber: 3826,
+      taskId: "W1-T2777",
+      supersededBy: 3831,
+      supersessionVerdict: complementaryVerdict({ planPrNumber: 3826, implementationPrNumber: 3831 }),
+      checksState: "green",
+      reviewState: "success",
+    }),
+    DEFAULT_SWEEP_POLICY,
+    NOW,
+  );
+  const implementation = deriveDisposition(
+    pr({ prNumber: 3831, taskId: "W1-T2777", checksState: "green", reviewState: "success" }),
+    DEFAULT_SWEEP_POLICY,
+    NOW,
+  );
+  assert.equal(plan.disposition, "mergeable", "the lower-numbered plan filing is preserved");
+  assert.equal(implementation.disposition, "mergeable", "the newer implementation is independently gateable");
+});
+
+test("W1-T2779: two implementation peers and two plan-only peers keep ordinary supersession disposal", () => {
+  const twoImplementations = deriveDisposition(
+    pr({ prNumber: 10, supersededBy: 11, supersessionVerdict: supersededVerdict() }),
+    DEFAULT_SWEEP_POLICY,
+    NOW,
+  );
+  const twoPlans = deriveDisposition(
+    pr({ prNumber: 20, supersededBy: 21, supersessionVerdict: supersededVerdict() }),
+    DEFAULT_SWEEP_POLICY,
+    NOW,
+  );
+  assert.equal(twoImplementations.disposition, "stale");
+  assert.equal(twoPlans.disposition, "stale");
+});
+
+test("W1-T2779: complementary is narrow — absent and indeterminate evidence keep ordinary duplicate disposal", () => {
+  const absent = deriveDisposition(pr({ prNumber: 10, supersededBy: 11 }), DEFAULT_SWEEP_POLICY, NOW);
+  const indeterminate = deriveDisposition(
+    pr({
+      prNumber: 10,
+      supersededBy: 11,
+      supersessionVerdict: { status: "indeterminate", detail: "one file read failed" },
+    }),
+    DEFAULT_SWEEP_POLICY,
+    NOW,
+  );
+  assert.equal(absent.disposition, "stale");
+  assert.equal(indeterminate.disposition, "stale");
+});
+
 test("W1-T920: the disposition is inert while its policy flag is off", () => {
   // The off path must be BYTE-FOR-BYTE today's behaviour: a verdict present on the PR, with the
   // flag at its shipped default (off), must change NOTHING — not the disposition, not the reason,

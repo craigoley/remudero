@@ -34,11 +34,12 @@ import {
   singlePrRestArgs,
   type GhApiFetcher,
 } from "../src/lib/open-prs-rest.js";
-import { checksStateFromRollup, DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
+import { checksStateFromRollup, DEFAULT_SWEEP_POLICY, deriveDisposition, runSweep, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
 import { fixCommand } from "../src/run-task.js";
 import { ghJson, type GhRateLimitReading } from "../src/lib/worker.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import type { Config } from "../src/lib/config.js";
+import { isInPlanScope } from "../src/lib/plan-architect.js";
 
 const OWNER = "craigoley";
 const REPO = "remudero";
@@ -1655,7 +1656,7 @@ test("W1-T2384: prFilesRestArgs asks for ONE pull request's files, paged at 100"
 
 test("W1-T2384: every path the PR touches is also touched by the superseding PR ⇒ superseded, carrying evidence rather than a bare integer", () => {
   const f = filesFetcher({ 1955: [file("src/lib/sweep.ts"), file("test/sweep.test.ts")], 1960: [file("src/lib/sweep.ts"), file("test/sweep.test.ts"), file("src/lib/board.ts")] });
-  const v = fetchSupersessionVerdict(OWNER, REPO, 1955, 1960, "W1-T900", f);
+  const v = fetchSupersessionVerdict(OWNER, REPO, 1955, 1960, "W1-T900", f, isInPlanScope);
   assert.equal(v.status, "superseded");
   assert.ok(v.evidence, "a superseded verdict MUST name its evidence — that is the whole deliverable");
   assert.equal(v.evidence!.supersedingPrNumber, 1960);
@@ -1666,7 +1667,7 @@ test("W1-T2384: every path the PR touches is also touched by the superseding PR 
 
 test("W1-T2384: no shared path ⇒ unique, a POSITIVE finding and never a silent absence", () => {
   const f = filesFetcher({ 1955: [file("src/lib/digest.ts")], 1960: [file("src/lib/sweep.ts")] });
-  const v = fetchSupersessionVerdict(OWNER, REPO, 1955, 1960, "W1-T900", f);
+  const v = fetchSupersessionVerdict(OWNER, REPO, 1955, 1960, "W1-T900", f, isInPlanScope);
   assert.equal(v.status, "unique");
   assert.equal(v.evidence, undefined, "evidence is REQUIRED only for `superseded`");
   assert.match(v.detail, /none of #1955/);
@@ -1674,14 +1675,97 @@ test("W1-T2384: no shared path ⇒ unique, a POSITIVE finding and never a silent
 
 test("W1-T2384: a PARTIAL overlap supports neither finding ⇒ indeterminate, never collapsed to unique", () => {
   const f = filesFetcher({ 1955: [file("src/lib/sweep.ts"), file("src/lib/digest.ts")], 1960: [file("src/lib/sweep.ts")] });
-  const v = fetchSupersessionVerdict(OWNER, REPO, 1955, 1960, "W1-T900", f);
+  const v = fetchSupersessionVerdict(OWNER, REPO, 1955, 1960, "W1-T900", f, isInPlanScope);
   assert.equal(v.status, "indeterminate", "collapsing this to `unique` would SAVE a PR the arithmetic condemned");
   assert.match(v.detail, /partial overlap/);
 });
 
+test("W1-T2779: a newer plan-only filing is complementary to the older implementation it exists to unblock", () => {
+  const f = filesFetcher({
+    3818: [
+      file("plan/tasks.d/W1-T2777-task.yaml"),
+      file("src/lib/worker.ts"),
+      file("test/worktree-node-modules-lockfile-mismatch.test.ts"),
+    ],
+    3826: [file("plan/tasks.d/W1-T2777-task.yaml")],
+  });
+  const v = fetchSupersessionVerdict(OWNER, REPO, 3818, 3826, "W1-T2777", f, isInPlanScope);
+  assert.equal(v.status, "complementary");
+  assert.deepEqual(v.complement, {
+    planPrNumber: 3826,
+    implementationPrNumber: 3818,
+    taskId: "W1-T2777",
+    planPathCount: 1,
+    implementationPathCount: 3,
+  });
+  assert.equal(f.calls.length, 2, "the classification reuses the two existing /files reads");
+  const disposition = deriveDisposition(
+    w1t529Pr({
+      prNumber: 3818,
+      taskId: "W1-T2777",
+      supersededBy: 3826,
+      supersessionVerdict: v,
+      checksState: "green",
+      reviewState: "success",
+    }),
+    DEFAULT_SWEEP_POLICY,
+    W1T529_SWEEP_NOW,
+  );
+  assert.equal(disposition.disposition, "mergeable", "the positive complement must make the stale row yield");
+});
+
+test("W1-T2779: inverse numbering is also complementary — neither stage wins merely by being newer", () => {
+  const f = filesFetcher({
+    3826: [file("plan/tasks.d/W1-T2777-task.yaml")],
+    3831: [file("src/lib/worker.ts"), file("test/worktree-node-modules-lockfile-mismatch.test.ts")],
+  });
+  const v = fetchSupersessionVerdict(OWNER, REPO, 3826, 3831, "W1-T2777", f, isInPlanScope);
+  assert.equal(v.status, "complementary");
+  assert.equal(v.complement?.planPrNumber, 3826);
+  assert.equal(v.complement?.implementationPrNumber, 3831);
+});
+
+test("W1-T2779: same-role peers retain existing verdicts", () => {
+  const twoImplementations = filesFetcher({
+    10: [file("src/lib/a.ts")],
+    11: [file("src/lib/a.ts"), file("src/lib/b.ts")],
+  });
+  assert.equal(fetchSupersessionVerdict(OWNER, REPO, 10, 11, "W1-T1", twoImplementations, isInPlanScope).status, "superseded");
+
+  const twoFilings = filesFetcher({
+    20: [file("plan/tasks.d/W1-T2.yaml")],
+    21: [file("plan/tasks.d/W1-T2.yaml")],
+  });
+  assert.equal(fetchSupersessionVerdict(OWNER, REPO, 20, 21, "W1-T2", twoFilings, isInPlanScope).status, "superseded");
+});
+
+test("W1-T2779: empty, malformed, failed, and merely partial evidence never becomes complementary", () => {
+  const empty = filesFetcher({ 30: [file("src/lib/a.ts")], 31: [] });
+  assert.equal(fetchSupersessionVerdict(OWNER, REPO, 30, 31, "W1-T3", empty, isInPlanScope).status, "indeterminate");
+
+  const malformed = filesFetcher({ 40: [file("src/lib/a.ts")], 41: [{ filename: "", additions: 5, deletions: 2 }] });
+  assert.equal(fetchSupersessionVerdict(OWNER, REPO, 40, 41, "W1-T4", malformed, isInPlanScope).status, "indeterminate");
+
+  const partial = filesFetcher({
+    50: [file("plan/tasks.d/W1-T5.yaml"), file("docs/a.md")],
+    51: [file("plan/tasks.d/W1-T5.yaml"), file("src/lib/a.ts")],
+  });
+  assert.equal(fetchSupersessionVerdict(OWNER, REPO, 50, 51, "W1-T5", partial, isInPlanScope).status, "indeterminate");
+
+  const failed = filesFetcher({ 60: [file("src/lib/a.ts")] });
+  const hydrated = hydrateSupersessionVerdicts(
+    OWNER,
+    REPO,
+    [{ number: 60, supersededBy: 61, taskId: "W1-T6" }],
+    failed,
+    isInPlanScope,
+  );
+  assert.equal(hydrated.get(60), undefined, "a failed changed-files read preserves the fail-closed absent verdict");
+});
+
 test("W1-T2384: an EMPTY corpus control ⇒ indeterminate — a read that observed nothing supports no finding", () => {
   const f = filesFetcher({ 1955: [], 1960: [file("src/lib/sweep.ts")] });
-  const v = fetchSupersessionVerdict(OWNER, REPO, 1955, 1960, "W1-T900", f);
+  const v = fetchSupersessionVerdict(OWNER, REPO, 1955, 1960, "W1-T900", f, isInPlanScope);
   assert.equal(v.status, "indeterminate");
   assert.equal(v.diff?.rawLineCount, 0, "the control is CARRIED, so the zero is visible rather than inferred");
 });
@@ -1691,19 +1775,19 @@ test("W1-T2384: hydrateSupersessionVerdicts is BEST-EFFORT per PR — one throw 
   const out = hydrateSupersessionVerdicts(OWNER, REPO, [
     { number: 1955, supersededBy: 1960, taskId: "W1-T900" },
     { number: 1970, supersededBy: 1971, taskId: "W1-T901" },
-  ], f);
+  ], f, isInPlanScope);
   assert.equal(out.get(1955)?.status, "superseded", "the readable PR still produced");
   assert.equal(out.get(1970), undefined, "the failing one keeps the pre-existing undefined — byte-identical to today");
 });
 
 test("W1-T2384: the per-PR cost is TWO calls, and the hydration is scoped to the flagged set alone", () => {
   const f = filesFetcher({ 1955: [file("src/lib/sweep.ts")], 1960: [file("src/lib/sweep.ts")] });
-  hydrateSupersessionVerdicts(OWNER, REPO, [{ number: 1955, supersededBy: 1960, taskId: "W1-T900" }], f);
+  hydrateSupersessionVerdicts(OWNER, REPO, [{ number: 1955, supersededBy: 1960, taskId: "W1-T900" }], f, isInPlanScope);
   assert.equal(f.calls.length, 2, "exactly two /files reads per flagged PR — its own and the superseding one");
   // AND NOTHING is fetched for a board with nothing flagged: the N+1 shape W1-T2340's first
   // attempt had is impossible here because the caller passes only `supersededBy != null` PRs.
   const quiet = filesFetcher({});
-  hydrateSupersessionVerdicts(OWNER, REPO, [], quiet);
+  hydrateSupersessionVerdicts(OWNER, REPO, [], quiet, isInPlanScope);
   assert.equal(quiet.calls.length, 0, "an unflagged board costs ZERO calls");
 });
 
@@ -1716,6 +1800,6 @@ test("W1-T2384: the hydration reuses MERGE_STATE_HYDRATION_CAP rather than inven
     flagged.push({ number: 1000 + i, supersededBy: 2000 + i, taskId: "W1-T900" });
   }
   const f = filesFetcher(byPr);
-  const out = hydrateSupersessionVerdicts(OWNER, REPO, flagged, f);
+  const out = hydrateSupersessionVerdicts(OWNER, REPO, flagged, f, isInPlanScope);
   assert.equal(out.size, MERGE_STATE_HYDRATION_CAP, "truncated at the SAME cap the sibling uses");
 });
