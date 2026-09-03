@@ -89,6 +89,7 @@
     "failures.yaml": {
       "entries": [
         "control-surface-fail-loud-stop-one-shot",
+        "cost-separates-never-ran-from-ran-and-failed",
         "criteria-go-stale-on-relocation",
         "no-live-operator-in-headless-worker",
         "probe-must-exercise-the-real-consuming-client",
@@ -98,8 +99,10 @@
       "globs": [
         "bin/rmd",
         "plan/tasks.yaml",
+        "src/lib/dispatch-claim.ts",
         "src/lib/fleet-control.ts",
         "src/lib/init.ts",
+        "src/lib/isolation.ts",
         "src/lib/review.ts",
         "src/lib/serve.ts",
         "src/lib/service.ts",
@@ -208,6 +211,9 @@
     ],
     "design-review": [
       "platform.yaml"
+    ],
+    "diagnosis": [
+      "failures.yaml"
     ],
     "docs": [
       "architecture.yaml"

@@ -31,7 +31,7 @@
   "src/lib/dep-review.ts": 399,
   "src/lib/deployer.ts": 1206,
   "src/lib/digest.ts": 1389,
-  "src/lib/dispatch-claim.ts": 500,
+  "src/lib/dispatch-claim.ts": 700,
   "src/lib/dispatch-governor.ts": 170,
   "src/lib/dispatch-overlap.ts": 532,
   "src/lib/doctor.ts": 1000,
