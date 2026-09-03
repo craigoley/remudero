@@ -1,0 +1,70 @@
+- id: W1-T2776
+  title: "HOST_CAUSED_SUITE_REDS MISSED test/a-lock-whose-container-is-gone-is-reclaimed-not-waited-on.test.ts — the same darwin bash-3.2 `declare -A` cluster it registers for test/recycle-container.test.ts also 8-fails this file, because both shell the same deploy/recycle-container.sh, and the mechanism that keeps the registry current when a NEW test joins an existing cluster did not fire"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: "span"
+  budget_usd: 4.00
+  files: [src/lib/ci-parity.ts, test/host-parity-azure-pole.test.ts]
+  origin: "operator-decision#w1-t2776-file-bash32-registry-gap-2026-09-03"
+  plan_refs: ["W1-T2773"]
+  status: queued
+  attempts: 0
+  note: |
+    MEASURED 2026-09-03 on the mac mini during W1-T2773 verification:
+    `node --test test/a-lock-whose-container-is-gone-is-reclaimed-not-waited-on.test.ts` reports
+    `# tests 9, # pass 1, # fail 8` with `deploy/recycle-container.sh: line 394: declare: -A:
+    invalid option` on every one of the 8 failures. Identical failure count and identical error
+    string on a clean origin/main worktree at 35c0d9d6, proving these are the same cluster.
+
+    THE FILE WAS PRESENT AT SESSION START. `git log --oneline --diff-filter=A -- test/a-lock-…`
+    names `#3478 e2b82850 fix(deploy): reclaim an inflight lock whose container docker reports
+    gone`, 282 commits before this session's start head. The file has co-existed with the
+    registry for hundreds of commits without being added to it. This isn't an add-an-entry gap;
+    the mechanism failed to catch a class it was built to catch.
+
+    THIS SHARD SHIPS TWO THINGS: the missing registry entry (small), AND a discovery test that
+    would refuse a future `test/*.test.ts` shelling `deploy/recycle-container.sh` (or any
+    already-registered host-caused script) unless it appears in `HOST_CAUSED_SUITE_REDS` under
+    the correct cluster. Without the discovery test, the next new test that shells the script
+    hits the same gap; the mechanism has to enforce its own completeness.
+
+    BAND. `risk: high` with `band_meaning: span` is Rule 19 SIZING: the fix is two coupled
+    surfaces (the missing entry AND the discovery test that stops a future new file having the
+    same gap), and shipping only one leaves the mechanism half-fixed. A false-positive
+    host-caused entry would let a real test failure read as expected, which is worse than no
+    entry at all, so the discovery test's predicate has to be tight — it walks tracked
+    test/*.test.ts and grep-matches only exact host-caused script names from the registry.
+  rationale: |
+    THE REGISTRY'S OWN PURPOSE (src/lib/ci-parity.ts:475): *"NAMES every cluster this host is
+    expected to produce. Anything else `ci:test` fails on is, by construction, NOT host-caused."*
+    That contract is broken today: an 8-failure file that IS host-caused reads as "not
+    host-caused" and shows up as a live defect a developer chases.
+
+    THE MECHANISM THAT DID NOT FIRE. `test/host-parity-azure-pole.test.ts` is the sibling that
+    keeps the registry honest against the Azure pole; there is no darwin-side analogue that
+    walks `test/**/*.test.ts` for shell invocations of `deploy/recycle-container.sh` (or the
+    other three host-caused scripts) and refuses a hit that is not registered. Adding one
+    generalises the case: any future file shelling a script the registry already knows about
+    fails a named test until it is either registered or moved off the script.
+
+    WHAT THIS SHARD DELIBERATELY DOES NOT DO. It does not repair the bash-3.2 script itself
+    (that would eliminate the cluster, and while it is a good goal, it is a different task's
+    surface — `deploy/recycle-container.sh`'s associative-array use has other justifications).
+    It does not widen `HOST_CAUSED_SUITE_REDS` beyond the one file the measurement names. And
+    it does not change the registry's fail-open contract.
+  acceptance:
+    - claim: "test/a-lock-whose-container-is-gone-is-reclaimed-not-waited-on.test.ts is registered in HOST_CAUSED_SUITE_REDS under the bash-3.2-no-associative-arrays cluster, with a note citing the measurement 8 of 9 fail on macOS bash 3.2, identical error string to test/recycle-container.test.ts"
+      proof: "grep: a-lock-whose-container-is-gone-is-reclaimed-not-waited-on in src/lib/ci-parity.ts"
+    - claim: "test/host-parity-azure-pole.test.ts (or a darwin-side sibling) refuses a NEW test file whose source shells any HOST_CAUSED_SUITE_REDS-tracked script unless the file is itself in the registry, so the next such test cannot slip past the way this one did"
+      proof: "unit test: test/host-parity-azure-pole.test.ts"
+    - claim: "the discovery test walks tracked test/*.test.ts via git ls-files, not a raw directory walk, so untracked scratch does not skew the check (same discipline as scripts/tracked-source-write-check.mjs and scripts/mkdtemp-callsite-check.mjs)"
+      proof: "grep: git ls-files in test/host-parity-azure-pole.test.ts"
+  falsifier: |
+    Delete the new entry and criterion 1's proof reads zero at head. Delete the discovery test's
+    body and criterion 2's named test moves `# fail 0 -> # fail 1`. Both directions must hold:
+    the mechanism must catch the registry gap AND the entry must actually close the specific gap
+    W1-T2773 measurement discovered.
