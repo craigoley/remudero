@@ -954,13 +954,10 @@ export function runCiParity(repoRoot: string, deps: CiParityDeps = {}): CiParity
 //
 // THE CURATION CRITERION (design ii) — stated here because `FAST_GATE_STEPS` below IS its
 // enforcement, not a preference next to it. A step qualifies ONLY if it is deterministic, runs
-// in seconds, and has demonstrably blocked a PR (or is the identical shape as one that has).
-// Ordinarily it also needs no network. W1-T2734 is the explicit exception: its source-size signal
-// refreshes origin/main so the merge-base measurement cannot silently use a stale ref; it makes
-// no other network call, and inability to refresh is reported as a measurement failure.
-// `required-core` marks the two steps #1352 itself was blocked by; `same-class` marks the rest,
-// admitted because each is the identical shape (a deterministic npm-script gate CI runs
-// unconditionally) and costs well under half a second.
+// in seconds, needs no network, and has demonstrably blocked a PR (or is the identical shape as
+// one that has). `required-core` marks the two steps #1352 itself was blocked by; `same-class`
+// marks the rest, admitted because each is the identical shape (a deterministic npm-script gate
+// CI runs unconditionally) and costs well under half a second.
 //
 // WHAT THIS MUST NOT BECOME (design iii): `npm test`. Growing this list to include a step whose
 // OWN command is the full `test/**/*.test.ts` glob (`npm run test:ci`, a bare `npm test`) is the
@@ -1102,12 +1099,13 @@ export const FAST_GATE_STEPS: { job: string; script: string; reason: string; bou
   },
   {
     job: "source-size",
-    script: "source-size-signal",
+    script: "source-size-ratchet",
     reason:
-      "same-class (W1-T2488/W1-T2734) — a deterministic npm-script signal: refreshes origin/main, measures only changed " +
-      "src/**/*.ts files from the merge base to HEAD, and publishes human plus schema-versioned JSON hotspot evidence. " +
-      "Positive growth remains PASS because line count is a review-risk signal rather than a correctness verdict; only an " +
-      "unreadable base or failed measurement refuses the step. The historical shared baseline is not read or written",
+      "same-class (W1-T2488) — a deterministic npm-script gate: walks src/'s own line counts via a plain readdirSync " +
+      "sweep against scripts/source-size-baseline.json, spawns no subprocess (no test runner, no git) and opens no " +
+      "network connection, measured ~0.2s. src/run-task.ts sat at 32,119 lines against a next-largest source file of " +
+      "8,445 with no ratchet watching it, the one drift dimension the CLAUDE.md/coverage/cycle/learnings/mutation " +
+      "ratchets did not already cover",
   },
   {
     job: "bound-kind-census",
