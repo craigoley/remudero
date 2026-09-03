@@ -1013,8 +1013,10 @@ function dispatchFilterReasonArms(): string[] {
 test("W1-T2637: the QUEUE_HEAD_REFUSAL_WORDING table names every DispatchFilterReason arm plus 'circuit-broken' — exhaustive by construction, not by enumeration this test could fall behind", () => {
   const src = readFileSync(new URL("../src/lib/status-board.ts", import.meta.url), "utf8");
   const decl = src.slice(src.indexOf("const QUEUE_HEAD_REFUSAL_WORDING"));
-  const body = decl.slice(0, decl.indexOf("\n};") + 3);
-  const keys = [...body.matchAll(/(?:"([a-z-]+)"|^\s*([a-z-]+))\s*:\s*\(/gm)].map((m) => m[1] ?? m[2]!);
+  const body = decl.slice(0, decl.indexOf("};") + 2);
+  // Entries may be packed several-per-line (source-size-ratchet headroom), so a key is matched
+  // wherever it follows the object literal's opening `{` or a `,` — not only at start of line.
+  const keys = [...body.matchAll(/(?:^|[{,])\s*(?:"([a-z-]+)"|([a-z-]+))\s*:\s*\(/gm)].map((m) => m[1] ?? m[2]!);
   const wanted = [...dispatchFilterReasonArms(), "circuit-broken"];
   assert.deepEqual(keys.sort(), wanted.sort(), "the table has exactly one entry per union member — no arm missing, none stray");
 });
