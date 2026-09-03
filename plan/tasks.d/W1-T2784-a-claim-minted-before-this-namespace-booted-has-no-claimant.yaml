@@ -10,17 +10,7 @@
               # call site that supplies them (run-task.ts) are one atomic fix — an arm with no
               # probe never fires, and a probe with no arm is dead code. The learnings/docs pair
               # rides along because the shard's own `operator_impact: true` obligates it.
-  files:
-    - src/lib/dispatch-claim.ts
-    - src/run-task.ts
-    - scripts/source-size-baseline.json
-    - learnings/failures.yaml
-    - learnings/index.json
-    - docs/troubleshooting.md
-    - test/a-claim-minted-before-this-namespace-booted-has-no-claimant.test.ts
-    - test/dispatch-claim.test.ts
-    - test/dispatch-claim-evidence-reachability.test.ts
-    - test/sandbox-subject-generator.test.ts
+  files: [src/lib/dispatch-claim.ts, src/run-task.ts, scripts/source-size-baseline.json, learnings/failures.yaml, learnings/index.json, docs/troubleshooting.md, test/a-claim-minted-before-this-namespace-booted-has-no-claimant.test.ts, test/dispatch-claim.test.ts, test/dispatch-claim-evidence-reachability.test.ts, test/sandbox-subject-generator.test.ts]
   origin: "oper#dispatch-claim-liveness-2026-09-03"
   plan_refs: ["W1-T1268", "W1-T2446", "W1-T396", "W1-T2754"]
   status: queued
