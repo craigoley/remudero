@@ -7,7 +7,10 @@
   principles: {tdd: strict}
   budget_usd: 45.00
   risk: high
-  files: [src/lib/feedback-landing.ts, test/a-landed-feedback-file-remains-in-the-boot-checkout.test.ts]
+  files:
+    - src/lib/feedback-landing.ts
+    - test/a-landed-feedback-file-remains-in-the-boot-checkout.test.ts
+    - scripts/source-size-baseline.json
   origin: "oper#feedback-landing-local-ack-2026-09-03"
   plan_refs: ["W1-T243", "W1-T530", "W1-T1054"]
   status: queued
@@ -101,3 +104,10 @@
     timestamps and recovery are observed from Azure state, the ledger and git. The stale reverse
     write did not occur before the process exited; it is a source-proven reachable consequence and
     is labeled as such in the rationale rather than reported as an incident fact.
+
+    Scope correction, 2026-09-03. The strict-TDD implementation adds the designed acknowledgement
+    predicate, result evidence and telemetry to `src/lib/feedback-landing.ts`. The source-size
+    ratchet measured that deliberate change at 820 lines against the recorded 735-line ceiling and
+    requires the next 1,000-line bucket in `scripts/source-size-baseline.json`. That generated size
+    ledger is therefore mechanically required implementation scope; declaring it here prevents an
+    otherwise-correct worker from either failing CI or pushing an undeclared path.
