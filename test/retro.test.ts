@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
@@ -453,6 +453,13 @@ test("renderPlanHealth names the flagged task and its corrective task when the q
 
 test("planHealthSweepSectionFor: renders the plan-health section from a repoRoot's plan/tasks.yaml, and degrades to '' when the file is absent (W1-T358)", () => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}plan-health-section-`));
+  // W1-T2783: prove the fixture itself carries the sanctioned reapable prefix, not just that
+  // the callsite lexically interpolates the constant — the boot sweep only reaps a directory
+  // whose actual on-disk name starts with RMD_TMP_PREFIX.
+  assert.ok(
+    basename(root).startsWith(RMD_TMP_PREFIX),
+    `fixture root ${root} must carry the sanctioned ${RMD_TMP_PREFIX} prefix so the boot sweep can reap it`,
+  );
   try {
     // Absent plan/tasks.yaml: degrades to no section, never a throw — same discipline as
     // netStateAdvisorySectionFor's absent-MASTER-PLAN.md branch.
@@ -491,6 +498,12 @@ test("planHealthSweepSectionFor: renders the plan-health section from a repoRoot
 
 test("planHealthSweepSectionFor: an explicit derived isMerged overrides the yaml status (W1-T367)", () => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}plan-health-section-projection-`));
+  // W1-T2783: same runtime proof as the sibling fixture above — the on-disk name, not just the
+  // source text, must carry the sanctioned prefix.
+  assert.ok(
+    basename(root).startsWith(RMD_TMP_PREFIX),
+    `fixture root ${root} must carry the sanctioned ${RMD_TMP_PREFIX} prefix so the boot sweep can reap it`,
+  );
   try {
     mkdirSync(join(root, "plan"), { recursive: true });
     // Same violating shape as above, but yaml says `queued` (the measured stale shape) while

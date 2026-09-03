@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { appendFileSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 
 import {
   checkRunsRestArgs,
@@ -443,6 +443,13 @@ test("falsifier — a neutral required check counts as satisfied through the RES
 test("fixCommand looks the PR up through the injected REST fetcher and never through a GraphQL-backed gh subcommand", async () => {
   const seen: string[][] = [];
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}fix-cmd-rest-`));
+  // W1-T2783: prove the fixture itself carries the sanctioned reapable prefix, not just that
+  // the callsite lexically interpolates the constant — a renamed/shadowed RMD_TMP_PREFIX would
+  // still satisfy the AST checker but produce a directory the boot sweep cannot identify.
+  assert.ok(
+    basename(root).startsWith(RMD_TMP_PREFIX),
+    `fixture root ${root} must carry the sanctioned ${RMD_TMP_PREFIX} prefix so the boot sweep can reap it`,
+  );
   const code = await fixCommand(["806"], {
     config: { claudeBin: "/bin/true", root } as Config,
     fetch: (args: string[]) => {
