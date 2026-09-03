@@ -71,6 +71,52 @@
     (v) WHAT THIS MUST NOT DO. It must not edit `scripts/coverage-session-blanking-check.mjs` or
     its test — W1-T2292 owns those and they pass. It must not widen the scan to the "spawn with no
     env option" shape the script explicitly names as unreachable. It must not touch `src/`.
+    ── CLASS CENSUS, MEASURED 2026-09-02 (evidence only; this shard's scope is UNCHANGED) ──
+
+    THIS IS NOT ONE UNWIRED DETECTOR. IT IS A CLASS, AND THE REPO'S OWN CONVENTION PRODUCES IT.
+    Census of every tracked executable under `scripts/` at origin/main, against every workflow in
+    `.github/workflows/` and every `package.json` script:
+
+        38 executables   30 wired   8 UNWIRED
+
+    Four of the eight are GATE-SHAPED (named `-check` or `-gate`), and NONE of the four is wired:
+
+        scripts/coverage-session-blanking-check.mjs   exit 1  — 3 defects + 16 findings, LIVE
+        scripts/credit-surface-gate.mjs               exit 1  — REFUSED: no head ref
+        scripts/tracked-source-write-check.mjs         exit 0  — clean; nothing stops a regression
+        scripts/state-citation-check.mjs               exit 0  — clean; nothing stops a regression
+
+    ⚠ THE OTHER FOUR ARE NOT DEFECTS AND ARE NAMED SO THIS CENSUS IS NOT OVER-READ.
+    `host-parity.ts` is imported by `ci-parity.ts` programmatically, `mount-headroom-sweep.mjs` is
+    an operator-run analysis tool, `plan-state-claims.mjs` likewise, and `shell-screenshot.mjs` is a
+    dev utility. None is gate-shaped and none should be a required check.
+
+    THE CONVENTION IS WRITTEN DOWN TWICE, AND BOTH TIMES THE SECOND HALF NEVER SHIPPED.
+    W1-T2292's criterion 7: "no caller is edited by this task."
+    W1-T1214's design (v), on `credit-surface-gate.mjs`, is even more explicit — it defers
+    "wiring this script into a CI workflow step (a separate PR, same pattern
+    `scripts/acceptance-author-gate.mjs`/the coverage-ratchet producer already follow)".
+    Each fence is correct in isolation: a producer PR that also edits `.github/workflows/` trips
+    Rule 25's instrument-isolation. What neither task owns is the successor, and no successor was
+    filed in either case.
+
+    AND THE COST IS NOT HYPOTHETICAL — IT WAS PAID TODAY. `credit-surface-gate.mjs` exists to refuse
+    an implementation PR credited on NEITHER surface (no `Remudero-Task:` trailer, no
+    `run-<taskId>-<epochMs>` head ref). Its own suite covers exactly that case:
+    "W1-T1214: an implementation pr credited on neither surface is refused". On 2026-09-02, PR #3704
+    was opened from `codex/W1-T2720-wire-slug-reaper` with a body ending `Task: W1-T2720` — not
+    `Remudero-Task:` — so `TASK_TRAILER_RE` matched nothing and the branch carried no run-shaped
+    credit either. W1-T2720 would have merged credited by neither path. It was caught by a human
+    reading the body and fixed by hand. THE GATE BUILT FOR THAT EXACT DEFECT WAS SITTING UNWIRED
+    WHILE IT HAPPENED.
+
+    A RECOMMENDATION, RECORDED AS A RECOMMENDATION AND NOT AS A RULING OR A SCOPE CHANGE. Wiring
+    four scripts one at a time leaves the fifth to the same fate, because the convention that
+    produced them is unchanged. The shape that would actually close it is a META-GATE: a check that
+    refuses a tracked `scripts/*-check|*-gate` executable which no workflow and no npm script
+    invokes — the same "make something refuse it" move CLAUDE.md's own preamble prescribes for a
+    rule that keeps being violated silently. That is a SEPARATE task and is not filed here; this
+    shard's scope, files and acceptance are untouched by this block.
   acceptance:
     - claim: "the check runs in CI as a required gate rather than existing unread, and the wiring names it by the same script path the repository already uses for its sibling gates"
       proof: "unit test: test/a-shipped-detector-exits-one-and-is-wired-to-nothing.test.ts"

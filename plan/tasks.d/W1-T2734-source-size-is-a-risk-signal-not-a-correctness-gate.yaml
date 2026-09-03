@@ -1,0 +1,92 @@
+- id: W1-T2734
+  title: "SOURCE LINE COUNT IS A RISK SIGNAL, NOT A CORRECTNESS VERDICT — the per-file ratchet blocks ordinary feature PRs until they edit a shared JSON number, and this repo has since filed eight tasks to repair conflicts, unreachable remedies, scope false positives and tracked-tree mutation caused by that mechanism; replace the hard block with a PR-relative, machine-readable hotspot signal that drives review depth and decomposition work without making honest code growth red"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 30.00
+  files: [scripts/source-size-ratchet.mjs, src/lib/ci-parity.ts, package.json, test/a-source-file-cannot-outgrow-its-baseline.test.ts]
+  origin: "operator-ruling#line-growth-should-not-block-prs-2026-09-02"
+  plan_refs: ["W1-T2488", "W1-T2526", "W1-T2532", "W1-T2539", "W1-T2650", "W1-T2651", "W1-T2653", "W1-T2678"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE ORIGINAL PROBLEM WAS REAL. W1-T2488 measured `src/run-task.ts` at 32,119 lines against a
+    next-largest source file of 8,445 and found no mechanism that would notice continued growth.
+    File length can be a useful maintainability smell and a cheap hotspot input.
+
+    THE ENFORCEMENT WAS THE WRONG ABSTRACTION. A line count does not prove a defect, regression,
+    security problem, missing test or architectural violation. The gate's prescribed repair is to
+    raise `scripts/source-size-baseline.json`; that changes no runtime behavior and improves no
+    code. A required check that becomes green by editing the threshold is recording consent, not
+    validating correctness. Consent is useful evidence, but it should not serialize the fleet.
+
+    THE REPO'S OWN INCIDENT RECORD NOW OUTWEIGHS THE ORIGINAL THEORY. After the gate shipped it
+    required W1-T2526, W1-T2532, W1-T2538, W1-T2539, W1-T2547, W1-T2650, W1-T2651, W1-T2653,
+    W1-T2672 and W1-T2678 to address its baseline conflicts, prose-only remedy, PR-body drift,
+    scope deadlocks, docs false positives and tracked-tree mutation. W1-T2532 measured six of nine
+    open PRs blocked simultaneously; W1-T2653 measured 17 of 23 runs ending blocked_ci and five
+    tasks unable to write the one-line remedy. Bucketing reduced baseline edits to 6.3% of 300
+    commits, but a low-frequency false block is still a false block and still consumes queue time.
+
+    EXTERNAL PRACTICE SUPPORTS THE DISTINCTION. ESLint's `max-lines` documentation calls large
+    files a code smell, says there is no objective acceptable maximum, and makes the rule optional.
+    Google's code-review guidance says change size is conceptual rather than a simplistic line
+    count and reviewers should balance code health with forward progress. RMD should retain the
+    cheap smell while refusing to represent it as proof that a PR is wrong.
+
+    THE REPLACEMENT IS PR-RELATIVE AND NON-BLOCKING. Measure only source files changed between the
+    refreshed merge base and HEAD. Emit before lines, after lines, absolute delta, percentage delta
+    and resulting total in deterministic human and JSON forms. Growth exits zero; malformed input,
+    an unreadable base, or an internal measurement failure still exits non-zero because a sensor
+    pretending it measured is an integrity defect. The checked-in baseline is no longer read or
+    written on the PR path, so no threshold edit, scope widening, PR-body rewrite or shared-key
+    merge conflict is required.
+
+    THE SIGNAL HAS A CONSUMER. Keep it in the habitual fast pass and publish its result for the
+    reviewer/routing layer: a high-growth hotspot increases design-review attention and can create
+    a separate decomposition proposal, but never fails the feature PR by itself. This is the first
+    step toward evidence-addressed structural risk; complexity, dependency centrality, churn and
+    defect history can join later without pretending any one proxy is a verdict.
+  design: |
+    Replace the baseline comparison in `scripts/source-size-ratchet.mjs` with a merge-base-to-HEAD
+    comparison over changed `src/**/*.ts` files. Preserve pure line-count helpers, add a stable JSON
+    schema/version, and make the human report clearly say `signal`, never `BLOCKED` or `TO FIX`.
+
+    Rename the package/fast-gate surface from `source-size-ratchet` to `source-size-signal` so its
+    contract cannot be misunderstood. The fast gate must refresh or receive the same base used by
+    other diff consumers and must fail closed only when the measurement itself is unavailable.
+
+    Do not delete or rewrite `scripts/source-size-baseline.json` in this PR. It is a historical
+    record named by many ratified task shards; making it inert removes the collision. A later
+    evidence-backed cleanup may archive it without coupling that migration to the policy change.
+  acceptance:
+    - claim: "an existing source file that grows by any number of lines emits a deterministic hotspot signal and exits zero — line growth alone never makes CI red"
+      proof: "unit test: test/a-source-file-cannot-outgrow-its-baseline.test.ts"
+    - claim: "a newly added source file is reported with before=0, after, delta and resulting total and exits zero"
+      proof: "unit test: test/a-source-file-cannot-outgrow-its-baseline.test.ts"
+    - claim: "the JSON form is schema-versioned, deterministic and carries path, before_lines, after_lines, delta_lines and delta_percent without absolute runner paths"
+      proof: "unit test: test/a-source-file-cannot-outgrow-its-baseline.test.ts"
+    - claim: "an unreadable or invalid base and an internal measurement failure still exit non-zero and say that measurement failed — sensor integrity remains a gate"
+      proof: "unit test: test/a-source-file-cannot-outgrow-its-baseline.test.ts"
+    - claim: "the PR-relative signal neither reads nor writes scripts/source-size-baseline.json, and running it leaves the tracked tree byte-identical"
+      proof: "unit test: test/a-source-file-cannot-outgrow-its-baseline.test.ts"
+    - claim: "the habitual fast gate runs the renamed source-size-signal against the refreshed merge base and consumes its result without treating positive growth as failure"
+      proof: "unit test: test/a-source-file-cannot-outgrow-its-baseline.test.ts"
+    - claim: "the output contains no instruction to raise a threshold, widen task scope or rewrite the PR body; the former mechanical-remedy queue is gone"
+      proof: "unit test: test/a-source-file-cannot-outgrow-its-baseline.test.ts"
+    - claim: "removing the base refresh or making a positive delta non-zero fails the test suite"
+      proof: "unit test: test/a-source-file-cannot-outgrow-its-baseline.test.ts"
+  falsifier: |
+    Close without implementation if current CI evidence shows source-line growth itself predicts a
+    correctness failure strongly enough to justify blocking, or if the existing gate can be made
+    green without a baseline edit after a legitimate file crosses its bucket. Neither was observed:
+    the measured repair changes metadata only, while the repository records repeated queue harm.
+  note: |
+    This is a policy change over every source PR, hence risk high. It does not declare the historical
+    baseline file because the implementation must stop touching it; adding it would reproduce the
+    exact shared-file collision being removed. Follow-up structural-risk fusion should remain a
+    separate concern and consume this task's versioned signal rather than growing this PR.

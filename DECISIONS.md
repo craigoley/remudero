@@ -1920,3 +1920,63 @@ not reachable from it, so the Consumer and Commercial Terms themselves are cited
 links and were not read.
 
 **Rollback:** delete this entry. It changes no behaviour.
+
+## 2026-09-02 — OPERATOR RULING (W1-T1260): the whole-plan lint signal — NONE of the three
+
+*Operator-authored, recorded at the operator's instruction. W1-T1260 is `verify: human` and its
+deliverable is exactly this record; `ruling-verify` refuses a DECISIONS.md task at `verify: auto`
+and `isDispatchEligible` returns false before the linter is consulted, so it could never
+auto-dispatch. Per the decision-authority ruling (fb-1785882211812-bafd8f) an agent may recommend a
+ruling and may never record one: the ruling below is the operator's; this entry transcribes it.*
+
+**THE RULING: NONE OF THE THREE.** This matches W1-T1260's own recorded recommendation.
+
+- **(a) annotate-on-credit — REJECTED.** It adds a STORED field over the credited corpus that can
+  disagree with the projection the moment either side moves: the decorative-status trap this repo has
+  measured twice (W1-T367's 248 of 359 already-shipped tasks re-linted every run; this file's own
+  583-of-643 entry). Rule 21's gate would not have blocked it — `postMergeAmendmentViolations` fires
+  only on added or changed acceptance criteria — so the objection is the charter, not the gate.
+- **(b) archive-on-credit — NOT AUTHORISED.** W1-T1260 records it as undecided in either direction,
+  needing a measurement that shard did not take: every `plan_refs`/`satisfied_by` pointer,
+  `loadPlan`'s corpus and the id-mint sweep read the current tree, and only the git-history half of
+  the mint (W1-T278) is known to survive a fold. The measurement was not taken and the change is not
+  authorised.
+- **(c) scope-the-open-set-to-credit — REJECTED, ruling unreopened.** W1-T367 design (iii) already
+  ruled LEAVE IT: `rmd lint-plan` is an offline deterministic linter and the projection needs a
+  GitHub read. The tempting counter — that `defaultMergeEvidenceLog` shipped later and IS offline —
+  fails on W1-T1260's own evidence: the offline source reads TWO of the four credit paths and was
+  wrong on two of the three residue rows.
+
+**THE MEASUREMENT, PRESERVED SO THE NEXT READER DOES NOT RE-DERIVE IT.** `rmd lint-plan`'s
+whole-plan pass reports ~169 open failing of which ~166 carry a merged implementation. Re-measured
+2026-09-02 against the credit paths the dispatcher actually uses: of the 160 ids the run names,
+**159 are already credited and 1 is genuinely open and failing.** The residue W1-T1260 examined was
+three ids, and two were false:
+
+| id | verdict | why the split missed it |
+|---|---|---|
+| W1-T2 | CREDITED | PR #18 carries the anchored trailer and head `run-W1-T2-1784044786127`; the subject never cites the id and the squash body carries no trailer |
+| W1-T326 | CREDITED | PR #1302 carries the anchored trailer and a `run-` head; its subject is `chore(plan): …`, which `LINT_FILING_SUBJECT_RE` excludes — right for an implement task, wrong for a RULING task whose whole deliverable ships under that subject |
+| W1-T49 | genuinely uncredited | parked on a `type: manual` dependency (W12-T1), a paperwork gap rather than work |
+
+**THE FOUR CREDIT PATHS, ordered, since three sessions have now re-derived them.**
+`correction.provenance` ledger line (SUPREME over every `deriveStatus` rung, and resident only on the
+daemon host — unreadable from any container) > `Remudero-Task:` trailer in the merged PR BODY >
+`run-<id>-<digits>` merged HEAD REF. A commit-message scan sees none of the first three reliably and
+is the error mode that produced this session's withdrawn W1-T2729. Measured on the host: five
+`correction.provenance` lines exist in the entire ledger history.
+
+**WHAT THIS RULING DOES NOT DECIDE.** It does not reopen the 2026-08-05 `status:` ruling or W1-T367
+design (iii); it does not re-file W1-T370 (the SPEND question, still `verify: human` and unruled) or
+W1-T369; it does not change what the linter CHECKS; and it does not settle W1-T1260's design (ii)
+question — whether to widen the split's evidence, exempt ruling-shaped tasks from the filing
+exclusion, or simply NAME the computed-then-discarded residue ids in the output. That last is
+recorded as an open question, not a design.
+
+**CONSEQUENT DISPOSITIONS.** W1-T1260 closes as a recorded decision (`retirement: closed`) — its
+deliverable is this entry. W1-T2657 (`plan/merged.d`, archived-from-location) and W1-T2658
+(`rmd archive-merged`) together implement candidate (b) and are WITHDRAWN, unbuilt, as implementing
+an approach this ruling does not authorise.
+
+**Rollback:** delete this entry and clear the `retirement:` field on W1-T1260, W1-T2657 and W1-T2658.
+No code was written; nothing else changes.
