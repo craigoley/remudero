@@ -8,7 +8,7 @@
   budget_usd: 3.00
   risk: high
   band_meaning: "span"
-  files: [src/lib/github-event-wake.ts, src/lib/main-health-rung.ts, src/run-task.ts, test/main-health-event-wake.test.ts]
+  files: [src/lib/github-event-wake.ts, src/lib/main-health-rung.ts, src/run-task.ts, test/main-health-event-wake.test.ts, test/main-health-wiring.test.ts]
   origin: "operator-session#red-main-unobserved-during-long-sweep-2026-09-03"
   plan_refs: ["W1-T2568", "W1-T2582", "W1-T2656", "W1-T2683", "W1-T2741"]
   status: queued
