@@ -10356,14 +10356,17 @@ export function taskRecordContextLine(
  * path does no extra reads and receives no extra note, since recon already relayed all of this".
  * That premise does not hold at any sha, and the code says so three ways:
  *
- *   (1) RECON IS NEVER TOLD WHICH TASK IT IS RECONNING. `renderReconPrompt` takes only a plan
- *       index and an operator-notes block — no task id, no title, no record path — and the notes
- *       block is `""` for any task with no console notes. So "recon already relayed all of this"
- *       is not a guarantee the code can make, only an outcome it may get. (Deliberately DESCRIBED
- *       rather than quoted: `test/recon-mount-routing.test.ts` locates the recon spawn with
- *       `SRC.indexOf` on that call's exact text, so a second verbatim copy above it silently
- *       redirects the test's 1400-character window into this comment. It did, and the suite
- *       caught it.)
+ *   (1) RECON USED NOT TO BE TOLD WHICH TASK IT WAS RECONNING (fixed by W1-T2632):
+ *       `renderReconPrompt` took only a plan index and an operator-notes block — no task id, no
+ *       title, no record path — and the notes block is `""` for any task with no console notes.
+ *       So "recon already relayed all of this" was never a guarantee the code could make, only an
+ *       outcome it might get. `renderReconPrompt` now also takes the task and the record path
+ *       (both optional, both fail-soft on an unresolvable record), but this block still names the
+ *       record itself rather than assuming recon did: reasons (2) and (3) below hold regardless of
+ *       what recon was told. (Deliberately DESCRIBED rather than quoted: `test/recon-mount-
+ *       routing.test.ts` locates the recon spawn with `SRC.indexOf` on that call's exact text, so
+ *       a second verbatim copy above it silently redirects the test's 1400-character window into
+ *       this comment. It did, and the suite caught it.)
  *   (2) ONLY `OBSERVED:` SURVIVES. This function keeps `parsed?.observed` alone, while
  *       `renderReconPrompt` also asks for INFERRED and COULDN'T-VERIFY — so a recon that reads
  *       the shard and summarises the design under INFERRED has that text dropped here.
@@ -10405,8 +10408,10 @@ export const RECON_UNVERIFIED_PREFIX = "RECON DID NOT ESTABLISH THIS — verify 
  *
  * THE RECON WAS NOT AT FAULT and is deliberately not "fixed" here. `renderReconPrompt`'s three
  * named commands (`git remote -v`, `git log --oneline -5`, `ls`) are all ORIENTATION — none reads
- * a file's contents — and its signature takes no task argument, so it cannot ask for a task's
- * design. "Confirm existence, not contents" is that prompt's own worked example, and 5 turns is
+ * a file's contents — and even now that its signature carries the task and its record path
+ * (W1-T2632), that pointer only NAMES the design, never inlines it, so recon still cannot read it
+ * without spending a turn it is not asked to spend. "Confirm existence, not contents" is that
+ * prompt's own worked example, and 5 turns is
  * the success mode (`RECON_MAX_TURNS`'s doc records six sonnet successes at 5-8 turns against
  * every failure clustered at 9). The recon reported its limit correctly; only the routing was wrong.
  *
@@ -10826,7 +10831,27 @@ export const RECON_MAX_TURNS = 20;
  * task's console-authored, provenance-stamped guidance — feedback INTO the task before it runs,
  * scoped strictly to this task's own id. `""` (the default) when the task carries no notes.
  */
-export function renderReconPrompt(planIndexBlock: string, operatorNotesBlock = ""): string {
+/**
+ * W1-T2632 — RECON IS NOW TOLD WHICH TASK IT IS RECONNING. `task` and `recordPath` are both
+ * OPTIONAL (and default to absent) so every pre-existing call site that only ever passed
+ * `planIndexBlock`/`operatorNotesBlock` — the whole `test/*.test.ts` corpus at this sha — keeps
+ * rendering byte-identical output; only the real recon spawn (below) supplies them.
+ *
+ * `recordPath` is {@link workerVisibleRecordPath}'s output, NEVER {@link taskRecordPath}'s raw
+ * absolute answer (W1-T501) — the caller is responsible for that re-anchoring, exactly as the
+ * implement-prompt path already is. When it is `undefined` (unresolvable or tree-escaping
+ * record), the pointer line is OMITTED and recon still runs with just the `TASK:` line —
+ * fail-soft, never a failed dispatch over one malformed plan file.
+ *
+ * NAMED, NOT INLINED: the record's design/rationale/criteria stay one `Read` away, the same
+ * retrieve-don't-inject discipline `planIndexBlock` already observes for MASTER-PLAN.
+ */
+export function renderReconPrompt(
+  planIndexBlock: string,
+  operatorNotesBlock = "",
+  task?: Pick<Task, "id" | "title">,
+  recordPath?: string,
+): string {
   return [
     "You are a RECON worker. Do NOT modify anything. Inspect the current git " +
       "repository read-only (git remote -v, git log --oneline -5, ls). Output one report:\n" +
@@ -10838,6 +10863,11 @@ export function renderReconPrompt(planIndexBlock: string, operatorNotesBlock = "
       "Optionally, after the report, add a '## Follow-ups' section — one typed entry\n" +
       "per line, its own one-line why inline: `research: <what, why>` | `task: <what, why>` |\n" +
       "`action: <what, why>` — for anything discovered that is out of THIS recon's scope.",
+    task ? `TASK: ${task.id} — ${task.title}` : "",
+    task && recordPath
+      ? `YOUR TASK'S OWN RECORD IS AT ${recordPath} — the design, rationale and acceptance ` +
+        "criteria for the task above live there, one `Read` away; this recon need not guess them."
+      : "",
     planIndexBlock,
     operatorNotesBlock,
   ]
@@ -11949,6 +11979,13 @@ async function runTask(
     const operatorNotes = loadOperatorNotesForTask(repoRoot, task.id);
     const operatorNotesBlock = renderOperatorNotes(operatorNotes);
     log("operator_notes.injected", { count: operatorNotes.length });
+    // W1-T2632: HOISTED from further below (was computed only after recon returned, "since
+    // recon already relayed all of this" — a premise `renderReconPrompt`'s own doc disproves).
+    // ONE lookup shared by the recon prompt below AND the post-recon CONTEXT block further
+    // down, never re-derived: `taskRecordPath` is fail-soft (`undefined` on an unresolvable
+    // record) and `workerVisibleRecordPath` (W1-T501) re-anchors it to the WORKER's own tree,
+    // never the orchestrator's `planPath`.
+    const recordPath = workerVisibleRecordPath(planPath, taskRecordPath(planPath, taskId));
     // impl-BP: model/effort come from the RECON row of the mount table (task_type "recon" ×
     // risk × class, §9) — the same discipline the implement spawn ~100 lines below states as
     // "never a hardcoded literal". These were simply absent, so every recon ran on the SDK
@@ -11975,7 +12012,7 @@ async function runTask(
         maxTurns: RECON_MAX_TURNS,
         maxBudgetUsd: budgetUsd, // dollars are the real backstop (WS-0 knob a).
         config,
-        prompt: renderReconPrompt(planIndexBlock, operatorNotesBlock),
+        prompt: renderReconPrompt(planIndexBlock, operatorNotesBlock, task, recordPath),
       });
 
     let recon: WorkerResult | undefined;
@@ -12197,16 +12234,13 @@ async function runTask(
     });
 
     // ── Render + provenance-lint the prompt.
-    // The record path is resolved for BOTH branches. It used to be resolved only on the degraded
-    // one, "since recon already relayed all of this" — but recon is never told WHICH TASK it is
-    // reconning (`renderReconPrompt` takes no task argument), only its `OBSERVED:` section
-    // survives `reconObservedToContext`, and that section can be empty. See that function's doc.
-    // ONE lookup, both arms: `taskRecordPath` is fail-soft and yields `undefined` rather than
-    // throwing, and the helper renders nothing for an undefined path.
-    // W1-T501: re-anchor to the WORKER's tree before this reaches any prompt. `taskRecordPath`
-    // resolves against the orchestrator's `planPath`, and that absolute answer is what sent
-    // workers writing into the daemon's own checkout.
-    const recordPath = workerVisibleRecordPath(planPath, taskRecordPath(planPath, taskId));
+    // `recordPath` is REUSED, not re-resolved: it was hoisted above the recon spawn (W1-T2632)
+    // so the SAME lookup now feeds both the recon prompt's pointer line and this CONTEXT block —
+    // one `taskRecordPath`/`workerVisibleRecordPath` computation, three consumers, never a second
+    // anchoring rule. It used to be resolved only here, on the degraded arm, "since recon already
+    // relayed all of this" — but recon was never told WHICH TASK it was reconning, only its
+    // `OBSERVED:` section survives `reconObservedToContext`, and that section can be empty. See
+    // that function's doc.
     // W1-T2241/W1-T2512: exactly one of these four is ever set, mutually exclusive (see the
     // recon dispatch above) — `reconMasked` short-circuits the WHOLE branch that could set
     // `reusedReconArtifact`/`reconDegradedSubtype`/`recon`, so it is checked first even though
