@@ -394,6 +394,53 @@ test("W1-T2734: an invalid base is a measurement failure, not a green empty sign
   }
 });
 
+test("W1-T2734: a malformed CLI argument is a measurement failure, naming the bad argument", () => {
+  // Exercises the parseArgs catch branch (an unrecognized flag never reaches measurement at all).
+  const unknown = run(["--root", REPO_ROOT, "--not-a-real-flag"]);
+  assert.notEqual(unknown.status, 0, "an unrecognized flag must not exit zero");
+  assert.match(unknown.stderr, /source-size-signal: MEASUREMENT FAILED — invalid arguments:/);
+  assert.doesNotMatch(unknown.stderr, /source-size-signal: OK/);
+
+  const missingValue = run(["--root"]); // --root takes a value; omitting it is the same parseArgs failure
+  assert.notEqual(missingValue.status, 0, "a flag missing its required value must not exit zero");
+  assert.match(missingValue.stderr, /source-size-signal: MEASUREMENT FAILED — invalid arguments:/);
+});
+
+test("W1-T2734: commit identities shorter than a full SHA-1 (e.g. this repo's own SHA-256 mode) fail measurement rather than emitting a truncated signal", () => {
+  // git's SHA-256 object format (git init --object-format=sha256) returns 64-hex-character commit
+  // identities, not the 40 this script's regex requires — the one realistic way to make `git
+  // rev-parse`/`git merge-base` exit 0 while returning something that is not a full SHA-1 identity.
+  const outer = mkdtempSync(join(tmpdir(), "rmd-source-size-sha256-"));
+  try {
+    const repo = join(outer, "repo");
+    mkdirSync(repo);
+    git(outer, "init", "-q", "-b", "main", "--object-format=sha256", repo);
+    git(repo, "config", "user.name", "RMD Source Signal Test");
+    git(repo, "config", "user.email", "source-signal@example.invalid");
+    plant(repo, "src/lib/grown.ts", 2);
+    git(repo, "add", ".");
+    git(repo, "commit", "-m", "base");
+    git(repo, "checkout", "-b", "feature");
+    plant(repo, "src/lib/grown.ts", 5);
+    git(repo, "add", ".");
+    git(repo, "commit", "-m", "grow source");
+
+    const headSha = git(repo, "rev-parse", "HEAD");
+    assert.doesNotMatch(headSha, /^[0-9a-f]{40}$/i, "sanity: SHA-256 mode really does produce a non-40-hex identity");
+
+    // --base "main" (not "origin/main") so measurement never needs a remote fetch.
+    const result = runSignal(repo, "--base", "main");
+    assert.notEqual(result.status, 0, "a non-40-hex commit identity must fail measurement, not emit a signal for it");
+    assert.match(
+      result.stderr,
+      /source-size-signal: MEASUREMENT FAILED — git did not return full commit identities for the merge base and HEAD/,
+    );
+    assert.doesNotMatch(result.stdout + result.stderr, /source-size-signal: OK/);
+  } finally {
+    rmSync(outer, { recursive: true, force: true });
+  }
+});
+
 test("W1-T2734: the sensor uses git only, never a test runner or a hand-rolled network client", () => {
   const source = readFileSync(SCRIPT, "utf8");
   assert.match(source, /node:child_process/, "the signal needs git to measure a merge-base-to-HEAD diff");
