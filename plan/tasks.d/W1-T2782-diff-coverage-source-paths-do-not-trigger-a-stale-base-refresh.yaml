@@ -1,0 +1,79 @@
+- id: W1-T2782
+  title: "A DIFF-COVERAGE RED ON SOURCE LINES CANNOT TRIGGER THE STALE-BASE REFRESH — the pre-strike classifier extracts only test paths, so an unrelated model-health PR spent a fix worker on source already present on newer main"
+  repo: remudero
+  depends_on: [W1-T2671]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high
+  files:
+    - src/run-task.ts
+    - test/a-red-branch-behind-its-base-spends-a-strike-first.test.ts
+  origin: "operator-session#diff-coverage-stale-base-repair-2026-09-03"
+  plan_refs: ["W1-T2671", "W1-T2298", "W1-T2774"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED on PR #3821 head 32cdf119: the coverage-ratchet job started against base
+    a9237bd and blocked only on `src/run-task.ts:13254` and `:13255`. Those lines are unrelated
+    comments already present on newer main 21d1a28. The daemon then recorded
+    `fix.base_refresh_checked` with `behind_by: 5`, `failing_test_files: []`,
+    `matching_base_files: []`, and `refresh: false`, and dispatched a paid fix worker.
+
+    The cause is explicit at source. W1-T2671's `decideRedBaseRefresh` calls
+    `failingTestFilesFromCiFailures`, whose suffix predicate admits only test roots, then
+    intersects those paths with the reversed compare's base-side changed files. That is correct
+    for test failures and structurally cannot recognize a diff-coverage report naming `src/`.
+    `src/lib/sweep.ts` already exposes `diffCoverageReport`, which parses the same CI failure tail
+    into exact `path:line` evidence, but the base-refresh decision never consumes it.
+
+    The falsifying observation would be either a non-empty `failing_test_files`/matching set in the
+    #3821 ledger row or an existing source-path input to `decideRedBaseRefresh`; both were checked
+    and are absent. This is not a reason to weaken diff coverage: its verdict was correct for the
+    base SHA the workflow actually received. The queue repair chose the wrong paid action after
+    main advanced.
+  design: |
+    Extend only the existing W1-T2671 pre-strike decision. Reuse `diffCoverageReport` to obtain
+    source `path:line` evidence from a genuine diff-coverage block, strip only the terminal line
+    number, normalize path separators, and intersect those repository-relative source paths with
+    `baseChangedFiles` using the same exact-or-complete-suffix rule already used for test paths.
+    Do not add a second CI-log parser or match a basename alone.
+
+    Refresh when the branch is positively behind and either an observed failing test path or an
+    observed diff-coverage source path intersects the base-only file list. Preserve every existing
+    abstention: current branch, unreadable or truncated compare, diff-coverage text without a
+    parseable path, and unrelated base changes all fall through to the ordinary fix rung. A
+    successful GitHub update-branch request still returns immediately without spending a strike;
+    if the new head stays red, the next level-triggered sweep may spend the ordinary strike.
+
+    Add `failing_source_files` beside the existing `failing_test_files` and
+    `matching_base_files` fields on `fix.base_refresh_checked`, so the operator can tell which
+    evidence arm justified or declined a refresh. Do not change the coverage gate, its parser,
+    the update-branch endpoint, strike accounting, or lifecycle behavior.
+  acceptance:
+    - claim: "a behind red PR whose genuine diff-coverage report names a source file also changed on the newer base requests GitHub update-branch before any worker spawn and spends zero strikes"
+      proof: "unit test: test/a-red-branch-behind-its-base-spends-a-strike-first.test.ts"
+    - claim: "the source match reuses the parsed diff-coverage report, strips only terminal line numbers, accepts exact or complete repository-path suffixes, and never matches by basename alone"
+      proof: "unit test: test/a-red-branch-behind-its-base-spends-a-strike-first.test.ts"
+    - claim: "fix.base_refresh_checked records failing source paths separately from failing test paths and records the exact base files that matched"
+      proof: "unit test: test/a-red-branch-behind-its-base-spends-a-strike-first.test.ts"
+    - claim: "a current branch, unreadable comparison, malformed diff-coverage tail, or behind branch whose base gap changes unrelated files still reaches the existing ordinary fix path"
+      proof: "unit test: test/a-red-branch-behind-its-base-spends-a-strike-first.test.ts"
+    - claim: "a successful base refresh remains a zero-strike terminal outcome for this pass, while a refreshed head that remains red can spend a real strike on the next fresh sweep"
+      proof: "unit test: test/a-red-branch-behind-its-base-spends-a-strike-first.test.ts"
+  falsifier: |
+    Start from the #3821 evidence shape: a five-commit-behind PR, a coverage-ratchet failure tail
+    containing only `diff-coverage: BLOCKED` plus `src/run-task.ts:13254` and `:13255`, and a
+    reversed compare whose files include `src/run-task.ts`. Before implementation the fixture must
+    produce `refresh: false`; after implementation it must request update-branch with zero worker
+    spawns and zero strikes. Delete the source-path splice and that test returns to failure. Pair it
+    with an unrelated-base-file control and a basename-collision control that never refresh.
+  note: |
+    ID PROVENANCE: `rmd next-task-id --reserve` atomically held `refs/rmd-id/W1-T2782`; that
+    reserved id is authoritative.
+
+    RISK: high because this extends an automatic write decision on open PR branches. The existing
+    W1-T2671 two-signal fence remains intact: a positive behind count plus an exact path
+    intersection are both mandatory, update-branch merges rather than rebases, and no lifecycle,
+    merge, or deployment action is added.
