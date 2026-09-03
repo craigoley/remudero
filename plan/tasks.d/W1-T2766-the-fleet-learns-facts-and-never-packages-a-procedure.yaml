@@ -1,0 +1,95 @@
+- id: W1-T2766
+  title: "THE FLEET LEARNS FACTS AND NEVER PACKAGES A PROCEDURE — the retro already mines merged runs for procedural candidates and files them as fact lines, workers already invoke bundled Claude Code skills unprompted, and the repository ships zero skills of its own; draft a SKILL.md from each recurring procedure into a workshop lane, scan it against the worker allowlist, stage it for the inbox, and meter its invocations"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 65.00
+  rationale: |
+    RE-DERIVED AT f12bb90ae (2026-09-02).
+
+    (1) THE TWO HALVES THAT EXIST, AND THE MISSING JOIN. W1-T87 ratified P13: `mineProceduralCandidates`
+    (src/lib/retro.ts) turns merged runs that share a procedure shape — proof patterns that executed,
+    single-strike merges, one-shot fix resolutions — into learning candidates of `kind: procedural`,
+    requiring two supporting runs so one success stays an anecdote. Those candidates become FACT LINES
+    injected under the knowledge budget: a sentence a worker may or may not act on. W1-T971 measured the
+    other half: fleet workers on the implement lane "DO SEE, DO LOAD AND DO SPONTANEOUSLY USE BUNDLED
+    CLAUDE CODE SKILLS" — six invocations, so the runtime's skill mechanism is live in this fleet. And
+    `git ls-files | grep -ic SKILL.md` reads 0: the repository authors no skill of its own. The
+    `.remudero/skills/*.yaml` registry (§5B) is the Architect's lane table — plan, retro, review,
+    design-review — not a procedure a worker can invoke mid-task.
+
+    (2) THE IDEA, FROM OPENCLAW 2.0. Its release note ships "Automatic Self-Learning: capture strong
+    reusable lessons and automatically apply scanner-approved new or Workshop-owned skills by default",
+    with "user-authored skill changes remain pending", and a "Skill Workshop" that consolidates learned
+    skill collections "through recoverable review", reusing existing skills during `/learn`. The two
+    disciplines this harness must keep are stricter than theirs: Rule 15 makes a procedure a plan write
+    the Architect proposes and the operator ratifies, and the wipe test (W1-T2512's named factor) is the
+    only honest measure of whether a skill helped.
+
+    (3) WHY A SKILL AND NOT A LONGER FACT. A fact line spends budget every spawn whether or not the task
+    needs it; a skill is loaded on demand by the runtime the worker already runs, costs nothing until
+    invoked, and its invocation is itself a ledgerable event — the adoption meter (W1-T2266) can read it
+    where a fact line's use is invisible. That is the difference between memory that is recalled and
+    memory that is executed.
+  design: |
+    (i) THE DRAFT. src/lib/skill-workshop.ts: `renderSkillDraft(candidate)` takes one procedural
+    candidate with its supporting runs and renders a Claude Code skill — a SKILL.md with name,
+    description, the procedure as steps, and the evidence runs as provenance lines in the same
+    `[src: …]` form learnings carry. The retro calls it for every candidate that clears the
+    two-run floor and renders the drafts in its gather beside the fact-line candidates.
+
+    (ii) THE SCANNER. `scanSkillDraft(draft, allowlist)` refuses a draft that names a tool, host or
+    path outside the worker's allowlist (settings/worker.json, the same list W1-T2698's probe reads),
+    or that carries an instruction-shaped line the untrusted envelope (W1-T2700) would fence. A
+    refused draft is reported with the offending line, never staged.
+
+    (iii) THE LANE. A scanned draft is staged as ONE inbox proposal carrying the SKILL.md text and its
+    evidence; `rmd approve` ratifies it into a plan PR that writes `.claude/skills/<name>/SKILL.md`.
+    Nothing writes into `.claude/skills/` outside that PR. A re-run of the retro over the same
+    evidence stages nothing twice (dedupe by candidate hash, the W1-T470 discipline).
+
+    (iv) THE LOADING PATH, MEASURED NOT ASSUMED. `spawnWorker` (src/lib/worker.ts) passes
+    `settingSources: []`, which the installed SDK documents as disabling filesystem settings; the
+    six invocations W1-T971 measured were BUNDLED skills. The SDK's `skills` option is a context
+    filter over the skills it discovers ("enable only the listed skills"). This task shows, with a
+    recorded listing from a real spawn, whether a repo-owned skill under .claude/skills is visible
+    to a worker through that option or a scoped `settingSources`; if it is not, the staged proposal
+    says so in its evidence and no SKILL.md is described as reachable by a worker.
+
+    (v) THE METER. Each repo-owned skill's invocations, already visible the way W1-T971 measured
+    them, join the adoption report so a skill nobody invokes is named in the same table as a
+    mechanism nobody adopted. The wipe test gains `skills` as a named factor value only if W1-T2659
+    lands first; this task does not add it and does not promise it.
+
+    (vi) WHAT DOES NOT CHANGE. Procedural fact lines keep flowing as W1-T87 built them. The knowledge
+    budget. The Architect registry. Rule 15.
+  acceptance:
+    - claim: "a procedural candidate with two or more supporting runs renders a skill draft carrying each run as provenance, and a single-run candidate renders nothing"
+      proof: "unit test: test/skill-workshop.test.ts"
+    - claim: "a draft naming a tool, host or path outside the worker allowlist is refused with the offending line named"
+      proof: "unit test: test/skill-workshop.test.ts"
+    - claim: "a scanned draft is staged as one inbox proposal and never written under the skills directory, and a re-run stages nothing twice"
+      proof: "unit test: test/skill-workshop.test.ts"
+    - claim: "a spawned worker's options list a repo-owned skill by name, or the staged proposal records that the runtime cannot load it"
+      proof: "unit test: test/skill-workshop.test.ts"
+    - claim: "the retro's gather renders skill drafts beside the fact-line candidates"
+      proof: "grep: renderSkillDraft( in src/lib/retro.ts"
+  risk: high
+  band_meaning: span
+  origin: "oper#external-scan-2026-09-02"
+  plan_refs: ["W1-T87", "W1-T971", "W1-T2266", "W1-T2512", "W1-T2659", "W1-T2698", "W1-T2700", "§5B", "§8A", "§12"]
+  files: [src/lib/skill-workshop.ts, src/lib/retro.ts, src/lib/inbox.ts, src/lib/worker.ts, test/skill-workshop.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    risk:high, band_meaning:span — a new module, the retro and the inbox under Rule 19; runtime
+    blast radius is staged proposals nobody has ratified.
+
+    FILED AT THE OPERATOR'S DIRECTION of 2026-09-02 ("leaning into more automation,
+    self-improvement, auto-skill creation"). The nearest existing mechanism, W1-T87's procedural
+    candidates, was measured against this shard before filing so it extends that lineage rather
+    than re-filing it.
+
+    SOURCE, PRIMARY: OpenClaw v2026.8.1 release note, "Automatic Self-Learning" and "Skill Workshop".
