@@ -8,7 +8,7 @@
   risk: high
   band_meaning: "span"
   budget_usd: 5.00
-  files: [src/lib/isolation.ts, test/a-failed-probe-is-not-a-parse-failure.test.ts]
+  files: [src/lib/isolation.ts, test/a-failed-probe-is-not-a-parse-failure.test.ts, scripts/source-size-baseline.json]
   origin: "operator-brief#codex-integration-defect-pair-2026-09-03"
   plan_refs: ["W1-T2754", "W1-T238", "W1-T1112", "W1-T17"]
   status: queued
@@ -23,6 +23,25 @@
     `files:` list is a source file and its own test, which the linter counts as two concerns and
     refuses at `risk: medium`. It is not a claim that the diff is large — it is one function's
     reason string plus a new pure selector.
+
+    AMENDED 2026-09-03 — `scripts/source-size-baseline.json` ADDED to `files:`. NOT a scope
+    widening in substance: the fix takes `src/lib/isolation.ts` from 417 to 478 lines, and
+    `source-size-ratchet` BLOCKS until that growth is recorded, naming the file to edit in its
+    own refusal text. So the third path is a path this task's OWN work makes mandatory, and it
+    was undeclarable at filing time because nobody knows a file's post-fix line count before
+    writing the fix.
+
+    THE ESCALATION THAT FORCED THIS (issue #3843, PR #3837): the blocked_review FIX RUNG refused
+    to dispatch strike 2 because the diff carried a path outside `files:`, and it was right to —
+    "only a human can undo an already-pushed out-of-scope commit". `widen-scope` is one of the
+    two options that escalation itself offers. The alternative it RECOMMENDS, revert, is refused
+    here on evidence: reverting the recorded line does not shrink the file, so it trades a scope
+    block for a red `source-size-ratchet` and resolves nothing.
+
+    WHY THE PLAN AND NOT THE PR BODY. A review `scope_violation` is advisory and a body could
+    argue a ratified widening past it — but the fix rung reads `files:`, not prose, so a
+    body-only argument would leave review green and the sweep refusing the same PR forever. The
+    plan is the only surface both mechanisms read.
 
     SEPARATELY TRUE, AND WHY THE FAIL-CLOSED POSTURE IS RESTATED IN EVERY CRITERION: the code
     around this edit is the isolation preflight that gates every task worker. A mistake letting
