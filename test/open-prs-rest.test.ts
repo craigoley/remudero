@@ -40,6 +40,7 @@ import { ghJson, type GhRateLimitReading } from "../src/lib/worker.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import type { Config } from "../src/lib/config.js";
 import { isInPlanScope } from "../src/lib/plan-architect.js";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 const OWNER = "craigoley";
 const REPO = "remudero";
@@ -441,7 +442,7 @@ test("falsifier — a neutral required check counts as satisfied through the RES
 
 test("fixCommand looks the PR up through the injected REST fetcher and never through a GraphQL-backed gh subcommand", async () => {
   const seen: string[][] = [];
-  const root = mkdtempSync(join(tmpdir(), "fix-cmd-rest-"));
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}fix-cmd-rest-`));
   const code = await fixCommand(["806"], {
     config: { claudeBin: "/bin/true", root } as Config,
     fetch: (args: string[]) => {

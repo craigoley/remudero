@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import {
   aggregateByClass,
   aggregateByType,
@@ -451,7 +452,7 @@ test("renderPlanHealth names the flagged task and its corrective task when the q
 // `renderPlanHealth`'s own doc comment makes ("printed by --dry-run").
 
 test("planHealthSweepSectionFor: renders the plan-health section from a repoRoot's plan/tasks.yaml, and degrades to '' when the file is absent (W1-T358)", () => {
-  const root = mkdtempSync(join(tmpdir(), "plan-health-section-"));
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}plan-health-section-`));
   try {
     // Absent plan/tasks.yaml: degrades to no section, never a throw — same discipline as
     // netStateAdvisorySectionFor's absent-MASTER-PLAN.md branch.
@@ -489,7 +490,7 @@ test("planHealthSweepSectionFor: renders the plan-health section from a repoRoot
 });
 
 test("planHealthSweepSectionFor: an explicit derived isMerged overrides the yaml status (W1-T367)", () => {
-  const root = mkdtempSync(join(tmpdir(), "plan-health-section-projection-"));
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}plan-health-section-projection-`));
   try {
     mkdirSync(join(root, "plan"), { recursive: true });
     // Same violating shape as above, but yaml says `queued` (the measured stale shape) while
