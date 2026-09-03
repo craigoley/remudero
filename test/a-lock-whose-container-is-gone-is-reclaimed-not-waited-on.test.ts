@@ -115,9 +115,9 @@ interface RunOpts {
 }
 
 function runRecycle(opts: RunOpts = {}): Run {
-  const dir = mkdtempSync(join(tmpdir(), "reclaim-stub-"));
-  const rec = mkdtempSync(join(tmpdir(), "reclaim-rec-"));
-  const state = opts.stateDir ?? mkdtempSync(join(tmpdir(), "reclaim-state-"));
+  const dir = mkdtempSync(join(tmpdir(), "rmd-reclaim-stub-"));
+  const rec = mkdtempSync(join(tmpdir(), "rmd-reclaim-rec-"));
+  const state = opts.stateDir ?? mkdtempSync(join(tmpdir(), "rmd-reclaim-state-"));
   writeStubs(dir);
   const r = spawnSync("bash", [opts.scriptPath ?? SCRIPT], {
     encoding: "utf8",
@@ -167,7 +167,7 @@ function makeInflightDir(state: string): string {
 // ── ACCEPTANCE 1: a lock whose container docker reports absent is reclaimed, not waited on ──────
 
 test("W1-T2556: an inflight lock naming a container docker has never heard of is reclaimed and the recycle proceeds", () => {
-  const state = mkdtempSync(join(tmpdir(), "reclaim-state-"));
+  const state = mkdtempSync(join(tmpdir(), "rmd-reclaim-state-"));
   const inflightDir = makeInflightDir(state);
   const lockPath = join(inflightDir, "W1-T2525.lock");
   writeFileSync(lockPath, JSON.stringify({ pid: 57, host: "8c8fc20029e2", startedAt: "2026-09-01T00:00:00Z" }));
@@ -187,7 +187,7 @@ test("W1-T2556: MEASURED SHAPE — a lock naming a container docker KNOWS but re
   // The actual 2026-09-01 incident: `docker ps -a` showed the container as `exited`, not gone from
   // docker's inventory — a strictly WEAKER claim than "docker inspect fails outright" (ACCEPTANCE
   // 1), and the one this task's own rationale names explicitly ("absent OR not running").
-  const state = mkdtempSync(join(tmpdir(), "reclaim-state-"));
+  const state = mkdtempSync(join(tmpdir(), "rmd-reclaim-state-"));
   const inflightDir = makeInflightDir(state);
   const lockPath = join(inflightDir, "W1-T2525.lock");
   writeFileSync(lockPath, JSON.stringify({ pid: 57, host: "8c8fc20029e2", startedAt: "2026-09-01T00:00:00Z" }));
@@ -204,7 +204,7 @@ test("W1-T2556: MEASURED SHAPE — a lock naming a container docker KNOWS but re
 // ── ACCEPTANCE 2: a lock whose container is RUNNING still blocks exactly as today ────────────────
 
 test("W1-T2556: an inflight lock naming a RUNNING container still refuses the recycle, untouched", () => {
-  const state = mkdtempSync(join(tmpdir(), "reclaim-state-"));
+  const state = mkdtempSync(join(tmpdir(), "rmd-reclaim-state-"));
   const inflightDir = makeInflightDir(state);
   const lockPath = join(inflightDir, "W1-T404.lock");
   writeFileSync(lockPath, JSON.stringify({ pid: 123, host: "5efb86ede91b", startedAt: "2026-08-18T22:00:00Z" }));
@@ -221,7 +221,7 @@ test("W1-T2556: an inflight lock naming a RUNNING container still refuses the re
 // ── ACCEPTANCE 3: a host that cannot be resolved is left alone and still blocks ──────────────────
 
 test("W1-T2556: an inflight lock whose host is not container-id-shaped cannot be resolved and still refuses", () => {
-  const state = mkdtempSync(join(tmpdir(), "reclaim-state-"));
+  const state = mkdtempSync(join(tmpdir(), "rmd-reclaim-state-"));
   const inflightDir = makeInflightDir(state);
   const lockPath = join(inflightDir, "W1-T900.lock");
   // "prod-box-3" is a free-form, human-named host — never shaped like a docker container id
@@ -244,7 +244,7 @@ test("W1-T2556: an inflight lock whose host is not container-id-shaped cannot be
 // ── ACCEPTANCE 4: an unreadable or malformed lock is left alone and still blocks ─────────────────
 
 test("W1-T2556: a malformed inflight lock (no host field) is left alone and still refuses", () => {
-  const state = mkdtempSync(join(tmpdir(), "reclaim-state-"));
+  const state = mkdtempSync(join(tmpdir(), "rmd-reclaim-state-"));
   const inflightDir = makeInflightDir(state);
   const lockPath = join(inflightDir, "W1-T111.lock");
   writeFileSync(lockPath, "not even json");
@@ -260,7 +260,7 @@ test("W1-T2556: a malformed inflight lock (no host field) is left alone and stil
 // ── ACCEPTANCE 5: every reclaimed lock is printed in full before it is acted on ──────────────────
 
 test("W1-T2556: a reclaimed lock is printed in full — pid, host and startedAt — before it is moved", () => {
-  const state = mkdtempSync(join(tmpdir(), "reclaim-state-"));
+  const state = mkdtempSync(join(tmpdir(), "rmd-reclaim-state-"));
   const inflightDir = makeInflightDir(state);
   writeFileSync(
     join(inflightDir, "W1-T2525.lock"),
@@ -281,7 +281,7 @@ test("W1-T2556: a reclaimed lock is printed in full — pid, host and startedAt 
 // ── ACCEPTANCE 6: a reclaimed lock is preserved, never unlinked ──────────────────────────────────
 
 test("W1-T2556: a reclaimed lock is moved aside byte-identical, with its reason recorded alongside it — never deleted", () => {
-  const state = mkdtempSync(join(tmpdir(), "reclaim-state-"));
+  const state = mkdtempSync(join(tmpdir(), "rmd-reclaim-state-"));
   const inflightDir = makeInflightDir(state);
   const original = { pid: 57, host: "8c8fc20029e2", startedAt: "2026-09-01T00:00:00Z" };
   writeFileSync(join(inflightDir, "W1-T2525.lock"), JSON.stringify(original));
@@ -321,12 +321,12 @@ test("W1-T2556: MUTANT: removing the reclaim step restores the deadlock — the 
   const anchor = "waited=0\nwhile :; do\n  reclaim_dead_inflight_locks\n  n=0\n";
   assert.equal(src.split(anchor).length - 1, 1, "the mutation target must be unique");
   const mutated = src.replace(anchor, "waited=0\nwhile :; do\n  n=0\n");
-  const dir = mkdtempSync(join(tmpdir(), "reclaim-mutant-"));
+  const dir = mkdtempSync(join(tmpdir(), "rmd-reclaim-mutant-"));
   const mutant = join(dir, "recycle-container.sh");
   writeFileSync(mutant, mutated, { mode: 0o755 });
   chmodSync(mutant, 0o755);
 
-  const state = mkdtempSync(join(tmpdir(), "reclaim-state-"));
+  const state = mkdtempSync(join(tmpdir(), "rmd-reclaim-state-"));
   const inflightDir = makeInflightDir(state);
   writeFileSync(join(inflightDir, "W1-T2525.lock"), JSON.stringify({ pid: 57, host: "8c8fc20029e2", startedAt: "2026-09-01T00:00:00Z" }));
 
@@ -336,7 +336,7 @@ test("W1-T2556: MUTANT: removing the reclaim step restores the deadlock — the 
 
   // …and the REAL script, on the identical fixture, proceeds — the same claim ACCEPTANCE 1 makes,
   // restated here as the falsifying half of the same property.
-  const state2 = mkdtempSync(join(tmpdir(), "reclaim-state-"));
+  const state2 = mkdtempSync(join(tmpdir(), "rmd-reclaim-state-"));
   const inflightDir2 = makeInflightDir(state2);
   writeFileSync(join(inflightDir2, "W1-T2525.lock"), JSON.stringify({ pid: 57, host: "8c8fc20029e2", startedAt: "2026-09-01T00:00:00Z" }));
   const realRun = runRecycle({ stateDir: state2 });

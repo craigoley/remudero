@@ -7060,6 +7060,15 @@ export const INSTRUMENT_SURFACE_EXCLUSIONS: Readonly<Record<string, string>> = {
     "real merged diffs first, and promoting it in the same PR that introduces it would make that PR " +
     "entangled with its own src/lib/ci-parity.ts registration — the circularity #3331 hit from the other " +
     "side, where a *-ratchet.mjs filename matched the blocking pattern automatically.",
+  "scripts/mkdtemp-callsite-check.mjs":
+    "KNOWN GAP, WIDENING DEFERRED (W1-T2773) — genuinely gate-rule logic: it refuses a " +
+    "`mkdtempSync(join(tmpdir(), <expr>))` callsite whose prefix `sweepStaleTempDirs` cannot prove " +
+    "reapable, enforced at author (commit) time via hooks/pre-commit and exposed as the " +
+    "`mkdtemp-callsite-check` package.json script. It is NOT promoted to INSTRUMENT_SURFACE here " +
+    "because W1-T402 design clause (v) requires measuring a widening against real merged diffs " +
+    "first, and promoting it in the same PR that introduces it would entangle that PR with its own " +
+    "registration — the same circularity scripts/unwired-gate-check.mjs and " +
+    "scripts/worker-branch-shape.mjs above record for themselves.",
   "scripts/generate-cli-reference.mjs": "its :check mode is not wired into any CI workflow",
   "scripts/generate-docs-index.mjs": "its :check mode is not wired into any CI workflow",
   "scripts/generate-learnings-index.mjs": "its :check mode is not wired into any CI workflow",
