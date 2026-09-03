@@ -101,6 +101,13 @@ interface BeatOpts {
   dockerStub?: string;
   /** A `hostname` to put on PATH, so `beat_host` can be asserted against a known answer. */
   hostnameStub?: string;
+  /**
+   * W1-T2767: a `df` to put on PATH, so the per-device headroom rows can be driven to a KNOWN
+   * two-device answer. Omit it and the REAL `df` runs — which is deliberate for the real-leaf
+   * test below: a suite where every reading is faked never executes the default path at all,
+   * and the whole point of this task is that the real reading was measuring the wrong device.
+   */
+  dfStub?: string;
   /** Applied to the copied script as [find, replace], with `find` asserted UNIQUE. */
   mutate?: [string, string];
 }
@@ -152,6 +159,10 @@ function runBeat(opts: BeatOpts = {}): Beat {
   if (opts.hostnameStub) {
     writeFileSync(join(binDir, "hostname"), opts.hostnameStub, { mode: 0o755 });
     chmodSync(join(binDir, "hostname"), 0o755);
+  }
+  if (opts.dfStub) {
+    writeFileSync(join(binDir, "df"), opts.dfStub, { mode: 0o755 });
+    chmodSync(join(binDir, "df"), 0o755);
   }
   // DEFAULT TO A RUNTIME THAT DOES NOT EXIST. Every pre-W1-T483 test predates the restart-budget
   // probe and must keep asserting exactly what it asserted; pointing the probe at a missing binary
@@ -832,4 +843,108 @@ test("MUTANT: failing INSIDE the loop is caught — one dead host must not hide 
   });
   assert.equal(w.status, 1, "it still fails, which is why the count is what discriminates");
   assert.doesNotMatch(w.report, /── heartbeat ──/, "the mutant must lose the SECOND host's block entirely");
+});
+
+// ── W1-T2767: per-device headroom ───────────────────────────────────────────────────────────────
+// THE BEAT HAS NEVER MEASURED THE DISK THAT FILLS. On 2026-09-02 the 29G OS disk hit 100% and the
+// host ran wedged ~25h while `disk_free_kb` read ~102GB green — correctly, because `RMD_ROOT` is a
+// mount of the 126G data disk (dev 66310) and `/` is dev 66306. These guards pin the labelled
+// per-device rows that make that split visible in the beat instead of invisible behind one number.
+
+/** A `df -Pk <path>` stub: two distinct devices, so dedupe and min are actually exercised. */
+const dfStub = (rootKb: string, stateKb: string): string =>
+  [
+    "#!/usr/bin/env bash",
+    // Mirrors `df -Pk`: a header line, then device / 1k-blocks / used / available / capacity / mount.
+    'target="${@: -1}"',
+    'if [ "$target" = "/" ]; then',
+    '  printf "Filesystem 1024-blocks Used Available Capacity Mounted\\n/dev/root 30000000 1000 %s 58%% /\\n" ' + JSON.stringify(rootKb),
+    "else",
+    '  printf "Filesystem 1024-blocks Used Available Capacity Mounted\\n/dev/nvme0n2p1 130000000 1000 %s 14%% /mnt/rmd\\n" ' + JSON.stringify(stateKb),
+    "fi",
+  ].join("\n") + "\n";
+
+test("W1-T2767: the beat publishes root and state headroom as separate labelled devices, and a minimum across them", () => {
+  // Root nearly full, state roomy — the EXACT September 2 shape, which the single `disk_free_kb`
+  // number reported as green.
+  const beat = runBeat({ dfStub: dfStub("500000", "107000000") });
+  assert.equal(beat.status, 0, beat.stderr);
+
+  assert.equal(field(beat.published, "root_fs_free_kb"), "500000", "the OS disk is reported in its own row");
+  assert.equal(field(beat.published, "root_fs_device"), "/dev/root");
+  assert.equal(field(beat.published, "state_fs_free_kb"), "107000000");
+  assert.equal(field(beat.published, "state_fs_device"), "/dev/nvme0n2p1");
+  assert.notEqual(
+    field(beat.published, "root_fs_device"),
+    field(beat.published, "state_fs_device"),
+    "the two rows must name DIFFERENT devices — that split is the whole finding",
+  );
+
+  // The alarm number is the SMALLEST device, not the state root's.
+  assert.equal(field(beat.published, "disk_min_free_kb"), "500000");
+  // Back-compat: the pre-existing field keeps its exact meaning and value for existing readers.
+  assert.equal(field(beat.published, "disk_free_kb"), "107000000");
+});
+
+test("W1-T2767: an unreadable device degrades to `unknown` and never drags the minimum to a fake 0", () => {
+  // `df` fails for every path: nothing is readable, so nothing may be claimed.
+  const beat = runBeat({ dfStub: "#!/usr/bin/env bash\nexit 1\n" });
+  assert.equal(beat.status, 0, beat.stderr);
+  assert.equal(field(beat.published, "root_fs_free_kb"), "unknown");
+  assert.equal(field(beat.published, "root_fs_device"), "unknown");
+  assert.equal(field(beat.published, "disk_min_free_kb"), "unknown", "unreadable is never reported as 0 free");
+});
+
+test("W1-T2767: one unreadable device does not erase a readable minimum", () => {
+  // `/` answers, `RMD_ROOT` does not. A readable reading must still be published and still drive
+  // the minimum — the mirror of the all-unreadable case above.
+  const half = [
+    "#!/usr/bin/env bash",
+    'target="${@: -1}"',
+    '[ "$target" = "/" ] || exit 1',
+    'printf "Filesystem 1024-blocks Used Available Capacity Mounted\\n/dev/root 30000000 1000 400000 58%% /\\n"',
+  ].join("\n") + "\n";
+  const beat = runBeat({ dfStub: half });
+  assert.equal(beat.status, 0, beat.stderr);
+  assert.equal(field(beat.published, "root_fs_free_kb"), "400000");
+  assert.equal(field(beat.published, "disk_free_kb"), "unknown", "the state root was genuinely unreadable");
+  assert.equal(field(beat.published, "disk_min_free_kb"), "400000", "a readable device still yields a minimum");
+});
+
+test("W1-T2767: the REAL df leaf runs and reports this host's actual root filesystem", () => {
+  // NO dfStub — the default implementation executes. Without this the seam's real leaf is never
+  // exercised and only the fakes above are ever proven (CLAUDE.md's all-fakes trap), which is
+  // exactly how a reading that measures the wrong device survives a green suite.
+  const beat = runBeat();
+  assert.equal(beat.status, 0, beat.stderr);
+
+  const rootKb = field(beat.published, "root_fs_free_kb");
+  const rootDev = field(beat.published, "root_fs_device");
+  const minKb = field(beat.published, "disk_min_free_kb");
+
+  // Falsifiable claims about the REAL reading, not merely that it returned.
+  assert.match(String(rootKb), /^[0-9]+$/, `real df must yield a numeric block count, got ${rootKb}`);
+  assert.ok(Number(rootKb) > 0, "a mounted root filesystem has non-zero available blocks");
+  assert.ok(String(rootDev).length > 0 && rootDev !== "unknown", `real df must name a device, got ${rootDev}`);
+  assert.match(String(minKb), /^[0-9]+$/, "the minimum over readable devices is numeric");
+  assert.ok(Number(minKb) <= Number(rootKb), "the minimum never exceeds a device it is taken over");
+});
+
+test("W1-T2767 mutant: dropping the root-filesystem probe is caught", () => {
+  const beat = runBeat({
+    dfStub: dfStub("500000", "107000000"),
+    mutate: ['ROOT_FS_FREE_KB="$(df_field / 4)"', 'ROOT_FS_FREE_KB=""'],
+  });
+  assert.notEqual(field(beat.published, "root_fs_free_kb"), "500000", "the guard must not pass on a script that stopped probing /");
+});
+
+test("W1-T2767 mutant: taking the minimum over the state root alone is caught", () => {
+  // The regression this task exists to prevent: a `min` that only ever sees config.root, which is
+  // precisely what reported green through September 2.
+  const beat = runBeat({
+    dfStub: dfStub("500000", "107000000"),
+    mutate: ['for _kb in "$DISK_FREE_KB" "$ROOT_FS_FREE_KB"; do', 'for _kb in "$DISK_FREE_KB"; do'],
+  });
+  assert.equal(field(beat.published, "disk_min_free_kb"), "107000000", "the mutant reports the roomy device");
+  assert.notEqual(field(beat.published, "disk_min_free_kb"), "500000", "and therefore misses the full one");
 });
