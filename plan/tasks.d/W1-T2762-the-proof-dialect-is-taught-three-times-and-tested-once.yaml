@@ -1,0 +1,87 @@
+- id: W1-T2762
+  title: "THE PROOF DIALECT IS TAUGHT THREE TIMES AND TESTED ONCE — the filing lanes read ACCEPTANCE_PROOF_GRAMMAR, whose every example runs through the real parser in CI; interactive sessions read CLAUDE.md's proof section, 7,454 bytes and six bullets carrying fourteen PR citations, each one a drift between that prose and the parser; and check-proof's help text is a third copy; render one dialect page from the parser's own constants, gate it against drift the way docs/cli-reference.md already is, and check every grammar statement the CLAUDE.md section quotes against the live constant"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: |
+    RE-DERIVED AT 7775b9977 (2026-09-03).
+
+    (1) THE THREE COPIES. src/lib/proof-grammar.ts holds `ACCEPTANCE_PROOF_GRAMMAR`, "the ONE copy
+    both task-filing lanes read" (src/lib/plan-architect.ts, src/lib/triage.ts), and
+    test/proof-grammar.test.ts runs every example in it through `parseWhitelistedProof` and the
+    metacharacter linter, so an example that stops parsing fails the build. CLAUDE.md's section
+    "Writing proofs and acceptance criteria" teaches the same grammar to every interactive session:
+    81 lines, 7,454 bytes, six bullets, citing fourteen PRs and seven tasks — #766, #773, #777,
+    #1189, #1194, #1598, #1714, #1721 and the rest are each a case where a session wrote what the
+    prose implied and the parser refused it. `rmd check-proof`'s `detail` string in `COMMANDS`
+    (src/run-task.ts) is the third copy, hand-written. Only the first is tested against the parser.
+
+    (2) THE PARSER IS THE PROTOCOL. `ACCEPTANCE_HEADER_RE`, `ACCEPTANCE_BULLET_RE`,
+    `parseDialectGrep`, `parseTestTarget` (src/lib/review.ts) and `looksLikeScenarioNarrative`
+    (src/lib/task-linter.ts) decide what a proof means. The Agora protocol paper (Marro et al.,
+    2024) names the shape this repo already has: natural language for rare exchanges, a negotiated
+    protocol document for the frequent one, and routines that execute it. The frequent exchange
+    here is the acceptance block; the protocol document exists only as a constant and a section of
+    prose that must be kept in step by hand.
+
+    (3) THE HOUSE PATTERN FOR THIS. docs/cli-reference.md is generated from `COMMANDS` by
+    scripts/generate-cli-reference.mjs and byte-compared by `cli-reference:check` inside `npm test`;
+    plan/plan-index.json and learnings/index.json are held the same way. A dialect page rendered from
+    the grammar constant and the parser's constants, gated the same way, cannot drift from the
+    parser — and the prose copy can be checked against it statement by statement.
+
+    (4) WHAT THIS DOES NOT DO. It does not shrink CLAUDE.md; that is W1-T2507's family and several
+    tests pin that section's prose (test/docs-claims.test.ts and siblings) — a builder moving a
+    bullet greps test/ for its phrase first. It gives the section a checked reference to point at.
+  design: |
+    (i) THE CONSTANTS BECOME READABLE. src/lib/review.ts exports the header and bullet regexes and
+    the two dialect parsers' shape as a `PROOF_DIALECT` descriptor (prefix, form, what is refused,
+    what is refused with which message); src/lib/task-linter.ts exports the narrative bounds the
+    same way. No parsing behaviour changes; the descriptor is derived from the same literals.
+
+    (ii) THE PAGE. scripts/generate-proof-dialect.mjs renders docs/proof-dialect.md from
+    `ACCEPTANCE_PROOF_GRAMMAR` plus the descriptors: the two forms, the header and bullet shapes with
+    the exact accepted markers, the refusals with their messages, the base-regex rule, the
+    scenario-narrative bounds, and the verdict-to-exit-code table `check-proof --help` prints.
+    `proof-dialect` and `proof-dialect:check` join package.json in the cli-reference shape, and the
+    check runs inside `npm test`.
+
+    (iii) THE DRIFT GATES. test/proof-dialect-doc.test.ts: every example on the page runs through
+    the real parser (the proof-grammar.test.ts discipline, extended to the page); a changed bullet
+    regex fails the check naming the constant; and each grammar statement CLAUDE.md's proof section
+    quotes — the accepted bullet markers, the hundred-character and one-comma bounds, the
+    last-in-split rule — is checked against the live descriptor, so the prose copy is finally held
+    to the parser too.
+
+    (iv) THE THIRD COPY. `check-proof`'s `detail` keeps its forensic narrative and gains one line
+    naming docs/proof-dialect.md as the reference; the verdict table on the page is rendered from
+    `CHECK_PROOF_EXIT`, not retyped.
+  acceptance:
+    - claim: "every example on the generated dialect page runs through the real parser and a broken example fails the check by name"
+      proof: "unit test: test/proof-dialect-doc.test.ts"
+    - claim: "a changed bullet or header regex fails the drift check naming the constant"
+      proof: "unit test: test/proof-dialect-doc.test.ts"
+    - claim: "each grammar statement CLAUDE.md's proof section quotes agrees with the live descriptor"
+      proof: "unit test: test/proof-dialect-doc.test.ts"
+    - claim: "the page and its check are wired the way the cli reference is"
+      proof: "grep: proof-dialect:check in package.json"
+    - claim: "the page is tracked and names the header shape"
+      proof: "grep: ACCEPTANCE_HEADER_RE in docs/proof-dialect.md"
+  risk: high
+  band_meaning: span
+  origin: "oper#concept-scan-2026-09-03"
+  plan_refs: ["W1-T362", "W1-T387", "W1-T2507", "W1-T2614", "§8A", "§12"]
+  files: [src/lib/review.ts, src/lib/task-linter.ts, src/lib/proof-grammar.ts, scripts/generate-proof-dialect.mjs, docs/proof-dialect.md, package.json, test/proof-dialect-doc.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    risk:high, band_meaning:span — two parser modules gaining exports, a generator, a page and a
+    check under Rule 19; runtime blast radius is nil, no parse decision changes.
+
+    FILED AT THE OPERATOR'S DIRECTION of 2026-09-03 (the compact-dialect scan). SOURCE, PRIMARY:
+    Marro et al., "A Scalable Communication Protocol for Networks of Large Language Models"
+    (arXiv 2410.11905), read through its GitHub README; the paper host was unreachable from the
+    filing session's egress proxy.
