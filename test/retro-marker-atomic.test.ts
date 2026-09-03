@@ -536,6 +536,8 @@ function setupFakeRetroFixture(
     preflightResult?: RetroPrepublishResult;
     /** Drive the production repair callback once before returning a passing second attempt. */
     preflightExercisesRepair?: boolean;
+    /** Override only the resumed repair worker result; the initial Architect result stays valid. */
+    repairWorkerResult?: Partial<WorkerResult>;
   } = {},
 ): FakeRetroFixture {
   const fakeHome = mkdtempSync(join(tmpdir(), "rmd-retro-success-home-"));
@@ -689,7 +691,7 @@ function setupFakeRetroFixture(
     compactionEvents: [],
     qualitySuspect: false,
     };
-    return result;
+    return args?.resumeSessionId ? { ...result, ...opts.repairWorkerResult } : result;
   };
 
   const prepublishPreflight = async (preflight: RunRetroPrepublishPreflightOptions): Promise<RetroPrepublishResult> => {
@@ -700,7 +702,18 @@ function setupFakeRetroFixture(
         provider: preflight.provenance.provider, model: preflight.provenance.model,
         effort: preflight.provenance.effort, session_id: preflight.provenance.sessionId,
       });
-      await preflight.repair("bounded fenced fixture evidence");
+      try {
+        await preflight.repair("bounded fenced fixture evidence");
+      } catch (error) {
+        preflight.log("retro.preflight_failed", {
+          attempt: 2, outcome: "failed", suite_count: 2, elapsed_ms: 1,
+          exit_class: "repair_spawn_failed", stderr_excerpt: String((error as Error)?.message ?? error),
+          remote_pr_existed: preflight.remotePrExisted,
+          provider: preflight.provenance.provider, model: preflight.provenance.model,
+          effort: preflight.provenance.effort, session_id: preflight.provenance.sessionId,
+        });
+        return { ok: false, attempts: 2, suiteCount: 2, repaired: false };
+      }
       await preflight.regenerateHarnessArtifacts();
       preflight.log("retro.preflight_passed", {
         attempt: 2, outcome: "passed", suite_count: 2, elapsed_ms: 1,
@@ -826,6 +839,32 @@ test("retroCommand: the one repair resumes the producing session on its original
     assert.equal(repair?.provider, "claude");
     assert.equal(repair?.resumed_session_id, "s-retro-fixture");
   });
+});
+
+test("retroCommand: a repair worker that changes identity, provider, or returns an error fails closed before publication", async (t) => {
+  const variants: Array<{ name: string; result: Partial<WorkerResult> }> = [
+    { name: "session identity", result: { sessionId: "different-session" } },
+    { name: "provider", result: { provider: "codex" } },
+    { name: "worker outcome", result: { isError: true, subtype: "error_during_execution" } },
+  ];
+
+  for (const variant of variants) {
+    await t.test(variant.name, async (t) => {
+      const fx = setupFakeRetroFixture(t, {
+        preflightExercisesRepair: true,
+        repairWorkerResult: variant.result,
+      });
+      await fx.run(async () => {
+        const exitCode = await withLiveWritesAllowed(() => retroCommand([], {
+          spawn: fx.fakeSpawn,
+          github: offlineGh,
+          prepublishPreflight: fx.prepublishPreflight,
+        }));
+        assert.equal(exitCode, 1, "a rejected repair cannot publish or advance the marker");
+        assert.equal(existsSync(join(fx.root, "state", "last-retro.json")), false);
+      });
+    });
+  }
 });
 
 // ── W1-T160: the INTEGRITY GATE — a HARD precondition INSIDE the automated
