@@ -6,6 +6,7 @@ import { detectUsageLimitRefusal, type UsageLimitRefusal } from "./classify.js";
 import type { UsageSnapshot } from "./headroom.js";
 import type { Config, WorkerProviderId } from "./config.js";
 import { loadMounts, mountsPath, type CapabilityLadder } from "./mounts.js";
+import { withTempDir } from "./tmp.js";
 import {
   spawnDetachedGroup,
   teardownProcessGroup,
@@ -985,6 +986,17 @@ export async function spawnCodexWorker(
   config: Config,
   selection?: Pick<ProviderCapacity, "model" | "effort">,
 ): Promise<CodexWorkerResult> {
+  return withTempDir("codex-worker", (privateTmpDir) =>
+    spawnCodexWorkerInPrivateTemp(args, config, privateTmpDir, selection),
+  );
+}
+
+async function spawnCodexWorkerInPrivateTemp(
+  args: CodexSpawnArgs,
+  config: Config,
+  privateTmpDir: string,
+  selection?: Pick<ProviderCapacity, "model" | "effort">,
+): Promise<CodexWorkerResult> {
   const bin = resolveCodexBin(config);
   const stderrChunks: string[] = [];
   const stdoutChunks: string[] = [];
@@ -993,8 +1005,9 @@ export async function spawnCodexWorker(
   const teardown = args.containment?.teardown ?? ((pgid: number) => void teardownProcessGroup(pgid));
   const startedAt = Date.now();
   let timedOut = false;
+  const childEnv = { ...codexSpawnEnv(config, args), TMPDIR: privateTmpDir };
   const contained = spawn(
-    { command: bin, args: codexExecArgs(args, config, selection), cwd: args.cwd, env: codexSpawnEnv(config, args) },
+    { command: bin, args: codexExecArgs(args, config, selection), cwd: args.cwd, env: childEnv },
     (chunk) => stderrChunks.push(chunk),
     args.onSpawnError,
   );
@@ -1049,7 +1062,7 @@ export async function spawnCodexWorker(
       apiError: parsed.errors.some((error) => /rate limit|server|network/i.test(error)),
       ...(parsed.usageRefusal ? { usageRefusal: parsed.usageRefusal } : {}),
       permissionDenials: parsed.errors.filter((error) => /permission|sandbox|denied/i.test(error)),
-      childEnvKeys: Object.keys(codexSpawnEnv(config, args)),
+      childEnvKeys: Object.keys(childEnv),
       accountLabel: undefined,
       provider: "codex",
       model,

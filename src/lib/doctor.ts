@@ -547,6 +547,91 @@ export function judgeCheckoutDepth(depth: { shallow: boolean; commitCount: numbe
 }
 
 /**
+ * W1-T2627 — THE WORKTREE BASE RECORD, READ FOR THE FIRST TIME. `recordWorktreeBase` (worker.ts)
+ * writes `<worktree>.base` on every `worktreeAdd`, `removeWorktreeBase` deletes it on teardown,
+ * and until this arm `readWorktreeBase` had ZERO production callers — the one fact that answers
+ * "is this worktree's HEAD the commit it was cut from" was written and discarded, never consulted.
+ * The incident that named this task: a follow-up run asked that exact question from first
+ * principles because there was nowhere to read the answer.
+ *
+ * FOUR STATES, NOT A BOOLEAN, and only ONE is a finding:
+ *   - `at-base`      — HEAD equals the recorded base. Ordinary: a fresh worktree before its own
+ *                       first commit sits here, and this is the state that produced the incident —
+ *                       it must render as unremarkable.
+ *   - `own-commits`  — HEAD descends from the recorded base. Ordinary: the run's own work.
+ *   - `unrelated`    — HEAD does NOT descend from its recorded base. The ONLY state worth a look.
+ *   - `base-unknown` — no record, an unreadable HEAD, or a failed ancestry read. NEVER promoted to
+ *                       `unrelated` — the fail-safe direction this repo has already fixed twice on
+ *                       the read path (W1-T119 throttled-is-not-absent, W1-T130
+ *                       cannot-observe-means-wait): "I could not look" must not render as
+ *                       "this worktree is contaminated".
+ */
+export type WorktreeBaseState = "at-base" | "own-commits" | "unrelated" | "base-unknown";
+
+/**
+ * PURE. The ancestry read is an INJECTED SEAM (`isAncestor`) exactly so this classifier is
+ * testable without a real git repository — the same no-I/O contract every other `judge*` function
+ * in this file already keeps. `isAncestor` returning `undefined` (the read itself failed, e.g. no
+ * git or an unreadable object) resolves to `base-unknown`, on the identical fail-safe direction as
+ * an absent `base` or unreadable `head`.
+ */
+export function classifyWorktreeBase(
+  base: string | null,
+  head: string | undefined,
+  isAncestor: (base: string, head: string) => boolean | undefined,
+): WorktreeBaseState {
+  if (base === null || head === undefined) return "base-unknown";
+  if (base === head) return "at-base";
+  const ancestor = isAncestor(base, head);
+  if (ancestor === undefined) return "base-unknown";
+  return ancestor ? "own-commits" : "unrelated";
+}
+
+/**
+ * One live run's already-classified worktree-base reading. `taskId` is the id the run's BRANCH
+ * claims — read via {@link taskIdFromRunBranch} (status.ts) by the I/O shell, reused rather than a
+ * fourth inline `run-<taskId>-<epochMs>` regex — never the lock-file task id, so a mismatch between
+ * what a branch claims and what a lock file says is legible instead of silently reconciled.
+ */
+export interface WorktreeBaseRow {
+  runId: string;
+  taskId: string | undefined;
+  state: WorktreeBaseState;
+}
+
+/**
+ * ONE LINE PER LIVE RUN, carrying the branch-claimed task id beside the head classification — the
+ * whole remedy the incident needed: "the branch says W1-T2461 and HEAD is at-base" legible at a
+ * glance instead of reconstructed from first principles.
+ *
+ * REPORT ONLY, like every sibling arm in this file: nothing here reaps, moves or refuses a
+ * worktree on the strength of this classification. `at-base`, `own-commits` and `base-unknown`
+ * are NOT findings and never move the verdict above OK; `unrelated` is the only state that does
+ * (WARN, never FAIL — this arm observes, it does not escalate to the daemon-is-down severity of
+ * e.g. {@link judgeLedgerFreshness}).
+ */
+export function judgeWorktreeBases(rows: readonly WorktreeBaseRow[]): Check {
+  const name = "worktree-base";
+  const threshold = "HEAD is at-base or descends from its recorded base (own-commits)";
+  if (rows.length === 0) {
+    return { name, verdict: "OK", measured: "0 live worktree(s)", threshold };
+  }
+  const unrelated = rows.filter((r) => r.state === "unrelated");
+  const measured = rows.map((r) => `${r.runId} (${r.taskId ?? "unknown task"}): ${r.state}`).join(", ");
+  return {
+    name,
+    verdict: unrelated.length > 0 ? "WARN" : "OK",
+    measured,
+    threshold,
+    ...(unrelated.length > 0
+      ? {
+          detail: `HEAD does not descend from its recorded base: ${unrelated.map((r) => r.runId).join(", ")} — report only, nothing here reaps, moves or refuses a worktree`,
+        }
+      : {}),
+  };
+}
+
+/**
  * PAUSE HELD WHILE DISPATCH CONTINUES. Earned on 2026-08-20: the operator held a pause for
  * fourteen minutes with no acknowledgement and reasonably concluded the control was dead. The
  * underlying tick defect is filed as W1-T1065 (#2298) and is CITED, NOT FIXED here — doctor
@@ -750,6 +835,10 @@ export interface DoctorInputs {
    *  never touches the filesystem, per the file header). `undefined` means the read failed —
    *  `judgeCheckoutDepth` reports that as unreadable, never as a healthy full checkout. */
   checkoutDepth?: { shallow: boolean; commitCount: number };
+  /** W1-T2627 — one entry per LIVE in-flight run, already read and classified by the caller (this
+   *  module never touches the filesystem or git, per the file header). Defaults to `[]`, which
+   *  {@link judgeWorktreeBases} reads as "0 live worktree(s)" — never a finding. */
+  worktreeBases?: readonly WorktreeBaseRow[];
 }
 
 /**
@@ -772,6 +861,7 @@ export function buildDoctorReport(inputs: DoctorInputs): DoctorReport {
     judgeLaneLessWorkers(inputs.oldestWorkerEtimeS, inputs.workerCount),
     judgeStaleGitLocks(inputs.gitLocks),
     judgeCheckoutDepth(inputs.checkoutDepth),
+    judgeWorktreeBases(inputs.worktreeBases ?? []),
     judgeDiskHeadroom(inputs.diskFreeBytes),
     judgeMemory(inputs.mem.availableBytes, inputs.mem.totalBytes, inputs.mem.swapTotalBytes),
   ];

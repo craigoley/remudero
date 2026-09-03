@@ -599,6 +599,22 @@ export interface SweepWakeWiring {
   close(): void;
 }
 
+/** W1-T2741: daemon-side scheduling policy and clock seams for high-fanout event settlement. */
+export interface SweepWakeWireOptions {
+  /** Trailing-edge quiet period for `check_run:completed` and `status`; zero preserves the
+   * pre-W1-T2741 immediate-wake behavior for callers that do not supply committed policy. */
+  checkSettleMs?: number;
+  /** One injected timer family owns both the ordinary poll race and the trailing settle clock. */
+  timers?: SweepWakeTimerDeps;
+  /** Wall clock used only to avoid re-waiting a full settle period for a boot-pending marker. */
+  now?: () => number;
+}
+
+/** High-fanout settlement events. Structural PR/review transitions are deliberately absent. */
+export function isHighFanoutGithubWake(record: Pick<SweepWakeMarker, "event" | "action">): boolean {
+  return (record.event === "check_run" && record.action === "completed") || record.event === "status";
+}
+
 /**
  * Compose the marker primitives + {@link createSweepWakeSignal} + {@link watchSweepWakeMarker}
  * into the one `{ sleep, close }` pair `daemonCommand` (`run-task.ts`) swaps in for its own
@@ -617,6 +633,7 @@ export function wireSweepWakeToDaemon(
   root: string,
   log: (step: string, extra?: Record<string, unknown>) => void = () => {},
   watch: typeof fsWatch = fsWatch,
+  options: SweepWakeWireOptions = {},
 ): SweepWakeWiring {
   const path = sweepWakeMarkerPath(root);
   const bootRecord = readSweepWakeMarker(path);
@@ -627,7 +644,51 @@ export function wireSweepWakeToDaemon(
       action: bootRecord.action,
     });
   }
-  const signal = createSweepWakeSignal(bootRecord !== undefined);
+  const timers = options.timers ?? realSweepWakeTimers;
+  const now = options.now ?? Date.now;
+  const checkSettleMs = options.checkSettleMs ?? 0;
+  const signal = createSweepWakeSignal(false, timers);
+  let checkSettleTimer: unknown | undefined;
+  let coalescedCheckEdges = 0;
+
+  /** Finish exactly one bounded check/status burst. `wake=false` means an already-accepted
+   * ordinary/structural sweep owns the durable level before the quiet timer fired. */
+  const finishCheckBurst = (wake: boolean) => {
+    if (checkSettleTimer !== undefined) timers.clearTimer(checkSettleTimer);
+    checkSettleTimer = undefined;
+    if (coalescedCheckEdges > 0) {
+      log("github.wake.check_settled", {
+        event_class: "check/status",
+        coalesced_edges: coalescedCheckEdges,
+        settle_ms: checkSettleMs,
+      });
+      coalescedCheckEdges = 0;
+    }
+    if (wake) signal.wake();
+  };
+
+  const scheduleRecord = (record: SweepWakeMarker, fromBoot: boolean = false) => {
+    if (!isHighFanoutGithubWake(record) || checkSettleMs <= 0) {
+      // A structural transition should never wait behind an older check burst. The next accepted
+      // full sweep sees both because the marker is level-triggered and contains only "reconcile".
+      finishCheckBurst(false);
+      signal.wake();
+      return;
+    }
+    coalescedCheckEdges++;
+    if (checkSettleTimer !== undefined) timers.clearTimer(checkSettleTimer);
+    const receivedAtMs = Date.parse(record.receivedAtIso);
+    const observedAgeMs = fromBoot && Number.isFinite(receivedAtMs) ? Math.max(0, now() - receivedAtMs) : 0;
+    const remainingMs = Math.max(0, checkSettleMs - observedAgeMs);
+    if (remainingMs === 0) {
+      finishCheckBurst(true);
+      return;
+    }
+    checkSettleTimer = timers.setTimer(() => {
+      checkSettleTimer = undefined;
+      finishCheckBurst(true);
+    }, remainingMs);
+  };
   // W1-T2656: remember which durable level has already produced an in-memory edge. If a sweep attempt is
   // declined while an older pass is still settling, that marker must remain on disk for the next
   // accepted pass, but re-reading the same level before every sleep must not create a zero-delay
@@ -637,7 +698,7 @@ export function wireSweepWakeToDaemon(
     const record = readSweepWakeMarker(path);
     if (!record || record.deliveryId === observedDeliveryId) return;
     observedDeliveryId = record.deliveryId;
-    signal.wake();
+    scheduleRecord(record);
   };
   const watcherSignal: SweepWakeSignal = {
     wake: wakeForCurrentMarker,
@@ -646,6 +707,7 @@ export function wireSweepWakeToDaemon(
     close: signal.close,
   };
   const watcher = watchSweepWakeMarker(root, watcherSignal, log, watch);
+  if (bootRecord) scheduleRecord(bootRecord, true);
   // Close the consume-to-watch race: a delivery may land after the boot claim but before
   // fs.watch is armed. The durable path is authoritative, so seed a pending wake if it exists.
   wakeForCurrentMarker();
@@ -663,12 +725,19 @@ export function wireSweepWakeToDaemon(
       // Clear the in-memory edge and claim the durable level together. A delivery racing after
       // the claim writes a new marker and raises a new edge for one later pass.
       signal.acknowledge();
+      // A normal poll or a structural event may reach an accepted sweep before the check quiet
+      // period. That pass owns the same level-triggered reconciliation, so retire and report the
+      // collapsed burst instead of letting its timer cause a redundant pass afterward.
+      finishCheckBurst(false);
       consumeSweepWakeMarker(path);
       const stillPending = readSweepWakeMarker(path);
       observedDeliveryId = stillPending?.deliveryId;
-      if (stillPending) signal.wake();
+      if (stillPending) scheduleRecord(stillPending);
     },
     close: () => {
+      if (checkSettleTimer !== undefined) timers.clearTimer(checkSettleTimer);
+      checkSettleTimer = undefined;
+      coalescedCheckEdges = 0;
       watcher.close();
       signal.close();
     },

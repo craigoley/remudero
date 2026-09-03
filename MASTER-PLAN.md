@@ -168,6 +168,10 @@ this block — a generator has no authority over WHY.
 - **ci-gate REQUIRED checks**: 14 — ci, lint-plan, depcruise, containment-probe, coverage-ratchet, mutation-ratchet, jscpd-gate, claims, learnings-budget-ratchet, commitlint, api-client-drift, no-hand-rolled-fetch, scan-pr / osv-scan, License Review — source: `REQUIRED` (.github/workflows/ci-gate.yml, job `ci-gate`)
 <!-- CAPABILITY SNAPSHOT:END -->
 
+★ **CURRENT R45 (RETRO-1788401594504, 2026-09-03): verification is the only mapped failure class, but it is not a task-defect census.** Of 10 runs, 5 ended `blocked_ci`; four — W1-T2622/#3712, W1-T2626/#3727, W1-T2630/#3716 and W1-T2633/#3724 — subsequently merged gate-side. The remaining two `blocked_containment` rows are host-side `containment/outside-cwd-denial` events whose probes never ran, so they are excluded from task defects. The one `incomplete` triage run also merged gate-side (#3762). **P47 owns the credit artifact; P63 owns the two reachable-remedy failures:** W1-T2630 needed `docs/docs-index.json` and W1-T2633 needed `scripts/source-size-baseline.json`, both outside declared scope. No new proposal is minted: the highest prior live id is P68, and these findings are already discriminated by existing golden proposals.
+
+★ **CURRENT CALIBRATION:** the run-lane table is observed, not mount-rebasable: `implement` is 9 runs / 2 ledger merges / $4.051 average / $36.456 total, while `triage` is 1 / 0 / $0.000 / $0.000; both report zero turns. The class-routing cells are likewise unfit for a routing decision (`src` 22% ledger merge rate; `triage` 0%, each with 0% turn coverage). G-17 has no Architect-lane rows in its historical window, so it is evidence about the capability half of G-17 only, never a tier move. Replay and mutation-ratchet have no recorded positive-control run; their absences remain P48, not results. The two proposed learnings are ratified at `user-overall`: validate HTTP status/structure before consuming fetched bodies, and probe per-run environment isolation rather than relying on host state.
+
 ★ **WS-1 COMPLETE + L2 LIVE (2026-07-15) — FOLDED TO THREE LINES BY R23; the SHIPPED log carries every
 PR and the claims have held for fifteen retro-cycles.** Self-hosting exit criterion MET (`rmd daemon`
 drained SBX-T1/T2/T3 unattended → #6/#7/#8, then survived kill-9 + restart with **no duplicate task
@@ -176,7 +180,7 @@ idle, not by an active `reconstructOrphan`). §5's Tier-1 security stack runs on
 "the harness eats first" is FACT there), and the daemon drains `remudero` and fires its own retro
 (W1-T160/#853) — the operator-kick era is over.
 
-★ **THIS CYCLE (RETRO-1788374498685, 2026-09-02): THE VERDICT COLUMN CALLED EIGHT RUNS `blocked_ci` AND
+★ **PRIOR CYCLE (RETRO-1788374498685, 2026-09-02): THE VERDICT COLUMN CALLED EIGHT RUNS `blocked_ci` AND
 SEVEN OF THEM HAD ALREADY MERGED.**
 11 runs declared over a **~6.1-hour** window (marker 2026-09-02T12:29:28.431Z = epoch
 `1788352168431`; newest ledger row 2026-09-02T18:36:21.138Z), costing **$62.200** — **$5.655/run,
@@ -621,17 +625,9 @@ re-registered, never dropped.**
 | R44-7 | **★ P66's BAR, QUOTED FROM P66's OWN ENTRY (rule 27)** — *an in-window merge on a NON-`run-*` head ref that names a `W1-T####` id — in its branch name, in a `plan/tasks.d/` file it changes, or in its trailer — for which the run lane ALSO merged a run in the same window* (**this cycle: 2 — #3687 names W1-T2717 in its branch and #3688 merges that run 45 minutes later; #3682 names W1-T2711 and #3684 merges that run 57 minutes later**) | **the count is STATED and each member's ID SOURCE is named (branch / changed shard / trailer)** | **SCORABLE OUT-OF-BAND** (rule 4). **TIE-BREAK:** a stated zero is a HIT only if both the changed-file lists AND the bodies of the non-`run-*` merges were read; a zero from branch names alone is UNRESOLVABLE. **RULE-17 EXCLUSION, NAMED:** a `plan/*` filing branch naming an id NO run lane touched in the window is the plan lane's own deliverable and can never be a member. **★ SECOND ARM, STILL RECORDED AND NOT SCORED:** count non-`run-*` merges whose title or body names another in-flight PR by number. |
 | R44-8 | **★ P67's BAR, RE-REGISTERED AFTER AN UNRESOLVABLE (rule 27)** — *an in-window merge, from ANY lane, after which one or more REQUIRED checks were red on `main` itself until a LATER merge repaired them* (**this cycle: UNREAD. Two `fix/*` merges landed — #3677, #3683 — which is P67's founding shape, but `main`'s post-merge check state was not read, so no count is claimed**) | **the count is STATED and each member names its REPAIRING merge and its RED INTERVAL** | **SCORABLE OUT-OF-BAND** (rule 4): read `main`'s check state around each in-window merge, or read the repairing PR's own body where it states the measurement. **TIE-BREAK:** a stated zero is a HIT only if `main`'s post-merge check state was actually READ; a zero from "no repair PR was noticed" is UNRESOLVABLE. **★ THE ROW IS RE-REGISTERED RATHER THAN DROPPED, AND THE REASON IS STATED:** R43-8's UNRESOLVABLE was caused by this rung not performing the read, not by the world; a row that goes unresolvable through the author's own omission is the last row that may be retired. |
 | R44-9 | **★ P68's BAR, REGISTERED VERBATIM AT MINT (rule 15)** — *a run whose recon reports, in its own follow-up harvest, that it had no task record to scope against; or, once the marker ships, a run whose ledger row carries `dispatch.task_record: absent`* (**this cycle: 5 of 11 — W1-T2613, T2619, T2623, T2625, T2629; and 5 of 11 report the opposite explicitly — T2617, T2618, T2620, T2621, T2628**) | **the count is STATED and each member is quoted, not paraphrased** | **SCORABLE FROM THE GATHER's own follow-up-harvest section.** **TIE-BREAK:** harvest prose is VOLUNTARY, so any count from prose alone is a **FLOOR on the class and never its size** — no rank and no scope may be sized on it (DR-11). **A zero from prose alone is UNRESOLVABLE, not a HIT.** **CONSEQUENCE:** a zero WITH the `dispatch.task_record` marker present folds P68 into P46; a zero WITHOUT it is P48's shape and is recorded. |
-**R43's pre-registrations, SCORED (P43(iii)'s calibration line — FOUR HITS plus ONE ON A DECLARED
-BOUNDARY, TWO MISSES, ONE UNRESOLVABLE; and the row that matters is the one this rung made unresolvable
-by its own omission.)**
-**★★ R43-1 HIT — P65's BAR READS FIVE, ITS LOWEST, AND EVERY FILE LIST WAS READ.** #3637
-(`main-health-rung.ts`, `run-task.ts`, `main-health-wiring.test.ts`), #3640 (`worker-containment.ts`,
-`worker-provider.ts`, `worker.ts`, `run-task.ts`, `daemon.test.ts`), #3616 (`mount-headroom-sweep.mjs` +
-a test), #3677 and #3683 (test-only `fix/*` merges) change `src/**` or `test/**` on head refs that are
-neither `run-*` nor plan-filing-only, out of 36 hand-named merges. The falsifier did NOT fire: none
-carries a `Remudero-Task` trailer the union credits. **The class fell 12 → 5 and DID NOT REACH ZERO, so
-the mount freeze's release condition survives its first stress test and is NOT moved** — rule 11 forbids
-sizing this row on the fall, and R44 does not.
+**R43's pre-registrations, SCORED:** four hits (one at the boundary), two misses and one unresolvable.
+**R43-1 HIT:** P65 fell 12 → 5 but did not reach zero, so the mount-freeze condition remained; its
+canonical bar and R44 evidence remain above.
 **★★ R43-2 HIT — THE SEAM READS TEN, ONE BACKWARD STRADDLER, ONE FORWARD, AND A COMPLETE PARTITION.**
 Uncredited in-window `run-W1-*` merges: **10**. Decoding to a run start before the marker: **1**
 (#3629/W1-T2610 — the very PR R43 recorded as open in-flight residue). In-window runs ending with an
@@ -781,6 +777,11 @@ FILES, never by prefix.
 
 Shipped arcs, keyed by Remudero-Task (Standing rule 13: the proof is a MERGED PR, not prose).
 Newest first. Cost/turns from the run ledger.
+
+### RETRO-1788401594504 (2026-09-03) — merge-credit reconciliation and plan-health follow-through
+
+- **W1-T2624** — worktree-base recon landed as [PR #3718](https://github.com/craigoley/remudero/pull/3718) · $5.071 · 0 turns.
+- **W1-T2634** — plan-health whole-corpus linting landed as [PR #3746](https://github.com/craigoley/remudero/pull/3746) · $6.312 · 0 turns.
 
 ### RETRO-1788374498685 (2026-09-02) — eight `blocked_ci` verdicts, seven of them already merged: the dispatch-only decline, the self-referential follow-up refusal, the canonical-checkout drift measure, the DECLINE-verdict census, the gate-release condition, the worktree ledger fields, the reap-branches split, the base-record reap & the divergence cause: W1-T2613–T2629 (3 credited / 10 by union / 20 in-window `run-W1-*` merged)
 
@@ -1611,7 +1612,16 @@ i.e. the plan's OLDEST entries were its most verbose. Ids/PRs/costs/turns preser
 - **THE FIRST GREEN LOOP — 3 tasks** (WS-0 spike/#1 $0.86, 7/7 verdicts GREEN, ground truth in FIELD
   FINDING 10 · SB-HELLO/sandbox#2 $0.41 · CI-GREEN-PROBE/#5 $0.44)
 
-## Calibration (observed — through RETRO-1788374498685, 2026-09-02)
+## Calibration (observed — current R45 first; prior-cycle evidence follows)
+
+**RETRO-1788401594504 (2026-09-03) — observed task-type calibration.** This is the deterministic gather's table, retained as an observed routing input; zero turns means no usable turns/merge measurement, not zero effort.
+
+| task_type | runs | merged | avg $ | avg turns | total $ |
+|---|---|---|---|---|---|
+| implement | 9 | 2 | $4.051 | 0 | $36.456 |
+| triage | 1 | 0 | $0.000 | 0 | $0.000 |
+
+**Prior-cycle calibration — through RETRO-1788374498685, 2026-09-02.**
 
 The empirical baseline **mounts.yaml (W1-T5, shipped #42; risk/class routing since W1-T167/#606)** and
 Flight-control burn-rate signals (§4B Layer 1, BUILT — W1-T20/#132) key off.
@@ -1763,6 +1773,8 @@ $1.258–$10.650, 14.7–86.6t — R8 churn-poisoned by the W1-T1 spin loop and 
 `NEXT (L2)` ranking in NET STATE was DELETED, not folded).** `P47 > P67 > P68 > P65 > P66 > P64 > P63 >
 P62 > P57 > P60 > P61 > P56 > P58 > P59 > P40 > P43 > P53 > P54 > P48 > P50 > P52 > P38 > P49 > P55 >
 P33 > P42 > P46 > P39 > P45 > P44 > P26`
+
+**★ R45 RETRO PROPOSALS — FAILURE MINING (PROPOSALS ONLY): no new proposal minted this cycle; highest prior was P68.** The four gate-side `blocked_ci` merges route to **P47**'s credit golden, rather than a second credit id. The actionable remedy-bound cases, W1-T2630 (`docs/docs-index.json`) and W1-T2633 (`scripts/source-size-baseline.json`), route to **P63**'s existing gate/scope golden: seed a required check whose prescribed remedy is outside `files:` and require a declared-scope widening or dedicated companion task before counting it as a task failure. The two containment denials are host signals, not proposal members.
 *(**ONE MOVE. P68 is R44's mint and enters at rank 3**, directly beneath P67 and above P65. The
 placement argument is about WHERE THE COST LANDS, not about size: **P65 and P66 concern work the
 instruments cannot SEE; P67 concerns a fact the instruments saw and read too early; P68 concerns work

@@ -1,0 +1,83 @@
+- id: W1-T2751
+  title: "a review materializes the mutable source branch instead of GitHub's read-only PR head ref, so a legitimate branch update can make every event-driven review refuse the same green PR as a stale checkout"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 24.00
+  risk: high
+  files:
+    - src/run-task.ts
+    - test/run-task.test.ts
+    - test/a-review-materializes-the-exact-pr-head.test.ts
+    - test/the-reviewer-reads-a-sha-it-has-not-fetched.test.ts
+  origin: "oper#pr-3766-exact-head-materialization-2026-09-03"
+  plan_refs: ["W1-T185", "W1-T232", "W1-T233"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THIS BLOCKED A READY REVIEW ON PR #3766. At 2026-09-03T03:12:16Z the Azure ledger recorded
+    that the review worktree materialized at 2cf0728a while the PR input was 4f6fe547, then safely
+    refused to post a verdict. Independent live reads reproduced both sides: GitHub's pull-request
+    REST response and `refs/pull/3766/head` named 4f6fe547, while the mutable source branch
+    `refs/heads/codex/W1-T2748-codex-review-nonrepo-plan` named 2cf0728a. The latter is a legitimate
+    descendant merge commit whose parents are the PR head and a newer main. CI was green, but the
+    review lane could not start against the exact input GitHub still assigned to the PR.
+
+    THE SAFETY CHECK WORKED; THE MATERIALIZATION SOURCE DID NOT. `runReview` reads the PR head SHA
+    from GitHub. `materializeReviewWorktree` then calls `git fetch origin` and creates its detached
+    worktree from `origin/<headRefName>` — a different, mutable namespace — before comparing the
+    resulting tip with the REST SHA. W1-T232 deliberately makes a mismatch throw rather than post
+    a false verdict, and that fail-closed rule must remain. Repeating the same two inconsistent
+    reads cannot clear the PR.
+
+    GITHUB ALREADY OWNS THE EXACT INPUT REF. GitHub's current pull-request documentation says it
+    creates a temporary, read-only `refs/pull/<number>/head` ref for each PR, and its checkout
+    documentation specifies `git fetch origin pull/<number>/head:<local-branch>` when the source
+    branch is inactive. On the live #3766 reproduction, that hidden ref is the one Git ref that
+    exactly matches the PR head SHA consumed by the reviewer. It also lives in the base repository,
+    so the materializer does not have to assume a same-repository source branch exists under
+    `origin/<headRefName>`.
+
+    THIS IS NOT AUTHORITY TO REVIEW A MOVED INPUT. The caller's supplied head SHA remains the
+    binding value. Fetch the PR-head ref to make that object available, materialize the detached
+    worktree at the supplied SHA, and retain the existing post-materialization equality assertion.
+    If the PR ref is absent, unreadable, or no longer makes the supplied object available, return
+    the existing named materialization failure and post no fabricated PASS.
+  design: |
+    Change the review materializer's fetch seam to accept the PR number and fetch
+    `refs/pull/<number>/head`, without creating or resetting a local source branch. Add the detached
+    worktree at the exact `headSha` the REST reader already supplied, not at
+    `origin/<headRefName>`. Keep `headRefName` only where other review evidence needs it; it is no
+    longer checkout authority.
+
+    Preserve W1-T232's exact-tip assertion and W1-T233's teardown ownership on every success,
+    ordinary failure, and thrown mismatch. The production fetch must remain argv-based and quiet;
+    it must not use a shell or write a reusable branch ref. Drive the real Git behavior with a bare
+    origin fixture containing a read-only PR-head ref and a deliberately divergent named branch.
+  acceptance:
+    - claim: "a review worktree is created at the supplied PR head SHA when `refs/pull/<number>/head` matches it, even when the named source branch points to a different commit"
+      proof: "unit test: test/a-review-materializes-the-exact-pr-head.test.ts"
+    - claim: "review materialization fetches GitHub's PR-head ref by pull-request number and does not use the mutable source branch as checkout authority"
+      proof: "unit test: test/a-review-materializes-the-exact-pr-head.test.ts"
+    - claim: "a missing or unreadable PR-head ref remains a named fetch failure and never falls back to reviewing an arbitrary local or source-branch tip"
+      proof: "unit test: test/a-review-materializes-the-exact-pr-head.test.ts"
+    - claim: "the existing exact-tip mismatch refusal and worktree teardown behavior remain fail-closed"
+      proof: "unit test: test/a-review-materializes-the-exact-pr-head.test.ts"
+  falsifier: |
+    Close this without implementation if a fresh authenticated GitHub read and a direct
+    `ls-remote` show that `refs/pull/3766/head` does not match the PR head SHA, or if the production
+    materializer already fetches that ref and creates the worktree at the supplied SHA. Either
+    result would invalidate the proposed source of truth.
+
+    Re-design rather than weakening the equality assertion if GitHub cannot supply the hidden ref.
+    A missing review is safer than a PASS posted against code other than the PR head.
+  note: |
+    ID PROVENANCE: `rmd next-task-id --reserve` measured max 2750 across the merged plan, open PRs
+    and plan history, then atomically created `refs/rmd-id/W1-T2751` on origin in one attempt. This
+    shard uses the id the command reported as held.
+
+    PRIMARY-SOURCE CHECK: GitHub's current "About pull requests" and "Checking out pull requests
+    locally" documentation were checked on 2026-09-03. The implementation contract uses only the
+    documented read-only PR-head ref; it does not depend on undocumented REST caching behavior.

@@ -1,0 +1,113 @@
+- id: W1-T2749
+  title: "a feedback landing is never acknowledged in the daemon's local queue — the byte-identical untracked copy survives until triage changes the upstream status, then the next freshness restart cannot check out main and exhausts Docker's bounded restart budget"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  risk: high
+  files:
+    - src/lib/feedback-landing.ts
+    - test/a-landed-feedback-file-remains-in-the-boot-checkout.test.ts
+    - scripts/source-size-baseline.json
+  origin: "oper#feedback-landing-local-ack-2026-09-03"
+  plan_refs: ["W1-T243", "W1-T530", "W1-T1054"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THIS CAUSED A FIVE-RESTART OUTAGE ON THE AZURE DAEMON. The boot checkout was at 653fbdd2 and
+    held exactly one untracked path,
+    `plan/feedback/fb-repair-blocked-fixable-2957.yaml`, with blob cfc417c9. `origin/main` advanced
+    to 2b43bcee and tracked the same path with blob 415cbf66. The entrypoint correctly reported that
+    the incoming path had DIFFERENT bytes, refused the checkout five times, and Docker's `on-failure`
+    restart budget stopped the container at exit 1. STOP, PAUSE, drain.lock and OOM were all absent.
+    Recovery required preserving that exact local file outside the checkout and running the
+    operator-approved `rmd-recycle.sh` wrapper.
+
+    THE LOCAL FILE WAS ALREADY DURABLE BEFORE IT BECAME DIFFERENT. The git history is the decisive
+    join. PR #3751 merged commit 0e7d4a69 at 01:28:39Z and added this path with the SAME cfc417c9
+    blob that remained untracked locally. At 01:40:12Z the daemon ran its level-triggered
+    `feedback.landing_sweep`; it reported `pushed:false, landed:false, file_count:0` and left the
+    byte-identical local copy in place. Auto-triage then opened PR #3762, which changed the tracked
+    entry to `status: rejected` and added `answered_by: null`; that merged as 2b43bcee at 01:50:52Z.
+    At 01:58:14Z self-freshness detected the moved main and exited 75. The stale local `status:new`
+    file then collided with the newer tracked terminal state on every boot.
+
+    W1-T1054'S FAIL-CLOSED ENTRYPOINT RULE IS CORRECT AND MUST NOT BE WEAKENED. It permits removal
+    only when an incoming commit adds the exact path with byte-identical content, and its acceptance
+    explicitly requires a differing local file to refuse. That rule protects unique uncommitted
+    work. Expanding it to discard any old-looking feedback bytes at boot would both contradict the
+    shipped task and put queue semantics into the image bootstrap. W1-T1054 names the real follow-up
+    directly: teaching `landFeedback` to clean up after itself is a separate candidate. This task is
+    that candidate.
+
+    THE MISSING OPERATION IS A QUEUE ACKNOWLEDGEMENT, NOT FEEDBACK DELETION. `captureFeedback`
+    writes an untracked local file because `landPending` uses that tree as its durable retry queue.
+    Once a fetched `origin/main` tracks the exact same bytes, that local queue copy contains no
+    unique information: the durable feedback record remains on main and in git history. The current
+    `landPending` computes this equality only to exclude the path from `unlanded`; it never removes
+    it. Every `rmSync` in `feedback-landing.ts` targets a scratch directory. The queue therefore has
+    enqueue and submit operations but no acknowledgement.
+
+    THE SAFETY PREDICATE IS ALREADY SETTLED. Reuse the byte-exact predicate W1-T1054 cites: an
+    UNTRACKED path under `plan/feedback/**` is removable only after the current call fetched
+    `origin/main`, resolved a readable blob at that exact path, and `git hash-object` proved the
+    local bytes identical. A tracked path is never a queue copy and must never be removed. A missing,
+    unreadable, or different remote blob leaves the local path untouched and eligible for the
+    existing landing path. No status name is trusted; equality is the authority.
+
+    THE REVERSE-WRITE RISK IS ALSO CLOSED BY THE SAME ACK. If the stale local `status:new` copy had
+    survived until another landing sweep after #3762 merged, the current `localSha !== remoteSha`
+    rule would classify it as unlanded and rebuild `feedback-landing` with the older bytes, proposing
+    a reversal of the terminal status. The 01:58 freshness exit happened before that later sweep in
+    this incident, so no reverse-write was observed; the source makes it reachable. Removing the
+    byte-identical queue copy at the 01:40 acknowledgement point prevents both the later boot
+    collision and that stale-authority path.
+  design: |
+    In `landPending`, enumerate only Git-untracked files under the landing kind's owned feedback
+    directory after the existing fetch. For each, resolve `origin/main:<path>`, require the blob to
+    be readable, compare it to `git hash-object <local path>`, and unlink only on exact equality.
+    Perform this acknowledgement before the existing whole-inbox unlanded scan, so the remainder
+    retains today's force-push/open-or-reuse behavior byte-for-byte. Do not inspect or alter tracked
+    files, do not infer from feedback status, and do not widen entrypoint cleanup.
+
+    Extend `LandFeedbackResult` with bounded acknowledgement evidence and have
+    `sweepFeedbackLanding` ledger a count on every pass plus the exact paths only when it actually
+    acknowledges one or more. Never record file content. Preserve best-effort behavior: a path that
+    cannot be proved redundant stays in place and landing continues; one unreadable comparison must
+    not suppress unrelated pending files.
+
+    The strict-TDD fixture must drive a real local repository and bare origin. First prove the
+    pre-fix red state: after the landing commit reaches origin/main, a sweep leaves the untracked
+    file behind. Then require the sweep to remove only that identical untracked copy. Advance main
+    with a different terminal version at the same path and prove the boot checkout can fast-forward
+    because no collision remains. Add independent controls for a differing untracked file, a path
+    absent upstream, a tracked feedback file, and one unreadable remote comparison.
+  acceptance:
+    - claim: "a level-triggered feedback landing sweep acknowledges and removes an untracked local queue file only after fetched `origin/main` tracks byte-identical content"
+      proof: "unit test: test/a-landed-feedback-file-remains-in-the-boot-checkout.test.ts"
+    - claim: "after acknowledgement, a later upstream status change at the same path can fast-forward into the boot checkout without an untracked-file collision"
+      proof: "unit test: test/a-landed-feedback-file-remains-in-the-boot-checkout.test.ts"
+    - claim: "a differing, absent-upstream, unreadable, or tracked feedback path is never removed by the acknowledgement pass"
+      proof: "unit test: test/a-landed-feedback-file-remains-in-the-boot-checkout.test.ts"
+    - claim: "unacknowledged files retain the existing landing-branch and PR behavior rather than being dropped from the durable retry queue"
+      proof: "unit test: test/a-landed-feedback-file-remains-in-the-boot-checkout.test.ts"
+    - claim: "an acting acknowledgement emits bounded telemetry with count and paths but no feedback content, while a quiet pass emits count only"
+      proof: "unit test: test/a-landed-feedback-file-remains-in-the-boot-checkout.test.ts"
+  note: |
+    ID PROVENANCE: after W1-T2748 was reserved and appeared in the open plan PR, `rmd next-task-id
+    --reserve` minted and atomically created `refs/rmd-id/W1-T2749` on origin in one attempt. This
+    shard uses the id the command reported as held.
+
+    OBSERVED VERSUS REACHABLE: the five-restart failure, exact blobs, landing/triage commits, sweep
+    timestamps and recovery are observed from Azure state, the ledger and git. The stale reverse
+    write did not occur before the process exited; it is a source-proven reachable consequence and
+    is labeled as such in the rationale rather than reported as an incident fact.
+
+    Scope correction, 2026-09-03. The strict-TDD implementation adds the designed acknowledgement
+    predicate, result evidence and telemetry to `src/lib/feedback-landing.ts`. The source-size
+    ratchet measured that deliberate change at 820 lines against the recorded 735-line ceiling and
+    requires the next 1,000-line bucket in `scripts/source-size-baseline.json`. That generated size
+    ledger is therefore mechanically required implementation scope; declaring it here prevents an
+    otherwise-correct worker from either failing CI or pushing an undeclared path.

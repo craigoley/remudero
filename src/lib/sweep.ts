@@ -5784,7 +5784,9 @@ const detachedSweepActions = new Set<Promise<void>>();
 /**
  * W1-T2379: hand a started action to {@link detachedSweepActions} so the caller need not await
  * it. The promise stored is ALREADY settled-safe (its rejection is caught here), so a drain can
- * never itself reject. Returns nothing — a caller that wants the outcome must await the original.
+ * never itself reject. The registry owns it until its own settlement; changing daemon phases
+ * does not change that lifetime. Returns nothing — a caller that wants the outcome must await
+ * the original.
  */
 function detachSweepAction(work: Promise<unknown>): void {
   const held: Promise<void> = work.then(
@@ -5796,10 +5798,11 @@ function detachSweepAction(work: Promise<unknown>): void {
 }
 
 /**
- * W1-T2379 — LET WORK ALREADY IN FLIGHT FINISH RATHER THAN ABORTING IT, which is the property
- * `startInFlightTicker`'s `stop()` has always had and which detaching a wait must not cost.
- * Awaits every action detached by {@link runSweepLightPass} and settles once they all have.
- * Safe to call when nothing is detached (resolves immediately) and safe to call twice.
+ * W1-T2379 — LET WORK ALREADY IN FLIGHT FINISH RATHER THAN ABORTING IT. Awaits every action
+ * detached by {@link runSweepLightPass} and settles once they all have. W1-T2744: this is an
+ * explicit daemon-lifetime/test seam, never part of a phase-local ticker's stop — the registry
+ * itself retains every action while a phase transition keeps the review clock live. Safe to call
+ * when nothing is detached (resolves immediately) and safe to call twice.
  */
 export async function drainDetachedSweepActions(): Promise<void> {
   while (detachedSweepActions.size > 0) {
@@ -5807,8 +5810,8 @@ export async function drainDetachedSweepActions(): Promise<void> {
   }
 }
 
-/** W1-T2379: how many detached actions are still in flight. Test-facing only — no production
- *  reader branches on this; the ticker awaits {@link drainDetachedSweepActions} instead. */
+/** W1-T2379/W1-T2744: how many detached actions are still in flight. The daemon heartbeat reports
+ *  this bounded count for observability; no production reader branches on it. */
 export function detachedSweepActionCount(): number {
   return detachedSweepActions.size;
 }
