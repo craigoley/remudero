@@ -1,0 +1,6 @@
+{"type":"thread.started","thread_id":"sanitized-azure-codex-0.152.0-isolation-probe"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I’ll first inspect and read the checkout’s `CLAUDE.md` and `AGENTS.md` instruction files using Bash, then run the four requested probe commands in order without changing anything."}}
+{"type":"item.completed","item":{"id":"item_5","type":"agent_message","text":"No checkout or `CLAUDE.md`/`AGENTS.md` files are present under `/tmp` in this worker, so there were no repository instructions to apply. I’m running the four probe commands now, in the specified order."}}
+{"type":"item.completed","item":{"id":"item_7","type":"agent_message","text":"REPORT\naliases: 0\nfunctions: 0\nalias_names: -\nfunction_names: -"}}
+{"type":"turn.completed","usage":{"input_tokens":110855,"cached_input_tokens":98816,"cache_write_input_tokens":0,"output_tokens":1130,"reasoning_output_tokens":448}}
