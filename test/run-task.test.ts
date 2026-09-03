@@ -2411,21 +2411,9 @@ test("W1-T232: materialization SUCCEEDS (no collision) while another real worktr
 
 test("W1-T2751: an unreadable supplied SHA fails closed during real worktree creation — no arbitrary ref is reviewed", () => {
   const { originDir, localDir } = gitFixture();
-  execFileSync("git", ["-C", localDir, "checkout", "-q", "-b", "moving-branch"]);
-  execFileSync("git", ["-C", localDir, "push", "--quiet", "origin", "moving-branch"]);
-  const advertisedHead = execFileSync("git", ["-C", localDir, "rev-parse", "moving-branch"], {
-    encoding: "utf8",
-  }).trim();
+  const advertisedHead = execFileSync("git", ["-C", localDir, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
   execFileSync("git", ["-C", originDir, "update-ref", "refs/pull/502/head", advertisedHead]);
-  execFileSync("git", ["-C", localDir, "checkout", "-q", "main"]);
-
-  const config = drainFixtureConfig();
-  const result = materializeReviewWorktree(
-    config,
-    localDir,
-    502,
-    "0000000000000000000000000000000000000000",
-  );
+  const result = materializeReviewWorktree(drainFixtureConfig(), localDir, 502, "0000000000000000000000000000000000000000");
   assert.equal(result.worktreePath, undefined);
   assert.equal(result.failure?.errorClass, "other");
   assert.match(result.failure?.message ?? "", /invalid reference/);
