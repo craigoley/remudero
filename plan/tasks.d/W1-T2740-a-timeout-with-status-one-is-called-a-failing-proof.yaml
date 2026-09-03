@@ -1,0 +1,81 @@
+- id: W1-T2740
+  title: "A TIMEOUT THAT RETURNS STATUS ONE IS CALLED A FAILING PROOF — a partial Node TAP stream with passing subtests but no final summary hard-blocks a green PR as `executed_fail`"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 12.00
+  files:
+    - src/lib/review.ts
+    - test/pure-proof-incomplete-run.test.ts
+  origin: "operator-session#pr-3719-proof-timeout-2026-09-02"
+  plan_refs: ["W1-T65", "W1-T112", "W1-T1077", "W1-T2728"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON PR #3719, HEAD 51d4958b, THEN REPRODUCED ON THE AZURE REVIEW HOST. The
+    `unit test: test/retro-marker-atomic.test.ts` proof was posted as `executed_fail`, while the
+    identical checkout completed all 33 tests successfully when allowed to finish in 127 seconds.
+    Running that same command through a 60-second `execFileSync` limit produced this error shape:
+    `status: 1`, `signal: null`, no `not ok` lines, and no final TAP summary. That is an incomplete
+    execution, not evidence that any test failed.
+
+    THE MISCLASSIFICATION IS AT ONE BRANCH. `execWhitelistedProof` throws only when the child error
+    has no numeric status. Node can reap a timeout-killed test process with numeric status one, so
+    the code enters its clean-nonzero branch. For a pure-path test, it recognizes only the narrower
+    W1-T1077 runtime-broken shape where every `not ok` line names the file wrapper. A timeout after
+    several passing subtests has no `not ok` line at all. It therefore falls through to `return
+    "fail"`, and `judgeCriterion` turns that into a binding `executed_fail` that overrides all
+    other evidence.
+
+    THE FINAL SUMMARY IS ALREADY THE REPOSITORY'S COMPLETION SIGNAL. `hasFinalSummary` exists for
+    name-filtered tests and documents that Node writes `# duration_ms` once, only after the suite
+    completes. The pure-path branch does not consult it. The observed timeout stream contains real
+    passing TAP results but no final summary; a natural failing run contains a real `not ok` and a
+    final summary. Reuse that distinction rather than guessing from `status`, `signal`, elapsed
+    wall time, or platform-specific timeout metadata.
+
+    THIS IS A REVIEW-GATE CORRECTNESS FIX, NOT A REQUEST TO RAISE THE TIMEOUT. A larger timeout
+    would delay every genuinely hung proof and eventually reproduce the same false verdict on a
+    slower file. The timeout remains a bound. Its expiry must yield an inconclusive execution
+    result, never a claim that code failed.
+  design: |
+    Add one pure-path TAP classifier beside the existing wrapper-name classifier. A nonzero test
+    run that emitted at least one real TAP result but no final summary is incomplete and throws to
+    `judgeCriterion`; it must be recorded as a named proof-skip/exec-error state and must never
+    become `executed_fail`. Keep the diagnostic bounded to a discriminator and result count, never
+    captured stdout.
+
+    Preserve the two hard-failure boundaries. A completed TAP run containing a real failing
+    subtest still returns `"fail"`. A missing test path, which emits no TAP result at all, still
+    returns `"fail"`; absence is not reclassified as a timeout. A complete passing run remains
+    `"pass"`.
+
+    Do not change `proofTimeoutMs`, do not special-case PR #3719 or its test path, and do not retry
+    an incomplete proof inside one review. The next GitHub event or ordinary recovery sweep may
+    review the same unchanged head again; this task only makes each individual observation honest.
+  acceptance:
+    - claim: "a pure-path test returning nonzero after emitting passing TAP results but before its final summary is inconclusive and never grades executed_fail"
+      proof: "unit test: test/pure-proof-incomplete-run.test.ts"
+    - claim: "the incomplete-run outcome is recorded by name without persisting captured TAP output"
+      proof: "unit test: test/pure-proof-incomplete-run.test.ts"
+    - claim: "a completed run with a genuine failing subtest still grades executed_fail"
+      proof: "unit test: test/pure-proof-incomplete-run.test.ts"
+    - claim: "a missing pure-path test that emits no TAP result remains a hard failure"
+      proof: "unit test: test/pure-proof-incomplete-run.test.ts"
+    - claim: "the proof timeout policy and complete-pass behavior are unchanged"
+      proof: "unit test: test/pure-proof-incomplete-run.test.ts"
+  falsifier: |
+    Close without implementation if a fresh Azure run of the exact PR #3719 proof now finishes
+    inside `proofTimeoutMs`, or if `execFileSync` reports the timeout without a numeric status. The
+    measured run instead took 127 seconds and its 60-second kill reported numeric status one. Also
+    close if the partial stdout carries Node's final `# duration_ms` summary; it did not, while the
+    unrestricted passing run did.
+  note: |
+    W1-T2740 was atomically reserved at `refs/rmd-id/W1-T2740`. The advisory mint named W1-T2739,
+    which another fleet caller already held; the allocator advanced and returned the id actually
+    held. This task changes the shared reviewer and therefore uses `risk: high` with
+    `band_meaning: span` even though the implementation is intentionally small.
