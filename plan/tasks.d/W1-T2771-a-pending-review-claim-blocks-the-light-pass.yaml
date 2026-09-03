@@ -1,0 +1,58 @@
+- id: W1-T2771
+  title: "A full sweep claims a green PR before it starts the review, so any later slow action holds the key while every light pass rejects that PR and lets it monopolize the one spawning admission"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 20.00
+  files:
+    - scripts/source-size-baseline.json
+    - src/lib/sweep.ts
+    - test/event-review-backlog-drain.test.ts
+    - test/review-admission-dedup.test.ts
+    - test/review-claim-timing.test.ts
+  origin: "operator-session#green-review-queue-wedged-2026-09-03"
+  plan_refs: ["W1-T513", "W1-T1049", "W1-T2379", "W1-T2582", "W1-T2584"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON AZURE, daemon run DAEMON-1788435477771. The daemon stayed alive and its light
+    sweep kept ticking, but PR #3787 was classified `post-review` and then rejected as `duplicate
+    review key ... already claimed` from 12:32:53Z onward. No `sweep.post_review.attempt`,
+    `review.pending_posted`, or `review.posted` row existed for that PR. Every other green PR was
+    refused because #3787 won the light pass's one spawning admission.
+
+    The full sweep that held the claim was triggered at 12:27:45Z. It later spent 303 seconds and
+    850 seconds in two fix-dispatch attempts for PR #3784, hit the 559-second sweep wall-clock
+    bound at 12:37:14Z, and continued executing behind the bound. Twenty-two subsequent full-sweep
+    retriggers were correctly rejected as concurrent, but the abandoned promise retained #3787's
+    review key because `runSweep` adds every review key during the sequential PR walk and does not
+    start the review pool until the entire walk finishes.
+
+    Claim at action time instead. A review worker must atomically check and add the module-level
+    key immediately before it starts that job, then re-read the outcome ledger while holding the
+    claim. The fresh read is load-bearing: a light pass may review the same input while an older
+    full sweep is stalled before its pool; when the full sweep later reaches the job, its original
+    pass-level ledger snapshot is stale and must not cause a second review. Release on every
+    settle/refusal exactly as today. An unstarted continuation-gated tail owns no claim and must
+    never delete a claim held by another concurrent pass.
+
+    This does not widen `reviewLanes`, the light-pass admission bounds, provider/model routing,
+    verdict policy, merge policy, STOP/PAUSE, or daemon lifecycle control. Claude and Codex use
+    the same post-review effect after admission and are unchanged.
+  acceptance:
+    - claim: "a full sweep stalled after discovering a reviewable PR does not stop a concurrent light pass from starting that PR's review"
+      proof: "unit test: test/review-claim-timing.test.ts"
+    - claim: "when the light pass records the review outcome, the stale full sweep re-reads that outcome at action time and never posts a second review"
+      proof: "unit test: test/review-claim-timing.test.ts"
+    - claim: "two callers that reach action time together still start at most one review for an exact input"
+      proof: "unit test: test/review-claim-timing.test.ts"
+    - claim: "a continuation-gated unstarted job releases no other pass's review claim and remains eligible on the next pass"
+      proof: "unit test: test/review-claim-timing.test.ts"
+  falsifier: |
+    Do not build this if a captured ledger row shows `sweep.post_review.attempt` for #3787 before
+    the first duplicate-key refusal, or if the key is held by an actively running #3787 reviewer.
+    Neither is true in the live incident: the positive controls are the completed attempt/done
+    pairs for #3785 and #3786, while #3787 has zero attempt rows.
