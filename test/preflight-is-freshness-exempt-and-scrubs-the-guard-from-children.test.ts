@@ -209,7 +209,19 @@ test("W1-T2769: checkCliFreshness in a spawned child still REFUSES a diverged ch
     "process.stdout.write(r.status);",
   ].join("\n");
   try {
-    const r = defaultPreflightSpawn("npx", ["tsx", "-e", childScript], { cwd: REPO_ROOT });
+    // W1-T2769: CI/GITHUB_ACTIONS CLEARED in the child's env, deliberately. `checkCliFreshness`
+    // checks `isCiEnv` BEFORE ever reading the guard var or touching `deps.git` — a correct,
+    // unrelated short-circuit for the real production path (a CI checkout is always "diverged"
+    // by design, see self-sync.ts). `defaultPreflightSpawn` merges `process.env` forward, so
+    // running THIS test inside an actual GitHub Actions runner (as CI itself does) leaks real
+    // `CI=true`/`GITHUB_ACTIONS=true` into the child and makes it return `guarded` off that
+    // earlier check, never reaching the fake `git` dep this test constructs at all — masking the
+    // one path this test exists to prove, only when run in CI. Clearing both here isolates the
+    // guard-var behavior under test from that unrelated, already-correct short-circuit.
+    const r = defaultPreflightSpawn("npx", ["tsx", "-e", childScript], {
+      cwd: REPO_ROOT,
+      env: { ...process.env, CI: "", GITHUB_ACTIONS: "" },
+    });
     assert.equal(r.status, 0, `child failed to run: ${r.stderr.slice(0, 800)}`);
     assert.equal(
       r.stdout.trim(),
