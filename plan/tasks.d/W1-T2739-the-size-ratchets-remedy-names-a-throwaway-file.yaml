@@ -5,7 +5,8 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  risk: medium
+  risk: high
+  band_meaning: span
   budget_usd: 8.00
   files:
     - scripts/source-size-ratchet.mjs
