@@ -1,0 +1,93 @@
+- id: W1-T2750
+  title: "a Codex write session creates `.git` metadata in the container-wide temporary root before its first model tool call, so later review proofs reject otherwise-safe fixture worker homes as tracked-tree placements and fail green PRs only on the daemon host"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: high
+  files: [src/lib/worker-provider.ts, test/a-codex-worker-uses-a-private-temporary-root.test.ts]
+  origin: "oper#codex-global-tmp-git-contamination-2026-09-03"
+  plan_refs: ["W1-T115", "W1-T2633", "W1-T2748"]
+  status: queued
+  attempts: 0
+  rationale: |
+    ONE SUCCESSFUL CODEX SESSION CHANGES THE MEANING OF THE SHARED TEMPORARY TREE. In the running
+    Azure container, `/tmp/.git` is an empty directory owned by the runtime user. Its filesystem
+    birth time is 2026-09-03T02:17:49.547Z. The matching Codex 0.152.0 rollout's first durable
+    `session_meta` row is 2026-09-03T02:17:49.725Z, with cwd
+    `/home/node/Remudero/worktrees/run-RETRO-1788401594504`; the model's first tool call did not
+    occur until 02:17:55.564Z. The marker therefore appeared during Codex session initialization,
+    178ms before the session record and more than six seconds before model-authored code could run.
+    Earlier Codex capacity probes did not create it. This task does not attribute the behavior to
+    model output.
+
+    THE CONTAMINATION PRODUCES A REAL FALSE RED. PR #3766 changed only its W1-T2748 plan shard.
+    GitHub CI passed and the exact `test/worker-provider.test.ts` proof passed 35/35 on the operator
+    Mac. In the daemon container, the same test and source at main commit 3cb72307 passed 31/35;
+    four Claude-path fixtures failed with `WorkerHomePlacementError` because their mkdtemp homes
+    resolved below `/tmp/.git`. W1-T2633's guard is correct: any `.git` ancestor must refuse worker
+    home materialization. Removing or weakening that safety check would let credentials and rc
+    files enter a tracked tree. The shared temp root is the broken upstream input.
+
+    THE ADAPTER CURRENTLY FORWARDS THAT SHARED ROOT BY DESIGN. `codexSpawnEnv` in
+    `src/lib/worker-provider.ts` copies process-wide `TMPDIR` into every paid Codex worker. Unlike
+    the Claude path, the Codex early-return branch in `spawnWorker` does not materialize a per-run
+    worker home or any other private runtime scratch. Concurrent Codex workers therefore share one
+    temp namespace with Remudero's proof executor, test fixtures, and daemon hygiene. A provider
+    startup side effect can poison unrelated reviews after the provider itself exits.
+
+    THE BOUNDARY MUST BE PER WORKER, NOT A PERIODIC DELETE OF `/tmp/.git`. Deleting a shared path
+    while another Codex worker is live creates a race and makes ownership unknowable. Ignoring the
+    marker in worker-home placement weakens a credential boundary. Recycling happens to clear the
+    container filesystem but turns every successful Codex write session into a latent recycle
+    requirement. Instead, every Codex semantic, implementation, repair, retro, and inbox worker
+    should receive a unique Remudero-owned `TMPDIR` for its whole process-group lifetime, then reap
+    it after process teardown on success, provider error, spawn error, or clock timeout.
+
+    THIS IS INDEPENDENT OF THE W1-T2748 REVIEWER-CWD FIX. W1-T2748 supplies the narrow
+    `--skip-git-repo-check` intent for a read-only reviewer whose cwd is deliberately not a Git
+    worktree. This task isolates provider runtime scratch for every Codex worker. Neither change
+    moves the worker cwd, widens sandbox writes, alters Git administrative grants, changes model or
+    provider selection, or touches the Claude environment.
+  design: |
+    Wrap the real `spawnCodexWorker` lifecycle at the provider adapter boundary in one
+    `withTempDir("codex-worker", ...)` scope from `src/lib/tmp.ts`. Override `TMPDIR` in the child
+    environment with that unique directory after the ordinary environment allowlist is built, so
+    neither the parent process nor an `args.env` value can collapse concurrent workers back onto a
+    shared root. Keep `CODEX_HOME` unchanged: authentication, rollout persistence and resume state
+    are durable provider state, not temporary process scratch.
+
+    The private directory must exist before the contained Codex process is spawned and remain
+    present until the process group has completed its existing teardown. Reap it in the outer
+    lifecycle after every terminal path. Do not delete any path not created by this invocation and
+    do not add a global `/tmp/.git` cleanup sweep. Preserve the current argv, cwd, sandbox mode,
+    writable Git roots, JSONL parsing, timeout, and attribution behavior byte-for-byte.
+
+    Drive the real exported adapter with a fake contained process, not a paid model. The fake must
+    observe an existing, unique `TMPDIR`, create an empty `.git` beneath it to reproduce the pinned
+    runtime's measured startup side effect, and prove the process-wide temp root receives no such
+    marker. Cover overlapping spawns, fresh and resumed argv, normal completion, provider error,
+    synchronous spawn failure, and clock timeout. Assert each private tree survives through
+    teardown and is absent afterward. A control must prove `CODEX_HOME`, cwd, Claude routing, and
+    the caller's own environment remain unchanged.
+  acceptance:
+    - claim: "every fresh and resumed Codex worker receives an existing, unique, per-worker `TMPDIR`; overlapping workers never share it and the process-wide temporary root is not used"
+      proof: "unit test: test/a-codex-worker-uses-a-private-temporary-root.test.ts"
+    - claim: "a fake Codex startup that creates `.git` under its supplied `TMPDIR` cannot create `/tmp/.git` or change later worker-home placement outside that private tree"
+      proof: "unit test: test/a-codex-worker-uses-a-private-temporary-root.test.ts"
+    - claim: "the private Codex temporary tree remains present through existing process-group teardown and is removed afterward on success, provider error, synchronous spawn error, and clock timeout"
+      proof: "unit test: test/a-codex-worker-uses-a-private-temporary-root.test.ts"
+    - claim: "Codex argv, cwd, sandbox and Git grants, durable `CODEX_HOME`, provider/model/headroom routing, the Claude spawn environment, and the parent process environment are unchanged"
+      proof: "unit test: test/a-codex-worker-uses-a-private-temporary-root.test.ts"
+  note: |
+    ID PROVENANCE: `rmd next-task-id --reserve` printed advisory W1-T2749, observed that origin's
+    reservation namespace already held W1-T2749, then atomically created `refs/rmd-id/W1-T2750`
+    and reported W1-T2750 as the id actually held. The shard uses the held id, never the advisory.
+
+    CAUSATION BOUNDARY: the timestamps prove the empty marker appears during the Codex process's
+    initialization window and before any model tool call. A clean-container launch that watches
+    the marker boundary is still required as the post-implementation live falsifier; until then,
+    the upstream component inside that initialization path is not claimed more narrowly than the
+    pinned Codex worker runtime.
