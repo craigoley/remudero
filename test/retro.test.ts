@@ -956,6 +956,107 @@ test("mineFollowups: an entry matching an open task/proposal title is DEDUPED, n
   assert.deepEqual(mineFollowups(updated, openTitles), { candidates: [], deduped: [], harvestLines: [] });
 });
 
+// ── W1-T2638: refuse a decorative yaml `status:` flip at harvest ───────────────────────────────
+// The canonical fixture is the ORIGINATING entry: `followup:W1-T2477-1788105355034:...:0` asked
+// to sync plan/tasks.d/W1-T2473-*.yaml's `status:` from `queued` to `shipped` — the fourth
+// recurrence of a class W1-T367's rationale already refutes (dispatch eligibility and dependency
+// satisfaction are GitHub-derived, never yaml `status:`), text a follow-up harvest never reads.
+
+const CANONICAL_STATUS_FLIP_TEXT =
+  "sync `plan/tasks.d/W1-T2473-*.yaml` `status:` field from `queued` to `shipped` (PR #3304 " +
+  "already merged) — stale status could cause a scheduler to re-offer already-completed work or " +
+  "block dependents unnecessarily.";
+
+test("mineFollowups: a follow-up whose whole action is flipping a task's yaml status field to an out-of-vocabulary value is REFUSED at harvest and never becomes a candidate, while an ordinary work follow-up in the same batch still mints", () => {
+  const records = parseLedger(
+    [
+      `{"ts":"2026-08-30T15:58:59.564Z","run_id":"W1-T2477-1","task_id":"W1-T2477","step":"report.followups","entries":[{"type":"task","text":${JSON.stringify(
+        CANONICAL_STATUS_FLIP_TEXT,
+      )}},{"type":"task","text":"add a retry budget to the flaky upload probe"}]}`,
+    ].join("\n"),
+  );
+  const harvest = mineFollowups(records);
+  assert.equal(harvest.candidates.length, 1, "only the ordinary work entry mints a candidate");
+  assert.equal(harvest.candidates[0]!.text, "add a retry budget to the flaky upload probe");
+  assert.equal(harvest.deduped.length, 1, "the status-flip entry is refused via the existing dedup path");
+  assert.equal(harvest.deduped[0]!.text, CANONICAL_STATUS_FLIP_TEXT);
+});
+
+test("mineFollowups: a status-flip follow-up's recorded reason states the refutation and names the sanctioned correction remedy, rather than declining silently", () => {
+  const harvest = mineFollowups(
+    parseLedger(
+      `{"ts":"2026-08-30T15:58:59.564Z","run_id":"W1-T2477-1","task_id":"W1-T2477","step":"report.followups","entries":[{"type":"task","text":${JSON.stringify(
+        CANONICAL_STATUS_FLIP_TEXT,
+      )}}]}`,
+    ),
+  );
+  const reason = harvest.deduped[0]!.reason;
+  assert.ok(reason, "the deduped candidate carries a reason");
+  // States the refutation: both cited harms resolve through the GitHub-derived projection.
+  assert.match(reason!, /GitHub-derived/);
+  assert.match(reason!, /isDispatchEligible/);
+  assert.match(reason!, /MergedResolver|yamlStatusMerged/);
+  // Names the schema fail-close for the out-of-vocabulary value this fixture actually uses.
+  assert.match(reason!, /TASK_STATUSES/);
+  assert.match(reason!, /fail-closes/);
+  // Names the sanctioned remedy for a GENUINELY uncredited task.
+  assert.match(reason!, /rmd correct/);
+  assert.match(reason!, /W1-T75/);
+  // The harvest LINE carries the same reason, not just the in-memory candidate.
+  const line = harvest.harvestLines.find((l) => l.entry_id === harvest.deduped[0]!.entryId);
+  assert.equal(line?.step, "followup.deduped");
+  assert.equal(line?.reason, reason);
+});
+
+test("mineFollowups: the status-flip scope fence holds — blocked, a retirement record, and the derived projection all still harvest normally, and an ambiguous status-field entry harvests rather than being dropped", () => {
+  const blockedText =
+    "sync `plan/tasks.d/W1-T9001-*.yaml` `status:` field from `queued` to `blocked` — the vendor " +
+    "API it depends on is down.";
+  const retirementText =
+    "add a `retirement: withdrawn` field to plan/tasks.d/W1-T9002-*.yaml since the ask was " +
+    "superseded by a later task.";
+  const projectionText =
+    "expose the GitHub-derived merged/blocked projection (isMerged/isDispatchEligible) as a " +
+    "queryable `rmd status --derived` command for operators, independent of any yaml field.";
+  const ambiguousText = "reconsider whether the `status:` field on old shards should be renamed for clarity.";
+  const records = parseLedger(
+    [
+      `{"ts":"2026-08-31T00:00:00.000Z","run_id":"R-fence","task_id":"W1-T9000","step":"report.followups","entries":[` +
+        `{"type":"task","text":${JSON.stringify(blockedText)}},` +
+        `{"type":"task","text":${JSON.stringify(retirementText)}},` +
+        `{"type":"task","text":${JSON.stringify(projectionText)}},` +
+        `{"type":"task","text":${JSON.stringify(ambiguousText)}}` +
+        `]}`,
+    ].join("\n"),
+  );
+  const harvest = mineFollowups(records);
+  assert.equal(harvest.deduped.length, 0, "none of the four scope-fence entries are refused");
+  const candidateTexts = harvest.candidates.map((c) => c.text).sort();
+  assert.deepEqual(candidateTexts, [ambiguousText, blockedText, projectionText, retirementText].sort());
+});
+
+test("mineFollowups: the status-flip refusal reuses the existing followup.deduped mark and mints no new step, so a second pass over the updated ledger refuses again and mints nothing new", () => {
+  const base = [
+    `{"ts":"2026-08-30T15:58:59.564Z","run_id":"W1-T2477-1","task_id":"W1-T2477","step":"report.followups","entries":[{"type":"task","text":${JSON.stringify(
+      CANONICAL_STATUS_FLIP_TEXT,
+    )}}]}`,
+  ];
+  const records = parseLedger(base.join("\n"));
+  const first = mineFollowups(records);
+  assert.equal(first.candidates.length, 0);
+  assert.equal(first.deduped.length, 1);
+  assert.deepEqual(
+    first.harvestLines.map((l) => l.step),
+    ["followup.deduped"],
+    "no new step is minted — the entry is recorded under the SAME mark title-dedup already uses",
+  );
+  const updated = parseLedger(
+    [...base, ...first.harvestLines.map((l) => JSON.stringify({ ts: "2026-08-30T16:00:00.000Z", ...l }))].join("\n"),
+  );
+  const second = mineFollowups(updated);
+  assert.deepEqual(second, { candidates: [], deduped: [], harvestLines: [] }, "a second pass mints and refuses nothing new");
+});
+
 test("recordFollowupHarvest: writes every harvest line via the injectable writer, never touching disk in a test", () => {
   const harvest = mineFollowups(
     parseLedger(
