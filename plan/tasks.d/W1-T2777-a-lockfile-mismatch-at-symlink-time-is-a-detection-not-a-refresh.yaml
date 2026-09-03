@@ -1,0 +1,143 @@
+- id: W1-T2777
+  title: "linkWorktreeNodeModules symlinks node_modules from a repoDir that may sit arbitrarily far behind the worktree's own origin/main HEAD, and a worker sees `Cannot find module` inside its own test as an apparent defect in its own diff — the drift bites BEFORE the code that would report it runs"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high  # Rule 19: three files span one concern — the shared-primitive extract (install-hash),
+              # the detection at the symlink boundary (worker.ts), and the new outcome the test
+              # suite pins. Decomposition would ship either a detection with no shared hash (a
+              # second implementation drifting silently — the exact class this task exists to
+              # prevent) or a shared hash with no consumer to justify its extract. Both halves land
+              # together or neither does.
+  files:
+    - src/lib/install-hash.ts
+    - src/lib/worker.ts
+    - src/run-task.ts
+    - test/worktree-node-modules-lockfile-mismatch.test.ts
+  origin: "oper#canonical-checkout-drift-detection-2026-09-03"
+  plan_refs: ["W1-T151", "W1-T2618", "W1-T2321"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE INVESTIGATION THAT PRODUCED THIS TASK, from an earlier session's canonical-checkout-drift
+    report: `linkWorktreeNodeModules` (`src/lib/worker.ts`) symlinks a fresh worktree's
+    node_modules from `resolveNodeModulesSource(repoDir)`. The worktree's source tree is cut
+    FRESH from `origin/main` (via `worktreeAdd`'s own `git fetch origin --quiet` on line 3244
+    plus `git worktree add ... origin/main` on the same call), but node_modules comes from
+    `repoDir` (e.g. `<state-root>/repos/<repo>`) which nothing refreshes. `recordCanonicalCheckoutDrift`
+    measures the gap and warns via `console.error` — MEASURED live in the earlier session:
+    27 → 28 → 39 → 47 → 48 commits behind origin/main across a few hours, and 50 behind at the
+    time of this task's investigation. On any commit that adds a dep, the worker starts with a
+    lockfile it cannot resolve and reads "Cannot find module" as a defect in its own diff.
+
+    THE DESIGN AS-SHIPPED, ACCEPTED BY THE OPERATOR, PRESERVED HERE. There are TWO checkouts —
+    the install/mount (`installRootDir()`, refreshed by `serviceFreshnessGate` and `runDeployCycle`'s
+    `pullFf`) and the worker pool (`<state-root>/repos/<repo>`, refreshed by nothing). The design
+    accepts arbitrary drift silently because `repos/<repo>` may be on any worker branch and no
+    unattended refresh can reason about that safely. THIS TASK DOES NOT TOUCH REFRESH. The
+    operator's directive is explicit: "Do NOT widen scope to fix repoDir's refresh cycle. That is
+    a separate design question and solving it here bundles unrelated risk into a diff that is
+    already load-bearing for every worker in the fleet."
+
+    THE FIX IS DETECTION, AT THE MOMENT IT CAN ACTUALLY BITE. Compare
+    `hashInstallInputs(worktree)` against `hashInstallInputs(nmSourceParent)` at symlink time.
+    Match ⇒ `"linked"`, silently as today. Differ ⇒ `"linked-lockfile-mismatch"` and a
+    `warn()` — same loud-channel idiom `recordCanonicalCheckoutDrift` already uses for the
+    coupling this task's warning mentions by name.
+
+    THE HASH PRIMITIVE IS SHARED, NOT DUPLICATED. `hashInstallInputs` was in `src/run-task.ts`;
+    `src/lib/worker.ts` cannot import from run-task (that is the wrong direction of the
+    dependency edge — worker is imported by run-task, not vice versa). Extracted to
+    `src/lib/install-hash.ts`; re-exported from run-task.ts so every existing caller
+    (run-task's own `ensureInstallFresh`, `test/run-task.test.ts`, `test/install-symlink-
+    refusal.test.ts`) keeps its import path unchanged. Two callers sharing ONE primitive is what
+    stops two independent hashes on the same inputs from drifting silently — the same class of
+    defect this task exists to detect at a different layer.
+
+    WHY THIS IS BEST-EFFORT AT THE CALLER, NOT A THROW. The function's own header commits to
+    "every outcome is a RETURN VALUE, never a throw. Creating a worktree must not fail because
+    its dev CLIs could not be wired up." The `linked-lockfile-mismatch` outcome preserves that
+    contract — the link IS made (worker won't lose its wiring) and the caller decides what a
+    mismatch means for its dispatch. That is the same shape `recordCanonicalCheckoutDrift`'s
+    `warn()`-and-proceed already uses; this task adds a legible return value alongside it so
+    the caller has a machine-readable signal, not only an operator-readable log line.
+  design: |
+    THREE FILE CHANGES, ONE ATOMIC FIX. Each fills a hole the others leave open:
+
+    (i) `src/lib/install-hash.ts` — NEW. `hashInstallInputs` and `installHashMarkerPath` moved
+        from `src/run-task.ts` byte-identically; the file header documents WHY (worker.ts must
+        consume the same primitive without a wrong-direction import). run-task.ts re-exports both
+        symbols so every existing consumer's import path is unchanged; no test needs an import
+        rewrite for the move alone.
+
+    (ii) `src/lib/worker.ts` — `linkWorktreeNodeModules` gains a lockfile-hash compare AFTER the
+         symlink succeeds. The `NodeModulesLinkOutcome` type union adds `linked-lockfile-mismatch`
+         (a fifth documented variant, added at end of the union so ordering is stable). Two new
+         injectable `deps`: `hashInstallInputs` (default the shared primitive) and `warn`
+         (default `console.error`, matching `recordCanonicalCheckoutDrift`'s convention). The
+         compare uses `dirname(source)` because `resolveNodeModulesSource` returns
+         `<x>/node_modules` and the hashInputs live in `<x>`, and on the fleet host the
+         fallback branch resolves to the install root — NOT repoDir — so the compare must key on
+         the actual source of node_modules, not on repoDir directly.
+
+    (iii) `test/worktree-node-modules-lockfile-mismatch.test.ts` — NEW. Eight guards, one per
+          direction the fix must be pinned in: the incident's exact shape (worktree adds a dep
+          repoDir does not), the healthy path stays quiet, the warning names both compared
+          directories, the three pre-existing outcomes (`already-present`/`no-source`/`failed`)
+          are byte-identically preserved AND short-circuit BEFORE the hash compare, the default
+          hasher IS the exported primitive (parallel-implementation regression lock), and one
+          end-to-end pass with NO injected hasher on real files so the production leaf is
+          exercised.
+
+    THE PRE-EXISTING OUTCOMES ARE PRESERVED BYTE-IDENTICALLY. `already-present` short-circuits
+    at lstat; `no-source` short-circuits at resolveSource; `failed` short-circuits at the
+    symlink throw. None of them reach the compare. The three per-outcome guards fail if a
+    future edit accidentally couples them to the hash path.
+
+    WHAT THIS DELIBERATELY DOES NOT DO. It does not touch `resolveNodeModulesSource`. It does
+    not refresh repoDir. It does not npm-install in the worktree. It does not gate dispatch on
+    the mismatch — that is the caller's decision (`worktreeAdd` currently discards the return;
+    a future task can wire escalation to `escalateCanonicalCheckoutDrift` or its own
+    successor, but this task's scope is detection only).
+  acceptance:
+    - claim: "linkWorktreeNodeModules returns linked-lockfile-mismatch when the worktree's package.json/package-lock.json hash differs from the source of the symlinked node_modules, and emits a warning naming both directories"
+      proof: "unit test: test/worktree-node-modules-lockfile-mismatch.test.ts"
+    - claim: "matching lockfiles on both sides return the pre-W1-T2777 `linked` outcome unchanged and emit no warning — the healthy path never spends operator attention on a non-finding"
+      proof: "unit test: test/worktree-node-modules-lockfile-mismatch.test.ts"
+    - claim: "the three pre-existing outcomes (already-present, no-source, failed) short-circuit BEFORE the hash compare and are byte-identically preserved — no per-outcome behaviour is coupled to the new detection"
+      proof: "unit test: test/worktree-node-modules-lockfile-mismatch.test.ts"
+    - claim: "the default hasher IS the exported hashInstallInputs from src/lib/install-hash.ts — no parallel implementation lives in worker.ts, so the compare and ensureInstallFresh's own compare cannot drift silently"
+      proof: "unit test: test/worktree-node-modules-lockfile-mismatch.test.ts"
+    - claim: "the default hash leaf runs end-to-end on real package.json/package-lock.json bytes on disk with no injected hasher, so a future regression in the production hash path fails this guard rather than only the fake-driven ones"
+      proof: "unit test: test/worktree-node-modules-lockfile-mismatch.test.ts"
+  note: |
+    ID PROVENANCE: W1-T2777 was reserved and supplied directly by the operator. Both scope-time
+    checks ran clean: `git ls-remote --heads origin 'run-W1-T2777-*'` returned 0 and the anchored
+    trailer scan returned `[]`, each qualified by a positive control on W1-T2749 →
+    [3773,3771,3768] because a freshly minted id reads zero against every surface for
+    query-shape reasons alone.
+
+    THE FALSIFIER WAS RUN, WHOLE-FIX. Reverting the detection block in `src/lib/worker.ts` to the
+    pre-W1-T2777 4-line return-linked-or-failed shape moves the new suite from `# fail 0` to
+    `# fail 5` (guards a, b, c, e, f — every one except the three pre-existing-outcome guards).
+    Restoring returns `# fail 0` and preserves the pre-existing 14 tests in `test/worktree-node-
+    modules.test.ts` unchanged. The three (d) guards stay green in both states — proving they
+    are not accidentally coupled to the new detection.
+
+    CALLER + CENSUS SWEEP: 8 files — every consumer of `linkWorktreeNodeModules`,
+    `hashInstallInputs`, `installHashMarkerPath`, `NodeModulesLinkOutcome` — plus the new file,
+    ran as `# tests 384 # pass 384 # fail 0`. Typecheck clean.
+
+    NOT IN SCOPE, PER OPERATOR DIRECTIVE. Fixing repoDir's refresh cycle. Wiring the mismatch
+    outcome to a caller-side escalation (worktreeAdd currently discards the return; a future
+    task can decide what a mismatch means for dispatch). Bumping to a throwing failure — the
+    file's own "never a throw" contract holds.
+
+    NOT REPRODUCED HERE, DELIBERATELY: the failure the incident actually produces (a worker
+    running `import`/`require` on a missing dep). Reproducing that would need a real worker
+    spawn on a real npm-resolvable dep, cost real spend, and prove the same thing this
+    detection prevents — that the worker never gets that far when the mismatch is loud at
+    symlink time. Guard (a) is the closer of the two proofs.
