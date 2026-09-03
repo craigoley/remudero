@@ -397,9 +397,9 @@ test/fleet-control.test.ts:240  # pre-existing at rule-introduction — W1-T2775
 test/fleet-digest-cadence.test.ts:40  # pre-existing at rule-introduction — W1-T2775 tranche migration pending
 test/fleet-heartbeat-image-sha.test.ts:92  # pre-existing at rule-introduction — W1-T2775 tranche migration pending
 test/fleet-heartbeat-supervisor-tick.test.ts:73  # pre-existing at rule-introduction — W1-T2775 tranche migration pending
-test/fleet-heartbeat.test.ts:109  # pre-existing at rule-introduction — W1-T2775 tranche migration pending
-test/fleet-heartbeat.test.ts:110  # pre-existing at rule-introduction — W1-T2775 tranche migration pending
-test/fleet-heartbeat.test.ts:746  # pre-existing at rule-introduction — W1-T2775 tranche migration pending
+test/fleet-heartbeat.test.ts:116  # pre-existing at rule-introduction — W1-T2775 tranche migration pending
+test/fleet-heartbeat.test.ts:117  # pre-existing at rule-introduction — W1-T2775 tranche migration pending
+test/fleet-heartbeat.test.ts:757  # pre-existing at rule-introduction — W1-T2775 tranche migration pending
 test/fleet-hold-shared.test.ts:86  # pre-existing at rule-introduction — W1-T2775 tranche migration pending
 test/fs-race-alerts.test.ts:21  # pre-existing at rule-introduction — W1-T2775 tranche migration pending
 test/git-config-lock-contention.test.ts:33  # pre-existing at rule-introduction — W1-T2775 tranche migration pending
