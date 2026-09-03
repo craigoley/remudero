@@ -183,9 +183,11 @@ test("W1-T2426 (acceptance 7): the light pass names the admission bound as the r
   const text = readFileSyncUtf8(new URL("../src/lib/sweep.ts", import.meta.url));
   assert.match(
     text,
-    /not admitted this pass: one post-review admission per light pass/,
+    /not admitted this pass: semantic post-review admission bound \$\{semanticBound\}/,
     "the non-admitted PR's stand-down must name the admission bound, not only the generic light-pass sentence",
   );
+  assert.match(text, /admitted \$\{admittedNumbers\} ahead/,
+    "the stand-down names which PRs consumed the configured bound");
   assert.match(text, /standDownReasonFor\?\.\(disposition\) \?\? "deferred to full sweep \(light pass\)"/,
     "the seam must FALL BACK to the generic sentence, so an unwired caller is byte-identical to today");
   assert.match(text, /standDownReasonFor\?: \(d: Disposition\) => string \| undefined;/, "the seam is optional");

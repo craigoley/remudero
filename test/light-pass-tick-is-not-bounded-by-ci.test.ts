@@ -468,7 +468,7 @@ test("acceptance 5: W1-T1211's blocked-fixable admission still fires exactly whe
   }
 });
 
-test("acceptance 6: at most one open PR is still admitted to post-review per light pass", async () => {
+test("acceptance 6: post-review admission still obeys the configured light-pass review-lane ceiling", async () => {
   const posted: number[] = [];
   const deps = baseDeps({
     ledgerPath: ledgerPath(),
@@ -480,7 +480,10 @@ test("acceptance 6: at most one open PR is still admitted to post-review per lig
   } as Partial<SweepDeps>);
 
   await runSweepLightPass([postReviewPr(31), postReviewPr(32), postReviewPr(33)], deps);
-  assert.ok(posted.length <= 1, `W1-T526's one-per-pass bound is untouched; saw ${posted.length} review dispatches`);
+  assert.ok(
+    posted.length <= DEFAULT_SWEEP_POLICY.reviewLanes,
+    `the configured review-lane ceiling is ${DEFAULT_SWEEP_POLICY.reviewLanes}; saw ${posted.length} review dispatches`,
+  );
   await drainDetachedSweepActions();
 });
 

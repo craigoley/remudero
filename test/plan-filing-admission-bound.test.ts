@@ -80,12 +80,12 @@ test("W1-T2439 (acceptance 2): the cheap lane is BOUNDED — a queue deeper than
   assert.deepEqual(planFilings.map((p) => p.prNumber), [10, 11, 12], "the OLDEST three, never an arbitrary three");
 });
 
-// ── acceptance 3: the spawning lane's bound is unchanged ────────────────────────────────────
+// ── acceptance 3: the spawning lane uses the configured review budget ───────────────────────
 
-test("W1-T2439 (acceptance 3): the spawning lane still admits exactly one", () => {
+test("W1-T2439/W1-T2792: the spawning lane admits the oldest configured reviewLanes", () => {
   const q = [build(20, "2026-08-01T00:00:00Z"), build(21, "2026-08-02T00:00:00Z"), build(22, "2026-08-03T00:00:00Z")];
   const { spawning } = selectReviewAdmissions(q, DEFAULT_SWEEP_POLICY, NOW);
-  assert.equal(spawning?.prNumber, 20, "the oldest build wins");
+  assert.deepEqual(spawning.map((p) => p.prNumber), [20, 21], "the oldest two builds win the configured two lanes");
   assert.equal(selectReviewAdmission(q, DEFAULT_SWEEP_POLICY, NOW)?.prNumber, 20,
     "and the singular entry point is byte-identical in behaviour to what W1-T526 always ran");
 });
@@ -94,27 +94,28 @@ test("W1-T2439 (acceptance 3): a build is REFUSED by the spawning bound even whi
   const q = [
     build(20, "2026-08-01T00:00:00Z"),
     build(21, "2026-08-02T00:00:00Z"),
-    filing(30, "2026-08-03T00:00:00Z"),
-    filing(31, "2026-08-04T00:00:00Z"),
+    build(22, "2026-08-03T00:00:00Z"),
+    filing(30, "2026-08-04T00:00:00Z"),
+    filing(31, "2026-08-05T00:00:00Z"),
   ];
   const { spawning, planFilings } = selectReviewAdmissions(q, DEFAULT_SWEEP_POLICY, NOW);
-  assert.equal(spawning?.prNumber, 20, "one build admitted");
-  assert.ok(!planFilings.some((p) => p.prNumber === 21), "the SECOND build is not smuggled into the cheap lane");
+  assert.deepEqual(spawning.map((p) => p.prNumber), [20, 21], "both configured semantic lanes are admitted");
+  assert.ok(!planFilings.some((p) => p.prNumber === 22), "the THIRD build is not smuggled into the cheap lane");
   assert.deepEqual(planFilings.map((p) => p.prNumber), [30, 31], "only real filings ride the cheap lane");
 });
 
 // ── acceptance 4: a plan-only review that reaches the judge is charged to the spawning side ──
 
-test("W1-T2439 (acceptance 4): the split never RAISES the spawning bound, so a filing that spawns eats capacity that was never expanded", () => {
+test("W1-T2439/W1-T2792: the split never exceeds reviewLanes, so a filing that spawns remains charged", () => {
   const onlyFilings = [filing(30, "2026-08-01T00:00:00Z"), filing(31, "2026-08-02T00:00:00Z")];
   const { spawning } = selectReviewAdmissions(onlyFilings, DEFAULT_SWEEP_POLICY, NOW);
-  assert.equal(spawning, undefined, "a pass of only filings admits NOBODY to the spawning lane");
-  // The guarantee: spawn-capable admissions never exceed the unchanged bound of one, whatever the
+  assert.deepEqual(spawning, [], "a pass of only filings admits NOBODY to the spawning lane");
+  // The guarantee: spawn-capable admissions never exceed the configured review bound, whatever the
   // cheap lane does. Detecting WHICH filing spawns is unbuildable at admission (the shard's Q1),
   // so the design charges it rather than predicting it.
   const mixed = [build(20, "2026-08-01T00:00:00Z"), ...onlyFilings];
   const r = selectReviewAdmissions(mixed, DEFAULT_SWEEP_POLICY, NOW);
-  assert.equal(r.spawning ? 1 : 0, 1, "still exactly one spawn-capable admission, never one-per-filing");
+  assert.equal(r.spawning.length, 1, "only the real build consumes semantic capacity, never one slot per filing");
 });
 
 // ── acceptance 5: an unpopulated signal falls back to today's behaviour ─────────────────────
@@ -124,7 +125,7 @@ test("W1-T2439 (acceptance 5): isPlanFiling undefined is treated as SPAWNING —
   assert.equal(q[0].isPlanFiling, undefined, "the fixture must actually omit it, or this asserts nothing");
   const { spawning, planFilings } = selectReviewAdmissions(q, DEFAULT_SWEEP_POLICY, NOW);
   assert.equal(planFilings.length, 0, "an absent signal never rides the cheap lane");
-  assert.equal(spawning?.prNumber, 40, "it competes for the single slot exactly as before");
+  assert.deepEqual(spawning.map((p) => p.prNumber), [40, 41], "both absent signals consume the bounded semantic capacity");
 });
 
 test("W1-T2439 (acceptance 5): isPlanFiling false is also SPAWNING, not merely undefined", () => {
