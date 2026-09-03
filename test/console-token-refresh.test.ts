@@ -12,7 +12,8 @@
 //      lifetimes
 //   5. no credential value reaches a log line, a ledger row, or disk on any arm of the new path
 import assert from "node:assert/strict";
-import { readFileSync, mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { chmodSync, readFileSync, mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -205,6 +206,122 @@ test("W1-T2269: deploy/serve-container.sh carries a passthrough for all three GH
   for (const name of ["GH_APP_ID", "GH_APP_INSTALLATION_ID", "GH_APP_PRIVATE_KEY_PATH"]) {
     assert.match(src, new RegExp(`-e ${name}\\b`), `serve-container.sh must pass ${name} through by name`);
   }
+});
+
+const SERVE_CONTAINER_SH = fileURLToPath(new URL("../deploy/serve-container.sh", import.meta.url));
+const SERVE_APP_KEY_DEST = "/home/node/.rmd-github-app-private-key.pem";
+
+function runServeLauncherFixture(source: "direct" | "daemon" | "missing") {
+  const root = tmpRoot();
+  const binDir = join(root, "bin");
+  const stateDir = join(root, "state-root");
+  const credDir = join(root, "daemon-credentials");
+  const capturePath = join(root, "docker-capture.txt");
+  const dockerPath = join(binDir, "docker");
+  const directKeyPath = join(root, "direct-app.pem");
+  const daemonKeyPath = "/home/node/.claude/rmd-app.pem";
+  const keyBody = "FAKE-PRIVATE-KEY-CONTENT-W1-T2778";
+  const token = "ghs_FAKE_STATIC_TOKEN_W1_T2778";
+  mkdirSync(binDir, { recursive: true });
+  mkdirSync(stateDir, { recursive: true });
+  mkdirSync(credDir, { recursive: true });
+  if (source === "direct") writeFileSync(directKeyPath, keyBody);
+  if (source === "daemon") writeFileSync(join(credDir, "rmd-app.pem"), keyBody);
+
+  writeFileSync(
+    dockerPath,
+    `#!/usr/bin/env bash
+set -euo pipefail
+if [ "\${1:-}" = "network" ] && [ "\${2:-}" = "inspect" ]; then
+  if [[ " $* " == *" --format "* ]]; then printf '%s\\n' 'cloudflared '; fi
+  exit 0
+fi
+if [ "\${1:-}" = "inspect" ] && [ "\${2:-}" = "remudero-daemon" ]; then
+  case "$*" in
+    *Config.Env*)
+      printf '%s\\n' 'GH_TOKEN=daemon-token' 'GH_APP_ID=123' 'GH_APP_INSTALLATION_ID=456' 'GH_APP_PRIVATE_KEY_PATH=${daemonKeyPath}'
+      ;;
+    *home/node/Remudero*)
+      printf '%s\\n' '${stateDir}'
+      ;;
+    *Mounts*)
+      printf '%s\\t%s\\n' '${stateDir}' '/home/node/Remudero' '${credDir}' '/home/node/.claude'
+      ;;
+  esac
+  exit 0
+fi
+if [ "\${1:-}" = "inspect" ] && [[ " $* " == *" remudero-serve "* ]]; then
+  case "$*" in
+    *State.Running*) printf '%s\\n' true; exit 0 ;;
+    *NetworkSettings.Networks*) printf '%s\\n' yes; exit 0 ;;
+    *) exit 1 ;;
+  esac
+fi
+if [ "\${1:-}" = "run" ]; then
+  {
+    printf '%s\\n' RUN
+    printf '%s\\n' "$@"
+    printf 'ENV:%s\\n' "\${GH_APP_PRIVATE_KEY_PATH:-}"
+  } >> "\${FAKE_DOCKER_CAPTURE}"
+  exit 0
+fi
+if [ "\${1:-}" = "logs" ]; then
+  printf '%s\\n' 'listening on http://0.0.0.0:4317'
+  exit 0
+fi
+exit 1
+`,
+  );
+  chmodSync(dockerPath, 0o755);
+
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    PATH: `${binDir}:${process.env.PATH ?? ""}`,
+    HOME: root,
+    GH_TOKEN: token,
+    FAKE_DOCKER_CAPTURE: capturePath,
+    RMD_SERVE_DOCKERENV_PATH: join(root, "not-a-container-marker"),
+    RMD_CLAUDE_JSON_PATH: join(root, "no-account-file"),
+    RMD_GITHUB_WEBHOOK_SECRET_PATH: join(root, "no-webhook-secret"),
+  };
+  delete env.GH_APP_ID;
+  delete env.GH_APP_INSTALLATION_ID;
+  delete env.GH_APP_PRIVATE_KEY_PATH;
+  if (source === "direct") {
+    env.GH_APP_ID = "123";
+    env.GH_APP_INSTALLATION_ID = "456";
+    env.GH_APP_PRIVATE_KEY_PATH = directKeyPath;
+  }
+
+  const result = spawnSync("bash", [SERVE_CONTAINER_SH], { encoding: "utf8", env });
+  const capture = readFileSync(capturePath, "utf8");
+  return { result, capture, root, credDir, directKeyPath, daemonKeyPath, keyBody, token };
+}
+
+test("W1-T2778: a direct readable host App key becomes one read-only file mount and the launched env names that destination", () => {
+  const fixture = runServeLauncherFixture("direct");
+  assert.equal(fixture.result.status, 0, fixture.result.stderr);
+  assert.ok(fixture.capture.includes(`${fixture.directKeyPath}:${SERVE_APP_KEY_DEST}:ro`));
+  assert.ok(fixture.capture.includes(`ENV:${SERVE_APP_KEY_DEST}`));
+  assert.equal(fixture.capture.split(SERVE_APP_KEY_DEST).length - 1, 2, "one mount destination plus one env value");
+  assert.ok(!`${fixture.result.stdout}${fixture.result.stderr}${fixture.capture}`.includes(fixture.keyBody), "key content never reaches output or argv");
+  assert.ok(!`${fixture.result.stdout}${fixture.result.stderr}${fixture.capture}`.includes(fixture.token), "token content never reaches output or argv");
+});
+
+test("W1-T2778: a daemon-container key path is translated through the daemon's observed mount source", () => {
+  const fixture = runServeLauncherFixture("daemon");
+  assert.equal(fixture.result.status, 0, fixture.result.stderr);
+  assert.ok(fixture.capture.includes(`${join(fixture.credDir, "rmd-app.pem")}:${SERVE_APP_KEY_DEST}:ro`));
+  assert.ok(fixture.capture.includes(`ENV:${SERVE_APP_KEY_DEST}`));
+  assert.ok(!fixture.capture.includes(`${fixture.credDir}:/home/node/.claude`), "the credential directory itself is never mounted");
+});
+
+test("W1-T2778: an untranslatable or missing key preserves startup and fallback without inventing a mount", () => {
+  const fixture = runServeLauncherFixture("missing");
+  assert.equal(fixture.result.status, 0, fixture.result.stderr);
+  assert.ok(!fixture.capture.includes(SERVE_APP_KEY_DEST));
+  assert.ok(fixture.capture.includes(`ENV:${fixture.daemonKeyPath}`), "the refresher retains the unreadable path so its existing telemetry names the failure");
+  assert.match(fixture.result.stderr, /private key.*unreadable|could not resolve.*private key/i);
 });
 
 // ── (2) A CREDENTIAL THAT CANNOT BE REPLACED IS REPORTED, NOT PRESENTED AS A WORKING BOARD ──────
