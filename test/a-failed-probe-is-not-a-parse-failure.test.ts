@@ -171,6 +171,74 @@ test("W1-T2755: a probe that parsed and found real leakage keeps assessIsolation
   assert.match(clean, /worker inherited 3 alias\(es\)/);
 });
 
+// ── (4b) NEGATIVE CONTROL — every counts-parsed path logs the SAME reason it always did ───────
+// The selector is hoisted above the first ledger write, so it now runs on EVERY probe, including
+// healthy ones. The pin that matters is therefore not "the errored path changed" but "nothing
+// else did" — and it has to be taken at the LEDGER SURFACE, because test (4) exercises only the
+// pure selector and would stay green if the hoist wired the wrong string into the rows. Both
+// counts-parsed outcomes are covered: the isolated probe, whose `isolation.probe` row is written
+// on every healthy run, and the proven-broken one.
+//
+// THE THIRD CASE IS THE DISCRIMINATING ONE, and it was added because the falsifier said so. A
+// clean-spawn probe reaches `verdict.reason` down TWO independent routes — the `countsParsed`
+// early return and the non-empty-transcript branch below it — so deleting the early return does
+// not move it, and the first two cases stayed green through that mutation. Only a probe whose
+// counts PARSED while its spawn ALSO flagged an error separates them: the early return is then
+// the sole thing standing between a real, measured leak and a ledger row blaming the spawn.
+
+test("W1-T2755 negative control: a counts-parsed probe logs assessIsolation's own reason verbatim — isolated and proven-broken alike", async () => {
+  const rowsFor = async (r: ProbeExecResult) => {
+    const rows: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+    // A proven-broken verdict throws and an isolated one does not; this test is about the ROWS
+    // both leave behind, and case (5) already owns the throwing half.
+    await probeIsolation({
+      settingsFile: "unused",
+      exec: async () => r,
+      log: (step, extra) => rows.push({ step, extra }),
+    }).catch(() => {});
+    return rows;
+  };
+
+  const isolated = { aliasCount: 0, functionCount: 0 };
+  const isolatedRows = await rowsFor({ transcript: "aliases: 0\nfunctions: 0", ...isolated, isError: false });
+  const okRow = isolatedRows.find((x) => x.step === "isolation.probe");
+  assert.ok(okRow, "an isolated probe still writes its observation row");
+  assert.equal(
+    okRow!.extra?.reason,
+    assessIsolation(isolated).reason,
+    "a healthy run's ledger reason is byte-identical to what it was before this fix",
+  );
+  assert.equal(okRow!.extra?.isolated, true, "and it still reports the isolated verdict");
+  assert.equal(
+    isolatedRows.find((x) => x.step === "isolation_preflight_failed"),
+    undefined,
+    "an isolated probe writes no verdict row at all",
+  );
+
+  const broken = { aliasCount: 4, functionCount: 2 };
+  const brokenRows = await rowsFor({ transcript: "aliases: 4\nfunctions: 2", ...broken, isError: false });
+  const expected = assessIsolation(broken).reason;
+  for (const step of ["isolation.probe", "isolation_preflight_failed"] as const) {
+    const row = brokenRows.find((x) => x.step === step);
+    assert.ok(row, `${step} must still be written for a proven-broken verdict`);
+    assert.equal(row!.extra?.reason, expected, `${step} keeps assessIsolation's wording for a real leak`);
+  }
+
+  // A measured leak whose spawn ALSO errored: the counts are real, so the rows must report the
+  // leak — not the spawn. This is the case the early return alone protects.
+  const erroredRows = await rowsFor({ transcript: "boom, but the report parsed", ...broken, isError: true });
+  for (const step of ["isolation.probe", "isolation_preflight_failed"] as const) {
+    const row = erroredRows.find((x) => x.step === step);
+    assert.ok(row, `${step} must still be written when a leaking probe also errored`);
+    assert.equal(row!.extra?.reason, expected, `${step} must report the real leak, not the spawn's error flag`);
+    assert.match(
+      String(row!.extra?.stderr_excerpt ?? ""),
+      /boom/,
+      `${step} still carries the spawn's own text alongside the leak reason`,
+    );
+  }
+});
+
 // ── (5) fail-closed is a POLICY this change must not touch ────────────────────────────────────
 
 test("W1-T2755: every non-isolated verdict still throws IsolationError — the reason changed, the policy did not", async () => {
