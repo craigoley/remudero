@@ -160,9 +160,15 @@ test("the guard's decision is unchanged -- ON MAIN still fast-forwards exactly a
   assert.equal(reexecCount(), 1);
 });
 
-// ── AC3: no verb is added to the read-only exempt set by this task ──────────────────────────
+// ── AC3: no verb is added to the read-only exempt set by THIS task ──────────────────────────
+// W1-T2769 UPDATE: the set itself DID widen -- by that task, not this one. Its own doc in
+// run-task.ts gives `preflight` a reason distinct from (and stronger than) doctor/status's:
+// auto-syncing before a preflight run would silently test code the operator never asked to
+// test. This guard's job stays the same -- catch an UNREVIEWED widening -- so it now pins the
+// set W1-T2769 left behind rather than the set W1-T1134 did; a fourth verb appearing here still
+// needs its own reasoning paragraph in run-task.ts, same as every member already has.
 
-test("READ_ONLY_FRESHNESS_EXEMPT_VERBS (src/run-task.ts) is unchanged -- still exactly {doctor, status}", () => {
+test("READ_ONLY_FRESHNESS_EXEMPT_VERBS (src/run-task.ts) is exactly {doctor, status, preflight}", () => {
   const runTaskSrc = readFileSync(join(__dirname, "..", "src", "run-task.ts"), "utf8");
   const match = runTaskSrc.match(
     /READ_ONLY_FRESHNESS_EXEMPT_VERBS:\s*ReadonlySet<string>\s*=\s*new Set\(\[([^\]]*)\]\)/,
@@ -174,8 +180,8 @@ test("READ_ONLY_FRESHNESS_EXEMPT_VERBS (src/run-task.ts) is unchanged -- still e
     .filter(Boolean);
   assert.deepEqual(
     verbs.sort(),
-    ["doctor", "status"],
-    "this task widens no verb into the exempt set -- that axis is W1-T1134's, untouched here",
+    ["doctor", "preflight", "status"],
+    "an unreviewed widening beyond W1-T2769's addition of `preflight` must fail here, not pass silently",
   );
 });
 

@@ -35370,15 +35370,41 @@ function logCliInvocation(cmd: string | undefined, argv: string[]): void {
  * comment, for the verbs that keep the gate). A DECLARED LIST, named beside its reason at each
  * call site, deliberately not a heuristic over the verb string and not conditioned on
  * `--dry-run` (a flag can be absent and the verb still dispatch) — see design (ii) of the
- * W1-T1134 task record. Exactly two members today:
- *   - `doctor`  — read-only by construction; its own registry entry refuses `--fix` by name.
- *   - `status`  — its only write is the machine-owned `state/status.json` cache, never a
- *                 decision this gate protects (the one judgement call design (v) calls out).
+ * W1-T1134 task record. Three members today:
+ *   - `doctor`    — read-only by construction; its own registry entry refuses `--fix` by name.
+ *   - `status`    — its only write is the machine-owned `state/status.json` cache, never a
+ *                   decision this gate protects (the one judgement call design (v) calls out).
+ *   - `preflight` (W1-T2769) — a STRONGER case than the other two, not merely a weaker one.
+ *                   `doctor`/`status` are exempt because auto-syncing first would be HARMLESS;
+ *                   for `preflight` it would be ACTIVELY WRONG. Every preflight mode (`--fast`,
+ *                   `--coverage`, `--ci-parity`) exists to test THIS checkout — typically a
+ *                   feature branch, per CLAUDE.md's "run before your first push" — against CI's
+ *                   own commands; auto-fast-forwarding origin/main underneath it first would
+ *                   silently swap in code the operator never asked to test, defeating the verb's
+ *                   entire purpose even when the fast-forward itself is safe. Its writes
+ *                   (coverage/, lcov, temp scratch) are machine-owned build/test artifacts, same
+ *                   footing as `status`'s cache. And the refusal arm was actively harmful too: on
+ *                   ANY feature branch (off-main is always "diverged", never "behind" — see the
+ *                   gate's own off-main clause below) the bare invocation refused outright
+ *                   ("rmd has diverged from origin/main ... refusing to auto-sync"), so
+ *                   `--ci-parity` — the gate CLAUDE.md's own first rule prescribes running before
+ *                   a first push — could not run on a feature branch AT ALL without the operator
+ *                   exporting `RMD_SELF_SYNC_DONE=1` (self-sync.ts's `SELF_SYNC_GUARD_ENV`). That
+ *                   export is deliberately documented (self-sync.ts) as guarding "every call" a
+ *                   shell makes for the session, which is correct for a re-exec child and wrong
+ *                   for an interactive workaround: it crossed into `ci:test`'s own child suite and
+ *                   poisoned every self-sync test the suite itself contains (MEASURED: 45 of 51
+ *                   `ci:test` failures on an otherwise-green feature branch, traced to this exact
+ *                   export). Exempting the verb removes the NEED for the export;
+ *                   `defaultPreflightSpawn` (lib/commit-message.ts) removes the RISK of it
+ *                   regardless, by never letting the guard reach a child it spawns. Both are
+ *                   required — the exemption fixes the documented invocation; the spawn scrub
+ *                   fixes what an operator's own shell might still carry for unrelated reasons.
  * `sweep`/`inbox` stay OUT even though their `--dry-run` forms are read-only: exempting the verb
  * name would also exempt their real (non-dry-run) dispatch. `run-task`/`drain`/`triage`/`fix`/
  * `approve`/`review`/`lint-plan` are untouched and keep falling to the gate's `else` branch.
  */
-const READ_ONLY_FRESHNESS_EXEMPT_VERBS: ReadonlySet<string> = new Set(["doctor", "status"]);
+const READ_ONLY_FRESHNESS_EXEMPT_VERBS: ReadonlySet<string> = new Set(["doctor", "status", "preflight"]);
 
 // ── CLI entry (invoked by bin/rmd). Kept tiny; all logic is above/lib.
 export async function main(

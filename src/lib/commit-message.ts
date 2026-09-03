@@ -480,18 +480,41 @@ export type PreflightSpawn = (
 // keep growing, while still catching a genuinely stuck/looping child.
 const PREFLIGHT_SPAWN_MAX_BUFFER = 64 * 1024 * 1024;
 
+// W1-T2769: the LITERAL, never an import off self-sync.js -- self-sync.ts already imports
+// (transitively, via daemon.ts) back to this module across dozens of existing rings, so a value
+// import the other way closes each one into a NEW dependency-cruiser cycle (MEASURED: 13 -> 53
+// warnings, cycle-ratchet ceiling in scripts/cycle-baseline.json). Same pattern as
+// open-prs-rest.ts's own header note for supersession.ts. self-sync.ts's `SELF_SYNC_GUARD_ENV`
+// export is the canonical name for this string; this constant must stay byte-identical to it.
+const SELF_SYNC_GUARD_ENV_NAME = "RMD_SELF_SYNC_DONE";
+
 export function defaultPreflightSpawn(
   file: string,
   args: string[],
   opts: { cwd?: string; input?: string; stream?: boolean; env?: NodeJS.ProcessEnv } = {},
 ): { status: number | null; stdout: string; stderr: string; error?: string; signal?: string } {
+  // MERGED OVER `process.env`, never replacing it: a bare `env` would drop PATH, HOME and the
+  // toolchain pins every step here depends on.
+  const env = { ...process.env, ...opts.env };
+  // W1-T2769: UNCONDITIONALLY SCRUBBED, regardless of whether `opts.env` was supplied. Every
+  // child this function spawns is a build/test process (`npm run test:ci` chief among them, via
+  // `ci-parity.ts`'s `ci:test` step) — never a re-exec of `rmd` itself — so this guard has no
+  // legitimate meaning for it. `alreadySelfSynced` (self-sync.ts) reads BOTH the injected `env`
+  // argument AND its own `process.env` — the latter read is what makes an operator's shell
+  // export cross into a spawned child regardless of what `env` object the child's OWN caller
+  // constructs. Deleting the key here, in the ONE place every preflight child is spawned, is
+  // what keeps that crossing from being possible at all: MEASURED, an operator's
+  // `RMD_SELF_SYNC_DONE=1` (documented in self-sync.ts as guarding "every call" for the shell's
+  // session) turned 45 of `ci:test`'s own self-sync tests red on an otherwise-green feature
+  // branch, because the export reached `node --test`'s children through exactly this
+  // inheritance path. `run-task.ts`'s `READ_ONLY_FRESHNESS_EXEMPT_VERBS` addition removes the
+  // NEED to export it for `preflight` itself; this removes the RISK of it regardless, for a
+  // shell where it is set for some unrelated reason.
+  delete env[SELF_SYNC_GUARD_ENV_NAME];
   const res = spawnSync(file, args, {
     cwd: opts.cwd,
     input: opts.input,
-    // MERGED OVER `process.env`, never replacing it: a bare `env` would drop PATH, HOME and the
-    // toolchain pins every step here depends on. Omitting `env` entirely leaves inheritance
-    // byte-identical to before this hook existed.
-    ...(opts.env ? { env: { ...process.env, ...opts.env } } : {}),
+    env,
     encoding: "utf8",
     maxBuffer: PREFLIGHT_SPAWN_MAX_BUFFER,
     // `stdio[0]` stays a pipe in BOTH modes so `opts.input` keeps working; only the output
