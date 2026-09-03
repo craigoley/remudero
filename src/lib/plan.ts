@@ -256,9 +256,7 @@ export function parseTasksFromYaml(text: string, sourceLabel: string): Task[] {
     }
     const status = (e.status ?? "queued") as TaskStatus;
     if (!TASK_STATUSES.includes(status)) {
-      throw new PlanError(
-        `task ${id}: invalid status '${status}' (must be ${TASK_STATUSES.join("|")}; status is decorative/initial-state only — real merge-state is derived from GitHub, never written back here)`,
-      );
+      throw new PlanError(`task ${id}: invalid status '${status}' (must be ${TASK_STATUSES.join("|")}; status is decorative/initial-state only — real merge-state is derived from GitHub, never written back here)`);
     }
     const retirement = e.retirement as RetirementReason | undefined;
     if (retirement !== undefined && !RETIREMENT_REASONS.includes(retirement)) {
