@@ -1,0 +1,146 @@
+- id: W1-T2786
+  title: "`hooks/mkdtemp-allowlist.txt` keys all 998 entries on `<file>:<line>`, so ANY edit inserting a line above an allowlisted callsite turns that entry into a false refusal — failing CI on the PR that shifted the line, whose author has nothing to do with temp directories, while 995 entries stay armed after a three-entry repair"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high  # Rule 19: the keying change (scripts/) and the mechanical migration of 998 entries
+              # (hooks/) are one atomic fix — a re-keyed checker against a line-keyed allowlist
+              # refuses all 998, and a re-keyed allowlist under a line-keyed checker matches none.
+              # They land together or main goes red harder than the defect they fix.
+  # FLOW STYLE IS LOAD-BEARING, not cosmetic: `shardDeclaredFilesInDiff`'s
+  # SHARD_FILES_LINE_RE matches ONLY `files: [a, b]` on one line, so a block-style list is
+  # invisible to it and `judgeCriterion`'s `not_yet_built` carve-out can never fire — the
+  # forward-referenced test below then grades `executed_fail` and hard-blocks this filing.
+  # MEASURED on the first review of #3864, which failed all 6 criteria for exactly this reason.
+  files: [scripts/mkdtemp-callsite-check.mjs, hooks/mkdtemp-allowlist.txt, test/mkdtemp-allowlist-rekey.test.ts, test/mkdtemp-callsite-check.test.ts, learnings/testing.yaml, learnings/index.json]
+  origin: "oper#mkdtemp-allowlist-position-key-2026-09-03"
+  plan_refs: ["W1-T2773", "W1-T2775", "W1-T2784"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE KEY DECAYS; NOTHING FAILS. `hooks/mkdtemp-allowlist.txt` records each exemption as
+    `<file>:<line>`. Insert one line anywhere above an allowlisted callsite and the entry no
+    longer names it, so a callsite that has been exempt for months is refused as though it were
+    new. MEASURED 2026-09-03: #3834 (merged 17:45:32Z) and #3831 (17:55:13Z) each inserted a line
+    above an allowlisted site and three entries drifted by exactly one —
+    `test/open-prs-rest.test.ts` allowlisted :443 / actual :444, `test/retro.test.ts` :453/:454
+    and :491/:492. None of those callsites is new; they date from #808, #1398 and #1412. The hook
+    did not fail and nothing bypassed it.
+
+    WHY THIS IS URGENT RATHER THAN TIDY. The refusal lands on whatever PR shifted the line, so it
+    blocks an author who has nothing to do with temp directories and no reason to recognise the
+    failure — it surfaces as the opaque `W1-T2773 programmatic and CLI boundaries preserve the
+    scanner's success and failure contracts`. And repairing the drifted entries fixes only those
+    entries: the remaining 995 stay armed, each one a latent red waiting for the next edit above it.
+
+    REPRODUCED ON A GREEN MAIN, INDEPENDENT OF TODAY'S DRIFT. At `1d71fb15` the checker reads
+    `clean — 646 tracked .ts/.mjs file(s) with a mkdtempSync callsite, 998 allowlisted`. Inserting
+    ONE unrelated comment line at the top of a file carrying an allowlisted callsite immediately
+    produced `(1 refused; 998 on hooks/mkdtemp-allowlist.txt)` naming
+    `test/a-permanently-uncreditable-head-is-re-dispatched-forever.test.ts:47: mkdtemp prefix
+    'terminal-head-gh-'`; reverting the insertion returned the checker to clean. The defect is the
+    KEY, not any particular day's drift.
+
+    WHETHER MAIN IS GREEN IS AN OBSERVATION, NOT A DESIGN INPUT. Today's three drifted entries were
+    already cleared by the time this task was scoped. Building toward "make main green" would shape
+    the fix around one day's drift instead of the keying defect, so this shard is written against
+    the defect and any effect on main's colour is reported afterward as a measurement.
+  design: |
+    RE-KEY ON `<file>` + `<prefix>`, DROPPING THE LINE ENTIRELY. Sites in one file sharing a prefix
+    collapse to a single entry — desirable, not a loss: they would want allowlisting together
+    anyway, and a collapsed entry cannot half-decay.
+
+    THE PREFIX MUST BE READ FROM THE ACTUAL CALLSITE, NEVER INFERRED FROM THE ENTRY TEXT. Inferring
+    it would encode the same staleness in a new shape. And a subtler version of the same trap:
+    resolving `<file>:<line>` against the current tree to find the prefix reads the WRONG LINE for
+    exactly those entries that have already drifted, then makes that wrong prefix permanent and
+    invisible under the new key. So the migration derives from OBSERVATION — run the scanner with
+    the allowlist empty and take its own refusal set (file, prefix) as the generated entries. That
+    is self-correcting for every hypothesis about today's state: new drift, entries left dangling
+    by a callsite that has since been migrated to `${RMD_TMP_PREFIX}`, or an incomplete prior
+    repair all resolve the same way, with no need to pick between them in advance.
+
+    ONE PREFIX EXTRACTOR, SHARED. The key computation and `formatRefusal`'s display must read the
+    prefix through the SAME function. Two extractors over the same input is the drift class this
+    task exists to remove, reintroduced one layer down (the same reason W1-T2784 extracted
+    `hashInstallInputs` rather than copying it).
+
+    VARIABLE-PREFIX CALLSITES NEED A DEFINED KEY TOO. A callsite classified `unresolvable` (a
+    variable, a call, a spread) has no static prefix — `scripts/recovery-drill.mjs` is the live
+    example. Those key on the file plus an explicit sentinel rather than being dropped from the
+    scheme, so every refusable classification remains expressible and the checker never silently
+    loses the ability to exempt one.
+
+    THE FILE HALF OF THE KEY STILL CARRIES MEANING. Dropping the line must not accidentally drop
+    the file: an allowlisted prefix appearing in a DIFFERENT file must still refuse, or the
+    allowlist would become a global prefix amnesty.
+
+    THE NEW PROOFS GO IN A NEW FILE, `test/mkdtemp-allowlist-rekey.test.ts`, AND THAT IS A
+    DISCRIMINATION DECISION RATHER THAN AN ORGANISATIONAL ONE. W1-T362 extended `executed_stale` to
+    `unit test:` proofs, so a proof reading the same at head and at base substantiates nothing.
+    Pointing these six at the EXISTING `test/mkdtemp-callsite-check.test.ts` would have graded
+    exactly that way: MEASURED 2026-09-03, a pristine `origin/main` worktree at `9e2f5e90` runs
+    `node scripts/mkdtemp-callsite-check.mjs` CLEAN (`648 tracked .ts/.mjs file(s) …, 998
+    allowlisted`, exit 0) now that #3840 has merged, so that suite passes at base and would pass
+    identically at head. A path that does not exist at base CANNOT pass at base, so the new file
+    discriminates BY CONSTRUCTION instead of by the current colour of main — which is another
+    lane's merge to move, exactly the dependency this shard's rationale refuses elsewhere.
+
+    `test/mkdtemp-callsite-check.test.ts` STAYS IN `files:` because the re-key genuinely breaks it:
+    its `W1-T2773 main: an allowlisted <file>:<line> bypasses the rule (the migration parking
+    mechanism)` case asserts the OLD key format directly, seeding a fixture allowlist with
+    `test/bare.test.ts:2`. That test must be rewritten to the new key. No criterion cites it — it
+    is declared because it is edited, not because it proves anything here.
+  acceptance:
+    - claim: "an unrelated line insertion above an allowlisted callsite does not refuse — the regression that exists today under `<file>:<line>` keying is gone"
+      proof: "unit test: test/mkdtemp-allowlist-rekey.test.ts"
+    - claim: "a genuinely new bare-prefix callsite is still refused, so the re-keying did not make the rule soft"
+      proof: "unit test: test/mkdtemp-allowlist-rekey.test.ts"
+    - claim: "an allowlisted prefix appearing in a DIFFERENT file is still refused — the file half of the key keeps its meaning"
+      proof: "unit test: test/mkdtemp-allowlist-rekey.test.ts"
+    - claim: "a callsite whose prefix cannot be statically resolved keys on the file plus an explicit sentinel and remains exemptible, rather than being dropped from the scheme"
+      proof: "unit test: test/mkdtemp-allowlist-rekey.test.ts"
+    - claim: "the key computation and the refusal message read the prefix through one shared extractor, so the two cannot drift apart"
+      proof: "unit test: test/mkdtemp-allowlist-rekey.test.ts"
+    - claim: "the migrated allowlist leaves the checker clean on an unmodified tree, and every generated entry names a prefix that actually occurs in the file it names"
+      proof: "unit test: test/mkdtemp-allowlist-rekey.test.ts"
+  note: |
+    ID PROVENANCE: W1-T2786 was reserved and supplied by the operator. `refs/rmd-dispatch/W1-T2786`
+    was minted BEFORE any work (`rmd-dispatch claim 33775@Remudero 2026-09-03T20:14:01.124Z`).
+    Both scope-time checks ran clean — `git ls-remote --heads origin 'run-W1-T2786-*'` returned 0,
+    and both the anchored trailer scan and the `run-W1-T2786-<digits>` head-ref credit path
+    returned `[]` — each qualified by a positive control on W1-T2749 -> [3773,3771,3768].
+
+    THIS FILING CARRIES NO `Remudero-Task:` TRAILER, DELIBERATELY, and its branch is `plan/…`
+    rather than `run-W1-T2786-<digits>`. A trailer on a filing would credit the task through the
+    authoritative path, so W1-T2786 would read as SHIPPED before any code exists — CLAUDE.md names
+    the weaker form of this ("unioning COMMIT SUBJECTS over-credits: `chore(plan): file W1-T411`
+    names a task the filing never implemented"), and a trailer turns that known subject-scan
+    artifact into an authoritative false credit. The branch name matters for the SAME reason and is
+    the half that is easy to miss: `findMergedByHeadBranch` credits a merge purely from a
+    `run-<taskId>-<digits>` head, with no trailer involved, so a run-shaped filing branch
+    over-credits through the other door. #3833 (`plan/file-w1-t2755-isolation-reason`) is the model
+    this follows.
+
+    SCOPE — DELIBERATELY NOT WIDENED:
+      - The 22 callsites W1-T2773 already migrated are untouched.
+      - The three entries #3840 addressed are untouched; that lane takes the better remedy for them
+        (`${RMD_TMP_PREFIX}` rather than an allowlist entry).
+      - No additional callsites are migrated off the allowlist — that is W1-T2775's tranche work.
+      - This is a keying change plus a mechanical migration. Nothing else.
+
+    THE GENERAL RULE IS RECORDED IN `learnings/` AS PART OF THE IMPLEMENTATION PR, earned by this
+    fix rather than asserted: an assertion anchored to POSITION, or validated against a
+    HAND-MAINTAINED SIDE TABLE, decays silently under a legitimate edit that had no way to know —
+    anchor on content, or derive from observation. Six instances measured in one session, and the
+    sixth is the sharpest because it caught the author inside the fix that records the rule:
+    `<file>:<line>` allowlist keys (995 armed); a task's declared `files:` list invalidated by the
+    source-size ratchet's own prescribed remedy; W1-T1268's wiring guard slicing `start + 4000`
+    chars; `HOST_CAUSED_SUITE_REDS` hand-maintained while `HOST_PARITY_BASELINE` derives the same
+    facts from an observed run; a re-anchor attempt on `costUsd: 0` that landed 18 chars early; and
+    `sandbox-subject-generator`'s hardcoded `smallest === "failures.yaml"` — whose own comment
+    recorded a PRIOR hand-repair, in a file whose header asks the claim be proven "against the real
+    smallest shard, not a stand-in", where the hardcoded name IS the stand-in it warns about.
