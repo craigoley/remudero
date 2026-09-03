@@ -35116,37 +35116,13 @@ function commandSyntax(name: string): string {
   return commandSpec(name).syntax;
 }
 
-/**
- * W1-T151 INSTALL FRESHNESS: sha256 of `package.json` + `package-lock.json` content
- * (order-stable, null-separated) — a workspaces field added to `package.json` with no
- * `package-lock.json` change (or vice versa) still moves this hash, so the fixture task
- * exists for ("the workspace conversion that broke operator builds while CI stayed
- * green") is caught either way. A missing file hashes as empty content rather than
- * throwing — deterministic either way, never a crash on a repo with no lockfile yet.
- * This is a change-detector, not a security digest — collision resistance beyond
- * "npm's own two source files changed" is not the property being relied on.
- */
-export function hashInstallInputs(
-  repoDir: string,
-  deps: { readFile?: (p: string) => string } = {},
-): string {
-  const readFile = deps.readFile ?? ((p: string) => {
-    try {
-      return readFileSync(p, "utf8");
-    } catch {
-      return "";
-    }
-  });
-  const pkg = readFile(join(repoDir, "package.json"));
-  const lock = readFile(join(repoDir, "package-lock.json"));
-  return createHash("sha256").update(pkg).update("\0").update(lock).digest("hex");
-}
-
-/** Where the last-successful-install hash is persisted — inside `node_modules` itself
- * (never committed, and naturally invalidated if `node_modules` is ever wiped wholesale). */
-export function installHashMarkerPath(repoDir: string): string {
-  return join(repoDir, "node_modules", ".rmd-install-hash");
-}
+// W1-T2777: moved to `src/lib/install-hash.ts` so `src/lib/worker.ts` can consume it
+// without a `lib/ → run-task` import edge. Re-exported here so every existing caller
+// (test/run-task.test.ts, test/install-symlink-refusal.test.ts, plus this file's own
+// InstallFreshnessDeps consumers below) keeps its import path unchanged. This is a
+// PURE MOVE — the function body and behaviour are byte-identical to the pre-move version.
+import { hashInstallInputs, installHashMarkerPath } from "./lib/install-hash.js";
+export { hashInstallInputs, installHashMarkerPath };
 
 export interface InstallFreshnessDeps {
   hash?: (repoDir: string) => string;
