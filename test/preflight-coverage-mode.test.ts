@@ -285,7 +285,7 @@ test(
 
 // ── acceptance 4: --fast still shells no test suite now that --coverage exists beside it ────
 
-test("FAST_GATE_STEPS: unaffected by --coverage's existence — still exactly the nine deterministic npm-script gates (the seven pre-existing plus W1-T2491's branch-shape gate plus W1-T2488's source-size-ratchet) plus the four W1-T2478 census entries, no coverage-shaped entry added", () => {
+test("FAST_GATE_STEPS: unaffected by --coverage's existence — still exactly the nine deterministic npm-script gates, including W1-T2734's source-size signal, plus the four W1-T2478 census entries", () => {
   const scripts = FAST_GATE_STEPS.map((s) => s.script).sort();
   assert.deepEqual(scripts, [
     "api-client:check",
@@ -299,7 +299,7 @@ test("FAST_GATE_STEPS: unaffected by --coverage's existence — still exactly th
     "jscpd",
     "learnings-budget-ratchet",
     "no-hand-rolled-fetch:check",
-    "source-size-ratchet",
+    "source-size-signal",
     "worker-branch-shape:check",
   ]);
   for (const step of FAST_GATE_STEPS) {

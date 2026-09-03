@@ -1,7 +1,21 @@
 #!/usr/bin/env node
 // scripts/source-size-ratchet.mjs
 //
-// FIVE RATCHETS AND NOT ONE BOUNDS A SOURCE FILE'S SIZE (W1-T2488).
+// W1-T2734 — SOURCE LINE COUNT IS A REVIEW-RISK SIGNAL, NOT A CORRECTNESS VERDICT.
+//
+// Default mode refreshes origin/main, measures the merge-base-to-HEAD change for each touched
+// src/**/*.ts file, and emits deterministic human plus schema-versioned JSON evidence. Growth is
+// always a successful measurement. An unreadable base or other measurement failure is non-zero.
+// The historical W1-T2488 shared-baseline ratchet remains reproducible only when the caller passes
+// `--baseline`; package.json keeps that explicit compatibility command off the habitual fast gate.
+//
+// Default usage:
+//   node scripts/source-size-ratchet.mjs
+//   node scripts/source-size-ratchet.mjs --json
+//   node scripts/source-size-ratchet.mjs --base <ref>
+//   node scripts/source-size-ratchet.mjs --root <dir>
+//
+// HISTORICAL W1-T2488 RATCHET (EXPLICIT --baseline MODE ONLY).
 //
 // THE ASYMMETRY THIS CLOSES. This repo already ratchets CLAUDE.md's injected byte weight
 // (scripts/claude-md-budget-ratchet.mjs), diff coverage (scripts/coverage-ratchet.mjs),
@@ -27,13 +41,11 @@
 // this task's own rationale cites (32119 for src/run-task.ts, 8445 for src/lib/sweep.ts) are the
 // exact numbers `countLines` returns for the shipped tree, not an approximation of them.
 //
-// WHY THIS BELONGS ON THE HABITUAL FAST GATE (src/lib/ci-parity.ts's `FAST_GATE_STEPS`, W1-T373).
-// That table's admission criterion is deterministic, seconds-fast, no network, demonstrably
-// worth catching -- and explicitly, its `--fast` mode NEVER shells `npm run test:ci` or any bare
-// `npm test`. This script spawns NO CHILD PROCESS AT ALL -- it walks `src/` with `node:fs`'s own
-// `readdirSync`, never `git ls-files` or any other subprocess -- and opens no network connection:
-// every byte it reads comes from a plain recursive directory walk plus one checked-in JSON file.
-// It belongs on the same terms as the other seven non-census entries already there.
+// HISTORICAL FAST-GATE BASIS. W1-T2488's baseline mode qualified because it was deterministic,
+// seconds-fast and local-only. W1-T2734 changes the ordinary path deliberately: it shells git and
+// refreshes origin/main so its PR-relative signal cannot silently measure against a stale base.
+// The baseline implementation below remains local-only and is reachable solely through the
+// explicit `--baseline` compatibility form.
 //
 // WHY A FILESYSTEM WALK, NOT `git ls-files`. A subprocess spawn is exactly the cost this step
 // exists to avoid paying, and `src/` carries no build output or ignored `.ts` file today (an
@@ -41,11 +53,10 @@
 // never silently exempted) -- so walking the directory tree directly gives the identical set of
 // paths `git ls-files -- src` would, with no process spawned to get it.
 //
-// Usage:
-//   node scripts/source-size-ratchet.mjs                          # enforce growth; record non-growth drift
-//   node scripts/source-size-ratchet.mjs --check                  # report baseline drift; never write
-//   node scripts/source-size-ratchet.mjs --root <dir>              # check a different checkout
-//   node scripts/source-size-ratchet.mjs --baseline <path>         # non-default baseline (tests use this)
+// Legacy usage:
+//   node scripts/source-size-ratchet.mjs --baseline scripts/source-size-baseline.json
+//   node scripts/source-size-ratchet.mjs --baseline scripts/source-size-baseline.json --check
+//   node scripts/source-size-ratchet.mjs --root <dir> --baseline <path>
 //
 // Defaults: --root . (resolved to an absolute path), --baseline <root>/scripts/source-size-baseline.json
 //
@@ -56,6 +67,7 @@
 // sibling gate.
 
 import { readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { join, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
 
@@ -241,7 +253,7 @@ function measureAll(root, files) {
   return currentLines;
 }
 
-function main(argv) {
+function runLegacyRatchet(argv) {
   const { values } = parseArgs({
     args: argv,
     options: {
@@ -355,6 +367,131 @@ function main(argv) {
     writeFileSync(baselinePath, `${JSON.stringify(verdict.nextBaseline, null, 2)}\n`);
   }
   return 0;
+}
+
+// W1-T2734 — SOURCE SIZE IS A SIGNAL, NOT A CORRECTNESS VERDICT.
+//
+// The baseline ratchet above is retained only behind an explicit `--baseline` argument so old
+// evidence and deliberate historical-ledger maintenance remain reproducible. The ordinary CLI
+// path — and the package script/FAST_GATE_STEPS entry wired to it — never reads or writes that
+// shared file. It measures the current PR against its refreshed merge base and emits evidence a
+// reviewer or future routing policy can consume. Positive growth is always exit 0; only an
+// inability to measure is a failure.
+
+export const SOURCE_SIZE_SIGNAL_SCHEMA_VERSION = 1;
+
+function gitResult(root, args) {
+  return spawnSync("git", args, { cwd: root, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
+}
+
+function runGit(root, args, stage) {
+  const result = gitResult(root, args);
+  if (result.status !== 0) {
+    const detail = `${result.stderr || result.stdout || "git returned no diagnostic"}`.trim();
+    throw new Error(`${stage}: ${detail}`);
+  }
+  return result.stdout;
+}
+
+function gitPathExists(root, revision, path) {
+  const result = gitResult(root, ["cat-file", "-e", `${revision}:${path}`]);
+  if (result.status === 0) return true;
+  if (result.status === 128) return false;
+  const detail = `${result.stderr || result.stdout || "git returned no diagnostic"}`.trim();
+  throw new Error(`inspect ${path} at base: ${detail}`);
+}
+
+/** Pure report builder used after the git boundary has supplied before/after text. */
+export function buildSourceSizeSignal(base, head, entries) {
+  const hotspots = [...entries]
+    .sort((a, b) => a.path.localeCompare(b.path))
+    .map(({ path, before, after }) => {
+      const beforeLines = countLines(before);
+      const afterLines = countLines(after);
+      const deltaLines = afterLines - beforeLines;
+      return {
+        path,
+        before_lines: beforeLines,
+        after_lines: afterLines,
+        delta_lines: deltaLines,
+        delta_percent: beforeLines === 0 ? null : Number(((deltaLines / beforeLines) * 100).toFixed(2)),
+      };
+    });
+  return { schema_version: SOURCE_SIZE_SIGNAL_SCHEMA_VERSION, base, head, hotspots };
+}
+
+/** Read the refreshed merge-base-to-HEAD source diff. No baseline file is consulted. */
+export function measureSourceSizeSignal(root, baseRef = "origin/main") {
+  if (baseRef === "origin/main") {
+    runGit(root, ["fetch", "origin", "main"], "refresh origin/main");
+  }
+  const head = runGit(root, ["rev-parse", "HEAD"], "resolve HEAD").trim();
+  const base = runGit(root, ["merge-base", baseRef, "HEAD"], `resolve merge base against ${baseRef}`).trim();
+  if (!/^[0-9a-f]{40}$/i.test(base) || !/^[0-9a-f]{40}$/i.test(head)) {
+    throw new Error("git did not return full commit identities for the merge base and HEAD");
+  }
+  const paths = runGit(
+    root,
+    ["diff", "--name-only", "--diff-filter=ACMR", `${base}...HEAD`, "--", "src"],
+    "list changed source files",
+  )
+    .split("\n")
+    .map((path) => path.trim())
+    .filter((path) => path.startsWith("src/") && path.endsWith(".ts"))
+    .sort();
+  const entries = paths.map((path) => ({
+    path,
+    before: gitPathExists(root, base, path) ? runGit(root, ["show", `${base}:${path}`], `read ${path} at base`) : "",
+    after: runGit(root, ["show", `HEAD:${path}`], `read ${path} at HEAD`),
+  }));
+  return buildSourceSizeSignal(base, head, entries);
+}
+
+export function renderSourceSizeSignal(report) {
+  const lines = [
+    `source-size-signal: OK — ${report.hotspots.length} changed source file(s); line count is a risk signal, not a correctness verdict.`,
+  ];
+  for (const hotspot of report.hotspots) {
+    const delta = hotspot.delta_lines >= 0 ? `+${hotspot.delta_lines}` : `${hotspot.delta_lines}`;
+    const percent =
+      hotspot.delta_percent === null
+        ? "new file"
+        : `${hotspot.delta_percent >= 0 ? "+" : ""}${hotspot.delta_percent.toFixed(2)}%`;
+    lines.push(`  - ${hotspot.path}: ${hotspot.before_lines} -> ${hotspot.after_lines} (${delta}, ${percent})`);
+  }
+  lines.push(`source-size-signal-json: ${JSON.stringify(report)}`);
+  return lines.join("\n");
+}
+
+function main(argv) {
+  // Compatibility is explicit and therefore cannot be reached from the new package/fast-gate
+  // surface. Keeping it makes every pre-W1-T2734 ratchet fixture reproducible without letting the
+  // historical shared baseline decide whether an ordinary PR is correct.
+  if (argv.includes("--baseline")) return runLegacyRatchet(argv);
+
+  let values;
+  try {
+    ({ values } = parseArgs({
+      args: argv,
+      options: {
+        root: { type: "string", default: "." },
+        base: { type: "string", default: "origin/main" },
+        json: { type: "boolean", default: false },
+      },
+    }));
+  } catch (e) {
+    console.error(`source-size-signal: MEASUREMENT FAILED — invalid arguments: ${String(e.message ?? e)}`);
+    return 1;
+  }
+
+  try {
+    const report = measureSourceSizeSignal(resolve(values.root), values.base);
+    console.log(values.json ? JSON.stringify(report) : renderSourceSizeSignal(report));
+    return 0;
+  } catch (e) {
+    console.error(`source-size-signal: MEASUREMENT FAILED — ${String(e.message ?? e)}`);
+    return 1;
+  }
 }
 
 // Importing this module must not run it (process.argv[1] is undefined when eval'd) -- W1-T438's
