@@ -1,0 +1,84 @@
+- id: W1-T2753
+  title: "a thrown review attempt is recorded as a permanent semantic refusal, so the stale-pending recovery rule selects the review lane after its ceiling and the refusal dedup vetoes that same recovery forever"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 28.00
+  risk: high
+  files:
+    - src/lib/sweep.ts
+    - test/post-review-throw-backoff.test.ts
+  origin: "oper#pr-3766-stale-pending-refusal-deadlock-2026-09-03"
+  plan_refs: ["W1-T529", "W1-T913", "W1-T1018", "W1-T1213", "W1-T2427"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THIS STRANDED A GREEN PR AFTER THE RECOVERY CLOCK EXPIRED. PR #3766 had every CI check green
+    and `remudero-review=pending` on head 4f6fe547. The review command posted that ownership status
+    at 2026-09-03T03:12:13Z, then the old materializer threw because it checked out 2cf0728a while
+    GitHub's PR head was 4f6fe547. The post-review pool caught the throw and wrote an exact-input
+    `review.post_refused` row. At 04:13:10Z the pending was 60 minutes old, so W1-T913 correctly
+    derived `post-review` and said it was re-running the unattended lane. The action did not run:
+    `prior.reviewRefused` matched the same task, PR URL, head and body digest and finalized
+    `acted:false`. Later passes repeat that contradiction while GitHub stays pending.
+
+    TWO CORRECT SAFETY RULES COMPOSE INTO A PERMANENT VETO. W1-T529 records an ordinary thrown
+    attempt so it cannot spend a model call every sweep. W1-T913 re-offers a pending whose owner
+    has not completed before `pendingCeilingMinutes`. `priorActionsFromLedger` puts the thrown
+    attempt in the same permanent `reviewRefused` set as semantic and lifecycle refusals, so the
+    later W1-T913 decision has no way to distinguish "do not retry this tick" from "never retry
+    this input." The disposition reason claims recovery while the admission guard forbids it.
+
+    THIS IS NOT W1-T1213'S CLOSED-LIFECYCLE CASE. That task excludes one refusal whose named
+    condition is disproved when a PR is read open again; it deliberately keeps every other refusal
+    forever. A thrown review is different: it made no semantic or merge decision, and the
+    materialization, network, provider or process condition can recover without a PR edit. Treating
+    it as a durable verdict makes operational repair invisible until a human manufactures a new
+    head or body digest.
+  design: |
+    Split sweep-generated `post-review attempt threw` outcomes from durable review-post refusals
+    when folding prior actions. Keep the exact-input identity, but retain the latest parseable
+    refusal timestamp instead of permanent set membership. While that attempt is newer than the
+    existing `pendingCeilingMinutes`, the post-review admission must stand down and name the
+    elapsed-time backoff. Once the same ceiling has elapsed, or the retryable row cannot be dated,
+    re-admit the exact input. A failed retry writes a new timestamp through the existing catch and
+    starts a fresh bounded interval; it must not run again on every sweep.
+
+    Reuse `pendingCeilingMinutes`, not a new policy value: this is the same incomplete review whose
+    pending owner W1-T913 already times with that ceiling. Do not consume the completed-judgment
+    `reviewOrphanCap`; a thrown attempt produced no judgment. Do not weaken durable refusals from
+    lifecycle, precedence or the guarded status poster. A delivered `review.posted` verdict still
+    wins immediately. A changed head or body still resets structurally through the exact-input key.
+
+    Fail open once for an undated retryable throw, matching W1-T913's undated-pending direction.
+    If the condition persists, the retry writes a fresh dated row and restores the bound. The
+    implementation changes review admission only; it posts no verdict, arms no merge and does not
+    alter Claude/Codex provider selection.
+  acceptance:
+    - claim: "a stale pending input whose last post-review attempt threw is re-admitted after the existing pending ceiling instead of being permanently suppressed"
+      proof: "unit test: test/post-review-throw-backoff.test.ts"
+    - claim: "the same thrown input is suppressed before the pending ceiling, and its stand-down reason names the retry backoff rather than claiming a durable verdict"
+      proof: "unit test: test/post-review-throw-backoff.test.ts"
+    - claim: "a second throw advances the retry timestamp, so repeated failures run at most once per pending-ceiling interval rather than once per sweep"
+      proof: "unit test: test/post-review-throw-backoff.test.ts"
+    - claim: "an undated retryable throw is admitted once and a fresh failure restores a dated bound"
+      proof: "unit test: test/post-review-throw-backoff.test.ts"
+    - claim: "semantic, precedence and lifecycle refusals remain durably deduped, and a delivered verdict still suppresses the exact input"
+      proof: "unit test: test/post-review-throw-backoff.test.ts"
+    - claim: "a new head or changed PR body receives a new exact-input key and is immediately eligible under the existing behavior"
+      proof: "unit test: test/post-review-throw-backoff.test.ts"
+  falsifier: |
+    Close this task without implementation if a fresh replay of the #3766 ledger through
+    `runSweep` dispatches `postReview` after the 60-minute pending ceiling despite the exact-input
+    `review.post_refused` row, or if the thrown-attempt row already has an elapsed-time release that
+    advances on each failure. Re-design rather than deleting dedup if a persistent throw can invoke
+    the review lane on consecutive sweeps.
+  note: |
+    ID PROVENANCE: `rmd next-task-id --reserve` measured max 2752 across the merged plan, open PRs
+    and plan history, then atomically created `refs/rmd-id/W1-T2753` on origin in one attempt.
+
+    SCOPE: `src/lib/sweep.ts` owns both the thrown-attempt row and the prior-action admission fold,
+    so the bounded retry can be implemented and tested without changing the reviewer, provider
+    router or GitHub status poster. The test file is new and dedicated to this composition defect.
