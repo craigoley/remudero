@@ -14,6 +14,7 @@ import {
 } from "../src/lib/review.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import { makeTempDir } from "../src/lib/tmp.js";
+import { ciGateFromRollup, fetchCiFailures } from "../src/run-task.js";
 
 const PR_URL = "https://github.com/craigoley/remudero/pull/3840";
 const HEAD = "61f35181057c37af013b5e46c29a4cc43d388505";
@@ -140,7 +141,29 @@ test("W1-T2793: a subject that genuinely has no criteria still fails closed", ()
   }
 });
 
-test("W1-T2793: the sibling CI-reader disagreement remains explicitly outside this review-status shard", () => {
-  const scope = "CI rollup reconciliation is out of scope here: its defect is pinning not parsing";
+test("W1-T2793: the sibling CI-reader disagreement (instance 1: ciGateFromRollup vs fetchCiFailures) remains explicitly outside this review-status shard", () => {
+  // Grounded in the REAL exported symbols (src/run-task.ts), not a re-declared stand-in — a
+  // rename or a caller-side fix to either would break THIS import, not just a string literal.
+  //
+  // Neither reader takes an owner+sha and fetches its own rollup: `ciGateFromRollup` takes only
+  // the rollup, and `fetchCiFailures` takes the rollup as its third argument (before the two
+  // defaulted trailing params). Neither can pin anything itself, so instance 1's measured
+  // disagreement (poll-start sha vs current head) is necessarily supplied by their CALLERS.
+  assert.equal(ciGateFromRollup.length, 1, "ciGateFromRollup takes only the rollup it judges");
+  assert.equal(fetchCiFailures.length, 3, "fetchCiFailures takes the rollup as its 3rd argument");
+
+  // Fed the IDENTICAL rollup, both readers agree — the parsers themselves do not disagree about
+  // one subject; only a caller handing them two DIFFERENT rollups (two different pinned shas)
+  // could reproduce instance 1, which is exactly why a parser-only unification cannot close it.
+  const sameRollup = [{ name: "ci", conclusion: "SUCCESS" }];
+  assert.equal(ciGateFromRollup(sameRollup), "green");
+  assert.equal(fetchCiFailures("owner", "repo", sameRollup).length, 0);
+
+  // This shard's declared files are src/lib/sweep.ts, src/lib/review.ts, and this test — NOT
+  // src/run-task.ts, where both readers' callers (and their sha-pinning) actually live. So
+  // instance 1 stays explicitly out of scope here rather than silently claimed closed.
+  const scope =
+    "CI rollup reconciliation (src/run-task.ts's ciGateFromRollup/fetchCiFailures callers) " +
+    "is out of scope here: its defect is pinning not parsing";
   assert.match(scope, /pinning not parsing/);
 });
