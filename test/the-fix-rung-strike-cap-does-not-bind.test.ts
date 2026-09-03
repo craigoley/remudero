@@ -9,8 +9,8 @@ import { appendLedger } from "../src/lib/ledger.js";
 
 // ── W1-T2520 — THE FIX-RUNG STRIKE CAP DOES NOT BIND ─────────────────────────────────────────
 //
-// `priorStrikesFor` (run-task.ts) derives `OpenPrView.priorStrikes` by COUNTING `fix.dispatch`
-// ledger rows at OpenPrView-build time — a read-modify-write with no mutual exclusion — while
+// `priorStrikesFor` (run-task.ts) derives `OpenPrView.priorStrikes` by counting the current head's
+// `fix.dispatch` ledger rows at OpenPrView-build time — a read-modify-write with no mutual exclusion — while
 // `deps.dispatchFix` ("the one lane W1-T1211 admits into the light pass that spends a worker",
 // sweep.ts's own doc) had no claim at all, unlike the review lane's `inFlightReviewKeys`
 // (W1-T513). Live: 13 fix-worker dispatches across two PRs against a `strikeCap` of 2, and one
@@ -134,10 +134,11 @@ test("acceptance 2 — the strike count is read under the claim, so both callers
 test("acceptance 3 — a PR at its strike cap dispatches nothing, however many sweeps observe it", async () => {
   const lp = ledgerPath();
   const taskId = "W1-CAP3";
+  const headSha = "sha-cap3";
   for (let i = 0; i < DEFAULT_SWEEP_POLICY.strikeCap; i++) {
-    appendLedger(lp, { run_id: "SWEEP-0", task_id: taskId, step: "fix.dispatch", strike: i + 1 });
+    appendLedger(lp, { run_id: "SWEEP-0", task_id: taskId, step: "fix.dispatch", strike: i + 1, head_sha: headSha });
   }
-  const staleView = pr({ prNumber: 2003, prUrl: "url/2003", taskId, headSha: "sha-cap3", priorStrikes: 0 });
+  const staleView = pr({ prNumber: 2003, prUrl: "url/2003", taskId, headSha, priorStrikes: 0 });
   const deps = fakeDeps({ ledgerPath: lp });
 
   // Five SEPARATE sweeps, none concurrent with another — the shape the live incident's own
@@ -276,4 +277,54 @@ test("acceptance 8 — removing (releasing) the claim lets a later sweep dispatc
   const depsC = fakeDeps({ ledgerPath: lp });
   await runSweep([pushedTarget], depsC, DEFAULT_SWEEP_POLICY);
   assert.equal(depsC.fixed.length, 1, "once the claim is removed, a later sweep dispatches again — its own (second, still-under-cap) strike");
+});
+
+test("W1-T2788: tagged strikes on the unchanged head still exhaust the fresh under-claim count", async () => {
+  const lp = ledgerPath();
+  const taskId = "W1-T2788-SAME";
+  const headSha = "sha-current";
+  for (let i = 0; i < DEFAULT_SWEEP_POLICY.strikeCap; i++) {
+    appendLedger(lp, {
+      run_id: "SWEEP-0",
+      task_id: taskId,
+      step: "fix.dispatch",
+      strike: i + 1,
+      head_sha: headSha,
+    });
+  }
+  const staleView = pr({ prNumber: 6001, prUrl: "url/6001", taskId, headSha, priorStrikes: 0 });
+  const deps = fakeDeps({ ledgerPath: lp });
+
+  const summary = await runSweep([staleView], deps, DEFAULT_SWEEP_POLICY);
+
+  assert.equal(deps.fixed.length, 0, "the same bad head cannot recover budget merely because rows are tagged");
+  assert.equal(summary.actions[0].acted, false);
+  assert.match(String(standDownReasonFor(lp, staleView.prNumber)), /fix strikes exhausted under the claim/);
+});
+
+test("W1-T2788: concurrent observations of one task at different heads never share a fix claim or strike budget", async () => {
+  const lp = ledgerPath();
+  const taskId = "W1-T2788-CHANGED";
+  const oldHead = pr({ prNumber: 6002, prUrl: "url/6002", taskId, headSha: "sha-old" });
+  const newHead = { ...oldHead, headSha: "sha-new" };
+  let releaseOld: (() => void) | undefined;
+  const oldGate = new Promise<void>((resolve) => {
+    releaseOld = resolve;
+  });
+  const oldDeps = fakeDeps({
+    ledgerPath: lp,
+    dispatchFix: async () => {
+      await oldGate;
+    },
+  });
+  const newDeps = fakeDeps({ ledgerPath: lp });
+
+  const pendingOld = runSweep([oldHead], oldDeps, DEFAULT_SWEEP_POLICY);
+  await flush();
+  const newSummary = await runSweep([newHead], newDeps, DEFAULT_SWEEP_POLICY);
+
+  assert.equal(newDeps.fixed.length, 1, "the current head dispatches while the stale head's distinct claim is still held");
+  assert.equal(newSummary.actions[0].acted, true);
+  releaseOld?.();
+  await pendingOld;
 });
