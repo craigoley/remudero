@@ -1,0 +1,91 @@
+- id: W1-T2739
+  title: "THE SIZE RATCHET'S REMEDY NOW NAMES A THROWAWAY FILE — the fix that stopped the shipped-tree check writing the tracked baseline made it run against a mkdtemp COPY, so the blocking message tells the author to edit a path that is deleted before they can read it, and the script has no read-only mode that would have made the copy unnecessary"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 8.00
+  files:
+    - scripts/source-size-ratchet.mjs
+    - test/a-source-file-cannot-outgrow-its-baseline.test.ts
+  origin: "operator-session#pr-3743-remedy-names-a-temp-path-2026-09-02"
+  plan_refs: ["W1-T2291"]
+  status: queued
+  attempts: 0
+  note: |
+    SELF-REPORTED REGRESSION. #3683 is mine and its fix was correct — the shipped-tree check really
+    was writing `scripts/source-size-baseline.json` on any run where `src/**` had gained an
+    unrecorded module. Running against a copy stopped that. What it did not account for is that the
+    script prints the baseline path it was GIVEN when it blocks, so the remedy it hands the author
+    now names the copy.
+  rationale: |
+    MEASURED ON PR #3743, 2026-09-02. The gate blocked correctly and printed:
+
+        - src/lib/doctor.ts: 888 lines > baseline 798 lines (+90 line(s) over)
+        - src/run-task.ts: 35508 lines > baseline 35500 lines (+8 line(s) over)
+        TO FIX: either shrink the growth back down, or record it -- edit
+          ../../../tmp/rmd-size-baseline-kqXZ48/source-size-baseline.json and set: ...
+
+    THE VERDICT IS RIGHT AND THE REMEDY IS UNFOLLOWABLE. `rmd-size-baseline-kqXZ48` is an
+    `mkdtemp` directory the test removes in the same run, so an author who follows the instruction
+    edits nothing, or creates a file no gate reads. The number to record is correct; the file to
+    record it in is not.
+
+    ⚠ THIS IS THE PRINTED-REMEDY-NEVER-APPLIED SHAPE, which this repo already has a gate for
+    (`test/a-printed-remedy-is-never-applied.test.ts`). The instruction is precise, actionable in
+    form, and points at nothing.
+
+    WHY THE COPY EXISTED AT ALL. `main()` in `scripts/source-size-ratchet.mjs` does not only READ a
+    baseline: when it sees a source file with no entry it RECORDS one and `writeFileSync`s the
+    result. The shipped-tree check ran it against the real tracked file, so an ordinary suite run
+    edited the repo — measured twice on 2026-09-02, both times adding
+    `src/lib/followup-dedup-census.ts`, and caught only because it tried to ride into two unrelated
+    PRs. #3683 fixed that by copying the baseline under `mkdtemp` first.
+
+    THE COPY WAS THE ONLY TOOL AVAILABLE, AND THAT IS THE ACTUAL DEFECT. The script exposes
+    `--root` and `--baseline` and nothing else: there is no way to ask it to JUDGE without also
+    authorising it to WRITE. A caller that wants a verdict and no side effect has to lie to it
+    about which file it is looking at, and the misleading remedy is the direct cost of that lie.
+
+  design: |
+    (i) A READ-ONLY MODE ON THE SCRIPT. `--check` judges and reports exactly as today and NEVER
+    writes — the same `verdict` and the same exit code, only the `writeFileSync` suppressed. This
+    is the capability whose absence forced the copy.
+
+    (ii) THE TEST THEN USES THE REAL PATH AGAIN. With `--check` the shipped-tree check can pass
+    `scripts/source-size-baseline.json` itself, so the remedy it prints names the file an author
+    actually edits, and the tracked tree still cannot be written — both properties at once, which
+    the copy could only trade against each other.
+
+    (iii) THE REGRESSION PIN CHANGES SHAPE, NOT PURPOSE. #3683 pinned "no test passes the TRACKED
+    baseline", which was right while the copy was the only defence. It becomes "any call naming the
+    tracked baseline must also pass `--check`" — the property that actually matters is that a test
+    cannot authorise a write, not that it cannot name the real file.
+
+    (iv) THE WRITE PATH IS UNTOUCHED WITHOUT THE FLAG. A real operator run still records newly-seen
+    files exactly as today; `--check` is opt-in and changes nothing for any existing caller.
+
+  acceptance:
+    - claim: "the blocking remedy names the tracked baseline an author can actually edit, not a mkdtemp copy"
+      proof: "unit test: test/a-source-file-cannot-outgrow-its-baseline.test.ts"
+    - claim: "--check judges and exits exactly as an ordinary run does, and writes nothing even when the tree carries an unrecorded source file"
+      proof: "unit test: test/a-source-file-cannot-outgrow-its-baseline.test.ts"
+    - claim: "an ordinary run without --check still records a newly-seen file, so the operator path is unchanged"
+      proof: "unit test: test/a-source-file-cannot-outgrow-its-baseline.test.ts"
+    - claim: "a test naming the tracked baseline without --check is refused by the suite's own pin, so the write cannot come back"
+      proof: "unit test: test/a-source-file-cannot-outgrow-its-baseline.test.ts"
+
+  falsifier: |
+    Close this without implementation if the shipped-tree check stops invoking the script as a
+    subprocess — a caller that evaluates the verdict in-process never authorises a write and needs
+    neither the copy nor the flag.
+
+    Re-design rather than build if `--check` cannot suppress the write without also changing the
+    exit code or the reported verdict: a read-only mode that grades differently from the real one
+    would make the gate's own test stop measuring the gate.
+
+    Do NOT resolve this by reverting to the tracked baseline without a read-only mode. That restores
+    the write #3683 removed, and the write is worse than the misleading remedy: it edits a gate's
+    own ceiling from a test run, silently pre-approving growth nobody ratified.
