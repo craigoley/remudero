@@ -13,7 +13,26 @@
 # FIVE REQUIREMENTS, each established rather than assumed — see the report in
 # state/recon-container-build.md for the execution evidence behind each one.
 
-FROM node:22-bookworm-slim
+# W1-T2770: PINNED TO THE EXACT `.nvmrc` VERSION, NOT THE FLOATING `node:22-bookworm-slim` TAG.
+# `scripts/coverage-merge-ratchet.mjs` reaches into `internal/test_runner/coverage` (Node's own
+# built-in test coverage internals, `--expose-internals`), and its `assertPinnedNodeVersion`
+# throws on ANY string mismatch against `.nvmrc` — so a base tag that resolved to `node:22.23.2`
+# turned `test/merge-lcov.test.ts`'s six coverage-merge-CLI tests red with no code change on
+# either side (MEASURED against `# tests 13224 # pass 13217 # fail 6`, W1-T2769's gate run).
+# The tag arrived through an unrelated rebuild, silently — the floating `22` slot moved and no
+# file in this repo did — which is the whole reason this pin exists.
+#
+# WHY NOT A DIGEST. A digest is stronger (it pins every apt-layer patch too) but this repo has
+# no digest-renewal process today; an unrenewed digest quietly rots the base's security-patch
+# surface, trading a loud version mismatch for a quiet unpatched-base failure. The exact version
+# tag still floats within patch-level rebuilds of `node:22.22.3-bookworm-slim`, which is the
+# residual risk — smaller than a digest's unmaintained-freeze risk, and made loud by W1-T2770's
+# `ci-parity.ts` cluster whenever it happens (the `appliesTo` fires on any drift from
+# `.nvmrc`, not only the specific 22.22.3 -> 22.23.2 direction that caused today's outage).
+#
+# UPDATING THE PIN. Bump both this tag AND `.nvmrc` in the same commit; the cluster's
+# self-expiry then re-arms itself around the new pin the moment the image lands.
+FROM node:22.22.3-bookworm-slim
 
 # ── REQ 1: AN INIT THAT REAPS ────────────────────────────────────────────────────────────────
 # `spawnDetachedGroup` (src/lib/worker-containment.ts) spawns with `detached: true`, so every
