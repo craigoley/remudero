@@ -9,6 +9,7 @@
   risk: high
   files:
     - src/run-task.ts
+    - test/run-task.test.ts
     - test/a-review-materializes-the-exact-pr-head.test.ts
   origin: "oper#pr-3766-exact-head-materialization-2026-09-03"
   plan_refs: ["W1-T185", "W1-T232", "W1-T233"]
