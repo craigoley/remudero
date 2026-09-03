@@ -1999,24 +1999,24 @@ test("resolveReviewTarget: no flag ⇒ the checkout default; --repo overrides (b
 // whitelisted proofs actually EXECUTE, mirroring the fix rung's own
 // `git worktree add origin/<branch>` pattern (reuse, not new machinery).
 
-test("ACCEPTANCE (criterion 4, unit slice): materializeReviewWorktree fetches, adds a worktree at origin/<headRefName>, then reads its tip — returning a path under worktreesDir(config) when the tip matches the PR head", () => {
+test("ACCEPTANCE (criterion 4, unit slice): materializeReviewWorktree fetches by PR number, adds a worktree at the supplied head SHA, then reads its tip", () => {
   const config = drainFixtureConfig();
   const calls: string[] = [];
   const deps: ReviewWorktreeDeps = {
-    fetch: (repoDir) => calls.push(`fetch:${repoDir}`),
-    addWorktree: (repoDir, worktreePath, branch) => calls.push(`add:${repoDir}:${worktreePath}:${branch}`),
+    fetch: (repoDir, prNumber) => calls.push(`fetch:${repoDir}:${prNumber}`),
+    addWorktree: (repoDir, worktreePath, revision) => calls.push(`add:${repoDir}:${worktreePath}:${revision}`),
     revParseHead: (worktreePath) => {
       calls.push(`rev-parse:${worktreePath}`);
       return "cafef00d";
     },
   };
-  const result = materializeReviewWorktree(config, "/repo", 411, "run-W1-T185-123", "cafef00d", deps);
+  const result = materializeReviewWorktree(config, "/repo", 411, "cafef00d", deps);
   const path = result.worktreePath;
   assert.ok(path, "materialization reports success");
   assert.equal(result.failure, undefined, "a success carries no failure");
   assert.ok(path!.startsWith(join(config.root, "worktrees")), "path lives under worktreesDir(config)");
   assert.ok(path!.includes("review-PR411-"), "path is scoped to the PR number");
-  assert.deepEqual(calls, [`fetch:/repo`, `add:/repo:${path}:run-W1-T185-123`, `rev-parse:${path}`]);
+  assert.deepEqual(calls, [`fetch:/repo:411`, `add:/repo:${path}:cafef00d`, `rev-parse:${path}`]);
 });
 
 test("materializeReviewWorktree returns a NAMED fetch-failure reason (never throws) when fetch fails — network unavailable is a FALLBACK trigger, not a crash", () => {
@@ -2028,7 +2028,7 @@ test("materializeReviewWorktree returns a NAMED fetch-failure reason (never thro
     addWorktree: () => assert.fail("addWorktree must not be reached when fetch already failed"),
     revParseHead: () => assert.fail("revParseHead must not be reached when fetch already failed"),
   };
-  const result = materializeReviewWorktree(config, "/repo", 391, "some-branch", "cafef00d", deps);
+  const result = materializeReviewWorktree(config, "/repo", 391, "cafef00d", deps);
   assert.equal(result.worktreePath, undefined);
   assert.equal(result.failure?.errorClass, "fetch-failure");
   assert.equal(result.failure?.message, "network unreachable");
@@ -2043,7 +2043,7 @@ test("materializeReviewWorktree returns a NAMED (\"other\") reason (never throws
     },
     revParseHead: () => assert.fail("revParseHead must not be reached when addWorktree already failed"),
   };
-  const result = materializeReviewWorktree(config, "/repo", 397, "deleted-branch", "cafef00d", deps);
+  const result = materializeReviewWorktree(config, "/repo", 397, "cafef00d", deps);
   assert.equal(result.worktreePath, undefined);
   assert.equal(result.failure?.errorClass, "other");
   assert.match(result.failure?.message ?? "", /deleted-branch/);
@@ -2058,7 +2058,7 @@ test("materializeReviewWorktree classifies a worktree-collision distinctly from 
     },
     revParseHead: () => assert.fail("revParseHead must not be reached when addWorktree already failed"),
   };
-  const result = materializeReviewWorktree(config, "/repo", 398, "held-branch", "cafef00d", deps);
+  const result = materializeReviewWorktree(config, "/repo", 398, "cafef00d", deps);
   assert.equal(result.worktreePath, undefined);
   assert.equal(result.failure?.errorClass, "worktree-collision");
 });
@@ -2080,7 +2080,7 @@ test("W1-T233 (criterion 1): a failure AFTER worktree creation (revParseHead thr
     },
     removeWorktree: (repoDir, worktreePath) => removeCalls.push(`${repoDir}:${worktreePath}`),
   };
-  const result = materializeReviewWorktree(config, "/repo", 399, "some-branch", "cafef00d", deps);
+  const result = materializeReviewWorktree(config, "/repo", 399, "cafef00d", deps);
   assert.equal(result.worktreePath, undefined);
   assert.equal(result.failure?.errorClass, "other");
   assert.match(result.failure?.message ?? "", /not a git repository/);
@@ -2099,7 +2099,7 @@ test("W1-T233: a fetch failure never attempts a removal — nothing was created 
     revParseHead: () => assert.fail("revParseHead must not be reached when fetch already failed"),
     removeWorktree: (repoDir, worktreePath) => removeCalls.push(`${repoDir}:${worktreePath}`),
   };
-  materializeReviewWorktree(config, "/repo", 400, "some-branch", "cafef00d", deps);
+  materializeReviewWorktree(config, "/repo", 400, "cafef00d", deps);
   assert.deepEqual(removeCalls, []);
 });
 
@@ -2119,7 +2119,7 @@ test("W1-T233: a removal failure during cleanup is swallowed (logged), never mas
         throw new Error("removal also failed");
       },
     };
-    const result = materializeReviewWorktree(config, "/repo", 401, "some-branch", "cafef00d", deps);
+    const result = materializeReviewWorktree(config, "/repo", 401, "cafef00d", deps);
     assert.equal(result.worktreePath, undefined);
     assert.match(result.failure?.message ?? "", /original failure: rev-parse exploded/);
     assert.ok(
@@ -2143,7 +2143,7 @@ test("materializeReviewWorktree THROWS (does not return undefined) when the mate
     revParseHead: () => "stale0ld",
   };
   assert.throws(
-    () => materializeReviewWorktree(config, "/repo", 402, "moved-branch", "cafef00d", deps),
+    () => materializeReviewWorktree(config, "/repo", 402, "cafef00d", deps),
     /stale0ld.*cafef00d|cafef00d.*stale0ld/s,
   );
 });
@@ -2160,7 +2160,7 @@ test("W1-T233: a tip-mismatch throw ALSO removes the just-created worktree befor
     revParseHead: () => "stale0ld",
     removeWorktree: (repoDir, worktreePath) => removeCalls.push(`${repoDir}:${worktreePath}`),
   };
-  assert.throws(() => materializeReviewWorktree(config, "/repo", 403, "moved-branch", "cafef00d", deps));
+  assert.throws(() => materializeReviewWorktree(config, "/repo", 403, "cafef00d", deps));
   assert.equal(removeCalls.length, 1, "the mismatched worktree is torn down exactly once before the throw");
 });
 
@@ -2318,7 +2318,7 @@ test("ACCEPTANCE (criterion 4, full chain): an operator-path review over a PR wh
     },
     revParseHead: () => "cafef00d",
   };
-  const worktreePath = materializeReviewWorktree(config, "/repo", 411, "run-W1-T185-fixture", "cafef00d", deps)
+  const worktreePath = materializeReviewWorktree(config, "/repo", 411, "cafef00d", deps)
     .worktreePath;
   assert.ok(worktreePath, "materialization succeeded");
   try {
@@ -2345,17 +2345,18 @@ test("ACCEPTANCE (criterion 4, full chain): an operator-path review over a PR wh
 // produces a detached worktree, never collides with another worktree already
 // holding the branch, and still executes proofs there (detached parity).
 
-test("W1-T232: realReviewWorktreeDeps.addWorktree yields a DETACHED worktree at the branch tip (proof there is no checkout -B, which would leave HEAD symbolic)", () => {
-  const { localDir } = gitFixture();
+test("W1-T232: realReviewWorktreeDeps.addWorktree yields a DETACHED worktree at the exact PR head (proof there is no checkout -B, which would leave HEAD symbolic)", () => {
+  const { originDir, localDir } = gitFixture();
   execFileSync("git", ["-C", localDir, "checkout", "-q", "-b", "feature-x"]);
   writeFileSync(join(localDir, "plan", "feature.txt"), "on the feature branch\n", "utf8");
   execFileSync("git", ["-C", localDir, "add", "."]);
   execFileSync("git", ["-C", localDir, "commit", "--quiet", "-m", "feature work"]);
   execFileSync("git", ["-C", localDir, "push", "--quiet", "origin", "feature-x"]);
   const headSha = execFileSync("git", ["-C", localDir, "rev-parse", "feature-x"], { encoding: "utf8" }).trim();
+  execFileSync("git", ["-C", originDir, "update-ref", "refs/pull/500/head", headSha]);
 
   const config = drainFixtureConfig();
-  const worktreePath = materializeReviewWorktree(config, localDir, 500, "feature-x", headSha).worktreePath;
+  const worktreePath = materializeReviewWorktree(config, localDir, 500, headSha).worktreePath;
   assert.ok(worktreePath, "materialization succeeded against real git");
   try {
     // `checkout -B <branch>` would leave HEAD as a SYMBOLIC ref to
@@ -2372,7 +2373,7 @@ test("W1-T232: realReviewWorktreeDeps.addWorktree yields a DETACHED worktree at 
 });
 
 test("W1-T232: materialization SUCCEEDS (no collision) while another real worktree already holds the PR's branch — the exact defect this task removes", () => {
-  const { localDir } = gitFixture();
+  const { originDir, localDir } = gitFixture();
   execFileSync("git", ["-C", localDir, "checkout", "-q", "-b", "held-branch"]);
   // At the repo ROOT, not under plan/ — the grep proof's recursive default
   // excludes plan/ (W1-T72, to keep a proof from self-matching its own
@@ -2383,6 +2384,7 @@ test("W1-T232: materialization SUCCEEDS (no collision) while another real worktr
   execFileSync("git", ["-C", localDir, "commit", "--quiet", "-m", "held work"]);
   execFileSync("git", ["-C", localDir, "push", "--quiet", "origin", "held-branch"]);
   const headSha = execFileSync("git", ["-C", localDir, "rev-parse", "held-branch"], { encoding: "utf8" }).trim();
+  execFileSync("git", ["-C", originDir, "update-ref", "refs/pull/501/head", headSha]);
   execFileSync("git", ["-C", localDir, "checkout", "-q", "main"]);
 
   // Seed a SECOND worktree that already holds `held-branch` — this is exactly
@@ -2393,7 +2395,7 @@ test("W1-T232: materialization SUCCEEDS (no collision) while another real worktr
   const config = drainFixtureConfig();
   let worktreePath: string | undefined;
   try {
-    worktreePath = materializeReviewWorktree(config, localDir, 501, "held-branch", headSha).worktreePath;
+    worktreePath = materializeReviewWorktree(config, localDir, 501, headSha).worktreePath;
     assert.ok(worktreePath, "materialization succeeds even though another worktree holds the branch");
 
     const criteria = [{ claim: "the held marker is present", proof: "grep: held elsewhere in held.txt" }];
@@ -2407,16 +2409,14 @@ test("W1-T232: materialization SUCCEEDS (no collision) while another real worktr
   }
 });
 
-test("W1-T232: a stale origin ref (materialized tip != PR head SHA) throws loudly through real git too — no verdict would ever be posted", () => {
-  const { localDir } = gitFixture();
-  execFileSync("git", ["-C", localDir, "checkout", "-q", "-b", "moving-branch"]);
-  execFileSync("git", ["-C", localDir, "push", "--quiet", "origin", "moving-branch"]);
-  execFileSync("git", ["-C", localDir, "checkout", "-q", "main"]);
-
-  const config = drainFixtureConfig();
-  // Claim a PR head SHA that does NOT match what's actually on origin/moving-branch —
-  // simulating a fetch that raced a force-push/rebase after the PR view was read.
-  assert.throws(() => materializeReviewWorktree(config, localDir, 502, "moving-branch", "0000000000000000000000000000000000000000"));
+test("W1-T2751: an unreadable supplied SHA fails closed during real worktree creation — no arbitrary ref is reviewed", () => {
+  const { originDir, localDir } = gitFixture();
+  const advertisedHead = execFileSync("git", ["-C", localDir, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  execFileSync("git", ["-C", originDir, "update-ref", "refs/pull/502/head", advertisedHead]);
+  const result = materializeReviewWorktree(drainFixtureConfig(), localDir, 502, "0000000000000000000000000000000000000000");
+  assert.equal(result.worktreePath, undefined);
+  assert.equal(result.failure?.errorClass, "other");
+  assert.match(result.failure?.message ?? "", /invalid reference/);
 });
 
 // ── W1-T185 (Gap 2, criterion 6): a materialized worktree is torn down on ──

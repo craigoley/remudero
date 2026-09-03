@@ -13555,11 +13555,11 @@ export function buildBaseProofDir(
 // keyword-only BY CONSTRUCTION, not by defect: it never checked anything out.
 //
 // Preferred fix, per the task's own design note: materialize a throwaway
-// worktree at the PR's head branch and execute there — REUSE of the exact
-// `git worktree add origin/<branch>` pattern `buildSweepEffects`'s
-// `dispatchFix` path already uses for the SAME purpose (see that function,
-// above), never new machinery. Teardown is the CALLER's job (a `finally` in
-// `reviewCommand`, below) so it covers every exit path.
+// worktree at the PR's exact head commit and execute there. GitHub's read-only
+// `refs/pull/<number>/head` ref makes that object available; the REST-supplied
+// SHA remains checkout authority even when the mutable source branch moves.
+// Teardown is the CALLER's job (a `finally` in `reviewCommand`, below) so it
+// covers every exit path.
 //
 // W1-T232: the original shape here ALSO ran `git checkout -B <branch>
 // origin/<branch>` after the `worktree add`, purely to give the throwaway
@@ -13584,8 +13584,8 @@ export function buildBaseProofDir(
  * materialization success/failure is a unit fixture, no real git/network
  * involved. */
 export interface ReviewWorktreeDeps {
-  fetch: (repoDir: string) => void;
-  addWorktree: (repoDir: string, worktreePath: string, branch: string) => void;
+  fetch: (repoDir: string, prNumber: number) => void;
+  addWorktree: (repoDir: string, worktreePath: string, revision: string) => void;
   revParseHead: (worktreePath: string) => string;
   /** Best-effort teardown of a worktree THIS attempt itself just created, used
    * only when a LATER step of the SAME attempt fails (W1-T233: a failed
@@ -13597,13 +13597,18 @@ export interface ReviewWorktreeDeps {
 }
 
 const realReviewWorktreeDeps: ReviewWorktreeDeps = {
-  fetch: (repoDir) => execFileSync("git", ["-C", repoDir, "fetch", "origin", "--quiet"], { stdio: "pipe" }),
-  // NO `checkout -B` — `worktree add <path> origin/<branch>` alone already
-  // leaves `<path>` at the right commit, DETACHED, and detached is all a
-  // review's file reads ever need. A named local branch here only exists to
-  // collide with whatever else holds that name (see the block comment above).
-  addWorktree: (repoDir, worktreePath, branch) =>
-    execFileSync("git", ["-C", repoDir, "worktree", "add", worktreePath, `origin/${branch}`], { stdio: "pipe" }),
+  // W1-T2751: fetch GitHub's read-only PR input ref without creating a reusable local ref.
+  // The object becomes available by SHA; neither FETCH_HEAD nor origin/<mutable-branch> is
+  // checkout authority for the review.
+  fetch: (repoDir, prNumber) =>
+    execFileSync(
+      "git",
+      ["-C", repoDir, "fetch", "--quiet", "--no-write-fetch-head", "origin", `refs/pull/${prNumber}/head`],
+      { stdio: "pipe" },
+    ),
+  // NO `checkout -B` and no source-branch ref: the REST-supplied SHA is the exact detached input.
+  addWorktree: (repoDir, worktreePath, revision) =>
+    execFileSync("git", ["-C", repoDir, "worktree", "add", "--detach", worktreePath, revision], { stdio: "pipe" }),
   revParseHead: (worktreePath) =>
     execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], { stdio: "pipe" }).toString().trim(),
 };
@@ -13668,7 +13673,7 @@ export function degradedReasonLedgerFields(materializationFailure?: Materializat
 }
 
 /**
- * Materialize a throwaway worktree at a PR's head branch so `rmd review` can
+ * Materialize a throwaway worktree at a PR's exact head SHA so `rmd review` can
  * execute whitelisted proofs exactly like the automated fix rung does.
  * Returns `{ worktreePath }` on success; on an ORDINARY materialization
  * failure (network, disk, a detached/deleted head) returns `{ worktreePath:
@@ -13700,7 +13705,6 @@ export function materializeReviewWorktree(
   config: Config,
   repoDir: string,
   prNumber: number,
-  headRefName: string,
   headSha: string,
   deps: ReviewWorktreeDeps = realReviewWorktreeDeps,
 ): MaterializeReviewWorktreeResult {
@@ -13708,7 +13712,7 @@ export function materializeReviewWorktree(
   const removeWorktree = deps.removeWorktree ?? worktreeRemove;
 
   try {
-    deps.fetch(repoDir);
+    deps.fetch(repoDir, prNumber);
   } catch (e) {
     // Nothing was created yet — no cleanup needed, only a named reason.
     return {
@@ -13720,7 +13724,7 @@ export function materializeReviewWorktree(
   let created = false;
   let tip: string;
   try {
-    deps.addWorktree(repoDir, worktreePath, headRefName);
+    deps.addWorktree(repoDir, worktreePath, headSha);
     created = true; // the worktree is now on disk — any exit from here must clean it up.
     tip = deps.revParseHead(worktreePath);
   } catch (e) {
@@ -13977,7 +13981,7 @@ interface ReviewCommandDeps {
    *  still runs its own, and a second fetch of an already-fetched ref is a no-op, so this adds an
    *  ordering guarantee rather than a second network cost. Injectable so a test can drive the
    *  unfetched-sha case without a network. */
-  fetchHead?: (repoDir: string) => void;
+  fetchHead?: (repoDir: string, prNumber: number) => void;
   /** Operator CLI remains deterministic; only internal unattended callers opt in. */
   executionMode?: "deterministic" | "semantic";
 }
@@ -14267,7 +14271,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   // outage through its own `fetch-failure` class, which is the degradation path this command
   // already has. Failing here instead would invent a second one for the same condition.
   try {
-    fetchHead(repoRoot);
+    fetchHead(repoRoot, view.number);
   } catch {
     // Swallowed on purpose — see above. The materializer's own fetch names a real outage.
   }
@@ -14376,7 +14380,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   // review falls back to keyword-only — EXPLICITLY marked (criterion 5),
   // never silently, and (W1-T233) the console line below now NAMES why,
   // instead of a bare "unavailable" with the real reason thrown away.
-  const materialized = materialize(config, repoRoot, view.number, view.headRefName, view.headRefOid);
+  const materialized = materialize(config, repoRoot, view.number, view.headRefOid);
   if (materialized.worktreePath === undefined) {
     console.log(
       `(worktree materialization failed [${materialized.failure.errorClass}]: ` +
