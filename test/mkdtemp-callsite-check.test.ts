@@ -69,6 +69,37 @@ test("W1-T2773 classify: a non-tmpdir root is not our concern — the boot sweep
 
 // ── scanFile: locates every callsite and its line number ─────────────────────────────────────
 
+test("W1-T2773 scanFile: a mkdtempSync OCCURRENCE inside a string literal or comment is NOT a callsite -- the rule's own documentation and this file's own fixtures must not be false-positived", () => {
+  // A doc comment discussing the API mentions mkdtempSync(...) in prose. Not a call.
+  const text1 = [
+    "/**",
+    " * `mkdtempSync(join(tmpdir(), \"bare-\"))` is the shape THIS rule refuses.",
+    " */",
+    "function real(){}",
+  ].join("\n");
+  assert.equal(scanFile(text1).length, 0, "prose in a block comment is not a call");
+
+  // A string constant carrying the exact refusal shape as sample text -- e.g. the
+  // INSTRUMENT_SURFACE excuse in src/lib/review.ts.
+  const text2 = `const NOTE = "mkdtempSync(join(tmpdir(), <expr>)) -- the exact shape";`;
+  assert.equal(scanFile(text2).length, 0, "a quoted example is not a call");
+
+  // A test-fixture string in a test file (this rule's own test file's shape).
+  const text3 = "const fixture = 'const d = mkdtempSync(join(tmpdir(), \"sweep-reentry-\"));';";
+  assert.equal(scanFile(text3).length, 0, "a fixture string that quotes the shape is not a call");
+
+  // A real call NEXT TO a comment example must still be caught -- the exclusion is strictly
+  // scoped to the string/comment span, not the whole line.
+  const text4 = [
+    "// example: mkdtempSync(join(tmpdir(), 'quoted-'))",
+    "const real = mkdtempSync(join(tmpdir(), 'sweep-reentry-'));",
+  ].join("\n");
+  const rows = scanFile(text4);
+  assert.equal(rows.length, 1, "a real call after a comment example is one call, not two");
+  assert.equal(rows[0].classification, "bare-literal");
+  assert.equal(rows[0].line, 2);
+});
+
 test("W1-T2773 scanFile: reports the line, the raw arg, and the classification for every callsite", () => {
   const text = [
     "import { mkdtempSync } from 'node:fs';",

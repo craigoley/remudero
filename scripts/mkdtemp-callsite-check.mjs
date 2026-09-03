@@ -194,12 +194,55 @@ export function classifyMkdtempFirstArg(expr) {
 
 const MKDTEMP_RE = /\bmkdtempSync\s*\(/g;
 
-/** Every `mkdtempSync` call in `text`, as {line, arg, classification} rows. */
+/**
+ * The set of [start,end) offsets in `text` that are inside a string, template literal, or
+ * `//`/`/* *​/` comment. A `mkdtempSync` occurrence inside one of these is NOT a real callsite
+ * — it is code text quoted for humans (a doc-comment example, an error message, a test
+ * fixture-string). Without this the scanner false-positives on every place the codebase
+ * DISCUSSES bare-prefix callsites, including this rule's own test file and its own
+ * INSTRUMENT_SURFACE excuse. The primitives (`skipString`) already know how to walk one
+ * string; here we walk them ALL, once per file, and return the exclusion ranges.
+ */
+function stringAndCommentRanges(text) {
+  const ranges = [];
+  let i = 0;
+  while (i < text.length) {
+    const c = text[i];
+    if (c === '"' || c === "'" || c === "`") {
+      const end = skipString(text, i, c);
+      ranges.push([i, end + 1]);
+      i = end + 1;
+      continue;
+    }
+    if (c === "/" && text[i + 1] === "/") {
+      const nl = text.indexOf("\n", i);
+      const end = nl === -1 ? text.length : nl;
+      ranges.push([i, end]);
+      i = end;
+      continue;
+    }
+    if (c === "/" && text[i + 1] === "*") {
+      const end = text.indexOf("*/", i + 2);
+      const stop = end === -1 ? text.length : end + 2;
+      ranges.push([i, stop]);
+      i = stop;
+      continue;
+    }
+    i++;
+  }
+  return ranges;
+}
+
+/** Every `mkdtempSync` call in `text`, as {line, arg, classification} rows.
+ *  Occurrences inside string literals or comments are skipped — see the exclusion helper. */
 export function scanFile(text) {
   const rows = [];
+  const excluded = stringAndCommentRanges(text);
+  const inExcluded = (off) => excluded.some(([a, b]) => off >= a && off < b);
   MKDTEMP_RE.lastIndex = 0;
   let m;
   while ((m = MKDTEMP_RE.exec(text))) {
+    if (inExcluded(m.index)) continue;
     const openIdx = m.index + m[0].length - 1;
     const closeIdx = matchClose(text, openIdx);
     if (closeIdx === -1) continue;
