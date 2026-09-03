@@ -1,0 +1,110 @@
+- id: W1-T2793
+  title: "two acceptance readers posted OPPOSITE remudero-review verdicts to the SAME sha on #3840 — PASS with 3 criteria resolved from the plan, then FAIL 'no acceptance criteria to judge (fail closed)' — on a body that carries a bare ## Acceptance header, three pipe-form bullets AND an anchored trailer, so neither reader lacked anything to read"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: "span"
+  budget_usd: 5.00
+  files: [src/lib/sweep.ts, src/lib/review.ts, test/two-readers-cannot-disagree-about-one-sha.test.ts]
+  origin: "operator-decision#w1-t2793-file-reader-disagreement-2026-09-03"
+  plan_refs: ["W1-T2541", "W1-T2790", "W1-T2791"]
+  status: queued
+  attempts: 0
+  note: |
+    THE EVIDENCE, at head 61f3518 of #3840, both posts to that ONE sha:
+
+      remudero-review=success — PASS — 3 criteria substantiated
+                                (resolved "criteria from plan at 7950eb15… task W1-T2783")
+      remudero-review=failure — FAIL — no acceptance criteria to judge (fail closed)
+
+    TWO EXPLANATIONS ARE ALREADY RULED OUT BY MEASUREMENT, and they are the two a reader reaches
+    for first. Fetched #3840's stored body: it carries a BARE `## Acceptance` header, THREE
+    pipe-form bullets, and an anchored `Remudero-Task: W1-T2783`. So this is NOT a defective body
+    (the block parses), and NOT a missing trailer (it resolves). Both readers had a complete body
+    AND a resolving trailer AND the same plan blob. One found three criteria; the other found zero
+    and failed closed over a PASS.
+
+    WHY THIS IS NOT W1-T2541's CLASS, and the distinction is the point. `src/lib/body-repair.ts`
+    diagnoses a PR blocked BY ITS OWN BODY — quoted `grep:` patterns, a missing trailer, the five
+    hand-repaired PRs its header enumerates. Its stated premise is that "the sweep's diagnosis is
+    already correct and already rendered; only the hand is missing". THIS CASE FALSIFIES THAT
+    PREMISE: the sweep's diagnosis is wrong, on a body that needs no repair. And body-repair is
+    explicitly the DIAGNOSIS half of a future writer ("that half is a separate, separately-reviewed
+    task"). A writer acting on this diagnosis would rewrite the body of a PR that had already
+    PASSED. That raises the stakes from a confusing verdict to a corrupting one, and it is the
+    reason this is filed now rather than absorbed into the repair work.
+
+    THE LEADING HYPOTHESIS — NOT YET MEASURED, and the build must confirm or kill it before
+    changing anything. A PR BODY IS MUTABLE AT A FIXED SHA. Nothing about editing a body moves the
+    head, and `remudero-review` is keyed to the sha alone. So two readers that both "read #3840 at
+    61f3518" can have read DIFFERENT BODIES, and "same sha" does not mean "same subject". That
+    also explains why this repo's own rule holds that the designed path for a stale verdict is a
+    NEW HEAD: the sha is the only key it has, and a body edit does not produce one.
+
+    THE CONFIRMING MEASUREMENT, so the build does not start by guessing: compare the two status
+    posts' timestamps against the PR timeline's body-edit events. If an edit falls between them,
+    the readers disagreed because the subject changed under a key that cannot express the change.
+    If NO edit falls between them, the hypothesis is dead and the cause is in the readers
+    themselves — take that branch rather than forcing the first one.
+  rationale: |
+    THIS IS THE THIRD INSTANCE OF ONE SHAPE — TWO READERS PINNED DIFFERENTLY — AND THE SHAPE, NOT
+    THE PARSER, IS THE DEFECT.
+
+      1. CI, measured by the Azure lane: `ciGateFromRollup` reads REST `/commits/{sha}/check-runs`
+         pinned to a POLL-START sha, while `fetchCiFailures` reads GraphQL `statusCheckRollup` at
+         CURRENT HEAD. The stand-down message then asserts the two "disagree", as though about a
+         common subject.
+      2. ACCEPTANCE, this shard: two readers, one sha, opposite verdicts, complete inputs.
+      3. THE SAME SESSION's #3842 escalation named head `2f6b001e` — a commit that exists as an
+         object but was never on the branch — and listed checks red that are green on the PR's
+         actual head. A reader pinned to a sha nobody else was looking at.
+
+    THE TRAP THIS SHARD EXISTS TO NAME. The obvious fix is "make the sweep use the reviewer's
+    parser". VERIFIED IN SOURCE that it would not be enough for instance 1 and probably not for
+    instance 2: `fetchCiFailures(owner, repo, rollup, …)` and `ciGateFromRollup(rollup)` both take
+    the rollup as an ARGUMENT — neither pins anything itself, so the pinning lives entirely in
+    their CALLERS. A change that unifies the parser without unifying the pinning leaves every
+    instance in place while looking like a fix.
+
+    THE CRITERIA DELIBERATELY DO NOT PRESCRIBE THE FIX. An earlier draft of criterion 2 required
+    `src/lib/sweep.ts` to carry a particular phrase naming which subject it read. That was dropped:
+    it dictates one remedy for a cause this shard has not yet confirmed, and if the confirming
+    measurement points at shared pinning instead, "name the subject" becomes the wrong shape and a
+    criterion nobody can honestly meet. The anchors that remain live in the TEST FILE the build
+    itself authors, where recording scope and direction is ordinary practice here.
+
+    SO THE DELIVERABLE IS A PROPERTY, NOT A REFACTOR: two readers asked about one subject must not
+    be able to publish contradictory verdicts about it, and where they can read different
+    subjects, the verdict must SAY WHICH subject it read rather than implying a common one. What
+    the second half looks like in code is the build's call, informed by the confirming measurement
+    above.
+
+    WHAT THIS SHARD DOES NOT DO. It does not weaken fail-closed. A reader that genuinely finds no
+    criteria must still fail closed — that posture is correct and is not what went wrong here.
+    The defect is a fail-closed verdict OVERWRITING a PASS derived from inputs that were present
+    the whole time.
+  acceptance:
+    - claim: "a regression test reproduces the disagreement shape deterministically — one body and one plan blob, two readers, and it fails when they return different answers about whether criteria exist"
+      proof: "unit test: test/two-readers-cannot-disagree-about-one-sha.test.ts"
+    - claim: "the test records whether the CI reader pair is fixed or explicitly out of scope, so a parser-only change cannot claim the shape is closed while leaving that instance in place"
+      proof: "grep: pinning not parsing in test/two-readers-cannot-disagree-about-one-sha.test.ts"
+    - claim: "fail-closed is preserved: a reader that genuinely resolves zero criteria still fails closed, and the test pins that direction too"
+      proof: "grep: still fails closed in test/two-readers-cannot-disagree-about-one-sha.test.ts"
+  falsifier: |
+    THE HYPOTHESIS IS THE FIRST THING TO FALSIFY, before any code changes. Pull #3840's timeline
+    and compare body-edit event timestamps against the two `remudero-review` status posts. An edit
+    between them confirms "mutable body at a fixed sha"; no edit between them KILLS it and the
+    cause is in the readers. Report which, and do not proceed on the unconfirmed branch.
+
+    THE REGRESSION TEST MUST FAIL BOTH WAYS. Feed both readers one body that HAS criteria: they
+    must agree it has them. Feed both one body that genuinely has NONE: they must agree it has
+    none AND both must still fail closed. A test that only pins the first direction would pass if
+    a future change made both readers blind, which is the vacuous shape this repo keeps meeting.
+
+    AND THE PARSER-ONLY FIX MUST BE SHOWN INSUFFICIENT: after any change, re-check that the CI
+    pair's pinning is addressed or explicitly out of scope. Both take their rollup as an argument,
+    so a parser unification cannot reach it, and a shard that quietly leaves instance 1 in place
+    while claiming the shape is fixed is the failure this filing is written to prevent.
