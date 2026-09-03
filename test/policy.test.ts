@@ -652,8 +652,12 @@ test("REJECTS an Infinity bound the same way — a bound that cannot bind is mal
 
 test("a YAML .nan min can no longer smuggle the stale 30000 proof timeout past its floor", () => {
   // Real YAML text, exactly as a plan PR would carry it — not a hand-built fixture object.
+  // W1-T2742: the value is matched by PATTERN, not by its literal. This replacement used to name
+  // `value: 60000` outright, so raising the operating timeout silently turned the substitution
+  // into a no-op and this guard asserted nothing about the file it had just failed to edit. The
+  // floor (`min: 60000`) is the ruled constant this test is actually about and stays literal.
   const smuggled = readFileSync(SHIPPED, "utf8")
-    .replace("  value: 60000\n  origin: \"lifted:src/lib/review.ts:675", "  value: 30000\n  origin: \"lifted:src/lib/review.ts:675")
+    .replace(/ {2}value: \d+\n {2}origin: "lifted:src\/lib\/review\.ts:675/, '  value: 30000\n  origin: "lifted:src/lib/review.ts:675')
     .replace("  min: 60000", "  min: .nan");
   const raw = parseYaml(smuggled) as Record<string, unknown>;
   assert.equal((raw.proofTimeoutMs as Record<string, unknown>).value, 30_000, "the fixture really does carry the stale 30000");
