@@ -26639,7 +26639,7 @@ export function buildOpenPrViews(
     const newest = peers.length ? Math.max(...peers) : pr.number;
     if (newest > pr.number) supersededPrs.push({ number: pr.number, supersededBy: newest, taskId: t });
   }
-  const supersessionVerdicts = hydrateSupersessionVerdicts(owner, repo, supersededPrs, fetch);
+  const supersessionVerdicts = hydrateSupersessionVerdicts(owner, repo, supersededPrs, fetch, isInPlanScope);
 
   return raw.map((pr) => {
     const taskId = resolveOpenPrTaskId(pr, ledger);

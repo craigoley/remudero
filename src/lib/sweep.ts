@@ -1109,7 +1109,9 @@ export interface OpenPrView {
    * gated by `policy.supersessionDisposalEnabled`) and a second row that lets the bare-number
    * `supersededBy` row YIELD when `status === "unique"`, gated separately by
    * `policy.conceptCoexistenceEnabled` — see that field's own doc for why the gates are kept
-   * apart.
+   * apart. W1-T2779 adds one unconditional, positive yield to that second row for
+   * `status === "complementary"`: a plan-only filing and its non-plan implementation are stages,
+   * not competing concepts, so the experimental concept flag does not govern them.
    *
    * SCOPE (honest, mirrors how `pendingAnswer`/`isPlanFiling` shipped their mechanism ahead of
    * their producer): this field, {@link SupersessionVerdict}, and its `DISPOSITION_RULES` rows
@@ -3187,6 +3189,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     disposition: "stale",
     when: (pr, policy) =>
       pr.supersededBy != null &&
+      pr.supersessionVerdict?.status !== "complementary" &&
       !(policy.conceptCoexistenceEnabled === true && pr.supersessionVerdict?.status === "unique"),
     reason: (pr) => `superseded-by #${pr.supersededBy}`,
   },

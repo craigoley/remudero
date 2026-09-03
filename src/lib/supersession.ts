@@ -19,10 +19,12 @@
  * same pattern `merge-state.ts` and `run-result.ts` already established.
  */
 
-/** W1-T920 — the three outcomes a supersession read may reach. `"indeterminate"` is a REAL
+/** W1-T920/W1-T2779 — the outcomes a supersession read may reach. `"indeterminate"` is a REAL
  *  outcome and never a collapsed failure: a read that could not decide must never read as
- *  `"unique"`, which would SAVE a PR the arithmetic condemned. */
-export type SupersessionStatus = "superseded" | "unique" | "indeterminate";
+ *  `"unique"`, which would SAVE a PR the arithmetic condemned. `"complementary"` is narrower:
+ *  both diffs were read and exactly one is wholly plan scope while the other contains non-plan
+ *  work, so neither stage may erase the other merely because its PR number is lower. */
+export type SupersessionStatus = "superseded" | "unique" | "complementary" | "indeterminate";
 
 /** W1-T920 (design note v) — the diff read, carrying its OWN corpus control. */
 export interface SupersessionDiffFinding {
@@ -45,6 +47,16 @@ export interface SupersessionEvidence {
   diff: SupersessionDiffFinding;
 }
 
+/** W1-T2779 — positive evidence that two same-task PRs are different pipeline stages. Counts are
+ *  the corpus control for the role classification; both are non-zero whenever this is present. */
+export interface SupersessionComplementEvidence {
+  planPrNumber: number;
+  implementationPrNumber: number;
+  taskId: string;
+  planPathCount: number;
+  implementationPathCount: number;
+}
+
 /**
  * W1-T920 — one open PR's supersession finding, read (never computed) by the disposition.
  * W1-T2384 wired its producer: `hydrateSupersessionVerdicts` (`src/lib/open-prs-rest.ts`),
@@ -56,6 +68,8 @@ export interface SupersessionVerdict {
   status: SupersessionStatus;
   /** REQUIRED when `status === "superseded"`; absent otherwise. */
   evidence?: SupersessionEvidence;
+  /** REQUIRED when `status === "complementary"`; absent otherwise. */
+  complement?: SupersessionComplementEvidence;
   /** Human-legible explanation, always present — e.g. why a read came back indeterminate. */
   detail: string;
   /** The diff read behind this verdict, present whenever one was performed — carried on the
