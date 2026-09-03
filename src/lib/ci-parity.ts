@@ -626,6 +626,77 @@ export const HOST_CAUSED_SUITE_REDS: HostCausedSuiteRedEntry[] = [
     note: "deploy/recycle-container.sh:198 `declare -A CAPTURED=()` is bash-4 syntax; this host's /bin/bash has no associative-array support",
     appliesTo: (f) => f.bashMajorVersion !== undefined && f.bashMajorVersion < 4,
   },
+  // ── W1-T2776: SEVEN MORE FILES IN THE SAME CLUSTER, all measured 2026-09-03 on the mini ──────
+  // The entry above is not the whole cluster and never was. `deploy/recycle-container.sh` is the
+  // repo's ONLY bash-4-only script (`declare -A`), and TEN tracked tests reference it in code;
+  // the eight that spawn it through the PATH `bash` — which is 3.2 on darwin — all red, and the
+  // registry named exactly one of them. The remaining two spawn it through a version-resolved
+  // binary (`test/container-config-mount.test.ts`'s `BASH_BIN`) or never spawn it at all, and
+  // both measure `# fail 0`; they are deliberately NOT registered, because an entry for a file
+  // that does not fail would let a real break there read as expected.
+  //
+  // Each `count` below is a MEASURED `# fail` from running that one file on this host at this
+  // sha, not a guess or a share of a total. The scope widening past the single file the shard's
+  // note named is forced by, and validated against, the discovery test in
+  // `test/host-parity-azure-pole.test.ts`: its predicate agrees with the measured pass/fail set
+  // on all ten files, so registering fewer would ship a test that reds on main.
+  //
+  // ONE FIGURE DELIBERATELY LEFT ALONE. `test/recycle-container.test.ts` measures `# fail 18`
+  // today against the 17 the entry above carries — the file gained a test since the W1-T2234
+  // census. That figure is NOT corrected here: the count table in
+  // `test/host-caused-suite-reds.test.ts` exists to stop exactly this number being silently
+  // rebased, and the drift errs in the SAFE direction (a registry that under-counts leaves one
+  // red unexplained and loud; one that over-counts absorbs a real failure). Filed as an
+  // observation rather than fixed in passing.
+  {
+    file: "test/a-lock-whose-container-is-gone-is-reclaimed-not-waited-on.test.ts",
+    cause: "bash-3.2-no-associative-arrays",
+    count: 8,
+    note: "spawns deploy/recycle-container.sh via the PATH `bash`; same `declare -A` refusal and same error text as test/recycle-container.test.ts — measured 8 of 9",
+    appliesTo: (f) => f.bashMajorVersion !== undefined && f.bashMajorVersion < 4,
+  },
+  {
+    file: "test/a-recycle-refuses-a-state-dir-that-is-not-a-checkout.test.ts",
+    cause: "bash-3.2-no-associative-arrays",
+    count: 5,
+    note: "same script, same PATH `bash`, same refusal — measured 5",
+    appliesTo: (f) => f.bashMajorVersion !== undefined && f.bashMajorVersion < 4,
+  },
+  {
+    file: "test/app-auth-satisfies-the-recycle-credential-refusal.test.ts",
+    cause: "bash-3.2-no-associative-arrays",
+    count: 6,
+    note: "same script, same PATH `bash`, same refusal — measured 6 of 6 (every test in the file)",
+    appliesTo: (f) => f.bashMajorVersion !== undefined && f.bashMajorVersion < 4,
+  },
+  {
+    file: "test/daemon-default-credential.test.ts",
+    cause: "bash-3.2-no-associative-arrays",
+    count: 1,
+    note: "only its one spawning test reds; its readFileSync source-assertions over the same script pass — measured 1",
+    appliesTo: (f) => f.bashMajorVersion !== undefined && f.bashMajorVersion < 4,
+  },
+  {
+    file: "test/recycle-capture-falls-back-to-the-shell.test.ts",
+    cause: "bash-3.2-no-associative-arrays",
+    count: 3,
+    note: "same script, same PATH `bash`, same refusal — measured 3",
+    appliesTo: (f) => f.bashMajorVersion !== undefined && f.bashMajorVersion < 4,
+  },
+  {
+    file: "test/the-recovery-path-merges-into-a-shared-checkout.test.ts",
+    cause: "bash-3.2-no-associative-arrays",
+    count: 8,
+    note: "same script, same PATH `bash`, same refusal — measured 8",
+    appliesTo: (f) => f.bashMajorVersion !== undefined && f.bashMajorVersion < 4,
+  },
+  {
+    file: "test/the-recycle-wait-is-sized-under-the-run-it-waits-on.test.ts",
+    cause: "bash-3.2-no-associative-arrays",
+    count: 5,
+    note: "same script, same PATH `bash`, same refusal — measured 5",
+    appliesTo: (f) => f.bashMajorVersion !== undefined && f.bashMajorVersion < 4,
+  },
   {
     file: "test/worker-credential-preflight.test.ts",
     cause: "darwin-keychain-unprovisioned",

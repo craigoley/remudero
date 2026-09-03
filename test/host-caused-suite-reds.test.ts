@@ -77,27 +77,53 @@ test("HOST_CAUSED_SUITE_REDS: the registry's per-cluster counts sum correctly �
   // a cluster whose count moved AND a cluster whose count moved the other way by the same
   // amount, and it silently rebases the "wrong carried 16" evidence trail every time a cluster
   // is added.
-  const expected: Record<string, number> = {
-    "bash-3.2-no-associative-arrays": 17,
-    "darwin-keychain-unprovisioned": 2,
-    "bsd-date-control-arm": 2,
-    "undiagnosed-ps-orphan-sweep": 2,
-    "linux-procfs-absent": 1,
-    "macos-corefoundation-env-leak": 1,
-    "w1-t2205-e2e-darwin-keychain-asymmetry": 1,
+  //
+  // W1-T2776 RE-KEYED THIS TABLE FROM CAUSE TO FILE. Keying by cause silently asserted that a
+  // cause has exactly ONE file, and that assumption is what the registry's gap was made of: the
+  // bash-3.2 cluster has EIGHT files, seven of which went unregistered for hundreds of commits.
+  // Per-FILE rows keep every property the cause-keyed version had — each row still pins one
+  // measured count, a removed registry entry still fails the length check — while letting the
+  // registry say the true thing about a cluster that spans files.
+  const expected: Record<string, { cause: string; count: number }> = {
+    // The W1-T2234 census figure, deliberately NOT rebased to today's measured 18 — see the
+    // note beside the entry in src/lib/ci-parity.ts. This row is the evidence trail the test's
+    // own header paragraph is about.
+    "test/recycle-container.test.ts": { cause: "bash-3.2-no-associative-arrays", count: 17 },
+    // W1-T2776: measured 2026-09-03, one `node --test` run per file on the mini. Every one of
+    // these spawns deploy/recycle-container.sh through the PATH `bash` (3.2 on darwin).
+    "test/a-lock-whose-container-is-gone-is-reclaimed-not-waited-on.test.ts": { cause: "bash-3.2-no-associative-arrays", count: 8 },
+    "test/a-recycle-refuses-a-state-dir-that-is-not-a-checkout.test.ts": { cause: "bash-3.2-no-associative-arrays", count: 5 },
+    "test/app-auth-satisfies-the-recycle-credential-refusal.test.ts": { cause: "bash-3.2-no-associative-arrays", count: 6 },
+    "test/daemon-default-credential.test.ts": { cause: "bash-3.2-no-associative-arrays", count: 1 },
+    "test/recycle-capture-falls-back-to-the-shell.test.ts": { cause: "bash-3.2-no-associative-arrays", count: 3 },
+    "test/the-recovery-path-merges-into-a-shared-checkout.test.ts": { cause: "bash-3.2-no-associative-arrays", count: 8 },
+    "test/the-recycle-wait-is-sized-under-the-run-it-waits-on.test.ts": { cause: "bash-3.2-no-associative-arrays", count: 5 },
+    "test/worker-credential-preflight.test.ts": { cause: "darwin-keychain-unprovisioned", count: 2 },
+    "test/fleet-heartbeat.test.ts": { cause: "bsd-date-control-arm", count: 2 },
+    "test/recovery-drill.test.ts": { cause: "undiagnosed-ps-orphan-sweep", count: 2 },
+    "test/dispatch-memory-governor.test.ts": { cause: "linux-procfs-absent", count: 1 },
+    "test/proof-spawner-env-isolation.test.ts": { cause: "macos-corefoundation-env-leak", count: 1 },
+    "test/worker.test.ts": { cause: "w1-t2205-e2e-darwin-keychain-asymmetry", count: 1 },
     // W1-T2770: the merge-lcov Node-pin-drift cluster is guarded by nodeVersion vs
     // pinnedNodeVersion, an axis independent of the platform/bash/procfs axes above; MEASURED
     // count is exactly the six coverage-merge-CLI tests that fail on any string mismatch.
-    "node-version-drift-from-pin": 6,
+    "test/merge-lcov.test.ts": { cause: "node-version-drift-from-pin", count: 6 },
   };
   for (const entry of HOST_CAUSED_SUITE_REDS) {
-    assert.ok(entry.cause in expected, `unknown cluster ${entry.cause} — declare its expected count here or remove it from the registry`);
-    assert.equal(entry.count, expected[entry.cause], `${entry.cause} count`);
+    const row = expected[entry.file];
+    assert.ok(row, `unregistered file ${entry.file} — declare its expected cause and count here or remove it from the registry`);
+    assert.equal(entry.cause, row.cause, `${entry.file} cause`);
+    assert.equal(entry.count, row.count, `${entry.file} count`);
   }
   assert.equal(
     HOST_CAUSED_SUITE_REDS.length,
     Object.keys(expected).length,
-    "the registry length must match this table's row count — a cluster removed from the registry but not from here would pass silently",
+    "the registry length must match this table's row count — an entry removed from the registry but not from here would pass silently",
+  );
+  assert.equal(
+    new Set(HOST_CAUSED_SUITE_REDS.map((e) => e.file)).size,
+    HOST_CAUSED_SUITE_REDS.length,
+    "one row per FILE — a duplicated file would let two rows disagree about the same measurement",
   );
 
   const bash = HOST_CAUSED_SUITE_REDS.find((e) => e.cause === "bash-3.2-no-associative-arrays");
