@@ -146,6 +146,44 @@ test("W1-T2792: one light pass reviews up to the configured semantic width", asy
   assert.equal(youngerLine?.acted, true, "the second PR uses the second configured review lane");
 });
 
+test("W1-T2792: semantic admission losers ledger the configured bound and winners", async () => {
+  const lp = ledgerPath();
+  const posted: number[] = [];
+  const deps = fakeDeps({
+    ledgerPath: lp,
+    postReview: (p) => {
+      posted.push(p.prNumber);
+    },
+  });
+  const queue = [40, 30, 20, 10].map((prNumber) =>
+    postReviewPr({
+      prNumber,
+      prUrl: `url/${prNumber}`,
+      taskId: `W1-T${prNumber}`,
+      headSha: `sha${prNumber}`,
+      isPlanFiling: false,
+      lastActivityAt: `2026-07-${String(9 + prNumber / 10).padStart(2, "0")}T00:00:00Z`,
+    }),
+  );
+
+  await runSweepLightPass(queue, deps, { ...DEFAULT_SWEEP_POLICY, reviewLanes: 2 });
+
+  assert.deepEqual(posted.sort((a, b) => a - b), [10, 20], "the two oldest heads win the configured lanes");
+  const losers = readLedgerLines(lp)
+    .filter((line) => line.step === "sweep.disposed" && (line.pr_number === 30 || line.pr_number === 40));
+  assert.equal(losers.length, 2, "both unadmitted PRs remain visible in the ledger");
+  for (const line of losers) {
+    assert.equal(line.disposition, "post-review", "admission changes no disposition");
+    assert.equal(line.acted, false, "the loser starts no review");
+    assert.equal(
+      line.stand_down_reason,
+      "not admitted this pass: semantic post-review admission bound 2; admitted #10, #20 ahead",
+      "the record names the actual bound and the PRs that consumed it",
+    );
+    assert.doesNotMatch(String(line.stand_down_reason), /one post-review admission per light pass/);
+  }
+});
+
 test("W1-T526: the loser of one pass wins a later pass", async () => {
   const lp = ledgerPath();
   const postedPass1: number[] = [];
