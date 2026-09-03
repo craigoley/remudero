@@ -317,7 +317,18 @@ test("W1-T1268 WIRED: an unreachable claim refuses via blocked_git_fetch, and co
   // widen RunResult's union for a distinction the ledger's `dispatch.claim` row already carries.
   const start = RUN_TASK_SRC.indexOf("CROSS-HOST DISPATCH CLAIM (W1-T1268)");
   assert.ok(start > 0);
-  const region = RUN_TASK_SRC.slice(start, start + 4000);
+  // ANCHORED TO THE BLOCK'S OWN END, NOT A CHARACTER COUNT (W1-T2784). This slice used to be
+  // `start + 4000`, which is not a property of anything — it is a guess about how long the block
+  // happens to be, and W1-T2784's dead-claimant probe (~1400 chars, added legitimately INSIDE the
+  // region) pushed the asserted line to offset 4872 and reddened a guard whose subject had not
+  // changed at all. The refusal's own `return {` is the real end of what this test means by "the
+  // claim block", so slice to that and the window tracks the code instead of drifting from it.
+  // The NEXT section's own banner is the boundary — a structural marker, not a line inside the
+  // return (an earlier attempt at this fix anchored on `costUsd: 0,` and landed 18 chars BEFORE
+  // the asserted line, which is the same class of mistake as the character count it replaced).
+  const end = RUN_TASK_SRC.indexOf("Reclaim debris from crashed prior runs", start);
+  assert.ok(end > start, "the next section's banner must still follow the claim block");
+  const region = RUN_TASK_SRC.slice(start, end);
   assert.match(region, /verdict: claimOutcome === "unreachable" \? "blocked_git_fetch" : "blocked_inflight"/);
 });
 

@@ -208,3 +208,30 @@ suite. Two of these fail loudly and are merely wasted time; the uid-0 one is the
 member of the set, because it converts a permission-branch test into a silent pass. If you
 need one of those fixtures verified, verify it on the mini or read CI's own log — a local
 result on this host cannot distinguish "the branch works" from "root ignored the bits."
+
+## A verdict blames a component that never ran
+
+**Symptom.** A run fails with a verdict naming a specific component — `blocked_isolation`,
+`blocked_containment`, or a daemon cycle summarised as `merged: (none)` — and every attempt to
+debug that component finds nothing wrong with it. The named parser, probe, or selector looks
+correct and passes when exercised by hand.
+
+**Cause.** The verdict is reporting the *last* thing that failed, not the *first*. When a probe's
+worker never starts, the harness still receives an empty result and classifies it as though the
+probe had run and produced nothing. Two measured shapes: a Codex isolation probe that exited 0
+with no output because its cwd was not a git repository (`Not inside a trusted directory`), and a
+probe whose spawn died on `API Error: 529 Overloaded` with the throw swallowed. Both surfaced as
+`blocked_isolation` — the same verdict a genuinely unparseable report produces.
+
+**Fix.** **Check the cost before believing the verdict.** The ledger row carries `cost_usd`, and
+it is the falsifier for "did this actually execute":
+
+- `cost_usd: 0` exactly — the worker never started. Look upstream of the named component: its
+  spawn arguments, its cwd, its binary's own preconditions.
+- `cost_usd` in the ~$0.001 range — the spawn started and died early; read `stderr_excerpt` on
+  the same row, which carries the real cause (a 529, a missing config) that the verdict discarded.
+- `cost_usd` at the component's normal figure (~$0.09 for an isolation probe) — the component
+  genuinely ran, and the verdict is trustworthy.
+
+A verdict name tells you the classification; the cost tells you whether the classification was
+earned. [learnings#cost-separates-never-ran-from-ran-and-failed]
