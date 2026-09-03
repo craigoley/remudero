@@ -1,0 +1,155 @@
+- id: W1-T2770
+  title: "six `test/merge-lcov.test.ts` failures block a fully green `--ci-parity` on this host because `deploy/Dockerfile`'s `FROM node:22-bookworm-slim` is a floating tag and drifted to 22.23.2 while `.nvmrc` (and `scripts/coverage-merge-ratchet.mjs`'s exact-string check) pins 22.22.3 — Node moved with no file change in this repo"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high  # Rule 19: two subsystems (ci-parity registry, Dockerfile) are one atomic filing —
+              # the image pin restores a green ci-parity, the cluster keeps a diff-caused break in
+              # those six files from being read as this same drift. Decomposition would ship the
+              # cluster with no self-expiry basis or the pin with no diagnosis for the inert
+              # window; either half alone is a false claim of resolution for the other.
+  files:
+    - src/lib/ci-parity.ts
+    - deploy/Dockerfile
+    - test/host-caused-suite-reds.test.ts
+    - test/merge-lcov-node-drift-cluster-and-image-pin.test.ts
+  origin: "oper#gate-rule-invalidated-2026-09-03"
+  plan_refs: ["W1-T2234", "W1-T2769"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE SIX FAILURES ARE `assertPinnedNodeVersion` THROWING, NOT SIX INDEPENDENT DEFECTS.
+    `scripts/coverage-merge-ratchet.mjs` reaches into `internal/test_runner/coverage` (Node's
+    built-in test-runner coverage internals, `--expose-internals`), and its
+    `assertPinnedNodeVersion` throws `raw coverage merge requires the repository-pinned Node
+    <.nvmrc>; running <process.versions.node>` on ANY string mismatch. `test/merge-lcov.test.ts`
+    executes six subprocesses that trigger that check; the six failures are one thrown message
+    surfacing six times. MEASURED at investigation time: `.nvmrc = 22.22.3`, container Node =
+    `22.23.2`, and W1-T2769's `CI=1 rmd preflight --ci-parity` reported `# tests 13224 / # pass
+    13217 / # fail 6` — those six.
+
+    THE IMAGE DRIFTED WITH NO EDIT TO ANY FILE. `deploy/Dockerfile`'s `FROM node:22-bookworm-slim`
+    is a FLOATING tag — the "22" slot resolves to whatever `library/node`'s current 22.x tip is at
+    `docker build` time. At the last image build 22.22.3 was current; between then and today
+    22.23.2 became current on the same slot; the running image now runs Node it never agreed to
+    run. The failures look diff-caused (a red required check on a PR whose diff touched neither
+    Node nor merge-lcov), but the whole cause is upstream tag movement plus a floating pin.
+
+    THE FIX IS IMAGE-SIDE. Pinning `FROM` to the exact `.nvmrc` version — `node:22.22.3-bookworm-
+    slim` today — resolves the drift and the six tests pass again as soon as
+    `.github/workflows/acr-build.yml` is dispatched and the new image is deployed. Until then
+    the change is INERT (ships in the image, not on the mount).
+
+    A CLUSTER IS ADDED, BUT IT IS ADVISORY. `ci-parity.ts`'s own header spells out the shape:
+    "SEPARATION, NOT SUPPRESSION" and "always reports `ok: true` (it is informational, never a
+    verdict of its own — the day this table gates a merge on a HOST FACT rather than on a test
+    result is the day it stops testing the diff)". `runCiParity`'s aggregation is
+    `ok: steps.every(s => s.ok)`, so a failing `ci:test` still fails the whole `--ci-parity`
+    verdict — the cluster does NOT restore a green gate. Its job is to keep the diagnosis
+    accurate during the inert window: a reader (human or agent) inspecting the six red tests
+    reads "node-version-drift-from-pin, W1-T2770's image pin is not deployed yet" rather than
+    inferring "six things I touched broke".
+
+    WHY THE CLUSTER MATTERS EVEN THOUGH IT ANNOTATES. `ci-parity.ts`'s header explicitly invites
+    the reader to "subtract them", which makes a STALE cluster harmful: six real failures in
+    those files, after the image is deployed and the drift is gone, would read as this cluster
+    and be discounted. The `appliesTo` predicate self-expires around ANY drift from `.nvmrc` —
+    not the specific 22.22.3 -> 22.23.2 direction that produced this outage — so the moment the
+    image lands at the pin, the cluster stops applying automatically with no follow-up edit.
+
+    A REBUILD ALONE WOULD NOT FIX THIS. The floating tag is the whole reason today's outage
+    happened; a dispatch of `acr-build.yml` today without pinning the FROM first would just
+    resolve to the current 22.x tip again — possibly the same 22.23.2, possibly a later one —
+    and the six failures would persist. The image pin has to land first.
+
+    DIGEST vs EXACT VERSION TAG. A digest pins every apt-layer patch too and is stronger, but
+    this repo has no digest-renewal process; an unrenewed digest quietly rots the base's
+    security-patch surface, trading a loud version mismatch for a quiet unpatched-base failure.
+    The exact version tag `node:22.22.3-bookworm-slim` still floats within patch-level rebuilds
+    of THAT tag — Debian security fixes reach the image on the next rebuild — while pinning the
+    Node runtime exactly. The cluster's `appliesTo` predicate makes any residual drift LOUD
+    whenever it happens, so this is the residual-risk trade the task chooses deliberately:
+    smaller than a digest's unmaintained-freeze risk, made visible by the same guard the fix
+    itself installs.
+  design: |
+    THREE CODE CHANGES, ONE ATOMIC FIX. All three must land together because each fills a hole
+    the others leave open:
+
+    (i) `deploy/Dockerfile` FROM line pinned to `node:22.22.3-bookworm-slim`. Ships INERT until
+        `.github/workflows/acr-build.yml` is dispatched; that is the operator's step, not this
+        task's. A comment beside the FROM line names the floating-tag failure mode, the
+        digest-vs-tag trade above, and the update procedure (bump this tag AND `.nvmrc` in the
+        same commit; the cluster re-arms itself around the new pin the moment the image lands).
+
+    (ii) `HostFacts` (src/lib/ci-parity.ts) gains `nodeVersion` and `pinnedNodeVersion`. The
+         former is `process.versions.node` (v-prefix stripped); the latter is `.nvmrc`'s
+         contents (also v-stripped). `pinnedNodeVersion` is `undefined` when `.nvmrc` is absent
+         or unreadable — the SAME "does not apply, silently" discipline `bashMajorVersion:
+         undefined` already establishes, so a probe that cannot tell must not guess a verdict
+         either way. `computeHostFacts` is the pure edge (a test hands it strings and asserts
+         the derived facts); `detectHostFacts` is the impure edge (spawns `bash`, reads
+         `/proc/meminfo` and `.nvmrc`), same shape as the existing bash/procfs handling.
+
+    (iii) A `HOST_CAUSED_SUITE_REDS` entry for `test/merge-lcov.test.ts` with cause
+          `node-version-drift-from-pin`, count 6 (the exact number of failing tests), and
+          `appliesTo` guarded on THREE clauses: the running Node was read, the pin was
+          readable, and the two differ. `!!` narrows `string | undefined` to `string` for the
+          compare below without a redundant check. Self-expires the moment (iii)'s third clause
+          becomes false — no follow-up edit required after the image is deployed.
+
+    The five existing `host-caused-suite-reds.test.ts` fixtures gain `nodeVersion: "22.22.3"` /
+    `pinnedNodeVersion: "22.22.3"` (the matching-pin case) so their platform-axis assertions are
+    not accidentally coupled to this new cluster's node-drift axis; the "matches every cluster"
+    census test additionally uses the drift shape so its `applicable.length ===
+    HOST_CAUSED_SUITE_REDS.length` claim still holds.
+
+    THE HIGHEST-VALUE GUARD in the new test file asserts that `hostCausedSuiteRedsStep` returns
+    `ok: true` on every combination of host facts, and that `ci:test` runs in the CI job's step
+    list regardless of what the cluster reports. Those two guards together are what stops a
+    later session from turning separation into suppression — the whole class this task exists
+    inside.
+  acceptance:
+    - claim: "`deploy/Dockerfile` pins `FROM node:` to the exact `.nvmrc` version, and a regression back into the floating major-only tag shape (`node:22-...`) fails a guard here"
+      proof: "unit test: test/merge-lcov-node-drift-cluster-and-image-pin.test.ts"
+    - claim: "the merge-lcov Node-pin-drift cluster is registered with cause `node-version-drift-from-pin`, count 6, and file `test/merge-lcov.test.ts`"
+      proof: "unit test: test/merge-lcov-node-drift-cluster-and-image-pin.test.ts"
+    - claim: "the cluster fires on any drift from `.nvmrc` in either direction, and self-expires the moment running Node matches the pin — no lingering suppression of six tests after the image lands"
+      proof: "unit test: test/merge-lcov-node-drift-cluster-and-image-pin.test.ts"
+    - claim: "`hostCausedSuiteRedsStep` returns `ok: true` on every combination of host facts — the cluster CANNOT alter `ci:test`'s pass/fail verdict, and `ci:test` remains a distinct step in the CI job entry regardless"
+      proof: "unit test: test/merge-lcov-node-drift-cluster-and-image-pin.test.ts"
+    - claim: "`detectHostFacts` reads this repo's real `.nvmrc` and produces a facts row with a plausible semver pin — the default leaf runs, not only the injected fakes"
+      proof: "unit test: test/merge-lcov-node-drift-cluster-and-image-pin.test.ts"
+  note: |
+    ID PROVENANCE: W1-T2770 was reserved and supplied directly by the operator. Both scope-time
+    checks ran clean at branch-out: `git ls-remote --heads origin 'run-W1-T2770-*'` returned 0
+    and the anchored trailer scan returned `[]`, each qualified by a positive control on
+    W1-T2749 -> [3773,3771,3768] because a freshly minted id reads zero against every surface
+    for query-shape reasons alone.
+
+    FALSIFIERS, EACH HALF, PROVEN INDEPENDENTLY. Reverting the Dockerfile pin alone failed 1
+    guard (the FROM-line assertion); reverting the cluster entry alone failed 3 guards (fires on
+    drift, fires on opposite direction, names the exact file/count). Restoring both returned
+    `# fail 0` on the standalone test file. The highest-value guards (informational contract,
+    ci:test not gated) stayed green in both falsifier states — proving they are not accidentally
+    coupled to either half, exactly as W1-T2769's PATH-inheritance guard is not.
+
+    CALLER + CENSUS SWEEP: 9 files — every consumer of the touched symbols (`HostFacts`,
+    `HOST_CAUSED_SUITE_REDS`, `hostCausedSuiteRedsStep`, `hostCausedSuiteRedsForFacts`,
+    `computeHostFacts`, `detectHostFacts`), the Dockerfile-census suites
+    (`binary-pin-rung.test.ts`, `entrypoint-boot.test.ts`, `fleet-heartbeat-image-sha.test.ts`,
+    `image-drift.test.ts`, `recycle-container.test.ts`, `verify-image-probes.test.ts`), and
+    `merge-lcov.test.ts` itself — ran together as `# tests 174 # pass 168 # fail 6`. The 6
+    failures are exactly the merge-lcov Node-pin ones the cluster now annotates — they persist
+    on THIS host until the image is rebuilt, and that IS the diagnosis this task publishes.
+
+    THIS TASK DOES NOT DISPATCH `acr-build.yml`. That is the operator's action, and it happens
+    AFTER this merges. Between this merging and the image landing, the cluster's
+    `ci:host-caused-suite-reds` step tells `--ci-parity` runs on the host why those six are red
+    without needing a human to re-derive the same investigation.
+
+    THIS TASK DOES NOT ADVANCE `.nvmrc`. `22.22.3` is the pin the coverage-merge ratchet was
+    written against; moving it is a distinct call and would touch a different set of assumptions
+    (Node internals API stability), out of scope here.
