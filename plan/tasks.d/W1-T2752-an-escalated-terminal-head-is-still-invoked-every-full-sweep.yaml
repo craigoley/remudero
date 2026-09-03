@@ -1,0 +1,94 @@
+- id: W1-T2752
+  title: "AN ESCALATED TERMINAL FIX HEAD IS STILL INVOKED ON EVERY FULL SWEEP — W1-T2723 stops the repeated GitHub head lookup and duplicate issue, but its delivered terminal cache is private to buildSweepEffects, so runSweep records acted:true eleven more times for the unchanged PR head and reports work the lane immediately declined"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 16.00
+  files:
+    - src/lib/sweep.ts
+    - src/run-task.ts
+    - test/an-escalated-terminal-head-stands-down-before-redispatch.test.ts
+  origin: "operator-session#terminal-head-outer-dispatch-gap-2026-09-03"
+  plan_refs: ["W1-T2231", "W1-T2379", "W1-T2723"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON THE LIVE FLEET, AFTER W1-T2723 WAS RUNNING. PR #3719 at head
+    4b02e57fbc4c3571367dfb87ed80fcf9aad42433 produced the new terminal
+    `sweep.fix.uncreditable_head` row at 2026-09-03T03:34:48.160Z and the one delivered
+    `sweep.fix.uncreditable_head_escalated` row at 03:34:50.971Z, pointing to issue #3776.
+    That proves W1-T2723's expensive-read and notification bounds work. The unchanged head then
+    produced eleven more live-file `sweep.disposed` rows with `acted:true` before an operator push
+    moved it. Those rows are not historical pre-fix residue: they followed the delivered terminal
+    row under the current daemon image.
+
+    THE MECHANISM IS READ AT CURRENT MAIN. `buildSweepEffects.dispatchFix` owns the
+    `terminalHeads` map and returns immediately when `priorTerminal?.escalated` is true. But
+    `runSweep` cannot see that state. It initializes `acted = !alreadyDone && !dryRun`; the
+    blocked-fixable/conflicted dedup deliberately re-arms a stalled fix; and the daemon light path
+    sets `detachFixWait`, so `runSweep` hands the promise to `detachSweepAction` and finalizes the
+    row before the clean terminal return is observable. The result is no second head lookup, issue,
+    or worker, but the outer lane is still invoked and reported as an action every full pass.
+
+    THIS IS THE NARROW FOLLOW-UP TO W1-T2723, NOT A REOPENING OF ITS DECISION. The terminal fact is
+    already durable, already loaded, already keyed by PR plus head SHA, and already distinguishes a
+    delivered escalation from one that still needs delivery. The missing boundary is a synchronous
+    admission read that lets `runSweep` stand down before invoking the effect once delivery is final.
+
+    TWO EXISTING CONTRACTS CONSTRAIN THE FIX. W1-T2379 requires the first detached invocation and
+    its pass-level dedup seed to be recorded before the light pass returns; awaiting the worker again
+    would restore the CI-bounded review clock. W1-T2231 deliberately keeps `acted` as lane invocation
+    and uses `spent` separately; globally redefining `acted` would break established dedup semantics.
+    The remedy therefore changes neither contract: the first evaluation still invokes normally, and
+    only an already-delivered terminal cache entry becomes a named pre-invocation stand-down.
+
+  design: |
+    (i) EXPOSE ONE READ-ONLY, SYNCHRONOUS ADMISSION SEAM. `SweepDeps` gains an optional predicate or
+    decision function supplied by `buildSweepEffects` from its existing `terminalHeads` map. It may
+    decline only when the exact `PR@head SHA` entry exists and its escalation was delivered. It does
+    no GitHub read and creates no second cache or persistence format.
+
+    (ii) APPLY IT BEFORE `dispatchFix` FOR BOTH DISPATCH SURFACES. `blocked-fixable` and `conflicted`
+    must record `acted:false` plus a stable, explicit `stand_down_reason` and must not call
+    `deps.dispatchFix` when the terminal decision says stop. Omitted seam preserves every existing
+    caller and fixture byte-for-byte.
+
+    (iii) NEW HEAD, NEW DECISION. The predicate is keyed by the exact head SHA already used by
+    W1-T2723. A push on the same PR misses the old entry and invokes the fix lane normally. There is
+    no PR-number-only cap and no elapsed-time lease.
+
+    (iv) FAILED DELIVERY STILL RETRIES DELIVERY. A cached terminal observation whose escalation was
+    not delivered must not stand down at the outer boundary; the existing effect must run so it can
+    retry that escalation without repeating the head lookup.
+
+    (v) DO NOT AWAIT DETACHED WORK, CHANGE THE FIX CEILING, WIDEN `fixHeadAcceptable`, OR REDEFINE
+    `acted`. W1-T2379's tick bound, W1-T2231's invocation/spend split, the two-strike ceiling, and
+    W1-T2723's foreign-head refusal remain intact.
+
+  acceptance:
+    - claim: "after a terminal not_a_run_branch decision is escalated, a later full or light sweep of the same PR head does not invoke dispatchFix and records acted false with a named terminal stand-down"
+      proof: "unit test: test/an-escalated-terminal-head-stands-down-before-redispatch.test.ts"
+    - claim: "the first terminal evaluation still invokes once and preserves the detached light-pass return contract"
+      proof: "unit test: test/an-escalated-terminal-head-stands-down-before-redispatch.test.ts"
+    - claim: "a new head SHA on the same PR is admitted and judged afresh without operator reset or elapsed-time wait"
+      proof: "unit test: test/an-escalated-terminal-head-stands-down-before-redispatch.test.ts"
+    - claim: "an observed terminal head whose escalation delivery failed is re-admitted only so the existing escalation retry can run"
+      proof: "unit test: test/an-escalated-terminal-head-stands-down-before-redispatch.test.ts"
+    - claim: "blocked-fixable and conflicted use the same terminal admission rule while every caller that omits the optional seam behaves unchanged"
+      proof: "unit test: test/an-escalated-terminal-head-stands-down-before-redispatch.test.ts"
+    - claim: "the two-strike ceiling, fixHeadAcceptable refusal, acted invocation semantics, and detached-action drain remain unchanged"
+      proof: "unit test: test/an-escalated-terminal-head-stands-down-before-redispatch.test.ts"
+
+  falsifier: |
+    Close this without implementation if current main already prevents the second call to
+    `deps.dispatchFix` after a delivered terminal entry, or if the eleven post-escalation rows are
+    shown to carry distinct head SHAs. Both checks were run before filing: source has no outer
+    terminal admission, and every measured row carries the same 4b02e57f head.
+
+    Re-design if the existing cache cannot distinguish delivered from failed escalation without a
+    fresh network read. Do not turn a failed delivery into a permanent stand-down, and do not fix
+    misleading telemetry by removing the retry that makes delivery reliable.
