@@ -1,18 +1,29 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import fsDefault from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { buildStatusBoard, renderStatusBoardText, type ServiceName, type StatusBoardDeps } from "../src/lib/status-board.js";
+import {
+  buildStatusBoard,
+  deriveQueueHead,
+  pickQueueHeadNextAction,
+  renderQueueHeadBlock,
+  renderStatusBoardText,
+  type QueueHeadRefusedRow,
+  type QueueHeadSection,
+  type ServiceName,
+  type StatusBoardDeps,
+} from "../src/lib/status-board.js";
+import type { DispatchFilterReason } from "../src/lib/drain.js";
 import { requestDrainNow, requestKick, requestPause, requestStop, setQuietHours } from "../src/lib/fleet-control.js";
 import { acquireInflightLock } from "../src/lib/inflight-lock.js";
 import { deployAutoPath, deployFailedAlertPath } from "../src/lib/deployer.js";
 import { statusCommand } from "../src/run-task.js";
 import type { Config } from "../src/lib/config.js";
 import { loadPlanFromYaml, type Plan } from "../src/lib/plan.js";
-import { DEFAULT_MAX_TASK_DISPATCHES, type GitHub, type PrRef } from "../src/lib/status.js";
+import { DEFAULT_MAX_TASK_DISPATCHES, type GitHub, type PrRef, type StatusProjection } from "../src/lib/status.js";
 import type { DraftCache, Proposal } from "../src/lib/inbox.js";
 
 // ── W1-T279: rmd status, half 1 of 2 — ONE read model over LOCAL truth (LIVENESS / LATCHES /
@@ -964,6 +975,187 @@ test("buildStatusBoard: no plan/tasks.yaml available ⇒ QUEUE HEAD/INBOX render
   const model = buildStatusBoard(tmpRoot(), join(tmpdir(), "does-not-exist.ndjson"), baseDeps());
   assert.match(model.queueHead.unknownReason ?? "", /plan\/tasks\.yaml/);
   assert.match(model.inbox.unknownReason ?? "", /plan\/tasks\.yaml/);
+});
+
+// ── W1-T2637: QUEUE HEAD's REFUSED renderer was a two-way ternary over the row's `reason` —
+// the breaker got its own wording and EVERY OTHER reason inherited the hardcoded run-branch
+// sentence. W1-T2415 already had to repair that ternary once, when it added the breaker arm;
+// this closes the trap for good with a label table keyed by `Record<QueueHeadRefusedRow["reason"],
+// ...>` so the type-checker — not a future author — names this site the next time either union
+// widens. Deliberately NOT exercised through a live `refused` row for every reason: the
+// derivation's own scope guard (`deriveQueueHead`'s `if (reason !== "run-branch-already-pushed")
+// return;`) still only ever admits the two reasons it admitted before this task (criterion 3
+// below), so most of these rows are hand-built — proving the RENDERER cannot mislabel them
+// WHENEVER a future, separately-decided change admits them, not that they are admitted today.
+
+function refusedRow(reason: QueueHeadRefusedRow["reason"], overrides: Partial<QueueHeadRefusedRow> = {}): QueueHeadRefusedRow {
+  return { taskId: "W1-TX", title: "some task", reason, ...overrides };
+}
+
+function sectionOf(refused: QueueHeadRefusedRow[]): QueueHeadSection {
+  return { rows: [], refused, refusedTruncated: 0 };
+}
+
+// The DispatchFilterReason union's own arms, read from source rather than retyped by hand — the
+// SAME technique test/queue-head-names-a-circuit-broken-refusal.test.ts already uses to pin this
+// union's membership, reused here so this file cannot drift from that one's count.
+function dispatchFilterReasonArms(): string[] {
+  const drain = readFileSync(new URL("../src/lib/drain.ts", import.meta.url), "utf8");
+  const decl = drain.slice(drain.indexOf("export type DispatchFilterReason ="));
+  const body = decl.slice(0, decl.indexOf(";"));
+  return [...body.matchAll(/\|\s*"([a-z-]+)"/g)].map((m) => m[1]!);
+}
+
+// ── ACCEPTANCE 1: "a refused row carrying a reason other than the run-branch and breaker cases
+// renders wording derived from that reason — never the hardcoded run-branch sentence it inherits
+// today" ─────────────────────────────────────────────────────────────────────────────────────────
+
+test("W1-T2637: the QUEUE_HEAD_REFUSAL_WORDING table names every DispatchFilterReason arm plus 'circuit-broken' — exhaustive by construction, not by enumeration this test could fall behind", () => {
+  const src = readFileSync(new URL("../src/lib/status-board.ts", import.meta.url), "utf8");
+  const decl = src.slice(src.indexOf("const QUEUE_HEAD_REFUSAL_WORDING"));
+  const body = decl.slice(0, decl.indexOf("\n};") + 3);
+  const keys = [...body.matchAll(/(?:"([a-z-]+)"|^\s*([a-z-]+))\s*:\s*\(/gm)].map((m) => m[1] ?? m[2]!);
+  const wanted = [...dispatchFilterReasonArms(), "circuit-broken"];
+  assert.deepEqual(keys.sort(), wanted.sort(), "the table has exactly one entry per union member — no arm missing, none stray");
+});
+
+test("W1-T2637: a refused row for any reason other than run-branch/breaker renders wording DERIVED FROM THAT REASON, never the hardcoded run-branch sentence it used to inherit", () => {
+  const otherReasons = dispatchFilterReasonArms().filter((r) => r !== "run-branch-already-pushed");
+  assert.ok(otherReasons.length > 0, "sanity: there is at least one non-run-branch reason to prove this against");
+  const seen = new Set<string>();
+  for (const reason of otherReasons) {
+    const out = renderQueueHeadBlock(sectionOf([refusedRow(reason as DispatchFilterReason)]));
+    const line = out.find((l) => l.startsWith("REFUSED:"))!;
+    assert.ok(line, `reason '${reason}' must still render a REFUSED line`);
+    assert.equal(line.includes("run branch already pushed"), false, `reason '${reason}' must NOT inherit the run-branch sentence`);
+    seen.add(line);
+  }
+  assert.equal(seen.size, otherReasons.length, "each reason renders its OWN wording — not one shared fallback string for all of them");
+});
+
+// ── ACCEPTANCE 2: "the two reasons that reach this surface today render byte-identically, breaker
+// reset-note fallback included" ─────────────────────────────────────────────────────────────────
+
+test("W1-T2637: the run-branch-already-pushed row renders BYTE-IDENTICALLY to before this task", () => {
+  const out = renderQueueHeadBlock(sectionOf([refusedRow("run-branch-already-pushed", { taskId: "W1-T903", title: "run branch already pushed" })]));
+  assert.equal(out.find((l) => l.startsWith("REFUSED:")), "REFUSED: W1-T903 — run branch already pushed (run branch already pushed to origin)");
+});
+
+test("W1-T2637: the circuit-broken row renders BYTE-IDENTICALLY to before this task, resetNote present", () => {
+  const out = renderQueueHeadBlock(
+    sectionOf([
+      refusedRow("circuit-broken", {
+        taskId: "W1-T920",
+        title: "dispatched past the breaker threshold",
+        resetNote: "resets only on a fresh owned PR for W1-T920 — 5/5 dispatches since the last one",
+      }),
+    ]),
+  );
+  assert.equal(
+    out.find((l) => l.startsWith("REFUSED:")),
+    "REFUSED: W1-T920 — dispatched past the breaker threshold (dispatch circuit breaker tripped — " +
+      "resets only on a fresh owned PR for W1-T920 — 5/5 dispatches since the last one)",
+  );
+});
+
+test("W1-T2637: the circuit-broken row's reset-note FALLBACK (no resetNote given) also renders byte-identically to before this task", () => {
+  const out = renderQueueHeadBlock(
+    sectionOf([refusedRow("circuit-broken", { taskId: "W1-T921", title: "no reset note", dispatchCount: 4, maxDispatches: 5 })]),
+  );
+  assert.equal(
+    out.find((l) => l.startsWith("REFUSED:")),
+    "REFUSED: W1-T921 — no reset note (dispatch circuit breaker tripped — 4/5 dispatches with no new owned PR)",
+  );
+});
+
+// ── ACCEPTANCE 3: "the refused list is NOT widened: a task refused for any other reason still
+// produces no refused row at all, so the scope guard stands" ───────────────────────────────────
+
+test("W1-T2637: deriveQueueHead's scope guard is UNCHANGED — it still only ever admits run-branch-already-pushed onto `refused`, never widening to the reasons this task adds wording for", () => {
+  const src = readFileSync(new URL("../src/lib/status-board.ts", import.meta.url), "utf8");
+  assert.match(src, /if \(reason !== "run-branch-already-pushed"\) return;/, "the W1-T1205/W1-T2415 scope guard stands verbatim");
+});
+
+test("buildStatusBoard: QUEUE HEAD — a task refused for 'blocked', 'retired', 'unmet-deps', 'verify-not-auto', or 'already-merged' is excluded from `rows` but produces NO `refused` row at all — the label table this task adds does not widen what the board admits", () => {
+  const yaml = `
+- id: W1-TOK
+  title: eligible
+  repo: remudero
+  type: implement
+  verify: auto
+  depends_on: []
+  status: queued
+- id: W1-TBLOCKED
+  title: plan-blocked
+  repo: remudero
+  type: implement
+  verify: auto
+  depends_on: []
+  status: blocked
+- id: W1-TRETIRED
+  title: retired
+  repo: remudero
+  type: implement
+  verify: auto
+  depends_on: []
+  status: blocked
+  retirement: closed
+- id: W1-TDEPS
+  title: unmet deps
+  repo: remudero
+  type: implement
+  verify: auto
+  depends_on: ["W1-TOK"]
+  status: queued
+- id: W1-TMANUAL
+  title: verify not auto
+  repo: remudero
+  type: implement
+  verify: manual
+  depends_on: []
+  status: queued
+- id: W1-TMERGED
+  title: already merged
+  repo: remudero
+  type: implement
+  verify: auto
+  depends_on: []
+  status: queued
+`;
+  const plan = loadPlanFromYaml(yaml, "fixture");
+  const projections = new Map([
+    ["W1-TOK", { merged: false } as StatusProjection],
+    ["W1-TBLOCKED", { merged: false } as StatusProjection],
+    ["W1-TRETIRED", { merged: false } as StatusProjection],
+    ["W1-TDEPS", { merged: false } as StatusProjection],
+    ["W1-TMANUAL", { merged: false } as StatusProjection],
+    ["W1-TMERGED", { merged: true } as StatusProjection],
+  ]);
+  const head = deriveQueueHead(plan, [], projections, undefined, 10, NOW_MS);
+  assert.deepEqual(head.rows.map((r) => r.taskId), ["W1-TOK"], "only the genuinely eligible task dispatches");
+  assert.deepEqual(head.refused, [], "none of the five other-reason exclusions produce a refused row — the scope guard stands");
+  assert.equal(head.refusedTruncated, 0);
+  assert.doesNotMatch(renderStatusBoardText(buildStatusBoard(tmpRoot(), join(tmpdir(), "does-not-exist.ndjson"), baseDeps({ plan, github: fakeGithub() }))), /REFUSED/);
+});
+
+// ── ACCEPTANCE 4: "the next-action rules stay scoped to their own reasons — a refusal of any
+// other kind draws no run-branch remedy and no breaker remedy" ─────────────────────────────────
+
+test("W1-T2637: the queue-head next-action rules stay reason-scoped — a refusal for any reason other than run-branch/breaker draws NEITHER the run-branch remedy NOR the breaker remedy", () => {
+  const otherReasons = dispatchFilterReasonArms().filter((r) => r !== "run-branch-already-pushed");
+  for (const reason of otherReasons) {
+    const action = pickQueueHeadNextAction(sectionOf([refusedRow(reason as DispatchFilterReason)]));
+    assert.equal(action, undefined, `reason '${reason}' must draw no next action from either reason-scoped rule — got: ${action}`);
+  }
+});
+
+test("W1-T2637: a mix of one exotic-reason row and one real run-branch row still picks ONLY the run-branch remedy, naming the run-branch task, never the exotic one", () => {
+  const action = pickQueueHeadNextAction(
+    sectionOf([refusedRow("blocked", { taskId: "W1-TBLOCKED" }), refusedRow("run-branch-already-pushed", { taskId: "W1-TBRANCH" })]),
+  );
+  assert.match(action ?? "", /W1-TBRANCH/);
+  assert.match(action ?? "", /run branch already pushed to origin/);
+  assert.equal(action?.includes("W1-TBLOCKED"), false);
 });
 
 // ── INBOX — ready/not-ready counts from inbox.ts's own InboxState, with the not-ready reason

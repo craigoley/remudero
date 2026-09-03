@@ -2027,6 +2027,17 @@ const QUEUE_HEAD_NEXT_ACTIONS: readonly NextActionRule<QueueHeadSection>[] = [
   },
 ];
 
+/** EXPORTED for test only — same convention as {@link deriveCircuitBrokenBlockers} and {@link
+ *  renderQueueHeadBlock}: lets a test drive the next-action rule engine directly against a
+ *  hand-built section. W1-T2637 (design (iv)): both rules above select their rows by reason
+ *  BEFORE speaking, and neither may relax into an any-refused-row predicate — a test needs to
+ *  reach this engine with a `refused` reason `deriveQueueHead`'s own scope guard (:1935) never
+ *  admits today (every arm but run-branch-already-pushed and circuit-broken) to prove that
+ *  scoping holds for reasons the derivation cannot yet produce, not only the two it can. */
+export function pickQueueHeadNextAction(section: QueueHeadSection): string | undefined {
+  return pickNextAction(QUEUE_HEAD_NEXT_ACTIONS, section);
+}
+
 // ── INBOX derivation ─────────────────────────────────────────────────────────────────────────
 
 function deriveInbox(
@@ -2678,6 +2689,33 @@ function renderBlockersBlock(b: BlockersSection): string[] {
   return out;
 }
 
+/**
+ * W1-T2637: A LABEL TABLE, EXHAUSTIVE BY CONSTRUCTION — one wording per member of
+ * {@link QueueHeadRefusedRow.reason} (the {@link DispatchFilterReason} union PLUS the
+ * `"circuit-broken"` literal this row type already carries), keyed as a `Record` over that exact
+ * type so the type-checker — not a reviewer — names this site the moment either union gains an
+ * arm this table has not been given a sentence for. Before this task the renderer was a two-way
+ * ternary that handed every reason but the breaker the run-branch sentence; W1-T2415 already had
+ * to repair that ternary once when it added the breaker arm, and the union has grown an arm
+ * (`"retired"`) since without this surface's own doc-scoped derivation ever admitting it (see
+ * `deriveQueueHead`'s `if (reason !== "run-branch-already-pushed") return;`, unchanged by this
+ * task). The two wordings that reach this surface today — run-branch and breaker, reset-note
+ * fallback included — render byte-identically to before; every other arm is unreachable while
+ * that guard stands, and its wording here is inert until a FUTURE, separately-decided change
+ * admits it (design (iii): this task does not widen the guard).
+ */
+const QUEUE_HEAD_REFUSAL_WORDING: Record<QueueHeadRefusedRow["reason"], (r: QueueHeadRefusedRow) => string> = {
+  "circuit-broken": (r) =>
+    `dispatch circuit breaker tripped — ${r.resetNote ?? `${r.dispatchCount}/${r.maxDispatches} dispatches with no new owned PR`}`,
+  "run-branch-already-pushed": () => "run branch already pushed to origin",
+  "already-merged": () => "already merged",
+  "verify-not-auto": () => "verify is not auto",
+  blocked: () => "blocked",
+  retired: () => "retired",
+  "unmet-deps": () => "dependencies not yet met",
+  "continued-this-pass": () => "continued this pass",
+};
+
 /** EXPORTED for test only — the same visibility `deriveCircuitBrokenBlockers` already carries,
  *  so a test can assert what an operator actually READS rather than only the section object.
  *  Behaviour unchanged for every existing (single-argument) caller: `enabled` defaults to
@@ -2709,13 +2747,11 @@ export function renderQueueHeadBlock(q: QueueHeadSection, enabled = false): stri
     // W1-T1205 (design (ii)): what dispatch is REFUSING, named — never silently absent from a
     // list that only ever showed what it would take.
     for (const r of q.refused) {
-      // W1-T2415: BRANCH ON THE REASON. This line used to hardcode the run-branch wording for
-      // every row, so a breaker refusal pushed here would have been mislabelled as a stale
-      // branch — a worse failure than the silence it replaces.
-      const why =
-        r.reason === "circuit-broken"
-          ? `dispatch circuit breaker tripped — ${r.resetNote ?? `${r.dispatchCount}/${r.maxDispatches} dispatches with no new owned PR`}`
-          : "run branch already pushed to origin";
+      // W1-T2415 hardcoded a two-way ternary here — everything but the breaker inherited the
+      // run-branch sentence — and had to repair it once already when it added the breaker arm.
+      // W1-T2637: LOOK UP THE REASON in the exhaustive table above instead, so the NEXT widening
+      // of `QueueHeadRefusedRow.reason` cannot silently inherit a neighbour's wording again.
+      const why = QUEUE_HEAD_REFUSAL_WORDING[r.reason](r);
       out.push(paint.warn(`REFUSED: ${r.taskId} — ${r.title} (${why})`, enabled));
     }
     if (q.refusedTruncated > 0) {
