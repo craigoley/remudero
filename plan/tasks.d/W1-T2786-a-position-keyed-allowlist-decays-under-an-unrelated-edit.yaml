@@ -10,13 +10,12 @@
               # (hooks/) are one atomic fix — a re-keyed checker against a line-keyed allowlist
               # refuses all 998, and a re-keyed allowlist under a line-keyed checker matches none.
               # They land together or main goes red harder than the defect they fix.
-  files:
-    - scripts/mkdtemp-callsite-check.mjs
-    - hooks/mkdtemp-allowlist.txt
-    - test/mkdtemp-allowlist-rekey.test.ts
-    - test/mkdtemp-callsite-check.test.ts
-    - learnings/testing.yaml
-    - learnings/index.json
+  # FLOW STYLE IS LOAD-BEARING, not cosmetic: `shardDeclaredFilesInDiff`'s
+  # SHARD_FILES_LINE_RE matches ONLY `files: [a, b]` on one line, so a block-style list is
+  # invisible to it and `judgeCriterion`'s `not_yet_built` carve-out can never fire — the
+  # forward-referenced test below then grades `executed_fail` and hard-blocks this filing.
+  # MEASURED on the first review of #3864, which failed all 6 criteria for exactly this reason.
+  files: [scripts/mkdtemp-callsite-check.mjs, hooks/mkdtemp-allowlist.txt, test/mkdtemp-allowlist-rekey.test.ts, test/mkdtemp-callsite-check.test.ts, learnings/testing.yaml, learnings/index.json]
   origin: "oper#mkdtemp-allowlist-position-key-2026-09-03"
   plan_refs: ["W1-T2773", "W1-T2775", "W1-T2784"]
   status: queued
