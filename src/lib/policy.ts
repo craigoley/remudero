@@ -256,6 +256,8 @@ export interface PolicyValues {
    *  literal. OPTIONAL, absent-means-default like {@link PolicyValues.sweepWallClockBoundMs}. */
   githubEventWake: {
     dedupCapacity: number;
+    /** W1-T2741: trailing-edge quiet period for high-fanout check/status deliveries. */
+    checkSettleMs: number;
   };
   /**
    * W1-T2579 — THE ARM GATE'S OPERATOR-RATIFIED BAND TABLE. `decideAutoMergeArm`
@@ -361,6 +363,7 @@ const EXPECTED_ORIGIN_KIND: Record<string, PolicyOriginKind> = {
   "scratchReap.maxAgeHours": "lifted",
   "worktreeReapBoot.enabled": "net-new",
   "githubEventWake.dedupCapacity": "net-new",
+  "githubEventWake.checkSettleMs": "net-new",
 };
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
@@ -571,6 +574,13 @@ export const DEFAULT_FIX_SPAWN_WALL_CLOCK_BOUND_MS = 3_600_000;
 export const DEFAULT_GITHUB_EVENT_WAKE_DEDUP_CAPACITY = 500;
 
 /**
+ * W1-T2741: default trailing-edge quiet period for terminal check/status webhook bursts.
+ * The committed policy row owns the derivation and bounds; this fallback preserves loading for
+ * older policy fixtures that predate the row.
+ */
+export const DEFAULT_GITHUB_EVENT_WAKE_CHECK_SETTLE_MS = 10_000;
+
+/**
  * Validate a raw (parsed-YAML) value into a {@link Policy}. Throws {@link PolicyError} on any
  * structural violation, out-of-bound value, or origin-kind mismatch — mirrors
  * `src/lib/mounts.ts`'s `validateMounts`/`src/lib/alert-lane.ts`'s `validateAlertPolicy`
@@ -708,6 +718,9 @@ export function validatePolicy(raw: unknown): Policy {
   const githubEventWakeDedupCapacity = githubEventWakeRaw
     ? numberField("githubEventWake.dedupCapacity", githubEventWakeRaw.dedupCapacity, origin, bounds)
     : DEFAULT_GITHUB_EVENT_WAKE_DEDUP_CAPACITY;
+  const githubEventWakeCheckSettleMs = githubEventWakeRaw?.checkSettleMs !== undefined
+    ? numberField("githubEventWake.checkSettleMs", githubEventWakeRaw.checkSettleMs, origin, bounds)
+    : DEFAULT_GITHUB_EVENT_WAKE_CHECK_SETTLE_MS;
 
   // W1-T2579: OPTIONAL, absent means `[]` — see validateArmCalibrationBands's own doc for why
   // this row's validation is stricter-at-load/inert-at-consult rather than the absent-means-
@@ -748,7 +761,10 @@ export function validatePolicy(raw: unknown): Policy {
       launchd: { throttleIntervalS },
       scratchReap: { enabled: scratchReapEnabled, maxAgeHours: scratchReapMaxAgeHours },
       worktreeReapBoot: { enabled: worktreeReapBootEnabled },
-      githubEventWake: { dedupCapacity: githubEventWakeDedupCapacity },
+      githubEventWake: {
+        dedupCapacity: githubEventWakeDedupCapacity,
+        checkSettleMs: githubEventWakeCheckSettleMs,
+      },
       armCalibrationBands,
     },
     origin,
