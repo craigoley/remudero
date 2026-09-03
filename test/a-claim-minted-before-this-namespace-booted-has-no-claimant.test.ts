@@ -26,6 +26,7 @@ import { test } from "node:test";
 import {
   decideDispatchClaimRelease,
   dispatchClaimRef,
+  gitDispatchClaimReserver,
   parseClaimAnchorMessage,
   pidIsPresent,
   readNamespaceBootMs,
@@ -54,6 +55,37 @@ const SAME_HOST_BOOTED_AFTER: ClaimantLivenessProbe = {
 };
 
 const BASE = { heldByThisRun: false, evidenceObserved: false, taskId: "W1-T2631" } as const;
+
+test("W1-T2784: the git reserver fetches and reads the orphan anchor message it judges", () => {
+  const sha = "a".repeat(40);
+  const ref = dispatchClaimRef("W1-T2631");
+  const calls: string[][] = [];
+  const reserver = gitDispatchClaimReserver({
+    run: (args) => {
+      calls.push(args);
+      if (args[0] === "ls-remote") return { status: 0, stdout: `${sha}\t${ref}\n`, stderr: "" };
+      if (args[0] === "fetch") return { status: 0, stdout: "", stderr: "" };
+      if (args[0] === "cat-file") {
+        return {
+          status: 0,
+          stdout: `tree ${"0".repeat(40)}\n\nrmd-dispatch claim 490780@${HOST} 2026-09-03T03:52:05.691Z\n`,
+          stderr: "",
+        };
+      }
+      return { status: 1, stdout: "", stderr: "unexpected argv" };
+    },
+  });
+
+  assert.equal(
+    reserver.anchorMessage?.("W1-T2631"),
+    `rmd-dispatch claim 490780@${HOST} 2026-09-03T03:52:05.691Z`,
+  );
+  assert.deepEqual(calls, [
+    ["ls-remote", "origin", ref],
+    ["fetch", "--quiet", "origin", `${ref}:${ref}`],
+    ["cat-file", "-p", sha],
+  ]);
+});
 
 // ── THE POSITIVE: the exact shape that was stuck ─────────────────────────────────────────────
 
@@ -179,7 +211,9 @@ test("W1-T2784: parseClaimAnchorMessage round-trips a real anchor and refuses ev
 
 // ── the I/O seams, against real /proc, so the default leaves are not left to fakes ────────────
 
-test("W1-T2784: readNamespaceBootMs reads THIS namespace's init start from real /proc", () => {
+test("W1-T2784: readNamespaceBootMs reads THIS namespace's init start from real /proc", {
+  skip: process.platform !== "linux" ? "the real /proc assertion is Linux-only" : false,
+}, () => {
   // The all-fakes trap: every decision test above injects its liveness, so without this the
   // production reader is never executed. Asserts falsifiable properties, not merely that it
   // returned — and deliberately NOT /proc/uptime, which is not namespaced (MEASURED: inside the
@@ -218,6 +252,11 @@ test("W1-T2784: pidIsPresent reports PRESENT on any doubt — absence is half th
   assert.equal(pidIsPresent(1, { exists: () => true }), true);
   assert.equal(pidIsPresent(999999, { exists: () => false }), false);
   assert.equal(pidIsPresent(1, { exists: () => { throw new Error("EPERM"); } }), true, "cannot tell => present => blocks release");
+});
+
+test("W1-T2784: pidIsPresent's default leaf reads Linux /proc", {
+  skip: process.platform !== "linux" ? "the default /proc leaf is Linux-only" : false,
+}, () => {
   assert.equal(pidIsPresent(1), true, "pid 1 really exists here — the default leaf runs");
 });
 

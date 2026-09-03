@@ -495,9 +495,9 @@ function workerResult(over: Partial<WorkerResult>): WorkerResult {
  *  `already-satisfied-exit.test.ts`'s own `gitFixture`) — `runTask`'s own `git worktree add` /
  *  `git worktree remove` all run for real, entirely offline. */
 function claimGitFixture(root: string): { repoDir: string } {
-  const originGit = mkdtempSync(join(tmpdir(), "dispatch-claim-behavioral-origin-"));
+  const originGit = mkdtempSync(join(tmpdir(), "rmd-dispatch-claim-behavioral-origin-"));
   execFileSync("git", ["init", "-q", "--bare", "--initial-branch=main", originGit]);
-  const seed = mkdtempSync(join(tmpdir(), "dispatch-claim-behavioral-seed-"));
+  const seed = mkdtempSync(join(tmpdir(), "rmd-dispatch-claim-behavioral-seed-"));
   execFileSync("git", ["clone", "-q", originGit, seed]);
   execFileSync("git", ["-C", seed, "config", "user.email", "dispatch-claim-test@example.invalid"]);
   execFileSync("git", ["-C", seed, "config", "user.name", "dispatch-claim-test"]);
@@ -593,7 +593,7 @@ function readLedger(root: string): Array<Record<string, unknown>> {
 }
 
 test("W1-T1268 BEHAVIORAL: a REAL runTask() refuses via blocked_inflight when the claim is TAKEN, before any spawn — and the operator arm leaves it (no landed-work evidence)", async () => {
-  const root = mkdtempSync(join(tmpdir(), "dispatch-claim-taken-root-"));
+  const root = mkdtempSync(join(tmpdir(), "rmd-dispatch-claim-taken-root-"));
   const TASK_ID = "T-DISPATCH-CLAIM-TAKEN";
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, CLAIM_BEHAVIORAL_PLAN(TASK_ID));
@@ -638,7 +638,7 @@ test("W1-T1268 BEHAVIORAL: a REAL runTask() refuses via blocked_inflight when th
 });
 
 test("W1-T1268 BEHAVIORAL: a REAL runTask() refuses via blocked_git_fetch when the claim attempt is UNREACHABLE, and never even asks for a release", async () => {
-  const root = mkdtempSync(join(tmpdir(), "dispatch-claim-unreachable-root-"));
+  const root = mkdtempSync(join(tmpdir(), "rmd-dispatch-claim-unreachable-root-"));
   const TASK_ID = "T-DISPATCH-CLAIM-UNREACHABLE";
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, CLAIM_BEHAVIORAL_PLAN(TASK_ID));
@@ -684,7 +684,7 @@ test("W1-T1268 BEHAVIORAL: a REAL runTask() refuses via blocked_git_fetch when t
 });
 
 test("W1-T1268 BEHAVIORAL: a REAL runTask() drops its own dispatch claim when the worktree base turns up STALE, before any worker runs", async () => {
-  const root = mkdtempSync(join(tmpdir(), "dispatch-claim-stale-root-"));
+  const root = mkdtempSync(join(tmpdir(), "rmd-dispatch-claim-stale-root-"));
   const TASK_ID = "T-DISPATCH-CLAIM-STALE";
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, CLAIM_BEHAVIORAL_PLAN(TASK_ID));
@@ -731,7 +731,7 @@ test("W1-T1268 BEHAVIORAL: a REAL runTask() drops its own dispatch claim when th
 });
 
 test("W1-T1268 BEHAVIORAL: a REAL runTask() ledgers dispatch.claim_release_error rather than replacing the verdict when the terminal holder-arm release itself throws", async () => {
-  const root = mkdtempSync(join(tmpdir(), "dispatch-claim-release-error-root-"));
+  const root = mkdtempSync(join(tmpdir(), "rmd-dispatch-claim-release-error-root-"));
   const TASK_ID = "T-DISPATCH-CLAIM-RELEASE-ERROR";
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, CLAIM_BEHAVIORAL_PLAN(TASK_ID));
@@ -779,7 +779,7 @@ test("W1-T1268 BEHAVIORAL: a REAL runTask() ledgers dispatch.claim_release_error
 });
 
 test("W1-T1268 BEHAVIORAL: a REAL runTask() drops its own claim (holder arm) in the terminal finally, on a normal worker-error verdict", async () => {
-  const root = mkdtempSync(join(tmpdir(), "dispatch-claim-holder-release-root-"));
+  const root = mkdtempSync(join(tmpdir(), "rmd-dispatch-claim-holder-release-root-"));
   const TASK_ID = "T-DISPATCH-CLAIM-HOLDER-RELEASE";
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, CLAIM_BEHAVIORAL_PLAN(TASK_ID));
