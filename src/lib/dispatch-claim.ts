@@ -420,7 +420,10 @@ function parseRepairClaim(anchor: string, message: string): RepairClaim | undefi
       typeof parsed.claimedAtIso !== "string"
     ) return undefined;
     return { anchor, prNumber: Number(parsed.prNumber), holder: parsed.holder, claimedAtIso: parsed.claimedAtIso };
-  } catch {
+  } catch (error) {
+    // Malformed JSON and a structurally-invalid payload have the same public result, but keep
+    // the caught failure explicit so this parser never becomes a bare catch-erasure site.
+    void error;
     return undefined;
   }
 }

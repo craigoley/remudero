@@ -114,6 +114,46 @@ test("W1-T2677: unreadable or malformed claim evidence fails closed rather than 
   assert.match(refused.reason, /invalid timestamp/);
 });
 
+test("W1-T2677: every remote race and failure arm refuses with its distinct reason", () => {
+  const base = fakeRemote();
+  const unreachableAttempt: RepairClaimReserver = { ...base.reserver, attempt: () => "unreachable" };
+  const attemptRefusal = claimRepair(unreachableAttempt, { prNumber: 101, holder: "repairer", nowMs: 1_000, ttlMs: 60_000 });
+  assert.equal(attemptRefusal.outcome, "unreachable");
+  assert.match(attemptRefusal.reason, /cannot reach origin to claim/);
+
+  const vanishedAfterContention: RepairClaimReserver = {
+    ...base.reserver,
+    attempt: () => "taken",
+    read: () => ({ state: "absent" }),
+  };
+  const vanished = claimRepair(vanishedAfterContention, { prNumber: 102, holder: "repairer", nowMs: 1_000, ttlMs: 60_000 });
+  assert.equal(vanished.outcome, "lost");
+  assert.match(vanished.reason, /changed while it was being inspected/);
+
+  const staleClaim: RepairClaim = {
+    anchor: "a".repeat(40),
+    prNumber: 103,
+    holder: "expired-holder",
+    claimedAtIso: new Date(0).toISOString(),
+  };
+  const staleBase: RepairClaimReserver = {
+    ...base.reserver,
+    attempt: () => "taken",
+    read: () => ({ state: "present", claim: staleClaim }),
+    replace: () => "lost",
+  };
+  const lost = claimRepair(staleBase, { prNumber: 103, holder: "replacement", nowMs: 60_001, ttlMs: 60_000 });
+  assert.equal(lost.outcome, "lost");
+  assert.match(lost.reason, /another repairer won/);
+
+  const unreachableReplace = claimRepair(
+    { ...staleBase, replace: () => "unreachable" },
+    { prNumber: 103, holder: "replacement", nowMs: 60_001, ttlMs: 60_000 },
+  );
+  assert.equal(unreachableReplace.outcome, "unreachable");
+  assert.match(unreachableReplace.reason, /cannot reach origin to replace expired/);
+});
+
 test("W1-T2677 real Git: any checkout can claim, an active peer observes it, expiry is reclaimable, and normal pushes remain independent", () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-repair-claim-"));
   const bare = join(root, "remote.git");
@@ -153,6 +193,22 @@ test("W1-T2677 real Git: any checkout can claim, an active peer observes it, exp
     assert.equal(replacement.claimed, true, replacement.reason);
     assert.equal(replacement.outcome, "reclaimed");
     assert.equal(replacement.previousHolder, "outside-rmd");
+
+    const malformedTree = execFileSync("git", ["-C", firstDir, "hash-object", "-t", "tree", "/dev/null"], { env: GIT_ENV, encoding: "utf8" }).trim();
+    const malformedAnchor = execFileSync(
+      "git",
+      ["-C", firstDir, "commit-tree", malformedTree, "-m", "rmd-repair claim v1\nnot-json"],
+      { env: GIT_ENV, encoding: "utf8" },
+    ).trim();
+    execFileSync("git", ["-C", firstDir, "push", "--quiet", "origin", `${malformedAnchor}:${repairClaimRef(404)}`], { env: GIT_ENV });
+    const malformedRead = factory(secondDir).read(404);
+    assert.equal(malformedRead.state, "present");
+    if (malformedRead.state === "present") {
+      assert.equal(malformedRead.claim.holder, "unknown");
+      assert.equal(malformedRead.claim.claimedAtIso, "invalid");
+    }
+
+    assert.equal(factory(secondDir).drop(3743, replacement.anchor!), true, "the current holder can release its exact anchor");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
