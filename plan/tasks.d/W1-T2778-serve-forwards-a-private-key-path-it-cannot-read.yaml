@@ -1,0 +1,87 @@
+- id: W1-T2778
+  title: "the Serve launcher forwards the daemon container's GitHub App private-key path but never mounts that file, so its in-process token refresher is always armed against an unreadable credential"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 16.00
+  risk: high
+  files:
+    - deploy/serve-container.sh
+    - test/console-token-refresh.test.ts
+  origin: "operator-session#serve-github-app-key-mount-2026-09-03"
+  plan_refs: ["W1-T1024", "W1-T1069", "W1-T1222", "W1-T2269", "W1-T2434", "W1-T2568"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED on the Azure fleet host at 2026-09-03T16:35Z: `remudero-serve` carries non-empty
+    `GH_APP_ID`, `GH_APP_INSTALLATION_ID`, and `GH_APP_PRIVATE_KEY_PATH`, but the configured path
+    is `/home/node/.claude/rmd-app.pem`, `/home/node/.claude` does not exist in that container,
+    and the path is unreadable as the container's uid 1000. Its mount list contains the state
+    directory, the account file, and the webhook secret, but no App private key or `.claude`
+    directory. No secret content was read or printed during this measurement.
+
+    OBSERVED at current `main`: W1-T2269 correctly arms Serve's own installation-token refresh
+    loop and `deploy/serve-container.sh` captures all three `GH_APP_*` values. The launcher then
+    passes `GH_APP_PRIVATE_KEY_PATH` by name while its own comment explicitly says it mounts no
+    volume for that path. When the value was captured from `remudero-daemon`, it names a path in
+    the daemon container's namespace, not a path in Serve's namespace. The board therefore
+    reports `private key unreadable` and falls back to the static `GH_TOKEN`; the renewable path
+    exists in code but cannot mint on the deployed container shape.
+
+    The falsifying observation would be a read-only `docker inspect` showing a mount whose
+    destination contains the configured key path, followed by an in-container uid-1000 readable
+    file check. Both were checked and both were false. This is a launch-boundary defect, not a
+    `github-app.ts` signing, exchange, or refresh-loop defect.
+  design: |
+    Teach only `deploy/serve-container.sh` to resolve the App key's host source and bind-mount
+    exactly that one regular, non-empty file read-only at a fixed Serve-only destination. A path
+    supplied directly by the invoking shell may name a readable host file. A path captured from
+    the daemon may name the daemon-side destination; translate it through the daemon's observed
+    mount source rather than assuming the operator's home or mounting the whole credential
+    directory. Rewrite `GH_APP_PRIVATE_KEY_PATH` in the launched container to the fixed
+    destination so the environment and mount cannot disagree.
+
+    Preserve W1-T2269's failure posture: absent, empty, outside-any-observed-daemon-mount, or
+    unreadable key material must not prevent Serve from starting and must not replace the static
+    fallback token. It must omit the key mount and leave the original configured path visible to
+    the existing refresher so its board telemetry continues to name `private key unreadable`.
+    Do not mount the daemon's whole `.claude` directory, Codex credentials, Docker socket, or any
+    new writable path. Do not print key content, token content, or place either value in argv.
+
+    Prove the actual shell behavior through a fake-Docker harness, not source regexes alone. The
+    harness must cover a direct host key, a daemon-container path translated through an observed
+    mount, and an unresolved/missing key. Keep account-file and webhook-secret optional mounts,
+    network selection, state-mount agreement, GitHub token fallback, and replace refusal byte-for-
+    byte compatible outside this credential-file splice.
+  acceptance:
+    - claim: "a readable host App key is bind-mounted as exactly one file read-only and the launched Serve process receives GH_APP_PRIVATE_KEY_PATH pointing at that same fixed container destination"
+      proof: "unit test: test/console-token-refresh.test.ts"
+    - claim: "a key path captured from remudero-daemon is translated through the daemon's actual mount source, never by assuming a host home-directory layout"
+      proof: "unit test: test/console-token-refresh.test.ts"
+    - claim: "an absent, empty, unreadable, or untranslatable key adds no mount, does not block Serve startup, and preserves the existing static-token fallback plus visible refresh failure"
+      proof: "unit test: test/console-token-refresh.test.ts"
+    - claim: "Serve receives only the one key file read-only; no credential directory, Codex home, Docker socket, key content, or token content crosses the container boundary or appears in output"
+      proof: "unit test: test/console-token-refresh.test.ts"
+    - claim: "the existing account-file, webhook-secret, state, network, token-capture, dry-run, and existing-container refusal behavior remains unchanged outside the App-key mount"
+      proof: "unit test: test/console-token-refresh.test.ts"
+  falsifier: |
+    Close this task without implementation if a uid-1000 read inside the current Serve container
+    succeeds at its configured `GH_APP_PRIVATE_KEY_PATH`, or if the current launcher already
+    bind-mounts the containing source into a destination that contains that path. Do not solve the
+    defect by copying key material into the image/state tree, mounting the entire credential
+    directory, weakening the refresher's fail-soft posture, coupling Serve's runtime to the daemon,
+    or replacing either container as part of the code change.
+  note: |
+    ID PROVENANCE: `rmd next-task-id --reserve` on detached current `origin/main` atomically held
+    `refs/rmd-id/W1-T2778`; that reserved id is authoritative.
+
+    RISK: high is Rule 19's sizing grade. The single launch-boundary concern necessarily reads
+    the daemon container's mount metadata to construct the Serve container's one-file mount, so
+    the linter classifies the design text across daemon and serve-container subsystems even though
+    production code changes stay in one launcher.
+
+    COMMISSIONING BOUNDARY: this task changes the committed launcher and its tests only. It does
+    not authorize an ACR build, Serve replacement, daemon recycle, Codex enablement, or any other
+    lifecycle action. The operator retains all of those decisions.
