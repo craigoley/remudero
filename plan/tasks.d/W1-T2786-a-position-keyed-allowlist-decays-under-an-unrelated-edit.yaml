@@ -13,6 +13,7 @@
   files:
     - scripts/mkdtemp-callsite-check.mjs
     - hooks/mkdtemp-allowlist.txt
+    - test/mkdtemp-allowlist-rekey.test.ts
     - test/mkdtemp-callsite-check.test.ts
     - learnings/testing.yaml
     - learnings/index.json
@@ -77,19 +78,36 @@
     THE FILE HALF OF THE KEY STILL CARRIES MEANING. Dropping the line must not accidentally drop
     the file: an allowlisted prefix appearing in a DIFFERENT file must still refuse, or the
     allowlist would become a global prefix amnesty.
+
+    THE NEW PROOFS GO IN A NEW FILE, `test/mkdtemp-allowlist-rekey.test.ts`, AND THAT IS A
+    DISCRIMINATION DECISION RATHER THAN AN ORGANISATIONAL ONE. W1-T362 extended `executed_stale` to
+    `unit test:` proofs, so a proof reading the same at head and at base substantiates nothing.
+    Pointing these six at the EXISTING `test/mkdtemp-callsite-check.test.ts` would have graded
+    exactly that way: MEASURED 2026-09-03, a pristine `origin/main` worktree at `9e2f5e90` runs
+    `node scripts/mkdtemp-callsite-check.mjs` CLEAN (`648 tracked .ts/.mjs file(s) …, 998
+    allowlisted`, exit 0) now that #3840 has merged, so that suite passes at base and would pass
+    identically at head. A path that does not exist at base CANNOT pass at base, so the new file
+    discriminates BY CONSTRUCTION instead of by the current colour of main — which is another
+    lane's merge to move, exactly the dependency this shard's rationale refuses elsewhere.
+
+    `test/mkdtemp-callsite-check.test.ts` STAYS IN `files:` because the re-key genuinely breaks it:
+    its `W1-T2773 main: an allowlisted <file>:<line> bypasses the rule (the migration parking
+    mechanism)` case asserts the OLD key format directly, seeding a fixture allowlist with
+    `test/bare.test.ts:2`. That test must be rewritten to the new key. No criterion cites it — it
+    is declared because it is edited, not because it proves anything here.
   acceptance:
     - claim: "an unrelated line insertion above an allowlisted callsite does not refuse — the regression that exists today under `<file>:<line>` keying is gone"
-      proof: "unit test: test/mkdtemp-callsite-check.test.ts"
+      proof: "unit test: test/mkdtemp-allowlist-rekey.test.ts"
     - claim: "a genuinely new bare-prefix callsite is still refused, so the re-keying did not make the rule soft"
-      proof: "unit test: test/mkdtemp-callsite-check.test.ts"
+      proof: "unit test: test/mkdtemp-allowlist-rekey.test.ts"
     - claim: "an allowlisted prefix appearing in a DIFFERENT file is still refused — the file half of the key keeps its meaning"
-      proof: "unit test: test/mkdtemp-callsite-check.test.ts"
+      proof: "unit test: test/mkdtemp-allowlist-rekey.test.ts"
     - claim: "a callsite whose prefix cannot be statically resolved keys on the file plus an explicit sentinel and remains exemptible, rather than being dropped from the scheme"
-      proof: "unit test: test/mkdtemp-callsite-check.test.ts"
+      proof: "unit test: test/mkdtemp-allowlist-rekey.test.ts"
     - claim: "the key computation and the refusal message read the prefix through one shared extractor, so the two cannot drift apart"
-      proof: "unit test: test/mkdtemp-callsite-check.test.ts"
+      proof: "unit test: test/mkdtemp-allowlist-rekey.test.ts"
     - claim: "the migrated allowlist leaves the checker clean on an unmodified tree, and every generated entry names a prefix that actually occurs in the file it names"
-      proof: "unit test: test/mkdtemp-callsite-check.test.ts"
+      proof: "unit test: test/mkdtemp-allowlist-rekey.test.ts"
   note: |
     ID PROVENANCE: W1-T2786 was reserved and supplied by the operator. `refs/rmd-dispatch/W1-T2786`
     was minted BEFORE any work (`rmd-dispatch claim 33775@Remudero 2026-09-03T20:14:01.124Z`).
