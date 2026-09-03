@@ -22,7 +22,9 @@
 // Accepted:
 //   - `join(tmpdir(), "rmd-*")`                  — a literal beginning with `rmd-`
 //   - `join(tmpdir(), \`${RMD_TMP_PREFIX}foo-\`)` — the sanctioned constant
-//   - the callsite's `<file>:<line>` is on `hooks/mkdtemp-allowlist.txt`
+//   - the callsite's `<file>:<prefix>` is on `hooks/mkdtemp-allowlist.txt` (W1-T2786 re-keyed
+//     this from `<file>:<line>`, which decayed under any edit that inserted a line above an
+//     allowlisted callsite — see `allowlistKey`)
 // Refused: anything else, INCLUDING a variable prefix — the rule reads the AST, not the
 // runtime value, so a variable prefix cannot be statically proven reapable and fails closed.
 //
@@ -149,45 +151,80 @@ function lineOf(text, off) {
 
 // ── the classification the rule turns on ─────────────────────────────────────────────────────
 
+/** The prefix stand-in for a callsite whose prefix CANNOT be resolved statically — a variable,
+ *  a call, a spread. Such a callsite still has to be exemptible (`scripts/recovery-drill.mjs`
+ *  is the live example), so it keys on its file plus this sentinel rather than dropping out of
+ *  the allowlist scheme entirely. Angle brackets cannot occur in a JS identifier or in the
+ *  literal head of a template, so it can never collide with a real extracted prefix. */
+export const UNRESOLVABLE_PREFIX_SENTINEL = "<unresolvable-prefix>";
+
 /**
- * Classify a `mkdtempSync` first-argument expression:
+ * THE ONE PARSE. Classify a `mkdtempSync` first-argument expression AND extract the static
+ * prefix it will produce, in a single walk — `{ classification, prefix }`.
+ *
+ * WHY THESE TWO ANSWERS COME FROM ONE FUNCTION (W1-T2786). The allowlist key and the refusal
+ * message both need the prefix. Deriving them separately is precisely the drift class this
+ * task exists to remove, one layer down: before this, `formatRefusal` re-parsed `arg` with its
+ * own regex that did NOT use `splitTopLevelArgs`, so the message could disagree with the
+ * classification about what the prefix even was. Callers now read `prefix` from here or not at
+ * all.
+ *
+ * Classifications:
  *   "sanctioned-literal" — a `join(tmpdir(), "rmd-*")` literal
  *   "sanctioned-const"   — a `join(tmpdir(), \`${RMD_TMP_PREFIX}...\`)` template
  *   "non-tmpdir"         — first arg is not `join(tmpdir(), …)` (a different root — not our
  *                          concern, boot sweep only reaps `os.tmpdir()`)
  *   "bare-literal"       — a `join(tmpdir(), "bare-…")` literal not starting with `rmd-`
  *   "unresolvable"       — anything else (variable, function call, spread); fails closed
+ *
+ * `prefix` is the STATIC head of the resulting directory name: a plain literal's body, or a
+ * template's literal head up to the first `${`. It is {@link UNRESOLVABLE_PREFIX_SENTINEL}
+ * whenever no static head exists — including a template that OPENS with an interpolation,
+ * whose head is the empty string and so names nothing a reader could act on.
  */
-export function classifyMkdtempFirstArg(expr) {
+export function parseMkdtempFirstArg(expr) {
+  const unresolved = (classification) => ({ classification, prefix: UNRESOLVABLE_PREFIX_SENTINEL });
   const e = expr.trim();
   // Must be `join(tmpdir(), <prefix>)`
   const m = /^join\s*\(/.exec(e);
-  if (!m) return "non-tmpdir";
+  if (!m) return unresolved("non-tmpdir");
   const openIdx = m.index + m[0].length - 1;
   const closeIdx = matchClose(e, openIdx);
-  if (closeIdx === -1) return "unresolvable";
+  if (closeIdx === -1) return unresolved("unresolvable");
   const inside = e.slice(openIdx + 1, closeIdx);
   const args = splitTopLevelArgs(inside);
-  if (args.length < 2) return "non-tmpdir";
-  if (!/^tmpdir\s*\(\s*\)\s*$/.test(args[0])) return "non-tmpdir";
-  const prefix = args[1];
+  if (args.length < 2) return unresolved("non-tmpdir");
+  if (!/^tmpdir\s*\(\s*\)\s*$/.test(args[0])) return unresolved("non-tmpdir");
+  const prefixExpr = args[1];
+  // The static head, computed ONCE and shared by every classification below.
+  const plainLit = /^(['"])(.*)\1$/s.exec(prefixExpr);
+  const tmplHead = prefixExpr.startsWith("`") ? (/^`([^`$]*)/.exec(prefixExpr)?.[1] ?? "") : undefined;
+  const head = plainLit ? plainLit[2] : tmplHead;
+  const prefix = head ? head : UNRESOLVABLE_PREFIX_SENTINEL;
+
   // sanctioned literal: "rmd-…" or 'rmd-…'
-  const litMatch = /^(['"])(rmd-[^'"]*)\1$/.exec(prefix);
-  if (litMatch) return "sanctioned-literal";
+  if (plainLit && plainLit[2].startsWith(RMD_TMP_PREFIX)) return { classification: "sanctioned-literal", prefix };
   // sanctioned template: `${RMD_TMP_PREFIX}…`
-  const tmpl = /^`\s*\$\{\s*([A-Za-z_$][\w$]*)\s*\}/.exec(prefix);
-  if (tmpl && SANCTIONED_PREFIX_IDENTS.has(tmpl[1])) return "sanctioned-const";
+  const tmpl = /^`\s*\$\{\s*([A-Za-z_$][\w$]*)\s*\}/.exec(prefixExpr);
+  if (tmpl && SANCTIONED_PREFIX_IDENTS.has(tmpl[1])) return { classification: "sanctioned-const", prefix };
   // sanctioned template whose LITERAL head begins with `rmd-` (before any `${...}`) — the
   // reapability property is the same: the resulting dir name starts with `rmd-` at runtime
   // regardless of what the interpolation is.
-  const litHead = /^`(rmd-[^`$]*)/.exec(prefix);
-  if (litHead) return "sanctioned-literal";
-  // any other literal is a bare prefix
-  const anyLit = /^(['"`])(.*)\1$/s.exec(prefix);
-  if (anyLit) return "bare-literal";
-  // template literal that doesn't start with a sanctioned constant
-  if (prefix.startsWith("`")) return "bare-literal";
-  return "unresolvable";
+  if (tmplHead && tmplHead.startsWith(RMD_TMP_PREFIX)) return { classification: "sanctioned-literal", prefix };
+  // any other literal, or a template not starting with a sanctioned constant, is a bare prefix
+  if (plainLit || tmplHead !== undefined) return { classification: "bare-literal", prefix };
+  return unresolved("unresolvable");
+}
+
+/** Classification only — the historical entry point, now a thin read of {@link
+ *  parseMkdtempFirstArg} so the two answers can never be computed by different code. */
+export function classifyMkdtempFirstArg(expr) {
+  return parseMkdtempFirstArg(expr).classification;
+}
+
+/** The static prefix only — see {@link parseMkdtempFirstArg}. */
+export function mkdtempPrefixOf(expr) {
+  return parseMkdtempFirstArg(expr).prefix;
 }
 
 // ── the scan ──────────────────────────────────────────────────────────────────────────────────
@@ -249,15 +286,42 @@ export function scanFile(text) {
     const args = splitTopLevelArgs(text.slice(openIdx + 1, closeIdx));
     if (args.length === 0) continue;
     const line = lineOf(text, m.index);
-    rows.push({ line, arg: args[0], classification: classifyMkdtempFirstArg(args[0]) });
+    // ONE parse per callsite: the row carries both answers so no downstream caller re-derives
+    // either one. `line` is reported (a human needs to find the callsite) but is NOT part of
+    // the allowlist key — see {@link allowlistKey}.
+    const { classification, prefix } = parseMkdtempFirstArg(args[0]);
+    rows.push({ line, arg: args[0], classification, prefix });
   }
   return rows;
 }
 
-/** Load the on-disk allowlist as a Set of `<repo-relative-path>:<line>` entries. Blank lines
- *  and lines starting with `#` are comments. Every entry must carry a reason (a `#` suffix on
- *  the same line, or an immediately preceding `#`-comment line — checked separately by test).
- *  A missing file is treated as empty (bootstrap case), never as an error. */
+/**
+ * The allowlist key for one callsite: `<repo-relative-path>:<prefix>`.
+ *
+ * THE LINE NUMBER IS DELIBERATELY ABSENT (W1-T2786). Keying on `<file>:<line>` made every
+ * entry decay under any edit that inserted a line above its callsite: the entry stopped naming
+ * the site, a months-old exemption became a false refusal, and the red landed on whoever
+ * shifted the line rather than on anyone who had touched temp directories. Nothing failed
+ * loudly; 998 entries were each one unrelated insertion away from firing. A prefix does not
+ * move when the file above it does.
+ *
+ * THE FILE HALF STILL CARRIES MEANING. Dropping the line must not accidentally drop the file
+ * — an exemption is for a known callsite in a known file, not a licence for that prefix
+ * anywhere in the tree, which would make the allowlist a global prefix amnesty.
+ *
+ * Two sites in ONE file sharing a prefix collapse to a single entry. That is intended: they
+ * would want exempting together anyway, and a collapsed entry cannot half-decay.
+ *
+ * The separator is `:` and parsing splits on the FIRST one, which is unambiguous because a
+ * repo-relative path cannot contain a colon while a prefix may.
+ */
+export function allowlistKey(file, prefix) {
+  return `${file}:${prefix}`;
+}
+
+/** Load the on-disk allowlist as a Set of `<repo-relative-path>:<prefix>` entries (see {@link
+ *  allowlistKey}). Blank lines and lines starting with `#` are comments; a trailing `# reason`
+ *  is stripped. A missing file is treated as empty (bootstrap case), never as an error. */
 export function loadAllowlist(repoRoot) {
   const p = join(repoRoot, ALLOWLIST_PATH);
   if (!existsSync(p)) return new Set();
@@ -295,9 +359,8 @@ export function scanRepo(repoRoot) {
     scanned++;
     for (const row of scanFile(text)) {
       if (!REFUSED.has(row.classification)) continue;
-      const key = `${f}:${row.line}`;
-      if (allowed.has(key)) continue;
-      refused.push({ file: f, line: row.line, arg: row.arg, classification: row.classification });
+      if (allowed.has(allowlistKey(f, row.prefix))) continue;
+      refused.push({ file: f, line: row.line, arg: row.arg, classification: row.classification, prefix: row.prefix });
     }
   }
   return { refused, scanned, allowedCount: allowed.size };
@@ -306,14 +369,17 @@ export function scanRepo(repoRoot) {
 /** Format one refused row as the exact message the operator directive names — audience is a
  *  human who authored the bare form an hour ago and does not yet know this repo has a
  *  reapability discipline. Names the fix, not the rule. */
-export function formatRefusal({ file, line, arg }) {
-  // Extract a short display form of the prefix for the message: the literal or template body.
-  const litMatch = /^join\s*\(\s*tmpdir\s*\(\s*\)\s*,\s*(['"`])([^'"`]{0,60})\1/.exec(arg);
-  const display = litMatch ? litMatch[2] : "<variable-prefix>";
+export function formatRefusal({ file, line, arg, prefix }) {
+  // THE SAME EXTRACTOR THE KEY USES. `prefix` is passed in by `scanRepo` (already parsed
+  // once); a caller constructing a row by hand gets it re-derived from the identical function
+  // rather than from a second regex of its own. Before W1-T2786 this line held a private
+  // regex, which is how the message and the key could disagree about the prefix.
+  const display = prefix ?? mkdtempPrefixOf(arg);
+  const suggestion = display === UNRESOLVABLE_PREFIX_SENTINEL ? "<prefix>" : display.replace(/^rmd-/, "");
   return (
     `${file}:${line}: mkdtemp prefix '${display}' will not be reaped by src/lib/tmp.ts's ` +
-    `sweepStaleTempDirs — use \`\${RMD_TMP_PREFIX}${display.replace(/^rmd-/, "")}\` or add ` +
-    `\`${file}:${line}\` to ${ALLOWLIST_PATH} with a reason.`
+    `sweepStaleTempDirs — use \`\${RMD_TMP_PREFIX}${suggestion}\` or add ` +
+    `\`${allowlistKey(file, display)}\` to ${ALLOWLIST_PATH} with a reason.`
   );
 }
 

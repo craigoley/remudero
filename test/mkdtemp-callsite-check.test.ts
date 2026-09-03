@@ -275,7 +275,12 @@ test("W1-T2773 main: a variable-prefix callsite fails closed — the rule cannot
   assert.ok(/<variable-prefix>|scripts\/varish\.mjs/.test(err.join("\n")));
 });
 
-test("W1-T2773 main: an allowlisted `<file>:<line>` bypasses the rule (the migration parking mechanism)", () => {
+// W1-T2786 re-keyed the allowlist from `<file>:<line>` to `<file>:<prefix>`. The parking
+// mechanism this test proves is unchanged; only the key it is spelled with has moved. The
+// line-keyed spelling (`test/bare.test.ts:2`) is now inert by design — the sibling suite
+// test/mkdtemp-allowlist-rekey.test.ts asserts that directly, so the retired form is proven
+// dead somewhere rather than merely deleted here.
+test("W1-T2773 main: an allowlisted `<file>:<prefix>` bypasses the rule (the migration parking mechanism)", () => {
   const root = makeFixtureRepo({
     "test/bare.test.ts": [
       "import { mkdtempSync } from 'node:fs';",
@@ -283,7 +288,7 @@ test("W1-T2773 main: an allowlisted `<file>:<line>` bypasses the rule (the migra
     ].join("\n"),
     "hooks/mkdtemp-allowlist.txt": [
       "# pre-existing site, migrated under W1-T2775",
-      "test/bare.test.ts:2",
+      "test/bare.test.ts:sweep-reentry-",
     ].join("\n"),
   });
   const out: string[] = [], err: string[] = [];

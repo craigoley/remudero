@@ -89,3 +89,24 @@
   assertion: 'grep -q "archiveCount" src/lib/ledger-grep.ts'
   src: measured 2026-08-23 — 126-line live ledger, one distinct step, zero archives
   cited: "2026-08-23"
+- id: position-and-side-table-anchors-decay-silently
+  subsystem: evidence
+  lifecycle: active
+  files: [hooks, scripts, test, src/lib/review.ts]
+  fact: >-
+    An assertion anchored to POSITION, or validated against a HAND-MAINTAINED SIDE TABLE, decays
+    silently under a legitimate edit that had no way to know. Anchor on CONTENT, or derive the
+    table from OBSERVATION. Measured: hooks/mkdtemp-allowlist.txt keyed 998 exemptions on
+    <file>:<line>, so one unrelated line insertion turned a months-old exemption into a false
+    refusal on a PR that never touched temp directories; re-keying on <file>:<prefix> collapsed
+    them to 909 entries that do not move. Five more in one session — a shard files: list
+    invalidated by the size ratchet's own prescribed remedy; a wiring guard slicing start+4000
+    chars; HOST_CAUSED_SUITE_REDS hand-maintained beside HOST_PARITY_BASELINE, which derives the
+    same facts from a run; a re-anchor that landed 18 chars early; and a generator test hardcoding
+    the smallest shard's NAME in a file asking for the real smallest, not a stand-in. Migrate such
+    a table by RE-OBSERVING (scan with the table empty, take the tool's own output), never by
+    resolving the stale keys — resolving reads the wrong row for exactly the entries that already
+    drifted, then makes that wrong value permanent under the new key.
+  assertion: 'grep -q "allowlistKey" scripts/mkdtemp-callsite-check.mjs'
+  src: W1-T2786 — measured 2026-09-03, 998 line-keyed entries re-keyed to 909 prefix-keyed
+  cited: "2026-09-03"
