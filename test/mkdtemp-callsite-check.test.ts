@@ -7,9 +7,9 @@
  * exactly as `hooks/pre-commit` will.
  */
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
@@ -177,6 +177,58 @@ function makeFixtureRepo(files: Record<string, string>): string {
   execFileSync("git", ["-C", root, "commit", "-q", "-m", "seed", "--no-verify"], { env });
   return root;
 }
+
+function makePreCommitFixtureRepo(): string {
+  const root = makeFixtureRepo({
+    "scripts/mkdtemp-callsite-check.mjs": readFileSync(SCRIPT, "utf8"),
+    "hooks/pre-commit": readFileSync(join(REPO_ROOT, "hooks", "pre-commit"), "utf8"),
+    "hooks/mkdtemp-allowlist.txt": "# fixture starts with no exemptions\n",
+    "test/seed.test.ts": "const seed = true;\n",
+  });
+  chmodSync(join(root, "hooks", "pre-commit"), 0o755);
+  execFileSync("git", ["-C", root, "config", "core.hooksPath", "hooks"]);
+  return root;
+}
+
+test("W1-T2773 pre-commit: the real hook refuses a staged bare prefix before commit and accepts the sanctioned repair", () => {
+  const root = makePreCommitFixtureRepo();
+  const candidate = join(root, "test", "candidate.test.ts");
+  const before = execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+
+  writeFileSync(
+    candidate,
+    [
+      "import { mkdtempSync } from 'node:fs';",
+      "import { tmpdir } from 'node:os';",
+      "import { join } from 'node:path';",
+      "mkdtempSync(join(tmpdir(), 'worker-bare-prefix-'));",
+    ].join("\n"),
+  );
+  execFileSync("git", ["-C", root, "add", "test/candidate.test.ts"]);
+  const refused = spawnSync("git", ["-C", root, "commit", "-m", "test: add a bare temp prefix"], {
+    encoding: "utf8",
+  });
+  assert.notEqual(refused.status, 0, "the real pre-commit hook must reject the staged callsite");
+  assert.match(refused.stderr, /pre-commit refused/);
+  assert.match(refused.stderr, /worker-bare-prefix-/);
+  assert.equal(
+    execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+    before,
+    "the refusal must happen before git creates a commit",
+  );
+
+  writeFileSync(candidate, readFileSync(candidate, "utf8").replace("worker-bare-prefix-", "rmd-worker-prefix-"));
+  execFileSync("git", ["-C", root, "add", "test/candidate.test.ts"]);
+  const accepted = spawnSync("git", ["-C", root, "commit", "-m", "test: use a reapable temp prefix"], {
+    encoding: "utf8",
+  });
+  assert.equal(accepted.status, 0, `the repaired staged callsite must commit:\n${accepted.stderr}`);
+  assert.notEqual(
+    execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+    before,
+    "the accepted repair must create the commit the refused form could not",
+  );
+});
 
 test("W1-T2773 main: a repo with only sanctioned callsites exits 0", () => {
   const root = makeFixtureRepo({
