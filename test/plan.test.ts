@@ -8,6 +8,7 @@ import {
   loadPlan,
   PlanError,
   selectTask,
+  TASK_STATUSES,
   transitiveDependents,
   unmetDependencies,
   visibleCriteria,
@@ -73,6 +74,46 @@ test("rejects a dependency on an unknown task", () => {
   attempts: 0
 `;
   assert.throws(() => loadPlan(planFile(bad)), PlanError);
+});
+
+// ── W1-T2639: the status arm must TEACH the permitted vocabulary, like its
+// risk/retirement siblings, instead of just refusing.
+
+test("rejects an out-of-vocabulary status, naming every member of TASK_STATUSES", () => {
+  const bad = `
+- id: S
+  title: s
+  repo: r
+  depends_on: []
+  type: implement
+  verify: auto
+  status: shipped
+  attempts: 0
+`;
+  assert.throws(() => loadPlan(planFile(bad)), (err: unknown) => {
+    assert.ok(err instanceof PlanError);
+    assert.match(err.message, /invalid status 'shipped'/);
+    for (const s of TASK_STATUSES) {
+      assert.ok(err.message.includes(s), `expected message to name '${s}': ${err.message}`);
+    }
+    return true;
+  });
+});
+
+test("status vocabulary is unchanged: 'shipped' stays illegal and 'merged'/'done' remain the only merged-meaning members", () => {
+  assert.ok(!(TASK_STATUSES as readonly string[]).includes("shipped"));
+  assert.deepEqual([...TASK_STATUSES], [
+    "queued",
+    "recon",
+    "prompted",
+    "running",
+    "review",
+    "fixing",
+    "diagnosing",
+    "blocked",
+    "merged",
+    "done",
+  ]);
 });
 
 test("rejects verify:human as not auto-runnable", () => {
