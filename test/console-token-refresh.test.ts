@@ -15,7 +15,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { chmodSync, readFileSync, mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import type { AddressInfo } from "node:net";
@@ -219,7 +219,12 @@ function runServeLauncherFixture(source: "direct" | "daemon" | "missing") {
   const capturePath = join(root, "docker-capture.txt");
   const dockerPath = join(binDir, "docker");
   const directKeyPath = join(root, "direct-app.pem");
-  const daemonKeyPath = "/home/node/.claude/rmd-app.pem";
+  // A production-shaped absolute path such as /home/node/.claude/rmd-app.pem can exist in the
+  // parent test container. In that case the launcher correctly treats it as directly readable
+  // and never exercises either translation arm. Give each fixture a container-only mount path so
+  // the test result cannot depend on credentials installed on the machine running the proof.
+  const daemonCredentialDest = `/rmd-test-${basename(root)}`;
+  const daemonKeyPath = join(daemonCredentialDest, "rmd-app.pem");
   const keyBody = "FAKE-PRIVATE-KEY-CONTENT-W1-T2778";
   const token = "ghs_FAKE_STATIC_TOKEN_W1_T2778";
   mkdirSync(binDir, { recursive: true });
@@ -245,7 +250,7 @@ if [ "\${1:-}" = "inspect" ] && [ "\${2:-}" = "remudero-daemon" ]; then
       printf '%s\\n' '${stateDir}'
       ;;
     *Mounts*)
-      printf '%s\\t%s\\n' '${stateDir}' '/home/node/Remudero' '${credDir}' '/home/node/.claude'
+      printf '%s\\t%s\\n' '${stateDir}' '/home/node/Remudero' '${credDir}' '${daemonCredentialDest}'
       ;;
   esac
   exit 0
@@ -311,7 +316,10 @@ test("W1-T2778: a direct readable host App key becomes one read-only file mount 
 test("W1-T2778: a daemon-container key path is translated through the daemon's observed mount source", () => {
   const fixture = runServeLauncherFixture("daemon");
   assert.equal(fixture.result.status, 0, fixture.result.stderr);
-  assert.ok(fixture.capture.includes(`${join(fixture.credDir, "rmd-app.pem")}:${SERVE_APP_KEY_DEST}:ro`));
+  assert.ok(
+    fixture.capture.includes(`${join(fixture.credDir, "rmd-app.pem")}:${SERVE_APP_KEY_DEST}:ro`),
+    `expected the translated file mount in:\n${fixture.capture}`,
+  );
   assert.ok(fixture.capture.includes(`ENV:${SERVE_APP_KEY_DEST}`));
   assert.ok(!fixture.capture.includes(`${fixture.credDir}:/home/node/.claude`), "the credential directory itself is never mounted");
 });
@@ -319,7 +327,7 @@ test("W1-T2778: a daemon-container key path is translated through the daemon's o
 test("W1-T2778: an untranslatable or missing key preserves startup and fallback without inventing a mount", () => {
   const fixture = runServeLauncherFixture("missing");
   assert.equal(fixture.result.status, 0, fixture.result.stderr);
-  assert.ok(!fixture.capture.includes(SERVE_APP_KEY_DEST));
+  assert.ok(!fixture.capture.includes(SERVE_APP_KEY_DEST), `unexpected key destination in:\n${fixture.capture}`);
   assert.ok(fixture.capture.includes(`ENV:${fixture.daemonKeyPath}`), "the refresher retains the unreadable path so its existing telemetry names the failure");
   assert.match(fixture.result.stderr, /private key.*unreadable|could not resolve.*private key/i);
 });
