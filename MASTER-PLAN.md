@@ -5031,6 +5031,75 @@ if the operator ever holds one, and no shard is filed on a plan nobody has. Stan
 (event-conditioned reminders with fire budgets): noted; merge holds and typed escalation options
 cover the first cases, and a shard waits for a measured need.
 
+## 4D. Concept scan (2026-09-03): a compact dialect for the fleet — taken, refused, already held
+
+The operator asked whether the acronym macros they use in interactive sessions (`tddr`, `grfp`)
+could apply to this harness, and whether the daemon and its workers could share a compact
+language that translates cleanly into the plain-language standard the fleet uses for people
+(docs/operator-message-standard.md). This block records what was measured, what the fleet
+already speaks, what was taken as shards, and what was refused, so the next scan starts here.
+[research: compact-dialect-2026-09-03]
+
+**WHAT THE FLEET ALREADY SPEAKS, MEASURED.** The daemon's language to a worker is one rendered
+prompt of six named parts — doctrine, cited task claims, the recon relay, operator notes, up to
+8,148 characters of glob-matched learnings, and the task body — plus a pointer at the shard on
+disk and a typed output contract (`implementPromptParts`, `outputContractLines`). The worker's
+language back is a marker grammar parsed by code, never by a model: `PR_URL:`, `DECISION_REQUEST`,
+`QUESTION`, typed `## Follow-ups` lines, `ALREADY_SATISFIED:`, `SHIPS-UNWIRED:`, the
+`Remudero-Task:` trailer. The proof dialect is the third machine language, executed by the
+reviewer. Every human-readable file in the repository — CLAUDE.md, MASTER-PLAN.md, DECISIONS.md,
+docs/ORIENTATION.md — reaches no dispatched worker: `spawnWorker` passes `settingSources: []`,
+which the installed SDK documents as the option that must include `'project'` to load CLAUDE.md.
+So the compact dialect the question asks for is the existing design; the scan found where it is
+incomplete, and one place where the plan describes it wrongly.
+
+**WHAT THE LITERATURE SAYS, AND HOW FAR IT REACHES.** Instruction-following falls with
+instruction count and favours earlier instructions (IFScale, 2025; twenty models); Anthropic's
+memory guidance targets under 200 lines per CLAUDE.md and says longer files reduce adherence —
+this file's is 493. A rare acronym splits into two or three sub-tokens against about five for the
+phrase it stands for, so shorthand saves nothing per use; the value is a long expansion behind a
+short name, which Claude Code provides as a skill whose body is substituted verbatim. Agora
+(2024) names the shape this harness has: natural language for rare exchanges, a negotiated
+protocol document for the frequent one, routines that execute it. Model-invented shorthand
+(Shogtongue, 2023; the FAIR negotiation bots, 2017) decoded unreliably and drifted, which is the
+argument for every compact form here having a parser and a plain-language rendering owned by code.
+
+**TAKEN — EIGHT SHARDS, FILED 2026-09-03, EACH NAMING ITS EVIDENCE.**
+- **W1-T2759 the worker lane never paid the context tax** — corrects the claim, held in CLAUDE.md, the
+  size ratchet's rationale and its test header, that the file is injected on every lane;
+  registers the isolation option in plan/claims.yaml and pins the SDK's own sentence.
+- **W1-T2760 the citation miner has no producer** — one typed report line, `LEARNINGS_USED:`, parsed
+  against the injected set, so compression candidates rank by claimed use rather than injection.
+- **W1-T2761 the headline index is built and no worker has seen it** — W1-T2508's switch-over, restated
+  on the corrected premise: a policy-gated seventh prompt part in the stable prefix, the body a
+  pointer away on disk, and a `rules` wipe-test factor so the first rule a worker sees is measured.
+- **W1-T2762 the proof dialect is taught three times and tested once** — a dialect page rendered from the
+  parser's own constants and drift-gated like docs/cli-reference.md, with the CLAUDE.md section's
+  grammar statements checked against the live constants.
+- **W1-T2763 the operator's shorthand is guessed by the model** — one tracked macro table, a generated
+  user-invocable-only skill per row, drift-gated; seeded with `tddr` and `grfp`.
+- **W1-T2764 the ledger's step names are the one vocabulary without a decoder** — a registry naming each
+  step's meaning, writer and the outcomes that writer can return, a shrink-only ratchet over
+  unregistered literals, a generated page; no literal renamed, per the 2026-08-15 ruling.
+- **W1-T2765 the prompt manifest is written on every run and read by nothing** — a digest section
+  summarising bytes per prompt part over its window and naming the part that grew.
+- **W1-T2766 the fleet learns facts and never packages a procedure** — the skill-workshop lane from the
+  2026-09-02 scan, amended to measure the loading path under isolation mode rather than assume it.
+
+**REFUSED, WITH THE REASON.** A token counter: budgets here are bytes and characters by design
+(`prompt.manifest`, both ratchets) and W1-T941 already derived the injection cap from measured
+drop pressure. Perplexity-style compression of the injected learnings (LLMLingua): learnings are
+instructions, not context, and citation evidence is the better selector once it measures use.
+Model-invented shorthand between daemon and worker: every compact form here has a code parser or
+it is prose, and a form only a model can decode is the Shogtongue failure. Shorthand as console
+commands: the reply route's doctrine is "A REPLY IS AN INPUT, NEVER A COMMAND" (W1-T2496).
+Renaming step names or verbs to friendlier words: query keys, ruled untouchable on 2026-08-15.
+Chain-of-Draft style output limits on workers: output verbosity is not a measured problem here.
+KV-cache sharing between lanes (DroidSpeak): needs shared serving the SDK boundary does not offer.
+A token-oriented serialization (TOON) of the ledger rows the retro reads: noted, and waiting on a
+measured input-token figure for the retro's gather, which the run ledger's `input_tokens` column
+can answer — name the query, not a number.
+
 ## 5. Principles engine
 
 Remudero's CI today is typecheck + tests. That is the FLOOR, not the bar. The operator's fleet
