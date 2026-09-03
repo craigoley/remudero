@@ -4770,6 +4770,19 @@ questions.ndjson / DECISIONS.md / the ledger (append-only, no round-trip hazard)
 templates) via PRs. Field ownership is documented per file; a conflict between a machine commit and
 a human edit resolves human-wins-on-narrative, machine-wins-on-status.
 
+**Two on-disk surfaces, one merged view.** A task record lives on one of two surfaces, and this
+section describes both because the gate enforces both. It is declared inline in the `tasks.yaml`
+block above, OR it is its own shard at `plan/tasks.d/<id>-<kebab-slug>.yaml`, a file holding a
+single-element YAML list in that same schema. A NEW task MUST be filed as its own shard.
+NEVER append a new task to plan/tasks.yaml: one task per file is the convention every filing has
+followed since PR #1060, because appending to one multi-thousand-line file makes every concurrent
+filing collide at end-of-file (the conflict storm W1-T122 sharded the plan to prevent). The plan
+gate enforces this at lint time and refuses a new task filed into the monolith. REWIRING an EXISTING
+task edits wherever it already lives, monolith or shard — it does not move surfaces. `loadPlan`
+reads both surfaces and merges them into one view; a task id declared on both surfaces, or on two
+different shards, throws `duplicate task id`, so the two surfaces can never silently disagree
+about which tasks exist.
+
 **Worker output contracts** (parsed from result JSON; malformed ⇒ one reformat retry ⇒ strike):
 - `RECON REPORT` — OBSERVED (command + output), INFERRED, COULDN'T-VERIFY. Prompts may cite only OBSERVED.
 - `REPORT` — changed / proven (proof pasted) / inferred / open questions / PR_URL.

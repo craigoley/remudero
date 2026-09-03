@@ -204,6 +204,23 @@
   assertion: 'grep -qF "\"P48\"" CLAUDE.md && ! grep -qF "\"P-N\"" CLAUDE.md && grep -qF "G-17" CLAUDE.md && grep -qF "\"DR-N\"" CLAUDE.md'
   precondition_paths: ["CLAUDE.md"]
 
+# Added by W1-T2640 (follow-up of W1-T2477): MASTER-PLAN.md §2 named only `plan/tasks.yaml` as
+# the plan format while src/lib/triage.ts and src/lib/task-linter.ts both REQUIRE a NEW task to be
+# filed as its own plan/tasks.d/<id>-<kebab-slug>.yaml shard -- 773 of ~1042 task records lived in
+# a form the contract never described. This claim pins the §2 amendment (the sharded filing home,
+# the monolith-append refusal, and the loadPlan merge/duplicate-id rule) so it cannot rot back to
+# describing only the monolith. MASTER-PLAN.md is declared in precondition_paths so a missing file
+# reports could-not-run rather than a silent pass.
+
+- id: plan-format-covers-shards
+  claim: "MASTER-PLAN.md §2 documents BOTH plan-record surfaces -- the plan/tasks.yaml monolith and
+    the plan/tasks.d/<id>-<kebab-slug>.yaml shard a NEW task must use -- states that appending a
+    new task to the monolith is refused, and records that loadPlan merges both surfaces and fails
+    loud on a duplicate task id across them."
+  plan_section: "MASTER-PLAN.md §2 Plan format & contracts"
+  assertion: 'grep -qF "kebab-slug" MASTER-PLAN.md && grep -qF "NEVER append a new task to plan/tasks.yaml" MASTER-PLAN.md && grep -qF "duplicate task id" MASTER-PLAN.md'
+  precondition_paths: ["MASTER-PLAN.md"]
+
 - id: plan-state-claims-self-consistent
   claim: "MASTER-PLAN.md does not assert a task id BOTH shipped (the '## SHIPPED log' section, in
     either its long-form W<n>-T<n> or house-style compressed-pair T<n>/#<pr> notation) AND
