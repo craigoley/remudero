@@ -76,23 +76,18 @@ function run(args: string[]) {
 // exactly the ones this task's own rationale cites ───────────────────────────────────────────────
 
 test("the shipped tree passes its own recorded baseline, and the ratchet is not vacuous — it really measures src/run-task.ts and src/lib/sweep.ts", () => {
-  // ⚠ AGAINST A COPY, NEVER THE TRACKED FILE — this suite's own header states the rule and this
-  // was the one test breaking it. `main()` does not only READ: when it sees a source file the
-  // baseline has no entry for, it RECORDS one and `writeFileSync`s the result (source-size-
-  // ratchet.mjs). Run against the real path, an ordinary suite run therefore edits a tracked file
-  // whenever `src/**` has gained a module — MEASURED twice on 2026-09-02, both times adding
-  // `src/lib/followup-dedup-census.ts` and leaving the tree dirty for whatever ran next. That is
-  // the W1-T2291 family the header above refuses to join, and it also silently pre-approves growth
-  // the gate exists to make someone decide about.
+  // ⚠ THE REAL BASELINE, AND READ-ONLY (W1-T2739). `main()` does not only READ: when it sees a
+  // source file the baseline has no entry for it RECORDS one and writes the file, so running it
+  // against the tracked path used to edit the repo mid-suite — measured twice on 2026-09-02, both
+  // times adding `src/lib/followup-dedup-census.ts`.
   //
-  // The copy carries the recorded baseline's exact CONTENT, so the assertion below is unchanged in
-  // meaning: the shipped tree still has to pass the baseline this repo actually records. Only the
-  // write lands somewhere throwaway.
-  const scratch = mkdtempSync(join(tmpdir(), "rmd-size-baseline-"));
-  const baselineCopy = join(scratch, "source-size-baseline.json");
-  writeFileSync(baselineCopy, readFileSync(REAL_BASELINE, "utf8"));
-  const gate = run(["--root", REPO_ROOT, "--baseline", baselineCopy]);
-  rmSync(scratch, { recursive: true, force: true });
+  // #3683 stopped that by running against a mkdtemp COPY, and that traded one defect for another:
+  // the script prints the baseline path it was GIVEN when it blocks, so the remedy named a
+  // directory deleted in the same run — "edit ../../../tmp/rmd-size-baseline-kqXZ48/…", precise,
+  // actionable in form, and pointing at nothing. `--check` removes the trade: the verdict and exit
+  // code are computed identically, only the write is suppressed, so this can name the file an
+  // author actually edits AND still not write it.
+  const gate = run(["--root", REPO_ROOT, "--baseline", REAL_BASELINE, "--check"]);
   assert.equal(gate.status, 0, `the tree must pass its own baseline:\n${gate.stdout}\n${gate.stderr}`);
   assert.match(gate.stdout, /source-size-ratchet: OK/);
   const baseline = JSON.parse(readFileSync(REAL_BASELINE, "utf8")) as Record<string, number>;
@@ -384,19 +379,55 @@ test("W1-T2539: the EXISTING exact-count baselines stay valid, so migration is l
   assert.equal(ceilingFor(3231), 3500);
 });
 
-test("no test in this suite passes the TRACKED baseline to the ratchet — the header's own rule, enforced", () => {
-  // A source-level pin, because the leak is invisible in a green run: the ratchet writes only when
-  // `src/**` has gained an unrecorded module, so the suite passes either way and the damage is a
-  // dirty tracked file the NEXT thing to run inherits. Asserting on behaviour would reproduce that
-  // same conditionality; asserting on the call site does not.
+test("any call naming the TRACKED baseline also passes --check, so a test can never authorise a write", () => {
+  // W1-T2739 RESHAPES THIS PIN, and the purpose is unchanged. #3683 pinned "no call names the
+  // tracked baseline", which was right while a mkdtemp copy was the only way to avoid the write —
+  // and it cost the remedy its followable path, because the script prints the baseline it was
+  // given. The property that actually matters was never "do not name the real file"; it is "do not
+  // authorise a write". `--check` expresses that directly, so the pin now demands it.
+  //
+  // Still a SOURCE-level check, for the reason it always was: the write happens only when `src/**`
+  // has an unrecorded module, so the suite passes either way and a behavioural assertion would go
+  // quiet on exactly the days it mattered.
   const src = readFileSync(join(REPO_ROOT, "test", "a-source-file-cannot-outgrow-its-baseline.test.ts"), "utf8");
   const invocations = [...src.matchAll(/run\(\[[^\]]*\]\)/g)].map((m) => m[0]);
   assert.ok(invocations.length > 0, "control: the suite really does invoke the ratchet, or this pins nothing");
   for (const call of invocations) {
-    assert.ok(
-      !/REAL_BASELINE/.test(call),
-      `the ratchet WRITES its baseline when it sees a new source file, so a run against the tracked ` +
-        `path edits the repo mid-suite. Copy it under mkdtemp first. Offending call: ${call}`,
+    if (!/REAL_BASELINE/.test(call)) continue;
+    assert.match(
+      call,
+      /--check/,
+      `the ratchet WRITES its baseline when it sees a new source file, so a call naming the tracked ` +
+        `path must pass --check or an ordinary suite run edits the repo. Offending call: ${call}`,
     );
+  }
+});
+
+test("--check suppresses the WRITE while judging identically — the property the copy used to buy", () => {
+  // ⚠ THIS TEST EXISTS BECAUSE ITS ABSENCE WAS MEASURED. Deleting the `values.check` guard in
+  // scripts/source-size-ratchet.mjs — making --check write anyway — left this suite at 17/17. The
+  // suppression is the whole reason the shipped-tree check above may name the REAL baseline, so an
+  // unfalsified claim there is the one that would let the write come back silently.
+  const dir = mkdtempSync(join(tmpdir(), "rmd-size-check-"));
+  try {
+    const root = join(dir, "root");
+    mkdirSync(join(root, "src", "lib"), { recursive: true });
+    writeFileSync(join(root, "src", "lib", "brand-new.ts"), "export const x = 1;\n");
+    const baselinePath = join(dir, "baseline.json");
+    const before = JSON.stringify({ "src/lib/other.ts": 10 }, null, 2) + "\n";
+    writeFileSync(baselinePath, before);
+
+    // A newly-seen source file is exactly the case that triggers a record-and-write.
+    const checked = run(["--root", root, "--baseline", baselinePath, "--check"]);
+    assert.equal(readFileSync(baselinePath, "utf8"), before, "--check must leave the baseline byte-identical");
+    assert.match(checked.stdout, /NOT written/, "and must say it declined to write");
+
+    // CONTROL: the same invocation WITHOUT --check does record, so the operator path is unchanged
+    // and this test is not passing because the write never happens at all.
+    run(["--root", root, "--baseline", baselinePath]);
+    const after = JSON.parse(readFileSync(baselinePath, "utf8")) as Record<string, number>;
+    assert.ok("src/lib/brand-new.ts" in after, "control: without --check the new file IS recorded");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });

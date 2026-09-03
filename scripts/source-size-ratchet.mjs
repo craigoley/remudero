@@ -246,6 +246,15 @@ function main(argv) {
     options: {
       root: { type: "string", default: "." },
       baseline: { type: "string" },
+      // W1-T2739 — JUDGE WITHOUT AUTHORISING A WRITE. `main()` below does not only read a
+      // baseline: when it sees a source file with no entry it RECORDS one and writes the file. A
+      // caller that wants only the verdict had no way to say so, so the suite's shipped-tree check
+      // ran the script against a mkdtemp COPY of the baseline instead — which stopped the write
+      // and made the blocking remedy name a path deleted in the same run:
+      //   "TO FIX: ... edit ../../../tmp/rmd-size-baseline-kqXZ48/source-size-baseline.json"
+      // With `--check` the caller can name the REAL baseline, so the remedy is followable and the
+      // tracked file still cannot be written. Opt-in: every existing caller is unaffected.
+      check: { type: "boolean", default: false },
     },
   });
 
@@ -329,7 +338,14 @@ function main(argv) {
     for (const path of verdict.removed) console.log(`  - ${path}`);
   }
   if (verdict.shrunk.length > 0 || verdict.added.length > 0 || verdict.removed.length > 0) {
-    writeFileSync(baselinePath, `${JSON.stringify(verdict.nextBaseline, null, 2)}\n`);
+    // W1-T2739: `--check` suppresses ONLY this write. The verdict above and the exit code below are
+    // computed identically either way — a read-only mode that graded differently would stop the
+    // gate's own test from measuring the gate.
+    if (values.check) {
+      console.log(`source-size-ratchet: --check — ${baselinePath} NOT written (${verdict.added.length} newly seen, ${verdict.shrunk.length} shrunk, ${verdict.removed.length} dropped)`);
+    } else {
+      writeFileSync(baselinePath, `${JSON.stringify(verdict.nextBaseline, null, 2)}\n`);
+    }
   }
   return 0;
 }
