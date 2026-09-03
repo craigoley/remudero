@@ -27329,6 +27329,83 @@ export function uncreditableHeadReason(
   return isDispatchedRunBranch(head) ? "foreign_run_branch" : "not_a_run_branch";
 }
 
+const TERMINAL_UNCREDITABLE_HEAD_STEP = "sweep.fix.uncreditable_head";
+const TERMINAL_UNCREDITABLE_HEAD_ESCALATED_STEP = "sweep.fix.uncreditable_head_escalated";
+const TERMINAL_UNCREDITABLE_HEAD_PATTERN =
+  '"step":"sweep\\.fix\\.uncreditable_head"|"step":"sweep\\.fix\\.uncreditable_head_escalated"';
+
+interface TerminalUncreditableHead {
+  prNumber: number;
+  headSha: string;
+  head: string;
+  taskId: string;
+  cause: "review" | "ci" | "conflict";
+  escalated: boolean;
+}
+
+/**
+ * W1-T2723 — process-lifetime index of terminal, head-SHA-keyed fix-rung declines. The first
+ * lookup after a daemon boot reconstructs it from archive∪live ledger history; later sweep-effect
+ * instances reuse the compact map and update it synchronously when they emit a new terminal row.
+ * Rotation is therefore harmless without decompressing the full corpus on every poll.
+ */
+const terminalUncreditableHeadsByLedger = new Map<string, Map<string, TerminalUncreditableHead>>();
+
+function terminalUncreditableHeadKey(prNumber: number, headSha: string): string {
+  return `${prNumber}:${headSha}`;
+}
+
+function terminalUncreditableHeads(ledgerPath: string): Map<string, TerminalUncreditableHead> {
+  const cached = terminalUncreditableHeadsByLedger.get(ledgerPath);
+  if (cached) return cached;
+
+  const union = resolveLedgerUnion(dirname(ledgerPath), TERMINAL_UNCREDITABLE_HEAD_PATTERN);
+  // A fresh fixture/installation has no rotations. In that one case, use the live ledger; once
+  // rotations exist, only a complete archive∪live union is accepted so a rotated terminal marker
+  // can never silently disappear and re-enable the GraphQL loop.
+  const rows = union.ok
+    ? parseLedger(union.matches.join("\n"))
+    : union.archiveCount === 0
+      ? readLedgerLines(ledgerPath)
+      : [];
+  const terminals = new Map<string, TerminalUncreditableHead>();
+  for (const row of rows) {
+    if (
+      row.step !== TERMINAL_UNCREDITABLE_HEAD_STEP ||
+      row.reason !== "not_a_run_branch" ||
+      row.terminal !== true ||
+      typeof row.pr_number !== "number" ||
+      typeof row.head_sha !== "string" ||
+      typeof row.head !== "string" ||
+      typeof row.repair_task_id !== "string" ||
+      (row.cause !== "review" && row.cause !== "ci" && row.cause !== "conflict")
+    ) {
+      continue;
+    }
+    terminals.set(terminalUncreditableHeadKey(row.pr_number, row.head_sha), {
+      prNumber: row.pr_number,
+      headSha: row.head_sha,
+      head: row.head,
+      taskId: row.repair_task_id,
+      cause: row.cause,
+      escalated: false,
+    });
+  }
+  for (const row of rows) {
+    if (
+      row.step !== TERMINAL_UNCREDITABLE_HEAD_ESCALATED_STEP ||
+      typeof row.pr_number !== "number" ||
+      typeof row.head_sha !== "string"
+    ) {
+      continue;
+    }
+    const terminal = terminals.get(terminalUncreditableHeadKey(row.pr_number, row.head_sha));
+    if (terminal) terminal.escalated = true;
+  }
+  terminalUncreditableHeadsByLedger.set(ledgerPath, terminals);
+  return terminals;
+}
+
 /**
  * W1-T2402: does `e` — whatever `dispatchFix`'s catch just caught — carry a SIGNAL TERMINATION,
  * and if so what is known about what the killed spawn spent? Read STRUCTURALLY off the error
@@ -27644,6 +27721,45 @@ export function buildSweepEffects(
   // than a second lock location.
   const inflightDir = join(config.root, "state", "inflight");
   const issues = issuesImpl ?? ghIssueGateway(owner, repo);
+  const terminalHeads = terminalUncreditableHeads(ledgerPath);
+  const escalateTerminalHead = (terminal: TerminalUncreditableHead): void => {
+    if (terminal.escalated) return;
+    const prUrl = `https://github.com/${owner}/${repo}/pull/${terminal.prNumber}`;
+    const issueUrl = tryEscalate(
+      {
+        class: "BLOCKED",
+        taskId: terminal.taskId,
+        runId,
+        headSha: terminal.headSha,
+        cause: terminal.cause,
+        summary: `PR ${prUrl} cannot be repaired from its non-fleet head`,
+        detail:
+          `The fix rung correctly refused branch ${terminal.head} at head ${terminal.headSha}: it is not this task's ` +
+          `fleet-owned run branch. Re-running the rung cannot change that ownership fact and would only repeat the ` +
+          `same GitHub read. The PR needs a new task-owned implementation or a manual resolution.`,
+        options: [
+          {
+            label: "supersede",
+            detail: "replace this PR with an implementation on the task's fleet-owned run branch, then close the blocked PR.",
+          },
+          {
+            label: "manual-resolution",
+            detail: "repair or merge the existing PR manually while leaving the fleet's foreign-head guard intact.",
+          },
+        ],
+        recommendation: "supersede",
+        consequence: "The PR remains red and outside the fix rung's safe ownership boundary until a human chooses a resolution.",
+      },
+      { issues, ledgerPath, runId },
+    );
+    if (!issueUrl) return;
+    terminal.escalated = true;
+    log(TERMINAL_UNCREDITABLE_HEAD_ESCALATED_STEP, {
+      pr_number: terminal.prNumber,
+      head_sha: terminal.headSha,
+      issue_url: issueUrl,
+    });
+  };
   const say = (msg: string) => console.error(`### rmd sweep — ${msg}`);
   // Defaults to the LIVE `plan/policy.yaml` flag (`loadDefaultPolicy`, the same memoized-per-
   // process reader every other W1-T253 consumer site uses) so production wiring picks up an
@@ -28053,6 +28169,13 @@ export function buildSweepEffects(
       // `acted:true` exactly as it always has, so it is still swallowed below.
       let dispatchStarted = false;
       try {
+        const terminalKey = terminalUncreditableHeadKey(pr.prNumber, pr.headSha);
+        const priorTerminal = terminalHeads.get(terminalKey);
+        // A delivered terminal decision is final for THIS SHA and requires no fresh network read.
+        // If delivery failed, retain the ordinary live-state preflight below before retrying only
+        // the escalation; the expensive/unchangeable head lookup is never repeated either way.
+        if (priorTerminal?.escalated) return;
+
         // W1-T177 SITE (v): an INDEPENDENT fresh live-state read, via the
         // SAME `readLiveState`/`ghLiveState` fail-open contract every other
         // spending site uses (see {@link dispatchFixPreflightStandDown}) —
@@ -28061,6 +28184,10 @@ export function buildSweepEffects(
         // stands the dispatch down; only a positive terminal reading does.
         const preflightStandDown = await dispatchFixPreflightStandDown(ghLiveState, pr, log);
         if (preflightStandDown) return;
+        if (priorTerminal) {
+          escalateTerminalHead(priorTerminal);
+          return;
+        }
 
         // W1-T78: an operator's answer to a PRIOR clarification question (routed here by the
         // DISPOSITION_RULES "answered" row) re-arms this SAME dispatch — never a new call site —
@@ -28125,12 +28252,30 @@ export function buildSweepEffects(
           // for the same purpose (its own value comes from the pure `terminalStateReason`), so
           // this introduces no new telemetry convention; the value is an enumerated token rather
           // than that row's free prose because this one has to aggregate.
-          log("sweep.fix.uncreditable_head", {
+          const reason = uncreditableHeadReason(realBranch, task.id, synthetic);
+          const cause = escalationCause(pr.mergeState === "dirty", isBlockedCi(pr));
+          log(TERMINAL_UNCREDITABLE_HEAD_STEP, {
             pr_number: pr.prNumber,
+            head_sha: pr.headSha,
             head: realBranch,
             synthetic,
-            reason: uncreditableHeadReason(realBranch, task.id, synthetic),
+            reason,
+            ...(reason === "not_a_run_branch"
+              ? { terminal: true, repair_task_id: task.id, cause }
+              : {}),
           });
+          if (reason === "not_a_run_branch" && realBranch) {
+            const terminal: TerminalUncreditableHead = {
+              prNumber: pr.prNumber,
+              headSha: pr.headSha,
+              head: realBranch,
+              taskId: task.id,
+              cause,
+              escalated: false,
+            };
+            terminalHeads.set(terminalKey, terminal);
+            escalateTerminalHead(terminal);
+          }
           return;
         }
 
