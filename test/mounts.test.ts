@@ -350,7 +350,11 @@ test("resolveMountForClass: a hand-built Mounts missing BOTH the class row and t
 function goodCapabilities() {
   return {
     ladder: { economy: 1, balanced: 2, frontier: 3 },
-    claude: { haiku: "economy", sonnet: "balanced", opus: "frontier" },
+    claude: {
+      haiku: "economy", sonnet: "balanced", opus: "frontier",
+      "claude-haiku-1": "economy", "claude-sonnet-1": "balanced", "claude-opus-1": "frontier",
+    },
+    claude_candidates: { economy: ["claude-haiku-1"], balanced: ["claude-sonnet-1"], frontier: ["claude-opus-1"] },
     codex: {
       economy: { low: ["e-lo"], medium: ["e-med"], high: ["e-hi"] },
       balanced: { low: ["b-lo"], medium: ["b-med"], high: ["b-hi"] },
@@ -428,6 +432,71 @@ test("capabilities.codex.<capability>.<effort> must be a NON-EMPTY list of model
       `${label} must be refused — an empty candidate list resolves to no model at all`,
     );
   }
+});
+
+test("capabilities.claude_candidates that is not a mapping at all is refused BEFORE any per-capability check — the shape arm, not the contents arm", () => {
+  const raw = goodRaw() as Record<string, unknown>;
+  const caps = goodCapabilities() as unknown as Record<string, unknown>;
+  caps.claude_candidates = ["claude-haiku-1"]; // a LIST, not capability -> model list
+  raw.capabilities = caps;
+  assert.throws(
+    () => validateMounts(raw),
+    /'capabilities\.claude_candidates' must be a mapping of capability -> model list/,
+    "a list cannot express capability -> model list, so it must be refused on SHAPE",
+  );
+});
+
+test("capabilities.claude_candidates.<capability> must be a NON-EMPTY list of model ids — each bad shape on its own", () => {
+  for (const [bad, label] of [
+    [[], "an empty list"],
+    ["claude-haiku-1", "a bare string rather than a list"],
+    [[""], "a list holding an empty id"],
+    [["claude-haiku-1", 7], "a list holding a non-string"],
+  ] as Array<[unknown, string]>) {
+    const raw = goodRaw() as Record<string, unknown>;
+    const caps = goodCapabilities() as { claude_candidates: Record<string, unknown> };
+    caps.claude_candidates.economy = bad;
+    raw.capabilities = caps;
+    assert.throws(
+      () => validateMounts(raw),
+      /'capabilities\.claude_candidates\.economy' must be a non-empty list of model ids/,
+      `${label} must be refused — an empty candidate list resolves to no model at all`,
+    );
+  }
+});
+
+test("capabilities.claude_candidates: the same concrete model listed under two capabilities is refused — a model cannot serve two ranks", () => {
+  const raw = goodRaw() as Record<string, unknown>;
+  const caps = goodCapabilities() as {
+    claude: Record<string, string>;
+    claude_candidates: Record<string, string[]>;
+  };
+  // Remap so the FIRST list processed (economy) accepts "claude-sonnet-1" cleanly, isolating
+  // the cross-list duplicate check from the separate "wrong capability" check below it.
+  caps.claude["claude-sonnet-1"] = "economy";
+  caps.claude_candidates.economy = ["claude-haiku-1", "claude-sonnet-1"];
+  caps.claude_candidates.balanced = ["claude-sonnet-1"];
+  raw.capabilities = caps;
+  assert.throws(
+    () => validateMounts(raw),
+    /Claude candidate 'claude-sonnet-1' appears in more than one capability list/,
+    "the same model id must not be eligible under two different capabilities at once",
+  );
+});
+
+test("capabilities.claude_candidates: a concrete Claude model present in 'capabilities.claude' but absent from every candidate list is refused by name", () => {
+  const raw = goodRaw() as Record<string, unknown>;
+  const caps = goodCapabilities() as {
+    claude: Record<string, string>;
+    claude_candidates: Record<string, string[]>;
+  };
+  caps.claude["claude-opus-9"] = "frontier"; // a concrete model with no candidate-list entry anywhere
+  raw.capabilities = caps;
+  assert.throws(
+    () => validateMounts(raw),
+    /concrete Claude model 'claude-opus-9' is missing from 'capabilities\.claude_candidates'/,
+    "every concrete Claude model named in 'capabilities.claude' must also appear in a candidate list",
+  );
 });
 
 test("capabilities omitted ENTIRELY still validates — the axis is optional and predates nothing", () => {

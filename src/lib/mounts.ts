@@ -93,6 +93,14 @@ export interface Mount {
 export const SYNTHESIS_ROLES = ["retro", "triage", "inbox_draft"] as const;
 export type SynthesisRole = (typeof SYNTHESIS_ROLES)[number];
 
+/** Convert a supported concrete Claude model id to the label used by Anthropic status updates. */
+export function claudeModelDisplayName(model: string): string | undefined {
+  const match = /^claude-(opus|sonnet|haiku)-(\d+)(?:-(\d+))?(?:-\d{8})?$/.exec(model);
+  if (!match) return undefined;
+  const family = match[1][0].toUpperCase() + match[1].slice(1);
+  return `${family} ${match[2]}${match[3] ? `.${match[3]}` : ""}`;
+}
+
 /**
  * Provider-neutral capability axis (W1-T2573). `tiers` above ranks CLAUDE model names — the
  * vocabulary every mount in `routes` is written in (Claude is canonical). `capabilities` is the
@@ -102,6 +110,8 @@ export type SynthesisRole = (typeof SYNTHESIS_ROLES)[number];
  *   - `claude`: Claude model name -> capability. Every `tiers` key MUST resolve here when this
  *     block is present (checked at load), so any mount that already validated against `tiers`
  *     also resolves a capability.
+ *   - `claudeCandidates`: capability -> ordered concrete Claude model ids. Aliases start at the
+ *     first entry; explicit concrete pins start at their own entry and can never be upgraded.
  *   - `codex`: capability -> effort -> ordered (most-preferred-first) Codex candidate models.
  *     Keyed on (capability, effort) so effort genuinely crosses the provider boundary instead of
  *     being dropped: a `sonnet/high` mount and a `sonnet/medium` mount can resolve different
@@ -116,6 +126,13 @@ export interface CapabilityLadder {
   ladder: Record<string, number>;
   /** Claude model name -> capability; every `tiers` key must appear. */
   claude: Record<string, string>;
+  /**
+   * capability -> ordered concrete Claude candidates, most capable first.
+   *
+   * Optional only for callers that construct a CapabilityLadder literal directly. The mounts
+   * loader always validates and populates this field whenever `capabilities` is declared.
+   */
+  claudeCandidates?: Record<string, string[]>;
   /** capability -> effort -> ordered provider candidate model ids (non-empty per (capability, effort)). */
   codex: Record<string, Record<string, string[]>>;
 }
@@ -321,6 +338,43 @@ function parseCapabilities(
     }
   }
 
+  if (!isObject(raw.claude_candidates)) {
+    throw new MountsError("'capabilities.claude_candidates' must be a mapping of capability -> model list.");
+  }
+  const claudeCandidates: Record<string, string[]> = {};
+  const candidateModels = new Set<string>();
+  for (const capability of Object.keys(ladder)) {
+    const models = raw.claude_candidates[capability];
+    if (!Array.isArray(models) || models.length === 0 || !models.every((entry) => typeof entry === "string" && entry.length > 0)) {
+      throw new MountsError(
+        `'capabilities.claude_candidates.${capability}' must be a non-empty list of model ids, got ${JSON.stringify(models)}.`,
+      );
+    }
+    if (new Set(models).size !== models.length) {
+      throw new MountsError(`'capabilities.claude_candidates.${capability}' must not contain duplicate model ids.`);
+    }
+    for (const model of models as string[]) {
+      if (!claudeModelDisplayName(model)) {
+        throw new MountsError(`Claude candidate '${model}' must be a supported concrete Claude model id.`);
+      }
+      if (candidateModels.has(model)) {
+        throw new MountsError(`Claude candidate '${model}' appears in more than one capability list.`);
+      }
+      if (claude[model] !== capability) {
+        throw new MountsError(
+          `Claude candidate '${model}' must map to '${capability}' in 'capabilities.claude', got ${JSON.stringify(claude[model])}.`,
+        );
+      }
+      candidateModels.add(model);
+    }
+    claudeCandidates[capability] = [...(models as string[])];
+  }
+  for (const model of Object.keys(claude).filter((name) => name.startsWith("claude-"))) {
+    if (!candidateModels.has(model)) {
+      throw new MountsError(`concrete Claude model '${model}' is missing from 'capabilities.claude_candidates'.`);
+    }
+  }
+
   if (!isObject(raw.codex)) {
     throw new MountsError("'capabilities.codex' must be a mapping of capability -> effort -> model list.");
   }
@@ -342,7 +396,7 @@ function parseCapabilities(
     }
   }
 
-  return { ladder, claude, codex };
+  return { ladder, claude, claudeCandidates, codex };
 }
 
 /**

@@ -41,6 +41,10 @@ import type { WorkflowRunObservation } from "./workflow-run.js";
 // imports a VALUE back off this module — see supersession.ts's own header.
 import type { SupersessionVerdict } from "./supersession.js";
 
+/** W1-T2779: injected from run-task.ts, which already owns the shared isInPlanScope import. Keeping
+ * this leaf unaware of plan-architect avoids closing three runtime dependency cycles. */
+export type PlanPathPredicate = (path: string) => boolean;
+
 export function openPrsRestArgs(owner: string, repo: string): string[] {
   return ["api", `repos/${owner}/${repo}/pulls?state=open&per_page=100`];
 }
@@ -1628,8 +1632,11 @@ interface RestPrFile {
  * observed nothing is INDETERMINATE, never "unique", because "unique" would SAVE a PR the
  * arithmetic condemned the moment someone turns `conceptCoexistenceEnabled` on.
  *
- * THE THREE OUTCOMES, and `"indeterminate"` is a real one (W1-T920 design (iii), which this
+ * THE OUTCOMES, and `"indeterminate"` is a real one (W1-T920 design (iii), which this
  * honours AT THE POINT OF PRODUCTION rather than only at the point of use):
+ *   - exactly one PR is wholly plan scope and the other contains non-plan work ->
+ *     `"complementary"` (W1-T2779), because filing and implementation are different pipeline
+ *     stages and neither supersedes the other;
  *   - every path this PR touches is also touched by the superseding PR -> `"superseded"`, carrying
  *     the evidence the disposition row names instead of a bare integer;
  *   - no path is shared -> `"unique"`, a POSITIVE finding;
@@ -1645,6 +1652,7 @@ export function fetchSupersessionVerdict(
   supersedingPrNumber: number,
   taskId: string,
   fetch: GhApiFetcher,
+  isPlanPath: PlanPathPredicate,
 ): SupersessionVerdict {
   const ours = fetch(prFilesRestArgs(owner, repo, prNumber)) as RestPrFile[];
   const theirs = fetch(prFilesRestArgs(owner, repo, supersedingPrNumber)) as RestPrFile[];
@@ -1653,12 +1661,41 @@ export function fetchSupersessionVerdict(
   const ourPaths = ours.map((f) => f.filename).filter((f): f is string => typeof f === "string" && f.length > 0);
   const theirPaths = new Set(theirs.map((f) => f.filename).filter((f): f is string => typeof f === "string" && f.length > 0));
   const rawLineCount = ours.reduce((n, f) => n + (f.additions ?? 0) + (f.deletions ?? 0), 0);
+  const theirRawLineCount = theirs.reduce((n, f) => n + (f.additions ?? 0) + (f.deletions ?? 0), 0);
   const matchedHunks = ourPaths.filter((f) => theirPaths.has(f)).length;
   const diff = { rawLineCount, matchedHunks };
 
   // THE CONTROL FIRST. An empty corpus cannot support either finding — see this function's own doc.
-  if (ourPaths.length === 0 || rawLineCount === 0) {
-    return { status: "indeterminate", detail: `the diff read for #${prNumber} observed no changed lines — no finding is supportable`, diff } as SupersessionVerdict;
+  if (ourPaths.length === 0 || rawLineCount === 0 || theirPaths.size === 0 || theirRawLineCount === 0) {
+    const emptyPrNumber = ourPaths.length === 0 || rawLineCount === 0 ? prNumber : supersedingPrNumber;
+    return { status: "indeterminate", detail: `the diff read for #${emptyPrNumber} observed no changed lines — no finding is supportable`, diff } as SupersessionVerdict;
+  }
+
+  // W1-T2779: PLAN FILING AND IMPLEMENTATION ARE COMPLEMENTARY, NEVER DUPLICATES. This is a
+  // positive result over both already-fetched corpora, not an inference from title/branch/task id.
+  // Exactly one side must be wholly plan scope and the other must contain a non-plan path. Two
+  // filings and two implementations fall through to the existing overlap verdicts unchanged.
+  const oursPlanOnly = ourPaths.every(isPlanPath);
+  const theirPathList = [...theirPaths];
+  const theirsPlanOnly = theirPathList.every(isPlanPath);
+  if (oursPlanOnly !== theirsPlanOnly) {
+    const planIsOurs = oursPlanOnly;
+    const planPaths = planIsOurs ? ourPaths : theirPathList;
+    const implementationPaths = planIsOurs ? theirPathList : ourPaths;
+    return {
+      status: "complementary",
+      complement: {
+        planPrNumber: planIsOurs ? prNumber : supersedingPrNumber,
+        implementationPrNumber: planIsOurs ? supersedingPrNumber : prNumber,
+        taskId,
+        planPathCount: planPaths.length,
+        implementationPathCount: implementationPaths.length,
+      },
+      detail:
+        `#${planIsOurs ? prNumber : supersedingPrNumber} is plan-only while ` +
+        `#${planIsOurs ? supersedingPrNumber : prNumber} contains non-plan work — complementary stages of ${taskId}`,
+      diff,
+    };
   }
   if (matchedHunks === ourPaths.length) {
     return {
@@ -1697,12 +1734,13 @@ export function hydrateSupersessionVerdicts(
   repo: string,
   supersededPrs: readonly { number: number; supersededBy: number; taskId: string }[],
   fetch: GhApiFetcher,
+  isPlanPath: PlanPathPredicate,
   cap: number = MERGE_STATE_HYDRATION_CAP,
 ): Map<number, SupersessionVerdict> {
   const out = new Map<number, SupersessionVerdict>();
   for (const p of supersededPrs.slice(0, cap)) {
     try {
-      out.set(p.number, fetchSupersessionVerdict(owner, repo, p.number, p.supersededBy, p.taskId, fetch));
+      out.set(p.number, fetchSupersessionVerdict(owner, repo, p.number, p.supersededBy, p.taskId, fetch, isPlanPath));
     } catch {
       /* best-effort: this PR keeps the pre-existing undefined supersessionVerdict, the pass continues */
     }

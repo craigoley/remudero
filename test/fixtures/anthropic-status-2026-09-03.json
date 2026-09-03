@@ -1,0 +1,18 @@
+{
+  "incidents": [
+    {
+      "name": "Elevated errors for multiple models",
+      "status": "identified",
+      "incident_updates": [
+        {
+          "status": "identified",
+          "body": "An exhaustive list of affected models: Mythos/Fable 5.1, Mythos/Fable 5, Opus 5, Opus 4.8, Opus 4.6."
+        },
+        {
+          "status": "investigating",
+          "body": "We are investigating elevated errors on requests to Claude Mythos 5.1, Claude Fable 5.1, and Claude Opus 5."
+        }
+      ]
+    }
+  ]
+}

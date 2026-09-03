@@ -70,6 +70,9 @@ efforts:
 #               name carries neither "haiku" nor "opus", which the OLD substring function could
 #               only route by accident (it silently fell through to "balanced"); here it resolves
 #               by its DECLARED capability instead.
+#   `claude_candidates` — capability -> ordered concrete Claude model ids. Aliases start at the
+#               best entry; an explicit concrete pin starts at its own position and therefore can
+#               remain in place or move downward during an incident, never silently upgrade.
 #   `codex`   — capability -> effort -> ordered (most-preferred-first) Codex candidate models.
 #               Keyed on (capability, effort) so effort genuinely crosses the provider boundary:
 #               a `sonnet/high` mount and a `sonnet/medium` mount both resolve capability
@@ -87,6 +90,18 @@ capabilities:
     sonnet: balanced
     opus: frontier
     claude-opus-5: frontier
+    claude-opus-4-8: frontier
+    claude-opus-4-7: frontier
+    claude-opus-4-6: frontier
+    claude-opus-4-5-20251101: frontier
+    claude-sonnet-5: balanced
+    claude-sonnet-4-6: balanced
+    claude-sonnet-4-5-20250929: balanced
+    claude-haiku-4-5-20251001: economy
+  claude_candidates:
+    economy:  [claude-haiku-4-5-20251001]
+    balanced: [claude-sonnet-5, claude-sonnet-4-6, claude-sonnet-4-5-20250929]
+    frontier: [claude-opus-5, claude-opus-4-8, claude-opus-4-7, claude-opus-4-6, claude-opus-4-5-20251101]
   codex:
     economy:
       low:    [gpt-5.4-mini]
