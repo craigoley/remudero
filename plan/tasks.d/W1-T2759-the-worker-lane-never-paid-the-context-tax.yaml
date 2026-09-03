@@ -1,0 +1,83 @@
+- id: W1-T2759
+  title: "THE WORKER LANE NEVER PAID THE CONTEXT TAX — CLAUDE.md's own maintenance line, the size ratchet's rationale and its test header all say the file is injected in full into every session on every lane, and spawnWorker passes settingSources: [] which the installed SDK documents as the option that must include 'project' to load CLAUDE.md at all; correct the three claims, register the fact in plan/claims.yaml, and pin the census of what each lane loads to the installed SDK"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 14.00
+  rationale: |
+    RE-DERIVED AT 7775b9977 (2026-09-03).
+
+    (1) THE CLAIM, IN THREE PLACES. CLAUDE.md's maintenance paragraph: "it is injected in full into
+    every session, so it is a context tax paid per session". test/claude-md-budget-ratchet.test.ts's
+    header: "CLAUDE.md is injected in full into every session on every lane". The cap baseline's
+    bumpRationale prices W1-T2507's migration as relief from a "formerly UNCONDITIONAL per-session
+    tax", and W1-T2508's rationale counts "bytes CLAUDE.md injects in full per session = 67535".
+
+    (2) THE MEASUREMENT THAT REFUTES IT FOR THE FLEET'S OWN WORKERS. `spawnWorker` (src/lib/worker.ts)
+    passes `settingSources: []` to the Agent SDK's query. The installed SDK (0.3.226, sdk.d.ts) says
+    of that option: "Pass `[]` to disable filesystem settings (SDK isolation mode). Must include
+    `'project'` to load CLAUDE.md files." `implementPromptParts` (src/run-task.ts) renders six named
+    parts — doctrine, task claims, recon relay, operator notes, matched learnings, task body — and a
+    pointer at the shard on disk; none carries CLAUDE.md, MASTER-PLAN.md, DECISIONS.md or
+    docs/ORIENTATION.md. Every spawn lane shares that function. The one lane told to read CLAUDE.md
+    is the Codex path: `spawnCodexWorker` (src/lib/worker-provider.ts) prepends "read and follow the
+    repository instruction files present in the checkout, including CLAUDE.md and AGENTS.md".
+
+    (3) WHO ACTUALLY PAYS. The 43,155 bytes are loaded by INTERACTIVE Claude Code sessions in this
+    checkout — the operator's and any agent session's — and by nothing the daemon dispatches. That
+    is still a real tax (Anthropic's memory page: "target under 200 lines per CLAUDE.md file. Longer
+    files consume more context and reduce adherence"; the file is 493 lines), but it is a tax on the
+    humans-and-agents lane, and every decision that priced it against WORKER throughput priced the
+    wrong lane. W1-T2508's switch-over is not a replacement of a whole-file inject for workers; it
+    would be the first time a worker saw any rule at all — a decision the headline shard filed beside this one puts behind a policy
+    row and a wipe-test factor, and which this task makes decidable on a true premise.
+
+    (4) WHY THIS IS A GATE AND NOT AN EDIT. Rule 22: a claim the plan makes about the system is
+    checked by plan/claims.yaml's CI job (W1-T29, W1-T2215) or it is prose. The isolation option is
+    one grep away and can be registered there; the SDK's own sentence can be pinned by a test so
+    the premise re-verifies against the INSTALLED version on every run (Standing rule 7).
+  design: |
+    (i) THE CENSUS TEST. test/what-a-worker-loads.test.ts: (a) the spawn options literal carries
+    `settingSources: []`; (b) the installed sdk.d.ts still documents that `[]` disables filesystem
+    settings and that `'project'` is required for CLAUDE.md — if a future SDK changes that sentence
+    the test fails and names it; (c) `implementPromptParts` over a fixture task renders no line that
+    appears in CLAUDE.md's rule bullets; (d) the Codex prelude still names CLAUDE.md. The census —
+    interactive session: full file; Claude worker: none; Codex worker: instructed to read — is a
+    table the test derives from those four facts, not prose it asserts.
+
+    (ii) THE CLAIM. plan/claims.yaml gains `worker-loads-no-claude-md`: the assertion greps the
+    isolation option in src/lib/worker.ts, with `precondition_paths` naming the file, so a missing
+    file reads could-not-run and never a false pass.
+
+    (iii) THE THREE CORRECTIONS. CLAUDE.md's maintenance line says which sessions pay: interactive
+    sessions in this checkout, never a dispatched worker. The ratchet test's header and the
+    baseline's rationale say the same in one clause each. No rule is moved, folded or deleted; the
+    cap is not touched; W1-T2507 and W1-T2508 are plan records and are not edited here — their
+    premise is corrected where the code can check it.
+
+    (iv) WHAT DOES NOT CHANGE. The ratchet, its cap, the learnings budget, the spawn options.
+  acceptance:
+    - claim: "the spawn options carry the isolation option and the installed SDK still documents it as the option that must include project to load CLAUDE.md"
+      proof: "unit test: test/what-a-worker-loads.test.ts"
+    - claim: "the implement prompt over a fixture task carries no line from CLAUDE.md's rule bullets and the Codex prelude still names the file"
+      proof: "unit test: test/what-a-worker-loads.test.ts"
+    - claim: "the claims registry carries the fact with its precondition path"
+      proof: "grep: worker-loads-no-claude-md in plan/claims.yaml"
+    - claim: "CLAUDE.md's maintenance line names the lane that pays"
+      proof: "grep: settingSources in CLAUDE.md"
+  risk: high
+  band_meaning: span
+  origin: "oper#concept-scan-2026-09-03"
+  plan_refs: ["W1-T29", "W1-T503", "W1-T2215", "W1-T2507", "W1-T2508", "§8A", "§12"]
+  files: [CLAUDE.md, scripts/claude-md-budget-baseline.json, test/claude-md-budget-ratchet.test.ts, plan/claims.yaml, test/what-a-worker-loads.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    risk:high, band_meaning:span — a doc line, a baseline rationale, a test header, a claims row and
+    a new test under Rule 19; runtime blast radius is zero, nothing a worker receives changes.
+
+    FILED AT THE OPERATOR'S DIRECTION of 2026-09-03 (the compact-dialect scan). The finding came
+    from asking what dialect the daemon already speaks to a worker: the answer was a six-part
+    prompt with no CLAUDE.md in it, and three artifacts saying the opposite.
