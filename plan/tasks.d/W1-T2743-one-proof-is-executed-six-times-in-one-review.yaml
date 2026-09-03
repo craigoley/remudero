@@ -1,0 +1,86 @@
+- id: W1-T2743
+  title: "ONE PROOF IS EXECUTED SIX TIMES IN ONE REVIEW — six acceptance criteria that cite the same test file spawn the same head and merge-base commands independently, multiplying runtime and allowing one transient result to contradict five later results in the same binding verdict"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 10.00
+  files:
+    - src/lib/review.ts
+    - src/run-task.ts
+    - test/a-review-runs-each-unique-proof-once.test.ts
+  origin: "operator-session#pr-3744-duplicate-proof-execution-2026-09-03"
+  plan_refs: ["W1-T65", "W1-T273", "W1-T362", "W1-T1077", "W1-T2742"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON PR #3744 AT HEAD 5af85ec9. Its six acceptance criteria all name the byte-identical
+    proof `unit test: test/a-gate-shaped-instrument-that-nothing-invokes.test.ts`. The posted
+    `review.posted` row contains six proof outcomes in order: one `executed_fail`, then five
+    `executed_pass`. That cannot describe six different facts; it is six samples of one fact
+    taken inside one review. The first sample alone made the commit status fail.
+
+    THE TEST IS GREEN ON THE MATERIAL CHECKOUT. The exact path completed 22/22 in under one second
+    in a clean local clone and again in the daemon's retained Azure PR worktree at the same sha.
+    Calling `execWhitelistedProof` directly in that Azure worktree returned `pass` in 838ms. This
+    does not prove the first live sample could never fail; it proves repeating an identical proof
+    created contradictory evidence and paid for five observations that could not improve the
+    verdict coherently.
+
+    THE LOOP HAS NO REVIEW-SCOPED CACHE. `judgeReview` maps each criterion through
+    `judgeCriterion` with one shared `ProofExecContext`, but that context carries the raw executor.
+    Each criterion therefore spawns its proof again. A passing proof is also re-run against the
+    merge-base for staleness, so N criteria citing one path can cost as many as 2N child processes.
+    `ensureDeps` and browser preflight have process latches; the proof command itself does not.
+
+    THIS IS NOT A CROSS-REVIEW RESULT CACHE. A new PR head, body, base, process or later review is
+    a new observation and must run again. The safe identity exists entirely inside one
+    `judgeReview` call: checkout path plus parsed command and argv. Memoizing there cannot let one
+    sha inherit another sha's result and needs no invalidation policy.
+  design: |
+    Wrap the proof executor once per `judgeReview` invocation with a synchronous memo that keys on
+    the checkout path, executable and exact argv. Use the same wrapper for PR-head and merge-base
+    calls, with checkout path in the key so those two observations can never alias. Cache all
+    terminal executor observations: `pass`, `fail`, `no-match`, and thrown execution errors. A
+    repeated criterion must receive the same return or throw as the first identical call; do not
+    retry a transient inside one supposedly atomic judgment.
+
+    Keep `judgeCriterion` independently callable and byte-compatible for its audit/test callers;
+    memoization belongs at the multi-criterion `judgeReview` boundary. Forward references and
+    unparseable proofs still spawn nothing. All existing per-criterion `proof_exec` outcomes stay
+    index-aligned and unchanged in meaning.
+
+    Add bounded legibility to the verdict and `review.posted`: numeric counts of unique proof
+    executions and memoized reuses. These count executor calls across both head and base but carry
+    no command, stdout, environment or unbounded key list. The #3744 shape should report two
+    unique executions and ten reuses when a base checkout is available, instead of hiding twelve
+    child spawns behind `proof_exec: 6/6`.
+
+    Do not add persistence, TTLs, global state or retry. W1-T2742 owns truthful timeout
+    classification; this task owns only one-review execution identity and measured duplicate cost.
+  acceptance:
+    - claim: "six criteria with the same pure-path proof execute once on the head and once on the merge-base, then reuse those observations for every duplicate"
+      proof: "unit test: test/a-review-runs-each-unique-proof-once.test.ts"
+    - claim: "head and merge-base executions never alias even when command and argv are identical"
+      proof: "unit test: test/a-review-runs-each-unique-proof-once.test.ts"
+    - claim: "a cached failure or execution error is reused consistently and is not silently retried inside the same review"
+      proof: "unit test: test/a-review-runs-each-unique-proof-once.test.ts"
+    - claim: "a later judgeReview call executes the proof again, so no result survives a review or head boundary"
+      proof: "unit test: test/a-review-runs-each-unique-proof-once.test.ts"
+    - claim: "review.posted records only bounded unique-run and reuse counts while preserving the existing index-aligned proof outcomes"
+      proof: "unit test: test/a-review-runs-each-unique-proof-once.test.ts"
+  falsifier: |
+    Close without implementation if an injected counting executor observes one head call and one
+    base call for six identical criteria on current main, or if the six live #3744 outcomes came
+    from different proof argv/checkouts. Current `judgeReview` passes the same raw executor to all
+    six `judgeCriterion` calls, and the task shard names the exact same proof string six times.
+    Also close if the first result was the only execution and the later five outcomes were reused;
+    one cached observation cannot yield one fail followed by five passes.
+  note: |
+    W1-T2743 was atomically reserved at `refs/rmd-id/W1-T2743` after W1-T2742 was already held by
+    the fleet. The reviewer is a merge gate, so even a small cache is `risk: high`; `band_meaning:
+    span` records the inseparable source, ledger projection and falsifier coverage rather than
+    understating the gate-wide consequence.
