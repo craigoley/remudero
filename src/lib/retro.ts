@@ -2467,6 +2467,11 @@ export interface FollowupCandidate {
   text: string;
   runId: string;
   taskId: string;
+  /** Set ONLY when this entry lands in `deduped` via a NAMED refusal arm that owes the reader
+   *  more than "matched an open title" — currently just {@link decorativeStatusFlipReason}
+   *  (W1-T2638). Absent (never `undefined`-but-present) for a plain `followupMatchesTitle`
+   *  match, so existing dedup call sites that never read this field see no shape change. */
+  reason?: string;
   prUrl?: string;
 }
 
@@ -2504,6 +2509,101 @@ function followupMatchesTitle(text: string, titleWords: Set<string>): boolean {
   let overlap = 0;
   for (const w of textWords) if (titleWords.has(w)) overlap++;
   return overlap / textWords.size >= 0.6;
+}
+
+// ── W1-T2638: refuse a "flip the decorative yaml `status:` field" follow-up at harvest ─────
+//
+// W1-T367's own rationale already carries the refutation this predicate states below — dispatch
+// eligibility and dependency satisfaction both resolve through the GitHub-derived projection,
+// never through a task's yaml `status:` field — but that text lives in a shard rationale
+// `mineFollowups` never reads, so the class has now recurred a FOURTH time (this task's own
+// origin follow-up: sync W1-T2473's `status:` from `queued` to `shipped`), each recurrence
+// re-spending an Architect drafting slot to re-derive what the plan already contains. This is
+// the narrowest place the class can die: BEFORE a candidate becomes a proposal id at all, and
+// distinct from `followupMatchesTitle` (which cannot catch it — the canonical fixture matches no
+// open task title).
+//
+// THE SCOPE FENCE IS THE HALF MOST LIKELY TO BE GOT WRONG (this task's own design note).
+// Refuses ONLY an entry whose action edits a task's yaml `status:` field TOWARD a merged-meaning
+// value (`merged`, `done`) or a value outside TASK_STATUSES' vocabulary. Never refuses an entry
+// about `blocked` (the one status value that genuinely gates dispatch — `isDispatchEligible`,
+// drain.ts:558), the `retirement:` field (a sibling field this predicate never inspects), or the
+// derived projection itself (not a yaml edit at all). An entry this predicate cannot read an
+// unambiguous target value out of is left untouched — ambiguity resolves toward HARVESTING,
+// never toward a silent drop.
+
+/** TASK_STATUSES (plan.ts:15-26), mirrored rather than imported — this module stays a leaf over
+ *  the ledger and gains no dependency on the plan loader for one closed-vocabulary check. */
+const KNOWN_TASK_STATUSES = new Set([
+  "queued",
+  "recon",
+  "prompted",
+  "running",
+  "review",
+  "fixing",
+  "diagnosing",
+  "blocked",
+  "merged",
+  "done",
+]);
+
+/** plan.ts's own `MERGED_STATUSES` (plan.ts:51) — the two TASK_STATUSES members that mean
+ *  "landed". A follow-up asking to hand-set a yaml `status:` field to either is exactly the
+ *  shape W1-T367's rationale refutes. */
+const MERGED_MEANING_STATUSES = new Set(["merged", "done"]);
+
+/** Matches an entry naming the yaml `status:` field itself — anchored on the `status:` colon
+ *  spelling every one of the four recurrences has used verbatim — and NOT `retirement:`, a bare
+ *  mention of the word "status" with no field syntax, or prose about the derived projection.
+ *  EXPORTED (unlike this module's other `_RE` validators) so test/retro.test.ts can drive both
+ *  arms directly by identifier — negative-reachability-ratchet.test.ts's fixture-less `_RE`
+ *  census (W1-T2317) counts a validator regex that no test names by `SYMBOL.test(...)`, and this
+ *  one is new at src/lib/retro.ts's already-at-baseline population; the fixture is the correction,
+ *  not a widened allowance. */
+export const STATUS_FIELD_RE = /`?status:`?\s*field/i;
+
+/**
+ * The value a `STATUS_FIELD_RE`-matching entry's text asks to set the field TO, or `undefined`
+ * when the text does not spell out an unambiguous single target — callers treat `undefined` as
+ * "leave it alone" (see the scope-fence note above the section header: ambiguity always harvests).
+ */
+function statusFlipTarget(text: string): string | undefined {
+  const fromTo = text.match(/field\s+from\s+[`'"]?[a-z0-9]+[`'"]?\s+to\s+[`'"]?([a-z0-9]+)[`'"]?/i);
+  if (fromTo) return fromTo[1]!.toLowerCase();
+  const bareTo = text.match(/status:`?\s*field[^.]*?\bto\s+[`'"]?([a-z0-9]+)[`'"]?/i);
+  if (bareTo) return bareTo[1]!.toLowerCase();
+  return undefined;
+}
+
+/**
+ * `undefined` unless `text` is, in scope, a decorative yaml `status:` flip — see the section doc
+ * above for the exact fence (never `blocked`, never the `retirement:` field, never an ambiguous
+ * read). When in scope, returns the REASON to record: the refutation itself (dispatch eligibility
+ * and dependency satisfaction are GitHub-derived, so the field is decorative) plus, for a value
+ * outside the schema, the fail-close it causes — and names the sanctioned remedy for a task that
+ * is GENUINELY uncredited, an operator correction rather than a yaml edit. The reason must teach,
+ * per this task's own design, never just decline.
+ */
+function decorativeStatusFlipReason(text: string): string | undefined {
+  if (!STATUS_FIELD_RE.test(text)) return undefined;
+  const target = statusFlipTarget(text);
+  if (!target || target === "blocked") return undefined;
+  const outOfVocabulary = !KNOWN_TASK_STATUSES.has(target);
+  if (!outOfVocabulary && !MERGED_MEANING_STATUSES.has(target)) return undefined;
+  return (
+    "decorative yaml `status:` flip refused (W1-T2638, refutation per W1-T367): dispatch " +
+    "eligibility (drain.ts's isDispatchEligible) resolves through isMerged's GitHub-derived " +
+    "projection before ever comparing t.status, and dependency satisfaction runs through an " +
+    "injected MergedResolver whose yaml-trusting default (plan.ts's yamlStatusMerged) is scoped " +
+    "to fixture tests only — so the field is decorative and neither harm this class of entry " +
+    "cites is reachable" +
+    (outOfVocabulary
+      ? `; "${target}" is additionally not a TASK_STATUSES member, so writing it fail-closes ` +
+        "loadPlan over the whole merged plan"
+      : "") +
+    ". If the task named here is genuinely uncredited, the sanctioned remedy is an operator " +
+    "correction (`rmd correct <id> --pr <n>`, W1-T75), never a yaml edit."
+  );
 }
 
 /**
@@ -2571,10 +2671,19 @@ export function mineFollowups(records: LedgerRecord[], openTitles: string[] = []
         taskId: String(r.task_id ?? "?"),
         ...(typeof r.pr_url === "string" ? { prUrl: r.pr_url } : {}),
       };
-      const isDup = openTitleWordSets.some((titleWords) => followupMatchesTitle(text, titleWords));
+      const statusFlipReason = decorativeStatusFlipReason(text);
+      const isDup = statusFlipReason !== undefined || openTitleWordSets.some((titleWords) => followupMatchesTitle(text, titleWords));
       if (isDup) {
-        deduped.push(candidate);
-        harvestLines.push({ run_id: candidate.runId, task_id: candidate.taskId, step: "followup.deduped", entry_id: entryId, type, text });
+        deduped.push(statusFlipReason !== undefined ? { ...candidate, reason: statusFlipReason } : candidate);
+        harvestLines.push({
+          run_id: candidate.runId,
+          task_id: candidate.taskId,
+          step: "followup.deduped",
+          entry_id: entryId,
+          type,
+          text,
+          ...(statusFlipReason !== undefined ? { reason: statusFlipReason } : {}),
+        });
       } else {
         candidates.push(candidate);
         harvestLines.push({ run_id: candidate.runId, task_id: candidate.taskId, step: "followup.harvested", entry_id: entryId, type, text });
