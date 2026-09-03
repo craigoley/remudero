@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
+import { SELF_SYNC_GUARD_ENV } from "./self-sync.js";
 
 /**
  * lib/commit-message.ts — Conventional-Commits shaping for MACHINE-BUILT commit
@@ -485,13 +486,28 @@ export function defaultPreflightSpawn(
   args: string[],
   opts: { cwd?: string; input?: string; stream?: boolean; env?: NodeJS.ProcessEnv } = {},
 ): { status: number | null; stdout: string; stderr: string; error?: string; signal?: string } {
+  // MERGED OVER `process.env`, never replacing it: a bare `env` would drop PATH, HOME and the
+  // toolchain pins every step here depends on.
+  const env = { ...process.env, ...opts.env };
+  // W1-T2769: UNCONDITIONALLY SCRUBBED, regardless of whether `opts.env` was supplied. Every
+  // child this function spawns is a build/test process (`npm run test:ci` chief among them, via
+  // `ci-parity.ts`'s `ci:test` step) — never a re-exec of `rmd` itself — so this guard has no
+  // legitimate meaning for it. `alreadySelfSynced` (self-sync.ts) reads BOTH the injected `env`
+  // argument AND its own `process.env` — the latter read is what makes an operator's shell
+  // export cross into a spawned child regardless of what `env` object the child's OWN caller
+  // constructs. Deleting the key here, in the ONE place every preflight child is spawned, is
+  // what keeps that crossing from being possible at all: MEASURED, an operator's
+  // `RMD_SELF_SYNC_DONE=1` (documented in self-sync.ts as guarding "every call" for the shell's
+  // session) turned 45 of `ci:test`'s own self-sync tests red on an otherwise-green feature
+  // branch, because the export reached `node --test`'s children through exactly this
+  // inheritance path. `run-task.ts`'s `READ_ONLY_FRESHNESS_EXEMPT_VERBS` addition removes the
+  // NEED to export it for `preflight` itself; this removes the RISK of it regardless, for a
+  // shell where it is set for some unrelated reason.
+  delete env[SELF_SYNC_GUARD_ENV];
   const res = spawnSync(file, args, {
     cwd: opts.cwd,
     input: opts.input,
-    // MERGED OVER `process.env`, never replacing it: a bare `env` would drop PATH, HOME and the
-    // toolchain pins every step here depends on. Omitting `env` entirely leaves inheritance
-    // byte-identical to before this hook existed.
-    ...(opts.env ? { env: { ...process.env, ...opts.env } } : {}),
+    env,
     encoding: "utf8",
     maxBuffer: PREFLIGHT_SPAWN_MAX_BUFFER,
     // `stdio[0]` stays a pipe in BOTH modes so `opts.input` keeps working; only the output
