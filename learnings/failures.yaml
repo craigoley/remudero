@@ -114,3 +114,23 @@
     PERSISTENT hold cleared only by `rmd resume`.
   src: fix/cli-safe-control-surface (W1-T14/T15 incident)
   cited: "2026-07-15"
+
+# ── Cost is the falsifier for "did this actually execute" (W1-T2784) ──
+- id: cost-separates-never-ran-from-ran-and-failed
+  subsystem: diagnosis
+  lifecycle: active
+  operator_impact: true
+  files: [src/lib/isolation.ts, src/lib/dispatch-claim.ts]
+  fact: >-
+    A verdict NAME tells you the classification; the COST tells you whether the classification was
+    earned. A $0 failure means the thing being blamed never ran, so the diagnosis is upstream of
+    wherever the verdict points. Three measured instances at two altitudes, all reading as an
+    ordinary failure of the named component: a Codex isolation probe at EXACTLY $0 (the binary
+    refused to start on a non-git cwd, exit 0, no output) verdicted blocked_isolation as though the
+    parser had failed; W1-T2636's isolation probe at $0.000972 (API 529, throw swallowed) verdicted
+    identically; and a daemon summary at $0.0000 with "merged: (none)" read as "a cycle that did
+    nothing" when it was "a cycle that never got to do anything". Before blaming the component a
+    verdict names, check whether it billed — an unearned classification sends every later
+    diagnosis at the wrong layer.
+  src: W1-T2754,W1-T2784
+  cited: "2026-09-03"

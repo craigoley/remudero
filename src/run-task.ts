@@ -23,7 +23,7 @@ import { promisify } from "node:util";
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { createServer, type Server } from "node:http";
-import { homedir, tmpdir } from "node:os";
+import { homedir, hostname, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
@@ -693,7 +693,17 @@ import {
   type HeadReflogEntry,
 } from "./lib/review-provider-provenance.js";
 import { decideAutoTriage, newFeedbackIdsOldestFirst, oldestFeedbackAgeMs, readAutoTriageMarker, recordAutoTriageFire, autoTriageMarkerPath, triageLockPath, claimTriageWithLogging, releaseTriageClaimWithLogging, gitTriageClaimReserver, type AutoTriageDecision, type TriageClaimReserver, type TriageClaimResult } from "./lib/auto-triage.js";
-import { decideDispatchClaim, releaseDispatchClaim, gitDispatchClaimReserver, dispatchClaimRef, type DispatchClaimReserver } from "./lib/dispatch-claim.js";
+import {
+  decideDispatchClaim,
+  releaseDispatchClaim,
+  gitDispatchClaimReserver,
+  dispatchClaimRef,
+  // W1-T2784: the dead-claimant arm's two probe leaves + the anchor decoder.
+  parseClaimAnchorMessage,
+  pidIsPresent,
+  readNamespaceBootMs,
+  type DispatchClaimReserver,
+} from "./lib/dispatch-claim.js";
 import {
   checkGithubPosture,
   readGithubPosture,
@@ -12013,7 +12023,28 @@ async function runTask(
     // holding fresh proof of it, so it drops the stale ref rather than leaving it for a THIRD
     // lane to find blocked by a dead claim. The refusal below stands either way.
     if (claimOutcome === "taken") {
-      const released = releaseDispatchClaim(task.id, claimReserver, { evidenceObserved: isMerged(task) });
+      // W1-T2784: the DEAD-CLAIMANT probe, supplied HERE and nowhere else — this is the only
+      // path that meets a claim it does not own with no landed evidence, i.e. the exact case
+      // that was producing permanent refs. See `decideDispatchClaimRelease`'s arm 3 for why the
+      // narrow same-host/predates-boot shape is decidable when general cross-host liveness is
+      // not. The probe is a THUNK: `releaseDispatchClaim` only calls it once an anchor has
+      // actually parsed, so arms 1 and 2 still cost no /proc read and no git round trip.
+      const released = releaseDispatchClaim(task.id, claimReserver, {
+        evidenceObserved: isMerged(task),
+        livenessProbe: () => {
+          const namespaceBootMs = readNamespaceBootMs();
+          if (namespaceBootMs === undefined) return undefined; // declines to the operator arm
+          const anchorPid = parseClaimAnchorMessage(claimReserver.anchorMessage?.(task.id))?.pid;
+          return {
+            localHost: hostname(),
+            namespaceBootMs,
+            namespaceBootIso: new Date(namespaceBootMs).toISOString(),
+            // No pid parsed ⇒ report PRESENT, which blocks the release. Same fail-closed
+            // direction every other absent input on this path takes.
+            pidPresent: anchorPid === undefined ? true : pidIsPresent(anchorPid),
+          };
+        },
+      });
       log("dispatch.claim_released", {
         ref: dispatchClaimRef(task.id),
         arm: released.arm,
@@ -12021,6 +12052,10 @@ async function runTask(
         dropped: released.dropped,
         reason: released.reason,
       });
+      // LOUD ON THE CONSOLE TOO, not only in the ledger (design note): this arm DELETES a lock a
+      // peer might believe it holds, so the operator reading stdout must see it happen and see
+      // which signals decided it — the ledger row alone is a record nobody is watching live.
+      if (released.arm === "dead-claimant") say(`RELEASED a dead claim — ${released.reason}`);
     }
     say(`REFUSED: ${claimDecision.reason}`);
     // `unreachable` mirrors `blocked_git_fetch`'s own "cannot reach origin" refusal (this IS a

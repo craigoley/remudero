@@ -39,13 +39,29 @@ test("generateSandboxTask: successive generated subjects are distinct, not drawn
   assert.equal(ids.size, 50, "every generated subject id must be distinct");
 });
 
-test("generateSandboxTask: reaches every shard in the project layer, including the smallest (failures.yaml)", () => {
+test("generateSandboxTask: reaches every shard in the project layer, including the smallest", () => {
   const index = realIndex();
   const shardNames = Object.keys(index.files).sort();
-  // Sanity: the corpus really is lopsided (design ii) — failures.yaml really is the smallest.
-  // (Was ci.yaml, tied at 6, until PR#2997 added two entries there — 8 now beats the tie.)
+  // Sanity: the corpus really is lopsided (design ii) — some shard is meaningfully smaller than
+  // the largest, and the loop below covers whichever one that is.
+  //
+  // DERIVED, NOT NAMED (W1-T2784). This line used to assert `smallest === "failures.yaml"`, and
+  // its own comment recorded that it had ALREADY been re-hand-maintained once: "(Was ci.yaml,
+  // tied at 6, until PR#2997 added two entries there — 8 now beats the tie.)" It drifted a second
+  // time when W1-T2784 added one entry to failures.yaml (7) and testing.yaml (6) became the
+  // smallest — reddening a test whose real claim, the loop below, was never in question. A
+  // hand-maintained assertion about a DERIVED fact decays under any legitimate edit that had no
+  // way to know; the fix is to derive it. This also honours this file's own header, which asks
+  // that "reaches the smallest shard" be proven "against the real smallest shard, not a stand-in"
+  // — a hardcoded name IS the stand-in.
   const smallest = shardNames.reduce((a, b) => (index.files[a].entries.length <= index.files[b].entries.length ? a : b));
-  assert.equal(smallest, "failures.yaml");
+  const largest = shardNames.reduce((a, b) => (index.files[a].entries.length >= index.files[b].entries.length ? a : b));
+  assert.ok(
+    index.files[smallest]!.entries.length < index.files[largest]!.entries.length,
+    `the corpus must stay lopsided for this proof to mean anything — smallest ${smallest} ` +
+      `(${index.files[smallest]!.entries.length}) vs largest ${largest} (${index.files[largest]!.entries.length})`,
+  );
+  assert.ok(shardNames.includes(smallest), "the smallest shard is one the loop below actually covers");
 
   for (const shard of shardNames) {
     const subject = generateSandboxTask(index, [shard], 0);

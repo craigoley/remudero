@@ -235,15 +235,36 @@ test("W1-T2446 ACCEPTANCE 3: the hoisted release reuses releaseDispatchClaim ver
   }
 });
 
-test("W1-T2446: decideDispatchClaimRelease itself still takes no clock input -- three arms, no timer, unmodified by this task", () => {
+test("W1-T2446: decideDispatchClaimRelease itself still takes no clock input -- no timer, no expiry", () => {
+  // W1-T2784 UPDATE: this guard's SUBJECT is unchanged and every timer assertion below is kept
+  // verbatim. What moved is the parameter-shape line: W1-T2784 added a FOURTH arm
+  // (`dead-claimant`) and, with it, two optional inputs. That arm is emphatically NOT the timer
+  // this guard exists to forbid -- it compares two RECORDED FACTS (the anchor's own minted-at
+  // against this PID namespace's own init start) and never reads a current time at all, which is
+  // why the forbidden list below still passes unmodified and is the real property under guard.
+  // The `mintedAtIso`/`namespaceBootIso` fields exist precisely so the decision can render those
+  // instants without constructing a `Date` -- see their own docs in dispatch-claim.ts.
   const fnStart = dispatchClaimSrc.indexOf("export function decideDispatchClaimRelease(");
   assert.notEqual(fnStart, -1);
   const fnEnd = dispatchClaimSrc.indexOf("\n}", fnStart);
   const fn = dispatchClaimSrc.slice(fnStart, fnEnd);
-  assert.match(fn, /heldByThisRun: boolean; evidenceObserved: boolean; taskId: string/, "the parameter shape is unchanged -- no time field added");
+  assert.match(fn, /heldByThisRun: boolean;/, "the original three inputs are still there");
+  assert.match(fn, /evidenceObserved: boolean;/);
+  assert.match(fn, /taskId: string;/);
+  // THE PROPERTY THIS GUARD ACTUALLY PROTECTS, unchanged and non-negotiable: no clock read, no
+  // timer, no elapsed-time expiry anywhere in the decision.
   for (const forbidden of ["Date.now", "new Date(", "setTimeout", "setInterval", "ageMs", "expiresAt", "expiryMs"]) {
     assert.ok(!fn.includes(forbidden), `decideDispatchClaimRelease must not reference ${forbidden}`);
   }
+  // And an unreviewed FIFTH arm must fail here rather than pass silently, the same way the
+  // original line pinned the arm count.
+  const arms = dispatchClaimSrc.match(/export type DispatchClaimReleaseArm = ([^;]+);/);
+  assert.ok(arms, "the arm union must still exist, unrenamed");
+  assert.equal(
+    arms![1]!.split("|").map((s) => s.trim().replaceAll('"', "")).sort().join(","),
+    "dead-claimant,evidence,holder,operator",
+    "exactly four arms: a fifth needs its own reasoned task, as dead-claimant had",
+  );
 });
 
 // ── claim 4: the board no longer asserts "no landed work observed" without checking ────────────
