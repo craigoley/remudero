@@ -32,6 +32,7 @@
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -222,4 +223,14 @@ test("W1-T2770: detectHostFacts reads this repo's real .nvmrc and produces a fac
   );
   // And the running Node reading, too — same all-fakes-trap logic.
   assert.match(facts.nodeVersion, /^\d+\.\d+\.\d+$/, `nodeVersion must be a plausible semver string; got ${facts.nodeVersion}`);
+});
+
+test("W1-T2770: detectHostFacts against a repoRoot with no .nvmrc reads the readFileSync throw and represents it as pinnedNodeVersion: undefined — never a thrown error out of the step, never a guessed value", () => {
+  // `tmpdir()` has no `.nvmrc` sitting in it, so this exercises the SAME catch branch
+  // `computeHostFacts`'s own doc comment describes: "Absent/unreadable is `undefined`, NOT the
+  // empty string". The `REPO_ROOT`-reading test above only ever exercises the try's happy path;
+  // this is the read that actually throws.
+  const spawn: PreflightSpawn = (_file, _args, _opts) => ({ status: 0, stdout: "", stderr: "" });
+  const facts = detectHostFacts(tmpdir(), spawn, () => false);
+  assert.equal(facts.pinnedNodeVersion, undefined, "a missing .nvmrc must read as undefined, never a guessed match/mismatch");
 });
