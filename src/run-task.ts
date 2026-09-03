@@ -23593,6 +23593,18 @@ export async function daemonCommand(
   } catch {
     log("daemon.provider_routing_status_write_failed", { reason: "write-failed" });
   }
+  // W1-T2787: ONE observer closure is shared by the ordinary full sweep and the daemon-side
+  // settled-check callback below. Its brief cache uses the SAME committed settle window, so an
+  // event observation followed immediately by the awakened full sweep spends one GitHub read,
+  // not two. Serve still only writes the signed marker and never receives this callback.
+  const mainHealthRung = buildMainHealthRung(target.owner, target.repo, {
+    fetch: ghJson,
+    issues: ghIssueGateway(target.owner, target.repo),
+    ledgerPath,
+    runId,
+    log,
+    freshMs: policy.values.githubEventWake.checkSettleMs,
+  });
   // W1-T2568 — THE GITHUB-EVENT WAKE'S ENTIRE DAEMON-SIDE WIRING. `wireSweepWakeToDaemon`
   // (lib/github-event-wake.ts) consumes any boot-pending marker, arms an `fs.watch` on the
   // shared state directory `remudero-serve`'s `POST /v1/hooks/github` route also writes into,
@@ -23605,6 +23617,9 @@ export async function daemonCommand(
   // `drainLock.release()`/`consumeStop` are already wired into both.
   const githubEventWake = (deps.wireSweepWake ?? wireSweepWakeToDaemon)(config.root, log, undefined, {
     checkSettleMs: policy.values.githubEventWake.checkSettleMs,
+    // W1-T2787: the callback fires when the daemon-side check/status burst settles, even when an
+    // older full sweep is still executing and the resulting wake is refused by its liveness gate.
+    onCheckBurstSettled: () => void mainHealthRung(),
   });
   const processKill = deps.processKill ?? ((pid: number, signal: NodeJS.Signals) => process.kill(pid, signal));
   const onSignal = (sig: NodeJS.Signals) => {
@@ -24046,13 +24061,7 @@ export async function daemonCommand(
           // and plan/policy.yaml's `workerStall` row for the ~16-minute `--ci-parity` default's
           // headroom rationale.
           policy.values.workerStall,
-          buildMainHealthRung(target.owner, target.repo, {
-            fetch: ghJson,
-            issues: ghIssueGateway(target.owner, target.repo),
-            ledgerPath,
-            runId,
-            log,
-          }),
+          mainHealthRung,
         ),
         // W1-T254 (the #707 fix): the restricted light-sweep ticker — ticks ONLY
         // the deterministic post-review re-post while `runOne` is unbounded and in
