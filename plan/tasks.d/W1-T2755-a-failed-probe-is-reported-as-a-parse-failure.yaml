@@ -1,0 +1,80 @@
+- id: W1-T2755
+  title: "A PROBE THAT NEVER RAN IS REPORTED AS A PROBE WHOSE REPORT COULD NOT BE PARSED — `assessIsolation` sees only two counts, so an errored spawn (a CLI refusing to start, a transport failure) yields NaN counts and is handed the `counts could not be parsed` reason, which travels into both the `isolation_preflight_failed` ledger row and the thrown `IsolationError` while the real cause sits unused in `isError`/`transcript`"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: "span"
+  budget_usd: 5.00
+  files: [src/lib/isolation.ts, test/a-failed-probe-is-not-a-parse-failure.test.ts]
+  origin: "operator-brief#codex-integration-defect-pair-2026-09-03"
+  plan_refs: ["W1-T2754", "W1-T238", "W1-T1112", "W1-T17"]
+  status: queued
+  attempts: 0
+  note: |
+    SIBLING OF W1-T2754. The operator reserved W1-T2754 and W1-T2755 as a consecutive pair for
+    the two Codex-integration defects. W1-T2754 (the Codex CLI refusing a non-git-repo cwd) was
+    built and shipped as #3795. This is its unbuilt sibling: the REPORTING defect that made that
+    cause invisible for a day.
+
+    BAND. `risk: high` with `band_meaning: span` is Rule 19 SIZING, declared up front: the
+    `files:` list is a source file and its own test, which the linter counts as two concerns and
+    refuses at `risk: medium`. It is not a claim that the diff is large — it is one function's
+    reason string plus a new pure selector.
+
+    SEPARATELY TRUE, AND WHY THE FAIL-CLOSED POSTURE IS RESTATED IN EVERY CRITERION: the code
+    around this edit is the isolation preflight that gates every task worker. A mistake letting
+    a failure read as a pass would put workers on an unproven host. Nothing here touches the
+    verdict, and acceptance criterion 5 exists to pin exactly that.
+  rationale: |
+    THE DEFECT, IN THE CODE. `probeIsolation` (src/lib/isolation.ts) computes
+    `verdict = assessIsolation(evidence)` where `evidence` is `{ aliasCount, functionCount }`.
+    `assessIsolation` therefore CANNOT see whether the probe spawn failed. When a spawn errors,
+    `parseIsolationReport` finds no report in the error text, both counts land as `NaN`, and
+    `assessIsolation` returns its unparseable-counts branch:
+    "the probe's alias/function counts could not be parsed — isolation UNPROVEN". That single
+    string is then used TWICE: as the `reason` field of the `isolation_preflight_failed` ledger
+    row, and inside the thrown `IsolationError` message.
+
+    THE INFORMATION WAS ALREADY IN HAND. `probeIsolation` holds `r.isError` and `r.transcript`
+    and already uses them — but only to attach `stderr_excerpt` to the ledger rows (W1-T238,
+    W1-T1112). The REASON, which is what a reader follows when a run dies, never consults them.
+
+    MEASURED COST. A full day of investigation aimed at the isolation prompt and the report
+    parser, when the actual cause was the Codex CLI refusing to start on a non-git-repo cwd
+    (fixed separately as W1-T2754). The reporting defect is what made the real cause invisible.
+    This is the same shape as the #981 ledger defect CLAUDE.md records: a line must carry the
+    reason from the decision that produced its outcome, not from a neighbouring one.
+
+    THE FIX IS A STRING, NOT A POLICY. A new pure `isolationFailureReason(evidence, verdict,
+    probe)` selects the reason from the signal that actually produced the failure:
+    proven-broken keeps `assessIsolation`'s exact wording (already specific); an errored spawn
+    names itself and carries the capped probe text; a genuine parse failure keeps the message
+    that case exists for; and no-counts/no-error/no-output reports itself as ambiguous rather
+    than blaming the parser. `assessIsolation` still decides isolation, the caller still throws
+    `IsolationError`, and an unproven probe still FAILS CLOSED.
+
+    SCOPE DISCIPLINE. This does not touch `isolationProbePrompt()` — that prompt is written
+    against Claude Code's tool surface and whether Codex needs its own probe is a separate live
+    thread. It does not refactor `isolation.ts`, audit neighbouring fail-closed paths, or alter
+    the `isolation.probe` observation row (which already carries `stderr_excerpt` and is not the
+    row a dying run is read from).
+  acceptance:
+    - claim: "a probe whose SPAWN failed is reported as a spawn failure carrying the probe's own error text, and the parse-failure wording is absent from that message"
+      proof: "unit test: test/a-failed-probe-is-not-a-parse-failure.test.ts"
+    - claim: "a probe that ran clean but returned an unreadable report still reports the parse failure verbatim, so the message that case exists for is preserved"
+      proof: "unit test: test/a-failed-probe-is-not-a-parse-failure.test.ts"
+    - claim: "an outcome with no counts, no error signal and no output reports itself as ambiguous rather than as a parse failure"
+      proof: "unit test: test/a-failed-probe-is-not-a-parse-failure.test.ts"
+    - claim: "a probe that parsed and found real leakage keeps the observed-counts wording unchanged, with or without an error flag"
+      proof: "unit test: test/a-failed-probe-is-not-a-parse-failure.test.ts"
+    - claim: "every non-isolated verdict still throws IsolationError, so the fail-closed posture is unchanged by this edit"
+      proof: "unit test: test/a-failed-probe-is-not-a-parse-failure.test.ts"
+  falsifier: |
+    Bypass the selector (`const failureReason = verdict.reason;`) and the REAL-LEAF test — the
+    one driving isolation.ts's own `defaultExecutor` with a spawn that actually errors — reds.
+    MEASURED both ways 2026-09-03: bypassed reads `# tests 5 / # pass 4 / # fail 1` with the
+    failing test named as the spawn-failure case; restored reads `# tests 5 / # pass 5 /
+    # fail 0`. The falsifier lands on the real path, not on a mock returning an error object.
