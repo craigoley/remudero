@@ -12,9 +12,12 @@
     - scripts/source-size-baseline.json
     - src/lib/claude-model-health.ts
     - src/lib/mounts.ts
+    - src/lib/provider-routing-status.ts
     - src/lib/worker.ts
+    - test/a-capability-ladder-is-data-not-a-substring-match.test.ts
     - test/claude-model-health-routing.test.ts
     - test/fixtures/anthropic-status-2026-09-03.json
+    - test/mounts.test.ts
   origin: "operator-session#health-aware-dual-provider-routing-2026-09-03"
   plan_refs: ["W1-T5", "W1-T2572", "W1-T2573", "W1-T2748", "W1-T2772"]
   status: queued
@@ -51,8 +54,9 @@
     Read only the unauthenticated canonical Statuspage v2 unresolved-incidents endpoint with an
     argv-free HTTP client, a short clock bound, a one-minute success cache, and one shared in-flight
     request. Match only configured concrete model display names using escaped token boundaries;
-    do not infer an entire family outage from a generic component state. Treat every model named
-    anywhere in an unresolved incident's updates as degraded until that incident disappears.
+    do not infer an entire family outage from a generic component state. Within each unresolved
+    incident, retain model-specific evidence unless a newer update explicitly replaces its scope
+    with an exhaustive or "only affected" list; that newer list is authoritative for the incident.
     Preserve a sanitized fixture of the observed payload. No GitHub request, Anthropic credential,
     prompt, repository content, or worker transcript may flow to the status service.
 
