@@ -1,31 +1,28 @@
 # ORIENTATION
 
-_MAINTAINED BY `rmd retro` — regenerated 2026-09-02T19:04:14.555Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
+_MAINTAINED BY `rmd retro` — regenerated 2026-09-03T02:24:30.532Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
 
 A fresh Architect session should be able to orient from THIS doc alone plus the plan index —
 not by re-deriving state from the full plan and ledger.
 
 ## Current state
 
-11 run(s) since the last retro marker. Verdicts: {"blocked_ci":8,"merged":3}.
+10 run(s) since the last retro marker. Verdicts: {"blocked_ci":5,"blocked_containment":2,"incomplete":1,"merged":2}.
 
 ### Shipped since marker
-- W1-T2613 → https://github.com/craigoley/remudero/pull/3651 (gate-side merge; run ended blocked_ci)
-- W1-T2614 → https://github.com/craigoley/remudero/pull/3659
-- W1-T2617 → https://github.com/craigoley/remudero/pull/3661 (gate-side merge; run ended blocked_ci)
-- W1-T2618 → https://github.com/craigoley/remudero/pull/3662 (gate-side merge; run ended blocked_ci)
-- W1-T2619 → https://github.com/craigoley/remudero/pull/3666
-- W1-T2620 → https://github.com/craigoley/remudero/pull/3673 (gate-side merge; run ended blocked_ci)
-- W1-T2621 → https://github.com/craigoley/remudero/pull/3680 (gate-side merge; run ended blocked_ci)
-- W1-T2625 → https://github.com/craigoley/remudero/pull/3672 (gate-side merge; run ended blocked_ci)
-- W1-T2628 → https://github.com/craigoley/remudero/pull/3697
-- W1-T2629 → https://github.com/craigoley/remudero/pull/3681 (gate-side merge; run ended blocked_ci)
+- TRIAGE-fb-repair-blocked-fixable-2957 → https://github.com/craigoley/remudero/pull/3762 (gate-side merge; run ended incomplete)
+- W1-T2622 → https://github.com/craigoley/remudero/pull/3712 (gate-side merge; run ended blocked_ci)
+- W1-T2624 → https://github.com/craigoley/remudero/pull/3718
+- W1-T2626 → https://github.com/craigoley/remudero/pull/3727 (gate-side merge; run ended blocked_ci)
+- W1-T2630 → https://github.com/craigoley/remudero/pull/3716 (gate-side merge; run ended blocked_ci)
+- W1-T2633 → https://github.com/craigoley/remudero/pull/3724 (gate-side merge; run ended blocked_ci)
+- W1-T2634 → https://github.com/craigoley/remudero/pull/3746
 
 ## Next runnable task
 
-**W1-T2622** — worktree-provisioning coverage census — every `git worktree add` in src/ either routes through worktreeAdd (base recorded, currency asserted) or is a NAMED exemption carrying its reason, enforced by a BIDIRECTIONAL static guard so a new raw site cannot appear silently and a rotted exemption cannot outlive the site it excused
+**W1-T2631** — AN UNRESOLVABLE TASK-RECORD POINTER RENDERS NOTHING AT ALL, SO A SPEC-BLIND WORKER IS NEVER TOLD IT IS SPEC-BLIND — `taskRecordContextLine` (src/run-task.ts:10012) returns the empty string whenever `taskRecordPath`/`workerVisibleRecordPath` cannot resolve the record, and that bullet is the ONLY transport by which a task's design, rationale and acceptance criteria reach a worker at all, while the output contract still demands the worker substantiate EVERY criterion it was neither shown nor told where to find; recon absence is already announced explicitly and record absence is not
 
-- risk: high · depends_on: W1-T2621
+- risk: high · depends_on: (none)
 
 ## Never-do invariants (MASTER-PLAN §12 Standing rules — extracted verbatim; §12 is authoritative)
 
@@ -302,3 +299,8 @@ not by re-deriving state from the full plan and ledger.
   editing the acceptance criteria its own judge reads, and under an LLM-as-judge design that is MORE
   load-bearing, not less. `rule15FilingViolation` is likewise untouched — it is a task-record SHAPE
   check and never had anything to do with who may file.
+- 28. A VERDICT CLASS IS NOT A FAILURE CLASS UNTIL YOU CHECK WHICH OF ITS MEMBERS MERGED. A
+  terminal run verdict records what the orchestrator observed at that instant; it is not material
+  proof that the pull request ultimately failed. Any failure census or taxonomy must join each
+  member to live merge state before classifying it, and an unreadable member remains unconfirmed
+  rather than being counted as a failure. [RETRO-1788374498685; DR-28; P47; 2026-09-02]
