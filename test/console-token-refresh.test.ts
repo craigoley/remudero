@@ -211,7 +211,7 @@ test("W1-T2269: deploy/serve-container.sh carries a passthrough for all three GH
 const SERVE_CONTAINER_SH = fileURLToPath(new URL("../deploy/serve-container.sh", import.meta.url));
 const SERVE_APP_KEY_DEST = "/home/node/.rmd-github-app-private-key.pem";
 
-function runServeLauncherFixture(source: "direct" | "daemon" | "missing") {
+function runServeLauncherFixture(source: "direct" | "daemon" | "missing" | "empty" | "unreadable") {
   const root = tmpRoot();
   const binDir = join(root, "bin");
   const stateDir = join(root, "state-root");
@@ -232,6 +232,16 @@ function runServeLauncherFixture(source: "direct" | "daemon" | "missing") {
   mkdirSync(credDir, { recursive: true });
   if (source === "direct") writeFileSync(directKeyPath, keyBody);
   if (source === "daemon") writeFileSync(join(credDir, "rmd-app.pem"), keyBody);
+  // W1-T2778 criterion 3 names FOUR degraded shapes — absent, empty, unreadable, untranslatable —
+  // and "missing" below only exercises the untranslatable one (a daemon-captured path with no
+  // matching host file). These two give the empty and unreadable shapes their own direct-path
+  // fixture, so a regression in either `-s` (non-empty) or `-r` (readable) has its own failing
+  // test rather than hiding behind "missing"'s coverage of the fourth shape.
+  if (source === "empty") writeFileSync(directKeyPath, "");
+  if (source === "unreadable") {
+    writeFileSync(directKeyPath, keyBody);
+    chmodSync(directKeyPath, 0o000);
+  }
 
   writeFileSync(
     dockerPath,
@@ -292,7 +302,7 @@ exit 1
   delete env.GH_APP_ID;
   delete env.GH_APP_INSTALLATION_ID;
   delete env.GH_APP_PRIVATE_KEY_PATH;
-  if (source === "direct") {
+  if (source === "direct" || source === "empty" || source === "unreadable") {
     env.GH_APP_ID = "123";
     env.GH_APP_INSTALLATION_ID = "456";
     env.GH_APP_PRIVATE_KEY_PATH = directKeyPath;
@@ -330,6 +340,26 @@ test("W1-T2778: an untranslatable or missing key preserves startup and fallback 
   assert.ok(!fixture.capture.includes(SERVE_APP_KEY_DEST), `unexpected key destination in:\n${fixture.capture}`);
   assert.ok(fixture.capture.includes(`ENV:${fixture.daemonKeyPath}`), "the refresher retains the unreadable path so its existing telemetry names the failure");
   assert.match(fixture.result.stderr, /private key.*unreadable|could not resolve.*private key/i);
+});
+
+test("W1-T2778: an empty declared key file preserves startup and fallback without inventing a mount", () => {
+  const fixture = runServeLauncherFixture("empty");
+  assert.equal(fixture.result.status, 0, fixture.result.stderr);
+  assert.ok(!fixture.capture.includes(SERVE_APP_KEY_DEST), `unexpected key destination in:\n${fixture.capture}`);
+  assert.ok(fixture.capture.includes(`ENV:${fixture.directKeyPath}`), "the refresher retains the declared path so its existing telemetry names the failure");
+  assert.match(fixture.result.stderr, /private key.*unreadable|could not resolve.*private key/i);
+});
+
+test("W1-T2778: an unreadable declared key file preserves startup and fallback without inventing a mount", () => {
+  const fixture = runServeLauncherFixture("unreadable");
+  assert.equal(fixture.result.status, 0, fixture.result.stderr);
+  assert.ok(!fixture.capture.includes(SERVE_APP_KEY_DEST), `unexpected key destination in:\n${fixture.capture}`);
+  assert.ok(fixture.capture.includes(`ENV:${fixture.directKeyPath}`), "the refresher retains the declared path so its existing telemetry names the failure");
+  assert.match(fixture.result.stderr, /private key.*unreadable|could not resolve.*private key/i);
+  assert.ok(
+    !`${fixture.result.stdout}${fixture.result.stderr}${fixture.capture}`.includes(fixture.keyBody),
+    "key content never reaches output even though the (unreadable-by-permission) file exists on disk",
+  );
 });
 
 // ── (2) A CREDENTIAL THAT CANNOT BE REPLACED IS REPORTED, NOT PRESENTED AS A WORKING BOARD ──────
