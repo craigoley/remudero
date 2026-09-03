@@ -1,0 +1,112 @@
+- id: W1-T2756
+  title: "Codex preflights inherit non-repository and transcript contracts proved only against Claude, so a connector that starts can still fail every run before the task worker"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 32.00
+  risk: high
+  files:
+    - scripts/source-size-baseline.json
+    - src/lib/containment.ts
+    - test/codex-preflight-contract.test.ts
+    - test/fixtures/codex-0.152.0-isolation-probe.jsonl
+  origin: "operator-session#codex-preflight-contract-audit-2026-09-03"
+  plan_refs: ["W1-T17", "W1-T115", "W1-T297", "W1-T2748"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON THE AZURE FLEET HOST WITH THE PINNED `codex-cli 0.152.0`: a Codex-routed
+    isolation probe launched from its real non-repository scratch shape only starts when the
+    adapter supplies the separately owned W1-T2754 Git-repository bypass. Once started, the raw
+    JSONL carries a final agent message with the exact four-line contract:
+
+      REPORT
+      aliases: 0
+      functions: 0
+      alias_names: -
+      function_names: -
+
+    Feeding that message through the current provider-neutral JSONL adapter and
+    `parseIsolationReport` yields the integer counts 0 and 0. That is the first provider-real
+    evidence for the transcript contract; merely seeing a Codex process start or a green PR queue
+    would not prove it. Codex is disabled in the fleet's `workerProviders.enabled` while this work
+    is commissioned, so the absence of new `blocked_isolation` rows is also not evidence.
+
+    THE SECOND PREFLIGHT IS WRITE-CAPABLE AND W1-T2748 DELIBERATELY DOES NOT BYPASS IT.
+    `containment.defaultExecutor` creates `<root>/tmp/containment-probe-<token>/cwd`, then calls
+    `spawnWorker` without a read-only tool list. W1-T2748 keeps a write-capable non-repository cwd
+    fail-closed because bypassing Git validation there could run an implementation worker against
+    the wrong directory. The containment probe is the legitimate exception: its cwd is newly
+    created, disposable, token-scoped, and removed in `finally`, but the provider boundary cannot
+    distinguish that provenance from a missing task worktree.
+
+    A LIVE FALSIFIER WAS RUN BEFORE FILING. Initializing only that disposable cwd with `git init
+    -q`, then running pinned Codex in `workspace-write`, produced an OS denial for a sibling write
+    and successfully created the inside-cwd marker. The final filesystem observation was
+    `outside=absent inside=present codex_exit=0`. This proves the narrow Git initialization can
+    satisfy Codex's trust prerequisite without weakening the containment verdict or granting the
+    sibling path.
+
+    THIS IS NOT W1-T2754 AND MUST NOT REIMPLEMENT IT. W1-T2754 owns the shared Codex argv change
+    that allows a read-only, intentionally non-repository worker to start. This task owns the
+    provider-real preflight contract and the write-capable containment probe's disposable Git
+    identity. It does not alter provider selection, rate-limit reads, the Claude command line,
+    semantic-review finality, or any fail-closed verdict.
+  design: |
+    Preserve one sanitized JSONL event excerpt captured from the pinned Azure CLI. Remove the real
+    thread id and path-bearing command events, but do not rewrite the retained event types, item
+    types, agent-message text, or usage shape. Drive the fixture through `parseCodexJsonl`, pass its provider-neutral transcript fields
+    through the same concatenation used by `isolation.defaultExecutor`, and then call
+    `parseIsolationReport`. Assert finite integer zero counts and a clean worker envelope. This is
+    a regression proof over an observed provider transcript, not a hand-authored final string.
+
+    Before the containment spawn, initialize only the token-scoped disposable `cwd` as a minimal
+    Git repository with an argv-based child process (`git init -q`). Do not use a shell, modify the
+    enclosing checkout, add a bypass flag, or change the generic provider adapter. A failed Git
+    initialization must abort before the paid worker call and flow through the existing preflight
+    failure boundary; it must never be treated as evidence that containment holds.
+
+    Extend the existing injectable seam narrowly enough that the unit test can capture the Git
+    initialization command and inspect the cwd at the moment `spawnWorker` is invoked. Prove that
+    `.git` exists before spawn, that the spawn still receives the same cwd, prompt, settings and
+    budget, and that the existing inside/outside marker evidence produces the same fail-closed
+    verdicts. The temporary repository must be removed by the existing `finally` cleanup.
+
+    Keep Claude behavior semantically unchanged: the Claude argv, environment, settings file,
+    prompt, marker paths and containment assessment do not change. The only additional cwd entry is
+    the disposable `.git` prerequisite, created before either provider is selected and removed with
+    the directory. Run the existing containment and isolation suites as regressions.
+  acceptance:
+    - claim: "a sanitized JSONL event excerpt captured from Azure `codex-cli 0.152.0` traverses `parseCodexJsonl` and `parseIsolationReport` to finite integer alias and function counts of zero"
+      proof: "unit test: test/codex-preflight-contract.test.ts"
+    - claim: "the write-capable containment probe initializes only its disposable cwd as a Git repository before invoking the provider, without adding a generic non-repository bypass"
+      proof: "unit test: test/codex-preflight-contract.test.ts"
+    - claim: "a Git initialization failure aborts before any worker spawn and can never be assessed as contained"
+      proof: "unit test: test/codex-preflight-contract.test.ts"
+    - claim: "the initialized probe still records an outside-cwd denial and an inside-cwd success as contained, while every unproven or outside-write-success state remains fail-closed"
+      proof: "unit test: test/codex-preflight-contract.test.ts"
+    - claim: "the containment scratch repository and marker files are removed on success and worker failure, and the Claude spawn contract remains otherwise unchanged"
+      proof: "unit test: test/codex-preflight-contract.test.ts"
+  falsifier: |
+    Close the transcript arm without code if a fresh pinned Codex JSONL capture cannot produce the
+    report through `parseCodexJsonl`, or if the captured final message yields NaN/null through
+    `parseIsolationReport`; that would require a provider-specific report protocol rather than a
+    fixture claiming compatibility. Close the containment arm if W1-T2754's final implementation
+    starts a write-capable non-repository containment probe while still refusing an ordinary
+    write-capable missing worktree, or if a live initialized-cwd control can write the sibling
+    outside path. Do not weaken either preflight to make a run proceed.
+  note: |
+    ID PROVENANCE: `rmd next-task-id --reserve` scanned the merged plan, GitHub state and reservation
+    refs, then origin was independently verified to hold `refs/rmd-id/W1-T2756` at
+    `7e1d37231d407a723030246b7de38354a11690a1`. The held id is used here.
+
+    OWNERSHIP: W1-T2754 is committed as aebf4429 by another agent and is closed to this task.
+    W1-T2755 separately owns propagation of the real spawn error instead of the misleading
+    `counts could not be parsed` symptom. Neither file nor behavior is duplicated here.
+
+    COMMISSIONING BOUNDARY: landing this task does not authorize adding Codex back to
+    `workerProviders.enabled`. Re-enable requires the separately owned W1-T2754 to be present in
+    the deployed image, this task's provider-real proof to pass against that exact image, and the
+    provider capability/rate-limit-read gaps from the same audit to have explicit safe posture.
