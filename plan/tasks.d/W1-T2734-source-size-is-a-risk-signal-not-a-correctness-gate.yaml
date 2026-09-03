@@ -8,7 +8,7 @@
   risk: high
   band_meaning: blast-radius
   budget_usd: 30.00
-  files: [scripts/source-size-ratchet.mjs, src/lib/ci-parity.ts, package.json, test/a-source-file-cannot-outgrow-its-baseline.test.ts]
+  files: [scripts/source-size-ratchet.mjs, src/lib/ci-parity.ts, src/run-task.ts, package.json, docs/cli-reference.md, test/a-source-file-cannot-outgrow-its-baseline.test.ts, test/preflight-fast-mode.test.ts, test/preflight-coverage-mode.test.ts]
   origin: "operator-ruling#line-growth-should-not-block-prs-2026-09-02"
   plan_refs: ["W1-T2488", "W1-T2526", "W1-T2532", "W1-T2539", "W1-T2650", "W1-T2651", "W1-T2653", "W1-T2678"]
   status: queued
