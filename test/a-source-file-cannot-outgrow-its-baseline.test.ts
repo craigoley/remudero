@@ -314,6 +314,21 @@ test("W1-T2734 prerequisite: source-size-signal is callable while the blocking c
   );
 });
 
+// ── acceptance: "the step is a member of the habitual fast gate" ────────────────────────────────
+
+test("W1-T2734: source-size-signal replaces the blocking ratchet on the habitual fast gate", () => {
+  const ciParity = readFileSync(join(REPO_ROOT, "src", "lib", "ci-parity.ts"), "utf8");
+  const stepsStart = ciParity.indexOf("export const FAST_GATE_STEPS");
+  assert.ok(stepsStart > 0, "sanity: FAST_GATE_STEPS must still be declared");
+  const stepsEnd = ciParity.indexOf("\n];", stepsStart);
+  const stepsBlock = ciParity.slice(stepsStart, stepsEnd);
+  assert.match(stepsBlock, /script:\s*"source-size-signal"/, "the non-blocking signal must be a FAST_GATE_STEPS entry");
+  assert.doesNotMatch(stepsBlock, /script:\s*"source-size-ratchet"/, "the blocking shared-baseline command must leave the PR gate");
+
+  const pkg = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")) as { scripts: Record<string, string> };
+  assert.equal(pkg.scripts["source-size-signal"], "node scripts/source-size-ratchet.mjs");
+});
+
 // ── W1-T2734 — PR-relative hotspot signal, never a correctness verdict ──────────────────────────
 
 test("W1-T2734: positive growth and a new file emit human hotspot signals, exit zero, and never touch the historical baseline", () => {
