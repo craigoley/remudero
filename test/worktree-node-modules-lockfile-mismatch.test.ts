@@ -207,6 +207,26 @@ test("W1-T2777 (d): `failed` is unchanged — a symlink that threw is `failed`, 
   assert.equal(hashCalls, 0, "a failed symlink short-circuits BEFORE the hash compare");
 });
 
+test("W1-T2777 (d): a hasher that VIOLATES its documented non-throwing contract yields `linked`, never a manufactured mismatch", () => {
+  // hashInstallInputs is documented to never throw (missing files hash as empty content).
+  // If an injected fake breaks that contract anyway, the compare must treat it as
+  // "cannot tell" and fall back to the pre-fix outcome — inventing a mismatch a real read
+  // never observed would be worse than staying silent.
+  const outcome = linkWorktreeNodeModules("/clone", "/wt", {
+    lstat: () => {
+      throw new Error("ENOENT");
+    },
+    resolveSource: () => "/src/node_modules",
+    symlink: () => {
+      /* succeeds — link is made */
+    },
+    hashInstallInputs: () => {
+      throw new Error("hashInstallInputs must never throw, but this fake does");
+    },
+  });
+  assert.equal(outcome, "linked", "a throwing hasher must not be read as a mismatch");
+});
+
 // ── (e) the shared primitive contract ────────────────────────────────────────────────────────
 
 test("W1-T2777 (e): the default hasher IS the exported hashInstallInputs — no parallel implementation lives in worker.ts", () => {
