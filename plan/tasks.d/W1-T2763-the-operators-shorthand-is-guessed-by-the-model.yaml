@@ -1,0 +1,80 @@
+- id: W1-T2763
+  title: "THE OPERATOR'S SHORTHAND IS GUESSED BY THE MODEL — the operator types acronyms like tddr and grfp into sessions and the model infers what they mean each time, the repository ships zero skills and no .claude/commands, and Claude Code substitutes a skill's body verbatim when the operator types /name; keep one tracked table of the operator's macros, generate a user-invocable-only skill per row, and gate the generated files against drift the way the cli reference is"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 22.00
+  rationale: |
+    RE-DERIVED AT 7775b9977 (2026-09-03).
+
+    (1) WHAT THE OPERATOR DOES TODAY. Standing shorthand in prompts — `tddr` for "think deeply and
+    do research", `grfp` for "give recommendations and follow-up prompts" — that the model expands
+    by guessing. A guess is right until it is not, and nothing records which expansion a session
+    used. The token saving is nil: a rare four-letter token splits into two or three sub-tokens
+    against about five for the phrase. The value the operator is after is a LONG expansion behind a
+    short name, and that is a substitution, not a guess.
+
+    (2) WHAT THE RUNTIME PROVIDES. Claude Code's skills page: "A file at .claude/commands/deploy.md
+    and a skill at .claude/skills/deploy/SKILL.md both create /deploy and work the same way";
+    "a skill's body loads only when it's used, so long reference material costs almost nothing
+    until you need it"; `disable-model-invocation: true` means "Only you can invoke the skill";
+    `$ARGUMENTS` is inserted as literal text. `.claude/` in this repository holds settings.json and
+    nothing else; `git ls-files | grep -ic SKILL.md` reads 0.
+
+    (3) WHY A TABLE AND A GENERATOR, NOT HAND-WRITTEN FILES. A macro's expansion is a standing
+    instruction and will be edited; two hand-kept copies drift. docs/cli-reference.md is generated
+    from `COMMANDS` and byte-compared by `cli-reference:check`; the same shape holds a macro table
+    and its rendered skills together, and lets a macro name the CLAUDE.md headlines it invokes so a
+    renamed rule fails the check rather than silently orphaning the macro.
+
+    (4) TWO REFUSALS, STATED HERE SO NOBODY RE-FILES THEM. Dispatched workers never load these:
+    `spawnWorker` passes `settingSources: []`, and a worker-facing procedure is the
+    skill-workshop lane filed beside this one, mined from evidence, not typed by the operator. And the console's
+    reply route stays "A REPLY IS AN INPUT, NEVER A COMMAND" (`buildEscalationReplyRoute`,
+    src/lib/panel-actions.ts, W1-T2496): a macro typed into a reply is text the Architect reads,
+    never a verb the daemon runs.
+  design: |
+    (i) THE TABLE. settings/macros.yaml: one row per macro — `name`, `summary` (the description
+    line), `expansion` (the plain-language body, in the register docs/operator-message-standard.md
+    asks for), `headlines` (CLAUDE.md headlines the expansion invokes, each of which must exist),
+    and `args` (whether `$ARGUMENTS` is appended). Seeded with the operator's own two: `tddr` and
+    `grfp`, their expansions written out in full for the operator to correct.
+
+    (ii) THE GENERATOR. scripts/generate-macro-skills.mjs renders `.claude/skills/<name>/SKILL.md`
+    per row: frontmatter `name`, `description`, `disable-model-invocation: true`; body = the
+    expansion, then the invoked headlines as a short list, then `$ARGUMENTS` when `args` is set.
+    `macro-skills` and `macro-skills:check` join package.json; the check runs inside `npm test` and
+    byte-compares every generated file, so a hand edit to a skill fails naming the macro.
+
+    (iii) THE REFUSALS IN CODE. A row whose `headlines` names a headline absent from CLAUDE.md is
+    refused by the generator with the headline quoted. A row without an expansion is refused. No
+    macro may share a name with an `rmd` verb.
+
+    (iv) WHAT DOES NOT CHANGE. The worker spawn. The reply route. CLAUDE.md.
+  acceptance:
+    - claim: "every macro row renders one skill file marked user-invocable-only carrying the row's expansion verbatim"
+      proof: "unit test: test/operator-macros-are-generated.test.ts"
+    - claim: "a hand-edited skill file fails the drift check naming the macro"
+      proof: "unit test: test/operator-macros-are-generated.test.ts"
+    - claim: "a macro naming a headline absent from CLAUDE.md is refused with the headline quoted"
+      proof: "unit test: test/operator-macros-are-generated.test.ts"
+    - claim: "the seed macro exists as a generated skill only the operator can invoke"
+      proof: "grep: disable-model-invocation in .claude/skills/tddr/SKILL.md"
+    - claim: "the check is wired the way the cli reference is"
+      proof: "grep: macro-skills:check in package.json"
+  risk: high
+  band_meaning: span
+  origin: "oper#concept-scan-2026-09-03"
+  plan_refs: ["W1-T2279", "W1-T2496", "§8A", "§12"]
+  files: [settings/macros.yaml, scripts/generate-macro-skills.mjs, .claude/skills/tddr/SKILL.md, .claude/skills/grfp/SKILL.md, package.json, test/operator-macros-are-generated.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    risk:high, band_meaning:span — a settings table, a generator, two generated files and a check
+    under Rule 19; runtime blast radius is nil, nothing the daemon runs reads these.
+
+    FILED AT THE OPERATOR'S DIRECTION of 2026-09-03 (the compact-dialect scan): the operator's own
+    two macros are the seed rows. SOURCE, PRIMARY: code.claude.com/docs/en/skills.md, read
+    2026-09-03.
