@@ -1,0 +1,89 @@
+- id: W1-T2748
+  title: "a Codex semantic reviewer is launched from an intentionally empty scratch directory, so every Codex review exits before thread start — the deterministic proof floor can still post PASS and conceal that the advisory reviewer never ran"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: high
+  files: [src/lib/worker-provider.ts, test/worker-provider.test.ts, test/a-codex-reviewer-scratch-directory-is-not-a-repository.test.ts]
+  origin: "oper#codex-reviewer-nonrepo-scratch-2026-09-03"
+  plan_refs: ["W1-T115", "W1-T185"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE CONNECTOR IS SELECTED BUT ITS REVIEWER NEVER STARTS. The Azure ledger contains four
+    `review.reviewer` rows with `provider: codex` since Codex was commissioned: PRs #3755,
+    #3719, #3763 and #3761. Every one has an empty session id, zero input/output tokens,
+    `subtype: error_exit_1`, a 106-514ms duration, and stderr `Not inside a trusted directory and
+    --skip-git-repo-check was not specified.` This is a four-of-four mechanism, not an isolated
+    provider outage. Two of those reviews still posted success because every deterministic proof
+    passed; `reviewer_outcome: error_exit_1` is present in the ledger but does not bind the
+    deterministic floor. The board can therefore look healthy while the new provider contributes
+    no semantic judgment.
+
+    THE CALLER DELIBERATELY CHOOSES A NON-REPOSITORY CWD. `runReview` in `src/run-task.ts` wraps the
+    advisory spawn in `withTempDir("review", ...)` and passes that fresh empty directory as
+    `spawnWorker.cwd`. W1-T115 requires this disposable reviewer scratch to be removed on every
+    exit; W1-T185's PR-head worktree is separately passed to the deterministic proof executor and
+    must not become the semantic reviewer's writable cwd. Moving the reviewer into the PR checkout
+    would collapse that isolation boundary and is not the fix.
+
+    THE ADAPTER NEVER EXPRESSES THE CALLER'S INTENT. `codexExecArgs` emits `codex exec --json
+    --ignore-user-config ... -C <cwd> -` for a fresh worker and the corresponding `exec resume`
+    shape for a continuation. It never emits `--skip-git-repo-check`. The pinned Azure binary is
+    `codex-cli 0.152.0`; its own live `codex exec --help` says that option allows Codex to run
+    outside a Git repository. A control invocation from the daemon's ordinary Git checkout
+    succeeds without the flag. A second control from a real linked worktree also succeeds without
+    it. Those controls falsify both a global authentication failure and the first hypothesis that
+    linked-worktree metadata was invisible. The failing population is the intentionally non-repo
+    reviewer scratch directory named above.
+
+    THE BYPASS MUST BE NARROWER THAN "ALL CODEX WORKERS". Implementation and repair workers are
+    expected to run in Git worktrees and may write/commit. Silently bypassing Git validation for a
+    write-capable worker whose checkout is missing would turn a materialization defect into an
+    agent run against the wrong directory. The adapter should add the flag only when the cwd is
+    confirmed not to be a Git worktree AND the requested Claude-compatible tool set is read-only.
+    A real Git worktree keeps today's argv byte-for-byte; a write-capable non-repository cwd keeps
+    failing closed. The same rule must apply to fresh and resume argv construction because both
+    can inherit an intentionally non-repository cwd.
+
+    THIS TASK DOES NOT CHANGE REVIEW FINALITY. The deterministic floor remains authoritative and
+    semantic review remains advisory. It only makes a selected Codex reviewer actually start, and
+    makes the argv policy falsifiable offline. Provider selection, model ladders, quota probes,
+    the Claude spawn path, and the container pin are unchanged.
+  design: |
+    Add one small repository predicate at the Codex adapter boundary. Resolve it with `git
+    rev-parse --is-inside-work-tree` in the requested cwd, using argv rather than a shell. In
+    `codexExecArgs`, add `--skip-git-repo-check` exactly when the tool set is read-only and that
+    predicate confirms the cwd is outside a Git worktree. Do not infer safety from an empty
+    `codexGitWritableRoots` result: that function also refuses repositories outside the configured
+    Remudero root, which is a different boundary.
+
+    Keep the condition in the shared option segment so fresh and resume calls receive the same
+    decision. Unit-drive the real `spawnCodexWorker` with a fake contained process to capture argv;
+    do not invoke a paid model in CI. Cover a non-repo read-only cwd, a real Git cwd, a non-repo
+    write-capable cwd, and resume. The test must also prove the prompt/result stream still reaches
+    the caller, so an argv assertion cannot pass around a spawn that no longer works.
+  acceptance:
+    - claim: "a read-only Codex worker launched from a confirmed non-repository scratch directory receives `--skip-git-repo-check` and completes through the existing JSONL adapter"
+      proof: "unit test: test/a-codex-reviewer-scratch-directory-is-not-a-repository.test.ts"
+    - claim: "a Codex worker launched from a real Git worktree does not receive the bypass flag"
+      proof: "unit test: test/a-codex-reviewer-scratch-directory-is-not-a-repository.test.ts"
+    - claim: "a write-capable Codex worker outside a Git worktree remains fail-closed and does not receive the bypass flag"
+      proof: "unit test: test/a-codex-reviewer-scratch-directory-is-not-a-repository.test.ts"
+    - claim: "fresh and resumed read-only Codex workers apply the same non-repository decision"
+      proof: "unit test: test/a-codex-reviewer-scratch-directory-is-not-a-repository.test.ts"
+    - claim: "the Claude provider path and Codex provider/model/headroom selection are unchanged"
+      proof: "unit test: test/worker-provider.test.ts"
+  note: |
+    ID PROVENANCE: `rmd next-task-id --reserve` printed advisory W1-T2745, observed that origin's
+    reservation namespace already held W1-T2745 through W1-T2747, then atomically created
+    `refs/rmd-id/W1-T2748` and reported W1-T2748 as the id actually held. The shard uses the held
+    id, never the advisory.
+
+    PRIMARY-SOURCE CHECK: official OpenAI documentation search did not expose this narrow CLI
+    option. The installed, pinned runtime is the authority for the integration: `codex-cli
+    0.152.0` and its own `codex exec --help` output were checked on the Azure container. No newer
+    CLI behavior is assumed.
