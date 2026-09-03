@@ -1,0 +1,102 @@
+- id: W1-T2791
+  title: "the source-size gate runs the RECORDING mode of scripts/source-size-ratchet.mjs and exits 0 while writing scripts/source-size-baseline.json — a --check mode that never writes already exists and nothing invokes it, so every lane's gate run leaves a tracked mutation it did not author and a passing verdict that hides it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: "span"
+  budget_usd: 4.00
+  files: [package.json, scripts/source-size-baseline.json, test/a-gate-run-leaves-the-tracked-tree-clean.test.ts]
+  origin: "operator-decision#w1-t2791-file-gate-mutates-tracked-tree-2026-09-03"
+  plan_refs: ["W1-T2755", "W1-T2790"]
+  status: queued
+  attempts: 0
+  note: |
+    MEASURED 2026-09-03 on a clean worktree at 4b753682, both directions in one sitting:
+
+      node scripts/source-size-ratchet.mjs           -> rc=0, "OK -- 164 source file(s), none over
+                                                        their recorded baseline", AND leaves
+                                                        `M scripts/source-size-baseline.json`
+      node scripts/source-size-ratchet.mjs --check   -> rc=1, names the drift, tree CLEAN
+
+    THE ASYMMETRY IS THE DEFECT, not the writing itself. The recording form EXITS 0 WHILE MUTATING.
+    A gate that says OK is the one thing a lane will not look behind, so the mutation rides along
+    into whatever that lane commits next. The `--check` form already exists, is documented in the
+    script's own usage block ("report baseline drift; never write"), and NOTHING invokes it:
+    `package.json:62` maps the `source-size-ratchet` script to the bare writing form, and
+    `src/lib/ci-parity.ts` registers that script name for the gate.
+
+    `--check` IS NOT A DROP-IN, and the shard must not pretend otherwise. It exits 1 where the
+    writing form exits 0 — TODAY, on main, because `src/lib/install-hash.ts` (new with W1-T2777)
+    has no recorded entry. So switching the gate turns a passing check into a failing one until
+    that entry is recorded deliberately. That is the intended contract — a ceiling is recorded by
+    a person, not by whoever happened to run the gate — but it is a behaviour change and the
+    build has to land the entry in the same diff or it reddens main.
+
+    THE DAMAGE IS NOT HYPOTHETICAL AND THIS SESSION PAID IT. W1-T2755's fix grew
+    `src/lib/isolation.ts` past its ceiling, the ratchet's prescribed remedy wrote
+    `scripts/source-size-baseline.json`, and that path was outside the shard's declared `files:`.
+    The blocked_review fix rung refused to dispatch strike 2 (issue #3843), correctly — "only a
+    human can undo an already-pushed out-of-scope commit". Unblocking it cost a whole extra
+    plan-only PR (#3850) to widen `files:`. The same run also silently recorded
+    `install-hash.ts: 500` and LOWERED `src/run-task.ts` 36500 -> 36000, neither related to that
+    diff; both were caught and reverted by hand only because the tree was inspected before
+    committing. A lane that did not inspect would have shipped another lane's drift under its own
+    task id.
+  rationale: |
+    ONE SHARD, AND THE MEASUREMENT IS WHAT DECIDES IT. The pair reported together — the ratchet's
+    write and a test's write into
+    `test/fixtures/live-plan-writers/changed-tasks/tasks.d/FIXTURE-C2-design-block.yaml` — share a
+    SYMPTOM ("a gate run leaves a tracked tree dirty") and do NOT share a cause, an intent, or a
+    remedy. They are one shard because the durable deliverable is ONE detector that catches the
+    class; they are not one bug.
+
+    THE SECOND INSTANCE IS THE MORE CAREFUL OF THE TWO, which inverts the obvious reading. Read
+    `test/changed-tasks-raw-text.test.ts` around its `live-plan-writers` fixture: the write is
+    deliberate, documented, wrapped in try/finally that restores the original, and the test
+    ALREADY asserts the live `plan/` tree stays clean DURING the run, not merely after
+    ("the window in which the tree is dirty IS the race"). Its fixture cannot be a temp directory
+    at all: `git show <ref>:<relPath>` exits 2 for a path absent at the ref, so `--base` cannot
+    resolve an untracked fixture — the comment says so and names W1-T120 for why an out-of-repo
+    `--plan` is refused besides. MEASURED: running that file leaves `git status --porcelain`
+    EMPTY, fixture restored. So it is not a test with an unannounced side effect; it is a test
+    that already moved its writes OFF `plan/` and guards the tree it most matters for. Its
+    residual exposure is the WINDOW — an abnormally terminated run skips `finally`, and CI shards
+    do get killed here (the W1-T2597 no-summary guard exists because of it) — which is a real but
+    strictly smaller problem than a mutation that is MEANT to persist and reports OK.
+
+    SO THIS SHARD FIXES INSTANCE 1 AND SHIPS THE DETECTOR; it does not rewrite instance 2. The
+    detector passes instance 2 as it stands, because instance 2 restores. If the window is judged
+    unacceptable later, that is its own filing with its own evidence, and it starts from a harder
+    constraint (the fixture must be tracked) than "stop writing".
+
+    WHY A DETECTOR AND NOT JUST THE ONE-LINE FIX. This is the W1-T2790 lesson applied one scope
+    down: a hand-fix of instance 1 leaves nothing that would catch instance 3. The detector states
+    the property directly — running the gate must leave `git status --porcelain` unchanged — so a
+    future step that writes during a gate fails by name instead of being noticed by whoever
+    happens to inspect a tree before committing.
+
+    THE DETECTOR MUST NOT BE VACUOUS. A check that runs the gate in a tree where nothing would
+    drift passes trivially and forever. It has to be falsified in the positive direction: with a
+    deliberately unrecorded source file present, the writing form dirties the tree and the check
+    must FAIL; with the gate switched to the non-writing form, the same setup must leave it clean.
+  acceptance:
+    - claim: "the source-size gate invokes a mode that never writes, so a gate run cannot record a baseline entry no one asked for"
+      proof: "grep: source-size-ratchet\\.mjs --check in package.json"
+    - claim: "src/lib/install-hash.ts carries a recorded ceiling, so switching the gate to the non-writing mode does not redden main on a file W1-T2777 added and nobody recorded"
+      proof: "grep: src/lib/install-hash\\.ts in scripts/source-size-baseline.json"
+    - claim: "a test asserts that running the source-size gate leaves the tracked tree byte-identical, and fails when the gate is switched back to the recording form"
+      proof: "unit test: test/a-gate-run-leaves-the-tracked-tree-clean.test.ts"
+  falsifier: |
+    BOTH DIRECTIONS, and the positive one is the one that matters. Point the new test at the
+    RECORDING form with an unrecorded source file present: it must FAIL, naming the dirtied path —
+    a detector that cannot be made to fail is measuring nothing. Restore the non-writing form: it
+    must pass with the tree byte-identical. Take `git status --porcelain` before and after in the
+    same process rather than trusting the script's exit code, because the exact defect here is a
+    mutation that exits 0.
+
+    SEPARATELY: the claim "--check is not a drop-in" is itself falsifiable and must be re-checked
+    at build time — if `src/lib/install-hash.ts` has gained a recorded ceiling by then, criterion
+    2 is already satisfied on main and the build must say so rather than re-recording it.
