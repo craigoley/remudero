@@ -1,0 +1,103 @@
+- id: W1-T2767
+  title: "fleet-heartbeat.sh publishes one `disk_free_kb`, read from `df -Pk $RMD_ROOT` — a mount of the 126G data disk — so the beat reported ~102GB green for the entire 25h outage in which the 29G OS disk sat at 100%"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: medium
+  files:
+    - scripts/fleet-heartbeat.sh
+    - test/fleet-heartbeat.test.ts
+  origin: "oper#os-disk-full-2026-09-02"
+  plan_refs: ["W1-T496", "W1-T1082", "W1-T2757", "W1-T2758"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE INSTRUMENT WAS HONEST AND ANSWERED THE WRONG QUESTION. At 2026-09-02T03:17:02Z the 29G OS
+    disk hit 100% (`rsyslogd: No space left on device`, `systemd-journald: Failed to create new
+    system journal`); the host ran wedged ~25h and went silent at 09-03T04:55Z. Throughout,
+    `disk_free_kb` read roughly 102GB and was CORRECT: it comes from `df -Pk "$RMD_ROOT"`, and
+    `$RMD_ROOT` is a mount of the 126G data disk. MEASURED device ids on this host: `/` and `/tmp`
+    are dev 66306; `/home/craigoleyagent/rmd-state2` and `/mnt/rmd` are dev 66310. The beat has
+    never once reported free space on the filesystem that fills.
+
+    THREE INSTRUMENTS SHARE THE BLIND SPOT, AND THE PATTERN IS THE FINDING. This beat
+    (`df -Pk $RMD_ROOT`); `readDiskHeadroom` in `run-task.ts`, which reads `config.root` and is
+    explicitly SURFACE-DO-NOT-GATE (W1-T2757); and `host-update.sh --reclaim-only`, which prunes
+    the docker root on dev 66310 and then prints `df -Pk /` from dev 66306 (W1-T2758). Each is
+    individually defensible; together they meant nothing on this host could see the disk that took
+    it down. Filed as three tasks so no one of them absorbs the others.
+
+    WHY THE HOST SIDE MUST PUBLISH THIS RATHER THAN THE DAEMON. The daemon runs INSIDE a container
+    whose `/` is a docker overlay on the data disk (MEASURED: container `/` is dev 48, its `/tmp`
+    likewise, `/home/node/Remudero` is dev 66310). Host root IS reachable from inside — at
+    `/home/node/.claude`, `/home/node/.codex` and `/home/node/.config/remudero`, which read dev
+    66306 with free space byte-identical to the host's `/` (11.95 GiB at the time of measurement) —
+    but ONLY because those binds happen to come from `/home`. That coverage is incidental to an
+    unrelated mount choice: move those binds to the data disk and an in-container enumeration goes
+    silently blind again, reading green with nothing announcing that it stopped holding. The beat
+    runs on the host and names the host's own root directly, so this is the reading that cannot be
+    undermined from outside its own file. The in-container per-device guard is still worth having
+    and is W1-T2757; it is second because it is the weaker of the two.
+
+    THIS HALF SHIPS ON THE MOUNT. `scripts/` is read from the bind-mounted checkout, so this lands
+    the moment it merges — no `acr-build.yml` dispatch, no image rebuild.
+  design: |
+    ADDITIVE, PER-DEVICE, LABELLED. `disk_free_kb` keeps its exact current meaning and value so no
+    existing reader breaks, and gains a labelled twin `state_fs_free_kb` plus a device id. Four new
+    fields: `state_fs_device`, `state_fs_free_kb`, `root_fs_device`, `root_fs_free_kb`, and the
+    aggregate `disk_min_free_kb`.
+
+    DEDUPED BY DEVICE, NOT BY PATH. `df -Pk` column 1 is the backing device, so two paths on one
+    filesystem collapse to one row rather than double-reporting the same headroom. On a host where
+    the state root happens to live on `/`, the two rows name the same device and the minimum is
+    simply that device's headroom.
+
+    THE MINIMUM IS THE ALARM NUMBER, because any one of these filling halts the fleet — and it is
+    taken over READABLE devices only. An unreadable `df` yields `unknown`, never `0`: reporting a
+    filesystem that could not be read as a full one would invert the alarm. This mirrors
+    `readDiskFreeBytes`'s own fail-soft discipline (`undefined`, never a fake 0). A single
+    unreadable device never drags a readable minimum to `unknown`, and that mirror case has its own
+    guard.
+
+    THE REAL `df` LEAF IS EXERCISED. Three guards drive a stubbed `df` to a known two-device answer;
+    a fourth runs with NO stub so the default path actually executes, and asserts falsifiable
+    properties of the real reading (numeric block count, non-zero available, a named device, and a
+    minimum that never exceeds a device it is taken over). A suite where every reading is faked
+    would leave the real leaf uncovered — which is exactly how a reading that measures the wrong
+    device survives a green suite.
+  acceptance:
+    - claim: "the beat publishes root and state filesystem headroom as separate labelled rows naming distinct devices, plus a minimum across them"
+      proof: "unit test: test/fleet-heartbeat.test.ts"
+    - claim: "an unreadable filesystem is published as `unknown` and never as 0 free, and one unreadable device does not erase a readable minimum"
+      proof: "unit test: test/fleet-heartbeat.test.ts"
+    - claim: "the real `df` leaf runs unstubbed and reports this host's actual root filesystem with a numeric, non-zero reading"
+      proof: "unit test: test/fleet-heartbeat.test.ts"
+    - claim: "the pre-existing `disk_free_kb` field keeps its exact meaning and value for existing readers"
+      proof: "unit test: test/fleet-heartbeat.test.ts"
+  note: |
+    ID PROVENANCE: W1-T2767 was reserved and supplied by the operator (NEW-A in the split of the
+    original headroom-guard scope). Both scope-time checks ran: `git ls-remote --heads origin
+    'run-W1-T2767-*'` returned 0 and the anchored merged-PR trailer scan returned `[]`, each
+    qualified by a positive control on a known-merged id (W1-T2749 -> [3773,3771,3768]), because a
+    freshly minted id reads zero against every surface for query-shape reasons alone.
+
+    THE FALSIFIER WAS RUN, WHOLE-FIX. Reverting `scripts/fleet-heartbeat.sh` to origin/main while
+    keeping the tests moved `# fail 0` to `# fail 6` (all six new guards); restoring it returned
+    `# fail 0`, with the 32 pre-existing guards passing in both states. Two of the six are the
+    file's own house-style mutants: one drops the `/` probe, one narrows the minimum back to the
+    state root alone — the exact regression that reported green through September 2.
+
+    CALLER AND CENSUS SWEEP: 11 files — every consumer of `disk_free_kb` plus every suite that
+    walks a population this script joins (`git grep -l fleet-heartbeat -- test/`, which finds
+    census suites that name none of this diff's symbols, CLAUDE.md hazard (j)) — ran together:
+    `# tests 159 # pass 159 # fail 0`.
+
+    MEASURED, NOT INFERRED: the fill instant and the ENOSPC cascade come from the surviving
+    pre-reboot journal (boot -1, 2026-09-01T13:34Z to 2026-09-03T04:55Z); the device ids from
+    `stat -c %d`; the container's mount namespace from `/proc/self/mounts` inside the daemon. A
+    64M tmpfs mounted on a device that is not `config.root` reads 0.06 GiB FAIL while
+    `config.root` reads 102.32 GiB OK — the coverage gap, demonstrated on real hardware rather
+    than argued.
