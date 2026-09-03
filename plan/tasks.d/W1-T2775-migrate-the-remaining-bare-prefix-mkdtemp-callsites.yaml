@@ -1,0 +1,69 @@
+- id: W1-T2775
+  title: "MIGRATE THE REMAINING ~1015 BARE-PREFIX `mkdtempSync` CALLSITES OFF `hooks/mkdtemp-allowlist.txt` — the fail-closed rule from W1-T2773 lands with an allowlist covering nearly the codebase, so the allowlist is permanent-by-default until this filed companion retires it in reviewable tranches"
+  repo: remudero
+  depends_on: [W1-T2773]
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  risk: medium
+  band_meaning: "span"
+  budget_usd: 0.00
+  files: [hooks/mkdtemp-allowlist.txt]
+  origin: "operator-decision#w1-t2773-file-companion-now-2026-09-03"
+  plan_refs: ["W1-T2773"]
+  status: queued
+  attempts: 0
+  note: |
+    `verify: human` because this is a scheduled, operator-paced migration whose direction the
+    shard cannot pick. Each tranche is a manual choice: which files, which order, how many at a
+    time to keep merge conflicts bounded against the open-PR surface. No auto-verifiable proof
+    would capture "the operator picked the right slice this week."
+
+    THREE RULES THIS SHARD PINS AS EVIDENCE, RECORDED HERE SO A FUTURE OPERATOR READS THEM WHEN
+    PICKING UP A TRANCHE: (a) each tranche PR removes an allowlist entry only in the SAME commit
+    that rewrites its callsite to `${RMD_TMP_PREFIX}<prefix>-`; (b) this shard closes only when
+    the allowlist reaches ZERO entries and `retirement: shipped` is written; (c) tranche size is
+    picked against the live open-PR conflict surface at the operator's judgment, not committed
+    here in a number.
+
+    W1-T2773 ships a fail-closed `scripts/mkdtemp-callsite-check.mjs` with `hooks/mkdtemp-allowlist.txt`
+    listing ~1015 pre-existing bare-prefix `mkdtempSync(join(tmpdir(), '<literal>'))` callsites,
+    each with a reason field. New violations are refused by the pre-commit hook and CI; the
+    allowlist entries are parked pending this task's tranches.
+
+    Each tranche of this task removes N allowlist entries in the same PR that rewrites each
+    entry's callsite to use `${RMD_TMP_PREFIX}<prefix>-`. The linter refuses reapproval and CI is
+    the falsifier: any entry removed from the allowlist whose callsite still uses a bare prefix
+    is a red PR.
+  rationale: |
+    THE COMPANION HAS TO BE FILED NOW OR THE ALLOWLIST IS PERMANENT. `hooks/mkdtemp-allowlist.txt`
+    is only defensible if a filed follow-up makes its retirement a scheduled thing rather than a
+    promise. A ~1015-entry allowlist introduced without a companion migration reads as the
+    codebase's actual policy after two months, and the fail-closed rule stops catching what it
+    exists to catch (every "add another exemption" becomes routine).
+
+    WHY THIS ISN'T DECOMPOSED PER FILE. 629 files carry an eligible callsite; 307 of those carry
+    no `rmd-` literal anywhere. A shard-per-file would be 629 tasks the queue cannot see the end
+    of. A single tranche shard with `verify: human` lets the operator size each PR against the
+    real conflict surface every open branch presents.
+
+    WHAT THIS SHARD DELIBERATELY DOES NOT DO. It does not touch the linter, the hook, or the
+    allowlist mechanism — those are W1-T2773's surface. It does not decide the tranche cadence;
+    that's a live operator judgment against the state of open PRs.
+  acceptance:
+    - claim: "the shard records the atomicity rule -- each tranche removes an allowlist entry only in the SAME commit that rewrites its callsite -- so a removed entry whose callsite is still bare reds the linter W1-T2773 ships"
+      proof: "grep: ATOMICITY: an entry is removed only in the SAME commit that rewrites its callsite in hooks/mkdtemp-allowlist.txt"
+    - claim: "the shard records the retirement rule -- the shard closes only when the allowlist reaches zero entries"
+      proof: "grep: RETIREMENT: this task (W1-T2775) closes only when this file reaches ZERO entries in hooks/mkdtemp-allowlist.txt"
+    - claim: "the shard records the operator-paced sizing rule -- tranche size is picked against the live open-PR conflict surface, not committed here"
+      proof: "grep: TRANCHE SIZE: picked against the live open-PR conflict surface, not committed here in hooks/mkdtemp-allowlist.txt"
+  falsifier: |
+    The rules above are recorded HERE so a future reader picking up this shard reads them by
+    default. Removing "removes an allowlist entry only in the SAME commit that rewrites its
+    callsite" from the note reds proof 1; removing "the allowlist reaches ZERO entries" reds
+    proof 2; removing "tranche size is picked against the live open-PR conflict surface" reds
+    proof 3.
+
+    The RUNTIME falsifier lives in W1-T2773's linter: a tranche PR that removes an allowlist
+    entry without migrating its callsite is refused by `hooks/pre-commit` and the CI job
+    W1-T2773 wires. No new runtime test is added here.
