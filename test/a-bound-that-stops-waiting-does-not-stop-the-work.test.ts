@@ -30,7 +30,7 @@ const NONE_MERGED: MergedSet = () => false;
 const REAL_SLEEP: DaemonDeps["sleep"] = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function fixturePlan(): Plan {
-  const dir = mkdtempSync(join(tmpdir(), "sweep-reentry-"));
+  const dir = mkdtempSync(join(tmpdir(), "rmd-sweep-reentry-"));
   const f = join(dir, "tasks.yaml");
   writeFileSync(
     f,
