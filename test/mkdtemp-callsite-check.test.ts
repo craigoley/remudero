@@ -275,7 +275,7 @@ test("W1-T2773 main: a variable-prefix callsite fails closed — the rule cannot
   assert.ok(/<variable-prefix>|scripts\/varish\.mjs/.test(err.join("\n")));
 });
 
-test("W1-T2773 main: an allowlisted `<file>:<line>` bypasses the rule (the migration parking mechanism)", () => {
+test("W1-T2773/W1-T2786 main: an allowlisted `<file><TAB><observed-prefix>` bypasses the rule", () => {
   const root = makeFixtureRepo({
     "test/bare.test.ts": [
       "import { mkdtempSync } from 'node:fs';",
@@ -283,7 +283,7 @@ test("W1-T2773 main: an allowlisted `<file>:<line>` bypasses the rule (the migra
     ].join("\n"),
     "hooks/mkdtemp-allowlist.txt": [
       "# pre-existing site, migrated under W1-T2775",
-      "test/bare.test.ts:2",
+      "test/bare.test.ts\tsweep-reentry-",
     ].join("\n"),
   });
   const out: string[] = [], err: string[] = [];
@@ -322,6 +322,7 @@ test("W1-T2773 formatRefusal: the message text NAMES THE FIX, not just the rule"
   assert.ok(msg.includes("'foo-'"), "must quote the prefix the human wrote");
   assert.ok(msg.includes("RMD_TMP_PREFIX"), "must name the constant to use");
   assert.ok(msg.includes(ALLOWLIST_PATH), "must name the allowlist as the escape hatch");
+  assert.ok(msg.includes("test/x.test.ts\\tfoo-"), "must print the exact stable allowlist key");
   assert.ok(msg.includes("sweepStaleTempDirs"), "must name why the current form fails");
   // Read the message aloud: "prefix 'foo-' will not be reaped by ... — use ..."
   assert.ok(/will not be reaped by/.test(msg));

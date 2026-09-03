@@ -22,7 +22,7 @@
 // Accepted:
 //   - `join(tmpdir(), "rmd-*")`                  — a literal beginning with `rmd-`
 //   - `join(tmpdir(), \`${RMD_TMP_PREFIX}foo-\`)` — the sanctioned constant
-//   - the callsite's `<file>:<line>` is on `hooks/mkdtemp-allowlist.txt`
+//   - the callsite's `<file><TAB><observed-prefix>` is on `hooks/mkdtemp-allowlist.txt`
 // Refused: anything else, INCLUDING a variable prefix — the rule reads the AST, not the
 // runtime value, so a variable prefix cannot be statically proven reapable and fails closed.
 //
@@ -60,6 +60,9 @@ export const SANCTIONED_PREFIX_IDENTS = new Set(["RMD_TMP_PREFIX"]);
  *  that ships with ~1015 pre-existing exemptions; see W1-T2775 for the tranche migration
  *  that retires it. */
 export const ALLOWLIST_PATH = "hooks/mkdtemp-allowlist.txt";
+
+/** Stable identity for a refusable callsite whose prefix expression cannot be resolved. */
+export const UNRESOLVABLE_PREFIX = "<unresolvable>";
 
 // ── expression scanning primitives ───────────────────────────────────────────────────────────
 // These are intentionally the same shape as scripts/tracked-source-write-check.mjs — a small
@@ -190,6 +193,33 @@ export function classifyMkdtempFirstArg(expr) {
   return "unresolvable";
 }
 
+/**
+ * Resolve the prefix text that identifies one allowlist exemption. This intentionally consumes
+ * the same full first-argument expression as {@link classifyMkdtempFirstArg}: identity comes from
+ * the observed callsite, never from a stale allowlist row or its former line number.
+ */
+export function extractMkdtempPrefix(expr) {
+  const e = expr.trim();
+  const m = /^join\s*\(/.exec(e);
+  if (!m) return UNRESOLVABLE_PREFIX;
+  const openIdx = m.index + m[0].length - 1;
+  const closeIdx = matchClose(e, openIdx);
+  if (closeIdx === -1) return UNRESOLVABLE_PREFIX;
+  const args = splitTopLevelArgs(e.slice(openIdx + 1, closeIdx));
+  if (args.length < 2 || !/^tmpdir\s*\(\s*\)\s*$/.test(args[0])) return UNRESOLVABLE_PREFIX;
+  const prefix = args[1].trim();
+  const quote = prefix[0];
+  if ((quote === '"' || quote === "'" || quote === "`") && prefix.at(-1) === quote) {
+    return prefix.slice(1, -1);
+  }
+  return UNRESOLVABLE_PREFIX;
+}
+
+/** The durable allowlist identity. A tab separates two independently meaningful fields. */
+export function allowlistKey(file, arg) {
+  return `${file}\t${extractMkdtempPrefix(arg)}`;
+}
+
 // ── the scan ──────────────────────────────────────────────────────────────────────────────────
 
 const MKDTEMP_RE = /\bmkdtempSync\s*\(/g;
@@ -254,7 +284,7 @@ export function scanFile(text) {
   return rows;
 }
 
-/** Load the on-disk allowlist as a Set of `<repo-relative-path>:<line>` entries. Blank lines
+/** Load the on-disk allowlist as a Set of `<repo-relative-path><TAB><observed-prefix>` entries. Blank lines
  *  and lines starting with `#` are comments. Every entry must carry a reason (a `#` suffix on
  *  the same line, or an immediately preceding `#`-comment line — checked separately by test).
  *  A missing file is treated as empty (bootstrap case), never as an error. */
@@ -264,7 +294,8 @@ export function loadAllowlist(repoRoot) {
   const text = readFileSync(p, "utf8");
   const out = new Set();
   for (const raw of text.split("\n")) {
-    const line = raw.replace(/#.*$/, "").trim();
+    if (raw.trimStart().startsWith("#")) continue;
+    const line = raw.replace(/\s+#.*$/, "").trim();
     if (!line) continue;
     out.add(line);
   }
@@ -274,8 +305,8 @@ export function loadAllowlist(repoRoot) {
 /** Refuse-worthy classifications: anything not sanctioned or explicitly out of scope. */
 const REFUSED = new Set(["bare-literal", "unresolvable"]);
 
-/** Scan every tracked `.ts`/`.mjs` under src/, scripts/, test/ and return {refused, scanned}. */
-export function scanRepo(repoRoot) {
+/** Observe every refusable callsite without consulting the allowlist. */
+export function collectRefusableCallsites(repoRoot) {
   const res = spawnSync(
     "git",
     ["-C", repoRoot, "ls-files", "src/", "scripts/", "test/"],
@@ -285,8 +316,7 @@ export function scanRepo(repoRoot) {
     throw new Error(`mkdtemp-callsite-check: git ls-files failed (status ${res.status}): ${res.stderr ?? ""}`);
   }
   const files = res.stdout.split("\n").filter((f) => /\.(ts|mjs)$/.test(f));
-  const allowed = loadAllowlist(repoRoot);
-  const refused = [];
+  const rows = [];
   let scanned = 0;
   for (const f of files) {
     let text;
@@ -295,25 +325,31 @@ export function scanRepo(repoRoot) {
     scanned++;
     for (const row of scanFile(text)) {
       if (!REFUSED.has(row.classification)) continue;
-      const key = `${f}:${row.line}`;
-      if (allowed.has(key)) continue;
-      refused.push({ file: f, line: row.line, arg: row.arg, classification: row.classification });
+      rows.push({ file: f, line: row.line, arg: row.arg, classification: row.classification });
     }
   }
-  return { refused, scanned, allowedCount: allowed.size };
+  return { rows, scanned };
+}
+
+/** Scan every tracked `.ts`/`.mjs` under src/, scripts/, test/ and apply stable exemptions. */
+export function scanRepo(repoRoot) {
+  const observed = collectRefusableCallsites(repoRoot);
+  const allowed = loadAllowlist(repoRoot);
+  const refused = observed.rows.filter((row) => !allowed.has(allowlistKey(row.file, row.arg)));
+  return { refused, scanned: observed.scanned, allowedCount: allowed.size };
 }
 
 /** Format one refused row as the exact message the operator directive names — audience is a
  *  human who authored the bare form an hour ago and does not yet know this repo has a
  *  reapability discipline. Names the fix, not the rule. */
 export function formatRefusal({ file, line, arg }) {
-  // Extract a short display form of the prefix for the message: the literal or template body.
-  const litMatch = /^join\s*\(\s*tmpdir\s*\(\s*\)\s*,\s*(['"`])([^'"`]{0,60})\1/.exec(arg);
-  const display = litMatch ? litMatch[2] : "<variable-prefix>";
+  const prefix = extractMkdtempPrefix(arg);
+  const display = prefix.slice(0, 60);
+  const serializedKey = JSON.stringify(allowlistKey(file, arg)).slice(1, -1);
   return (
     `${file}:${line}: mkdtemp prefix '${display}' will not be reaped by src/lib/tmp.ts's ` +
     `sweepStaleTempDirs — use \`\${RMD_TMP_PREFIX}${display.replace(/^rmd-/, "")}\` or add ` +
-    `\`${file}:${line}\` to ${ALLOWLIST_PATH} with a reason.`
+    `\`${serializedKey}\` to ${ALLOWLIST_PATH} with a reason.`
   );
 }
 

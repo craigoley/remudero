@@ -89,3 +89,18 @@
   assertion: 'grep -q "archiveCount" src/lib/ledger-grep.ts'
   src: measured 2026-08-23 — 126-line live ledger, one distinct step, zero archives
   cited: "2026-08-23"
+
+- id: position-is-presentation-not-identity
+  subsystem: evidence
+  lifecycle: active
+  files: [scripts, hooks, test, plan/tasks.d]
+  fact: >-
+    A source position is presentation, not durable identity: keying an exemption or assertion on
+    `<file>:<line>` makes any unrelated insertion above it invalidate the side table. Derive keys
+    from the observed semantic content instead (for the mkdtemp rule, file plus observed prefix),
+    and regenerate migrations from the scanner's live observations rather than translating stale
+    positions. Measured in W1-T2786: 970 live refusable callsites became 911 stable file/prefix
+    identities, while a one-line insertion no longer changed the applicable exemption.
+  assertion: 'grep -q "allowlistKey(row.file, row.arg)" scripts/mkdtemp-callsite-check.mjs'
+  src: W1-T2786
+  cited: "2026-09-03"

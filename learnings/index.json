@@ -150,11 +150,13 @@
         "grep-anchor-must-fit-one-line",
         "lazy-config-in-ci",
         "live-proof-runs-the-checked-out-code",
+        "position-is-presentation-not-identity",
         "scan-both-quote-styles",
         "task-linting-is-mostly-deterministic"
       ],
       "globs": [
         "bin/rmd",
+        "hooks",
         "learnings",
         "plan/tasks.d",
         "plan/tasks.yaml",
