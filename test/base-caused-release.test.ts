@@ -359,13 +359,15 @@ function buildRealEffects(
   );
 }
 
-test("W1-T2620 GUARDED SITE: buildSweepEffects wires readMainTip and releaseBaseCausedStandDown — both callable, not undefined", () => {
+test("W1-T2620/W1-T2789 GUARDED SITE: buildSweepEffects wires the base-release readers and action — all callable, not undefined", () => {
   const effects = buildRealEffects(
     () => "unused",
     async () => ({ sha: TIP_B }),
   );
   assert.equal(typeof effects.readMainTip, "function", "readMainTip must be reachable from the real gateway builder");
   assert.equal(typeof effects.releaseBaseCausedStandDown, "function", "releaseBaseCausedStandDown must be reachable from the real gateway builder");
+  assert.equal(typeof effects.readRedBaseRefreshFacts, "function", "stale-base facts must be reachable from the real gateway builder");
+  assert.equal(typeof effects.updateBranch, "function", "stale-base release must reuse the real update-branch action");
 });
 
 test("W1-T2620 GUARDED SITE: readMainTip's real implementation returns the sha the REST commit read carries", async () => {

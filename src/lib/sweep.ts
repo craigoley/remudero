@@ -300,6 +300,85 @@ export interface CiFailure {
   annotationFallback?: CiAnnotationFallback;
 }
 
+/**
+ * W1-T2671/W1-T2789 — the two independently-observed facts required before a red branch may be
+ * refreshed from its base. Optional fields are an honest unreadable result, never zero/empty.
+ */
+export interface RedBaseRefreshFacts {
+  behindBy?: number;
+  baseChangedFiles?: string[];
+}
+
+export interface RedBaseRefreshDecision {
+  refresh: boolean;
+  behindBy?: number;
+  failingTestFiles: string[];
+  failingSourceFiles: string[];
+  matchingBaseFiles: string[];
+}
+
+// Locate the distinctive suffix with no nested repetition, then recover its ordinary path prefix
+// by walking left. Keeping prefix discovery out of the regexp makes runtime linear even when a
+// hostile or corrupted CI log contains thousands of path-like delimiters.
+const CI_TEST_PATH_SUFFIX = /\b(?:test|tests|__tests__)[\\/][A-Za-z0-9._@%+~\\/-]+\.(?:[cm]?[jt]sx?)/gi;
+const CI_PATH_PREFIX_CHAR = /[A-Za-z0-9._:@%+~\\/-]/;
+
+/** Extract only test-file paths from the CI evidence the fix rung receives. */
+export function failingTestFilesFromCiFailures(failures: readonly CiFailure[]): string[] {
+  const paths = new Set<string>();
+  for (const failure of failures) {
+    for (const text of [failure.name, failure.logTail]) {
+      for (const match of text.matchAll(CI_TEST_PATH_SUFFIX)) {
+        let start = match.index;
+        while (start > 0 && CI_PATH_PREFIX_CHAR.test(text[start - 1])) start--;
+        const end = match.index + match[0].length;
+        paths.add(text.slice(start, end).replace(/^file:\/\//, "").replaceAll("\\", "/"));
+      }
+    }
+  }
+  return [...paths];
+}
+
+/** Extract source paths only from the existing, distinctive diff-coverage report. */
+export function failingSourceFilesFromCiFailures(failures: readonly CiFailure[]): string[] {
+  const report = diffCoverageReport(failures);
+  if (!report) return [];
+  return [...new Set(report.uncovered.map((pathLine) => pathLine.replace(/:\d+$/, "").replaceAll("\\", "/")))];
+}
+
+/** Exact repository path, or that complete path below an observed checkout prefix. */
+function observedPathMatchesRepositoryPath(observedPath: string, repositoryPath: string): boolean {
+  return observedPath === repositoryPath || observedPath.endsWith(`/${repositoryPath}`);
+}
+
+/**
+ * W1-T2671/W1-T2789 — the ONE pure exact-path decision shared by the fix rung and sweep-level
+ * pre-exhaustion release. Neither caller may reinterpret a weak behind/path signal differently.
+ */
+export function decideRedBaseRefresh(
+  failures: readonly CiFailure[],
+  facts: RedBaseRefreshFacts,
+): RedBaseRefreshDecision {
+  const failingTestFiles = failingTestFilesFromCiFailures(failures);
+  const failingSourceFiles = failingSourceFilesFromCiFailures(failures);
+  const baseChangedFiles = facts.baseChangedFiles;
+  const matchingBaseFiles =
+    facts.behindBy !== undefined && facts.behindBy > 0 && baseChangedFiles !== undefined
+      ? baseChangedFiles.filter((baseFile) =>
+          [...failingTestFiles, ...failingSourceFiles].some((failureFile) =>
+            observedPathMatchesRepositoryPath(failureFile, baseFile),
+          ),
+        )
+      : [];
+  return {
+    refresh: matchingBaseFiles.length > 0,
+    behindBy: facts.behindBy,
+    failingTestFiles,
+    failingSourceFiles,
+    matchingBaseFiles,
+  };
+}
+
 /** The sources {@link CiFailure.logTail} can come from, in preference order. */
 export type CiTailSource = "log" | "annotations";
 
@@ -2551,6 +2630,62 @@ export function selectBaseCausedRelease(
   return oldestActivityFirst(eligible, now);
 }
 
+export interface StaleBaseReleaseTarget {
+  pr: OpenPrView;
+  decision: RedBaseRefreshDecision;
+  mainTipSha: string;
+}
+
+/** Successful queue-maintenance releases, keyed on every input the write depended on. */
+export function staleBaseReleaseKeysFromLedger(lines: readonly Record<string, unknown>[]): Set<string> {
+  const keys = new Set<string>();
+  for (const line of lines) {
+    // A successful red-base refresh is still the existing update-branch action. Reuse its
+    // decision-relevant, rotation-safe marker; `main_tip_sha` distinguishes this lane from the
+    // stale-gate updater, whose rows do not carry that input.
+    if (line.step !== "sweep.update_branch.updated") continue;
+    if (typeof line.pr_number !== "number" || typeof line.head_sha !== "string" || typeof line.main_tip_sha !== "string") continue;
+    keys.add(`${line.pr_number}@${line.head_sha}@${line.main_tip_sha}`);
+  }
+  return keys;
+}
+
+/**
+ * W1-T2789 — choose at most one strike-exhausted, checks-red PR whose exact failing path changed
+ * on a positively newer base. Candidates are inspected oldest-first, and only a successful prior
+ * release of this exact `(PR, head, main tip)` suppresses it. An unreadable comparison abstains.
+ */
+export async function selectStaleBaseRelease(
+  prs: readonly OpenPrView[],
+  policy: SweepPolicy,
+  now: number,
+  mainTipSha: string | undefined,
+  priorReleaseKeys: ReadonlySet<string>,
+  readFacts: ((pr: OpenPrView) => RedBaseRefreshFacts | Promise<RedBaseRefreshFacts>) | undefined,
+  onReadError: (pr: OpenPrView, error: unknown) => void = () => {},
+): Promise<StaleBaseReleaseTarget | undefined> {
+  if (mainTipSha === undefined || readFacts === undefined) return undefined;
+  const remaining = prs.filter((pr) => {
+    if (!isBlockedCi(pr) || (pr.ciFailures?.length ?? 0) === 0) return false;
+    if (deriveDisposition(pr, policy, now).disposition !== "blocked-ambiguous") return false;
+    if (pr.priorStrikes < fixCeilingInForce(pr, policy.strikeCap, policy.clarify)) return false;
+    return !priorReleaseKeys.has(`${pr.prNumber}@${pr.headSha}@${mainTipSha}`);
+  });
+  while (remaining.length > 0) {
+    const candidate = oldestActivityFirst(remaining, now)!;
+    remaining.splice(remaining.indexOf(candidate), 1);
+    try {
+      const decision = decideRedBaseRefresh(candidate.ciFailures ?? [], await readFacts(candidate));
+      if (decision.refresh) return { pr: candidate, decision, mainTipSha };
+    } catch (error) {
+      // Deliberate fail-closed read: attribute the outage, skip this candidate, and preserve the
+      // ordinary blocked disposition. A missing compare must never manufacture update authority.
+      onReadError(candidate, error);
+    }
+  }
+  return undefined;
+}
+
 /**
  * The four named "why is this actually blocked" states an escalation must distinguish
  * (W1-T186) — never a single overloaded `checksState`/`reviewState` pair. Exactly one applies
@@ -4606,6 +4741,8 @@ export function terminalStateReason(state: string | undefined): string | undefin
 export interface LiveStateResult {
   ok: boolean;
   state?: string;
+  /** Current PR head from the same fresh read, when the caller needs input-pinned mutation. */
+  headSha?: string;
 }
 
 /**
@@ -4864,6 +5001,12 @@ export interface SweepDeps {
    * fires ONLY on a positive, freshly-observed terminal reading.
    */
   readLiveState?: (pr: OpenPrView) => LiveStateResult | Promise<LiveStateResult>;
+  /**
+   * W1-T2789 — fresh reversed-compare evidence for a checks-red PR that the strike table would
+   * otherwise make terminal. Optional/unreadable means the ordinary disposition is preserved.
+   * The decision itself is {@link decideRedBaseRefresh}, shared verbatim with the fix rung.
+   */
+  readRedBaseRefreshFacts?: (pr: OpenPrView) => RedBaseRefreshFacts | Promise<RedBaseRefreshFacts>;
   /**
    * W1-T254 (the #707 fix's LIGHT-SWEEP restriction): when supplied, gates
    * which disposition's action is allowed to actually fire THIS pass — a
@@ -5994,6 +6137,25 @@ export async function runSweep(
     mainTipSha === undefined
       ? undefined
       : selectBaseCausedRelease(openPrs, mainTipSha, lastBaseCausedTipFromLedger(ledgerLines), now);
+  // W1-T2789 — unlike W1-T2620's cohort-wide release above, this is exact-path evidence for the
+  // exhausted red population the disposition table would otherwise escalate before runFixRung
+  // can reach its W1-T2671 pre-strike check. One oldest eligible target is selected up front;
+  // the write still rechecks live state/head at action time below.
+  const staleBaseReleaseTarget = await selectStaleBaseRelease(
+    openPrs,
+    policy,
+    now,
+    mainTipSha,
+    staleBaseReleaseKeysFromLedger(ledgerLines),
+    deps.updateBranch && deps.readLiveState && (deps.actionable?.("blocked-ambiguous") ?? true)
+      ? deps.readRedBaseRefreshFacts
+      : undefined,
+    (pr, error) => log("sweep.red_base_refresh.read_error", {
+      pr_number: pr.prNumber,
+      head_sha: pr.headSha,
+      error: String((error as Error)?.message ?? error),
+    }),
+  );
   // `prIndex` -> this PASS's own streak (+ whether the one-time repeat escalation fires this
   // pass), populated in the per-PR walk below and read back by `finalizeDisposition` — a Map
   // keyed by index rather than two new positional parameters threaded through every one of that
@@ -6041,6 +6203,9 @@ export async function runSweep(
   // "nothing to do" from "something threw" at a glance — see renderSweepSummary.
   let actionsFailed = 0;
   let noneCount = 0;
+  // W1-T2789: once this lane has attempted an update, the older armed/stale-gate update lane at
+  // the end of the pass must not issue a second request against the same stale snapshot.
+  let staleBaseAttemptedPrNumber: number | undefined;
 
   // ── W1-T473/W1-T513 — REVIEW CONCURRENCY BUDGET STATE ──────────────────────
   // `claimedReviewKeys` is the REAL mutual exclusion concurrency needs. A pool worker consults
@@ -6586,6 +6751,15 @@ export async function runSweep(
         alreadyDone = false;
     }
 
+    // W1-T2789: a prior blocked-ambiguous escalation is not a successful base refresh. The
+    // exact-path release has its own `(PR, head, main tip)` success key, so it must remain
+    // retryable after a read/write failure even when the ordinary escalation action was already
+    // recorded for this head.
+    if (staleBaseReleaseTarget?.pr.prNumber === pr.prNumber) {
+      alreadyDone = false;
+      dedupStandDownReason = undefined;
+    }
+
     let acted = !alreadyDone && !deps.dryRun;
     // The dep-review lane's decision for THIS pass (dep-review disposition only)
     // — ledgered so priorActionsFromLedger can tell terminal from hold.
@@ -6965,6 +7139,84 @@ export async function runSweep(
               await deps.close(pr, reason);
               break;
             case "blocked-ambiguous":
+              // W1-T2789 — an exhausted checks-red PR cannot reach runFixRung's W1-T2671
+              // pre-strike base-gap check: the disposition table routes it here first. When the
+              // shared exact-path decision selected THIS oldest candidate, perform the same
+              // update-branch write as queue maintenance before escalating. The ordinary
+              // blocked-ambiguous disposition remains the recorded state, and `acted` remains
+              // false so this zero-strike release never seeds the escalation/fix dedup.
+              if (staleBaseReleaseTarget?.pr.prNumber === pr.prNumber) {
+                const live = await deps.readLiveState?.(pr);
+                if (live?.ok !== true) {
+                  log("sweep.red_base_refresh.live_indeterminate", {
+                    pr_number: pr.prNumber,
+                    head_sha: pr.headSha,
+                  });
+                } else {
+                  const terminal = terminalStateReason(live.state);
+                  if (terminal) {
+                    acted = false;
+                    standDownReason = `stale-base release refused: ${terminal}`;
+                    break;
+                  }
+                  if (live.headSha !== pr.headSha) {
+                    acted = false;
+                    standDownReason = live.headSha
+                      ? `stale-base release refused: head moved from ${pr.headSha} to ${live.headSha}`
+                      : "stale-base release refused: fresh head sha was unreadable";
+                    break;
+                  }
+                  const decision = staleBaseReleaseTarget.decision;
+                  appendLine(deps.ledgerPath, {
+                    run_id: deps.runId,
+                    task_id: pr.taskId ?? "SWEEP",
+                    step: "sweep.red_base_refresh.attempted",
+                    pr_number: pr.prNumber,
+                    pr_url: pr.prUrl,
+                    head_sha: pr.headSha,
+                    main_tip_sha: staleBaseReleaseTarget.mainTipSha,
+                    behind_by: decision.behindBy,
+                    matching_base_files: decision.matchingBaseFiles,
+                  });
+                  staleBaseAttemptedPrNumber = pr.prNumber;
+                  try {
+                    const outcome = await deps.updateBranch!(pr);
+                    appendLine(deps.ledgerPath, {
+                      run_id: deps.runId,
+                      task_id: pr.taskId ?? "SWEEP",
+                      step: outcome === "updated" ? "sweep.update_branch.updated" : `sweep.red_base_refresh.${outcome}`,
+                      release_kind: "red-base",
+                      pr_number: pr.prNumber,
+                      pr_url: pr.prUrl,
+                      head_sha: pr.headSha,
+                      main_tip_sha: staleBaseReleaseTarget.mainTipSha,
+                      behind_by: decision.behindBy,
+                      matching_base_files: decision.matchingBaseFiles,
+                    });
+                    if (outcome === "updated") {
+                      acted = false;
+                      standDownReason =
+                        `base refresh requested before strike-cap escalation: head was ${decision.behindBy} commit(s) behind ` +
+                        `and newer main changed ${decision.matchingBaseFiles.join(", ")}; no strike spent`;
+                      break;
+                    }
+                  } catch (error) {
+                    appendLine(deps.ledgerPath, {
+                      run_id: deps.runId,
+                      task_id: pr.taskId ?? "SWEEP",
+                      step: "sweep.red_base_refresh.error",
+                      pr_number: pr.prNumber,
+                      pr_url: pr.prUrl,
+                      head_sha: pr.headSha,
+                      main_tip_sha: staleBaseReleaseTarget.mainTipSha,
+                      error: String((error as Error)?.message ?? error),
+                    });
+                  }
+                }
+                // A read/write failure remains visible above but never poisons this input: no
+                // successful release row exists, so the next pass may retry under the existing
+                // GitHub pacer. Preserve today's escalation for this pass below.
+              }
               // W1-T196: stand down instead of escalating `task: UNKNOWN` — see
               // `unattributableFiling`'s doc comment above. No `deps.escalate`
               // call, no issue, but NEVER silent: the stand-down reason names
@@ -7420,7 +7672,7 @@ export async function runSweep(
   // pass (design v). `dryRun` leaves no trace, mirroring every other action in this module.
   if (!deps.dryRun && deps.updateBranch) {
     const target = selectUpdateBranchTarget(
-      openPrs,
+      openPrs.filter((pr) => pr.prNumber !== staleBaseAttemptedPrNumber),
       now,
       deps.inFlightTaskIds ?? new Set(),
       deps.staleGateWorkflowsByPr ?? new Map(),

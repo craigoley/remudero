@@ -732,6 +732,9 @@ import {
   type RequiredContextsRead,} from "./lib/status.js";
 import {
   DEFAULT_SWEEP_POLICY,
+  decideRedBaseRefresh,
+  failingSourceFilesFromCiFailures,
+  failingTestFilesFromCiFailures,
   actionableGateFailuresFromReasons,
   armOutcomeArmed,
   checkCostGovernor,
@@ -790,6 +793,7 @@ import {
   type RollupCheckEntry,
   type PostFixReverificationSummary,
   type QueueGovernorResult,
+  type RedBaseRefreshFacts,
   type PostReviewStallVerdict,
   type RepairFilingCapture,
   type StrikeAttempt,
@@ -804,6 +808,14 @@ import {
   type ArmAttemptOutcome,
   type ArmOutcomeName,
 } from "./lib/sweep.js";
+// Compatibility exports: W1-T2789 moved the shared exact-path decision into the sweep leaf so
+// the sweep and fix rung cannot disagree, while existing callers of run-task.ts keep their API.
+export {
+  decideRedBaseRefresh,
+  failingSourceFilesFromCiFailures,
+  failingTestFilesFromCiFailures,
+} from "./lib/sweep.js";
+export type { RedBaseRefreshDecision, RedBaseRefreshFacts } from "./lib/sweep.js";
 import { readCiGateRequiredChecks } from "./lib/ci-gate-required.js";
 import { applyCorrection } from "./lib/correct.js";
 import {
@@ -6334,8 +6346,10 @@ function ghLiveState(prUrl: string): LiveStateResult {
   const target = prUrlTarget(prUrl);
   if (!target) return { ok: false };
   try {
-    const state = liveStateFromRest(target.owner, target.repo, target.number, ghJson);
-    return state ? { ok: true, state } : { ok: false };
+    const row = ghJson(singlePrRestArgs(target.owner, target.repo, target.number)) as RestPullRow;
+    const state = prStateFromRest(row);
+    const headSha = row.head?.sha;
+    return state ? { ok: true, state, ...(typeof headSha === "string" ? { headSha } : {}) } : { ok: false };
   } catch {
     return { ok: false };
   }
@@ -7289,91 +7303,6 @@ export function ghUpdateBranch(
  * Both fields are optional on purpose. An unreadable comparison must fail open to the existing
  * fix rung, not invent either a stale branch or a matching file.
  */
-export interface RedBaseRefreshFacts {
-  behindBy?: number;
-  baseChangedFiles?: string[];
-}
-
-export interface RedBaseRefreshDecision {
-  refresh: boolean;
-  behindBy?: number;
-  failingTestFiles: string[];
-  failingSourceFiles: string[];
-  matchingBaseFiles: string[];
-}
-
-// Locate the distinctive suffix with no nested repetition, then recover its ordinary path prefix
-// by walking left. Keeping prefix discovery out of the regexp makes runtime linear even when a
-// hostile or corrupted CI log contains thousands of path-like delimiters.
-const CI_TEST_PATH_SUFFIX = /\b(?:test|tests|__tests__)[\\/][A-Za-z0-9._@%+~\\/-]+\.(?:[cm]?[jt]sx?)/gi;
-const CI_PATH_PREFIX_CHAR = /[A-Za-z0-9._:@%+~\\/-]/;
-
-/**
- * Extract only test-file paths from the failure evidence the ci-log worker would otherwise see.
- * Absolute paths are retained: {@link decideRedBaseRefresh} suffix-matches them against GitHub's
- * repository-relative file list, so no checkout-root guess enters the decision.
- */
-export function failingTestFilesFromCiFailures(failures: readonly CiFailure[]): string[] {
-  const paths = new Set<string>();
-  for (const failure of failures) {
-    for (const text of [failure.name, failure.logTail]) {
-      for (const match of text.matchAll(CI_TEST_PATH_SUFFIX)) {
-        let start = match.index;
-        while (start > 0 && CI_PATH_PREFIX_CHAR.test(text[start - 1])) start--;
-        const end = match.index + match[0].length;
-        paths.add(text.slice(start, end).replace(/^file:\/\//, "").replaceAll("\\", "/"));
-      }
-    }
-  }
-  return [...paths];
-}
-
-/**
- * Extract repository source paths only from the existing, distinctive diff-coverage report.
- * `diffCoverageReport` owns recognition of a genuine report and its `path:line` rows; this
- * adapter removes only the terminal line number and normalizes separators for comparison with
- * GitHub's repository-relative file list.
- */
-export function failingSourceFilesFromCiFailures(failures: readonly CiFailure[]): string[] {
-  const report = diffCoverageReport(failures);
-  if (!report) return [];
-  return [...new Set(report.uncovered.map((pathLine) => pathLine.replace(/:\d+$/, "").replaceAll("\\", "/")))];
-}
-
-/** Exact repository path, or that complete path below an observed checkout prefix. */
-function observedPathMatchesRepositoryPath(observedPath: string, repositoryPath: string): boolean {
-  return observedPath === repositoryPath || observedPath.endsWith(`/${repositoryPath}`);
-}
-
-/**
- * The pre-strike decision, kept pure so both positive predicates have paired controls. A file
- * matches only when GitHub's repository-relative base-gap path is the same as, or a complete
- * suffix of, an observed CI path. Basename-only matching is deliberately forbidden.
- */
-export function decideRedBaseRefresh(
-  failures: readonly CiFailure[],
-  facts: RedBaseRefreshFacts,
-): RedBaseRefreshDecision {
-  const failingTestFiles = failingTestFilesFromCiFailures(failures);
-  const failingSourceFiles = failingSourceFilesFromCiFailures(failures);
-  const baseChangedFiles = facts.baseChangedFiles;
-  const matchingBaseFiles =
-    facts.behindBy !== undefined && facts.behindBy > 0 && baseChangedFiles !== undefined
-      ? baseChangedFiles.filter((baseFile) =>
-          [...failingTestFiles, ...failingSourceFiles].some((failureFile) =>
-            observedPathMatchesRepositoryPath(failureFile, baseFile),
-          ),
-        )
-      : [];
-  return {
-    refresh: matchingBaseFiles.length > 0,
-    behindBy: facts.behindBy,
-    failingTestFiles,
-    failingSourceFiles,
-    matchingBaseFiles,
-  };
-}
-
 /**
  * W1-T2671's REST read. GitHub documents compare as `git log BASE..HEAD` plus the files changed
  * between those commits. Reversing the ordinary PR comparison (`headSha...baseRef`) therefore
@@ -28079,6 +28008,7 @@ export function buildSweepEffects(
   | "dispatchFix"
   | "escalate"
   | "readLiveState"
+  | "readRedBaseRefreshFacts"
   | "depReview"
   | "postReview"
   | "repushAbsent"
@@ -28872,6 +28802,10 @@ export function buildSweepEffects(
     // blocked-fixable disposition actually spends a fix-rung strike — see
     // `SweepDeps.readLiveState`'s own doc for the fail-open contract.
     readLiveState: (pr) => ghLiveState(pr.prUrl),
+
+    // W1-T2789 — the sweep-level consumer of the SAME reversed-compare reader and exact-path
+    // decision runFixRung already uses. This is deliberately not exposed through Serve.
+    readRedBaseRefreshFacts: (pr) => redBaseRefreshFactsFromRest(owner, repo, pr.prNumber),
 
     // W1-T528 — the action half of W1-T520. `runSweep` calls this AT MOST ONCE per pass, on the
     // single PR `selectUpdateBranchTarget` chose — see `SweepDeps.updateBranch`'s own doc.
