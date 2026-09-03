@@ -482,6 +482,7 @@ import {
   runMeasurementCadenceReport,
   runVerbCensus,
   type MeasurementCadenceDecision,
+  type MeasurementCadenceReportOpts,
   type MeasurementCadenceRunResult,
 } from "./lib/measurement-cadence.js";
 import {
@@ -18961,6 +18962,80 @@ export function buildGithubPostureDaemonHooks(deps: {
   return { checkGithubPosture: () => check() };
 }
 
+/** {@link defaultProofDebtCadenceInput}'s injectable seam — tests only; production always takes
+ *  the module's own `loadPlan`/`defaultMergeEvidenceLog`/`resolveNameFilteredCandidates`. */
+export interface ProofDebtCadenceInputDeps {
+  loadPlan?: typeof loadPlan;
+  readMergeEvidenceLog?: typeof defaultMergeEvidenceLog;
+  resolveNameFilteredCandidates?: (rawName: string) => NameFilterResolution;
+  pathExists?: (rel: string) => boolean;
+}
+
+/**
+ * W1-T2641: `MeasurementCadenceReportOpts.proofDebt`'s ONE production supplier — mirrors
+ * {@link defaultBoardReviewItems}'s reader/mapper split (the real reads live here; the shapes
+ * they feed stay pure) so `buildMeasurementCadenceDaemonHooks`'s `run` holds only a call, never
+ * inlined I/O. Returns `undefined` when the producer should be skipped this fire — never a
+ * partial or guessed input — so the caller can pass the result straight through to
+ * `opts.proofDebt` unchanged.
+ *
+ * THE SAME POPULATION, THE SAME TWO PREDICATES `proofQueueAuditCommand`'s own default path binds
+ * (design (ii)): `isOpenLintTask` intersected with `classifyFailingMergeEvidence`'s `.without`
+ * half over `defaultMergeEvidenceLog`'s dump, then `resolveNameFilteredCandidates(repoRoot, …)`
+ * and `existsSync(join(repoRoot, …))` — `creditedIds`/`symbolFoundAt` stay unbound, exactly as
+ * that verb's default path leaves them, so the cadence and a human running the verb by hand can
+ * never name different offenders on one checkout.
+ *
+ * FAILS OPEN, NEVER WIDE (design (v) / W1-T130's polarity): an unreadable plan, unavailable merge
+ * evidence, or any other throw while building this input returns `undefined` — the SAME direction
+ * `proofQueueAuditCommand` itself takes on a shallow checkout — rather than falling back to the
+ * unfiltered open population, which would name debt a merge already retired. The single
+ * try/catch below is deliberate: it is what keeps a throw HERE from ever reaching
+ * `runMeasurementCadenceReport` and aborting the cadence's other verbs (ruleEfficacy,
+ * verdictCalibration, autonomyRate, …) over a producer none of them depend on.
+ *
+ * `shardPathFor` RELATIVISES `taskRecordPath`'s absolute answer against `repoRoot` before it
+ * leaves this function (design (iii)) — `EvidenceAnchor.path` is documented repo-relative
+ * (lib/inbox.ts) and `taskRecordPath` is not, and every existing test supplies its own resolver so
+ * this mismatch is otherwise unit-test-invisible. An id `taskRecordPath` cannot resolve stays
+ * `undefined`, never invented.
+ *
+ * LAZY BY CONSTRUCTION: this does no git/plan/filesystem read until CALLED, and its one caller
+ * (`buildMeasurementCadenceDaemonHooks`'s `run`, below) only runs on a tick that already decided
+ * `fire: true` — so a tick that does not fire never reaches this function at all (design (iv)).
+ */
+export function defaultProofDebtCadenceInput(
+  repoRoot: string,
+  deps: ProofDebtCadenceInputDeps = {},
+): MeasurementCadenceReportOpts["proofDebt"] {
+  try {
+    const planPath = join(repoRoot, "plan", "tasks.yaml");
+    const plan = (deps.loadPlan ?? loadPlan)(planPath);
+    const openIds = plan.tasks.filter(isOpenLintTask).map((t) => t.id);
+    const { dump } = (deps.readMergeEvidenceLog ?? defaultMergeEvidenceLog)(repoRoot);
+    const unmergedIds = new Set(classifyFailingMergeEvidence(openIds, dump).without);
+    const tasks = plan.tasks.filter((t) => unmergedIds.has(t.id));
+    return {
+      tasks,
+      resolveNameFilteredCandidates:
+        deps.resolveNameFilteredCandidates ?? ((rawName) => resolveNameFilteredCandidates(repoRoot, rawName)),
+      pathExists: deps.pathExists ?? ((rel) => existsSync(join(repoRoot, rel))),
+      shardPathFor: (taskId) => {
+        const resolved = taskRecordPath(planPath, taskId);
+        return resolved === undefined ? undefined : relative(repoRoot, resolved);
+      },
+    };
+  } catch {
+    // FAIL OPEN (design (v) / W1-T130's polarity): an unreadable plan, unavailable merge
+    // evidence — the same shallow-checkout case `proofQueueAuditCommand`'s own catch handles a
+    // few hundred lines up — or any other construction failure skips this producer entirely
+    // rather than falling back to a wider, unfiltered population. Never rethrown: this keeps the
+    // cadence's other verbs (ruleEfficacy, verdictCalibration, autonomyRate, …) running on a tick
+    // this producer alone could otherwise cost.
+    return undefined;
+  }
+}
+
 /**
  * W1-T1259: the measurement-cadence rung's PRODUCER, mirroring {@link buildAutoTriageDaemonHooks}
  * exactly — the CONSUMER (`daemon.ts` reads `deps.checkMeasurementCadence`/
@@ -19012,6 +19087,11 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
         // checkout, same as the git log join two lines above — never a drained target's (this
         // hook is SELF-TARGET ONLY, per this function's own doc).
         checkoutDir: repoRoot,
+        // W1-T2641: the proof-debt producer's ONE production supplier — see
+        // `defaultProofDebtCadenceInput`'s own doc for the population, the fail-open direction,
+        // and why this call is lazy here rather than hoisted to hook construction. Called only
+        // on a tick this function's own caller (daemon.ts) already decided `fire: true` for.
+        proofDebt: defaultProofDebtCadenceInput(repoRoot),
       });
     });
   return { checkMeasurementCadence: check, runMeasurementCadence: run };
