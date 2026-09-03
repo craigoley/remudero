@@ -1027,6 +1027,8 @@ function isGitWorktree(cwd: string): boolean {
       stdio: ["ignore", "pipe", "ignore"],
     }).trim() === "true";
   } catch {
+    // `git` missing, not a repo, or the probe otherwise failed to prove worktree membership --
+    // treat as "not a worktree" so the bypass stays fail-closed on any unproven cwd.
     return false;
   }
 }
