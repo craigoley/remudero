@@ -1,0 +1,147 @@
+- id: W1-T2784
+  title: "`decideDispatchClaimRelease` refuses every unowned claim on the ground that cross-host liveness is not decidable — true in general and FALSE when the anchor names THIS host and predates THIS PID namespace's own init, which is exactly the shape that made `refs/rmd-dispatch/W1-T2631` and `W1-T2636` permanent and cost $37.6891 across 122 blocked verdicts and zero completions"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high  # Rule 19: the pure decision (dispatch-claim.ts), its two probe leaves, and the one
+              # call site that supplies them (run-task.ts) are one atomic fix — an arm with no
+              # probe never fires, and a probe with no arm is dead code. The learnings/docs pair
+              # rides along because the shard's own `operator_impact: true` obligates it.
+  files: [src/lib/dispatch-claim.ts, src/run-task.ts, scripts/source-size-baseline.json, learnings/failures.yaml, learnings/index.json, docs/troubleshooting.md, test/a-claim-minted-before-this-namespace-booted-has-no-claimant.test.ts, test/dispatch-claim.test.ts, test/dispatch-claim-evidence-reachability.test.ts, test/sandbox-subject-generator.test.ts]
+  origin: "oper#dispatch-claim-liveness-2026-09-03"
+  plan_refs: ["W1-T1268", "W1-T2446", "W1-T396", "W1-T2754"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE MEASURED INCIDENT. `refs/rmd-dispatch/W1-T2631` was minted `490780@5670f73af4f4` at
+    2026-09-03T03:52:05.691Z. Its run reached recon, built a prompt, spawned an implement worker
+    (`worker.state` rows through 04:02:47Z) and then stopped — no verdict row, no claim release.
+    The daemon container restarted at 11:37:56Z under the SAME id, so pid 490780 was gone while
+    the hostname the anchor named still matched. Every later lane read a live-looking holder and
+    took the operator arm. FOUR refusals followed (11:45, 15:25, 16:47 on W1-T2631; 11:45 on
+    W1-T2636), each one AFTER two preflight workers had already spawned — $2.3421 of preflight
+    burned on refusals alone, 17.4% of that day's total preflight spend. W1-T2631 and W1-T2636
+    together: 173 cost rows, $37.6891, 60 `blocked_containment` + 62 `blocked_isolation`, zero
+    completions. The operator cleared four refs by hand.
+
+    THE OPERATOR ARM IS CORRECT AND IS NOT WEAKENED. "Cross-host liveness is not decidable" is
+    true whenever the anchor names a host this process is not — the same reason `isHolderStale`
+    (W1-T396) refuses to widen into a cross-host question at all. This task does not attempt
+    general cross-host liveness and must not be read as a step toward it.
+
+    THE ONE DECIDABLE CASE. A process cannot outlive the PID namespace containing it. When the
+    anchor's host equals this process's own hostname AND the claim's minted-at predates this
+    namespace's init start, the claimant provably cannot exist. No liveness guess, no timer, no
+    elapsed-time threshold — two recorded facts compared against each other, never against "now".
+
+    WHY BOOT TIME IS PRIMARY AND PID ABSENCE ONLY CONFIRMS. Pid liveness alone carries a reuse
+    hazard: a recycled pid reads ALIVE and errs safe, but reading a pid as ABSENT is only sound
+    if that number could not have been reused — which a namespace restart guarantees and nothing
+    else does. So the boot comparison carries the proof and `pidPresent` must AGREE; both hold or
+    the arm declines. A pid that reappeared under a recycled number after the restart therefore
+    BLOCKS the release, leaving the operator arm to handle it. That false negative is the stuck
+    claim persisting — today's behaviour — and is the safe direction; a false positive is the
+    duplicate dispatch W1-T1265 measured at 53.776 seconds apart.
+  design: |
+    TWO OF THE THREE SIGNALS THE BRIEF SUGGESTED ARE WRONG, MEASURED BEFORE BUILDING — the brief
+    asked for this check explicitly and it changed the implementation:
+
+      - `/proc/uptime` IS NOT NAMESPACED. Read inside the daemon container it returned 27884.08s
+        against the host's 27884.02s — the HOST's boot (10:52:57Z), not the container's start
+        (11:37:56Z). A predicate built on it compares a claim against the wrong epoch entirely.
+      - `stat -c %y /proc/1` IS NOT PROCESS START. It read 17:27:50Z for a container started at
+        11:37:56Z — proc-entry access time, ~6h off.
+
+    THE CORRECT READING is `/proc/stat`'s `btime` plus `/proc/1/stat` field 22 (starttime, in
+    CLK_TCK ticks). MEASURED: reconstructs docker's own `StartedAt` to 11:37:55Z against
+    11:37:56.73Z — the one-second rounding of integer ticks. It is namespace-correct for free,
+    because `/proc/1` resolves to whatever init THIS namespace has: host boot on the host,
+    container start inside the container, with no branch on which one we are.
+
+    FIELD 22 IS INDEXED FROM AFTER THE COMM, NOT FROM THE LINE START. `/proc/<pid>/stat` field 2
+    is free-form inside parentheses and may contain spaces AND parentheses, so a whitespace split
+    mis-indexes every later field. `readNamespaceBootMs` slices after the LAST `)` and indexes
+    from there; its own guard builds the fixture positionally rather than hand-spacing it, because
+    a hand-written version of that row got the count wrong on the first attempt.
+
+    A FOURTH ARM, ORDERED AFTER holder AND evidence, BEFORE operator. Both new inputs are OPTIONAL
+    and LAST on the existing parameter objects, so every existing caller and every pre-existing
+    test fake keeps today's three-arm behaviour byte-for-byte: no probe supplied ⇒ no anchor
+    identity ⇒ the arm declines to `operator`. The probe is a THUNK and is called only once an
+    anchor has actually parsed, so arms 1 and 2 still cost no `/proc` read and no git round trip.
+
+    THE DROP PINS ITS LEASE. The dead-claimant arm drops with `--force-with-lease` against the sha
+    it JUDGED, so a claim re-minted between the read and the push — a live lane legitimately
+    taking it — fails the lease and survives. That is the one race a proof-of-death cannot see,
+    closed by git rather than by a guess.
+
+    NO CLOCK ANYWHERE IN THE DECISION. W1-T2446's guard forbids `Date.now`/`new Date(`/timers
+    inside `decideDispatchClaimRelease`, and that guard is protecting a real property. The
+    identity and probe types therefore carry `mintedAtIso`/`namespaceBootIso` — preformatted at
+    the seam — so the reason string can name both instants without constructing a `Date`. The
+    forbidden list in that guard passes unmodified.
+
+    LOUD ON BOTH CHANNELS. The arm DELETES a lock a peer might believe it holds, so the reason
+    names the ref, the anchor's pid@host, the minted-at, the namespace boot it lost to, and the
+    pid-absence confirmation — and `run-task.ts` says it on stdout as well as ledgering it, because
+    a ledger row alone is a record nobody is watching live.
+  acceptance:
+    - claim: "a claim whose anchor names this host and whose minted-at predates this PID namespace's init, with the pid absent, is released on a `dead-claimant` arm"
+      proof: "unit test: test/a-claim-minted-before-this-namespace-booted-has-no-claimant.test.ts"
+    - claim: "a claim anchored to a DIFFERENT host is never released, and its refusal still reads `Cross-host liveness is not decidable`"
+      proof: "unit test: test/a-claim-minted-before-this-namespace-booted-has-no-claimant.test.ts"
+    - claim: "a claim minted AFTER this namespace booted is never released, whether its pid reads alive or absent, and a pid that reads present blocks release even when the claim predates boot"
+      proof: "unit test: test/a-claim-minted-before-this-namespace-booted-has-no-claimant.test.ts"
+    - claim: "an absent anchor identity, an absent liveness reading, or an unparseable anchor message each decline to the operator arm and drop nothing"
+      proof: "unit test: test/a-claim-minted-before-this-namespace-booted-has-no-claimant.test.ts"
+    - claim: "`readNamespaceBootMs` reads this namespace's own init start from real /proc, parses a comm containing spaces and parentheses, and declines on unreadable input; `pidIsPresent` reports present on any doubt"
+      proof: "unit test: test/a-claim-minted-before-this-namespace-booted-has-no-claimant.test.ts"
+    - claim: "the release reason names the ref, the anchor's pid and host, the minted-at, the namespace boot, and the pid-absence confirmation, and the drop pins --force-with-lease to the sha it judged"
+      proof: "unit test: test/a-claim-minted-before-this-namespace-booted-has-no-claimant.test.ts"
+  note: |
+    ID PROVENANCE: W1-T2784 was reserved and supplied directly by the operator.
+    `refs/rmd-dispatch/W1-T2784` was minted BEFORE any work (`rmd-dispatch claim
+    3343191@Remudero 2026-09-03T18:37:09.741Z`), the same discipline the Mac lane keeps. Both
+    scope-time checks ran clean — `git ls-remote --heads origin 'run-W1-T2784-*'` returned 0, and
+    both the anchored trailer scan and the `run-W1-T2784-<digits>` head-ref credit path returned
+    `[]` — each qualified by a positive control on W1-T2749 -> [3773,3771,3768], because a freshly
+    minted id reads zero against every surface for query-shape reasons alone.
+
+    THE FALSIFIER WAS RUN, WHOLE-FIX. Neutering the arm's guard moved the new suite from
+    `# fail 0` to `# fail 3`; restoring returned `# fail 0`. WORTH NAMING: the three that move are
+    the POSITIVE plus the release wiring — the negatives stay green in BOTH states, correctly,
+    because they assert the operator arm and a neutered arm also declines. So the negatives prove
+    the arm is not too eager and the positive proves it works at all; neither substitutes for the
+    other, and a suite of negatives alone would have passed against a fix that does nothing.
+
+    CALLER + CENSUS SWEEP: 13 files — every consumer of the touched symbols, plus the ratchets and
+    census suites this diff joins (`catch-erasure-ratchet`, `a-source-file-cannot-outgrow-its-
+    baseline`, `learnings`, `learnings-index`, `docs-index`) — ran as `# tests 219 # pass 219
+    # fail 0`. Typecheck clean.
+
+    TWO ADJACENT GUARDS WERE UPDATED, EACH FOR ITS OWN REASON, NEITHER BY WEAKENING IT:
+      - `dispatch-claim-evidence-reachability.test.ts`'s W1-T2446 guard pinned the parameter shape
+        and the arm count. Its timer assertions are kept VERBATIM and still pass; only the
+        shape/count lines moved, and it now also refuses an unreviewed FIFTH arm.
+      - `dispatch-claim.test.ts`'s W1-T1268 wiring guard sliced `start + 4000` chars from a marker.
+        That is not a property of anything, and this diff's ~1400 chars of probe pushed the
+        asserted line to offset 4872. Re-anchored to the NEXT section's own banner so the window
+        tracks the code. (A first attempt anchored on `costUsd: 0,` and landed 18 chars BEFORE the
+        asserted line — the same class of mistake as the character count it replaced.)
+
+    THE SOURCE-SIZE BASELINE was raised for `src/lib/dispatch-claim.ts` (500 -> 700) at the file's
+    TRUE size, not the ratchet's suggested 1000: recording 1000 would hand it 300 lines of unearned
+    headroom, and a ratchet exists to be tight.
+
+    THE COST RULE IS FOLDED IN, as the operator asked and as this session's own evidence earned:
+    `learnings/failures.yaml#cost-separates-never-ran-from-ran-and-failed` plus its obligated
+    `docs/troubleshooting.md` entry ("A verdict blames a component that never ran"). Budget checked
+    BEFORE writing — the ratchet read 34118/42000 chars with 7882 free, and 35045/42000 after.
+
+    NOT IN SCOPE: general cross-host liveness (the operator arm keeps it, correctly); the ordering
+    defect that runs both preflight probes BEFORE this claim check is reached (a separate filing —
+    it is why these refusals cost $2.3421 rather than nothing); and reclaiming the four refs this
+    incident stranded, which was the operator's own act.
