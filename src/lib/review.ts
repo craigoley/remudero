@@ -7,7 +7,7 @@ import { classifyFailure } from "./classify.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { reclaimStaleLock } from "./fs-race-safe.js";
 import { appendLedger } from "./ledger.js";
-import { liveStateFromRest, type GhApiFetcher } from "./open-prs-rest.js";
+import { prStateFromRest, singlePrRestArgs, type GhApiFetcher, type RestPullRow } from "./open-prs-rest.js";
 import { isInPlanScope } from "./plan-architect.js";
 import { loadPlanAtRef, visibleCriteria, type AcceptanceCriterion, type TaskRisk } from "./plan.js";
 import { scanUnreachedExports, type UnreachedExport } from "./reachability.js";
@@ -8259,7 +8259,7 @@ export async function postReviewStatus(
 // the arm path, because the posted status is what branch protection reads,
 // what the board renders, and what an operator opens a PR to see.
 //
-// ONE POST SITE enforces FOUR RULES — {@link postReviewStatusGuarded} is the
+// ONE POST SITE enforces FIVE RULES — {@link postReviewStatusGuarded} is the
 // only call path `run-task.ts` uses from here on (the raw {@link
 // postReviewStatus} above becomes an internal implementation detail + the
 // injectable "real poster" in tests):
@@ -8284,8 +8284,12 @@ export async function postReviewStatus(
 //         hiccup degrades, it never crashes the run (the W1-T113 class,
 //         applied here; LIVE INCIDENT: a bare 503 crashed run
 //         W1-T132-1784508142857 mid-fix-rung, escalation #283).
+//   (v)   SUBJECT FRESHNESS (W1-T2793) — when a caller identifies the exact
+//         head+body it judged, the lifecycle read also identifies the CURRENT
+//         head+body. A verdict whose input no longer matches is refused rather
+//         than overwriting the sha-scoped GitHub status for a different body.
 // READ BEFORE WRITE, HONESTLY: precedence needs the CURRENT posted state, so
-// {@link postReviewStatusGuarded} reads the ledger and the live PR lifecycle
+// {@link postReviewStatusGuarded} reads the ledger and the live PR lifecycle/input
 // AFTER acquiring the lock, never before — a read taken before the lock is
 // exactly the TOCTOU gap the lock exists to close.
 // ────────────────────────────────────────────────────────────────────────────
@@ -8409,6 +8413,9 @@ export function lastPendingReviewStatusFromLedger(
 export interface PrLifecycleState {
   merged: boolean;
   closed: boolean;
+  /** Content address of the live head+body returned by the SAME single-PR REST read. Optional
+   *  only for legacy/injected callers that can observe lifecycle but not the review subject. */
+  reviewInputDigest?: string;
 }
 
 /**
@@ -8433,8 +8440,8 @@ function prLifecycleUrlTarget(prUrl: string): { owner: string; repo: string; num
  * `ghLiveStateByNumber`, takes a number+repo, not a URL — see run-task.ts), and it was the one
  * actually observed failing with `GraphQL: API rate limit already exceeded` on 2026-08-15.
  *
- * Reuses {@link liveStateFromRest} — the SAME REST composition `ghLiveState` already uses — so
- * REST's two-valued `state`/`merged` fold is composed in exactly one place. THE TWO-VALUED FOLD
+ * Reuses {@link prStateFromRest} — the SAME REST fold `liveStateFromRest` composes — so
+ * REST's two-valued `state`/`merged` fold is still decided in exactly one place. THE TWO-VALUED FOLD
  * IS BENIGN HERE: a naive `.state`-only read would mislabel a MERGED PR as merely `closed`, but
  * `decideReviewStatusPost` (below) refuses posting on merged OR closed alike, so folding merged
  * into `MERGED` (rather than leaving it `CLOSED`) changes no caller-visible decision here — see
@@ -8449,8 +8456,25 @@ export function fetchPrLifecycle(prUrl: string, fetch: GhApiFetcher = ghJson): P
         "back to `gh pr view --json state`, whose GraphQL budget exhaustion is the defect this read was moved off",
     );
   }
-  const state = liveStateFromRest(target.owner, target.repo, target.number, fetch);
-  return { merged: state === "MERGED", closed: state === "CLOSED" };
+  // W1-T2793: retain the head+body identity from this SAME response before folding lifecycle.
+  // This adds no GitHub call and stores/logs neither body nor transcript. The optional spread
+  // keeps malformed/legacy fixtures on their historical lifecycle-only contract; the real
+  // single-PR response carries both fields.
+  const row = fetch(singlePrRestArgs(target.owner, target.repo, target.number)) as RestPullRow;
+  const state = prStateFromRest(row);
+  const headSha = row.head?.sha;
+  const currentInput =
+    (row.state === "open" || row.state === "closed") &&
+    typeof headSha === "string" &&
+    headSha !== "" &&
+    (typeof row.body === "string" || row.body === null)
+      ? reviewInputDigest(headSha, row.body ?? "")
+      : undefined;
+  return {
+    merged: state === "MERGED",
+    closed: state === "CLOSED",
+    ...(currentInput !== undefined ? { reviewInputDigest: currentInput } : {}),
+  };
 }
 
 // ── W1-T2419: the COMMENT channel is append-only, unlike the status row above ─────────────────
@@ -8574,6 +8598,8 @@ export interface ReviewStatusPostAttempt {
   headSha: string;
   state: PostableReviewState;
   evidence: ReviewEvidenceStrength;
+  /** Exact head+body judged by this attempt. Absent preserves the legacy lifecycle-only gate. */
+  reviewInputDigest?: string;
 }
 
 export type ReviewStatusDecision = { post: true } | { post: false; reason: string };
@@ -8596,6 +8622,18 @@ export function decideReviewStatusPost(
       reason:
         `PR is already ${lifecycle.merged ? "merged" : "closed"} — refusing to post remudero-review against ` +
         `a closed lifecycle (W1-T228 lifecycle rule)`,
+    };
+  }
+  if (
+    attempt.reviewInputDigest !== undefined &&
+    lifecycle.reviewInputDigest !== undefined &&
+    attempt.reviewInputDigest !== lifecycle.reviewInputDigest
+  ) {
+    return {
+      post: false,
+      reason:
+        `review input changed after this verdict started — refusing to overwrite ${attempt.headSha.slice(0, 7)}'s ` +
+        `status for a different head+body subject (W1-T2793 subject-freshness rule)`,
     };
   }
   if (
@@ -8852,7 +8890,12 @@ export async function postReviewStatusGuarded(
       return { posted: false, conflict: true, effectiveState: "failure", reason };
     }
     const decision = decideReviewStatusPost(
-      { headSha: opts.sha, state: opts.state, evidence: opts.evidence },
+      {
+        headSha: opts.sha,
+        state: opts.state,
+        evidence: opts.evidence,
+        ...(opts.reviewInputDigest !== undefined ? { reviewInputDigest: opts.reviewInputDigest } : {}),
+      },
       prior,
       lifecycle,
     );

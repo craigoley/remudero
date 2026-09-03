@@ -3397,6 +3397,13 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // {@link reviewVerdictOvertakenByActivity} fails CLOSED on unreadable timestamps, and the
     // strict explicit-zero exact-input check fails closed for legacy/unwired callers. Either shape
     // falls straight through to rows 4/6/7.
+    //
+    // W1-T2793 — THIS COARSE ADMISSION IS NOT AUTHORITY TO OVERWRITE A DIFFERENT BODY. GitHub
+    // `updated_at` can only say that activity occurred; immediately before the resulting verdict
+    // is posted, review.ts's one guarded status site compares this attempt's head+body digest with
+    // the digest returned by its fresh lifecycle read. A body that moved again is refused there.
+    // The pair is deliberate: this row makes a changed input reachable; the write guard proves
+    // that the subject it finally publishes is still that input.
     disposition: "post-review",
     when: (pr) =>
       pr.checksState === "green" &&

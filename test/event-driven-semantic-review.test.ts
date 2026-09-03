@@ -165,6 +165,7 @@ esac
         acceptance: [{ claim: "the deterministic verdict posts", proof: "the deterministic verdict posts" }],
       },
       report: "The deterministic verdict posts.",
+      reviewInputBody: "",
       settingsFile,
       config: { root, claudeBin: fakeClaude, enabledProviders: ["claude"] } as Config,
       budgetUsd: 15,
