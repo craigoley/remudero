@@ -26,10 +26,11 @@ raw: >-
   89e4fe5 — ci-log fix, strike 1/2
 attachments: []
 origin: repair#blocked-fixable
-status: new
+status: rejected
 reply_to: null
 proposal_pr: null
 summary: null
 expansion: null
 submission_key: null
 thread_id: null
+answered_by: null
