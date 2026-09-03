@@ -1,0 +1,87 @@
+- id: W1-T2760
+  title: "THE CITATION MINER HAS NO PRODUCER — the retro's git-log miner scans commits for learnings#<id> citations that no prompt ever asks a worker to write, so cited_count measures how often a learning was INJECTED, compression candidates rank the least-injected entry as the least useful, and the ranking feeds the next injection; add one typed report line naming the learnings a worker acted on, parse it against the injected set, and rank compression by use with injection only as the tiebreak"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  rationale: |
+    RE-DERIVED AT 7775b9977 (2026-09-03).
+
+    (1) THE TWO MINERS AND WHAT EACH CAN SEE. `mineLedgerCitations` (src/lib/retro.ts, W1-T419)
+    reads `learnings.injected` rows' `matched_ids` — one citation per id per row, which is the
+    record that an entry was PUT IN THE PROMPT. `mineGitLogCitations` scans commit subjects and
+    bodies for `learnings#<id>`, and the module's own comment records the result: the full commit
+    history carried "effectively zero `learnings#<id>` citations (2 bare-prefix hits, no ids)".
+    `outputContractLines` and `commitMessageContractLines` (src/lib/compaction.ts) ask a worker for
+    a Conventional Commits header, a Remudero-Task trailer, a Follow-ups section and a PR_URL line;
+    they never ask which learning it used. The miner was built for a signal nothing produces.
+
+    (2) THE LOOP THAT RESULTS. `aggregateCitationEvidence` stamps `cited`/`cited_count` from both
+    miners, so with the git half empty the stamp IS the injection count. `selectLearnings`
+    (src/lib/learnings.ts) breaks ties on `cited`; `compressionCandidates`
+    (scripts/learnings-budget-ratchet.mjs, W1-T419 design iii) names the K least-evidenced entries
+    as what to fold first. An entry that matches many tasks' files is injected often, stamped often,
+    ranked high, and injected again; an entry that matches few is named for compression. The
+    flywheel MASTER-PLAN §8A describes — retros compress what evidence says is unused — is turning
+    on a proxy that cannot distinguish use from presence.
+
+    (3) THE DIALECT ALREADY HAS THE SHAPE. The worker's return channel is a marker grammar parsed by
+    code: `PR_URL:`, `DECISION_REQUEST`, `QUESTION`, `## Follow-ups` typed lines,
+    `ALREADY_SATISFIED:`, `SHIPS-UNWIRED:` (src/lib/worker.ts, src/lib/review.ts). A learning is
+    injected as `- <fact> [src: learnings#<id>]`, so the id is already in the worker's context in the
+    form the miner expects. One more typed line closes the loop without a new vocabulary.
+
+    (4) RULE 22 STATED UP FRONT. "Used" is a worker's CLAIM, marked as one on the ledger and in the
+    stamp; the wipe test (W1-T2512, W1-T2659) remains the only measure of EFFECT. What this task
+    changes is which proxy ranks compression: a claim of use over a record of presence.
+  design: |
+    (i) THE LINE. `outputContractLines` gains one REPORT line, in the same anchored form as PR_URL:
+    `LEARNINGS_USED: learnings#<id>, learnings#<id>` or `LEARNINGS_USED: none` — required, so a
+    silent report is distinguishable from a report naming none.
+
+    (ii) THE PARSER. `parseLearningsUsed(transcript, injectedIds)` in src/lib/worker.ts: anchored to
+    the line start, last match wins (the PR_URL discipline, W1-T62); every id is checked against the
+    run's `matched_ids` — an id that was never injected is REFUSED by name and reported, never
+    stamped, because a worker citing a learning it was not shown is the exact fabrication the
+    keyword floor exists to catch on the other channel. The run ledgers `learnings.used` with
+    `used_ids`, `injected_ids`, `refused_ids` and the reason for each refusal.
+
+    (iii) THE AGGREGATE. `mineLedgerCitations` emits two evidence kinds, injected and used;
+    `aggregateCitationEvidence` stamps `used_count` beside `cited_count` and never sums them;
+    `stampCitations` writes both. `compressionCandidates` ranks least-used first, injection count as
+    the tiebreak, and `renderCandidateLine` prints both columns so a never-used-but-often-injected
+    entry is legible as exactly that.
+
+    (iv) THE ANCHOR. `renderAnchorBlock` re-injects the same line after a compaction, byte-identical
+    (the W1-T2297 discipline), so a long run does not forget it was asked.
+
+    (v) WHAT DOES NOT CHANGE. The knowledge budget and its cap. Lifecycle. The wipe test. The git-log
+    miner stays, reading whatever a human commit still carries.
+  acceptance:
+    - claim: "a report line naming an injected learning is parsed and ledgered as used, and one naming a learning never injected is refused by name"
+      proof: "unit test: test/the-citation-miner-has-a-producer.test.ts"
+    - claim: "the citation aggregate carries used and injected as separate counts and never sums them"
+      proof: "unit test: test/the-citation-miner-has-a-producer.test.ts"
+    - claim: "compression candidates rank least-used first with injection only as the tiebreak"
+      proof: "unit test: test/the-citation-miner-has-a-producer.test.ts"
+    - claim: "the output contract asks for the line and the anchor block repeats it"
+      proof: "grep: LEARNINGS_USED in src/lib/compaction.ts"
+    - claim: "the transcript parser exists on the worker return channel"
+      proof: "grep: parseLearningsUsed( in src/lib/worker.ts"
+  risk: high
+  band_meaning: span
+  origin: "oper#concept-scan-2026-09-03"
+  plan_refs: ["W1-T419", "W1-T1248", "W1-T941", "W1-T2297", "W1-T2512", "W1-T2659", "§8A", "§12"]
+  files: [src/lib/compaction.ts, src/lib/worker.ts, src/lib/retro.ts, scripts/learnings-budget-ratchet.mjs, test/the-citation-miner-has-a-producer.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    risk:high, band_meaning:span — the output contract, the transcript parser, the retro aggregate
+    and the ratchet's recommender under Rule 19; runtime blast radius is one more ledger step and a
+    changed ORDER of compression candidates that a human still has to act on.
+
+    FILED AT THE OPERATOR'S DIRECTION of 2026-09-03 (the compact-dialect scan). The nearest existing
+    mechanism, W1-T419's citation evidence and W1-T1248's stamps, was read before filing; this
+    extends both with the producer they were built to consume.
