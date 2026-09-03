@@ -261,7 +261,7 @@ test("W1-T2446: decideDispatchClaimRelease itself still takes no clock input -- 
   const arms = dispatchClaimSrc.match(/export type DispatchClaimReleaseArm = ([^;]+);/);
   assert.ok(arms, "the arm union must still exist, unrenamed");
   assert.equal(
-    arms![1]!.split("|").map((s) => s.trim().replace(/"/g, "")).sort().join(","),
+    arms![1]!.split("|").map((s) => s.trim().replaceAll('"', "")).sort().join(","),
     "dead-claimant,evidence,holder,operator",
     "exactly four arms: a fifth needs its own reasoned task, as dead-claimant had",
   );
