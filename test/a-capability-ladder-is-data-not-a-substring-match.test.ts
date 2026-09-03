@@ -164,7 +164,11 @@ test("a capability assignment that would put a worker AT the Architect's capabil
   // this — proof that the invariant survived the generalisation instead of being weakened by it.
   bad.capabilities = {
     ladder: { economy: 1, frontier: 2 },
-    claude: { haiku: "economy", sonnet: "frontier", opus: "frontier" },
+    claude: {
+      haiku: "economy", sonnet: "frontier", opus: "frontier",
+      "claude-haiku-1": "economy", "claude-sonnet-1": "frontier", "claude-opus-1": "frontier",
+    },
+    claude_candidates: { economy: ["claude-haiku-1"], frontier: ["claude-sonnet-1", "claude-opus-1"] },
     codex: {
       economy: { low: ["m"], medium: ["m"], high: ["m"] },
       frontier: { low: ["m"], medium: ["m"], high: ["m"] },
@@ -190,7 +194,11 @@ test("a capability assignment that would put a worker AT the flight judge's capa
   bad.judge.model = "opus";
   bad.capabilities = {
     ladder: { economy: 1, frontier: 2, apex: 3 },
-    claude: { haiku: "economy", sonnet: "frontier", opus: "frontier", "claude-opus-5": "apex" },
+    claude: {
+      haiku: "economy", sonnet: "frontier", opus: "frontier", "claude-opus-5": "apex",
+      "claude-haiku-1": "economy", "claude-sonnet-1": "frontier", "claude-opus-1": "frontier",
+    },
+    claude_candidates: { economy: ["claude-haiku-1"], frontier: ["claude-sonnet-1", "claude-opus-1"], apex: ["claude-opus-5"] },
     codex: {
       economy: { low: ["m"], medium: ["m"], high: ["m"] },
       frontier: { low: ["m"], medium: ["m"], high: ["m"] },
@@ -207,7 +215,11 @@ test("a capability assignment that keeps every worker strictly below the Archite
   const good = goodRaw() as unknown as Record<string, any>;
   good.capabilities = {
     ladder: { economy: 1, balanced: 2, frontier: 3 },
-    claude: { haiku: "economy", sonnet: "balanced", opus: "frontier" },
+    claude: {
+      haiku: "economy", sonnet: "balanced", opus: "frontier",
+      "claude-haiku-1": "economy", "claude-sonnet-1": "balanced", "claude-opus-1": "frontier",
+    },
+    claude_candidates: { economy: ["claude-haiku-1"], balanced: ["claude-sonnet-1"], frontier: ["claude-opus-1"] },
     codex: {
       economy: { low: ["m"], medium: ["m"], high: ["m"] },
       balanced: { low: ["m"], medium: ["m"], high: ["m"] },
@@ -221,7 +233,11 @@ test("'capabilities.claude' missing a capability for a declared 'tiers' model is
   const bad = goodRaw() as unknown as Record<string, any>;
   bad.capabilities = {
     ladder: { economy: 1, frontier: 2 },
-    claude: { haiku: "economy", sonnet: "frontier" }, // "opus" (a `tiers` key) is missing
+    claude: {
+      haiku: "economy", sonnet: "frontier",
+      "claude-haiku-1": "economy", "claude-sonnet-1": "frontier",
+    }, // "opus" (a `tiers` key) is missing
+    claude_candidates: { economy: ["claude-haiku-1"], frontier: ["claude-sonnet-1"] },
     codex: {
       economy: { low: ["m"], medium: ["m"], high: ["m"] },
       frontier: { low: ["m"], medium: ["m"], high: ["m"] },

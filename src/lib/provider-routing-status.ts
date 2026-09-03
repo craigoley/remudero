@@ -6,6 +6,7 @@
 import { chmodSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { WorkerProviderId } from "./config.js";
+import type { ClaudeModelHealthRoute, ClaudeModelHealthSource, ClaudeModelHealthState } from "./claude-model-health.js";
 import type {
   EffectiveProviderRoutingPolicy,
   ProviderPark,
@@ -72,6 +73,14 @@ export interface ProviderRoutingSelectedStatus {
   effort?: string;
 }
 
+export interface ProviderRoutingModelHealthStatus {
+  requestedModel?: string;
+  routedModel?: string;
+  state: ClaudeModelHealthState;
+  source: ClaudeModelHealthSource;
+  eligible: boolean;
+}
+
 export interface ProviderRoutingPolicyStatus {
   provenance: "default" | "overridden";
   committed: {
@@ -110,6 +119,7 @@ export interface ProviderRoutingStatus {
   providers?: ProviderRoutingProviderStatus[];
   selected?: ProviderRoutingSelectedStatus;
   blockedReason?: "no-provider-headroom";
+  modelHealth?: ProviderRoutingModelHealthStatus;
   policy?: ProviderRoutingPolicyStatus;
   preferenceBypass?: ProviderRoutingPreferenceBypass;
 }
@@ -120,6 +130,7 @@ interface ProviderRoutingWriteBase {
   observedAtMs: number;
   cacheValidMs: number;
   policy?: EffectiveProviderRoutingPolicy;
+  modelHealth?: ClaudeModelHealthRoute;
   preferenceBypass?: ProviderRoutingPreferenceBypass;
 }
 
@@ -281,6 +292,29 @@ function projectPolicy(policy: EffectiveProviderRoutingPolicy): ProviderRoutingP
   };
 }
 
+function projectModelHealth(value: unknown): ProviderRoutingModelHealthStatus | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const raw = value as Record<string, unknown>;
+  const state = raw.state;
+  const source = raw.source;
+  if (
+    (state !== "healthy" && state !== "degraded" && state !== "unknown") ||
+    (source !== "fresh" && source !== "stale" && source !== "unknown") ||
+    typeof raw.eligible !== "boolean"
+  ) return undefined;
+  const requestedModel = raw.requestedModel === undefined ? undefined : safeLabel(raw.requestedModel);
+  const routedModel = raw.routedModel === undefined ? undefined : safeLabel(raw.routedModel);
+  if (raw.requestedModel !== undefined && !requestedModel) return undefined;
+  if (raw.routedModel !== undefined && !routedModel) return undefined;
+  return {
+    ...(requestedModel ? { requestedModel } : {}),
+    ...(routedModel ? { routedModel } : {}),
+    state,
+    source,
+    eligible: raw.eligible,
+  };
+}
+
 function projectWrite(input: ProviderRoutingWriteInput): ProviderRoutingStatus {
   if (!Number.isFinite(input.observedAtMs)) throw new Error("provider routing observation time is invalid");
   if (!Number.isFinite(input.cacheValidMs) || input.cacheValidMs <= 0) {
@@ -291,12 +325,15 @@ function projectWrite(input: ProviderRoutingWriteInput): ProviderRoutingStatus {
   const enabledProviders = [...new Set(input.enabledProviders.map(providerId).filter((p): p is WorkerProviderId => p !== undefined))];
   const reservePercent = safePercent(input.reservePercent);
   if (reservePercent === undefined || reservePercent >= 100) throw new Error("provider routing reserve is invalid");
+  const modelHealth = input.modelHealth ? projectModelHealth(input.modelHealth) : undefined;
+  if (input.modelHealth && !modelHealth) throw new Error("provider routing model-health observation is invalid");
   const base = {
     version: PROVIDER_ROUTING_STATUS_VERSION,
     enabledProviders,
     reservePercent,
     observedAt: new Date(observedAtMs).toISOString(),
     freshUntil: new Date(observedAtMs + cacheValidMs).toISOString(),
+    ...(modelHealth ? { modelHealth } : {}),
     ...(input.policy ? { policy: projectPolicy(input.policy) } : {}),
     ...(input.preferenceBypass ? { preferenceBypass: { ...input.preferenceBypass } } : {}),
   };
@@ -599,6 +636,11 @@ function parseSnapshot(value: unknown, nowMs: number): ProviderRoutingStatus | u
     freshUntil,
     providers,
   };
+  if (raw.modelHealth !== undefined) {
+    const modelHealth = projectModelHealth(raw.modelHealth);
+    if (!modelHealth) return undefined;
+    base.modelHealth = modelHealth;
+  }
   if (raw.policy !== undefined) {
     const policy = parsePolicy(raw.policy);
     if (!policy) return undefined;
