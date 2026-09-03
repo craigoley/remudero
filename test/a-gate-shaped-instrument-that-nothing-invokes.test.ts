@@ -33,12 +33,16 @@ const SCRIPT = join(REPO_ROOT, "scripts", "unwired-gate-check.mjs");
 
 type Stale = { script: string; why: string };
 type Scan = { unwired: string[]; stale: Stale[]; gateShaped: string[]; scanned: number };
+/** The narrow shape {@link listTrackedScripts} actually calls its injected `spawn` through --
+ *  not the full overloaded `typeof spawnSync`, so a fixture can hand a plain function literal
+ *  without fighting spawnSync's option-dependent return-type overloads. */
+type GitSpawn = (command: string, args: string[], options: { cwd: string; encoding: "utf8" }) => { status: number | null; stdout: string; stderr: string };
 const mod = (await import(pathToFileURL(SCRIPT).href)) as {
   GATE_SHAPED_RE: RegExp;
   EXECUTABLE_RE: RegExp;
   EXECUTING_KEYS: Set<string>;
   ALLOWANCE: Array<{ script: string; reason: string }>;
-  listTrackedScripts: (repoRoot: string) => string[];
+  listTrackedScripts: (repoRoot: string, spawn?: GitSpawn) => string[];
   isGateShaped: (relPath: string) => boolean;
   collectExecutingStrings: (node: unknown, out?: string[]) => string[];
   collectWiringText: (repoRoot: string) => string;
@@ -393,6 +397,28 @@ test("W1-T2735: listTrackedScripts throws, rather than reporting an empty corpus
   } finally {
     rmSync(notARepo, { recursive: true, force: true });
   }
+});
+
+test("W1-T2735: listTrackedScripts retries a TRANSIENT git failure before giving up, and still returns the real corpus", () => {
+  let calls = 0;
+  const flaky: GitSpawn = (command, args, options) => {
+    calls += 1;
+    if (calls < 2) return { status: 1, stdout: "", stderr: "fatal: index.lock exists" };
+    return spawnSync(command, args, options);
+  };
+  const tracked = mod.listTrackedScripts(REPO_ROOT, flaky);
+  assert.ok(calls >= 2, "the wrapper's first, failing call must actually have been retried");
+  assert.ok(tracked.length > 10, "once the transient failure clears, the real corpus is still returned");
+});
+
+test("W1-T2735: listTrackedScripts gives up and throws after repeated failures, not silently forever", () => {
+  let calls = 0;
+  const alwaysFlaky: GitSpawn = () => {
+    calls += 1;
+    return { status: 1, stdout: "", stderr: "fatal: index.lock exists" };
+  };
+  assert.throws(() => mod.listTrackedScripts(REPO_ROOT, alwaysFlaky), /git ls-files/, "a PERSISTENT failure must still throw, never retry forever");
+  assert.equal(calls, 3, "bounded retries -- not zero (a transient race deserves a second chance) and not unbounded");
 });
 
 test("W1-T2735: collectWiringText tolerates a missing workflows dir and an unreadable package.json", () => {

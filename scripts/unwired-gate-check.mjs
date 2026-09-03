@@ -106,10 +106,31 @@ export const ALLOWANCE = [
   },
 ];
 
+/** A small bounded synchronous sleep (`Atomics.wait` on a throwaway buffer) -- used only to
+ *  space out {@link listTrackedScripts}'s retries, never to change the eventual verdict. */
+function sleepMs(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
 /** Tracked `scripts/` executables, via `git ls-files` -- the tracked set is the subject, and this
- *  keeps untracked scratch out of scope with no separate exclusion list. */
-export function listTrackedScripts(repoRoot) {
-  const res = spawnSync("git", ["ls-files", "scripts/"], { cwd: repoRoot, encoding: "utf8" });
+ *  keeps untracked scratch out of scope with no separate exclusion list.
+ *
+ *  Retries a CLEAN nonzero exit up to twice more, a short beat apart, before throwing: a
+ *  same-process `git ls-files` is read-only and never fails on a healthy repo, so a failure here
+ *  is either genuinely no-repo (this loop still throws, just after `attempts` tries -- unchanged
+ *  for `listTrackedScripts` called against a real non-repo directory) or a TRANSIENT race with
+ *  another `git` process sharing this checkout (a momentary `index.lock`, the exact shape
+ *  test/setup/tmp-hygiene.ts's own module comment (W1-T1217) already measured and fenced for a
+ *  clone racing a background `gc --auto` in this same suite). `spawn` is injectable so a test can
+ *  simulate that race deterministically rather than needing a genuinely flaky host. */
+export function listTrackedScripts(repoRoot, spawn = spawnSync) {
+  let res;
+  const attempts = 3;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    res = spawn("git", ["ls-files", "scripts/"], { cwd: repoRoot, encoding: "utf8" });
+    if (res.status === 0 || attempt === attempts) break;
+    sleepMs(20 * attempt);
+  }
   if (res.status !== 0) {
     throw new Error(`unwired-gate-check: \`git ls-files scripts/\` failed (status ${res.status}): ${res.stderr ?? ""}`);
   }
