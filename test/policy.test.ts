@@ -561,6 +561,7 @@ test("every LIFTED field records origin=lifted:<source-site> — the net-new fie
     // W1-T2568: delivery replay protection is new with the webhook wake. No pre-existing source
     // constant bounded this persistent set, so its capacity is intentionally net-new policy data.
     "githubEventWake.dedupCapacity",
+    "githubEventWake.checkSettleMs",
   ]);
   const liftedPaths = Object.keys(p.origin).filter((path) => !NET_NEW.has(path));
   assert.ok(liftedPaths.length > 0);

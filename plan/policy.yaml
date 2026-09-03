@@ -1070,6 +1070,20 @@ githubEventWake:
     origin: "net-new"
     min: 50
     max: 5000
+  # W1-T2741 — terminal `check_run:completed` and legacy `status` deliveries arrive as one
+  # matrix-shaped settlement stream, but each distinct delivery currently interrupts the daemon
+  # into a complete repository sweep. The live 00:55 wave spanned about 26 seconds with no
+  # ten-second quiet gap; 10000 therefore collapses that wave to one trailing wake while staying
+  # six times faster than the ordinary 60000ms poll. Structural pull-request/review events bypass
+  # this timer. The ordinary poll remains the starvation bound if the stream never goes quiet.
+  # min=1000 prevents a source-shaped zero-delay loop; max=60000 prevents tuning settlement past
+  # the ordinary default recovery cadence. This bounds scheduling only—no delivery is discarded,
+  # and the one durable marker remains until an accepted sweep acknowledges it.
+  checkSettleMs:
+    value: 10000
+    origin: "net-new"
+    min: 1000
+    max: 60000
 
 # W1-T2579 — THE ARM GATE'S OPERATOR-RATIFIED BAND TABLE. `decideAutoMergeArm` (src/lib/
 # review.ts) reads this table AFTER its existing refusals, on the already-arming full-pass/

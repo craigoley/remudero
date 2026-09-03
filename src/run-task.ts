@@ -23272,7 +23272,9 @@ export async function daemonCommand(
   // watcher is closed on daemon shutdown and cannot keep the process alive after normal stop")
   // — wired into `onSignal` immediately below AND the ordinary `finally`, mirroring exactly how
   // `drainLock.release()`/`consumeStop` are already wired into both.
-  const githubEventWake = (deps.wireSweepWake ?? wireSweepWakeToDaemon)(config.root, log);
+  const githubEventWake = (deps.wireSweepWake ?? wireSweepWakeToDaemon)(config.root, log, undefined, {
+    checkSettleMs: policy.values.githubEventWake.checkSettleMs,
+  });
   const processKill = deps.processKill ?? ((pid: number, signal: NodeJS.Signals) => process.kill(pid, signal));
   const onSignal = (sig: NodeJS.Signals) => {
     githubEventWake.close();
