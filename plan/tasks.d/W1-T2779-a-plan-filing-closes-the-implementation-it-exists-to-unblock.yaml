@@ -1,0 +1,89 @@
+- id: W1-T2779
+  title: "a newer plan-only filing is treated as a superseding implementation and closes the code PR it exists to unblock"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 24.00
+  risk: high
+  files:
+    - src/lib/open-prs-rest.ts
+    - src/lib/supersession.ts
+    - src/lib/sweep.ts
+    - src/run-task.ts
+    - test/open-prs-rest.test.ts
+    - test/sweep.test.ts
+  origin: "operator-session#plan-filing-closed-implementations-2026-09-03"
+  plan_refs: ["W1-T205", "W1-T384", "W1-T920", "W1-T932", "W1-T2384", "W1-T2692"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED on 2026-09-03: implementation PR #3818 (W1-T2777) failed Standing Rule 15 because
+    it carried its task shard beside code and tests. A byte-identical plan-only split was opened
+    as #3826. Before #3826 merged, the fleet sweep closed #3818 with `superseded-by #3826`.
+    The same thing happened to implementation PR #3821 (W1-T2774) after its exact task-shard
+    amendment was split into plan-only PR #3827. GitHub's REST timeline names
+    `remudero-fleet[bot]` as the closer of both; neither implementation was merged. They had to be
+    reopened and updated by hand after the plan PRs merged.
+
+    OBSERVED at current main: `buildOpenPrViews` groups every open PR resolving to the same task
+    id, assigns every lower-numbered peer `supersededBy` equal to the highest PR number, and the
+    bare-number supersession disposition closes it. No PR role is considered. The REST
+    supersession reader already fetches both PRs' changed-file lists, but a partial overlap is
+    deliberately `indeterminate`; the disposition therefore retains the bare-number close. In
+    the incidents, the exact plan shard is the shared path and the older PR's code/test paths are
+    the non-overlap, so the safety read positively observed the complement and still closed it.
+
+    The falsifying evidence would be either implementation PR having been closed by a person or
+    merged elsewhere, or the superseding PR changing non-plan files. GitHub's timeline and both
+    `/pulls/N/files` responses were checked: the fleet bot closed both implementations, and #3826
+    and #3827 were plan-only. This is not duplicate work. A plan filing and the implementation it
+    authorizes are complementary stages of one task.
+  design: |
+    Extend the existing three-valued supersession evidence with one positive, structural result
+    for the exact complementary shape: one PR's non-empty observed diff is wholly plan scope and
+    the other PR's non-empty observed diff contains at least one non-plan path. Use the shared
+    `isInPlanScope` predicate; do not reproduce plan-path rules. Inject it from `run-task.ts`,
+    which already imports it, so the REST leaf does not gain a cycle through the heavy
+    plan-architect module. Name both PR roles in the verdict so telemetry remains checkable.
+
+    The bare-number supersession row must yield for that positive complementary verdict without
+    requiring the concept-coexistence experiment flag. This is not an ambiguous concept ruling:
+    plan-only versus implementation is mechanically observable and closing either half can make
+    the other unmergeable. Preserve every existing direction: two implementation PRs remain
+    governed by ordinary supersession; two plan-only PRs remain governed by ordinary
+    supersession; empty, malformed, failed, and partial non-complementary reads remain
+    indeterminate and fail closed; the explicit `superseded` verdict and its policy gate do not
+    change.
+
+    Do not auto-merge either PR, weaken Standing Rule 15, infer roles from titles or branch names,
+    or add another GitHub call. The existing two `/files` reads already hold all evidence needed.
+  acceptance:
+    - claim: "a newer plan-only PR and an older implementation PR for the same task are classified as complementary and the implementation is not disposed stale"
+      proof: "unit test: test/open-prs-rest.test.ts"
+    - claim: "the inverse ordering, with the plan-only PR older than its implementation, also preserves both PRs"
+      proof: "unit test: test/sweep.test.ts"
+    - claim: "two implementation PRs and two plan-only PRs keep the existing supersession behavior unchanged"
+      proof: "unit test: test/sweep.test.ts"
+    - claim: "empty, malformed, failed, or merely partial-overlap evidence never receives the complementary verdict"
+      proof: "unit test: test/open-prs-rest.test.ts"
+    - claim: "the classification reuses the existing two changed-file reads and the repository's shared plan-scope predicate, adding zero GitHub calls and no path heuristic"
+      proof: "unit test: test/open-prs-rest.test.ts"
+  falsifier: |
+    Close this task without implementation if the REST file lists show either #3826 or #3827
+    changed a non-plan path, if GitHub's timeline shows a human rather than the fleet sweep closed
+    #3818/#3821, or if current main already has a positive plan-versus-implementation verdict that
+    makes the bare-number supersession row yield. Do not make unreadable evidence permissive and
+    do not disable ordinary duplicate disposal.
+  note: |
+    ID PROVENANCE: `rmd next-task-id --reserve` on detached current `origin/main` atomically held
+    `refs/rmd-id/W1-T2779`; the RESERVED id is authoritative.
+
+    RISK: high is Rule 19's sizing grade. One supersession decision crosses its existing REST
+    producer, leaf verdict type, disposition consumer, wiring call, and their tests. The
+    behavioral concern is singular and the external write remains the existing reversible PR
+    close.
+
+    OPERATOR BOUNDARY: this task changes code and tests only. It does not authorize merging a PR,
+    replacing either service, changing live policy, or recycling the daemon.

@@ -52,6 +52,10 @@ import { assertLiveSpawnAllowed } from "./spawn-guard.js";
 import { validateWorkerSettingsFile } from "./settings.js";
 import { DEFAULT_TEARDOWN_SCRATCH_SWEEP_MAX_AGE_MS, reapWorkerScratch, sweepStaleWorkerScratch } from "./worker-scratch.js";
 import { assertLiveWriteAllowed } from "./live-write-guard.js";
+// W1-T2777: same primitive `ensureInstallFresh` (run-task.ts) uses, shared via the extracted
+// `install-hash` module so both freshness paths compare the same hash — never a parallel
+// implementation that could drift silently. See lib/install-hash.ts for the extraction reason.
+import { hashInstallInputs } from "./install-hash.js";
 import {
   assertWorkerCredentialFile,
   CLAUDE_CONFIG_REL,
@@ -2726,7 +2730,19 @@ export function resolveNodeModulesSource(
   return [join(repoDir, "node_modules"), join(installRoot, "node_modules")].find((c) => exists(c));
 }
 
-export type NodeModulesLinkOutcome = "linked" | "already-present" | "no-source" | "failed";
+export type NodeModulesLinkOutcome =
+  | "linked"
+  | "already-present"
+  | "no-source"
+  | "failed"
+  // W1-T2777: the link was made (best-effort contract unchanged) but the source's
+  // `package.json`+`package-lock.json` hash differed from the worktree's. The worktree's
+  // source tree was cut from `origin/main` at HEAD; its `node_modules` came from
+  // `repoDir` (see {@link resolveNodeModulesSource}) which may sit arbitrarily far behind
+  // (see {@link recordCanonicalCheckoutDrift} for the coupling that surfaces this). This
+  // outcome tells the caller so a worker cannot start with a lockfile it cannot resolve
+  // and read the resulting "module not found" as a defect in its own diff.
+  | "linked-lockfile-mismatch";
 
 /**
  * Give a fresh worktree a `node_modules`, by SYMLINK — never by installing.
@@ -2757,6 +2773,21 @@ export function linkWorktreeNodeModules(
      *  as taken. Linking over either one would write INSIDE the existing target. */
     lstat?: (p: string) => unknown;
     symlink?: (target: string, path: string) => void;
+    /**
+     * W1-T2777: injectable hasher over `package.json` + `package-lock.json` (default the real
+     * `hashInstallInputs` shared with `ensureInstallFresh`). A test hands both sides to prove
+     * both directions of the compare — matching lockfiles stay quiet, differing ones return
+     * `linked-lockfile-mismatch`. Sharing this ONE primitive with the run-task freshness path
+     * is what stops two independent hashes on the same inputs from drifting silently.
+     */
+    hashInstallInputs?: (dir: string) => string;
+    /**
+     * W1-T2777: surface for the loud channel. Default `console.error`, matching
+     * {@link recordCanonicalCheckoutDrift}'s existing convention rather than inventing a second
+     * one. The warning names the two sides being compared (worktree source dir and the
+     * `node_modules` source path) so the operator or the caller has both without re-deriving.
+     */
+    warn?: (message: string) => void;
   } = {},
 ): NodeModulesLinkOutcome {
   const dest = join(worktreePath, "node_modules");
@@ -2770,10 +2801,47 @@ export function linkWorktreeNodeModules(
   if (!source) return "no-source";
   try {
     (deps.symlink ?? ((t: string, p: string) => symlinkSync(t, p, "dir")))(source, dest);
-    return "linked";
   } catch {
+    // Symlink failed — no lockfile compare is meaningful because there is nothing linked to
+    // compare against. Preserves the pre-W1-T2777 "failed" contract byte-identically.
     return "failed";
   }
+  // W1-T2777: LOCKFILE COMPARE AT SYMLINK TIME. The link is already in place (best-effort
+  // contract from the header holds), and now the two `package.json`+`package-lock.json` hashes
+  // decide whether it is SAFE-TO-USE or KNOWN-STALE. The source of node_modules is
+  // `parentOf(source)` — `resolveNodeModulesSource` returns `<x>/node_modules` and the
+  // hashInputs live in `<x>` — not `repoDir`, because on the fleet host the fallback branch
+  // resolves to the install root's own tree, not repoDir's (see the doc for `resolveSource`).
+  // WHY THIS IS THE RIGHT MOMENT. Any comparison earlier misses the fact that resolveSource
+  // may point at the install root rather than repoDir; any comparison later runs after a worker
+  // has already imported code and seen "Cannot find module" without the operator being told
+  // whose fault it was. Here, the link is fresh, the two source trees are identifiable, and
+  // the outcome propagates to the caller by return value — the existing best-effort pattern
+  // (`recordCanonicalCheckoutDrift`) uses the same idiom for the same reason.
+  const hashFn = deps.hashInstallInputs ?? ((d: string) => hashInstallInputs(d));
+  const nmSourceDir = dirname(source);
+  let mismatch = false;
+  try {
+    // Both reads catch failures internally (see hashInstallInputs' contract). A missing file
+    // hashes as empty content on both sides, which produces a MATCH — safest possible verdict
+    // when there is nothing to compare.
+    mismatch = hashFn(worktreePath) !== hashFn(nmSourceDir);
+  } catch {
+    // The hash function is documented to be non-throwing; a throw here means the injected
+    // fake broke that contract. Treat as "cannot tell" and preserve the pre-fix outcome —
+    // never invent a mismatch a real read did not observe.
+    mismatch = false;
+  }
+  if (mismatch) {
+    (deps.warn ?? ((m: string) => console.error(m)))(
+      `node_modules lockfile mismatch: worktree ${worktreePath} was cut from origin/main HEAD but its ` +
+        `node_modules is symlinked from ${nmSourceDir} whose package.json/package-lock.json hash differs — ` +
+        "a worker may see 'Cannot find module' or a resolved version its own diff never asked for " +
+        "(best-effort — see linkWorktreeNodeModules and recordCanonicalCheckoutDrift)",
+    );
+    return "linked-lockfile-mismatch";
+  }
+  return "linked";
 }
 
 /**
