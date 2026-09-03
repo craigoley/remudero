@@ -14,6 +14,7 @@
     - src/run-task.ts
     - plan/policy.yaml
     - test/a-github-check-fanout-is-a-sweep-storm.test.ts
+    - test/policy.test.ts
   origin: "operator-session#github-event-review-throughput-2026-09-03"
   plan_refs: ["W1-T2568", "W1-T2656", "W1-T2582", "W1-T1272"]
   status: queued
@@ -92,5 +93,12 @@
     W1-T2741 was atomically reserved at `refs/rmd-id/W1-T2741` before this file was written. This
     is deliberately a scheduling/backpressure task, not the later event-indexed incremental-queue
     design: it changes when the existing full reconciliation runs while preserving its authority.
-    The policy loader, daemon wiring and wake primitive must land together, so the five-path band
+    The policy loader, daemon wiring and wake primitive must land together, so the six-path band
     is `risk: high` with `band_meaning: span` rather than a partially wired policy PR.
+
+    Scope correction, 2026-09-03. `test/policy.test.ts` owns an exhaustive `NET_NEW` registry for
+    every policy field's required provenance kind. Adding the designed net-new
+    `githubEventWake.checkSettleMs` row without updating that registry makes the existing policy
+    suite fail (`githubEventWake.checkSettleMs should be lifted`, because omission falls into the
+    complement). The path is therefore part of the implementation's mechanically required scope;
+    this plan-only correction declares it before any implementation PR is opened.
