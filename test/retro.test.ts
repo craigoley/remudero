@@ -48,6 +48,7 @@ import {
   renderPlanHealth,
   renderProceduralCandidates,
   shippedSince,
+  STATUS_FIELD_RE,
   taskDefectCounts,
   tierOf,
   verdictDistribution,
@@ -966,6 +967,18 @@ const CANONICAL_STATUS_FLIP_TEXT =
   "sync `plan/tasks.d/W1-T2473-*.yaml` `status:` field from `queued` to `shipped` (PR #3304 " +
   "already merged) — stale status could cause a scheduler to re-offer already-completed work or " +
   "block dependents unnecessarily.";
+
+// negative-reachability-ratchet.test.ts (W1-T2317) counts every module-scope `_RE` validator in
+// src/**/*.ts that no test drives through BOTH arms by identifier — `STATUS_FIELD_RE` is exported
+// (see its own doc in src/lib/retro.ts) exactly so this fixture can name it directly, rather than
+// only ever reaching it indirectly through `decorativeStatusFlipReason`/`mineFollowups`, which the
+// ratchet's text-proximity heuristic cannot credit.
+test("STATUS_FIELD_RE: matches the `status:` field spelling every recurrence has used, and rejects ordinary prose that never names the field", () => {
+  assert.equal(STATUS_FIELD_RE.test("`status:` field from `queued` to `shipped`"), true);
+  assert.equal(STATUS_FIELD_RE.test("status: field"), true);
+  assert.equal(STATUS_FIELD_RE.test("the `retirement:` field, not the status field"), false);
+  assert.equal(STATUS_FIELD_RE.test("reconsider whether status should be renamed"), false);
+});
 
 test("mineFollowups: a follow-up whose whole action is flipping a task's yaml status field to an out-of-vocabulary value is REFUSED at harvest and never becomes a candidate, while an ordinary work follow-up in the same batch still mints", () => {
   const records = parseLedger(

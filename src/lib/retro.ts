@@ -2554,8 +2554,13 @@ const MERGED_MEANING_STATUSES = new Set(["merged", "done"]);
 
 /** Matches an entry naming the yaml `status:` field itself — anchored on the `status:` colon
  *  spelling every one of the four recurrences has used verbatim — and NOT `retirement:`, a bare
- *  mention of the word "status" with no field syntax, or prose about the derived projection. */
-const STATUS_FIELD_RE = /`?status:`?\s*field/i;
+ *  mention of the word "status" with no field syntax, or prose about the derived projection.
+ *  EXPORTED (unlike this module's other `_RE` validators) so test/retro.test.ts can drive both
+ *  arms directly by identifier — negative-reachability-ratchet.test.ts's fixture-less `_RE`
+ *  census (W1-T2317) counts a validator regex that no test names by `SYMBOL.test(...)`, and this
+ *  one is new at src/lib/retro.ts's already-at-baseline population; the fixture is the correction,
+ *  not a widened allowance. */
+export const STATUS_FIELD_RE = /`?status:`?\s*field/i;
 
 /**
  * The value a `STATUS_FIELD_RE`-matching entry's text asks to set the field TO, or `undefined`
