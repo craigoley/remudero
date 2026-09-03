@@ -1,0 +1,68 @@
+- id: W1-T2742
+  title: "A PROOF TIMEOUT IS GRADED AS A FAILED PROOF — `execFileSync` kills a slow proof with SIGTERM, but `node --test` TRAPS SIGTERM and exits 1 CLEANLY, so `execWhitelistedProof`'s `typeof err.status !== \"number\"` guard never fires and a criterion whose test PASSES is reported `executed_fail`, which overrides keyword coverage and refuses the PR"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: "span"
+  budget_usd: 8.00
+  files: [src/lib/review.ts, plan/policy.yaml, test/a-proof-timeout-is-not-a-failed-proof.test.ts, test/policy.test.ts]
+  origin: "operator-decision#pr-3719-refused-on-a-passing-suite-2026-09-03"
+  plan_refs: ["W1-T253", "W1-T2728", "W1-T499"]
+  status: queued
+  attempts: 0
+  note: |
+    BAND. `risk: high` with `band_meaning: span` is Rule 19 SIZING, not blast radius: the fix and
+    the bound it exposes cannot ship apart. Correcting the grading alone leaves every proof slower
+    than 60s concluding nothing on a healthy suite; raising the bound alone leaves the misgrading
+    live and merely rarer. `plan/policy.yaml` is NOT on the instrument surface (MEASURED:
+    `detectInstrumentEntanglement(["src/lib/review.ts","plan/policy.yaml"])` returns
+    `entangled: false`), so Rule 25 does not force these into separate PRs.
+  rationale: |
+    MEASURED 2026-09-03 on current main, with a probe that spawns a deliberately slow `node --test`
+    under a 2s `execFileSync` timeout:
+
+      status = 1   signal = null   killed = undefined   code = "ETIMEDOUT"
+
+    `execWhitelistedProof` (src/lib/review.ts) opens its catch with
+    `if (typeof err.status !== "number") throw err`, whose own comment says it is there to turn a
+    timeout into `exec_error`. It cannot: `execFileSync` kills the child with SIGTERM, `node --test`
+    installs a handler and shuts down CLEANLY, and the error therefore carries the NUMBER 1 in
+    `status` with `signal: null` and `killed: undefined` — indistinguishable, by every field that
+    guard consults, from an ordinary failing test. The proof falls through to
+    `return "fail"`, and `executed_fail` OVERRIDES keyword coverage.
+
+    THE CONSEQUENCE IS A FALSE REFUSAL, NOT A MISSED PASS. PR #3719 was refused on criterion
+    "a second failure leaves the retro marker unchanged …", proof
+    `unit test: test/retro-marker-atomic.test.ts` — a suite that passes 33/33 in 52.9s on a dev
+    host and merely exceeded 60s on the reviewer's. The verdict read "proof executed and FAILED",
+    which sent a session hunting a defect that does not exist.
+
+    `code: "ETIMEDOUT"` is set by Node on the timeout error whatever the child did with the
+    signal, and is the one field that discriminates. It is checked FIRST, independently of
+    `status`.
+
+    THE BOUND ITSELF IS A HANG GUARD AND STAYS. src/lib/review.ts states it: "a hanging test must
+    never stall the required check into the absent-check deadlock class" — an absent required
+    check deadlocks merge forever, so removing the timeout trades a wrong verdict for a stuck one.
+    What was wrong is the VALUE: 60000 was separating nothing, since the population it refused is
+    real passing integration suites. Raised to 180000, inside this row's own declared
+    `max: 300000`. The ruled floor (`min: 60000`, the binding 30000 rejection) is untouched.
+
+    ONE COUPLED TEST EDIT. test/policy.test.ts's `.nan` smuggle fixture text-replaced the literal
+    `value: 60000` out of the shipped policy.yaml; raising the value turned that substitution into
+    a silent no-op, so the guard would have asserted nothing about a file it had failed to edit.
+    It now matches the value by pattern and keeps the ruled floor literal, so the next retune does
+    not re-break it.
+  acceptance:
+    - claim: "a proof that exceeds the per-proof timeout reaches the caller as exec_error rather than a verdict, so a slow-but-passing suite is never reported as a failing criterion"
+      proof: "unit test: test/a-proof-timeout-is-not-a-failed-proof.test.ts"
+    - claim: "a genuine clean nonzero exit is still graded fail, so the timeout fix is not a blanket suppression of real refusals"
+      proof: "unit test: test/a-proof-timeout-is-not-a-failed-proof.test.ts"
+    - claim: "the operating proof timeout is raised and stays inside the envelope the policy row itself declares, with the ruled floor unchanged"
+      proof: "unit test: test/a-proof-timeout-is-not-a-failed-proof.test.ts"
+  falsifier: |
+    Delete the `err.code === "ETIMEDOUT"` line and the named suite fails; restore it and it passes.
+    MEASURED both ways 2026-09-03: without the fix `# fail 1`, with it `# fail 0`, 3/3.
