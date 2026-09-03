@@ -1,0 +1,86 @@
+- id: W1-T2764
+  title: "THE LEDGER'S STEP NAMES ARE THE ONE VOCABULARY WITHOUT A DECODER — some thirty enumerations in src/ are closed and refused by code, and the ledger's step field, the most-read machine record the fleet has, is a free string written ad hoc with no registry, no meaning beside it, and a standing learning that a step name is a claim; add a registry naming each step's meaning, its writer and the outcomes that writer can return, ratchet unregistered literals shrink-only, and render the page from it; rename nothing"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: |
+    RE-DERIVED AT 7775b9977 (2026-09-03).
+
+    (1) THE ASYMMETRY. Escalation option kinds are refused by `validateEscalationOptionKind`;
+    learnings `lifecycle` is refused at load; policy `origin:` is refused in both directions by
+    `parseOrigin`; wipe-test factors are refused by `resolveWipeTestFactor`; ledger SENDERS are
+    refused by `resolveProducerIdentity`, and `PRODUCER_IDENTITIES` is the one vocabulary that
+    carries its own `displayName`. The ledger's `step` (`LedgerLine.step: string`, src/lib/ledger.ts)
+    is none of these. The query `grep -rhoE 'log\("[a-z_]+(\.[a-z_]+)+"' src/ | sort -u | wc -l`
+    reads 431 distinct literals at 7775b9977; the closed subsets that exist —
+    `DECISION_RELEVANT_LEDGER_STEPS`, `RENDER_RELEVANT_LEDGER_STEPS`, `SWEEP_LIVENESS_STEPS`,
+    `LANE_START_STEPS`, `OPERATOR_ACTION_STEPS` — select from that open universe for retention or
+    rendering and define nothing.
+
+    (2) THE LEARNING THAT SAYS WHY IT MATTERS. learnings/architecture.yaml carries
+    `ledger-step-name-is-a-claim-not-evidence`: `armAutoMerge` returns one of seven outcomes, five
+    arm nothing, and lanes logged `automerge.armed` unconditionally — 176 rows, 135 blind. A step
+    name with its writer's real outcome set beside it would have made that row unwritable as
+    evidence. Nothing today says, for any step, what the function that wrote it can return.
+
+    (3) THE RULING THAT BOUNDS THIS. DECISIONS.md, 2026-08-15: "Ledger step names, function names
+    and file paths are not [free to change]. Those are query keys: renaming one breaks every
+    historical question anyone can ask of the record". So this is a DECODER, never a rename: every
+    step keeps its literal; the registry adds the plain-language meaning beside it.
+
+    (4) WHY A RATCHET AND NOT A REFUSAL AT WRITE. A daemon that refuses to append a ledger line on
+    an unregistered step would fail on its first new step in production — a bound firing on a
+    healthy condition, this repo's recurring defect. The CI ratchet shape (`claude-md-budget-ratchet`,
+    `task-id-existence-check` with its baseline of exemptions) counts unregistered literals against
+    a shrink-only baseline, so the population can only fall and the daemon never stops writing.
+  design: |
+    (i) THE REGISTRY. src/lib/ledger-steps.ts: `LEDGER_STEPS`, one row per step — `step`,
+    `meaning` (what happened, in the operator-message register), `writer` (the symbol that logs
+    it), `outcomes` (what that writer can return, so a step logged unconditionally is legible as
+    such), and `family` (the dotted prefix). Seeded from the literals the ratchet finds, with
+    meanings drawn from each writer's own doc comment; a row whose writer cannot be found by name
+    is refused by the registry's own test.
+
+    (ii) THE RATCHET. scripts/ledger-steps-check.mjs scans src/ for step literals with the query
+    above and its `step: "..."` twin, subtracts the registry, and compares the remainder to
+    scripts/ledger-steps-baseline.json — shrink-only, exemptions each with a written reason, the
+    task-id-existence shape. Runs in `npm test` via `ledger-steps:check`.
+
+    (iii) THE PAGE. scripts/generate-ledger-steps.mjs renders docs/ledger-steps.md from the
+    registry, grouped by family, drift-gated like docs/cli-reference.md.
+
+    (iv) THE DECODER SEAM AND ITS ONE CALLER. `meaningOfStep(step)` returns the row or undefined.
+    `rmd ledger-grep` (src/run-task.ts) prints the registered meaning beside a matched row's step
+    when one exists and prints the row unchanged when none does — the one call site this task
+    wires, read-only; the console's row renderers may read the same seam later and are not touched.
+
+    (v) WHAT DOES NOT CHANGE. Every step literal. `appendLedger`. Retention subsets.
+  acceptance:
+    - claim: "every registered step names a writer that exists and the outcomes that writer can return"
+      proof: "unit test: test/every-ledger-step-has-a-meaning.test.ts"
+    - claim: "an unregistered step literal added to src raises the unknown count and fails the ratchet by name"
+      proof: "unit test: test/every-ledger-step-has-a-meaning.test.ts"
+    - claim: "the generated page and the registry cannot drift"
+      proof: "unit test: test/every-ledger-step-has-a-meaning.test.ts"
+    - claim: "the registry exists with its decoder seam"
+      proof: "grep: meaningOfStep( in src/lib/ledger-steps.ts"
+    - claim: "ledger-grep reads the seam and prints the meaning beside a matched step"
+      proof: "grep: meaningOfStep( in src/run-task.ts"
+    - claim: "the ratchet is wired into the test script"
+      proof: "grep: ledger-steps:check in package.json"
+  risk: high
+  band_meaning: span
+  origin: "oper#concept-scan-2026-09-03"
+  plan_refs: ["W1-T2273", "W1-T2279", "W1-T2697", "§8A", "§12"]
+  files: [src/lib/ledger-steps.ts, src/run-task.ts, scripts/ledger-steps-check.mjs, scripts/ledger-steps-baseline.json, scripts/generate-ledger-steps.mjs, docs/ledger-steps.md, package.json, test/every-ledger-step-has-a-meaning.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    risk:high, band_meaning:span — a registry, a ratchet with its baseline, a generator and a page
+    under Rule 19; runtime blast radius is nil, no ledger write changes and no literal is renamed.
+
+    FILED AT THE OPERATOR'S DIRECTION of 2026-09-03 (the compact-dialect scan). The 2026-08-15
+    vocabulary ruling was read before filing and binds this task: decode, never rename.
