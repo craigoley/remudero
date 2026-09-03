@@ -1,0 +1,69 @@
+- id: W1-T2765
+  title: "THE PROMPT MANIFEST IS WRITTEN ON EVERY RUN AND READ BY NOTHING — W1-T2297 fingerprints every prompt part by name, sha256 and byte count into prompt.manifest, and no verb, report or panel reads a row, so the fleet's own dialect has a meter with no dial; give the digest a section summarising bytes per part over its window and naming the part that grew"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 18.00
+  rationale: |
+    RE-DERIVED AT 7775b9977 (2026-09-03).
+
+    (1) THE WRITER. `buildPromptManifest` (src/lib/prompt-manifest.ts) records `{ name, present,
+    sha256, bytes }` per part, and `runTask` logs it as `prompt.manifest` right after
+    `prompt.linted`, re-calling `implementPromptParts` with the identical arguments so the
+    fingerprint cannot drift from what was rendered. Its own header calls it "A RECORD, NEVER A
+    GATE" and it is excluded from `DECISION_RELEVANT_LEDGER_STEPS` by design.
+
+    (2) THE READER. None. Across src/, scripts/, docs/ and test/ the step name appears in its
+    writer, its unit test, and `buildBundle`'s independent producer. `rmd digest` (src/lib/digest.ts,
+    W1-T2277) renders cost, cache mix and cadence items and has no prompt section; the measurement
+    panel (W1-T2660) reads measurement rows and has no prompt row. This is the adoption class the
+    adoption report (W1-T2266) exists to name: a mechanism merged and never consumed.
+
+    (3) WHY IT MATTERS TO THIS SCAN. The daemon's dialect to a worker is six parts today and gains a
+    seventh under the headline shard filed beside this one, behind a policy row. Whether a part is growing, how large the learnings
+    part actually lands against its 8,148-character cap, and which part dominates a prompt are all
+    questions the manifest already answers per run and nothing answers per week. A compaction
+    decision with no meter is a guess; the meter exists.
+
+    (4) BYTES, NOT TOKENS, ON PURPOSE. The fleet measures prompt size in bytes and characters;
+    the only token figures are billed after the fact on the run's ledger line and one coarse
+    `CHARS_PER_TOKEN = 4` estimate in digest.ts. Bytes are the manifest's unit and the ratchets'
+    unit; this task reports in that unit and does not add a tokenizer.
+  design: |
+    (i) THE SUMMARY. `summarizePromptParts(rows, window)` in src/lib/digest.ts: per part name,
+    the presence rate, the p50 and p90 byte counts over the window, the same over the prior window,
+    and the one part with the largest p50 growth named. A window with no manifest rows renders
+    "not observed" and never a zero row, the P48 no-naked-zero discipline.
+
+    (ii) THE SECTION. `renderDigest` gains "PROMPT PARTS", one line per part in the register the
+    digest already uses, after cost and before cadence items; the summary builder in src/run-task.ts
+    reads `prompt.manifest` rows through the ledger union reader (`ledgerRotationEntries`), never
+    the live file alone.
+
+    (iii) WHAT DOES NOT CHANGE. The manifest's shape and step. The digest's other sections. No
+    gate, no threshold, no ceiling: this is a report.
+  acceptance:
+    - claim: "the digest summarises manifest rows per part with p50 and p90 bytes over its window and names the part that grew most"
+      proof: "unit test: test/the-prompt-manifest-reaches-a-reader.test.ts"
+    - claim: "a window with no manifest rows renders not observed and never a zero"
+      proof: "unit test: test/the-prompt-manifest-reaches-a-reader.test.ts"
+    - claim: "the summary exists in the digest module"
+      proof: "grep: summarizePromptParts( in src/lib/digest.ts"
+    - claim: "the section is rendered by name"
+      proof: "grep: PROMPT PARTS in src/lib/digest.ts"
+  risk: high
+  band_meaning: span
+  origin: "oper#concept-scan-2026-09-03"
+  plan_refs: ["W1-T2266", "W1-T2277", "W1-T2297", "W1-T2660", "§8A"]
+  files: [src/lib/digest.ts, src/run-task.ts, test/the-prompt-manifest-reaches-a-reader.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    risk:high, band_meaning:span — the digest module and the summary builder that feeds it are
+    two concerns under Rule 19 (measured: the linter refused medium); runtime blast radius is one
+    more report section and no gate.
+
+    FILED AT THE OPERATOR'S DIRECTION of 2026-09-03 (the compact-dialect scan). One reader for a
+    record that has none, in the adoption class W1-T2266 names.
