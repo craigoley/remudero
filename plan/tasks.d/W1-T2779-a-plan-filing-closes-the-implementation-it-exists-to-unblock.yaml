@@ -11,6 +11,7 @@
     - src/lib/open-prs-rest.ts
     - src/lib/supersession.ts
     - src/lib/sweep.ts
+    - src/run-task.ts
     - test/open-prs-rest.test.ts
     - test/sweep.test.ts
   origin: "operator-session#plan-filing-closed-implementations-2026-09-03"
@@ -43,8 +44,9 @@
     Extend the existing three-valued supersession evidence with one positive, structural result
     for the exact complementary shape: one PR's non-empty observed diff is wholly plan scope and
     the other PR's non-empty observed diff contains at least one non-plan path. Use the shared
-    `isInPlanScope` predicate; do not reproduce plan-path rules. Name both PR roles in the verdict
-    so telemetry remains checkable.
+    `isInPlanScope` predicate; do not reproduce plan-path rules. Inject it from `run-task.ts`,
+    which already imports it, so the REST leaf does not gain a cycle through the heavy
+    plan-architect module. Name both PR roles in the verdict so telemetry remains checkable.
 
     The bare-number supersession row must yield for that positive complementary verdict without
     requiring the concept-coexistence experiment flag. This is not an ambiguous concept ruling:
@@ -79,8 +81,9 @@
     `refs/rmd-id/W1-T2779`; the RESERVED id is authoritative.
 
     RISK: high is Rule 19's sizing grade. One supersession decision crosses its existing REST
-    producer, leaf verdict type, disposition consumer, and their tests. The behavioral concern is
-    singular and the external write remains the existing reversible PR close.
+    producer, leaf verdict type, disposition consumer, wiring call, and their tests. The
+    behavioral concern is singular and the external write remains the existing reversible PR
+    close.
 
     OPERATOR BOUNDARY: this task changes code and tests only. It does not authorize merging a PR,
     replacing either service, changing live policy, or recycling the daemon.
