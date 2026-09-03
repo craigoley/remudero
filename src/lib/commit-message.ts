@@ -1,6 +1,5 @@
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
-import { SELF_SYNC_GUARD_ENV } from "./self-sync.js";
 
 /**
  * lib/commit-message.ts — Conventional-Commits shaping for MACHINE-BUILT commit
@@ -481,6 +480,14 @@ export type PreflightSpawn = (
 // keep growing, while still catching a genuinely stuck/looping child.
 const PREFLIGHT_SPAWN_MAX_BUFFER = 64 * 1024 * 1024;
 
+// W1-T2769: the LITERAL, never an import off self-sync.js -- self-sync.ts already imports
+// (transitively, via daemon.ts) back to this module across dozens of existing rings, so a value
+// import the other way closes each one into a NEW dependency-cruiser cycle (MEASURED: 13 -> 53
+// warnings, cycle-ratchet ceiling in scripts/cycle-baseline.json). Same pattern as
+// open-prs-rest.ts's own header note for supersession.ts. self-sync.ts's `SELF_SYNC_GUARD_ENV`
+// export is the canonical name for this string; this constant must stay byte-identical to it.
+const SELF_SYNC_GUARD_ENV_NAME = "RMD_SELF_SYNC_DONE";
+
 export function defaultPreflightSpawn(
   file: string,
   args: string[],
@@ -503,7 +510,7 @@ export function defaultPreflightSpawn(
   // inheritance path. `run-task.ts`'s `READ_ONLY_FRESHNESS_EXEMPT_VERBS` addition removes the
   // NEED to export it for `preflight` itself; this removes the RISK of it regardless, for a
   // shell where it is set for some unrelated reason.
-  delete env[SELF_SYNC_GUARD_ENV];
+  delete env[SELF_SYNC_GUARD_ENV_NAME];
   const res = spawnSync(file, args, {
     cwd: opts.cwd,
     input: opts.input,

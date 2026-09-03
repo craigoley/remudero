@@ -27,7 +27,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { defaultPreflightSpawn } from "../src/lib/commit-message.js";
 import { main } from "../src/run-task.js";
-import { checkCliFreshness } from "../src/lib/self-sync.js";
+import { checkCliFreshness, SELF_SYNC_GUARD_ENV } from "../src/lib/self-sync.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");
@@ -220,4 +220,21 @@ test("W1-T2769: checkCliFreshness in a spawned child still REFUSES a diverged ch
     if (prior === undefined) delete process.env.RMD_SELF_SYNC_DONE;
     else process.env.RMD_SELF_SYNC_DONE = prior;
   }
+});
+
+// ── the literal cannot drift from the canonical export ───────────────────────────────────────
+//
+// `defaultPreflightSpawn` scrubs the LITERAL `"RMD_SELF_SYNC_DONE"` rather than importing
+// self-sync.ts's own `SELF_SYNC_GUARD_ENV` — importing it would close dozens of existing rings
+// (self-sync.ts already reaches back to commit-message.ts transitively via daemon.ts) into NEW
+// dependency-cruiser cycles (MEASURED: 13 -> 53 warnings against the cycle-ratchet ceiling).
+// That means the two names are no longer tied together by the type checker, so this guard is
+// what would catch either one being renamed without the other.
+test("W1-T2769: the literal defaultPreflightSpawn scrubs matches self-sync.ts's own SELF_SYNC_GUARD_ENV", () => {
+  assert.equal(
+    SELF_SYNC_GUARD_ENV,
+    "RMD_SELF_SYNC_DONE",
+    "if this ever changes, commit-message.ts's inlined literal (kept separate to avoid a " +
+      "dependency-cruiser cycle) must be updated to match",
+  );
 });
