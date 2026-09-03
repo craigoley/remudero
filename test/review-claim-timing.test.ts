@@ -180,3 +180,44 @@ test("W1-T2771: an unstarted tail never releases another pass's active claim", a
   const contenderRow = readLedgerLines(path).find((line) => line.step === "sweep.disposed" && line.run_id === "CONTENDER");
   assert.match(String(contenderRow?.stand_down_reason ?? ""), /duplicate review key/);
 });
+
+test("W1-T2771: a failed action-time re-read fails closed, releases the claim, and never posts", async () => {
+  const path = ledgerPath();
+  const review = reviewablePr();
+  let reads = 0;
+  let postReviewCalled = false;
+
+  const summary = await runSweep(
+    [review],
+    deps(path, {
+      postReview: async () => {
+        postReviewCalled = true;
+      },
+      // The top-of-function `prior` snapshot (read #1) must still succeed so the review is even
+      // identified as a candidate; only the action-time re-read inside `claimReview` (read #2)
+      // fails, exercising the `catch` that reads the ledger closed instead of throwing out of
+      // the sweep.
+      readLedger: (p) => {
+        reads += 1;
+        if (reads === 1) return readLedgerLines(p);
+        throw new Error("ledger disk read boom");
+      },
+    }),
+    DEFAULT_SWEEP_POLICY,
+  );
+
+  assert.equal(postReviewCalled, false, "a failed re-read must never let the review post");
+  assert.equal(summary.actions[0]?.acted, false, "the sweep stands the candidate down rather than acting on a stale claim");
+  const row = readLedgerLines(path).find((line) => line.step === "sweep.disposed" && line.pr_number === 100);
+  assert.match(
+    String(row?.stand_down_reason ?? ""),
+    /review action-time outcome read failed closed \(ledger disk read boom\)/,
+    "the disposed row carries the read failure so an operator can see why the claim was released",
+  );
+
+  // The claim is released on the failed-read path (not leaked), so a later pass with a healthy
+  // ledger reader can still claim and post the review normally.
+  const retry = await runSweep([review], deps(path, { postReview: async () => { postReviewCalled = true; } }), DEFAULT_SWEEP_POLICY);
+  assert.equal(postReviewCalled, true, "a subsequent pass with a working ledger reader can still claim the released key");
+  assert.equal(retry.actions[0]?.acted, true);
+});
