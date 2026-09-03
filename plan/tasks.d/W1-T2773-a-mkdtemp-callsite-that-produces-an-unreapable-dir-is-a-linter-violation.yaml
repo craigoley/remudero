@@ -1,0 +1,143 @@
+- id: W1-T2773
+  title: "A BARE-PREFIX `mkdtempSync` PRODUCES A DIR THE BOOT SWEEP CANNOT REAP, AND ~1020 CALLSITES DO IT — reapability was contingent on `test/setup/tmp-hygiene.ts` being `--import`ed, and `scripts/recovery-drill.mjs:159` (a variable prefix, no wrapper) plus 5 named test prefixes (`sweep-reentry-`, `unwired-gate-`, `fleet-heartbeat-gclog-`, `w1-t2587-instr-base-`, `reclaim-state-`, …) leak `<prefix>-*` dirs the `rmd-`-keyed sweep never matches"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: "span"
+  budget_usd: 12.00
+  files: [scripts/mkdtemp-callsite-check.mjs, hooks/pre-commit, hooks/mkdtemp-allowlist.txt, test/mkdtemp-callsite-check.test.ts, scripts/recovery-drill.mjs, test/a-bound-that-stops-waiting-does-not-stop-the-work.test.ts, test/a-clone-that-can-no-longer-gc-says-so-in-the-beat.test.ts, test/a-gate-shaped-instrument-that-nothing-invokes.test.ts, test/a-hand-rolled-mutation-test-collides-with-the-real-harness.test.ts, test/a-lock-whose-container-is-gone-is-reclaimed-not-waited-on.test.ts]
+  origin: "operator-decision#w1-t2773-reshape-source-fix-to-linter-2026-09-03"
+  plan_refs: ["W1-T115", "W1-T131", "W1-T137", "W1-T2291"]
+  status: queued
+  attempts: 0
+  note: |
+    THIS SHARD'S SCOPE CHANGED. The first brief called for an unconditional fix inside src/lib/tmp.ts:
+    move `reapableTmpPrefix` in, install a `fs.mkdtempSync` wrap at module load, and let the ~60
+    fixture callsites route through unchanged. That was built and the falsifier (a bare
+    `node --test` on `test/a-bound-that-stops-waiting-does-not-stop-the-work.test.ts`) refused to
+    pass: the fix produced ZERO reapable dirs, 4 fresh bare `sweep-reentry-*`. Root cause: `tmp.ts`
+    is a LEAF; only `src/run-task.ts` and `src/lib/worker-provider.ts` import it, so its wrap fires
+    only when one of those is on the graph. A bare `node --test <file>` doesn't load either.
+    Operator ruling recorded: (a) documenting a longer `--import` workaround and (b) widening
+    tmp.ts into a hub with a global load-order dependency are both worse than the status quo.
+    Option (c) is correct: catch the callsite at authoring time with a linter that reads the AST
+    directly, so the fix does not depend on any import graph.
+
+    AND THE SCALE CHANGED. `git grep -E "mkdtempSync\\s*\\(\\s*join\\s*\\(\\s*tmpdir\\s*\\(\\s*\\)"`
+    over src/scripts/test/ that DON'T carry `rmd-` on the same line: 1020 hits across 629 files;
+    307 files carry no `rmd-` literal anywhere. The earlier brief's "5 examples + others grep
+    finds" underestimated by two orders of magnitude. The rule + hook + migration cannot ship as
+    ONE PR (conflict surface every open branch touches), and it doesn't have to: this shard ships
+    the RULE and the HOOK and the SPECIFIC SITES the falsifier exercises; a sibling shard picks
+    up the rest of the migration in tranches.
+  # ── OPERATOR FOLD-INS (2026-09-03) ────────────────────────────────────────────────────────
+  # Q1 (allowlist location): on-disk `hooks/mkdtemp-allowlist.txt`, declared as a sixth file. A
+  # fail-closed rule with ~1015 exemptions has its allowlist as a load-bearing artifact, not a
+  # constant in the linter's own source. On-disk keeps retirement PRs (W1-T2775's tranches) small
+  # and reviewable — a diff removes N lines from a plain-text file, one per callsite migrated.
+  #
+  # Q1 (worker.ts drop, MEASURED at src/lib/worker.ts:3297 on origin/main): `worktreeAdd` writes
+  # `core.hooksPath hooks` per worktree — POINTS AT THE DIRECTORY, not any specific file — and
+  # `deploy/entrypoint.sh` does the same for the daemon container. Any tracked file dropped into
+  # `hooks/` becomes active immediately with no source change, exactly as `hooks/commit-msg`
+  # (W1-T137) and `hooks/deny-floor.sh` already do. src/lib/worker.ts is therefore NOT in this
+  # shard's `files:`; a reviewer asking why should read that line.
+  #
+  # Q2 (sibling filing): the ~1015-callsite migration is filed as W1-T2775, in this same PR, so
+  # `hooks/mkdtemp-allowlist.txt`'s retirement is a scheduled thing rather than a promise. This
+  # shard ships the rule; W1-T2775 retires the allowlist in operator-paced tranches. See its own
+  # record for the atomicity/retirement/sizing rules its acceptance pins.
+  #
+  # Q3 (REAPABLE_TMP_MARKER): REJECTED. The rule accepts `RMD_TMP_PREFIX` and nothing else.
+  # Adding a second sanctioned prefix before a callsite needs it is speculative surface for a
+  # rule whose entire job is refusing surface. When a future task needs the marker, that task
+  # adds both the constant and the lint-rule allowance in ONE commit, keeping the linkage
+  # explicit.
+  #
+  # PRE-COMMIT MESSAGE FOLD (operator directive): refusals must name the fix, not the rule. The
+  # message is written for a human who authored the bare form an hour ago and does not yet know
+  # this repo has a reapability discipline. Shape:
+  #
+  #     mkdtemp prefix 'foo-' will not be reaped by src/lib/tmp.ts's sweepStaleTempDirs — use
+  #     `${RMD_TMP_PREFIX}foo-` or add to hooks/mkdtemp-allowlist.txt with a reason.
+  #
+  # An unexplained refusal becomes a source of frustration people eventually route around; a
+  # message that names the fix does not. (The earlier draft cited `/etc/cron.d/rmd-tmp-sweep`
+  # which does not exist in this tree — the correct citation is `src/lib/tmp.ts`'s boot sweep.)
+  rationale: |
+    THE DEFECT AT SOURCE. `src/lib/tmp.ts`'s `sweepStaleTempDirs` reaps only names starting with
+    `RMD_TMP_PREFIX` = `"rmd-"`. `test/setup/tmp-hygiene.ts` wraps `fs.mkdtempSync` to normalize a
+    bare prefix through `reapableTmpPrefix`, prepending `rmd-test-` so the sweep matches — but
+    that wrap only fires when the setup file is `--import`ed. A bare `node --test <file>`, a
+    script the tests spawn (`scripts/recovery-drill.mjs:159`), a developer running one file
+    directly, and every future callsite added by a worker that forgets the convention all bypass
+    it. The wrap was a workaround at the wrong layer; the callsite is what needs to be authored
+    correctly.
+
+    THE RULE. A `mkdtempSync` call whose FIRST argument is `join(tmpdir(), <expr>)` (or a
+    statically-resolvable alias) is a violation UNLESS `<expr>` is a string beginning with
+    `rmd-`, or a template literal beginning with `${RMD_TMP_PREFIX}`, or the callsite is on
+    the documented `hooks/mkdtemp-allowlist.txt`. Non-string
+    `<expr>` (variable prefix, function return, spread) is refused outright: the rule reads the
+    AST, not the runtime value, so a variable prefix cannot be statically proven reapable and
+    must be replaced with a resolved literal. `scripts/tracked-source-write-check.mjs` is the
+    precedent for the AST walk shape: `git ls-files` for corpus, best-effort static resolution of
+    string arguments, a small explicit exemption list rather than pattern soup, and a doc comment
+    that names what the check CANNOT catch.
+
+    THE HOOK. `.husky/` does not exist here; `lint-plan` runs from CI only (measured 2026-09-03).
+    `hooks/pre-commit` doesn't exist yet either, but `hooks/commit-msg` and `hooks/deny-floor.sh`
+    both do, and `src/lib/worker.ts` (line 3297) already writes `core.hooksPath hooks` into every
+    worktree at `worktreeAdd`, and `deploy/entrypoint.sh` writes the same for the daemon
+    container. So a new tracked `hooks/pre-commit` calling `scripts/mkdtemp-callsite-check.mjs`
+    inherits the SAME wiring `commit-msg` uses, with no bootstrap, no husky install, and no
+    developer machine that CI never sees. A worker that authors a bare-prefix callsite gets its
+    commit refused in its own worktree, before the branch push, before CI. The check also runs in
+    CI (a new `.github/workflows/ci.yml` job or a `lint-plan` sibling) so the operator's own
+    checkout, and any commit made outside the hook path, cannot slip past.
+
+    THE MIGRATION IN THIS PR. Only the sites the falsifier NAMES — the five test prefixes
+    (`sweep-reentry-`, `unwired-gate-`, `fleet-heartbeat-gclog-`, `w1-t2587-instr-base-`,
+    `reclaim-state-`) and `scripts/recovery-drill.mjs:159` — plus every OTHER site that lives in
+    the same files as those five. That is bounded and reviewable. The remaining ~1015 hits ship
+    behind a sibling migration shard (see BAND below) in tranches that respect the conflict
+    surface every open branch presents. Until they land, they carry an allowlist entry in
+    `scripts/mkdtemp-callsite-check.mjs` naming their file and a reason, so the rule fails closed
+    for NEW additions without paying the migration cost on day one.
+
+    WHAT THIS DELIBERATELY DOES NOT DO. It does not change `src/lib/tmp.ts` itself (the earlier
+    at-source approach's dead body). It does not add a global load-order dependency across the
+    codebase. It does not widen `sweepStaleTempDirs` to match non-`rmd-` prefixes — that would
+    make the sweep read every unrelated program's temp dirs and turn the incident it was built
+    for into a data hazard. And it does not touch `test/setup/tmp-hygiene.ts`'s runtime wrap, so
+    a suite running today with the wrapper loaded keeps working exactly as before.
+
+    BAND. `risk: high` with `band_meaning: span` is Rule 19 SIZING, not blast radius: the linter
+    lives in `scripts/`, its wiring lives in `hooks/` and `src/lib/worker.ts`, the migration
+    lives in `scripts/recovery-drill.mjs` and five test files. Six subsystems on paper, one
+    concern in practice: a callsite convention and its enforcement. Not decomposable: shipping
+    the rule without migrating the sites it names would immediately red every pre-commit and
+    every CI on this repo; shipping the migration without the rule leaves the next author to
+    reintroduce the defect.
+  acceptance:
+    - claim: "a bare-prefix mkdtempSync(join(tmpdir(), '<literal>')) callsite is refused by scripts/mkdtemp-callsite-check.mjs with a message naming its file and line, unless the literal starts with rmd- or the file is on the recorded allowlist"
+      proof: "unit test: test/mkdtemp-callsite-check.test.ts"
+    - claim: "a mkdtempSync callsite whose prefix expression is not a static string (a variable, function call, or spread) is refused, because the rule cannot prove reapability from the AST alone and must fail closed"
+      proof: "unit test: test/mkdtemp-callsite-check.test.ts"
+    - claim: "a mkdtempSync callsite prefixed with `${RMD_TMP_PREFIX}` (the one existing sanctioned constant) is accepted, and NO other prefix is admitted as sanctioned by this rule"
+      proof: "unit test: test/mkdtemp-callsite-check.test.ts"
+    - claim: "hooks/pre-commit invokes the check and exits non-zero when any staged file adds a refused callsite, so a worker's own worktree stops the commit before any branch push"
+      proof: "unit test: test/mkdtemp-callsite-check.test.ts"
+    - claim: "the five test prefixes the falsifier names (sweep-reentry-, unwired-gate-, fleet-heartbeat-gclog-, w1-t2587-instr-base-, reclaim-state-) and scripts/recovery-drill.mjs are migrated to rmd- prefixes and pass the rule at head"
+      proof: "unit test: test/mkdtemp-callsite-check.test.ts"
+  falsifier: |
+    Delete the string-literal refusal branch from `scripts/mkdtemp-callsite-check.mjs` and the
+    named test in `test/mkdtemp-callsite-check.test.ts` moves `# fail 0` -> `# fail 1`. Restore
+    it, and it returns to `# fail 0`. Independently: check the linter runs against the AST, not
+    the import graph (a bare `node --test test/mkdtemp-callsite-check.test.ts` with no wrapper
+    loaded still exercises the refusal — measured before push). Both directions matter: the
+    linter must catch NEW additions without depending on any runtime wrap, and it must NOT catch
+    the sanctioned `${RMD_TMP_PREFIX}` shape.
