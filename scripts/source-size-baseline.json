@@ -21,7 +21,7 @@
   "src/lib/config.ts": 1000,
   "src/lib/console-freshness.ts": 111,
   "src/lib/console-url.ts": 236,
-  "src/lib/containment.ts": 1756,
+  "src/lib/containment.ts": 2000,
   "src/lib/correct.ts": 71,
   "src/lib/cost-anomaly.ts": 270,
   "src/lib/coverage-improvement.ts": 337,

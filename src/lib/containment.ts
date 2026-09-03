@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 // W1-T2213: `configPath()` alongside `loadConfig`/`Config` — the SAME resolver
@@ -1314,6 +1315,9 @@ export function defaultExecutor(
   config: Config,
   budgetUsd?: number,
   spawn: typeof spawnWorker = spawnWorker,
+  initializeRepository: (cwd: string) => void = (cwd) => {
+    execFileSync("git", ["init", "-q"], { cwd, stdio: "ignore" });
+  },
 ): ProbeExecutor {
   return async (token: string) => {
     // The scratch dir lives under the WORKSPACE root, never under $TMPDIR — the
@@ -1375,6 +1379,11 @@ export function defaultExecutor(
     // the prompt actually asks the worker to do.
     const prompt = containmentProbePrompt(token, allowedHost, tokenPath, controlPath, operatorHomeConfigPath);
     try {
+      // Codex requires a trusted Git working tree before it will start a write-capable worker.
+      // This cwd is a fresh, token-scoped probe artifact rather than a missing task worktree, so
+      // give only the disposable directory a minimal Git identity. The generic provider adapter
+      // remains fail-closed for every other write-capable non-repository cwd.
+      initializeRepository(cwd);
       const probe = await spawn({
         cwd,
         permissionMode: "bypassPermissions",
