@@ -51,31 +51,83 @@ function recordingSpawn(map: Record<string, { status: number; stdout?: string; s
   return { spawn, calls };
 }
 
-const DARWIN_BASH_3_2: HostFacts = { platform: "darwin", bashMajorVersion: 3, hasProcMeminfo: false };
-const LINUX_CI: HostFacts = { platform: "linux", bashMajorVersion: 5, hasProcMeminfo: true };
+// W1-T2770: `nodeVersion`/`pinnedNodeVersion` set to the same value so this fixture's platform
+// axis is not accidentally coupled to the merge-lcov cluster's node-version-drift predicate —
+// every existing assertion below is about the platform/bash/meminfo axes, and a fixture that
+// silently triggered a fourth cluster would make those assertions read the wrong signal.
+const DARWIN_BASH_3_2: HostFacts = {
+  platform: "darwin",
+  bashMajorVersion: 3,
+  hasProcMeminfo: false,
+  nodeVersion: "22.22.3",
+  pinnedNodeVersion: "22.22.3",
+};
+const LINUX_CI: HostFacts = {
+  platform: "linux",
+  bashMajorVersion: 5,
+  hasProcMeminfo: true,
+  nodeVersion: "22.22.3",
+  pinnedNodeVersion: "22.22.3",
+};
 
 // ── acceptance 1: a lane reports which suite failures are host-caused ───────────────────────
 
-test("HOST_CAUSED_SUITE_REDS: the registry carries the census's corrected 26 — 17 + 2 + 2 + 2 + 1 + 1 + 1 — not the wrong carried 16", () => {
-  const total = HOST_CAUSED_SUITE_REDS.reduce((sum, e) => sum + e.count, 0);
-  assert.equal(total, 26, "17(bash) + 2(keychain) + 2(bsd-date) + 2(recovery-drill) + 1(procfs) + 1(CF-env) + 1(e2e) = 26");
+test("HOST_CAUSED_SUITE_REDS: the registry's per-cluster counts sum correctly — each cluster's file/cause/count row must match, not just the total", () => {
+  // Counts asserted PER CLUSTER, not merely against a magic total: a total-only compare hides
+  // a cluster whose count moved AND a cluster whose count moved the other way by the same
+  // amount, and it silently rebases the "wrong carried 16" evidence trail every time a cluster
+  // is added.
+  const expected: Record<string, number> = {
+    "bash-3.2-no-associative-arrays": 17,
+    "darwin-keychain-unprovisioned": 2,
+    "bsd-date-control-arm": 2,
+    "undiagnosed-ps-orphan-sweep": 2,
+    "linux-procfs-absent": 1,
+    "macos-corefoundation-env-leak": 1,
+    "w1-t2205-e2e-darwin-keychain-asymmetry": 1,
+    // W1-T2770: the merge-lcov Node-pin-drift cluster is guarded by nodeVersion vs
+    // pinnedNodeVersion, an axis independent of the platform/bash/procfs axes above; MEASURED
+    // count is exactly the six coverage-merge-CLI tests that fail on any string mismatch.
+    "node-version-drift-from-pin": 6,
+  };
+  for (const entry of HOST_CAUSED_SUITE_REDS) {
+    assert.ok(entry.cause in expected, `unknown cluster ${entry.cause} — declare its expected count here or remove it from the registry`);
+    assert.equal(entry.count, expected[entry.cause], `${entry.cause} count`);
+  }
+  assert.equal(
+    HOST_CAUSED_SUITE_REDS.length,
+    Object.keys(expected).length,
+    "the registry length must match this table's row count — a cluster removed from the registry but not from here would pass silently",
+  );
+
   const bash = HOST_CAUSED_SUITE_REDS.find((e) => e.cause === "bash-3.2-no-associative-arrays");
-  assert.equal(bash?.count, 17, "the corrected per-file recount, not the wrong carried 16");
   assert.equal(bash?.file, "test/recycle-container.test.ts");
 });
 
-test("hostCausedSuiteRedsForFacts: a darwin/bash-3.2 host matches every registered cluster (all seven `appliesTo` predicates read true)", () => {
-  const applicable = hostCausedSuiteRedsForFacts(DARWIN_BASH_3_2);
-  assert.equal(applicable.length, HOST_CAUSED_SUITE_REDS.length, "darwin + bash 3.2 + no /proc/meminfo satisfies every entry's predicate");
+test("hostCausedSuiteRedsForFacts: a host that satisfies EVERY axis matches every registered cluster (all `appliesTo` predicates read true)", () => {
+  // The full-house case: darwin + bash 3.2 + no procfs (the original axes) AND a
+  // running-Node/pin mismatch (W1-T2770's axis). Each cluster keys off one of these; the
+  // fixture must exercise all of them for the equality below to hold.
+  const allAxes: HostFacts = { ...DARWIN_BASH_3_2, nodeVersion: "22.23.2", pinnedNodeVersion: "22.22.3" };
+  const applicable = hostCausedSuiteRedsForFacts(allAxes);
+  assert.equal(applicable.length, HOST_CAUSED_SUITE_REDS.length, "every axis satisfied => every cluster applies");
 });
 
-test("hostCausedSuiteRedsStep: on a darwin/bash-3.2 host, the step NAMES the applicable clusters — file, cause and count — so a lane can subtract them from ci:test's own FAIL", () => {
-  const step = hostCausedSuiteRedsStep(DARWIN_BASH_3_2);
+test("hostCausedSuiteRedsStep: on a full-house darwin/bash-3.2/node-drift host, the step NAMES the applicable clusters — file, cause and count — so a lane can subtract them from ci:test's own FAIL", () => {
+  const allAxes: HostFacts = { ...DARWIN_BASH_3_2, nodeVersion: "22.23.2", pinnedNodeVersion: "22.22.3" };
+  const step = hostCausedSuiteRedsStep(allAxes);
   assert.equal(step.ok, true, "informational — never its own verdict");
   assert.match(step.detail, /test\/recycle-container\.test\.ts/);
   assert.match(step.detail, /bash-3\.2-no-associative-arrays/);
   assert.match(step.detail, /~17 test\(s\)/);
-  assert.match(step.detail, /7 of 7 known host-caused suite-red cluster\(s\) apply/);
+  assert.match(step.detail, /test\/merge-lcov\.test\.ts/);
+  assert.match(step.detail, /node-version-drift-from-pin/);
+  // The banner reports "N of M" where M is the registry size — matched loosely on the numbers
+  // so a future added cluster does not re-break this assertion for the same reason today's did.
+  assert.match(
+    step.detail,
+    new RegExp(`${HOST_CAUSED_SUITE_REDS.length} of ${HOST_CAUSED_SUITE_REDS.length} known host-caused suite-red cluster\\(s\\) apply`),
+  );
 });
 
 test("CI_PARITY_TABLE: the 'ci' job entry runs a DEDICATED ci:host-caused-suite-reds step, named independently of ci:test — same shape as W1-T373's ci:cli-reference-check precedent", () => {
@@ -112,7 +164,13 @@ test("hostCausedSuiteRedsStep: on a linux CI host, the step reports 0 applicable
 test("computeHostFacts / parseBashMajorVersion: an UNPARSEABLE or missing bash version reads as undefined, never a guessed 0 or a false match on the bash-3.2 cluster", () => {
   assert.equal(parseBashMajorVersion(""), undefined);
   assert.equal(parseBashMajorVersion("not a version string"), undefined);
-  const facts = computeHostFacts({ platform: "darwin", bashVersionText: "", hasProcMeminfo: true });
+  const facts = computeHostFacts({
+    platform: "darwin",
+    bashVersionText: "",
+    hasProcMeminfo: true,
+    nodeVersion: "22.22.3",
+    nvmrcText: "22.22.3\n",
+  });
   assert.equal(facts.bashMajorVersion, undefined);
   const applicable = hostCausedSuiteRedsForFacts(facts);
   assert.equal(
@@ -140,7 +198,13 @@ test("runCiParity: ci:test's own FAIL is completely unaffected by ci:host-caused
 
 test("hostCausedSuiteRedsStep: a cluster's appliesTo() predicate is never satisfied merely because the FILE matches — it is keyed on host facts, so a new/undeclared break in a registered file is never claimed as this host's own", () => {
   // Same file as the darwin-keychain entry, but linux facts: the entry must not apply.
-  const linuxFacts: HostFacts = { platform: "linux", bashMajorVersion: 5, hasProcMeminfo: true };
+  const linuxFacts: HostFacts = {
+    platform: "linux",
+    bashMajorVersion: 5,
+    hasProcMeminfo: true,
+    nodeVersion: "22.22.3",
+    pinnedNodeVersion: "22.22.3",
+  };
   const applicable = hostCausedSuiteRedsForFacts(linuxFacts);
   assert.equal(
     applicable.some((e) => e.file === "test/worker-credential-preflight.test.ts"),
@@ -166,8 +230,8 @@ test("hostCausedSuiteRedsStep: never returns ok: false for ANY combination of ho
   const combos: HostFacts[] = [
     DARWIN_BASH_3_2,
     LINUX_CI,
-    { platform: "darwin", bashMajorVersion: undefined, hasProcMeminfo: true },
-    { platform: "win32", bashMajorVersion: undefined, hasProcMeminfo: false },
+    { platform: "darwin", bashMajorVersion: undefined, hasProcMeminfo: true, nodeVersion: "22.22.3", pinnedNodeVersion: "22.22.3" },
+    { platform: "win32", bashMajorVersion: undefined, hasProcMeminfo: false, nodeVersion: "22.22.3", pinnedNodeVersion: "22.22.3" },
   ];
   for (const facts of combos) {
     assert.equal(hostCausedSuiteRedsStep(facts).ok, true, `facts=${JSON.stringify(facts)} must still report ok: true`);
