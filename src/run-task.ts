@@ -744,6 +744,7 @@ import {
   dedupeRollupByLatestAttempt,
   deriveDayCostUsd,
   deriveDisposition,
+  diffCoverageReport,
   fixCeilingInForce,
   fixDispatchBudget,
   isBlockedCi,
@@ -7296,6 +7297,7 @@ export interface RedBaseRefreshDecision {
   refresh: boolean;
   behindBy?: number;
   failingTestFiles: string[];
+  failingSourceFiles: string[];
   matchingBaseFiles: string[];
 }
 
@@ -7326,6 +7328,23 @@ export function failingTestFilesFromCiFailures(failures: readonly CiFailure[]): 
 }
 
 /**
+ * Extract repository source paths only from the existing, distinctive diff-coverage report.
+ * `diffCoverageReport` owns recognition of a genuine report and its `path:line` rows; this
+ * adapter removes only the terminal line number and normalizes separators for comparison with
+ * GitHub's repository-relative file list.
+ */
+export function failingSourceFilesFromCiFailures(failures: readonly CiFailure[]): string[] {
+  const report = diffCoverageReport(failures);
+  if (!report) return [];
+  return [...new Set(report.uncovered.map((pathLine) => pathLine.replace(/:\d+$/, "").replaceAll("\\", "/")))];
+}
+
+/** Exact repository path, or that complete path below an observed checkout prefix. */
+function observedPathMatchesRepositoryPath(observedPath: string, repositoryPath: string): boolean {
+  return observedPath === repositoryPath || observedPath.endsWith(`/${repositoryPath}`);
+}
+
+/**
  * The pre-strike decision, kept pure so both positive predicates have paired controls. A file
  * matches only when GitHub's repository-relative base-gap path is the same as, or a complete
  * suffix of, an observed CI path. Basename-only matching is deliberately forbidden.
@@ -7335,17 +7354,21 @@ export function decideRedBaseRefresh(
   facts: RedBaseRefreshFacts,
 ): RedBaseRefreshDecision {
   const failingTestFiles = failingTestFilesFromCiFailures(failures);
+  const failingSourceFiles = failingSourceFilesFromCiFailures(failures);
   const baseChangedFiles = facts.baseChangedFiles;
   const matchingBaseFiles =
     facts.behindBy !== undefined && facts.behindBy > 0 && baseChangedFiles !== undefined
       ? baseChangedFiles.filter((baseFile) =>
-          failingTestFiles.some((failureFile) => failureFile === baseFile || failureFile.endsWith(`/${baseFile}`)),
+          [...failingTestFiles, ...failingSourceFiles].some((failureFile) =>
+            observedPathMatchesRepositoryPath(failureFile, baseFile),
+          ),
         )
       : [];
   return {
     refresh: matchingBaseFiles.length > 0,
     behindBy: facts.behindBy,
     failingTestFiles,
+    failingSourceFiles,
     matchingBaseFiles,
   };
 }
@@ -8440,9 +8463,10 @@ export async function runFixRung(opts: {
 
     // W1-T2671 SITE — BASE-GAP REFRESH, BEFORE `strikes++` and before every deterministic/worker
     // repair below. This is deliberately restricted to a ci-log round with a non-empty failure
-    // set: only that shape supplies the failing test path needed to prove that the base changed
-    // the same file. `decideRedBaseRefresh` requires BOTH a positive behind count and an exact
-    // repository-path/suffix match; current branches and unrelated base movement fall through.
+    // set: only that shape supplies the failing test or diff-coverage source path needed to prove
+    // that the base changed the same file. `decideRedBaseRefresh` requires BOTH a positive behind
+    // count and an exact repository-path/suffix match; current branches and unrelated base
+    // movement fall through.
     //
     // A successful update returns immediately with ZERO strikes. GitHub documents this endpoint
     // as asynchronous (202) and as MERGING base HEAD into the PR branch, so polling CI immediately
@@ -8469,6 +8493,7 @@ export async function runFixRung(opts: {
           pr_number: prNumber,
           behind_by: decision.behindBy,
           failing_test_files: decision.failingTestFiles,
+          failing_source_files: decision.failingSourceFiles,
           matching_base_files: decision.matchingBaseFiles,
           refresh: decision.refresh,
         });
