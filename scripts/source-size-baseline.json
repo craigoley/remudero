@@ -118,6 +118,7 @@
   "src/lib/replay.ts": 240,
   "src/lib/reply-interpreter.ts": 198,
   "src/lib/repo-location.ts": 84,
+  "src/lib/retro-preflight.ts": 500,
   "src/lib/retro.ts": 5000,
   "src/lib/review-provider-provenance.ts": 500,
   "src/lib/review.ts": 9500,
@@ -157,6 +158,7 @@
   "src/lib/worker-scratch.ts": 227,
   "src/lib/worker.ts": 4500,
   "src/lib/workflow-run.ts": 28,
+  "src/lib/worktree-sites.ts": 500,
   "src/run-task.ts": 36000,
   "src/spike.ts": 311
 }

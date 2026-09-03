@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 // intercepts the REAL fs.writeFileSync/fs.renameSync calls saveMarker makes, never a
 // reimplementation.
 import fsDefault from "node:fs";
-import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
@@ -25,11 +25,12 @@ import {
 } from "../src/lib/retro.js";
 import { configPath } from "../src/lib/config.js";
 import { resolveRepoRoot, retroCommand } from "../src/run-task.js";
-import type { WorkerResult } from "../src/lib/worker.js";
+import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
 import { runDaemon } from "../src/lib/daemon.js";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { offlineGithub } from "./setup/offline-github.js";
+import type { RunRetroPrepublishPreflightOptions, RetroPrepublishResult } from "../src/lib/retro-preflight.js";
 
 /**
  * ONE offline gateway for every `retroCommand` call in this file — 24 of them, each of which used
@@ -472,7 +473,9 @@ test("retroCommand: a non-trivial MASTER-PLAN.md yielding ZERO proposal-bullet m
 interface FakeRetroFixture {
   root: string;
   branch: string;
-  fakeSpawn: () => Promise<WorkerResult>;
+  fakeSpawn: (args?: SpawnWorkerArgs) => Promise<WorkerResult>;
+  spawnArgs: SpawnWorkerArgs[];
+  prepublishPreflight: (opts: RunRetroPrepublishPreflightOptions) => Promise<RetroPrepublishResult>;
   /** Swaps HOME/PATH/Date.now in, runs `body`, and ALWAYS restores them after -- even on throw. */
   run<T>(body: () => Promise<T>): Promise<T>;
 }
@@ -496,6 +499,9 @@ function setupFakeRetroFixture(
      *  create fallback path (`gh api --method POST repos/.../pulls`, W1-T1202; our fake
      *  `gh` answers it with a fresh `html_url`). */
     noPrUrl?: boolean;
+    /** The worker omitted PR_URL even though this exact run branch already has an open PR.
+     *  The harness must recover and reuse it, never create a replacement. */
+    existingPrWithoutReport?: boolean;
     /** `gh pr view --json headRefName` returns no `headRefName` at all (an UNRESOLVED
      *  head ref, distinct from a resolved-but-wrong one) -- checkPrOwnership's `?? null`
      *  fallback. */
@@ -526,6 +532,12 @@ function setupFakeRetroFixture(
     /** Pre-register a REAL, lockless `run-*` git worktree well past pruneStaleRuns'
      *  grace window -- exercises its force-remove branch (`pruned.worktrees.length`). */
     staleWorktree?: boolean;
+    /** Terminal prepublish result used to prove marker/review/arm atomicity. Default passes. */
+    preflightResult?: RetroPrepublishResult;
+    /** Drive the production repair callback once before returning a passing second attempt. */
+    preflightExercisesRepair?: boolean;
+    /** Override only the resumed repair worker result; the initial Architect result stays valid. */
+    repairWorkerResult?: Partial<WorkerResult>;
   } = {},
 ): FakeRetroFixture {
   const fakeHome = mkdtempSync(join(tmpdir(), "rmd-retro-success-home-"));
@@ -608,7 +620,7 @@ function setupFakeRetroFixture(
       // itself legitimately contain words like "diff" (ensureJudgeableBody's own proof
       // text does), which a whole-string substring match would misfire on.
       // repo clone <slug> <dest>  (repoDir absent) -- a REAL local clone, never a stub.
-      `if [[ "$1" == 'repo' && "$2" == 'clone' ]]; then git clone -q ${JSON.stringify(originGit)} "$4"; exit 0; fi`,
+      `if [[ "$1" == 'repo' && "$2" == 'clone' ]]; then git clone -q ${JSON.stringify(originGit)} "$4"; git -C "$4" config user.email retro-test@example.invalid; git -C "$4" config user.name retro-test; exit 0; fi`,
       // pr view <url> --json <field>
       `if [[ "$1" == 'pr' && "$2" == 'view' ]]; then`,
       // --json body  (ensureTaskTrailer + the acceptance-repair check) -- or a response
@@ -627,6 +639,9 @@ function setupFakeRetroFixture(
       // retroCommand exits right after the marker-advance line with no further gh calls.
       `if [[ "$1" == 'api' ]]; then`,
       `  case "$2" in`,
+      opts.existingPrWithoutReport
+        ? `    */pulls?head=*) echo '[{"html_url":"https://github.com/craigoley/remudero/pull/434343","number":434343}]'; exit 0 ;;`
+        : `    */pulls?head=*) echo '[]'; exit 0 ;;`,
       `    */pulls/*) echo '{"number":999999,"state":"open","merged":false,"merged_at":null,"head":{"sha":"deadbeef"}}'; exit 0 ;;`,
       `    */check-runs*) echo '{"check_runs":[{"name":"ci","status":"completed","conclusion":"failure"}]}'; exit 0 ;;`,
       `    */status) echo '{"statuses":[]}'; exit 0 ;;`,
@@ -653,7 +668,11 @@ function setupFakeRetroFixture(
   );
   chmodSync(fakeGhPath, 0o755);
 
-  const fakeSpawn = async (): Promise<WorkerResult> => ({
+  const spawnArgs: SpawnWorkerArgs[] = [];
+  const fakeSpawn = async (args?: SpawnWorkerArgs): Promise<WorkerResult> => {
+    if (args) spawnArgs.push(args);
+    const result: WorkerResult = {
+    provider: "claude",
     sessionId: "s-retro-fixture",
     costUsd: 0.01,
     numTurns: 1,
@@ -671,7 +690,55 @@ function setupFakeRetroFixture(
     modelUsage: {},
     compactionEvents: [],
     qualitySuspect: false,
-  });
+    };
+    return args?.resumeSessionId ? { ...result, ...opts.repairWorkerResult } : result;
+  };
+
+  const prepublishPreflight = async (preflight: RunRetroPrepublishPreflightOptions): Promise<RetroPrepublishResult> => {
+    if (opts.preflightExercisesRepair) {
+      preflight.log("retro.preflight_failed", {
+        attempt: 1, outcome: "failed", suite_count: 2, elapsed_ms: 1,
+        remote_pr_existed: preflight.remotePrExisted,
+        provider: preflight.provenance.provider, model: preflight.provenance.model,
+        effort: preflight.provenance.effort, session_id: preflight.provenance.sessionId,
+      });
+      try {
+        await preflight.repair("bounded fenced fixture evidence");
+      } catch (error) {
+        preflight.log("retro.preflight_failed", {
+          attempt: 2, outcome: "failed", suite_count: 2, elapsed_ms: 1,
+          exit_class: "repair_spawn_failed", stderr_excerpt: String((error as Error)?.message ?? error),
+          remote_pr_existed: preflight.remotePrExisted,
+          provider: preflight.provenance.provider, model: preflight.provenance.model,
+          effort: preflight.provenance.effort, session_id: preflight.provenance.sessionId,
+        });
+        return { ok: false, attempts: 2, suiteCount: 2, repaired: false };
+      }
+      await preflight.regenerateHarnessArtifacts();
+      preflight.log("retro.preflight_passed", {
+        attempt: 2, outcome: "passed", suite_count: 2, elapsed_ms: 1,
+        remote_pr_existed: preflight.remotePrExisted,
+        provider: preflight.provenance.provider, model: preflight.provenance.model,
+        effort: preflight.provenance.effort, session_id: preflight.provenance.sessionId,
+      });
+      return { ok: true, attempts: 2, suiteCount: 2, repaired: true };
+    }
+    const result = opts.preflightResult ?? { ok: true, attempts: 1, suiteCount: 2, repaired: false };
+    for (let attempt = 1; attempt <= result.attempts; attempt += 1) {
+      preflight.log(result.ok && attempt === result.attempts ? "retro.preflight_passed" : "retro.preflight_failed", {
+        attempt,
+        outcome: result.ok && attempt === result.attempts ? "passed" : "failed",
+        suite_count: result.suiteCount,
+        elapsed_ms: 1,
+        remote_pr_existed: preflight.remotePrExisted,
+        provider: preflight.provenance.provider,
+        model: preflight.provenance.model,
+        effort: preflight.provenance.effort,
+        session_id: preflight.provenance.sessionId,
+      });
+    }
+    return result;
+  };
 
   async function run<T>(body: () => Promise<T>): Promise<T> {
     const savedHome = process.env.HOME;
@@ -696,7 +763,7 @@ function setupFakeRetroFixture(
     }
   }
 
-  return { root, branch, fakeSpawn, run };
+  return { root, branch, fakeSpawn, spawnArgs, prepublishPreflight, run };
 }
 
 test("retroCommand: a clean run reaches the REAL saveMarker call at the end of the success path and lands a valid marker", async (t) => {
@@ -706,7 +773,7 @@ test("retroCommand: a clean run reaches the REAL saveMarker call at the end of t
   // once per variant.
   const fx = setupFakeRetroFixture(t, { includeGeneratorScript: true });
   await fx.run(async () => {
-    const exitCode = await withLiveWritesAllowed(() => retroCommand([], { spawn: fx.fakeSpawn, github: offlineGh }));
+    const exitCode = await withLiveWritesAllowed(() => retroCommand([], { spawn: fx.fakeSpawn, github: offlineGh, prepublishPreflight: fx.prepublishPreflight }));
     // ci went "red" on the first poll (fake gh above) -> retroCommand returns 1 right
     // after the marker-advance line, without ever reaching reviewCommand/armAutoMerge.
     assert.equal(exitCode, 1, "a red ci gate leaves the PR open (exit 1) -- but ONLY after the marker already advanced");
@@ -725,6 +792,12 @@ test("retroCommand: a clean run reaches the REAL saveMarker call at the end of t
       ledgerLines.some((l) => l.step === "plan_index.regenerated"),
       "the real generator script must have actually run and committed a change",
     );
+    const preflightIndex = ledgerLines.findIndex((l) => l.step === "retro.preflight_passed");
+    const openedIndex = ledgerLines.findIndex((l) => l.step === "pr.opened");
+    const markerIndex = ledgerLines.findIndex((l) => l.step === "retro.marker.advanced");
+    assert.ok(preflightIndex >= 0, "the production retro path must call the prepublish preflight");
+    assert.ok(preflightIndex < openedIndex, "preflight must pass before pr.opened is emitted");
+    assert.ok(preflightIndex < markerIndex, "preflight must pass before the retro marker advances");
   });
 });
 
@@ -733,11 +806,65 @@ test("retroCommand: a clean run with a PRE-EXISTING valid marker still resolves 
     seedMarker: { ts: "2026-01-01T00:00:00.000Z", learnings_count: 2, runs_seen: 3 },
   });
   await fx.run(async () => {
-    const exitCode = await withLiveWritesAllowed(() => retroCommand([], { spawn: fx.fakeSpawn, github: offlineGh }));
+    const exitCode = await withLiveWritesAllowed(() => retroCommand([], { spawn: fx.fakeSpawn, github: offlineGh, prepublishPreflight: fx.prepublishPreflight }));
     assert.equal(exitCode, 1, "same red-ci exit as the other success-path variants");
     const marker = JSON.parse(readFileSync(join(fx.root, "state", "last-retro.json"), "utf8")) as RetroMarker;
     assert.ok(new Date(marker.ts).getTime() > new Date("2026-01-01T00:00:00.000Z").getTime(), "the marker really advanced past the seeded one");
   });
+});
+
+test("retroCommand: the one repair resumes the producing session on its original provider and reruns harness generators", async (t) => {
+  const fx = setupFakeRetroFixture(t, { preflightExercisesRepair: true, includeGeneratorScript: true });
+  await fx.run(async () => {
+    const exitCode = await withLiveWritesAllowed(() => retroCommand([], {
+      spawn: fx.fakeSpawn,
+      github: offlineGh,
+      prepublishPreflight: fx.prepublishPreflight,
+    }));
+    assert.equal(exitCode, 1, "the fixture's public CI is red only after the repaired prepublish passes");
+    const repairSpawns = fx.spawnArgs.filter((args) => args.resumeSessionId !== undefined);
+    assert.equal(repairSpawns.length, 1, "promotion judges are fresh; exactly one spawn resumes a session");
+    assert.equal(repairSpawns[0].resumeSessionId, "s-retro-fixture", "the repair resumes the producing session");
+    assert.deepEqual(
+      repairSpawns[0].config?.workerProviders?.enabled,
+      ["claude"],
+      "the per-call config pins the resume to the producing backend without mutating host config",
+    );
+    const ledgerLines = readFileSync(join(fx.root, "state", "ledger.ndjson"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    assert.deepEqual(
+      ledgerLines.filter((l) => l.step === "retro.preflight_failed" || l.step === "retro.preflight_passed").map((l) => l.step),
+      ["retro.preflight_failed", "retro.preflight_passed"],
+    );
+    const repair = ledgerLines.find((l) => l.step === "retro.preflight_repair");
+    assert.equal(repair?.provider, "claude");
+    assert.equal(repair?.resumed_session_id, "s-retro-fixture");
+  });
+});
+
+test("retroCommand: a repair worker that changes identity, provider, or returns an error fails closed before publication", async (t) => {
+  const variants: Array<{ name: string; result: Partial<WorkerResult> }> = [
+    { name: "session identity", result: { sessionId: "different-session" } },
+    { name: "provider", result: { provider: "codex" } },
+    { name: "worker outcome", result: { isError: true, subtype: "error_during_execution" } },
+  ];
+
+  for (const variant of variants) {
+    await t.test(variant.name, async (t) => {
+      const fx = setupFakeRetroFixture(t, {
+        preflightExercisesRepair: true,
+        repairWorkerResult: variant.result,
+      });
+      await fx.run(async () => {
+        const exitCode = await withLiveWritesAllowed(() => retroCommand([], {
+          spawn: fx.fakeSpawn,
+          github: offlineGh,
+          prepublishPreflight: fx.prepublishPreflight,
+        }));
+        assert.equal(exitCode, 1, "a rejected repair cannot publish or advance the marker");
+        assert.equal(existsSync(join(fx.root, "state", "last-retro.json")), false);
+      });
+    });
+  }
 });
 
 // ── W1-T160: the INTEGRITY GATE — a HARD precondition INSIDE the automated
@@ -794,7 +921,7 @@ test("retroCommand: an OPERATOR-run retro (opts.automated absent) is NOT integri
     seedMarker: { ts: "2026-01-01T00:00:00.000Z", learnings_count: 0, runs_seen: 0 },
   });
   await fx.run(async () => {
-    const exitCode = await withLiveWritesAllowed(() => retroCommand([], { spawn: fx.fakeSpawn, github: offlineGh })); // no `automated` -- same shape as every other test in this file
+    const exitCode = await withLiveWritesAllowed(() => retroCommand([], { spawn: fx.fakeSpawn, github: offlineGh, prepublishPreflight: fx.prepublishPreflight })); // no `automated` -- same shape as every other test in this file
     assert.equal(exitCode, 1, "same red-ci exit as the ordinary success path -- unaffected by the integrity gate");
     const marker = JSON.parse(readFileSync(join(fx.root, "state", "last-retro.json"), "utf8")) as RetroMarker;
     assert.ok(
@@ -813,6 +940,7 @@ test("retroCommand: an automated run whose gather DOES credit merges passes the 
       github: offlineGh,
       spawn: fx.fakeSpawn,
       automated: { reason: "days", mergesSinceMarker: 0, daysSinceMarker: 8 },
+      prepublishPreflight: fx.prepublishPreflight,
     }));
     // mergesSinceMarker: 0 -> checkRetroIntegrity's `priorMergesSinceMarker > 0` guard
     // never trips, regardless of what the real gather credits -- same red-ci exit 1 as
@@ -870,7 +998,7 @@ test(
         // -> gh pr create -> ownership assert -> pr.opened -> marker save), gated by
         // opts.automated exactly as the real daemon wiring (run-task.ts's daemonCommand
         // / retroTriggerCheck) invokes it in production. Never a stand-in.
-        await withLiveWritesAllowed(() => retroCommand([], { spawn: fx.fakeSpawn, automated: decision, github: offlineGh }));
+        await withLiveWritesAllowed(() => retroCommand([], { spawn: fx.fakeSpawn, automated: decision, github: offlineGh, prepublishPreflight: fx.prepublishPreflight }));
       };
 
       const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
@@ -927,9 +1055,30 @@ test(
 test("retroCommand: an ownership mismatch (claimed PR head branch != this run's own branch) fails CLOSED before the marker ever advances", async (t) => {
   const fx = setupFakeRetroFixture(t, { headRefName: () => "some-other-branch-entirely" });
   await fx.run(async () => {
-    const exitCode = await withLiveWritesAllowed(() => retroCommand([], { spawn: fx.fakeSpawn, github: offlineGh }));
+    const exitCode = await withLiveWritesAllowed(() => retroCommand([], { spawn: fx.fakeSpawn, github: offlineGh, prepublishPreflight: fx.prepublishPreflight }));
     assert.equal(exitCode, 1, "pr_attribution_failed is a fail-closed exit 1, same as any other refused retro");
     assert.ok(!fsDefault.existsSync(join(fx.root, "state", "last-retro.json")), "an ownership mismatch must NEVER advance the marker");
+  });
+});
+
+test("retroCommand: a terminal second prepublish failure preserves the diagnostic branch and posts no PR, marker, review, or merge arm", async (t) => {
+  const fx = setupFakeRetroFixture(t, {
+    preflightResult: { ok: false, attempts: 2, suiteCount: 158, repaired: true },
+  });
+  await fx.run(async () => {
+    const exitCode = await withLiveWritesAllowed(() => retroCommand([], {
+      spawn: fx.fakeSpawn,
+      github: offlineGh,
+      prepublishPreflight: fx.prepublishPreflight,
+    }));
+    assert.equal(exitCode, 1);
+    assert.ok(!fsDefault.existsSync(join(fx.root, "state", "last-retro.json")), "a second failure must leave the marker unchanged");
+    assert.ok(fsDefault.existsSync(join(fx.root, "worktrees", fx.branch)), "the committed diagnostic worktree/branch stays available");
+    const ledgerLines = readFileSync(join(fx.root, "state", "ledger.ndjson"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    assert.equal(ledgerLines.filter((l) => l.step === "retro.preflight_failed").length, 2);
+    for (const forbidden of ["pr.opened", "review.posted", "automerge.armed", "retro.marker.advanced"]) {
+      assert.equal(ledgerLines.some((l) => l.step === forbidden), false, `${forbidden} must not occur after terminal preflight failure`);
+    }
   });
 });
 
@@ -938,7 +1087,7 @@ test("retroCommand: a diff that touches src/ fails the plan-only guard before th
     diff: "diff --git a/src/lib/retro.ts b/src/lib/retro.ts\n--- a/src/lib/retro.ts\n+++ b/src/lib/retro.ts\n+// not plan-only\n",
   });
   await fx.run(async () => {
-    const exitCode = await withLiveWritesAllowed(() => retroCommand([], { spawn: fx.fakeSpawn, github: offlineGh }));
+    const exitCode = await withLiveWritesAllowed(() => retroCommand([], { spawn: fx.fakeSpawn, github: offlineGh, prepublishPreflight: fx.prepublishPreflight }));
     assert.equal(exitCode, 1, "a code-touching retro PR is left OPEN for inspection -- exit 1");
     assert.ok(!fsDefault.existsSync(join(fx.root, "state", "last-retro.json")), "a plan-only violation must NEVER advance the marker");
   });
@@ -950,7 +1099,7 @@ test("retroCommand: a PR body missing an Acceptance block gets the harness-side 
   // branch fires and `gh pr edit` is invoked to fix it up (our fake `gh` accepts any `edit`).
   const fx = setupFakeRetroFixture(t, { body: "Remudero-Task: RETRO\n" });
   await fx.run(async () => {
-    const exitCode = await withLiveWritesAllowed(() => retroCommand([], { spawn: fx.fakeSpawn, github: offlineGh }));
+    const exitCode = await withLiveWritesAllowed(() => retroCommand([], { spawn: fx.fakeSpawn, github: offlineGh, prepublishPreflight: fx.prepublishPreflight }));
     assert.equal(exitCode, 1, "same red-ci exit as the other success-path variants -- the repair itself never blocks the retro");
     const marker = JSON.parse(readFileSync(join(fx.root, "state", "last-retro.json"), "utf8")) as RetroMarker;
     assert.ok(marker.ts, "the repair pass is best-effort -- it must never prevent the marker from advancing");
@@ -961,7 +1110,7 @@ test("retroCommand: a transient `gh pr diff` failure is caught by the outer catc
   const fx = setupFakeRetroFixture(t, { diffFails: true });
   await fx.run(async () => {
     await assert.rejects(
-      () => withLiveWritesAllowed(() => retroCommand([], { spawn: fx.fakeSpawn, github: offlineGh })),
+      () => withLiveWritesAllowed(() => retroCommand([], { spawn: fx.fakeSpawn, github: offlineGh, prepublishPreflight: fx.prepublishPreflight })),
       /transient failure/,
       "the outer catch re-throws (never swallows) an unexpected mid-flight gh failure",
     );
@@ -974,38 +1123,52 @@ test("retroCommand: a transient `gh pr diff` failure is caught by the outer catc
 test("retroCommand: no PR_URL in the Architect's report falls back to `gh pr create --fill` and still reaches the marker advance", async (t) => {
   const fx = setupFakeRetroFixture(t, { noPrUrl: true });
   await fx.run(async () => {
-    const exitCode = await withLiveWritesAllowed(() => retroCommand([], { spawn: fx.fakeSpawn, github: offlineGh }));
+    const exitCode = await withLiveWritesAllowed(() => retroCommand([], { spawn: fx.fakeSpawn, github: offlineGh, prepublishPreflight: fx.prepublishPreflight }));
     assert.equal(exitCode, 1, "same red-ci exit as the other success-path variants");
     const marker = JSON.parse(readFileSync(join(fx.root, "state", "last-retro.json"), "utf8")) as RetroMarker;
     assert.ok(marker.ts, "the gh-pr-create-fill fallback must still reach the real saveMarker call");
   });
 });
 
-test("retroCommand: an UNRESOLVED head ref (gh cannot say what branch the PR is on) fails CLOSED, distinctly from a resolved-but-wrong one", async (t) => {
-  const fx = setupFakeRetroFixture(t, { unresolvedHeadRef: true });
+test("retroCommand: an exact-head PR omitted from the report is recovered and reused before preflight", async (t) => {
+  const fx = setupFakeRetroFixture(t, { noPrUrl: true, existingPrWithoutReport: true });
   await fx.run(async () => {
-    const exitCode = await withLiveWritesAllowed(() => retroCommand([], { spawn: fx.fakeSpawn, github: offlineGh }));
-    assert.equal(exitCode, 1, "an unresolved head ref is treated as NOT owned -- fail closed, same as a resolved mismatch");
-    assert.ok(!fsDefault.existsSync(join(fx.root, "state", "last-retro.json")), "an unresolved head ref must NEVER advance the marker");
+    const exitCode = await withLiveWritesAllowed(() => retroCommand([], {
+      spawn: fx.fakeSpawn,
+      github: offlineGh,
+      prepublishPreflight: fx.prepublishPreflight,
+    }));
+    assert.equal(exitCode, 1, "the fixture reaches its intentional red public-CI gate");
+    const ledgerLines = readFileSync(join(fx.root, "state", "ledger.ndjson"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    const recovered = ledgerLines.find((l) => l.step === "retro.pr.recovered");
+    assert.equal(recovered?.pr_url, "https://github.com/craigoley/remudero/pull/434343");
+    assert.equal(recovered?.head_branch, fx.branch);
+    assert.equal(
+      ledgerLines.find((l) => l.step === "retro.preflight_passed")?.remote_pr_existed,
+      true,
+      "preflight telemetry records that publication had already happened",
+    );
+    assert.equal(
+      ledgerLines.find((l) => l.step === "pr.opened")?.pr_url,
+      "https://github.com/craigoley/remudero/pull/434343",
+      "the same exact-head PR survives validation and publication; no replacement is created",
+    );
   });
 });
 
-test("retroCommand: a missing MASTER-PLAN.md degrades docs/ORIENTATION.md regeneration gracefully (best-effort) and still reaches the marker advance", async (t) => {
-  const fx = setupFakeRetroFixture(t, { missingMasterPlan: true });
+test("retroCommand: an UNRESOLVED head ref (gh cannot say what branch the PR is on) fails CLOSED, distinctly from a resolved-but-wrong one", async (t) => {
+  const fx = setupFakeRetroFixture(t, { unresolvedHeadRef: true });
   await fx.run(async () => {
-    const exitCode = await withLiveWritesAllowed(() => retroCommand([], { spawn: fx.fakeSpawn, github: offlineGh }));
-    assert.equal(exitCode, 1, "same red-ci exit as the other success-path variants");
-    const marker = JSON.parse(readFileSync(join(fx.root, "state", "last-retro.json"), "utf8")) as RetroMarker;
-    assert.ok(marker.ts, "a best-effort ORIENTATION.md failure must never prevent the marker from advancing");
-    const ledgerLines = readFileSync(join(fx.root, "state", "ledger.ndjson"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
-    assert.ok(ledgerLines.some((l) => l.step === "orientation.write.error"), "the missing MASTER-PLAN.md must be ledgered, not silently swallowed");
+    const exitCode = await withLiveWritesAllowed(() => retroCommand([], { spawn: fx.fakeSpawn, github: offlineGh, prepublishPreflight: fx.prepublishPreflight }));
+    assert.equal(exitCode, 1, "an unresolved head ref is treated as NOT owned -- fail closed, same as a resolved mismatch");
+    assert.ok(!fsDefault.existsSync(join(fx.root, "state", "last-retro.json")), "an unresolved head ref must NEVER advance the marker");
   });
 });
 
 test("retroCommand: a missing plan-index generator script degrades plan-index.json regeneration gracefully (best-effort) and still reaches the marker advance", async (t) => {
   const fx = setupFakeRetroFixture(t); // includeGeneratorScript defaults to false (absent)
   await fx.run(async () => {
-    const exitCode = await withLiveWritesAllowed(() => retroCommand([], { spawn: fx.fakeSpawn, github: offlineGh }));
+    const exitCode = await withLiveWritesAllowed(() => retroCommand([], { spawn: fx.fakeSpawn, github: offlineGh, prepublishPreflight: fx.prepublishPreflight }));
     assert.equal(exitCode, 1, "same red-ci exit as the other success-path variants");
     const marker = JSON.parse(readFileSync(join(fx.root, "state", "last-retro.json"), "utf8")) as RetroMarker;
     assert.ok(marker.ts, "a best-effort plan-index.json failure must never prevent the marker from advancing");
@@ -1017,7 +1180,7 @@ test("retroCommand: a missing plan-index generator script degrades plan-index.js
 test("retroCommand: a malformed plan/tasks.yaml degrades the best-effort 'next runnable task' lookup gracefully and still reaches the marker advance", async (t) => {
   const fx = setupFakeRetroFixture(t, { badPlan: true });
   await fx.run(async () => {
-    const exitCode = await withLiveWritesAllowed(() => retroCommand([], { spawn: fx.fakeSpawn, github: offlineGh }));
+    const exitCode = await withLiveWritesAllowed(() => retroCommand([], { spawn: fx.fakeSpawn, github: offlineGh, prepublishPreflight: fx.prepublishPreflight }));
     assert.equal(exitCode, 1, "same red-ci exit as the other success-path variants");
     const marker = JSON.parse(readFileSync(join(fx.root, "state", "last-retro.json"), "utf8")) as RetroMarker;
     assert.ok(marker.ts, "a best-effort next-task lookup failure must never prevent the marker from advancing");
@@ -1029,7 +1192,7 @@ test("retroCommand: a malformed plan/tasks.yaml degrades the best-effort 'next r
 test("retroCommand: a PR body with NO body field at all (not merely empty) still gets trailer-stamped and repaired", async (t) => {
   const fx = setupFakeRetroFixture(t, { omitBody: true });
   await fx.run(async () => {
-    const exitCode = await withLiveWritesAllowed(() => retroCommand([], { spawn: fx.fakeSpawn, github: offlineGh }));
+    const exitCode = await withLiveWritesAllowed(() => retroCommand([], { spawn: fx.fakeSpawn, github: offlineGh, prepublishPreflight: fx.prepublishPreflight }));
     assert.equal(exitCode, 1, "same red-ci exit as the other success-path variants");
     const marker = JSON.parse(readFileSync(join(fx.root, "state", "last-retro.json"), "utf8")) as RetroMarker;
     assert.ok(marker.ts, "a missing body field is best-effort (ensureTaskTrailer/the repair pass) -- never blocks the marker advance");
@@ -1039,7 +1202,7 @@ test("retroCommand: a PR body with NO body field at all (not merely empty) still
 test("retroCommand: repoDir absent triggers a REAL `gh repo clone` and still reaches the marker advance", async (t) => {
   const fx = setupFakeRetroFixture(t, { missingRepoDir: true });
   await fx.run(async () => {
-    const exitCode = await withLiveWritesAllowed(() => retroCommand([], { spawn: fx.fakeSpawn, github: offlineGh }));
+    const exitCode = await withLiveWritesAllowed(() => retroCommand([], { spawn: fx.fakeSpawn, github: offlineGh, prepublishPreflight: fx.prepublishPreflight }));
     assert.equal(exitCode, 1, "same red-ci exit as the other success-path variants");
     const marker = JSON.parse(readFileSync(join(fx.root, "state", "last-retro.json"), "utf8")) as RetroMarker;
     assert.ok(marker.ts, "the gh-repo-clone fallback must still reach the real saveMarker call");
@@ -1053,7 +1216,7 @@ test("retroCommand: a transient `gh pr edit` failure during the acceptance-repai
   // outer catch and rethrown instead).
   const fx = setupFakeRetroFixture(t, { body: "Remudero-Task: RETRO\n", repairEditFails: true });
   await fx.run(async () => {
-    const exitCode = await withLiveWritesAllowed(() => retroCommand([], { spawn: fx.fakeSpawn, github: offlineGh }));
+    const exitCode = await withLiveWritesAllowed(() => retroCommand([], { spawn: fx.fakeSpawn, github: offlineGh, prepublishPreflight: fx.prepublishPreflight }));
     assert.equal(exitCode, 1, "the repair failure is best-effort -- it must NOT propagate as an uncaught rejection");
     const marker = JSON.parse(readFileSync(join(fx.root, "state", "last-retro.json"), "utf8")) as RetroMarker;
     assert.ok(marker.ts, "a failed repair attempt must never prevent the marker from advancing");
@@ -1065,7 +1228,7 @@ test("retroCommand: a transient `gh pr edit` failure during the acceptance-repai
 test("retroCommand: the Architect commits NOTHING (no PR_URL, ORIENTATION.md/plan-index.json both degrade) -- the no-op guard exits before any PR, marker untouched", async (t) => {
   const fx = setupFakeRetroFixture(t, { noPrUrl: true, missingMasterPlan: true }); // includeGeneratorScript defaults to false
   await fx.run(async () => {
-    const exitCode = await withLiveWritesAllowed(() => retroCommand([], { spawn: fx.fakeSpawn, github: offlineGh }));
+    const exitCode = await withLiveWritesAllowed(() => retroCommand([], { spawn: fx.fakeSpawn, github: offlineGh, prepublishPreflight: fx.prepublishPreflight }));
     assert.equal(exitCode, 1, "0 commits ahead of origin/main means nothing to PR -- retro.no_op, exit 1");
     assert.ok(!fsDefault.existsSync(join(fx.root, "state", "last-retro.json")), "a no-op retro (nothing committed) must NEVER advance the marker");
     const ledgerLines = readFileSync(join(fx.root, "state", "ledger.ndjson"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
@@ -1078,7 +1241,7 @@ test("retroCommand: a stale lockless leftover worktree is force-removed by prune
   const stalePath = join(fx.root, "worktrees", "run-STALE-leftover");
   assert.ok(fsDefault.existsSync(stalePath), "sanity: the stale worktree must exist BEFORE retroCommand runs");
   await fx.run(async () => {
-    const exitCode = await withLiveWritesAllowed(() => retroCommand([], { spawn: fx.fakeSpawn, github: offlineGh }));
+    const exitCode = await withLiveWritesAllowed(() => retroCommand([], { spawn: fx.fakeSpawn, github: offlineGh, prepublishPreflight: fx.prepublishPreflight }));
     assert.equal(exitCode, 1, "same red-ci exit as the other success-path variants");
     const marker = JSON.parse(readFileSync(join(fx.root, "state", "last-retro.json"), "utf8")) as RetroMarker;
     assert.ok(marker.ts, "pruning a stale sibling worktree must never prevent THIS run's own marker advance");

@@ -449,6 +449,11 @@ import {
   type RetroTriggerDecision,
   type ShippedGithub,
 } from "./lib/retro.js";
+import {
+  runRetroPrepublishPreflight,
+  type RunRetroPrepublishPreflightOptions,
+  type RetroPrepublishProvenance,
+} from "./lib/retro-preflight.js";
 import { regenerateOrientation } from "./lib/orientation.js";
 import {
   buildPlanPrBody,
@@ -19651,6 +19656,9 @@ async function retroCommand(
      * so; see {@link promotionProposalSectionFor} for why no fail-closed default is fabricated.
      */
     promotionJudge?: PromotionJudgeDeps["judge"];
+    /** Test seam for the retro's blocking local publication gate. Production always uses the
+     * real dynamically-enumerated plan-reading preflight. */
+    prepublishPreflight?: typeof runRetroPrepublishPreflight;
   } = {},
 ): Promise<number> {
   const dryRun = rest.includes("--dry-run");
@@ -20021,87 +20029,164 @@ async function retroCommand(
       ...workerLedgerFields(worker),
     });
 
-    // W1-T39: docs/ORIENTATION.md is HARNESS-OWNED — deterministically regenerated
-    // here (never LLM-authored) so it can never go stale by hand-copy or by an
-    // Architect forgetting to touch it. Runs AFTER the worker so it also reflects
-    // whatever the Architect just changed in MASTER-PLAN.md §12 (Standing rules).
-    // The mechanism itself lives in lib/orientation.ts (independently exercised
-    // against a real git worktree by test/orientation.test.ts, see that file for
-    // the falsifier that proves a second pass's diff names the REFRESHED state).
-    let orientationCommitted = false;
-    try {
-      const result = regenerateOrientation({
-        worktreePath,
-        generatedAt: new Date().toISOString(),
-        gather,
-        nextTask,
-      });
-      orientationCommitted = result.committed;
-      if (result.committed) log("orientation.regenerated", { diff_bytes: result.diff?.length ?? 0 });
-    } catch (e) {
-      log("orientation.write.error", { error: String((e as Error)?.message ?? e) });
+    // The same harness-owned regeneration sequence runs after initial synthesis and after the ONE
+    // same-session preflight repair. Keeping it in one closure prevents the repair route from
+    // quietly omitting a generator and publishing a different artifact set than attempt one.
+    const regenerateHarnessArtifacts = (): {
+      orientationCommitted: boolean;
+      planIndexCommitted: boolean;
+      citationStampCommitted: boolean;
+    } => {
+      // W1-T39: docs/ORIENTATION.md is HARNESS-OWNED — deterministically regenerated
+      // here (never LLM-authored) so it can never go stale by hand-copy or by an
+      // Architect forgetting to touch it. Runs AFTER the worker so it also reflects
+      // whatever the Architect just changed in MASTER-PLAN.md §12 (Standing rules).
+      let orientationCommitted = false;
+      try {
+        const result = regenerateOrientation({
+          worktreePath,
+          generatedAt: new Date().toISOString(),
+          gather,
+          nextTask,
+        });
+        orientationCommitted = result.committed;
+        if (result.committed) log("orientation.regenerated", { diff_bytes: result.diff?.length ?? 0 });
+      } catch (e) {
+        log("orientation.write.error", { error: String((e as Error)?.message ?? e) });
+      }
+
+      // W1-T136 (#287 class): plan/plan-index.json is HARNESS-OWNED too — the Architect
+      // just edited MASTER-PLAN.md above, and an un-regenerated index reds
+      // `plan-index:check` post-push (#287's exact failure).
+      let planIndexCommitted = false;
+      try {
+        const result = regeneratePlanIndexAndCommit({ worktreePath });
+        planIndexCommitted = result.committed;
+        if (result.committed) log("plan_index.regenerated", { diff_bytes: result.diff?.length ?? 0 });
+      } catch (e) {
+        log("plan_index.regen.error", { error: String((e as Error)?.message ?? e) });
+      }
+
+      // W1-T1248: the citation miners' production caller. It follows both other generators on
+      // every pass so the exact final branch, not a pre-repair approximation, is validated.
+      const citationStampCommitted = runCitationStampPass({ worktreePath, followupLedgerNdjson, log });
+      return { orientationCommitted, planIndexCommitted, citationStampCommitted };
+    };
+    regenerateHarnessArtifacts();
+
+    // A compliant Architect no longer publishes. This compatibility read catches an older or
+    // disobedient session that already did. The report is evidence but not the source of truth:
+    // an Architect can successfully push/open a PR and then omit its URL (or lose the response),
+    // so an absent report URL gets one exact-head REST probe before this run may create anything.
+    // A failed probe throws and fails closed; treating an unreadable remote as "no PR" would make
+    // a second PR possible. The discovered URL is retained through repair and publication.
+    let prUrl = parseReport(workerTranscript(worker))?.prUrl;
+    if (!prUrl) {
+      const existingPr = probeExistingPlanPr(ghJson, owner, repo, branch);
+      if (existingPr) {
+        prUrl = existingPr.prUrl;
+        log("retro.pr.recovered", { pr_url: prUrl, pr_number: existingPr.prNumber, head_branch: branch });
+      }
+    }
+    const remotePrExisted = Boolean(prUrl);
+    if (prUrl) {
+      const prematureOwnership = checkPrOwnership(prUrl, branch, ghPrHeadGateway(), worker.costUsd, worker.accountLabel);
+      if (prematureOwnership) {
+        log("verdict", prematureOwnership.ledger);
+        say(
+          `verdict: pr_attribution_failed — claimed PR ${prUrl} ` +
+            `(branch ${prematureOwnership.ledger.claimed_branch ?? "unresolved"}) is not this retro's own branch ` +
+            `(${branch}) — PR left UNTOUCHED`,
+        );
+        worktreeRemove(repoDir, worktreePath);
+        return 1;
+      }
     }
 
-    // W1-T136 (#287 class): plan/plan-index.json is HARNESS-OWNED too — the Architect
-    // just edited MASTER-PLAN.md above, and an un-regenerated index reds
-    // `plan-index:check` post-push (#287's exact failure). Mirrors regenerateOrientation's
-    // write/add/diff-cached-quiet/commit-if-changed discipline (lib/plan-pr-emitter.ts).
-    let planIndexCommitted = false;
-    try {
-      const result = regeneratePlanIndexAndCommit({ worktreePath });
-      planIndexCommitted = result.committed;
-      if (result.committed) log("plan_index.regenerated", { diff_bytes: result.diff?.length ?? 0 });
-    } catch (e) {
-      log("plan_index.regen.error", { error: String((e as Error)?.message ?? e) });
+    // GUARD (W1-T64): no final branch means there is nothing to validate or publish.
+    if (commitsAhead(worktreePath, "origin/main") === 0) {
+      log("retro.no_op", { reason: "worker committed nothing", subtype: worker.subtype });
+      say(`retro no-op — worker (subtype ${worker.subtype}) committed nothing; nothing to PR`);
+      worktreeRemove(repoDir, worktreePath);
+      return 1;
     }
 
-    // W1-T1248: the citation miners' production caller (see citationStampPassFor's own doc) —
-    // rides EVERY real retro, mirroring orientation/plan-index's own regenerate-and-commit-if-
-    // changed discipline just above. Runs AFTER both: neither reads `learnings/`, so ordering
-    // doesn't matter for correctness, but grouping every HARNESS-OWNED post-worker write together
-    // keeps this block's shape legible top-to-bottom. The try/catch itself lives in
-    // runCitationStampPass (its own doc explains why it's split out).
-    const citationStampCommitted = runCitationStampPass({ worktreePath, followupLedgerNdjson, log });
-
-    // Ensure the branch reached origin (worker pushes without -u). Also push when
-    // ORIENTATION.md/plan-index.json/learnings citation stamps were regenerated AFTER the
-    // worker's own push, so those commits aren't silently left local (never reaching the PR the
-    // worker already opened).
-    let onOrigin = false;
-    try {
-      execFileSync("git", ["-C", worktreePath, "ls-remote", "--exit-code", "origin", branch], { stdio: "ignore" });
-      onOrigin = true;
-    } catch {
-      onOrigin = false;
+    const provenance: RetroPrepublishProvenance = {
+      ...(worker.provider ? { provider: worker.provider } : {}),
+      model: worker.model,
+      servedModel: worker.servedModel ?? null,
+      effort: worker.effort,
+      sessionId: worker.sessionId,
+    };
+    const preflightOptions: RunRetroPrepublishPreflightOptions = {
+      worktreePath,
+      provenance,
+      remotePrExisted,
+      log,
+      repair: async (repairPrompt) => {
+        // A resume token belongs to one backend. Narrowing the copied config to the producing
+        // provider makes provider routing capacity-aware within that backend without ever handing
+        // a Claude session id to Codex (or vice versa). The host config and live policy stay
+        // untouched; this is a per-call copy only.
+        const repairConfig: Config = worker.provider
+          ? {
+              ...config,
+              workerProviders: { ...config.workerProviders, enabled: [worker.provider] },
+            }
+          : config;
+        const repaired = await spawn({
+          cwd: worktreePath,
+          permissionMode: "bypassPermissions",
+          settingsFile,
+          model: arch,
+          effort: archEffort,
+          maxTurns: mountsTable.synthesis.retro.maxTurns,
+          maxBudgetUsd: DEFAULT_BUDGET_USD,
+          config: repairConfig,
+          prompt: repairPrompt,
+          resumeSessionId: worker.sessionId,
+        });
+        log("retro.preflight_repair", {
+          session_id: repaired.sessionId,
+          resumed_session_id: worker.sessionId,
+          ...workerLedgerFields(repaired),
+        });
+        if (repaired.sessionId && repaired.sessionId !== worker.sessionId) {
+          throw new Error(`retro preflight repair returned a different session (${repaired.sessionId})`);
+        }
+        if (worker.provider && repaired.provider && repaired.provider !== worker.provider) {
+          throw new Error(`retro preflight repair switched provider from ${worker.provider} to ${repaired.provider}`);
+        }
+        if (repaired.isError) {
+          throw new Error(`retro preflight repair failed: ${repaired.subtype}`);
+        }
+      },
+      regenerateHarnessArtifacts: () => {
+        regenerateHarnessArtifacts();
+      },
+    };
+    const preflight = opts.prepublishPreflight
+      ? await opts.prepublishPreflight(preflightOptions)
+      : await runRetroPrepublishPreflight(preflightOptions);
+    if (!preflight.ok) {
+      say(
+        `prepublish validation failed after ${preflight.attempts} attempt(s) — marker unchanged; ` +
+          `diagnostic branch preserved at ${worktreePath}`,
+      );
+      return 1;
     }
-    if (!onOrigin || orientationCommitted || planIndexCommitted || citationStampCommitted) {
-      gitPushRunBranch(worktreePath);
-    }
 
-    // W1-T1012: append the `Remudero-Task: <runId>` trailer to the branch's tip commit HERE —
-    // after the branch is confirmed on origin (the ensure-push just above, or the Architect's
-    // own push) and before either PR path below can read that tip: the Architect's own
-    // reported `prUrl`, or the `gh pr create --fill` fallback. Idempotent — see
-    // `appendTaskTrailerToCommit`'s own doc — so an Architect that already wrote the trailer
-    // pays no second amend.
+    // Publication begins only after the local gate passes. A premature owned PR is updated in
+    // place by pushing this same branch; the normal path publishes the branch for the first time.
+    gitPushRunBranch(worktreePath);
+
+    // W1-T1012: append the run trailer after validation (commit-message-only; no tested file
+    // changes), then update the same branch atomically before PR creation/body repair.
     if (appendTaskTrailerToCommit(worktreePath, runId)) {
       gitPushRunBranch(worktreePath, { force: true });
     }
 
-    let prUrl = parseReport(workerTranscript(worker))?.prUrl;
     if (!prUrl) {
-      // GUARD (W1-T64): 0 commits ahead of origin/main means the Architect produced
-      // nothing to PR (its subtype is already logged above via retro.synthesized) —
-      // `gh pr create --fill` has no diff to fill and THROWS on an empty branch, which
-      // used to crash the retro outright. commitsAhead already exists (the implement
-      // no-op guard, above in this file); reuse it here rather than ever attempting a PR
-      // on an empty branch. A real retro (>=1 commit) proceeds exactly as before.
-      if (commitsAhead(worktreePath, "origin/main") === 0) {
-        log("retro.no_op", { reason: "worker committed nothing", subtype: worker.subtype });
-        say(`retro no-op — worker (subtype ${worker.subtype}) committed nothing; nothing to PR`);
-        worktreeRemove(repoDir, worktreePath);
-        return 1;
-      }
       const prCreate = ghPrCreateFillCommand(worktreePath, owner, repo, branch, lastCommitSubject(worktreePath));
       prUrl = runGhPrCreate(prCreate, branch, log, say).prUrl;
     }
@@ -20292,14 +20377,15 @@ export function retroPrompt(gatherReport: string, calTable: string, runId: strin
     "",
     "Then, from the working directory:",
     "- git add MASTER-PLAN.md && commit with a concise message;",
-    "- `git push origin HEAD` (NOT -u);",
-    "- open a PR: `gh pr create --fill --base main`. The PR body MUST include an `Acceptance:` block",
-    "  covering: SHIPPED log added, NET STATE refreshed, calibration table present, and COMPRESSION",
-    "  done (name the deletion).",
+    "- STOP after the local commit. Do NOT push, open or edit a PR, create a task, or change branches.",
+    "  The harness owns publication: it regenerates its artifacts, runs the exact plan-reading CI",
+    "  suite set, and only after that passes pushes this branch and opens or updates its one PR.",
+    "- In your REPORT, include an `Acceptance:` block covering: SHIPPED log added, NET STATE refreshed,",
+    "  calibration table present, and COMPRESSION done (name the deletion).",
     ...RETRO_ACCEPTANCE_BLOCK_GRAMMAR,
     "  Include as the LAST body line:",
     `  Remudero-Task: RETRO-${runId.replace(/^RETRO-/, "")}`,
-    "- End your REPORT with exactly: PR_URL: <the pull request url>",
+    "- End your REPORT with exactly: READY_FOR_HARNESS",
   ].join("\n");
 }
 
