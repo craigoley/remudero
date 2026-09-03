@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import {
   INCIDENT_SCOPE_RE,
@@ -17,10 +17,20 @@ import { loadMounts, MountsError, mountsPath, type CapabilityLadder } from "../s
 import { ProviderCapacityBlockedError, type ProviderCapacity } from "../src/lib/worker-provider.js";
 import { readProviderRoutingStatus } from "../src/lib/provider-routing-status.js";
 import { createClaudeExecutableCache, spawnWorker, workerLedgerFields, type WorkerResult } from "../src/lib/worker.js";
+import { gitWorkTreeAncestor } from "../src/lib/worker-home.js";
 
 const REPO_ROOT = join(import.meta.dirname, "..");
 const STATUS_FIXTURE = JSON.parse(readFileSync(join(import.meta.dirname, "fixtures", "anthropic-status-2026-09-03.json"), "utf8"));
 const NOW = Date.parse("2026-09-03T14:00:00.000Z");
+
+/** A worker-home fixture must honour the same placement invariant production enforces. The fleet
+ * image can legitimately carry unrelated `/tmp/.git` test detritus, so select a parent only after
+ * proving it is outside every Git tree instead of assuming os.tmpdir() is always safe. */
+function workerFixtureRoot(prefix: string): string {
+  const parent = [tmpdir(), dirname(REPO_ROOT)].find((candidate) => gitWorkTreeAncestor(candidate) === undefined);
+  assert.ok(parent, "the test host must provide a scratch parent outside every Git work tree");
+  return mkdtempSync(join(parent, prefix));
+}
 
 function capabilities(): CapabilityLadder {
   const value = loadMounts(mountsPath(REPO_ROOT)).capabilities;
@@ -262,7 +272,7 @@ function workerArgs(
 }
 
 test("the Claude SDK receives Opus 4.7 while durable evidence keeps requested, routed, and served identities distinct", async () => {
-  const root = mkdtempSync(join(tmpdir(), "rmd-health-claude-worker-"));
+  const root = workerFixtureRoot("rmd-health-claude-worker-");
   let spawnedModel: string | undefined;
   try {
     const result = await spawnWorker(workerArgs(root, {
@@ -295,7 +305,7 @@ test("the Claude SDK receives Opus 4.7 while durable evidence keeps requested, r
 });
 
 test("all degraded Claude candidates admit only an enabled assigned Codex subscription above reserve", async () => {
-  const root = mkdtempSync(join(tmpdir(), "rmd-health-codex-worker-"));
+  const root = workerFixtureRoot("rmd-health-codex-worker-");
   const allFrontier = [...(capabilities().claudeCandidates?.frontier ?? [])];
   assert.ok(allFrontier.length > 0);
   let codexSpawned = 0;
@@ -346,7 +356,7 @@ test("all degraded Claude candidates admit only an enabled assigned Codex subscr
 });
 
 test("unknown advisory health preserves a Claude-only request and Codex-only installs never call Anthropic status", async () => {
-  const root = mkdtempSync(join(tmpdir(), "rmd-health-unknown-worker-"));
+  const root = workerFixtureRoot("rmd-health-unknown-worker-");
   let spawnedModel: string | undefined;
   try {
     const claude = await spawnWorker(workerArgs(root, {
