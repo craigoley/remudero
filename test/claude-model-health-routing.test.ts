@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  INCIDENT_SCOPE_RE,
   MAX_CLAUDE_STATUS_BYTES,
   clearClaudeModelHealthCache,
   fetchBoundedStatusJson,
@@ -30,6 +31,12 @@ function capabilities(): CapabilityLadder {
 function reading(degradedModels: string[], source: ClaudeModelHealthReading["source"] = "fresh"): ClaudeModelHealthReading {
   return { degradedModels, source, observedAtMs: NOW };
 }
+
+test("INCIDENT_SCOPE_RE matches only an explicit only-affected or exhaustive-list scope statement, not ordinary incident prose", () => {
+  assert.equal(INCIDENT_SCOPE_RE.test("The only affected models right now are Opus 5 and Opus 4.8."), true);
+  assert.equal(INCIDENT_SCOPE_RE.test("This is the exhaustive list of affected models: Opus 5."), true);
+  assert.equal(INCIDENT_SCOPE_RE.test("We are investigating elevated error rates for some Claude models."), false);
+});
 
 test("the observed incident routes opus and claude-opus-5 to healthy Opus 4.7 without matching Opus 5.1", () => {
   const ladder = capabilities();

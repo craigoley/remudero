@@ -8,9 +8,13 @@
 import { claudeModelDisplayName, type CapabilityLadder } from "./mounts.js";
 
 export const CLAUDE_STATUS_URL = "https://status.claude.com/api/v2/incidents/unresolved.json";
+/** BACKSTOP (W1-T1266): the unresolved-incidents payload is ordinarily a few KiB; this caps a
+ *  hostile or malfunctioning feed before it is buffered, never a bound normal traffic nears. */
 export const MAX_CLAUDE_STATUS_BYTES = 256 * 1024;
 export const CLAUDE_HEALTH_FRESH_MS = 60_000;
 export const CLAUDE_HEALTH_STALE_MS = 5 * 60_000;
+/** BACKSTOP (W1-T1266): a healthy status-feed response returns in well under a second; this
+ *  fires only once the request has already hung, never during ordinary traffic. */
 export const CLAUDE_HEALTH_TIMEOUT_MS = 3_000;
 
 export type ClaudeModelHealthSource = "fresh" | "stale" | "unknown";
@@ -97,7 +101,7 @@ function escaped(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-const INCIDENT_SCOPE_RE = /\b(?:only affected models(?: right now)? are|exhaustive list of affected models)\b/i;
+export const INCIDENT_SCOPE_RE = /\b(?:only affected models(?: right now)? are|exhaustive list of affected models)\b/i;
 
 function statusText(payload: unknown): string {
   if (!isRecord(payload) || !Array.isArray(payload.incidents)) {
