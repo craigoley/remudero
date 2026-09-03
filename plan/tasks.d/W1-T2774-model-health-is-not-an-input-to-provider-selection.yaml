@@ -1,0 +1,111 @@
+- id: W1-T2774
+  title: "provider selection measures subscription headroom but ignores live model health, so a known-degraded Claude model keeps receiving paid work even when a healthy same-capability Claude or assigned Codex route exists"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 48.00
+  risk: high
+  files:
+    - .remudero/mounts.yaml
+    - scripts/source-size-baseline.json
+    - src/lib/claude-model-health.ts
+    - src/lib/mounts.ts
+    - src/lib/worker.ts
+    - test/claude-model-health-routing.test.ts
+    - test/fixtures/anthropic-status-2026-09-03.json
+  origin: "operator-session#health-aware-dual-provider-routing-2026-09-03"
+  plan_refs: ["W1-T5", "W1-T2572", "W1-T2573", "W1-T2748", "W1-T2772"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED at 2026-09-03T13:56Z from Anthropic's public Statuspage v2 endpoints, after the
+    canonical redirect from `status.anthropic.com` to `status.claude.com`: overall status was
+    `minor`, Claude Code and the Claude API were both `partial_outage`, and the unresolved major
+    incident "Elevated errors for multiple models" said its exhaustive affected set was
+    Mythos/Fable 5.1, Mythos/Fable 5, Opus 5, Opus 4.8, and Opus 4.6. Opus 4.7 was not named.
+    Anthropic's current model-lifecycle documentation lists `claude-opus-5`,
+    `claude-opus-4-8`, `claude-opus-4-7`, and `claude-opus-4-6` as active models.
+
+    OBSERVED in the current spawn path: Remudero measures provider subscription windows and
+    selects by usable headroom, but the Claude branch passes the mount's `args.model` directly to
+    the SDK. A single-provider Claude install bypasses provider-capacity selection entirely. No
+    current input reads provider model health, no ordered Claude fallback table exists, and a
+    known-degraded `claude-opus-5`/`opus` request therefore keeps targeting the incident model.
+
+    Model health and subscription headroom answer different questions and must remain separate.
+    Health determines which concrete mounts are eligible. The existing provider policy then
+    chooses among eligible, assigned subscriptions by reset-aware headroom. For the observed
+    incident an Opus request must resolve to healthy Opus 4.7, not cross the capability boundary
+    to Sonnet. Once Codex is commissioned, an eligible frontier Codex model may instead win when
+    its assigned subscription has the stronger usable headroom; this task must not enable Codex
+    or weaken any commissioning gate.
+  design: |
+    Add a repository-owned, ordered Claude candidate ladder to the existing provider-neutral
+    capability data. Validate it at mounts-load time: every capability has a non-empty unique
+    candidate list, every candidate maps back to that same capability, and an explicit concrete
+    request starts at its own position so health routing can downgrade but never silently upgrade
+    a pin. Aliases such as `opus` start at the best candidate in their declared capability.
+
+    Read only the unauthenticated canonical Statuspage v2 unresolved-incidents endpoint with an
+    argv-free HTTP client, a short clock bound, a one-minute success cache, and one shared in-flight
+    request. Match only configured concrete model display names using escaped token boundaries;
+    do not infer an entire family outage from a generic component state. Treat every model named
+    anywhere in an unresolved incident's updates as degraded until that incident disappears.
+    Preserve a sanitized fixture of the observed payload. No GitHub request, Anthropic credential,
+    prompt, repository content, or worker transcript may flow to the status service.
+
+    Resolve Claude health before provider selection. A healthy same-capability candidate keeps
+    Claude eligible and is carried as the concrete model into the spawn. If every candidate is
+    known degraded, mark Claude ineligible so an already-enabled Codex route can win only through
+    the existing assigned-subscription and reserve/headroom checks. If no provider remains, fail
+    closed before a paid model call with an explicit model-health reason. A Claude-only install
+    uses the same resolver and therefore falls back within Claude rather than bypassing health.
+
+    Status transport timeout, malformed JSON, or an unavailable endpoint is UNKNOWN, never
+    fabricated healthy or degraded. Reuse a bounded last successful reading when available;
+    without one, preserve the requested model and emit the unknown posture so an outage of the
+    advisory status service cannot halt the only configured subscription. This fail-soft source
+    posture must be explicit in telemetry and must not be confused with a positive health result.
+
+    Preserve three model identities in durable evidence: requested mount, concrete routed model,
+    and provider-reported served model. Add the routed model and health source/state to the existing
+    worker result/ledger seam without changing old rows. The decision must also appear in provider
+    routing status for the console. Keep Claude capacity caching and Codex capacity semantics
+    unchanged; W1-T2772 separately owns Codex control-session single-flight and timeout attribution.
+  acceptance:
+    - claim: "the preserved 2026-09-03 Statuspage payload marks Opus 5, Opus 4.8, and Opus 4.6 degraded but leaves Opus 4.7 eligible, so both `opus` and `claude-opus-5` resolve to `claude-opus-4-7`"
+      proof: "unit test: test/claude-model-health-routing.test.ts"
+    - claim: "Claude fallback candidates are ordered policy data, validated as unique and same-capability, and an explicit concrete model can only remain in place or move downward within its declared capability"
+      proof: "unit test: test/claude-model-health-routing.test.ts"
+    - claim: "concurrent health reads share one bounded public request and later reads use the fresh cache rather than issuing one status request per worker"
+      proof: "unit test: test/claude-model-health-routing.test.ts"
+    - claim: "a known outage of every same-capability Claude candidate removes Claude from provider eligibility, allowing Codex only when it is enabled, assigned, readable, and above reserve"
+      proof: "unit test: test/claude-model-health-routing.test.ts"
+    - claim: "a status timeout or malformed response is recorded as unknown, reuses only bounded last-success evidence, and never invents model health or blocks a Claude-only install solely because the advisory source failed"
+      proof: "unit test: test/claude-model-health-routing.test.ts"
+    - claim: "the actual Claude SDK spawn receives the resolved concrete model while durable worker evidence distinguishes requested, routed, and provider-served model identities plus the health decision source"
+      proof: "unit test: test/claude-model-health-routing.test.ts"
+    - claim: "Codex remains disabled unless the operator enables it, and all existing Claude containment, credential, capacity, mount-invariant, and provider-headroom behavior remains unchanged outside the model-health decision"
+      proof: "unit test: test/claude-model-health-routing.test.ts"
+    - claim: "the real worker spawn path invokes the model-health resolver rather than leaving the new module reachable only from tests"
+      proof: "unit test: test/claude-model-health-routing.test.ts"
+  falsifier: |
+    Close this task without implementation if the canonical unresolved-incidents endpoint does not
+    expose model-specific incident text, if `claude-opus-4-7` is not active/available to the fleet
+    subscription, or if the current Claude SDK cannot accept a concrete fallback model. Do not
+    scrape rendered HTML, weaken the Tier Invariant, treat a component-wide partial outage as proof
+    that every model is degraded, route across a lower capability, enable Codex, or turn an
+    unreadable advisory status source into permission to spend on an otherwise ineligible provider.
+  note: |
+    ID PROVENANCE: `rmd next-task-id --reserve` reported advisory W1-T2773 but atomically held
+    `refs/rmd-id/W1-T2774`; the held id is authoritative and used here.
+
+    INCIDENT SOURCE: `https://status.claude.com/api/v2/incidents/unresolved.json`, observed
+    2026-09-03T13:56Z. MODEL-LIFECYCLE SOURCE: Anthropic's current Model deprecations page,
+    observed the same day. The fixture is test evidence, not a permanent declaration that those
+    models remain degraded after the incident resolves.
+
+    COMMISSIONING BOUNDARY: this task consumes existing provider configuration only. It neither
+    adds Codex to `workerProviders.enabled` nor authorizes a daemon/Serve recycle or deployment.
