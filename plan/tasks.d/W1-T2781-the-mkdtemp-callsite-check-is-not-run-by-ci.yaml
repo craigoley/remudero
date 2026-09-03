@@ -1,0 +1,70 @@
+- id: W1-T2781
+  title: "THE MKTEMP CALLSITE CHECK IS PRESENT BUT CI NEVER RUNS IT — package.json satisfies the generic wiring detector while commits made outside core.hooksPath can still add unreapable temp prefixes"
+  repo: remudero
+  depends_on: [W1-T2773]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high
+  files:
+    - .github/workflows/unwired-gate.yml
+    - test/mkdtemp-callsite-ci-wiring.test.ts
+  origin: "operator-session#mkdtemp-ci-wiring-gap-2026-09-03"
+  plan_refs: ["W1-T2735", "W1-T2773", "Rule 25"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED on PR #3808 head 003730ac and rechecked after its proof repair: the new
+    `scripts/mkdtemp-callsite-check.mjs` appears in `package.json` and `hooks/pre-commit`, but no
+    executable value in `.github/workflows/*.yml` invokes it. `git grep` finds the package-script
+    entry and the hook only. W1-T2773's own rationale says the check also runs in CI so commits
+    made outside the configured hook path cannot slip through; material state does not satisfy
+    that statement.
+
+    The generic W1-T2735 unwired-gate cannot detect this gap. Its documented contract treats an
+    npm script value as a complete wiring surface, so `"mkdtemp-callsite-check": "node
+    scripts/mkdtemp-callsite-check.mjs"` correctly clears that generic detector even though no CI
+    runner calls the npm script. That detector proves discoverability, not enforcement.
+
+    The falsifying observation would be a parsed workflow step whose executable `run:` value
+    invokes the mkdtemp checker and propagates its exit code. Every workflow was searched and no
+    such step exists. This task depends on W1-T2773 because the workflow must not call a package
+    script before that script and its allowlisted clean baseline have merged.
+  design: |
+    Add one fail-closed step to the existing `unwired-gate` job in
+    `.github/workflows/unwired-gate.yml`, after `npm ci`. Invoke W1-T2773's package script by name
+    and let its nonzero exit status fail the job. Do not use `continue-on-error`, `|| true`, a path
+    filter, or a second runner job.
+
+    Co-locating this check with the existing unconditional lightweight workflow avoids another
+    GitHub-hosted runner startup and avoids multiplying the scan across the four main CI shards.
+    Preserve the workflow's `pull_request` trigger, read-only permission, pinned actions, timeout,
+    and existing unwired-gate step exactly outside the new step.
+
+    Prove material wiring by parsing the workflow YAML in a dedicated test. The proof must find
+    exactly one executable step across all workflows that invokes the package script, verify it
+    belongs to the existing `unwired-gate` job, and verify that neither the step nor its job
+    suppresses a nonzero result. A raw text match is insufficient because comments and step names
+    are not execution.
+  acceptance:
+    - claim: "exactly one executable GitHub Actions step invokes `npm run --silent mkdtemp-callsite-check`, and it is in the existing unconditional unwired-gate job rather than a four-way test matrix or a new runner job"
+      proof: "unit test: test/mkdtemp-callsite-ci-wiring.test.ts"
+    - claim: "the CI step propagates the checker's nonzero exit status: neither the step nor its job uses continue-on-error, `|| true`, or another failure-masking construct"
+      proof: "unit test: test/mkdtemp-callsite-ci-wiring.test.ts"
+    - claim: "the pull_request trigger, read-only contents permission, pinned setup actions, timeout, install step, and existing unwired-gate invocation remain present and unchanged outside the added checker step"
+      proof: "unit test: test/mkdtemp-callsite-ci-wiring.test.ts"
+  falsifier: |
+    Before implementation, parse every tracked `.github/workflows/*.yml` and confirm no executable
+    `run:` value invokes `mkdtemp-callsite-check`; the dedicated test must fail on that current
+    state. After implementation it passes. Delete only the new workflow step and the test returns
+    to failure. Separately plant a refused bare-prefix callsite in an isolated tracked fixture and
+    execute the exact workflow command; its nonzero exit must be preserved rather than masked.
+  note: |
+    ID PROVENANCE: `rmd next-task-id --reserve` printed advisory W1-T2780 but atomically held
+    `refs/rmd-id/W1-T2781`; the reserved id is authoritative.
+
+    RISK: high because this changes an unconditional pull-request gate and can block the whole PR
+    queue if W1-T2773's allowlist is not clean. The hard dependency and an existing single-run job
+    are the containment boundary. No daemon, Serve, ACR, subscription, or deployment state changes
+    are part of this task.
