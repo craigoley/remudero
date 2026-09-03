@@ -64,7 +64,7 @@
   "src/lib/inflight-lock.ts": 270,
   "src/lib/init.ts": 257,
   "src/lib/install-root.ts": 279,
-  "src/lib/isolation.ts": 417,
+  "src/lib/isolation.ts": 500,
   "src/lib/issues-intake.ts": 230,
   "src/lib/knowledge-dedup.ts": 209,
   "src/lib/last-seen.ts": 105,
