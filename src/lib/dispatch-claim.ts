@@ -253,3 +253,227 @@ export function releaseDispatchClaim(
   if (!decision.release) return { ...decision, dropped: false };
   return { ...decision, dropped: reserver.drop(taskId, i.anchor !== undefined ? { expect: i.anchor } : {}) };
 }
+
+// ── PR REPAIR CLAIMS (W1-T2677) ─────────────────────────────────────────────────────────────
+
+/** One advisory claim on an open PR repair. Unlike a task-dispatch claim, this record expires:
+ * repairers already have an exact-head push guard, so the claim prevents duplicate diagnosis
+ * work but is never authority to block a later branch push. */
+export interface RepairClaim {
+  readonly anchor: string;
+  readonly prNumber: number;
+  readonly holder: string;
+  readonly claimedAtIso: string;
+}
+
+export function repairClaimRef(prNumber: number): string {
+  if (!Number.isSafeInteger(prNumber) || prNumber <= 0) throw new RangeError(`invalid PR number: ${prNumber}`);
+  return `refs/rmd-repair/${prNumber}`;
+}
+
+export type RepairClaimRead =
+  | { readonly state: "present"; readonly claim: RepairClaim }
+  | { readonly state: "absent" }
+  | { readonly state: "unreachable"; readonly reason?: string };
+
+export interface RepairClaimReserver {
+  /** Mint an orphan commit carrying the holder and timestamp; performs no remote write. */
+  mintAnchor(input: Omit<RepairClaim, "anchor">): string;
+  /** Create the PR's ref if absent. The non-fast-forward rejection is the atomic contention. */
+  attempt(prNumber: number, anchor: string): DispatchClaimOutcome;
+  /** Read the current remote anchor and its embedded claim metadata. */
+  read(prNumber: number): RepairClaimRead;
+  /** Replace exactly one expired anchor. A changed lease means another reclaimer won. */
+  replace(prNumber: number, anchor: string, expectedAnchor: string): "replaced" | "lost" | "unreachable";
+  /** Best-effort holder release, conditional on the ref still carrying this anchor. */
+  drop(prNumber: number, expectedAnchor: string): boolean;
+}
+
+export interface RepairClaimDecision {
+  readonly claimed: boolean;
+  readonly outcome: "created" | "taken" | "reclaimed" | "lost" | "unreachable" | "unreadable";
+  readonly reason: string;
+  readonly anchor?: string;
+  readonly holder?: string;
+  readonly previousHolder?: string;
+  readonly ageMs?: number;
+}
+
+/**
+ * Atomically claim the diagnosis phase for one open PR.
+ *
+ * The first push is create-if-absent. A live claim returns its holder and measured age. An
+ * expired claim may be replaced only with a force-with-lease against the anchor just read, so
+ * two reclaimers cannot both leave believing they won. Unreadable metadata fails closed: age is
+ * not guessed and malformed evidence is never laundered into expiry.
+ */
+export function claimRepair(
+  reserver: RepairClaimReserver,
+  input: { prNumber: number; holder?: string; nowMs: number; ttlMs: number },
+): RepairClaimDecision {
+  repairClaimRef(input.prNumber); // validate before minting or touching origin
+  if (!Number.isFinite(input.nowMs)) throw new RangeError(`invalid repair-claim clock: ${input.nowMs}`);
+  if (!Number.isFinite(input.ttlMs) || input.ttlMs <= 0) throw new RangeError(`invalid repair-claim ttl: ${input.ttlMs}`);
+
+  const holder = input.holder ?? `${process.pid}@${hostname()}`;
+  const proposed: Omit<RepairClaim, "anchor"> = {
+    prNumber: input.prNumber,
+    holder,
+    claimedAtIso: new Date(input.nowMs).toISOString(),
+  };
+  const anchor = reserver.mintAnchor(proposed);
+  const attempt = reserver.attempt(input.prNumber, anchor);
+  if (attempt === "created") {
+    return {
+      claimed: true,
+      outcome: "created",
+      anchor,
+      holder,
+      ageMs: 0,
+      reason: `claimed ${repairClaimRef(input.prNumber)} for ${holder}`,
+    };
+  }
+  if (attempt === "unreachable") {
+    return {
+      claimed: false,
+      outcome: "unreachable",
+      reason: `cannot reach origin to claim ${repairClaimRef(input.prNumber)}; repair diagnosis withheld`,
+    };
+  }
+
+  const current = reserver.read(input.prNumber);
+  if (current.state === "unreachable") {
+    const detail = current.reason ? `: ${current.reason}` : "";
+    return {
+      claimed: false,
+      outcome: "unreachable",
+      reason: `cannot read the holder of ${repairClaimRef(input.prNumber)}${detail}; repair diagnosis withheld`,
+    };
+  }
+  // The holder may have released between the rejected create and this read. Refuse this round;
+  // the next caller retries the ordinary create path. This preserves one remote mutation per arm
+  // and cannot strand the PR because an absent ref has no holder.
+  if (current.state === "absent") {
+    return {
+      claimed: false,
+      outcome: "lost",
+      reason: `${repairClaimRef(input.prNumber)} changed while it was being inspected; retry from fresh state`,
+    };
+  }
+
+  const claimedAtMs = Date.parse(current.claim.claimedAtIso);
+  if (!Number.isFinite(claimedAtMs)) {
+    return {
+      claimed: false,
+      outcome: "unreadable",
+      holder: current.claim.holder,
+      reason: `${repairClaimRef(input.prNumber)} carries an invalid timestamp; expiry cannot be established`,
+    };
+  }
+  const ageMs = Math.max(0, input.nowMs - claimedAtMs);
+  if (ageMs < input.ttlMs) {
+    return {
+      claimed: false,
+      outcome: "taken",
+      holder: current.claim.holder,
+      ageMs,
+      reason: `${repairClaimRef(input.prNumber)} is held by ${current.claim.holder}, age ${ageMs}ms`,
+    };
+  }
+
+  const replaced = reserver.replace(input.prNumber, anchor, current.claim.anchor);
+  if (replaced === "replaced") {
+    return {
+      claimed: true,
+      outcome: "reclaimed",
+      anchor,
+      holder,
+      previousHolder: current.claim.holder,
+      ageMs,
+      reason: `reclaimed expired ${repairClaimRef(input.prNumber)} from ${current.claim.holder} at age ${ageMs}ms`,
+    };
+  }
+  return {
+    claimed: false,
+    outcome: replaced === "lost" ? "lost" : "unreachable",
+    holder: current.claim.holder,
+    ageMs,
+    reason:
+      replaced === "lost"
+        ? `${repairClaimRef(input.prNumber)} changed before expired-claim takeover; another repairer won`
+        : `cannot reach origin to replace expired ${repairClaimRef(input.prNumber)}; repair diagnosis withheld`,
+  };
+}
+
+const REPAIR_CLAIM_MESSAGE_PREFIX = "rmd-repair claim v1";
+
+function parseRepairClaim(anchor: string, message: string): RepairClaim | undefined {
+  const lines = message.trim().split("\n");
+  if (lines[0] !== REPAIR_CLAIM_MESSAGE_PREFIX) return undefined;
+  try {
+    const parsed = JSON.parse(lines.slice(1).join("\n")) as Partial<RepairClaim>;
+    if (
+      !Number.isSafeInteger(parsed.prNumber) ||
+      Number(parsed.prNumber) <= 0 ||
+      typeof parsed.holder !== "string" ||
+      parsed.holder.length === 0 ||
+      typeof parsed.claimedAtIso !== "string"
+    ) return undefined;
+    return { anchor, prNumber: Number(parsed.prNumber), holder: parsed.holder, claimedAtIso: parsed.claimedAtIso };
+  } catch (error) {
+    // Malformed JSON and a structurally-invalid payload have the same public result, but keep
+    // the caught failure explicit so this parser never becomes a bare catch-erasure site.
+    void error;
+    return undefined;
+  }
+}
+
+/** Real Git implementation usable from a fleet fixer, Codex session, or operator checkout. */
+export function gitRepairClaimReserver(deps: DispatchClaimGitDeps): RepairClaimReserver {
+  const minted = new Map<string, Omit<RepairClaim, "anchor">>();
+  return {
+    mintAnchor(input) {
+      const tree = deps.run(["hash-object", "-t", "tree", "/dev/null"]);
+      if (tree.status !== 0 || tree.stdout.trim().length === 0) throw new Error(`cannot mint repair claim tree: ${tree.stderr.trim()}`);
+      const message = `${REPAIR_CLAIM_MESSAGE_PREFIX}\n${JSON.stringify(input)}`;
+      const commit = deps.run(["commit-tree", tree.stdout.trim(), "-m", message]);
+      if (commit.status !== 0 || commit.stdout.trim().length === 0) throw new Error(`cannot mint repair claim anchor: ${commit.stderr.trim()}`);
+      const anchor = commit.stdout.trim();
+      minted.set(anchor, input);
+      return anchor;
+    },
+    attempt(prNumber, anchor) {
+      const res = deps.run(["push", "origin", `${anchor}:${repairClaimRef(prNumber)}`]);
+      return res.status === 0 ? "created" : classifyPushFailure(res.stderr);
+    },
+    read(prNumber) {
+      const ref = repairClaimRef(prNumber);
+      const listed = deps.run(["ls-remote", "origin", ref]);
+      if (listed.status !== 0) return { state: "unreachable", reason: listed.stderr.replace(/\s+/g, " ").trim().slice(0, 300) };
+      const anchor = listed.stdout.trim().split(/\s+/)[0];
+      if (!anchor) return { state: "absent" };
+      // A second checkout does not have the orphan object merely because ls-remote named it.
+      // Fetch only this private ref, then inspect the exact advertised anchor.
+      const fetched = deps.run(["fetch", "--quiet", "origin", ref]);
+      if (fetched.status !== 0) return { state: "unreachable", reason: fetched.stderr.replace(/\s+/g, " ").trim().slice(0, 300) };
+      const shown = deps.run(["show", "-s", "--format=%B", anchor]);
+      if (shown.status !== 0) return { state: "unreachable", reason: shown.stderr.replace(/\s+/g, " ").trim().slice(0, 300) };
+      const claim = parseRepairClaim(anchor, shown.stdout);
+      return claim ? { state: "present", claim } : {
+        state: "present",
+        claim: { anchor, prNumber, holder: "unknown", claimedAtIso: "invalid" },
+      };
+    },
+    replace(prNumber, anchor, expectedAnchor) {
+      if (!minted.has(anchor)) throw new Error(`repair claim anchor ${anchor} was not minted by this reserver`);
+      const ref = repairClaimRef(prNumber);
+      const res = deps.run(["push", `--force-with-lease=${ref}:${expectedAnchor}`, "origin", `${anchor}:${ref}`]);
+      if (res.status === 0) return "replaced";
+      return classifyPushFailure(res.stderr) === "taken" ? "lost" : "unreachable";
+    },
+    drop(prNumber, expectedAnchor) {
+      const ref = repairClaimRef(prNumber);
+      return deps.run(["push", `--force-with-lease=${ref}:${expectedAnchor}`, "origin", `:${ref}`]).status === 0;
+    },
+  };
+}
