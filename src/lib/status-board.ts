@@ -2027,6 +2027,8 @@ const QUEUE_HEAD_NEXT_ACTIONS: readonly NextActionRule<QueueHeadSection>[] = [
   },
 ];
 
+/** EXPORTED for test only (as {@link renderQueueHeadBlock} already is). W1-T2637: lets a test prove both rules above stay reason-scoped for a `refused` reason the derivation cannot produce today (the guard at :1935 is unchanged). */ export function pickQueueHeadNextAction(section: QueueHeadSection): string | undefined { return pickNextAction(QUEUE_HEAD_NEXT_ACTIONS, section); }
+
 // ── INBOX derivation ─────────────────────────────────────────────────────────────────────────
 
 function deriveInbox(
@@ -2678,6 +2680,11 @@ function renderBlockersBlock(b: BlockersSection): string[] {
   return out;
 }
 
+/** W1-T2637: a label table, exhaustive BY CONSTRUCTION — one wording per {@link QueueHeadRefusedRow.reason} member, keyed as a `Record` so the type-checker names any arm left without a sentence. Replaces the two-way ternary W1-T2415 already had to repair once; `deriveQueueHead`'s guard is unchanged, so only run-branch/breaker reach this table today, both byte-identical to before. */ const QUEUE_HEAD_REFUSAL_WORDING: Record<QueueHeadRefusedRow["reason"], (r: QueueHeadRefusedRow) => string> = {
+  "circuit-broken": (r) => `dispatch circuit breaker tripped — ${r.resetNote ?? `${r.dispatchCount}/${r.maxDispatches} dispatches with no new owned PR`}`,
+  "run-branch-already-pushed": () => "run branch already pushed to origin", "already-merged": () => "already merged", "verify-not-auto": () => "verify is not auto",
+  blocked: () => "blocked", retired: () => "retired", "unmet-deps": () => "dependencies not yet met", "continued-this-pass": () => "continued this pass" };
+
 /** EXPORTED for test only — the same visibility `deriveCircuitBrokenBlockers` already carries,
  *  so a test can assert what an operator actually READS rather than only the section object.
  *  Behaviour unchanged for every existing (single-argument) caller: `enabled` defaults to
@@ -2706,16 +2713,9 @@ export function renderQueueHeadBlock(q: QueueHeadSection, enabled = false): stri
         ),
       );
     }
-    // W1-T1205 (design (ii)): what dispatch is REFUSING, named — never silently absent from a
-    // list that only ever showed what it would take.
+    // W1-T1205 (design (ii)): what dispatch is REFUSING, named — never silently absent from a list that only ever showed what it would take.
     for (const r of q.refused) {
-      // W1-T2415: BRANCH ON THE REASON. This line used to hardcode the run-branch wording for
-      // every row, so a breaker refusal pushed here would have been mislabelled as a stale
-      // branch — a worse failure than the silence it replaces.
-      const why =
-        r.reason === "circuit-broken"
-          ? `dispatch circuit breaker tripped — ${r.resetNote ?? `${r.dispatchCount}/${r.maxDispatches} dispatches with no new owned PR`}`
-          : "run branch already pushed to origin";
+      const why = QUEUE_HEAD_REFUSAL_WORDING[r.reason](r); // W1-T2637: table lookup, was a two-way ternary
       out.push(paint.warn(`REFUSED: ${r.taskId} — ${r.title} (${why})`, enabled));
     }
     if (q.refusedTruncated > 0) {
