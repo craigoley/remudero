@@ -125,6 +125,9 @@ CLAUDE_JSON_MOUNT_DEST="/home/node/.claude.json"
 # test is below.
 GITHUB_WEBHOOK_SECRET_PATH="${RMD_GITHUB_WEBHOOK_SECRET_PATH:-}"
 GITHUB_WEBHOOK_SECRET_MOUNT_DEST="/home/node/.rmd-github-webhook-secret"
+# W1-T2778: one file, never the daemon's whole credential directory. The host-side source is
+# resolved after GH_APP_* capture because a captured value names the daemon container's namespace.
+APP_PRIVATE_KEY_MOUNT_DEST="/home/node/.rmd-github-app-private-key.pem"
 SERVE_PORT="${RMD_SERVE_PORT:-4317}"
 # The pair from part 1 of the header. Both are named here, next to each other, so a future edit
 # cannot drop one and leave a launch that boots and binds the wrong interface.
@@ -240,8 +243,8 @@ echo "serve-container: GH_TOKEN ${GH_TOKEN_SOURCE} (value never printed, never w
 # contract exactly: a console with none of them set starts and serves precisely as it did before
 # this task, `GH_TOKEN` (whatever it holds at spawn) keeps authenticating every `gh`/`git` call,
 # and the operator sees an explicit "static (no renewal configured)" chip on the board rather than
-# a silent behaviour change. A `GH_APP_PRIVATE_KEY_PATH` that does not resolve to a readable file
-# INSIDE this container (this script mounts no new volume for it) degrades the same graceful way:
+# a silent behaviour change. W1-T2778 resolves the configured path to one readable HOST file and
+# mounts only that file below. If it cannot, the launch still degrades the same graceful way:
 # `refreshInstallationToken` reports "private key unreadable", ledgers it, and leaves `GH_TOKEN`
 # exactly as it found it — never a boot failure, never a masked one either (see the board chip).
 for VAR_NAME in GH_APP_ID GH_APP_INSTALLATION_ID GH_APP_PRIVATE_KEY_PATH; do
@@ -261,6 +264,57 @@ for VAR_NAME in GH_APP_ID GH_APP_INSTALLATION_ID GH_APP_PRIVATE_KEY_PATH; do
   fi
 done
 unset CURRENT VAR_NAME
+
+# A value captured from remudero-daemon names a path in THAT container's mount namespace. Passing
+# it through unchanged was W1-T2778's measured defect: Serve had all three env names, no `.claude`
+# mount, and therefore no readable key. Translate through the daemon's ACTUAL mounts rather than
+# assuming where the operator keeps credentials on the host. Longest destination wins so a nested
+# mount is never shadowed by a broader parent. Paths are metadata, not secret material; key CONTENT
+# is never read here.
+daemon_host_path_for() {
+  local CONTAINER_PATH="$1"
+  local BEST_SOURCE=""
+  local BEST_DEST=""
+  local SOURCE=""
+  local DEST=""
+  while IFS=$'\t' read -r SOURCE DEST; do
+    [ -n "${SOURCE}" ] && [ -n "${DEST}" ] || continue
+    case "${CONTAINER_PATH}" in
+      "${DEST}"|"${DEST}"/*)
+        if [ "${#DEST}" -gt "${#BEST_DEST}" ]; then
+          BEST_SOURCE="${SOURCE}"
+          BEST_DEST="${DEST}"
+        fi
+        ;;
+    esac
+  done < <(docker inspect "${DAEMON_CONTAINER}" --format '{{range .Mounts}}{{printf "%s\t%s\n" .Source .Destination}}{{end}}' 2>/dev/null || true)
+  if [ -z "${BEST_DEST}" ]; then
+    return 1
+  fi
+  printf '%s%s\n' "${BEST_SOURCE}" "${CONTAINER_PATH:${#BEST_DEST}}"
+}
+
+APP_PRIVATE_KEY_ARGS=()
+APP_KEY_DECLARED="${GH_APP_PRIVATE_KEY_PATH:-}"
+APP_KEY_HOST=""
+if [ -n "${APP_KEY_DECLARED}" ]; then
+  if [ -f "${APP_KEY_DECLARED}" ] && [ -s "${APP_KEY_DECLARED}" ] && [ -r "${APP_KEY_DECLARED}" ]; then
+    APP_KEY_HOST="${APP_KEY_DECLARED}"
+  elif [ -n "${DAEMON_STATE_DIR}" ]; then
+    APP_KEY_HOST="$(daemon_host_path_for "${APP_KEY_DECLARED}" || true)"
+  fi
+  if [ -n "${APP_KEY_HOST}" ] && [ -f "${APP_KEY_HOST}" ] && [ -s "${APP_KEY_HOST}" ] && [ -r "${APP_KEY_HOST}" ]; then
+    APP_PRIVATE_KEY_ARGS=(-v "${APP_KEY_HOST}:${APP_PRIVATE_KEY_MOUNT_DEST}:ro")
+    GH_APP_PRIVATE_KEY_PATH="${APP_PRIVATE_KEY_MOUNT_DEST}"
+    export GH_APP_PRIVATE_KEY_PATH
+    echo "serve-container: GitHub App private key mounted as one read-only file (content never read or printed)"
+  else
+    APP_KEY_HOST=""
+    echo "serve-container: NOTE — configured GitHub App private key is unreadable or cannot be resolved through ${DAEMON_CONTAINER}'s mounts." >&2
+    echo "  Not a refusal: GH_TOKEN remains the fallback and the console reports the refresh failure." >&2
+  fi
+fi
+unset APP_KEY_DECLARED APP_KEY_HOST
 
 # ── 4c. THE ACCOUNT FILE — MOUNTED READ-ONLY WHEN PRESENT, NEVER REFUSED WHEN ABSENT (W1-T2434) ──
 # See the header note for the defect this closes. `-f` (a regular file, not a directory) is the
@@ -320,6 +374,9 @@ RUN_ARGS=(
   -e GH_APP_PRIVATE_KEY_PATH
   -e "RMD_SERVE_NETWORK=${SERVE_NETWORK_ENV_VALUE}"
   -v "${STATE_DIR}:${STATE_MOUNT_DEST}"
+  # W1-T2778: same bash-3.2-safe optional-array form as the two optional mounts below. This is
+  # exactly one regular, non-empty, host-readable key file and is always read-only.
+  "${APP_PRIVATE_KEY_ARGS[@]+"${APP_PRIVATE_KEY_ARGS[@]}"}"
   # W1-T2434: the `[@]+"..."` form, not a bare `"${ACCOUNT_FILE_ARGS[@]}"`. Under `set -u` (line 1)
   # bash BEFORE 4.4 treats expanding an EMPTY array as an unbound variable and aborts the script —
   # MEASURED on bash 3.2.57, which is what `/usr/bin/env bash` resolves to on macOS: `EMPTY[@]:

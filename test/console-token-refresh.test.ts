@@ -12,9 +12,10 @@
 //      lifetimes
 //   5. no credential value reaches a log line, a ledger row, or disk on any arm of the new path
 import assert from "node:assert/strict";
-import { readFileSync, mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { chmodSync, readFileSync, mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import type { AddressInfo } from "node:net";
@@ -205,6 +206,248 @@ test("W1-T2269: deploy/serve-container.sh carries a passthrough for all three GH
   for (const name of ["GH_APP_ID", "GH_APP_INSTALLATION_ID", "GH_APP_PRIVATE_KEY_PATH"]) {
     assert.match(src, new RegExp(`-e ${name}\\b`), `serve-container.sh must pass ${name} through by name`);
   }
+});
+
+const SERVE_CONTAINER_SH = fileURLToPath(new URL("../deploy/serve-container.sh", import.meta.url));
+const SERVE_APP_KEY_DEST = "/home/node/.rmd-github-app-private-key.pem";
+// W1-T2778 criterion 5: the fixed destinations deploy/serve-container.sh has used since before
+// this task, for the account file, webhook secret, state mount, and default network name — read
+// here from the script's own constants so this file fails loudly if any of them ever drift.
+const SERVE_ACCOUNT_FILE_DEST = "/home/node/.claude.json";
+const SERVE_WEBHOOK_SECRET_DEST = "/home/node/.rmd-github-webhook-secret";
+const SERVE_STATE_MOUNT_DEST = "/home/node/Remudero";
+const SERVE_DEFAULT_NETWORK = "rmd-net";
+
+interface ServeLauncherFixtureOptions {
+  // W1-T2778 criterion 5: the pre-existing account-file, webhook-secret, and GH_TOKEN-capture
+  // behaviors must ride unchanged alongside the new App-key mount. Off by default so the four
+  // tests above (unchanged from before this option existed) keep exercising the plain paths.
+  accountFilePresent?: boolean;
+  webhookSecretPresent?: boolean;
+  captureTokenFromDaemon?: boolean;
+  extraArgv?: string[];
+  existingContainer?: boolean;
+}
+
+function runServeLauncherFixture(
+  source: "direct" | "daemon" | "missing" | "empty",
+  options: ServeLauncherFixtureOptions = {},
+) {
+  const root = tmpRoot();
+  const binDir = join(root, "bin");
+  const stateDir = join(root, "state-root");
+  const credDir = join(root, "daemon-credentials");
+  const capturePath = join(root, "docker-capture.txt");
+  const dockerPath = join(binDir, "docker");
+  const directKeyPath = join(root, "direct-app.pem");
+  const accountFilePath = join(root, "account-file.json");
+  const webhookSecretPath = join(root, "webhook-secret.txt");
+  // A production-shaped absolute path such as /home/node/.claude/rmd-app.pem can exist in the
+  // parent test container. In that case the launcher correctly treats it as directly readable
+  // and never exercises either translation arm. Give each fixture a container-only mount path so
+  // the test result cannot depend on credentials installed on the machine running the proof.
+  const daemonCredentialDest = `/rmd-test-${basename(root)}`;
+  const daemonKeyPath = join(daemonCredentialDest, "rmd-app.pem");
+  const keyBody = "FAKE-PRIVATE-KEY-CONTENT-W1-T2778";
+  const token = "ghs_FAKE_STATIC_TOKEN_W1_T2778";
+  mkdirSync(binDir, { recursive: true });
+  mkdirSync(stateDir, { recursive: true });
+  mkdirSync(credDir, { recursive: true });
+  // Pre-touch the capture file: a dry run and a refused (existing-container) launch never call
+  // `docker run`, so nothing would otherwise create this file before the common return below reads it.
+  writeFileSync(capturePath, "");
+  if (source === "direct") writeFileSync(directKeyPath, keyBody);
+  if (source === "daemon") writeFileSync(join(credDir, "rmd-app.pem"), keyBody);
+  // W1-T2778 criterion 3 names FOUR degraded shapes — absent, empty, unreadable, untranslatable —
+  // and "missing" below only exercises the untranslatable one (a daemon-captured path with no
+  // matching host file). The empty case gives `-s` (non-empty) its own portable direct-path
+  // fixture rather than hiding behind "missing"'s coverage of the fourth shape. A chmod-based
+  // unreadable fixture is deliberately absent: uid 0 bypasses it, so it changes meaning by host
+  // and is refused by the repository's host-capability ratchet.
+  if (source === "empty") writeFileSync(directKeyPath, "");
+  if (options.accountFilePresent) writeFileSync(accountFilePath, '{"account":"fake"}');
+  if (options.webhookSecretPresent) writeFileSync(webhookSecretPath, "fake-webhook-secret");
+
+  writeFileSync(
+    dockerPath,
+    `#!/usr/bin/env bash
+set -euo pipefail
+if [ "\${1:-}" = "network" ] && [ "\${2:-}" = "inspect" ]; then
+  if [[ " $* " == *" --format "* ]]; then printf '%s\\n' 'cloudflared '; fi
+  exit 0
+fi
+if [ "\${1:-}" = "inspect" ] && [ "\${2:-}" = "remudero-daemon" ]; then
+  case "$*" in
+    *Config.Env*)
+      printf '%s\\n' 'GH_TOKEN=daemon-token' 'GH_APP_ID=123' 'GH_APP_INSTALLATION_ID=456' 'GH_APP_PRIVATE_KEY_PATH=${daemonKeyPath}'
+      ;;
+    *home/node/Remudero*)
+      printf '%s\\n' '${stateDir}'
+      ;;
+    *Mounts*)
+      printf '%s\\t%s\\n' '${stateDir}' '/home/node/Remudero' '${credDir}' '${daemonCredentialDest}'
+      ;;
+  esac
+  exit 0
+fi
+if [ "\${1:-}" = "inspect" ] && [[ " $* " == *" remudero-serve "* ]]; then
+  case "$*" in
+    *State.Running*) printf '%s\\n' true; exit 0 ;;
+    *NetworkSettings.Networks*) printf '%s\\n' yes; exit 0 ;;
+    *)
+      # The plain existence check (no --format) this script's own "an existing container is never
+      # silently replaced" section runs before ever building RUN_ARGS. FAKE_EXISTING_CONTAINER lets
+      # W1-T2778's own coverage prove that refusal is untouched by the new App-key mount code.
+      if [ "\${FAKE_EXISTING_CONTAINER:-0}" = "1" ]; then exit 0; else exit 1; fi
+      ;;
+  esac
+fi
+if [ "\${1:-}" = "run" ]; then
+  {
+    printf '%s\\n' RUN
+    printf '%s\\n' "$@"
+    printf 'ENV:%s\\n' "\${GH_APP_PRIVATE_KEY_PATH:-}"
+  } >> "\${FAKE_DOCKER_CAPTURE}"
+  exit 0
+fi
+if [ "\${1:-}" = "logs" ]; then
+  printf '%s\\n' 'listening on http://0.0.0.0:4317'
+  exit 0
+fi
+exit 1
+`,
+  );
+  chmodSync(dockerPath, 0o755);
+
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    PATH: `${binDir}:${process.env.PATH ?? ""}`,
+    HOME: root,
+    GH_TOKEN: token,
+    FAKE_DOCKER_CAPTURE: capturePath,
+    RMD_SERVE_DOCKERENV_PATH: join(root, "not-a-container-marker"),
+    RMD_CLAUDE_JSON_PATH: options.accountFilePresent ? accountFilePath : join(root, "no-account-file"),
+    RMD_GITHUB_WEBHOOK_SECRET_PATH: options.webhookSecretPresent ? webhookSecretPath : join(root, "no-webhook-secret"),
+  };
+  delete env.GH_APP_ID;
+  delete env.GH_APP_INSTALLATION_ID;
+  delete env.GH_APP_PRIVATE_KEY_PATH;
+  if (source === "direct" || source === "empty") {
+    env.GH_APP_ID = "123";
+    env.GH_APP_INSTALLATION_ID = "456";
+    env.GH_APP_PRIVATE_KEY_PATH = directKeyPath;
+  }
+  if (options.captureTokenFromDaemon) {
+    // W1-T2778 criterion 5: the GH_TOKEN-capture-from-daemon path (unmodified by this task) must
+    // still work with an App key configured. The fake daemon's Config.Env above always offers
+    // GH_TOKEN=daemon-token; leaving this shell's own GH_TOKEN unset is what makes the launcher
+    // fall through to that capture instead of using this shell's value.
+    delete env.GH_TOKEN;
+  }
+  if (options.existingContainer) {
+    env.FAKE_EXISTING_CONTAINER = "1";
+  }
+
+  const result = spawnSync(
+    "bash",
+    [SERVE_CONTAINER_SH, ...(options.extraArgv ?? [])],
+    { encoding: "utf8", env },
+  );
+  const capture = readFileSync(capturePath, "utf8");
+  return { result, capture, root, credDir, directKeyPath, daemonKeyPath, keyBody, token, accountFilePath, webhookSecretPath, stateDir };
+}
+
+test("W1-T2778: a direct readable host App key becomes one read-only file mount and the launched env names that destination", () => {
+  const fixture = runServeLauncherFixture("direct");
+  assert.equal(fixture.result.status, 0, fixture.result.stderr);
+  assert.ok(fixture.capture.includes(`${fixture.directKeyPath}:${SERVE_APP_KEY_DEST}:ro`));
+  assert.ok(fixture.capture.includes(`ENV:${SERVE_APP_KEY_DEST}`));
+  assert.equal(fixture.capture.split(SERVE_APP_KEY_DEST).length - 1, 2, "one mount destination plus one env value");
+  assert.ok(!`${fixture.result.stdout}${fixture.result.stderr}${fixture.capture}`.includes(fixture.keyBody), "key content never reaches output or argv");
+  assert.ok(!`${fixture.result.stdout}${fixture.result.stderr}${fixture.capture}`.includes(fixture.token), "token content never reaches output or argv");
+});
+
+test("W1-T2778: a daemon-container key path is translated through the daemon's observed mount source", () => {
+  const fixture = runServeLauncherFixture("daemon");
+  assert.equal(fixture.result.status, 0, fixture.result.stderr);
+  assert.ok(
+    fixture.capture.includes(`${join(fixture.credDir, "rmd-app.pem")}:${SERVE_APP_KEY_DEST}:ro`),
+    `expected the translated file mount in:\n${fixture.capture}`,
+  );
+  assert.ok(fixture.capture.includes(`ENV:${SERVE_APP_KEY_DEST}`));
+  assert.ok(!fixture.capture.includes(`${fixture.credDir}:/home/node/.claude`), "the credential directory itself is never mounted");
+});
+
+test("W1-T2778: an untranslatable or missing key preserves startup and fallback without inventing a mount", () => {
+  const fixture = runServeLauncherFixture("missing");
+  assert.equal(fixture.result.status, 0, fixture.result.stderr);
+  assert.ok(!fixture.capture.includes(SERVE_APP_KEY_DEST), `unexpected key destination in:\n${fixture.capture}`);
+  assert.ok(fixture.capture.includes(`ENV:${fixture.daemonKeyPath}`), "the refresher retains the unreadable path so its existing telemetry names the failure");
+  assert.match(fixture.result.stderr, /private key.*unreadable|could not resolve.*private key/i);
+});
+
+test("W1-T2778: an empty declared key file preserves startup and fallback without inventing a mount", () => {
+  const fixture = runServeLauncherFixture("empty");
+  assert.equal(fixture.result.status, 0, fixture.result.stderr);
+  assert.ok(!fixture.capture.includes(SERVE_APP_KEY_DEST), `unexpected key destination in:\n${fixture.capture}`);
+  assert.ok(fixture.capture.includes(`ENV:${fixture.directKeyPath}`), "the refresher retains the declared path so its existing telemetry names the failure");
+  assert.match(fixture.result.stderr, /private key.*unreadable|could not resolve.*private key/i);
+});
+
+test("W1-T2778: the account file, webhook secret, state mount, network attach, and daemon-captured GH_TOKEN ride unchanged alongside the App-key mount", () => {
+  const fixture = runServeLauncherFixture("direct", {
+    accountFilePresent: true,
+    webhookSecretPresent: true,
+    captureTokenFromDaemon: true,
+  });
+  assert.equal(fixture.result.status, 0, fixture.result.stderr);
+  assert.ok(fixture.capture.includes(`${fixture.directKeyPath}:${SERVE_APP_KEY_DEST}:ro`), "the App-key mount is still present");
+  assert.ok(
+    fixture.capture.includes(`${fixture.accountFilePath}:${SERVE_ACCOUNT_FILE_DEST}:ro`),
+    `expected the unchanged account-file mount in:\n${fixture.capture}`,
+  );
+  assert.ok(
+    fixture.capture.includes(`${fixture.webhookSecretPath}:${SERVE_WEBHOOK_SECRET_DEST}:ro`),
+    `expected the unchanged webhook-secret mount in:\n${fixture.capture}`,
+  );
+  assert.ok(
+    fixture.capture.includes(`${fixture.stateDir}:${SERVE_STATE_MOUNT_DEST}`),
+    `expected the unchanged state mount in:\n${fixture.capture}`,
+  );
+  assert.match(
+    fixture.capture,
+    new RegExp(`--network\\n${SERVE_DEFAULT_NETWORK}\\n`),
+    "the network attach is unchanged", // one argv entry per capture line — see the fake docker's `printf '%s\\n' "$@"`
+  );
+  assert.ok(
+    !`${fixture.result.stdout}${fixture.result.stderr}${fixture.capture}`.includes("daemon-token"),
+    "the daemon-captured token value is never printed, even though capture (not this shell's own GH_TOKEN) is what supplied it",
+  );
+});
+
+test("W1-T2778: --dry-run prints the App-key mount alongside every other mount and changes nothing", () => {
+  const fixture = runServeLauncherFixture("direct", {
+    accountFilePresent: true,
+    webhookSecretPresent: true,
+    extraArgv: ["--dry-run"],
+  });
+  assert.equal(fixture.result.status, 0, fixture.result.stderr);
+  assert.match(fixture.result.stdout, /--dry-run, nothing changed/);
+  assert.ok(fixture.result.stdout.includes(`${fixture.directKeyPath}:${SERVE_APP_KEY_DEST}:ro`), "the printed launch names the App-key mount");
+  assert.ok(fixture.result.stdout.includes(`${fixture.accountFilePath}:${SERVE_ACCOUNT_FILE_DEST}:ro`), "the printed launch still names the account-file mount");
+  assert.ok(fixture.result.stdout.includes(`${fixture.webhookSecretPath}:${SERVE_WEBHOOK_SECRET_DEST}:ro`), "the printed launch still names the webhook-secret mount");
+  assert.equal(fixture.capture, "", "a dry run never calls docker run — nothing was actually launched");
+  assert.ok(
+    !`${fixture.result.stdout}${fixture.result.stderr}`.includes(fixture.keyBody),
+    "key content never reaches the printed dry-run output",
+  );
+});
+
+test("W1-T2778: an existing remudero-serve container is still refused without --replace, App key configured or not", () => {
+  const fixture = runServeLauncherFixture("direct", { existingContainer: true });
+  assert.equal(fixture.result.status, 1, fixture.result.stdout);
+  assert.match(fixture.result.stderr, /REFUSING.*already exists/s);
+  assert.equal(fixture.capture, "", "the refusal fires before docker run is ever called — nothing was launched or replaced");
 });
 
 // ── (2) A CREDENTIAL THAT CANNOT BE REPLACED IS REPORTED, NOT PRESENTED AS A WORKING BOARD ──────
