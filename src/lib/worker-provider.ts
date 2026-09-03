@@ -962,6 +962,22 @@ function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<Pr
   const shared = [
     "--json",
     "--ignore-user-config",
+    // W1-T2754: Codex refuses to start when its `-C` cwd is neither a git repository nor a
+    // configured trusted directory — "Not inside a trusted directory and --skip-git-repo-check
+    // was not specified." — and it does so by EXITING 0 WITH NO OUTPUT, so the caller sees an
+    // empty transcript rather than an error. That is how it reached production as a parse
+    // failure: `probeIsolation`'s `defaultExecutor` (src/lib/isolation.ts) creates its probe cwd
+    // with a bare `mkdirSync` under `config.root/tmp`, which is NOT a repo, so every Codex-routed
+    // isolation probe returned nothing, parsed to NaN counts and failed closed as
+    // `blocked_isolation — the probe's alias/function counts could not be parsed`, at $0 cost.
+    // Task workers never hit it because their cwd IS a git worktree, which is exactly why the
+    // failure looked provider-correlated and intermittent rather than structural.
+    //
+    // THIS FLAG ONLY WAIVES THE TRUST PROMPT, NOT THE SANDBOX. `--sandbox read-only` /
+    // `workspace-write` below still bound what the worker may touch, and the writable-root grants
+    // are computed separately by `codexGitWritableRoots`. It rides in `shared` so BOTH the fresh
+    // and `exec resume` argv carry it; for a worktree cwd it is a no-op.
+    "--skip-git-repo-check",
     "-c", 'shell_environment_policy.inherit="core"',
     "-c", 'shell_environment_policy.exclude=["CODEX_HOME","OPENAI_API_KEY","ANTHROPIC_API_KEY"]',
   ];
