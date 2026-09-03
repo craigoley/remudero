@@ -237,11 +237,12 @@ test("W1-T2735: a script named only in a workflow COMMENT is not credited as wir
 
 test("W1-T2735: collectExecutingStrings takes run/uses/entrypoint/args/cmd and never `name`", () => {
   const doc = parseYaml(
-    "jobs:\n  j:\n    name: node scripts/named-check.mjs\n    steps:\n      - name: prose\n        run: node scripts/ran-check.mjs\n      - uses: ./.github/actions/used-check\n",
+    "jobs:\n  j:\n    name: node scripts/named-check.mjs\n    steps:\n      - name: prose\n        run: node scripts/ran-check.mjs\n      - uses: ./.github/actions/used-check\n        args: [node, scripts/array-check.mjs]\n",
   );
   const strings = mod.collectExecutingStrings(doc);
   assert.ok(strings.some((s) => s.includes("ran-check.mjs")), "a `run:` value is executable");
   assert.ok(strings.some((s) => s.includes("used-check")), "a `uses:` value is executable");
+  assert.ok(strings.some((s) => s.includes("array-check.mjs")), "an array-valued executable key contributes each string argument");
   assert.ok(!strings.some((s) => s.includes("named-check.mjs")), "a `name:` value is prose");
   assert.deepEqual([...mod.EXECUTING_KEYS].sort(), ["args", "cmd", "entrypoint", "run", "uses"]);
 });
