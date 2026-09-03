@@ -744,8 +744,10 @@ import {
   dedupeRollupByLatestAttempt,
   deriveDayCostUsd,
   deriveDisposition,
+  diffCoverageReport,
   fixCeilingInForce,
   fixDispatchBudget,
+  fixLedgerRowsForHead,
   isBlockedCi,
   listRetirableEscalationIssues,
   logCostGovernorDeferral,
@@ -7296,6 +7298,7 @@ export interface RedBaseRefreshDecision {
   refresh: boolean;
   behindBy?: number;
   failingTestFiles: string[];
+  failingSourceFiles: string[];
   matchingBaseFiles: string[];
 }
 
@@ -7326,6 +7329,23 @@ export function failingTestFilesFromCiFailures(failures: readonly CiFailure[]): 
 }
 
 /**
+ * Extract repository source paths only from the existing, distinctive diff-coverage report.
+ * `diffCoverageReport` owns recognition of a genuine report and its `path:line` rows; this
+ * adapter removes only the terminal line number and normalizes separators for comparison with
+ * GitHub's repository-relative file list.
+ */
+export function failingSourceFilesFromCiFailures(failures: readonly CiFailure[]): string[] {
+  const report = diffCoverageReport(failures);
+  if (!report) return [];
+  return [...new Set(report.uncovered.map((pathLine) => pathLine.replace(/:\d+$/, "").replaceAll("\\", "/")))];
+}
+
+/** Exact repository path, or that complete path below an observed checkout prefix. */
+function observedPathMatchesRepositoryPath(observedPath: string, repositoryPath: string): boolean {
+  return observedPath === repositoryPath || observedPath.endsWith(`/${repositoryPath}`);
+}
+
+/**
  * The pre-strike decision, kept pure so both positive predicates have paired controls. A file
  * matches only when GitHub's repository-relative base-gap path is the same as, or a complete
  * suffix of, an observed CI path. Basename-only matching is deliberately forbidden.
@@ -7335,17 +7355,21 @@ export function decideRedBaseRefresh(
   facts: RedBaseRefreshFacts,
 ): RedBaseRefreshDecision {
   const failingTestFiles = failingTestFilesFromCiFailures(failures);
+  const failingSourceFiles = failingSourceFilesFromCiFailures(failures);
   const baseChangedFiles = facts.baseChangedFiles;
   const matchingBaseFiles =
     facts.behindBy !== undefined && facts.behindBy > 0 && baseChangedFiles !== undefined
       ? baseChangedFiles.filter((baseFile) =>
-          failingTestFiles.some((failureFile) => failureFile === baseFile || failureFile.endsWith(`/${baseFile}`)),
+          [...failingTestFiles, ...failingSourceFiles].some((failureFile) =>
+            observedPathMatchesRepositoryPath(failureFile, baseFile),
+          ),
         )
       : [];
   return {
     refresh: matchingBaseFiles.length > 0,
     behindBy: facts.behindBy,
     failingTestFiles,
+    failingSourceFiles,
     matchingBaseFiles,
   };
 }
@@ -8440,9 +8464,10 @@ export async function runFixRung(opts: {
 
     // W1-T2671 SITE — BASE-GAP REFRESH, BEFORE `strikes++` and before every deterministic/worker
     // repair below. This is deliberately restricted to a ci-log round with a non-empty failure
-    // set: only that shape supplies the failing test path needed to prove that the base changed
-    // the same file. `decideRedBaseRefresh` requires BOTH a positive behind count and an exact
-    // repository-path/suffix match; current branches and unrelated base movement fall through.
+    // set: only that shape supplies the failing test or diff-coverage source path needed to prove
+    // that the base changed the same file. `decideRedBaseRefresh` requires BOTH a positive behind
+    // count and an exact repository-path/suffix match; current branches and unrelated base
+    // movement fall through.
     //
     // A successful update returns immediately with ZERO strikes. GitHub documents this endpoint
     // as asynchronous (202) and as MERGING base HEAD into the PR branch, so polling CI immediately
@@ -8469,6 +8494,7 @@ export async function runFixRung(opts: {
           pr_number: prNumber,
           behind_by: decision.behindBy,
           failing_test_files: decision.failingTestFiles,
+          failing_source_files: decision.failingSourceFiles,
           matching_base_files: decision.matchingBaseFiles,
           refresh: decision.refresh,
         });
@@ -8571,6 +8597,7 @@ export async function runFixRung(opts: {
             mode: "body-repair",
             defect: repair.defect,
             verdict_regime: verdictRegime,
+            head_sha: review.headSha,
           });
           deps.say(
             `fix rung: strike ${strikes}/${opts.strikeCap} — repaired an author-time acceptance-gate ` +
@@ -9334,6 +9361,7 @@ export async function runFixRung(opts: {
         round,
         mode: fixMode,
         verdict_regime: verdictRegime,
+        head_sha: priorHeadSha,
         // W1-T1219: the spawn's own elapsed milliseconds — see spawnFixWorkerBounded's own doc.
         elapsed_ms: spawnElapsedMs,
       });
@@ -9643,6 +9671,7 @@ export async function runFixRung(opts: {
       strike: strikes,
       state: review.state,
       unmet: review.criteria.filter((c) => !c.met).length,
+      head_sha: priorHeadSha,
     });
 
     if (review.decisionDisposition === "in_flight") {
@@ -23595,6 +23624,18 @@ export async function daemonCommand(
   } catch {
     log("daemon.provider_routing_status_write_failed", { reason: "write-failed" });
   }
+  // W1-T2787: ONE observer closure is shared by the ordinary full sweep and the daemon-side
+  // settled-check callback below. Its brief cache uses the SAME committed settle window, so an
+  // event observation followed immediately by the awakened full sweep spends one GitHub read,
+  // not two. Serve still only writes the signed marker and never receives this callback.
+  const mainHealthRung = buildMainHealthRung(target.owner, target.repo, {
+    fetch: ghJson,
+    issues: ghIssueGateway(target.owner, target.repo),
+    ledgerPath,
+    runId,
+    log,
+    freshMs: policy.values.githubEventWake.checkSettleMs,
+  });
   // W1-T2568 — THE GITHUB-EVENT WAKE'S ENTIRE DAEMON-SIDE WIRING. `wireSweepWakeToDaemon`
   // (lib/github-event-wake.ts) consumes any boot-pending marker, arms an `fs.watch` on the
   // shared state directory `remudero-serve`'s `POST /v1/hooks/github` route also writes into,
@@ -23607,6 +23648,9 @@ export async function daemonCommand(
   // `drainLock.release()`/`consumeStop` are already wired into both.
   const githubEventWake = (deps.wireSweepWake ?? wireSweepWakeToDaemon)(config.root, log, undefined, {
     checkSettleMs: policy.values.githubEventWake.checkSettleMs,
+    // W1-T2787: the callback fires when the daemon-side check/status burst settles, even when an
+    // older full sweep is still executing and the resulting wake is refused by its liveness gate.
+    onCheckBurstSettled: () => void mainHealthRung(),
   });
   const processKill = deps.processKill ?? ((pid: number, signal: NodeJS.Signals) => process.kill(pid, signal));
   const onSignal = (sig: NodeJS.Signals) => {
@@ -24048,13 +24092,7 @@ export async function daemonCommand(
           // and plan/policy.yaml's `workerStall` row for the ~16-minute `--ci-parity` default's
           // headroom rationale.
           policy.values.workerStall,
-          buildMainHealthRung(target.owner, target.repo, {
-            fetch: ghJson,
-            issues: ghIssueGateway(target.owner, target.repo),
-            ledgerPath,
-            runId,
-            log,
-          }),
+          mainHealthRung,
         ),
         // W1-T254 (the #707 fix): the restricted light-sweep ticker — ticks ONLY
         // the deterministic post-review re-post while `runOne` is unbounded and in
@@ -26544,8 +26582,7 @@ function actionableGateFailuresFromLedger(lines: Array<Record<string, unknown>>,
 }
 
 /**
- * Fix strikes already attempted for a PR — a straight `fix.dispatch` (task_id)
- * count. W1-T78 fixed the cold-dispatch `log` wrapper (`buildSweepEffects`'s
+ * Fix strikes already attempted for a PR. W1-T78 fixed the cold-dispatch `log` wrapper (`buildSweepEffects`'s
  * `dispatchFix`) to stamp the REAL `task.id` on every `fix.dispatch`/`fix.review`
  * line it writes — before that fix, a cold dispatch's lines carried the OUTER
  * caller's synthetic id ("SWEEP"/"FIX"/"DAEMON"), so this function used to fall
@@ -26556,7 +26593,9 @@ function actionableGateFailuresFromLedger(lines: Array<Record<string, unknown>>,
  * task-tagged for every caller, so counting BOTH would double-count every real
  * strike (N `fix.dispatch` lines + 1 proxy line per dispatchFix call) and could
  * starve an answered PR of its one legitimate extra strike (W1-T78's
- * `strikeCapForAnswer` ceiling check).
+ * `strikeCapForAnswer` ceiling check). W1-T2788 makes that count head-generational through
+ * {@link fixLedgerRowsForHead}: a changed PR head re-earns the configured allowance while an
+ * unchanged head remains bounded.
  */
 /**
  * The regime the CURRENT verdict for a task was produced under (W1-T199) — read
@@ -26617,11 +26656,12 @@ export function priorStrikesFor(
   lines: Array<Record<string, unknown>>,
   taskId: string | undefined,
   currentRegime: StrikeRegime = "keyword_only",
+  currentHeadSha?: string,
 ): number {
   if (!taskId) return 0;
   let n = 0;
-  for (const line of lines) {
-    if (line.step !== "fix.dispatch" || line.task_id !== taskId) continue;
+  for (const line of fixLedgerRowsForHead(lines, taskId, currentHeadSha)) {
+    if (line.step !== "fix.dispatch") continue;
     // Under the executed regime a keyword-era strike is amnestied; every other
     // combination counts, so the cap keeps binding on same-regime failures.
     if (currentRegime === "executed" && strikeRegimeOf(line) === "keyword_only") continue;
@@ -26631,18 +26671,23 @@ export function priorStrikesFor(
 }
 
 /**
- * W1-T78: what each fix-rung strike TRIED for a task, ledger ground truth
+ * W1-T78: what each fix-rung strike TRIED for a task and current PR head, ledger ground truth
  * ONLY (never inferred) — the clarification-question rung's "what the fix
  * worker tried per strike" input. `fix.dispatch` opens a strike (round +
  * unmet count going IN); `fix.review` (only reached once CI is green) records
  * its outcome. A strike with no matching `fix.review` line simply never
- * reached a review (e.g. `fix.ci_not_green` — CI never went green).
+ * reached a review (e.g. `fix.ci_not_green` — CI never went green). W1-T2788 selects the same
+ * head generation as the cap before pairing rows, so repeated strike numbers from older heads
+ * cannot leak into a current clarification.
  */
-export function deriveStrikeHistory(lines: Array<Record<string, unknown>>, taskId: string | undefined): StrikeAttempt[] {
+export function deriveStrikeHistory(
+  lines: Array<Record<string, unknown>>,
+  taskId: string | undefined,
+  currentHeadSha?: string,
+): StrikeAttempt[] {
   if (!taskId) return [];
   const byStrike = new Map<number, StrikeAttempt>();
-  for (const line of lines) {
-    if (line.task_id !== taskId) continue;
+  for (const line of fixLedgerRowsForHead(lines, taskId, currentHeadSha)) {
     const strike = typeof line.strike === "number" ? line.strike : undefined;
     if (strike === undefined) continue;
     if (line.step === "fix.dispatch") {
@@ -26931,8 +26976,8 @@ export function buildOpenPrViews(
       // already scans — see `actionableGateFailuresFromLedger`'s own doc for why it is keyed
       // differently (no `isPlanOnlyFilingPr` gate) and why it never parses `failure_reason`.
       actionableGateFailures: reviewState === "failure" ? actionableGateFailuresFromLedger(ledger, gateFailureKey) : [],
-      priorStrikes: priorStrikesFor(ledger, taskId, currentStrikeRegimeFor(ledger, taskId)),
-      strikeHistory: deriveStrikeHistory(ledger, taskId),
+      priorStrikes: priorStrikesFor(ledger, taskId, currentStrikeRegimeFor(ledger, taskId), pr.headRefOid),
+      strikeHistory: deriveStrikeHistory(ledger, taskId, pr.headRefOid),
       supersededBy,
       lastActivityAt: pr.updatedAt,
       // W1-T1201: the age clamp's other half — see `RawOpenPr.createdAt`'s own doc for why this
@@ -30322,8 +30367,8 @@ export async function fixCommand(
     // W1-T440: same signal as buildOpenPrViews above — routeFix's deriveDisposition call
     // reads it via the SAME sweep.ts row 7.
     criteriaRecoverable: taskId !== undefined,
-    priorStrikes: priorStrikesFor(ledger, taskId, currentStrikeRegimeFor(ledger, taskId)),
-    strikeHistory: deriveStrikeHistory(ledger, taskId),
+    priorStrikes: priorStrikesFor(ledger, taskId, currentStrikeRegimeFor(ledger, taskId), raw.headRefOid),
+    strikeHistory: deriveStrikeHistory(ledger, taskId, raw.headRefOid),
     // superseded-by is a cross-PR sweep concern (which OTHER open PR credits the
     // same task) — out of scope for a single explicitly-named PR lookup.
     supersededBy: undefined,
