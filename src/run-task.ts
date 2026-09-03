@@ -6243,6 +6243,13 @@ export function fixRungTerminationVerdict(
       phrase: `rebased onto its base (prerequisite #${rung.blockedOnPr})`,
     };
   }
+  if (rung.outcome === "base_refreshed") {
+    return {
+      reason: rung.reason,
+      extra: {},
+      phrase: "base refreshed without spending a strike",
+    };
+  }
   return {
     reason: `stood down — ${rung.standDownReason}`,
     extra: {},
@@ -6251,7 +6258,7 @@ export function fixRungTerminationVerdict(
 }
 
 export interface FixRungOutcome {
-  outcome: "fixed" | "escalated" | "stood_down" | "spawn_abandoned" | "parked" | "rebased";
+  outcome: "fixed" | "escalated" | "stood_down" | "spawn_abandoned" | "parked" | "rebased" | "base_refreshed";
   /** The last review computed — passing when `outcome === "fixed"`. Unchanged from the PRIOR
    *  round's own verdict when `outcome === "spawn_abandoned"` (W1-T1044): the strike that
    *  abandoned never produced a new head to re-review. */
@@ -7271,6 +7278,118 @@ export function ghUpdateBranch(
 }
 
 /**
+ * W1-T2671: the two facts that justify refreshing a checks-red branch before paying for a fix
+ * worker. `behindBy` is read from the REVERSED compare (`head...base`)'s `ahead_by`: in that
+ * direction GitHub's HEAD is the target branch, so its ahead count is exactly how many commits
+ * the PR lacks. `baseChangedFiles` is the same response's merge-base-to-HEAD file list — the
+ * files changed on the base side of the gap, never the PR's own diff.
+ *
+ * Both fields are optional on purpose. An unreadable comparison must fail open to the existing
+ * fix rung, not invent either a stale branch or a matching file.
+ */
+export interface RedBaseRefreshFacts {
+  behindBy?: number;
+  baseChangedFiles?: string[];
+}
+
+export interface RedBaseRefreshDecision {
+  refresh: boolean;
+  behindBy?: number;
+  failingTestFiles: string[];
+  matchingBaseFiles: string[];
+}
+
+// Locate the distinctive suffix with no nested repetition, then recover its ordinary path prefix
+// by walking left. Keeping prefix discovery out of the regexp makes runtime linear even when a
+// hostile or corrupted CI log contains thousands of path-like delimiters.
+const CI_TEST_PATH_SUFFIX = /\b(?:test|tests|__tests__)[\\/][A-Za-z0-9._@%+~\\/-]+\.(?:[cm]?[jt]sx?)/gi;
+const CI_PATH_PREFIX_CHAR = /[A-Za-z0-9._:@%+~\\/-]/;
+
+/**
+ * Extract only test-file paths from the failure evidence the ci-log worker would otherwise see.
+ * Absolute paths are retained: {@link decideRedBaseRefresh} suffix-matches them against GitHub's
+ * repository-relative file list, so no checkout-root guess enters the decision.
+ */
+export function failingTestFilesFromCiFailures(failures: readonly CiFailure[]): string[] {
+  const paths = new Set<string>();
+  for (const failure of failures) {
+    for (const text of [failure.name, failure.logTail]) {
+      for (const match of text.matchAll(CI_TEST_PATH_SUFFIX)) {
+        let start = match.index;
+        while (start > 0 && CI_PATH_PREFIX_CHAR.test(text[start - 1])) start--;
+        const end = match.index + match[0].length;
+        paths.add(text.slice(start, end).replace(/^file:\/\//, "").replaceAll("\\", "/"));
+      }
+    }
+  }
+  return [...paths];
+}
+
+/**
+ * The pre-strike decision, kept pure so both positive predicates have paired controls. A file
+ * matches only when GitHub's repository-relative base-gap path is the same as, or a complete
+ * suffix of, an observed CI path. Basename-only matching is deliberately forbidden.
+ */
+export function decideRedBaseRefresh(
+  failures: readonly CiFailure[],
+  facts: RedBaseRefreshFacts,
+): RedBaseRefreshDecision {
+  const failingTestFiles = failingTestFilesFromCiFailures(failures);
+  const baseChangedFiles = facts.baseChangedFiles;
+  const matchingBaseFiles =
+    facts.behindBy !== undefined && facts.behindBy > 0 && baseChangedFiles !== undefined
+      ? baseChangedFiles.filter((baseFile) =>
+          failingTestFiles.some((failureFile) => failureFile === baseFile || failureFile.endsWith(`/${baseFile}`)),
+        )
+      : [];
+  return {
+    refresh: matchingBaseFiles.length > 0,
+    behindBy: facts.behindBy,
+    failingTestFiles,
+    matchingBaseFiles,
+  };
+}
+
+/**
+ * W1-T2671's REST read. GitHub documents compare as `git log BASE..HEAD` plus the files changed
+ * between those commits. Reversing the ordinary PR comparison (`headSha...baseRef`) therefore
+ * yields the base-only side of a divergent history in one response: `ahead_by` is the branch's
+ * behind count and `files[]` is what changed on base. The API caps that file list at 300; omission
+ * can only cause this optimization to abstain and spend the ordinary strike, never a false merge.
+ */
+export function redBaseRefreshFactsFromRest(
+  owner: string,
+  repo: string,
+  prNumber: number,
+  fetch: GhApiFetcher = ghJson,
+): RedBaseRefreshFacts {
+  try {
+    const pr = fetch(["api", `repos/${owner}/${repo}/pulls/${prNumber}`]) as {
+      base?: { ref?: string };
+      head?: { sha?: string };
+    };
+    const base = pr?.base?.ref;
+    const head = pr?.head?.sha;
+    if (!base || !head) return {};
+    const compare = fetch(["api", `repos/${owner}/${repo}/compare/${head}...${base}`]) as {
+      ahead_by?: unknown;
+      files?: unknown;
+    };
+    const files = Array.isArray(compare.files)
+      ? compare.files
+          .map((file) => (file && typeof file === "object" ? (file as { filename?: unknown }).filename : undefined))
+          .filter((filename): filename is string => typeof filename === "string")
+      : undefined;
+    return {
+      behindBy: typeof compare.ahead_by === "number" ? compare.ahead_by : undefined,
+      baseChangedFiles: files,
+    };
+  } catch {
+    return {};
+  }
+}
+
+/**
  * W1-T1095 (capability 3): has this pull request already spent its ONE rebase? A pure fold over
  * rows already written — no new read, no timer, no state file. PR-NUMBER keyed, not task-id
  * keyed: the bound the shard states is "at most one rebase-and-retry per blocked PR", and one
@@ -8053,6 +8172,12 @@ export async function runFixRung(opts: {
      */
     updateBranch?: (prNumber: number) => { ok: boolean; error?: string } | Promise<{ ok: boolean; error?: string }>;
     /**
+     * W1-T2671: fresh REST evidence for the checks-red branch's own base gap. Consulted only for
+     * ci-log mode, before the first strike. Omitted or unreadable facts leave the existing fix
+     * path unchanged.
+     */
+    readRedBaseRefreshFacts?: (prNumber: number) => RedBaseRefreshFacts | Promise<RedBaseRefreshFacts>;
+    /**
      * W1-T1095 (capability 3): the ledger rows the ONE-rebase-per-pull-request bound is folded
      * from ({@link fixRebaseAlreadySpent}). Defaults to reading `deps.ledgerPath`, the same
      * `ledgerLines?` seam `armAuto`/`disarmAuto` already take.
@@ -8185,6 +8310,11 @@ export async function runFixRung(opts: {
   // does not parse, in which case the pre-strike merge-conflict check below is skipped every
   // round (never a guessed number).
   const prNumber = prNumberFromRef(opts.prUrl);
+  // W1-T2671: at most one base-gap read/update attempt per invocation. A successful update ends
+  // this invocation because GitHub's update-branch endpoint is asynchronous and the current
+  // worktree is now stale; the next level-triggered sweep reconstructs both CI and the checkout
+  // at the new head. A failed/indeterminate read falls through to the ordinary fix rung.
+  let baseRefreshChecked = false;
 
   // W1-T2403: `retriggers < retriggerCap` is the SEPARATE bound that stops an unbounded loop the
   // moment `strikes` stops moving (a retrigger-shaped round never increments it, below) — without
@@ -8306,6 +8436,74 @@ export async function runFixRung(opts: {
       deps.log("fix.stood_down", { site: "rung.strike", strike: strikes + 1, reason: preStrikeStandDown.reason });
       deps.say(`fix rung: standing down before strike ${strikes + 1} — ${preStrikeStandDown.reason}`);
       return { outcome: "stood_down", review, strikes, retriggers, reason: preStrikeStandDown.reason, standDownReason: preStrikeStandDown.reason };
+    }
+
+    // W1-T2671 SITE — BASE-GAP REFRESH, BEFORE `strikes++` and before every deterministic/worker
+    // repair below. This is deliberately restricted to a ci-log round with a non-empty failure
+    // set: only that shape supplies the failing test path needed to prove that the base changed
+    // the same file. `decideRedBaseRefresh` requires BOTH a positive behind count and an exact
+    // repository-path/suffix match; current branches and unrelated base movement fall through.
+    //
+    // A successful update returns immediately with ZERO strikes. GitHub documents this endpoint
+    // as asynchronous (202) and as MERGING base HEAD into the PR branch, so polling CI immediately
+    // could still observe the OLD red head, while continuing in this invocation would hand a
+    // stale checkout to the worker. The next sweep is the safe continuation: if the merge clears
+    // CI, normal review proceeds; if CI remains red, `behindBy` is then zero and this same gate
+    // falls through to the ordinary strike. That is one level-triggered flow, not credit for a fix.
+    if (
+      !baseRefreshChecked &&
+      currentMergeConflict === undefined &&
+      noReviewYet &&
+      currentCiFailures !== undefined &&
+      currentCiFailures.length > 0 &&
+      prNumber !== undefined &&
+      deps.readRedBaseRefreshFacts &&
+      deps.updateBranch
+    ) {
+      baseRefreshChecked = true;
+      try {
+        const facts = await deps.readRedBaseRefreshFacts(prNumber);
+        const decision = decideRedBaseRefresh(currentCiFailures, facts);
+        deps.log("fix.base_refresh_checked", {
+          strike: strikes + 1,
+          pr_number: prNumber,
+          behind_by: decision.behindBy,
+          failing_test_files: decision.failingTestFiles,
+          matching_base_files: decision.matchingBaseFiles,
+          refresh: decision.refresh,
+        });
+        if (decision.refresh) {
+          const updated = await deps.updateBranch(prNumber);
+          if (updated.ok) {
+            const reason =
+              `base refresh requested before strike ${strikes + 1}: head was ${decision.behindBy} commit(s) behind ` +
+              `and base changed ${decision.matchingBaseFiles.join(", ")}; GitHub is merging base into the branch`;
+            deps.log("fix.base_refreshed", {
+              strike: strikes + 1,
+              pr_number: prNumber,
+              behind_by: decision.behindBy,
+              matching_base_files: decision.matchingBaseFiles,
+              method: "merge",
+              reason,
+            });
+            deps.say(`fix rung: BASE REFRESH requested with no strike spent — ${reason}: ${opts.prUrl}`);
+            return { outcome: "base_refreshed", review, strikes, retriggers, reason };
+          }
+          deps.log("fix.base_refresh_failed", {
+            strike: strikes + 1,
+            pr_number: prNumber,
+            behind_by: decision.behindBy,
+            matching_base_files: decision.matchingBaseFiles,
+            error: updated.error ?? "no error reported",
+          });
+        }
+      } catch (e) {
+        deps.log("fix.base_refresh_read_error", {
+          strike: strikes + 1,
+          pr_number: prNumber,
+          error: String((e as Error)?.message ?? e),
+        });
+      }
     }
 
     // W1-T2272 SITE — ACCEPTANCE-AUTHOR-GATE BODY REPAIR, BEFORE `strikes++`/any commit (design
@@ -12992,6 +13190,10 @@ async function runTask(
           // Both are PURE API — no branch, no checkout — because the daemon is detached on every
           // boot, the assumption that broke `armAuto`'s `--delete-branch` (W1-T1111).
           readMergeFacts: (n) => fixRebaseMergeFactsFromRest(owner, task.repo, n),
+          // W1-T2671: separate reversed-compare read for the base-only gap. Kept distinct from
+          // `readMergeFacts` so ordinary pre-strike mergeability checks do not pay for or confuse
+          // this ci-log-only file-overlap optimization.
+          readRedBaseRefreshFacts: (n) => redBaseRefreshFactsFromRest(owner, task.repo, n),
           updateBranch: (n) => ghUpdateBranch(owner, task.repo, n),
           // W1-T1044: the wall-clock bound on this rung's own worker spawn, and the best-effort
           // reclaim of whatever it abandoned — see runFixRung's own deps doc. W1-T1219: reads
@@ -13047,8 +13249,13 @@ async function runTask(
         say(`verdict: blocked — fix rung exhausted (${rung.strikes} strike(s)), escalated: ${rung.issueUrl}`);
         return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked" };
       }
-      if (rung.outcome === "stood_down" || rung.outcome === "parked" || rung.outcome === "rebased") {
-        // TWO NON-SPENDING TERMINATIONS, ONE EMISSION.
+      if (
+        rung.outcome === "stood_down" ||
+        rung.outcome === "parked" ||
+        rung.outcome === "rebased" ||
+        rung.outcome === "base_refreshed"
+      ) {
+        // NON-SPENDING TERMINATIONS, ONE EMISSION.
         //
         // W1-T177 (`stood_down`): this run's own PR went terminal (merged/closed) mid-rung —
         // stand down rather than spend another strike or escalate.
@@ -28562,6 +28769,8 @@ export function buildSweepEffects(
             // W1-T1095 (capability 3): same two seams as the run-loop call site above — pure
             // API reads plus the guarded update-branch write, never a local rebase.
             readMergeFacts: (n) => fixRebaseMergeFactsFromRest(owner, repo, n),
+            // W1-T2671: same ci-log-only base-gap reader as the run-loop call site above.
+            readRedBaseRefreshFacts: (n) => redBaseRefreshFactsFromRest(owner, repo, n),
             updateBranch: (n) => ghUpdateBranch(owner, repo, n),
             // W1-T1044: THIS is the call site the measured incident actually hit — a fix-rung
             // worker spawned from a `dispatchFix` disposition ran 8,970s as a direct child of
@@ -35116,37 +35325,13 @@ function commandSyntax(name: string): string {
   return commandSpec(name).syntax;
 }
 
-/**
- * W1-T151 INSTALL FRESHNESS: sha256 of `package.json` + `package-lock.json` content
- * (order-stable, null-separated) — a workspaces field added to `package.json` with no
- * `package-lock.json` change (or vice versa) still moves this hash, so the fixture task
- * exists for ("the workspace conversion that broke operator builds while CI stayed
- * green") is caught either way. A missing file hashes as empty content rather than
- * throwing — deterministic either way, never a crash on a repo with no lockfile yet.
- * This is a change-detector, not a security digest — collision resistance beyond
- * "npm's own two source files changed" is not the property being relied on.
- */
-export function hashInstallInputs(
-  repoDir: string,
-  deps: { readFile?: (p: string) => string } = {},
-): string {
-  const readFile = deps.readFile ?? ((p: string) => {
-    try {
-      return readFileSync(p, "utf8");
-    } catch {
-      return "";
-    }
-  });
-  const pkg = readFile(join(repoDir, "package.json"));
-  const lock = readFile(join(repoDir, "package-lock.json"));
-  return createHash("sha256").update(pkg).update("\0").update(lock).digest("hex");
-}
-
-/** Where the last-successful-install hash is persisted — inside `node_modules` itself
- * (never committed, and naturally invalidated if `node_modules` is ever wiped wholesale). */
-export function installHashMarkerPath(repoDir: string): string {
-  return join(repoDir, "node_modules", ".rmd-install-hash");
-}
+// W1-T2777: moved to `src/lib/install-hash.ts` so `src/lib/worker.ts` can consume it
+// without a `lib/ → run-task` import edge. Re-exported here so every existing caller
+// (test/run-task.test.ts, test/install-symlink-refusal.test.ts, plus this file's own
+// InstallFreshnessDeps consumers below) keeps its import path unchanged. This is a
+// PURE MOVE — the function body and behaviour are byte-identical to the pre-move version.
+import { hashInstallInputs, installHashMarkerPath } from "./lib/install-hash.js";
+export { hashInstallInputs, installHashMarkerPath };
 
 export interface InstallFreshnessDeps {
   hash?: (repoDir: string) => string;
