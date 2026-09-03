@@ -1,0 +1,90 @@
+- id: W1-T2785
+  title: "test/fleet-heartbeat-supervisor-tick.test.ts reds on darwin and is in NEITHER host registry — its FIXED_NOW_DATE stub execs /usr/bin/date, which does not exist on macOS, so the same cause HOST_PARITY_BASELINE already declares by name for the sibling file goes unrecorded in HOST_CAUSED_SUITE_REDS"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: "span"
+  budget_usd: 3.00
+  files: [src/lib/ci-parity.ts, test/host-caused-suite-reds.test.ts]
+  origin: "operator-decision#w1-t2785-file-date-cluster-gap-2026-09-03"
+  plan_refs: ["W1-T2776"]
+  status: queued
+  attempts: 0
+  note: |
+    MEASURED 2026-09-03 on the mini: `node --test test/fleet-heartbeat-supervisor-tick.test.ts`
+    reports `# tests 10, # pass 9, # fail 1`, the failure being "the staleness predicate
+    discriminates at its own boundary, in both directions" asserting `'unknown' !== 'live'`.
+
+    HOST-SPECIFIC, PROVEN AT ONE SHA — not a defect, and not a time bomb. ci-shard (3/4) of run
+    33788538399's sibling run 33787747133, at head 990b1e98, reports `ok 1198 - the staleness
+    predicate discriminates at its own boundary, in both directions` GREEN on Linux. Same commit,
+    green on Linux, red on darwin. One platform green at one sha rules out the CLAUDE.md #2250
+    fixed-date-constant shape structurally: a clock-boundary time bomb fires on both platforms.
+
+    MECHANISM, CONFIRMED EMPIRICALLY RATHER THAN FROM FILE ADJACENCY. The file's `FIXED_NOW_DATE`
+    stub ends its ISO branch with `exec /usr/bin/date -u -d "@${epochS}" ...`. TWO independent
+    darwin facts break it, and the FIRST one bites:
+      (1) `/usr/bin/date` DOES NOT EXIST on macOS — date ships at `/bin/date`. Measured: `ls
+          /usr/bin` lists 924 entries with `git`, `grep` and `env` all present and `date` absent,
+          so this is a host fact and not a hidden path (positive control against the CLAUDE.md
+          hazard (e) environmental-artifact reading). The exec fails 127 before any flag is
+          parsed.
+      (2) Even at the right path, `-d` is a GNU extension. Measured on this host: `date -u -d
+          "@1200000000"` -> `date: illegal option -- d` (rc 1), while the BSD form `date -u -r
+          1200000000` -> `2008-01-10T21:20:00Z` (rc 0).
+    Both are the SAME host fact family the registered `bsd-date-control-arm` entry keys off, and
+    the appliesTo predicate is identical (`platform === "darwin"`), so this EXTENDS that cluster
+    rather than needing a new one. That conclusion rests on the two measurements above, not on the
+    two files being siblings.
+
+    THE FILE IS IN NEITHER REGISTRY. `grep -c supervisor-tick` reads 0 in src/lib/ci-parity.ts and
+    0 in src/lib/host-parity.ts. Meanwhile HOST_PARITY_BASELINE ALREADY declares this exact cause,
+    in these words, for the sibling file: "the BSD_DATE stub emulates BSD by delegating its parse
+    to `/usr/bin/date -u -d`, which ON MACOS IS BSD DATE and rejects -d". So the knowledge was in
+    the repo and the new file still slipped past both hand-maintained lists.
+
+    BAND. `risk: high` with `band_meaning: span` is Rule 19 SIZING, not blast radius — the two
+    declared files are `src/lib/ci-parity.ts` (the entry) and `test/host-caused-suite-reds.test.ts`
+    (the row that pins it), which the linter reads as two concerns. They are one act: an entry
+    whose count nothing pins is a number no falsifier grades, and decomposing a claim from its own
+    falsifier is not a real decomposition.
+
+    A CORRECTION THIS SHARD CARRIES BUT DOES NOT APPLY. That baseline reason names the wrong
+    failure STEP: on this host the exec dies on the missing path before `-d` is ever parsed.
+    Right conclusion, wrong mechanism, and it would send the next reader to flag-compatibility
+    instead of to the path. Left alone here deliberately — src/lib/host-parity.ts is a different
+    surface and amending it is a separate, ratifiable act.
+  rationale: |
+    W1-T2776 shipped a discovery test that refuses an unregistered test file shelling a bash-4-only
+    deploy script. It keys on THAT cause and cannot see this one: a date-arithmetic red involves no
+    deploy script and no `spawnSync("bash", ...)`. So after W1-T2776 lands, the NEXT date-caused
+    red is still unregistered, which is the third instance in one session of the same shape — the
+    mechanism failing to catch a class it exists to catch.
+
+    THIS SHARD DOES THE NARROW, MEASURED THING: register the file under the cluster its mechanism
+    actually belongs to, with its measured count, and pin that row by name in the count table so a
+    drift fails loudly. It does NOT attempt a unified predicate over both causes; whether the two
+    detections can share one predicate, or whether the reconciliation belongs with the OBSERVATIONAL
+    mechanism (HOST_PARITY_BASELINE, which diffs a real failure set) rather than with textual
+    prediction, is a design question worth its own filing and is deliberately out of scope here.
+
+    IT ALSO DOES NOT FIX THE TEST. Repointing the stub at `/bin/date` (or at the BSD `-r` form)
+    would eliminate the divergence rather than declare it, which is a better end state and a
+    different task's surface — the same boundary W1-T2776 drew around repairing
+    deploy/recycle-container.sh itself.
+  acceptance:
+    - claim: "test/fleet-heartbeat-supervisor-tick.test.ts is registered in HOST_CAUSED_SUITE_REDS under the bsd-date-control-arm cluster with its measured count of 1"
+      proof: "grep: fleet-heartbeat-supervisor-tick in src/lib/ci-parity.ts"
+    - claim: "the entry's note names the absolute path that does not exist on darwin, so a reader is sent to the missing path rather than to flag compatibility"
+      proof: "grep: /usr/bin/date in src/lib/ci-parity.ts"
+    - claim: "the registry's count table names the new file with its measured count so a removed or drifted row fails by name rather than silently"
+      proof: "grep: fleet-heartbeat-supervisor-tick in test/host-caused-suite-reds.test.ts"
+  falsifier: |
+    Delete the registry entry and criterion 1's proof reads 0 at head; delete the count-table row
+    and criterion 3's reads 0. All three proofs must MISS the merge-base: measured 2026-09-03, all
+    three targets read 0 on origin/main at 990b1e98. Separately, the entry must be load-bearing:
+    `hostCausedSuiteRedsForFacts` on darwin facts must attribute this file, so its 1 failure reads
+    as host-caused rather than diff-caused, and must NOT attribute it on a linux/bash-5 host.
