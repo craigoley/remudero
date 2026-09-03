@@ -12,7 +12,7 @@
 // suite must not add a member to that family while proving a gate about the tree's own shape.
 
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -70,6 +70,40 @@ function writeBaseline(root: string, body: Record<string, number>): string {
 
 function run(args: string[]) {
   return spawnSync(process.execPath, [SCRIPT, ...args], { cwd: REPO_ROOT, encoding: "utf8" });
+}
+
+function git(cwd: string, ...args: string[]): string {
+  return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+}
+
+function signalFixture(): { outer: string; repo: string; baselinePath: string } {
+  const outer = mkdtempSync(join(tmpdir(), "rmd-source-size-signal-"));
+  const remote = join(outer, "origin.git");
+  const repo = join(outer, "repo");
+  mkdirSync(repo);
+  git(outer, "init", "--bare", remote);
+  git(repo, "init", "-b", "main");
+  git(repo, "config", "user.name", "RMD Source Signal Test");
+  git(repo, "config", "user.email", "source-signal@example.invalid");
+  plant(repo, "src/lib/grown.ts", 2);
+  mkdirSync(join(repo, "scripts"), { recursive: true });
+  const baselinePath = join(repo, "scripts", "source-size-baseline.json");
+  writeFileSync(baselinePath, '{"sentinel":123}\n');
+  git(repo, "add", ".");
+  git(repo, "commit", "-m", "base");
+  git(repo, "remote", "add", "origin", remote);
+  git(repo, "push", "-u", "origin", "main");
+  git(remote, "symbolic-ref", "HEAD", "refs/heads/main");
+  git(repo, "checkout", "-b", "run-W1-T2734-1");
+  plant(repo, "src/lib/grown.ts", 5);
+  plant(repo, "src/lib/new.ts", 3);
+  git(repo, "add", ".");
+  git(repo, "commit", "-m", "grow source");
+  return { outer, repo, baselinePath };
+}
+
+function runSignal(root: string, ...args: string[]) {
+  return spawnSync(process.execPath, [SCRIPT, "--root", root, ...args], { cwd: root, encoding: "utf8" });
 }
 
 // ── sanity: the gate is live over the shipped tree, and the SURFACE figures it measures are ────
@@ -268,25 +302,146 @@ test("a malformed baseline is REFUSED, never silently disarmed", () => {
   }
 });
 
-// ── acceptance: "the step is a member of the habitual fast gate" ────────────────────────────────
+// ── prerequisite contract: the renamed command is registered without arming the fast gate ──────
 
-test("source-size-ratchet is a member of FAST_GATE_STEPS and wired into package.json's scripts", () => {
-  const ciParity = readFileSync(join(REPO_ROOT, "src", "lib", "ci-parity.ts"), "utf8");
-  const stepsStart = ciParity.indexOf("export const FAST_GATE_STEPS");
-  assert.ok(stepsStart > 0, "sanity: FAST_GATE_STEPS must still be declared");
-  const stepsEnd = ciParity.indexOf("\n];", stepsStart);
-  const stepsBlock = ciParity.slice(stepsStart, stepsEnd);
-  assert.match(stepsBlock, /script:\s*"source-size-ratchet"/, "source-size-ratchet must be a FAST_GATE_STEPS entry");
-
+test("W1-T2734 prerequisite: source-size-signal is callable while the blocking compatibility command stays explicit", () => {
   const pkg = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")) as { scripts: Record<string, string> };
-  assert.equal(pkg.scripts["source-size-ratchet"], "node scripts/source-size-ratchet.mjs");
+  assert.equal(pkg.scripts["source-size-signal"], "node scripts/source-size-ratchet.mjs");
+  assert.equal(
+    pkg.scripts["source-size-ratchet"],
+    "node scripts/source-size-ratchet.mjs --baseline scripts/source-size-baseline.json",
+    "the historical gate remains reproducible without owning the default signal path",
+  );
 });
 
-// ── acceptance: "the step spawns no test runner and opens no network connection" ─────────────────
+// ── W1-T2734 — PR-relative hotspot signal, never a correctness verdict ──────────────────────────
 
-test("scripts/source-size-ratchet.mjs spawns NO subprocess at all (no test runner, no git, nothing) and opens no network connection", () => {
+test("W1-T2734: positive growth and a new file emit human hotspot signals, exit zero, and never touch the historical baseline", () => {
+  const { outer, repo, baselinePath } = signalFixture();
+  try {
+    const before = readFileSync(baselinePath, "utf8");
+    const result = runSignal(repo);
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stdout, /source-size-signal: OK/);
+    assert.match(result.stdout, /src\/lib\/grown\.ts: 2 -> 5 \(\+3, \+150\.00%\)/);
+    assert.match(result.stdout, /src\/lib\/new\.ts: 0 -> 3 \(\+3, new file\)/);
+    assert.doesNotMatch(result.stdout + result.stderr, /BLOCKED|TO FIX|raise .*threshold|rewrite .*PR body/i);
+    assert.equal(readFileSync(baselinePath, "utf8"), before, "the historical baseline is inert on the PR-relative path");
+  } finally {
+    rmSync(outer, { recursive: true, force: true });
+  }
+});
+
+test("W1-T2734: JSON output is schema-versioned, deterministic, repo-relative, and carries every required measure", () => {
+  const { outer, repo } = signalFixture();
+  try {
+    const result = runSignal(repo, "--json");
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    const report = JSON.parse(result.stdout) as {
+      schema_version: number;
+      base: string;
+      head: string;
+      hotspots: Array<Record<string, unknown>>;
+    };
+    assert.equal(report.schema_version, 1);
+    assert.match(report.base, /^[0-9a-f]{40}$/);
+    assert.match(report.head, /^[0-9a-f]{40}$/);
+    assert.deepEqual(report.hotspots, [
+      { path: "src/lib/grown.ts", before_lines: 2, after_lines: 5, delta_lines: 3, delta_percent: 150 },
+      { path: "src/lib/new.ts", before_lines: 0, after_lines: 3, delta_lines: 3, delta_percent: null },
+    ]);
+    assert.doesNotMatch(result.stdout, new RegExp(outer.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), "JSON must never expose an absolute runner path");
+  } finally {
+    rmSync(outer, { recursive: true, force: true });
+  }
+});
+
+test("W1-T2734: the default origin/main base is fetched before measurement", () => {
+  const { outer, repo } = signalFixture();
+  const publisher = join(outer, "publisher");
+  try {
+    git(outer, "clone", "--branch", "main", join(outer, "origin.git"), publisher);
+    git(publisher, "config", "user.name", "RMD Source Signal Test");
+    git(publisher, "config", "user.email", "source-signal@example.invalid");
+    plant(publisher, "src/lib/base-only.ts", 1);
+    git(publisher, "add", ".");
+    git(publisher, "commit", "-m", "advance main");
+    git(publisher, "push", "origin", "main");
+    const stale = git(repo, "rev-parse", "origin/main");
+    const remoteTip = git(publisher, "rev-parse", "HEAD");
+    assert.notEqual(stale, remoteTip, "precondition: the signal checkout's tracking ref is stale");
+
+    const result = runSignal(repo);
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.equal(git(repo, "rev-parse", "origin/main"), remoteTip, "the measurement refreshes origin/main first");
+  } finally {
+    rmSync(outer, { recursive: true, force: true });
+  }
+});
+
+test("W1-T2734: an invalid base is a measurement failure, not a green empty signal", () => {
+  const { outer, repo } = signalFixture();
+  try {
+    const result = runSignal(repo, "--base", "refs/heads/does-not-exist");
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /source-size-signal: MEASUREMENT FAILED/);
+    assert.doesNotMatch(result.stderr, /source-size-signal: OK/);
+  } finally {
+    rmSync(outer, { recursive: true, force: true });
+  }
+});
+
+test("W1-T2734: a malformed CLI argument is a measurement failure, naming the bad argument", () => {
+  // Exercises the parseArgs catch branch (an unrecognized flag never reaches measurement at all).
+  const unknown = run(["--root", REPO_ROOT, "--not-a-real-flag"]);
+  assert.notEqual(unknown.status, 0, "an unrecognized flag must not exit zero");
+  assert.match(unknown.stderr, /source-size-signal: MEASUREMENT FAILED — invalid arguments:/);
+  assert.doesNotMatch(unknown.stderr, /source-size-signal: OK/);
+
+  const missingValue = run(["--root"]); // --root takes a value; omitting it is the same parseArgs failure
+  assert.notEqual(missingValue.status, 0, "a flag missing its required value must not exit zero");
+  assert.match(missingValue.stderr, /source-size-signal: MEASUREMENT FAILED — invalid arguments:/);
+});
+
+test("W1-T2734: commit identities shorter than a full SHA-1 (e.g. this repo's own SHA-256 mode) fail measurement rather than emitting a truncated signal", () => {
+  // git's SHA-256 object format (git init --object-format=sha256) returns 64-hex-character commit
+  // identities, not the 40 this script's regex requires — the one realistic way to make `git
+  // rev-parse`/`git merge-base` exit 0 while returning something that is not a full SHA-1 identity.
+  const outer = mkdtempSync(join(tmpdir(), "rmd-source-size-sha256-"));
+  try {
+    const repo = join(outer, "repo");
+    mkdirSync(repo);
+    git(outer, "init", "-q", "-b", "main", "--object-format=sha256", repo);
+    git(repo, "config", "user.name", "RMD Source Signal Test");
+    git(repo, "config", "user.email", "source-signal@example.invalid");
+    plant(repo, "src/lib/grown.ts", 2);
+    git(repo, "add", ".");
+    git(repo, "commit", "-m", "base");
+    git(repo, "checkout", "-b", "feature");
+    plant(repo, "src/lib/grown.ts", 5);
+    git(repo, "add", ".");
+    git(repo, "commit", "-m", "grow source");
+
+    const headSha = git(repo, "rev-parse", "HEAD");
+    assert.doesNotMatch(headSha, /^[0-9a-f]{40}$/i, "sanity: SHA-256 mode really does produce a non-40-hex identity");
+
+    // --base "main" (not "origin/main") so measurement never needs a remote fetch.
+    const result = runSignal(repo, "--base", "main");
+    assert.notEqual(result.status, 0, "a non-40-hex commit identity must fail measurement, not emit a signal for it");
+    assert.match(
+      result.stderr,
+      /source-size-signal: MEASUREMENT FAILED — git did not return full commit identities for the merge base and HEAD/,
+    );
+    assert.doesNotMatch(result.stdout + result.stderr, /source-size-signal: OK/);
+  } finally {
+    rmSync(outer, { recursive: true, force: true });
+  }
+});
+
+test("W1-T2734: the sensor uses git only, never a test runner or a hand-rolled network client", () => {
   const source = readFileSync(SCRIPT, "utf8");
-  assert.doesNotMatch(source, /node:child_process/, "no child_process import — this gate spawns nothing, not even git");
+  assert.match(source, /node:child_process/, "the signal needs git to measure a merge-base-to-HEAD diff");
+  assert.match(source, /\["fetch",\s*"origin",\s*"main"\]/, "the default base is refreshed before measurement");
   assert.doesNotMatch(source, /\bnode\s+--test\b/, "no test-runner invocation anywhere in the source");
   for (const networkModule of ["node:http", "node:https", "node:net", "node:tls", "node:dgram"]) {
     assert.doesNotMatch(source, new RegExp(networkModule.replace(":", "\\:")), `no ${networkModule} import — this gate opens no network connection`);
