@@ -21,10 +21,11 @@
  * acceptance claim 3). A later capture (or a manual `rmd feedback land`, not yet built)
  * retries the same unlanded files.
  *
- * MECHANISM — plumbing only, and it NEVER touches the caller's own working tree, index,
- * or local branches (the W1-T60 rule: a background/library call must never mutate the
- * operator's checkout — `syncPlanFromOrigin`, run-task.ts, follows the identical
- * `git fetch` + read-only-blob discipline for the same reason). It fetches `origin/main`,
+ * MECHANISM — plumbing only. It NEVER touches the caller's index, tracked files, or local
+ * branches (the W1-T60 rule: a background/library call must not mutate operator work). The one
+ * narrow working-tree mutation is the W1-T2749 queue acknowledgement: after fetching
+ * `origin/main`, an untracked `plan/feedback/**` copy is removed only when Git proves the same
+ * bytes are already durable at that exact upstream path. It fetches `origin/main`,
  * diffs the local `plan/feedback/**` tree against it, and — only for files that actually
  * differ — builds one new commit against a SCRATCH index (`GIT_INDEX_FILE`, never the
  * repo's real index) via `hash-object`/`write-tree`/`commit-tree`, then force-pushes it to
@@ -36,7 +37,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { assertLiveWriteAllowed } from "./live-write-guard.js";
@@ -118,7 +119,19 @@ export interface LandFeedbackResult {
    * own doc for why that split exists (W1-T530).
    */
   pushed?: boolean;
+  /**
+   * Present only when this call removed one or more redundant, untracked queue copies after
+   * fetched `origin/main` proved their bytes durable at the same paths. `count` is exact while
+   * `paths` is deliberately bounded so one large inbox cannot create an unbounded ledger line.
+   */
+  acknowledgement?: {
+    count: number;
+    paths: string[];
+    truncated: boolean;
+  };
 }
+
+const ACKNOWLEDGEMENT_PATH_LIMIT = 50;
 
 function defaultGit(root: string): GitExec {
   return (args, opts) =>
@@ -131,6 +144,52 @@ function defaultGit(root: string): GitExec {
 
 function defaultGh(): GhExec {
   return (args) => execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+}
+
+/**
+ * Remove only redundant UNTRACKED queue copies whose exact bytes are already readable from the
+ * fetched `origin/main`. Every comparison is independent: a missing/corrupt object, a racing
+ * path, or a failed unlink leaves that path untouched without suppressing the rest of the inbox.
+ */
+function acknowledgeLandedQueueCopies(
+  root: string,
+  kind: LandingKind,
+  git: GitExec,
+): LandFeedbackResult["acknowledgement"] {
+  let untracked: string[];
+  try {
+    untracked = git(["ls-files", "--others", "--exclude-standard", "-z", "--", kind.ownedDir])
+      .split("\0")
+      .filter(Boolean)
+      .sort();
+  } catch {
+    return undefined;
+  }
+
+  const acknowledged: string[] = [];
+  for (const rel of untracked) {
+    try {
+      // Re-check the index immediately before the destructive step. The initial enumeration is
+      // not authority if another local actor tracked the path while this pass was running.
+      if (git(["ls-files", "--", rel]).trim() !== "") continue;
+      const remoteSha = git(["rev-parse", `origin/main:${rel}`]).trim();
+      git(["cat-file", "-e", `${remoteSha}^{blob}`]);
+      const localSha = git(["hash-object", join(root, rel)]).trim();
+      if (localSha !== remoteSha) continue;
+      unlinkSync(join(root, rel));
+      acknowledged.push(rel);
+    } catch {
+      // This is a queue acknowledgement, never authority to discard an unproved path. The
+      // ordinary landing scan below still gets its independent chance to submit the remainder.
+    }
+  }
+
+  if (acknowledged.length === 0) return undefined;
+  return {
+    count: acknowledged.length,
+    paths: acknowledged.slice(0, ACKNOWLEDGEMENT_PATH_LIMIT),
+    truncated: acknowledged.length > ACKNOWLEDGEMENT_PATH_LIMIT,
+  };
 }
 
 /** Every file under `<root>/<relDir>/` (recursively — entries AND any nested attachments), repo-relative. */
@@ -404,21 +463,31 @@ function finishLanding(
 }
 
 /**
- * Best-effort land any `plan/feedback/**` file present in `root`'s REAL working tree but
- * absent or changed on `origin/main`, onto the shared `feedback-landing` PR. NEVER throws:
+ * Best-effort acknowledge any byte-identical, untracked queue copy already on fetched
+ * `origin/main`, then land every remaining `plan/feedback/**` file present in `root`'s REAL
+ * working tree but absent or changed upstream onto the shared `feedback-landing` PR. NEVER throws:
  * every failure — not a git checkout, no `origin` remote, offline, `gh`
  * unavailable/unauthenticated — resolves to `{ landed: false, files: [], error }` instead.
  * Scans disk because `captureFeedback`'s local copy is the durable buffer §7B promises even
  * offline — unlike {@link landContent}, this one legitimately needs a real file to read.
  */
-function landPending(root: string, kind: LandingKind, opts: LandFeedbackOpts): LandFeedbackResult {
+interface LandPendingOpts extends LandFeedbackOpts {
+  /** Internal compatibility seam: only the named sweep publishes acknowledgement evidence. */
+  reportAcknowledgement?: boolean;
+}
+
+function landPending(root: string, kind: LandingKind, opts: LandPendingOpts): LandFeedbackResult {
   const git = opts.git ?? defaultGit(root);
   const gh = opts.gh ?? defaultGh();
   let scratchDir: string | undefined;
+  let acknowledgement: LandFeedbackResult["acknowledgement"];
+  const withAcknowledgement = (result: LandFeedbackResult): LandFeedbackResult =>
+    acknowledgement && opts.reportAcknowledgement ? { ...result, acknowledgement } : result;
 
   try {
     git(["fetch", "origin", "--quiet"]);
     const mainSha = git(["rev-parse", "origin/main"]).trim();
+    acknowledgement = acknowledgeLandedQueueCopies(root, kind, git);
 
     const unlanded = listRelFiles(root, FEEDBACK_REL_DIR).filter((rel) => {
       const localSha = git(["hash-object", join(root, rel)]).trim();
@@ -430,10 +499,11 @@ function landPending(root: string, kind: LandingKind, opts: LandFeedbackOpts): L
       }
       return remoteSha !== localSha;
     });
-    if (unlanded.length === 0) return { landed: false, files: [] };
+    if (unlanded.length === 0) return withAcknowledgement({ landed: false, files: [] });
 
-    // Build the new commit against a SCRATCH index — never the caller's real index/working
-    // tree (W1-T60: this module must never mutate the operator's own checkout).
+    // Build the new commit against a SCRATCH index — never the caller's real index or tracked
+    // work. W1-T2749's proved-redundant untracked queue acknowledgement above is the sole narrow
+    // working-tree mutation; the landing commit itself retains W1-T60's isolation.
     scratchDir = mkdtempSync(join(tmpdir(), `rmd-${kind.branch}-`));
     const env = { ...process.env, GIT_INDEX_FILE: join(scratchDir, "index") };
     git(["read-tree", "origin/main"], { env });
@@ -442,9 +512,9 @@ function landPending(root: string, kind: LandingKind, opts: LandFeedbackOpts): L
       git(["update-index", "--add", "--cacheinfo", `100644,${blobSha},${rel}`], { env });
     }
     const treeSha = git(["write-tree"], { env }).trim();
-    return finishLanding(kind, git, gh, mainSha, treeSha, unlanded, env, opts.ledgerLines);
+    return withAcknowledgement(finishLanding(kind, git, gh, mainSha, treeSha, unlanded, env, opts.ledgerLines));
   } catch (e) {
-    return { landed: false, files: [], error: String((e as Error)?.message ?? e) };
+    return withAcknowledgement({ landed: false, files: [], error: String((e as Error)?.message ?? e) });
   } finally {
     if (scratchDir) {
       try {
@@ -479,8 +549,9 @@ export interface SweepFeedbackLandingOpts extends LandFeedbackOpts {
  * stranded off `origin/main` forever, and `rmd triage` refuses it as not-on-origin because it
  * deliberately reads from a fresh origin/main worktree, never `root`.
  *
- * A THIN WRAPPER, NOT A REWRITE: this re-runs the exact same whole-inbox scan/reconcile
- * `landFeedback` already performs — nothing about the scratch-index discipline (W1-T60), the
+ * A THIN WRAPPER, NOT A REWRITE: this re-runs the same whole-inbox scan/reconcile and reports
+ * W1-T2749's exact-byte queue acknowledgements — nothing about the scratch-index discipline
+ * (W1-T60), the
  * rebuild-from-current-origin/main force-push, or the shared `feedback-landing` branch/PR
  * changes. Calling it twice over unchanged state is safe by the SAME idempotence
  * `findPendingLandingPr` + the tree-compare short-circuit in {@link finishLanding} already give
@@ -498,8 +569,16 @@ export interface SweepFeedbackLandingOpts extends LandFeedbackOpts {
  */
 export function sweepFeedbackLanding(root: string, opts: SweepFeedbackLandingOpts = {}): LandFeedbackResult {
   const { log, ...landOpts } = opts;
-  const result = landFeedback(root, landOpts);
+  const result = landPending(root, FEEDBACK_LANDING_KIND, { ...landOpts, reportAcknowledgement: true });
   if (log) {
+    const acknowledgement = result.acknowledgement;
+    const acknowledgementEvidence = acknowledgement
+      ? {
+          acknowledged_count: acknowledgement.count,
+          acknowledged_paths: acknowledgement.paths,
+          acknowledged_paths_truncated: acknowledgement.truncated,
+        }
+      : { acknowledged_count: 0 };
     if (result.pushed) {
       log("feedback.landing_sweep", {
         pushed: true,
@@ -507,9 +586,15 @@ export function sweepFeedbackLanding(root: string, opts: SweepFeedbackLandingOpt
         files: result.files,
         pr_url: result.prUrl,
         error: result.error,
+        ...acknowledgementEvidence,
       });
     } else {
-      log("feedback.landing_sweep", { pushed: false, landed: result.landed, file_count: result.files.length });
+      log("feedback.landing_sweep", {
+        pushed: false,
+        landed: result.landed,
+        file_count: result.files.length,
+        ...acknowledgementEvidence,
+      });
     }
   }
   return result;
