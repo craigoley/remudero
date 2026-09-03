@@ -747,6 +747,7 @@ import {
   diffCoverageReport,
   fixCeilingInForce,
   fixDispatchBudget,
+  fixLedgerRowsForHead,
   isBlockedCi,
   listRetirableEscalationIssues,
   logCostGovernorDeferral,
@@ -8596,6 +8597,7 @@ export async function runFixRung(opts: {
             mode: "body-repair",
             defect: repair.defect,
             verdict_regime: verdictRegime,
+            head_sha: review.headSha,
           });
           deps.say(
             `fix rung: strike ${strikes}/${opts.strikeCap} — repaired an author-time acceptance-gate ` +
@@ -9359,6 +9361,7 @@ export async function runFixRung(opts: {
         round,
         mode: fixMode,
         verdict_regime: verdictRegime,
+        head_sha: priorHeadSha,
         // W1-T1219: the spawn's own elapsed milliseconds — see spawnFixWorkerBounded's own doc.
         elapsed_ms: spawnElapsedMs,
       });
@@ -9668,6 +9671,7 @@ export async function runFixRung(opts: {
       strike: strikes,
       state: review.state,
       unmet: review.criteria.filter((c) => !c.met).length,
+      head_sha: priorHeadSha,
     });
 
     if (review.decisionDisposition === "in_flight") {
@@ -26576,8 +26580,7 @@ function actionableGateFailuresFromLedger(lines: Array<Record<string, unknown>>,
 }
 
 /**
- * Fix strikes already attempted for a PR — a straight `fix.dispatch` (task_id)
- * count. W1-T78 fixed the cold-dispatch `log` wrapper (`buildSweepEffects`'s
+ * Fix strikes already attempted for a PR. W1-T78 fixed the cold-dispatch `log` wrapper (`buildSweepEffects`'s
  * `dispatchFix`) to stamp the REAL `task.id` on every `fix.dispatch`/`fix.review`
  * line it writes — before that fix, a cold dispatch's lines carried the OUTER
  * caller's synthetic id ("SWEEP"/"FIX"/"DAEMON"), so this function used to fall
@@ -26588,7 +26591,9 @@ function actionableGateFailuresFromLedger(lines: Array<Record<string, unknown>>,
  * task-tagged for every caller, so counting BOTH would double-count every real
  * strike (N `fix.dispatch` lines + 1 proxy line per dispatchFix call) and could
  * starve an answered PR of its one legitimate extra strike (W1-T78's
- * `strikeCapForAnswer` ceiling check).
+ * `strikeCapForAnswer` ceiling check). W1-T2788 makes that count head-generational through
+ * {@link fixLedgerRowsForHead}: a changed PR head re-earns the configured allowance while an
+ * unchanged head remains bounded.
  */
 /**
  * The regime the CURRENT verdict for a task was produced under (W1-T199) — read
@@ -26649,11 +26654,12 @@ export function priorStrikesFor(
   lines: Array<Record<string, unknown>>,
   taskId: string | undefined,
   currentRegime: StrikeRegime = "keyword_only",
+  currentHeadSha?: string,
 ): number {
   if (!taskId) return 0;
   let n = 0;
-  for (const line of lines) {
-    if (line.step !== "fix.dispatch" || line.task_id !== taskId) continue;
+  for (const line of fixLedgerRowsForHead(lines, taskId, currentHeadSha)) {
+    if (line.step !== "fix.dispatch") continue;
     // Under the executed regime a keyword-era strike is amnestied; every other
     // combination counts, so the cap keeps binding on same-regime failures.
     if (currentRegime === "executed" && strikeRegimeOf(line) === "keyword_only") continue;
@@ -26663,18 +26669,23 @@ export function priorStrikesFor(
 }
 
 /**
- * W1-T78: what each fix-rung strike TRIED for a task, ledger ground truth
+ * W1-T78: what each fix-rung strike TRIED for a task and current PR head, ledger ground truth
  * ONLY (never inferred) — the clarification-question rung's "what the fix
  * worker tried per strike" input. `fix.dispatch` opens a strike (round +
  * unmet count going IN); `fix.review` (only reached once CI is green) records
  * its outcome. A strike with no matching `fix.review` line simply never
- * reached a review (e.g. `fix.ci_not_green` — CI never went green).
+ * reached a review (e.g. `fix.ci_not_green` — CI never went green). W1-T2788 selects the same
+ * head generation as the cap before pairing rows, so repeated strike numbers from older heads
+ * cannot leak into a current clarification.
  */
-export function deriveStrikeHistory(lines: Array<Record<string, unknown>>, taskId: string | undefined): StrikeAttempt[] {
+export function deriveStrikeHistory(
+  lines: Array<Record<string, unknown>>,
+  taskId: string | undefined,
+  currentHeadSha?: string,
+): StrikeAttempt[] {
   if (!taskId) return [];
   const byStrike = new Map<number, StrikeAttempt>();
-  for (const line of lines) {
-    if (line.task_id !== taskId) continue;
+  for (const line of fixLedgerRowsForHead(lines, taskId, currentHeadSha)) {
     const strike = typeof line.strike === "number" ? line.strike : undefined;
     if (strike === undefined) continue;
     if (line.step === "fix.dispatch") {
@@ -26963,8 +26974,8 @@ export function buildOpenPrViews(
       // already scans — see `actionableGateFailuresFromLedger`'s own doc for why it is keyed
       // differently (no `isPlanOnlyFilingPr` gate) and why it never parses `failure_reason`.
       actionableGateFailures: reviewState === "failure" ? actionableGateFailuresFromLedger(ledger, gateFailureKey) : [],
-      priorStrikes: priorStrikesFor(ledger, taskId, currentStrikeRegimeFor(ledger, taskId)),
-      strikeHistory: deriveStrikeHistory(ledger, taskId),
+      priorStrikes: priorStrikesFor(ledger, taskId, currentStrikeRegimeFor(ledger, taskId), pr.headRefOid),
+      strikeHistory: deriveStrikeHistory(ledger, taskId, pr.headRefOid),
       supersededBy,
       lastActivityAt: pr.updatedAt,
       // W1-T1201: the age clamp's other half — see `RawOpenPr.createdAt`'s own doc for why this
@@ -30354,8 +30365,8 @@ export async function fixCommand(
     // W1-T440: same signal as buildOpenPrViews above — routeFix's deriveDisposition call
     // reads it via the SAME sweep.ts row 7.
     criteriaRecoverable: taskId !== undefined,
-    priorStrikes: priorStrikesFor(ledger, taskId, currentStrikeRegimeFor(ledger, taskId)),
-    strikeHistory: deriveStrikeHistory(ledger, taskId),
+    priorStrikes: priorStrikesFor(ledger, taskId, currentStrikeRegimeFor(ledger, taskId), raw.headRefOid),
+    strikeHistory: deriveStrikeHistory(ledger, taskId, raw.headRefOid),
     // superseded-by is a cross-PR sweep concern (which OTHER open PR credits the
     // same task) — out of scope for a single explicitly-named PR lookup.
     supersededBy: undefined,
