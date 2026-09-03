@@ -24989,6 +24989,12 @@ function defaultReadWorktreeHead(worktreePath: string): string | undefined {
   try {
     return execFileSync("git", ["rev-parse", "HEAD"], { cwd: worktreePath, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
   } catch {
+    // W1-T2627: `undefined` is the ABSENT reading, not a swallowed failure. A worktree can
+    // legitimately have no resolvable HEAD — freshly added and not yet checked out, or its
+    // directory reaped from under the admin record — and `rev-parse` exits non-zero for all of
+    // them alike. `doctor` is READ-ONLY and reports what it could and could not observe, so an
+    // unreadable head must degrade to "not observed" rather than throw and take the whole health
+    // check down over one worktree.
     return undefined;
   }
 }
@@ -24998,6 +25004,12 @@ function defaultIsWorktreeBaseAncestor(worktreePath: string, base: string, head:
     execFileSync("git", ["merge-base", "--is-ancestor", base, head], { cwd: worktreePath, stdio: ["ignore", "pipe", "pipe"] });
     return true;
   } catch (e) {
+    // W1-T2627: `git merge-base --is-ancestor` ANSWERS THROUGH ITS EXIT CODE, so a throw here is
+    // two different events wearing one shape. Exit 1 is a real answer — "base is not an ancestor
+    // of head" — and must read as `false`. ANY OTHER status (128 for a bad revision or a corrupt
+    // worktree, or a spawn error with no status at all) means git could not decide, which is
+    // `undefined` = not observed. Collapsing the second case into `false` would report a healthy
+    // worktree as diverged on nothing more than an unreadable ref.
     return (e as { status?: number | null }).status === 1 ? false : undefined;
   }
 }
