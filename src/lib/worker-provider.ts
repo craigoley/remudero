@@ -689,10 +689,17 @@ interface CodexRuntimeReading {
   models: CodexModelInfo[];
 }
 
+type CodexRuntimeResult = CodexRuntimeReading | ProviderCapacity;
+
 const codexCapacityCache = new Map<string, { at: number; value: CodexRuntimeReading }>();
+const codexCapacityFailureCache = new Map<string, { at: number; value: ProviderCapacity }>();
+const codexCapacityInFlight = new Map<string, Promise<CodexRuntimeResult>>();
+const CODEX_CAPACITY_FAILURE_BACKOFF_MAX_MS = 10_000;
 
 export function clearCodexCapacityCache(): void {
   codexCapacityCache.clear();
+  codexCapacityFailureCache.clear();
+  codexCapacityInFlight.clear();
 }
 
 function resolveCodexBin(config: Config, resolveEnv: NodeJS.ProcessEnv = process.env): string {
@@ -725,28 +732,12 @@ function codexControlEnv(config: Config): NodeJS.ProcessEnv {
   return env;
 }
 
-/** Read account-visible models and their subscription buckets through one app-server session. */
-export async function readCodexCapacity(config: Config, deps: CodexCapacityDeps = {}): Promise<ProviderCapacity> {
-  let bin: string;
-  try {
-    bin = resolveCodexBin(config, deps.resolveEnv);
-  } catch (error) {
-    // Toolchain absence is a named unreadable capacity, so routing can still use Claude.
-    return { provider: "codex", readable: false, windows: [], detail: (error as Error).message };
-  }
-  const capabilities = resolveCapabilityLadder(config, deps);
-  const now = deps.now ?? Date.now;
-  const cacheKey = `${bin}\0${codexHome(config)}`;
-  const cached = codexCapacityCache.get(cacheKey);
-  const cacheMs = config.workerProviders?.capacityCacheMs ?? 60_000;
-  if (!deps.forceRefresh && cached && now() - cached.at < cacheMs) {
-    if (deps.selectedModel) return selectCodexAttributionModel(cached.value.models, cached.value.rateLimits, deps.selectedModel);
-    return selectCodexModel(cached.value.models, cached.value.rateLimits, config, deps.requestedModel, deps.requestedEffort, capabilities, {
-      preferredModel: deps.preferredModel,
-      reservePercent: deps.reservePercent,
-    });
-  }
-
+/** One raw Codex control-plane exchange. It applies no caller model or provider policy. */
+async function readCodexRuntime(
+  config: Config,
+  bin: string,
+  deps: Pick<CodexCapacityDeps, "spawn" | "timeoutMs">,
+): Promise<CodexRuntimeResult> {
   const spawn = deps.spawn ?? ((command, args, options) => spawnChild(command, args, { ...options, stdio: ["pipe", "pipe", "pipe"] }));
   const timeoutMs = deps.timeoutMs ?? 10_000;
   let child: ChildProcessWithoutNullStreams;
@@ -757,21 +748,36 @@ export async function readCodexCapacity(config: Config, deps: CodexCapacityDeps 
     return { provider: "codex", readable: false, windows: [], detail: `app-server spawn failed: ${(error as Error).message}` };
   }
 
-  const value = await new Promise<CodexRuntimeReading | ProviderCapacity>((resolve) => {
+  return new Promise<CodexRuntimeResult>((resolve) => {
     let settled = false;
     let buffer = "";
     let stderr = "";
     let rateLimits: unknown;
     let models: CodexModelInfo[] | undefined;
-    const finish = (result: CodexRuntimeReading | ProviderCapacity) => {
+    let initialized = false;
+    let rateLimitsReceived = false;
+    let modelsReceived = false;
+    const finish = (result: CodexRuntimeResult) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       child.kill("SIGKILL");
       resolve(result);
     };
+    const unfinishedPhases = (): string[] => {
+      if (!initialized) return ["initialize"];
+      const pending: string[] = [];
+      if (!rateLimitsReceived) pending.push("account/rateLimits/read");
+      if (!modelsReceived) pending.push("model/list");
+      return pending;
+    };
     const timer = setTimeout(
-      () => finish({ provider: "codex", readable: false, windows: [], detail: `rate-limit read timed out after ${timeoutMs}ms` }),
+      () => finish({
+        provider: "codex",
+        readable: false,
+        windows: [],
+        detail: `app-server timed out after ${timeoutMs}ms; unfinished: ${unfinishedPhases().join(", ") || "response validation"}`,
+      }),
       timeoutMs,
     );
     child.on("error", (error) => finish({ provider: "codex", readable: false, windows: [], detail: `app-server error: ${error.message}` }));
@@ -796,17 +802,20 @@ export async function readCodexCapacity(config: Config, deps: CodexCapacityDeps 
           continue;
         }
         if (message.id === 1) {
+          initialized = true;
           child.stdin.write(`${JSON.stringify({ method: "initialized", params: {} })}\n`);
           child.stdin.write(`${JSON.stringify({ method: "account/rateLimits/read", id: 2, params: {} })}\n`);
           child.stdin.write(`${JSON.stringify({ method: "model/list", id: 3, params: { limit: 100, includeHidden: false } })}\n`);
         } else if (message.id === 2) {
+          rateLimitsReceived = true;
           if (message.error) {
             finish({ provider: "codex", readable: false, windows: [], detail: message.error.message ?? "rate-limit RPC error" });
           } else {
             rateLimits = message.result;
-            if (models) finish({ rateLimits, models });
+            if (modelsReceived) finish({ rateLimits, models: models ?? [] });
           }
         } else if (message.id === 3) {
+          modelsReceived = true;
           if (message.error) {
             finish({ provider: "codex", readable: false, windows: [], detail: message.error.message ?? "model-list RPC error" });
           } else {
@@ -815,7 +824,7 @@ export async function readCodexCapacity(config: Config, deps: CodexCapacityDeps 
               finish({ provider: "codex", readable: false, windows: [], detail: "model/list exceeded the supported 100-model page" });
             } else {
               models = Array.isArray(result?.data) ? result.data : [];
-              if (rateLimits !== undefined) finish({ rateLimits, models });
+              if (rateLimitsReceived) finish({ rateLimits, models });
             }
           }
         }
@@ -825,13 +834,84 @@ export async function readCodexCapacity(config: Config, deps: CodexCapacityDeps 
       `${JSON.stringify({ method: "initialize", id: 1, params: { clientInfo: { name: "remudero", title: "Remudero", version: "0.1.0" } } })}\n`,
     );
   });
-  if ("provider" in value) return value;
-  codexCapacityCache.set(cacheKey, { at: now(), value });
+}
+
+function selectCodexRuntime(
+  value: CodexRuntimeReading,
+  config: Config,
+  deps: CodexCapacityDeps,
+  capabilities: CapabilityLadder | undefined,
+): ProviderCapacity {
   if (deps.selectedModel) return selectCodexAttributionModel(value.models, value.rateLimits, deps.selectedModel);
   return selectCodexModel(value.models, value.rateLimits, config, deps.requestedModel, deps.requestedEffort, capabilities, {
     preferredModel: deps.preferredModel,
     reservePercent: deps.reservePercent,
   });
+}
+
+function backedOffCodexFailure(value: ProviderCapacity, ageMs: number, backoffMs: number): ProviderCapacity {
+  const remainingMs = Math.max(0, backoffMs - ageMs);
+  return {
+    ...value,
+    windows: [],
+    detail: `${value.detail ?? "Codex capacity read failed"}; failure backoff ${ageMs}ms old, retry in ${remainingMs}ms`,
+  };
+}
+
+/** Read account-visible models and their subscription buckets through one app-server session. */
+export async function readCodexCapacity(config: Config, deps: CodexCapacityDeps = {}): Promise<ProviderCapacity> {
+  let bin: string;
+  try {
+    bin = resolveCodexBin(config, deps.resolveEnv);
+  } catch (error) {
+    // Toolchain absence is a named unreadable capacity, so routing can still use Claude.
+    return { provider: "codex", readable: false, windows: [], detail: (error as Error).message };
+  }
+  const capabilities = resolveCapabilityLadder(config, deps);
+  const now = deps.now ?? Date.now;
+  const cacheKey = `${bin}\0${codexHome(config)}`;
+  const cacheMs = config.workerProviders?.capacityCacheMs ?? 60_000;
+  const failureBackoffMs = Math.min(CODEX_CAPACITY_FAILURE_BACKOFF_MAX_MS, cacheMs);
+  if (!deps.forceRefresh) {
+    const cached = codexCapacityCache.get(cacheKey);
+    if (cached && now() - cached.at < cacheMs) return selectCodexRuntime(cached.value, config, deps, capabilities);
+    const failed = codexCapacityFailureCache.get(cacheKey);
+    if (failed) {
+      const ageMs = now() - failed.at;
+      if (ageMs < failureBackoffMs) return backedOffCodexFailure(failed.value, ageMs, failureBackoffMs);
+      codexCapacityFailureCache.delete(cacheKey);
+    }
+  }
+
+  let exchange: Promise<CodexRuntimeResult>;
+  if (!deps.forceRefresh) {
+    const active = codexCapacityInFlight.get(cacheKey);
+    if (active) {
+      exchange = active;
+    } else {
+      exchange = readCodexRuntime(config, bin, deps);
+      codexCapacityInFlight.set(cacheKey, exchange);
+    }
+  } else {
+    exchange = readCodexRuntime(config, bin, deps);
+  }
+
+  let value: CodexRuntimeResult;
+  try {
+    value = await exchange;
+  } finally {
+    if (!deps.forceRefresh && codexCapacityInFlight.get(cacheKey) === exchange) {
+      codexCapacityInFlight.delete(cacheKey);
+    }
+  }
+  if ("provider" in value) {
+    codexCapacityCache.delete(cacheKey);
+    if (!deps.forceRefresh) codexCapacityFailureCache.set(cacheKey, { at: now(), value });
+    return value;
+  }
+  codexCapacityCache.set(cacheKey, { at: now(), value });
+  codexCapacityFailureCache.delete(cacheKey);
+  return selectCodexRuntime(value, config, deps, capabilities);
 }
 
 interface CodexJsonEvent {
