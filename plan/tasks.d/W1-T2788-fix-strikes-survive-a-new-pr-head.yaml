@@ -1,0 +1,81 @@
+- id: W1-T2788
+  title: "FIX STRIKES SURVIVE A NEW PR HEAD — the daemon says a changed head re-earns an attempt, but both cap readers count every fix.dispatch ever written for the task and keep repaired PRs permanently exhausted"
+  repo: remudero
+  depends_on: [W1-T2520, W1-T2306]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 16.00
+  risk: high
+  files:
+    - src/run-task.ts
+    - src/lib/sweep.ts
+    - test/body-repair-strike-counts.test.ts
+    - test/the-fix-rung-strike-cap-does-not-bind.test.ts
+    - test/fix-strikes-reset-on-new-head.test.ts
+  origin: "operator-ruling#changed-pr-head-resets-fix-cap-2026-09-03"
+  plan_refs: ["W1-T78", "W1-T199", "W1-T2306", "W1-T2452", "W1-T2520"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED on PRs #3837, #3838 and #3839 after merged #3840 removed their only failing
+    mkdtemp scanner inputs: each PR remained `blocked-ambiguous` and `fix strikes exhausted
+    (2/2)` on its unchanged old head. A signed empty commit created a new review input, but the
+    daemon still had no automatic way to grant that new head a bounded fix allowance. The
+    operator ruled that the cap must reset when the PR changes.
+
+    The source contradicts the user-facing claim. `priorStrikesFor` counts every matching
+    `fix.dispatch` row by `task_id` and verdict regime, regardless of `OpenPrView.headSha`.
+    `freshFixDispatchCount`, the under-claim race guard, also counts by task alone. Both
+    `fix.dispatch` writers omit `head_sha`, and `deriveStrikeHistory` mixes attempts from all
+    historical heads into the current clarification. The sweep's escalation dedup is head-bound,
+    but the budget that decides whether a fix may run is not.
+
+    The falsifying observation would be a head filter in either cap reader or a target-head field
+    on both dispatch writers. None exists; `test/body-repair-strike-counts.test.ts` explicitly
+    asserts the opposite contract. Removing the cap entirely would be unsafe: an unchanged bad
+    head must remain bounded, and concurrent sweeps must still share the same fresh count.
+  design: |
+    Make the strike budget a property of the current PR head generation. Stamp the input
+    `head_sha` on both body-repair and worker-backed `fix.dispatch` rows before any push changes
+    the branch. Count only attempts attributable to the current head in `priorStrikesFor`, the
+    fresh under-claim check, and `deriveStrikeHistory`.
+
+    Preserve historical safety. For new tagged rows, exact head equality is mandatory. For legacy
+    untagged rows, use the most recent `sweep.disposed` observation of this task and current head
+    as the generation boundary; count only later legacy dispatches. If no trustworthy boundary
+    exists, retain the old all-history count rather than granting an unproven reset. Do not parse
+    prose or infer a head from a commit subject.
+
+    A remote head change grants one fresh configured allowance on a later invocation; it does not
+    unbound a single invocation, refund attempts on the same head, bypass the in-flight mutex, or
+    alter the separate answer-based extension. Keep the sweep's fresh read under the claim and
+    make its fold agree with the OpenPrView and clarification folds for the same ledger.
+  acceptance:
+    - claim: "both fix.dispatch writers record the exact input head sha the attempt targeted, including body-only repairs that do not move the branch"
+      proof: "unit test: test/fix-strikes-reset-on-new-head.test.ts"
+    - claim: "two exhausted strikes on head A do not consume any of head B's configured allowance after GitHub reports a new head"
+      proof: "unit test: test/fix-strikes-reset-on-new-head.test.ts"
+    - claim: "attempts on the unchanged current head still reach the cap and are refused under the fresh in-flight claim, so a bad head cannot loop"
+      proof: "unit test: test/the-fix-rung-strike-cap-does-not-bind.test.ts"
+    - claim: "the OpenPrView count, fresh under-claim count and rendered strike history select the same current-head generation from one ledger"
+      proof: "unit test: test/fix-strikes-reset-on-new-head.test.ts"
+    - claim: "legacy untagged rows reset only after a current-head sweep.disposed boundary; without that boundary they retain the historical all-task count and fail closed"
+      proof: "unit test: test/fix-strikes-reset-on-new-head.test.ts"
+    - claim: "a clarification-answer extension remains additive to the current head's normal cap and no prior head's attempts enter that calculation"
+      proof: "unit test: test/fix-strikes-reset-on-new-head.test.ts"
+    - claim: "concurrent sweeps on the same task and head still dispatch at most one worker, while different heads never share an in-flight key"
+      proof: "unit test: test/the-fix-rung-strike-cap-does-not-bind.test.ts"
+  falsifier: |
+    Seed two executed fix.dispatch rows for task T on head A, then present the same task on head B.
+    Before implementation both the OpenPrView fold and fresh under-claim fold report 2/2 and refuse;
+    after implementation both report zero and one bounded dispatch is admitted. Change only head B
+    back to A and both must refuse again. Delete the new dispatch head fields and the tagged-row
+    test must fail; remove the legacy boundary and the no-boundary control must fail closed rather
+    than silently granting a reset.
+  note: |
+    ID PROVENANCE: `rmd next-task-id --reserve` atomically held `refs/rmd-id/W1-T2788` on the first
+    attempt; W1-T2788 is authoritative.
+
+    This task changes only accounting and evidence attribution. It does not raise the configured
+    strike cap, auto-answer clarification questions, merge a PR, or change daemon/service lifecycle.

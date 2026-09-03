@@ -254,11 +254,15 @@ test("the full sweep contains an injected main-health failure and continues its 
   }
 });
 
-test("daemonCommand supplies the real REST and issue gateways to the full-sweep observer", () => {
+test("daemonCommand supplies the real REST and issue gateways to the one event-and-sweep observer", () => {
   const source = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
-  const call = source.slice(source.indexOf("sweep: buildSweepHook("), source.indexOf("sweepLight: buildSweepLightHook("));
+  const observerStart = source.indexOf("const mainHealthRung = buildMainHealthRung(");
+  const call = source.slice(observerStart, source.indexOf("sweepLight: buildSweepLightHook(", observerStart));
 
+  assert.ok(observerStart > 0, "one observer is constructed before both production call sites");
   assert.match(call, /buildMainHealthRung\(target\.owner, target\.repo/);
   assert.match(call, /fetch: ghJson/);
   assert.match(call, /issues: ghIssueGateway\(target\.owner, target\.repo\)/);
+  assert.match(call, /onCheckBurstSettled:\s*\(\)\s*=>\s*void mainHealthRung\(\)/);
+  assert.match(call, /buildSweepHook\([\s\S]*?mainHealthRung[\s\S]*?\)/);
 });

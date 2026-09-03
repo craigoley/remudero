@@ -608,6 +608,14 @@ export interface SweepWakeWireOptions {
   timers?: SweepWakeTimerDeps;
   /** Wall clock used only to avoid re-waiting a full settle period for a boot-pending marker. */
   now?: () => number;
+  /**
+   * W1-T2787: observe default-branch health when a high-fanout check/status burst settles,
+   * independently of whether the ordinary full-sweep liveness gate can accept the resulting
+   * wake. This runs in the daemon-side marker watcher, never in Serve. Structural PR/review
+   * events do not call it. A callback failure is named and swallowed so it cannot suppress the
+   * wake that still drives ordinary reconciliation.
+   */
+  onCheckBurstSettled?: () => void;
 }
 
 /** High-fanout settlement events. Structural PR/review transitions are deliberately absent. */
@@ -657,12 +665,20 @@ export function wireSweepWakeToDaemon(
     if (checkSettleTimer !== undefined) timers.clearTimer(checkSettleTimer);
     checkSettleTimer = undefined;
     if (coalescedCheckEdges > 0) {
+      const settledEdges = coalescedCheckEdges;
       log("github.wake.check_settled", {
         event_class: "check/status",
-        coalesced_edges: coalescedCheckEdges,
+        coalesced_edges: settledEdges,
         settle_ms: checkSettleMs,
       });
       coalescedCheckEdges = 0;
+      try {
+        options.onCheckBurstSettled?.();
+      } catch (error) {
+        log("github.wake.check_settle_callback_failed", {
+          error: String((error as Error)?.message ?? error),
+        });
+      }
     }
     if (wake) signal.wake();
   };

@@ -1,0 +1,122 @@
+- id: W1-T2790
+  title: "DESIGN QUESTION: should HOST_CAUSED_SUITE_REDS be DERIVED from a real run diffed against HOST_PARITY_BASELINE rather than hand-written? Two registries record host divergence by different methods, one predictive and one observational, and the predictive one was measured nine entries short in a single session"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: "span"
+  budget_usd: 2.00
+  files: [DECISIONS.md]
+  origin: "operator-decision#w1-t2790-file-registry-derivation-question-2026-09-03"
+  plan_refs: ["W1-T2776", "W1-T2785", "W1-T2770"]
+  status: queued
+  attempts: 0
+  note: |
+    THIS IS A QUESTION, NOT A BUILD. `verify: human` on purpose: a grep can confirm a decision
+    was written, never that it is sound, so a person ratifies this one. The BUILD that follows,
+    if any, is a separate task with auto proofs.
+
+    THE PROOFS ARE REQUIRED ANCHORS, AND THAT IS DELIBERATE. `proof-dialect` is a BLOCKING
+    lint-plan violation even at `verify: human` — MEASURED 2026-09-03: three prose `human:`
+    proofs took `lint-plan --base origin/main` to rc=1 with three blocking violations. (CLAUDE.md
+    says a `verify: human` task's dialect debt "can never stall the queue"; that is true of
+    DISPATCH, where `isDispatchEligible` refuses before the linter is consulted, and false of the
+    linter CI actually runs.) So the criteria name three literal phrases the decision entry must
+    carry — `W1-T2790 chosen shape`, `unavailability objection`, `nine measured gaps`. This is
+    NOT proof theatre in the sense the dialect gate exists to stop: the deliverable really is
+    text in a tracked file, each phrase is absent from DECISIONS.md today so each grep really
+    discriminates, and the phrases were chosen to be the three things a thin decision would
+    otherwise omit. What they cannot check is whether the reasoning is any good — which is
+    exactly the residue `verify: human` covers.
+
+    THE MEASUREMENT THAT PROMPTS IT — all 2026-09-03, one session on the mini.
+    `HOST_CAUSED_SUITE_REDS` (src/lib/ci-parity.ts) held EIGHT entries — counted from the array,
+    correcting a figure of seven this session carried in prose before checking. Nine gaps were
+    found in that session, i.e. more was missing than present:
+      - SEVEN unregistered files in the bash-3.2 cluster (W1-T2776), measured 36 failures between
+        them, found only because building a discovery test forced a corpus sweep;
+      - ONE file (W1-T2785) absent from BOTH registries;
+      - ONE count drift: test/recycle-container.test.ts reads 18 today against a recorded 17.
+    None was found by reading the registry. Each was found by running something.
+
+    THE POPULATIONS ARE MEASURABLY DIFFERENT, which is this shard's own falsifier run: the
+    registry names 8 files, the baseline names 3, only 2 appear in both, and
+    test/fleet-heartbeat-supervisor-tick.test.ts appears in NEITHER. The two lists are not the
+    same set recorded twice, so the propagation gap is real rather than an artifact of keying.
+
+    THE KNOWLEDGE WAS ALREADY IN THE REPO, IN THE OTHER ORGAN. `HOST_PARITY_BASELINE`
+    (src/lib/host-parity.ts) declares W1-T2785's exact cause, in these words, for a SIBLING file:
+    "the BSD_DATE stub emulates BSD by delegating its parse to `/usr/bin/date -u -d`, which ON
+    MACOS IS BSD DATE and rejects -d". A second file broke the same way and neither list gained
+    an entry. So this is not a knowledge gap; it is a propagation gap between two hand-maintained
+    lists that never consult each other.
+
+    WHY MORE PREDICATES WILL NOT CLOSE IT. W1-T2776 shipped a discovery test that refuses an
+    unregistered test file shelling a bash-4-only deploy script. It keys on THAT cause and is
+    blind to the date cause by construction — no deploy script, no `spawnSync("bash", ...)`.
+    Covering both textually means accumulating a catalogue of platform quirks (GNU-only flags,
+    /usr/bin vs /bin paths, procfs, keychain, CoreFoundation), each with its own matcher, each
+    written AFTER something broke. A predictive list can only ever encode causes someone already
+    anticipated, which is the definition of the gap it keeps having.
+
+    AN OBSERVATIONAL LIST CANNOT BE UNDER-POPULATED BY AN UNANTICIPATED CAUSE, because it starts
+    from what actually failed. That is the asymmetry the question turns on.
+  rationale: |
+    THE TWO MECHANISMS, AND HOW THEY DIFFER.
+      - `HOST_CAUSED_SUITE_REDS` — PREDICTIVE. Keyed on cheap host FACTS (`appliesTo(facts)`:
+        bash major version, platform, procfs, node-vs-pin). Per FILE, carries a `count`. Its own
+        header states the contract: it "NAMES every cluster this host is expected to produce.
+        Anything else `ci:test` fails on is, by construction, NOT host-caused." Hand-written.
+      - `HOST_PARITY_BASELINE` — OBSERVATIONAL. Per TEST NAME, scoped by POLE (mini/ci/azure),
+        diffed by `diffHostParity` against an OBSERVED failure set into `undeclared`/`healed`/
+        `declaredSeen`. Also hand-written, but its inputs are real runs, and its `undeclared` arm
+        is already exactly the "you did not declare this" signal the other list lacks.
+
+    THE QUESTION. Should the predictive list be DERIVED — a real run's failure set diffed against
+    the observational baseline, with `appliesTo` retained only to say which POLE a divergence
+    belongs to — rather than hand-written? Or do the two serve genuinely different consumers and
+    the right answer is to make them consult each other while both stay hand-maintained?
+
+    ARGUMENTS THE DECIDER SHOULD WEIGH, AND THIS SHARD DOES NOT PRE-JUDGE:
+      FOR deriving. Nine gaps against eight entries is not a maintenance lapse, it is a method
+      failing. Every gap was found by running something and none by reading. `readTapFailures`
+      already exists on the observational side, so a machine-readable failure set is not new work
+      for every pole.
+      AGAINST deriving. The predictive list is consumed where NO run output is available — its
+      own file comment says `stream: true` makes a live `ci:test` result "structurally
+      unavailable here", which is precisely why it keys on host facts rather than parsing output.
+      A derived list may be unavailable at the moment of its only consumer. That objection is
+      load-bearing and must be answered, not waved past.
+      A THIRD SHAPE. Keep the predictive list for the fast path, and add a RECONCILER that diffs
+      it against an observed run and reports discrepancies — neither list changes policy, but
+      "you did not declare this" stops depending on a human noticing.
+
+    WHAT IS EXPLICITLY NOT WANTED: a one-time hand audit of the registry. An audit re-runs, by
+    hand, exactly the process whose failure produced the gap, and leaves nothing behind that
+    would catch the tenth one.
+
+    A FACT THAT MAY SIMPLIFY THE DESIGN. The `count` field is decorative. W1-T2770 established it
+    is neither exact nor a floor and is never reconciled against observed failures; `grep -n
+    '\.count\b' src/lib/ci-parity.ts` returns exactly two consumers — a `reduce` sum and a
+    rendered `(~${e.count} test(s))` line, both already hedged with a tilde. Nothing reads it to
+    decide whether a red is host-caused; `appliesTo` does that from host facts alone. If a
+    derived list would be hard to keep exact, the exactness may not be required.
+  acceptance:
+    - claim: "a decision is recorded in DECISIONS.md under this task id, naming which of the three shapes was chosen"
+      proof: "grep: W1-T2790 chosen shape in DECISIONS.md"
+    - claim: "the entry answers the structural-unavailability objection on its merits rather than leaving it open"
+      proof: "grep: unavailability objection in DECISIONS.md"
+    - claim: "the entry disposes of the nine measured gaps explicitly rather than only settling the general question"
+      proof: "grep: nine measured gaps in DECISIONS.md"
+  falsifier: |
+    This task is falsified as WRITTEN if the two registries turn out to have the same population
+    by construction, which would make the propagation gap illusory: check by listing every file
+    named in HOST_CAUSED_SUITE_REDS against every test named in HOST_PARITY_BASELINE. MEASURED
+    2026-09-03, they do NOT — test/fleet-heartbeat-supervisor-tick.test.ts is in neither, and
+    test/fleet-heartbeat.test.ts is in both under different keys (file vs test name).
+
+    It is falsified as URGENT if the predictive list has no consumer that could read a derived
+    one. That is the AGAINST argument above and is the single measurement that would settle the
+    question in the negative; take it before building anything.

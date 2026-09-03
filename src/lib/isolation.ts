@@ -160,6 +160,58 @@ export function assessIsolation(e: IsolationEvidence): { isolated: boolean; reas
   };
 }
 
+/**
+ * W1-T2755 — the reason a FAILED isolation verdict reports, chosen from the signal that
+ * actually produced the failure.
+ *
+ * THE DEFECT THIS CLOSES. {@link assessIsolation} sees only {@link IsolationEvidence} — two
+ * counts. It cannot see whether the probe SPAWN failed, so a probe that never ran (a CLI
+ * refusing to start, a transport failure, a spawn error) yields `NaN` counts and gets the
+ * "counts could not be parsed" reason, which then travels into BOTH the
+ * `isolation_preflight_failed` ledger row and the thrown {@link IsolationError} message. A
+ * reader following that verdict investigates the report PARSER; the real cause is sitting in
+ * `isError`/`transcript`, already carried into this function and used only for the row's
+ * `stderr_excerpt`. MEASURED COST: a full day of investigation aimed at the isolation prompt
+ * and the parser when the actual cause was the Codex CLI refusing a non-git-repo cwd (fixed
+ * separately as W1-T2754). Same shape as the #981 ledger defect CLAUDE.md records — a line
+ * must carry the reason from the decision that produced its outcome.
+ *
+ * THE VERDICT IS UNTOUCHED. This chooses a STRING. `assessIsolation` still decides
+ * `isolated`, the caller still throws, and an unproven probe still fails closed. Nothing here
+ * can turn a failure into a pass.
+ *
+ * THE THREE CASES, in the order they are distinguished:
+ *  1. PROVEN BROKEN — counts parsed and at least one is nonzero. `assessIsolation`'s reason
+ *     already names the observed leakage exactly; it is returned unchanged. A spawn that
+ *     errored but still somehow produced parseable nonzero counts is a real leak either way.
+ *  2. SPAWN FAILED — counts unparseable AND `isError`. The probe did not produce a report to
+ *     parse; report the spawn's own text.
+ *  3. GENUINELY UNPARSEABLE — counts unparseable, no error, but the probe DID return output.
+ *     This is the case the parse-failure message exists for, and it keeps it verbatim.
+ *  4. AMBIGUOUS — counts unparseable, no error signal, and no output either. Neither signal is
+ *     present, so neither explanation is earned; say exactly that rather than blame the parser.
+ */
+export function isolationFailureReason(
+  evidence: IsolationEvidence,
+  verdict: { isolated: boolean; reason: string },
+  probe: { isError?: boolean; transcript?: string },
+): string {
+  const countsParsed = Number.isFinite(evidence.aliasCount) && Number.isFinite(evidence.functionCount);
+  if (countsParsed) return verdict.reason; // (1) proven broken — already specific
+  const transcript = probe.transcript ?? "";
+  if (probe.isError) {
+    // (2) the spawn itself failed — name THAT, capped the same way the ledger row caps it.
+    const excerpt = capStderrExcerpt(transcript.trim());
+    return (
+      "the probe spawn itself FAILED, so no report was produced to parse — isolation UNPROVEN" +
+      (excerpt ? `; probe error: ${excerpt}` : "")
+    );
+  }
+  if (transcript.trim() !== "") return verdict.reason; // (3) real parse failure — keep the message it exists for
+  // (4) no counts, no error, no output.
+  return "the probe returned no output and reported no error, so neither a parse failure nor a spawn failure is established — isolation UNPROVEN";
+}
+
 /** What one probe execution returns to the verdict layer. */
 export interface ProbeExecResult {
   transcript: string;
@@ -365,9 +417,18 @@ export async function probeIsolation(opts: {
   if (r.functionNames) evidence.functionNames = r.functionNames;
   const verdict = assessIsolation(evidence);
   const costUsd = r.costUsd ?? 0;
+  // W1-T2755: pick the reason from the signal that actually produced this outcome, BEFORE the
+  // first ledger row is written. Hoisted above `isolation.probe` on purpose: that row is
+  // written on EVERY probe, so it is the one a reader scanning probe history sees, and leaving
+  // it saying "counts could not be parsed" on a spawn failure would recreate this task's own
+  // defect on the forensic surface it did its damage on. TOTAL and SAFE to call
+  // unconditionally: `isolationFailureReason` returns `verdict.reason` untouched whenever the
+  // counts parsed, which covers every isolated (0/0) and proven-broken (nonzero) outcome — only
+  // the unparseable-counts paths can differ, and those are exactly the misattributed ones.
+  const failureReason = isolationFailureReason(evidence, verdict, r);
   log("isolation.probe", {
     isolated: verdict.isolated,
-    reason: verdict.reason,
+    reason: failureReason,
     alias_count: evidence.aliasCount,
     function_count: evidence.functionCount,
     alias_names: evidence.aliasNames ?? null,
@@ -388,7 +449,7 @@ export async function probeIsolation(opts: {
       function_count: evidence.functionCount,
       alias_names: evidence.aliasNames ?? null,
       function_names: evidence.functionNames ?? null,
-      reason: verdict.reason,
+      reason: failureReason,
       // W1-T1112: this row is the run-terminating VERDICT — the one a reader follows
       // when the run dies — so it must carry the spawn's own error text itself, not
       // just point at the sibling `isolation.probe` row written the same millisecond.
@@ -407,7 +468,7 @@ export async function probeIsolation(opts: {
         ? `${evidence.aliasCount} aliases, ${evidence.functionCount} functions`
         : "unproven";
     throw new IsolationError(
-      `isolation_preflight_failed: ${verdict.reason} — FAIL CLOSED, the run does not proceed`,
+      `isolation_preflight_failed: ${failureReason} — FAIL CLOSED, the run does not proceed`,
       observed,
       r.childEnvKeys ?? [],
       r.accountLabel,

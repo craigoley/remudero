@@ -302,6 +302,18 @@ test("a malformed baseline is REFUSED, never silently disarmed", () => {
   }
 });
 
+// ── prerequisite contract: the renamed command is registered without arming the fast gate ──────
+
+test("W1-T2734 prerequisite: source-size-signal is callable while the blocking compatibility command stays explicit", () => {
+  const pkg = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")) as { scripts: Record<string, string> };
+  assert.equal(pkg.scripts["source-size-signal"], "node scripts/source-size-ratchet.mjs");
+  assert.equal(
+    pkg.scripts["source-size-ratchet"],
+    "node scripts/source-size-ratchet.mjs --baseline scripts/source-size-baseline.json",
+    "the historical gate remains reproducible without owning the default signal path",
+  );
+});
+
 // ── W1-T2734 — PR-relative hotspot signal, never a correctness verdict ──────────────────────────
 
 test("W1-T2734: positive growth and a new file emit human hotspot signals, exit zero, and never touch the historical baseline", () => {

@@ -1,0 +1,25 @@
+# Fixture (W1-T2640): mirrors plan/claims.yaml's `plan-format-covers-shards` assertion shape
+# (three ANDed greps for the sharded filing home, the monolith-append refusal, and the
+# duplicate-id merge rule) but points it at synthetic §2 fragments instead of the real
+# MASTER-PLAN.md, so this falsifier never has to mutate a real plan file. Proves the assertion
+# actually distinguishes the amended wording from the pre-amendment (monolith-only) wording --
+# not merely that the YAML parses -- and that a claim whose own input is missing reports
+# could-not-run rather than a silent pass.
+
+- id: fixture-plan-format-amended
+  claim: "The amended §2 fixture documents the sharded filing home, the monolith-append refusal,
+    and the loadPlan merge/duplicate-id rule."
+  plan_section: "test fixture -- not a real plan claim"
+  assertion: 'grep -qF "kebab-slug" test/fixtures/claims-check/plan-format-covers-shards-amended.md && grep -qF "NEVER append a new task to plan/tasks.yaml" test/fixtures/claims-check/plan-format-covers-shards-amended.md && grep -qF "duplicate task id" test/fixtures/claims-check/plan-format-covers-shards-amended.md'
+
+- id: fixture-plan-format-pre-amendment-planted-lie
+  claim: "Deliberately false: the pre-amendment §2 fixture (monolith-only wording) still documents
+    the sharded filing home, the monolith-append refusal, and the duplicate-id merge rule."
+  plan_section: "test fixture -- not a real plan claim"
+  assertion: 'grep -qF "kebab-slug" test/fixtures/claims-check/plan-format-covers-shards-pre-amendment.md && grep -qF "NEVER append a new task to plan/tasks.yaml" test/fixtures/claims-check/plan-format-covers-shards-pre-amendment.md && grep -qF "duplicate task id" test/fixtures/claims-check/plan-format-covers-shards-pre-amendment.md'
+
+- id: fixture-plan-format-could-not-run
+  claim: "This claim's own input fixture does not exist, so it cannot be checked either way."
+  plan_section: "test fixture -- not a real plan claim"
+  assertion: 'grep -qF "kebab-slug" test/fixtures/claims-check/plan-format-covers-shards-does-not-exist.md'
+  precondition_paths: ["test/fixtures/claims-check/plan-format-covers-shards-does-not-exist.md"]

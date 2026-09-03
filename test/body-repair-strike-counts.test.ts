@@ -12,9 +12,9 @@
  *
  * THE FIX. The body-repair writer now tags `verdict_regime` with the SAME computation the
  * ordinary writer already used (W1-T199): `"executed"` if the in-scope review's criteria show
- * any `proof_exec !== "not_executable"`, else `"keyword_only"`. No sha is read or introduced —
- * both writers, and every reader (`strikeRegimeOf`/`currentStrikeRegimeFor`/`priorStrikesFor`),
- * stay keyed on `task_id` alone.
+ * any `proof_exec !== "not_executable"`, else `"keyword_only"`. W1-T2788 additionally stamps
+ * `head_sha` from the review this repair targeted, so a later PR head gets a fresh bounded
+ * allowance without changing this regime amnesty.
  */
 import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
@@ -226,24 +226,24 @@ test("W1-T2306 (acceptance 3): a body-repair strike spent while every criterion 
   );
 });
 
-// ── acceptance 4: still keyed on task_id, never a head sha ─────────────────────────────────────
+// ── acceptance 4: exact input-head attribution ─────────────────────────────────────────────────
 
-test("W1-T2306 (acceptance 4): the body-repair fix.dispatch row carries no sha field at all, and priorStrikesFor counts it purely by task_id across DIFFERENT (or absent) head shas", async () => {
+test("W1-T2788: the body-repair fix.dispatch row records its exact input head and only counts for that head", async () => {
   const { lines: strike1 } = await driveBodyRepairStrike({
     strikeCap: 1,
     criteria: [criterion({ claim: "criterion A", met: false, reason: "r", proof_exec: "executed_fail" })],
   });
   const dispatchLine = strike1.find((l) => l.step === "fix.dispatch")!;
-  assert.equal(dispatchLine.sha, undefined, "no sha field is introduced");
-  assert.equal(dispatchLine.head_sha, undefined, "no sha field is introduced, under any spelling");
+  assert.equal(dispatchLine.sha, undefined, "the legacy ambiguous field spelling stays absent");
+  assert.equal(dispatchLine.head_sha, "deadbeef", "the body-only repair targets the initial review head exactly");
 
-  // Two hand-built rows for the SAME task but with different (and one entirely absent) sha-shaped
-  // fields — priorStrikesFor must count both purely off task_id/step/verdict_regime.
+  // Two tagged rows for the same task belong to different head generations.
   const rows = [
-    { task_id: "W1-BR", step: "fix.dispatch", verdict_regime: "executed", sha: "aaa" },
-    { task_id: "W1-BR", step: "fix.dispatch", verdict_regime: "executed" },
+    { task_id: "W1-BR", step: "fix.dispatch", verdict_regime: "executed", head_sha: "aaa" },
+    { task_id: "W1-BR", step: "fix.dispatch", verdict_regime: "executed", head_sha: "bbb" },
   ];
-  assert.equal(priorStrikesFor(rows, "W1-BR", "executed"), 2, "keyed on task_id alone — a present, absent, or varying sha never changes the count");
+  assert.equal(priorStrikesFor(rows, "W1-BR", "executed", "aaa"), 1);
+  assert.equal(priorStrikesFor(rows, "W1-BR", "executed", "bbb"), 1);
 });
 
 // ── acceptance 5: the falsifier — remove the tag again, and the count reverts to the original

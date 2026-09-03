@@ -5719,16 +5719,75 @@ const inFlightReviewKeys = new Set<string>();
 const inFlightFixKeys = new Set<string>();
 
 /**
- * W1-T2520 — THE SAME PLAIN FOLD {@link priorStrikesFor} (run-task.ts) PERFORMS UNDER ITS DEFAULT
- * `"keyword_only"` REGIME: every `fix.dispatch` row for this task counts, no amnesty. Duplicated
- * here rather than imported, because this module is deliberately kept free of a run-task.ts
- * dependency (see the hand-filed-repair/`armOutcomeArmed` doc comments elsewhere in this file) —
- * and because `currentStrikeRegimeFor`'s amnesty override is explicitly NOT this task's concern: a
- * strike a regime change later amnesties is a separate reason a strike may not count, and it is
- * NOT the cause of the race this task fixes (the counter DID advance; it just advanced slower than
- * the read-modify-write race let dispatches through). What this exists for is FRESHNESS, not
- * amnesty parity: called with a ledger read taken AFTER the claim below, so two callers reading
- * concurrently can no longer see the same stale count.
+ * W1-T2788 — select the fix-rung ledger generation attributable to `currentHeadSha`.
+ *
+ * New `fix.dispatch` rows name the exact input head they targeted and therefore require exact
+ * equality. Historical rows have no head field. Those legacy rows reset only when the ledger has
+ * a trustworthy `sweep.disposed` observation for this task at the current head; only rows after
+ * the most recent such boundary belong to the current generation. With no boundary, legacy rows
+ * remain selected so an incomplete history fails closed instead of manufacturing strike budget.
+ *
+ * `fix.review` has historically carried no head either. Associate it only with the most recent
+ * selected dispatch carrying the same strike number. A dispatch from another head clears that
+ * association before its review is seen, so clarification history cannot inherit another head's
+ * outcome when strike numbers restart.
+ *
+ * Omitting `currentHeadSha` preserves the pre-W1-T2788 all-task fold for callers that do not have
+ * a head identity. Production cap callers always provide one.
+ */
+export function fixLedgerRowsForHead(
+  lines: Array<Record<string, unknown>>,
+  taskId: string | undefined,
+  currentHeadSha?: string,
+): Array<Record<string, unknown>> {
+  if (!taskId) return [];
+  if (!currentHeadSha) {
+    return lines.filter(
+      (line) => line.task_id === taskId && (line.step === "fix.dispatch" || line.step === "fix.review"),
+    );
+  }
+
+  let legacyBoundary = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.task_id === taskId && line.step === "sweep.disposed" && line.head_sha === currentHeadSha) {
+      legacyBoundary = i;
+    }
+  }
+
+  const selected: Array<Record<string, unknown>> = [];
+  const selectedStrikes = new Set<number>();
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.task_id !== taskId) continue;
+    const strike = typeof line.strike === "number" ? line.strike : undefined;
+    if (line.step === "fix.dispatch") {
+      const taggedHead = typeof line.head_sha === "string" ? line.head_sha : undefined;
+      const belongsToHead = taggedHead !== undefined
+        ? taggedHead === currentHeadSha
+        : legacyBoundary < 0 || i > legacyBoundary;
+      if (strike !== undefined) {
+        if (belongsToHead) selectedStrikes.add(strike);
+        else selectedStrikes.delete(strike);
+      }
+      if (belongsToHead) selected.push(line);
+      continue;
+    }
+    if (line.step === "fix.review" && strike !== undefined && selectedStrikes.has(strike)) {
+      const taggedHead = typeof line.head_sha === "string" ? line.head_sha : undefined;
+      if (taggedHead === undefined || taggedHead === currentHeadSha) selected.push(line);
+    }
+  }
+  return selected;
+}
+
+/**
+ * W1-T2520 — the fresh under-claim counterpart to {@link priorStrikesFor} (run-task.ts). It keeps
+ * the default `"keyword_only"` regime (no amnesty), while W1-T2788 feeds it the SAME current-head
+ * generation selected by {@link fixLedgerRowsForHead}. This module remains free of a run-task.ts
+ * dependency; the shared generation fold lives here and run-task imports downward. What this
+ * function adds is FRESHNESS: it reads the ledger AFTER taking the claim below, so two callers
+ * cannot act on the same stale count.
  *
  * COUNTS DISTINCT `strike` NUMBERS, NOT RAW ROWS — deliberately NOT `priorStrikesFor`'s own plain
  * `n++` per matching line. A real dispatch's `strike` field is the count `priorStrikesFor` itself
@@ -5738,12 +5797,16 @@ const inFlightFixKeys = new Set<string>();
  * worker spent). Rows carrying no numeric `strike` at all are each counted on their own — the
  * ledger gives this fold nothing to dedupe them BY, so it must not silently drop one.
  */
-function freshFixDispatchCount(lines: Array<Record<string, unknown>>, taskId: string | undefined): number {
+function freshFixDispatchCount(
+  lines: Array<Record<string, unknown>>,
+  taskId: string | undefined,
+  currentHeadSha: string,
+): number {
   if (!taskId) return 0;
   const strikeNumbers = new Set<number>();
   let unnumbered = 0;
-  for (const line of lines) {
-    if (line.step !== "fix.dispatch" || line.task_id !== taskId) continue;
+  for (const line of fixLedgerRowsForHead(lines, taskId, currentHeadSha)) {
+    if (line.step !== "fix.dispatch") continue;
     if (typeof line.strike === "number") {
       strikeNumbers.add(line.strike);
     } else {
@@ -6071,7 +6134,7 @@ export async function runSweep(
     // predates it.
     const freshLines = readLedger(deps.ledgerPath);
     const ceiling = fixCeilingInForce(pr, policy.strikeCap, policy.clarify);
-    const freshStrikes = freshFixDispatchCount(freshLines, pr.taskId);
+    const freshStrikes = freshFixDispatchCount(freshLines, pr.taskId, pr.headSha);
     if (freshStrikes >= ceiling) {
       inFlightFixKeys.delete(fixKey);
       return {

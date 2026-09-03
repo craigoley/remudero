@@ -136,6 +136,7 @@ test("W1-T2671: the reversed compare maps the base-only gap and exact failing te
       refresh: true,
       behindBy: 7,
       failingTestFiles: ["/workspace/remudero/test/sweep-gateway-warm.test.ts"],
+      failingSourceFiles: [],
       matchingBaseFiles: ["test/sweep-gateway-warm.test.ts"],
     },
   );
@@ -156,6 +157,114 @@ test("W1-T2671: CI test-path extraction preserves supported roots without treati
     ]),
     ["test/name.test.ts", "/workspace/remudero/test/posix.test.ts", "C:/workspace/remudero/tests/windows.spec.ts"],
   );
+});
+
+test("W1-T2782: a genuine diff-coverage source path changed on the newer base requests a refresh", () => {
+  const decision = decideRedBaseRefresh(
+    [{
+      name: "coverage-ratchet",
+      logTail: [
+        "diff-coverage: BLOCKED -- this diff adds source line(s) with zero covering tests:",
+        "  - src/run-task.ts:13254",
+        "  - src/run-task.ts:13255",
+      ].join("\n"),
+    }],
+    { behindBy: 5, baseChangedFiles: ["src/run-task.ts", "src/lib/unrelated.ts"] },
+  );
+
+  assert.deepEqual(decision, {
+    refresh: true,
+    behindBy: 5,
+    failingTestFiles: [],
+    failingSourceFiles: ["src/run-task.ts"],
+    matchingBaseFiles: ["src/run-task.ts"],
+  });
+});
+
+test("W1-T2782: source paths normalize separators, strip only the terminal line number, and suffix-match a checkout prefix", () => {
+  const decision = decideRedBaseRefresh(
+    [{
+      name: "coverage-ratchet",
+      logTail: [
+        "diff-coverage: BLOCKED -- this diff adds source line(s) with zero covering tests:",
+        "  - C:\\workspace\\remudero\\src\\lib\\model-health.ts:47",
+      ].join("\n"),
+    }],
+    { behindBy: 2, baseChangedFiles: ["src/lib/model-health.ts"] },
+  );
+
+  assert.deepEqual(decision.failingSourceFiles, ["C:/workspace/remudero/src/lib/model-health.ts"]);
+  assert.deepEqual(decision.matchingBaseFiles, ["src/lib/model-health.ts"]);
+  assert.equal(decision.refresh, true);
+});
+
+test("W1-T2782: source matching never uses basename alone and malformed or non-diff-coverage text abstains", () => {
+  const basenameOnly = decideRedBaseRefresh(
+    [{
+      name: "coverage-ratchet",
+      logTail: [
+        "diff-coverage: BLOCKED -- this diff adds source line(s) with zero covering tests:",
+        "  - /workspace/other/foo.ts:12",
+      ].join("\n"),
+    }],
+    { behindBy: 3, baseChangedFiles: ["src/lib/foo.ts"] },
+  );
+  assert.deepEqual(basenameOnly.failingSourceFiles, ["/workspace/other/foo.ts"]);
+  assert.deepEqual(basenameOnly.matchingBaseFiles, []);
+  assert.equal(basenameOnly.refresh, false);
+
+  for (const logTail of [
+    "diff-coverage: BLOCKED -- this diff adds source line(s) with zero covering tests:\n  - not-a-path",
+    "ordinary compiler failure at src/run-task.ts:13254",
+  ]) {
+    const malformed = decideRedBaseRefresh(
+      [{ name: "coverage-ratchet", logTail }],
+      { behindBy: 3, baseChangedFiles: ["src/run-task.ts"] },
+    );
+    assert.deepEqual(malformed.failingSourceFiles, []);
+    assert.deepEqual(malformed.matchingBaseFiles, []);
+    assert.equal(malformed.refresh, false);
+  }
+});
+
+test("W1-T2782: the pre-strike ledger fact separates source evidence from test evidence", async () => {
+  const events: string[] = [];
+  let checked: Record<string, unknown> | undefined;
+  const outcome = await runFixRung({
+    ...baseOpts(),
+    ciFailures: [{
+      name: "coverage-ratchet",
+      logTail: [
+        "diff-coverage: BLOCKED -- this diff adds source line(s) with zero covering tests:",
+        "  - src/run-task.ts:13254",
+      ].join("\n"),
+    }],
+    deps: {
+      ...deps(events, ["green"]),
+      log: (step: string, extra?: Record<string, unknown>) => {
+        events.push(step);
+        if (step === "fix.base_refresh_checked") checked = extra;
+      },
+      readRedBaseRefreshFacts: async () => ({ behindBy: 5, baseChangedFiles: ["src/run-task.ts"] }),
+      updateBranch: async () => {
+        events.push("update-branch");
+        return { ok: true };
+      },
+    },
+  });
+
+  assert.equal(outcome.outcome, "base_refreshed");
+  assert.equal(outcome.strikes, 0);
+  assert.equal(events.includes("spawn"), false);
+  assert.deepEqual(checked, {
+    strike: 1,
+    pr_number: 2671,
+    behind_by: 5,
+    failing_test_files: [],
+    failing_source_files: ["src/run-task.ts"],
+    matching_base_files: ["src/run-task.ts"],
+    refresh: true,
+  });
 });
 
 test("W1-T2671: malformed or failed REST evidence is unavailable, never a fabricated zero-gap", () => {

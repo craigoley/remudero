@@ -69,5 +69,7 @@ jobs:
           node-version-file: .nvmrc
       - name: Install (clean, from lockfile)
         run: npm ci
+      - name: Mkdtemp callsite check (every tracked temp fixture is boot-sweep reapable)
+        run: npm run --silent mkdtemp-callsite-check
       - name: Unwired-gate guard (every gate-shaped scripts/ executable is invoked by a workflow or an npm script)
         run: npm run --silent unwired-gate:check

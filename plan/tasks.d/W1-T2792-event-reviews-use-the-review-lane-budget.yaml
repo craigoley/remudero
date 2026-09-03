@@ -1,0 +1,109 @@
+- id: W1-T2792
+  title: "EVENT-DRIVEN REVIEWS DISCOVER THE BACKLOG BUT ADMIT ONE WORKER AT A TIME — the light pass ignores the configured two-lane review budget, so each green PR waits for the preceding semantic review plus another ticker cycle"
+  repo: remudero
+  depends_on: [W1-T526, W1-T1049, W1-T2584, W1-T2593, W1-T2771]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 18.00
+  risk: high
+  files:
+    - src/lib/sweep.ts
+    - test/event-review-backlog-drain.test.ts
+    - test/plan-filing-admission-bound.test.ts
+    - test/review-admission-dedup.test.ts
+    - test/sweep-review-admission.test.ts
+    - test/sweep.test.ts
+  origin: "operator-session#green-review-queue-still-serial-2026-09-03"
+  plan_refs: ["W1-T526", "W1-T1049", "W1-T2439", "W1-T2583", "W1-T2584", "W1-T2593", "W1-T2771"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED LIVE on the Azure fleet, not inferred from a board snapshot. PR #3857 posted
+    `review.pending_posted` at 20:19:34Z, occupied the only admitted semantic review until
+    `review.posted` at 20:21:52Z, and PR #3858 was not admitted until 20:23:31Z. During the same
+    interval #3859, #3860 and #3861 were checks-green and reviewless. Each repeatedly wrote
+    `sweep.disposed{disposition:"post-review",acted:false}` with `not admitted this pass: one
+    post-review admission per light pass (#<prior> won it)`. The event path therefore discovered
+    every ready PR promptly but intentionally serialized the actions that clear them.
+
+    The configured review budget says two, not one. `plan/policy.yaml` carries
+    `sweep.reviewLanes.value: 2`; W1-T1049 made that the review lane's independent concurrency
+    ceiling, and W1-T2584 made one full sweep drain all eligible reviews through a fixed-size pool
+    of that width. `runSweepLightPass`, the path kept alive during long daemon work and awakened by
+    GitHub events, does not use it. `selectReviewAdmissions` returns exactly one potentially
+    semantic PR regardless of `reviewLanes`, while its separate deterministic plan-filing lane may
+    admit three. The result is a hidden scheduler policy that contradicts the named policy row.
+
+    W1-T526's old bound solved a real cost failure: with strict branch protection, reviewing all
+    eight open heads before the first merge caused 36 reviews as later base updates minted new
+    heads. Removing every bound would recreate that quadratic spend. The operator has now ruled
+    that the current one-at-a-time response is too slow and that GitHub events must drive parallel
+    reviewers. The smallest reversible change is not an unbounded fan-out: use the existing,
+    measured `reviewLanes` ceiling in the light path too. At today's value that doubles admission
+    from one to two and keeps the host-wide concurrency ruling intact.
+
+    The falsifying observation would be two semantic `review.pending_posted` intervals overlapping
+    from one light pass, or source that selects `policy.reviewLanes` potentially-semantic heads.
+    Neither exists. The live intervals above are disjoint, and `selectReviewAdmissions` ends with
+    one `oldestByKey(...)` result.
+  design: |
+    Make the light/event pass select the oldest `max(1, reviewLanes)` post-review candidates whose
+    positive `isPlanFiling` signal is not true. Preserve the immutable `reviewAdmissionKey`
+    ordering, outcome filtering before ranking, action-time ledger re-read, and module-wide
+    task/head mutex. The selected set may start concurrently through the existing per-PR
+    `runSweep` calls; no new worker mechanism or provider bypass is introduced.
+
+    Keep the deterministic plan-filing lane separate and bounded by
+    `planFilingAdmissionBound`. A missing plan-filing signal still fails toward the semantic lane;
+    improving that producer is a separate concern. Render admission stand-down telemetry with the
+    actual configured semantic bound and the admitted PR numbers, so a future operator never has
+    to infer which ceiling fired from stale prose.
+
+    Provider selection remains authoritative at spawn time. Every admitted semantic reviewer must
+    still pass the existing enabled-provider, assignment, model-health, subscription-headroom and
+    reserve checks; this task grants scheduler admission, not provider capacity. A provider or
+    GitHub-capacity refusal must leave no delivered/refused outcome key for work that never ran, so
+    the next level-triggered pass can recover it. The configured width remains a ceiling rather
+    than a target: zero eligible reviews start zero workers, and no light pass exceeds the same
+    review concurrency the full sweep already enforces.
+
+    This is the immediate throughput repair. Reusing semantic evidence across a base-only head
+    update requires a separately versioned, dependency-aware invalidation contract: checks must be
+    rerun on the new base, while a model verdict may be reused only when the reviewed diff,
+    acceptance record, policy revision and relevant dependency surface are unchanged. Do not hide
+    that safety decision inside a scheduler patch.
+  acceptance:
+    - claim: "one light/event pass with four eligible semantic reviews and reviewLanes two starts the oldest two before either settles, while the other two stand down"
+      proof: "unit test: test/event-review-backlog-drain.test.ts"
+    - claim: "the light pass never has more semantic review actions in flight than reviewLanes, and a policy width of one preserves W1-T526's old behavior"
+      proof: "unit test: test/sweep-review-admission.test.ts"
+    - claim: "after the first pair records delivered outcomes, the next pass excludes them before ranking and admits the next two without either delivered head spending a slot"
+      proof: "unit test: test/review-admission-dedup.test.ts"
+    - claim: "semantic candidates remain oldest-first on reviewAdmissionKey and only post-review dispositions can enter the selected set"
+      proof: "unit test: test/sweep-review-admission.test.ts"
+    - claim: "the separately bounded positive plan-filing lane is unchanged, while an absent isPlanFiling signal still consumes semantic capacity rather than being guessed cheap"
+      proof: "unit test: test/plan-filing-admission-bound.test.ts"
+    - claim: "a full sweep and light pass racing the same task and head still produce at most one review action because the existing action-time mutex remains authoritative"
+      proof: "unit test: test/event-review-backlog-drain.test.ts"
+    - claim: "a capacity or continuation refusal creates no terminal review outcome for an unstarted head, and that head is eligible on the next pass"
+      proof: "unit test: test/event-review-backlog-drain.test.ts"
+    - claim: "non-review dispositions, auto-merge arming, fix dispatch, escalation, pause/STOP authority and daemon/service lifecycle are unchanged"
+      proof: "unit test: test/sweep.test.ts"
+    - claim: "an admission loser is ledgered with the configured semantic bound and the PR numbers admitted ahead of it, never the obsolete hard-coded one-per-pass sentence"
+      proof: "unit test: test/sweep-review-admission.test.ts"
+  falsifier: |
+    Hold two review promises open and present four checks-green, reviewless PRs in reverse order
+    under `reviewLanes: 2`. Before the fix only the oldest promise starts. After the fix the oldest
+    two must both start before either is released, the younger two must write acted:false with a
+    bound-of-two admission reason, and maximum in-flight must equal two. Change only the policy to
+    one and exactly one may start. Delete the delivered rows between passes and the same oldest pair
+    must remain eligible; restore them and the next pair must advance.
+  note: |
+    ID PROVENANCE: `rmd next-task-id --reserve` first printed advisory W1-T2791, then found that
+    origin already held through W1-T2791 and atomically reserved `refs/rmd-id/W1-T2792`.
+    W1-T2792 is the authoritative id.
+
+    This task changes review scheduling only. It does not raise `plan/policy.yaml`'s review-lane
+    value, enable Codex, alter a provider reserve, deploy, recycle, merge, or remove the operator's
+    hold/manual-squash authority.

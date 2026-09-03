@@ -1015,6 +1015,25 @@ function isWithin(root: string, candidate: string): boolean {
 }
 
 /**
+ * Codex's trust bypass is safe only for the deliberately non-repository, read-only call sites
+ * (semantic review and isolation probes). A write-capable worker whose checkout is missing must
+ * keep failing closed at Codex's own repository gate instead of running in the wrong directory.
+ */
+function isGitWorktree(cwd: string): boolean {
+  try {
+    return execFileSync("git", ["rev-parse", "--is-inside-work-tree"], {
+      cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim() === "true";
+  } catch {
+    // `git` missing, not a repo, or the probe otherwise failed to prove worktree membership --
+    // treat as "not a worktree" so the bypass stays fail-closed on any unproven cwd.
+    return false;
+  }
+}
+
+/**
  * Resolve only this checkout's Git administrative directories. Codex workspace-write protects
  * `.git` by default, while Remudero implementation prompts require the worker to commit. Linked
  * worktrees need both the per-worktree git dir and their shared common dir; paths outside the
@@ -1039,6 +1058,8 @@ export function codexGitWritableRoots(cwd: string, configRoot: string): string[]
 function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<ProviderCapacity, "model" | "effort">): string[] {
   const model = selection?.model ?? config.workerProviders?.codexModel;
   const effort = selection?.effort === "default" ? undefined : selection?.effort;
+  const readOnly = Array.isArray(args.tools) && !args.tools.some((tool) => ["Write", "Edit", "NotebookEdit", "MultiEdit"].includes(tool));
+  const skipGitRepoCheck = readOnly && !isGitWorktree(args.cwd);
   const shared = [
     "--json",
     "--ignore-user-config",
@@ -1053,18 +1074,17 @@ function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<Pr
     // Task workers never hit it because their cwd IS a git worktree, which is exactly why the
     // failure looked provider-correlated and intermittent rather than structural.
     //
-    // THIS FLAG ONLY WAIVES THE TRUST PROMPT, NOT THE SANDBOX. `--sandbox read-only` /
-    // `workspace-write` below still bound what the worker may touch, and the writable-root grants
-    // are computed separately by `codexGitWritableRoots`. It rides in `shared` so BOTH the fresh
-    // and `exec resume` argv carry it; for a worktree cwd it is a no-op.
-    "--skip-git-repo-check",
     "-c", 'shell_environment_policy.inherit="core"',
     "-c", 'shell_environment_policy.exclude=["CODEX_HOME","OPENAI_API_KEY","ANTHROPIC_API_KEY"]',
   ];
+  // W1-T2748 narrows W1-T2754's trust bypass to the two call-site properties that make it safe:
+  // read-only tools and positive evidence that the cwd is not a Git worktree. The flag remains in
+  // this shared segment so fresh and resumed reviewers/probes cannot drift apart. A write-capable
+  // non-repository cwd receives no bypass and Codex refuses it before doing work.
+  if (skipGitRepoCheck) shared.splice(2, 0, "--skip-git-repo-check");
   if (model) shared.push("--model", model);
   if (effort) shared.push("-c", `model_reasoning_effort=\"${effort}\"`);
   if (args.resumeSessionId) return ["exec", "resume", ...shared, args.resumeSessionId, "-"];
-  const readOnly = Array.isArray(args.tools) && !args.tools.some((tool) => ["Write", "Edit", "NotebookEdit", "MultiEdit"].includes(tool));
   const gitWritableRoots = readOnly ? [] : codexGitWritableRoots(args.cwd, config.root);
   return [
     "exec",

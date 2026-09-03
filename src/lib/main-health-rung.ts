@@ -21,6 +21,10 @@ export interface MainHealthRungDeps {
   ledgerPath: string;
   runId: string;
   log: (step: string, extra?: Record<string, unknown>) => void;
+  /** Brief successful-observation cache shared by the event and ordinary full-sweep paths. */
+  freshMs?: number;
+  /** Injectable wall clock for the freshness boundary. */
+  now?: () => number;
 }
 
 interface RepoMetadata {
@@ -74,10 +78,11 @@ function isMainHealthIssue(issue: OpenIssue): boolean {
 }
 
 /**
- * Build the default-branch observer once per daemon process, then invoke it on every FULL sweep.
- * The branch name is stable enough to cache for that process; the head SHA and its rollup are
- * deliberately re-read on every invocation. All errors are named and swallowed here so neither
- * GitHub nor issue transport can stop the PR reconciler that follows this rung.
+ * Build the default-branch observer once per daemon process, then invoke it from settled check
+ * events and every FULL sweep. The branch name is stable enough to cache for that process; the
+ * head SHA and its rollup are re-read after the brief event-settlement freshness window. All
+ * errors are named and swallowed here so neither GitHub nor issue transport can stop the PR
+ * reconciler that follows this rung.
  */
 export function buildMainHealthRung(
   owner: string,
@@ -87,8 +92,12 @@ export function buildMainHealthRung(
   let defaultBranch: string | undefined;
   let escalatedSignature: string | undefined;
   let resolvedSignature: string | undefined;
+  let lastSuccessfulObservationAtMs: number | undefined;
+  let inFlight: Promise<void> | undefined;
+  const freshMs = Math.max(0, deps.freshMs ?? 0);
+  const now = deps.now ?? Date.now;
 
-  return async () => {
+  const observe = async (startedAtMs: number): Promise<void> => {
     try {
       if (!defaultBranch) {
         const metadata = deps.fetch(["api", `repos/${owner}/${repo}`]) as RepoMetadata;
@@ -114,7 +123,10 @@ export function buildMainHealthRung(
       if (observation.state === "red") {
         resolvedSignature = undefined;
         const signature = `${sha}:${[...observation.failingChecks].sort().join(",")}`;
-        if (signature === escalatedSignature) return;
+        if (signature === escalatedSignature) {
+          lastSuccessfulObservationAtMs = startedAtMs;
+          return;
+        }
         const issueUrl = tryEscalate(escalationFor(observation, branch), {
           issues: deps.issues,
           ledgerPath: deps.ledgerPath,
@@ -129,16 +141,21 @@ export function buildMainHealthRung(
             issue_url: issueUrl,
           });
         }
+        lastSuccessfulObservationAtMs = startedAtMs;
         return;
       }
 
       escalatedSignature = undefined;
       if (observation.state !== "green") {
         resolvedSignature = undefined;
+        lastSuccessfulObservationAtMs = startedAtMs;
         return;
       }
       const signature = `${observation.state}:${sha}`;
-      if (signature === resolvedSignature) return;
+      if (signature === resolvedSignature) {
+        lastSuccessfulObservationAtMs = startedAtMs;
+        return;
+      }
       if (!deps.issues.listOpen || !deps.issues.closeWithComment) {
         throw new Error("main-health resolution requires issue list and close support");
       }
@@ -151,8 +168,27 @@ export function buildMainHealthRung(
         deps.log("main.health.resolved", { branch, sha, issue_url: issue.url });
       }
       resolvedSignature = signature;
+      lastSuccessfulObservationAtMs = startedAtMs;
     } catch (error) {
       deps.log("main.health.error", { error: String((error as Error)?.message ?? error) });
     }
+  };
+
+  return () => {
+    const startedAtMs = now();
+    if (
+      lastSuccessfulObservationAtMs !== undefined &&
+      startedAtMs >= lastSuccessfulObservationAtMs &&
+      startedAtMs - lastSuccessfulObservationAtMs < freshMs
+    ) {
+      return Promise.resolve();
+    }
+    if (inFlight) return inFlight;
+    const started = observe(startedAtMs);
+    inFlight = started;
+    void started.finally(() => {
+      if (inFlight === started) inFlight = undefined;
+    });
+    return started;
   };
 }
