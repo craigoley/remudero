@@ -140,6 +140,14 @@ test("INSTRUMENT_SURFACE_EXCLUSIONS: every real exclusion in review.ts carries a
   }
 });
 
+test("W1-T2843: the entrypoint path trigger has a reasoned instrument-surface exclusion", () => {
+  const reason = INSTRUMENT_SURFACE_EXCLUSIONS["deploy/entrypoint.sh"];
+  assert.equal(typeof reason, "string", "the baked entrypoint must be classified explicitly");
+  assert.match(reason, /container image asset/i);
+  assert.match(reason, /push\.paths/);
+  assert.match(reason, /not (?:CI )?gate(?:-rule)? logic/i);
+});
+
 // ── acceptance claim 3: the declared list is the SOLE blocking authority — the derivation/
 // exclusions can never themselves refuse a PR, however wrong or incomplete they are ────────────
 

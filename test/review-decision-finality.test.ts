@@ -185,7 +185,16 @@ test("W1-T2722: production claims before spawn, replays before post/comment, and
   const reviewBody = source.slice(reviewStart, reviewEnd);
   const claimAt = reviewBody.indexOf("claimReviewDecision({");
   const replayAt = reviewBody.indexOf('decisionClaim.kind === "replay"');
-  assert.ok(claimAt >= 0 && claimAt < reviewBody.indexOf("spawnWorker({"));
+  // W1-T2829 seamed this call site to `(args.reviewerSpawnWorker ?? spawnWorker)({`, so the bare
+  // `spawnWorker({` literal this once searched for no longer exists and `indexOf` returned -1 —
+  // which read as "the claim is not before the spawn" while the ordering was in fact unchanged.
+  // Match the CALL rather than one spelling of the callee: both the direct and the seamed form end
+  // in `spawnWorker)({` or `spawnWorker({`, so anchor on the opening of the spawn's argument
+  // object. Asserted >= 0 first, so a future rename fails loudly here instead of silently
+  // comparing against -1.
+  const spawnAt = reviewBody.search(/spawnWorker\)?\(\{/);
+  assert.ok(spawnAt >= 0, "the reviewer spawn call site must still be findable in runReview's body");
+  assert.ok(claimAt >= 0 && claimAt < spawnAt);
   assert.ok(replayAt > claimAt && replayAt < reviewBody.indexOf("postReviewStatusGuarded({"));
   assert.ok(replayAt < reviewBody.indexOf("postReviewCommentGuarded(prUrl"));
   assert.match(reviewBody, /review_decision_digest: decisionDigest/);

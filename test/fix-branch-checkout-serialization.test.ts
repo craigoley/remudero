@@ -9,16 +9,20 @@
  * window and resets the SAME local ref back to `origin/<branch>` — A's commit is now
  * unreferenced, rewound with no error, between commit and push.
  *
- * THE FIX, two halves at one site (never a second concern):
+ * THE FIRST FIX, two halves at one site (never a second concern):
  *  (i) `checkoutFixHeadRef` (src/run-task.ts) replaces the destructive `checkout -B` with a
  *      three-way compare against the local ref: absent → create (unchanged); at/behind origin →
- *      fast-forward (unchanged); AHEAD of origin → REFUSE via `FixRungCheckoutRefusedError`,
- *      local ref left untouched.
+ *      fast-forward (unchanged); AHEAD of origin → originally REFUSE via
+ *      `FixRungCheckoutRefusedError`.
  *  (ii) `dispatchFix` takes an EXCLUSIVE per-(repo, branch) claim — reusing
  *      `src/lib/inflight-lock.ts`'s O_EXCL discipline via `fixBranchClaimKey` — before any
  *      worktree/git side effect, so two concurrent rounds for the same task never even race the
  *      checkout: the loser declines the poll (`sweep.fix.checkout_claim_declined`) instead of
  *      reaching the checkout at all.
+ *
+ * W1-T2839 keeps that no-loss rule but closes its permanent refusal state: once the exclusive
+ * claim is held, an unheld ahead/diverged tip is anchored under `refs/rmd-recovery/fix/`, then
+ * the branch is moved with compare-and-swap. A held branch or lost CAS still refuses.
  *
  * Git-backed tests use REAL repositories (no execFileSync mocking) — same convention as the
  * sibling suite test/git-config-lock-contention.test.ts. The `dispatchFix`-level tests drive the
@@ -81,6 +85,20 @@ function commit(repo: string, file: string, msg: string): void {
   writeFileSync(join(repo, file), `${msg}\n`, "utf8");
   execFileSync("git", ["-C", repo, "add", "-A"]);
   execFileSync("git", ["-C", repo, "commit", "--no-verify", "--quiet", "-m", msg]);
+}
+
+function commitObject(repo: string, parent: string, msg: string): string {
+  const tree = sha(repo, `${parent}^{tree}`);
+  return execFileSync("git", ["-C", repo, "commit-tree", tree, "-p", parent, "-m", msg], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      GIT_AUTHOR_NAME: "probe",
+      GIT_AUTHOR_EMAIL: "probe@example.invalid",
+      GIT_COMMITTER_NAME: "probe",
+      GIT_COMMITTER_EMAIL: "probe@example.invalid",
+    },
+  }).trim();
 }
 
 // ── (i) checkoutFixHeadRef / createFixRungWorktree — the non-destructive checkout ─────
@@ -161,7 +179,7 @@ test("local ref EQUAL to origin: unchanged — a no-op reset either way", () => 
   }
 });
 
-test("local ref AHEAD of origin: REFUSES with both shas named, local ref left untouched", () => {
+test("local ref AHEAD of origin: preserves the local commit, resets by CAS, and proceeds", () => {
   const root = tmp("rmd-fbcs-ahead-");
   try {
     const upstream = seedUpstream(root);
@@ -181,23 +199,102 @@ test("local ref AHEAD of origin: REFUSES with both shas named, local ref left un
     assert.notEqual(localSha, originSha, "premise: round A really did move the branch ahead of origin");
     execFileSync("git", ["-C", repoDir, "worktree", "remove", "--force", wtA]);
 
-    // Round B arrives in that window.
+    // Round B arrives after round A's claim is gone. The local-only commit remains recoverable,
+    // but it no longer parks every future level-triggered repair pass.
     const wtB = join(root, "wtB");
-    assert.throws(
-      () => createFixRungWorktree(repoDir, wtB, "run-ahead-probe"),
-      (e: unknown) => {
-        assert.ok(e instanceof FixRungCheckoutRefusedError, `expected FixRungCheckoutRefusedError, got ${e}`);
-        const err = e as FixRungCheckoutRefusedError;
-        assert.equal(err.branch, "run-ahead-probe");
-        assert.equal(err.localSha, localSha, "names round A's local (unpushed) sha");
-        assert.equal(err.originSha, originSha, "names origin's sha");
-        return true;
-      },
-    );
+    const recovered = createFixRungWorktree(repoDir, wtB, "run-ahead-probe");
 
-    // The reported rewind — a local commit discarded between commit and push — is impossible:
-    // the shared local ref still names round A's commit, verbatim.
-    assert.equal(sha(repoDir, "refs/heads/run-ahead-probe"), localSha, "the local ref is untouched by the refusal");
+    assert.ok(recovered, "the non-ancestor transition is reported to the caller");
+    assert.equal(recovered.localSha, localSha);
+    assert.equal(recovered.originSha, originSha);
+    assert.equal(sha(repoDir, recovered.recoveryRef), localSha, "the local-only commit remains named");
+    assert.equal(sha(repoDir, "refs/heads/run-ahead-probe"), originSha, "the shared branch now follows origin");
+    assert.equal(sha(wtB, "HEAD"), originSha, "the repair worktree can proceed from the PR head");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("local ref DIVERGED from origin: preserves the local side and proceeds from the remote side", () => {
+  const root = tmp("rmd-fbcs-diverged-");
+  try {
+    const upstream = seedUpstream(root);
+    const repoDir = join(root, "repoDir");
+    cloneOf(upstream, repoDir);
+    const branch = "run-diverged-probe";
+    execFileSync("git", ["-C", repoDir, "checkout", "-q", "-b", branch]);
+    execFileSync("git", ["-C", repoDir, "push", "--quiet", "origin", branch]);
+    commit(repoDir, "local-only.txt", "local-only");
+    const localSha = sha(repoDir, branch);
+    execFileSync("git", ["-C", repoDir, "checkout", "-q", "main"]);
+
+    const advancer = join(root, "advancer");
+    cloneOf(upstream, advancer);
+    execFileSync("git", ["-C", advancer, "checkout", "-q", branch]);
+    commit(advancer, "remote-only.txt", "remote-only");
+    execFileSync("git", ["-C", advancer, "push", "--quiet", "origin", branch]);
+    const originSha = sha(advancer, branch);
+
+    const recovered = createFixRungWorktree(repoDir, join(root, "wt"), branch);
+    assert.ok(recovered);
+    assert.equal(sha(repoDir, recovered.recoveryRef), localSha);
+    assert.equal(sha(repoDir, `refs/heads/${branch}`), originSha);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a local ref held by a registered worktree is refused and no recovery ref is created", () => {
+  const root = tmp("rmd-fbcs-held-");
+  try {
+    const upstream = seedUpstream(root);
+    const repoDir = join(root, "repoDir");
+    cloneOf(upstream, repoDir);
+    const branch = "run-held-probe";
+    execFileSync("git", ["-C", repoDir, "branch", branch]);
+    execFileSync("git", ["-C", repoDir, "push", "--quiet", "origin", branch]);
+    const originSha = sha(repoDir, `origin/${branch}`);
+    const holder = join(root, "holder");
+    createFixRungWorktree(repoDir, holder, branch);
+    commit(holder, "held.txt", "held local commit");
+    const localSha = sha(holder, "HEAD");
+
+    assert.throws(
+      () => createFixRungWorktree(repoDir, join(root, "challenger"), branch),
+      (e: unknown) => e instanceof FixRungCheckoutRefusedError,
+    );
+    assert.equal(sha(repoDir, `refs/heads/${branch}`), localSha);
+    assert.throws(() => sha(repoDir, `refs/rmd-recovery/fix/${branch}/${localSha}`));
+    assert.notEqual(localSha, originSha);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the recovered branch move is compare-and-swap protected against a concurrent ref change", () => {
+  const root = tmp("rmd-fbcs-cas-");
+  try {
+    const upstream = seedUpstream(root);
+    const repoDir = join(root, "repoDir");
+    cloneOf(upstream, repoDir);
+    const branch = "run-cas-probe";
+    execFileSync("git", ["-C", repoDir, "checkout", "-q", "-b", branch]);
+    execFileSync("git", ["-C", repoDir, "push", "--quiet", "origin", branch]);
+    commit(repoDir, "local-only.txt", "local-only");
+    const localSha = sha(repoDir, branch);
+    const racingSha = commitObject(repoDir, localSha, "racing commit");
+    execFileSync("git", ["-C", repoDir, "checkout", "-q", "main"]);
+
+    assert.throws(
+      () =>
+        createFixRungWorktree(repoDir, join(root, "wt"), branch, {
+          beforeHeadCompareAndSwap: () =>
+            execFileSync("git", ["-C", repoDir, "update-ref", `refs/heads/${branch}`, racingSha, localSha]),
+        }),
+      (e: unknown) => e instanceof FixRungCheckoutRefusedError,
+    );
+    assert.equal(sha(repoDir, `refs/heads/${branch}`), racingSha, "the racing writer wins; recovery overwrites nothing");
+    assert.equal(sha(repoDir, `refs/rmd-recovery/fix/${branch}/${localSha}`), localSha);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -322,6 +419,34 @@ test("a FREE branch claim is taken and the round proceeds to the checkout step (
     const key = fixBranchClaimKey("acme", "scratch-fbcs-repo", branch);
     const reacquired = acquireInflightLock(inflightDir, key, { run_id: "PROBE-AFTER" });
     reacquired.release();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("dispatchFix ledgers a successful stale-ref recovery before the repair worker starts", async () => {
+  const root = tmp("rmd-fbcs-recovery-ledger-");
+  const branch = "run-W1-T500-1785600000002";
+  try {
+    const upstream = seedUpstream(root);
+    mkdirSync(join(root, "repos"), { recursive: true });
+    const repoDir = join(root, "repos", "scratch-fbcs-repo");
+    cloneOf(upstream, repoDir);
+    execFileSync("git", ["-C", repoDir, "checkout", "-q", "-b", branch]);
+    execFileSync("git", ["-C", repoDir, "push", "--quiet", "origin", branch]);
+    const originSha = sha(repoDir, `origin/${branch}`);
+    commit(repoDir, "abandoned.txt", "abandoned fix commit");
+    const localSha = sha(repoDir, branch);
+    execFileSync("git", ["-C", repoDir, "checkout", "-q", "main"]);
+
+    const { logs } = await driveDispatchFix(root, branch);
+    const row = logs.find((entry) => entry.step === "sweep.fix.checkout_recovered");
+    assert.ok(row, `expected recovery telemetry; steps were ${JSON.stringify(logs.map((entry) => entry.step))}`);
+    assert.equal(row.extra?.branch, branch);
+    assert.equal(row.extra?.local_sha, localSha);
+    assert.equal(row.extra?.origin_sha, originSha);
+    assert.equal(sha(repoDir, String(row.extra?.recovery_ref)), localSha);
+    assert.ok(!logs.some((entry) => entry.step === "sweep.fix.checkout_refused"));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
