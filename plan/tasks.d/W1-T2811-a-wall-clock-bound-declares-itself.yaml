@@ -8,16 +8,7 @@
   risk: high
   band_meaning: "span"
   budget_usd: 8.00
-  files:
-    - test/helpers/wall-clock-bound.ts
-    - test/a-wall-clock-bound-declares-itself.test.ts
-    - test/console-write-entry.test.ts
-    - test/poll-rollup-over-rest.test.ts
-    - test/review-status-gate.test.ts
-    - test/run-task.test.ts
-    - test/worker-containment.test.ts
-    - test/worker-credential-expiry-margin.test.ts
-    - test/worktree-reap-liveness.test.ts
+  files: [test/helpers/wall-clock-bound.ts, test/a-wall-clock-bound-declares-itself.test.ts, test/console-write-entry.test.ts, test/poll-rollup-over-rest.test.ts, test/review-status-gate.test.ts, test/run-task.test.ts, test/worker-containment.test.ts, test/worker-credential-expiry-margin.test.ts, test/worktree-reap-liveness.test.ts]
   origin: "operator-decision#w1-t2811-wall-clock-expression-2026-09-04"
   plan_refs: ["W1-T2790", "W1-T2810", "W1-T2809", "W1-T2776"]
   status: queued
@@ -74,6 +65,28 @@
     variable `elapsedMs`). A grep is the right tool to SIZE the population once. It is the wrong
     tool to MAINTAIN it, which is precisely why the deliverable is a seam that the members declare
     through rather than the roster this grep would produce.
+
+    AND THAT IS NOT A HYPOTHETICAL — TWO LANES GREPPED FOR THIS SAME CLASS AND AGREED ON ONE FILE.
+    A second census was taken independently on the other lane, over two axes: real wall-clock
+    BUDGET assertions in 5 files (`test/serve.first-paint.test.ts`, `test/serve.test.ts` at two
+    sites, `test/status-board-reads-rotations.test.ts`, `test/w1-t187-end-to-end.test.ts`, and
+    `test/worker-containment.test.ts` at `elapsed < 100`, the most load-fragile site either census
+    found), plus spawned-process WAIT WINDOWS in 4 more files — union ~9. This shard's own census
+    names 7. **The two lists intersect in exactly ONE file: `test/worker-containment.test.ts`.**
+
+    Two mechanical greps, aimed at one class, on one tree, on one day, overlapping by one of
+    seven. Neither is wrong; they key on different spellings of the same idea, and the union is
+    larger than either. THIS IS THE STRONGEST ARGUMENT FOR THE SEAM THAT EXISTS: a roster derived
+    by grep is a function of WHO GREPPED, so any roster this class ever gets would encode its
+    author rather than its membership — and the disagreement is invisible until someone takes a
+    second census, which nothing schedules. A declaration at the call site has no such degree of
+    freedom: the member says so itself, in one place, and two readers cannot disagree about it.
+
+    THE BUILD SHOULD THEREFORE TAKE THE UNION, NOT THIS SHARD'S SEVEN. Re-run both axes at build
+    time — the upper-bound predicate above AND a spawned-process wait-window pass — and migrate
+    every member found. `files:` below declares the seven this census names; a union member outside
+    that list is a scope widening to be recorded in the PR body and the source comment, never by
+    editing this shard, exactly as the design section already requires.
 
     ID PROVENANCE: `refs/rmd-id/W1-T2811` was already held on origin at
     065e67100203d4a375bd679625e9a704157256b1 when this shard was written, verified against a fresh
