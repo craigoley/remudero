@@ -7,8 +7,10 @@ import { test } from "node:test";
 import { scanPlanCoherence, type PlanCoherenceShardEntry } from "../src/lib/plan-coherence.js";
 import { loadPlan } from "../src/lib/plan.js";
 import {
+  buildGather,
   planCoherenceRung,
   planCoherenceSectionFor,
+  renderGather,
   renderPlanCoherence,
   type PlanCoherenceShardListing,
 } from "../src/lib/retro.js";
@@ -259,4 +261,74 @@ test("planCoherenceSectionFor composes the rung and the render into one call, fo
   assert.match(section, /broken-name\.yaml/);
   assert.match(section, /W1-T500/);
   assert.match(section, /4 disagreement\(s\)/);
+});
+
+// ── ACCEPTANCE #6 ────────────────────────────────────────────────────────────────────────
+// "the rung has a LIVE CALL SITE in the retro — the fourteen-cycle question is answered every
+// cycle by measurement rather than re-asked in prose, and this module is not a signal read by
+// nothing"
+//
+// `buildGather` is called UNCONDITIONALLY every `rmd retro` cycle (retroCommand, run-task.ts)
+// and its result is fed straight into `renderGather`, which produces the actual retro report
+// text (both --dry-run and the real automated run). `planCoherenceRung(` is called FROM INSIDE
+// `buildGather` — not merely declared in this file, and not only reachable from a standalone
+// wrapper this suite calls directly — so wiring `opts.planCoherence` in is the whole difference
+// between "this rung is read by nothing" and "this rung answers the fourteen-cycle question
+// every cycle the retro already runs".
+
+const MINIMAL_LEDGER = "";
+const MINIMAL_LEARNINGS = "# L\n";
+
+test("ACCEPTANCE #6: buildGather omits planCoherence, and renderGather prints no section, when the caller supplies nothing (existing callers unaffected)", () => {
+  const g = buildGather({ ledgerNdjson: MINIMAL_LEDGER, learningsMd: MINIMAL_LEARNINGS });
+  assert.equal(g.planCoherence, undefined);
+  const rendered = renderGather(g);
+  assert.doesNotMatch(rendered, /Plan-coherence rung/);
+});
+
+test("ACCEPTANCE #6: buildGather COMPUTES planCoherenceRung, and renderGather prints the clean section, when the caller wires plan/tasks.yaml + shards in", () => {
+  const g = buildGather({
+    ledgerNdjson: MINIMAL_LEDGER,
+    learningsMd: MINIMAL_LEARNINGS,
+    planCoherence: {
+      monolith: { path: MONOLITH_PATH, text: taskList("W1-T1") },
+      shards: { ok: true, entries: [shard("plan/tasks.d/W1-T2-beta.yaml", task("W1-T2"))] },
+    },
+  });
+  assert.ok(g.planCoherence, "buildGather must have run the census, not left it undefined");
+  assert.equal(g.planCoherence?.kind, "clean");
+  const rendered = renderGather(g);
+  assert.match(rendered, /## Plan-coherence rung/);
+  assert.match(rendered, /No disagreements/);
+});
+
+test("ACCEPTANCE #6: a real disagreement supplied through buildGather surfaces in renderGather's report, naming the offender", () => {
+  const g = buildGather({
+    ledgerNdjson: MINIMAL_LEDGER,
+    learningsMd: MINIMAL_LEARNINGS,
+    planCoherence: {
+      monolith: { path: MONOLITH_PATH, text: taskList() },
+      shards: { ok: true, entries: [shard("plan/tasks.d/W1-T1-alpha.yaml", task("W1-T9"))] },
+    },
+  });
+  assert.equal(g.planCoherence?.kind, "findings");
+  const rendered = renderGather(g);
+  assert.match(rendered, /## Plan-coherence rung/);
+  assert.match(rendered, /W1-T1/);
+  assert.match(rendered, /W1-T9/);
+});
+
+test("ACCEPTANCE #6: an unlistable plan/tasks.d/ wired through buildGather renders UNEXAMINED in the retro report, never a silent clean", () => {
+  const g = buildGather({
+    ledgerNdjson: MINIMAL_LEDGER,
+    learningsMd: MINIMAL_LEARNINGS,
+    planCoherence: {
+      monolith: { path: MONOLITH_PATH, text: taskList("W1-T1") },
+      shards: { ok: false, reason: "EACCES: permission denied, scandir 'plan/tasks.d'" },
+    },
+  });
+  assert.equal(g.planCoherence?.kind, "unexamined");
+  const rendered = renderGather(g);
+  assert.match(rendered, /UNEXAMINED/);
+  assert.doesNotMatch(rendered, /No disagreements/);
 });

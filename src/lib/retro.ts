@@ -1647,6 +1647,18 @@ export interface RetroGather {
    *  uses, because a stale-corpus HISTORICAL share is still what this asks for
    *  (see {@link ArchitectLaneShareReport.windowStartTs}/`windowEndTs`). */
   architectLaneShare: ArchitectLaneShareReport;
+  /**
+   * W1-T2642: the plan-coherence census (`planCoherenceRung`) — present ONLY when
+   * `buildGather` was given `opts.planCoherence` (the monolith blob + shard listing; buildGather
+   * never reads `plan/tasks.yaml` or `plan/tasks.d/*` itself, same discipline `openTitles`
+   * above already documents for this exact directory). Omitted entirely when the caller hasn't
+   * wired the read yet — never a silent `clean` render standing in for a scan that never ran.
+   * THE LIVE CALL SITE (this field's only producer, `buildGather` below) is what answers the
+   * fourteen-cycle "does plan/tasks.yaml and plan/tasks.d/*.yaml disagree" question by
+   * measurement, every retro cycle `renderGather` runs, rather than leaving this rung a signal
+   * only its own tests import.
+   */
+  planCoherence?: PlanCoherenceReport;
 }
 
 /**
@@ -1702,6 +1714,17 @@ export function buildGather(opts: {
    * its prior behavior unchanged.
    */
   followupLedgerNdjson?: string;
+  /**
+   * W1-T2642: the plan-coherence census's raw inputs — the monolith blob plus a listing of
+   * every `plan/tasks.d/*.yaml` shard (or the stated reason the directory could not be
+   * listed). buildGather stays FS-free (same discipline `openTitles`/`mastMapping` above
+   * already document): the caller (`retroCommand`, run-task.ts) reads `plan/tasks.yaml` and
+   * `plan/tasks.d/` and hands the bytes in here. Omit ⇒ `RetroGather.planCoherence` is
+   * omitted entirely, never a silent clean/zero render for a census that never ran — see
+   * {@link planCoherenceRung}'s own doc for the `unexamined`/`clean`/`findings` states this
+   * produces once wired.
+   */
+  planCoherence?: { monolith: { path: string; text: string }; shards: PlanCoherenceShardListing };
 }): RetroGather {
   const records = parseLedger(opts.ledgerNdjson);
   const followupRecords = opts.followupLedgerNdjson !== undefined ? parseLedger(opts.followupLedgerNdjson) : records;
@@ -1778,6 +1801,12 @@ export function buildGather(opts: {
     // W1-T2239: FULL `records`, same reasoning as `mutationGateLifetime` above — a
     // measurement of the fleet's own allocation must not truncate to the marker window.
     architectLaneShare: architectLaneShare(records),
+    // W1-T2642: THE LIVE CALL SITE. Runs every cycle `buildGather` runs (retroCommand's own
+    // unconditional call, run-task.ts) whenever the caller supplied `opts.planCoherence` —
+    // omitted entirely otherwise, never a silent clean/zero for a census that did not run.
+    ...(opts.planCoherence
+      ? { planCoherence: planCoherenceRung(opts.planCoherence.monolith, opts.planCoherence.shards) }
+      : {}),
   };
 }
 
@@ -1916,6 +1945,10 @@ export function renderGather(g: RetroGather): string {
     renderProceduralCandidates(g.proceduralCandidates),
     "",
     renderFollowupCandidates(g.followups),
+    // W1-T2642: present only when `buildGather` was handed `opts.planCoherence` — omitted
+    // rather than rendering a stale/absent census as a silent clean pass (see that field's
+    // own doc, `RetroGather.planCoherence`, for the "never a bare zero" discipline).
+    ...(g.planCoherence ? ["", renderPlanCoherence(g.planCoherence)] : []),
   ].join("\n");
 }
 
