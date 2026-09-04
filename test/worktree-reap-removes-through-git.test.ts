@@ -158,6 +158,77 @@ test("reapStaleWorktrees: an ORPHANED linked worktree (parent clone deleted) is 
   }
 });
 
+// ── THE PRUNE-BEHIND-RMSYNC PATH: a present parent that does not register this entry ──────
+
+test("reapStaleWorktrees: an rm-only entry whose parent IS a real repo prunes behind the rmSync", () => {
+  // The FULL reaper pass, not planWorktreeRemoval in isolation: this is the only route that
+  // exercises executeWorktreeRemoval's rm-only branch, which fs.rmSync()s the tree and then
+  // shells `git worktree prune` in the carried parent — the idempotent "collects anything the
+  // registration lookup missed" behind an rmSync that was already correct on its own.
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "rmd-reap-prune-behind-")));
+  const repoDir = join(dir, "repo");
+  const worktreesRoot = join(dir, "worktrees");
+  try {
+    mkdirSync(repoDir, { recursive: true });
+    mkdirSync(worktreesRoot, { recursive: true });
+    execFileSync("git", ["init", "-b", "main", repoDir], { encoding: "utf8" });
+    const git = (...args: string[]) =>
+      execFileSync("git", ["-C", repoDir, ...args], { encoding: "utf8", env: GIT_ENV });
+    git("config", "user.email", "t@t");
+    git("config", "user.name", "t");
+    writeFileSync(join(repoDir, "README.md"), "seed\n");
+    git("add", "-A");
+    git("commit", "-m", "seed");
+
+    // A `.git` FILE pointing at a real, PRESENT parent — but this entry was never actually
+    // registered there with `git worktree add`, so the parent's own `git worktree list` does not
+    // know about it. The record is already gone, so rmSync is correct; the parent rides along so
+    // the caller can prune behind it anyway.
+    const name = "sweep-W1-T9007-unregistered";
+    const entryPath = join(worktreesRoot, name);
+    mkdirSync(entryPath, { recursive: true });
+    writeFileSync(join(entryPath, ".git"), `gitdir: ${repoDir}/.git/worktrees/${name}\n`);
+
+    const summary = reapStaleWorktrees(worktreesRoot, { now: () => 4_000_000_000_000, isPidAlive: () => false });
+
+    assert.ok(!existsSync(entryPath), "the untracked working tree is removed");
+    assert.ok(summary.reaped.includes(name), "and the reaper says so");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("reapStaleWorktrees: a failed prune behind an rm-only removal is swallowed, never reported as removal-failed", () => {
+  // The parent EXISTS (so the rm-only plan still carries it and still attempts the prune) but is
+  // not a git repository at all, so `git worktree prune` there throws. That failure is
+  // BEST-EFFORT: the tree is already gone by the time it runs, so it must never flip a
+  // successful removal into `removal-failed` — the next pass, or pruneStaleRuns, collects
+  // whatever record the failed prune could not.
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "rmd-reap-prune-fails-")));
+  const repoDir = join(dir, "not-a-repo"); // exists on disk, but has no `.git` of its own
+  const worktreesRoot = join(dir, "worktrees");
+  try {
+    mkdirSync(repoDir, { recursive: true });
+    mkdirSync(worktreesRoot, { recursive: true });
+
+    const name = "sweep-W1-T9008-prune-fails";
+    const entryPath = join(worktreesRoot, name);
+    mkdirSync(entryPath, { recursive: true });
+    writeFileSync(join(entryPath, ".git"), `gitdir: ${repoDir}/.git/worktrees/${name}\n`);
+
+    const summary = reapStaleWorktrees(worktreesRoot, { now: () => 4_000_000_000_000, isPidAlive: () => false });
+
+    assert.ok(!existsSync(entryPath), "the working tree is still removed by rmSync regardless of the prune outcome");
+    assert.ok(
+      summary.reaped.includes(name),
+      "a prune failure against a non-repo parent never demotes this to removal-failed",
+    );
+    assert.ok(!summary.kept.includes(name));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ── THE KEEP DIRECTION: an unknowable `.git` destroys nothing ─────────────────────────────
 
 test("reapStaleWorktrees: an UNREADABLE `.git` KEEPS the directory — the ambiguous signal never destroys", () => {
