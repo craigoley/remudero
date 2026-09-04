@@ -221,7 +221,13 @@ export function checkSurfacesInScopeAndStdoutExclusion(text: string): { ok: bool
     ["names renderStatusBoardText / rmd status as in scope", /renderStatusBoardText/],
     ["names the escalation summary/detail as in scope", /summary.{0,20}detail|`summary`.{0,60}`detail`/is],
     ["excludes the daemon's stdout by name", /daemon('s)? (own )?stdout/i],
-    ["gives a reason for the stdout exclusion (forensic record / retro greps)", /(forensic record|retro greps)/i],
+    // W1-T2817. This requirement USED to be /(forensic record|retro greps)/i — two phrases, not a
+    // reason. It therefore passed on a doc asserting the OPPOSITE of the reason it was checking for,
+    // which is exactly what happened when the false premise was retired: the corrected paragraph
+    // QUOTES the retired phrase, so the old regex stayed green through a correction that reversed
+    // the claim under it. It now anchors on the code the reason cites.
+    ["gives a reason for the stdout exclusion, grounded in what the code does", /ROTATED_LOG_FILES|NEVER_ROTATE_FILENAME/],
+    ["marks the retired premise as corrected rather than silently dropping it", /used to give|is corrected here/i],
   ];
   return runRequirements(text, requirements);
 }
@@ -229,6 +235,21 @@ export function checkSurfacesInScopeAndStdoutExclusion(text: string): { ok: bool
 test("operator-message-standard: the surfaces in scope are named alongside the daemon stdout exclusion and its reason", () => {
   const result = checkSurfacesInScopeAndStdoutExclusion(doc);
   assert.ok(result.ok, `doc is missing: ${result.missing.join(", ")}`);
+});
+
+test("operator-message-standard falsifier: the retired phrase ALONE no longer satisfies claim 7 — the case that used to pass", () => {
+  // The exact shape the old requirement accepted: the exclusion named, both phrases present, and no
+  // code-grounded reason anywhere. This must now be RED, or the correction is undone the moment
+  // someone reinstates the premise.
+  const result = checkSurfacesInScopeAndStdoutExclusion(
+    "This standard covers renderStatusBoardText and the escalation `summary` and `detail` fields. " +
+      "The daemon's stdout is out of scope: its lines are the forensic record that every retro greps.",
+  );
+  assert.equal(result.ok, false, "a doc offering only the retired premise must not satisfy claim 7");
+  assert.ok(
+    result.missing.some((m) => m.includes("grounded in what the code does")),
+    `the missing list should name the code-grounded requirement, got: ${result.missing.join(", ")}`,
+  );
 });
 
 test("operator-message-standard falsifier: a doc naming surfaces with no stdout exclusion turns claim 7 RED", () => {
