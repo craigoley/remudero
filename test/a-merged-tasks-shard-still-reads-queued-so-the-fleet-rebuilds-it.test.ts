@@ -32,7 +32,12 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-import { runnableCandidates, type AlreadyMergedCredit, type NextRunnableOpts } from "../src/lib/drain.js";
+import {
+  alreadyMergedCreditFromProjection,
+  runnableCandidates,
+  type AlreadyMergedCredit,
+  type NextRunnableOpts,
+} from "../src/lib/drain.js";
 import { buildPlanFrontier } from "../src/lib/panel-graph.js";
 import type { Plan, Task } from "../src/lib/plan.js";
 
@@ -174,24 +179,39 @@ test("W1-T2675: the frontier SKIPS a credit-indeterminate task instead of callin
  *  would: alongside the `already-merged` decline, never in place of it. */
 function selectWithCredit(
   ids: string[],
-  projection: Map<string, { merged?: boolean }>,
-  creditFor: (id: string) => AlreadyMergedCredit | undefined,
-): { dispatched: string[]; filtered: Array<[string, string]>; credits: Array<[string, AlreadyMergedCredit]> } {
+  projection: Map<string, { merged?: boolean; source?: "trailer" | "head-branch" | "none"; prNumber?: number }>,
+): {
+  dispatched: string[];
+  filtered: Array<[string, string]>;
+  credits: Array<[string, AlreadyMergedCredit]>;
+  events: string[];
+} {
   const filtered: Array<[string, string]> = [];
   const credits: Array<[string, AlreadyMergedCredit]> = [];
+  const events: string[] = [];
   const plan = { tasks: ids.map(task) } as unknown as Plan;
-  const dispatched = runnableCandidates(plan, adapter(projection), ids.length, {
-    creditFor,
-    onFiltered: (t, reason) => filtered.push([t.id, reason]),
-    onAlreadyMergedCredit: (t, credit) => credits.push([t.id, credit]),
-  }).map((t) => t.id);
-  return { dispatched, filtered, credits };
+  const dispatched = runnableCandidates(
+    plan,
+    (id) => {
+      events.push(`merged:${id}`);
+      return projection.get(id)?.merged ?? false;
+    },
+    ids.length,
+    {
+      creditFor: (id) => {
+        events.push(`credit:${id}`);
+        return alreadyMergedCreditFromProjection(projection.get(id));
+      },
+      onFiltered: (t, reason) => filtered.push([t.id, reason]),
+      onAlreadyMergedCredit: (t, credit) => credits.push([t.id, credit]),
+    },
+  ).map((t) => t.id);
+  return { dispatched, filtered, credits, events };
 }
 
 test("W1-T2675: the already-merged refusal names which credit path matched and the PR that carried it", () => {
-  const projection = new Map([["W1-T1000002", { merged: true }]]);
-  const { dispatched, filtered, credits } = selectWithCredit(["W1-T1000002"], projection, (id) =>
-    id === "W1-T1000002" ? { path: "trailer", prNumber: 2376 } : undefined);
+  const projection = new Map([["W1-T1000002", { merged: true, source: "trailer" as const, prNumber: 2376 }]]);
+  const { dispatched, filtered, credits, events } = selectWithCredit(["W1-T1000002"], projection);
 
   assert.deepEqual(dispatched, []);
   assert.equal(filtered[0]?.[1], "already-merged", "the refusal itself is still already-merged, unchanged");
@@ -199,19 +219,22 @@ test("W1-T2675: the already-merged refusal names which credit path matched and t
   assert.equal(credits[0]?.[0], "W1-T1000002");
   assert.deepEqual(credits[0]?.[1], { path: "trailer", prNumber: 2376 },
     "both the matched credit path AND the PR that carried it are named");
+  assert.deepEqual(events, ["merged:W1-T1000002", "credit:W1-T1000002"],
+    "the credit detail is read from the same projection only after merged=true already refused dispatch");
 });
 
 test("W1-T2675: credit by head-ref alone is honoured, so a merge carrying no trailer still counts", () => {
   // #1657, cited in this task's own filing: zero trailers, credited purely by its
-  // run-<taskId>-<epochMs> head ref. isMerged(true) is honoured on its own — no trailer is
+  // run-W1-T444-1786560477 head ref. isMerged(true) is honoured on its own — no trailer is
   // required for the refusal to fire — and the named path reports exactly that evidence.
-  const projection = new Map([["W1-T1657", { merged: true }]]);
-  const { dispatched, filtered, credits } = selectWithCredit(["W1-T1657"], projection, (id) =>
-    id === "W1-T1657" ? { path: "head-ref", prNumber: 1657 } : undefined);
+  const projection = new Map([["W1-T444", { merged: true, source: "head-branch" as const, prNumber: 1657 }]]);
+  const { dispatched, filtered, credits, events } = selectWithCredit(["W1-T444"], projection);
 
   assert.deepEqual(dispatched, [], "a head-ref-only credit still refuses the task, with no trailer needed");
   assert.equal(filtered[0]?.[1], "already-merged");
   assert.deepEqual(credits[0]?.[1], { path: "head-ref", prNumber: 1657 });
+  assert.deepEqual(events, ["merged:W1-T444", "credit:W1-T444"],
+    "head-ref credit is honoured through the merged projection itself, not a trailer-only path");
 });
 
 test("W1-T2675: the shard's own status field is neither read nor written by the already-merged check", () => {

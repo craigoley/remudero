@@ -29,7 +29,7 @@ import {
   type ObservedScopeByTask,
 } from "./dispatch-overlap.js";
 import { taskIdFromRunBranch } from "./status.js";
-import type { OpenSiblingBuild } from "./status.js";
+import type { OpenSiblingBuild, StatusProjection } from "./status.js";
 
 /** A merged predicate — DERIVED FROM GITHUB in the real runner (status.ts). */
 export type MergedSet = (taskId: string) => boolean;
@@ -50,6 +50,21 @@ export type CreditPath = "trailer" | "head-ref" | "both";
 export interface AlreadyMergedCredit {
   path: CreditPath;
   prNumber: number;
+}
+
+/**
+ * Converts the SAME status projection that feeds `isMerged` into the operator-facing detail
+ * carried by {@link NextRunnableOpts.creditFor}. The projection's `merged` boolean remains the
+ * gate; this helper only names the matched path once that gate has already refused dispatch.
+ */
+export function alreadyMergedCreditFromProjection(
+  projection: Partial<Pick<StatusProjection, "merged" | "source" | "prNumber">> | undefined,
+): AlreadyMergedCredit | undefined {
+  if (projection === undefined) return undefined;
+  if (projection.merged !== true || typeof projection.prNumber !== "number") return undefined;
+  if (projection.source === "trailer") return { path: "trailer", prNumber: projection.prNumber };
+  if (projection.source === "head-branch") return { path: "head-ref", prNumber: projection.prNumber };
+  return undefined;
 }
 
 /**
