@@ -85,6 +85,39 @@
     the builder's judgement; either satisfies this task, and neither is a change to what any census
     ACCEPTS.
 
+    ⚠ EVERY ACCEPTANCE CRITERION BELOW IS ALREADY SATISFIED ON origin/main (measured 2026-09-04),
+    AND THE PREMISE THIS SHARD RESTS ON IS FALSE. RECOMMEND CLOSING WITHOUT IMPLEMENTATION.
+
+    W1-T2478 admitted the census class to the habitual gate on 2026-08-30 (868ff027). Read back
+    from the shipped module today, `FAST_GATE_STEPS` carries all four as entries that SPAWN each
+    suite — not a re-implemented predicate — every one inside the shared bound:
+
+        bound-kind-census             script=census:bound-kind             measured  470ms
+        catch-erasure-census          script=census:catch-erasure          measured  803ms
+        negative-reachability-census  script=census:negative-reachability  measured 1201ms
+        no-shallowing-census          script=census:no-shallowing          measured  526ms
+        FAST_GATE_CENSUS_BOUND_MS = 2000
+
+    That is criterion 1 (the gate runs them), criterion 2 (it invokes the suites rather than
+    re-implementing them — each entry's script is `census:<name>`), and criterion 3 (all four
+    measure under the bound), with nothing left to build. W1-T2643 later made the set a DERIVED
+    projection of `CENSUS_ADMITTED_MEMBERS`, so a hand-added step beside it cannot occur.
+
+    THE DATES ARE WHAT SETTLES IT, AND THEY WERE NOT CHECKED WHEN THIS WAS FILED. The three PRs
+    the rationale measures — #3535, #3542, #3541 — all merged 2026-09-01, TWO DAYS AFTER the
+    admission. So the gate already ran these four suites when those PRs were authored, and they
+    hit CI anyway. The evidence does not support "the gate does not run them"; it refutes it.
+
+    ⚠ THE REAL GAP THE SAME EVIDENCE DOES SUPPORT, stated so it is not lost with this task: the
+    conventions are reachable at author time ONLY through `rmd preflight --fast`, and CLAUDE.md's
+    "Before you push" rule names `rmd preflight --ci-parity` instead. Measured: NONE of the four
+    census jobs appears in `CI_PARITY_TABLE`, and `preflightCommand`'s own doc says `--ci-parity`
+    "shells the FULL `npm run test:ci` suite ... and is therefore not a mode a worker can run
+    habitually". So a lane following CLAUDE.md literally either pays minutes or learns nothing.
+    Whether the fix is a doc change, a mode change, or admitting the census entries to the parity
+    table is a separate decision, on evidence this task's rationale collected and its own remedy
+    would not have addressed.
+
     NOT IN SCOPE: changing what any of the four census suites accepts (W1-T2596 covers their escape
     hatches), and the shard/summary reporting question (W1-T2597).
 
