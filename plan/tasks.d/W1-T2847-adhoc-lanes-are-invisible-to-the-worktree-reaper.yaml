@@ -1,0 +1,168 @@
+- id: W1-T2847
+  title: "THE WORKTREE REAPER'S ENTIRE SCAN SURFACE IS 44K WHILE 4.7G OF THE SAME OBJECT SITS ONE DIRECTORY ABOVE IT — reapStaleWorktrees only ever reads config.root/worktrees, but 180 of the 191 linked worktrees under config.root are hand-cut lanes that live as its SIBLINGS, so give ad-hoc lanes a declared home the cadence can see and reap them through their parent"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  rationale: |
+    MEASURED 2026-09-04 on the Mac mini (228Gi volume, two real accounts), all counts with an
+    explicit permission-truncation check: `find /Users/craigoleyagent/Remudero -maxdepth 2 -type d
+    ! -readable` returned 0 and `du` wrote 0 bytes to stderr, so no traversal below under-reports.
+
+    (1) THE REAPER SEES 11 OF 191. `worktreesDir(config)` is `join(config.root, "worktrees")`
+    (`src/lib/worker.ts`), and `runWorktreeReapRung` passes exactly that one root to
+    `reapStaleWorktrees`. Under `config.root` there are 214 entries, of which 180 carry a `.git`
+    FILE — they are LINKED WORKTREES — and they sit as SIBLINGS of `worktrees/`, not inside it.
+    `worktrees/` itself holds 11. So the cadence reaper's scan surface is 11 directories totalling
+    44K, while 4.7G of the identical object class is one directory up and unreachable to it. Total
+    `config.root` is 8.4G.
+
+    (2) THIS IS NOT DEBRIS AND MUST NOT BE BLIND-REAPED. `git worktree list --porcelain` in the
+    parent clone reports `prunable` ZERO times: all 180 are still registered and on live branches.
+    An age-or-name sweep over `config.root` would destroy live operator work, which is the 2026-07-31
+    failure CLAUDE.md records under "Never do interactive work inside `<config.root>/worktrees`".
+    THE POPULATION IS THE HAZARD, NOT THE TARGET.
+
+    (3) WHERE THE LANES COME FROM, AND WHY THEY ARE OUTSIDE `worktrees/`. CLAUDE.md itself sends
+    them there: "Never do interactive work inside `<config.root>/worktrees` — the fleet reaps it …
+    Cut worktrees elsewhere (e.g. `~/Remudero/<name>-work`)". The advice is correct and the
+    consequence is unmanaged — every lane it creates is outside the only directory anything sweeps.
+    The names read as agent task lanes (`alloc`, `am`, `atbase`, `athead`, `base3719`, `basegrade`,
+    `board`, …), i.e. one directory per unit of work, retained after the work ends.
+
+    (4) THE SAME PRACTICE ON THE CONSOLE ACCOUNT LANDED IN `$HOME` AND FILLED THE VOLUME. On
+    `/Users/craigoley` the identical practice put lanes at `~/<name>` rather than `~/Remudero/<name>`.
+    Recovered from that account's Codex command log (`thread_history_1.sqlite`, 218
+    `commandExecution` rows matching `worktree add … /Users/craigoley/`), 154 DISTINCT home-root
+    worktrees were created across 2026-09-01 07:15 to 2026-09-03 18:58 — 15, 88 and 51 per day —
+    against 16 removed with `git worktree remove` and ZERO with `rm -rf`. A ~10% teardown rate. The
+    surviving specimens measured 42-45M with a symlinked `node_modules` and 453M with a real one; 54
+    such directories were deleted on 2026-09-04 totalling 9.5G. THE VOLUME HAS FILLED TO 100% FOUR
+    TIMES IN FOUR MONTHS and stands at 91% (17Gi free) as this is filed.
+
+    (5) NOTHING ANYWHERE COVERS EITHER LOCATION. `cloneReapRoots()` (`src/lib/clone-reaper.ts`)
+    returns `[os.tmpdir(), "/private/tmp", claudeScratchRoot()]` on darwin — `claudeScratchRoot()`
+    resolves to `/private/tmp/claude-<uid>`, so no root is under a home at all. `pruneStaleRuns` is
+    given `worktreesDir(config)` at every call site. `reapWorkerScratch` and
+    `sweepStaleWorkerScratch` are scoped to `claudeScratchRoot()` children by
+    `isReapableScratchTarget`. The process-exit handlers in `src/run-task.ts` release the DRAIN LOCK
+    only. `rmd doctor` is read-only and `rmd reap-branches` is remote branches. So a lane cut one
+    directory outside `worktrees/` is reaped by nothing, ever, on any cadence.
+
+    (6) THE CADENCE ALSO DOES NOT RUN ON THIS HOST, WHICH IS WHY (1) HAS BEEN INVISIBLE. Neither
+    local ledger carries a single `worktree.*`, `clone.*`, `tmp.*` or `reap` step — measured across
+    the agent account's full range (6588 rows, 2026-07-15 to 2026-09-04) and the console account's
+    (2443 rows). Both are dominated by `cli.invoked`. The daemon runs in Azure; local activity is
+    CLI-only. THIS IS EXPECTED AND IS NOT THE DEFECT — it is the reason the 4.7G accumulated with no
+    ledger row naming it.
+  design: |
+    THE SHAPE: give ad-hoc lanes ONE declared, derived home that the existing cadence already
+    reaches, and reap that home with the SAME parent-aware removal the reaper now uses — no new
+    mechanism, no wider root, nothing destroyed that is live.
+
+    (i) A DERIVED LANE ROOT, A SIBLING OF `worktreesDir`, NEVER `config.root` ITSELF AND NEVER
+    `$HOME`. Add one resolver beside `worktreesDir` in `src/lib/worker.ts` — the same
+    `join(config.root, …)` shape, never a hardcoded absolute path (public-repo hygiene, matching
+    `workerHomeDir`'s own note). Reaping `config.root` WHOLESALE IS REFUSED BY THIS TASK: rationale
+    (2) measured 180 live worktrees there plus 34 non-worktree entries (ledgers, PR bodies, manifests)
+    that are not worktrees at all and must never be walked by a reaper. A bounded, fleet-owned,
+    lane-only directory is the whole point.
+
+    (ii) REAP IT THROUGH THE PARENT, REUSING WHAT LANDED. `planWorktreeRemoval` /
+    `executeWorktreeRemoval` (`src/lib/worker.ts`) already classify a candidate from its own `.git`
+    and remove a linked worktree via `git worktree remove --force` in its resolved parent, falling
+    back to `rmSync` only where no admin record can be stranded, and keeping on an unreadable `.git`.
+    THIS TASK MUST CALL THAT, NOT WRITE A SECOND REMOVAL. A builder who reaches for `fs.rmSync` here
+    is reinstating the 2026-07-31 defect that work exists to close.
+
+    (iii) THE LIVENESS DOCTRINE IS INHERITED WHOLE, NOT RE-DECIDED. `reapStaleWorktrees` already
+    fails closed on a live pid, on a branch still live upstream however old, and on an incomplete
+    activity probe. Rationale (2) says every lane on this host is on a live branch RIGHT NOW, so a
+    correct implementation reaps ZERO of them today and that is the expected result — the value is
+    the bound, not an immediate reclaim. A criterion asserting "N were reclaimed" would be wrong.
+
+    (iv) THE AGE CEILING MUST BE SIZED FOR A HUMAN, NOT A TASK.
+    `DEFAULT_WORKTREE_REAP_GRACE_MS` is calibrated against run wall-clock. An operator lane is
+    legitimately idle overnight and across a weekend. Derive this root's ceiling from the observed
+    lane lifetime and say what distribution it was sized against — the bound-fires-on-a-healthy-
+    condition defect is this repo's recurring one (W1-T312, W1-T380/#1392, W1-T382/#1401).
+
+    (v) SHIP IT SURVEY-FIRST. `reapStaleWorktrees` already takes `dryRun`, and
+    `logWorktreeReapBootSurvey` already ships DRY behind a policy flag (W1-T406). This root gets the
+    same treatment: ledger what it WOULD reclaim before it is allowed to delete anything. Against a
+    population of 180 live operator lanes that is not caution, it is the only responsible default.
+
+    (vi) MOVE THE PRACTICE, AND MAKE SOMETHING REFUSE IT — DO NOT ONLY EDIT THE PROSE. CLAUDE.md's
+    "Cut worktrees elsewhere (e.g. `~/Remudero/<name>-work`)" must name the derived lane root from
+    (i). But CLAUDE.md's own header says a rule stated ONLY there "can be violated silently and
+    repeatedly", and rationale (4) is exactly that happening — so the doc edit is NOT the deliverable.
+    A check that refuses, or reports, a worktree registered outside both `worktreesDir` and the lane
+    root is. NOTE THE COVERAGE LIMIT HONESTLY: the console account's lanes came from Codex, not from
+    Claude Code, so a Claude-Code-only session hook would have caught none of the 154 in rationale
+    (4). Prefer a check that reads git's OWN registration (`git worktree list`) over one that
+    pattern-matches a shell command.
+
+    (vii) OUT OF SCOPE, NAMED. Adding any `$HOME`-scoped root to `cloneReapRoots` — `clone-reaper.ts`
+    requires `.git` to be a DIRECTORY precisely so it can never touch a linked worktree, and 52 of
+    the 54 directories in rationale (4) were linked, so that reaper would have refused ~96% of the
+    leak by design while gaining a root full of `Documents`, `Library` and `.ssh`. Reclaiming the
+    console account's existing lanes — an operator action, already done by hand on 2026-09-04. And
+    NOT rebuilding `planWorktreeRemoval`, per (ii).
+  acceptance:
+    - claim: "ad-hoc lanes resolve to one derived root under config.root rather than to config.root itself or a home directory"
+      proof: "unit test: test/adhoc-lane-root.test.ts"
+    - claim: "the lane root is reaped through the parent-aware removal rather than a bare recursive delete"
+      proof: "unit test: test/adhoc-lane-reap.test.ts"
+    - claim: "a lane whose branch is still live upstream is never reaped however old"
+      proof: "unit test: test/adhoc-lane-reap.test.ts"
+    - claim: "the lane rung surveys and ledgers what it would reclaim before it is permitted to delete"
+      proof: "unit test: test/adhoc-lane-reap.test.ts"
+    - claim: "a named lane-root resolver exists beside worktreesDir rather than a hardcoded path"
+      proof: "grep: adhocLaneRoot in src/lib/worker.ts"
+  risk: high
+  origin: "oper#adhoc-lane-leak-2026-09-04"
+  plan_refs: ["W1-T175", "W1-T378", "W1-T381", "W1-T406", "W1-T411"]
+  files: [src/lib/worker.ts, test/adhoc-lane-root.test.ts, test/adhoc-lane-reap.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    SCOPE RATIFIED BY THE OPERATOR BEFORE FILING. Four remediation shapes were put to the operator
+    from the 2026-09-04 recon; this shard is the one chosen ("D"), namely move the practice into
+    config.root and give that root a lane reaper. The three declined shapes are recorded in design
+    (vii) rather than dropped, so a later reader does not re-propose the $HOME reap root.
+
+    WHY THIS IS NOT W1-T411. W1-T411 gives stale temp dirs, per-spawn worker homes and abandoned
+    review clones a start-of-run rung; every one of those roots is under tmp or is a standalone
+    clone. NONE of them is a linked worktree under config.root, which is this shard's entire subject.
+    Verified at filing: nothing under plan/ mentions a hand-cut, operator or interactive worktree
+    lane, by `git grep` over plan/ with a matching control.
+
+    WHY THIS IS NOT THE WORKTREE-REAP REMOVAL FIX. The parent-aware removal in design (ii) is
+    already open as a separate PR against `reapStaleWorktrees`; it changes HOW an entry is removed
+    and reclaims no disk. This shard changes WHICH root is scanned. Filed as a dependent-free task
+    because it consumes that work through the exported helper rather than editing the same block.
+
+    FILES DERIVED FROM THE RESOLUTION CHAIN, NOT GUESSED. `src/lib/worker.ts` is declared because
+    `worktreesDir`, `reapStaleWorktrees`, `runWorktreeReapRung`, `planWorktreeRemoval` and
+    `executeWorktreeRemoval` are all defined there. `src/lib/config.ts` is NOT declared: `config.root`
+    already resolves correctly (`join(homedir(), "Remudero")`, unchanged since the repo's first
+    substantive commit 7985d6aa, confirmed by blame) and this task adds a sibling of `worktreesDir`,
+    not a new root key. `src/lib/clone-reaper.ts` is NOT declared — design (vii). `src/run-task.ts`
+    is NOT declared: the rung wiring already exists via `runWorktreeReapRung`, and an implementer who
+    needs it should widen the shard deliberately rather than inherit it.
+
+    BOTH NEW TEST PATHS ARE DECLARED AND BOTH ARE NEW. Acceptance proofs use the PURE-PATH
+    `unit test: test/<file>.test.ts` form, not a title: in a plan shard `judgeCriterion`'s
+    `not_yet_built` carve-out needs `!nameFiltered` AND the path present in `files:`, so a title here
+    would grade `no-match` and become test theatre. The fifth criterion is doc-shaped — the finding
+    itself — and takes a `grep:` on ONE PHYSICAL LINE against this shard's own path.
+
+    THE MEASUREMENT THIS FILING COULD NOT CLOSE, RECORDED RATHER THAN SMOOTHED. ~98 of the 154
+    home-root directories in rationale (4) disappeared during 2026-09-01/02 with NO `rm -rf` and NO
+    `git worktree remove` anywhere in the Codex command log, searched in absolute, tilde and glob
+    forms. If something automated removed them, the ~10% teardown rate and the derived per-day cost
+    are too pessimistic. The console account's Claude Code transcripts are mode 0700 and were not
+    readable, so that half of the population was never observed at all; every creation count in
+    rationale (4) is therefore a FLOOR.
