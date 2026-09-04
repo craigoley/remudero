@@ -21,6 +21,21 @@ interface CodexSpawnArgs {
   cwd: string;
   prompt: string;
   resumeSessionId?: string;
+  /**
+   * W1-T2800 — THE REDIRECTED PER-SPAWN WORKER HOME, threaded EXPLICITLY rather than left to
+   * `args.env` ordering. `spawnWorker` establishes it (`perRunWorkerHomeDir` +
+   * `materializeWorkerHome`) before provider selection commits, so the Codex branch can no longer
+   * return past the redirection the Claude path has had since W1-T18.
+   *
+   * WHY EXPLICIT: `codexSpawnEnv` assigned `env.HOME` first and then copied `args.env` over it, so
+   * an `args.env.HOME` would HAPPEN to win. That is an implicit ordering dependency, and the
+   * design forbids it becoming the mechanism — a later reorder of those two statements would
+   * silently restore the leak with no test failing.
+   */
+  workerHome: string;
+  /** W1-T2800 — `workerZdotdir(config)`, the SAME value the Claude path passes, so a directly
+   *  invoked zsh cannot reach the operator's zdotdir (W1-T1C compinit contamination). */
+  zdotdir?: string;
   env?: Record<string, string>;
   effort?: string;
   maxTurns?: number;
@@ -991,13 +1006,52 @@ function codexSpawnEnv(config: Config, args: CodexSpawnArgs): Record<string, str
   const allowed = ["PATH", "TMPDIR", "LANG", "LC_ALL", "USER", "LOGNAME", "SSH_AUTH_SOCK", "GH_TOKEN", "GITHUB_TOKEN"];
   const env: Record<string, string | undefined> = {};
   for (const key of allowed) if (process.env[key] !== undefined) env[key] = process.env[key];
-  env.HOME = process.env.HOME ?? homedir();
   env.CODEX_HOME = codexHome(config);
   for (const [key, value] of Object.entries(args.env ?? {})) {
     if (!/^ANTHROPIC_|^OPENAI_API_KEY$/.test(key)) env[key] = value;
   }
+  // W1-T2800 — ASSIGNED AFTER `args.env` IS COPIED, AND FROM THE THREADED HOME ONLY.
+  //
+  // MEASURED against pinned codex-cli 0.152.0, with a sentinel exported only from `$HOME/.bashrc`
+  // and this function's own filter plus `shell_environment_policy.exclude` both in force:
+  // `/proc/self/environ` in the child carried ZERO ANTHROPIC keys and a bare `env` (no shell)
+  // carried zero — BOTH EXCLUSIONS HELD — while the worker's SHELL-VISIBLE value was the
+  // sentinel. Plain `bash -c` under the same HOME without Codex read empty, which is the
+  // discriminating control. The exclusions act at the PROCESS BOUNDARY and cannot stop a shell
+  // that re-reads the value FROM DISK afterwards; only a redirected HOME whose rc files are blank
+  // can. Removing `.bashrc` closed the leak and restoring it re-opened it.
+  //
+  // So neither exclusion above is wrong and neither is edited here — this is the missing THIRD
+  // boundary, not a replacement for the two that already work.
+  env.HOME = args.workerHome;
+  if (args.zdotdir !== undefined) env.ZDOTDIR = args.zdotdir;
   Object.assign(env, workerMarkerEnv(args.runId, args.taskId, workerInstallationScope(config.root)));
   return env;
+}
+
+/**
+ * W1-T2800 SCOPE NOTE — a widening recorded here and in the PR body, never in the shard (a
+ * `verify: auto` task cannot declare its own plan record, and `rule15-filing` refuses it).
+ *
+ * `CodexSpawnArgs.workerHome` is REQUIRED, which is the point: an optional field with a fallback
+ * is the defect this task fixes. Making it required is a type-level contract change, so five test
+ * files outside this task's declared `files:` construct Codex spawn fakes the compiler now
+ * refuses — `a-codex-reviewer-scratch-directory-is-not-a-repository`,
+ * `a-codex-worker-starts-outside-a-git-repository`, `a-codex-worker-uses-a-private-temporary-root`,
+ * `codex-model-console` and `worker-provider`. Each gained ONE field on its fake and nothing else;
+ * no assertion, subject or expectation in them was touched.
+ *
+ * The alternative — leaving `workerHome` optional so those fakes still compile — would have kept
+ * a reachable `process.env.HOME` fallback on the spawn path, i.e. preserved the leak to avoid an
+ * advisory. `scope_violation` is advisory precisely so a review can ratify a widening like this
+ * one; the fakes were updated rather than the contract weakened.
+ */
+
+/** W1-T2800: {@link codexSpawnEnv} under test — the env boundary this task fixes is the whole
+ *  subject, so it is reachable directly rather than only through a live spawn. Exported for the
+ *  test seam ONLY; every production caller still goes through {@link codexSpawnEnv}. */
+export function codexSpawnEnvForTest(config: Config, args: CodexSpawnArgs): Record<string, string | undefined> {
+  return codexSpawnEnv(config, args);
 }
 
 function physicalPath(path: string): string {

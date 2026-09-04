@@ -681,6 +681,8 @@ test("Codex spawn carries a subscription refusal through the shared ledger seam"
   });
   const result = await spawnCodexWorker(
     {
+      // W1-T2800: the Codex spawn now requires an explicit redirected worker home.
+      workerHome: mkdtempSync(join(tmpdir(), "rmd-codex-home-")),
       cwd: process.cwd(),
       prompt: "do the task",
       containment: {
@@ -953,6 +955,8 @@ test("Codex worker clock bound tears down the contained process and fails the ru
   await assert.rejects(
     spawnCodexWorker(
       {
+        // W1-T2800: the Codex spawn now requires an explicit redirected worker home.
+        workerHome: mkdtempSync(join(tmpdir(), "rmd-codex-home-")),
         cwd: process.cwd(),
         prompt: "wait forever",
         clockBound: { boundMs: 1 },

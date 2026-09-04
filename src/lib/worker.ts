@@ -1109,7 +1109,12 @@ export interface SpawnWorkerArgs {
     ) => Promise<ProviderCapacity>;
     /** Test seam for the selected Codex spawn; production uses the real contained CLI adapter. */
     spawnCodex?: (
-      args: SpawnWorkerArgs,
+      // W1-T2800: the Codex spawn now REQUIRES the redirected per-spawn worker home, threaded
+      // explicitly rather than inferred from `process.env.HOME` or from `args.env` ordering. The
+      // seam carries it so a test double is held to the same contract the real
+      // `spawnCodexWorker` is — a fake that could omit it would be proving a spawn shape
+      // production can no longer produce.
+      args: SpawnWorkerArgs & { workerHome: string; zdotdir?: string },
       config: Config,
       selection?: Pick<ProviderCapacity, "model" | "effort">,
     ) => Promise<WorkerResult>;
@@ -1520,6 +1525,16 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
   // between concurrent calls; one worker's advisory status read must not switch another's home.
   const realHome = process.env.HOME ?? homedir();
   const config = args.config ?? loadConfig();
+  // W1-T2800: HOISTED ABOVE PROVIDER SELECTION so the Codex branch below cannot return past the
+  // HOME redirection the Claude path has had since W1-T18. Previously this sequence lived after
+  // the `selection.provider === "codex"` early return, so `codexSpawnEnv` fell back to
+  // `process.env.HOME` — the OPERATOR'S REAL HOME — and a worker shell sourcing an rc file from
+  // it re-exported ANTHROPIC_API_KEY past both of Codex's process-boundary exclusions. Computing
+  // the path here is inert (no disk write); each provider branch materializes and reaps it.
+  // `{ perSpawn: true }` is preserved verbatim (W1-T170, W1-T2463): two spawns sharing a runId
+  // still get distinct homes.
+  const workerHomeRoot = workerHomeDir(config);
+  const workerHome = perRunWorkerHomeDir(workerHomeRoot, args.runId, { perSpawn: true });
   const routingPolicy = resolveProviderRoutingPolicy(config.root, config, { now: args.providerRouting?.now });
   if (routingPolicy.fallback) {
     console.error(JSON.stringify({
@@ -1654,8 +1669,15 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         assertLiveSpawnAllowed(`spawnCodexWorker for task ${args.taskId ?? "<no taskId>"}`);
       }
       const measurement = await beginSelectedCapacityMeasurement(args, config, selection, capabilities);
+      // W1-T2800: MATERIALIZE the redirected home before the spawn — the SAME function the Claude
+      // path calls (never a second materializer), which writes the blank rc files
+      // (`WORKER_HOME_RC_FILES`) that close the leak. MEASURED against pinned codex-cli 0.152.0:
+      // both Codex exclusions hold at the process boundary (zero ANTHROPIC keys in the child's
+      // `/proc/self/environ`) while the worker's SHELL still read the operator's exported value
+      // from `$HOME/.bashrc`. A blank rc in a redirected HOME is the only boundary that stops it.
+      materializeWorkerHome({ workerHome, realHome });
       try {
-        const result = await runCodex(args, config, selection.capacity);
+        const result = await runCodex({ ...args, workerHome, zdotdir: workerZdotdir(config) }, config, selection.capacity);
         result.routedModel = selection.capacity.model ?? result.model;
         if (args.model) result.model = args.model;
         if (claudeHealthRoute) {
@@ -1668,6 +1690,11 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       } catch (error) {
         if (measurement) abandonProviderWindowMeasurement(measurement);
         throw error;
+      } finally {
+        // W1-T2800: reap THIS spawn's per-spawn home on every exit path INCLUDING error — the
+        // same guarantee (and the same `reapWorkerHome` call) the Claude path's own `finally`
+        // below has carried since W1-T170. Best-effort and guarded; never touches the root.
+        reapWorkerHome(workerHomeRoot, workerHome);
       }
     }
     routedClaudeSelection = selection;
@@ -1689,7 +1716,6 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
   // slot race each other. So EVERY spawn gets its OWN home, a sibling of the
   // root (`perRunWorkerHomeDir`), never the shared root itself; reaped below
   // on every exit path (including error) once this spawn is done with it.
-  const workerHomeRoot = workerHomeDir(config);
   // W1-T2463: opt IN to a per-spawn uniqueness token appended after args.runId (see
   // perRunWorkerHomeDir's own doc, worker-home.ts). Every fix spawn inside one daemon run
   // previously resolved to the SAME `worker-home-<runId>` (keyed on runId alone), so one
@@ -1699,7 +1725,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
   // untouched), so reclamation is unaffected; only THIS call site opts in — the OTHER
   // caller in src/ (run-task.ts's readUsageSnapshot, "usage-probe") does not, so its
   // stable, non-per-call home is unchanged.
-  const workerHome = perRunWorkerHomeDir(workerHomeRoot, args.runId, { perSpawn: true });
+  // W1-T2800: both are resolved ONCE, above provider selection — see that hoist's own comment.
   try {
     // W1-T235 (WS-7 keychain-unlock gate, macOS only): guarantee the DEDICATED
     // always-unlocked worker keychain before any spawn, and point the redirected

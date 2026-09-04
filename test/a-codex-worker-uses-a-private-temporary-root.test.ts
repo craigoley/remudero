@@ -63,6 +63,8 @@ test("W1-T2750: overlapping fresh and resumed Codex workers get distinct private
     const controlled = deferredCodexProcess();
     const promise = spawnCodexWorker(
       {
+        // W1-T2800: the Codex spawn now requires an explicit redirected worker home.
+        workerHome: mkdtempSync(join(tmpdir(), "rmd-codex-home-")),
         cwd: process.cwd(),
         prompt: "exercise the private temp root",
         resumeSessionId,
@@ -124,6 +126,8 @@ test("W1-T2750: provider-error and synchronous-spawn paths both reap only their 
   let providerTmp = "";
   const providerPromise = spawnCodexWorker(
     {
+      // W1-T2800: the Codex spawn now requires an explicit redirected worker home.
+      workerHome: mkdtempSync(join(tmpdir(), "rmd-codex-home-")),
       cwd: process.cwd(),
       prompt: "return a provider error",
       env: { TMPDIR: sharedTmp },
@@ -147,6 +151,8 @@ test("W1-T2750: provider-error and synchronous-spawn paths both reap only their 
   await assert.rejects(
     spawnCodexWorker(
       {
+        // W1-T2800: the Codex spawn now requires an explicit redirected worker home.
+        workerHome: mkdtempSync(join(tmpdir(), "rmd-codex-home-")),
         cwd: process.cwd(),
         prompt: "fail synchronously",
         env: { TMPDIR: sharedTmp },
@@ -175,6 +181,8 @@ test("W1-T2750: a clock timeout keeps the private TMPDIR through teardown and re
   await assert.rejects(
     spawnCodexWorker(
       {
+        // W1-T2800: the Codex spawn now requires an explicit redirected worker home.
+        workerHome: mkdtempSync(join(tmpdir(), "rmd-codex-home-")),
         cwd: process.cwd(),
         prompt: "wait forever",
         env: { TMPDIR: join(root, "ignored-caller-tmp") },
