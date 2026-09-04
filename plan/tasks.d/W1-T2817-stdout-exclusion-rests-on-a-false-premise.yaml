@@ -1,0 +1,108 @@
+- id: W1-T2817
+  title: "THE OPERATOR MESSAGE STANDARD EXCLUDES ITS LARGEST SURFACE ON A PREMISE THE CODE FALSIFIES — the doc puts process stdout out of scope because its lines are the forensic record every retro greps, and no code anywhere reads the content of an out.log while the identical query for the ledger returns 84 files"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 10.00
+  rationale: |
+    **THE EXCLUSION AND ITS STATED GROUND.** docs/operator-message-standard.md is NORMATIVE. Its
+    heading "Out of scope: the daemon's stdout" excludes that surface and gives a reason: the lines
+    are "the forensic record that every retro greps", so restating any of it in the standard's terms
+    "would invalidate the searches that depend on its current wording".
+
+    **ZERO READERS AND A CONTROL OF EIGHTY-FOUR.** Measured on origin/main: no code in the repo
+    reads the CONTENT of any out.log. The query
+    `git grep -naE '(readFileSync|readFile|createReadStream|tail|zgrep|grep)[^ ]*out\.log' -- src/
+    scripts/ test/ deploy/ .github/` returns 0, and the IDENTICAL query with `ledger` substituted
+    for `out.log` returns 84 files — same tool, same flags, same corpus, so the zero is absence and
+    not a blind read. The only 15 references to out.log anywhere are path construction, the rotation
+    roster, and prose in comments. retro.ts contains no stdout read at all; its forensic union is
+    `resolveLedgerUnion` (src/lib/ledger-grep.ts) over the LEDGER.
+
+    **THE CODE STATES THIS HIERARCHY BACKWARDS FROM THE DOC.** src/lib/log-rotation.ts puts
+    daemon.out.log on ROTATED_LOG_FILES — newsyslog, LOG_ROTATION_COUNT 5, size and age ceilings,
+    compressed — while state/ledger.ndjson is NEVER_ROTATE_FILENAME, and generateNewsyslogConfig
+    THROWS a LogRotationConfigError if the ledger ever appears in the rotation roster. Stdout is the
+    channel this repo bounds and discards by design. The ledger is the one it refuses to lose. The
+    doc's stated ground has the two exactly the wrong way round.
+
+    **WHY THAT MATTERS RATHER THAN BEING A WORDING NIT.** The excluded surface is the largest
+    operator-facing surface the repo has: 106 call sites across 5 modules, against 323 console.log
+    calls in the same sweep. The standard governs the status board, the console rows, an escalation
+    body, and now the narrative half of generated commit and PR text (W1-T2806, W1-T2807). It
+    governs none of this. A NORMATIVE document excluding its biggest surface is a defensible
+    position; excluding it on a reason its own repo falsifies is not, because nobody re-examines an
+    exclusion that reads as already justified.
+  design: |
+    **ONE HUNDRED AND SIX CALL SITES CARRY NO AUDIENCE.** There is no exported `say` to change.
+    `say` is a per-lane LOCAL CLOSURE redeclared 7 times — 5 in src/run-task.ts, one each in
+    src/lib/operator-sync.ts and src/lib/self-sync.ts — and threaded as a dep field through 9
+    declarations. EVERY one of the 9 is `(msg: string) => void`. No channel, level or audience
+    parameter exists at any of them. That, not the absence of a split, is the mechanical gap.
+
+    **THE SPLIT ALREADY EXISTS AS A SIBLING SYMBOL.** Every lane declares
+    `const log = (step, extra) => appendLedger(...)` immediately above its `const say = ...`, and
+    buildSweepEffects passes both as adjacent deps fields. `log` is forensic, `say` is narration.
+    A second, orthogonal distinction exists undeclared at the fd level: 7 sinks on stdout, 4 on
+    stderr. So the concept is present twice already and neither is expressible at a call site.
+
+    **THIS SHARD DOES NOT DECIDE THE SCOPE QUESTION.** It records a falsified premise and parks the
+    ruling. Two answers are open and they are not equivalent:
+
+    (a) THE EXCLUSION SURVIVES ON DIFFERENT GROUNDS — volume, and the fact that stdout is bounded
+    and discarded, are honest reasons to leave it out. Then the doc's stated reason is corrected and
+    the exclusion stands. Cheap, and it makes the standard's own reasoning true.
+
+    (b) THE SURFACE COMES INTO SCOPE, because the reason for keeping it out was the only one given
+    and it is false. Then a later filing does the work, and the sizing below is what it inherits.
+
+    **WHAT A BUILD WOULD COST, SO (b) IS PRICED RATHER THAN GUESSED.** Threading a channel argument
+    through run-task.ts's 98 call sites runs into 71 lines of source-size headroom — the baseline
+    records 36500 and the file measures 36429 — so it forces a deliberate baseline raise, and
+    evaluateSourceSizeRatchet writes a too-high value back DOWN, so pre-raising separately does not
+    work. checkDocsAwareness names `^src/run-task\.ts$` in USER_VISIBLE_SURFACE_RE, so a docs/ file
+    or a stated reason is mandatory. Two test suites slice run-task.ts's SOURCE TEXT by literal and
+    break on a call-site rewrite even when output is byte-identical:
+    test/resolver-divergence-detector.test.ts and test/serve.test.ts. Six more assert output
+    literals. The additive shape — a third symbol beside the existing two — touches only what it
+    reclassifies and costs none of that.
+
+    **WHAT MUST NOT CHANGE.** (i) No operator message is reworded by this shard; it records and
+    parks. (ii) The standard's prohibition on adding any readability, length or vocabulary score
+    carries over unchanged to whatever answer is taken. (iii) The ledger stays the forensic record
+    and NEVER_ROTATE_FILENAME stays as it is; nothing here proposes routing narration into it.
+    (iv) The two source-text anchors above are not to be "fixed" by rewording the tests — they are
+    evidence of coupling, and a build that trips them has learned something.
+  acceptance:
+    - claim: "the shard records that no code reads the excluded channel's content, with the control that proves the query was not blind"
+      proof: "grep: ZERO READERS AND A CONTROL OF EIGHTY-FOUR in plan/tasks.d/W1-T2817-stdout-exclusion-rests-on-a-false-premise.yaml"
+    - claim: "the shard shows the rotation code ordering the two channels the opposite way from the document"
+      proof: "grep: THE CODE STATES THIS HIERARCHY BACKWARDS FROM THE DOC in plan/tasks.d/W1-T2817-stdout-exclusion-rests-on-a-false-premise.yaml"
+    - claim: "the shard measures the excluded surface rather than asserting it is large"
+      proof: "grep: ONE HUNDRED AND SIX CALL SITES CARRY NO AUDIENCE in plan/tasks.d/W1-T2817-stdout-exclusion-rests-on-a-false-premise.yaml"
+    - claim: "the shard records that the distinction already exists as a sibling symbol, so a later build promotes a convention rather than inventing one"
+      proof: "grep: THE SPLIT ALREADY EXISTS AS A SIBLING SYMBOL in plan/tasks.d/W1-T2817-stdout-exclusion-rests-on-a-false-premise.yaml"
+    - claim: "the shard settles nothing itself and parks the scope ruling for the operator"
+      proof: "grep: THIS SHARD DOES NOT DECIDE THE SCOPE QUESTION in plan/tasks.d/W1-T2817-stdout-exclusion-rests-on-a-false-premise.yaml"
+  files: [plan/tasks.d/W1-T2817-stdout-exclusion-rests-on-a-false-premise.yaml]
+  status: queued
+  attempts: 0
+  origin: "oper#plain-language-surfaces-2026-09-04"
+  plan_refs: ["W1-T2279", "W1-T2806", "W1-T2807"]
+  note: |
+    VERIFY IS HUMAN BECAUSE THE SCOPE OF A NORMATIVE DOCUMENT IS THE OPERATOR'S. A lane that widened
+    the standard on its own would be re-scoping a document every later surface cites. The falsified
+    premise is a measurement and belongs in the record; the answer is a ruling and does not.
+
+    EVERY COUNT HERE IS A QUERY AND NOT A NUMBER TO CARRY. The 0-versus-84, the 106 call sites, the
+    9 declarations and the 71 lines of headroom are all recorded with the command that produced
+    them, because each moves with the tree. Re-run them; do not quote them forward.
+
+    THE MEASUREMENT SURVIVED ITS OWN HAZARDS. The mawk trap fired live during this recon: a
+    backslash-b form read 0 over a range where the POSIX form read 1. Every count here uses POSIX
+    classes. The adversarial verification pass that was supposed to check these numbers died on a
+    session limit, so the two load-bearing claims were re-derived by hand instead, each with its
+    control, and that is why only those two carry a control in the text above.
