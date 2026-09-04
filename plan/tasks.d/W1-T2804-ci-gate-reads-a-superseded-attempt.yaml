@@ -1,0 +1,203 @@
+- id: W1-T2804
+  title: "ciGateFromRollup applies neither dedupeRollupByLatestAttempt nor the required-context filter its two siblings got in W1-T457, so a superseded red attempt outvotes its own successor and waitForCiGreen can return RED on a PR that is actually GREEN — and the pinning that would make the two readers comparable at all lives in their callers, not in either function"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 12.00
+  files: [src/run-task.ts, test/ci-gate-reads-a-superseded-attempt.test.ts]
+  origin: "operator-decision#w1-t2804-ci-gate-superseded-attempt-2026-09-04"
+  plan_refs: ["W1-T457", "W1-T2274", "W1-T2793"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE GAP, OBSERVED IN SOURCE AT HEAD 3bc1542.
+    `ciGateFromRollup` (`src/run-task.ts`) is three lines of judgement over a raw rollup:
+
+        const roll = (rollup ?? []).filter((c) => (c.name ?? c.context) !== REVIEW_CTX);
+        const red  = roll.find((c) => isTerminalRed(String(c.conclusion ?? c.state ?? "")));
+        if (red) return "red";
+
+    It excludes `remudero-review` and nothing else. Both of its siblings do more, and both got that
+    more from ONE task:
+      - `checksStateFromRollup` (`src/lib/sweep.ts`) filters to branch protection's OWN required
+        contexts and then calls `dedupeRollupByLatestAttempt` before judging.
+      - `fetchCiFailures` (`src/run-task.ts`) calls `dedupeRollupByLatestAttempt` first and filters
+        on the same shared `REQUIRED_CHECK_FAIL` set.
+    W1-T457 added both for the #1728 defect and never reached this third call site. Its own doc
+    states the property the third reader does not have: "a SUPERSEDED entry … must never permanently
+    veto this function's answer."
+
+    THE CONSEQUENCE OUTRANKS LATENCY, WHICH IS WHY THIS IS FILED AT ALL. A sha accumulates one
+    rollup entry PER ATTEMPT, not one per check name — W1-T457 measured two `ci-gate` entries on one
+    sha, `completed/cancelled` at 13:48:42 and `completed/success` at 13:50:02. `waitForCiGreen`
+    tests `red` FIRST and returns immediately, so a stale CANCELLED attempt of a check whose later
+    attempt on that same sha went SUCCESS makes the gate read RED on a PR that is green. That is not
+    a slow gate; it is a merge blocked on false evidence, and the run that reads it books
+    `blocked_ci` against a PR with nothing wrong. The operator measured the live shape:
+    `acceptance-author-gate` carrying three attempts on one sha at edb9cfb3.
+
+    THE MISSING REQUIRED-CONTEXT FILTER IS A SECOND, INDEPENDENT FALSE-RED SOURCE. Every reported
+    check votes here, required or not, so a red NON-REQUIRED context — one GitHub itself would merge
+    straight past — returns "red" from this gate. `checksStateFromRollup`'s own doc records the
+    mirror-image incident this caused on the other reader (#170: a single SKIPPED non-required
+    context held checksState at "pending" forever) and the fail-closed degrade it uses when branch
+    protection is unreadable. That degrade is part of the contract and must be carried across, not
+    reinvented.
+
+    FOLDED IN, NOT FILED SEPARATELY: THE SHA-PINNING SKEW, BECAUSE FIXING THE PARSER WITHOUT IT
+    LEAVES THE DEFECT.
+      - `waitForCiGreen` reads the PR row, takes `mapRestPr(row).headRefOid`, and calls
+        `restRollupFor(owner, repo, sha, read)` — REST `/commits/{sha}/check-runs`, PINNED to the sha
+        it read at the top of that poll iteration.
+      - the wired `deps.fetchCiFailures` reads `gh pr view --json statusCheckRollup` — GraphQL, at
+        whatever the CURRENT head is when that call runs.
+    NEITHER FUNCTION PINS ANYTHING ITSELF. Both take the rollup as an ARGUMENT, so the pinning lives
+    entirely in their callers, and the two callers pin differently. The stand-down message the fix
+    rung then prints —
+      "the checks-red rollup and the ci-log evidence miner disagree, so there is nothing to hand a
+       fix worker"
+    — asserts a DISAGREEMENT, a word that presupposes a common subject. The two readers were never
+    pinned to one. Pin them consistently and the honest message falls out of the code rather than
+    having to be written; leave the pinning alone and any new message is still a claim about a
+    subject that does not exist.
+
+    THIS IS INSTANCE 1 OF THE SHAPE W1-T2793 NAMES, AND W1-T2793 IS NOT ITS OWNER. That shard's own
+    rationale enumerates this CI pair as instance 1 and then verifies in source that a parser
+    unification cannot reach it, precisely because both take the rollup as an argument. Its
+    criterion 2 therefore requires only that the build "records whether the CI reader pair is fixed
+    or explicitly out of scope" — an escape hatch, deliberately left open, for a pair whose files
+    (`src/run-task.ts`) are not in its `files:` list at all. This shard is what closes it. The two
+    are siblings, not duplicates, and neither blocks the other: they touch disjoint files.
+
+    THE TRAP, STATED PLAINLY BECAUSE IT IS THE ONE THIS SHARD EXISTS TO PREVENT. A change that adds
+    `dedupeRollupByLatestAttempt` and the required-context filter to `ciGateFromRollup` LOOKS LIKE
+    THE FIX. It closes the superseded-attempt vote and the non-required false red, and it leaves the
+    two readers still pinned to different shas — so they can still return contradictory answers
+    about a PR, and the stand-down message still claims a disagreement about a subject they never
+    shared. Unifying the parse without unifying the pinning is a partial fix wearing a complete
+    one's clothes.
+  design: |
+    ONE CONCERN: two readers of one PR's check state must not be able to publish contradictory
+    answers about it — which requires that they read the same ENTRIES (parse) about the same
+    COMMIT (pinning). Both halves, or the concern is not closed.
+
+    (i) THE PARSE. Give `ciGateFromRollup` the two rules its siblings already have, by CALLING the
+    shared implementations, never by re-deriving them: `dedupeRollupByLatestAttempt` for the
+    latest-attempt rule and branch protection's own required-context list for the vote. W1-T457's
+    own design note is the standing instruction — "the fix is to give the sweep the rule the gate
+    already has, not to invent one" — and a fourth hand-rolled filter here would relocate the drift
+    rather than remove it.
+    CARRY THE FAIL-CLOSED DEGRADE ACROSS UNCHANGED. `checksStateFromRollup` treats an unreadable
+    required-context list as "every reported context counts", because an unreadable protection rule
+    must never manufacture a false green. A container PAT gets 403 on the protection endpoint, so
+    that branch is the COMMON case on this fleet, not an edge one. Read the degrade from the sibling;
+    do not re-decide it.
+
+    (ii) THE SIGNATURE. `requiredContexts` is APPENDED LAST with a default, so no positional caller
+    shifts and every existing call site stays byte-identical until it is deliberately wired. That is
+    the same shape `fetchCiFailures` used for `fetchAnnotations` and the preflight seam used for its
+    runner — it is this repo's convention for adding a dependency to a live function.
+
+    (iii) THE PINNING, WHICH IS THE HALF A PARSER FIX CANNOT REACH. Make the two readers agree on
+    the commit they are answering about. The mechanism is the build's call, but the property is not:
+    within one decision — one poll iteration, or one fix-rung round — the gate reader and the
+    evidence miner must resolve their rollups for the SAME sha, and that sha must be OBSERVABLE in
+    whatever the decision reports. Prefer threading the already-resolved sha over adding a second
+    independent read; a second read is a second chance to skew.
+
+    (iv) THE MESSAGE FALLS OUT, IT IS NOT WRITTEN. Once (iii) holds, "the two readers disagree" is
+    either true of a genuinely shared subject — and should name that sha — or the code no longer
+    reaches it. Do not hand-author a message asserting a shared subject that the pinning does not
+    guarantee; that is the current defect with better prose.
+
+    (v) DO NOT COLLAPSE `ciGateFromRollup` INTO `checksStateFromRollup`. They answer different
+    questions and the difference is load-bearing: this one returns "green" only when a check named
+    `ci` reports SUCCESS, while the sibling returns green when every REQUIRED context is OK. A
+    collapse would silently change what `waitForCiGreen` waits for. Share the RULES; keep the
+    verdicts distinct.
+
+    (vi) NOT IN SCOPE, EACH WITH A REASON:
+      - The acceptance-reader disagreement on #3840. That is W1-T2793, filed, with its own files and
+        its own confirming measurement.
+      - `REQUIRED_CHECK_FAIL` / `REQUIRED_CHECK_OK` membership. W1-T2274 last moved that vocabulary
+        deliberately; this task consumes it and must not edit it.
+      - The `remudero-review` exclusion. It is correct here for the reason `ciGateFromRollup`'s own
+        doc gives (the #177 stale-status exhaustion) and stays exactly as it is.
+      - Re-queueing a cancelled check. W1-T1223 owns that, and its `CancelledRequiredCheck` producer
+        already reads the deduped rollup.
+  acceptance:
+    - claim: "a sha carrying three attempts of one required check whose LATEST attempt is green reads green from the gate, so a superseded red attempt can no longer outvote its own successor"
+      proof: "unit test: test/ci-gate-reads-a-superseded-attempt.test.ts"
+    - claim: "a genuinely red required check still reads red, and a red NON-required context no longer votes at all, with the unreadable-protection degrade carried across from the sibling rather than re-decided"
+      proof: "grep: genuine red still reds in test/ci-gate-reads-a-superseded-attempt.test.ts"
+    - claim: "the latest-attempt rule and the required-context list are the shared implementations the two siblings already call, not a fourth hand-rolled filter that can drift from them"
+      proof: "grep: shared rule not a fourth filter in test/ci-gate-reads-a-superseded-attempt.test.ts"
+    - claim: "the gate reader and the ci-log evidence miner resolve their rollups for one sha within a single decision, and the sha they agreed on is observable in what that decision reports"
+      proof: "grep: one sha per decision in test/ci-gate-reads-a-superseded-attempt.test.ts"
+    - claim: "the falsifier records that a parser-only change is insufficient, so a later reader cannot mistake a dedupe fix for the closed concern"
+      proof: "grep: pinning is not parsing in test/ci-gate-reads-a-superseded-attempt.test.ts"
+  falsifier: |
+    BOTH DIRECTIONS ON THE DEDUPE, AND THE SECOND MATTERS MORE. A dedupe that swallows real failures
+    is worse than the bug it replaces: it turns a false red into a false GREEN, which merges.
+
+      FORWARD  — three entries for one check name on one sha, started 13:48:42 CANCELLED,
+                 13:49:20 FAILURE, 13:50:02 SUCCESS. The gate reads green.
+      REVERSE  — the same three with the LATEST entry FAILURE. The gate reads red. And a single
+                 genuine FAILURE with no siblings still reads red, so the dedupe cannot be satisfied
+                 by an empty gate.
+      BOUNDARY — an entry with NO `startedAt` sorting against one that has it, since
+                 `dedupeRollupByLatestAttempt` defines that ordering and this reader now inherits it.
+
+    BOTH DIRECTIONS ON THE REQUIRED-CONTEXT FILTER:
+      a red NON-required context does not make the gate red; a red REQUIRED one does; and with the
+      required list UNREADABLE (the 403 case, which is the common one on this fleet) every reported
+      context counts again, fail-closed — never a green manufactured out of a missing list.
+
+    THE PINNING FALSIFIER IS THE ONE THAT DECIDES WHETHER THIS TASK IS DONE. Construct a round in
+    which the head sha MOVES between the gate read and the evidence read, and assert the two readers
+    still answer about one commit. A test that only exercises a static head passes on the current
+    code and proves nothing — it is exactly the vacuous shape this repo keeps meeting, and it would
+    let the parser-only fix this shard's rationale warns about ship as complete.
+
+    AND A CONTROL ON THE FALSIFIER ITSELF: delete the dedupe call and re-run. The forward case must
+    go RED (`# fail` non-zero). A test that passes with the fix removed is measuring nothing.
+  note: |
+    FILED 2026-09-04 from an operator incident report. The id was reserved on origin
+    (`refs/rmd-id/W1-T2804`, minted 12:36:27Z) before this filing.
+
+    WHAT WAS OBSERVED IN SOURCE AT HEAD 3bc1542, so the build does not re-derive it:
+      - `ciGateFromRollup` filters `REVIEW_CTX` and nothing else — no dedupe, no required-context
+        filter.
+      - `checksStateFromRollup` (`src/lib/sweep.ts`) calls `dedupeRollupByLatestAttempt` and filters
+        on `requiredContexts`; `fetchCiFailures` calls the same dedupe and the shared
+        `REQUIRED_CHECK_FAIL` set. Both cite W1-T457.
+      - `waitForCiGreen` calls `ciGateFromRollup(roll)` where `roll = restRollupFor(owner, repo, sha,
+        read)` and `sha` came from the PR row read at the top of that iteration; the wired
+        `deps.fetchCiFailures` calls `gh pr view --json statusCheckRollup`. Two transports, two
+        pinnings, both chosen by callers.
+      - the stand-down text asserting the two readers "disagree" is the `rung.empty_ci_failures`
+        site's own reason string.
+    WHAT IS THE OPERATOR'S MEASUREMENT, NOT THIS FILING'S: `acceptance-author-gate` carrying three
+    attempts on one sha at edb9cfb3.
+
+    RELATIONSHIP TO W1-T2793, STATED SO NEITHER BUILD DISCOVERS IT LATE. W1-T2793 names this pair as
+    instance 1 and leaves it explicitly optional. If W1-T2793 lands first AND closes the CI pair
+    rather than taking its out-of-scope branch, this task shrinks to whatever it left; the build
+    must CHECK that before starting rather than assume either way. No `depends_on` is declared,
+    because the files are disjoint (`src/run-task.ts` here, `src/lib/sweep.ts` and
+    `src/lib/review.ts` there) and gating a live false-red on an unrelated acceptance investigation
+    would be worse than the small chance of overlap.
+
+    risk:medium, RULE 19 SIZING CHECKED RATHER THAN ASSUMED: the declared set is one source file
+    plus this task's OWN falsifier, whose basename matches this shard's slug, so `subsystemsOf`
+    discounts it as a companion and the tally is one concern. No acceptance text contains a
+    SUBSYSTEM_LEXICON noun.
+
+    ON THE PROOFS: criterion 1 is the pure-path `unit test:` form and earns the `not_yet_built`
+    carve-out on this plan-only head — `judgeCriterion` requires `kind === "test"`, `!nameFiltered`,
+    the path present in this shard's flow-style `files:`, and the file ABSENT at head; all four
+    hold. The other four are `grep:` anchors into that same falsifier so each criterion
+    discriminates independently on the build PR. No pattern contains `*`, `.`, `^`, `$` or `[`.
