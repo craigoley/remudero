@@ -12946,7 +12946,7 @@ async function runTask(
       // convention `lib/ci-parity.ts` uses at both of its own diff sites.
       let diffFiles: string[] | undefined;
       try {
-        diffFiles = execFileSync("git", ["-C", worktreePath, "diff", "--name-only", "origin/main...HEAD"], {
+        diffFiles = execFileSync("git", ["-C", worktreePath, ...MERGE_BASE_DIFF_ARGS], {
           encoding: "utf8",
         })
           .split("\n")
@@ -15547,6 +15547,19 @@ export interface CheckAcceptanceDeps {
  * READ-ONLY: writes no ledger line, no state file, opens nothing.
  */
 /**
+ * The `git diff` argv for "what THIS BRANCH changed relative to where it started" — THREE-DOT,
+ * against the merge base, and that was a real defect once rather than a style preference: two-dot
+ * `origin/main..HEAD` diffs the two TIPS, so every file merged to main after a worktree was cut
+ * reads as something that branch changed (measured on #1533 breaking a running drain's push).
+ *
+ * ONE SPELLING, DELIBERATELY. test/scope-guard-merge-base.test.ts asserts this literal appears
+ * EXACTLY ONCE in this file, so a mutant flipping three-dot to two-dot has a unique substitution
+ * target — and, since both call sites now read it from here, that one mutant reaches both. A second
+ * hand-written copy is how the next one silently gets the range wrong.
+ */
+const MERGE_BASE_DIFF_ARGS = ["diff", "--name-only", "origin/main...HEAD"] as const;
+
+/**
  * W1-T2669 — the sentence to print when a `Remudero-Task:` trailer names a task with NO path in
  * common with this diff, or `undefined` when there is nothing to say.
  *
@@ -15582,7 +15595,7 @@ function trailerScopeMismatch(taskId: string, declared: string[], deps: CheckAcc
  *  origin/main, the same range `rmd preflight --coverage` self-derives rather than trusting a
  *  caller-supplied diff. */
 function checkAcceptanceChangedFiles(): string[] {
-  return execFileSync("git", ["diff", "--name-only", "origin/main...HEAD"], { encoding: "utf8", maxBuffer: 1 << 26 })
+  return execFileSync("git", [...MERGE_BASE_DIFF_ARGS], { encoding: "utf8", maxBuffer: 1 << 26 })
     .split("\n")
     .map((l) => l.trim())
     .filter(Boolean);
