@@ -10,6 +10,13 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { detectTestTheater } from "../src/lib/review.js";
+// The planted tautologies live under `test/fixtures/` — which `isFixtureDataPath` excludes from
+// the scan — because a suite holding them INLINE self-matches the very arm it is testing. See
+// that fixture's own header for the measurement that earned this split.
+import {
+  ALL_PLANTED_TAUTOLOGIES,
+  PLANTED_BARE_ASSERT_TRUE,
+} from "./fixtures/test-theater-planted/planted.js";
 
 /** A unified-diff hunk for one test file. `lines` carry their own `+`/`-`/` ` prefix. */
 function diffFor(path: string, lines: string[]): string {
@@ -71,16 +78,16 @@ test("W1-T2815: an ADDED test case that DOES assert is not theater — the uncha
 // NOOP_ASSERTION_RE check would let a tautology smuggled into an EXISTING test case walk straight
 // through, because such a diff declares no new case either.
 
-test("W1-T2815: a planted `assert(true)` inside an EXISTING test case is still refused, though the diff declares no new case", () => {
+test("W1-T2815: a planted tautology inside an EXISTING test case is still refused, though the diff declares no new case", () => {
   const diff = diffFor("test/some-feature.test.ts", [
     "   const result = doTheThing();",
-    "+  assert(true);",
+    PLANTED_BARE_ASSERT_TRUE,
   ]);
   assert.equal(detectTestTheater(diff), true, "the NOOP arm must sit ABOVE the declaration guard");
 });
 
-test("W1-T2815: `expect(true)` and `assert.equal(true, true)` are refused on the same unconditional arm", () => {
-  for (const planted of ["+  expect(true);", "+  assert.equal(true, true);"]) {
+test("W1-T2815: every planted-tautology form is refused on the same unconditional arm", () => {
+  for (const planted of ALL_PLANTED_TAUTOLOGIES) {
     assert.equal(detectTestTheater(diffFor("test/some-feature.test.ts", [planted])), true, planted);
   }
 });
