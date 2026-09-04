@@ -1,0 +1,82 @@
+- id: W1-T2845
+  title: "MAIN CAN ADVANCE BETWEEN THE ONLY FRESHNESS READ AND ADMISSION — a long retro or sweep can make the daemon stale inside one tick, but only STOP and PAUSE are re-checked before admission, so stale code starts another worker and postpones its own restart"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  files:
+    - src/lib/daemon.ts
+    - test/daemon-freshness.test.ts
+  origin: "incident#stale-post-retro-admission-2026-09-04"
+  plan_refs: ["W1-T126", "W1-T936", "W1-T1065", "W1-T1272", "W1-T2265"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON THE AZURE FLEET ON 2026-09-04. The daemon process booted from checkout
+    `aa36784f`. Its mounted checkout later fetched `origin/main` to `86752c4f`. A retro
+    prepublish attempt ended at 21:39:36Z after a long validation window. Instead of reaching
+    `daemon_selfrestart_for_freshness`, that same process selected W1-T2653 at 21:43:25Z and
+    recorded `run.start` at 21:45:38Z. W1-T2667 was also selected in the same batch and only its
+    nested run-task guard refused it as already merged. The stale process therefore admitted new
+    work after the remote ref had advanced, and its freshness restart remained delayed behind the
+    newly started W1-T2653 lane.
+
+    SOURCE CONFIRMS THE WINDOW. `runDaemon` reads `deps.checkFreshness` once near the top of the
+    tick, before the full sweep, orphan and feedback reconciliation, GitHub posture, measurement
+    cadence, usage reads, retro and console kick. W1-T1065 added a second STOP and PAUSE read
+    immediately before admission because those earlier values can go stale while awaited rungs
+    run. That pre-admission block does not read freshness. A remote advance during any long rung
+    is therefore invisible until the next tick, but starting a worker prevents that next tick
+    until the worker settles.
+
+    This is not the already-solved W1-T1272 ordering defect. W1-T1272 ensures a freshness verdict
+    that is already stale reaches the full sweep before returning. Here the first verdict was
+    fresh and became obsolete inside the tick. It is also not a request to make retro concurrent:
+    the plan-consistency ruling remains intact. The defect is one missing re-check at the same
+    safe pre-admission boundary already established for STOP and PAUSE.
+  design: |
+    Re-check the existing `deps.checkFreshness` immediately after the pre-admission STOP and PAUSE
+    checks and before any task is appended to `admitted` or any `daemon.iteration` row is written.
+    If the second observation is stale, admit nothing and use the same stale-exit path as the
+    top-of-tick check: perform any required install, run the bounded full sweep required by
+    W1-T1272, ledger `daemon_selfrestart_for_freshness`, and return the existing `stale` summary.
+    Factor that stale-exit behavior so the two call sites cannot drift.
+
+    STOP and PAUSE retain priority at both boundaries. A hard STOP still exits cleanly without a
+    freshness restart. PAUSE still idles in-process and suppresses freshness checks while held.
+    No already-admitted worker is interrupted because the new read remains above admission and
+    `Promise.allSettled`. A fresh or unavailable second observation changes nothing. The extra
+    check uses the existing git freshness dependency and does not consume GitHub REST or GraphQL
+    budget.
+
+    Do not weaken the fail-closed preflights, detach retro, change lane counts, or add another
+    restart mechanism. This task closes only the stale-within-one-tick admission window.
+  acceptance:
+    - claim: "when origin/main advances during a long awaited rung, the daemon admits no task from that stale tick"
+      proof: "unit test: test/daemon-freshness.test.ts"
+    - claim: "the late stale observation follows the same bounded full-sweep, install and daemon_selfrestart_for_freshness path as a top-of-tick stale observation"
+      proof: "unit test: test/daemon-freshness.test.ts"
+    - claim: "STOP and PAUSE observed at the pre-admission boundary still win over a simultaneous freshness restart"
+      proof: "unit test: test/daemon-freshness.test.ts"
+    - claim: "a fresh or unavailable late observation preserves the existing dispatch path"
+      proof: "unit test: test/daemon-freshness.test.ts"
+    - claim: "the late check sits before admission and never interrupts an already-running batch"
+      proof: "unit test: test/daemon-freshness.test.ts"
+    - claim: "removing only the pre-admission freshness read makes the stale-during-retro fixture dispatch and fail"
+      proof: "mutation test: test/daemon-freshness.test.ts"
+  falsifier: |
+    Close without implementation if current source already reads freshness again after the long
+    awaited rungs and before admission, or if the live timestamps show W1-T2653 was admitted before
+    `origin/main` advanced. Source has only the top-of-tick freshness call, while the container's
+    remote ref and the 21:43:25Z selection refute those alternatives.
+  note: |
+    ID PROVENANCE: `rmd next-task-id --reserve` atomically reserved W1-T2845 at
+    `refs/rmd-id/W1-T2845` after observing 2844 as the maximum across the plan, open PRs and
+    history.
+
+    `risk: high` pays the repository's filename-span rule for one daemon source file and its
+    dedicated freshness test. This task does not start, stop, restart, replace or deploy either
+    Azure container.
