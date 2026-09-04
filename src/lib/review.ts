@@ -13,7 +13,12 @@ import { loadPlanAtRef, visibleCriteria, type AcceptanceCriterion, type TaskRisk
 import { scanUnreachedExports, type UnreachedExport } from "./reachability.js";
 import { loadDefaultPolicy, type ArmCalibrationBandRow } from "./policy.js";
 import { readLedgerLines } from "./status.js";
-import { GENERATED_LEDGER_CLASSES, isCompanionPath } from "./companion-paths.js";
+import {
+  COMPANION_PATH_CLASSES,
+  type CompanionPathClass,
+  GENERATED_LEDGER_CLASSES,
+  isCompanionPath,
+} from "./companion-paths.js";
 import { ghJson } from "./worker.js";
 
 /**
@@ -6839,13 +6844,46 @@ function changedFiles(lines: DiffLine[]): string[] {
 /**
  * ONE CONCERN: a PR should cluster around a single source module. Two or more
  * distinct product/test STEMS is the partial-fix-drift smell of a multi-concern PR.
+ *
+ * W1-T2823 — THE COMPANION DISCOUNT, READ FROM THE SHARED TABLE. {@link concernStem} keys a
+ * concern to a BASENAME, and its collapse rule is written for a `src/lib/foo.ts` +
+ * `test/foo.test.ts` pairing. This repo does not name suites that way: a falsifier is named after
+ * the CLAIM it proves, so a PR's own suite contributed a second stem and the arm fired on 36 of
+ * the 43 judged commits in an 80-commit sample of origin/main (83.7%). An advisory the fix rung
+ * CONSUMES that is wrong five times in six is worse than no input, because the ~15% where the arm
+ * is RIGHT cannot be told apart from the rest.
+ *
+ * The discount is {@link COMPANION_PATH_CLASSES} — the table W1-T2547 extracted so "BOTH
+ * task-linter.ts and review.ts can read it", named in its own header for THIS consumer — and not
+ * a fourth basename heuristic private to the rubric, which would relocate the drift rather than
+ * remove it (W1-T457: give the consumer the rule the other gate already has).
+ *
+ * TWO PASSES, mirroring {@link "./task-linter.js".subsystemsOf} rather than re-deriving it:
+ * companions are collected SEPARATELY and folded in only if nothing else survives, so a test-only
+ * diff still scores its stems instead of collapsing to zero concerns and passing vacuously.
+ *
+ * LOOSE, NOT TIGHT, AND MEASURED BOTH WAYS BEFORE CHOOSING. The alternative was W1-T2525's
+ * `ownFalsifierSlug` narrowing — discount only the suite whose stem equals the task's own shard
+ * slug. Over the same 43 commits: 36 today, 19 under this rule, 33 under the slug narrowing. They
+ * differ on 6 commits and the slug narrowing is wrong on every one, because a shard slug is
+ * derived from the task TITLE and truncated while a falsifier is named after the CLAIM, so it
+ * flags the PR's own suite. It would also need the `Remudero-Task:` trailer, a dependency this arm
+ * does not have.
  */
-export function checkOneConcern(diff: string): RubricItemResult {
+export function checkOneConcern(
+  diff: string,
+  companionClasses: ReadonlyArray<CompanionPathClass> = COMPANION_PATH_CLASSES,
+): RubricItemResult {
   const stems = new Set<string>();
+  const companions = new Set<string>();
   for (const f of changedFiles(walkDiff(diff))) {
     const s = concernStem(f);
-    if (s) stems.add(s);
+    if (!s) continue;
+    if (isCompanionPath(f, companionClasses)) companions.add(s);
+    else stems.add(s);
   }
+  // A diff of companions ONLY still counts them — see the two-pass note above.
+  if (stems.size === 0) for (const s of companions) stems.add(s);
   if (stems.size > 1) {
     return {
       key: "one-concern",
