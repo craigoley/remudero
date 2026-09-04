@@ -1,0 +1,54 @@
+- id: W1-T2843
+  title: "an ACR workflow path trigger naming deploy/entrypoint.sh is misclassified as gate logic, so the image-build PR fails instrument-surface completeness even though the entrypoint does not define what CI measures"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high
+  files:
+    - src/lib/review.ts
+    - test/instrument-surface-completeness.test.ts
+  origin: "oper#pr-3967-entrypoint-path-trigger-2026-09-04"
+  plan_refs: ["W1-T402", "W1-T2841"]
+  status: queued
+  attempts: 0
+  rationale: |
+    PR #3967 adds `deploy/entrypoint.sh` to the ACR workflow's `push.paths` filter because that
+    file is copied into the image and therefore requires a rebuild. CI shard 4/4 failed twice on
+    the same deterministic assertion: instrument-surface completeness derived
+    `deploy/entrypoint.sh` as an undeclared gate-rule-like path. The workflow reference controls
+    WHEN a build runs; it does not change WHAT any correctness gate measures.
+
+    `src/lib/review.ts` already carries a reasoned exclusion for `deploy/recycle-container.sh`,
+    another operational script referenced by workflow plumbing but not a CI instrument. The
+    missing entrypoint exclusion makes the complete, required image-build trigger impossible to
+    land without either weakening the trigger or misrepresenting an operational asset as gate
+    policy. Neither is correct.
+  design: |
+    Add `deploy/entrypoint.sh` to `INSTRUMENT_SURFACE_EXCLUSIONS` with a substantive reason that
+    names both facts: it is a container image asset, and its new workflow reference is only a
+    `push.paths` trigger. Keep the completeness detector and every true instrument-surface rule
+    unchanged. Add a focused assertion that the exact path has a non-blank, reasoned exclusion so
+    removing the implementation makes the test fail even before PR #3967's workflow change is in
+    the same tree.
+
+    This task does not edit the ACR workflow, the entrypoint, or PR #3967. Once this exclusion
+    lands on main, #3967's merge ref will inherit it and its existing completeness test can pass.
+  acceptance:
+    - claim: "deploy/entrypoint.sh is explicitly classified as an operational image asset rather than a CI gate instrument"
+      proof: "unit test: W1-T2843: the entrypoint path trigger has a reasoned instrument-surface exclusion"
+    - claim: "the exclusion reason states that the workflow reference is a push.paths build trigger and not gate-rule logic"
+      proof: "unit test: W1-T2843: the entrypoint path trigger has a reasoned instrument-surface exclusion"
+    - claim: "all other derived workflow and package paths still pass through the existing fail-closed completeness detector"
+      proof: "unit test: test/instrument-surface-completeness.test.ts"
+  falsifier: |
+    Close this task without implementation if PR #3967 passes the instrument-surface completeness
+    test unchanged, or if `deploy/entrypoint.sh` is shown to define a correctness gate's policy or
+    measured output rather than only the container runtime and its build-trigger eligibility.
+  note: |
+    ID PROVENANCE: `rmd next-task-id --reserve` reported advisory W1-T2842, observed that origin
+    already held that reservation, then atomically reserved W1-T2843 at
+    `refs/rmd-id/W1-T2843` in one attempt. The observed failing CI line named exactly
+    `deploy/entrypoint.sh`; no second path is included in this task.
