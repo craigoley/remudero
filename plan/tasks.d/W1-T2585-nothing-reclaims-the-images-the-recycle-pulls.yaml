@@ -5,9 +5,12 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  risk: medium
+  risk: high
   budget_usd: 6.00
-  files: [deploy/recycle-container.sh, test/nothing-reclaims-the-images-the-recycle-pulls.test.ts]
+  files:
+    - deploy/recycle-container.sh
+    - test/nothing-reclaims-the-images-the-recycle-pulls.test.ts
+    - test/host-capability-fixtures.test.ts
   origin: "operator-brief#image-store-unreclaimed-2026-09-01"
   plan_refs: ["W1-T1064", "W1-T1082", "W1-T411"]
   status: queued
