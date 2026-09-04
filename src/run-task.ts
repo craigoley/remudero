@@ -658,7 +658,6 @@ import {
   cappedReason,
   reviewLedgerLegibilityFields,
   reviewLedgerReasons,
-  SCOPE_EXEMPT_GENERATED_ARTIFACTS,
   resolvePlanCriteriaAtHead,
   type PlanCriteriaAtHeadDivergence,
   parseWhitelistedProof,
@@ -748,6 +747,7 @@ import {
   decideRedBaseRefresh,
   failingSourceFilesFromCiFailures,
   failingTestFilesFromCiFailures,
+  REGENERABLE_ARTIFACT_GENERATORS,
   actionableGateFailuresFromReasons,
   armOutcomeArmed,
   checkCostGovernor,
@@ -4025,12 +4025,19 @@ export function checkPrOwnership(
  * legitimize an out-of-scope push. An empty `diffFiles` is always clean
  * (nothing staged, nothing to refuse) regardless of the declared scope.
  *
- * W1-T2650: also admits {@link SCOPE_EXEMPT_GENERATED_ARTIFACTS} — the SAME enumerated set
- * `scopeViolationFiles` (lib/review.ts) subtracts, so a PR this guard admits is never the one the
- * reviewer's `scope_violation` advisory flags for the same path, and vice versa. The exemption is
- * only ever consulted ALONGSIDE a task's own declared scope (the `!declaredFiles ||
- * declaredFiles.length === 0` branch above already returned): an undeclared task still has every
- * non-empty diff refused, exempt artifact or not, so this never widens the fail-closed default.
+ * W1-T2650 admitted ONE hand-enumerated path (`scripts/source-size-baseline.json`, then
+ * `lib/review.ts`'s `SCOPE_EXEMPT_GENERATED_ARTIFACTS`) so that gate's own printed remedy stopped
+ * being refused by this guard. W1-T2651 generalizes the SOURCE of that admission: rather than a
+ * second hand-maintained list this guard alone consulted, the exempt set is now read directly off
+ * {@link REGENERABLE_ARTIFACT_GENERATORS} (lib/sweep.ts) — the repo's OWN registry of paths a
+ * generator reproduces from the tree, already relied on by the merge-conflict rung (W1-T2548) and
+ * named in {@link "./run-task.js".renderFixPrompt}'s DECLARED SCOPE carve-out (W1-T2651) with the
+ * identical set, so a worker told it MAY commit a registry path is never the one this guard then
+ * refuses. A sixth (or Nth) regenerable artifact registered there inherits the carve-out with no
+ * second table to keep in sync. The exemption is only ever consulted ALONGSIDE a task's own
+ * declared scope (the `!declaredFiles || declaredFiles.length === 0` branch above already
+ * returned): an undeclared task still has every non-empty diff refused, registry artifact or not,
+ * so this never widens the fail-closed default.
  */
 export function scopeGuardOutOfScopeFiles(
   diffFiles: readonly string[],
@@ -4039,7 +4046,7 @@ export function scopeGuardOutOfScopeFiles(
   if (diffFiles.length === 0) return [];
   if (!declaredFiles || declaredFiles.length === 0) return [...diffFiles];
   const declared = new Set(declaredFiles);
-  return diffFiles.filter((f) => !declared.has(f) && !SCOPE_EXEMPT_GENERATED_ARTIFACTS.has(f));
+  return diffFiles.filter((f) => !declared.has(f) && !Object.hasOwn(REGENERABLE_ARTIFACT_GENERATORS, f));
 }
 
 /** The `git ls-remote --exit-code` probe's OWN failure evidence — captured from the `catch`
@@ -5707,6 +5714,22 @@ export function reportSubstituteStandDownReason(
  * not) from a failing check. See {@link fixRungScopeStandDownReason} for the belt-and-suspenders
  * half of this fix: a worker that ignores this line and pushes outside scope anyway is caught at
  * the NEXT pre-strike gate, before another strike compounds on top of it.
+ *
+ * W1-T2651: before this, the DECLARED SCOPE sentence forbade EVERY path outside `task.files`,
+ * mode-agnostically — including the one edit a failing gate had itself just printed as the fix
+ * (`scripts/source-size-ratchet.mjs`'s own remedy for the source-size ceiling it enforces). A
+ * worker that obeyed this prompt filed a Follow-up and left the PR red; a worker that obeyed the
+ * gate instead was caught by {@link fixRungScopeStandDownReason}'s belt-and-suspenders half, which
+ * stood the rung down over the very path the prompt would have called "not yours to widen" — no
+ * lane in the fleet could clear it either way. The REGISTRY EXCEPTION clause below names the ONE
+ * bounded carve-out: a path {@link REGENERABLE_ARTIFACT_GENERATORS} (lib/sweep.ts) declares may be
+ * committed alongside the declared scope, and {@link scopeGuardOutOfScopeFiles} (which
+ * `fixRungScopeStandDownReason` calls, via {@link outOfDeclaredScopeFiles}) now agrees — the SAME
+ * registry, read once, never a second hand-maintained list either side could drift from. Rendered
+ * only for a NON-plan-only task: a plan-only PR's scope regime is plan-membership
+ * ({@link outOfPlanScopeFiles}), which this registry was never wired into (design note iii keeps
+ * the two regimes untouched), so promising the exception there would tell a worker something the
+ * pre-strike gate would still refuse.
  */
 export function renderFixPrompt(opts: {
   task: { id: string; title: string; files?: readonly string[] };
@@ -5744,6 +5767,14 @@ export function renderFixPrompt(opts: {
     opts.task.files && opts.task.files.length > 0 && opts.baselineDiffFiles
       ? outOfDeclaredScopeFiles(opts.baselineDiffFiles, opts.task.files)
       : [];
+  // W1-T2651: the ONE bounded exception to "do not push it" — a path this repo's own generator
+  // registry declares (the SAME registry {@link scopeGuardOutOfScopeFiles} now reads, never a
+  // second list). Rendered only for a task whose declared scope is NOT plan-only: a plan-only PR
+  // is graded by plan-scope membership instead ({@link outOfDeclaredScopeFiles}'s own regime
+  // selection), which this registry was never wired into, so promising the exception there would
+  // contradict the pre-strike gate that actually runs against that PR.
+  const planOnlyTask = !!opts.task.files && opts.task.files.length > 0 && opts.task.files.every(isInPlanScope);
+  const registryPaths = Object.keys(REGENERABLE_ARTIFACT_GENERATORS).sort();
   const scopeBlock =
     opts.task.files && opts.task.files.length > 0
       ? [
@@ -5754,6 +5785,18 @@ export function renderFixPrompt(opts: {
             `yours to widen. A commit outside declared scope is PUSHED AND FLAGGED (\`scope_guard.overrun\`), ` +
             `not blocked — but the NEXT round's fix rung stands down on any NEW out-of-scope path THIS rung ` +
             `adds, so treat "do not push it" as the real rule, not a formality.`,
+          ...(!planOnlyTask
+            ? [
+                `REGISTRY EXCEPTION (W1-T2651): the one bounded exception to "do not push it" is a path this ` +
+                  `repo's own generator registry declares (REGENERABLE_ARTIFACT_GENERATORS, lib/sweep.ts — ` +
+                  `currently ${registryPaths.join(", ")}). If the failing gate you are fixing names one of ` +
+                  `those paths as its own remedy, you MAY commit it alongside the declared scope above — the ` +
+                  `fix rung will NOT stand down over it and no strike is spent for doing so — but re-derive ` +
+                  `any file-count or file-list claim in your REPORT/PR body afterward so it still matches the ` +
+                  `diff you actually pushed. Every other path outside the declared list still follows the ` +
+                  `"do NOT push it" rule above verbatim; this is not a general licence to widen scope.`,
+              ]
+            : []),
           ...(inheritedOutOfScope.length > 0
             ? [
                 `INHERITED SCOPE (W1-T2607): this branch already carries path(s) outside the declared list ` +
