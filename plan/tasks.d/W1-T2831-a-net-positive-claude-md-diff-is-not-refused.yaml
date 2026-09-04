@@ -1,0 +1,165 @@
+- id: W1-T2831
+  title: "MASTER-PLAN §8A — compression is a deliverable, not just accretion — is enforced by NOTHING: the claude-md-budget-ratchet caps TOTAL SIZE while §8A demands PER-CHANGE discipline, so a lane may add 400 net bytes while headroom exists, pass every required check, and leave the cost to whoever arrives when the cap binds"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 8.00
+  files: [scripts/claude-md-budget-ratchet.mjs, test/a-net-positive-claude-md-diff-is-not-refused.test.ts]
+  origin: "operator-decision#w1-t2831-net-byte-gate-2026-09-04"
+  plan_refs: ["W1-T2507", "W1-T503", "W1-T2805"]
+  status: queued
+  attempts: 0
+  rationale: |
+    TWO DIFFERENT RULES, ONE OF THEM UNENFORCED. `scripts/claude-md-budget-ratchet.mjs` compares
+    ONE number — the file's total size — against `capBytes`. MASTER-PLAN §8A asks something else
+    entirely: that each CHANGE pay for itself. A total-size ceiling is silent about per-change
+    discipline for as long as headroom lasts, and CLAUDE.md's own preamble already names what that
+    means — a rule stated only in prose "can be violated silently and repeatedly", and the fix is
+    to make something refuse it rather than to sharpen the wording.
+
+    MEASURED 2026-09-04 over the 21 days 2026-08-14..2026-09-04, 32 commits touching CLAUDE.md
+    (`--no-merges` excludes nothing here: this is a squash-merge repo, and the with-merges count is
+    also 32, so no CLAUDE.md change reached main only through a merge commit).
+
+    LINES ARE NOT BYTES AND THE RATCHET CAPS BYTES, so the two classifications disagree and only
+    one of them is about the thing being enforced:
+      by LINES:  5 add-with-no-deletion | 11 added <= removed | 16 partial
+      by BYTES:  16 net additions       | 4 net folds         | 12 net-neutral rewrites
+    Only FOUR of thirty-two commits actually made the file smaller. Twelve are in-place rewrites
+    that a line count scores as folds: `22ba6cba` reads 27 added / 26 removed, and its first added
+    and first removed lines are THE SAME SENTENCE REWORDED, for +14 bytes.
+
+    THE LIVE REGIME IS THE CASE THIS GATE IS FOR. W1-T2507 lowered the cap 67536 -> 44000 on
+    2026-08-31 — the first downward move this ratchet has ever made — after migrating content OUT
+    (path-scoped bullets to `learnings/`, host-only rules to `docs/operator-guide.md`, the dated
+    sections folded into topical ones), and its recorded rationale says the new figure keeps
+    "about 1400 bytes" so the ratchet "keeps its designed job of forcing a fold-or-migrate decision
+    on the NEXT addition". Since that decision: FIVE commits, +862 net bytes, ZERO net folds, and
+    headroom 845 -> 604 -> 192 -> 14 in four days. The forcing function works; nothing makes the
+    per-change decision it was meant to force.
+
+    THE OBVIOUS PREDICATE IS WRONG, AND THIS IS THE FINDING THE MEASUREMENT PRODUCED. A gate
+    refusing "a CLAUDE.md addition that carries no deletion" would have PASSED ALL FOUR commits
+    that consumed the headroom — every one of them already deletes something. That predicate is a
+    PROXY for the property that matters and is satisfied by exactly the failing cases; shipping it
+    would produce a green gate and an unchanged trend. The gate must key on NET BYTES.
+
+    THE POLICY CONSEQUENCE, STATED BECAUSE IT IS THE REAL EFFECT RATHER THAN A SIDE EFFECT: at
+    current headroom, CLAUDE.md space is earned only by a fact a session must read BEFORE ACTING,
+    and only by DISPLACING something else. Everything else belongs in `learnings/*.yaml`, whose
+    `files:` glob delivers a fact to the task that governs it. Two lanes already applied that by
+    hand this week — W1-T2805 routed four of its own items to `learnings/` for exactly this reason.
+    This gate makes it hold when nobody is watching, which is the only condition under which it has
+    ever failed.
+  design: |
+    EXTEND THE EXISTING RATCHET. `scripts/claude-md-budget-ratchet.mjs` already resolves the file,
+    already measures BYTES (`measureBytes` uses `readFileSync(path).length`, deliberately bytes and
+    not characters), and already owns the CLAUDE.md size contract. Add the BASE's size beside the
+    head's and refuse a net-positive delta. DO NOT BUILD A PARALLEL CHECKER: a second script with
+    its own notion of the same budget is a second thing to keep in step, and this repo has already
+    measured what happens when one predicate exists in two copies.
+
+    (i) THE CAP CHECK IS UNCHANGED AND STAYS. `evaluateRatchet` keeps refusing an over-cap file, and
+    keeps its `capBytes`-not-a-number throw. The net-byte rule is an ADDITIONAL violation on the
+    same run, reported in the same list, so one invocation answers both questions and CI needs no
+    new job. A run that trips both reports both.
+
+    (ii) RESOLVING THE BASE IS THE ONLY GENUINELY NEW INPUT, AND IT HAS A KNOWN TRAP. CI already
+    passes `BASE_SHA: ${{ github.event.pull_request.base.sha }}` to other jobs, and CLAUDE.md
+    records that this is an EVENT-PAYLOAD SNAPSHOT: a re-run replays the same sha, so a poisoned
+    base does not clear by re-running. Prefer a base resolved at run time (`git merge-base` against
+    the tracking branch) with the env value as an explicit, documented fallback; whichever is
+    chosen, the script must SAY which base it used in its output, because a gate that reports a
+    delta without naming the two operands is the stale-operand shape hazard (h) already describes.
+
+    (iii) THE THREE STATES THAT ARE NOT VIOLATIONS, each of which must be reachable and tested:
+      - CLAUDE.md ABSENT FROM THE DIFF — the gate does not fire at all. This is most runs.
+      - NO RESOLVABLE BASE (a run on `main` itself, a shallow clone, a detached head with no
+        tracking branch) — report "base unresolved, net-byte check skipped" and exit 0 on that arm.
+        It must NOT invent a base and it must NOT refuse: a check that cannot determine its own
+        comparand must not claim to have enforced one, which is the posture `capBytes: null`
+        already establishes one function over.
+      - DELTA <= 0 — passes silently. A gate that refuses a sharpening is worse than no gate,
+        because the sharpening is the behaviour §8A is trying to buy.
+
+    (iv) NO OVERRIDE FLAG, AND THIS IS A DESIGN CONSTRAINT RATHER THAN AN OMISSION. An escape hatch
+    would be reached for on the first inconvenient PR and the rule returns to prose with extra
+    steps. If a rule genuinely earns its bytes the author folds first, or files a compression task
+    first — that IS the discipline §8A names. Do not add `--allow-growth`, an env bypass, a
+    commit-message trailer, or a per-PR exemption list.
+
+    (v) DO NOT RAISE THE CAP AS PART OF THIS, AND DO NOT LOWER IT EITHER. 44000 was chosen on
+    2026-08-31 with stated arithmetic by a task that did the expensive migration first, and four
+    raises preceded that single cut. This gate exists to PROTECT that decision; changing the number
+    in the same diff would make the gate's first act an instance of the behaviour it refuses.
+    `scripts/claude-md-budget-baseline.json` is deliberately NOT in `files:`.
+
+    (vi) NOT IN SCOPE: extending the rule to `learnings/*.yaml` (that corpus has its own ratchet
+    with its own budget and 6349 chars of headroom, so the pressure this task answers does not
+    exist there), and any edit to CLAUDE.md itself.
+  acceptance:
+    - claim: "a net-positive CLAUDE.md diff is refused, with the failure naming both operands and the delta rather than only the verdict"
+      proof: "unit test: test/a-net-positive-claude-md-diff-is-not-refused.test.ts"
+    - claim: "a byte-neutral or net-negative CLAUDE.md diff passes, so the gate never refuses a sharpening or a fold"
+      proof: "grep: a fold and a sharpening both pass in test/a-net-positive-claude-md-diff-is-not-refused.test.ts"
+    - claim: "a diff that does not touch CLAUDE.md is unaffected, and an unresolvable base skips the net-byte arm rather than refusing or inventing a comparand"
+      proof: "grep: not fire on an untouched file in test/a-net-positive-claude-md-diff-is-not-refused.test.ts"
+    - claim: "the existing total-size cap check still refuses an over-cap file and still throws on a non-number capBytes, both reported from the same single invocation"
+      proof: "grep: the cap check still refuses in test/a-net-positive-claude-md-diff-is-not-refused.test.ts"
+    - claim: "no override exists — the script exposes no flag, env var or trailer that permits a net-positive diff to pass"
+      proof: "grep: no override exists in test/a-net-positive-claude-md-diff-is-not-refused.test.ts"
+  falsifier: |
+    THREE DIRECTIONS, AND ALL THREE MUST BE DRIVEN — the second is the one that makes this a gate
+    worth having rather than a blunt refusal.
+
+      REFUSE  — construct a net-positive CLAUDE.md diff and prove it REDS, naming the base size,
+                the head size and the delta. A gate that cannot be made to fail is measuring
+                nothing.
+      PASS    — a byte-NEUTRAL diff (an in-place reword, the 12-commit shape the measurement found)
+                and a net-NEGATIVE diff both pass. If either reds, the gate refuses sharpening and
+                is worse than no gate at all.
+      SILENT  — a diff touching no CLAUDE.md byte does not fire the arm, and an unresolvable base
+                skips it with a stated reason and exit 0.
+
+    THE NO-OVERRIDE PROPERTY IS ITSELF FALSIFIABLE AND MUST BE PINNED, not merely intended: assert
+    over the script's own source that it exposes no growth-permitting flag or env read. A test that
+    only exercises the happy paths would let an escape hatch be added later without reddening
+    anything, and an escape hatch is the failure mode this design section names.
+
+    ONE MEASUREMENT TRAP, NAMED SO THE BUILD DOES NOT REPEAT THE ANALYSIS'S OWN FIRST ERROR: do not
+    classify by ADDED/REMOVED LINE COUNTS. Twelve of the thirty-two measured commits are in-place
+    rewrites whose line counts read as folds and whose byte deltas are approximately zero, and one
+    (`22ba6cba`, 27/26 lines, +14 bytes) is the same sentence reworded. The gate compares BYTES on
+    both sides or it enforces a different rule from the one it claims.
+
+    CLOSE THIS TASK WITHOUT CODE if the cap has by then been raised: a net-byte gate protecting a
+    ceiling that moves on request enforces nothing, and the right response would be to settle the
+    ceiling question first.
+  note: |
+    ID PROVENANCE: `refs/rmd-id/W1-T2831` was already held on origin at
+    97e2da0f2c7a1b627e179f8db513b9be5eddbb20 when this shard was written. SWEPT FIRST, because a
+    minted id is not evidence the work is unclaimed (measured three times this week): no shard for
+    W1-T2831 in `plan/tasks.yaml` or `plan/tasks.d/` (control: the W1-T2805 shard IS found by that
+    query), no commit on origin/main naming it (control: W1-T2805 returns 3), no head matching it
+    (control: 164 heads exist), and no open PR referencing it. `refs/rmd-dispatch/W1-T2831` was
+    then minted, `[new reference]`, uncontended.
+
+    THE FALSIFIER FILE IS NAMED AFTER THIS SHARD'S OWN SLUG DELIBERATELY. `sizingViolation`'s
+    own-falsifier discount (W1-T2525) only discounts a companion whose `moduleIdFromPath` EQUALS
+    the shard's filename slug, so `test/a-net-positive-claude-md-diff-is-not-refused.test.ts`
+    beside `W1-T2831-a-net-positive-claude-md-diff-is-not-refused.yaml` scores as one concern
+    rather than two — the same mechanism W1-T2815 measured and recorded.
+
+    A CANDIDATE FOLD FOR WHOEVER NEXT AMENDS CLAUDE.MD, NOT DONE HERE AND NOT THIS TASK'S SCOPE:
+    hazard (h) cites "63798 against a cap of 65536 raised 2026-08-22" as the CURRENT state. Both
+    operands are two regimes stale — the file is 43986 against a cap of 44000 — in a bullet whose
+    own point is that stale operands read as authoritative. Correcting it is SHORTER than what is
+    there, so it pays for itself under the very rule this task enforces.
+
+    WHAT IS THE MEASUREMENT'S, NOT THIS FILING'S: the 32-commit classification, the 4-of-32 net-fold
+    figure, the +862/4-day live-regime figure, and the `22ba6cba` rewrite instance. All were taken
+    read-only against origin/main on 2026-09-04 and are reproducible with
+    `git log --numstat --no-merges -- CLAUDE.md` plus a per-commit `git show <sha>:CLAUDE.md | wc -c`.
