@@ -57,7 +57,17 @@ import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import type { AcceptanceCriterion } from "./plan.js";
 import { acceptanceBlockDiagnostics } from "./review.js";
-import { shapeCommitMessage } from "./commit-message.js";
+import {
+  checkGeneratedCommitNarrative,
+  renderCommitNarrativeParagraphs,
+  shapeCommitMessage,
+} from "./commit-message.js";
+import {
+  checkOperatorMessage,
+  type OperatorMessage,
+  type OperatorMessageCheckResult,
+  type OperatorMessageSlot,
+} from "./operator-message.js";
 import type { GhApiFetcher } from "./open-prs-rest.js";
 
 // ── 1. Acceptance-block rendering (the missing counterpart to parseAcceptanceBlock) ─────────
@@ -231,6 +241,13 @@ export interface PlanPrCommitOpts {
   /** The task id for the `Remudero-Task:` trailer. OMIT for a plan-FILING PR (the
    *  correctness rule above) — no argument means no trailer, never a wrong one. */
   taskId?: string;
+  /** W1-T2807 — what a reader who finds this commit later can do about it. OPTIONAL, and
+   *  OMITTING IT LEAVES THE OUTPUT BYTE-IDENTICAL (the {@link PlanPrBodyOpts.changedFiles}
+   *  precedent). An explicit `null` records "there is nothing to do" rather than silence. */
+  whatToDo?: OperatorMessageSlot;
+  /** W1-T2807 — why this matters to that reader. Same optionality and the same byte-identity
+   *  guarantee as {@link PlanPrCommitOpts.whatToDo}. */
+  consequence?: OperatorMessageSlot;
 }
 
 /**
@@ -240,9 +257,58 @@ export interface PlanPrCommitOpts {
  */
 export function buildPlanPrCommitMessage(opts: PlanPrCommitOpts): string {
   const { scope, subject, extraBody, taskId } = opts;
-  const shaped = shapeCommitMessage(`chore(${scope})`, subject, extraBody ?? "");
+  // W1-T2807: the narrative slots render as ORDINARY BODY PARAGRAPHS, appended after `extraBody`
+  // and therefore still above the trailer, so `shapeCommitMessage` wraps them exactly as it wraps
+  // any other body text and no commitlint limit is bypassed. Both slots omitted renders nothing,
+  // which is why every existing caller keeps the message it already produced.
+  const narrative = renderCommitNarrativeParagraphs({
+    prefix: `chore(${scope})`,
+    subject,
+    whatToDo: opts.whatToDo,
+    consequence: opts.consequence,
+  });
+  const body = [extraBody ?? "", narrative].filter((part) => part.trim() !== "").join("\n\n");
+  const shaped = shapeCommitMessage(`chore(${scope})`, subject, body);
   if (!taskId) return shaped.message;
   return `${shaped.message.replace(/\n+$/, "")}\n\nRemudero-Task: ${taskId}\n`;
+}
+
+/** What a generated record and its (advisory, never blocking) conformance check look like
+ *  together. The check rides BESIDE the text because the standard forbids splicing it in: in a
+ *  commit it would land in the trailer region, and in a PR body it would follow the acceptance
+ *  block, whose bullets must never be interrupted. */
+export interface CheckedGeneratedText<TField extends string> {
+  /** The record itself, byte-identical to what the unchecked builder returns. */
+  text: string;
+  /** The presence result, or `undefined` when the check could not be run at all. Advisory:
+   *  no caller may withhold a commit or a pull request on it. */
+  messageCheck: OperatorMessageCheckResult | undefined;
+  /** Which builder produced `text`, so a census can attribute a gap without re-deriving it. */
+  surface: TField;
+}
+
+/**
+ * {@link buildPlanPrCommitMessage} plus its narrative presence check.
+ *
+ * `text` is the SAME STRING the unchecked builder returns for the same opts — this adds a second
+ * return value, never a different message. Nothing here can fail the commit.
+ */
+export function buildPlanPrCommitMessageChecked(
+  opts: PlanPrCommitOpts,
+): CheckedGeneratedText<"commit-message"> {
+  // Same ordering guarantee as {@link buildPlanPrBodyChecked}: the message exists before its own
+  // check is ever consulted.
+  const text = buildPlanPrCommitMessage(opts);
+  return {
+    text,
+    messageCheck: checkGeneratedCommitNarrative({
+      prefix: `chore(${opts.scope})`,
+      subject: opts.subject,
+      whatToDo: opts.whatToDo,
+      consequence: opts.consequence,
+    }),
+    surface: "commit-message",
+  };
 }
 
 // ── 5. PR-body assembly ───────────────────────────────────────────────────────────────────
@@ -344,6 +410,13 @@ export interface PlanPrBodyOpts {
    *  existing caller keeps the body it already produced, so this adds a section rather than
    *  reshaping the contract. */
   changedFiles?: readonly string[];
+  /** W1-T2807 — who is telling the reviewer this. OPTIONAL; omitting it, like the two slots
+   *  below, leaves the body BYTE-IDENTICAL. */
+  speaker?: string;
+  /** W1-T2807 — what the reviewer can do. An explicit `null` records "nothing to do". */
+  whatToDo?: OperatorMessageSlot;
+  /** W1-T2807 — why it matters to the reviewer. */
+  consequence?: OperatorMessageSlot;
 }
 
 /**
@@ -355,11 +428,64 @@ export function buildPlanPrBody(opts: PlanPrBodyOpts): string {
   // W1-T2535: the changed-files block sits ABOVE the Acceptance block, because the Acceptance
   // block must stay the LAST thing before the trailer — its bullets are never to be interrupted
   // (the #394 lesson, already recorded on `criteria` above).
-  const parts = [intro.trim()];
+  // W1-T2807: the narrative slots render INSIDE THE INTRO REGION, above the changed-files block and
+  // far above the Acceptance block. Nothing may be appended below the acceptance bullets — a single
+  // interposed line breaks `parseAcceptanceBlock`, which fails CLOSED and reddens a PR whose checks
+  // are otherwise all green. Both slots omitted renders nothing, so every existing caller keeps the
+  // body it already produced.
+  const narrative = renderPrNarrativeParagraphs(opts);
+  const parts = [[intro.trim(), narrative].filter((part) => part !== "").join("\n\n")];
   if (changedFiles !== undefined) parts.push("", renderChangedFilesBlock(changedFiles));
   parts.push("", renderAcceptanceBlock(criteria));
   if (taskId) parts.push("", `Remudero-Task: ${taskId}`);
   return `${parts.join("\n")}\n`;
+}
+
+/** The PR body's narrative slots as intro paragraphs, in the standard's order. `""` when neither
+ *  carries text — which is what keeps an existing caller's body byte-identical. */
+export function renderPrNarrativeParagraphs(opts: PlanPrBodyOpts): string {
+  const paragraphs: string[] = [];
+  if (typeof opts.consequence === "string" && opts.consequence.trim() !== "") {
+    paragraphs.push(opts.consequence.trim());
+  }
+  if (typeof opts.whatToDo === "string" && opts.whatToDo.trim() !== "") {
+    paragraphs.push(opts.whatToDo.trim());
+  }
+  return paragraphs.join("\n\n");
+}
+
+/** Project a generated PR body's narrative half onto the four presence slots. `whatHappened` is the
+ *  intro, which every caller already supplies; the other three are what the record may be missing. */
+export function projectPrBodyNarrative(opts: PlanPrBodyOpts): OperatorMessage {
+  return {
+    speaker: opts.speaker,
+    whatHappened: opts.intro,
+    whatIsAsked: opts.whatToDo,
+    consequenceOfInaction: opts.consequence,
+  };
+}
+
+/**
+ * {@link buildPlanPrBody} plus its narrative presence check.
+ *
+ * `text` is the SAME STRING the unchecked builder returns for the same opts. The check is advisory
+ * and best-effort: a checker fault yields `undefined`, never a synthesised verdict, and no pull
+ * request is ever withheld on it.
+ */
+export function buildPlanPrBodyChecked(opts: PlanPrBodyOpts): CheckedGeneratedText<"pr-body"> {
+  // The record is built FIRST and unconditionally. Ordering is the guarantee here: nothing the
+  // conformance check does — including failing outright — can stand between a caller and its body.
+  const text = buildPlanPrBody(opts);
+  let messageCheck: OperatorMessageCheckResult | undefined;
+  try {
+    messageCheck = checkOperatorMessage(projectPrBodyNarrative(opts));
+  } catch {
+    // Swallowed for the same reason as on the commit surface: the pull request is the deliverable
+    // and its own conformance check must not be able to block it. `undefined` keeps "could not be
+    // read" distinct from "was read and found thin".
+    messageCheck = undefined;
+  }
+  return { text, messageCheck, surface: "pr-body" };
 }
 
 // ── 6. Plan-index regeneration (the #287 fix, mirrors lib/orientation.ts) ───────────────────

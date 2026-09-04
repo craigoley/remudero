@@ -1,5 +1,11 @@
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
+import {
+  checkOperatorMessage,
+  type OperatorMessage,
+  type OperatorMessageCheckResult,
+  type OperatorMessageSlot,
+} from "./operator-message.js";
 
 /**
  * lib/commit-message.ts — Conventional-Commits shaping for MACHINE-BUILT commit
@@ -369,6 +375,98 @@ export function shapeCommitMessage(
   const message = wrapped.length > 0 ? `${header}\n\n${wrapped.join("\n")}\n` : `${header}\n`;
 
   return { message, header, trimmed };
+}
+
+// ── OPERATOR MESSAGE STANDARD — the generated commit's narrative half (W1-T2807) ─────────────
+//
+// Everything above this line governs SHAPE: a header length in characters, a subject case, a
+// wrapped body, overflow preserved rather than discarded. Every one of those is a commitlint
+// contract, and not one of them asks whether a reader learns anything. The reader of a generated
+// commit — whoever finds it later doing archaeology, plus the retro — was the one reader this repo
+// owed no structure to at all.
+//
+// WHAT IS FROZEN. docs/operator-message-standard.md names this surface and, in the same breath,
+// freezes the parsed half: the conventional `type(scope)` prefix, every limit `shapeCommitMessage`
+// enforces, the `Remudero-Task:` trailer and the `(W1-Tnnn)` subject citation. Nothing below moves
+// a byte any of those parsers read. The narrative slots render as ordinary body paragraphs, which
+// `shapeCommitMessage` then wraps exactly as it wraps any other body text.
+//
+// AND THE MARK IS NEVER SPLICED IN. A conformance footer appended to a commit message would land
+// in the trailer region, where a line-anchored matcher is looking for `Remudero-Task:`. So the
+// check is RETURNED BESIDE the message, never written into it — and it never blocks: a commit is
+// not withheld because a paragraph is thin.
+
+/**
+ * The narrative half of a generated commit, as the presence check reads it.
+ *
+ * `whatToDo` and `consequence` are NEW and OPTIONAL, and most callers will omit them — which is
+ * exactly the gap this exists to make visible rather than silently accept, the same way
+ * `Escalation.consequence` does on the escalation surface. Omitting one renders nothing, so a
+ * caller that passes neither gets a byte-identical commit message.
+ *
+ * An explicit `null` is DIFFERENT from omitting: it means "there is nothing here", which the
+ * checker counts as present. That is part (iv) of the standard — never reporting "observed absent"
+ * and "not observed" as the same fact.
+ */
+export interface GeneratedCommitNarrative {
+  /** The conventional `type(scope)` prefix — a commit's declared speaker. */
+  prefix: string;
+  /** The commit subject: what happened. */
+  subject: string;
+  /** What a reader who finds this commit later can do about it. */
+  whatToDo?: OperatorMessageSlot;
+  /** Why it matters to that reader — the standard's part (ii). */
+  consequence?: OperatorMessageSlot;
+}
+
+/**
+ * Project a generated commit's narrative onto the four presence slots, reading only what the
+ * record already carries — the same discipline `toOperatorMessage` (`escalate.ts`) follows.
+ */
+export function projectCommitNarrative(narrative: GeneratedCommitNarrative): OperatorMessage {
+  return {
+    speaker: narrative.prefix,
+    whatHappened: narrative.subject,
+    whatIsAsked: narrative.whatToDo,
+    consequenceOfInaction: narrative.consequence,
+  };
+}
+
+/**
+ * {@link checkOperatorMessage} over that projection, best-effort — mirrors `escalate.ts`'s own safe
+ * wrapper. Returns `undefined` rather than a fabricated verdict when the check itself cannot run,
+ * so an unreadable record is never reported as an incomplete one.
+ *
+ * THIS NEVER BLOCKS. Its result is advisory: no caller may withhold a commit on it.
+ */
+export function checkGeneratedCommitNarrative(
+  narrative: GeneratedCommitNarrative,
+): OperatorMessageCheckResult | undefined {
+  try {
+    return checkOperatorMessage(projectCommitNarrative(narrative));
+  } catch {
+    // Deliberately swallowed: the commit is the deliverable and its own conformance check must not
+    // be able to fail it. Returning undefined rather than a synthesised result keeps "could not be
+    // read" distinct from "was read and found thin".
+    return undefined;
+  }
+}
+
+/**
+ * The narrative slots rendered as body paragraphs, in the order the standard states them. Returns
+ * `""` when neither slot carries text, so a caller that passes nothing produces the same body it
+ * always did. An explicit `null` renders NOTHING as well — it is a statement to the record, not a
+ * sentence this module would have to invent on the author's behalf.
+ */
+export function renderCommitNarrativeParagraphs(narrative: GeneratedCommitNarrative): string {
+  const paragraphs: string[] = [];
+  if (typeof narrative.consequence === "string" && narrative.consequence.trim() !== "") {
+    paragraphs.push(narrative.consequence.trim());
+  }
+  if (typeof narrative.whatToDo === "string" && narrative.whatToDo.trim() !== "") {
+    paragraphs.push(narrative.whatToDo.trim());
+  }
+  return paragraphs.join("\n\n");
 }
 
 // ── W1-T221: `rmd preflight` — the hand route's missing gate ───────────────────────────
