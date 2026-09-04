@@ -6437,8 +6437,14 @@ export function assertRoutesScopeComplete(entries: readonly { method?: Method; p
     throw new Error(`route(s) with no declared Scope: ${missing.join(", ")}`);
   }
 }
-/** Every REST route `rmd serve` registers — board, panel actions (two-root split, see module header), panel graph, and the shell. Reused verbatim from each module's own exported builder. */
-export function buildServeRoutes(deps: ServeDeps): Route[] {
+interface ServeRoutesAssembly {
+  routes: Route[];
+  /** The first GitHub App token mint. Absent when App refresh is not configured. */
+  githubAppReady?: Promise<void>;
+}
+
+/** Internal route assembly that keeps the first-mint readiness signal beside the routes it protects. */
+function assembleServeRoutes(deps: ServeDeps): ServeRoutesAssembly {
   // CAPTURED ONCE, HERE. buildServeRoutes runs exactly once per `rmd serve` process, so this is
   // server start; both the shell span and GET /v1/version close over this one value and neither
   // ever re-resolves it. See resolveConsoleSha for why re-reading per request would be worse
@@ -6453,10 +6459,11 @@ export function buildServeRoutes(deps: ServeDeps): Route[] {
   // daemon being reachable (claim: "the console starts and serves when the daemon is absent").
   const githubCredential = trackGithubCredentialState(deps.log);
   const startGithubAppRefresh = deps.githubAppRefresh?.start ?? startInstallationTokenRefresh;
-  githubCredential.state.armed = startGithubAppRefresh({
+  const githubAppRefresh = startGithubAppRefresh({
     log: githubCredential.log,
     env: deps.githubAppRefresh?.env,
-  }).armed;
+  });
+  githubCredential.state.armed = githubAppRefresh.armed;
   const fleetControlDeps: PanelActionDeps = { root: deps.fleetControlRoot, ledgerPath: deps.ledgerPath, issues: deps.issues };
   const questionDeps: PanelActionDeps = { root: deps.questionsRoot, ledgerPath: deps.ledgerPath, issues: deps.issues };
   // W1-T288: the SAME fleetControlDeps root/ledgerPath, plus the (optional, injectable)
@@ -6649,8 +6656,19 @@ export function buildServeRoutes(deps: ServeDeps): Route[] {
   // tier sibling, as the runtime backstop for whatever the compiler cannot see. See
   // `assertRoutesScopeComplete`'s own doc.
   assertRoutesScopeComplete(routes);
-  return routes;
+  return { routes, githubAppReady: githubAppRefresh.ready };
 }
+
+/** Every REST route `rmd serve` registers — board, panel actions, panel graph, and the shell. */
+export function buildServeRoutes(deps: ServeDeps): Route[] {
+  return assembleServeRoutes(deps).routes;
+}
+
+interface ServeServerAssembly {
+  server: Server;
+  githubAppReady?: Promise<void>;
+}
+
 /**
  * Build (but do not `.listen()`) the full `rmd serve` HTTP server — one call, every route wired.
  * `deps.board.github`'s background TTL refresh (W1-T154) runs ONLY while at least one console is
@@ -6658,7 +6676,7 @@ export function buildServeRoutes(deps: ServeDeps): Route[] {
  * It is also stopped unconditionally when the returned server `close`s, so a server torn down
  * with a viewer still attached leaves no timer behind.
  */
-export function buildServeServer(deps: ServeDeps): Server {
+function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   const prewarm = gatePrewarmOnClients(
     buildStatusStream(deps.board, deps.pollMs ?? DEFAULT_POLL_MS),
     deps.board.github,
@@ -6676,7 +6694,8 @@ export function buildServeServer(deps: ServeDeps): Server {
   // that could drift from the one the exit decision uses.
   const consoleSha = deps.consoleSha ?? resolveConsoleSha();
   const staleExit = gateStaleCodeExit({ bootSha: consoleSha, log: deps.log });
-  const routes = buildServeRoutes({ ...deps, consoleSha, confirmNonces }).map((route) =>
+  const routeAssembly = assembleServeRoutes({ ...deps, consoleSha, confirmNonces });
+  const routes = routeAssembly.routes.map((route) =>
     // rationale (7): HIGH-tier IS the write-consequence set this task must respect — the same
     // five paths (`/v1/manual/approve`, `/v1/drain/kick`, `/v1/drain/run`, `/v1/inbox/approve`,
     // `/v1/skills/run`) `HIGH_TIER_WRITE_PATHS` names client-side, read here off the route table's
@@ -6701,7 +6720,22 @@ export function buildServeServer(deps: ServeDeps): Server {
     enforceWriteTiers: true,
   });
   server.on("close", prewarm.stop);
-  return server;
+  return { server, githubAppReady: routeAssembly.githubAppReady };
+}
+
+export function buildServeServer(deps: ServeDeps): Server {
+  return assembleServeServer(deps).server;
+}
+
+/**
+ * Production boot boundary: wait for the first GitHub App mint to settle before any caller can
+ * bind the server. `ready` never rejects and is absent when App refresh is unconfigured, so this
+ * preserves Serve's fail-open posture while removing the empty-token startup race.
+ */
+export async function buildReadyServeServer(deps: ServeDeps): Promise<Server> {
+  const assembly = assembleServeServer(deps);
+  if (assembly.githubAppReady) await assembly.githubAppReady;
+  return assembly.server;
 }
 // ── CLI glue: port + token resolution (kept here, not run-task.ts, so both are unit-testable
 // as pure/near-pure functions rather than only exercisable through the live CLI) ────────────
