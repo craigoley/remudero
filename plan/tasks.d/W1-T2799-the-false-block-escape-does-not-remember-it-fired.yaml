@@ -1,0 +1,179 @@
+- id: W1-T2799
+  title: "THE FIX RUNG'S FALSE-BLOCK ESCAPE IS A CIRCUIT BREAKER THAT DOES NOT REMEMBER IT FIRED — it escalates, returns, and the next sweep builds a FRESH rung with strikes reset that spends another worker re-discovering the same question; MEASURED ten escalations across four heads on #3887/#3889, EIGHT consecutive on one head, seven of them dispatching a worker that pushed nothing"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: architect
+  plan_refs: ["§4", "W1-T76", "W1-T104", "W1-T168", "W1-T178", "W1-T195", "W1-T345", "W1-T1284"]
+  files: [src/lib/escalate.ts, src/run-task.ts, test/fix-rung-open-escalation-stand-down.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    FILED FROM A READ-ONLY DIAGNOSIS OF PR #3887 (2026-09-04). The review false-block escape
+    (`detectReviewFalseBlock` -> `escalate`, run-task.ts) opens a needs-human issue and returns
+    `escalated`. NOTHING RECORDS THAT IT FIRED. The next level-triggered sweep constructs a fresh
+    `runFixRung` with `strikes` reset, re-reads the same still-failing review on the same unchanged
+    head, and spends a fix worker BEFORE `detectReviewFalseBlock` can fire again — which it then
+    does, appending to the very issue already open and waiting on a human.
+
+    MEASURED, from issue #3889's own comment stream (heads and strike counts read off each
+    appended body): ten escalations across four heads — f28ac5e (x2), a115088, then d8fa22b
+    EIGHT CONSECUTIVE TIMES between 03:17:14Z and 05:14:39Z. The head did not move across seven of
+    those eight, so seven fix workers ran and pushed nothing at all.
+
+    THE DEDUP THAT EXISTS IS AT THE WRONG LAYER, AND THAT IS THE WHOLE DEFECT. `escalate()` already
+    consults `findDuplicateEscalation` (lib/escalate.ts) and correctly appended all ten to one
+    issue rather than opening ten siblings (W1-T104/W1-T345). But it runs INSIDE `escalate()` — by
+    which time the strike is already spent. The right predicate, consulted at the wrong moment.
+
+    THREE NEIGHBOURING GUARDS DO NOT COVER IT, EACH CHECKED AT SOURCE RATHER THAN ASSUMED:
+    (i) `applyVerdictStability` (W1-T178, lib/review.ts) is the nearest-LOOKING guard and cannot
+    help. Its `isUnchangedSemanticDowngrade` requires `prior.state === "success"` on the same head
+    before it will suppress a downgrade. Here the FIRST review on each head is already a failure,
+    so there is no prior success to protect. IT GUARDS green->red ON ONE HEAD; THIS IS red
+    REPEATING ON ONE HEAD. Stated explicitly so a successor does not assume that path already
+    handles it — the shapes are one word apart and the code is not.
+    (ii) `unchangedTreeStandDownReason` (W1-T1284) compares against `lastGateSnapshot`, a local in
+    ONE `runFixRung` invocation's scope. Every sweep is a new invocation, so its memory is gone
+    before the second escalation is ever reached. Its `strikes=1` reading in every appended #3889
+    body is the direct evidence the rung restarts each sweep.
+    (iii) `fixRungStandDownReason`'s five existing reason sources all read the PR or the worktree.
+    None reads whether a human has ALREADY been asked about this exact state.
+
+    AND THE KEY IS TOO COARSE TO BUILD ON UNTIL A SECOND, SMALLER DEFECT IS FIXED IN THE SAME DIFF.
+    W1-T195 gave the dedup key two optional dimensions (`headSha`, `cause`) precisely so "a new
+    push (new headSha) ... opens its OWN issue rather than being silently suppressed by a stale
+    one". The review false-block producer (run-task.ts, the `escalate` under `if (falseBlockReason)`)
+    IS THE ONLY FIX-RUNG escalate() OPTING INTO NEITHER — MEASURED against its siblings: the
+    foreign-head producer passes `headSha`, and the ci-log false-block, retrigger-exhaustion and
+    strike-exhaustion producers all pass BOTH. That is why four distinct heads collapsed into one
+    issue. A pre-strike gate keyed on (taskId, PR) alone would stand the rung down on a GENUINELY
+    NEW head — the too-eager direction, in which a stand-down silently stops fixing things. So the
+    two halves are not separable: the gate is only safe once the producer is precise.
+
+    RECORDED HERE THOUGH IT IS NOT THIS TASK'S DELIVERABLE — THE THIRD PROOF FAILURE MODE, found
+    in the same diagnosis and with no home yet. `no-match`/`not_executable` and `executed_stale`
+    both ANNOUNCE THEMSELVES on the verdict line. There is a third that does not: a proof that
+    executes, discriminates head from base, reads `proof_exec: N/N` and `verdict: pass`, and STILL
+    cannot observe what its claim asserts. #3887's criterion 6 is the specimen — the claim is
+    "answered every cycle by measurement", the proof is `grep: planCoherenceRung( in
+    src/lib/retro.ts`, and that grep returns 3 whether the call site measures the live plan or
+    wraps an always-`unexamined` default. Its output is CONSTANT across the very thing the claim
+    is about. THAT is why the fix rung read the block as a false-block and spent seven workers:
+    from the deterministic floor's point of view it IS one, and the floor is not wrong — it simply
+    cannot see what the claim is about.
+
+    THE DIAGNOSTIC IS PORTABLE AND SHOULD BE STATED AS A QUESTION ABOUT OBSERVABILITY, NOT
+    EXECUTION: can this proof's output DIFFER between a world where the claim holds and one where
+    it does not? Note how close that sits to `executed_stale`, which asks the near-identical
+    question one axis over (does it discriminate head from base?) and IS mechanised — the
+    adjacency is the reason to think this is partly checkable rather than purely a judgment call.
+    THE LINT-RULE SHAPE: a `grep:` proof whose pattern names only a symbol the diff itself
+    introduces can, at most, prove that symbol exists, which is never enough for a claim about
+    RUNTIME BEHAVIOUR. This shard applies its own lesson — every behavioural criterion below takes
+    a `unit test:` proof, and its single `grep:` proof carries a claim that is genuinely about
+    text (which module a symbol is imported from).
+
+    RULE 19: risk:high IS THE SPAN, NOT THE BLAST RADIUS, AND THIS IS A REGRADE ON THE MERITS
+    RATHER THAN A WORKAROUND. `sizingViolation` refuses two subsystem stems (escalate, run-task) at
+    risk:medium for the SPAN alone, and offers two exits: raise the band, or decompose into one
+    task per concern. DECOMPOSITION IS UNAVAILABLE HERE AND THE FALSIFIER PROVES IT rather than
+    asserting it — with the producer half (B) removed, the counter-falsifier fails reporting
+    `1 !== 3`: three genuinely new heads collapse into one issue, so the gate (A) shipped alone
+    would refuse workers on heads carrying real new work. A gate whose key cannot discriminate is
+    worse than no gate, and a producer with no consumer changes nothing, so the single invariant
+    (a strike is never spent re-asking a question already in front of a human) is unsatisfiable
+    piecewise. The same atomic-coupling exit W1-T250, W1-T2477 and W1-T2642 take.
+
+    NOT IN SCOPE, NAMED SO NOTHING IS ORPHANED: the ADVISORY-vs-BLOCKING question behind #3887
+    itself (a reviewer semantically downgrading a passing floor) is W1-T168's own territory and a
+    judgment problem, not a loop problem; this task makes the loop cost one worker instead of
+    eight and changes no verdict. Back-filling `**Head:**` onto issues already open is not
+    attempted either — a legacy head-less issue simply never stands the rung down (see criterion 4),
+    which is the fail-open direction.
+  design: |
+    (A) THE SIXTH REASON SOURCE. `openEscalationStandDownReason` (run-task.ts, pure and exported,
+    mirroring `unchangedTreeStandDownReason`'s shape exactly) is composed into the EXISTING
+    `fixRungStandDownReason` gate at site `rung.strike` — never a parallel early return —
+    alongside terminal PR state, foreign head, red-check supersession, merge conflict and the
+    unchanged tree. Checked LAST of the six: it is the only source costing a network read, so the
+    five cheaper already-fetched facts answer first. The impure `listOpen` read stays in the
+    caller and the finder is INJECTED, the same seam `readRollup`/`readMergeFacts` already use, so
+    tests never touch the network.
+
+    THE PREDICATE IS `findDuplicateEscalation` ITSELF — exported, never re-implemented. A second
+    matcher would be a second opinion about which issues are duplicates, which is the disease. Its
+    signature widens from `Escalation` to an exported `EscalationDedupKey` (the subset it actually
+    reads) so a caller merely ASKING the question need not fabricate the `options`/`recommendation`
+    of an escalation it is not filing, and so the compiler proves probe and escalation are keyed
+    identically. Every `Escalation` satisfies it structurally; `escalate()`'s own calls are
+    unchanged.
+
+    DELIBERATELY STRICTER THAN THAT MATCHER, AND THIS IS THE LOAD-BEARING PART.
+    `matchesOptionalDimension` is permissive when either side omits a dimension, so a probe
+    carrying a head matches a legacy issue carrying none. That is RIGHT for its own purpose: it
+    fails toward APPENDING to an open issue, which is cheap and visible. Reusing it to REFUSE A FIX
+    WORKER INVERTS THE POLARITY — it would fail toward NOT FIXING, silently, on a head that may
+    carry real new work. So a stand-down additionally requires the candidate to carry a `**Head:**`
+    line EQUAL to the head about to be struck against, read through an exported `escalationHeadSha`
+    (the SAME `HEAD_SHA_LINE_RE` the matcher uses — one parser, not two).
+
+    THE RESET IS THE HUMAN, AND THAT IS THE POINT. `listOpen` stops returning the issue the moment
+    the operator closes it, so acting on the escalation — the thing the rung is waiting for — is
+    what resumes the rung. A new push resumes it too, by moving the head out from under the key.
+
+    THE FAIL-OPEN CONSEQUENCE, STATED SO NOBODY DISCOVERS IT BY SURPRISE. Because a candidate
+    with no `**Head:**` line never refuses a worker, and because #3889 — the issue this task was
+    filed from — CARRIES NO SUCH LINE (it predates the producer fix in (B) below), THIS TASK DOES
+    NOT STOP THE #3889 LOOP RETROACTIVELY. It stops one escalation AFTER merge: the next
+    false-block escalation is the first head-qualified one, and the sweep after that is the first
+    to stand down. That is the fail-open direction and it is the right trade — the alternative,
+    inheriting the permissive match, refuses workers on heads that may carry real new work — but
+    it is a behavioural fact, not a footnote, and a reader comparing the merge against #3889's
+    comment stream will otherwise think the fix did not work.
+
+    AND #3887 IS BEING UNBLOCKED SEPARATELY, BY A RATIFIED SCOPE WIDENING adding src/run-task.ts
+    to W1-T2642's `files:` so its existing fix rung can push the wiring criterion 6 asks for. THE
+    TWO FIXES ARE INDEPENDENT AND EITHER IS SUFFICIENT to end the current loop: that widening ends
+    it by making the review pass, this task ends it by making the rung stop paying for a question
+    already in front of a human. Neither waits on the other, and this task must not be credited
+    with unblocking #3887 — it changes no verdict.
+
+    (B) THE PRODUCER, SAME DIFF. The review false-block `escalate()` passes `headSha:
+    review.headSha` and `cause: escalationCause(currentMergeConflict !== undefined, noReviewYet)` —
+    the identical expression the retrigger-exhaustion and strike-exhaustion producers beside it
+    already use, never a new derivation.
+  acceptance:
+    - claim: "a second sweep observing the SAME (task, PR, head, cause) as an already-open needs-human escalation stands down BEFORE dispatching a fix worker — over #3889's own shape, eight consecutive sweeps on one head spend exactly ONE worker and open exactly ONE issue"
+      proof: "unit test: test/fix-rung-open-escalation-stand-down.test.ts"
+    - claim: "a genuinely NEW head still spends its strike with the previous head's escalation still open, and opens its OWN issue — the too-eager direction, in which a stand-down silently stops fixing things, is the one this must never take"
+      proof: "unit test: test/fix-rung-open-escalation-stand-down.test.ts"
+    - claim: "the review false-block escalation carries **Head:** and **Cause:**, the two W1-T195 dimensions it was the ONLY fix-rung escalate to omit — without them three distinct heads collapse into one issue and the pre-strike key cannot tell a new push from a repeat"
+      proof: "unit test: test/fix-rung-open-escalation-stand-down.test.ts"
+    - claim: "the stand-down is STRICTER than findDuplicateEscalation itself: a candidate carrying no **Head:** line, or a different head, never refuses a worker — matchesOptionalDimension's permissiveness fails toward appending, which is cheap, and must not be inherited by a gate whose failure direction is not fixing"
+      proof: "unit test: test/fix-rung-open-escalation-stand-down.test.ts"
+    - claim: "it is composed into the EXISTING fixRungStandDownReason gate at site rung.strike as a sixth reason source, never a parallel early return, and a gateway with no listOpen at all behaves exactly as before this task — every strike still spends"
+      proof: "unit test: test/fix-rung-open-escalation-stand-down.test.ts"
+    - claim: "the pre-strike probe and escalate()'s own dedup can never disagree about which issues are duplicates, because both resolve through the SAME findDuplicateEscalation and the SAME **Head:** parser — the issue escalate() files on one sweep is exactly the one the next sweep's probe finds, round-tripped through both paths rather than asserted"
+      proof: "unit test: test/fix-rung-open-escalation-stand-down.test.ts"
+  note: |
+    FILED 2026-09-04 from a read-only diagnosis of PR #3887, whose own criterion-6 block was
+    ratified as a scope widening separately. This task is the SECOND finding of that diagnosis and
+    is independent of it: it changes no verdict and unblocks no PR, it only stops the fleet paying
+    a fix worker per sweep for a question already sitting in front of a human.
+
+    THE FALSIFIER IS THE PRODUCTION FIXTURE, NOT A SYNTHETIC ONE. #3889's ten escalations across
+    four heads are reproduced directly: eight sweeps at head d8fa22b7 (one worker expected), and
+    the real f28ac5e -> a115088 -> d8fa22b sequence (three workers, three issues expected). Each
+    half was verified load-bearing by DELETING it and re-running — removing (B) fails three tests
+    including the counter-falsifier, which reports `1 !== 3` because three genuinely new heads
+    collapse into one issue; removing (A) fails exactly the eight-sweep test.
+
+    scripts/source-size-baseline.json moves with this diff (src/lib/escalate.ts 1516 -> 2000, the
+    500-line bucket ceilingFor() computes). It is deliberately NOT in files: — W1-T2650/#3900
+    added SCOPE_EXEMPT_GENERATED_ARTIFACTS naming exactly that path, so both scopeGuardOutOfScopeFiles
+    and scopeViolationFiles subtract it already.
