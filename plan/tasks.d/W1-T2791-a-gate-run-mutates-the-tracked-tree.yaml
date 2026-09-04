@@ -1,102 +1,128 @@
 - id: W1-T2791
-  title: "the source-size gate runs the RECORDING mode of scripts/source-size-ratchet.mjs and exits 0 while writing scripts/source-size-baseline.json — a --check mode that never writes already exists and nothing invokes it, so every lane's gate run leaves a tracked mutation it did not author and a passing verdict that hides it"
+  title: "the source-size RECORDING form still exits 0 while writing scripts/source-size-baseline.json, and W1-T2650 has since exempted that exact path from BOTH the scope guard and the reviewer — so a stray baseline write that used to be refused by name now lands silently, and no test asserts that a gate run leaves the tracked tree unchanged"
   repo: remudero
   depends_on: []
   type: implement
   verify: auto
   principles: {tdd: strict}
-  risk: high
-  band_meaning: "span"
+  risk: medium
   budget_usd: 4.00
-  files: [package.json, scripts/source-size-baseline.json, test/a-gate-run-leaves-the-tracked-tree-clean.test.ts]
+  files: [test/a-gate-run-leaves-the-tracked-tree-clean.test.ts]
   origin: "operator-decision#w1-t2791-file-gate-mutates-tracked-tree-2026-09-03"
-  plan_refs: ["W1-T2755", "W1-T2790"]
+  plan_refs: ["W1-T2650", "W1-T2734", "W1-T2755", "W1-T2790"]
   status: queued
   attempts: 0
   note: |
-    MEASURED 2026-09-03 on a clean worktree at 4b753682, both directions in one sitting:
+    RE-SCOPED 2026-09-04, operator-approved. THE WORLD MOVED UNDER THIS SHARD; the criteria below
+    are not edited to match a diff. Everything in this block is a measurement taken on origin/main
+    at 3bc15420, in a throwaway worktree, and each superseded criterion is RECORDED rather than
+    deleted so a later reader can tell "this shipped elsewhere" from "we decided against this".
 
-      node scripts/source-size-ratchet.mjs           -> rc=0, "OK -- 164 source file(s), none over
-                                                        their recorded baseline", AND leaves
-                                                        `M scripts/source-size-baseline.json`
-      node scripts/source-size-ratchet.mjs --check   -> rc=1, names the drift, tree CLEAN
+    CRITERION 1 IS SATISFIED — BY #3871, NOT BY THIS TASK, AND NOT DROPPED. As filed it read:
 
-    THE ASYMMETRY IS THE DEFECT, not the writing itself. The recording form EXITS 0 WHILE MUTATING.
-    A gate that says OK is the one thing a lane will not look behind, so the mutation rides along
-    into whatever that lane commits next. The `--check` form already exists, is documented in the
-    script's own usage block ("report baseline drift; never write"), and NOTHING invokes it:
-    `package.json:62` maps the `source-size-ratchet` script to the bare writing form, and
-    `src/lib/ci-parity.ts` registers that script name for the gate.
-
-    `--check` IS NOT A DROP-IN, and the shard must not pretend otherwise. It exits 1 where the
-    writing form exits 0 — TODAY, on main, because `src/lib/install-hash.ts` (new with W1-T2777)
-    has no recorded entry. So switching the gate turns a passing check into a failing one until
-    that entry is recorded deliberately. That is the intended contract — a ceiling is recorded by
-    a person, not by whoever happened to run the gate — but it is a behaviour change and the
-    build has to land the entry in the same diff or it reddens main.
-
-    THE DAMAGE IS NOT HYPOTHETICAL AND THIS SESSION PAID IT. W1-T2755's fix grew
-    `src/lib/isolation.ts` past its ceiling, the ratchet's prescribed remedy wrote
-    `scripts/source-size-baseline.json`, and that path was outside the shard's declared `files:`.
-    The blocked_review fix rung refused to dispatch strike 2 (issue #3843), correctly — "only a
-    human can undo an already-pushed out-of-scope commit". Unblocking it cost a whole extra
-    plan-only PR (#3850) to widen `files:`. The same run also silently recorded
-    `install-hash.ts: 500` and LOWERED `src/run-task.ts` 36500 -> 36000, neither related to that
-    diff; both were caught and reverted by hand only because the tree was inspected before
-    committing. A lane that did not inspect would have shipped another lane's drift under its own
-    task id.
-  rationale: |
-    ONE SHARD, AND THE MEASUREMENT IS WHAT DECIDES IT. The pair reported together — the ratchet's
-    write and a test's write into
-    `test/fixtures/live-plan-writers/changed-tasks/tasks.d/FIXTURE-C2-design-block.yaml` — share a
-    SYMPTOM ("a gate run leaves a tracked tree dirty") and do NOT share a cause, an intent, or a
-    remedy. They are one shard because the durable deliverable is ONE detector that catches the
-    class; they are not one bug.
-
-    THE SECOND INSTANCE IS THE MORE CAREFUL OF THE TWO, which inverts the obvious reading. Read
-    `test/changed-tasks-raw-text.test.ts` around its `live-plan-writers` fixture: the write is
-    deliberate, documented, wrapped in try/finally that restores the original, and the test
-    ALREADY asserts the live `plan/` tree stays clean DURING the run, not merely after
-    ("the window in which the tree is dirty IS the race"). Its fixture cannot be a temp directory
-    at all: `git show <ref>:<relPath>` exits 2 for a path absent at the ref, so `--base` cannot
-    resolve an untracked fixture — the comment says so and names W1-T120 for why an out-of-repo
-    `--plan` is refused besides. MEASURED: running that file leaves `git status --porcelain`
-    EMPTY, fixture restored. So it is not a test with an unannounced side effect; it is a test
-    that already moved its writes OFF `plan/` and guards the tree it most matters for. Its
-    residual exposure is the WINDOW — an abnormally terminated run skips `finally`, and CI shards
-    do get killed here (the W1-T2597 no-summary guard exists because of it) — which is a real but
-    strictly smaller problem than a mutation that is MEANT to persist and reports OK.
-
-    SO THIS SHARD FIXES INSTANCE 1 AND SHIPS THE DETECTOR; it does not rewrite instance 2. The
-    detector passes instance 2 as it stands, because instance 2 restores. If the window is judged
-    unacceptable later, that is its own filing with its own evidence, and it starts from a harder
-    constraint (the fixture must be tracked) than "stop writing".
-
-    WHY A DETECTOR AND NOT JUST THE ONE-LINE FIX. This is the W1-T2790 lesson applied one scope
-    down: a hand-fix of instance 1 leaves nothing that would catch instance 3. The detector states
-    the property directly — running the gate must leave `git status --porcelain` unchanged — so a
-    future step that writes during a gate fails by name instead of being noticed by whoever
-    happens to inspect a tree before committing.
-
-    THE DETECTOR MUST NOT BE VACUOUS. A check that runs the gate in a tree where nothing would
-    drift passes trivially and forever. It has to be falsified in the positive direction: with a
-    deliberately unrecorded source file present, the writing form dirties the tree and the check
-    must FAIL; with the gate switched to the non-writing form, the same setup must leave it clean.
-  acceptance:
-    - claim: "the source-size gate invokes a mode that never writes, so a gate run cannot record a baseline entry no one asked for"
+      claim: "the source-size gate invokes a mode that never writes, so a gate run cannot record a
+              baseline entry no one asked for"
       proof: "grep: source-size-ratchet\\.mjs --check in package.json"
-    - claim: "src/lib/install-hash.ts carries a recorded ceiling, so switching the gate to the non-writing mode does not redden main on a file W1-T2777 added and nobody recorded"
-      proof: "grep: src/lib/install-hash\\.ts in scripts/source-size-baseline.json"
-    - claim: "a test asserts that running the source-size gate leaves the tracked tree byte-identical, and fails when the gate is switched back to the recording form"
+
+    That property now HOLDS on main. `1eb3b6ea` ("chore(instrument): split the source-size signal
+    prerequisite", #3871) split the script into two invocations, and `src/lib/ci-parity.ts`
+    registers `script: "source-size-signal"` — the bare form — for the `source-size` job. MEASURED:
+    `node scripts/source-size-ratchet.mjs` exits 0 and leaves `git status --porcelain` EMPTY. The
+    entry's own reason string says it outright: "The historical shared baseline is not read or
+    written". So the gate can no longer record an entry nobody asked for.
+
+    IT WAS SATISFIED BY A DIFFERENT MECHANISM THAN THE PROOF NAMES, which is why the proof must not
+    survive: `grep -c 'source-size-ratchet\.mjs --check' package.json` reads 0 on main and would
+    stay 0. `package.json:62-63` maps `source-size-signal` to the bare form and `source-size-ratchet`
+    to `--baseline scripts/source-size-baseline.json`; neither names `--check`. Building to that
+    proof would mean wiring a `--check` flag into a gate that already does not write — churn that
+    changes no behaviour. The claim is true; the proof is stale.
+
+    CRITERION 2 IS DROPPED, AND THE REASON IS A MEASUREMENT, NOT A SCOPE PREFERENCE. As filed it
+    required `src/lib/install-hash.ts` to carry a recorded ceiling so that switching the gate to
+    the non-writing mode would not redden main. MEASURED: `install-hash` still appears 0 times in
+    `scripts/source-size-baseline.json`, so the entry is genuinely still absent — but the condition
+    that made it necessary is gone. The gate no longer reads or writes that baseline at all, so
+    there is no switch left to make and nothing to redden. Recording the entry now would be an
+    unrelated bookkeeping edit riding under this task id, which is the exact failure this shard's
+    own note complains about.
+
+    THE BASELINE IS NOT INERT, AND THAT QUESTION WAS ASKED AND ANSWERED BEFORE RE-SCOPING. #3871
+    converted the FAST-GATE STEP from blocking to advisory; it did NOT remove enforcement.
+    Enforcement lives in `test/a-source-file-cannot-outgrow-its-baseline.test.ts`, which runs the
+    ratchet as `--root <REPO_ROOT> --baseline <copy of the real baseline>` and asserts
+    `gate.status === 0` against the REAL `src/` tree — so it blocks inside `npm run test:ci`, which
+    is the ci-shard 4/4 red operators have been seeing. FALSIFIED DIRECTLY: growing
+    `src/lib/isolation.ts` from 478 lines to 598, past its recorded ceiling of 500, turns that file
+    from `# pass 24 / # fail 0` into `not ok 1 ... source-size-ratchet: BLOCKED -- 1 source file(s)
+    grew past their recorded baseline`; restoring the file restores the pass. So the three lanes
+    that maintained ceilings (417->478, 500->700, 1516->2000) were maintaining a live gate, and
+    `--check` is NOT the only enforcing form — the enforcing form is the bare `--baseline`
+    invocation the test drives.
+
+    NEITHER #3871 NOR #3750 CARRIES A `Remudero-Task:` TRAILER, so both are cited here by PR number
+    and sha. A trailer-only credit scan cannot see either — the same gap W1-T2776's implementation
+    subject demonstrated on 2026-09-04.
+  rationale: |
+    WHAT SURVIVES IS THE DETECTOR, AND W1-T2650 MADE IT MORE NECESSARY RATHER THAN LESS. That is
+    the whole argument for still building this, so it is stated first.
+
+    The obvious reading of `e2a8947b` (W1-T2650, "exempt the size baseline from the scope
+    guard/reviewer") is that it solved this shard's damage and left the cause. It did solve the
+    damage: `SCOPE_EXEMPT_GENERATED_ARTIFACTS` (`src/lib/review.ts`) names
+    `scripts/source-size-baseline.json` and is subtracted by BOTH `scopeGuardOutOfScopeFiles` and
+    `scopeViolationFiles`, so the blocked_review that cost issue #3843 and the extra plan-only PR
+    #3850 cannot recur.
+
+    BUT THE SCOPE GUARD WAS THE THING THAT CAUGHT A STRAY BASELINE WRITE, LOUDLY, BY REFUSING IT BY
+    NAME. Exempting the path removed the symptom, not the cause — and it removed the only mechanism
+    that made the cause observable. The recording form still exits 0 while mutating: MEASURED,
+    `node scripts/source-size-ratchet.mjs --baseline scripts/source-size-baseline.json` exits 0,
+    leaves `M scripts/source-size-baseline.json`, and silently recorded `src/lib/install-hash.ts:
+    53 lines` in the probe run. Before W1-T2650 that mutation would have been refused as
+    out-of-scope; after it, the same mutation rides along with NO gate objecting at all. The
+    detector is what replaces the guard that was removed.
+
+    WHY THE DETECTOR MUST BE RETARGETED, NOT BUILT AS FILED. The original criterion asserted that
+    "running the source-size gate" leaves the tree byte-identical. Pointed at the gate as it now
+    stands, that assertion passes trivially and forever, because the gate runs `source-size-signal`
+    and `source-size-signal` never writes — the exact vacuity this shard's own filing warned
+    against. The property worth pinning is therefore the one the fast gate as a WHOLE must satisfy:
+    no step on the gate path may leave the tracked tree dirty, with the recording form serving as
+    the positive falsifier that the check can be made to fail.
+
+    THE SECOND INSTANCE HAS ALREADY BEEN FIXED, INDEPENDENTLY, AND IT NARROWS THE CLASS RATHER THAN
+    THIS TASK. `test/a-source-file-cannot-outgrow-its-baseline.test.ts` used to run the ratchet
+    against the REAL baseline path and so dirtied the tracked tree on every suite run; its own
+    header records the fix ("AGAINST A COPY, NEVER THE TRACKED FILE") and names the two 2026-09-02
+    measurements that forced it. So the class this shard exists to catch has been shrinking by hand,
+    one instance at a time, with nothing asserting the property — which is precisely the argument
+    for a detector rather than a third hand-fix.
+
+    THE DETECTOR MUST NOT BE VACUOUS. A check that runs a gate in a tree where nothing would drift
+    passes trivially. It has to be falsified in the positive direction: with a deliberately
+    unrecorded source file present, the RECORDING form dirties the tree and the check must FAIL
+    naming the dirtied path; on the gate path as shipped, the same setup must leave it clean.
+  acceptance:
+    - claim: "a test runs the fast gate's own source-size step and asserts the tracked tree is byte-identical afterwards, comparing git status --porcelain before and after in-process rather than trusting the step's exit code"
+      proof: "unit test: test/a-gate-run-leaves-the-tracked-tree-clean.test.ts"
+    - claim: "the same test is falsified in the positive direction — pointed at the recording form with an unrecorded source file present it FAILS and names the dirtied path, so the check is not vacuous"
       proof: "unit test: test/a-gate-run-leaves-the-tracked-tree-clean.test.ts"
   falsifier: |
     BOTH DIRECTIONS, and the positive one is the one that matters. Point the new test at the
-    RECORDING form with an unrecorded source file present: it must FAIL, naming the dirtied path —
-    a detector that cannot be made to fail is measuring nothing. Restore the non-writing form: it
-    must pass with the tree byte-identical. Take `git status --porcelain` before and after in the
-    same process rather than trusting the script's exit code, because the exact defect here is a
-    mutation that exits 0.
+    RECORDING form (`--baseline scripts/source-size-baseline.json`) with an unrecorded source file
+    present: it must FAIL, naming the dirtied path — a detector that cannot be made to fail is
+    measuring nothing. Point it at the gate path as shipped (`source-size-signal`): it must pass
+    with the tree byte-identical. Take `git status --porcelain` before and after in the same
+    process rather than trusting an exit code, because the defect this guards is a mutation that
+    exits 0.
 
-    SEPARATELY: the claim "--check is not a drop-in" is itself falsifiable and must be re-checked
-    at build time — if `src/lib/install-hash.ts` has gained a recorded ceiling by then, criterion
-    2 is already satisfied on main and the build must say so rather than re-recording it.
+    NEVER WRITE THE PROBE'S FIXTURE INTO THE TRACKED TREE. The suite this joins already refuses
+    that (`test/a-source-file-cannot-outgrow-its-baseline.test.ts`'s header, and its own copy-the-
+    baseline fix); a detector for tracked-tree mutation that itself mutates the tracked tree is
+    self-refuting.
+
+    CLOSE THIS TASK WITHOUT CODE if the recording form has by then stopped exiting 0 while writing,
+    or if some other gate has taken over asserting the property — either would mean the detector
+    guards nothing. Re-measure both forms before building rather than trusting this note: this
+    shard has already been overtaken once by #3871, which is why the re-scope block above exists.
