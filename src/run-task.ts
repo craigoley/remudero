@@ -658,6 +658,7 @@ import {
   cappedReason,
   reviewLedgerLegibilityFields,
   reviewLedgerReasons,
+  SCOPE_EXEMPT_GENERATED_ARTIFACTS,
   resolvePlanCriteriaAtHead,
   type PlanCriteriaAtHeadDivergence,
   parseWhitelistedProof,
@@ -4023,6 +4024,13 @@ export function checkPrOwnership(
  * rather than waving it through — a task with no declared scope can never
  * legitimize an out-of-scope push. An empty `diffFiles` is always clean
  * (nothing staged, nothing to refuse) regardless of the declared scope.
+ *
+ * W1-T2650: also admits {@link SCOPE_EXEMPT_GENERATED_ARTIFACTS} — the SAME enumerated set
+ * `scopeViolationFiles` (lib/review.ts) subtracts, so a PR this guard admits is never the one the
+ * reviewer's `scope_violation` advisory flags for the same path, and vice versa. The exemption is
+ * only ever consulted ALONGSIDE a task's own declared scope (the `!declaredFiles ||
+ * declaredFiles.length === 0` branch above already returned): an undeclared task still has every
+ * non-empty diff refused, exempt artifact or not, so this never widens the fail-closed default.
  */
 export function scopeGuardOutOfScopeFiles(
   diffFiles: readonly string[],
@@ -4031,7 +4039,7 @@ export function scopeGuardOutOfScopeFiles(
   if (diffFiles.length === 0) return [];
   if (!declaredFiles || declaredFiles.length === 0) return [...diffFiles];
   const declared = new Set(declaredFiles);
-  return diffFiles.filter((f) => !declared.has(f));
+  return diffFiles.filter((f) => !declared.has(f) && !SCOPE_EXEMPT_GENERATED_ARTIFACTS.has(f));
 }
 
 /** The `git ls-remote --exit-code` probe's OWN failure evidence — captured from the `catch`
