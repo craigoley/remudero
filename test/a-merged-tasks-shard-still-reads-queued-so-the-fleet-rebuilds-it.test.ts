@@ -32,7 +32,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-import { runnableCandidates, type NextRunnableOpts } from "../src/lib/drain.js";
+import { runnableCandidates, type AlreadyMergedCredit, type NextRunnableOpts } from "../src/lib/drain.js";
 import { buildPlanFrontier } from "../src/lib/panel-graph.js";
 import type { Plan, Task } from "../src/lib/plan.js";
 
@@ -168,4 +168,75 @@ test("W1-T2675: the frontier SKIPS a credit-indeterminate task instead of callin
     assert.notEqual(row.reasonKind, "unmet-dependency",
       "no row may be attributed to unmet dependencies — neither task has any");
   }
+});
+
+/** Captures {@link AlreadyMergedCredit} the way a real caller (a daemon log line, a ledger row)
+ *  would: alongside the `already-merged` decline, never in place of it. */
+function selectWithCredit(
+  ids: string[],
+  projection: Map<string, { merged?: boolean }>,
+  creditFor: (id: string) => AlreadyMergedCredit | undefined,
+): { dispatched: string[]; filtered: Array<[string, string]>; credits: Array<[string, AlreadyMergedCredit]> } {
+  const filtered: Array<[string, string]> = [];
+  const credits: Array<[string, AlreadyMergedCredit]> = [];
+  const plan = { tasks: ids.map(task) } as unknown as Plan;
+  const dispatched = runnableCandidates(plan, adapter(projection), ids.length, {
+    creditFor,
+    onFiltered: (t, reason) => filtered.push([t.id, reason]),
+    onAlreadyMergedCredit: (t, credit) => credits.push([t.id, credit]),
+  }).map((t) => t.id);
+  return { dispatched, filtered, credits };
+}
+
+test("W1-T2675: the already-merged refusal names which credit path matched and the PR that carried it", () => {
+  const projection = new Map([["W1-T1000002", { merged: true }]]);
+  const { dispatched, filtered, credits } = selectWithCredit(["W1-T1000002"], projection, (id) =>
+    id === "W1-T1000002" ? { path: "trailer", prNumber: 2376 } : undefined);
+
+  assert.deepEqual(dispatched, []);
+  assert.equal(filtered[0]?.[1], "already-merged", "the refusal itself is still already-merged, unchanged");
+  assert.equal(credits.length, 1, "the credit is named exactly once, alongside the refusal");
+  assert.equal(credits[0]?.[0], "W1-T1000002");
+  assert.deepEqual(credits[0]?.[1], { path: "trailer", prNumber: 2376 },
+    "both the matched credit path AND the PR that carried it are named");
+});
+
+test("W1-T2675: credit by head-ref alone is honoured, so a merge carrying no trailer still counts", () => {
+  // #1657, cited in this task's own filing: zero trailers, credited purely by its
+  // run-<taskId>-<epochMs> head ref. isMerged(true) is honoured on its own — no trailer is
+  // required for the refusal to fire — and the named path reports exactly that evidence.
+  const projection = new Map([["W1-T1657", { merged: true }]]);
+  const { dispatched, filtered, credits } = selectWithCredit(["W1-T1657"], projection, (id) =>
+    id === "W1-T1657" ? { path: "head-ref", prNumber: 1657 } : undefined);
+
+  assert.deepEqual(dispatched, [], "a head-ref-only credit still refuses the task, with no trailer needed");
+  assert.equal(filtered[0]?.[1], "already-merged");
+  assert.deepEqual(credits[0]?.[1], { path: "head-ref", prNumber: 1657 });
+});
+
+test("W1-T2675: the shard's own status field is neither read nor written by the already-merged check", () => {
+  // A task's `status:` is a hand-authored filing artifact (CLAUDE.md), never a completion signal —
+  // so a merged-credited task must be refused already-merged regardless of what its OWN status
+  // field says, and that field must come back byte-identical: nothing on this branch writes it.
+  const t = task("W1-T-STALE-STATUS");
+  (t as unknown as { status: string }).status = "in_progress"; // deliberately NOT "queued" nor "blocked"
+  const plan = { tasks: [t] } as unknown as Plan;
+  const projection = new Map([["W1-T-STALE-STATUS", true]]);
+  const filtered: Array<[string, string]> = [];
+  const credits: Array<[string, AlreadyMergedCredit]> = [];
+
+  const dispatched = runnableCandidates(plan, (id) => projection.get(id) ?? false, 1, {
+    creditFor: (id) => (id === "W1-T-STALE-STATUS" ? { path: "both", prNumber: 4242 } : undefined),
+    onFiltered: (task_, reason) => filtered.push([task_.id, reason]),
+    onAlreadyMergedCredit: (task_, credit) => credits.push([task_.id, credit]),
+  }).map((c) => c.id);
+
+  assert.deepEqual(dispatched, []);
+  assert.equal(filtered[0]?.[1], "already-merged",
+    "the decision is already-merged regardless of the task's own status field — never blocked, " +
+    "never anything derived from status");
+  assert.deepEqual(credits[0]?.[1], { path: "both", prNumber: 4242 });
+  // The check never WRITES status either: the same object handed in comes back unchanged.
+  assert.equal((t as unknown as { status: string }).status, "in_progress",
+    "the check must not mutate the shard's own status field");
 });

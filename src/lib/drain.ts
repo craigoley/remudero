@@ -35,6 +35,24 @@ import type { OpenSiblingBuild } from "./status.js";
 export type MergedSet = (taskId: string) => boolean;
 
 /**
+ * W1-T2675 — WHICH of the two credit paths (status.ts's `findMergedByHeadBranch` union: a
+ * `Remudero-Task:` trailer, a `run-<taskId>-<epochMs>` head ref, or both) actually credited an
+ * already-merged task. `"head-ref"` is named explicitly — and must be, on its own, sufficient to
+ * report — because a merge can carry ZERO trailers and still be credited purely by branch name
+ * (#1657, cited in this task's own filing); collapsing that case into a generic "credited" would
+ * hide the exact evidence an operator most needs when the trailer is the thing missing.
+ */
+export type CreditPath = "trailer" | "head-ref" | "both";
+
+/** The evidence behind an `"already-merged"` refusal: which path matched, and the PR it rode in
+ *  on — the two facts {@link NextRunnableOpts.creditFor} reports so an operator sees "already
+ *  shipped as #N (head-ref)" rather than a bare refusal with no PR to go look at. */
+export interface AlreadyMergedCredit {
+  path: CreditPath;
+  prNumber: number;
+}
+
+/**
  * Resolves the OPEN PR number for a task's most-recently-derived PR — undefined
  * when that PR is merged, closed, or there is none. Backs the in-flight
  * dispatch-dedup guard (W1-T80, the #143/#145 duplicate-build race): DERIVED
@@ -241,6 +259,29 @@ export interface NextRunnableOpts {
    * silently re-exposes a shipped task as dispatchable `verify: auto` work.
    */
   onSinglePathCredit?: (task: Task) => void;
+  /**
+   * W1-T2675 (criteria 2 and 3 of this task's own filing): resolves the {@link AlreadyMergedCredit}
+   * — WHICH credit path matched and the PR that carried it — for a task {@link MergedSet} already
+   * refused. Consulted ONLY on the `"already-merged"` decline, exactly where `isSinglePathCredit`
+   * above is consulted, and for the identical reason: this can never itself change eligibility,
+   * `isMerged(t.id)` alone already decided that. Returns `undefined` when the caller holds no such
+   * detail (a bare boolean `MergedSet` carries none) — the refusal still fires, unnamed, byte-
+   * identical to before this probe existed. NEITHER THIS PROBE NOR ITS CALLBACK EVER READS
+   * `t.status` OR `t.retirement` — the credit union this reports comes entirely from the caller's
+   * own GitHub-derived projection (status.ts), never from the hand-authored plan shard; see
+   * {@link isDispatchEligible}'s `already-merged` arm, which checks `isMerged(t.id)` before this is
+   * even reached and never touches the task's `status` field on this branch, matching CLAUDE.md's
+   * rule that a shard's `status:` is not a completion signal and nothing here treats it as one.
+   */
+  creditFor?: (taskId: string) => AlreadyMergedCredit | undefined;
+  /**
+   * Called ALONGSIDE (never instead of) `onFiltered(task, "already-merged")` when {@link
+   * creditFor} resolves a credit — mirrors `onSinglePathCredit`'s "called alongside" discipline —
+   * so a caller watching the dispatch loop can print "already shipped as #N (head-ref)" instead of
+   * a bare refusal with no PR to go look at (this task's own rationale: the operator should see
+   * WHICH credit path matched and WHICH PR carried it, not just that a refusal fired).
+   */
+  onAlreadyMergedCredit?: (task: Task, credit: AlreadyMergedCredit) => void;
   /**
    * W1-T177 (TERMINAL-STATE CHECK AT EVERY SPENDING SITE): an OPTIONAL fresh
    * re-read of ONE candidate in-flight PR's live GitHub state, consulted
@@ -597,6 +638,12 @@ function isDispatchEligible(plan: Plan, t: Task, isMerged: MergedSet, opts: Next
     // that omits `isSinglePathCredit` sees byte-identical behaviour to before this
     // existed.
     if (opts.isSinglePathCredit?.(t.id)) opts.onSinglePathCredit?.(t);
+    // W1-T2675: NAME the credit — which path matched and the PR it rode in on — the SAME
+    // "called alongside, never gating" discipline as the single-path observation just above.
+    // `t.status` is never read here or by `opts.creditFor`: the decision was already made by
+    // `isMerged(t.id)`, a GitHub-derived read, before this line runs.
+    const credit = opts.creditFor?.(t.id);
+    if (credit) opts.onAlreadyMergedCredit?.(t, credit);
     opts.onFiltered?.(t, "already-merged");
     return false;
   }
