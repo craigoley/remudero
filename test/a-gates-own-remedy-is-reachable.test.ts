@@ -29,15 +29,118 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import fs from "node:fs";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
-import { fixRungScopeStandDownReason, renderFixPrompt } from "../src/run-task.js";
+import { fixRungScopeStandDownReason, renderFixPrompt, runFixRung } from "../src/run-task.js";
 import { FAST_GATE_STEPS, remedyFilesForFailingChecks } from "../src/lib/ci-parity.js";
+import type { ReviewVerdict } from "../src/lib/review.js";
+import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";
+import type { Mount } from "../src/lib/mounts.js";
+import type { Config } from "../src/lib/config.js";
+import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
 
 const REMEDY_PATH = "scripts/source-size-baseline.json";
 const ROGUE_PATH = "src/lib/rogue.ts";
 
 function ciEvidence(names: string[]): { ciFailures: Array<{ name: string; logTail: string }> } {
   return { ciFailures: names.map((name) => ({ name, logTail: "boom" })) };
+}
+
+// ── shared fixtures for the runFixRung INTEGRATION suite below, at the bottom of this file —
+// mirrors test/fix-rung-scope-standdown.test.ts's own conventions (the sibling suite this task's
+// mechanism sits beside) so the real dispatch loop, not just the pure functions, is exercised.
+
+function workerResult(over: Partial<WorkerResult> = {}): WorkerResult {
+  return {
+    sessionId: "s",
+    costUsd: 0,
+    numTurns: 0,
+    text: "",
+    blocks: [],
+    stderr: "",
+    subtype: "success",
+    isError: false,
+    apiError: false,
+    permissionDenials: [],
+    childEnvKeys: [],
+    model: "default",
+    effort: "default",
+    tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+    modelUsage: {},
+    compactionEvents: [],
+    qualitySuspect: false,
+    ...over,
+  };
+}
+
+function ciLogInitialReview(headSha = "deadbeef"): ReviewVerdict & { headSha: string; reviewerOutcome: string } {
+  return {
+    state: "failure",
+    criteria: [],
+    testTheater: false,
+    summary: "sweep-reconstructed: required checks red (1 failing check(s)) — ci-log dispatch",
+    floorDegraded: false,
+    capped: false,
+    keywordOnly: false,
+    planOnly: false,
+    headSha,
+    reviewerOutcome: "sweep-reconstructed-ci-log",
+  };
+}
+
+const FIX_RUNG_MOUNT: Mount = { model: "sonnet", effort: "medium", maxTurns: 400, contextBudget: 120000 };
+
+function fixRungBaseOpts(task: { id: string; title: string; files?: string[] }) {
+  return {
+    taskId: task.id,
+    runId: `${task.id}-1730000000000`,
+    task,
+    prUrl: "https://github.com/acme/remudero/pull/2653",
+    branch: `run-${task.id}-1730000000000`,
+    worktreePath: "/tmp/rmd-gate-remedy-wt",
+    initialSessionId: "",
+    mount: FIX_RUNG_MOUNT,
+    settingsFile: "/tmp/rmd-gate-remedy-settings.json",
+    config: {} as Config,
+    budgetUsd: 10,
+    reviewBase: { owner: "acme", repo: "remudero", headCheckoutDir: "/tmp/rmd-gate-remedy-wt", reviewerMount: FIX_RUNG_MOUNT },
+  };
+}
+
+function tmpLedgerPath(): string {
+  return join(mkdtempSync(join(tmpdir(), "rmd-gate-remedy-")), "ledger.ndjson");
+}
+
+function fakeIssueStore(): IssueGateway & { calls: Array<{ title: string; body: string; labels: string[] }> } {
+  let seq = 900;
+  const issues: Array<{ number: number; url: string; title: string; body: string; state: string }> = [];
+  const calls: Array<{ title: string; body: string; labels: string[] }> = [];
+  return {
+    calls,
+    create(title, body, labels) {
+      const number = seq++;
+      const url = `https://github.com/acme/remudero/issues/${number}`;
+      issues.push({ number, url, title, body, state: "open" });
+      calls.push({ title, body, labels });
+      return url;
+    },
+    listOpen(): OpenIssue[] {
+      return issues.filter((i) => i.state === "open").map((i) => ({ number: i.number, url: i.url, title: i.title, body: i.body }));
+    },
+    comment() {
+      // not exercised by these tests
+    },
+  };
+}
+
+/** A `deps.fetchPrDiffFiles` fake that replays a fixed SEQUENCE of diff-file snapshots, one per
+ *  call — call 0 is the pre-loop baseline snapshot, mirroring fix-rung-scope-standdown.test.ts's
+ *  own `diffFileSequence` helper. */
+function diffFileSequence(sequence: string[][]): () => Promise<string[]> {
+  let i = 0;
+  return async () => sequence[Math.min(i++, sequence.length - 1)];
 }
 
 // ── ACCEPTANCE #5 — the pairing is DECLARED in the registry, with its own reason ────────────────
@@ -222,5 +325,132 @@ test("acceptance 4: instruction and enforcement agree — the SAME reachableReme
     fixRungScopeStandDownReason(current, baseline, declared, reachable),
     undefined,
     "a path the prompt just told the worker it MAY commit must never stand the rung down",
+  );
+});
+
+// ── INTEGRATION: the real `runFixRung` dispatch loop, at the actual enforcement point ───────────
+//
+// Everything above proves the pure functions and `renderFixPrompt` in isolation. This section
+// proves the SAME property through the real orchestration loop `runFixRung` — the "enforcement
+// point" claim 1 names, and the exact seam five real tasks' fix rungs deadlocked at (rationale,
+// W1-T2485/W1-T2490/W1-T2497/W1-T2503/W1-T2504): round 1 dispatches a real fix worker whose
+// commit adds the source-size gate's own declared remedy file while THAT gate is still the one
+// failing; round 2's pre-strike scope gate — the code path at `rung.scope` inside `runFixRung`,
+// never a hand-called `fixRungScopeStandDownReason` — must NOT stand down over it, and instead
+// spends its own second strike normally, exactly like a repair confined to declared scope would.
+
+// NOTE on the falsifier below: `scripts/source-size-baseline.json` is ALSO a member of the
+// pre-existing, unconditional `REGENERABLE_ARTIFACT_GENERATORS` registry (W1-T2650/W1-T2651),
+// so it is ALREADY exempt from the real `runFixRung` scope gate regardless of which check this
+// round addresses — that grant is deliberately untouched (see the file header). A "wrong check"
+// falsifier for THIS file specifically is therefore not observable through the real end-to-end
+// loop (it IS observable, and proved, at the pure-function level: `remedyFilesForFailingChecks`
+// and `fixRungScopeStandDownReason`'s own "acceptance 3" tests above, using a step table the
+// production registry does not already cover). What real `runFixRung` integration CAN prove
+// end-to-end — and what the second test below does — is that the exemption is still exactly ONE
+// named file: a genuinely unrelated rogue path is still stood down even while the source-size
+// gate's own remedy is reachable in the very same round.
+
+test("runFixRung (integration, acceptance 1): a ci-log round-1 commit adding the source-size gate's OWN remedy file does not stand round 2's rung down — the deadlock is gone at the real enforcement point", async () => {
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  let waitCalls = 0;
+
+  const outcome = await runFixRung({
+    ...fixRungBaseOpts({ id: "W1-T2653Y", title: "fix the source-size ceiling", files: ["src/lib/worker.ts"] }),
+    strikeCap: 3,
+    initialReview: ciLogInitialReview(),
+    ciFailures: [{ name: "source-size", logTail: "source-size-ratchet: BLOCKED -- 1 source file(s) grew" }],
+    deps: {
+      spawn: async (args) => {
+        spawnCalls.push(args);
+        return workerResult({ sessionId: `fix-session-${spawnCalls.length}` });
+      },
+      // Round 1's push leaves `source-size` red (the worker's first attempt didn't land yet) —
+      // `fetchCiFailures` refreshes round 2's evidence to the SAME still-failing check, so
+      // `currentCiFailures` still names `source-size` at round 2's own pre-strike gate, exactly
+      // the live condition `reachableRemedyFiles` is scoped to. Round 2's push clears CI, ending
+      // the loop at exactly two strikes.
+      waitForCiGreen: async () => {
+        waitCalls++;
+        return waitCalls === 1 ? "red" : "green";
+      },
+      fetchCiFailures: async () => [{ name: "source-size", logTail: "source-size-ratchet: BLOCKED -- 1 source file(s) grew" }],
+      runReview: async () => ({
+        ...ciLogInitialReview("sha-2"),
+        state: "success",
+        criteria: [{ claim: "source-size ceiling recorded", met: true, proof: "npm run source-size-signal", reason: "", proof_exec: "executed_pass" }],
+      }),
+      push: () => {},
+      issues: fakeIssueStore(),
+      ledgerPath: tmpLedgerPath(),
+      log: () => {},
+      say: () => {},
+      account: (r) => r,
+      // Call 0: pre-loop baseline (declared file only). Call 1: round 1's own pre-strike check —
+      // unchanged, a structural no-op. Call 2: round 2's pre-strike check — observes round 1's
+      // OWN commit having added the gate's declared remedy file. Call 3+: unchanged thereafter.
+      fetchPrDiffFiles: diffFileSequence([
+        ["src/lib/worker.ts"],
+        ["src/lib/worker.ts"],
+        ["src/lib/worker.ts", REMEDY_PATH],
+      ]),
+    },
+  });
+
+  assert.equal(spawnCalls.length, 2, "BOTH strikes dispatch — round 2 is never stood down over the gate's own remedy file");
+  assert.equal(outcome.outcome, "fixed");
+  assert.equal(outcome.strikes, 2);
+  assert.equal(outcome.standDownReason, undefined, "the scope gate never fires for this repair");
+
+  // Acceptance 4, tied to the SAME real dispatch: round 1's actual prompt — the one really sent
+  // to the worker, not a hand-built call — already named the reachable remedy file and its gate
+  // alongside the declared scope, so instruction (round 1's prompt) and enforcement (round 2's
+  // guard, just proved above) agree on the identical file.
+  assert.match(spawnCalls[0].prompt, /GATE REMEDY/);
+  assert.match(spawnCalls[0].prompt, /source-size/);
+  assert.match(spawnCalls[0].prompt, /scripts\/source-size-baseline\.json/);
+  assert.match(spawnCalls[0].prompt, /DECLARED SCOPE/);
+  assert.match(spawnCalls[0].prompt, /src\/lib\/worker\.ts/);
+});
+
+test("runFixRung (integration, falsifier): a genuinely unrelated rogue path still stands round 2's rung down even while the source-size remedy is reachable THIS same round", async () => {
+  const spawnCalls: SpawnWorkerArgs[] = [];
+
+  const outcome = await runFixRung({
+    ...fixRungBaseOpts({ id: "W1-T2653Z", title: "fix the source-size ceiling", files: ["src/lib/worker.ts"] }),
+    strikeCap: 3,
+    initialReview: ciLogInitialReview(),
+    ciFailures: [{ name: "source-size", logTail: "source-size-ratchet: BLOCKED -- 1 source file(s) grew" }],
+    deps: {
+      spawn: async (args) => {
+        spawnCalls.push(args);
+        return workerResult({ sessionId: `fix-session-${spawnCalls.length}` });
+      },
+      waitForCiGreen: async () => "red",
+      fetchCiFailures: async () => [{ name: "source-size", logTail: "source-size-ratchet: BLOCKED -- 1 source file(s) grew" }],
+      runReview: async () => ({ ...ciLogInitialReview("sha-1") }),
+      push: () => {},
+      issues: fakeIssueStore(),
+      ledgerPath: tmpLedgerPath(),
+      log: () => {},
+      say: () => {},
+      account: (r) => r,
+      // Round 1's own commit adds a genuinely unrelated rogue path — NOT the source-size gate's
+      // declared remedy — alongside the declared file.
+      fetchPrDiffFiles: diffFileSequence([
+        ["src/lib/worker.ts"],
+        ["src/lib/worker.ts"],
+        ["src/lib/worker.ts", ROGUE_PATH],
+      ]),
+    },
+  });
+
+  assert.equal(spawnCalls.length, 1, "round 2 never dispatches — the rung stood down first");
+  assert.equal(outcome.outcome, "stood_down");
+  assert.match(outcome.standDownReason ?? "", new RegExp(ROGUE_PATH.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.doesNotMatch(
+    outcome.standDownReason ?? "",
+    /source-size-baseline/,
+    "the exemption is ONE named file — it must not silently swallow an unrelated path too",
   );
 });
