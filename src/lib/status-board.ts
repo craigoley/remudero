@@ -2683,7 +2683,13 @@ function renderBlockersBlock(b: BlockersSection): string[] {
 /** W1-T2637: a label table, exhaustive BY CONSTRUCTION — one wording per {@link QueueHeadRefusedRow.reason} member, keyed as a `Record` so the type-checker names any arm left without a sentence. Replaces the two-way ternary W1-T2415 already had to repair once; `deriveQueueHead`'s guard is unchanged, so only run-branch/breaker reach this table today, both byte-identical to before. */ const QUEUE_HEAD_REFUSAL_WORDING: Record<QueueHeadRefusedRow["reason"], (r: QueueHeadRefusedRow) => string> = {
   "circuit-broken": (r) => `dispatch circuit breaker tripped — ${r.resetNote ?? `${r.dispatchCount}/${r.maxDispatches} dispatches with no new owned PR`}`,
   "run-branch-already-pushed": () => "run branch already pushed to origin", "already-merged": () => "already merged", "verify-not-auto": () => "verify is not auto",
-  blocked: () => "blocked", retired: () => "retired", "unmet-deps": () => "dependencies not yet met", "continued-this-pass": () => "continued this pass" };
+  blocked: () => "blocked", retired: () => "retired", "unmet-deps": () => "dependencies not yet met", "continued-this-pass": () => "continued this pass",
+  // W1-T2675 — worded as a BLIND SPOT, never a verdict: the fleet could not read this task's merge
+  // credit, so it is held rather than rebuilt. An operator seeing it should look at GitHub
+  // reachability (rate limit, auth, transport), not at the task. The entry itself follows the
+  // comma directly, because this table's exhaustiveness test matches a key only where it follows
+  // the literal's opening brace or a comma.
+  "credit-indeterminate": () => "merge credit could not be read — held rather than rebuilt" };
 
 /** EXPORTED for test only — the same visibility `deriveCircuitBrokenBlockers` already carries,
  *  so a test can assert what an operator actually READS rather than only the section object.

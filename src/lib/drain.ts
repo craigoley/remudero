@@ -110,6 +110,28 @@ export interface NextRunnableOpts {
   isOpenPr?: OpenPrCheck;
 
   /**
+   * W1-T2675 — CREDIT READ FAILED, WHICH IS NOT THE SAME AS "NOT MERGED". `deriveStatus`
+   * (lib/status.ts) returns `{ merged: false, source: "throttled", indeterminate: true }` when the
+   * GitHub credit read genuinely FAILED rather than resolving to a clean "no evidence", and
+   * {@link StatusProjection.indeterminate}'s own doc states the obligation this probe discharges:
+   * "a caller that gates dispatch or a ledger write off this projection MUST treat `indeterminate`
+   * as DO NOT ACT, never as an ordinary queued task, because the evidence a 'not merged' conclusion
+   * would rest on was never actually consulted."
+   *
+   * WITHOUT IT THE ADAPTER FAILS OPEN. Every {@link MergedSet} in the repo is spelled
+   * `projection.get(id)?.merged ?? false`, which collapses `indeterminate` into a confident
+   * `false` — so a task that really shipped is admitted, a worker spawns, and the rebuild cannot
+   * pass review because the shard's criteria describe a diff already on main. That is the #3512
+   * lifecycle W1-T2675 measured; the pre-existing `isMerged(t.id)` refusal at the top of
+   * {@link isDispatchEligible} was never the missing piece and is unchanged.
+   *
+   * OMITTED ⇒ TODAY'S BEHAVIOUR, EXACTLY — the same convention every other probe on this interface
+   * follows. A caller that cannot supply it holds no indeterminate evidence to act on, so there is
+   * nothing to fail closed on; it is never a silently widened refusal.
+   */
+  isCreditIndeterminate?: (taskId: string) => boolean;
+
+  /**
    * W1-T2397 — THE OPEN-SIBLING OBSERVATION, READ OFF THE PROJECTION THIS PASS ALREADY BUILT.
    *
    * Answers, for the task about to be dispatched: is there an OPEN PR building it that is NOT its
@@ -494,6 +516,13 @@ export type DispatchFilterReason =
   | "retired"
   | "unmet-deps"
   | "continued-this-pass"
+  // W1-T2675 — DISTINCT FROM "already-merged", AND THE DISTINCTION IS THE POINT. That reason means
+  // the credit projection SAW a merge. This one means it could not look, a failed GitHub read
+  // carrying indeterminate true, which is not evidence of absence. Folding the two would tell an
+  // operator a task shipped when what actually happened is that the fleet went briefly blind.
+  // NO SEMICOLON ABOVE, DELIBERATELY: two census tests read this union by slicing the declaration
+  // at its FIRST semicolon, so one inside a comment here silently truncates the arm list they pin.
+  | "credit-indeterminate"
   | "run-branch-already-pushed";
 
 /** How many ids each bucket names before truncating — a count tells the operator something is
@@ -531,6 +560,7 @@ export function tallyDispatchFilters(): {
     retired: [],
     "unmet-deps": [],
     "continued-this-pass": [],
+    "credit-indeterminate": [],
     "run-branch-already-pushed": [],
   };
   const snapshot = (): IdleReasonTally =>
@@ -568,6 +598,16 @@ function isDispatchEligible(plan: Plan, t: Task, isMerged: MergedSet, opts: Next
     // existed.
     if (opts.isSinglePathCredit?.(t.id)) opts.onSinglePathCredit?.(t);
     opts.onFiltered?.(t, "already-merged");
+    return false;
+  }
+  // W1-T2675: THE CREDIT READ FAILED — refuse rather than guess. Placed immediately after the
+  // `already-merged` arm because it answers the SAME question that arm just answered `false` to,
+  // and the two must stay distinguishable: `already-merged` means the projection SAW a credit,
+  // this means it could not look. Ahead of every other filter for the same reason `excludeIds` is
+  // ahead of the probes below — a task that may already have shipped must not be spawned while a
+  // cheaper filter is still deciding, and admitting it costs a full PR lifecycle to undo.
+  if (opts.isCreditIndeterminate?.(t.id)) {
+    opts.onFiltered?.(t, "credit-indeterminate");
     return false;
   }
   // CONTINUED THIS PASS (NON_HALTING_VERDICTS): a task the drain already ran and continued past
@@ -1410,6 +1450,14 @@ export interface DrainDeps {
    */
   isOpenPr?: OpenPrCheck;
   /**
+   * W1-T2675 — the credit-read-failed probe, resolved by the CALLER from the same projection
+   * `refreshMerged` builds, exactly as `isOpenPr` is: this module never reads GitHub. See
+   * {@link NextRunnableOpts.isCreditIndeterminate} for why a `merged: false` carrying
+   * `indeterminate: true` must refuse rather than dispatch. Optional, and omitting it leaves
+   * selection byte-identical to before it existed.
+   */
+  isCreditIndeterminate?: (taskId: string) => boolean;
+  /**
    * W1-T2397 — the open-sibling OBSERVATION's two halves, forwarded verbatim to
    * {@link NextRunnableOpts.openSiblingBuildFor} / {@link NextRunnableOpts.onOpenSiblingBuild};
    * see those fields' own docs for the contract. Carried on `DrainDeps` for the same reason
@@ -1786,6 +1834,7 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
 
     const skipOpts: NextRunnableOpts = {
       isOpenPr: deps.isOpenPr,
+      isCreditIndeterminate: deps.isCreditIndeterminate,
       // W1-T2397: forwarded at BOTH `skipOpts` sites, so the single-lane and multi-lane passes
       // observe identically — the same reason `observedByTask` is carried at both.
       openSiblingBuildFor: deps.openSiblingBuildFor,
@@ -2147,6 +2196,7 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
 
     const skipOpts: NextRunnableOpts = {
       isOpenPr: deps.isOpenPr,
+      isCreditIndeterminate: deps.isCreditIndeterminate,
       // W1-T2397: forwarded at BOTH `skipOpts` sites, so the single-lane and multi-lane passes
       // observe identically — the same reason `observedByTask` is carried at both.
       openSiblingBuildFor: deps.openSiblingBuildFor,
