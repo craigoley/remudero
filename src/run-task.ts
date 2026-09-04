@@ -861,6 +861,7 @@ import {
   capStderrExcerpt,
   STDERR_EXCERPT_CAP,
   noPrReportExcerpt,
+  listRegisteredWorktrees,
   workerLedgerFields,
   workerTranscript,
   uniqueRunBranch,
@@ -874,6 +875,7 @@ import {
   WORKTREE_BASE_UNCHECKABLE_STREAK_BOUND,
   type RunLockInfo,
   type SpawnWorkerArgs,
+  type RegisteredWorktree,
   type WorkerResult,
   type WorktreeReapSummary,
   openUsageProbeSession,
@@ -6569,6 +6571,102 @@ export function unchangedTreeStandDownReason(
   };
 }
 
+export interface WorktreeStatusFact {
+  path: string;
+  code: string;
+  staged: boolean;
+  unstaged: boolean;
+}
+
+export interface WorktreeDiffStat {
+  filesChanged: number;
+  insertions: number;
+  deletions: number;
+}
+
+export interface ForeignTreeStandDown {
+  reason: string;
+  porcelainPaths: WorktreeStatusFact[];
+  diffstat: WorktreeDiffStat;
+  otherWorktrees: RegisteredWorktree[];
+}
+
+const EMPTY_UNTRACKED_HASH = createHash("sha256").digest("hex");
+
+export function worktreeSnapshotIsClean(snapshot: WorktreeSnapshot | undefined): boolean {
+  return !!snapshot && snapshot.status === "" && snapshot.diff === "" && snapshot.untrackedHash === EMPTY_UNTRACKED_HASH;
+}
+
+export function worktreeStatusFacts(status: string): WorktreeStatusFact[] {
+  return status
+    .split("\0")
+    .filter(Boolean)
+    .map((entry) => {
+      const code = entry.slice(0, 2);
+      const path = entry.slice(3);
+      return {
+        path,
+        code,
+        staged: code[0] !== " " && code[0] !== "?",
+        unstaged: code[1] !== " " || code === "??",
+      };
+    });
+}
+
+export function worktreeDiffStatFromSnapshot(snapshot: WorktreeSnapshot): WorktreeDiffStat {
+  const files = new Set<string>();
+  let insertions = 0;
+  let deletions = 0;
+  for (const line of snapshot.diff.split("\n")) {
+    const header = /^diff --git a\/(.+) b\/(.+)$/.exec(line);
+    if (header) {
+      files.add(header[2]);
+      continue;
+    }
+    if (line.startsWith("+++") || line.startsWith("---")) continue;
+    if (line.startsWith("+")) insertions++;
+    else if (line.startsWith("-")) deletions++;
+  }
+  for (const fact of worktreeStatusFacts(snapshot.status)) files.add(fact.path);
+  return { filesChanged: files.size, insertions, deletions };
+}
+
+/**
+ * W1-T2652: the fix-rung worktree is expected to be byte-clean immediately after materialization.
+ * A dirty birth snapshot, or round-1 drift away from that birth snapshot before the first worker
+ * turn, is foreign local content. Unreadable snapshots fail open exactly like W1-T1284.
+ */
+export function foreignTreeStandDownReason(opts: {
+  round: number;
+  branch: string;
+  currentWorktreePath: string;
+  birthSnapshot: WorktreeSnapshot | undefined;
+  currentSnapshot: WorktreeSnapshot | undefined;
+  registeredWorktrees?: readonly RegisteredWorktree[];
+}): ForeignTreeStandDown | undefined {
+  if (opts.round !== 1) return undefined;
+  if (!opts.birthSnapshot || !opts.currentSnapshot) return undefined;
+
+  const dirtyAtBirth = !worktreeSnapshotIsClean(opts.birthSnapshot);
+  const driftedBeforeTurn = !worktreeSnapshotsEqual(opts.birthSnapshot, opts.currentSnapshot);
+  if (!dirtyAtBirth && !driftedBeforeTurn) return undefined;
+
+  const reason = dirtyAtBirth
+    ? "fix-rung worktree was not byte-clean at birth, before any fix worker turn could author it"
+    : "fix-rung worktree differs from its birth snapshot before the first fix worker turn";
+  const otherWorktrees = (opts.registeredWorktrees ?? [])
+    .filter((entry) => entry.branch === opts.branch && entry.path !== opts.currentWorktreePath)
+    .map((entry) => ({ path: entry.path, branch: entry.branch }));
+  return {
+    reason:
+      `${reason} — standing down and escalating rather than committing local content whose author ` +
+      `this rung did not observe`,
+    porcelainPaths: worktreeStatusFacts(opts.currentSnapshot.status),
+    diffstat: worktreeDiffStatFromSnapshot(opts.currentSnapshot),
+    otherWorktrees,
+  };
+}
+
 /**
  * W1-T2799 (the fix-rung pre-strike gate's SIXTH reason source, composed into {@link
  * fixRungStandDownReason} below — never a parallel early return): has a human ALREADY been asked
@@ -6711,6 +6809,10 @@ export function captureWorktreeSnapshotViaGit(worktreePath: string): WorktreeSna
  * passes it. See {@link unchangedTreeStandDownReason}'s own doc for the defect it closes; it
  * ledgers only, exactly like `redCheckSupersession`/`mergeConflictCheck` (an unchanged local
  * tree is a self-evident fact this rung itself observed, never an operator-decidable question).
+ *
+ * W1-T2652 composes the birth-snapshot variant beside it: a round-1 worktree already dirty at
+ * materialization, or drifted before the first worker turn, escalates because adopting or
+ * discarding that local content is operator-decidable.
  */
 async function fixRungStandDownReason(
   readLiveState: ((prUrl: string) => LiveStateResult | Promise<LiveStateResult>) | undefined,
@@ -6757,6 +6859,14 @@ async function fixRungStandDownReason(
     previousFailure: { gateKey: string; snapshot: WorktreeSnapshot } | undefined;
     currentSnapshot: WorktreeSnapshot | undefined;
   },
+  foreignTree?: {
+    round: number;
+    branch: string;
+    currentWorktreePath: string;
+    birthSnapshot: WorktreeSnapshot | undefined;
+    currentSnapshot: WorktreeSnapshot | undefined;
+    registeredWorktrees?: readonly RegisteredWorktree[];
+  },
   /**
    * W1-T2799 — the escalation THIS round's strike would eventually re-file if it changed nothing
    * (`key`), the head it would be filed against (`headSha`), and the finder that answers whether
@@ -6775,7 +6885,7 @@ async function fixRungStandDownReason(
     key: EscalationDedupKey;
     find: (key: EscalationDedupKey) => OpenIssue | undefined;
   },
-): Promise<{ reason: string; foreignHead?: { headSha: string; author: string } } | undefined> {
+): Promise<{ reason: string; foreignHead?: { headSha: string; author: string }; foreignTree?: ForeignTreeStandDown } | undefined> {
   if (!readLiveState) return undefined;
   const live = await readLiveState(prUrl);
   if (!live.ok) {
@@ -6850,6 +6960,11 @@ async function fixRungStandDownReason(
       unchangedTree.currentSnapshot,
     );
     if (unchanged) return unchanged;
+  }
+
+  if (foreignTree) {
+    const foreign = foreignTreeStandDownReason(foreignTree);
+    if (foreign) return { reason: foreign.reason, foreignTree: foreign };
   }
 
   if (openEscalation) {
@@ -8082,6 +8197,12 @@ export async function runFixRung(opts: {
   /** The blocked_review verdict that triggered this rung. */
   initialReview: ReviewRunResult;
   reviewBase: { owner: string; repo: string; headCheckoutDir: string; reviewerMount: Mount };
+  /**
+   * W1-T2652: snapshot captured immediately after a fix-rung worktree is materialized. Optional
+   * because the original implement run's own worktree has no separate fix-rung birth moment; absent
+   * data fails open and leaves round 1 unchanged.
+   */
+  birthWorktreeSnapshot?: WorktreeSnapshot;
   /** W1-T322: threaded straight through to every re-review this rung runs — see runReview's own
    *  `openTaskIds` doc. Optional; absent behaves exactly as every pre-W1-T322 caller already does. */
   openTaskIds?: ReadonlySet<string>;
@@ -8309,6 +8430,11 @@ export async function runFixRung(opts: {
      */
     captureWorktreeSnapshot?: (worktreePath: string) => WorktreeSnapshot | undefined | Promise<WorktreeSnapshot | undefined>;
     /**
+     * W1-T2652: registered worktree facts for the current repo, used only to name OTHER registered
+     * worktrees on the same branch in a foreign-tree escalation. Optional and observational only.
+     */
+    readRegisteredWorktrees?: () => readonly RegisteredWorktree[] | Promise<readonly RegisteredWorktree[]>;
+    /**
      * W1-T2403: read THIS round's own new commit(s) — `sinceSha..HEAD` in `opts.worktreePath` —
      * consulted right after `deps.spawn` demonstrably returns and BEFORE `strikes` is committed,
      * to decide whether the round is an ordinary repair or RETRIGGER-SHAPED (see
@@ -8471,6 +8597,14 @@ export async function runFixRung(opts: {
         currentTreeSnapshot = undefined; // fail open — an unreadable capture never manufactures a stand-down
       }
     }
+    let registeredWorktrees: readonly RegisteredWorktree[] | undefined;
+    if (opts.birthWorktreeSnapshot && deps.readRegisteredWorktrees) {
+      try {
+        registeredWorktrees = await deps.readRegisteredWorktrees();
+      } catch {
+        registeredWorktrees = undefined; // observational only — never block on an unreadable registry
+      }
+    }
     const preStrikeStandDown = await fixRungStandDownReason(
       deps.readLiveState,
       opts.prUrl,
@@ -8487,6 +8621,16 @@ export async function runFixRung(opts: {
         ? { prNumber, readMergeFacts: deps.readMergeFacts }
         : undefined,
       deps.captureWorktreeSnapshot ? { gateKey, previousFailure: lastGateSnapshot, currentSnapshot: currentTreeSnapshot } : undefined,
+      opts.birthWorktreeSnapshot
+        ? {
+            round: strikes + retriggers + 1,
+            branch: opts.branch,
+            currentWorktreePath: opts.worktreePath,
+            birthSnapshot: opts.birthWorktreeSnapshot,
+            currentSnapshot: currentTreeSnapshot,
+            registeredWorktrees,
+          }
+        : undefined,
       // W1-T2799: the SIXTH source — has a human already been asked about this exact state? The
       // key is the escalation the false-block escape below would file if this strike changed
       // nothing, assembled through the SAME `EscalationDedupKey` shape `escalate()` itself is
@@ -8519,6 +8663,57 @@ export async function runFixRung(opts: {
       lastGateSnapshot = currentTreeSnapshot ? { gateKey, snapshot: currentTreeSnapshot } : undefined;
     }
     if (preStrikeStandDown) {
+      if (preStrikeStandDown.foreignTree) {
+        const foreignTree = preStrikeStandDown.foreignTree;
+        deps.log("rung.foreign_tree", {
+          site: "rung.strike",
+          strike: strikes + 1,
+          branch: opts.branch,
+          reason: foreignTree.reason,
+          porcelain_paths: foreignTree.porcelainPaths,
+          diffstat: foreignTree.diffstat,
+          other_worktrees: foreignTree.otherWorktrees,
+        });
+        const issueUrl = escalate(
+          {
+            class: "BLOCKED",
+            taskId: opts.taskId,
+            runId: opts.runId,
+            headSha: review.headSha,
+            cause: escalationCause(currentMergeConflict !== undefined, noReviewYet),
+            summary: `fix rung standing down — foreign worktree content before round 1 — ${opts.prUrl}`,
+            detail:
+              `The blocked_review FIX RUNG (W1-T76, W1-T2652) observed local worktree content on ` +
+              `${opts.branch} before spending strike ${strikes + 1}: ${foreignTree.reason}. The rung did not ` +
+              `observe an author for this content and will not reset, stash, clean, commit or push it. ` +
+              `Observed porcelain paths: ${JSON.stringify(foreignTree.porcelainPaths)}. Observed diffstat: ` +
+              `${JSON.stringify(foreignTree.diffstat)}. Other registered worktrees on this branch: ` +
+              `${JSON.stringify(foreignTree.otherWorktrees)}.`,
+            options: [
+              {
+                label: "discard",
+                detail: "remove the foreign local content, then re-run the fix rung against a clean materialized worktree.",
+              },
+              {
+                label: "adopt",
+                detail: "confirm this local content is intentional and should be preserved before resuming the fix rung.",
+              },
+            ],
+            recommendation: "discard",
+          },
+          { issues: deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId },
+        );
+        deps.log("fix.stood_down", {
+          site: "rung.foreign_tree",
+          strike: strikes + 1,
+          reason: preStrikeStandDown.reason,
+          issue_url: issueUrl,
+        });
+        deps.say(
+          `fix rung: standing down before strike ${strikes + 1} — ${preStrikeStandDown.reason} — escalated: ${issueUrl}`,
+        );
+        return { outcome: "stood_down", review, strikes, retriggers, reason: preStrikeStandDown.reason, standDownReason: preStrikeStandDown.reason, issueUrl };
+      }
       if (preStrikeStandDown.foreignHead) {
         // W1-T296: a human or a sibling session appears to be actively
         // editing this branch — unlike the terminal-state reason above,
@@ -29128,6 +29323,7 @@ export function buildSweepEffects(
           }
           throw e;
         }
+        const birthWorktreeSnapshot = captureWorktreeSnapshotViaGit(worktreePath);
 
         const mountsTable = loadMounts(mountsPath(repoRoot));
         const fixMount: Mount = resolveMount(mountsTable, "fix", task.risk);
@@ -29155,6 +29351,7 @@ export function buildSweepEffects(
             pr,
             reviewBase: { owner, repo, headCheckoutDir: worktreePath, reviewerMount },
           }),
+          birthWorktreeSnapshot,
           // W1-T322: same plan this sweep already loaded (`fixRungTaskFor(plan, …)` above) — see
           // runTask's own `openTaskIds` comment for what this set is and why it's computed once.
           // W1-T367 (design (v)): the sweep has no derived projection in hand at this call site
@@ -29256,6 +29453,9 @@ export function buildSweepEffects(
             // W1-T1284: same LOCAL worktree reader as the run-loop call site above — see that
             // site's own comment.
             captureWorktreeSnapshot: captureWorktreeSnapshotViaGit,
+            // W1-T2652: observational registry read used only when the birth snapshot detects
+            // foreign local content; shares lib/worker.ts's porcelain reader with the reaper.
+            readRegisteredWorktrees: () => listRegisteredWorktrees(repoDir),
             // W1-T2403: same LOCAL worktree reader as the run-loop call site above.
             readRoundCommits: readFixRoundCommitsViaGit,
             // W1-T2551: same three real, local wirings as the run-loop call site above.
