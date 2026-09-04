@@ -272,6 +272,7 @@ import { ghTraceGateway, renderTraceChain, traceForward, traceReverse } from "./
 import { runPreflight, type PreflightDeps } from "./lib/commit-message.js";
 import {
   buildPreflightSummary,
+  FAST_GATE_STEPS,
   preflightFailureNotice,
   preflightSummaryPath,
   runCiParity,
@@ -657,6 +658,7 @@ import {
   cappedReason,
   reviewLedgerLegibilityFields,
   reviewLedgerReasons,
+  SCOPE_EXEMPT_GENERATED_ARTIFACTS,
   resolvePlanCriteriaAtHead,
   type PlanCriteriaAtHeadDivergence,
   parseWhitelistedProof,
@@ -4022,6 +4024,13 @@ export function checkPrOwnership(
  * rather than waving it through — a task with no declared scope can never
  * legitimize an out-of-scope push. An empty `diffFiles` is always clean
  * (nothing staged, nothing to refuse) regardless of the declared scope.
+ *
+ * W1-T2650: also admits {@link SCOPE_EXEMPT_GENERATED_ARTIFACTS} — the SAME enumerated set
+ * `scopeViolationFiles` (lib/review.ts) subtracts, so a PR this guard admits is never the one the
+ * reviewer's `scope_violation` advisory flags for the same path, and vice versa. The exemption is
+ * only ever consulted ALONGSIDE a task's own declared scope (the `!declaredFiles ||
+ * declaredFiles.length === 0` branch above already returned): an undeclared task still has every
+ * non-empty diff refused, exempt artifact or not, so this never widens the fail-closed default.
  */
 export function scopeGuardOutOfScopeFiles(
   diffFiles: readonly string[],
@@ -4030,7 +4039,7 @@ export function scopeGuardOutOfScopeFiles(
   if (diffFiles.length === 0) return [];
   if (!declaredFiles || declaredFiles.length === 0) return [...diffFiles];
   const declared = new Set(declaredFiles);
-  return diffFiles.filter((f) => !declared.has(f));
+  return diffFiles.filter((f) => !declared.has(f) && !SCOPE_EXEMPT_GENERATED_ARTIFACTS.has(f));
 }
 
 /** The `git ls-remote --exit-code` probe's OWN failure evidence — captured from the `catch`
@@ -18511,8 +18520,8 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
 }
 
 /**
- * `rmd preflight [--from <ref>] [--to <ref>] [--ci-parity] [--fast] [--summary-file <path>]` — W1-T221's hand-route
- * commit gate. Runs {@link runPreflight}'s three independent steps (commitlint, `tsc --noEmit`,
+ * `rmd preflight [--from <ref>] [--to <ref>] [--ci-parity] [--fast] [--coverage] [--summary-file <path>]` —
+ * W1-T221's hand-route commit gate. Runs {@link runPreflight}'s three independent steps (commitlint, `tsc --noEmit`,
  * and lib/commit-message.ts's own header/body checks) over the commit range not yet on
  * `origin/main`, prints every step's own pass/fail line UNCONDITIONALLY (never only on
  * failure — fixture 3's redirected-and-swallowed check is exactly the shape this avoids),
@@ -18526,10 +18535,15 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
  * {@link runCiParity}'s steps (one or more per .github/workflows/ci.yml job — see lib/ci-
  * parity.ts), which shells the FULL `npm run test:ci` suite as part of the `ci` job's mirror
  * and is therefore not a mode a worker can run habitually. `--fast` runs
- * {@link runPreflightFast}'s steps instead: the curated, seconds-fast deterministic npm-script
- * gates (`FAST_GATE_STEPS`, lib/ci-parity.ts) that actually block PRs — never the test suite.
- * W1-T2734's source-size signal is the one networked member: it refreshes origin/main before a
- * PR-relative measurement; the other members remain network-free. `--coverage` runs
+ * {@link runPreflightFast}'s steps instead: EVERY `FAST_GATE_STEPS` entry (lib/ci-parity.ts,
+ * rendered into the printed usage by {@link renderFastGateScriptList} so a later row is never a
+ * second edit) — none of them shells the full `test:ci` suite, but the four `census:*` entries
+ * among them each spawn `node --test` on their own one named file; W1-T2478 admitted that class
+ * under a measured ceiling, and W1-T2545 replaced the fixed one with a bound derived from THIS
+ * run's own cheapest census entry, refusing an outlier as `RUNAWAY` — never a written millisecond
+ * constant a growing corpus outgrows. W1-T2734's source-size signal is the one networked member:
+ * it refreshes origin/main before a PR-relative measurement; every other member remains
+ * network-free. `--coverage` runs
  * {@link runPreflightCoverage} instead: JUST the
  * diff-coverage gate, at author-time, on its OWN freshly self-derived `origin/main...HEAD`
  * base — never a caller-supplied diff. It is OPT-IN AND SLOW BY CONSTRUCTION (minutes, not
@@ -18553,8 +18567,26 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
  * `--summary-file` to opt into a specific path regardless. Only a call with no injected spawn
  * (a real worker running the real binary) falls back to `preflightSummaryPath(repoRoot)`.
  */
+/** The exact flags `preflight`'s own arg validator accepts below — SHARED with the COMMANDS
+ *  registry's usage signature (`preflight`'s `syntax`) so the two cannot independently drift,
+ *  and exported for the falsifying test (W1-T2646,
+ *  test/preflight-help-is-derived-not-retyped.test.ts) to gate directly: a flag added to one
+ *  list and not the printed signature is now a test failure, not a reader's omission. */
+export const PREFLIGHT_VALUE_FLAGS = ["--from", "--to", "--summary-file"] as const;
+export const PREFLIGHT_BOOL_FLAGS = ["--ci-parity", "--fast", "--coverage"] as const;
+
+/** W1-T2646: renders `FAST_GATE_STEPS`' own script names — SCRIPT NAMES ONLY, never each
+ *  entry's `reason` (which runs to paragraphs and would flood the printed usage) — for
+ *  `preflight`'s COMMANDS entry below. A pure function of whatever table it is given, so the
+ *  falsifying test can drive it with a synthetic table (a row `FAST_GATE_STEPS` does not carry
+ *  today) and prove the printed usage is COMPOSED from the table, not a copy that happens to
+ *  agree with it right now. */
+export function renderFastGateScriptList(steps: readonly { readonly script: string }[]): string {
+  return steps.map((step) => step.script).join(", ");
+}
+
 export async function preflightCommand(rest: string[], deps: PreflightDeps = {}): Promise<number> {
-  const badArg = unknownArgError("preflight", rest, ["--from", "--to", "--summary-file"], ["--ci-parity", "--fast", "--coverage"]);
+  const badArg = unknownArgError("preflight", rest, [...PREFLIGHT_VALUE_FLAGS], [...PREFLIGHT_BOOL_FLAGS]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
     return 2;
@@ -35018,9 +35050,12 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "preflight",
-    syntax: "rmd preflight [--from <ref>] [--to <ref>] [--ci-parity] [--fast]",
+    syntax: "rmd preflight [--from <ref>] [--to <ref>] [--ci-parity] [--fast] [--coverage] [--summary-file <path>]",
     summary: "The HAND route's commit gate: commitlint, tsc --noEmit, commit-message checks.",
-    detail: "W1-T221: the HAND route's commit gate — runs commitlint, `tsc --noEmit`, and lib/commit-message.ts's own header/body checks as three INDEPENDENT steps (each names its own pass/fail, never chained with &&) over the commit range not yet on origin/main; --from/--to override the default origin/main..HEAD range; --ci-parity (W1-T294) ADDS one or more named steps per .github/workflows/ci.yml job (lib/ci-parity.ts), computed against a freshly refreshed origin/main and CI's own coverage/diff-scoping flags, with a dedicated ci-parity:drift step that fails if a ci.yml job has no parity entry, but shells the FULL test:ci suite as part of its `ci` job mirror; --fast (W1-T373) ADDS the curated, seconds-fast deterministic npm-script gates instead (cli-reference:check, claims, learnings-budget-ratchet, jscpd, depcruise, api-client:check, no-hand-rolled-fetch:check, source-size-signal — FAST_GATE_STEPS, lib/ci-parity.ts) and NEVER shells the test suite, so it is the mode a worker can run habitually; W1-T2734's source-size signal refreshes origin/main and every other member remains network-free; either or both flags may be passed; exits non-zero if any step fails, after every step has run and reported. EVERY run also writes a machine-readable verdict to `<repoRoot>/coverage/preflight-summary.json` (override with --summary-file <path>) — ok, the head sha, duration, pass/fail counts and every step — so an eight-minute result survives the container that produced it; written on FAIL as well as PASS, and a write failure never changes the exit code",
+    detail:
+      "W1-T221: the HAND route's commit gate — runs commitlint, `tsc --noEmit`, and lib/commit-message.ts's own header/body checks as three INDEPENDENT steps (each names its own pass/fail, never chained with &&) over the commit range not yet on origin/main; --from/--to override the default origin/main..HEAD range; --ci-parity (W1-T294) ADDS one or more named steps per .github/workflows/ci.yml job (lib/ci-parity.ts), computed against a freshly refreshed origin/main and CI's own coverage/diff-scoping flags, with a dedicated ci-parity:drift step that fails if a ci.yml job has no parity entry, but shells the FULL test:ci suite as part of its `ci` job mirror; --fast (W1-T373) ADDS every FAST_GATE_STEPS entry (lib/ci-parity.ts) — RENDERED here from that table, never retyped, so a later row changes this line with no edit to this string: " +
+      renderFastGateScriptList(FAST_GATE_STEPS) +
+      " — none of them shells the full test:ci suite, though the four census:* entries above each spawn `node --test` on their own one named file; that spawn is timed, and an outlier is refused as RUNAWAY — not by a fixed millisecond ceiling, but by a bound derived from THIS SAME run's own cheapest census entry (W1-T2478 admitted the class under a measured bound, W1-T2545 made that bound relative so a growing corpus cannot outgrow it) — the one failure mode unique to --fast; W1-T2734's source-size signal is the one networked member, refreshing origin/main before a PR-relative measurement, and every other member stays network-free; --coverage (W1-T1074) ADDS runPreflightCoverage's diff-coverage gate alone, at author-time on its own freshly self-derived origin/main...HEAD base — never a caller-supplied diff — opt-in and slow by construction (minutes, not seconds: it shells the same full instrumented suite --ci-parity's coverage-ratchet job runs, because a coverage lcov needs the full suite and --fast can never carry one, by design), and REFUSES rather than reports on an empty diff, a tree left dirty in a diffed file, or a changed file with no lcov SF: instrumentation record (reported as UNPROVEN, naming the file); any subset of --ci-parity/--fast/--coverage may be passed; exits non-zero if any step fails, after every step has run and reported. EVERY run also writes a machine-readable verdict to `<repoRoot>/coverage/preflight-summary.json` (override with --summary-file <path>) — ok, the head sha, duration, pass/fail counts and every step — so an eight-minute result survives the container that produced it; written on FAIL as well as PASS, and a write failure never changes the exit code",
   },
   {
     name: "next-task-id",

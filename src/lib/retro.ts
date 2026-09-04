@@ -2832,14 +2832,14 @@ export const FOLLOWUP_TYPE_ROUTES: Readonly<Record<FollowupCandidate["type"], "p
 
 /** One candidate's routing outcome. A decline always NAMES the arm that declined it — never a
  *  bare boolean — so a reader can tell "already covered by the existing title dedup" from
- *  "not plan-shaped work" from "restates its own declaring task" or "dispatch-only" without
- *  re-deriving any of the four from `harvest` by hand. */
+ *  "not plan-shaped work" from "restates its own declaring task" or "dispatch-only" from
+ *  "re-decides a settled question" without re-deriving any of the five from `harvest` by hand. */
 export type FollowupRouteOutcome =
   | { candidate: FollowupCandidate; routed: true; proposalId: string }
   | {
       candidate: FollowupCandidate;
       routed: false;
-      arm: "title-dedup" | "type-not-plan-shaped" | "self-referential" | "dispatch-only";
+      arm: "title-dedup" | "type-not-plan-shaped" | "self-referential" | "dispatch-only" | "settled-question";
       reason: string;
     };
 
@@ -2934,8 +2934,101 @@ function dispatchOnlyReferent(candidate: FollowupCandidate): string | undefined 
   return candidate.taskId;
 }
 
+// ── W1-T2645: the fifth refusal arm — "settled-question" ────────────────────────────────────────
+//
+// title-dedup (lexical word-overlap) and type-not-plan-shaped (FOLLOWUP_TYPE_ROUTES) are the two
+// arms this function's own doc named before this task; dispatch-only and self-referential added
+// two more, and NONE of the four asks whether a candidate's REMEDY contradicts a question the
+// plan has already, on record, decided. The regression corpus this arm is seeded from, verbatim:
+// "sync plan/tasks.d/W1-T2473-*.yaml status: from queued to shipped (PR #3304 already merged it),
+// stale status could cause a scheduler to re-offer completed work" — the FOURTH recorded instance
+// of one misdiagnosis (DECISIONS.md's W1-T1/W1-T12a/W1-T99 each independently concluding that a
+// task's yaml `status:` field is decorative and never drives dispatch). `followupMatchesTitle`
+// cannot catch it (the text matches no open task title), and `decorativeStatusFlipReason`
+// (W1-T2638, harvest-time) cannot either — that guard requires the literal word "field"
+// immediately after `status:` (`STATUS_FIELD_RE`), which this exact phrasing lacks.
+//
+// THE TABLE IS DATA, NOT BRANCHES (this task's own design note (i)): a second settled question
+// later is a ROW added to `SETTLED_QUESTIONS`, never a new `if` in `routeFollowupsToRegistry` —
+// the W1-T81/W1-T92/W1-T101 precision-family discipline applied here.
+//
+// FAIL-OPEN IS THE CORRECT POLARITY (design note (iii), the opposite of this repo's usual
+// default): refusing a genuine follow-up loses work permanently, so each row's `matches`
+// predicate is narrow on purpose — it matches the proposed-WRITE shape ("status: from X to Y"),
+// never the bare word "status", so an entry that merely mentions status or proposes work on a
+// status BOARD still routes and mints its proposal.
+//
+// THIS ARM DECLINES PROMOTION ONLY, NEVER THE HARVEST (design note (ii)): a matched candidate
+// already rode through `mineFollowups`/`recordFollowupHarvest` unchanged (exactly as the existing
+// "action" decline leaves its entry harvested) — only the mint into the registry is refused here.
+
+/** One row of the settled-question table: a candidate whose remedy re-decides a question the plan
+ *  has already, on record, answered. DATA, never a code branch — see the section doc above. */
+export interface SettledQuestionRow {
+  id: string;
+  /** True when `text` proposes the exact write/remedy this row's question was decided against.
+   *  Narrow by design — matches a proposed WRITE, never the mere appearance of a word, so
+   *  ambiguity routes rather than being silently declined. */
+  matches: (text: string) => boolean;
+  /** The record that already decided this question, cited so a reader can verify the decline
+   *  instead of re-deriving it. */
+  decidedIn: string;
+  /** Reason text for the routing outcome — names `decidedIn` verbatim so a reader can tell this
+   *  decline from every other arm's without re-deriving it. */
+  reason: string;
+}
+
+/** Matches a candidate proposing to hand-write a task's yaml `status:` field to a new value —
+ *  e.g. "status: from queued to shipped" or "status: field ... to done" — deliberately narrower
+ *  than `STATUS_FIELD_RE` (which requires the literal word "field"): this is the settled-question
+ *  routing gate, not the W1-T2638 harvest-time guard, and it must catch the phrasing that guard
+ *  does not ("status: from queued to shipped" — no "field" anywhere in the text). Does NOT match
+ *  a bare mention of the word "status" or prose about a status BOARD — the fail-open scope fence
+ *  (design note (iii)). EXPORTED (like `STATUS_FIELD_RE` above) so a test can drive both arms
+ *  directly by identifier per test/negative-reachability-ratchet.test.ts's `_RE` census. */
+export const TASK_STATUS_FIELD_WRITE_RE =
+  /\bstatus:\s*(?:`?\s*field`?\s+)?from\s+[`'"]?[a-z][\w-]*[`'"]?\s+to\s+[`'"]?[a-z][\w-]*[`'"]?/i;
+
+/** Seeded with EXACTLY the one row this task's own rationale justifies — four independent
+ *  recurrences of one misdiagnosis (DECISIONS.md's W1-T1/W1-T12a/W1-T99 plus this task's own
+ *  occasioning follow-up). A second settled question later is another row, never a code change to
+ *  {@link routeFollowupsToRegistry} — see the section doc above. */
+export const SETTLED_QUESTIONS: readonly SettledQuestionRow[] = [
+  {
+    id: "task-status-field-is-decorative",
+    matches: (text) => TASK_STATUS_FIELD_WRITE_RE.test(text),
+    decidedIn:
+      "plan/tasks.yaml's own header (status: is decorative/initial-state only) and " +
+      "src/lib/plan.ts's TASK_STATUSES enum (W1-T367; DECISIONS.md W1-T1/W1-T12a/W1-T99)",
+    reason:
+      "a task's yaml `status:` field is decorative, not a dispatch input — the dispatch " +
+      "predicate (drain.ts) and dependency satisfaction both resolve through a GitHub-derived " +
+      "projection, never through this field (W1-T367 measured 248 of 359 tasks, 69%, carrying " +
+      "`status: queued` while merged), and DECISIONS.md has already answered this exact " +
+      "question three times (W1-T1, W1-T12a, W1-T99) on the same ground — hand-syncing one " +
+      "shard's field re-decides a question already on record rather than correcting the actual " +
+      "residue (a missing Remudero-Task trailer, P46/P56/W1-T367's territory, never a field " +
+      "sync). See plan/tasks.yaml's header and src/lib/plan.ts's TASK_STATUSES enum.",
+  },
+];
+
+/** The first row of `rows` whose `matches` predicate fires on `text`, or `undefined` when none
+ *  does — EXPORTED, and `rows` is a plain parameter (defaulting to {@link SETTLED_QUESTIONS}
+ *  rather than closing over it), so a test can prove the table is DATA directly: pass a table
+ *  with an added row and watch a fresh candidate decline with no change to this function or to
+ *  `routeFollowupsToRegistry`, or pass `[]` and watch the seeded candidate route exactly as it
+ *  would have before this arm existed. */
+export function findSettledQuestion(text: string, rows: readonly SettledQuestionRow[] = SETTLED_QUESTIONS): SettledQuestionRow | undefined {
+  return rows.find((row) => row.matches(text));
+}
+
 export interface RouteFollowupsDeps {
   registryPath: string;
+  /** Injectable — defaults to {@link SETTLED_QUESTIONS}. A test overrides this to prove the
+   *  settled-question arm is driven by DATA, not a branch: an empty array here must route every
+   *  candidate exactly as `routeFollowupsToRegistry` did before this arm existed, and a table with
+   *  an added row must decline a fresh candidate with no change to this function's own code. */
+  settledQuestions?: readonly SettledQuestionRow[];
   /** Injectable — production takes `updateProposalRegistry` (the W1-T240 single writer),
    *  mirroring board-review.ts's `updateRegistry` seam so a test never touches disk. */
   updateRegistry?: (
@@ -2960,11 +3053,16 @@ export function followupProposalId(candidate: FollowupCandidate): string {
  * (inbox.ts's `updateProposalRegistry`) board-review.ts/rule-efficacy.ts/feedback-docket.ts
  * already use — replacing "nobody reads this markdown section" with an actual consumer.
  *
- * FOUR REFUSAL ARMS, each named on its own outcome, neither re-implemented here:
+ * FIVE REFUSAL ARMS, each named on its own outcome, neither re-implemented here:
  *   - `"title-dedup"`: `harvest.deduped` — `mineFollowups`'s OWN `followupMatchesTitle` arm,
  *     the existing duplicate refusal this function reuses verbatim rather than re-scoring.
  *   - `"type-not-plan-shaped"`: {@link FOLLOWUP_TYPE_ROUTES} says the entry's type is not
  *     routable — the type definition decided above, cited, never re-guessed per call.
+ *   - `"settled-question"` (W1-T2645): {@link findSettledQuestion} says the entry's text
+ *     proposes a remedy the plan has already, on record, decided against (seeded with the one
+ *     row four independent recurrences justify — a hand-written task `status:` field flip).
+ *     Checked before dispatch-only/self-referential: a candidate re-deciding a settled question
+ *     should never reach a drafting slot regardless of how it otherwise reads.
  *   - `"self-referential"` (W1-T2617): {@link isSelfReferentialFollowup} says the entry's own
  *     ask IS the task that declared it ("implement <taskId>" naming its own `taskId`) — routing
  *     it would mint a duplicate of a plan record (task or shipped PR) that already exists on
@@ -2991,6 +3089,7 @@ export function followupProposalId(candidate: FollowupCandidate): string {
  */
 export function routeFollowupsToRegistry(harvest: FollowupHarvest, deps: RouteFollowupsDeps): FollowupRouteOutcome[] {
   const updateRegistry = deps.updateRegistry ?? updateProposalRegistry;
+  const settledQuestions = deps.settledQuestions ?? SETTLED_QUESTIONS;
   const outcomes: FollowupRouteOutcome[] = [];
 
   for (const candidate of harvest.deduped) {
@@ -3010,6 +3109,16 @@ export function routeFollowupsToRegistry(harvest: FollowupHarvest, deps: RouteFo
         routed: false,
         arm: "type-not-plan-shaped",
         reason: `"${candidate.type}" is an operator ask, not plan-shaped work (FOLLOWUP_TYPE_ROUTES)`,
+      });
+      continue;
+    }
+    const settledQuestion = findSettledQuestion(candidate.text, settledQuestions);
+    if (settledQuestion !== undefined) {
+      outcomes.push({
+        candidate,
+        routed: false,
+        arm: "settled-question",
+        reason: `${settledQuestion.reason} (decided in: ${settledQuestion.decidedIn})`,
       });
       continue;
     }
