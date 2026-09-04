@@ -140,9 +140,34 @@
     other: legibility is a property of the RUN's context, expression is a property of the TEST's
     contract, and a red is best diagnosed with both. Shipping both without saying which does what
     is how two mechanisms end up half-covering one problem, so the split is recorded here.
-    W1-T2810 IS UNFILED AS THIS SHARD IS WRITTEN (no shard on origin/main, no open PR, id reserved
-    only), so this boundary is stated from its commissioning intent and must be re-checked against
-    its shard text once that exists.
+    RE-CHECK DISCHARGED 2026-09-04 — DO NOT RE-DERIVE IT. This paragraph was written while W1-T2810
+    was an unfiled reserved id, and it asked for a re-check against that shard's real text once one
+    existed. That shard landed as #3917
+    (`plan/tasks.d/W1-T2810-a-gate-verdict-names-its-own-context.yaml`) and the re-check has been
+    done. THE SPLIT HOLDS, and it is ratified from the other side rather than merely compatible:
+    W1-T2810's design (v) quotes the two bolded sentences above VERBATIM, states that it "AGREES
+    WITH THAT SPLIT VERBATIM", and names this shard's request as the thing it is answering. Those
+    two sentences are therefore LOAD-BEARING AS WORDED — a sibling cites them literally, so
+    rewriting them would strand that citation.
+
+    IT IS ENFORCED, NOT ASSERTED. W1-T2810 turned the split into a scope fence on its own side: it
+    may touch no assertion, no test helper and nothing at per-assertion granularity, its output is
+    RUN-SCOPED (one context stamp per gate run), and it carries an acceptance criterion that the
+    stamp "is run-scoped and this diff adds no per-assertion surface, so W1-T2811's expression half
+    stays unbuilt rather than being spuriously closed by this task's output", plus a falsifier that
+    reds if the stamp ever becomes per-step or per-assertion. So THIS shard's own close-without-code
+    clause cannot fire spuriously: the only thing that could trip it is guarded by a test on the
+    other task.
+
+    ONE CORRECTION THIS RE-CHECK PRODUCED, RECORDED RATHER THAN EDITED IN. The characterisation
+    above is NARROWER than W1-T2810 actually turned out to be. Load is its THIRD instance of three,
+    not its subject: W1-T2810 is "a gate verdict names neither the tree it measured nor the
+    conditions it measured under", and its first two instances are TREE STALENESS — a ratchet run in
+    a 465-commit-behind checkout printing `OK` with both operands stale (CLAUDE.md hazard (h)), and
+    main moving three times inside one 40-minute local gate run. The ownership split is unaffected
+    in either direction, which is why the wording above is left standing for the sibling's citation
+    rather than rewritten; a builder wanting W1-T2810's full scope should read its shard, not this
+    summary of it.
 
     WHAT THIS DOES NOT DO. It does not skip, relax or quarantine any test — every one of the seven
     keeps asserting exactly the bound it asserts today, and a genuine regression still reds. It
