@@ -225,6 +225,36 @@ test("CLI: a corpus with every citation anchored ALSO exits 0 (the exit code nev
   }
 });
 
+test("CLI: a missing MASTER-PLAN.md is an operational failure to SCAN (loadCorpus's own catch), not a clean pass", () => {
+  const dir = makeTempDir("citation-anchor-census-no-monolith");
+  try {
+    // No MASTER-PLAN.md written at all -- loadCorpus's readFileSync throws ENOENT, which the
+    // catch block in main() turns into a distinct "could not read the corpus" message and a
+    // non-zero exit, never the "ZERO shards" message (that is a DIFFERENT, later branch).
+    mkdirSync(join(dir, "plan", "tasks.d"), { recursive: true });
+    const result = runCli(["--cwd", dir]);
+    assert.notEqual(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stdout + result.stderr, /could not read the corpus/);
+    assert.doesNotMatch(result.stdout + result.stderr, /scanned ZERO plan\/tasks\.d\/ shards/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("CLI: a bad --plan-tasks-dir (readdirSync throws) is ALSO the loadCorpus catch's operational failure, not a crash", () => {
+  const dir = makeTempDir("citation-anchor-census-bad-shard-dir");
+  try {
+    writeFileSync(join(dir, "MASTER-PLAN.md"), "# fixture monolith\nNo PR citations here.\n");
+    // plan/tasks.d/ is never created -- readdirSync on the missing dir throws ENOENT, exercising
+    // the SAME catch as the missing-monolith case above via a different underlying fs call.
+    const result = runCli(["--cwd", dir]);
+    assert.notEqual(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stdout + result.stderr, /could not read the corpus/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("CLI: scanning ZERO plan/tasks.d/ shards is an operational failure (refuses a vacuous report), not a clean pass", () => {
   const dir = makeTempDir("citation-anchor-census-empty");
   try {
