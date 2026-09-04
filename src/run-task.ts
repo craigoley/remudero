@@ -15512,6 +15512,15 @@ export function followupLedgerUnionNdjson(stateDir: string): string {
  *  plan file instead. Never a second resolver: this is the SAME function `reviewCommand` calls. */
 export interface CheckAcceptanceDeps {
   planPath?: string;
+  /**
+   * W1-T2669 — the paths this branch changes, defaulting to a self-derived
+   * `git diff --name-only origin/main...HEAD` in this checkout. Injectable so the relatedness
+   * report can be driven without a git history, exactly as `planPath` is injectable rather than
+   * pointing every test at the real plan. THROWING IS A SUPPORTED ANSWER: a body checked outside a
+   * checkout has no diff to compare against, which is no evidence of a mismatch, so the caller
+   * treats a throw as "cannot tell" and stays silent.
+   */
+  changedFiles?: () => string[];
 }
 
 /**
@@ -15537,6 +15546,48 @@ export interface CheckAcceptanceDeps {
  *
  * READ-ONLY: writes no ledger line, no state file, opens nothing.
  */
+/**
+ * W1-T2669 — the sentence to print when a `Remudero-Task:` trailer names a task with NO path in
+ * common with this diff, or `undefined` when there is nothing to say.
+ *
+ * SILENT IN EVERY UNDECIDABLE CASE, and each is a real one rather than defensive padding: a task
+ * declaring no `files:` cannot be shown unrelated to anything (`overlappingPaths` fail-closes an
+ * empty list to "overlaps everything" for the same reason), and a diff that cannot be read — a body
+ * checked outside a checkout, no origin/main — is absence of evidence, not evidence of a mismatch.
+ * Reporting either would train an operator to ignore the line, which costs more than the silence.
+ *
+ * ONE SHARED PATH IS ENOUGH. A task build's diff intersects its shard's declared files essentially
+ * by construction; the shape worth naming is the total miss, where the trailer names a task the
+ * diff has nothing to do with.
+ */
+function trailerScopeMismatch(taskId: string, declared: string[], deps: CheckAcceptanceDeps): string | undefined {
+  if (declared.length === 0) return undefined;
+  let changed: string[];
+  try {
+    changed = (deps.changedFiles ?? checkAcceptanceChangedFiles)();
+  } catch {
+    return undefined;
+  }
+  if (changed.length === 0) return undefined;
+  const touched = new Set(changed);
+  if (declared.some((f) => touched.has(f))) return undefined;
+  return (
+    `this diff shares no path with ${taskId}'s declared files (${declared.join(", ")}), ` +
+    `so the trailer may name an unrelated task — the gate will still judge this PR on that shard's criteria. ` +
+    `Advisory only: a widened build is legitimate and this changes no verdict.`
+  );
+}
+
+/** {@link CheckAcceptanceDeps.changedFiles}'s default — this branch's own paths against
+ *  origin/main, the same range `rmd preflight --coverage` self-derives rather than trusting a
+ *  caller-supplied diff. */
+function checkAcceptanceChangedFiles(): string[] {
+  return execFileSync("git", ["diff", "--name-only", "origin/main...HEAD"], { encoding: "utf8", maxBuffer: 1 << 26 })
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+}
+
 export function checkAcceptanceCommand(rest: string[], deps: CheckAcceptanceDeps = {}): number {
   const file = rest.find((a) => !a.startsWith("--"));
   if (!file) {
@@ -15556,11 +15607,14 @@ export function checkAcceptanceCommand(rest: string[], deps: CheckAcceptanceDeps
   const planPath = deps.planPath ?? join(repoRoot, "plan", "tasks.yaml");
   const taskId = reviewTaskIdFromBody(body);
   let criteria: AcceptanceCriterion[] = [];
+  let declaredFilesForTrailer: string[] = [];
   if (taskId) {
     try {
       const plan = loadPlan(planPath);
       const t = plan.byId.get(taskId);
       if (t?.acceptance?.length) criteria = t.acceptance;
+      // W1-T2669: read off the SAME task object, never a second plan load.
+      declaredFilesForTrailer = t?.files ?? [];
     } catch {
       // A bad/absent plan is not this command's concern either — fall through to the body,
       // exactly like reviewCommand's own catch does.
@@ -15579,8 +15633,16 @@ export function checkAcceptanceCommand(rest: string[], deps: CheckAcceptanceDeps
       : "NONE (fail closed — nothing to judge is never a pass)";
   const emptyProofs = criteria.filter((c) => !c.proof).length;
 
+  // W1-T2669: the trailer redirects the gate to ANOTHER task's acceptance, and nothing checked
+  // that the named task relates to this diff — so a PR could be judged on proofs over files it
+  // never touches while its own criteria went unread (#3559's first draft, caught by hand).
+  // ADVISORY ONLY: a legitimate build can widen beyond its declared files, so this names the
+  // mismatch and changes neither the resolved criteria nor the exit code.
+  const unrelated = trailerResolved ? trailerScopeMismatch(taskId!, declaredFilesForTrailer, deps) : undefined;
+
   console.log(`file:            ${file}`);
   console.log(`criteria source: ${source}`);
+  if (unrelated) console.log(`WARNING:         ${unrelated}`);
   console.log(`criteria parsed: ${criteria.length}`);
   console.log(`empty proofs:    ${emptyProofs}`);
   criteria.forEach((c, i) => {
