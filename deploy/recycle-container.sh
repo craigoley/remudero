@@ -982,4 +982,83 @@ if [ -z "${STARTED_IMAGE_ID}" ] || [ "${STARTED_IMAGE_ID}" != "${PULLED_IMAGE_ID
 fi
 
 echo "recycle-container: OK — ${CONTAINER_NAME} recycled onto ${PULLED_IMAGE_ID}"
+
+# ── 8. RECLAIM THE IMAGE THIS RECYCLE REPLACED (W1-T2585) ───────────────────────────────────────
+# EVERY RECYCLE PULLED ~6GB AND REMOVED NOTHING. MEASURED 2026-09-01: docker images held 22.92G of
+# a 29G disk at 100% full; a manual prune reclaimed 4.549GB. The failure did not surface as a disk
+# alarm — the daemon exited 1, workers failed checkout, and deploy/verify-image.sh emitted three
+# confident and WRONG product diagnoses (W1-T2571 owns that misreporting). Nothing in the fleet
+# said "the disk is full".
+#
+# deploy/host-update.sh has reclaimed since 2026-08-08, and that is NOT this path: host-update is
+# the operator's full update run, while the recycle is the ordinary action after any merge to a
+# baked path. Its `--reclaim-only` mode exists so a reclaim can run on a schedule, but MEASURED
+# 2026-09-04 that flag is named by no workflow and no npm script — only by a COMMENT in
+# scripts/fleet-heartbeat.sh — so nothing reclaims between operator-initiated host-updates.
+#
+# ── WHY HERE, AND NOWHERE EARLIER IN THIS FILE ─────────────────────────────────────────────────
+# The one hard constraint is NEVER REMOVE AN IMAGE THAT IS IN USE: taking the running container's
+# image, or the digest this run just pulled, makes the host unrecoverable rather than merely full.
+# This position makes that safe BY CONSTRUCTION rather than by care. Section 7 above has just
+# proven the new container is running ON `PULLED_IMAGE_ID`, so that digest is referenced and cannot
+# be pruned; the image this recycle replaced is, by the same fact, referenced by nothing. Anywhere
+# earlier — in particular the window between `docker rm` and `docker run` — NO container references
+# the new image either, and a prune there would delete the image the recycle is about to start.
+#
+# ── THE GUARD IS EXPLICIT, NOT `prune`'s DEFAULTS ──────────────────────────────────────────────
+# The rationale requires proving the protection rather than trusting `docker image prune -a`'s own
+# "unreferenced" rule. So the protected set is computed first, from the containers themselves, and
+# re-inspected afterwards: if any protected id is gone after the prune, that is reported as a
+# FAILED reclaim. A prune whose defaults ever changed would be caught by that check rather than by
+# an unrecoverable host.
+#
+# ── AND A ZERO IS STATED, NEVER IMPLIED ────────────────────────────────────────────────────────
+# A prune that matches nothing exits 0 and prints "Total reclaimed space: 0B", which reads exactly
+# like one that worked. The reclaimed figure is echoed on its own line either way, and the zero
+# case says so in words.
+#
+# Volumes are never pruned — same rule host-update.sh states, and there is no flag here to enable
+# it. `docker container prune` is NOT run either: it removes STOPPED containers, and an ad-hoc
+# worker that has exited is indistinguishable from junk from here (the W1-T2725 reasoning).
+if [ "${RMD_RECYCLE_SKIP_RECLAIM:-0}" = "1" ]; then
+  echo "recycle-container: reclaim SKIPPED (RMD_RECYCLE_SKIP_RECLAIM=1)"
+else
+  # Every image id any container — running or stopped — is built on, plus the digest just pulled.
+  PROTECTED_IMAGE_IDS="$(docker ps -aq 2>/dev/null | xargs -r docker inspect --format '{{.Image}}' 2>/dev/null || true)"
+  PROTECTED_IMAGE_IDS="$(printf '%s\n%s\n' "${PROTECTED_IMAGE_IDS}" "${PULLED_IMAGE_ID}" | sed '/^$/d' | sort -u)"
+  echo "recycle-container: reclaiming unreferenced images ($(printf '%s\n' "${PROTECTED_IMAGE_IDS}" | sed '/^$/d' | wc -l | tr -d ' ') protected)"
+
+  # `|| true`: a prune failure is NON-FATAL, exactly as in host-update.sh. The recycle has already
+  # succeeded by this point, and failing it now over a housekeeping step would report a good
+  # recycle as a bad one. The error text still prints.
+  RECLAIM_OUTPUT="$(docker image prune -af 2>&1 || true)"
+  RECLAIMED="$(printf '%s\n' "${RECLAIM_OUTPUT}" | sed -n 's/^Total reclaimed space: //p' | tail -1)"
+
+  # THE FALSIFIER THE RATIONALE ASKS FOR: every protected id must still resolve. This is the check
+  # that would catch a prune which reached further than its documented scope.
+  RECLAIM_TOOK_A_PROTECTED_IMAGE=""
+  while IFS= read -r protected_id; do
+    [ -n "${protected_id}" ] || continue
+    if ! docker image inspect "${protected_id}" >/dev/null 2>&1; then
+      RECLAIM_TOOK_A_PROTECTED_IMAGE="${protected_id}"
+      break
+    fi
+  done <<EOF_PROTECTED
+${PROTECTED_IMAGE_IDS}
+EOF_PROTECTED
+
+  if [ -n "${RECLAIM_TOOK_A_PROTECTED_IMAGE}" ]; then
+    echo "recycle-container: FAILED RECLAIM — the prune removed ${RECLAIM_TOOK_A_PROTECTED_IMAGE}," >&2
+    echo "  which a container references (or is the digest this run just pulled). The recycle itself" >&2
+    echo "  SUCCEEDED and ${CONTAINER_NAME} is running; do not re-run the reclaim until this is understood." >&2
+    exit 1
+  fi
+
+  if [ -z "${RECLAIMED}" ] || [ "${RECLAIMED}" = "0B" ]; then
+    echo "recycle-container: reclaimed 0B — nothing was unreferenced. Not an error, and not a success either."
+  else
+    echo "recycle-container: reclaimed ${RECLAIMED}"
+  fi
+fi
+
 echo "  Next: ./deploy/verify-image.sh --expect ${PULLED_IMAGE_ID}   # the full toolchain probe"
