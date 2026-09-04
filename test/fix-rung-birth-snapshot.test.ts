@@ -16,9 +16,7 @@ import { test } from "node:test";
 import {
   captureWorktreeSnapshotViaGit,
   createFixRungWorktree,
-  foreignTreeStandDownReason,
   runFixRung,
-  worktreeSnapshotIsClean,
   type WorktreeSnapshot,
 } from "../src/run-task.js";
 import type { Config } from "../src/lib/config.js";
@@ -26,6 +24,7 @@ import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";
 import type { Mount } from "../src/lib/mounts.js";
 import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { foreignTreeStandDownReason, worktreeSnapshotIsClean } from "../src/lib/worker.js";
 import type { RegisteredWorktree, SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
 
 const GIT_ENV = {

@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   appendFileSync,
   existsSync,
@@ -3706,6 +3707,68 @@ export function readRunLock(worktreePath: string): RunLockRead {
 export interface RegisteredWorktree {
   path: string;
   branch?: string;
+}
+
+export type WorktreeSnapshotLike = { status: string; diff: string; untrackedHash: string };
+export interface WorktreeStatusFact { path: string; code: string; staged: boolean; unstaged: boolean }
+export interface WorktreeDiffStat { filesChanged: number; insertions: number; deletions: number }
+export interface ForeignTreeStandDown {
+  reason: string;
+  porcelainPaths: WorktreeStatusFact[];
+  diffstat: WorktreeDiffStat;
+  otherWorktrees: RegisteredWorktree[];
+}
+
+const EMPTY_UNTRACKED_HASH = createHash("sha256").digest("hex");
+
+export function worktreeSnapshotIsClean(snapshot: WorktreeSnapshotLike | undefined): boolean {
+  return !!snapshot && snapshot.status === "" && snapshot.diff === "" && snapshot.untrackedHash === EMPTY_UNTRACKED_HASH;
+}
+
+export function worktreeStatusFacts(status: string): WorktreeStatusFact[] {
+  return status.split("\0").filter(Boolean).map((entry) => {
+    const code = entry.slice(0, 2);
+    return { path: entry.slice(3), code, staged: code[0] !== " " && code[0] !== "?", unstaged: code[1] !== " " || code === "??" };
+  });
+}
+
+export function worktreeDiffStatFromSnapshot(snapshot: WorktreeSnapshotLike): WorktreeDiffStat {
+  const files = new Set<string>();
+  let insertions = 0;
+  let deletions = 0;
+  for (const line of snapshot.diff.split("\n")) {
+    const header = /^diff --git a\/(.+) b\/(.+)$/.exec(line);
+    if (header) files.add(header[2]);
+    else if (!line.startsWith("+++") && !line.startsWith("---") && line.startsWith("+")) insertions++;
+    else if (!line.startsWith("+++") && !line.startsWith("---") && line.startsWith("-")) deletions++;
+  }
+  for (const fact of worktreeStatusFacts(snapshot.status)) files.add(fact.path);
+  return { filesChanged: files.size, insertions, deletions };
+}
+
+export function foreignTreeStandDownReason(opts: {
+  round: number; branch: string; currentWorktreePath: string;
+  birthSnapshot: WorktreeSnapshotLike | undefined; currentSnapshot: WorktreeSnapshotLike | undefined;
+  registeredWorktrees?: readonly RegisteredWorktree[];
+}): ForeignTreeStandDown | undefined {
+  if (opts.round !== 1 || !opts.birthSnapshot || !opts.currentSnapshot) return undefined;
+  const dirtyAtBirth = !worktreeSnapshotIsClean(opts.birthSnapshot);
+  const driftedBeforeTurn =
+    opts.birthSnapshot.status !== opts.currentSnapshot.status ||
+    opts.birthSnapshot.diff !== opts.currentSnapshot.diff ||
+    opts.birthSnapshot.untrackedHash !== opts.currentSnapshot.untrackedHash;
+  if (!dirtyAtBirth && !driftedBeforeTurn) return undefined;
+  const reason = dirtyAtBirth
+    ? "fix-rung worktree was not byte-clean at birth, before any fix worker turn could author it"
+    : "fix-rung worktree differs from its birth snapshot before the first fix worker turn";
+  return {
+    reason: `${reason} — standing down and escalating rather than committing local content whose author this rung did not observe`,
+    porcelainPaths: worktreeStatusFacts(opts.currentSnapshot.status),
+    diffstat: worktreeDiffStatFromSnapshot(opts.currentSnapshot),
+    otherWorktrees: (opts.registeredWorktrees ?? [])
+      .filter((entry) => entry.branch === opts.branch && entry.path !== opts.currentWorktreePath)
+      .map((entry) => ({ path: entry.path, branch: entry.branch })),
+  };
 }
 
 /**
