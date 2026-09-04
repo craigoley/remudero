@@ -1,0 +1,148 @@
+- id: W1-T2835
+  title: "A PROOF THAT CANNOT DISCRIMINATE IS ONLY DISCOVERED AT REVIEW, WHEN IT SILENTLY DEGRADES — `lint-plan` validates a proof's SHAPE and RESOLVABILITY but never whether it can tell head from base, so a shard whose pure-path `unit test:` proof names a file that already exists is filed clean and every criterion it carries grades `executed_stale` weeks later"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 22.00
+  files: [src/lib/task-linter.ts, src/run-task.ts, test/lint-plan-proof-discrimination.test.ts]
+  origin: "operator-session#proof-discrimination-enforcement-2026-09-04"
+  plan_refs: ["W1-T2813", "W1-T2812", "W1-T273", "W1-T362", "W1-T963", "W1-T488"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE RULE EXISTS AND NOTHING REFUSES IT. CLAUDE.md now states that `classifyBaseProofOutcome`
+    (`src/lib/review.ts`) decides staleness by RE-RUNNING a proof against the merge-base, so a
+    pure-path `unit test:` proof discriminates ONLY where its file is absent or failing there — and
+    that a task REPAIRING an existing test can therefore never prove itself that way. That rule is
+    prose. CLAUDE.md's own preamble says a rule stated only there "can be violated silently and
+    repeatedly", and that when one turns out to matter the fix is to make something refuse it.
+
+    THIS ONE TURNED OUT TO MATTER, MEASURED ON A REAL SHARD RATHER THAN IMAGINED. W1-T2813 was
+    filed with four acceptance criteria, all pure-path `unit test:` proofs naming
+    `test/the-wipe-test-can-only-ask-about-learnings.test.ts` — a file that already existed on main,
+    because that task's whole purpose was to REPAIR the test in it. `lint-plan` reported zero
+    violations for the shard; a control run without it gave the identical rc and failing count. The
+    defect surfaced only when its builder read `classifyBaseProofOutcome` by hand, one PR later. The
+    filing and the build were the same session, so nothing external caught it either.
+
+    THE LINTER ALREADY POLICES TWO OF THE THREE QUESTIONS AND SAYS SO IN ITS OWN COMMENT: it
+    "validates proof SHAPE (proof-dialect) and RESOLVABILITY (proof-resolvability), never whether
+    the artifact a proof names is inside" scope. Discrimination is the third question and no check
+    asks it. VERIFIED by reading, not by a bare count: the four `merge-base|origin/main|baseCwd|
+    classifyBase` hits in `src/lib/task-linter.ts` are all prose in comments about private
+    advisories and shard filing; none is a base-aware proof check.
+
+    THE MIRROR OF A CHECK THAT ALREADY EXISTS. `proofResolvabilityViolations`'s own `LintOpts` doc
+    records the exact tension this task completes: "a queued task's proof legitimately
+    FORWARD-REFERENCES the test its own PR will create, and this check cannot tell that apart from
+    a dead reference pre-dispatch." That check reasons about the CURRENT tree and treats absence as
+    the ambiguous case. This one reasons about the BASE tree, where absence is the HEALTHY case and
+    PRESENCE is the defect. The two are complementary readings of one fact and must not be merged:
+    resolvability asks whether the artifact will ever exist, discrimination asks whether it already
+    did.
+
+    THE RAW COUNT OVER-COUNTS AND IS NOT THE CENSUS. Over the 1037 shards in `plan/tasks.d/` that
+    carry an acceptance block, 838 use at least one pure-path `unit test:` proof and 749 name a test
+    file present in the tree TODAY. That 749 is NOT the biting population and must not be quoted as
+    one: most of those tasks have MERGED, so the file exists now precisely because that task created
+    it — at filing time it was a healthy forward reference. The honest figure needs each shard
+    evaluated at ITS OWN filing base, which this filing session could not compute (shallow clone, 88
+    commits). Sizing the real population is the builder's first criterion, below, and the floor is
+    stated before the work rather than after it.
+
+  design: |
+    Add ONE check to `src/lib/task-linter.ts`, joining `proof-dialect` / `proof-resolvability` /
+    `proof-scope` as a fourth member of that family rather than a new mechanism. Name it for the
+    question it asks, not for the failure it predicts.
+
+    THE LINTER IS PURE, SO THE BASE FACT ARRIVES BY INJECTION — do not make this module read disk
+    or shell git. Add a `LintOpts` predicate answering "did this repo-relative path exist at the
+    base ref", the base-tree counterpart of the existing `moduleExists`, and follow the contract
+    that opt's own doc already sets: ABSENT ⇒ THE CHECK IS SILENT. Three checks already model this
+    (`moduleExists`/`callSiteViolations`, `blockedDisposition`, `newMonolithIds`), and two of them
+    fire only in the `--base` pass for the same reason this one must: a whole-plan run has no base
+    to compare against and must not report the standing population.
+
+    WARN, NEVER BLOCK. "The file exists at base" is a HEURISTIC for "the proof passes at base",
+    which is what actually makes it stale. A repair whose target test is currently RED at base
+    discriminates correctly and would be refused by a blocking arm — a false positive on a
+    legitimate shape. Match `proof-scope`'s default (`warn`) and give the severity an override in
+    `LintOpts` exactly as its siblings do, but wire no call site to `block`.
+
+    A FORWARD-REFERENCING PROOF MUST NOT WARN. The healthy TDD case — a proof naming a test the
+    task's own PR will create — is the majority and the whole point of the pure-path form. A check
+    that warns on it would be worse than the gap it closes, because it would train readers to
+    ignore the new row. Pin that direction with its own test, not only the positive one.
+
+    The message must name the CONSEQUENCE, not the shape: that `classifyBaseProofOutcome` re-runs
+    this proof at the merge-base, that passing there grades `executed_stale`, and that the criterion
+    then degrades to the keyword floor SILENTLY. A reader who sees only "this file exists at base"
+    cannot act on it.
+
+    Wire the predicate at `lint-plan`'s `--base` pass in `src/run-task.ts` and nowhere else. That
+    file is declared and the serialisation cost is accepted in writing (W1-T471). Do not touch the
+    pre-dispatch call site: a queued task's proof legitimately forward-references, and that site
+    already demotes `proof-resolvability` to `warn` for exactly this reason.
+
+    Do NOT change `classifyBaseProofOutcome`, `judgeCriterion`, the `executed_stale` verdict, or any
+    review-time behaviour. This task moves the discovery EARLIER; it does not alter what review does
+    when it discovers it.
+
+  acceptance:
+    - claim: "a shard whose pure-path unit test proof names a file present at the base ref is reported, with a message naming the executed_stale consequence rather than only the file's presence"
+      proof: "unit test: test/lint-plan-proof-discrimination.test.ts"
+    - claim: "a forward-referencing proof, naming a test the task's own PR will create, is NOT reported, so the healthy majority case stays silent"
+      proof: "unit test: test/lint-plan-proof-discrimination.test.ts"
+    - claim: "the check is silent when the base predicate is absent, so the whole-plan and pre-dispatch passes never report the standing population"
+      proof: "unit test: test/lint-plan-proof-discrimination.test.ts"
+    - claim: "the check warns and never blocks, so a repair whose target test is red at the base is not refused on a heuristic"
+      proof: "unit test: test/lint-plan-proof-discrimination.test.ts"
+    - claim: "the linter still reads no disk and shells no git, the base fact arriving only through the injected predicate"
+      proof: "unit test: test/lint-plan-proof-discrimination.test.ts"
+
+  falsifier: |
+    THE CENSUS IS CRITERION ONE AND IT CAN END THIS TASK. Re-derive the biting population on a
+    FULL-HISTORY checkout: for each shard, resolve the commit that ADDED it and ask whether each
+    pure-path `unit test:` proof's path existed at that commit's PARENT. The 749 figure in the
+    rationale is the wrong measurement and must not be reused. THE FLOOR, STATED BEFORE THE WORK:
+    under 15 shards where a proof named an already-existing file at its own filing base, close this
+    task UNBUILT with the measurement recorded — the rule then belongs in prose alone, and one
+    confirmed instance is an anecdote rather than a population.
+
+    CLOSE THIS TASK WITHOUT IMPLEMENTATION if `lint-plan` already reports proof staleness under any
+    name. `proof-dialect`, `proof-resolvability` and `proof-scope` are NOT that check: shape,
+    existence-now, and declared-scope membership are three different questions, and none consults a
+    base ref.
+
+    THE FALSE-POSITIVE DIRECTION IS THE ONE THAT SINKS THIS. Prove the forward-referencing case
+    stays silent against a REAL shard whose test did not exist at its filing base, not only against
+    a synthetic fixture. A check that fires on the healthy majority is a regression even if every
+    true positive it finds is real.
+
+    Do NOT discharge this by blocking rather than warning, by making the linter read disk or shell
+    git, by wiring the predicate into the pre-dispatch call site, or by changing what review does
+    with an `executed_stale` verdict.
+
+  note: |
+    ID PROVENANCE, STATED HONESTLY BECAUSE IT IS IRREGULAR. W1-T2835 was chosen as the lowest id
+    free on every surface checked — `refs/rmd-id/W1-T2835` absent (control: `W1-T2834` reads 1, so
+    the query works), no shard in `plan/tasks.d/`, highest filed 2831, highest reserved 2834. It was
+    NOT minted by `rmd next-task-id --reserve`: this session's GitHub credential returns a
+    deterministic 403 on any ref outside `refs/heads/*`, so `refs/rmd-id/W1-T2835` and
+    `refs/rmd-dispatch/W1-T2835` both remain unminted and are the operator's to create. The id
+    allocator counts OPEN PRs when computing its maximum, so this filing PR protects the id while it
+    is open; if a concurrent host reserves 2835 first, this filing is the loser of that race and
+    renumbers.
+
+    W1-T963 IS NOT THIS TASK AND WAS CHECKED, NOT ASSUMED. It filed "non-discriminating proofs" and
+    shipped as #2204, but its surface is the TRIAGE-GENERATED proof and the empty-diff merge gate at
+    REVIEW time. This one is author-time linting of a HAND-WRITTEN shard's proof, in a module
+    W1-T963 never touched. Neither subsumes the other and the falsifiers are independent.
+
+    `risk: high`, `band_meaning: span` is Rule 19's span classification across the check, its
+    one wiring site and its suite. It authorizes no review-time change: nothing in `src/lib/review.ts`
+    is in `files:`.
