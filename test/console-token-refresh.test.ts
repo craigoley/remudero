@@ -225,6 +225,8 @@ interface ServeLauncherFixtureOptions {
   accountFilePresent?: boolean;
   webhookSecretPresent?: boolean;
   captureTokenFromDaemon?: boolean;
+  /** False models the App-only production shape: neither shell nor daemon carries a static token. */
+  daemonTokenPresent?: boolean;
   extraArgv?: string[];
   existingContainer?: boolean;
 }
@@ -250,6 +252,7 @@ function runServeLauncherFixture(
   const daemonKeyPath = join(daemonCredentialDest, "rmd-app.pem");
   const keyBody = "FAKE-PRIVATE-KEY-CONTENT-W1-T2778";
   const token = "ghs_FAKE_STATIC_TOKEN_W1_T2778";
+  const daemonTokenArg = options.daemonTokenPresent === false ? "" : "'GH_TOKEN=daemon-token'";
   mkdirSync(binDir, { recursive: true });
   mkdirSync(stateDir, { recursive: true });
   mkdirSync(credDir, { recursive: true });
@@ -279,7 +282,7 @@ fi
 if [ "\${1:-}" = "inspect" ] && [ "\${2:-}" = "remudero-daemon" ]; then
   case "$*" in
     *Config.Env*)
-      printf '%s\\n' 'GH_TOKEN=daemon-token' 'GH_APP_ID=123' 'GH_APP_INSTALLATION_ID=456' 'GH_APP_PRIVATE_KEY_PATH=${daemonKeyPath}'
+      printf '%s\\n' ${daemonTokenArg} 'GH_APP_ID=123' 'GH_APP_INSTALLATION_ID=456' 'GH_APP_PRIVATE_KEY_PATH=${daemonKeyPath}'
       ;;
     *home/node/Remudero*)
       printf '%s\\n' '${stateDir}'
@@ -448,6 +451,27 @@ test("W1-T2778: an existing remudero-serve container is still refused without --
   assert.equal(fixture.result.status, 1, fixture.result.stdout);
   assert.match(fixture.result.stderr, /REFUSING.*already exists/s);
   assert.equal(fixture.capture, "", "the refusal fires before docker run is ever called — nothing was launched or replaced");
+});
+
+test("W1-T2836: a readable App identity launches without any static GH_TOKEN", () => {
+  const fixture = runServeLauncherFixture("direct", {
+    captureTokenFromDaemon: true,
+    daemonTokenPresent: false,
+  });
+  assert.equal(fixture.result.status, 0, fixture.result.stderr);
+  assert.match(fixture.result.stdout, /no static GH_TOKEN; GitHub App auth is fully configured/);
+  assert.ok(fixture.capture.includes(`${fixture.directKeyPath}:${SERVE_APP_KEY_DEST}:ro`));
+  assert.ok(!`${fixture.result.stdout}${fixture.result.stderr}${fixture.capture}`.includes(fixture.token));
+});
+
+test("W1-T2836: no static token plus an unusable App key still refuses before docker run", () => {
+  const fixture = runServeLauncherFixture("missing", {
+    captureTokenFromDaemon: true,
+    daemonTokenPresent: false,
+  });
+  assert.equal(fixture.result.status, 1, fixture.result.stdout);
+  assert.match(fixture.result.stderr, /REFUSING — no GH_TOKEN is available, and GitHub App auth is not usable/);
+  assert.equal(fixture.capture, "", "the failed credential preflight must not replace or launch anything");
 });
 
 // ── (2) A CREDENTIAL THAT CANNOT BE REPLACED IS REPORTED, NOT PRESENTED AS A WORKING BOARD ──────
