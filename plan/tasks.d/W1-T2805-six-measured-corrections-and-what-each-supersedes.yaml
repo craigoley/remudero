@@ -1,5 +1,5 @@
 - id: W1-T2805
-  title: "eleven corrections measured this week each contradict guidance the repo currently ships — hazard (k) has a third indistinguishable state, verify:human dialect debt DOES stall the linter and the dialect it is said to lack already exists, forwardReference has four conditions rather than the two CLAUDE.md names, and three failure modes (proof-weaker-than-claim, cost as the execution falsifier, the plan-only head's dialect ceiling) have no home at all"
+  title: "thirteen corrections measured this week each contradict guidance the repo currently ships — hazard (k) has a third indistinguishable state, verify:human dialect debt DOES stall the linter and the dialect it is said to lack already exists, forwardReference has four conditions rather than the two CLAUDE.md names, and three failure modes (proof-weaker-than-claim, cost as the execution falsifier, the plan-only head's dialect ceiling) have no home at all"
   repo: remudero
   depends_on: []
   type: implement
@@ -160,8 +160,39 @@
       this amendment is already recomputing. GIT PUSH IS UNAFFECTED by any of it, which is worth
       stating because it is what lets a lane keep working through an exhausted REST budget.
 
-    ELEVEN CORRECTIONS, FIVE NEW ENTRIES. (1), (2), (3)+(6), (11) and (12) are IN-PLACE edits that
-    supersede shipped text; (4), (5), (7), (8), (9) and (10) are additions.
+    (13) AN ERROR THAT NAMES ITS CHECK IS NOT AN ERROR THAT NAMES ITS CAUSE. A message is
+    SELF-DIAGNOSING only when its text separates its own cause from the NEIGHBOURING causes that
+    produce the same failure class; naming the check that fired is not that. Two measured this
+    week, both since fixed, and the fix in each case was to add the ONE value that discriminates:
+      - `retro preflight exceeded 1200000ms` named the BOUND alone, so a genuine hang and a
+        too-tight bound printed the IDENTICAL sentence. Separating them took deriving
+        1200948 - 1200000 = 948ms by hand off a ledger row. W1-T2803 now reports the measured
+        elapsed beside the bound.
+      - `isolation_preflight_failed: the probe's alias/function counts could not be parsed` was
+        emitted for a spawn that NEVER RAN, sending a reader to the report parser when the cause
+        was a CLI refusing to start. W1-T2755 now reports the spawn failure instead.
+    THE COUNTER-EXAMPLE IS WHAT MAKES THE RULE CHECKABLE RATHER THAN A PLEA FOR BETTER WORDING:
+    `source-size-signal: MEASUREMENT FAILED — invalid arguments: Unknown option '--check'` names
+    its cause exactly and costs its reader no investigation at all. THE TEST TO APPLY BEFORE
+    SHIPPING A FAILURE MESSAGE: can two different causes print this same sentence? If yes, it names
+    a check and not a cause, and the discriminating value is the thing to add.
+
+    (14) A PROBE WHOSE SETUP GUARANTEES THE OUTCOME IT TESTS FOR MEASURES NOTHING. This is the
+    INVERSE of the positive-control discipline already recorded, and it is not covered by it: a
+    control guards against a false NEGATIVE (the query could not see its corpus), while this guards
+    against a false POSITIVE (the setup manufactured the observation). A rigged probe is more
+    dangerous than a blind query because it CONFIRMS, and a confirmation is not re-examined.
+    MEASURED AS A NEAR-MISS, CAUGHT BEFORE IT RAN: W1-T2800's falsifier requires reproducing an
+    `ANTHROPIC_API_KEY` leak reaching a worker through a sourced rc file. A probe invoking
+    `bash -lc` would have observed that leak — but `bash -lc` SOURCES RC FILES BY DEFINITION, so it
+    would have observed it whatever Codex does, and the open question is precisely whether CODEX's
+    own shell invocation sources them. The probe has to use the invocation UNDER TEST, never one
+    chosen because it makes the effect appear.
+    THE TEST: name the outcome this setup makes IMPOSSIBLE. If there is none, the probe is rigged
+    and its agreement with the hypothesis is worth nothing.
+
+    THIRTEEN CORRECTIONS, SEVEN NEW ENTRIES. (1), (2), (3)+(6), (11) and (12) are IN-PLACE edits
+    that supersede shipped text; (4), (5), (7), (8), (9), (10), (13) and (14) are additions.
   design: |
     ONE CONCERN: make the repo's shipped guidance agree with what was measured this week, and pay
     for every added byte by folding what it supersedes. DOCUMENTATION ONLY — no `src/`, no `test/`,
@@ -195,6 +226,12 @@
             reason a reader skips them — a minted id feels like the answer. Not a new bullet.
       (10) → NEW entry in `learnings/architecture.yaml`, `subsystem: proofs`, next to (4). It is
             the affirmative half of W1-T2790's ordering and should cite that ruling by id.
+      (13) → NEW entry in `learnings/failures.yaml`. An incident learning: two real messages, both
+            already repaired, kept for the RULE they establish rather than for either incident. It
+            must carry the counter-example, or it degrades into "write clearer errors".
+      (14) → NEW entry in `learnings/architecture.yaml`, `subsystem: proofs`. It belongs beside the
+            control discipline it inverts, and must SAY that it is the inverse — a reader who has
+            internalised positive controls is exactly the reader who will not see this one.
       (11) → CLAUDE.md, SHARPENING the existing `pkill -f` bullet under "Operating this host" IN
             PLACE. The bullet's mechanism sentence is right and stays; what is added is that
             excluding your own pid is insufficient on a shared host, and that the discriminator is
@@ -209,9 +246,18 @@
     stale, which is itself the reason this task must re-measure rather than trust its own note:
       `scripts/learnings-budget-ratchet.mjs` — active corpus 35651 chars against a 42000 cap,
           68 active / 71 total entries: 6349 chars of headroom. UNCHANGED.
-      `scripts/claude-md-budget-ratchet.mjs` — CLAUDE.md 43396 bytes against a 44000 cap:
-          604 bytes of headroom, DOWN FROM THE 845 THIS SHARD WAS FILED WITH (#3908 landed between
-          the filing and the amendment).
+      `scripts/claude-md-budget-ratchet.mjs` — CLAUDE.md 43808 bytes against a 44000 cap:
+          192 BYTES OF HEADROOM, re-measured at 2695b603 when (13) and (14) were folded in. The
+          figure has now moved TWICE under this shard — 845 at filing, 604 at the first amendment,
+          192 now — which is itself the argument for re-measuring at build time rather than
+          trusting any number written here, including this one.
+
+    THE CLAUDE.MD HALF IS NOW NET-NEGATIVE OR IT DOES NOT LAND. 192 bytes is not one paragraph; it
+    is barely one sentence. The five CLAUDE.md edits must free more than they spend, and a build
+    that merely fits under the cap has failed this task's own §8A test. BOTH ITEMS ADDED BY THIS
+    SECOND AMENDMENT GO TO `learnings/`, deliberately, where 6349 chars of headroom remain: nothing
+    in (13) or (14) is a workflow rule a session must read before acting, so neither earns
+    CLAUDE.md space at this price.
 
     DOES THE RESIDUE FIT? YES, BUT ONLY BECAUSE THE CLAUDE.MD HALF MUST FOLD, AND THAT CONSTRAINT
     IS NOW BINDING RATHER THAN COMFORTABLE. Six entries are destined for `learnings/` — (4), (5),
@@ -279,6 +325,10 @@
       proof: "grep: - id: bare-node-test-resolution-failure in learnings/failures.yaml"
     - claim: "TAP output proximity is recorded as not implying causation, stating what separates it from the no-summary rule it resembles"
       proof: "grep: - id: tap-proximity-is-not-causation in learnings/failures.yaml"
+    - claim: "a failure message is recorded as self-diagnosing only when it separates its own cause from the neighbouring causes sharing its failure class, with the counter-example that makes the rule checkable"
+      proof: "grep: - id: an-error-names-its-cause-not-its-check in learnings/failures.yaml"
+    - claim: "a probe whose setup guarantees its own outcome is recorded as measuring nothing, stated as the inverse of the positive-control discipline rather than a restatement of it"
+      proof: "grep: - id: a-rigged-probe-measures-nothing in learnings/architecture.yaml"
   falsifier: |
     THE COMPRESSION CLAIM IS THE ONE THAT CAN BE FAKED, SO MEASURE IT RATHER THAN ASSERTING IT. Run
     both ratchets before and after and report all four numbers. The CLAUDE.md delta must be zero or
