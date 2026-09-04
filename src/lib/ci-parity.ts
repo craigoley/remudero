@@ -1743,7 +1743,20 @@ export function censusPopulationDrift(
   return { unknown, stale };
 }
 
-export const FAST_GATE_STEPS: { job: string; script: string; reason: string; boundMs?: number }[] = [
+export const FAST_GATE_STEPS: {
+  job: string;
+  script: string;
+  reason: string;
+  boundMs?: number;
+  /**
+   * W1-T2653 — THIS GATE'S OWN DECLARED REMEDY FILE(S), reachable to a fix rung repairing
+   * THIS gate's failure and no other (see {@link remedyFilesForFailingChecks} below). Optional:
+   * a gate with no `remedyFiles` grants no exemption, exactly as before this field existed. A
+   * per-entry REASON for the pairing belongs in THIS entry's own `reason` above — never a shared
+   * sentence borrowed from a neighbour (the W1-T2526 precedent this repeats).
+   */
+  remedyFiles?: readonly string[];
+}[] = [
   {
     job: "cli-reference",
     script: "cli-reference:check",
@@ -1786,7 +1799,13 @@ export const FAST_GATE_STEPS: { job: string; script: string; reason: string; bou
       "same-class (W1-T2488/W1-T2734) — a deterministic npm-script signal: refreshes origin/main, measures only changed " +
       "src/**/*.ts files from the merge base to HEAD, and publishes human plus schema-versioned JSON hotspot evidence. " +
       "Positive growth remains PASS because line count is a review-risk signal rather than a correctness verdict; only an " +
-      "unreadable base or failed measurement refuses the step. The historical shared baseline is not read or written",
+      "unreadable base or failed measurement refuses the step. The historical shared baseline is not read or written " +
+      "by this signal script — but `source-size-ratchet`'s OWN blocking `--baseline --check` mode (the gate this " +
+      "signal script shares its file with, W1-T2653) prints the exact `\"path\": bucket` line to write on a refusal " +
+      "and states recording it is safe in the same PR; `remedyFiles` below names that ONE file as reachable to a " +
+      "fix rung repairing THIS gate's own failure, scoped by `remedyFilesForFailingChecks` to a strike that is " +
+      "actually addressing `source-size`, never a general widening of declared scope.",
+    remedyFiles: ["scripts/source-size-baseline.json"],
   },
   // W1-T2643: the four census entries are no longer hand-written here — they are
   // CENSUS_ADMITTED_MEMBERS's own projection (see CENSUS_POPULATION above). Editing a census
@@ -1802,6 +1821,38 @@ export const FAST_GATE_STEPS: { job: string; script: string; reason: string; bou
       "seven modules read for dispatch visibility and merge credit (scripts/worker-branch-shape.mjs)",
   },
 ];
+
+/**
+ * W1-T2653 — THE DECLARED REMEDY, REACHABLE ONLY WHILE ITS OWN GATE IS THE ONE ACTUALLY FAILING.
+ * A fix rung's pre-strike scope guard ({@link "../run-task.js".fixRungScopeStandDownReason}) and
+ * its worker prompt ({@link "../run-task.js".renderFixPrompt}) both need the SAME answer to "which
+ * paths may THIS strike write beyond its declared scope, because a currently-failing gate names
+ * them as ITS OWN remedy" — computed here ONCE, off {@link FAST_GATE_STEPS}'s own per-entry
+ * `remedyFiles` (design note i), never re-derived per caller.
+ *
+ * Matches purely on `job` — the ONE identifier {@link FAST_GATE_STEPS} already keys every gate by
+ * — against the failing check names the caller already holds (the ci-log fix mode's own evidence,
+ * W1-T94). A check that is NOT currently in `failingCheckNames` contributes nothing, so a remedy
+ * file stays unreachable until the gate that declares it is the one actually red THIS round
+ * (design note ii: "scoped to the repair, not granted globally" — the deliberate difference from
+ * {@link "../lib/sweep.js".REGENERABLE_ARTIFACT_GENERATORS}'s unconditional, membership-only grant).
+ *
+ * PURE: no I/O — both inputs are the caller's own reads; `steps` defaults to the real
+ * {@link FAST_GATE_STEPS} but accepts a fixture for testing without importing production data.
+ */
+export function remedyFilesForFailingChecks(
+  failingCheckNames: readonly string[],
+  steps: readonly { job: string; remedyFiles?: readonly string[] }[] = FAST_GATE_STEPS,
+): string[] {
+  const failing = new Set(failingCheckNames);
+  const files = new Set<string>();
+  for (const step of steps) {
+    if (step.remedyFiles && failing.has(step.job)) {
+      for (const f of step.remedyFiles) files.add(f);
+    }
+  }
+  return [...files].sort();
+}
 
 // ── W1-T2523: WHICH CENSUS SUITES DOES A CHANGED PATH JOIN? A REPORT, NEVER A GATE ────────────
 //

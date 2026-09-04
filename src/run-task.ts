@@ -280,6 +280,7 @@ import {
   FAST_GATE_STEPS,
   preflightFailureNotice,
   preflightSummaryPath,
+  remedyFilesForFailingChecks,
   runCiParity,
   runPreflightCoverage,
   runPreflightFast,
@@ -4248,18 +4249,32 @@ export function outOfDeclaredScopeFiles(
  * pre-strike check in this file) rather than refusing blind and stranding every red PR on a task
  * that simply predates the `files:` convention (design note v).
  *
- * PURE: no I/O — both file lists are the caller's own reads, never fetched here.
+ * `reachableRemedyFiles` (W1-T2653, a FOURTH parameter — never a module-scope read, so the
+ * coupling to whichever checks are actually failing THIS round is visible at the call site and
+ * testable without I/O) is the caller's own answer to "which paths does a currently-failing
+ * gate declare as ITS OWN remedy" (see {@link "./lib/ci-parity.js".remedyFilesForFailingChecks}).
+ * A path in that set is exempted from `newOutOfScopePaths` exactly like an already-out-of-scope
+ * baseline path — but ONLY for THIS invocation's own failing checks, never unconditionally: a
+ * strike addressing checks that do not declare a given path gets no exemption for it, so the
+ * grant stays scoped to the repair rather than becoming a second, unbounded membership table
+ * (design note ii — the deliberate difference from {@link REGENERABLE_ARTIFACT_GENERATORS}'s
+ * always-on grant, which this parameter is additive to and never narrows). Defaults to `[]`,
+ * matching every existing call site's behavior byte-for-byte until a caller opts in.
+ *
+ * PURE: no I/O — every input is the caller's own read, never fetched here.
  */
 export function fixRungScopeStandDownReason(
   currentDiffFiles: readonly string[],
   baselineDiffFiles: readonly string[],
   declaredFiles: readonly string[] | undefined,
+  reachableRemedyFiles: readonly string[] = [],
 ): { reason: string; scopeKind: "files" | "plan"; newOutOfScopePaths: string[] } | undefined {
   if (!declaredFiles || declaredFiles.length === 0) return undefined;
   const planOnlyTask = declaredFiles.every(isInPlanScope);
+  const remedyExempt = new Set(reachableRemedyFiles);
   const alreadyOutOfScope = new Set(outOfDeclaredScopeFiles(baselineDiffFiles, declaredFiles));
   const newOutOfScopePaths = outOfDeclaredScopeFiles(currentDiffFiles, declaredFiles).filter(
-    (f) => !alreadyOutOfScope.has(f),
+    (f) => !alreadyOutOfScope.has(f) && !(!planOnlyTask && remedyExempt.has(f)),
   );
   if (newOutOfScopePaths.length === 0) return undefined;
   const scopeKind: "files" | "plan" = planOnlyTask ? "plan" : "files";
@@ -5794,6 +5809,18 @@ export function renderFixPrompt(opts: {
   // contradict the pre-strike gate that actually runs against that PR.
   const planOnlyTask = !!opts.task.files && opts.task.files.length > 0 && opts.task.files.every(isInPlanScope);
   const registryPaths = Object.keys(REGENERABLE_ARTIFACT_GENERATORS).sort();
+  // W1-T2653: THIS round's own reachable remedy, named WITH its gate — the fix that closes
+  // acceptance note (iii): "It must name the reachable remedy file alongside them, as a permitted
+  // path with its gate named." Computed from `evidence.ciFailures` (undefined outside ci-log mode,
+  // so this is empty there too, matching REGISTRY EXCEPTION's own mode reach) matched against
+  // `FAST_GATE_STEPS`'s own per-entry `remedyFiles` (lib/ci-parity.ts) — the SAME source
+  // {@link "./lib/ci-parity.js".remedyFilesForFailingChecks} reads for the pre-strike guard, never
+  // a second judgment on the same facts.
+  const failingCheckNames = new Set((opts.evidence.ciFailures ?? []).map((f) => f.name));
+  const reachableGateRemedies = FAST_GATE_STEPS.filter(
+    (s): s is (typeof FAST_GATE_STEPS)[number] & { remedyFiles: readonly string[] } =>
+      s.remedyFiles !== undefined && s.remedyFiles.length > 0 && failingCheckNames.has(s.job),
+  );
   const scopeBlock =
     opts.task.files && opts.task.files.length > 0
       ? [
@@ -5814,6 +5841,20 @@ export function renderFixPrompt(opts: {
                   `any file-count or file-list claim in your REPORT/PR body afterward so it still matches the ` +
                   `diff you actually pushed. Every other path outside the declared list still follows the ` +
                   `"do NOT push it" rule above verbatim; this is not a general licence to widen scope.`,
+              ]
+            : []),
+          ...(!planOnlyTask && reachableGateRemedies.length > 0
+            ? [
+                `GATE REMEDY (W1-T2653): a currently-failing check you are fixing THIS round declares its own ` +
+                  `remedy file — ${reachableGateRemedies
+                    .map((s) => `the \`${s.job}\` gate: ${s.remedyFiles.join(", ")}`)
+                    .join("; ")} (FAST_GATE_STEPS, lib/ci-parity.ts). You MAY commit it alongside the declared ` +
+                  `scope above — the fix rung will NOT stand down over it and no strike is spent for doing so — ` +
+                  `but re-derive any file-count or file-list claim in your REPORT/PR body afterward so it still ` +
+                  `matches the diff you actually pushed. This is scoped to THIS repair: it exempts only the ` +
+                  `remedy file(s) of a check that is actually failing right now, never a general licence, and a ` +
+                  `path outside both the declared scope and this gate's own remedy still follows the "do NOT ` +
+                  `push it" rule above verbatim.`,
               ]
             : []),
           ...(inheritedOutOfScope.length > 0
@@ -8906,9 +8947,15 @@ export async function runFixRung(opts: {
       } catch {
         currentDiffFiles = undefined;
       }
+      // W1-T2653: this round's OWN reachable remedy — the declared remedy file(s) of whichever
+      // FAST_GATE_STEPS gate(s) are the ones actually failing right now (`currentCiFailures`, the
+      // SAME evidence the next strike's own prompt is dispatched against), never every registered
+      // remedy regardless of what is red. Empty outside ci-log mode (`currentCiFailures` is
+      // `undefined` for a merge-conflict/reviewer-unmet round), matching that mode split exactly.
+      const reachableRemedyFiles = remedyFilesForFailingChecks((currentCiFailures ?? []).map((f) => f.name));
       const scopeStandDown =
         currentDiffFiles !== undefined
-          ? fixRungScopeStandDownReason(currentDiffFiles, baselineDiffFiles, opts.task.files)
+          ? fixRungScopeStandDownReason(currentDiffFiles, baselineDiffFiles, opts.task.files, reachableRemedyFiles)
           : undefined;
       if (scopeStandDown) {
         const issueUrl = escalate(
