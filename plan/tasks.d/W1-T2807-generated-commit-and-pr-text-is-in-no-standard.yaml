@@ -1,0 +1,107 @@
+- id: W1-T2807
+  title: "EVERY COMMIT MESSAGE AND PR BODY THE FLEET WRITES IS GOVERNED FOR SHAPE AND FOR NOTHING ELSE — shapeCommitMessage guarantees a header length, a subject case and a wrapped body, the operator message standard names neither surface in its scope, and the reader of a generated commit is the one reader no structure is owed to"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 30.00
+  rationale: |
+    **WHAT IS GOVERNED TODAY IS SHAPE, NOT CONTENT.** shapeCommitMessage (src/lib/commit-message.ts)
+    guarantees the header fits headerMaxLength in CHARACTERS, that the subject does not trip
+    subject-case, that no body line exceeds bodyMaxLineLength, and that overflow from a trimmed
+    subject is preserved rather than discarded. Every one of those is a commitlint contract. None
+    of them asks whether a reader learns anything.
+
+    **AND THE STANDARD DOES NOT REACH EITHER SURFACE.** docs/operator-message-standard.md is
+    NORMATIVE and names two surfaces: the rendered status board, and the escalation issue body's
+    narrative half. Measured on this tree, commit-message.ts and plan-pr-emitter.ts cite the
+    standard ZERO times each. A generated commit message is read later by a human doing
+    archaeology, and by the retro, and it is governed by no structure at all.
+
+    **THE HARD CONSTRAINT, AND IT IS THE WHOLE DIFFICULTY: THIS TEXT IS ALSO A MACHINE CONTRACT.**
+    Generated commit and PR text is parsed back by this repo in at least four ways. The
+    Remudero-Task trailer is matched anchored, line-anchored, to credit a merge. Subject citations
+    of the form (W1-Tnnn) are a second credit path. parseAcceptanceBlock resolves criteria out of a
+    PR body and fails CLOSED when it resolves none, so a body whose shape moves takes the review
+    down with it. bodyContradictsDiff reads the body against the real changeset. A plain-language
+    pass that treated this text as prose would break credit, review, or both, silently.
+
+    **SO THE SHAPE OF THE WORK IS ADDITIVE, NEVER A REWRITE.** The parsed structure is frozen; the
+    narrative parts around it are what gain a contract. That is the same split the standard already
+    made when it excluded the daemon's stdout as the forensic record every retro greps, and the same
+    split that keeps the containment verdict strings out of scope.
+  design: |
+    **Q1 - WHICH PARTS ARE NARRATIVE AND WHICH ARE PARSED.**
+
+    PARSED, FROZEN, NOT TOUCHED BY THIS TASK: the conventional type(scope) prefix and every
+    commitlint limit shapeCommitMessage already enforces; the Remudero-Task trailer; the (W1-Tnnn)
+    subject citation; the acceptance block parseAcceptanceBlock reads, including its header form,
+    its bullet forms and its proof dialects; anything bodyContradictsDiff scores.
+
+    NARRATIVE, AND WHAT THIS TASK GOVERNS: the commit body's explanatory paragraphs, and the PR
+    body's prose sections outside the acceptance block. Those are what a later reader actually
+    reads, and they are where the standard's parts belong.
+
+    **Q2 - WHAT THE CONTRACT SHOULD BE, GIVEN THE CHECKER IS PRESENCE-ONLY.**
+
+    The standard's checkable part is a SLOT, not a score, and the standard forbids adding any
+    readability metric in its name. So the extension is: the narrative half carries what happened
+    and why it matters to the reader who will find this commit later, and where an action is owed
+    it is named or explicitly declared absent. The same four presence parts, projected onto a
+    different record, exactly as escalate.ts projects an Escalation.
+
+    **AND THE FAILURE DIRECTION IS ALREADY SETTLED.** operator-message.ts fails toward DELIVERY: a
+    non-conforming message is marked and still sent. A commit or a PR must never be BLOCKED by this
+    contract. A gate that refused to commit because a paragraph was thin would strand real work for
+    a prose judgement no machine can make.
+
+    **Q3 - WHAT MUST NOT CHANGE.**
+
+    (i) THE PARSED STRUCTURE IS FROZEN. Trailer, subject citation, acceptance block and every
+    commitlint limit keep their exact form. Nothing in this task may move a byte a parser reads.
+
+    (ii) NO COMMIT OR PR IS EVER BLOCKED by the narrative contract. It marks, it does not refuse.
+
+    (iii) NO SCORE. No readability, length or vocabulary metric, per the standard's own prohibition
+    on adding one in its name.
+
+    (iv) NO EXISTING MESSAGE IS REWRITTEN. The standard says a per-surface rewrite is separate,
+    later work; this extends scope and wires the presence check, and stops.
+
+    (v) THE DAEMON'S STDOUT STAYS OUT OF SCOPE, and so do the containment verdict strings. This
+    task widens the standard to two named surfaces only and inherits every exclusion it already
+    carries.
+  acceptance:
+    - claim: "the standard names generated commit messages and PR bodies as surfaces in scope"
+      proof: "unit test: test/generated-text-message-standard.test.ts"
+    - claim: "the narrative half of a generated commit body is projected onto the four presence slots"
+      proof: "unit test: test/generated-text-message-standard.test.ts"
+    - claim: "the narrative half of a generated PR body is projected the same way"
+      proof: "unit test: test/generated-text-message-standard.test.ts"
+    - claim: "a non-conforming narrative marks the record and never blocks the commit or the pull request"
+      proof: "unit test: test/generated-text-message-standard.test.ts"
+    - claim: "the trailer, the subject citation and the acceptance block parse exactly as they do today"
+      proof: "unit test: test/generated-text-message-standard.test.ts"
+    - claim: "every commitlint guarantee shapeCommitMessage already makes still holds"
+      proof: "unit test: test/generated-text-message-standard.test.ts"
+    - claim: "the extension introduces no readability, length or vocabulary score"
+      proof: "unit test: test/generated-text-message-standard.test.ts"
+  files: [docs/operator-message-standard.md, src/lib/commit-message.ts, src/lib/plan-pr-emitter.ts, test/generated-text-message-standard.test.ts]
+  status: queued
+  attempts: 0
+  origin: "oper#plain-language-surfaces-2026-09-04"
+  plan_refs: ["W1-T2279", "W1-T2498", "W1-T2806"]
+  note: |
+    RISK BAND IS RULE 19'S SPAN, NOT BLAST RADIUS. The declared files cross a document, the commit
+    writer and the PR emitter, which fails sizing at a lower band. The change is additive and
+    reversible; the band records the span. Splitting the document from the two writers was
+    considered and rejected: a scope extension with no wired surface is the unconsumed-declaration
+    shape this repo keeps re-filing, and the two writers share one contract.
+
+    THE STANDARD IS EXTENDED, NOT REWRITTEN. Its principles, its prohibition on scores, its
+    delivery-first failure direction and its existing exclusions carry over unchanged.
+
+    WHAT WAS MEASURED. On this tree commit-message.ts and plan-pr-emitter.ts cite the standard zero
+    times, and checkOperatorMessage has exactly one consumer. Both figures are from the working tree.
