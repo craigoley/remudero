@@ -3,7 +3,61 @@ import { spawn } from "node:child_process";
 /** PRIMARY CONTROL: maximum combined stdout/stderr bytes retained for one preflight attempt. */
 export const RETRO_PREFLIGHT_CAPTURE_BYTES = 16 * 1024;
 const RETRO_PREFLIGHT_MAX_BUFFER_BYTES = 32 * 1024 * 1024;
-const RETRO_PREFLIGHT_TIMEOUT_MS = 20 * 60 * 1000;
+
+/**
+ * THE PREFLIGHT IS BOUNDED BY SILENCE, NOT BY TOTAL DURATION (W1-T2803).
+ *
+ * WHAT THE OLD BOUND DID. `RETRO_PREFLIGHT_TIMEOUT_MS = 20 * 60 * 1000` was a per-command
+ * DEADLINE on a run whose length grows with the tree: the plan-reading suite set is derived
+ * from `--list-plan-reading-suites`, so every added suite moves the whole run closer to the
+ * bound until it crosses. It crossed on 2026-09-03, and from then every retro died at
+ * `exit_class: process_timeout` while still passing tests — the operator measured
+ * `elapsed_ms: 1200948` against a 1200000ms bound, a 948ms overshoot that is enumeration
+ * plus attempt overhead, not a hang.
+ *
+ * WHY A BIGGER NUMBER WAS REFUSED. This is the FIFTH instance of one shape here — a bound
+ * that fires on a healthy condition (W1-T312's ci-gate wait cap, W1-T380's deploy ceiling,
+ * W1-T382's check-wait bound, `CLAUDE_HEALTH_TIMEOUT_MS`, this). Raising the constant re-arms
+ * the identical defect at a later suite count and a date nobody will connect to it. W1-T382's
+ * fix is the precedent worth copying: it replaced a deadline with a DERIVATIVE — no forward
+ * motion — so the bound stopped decaying with the workload.
+ *
+ * WHAT THIS BOUND MEASURES. The gap between successive output chunks. `node --test` streams
+ * TAP continuously, so a working run is never silent for long, however slow the host; a hung
+ * run is silent immediately. The timer below is re-armed on every stdout/stderr chunk, so the
+ * bound is on SILENCE and is INDEPENDENT of both the suite count and the host's speed. That
+ * independence is the point: it is why a value derived off the fleet host is defensible here
+ * where a total-duration value would not have been.
+ *
+ * MEASURED 2026-09-04 on the operator mini (Darwin 25.5.0, fleet idle), 201 enumerated
+ * plan-reading suites, over a 40-suite sample of that exact command line:
+ *   total 235482ms, 937 output chunks, LONGEST SILENT GAP 168843ms — and that gap ran to the
+ *   end of the run, so a healthy preflight really is silent for minutes at a time.
+ * THAT NUMBER IS WHY THIS BOUND IS 15 MINUTES AND NOT THE 5 THIS TASK FIRST WROTE. Five would
+ * have been 1.78x the observed gap on an IDLE mini, and the fleet host is slower and loaded —
+ * which is the same too-tight-margin mistake this task exists to undo, re-armed one layer down.
+ * 15 minutes is ~5.3x the measured maximum.
+ *
+ * THE HONEST LIMIT OF THAT MEASUREMENT: it is a 40-suite sample taken on the mini, not the
+ * 201-suite run on the fleet host. A silent gap is bounded by the SLOWEST SINGLE SUITE rather
+ * than by the corpus size, so it transfers far better than a total duration would — but a
+ * larger corpus has more chances to contain a slower suite, and this sample cannot rule that
+ * out. The margin above is sized for that uncertainty, and the failure message now reports the
+ * measured elapsed so the NEXT re-size is arithmetic rather than another guess.
+ *
+ * THE RUNAWAY DIRECTION IS STILL BOUNDED, by {@link RETRO_PREFLIGHT_MAX_BUFFER_BYTES}: a run
+ * that emits without progressing trips the 32MB cap and is killed as `output_limit_exceeded`.
+ * So both failure directions keep a terminator and neither depends on total wall clock.
+ */
+export const RETRO_PREFLIGHT_STALL_MS = 15 * 60 * 1000;
+/**
+ * Exit classes produced by the harness's own BOUNDS rather than by the suite under test
+ * (W1-T2803). Each names a run that was terminated or never started, so none can carry a failing
+ * test name and none can name a plan defect. {@link runRetroPrepublishPreflight} stands down on
+ * these instead of resuming the Architect. `tests_failed` is deliberately absent — that is a real
+ * verdict about the plan and is exactly what the repair rung is for.
+ */
+const BOUND_FAILURE_CLASSES = new Set(["process_timeout", "output_limit_exceeded", "process_spawn_failed"]);
 const MAX_FAILING_TESTS = 20;
 const MAX_FAILING_TEST_NAME_BYTES = 300;
 
@@ -102,17 +156,34 @@ export function runRetroPrepublishCommand(
         child.kill("SIGTERM");
       }
     };
-    child.stdout.on("data", (chunk: Buffer) => capture("stdout", chunk));
-    child.stderr.on("data", (chunk: Buffer) => capture("stderr", chunk));
+    child.stdout.on("data", (chunk: Buffer) => { capture("stdout", chunk); armStallBound(); });
+    child.stderr.on("data", (chunk: Buffer) => { capture("stderr", chunk); armStallBound(); });
     child.once("error", (error) => {
       processError = error;
     });
-    const timer = setTimeout(() => {
-      if (!processError) {
-        processError = Object.assign(new Error(`retro preflight exceeded ${options.timeout}ms`), { code: "ETIMEDOUT" });
-      }
-      child.kill("SIGTERM");
-    }, options.timeout);
+    // W1-T2803: the bound is on SILENCE, re-armed on every chunk, so it never decays with the
+    // suite count. `startedAt` is carried into the message because the BOUND alone cannot tell a
+    // reader which failure they have: a hang and a too-tight deadline print the same sentence
+    // when only the bound is named, which is the arithmetic this task's filing had to do by hand.
+    const startedAt = Date.now();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const armStallBound = (): void => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        if (!processError) {
+          const elapsedMs = Date.now() - startedAt;
+          processError = Object.assign(
+            new Error(
+              `retro preflight produced no output for ${options.timeout}ms ` +
+                `(elapsed ${elapsedMs}ms at the stall, command: ${command})`,
+            ),
+            { code: "ETIMEDOUT" },
+          );
+        }
+        child.kill("SIGTERM");
+      }, options.timeout);
+    };
+    armStallBound();
     child.once("close", (status, signal) => {
       clearTimeout(timer);
       resolve({ status, signal, stdout, stderr, ...(processError ? { error: processError } : {}) });
@@ -172,7 +243,7 @@ function commandOptions(worktreePath: string): Parameters<RetroPrepublishRunner>
     cwd: worktreePath,
     encoding: "utf8",
     maxBuffer: RETRO_PREFLIGHT_MAX_BUFFER_BYTES,
-    timeout: RETRO_PREFLIGHT_TIMEOUT_MS,
+    timeout: RETRO_PREFLIGHT_STALL_MS,
     env: { ...process.env },
   };
 }
@@ -331,6 +402,31 @@ export async function runRetroPrepublishPreflight(
   const first = await runAttempt(opts.worktreePath, run, now);
   logAttempt(opts, 1, first);
   if (first.ok) return { ok: true, attempts: 1, suiteCount: first.suiteCount, repaired: false };
+
+  // W1-T2803: a BOUND failure carries no failing test and names no plan defect, so there is
+  // nothing for an Architect to repair. `repairPrompt` would render `failing_tests: - (no failing
+  // test name parsed)` — a killed run emits no `not ok` lines — and ask an opus-5 session to find a
+  // plan defect in a run that was terminated while passing. That is the empty-evidence shape the
+  // fix rung already refuses by name (`rung.empty_ci_failures`, "standing down rather than spending
+  // a strike on empty evidence"), one subsystem over. Standing down here is the COST half of this
+  // task: without it every future bound failure stays wired to a resumed Architect plus a second
+  // full attempt against an unchanged bound — the same wall clock for the same answer.
+  //
+  // ORDINARY failures are untouched: `tests_failed` still repairs and still re-runs, which is the
+  // rung this preflight exists to drive. A stand-down on EVERY failure would delete it.
+  if (BOUND_FAILURE_CLASSES.has(first.failure!.exitClass)) {
+    opts.log("retro.preflight_repair_stood_down", {
+      attempt: 1,
+      exit_class: first.failure!.exitClass,
+      elapsed_ms: first.elapsedMs,
+      suite_count: first.suiteCount,
+      reason:
+        "a bound failure carries no failing test and names no plan defect — standing down rather " +
+        "than resuming the producing session against empty evidence",
+      ...provenanceFields(opts.provenance),
+    });
+    return { ok: false, attempts: 1, suiteCount: first.suiteCount, repaired: false };
+  }
 
   try {
     await opts.repair(repairPrompt(first.failure!));

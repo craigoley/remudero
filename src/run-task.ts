@@ -20623,9 +20623,18 @@ async function retroCommand(
       ? await opts.prepublishPreflight(preflightOptions)
       : await runRetroPrepublishPreflight(preflightOptions);
     if (!preflight.ok) {
+      // W1-T2803: name what SURVIVES, never a branch that does not. The previous wording claimed the
+      // run's diagnostic branch was kept at `worktreePath`, and was false twice over: `gitPushRunBranch`
+      // sits BELOW this return, so the branch is local to the run host and unreachable from
+      // anywhere else; and `reapStaleWorktrees` keeps a worktree only for a live pid or a live
+      // upstream branch, so a failed retro's directory is reaped once the run exits. The operator
+      // observed exactly that — `worktree.reaped` rows for these runs and no surviving directories.
+      // A message that sends a reader to a directory that is gone is worse than one that says
+      // nothing, because it costs them the search before they reach the ledger row that did survive.
       say(
         `prepublish validation failed after ${preflight.attempts} attempt(s) — marker unchanged; ` +
-          `diagnostic branch preserved at ${worktreePath}`,
+          `evidence is in the ledger: retro.preflight_failed rows carry the exit class, elapsed_ms, ` +
+          `suite count and bounded stdout/stderr excerpts`,
       );
       return 1;
     }
