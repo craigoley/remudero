@@ -482,6 +482,19 @@ test("armFieldsByRunId: the implementation worker wins over an earlier recon wor
   });
 });
 
+test("armFieldsByRunId: the implementation worker also wins over a later recon worker", () => {
+  const records = [
+    { run_id: "R1", step: "implement.done", provider: "claude", served_model: "claude-haiku-4-5-20251001", effort: "medium" },
+    { run_id: "R1", step: "recon.done", provider: "claude", served_model: "claude-sonnet-5", effort: "medium" },
+  ];
+  const fields = armFieldsByRunId(records);
+  assert.deepEqual(fields.get("R1"), {
+    provider: "claude",
+    servedModel: "claude-haiku-4-5-20251001",
+    effort: "medium",
+  });
+});
+
 test("armFieldsByRunId: recon remains the honest fallback for a recon-only run", () => {
   const records = [
     { run_id: "R1", step: "recon.done", provider: "claude", served_model: "claude-sonnet-5", effort: "medium" },

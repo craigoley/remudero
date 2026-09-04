@@ -313,28 +313,27 @@ const WINDOW_REASON_LENGTH_CAP = 96;
  *     provider named nothing, W1-T2572's own honest-unknown) and `"unknown"` only when the key is
  *     absent altogether (a ledger line predating W1-T2572).
  *   - `provider` reads `"unknown"` when absent (a line predating provider ledgering).
- * The FIRST IMPLEMENTATION line for a run_id wins. `recon.done` is only a fallback for a
- * recon-only run. The mount being measured routes the implementation worker, so allowing an
- * earlier recon row to win would label the implementation outcome with the recon model. Within
- * implementation resumes, first still wins: the retained production corpus has no run whose
- * implementation resumes disagree on provider/model/effort, and silently switching attribution
- * on a later resume would be no more honest than silently taking the earlier recon row.
+ * The FIRST IMPLEMENTATION line for a run_id wins, regardless of where any `recon.done` row
+ * appears in the ledger. `recon.done` is only a fallback for a recon-only run. The mount being
+ * measured routes the implementation worker, so allowing a recon row to win would label the
+ * implementation outcome with the recon model. Within implementation resumes, first still wins:
+ * the retained production corpus has no run whose implementation resumes disagree on
+ * provider/model/effort, and silently switching attribution on a later resume would be no more
+ * honest than silently taking a recon row.
  */
 export function armFieldsByRunId(records) {
   const out = new Map();
-  const priorities = new Map();
+  const implementationRuns = new Set();
   for (const r of records) {
     if (!r || typeof r !== "object") continue;
     if (typeof r.run_id !== "string" || typeof r.step !== "string" || !ARM_DONE_STEPS.has(r.step)) continue;
-    const priority = r.step === "recon.done" ? 0 : 1;
-    if ((priorities.get(r.run_id) ?? -1) >= priority) continue;
-    out.set(r.run_id, {
-      provider: typeof r.provider === "string" ? r.provider : "unknown",
-      servedModel:
-        typeof r.served_model === "string" ? r.served_model : r.served_model === null ? "unreported" : "unknown",
-      effort: typeof r.effort === "string" ? r.effort : "unknown",
-    });
-    priorities.set(r.run_id, priority);
+    if (IMPLEMENTATION_DONE_STEPS.has(r.step)) {
+      if (implementationRuns.has(r.run_id)) continue;
+      out.set(r.run_id, fieldsFromDoneRow(r));
+      implementationRuns.add(r.run_id);
+      continue;
+    }
+    if (!out.has(r.run_id)) out.set(r.run_id, fieldsFromDoneRow(r));
   }
   return out;
 }
