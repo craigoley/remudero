@@ -36,6 +36,31 @@
     governs none of this. A NORMATIVE document excluding its biggest surface is a defensible
     position; excluding it on a reason its own repo falsifies is not, because nobody re-examines an
     exclusion that reads as already justified.
+
+    **OPERATOR RULING, 2026-09-04 — THE EXCLUSION STAYS AND THE REASON IS CORRECTED.** Answer (a) of
+    the two this shard parked. The surface does not come into scope; the stated ground does change,
+    because it was false and an exclusion nobody re-examines is exactly what a false justification
+    buys. The correction lands in docs/operator-message-standard.md and is not re-decided here.
+
+    **TWO CORRECTIONS TO THIS SHARD'S OWN EVIDENCE, RECORDED RATHER THAN QUIETLY FIXED.** (i) The
+    zero above is stated without a qualifier and should carry one: no PRODUCTION code reads an
+    out.log's content, but FOUR test suites do. install-symlink-refusal and serve-service-boot each
+    readFileSync a serve.out.log and assert on literals run-task.ts prints, and
+    resolver-divergence-detector and serve slice run-task.ts's SOURCE TEXT by banner literal. The
+    conclusion is unchanged and the argument is stronger for it: the wording IS load-bearing, just
+    for tests rather than for retros, so rewording still costs something real. (ii) The query
+    published above anchors the read verb adjacent to the path on one line, which misses a read
+    whose path was assigned to a variable first. It found the right answer for production and is
+    not a general instrument; do not copy it forward.
+
+    **AND THE TEST THAT GUARDED THIS PASSAGE WAS CHECKING FOR TWO WORDS, NOT A REASON.**
+    checkSurfacesInScopeAndStdoutExclusion's fourth requirement read
+    /(forensic record|retro greps)/i under the label "gives a reason for the stdout exclusion". It
+    therefore stayed GREEN through a correction that reversed the claim beneath it, because the
+    corrected paragraph quotes the retired phrase. Measured, not inferred: the corrected doc passed
+    the old requirement unchanged. The requirement now anchors on the code the reason cites, and a
+    falsifier pins the case that used to pass.
+
   design: |
     **ONE HUNDRED AND SIX CALL SITES CARRY NO AUDIENCE.** There is no exported `say` to change.
     `say` is a per-lane LOCAL CLOSURE redeclared 7 times — 5 in src/run-task.ts, one each in

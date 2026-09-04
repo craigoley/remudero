@@ -153,10 +153,35 @@ a prose judgement no machine can make.
 
 ## Out of scope: the daemon's stdout
 
-The daemon's own stdout is excluded from this standard. Its only readers are operators actively
-debugging, it is high-volume, and its lines are the forensic record that every retro greps;
-restating any of it in this standard's terms would invalidate the searches that depend on its
-current wording, for no gain to a reader who is not already reading source.
+The daemon's own stdout is excluded from this standard. The exclusion stands; the reason this
+section used to give for it did not, and is corrected here rather than quietly dropped.
+
+**WHAT WAS WRONG.** It said those lines "are the forensic record that every retro greps". No
+PRODUCTION code reads the content of any `out.log` — the query over `src/`, `scripts/`, `deploy/`
+and `.github/` returns nothing, while the identical query with `ledger` substituted matches in 84
+files, so the zero is absence and not a blind read. `retro.ts` contains no stdout read at all; its
+forensic union is `resolveLedgerUnion` (`ledger-grep.ts`) over the LEDGER.
+
+**AND THE ROTATION CODE ORDERS THE TWO CHANNELS THE OTHER WAY ROUND.** `log-rotation.ts` puts
+`daemon.out.log` on `ROTATED_LOG_FILES` — size- and age-bounded, `LOG_ROTATION_COUNT` compressed
+generations kept and the oldest then dropped — while `state/ledger.ndjson` is
+`NEVER_ROTATE_FILENAME`, and `generateNewsyslogConfig` THROWS if the ledger ever enters that
+roster. Stdout is the channel this repo has decided it can bound and discard. The ledger is the one
+it refuses to lose.
+
+**THE GROUNDS THAT DO HOLD, AND THEY ARE A COST ARGUMENT.** Volume: `say` has 106 call sites across
+five modules, and every one of the seven `const say =` closures is `(msg: string) => void` — no
+channel, level or audience parameter exists anywhere, so there is nothing to project the four parts
+onto without threading a new argument through all of them. Audience: stdout's reader is an operator
+already at a terminal, mid-debug, who can resolve a terse line by reading the source beside it.
+A channel the repo deliberately drops is a poor place to owe a durable structure, and 106 sites is
+not repaid by that reader.
+
+**THE WORDING IS STILL LOAD-BEARING — FOR TESTS, NOT RETROS.** Suites assert on these banners:
+`serve-service-boot` and `install-symlink-refusal` read a `serve.out.log` and match printed
+literals, and `resolver-divergence-detector` and `serve` slice `run-task.ts`'s SOURCE TEXT by
+banner literal, so they break on a call-site rewrite even when the output is byte-identical.
+Rewording therefore still has a real cost. It is simply not the cost this section used to claim.
 
 ## What this task does not do
 
