@@ -1,0 +1,79 @@
+- id: W1-T2846
+  title: "REVIEW COMMAND IGNORES THE RUN-BRANCH TASK ID THAT THE SWEEP ALREADY TRUSTS — an implementation PR missing the exact trailer is swept as W1-T<n> but judged and ledgered as synthetic PR-<n>, so it fails with zero criteria and consumes repeated review admissions"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  files:
+    - src/run-task.ts
+    - test/review-command-task-id.test.ts
+  origin: "incident#3970-3972-3973-split-review-identity-2026-09-04"
+  plan_refs: ["W1-T453", "W1-T913", "W1-T2439", "W1-T2511"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON PRS #3970, #3972 AND #3973 ON 2026-09-04. Each implementation lived on a
+    fleet-shaped `run-W1-T<n>-<epoch>` branch, but its body ended in a noncanonical `Task:` line
+    rather than the exact anchored `Remudero-Task:` trailer. The daemon's first reviews were
+    ledgered under `PR-3970`, `PR-3972` and `PR-3973` and each posted `failure_class:no_criteria`
+    with zero criteria. After the bodies were repaired, the same unchanged heads were ledgered as
+    W1-T2753, W1-T2842 and W1-T2837, resolved 6, 4 and 4 criteria respectively, and posted PASS.
+    The body edit changed review identity and criteria, not code.
+
+    SOURCE EXPLAINS THE SPLIT. `resolveOpenPrTaskId` already implements W1-T453's policy for the
+    sweep: exact trailer first, otherwise the trusted `run-<taskId>-<epoch>` head ref, except when
+    the durable `pr.opened{plan_only:true}` marker proves the PR is only filing a task. In contrast,
+    `reviewCommand` assigns `taskId = reviewTaskIdFromBody(body)` and never consults
+    `view.headRefName`. The sweep can therefore select and describe a PR as W1-T<n>, then call the
+    reviewer that forgets that identity and writes an incompatible synthetic key.
+
+    This is not permission to accept a loose `Task:` parser. The exact trailer remains canonical,
+    anchored and last-wins. The fleet-minted branch is the existing fallback, and the plan-only
+    exclusion prevents a filing PR from falsely crediting the task whose run branch happened to
+    file it. Manual branches with no trailer remain unattributed and keep `PR-<n>` evidence.
+  design: |
+    Extract one pure task-id resolver used by both `reviewCommand` and `resolveOpenPrTaskId`. It
+    accepts the PR body, head ref and the already-derived positive plan-only fact. It returns the
+    exact trailer when present; otherwise it returns the run-branch task id only when the PR is not
+    positively plan-only; otherwise it returns undefined.
+
+    In `reviewCommand`, load the existing ledger/config early enough to derive the same
+    `isPlanOnlyFilingPr` fact from the current PR URL, then resolve the task id once and use that one
+    value for head-plan criteria, pending status, provider provenance, all review ledger rows and
+    the `runReview` task. Do not add a GitHub read or infer plan-only from changed paths or a missing
+    trailer. Preserve explicit-trailer precedence when the trailer and branch disagree.
+
+    Keep `reviewTaskIdFromBody` as the canonical exact-trailer helper for callers that genuinely
+    need body-only semantics. The new resolver is a higher-level PR-identity policy, not a weaker
+    trailer parser.
+  acceptance:
+    - claim: "reviewCommand and buildOpenPrViews use the same task-id resolver rather than independently applying different fallback rules"
+      proof: "unit test: test/review-command-task-id.test.ts"
+    - claim: "an implementation PR on run-W1-T<n>-<epoch> with no exact trailer is judged and ledgered as W1-T<n>, with criteria resolved from that task"
+      proof: "unit test: test/review-command-task-id.test.ts"
+    - claim: "an exact Remudero-Task trailer wins when it disagrees with the run branch"
+      proof: "unit test: test/review-command-task-id.test.ts"
+    - claim: "a positively marked plan-only filing never inherits the task id embedded in its run branch"
+      proof: "unit test: test/review-command-task-id.test.ts"
+    - claim: "a manual non-run branch without a trailer remains unattributed and keeps the existing PR-<n> synthetic review identity"
+      proof: "unit test: test/review-command-task-id.test.ts"
+    - claim: "the fallback consumes no additional GitHub REST or GraphQL request"
+      proof: "unit test: test/review-command-task-id.test.ts"
+    - claim: "removing the branch fallback reproduces the PR-3970 no-criteria verdict in the fixture"
+      proof: "mutation test: test/review-command-task-id.test.ts"
+  falsifier: |
+    Close without implementation if the current review command already uses `headRefName` with the
+    plan-only exclusion, or if the ledger shows the first #3970/#3972/#3973 reviews resolved their
+    W1-T ids and failed for substantive criteria. Source and the three `task_id:PR-<n>`,
+    `failure_class:no_criteria` rows refute both alternatives.
+  note: |
+    ID PROVENANCE: `rmd next-task-id --reserve` atomically reserved W1-T2846 at
+    `refs/rmd-id/W1-T2846` after observing 2845 as the maximum across the plan, open PRs and
+    history.
+
+    This task fixes the automation gap exposed by an operator-authored PR-body error; it does not
+    excuse that error. The emitting workflow should still always write the exact trailer because
+    it is the durable, explicit identity and takes precedence over branch inference.
