@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { scanPlanCoherence, type PlanCoherenceShardEntry } from "../src/lib/plan-coherence.js";
 import { loadPlan } from "../src/lib/plan.js";
@@ -23,6 +24,7 @@ import {
 // hand-authored, never the live plan — the suite must not go red just because the plan changed.
 
 const MONOLITH_PATH = "plan/tasks.yaml";
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 /** A minimal well-formed task entry — the smallest shape `parseTasksFromYaml` accepts (mirrors
  *  test/main-plan-load-guard.test.ts's own `task` helper). */
@@ -336,4 +338,55 @@ test("ACCEPTANCE #6: an unlistable plan/tasks.d/ wired through buildGather rende
   const rendered = renderGather(g);
   assert.match(rendered, /UNEXAMINED/);
   assert.doesNotMatch(rendered, /No disagreements/);
+});
+
+// ── ACCEPTANCE #6, continued — MEASUREMENT, NOT A FIXTURE STANDING IN FOR ONE ─────────────────
+//
+// Every fixture above is deliberately hand-authored (this file's own header states why: the
+// suite must not go red just because the live plan changed shape). That leaves exactly the gap
+// a grep for `planCoherenceRung(` cannot close: text can call something "measured every cycle"
+// while every exercised call only ever hands the rung a synthetic toy. This test closes it the
+// same way test/main-plan-load-guard.test.ts's own "asserted against the REAL tree" test does
+// for `loadPlan` — run the identical PURE rung (`scanPlanCoherence` via `planCoherenceRung`,
+// this module's only consumer) over THIS repo's ACTUAL `plan/tasks.yaml` and every ACTUAL
+// `plan/tasks.d/*.yaml` shard, read here (never inside plan-coherence.ts or retro.ts, which stay
+// fs-free) exactly the way `retroCommand` would. The rung genuinely scans production bytes on
+// every run of this suite — the one remaining gap is `retroCommand` (src/run-task.ts, outside
+// this task's declared scope) threading those same real bytes into `opts.planCoherence`, a
+// wiring follow-up, never a "does the rung actually work" open question.
+test("the rung genuinely measures THIS repo's real plan corpus, live off disk — not a hand-authored fixture standing in for it", () => {
+  const shardDir = join(REPO_ROOT, "plan", "tasks.d");
+  const shardFiles = readdirSync(shardDir)
+    .filter((f) => f.endsWith(".yaml") || f.endsWith(".yml"))
+    .sort();
+  assert.ok(shardFiles.length > 0, "sanity: the real plan/tasks.d/ must hold shards, or this proves nothing");
+
+  const entries: PlanCoherenceShardEntry[] = shardFiles.map((f) => ({
+    path: join("plan", "tasks.d", f),
+    text: readFileSync(join(shardDir, f), "utf8"),
+  }));
+  const monolith = { path: MONOLITH_PATH, text: readFileSync(join(REPO_ROOT, "plan", "tasks.yaml"), "utf8") };
+
+  const report = planCoherenceRung(monolith, { ok: true, entries });
+
+  // Never `unexamined` — the real directory really did list and every real shard really parsed,
+  // so the scan really ran over real bytes rather than degrading.
+  assert.notEqual(report.kind, "unexamined", "the real corpus must actually be scanned, not degrade to unexamined");
+  if (report.kind === "unexamined") return;
+  assert.equal(report.shardsExamined, shardFiles.length, "every real shard file on disk was actually examined");
+  assert.ok(report.monolithRecordsExamined > 0, "the real monolith holds real records to have examined");
+
+  // Deliberately NOT asserting `clean` vs `findings`: a real corpus's finding count is a fact
+  // about the plan on disk today, not a fixture this suite controls — hard-coding either branch
+  // would make this test flip red the moment the live plan legitimately changes, exactly the
+  // failure mode this file's header already refuses for every fixture above. Either branch still
+  // proves the same thing: the rung named every offender it found (P48 — never a bare zero), and
+  // `renderPlanCoherence` renders that state, not silence.
+  const rendered = renderPlanCoherence(report);
+  assert.match(rendered, /## Plan-coherence rung/);
+  if (report.kind === "clean") {
+    assert.match(rendered, /No disagreements/);
+  } else {
+    assert.match(rendered, new RegExp(`${report.findings.length} disagreement\\(s\\) found`));
+  }
 });
