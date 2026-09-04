@@ -21,6 +21,7 @@ import { fileURLToPath } from "node:url";
 import type { AddressInfo } from "node:net";
 
 import {
+  buildReadyServeServer,
   buildServeRoutes,
   buildServeServer,
   buildVersionRoute,
@@ -158,6 +159,61 @@ test("W1-T2269: an unconfigured console arms nothing — byte-identical to befor
   const routes = buildServeRoutes(depsFor(root, { githubAppRefresh: { env: {} } }));
   const version = routes.find((r) => "path" in r && r.path === "/v1/version");
   assert.ok(version, "GET /v1/version must be mounted");
+});
+
+test("W1-T2838: production assembly waits for the first App mint before exposing a server to bind", async () => {
+  const root = tmpRoot();
+  let releaseReady!: () => void;
+  const ready = new Promise<void>((resolve) => {
+    releaseReady = resolve;
+  });
+  let starts = 0;
+
+  const pendingServer = buildReadyServeServer(
+    depsFor(root, {
+      githubAppRefresh: {
+        env: {
+          [GH_APP_ID_ENV]: "app-1",
+          [GH_APP_INSTALLATION_ID_ENV]: "inst-1",
+          [GH_APP_PRIVATE_KEY_PATH_ENV]: "/fake/key.pem",
+        },
+        start: () => {
+          starts += 1;
+          return { armed: true, ready };
+        },
+      },
+    }),
+  );
+  let exposed = false;
+  void pendingServer.then(() => {
+    exposed = true;
+  });
+
+  await Promise.resolve();
+  assert.equal(starts, 1, "the ready-aware builder must arm exactly one refresher");
+  assert.equal(exposed, false, "the server must remain unavailable to listen while the first mint is pending");
+
+  releaseReady();
+  const server = await pendingServer;
+  assert.equal(exposed, true, "the server must become available once the first mint settles");
+  server.close();
+});
+
+test("W1-T2838: an unconfigured production assembly has no artificial boot wait", async () => {
+  const root = tmpRoot();
+  const server = await buildReadyServeServer(depsFor(root, { githubAppRefresh: { env: {} } }));
+  server.close();
+});
+
+test("W1-T2838: serveCommand awaits the ready-aware builder before its first listen", () => {
+  const src = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
+  const serveCommand = src.indexOf("export async function serveCommand(");
+  const readyBuild = src.indexOf("const server = await buildReadyServeServer(", serveCommand);
+  const firstListen = src.indexOf("await listenWithReapWait(", serveCommand);
+
+  assert.notEqual(serveCommand, -1, "serveCommand must remain exported");
+  assert.ok(readyBuild > serveCommand, "serveCommand must use the builder that carries first-mint readiness");
+  assert.ok(firstListen > readyBuild, "the first listen must happen only after the ready-aware builder settles");
 });
 
 test("W1-T2269: a configured console arms its OWN in-process refresh loop, never the daemon's", () => {
@@ -590,14 +646,15 @@ test("W1-T2269: serve.ts's new credential-refresh wiring makes no HTTP call of i
   const trackerBody = extractFunctionBody(src, "trackGithubCredentialState");
   const rendererBody = extractFunctionBody(src, "renderGithubCredentialHtml");
   const armStart = src.indexOf("const githubCredential = trackGithubCredentialState(deps.log);");
-  assert.ok(armStart >= 0, "the arming call site must exist in buildServeRoutes");
-  const armEnd = src.indexOf("}).armed;", armStart);
-  assert.ok(armEnd >= 0, "the arming call site must close with `}).armed;`");
-  const armBlock = src.slice(armStart, armEnd + "}).armed;".length);
+  assert.ok(armStart >= 0, "the arming call site must exist in assembleServeRoutes");
+  const armEndMarker = "githubCredential.state.armed = githubAppRefresh.armed;";
+  const armEnd = src.indexOf(armEndMarker, armStart);
+  assert.ok(armEnd >= 0, "the arming call site must retain the refresh result without adding its own exchange");
+  const armBlock = src.slice(armStart, armEnd + armEndMarker.length);
   for (const [label, code] of [
     ["trackGithubCredentialState", trackerBody],
     ["renderGithubCredentialHtml", rendererBody],
-    ["buildServeRoutes's arming call site", armBlock],
+    ["assembleServeRoutes's arming call site", armBlock],
   ] as const) {
     assert.ok(!/\bfetch\(/.test(code), `${label} must not itself fetch anything — only github-app.ts's own exchange may`);
   }

@@ -286,7 +286,7 @@ import {
 } from "./lib/ci-parity.js";
 import { ghIssueCloser } from "./lib/panel-actions.js";
 import {
-  buildServeServer,
+  buildReadyServeServer,
   currentBranch,
   DEFAULT_BIND_ATTEMPTS,
   DEFAULT_BIND_RETRY_MS,
@@ -26286,7 +26286,11 @@ export async function serveCommand(
     log("serve.feedback_expander_unavailable", { error: String((e as Error)?.message ?? e) });
   }
 
-  const server = buildServeServer({
+  // W1-T2838: do not bind until Serve's OWN first App-token mint settles. The refresher's
+  // `ready` promise is fail-open and always settles, so an exchange outage still starts the
+  // console in an honestly degraded state instead of racing the first board read with an empty
+  // GH_TOKEN.
+  const server = await buildReadyServeServer({
     boardGithubRefreshMs: DEFAULT_BOARD_POLL_TTL_MS,
     // `inflightHolder` wires deriveStatus's THIRD liveness disjunct (lib/status.ts) to the real
     // lock directory — the same `<config.root>/state/inflight` path `acquireInflightLock` writes
