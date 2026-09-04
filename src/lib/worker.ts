@@ -1668,15 +1668,16 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       if (args.providerRouting?.spawnCodex === undefined) {
         assertLiveSpawnAllowed(`spawnCodexWorker for task ${args.taskId ?? "<no taskId>"}`);
       }
-      const measurement = await beginSelectedCapacityMeasurement(args, config, selection, capabilities);
-      // W1-T2800: MATERIALIZE the redirected home before the spawn — the SAME function the Claude
-      // path calls (never a second materializer), which writes the blank rc files
-      // (`WORKER_HOME_RC_FILES`) that close the leak. MEASURED against pinned codex-cli 0.152.0:
-      // both Codex exclusions hold at the process boundary (zero ANTHROPIC keys in the child's
-      // `/proc/self/environ`) while the worker's SHELL still read the operator's exported value
-      // from `$HOME/.bashrc`. A blank rc in a redirected HOME is the only boundary that stops it.
-      materializeWorkerHome({ workerHome, realHome });
+      let measurement: ProviderWindowMeasurement | undefined;
       try {
+        // W1-T2800: MATERIALIZE the redirected home before the spawn — the SAME function the Claude
+        // path calls (never a second materializer), which writes the blank rc files
+        // (`WORKER_HOME_RC_FILES`) that close the leak. MEASURED against pinned codex-cli 0.152.0:
+        // both Codex exclusions hold at the process boundary (zero ANTHROPIC keys in the child's
+        // `/proc/self/environ`) while the worker's SHELL still read the operator's exported value
+        // from `$HOME/.bashrc`. A blank rc in a redirected HOME is the only boundary that stops it.
+        materializeWorkerHome({ workerHome, realHome });
+        measurement = await beginSelectedCapacityMeasurement(args, config, selection, capabilities);
         const result = await runCodex({ ...args, workerHome, zdotdir: workerZdotdir(config) }, config, selection.capacity);
         result.routedModel = selection.capacity.model ?? result.model;
         if (args.model) result.model = args.model;

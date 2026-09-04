@@ -25,6 +25,7 @@
  * actually hands its child — the same shape as the live reproduction, minus the binary.
  */
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -54,6 +55,18 @@ function fakeConfig(root: string): Config {
   return { root, workerProviders: { codex: { codexHome: join(root, "codex-home") } } } as unknown as Config;
 }
 
+function materializeOutsideRepo(workerHome: string, realHome: string): void {
+  materializeWorkerHome({ workerHome, realHome, exists: (path) => !path.endsWith("/.git") });
+}
+
+function interactiveBashAnthropicKey(env: Record<string, string | undefined>): string {
+  return execFileSync("/usr/bin/bash", ["-ic", "printf %s \"${ANTHROPIC_API_KEY-}\""], {
+    encoding: "utf8",
+    env,
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+}
+
 // ── the leak itself: asserted on the VALUE, per the falsifier ───────────────────────────────────
 
 test("W1-T2800: the sentinel exported only from an rc file is UNREACHABLE through the Codex spawn env — HOME resolves to a redirected per-spawn home whose rc files are blank", () => {
@@ -61,7 +74,7 @@ test("W1-T2800: the sentinel exported only from an rc file is UNREACHABLE throug
   try {
     const operatorHome = operatorHomeWithRcSentinel(root);
     const workerHome = perRunWorkerHomeDir(join(root, "worker-homes"), "RUN-1", { perSpawn: true });
-    materializeWorkerHome({ workerHome, realHome: operatorHome });
+    materializeOutsideRepo(workerHome, operatorHome);
 
     const env = codexSpawnEnvForTest(fakeConfig(root), {
       cwd: root,
@@ -71,6 +84,13 @@ test("W1-T2800: the sentinel exported only from an rc file is UNREACHABLE throug
       zdotdir: join(root, "zdotdir"),
       env: {},
     });
+
+    const unsafeEnv = { ...env, HOME: operatorHome };
+    assert.equal(
+      interactiveBashAnthropicKey(unsafeEnv),
+      SENTINEL,
+      "the control shell must observe the sentinel when HOME still points at the operator rc",
+    );
 
     // (a) HOME is the redirected home, NOT the operator's — and there is no process.env.HOME
     //     fallback reachable on this path.
@@ -90,6 +110,11 @@ test("W1-T2800: the sentinel exported only from an rc file is UNREACHABLE throug
 
     // (c) no ANTHROPIC_ key survives into the spawn env either — the boundary exclusion still holds
     assert.equal(Object.keys(env).filter((k) => k.startsWith("ANTHROPIC_")).length, 0);
+    assert.equal(
+      interactiveBashAnthropicKey(env),
+      "",
+      "the Codex worker shell must not be able to re-export the sentinel from the redirected HOME",
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -99,7 +124,7 @@ test("W1-T2800: an ANTHROPIC_ key in args.env is still filtered, and the redirec
   const root = scratch();
   try {
     const workerHome = perRunWorkerHomeDir(join(root, "worker-homes"), "RUN-2", { perSpawn: true });
-    materializeWorkerHome({ workerHome, realHome: operatorHomeWithRcSentinel(root) });
+    materializeOutsideRepo(workerHome, operatorHomeWithRcSentinel(root));
     const env = codexSpawnEnvForTest(fakeConfig(root), {
       cwd: root,
       prompt: "p",
@@ -124,7 +149,7 @@ test("W1-T2800: ZDOTDIR is redirected on the Codex path, so a directly-invoked z
   const root = scratch();
   try {
     const workerHome = perRunWorkerHomeDir(join(root, "worker-homes"), "RUN-3", { perSpawn: true });
-    materializeWorkerHome({ workerHome, realHome: operatorHomeWithRcSentinel(root) });
+    materializeOutsideRepo(workerHome, operatorHomeWithRcSentinel(root));
     const zdotdir = join(root, "zdotdir");
     const env = codexSpawnEnvForTest(fakeConfig(root), { cwd: root, prompt: "p", runId: "RUN-3", workerHome, zdotdir, env: {} });
     assert.equal(env.ZDOTDIR, zdotdir, "ZDOTDIR must be redirected on the Codex path (W1-T1C compinit contamination)");
@@ -137,13 +162,16 @@ test("W1-T2800: billingMode over the Codex spawn's own env keys reads subscripti
   const root = scratch();
   try {
     const workerHome = perRunWorkerHomeDir(join(root, "worker-homes"), "RUN-4", { perSpawn: true });
-    materializeWorkerHome({ workerHome, realHome: operatorHomeWithRcSentinel(root) });
+    const operatorHome = operatorHomeWithRcSentinel(root);
+    materializeOutsideRepo(workerHome, operatorHome);
     const env = codexSpawnEnvForTest(fakeConfig(root), {
       cwd: root, prompt: "p", runId: "RUN-4", workerHome, zdotdir: join(root, "zdotdir"),
       env: { ANTHROPIC_API_KEY: SENTINEL },
     });
     const childEnvKeys = Object.keys(env);
     assert.equal(billingMode(childEnvKeys), "subscription", "the ledger's billing derivation must agree with the real env");
+    assert.equal(interactiveBashAnthropicKey({ ...env, HOME: operatorHome }), SENTINEL);
+    assert.equal(interactiveBashAnthropicKey(env), "");
     // the agreement the shard demands: the shell's HOME carries no rc that could re-export a key
     for (const rc of WORKER_HOME_RC_FILES) {
       assert.ok(!(readFileSync(join(env.HOME as string, rc), "utf8") as string).includes("ANTHROPIC_"), `${rc} must not reintroduce a key childEnvKeys cannot see`);
@@ -162,16 +190,60 @@ test("W1-T2800: HOME is required on the Codex spawn path — there is no process
     writeFileSync(join(process.env.HOME, ".bashrc"), `export ANTHROPIC_API_KEY=${SENTINEL}\n`);
     try {
       const workerHome = perRunWorkerHomeDir(join(root, "worker-homes"), "RUN-5", { perSpawn: true });
-      materializeWorkerHome({ workerHome, realHome: process.env.HOME });
+      materializeOutsideRepo(workerHome, process.env.HOME);
       const env = codexSpawnEnvForTest(fakeConfig(root), {
         cwd: root, prompt: "p", runId: "RUN-5", workerHome, zdotdir: join(root, "zdotdir"), env: {},
       });
       assert.equal(env.HOME, workerHome);
       assert.notEqual(env.HOME, process.env.HOME, "process.env.HOME must not be reachable as a fallback on the spawn path");
+      assert.equal(interactiveBashAnthropicKey({ ...env, HOME: process.env.HOME }), SENTINEL);
+      assert.equal(interactiveBashAnthropicKey(env), "");
     } finally {
       if (saved === undefined) delete process.env.HOME; else process.env.HOME = saved;
     }
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("W1-T2800: the Claude spawn contract is unchanged, and Codex home cleanup wraps every local failure", () => {
+  const source = readFileSync(join(process.cwd(), "src/lib/worker.ts"), "utf8");
+  const childEnv = source.indexOf("const childEnv = buildWorkerEnv(args.env ?? {}, process.env");
+  const markers = source.indexOf("Object.assign(childEnv, workerMarkerEnv(args.runId, args.taskId, workerInstallationScope(config.root)))");
+  const options = source.indexOf("const options: Options = {");
+  const query = source.indexOf("collectWorkerResult(runQuery({ prompt: args.prompt, options })");
+  assert.ok(childEnv > 0, "Claude must still build its child env through buildWorkerEnv");
+  assert.ok(markers > childEnv, "Claude marker env is still added after buildWorkerEnv");
+  assert.ok(options > markers, "Claude query options must be built from the marked child env");
+  assert.ok(query > options, "Claude still sends the original prompt and options to the SDK query");
+
+  const optionsBlock = source.slice(options, source.indexOf("if (args.resumeSessionId)", options));
+  assert.match(optionsBlock, /cwd: args\.cwd/);
+  assert.match(optionsBlock, /permissionMode: args\.permissionMode/);
+  assert.match(optionsBlock, /pathToClaudeCodeExecutable: claudeBin/);
+  assert.match(optionsBlock, /env: childEnv/);
+  assert.match(optionsBlock, /settings: args\.settingsFile/);
+  assert.match(optionsBlock, /settingSources: \[\]/);
+  assert.match(optionsBlock, /spawnClaudeCodeProcess: buildContainedSpawnFn\(/);
+
+  const envBlock = source.slice(childEnv, markers);
+  assert.match(envBlock, /home: workerHome/);
+  assert.match(envBlock, /allowApiKey: config\.overflow === "api_key"/);
+  assert.match(envBlock, /zdotdir: workerZdotdir\(config\)/);
+  assert.match(envBlock, /shell: workerShell\(config\)/);
+
+  const codexBranch = source.slice(
+    source.indexOf('if (selection.provider === "codex")'),
+    source.indexOf("routedClaudeSelection = selection;"),
+  );
+  const codexTry = codexBranch.indexOf("try {");
+  const materialize = codexBranch.indexOf("materializeWorkerHome({ workerHome, realHome })");
+  const measurement = codexBranch.indexOf("measurement = await beginSelectedCapacityMeasurement");
+  const runCodex = codexBranch.indexOf("runCodex({ ...args, workerHome, zdotdir: workerZdotdir(config) }");
+  const codexFinally = codexBranch.indexOf("finally {");
+  const reap = codexBranch.indexOf("reapWorkerHome(workerHomeRoot, workerHome)");
+  assert.ok(codexTry >= 0 && materialize > codexTry, "Codex materialization must run inside the cleanup try");
+  assert.ok(measurement > materialize, "Codex provider measurement starts only after home materialization succeeds");
+  assert.ok(runCodex > measurement, "Codex spawn receives the redirected worker home after measurement begins");
+  assert.ok(codexFinally > runCodex && reap > codexFinally, "Codex per-spawn home is reaped by the branch finally");
 });
