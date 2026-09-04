@@ -861,6 +861,7 @@ import {
   capStderrExcerpt,
   STDERR_EXCERPT_CAP,
   noPrReportExcerpt,
+  foreignTreeStandDownReason, listRegisteredWorktrees,
   workerLedgerFields,
   workerTranscript,
   uniqueRunBranch,
@@ -874,6 +875,7 @@ import {
   WORKTREE_BASE_UNCHECKABLE_STREAK_BOUND,
   type RunLockInfo,
   type SpawnWorkerArgs,
+  type ForeignTreeStandDown, type RegisteredWorktree,
   type WorkerResult,
   type WorktreeReapSummary,
   openUsageProbeSession,
@@ -6757,6 +6759,7 @@ async function fixRungStandDownReason(
     previousFailure: { gateKey: string; snapshot: WorktreeSnapshot } | undefined;
     currentSnapshot: WorktreeSnapshot | undefined;
   },
+  foreignTree?: { round: number; branch: string; currentWorktreePath: string; birthSnapshot: WorktreeSnapshot | undefined; currentSnapshot: WorktreeSnapshot | undefined; registeredWorktrees?: readonly RegisteredWorktree[] },
   /**
    * W1-T2799 — the escalation THIS round's strike would eventually re-file if it changed nothing
    * (`key`), the head it would be filed against (`headSha`), and the finder that answers whether
@@ -6775,7 +6778,7 @@ async function fixRungStandDownReason(
     key: EscalationDedupKey;
     find: (key: EscalationDedupKey) => OpenIssue | undefined;
   },
-): Promise<{ reason: string; foreignHead?: { headSha: string; author: string } } | undefined> {
+): Promise<{ reason: string; foreignHead?: { headSha: string; author: string }; foreignTree?: ForeignTreeStandDown } | undefined> {
   if (!readLiveState) return undefined;
   const live = await readLiveState(prUrl);
   if (!live.ok) {
@@ -6851,6 +6854,8 @@ async function fixRungStandDownReason(
     );
     if (unchanged) return unchanged;
   }
+
+  if (foreignTree) { const foreign = foreignTreeStandDownReason(foreignTree); if (foreign) return { reason: foreign.reason, foreignTree: foreign }; }
 
   if (openEscalation) {
     // NO try/catch HERE, DELIBERATELY: the fail-open contract has exactly ONE owner, and it is
@@ -8081,7 +8086,7 @@ export async function runFixRung(opts: {
   retriggerCap?: number;
   /** The blocked_review verdict that triggered this rung. */
   initialReview: ReviewRunResult;
-  reviewBase: { owner: string; repo: string; headCheckoutDir: string; reviewerMount: Mount };
+  reviewBase: { owner: string; repo: string; headCheckoutDir: string; reviewerMount: Mount }; birthWorktreeSnapshot?: WorktreeSnapshot;
   /** W1-T322: threaded straight through to every re-review this rung runs — see runReview's own
    *  `openTaskIds` doc. Optional; absent behaves exactly as every pre-W1-T322 caller already does. */
   openTaskIds?: ReadonlySet<string>;
@@ -8307,7 +8312,7 @@ export async function runFixRung(opts: {
      * (fail open — a read failure can only ever cause a strike to spend). The real call sites
      * wire {@link captureWorktreeSnapshotViaGit}.
      */
-    captureWorktreeSnapshot?: (worktreePath: string) => WorktreeSnapshot | undefined | Promise<WorktreeSnapshot | undefined>;
+    captureWorktreeSnapshot?: (worktreePath: string) => WorktreeSnapshot | undefined | Promise<WorktreeSnapshot | undefined>; readRegisteredWorktrees?: () => readonly RegisteredWorktree[] | Promise<readonly RegisteredWorktree[]>;
     /**
      * W1-T2403: read THIS round's own new commit(s) — `sinceSha..HEAD` in `opts.worktreePath` —
      * consulted right after `deps.spawn` demonstrably returns and BEFORE `strikes` is committed,
@@ -8471,6 +8476,9 @@ export async function runFixRung(opts: {
         currentTreeSnapshot = undefined; // fail open — an unreadable capture never manufactures a stand-down
       }
     }
+    const registeredWorktrees = opts.birthWorktreeSnapshot && deps.readRegisteredWorktrees
+        ? await Promise.resolve().then(deps.readRegisteredWorktrees).catch((_registryReadError: unknown): undefined => undefined)
+        : undefined;
     const preStrikeStandDown = await fixRungStandDownReason(
       deps.readLiveState,
       opts.prUrl,
@@ -8487,6 +8495,7 @@ export async function runFixRung(opts: {
         ? { prNumber, readMergeFacts: deps.readMergeFacts }
         : undefined,
       deps.captureWorktreeSnapshot ? { gateKey, previousFailure: lastGateSnapshot, currentSnapshot: currentTreeSnapshot } : undefined,
+      opts.birthWorktreeSnapshot ? { round: strikes + retriggers + 1, branch: opts.branch, currentWorktreePath: opts.worktreePath, birthSnapshot: opts.birthWorktreeSnapshot, currentSnapshot: currentTreeSnapshot, registeredWorktrees } : undefined,
       // W1-T2799: the SIXTH source — has a human already been asked about this exact state? The
       // key is the escalation the false-block escape below would file if this strike changed
       // nothing, assembled through the SAME `EscalationDedupKey` shape `escalate()` itself is
@@ -8519,6 +8528,18 @@ export async function runFixRung(opts: {
       lastGateSnapshot = currentTreeSnapshot ? { gateKey, snapshot: currentTreeSnapshot } : undefined;
     }
     if (preStrikeStandDown) {
+      const foreignTree = preStrikeStandDown.foreignTree;
+      if (foreignTree) {
+        deps.log("rung.foreign_tree", { site: "rung.strike", strike: strikes + 1, branch: opts.branch, reason: foreignTree.reason, porcelain_paths: foreignTree.porcelainPaths, diffstat: foreignTree.diffstat, other_worktrees: foreignTree.otherWorktrees });
+        const detail = `The blocked_review FIX RUNG (W1-T76, W1-T2652) observed local worktree content on ${opts.branch} before spending strike ${strikes + 1}: ${foreignTree.reason}. The rung did not observe an author for this content and will not reset, stash, clean, commit or push it. Observed porcelain paths: ${JSON.stringify(foreignTree.porcelainPaths)}. Observed diffstat: ${JSON.stringify(foreignTree.diffstat)}. Other registered worktrees on this branch: ${JSON.stringify(foreignTree.otherWorktrees)}.`;
+        const issueUrl = escalate(
+          { class: "BLOCKED", taskId: opts.taskId, runId: opts.runId, headSha: review.headSha, cause: escalationCause(currentMergeConflict !== undefined, noReviewYet), summary: `fix rung standing down — foreign worktree content before round 1 — ${opts.prUrl}`, detail, options: [{ label: "discard", detail: "remove the foreign local content, then re-run the fix rung against a clean materialized worktree." }, { label: "adopt", detail: "confirm this local content is intentional and should be preserved before resuming the fix rung." }], recommendation: "discard" },
+          { issues: deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId },
+        );
+        deps.log("fix.stood_down", { site: "rung.foreign_tree", strike: strikes + 1, reason: preStrikeStandDown.reason, issue_url: issueUrl });
+        deps.say(`fix rung: standing down before strike ${strikes + 1} — ${preStrikeStandDown.reason} — escalated: ${issueUrl}`);
+        return { outcome: "stood_down", review, strikes, retriggers, reason: preStrikeStandDown.reason, standDownReason: preStrikeStandDown.reason, issueUrl };
+      }
       if (preStrikeStandDown.foreignHead) {
         // W1-T296: a human or a sibling session appears to be actively
         // editing this branch — unlike the terminal-state reason above,
@@ -29140,6 +29161,7 @@ export function buildSweepEffects(
           }
           throw e;
         }
+        const birthWorktreeSnapshot = captureWorktreeSnapshotViaGit(worktreePath);
 
         const mountsTable = loadMounts(mountsPath(repoRoot));
         const fixMount: Mount = resolveMount(mountsTable, "fix", task.risk);
@@ -29167,6 +29189,7 @@ export function buildSweepEffects(
             pr,
             reviewBase: { owner, repo, headCheckoutDir: worktreePath, reviewerMount },
           }),
+          birthWorktreeSnapshot,
           // W1-T322: same plan this sweep already loaded (`fixRungTaskFor(plan, …)` above) — see
           // runTask's own `openTaskIds` comment for what this set is and why it's computed once.
           // W1-T367 (design (v)): the sweep has no derived projection in hand at this call site
@@ -29268,6 +29291,7 @@ export function buildSweepEffects(
             // W1-T1284: same LOCAL worktree reader as the run-loop call site above — see that
             // site's own comment.
             captureWorktreeSnapshot: captureWorktreeSnapshotViaGit,
+            readRegisteredWorktrees: () => listRegisteredWorktrees(repoDir),
             // W1-T2403: same LOCAL worktree reader as the run-loop call site above.
             readRoundCommits: readFixRoundCommitsViaGit,
             // W1-T2551: same three real, local wirings as the run-loop call site above.

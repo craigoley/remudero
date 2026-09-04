@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   appendFileSync,
   existsSync,
@@ -3729,6 +3730,113 @@ export function readRunLock(worktreePath: string): RunLockRead {
   return { kind: "corrupt", raw };
 }
 
+/** One entry from `git worktree list --porcelain`, normalized for callers. */
+export interface RegisteredWorktree {
+  path: string;
+  branch?: string;
+}
+
+export type WorktreeSnapshotLike = { status: string; diff: string; untrackedHash: string };
+export interface WorktreeStatusFact { path: string; code: string; staged: boolean; unstaged: boolean }
+export interface WorktreeDiffStat { filesChanged: number; insertions: number; deletions: number }
+export interface ForeignTreeStandDown {
+  reason: string;
+  porcelainPaths: WorktreeStatusFact[];
+  diffstat: WorktreeDiffStat;
+  otherWorktrees: RegisteredWorktree[];
+}
+
+const EMPTY_UNTRACKED_HASH = createHash("sha256").digest("hex");
+
+export function worktreeSnapshotIsClean(snapshot: WorktreeSnapshotLike | undefined): boolean {
+  return !!snapshot && snapshot.status === "" && snapshot.diff === "" && snapshot.untrackedHash === EMPTY_UNTRACKED_HASH;
+}
+
+export function worktreeStatusFacts(status: string): WorktreeStatusFact[] {
+  return status.split("\0").filter(Boolean).map((entry) => {
+    const code = entry.slice(0, 2);
+    return { path: entry.slice(3), code, staged: code[0] !== " " && code[0] !== "?", unstaged: code[1] !== " " || code === "??" };
+  });
+}
+
+export function worktreeDiffStatFromSnapshot(snapshot: WorktreeSnapshotLike): WorktreeDiffStat {
+  const files = new Set<string>();
+  let insertions = 0;
+  let deletions = 0;
+  for (const line of snapshot.diff.split("\n")) {
+    const header = /^diff --git a\/(.+) b\/(.+)$/.exec(line);
+    if (header) files.add(header[2]);
+    else if (!line.startsWith("+++") && !line.startsWith("---") && line.startsWith("+")) insertions++;
+    else if (!line.startsWith("+++") && !line.startsWith("---") && line.startsWith("-")) deletions++;
+  }
+  for (const fact of worktreeStatusFacts(snapshot.status)) files.add(fact.path);
+  return { filesChanged: files.size, insertions, deletions };
+}
+
+export function foreignTreeStandDownReason(opts: {
+  round: number; branch: string; currentWorktreePath: string;
+  birthSnapshot: WorktreeSnapshotLike | undefined; currentSnapshot: WorktreeSnapshotLike | undefined;
+  registeredWorktrees?: readonly RegisteredWorktree[];
+}): ForeignTreeStandDown | undefined {
+  if (opts.round !== 1 || !opts.birthSnapshot || !opts.currentSnapshot) return undefined;
+  const dirtyAtBirth = !worktreeSnapshotIsClean(opts.birthSnapshot);
+  const driftedBeforeTurn =
+    opts.birthSnapshot.status !== opts.currentSnapshot.status ||
+    opts.birthSnapshot.diff !== opts.currentSnapshot.diff ||
+    opts.birthSnapshot.untrackedHash !== opts.currentSnapshot.untrackedHash;
+  if (!dirtyAtBirth && !driftedBeforeTurn) return undefined;
+  const reason = dirtyAtBirth
+    ? "fix-rung worktree was not byte-clean at birth, before any fix worker turn could author it"
+    : "fix-rung worktree differs from its birth snapshot before the first fix worker turn";
+  return {
+    reason: `${reason} — standing down and escalating rather than committing local content whose author this rung did not observe`,
+    porcelainPaths: worktreeStatusFacts(opts.currentSnapshot.status),
+    diffstat: worktreeDiffStatFromSnapshot(opts.currentSnapshot),
+    otherWorktrees: (opts.registeredWorktrees ?? [])
+      .filter((entry) => entry.branch === opts.branch && entry.path !== opts.currentWorktreePath)
+      .map((entry) => ({ path: entry.path, branch: entry.branch })),
+  };
+}
+
+/**
+ * Parse `git worktree list --porcelain` once for every consumer that needs registered worktree
+ * facts. Linked-worktree callers should reuse this rather than hand-spelling the porcelain scan.
+ */
+export function parseRegisteredWorktrees(list: string): RegisteredWorktree[] {
+  const entries: RegisteredWorktree[] = [];
+  let cur: RegisteredWorktree | undefined;
+  const flush = () => {
+    if (cur) entries.push(cur);
+    cur = undefined;
+  };
+  for (const line of list.split("\n")) {
+    if (line.startsWith("worktree ")) {
+      flush();
+      cur = { path: line.slice("worktree ".length).trim() };
+    } else if (line.startsWith("branch ") && cur) {
+      cur.branch = line.slice("branch ".length).trim().replace(/^refs\/heads\//, "");
+    }
+  }
+  flush();
+  return entries;
+}
+
+/**
+ * Read the registered worktrees for `repoDir`. Best-effort: an unreadable git registry reports
+ * an empty list, matching the reaper's existing fail-soft contract.
+ */
+export function listRegisteredWorktrees(repoDir: string): RegisteredWorktree[] {
+  try {
+    return parseRegisteredWorktrees(
+      execFileSync("git", ["-C", repoDir, "worktree", "list", "--porcelain"], {
+        encoding: "utf8",
+      }),
+    );
+  } catch {
+    return [];
+  }
+}
+
 /** Remove the sibling run.lock (idempotent) — called on terminal verdict / on reap. */
 export function removeRunLock(worktreePath: string): void {
   try {
@@ -3954,26 +4062,15 @@ export function pruneStaleRuns(
 
   // 1. Force-remove any registered worktree whose path is under our worktrees
   //    root and whose branch is a run-* branch — UNLESS a live run owns it.
-  let list = "";
-  try {
-    list = execFileSync("git", ["-C", repoDir, "worktree", "list", "--porcelain"], {
-      encoding: "utf8",
-    });
-  } catch {
-    list = "";
-  }
-  let curPath = "";
-  for (const line of list.split("\n")) {
-    if (line.startsWith("worktree ")) curPath = line.slice("worktree ".length).trim();
-    else if (line.startsWith("branch ")) {
-      const ref = line.slice("branch ".length).trim(); // e.g. refs/heads/run-…
-      const isRun = /\/run-/.test(ref) || ref.startsWith("run-");
-      if (isRun && curPath.startsWith(worktreesRoot)) {
+  for (const registered of listRegisteredWorktrees(repoDir)) {
+    if (registered.branch) {
+      const isRun = registered.branch.startsWith("run-");
+      if (isRun && registered.path.startsWith(worktreesRoot)) {
         // LIVENESS GUARD: a worktree whose run.lock names a live pid is IN USE.
         // Never force-remove it — that is the bug that lost a 65-turn implement.
-        const lockRead = readRunLock(curPath);
+        const lockRead = readRunLock(registered.path);
         if (lockRead.kind === "live" && isPidAlive(lockRead.info.pid)) {
-          skipped.push(curPath);
+          skipped.push(registered.path);
           continue;
         }
         // AGE GUARD: a LOCKLESS ("absent") OR CORRUPT ("W1-T208: unparseable — may be a
@@ -3986,22 +4083,22 @@ export function pruneStaleRuns(
         if (lockRead.kind !== "live" && graceMs > 0) {
           let mtimeMs = 0;
           try {
-            mtimeMs = statSync(curPath).mtimeMs;
+            mtimeMs = statSync(registered.path).mtimeMs;
           } catch {
             mtimeMs = 0;
           }
           if (now() - mtimeMs < graceMs) {
-            skipped.push(curPath);
+            skipped.push(registered.path);
             continue;
           }
         }
         try {
-          execFileSync("git", ["-C", repoDir, "worktree", "remove", "--force", curPath], {
+          execFileSync("git", ["-C", repoDir, "worktree", "remove", "--force", registered.path], {
             stdio: "pipe",
           });
-          removeRunLock(curPath); // clear the dead sibling lock so it can't linger
-          removeWorktreeBase(curPath); // the sibling base record dies with its worktree too
-          removedWorktrees.push(curPath);
+          removeRunLock(registered.path); // clear the dead sibling lock so it can't linger
+          removeWorktreeBase(registered.path); // the sibling base record dies with its worktree too
+          removedWorktrees.push(registered.path);
         } catch {
           // best-effort
         }
@@ -4286,27 +4383,8 @@ interface WorktreeRegistration {
 function resolveWorktreeRegistration(entryPath: string): WorktreeRegistration | null {
   const repoDir = resolveWorktreeRepoDir(entryPath);
   if (!repoDir) return null;
-  let list = "";
-  try {
-    list = execFileSync("git", ["-C", repoDir, "worktree", "list", "--porcelain"], {
-      encoding: "utf8",
-    });
-  } catch {
-    return null;
-  }
-  let curPath = "";
-  let curBranch: string | undefined;
-  let found = false;
-  for (const line of list.split("\n")) {
-    if (line.startsWith("worktree ")) {
-      curPath = line.slice("worktree ".length).trim();
-      curBranch = undefined;
-      if (curPath === entryPath) found = true;
-    } else if (line.startsWith("branch ") && curPath === entryPath) {
-      curBranch = line.slice("branch ".length).trim().replace(/^refs\/heads\//, "");
-    }
-  }
-  return found ? { repoDir, branch: curBranch } : null;
+  const found = listRegisteredWorktrees(repoDir).find((entry) => entry.path === entryPath);
+  return found ? { repoDir, branch: found.branch } : null;
 }
 
 /**
