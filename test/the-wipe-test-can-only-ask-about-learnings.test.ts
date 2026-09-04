@@ -660,3 +660,45 @@ test("main(): `rmd wipe-test <id> --factor recon --repo remudero` (no --allow-no
   }
   cap.explains(() => assert.equal(exitCode, 2, "the CLI entrypoint refuses a non-sandbox --repo for the recon factor too"));
 });
+
+// W1-T2813 — THE DISCRIMINATOR FOR THIS TASK'S OWN CRITERIA.
+//
+// The entrypoint case above cannot discriminate on its own: `checkCliFreshness` returns `guarded`
+// whenever `isCiEnv` is true, and CI always sets `CI`/`GITHUB_ACTIONS`, so that case passes on this
+// head AND on the merge-base wherever a reviewer runs it. A proof reading the same result on both
+// sides substantiates nothing (W1-T2273/W1-T2362, `executed_stale`). These assertions read the
+// source of this very file, the pattern `test/container-config-mount.test.ts` already uses, and
+// they FAIL on the merge-base because none of the text they require exists there.
+test("W1-T2813: the wipe-test entrypoint case controls the self-sync guard for its own window and restores it exactly", () => {
+  const src = readFileSync(new URL(import.meta.url), "utf8");
+
+  assert.ok(
+    src.includes('import { SELF_SYNC_GUARD_ENV } from "../src/lib/self-sync.js";'),
+    "the guard must be named through the module's exported constant, so a rename breaks this test rather than silently reverting it to ambient behaviour",
+  );
+  assert.ok(
+    src.includes('process.env[SELF_SYNC_GUARD_ENV] = "1";'),
+    "the case must set the guard for its own window instead of inheriting whatever the checkout's staleness happens to be",
+  );
+  assert.ok(
+    src.includes("if (savedGuard === undefined) delete process.env[SELF_SYNC_GUARD_ENV];"),
+    "an absent key must be restored by DELETION; writing a falsy value back would leave a defined key a sibling test could observe",
+  );
+  assert.ok(
+    src.includes("const savedGuard = process.env[SELF_SYNC_GUARD_ENV];"),
+    "the prior value must be captured before the window so it can be restored exactly",
+  );
+
+  // The bare literal must appear nowhere: `SELF_SYNC_GUARD_ENV` is the only permitted spelling here.
+  // The needle is assembled at runtime so that looking for it does not itself put it in this file.
+  const bareName = ["RMD", "SELF", "SYNC", "DONE"].join("_");
+  const bare = src.split(bareName).length - 1;
+  assert.equal(bare, 0, `the raw guard name must not be hard-coded in this suite; found ${bare} occurrence(s)`);
+  assert.equal(bareName, SELF_SYNC_GUARD_ENV, "the needle must be the constant's real value, or this check proves nothing");
+
+  // And the case still asserts the refusal it exists to assert, through W1-T2812's capture.
+  assert.ok(
+    src.includes('cap.explains(() => assert.equal(exitCode, 2, "the CLI entrypoint refuses a non-sandbox --repo for the recon factor too"));'),
+    "the exit-code-2 assertion and its stderr capture must both survive this change",
+  );
+});
