@@ -27884,6 +27884,11 @@ function preserveFixHead(repoDir: string, branch: string, localSha: string): str
       stdio: ["ignore", "pipe", "pipe"],
     }).trim();
   } catch {
+    // `rev-parse --verify` exits non-zero when the recovery ref does not exist, which is the
+    // ORDINARY first-preserve case and not a fault: `null` here means "no ref yet", and the
+    // `update-ref` below then creates it with a ZERO_GIT_OID compare-and-swap that itself fails
+    // closed if the ref appeared in between. A genuinely broken repository would fail that
+    // update-ref too, so the distinction is not erased — it is deferred to the write that needs it.
     existing = null;
   }
   if (existing === null) {
