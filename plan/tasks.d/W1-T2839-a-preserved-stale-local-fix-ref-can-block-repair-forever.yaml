@@ -1,0 +1,49 @@
+- id: W1-T2839
+  title: "a preserved stale local fix ref can block repair forever"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: "incident#3925-stale-local-fix-ref-2026-09-04"
+  plan_refs: ["W1-T2609", "W1-T2610"]
+  files: [src/run-task.ts, test/fix-branch-checkout-serialization.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED on the Azure fleet host while PR #3925 was red: every daemon sweep acquired the
+    branch claim, fetched the current remote head, and then emitted `sweep.fix.checkout_refused`.
+    The local head was 50692f5 while origin was edbe952; the two refs had diverged. After the PR
+    head advanced again to fca69be, the abandoned local ref remained the same, so a level-triggered
+    retry could never change the decision. W1-T2609 correctly stopped an unconditional reset from
+    discarding an unpushed commit, but its only terminal state for ahead or diverged refs is refusal.
+    One preserved commit can therefore suppress automated repair for that PR forever.
+  design: |
+    Keep W1-T2609's no-loss posture and add a recovery transition under its existing exclusive
+    per-(repo, branch) claim. Before moving an ahead or diverged local head, prove no registered
+    worktree holds that branch. Create an immutable recovery ref naming the exact local commit,
+    verify it resolves to that commit, then move refs/heads/<branch> to origin/<branch> with
+    `git update-ref` compare-and-swap against the local sha that was inspected. If any proof,
+    recovery-ref creation, or compare-and-swap fails, preserve the current refusal behavior.
+
+    Return the recovery evidence to the dispatch caller and ledger the branch, preserved ref,
+    local sha, and origin sha. The subsequent named-branch checkout stays on origin/<branch> and
+    the fix round proceeds in the same sweep. Do not push the recovery ref, delete it, inspect its
+    contents, or weaken the existing branch claim.
+  acceptance:
+    - claim: "an unheld ahead or diverged local fix ref is preserved under a recovery ref before the local branch moves, and both refs resolve to the expected commits"
+      proof: "unit test: test/fix-branch-checkout-serialization.test.ts"
+    - claim: "the local branch move is compare-and-swap protected, so a concurrent ref change fails closed without overwriting either commit"
+      proof: "unit test: test/fix-branch-checkout-serialization.test.ts"
+    - claim: "a branch held by any registered worktree is still refused and left untouched"
+      proof: "unit test: test/fix-branch-checkout-serialization.test.ts"
+    - claim: "a successful recovery is ledgered with its local sha, origin sha, branch, and preserved recovery ref before the repair worker runs"
+      proof: "unit test: test/fix-branch-checkout-serialization.test.ts"
+    - claim: "absent, equal, and behind local refs keep W1-T2609's existing behavior and create no recovery ref"
+      proof: "unit test: test/fix-branch-checkout-serialization.test.ts"
+  note: |
+    Filed from direct source, git-graph, container-log, and ledger evidence on 2026-09-04. The
+    recovery ref is deliberately local: it is a loss-prevention anchor for an abandoned daemon
+    checkout, not a new GitHub branch or PR. W1-T2610 remains the independent push post-condition.
