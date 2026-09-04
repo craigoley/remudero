@@ -161,14 +161,24 @@ test("W1-T2585: the recycle reclaims unreferenced images and reports the bytes i
   assert.match(out.stdout, /reclaimed 4\.549GB/, out.stdout);
 });
 
-test("W1-T2585: on origin/main the recycle pruned nothing — the falsifier this task rests on", () => {
-  const base = spawnSync("git", ["show", "origin/main:deploy/recycle-container.sh"], { cwd: REPO_ROOT, encoding: "utf8" });
-  assert.equal(base.status, 0, "origin/main must be readable for this control to mean anything");
-  assert.ok(/docker pull/.test(base.stdout), "control: the base script really does pull, so this query can see its corpus");
-  assert.ok(
-    !/image\s+prune|image\s+rm|\brmi\b/.test(base.stdout),
-    "the premise is that the base script reclaims nothing; if this fails the task is already done",
-  );
+// W1-T2585's PREMISE TEST WAS RETIRED HERE, AND THIS IS ITS DURABLE SUCCESSOR.
+// It read `origin/main:deploy/recycle-container.sh` and asserted the base carried NO prune —
+// "the falsifier this task rests on". That was true only while W1-T2585 was UNMERGED. Once #3978
+// landed, `origin/main` carried the very reclaim this suite requires at head, so the assertion
+// inverted from premise to contradiction and failed on main AND on every branch cut from it
+// (observed with W1-T985's identical shape: main red, plus ci-shard failures on #3998/#3999,
+// neither of which had touched this code). A premise its own merge destroys cannot be pinned to a
+// moving ref — CLAUDE.md hazard (d): name the question the query actually answers. "Was the
+// reclaim absent BEFORE this task?" is now a matter of history, not of the tree.
+//
+// What survives is the REGRESSION half of the same question, asked LOCALLY and permanently: the
+// shipped script must still carry the reclaim and still carry the guard that makes it safe.
+// Deleting either fails this, which is the property actually worth holding from here on.
+test("W1-T2585: the shipped recycle still carries the reclaim, and still guards it", () => {
+  const script = readFileSync(SCRIPT, "utf8");
+  assert.match(script, /docker image prune/, "the reclaim itself must still be here");
+  assert.match(script, /PROTECTED_IMAGE_IDS/, "and so must the protected-set guard that makes the prune safe");
+  assert.doesNotMatch(script, /--volumes/, "volumes are never pruned — same rule host-update.sh states");
 });
 
 // ── criterion 2 ──────────────────────────────────────────────────────────────────────────────

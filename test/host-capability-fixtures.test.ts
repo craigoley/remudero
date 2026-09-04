@@ -316,16 +316,6 @@ const DECLARED: readonly Declared[] = [
       "with NO fetch-depth, so origin/main does not exist as a ref on a runner: this passes on the mini and fails " +
       "there. The fix is a depth guarantee in the workflow, not here.",
   },
-  {
-    kind: "live-tree-git",
-    file: "nothing-reclaims-the-images-the-recycle-pulls.test.ts",
-    key: "origin/main",
-    count: 1,
-    reason:
-      "the test's load-bearing falsifier reads the pre-change recycle script from origin/main to prove the " +
-      "reclaim did not already exist. The CI checkout may not carry that remote-tracking ref, so the fixture " +
-      "can differ by host; declaring it keeps that dependency visible rather than silently host-conditioned.",
-  },
   // ── unidentified-commit has NO entries on purpose: the floor is zero and worth holding. ─────
 ];
 
