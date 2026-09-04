@@ -59,7 +59,7 @@ function runGenerate(source: string, out: string) {
 }
 
 test("generate-api-client (no --check) writes a client that a subsequent --check accepts", () => {
-  const tmp = mkdtempSync(join(tmpdir(), "api-client-roundtrip-"));
+  const tmp = mkdtempSync(join(tmpdir(), "rmd-api-client-roundtrip-"));
   try {
     const source = join(tmp, "daemon.yaml");
     writeFileSync(source, MINIMAL_SPEC);
@@ -83,7 +83,7 @@ test("generate-api-client (no --check) writes a client that a subsequent --check
 });
 
 test("generate-api-client --check: a STALE client (spec changed since generation) -> non-zero exit, NAMES the file to regenerate", () => {
-  const tmp = mkdtempSync(join(tmpdir(), "api-client-stale-"));
+  const tmp = mkdtempSync(join(tmpdir(), "rmd-api-client-stale-"));
   try {
     const source = join(tmp, "daemon.yaml");
     const out = join(tmp, "schema.d.ts");
@@ -107,7 +107,7 @@ test("generate-api-client --check: a STALE client (spec changed since generation
 });
 
 test("generate-api-client --check: a MISSING committed client -> non-zero exit, tells the operator how to generate it", () => {
-  const tmp = mkdtempSync(join(tmpdir(), "api-client-missing-"));
+  const tmp = mkdtempSync(join(tmpdir(), "rmd-api-client-missing-"));
   try {
     const source = join(tmp, "daemon.yaml");
     writeFileSync(source, MINIMAL_SPEC);
@@ -122,7 +122,7 @@ test("generate-api-client --check: a MISSING committed client -> non-zero exit, 
 });
 
 test("generate-api-client: an unresolvable $ref fails loudly (non-zero exit, names the bad ref) instead of emitting broken TS", () => {
-  const tmp = mkdtempSync(join(tmpdir(), "api-client-bad-ref-"));
+  const tmp = mkdtempSync(join(tmpdir(), "rmd-api-client-bad-ref-"));
   try {
     const source = join(tmp, "daemon.yaml");
     writeFileSync(

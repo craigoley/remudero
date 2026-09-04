@@ -340,7 +340,7 @@ function w1t952Deps(checkAcceptance: (prUrl: string) => AcceptanceAuthorTimeResu
 }
 
 test("W1-T952: a body with no acceptance header is refused at author time", async () => {
-  const root = mkdtempSync(join(tmpdir(), "w1t952-refused-"));
+  const root = mkdtempSync(join(tmpdir(), "rmd-w1t952-refused-"));
   const ledgerPath = join(root, "ledger.ndjson");
   try {
     const deps = w1t952Deps(() => acceptanceAuthorTimeCheck("just prose, no header, no trailer anywhere in this body"));
@@ -363,7 +363,7 @@ test("W1-T952: a checkAcceptance that THROWS is ledgered as an error, never swal
   // The catch arm around the diagnostics call. Without this the only executed paths are ok and
   // not-ok, and a reader would have to take on faith that a `gh` failure here degrades rather
   // than killing the lane after the worker has already been paid for.
-  const root = mkdtempSync(join(tmpdir(), "w1t952-throws-"));
+  const root = mkdtempSync(join(tmpdir(), "rmd-w1t952-throws-"));
   const ledgerPath = join(root, "ledger.ndjson");
   try {
     const deps = w1t952Deps(() => {
@@ -391,7 +391,7 @@ test("W1-T952: a checkAcceptance that THROWS is ledgered as an error, never swal
 });
 
 test("W1-T952: a well-formed body is accepted in the same run", async () => {
-  const root = mkdtempSync(join(tmpdir(), "w1t952-accepted-"));
+  const root = mkdtempSync(join(tmpdir(), "rmd-w1t952-accepted-"));
   const ledgerPath = join(root, "ledger.ndjson");
   try {
     const deps = w1t952Deps(() => acceptanceAuthorTimeCheck("Acceptance:\n- the claim | unit test: test/foo.test.ts\n"));

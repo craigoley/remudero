@@ -170,7 +170,7 @@ ${RETIRED_ONLY_YAML}
 
 test("claim 4: a queue whose only remaining blockers are retired reports no recoverable blocker (never escalates)", async () => {
   const plan = loadPlanFromYaml(RETIRED_ONLY_YAML, "retired-only");
-  const root = mkdtempSync(join(tmpdir(), "retired-only-root-"));
+  const root = mkdtempSync(join(tmpdir(), "rmd-retired-only-root-"));
   const clock = pollingClock(root, 6);
   const censuses: StarvationCensus[] = [];
 
@@ -197,7 +197,7 @@ test("claim 4: a queue whose only remaining blockers are retired reports no reco
 
 test("claim 5 + 3: the same queue plus one non-retired blocked task still reports a recoverable blocker, naming retired separately", async () => {
   const plan = loadPlanFromYaml(RETIRED_PLUS_ONE_RECOVERABLE_YAML, "retired-plus-one");
-  const root = mkdtempSync(join(tmpdir(), "retired-plus-one-root-"));
+  const root = mkdtempSync(join(tmpdir(), "rmd-retired-plus-one-root-"));
   const clock = pollingClock(root, 6);
   const censuses: StarvationCensus[] = [];
 

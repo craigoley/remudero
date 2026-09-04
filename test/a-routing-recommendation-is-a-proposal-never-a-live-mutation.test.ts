@@ -165,7 +165,7 @@ function recommendableCell(): MountHeadroomCell {
 }
 
 function tmpDir(): string {
-  return mkdtempSync(join(tmpdir(), "mount-recommendation-proposal-"));
+  return mkdtempSync(join(tmpdir(), "rmd-mount-recommendation-proposal-"));
 }
 
 // ── Claim 1: reached from a production caller ──────────────────────────────────────────────

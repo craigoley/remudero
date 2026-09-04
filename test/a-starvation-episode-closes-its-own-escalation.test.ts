@@ -24,7 +24,7 @@ import { requestStop, stopDetail } from "../src/lib/fleet-control.js";
  */
 
 function planFrom(yaml: string, tag: string): Plan {
-  const dir = mkdtempSync(join(tmpdir(), `starvation-cleared-${tag}-`));
+  const dir = mkdtempSync(join(tmpdir(), `rmd-starvation-cleared-${tag}-`));
   const f = join(dir, "tasks.yaml");
   writeFileSync(f, yaml);
   return loadPlan(f);
@@ -123,7 +123,7 @@ const NEVER_STARVED_YAML = `
 test("SITE 2 (dispatchable task appears): the cleared hook fires exactly once, naming the site and the task that ended the episode", async () => {
   const plan = planFrom(SITE2_YAML, "site2");
   const merged = new Set<string>(); // BL starts unmerged, so DEP starts unmet-deps (starved)
-  const root = mkdtempSync(join(tmpdir(), "starvation-cleared-site2-root-"));
+  const root = mkdtempSync(join(tmpdir(), "rmd-starvation-cleared-site2-root-"));
   const censuses: StarvationCensus[] = [];
   const cleared: StarvationClearedInfo[] = [];
   let dispatched: string[] = [];
@@ -174,7 +174,7 @@ test("SITE 2 (dispatchable task appears): the cleared hook fires exactly once, n
 test("SITE 1 (nothing recoverable is blocking): the cleared hook fires exactly once, naming the site with NO task (nothing dispatched)", async () => {
   let plan = planFrom(SITE1_STARVED_YAML, "site1-starved");
   const clearedPlan = planFrom(SITE1_CLEARED_YAML, "site1-cleared");
-  const root = mkdtempSync(join(tmpdir(), "starvation-cleared-site1-root-"));
+  const root = mkdtempSync(join(tmpdir(), "rmd-starvation-cleared-site1-root-"));
   const clock = pollingClock(root, 6);
   const censuses: StarvationCensus[] = [];
   const cleared: StarvationClearedInfo[] = [];
@@ -216,7 +216,7 @@ test("SITE 1 (nothing recoverable is blocking): the cleared hook fires exactly o
 test("a daemon that never escalates (an all-merged/verify-human plan) fires the cleared hook not at all", async () => {
   const plan = planFrom(NEVER_STARVED_YAML, "never-starved");
   const merged = new Set(["M"]);
-  const root = mkdtempSync(join(tmpdir(), "starvation-cleared-never-root-"));
+  const root = mkdtempSync(join(tmpdir(), "rmd-starvation-cleared-never-root-"));
   const clock = pollingClock(root, 8);
   const censuses: StarvationCensus[] = [];
   const cleared: StarvationClearedInfo[] = [];
@@ -243,7 +243,7 @@ test("a daemon that never escalates (an all-merged/verify-human plan) fires the 
 test("two consecutive unstarved ticks after the episode ends fire the cleared hook once, never once per tick", async () => {
   let plan = planFrom(SITE1_STARVED_YAML, "site1-repeat-starved");
   const clearedPlan = planFrom(SITE1_CLEARED_YAML, "site1-repeat-cleared");
-  const root = mkdtempSync(join(tmpdir(), "starvation-cleared-repeat-root-"));
+  const root = mkdtempSync(join(tmpdir(), "rmd-starvation-cleared-repeat-root-"));
   // Run for MANY more ticks than needed to clear once, so a per-tick re-fire is falsified rather
   // than merely unobserved.
   const clock = pollingClock(root, 12);
@@ -277,7 +277,7 @@ test("two consecutive unstarved ticks after the episode ends fire the cleared ho
 // ── claim: the open starvation escalation is closed with a comment citing that reason ──────────
 
 test("escalateStarvationCleared: closes the open starvation escalation with a comment citing the reason (both sites)", () => {
-  const dir = mkdtempSync(join(tmpdir(), "starvation-cleared-close-"));
+  const dir = mkdtempSync(join(tmpdir(), "rmd-starvation-cleared-close-"));
   const ledgerPath = join(dir, "ledger.ndjson");
   appendLedger(ledgerPath, {
     run_id: "RUN-1",
@@ -297,7 +297,7 @@ test("escalateStarvationCleared: closes the open starvation escalation with a co
   assert.match(closeCalls[0].comment, /nothing recoverable/i, "the closing comment cites WHY the episode ended, not a bare 'resolved'");
 
   // Site 2's reason, naming the task.
-  const dir2 = mkdtempSync(join(tmpdir(), "starvation-cleared-close2-"));
+  const dir2 = mkdtempSync(join(tmpdir(), "rmd-starvation-cleared-close2-"));
   const ledgerPath2 = join(dir2, "ledger.ndjson");
   appendLedger(ledgerPath2, {
     run_id: "RUN-1",
@@ -319,7 +319,7 @@ test("escalateStarvationCleared: closes the open starvation escalation with a co
 // ── claim: a gateway that cannot close leaves the issue open and costs one logged line ─────────
 
 test("escalateStarvationCleared: a gateway that cannot close leaves the issue open and costs one logged (ledger) line, never a throw", () => {
-  const dir = mkdtempSync(join(tmpdir(), "starvation-cleared-nocap-"));
+  const dir = mkdtempSync(join(tmpdir(), "rmd-starvation-cleared-nocap-"));
   const ledgerPath = join(dir, "ledger.ndjson");
   appendLedger(ledgerPath, {
     run_id: "RUN-1",
@@ -344,7 +344,7 @@ test("escalateStarvationCleared: a gateway that cannot close leaves the issue op
 // ── claim: a throw in the closer never ends the daemon loop ────────────────────────────────────
 
 test("escalateStarvationCleared: a THROWING closeWithComment leaves the issue open, costs one logged line, and never throws itself", () => {
-  const dir = mkdtempSync(join(tmpdir(), "starvation-cleared-throw-"));
+  const dir = mkdtempSync(join(tmpdir(), "rmd-starvation-cleared-throw-"));
   const ledgerPath = join(dir, "ledger.ndjson");
   appendLedger(ledgerPath, {
     run_id: "RUN-1",
@@ -372,7 +372,7 @@ test("escalateStarvationCleared: a THROWING closeWithComment leaves the issue op
 test("runDaemon: a hook that throws synchronously never ends the daemon loop — the loop keeps polling and stops cleanly", async () => {
   const plan = planFrom(SITE1_STARVED_YAML, "site1-throwing-hook");
   const clearedPlan = planFrom(SITE1_CLEARED_YAML, "site1-throwing-hook-cleared");
-  const root = mkdtempSync(join(tmpdir(), "starvation-cleared-loop-throw-root-"));
+  const root = mkdtempSync(join(tmpdir(), "rmd-starvation-cleared-loop-throw-root-"));
   const clock = pollingClock(root, 10);
   const censuses: StarvationCensus[] = [];
   let swapped = false;
@@ -411,7 +411,7 @@ test("DECISION_RELEVANT_LEDGER_STEPS: registers the starvation-cleared referent 
 });
 
 test("escalateStarvationCleared: writes a countable ledger row on a successful close", () => {
-  const dir = mkdtempSync(join(tmpdir(), "starvation-cleared-countable-"));
+  const dir = mkdtempSync(join(tmpdir(), "rmd-starvation-cleared-countable-"));
   const ledgerPath = join(dir, "ledger.ndjson");
   appendLedger(ledgerPath, {
     run_id: "RUN-1",
@@ -433,7 +433,7 @@ test("escalateStarvationCleared: writes a countable ledger row on a successful c
 // ── claim: no escalation of another class is closed by this path ───────────────────────────────
 
 test("escalateStarvationCleared: touches nothing when no starvation escalation is open, even alongside a DIFFERENT open escalation", () => {
-  const dir = mkdtempSync(join(tmpdir(), "starvation-cleared-other-class-"));
+  const dir = mkdtempSync(join(tmpdir(), "rmd-starvation-cleared-other-class-"));
   const ledgerPath = join(dir, "ledger.ndjson");
   // A DIFFERENT class's escalation (headroom breach) — NOT dispatch.starvation.escalated.
   appendLedger(ledgerPath, {
@@ -451,7 +451,7 @@ test("escalateStarvationCleared: touches nothing when no starvation escalation i
 
   // A starvation episode that ALREADY cleared — the referent is gone; a second clear call must
   // not re-derive the older, already-closed issue and close it again.
-  const dir2 = mkdtempSync(join(tmpdir(), "starvation-cleared-already-"));
+  const dir2 = mkdtempSync(join(tmpdir(), "rmd-starvation-cleared-already-"));
   const ledgerPath2 = join(dir2, "ledger.ndjson");
   appendLedger(ledgerPath2, {
     run_id: "RUN-1",
@@ -479,8 +479,8 @@ test("escalateStarvationCleared: touches nothing when no starvation escalation i
 test("REACHABILITY, end to end: runDaemon → escalateStarvation opens → the episode ends → escalateStarvationCleared closes the SAME issue", async () => {
   const plan = planFrom(SITE2_YAML, "reachability");
   const merged = new Set<string>();
-  const root = mkdtempSync(join(tmpdir(), "starvation-cleared-reachability-root-"));
-  const dir = mkdtempSync(join(tmpdir(), "starvation-cleared-reachability-ledger-"));
+  const root = mkdtempSync(join(tmpdir(), "rmd-starvation-cleared-reachability-root-"));
+  const dir = mkdtempSync(join(tmpdir(), "rmd-starvation-cleared-reachability-ledger-"));
   const ledgerPath = join(dir, "ledger.ndjson");
   let created = 0;
   let dispatched: string[] = [];

@@ -15,7 +15,7 @@ import type { Config } from "../src/lib/config.js";
 // occasionally-file-flaky W1-T240 registry tests, so its coverage lands deterministically.
 
 test("draftProposalBatch: resolves the Architect model from the mounts.yaml `architect:` row, then fails before any real spawn — the inbox-draft rung is mount-governed", async () => {
-  const bin = mkdtempSync(join(tmpdir(), "gh-draft-"));
+  const bin = mkdtempSync(join(tmpdir(), "rmd-gh-draft-"));
   writeFileSync(join(bin, "gh"), "#!/bin/sh\nexit 1\n", { mode: 0o755 }); // a clone attempt fails fast
   const oldPath = process.env.PATH;
   process.env.PATH = `${bin}:${oldPath}`;
