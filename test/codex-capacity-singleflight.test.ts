@@ -109,6 +109,89 @@ test("three concurrent ordinary cold reads share one app-server while preserving
   );
 });
 
+test("a transient app-server timeout is retried once inside the shared raw exchange", async () => {
+  clearCodexCapacityCache();
+  let spawns = 0;
+  let kills = 0;
+  const spawn = () => {
+    spawns += 1;
+    if (spawns === 1) {
+      return fakeAppServer((request, { stdout }) => {
+        if (request.id === 1) stdout.write(`${JSON.stringify({ id: 1, result: {} })}\n`);
+      }, () => { kills += 1; }) as never;
+    }
+    return successfulServer(() => { kills += 1; }) as never;
+  };
+  const cfg = config("/tmp/codex-singleflight-timeout-retry");
+
+  const [economy, balanced, frontier] = await Promise.all([
+    readCodexCapacity(cfg, { timeoutMs: 5, requestedModel: "haiku", requestedEffort: "low", capabilities: CAPABILITIES, spawn }),
+    readCodexCapacity(cfg, { timeoutMs: 5, requestedModel: "sonnet", requestedEffort: "medium", capabilities: CAPABILITIES, spawn }),
+    readCodexCapacity(cfg, { timeoutMs: 5, requestedModel: "opus", requestedEffort: "high", capabilities: CAPABILITIES, spawn }),
+  ]);
+
+  assert.equal(spawns, 2, "all ordinary callers must share one first attempt and one retry");
+  assert.equal(kills, 2, "the timed-out and successful children must each be reaped once");
+  assert.deepEqual(
+    [economy, balanced, frontier].map((reading) => [reading.readable, reading.model, reading.effort]),
+    [
+      [true, "gpt-5.3-codex-spark", "low"],
+      [true, "gpt-5.6-terra", "medium"],
+      [true, "gpt-5.6-sol", "high"],
+    ],
+  );
+  for (const reading of [economy, balanced, frontier]) {
+    assert.match(reading.detail ?? "", /recovered on timeout retry.*attempt 1.*account\/rateLimits\/read, model\/list/);
+  }
+});
+
+test("two app-server timeouts fail closed once and enter the existing failure backoff", async () => {
+  clearCodexCapacityCache();
+  let spawns = 0;
+  let kills = 0;
+  const spawn = () => {
+    spawns += 1;
+    return fakeAppServer((request, { stdout }) => {
+      if (request.id === 1) stdout.write(`${JSON.stringify({ id: 1, result: {} })}\n`);
+    }, () => { kills += 1; }) as never;
+  };
+  const cfg = config("/tmp/codex-singleflight-double-timeout");
+  const deps = { timeoutMs: 5, capabilities: CAPABILITIES, spawn, now: () => 1_000 };
+
+  const failed = await readCodexCapacity(cfg, deps);
+  assert.equal(failed.readable, false);
+  assert.deepEqual(failed.windows, []);
+  assert.match(failed.detail ?? "", /attempt 1.*timed out.*attempt 2.*timed out/s);
+  assert.equal(spawns, 2, "the failed fresh read spends exactly one timeout retry before backing off");
+  assert.equal(kills, 2);
+
+  const backedOff = await readCodexCapacity(cfg, deps);
+  assert.equal(backedOff.readable, false);
+  assert.match(backedOff.detail ?? "", /failure backoff/);
+  assert.equal(spawns, 2, "failure backoff must not admit a third child");
+});
+
+test("malformed app-server stdout fails closed without spending the transient timeout retry", async () => {
+  clearCodexCapacityCache();
+  let spawns = 0;
+  let kills = 0;
+  const result = await readCodexCapacity(config("/tmp/codex-singleflight-malformed-no-retry"), {
+    timeoutMs: 5,
+    capabilities: CAPABILITIES,
+    spawn: () => {
+      spawns += 1;
+      return fakeAppServer((request, { stdout }) => {
+        if (request.id === 1) stdout.write("not-json\n");
+      }, () => { kills += 1; }) as never;
+    },
+  });
+
+  assert.equal(result.readable, false);
+  assert.match(result.detail ?? "", /malformed app-server stdout/);
+  assert.equal(spawns, 1);
+  assert.equal(kills, 1);
+});
+
 test("ordinary failures back off without reviving stale headroom, then one post-expiry caller retries", async () => {
   clearCodexCapacityCache();
   let now = 1_000;
@@ -138,7 +221,7 @@ test("ordinary failures back off without reviving stale headroom, then one post-
   assert.equal(backedOff.readable, false);
   assert.deepEqual(backedOff.windows, [], "the earlier successful quota must not reappear after a failed fresh probe");
   assert.match(backedOff.detail ?? "", /failure backoff/);
-  assert.equal(spawns, 2);
+  assert.equal(spawns, 3, "the failed fresh read spends its one timeout retry before backing off");
 
   now += 20;
   mode = "success";
@@ -148,8 +231,8 @@ test("ordinary failures back off without reviving stale headroom, then one post-
   ]);
   assert.equal(retried.readable, true);
   assert.equal(joined.readable, true);
-  assert.equal(spawns, 3);
-  assert.equal(kills, 3);
+  assert.equal(spawns, 4);
+  assert.equal(kills, 4);
 });
 
 test("failure backoff is capped at ten seconds even when the success cache is longer", async () => {
@@ -171,12 +254,12 @@ test("failure backoff is capped at ten seconds even when the success cache is lo
   assert.equal((await readCodexCapacity(cfg, deps)).readable, false);
   now = 9_999;
   assert.match((await readCodexCapacity(cfg, deps)).detail ?? "", /failure backoff/);
-  assert.equal(spawns, 1);
+  assert.equal(spawns, 2);
   now = 10_000;
   mode = "success";
   assert.equal((await readCodexCapacity(cfg, deps)).readable, true);
-  assert.equal(spawns, 2);
-  assert.equal(kills, 2);
+  assert.equal(spawns, 3);
+  assert.equal(kills, 3);
 });
 
 test("forceRefresh bypasses success, failure-backoff, and an ordinary in-flight exchange", async () => {
@@ -206,7 +289,7 @@ test("forceRefresh bypasses success, failure-backoff, and an ordinary in-flight 
   assert.equal(failed.readable, false);
   const refreshed = await readCodexCapacity(cfg, { forceRefresh: true, spawn: successSpawn, capabilities: CAPABILITIES });
   assert.equal(refreshed.readable, true);
-  assert.equal(spawns, 2, "force refresh must bypass failure backoff");
+  assert.equal(spawns, 3, "force refresh must bypass failure backoff after the failed read's one retry");
 
   clearCodexCapacityCache();
   spawns = 0;
@@ -278,18 +361,22 @@ test("timeout diagnostics name only the app-server phases still unfinished at th
 
   for (const item of cases) {
     clearCodexCapacityCache();
+    let spawns = 0;
     let kills = 0;
-    const proc = fakeAppServer((request, { stdout }) => item.respond(request, stdout), () => { kills += 1; });
     const result = await readCodexCapacity(config(`/tmp/codex-timeout-${item.name}`), {
       timeoutMs: 5,
-      spawn: () => proc as never,
+      spawn: () => {
+        spawns += 1;
+        return fakeAppServer((request, { stdout }) => item.respond(request, stdout), () => { kills += 1; }) as never;
+      },
       capabilities: CAPABILITIES,
     });
     assert.equal(result.readable, false, item.name);
     assert.match(result.detail ?? "", item.expected, item.name);
     assert.doesNotMatch(result.detail ?? "", item.absent, item.name);
     assert.match(result.detail ?? "", /after 5ms/);
-    assert.equal(kills, 1, `${item.name}: the child must be killed exactly once`);
+    assert.equal(spawns, 2, `${item.name}: one timed-out exchange must receive exactly one retry`);
+    assert.equal(kills, 2, `${item.name}: each child must be killed exactly once`);
   }
 });
 
