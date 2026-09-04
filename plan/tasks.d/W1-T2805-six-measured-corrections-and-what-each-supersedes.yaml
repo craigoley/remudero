@@ -1,0 +1,365 @@
+- id: W1-T2805
+  title: "eleven corrections measured this week each contradict guidance the repo currently ships — hazard (k) has a third indistinguishable state, verify:human dialect debt DOES stall the linter and the dialect it is said to lack already exists, forwardReference has four conditions rather than the two CLAUDE.md names, and three failure modes (proof-weaker-than-claim, cost as the execution falsifier, the plan-only head's dialect ceiling) have no home at all"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: "span"
+  budget_usd: 8.00
+  files: [CLAUDE.md, learnings/architecture.yaml, learnings/failures.yaml, learnings/index.json]
+  origin: "operator-decision#w1-t2805-learnings-pass-2026-09-04"
+  plan_refs: ["§8A", "W1-T2507", "W1-T33"]
+  status: queued
+  attempts: 0
+  rationale: |
+    SIX CORRECTIONS, EACH MEASURED THIS WEEK, EACH HAVING COST CYCLES. THREE OF THEM CORRECT TEXT
+    THE REPO SHIPS TODAY, WHICH IS WHY THEY CANNOT BE FILED BESIDE IT AND LEFT.
+
+    (1) HAZARD (k) HAS A THIRD STATE, AND ALL THREE LOOK IDENTICAL.
+    `postMergeAmendmentViolations` (`src/lib/review.ts`) returns `[]` on `!ctx.statusResolvable`, on
+    `!ctx.merged`, AND when the rule genuinely does not apply. CLAUDE.md's (k) bullet names the
+    first two as a pair and closes with the blocking-control remedy; what it does not say is that
+    the honest THIRD state is byte-identical at the call site, so "the rule found nothing" and "the
+    call was dead" cannot be told apart by reading the return value at all. The remedy is unchanged
+    — a blocking control in the SAME call shape — but its NECESSITY is what the current wording
+    understates: without it, a real zero and a dead call are indistinguishable, not merely
+    confusable.
+
+    (2) VERIFY:HUMAN DIALECT DEBT STALLS THE LINTER THOUGH NOT DISPATCH — AND THE DIALECT IT IS SAID
+    TO LACK ALREADY EXISTS. Both halves are wrong in ONE shipped entry,
+    `no-rewriting-proofs-on-verify-human` (`learnings/architecture.yaml`):
+      - it says the debt "can never stall the queue". TRUE OF DISPATCH: `isDispatchEligible`
+        (`src/lib/drain.ts`) returns false at `t.verify !== "auto"` before the linter is consulted,
+        exactly as the entry states. FALSE OF THE LINTER CI RUNS: `proofDialectViolations`
+        (`src/lib/task-linter.ts`) takes `opts.proofDialect ?? "block"` and reads `task.verify` ONLY
+        to permit `demonstration:`. Three prose `human:` proofs took `lint-plan --base origin/main`
+        to rc=1 with three blocking `proof-dialect` violations. The entry's guidance therefore
+        produces an UNMERGEABLE FILING, which is the worst kind of wrong guidance: it is correct
+        about the mechanism it names and silent about the one that blocks you.
+      - it closes "Report them as needing a proof kind the dialect lacks." The dialect does not lack
+        one. `isDemonstrationProof` (`src/lib/review.ts`, consumed by the linter) accepts
+        `demonstration: <what the operator must do>` and the linter's own comment states it is
+        "Legal ONLY on a verify:human task, where declining to execute it is the entire point (lints
+        clean, no violation at all — never even a warn)" — and BLOCKED unconditionally on a
+        verify:auto task. That is precisely the proof kind the entry tells readers to report as
+        missing. W1-T277 built it; the entry predates the knowledge and was migrated forward intact.
+
+    (3) FORWARDREFERENCE HAS FOUR CONDITIONS, NOT TWO. CLAUDE.md names `!nameFiltered` and the path
+    in the shard's `files:` (`shardDeclaredFilesInDiff`). `judgeCriterion` (`src/lib/review.ts`)
+    actually requires FOUR:
+        whitelisted.kind === "test"
+        && !whitelisted.nameFiltered
+        && execCtx.forwardReferenceFiles?.has(whitelisted.label) === true
+        && !existsSync(join(execCtx.cwd, whitelisted.label))
+    plus a fifth, structural one upstream: `SHARD_FILES_LINE_RE` is `/^\s*files:\s*\[(.*)\]\s*$/`, so
+    only a FLOW-STYLE, SINGLE-LINE `files:` is read at all — a block-style list yields no declared
+    files and the carve-out cannot fire.
+    THE `existsSync` CONDITION IS THE ONE THAT BITES, AND IT BITES SILENTLY. A filing that cites an
+    EXISTING test file gets NO carve-out: the proof executes for real, PASSES on the head, matches
+    the merge-base identically (the filing changed no test), and grades `executed_stale` — on the
+    filing itself, with no warning attached and a body that reads correctly to a human. The current
+    two-condition wording reads as permission to cite any test path in `files:`.
+
+    (4) PROOF-WEAKER-THAN-CLAIM IS A THIRD FAILURE MODE AND IT HAS NO NAME HERE.
+    `no-match` and `executed_stale` both ANNOUNCE themselves in the verdict line. This one reports
+    PASS with `proof_exec N/N` and is caught only by a human or an LLM reading the claim beside the
+    diff — which is why #3887 spent seven fix workers against a floor that read success.
+    THE DIAGNOSTIC IS ABOUT OBSERVABILITY, NOT EXECUTION: can this proof's output differ between a
+    world where the claim holds and one where it does not? THE USABLE HEURISTIC: a `grep:` naming
+    only a symbol THE DIFF ITSELF INTRODUCES can prove the symbol exists and nothing more, so it
+    can never carry a claim about runtime behaviour. That is a checkable rule an author can apply
+    before pushing, which is what makes it worth recording rather than restating "write good
+    proofs".
+
+    (5) COST IS THE FALSIFIER FOR "DID THIS ACTUALLY EXECUTE". A verdict name gives you the
+    CLASSIFICATION; the cost tells you whether it was EARNED. Three measured, at two altitudes:
+      - a Codex isolation probe at exactly $0 — the CLI refused to start;
+      - W1-T2636's probe at $0.000972 — an API 529 whose throw was swallowed;
+      - a cycle summary at $0.0000 with `merged: (none)`, which reads as "a cycle that did nothing"
+        when it was "a cycle that never got to do anything."
+    The first two both surfaced as `blocked_isolation`. The verdict name cannot separate them; the
+    cost can, in one glance, at both altitudes. Note this is NOT "a zero cost is a bug" — the
+    `task_already_merged` verdict documents `costUsd: 0` as the honest answer for a run refused
+    before any spend. The rule is that a zero or near-zero cost is the FIRST thing to check against
+    a verdict that claims work happened.
+
+    (6) ON A PLAN-ONLY HEAD, A `grep:` PROOF CAN ONLY ASSERT WHAT IS TRUE AT THAT HEAD. It can prove
+    things about existing code or about the shard's OWN text. It cannot reach forward, because only
+    `unit test:` gets the `not_yet_built` carve-out — every other dialect grades against a head that
+    carries no implementation. This is (3)'s lesson one dialect over, which is why it folds into the
+    same bullet rather than earning its own.
+
+    WHY THIS IS A DELIVERABLE AND NOT ACCRETION. MASTER-PLAN §8A: compression is a deliverable. A
+    pass that adds six entries and folds nothing makes the corpus worse, and three of these six are
+    CORRECTIONS to shipped text — filing a correction beside the wrong sentence leaves the wrong
+    sentence in the file that every session loads. So (1), (2) and (3)+(6) are in-place edits that
+    supersede what they touch, and only (4) and (5) are additions. Six corrections, two new entries.
+
+    AMENDED 2026-09-04, operator-approved, BEFORE ANY OF THIS WAS BUILT. Five further measured
+    items and one PROMOTION arrived from the same week; they are folded in here rather than filed
+    as a second id, and the budget arithmetic below is RECOMPUTED rather than inherited — it had
+    already gone stale.
+
+    (7) BARE `node --test` SILENTLY MODULE-RESOLUTION-FAILS FOR ANY FILE IMPORTING `src/`. It does
+    not error usefully — it reports the file as one failed test with `ERR_MODULE_NOT_FOUND` for a
+    `.js` specifier tsx would have resolved — so a COUNT measured that way reads WRONG rather than
+    refusing. Measured this week: a suite reporting `# tests 1 / # fail 1` under bare `node --test`
+    reports `# tests 16 / # pass 16` under the repo's real runner
+    (`node --test --import tsx --import ./test/setup/tmp-hygiene.ts`). This sits BESIDE the
+    reapability trap — same invocation, second hazard — and it bit while measuring a registry count
+    that a task then declared.
+
+    (8) PROXIMITY IN A TAP FILE IS NOT PROXIMITY IN CAUSATION. Concurrent runners interleave
+    output, so the context lines printed around a failure may belong to a DIFFERENT suite. This is
+    distinct from the killed-run rule already recorded: that one ANNOUNCES itself by a missing
+    summary, while this looks exactly like real context and reads as evidence. A diagnosis was
+    inferred from another suite's stderr this week and would have been carried forward.
+
+    (9) A FRESHLY MINTED ID IS NOT EVIDENCE THE WORK IS UNCLAIMED. The mint reserves an IDENTIFIER
+    and says nothing about whether the WORK exists. THREE instances this week, recorded together
+    because the pattern is that a mint feels like an answer to "is this claimed?" to the person
+    HANDING IT OVER as much as to the person receiving it: a lane re-derived W1-T2811 for an hour
+    after it was already filed; three ids were routed for filing that #3909 had already filed; and
+    the routing brief itself was written off three minted ids without a sweep, in the same session
+    that added this very rule to the queue. The instrument is already documented and is one
+    command: the `ls-remote` sweep over open PR heads, plus `git ls-tree origin/main plan/tasks.d/`.
+
+    (10) A HAND-DERIVED ROSTER'S ERROR IS INVISIBLE WITHOUT A SECOND INDEPENDENT DERIVATION, AND
+    NOTHING SCHEDULES ONE. Two mechanical censuses of the wall-clock-dependent test class, taken on
+    the SAME TREE on the SAME DAY by different lanes, intersected in ONE file of seven. Neither was
+    wrong; they keyed on different spellings of one idea. A single-author roster therefore reads as
+    authoritative indefinitely, because its error is undetectable BY CONSTRUCTION. This is the
+    AFFIRMATIVE argument under W1-T2790's ratified ordering — self-declaring at a seam beats a
+    roster because a declaration has no such degree of freedom — and the rest of this queue is
+    prohibitions.
+
+    (11) `pkill -f` SIBLING-MATCH: THE EXISTING RULE COVERS HALF THE HAZARD. CLAUDE.md warns that a
+    shape-based sweep matches the searching shell's OWN command line. On a shared host it also
+    matches ANOTHER LANE'S processes, and did: a lane's `--ci-parity` runners under `/workspace/`
+    were killed by a sweep filtering on `--test --import tsx` / `test-with-retry` / coverage that
+    excluded only the sweeper's own pid. Excluding self is not enough on a host with peers. The
+    correct discriminator is `/proc/<pid>/cwd` against the repo path — identity, not shape.
+
+    (12) PROMOTION, NOT AN ADDITION: THE REST/GRAPHQL ENTRY IS NO LONGER PROVISIONAL, AND IT IS
+    WRONG IN TWO INDEPENDENT WAYS. CLAUDE.md states that GraphQL is the budget that dies on this
+    account while REST stays healthy.
+      (a) WRONG RESOURCE. A header reading taken AT THE MOMENT of a 403, with the prescribed
+          instrument, reads `X-Ratelimit-Resource: core`, `Limit 5000`, `Remaining 0`, `Used 5422`
+          — REST/core genuinely exhausted, the third occurrence in one day.
+      (b) WRONG POSTURE, AND THIS HALF IS NOT A COROLLARY OF (a). A budget reading does not predict
+          whether the NEXT call will work. Measured on one host in one minute: a POST that CREATED
+          A PR SUCCEEDED while `gh api user -i` read `X-Ratelimit-Remaining: 0`, and the very next
+          GET 403'd. So "read the budget, then act" fails here even once the resource name is
+          corrected. THE POSTURE THE MEASUREMENT SUPPORTS IS ATTEMPT AND HANDLE: make one attempt,
+          handle the 403, do not retry — which remains distinct from polling and is what the
+          no-poller rule already forbids.
+      Both halves are one entry, not two: both say "the documented approach to rate limits on this
+      host does not hold", and splitting them would carry the same context twice against a budget
+      this amendment is already recomputing. GIT PUSH IS UNAFFECTED by any of it, which is worth
+      stating because it is what lets a lane keep working through an exhausted REST budget.
+
+    ELEVEN CORRECTIONS, FIVE NEW ENTRIES. (1), (2), (3)+(6), (11) and (12) are IN-PLACE edits that
+    supersede shipped text; (4), (5), (7), (8), (9) and (10) are additions.
+  design: |
+    ONE CONCERN: make the repo's shipped guidance agree with what was measured this week, and pay
+    for every added byte by folding what it supersedes. DOCUMENTATION ONLY — no `src/`, no `test/`,
+    no `scripts/` path is declared, and no code change may be stacked onto this task. Its value is
+    that it lands.
+
+    (i) WHERE EACH CORRECTION GOES, AND WHAT IT SUPERSEDES. Stated so the build does not re-decide
+    it, and so a reviewer can check the fold rather than take it on trust:
+      (1) → SHARPENS CLAUDE.md's existing hazard (k) bullet IN PLACE. Not a new bullet beside it —
+            (k) already exists and already carries the remedy; what changes is that it names three
+            indistinguishable states and says the blocking control is the ONLY separator.
+      (2) → REWRITES the `no-rewriting-proofs-on-verify-human` entry in `learnings/architecture.yaml`
+            IN PLACE. Its true half (dispatch refuses before the linter) is kept; its false half
+            ("can never stall the queue", unqualified) is corrected to name the linter; and its
+            closing sentence is REPLACED — the dialect has `demonstration:`, legal only on
+            verify:human, and that is what the reader should be told to write.
+      (3)+(6) → SHARPEN CLAUDE.md's `not_yet_built` bullet IN PLACE, as ONE bullet: all four
+            conditions, the flow-style `files:` requirement, the `existsSync` trap named as the one
+            that bites, and the plan-only-head dialect ceiling that follows from it.
+      (4) → NEW entry in `learnings/architecture.yaml`, `subsystem: proofs`, alongside
+            `plan-only-pr-not-auto-capped` and the entry (2) rewrites.
+      (5) → NEW entry in `learnings/failures.yaml` — an incident learning, which is that shard's
+            stated remit (a specific run went wrong and the durable fact must be inherited).
+      (7) → NEW entry in `learnings/failures.yaml`, placed BESIDE the reapability trap it shares an
+            invocation with, so a reader meeting one meets the other.
+      (8) → NEW entry in `learnings/failures.yaml`. It must SAY what separates it from the
+            killed-run rule (that one announces itself by a missing summary; this does not), or it
+            reads as a restatement and gets folded away by the next pass.
+      (9) → CLAUDE.md, SHARPENING the existing scope-time-checks bullet under "Plan and task
+            hygiene" IN PLACE. That bullet already carries the two commands; what it lacks is the
+            reason a reader skips them — a minted id feels like the answer. Not a new bullet.
+      (10) → NEW entry in `learnings/architecture.yaml`, `subsystem: proofs`, next to (4). It is
+            the affirmative half of W1-T2790's ordering and should cite that ruling by id.
+      (11) → CLAUDE.md, SHARPENING the existing `pkill -f` bullet under "Operating this host" IN
+            PLACE. The bullet's mechanism sentence is right and stays; what is added is that
+            excluding your own pid is insufficient on a shared host, and that the discriminator is
+            `/proc/<pid>/cwd` rather than a better pattern.
+      (12) → CLAUDE.md, REPLACING the GraphQL-dies-while-REST-survives claim under "CI and merging"
+            IN PLACE. Both halves in one entry. The `gh pr create` REST-bypass advice that bullet
+            carries is still USEFUL and must survive the rewrite — what changes is the claim about
+            which budget dies and the instruction to gate on a reading.
+
+    (ii) THE BUDGETS ARE HARD CONSTRAINTS, NOT COURTESIES, AND BOTH ARE REQUIRED CI JOBS.
+    RECOMPUTED AT HEAD 7a13b300 ON AMENDMENT, NOT INHERITED — the filed figure had already gone
+    stale, which is itself the reason this task must re-measure rather than trust its own note:
+      `scripts/learnings-budget-ratchet.mjs` — active corpus 35651 chars against a 42000 cap,
+          68 active / 71 total entries: 6349 chars of headroom. UNCHANGED.
+      `scripts/claude-md-budget-ratchet.mjs` — CLAUDE.md 43396 bytes against a 44000 cap:
+          604 bytes of headroom, DOWN FROM THE 845 THIS SHARD WAS FILED WITH (#3908 landed between
+          the filing and the amendment).
+
+    DOES THE RESIDUE FIT? YES, BUT ONLY BECAUSE THE CLAUDE.MD HALF MUST FOLD, AND THAT CONSTRAINT
+    IS NOW BINDING RATHER THAN COMFORTABLE. Six entries are destined for `learnings/` — (4), (5),
+    (7), (8), (10) — against 6349 chars of headroom, which is ample. FIVE edits are destined for
+    CLAUDE.md — (1), (3)+(6), (9), (11), (12) — against 604 bytes. Written additively those cannot
+    fit, and that is not a reason to split the task: §8A already requires them to be folds. Three
+    of the five ((9), (11), (12)) are SHARPENINGS of bullets that already exist, and (12) REPLACES
+    a claim that is simply wrong, so the fold has real material to work with. A SPLIT INTO A SECOND
+    ID WAS CONSIDERED AND REFUSED ON THIS ARITHMETIC: the learnings side has room, and splitting
+    the CLAUDE.md side would put two passes in contention for the same 604 bytes, which is worse
+    than one pass that must fold.
+    The learnings side has room for (4) and (5) written properly. THE CLAUDE.MD SIDE DOES NOT have
+    room for two sharpened bullets written additively: 845 bytes is roughly one paragraph. So the
+    CLAUDE.md half must be NET-NEUTRAL OR NET-NEGATIVE, paid for by folding within the bullets being
+    edited — which is what §8A asks for anyway. Record the measured BEFORE and AFTER byte and char
+    counts in the PR body rather than asserting the file "got shorter"; both ratchets are required
+    checks, so a miss blocks the PR rather than landing quietly.
+
+    (iii) REGENERATE THE INDEX. `learnings/index.json` is generated —
+    `npm run learnings-index` — and `test/learnings-index.test.ts` reddens on a stale one. It is
+    declared in `files:` because the diff will contain it, never hand-edited.
+
+    (iv) DO NOT INVENT A SCHEMA FIELD FOR "SUPERSEDES". The corpus has a fixed per-entry schema
+    (`learnings/platform.yaml`'s header) enforced by the generator, which throws on a missing
+    required field. The supersession record belongs in the PR body and in the prose of the entries
+    themselves, not in a new key that would need a generator change — and a generator change is a
+    code change this task is forbidden from stacking.
+
+    (v) EVERY CORRECTION CITES ITS SOURCE SYMBOL, NEVER A LINE NUMBER. CLAUDE.md's own maintenance
+    rule: line numbers drift and every one this file used to carry had gone stale. The symbols are
+    named in the rationale above and are the ones to cite.
+
+    (vi) NOT IN SCOPE, EACH WITH A REASON:
+      - Any change to `src/lib/review.ts`, `src/lib/task-linter.ts` or `src/lib/drain.ts`. Every
+        one of these six corrections is a case where the CODE IS RIGHT and the PROSE IS WRONG.
+        Changing code to match wrong prose would be the inverse of the fix.
+      - Adding `learnings/` to `DATA_ARTIFACT_CLASSES` so a learnings pass stops scoring one
+        subsystem per shard. That is a real observation (see the note) and a real code change, and
+        it belongs in its own filing.
+      - Retiring entries beyond the ones these six supersede. A general lifecycle sweep is a
+        different task with a different falsifier; opportunistic retirement inside a correction pass
+        is how a documentation change becomes unreviewable.
+  acceptance:
+    - claim: "hazard (k) names three indistinguishable returns rather than two, so a real zero and a dead call are stated to be inseparable without a blocking control in the same call shape"
+      proof: "grep: a dead call and a real zero in CLAUDE.md"
+    - claim: "the verify:human entry no longer claims dialect debt can never stall the queue: it keeps the dispatch half, corrects the linter half, and points the reader at the demonstration dialect that already exists instead of a proof kind said to be missing"
+      proof: "grep: the linter still blocks in learnings/architecture.yaml"
+    - claim: "the not_yet_built bullet names all four conditions and the flow-style files: requirement, with the existsSync case called out as the one that silently grades a filing stale"
+      proof: "grep: four conditions not two in CLAUDE.md"
+    - claim: "the same bullet carries the plan-only-head ceiling that follows from it — no dialect but unit test reaches forward past a head with no implementation"
+      proof: "grep: only unit test reaches forward in CLAUDE.md"
+    - claim: "proof-weaker-than-claim is recorded as a distinct failure mode that reports pass, with the observability question and the introduced-symbol heuristic an author can apply before pushing"
+      proof: "grep: - id: proof-weaker-than-claim in learnings/architecture.yaml"
+    - claim: "cost is recorded as the falsifier for whether a classified verdict was earned, at both the probe and cycle altitudes, without claiming a zero cost is itself a defect"
+      proof: "grep: - id: cost-is-the-execution-falsifier in learnings/failures.yaml"
+    - claim: "the scope-time bullet says a minted id is not evidence the work is unclaimed, naming why the documented sweep gets skipped rather than merely repeating the commands"
+      proof: "grep: a minted id is not evidence in CLAUDE.md"
+    - claim: "the pkill bullet says excluding your own pid is insufficient on a shared host and names the cwd of the process as the discriminator rather than a better pattern"
+      proof: "grep: excluding your own pid is not enough in CLAUDE.md"
+    - claim: "the rate-limit guidance names core as the budget measured exhausted and replaces gating on a budget reading with one attempt and a handled refusal"
+      proof: "grep: attempt and handle in CLAUDE.md"
+    - claim: "a hand-derived roster is recorded as having an error undetectable without a second independent derivation, cited as the affirmative half of the ratified ordering"
+      proof: "grep: - id: a-roster-error-needs-a-second-derivation in learnings/architecture.yaml"
+    - claim: "bare node --test is recorded as silently module-resolution-failing on any file importing src, beside the reapability trap it shares an invocation with"
+      proof: "grep: - id: bare-node-test-resolution-failure in learnings/failures.yaml"
+    - claim: "TAP output proximity is recorded as not implying causation, stating what separates it from the no-summary rule it resembles"
+      proof: "grep: - id: tap-proximity-is-not-causation in learnings/failures.yaml"
+  falsifier: |
+    THE COMPRESSION CLAIM IS THE ONE THAT CAN BE FAKED, SO MEASURE IT RATHER THAN ASSERTING IT. Run
+    both ratchets before and after and report all four numbers. The CLAUDE.md delta must be zero or
+    negative; a positive delta that still fits inside 845 bytes SATISFIES CI and FAILS THIS TASK,
+    because §8A asks for a fold, not for headroom to be spent.
+
+    EACH IN-PLACE CORRECTION MUST BE VERIFIED GONE, NOT JUST ADDED. A `grep:` proof can only assert
+    presence, so the acceptance criteria above cannot catch a correction APPENDED beside the wrong
+    sentence with the wrong sentence left standing. Check the negative direction by hand and report
+    it: after the edit, `grep -arn -- "Report them as needing a proof kind the dialect lacks"
+    learnings/architecture.yaml` reads 0, and the unqualified "can never stall the queue" wording is
+    gone. Both read 1 at head today — that is the control proving the check can see them.
+
+    EVERY ANCHOR IN THE ACCEPTANCE CRITERIA WAS VERIFIED TO READ ZERO AT HEAD 3bc1542 with the
+    executor's own invocation (`grep -arn -- <pattern> <path>`), against a positive control that
+    read 1 (`not_yet_built` in CLAUDE.md, `no-rewriting-proofs-on-verify-human` in
+    learnings/architecture.yaml). So every one discriminates head from base and none can degrade to
+    `executed_stale`.
+
+    ONE HAZARD THE BUILD MUST NOT WALK INTO, because it would redden its own criteria: a
+    `grep:` pattern must match text on ONE PHYSICAL LINE, and the learnings entries are YAML FOLDED
+    SCALARS (`fact: >-`) that WRAP. An anchor phrase placed across a wrap reads 0 at head with no
+    error. Two of the six anchors target `- id:` lines for exactly this reason; the third
+    (`the linter still blocks`) is short enough to place inside one physical line, and the build
+    must confirm it does before pushing rather than after.
+
+    AND THE SCHEMA IS ENFORCED: `scripts/generate-learnings-index.mjs` throws on a missing required
+    field and on a duplicate id across shards, so a malformed new entry fails loudly rather than
+    landing. Regenerate the index and let `test/learnings-index.test.ts` confirm it is fresh.
+
+    THE AMENDED HALF CARRIES THE SAME OBLIGATIONS, AND ONE MORE. Every anchor added by this
+    amendment must be verified to read ZERO at head with the executor's own invocation before
+    pushing, exactly as the original six were — and the three CLAUDE.md anchors must be verified to
+    sit on ONE PHYSICAL LINE, because CLAUDE.md wraps its bullets at roughly 100 columns and an
+    anchor placed across a wrap reads 0 with no error.
+
+    THE NEGATIVE DIRECTION FOR (12) IS THE ONE THAT CAN BE FAKED. The rate-limit correction must
+    REPLACE the claim that GraphQL is the budget that dies while REST stays healthy, not sit beside
+    it. After the edit, a grep for the surviving old wording must read 0, and the `gh pr create`
+    REST-bypass advice in that same bullet — which is still true and still useful — must read 1. A
+    correction that deletes the useful half while fixing the wrong half is a regression this task
+    would otherwise ship silently.
+
+    AND THE CLAUDE.MD DELTA IS NOW THE BINDING CONSTRAINT, NOT A COURTESY: 604 bytes of headroom
+    against five edits. Report the before and after byte count. A positive delta that still fits
+    under the cap SATISFIES CI AND FAILS THIS TASK.
+  note: |
+    FILED 2026-09-04 from an operator retro pass. The id was reserved on origin
+    (`refs/rmd-id/W1-T2805`, minted 12:36:32Z) before this filing.
+
+    WHAT WAS MEASURED IN THIS CHECKOUT AT HEAD 3bc1542, so the build inherits it rather than
+    re-deriving it:
+      - learnings budget: 35651 / 42000 chars, 68 active / 71 total entries (6349 chars headroom).
+      - CLAUDE.md budget: 43155 / 44000 bytes (845 bytes headroom). Both ratchets are required CI
+        jobs in `.github/workflows/ci.yml`.
+      - `proofDialectViolations` defaults to `severity: "block"` and consults `task.verify` only to
+        permit `demonstration:`; `isDispatchEligible` refuses at `t.verify !== "auto"` before any
+        lint. Both halves of correction (2) confirmed in source.
+      - `judgeCriterion`'s forward-reference guard carries four conjuncts; `SHARD_FILES_LINE_RE` is
+        flow-style-only. Correction (3) confirmed in source.
+      - the phrase "can never stall the queue" appears in `learnings/architecture.yaml`, NOT in
+        CLAUDE.md as the intake report had it. The correction is filed against where the text
+        actually lives.
+    WHAT IS THE OPERATOR'S MEASUREMENT, NOT THIS FILING'S: the three prose `human:` proofs taking
+    `lint-plan` to rc=1, #3887's seven fix workers, and all three cost readings in correction (5)
+    (the $0 Codex probe, W1-T2636's $0.000972, and the $0.0000 cycle summary).
+
+    risk:high with band_meaning:span, AND THE REASON IS AN ARTIFACT OF THE LINTER RATHER THAN OF THE
+    WORK. `DATA_ARTIFACT_CLASSES` discounts `plan/`, `config/` and `settings/` data files but NOT
+    `learnings/`, so `subsystemsOf` counts CLAUDE.md and each learnings shard as its own concern and
+    a four-file documentation pass scores four. `band_meaning: span` reports that width honestly
+    instead of hiding it. Declaring the true blast radius: low — no executable path changes, and the
+    two required ratchets plus `test/learnings-index.test.ts` are the enforcement. Adding
+    `learnings/` to the discount table would fix the mis-sizing and is deliberately NOT done here,
+    because it is a code change and this task must not carry one; it is named in design (vi) as its
+    own filing.
+
+    ON THE PROOFS: all six are `grep:` with an explicit path, and every path is inside `files:`, so
+    `proofScopeViolations` is silent. No pattern contains `*`, `.`, `^`, `$` or `[` — none is
+    refused by the grep-safety check and none is silently a regex — and no pattern contains the
+    substring " in ", which `DIALECT_GREP_PATH_RE` would split on before reaching the real path.
+    NO `unit test:` PROOF IS USED, deliberately: this task declares no test file, and citing an
+    EXISTING one would trip correction (3)'s own `existsSync` trap and grade the filing stale — the
+    exact defect this shard exists to write down.

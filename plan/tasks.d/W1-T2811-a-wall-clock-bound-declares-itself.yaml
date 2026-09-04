@@ -1,0 +1,228 @@
+- id: W1-T2811
+  title: "a test that asserts a wall-clock bound has no way to SAY SO, so the load-dependent class is inexpressible in either host registry — give the assertion one seam it declares through, rather than adding a fourth hand-maintained roster of test names"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: "span"
+  budget_usd: 8.00
+  files: [test/helpers/wall-clock-bound.ts, test/a-wall-clock-bound-declares-itself.test.ts, test/console-write-entry.test.ts, test/poll-rollup-over-rest.test.ts, test/review-status-gate.test.ts, test/run-task.test.ts, test/worker-containment.test.ts, test/worker-credential-expiry-margin.test.ts, test/worktree-reap-liveness.test.ts]
+  origin: "operator-decision#w1-t2811-wall-clock-expression-2026-09-04"
+  plan_refs: ["W1-T2790", "W1-T2810", "W1-T2809", "W1-T2776"]
+  status: queued
+  attempts: 0
+  note: |
+    THE CENSUS IS CRITERION 1 AND IT CARRIES AN ABANDONMENT FLOOR. This task may close as
+    "measured, too small, no action" on its own evidence, and that is a SUCCESS, not a failure to
+    deliver. Measure before building; do not justify the build after doing it.
+
+    MEASURED 2026-09-04 at 3a7c20a5, in a throwaway worktree. Membership predicate — an assertion
+    putting a REAL-clock elapsed value under an UPPER bound, which is the only shape that fails
+    when the machine is slow:
+
+      git grep -nE 'assert[^\n]*(elapsed[A-Za-z]*|Date\.now\(\)[[:space:]]*-[^\n]*)[[:space:]]*<[[:space:]]*[0-9]' -- 'test/*.test.ts'
+
+    **7 files, 9 assertion sites**, out of 1030 tracked test files (112 of which read a real clock
+    at all). The bounds span two orders of magnitude:
+
+      test/run-task.test.ts                        < 50ms    (tightest; hrtime, synchronous path)
+      test/worker-containment.test.ts              < 100ms
+      test/worker-credential-expiry-margin.test.ts < 200ms
+      test/review-status-gate.test.ts              < 1000ms
+      test/console-write-entry.test.ts             < 2000ms
+      test/poll-rollup-over-rest.test.ts           < 5000ms
+      test/worktree-reap-liveness.test.ts          < 1 minute (3 sites, mtime age)
+
+    TWO MEMBERS WERE SPOT-CHECKED RATHER THAN TRUSTED TO THE GREP, because the predicate must not
+    count an INJECTED clock: `run-task.test.ts` uses `process.hrtime.bigint()` and
+    `worker-credential-expiry-margin.test.ts` uses `Date.now()` — both real. The same read
+    excluded the deterministic look-alikes the grep surfaces on a wider pattern: `board.test.ts`,
+    `status.test.ts`, `deployer.test.ts`, `headroom-park-ceiling.test.ts` and
+    `open-prs-rest.test.ts` all assert on a FAKE clock's value and are correctly not members.
+    LOWER-bound assertions (`>= 2_000` in an-operator-stop-is-undone-by-the-restart-policy,
+    `>= 15` in sweep-wall-clock-bound, `>= 30` in retro-sweep-ticker) are also not members: load
+    makes those MORE likely to pass, not less.
+
+    THE FLOOR, STATED BEFORE THE WORK. Re-run the predicate at build time. If it reports **fewer
+    than 3 distinct files, or fewer than 4 assertion sites**, CLOSE THIS TASK UNBUILT with the
+    measurement recorded — a seam plus a census plus seven migrations is not worth carrying for
+    two call sites, and the honest disposition is that the class is too small to express. Today's
+    7/9 clears that floor with room; the floor exists because the population may shrink before
+    anyone builds this, and because a task that cannot close on its own evidence will always find
+    a reason to proceed.
+
+    A SOFTER, WIDER POPULATION EXISTS AND IS DELIBERATELY OUT OF SCOPE: 36 test files perform a
+    REAL `setTimeout`/`sleep`/`delay` wait without asserting any duration. Those are load-sensitive
+    by construction but have no bound to declare, so the seam has nothing to attach to. Naming them
+    here so a later reader does not mistake the 7 for the whole class.
+
+    THE CENSUS PREDICATE ABOVE IS ITSELF AN ENUMERATIVE GREP WITH EXACTLY THE BLINDNESS W1-T2790
+    RANKS LAST, AND THAT IS THE ARGUMENT, NOT AN EMBARRASSMENT. It keys on the literal spellings
+    `elapsed…` and `Date.now() -`; a test timing with `process.hrtime` into a differently-named
+    variable is invisible to it (today's members escape that only because they happen to name a
+    variable `elapsedMs`). A grep is the right tool to SIZE the population once. It is the wrong
+    tool to MAINTAIN it, which is precisely why the deliverable is a seam that the members declare
+    through rather than the roster this grep would produce.
+
+    AND THAT IS NOT A HYPOTHETICAL — TWO LANES GREPPED FOR THIS SAME CLASS AND AGREED ON ONE FILE.
+    A second census was taken independently on the other lane, over two axes: real wall-clock
+    BUDGET assertions in 5 files (`test/serve.first-paint.test.ts`, `test/serve.test.ts` at two
+    sites, `test/status-board-reads-rotations.test.ts`, `test/w1-t187-end-to-end.test.ts`, and
+    `test/worker-containment.test.ts` at `elapsed < 100`, the most load-fragile site either census
+    found), plus spawned-process WAIT WINDOWS in 4 more files — union ~9. This shard's own census
+    names 7. **The two lists intersect in exactly ONE file: `test/worker-containment.test.ts`.**
+
+    Two mechanical greps, aimed at one class, on one tree, on one day, overlapping by one of
+    seven. Neither is wrong; they key on different spellings of the same idea, and the union is
+    larger than either. THIS IS THE STRONGEST ARGUMENT FOR THE SEAM THAT EXISTS: a roster derived
+    by grep is a function of WHO GREPPED, so any roster this class ever gets would encode its
+    author rather than its membership — and the disagreement is invisible until someone takes a
+    second census, which nothing schedules. A declaration at the call site has no such degree of
+    freedom: the member says so itself, in one place, and two readers cannot disagree about it.
+
+    THE BUILD SHOULD THEREFORE TAKE THE UNION, NOT THIS SHARD'S SEVEN. Re-run both axes at build
+    time — the upper-bound predicate above AND a spawned-process wait-window pass — and migrate
+    every member found. `files:` below declares the seven this census names; a union member outside
+    that list is a scope widening to be recorded in the PR body and the source comment, never by
+    editing this shard, exactly as the design section already requires.
+
+    ID PROVENANCE: `refs/rmd-id/W1-T2811` was already held on origin at
+    065e67100203d4a375bd679625e9a704157256b1 when this shard was written, verified against a fresh
+    `git ls-remote origin 'refs/rmd-id/*'` (924 refs, control non-zero). No shard for W1-T2811
+    existed in `plan/tasks.yaml` or `plan/tasks.d/` — control: the W1-T2790 shard IS found by that
+    same query — the highest filed id was W1-T2807, and no open PR referenced the id. The held id
+    is used here and was not re-pushed.
+
+    SIZING: `lint-plan` reports one ⚠ for this shard — a 9-concern span at `risk:high`,
+    `band_meaning:span`. That is W1-T2503's report-not-refuse arm and is the intended consequence
+    of declaring the band: seven of the nine files are the migrated members themselves, and a
+    seam with no declarers cannot ship green.
+  rationale: |
+    THIS IS THE FIRST INSTANCE OF THE W1-T2790 ORDERING, AT SMALL SCALE, ON A BOUNDED POPULATION.
+    That recommendation ranks (1) self-declaring at one seam above (2) derived-and-committed above
+    (3) hand-written prediction. The obvious version of this task — "identify the wall-clock tests
+    and exclude them" — is shape (3): a fourth hand-maintained list of test names, alongside
+    HOST_CAUSED_SUITE_REDS, HOST_PARITY_BASELINE and CENSUS_POPULATION, and it would rot the same
+    way for the same reason. This shard is deliberately the shape (1) version.
+
+    ITS SECOND VALUE IS AS A TEST OF THE RECOMMENDATION ITSELF. W1-T2790 proposes an ordering that
+    nothing in this repo has yet built against. Seven migrations is cheap enough to do before the
+    derived-registry work and concrete enough to find out whether self-declaration is actually
+    pleasant to write. IF SELF-DECLARATION TURNS OUT TO BE AWKWARD FOR EVEN TWO OF THE SEVEN, SAY
+    SO IN THE PR — that is evidence about the ordering, arriving before anyone commits to building
+    a generator on the strength of it, and it is worth more than a clean migration report.
+
+    WHY THE CLASS IS INEXPRESSIBLE TODAY. `HOST_CAUSED_SUITE_REDS` keys on cheap host FACTS —
+    platform, bash version, procfs, node-vs-pin — and load is not a host fact, so the predictive
+    registry cannot key on it. `HOST_PARITY_BASELINE` observes a real run, but its `confirm` hook
+    re-runs an undeclared failure's own file ALONE, and a load-caused failure does not reproduce
+    on an idle re-run — so it is filtered out as unconfirmed. The net effect is that the
+    observational mechanism degrades to SILENCE on this category rather than flapping. Silence is
+    a better failure than instability, and it is also exactly why the class needs its own
+    expression: a mechanism that reliably says nothing about a category is not covering it.
+
+    THE SEAM. One helper — `test/helpers/wall-clock-bound.ts` — exporting the assertion the seven
+    members call instead of a bare `assert.ok(elapsed < N)`. The DECLARATION IS THE CALL SITE:
+    nothing is registered, nothing is listed, and a member that stops being one stops declaring by
+    deleting its own call. The recognizer becomes ONE query — which test files import that helper —
+    and is therefore EXACT rather than approximate, unlike `censusPopulationDrift`'s own
+    self-described "approximate by construction" text match. Because the bound now passes through
+    one function, a later task can annotate, relax or skip the whole class centrally without
+    touching seven files again; this task does not build that, it only makes it possible.
+
+    BOUNDARY WITH W1-T2810 — STATED SO THE TWO DO NOT HALF-COVER ONE PROBLEM. **W1-T2810 owns
+    LEGIBILITY: it makes a load-caused red interpretable, so a reader can see that the run was
+    loaded.** It is cheaper and more general — it applies to every red on a loaded run, declared or
+    not. **This task owns EXPRESSION: it lets a test state that its own contract is wall-clock
+    dependent.** It is surgical and applies only to the declared members. Neither subsumes the
+    other: legibility is a property of the RUN's context, expression is a property of the TEST's
+    contract, and a red is best diagnosed with both. Shipping both without saying which does what
+    is how two mechanisms end up half-covering one problem, so the split is recorded here.
+    RE-CHECK DISCHARGED 2026-09-04 — DO NOT RE-DERIVE IT. This paragraph was written while W1-T2810
+    was an unfiled reserved id, and it asked for a re-check against that shard's real text once one
+    existed. That shard landed as #3917
+    (`plan/tasks.d/W1-T2810-a-gate-verdict-names-its-own-context.yaml`) and the re-check has been
+    done. THE SPLIT HOLDS, and it is ratified from the other side rather than merely compatible:
+    W1-T2810's design (v) quotes the two bolded sentences above VERBATIM, states that it "AGREES
+    WITH THAT SPLIT VERBATIM", and names this shard's request as the thing it is answering. Those
+    two sentences are therefore LOAD-BEARING AS WORDED — a sibling cites them literally, so
+    rewriting them would strand that citation.
+
+    IT IS ENFORCED, NOT ASSERTED. W1-T2810 turned the split into a scope fence on its own side: it
+    may touch no assertion, no test helper and nothing at per-assertion granularity, its output is
+    RUN-SCOPED (one context stamp per gate run), and it carries an acceptance criterion that the
+    stamp "is run-scoped and this diff adds no per-assertion surface, so W1-T2811's expression half
+    stays unbuilt rather than being spuriously closed by this task's output", plus a falsifier that
+    reds if the stamp ever becomes per-step or per-assertion. So THIS shard's own close-without-code
+    clause cannot fire spuriously: the only thing that could trip it is guarded by a test on the
+    other task.
+
+    ONE CORRECTION THIS RE-CHECK PRODUCED, RECORDED RATHER THAN EDITED IN. The characterisation
+    above is NARROWER than W1-T2810 actually turned out to be. Load is its THIRD instance of three,
+    not its subject: W1-T2810 is "a gate verdict names neither the tree it measured nor the
+    conditions it measured under", and its first two instances are TREE STALENESS — a ratchet run in
+    a 465-commit-behind checkout printing `OK` with both operands stale (CLAUDE.md hazard (h)), and
+    main moving three times inside one 40-minute local gate run. The ownership split is unaffected
+    in either direction, which is why the wording above is left standing for the sibling's citation
+    rather than rewritten; a builder wanting W1-T2810's full scope should read its shard, not this
+    summary of it.
+
+    WHAT THIS DOES NOT DO. It does not skip, relax or quarantine any test — every one of the seven
+    keeps asserting exactly the bound it asserts today, and a genuine regression still reds. It
+    does not add a registry, a roster, or an `appliesTo` predicate. It does not touch
+    HOST_CAUSED_SUITE_REDS or HOST_PARITY_BASELINE. It does not attempt the 36-file soft
+    population above.
+  design: |
+    ORDER OF WORK, AND THE FIRST STEP CAN END THE TASK. Re-run the census predicate from the note.
+    Record the count in the PR body. If it is under the floor, close unbuilt and ship nothing.
+
+    The helper takes the measured elapsed value, the bound, and the message the call site already
+    carries, and asserts the same comparison the member asserts today — so a passing suite stays
+    passing and a real regression still fails. Its failure message must additionally NAME the
+    wall-clock dependence, so a red at that assertion is self-explaining without a reader having to
+    know this class exists. Keep the helper free of any skip, retry or tolerance behaviour: this
+    task establishes the seam and nothing else, and a tolerance added here would silently weaken
+    seven real assertions.
+
+    The census test re-runs the recognizer over the tree and asserts ZERO undeclared members — a
+    file matching the wall-clock predicate that does not import the helper fails by name, with a
+    message naming the helper as the remedy. It must be falsified in the positive direction: revert
+    ONE member to a bare `assert.ok(elapsed < N)` and the census test must FAIL naming that file.
+
+    Migrate all seven members in this diff, or the seam has no declarers and the census test cannot
+    be green. `test/run-task.test.ts` is one of them: EDIT its existing assertion in place, never
+    append a new test to that file — it crash-loops at file level under `--experimental-test-coverage`
+    (CLAUDE.md's own coverage trap), and a new test there would zero the lcov.
+
+    IF THE RE-MEASURED POPULATION NAMES A FILE NOT IN `files:` ABOVE, that is a scope widening and
+    must be recorded in the PR body and the source comment — never by editing this shard, which
+    `rule15-filing` refuses for a `verify: auto` task.
+  acceptance:
+    - claim: "the census predicate is re-run at build time and its measured population recorded, with the task closing unbuilt when the count falls under the stated floor"
+      proof: "unit test: test/a-wall-clock-bound-declares-itself.test.ts"
+    - claim: "one helper is the single place a wall-clock bound is declared, so the recognizer is one import query rather than a text match over clock idioms"
+      proof: "unit test: test/a-wall-clock-bound-declares-itself.test.ts"
+    - claim: "every test matching the wall-clock predicate declares through the seam, and a member reverted to a bare elapsed assertion fails the census by name"
+      proof: "unit test: test/a-wall-clock-bound-declares-itself.test.ts"
+    - claim: "the helper asserts the same bound it replaced and names the wall-clock dependence in its failure message, adding no tolerance skip or retry"
+      proof: "unit test: test/a-wall-clock-bound-declares-itself.test.ts"
+  falsifier: |
+    THE CENSUS CAN END THIS TASK, AND THAT IS THE POINT. Re-run the predicate in the note. Under 3
+    distinct files or under 4 assertion sites, close unbuilt with the measurement recorded. Do not
+    build a seam for a population that does not exist.
+
+    THE SEAM MUST BE FALSIFIED IN THE POSITIVE DIRECTION. Revert one migrated member to a bare
+    `assert.ok(elapsed < N, …)`: the census test must FAIL and NAME that file. A census that cannot
+    be made to fail is measuring nothing — the same standard W1-T2791 and W1-T2776 were held to.
+
+    THE MIGRATION MUST NOT WEAKEN ANYTHING. Verify that each of the seven still fails when its
+    bound is genuinely exceeded: temporarily tighten one bound to an impossible value and confirm
+    a red. A helper that swallowed a real breach would convert seven live assertions into
+    decoration, which is a worse outcome than the inexpressible class this task set out to fix.
+
+    CLOSE WITHOUT CODE if W1-T2810 has, by build time, shipped something that already makes each
+    of these seven assertions declare its own wall-clock dependence at the assertion site. That
+    would be legibility having grown into expression, and two mechanisms would then be covering one
+    problem — the exact overlap the boundary above exists to prevent.

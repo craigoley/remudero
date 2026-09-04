@@ -1,0 +1,255 @@
+- id: W1-T2810
+  title: "rmd preflight prints PASS or FAIL and names neither the tree it measured nor the conditions it measured under — the head sha is ALREADY computed one layer down and written to the JSON summary, and never reaches the line a human reads, so a green from a 465-commit-behind checkout and a green from head are the same sentence"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: "span"
+  budget_usd: 12.00
+  files: [src/lib/ci-parity.ts, src/run-task.ts, test/a-gate-verdict-names-its-own-context.test.ts]
+  origin: "operator-decision#w1-t2810-gate-verdict-context-2026-09-04"
+  plan_refs: ["W1-T2811", "W1-T2790", "W1-T986", "W1-T455"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE DEFECT IS A COMBINATION, NOT AN OMISSION: the gate is HONEST ABOUT WHAT IT MEASURED and
+    SILENT ABOUT THE CONTEXT THAT MAKES THE MEASUREMENT MEANINGFUL. Each half alone is fine. Together
+    they produce a confident wrong answer, because nothing in the output invites the reader to doubt
+    it.
+
+    THE SHARPEST FORM OF THE FINDING, OBSERVED IN SOURCE AT HEAD adcdc764: THE GATE ALREADY KNOWS.
+    `preflightCommand` (`src/run-task.ts`) calls `readHeadShaForSummary()` and puts the result in
+    `PreflightSummary.headSha`, whose own field comment reads "The head sha the run measured". That
+    summary is written to `coverage/preflight-summary.json`. The two lines a human actually reads are:
+
+      "### rmd preflight: PASS — commitlint, typecheck, and emitter checks are all clean; the push may proceed"
+      "### rmd preflight: FAIL — see the named step(s) above; do not push until every step passes"
+
+    Neither carries the sha. So this is not "go measure something new"; it is that the measurement
+    already exists one layer down and never reaches the sentence anyone reads. The behind-count and
+    the load are the two facts genuinely not computed anywhere.
+
+    THREE MEASURED INSTANCES, AND THEY WANT ONE FIX RATHER THAN THREE.
+
+      1. WHICH TREE — CLAUDE.md hazard (h). A gate ran in an operator checkout 465 commits behind
+         and printed "60965 bytes (cap 61046) OK", exit 0, with BOTH operands stale: the file it
+         measured and the cap it measured against had each moved. Nothing in the output said which
+         tree. The hazard's own remedy is `git rev-list --count HEAD..origin/main`, which "costs
+         nothing" — a discipline someone must remember, which is exactly what this task converts
+         into a property of the output.
+      2. WHICH TREE, AGAIN, BY A DIFFERENT ROUTE — main moves faster than a local full gate
+         completes. Measured this week: three merges inside the ~40 minutes one run took, one of
+         them touching the running lane's own file. A local green is therefore a point-in-time
+         claim about a tree that no longer exists by the time it lands, and the verdict says
+         nothing about that. This instance is the reason the behind-count must carry its OWN
+         staleness (design (ii)): a count taken at the start of a 40-minute run is itself 40
+         minutes old by the time it prints.
+      3. UNDER WHAT CONDITIONS — load. Test suites that assert an upper bound on real elapsed time
+         go red under a loaded gate and pass in isolation. A red from that class is uninterpretable
+         unless the run records that it was loaded, and today nothing does.
+
+    WHY BOTH DIMENSIONS IN ONE TASK. Shipping the sha stamp alone costs a second task and a second
+    review cycle to add one more field to one line, and the load half has a live consumer: W1-T2811
+    is open RIGHT NOW (PR #3912) and its own falsifier can close it unbuilt if this task's output
+    grows into per-assertion declaration. A boundary that a sibling is already reading must be
+    settled by the shard that owns the other side of it, not left to a follow-up.
+
+    WHY THE SEAM IS NOT A NEW INVENTION. `src/lib/ci-parity.ts` already carries exactly this shape
+    one concern over: `HostFacts` ("Cheap, host-scoped facts … Every field is dependency-injectable
+    via `computeHostFacts` so a test proves this registry's logic without needing an actual
+    darwin/bash-3.2 machine"), rendered into a `factsLine` —
+    `platform=…, bash-major=…, /proc/meminfo=…` — that a step's detail already prints. It also
+    already carries the exact discipline this task needs, in its own words: a field is `undefined`
+    when the probe cannot tell, because "a probe that cannot tell must not guess a verdict either
+    way", and `parseBashMajorVersion` returns `undefined` "rather than a guessed 0". `HostFacts`
+    answers WHICH MACHINE. This task's sibling answers WHICH TREE AND UNDER WHAT LOAD. Same shape,
+    same injectability, same never-guess-a-zero rule — a second registry-with-a-rendered-line, not
+    a second way of doing it.
+  design: |
+    ONE CONCERN: a gate verdict states the context that makes it interpretable — which tree, and
+    under what conditions — on the line that a human reads, in both directions.
+
+    (i) THE SURFACE IS `rmd preflight`'S VERDICT LINE, AND ONLY THAT.
+    One line, two branches (PASS and FAIL), both stamped. Not a flag, not a subcommand, not an
+    opt-in: a gate that will tell you its conditions IF YOU ASK has the same defect, because nobody
+    asks. Add the same three facts to `PreflightSummary` so the durable JSON and the terminal line
+    cannot drift — `headSha` is already there and is the precedent for the shape.
+
+    (ii) WHICH TREE — SETTLED, NOT LEFT TO THE BUILD.
+    Report `behind N` from `git rev-list --count HEAD..origin/main`, AND the AGE OF THE
+    `origin/main` REF ITSELF. Both, always, because a behind-count computed against a stale local
+    ref is itself stale, and reporting the number alone reproduces this task's own defect one level
+    down.
+      - DO NOT FETCH. A local gate must not acquire a network dependency: `preflightSummaryPath`'s
+        own doc already refuses `config.root` on the grounds that "a preflight that is meant to run
+        anywhere must not acquire that dependency", and a fetch adds a hang path to the one command
+        CLAUDE.md tells every session to run before its first push. Report the age instead; the
+        reader decides whether to fetch.
+      - READ THE AGE FROM THE REFLOG, NEVER FROM THE COMMIT DATE. MEASURED in this checkout: the
+        `origin/main` ref was fetched at 13:13:13Z while its tip commit's own date is 13:10:19Z.
+        Those differ by construction and diverge without bound — on a checkout last fetched days
+        ago, the tip's commit date still reads "recent" because it tracks whatever main last did.
+        `git reflog show --date=iso origin/main` carries the FETCH events themselves
+        (`fetch origin --quiet: fast-forward`) and is the only cheap local record of when this
+        checkout last learned anything.
+      - UNKNOWN IS NEVER ZERO, AND THIS IS A REAL CASE NOT A DEFENSIVE ONE. MEASURED: a
+        `--depth 1` clone has NO `refs/remotes/origin/main` at all — only `HEAD` — and
+        `git rev-list --count HEAD..origin/main` there exits 128 with EMPTY stdout. Worker
+        sandboxes and CI checkouts are shallow, so this path is ordinary, not exotic. A non-zero
+        exit must render as a NAMED unknown that says why ("no origin/main ref — shallow or
+        unfetched clone"), never as 0, which is the one value that means "you are up to date". The
+        reflog degrades identically (exit 128, zero lines) and must render the same way.
+
+    (iii) UNDER WHAT CONDITIONS — SETTLED, NOT LEFT TO THE BUILD.
+    LOAD IS `os.loadavg()[0]` NORMALISED BY `os.cpus().length`, SAMPLED AT BOTH THE START AND THE
+    END OF THE RUN, with the cpu count reported alongside. Each clause earns its place:
+      - `os.loadavg()` is a syscall-cheap read, so it can be taken on every run — the brief's own
+        cost constraint.
+      - normalising by core count makes the number mean the same thing on a 4-core container and a
+        12-core mini; a raw 4.0 is saturation on one and idle on the other, so a raw number is not
+        "stable enough that the same conditions read the same".
+      - BOTH ENDS, because a single start-time sample misreports and this was observed live: right
+        after a heavy run was stopped in this container, `os.loadavg()` read
+        [0.69, 2.37, 2.29] on 4 cpus — a 1-minute figure of 0.17 normalised beside a 5-minute
+        figure of 0.59. A start sample taken there would have recorded an idle machine that had
+        been saturated moments earlier, and an end-only sample cannot separate "the machine was
+        already busy" from "this gate WAS the load". Two samples answer both.
+      - THE LABEL THRESHOLD IS DATA, NOT A BURIED BRANCH: normalised ≥ 1.0 means runnable work
+        exceeds cores. Put the number where `HOST_CAUSED_SUITE_REDS` and `PROOF_PAYLOAD_SHAPES`
+        put theirs — a named exported constant — so changing it is a data edit, not an engine edit.
+      - DEGRADE: `os.loadavg()` returns [0,0,0] on platforms that do not implement it. Render that
+        as unavailable, not as an idle machine — the same never-guess-a-zero rule as (ii), and the
+        rule `parseBashMajorVersion` already states in this very file.
+
+    (iv) BOTH DIRECTIONS ON THE VERDICT, AND THE PASSING ONE IS THE POINT.
+    A stale RED gets investigated anyway — the reader is already suspicious. A stale GREEN is the
+    dangerous one and is precisely hazard (h)'s shape: exit 0, confident sentence, both operands
+    moved. So the stamp must be on the PASS branch, and the falsifier must pin it there
+    specifically rather than only on FAIL.
+
+    (v) THE BOUNDARY WITH W1-T2811, RE-CHECKED AGAINST ITS ACTUAL SHARD TEXT.
+    W1-T2811's shard (read at PR #3912, head f139a126) states: "W1-T2810 owns LEGIBILITY: it makes
+    a load-caused red interpretable, so a reader can see that the run was loaded … This task owns
+    EXPRESSION: it lets a test state that its own contract is wall-clock dependent." THIS SHARD
+    AGREES WITH THAT SPLIT VERBATIM and it was written before this one existed, from this task's
+    commissioning intent; that shard asks for exactly this re-check, and this is it.
+    THE CONSEQUENCE IS A HARD SCOPE FENCE, because W1-T2811 carries a clause that closes it unbuilt
+    "if W1-T2810 has, by build time, shipped something that already makes each of these seven
+    assertions declare its own wall-clock dependence at the assertion site". This task must
+    therefore NOT touch any assertion, any test helper, or anything at a per-assertion granularity.
+    Its output is RUN-SCOPED: one context stamp per gate run, describing the RUN's conditions. It
+    says nothing about any individual test's contract, and it cannot, because it does not know
+    which assertions are wall-clock dependent — that is the fact W1-T2811 exists to make
+    expressible. Make this checkable: the falsifier asserts the stamp is emitted once per run and
+    that this diff adds no per-assertion surface.
+
+    (vi) NOT IN SCOPE, EACH WITH A REASON:
+      - Stamping the 38 `scripts/*.mjs` gates individually. Hazard (h)'s instance was a ratchet run
+        DIRECTLY, and that route is already ruled: W1-T986 replaced CLAUDE.md's hand recipe with
+        "run the gate itself, never a proxy for what it does", so a directly-run ratchet is running
+        a proxy. Anyone following current guidance goes through the surface this task stamps. Keep
+        the renderer EXPORTED and free of `run-task.ts` imports so a later task can call it from a
+        `.mjs` gate — ten scripts already import from `../src/lib/*.ts`, so that path is
+        precedented and costs one line when someone wants it. Filing that follow-on is not this
+        task's job.
+      - Changing any threshold, cap or bound the gate evaluates. This task changes what the verdict
+        SAYS about its context, never what it decides.
+      - Failing or warning on a non-zero behind-count. Reporting is the deliverable; a gate that
+        refuses to run in a behind checkout is a different, much more disruptive decision that
+        nobody has asked for and that would block legitimate work on a feature branch.
+      - `HostFacts` itself. It answers a different question (which machine) and is consumed by a
+        registry this task does not touch.
+  acceptance:
+    - claim: "both verdict branches carry the head sha, the behind-count against origin/main and the load context, so a passing run and a failing run are equally interpretable and neither can be read without its tree position"
+      proof: "unit test: test/a-gate-verdict-names-its-own-context.test.ts"
+    - claim: "a behind-count that could not be computed renders as a named unknown explaining why, never as zero, because zero is the one value that means up to date"
+      proof: "grep: unknown never zero in test/a-gate-verdict-names-its-own-context.test.ts"
+    - claim: "the behind-count carries the age of the origin/main ref itself, read from the reflog's fetch events rather than the tip commit's date, so a number computed against a stale ref cannot look current"
+      proof: "grep: fetch age not commit date in test/a-gate-verdict-names-its-own-context.test.ts"
+    - claim: "load is core-normalised loadavg sampled at both the start and the end of the run against a named exported threshold, so the same conditions read the same and a decayed start sample cannot report an idle machine"
+      proof: "grep: sampled at both ends in test/a-gate-verdict-names-its-own-context.test.ts"
+    - claim: "the stamp is run-scoped and this diff adds no per-assertion surface, so W1-T2811's expression half stays unbuilt rather than being spuriously closed by this task's output"
+      proof: "grep: run scoped never per assertion in test/a-gate-verdict-names-its-own-context.test.ts"
+  falsifier: |
+    THE BEHIND-COUNT, BOTH DIRECTIONS AND THE DEGRADE — three cases, not two:
+      BEHIND   — a checkout whose HEAD is behind origin/main prints a NON-ZERO count.
+      CURRENT  — a checkout at origin/main prints 0.
+      UNKNOWN  — a checkout with no origin/main ref prints the named unknown and NOT 0. This is the
+                 case a two-case falsifier misses, and it is the one that recreates hazard (h)
+                 exactly: a shallow clone silently reporting "behind 0" is a confident wrong answer
+                 wearing this task's own fix. Drive it through the injected exec seam
+                 (`readHeadShaForSummary`'s pattern: default really shells out, appended last, one
+                 test per arm) rather than by building a shallow clone in a test.
+
+    THE LOAD READING, BOTH DIRECTIONS: a synthetic loadavg above the threshold labels the run
+    loaded; one below does not. And [0,0,0] renders unavailable, never idle.
+
+    THE STAMP MUST BE PROVEN LOAD-BEARING: delete it and a test must RED. `# fail` non-zero with
+    the stamp removed, `# fail 0` with it restored — the same standard W1-T2250 was held to. A
+    stamp nothing asserts on is decoration that the next refactor will silently drop.
+
+    AND IT MUST BE PROVEN ON A PASSING VERDICT SPECIFICALLY, not only a failing one. A test that
+    only exercises the FAIL branch would pass while the dangerous case — the confident stale green
+    — shipped unstamped. Assert the PASS line's text directly.
+
+    THE BOUNDARY IS FALSIFIABLE TOO, AND W1-T2811 IS WAITING ON IT: assert the stamp is emitted
+    ONCE PER RUN. If a later change made it per-step or per-assertion, that test must red — because
+    at that point this task would have grown into W1-T2811's territory and would close a sibling
+    that should have been built.
+
+    ONE MEASUREMENT TRAP, NAMED SO THE BUILD DOES NOT WALK INTO IT: `git rev-list --count
+    HEAD..origin/main` piped into anything reports the PIPE's exit status, not git's. MEASURED
+    while writing this shard — `git rev-list … | head -2` reported rc=0 on the very invocation that
+    had failed with 128. Capture the status of git itself, or the unknown case will silently be
+    read as success and render as 0, which is the exact defect this criterion exists to prevent.
+  note: |
+    FILED 2026-09-04. The id was reserved on origin (`refs/rmd-id/W1-T2810`,
+    ea87b31345af0b51b0e927960ce92b94f999bc18) before this filing; no shard for it existed in
+    `plan/tasks.yaml` or `plan/tasks.d/` (control: W1-T2803's shard IS found by the same query),
+    and no open PR referenced the id.
+
+    THE DISPATCH CLAIM COULD NOT BE MINTED FROM THIS ENVIRONMENT, and that is a fact about the
+    environment, not a decision. `refs/rmd-dispatch/W1-T2810` was attempted four times with
+    exponential backoff and refused with HTTP 403 at `git-receive-pack`; the REST path
+    (`POST /repos/…/git/refs`) answers 403 "Write access to this GitHub API path is not permitted
+    through this proxy". POSITIVE CONTROL, so this is not read as a permission problem with the
+    repo: the SAME anchor commit pushed successfully to a `refs/heads/*` name in the same session.
+    The gateway allows `refs/heads/*` and refuses every other namespace. The build must mint the
+    claim itself if it runs somewhere that can, and the `run-W1-T2810-<epochMs>` branch remains the
+    other, independent visibility path (`projectPlan` attributes an open PR by `headRefName`, never
+    by the claim), so in-flight work is still visible to dispatch without it.
+
+    WHAT WAS OBSERVED IN SOURCE AT HEAD adcdc764, so the build does not re-derive it:
+      - `preflightCommand` prints exactly two verdict lines (PASS / FAIL) and neither names a sha.
+      - `PreflightSummary.headSha` already exists and is already populated by
+        `readHeadShaForSummary()`, whose injectable-`exec`-appended-last shape and catch-arm
+        rationale are the pattern the two new readers should copy.
+      - `HostFacts` / `computeHostFacts` / `factsLine` in `src/lib/ci-parity.ts` are the sibling
+        precedent, including the never-guess-a-zero rule stated in their own docs.
+    WHAT WAS MEASURED IN THIS CHECKOUT:
+      - `git rev-list --count HEAD..origin/main` = 0 at a current head; exit 128 with empty stdout
+        against a missing ref.
+      - a `git clone --depth 1` carries no `refs/remotes/origin/main` (only `HEAD`).
+      - `origin/main` ref fetched 13:13:13Z vs its tip commit's date 13:10:19Z.
+      - `os.loadavg()` = [0.69, 2.37, 2.29] on `os.cpus().length` = 4, taken moments after a heavy
+        run was stopped.
+    WHAT IS THE OPERATOR'S MEASUREMENT, NOT THIS FILING'S: the 465-commit-behind checkout and its
+    "60965 bytes (cap 61046) OK" line, the three merges inside one ~40-minute gate run, and the
+    two suites observed going red under a loaded gate.
+
+    risk:high with band_meaning:span, DECLARED RATHER THAN DODGED: `subsystemsOf` counts
+    `src/lib/ci-parity.ts` and `src/run-task.ts` as two concerns and both are genuinely needed —
+    the readers and the renderer belong beside `HostFacts` in the first, the verdict line lives in
+    the second. Moving the verdict line into the library to score one subsystem would be a refactor
+    invented to satisfy a linter, and is refused. The test file's basename matches this shard's
+    slug, so it is discounted as this task's own falsifier.
+
+    ON THE PROOFS: criterion 1 is the pure-path `unit test:` form and earns the `not_yet_built`
+    carve-out on this plan-only head — `judgeCriterion` requires `kind === "test"`, `!nameFiltered`,
+    the path present in this shard's flow-style `files:`, and the file ABSENT at head; all four
+    hold. The other four are `grep:` anchors into that same falsifier so each criterion
+    discriminates independently on the build PR. No pattern contains `*`, `.`, `^`, `$` or `[`, and
+    none contains the substring " in ", which `DIALECT_GREP_PATH_RE` would split on before reaching
+    the real path.

@@ -23,7 +23,7 @@ import { promisify } from "node:util";
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { createServer, type Server } from "node:http";
-import { homedir, hostname, tmpdir } from "node:os";
+import { cpus as osCpus, homedir, hostname, loadavg as osLoadavg, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
@@ -198,11 +198,14 @@ import {
   escalate,
   escalateWithSummary,
   escalationCause,
+  escalationHeadSha,
+  findDuplicateEscalation,
   ghIssueGateway,
   presenceMode,
   setPresenceMode,
   tryEscalate,
   type EscalationClass,
+  type EscalationDedupKey,
   type EscalationOption,
   type IssueGateway,
   type OpenIssue,
@@ -269,9 +272,11 @@ import {
 } from "./lib/feedback.js";
 import { findPendingLandingPr, recordDecision, sweepFeedbackLanding } from "./lib/feedback-landing.js";
 import { ghTraceGateway, renderTraceChain, traceForward, traceReverse } from "./lib/trace.js";
-import { runPreflight, type PreflightDeps } from "./lib/commit-message.js";
+import { defaultPreflightSpawn, runPreflight, type PreflightDeps } from "./lib/commit-message.js";
 import {
   buildPreflightSummary,
+  detectRunContext,
+  runContextLine,
   FAST_GATE_STEPS,
   preflightFailureNotice,
   preflightSummaryPath,
@@ -429,6 +434,7 @@ import {
   parseLedger,
   planHealthSweep,
   planStateTruthRung,
+  type PlanCoherenceShardListing,
   probeGithubThrottle,
   recordFollowupHarvest,
   renderGather,
@@ -6564,6 +6570,67 @@ export function unchangedTreeStandDownReason(
 }
 
 /**
+ * W1-T2799 (the fix-rung pre-strike gate's SIXTH reason source, composed into {@link
+ * fixRungStandDownReason} below — never a parallel early return): has a human ALREADY been asked
+ * about this exact state?
+ *
+ * THE DEFECT THIS CLOSES. The review false-block escape (`detectReviewFalseBlock` -> `escalate`,
+ * below) opens a needs-human issue and returns `escalated`. NOTHING RECORDS THAT IT FIRED. The
+ * next level-triggered sweep builds a FRESH {@link runFixRung} with `strikes` reset, re-reads the
+ * same still-failing review on the same unchanged head, and spends a fix worker BEFORE the escape
+ * can fire again — which it then does, appending to the very issue already open and waiting on a
+ * human. MEASURED on #3889: ten escalations across four heads, EIGHT consecutive on head d8fa22b,
+ * seven of which dispatched a worker that pushed nothing at all.
+ *
+ * THE DEDUP THAT EXISTS IS AT THE WRONG LAYER, WHICH IS THE WHOLE DEFECT. `escalate()` already
+ * consults {@link findDuplicateEscalation} and correctly appended all ten to ONE issue rather
+ * than opening ten siblings (W1-T104/W1-T345) — but it runs INSIDE `escalate()`, by which time
+ * the strike is already spent. The right predicate, consulted at the wrong moment. So this reuses
+ * that EXACT predicate (the caller passes its result in) rather than re-implementing a second
+ * opinion about which issues are duplicates.
+ *
+ * DELIBERATELY STRICTER THAN THAT PREDICATE, AND THIS IS THE LOAD-BEARING PART.
+ * `matchesOptionalDimension` is permissive when either side omits a dimension, so a probe carrying
+ * a head matches a legacy issue carrying none. That is RIGHT for its own purpose — it fails toward
+ * APPENDING to an open issue, which is cheap and visible. REUSING IT TO REFUSE A FIX WORKER
+ * INVERTS THE POLARITY: it would fail toward NOT FIXING, silently, on a head that may carry real
+ * new work. So a stand-down additionally requires the candidate to carry a `**Head:**` line EQUAL
+ * to the head about to be struck against, read through {@link escalationHeadSha} — the SAME
+ * `HEAD_SHA_LINE_RE` the matcher uses, one parser and not two.
+ *
+ * THE RESET IS THE HUMAN, AND THAT IS THE POINT. `listOpen` stops returning the issue the moment
+ * the operator closes it, so acting on the escalation — the thing the rung is waiting for — is
+ * what resumes the rung. A new push resumes it too, by moving the head out from under the key.
+ *
+ * THE FAIL-OPEN CONSEQUENCE, STATED SO NOBODY DISCOVERS IT BY SURPRISE. Because a candidate with
+ * no `**Head:**` line never refuses a worker, and because #3889 — the issue this was filed from —
+ * CARRIES NO SUCH LINE (it predates the producer fix below), THIS DOES NOT STOP THE #3889 LOOP
+ * RETROACTIVELY. It stops one escalation AFTER merge: the next false-block escalation is the first
+ * head-qualified one, and the sweep after that is the first to stand down.
+ *
+ * PURE and exported so the boundary is unit-testable independent of the rung's issue plumbing,
+ * exactly like {@link unchangedTreeStandDownReason} beside it.
+ */
+export function openEscalationStandDownReason(
+  headSha: string,
+  candidate: OpenIssue | undefined,
+): { reason: string } | undefined {
+  if (!candidate) return undefined; // nothing open on this key — the ordinary path
+  const candidateHead = escalationHeadSha(candidate.body);
+  // STRICTER THAN THE MATCHER (both arms): a candidate naming NO head, or naming a DIFFERENT one,
+  // never refuses a worker. The first arm is the legacy-issue case, the second is a genuinely new
+  // push whose issue has not been filed yet — in both, the failure direction of guessing wrong is
+  // "stop fixing things", so both fail open.
+  if (candidateHead === undefined || candidateHead !== headSha) return undefined;
+  return {
+    reason:
+      `a needs-human escalation for this exact (task, PR, head ${headSha}, cause) is ALREADY OPEN and ` +
+      `awaiting a human (${candidate.url}) — a strike here would re-ask a question already in front of ` +
+      `someone and append to that same issue; standing down until it is closed or the head moves`,
+  };
+}
+
+/**
  * W1-T1284: the real worktree-content reader the fix rung wires for its pre-strike unchanged-tree
  * check — three LOCAL git reads, never a remote one and never anything about `origin/main` (Q2's
  * own "must not cover the base" constraint): `git status --porcelain=v1` (tracked modifications,
@@ -6690,6 +6757,24 @@ async function fixRungStandDownReason(
     previousFailure: { gateKey: string; snapshot: WorktreeSnapshot } | undefined;
     currentSnapshot: WorktreeSnapshot | undefined;
   },
+  /**
+   * W1-T2799 — the escalation THIS round's strike would eventually re-file if it changed nothing
+   * (`key`), the head it would be filed against (`headSha`), and the finder that answers whether
+   * such an issue is already open. `find` is INJECTED rather than called here so this function
+   * stays free of the issue gateway, the same seam `readRollup`/`readMergeFacts` above already
+   * use; the caller wires it to {@link findDuplicateEscalation} itself, never a second matcher.
+   * Omitted (a gateway with no `listOpen`, or any site other than `rung.strike`) skips this check
+   * entirely — fail open, exactly like every other optional reason source here.
+   *
+   * CHECKED LAST of the six, deliberately: it is the only source that costs an issue-list read
+   * this round would not otherwise perform, so the five cheaper answers — all of them either
+   * already-fetched facts or reads the rung needs regardless — get to answer first.
+   */
+  openEscalation?: {
+    headSha: string;
+    key: EscalationDedupKey;
+    find: (key: EscalationDedupKey) => OpenIssue | undefined;
+  },
 ): Promise<{ reason: string; foreignHead?: { headSha: string; author: string } } | undefined> {
   if (!readLiveState) return undefined;
   const live = await readLiveState(prUrl);
@@ -6765,6 +6850,20 @@ async function fixRungStandDownReason(
       unchangedTree.currentSnapshot,
     );
     if (unchanged) return unchanged;
+  }
+
+  if (openEscalation) {
+    // NO try/catch HERE, DELIBERATELY: the fail-open contract has exactly ONE owner, and it is
+    // `findDuplicateEscalation` itself — "best-effort dedup: a failed read must never block the
+    // escalation itself" is its own doc, and it swallows a throwing `listOpen` into `undefined`
+    // before this ever sees it. A second catch around it would be an arm no production path can
+    // reach (measured: `diff-coverage` flagged it as an added line with zero covering tests) and
+    // a second, silently-drifting statement of the same guarantee.
+    const alreadyAsked = openEscalationStandDownReason(
+      openEscalation.headSha,
+      openEscalation.find(openEscalation.key),
+    );
+    if (alreadyAsked) return alreadyAsked;
   }
 
   return undefined;
@@ -8388,6 +8487,28 @@ export async function runFixRung(opts: {
         ? { prNumber, readMergeFacts: deps.readMergeFacts }
         : undefined,
       deps.captureWorktreeSnapshot ? { gateKey, previousFailure: lastGateSnapshot, currentSnapshot: currentTreeSnapshot } : undefined,
+      // W1-T2799: the SIXTH source — has a human already been asked about this exact state? The
+      // key is the escalation the false-block escape below would file if this strike changed
+      // nothing, assembled through the SAME `EscalationDedupKey` shape `escalate()` itself is
+      // keyed on, so probe and producer can never disagree about which issue is the duplicate.
+      // `summary` carries `opts.prUrl` because the dedup key's PR dimension is scraped out of the
+      // summary/detail TEXT (`extractPrRef`), never passed as a field. A gateway with no
+      // `listOpen` makes `findDuplicateEscalation` return `undefined` for every key, so this site
+      // behaves exactly as it did before this task — every strike still spends.
+      deps.issues.listOpen
+        ? {
+            headSha: review.headSha,
+            key: {
+              class: "BLOCKED" as const,
+              taskId: opts.taskId,
+              summary: `review false-block — ${opts.prUrl}`,
+              detail: "",
+              headSha: review.headSha,
+              cause: escalationCause(currentMergeConflict !== undefined, noReviewYet),
+            },
+            find: (key: EscalationDedupKey) => findDuplicateEscalation(key, { issues: deps.issues }),
+          }
+        : undefined,
     );
     // W1-T1284: recorded for the NEXT round's comparison regardless of what this round decides —
     // a return below (any stand-down) means there IS no next round, so updating here first is
@@ -9734,6 +9855,15 @@ export async function runFixRung(opts: {
           class: "BLOCKED",
           taskId: opts.taskId,
           runId: opts.runId,
+          // W1-T2799 (B): the two W1-T195 dedup dimensions this producer was the ONLY fix-rung
+          // `escalate()` to omit — MEASURED against its siblings: the foreign-head producer passes
+          // `headSha`, and the ci-log false-block, retrigger-exhaustion and strike-exhaustion
+          // producers all pass BOTH. Omitting them is why four distinct heads collapsed into one
+          // issue on #3889, and why the pre-strike gate above could not otherwise tell a new push
+          // from a repeat. The `cause` expression is the IDENTICAL one the strike-exhaustion
+          // producer below already uses, never a new derivation.
+          headSha: review.headSha,
+          cause: escalationCause(currentMergeConflict !== undefined, noReviewYet),
           summary: `review false-block after ${strikes} strike(s) (${falseBlockReason}) — ${opts.prUrl}`,
           detail:
             `The blocked_review FIX RUNG (W1-T76, W1-T168) detected a REVIEW FALSE-BLOCK it cannot resolve by ` +
@@ -12945,7 +13075,7 @@ async function runTask(
       // convention `lib/ci-parity.ts` uses at both of its own diff sites.
       let diffFiles: string[] | undefined;
       try {
-        diffFiles = execFileSync("git", ["-C", worktreePath, "diff", "--name-only", "origin/main...HEAD"], {
+        diffFiles = execFileSync("git", ["-C", worktreePath, ...MERGE_BASE_DIFF_ARGS], {
           encoding: "utf8",
         })
           .split("\n")
@@ -15511,6 +15641,15 @@ export function followupLedgerUnionNdjson(stateDir: string): string {
  *  plan file instead. Never a second resolver: this is the SAME function `reviewCommand` calls. */
 export interface CheckAcceptanceDeps {
   planPath?: string;
+  /**
+   * W1-T2669 — the paths this branch changes, defaulting to a self-derived
+   * `git diff --name-only origin/main...HEAD` in this checkout. Injectable so the relatedness
+   * report can be driven without a git history, exactly as `planPath` is injectable rather than
+   * pointing every test at the real plan. THROWING IS A SUPPORTED ANSWER: a body checked outside a
+   * checkout has no diff to compare against, which is no evidence of a mismatch, so the caller
+   * treats a throw as "cannot tell" and stays silent.
+   */
+  changedFiles?: () => string[];
 }
 
 /**
@@ -15536,6 +15675,61 @@ export interface CheckAcceptanceDeps {
  *
  * READ-ONLY: writes no ledger line, no state file, opens nothing.
  */
+/**
+ * The `git diff` argv for "what THIS BRANCH changed relative to where it started" — THREE-DOT,
+ * against the merge base, and that was a real defect once rather than a style preference: two-dot
+ * `origin/main..HEAD` diffs the two TIPS, so every file merged to main after a worktree was cut
+ * reads as something that branch changed (measured on #1533 breaking a running drain's push).
+ *
+ * ONE SPELLING, DELIBERATELY. test/scope-guard-merge-base.test.ts asserts this literal appears
+ * EXACTLY ONCE in this file, so a mutant flipping three-dot to two-dot has a unique substitution
+ * target — and, since both call sites now read it from here, that one mutant reaches both. A second
+ * hand-written copy is how the next one silently gets the range wrong.
+ */
+const MERGE_BASE_DIFF_ARGS = ["diff", "--name-only", "origin/main...HEAD"] as const;
+
+/**
+ * W1-T2669 — the sentence to print when a `Remudero-Task:` trailer names a task with NO path in
+ * common with this diff, or `undefined` when there is nothing to say.
+ *
+ * SILENT IN EVERY UNDECIDABLE CASE, and each is a real one rather than defensive padding: a task
+ * declaring no `files:` cannot be shown unrelated to anything (`overlappingPaths` fail-closes an
+ * empty list to "overlaps everything" for the same reason), and a diff that cannot be read — a body
+ * checked outside a checkout, no origin/main — is absence of evidence, not evidence of a mismatch.
+ * Reporting either would train an operator to ignore the line, which costs more than the silence.
+ *
+ * ONE SHARED PATH IS ENOUGH. A task build's diff intersects its shard's declared files essentially
+ * by construction; the shape worth naming is the total miss, where the trailer names a task the
+ * diff has nothing to do with.
+ */
+function trailerScopeMismatch(taskId: string, declared: string[], deps: CheckAcceptanceDeps): string | undefined {
+  if (declared.length === 0) return undefined;
+  let changed: string[];
+  try {
+    changed = (deps.changedFiles ?? checkAcceptanceChangedFiles)();
+  } catch {
+    return undefined;
+  }
+  if (changed.length === 0) return undefined;
+  const touched = new Set(changed);
+  if (declared.some((f) => touched.has(f))) return undefined;
+  return (
+    `this diff shares no path with ${taskId}'s declared files (${declared.join(", ")}), ` +
+    `so the trailer may name an unrelated task — the gate will still judge this PR on that shard's criteria. ` +
+    `Advisory only: a widened build is legitimate and this changes no verdict.`
+  );
+}
+
+/** {@link CheckAcceptanceDeps.changedFiles}'s default — this branch's own paths against
+ *  origin/main, the same range `rmd preflight --coverage` self-derives rather than trusting a
+ *  caller-supplied diff. */
+function checkAcceptanceChangedFiles(): string[] {
+  return execFileSync("git", [...MERGE_BASE_DIFF_ARGS], { encoding: "utf8", maxBuffer: 1 << 26 })
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+}
+
 export function checkAcceptanceCommand(rest: string[], deps: CheckAcceptanceDeps = {}): number {
   const file = rest.find((a) => !a.startsWith("--"));
   if (!file) {
@@ -15555,11 +15749,14 @@ export function checkAcceptanceCommand(rest: string[], deps: CheckAcceptanceDeps
   const planPath = deps.planPath ?? join(repoRoot, "plan", "tasks.yaml");
   const taskId = reviewTaskIdFromBody(body);
   let criteria: AcceptanceCriterion[] = [];
+  let declaredFilesForTrailer: string[] = [];
   if (taskId) {
     try {
       const plan = loadPlan(planPath);
       const t = plan.byId.get(taskId);
       if (t?.acceptance?.length) criteria = t.acceptance;
+      // W1-T2669: read off the SAME task object, never a second plan load.
+      declaredFilesForTrailer = t?.files ?? [];
     } catch {
       // A bad/absent plan is not this command's concern either — fall through to the body,
       // exactly like reviewCommand's own catch does.
@@ -15578,8 +15775,16 @@ export function checkAcceptanceCommand(rest: string[], deps: CheckAcceptanceDeps
       : "NONE (fail closed — nothing to judge is never a pass)";
   const emptyProofs = criteria.filter((c) => !c.proof).length;
 
+  // W1-T2669: the trailer redirects the gate to ANOTHER task's acceptance, and nothing checked
+  // that the named task relates to this diff — so a PR could be judged on proofs over files it
+  // never touches while its own criteria went unread (#3559's first draft, caught by hand).
+  // ADVISORY ONLY: a legitimate build can widen beyond its declared files, so this names the
+  // mismatch and changes neither the resolved criteria nor the exit code.
+  const unrelated = trailerResolved ? trailerScopeMismatch(taskId!, declaredFilesForTrailer, deps) : undefined;
+
   console.log(`file:            ${file}`);
   console.log(`criteria source: ${source}`);
+  if (unrelated) console.log(`WARNING:         ${unrelated}`);
   console.log(`criteria parsed: ${criteria.length}`);
   console.log(`empty proofs:    ${emptyProofs}`);
   criteria.forEach((c, i) => {
@@ -18628,13 +18833,36 @@ export function renderFastGateScriptList(steps: readonly { readonly script: stri
   return steps.map((step) => step.script).join(", ");
 }
 
-export async function preflightCommand(rest: string[], deps: PreflightDeps = {}): Promise<number> {
+/**
+ * W1-T2810 — `preflightCommand`'s OWN seams, declared here rather than widened onto
+ * {@link PreflightDeps}, which `runPreflight`, `runPreflightFast`, `runCiParity` and
+ * `runPreflightCoverage` all consume and none of which reads a clock or a load average. The run
+ * context is a property of THIS COMMAND's whole invocation — one stamp per run — so its seams
+ * belong to this signature alone. Both are optional and appended by intersection, so every
+ * existing `preflightCommand(rest, { spawn })` call site is byte-identical.
+ *
+ * Injectable for the same reason `computeHostFacts` splits from `detectHostFacts`: a test must
+ * drive the LOADED branch and the load-unavailable branch without an actually busy machine, and
+ * `os.loadavg()` is the one input here that cannot be arranged.
+ */
+export type PreflightCommandDeps = PreflightDeps & {
+  loadavg?: () => readonly number[] | undefined;
+  cpuCount?: number;
+};
+
+export async function preflightCommand(rest: string[], deps: PreflightCommandDeps = {}): Promise<number> {
   const badArg = unknownArgError("preflight", rest, [...PREFLIGHT_VALUE_FLAGS], [...PREFLIGHT_BOOL_FLAGS]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
     return 2;
   }
   const startedAtMs = Date.now();
+  // W1-T2810: the START sample, taken here rather than at the end with everything else, because
+  // one sample cannot answer both questions the stamp exists for. `os.loadavg()[0]` is a
+  // ONE-MINUTE average, so a reading taken after an eight-minute `--ci-parity` run describes that
+  // run and says nothing about what the machine was doing when it began — and a run that started
+  // on a saturated machine is exactly the one whose wall-clock reds need explaining.
+  const loadavgStart = deps.loadavg ? deps.loadavg() : osLoadavg();
   const from = flagValue(rest, "--from");
   const to = flagValue(rest, "--to");
   const range = deps.range ?? (from !== undefined || to !== undefined ? { from: from ?? "origin/main", to: to ?? "HEAD" } : undefined);
@@ -18663,10 +18891,31 @@ export async function preflightCommand(rest: string[], deps: PreflightDeps = {})
     }
   }
   const ok = result.ok && (fast?.ok ?? true) && (ciParity?.ok ?? true) && (coverage?.ok ?? true);
+  // W1-T2810 — THE STAMP, ON BOTH BRANCHES AND ON THE LINE ITSELF.
+  //
+  // ON BOTH: a stale RED gets investigated anyway, because the reader is already suspicious. The
+  // stale GREEN is the dangerous one and is precisely hazard (h)'s measured shape — exit 0, a
+  // confident sentence, and both the measured file and the threshold it was measured against
+  // already moved. So the PASS branch is the one this exists for, not the FAIL branch.
+  //
+  // ON THE LINE, never behind a flag or a `preflight --context` subcommand: a gate that will tell
+  // you its conditions IF YOU ASK has the same defect, because nobody asks. `headSha` is the
+  // proof that adding a surface is not enough on its own — it has been computed on this path all
+  // along and written to the JSON summary, and never reached the sentence a human reads.
+  const headSha = readHeadShaForSummary();
+  const runContext = detectRunContext({
+    repoRoot,
+    headSha,
+    spawn: deps.spawn ?? defaultPreflightSpawn,
+    loadavgStart,
+    loadavgEnd: deps.loadavg ? deps.loadavg() : osLoadavg(),
+    cpuCount: deps.cpuCount ?? osCpus().length,
+  });
   console.log(
-    ok
+    (ok
       ? "\n### rmd preflight: PASS — commitlint, typecheck, and emitter checks are all clean; the push may proceed"
-      : "\n### rmd preflight: FAIL — see the named step(s) above; do not push until every step passes",
+      : "\n### rmd preflight: FAIL — see the named step(s) above; do not push until every step passes") +
+      `\n### ${runContextLine(runContext)}`,
   );
 
   // ── THE RESULT MUST SURVIVE THE CONTAINER THAT PRODUCED IT (see preflightSummaryPath's doc).
@@ -18694,8 +18943,9 @@ export async function preflightCommand(rest: string[], deps: PreflightDeps = {})
     steps: [...result.steps, ...(fast?.steps ?? []), ...(ciParity?.steps ?? []), ...(coverage?.steps ?? [])],
     finishedAt: new Date().toISOString(),
     durationMs: Date.now() - startedAtMs,
-    headSha: readHeadShaForSummary(),
+    headSha,
     args: rest,
+    runContext,
   });
   if (summaryPath === undefined) {
     console.log(
@@ -19998,6 +20248,59 @@ export function addLaneWorktree(
   return { branch, worktreePath };
 }
 
+/**
+ * W1-T2642: THE PLAN-COHERENCE CENSUS'S DISK READ — `retroCommand`'s half of the seam whose other
+ * half is {@link "./lib/retro.js".planCoherenceRung}. The rung and `src/lib/plan-coherence.ts` are
+ * both PURE (no fs, no network); reading `plan/tasks.yaml` and listing `plan/tasks.d/` is the
+ * caller's job, exactly the way `openTaskTitles`/`mastMapping` below already split it.
+ *
+ * DEGRADES WITH A STATED REASON, NEVER SILENTLY. An unlistable `plan/tasks.d/` returns
+ * `{ ok: false, reason }`, which the rung renders as `unexamined` naming that reason — never a
+ * `clean` over a scan that did not run (P48). The ONE exception is `ENOENT`, which is read as an
+ * empty listing rather than a failure: {@link "./lib/plan.js".loadPlan}'s own `listShardFiles`
+ * tolerates a repo with no shard directory yet, and this census must not report a scan failure
+ * where the loader reports a healthy plan — the two would then disagree about the same tree.
+ *
+ * A shard that lists but cannot be READ is a genuine failure and is reported as one: it is
+ * neither "absent" nor safely skippable, and skipping it would under-count `shardsExamined`
+ * while still rendering `clean`. NOTHING HERE THROWS. `retroCommand` runs unattended and every
+ * other dedup/table read around it degrades rather than aborting the cycle (`openTaskTitles`,
+ * `mastMapping`, `netStateAdvisorySectionFor`); a census is not worth losing a retro over.
+ */
+export function readPlanCoherenceInputs(root: string): {
+  monolith: { path: string; text: string };
+  shards: PlanCoherenceShardListing;
+} {
+  const monolithRel = join("plan", "tasks.yaml");
+  const monolithAbs = join(root, monolithRel);
+  // An ABSENT monolith is an empty task list, not a failure (the same back-compat reading
+  // `listShardFiles` gives an absent shard directory). A monolith that EXISTS and will not read
+  // is a real failure and is reported as one — never swallowed into an empty corpus that would
+  // then render `clean`.
+  let monolith = { path: monolithRel, text: "[]\n" };
+  try {
+    if (existsSync(monolithAbs)) monolith = { path: monolithRel, text: readFileSync(monolithAbs, "utf8") };
+  } catch (e) {
+    return { monolith, shards: { ok: false, reason: `${monolithRel} could not be read: ${String((e as Error)?.message ?? e)}` } };
+  }
+  const shardDir = join(root, "plan", "tasks.d");
+  try {
+    const files = readdirSync(shardDir)
+      .filter((f) => f.endsWith(".yaml") || f.endsWith(".yml"))
+      .sort();
+    return {
+      monolith,
+      shards: {
+        ok: true,
+        entries: files.map((f) => ({ path: join("plan", "tasks.d", f), text: readFileSync(join(shardDir, f), "utf8") })),
+      },
+    };
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException)?.code === "ENOENT") return { monolith, shards: { ok: true, entries: [] } };
+    return { monolith, shards: { ok: false, reason: `plan/tasks.d/ could not be listed or read: ${String((e as Error)?.message ?? e)}` } };
+  }
+}
+
 async function retroCommand(
   rest: string[],
   opts: {
@@ -20152,6 +20455,11 @@ async function retroCommand(
     priorMastCategoryCounts: marker?.mast_category_counts,
     openTitles: [...openTaskTitles, ...openProposalLines],
     mounts: mountsTable,
+    // W1-T2642: the plan-coherence census's REAL bytes, read here (buildGather stays fs-free) so
+    // the rung answers the fourteen-cycle monolith-vs-shard question by MEASUREMENT on every
+    // `rmd retro` cycle instead of rendering `unexamined`. Reads THIS checkout's plan (repoRoot),
+    // the same tree `openTaskTitles` above already loads.
+    planCoherence: readPlanCoherenceInputs(repoRoot),
     now: Date.now(),
   });
   // W1-T111 (P25 iv): the approve/reframe rate is telemetry, not decoration — the field's

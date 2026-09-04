@@ -100,6 +100,8 @@ import { resolveFreshness } from "./console-freshness.js";
 import { readIdleReasons, renderIdleReasonsHtml } from "./idle-reasons-panel.js";
 import { readLedgerLines } from "./status.js";
 import { buildReplay, resolveReplayLedgerLines, type ReplayLedgerRead } from "./ledger-replay.js";
+import { latestMeasurementRows, type LatestMeasurementRowsResult } from "./measurement-cadence.js";
+import type { LedgerUnionResult } from "./ledger-grep.js";
 import {
   startInstallationTokenRefresh,
   TOKEN_REFRESHED_STEP,
@@ -300,6 +302,17 @@ export interface ServeDeps {
    * real state dir — the same seam `ReplayRouteDeps` (below) and `peek` (above) both use.
    */
   replay?: { stateDir?: string; resolveReplayLedgerLines?: (stateDir: string) => ReplayLedgerRead };
+  /**
+   * W1-T2660: `GET /v1/self-measurement`'s ledger-corpus read. `stateDir` defaults to
+   * `dirname(deps.ledgerPath)` — the SAME derivation `replay` (above) already uses, never a
+   * second root. `n` bounds how many of the newest `measurement_cadence.ran` rows the reader
+   * ({@link latestMeasurementRows}, measurement-cadence.ts) returns; the panel needs at least
+   * two per verb (latest + previous), so the default reads a handful more than
+   * `plan/policy.yaml`'s own `measurementCadence.maxPerDay: 4` rather than exactly two. Both
+   * fields are injectable so a test drives the "unreadable" (`ok: false`) union path without a
+   * real state dir — the same seam `replay`/`peek` above both use.
+   */
+  selfMeasurement?: { stateDir?: string; n?: number; ledgerUnion?: (stateDir: string, pattern: RegExp) => LedgerUnionResult };
   /**
    * W1-T2269: the console's OWN installation-token refresh loop — the SAME mechanism
    * `run-task.ts`'s `serveCommand` already arms for the daemon (`github-app.ts`'s
@@ -1125,6 +1138,18 @@ export function renderShellHtml(
     <span class="glance-item"><span class="glance-label">preference bypass</span><span class="glance-value" id="pr-bypass">…</span></span>
     <span class="glance-item"><span class="glance-label">override expires</span><span class="glance-value" id="pr-expires">…</span></span>
     <span class="glance-item"><span class="glance-label">routing as of</span><span class="glance-value" id="pr-as-of">…</span></span>
+  </section>
+  <!-- W1-T2660: the fleet's own measurement_cadence.ran rows (rule-efficacy, verdict-
+       calibration, autonomy-rate, adoption, proof-debt, the verb census), one row per verb,
+       read via GET /v1/self-measurement (measurement-cadence.ts's latestMeasurementRows off the
+       ledger UNION, never the live file alone -- see that function's own doc for why). Starts
+       empty until the first fetch lands; renderSelfMeasurement (below) fills it, a refusal
+       renders as a refusal, a verb with no row at all renders "never measured", and an
+       unreadable ledger union renders the whole list as unreadable -- never a silent zero and
+       never a quietly-empty panel. -->
+  <section id="self-measurement" class="daemon-health" aria-label="Self-measurement">
+    <h3>Self-measurement <span id="self-measurement-summary" class="section-summary"></span></h3>
+    <ol id="self-measurement-list" class="row-list"></ol>
   </section>
   <!-- Rendered SERVER-SIDE from the sha captured at start: a static span, deliberately NOT a
        client-script field, so this carries no risk to the template literal below. -->
@@ -2427,6 +2452,106 @@ export function renderShellHtml(
     }
     setGlanceValue("dh-disk-free", h.diskFreeBytes != null ? formatBytes(h.diskFreeBytes) : "unknown");
     setGlanceValue("dh-rate-limit", h.rateLimitRemaining != null ? String(h.rateLimitRemaining) : "unknown");
+  }
+
+  /** W1-T2660: the CURRENT verb set {@link renderSelfMeasurement} looks for on GET
+   *  /v1/self-measurement's rows -- mirrors MeasurementCadenceRunResult's own members
+   *  (measurement-cadence.ts), \`boardReview\` excluded because that verb already owns its own
+   *  row family and never rides this one (CADENCE_ROW_OWN_FAMILY_KEYS, same module). A hand-
+   *  maintained list, on purpose, the same discipline ADOPTION_SHAPE4_PREDICATES keeps for its
+   *  own declared population: extend it by hand when a new verb joins the cadence spine. The
+   *  panel itself renders whatever a row actually carries even if a key here goes stale --
+   *  see selfMeasurementFigure below -- so a forgotten edit here loses ONE row's label, never
+   *  the whole panel. */
+  const SELF_MEASUREMENT_VERBS = [
+    { key: "ruleEfficacy", label: "rule efficacy" },
+    { key: "verdictCalibration", label: "verdict calibration" },
+    { key: "autonomyRate", label: "autonomy rate" },
+    { key: "verbCensus", label: "verb census" },
+    { key: "adoptionReport", label: "adoption report" },
+    { key: "adoptionMint", label: "adoption mint" },
+    { key: "proofDebtReport", label: "proof debt" },
+    { key: "proofDebtMint", label: "proof debt mint" },
+  ];
+
+  /** One verb's latest value -> a headline figure string, generic over ANY shape the writer
+   *  emits (design (ii): "renders whatever verbs the row carries and hides nothing it does not
+   *  recognise") -- a REFUSED verb (\`status === "refused"\`) renders its OWN refusedReason,
+   *  verbatim, never folded into the generic branch below (standing rule 22: a refusal is
+   *  rendered as a refusal, never as a zero). Everything else renders its own scalar/array
+   *  fields as "key value" pairs, skipping \`status\`/\`refusedReason\` themselves. */
+  function selfMeasurementFigure(v) {
+    if (v === null || v === undefined) return { refused: false, text: "" };
+    if (typeof v !== "object" || Array.isArray(v)) return { refused: false, text: String(v) };
+    if (v.status === "refused") {
+      return { refused: true, text: v.refusedReason || "refused (no reason given)" };
+    }
+    const parts = [];
+    for (const k of Object.keys(v)) {
+      if (k === "status" || k === "refusedReason") continue;
+      const fv = v[k];
+      if (fv === null || fv === undefined) continue;
+      if (Array.isArray(fv)) parts.push(\`\${k}: \${fv.length}\`);
+      else if (typeof fv === "object") continue; // nested shapes (e.g. calibration classes) skipped, not zeroed
+      else parts.push(\`\${k}: \${fv}\`);
+    }
+    return { refused: false, text: parts.length ? parts.join(", ") : v.status || "measured" };
+  }
+
+  /** One verb's row: name, latest figure-or-refusal, as-of, previous figure (design (ii)'s ONE
+   *  PANEL). \`rows\` is GET /v1/self-measurement's own \`rows\` array, already newest-first
+   *  (latestMeasurementRows' own sort, measurement-cadence.ts) -- never re-sorted here. A verb
+   *  absent from EVERY row in \`rows\` renders "never measured", never a bare 0 (standing rule
+   *  22, the same discipline {@link renderDaemonHealth}'s "unknown" fields already follow). */
+  function selfMeasurementRowHtml(verb, rows) {
+    let latest = null;
+    let latestTs = null;
+    let previous = null;
+    for (const row of rows) {
+      const result = row && row.result ? row.result : {};
+      if (!Object.prototype.hasOwnProperty.call(result, verb.key)) continue;
+      if (latest === null && latestTs === null) {
+        latest = result[verb.key];
+        latestTs = row.ts;
+      } else if (previous === null) {
+        previous = result[verb.key];
+        break;
+      }
+    }
+    if (latestTs === null) {
+      return \`<li class="row self-measurement-row" data-verb="\${escapeHtml(verb.key)}" data-self-measurement-state="never-measured"><span class="task-id">\${escapeHtml(verb.label)}</span><span class="detail">never measured</span></li>\`;
+    }
+    const figure = selfMeasurementFigure(latest);
+    const prevText = previous !== null ? \` · previously: \${escapeHtml(selfMeasurementFigure(previous).text)}\` : "";
+    const stateAttr = figure.refused ? "refused" : "measured";
+    return (
+      \`<li class="row self-measurement-row" data-verb="\${escapeHtml(verb.key)}" data-self-measurement-state="\${stateAttr}">\` +
+      \`<span class="task-id">\${escapeHtml(verb.label)}</span>\` +
+      \`<span class="detail">\${figure.refused ? "refused: " : ""}\${escapeHtml(figure.text)} · as of \${escapeHtml(formatTimestamp(latestTs))}\${prevText}</span>\` +
+      \`</li>\`
+    );
+  }
+
+  /** Renders GET /v1/self-measurement's body -- the ONE console surface over
+   *  \`measurement_cadence.ran\` rows (this task's own rationale (1)). \`status: "unreadable"\`
+   *  renders the panel AS unreadable, never as a quietly-empty list -- the W1-T119 distinction
+   *  {@link latestMeasurementRows}'s own doc states, mechanized here so a reader can never
+   *  mistake "the ledger union could not be read" for "the fleet has never measured itself". An
+   *  \`ok\` response with zero rows (a fresh state dir, or the cadence has genuinely never fired)
+   *  falls straight through to selfMeasurementRowHtml's own "never measured" branch for every
+   *  verb, with no separate empty-state branch needed here. */
+  function renderSelfMeasurement(v) {
+    const list = document.getElementById("self-measurement-list");
+    if (!list) return;
+    if (!v || v.status === "unreadable") {
+      const reason = v && v.reason ? v.reason : "no response from GET /v1/self-measurement";
+      list.innerHTML = \`<li class="empty self-measurement-unreadable" data-self-measurement="unreadable">UNREADABLE — the measurement ledger union could not be read (\${escapeHtml(reason)})</li>\`;
+      setGlanceValue("self-measurement-summary", "unreadable");
+      return;
+    }
+    const rows = v.rows || [];
+    list.innerHTML = SELF_MEASUREMENT_VERBS.map((verb) => selfMeasurementRowHtml(verb, rows)).join("");
+    setGlanceValue("self-measurement-summary", rows.length ? \`as of \${formatTimestamp(rows[0].ts)}\` : "never measured");
   }
 
   /** One usage window as "12% · resets 20:50:00 EDT". "unknown" -- NEVER "0%" -- whenever the
@@ -5307,7 +5432,7 @@ export function renderShellHtml(
     }
 
     try {
-      const [recentSnap, upNextSnap, feedbackSnap, inboxSnap, controlStatus, daemonHealth, accountUsage, providerRouting, planView] = await Promise.all([
+      const [recentSnap, upNextSnap, feedbackSnap, inboxSnap, controlStatus, daemonHealth, accountUsage, providerRouting, planView, selfMeasurement] = await Promise.all([
         getJson("/v1/recent").catch(() => ({ entries: [] })),
         getJson("/v1/drain/preview?max=5").catch(() => ({ cards: [] })),
         getJson("/v1/feedback").catch(() => ({ entries: [] })),
@@ -5333,6 +5458,12 @@ export function renderShellHtml(
         // sibling above; a failure here leaves the tab showing its last-known values (or "…"
         // pre-first-success) and never breaks the rest of the refresh.
         getJson("/v1/plan/view").catch(() => null),
+        // W1-T2660: the self-measurement panel's own fetch -- same catch-and-degrade convention
+        // as every sibling above; a failure here leaves the panel showing its last-known values
+        // (or empty pre-first-success) and never breaks the rest of the refresh. A SUCCESSFUL
+        // fetch that reads status "unreadable" is NOT caught here -- it is a real response
+        // renderSelfMeasurement itself renders as unreadable (see that function's own doc).
+        getJson("/v1/self-measurement").catch(() => null /* fetch failed -- panel keeps its last-known rows */),
       ]);
       latestFeedbackEntries = feedbackSnap.entries ?? [];
       latestInboxReady = inboxSnap.ready ?? [];
@@ -5356,6 +5487,9 @@ export function renderShellHtml(
       if (planView) {
         latestPlanView = planView;
         renderPlanView(planView);
+      }
+      if (selfMeasurement) {
+        renderSelfMeasurement(selfMeasurement);
       }
       // W1-T223: ONLY here (never off the status-only pass above) -- see finishSectionRender's
       // own doc for why defaulting/summarizing off still-empty feedback/inbox/up-next/recent
@@ -6241,6 +6375,36 @@ export function buildReplayRoute(deps: ReplayRouteDeps): Route {
     },
   };
 }
+
+/** {@link buildSelfMeasurementRoute}'s deps — see the `ServeDeps.selfMeasurement` field this
+ *  route's production wiring reads from for what each one defaults to. */
+export interface SelfMeasurementRouteDeps {
+  stateDir: string;
+  n?: number;
+  ledgerUnion?: (stateDir: string, pattern: RegExp) => LedgerUnionResult;
+}
+
+/**
+ * W1-T2660: `GET /v1/self-measurement` — the console's ONE read of `measurement_cadence.ran`
+ * rows (rule-efficacy, verdict-calibration, autonomy-rate, adoption, proof-debt, the verb
+ * census), via {@link latestMeasurementRows} (measurement-cadence.ts) — the reader that INVERTS
+ * that module's own writer (design (i)) rather than re-describing the row shape here. Returns
+ * `latestMeasurementRows`'s own result verbatim as JSON: `{status: "ok", rows: [...]}` or
+ * `{status: "unreadable", reason}` — the client-side `renderSelfMeasurement` (renderShellHtml's
+ * script) renders the `unreadable` case AS unreadable, never as a quietly-empty panel (the
+ * W1-T119 distinction this reader's own doc states).
+ */
+export function buildSelfMeasurementRoute(deps: SelfMeasurementRouteDeps): Route {
+  return {
+    method: "GET",
+    path: "/v1/self-measurement",
+    scope: "read",
+    handler: (_req, res) => {
+      const result: LatestMeasurementRowsResult = latestMeasurementRows(deps.stateDir, deps.n ?? 10, deps.ledgerUnion);
+      sendJson(res, 200, result);
+    },
+  };
+}
 /**
  * W1-T493 design (i): the completeness ratchet for SCOPE, `writeRoutesMissingTier`-shaped
  * (service.ts, W1-T404) but over `scope` rather than `tier`. `scope` is REQUIRED on both `Route`
@@ -6440,6 +6604,14 @@ export function buildServeRoutes(deps: ServeDeps): Route[] {
     buildReplayRoute({
       stateDir: deps.replay?.stateDir ?? dirname(deps.ledgerPath),
       resolveReplayLedgerLines: deps.replay?.resolveReplayLedgerLines,
+    }),
+    // W1-T2660: the self-measurement panel over `measurement_cadence.ran` rows. `stateDir`
+    // defaults to `dirname(deps.ledgerPath)` -- the SAME derivation `replay` immediately above
+    // uses, never a second root.
+    buildSelfMeasurementRoute({
+      stateDir: deps.selfMeasurement?.stateDir ?? dirname(deps.ledgerPath),
+      n: deps.selfMeasurement?.n,
+      ledgerUnion: deps.selfMeasurement?.ledgerUnion,
     }),
     // W1-T500: the nonce-issuance route design (iv)'s second factor needs to exist AT ALL -- built
     // (service.ts, W1-T404) and exported, but mounted nowhere until now, which is why every

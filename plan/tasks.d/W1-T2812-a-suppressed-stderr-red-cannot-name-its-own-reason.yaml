@@ -1,0 +1,145 @@
+- id: W1-T2812
+  title: "A SUPPRESSED-STDERR RED CANNOT NAME ITS OWN REASON — 57 suites stub `console.error` around a CLI entrypoint and then assert on a bare exit code, so a failure renders as `1 !== 2` while the explanation the code printed was discarded by the test itself, in the same window that produced the failure"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 18.00
+  files: [test/helpers/captured-console.ts, test/captured-console-names-the-reason.test.ts, test/the-wipe-test-can-only-ask-about-learnings.test.ts]
+  origin: "operator-session#suppressed-stderr-red-2026-09-04"
+  plan_refs: ["W1-T2810", "W1-T2811", "W1-T2790"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE MOTIVATING INSTANCE, AND IT COST REAL TIME THIS WEEK.
+    `test/the-wipe-test-can-only-ask-about-learnings.test.ts` failed `1 !== 2` on a CLI exit code.
+    The suite stubs `console.error = () => {}` for exactly the window in which `main()` runs and
+    restores it in `finally`. `exitCode` came back 1, so `process.exit(1)` really was called inside
+    the patched window — `main()` took an error path rather than the intended refusal at exit 2.
+    What it printed about why went nowhere. THE STDERR WAS NOT MISSING; THE TEST DISCARDED IT AT
+    SOURCE. Diagnosis then required a seam-level investigation to learn what one print statement
+    would have said, and it is STILL UNRESOLVED.
+
+    THE CENSUS IS CRITERION ONE AND IT REFRAMES THE TASK. MEASURED 2026-09-04 at 3bc1542 over the
+    1029 tracked `test/*.test.ts` files, counting `console.error =` assignments and discarding the
+    restore form (a bare identifier RHS such as `realErr`, `origError`):
+
+      57 files stub `console.error`, across 79 stub assignments.
+      17 assignments across 15 files are BLACK HOLES — the literal `() => {}`.
+      62 assignments across 50 files ALREADY CAPTURE into an array; 8 files carry both shapes.
+
+    SO BUFFERING IS NOT THE MISSING HALF. The brief that commissioned this task assumed the fix was
+    "stub into a buffer, not a black hole". The majority of this repo ALREADY buffers. The half
+    that is missing everywhere is THE DUMP.
+
+    CAPTURED BUT NEVER DUMPED IS A BLACK HOLE WITH EXTRA STEPS, and it is the larger population.
+    A buffer that no failure path ever reads is exactly as uninterpretable as `() => {}`; it merely
+    looks conscientious. Searching every assertion in `test/` for one that passes a captured buffer
+    as its message argument returns EXACTLY ONE hit repo-wide —
+    `test/a-gate-shaped-instrument-that-nothing-invokes.test.ts:339`, `assert.ok(..., err.join("\n"))`
+    — and that suite does not stub `console.error` at all; it injects `log:`/`error:` seams. AMONG
+    THE 57 CONSOLE-STUBBING SUITES THE CORRECT IDIOM APPEARS ZERO TIMES.
+
+    THE STRUCTURAL QUESTION, ANSWERED: HAND-ROLLED, NO SHARED HELPER. `captureConsole` is defined
+    independently TWICE — `test/a-blocked-task-must-name-its-disposition.test.ts` and
+    `test/base-lint-attributes-pre-existing-violations.test.ts` — and `withCapturedConsole` is a
+    third, differently-named local in `test/acceptance-preflight-agrees-with-gate.test.ts`. No test
+    imports a console capture from `test/setup/` or `test/helpers/`; the shared modules that exist
+    there are tmp-hygiene, open-shell, reapable-prefix, offline-github, mutant-module, import-sweep,
+    mutation-sandbox, declared-routes and triage-proof-needle, none of them a console capture. This
+    is therefore a helper PLUS call-site migration, not one change — which is a sizing problem, and
+    the reason this task is deliberately tranche one rather than the whole population.
+
+    CROSS-CITE W1-T2810, WHICH THIS DOES NOT SUBSUME AND MUST NOT BE MERGED WITH. W1-T2810 owns
+    LEGIBILITY: it makes a load-caused red interpretable so a reader can see the run was loaded.
+    This task owns RETENTION: it stops a suite discarding the explanation its own subject printed.
+    Both are instances of one principle — a mechanism reporting the conditions of its own
+    measurement rather than only its verdict — but the surfaces do not overlap and the falsifiers
+    are independent: W1-T2810's turns on a loaded run, this one on a deliberately broken assertion
+    under no load at all. W1-T2810 is UNFILED as this shard is written (no shard on origin/main, no
+    open PR, `refs/rmd-id/W1-T2810` reserved only at ea87b31), so this boundary is stated from its
+    commissioning intent and must be re-checked against the real shard text once that exists —
+    the same qualification W1-T2811's shard makes about the same sibling.
+
+  design: |
+    Add ONE shared helper at `test/helpers/captured-console.ts` and migrate ONE call site — the
+    motivating suite — proving the idiom end to end. Do not migrate the other 56 files in this
+    task; see the tranche note below.
+
+    The helper captures `console.error` into a buffer and restores it, and exposes the buffer in a
+    form an assertion can carry as its failure message. Suppression during a passing run is the
+    reason the stubbing exists and is preserved exactly: nothing is printed on green.
+
+    THE MESSAGE ARGUMENT REPLACES THE DIFF, AND THAT IS THE TRAP IN THIS TASK. `assert.equal(a, b, m)`
+    renders `m` INSTEAD of node's generated `1 !== 2`, so the naive fix — passing the joined buffer
+    straight in as the message — trades one lost signal for another and leaves the reader unable to
+    see which values disagreed. The helper must therefore produce a message that carries BOTH the
+    numeric disagreement and the captured stderr, or wrap the assertion so node's generated text
+    survives alongside the buffer. Either shape is acceptable; silently dropping the diff is not,
+    and a criterion below pins it.
+
+    THE DUMP MUST FIRE ON ASSERTION FAILURE, NOT IN `finally`. A `finally` dump prints on every run
+    including passes, which is the green-run noise regression this task exists to avoid. Building
+    the message string eagerly on a passing run is fine — it produces no output; PRINTING on a
+    passing run is not.
+
+    Do NOT remove the stubbing anywhere. Do not migrate suites outside `files:`. Do not change any
+    CLI's own stderr, exit codes, or behaviour — this task touches test scaffolding only.
+
+  acceptance:
+    - claim: "a suite in this class fails against a deliberately broken expectation and its output names the reason the subject printed, rather than only a bare numeric disagreement"
+      proof: "unit test: test/captured-console-names-the-reason.test.ts"
+    - claim: "the failure message carries BOTH node's generated value disagreement and the captured stderr, so adding the reason does not cost the diff"
+      proof: "unit test: test/captured-console-names-the-reason.test.ts"
+    - claim: "a passing run prints nothing extra, so suppression still holds and green output is unchanged"
+      proof: "unit test: test/captured-console-names-the-reason.test.ts"
+    - claim: "removing the dump makes the reason disappear and returns the bare numeric failure, proving the dump is load-bearing rather than incidental"
+      proof: "unit test: test/captured-console-names-the-reason.test.ts"
+    - claim: "the motivating suite no longer discards its subject's stderr and still asserts the same exit code it asserted before"
+      proof: "unit test: test/the-wipe-test-can-only-ask-about-learnings.test.ts"
+
+  falsifier: |
+    CLOSE THIS TASK WITHOUT IMPLEMENTATION if a shared console-capture helper already exists under
+    `test/helpers/` or `test/setup/` AND the motivating suite already carries its subject's stderr
+    into the failure it produces. Three independent local definitions of the same idea, which is
+    what the census found, is not that helper.
+
+    THE DUMP MUST BE PROVEN AGAINST A DELIBERATELY BROKEN CASE, NOT A HYPOTHETICAL. A test that
+    asserts the helper's buffer is non-empty proves capture, not retention: it does not establish
+    that a FAILING assertion surfaces the buffer to whoever reads the run. Break an expectation on
+    purpose, capture the reporter's output, and assert the reason appears in it.
+
+    RE-DERIVE THE CENSUS AT BUILD TIME AND SAY WHAT YOU FOUND. If the black-hole population has
+    fallen below 5 files, or if the captured-but-never-dumped population has fallen below 10, the
+    motivating instance is likely already fixed and this task should close with the new measurement
+    recorded rather than build a helper for a population that no longer exists.
+
+    Do NOT discharge this by deleting the stubbing, by dumping in `finally`, by making the helper
+    print on a passing run, or by widening `files:` to the rest of the population.
+
+  note: |
+    ID PROVENANCE, STATED HONESTLY BECAUSE IT IS IRREGULAR. The id W1-T2812 was assigned directly by
+    the operator in session, NOT minted by `rmd next-task-id --reserve`. VERIFIED 2026-09-04:
+    `refs/rmd-id/W1-T2812` does NOT exist on origin, against a control of 924 readable
+    `refs/rmd-id/*` refs; the highest reserved id is W1-T2811 and the highest filed shard is
+    W1-T2800, so 2812 is genuinely next-free rather than contested. The filing session could not
+    mint the ref itself — its GitHub credential returns a deterministic 403 on any ref outside
+    `refs/heads/*`, confirmed twice against a branch push to the same host that succeeded — so
+    `refs/rmd-id/W1-T2812` and `refs/rmd-dispatch/W1-T2812` BOTH remain unminted and are the
+    operator's to create. If a concurrent host reserves 2812 before this merges, this filing is the
+    loser of that race and renumbers.
+
+    SIZING AND THE TRANCHE PLAN. `files:` is 3 by deliberate choice, not because the population is
+    3. The census found 57 files and 79 stub assignments; migrating them in one PR would be a wide
+    `files:` on a repo merging several PRs an hour and would rebase-thrash. This task ships the
+    helper and ONE migration that proves the idiom. The remaining population tranches naturally in
+    the order the census gives: first the 15 black-hole files, which retain nothing at all, then the
+    50 capture-but-never-dump files, which retain a buffer nobody reads. Those tranches are separate
+    filings and are not authorized by this shard.
+
+    `risk: high`, `band_meaning: span` is Rule 19's span classification across a new helper, its
+    own suite and one migrated member. It authorizes no source change: nothing under `src/` is in
+    `files:`, and no CLI's stderr, exit code or behaviour moves.
