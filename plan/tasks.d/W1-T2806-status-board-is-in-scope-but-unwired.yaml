@@ -1,0 +1,97 @@
+- id: W1-T2806
+  title: "THE STATUS BOARD IS NAMED IN THE OPERATOR MESSAGE STANDARD'S OWN SCOPE AND CONSUMES NONE OF IT — the standard lists renderStatusBoardText as surface one, escalate.ts is the only module that ever calls checkOperatorMessage, and the board cites the standard zero times, so the one surface an operator reads first is the one surface the presence check never sees"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 25.00
+  rationale: |
+    **THE STANDARD ALREADY CLAIMS THIS SURFACE.** docs/operator-message-standard.md is NORMATIVE
+    and its Surfaces heading names renderStatusBoardText and its per-section helpers first, ahead
+    of the escalation body. It reasons that the board already carries a next-action slot, so the
+    standard describes structure already present rather than inventing one.
+
+    **BUT NOTHING ROUTES THROUGH THE CHECKER.** Measured on this tree: checkOperatorMessage and
+    operatorMessageFooter are imported by exactly ONE module, escalate.ts, which projects an
+    Escalation onto the four slots through toOperatorMessage and renders the footer at two sites.
+    status-board.ts references the standard ZERO times. It carries nine NextActionRule references,
+    which is its own type-level slot and a real guarantee, but that type enforces ONE part of the
+    structure and the checker reads FOUR.
+
+    **SO THE GAP IS A PROJECTION, NOT A REWRITE.** escalate.ts already demonstrates the shape: a
+    small pure function mapping a domain record onto speaker, whatHappened, whatIsAsked and
+    consequenceOfInaction, plus a best-effort wrapper that swallows a checker failure rather than
+    letting it reach the reader. The board needs its own projection of the same kind. No board
+    message is reworded to get there.
+
+    **WHY IT MATTERS MORE HERE THAN ON THE ESCALATION BODY.** The standard's own opening records
+    that the console's worst outage cost 3h51m on a message that was already good prose and simply
+    never rendered. The board is the surface an operator reads first and the one where an
+    unrendered or structurally incomplete row is most expensive.
+  design: |
+    **Q1 - WHAT WIRING MEANS, GIVEN THE CHECKER IS PRESENCE-ONLY.**
+
+    checkOperatorMessage asks whether each of OPERATOR_MESSAGE_PARTS is PRESENT, where an explicit
+    null counts as present. It never inspects wording and never throws. So wiring the board means
+    projecting each rendered block onto those four slots and recording what is missing. It does not
+    mean scoring prose, and this task must add no readability metric, word-count gate or
+    sentence-length threshold: the standard forbids any of those being added in its name, on the
+    ground that this repo cannot compute reader comprehension honestly.
+
+    **Q2 - THE FAILURE DIRECTION IS ALREADY DECIDED AND MUST BE COPIED, NOT RE-ARGUED.**
+
+    operator-message.ts states that the fallback is the hazard and that it fails toward DELIVERY:
+    a non-conforming message is marked and still delivered, never dropped or held. escalate.ts
+    implements exactly that with checkOperatorMessageSafe. The board must inherit that direction
+    without exception. A board that hid a row because its projection was incomplete would recreate
+    the 3h51m outage in a new way, which is the one outcome the standard exists to prevent.
+
+    **Q3 - WHAT MUST NOT CHANGE.**
+
+    (i) NO BOARD MESSAGE IS REWORDED by this task. The standard says a per-surface rewrite is
+    separate, later work; this wires the check and stops there.
+
+    (ii) NextActionRule keeps its required action field. The type-level guarantee is not replaced by
+    the runtime check, it is joined by it.
+
+    (iii) THE CHECK NEVER BLOCKS OR HIDES. No row is withheld, reordered or truncated because its
+    projection is incomplete.
+
+    (iv) NO SCORE. No readability, length or vocabulary metric is introduced, per the standard's own
+    prohibition.
+
+    (v) The board's existing rendered text stays byte-stable where tests and retro greps depend on
+    it, so a projection is added beside the render rather than inside it.
+  acceptance:
+    - claim: "each rendered board block is projected onto the four presence slots the standard defines"
+      proof: "unit test: test/status-board-operator-message.test.ts"
+    - claim: "an incomplete projection marks the row and still renders it, never hides or holds it"
+      proof: "unit test: test/status-board-operator-message.test.ts"
+    - claim: "a checker failure cannot reach the operator, mirroring the escalation path's safe wrapper"
+      proof: "unit test: test/status-board-operator-message.test.ts"
+    - claim: "no existing board message text changes as a result of the wiring"
+      proof: "unit test: test/status-board-operator-message.test.ts"
+    - claim: "the wiring introduces no readability, length or vocabulary score"
+      proof: "unit test: test/status-board-operator-message.test.ts"
+  files: [src/lib/status-board.ts, test/status-board-operator-message.test.ts]
+  status: queued
+  attempts: 0
+  origin: "oper#plain-language-surfaces-2026-09-04"
+  plan_refs: ["W1-T2279", "W1-T2498", "W1-T2807"]
+  note: |
+    RISK BAND IS RULE 19'S SPAN, NOT BLAST RADIUS - AND HERE THE SPAN IS A STEM ARTIFACT. The
+    linter derives concerns from file STEMS, so src/lib/status-board.ts and
+    test/status-board-operator-message.test.ts read as two (status-board,
+    status-board-operator-message) even though the change is one concern: a projection beside the
+    board's render plus its falsifier. Decomposing would mean a test with no subject, and naming the
+    test after the module's own stem would append coverage-load-bearing assertions to a shared
+    suite, which the house rule refuses. Raised and recorded rather than worked around.
+
+    THE STANDARD IS CITED, NOT RESTATED. docs/operator-message-standard.md carries the reasoning and
+    the ISO 24495-1 principles; this shard names the gap and the wiring only.
+
+    WHAT WAS MEASURED. On this tree the checker has one consumer (escalate.ts) and status-board.ts
+    cites the standard zero times against nine NextActionRule references. Both figures are from the
+    working tree rather than recalled.
