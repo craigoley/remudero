@@ -1177,9 +1177,10 @@ export function censusRunawayThresholdMs(durationsMs: readonly number[]): number
 // own admission ("HONEST LIMITS OF THIS FILING") — describes a "sixth" suite at 6371ms distinct
 // from a "fifth" at ~2.1s. W1-T2478's own SHIPPED artifact (the test header above, and PR #3323's
 // own body) names only ONE excluded suite. This task's own re-application of the predicate against
-// every recognizer candidate in the CURRENT tree (all 24, enumerated below — including this
-// task's own proof file, which the recognizer's text-substring heuristic also self-matches)
-// finds no second suite satisfying (a)-(c) — the closest calls, `test/mkdtemp-callsite-check.test.ts` and
+// every recognizer candidate in the CURRENT tree (24 at this task's own HEAD, 25 after W1-T2644
+// below adds its own proof file, which the recognizer's text-substring heuristic also
+// self-matches — see that task's own section) finds no second suite satisfying (a)-(c) — the
+// closest calls, `test/mkdtemp-callsite-check.test.ts` and
 // `test/state-citation-check.test.ts`, each delegate their real per-file walk to an external
 // script and assert only its aggregate "clean" exit from the `.test.ts` file itself, the same
 // shape `claims`/`jscpd` already have as ordinary `same-class` entries, never the census's own
@@ -1419,7 +1420,31 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
     "this file — meta-tests CENSUS_POPULATION/censusPopulationDrift/FAST_GATE_STEPS themselves; its one real git call is " +
       "`git grep`, never `git ls-files`, so it is not itself a src-population walk",
   ),
+  // W1-T2644's OWN proof file, the same self-reference shape its sibling directly above already
+  // has: it discusses (and, for the UNCLASSIFIED test, fabricates fixture text containing) both
+  // "ls-files" and "src/", which trips the recognizer's text-substring match. It never shells
+  // `git ls-files` itself — only `censusPopulationDrift`'s own `git grep` seam, under a mock —
+  // so it fails clause (a) exactly like the entry above it.
+  refusedForPredicate(
+    "test/the-census-roster-is-named-not-numbered.test.ts",
+    "a",
+    "this file — asserts CENSUS_SUITE_ROSTER/CENSUS_POPULATION/censusPopulationDrift/FAST_GATE_STEPS stay one consistent " +
+      "source; every git call it makes is through a mocked PreflightSpawn, never a real `git ls-files`, so it is not itself " +
+      "a src-population walk",
+  ),
 ];
+
+// W1-T2644: THE ROSTER IS THE POPULATION, RE-EXPORTED UNDER THE NAME THIS TASK'S OWN ACCEPTANCE
+// CRITERION NAMES ("the roster is stated once, as data, beside the step table it governs" —
+// grep: CENSUS_SUITE_ROSTER). An alias, deliberately never a second array: W1-T2523's own
+// rationale already paid for the "two-derivations" defect once ("RE-DERIVE RATHER THAN TRUST THE
+// TWO"), and this task's own note says the same thing about itself — "whichever lands second
+// should READ the roster rather than growing a second derivation". `CENSUS_POPULATION` keeps its
+// name (existing callers — test/the-census-admission-set-is-derived-not-enumerated.test.ts,
+// shipped by W1-T2643 and out of this task's own file list — read it directly, by that name,
+// today); `CENSUS_SUITE_ROSTER` is the identical array under the label this task's acceptance
+// text specifies, so a reader who greps either name finds the SAME data, never two.
+export const CENSUS_SUITE_ROSTER: readonly CensusPopulationMember[] = CENSUS_POPULATION;
 
 export const CENSUS_ADMITTED_MEMBERS: readonly (CensusPopulationMember & {
   readonly script: string;
