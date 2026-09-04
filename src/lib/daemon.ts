@@ -1011,6 +1011,14 @@ export interface DaemonDeps {
    */
   isOpenPr?: OpenPrCheck;
   /**
+   * W1-T2675 — the credit-read-failed probe, resolved by the CALLER from the same projection
+   * `refreshMerged` builds, exactly as `isOpenPr` is: this module never reads GitHub. See
+   * {@link NextRunnableOpts.isCreditIndeterminate} for why a `merged: false` carrying
+   * `indeterminate: true` must refuse rather than dispatch. Optional, and omitting it leaves
+   * selection byte-identical to before it existed.
+   */
+  isCreditIndeterminate?: (taskId: string) => boolean;
+  /**
    * W1-T2397 — the open-sibling OBSERVATION's two halves, forwarded verbatim into this tick's
    * {@link NextRunnableOpts}; see those fields' own docs in drain.ts for the contract, and
    * run-task.ts's `openSiblingObservation` for the one factory both lanes build them from.
@@ -3742,6 +3750,7 @@ export async function runDaemon(
         : undefined;
       const dispatchOpts: NextRunnableOpts = {
       isOpenPr: deps.isOpenPr,
+      isCreditIndeterminate: deps.isCreditIndeterminate,
       // W1-T2397: forwarded into the tick's own opts, exactly as drain.ts forwards them at both of
       // its `skipOpts` sites. `nextRunnable` consults them AFTER eligibility and BEFORE returning,
       // so this cannot change what this tick dispatches.

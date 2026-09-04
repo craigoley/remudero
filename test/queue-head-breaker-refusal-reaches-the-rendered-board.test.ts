@@ -251,6 +251,7 @@ test("drain.ts: tallyDispatchFilters's DispatchFilterReason-keyed record still h
     "already-merged",
     "blocked",
     "continued-this-pass",
+    "credit-indeterminate",
     "retired",
     "run-branch-already-pushed",
     "unmet-deps",
