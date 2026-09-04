@@ -27835,11 +27835,9 @@ export function buildFixRungDispatchArgs(args: {
 }
 
 /**
- * W1-T2609: thrown by {@link checkoutFixHeadRef} when the branch's local ref is AHEAD of
- * `origin/<branch>` — i.e. it carries a commit `origin/<branch>` does not. Resetting it would
- * silently discard that commit (the OBSERVED defect: a fix round's local commit rewound between
- * `git commit` and `git push` by a concurrent round sharing the same branch name). Both shas are
- * carried so the caller's decline row is diagnosable without a second git call.
+ * W1-T2609/W1-T2839: thrown when a fix-head move cannot prove it is safe. W1-T2839 preserves an
+ * unheld ahead/diverged tip before moving it; a held branch or failed compare-and-swap still
+ * refuses. Both shas are carried so the caller's decline row is diagnosable without another read.
  */
 export class FixRungCheckoutRefusedError extends Error {
   constructor(
@@ -27849,10 +27847,56 @@ export class FixRungCheckoutRefusedError extends Error {
   ) {
     super(
       `refusing to reset local branch ${branch} (${localSha}) to origin/${branch} (${originSha}): ` +
-        `the local ref is ahead of origin and would lose unpushed work`,
+        `the local ref changed or is held by a worktree, so recovery cannot prove the move safe`,
     );
     this.name = "FixRungCheckoutRefusedError";
   }
+}
+
+export interface FixHeadRecovery {
+  branch: string;
+  localSha: string;
+  originSha: string;
+  recoveryRef: string;
+}
+
+export interface CheckoutFixHeadRefDeps {
+  /** Test seam at the exact compare-and-swap boundary; production never supplies it. */
+  beforeHeadCompareAndSwap?: () => void;
+}
+
+const ZERO_GIT_OID = "0000000000000000000000000000000000000000";
+
+function fixHeadHeldByWorktree(repoDir: string, branchRef: string): boolean {
+  const rows = execFileSync("git", ["-C", repoDir, "worktree", "list", "--porcelain"], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  return rows.split("\n").some((line) => line === `branch ${branchRef}`);
+}
+
+function preserveFixHead(repoDir: string, branch: string, localSha: string): string {
+  const recoveryRef = `refs/rmd-recovery/fix/${branch}/${localSha}`;
+  let existing: string | null = null;
+  try {
+    existing = execFileSync("git", ["-C", repoDir, "rev-parse", "--verify", recoveryRef], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+  } catch {
+    existing = null;
+  }
+  if (existing === null) {
+    execFileSync("git", ["-C", repoDir, "update-ref", recoveryRef, localSha, ZERO_GIT_OID], { stdio: "pipe" });
+  } else if (existing !== localSha) {
+    throw new Error(`recovery ref ${recoveryRef} resolves to ${existing}, expected ${localSha}`);
+  }
+  const preserved = execFileSync("git", ["-C", repoDir, "rev-parse", "--verify", recoveryRef], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  }).trim();
+  if (preserved !== localSha) throw new Error(`recovery ref ${recoveryRef} did not preserve ${localSha}`);
+  return recoveryRef;
 }
 
 /**
@@ -27865,22 +27909,25 @@ export class FixRungCheckoutRefusedError extends Error {
  * (unpushed) had that commit silently rewound by a concurrent round landing here in the same
  * window (PR #3261's reported incident).
  *
- * Three cases, by comparing the local ref (if any) against `origin/<branch>`:
- *  - no local ref yet: create it at `origin/<branch>` — byte-identical to the old sequence.
- *  - local ref is an ancestor of (or equal to) `origin/<branch>` (at or behind): fast-forward —
- *    also byte-identical to the old sequence, since nothing local is lost.
- *  - local ref is NOT an ancestor of `origin/<branch>` (ahead, or diverged — either way it holds
- *    a commit `origin/<branch>` lacks): REFUSE with {@link FixRungCheckoutRefusedError} and leave
- *    the local ref untouched. The caller (`dispatchFix`) declines this round the same way it
- *    already declines `sweep.fix.uncreditable_head` — one lost poll, not a lost commit.
+ * W1-T2839 closes the permanent-refusal state W1-T2609 left behind. Absent, equal, and behind
+ * refs still create/attach/fast-forward. An ahead or diverged ref is moved only after (1) no
+ * registered worktree holds it, (2) an exact recovery ref preserves its tip, and (3) an
+ * `update-ref` compare-and-swap proves it did not change since inspection. Any failed proof
+ * refuses; a successful transition returns its recovery evidence for the dispatch ledger.
  */
-export function checkoutFixHeadRef(repoDir: string, worktreePath: string, branch: string): void {
+export function checkoutFixHeadRef(
+  repoDir: string,
+  worktreePath: string,
+  branch: string,
+  deps: CheckoutFixHeadRefDeps = {},
+): FixHeadRecovery | undefined {
   const originSha = execFileSync("git", ["-C", repoDir, "rev-parse", `origin/${branch}`], { stdio: "pipe" })
     .toString()
     .trim();
+  const branchRef = `refs/heads/${branch}`;
   let localSha: string | null = null;
   try {
-    localSha = execFileSync("git", ["-C", repoDir, "rev-parse", "--verify", `refs/heads/${branch}`], {
+    localSha = execFileSync("git", ["-C", repoDir, "rev-parse", "--verify", branchRef], {
       stdio: "pipe",
     })
       .toString()
@@ -27889,7 +27936,13 @@ export function checkoutFixHeadRef(repoDir: string, worktreePath: string, branch
     localSha = null; // no local ref yet — the "create fresh" case below.
   }
 
-  if (localSha !== null && localSha !== originSha) {
+  let recovery: FixHeadRecovery | undefined;
+  if (localSha === null) {
+    execFileSync("git", ["-C", repoDir, "update-ref", branchRef, originSha, ZERO_GIT_OID], { stdio: "pipe" });
+  } else if (localSha !== originSha) {
+    if (fixHeadHeldByWorktree(repoDir, branchRef)) {
+      throw new FixRungCheckoutRefusedError(branch, localSha, originSha);
+    }
     let localIsAncestor = false;
     try {
       execFileSync("git", ["-C", repoDir, "merge-base", "--is-ancestor", localSha, originSha], { stdio: "pipe" });
@@ -27897,41 +27950,49 @@ export function checkoutFixHeadRef(repoDir: string, worktreePath: string, branch
     } catch {
       localIsAncestor = false; // non-zero exit ⇒ NOT an ancestor (ahead, or diverged) — refuse below.
     }
-    if (!localIsAncestor) throw new FixRungCheckoutRefusedError(branch, localSha, originSha);
+    if (!localIsAncestor) {
+      const recoveryRef = preserveFixHead(repoDir, branch, localSha);
+      recovery = { branch, localSha, originSha, recoveryRef };
+    }
+    deps.beforeHeadCompareAndSwap?.();
+    try {
+      execFileSync("git", ["-C", repoDir, "update-ref", branchRef, originSha, localSha], { stdio: "pipe" });
+    } catch {
+      throw new FixRungCheckoutRefusedError(branch, localSha, originSha);
+    }
   }
 
-  execFileSync(
-    "git",
-    ["-C", worktreePath, "checkout", "-B", branch, `origin/${branch}`, "--no-track"],
-    { stdio: "pipe" },
-  );
+  execFileSync("git", ["-C", worktreePath, "checkout", branch], { stdio: "pipe" });
+  const checkedOutSha = execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  }).trim();
+  if (checkedOutSha !== originSha) throw new FixRungCheckoutRefusedError(branch, checkedOutSha, originSha);
+  return recovery;
 }
 
 /**
  * W1-T1129: the fix rung's throwaway worktree AND its named local branch, extracted from
  * `dispatchFix` (its one call site) purely so this exact git sequence is directly unit-testable
- * against a real repo, with no behaviour change beyond the `--no-track` below.
+ * against a real repo.
  *
- * `origin/<branch>` is a remote-tracking start point, so a plain `checkout -B <branch>
- * origin/<branch>` defaults to ALSO writing `branch.<branch>.remote`/`.merge` into
- * `.git/config` — a config write that, in a worktree, lands in the ONE file the main
- * checkout and every sibling worktree share, and races every other concurrent lane's own
- * config write for the same `.git/config.lock` (rationale (1)/(3)/(4)). Nothing in `src/`
- * ever reads that tracking config — `gitPushRunBranch` pushes an explicit `origin HEAD`
- * refspec (rationale (5)) — so the write is created, contended over, and never consulted.
- * The review lane's `realReviewWorktreeDeps` already skips `checkout -B` entirely for this
- * same reason (see its own comment, above); the fix rung cannot follow it there because it
- * PUSHES, and a detached HEAD has no branch for `git push origin HEAD` to resolve (rationale
- * (7)). `--no-track` keeps the named local branch — still landing at `origin/<branch>`'s
- * commit, still pushable — while dropping only the tracking-config write.
+ * W1-T1129 removed the tracking-config write a `checkout -B ... origin/<branch>` would normally
+ * make in the shared `.git/config`. W1-T2839 no longer uses `checkout -B`: it creates or moves the
+ * local ref explicitly, then checks out that already-existing branch. The result remains a named,
+ * pushable branch and still writes no `branch.<branch>.remote`/`.merge` tracking configuration.
  *
- * W1-T2609: the checkout step itself is now {@link checkoutFixHeadRef} — non-destructive,
- * where this used to run an unconditional `checkout -B`. See that function's own doc.
+ * W1-T2609/W1-T2839: the checkout step itself is now {@link checkoutFixHeadRef} — it never
+ * force-resets the shared branch, and it preserves stale non-ancestor tips before CAS recovery.
  */
-export function createFixRungWorktree(repoDir: string, worktreePath: string, branch: string): void {
+export function createFixRungWorktree(
+  repoDir: string,
+  worktreePath: string,
+  branch: string,
+  deps: CheckoutFixHeadRefDeps = {},
+): FixHeadRecovery | undefined {
   execFileSync("git", ["-C", repoDir, "fetch", "origin", "--quiet"], { stdio: "pipe" });
   execFileSync("git", ["-C", repoDir, "worktree", "add", worktreePath, `origin/${branch}`], { stdio: "pipe" });
-  checkoutFixHeadRef(repoDir, worktreePath, branch);
+  return checkoutFixHeadRef(repoDir, worktreePath, branch, deps);
 }
 
 /**
@@ -29144,7 +29205,17 @@ export function buildSweepEffects(
 
         worktreePath = join(worktreesDir(config), `sweep-${task.id}-${Date.now()}`);
         try {
-          createFixRungWorktree(repoDir, worktreePath, realBranch);
+          const recoveredHead = createFixRungWorktree(repoDir, worktreePath, realBranch);
+          if (recoveredHead) {
+            log("sweep.fix.checkout_recovered", {
+              pr_number: pr.prNumber,
+              task_id: task.id,
+              branch: recoveredHead.branch,
+              local_sha: recoveredHead.localSha,
+              origin_sha: recoveredHead.originSha,
+              recovery_ref: recoveredHead.recoveryRef,
+            });
+          }
         } catch (e) {
           if (e instanceof FixRungCheckoutRefusedError) {
             // W1-T2609 (design i): the local ref is ahead of origin/<branch> — a concurrent
