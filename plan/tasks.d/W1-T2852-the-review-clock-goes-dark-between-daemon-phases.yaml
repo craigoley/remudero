@@ -1,0 +1,81 @@
+- id: W1-T2852
+  title: "THE EVENT-DRIVEN REVIEW CLOCK GOES DARK BETWEEN NAMED DAEMON PHASES — after a bounded full sweep returns, orphan cleanup, feedback landing, measurement cadence, digest cadence and board review all run before the next retro/dispatch ticker exists, so accepted GitHub wakes and green PRs can wait behind minutes of unrelated control-plane work"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 25.00
+  files:
+    - src/lib/daemon.ts
+    - test/event-review-clock-all-phases.test.ts
+  origin: "operator-session#green-review-backlog-2026-09-04"
+  plan_refs: ["W1-T254", "W1-T484", "W1-T1272", "W1-T2584", "W1-T2744"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON AZURE RUN DAEMON-1788562467405. A full sweep reached its configured 559000 ms
+    wall-clock bound at 23:06:20Z. Signed GitHub `check_run.completed` wakes continued to arrive.
+    The daemon then spent 40.9s in main-health/orphan/feedback work, 167.9s in measurement cadence,
+    and 136.1s in board review before reaching the next review-capable retro/dispatch phase at
+    23:18:20Z. During the same interval the 23:15:39 sweep snapshot named nine `post-review` PRs;
+    every one stood down because the prior pass deadline had closed admissions. The next phase did
+    not begin until roughly twelve minutes after the bound.
+
+    SOURCE MATCHES THE TRACE. `startInFlightTicker` is created only inside `runGatedSweep` and the
+    retro/dispatch wrappers. In `runDaemon`, the awaited orphan, feedback, measurement, digest and
+    board-review rungs sit after `runGatedSweep` has stopped its phase ticker and before retro or
+    dispatch starts another. A GitHub webhook therefore wakes a durable marker but cannot make a
+    review clock exist while those awaits run. This is event-driven input with phase-dependent
+    polling, not an event-driven review scheduler.
+
+    W1-T2744 fixed a different lifetime mismatch: abandoning a sweep no longer waits for every
+    detached fix. It did not cover the ordinary awaited rungs after that return. W1-T2584 keeps a
+    review pool pulling only while its own full-sweep admission gate remains open; it correctly
+    refuses to keep admitting after the sweep deadline. Neither task supplies a review clock during
+    the uncovered interval measured here.
+  design: |
+    Give the daemon one review-only clock whose lifetime covers every potentially long phase of an
+    iteration, rather than repeatedly creating clocks around only sweep, retro and dispatch. Reuse
+    the existing `deps.sweepLight` restricted reconciler: it may post sha-pinned reviews and perform
+    the already-approved non-worker cancellation requeue, but it must not widen fix, close,
+    escalation, dependency-review or merge admission.
+
+    The clock must consume the existing interruptible GitHub wake signal and retain a coalesced wake
+    until a light pass actually starts. It must check STOP and PAUSE immediately before admission.
+    A wake during an in-flight light pass schedules at most one follow-up pass; it never starts an
+    overlapping pass or a hot loop. The module-wide exact-input review mutex remains the final
+    duplicate-post guard.
+
+    Preserve the full-sweep wall-clock bound and liveness exclusion. This clock does not keep a
+    timed-out full sweep alive and does not start a second full sweep; it runs only the restricted
+    light hook. Phase labels may remain telemetry, but phase transitions must no longer create
+    gaps or overlapping tickers. Shutdown drains an already-started light pass under the existing
+    contract and starts nothing new.
+  acceptance:
+    - claim: "a GitHub wake received while measurement or board review is unresolved starts the restricted light-review pass without waiting for that rung to finish"
+      proof: "unit test: test/event-review-clock-all-phases.test.ts"
+    - claim: "the review clock remains live from the end of one full-sweep await through orphan, feedback, measurement, digest and board-review awaits until dispatch or idle"
+      proof: "unit test: test/event-review-clock-all-phases.test.ts"
+    - claim: "a wake during an active light pass coalesces to one follow-up pass and never overlaps two sweepLight calls"
+      proof: "unit test: test/event-review-clock-all-phases.test.ts"
+    - claim: "STOP and PAUSE prevent new light-review admission while an already-started pass settles"
+      proof: "unit test: test/event-review-clock-all-phases.test.ts"
+    - claim: "the full-sweep wall-clock, full-sweep liveness mutex and restricted light-pass action set remain unchanged"
+      proof: "unit test: test/event-review-clock-all-phases.test.ts"
+    - claim: "removing the iteration-spanning clock reproduces the measured wake-behind-board-review delay"
+      proof: "mutation test: test/event-review-clock-all-phases.test.ts"
+  falsifier: |
+    Close without implementation if a production source trace shows one `sweepLight` ticker already
+    alive while `runMeasurementCadence` or `runBoardReview` is awaited, or if the Azure ledger shows
+    a light-review attempt between 23:06:20Z and 23:18:20Z in DAEMON-1788562467405. Source has no
+    ticker at either await, and the ledger has no such attempt; accepted Serve wake rows alone do not
+    falsify the missing consumer.
+  note: |
+    ID PROVENANCE: `rmd next-task-id --reserve` atomically reserved W1-T2852 at
+    `refs/rmd-id/W1-T2852` on the first attempt after observing W1-T2851 as the maximum.
+
+    This task does not raise review concurrency. Dynamic lane sizing is separately reserved as
+    W1-T2853 so clock liveness and resource policy remain independently reviewable and falsifiable.
