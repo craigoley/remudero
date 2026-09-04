@@ -4184,8 +4184,13 @@ export type WorktreeKeepReason =
   /** The activity probe could not complete (unreadable, or past the entry cap), so liveness is
    *  UNKNOWN and the entry is kept. An ambiguous signal keeps; it never destroys. */
   | "activity-unknown"
-  /** rmSync itself failed — best-effort, the rest of the pass continues. */
-  | "removal-failed";
+  /** Removal itself failed — best-effort, the rest of the pass continues. */
+  | "removal-failed"
+  /** The entry's own `.git` is present but could not be read or parsed, so whether an admin
+   *  record exists in some parent clone is UNKNOWABLE. An ambiguous signal keeps; it never
+   *  destroys — the same doctrine `activity-unknown` applies one gate above. See
+   *  {@link planWorktreeRemoval}. */
+  | "git-unreadable";
 
 /**
  * The newest mtime anywhere under `dir`, and whether the walk could be trusted (W1-T378).
@@ -4388,6 +4393,132 @@ function resolveWorktreeRegistration(entryPath: string): WorktreeRegistration | 
 }
 
 /**
+ * HOW an aged, terminal reap candidate must be REMOVED — never WHETHER it should be, which
+ * every gate above this decides and this function deliberately does not revisit.
+ *
+ * `git-remove` deletes the working tree AND its admin record in one operation, in the parent.
+ * `rm-only` deletes the tree directly, and carries the parent (when one exists) so the caller
+ * can `git worktree prune` behind it. `keep` destroys nothing.
+ */
+export type WorktreeRemovalPlan =
+  | { kind: "git-remove"; repoDir: string }
+  | { kind: "rm-only"; repoDir?: string }
+  | { kind: "keep" };
+
+/**
+ * Decide {@link WorktreeRemovalPlan} for `entryPath` from its OWN `.git`, BEFORE anything is
+ * destroyed.
+ *
+ * WHY THIS EXISTS (the 2026-07-31 destruction, CLAUDE.md "Never do interactive work inside
+ * `<config.root>/worktrees`"). `reapStaleWorktrees` removed every candidate with a bare
+ * `fs.rmSync`. Everything under {@link worktreesDir} is a LINKED worktree — {@link worktreeAdd}
+ * is what puts it there — and a linked worktree's admin record lives in the PARENT clone at
+ * `<repoDir>/.git/worktrees/<name>`. `rm -rf` on one deletes the tree and STRANDS that record:
+ * `git worktree list` reports it `prunable`, and git still refuses to re-check-out the branch
+ * (`fatal: '<branch>' is already used by worktree at <path>`) on the next run that mints the same
+ * name. `lib/clone-reaper.ts`'s own header cites this same failure as its reason for touching
+ * nothing whose `.git` is not a DIRECTORY; this function is the other half of that lesson —
+ * the reaper that DOES own linked worktrees, removing them through git instead of around it.
+ *
+ * THE CASES, and why each primitive is the correct one rather than a fallback:
+ *
+ *   `.git` ABSENT — not a worktree at all: hole (1) debris, or a tree something else already
+ *     removed mid-pass. No record anywhere points at it, so `rmSync` strands nothing. `rm-only`.
+ *
+ *   `.git` is a DIRECTORY — a STANDALONE clone. It owns its objects and its admin dir outright,
+ *     so removing the tree removes every record with it. `rm-only`.
+ *
+ *   `.git` is a FILE and the resolved parent REGISTERS this path — the real linked case, and the
+ *     only one that can strand anything. `git-remove`: `git worktree remove --force` in that
+ *     parent, the same primitive {@link pruneStaleRuns} already uses.
+ *
+ *   `.git` is a FILE, the parent exists, but does NOT register this path — the record is already
+ *     gone (a parent that pruned it, or a tree that was never registered there). There is nothing
+ *     left to strand, so `rmSync` is CORRECT here, not a concession; the `repoDir` rides along so
+ *     the caller can prune behind it anyway, which is idempotent and collects any record this
+ *     lookup could not see.
+ *
+ *   `.git` is a FILE and the parent is ABSENT — the parent clone is gone, so no admin record can
+ *     exist to be stranded and no `git worktree remove` is even possible. `rmSync` is the only
+ *     primitive left AND is safe for exactly that reason. (This is the shape 52 of the 54
+ *     directories measured in `$HOME` on 2026-09-04 had: linked worktrees outliving their parent.)
+ *
+ *   `.git` is UNREADABLE or UNPARSEABLE — whether a record exists is UNKNOWABLE, so this KEEPS.
+ *     An ambiguous signal never destroys; that is the same direction `activity-unknown` already
+ *     fails one gate above, and the direction the 2026-07-31 incident was decided in the wrong
+ *     one. A kept directory costs disk; a wrongly removed one costs work.
+ *
+ * `registration` is the caller's ALREADY-COMPUTED {@link resolveWorktreeRegistration} result —
+ * threaded in rather than re-derived so this decision cannot disagree with the `live-branch`
+ * gate that read the same lookup, and so the reaper still shells `git worktree list` exactly once
+ * per entry.
+ */
+export function planWorktreeRemoval(
+  entryPath: string,
+  registration: WorktreeRegistration | null,
+  fsImpl: Pick<typeof fs, "lstatSync" | "existsSync"> = fs,
+): WorktreeRemovalPlan {
+  // The parent already told us it registers this path — that IS the linked case, and no
+  // re-reading of `.git` can contradict a lookup that just succeeded against the real repo.
+  if (registration) return { kind: "git-remove", repoDir: registration.repoDir };
+
+  let gitStat: { isDirectory(): boolean };
+  try {
+    gitStat = fsImpl.lstatSync(join(entryPath, ".git"));
+  } catch (e) {
+    // ENOENT is "not a worktree" — reapable, and the ONLY error shape that is. Anything else
+    // (EACCES, EIO, a `.git` we can see but not stat) leaves the question open, so it keeps.
+    return (e as NodeJS.ErrnoException)?.code === "ENOENT" ? { kind: "rm-only" } : { kind: "keep" };
+  }
+  if (gitStat.isDirectory()) return { kind: "rm-only" }; // standalone clone — owns its own records
+
+  const repoDir = resolveWorktreeRepoDir(entryPath);
+  if (!repoDir) return { kind: "keep" }; // a `.git` FILE we could not read or parse — unknowable
+  // Parsed, but the parent is gone: nothing can hold a record for this tree, so `rmSync` is the
+  // only primitive left and is safe precisely because the parent is confirmed absent.
+  if (!fsImpl.existsSync(repoDir)) return { kind: "rm-only" };
+  // Parent present but not registering this path — the record is already gone. Prune behind the
+  // removal anyway; it is idempotent and collects anything the registration lookup missed.
+  return { kind: "rm-only", repoDir };
+}
+
+/**
+ * Execute a {@link planWorktreeRemoval} decision. Throws on failure so the reaper's own
+ * per-entry try/catch records `removal-failed` and the pass continues — the same best-effort
+ * shape every other removal in this file already has.
+ *
+ * `--force` is deliberate and is what keeps this a DEFECT FIX rather than a selection change:
+ * plain `git worktree remove` refuses on a tree with modified OR untracked files (measured:
+ * `fatal: '<path>' contains modified or untracked files, use --force to delete it`), and a stale
+ * run worktree nearly always carries untracked build output — so omitting `--force` would keep
+ * almost everything and silently disable the W1-T175 reaper. Today's `rmSync` already removes
+ * these trees unconditionally; `--force` reproduces exactly that set while adding the admin-record
+ * cleanup. WHETHER a dirty tree deserves protection is a SELECTION question, owned by the
+ * liveness/age gates above, and is not reopened here.
+ */
+function executeWorktreeRemoval(
+  entryPath: string,
+  // `keep` is excluded at the type level, not merely by convention: the caller must have already
+  // acted on it (by keeping the entry) before anything here could destroy something.
+  plan: Exclude<WorktreeRemovalPlan, { kind: "keep" }>,
+): void {
+  if (plan.kind === "git-remove") {
+    execFileSync("git", ["-C", plan.repoDir, "worktree", "remove", "--force", entryPath], {
+      stdio: "pipe",
+    });
+    return;
+  }
+  fs.rmSync(entryPath, { recursive: true, force: true });
+  if (!plan.repoDir) return;
+  try {
+    execFileSync("git", ["-C", plan.repoDir, "worktree", "prune"], { stdio: "pipe" });
+  } catch {
+    // Best-effort, and never a reason to report the removal itself as failed: the tree IS gone,
+    // and `prune` is level-triggered — the next pass (or pruneStaleRuns) collects the record.
+  }
+}
+
+/**
  * Default {@link WorktreeReapOpts.branchIsLiveUpstream}: does `branch` still exist on
  * `origin`? Mirrors the fixture forensics' own check (`gh api .../branches/<b>` => 404
  * ⇒ deleted upstream) with plain git plumbing. FAIL CLOSED on anything ambiguous — a
@@ -4412,6 +4543,12 @@ function defaultBranchIsLiveUpstream(branch: string, repoDir: string): boolean {
  * reaped, however old; everything else is reaped only once past `maxAgeMs`. A
  * per-entry failure (a removal hiccup, an unreadable entry) is best-effort and
  * never blocks the rest of the pass — mirrors pruneStaleRuns' own per-item guards.
+ *
+ * HOW an entry is removed is a separate decision from WHETHER, and lives in
+ * {@link planWorktreeRemoval}: a LINKED worktree (which is what {@link worktreeAdd} puts under
+ * {@link worktreesDir}) dies through `git worktree remove --force` in its own parent, so its
+ * admin record dies with it. A bare `rmSync` here is what stranded records as `prunable` and
+ * left git refusing the branch — the 2026-07-31 destruction CLAUDE.md records.
  */
 export function reapStaleWorktrees(root: string, opts: WorktreeReapOpts = {}): WorktreeReapSummary {
   const isPidAlive = opts.isPidAlive ?? defaultIsPidAlive;
@@ -4491,9 +4628,19 @@ export function reapStaleWorktrees(root: string, opts: WorktreeReapOpts = {}): W
       keep(name, "recent-activity");
       continue;
     }
+    // HOW to remove it, decided BEFORE anything is destroyed — a linked worktree must die through
+    // its parent (`git worktree remove`), or its admin record is stranded `prunable` and git keeps
+    // refusing the branch. See {@link planWorktreeRemoval} for all five cases and the 2026-07-31
+    // destruction that motivates them. `registration` is the lookup the live-branch gate above
+    // already made, threaded in rather than re-derived.
+    const removalPlan = planWorktreeRemoval(entryPath, registration);
+    if (removalPlan.kind === "keep") {
+      keep(name, "git-unreadable"); // unknowable `.git` — the ambiguous signal keeps, as always
+      continue;
+    }
     try {
       if (!dryRun) {
-        fs.rmSync(entryPath, { recursive: true, force: true });
+        executeWorktreeRemoval(entryPath, removalPlan);
         removeRunLock(entryPath); // clear the sibling lock so it can't linger widowed
         // MERGE RESOLUTION (W1-T406 × W1-T405): main added this base-record cleanup while this
         // branch added the `dryRun` guard. It belongs INSIDE the guard — the base record is a
