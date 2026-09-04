@@ -1,0 +1,68 @@
+- id: W1-T2842
+  title: "GPT-5.3-Codex-Spark is proven on the fleet but cannot serve economy/low work"
+  repo: remudero
+  depends_on: [W1-T2573, W1-T2711]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: "blast-radius"
+  budget_usd: 12.00
+  files:
+    - .remudero/mounts.yaml
+    - test/codex-spark-economy-routing.test.ts
+  origin: "operator-session#spark-smart-selector-2026-09-04"
+  plan_refs: ["W1-T2572", "W1-T2573", "W1-T2711", "W1-T2840"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED on origin/main on 2026-09-04: the reviewed capability table maps
+    GPT-5.3-Codex-Spark only into economy/medium and economy/high. The economy/low row contains
+    only GPT-5.4-Mini, so low-effort documentation, plan-lint and manual work cannot select Spark
+    even when it is account-visible, healthy and has more independent subscription headroom.
+
+    OBSERVED on the Azure fleet with Codex CLI 0.152.0: a read-only, no-tool Spark canary using the
+    daemon container's exact seccomp/AppArmor profile completed in 4.4 seconds and returned its
+    exact output contract. The authenticated CLI inventory exposes Spark with low, medium, high
+    and xhigh reasoning. OpenAI's current Codex model documentation describes Spark as the
+    ultra-fast, less-capable, text-only 128K model for near-instant coding iteration with its own
+    usage limits. Every current economy/low mount has a context budget at or below 60K.
+
+    This is a routing-policy data gap, not a new provider adapter. W1-T2573 already makes the
+    candidate list reviewed data. W1-T2711 already intersects it with the authenticated visible
+    model list, supported effort and the matching quota bucket, then ranks eligible candidates by
+    tightest remaining headroom. An account without Spark therefore skips it rather than failing,
+    and a depleted Spark bucket cannot veto Luna or Claude.
+  design: |
+    Add `gpt-5.3-codex-spark` as the first economy/low Codex candidate and
+    `gpt-5.6-luna` as its same-capability fallback. Retain `gpt-5.4-mini` at the end of this narrow
+    change so model retirement policy is not silently bundled into a Spark activation.
+
+    Add a purpose-named test that loads the real mounts table and drives the real Codex selector.
+    Prove that economy/low selects Spark when its independent bucket has usable headroom, chooses
+    Luna when Spark is absent or below reserve, and never promotes an economy request into a
+    balanced or frontier model. Preserve every non-economy row byte-for-byte.
+
+    Do not add a model-name heuristic, force Spark when it is absent, bypass supported-effort or
+    reserve checks, change provider enablement, alter the daemon/Serve lifecycle, or promote Spark
+    beyond the economy capability without measured task outcomes.
+  acceptance:
+    - claim: "the real economy/low capability row offers Spark first and Luna as a same-capability fallback"
+      proof: "unit test: test/codex-spark-economy-routing.test.ts"
+    - claim: "an account-visible Spark with usable independent headroom is selected for an economy/low request"
+      proof: "unit test: test/codex-spark-economy-routing.test.ts"
+    - claim: "an absent, unsupported or below-reserve Spark is bypassed and an eligible Luna remains selectable"
+      proof: "unit test: test/codex-spark-economy-routing.test.ts"
+    - claim: "the change cannot route economy work to a balanced or frontier Codex model and leaves every non-economy candidate row unchanged"
+      proof: "unit test: test/codex-spark-economy-routing.test.ts"
+  falsifier: |
+    Close without implementation if the Azure subscription cannot execute Spark, if the live
+    model inventory omits low reasoning, if any economy/low mount exceeds Spark's 128K context, or
+    if the current selector forces an unavailable candidate instead of filtering through live
+    visibility and headroom. None held at filing: the fleet canary passed, the model exposes low,
+    the largest relevant mount is 60K, and `selectCodexModel` filters candidates before ranking.
+  note: |
+    `rmd next-task-id --reserve` reported `RESERVED W1-T2842 on origin` before this shard was
+    written. The direct canary used no repository write tools and did not change durable routing.
+    This task makes Spark eligible only; measured quality, latency, retry and acceptance outcomes
+    remain the evidence required for any later promotion beyond economy work.
