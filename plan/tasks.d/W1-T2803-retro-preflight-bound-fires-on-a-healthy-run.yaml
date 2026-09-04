@@ -1,0 +1,210 @@
+- id: W1-T2803
+  title: "the retro prepublish preflight's 20-minute bound is a PER-COMMAND timeout applied to a 200-suite run on a host that is also running the fleet — every retro since 2026-09-03 dies at exit_class process_timeout, resumes an opus-5 Architect to repair a failure carrying zero failing tests, and then tells the operator a diagnostic branch is preserved at a worktree that was never pushed and has already been reaped"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: "span"
+  budget_usd: 12.00
+  files: [src/lib/retro-preflight.ts, src/run-task.ts, test/retro-preflight-bound-fires-on-a-healthy-run.test.ts]
+  origin: "operator-decision#w1-t2803-retro-preflight-bound-2026-09-04"
+  plan_refs: ["W1-T312", "W1-T380", "W1-T382", "W1-T2728"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THIS IS THE FIFTH INSTANCE OF ONE SHAPE — A BOUND THAT FIRES ON A HEALTHY CONDITION — AND FIVE
+    IS AN ARGUMENT ABOUT HOW BOUNDS GET SIZED HERE, NOT ONE MORE NUMBER TO RAISE.
+
+      1. W1-T312 — ci-gate's wait cap was set below this repo's real required-check wall-clock, so a
+         green-in-progress sibling was timed out rather than waited for. Fixed by MEASURING the
+         wall-clock and documenting the measurement beside the value:
+         `.github/workflows/ci-gate.yml` carries `WAIT_CAP_SECONDS: "2400"` with the job's own
+         comment reading "the cap is WAIT_CAP_SECONDS (measured + documented in the job env above)".
+      2. W1-T380/#1392 — a deploy ceiling consumed by a dry run that delivered nothing.
+      3. W1-T382/#1401 — a check-wait bound where 21 of 21 PRs ever booked as a timeout later
+         merged; the fix replaced a fixed ITERATION COUNT with a derivative (no forward motion
+         across STALL_WINDOW identical polls), so the bound stopped being a deadline at all.
+      4. `CLAUDE_HEALTH_TIMEOUT_MS = 3_000` (`src/lib/claude-model-health.ts`) — a 3-second bound on
+         a Claude status read.
+      5. THIS ONE.
+
+    CLAUDE.md already names the pattern under "Investigation discipline" and already names three of
+    those instances. What it does not yet carry is the sizing DISCIPLINE the repeated instance argues
+    for, and this shard is the fifth chance to establish it rather than re-tune a constant.
+
+    THE BOUND, OBSERVED IN SOURCE AT HEAD 3bc1542.
+    `RETRO_PREFLIGHT_TIMEOUT_MS = 20 * 60 * 1000` (`src/lib/retro-preflight.ts`), reached only
+    through `commandOptions(worktreePath)`, which is called TWICE per attempt — once for
+    `enumerateSuites` and once for the `scripts/test-with-retry.mjs` run. So it is a PER-COMMAND
+    timeout, while `runAttempt` measures `elapsedMs` across BOTH commands.
+
+    THAT ARITHMETIC IDENTIFIES THE CAUSE AND IS THE REASON THIS IS NOT A HANG. The operator measured
+    `elapsed_ms: 1200948`, `exit_class: "process_timeout"`, `signal: SIGTERM`. The bound is
+    1200000ms. The difference is 948ms — enumeration plus attempt overhead. A run that hung would
+    not land 948ms over a per-command bound measured across two commands; a run whose SECOND command
+    was killed exactly at the bound lands precisely there. The bound fired on a run that was still
+    working.
+
+    THE CORPUS THE BOUND IS SIZED AGAINST IS GROWING, WHICH IS WHY A NEW CONSTANT RE-ARMS THE SAME
+    DEFECT. `node --import tsx scripts/diff-class.mjs --list-plan-reading-suites` returns 200 suites
+    at head 3bc1542, MEASURED IN THIS CHECKOUT. The operator's incident report counts 193. The
+    plan-reading suite set is derived from the tree, so it grows with the tree, and a fixed constant
+    chosen against today's count decays into the same failure at a date nobody will connect to it.
+    The 2026-09-03 onset is what that decay looks like from the outside.
+
+    WHAT ONE FIRING COSTS, FROM `runRetroPrepublishPreflight`'S OWN CONTROL FLOW.
+    A first failure is not terminal: `opts.repair(repairPrompt(first.failure!))` runs
+    UNCONDITIONALLY on any first-attempt failure, then `regenerateHarnessArtifacts`, then a SECOND
+    full `runAttempt`. So a timeout costs two bounds of wall clock — 40 minutes — plus one resumed
+    Architect session in between. At roughly 16 retros/day that is the ~$7.24/day the operator
+    ranked, and it buys nothing.
+
+    AND THE REPAIR IS DISPATCHED AGAINST NOTHING. `repairPrompt` renders `exit_class:
+    process_timeout` and `failing_tests: - (no failing test name parsed)` — because a killed run
+    emits no `not ok` lines to parse — inside a prompt whose standing instruction is "Repair the
+    current branch only … Commit the smallest plan-only correction." An opus-5 Architect is being
+    asked to find a plan defect in a run that was killed while passing. This is the same
+    empty-evidence shape the fix rung already refuses by name (`fix.stood_down`, site
+    `rung.empty_ci_failures`: "standing down rather than spending a strike on empty evidence"), one
+    subsystem over and not yet refused here.
+
+    THE SECOND HALF: THE MESSAGE PROMISES EVIDENCE IT DOES NOT LEAVE, AND IT IS FALSE TWICE.
+    `src/run-task.ts` says, on `!preflight.ok`:
+      "prepublish validation failed after N attempt(s) — marker unchanged; diagnostic branch
+       preserved at /home/node/Remudero/worktrees/run-RETRO-…"
+      (i)  THE BRANCH IS NEVER PUSHED. `gitPushRunBranch(worktreePath)` sits BELOW that `return 1`
+           — publication begins only after the gate passes. So the named branch exists on that host
+           and nowhere else, and an operator reading the message off the fleet cannot reach it.
+      (ii) THE DIRECTORY IS RECLAIMED. `reapStaleWorktrees` (`src/lib/worker.ts`) keeps a worktree
+           only for a live pid or a branch live upstream; a failed retro has neither once the run
+           exits, so the entry falls through to the age gate and is reaped. The operator observed
+           exactly this — `worktree.reaped` rows for these runs and no surviving directories.
+    A message that promises preserved evidence and delivers none is worse than one that says
+    nothing: it sends the reader to look for a directory instead of at the ledger row that does
+    survive, and it did so on every one of these failures.
+  design: |
+    ONE CONCERN: the retro prepublish preflight's TIMEOUT PATH — what makes it fire, what it costs
+    when it fires wrongly, and whether what it then reports is true. The bound and the message are
+    the same failure event and are fixed together; splitting them would ship a correctly-sized bound
+    whose one remaining firing still lies about the evidence.
+
+    (i) MEASURE BEFORE CHANGING ANY NUMBER. Run the preflight's real command set on the FLEET HOST
+    that runs it, under the load it actually runs under (the fleet is running), and report a
+    DISTRIBUTION rather than one sample: at least three runs, with the suite count and the host
+    named. A single measurement taken on an idle host is the reading that produced the current
+    constant. Report it in the PR body.
+
+    (ii) SIZE FROM THAT MEASUREMENT, WITH MARGIN, AND MAKE THE MARGIN AUDITABLE. Whatever value
+    lands must carry, in the source beside it, the measured wall-clock it was derived from, the host,
+    the date and the suite count at that date — the shape W1-T312 already established for
+    `WAIT_CAP_SECONDS` and the reason that bound has not re-fired. A bare larger integer is refused
+    by this task's own falsifier: it repeats the mistake at a different number and leaves the next
+    reader with nothing to check it against.
+    PREFER A DERIVED BOUND IF ONE IS DEFENSIBLE. W1-T382's fix was not a bigger number, it was a
+    DIFFERENT KIND of bound — no forward motion, rather than a deadline. If the build can express
+    "this run has stopped making progress" over the preflight's own streaming output, that is the
+    better answer and it does not decay with the suite count. If it cannot, say so with a reason and
+    take the measured-constant path; do not silently choose the easy one.
+
+    (iii) THE FAILURE MUST REPORT THE MEASURED ELAPSED BESIDE THE BOUND. Today the timeout error
+    reads `retro preflight exceeded <timeout>ms` — the BOUND only — and the operator-facing message
+    reports neither. `elapsed_ms` already reaches the ledger via `logAttempt`; the failure the human
+    reads must carry it too, with the bound and the suite count, so the next reader can separate a
+    genuine hang (elapsed far under the bound, or a process that never produced output) from a bound
+    that is too tight (elapsed pinned at the bound) WITHOUT re-deriving the arithmetic this shard's
+    rationale had to do by hand.
+
+    (iv) DO NOT SPEND AN ARCHITECT REPAIR ON A BOUND FAILURE. `process_timeout` (and, by the same
+    argument, `output_limit_exceeded` and `process_spawn_failed`) carries no failing test and names
+    no plan defect. Stand down on it the way the fix rung already stands down on zero enumerable
+    failures — ledger the reason, report it, and do not resume the producing session. A second
+    attempt against an unchanged bound is the same 20 minutes for the same answer. This is the
+    cost half of the finding and it is in scope; a fix that only widens the bound leaves an
+    Architect spawn wired to every future bound failure.
+
+    (v) THE MESSAGE TELLS THE TRUTH ABOUT WHAT SURVIVES. Name the artifact that actually outlives
+    the run — the ledger rows (`retro.preflight_failed`, with its exit class, elapsed and bounded
+    output excerpts) — and drop or qualify the preserved-branch claim. If the build wants the
+    worktree genuinely preserved, that is a real option, but it must then be MADE true (an explicit
+    keep, and a reaper signal that honours it), never asserted; the honest short message is
+    preferred to a preservation mechanism this task did not scope.
+
+    (vi) NOT IN SCOPE, EACH WITH A REASON:
+      - Making the preflight FASTER, or changing which suites `--list-plan-reading-suites` selects.
+        That is a different concern with a different falsifier, and it would let a bad bound hide
+        behind a faster run.
+      - `reapStaleWorktrees`' own policy. It is behaving correctly; the defect is a message that
+        contradicts it, not the reaper.
+      - The retro's publication order (W1-T2728 owns the gate-before-publish decision, and that
+        ordering is correct).
+      - Any other timeout constant in the tree. The five-instance argument is the RATIONALE for how
+        this one is sized; it is not a licence to re-tune the other four here.
+  acceptance:
+    - claim: "the bound is derived from a measurement taken on the host that runs it and the measurement travels with the value in source — host, date, measured wall-clock and suite count — rather than being asserted in a PR body that no later reader will find"
+      proof: "unit test: test/retro-preflight-bound-fires-on-a-healthy-run.test.ts"
+    - claim: "a genuinely hung preflight is still terminated: the bound is raised or re-shaped, never removed, and the falsifier drives a run past the new bound and asserts it is terminated with the timeout exit class"
+      proof: "grep: still terminated in test/retro-preflight-bound-fires-on-a-healthy-run.test.ts"
+    - claim: "a timeout failure reports the measured elapsed alongside the bound it exceeded, so a reader can tell a hang from a bound that is too tight without re-deriving the arithmetic by hand"
+      proof: "grep: elapsed beside the bound in test/retro-preflight-bound-fires-on-a-healthy-run.test.ts"
+    - claim: "a bound failure no longer resumes the producing Architect session, because a terminated run carries no failing test and names no plan defect to repair"
+      proof: "grep: no repair on a bound failure in test/retro-preflight-bound-fires-on-a-healthy-run.test.ts"
+    - claim: "the prepublish failure message no longer promises a preserved diagnostic branch, because the branch is never pushed and the worktree is reaped; it names what actually survives instead"
+      proof: "grep: names what survives in test/retro-preflight-bound-fires-on-a-healthy-run.test.ts"
+  falsifier: |
+    BOTH DIRECTIONS, AND THE SECOND MATTERS MORE. A bound raised until nothing ever fires is not a
+    bound; it converts every genuine hang into an unbounded run holding a retro slot forever.
+
+      FORWARD  — a preflight that timed out under the old bound completes under the new one. Prove
+                 this with the HOST MEASUREMENT from design (i), not with a fixture: a fake runner
+                 can be made to finish under any number.
+      REVERSE  — a run that exceeds the NEW bound is still terminated, still classified
+                 `process_timeout`, and still reports SIGTERM. Drive this deterministically through
+                 the injected `deps.run`/`deps.now` seams the module already exposes; it must not
+                 need a real 20-minute wall clock.
+
+    AND THE REPAIR-PATH DIRECTION, WHICH IS WHERE THE MONEY IS: assert that a `process_timeout`
+    first attempt performs NO repair spawn and NO second attempt, and — in the same file — that an
+    ORDINARY `tests_failed` first attempt still does both. A change that stands down on every
+    failure would pass a one-directional test and would silently delete the repair rung this
+    preflight exists to drive.
+
+    THE MESSAGE DIRECTION: assert the failure text does not claim a preserved branch. Pin the
+    absence, not a new wording — a test that greps for one exact replacement sentence reddens on
+    every future rewording and teaches nothing.
+
+    ONE MEASUREMENT TRAP, NAMED SO IT IS NOT REPEATED: the elapsed this shard reasons from is
+    `runAttempt`'s ACROSS-BOTH-COMMANDS figure, while the timeout is PER COMMAND. Any new
+    measurement must say which of the two it reports. Comparing a per-command bound against an
+    across-attempt elapsed is how a 948ms overshoot could otherwise read as a hang.
+  note: |
+    FILED 2026-09-04 from an operator incident report. The id was reserved on origin
+    (`refs/rmd-id/W1-T2803`, minted 12:36:22Z) before this filing.
+
+    WHAT WAS MEASURED IN THIS CHECKOUT AT HEAD 3bc1542, so the build does not re-derive it:
+      - `RETRO_PREFLIGHT_TIMEOUT_MS = 20 * 60 * 1000`, applied through `commandOptions`, which is
+        called once per command and twice per attempt.
+      - 200 plan-reading suites from `--list-plan-reading-suites` (the report counts 193).
+      - `runRetroPrepublishPreflight` runs at most two attempts, with an unconditional
+        `opts.repair(...)` between them on any first-attempt failure.
+      - `gitPushRunBranch` is below the `!preflight.ok` return, so the retro branch is local-only on
+        that path; `reapStaleWorktrees` keeps only a live pid or a live upstream branch.
+    WHAT IS THE OPERATOR'S MEASUREMENT, NOT THIS FILING'S: `elapsed_ms: 1200948`, the SIGTERM, the
+    ~16 failures/day, the $7.24/day ranking, and the observed `worktree.reaped` rows. The
+    1200948 − 1200000 = 948ms arithmetic is this filing's, over those two numbers.
+
+    risk:high with band_meaning:span, DECLARED RATHER THAN DODGED: `subsystemsOf` counts
+    `src/lib/retro-preflight.ts` and `src/run-task.ts` as two concerns, and both are genuinely
+    needed — the bound and the exit classification live in the first, the operator-facing message in
+    the second. `band_meaning: span` reports that width instead of hiding it, which is what a wide
+    span already admits (W1-T2503). Moving the message into the library purely to score one
+    subsystem would be a refactor invented to satisfy a linter, and is refused.
+
+    ON THE PROOFS: criterion 1 is the pure-path `unit test:` form so it earns the `not_yet_built`
+    carve-out on this plan-only head (`judgeCriterion` needs `kind === "test"`, `!nameFiltered`, the
+    path in this shard's flow-style `files:`, and the file ABSENT at head — all four hold). The
+    remaining four are `grep:` anchors into that same not-yet-written falsifier, the shape W1-T2793
+    already uses, so each criterion discriminates on the build PR instead of four criteria resolving
+    to one whole-file pass. No pattern contains `*`, `.`, `^`, `$` or `[`, so none is refused by the
+    grep-safety check and none is silently a regex.
