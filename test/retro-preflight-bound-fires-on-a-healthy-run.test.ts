@@ -17,6 +17,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   RETRO_PREFLIGHT_STALL_MS,
+  RETRO_PREFLIGHT_TOTAL_BACKSTOP_MS,
   runRetroPrepublishCommand,
   runRetroPrepublishPreflight,
   type RetroPrepublishCommandResult,
@@ -25,8 +26,9 @@ import {
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
-function options(timeout: number): Parameters<RetroPrepublishRunner>[2] {
-  return { cwd: REPO_ROOT, encoding: "utf8", maxBuffer: 1024 * 1024, timeout, env: { ...process.env } };
+function options(timeout: number, totalBackstopMs?: number): Parameters<RetroPrepublishRunner>[2] {
+  return { cwd: REPO_ROOT, encoding: "utf8", maxBuffer: 1024 * 1024, timeout, env: { ...process.env },
+           ...(totalBackstopMs === undefined ? {} : { totalBackstopMs }) };
 }
 
 /** A child that prints every `everyMs` for `totalMs`, so it is never silent for long but runs
@@ -127,14 +129,46 @@ test("W1-T2803: the prepublish failure message names what survives, and no longe
   assert.match(runTask, /prepublish validation failed[\s\S]{0,400}retro\.preflight_failed/, "the message names the ledger rows that do outlive the run");
 });
 
-test("W1-T2803: the bound's measurement travels with the value in source — host, date and suite count, not a bare integer", () => {
+test("W1-T2803: the bound's measurement travels with the value in source — the fleet host's own run, its load curve and its ZERO failures, not a bare integer", () => {
   // W1-T312's `WAIT_CAP_SECONDS` established this shape and is the reason that bound has not
-  // re-fired: a later reader can check the number against what it was derived from.
+  // re-fired: a later reader can check the number against what it was derived from. The reading
+  // that matters is the one taken on the host that RUNS this, under the contention it runs under.
   const source = readFileSync(join(REPO_ROOT, "src", "lib", "retro-preflight.ts"), "utf8");
   const doc = source.slice(0, source.indexOf("export const RETRO_PREFLIGHT_STALL_MS"));
-  assert.match(doc, /MEASURED 2026-09-04/, "the date the measurement was taken");
-  assert.match(doc, /mini/, "the host it was taken on");
-  assert.match(doc, /201 enumerated/, "the suite count at that date");
-  assert.match(doc, /re-armed on every stdout\/stderr chunk/, "and what the bound actually measures");
+  assert.match(doc, /Azure fleet container/, "the host that actually runs it");
+  assert.match(doc, /2026-09-04/, "the date the measurement was taken");
+  assert.match(doc, /1488602 ms/, "the measured wall clock on that host");
+  assert.match(doc, /203 enumerated/, "the suite count at that date");
+  assert.match(doc, /FAILURES: 0/, "and the zero that makes this a duration problem and nothing else");
+  assert.match(doc, /min 1\.71, p50 12\.13, p90 20\.04, max 22\.34/, "the load curve the run executed under");
+  assert.match(doc, /50 samples/, "including how many samples it rests on");
   assert.ok(RETRO_PREFLIGHT_STALL_MS > 0, "the bound is still a bound");
+});
+
+test("W1-T2803: the source names elapsed-reporting as the durable deliverable and the constants as stopgaps, because the suite count moves", () => {
+  // The corpus went 193 -> 201 -> 203 during the investigation. Whoever re-sizes next must be told
+  // which half of this fix survives that drift, or they re-size by guessing exactly as before.
+  const source = readFileSync(join(REPO_ROOT, "src", "lib", "retro-preflight.ts"), "utf8");
+  assert.match(source, /THE DURABLE DELIVERABLE IS ELAPSED-REPORTING/);
+  assert.match(source, /THE CONSTANTS ARE STOPGAPS/);
+  assert.match(source, /193 -> 201 -> 203/, "the drift that makes any fixed total a moving target");
+});
+
+test("W1-T2803: a run that keeps emitting but never finishes is still terminated by the total backstop", () => {
+  // The one case SILENCE cannot catch. Deliberately far above any healthy run: the measured fleet
+  // run is 1488602ms and this is ~2.4x it, so it can only fire on something genuinely wrong.
+  assert.ok(
+    RETRO_PREFLIGHT_TOTAL_BACKSTOP_MS > 1_488_602,
+    "the backstop must sit above the measured healthy run on the fleet host, or it re-arms this task's own defect",
+  );
+  assert.ok(RETRO_PREFLIGHT_TOTAL_BACKSTOP_MS >= RETRO_PREFLIGHT_STALL_MS, "and above the primary control it backs");
+});
+
+test("W1-T2803: the backstop fires on a chatty run that outruns it, naming the elapsed beside the bound", async () => {
+  // Chatty enough that the stall bound never arms, but past a deliberately tiny backstop.
+  const result = await runRetroPrepublishCommand(process.execPath, ["-e", CHATTY(20, 5_000)], options(60_000, 300));
+  assert.ok(result.error, "a run past the total backstop must be terminated even while emitting");
+  assert.equal((result.error as NodeJS.ErrnoException).code, "ETIMEDOUT");
+  assert.match(result.error?.message ?? "", /total backstop/);
+  assert.match(result.error?.message ?? "", /elapsed \d+ms/, "the measured elapsed rides beside the bound here too");
 });

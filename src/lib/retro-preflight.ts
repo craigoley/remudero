@@ -29,27 +29,66 @@ const RETRO_PREFLIGHT_MAX_BUFFER_BYTES = 32 * 1024 * 1024;
  * independence is the point: it is why a value derived off the fleet host is defensible here
  * where a total-duration value would not have been.
  *
- * MEASURED 2026-09-04 on the operator mini (Darwin 25.5.0, fleet idle), 201 enumerated
- * plan-reading suites, over a 40-suite sample of that exact command line:
- *   total 235482ms, 937 output chunks, LONGEST SILENT GAP 168843ms — and that gap ran to the
- *   end of the run, so a healthy preflight really is silent for minutes at a time.
- * THAT NUMBER IS WHY THIS BOUND IS 15 MINUTES AND NOT THE 5 THIS TASK FIRST WROTE. Five would
- * have been 1.78x the observed gap on an IDLE mini, and the fleet host is slower and loaded —
- * which is the same too-tight-margin mistake this task exists to undo, re-armed one layer down.
- * 15 minutes is ~5.3x the measured maximum.
+ * THE MEASUREMENT THAT SIZES THIS, TAKEN ON THE HOST THAT RUNS IT — the Azure fleet container,
+ * 2026-09-04, under the contended regime the retro actually executes in:
  *
- * THE HONEST LIMIT OF THAT MEASUREMENT: it is a 40-suite sample taken on the mini, not the
- * 201-suite run on the fleet host. A silent gap is bounded by the SLOWEST SINGLE SUITE rather
- * than by the corpus size, so it transfers far better than a total duration would — but a
- * larger corpus has more chances to contain a slower suite, and this sample cannot rule that
- * out. The margin above is sized for that uncertainty, and the failure message now reports the
- * measured elapsed so the NEXT re-size is arithmetic rather than another guess.
+ *   wall clock   1488602 ms (24m 48s)     exit 0
+ *   tests        4386                     FAILURES: 0
+ *   suites       203 enumerated plan-reading suites
+ *   load avg     50 samples: min 1.71, p50 12.13, p90 20.04, max 22.34
+ *
+ * THE ZERO IS THE FINDING; THE DURATION IS ONLY ITS CONSEQUENCE. 4386 tests passed and none
+ * failed. The 20-minute deadline was never masking a broken suite — it was killing a healthy run
+ * 289 seconds from the end, at 1.24x the bound. Every `process_timeout` retro since 2026-09-03
+ * was a duration problem and nothing else, which is exactly what this task assumed and what this
+ * run proves rather than infers.
+ *
+ * A CONTENDED NUMBER ON THE RIGHT HOST BEATS A CLEAN NUMBER FROM THE WRONG ONE. An earlier
+ * revision sized this from a 40-suite sample on the operator mini (idle, Darwin): total 235482ms,
+ * 937 chunks, longest silent gap 168843ms. That reading is retained here because it is what sizes
+ * the SILENCE bound — the mini can measure inter-chunk gaps and the container run above reports
+ * only totals — but it was the wrong host to size anything from, and it is no longer the reading
+ * this file rests on.
+ *
+ * WHY 15 MINUTES OF SILENCE. The mini's longest healthy gap was 168843ms (~2m 49s); 15 minutes is
+ * ~5.3x that. The quantity being bounded is ONE test's think-time, which a loaded host stretches
+ * by a FACTOR — the container's own load curve puts max/p50 at 22.34/12.13, about 1.84x — so a
+ * 5.3x margin absorbs the worst sampled contention with room and still refuses a genuine hang
+ * within fifteen minutes. Total duration does not enter this number at all, which is why the
+ * 24m48s run above passes it untouched.
+ *
+ * AND THE SUITE COUNT IS A MOVING TARGET, WHICH DECIDES WHICH HALF OF THIS FIX IS DURABLE.
+ * The corpus went 193 -> 201 -> 203 suites DURING this investigation alone. Any constant sized
+ * against a total duration is therefore stale on the day it lands.
+ *   - THE DURABLE DELIVERABLE IS ELAPSED-REPORTING: the failure below names the measured elapsed
+ *     beside the bound it exceeded, so the next re-size is ARITHMETIC done by a reader who has
+ *     both operands, not another guess.
+ *   - THE CONSTANTS ARE STOPGAPS, and {@link RETRO_PREFLIGHT_TOTAL_BACKSTOP_MS} most of all.
+ * Say it that way round when re-tuning: fix the reporting first, then argue about the number.
  *
  * THE RUNAWAY DIRECTION IS STILL BOUNDED, by {@link RETRO_PREFLIGHT_MAX_BUFFER_BYTES}: a run
  * that emits without progressing trips the 32MB cap and is killed as `output_limit_exceeded`.
- * So both failure directions keep a terminator and neither depends on total wall clock.
  */
 export const RETRO_PREFLIGHT_STALL_MS = 15 * 60 * 1000;
+
+/**
+ * A GENEROUS TOTAL-DURATION BACKSTOP, AND EXPLICITLY A STOPGAP (W1-T2803).
+ *
+ * The stall bound above is the PRIMARY control and the only one that does not decay with the
+ * corpus. This exists for the one case silence cannot catch: a run that keeps emitting but never
+ * finishes would otherwise hold a retro slot until the 32MB output cap trips, which a steady
+ * trickle of TAP can take hours to reach.
+ *
+ * THE MARGIN, AND WHAT IT PROTECTS AGAINST. The measured healthy run on the fleet host is
+ * 1488602ms at p50 load 12.13. That run is an upper bound within the RIGHT regime but NOT the
+ * worst case: the same 50 samples put p90 at 20.04 and max at 22.34, so a run executing under
+ * sustained peak contention could plausibly take ~1.84x the median-load figure. 60 minutes is
+ * ~2.4x the measured run — it covers that contention multiplier AND leaves room for corpus growth
+ * at the observed 193 -> 203 drift, so it does not become the next bound that fires on a healthy
+ * run. It is deliberately far above anything a working preflight should reach: a backstop that
+ * competes with the primary control is just a second deadline.
+ */
+export const RETRO_PREFLIGHT_TOTAL_BACKSTOP_MS = 60 * 60 * 1000;
 /**
  * Exit classes produced by the harness's own BOUNDS rather than by the suite under test
  * (W1-T2803). Each names a run that was terminated or never started, so none can carry a failing
@@ -77,6 +116,12 @@ export type RetroPrepublishRunner = (
     encoding: "utf8";
     maxBuffer: number;
     timeout: number;
+    /**
+     * W1-T2803: the whole-command deadline, distinct from `timeout`, which bounds SILENCE.
+     * OPTIONAL so every existing test double satisfies this interface unchanged; omitted ⇒
+     * {@link RETRO_PREFLIGHT_TOTAL_BACKSTOP_MS}, the same value `commandOptions` supplies.
+     */
+    totalBackstopMs?: number;
     env: NodeJS.ProcessEnv;
   },
 ) => RetroPrepublishCommandResult | Promise<RetroPrepublishCommandResult>;
@@ -184,8 +229,26 @@ export function runRetroPrepublishCommand(
       }, options.timeout);
     };
     armStallBound();
+    // W1-T2803: the total backstop is NOT re-armed — it is a single deadline for the whole
+    // command, and deliberately far above any healthy run (see its constant's doc). It exists only
+    // so a run that keeps emitting but never finishes cannot hold a retro slot indefinitely; the
+    // stall bound above is what actually catches a hang.
+    const backstop = setTimeout(() => {
+      if (!processError) {
+        const elapsedMs = Date.now() - startedAt;
+        processError = Object.assign(
+          new Error(
+            `retro preflight exceeded the ${options.totalBackstopMs ?? RETRO_PREFLIGHT_TOTAL_BACKSTOP_MS}ms total backstop ` +
+              `(elapsed ${elapsedMs}ms, command: ${command})`,
+          ),
+          { code: "ETIMEDOUT" },
+        );
+      }
+      child.kill("SIGTERM");
+    }, options.totalBackstopMs ?? RETRO_PREFLIGHT_TOTAL_BACKSTOP_MS);
     child.once("close", (status, signal) => {
       clearTimeout(timer);
+      clearTimeout(backstop);
       resolve({ status, signal, stdout, stderr, ...(processError ? { error: processError } : {}) });
     });
   });
@@ -244,6 +307,7 @@ function commandOptions(worktreePath: string): Parameters<RetroPrepublishRunner>
     encoding: "utf8",
     maxBuffer: RETRO_PREFLIGHT_MAX_BUFFER_BYTES,
     timeout: RETRO_PREFLIGHT_STALL_MS,
+    totalBackstopMs: RETRO_PREFLIGHT_TOTAL_BACKSTOP_MS,
     env: { ...process.env },
   };
 }
