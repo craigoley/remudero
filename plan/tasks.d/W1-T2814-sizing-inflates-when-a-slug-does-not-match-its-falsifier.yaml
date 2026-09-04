@@ -1,0 +1,119 @@
+- id: W1-T2814
+  title: "RULE 19's SIZING VIOLATION INFLATES A RISK BAND SILENTLY WHEN A SHARD'S FILENAME SLUG DIFFERS FROM ITS OWN TEST'S MODULE ID — the message names two exits and the wrong one silences the error identically, so a lane that regrades to risk:high gets no signal it encoded a filename mismatch as real span; MEASURED 309 of 876 risk:high shards could have their span removed by a rename alone"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: medium
+  origin: architect
+  plan_refs: ["§12", "W1-T2525", "W1-T2543", "W1-T2809"]
+  files: [src/lib/task-linter.ts, test/sizing-inflates-when-a-slug-does-not-match-its-falsifier.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    A DIAGNOSTIC THAT SUGGESTS REMEDIES IS STEERING BEHAVIOUR, AND AN INCOMPLETE LIST STEERS WRONG.
+    Every error message enumerating fixes carries this exposure; this is the instance that was
+    measured.
+
+    THE DEFECT. `subsystemsOf` (src/lib/task-linter.ts) counts a test file's stem as a distinct
+    subsystem. W1-T2525 added a carve-out discounting a `test/` path whose `moduleIdFromPath`
+    EQUALS the shard's own filename slug, on the stated principle that a task's own falsifier is
+    not a second concern — narrowing W1-T2543's earlier discount, which applied to ANY `test/`
+    path unconditionally. The carve-out is right. But it keys on STRING EQUALITY between two names
+    a filer chooses independently, so A FEW WORDS' DIFFERENCE DEFEATS IT and the task reads as
+    spanning two subsystems when it spans one.
+
+    MEASURED INSTANCE, from this session. W1-T2809's filing tripped
+    `[sizing] spans 2 distinct subsystems/concerns (census-discovery-is-blind-to-a-second-idiom,
+    ci-parity) at risk:medium`. Its files were ONE source file and ONE test — the dominant shape
+    the carve-out exists for. Renaming the shard so its slug matched the test's module id made it
+    pass at `risk: medium` WITH NO OTHER CHANGE.
+
+    WHY IT MATTERS, AND IT IS NOT THE ANNOYANCE — THE WRONG REMEDY SILENCES THE ERROR IDENTICALLY.
+    The violation text names two exits: "raise to risk:high or decompose into one task per
+    concern". Regrading to `risk: high` ALSO makes the violation disappear, and looks like the
+    intended fix. A lane that does not open `subsystemsOf` inflates the band and receives no signal
+    that it did anything wrong — there is no second message, no warning, no ledger row. The gate is
+    honest about what it refused and silent about which of its two exits was appropriate.
+
+    INFLATED BANDS ARE NOT COSMETIC. `risk` drives sizing exemptions, dispatch ordering and effort
+    routing, so anything reading that field downstream may be reading a number that encodes a
+    FILENAME MISMATCH rather than real span. That is the same class as a gate answering wrong
+    rather than erroring.
+
+    THE POPULATION IS MEASURED, NOT ASSUMED, AND THE NUMBER IS LARGE. Re-derived over
+    plan/tasks.d/ at 7a13b300: of 876 `risk: high` shards carrying a `files:` list, 309 have a
+    span that exists SOLELY because a declared `test/` path's module id differs from the shard's
+    slug — one non-test stem, at least one test, and no test matching the slug. Removing the test
+    files leaves fewer than two stems, so a rename alone would drop the span.
+
+    STATE THE LIMIT OF THAT NUMBER HONESTLY: 309 is an UPPER BOUND ON EXPOSURE, not a count of
+    confirmed inflation. It says "this shard's span would vanish on a rename"; it does NOT say the
+    band was raised BECAUSE of it, since a task can be legitimately `risk: high` for blast radius
+    or operator judgment and merely happen to match the shape. The census's job is to size the
+    exposure, and 309 of 876 sizes it decisively either way.
+  design: |
+    TWO DELIVERABLES, AND THE FIRST DECIDES WHETHER THE SECOND MATTERS.
+
+    (1) THE CENSUS, WITH ITS ABANDONMENT FLOOR STATED UP FRONT. Re-run the predicate AT BUILD TIME
+    through the linter's OWN `subsystemsOf`/`moduleIdFromPath` — never the hand-rolled
+    re-derivation this note used — and record the measured count in the test. THE FLOOR: if fewer
+    than 20 `risk: high` shards show a span removable by rename alone, CLOSE THIS TASK UNBUILT and
+    record the measurement; at that size it is a message fix nobody needs a task for. The
+    2026-09-04 reading was 309, so the floor is expected to clear — but the build re-measures and
+    the floor binds on what IT reads, not on this note.
+
+    (2) THE MESSAGE NAMES THE THIRD EXIT, WITH ITS CONDITION. Today it names two. It must name
+    three, and the third must carry the CONDITION under which it applies, not stand as a bare
+    suggestion: the discount exists because a test that IS THIS TASK'S OWN FALSIFIER is not a
+    second subsystem, so the exit is available when the declared test is the suite written to prove
+    THIS task's criteria — and not otherwise.
+
+    THE TRAP, AND IT IS THE REASON THE CONDITION IS NOT OPTIONAL. Advertising the rename INVITES
+    GAMING IT. A message reading "rename your shard to match your test" converts a principled
+    discount into a dodge — any task spanning two real concerns could silence Rule 19 by renaming a
+    file, and this task would have built the next silent distortion while fixing this one. The
+    message must let a reader tell "my test is my own falsifier, so the carve-out legitimately
+    applies to me" apart from "rename to make this go away". Assert on the TEXT A READER WOULD ACT
+    ON, never merely that a string changed.
+
+    TWO THINGS THIS TASK MUST NOT DO, each a way of appearing to fix it while making things worse:
+
+    DO NOT WIDEN `subsystemsOf`'s CARVE-OUT to be more lenient — fuzzy matching, prefix matching,
+    "any single test file" — that is WEAKENING A GATE, and W1-T2525 narrowed this discount
+    deliberately because a task listing SOMEONE ELSE'S test file is still spanning concerns. This
+    task is about the MESSAGE and the CENSUS; the predicate is correct as written.
+
+    DO NOT EDIT ANY EXISTING SHARD'S `risk` BAND. If the census finds inflated ones, that is a
+    FINDING TO REPORT. A bulk correction would ride under this id and mutate other lanes' tasks —
+    including tasks currently in flight, whose dispatch ordering would change under them.
+
+    SELF-REFERENTIAL CHECK, RUN BEFORE PUSHING THIS FILING: this shard's own filename slug
+    (`sizing-inflates-when-a-slug-does-not-match-its-falsifier`) equals its own test's module id,
+    so the carve-out fires and it does NOT trip the rule it is about. A shard filed about this
+    defect that trips the defect would be its own counter-argument.
+  acceptance:
+    - claim: "a shard whose declared test's module id EQUALS its filename slug does not trip the span, and an otherwise-identical shard whose test differs by a few words DOES — the pair proves W1-T2525's carve-out is what does the work, not something else about the two fixtures"
+      proof: "unit test: test/sizing-inflates-when-a-slug-does-not-match-its-falsifier.test.ts"
+    - claim: "given a violation the own-falsifier carve-out could resolve, the message names that third exit AND the condition under which it applies — that the declared test is the suite proving THIS task's criteria — so a reader can tell whether it applies to them rather than reading it as permission to rename"
+      proof: "unit test: test/sizing-inflates-when-a-slug-does-not-match-its-falsifier.test.ts"
+    - claim: "deleting the message change reds a test by name, so the new text is load-bearing rather than decorative"
+      proof: "unit test: test/sizing-inflates-when-a-slug-does-not-match-its-falsifier.test.ts"
+    - claim: "the census predicate re-runs at build time through the linter's OWN subsystemsOf and records its measured count, and the stated abandonment floor is asserted against that measurement rather than against a number copied from the filing note"
+      proof: "unit test: test/sizing-inflates-when-a-slug-does-not-match-its-falsifier.test.ts"
+    - claim: "the carve-out itself is unchanged — a task declaring a test that is NOT its own falsifier still spans two subsystems and is still refused, so naming the third exit never widened the gate it explains"
+      proof: "unit test: test/sizing-inflates-when-a-slug-does-not-match-its-falsifier.test.ts"
+  note: |
+    FILED 2026-09-04, from W1-T2809's own filing tripping this rule. The sequence is the evidence:
+    the violation fired, the message offered "regrade to risk:high", regrading would have silenced
+    it, and only reading `subsystemsOf` revealed that the real remedy was a rename — a remedy the
+    message does not mention. W1-T2799's filing took the regrade exit EARLIER THE SAME SESSION and
+    took it correctly (it spans two genuine source stems, escalate and run-task), which is why the
+    two cases together are the falsifier pair rather than one anecdote: the same message, two
+    tasks, two different correct answers, and no way to tell them apart from the text.
+
+    SIBLINGS, DELIBERATELY NOT FOLDED IN: W1-T2809 (census discovery's single-idiom blindness — the
+    task whose filing surfaced this) and W1-T2790's ordering, which governs how a recognizer should
+    be built, not how a diagnostic should be worded. Each is its own concern under Rule 19.
