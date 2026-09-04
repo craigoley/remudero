@@ -1,0 +1,140 @@
+- id: W1-T2828
+  title: "THE CLAUDE CAPACITY READ CANNOT SAY WHICH ACCOUNT IT MEASURED — the operator switches subscriptions by hand and rmd follows whatever Claude Code is logged into, so two readings from two accounts are indistinguishable in the ledger and providerWindowConsumption will silently subtract one account's window from another's the moment two reset timestamps coincide"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: architect
+  plan_refs: ["§9", "W1-T265", "W1-T268", "W1-T333", "W1-T2800"]
+  files: [src/lib/worker-provider.ts, src/lib/worker.ts, test/the-capacity-read-cannot-say-which-account-it-measured.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    THIS IS EXPECTED OPERATOR BEHAVIOUR, NOT A MALFUNCTION, WHICH IS WHY IT RECURS. The operator
+    switches Claude subscriptions BY HAND on the Azure host — Claude Code CLI login, browser
+    bounce-out, code paste — and rmd follows whatever identity Claude Code is currently logged
+    into. The main subscription hits its session limit; he switches to an agent subscription with
+    session headroom but little weekly; he switches back when the 5h session window clears. Each
+    switch is deliberate and each one is invisible to every instrument rmd has.
+
+    WHAT THAT LOOKS LIKE IN ONE LOG WINDOW, and why it reads as corruption rather than as two
+    accounts: session 86→89→93 / weekly 60→60→61 / Fable 42, interleaved with session 2→4→5 /
+    weekly 92→93→93 / Fable 0, interleaved with session 10→17→20 / weekly 64→65→66 / Fable 42. A
+    5h session window rolling over explains 93→2. Weekly going 61→93→64 does not, and `weekly
+    (Fable)` flipping 42→0→42 is the tell, because Fable usage does not decrease.
+    tightest_remaining_percent swings 7↔47 with it and selectWorkerProvider reads that number to
+    choose between Claude and Codex.
+
+    WHERE THE READ AUTHENTICATES FROM, VERIFIED AT SOURCE. `readUsageSnapshotViaSdk`
+    (src/run-task.ts) calls `openUsageProbeSession` (src/lib/worker.ts), which calls the SDK
+    `query()` with NO env override and NO `home:` option. It therefore inherits the daemon's
+    ambient identity. Spawned workers do not: they get a redirected HOME and a copied worker
+    keychain (W1-T18, and W1-T2800 extended the same redirection to the Codex path). So the
+    GOVERNOR and the SPENDERS read different identities by construction the moment more than one
+    account exists on the host.
+
+    THE HAZARD WAS ALREADY WRITTEN DOWN, AND THAT IS ITS OWN FINDING. src/lib/account-usage.ts's
+    module header says, verbatim, and it predates the switching:
+
+      "it reads the OPERATOR'S login keychain while spawned workers read a copied worker keychain.
+       With one Anthropic account on the host both resolve to the same identity… That stops being
+       true the moment a second account exists on this host, at which point the governor would be
+       metering an account the workers are not spending."
+
+    A COMMENT THAT DOCUMENTS ITS OWN PRECONDITION WITH NO CHECK ATTACHED IS A HAZARD IN ITS OWN
+    RIGHT: the knowledge was present and inert, which is worse than absent, because the eventual
+    discovery reads as a surprise nobody could have had. The precondition is now satisfied and
+    nothing fires.
+
+    THE DISCRIMINATORS, IN DESCENDING STRENGTH.
+    (i) `oauthAccount.accountUuid` in `~/.claude.json` — STABLE PER ACCOUNT. This is the one to use.
+    (ii) `subscription_type` in the SDK response (`SdkUsageReading`, src/lib/headroom.ts) — TIER
+    ONLY, and therefore NOT a substitute: two subscriptions of the same tier read identically.
+    Worth recording that `usageSnapshotFromSdk` ALREADY RECEIVES it and discards it in the same
+    expression that reads it, collapsing it to a boolean-ish `billingMode` (non-empty string ⇒
+    subscription); `UsageSnapshot` carries only `{ billingMode, session, weekly }`.
+    (iii) `cachedUsageUtilization.accountUuid` in `~/.claude.json` — says whose usage the cached
+    block describes, which is a different question from who is logged in now.
+
+    THE BLAST RADIUS IS BOUNDED AND SAYING SO IS PART OF THE FILING. `tightest_remaining_percent`
+    is WRITTEN ONCE (worker.ts's `worker.provider.selected` row) and READ BACK BY NOTHING in
+    `src/` — measured, not assumed. So no trend, chart or rolling comparison is currently mixing
+    two accounts' series, and a reviewer should not assume worse. The live exposure is the single
+    comparison named below, not the reporting surface.
+  design: |
+    THE FIELD ALREADY EXISTS, WHICH MAKES THE LABEL HALF ADDITIVE. `ProviderCapacity` carries an
+    optional `accountLabel`. The CODEX path already populates it (`capacityFromBucket(bucket,
+    reading.accountId)`). `claudeCapacityFromUsage` sets it ZERO times, and
+    `worker.provider.selected` does not project `accountLabel` at all — so even Codex's existing
+    label never reaches the ledger.
+
+    TWO ADDITIVE CHANGES, AND THEY MUST MATCH THE CODEX PRECEDENT'S SHAPE. Populate `accountLabel`
+    on the Claude side from `oauthAccount.accountUuid`, and project it into the
+    `worker.provider.selected` row FOR BOTH PROVIDERS. An inconsistency between the two providers'
+    labels would defeat the purpose — a reader comparing rows must not have to know which provider
+    formats its label which way.
+
+    THE LATENT DEFECT IS WHY THIS IS NOT A LOGGING CHANGE. `providerWindowConsumption`
+    (src/lib/worker-provider.ts) compares a BEFORE and AFTER reading around every spawn and
+    contains ZERO identity checks — verified by reading the function. What protects it today is
+    INCIDENTAL, not designed: a window is comparable only when `name` AND `resetsAt` match exactly,
+    and a negative delta is refused as `counter-regressed`, so a mid-spawn switch usually lands in
+    `no-reset-stable-window` or `counter-regressed`. THAT IS LUCK. TWO ACCOUNTS WHOSE WEEKLY
+    WINDOWS SHARE A RESET TIMESTAMP WOULD MATCH AND YIELD A SILENT CROSS-ACCOUNT DELTA, attributed
+    to one worker's spend.
+
+    THE GUARD IS IMPOSSIBLE WITHOUT THE LABEL, which is the argument for ONE diff rather than
+    shipping the label as logging with the guard as a follow-up: a follow-up would leave the
+    unguarded subtraction in place for exactly as long as it took to schedule.
+
+    FAIL OPEN ON THE LABEL, NEVER ON THE CAPACITY READ. A missing, unparseable, or shape-changed
+    `~/.claude.json` must leave the capacity read working exactly as it does today, with the label
+    simply ABSENT. A host with one account has run fine without this for months and must keep
+    running. The label is an annotation on a reading, never a precondition for taking one.
+
+    NEVER READ OR LOG `emailAddress` OR `organizationName`. They sit beside `accountUuid` in the
+    same file and are unnecessary exposure. The uuid alone answers "which account", which is the
+    entire question. This mirrors account-usage.ts's own discipline: it projects identity fields
+    and discards the parsed object in the same expression, and persists a narrow projection that
+    deliberately excludes email and org.
+
+    NOT IN SCOPE, NAMED SO NOTHING IS ORPHANED: the console-driven subscription switching the
+    operator eventually wants (a separate, larger task that DEPENDS on this landing first — an
+    identity that cannot be read cannot be driven); changing which identity the probe authenticates
+    as, or redirecting the probe's HOME (that would change what is measured, not what is recorded);
+    and surfacing `subscription_type` through `UsageSnapshot`, which is a tier signal and answers a
+    different question than this task's.
+  acceptance:
+    - claim: "two capacity readings taken under different accounts produce DIFFERENT accountLabels, and repeated readings under one account produce a STABLE label — so a switch is visibly a different account rather than a corrupted number"
+      proof: "unit test: test/the-capacity-read-cannot-say-which-account-it-measured.test.ts"
+    - claim: "worker.provider.selected carries the account label for BOTH providers in the same field and the same shape, never Claude-only, so rows from the two providers are comparable by a reader that does not know which produced them"
+      proof: "unit test: test/the-capacity-read-cannot-say-which-account-it-measured.test.ts"
+    - claim: "providerWindowConsumption REFUSES a cross-account comparison: two readings whose window name AND resetsAt MATCH but whose accounts differ compute a delta before this change and are refused after it, so the guard is proven on the case incidental protection does not cover"
+      proof: "unit test: test/the-capacity-read-cannot-say-which-account-it-measured.test.ts"
+    - claim: "a same-account before/after comparison still computes its delta exactly as today, so the new guard refuses only cross-account pairs and never silently stops attributing ordinary spend"
+      proof: "unit test: test/the-capacity-read-cannot-say-which-account-it-measured.test.ts"
+    - claim: "an absent, unparseable or shape-changed ~/.claude.json leaves the capacity read READABLE with its windows intact and the label simply absent — the label fails open and is never a precondition for taking a reading"
+      proof: "unit test: test/the-capacity-read-cannot-say-which-account-it-measured.test.ts"
+    - claim: "no identity field other than accountUuid is read or emitted — emailAddress and organizationName appear in neither the capacity reading nor any ledger row this change touches"
+      proof: "unit test: test/the-capacity-read-cannot-say-which-account-it-measured.test.ts"
+  note: |
+    FILED 2026-09-04 from an on-host investigation of interleaved capacity readings that initially
+    looked like a corrupted read. THE READINGS ARE CORRECT; each describes a real account. What is
+    missing is the field that says WHICH, and the investigation is the filing trigger: three
+    engineers reading that log window would each have to re-derive "these are two accounts" from
+    the shape of the numbers, and the third fact needed to do that (Fable usage cannot decrease)
+    is not written down anywhere.
+
+    THE GUARD'S FALSIFIER IS THE LOAD-BEARING ONE and must be constructed deliberately, because
+    the case it covers is the one incidental protection hides: two readings with MATCHING window
+    `name` and MATCHING `resetsAt` and DIFFERENT accounts. A test that merely switches accounts
+    without pinning `resetsAt` equal will land in `no-reset-stable-window` and pass for the wrong
+    reason — proving the plumbing, not the guard. Prove it computes a delta BEFORE the change and
+    refuses AFTER.
+
+    SIBLINGS, DELIBERATELY NOT FOLDED IN: W1-T2800 (the Codex worker's HOME redirection — the same
+    governor-versus-spender seam one provider over, already merged) and the console-driven
+    switching named as out of scope in `design`. Each is its own concern under Rule 19.
