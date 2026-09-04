@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { declaredFilesForFiledIds, printLaneOverlapAdvisory } from "../src/run-task.js";
@@ -206,7 +205,21 @@ test("W1-T985: all three minting lanes reach the advisory, not just the CLI verb
   const src = readFileSync(join(import.meta.dirname, "..", "src", "run-task.ts"), "utf8");
   const callSites = [...src.matchAll(/printLaneOverlapAdvisory\(/g)].length;
   assert.ok(callSites >= 4, `expected the definition plus three lane call sites, found ${callSites}`);
-  const base = execFileSync("git", ["show", "origin/main:src/run-task.ts"], { cwd: join(import.meta.dirname, ".."), encoding: "utf8", maxBuffer: 1 << 26 });
-  assert.ok(/overlapAdvisoryLines\(/.test(base), "control: the base really does carry the CLI verb's own reader, so this query can see its corpus");
-  assert.equal([...base.matchAll(/printLaneOverlapAdvisory\(/g)].length, 0, "and on the base the lanes had no reader at all — the premise of this task");
+  // ANTI-VACUITY, WITHOUT A MOVING BASELINE. This used to read `origin/main:src/run-task.ts` and
+  // assert it carried ZERO call sites — "the premise of this task". That was true only while
+  // W1-T985 was UNMERGED. The moment it landed, `origin/main` carried the four call sites this
+  // very test requires at head, so the assertion inverted from premise to contradiction and read
+  // `4 !== 0` on main and on every branch cut from it (observed: main red, plus ci-shard 1 on
+  // #3998 and #3999, none of which had touched this code).
+  //
+  // A PREMISE ITS OWN MERGE DESTROYS CANNOT BE PINNED TO A MOVING REF — CLAUDE.md hazard (d):
+  // name the question the query actually answers. "Did the lanes lack a reader BEFORE this task?"
+  // is answered by history, not by whatever `origin/main` happens to be today, and re-asking it
+  // after the merge asks a different question that must fail. The control that survives is a
+  // LOCAL one, and it still refuses a regex that would match anything: the module must really be
+  // the one carrying the advisory, and a name it does not carry must read zero. The BEHAVIOUR —
+  // that each lane actually prints the advisory — is proven by the three lane tests above, which
+  // drive the real command paths rather than scanning source.
+  assert.ok(/overlapAdvisoryLines\(/.test(src), "control: this really is the module that carries the advisory's own reader");
+  assert.equal([...src.matchAll(/printLaneOverlapAdvisoryNoSuchSymbol\(/g)].length, 0, "control: the matcher discriminates — it is not matching everything");
 });
