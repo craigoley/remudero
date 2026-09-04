@@ -102,6 +102,13 @@ export interface PreflightSummary {
   failed: number;
   /** Every step, in order — the failing ones are the reason to keep this file at all. */
   steps: CiParityStepResult[];
+  /**
+   * W1-T2810 — which tree this run measured and under what load. Carried here as well as on the
+   * terminal verdict line so the durable summary and the sentence a human read cannot drift:
+   * `headSha` above was already in this file and already absent from that line, which is the
+   * defect this field's siblings close. Optional so every pre-existing summary still parses.
+   */
+  runContext?: RunContext;
 }
 
 /**
@@ -118,6 +125,7 @@ export function buildPreflightSummary(input: {
   durationMs: number;
   headSha: string;
   args: string[];
+  runContext?: RunContext;
 }): PreflightSummary {
   const failed = input.steps.filter((s) => !s.ok);
   return {
@@ -129,6 +137,7 @@ export function buildPreflightSummary(input: {
     passed: input.steps.length - failed.length,
     failed: failed.length,
     steps: input.steps,
+    ...(input.runContext ? { runContext: input.runContext } : {}),
   };
 }
 
@@ -598,6 +607,208 @@ export function detectHostFacts(repoRoot: string, spawn: PreflightSpawn, hasFile
     hasProcMeminfo: hasFile("/proc/meminfo"),
     nodeVersion: process.versions.node,
     nvmrcText,
+  });
+}
+
+// ── RUN CONTEXT (W1-T2810) ───────────────────────────────────────────────────────────────────
+//
+// {@link HostFacts} above answers WHICH MACHINE. This pair answers WHICH TREE and UNDER WHAT
+// LOAD — the two facts that make a gate verdict interpretable and that the verdict line did not
+// carry. Same shape as its sibling on purpose: a pure builder over raw inputs, an impure edge
+// that reads them through the one `PreflightSpawn` seam this module already uses, and a rendered
+// line a caller prints. Same `undefined`-never-a-guessed-value discipline too — see
+// `parseBashMajorVersion`'s own doc, which this deliberately copies rather than restates.
+//
+// WHY THE VERDICT LINE AND NOT A SUBCOMMAND: a gate that will tell you its conditions IF YOU ASK
+// has the same defect, because nobody asks. Measured (CLAUDE.md hazard (h)): a ratchet run in a
+// checkout 465 commits behind printed `60965 bytes (cap 61046) OK`, exit 0, with BOTH the file it
+// measured and the cap it measured against already moved, and nothing in the output said so.
+
+/**
+ * PRIMARY CONTROL: core-normalised 1-minute loadavg at or above which a run is LABELLED loaded.
+ * 1.0 means runnable work equals the core count — the standard reading of a saturated machine.
+ *
+ * PRIMARY rather than BACKSTOP because nothing else decides this: no second signal labels a run
+ * loaded, and no wider gate catches a mislabelled one. It also GATES NOTHING — it changes a word
+ * on a report, never a verdict — so the cost of it being slightly wrong is a reader who has to
+ * read the two numbers printed beside it, which is why a round, conventional value is right here
+ * and a measured one would be false precision.
+ *
+ * DATA, deliberately, and exported: the same treatment {@link HOST_CAUSED_SUITE_REDS} and
+ * `PROOF_PAYLOAD_SHAPES` get, so moving this line is a data edit rather than an engine edit.
+ */
+export const LOADED_RUN_THRESHOLD = 1;
+
+/**
+ * One gate run's own context. RUN-SCOPED BY CONSTRUCTION — exactly one of these per run,
+ * describing the RUN's conditions, never an individual assertion's contract. That boundary is
+ * load-bearing: W1-T2811 owns EXPRESSION (a test declaring that its own bound is wall-clock
+ * dependent) and would be wrongly closed as already-shipped if this grew a per-assertion surface.
+ */
+export interface RunContext {
+  /** The head this run measured, or `"unknown"`. */
+  headSha: string;
+  /**
+   * Commits this checkout is behind `origin/main`. `undefined` when it could not be computed —
+   * NEVER 0, because 0 is the one value that means "you are up to date", and rendering an
+   * unreadable comparison as 0 is hazard (h) recreated wearing this feature's own fix.
+   */
+  behindCount: number | undefined;
+  /** Why {@link behindCount} is `undefined`, so the reader is told rather than left to guess. */
+  behindUnknownReason: string | undefined;
+  /**
+   * When this checkout last FETCHED `origin/main`, from the reflog — NOT the tip commit's date.
+   * The two differ by construction and diverge without bound: a checkout last fetched days ago
+   * still shows a recent tip date, because the tip date tracks whatever main last did. Without
+   * this, a behind-count computed against a stale ref reads exactly like a current one.
+   */
+  originFetchedAt: string | undefined;
+  /** Core-normalised 1-minute loadavg at the START of the run; `undefined` when unavailable. */
+  loadStart: number | undefined;
+  /** The same reading at the END. Both, because one sample cannot answer both questions: a start
+   *  sample decays (measured: [0.69, 2.37, 2.29] on 4 cpus moments after a heavy run stopped, so
+   *  the 1-minute figure already read idle while the 5-minute one did not), and an end-only
+   *  sample cannot separate "the machine was already busy" from "this gate WAS the load". */
+  loadEnd: number | undefined;
+  cpuCount: number;
+}
+
+/** `undefined` unless every element is a finite number and at least one is non-zero. An all-zero
+ *  triple is what a platform without loadavg reports, and reading that as an idle machine is the
+ *  same guessed-zero this module refuses everywhere else. */
+export function normalisedLoad(loadavg: readonly number[] | undefined, cpuCount: number): number | undefined {
+  if (!loadavg || loadavg.length < 3 || cpuCount <= 0) return undefined;
+  if (!loadavg.every((n) => Number.isFinite(n))) return undefined;
+  if (loadavg.every((n) => n === 0)) return undefined;
+  return loadavg[0] / cpuCount;
+}
+
+/** The `origin/main@{<iso>}` selector a `git reflog show --format=%gd` line carries, or
+ *  `undefined` on anything else — never a guessed timestamp. */
+export function parseReflogFetchStamp(reflogText: string | undefined): string | undefined {
+  if (reflogText === undefined) return undefined;
+  const m = /@\{([^}]+)\}/.exec(reflogText.trim());
+  return m ? m[1] : undefined;
+}
+
+/** PURE — same precedent as {@link computeHostFacts} and {@link buildPreflightSummary}: the caller
+ *  owns every impure read, so a test drives every branch without a git tree or a busy machine. */
+export function computeRunContext(input: {
+  headSha: string;
+  /** stdout of `git rev-list --count HEAD..origin/main`, or `undefined` when that read FAILED. */
+  behindText: string | undefined;
+  /**
+   * What actually went wrong, when it did. CARRIED rather than assumed: the shallow-clone case is
+   * the COMMON reason a behind-count is unreadable, but it is not the only one — a missing git, a
+   * permission error and a corrupt ref all land here too, and naming the common case for all of
+   * them is the same guess this module refuses everywhere else. `undefined` when the read
+   * succeeded, or when the caller had no detail to give.
+   */
+  behindFailure?: string | undefined;
+  /** stdout of `git reflog show --date=iso-strict --format=%gd -n 1 origin/main`, or undefined. */
+  reflogText: string | undefined;
+  loadavgStart: readonly number[] | undefined;
+  loadavgEnd: readonly number[] | undefined;
+  cpuCount: number;
+}): RunContext {
+  const trimmed = (input.behindText ?? "").trim();
+  const parsed = /^\d+$/.test(trimmed) ? Number(trimmed) : undefined;
+  return {
+    headSha: input.headSha,
+    behindCount: parsed,
+    behindUnknownReason:
+      parsed !== undefined
+        ? undefined
+        : input.behindFailure && input.behindFailure.trim() !== ""
+          ? input.behindFailure.trim()
+          : "no origin/main ref — shallow or unfetched clone",
+    originFetchedAt: parseReflogFetchStamp(input.reflogText),
+    loadStart: normalisedLoad(input.loadavgStart, input.cpuCount),
+    loadEnd: normalisedLoad(input.loadavgEnd, input.cpuCount),
+    cpuCount: input.cpuCount,
+  };
+}
+
+/** The rendered stamp, appended to BOTH verdict branches. The PASSING one is the point: a stale
+ *  red gets investigated anyway, while a stale GREEN is a confident wrong answer nobody questions
+ *  — which is exactly the shape hazard (h) measured. */
+export function runContextLine(ctx: RunContext): string {
+  const behind =
+    ctx.behindCount === undefined
+      ? `behind=unknown (${ctx.behindUnknownReason ?? "unreadable"})`
+      : `behind=${ctx.behindCount}`;
+  const fetched =
+    ctx.originFetchedAt === undefined
+      ? "origin/main fetch age unknown"
+      : `origin/main fetched ${ctx.originFetchedAt}`;
+  const load =
+    ctx.loadStart === undefined && ctx.loadEnd === undefined
+      ? "load=unavailable"
+      : `load=${fmtLoad(ctx.loadStart)}->${fmtLoad(ctx.loadEnd)} of ${ctx.cpuCount} cpu${
+          isLoadedRun(ctx) ? " (LOADED)" : ""
+        }`;
+  return `context: sha=${ctx.headSha}, ${behind}, ${fetched}, ${load}`;
+}
+
+function fmtLoad(v: number | undefined): string {
+  return v === undefined ? "?" : v.toFixed(2);
+}
+
+/** TRUE when either sample reached {@link LOADED_RUN_THRESHOLD}. EITHER, not both: a run that was
+ *  loaded at any point could have produced a wall-clock red, and the stamp exists to make that
+ *  red interpretable rather than to characterise the whole run precisely. */
+export function isLoadedRun(ctx: RunContext): boolean {
+  return (ctx.loadStart ?? 0) >= LOADED_RUN_THRESHOLD || (ctx.loadEnd ?? 0) >= LOADED_RUN_THRESHOLD;
+}
+
+/**
+ * The impure edge. Reads git through the SAME injectable `PreflightSpawn` seam every other step in
+ * this module uses (never a second spawn mechanism — `detectHostFacts`'s own rule), and the load
+ * through injectable `loadavg`/`cpuCount` so a test drives the threshold without a busy machine.
+ *
+ * NEVER FETCHES. A local gate must not acquire a network dependency: `preflightSummaryPath`'s doc
+ * already refuses `config.root` on the grounds that a preflight "meant to run anywhere must not
+ * acquire that dependency", and a fetch would add a hang path to the one command every session is
+ * told to run before its first push. The fetch AGE is reported instead; the reader decides.
+ *
+ * A NON-ZERO `status` IS THE UNKNOWN SIGNAL AND IS READ FROM THE SPAWN RESULT, never from a
+ * pipeline. Measured while this was designed: `git rev-list --count HEAD..origin/main | head -2`
+ * reports the PIPE's status, not git's, so the very invocation that had failed with 128 read as
+ * success — which would render the unknown case as `behind=0`.
+ */
+export function detectRunContext(input: {
+  repoRoot: string;
+  headSha: string;
+  spawn: PreflightSpawn;
+  loadavgStart: readonly number[] | undefined;
+  loadavgEnd: readonly number[] | undefined;
+  cpuCount: number;
+}): RunContext {
+  // RECORDS, NEVER ERASES. A catch that returned the same `undefined` an empty read produces would
+  // fold "the read failed" and "there was nothing to read" into one value — the erasure shape
+  // `test/catch-erasure-ratchet.test.ts` exists to stop, and the reason this returns a tagged
+  // union rather than a bare string. The detail it carries is what lets `behindUnknownReason`
+  // report the OBSERVED cause instead of assuming the common one.
+  const read = (args: string[]): { text: string } | { reason: string } => {
+    try {
+      const res = input.spawn("git", ["-C", input.repoRoot, ...args], { cwd: input.repoRoot });
+      if (res.status === 0) return { text: res.stdout ?? "" };
+      const stderr = (res.stderr ?? "").split("\n")[0]!.trim();
+      return { reason: stderr !== "" ? stderr : `git exited ${res.status}` };
+    } catch (e) {
+      return { reason: String((e as Error)?.message ?? e) };
+    }
+  };
+  const behind = read(["rev-list", "--count", "HEAD..origin/main"]);
+  const reflog = read(["reflog", "show", "--date=iso-strict", "--format=%gd", "-n", "1", "origin/main"]);
+  return computeRunContext({
+    headSha: input.headSha,
+    behindText: "text" in behind ? behind.text : undefined,
+    behindFailure: "reason" in behind ? behind.reason : undefined,
+    reflogText: "text" in reflog ? reflog.text : undefined,
+    loadavgStart: input.loadavgStart,
+    loadavgEnd: input.loadavgEnd,
+    cpuCount: input.cpuCount,
   });
 }
 
