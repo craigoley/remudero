@@ -228,6 +228,50 @@ test("self-measurement panel: renders the latest per-verb figure with its as-of 
   });
 });
 
+// ── a torn/foreign line in the union must be skipped, never take the whole read down ─────────
+// (latestMeasurementRows' own doc, measurement-cadence.ts: "one torn or foreign line must never
+// take the whole read down"). This line matches MEASUREMENT_CADENCE_RAN_PATTERN's raw-substring
+// grep (it contains `"step":"measurement_cadence.ran"` verbatim) but is NOT valid JSON, so it
+// reaches -- and must survive -- the reader's own JSON.parse try/catch.
+
+test("self-measurement panel: a torn line that matches the ledger grep but fails JSON.parse is skipped, not fatal", async () => {
+  const root = tmpRoot();
+  const deps = fixtureDeps(root, [task({ id: "W1-T1" })]);
+  const stateDir = stateDirFor(root);
+
+  const tornLine = '{"step":"measurement_cadence.ran", this is not valid json';
+  const validRow = {
+    ts: "2026-09-03T06:00:00.000Z",
+    host: "fleet-1",
+    run_id: "DAEMON-1",
+    task_id: "DAEMON",
+    step: "measurement_cadence.ran",
+    lane: "daemon",
+    rule_efficacy: { status: "measured", measurableCount: 7, repeatingCount: 0, repeatIncidentRate: 0, escalated: false, escalatedProposalIds: [] },
+  };
+  writeFileSync(
+    join(stateDir, "ledger.2026-09-03T06-00-00-000Z.ndjson"),
+    tornLine + "\n" + JSON.stringify(validRow) + "\n",
+  );
+
+  await withShell(deps, async (base) => {
+    const { context, page } = await openShell(base);
+    try {
+      await page.waitForFunction(() => document.querySelectorAll("#self-measurement-list .self-measurement-row").length > 0, null, {
+        timeout: 5000,
+      });
+
+      // The torn line never took the read down: the panel is "ok", not "unreadable", and the
+      // one VALID row beside the torn line still renders with its own figure.
+      const ruleEfficacy = await rowText(page, "ruleEfficacy");
+      assert.match(ruleEfficacy ?? "", /measurableCount: 7/, "the valid row beside the torn line still renders");
+      assert.equal(await rowState(page, "ruleEfficacy"), "measured");
+    } finally {
+      await context.close();
+    }
+  });
+});
+
 // ── criterion 3: an unreadable ledger union renders the panel as unreadable, never empty ────
 
 test("self-measurement panel: an unreadable ledger union (zero archives) renders the whole panel as unreadable, never a quietly-empty list", async () => {
