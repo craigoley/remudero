@@ -983,6 +983,16 @@ function isTestPath(path: string): boolean {
 }
 
 const ASSERTION_RE = /\b(assert|expect|should)\b|\.(is|ok|equal|deepEqual|match|throws|rejects)\(/;
+/**
+ * A NEW TEST CASE being declared among a diff's added lines — `test(`, `it(`,
+ * `describe(`, including their `.only`/`.skip`/`.each` modifier forms. This is
+ * what makes "added tests" something there is to judge at all; see
+ * {@link detectTestTheater} for why its absence must not fire the no-assertion
+ * arm. Matches the CALL, never a bare token, so a variable named `test` or a
+ * comment mentioning one cannot smuggle an assertion-free case past the gate.
+ */
+const TEST_DECLARATION_RE = /\b(?:test|it|describe)\s*(?:\.\w+)?\s*\(/;
+
 const NOOP_ASSERTION_RE =
   /assert(\.\w+)?\(\s*true\s*[),]|assert\.equal\(\s*true\s*,\s*true|expect\(\s*true\s*\)/;
 
@@ -1035,7 +1045,29 @@ export function detectTestTheater(diff: string): boolean {
     if (inTestFile && line.startsWith("+")) addedTestLines.push(line.slice(1));
   }
   if (addedTestLines.length === 0) return false;
+  // THE PLANTED-TAUTOLOGY ARM IS UNCONDITIONAL, AND STAYS ABOVE THE GUARD BELOW.
+  // `assert(true)` is a deliberate act, not an absence, so it is refused whether or not the diff
+  // declares a test case — smuggling one into an EXISTING case is precisely the shape that would
+  // otherwise walk through the new guard (W1-T2815 falsifier 2).
   if (addedTestLines.some((l) => NOOP_ASSERTION_RE.test(l))) return true;
+  // W1-T2815: A DIFF THAT DECLARES NO NEW TEST CASE HAS ADDED NO TEST TO JUDGE.
+  //
+  // A unified diff renders a MODIFICATION as a `-`/`+` pair, and the loop above reads only the `+`
+  // half, so an in-place rewrite of existing test code was indistinguishable from newly added test
+  // code — and, carrying no assertion of its own, was refused as theater. MEASURED on #3922
+  // (W1-T2775 tranche 1): 52 added test lines, every one a one-token `mkdtempSync` prefix rewrite,
+  // zero test-case declarations, `testTheater = true` with all 36 check runs otherwise green and
+  // every acceptance criterion met. That shape recurs in all 26 remaining W1-T2775 tranches and in
+  // any rename, import reorder or lint fix touching a test file.
+  //
+  // This narrows ONLY the no-assertion arm, and it restores the rule this function's own doc
+  // already states ("added test CODE that asserts nothing") rather than inventing a new one.
+  // ITS COST, STATED RATHER THAN BURIED: lines appended INSIDE an existing test case, with no
+  // assertion anywhere in the added set, no longer trip this arm. The alternative — pairing added
+  // lines against removed ones so only genuinely new lines are judged — keeps that case covered,
+  // but a unified diff carries no reliable pairing, trading a crisp rule for a heuristic that can
+  // itself misfire; the operator ruled for the declaration gate (2026-09-04).
+  if (!addedTestLines.some((l) => TEST_DECLARATION_RE.test(l))) return false;
   const hasRealAssertion = addedTestLines.some((l) => ASSERTION_RE.test(l));
   return !hasRealAssertion;
 }
