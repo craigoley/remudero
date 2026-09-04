@@ -207,8 +207,10 @@ fi
 # ── 4. GH_TOKEN — CAPTURED, NEVER RETYPED, NEVER PRINTED ────────────────────────────────────────
 # The console reads GitHub for the board. The token exists only in an environment: this shell's, or
 # the live daemon container's (deploy/entrypoint.sh deliberately never writes it to disk). Prefer
-# the shell's, fall back to the daemon's, refuse if neither has one — a console launched without it
-# starts and then fails every read, which reads as "GitHub is down" rather than "no credential".
+# the shell's and fall back to the daemon's. THE CREDENTIAL DECISION IS DEFERRED until after the App
+# inputs are resolved below: a complete App identity plus a readable key is itself a durable
+# credential and mints GH_TOKEN in-process, so requiring a second static token would make App-only
+# deployments impossible. A launch with neither form still refuses before touching the container.
 GH_TOKEN_SOURCE="the invoking shell"
 if [ -z "${GH_TOKEN:-}" ] && [ -n "${DAEMON_STATE_DIR}" ]; then
   CAPTURED="$(docker inspect "${DAEMON_CONTAINER}" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
@@ -219,14 +221,6 @@ if [ -z "${GH_TOKEN:-}" ] && [ -n "${DAEMON_STATE_DIR}" ]; then
   fi
   unset CAPTURED
 fi
-if [ -z "${GH_TOKEN:-}" ]; then
-  echo "serve-container: REFUSING — no GH_TOKEN in this shell and none capturable from ${DAEMON_CONTAINER}." >&2
-  echo "  Supply it for this invocation only:  GH_TOKEN=<token> $0" >&2
-  exit 1
-fi
-export GH_TOKEN
-echo "serve-container: GH_TOKEN ${GH_TOKEN_SOURCE} (value never printed, never written to disk)"
-
 # ── 4b. GH_APP_* — OPTIONAL, CAPTURED THE SAME WAY, NEVER REFUSED (W1-T2269) ────────────────────
 # `src/lib/github-app.ts`'s `startInstallationTokenRefresh` lets the console mint its OWN
 # installation tokens in-process, straight from GitHub's token-exchange endpoint — it never asks
@@ -313,6 +307,26 @@ if [ -n "${APP_KEY_DECLARED}" ]; then
     echo "serve-container: NOTE — configured GitHub App private key is unreadable or cannot be resolved through ${DAEMON_CONTAINER}'s mounts." >&2
     echo "  Not a refusal: GH_TOKEN remains the fallback and the console reports the refresh failure." >&2
   fi
+fi
+
+# W1-T2836: decide whether the launch has A CREDENTIAL only after both credential forms have been
+# measured. This is the same boundary recycle-container.sh already enforces for the daemon: a
+# static GH_TOKEN is usable immediately; a complete App identity with a readable mounted key is
+# durable and mints its own token at process start. In the latter case define GH_TOKEN as empty so
+# Docker's name-only `-e GH_TOKEN` remains deterministic and no stale token is invented. A partial
+# or unreadable App configuration is not a credential and cannot weaken the original refusal.
+if [ -n "${GH_TOKEN:-}" ]; then
+  export GH_TOKEN
+  echo "serve-container: GH_TOKEN ${GH_TOKEN_SOURCE} (value never printed, never written to disk)"
+elif [ -n "${GH_APP_ID:-}" ] && [ -n "${GH_APP_INSTALLATION_ID:-}" ] && [ -n "${APP_KEY_HOST}" ]; then
+  GH_TOKEN=""
+  export GH_TOKEN
+  echo "serve-container: no static GH_TOKEN; GitHub App auth is fully configured and will mint in-process"
+else
+  echo "serve-container: REFUSING — no GH_TOKEN is available, and GitHub App auth is not usable either." >&2
+  echo "  Provide a static GH_TOKEN, or configure GH_APP_ID, GH_APP_INSTALLATION_ID, and a readable" >&2
+  echo "  GH_APP_PRIVATE_KEY_PATH. Nothing has been changed." >&2
+  exit 1
 fi
 unset APP_KEY_DECLARED APP_KEY_HOST
 
