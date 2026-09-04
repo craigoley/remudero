@@ -7,21 +7,6 @@ const RETRO_PREFLIGHT_MAX_BUFFER_BYTES = 32 * 1024 * 1024;
 /**
  * THE PREFLIGHT IS BOUNDED BY SILENCE, NOT BY TOTAL DURATION (W1-T2803).
  *
- * WHAT THE OLD BOUND DID. `RETRO_PREFLIGHT_TIMEOUT_MS = 20 * 60 * 1000` was a per-command
- * DEADLINE on a run whose length grows with the tree: the plan-reading suite set is derived
- * from `--list-plan-reading-suites`, so every added suite moves the whole run closer to the
- * bound until it crosses. It crossed on 2026-09-03, and from then every retro died at
- * `exit_class: process_timeout` while still passing tests — the operator measured
- * `elapsed_ms: 1200948` against a 1200000ms bound, a 948ms overshoot that is enumeration
- * plus attempt overhead, not a hang.
- *
- * WHY A BIGGER NUMBER WAS REFUSED. This is the FIFTH instance of one shape here — a bound
- * that fires on a healthy condition (W1-T312's ci-gate wait cap, W1-T380's deploy ceiling,
- * W1-T382's check-wait bound, `CLAUDE_HEALTH_TIMEOUT_MS`, this). Raising the constant re-arms
- * the identical defect at a later suite count and a date nobody will connect to it. W1-T382's
- * fix is the precedent worth copying: it replaced a deadline with a DERIVATIVE — no forward
- * motion — so the bound stopped decaying with the workload.
- *
  * WHAT THIS BOUND MEASURES. The gap between successive output chunks. `node --test` streams
  * TAP continuously, so a working run is never silent for long, however slow the host; a hung
  * run is silent immediately. The timer below is re-armed on every stdout/stderr chunk, so the
@@ -37,34 +22,11 @@ const RETRO_PREFLIGHT_MAX_BUFFER_BYTES = 32 * 1024 * 1024;
  *   suites       203 enumerated plan-reading suites
  *   load avg     50 samples: min 1.71, p50 12.13, p90 20.04, max 22.34
  *
- * THE ZERO IS THE FINDING; THE DURATION IS ONLY ITS CONSEQUENCE. 4386 tests passed and none
- * failed. The 20-minute deadline was never masking a broken suite — it was killing a healthy run
- * 289 seconds from the end, at 1.24x the bound. Every `process_timeout` retro since 2026-09-03
- * was a duration problem and nothing else, which is exactly what this task assumed and what this
- * run proves rather than infers.
- *
- * A CONTENDED NUMBER ON THE RIGHT HOST BEATS A CLEAN NUMBER FROM THE WRONG ONE. An earlier
- * revision sized this from a 40-suite sample on the operator mini (idle, Darwin): total 235482ms,
- * 937 chunks, longest silent gap 168843ms. That reading is retained here because it is what sizes
- * the SILENCE bound — the mini can measure inter-chunk gaps and the container run above reports
- * only totals — but it was the wrong host to size anything from, and it is no longer the reading
- * this file rests on.
- *
- * WHY 15 MINUTES OF SILENCE. The mini's longest healthy gap was 168843ms (~2m 49s); 15 minutes is
- * ~5.3x that. The quantity being bounded is ONE test's think-time, which a loaded host stretches
- * by a FACTOR — the container's own load curve puts max/p50 at 22.34/12.13, about 1.84x — so a
- * 5.3x margin absorbs the worst sampled contention with room and still refuses a genuine hang
- * within fifteen minutes. Total duration does not enter this number at all, which is why the
- * 24m48s run above passes it untouched.
- *
- * AND THE SUITE COUNT IS A MOVING TARGET, WHICH DECIDES WHICH HALF OF THIS FIX IS DURABLE.
- * The corpus went 193 -> 201 -> 203 suites DURING this investigation alone. Any constant sized
- * against a total duration is therefore stale on the day it lands.
- *   - THE DURABLE DELIVERABLE IS ELAPSED-REPORTING: the failure below names the measured elapsed
- *     beside the bound it exceeded, so the next re-size is ARITHMETIC done by a reader who has
- *     both operands, not another guess.
- *   - THE CONSTANTS ARE STOPGAPS, and {@link RETRO_PREFLIGHT_TOTAL_BACKSTOP_MS} most of all.
- * Say it that way round when re-tuning: fix the reporting first, then argue about the number.
+ * 4386 tests passed and none failed. A 40-suite sample on the operator mini measured a 168843ms
+ * longest healthy gap; 15 minutes is ~5.3x that. The fleet load curve's max/p50 ratio was 1.84x,
+ * so this margin covers observed contention while still terminating a silent hang. The failure
+ * message reports measured elapsed time beside the bound; both constants remain auditable
+ * stopgaps, while elapsed reporting survives future suite-count growth.
  *
  * THE RUNAWAY DIRECTION IS STILL BOUNDED, by {@link RETRO_PREFLIGHT_MAX_BUFFER_BYTES}: a run
  * that emits without progressing trips the 32MB cap and is killed as `output_limit_exceeded`.

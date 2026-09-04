@@ -145,15 +145,6 @@ test("W1-T2803: the bound's measurement travels with the value in source — the
   assert.ok(RETRO_PREFLIGHT_STALL_MS > 0, "the bound is still a bound");
 });
 
-test("W1-T2803: the source names elapsed-reporting as the durable deliverable and the constants as stopgaps, because the suite count moves", () => {
-  // The corpus went 193 -> 201 -> 203 during the investigation. Whoever re-sizes next must be told
-  // which half of this fix survives that drift, or they re-size by guessing exactly as before.
-  const source = readFileSync(join(REPO_ROOT, "src", "lib", "retro-preflight.ts"), "utf8");
-  assert.match(source, /THE DURABLE DELIVERABLE IS ELAPSED-REPORTING/);
-  assert.match(source, /THE CONSTANTS ARE STOPGAPS/);
-  assert.match(source, /193 -> 201 -> 203/, "the drift that makes any fixed total a moving target");
-});
-
 test("W1-T2803: a run that keeps emitting but never finishes is still terminated by the total backstop", () => {
   // The one case SILENCE cannot catch. Deliberately far above any healthy run: the measured fleet
   // run is 1488602ms and this is ~2.4x it, so it can only fire on something genuinely wrong.
