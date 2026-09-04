@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { captureConsoleError } from "./helpers/captured-console.js";
+import { SELF_SYNC_GUARD_ENV } from "../src/lib/self-sync.js";
 import type { Config } from "../src/lib/config.js";
 import type { GitHub } from "../src/lib/status.js";
 import { readLedgerLines } from "../src/lib/status.js";
@@ -627,6 +628,16 @@ test("wipeTestCommand: --factor recon on a non-sandbox --repo without --allow-no
 test("main(): `rmd wipe-test <id> --factor recon --repo remudero` (no --allow-non-sandbox) dispatches to wipeTestCommand and exits 2", async () => {
   const savedArgv = process.argv;
   const savedExit = process.exit;
+  // W1-T2813: control the self-sync freshness guard for THIS window. `main()` reaches
+  // `checkCliFreshness`, which refuses and exits 1 when the checkout is behind origin/main on a
+  // branch that is not `main` -- so without this the assertion below measures how stale the
+  // contributor's checkout happens to be rather than the refusal it means to assert. The guard
+  // reads `process.env` directly (self-sync.ts's loop-guard disjunct: re-entrancy is a property of
+  // the PROCESS, since a spawn writes a child's environment and cannot reach a parameter), so
+  // setting it here is sufficient and no injection is needed. CI is already exempt via `isCiEnv`;
+  // this covers the contributor on a drifted feature branch, the one population that reds.
+  const savedGuard = process.env[SELF_SYNC_GUARD_ENV];
+  process.env[SELF_SYNC_GUARD_ENV] = "1";
   process.argv = ["node", "rmd", "wipe-test", "W1-T86", "--factor", "recon", "--repo", "remudero"];
   let exitCode: number | undefined;
   (process as unknown as { exit: (code?: number) => never }).exit = ((code?: number) => {
@@ -641,6 +652,10 @@ test("main(): `rmd wipe-test <id> --factor recon --repo remudero` (no --allow-no
   } finally {
     process.argv = savedArgv;
     process.exit = savedExit;
+    // Restore EXACTLY: delete when the key was absent, so a sibling test never observes a value
+    // this one invented. Writing "" back would leave a defined-but-falsy key behind.
+    if (savedGuard === undefined) delete process.env[SELF_SYNC_GUARD_ENV];
+    else process.env[SELF_SYNC_GUARD_ENV] = savedGuard;
     cap.restore();
   }
   cap.explains(() => assert.equal(exitCode, 2, "the CLI entrypoint refuses a non-sandbox --repo for the recon factor too"));
