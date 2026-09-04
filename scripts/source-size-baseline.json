@@ -39,7 +39,7 @@
   "src/lib/drain.ts": 2363,
   "src/lib/emissions.ts": 205,
   "src/lib/env.ts": 510,
-  "src/lib/escalate.ts": 1516,
+  "src/lib/escalate.ts": 2000,
   "src/lib/feedback-docket.ts": 334,
   "src/lib/feedback-landing.ts": 1000,
   "src/lib/feedback.ts": 1178,

@@ -1047,6 +1047,16 @@ const HEAD_SHA_LINE_RE = /^\*\*Head:\*\*\s*(\S+)\s*$/m;
  *  {@link HEAD_SHA_LINE_RE}. */
 const CAUSE_LINE_RE = /^\*\*Cause:\*\*\s*(\S+)\s*$/m;
 
+/** Read an open issue's `**Head:**` line back through the SAME {@link HEAD_SHA_LINE_RE} the dedup
+ *  matcher below uses — exported so the fix rung's pre-strike gate qualifies a candidate on the
+ *  head without a second parser. `undefined` on an absent body or a producer that never set
+ *  {@link Escalation.headSha}; a caller that REFUSES WORK on a match must read that `undefined` as
+ *  "do not refuse" ({@link "../run-task.js".openEscalationStandDownReason} states why the
+ *  permissiveness {@link matchesOptionalDimension} is right to have must not be inherited there). */
+export function escalationHeadSha(body: string | undefined): string | undefined {
+  return body ? HEAD_SHA_LINE_RE.exec(body)?.[1] : undefined;
+}
+
 /**
  * Does an OPTIONAL composite-key dimension veto a dedup match? A dimension only vetoes
  * when BOTH sides carry a value and they DISAGREE — either side missing means that
@@ -1118,6 +1128,13 @@ function matchesOptionalDimension(wanted: string | undefined, candidate: string 
  * never silent: it's noted both in the issue body and on this escalation's ledger
  * line as `degraded_labels`.
  */
+/** The SUBSET of {@link Escalation} {@link findDuplicateEscalation} actually reads — exported so a
+ *  caller that only wants to ASK the dedup question ("is one already open?") need not fabricate the
+ *  `options`/`recommendation` of an escalation it is not filing, and so the compiler proves probe
+ *  and escalation are keyed identically. Every {@link Escalation} satisfies it structurally.
+ *  `summary`/`detail` appear only because {@link extractPrRef} scrapes the PR ref out of them. */
+export type EscalationDedupKey = Pick<Escalation, "class" | "taskId" | "summary" | "detail" | "headSha" | "cause">;
+
 /**
  * Search OPEN `needs-human` issues for a duplicate of `e` — extracted from {@link escalate} so
  * {@link escalateWithJudge} can run the IDENTICAL search once, up front, to decide whether the
@@ -1125,7 +1142,7 @@ function matchesOptionalDimension(wanted: string | undefined, candidate: string 
  * {@link OpenIssue}, or `undefined` when no gateway `listOpen`, a failed read, or no match — the
  * SAME best-effort, fail-open-to-"no dup found" contract {@link escalate} always had.
  */
-function findDuplicateEscalation(e: Escalation, deps: EscalateDeps): OpenIssue | undefined {
+export function findDuplicateEscalation(e: EscalationDedupKey, deps: EscalateDeps): OpenIssue | undefined {
   if (!deps.issues.listOpen) return undefined;
   let open: OpenIssue[];
   try {
