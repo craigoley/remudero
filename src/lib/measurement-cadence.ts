@@ -1453,3 +1453,107 @@ export function buildMeasurementCadenceRow(result: MeasurementCadenceRunResult):
     return { row_build_failed: String((e as Error)?.message ?? e) };
   }
 }
+
+// ── W1-T2660: THE ONE READER (design (i)) ───────────────────────────────────────────────────
+//
+// The producer above has run on a policy-driven cadence since 2026-09-02 (`plan/policy.yaml`'s
+// `measurementCadence` row) and written `measurement_cadence.ran` rows the whole time; nothing
+// in `src/lib/serve.ts`, `src/lib/board.ts`, `src/lib/status-board.ts` or `src/lib/digest.ts`
+// ever read one back until this reader existed — "correct code that nothing calls, warned about
+// each time" (this task's own rationale (2)). `latestMeasurementRows` closes that: it is the
+// ONLY function in this module that reads the row it writes, and it inverts
+// {@link buildMeasurementCadenceRow} key-for-key rather than re-describing that row's shape by
+// hand, so the two can never drift apart silently.
+
+/** The ledger `step` {@link buildMeasurementCadenceRow}'s own caller (`lib/daemon.ts`'s poll
+ *  loop) stamps on every row this reads — matched against the RAW `JSON.stringify` text (no
+ *  spaces around `:`), the same no-space convention every other {@link resolveLedgerUnion}
+ *  pre-filter in this codebase uses (see autonomy.ts's `LEDGER_STEP_PATTERN`). */
+const MEASUREMENT_CADENCE_RAN_PATTERN = /"step":"measurement_cadence\.ran"/;
+
+/** Ledger envelope keys `appendLedger`/the daemon's own `log` closure stamp on EVERY row
+ *  (`ts`, `host`, `run_id`, `task_id`, `step`, `lane`) — never a cadence verb's own field, so
+ *  they are dropped before the remaining keys are read back as {@link MeasurementCadenceRunResult}
+ *  members. */
+const MEASUREMENT_CADENCE_ROW_ENVELOPE_KEYS: ReadonlySet<string> = new Set(["ts", "host", "run_id", "task_id", "step", "lane"]);
+
+/** camelCase inverse of {@link cadenceRowKeyName} — snake_case -> camelCase, ASCII-only, the
+ *  mirror image of that function's own single job. Together the pair means this reader inverts
+ *  the writer instead of re-declaring `MeasurementCadenceRunResult`'s key spelling a second time
+ *  by hand (design (i)'s own "the reader inverts the writer" clause). */
+function cadenceRowFieldName(snakeKey: string): string {
+  return snakeKey.replace(/_([a-z])/g, (_match, letter: string) => letter.toUpperCase());
+}
+
+/** One parsed `measurement_cadence.ran` row. */
+export interface MeasurementCadenceRowEntry {
+  /** The row's OWN `ts` (when that cadence fire happened), never when this reader ran. */
+  ts: string;
+  /** The row's verb fields, camelCased back onto {@link MeasurementCadenceRunResult}'s own key
+   *  spelling (`boardReview` never appears — {@link CADENCE_ROW_OWN_FAMILY_KEYS} excludes it from
+   *  the row at write time already). A key {@link buildMeasurementCadenceRow} never wrote for
+   *  this fire (an optional verb the caller did not opt into, or a genuinely corrupt row this
+   *  reader still returns `row_build_failed` for) is simply absent here too — nothing on this
+   *  side invents a value the writer never emitted. */
+  result: Record<string, unknown>;
+}
+
+/** {@link latestMeasurementRows}'s own result — `unreadable` is a DISTINCT case from `ok` with
+ *  zero rows (W1-T119's own distinction): a state dir with no archives, or a rotation that could
+ *  not be opened, means the read itself cannot be trusted, and must never be reported as "this
+ *  system has never measured itself" — that is a claim about the FLEET, and this failure is a
+ *  claim about the READ. */
+export type LatestMeasurementRowsResult =
+  | { status: "ok"; rows: MeasurementCadenceRowEntry[] }
+  | { status: "unreadable"; reason: string };
+
+/**
+ * THE ONE READER (design (i)). The last `n` `measurement_cadence.ran` rows, newest first, off
+ * the ledger UNION ({@link resolveLedgerUnion}) — never the live file alone, because these rows
+ * rotate like any other ledger step and a live-file-only read would report "never measured" the
+ * day after a rotation (this task's own rationale (3); the console's ledger-first doctrine,
+ * W1-T184). A union that reads `ok: false` returns `{status: "unreadable"}`, never an empty
+ * `rows: []` — folding the two together would render a genuinely-unreadable ledger as a calm,
+ * empty "never measured" panel, which is exactly the false-healthy shape P48 refuses everywhere
+ * else in this module.
+ *
+ * A ledger line that fails to parse as JSON, isn't a `measurement_cadence.ran` step, or carries
+ * no usable `ts` is skipped rather than thrown on — one torn or foreign line must never take the
+ * whole read down. `n` is clamped to a non-negative count; a caller passing 0 or a negative
+ * number gets `{status: "ok", rows: []}` rather than every row in the corpus.
+ */
+export function latestMeasurementRows(
+  stateDir: string,
+  n: number,
+  ledgerUnion: (stateDir: string, pattern: RegExp) => LedgerUnionResult = resolveLedgerUnion,
+): LatestMeasurementRowsResult {
+  const union = ledgerUnion(stateDir, MEASUREMENT_CADENCE_RAN_PATTERN);
+  if (!union.ok) {
+    const reason =
+      union.archiveCount === 0
+        ? `no ledger archives found under ${union.stateDir} — the union cannot be trusted (lib/ledger-grep.ts)`
+        : `${union.unread.length} ledger rotation(s) under ${union.stateDir} could not be read`;
+    return { status: "unreadable", reason };
+  }
+
+  const rows: MeasurementCadenceRowEntry[] = [];
+  for (const line of union.matches) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      continue; // torn or foreign line — never takes the whole read down
+    }
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) continue;
+    const obj = parsed as Record<string, unknown>;
+    if (obj.step !== "measurement_cadence.ran" || typeof obj.ts !== "string") continue;
+    const result: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(obj)) {
+      if (MEASUREMENT_CADENCE_ROW_ENVELOPE_KEYS.has(key)) continue;
+      result[cadenceRowFieldName(key)] = value;
+    }
+    rows.push({ ts: obj.ts, result });
+  }
+  rows.sort((a, b) => (a.ts < b.ts ? 1 : a.ts > b.ts ? -1 : 0));
+  return { status: "ok", rows: rows.slice(0, Math.max(0, n)) };
+}
