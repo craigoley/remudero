@@ -195,7 +195,10 @@ forensic detail, so the narrative does not need to live here.
   `gh api "repos/<owner>/<repo>/pulls?state=closed&per_page=100" --jq '[.[]|select(.merged_at!=null)|select(.body//""|test("(?m)^Remudero-Task:[ \t]*<id>[ \t]*$"))|.number]'`   # has it ALREADY SHIPPED
   Anchor the trailer test exactly (`^Remudero-Task:\s*<id>\s*$`, multiline) — GitHub's search is NOT
   exact-phrase, and unioning COMMIT SUBJECTS over-credits: `chore(plan): file W1-T411` names a
-  task the filing never implemented. Add the head-ref query when the trailer scan reads zero.
+  task the filing never implemented. Subjects also UNDER-credit in the SAME sweep, so a subject
+  scan is wrong in both directions at once: W1-T2776 shipped as `fix(ci-parity): register the
+  whole bash-3.2 cluster …`, citing no id, so only its FILING matched (2026-09-04). Add the
+  head-ref query when the trailer scan reads zero.
 - **Sweep the SUBJECT over open PR heads, not only `origin/main` — the id half already does.** A
   main-only subject scan cannot see an in-flight sibling shard, the one case it exists to catch:
   `git ls-remote --heads origin`, then read each head's tree — real files, no REST call. COUNT per
