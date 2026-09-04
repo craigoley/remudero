@@ -1,0 +1,119 @@
+- id: W1-T2809
+  title: "CENSUS DISCOVERY IMPLEMENTS ONE ENUMERATION IDIOM AND IS STRUCTURALLY BLIND TO THE OTHER — discoverSrcFilteredLsFilesCallers probes for the literal string ls-files, so the 78 suites that walk src/ with readdirSync/globSync are invisible with ZERO overlap, and the canonical instance hazard (j) was written about is in NEITHER set because unknownCoverage cannot fail open over a candidate never enumerated"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: medium
+  origin: architect
+  plan_refs: ["§12", "W1-T2523", "W1-T2790", "W1-T2805"]
+  files: [src/lib/ci-parity.ts, test/census-discovery-is-blind-to-a-second-idiom.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    THIS IS NOT "A FILE IS MISSED". Stated that way a reviewer accepts a one-line fix, and the
+    one-line fix is the defect repeating. The mechanism implements ONE enumeration idiom and is
+    STRUCTURALLY BLIND to the other.
+
+    `discoverSrcFilteredLsFilesCallers` (src/lib/ci-parity.ts) makes exactly ONE probe —
+    `git grep -l 'ls-files' -- 'test/*.test.ts'` — and W1-T2523's own test asserts that argv
+    VERBATIM, so the probe is pinned, not incidental. It therefore discovers a census suite by the
+    literal string `ls-files`. A suite that enumerates `src/` with `readdirSync` or `globSync`
+    contains no such string and is invisible to it.
+
+    MEASURED at 393dfa99, with the intersection as the control rather than a bare count:
+      A = suites the probe sees (its own `ls-files` argv) ......................... 28
+      B = suites walking src/ via readdirSync/globSync instead .................... 78
+      A INTERSECT B ............................................................... 0
+    ZERO overlap is the finding. Two disjoint populations, one probe, and the probe is pointed at
+    the smaller one. B is a grep-shaped estimate and may over-include by a few (a file that merely
+    mentions `src/lib` in a comment); the DISJOINTNESS and the canonical instance below carry the
+    argument without the count being exact.
+
+    THE CANONICAL INSTANCE IS IN NEITHER SET, AND THAT LOCATES THE DEFECT. CLAUDE.md's hazard (j)
+    cites `test/config-reader-seams.test.ts` as its motivating example — #2639 added one seamed
+    policy read and reddened it, with a correctly-run caller sweep finding nothing, because the
+    suite names none of that PR's symbols. Run `censusSuiteMembershipFor` against #2639's OWN
+    changed paths today and that file appears in `suites` (0 named) and in `unknownCoverage` (21
+    entries) EQUALLY NOT AT ALL. `unknownCoverage`'s fail-open contract — "unknown stays visible"
+    — cannot cover a candidate discovery never enumerated, so the gap is UPSTREAM of the
+    classifier, in whatever produces candidates. The classifier is working exactly as written.
+
+    W1-T2790 IS THE GENERAL FORM AND ITS ORDERING IS NOW RATIFIED (#3911): self-declaring at one
+    seam > derived-and-committed > hand-written prediction. This is a concrete instance of that
+    thesis and each strengthens the other — W1-T2790 argues the shape, this task is a measured case
+    where the enumerative shape already failed once in production.
+
+    WHY A SECOND MATCHER IS NOT THE ANSWER, stated before anyone proposes it: matcher #2 would be
+    blind to idiom #3 (`fs.opendir`, `fast-glob`, a helper wrapping any of them) in exactly the way
+    matcher #1 is blind to #2, and idiom #3 would be found the way this one was — by accident,
+    after it costs someone a red PR.
+  design: |
+    TWO DELIVERABLES, AND WHICH IS WHICH IS PART OF THE SPEC.
+
+    (1) THE DELIVERABLE — A POSITIVE CONTROL THAT FAILS WHEN A KNOWN CENSUS SUITE IS NOT
+    DISCOVERED. Feed `censusSuiteMembershipFor` #2639's changed paths (a corpus known to have
+    reddened a census suite) and REQUIRE `test/config-reader-seams.test.ts` in one of the two sets
+    — `suites` or `unknownCoverage`. Today it is in neither, so the control fails on arrival and
+    passes once discovery is widened. This is the same artifact as the falsifier, which is why it
+    costs nearly nothing, and it is what makes the blind spot VISIBLE AS IT GROWS even when it
+    cannot be eliminated.
+
+    THE MECHANISM IS UNDERSTOOD TO BE INCOMPLETE BY DESIGN, SO THE NEXT IDIOM'S ARRIVAL IS AN
+    EXPECTED EVENT THE CONTROL REPORTS RATHER THAN A SURPRISE SOMEONE REDISCOVERS. That sentence is
+    the whole reason the control outranks the matcher: it converts an unknown-unknown into a
+    reported one.
+
+    (2) THE IMMEDIATE FIX, EXPLICITLY NOT THE DELIVERABLE — whatever closes the 78 today.
+
+    PREFER THE SEAM, per W1-T2790's ratified ordering. Census suites already share a natural seam:
+    they all enumerate the tracked file list. A helper they call to do that enumeration IS the
+    declaration, which makes the recognizer an EXACT IMPORT QUERY rather than a text match over
+    clock-or-glob idioms, and RETIRES matcher #1 rather than adding #2 beside it.
+
+    THE SEAM'S COST IS MEASURED AND IT IS WHY THIS TASK DOES NOT ADOPT IT WHOLESALE: adoption means
+    editing ~78 suites to call the helper, which is its own filing and its own review, not a rider
+    on this one. So THIS task ships the second matcher AS AN EXPLICITLY LABELLED STOPGAP with the
+    seam named in-source as its successor — never silently, because A STOPGAP THAT SHIPS UNLABELLED
+    BECOMES PERMANENT. The label is a source comment naming the seam and the successor filing, and
+    a criterion asserts the label exists so it cannot be dropped in a later edit.
+
+    WHY THE CONTROL SURVIVES THE STOPGAP: the control does not test which idioms are matched, it
+    tests that a KNOWN member is discovered. It therefore keeps working unchanged when the seam
+    replaces the matchers, and it fails again the day idiom #3 appears — which is the behaviour
+    that makes it the deliverable.
+
+    NOT IN SCOPE, NAMED SO NOTHING IS ORPHANED: adopting the seam across the ~78 suites (its own
+    filing, per above); the W1-T2811 wall-clock class, which is a different population discovered by
+    a different predicate; and CLAUDE.md's hazard (j) prose itself, which W1-T2805's learnings pass
+    owns.
+  acceptance:
+    - claim: "a positive control feeds censusSuiteMembershipFor the changed paths of a PR known to have reddened a census suite and REQUIRES that suite in one of the two sets, so a discovery that cannot see it fails rather than reporting a clean zero"
+      proof: "unit test: test/census-discovery-is-blind-to-a-second-idiom.test.ts"
+    - claim: "the control is falsifiable by construction — with discovery restored to its single ls-files probe the control FAILS naming the undiscovered suite, and it passes only once discovery actually reaches that suite"
+      proof: "unit test: test/census-discovery-is-blind-to-a-second-idiom.test.ts"
+    - claim: "the two enumeration populations are asserted DISJOINT at head — suites found by the ls-files probe and suites walking src/ by readdirSync/globSync share no member — so the blindness is proven structural rather than incidental to one file"
+      proof: "unit test: test/census-discovery-is-blind-to-a-second-idiom.test.ts"
+    - claim: "the second matcher carries an in-source STOPGAP label naming the seam as its successor, and a test asserts that label is present so it cannot be silently dropped in a later edit"
+      proof: "unit test: test/census-discovery-is-blind-to-a-second-idiom.test.ts"
+    - claim: "unknownCoverage still reports every discovered-but-unplaceable caller, so widening discovery never converts a visible unknown into a silent omission"
+      proof: "unit test: test/census-discovery-is-blind-to-a-second-idiom.test.ts"
+  note: |
+    FILED 2026-09-04 from a scoped-verification run for W1-T2799. The scoped set for that PR was
+    derived from `censusSuiteMembershipFor` and then CORRECTED BY HAND to add
+    `test/config-reader-seams.test.ts`, because the derivation could not name the one suite
+    CLAUDE.md's own hazard (j) cites. A tool that must be manually corrected against the example it
+    was built for is the filing trigger.
+
+    THE MEASUREMENT IS REPRODUCIBLE IN TWO COMMANDS and should be re-run at build time rather than
+    trusted from this note (counts drift; the disjointness is the claim):
+      git grep -l 'ls-files' -- 'test/*.test.ts'
+      # vs suites matching readdirSync|globSync AND referencing src/
+    Re-derive both, assert the intersection is empty, and assert config-reader-seams is in the
+    second and not the first.
+
+    DELIBERATELY NOT FOLDED IN: W1-T2811 (wall-clock self-declaration — a different population, a
+    different predicate, same W1-T2790 thesis) and W1-T2810 (a gate reporting the conditions of its
+    own measurement). Each is its own concern under Rule 19.

@@ -198,11 +198,14 @@ import {
   escalate,
   escalateWithSummary,
   escalationCause,
+  escalationHeadSha,
+  findDuplicateEscalation,
   ghIssueGateway,
   presenceMode,
   setPresenceMode,
   tryEscalate,
   type EscalationClass,
+  type EscalationDedupKey,
   type EscalationOption,
   type IssueGateway,
   type OpenIssue,
@@ -6567,6 +6570,67 @@ export function unchangedTreeStandDownReason(
 }
 
 /**
+ * W1-T2799 (the fix-rung pre-strike gate's SIXTH reason source, composed into {@link
+ * fixRungStandDownReason} below — never a parallel early return): has a human ALREADY been asked
+ * about this exact state?
+ *
+ * THE DEFECT THIS CLOSES. The review false-block escape (`detectReviewFalseBlock` -> `escalate`,
+ * below) opens a needs-human issue and returns `escalated`. NOTHING RECORDS THAT IT FIRED. The
+ * next level-triggered sweep builds a FRESH {@link runFixRung} with `strikes` reset, re-reads the
+ * same still-failing review on the same unchanged head, and spends a fix worker BEFORE the escape
+ * can fire again — which it then does, appending to the very issue already open and waiting on a
+ * human. MEASURED on #3889: ten escalations across four heads, EIGHT consecutive on head d8fa22b,
+ * seven of which dispatched a worker that pushed nothing at all.
+ *
+ * THE DEDUP THAT EXISTS IS AT THE WRONG LAYER, WHICH IS THE WHOLE DEFECT. `escalate()` already
+ * consults {@link findDuplicateEscalation} and correctly appended all ten to ONE issue rather
+ * than opening ten siblings (W1-T104/W1-T345) — but it runs INSIDE `escalate()`, by which time
+ * the strike is already spent. The right predicate, consulted at the wrong moment. So this reuses
+ * that EXACT predicate (the caller passes its result in) rather than re-implementing a second
+ * opinion about which issues are duplicates.
+ *
+ * DELIBERATELY STRICTER THAN THAT PREDICATE, AND THIS IS THE LOAD-BEARING PART.
+ * `matchesOptionalDimension` is permissive when either side omits a dimension, so a probe carrying
+ * a head matches a legacy issue carrying none. That is RIGHT for its own purpose — it fails toward
+ * APPENDING to an open issue, which is cheap and visible. REUSING IT TO REFUSE A FIX WORKER
+ * INVERTS THE POLARITY: it would fail toward NOT FIXING, silently, on a head that may carry real
+ * new work. So a stand-down additionally requires the candidate to carry a `**Head:**` line EQUAL
+ * to the head about to be struck against, read through {@link escalationHeadSha} — the SAME
+ * `HEAD_SHA_LINE_RE` the matcher uses, one parser and not two.
+ *
+ * THE RESET IS THE HUMAN, AND THAT IS THE POINT. `listOpen` stops returning the issue the moment
+ * the operator closes it, so acting on the escalation — the thing the rung is waiting for — is
+ * what resumes the rung. A new push resumes it too, by moving the head out from under the key.
+ *
+ * THE FAIL-OPEN CONSEQUENCE, STATED SO NOBODY DISCOVERS IT BY SURPRISE. Because a candidate with
+ * no `**Head:**` line never refuses a worker, and because #3889 — the issue this was filed from —
+ * CARRIES NO SUCH LINE (it predates the producer fix below), THIS DOES NOT STOP THE #3889 LOOP
+ * RETROACTIVELY. It stops one escalation AFTER merge: the next false-block escalation is the first
+ * head-qualified one, and the sweep after that is the first to stand down.
+ *
+ * PURE and exported so the boundary is unit-testable independent of the rung's issue plumbing,
+ * exactly like {@link unchangedTreeStandDownReason} beside it.
+ */
+export function openEscalationStandDownReason(
+  headSha: string,
+  candidate: OpenIssue | undefined,
+): { reason: string } | undefined {
+  if (!candidate) return undefined; // nothing open on this key — the ordinary path
+  const candidateHead = escalationHeadSha(candidate.body);
+  // STRICTER THAN THE MATCHER (both arms): a candidate naming NO head, or naming a DIFFERENT one,
+  // never refuses a worker. The first arm is the legacy-issue case, the second is a genuinely new
+  // push whose issue has not been filed yet — in both, the failure direction of guessing wrong is
+  // "stop fixing things", so both fail open.
+  if (candidateHead === undefined || candidateHead !== headSha) return undefined;
+  return {
+    reason:
+      `a needs-human escalation for this exact (task, PR, head ${headSha}, cause) is ALREADY OPEN and ` +
+      `awaiting a human (${candidate.url}) — a strike here would re-ask a question already in front of ` +
+      `someone and append to that same issue; standing down until it is closed or the head moves`,
+  };
+}
+
+/**
  * W1-T1284: the real worktree-content reader the fix rung wires for its pre-strike unchanged-tree
  * check — three LOCAL git reads, never a remote one and never anything about `origin/main` (Q2's
  * own "must not cover the base" constraint): `git status --porcelain=v1` (tracked modifications,
@@ -6693,6 +6757,24 @@ async function fixRungStandDownReason(
     previousFailure: { gateKey: string; snapshot: WorktreeSnapshot } | undefined;
     currentSnapshot: WorktreeSnapshot | undefined;
   },
+  /**
+   * W1-T2799 — the escalation THIS round's strike would eventually re-file if it changed nothing
+   * (`key`), the head it would be filed against (`headSha`), and the finder that answers whether
+   * such an issue is already open. `find` is INJECTED rather than called here so this function
+   * stays free of the issue gateway, the same seam `readRollup`/`readMergeFacts` above already
+   * use; the caller wires it to {@link findDuplicateEscalation} itself, never a second matcher.
+   * Omitted (a gateway with no `listOpen`, or any site other than `rung.strike`) skips this check
+   * entirely — fail open, exactly like every other optional reason source here.
+   *
+   * CHECKED LAST of the six, deliberately: it is the only source that costs an issue-list read
+   * this round would not otherwise perform, so the five cheaper answers — all of them either
+   * already-fetched facts or reads the rung needs regardless — get to answer first.
+   */
+  openEscalation?: {
+    headSha: string;
+    key: EscalationDedupKey;
+    find: (key: EscalationDedupKey) => OpenIssue | undefined;
+  },
 ): Promise<{ reason: string; foreignHead?: { headSha: string; author: string } } | undefined> {
   if (!readLiveState) return undefined;
   const live = await readLiveState(prUrl);
@@ -6768,6 +6850,20 @@ async function fixRungStandDownReason(
       unchangedTree.currentSnapshot,
     );
     if (unchanged) return unchanged;
+  }
+
+  if (openEscalation) {
+    // NO try/catch HERE, DELIBERATELY: the fail-open contract has exactly ONE owner, and it is
+    // `findDuplicateEscalation` itself — "best-effort dedup: a failed read must never block the
+    // escalation itself" is its own doc, and it swallows a throwing `listOpen` into `undefined`
+    // before this ever sees it. A second catch around it would be an arm no production path can
+    // reach (measured: `diff-coverage` flagged it as an added line with zero covering tests) and
+    // a second, silently-drifting statement of the same guarantee.
+    const alreadyAsked = openEscalationStandDownReason(
+      openEscalation.headSha,
+      openEscalation.find(openEscalation.key),
+    );
+    if (alreadyAsked) return alreadyAsked;
   }
 
   return undefined;
@@ -8391,6 +8487,28 @@ export async function runFixRung(opts: {
         ? { prNumber, readMergeFacts: deps.readMergeFacts }
         : undefined,
       deps.captureWorktreeSnapshot ? { gateKey, previousFailure: lastGateSnapshot, currentSnapshot: currentTreeSnapshot } : undefined,
+      // W1-T2799: the SIXTH source — has a human already been asked about this exact state? The
+      // key is the escalation the false-block escape below would file if this strike changed
+      // nothing, assembled through the SAME `EscalationDedupKey` shape `escalate()` itself is
+      // keyed on, so probe and producer can never disagree about which issue is the duplicate.
+      // `summary` carries `opts.prUrl` because the dedup key's PR dimension is scraped out of the
+      // summary/detail TEXT (`extractPrRef`), never passed as a field. A gateway with no
+      // `listOpen` makes `findDuplicateEscalation` return `undefined` for every key, so this site
+      // behaves exactly as it did before this task — every strike still spends.
+      deps.issues.listOpen
+        ? {
+            headSha: review.headSha,
+            key: {
+              class: "BLOCKED" as const,
+              taskId: opts.taskId,
+              summary: `review false-block — ${opts.prUrl}`,
+              detail: "",
+              headSha: review.headSha,
+              cause: escalationCause(currentMergeConflict !== undefined, noReviewYet),
+            },
+            find: (key: EscalationDedupKey) => findDuplicateEscalation(key, { issues: deps.issues }),
+          }
+        : undefined,
     );
     // W1-T1284: recorded for the NEXT round's comparison regardless of what this round decides —
     // a return below (any stand-down) means there IS no next round, so updating here first is
@@ -9737,6 +9855,15 @@ export async function runFixRung(opts: {
           class: "BLOCKED",
           taskId: opts.taskId,
           runId: opts.runId,
+          // W1-T2799 (B): the two W1-T195 dedup dimensions this producer was the ONLY fix-rung
+          // `escalate()` to omit — MEASURED against its siblings: the foreign-head producer passes
+          // `headSha`, and the ci-log false-block, retrigger-exhaustion and strike-exhaustion
+          // producers all pass BOTH. Omitting them is why four distinct heads collapsed into one
+          // issue on #3889, and why the pre-strike gate above could not otherwise tell a new push
+          // from a repeat. The `cause` expression is the IDENTICAL one the strike-exhaustion
+          // producer below already uses, never a new derivation.
+          headSha: review.headSha,
+          cause: escalationCause(currentMergeConflict !== undefined, noReviewYet),
           summary: `review false-block after ${strikes} strike(s) (${falseBlockReason}) — ${opts.prUrl}`,
           detail:
             `The blocked_review FIX RUNG (W1-T76, W1-T168) detected a REVIEW FALSE-BLOCK it cannot resolve by ` +
