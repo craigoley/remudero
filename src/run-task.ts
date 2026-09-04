@@ -4800,6 +4800,12 @@ async function runReview(args: {
    * caller before this task.
    */
   reviewerQueryFn?: SpawnWorkerArgs["queryFn"];
+  /**
+   * W1-T2829: injectable semantic-review spawn boundary. Production defaults to the shared
+   * provider router; tests use this seam to observe the exact arguments emitted by THIS call
+   * site and drive the Codex adapter without a live subscription call.
+   */
+  reviewerSpawnWorker?: typeof spawnWorker;
   /** The (task_type="reviewer" × the under-review task's risk) mount (§9,
    * W1-T63) — MOUNT-GOVERNED, never a hardcoded literal. Only consulted when a
    * reviewer is actually spawned (spawnReviewer!==false && criteria.length>0). */
@@ -4981,7 +4987,7 @@ async function runReview(args: {
           "\n" +
           reviewerVerdictContract(criteria.length);
         const reviewer = args.account(
-          await spawnWorker({
+          await (args.reviewerSpawnWorker ?? spawnWorker)({
             cwd: reviewCwd,
             permissionMode: "bypassPermissions",
             settingsFile: args.settingsFile,
@@ -4996,6 +5002,11 @@ async function runReview(args: {
             maxBudgetUsd: args.budgetUsd,
             config: args.config,
             queryFn: args.reviewerQueryFn, // W1-T2205: absent ⇒ the real SDK query(), unchanged.
+            // W1-T2829: make the existing read-only contract structural at this production call
+            // site. The reviewer still needs inspection tools to fetch the diff and run proofs;
+            // the shared list excludes every write tool, which also lets the Codex adapter use its
+            // narrowly gated non-repository trust bypass for this throwaway cwd.
+            tools: SPECIALIST_TOOLS,
             prompt, // NEVER resumeSessionId, NEVER forkSession — fresh by construction.
           }),
         );
