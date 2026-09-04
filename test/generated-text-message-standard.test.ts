@@ -4,17 +4,12 @@ import { test } from "node:test";
 import {
   CONVENTIONAL_LIMITS,
   checkCommitMessage,
-  checkGeneratedCommitNarrative,
-  projectCommitNarrative,
   renderCommitNarrativeParagraphs,
 } from "../src/lib/commit-message.js";
 import { OPERATOR_MESSAGE_PARTS } from "../src/lib/operator-message.js";
 import {
   buildPlanPrBody,
-  buildPlanPrBodyChecked,
   buildPlanPrCommitMessage,
-  buildPlanPrCommitMessageChecked,
-  projectPrBodyNarrative,
   type PlanPrBodyOpts,
   type PlanPrCommitOpts,
 } from "../src/lib/plan-pr-emitter.js";
@@ -24,6 +19,12 @@ import { parseAcceptanceBlock } from "../src/lib/review.js";
 // `shapeCommitMessage` guarantees a header length, a subject case and a wrapped body. Every one of
 // those is a commitlint contract about SHAPE, and not one asks whether a reader learns anything —
 // so the reader of a generated commit was the one reader no structure was owed to.
+//
+// SCOPE NOTE (2026-09-04): the check-and-report layer this suite once also covered — the two
+// `*Checked` builders, their projections and their safe wrapper — was removed because nothing in
+// production ever called it; the unwired-export advisory on #3926 named it and was not acted on.
+// What remains is the half that IS reachable: the narrative slots and the paragraphs they render
+// into a commit body and a PR intro. See W1-T2826's design for the measurement.
 //
 // The whole difficulty is that this text is ALSO a machine contract: the `Remudero-Task:` trailer
 // credits a merge, a `(W1-Tnnn)` subject citation is a second credit path, and
@@ -61,35 +62,6 @@ test("the standard names generated commit messages and generated PR bodies as su
 
 // ── criterion 2: the commit's narrative half is projected onto the four slots ────────────────────
 
-test("a generated commit's narrative is projected onto exactly the four presence slots, and onto no others", () => {
-  const projected = projectCommitNarrative({
-    prefix: "chore(plan)",
-    subject: "file W1-T2807 under the reserved id",
-    whatToDo: "read the shard for the design questions",
-    consequence: "the id stays reserved and unbuilt until someone does",
-  });
-  assert.equal(projected.speaker, "chore(plan)");
-  assert.equal(projected.whatHappened, "file W1-T2807 under the reserved id");
-  assert.equal(projected.whatIsAsked, "read the shard for the design questions");
-  assert.equal(projected.consequenceOfInaction, "the id stays reserved and unbuilt until someone does");
-  assert.deepEqual(Object.keys(projected).sort(), [...OPERATOR_MESSAGE_PARTS].sort());
-});
-
-test("an omitted commit slot is reported missing, and an explicit null is reported PRESENT — the two are never the same fact", () => {
-  const omitted = checkGeneratedCommitNarrative({ prefix: "chore(plan)", subject: "do a thing" });
-  assert.equal(omitted?.ok, false);
-  assert.deepEqual(omitted?.missing, ["whatIsAsked", "consequenceOfInaction"]);
-
-  const declaredEmpty = checkGeneratedCommitNarrative({
-    prefix: "chore(plan)",
-    subject: "do a thing",
-    whatToDo: null,
-    consequence: null,
-  });
-  assert.equal(declaredEmpty?.ok, true);
-  assert.deepEqual(declaredEmpty?.missing, []);
-});
-
 test("the commit's narrative slots render as body paragraphs in the standard's order, and render nothing when omitted", () => {
   assert.equal(renderCommitNarrativeParagraphs({ prefix: "chore(plan)", subject: "s" }), "");
   // An explicit null is a statement to the RECORD, not a sentence this module invents for the author.
@@ -110,17 +82,6 @@ test("the commit's narrative slots render as body paragraphs in the standard's o
 
 // ── criterion 3: the PR body's narrative half is projected the same way ──────────────────────────
 
-test("a generated PR body's narrative is projected onto the same four slots, with the intro as whatHappened", () => {
-  const projected = projectPrBodyNarrative(
-    bodyOpts({ speaker: "plan lane", whatToDo: "review the shard", consequence: "the id stays unbuilt" }),
-  );
-  assert.equal(projected.speaker, "plan lane");
-  assert.equal(projected.whatHappened, "This files one shard.");
-  assert.equal(projected.whatIsAsked, "review the shard");
-  assert.equal(projected.consequenceOfInaction, "the id stays unbuilt");
-  assert.deepEqual(Object.keys(projected).sort(), [...OPERATOR_MESSAGE_PARTS].sort());
-});
-
 test("a PR body's narrative slots render inside the INTRO region — never below the Acceptance block, whose bullets must not be interrupted", () => {
   const body = buildPlanPrBody(
     bodyOpts({ whatToDo: "review the shard", consequence: "the id stays unbuilt", taskId: "W1-T2807" }),
@@ -136,65 +97,6 @@ test("a PR body's narrative slots render inside the INTRO region — never below
 });
 
 // ── criterion 4: a non-conforming narrative marks, and never blocks ──────────────────────────────
-
-test("a commit whose narrative is incomplete is still produced in full — the check rides beside the message, never inside it", () => {
-  const checked = buildPlanPrCommitMessageChecked(commitOpts({ taskId: "W1-T2807" }));
-  assert.equal(checked.messageCheck?.ok, false);
-  assert.deepEqual(checked.messageCheck?.missing, ["whatIsAsked", "consequenceOfInaction"]);
-  assert.equal(checked.surface, "commit-message");
-  // The message is produced anyway, and is BYTE-IDENTICAL to the unchecked builder's.
-  assert.equal(checked.text, buildPlanPrCommitMessage(commitOpts({ taskId: "W1-T2807" })));
-  // ...and the mark is nowhere in the text, above all not in the trailer region.
-  assert.ok(!checked.text.includes("operator-message"));
-  assert.ok(checked.text.trimEnd().endsWith("Remudero-Task: W1-T2807"));
-});
-
-test("a PR body whose narrative is incomplete is still produced in full, with the check beside it and no mark in the text", () => {
-  const checked = buildPlanPrBodyChecked(bodyOpts({ taskId: "W1-T2807" }));
-  assert.equal(checked.messageCheck?.ok, false);
-  assert.deepEqual(checked.messageCheck?.missing, ["speaker", "whatIsAsked", "consequenceOfInaction"]);
-  assert.equal(checked.surface, "pr-body");
-  assert.equal(checked.text, buildPlanPrBody(bodyOpts({ taskId: "W1-T2807" })));
-  assert.ok(!checked.text.includes("operator-message"));
-});
-
-test("a checker fault yields undefined rather than a synthesised verdict — the safe wrapper, proved directly", () => {
-  const exploding = { prefix: "chore(plan)", subject: "do a thing" };
-  Object.defineProperty(exploding, "whatToDo", {
-    get() {
-      throw new Error("checker read blew up");
-    },
-    enumerable: true,
-  });
-  let result: ReturnType<typeof checkGeneratedCommitNarrative> | undefined;
-  assert.doesNotThrow(() => {
-    result = checkGeneratedCommitNarrative(exploding);
-  });
-  // Undefined, NOT a fabricated "incomplete": "could not be read" and "was read and found thin"
-  // are different facts, and part (iv) of the standard is about never conflating them.
-  assert.equal(result, undefined);
-});
-
-test("the record is built BEFORE its own check is consulted, so no conformance result can stand between a caller and its text", () => {
-  // Ordering asserted at the source, because it is the guarantee and it is invisible in the output:
-  // a future edit that moved the build below the check would still pass every behavioural test here.
-  const emitter = readFileSync(new URL("../src/lib/plan-pr-emitter.ts", import.meta.url), "utf8");
-  for (const [fn, build] of [
-    ["buildPlanPrBodyChecked", "const text = buildPlanPrBody(opts);"],
-    ["buildPlanPrCommitMessageChecked", "const text = buildPlanPrCommitMessage(opts);"],
-  ] as const) {
-    const start = emitter.indexOf(`export function ${fn}`);
-    assert.ok(start > 0, `${fn} not found`);
-    const body = emitter.slice(start, emitter.indexOf("\n}", start));
-    const buildAt = body.indexOf(build);
-    const checkAt = body.search(/check(OperatorMessage|GeneratedCommitNarrative)\(/);
-    assert.ok(buildAt > 0, `${fn} no longer builds its record with ${JSON.stringify(build)}`);
-    assert.ok(checkAt > 0, `${fn} no longer runs a conformance check`);
-    assert.ok(buildAt < checkAt, `${fn} runs its check BEFORE building the record`);
-  }
-});
-
-// ── criterion 5: the parsed structure is unchanged ───────────────────────────────────────────────
 
 test("omitting the new narrative slots leaves both records BYTE-IDENTICAL — every existing caller keeps what it produced", () => {
   // The discriminating pair: same opts minus the new fields, on both surfaces.
@@ -308,4 +210,55 @@ test("the wrapping the narrative goes through is shapeCommitMessage's own — ne
   // A second, local copy of either limit is how a writer and its gate drift apart.
   assert.ok(!emitter.includes("headerMaxLength:"));
   assert.ok(!emitter.includes("bodyMaxLineLength:"));
+});
+
+// ── the removed check layer stays removed ────────────────────────────────────────────────────────
+
+test("the unreachable check-and-report layer is gone from both writers, and nothing it fed was left orphaned", () => {
+  const emitter = readFileSync(new URL("../src/lib/plan-pr-emitter.ts", import.meta.url), "utf8");
+  const commit = readFileSync(new URL("../src/lib/commit-message.ts", import.meta.url), "utf8");
+
+  // A grep proof cannot demonstrate an absence — it reads 0 and grades `no-match`. This is where
+  // the deletion is pinned instead. `buildPlanPrCommitMessageChecked` is the symbol the
+  // unwired-export advisory named on #3926; the other five went with it because removing only the
+  // two it could see would have orphaned the three that fed them.
+  for (const gone of [
+    "CheckedGeneratedText",
+    "buildPlanPrBodyChecked",
+    "buildPlanPrCommitMessageChecked",
+    "projectPrBodyNarrative",
+  ]) {
+    assert.ok(!emitter.includes(gone), `plan-pr-emitter.ts still carries ${gone}`);
+  }
+  for (const gone of ["projectCommitNarrative", "checkGeneratedCommitNarrative"]) {
+    assert.ok(!commit.includes(gone), `commit-message.ts still carries ${gone}`);
+  }
+
+  // POSITIVE CONTROL for all six zeros: this scan can read both files and DOES see the half that
+  // was deliberately kept. Without this, six absent strings are indistinguishable from a failed read.
+  assert.ok(emitter.includes("renderPrNarrativeParagraphs"), "scan could not read plan-pr-emitter.ts");
+  assert.ok(commit.includes("renderCommitNarrativeParagraphs"), "scan could not read commit-message.ts");
+  assert.ok(commit.includes("GeneratedCommitNarrative"), "the kept narrative record went missing too");
+});
+
+test("the kept half is still reachable from the live builders — the removal took no wiring with it", () => {
+  const emitter = readFileSync(new URL("../src/lib/plan-pr-emitter.ts", import.meta.url), "utf8");
+  /** One exported function's body: from its signature to the next top-level `export`. A fixed
+   *  character window silently truncates — a first draft of this test used 900 and its own control
+   *  fell outside it, which is how the window was found to be wrong rather than the code. */
+  const bodyOf = (signature: string): string => {
+    const start = emitter.indexOf(signature);
+    assert.ok(start > 0, `${signature} not found`);
+    const rest = emitter.slice(start + signature.length);
+    const end = rest.indexOf("\nexport ");
+    return rest.slice(0, end === -1 ? undefined : end);
+  };
+
+  // Each surviving renderer is CALLED by the builder production actually uses, not merely exported.
+  assert.ok(bodyOf("export function buildPlanPrCommitMessage(").includes("renderCommitNarrativeParagraphs("));
+  const prBody = bodyOf("export function buildPlanPrBody(");
+  assert.ok(prBody.includes("renderPrNarrativeParagraphs("));
+  // Control: the same extraction finds a call that IS there and misses one that is not.
+  assert.ok(prBody.includes("renderAcceptanceBlock("), "the body extraction truncated before the block it renders");
+  assert.ok(!prBody.includes("buildPlanPrBodyChecked("));
 });
