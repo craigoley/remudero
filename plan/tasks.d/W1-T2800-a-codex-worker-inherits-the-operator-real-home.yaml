@@ -1,0 +1,152 @@
+- id: W1-T2800
+  title: "a Codex worker inherits the operator's real HOME, so an rc file sourced inside the worker re-exports ANTHROPIC_API_KEY past two exclusions written to stop it, and the leak is invisible to the instrument that reports billing"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 32.00
+  risk: high
+  files:
+    - src/lib/worker.ts
+    - src/lib/worker-provider.ts
+    - test/codex-worker-home-redirection.test.ts
+  origin: "operator-session#codex-reenable-audit-2026-09-04"
+  plan_refs: ["W1-T18", "W1-T170", "W1-T258", "W1-T2748", "W1-T2754", "W1-T2756"]
+  status: queued
+  attempts: 0
+  rationale: |
+    `spawnWorker` (src/lib/worker.ts) returns inside its `selection.provider === "codex"` branch
+    BEFORE it ever reaches `perRunWorkerHomeDir` and `materializeWorkerHome`. Every HOME-facing
+    protection the Claude path depends on is therefore established on a line the Codex path never
+    executes. `codexSpawnEnv` (src/lib/worker-provider.ts) then sets `env.HOME = process.env.HOME
+    ?? homedir()` — the OPERATOR'S REAL HOME — and hands it to the child.
+
+    THE EXCLUSIONS THIS DEFEATS ARE REAL AND THERE ARE THREE, NOT ONE. `codexSpawnEnv` filters
+    `^ANTHROPIC_|^OPENAI_API_KEY$` out of `args.env`, and the shared Codex argv sets
+    `shell_environment_policy.exclude=["CODEX_HOME","OPENAI_API_KEY","ANTHROPIC_API_KEY"]`. Both
+    act at the PROCESS BOUNDARY and neither can stop a shell that re-reads the value FROM DISK
+    after that boundary is crossed. The third is the one the Codex path skips wholesale:
+    `buildWorkerEnv` (src/lib/env.ts) THROWS `billing-boundary violation` on any surviving
+    `ANTHROPIC_*` key unless the gated overflow valve is engaged (`config.overflow === "api_key"`,
+    which `validateConfig` refuses without a paired `dailyCapUsd`). The Codex path never calls
+    `buildWorkerEnv` at all — it hand-rolls a weaker allowlist instead.
+
+    THE LEAK IS INVISIBLE TO THE INSTRUMENT THAT EXISTS TO SEE IT. `spawnCodexWorkerInPrivateTemp`
+    records `childEnvKeys: Object.keys(childEnv)` — the process-boundary env only. A key re-exported
+    by a sourced rc file never appears there, so `billingMode(childEnvKeys)` (env.ts) still returns
+    `"subscription"` while the worker's own shell holds the key. The ledger is not merely silent;
+    it is confidently wrong, and no existing assertion fires.
+
+    MEASURED ON THE OPERATOR MINI 2026-09-04: `~/.bashrc` is absent while `~/.zshrc` exists and
+    exports `ANTHROPIC_API_KEY` on two separate lines. `WORKER_HOME_RC_FILES` (worker-home.ts)
+    blanks all eight rc names precisely because the Claude path cannot rely on which of them a host
+    happens to carry. The Codex path makes that same host-accidental content load-bearing again —
+    the exact hypothesis `src/lib/isolation.ts`'s own header warns is never to be assumed.
+
+    NOT YET PROVEN, AND THE FALSIFIER TURNS ON IT: whether pinned `codex-cli 0.152.0` starts its
+    shell in a mode that sources rc files was NOT determined — no codex binary exists on the mini
+    (absent from PATH, no `~/.codex`), so this was read from source and never executed. The Azure
+    capture preserved in `test/fixtures/codex-0.152.0-isolation-probe.jsonl` (W1-T2756) reports
+    `aliases: 0 / functions: 0`, which is consistent BOTH with a shell that sources nothing AND
+    with a container HOME that has no rc content to source. That fixture therefore does not settle
+    this question in either direction.
+
+    THE PROBE-COUNT ASYMMETRY IS A SYMPTOM OF THIS GAP, NOT THE CLAIM. Because HOME is real, the
+    isolation probe under Codex measures whatever the host's dotfiles do rather than the redirected
+    empty-rc HOME the Claude path guarantees, so it can read 0/0 on a clean container and nonzero on
+    a host with dotfiles. On the mini it would surface exactly one alias (`cc`) and one function
+    (`claude`), neither in `CLAUDE_CODE_TOOL_WRAPPERS`, and fail closed. That is a correct
+    fail-closed on a real difference, and it is the cheapest observable signal that this defect is
+    live — but the defect is the exclusion defeat above, which is silent when the probe passes.
+
+    KNOWN AND DELIBERATELY OUT OF SCOPE — two probe-semantics items from the same audit, both
+    documentation-grade, neither a blocker and neither a security boundary. (i) `isolation.ts`'s
+    module header claims the read-only guarantee comes from restricting the model's tool set, which
+    is Claude-only prose: on the Codex path `args.tools` is consumed solely to choose
+    `--sandbox read-only`, so the guarantee holds by sandbox rather than by tool absence. (ii)
+    `CLAUDE_CODE_TOOL_WRAPPERS` names Claude Code plumbing that Codex never injects, so under Codex
+    the exclusion is inert and would silently un-count operator functions genuinely named
+    find/grep/rg/pkill — a minor false-negative in the probe's count, not a leak.
+  design: |
+    Bring the Codex path UP to the Claude path's redirection. Do not weaken, relax or make optional
+    any part of the Claude path to make the two symmetric — the Claude path is the reference.
+
+    Establish the per-spawn worker home for BOTH providers before provider selection commits, so
+    the Codex branch cannot return past it: hoist the existing `workerHomeDir` /
+    `perRunWorkerHomeDir` / `materializeWorkerHome` sequence (and its `finally` reap) so it covers
+    the Codex return, keeping `{ perSpawn: true }` so two spawns sharing a runId still get distinct
+    homes (W1-T170, W1-T2463). Reuse the existing functions; do not fork a second materializer.
+
+    Thread the resolved home into `codexSpawnEnv` EXPLICITLY — a new field on `CodexSpawnArgs`
+    carrying the redirected home — rather than relying on `args.env` ordering. Today
+    `codexSpawnEnv` assigns `env.HOME` first and then copies `args.env` over it, so an
+    `args.env.HOME` would happen to win; that is an implicit ordering dependency and must not
+    become the mechanism. `env.HOME` must resolve to the redirected home with no
+    `process.env.HOME` fallback on the spawn path.
+
+    Redirect `ZDOTDIR` on the Codex path too, via the same `workerZdotdir(config)` the Claude path
+    uses, so a directly-invoked zsh cannot reach the operator's zdotdir (W1-T1C compinit
+    contamination). Keep `CODEX_HOME` resolution unchanged.
+
+    Leave the argv `shell_environment_policy` lines and `codexSpawnEnv`'s existing key filter
+    exactly as they are. They are not wrong; they are insufficient alone, and this task adds the
+    missing third boundary rather than editing either of the two that already work.
+
+    Keep `childEnvKeys` honest: it must continue to report the process-boundary keys, and after
+    this change the worker's shell-visible environment must AGREE with it. Do not widen
+    `childEnvKeys` to paper over a leak that should not exist.
+
+    Claude behaviour is unchanged: same argv, same settings file, same prompt, same marker paths,
+    same `buildWorkerEnv` call with the same `allowApiKey` gate, same billing derivation. Run the
+    existing worker, worker-home, containment and isolation suites as regressions, plus every
+    caller of the changed symbols (`git grep -l`) and any suite that walks a `src/**` population.
+  acceptance:
+    - claim: "a sentinel ANTHROPIC_API_KEY exported only from an rc file in a simulated operator HOME is observable inside the Codex worker's shell before the fix and absent after it, asserted on the value rather than on HOME being redirected"
+      proof: "unit test: test/codex-worker-home-redirection.test.ts"
+    - claim: "the Codex spawn resolves HOME to a per-spawn redirected worker home whose rc files are blank, with no process.env.HOME fallback reachable on the spawn path"
+      proof: "unit test: test/codex-worker-home-redirection.test.ts"
+    - claim: "ZDOTDIR is redirected on the Codex path so a directly-invoked zsh cannot source the operator's zdotdir"
+      proof: "unit test: test/codex-worker-home-redirection.test.ts"
+    - claim: "billingMode over the Codex worker's childEnvKeys agrees with the worker's shell-visible environment, so no ANTHROPIC_ key is present in one and absent from the other"
+      proof: "unit test: test/codex-worker-home-redirection.test.ts"
+    - claim: "the Claude spawn contract is unchanged in argv, settings file, prompt, marker paths and its buildWorkerEnv allowApiKey gate, and the per-spawn home is still reaped on every exit path including error"
+      proof: "unit test: test/codex-worker-home-redirection.test.ts"
+  falsifier: |
+    THE LEAK MUST BE DEMONSTRATED BEFORE IT IS FIXED. Reproduce, against pinned Codex, a variable
+    excluded by BOTH the `codexSpawnEnv` filter and `shell_environment_policy.exclude` arriving
+    inside the worker via a sourced rc file, and assert on the LEAKED VALUE. A test that only
+    asserts HOME points somewhere redirected proves the wiring and not the exclusion, and does not
+    discharge this task.
+
+    CLOSE THIS TASK WITHOUT A FIX if that reproduction fails — specifically if pinned
+    `codex-cli 0.152.0` starts its shell in a mode that sources no rc file, so no operator-exported
+    value can cross into the worker regardless of HOME. In that case the exclusions are intact, the
+    remaining difference is the probe-count asymmetry recorded above, and that is a separate and
+    much smaller filing rather than a security fix. Report the negative result with the shell
+    invocation observed; do not fix the wiring on the strength of the reading alone.
+
+    Do NOT discharge this by weakening the Claude path's redirection, by widening `childEnvKeys`,
+    by relaxing `buildWorkerEnv`'s billing-boundary throw, or by adding an ANTHROPIC_ key to any
+    allowlist.
+  note: |
+    ID PROVENANCE: `refs/rmd-id/W1-T2800` was already held on origin at
+    81c9fe5634886328bb8fee21a77dbc7f6659b26a when this shard was written, verified against a fresh
+    `git ls-remote origin 'refs/rmd-id/*'` (913 refs, control non-zero). No shard for W1-T2800
+    existed in `plan/tasks.yaml` or `plan/tasks.d/`, the highest filed id was W1-T2794, and no open
+    PR referenced the id. The held id is used here and was not re-pushed.
+
+    SIZING BAND: `risk: high` is set up front because `files:` spans `worker.ts` and
+    `worker-provider.ts` — that is Rule 19's SPAN, not a claim about blast radius. The change is
+    one seam (the Codex spawn's environment boundary) that happens to be authored across the
+    selection site and the adapter.
+
+    OWNERSHIP: this is neither W1-T2754 (the shared non-repository argv bypass), W1-T2748 (which
+    narrowed that bypass to read-only non-repository cwds), nor W1-T2756 (the provider-real
+    preflight contracts and the containment probe's disposable Git identity) — all three merged.
+    It is not W1-T2592, which owns the Azure container's config durability and is separately
+    scheduled. No file or behaviour of any of those is duplicated here.
+
+    OCCASION: filed during the audit that preceded re-enabling Codex on the Azure host. Codex being
+    routable again is what makes this reachable in production rather than theoretical, and a green
+    queue is not evidence against it — the leak is silent whenever the isolation probe passes.
