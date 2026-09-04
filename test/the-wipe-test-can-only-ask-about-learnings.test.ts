@@ -4,7 +4,6 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { captureConsoleError } from "./helpers/captured-console.js";
 import type { Config } from "../src/lib/config.js";
 import type { GitHub } from "../src/lib/status.js";
 import { readLedgerLines } from "../src/lib/status.js";
@@ -627,13 +626,14 @@ test("wipeTestCommand: --factor recon on a non-sandbox --repo without --allow-no
 test("main(): `rmd wipe-test <id> --factor recon --repo remudero` (no --allow-non-sandbox) dispatches to wipeTestCommand and exits 2", async () => {
   const savedArgv = process.argv;
   const savedExit = process.exit;
+  const savedLog = console.error;
   process.argv = ["node", "rmd", "wipe-test", "W1-T86", "--factor", "recon", "--repo", "remudero"];
   let exitCode: number | undefined;
   (process as unknown as { exit: (code?: number) => never }).exit = ((code?: number) => {
     exitCode = code;
     throw new Error("__exit__");
   }) as never;
-  const cap = captureConsoleError();
+  console.error = () => {};
   try {
     await main().catch((e) => {
       if (!(e instanceof Error) || e.message !== "__exit__") throw e;
@@ -641,7 +641,7 @@ test("main(): `rmd wipe-test <id> --factor recon --repo remudero` (no --allow-no
   } finally {
     process.argv = savedArgv;
     process.exit = savedExit;
-    cap.restore();
+    console.error = savedLog;
   }
-  cap.explains(() => assert.equal(exitCode, 2, "the CLI entrypoint refuses a non-sandbox --repo for the recon factor too"));
+  assert.equal(exitCode, 2, "the CLI entrypoint refuses a non-sandbox --repo for the recon factor too");
 });

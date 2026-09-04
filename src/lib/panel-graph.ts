@@ -866,13 +866,6 @@ function frontierFilterReason(
 ): { kind: FrontierReasonKind; reason: string } | undefined {
   if (reason === "already-merged") return undefined;
   if (reason === "verify-not-auto") return undefined;
-  // W1-T2675: SKIPPED, NOT GUESSED AT — this function's only caller already documents exactly this
-  // case ("A task neither eligible nor named by one of the remaining filter reasons (e.g. in-flight
-  // under an open PR, or an indeterminate GitHub read) is Now-tab territory ... and is skipped here,
-  // never guessed at"). Without this arm the reason falls through to the trailing "unmet-deps" catch-
-  // all below and renders as `blocked on unmet dependencies: (none resolved)` — a sentence that is
-  // false in both halves, and the W1-T2636 defect shape repeated on a new member.
-  if (reason === "credit-indeterminate") return undefined;
   if (reason === "blocked") {
     return { kind: "blocked", reason: task.note ? `blocked — ${task.note}` : `${task.id}'s own status is blocked` };
   }
@@ -911,11 +904,6 @@ export function buildPlanFrontier(
   limit: number,
   ledgerLines: ReadonlyArray<Record<string, unknown>>,
   maxDispatches: number = DEFAULT_MAX_TASK_DISPATCHES,
-  // W1-T2675: APPENDED LAST so no positional caller shifts. Without it this view cannot tell a
-  // task whose merge credit simply has not been read from one that genuinely has none, and would
-  // render the first as an ordinary runnable candidate — inviting exactly the rebuild the dispatch
-  // refusal exists to prevent. Omitted ⇒ unchanged behaviour, as before it existed.
-  isCreditIndeterminate?: (taskId: string) => boolean,
 ): FrontierRow[] {
   const heldReasons = new Map<string, { kind: FrontierReasonKind; reason: string }>();
   const isCircuitTripped = (id: string) => isDispatchBreakerTripped(ledgerLines, id, maxDispatches);
@@ -924,7 +912,6 @@ export function buildPlanFrontier(
   // however many held rows sit ahead of the runnable ones the caller asked to see — ordering
   // and eligibility are never re-derived a second time for the truncated view.
   const eligible = runnableCandidates(plan, isMerged, plan.tasks.length, {
-    isCreditIndeterminate,
     onFiltered: (task, reason) => {
       const r = frontierFilterReason(plan, task, reason, isMerged);
       if (r) heldReasons.set(task.id, r);
@@ -1159,8 +1146,7 @@ export function buildPlanViewRoute(deps: PanelGraphDeps): Route {
       const planIndex = loadPlanIndex(join(dirname(deps.planPath), "plan-index.json"));
       const sections = computePlanSectionCounts(plan, projection, planRefs, planIndex, progress.unknown, sectionCache);
       const ledgerLines = readLedgerLines(deps.ledgerPath);
-      const frontier = buildPlanFrontier(plan, isMerged, limit, ledgerLines, undefined, (id) =>
-        projection.get(id)?.indeterminate === true);
+      const frontier = buildPlanFrontier(plan, isMerged, limit, ledgerLines);
       sendJson(res, 200, { progress, sections, frontier });
     },
   };
