@@ -5,16 +5,20 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { configPath } from "../src/lib/config.js";
+import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+import { offlineGithub } from "./setup/offline-github.js";
+
 import { scanPlanCoherence, type PlanCoherenceShardEntry } from "../src/lib/plan-coherence.js";
 import { loadPlan } from "../src/lib/plan.js";
 import {
   buildGather,
   planCoherenceRung,
-  planCoherenceSectionFor,
   renderGather,
   renderPlanCoherence,
   type PlanCoherenceShardListing,
 } from "../src/lib/retro.js";
+import { readPlanCoherenceInputs, retroCommand } from "../src/run-task.js";
 
 // W1-T2642 — THE MONOLITH-VS-SHARD QUESTION, MEASURED. `loadPlan`'s merged view is coherent by
 // construction (duplicate ids and unresolved `depends_on` both throw `PlanError`), but the two
@@ -244,9 +248,9 @@ test("ACCEPTANCE #5: there is no unavailable state to construct — the type onl
   }
 });
 
-// ── the retro-facing composition, and a full multi-finding integration pass ────────────────
+// ── a full multi-finding integration pass, and the rung's own degradation arm ──────────────
 
-test("planCoherenceSectionFor composes the rung and the render into one call, for a multi-finding corpus", () => {
+test("the rung renders every finding class at once for a multi-finding corpus, naming each offender", () => {
   const shards: PlanCoherenceShardListing = {
     ok: true,
     entries: [
@@ -256,13 +260,42 @@ test("planCoherenceSectionFor composes the rung and the render into one call, fo
       shard("plan/tasks.d/W1-T500-gamma.yaml", task("W1-T500")), // cross-file duplicate w/ monolith
     ],
   };
-  const section = planCoherenceSectionFor({ path: MONOLITH_PATH, text: taskList("W1-T500") }, shards);
+  const section = renderPlanCoherence(planCoherenceRung({ path: MONOLITH_PATH, text: taskList("W1-T500") }, shards));
   assert.match(section, /## Plan-coherence rung/);
   assert.match(section, /W1-T9/);
   assert.match(section, /W1-T2, W1-T3/);
   assert.match(section, /broken-name\.yaml/);
   assert.match(section, /W1-T500/);
   assert.match(section, /4 disagreement\(s\)/);
+});
+
+// THE RUNG DEGRADES WHERE THE MODULE STAYS STRICT. `scanPlanCoherence` throws `PlanError` exactly
+// where `parseTasksFromYaml` does — deliberate, and documented in plan-coherence.ts. But
+// `retroCommand` now hands the rung REAL production bytes on every unattended cycle, so a single
+// malformed shard must not take the whole retro down with it: the rung catches, and reports
+// `unexamined` carrying the parser's own message. Never a `clean` over a scan that did not finish.
+test("a malformed shard degrades the rung to UNEXAMINED with the parser's own reason — it never aborts the retro, and never reads clean", () => {
+  const report = planCoherenceRung(
+    { path: MONOLITH_PATH, text: taskList("W1-T1") },
+    { ok: true, entries: [shard("plan/tasks.d/W1-T2-beta.yaml", "this: is not a task list")] },
+  );
+  assert.equal(report.kind, "unexamined");
+  if (report.kind !== "unexamined") return;
+  assert.match(report.reason, /could not be parsed/);
+  assert.match(report.reason, /YAML list of task entries/, "the parser's own message must survive, not be replaced by a generic one");
+  assert.doesNotMatch(renderPlanCoherence(report), /No disagreements/);
+});
+
+// A malformed MONOLITH takes the same arm — the scan parses it first, so this is a distinct path
+// through `scanPlanCoherence` and not a second reading of the shard case above.
+test("a malformed monolith degrades to UNEXAMINED too, rather than throwing out of buildGather", () => {
+  const g = buildGather({
+    ledgerNdjson: "",
+    learningsMd: "# L\n",
+    planCoherence: { monolith: { path: MONOLITH_PATH, text: "not: a list" }, shards: { ok: true, entries: [] } },
+  });
+  assert.equal(g.planCoherence.kind, "unexamined");
+  assert.match(renderGather(g), /UNEXAMINED/);
 });
 
 // ── ACCEPTANCE #6 ────────────────────────────────────────────────────────────────────────
@@ -388,5 +421,120 @@ test("the rung genuinely measures THIS repo's real plan corpus, live off disk �
     assert.match(rendered, /No disagreements/);
   } else {
     assert.match(rendered, new RegExp(`${report.findings.length} disagreement\\(s\\) found`));
+  }
+});
+
+// ── ACCEPTANCE #6, THE PRODUCTION READ AND THE PRODUCTION COMMAND ──────────────────────────────
+//
+// The two halves of the seam, each driven directly. `readPlanCoherenceInputs` (run-task.ts) is
+// `retroCommand`'s disk read — the piece that turns the rung from "callable" into "measuring
+// production bytes"; the rung and plan-coherence.ts stay fs-free on the other side of it.
+
+test("ACCEPTANCE #6: readPlanCoherenceInputs reads THIS repo's real monolith and every real shard off disk", () => {
+  const inputs = readPlanCoherenceInputs(REPO_ROOT);
+  assert.equal(inputs.monolith.path, MONOLITH_PATH);
+  assert.ok(inputs.monolith.text.includes("- id: W1-T"), "the real plan/tasks.yaml bytes, not a placeholder");
+  assert.equal(inputs.shards.ok, true);
+  if (!inputs.shards.ok) return;
+
+  const onDisk = readdirSync(join(REPO_ROOT, "plan", "tasks.d"))
+    .filter((f) => f.endsWith(".yaml") || f.endsWith(".yml"))
+    .sort();
+  assert.ok(onDisk.length > 0, "sanity: the real plan/tasks.d/ must hold shards, or this proves nothing");
+  assert.deepEqual(
+    inputs.shards.entries.map((e) => e.path),
+    onDisk.map((f) => join("plan", "tasks.d", f)),
+    "every real shard, at the REPO-RELATIVE path shardSlugFromPath parses — an absolute path would read as unparseable",
+  );
+
+  // And the rung really scans them: a real verdict, never the `unexamined` a caller that supplies
+  // nothing gets. This is the difference the reviewer's semantic downgrade turned on.
+  const report = planCoherenceRung(inputs.monolith, inputs.shards);
+  assert.notEqual(report.kind, "unexamined", "the real corpus must be MEASURED through the production read, not degrade");
+});
+
+test("ACCEPTANCE #6: readPlanCoherenceInputs degrades with a STATED reason when plan/tasks.d/ cannot be listed, and reads an ABSENT one as zero shards", () => {
+  // ABSENT: loadPlan's own listShardFiles tolerates a repo with no shard directory, so this
+  // census must agree with the loader rather than reporting a scan failure over a healthy tree.
+  const empty = mkdtempSync(join(tmpdir(), "rmd-coherence-absent-"));
+  mkdirSync(join(empty, "plan"), { recursive: true });
+  writeFileSync(join(empty, "plan", "tasks.yaml"), taskList("W1-T1") + "\n");
+  const absent = readPlanCoherenceInputs(empty);
+  assert.equal(absent.shards.ok, true, "an absent plan/tasks.d/ is an empty listing, never a scan failure");
+  assert.equal(planCoherenceRung(absent.monolith, absent.shards).kind, "clean");
+
+  // A MISSING MONOLITH still parses (as zero records) rather than throwing out of the scan.
+  const bare = mkdtempSync(join(tmpdir(), "rmd-coherence-bare-"));
+  const bareInputs = readPlanCoherenceInputs(bare);
+  assert.equal(planCoherenceRung(bareInputs.monolith, bareInputs.shards).kind, "clean");
+
+  // UNLISTABLE: a plan/tasks.d/ that is a FILE, not a directory — ENOTDIR, a real errno that is
+  // not ENOENT, so it must surface as `{ ok: false }` and render UNEXAMINED with its reason.
+  const blocked = mkdtempSync(join(tmpdir(), "rmd-coherence-blocked-"));
+  mkdirSync(join(blocked, "plan"), { recursive: true });
+  writeFileSync(join(blocked, "plan", "tasks.yaml"), taskList("W1-T1") + "\n");
+  writeFileSync(join(blocked, "plan", "tasks.d"), "not a directory\n");
+  const unlistable = readPlanCoherenceInputs(blocked);
+  assert.equal(unlistable.shards.ok, false);
+  if (unlistable.shards.ok) return;
+  assert.match(unlistable.shards.reason, /ENOTDIR/, "the errno the caller actually hit, never a generic sentence");
+  const rendered = renderPlanCoherence(planCoherenceRung(unlistable.monolith, unlistable.shards));
+  assert.match(rendered, /UNEXAMINED/);
+  assert.match(rendered, /ENOTDIR/);
+  assert.doesNotMatch(rendered, /No disagreements/);
+});
+
+// A monolith that EXISTS but will not read is the arm the fixture in
+// test/retro-marker-atomic.test.ts forces on the follow-up dedup path: `retroCommand` runs
+// unattended, so this census must degrade with a stated reason exactly the way that read does,
+// never throw the whole cycle away. Driven through a real unreadable file rather than a mock.
+test("ACCEPTANCE #6: a plan/tasks.yaml that exists but will not read degrades to a STATED reason — it never throws out of the census", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-coherence-unreadable-"));
+  mkdirSync(join(root, "plan", "tasks.d"), { recursive: true });
+  // A DIRECTORY where tasks.yaml should be: existsSync says yes, readFileSync throws EISDIR.
+  mkdirSync(join(root, "plan", "tasks.yaml"));
+  const inputs = readPlanCoherenceInputs(root);
+  assert.equal(inputs.shards.ok, false);
+  if (inputs.shards.ok) return;
+  assert.match(inputs.shards.reason, /plan\/tasks\.yaml could not be read/);
+  assert.match(inputs.shards.reason, /EISDIR/, "the errno the caller actually hit, never a generic sentence");
+  const rendered = renderPlanCoherence(planCoherenceRung(inputs.monolith, inputs.shards));
+  assert.match(rendered, /UNEXAMINED/);
+  assert.doesNotMatch(rendered, /No disagreements/);
+});
+
+// THE WHOLE POINT, DRIVEN THROUGH THE REAL COMMAND. Every test above could pass on a change that
+// left `retroCommand` never supplying real bytes — the "built and unreachable" shape this task's
+// own rationale refuses, and the exact reason a passing `grep: planCoherenceRung(` proof was
+// judged non-responsive. This drives `rmd retro --dry-run` end to end and asserts the printed
+// report carries a MEASURED verdict over this repo's live plan corpus, never `UNEXAMINED`.
+// Mirrors test/learnings-promotion-caller.test.ts's own caller test exactly.
+test("ACCEPTANCE #6: retroCommand's --dry-run report carries a MEASURED plan-coherence verdict over the live plan, not UNEXAMINED", async (t) => {
+  const fakeHome = mkdtempSync(join(tmpdir(), "rmd-coherence-home-"));
+  const root = mkdtempSync(join(tmpdir(), "rmd-coherence-root-"));
+  const savedHome = process.env.HOME;
+  process.env.HOME = fakeHome;
+  mkdirSync(join(fakeHome, ".config", "remudero"), { recursive: true });
+  writeFileSync(configPath(), JSON.stringify({ claudeBin: "/bin/true", root }, null, 2) + "\n");
+  const logSpy = t.mock.method(console, "log", () => {});
+  try {
+    const exitCode = await withLiveWritesAllowed(() => retroCommand(["--dry-run"], { github: offlineGithub() }));
+    assert.equal(exitCode, 0);
+    const printed = logSpy.mock.calls.map((c) => String(c.arguments[0])).join("\n");
+    assert.match(printed, /## Plan-coherence rung/, "the section must be reached from the REAL command");
+    assert.doesNotMatch(
+      printed,
+      /Plan-coherence rung[\s\S]{0,200}?UNEXAMINED/,
+      "retroCommand must supply real plan bytes — an UNEXAMINED verdict here is the signal-read-by-nothing shape this criterion refuses",
+    );
+    // Not asserting clean vs. findings: that is a fact about the plan on disk today, not one this
+    // suite controls — the same fixture-independence rule this file's header states.
+    assert.ok(
+      /Plan-coherence rung[\s\S]{0,200}?(No disagreements|disagreement\(s\) found)/.test(printed),
+      "the printed section must carry a real verdict, with the counts it examined",
+    );
+  } finally {
+    if (savedHome === undefined) delete process.env.HOME;
+    else process.env.HOME = savedHome;
   }
 });

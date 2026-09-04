@@ -429,6 +429,7 @@ import {
   parseLedger,
   planHealthSweep,
   planStateTruthRung,
+  type PlanCoherenceShardListing,
   probeGithubThrottle,
   recordFollowupHarvest,
   renderGather,
@@ -19955,6 +19956,59 @@ export function addLaneWorktree(
   return { branch, worktreePath };
 }
 
+/**
+ * W1-T2642: THE PLAN-COHERENCE CENSUS'S DISK READ — `retroCommand`'s half of the seam whose other
+ * half is {@link "./lib/retro.js".planCoherenceRung}. The rung and `src/lib/plan-coherence.ts` are
+ * both PURE (no fs, no network); reading `plan/tasks.yaml` and listing `plan/tasks.d/` is the
+ * caller's job, exactly the way `openTaskTitles`/`mastMapping` below already split it.
+ *
+ * DEGRADES WITH A STATED REASON, NEVER SILENTLY. An unlistable `plan/tasks.d/` returns
+ * `{ ok: false, reason }`, which the rung renders as `unexamined` naming that reason — never a
+ * `clean` over a scan that did not run (P48). The ONE exception is `ENOENT`, which is read as an
+ * empty listing rather than a failure: {@link "./lib/plan.js".loadPlan}'s own `listShardFiles`
+ * tolerates a repo with no shard directory yet, and this census must not report a scan failure
+ * where the loader reports a healthy plan — the two would then disagree about the same tree.
+ *
+ * A shard that lists but cannot be READ is a genuine failure and is reported as one: it is
+ * neither "absent" nor safely skippable, and skipping it would under-count `shardsExamined`
+ * while still rendering `clean`. NOTHING HERE THROWS. `retroCommand` runs unattended and every
+ * other dedup/table read around it degrades rather than aborting the cycle (`openTaskTitles`,
+ * `mastMapping`, `netStateAdvisorySectionFor`); a census is not worth losing a retro over.
+ */
+export function readPlanCoherenceInputs(root: string): {
+  monolith: { path: string; text: string };
+  shards: PlanCoherenceShardListing;
+} {
+  const monolithRel = join("plan", "tasks.yaml");
+  const monolithAbs = join(root, monolithRel);
+  // An ABSENT monolith is an empty task list, not a failure (the same back-compat reading
+  // `listShardFiles` gives an absent shard directory). A monolith that EXISTS and will not read
+  // is a real failure and is reported as one — never swallowed into an empty corpus that would
+  // then render `clean`.
+  let monolith = { path: monolithRel, text: "[]\n" };
+  try {
+    if (existsSync(monolithAbs)) monolith = { path: monolithRel, text: readFileSync(monolithAbs, "utf8") };
+  } catch (e) {
+    return { monolith, shards: { ok: false, reason: `${monolithRel} could not be read: ${String((e as Error)?.message ?? e)}` } };
+  }
+  const shardDir = join(root, "plan", "tasks.d");
+  try {
+    const files = readdirSync(shardDir)
+      .filter((f) => f.endsWith(".yaml") || f.endsWith(".yml"))
+      .sort();
+    return {
+      monolith,
+      shards: {
+        ok: true,
+        entries: files.map((f) => ({ path: join("plan", "tasks.d", f), text: readFileSync(join(shardDir, f), "utf8") })),
+      },
+    };
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException)?.code === "ENOENT") return { monolith, shards: { ok: true, entries: [] } };
+    return { monolith, shards: { ok: false, reason: `plan/tasks.d/ could not be listed or read: ${String((e as Error)?.message ?? e)}` } };
+  }
+}
+
 async function retroCommand(
   rest: string[],
   opts: {
@@ -20109,6 +20163,11 @@ async function retroCommand(
     priorMastCategoryCounts: marker?.mast_category_counts,
     openTitles: [...openTaskTitles, ...openProposalLines],
     mounts: mountsTable,
+    // W1-T2642: the plan-coherence census's REAL bytes, read here (buildGather stays fs-free) so
+    // the rung answers the fourteen-cycle monolith-vs-shard question by MEASUREMENT on every
+    // `rmd retro` cycle instead of rendering `unexamined`. Reads THIS checkout's plan (repoRoot),
+    // the same tree `openTaskTitles` above already loads.
+    planCoherence: readPlanCoherenceInputs(repoRoot),
     now: Date.now(),
   });
   // W1-T111 (P25 iv): the approve/reframe rate is telemetry, not decoration — the field's

@@ -1650,13 +1650,14 @@ export interface RetroGather {
   /**
    * W1-T2642: the plan-coherence census — ALWAYS present, computed on EVERY `buildGather` call
    * (never optional; unlike `mast`/`weeklyBurnByModelClass`, which genuinely degrade for a
-   * table `buildGather` never reads). `buildGather` still never touches disk itself: absent a
-   * caller-supplied `opts.planCoherence`, this reports `{ kind: "unexamined", reason }` naming
-   * that plainly, rather than being omitted — omission reads as "nothing calls this"; a stated
-   * `unexamined` is a real, rendered, every-cycle answer. `retroCommand` (src/run-task.ts,
-   * outside this task's `files:`) does not yet pass real bytes, so today's cycles render
-   * `unexamined` — but the call is live and unconditional now, so wiring real bytes in later
-   * only upgrades the SAME call site to `clean`/`findings`.
+   * table `buildGather` never reads). `retroCommand` ({@link "../run-task.js".retroCommand}, via
+   * {@link "../run-task.js".readPlanCoherenceInputs}) supplies the REAL `plan/tasks.yaml` +
+   * `plan/tasks.d/*.yaml` bytes on every `rmd retro` cycle, so a live cycle renders a real
+   * `clean`/`findings` verdict — the fourteen-cycle question answered by measurement.
+   * `buildGather` still never touches disk itself: a caller that omits `opts.planCoherence`
+   * gets `{ kind: "unexamined", reason }` naming that plainly rather than an omitted field,
+   * because omission reads as "nothing calls this" while a stated `unexamined` is a real,
+   * rendered answer.
    */
   planCoherence: PlanCoherenceReport;
 }
@@ -1719,9 +1720,11 @@ export function buildGather(opts: {
    * every `plan/tasks.d/*.yaml` shard (or the stated reason the directory could not be
    * listed). buildGather stays FS-free (same discipline `openTitles`/`mastMapping` above
    * already document): the caller reads `plan/tasks.yaml`/`plan/tasks.d/` and hands the bytes
-   * in here. Omit ⇒ `planCoherenceRung` still runs (see the unconditional call site below)
-   * against an `{ ok: false, reason }` default, so `RetroGather.planCoherence` reports
-   * `unexamined` rather than being omitted — see {@link planCoherenceRung}'s own doc.
+   * in here — {@link "../run-task.js".readPlanCoherenceInputs} is that read, and
+   * `retroCommand` passes its result on every cycle. Omit ⇒ `planCoherenceRung` still runs
+   * (see the unconditional call site below) against an `{ ok: false, reason }` default, so
+   * `RetroGather.planCoherence` reports `unexamined` rather than being omitted — see {@link
+   * planCoherenceRung}'s own doc.
    */
   planCoherence?: { monolith: { path: string; text: string }; shards: PlanCoherenceShardListing };
 }): RetroGather {
@@ -1801,10 +1804,11 @@ export function buildGather(opts: {
     // measurement of the fleet's own allocation must not truncate to the marker window.
     architectLaneShare: architectLaneShare(records),
     // W1-T2642: UNCONDITIONAL — called on EVERY buildGather invocation, never gated behind
-    // whether `opts.planCoherence` was supplied. `retroCommand` (run-task.ts) does not yet pass
-    // real bytes (out-of-scope follow-up), so this defaults to `{ ok: false, reason }` and
-    // renders `unexamined` — a stated reason every cycle, never the silent omission a prior
-    // revision used. Real bytes later upgrade this SAME call site to `clean`/`findings`.
+    // whether `opts.planCoherence` was supplied. `retroCommand` (run-task.ts) DOES pass the real
+    // plan/tasks.yaml + plan/tasks.d/ bytes, so a live cycle renders a real clean/findings
+    // verdict; the `{ ok: false, reason }` default below is what a caller that supplies nothing
+    // gets — rendered `unexamined` with a stated reason, never the silent omission a prior
+    // revision used, and never a bare zero (P48).
     planCoherence: planCoherenceRung(
       opts.planCoherence?.monolith ?? { path: "plan/tasks.yaml", text: "" },
       opts.planCoherence?.shards ?? {
@@ -5008,11 +5012,13 @@ export function renderPlanStateTruth(report: PlanStateTruthReport): string {
  * a reason {@link planStateTruthRung} must. The one way it can fail to scan is the caller not
  * being able to LIST `plan/tasks.d/` at all — that is `unexamined`, not `unavailable`.
  */
-/** What the caller found trying to LIST `plan/tasks.d/` — `ok: true` with every shard entry it
- *  read, or `ok: false` with a stated reason it could not list the directory at all (see {@link
- *  planCoherenceRung}'s doc for why this is `unexamined` and not folded into a zero-shard
- *  `clean` result). A discriminated union rather than `T[] | { reason }` because `Array.isArray`
- *  does not reliably narrow a `readonly T[] | object` union. */
+/** What the caller found trying to ASSEMBLE the corpus — `ok: true` with every shard entry it
+ *  read, or `ok: false` with a stated reason it could not (an unlistable `plan/tasks.d/`, or a
+ *  `plan/tasks.yaml` that exists but will not read; see {@link planCoherenceRung}'s doc for why
+ *  either is `unexamined` and not folded into a zero-shard `clean` result — and {@link
+ *  "../run-task.js".readPlanCoherenceInputs} for the production read that produces both arms).
+ *  A discriminated union rather than `T[] | { reason }` because `Array.isArray` does not
+ *  reliably narrow a `readonly T[] | object` union. */
 export type PlanCoherenceShardListing =
   | { ok: true; entries: readonly PlanCoherenceShardEntry[] }
   | { ok: false; reason: string };
@@ -5034,21 +5040,34 @@ export type PlanCoherenceReport =
  * the full "harvest (a)" history. Calls {@link scanPlanCoherence} (plan-coherence.ts, this
  * rung's ONLY consumer) with the monolith blob and every shard entry the caller read off disk.
  *
- * `shards` carries `{ ok: false, reason }` exactly when the caller could not
- * LIST `plan/tasks.d/` at all (a permissions error, say — NOT the back-compat "directory does
- * not exist yet" case {@link "./plan.js".loadPlan}'s own `listShardFiles` tolerates by reading
- * as an empty listing, which this rung also reads as zero shards examined, not unexamined) —
- * `unexamined`, never a silent `clean` render over a scan that never actually ran (P48: never a
- * bare zero indistinguishable from a check that did not run).
+ * `shards` carries `{ ok: false, reason }` exactly when the caller could not ASSEMBLE the
+ * corpus — it could not LIST `plan/tasks.d/` (a permissions error, say), or the monolith itself
+ * would not read. NOT the back-compat "directory does not exist yet" case {@link
+ * "./plan.js".loadPlan}'s own `listShardFiles` tolerates by reading as an empty listing, which
+ * this rung also reads as zero shards examined, not unexamined. Either failure renders
+ * `unexamined`, never a silent `clean` over a scan that never actually ran (P48: never a bare
+ * zero indistinguishable from a check that did not run).
  */
 export function planCoherenceRung(
   monolith: { path: string; text: string },
   shards: PlanCoherenceShardListing,
 ): PlanCoherenceReport {
   if (!shards.ok) {
-    return { kind: "unexamined", reason: `plan/tasks.d/ could not be listed: ${shards.reason}` };
+    return { kind: "unexamined", reason: `the plan corpus could not be assembled: ${shards.reason}` };
   }
-  const scan = scanPlanCoherence(monolith, shards.entries);
+  let scan;
+  try {
+    scan = scanPlanCoherence(monolith, shards.entries);
+  } catch (e) {
+    // A blob that is not a parseable task list throws `PlanError` out of `parseTasksFromYaml`,
+    // exactly as plan-coherence.ts's own doc says it does. THE MODULE STAYS STRICT AND THE RUNG
+    // DEGRADES: `retroCommand` now hands this REAL production bytes every cycle, and an
+    // unattended retro must not ABORT on one malformed shard the way a loader may — it must say
+    // so and carry on. `unexamined` with the parser's own message, never a silent `clean` over a
+    // scan that did not complete (P48: a bare zero is indistinguishable from a check that never
+    // ran, and a crashed retro reports nothing at all).
+    return { kind: "unexamined", reason: `the plan corpus could not be parsed: ${String((e as Error)?.message ?? e)}` };
+  }
   const counts = { shardsExamined: scan.shardsExamined, monolithRecordsExamined: scan.monolithRecordsExamined };
   if (scan.findings.length === 0) return { kind: "clean", ...counts };
   return { kind: "findings", findings: scan.findings, ...counts };
@@ -5089,20 +5108,4 @@ export function renderPlanCoherence(report: PlanCoherenceReport): string {
     "",
     ...report.findings.map(renderPlanCoherenceFinding),
   ].join("\n");
-}
-
-/**
- * Convenience composition — {@link renderPlanCoherence}(`planCoherenceRung`(…)) — for a caller
- * with the monolith blob and shard listing already in hand. NO production caller today (only
- * its own test exercises it) — the genuine live wiring is `buildGather`/`renderGather` above,
- * which call `planCoherenceRung` UNCONDITIONALLY, defaulting to `{ ok: false, reason }`
- * (rendered `unexamined`) absent a caller-supplied `opts.planCoherence`. `retroCommand`
- * (src/run-task.ts, outside this task's declared scope) supplying real bytes is the one
- * remaining follow-up — it only upgrades this ALREADY-LIVE call site, never turns on a dark one.
- */
-export function planCoherenceSectionFor(
-  monolith: { path: string; text: string },
-  shards: PlanCoherenceShardListing,
-): string {
-  return renderPlanCoherence(planCoherenceRung(monolith, shards));
 }
