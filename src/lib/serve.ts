@@ -167,6 +167,9 @@ export interface ServeDeps {
   /** Injectable ONLY so a unit test can pin the captured sha; real callers omit it and get
    *  {@link resolveConsoleSha}, resolved once at server start. */
   consoleSha?: string;
+  /** W1-T2562: re-resolve the CURRENT on-disk sha for the shell's staleness chip. Defaults to
+   *  {@link resolveConsoleSha} — the same primitive {@link gateStaleCodeExit} compares against. */
+  resolveCurrentSha?: () => string;
   board: BoardDeps;
   /**
    * `plan/feedback/` + `plan/tasks.yaml` root and GitHub trace gateway (panel-graph.ts).
@@ -622,6 +625,11 @@ export function renderShellHtml(
   // discipline the "console build" chip beside it already follows. Appended last and defaulted
   // so every existing caller/test is unaffected.
   githubCredentialHtml: string = renderGithubCredentialHtml({ armed: false }),
+  // W1-T2562: the "loaded code" glance chip's inner HTML, rendered SERVER-SIDE by buildShellRoute
+  // from a sha re-resolved per request. Appended last and defaulted — same discipline as the two
+  // chips above — so every existing caller and test is unaffected and the client script is
+  // byte-identical to main.
+  consoleCodeHtml: string = `<span class="console-code-current">current</span>`,
 ): string {
   return `<!doctype html>
 <html lang="en">
@@ -1156,6 +1164,7 @@ export function renderShellHtml(
   <section id="console-version" class="daemon-health" aria-label="Console build">
     <span class="glance-item"><span class="glance-label">console build</span><span class="glance-value" id="console-sha">${consoleSha.slice(0, 12)}</span></span>
     <span class="glance-item"><span class="glance-label">github credential</span><span class="glance-value" id="github-credential">${githubCredentialHtml}</span></span>
+    <span class="glance-item"><span class="glance-label">loaded code</span><span class="glance-value" id="console-code">${consoleCodeHtml}</span></span>
   </section>
   <p id="top-status" role="status" aria-live="polite">loading…</p>
   <p id="summary" class="counts" aria-live="polite"></p>
@@ -5745,6 +5754,49 @@ export function isConsoleCodeStale(bootSha: string, currentSha: string): boolean
   if (bootSha === CONSOLE_SHA_UNKNOWN || currentSha === CONSOLE_SHA_UNKNOWN) return false;
   return bootSha !== currentSha;
 }
+/**
+ * W1-T2562 — THE STALE-CODE BANNER, disposition (ii). `rmd serve` runs BOOT-TIME code while the
+ * checkout advances under it, and the two containers share ONE bind mount, so every file-level
+ * diagnostic reports CURRENT code — the files genuinely are current; only the loaded modules are
+ * not. `stat -c %d:%i` on package.json returns the identical device:inode from both containers. A
+ * reader checking "is serve up to date" by reading its tree gets a confident, wrong yes.
+ *
+ * WHY A BANNER RATHER THAN A RESTART, AND WHY THE EXISTING EXIT IS NOT ENOUGH. W1-T2229 already
+ * ships {@link gateStaleCodeExit}, which exits when the code is stale AND no client is connected
+ * AND no write is in flight. That gate is live and correct — and it starves exactly when the
+ * console is being used: MEASURED 2026-09-01, a week after it shipped, `remudero-serve` was up 20
+ * hours with ONE boot line, ZERO restarts, and 60 commits behind its own checkout. A watched
+ * console never reaches `clients === 0`. The alternative disposition — exiting stale like the
+ * daemon does — restarts on EVERY merge, a measured median of 63/day, roughly every 23 minutes,
+ * each one dropping the live SSE connections the console holds open. That trades a stale console
+ * for a flapping one, which is worse for the same operator. So the staleness is REPORTED and the
+ * human restarts deliberately.
+ *
+ * NOT ON `GET /v1/version`, DELIBERATELY: that payload's keys are pinned by a standing security
+ * invariant (test/serve.test.ts, "the served payload carries the sha and NO credential-shaped
+ * key"), and the same reasoning W1-T2269 recorded for the credential state applies — the console
+ * is the surface an operator watches, so the SHELL is where a state he must act on belongs.
+ *
+ * SERVER-SIDE AND STATIC, like the "console build" and "github credential" chips beside it: no
+ * client-script field, so this carries no risk to the template literal that has broken the last
+ * five PRs that edited it. Escaped through {@link escapeHtml} for the same reason those are.
+ */
+export function renderConsoleCodeStalenessHtml(input: { bootSha: string; currentSha: string }): string {
+  if (input.bootSha === CONSOLE_SHA_UNKNOWN || input.currentSha === CONSOLE_SHA_UNKNOWN) {
+    // ABSENT IS NOT FRESH. An unresolved sha on either side cannot decide the question, and
+    // saying so is the same discipline `isConsoleCodeStale` follows by never calling it stale.
+    return `<span class="console-code-unknown">unknown — the checkout sha could not be read, so staleness is undecided</span>`;
+  }
+  if (!isConsoleCodeStale(input.bootSha, input.currentSha)) return `<span class="console-code-current">current</span>`;
+  // `resolveConsoleSha` yields hex or CONSOLE_SHA_UNKNOWN, so neither side can carry markup today.
+  // Escaped anyway, for the reason `renderGithubCredentialHtml` beside it states: the render site
+  // should never depend on the producer's string set staying free of `<`/`&` forever.
+  const esc = (t: string): string => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return (
+    `<span class="console-code-stale">STALE — serving ${esc(input.bootSha.slice(0, 12))} while the checkout reads ` +
+    `${esc(input.currentSha.slice(0, 12))}. Restart remudero-serve to pick it up.</span>`
+  );
+}
 /** {@link gateStaleCodeExit}'s constructor deps — every side effect injectable, same discipline
  *  {@link gatePrewarmOnClients} already follows for this module's other refcount gate. */
 export interface StaleCodeExitDeps {
@@ -5916,7 +5968,7 @@ function renderGithubCredentialHtml(state: GithubCredentialState): string {
  * closes the W1-T139 bootstrap paradox: the auth spec was satisfied against header-sending fetch
  * clients and unreachable by the one client that matters, the browser opening the URL.
  */
-function buildShellRoute(
+export function buildShellRoute(
   phaseElapsedThresholdsMs: Record<string, number>,
   consoleSha: string,
   // W1-…/impl-FC: the WHY-IDLE panel's inputs. Appended LAST and defaulted so no positional caller
@@ -5927,6 +5979,10 @@ function buildShellRoute(
   // on every request, same as `idle` above, so a refresh failure that lands after boot shows up
   // on the very next page load without a server restart. Defaulted so no existing caller shifts.
   credential: GithubCredentialState = { armed: false },
+  // W1-T2562: re-resolve the CURRENT on-disk sha, fresh, per request — the same primitive
+  // `gateStaleCodeExit` compares against, called again. Injectable so a test never shells to git.
+  // Appended last and defaulted so no positional caller shifts.
+  resolveCurrentSha: () => string = resolveConsoleSha,
 ): Route {
   return {
     method: "GET",
@@ -5950,7 +6006,18 @@ function buildShellRoute(
         panel = renderIdleReasonsHtml({ kind: "unknown", why: `ledger unreadable: ${String((e as Error)?.message ?? e)}` });
       }
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-      res.end(renderShellHtml(phaseElapsedThresholdsMs, consoleSha, panel, renderGithubCredentialHtml(credential)));
+      // PER REQUEST, for the same reason the idle panel above is: the shell re-renders on every
+      // page load, so a merge that lands after boot shows up on the very next load. A resolution
+      // failure degrades to UNKNOWN inside the renderer, never to a confident "current".
+      let consoleCodeHtml: string;
+      try {
+        consoleCodeHtml = renderConsoleCodeStalenessHtml({ bootSha: consoleSha, currentSha: resolveCurrentSha() });
+      } catch {
+        // NOT "current": a throw here cannot decide the question either, and the whole defect this
+        // chip exists for is a confident, wrong yes. Reported as undecided, with the reason.
+        consoleCodeHtml = renderConsoleCodeStalenessHtml({ bootSha: CONSOLE_SHA_UNKNOWN, currentSha: CONSOLE_SHA_UNKNOWN });
+      }
+      res.end(renderShellHtml(phaseElapsedThresholdsMs, consoleSha, panel, renderGithubCredentialHtml(credential), consoleCodeHtml));
     },
   };
 }
@@ -6599,6 +6666,9 @@ function assembleServeRoutes(deps: ServeDeps): ServeRoutesAssembly {
       consoleSha,
       { ledgerPath: deps.ledgerPath },
       githubCredential.state,
+      // W1-T2562: threaded from ServeDeps so a test observes the staleness chip without shelling
+      // to git, exactly as `gateStaleCodeExit`'s own `resolveCurrentSha` seam already allows.
+      deps.resolveCurrentSha ?? resolveConsoleSha,
     ),
     buildVersionRoute(consoleSha),
     // W1-T945: read-only run-tail reader — root defaults to fleetControlRoot (= config.root, the
