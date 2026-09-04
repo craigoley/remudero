@@ -1,0 +1,102 @@
+- id: W1-T2848
+  title: "deploy/host-update.sh WRITES TWO FIXED /tmp PATHS ON A SHARED MULTI-USER HOST, SO WHICHEVER ACCOUNT RUNS IT FIRST PERMANENTLY BLOCKS THE OTHER — and the script then misreports the collision as 'docker is not answering', sending a macOS operator to systemctl: give both files per-invocation names"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  rationale: |
+    (1) THE TWO PATHS, AT origin/main. `deploy/host-update.sh` line 427 redirects docker's stderr to
+    a FIXED `/tmp/host-update-docker.err`, then reads it back at lines 429 and 430; line 668 tees a
+    pull log to a FIXED `/tmp/host-update-pull.log` and greps it at line 671. Neither name carries a
+    pid, a nonce or an mktemp suffix.
+
+    (2) MEASURED COLLISION ON THIS HOST. `/tmp/host-update-docker.err` exists, owned by uid
+    `craigoley` mode 0644, while the fleet account is `craigoleyagent`. `/tmp` is sticky, so the
+    second account cannot write a file the first created, and the redirect fails:
+      deploy/host-update.sh: line 427: /tmp/host-update-docker.err: Permission denied
+    This is not hypothetical — it is the reason 12 tests in `test/host-update-reclaim.test.ts` are
+    red on this machine, measured identically at merge-base 67e6a451 and on a working branch, so it
+    is pre-existing and environmental rather than any diff's.
+
+    (3) THE FAILURE IS MISDIAGNOSED, WHICH IS THE WORSE HALF. With the redirect refused, the
+    surrounding conditional falls through and the script prints:
+      host-update: docker is not answering.
+        Check the daemon is up: 'systemctl status docker'.
+    Docker is answering. The operator is sent to `systemctl` — which does not exist on macOS, the
+    platform this host runs — for a tmp-file permission problem. A wrong diagnosis that names a
+    non-existent tool on the platform it is printed on costs more than the original failure.
+
+    (4) IT IS INVISIBLE TO THE CAMPAIGN BUILT TO CATCH EXACTLY THIS. W1-T2773's
+    `scripts/mkdtemp-callsite-check.mjs` refuses a bare-prefix temp path at author time, and W1-T2775
+    migrated the callsites — but the scanner reads tracked `.ts` and `.mjs` only, so every shell
+    script under `deploy/` sits outside its corpus. The reapable-prefix discipline has never applied
+    to the files that actually run on the host.
+
+    (5) THE PREDICTABLE-NAME SHAPE IS THE SECOND REASON TO FIX IT. A fixed, guessable path in a
+    world-writable directory, written by a script that runs deploys, is a shape this repo has already
+    decided against everywhere it could see it. Here the same shape survives because the scanner
+    cannot read shell.
+  design: |
+    (i) PER-INVOCATION NAMES FOR BOTH FILES, VIA `mktemp`, NOT A PID SUFFIX. A pid can be reused and
+    does not defend against a pre-created file; `mktemp` creates atomically and fails if it cannot.
+    Both `/tmp/host-update-docker.err` and `/tmp/host-update-pull.log` get one, and each is removed
+    on exit rather than left behind — the script must not trade a collision for a new leak.
+
+    (ii) CARRY THE `rmd-` PREFIX SO THE EXISTING SWEEP CAN SEE THEM. `src/lib/tmp.ts`'s
+    `sweepStaleTempDirs` reaps only names beginning with `rmd-`, which is the whole premise of
+    W1-T2773. A name without it is a fresh permanent leak of exactly the kind that campaign exists
+    to stop — this is the one place the shell side can join it cheaply.
+
+    (iii) THE DIAGNOSIS MUST NAME WHAT ACTUALLY FAILED. If the error file cannot be created, say
+    that, and name the path — do not fall through into the docker-is-down branch. Rationale (3) is a
+    reporting defect independent of the collision, and fixing only the path would leave the next
+    unrelated write failure equally misreported.
+
+    (iv) DO NOT MENTION `systemctl` ON A PLATFORM THAT LACKS IT. The remediation line is inherited
+    from a Linux assumption. Either gate it on platform or drop it to a neutral instruction; a
+    macOS operator following it verbatim gets `command not found`.
+
+    (v) OUT OF SCOPE. Extending `scripts/mkdtemp-callsite-check.mjs` to scan shell scripts — real
+    work, genuinely wanted, and a different task with a different gate surface; rationale (4) names
+    the gap so it is filed rather than lost. And NOT a rewrite of `host-update.sh`'s docker probing,
+    reclaim ordering or refusal logic, all of which are correct and heavily tested.
+  acceptance:
+    - claim: "neither temp path is a fixed literal, so two accounts on one host do not collide"
+      proof: "unit test: test/host-update-tmp-paths.test.ts"
+    - claim: "a temp file that cannot be created is reported as that, naming the path, rather than as docker being down"
+      proof: "unit test: test/host-update-tmp-paths.test.ts"
+    - claim: "both temp files are removed on exit rather than traded for a new leak"
+      proof: "unit test: test/host-update-tmp-paths.test.ts"
+    - claim: "the temp files are created per invocation rather than at a fixed literal path"
+      proof: "grep: mktemp in deploy/host-update.sh"
+  risk: high
+  origin: "oper#host-update-tmp-collision-2026-09-04"
+  plan_refs: ["W1-T2773", "W1-T2775"]
+  files: [deploy/host-update.sh, test/host-update-tmp-paths.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    THE FOURTH CRITERION WAS REWRITTEN BEFORE FILING AND THE FIRST DRAFT WAS WRONG. It began as a
+    NEGATIVE grep — the fixed path must STOP matching — which `check-proof` grades `no-match`, i.e.
+    test theatre, because a `grep:` proof must MATCH at head and MISS the base. It now greps
+    `mktemp`, which reads 0 in `deploy/host-update.sh` at the merge base (measured) and must read
+    non-zero at head, so it discriminates in the direction the executor actually scores.
+
+    DISCOVERED WHILE VALIDATING AN UNRELATED PR, NOT BY A SWEEP. These 12 reds were inside the 79
+    pre-existing failures on this host and were about to be reported as machine noise. They were only
+    separated from the genuine host clusters (bash 3.2, BSD date, darwin keychain) by reading each
+    failure's own error text. `rmd preflight --ci-parity`'s `ci:host-caused-suite-reds` step does NOT
+    declare this file, correctly — it is a real defect, not a host fact — but the consequence is that
+    W1-T2234 forces every local full-suite run to re-derive that from scratch.
+
+    CI IS GREEN ON THIS FILE AND THAT IS CONSISTENT. A CI runner has a clean `/tmp` and one uid, so
+    the collision cannot occur there. The defect is specific to a shared host with two real accounts,
+    which is what this machine is.
+
+    risk: high IS RULE 19'S SPAN, NOT BLAST RADIUS, AND IS SET DELIBERATELY. `sizingViolation`
+    (`src/lib/task-linter.ts`) derives subsystems from `files:` AND from the acceptance text, and
+    exempts only `risk: high`; this shard touches one source file plus its new suite, which the
+    linter counts as 2 concerns. The change itself is small and its blast radius is narrow — the
+    field records span, exactly as W1-T999's own note records it.
