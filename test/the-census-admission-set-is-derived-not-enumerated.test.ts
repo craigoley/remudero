@@ -174,7 +174,7 @@ test("the population's re-application of the predicate against EVERY recognizer-
   assert.equal(refusedForCost[0]!.testFile, "test/enforcement-data-carveout.test.ts");
   // Every OTHER recognizer candidate carries a NAMED failing clause — considered and excluded,
   // never silently absent — which is the acceptance claim this test and the ones above jointly
-  // discharge: population size (23) strictly exceeds "the shipped table's four".
+  // discharge: population size strictly exceeds "the shipped table's four" (checked below).
   const refusedForPredicate = CENSUS_POPULATION.filter((m) => m.verdict.status === "REFUSED" && m.verdict.reason.kind === "predicate");
   assert.equal(CENSUS_ADMITTED_MEMBERS.length + refusedForCost.length + refusedForPredicate.length, CENSUS_POPULATION.length);
   assert.ok(CENSUS_POPULATION.length > 4, "the population must be strictly larger than the shipped table's four");

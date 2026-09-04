@@ -1177,8 +1177,9 @@ export function censusRunawayThresholdMs(durationsMs: readonly number[]): number
 // own admission ("HONEST LIMITS OF THIS FILING") — describes a "sixth" suite at 6371ms distinct
 // from a "fifth" at ~2.1s. W1-T2478's own SHIPPED artifact (the test header above, and PR #3323's
 // own body) names only ONE excluded suite. This task's own re-application of the predicate against
-// every recognizer candidate in the CURRENT tree (all 23, enumerated below) finds no second suite
-// satisfying (a)-(c) — the closest calls, `test/mkdtemp-callsite-check.test.ts` and
+// every recognizer candidate in the CURRENT tree (all 24, enumerated below — including this
+// task's own proof file, which the recognizer's text-substring heuristic also self-matches)
+// finds no second suite satisfying (a)-(c) — the closest calls, `test/mkdtemp-callsite-check.test.ts` and
 // `test/state-citation-check.test.ts`, each delegate their real per-file walk to an external
 // script and assert only its aggregate "clean" exit from the `.test.ts` file itself, the same
 // shape `claims`/`jscpd` already have as ordinary `same-class` entries, never the census's own
@@ -1405,6 +1406,18 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
     "a",
     "listTrackedTestFiles shells `git ls-files -- test` — test/ only; src/ is the PROTECTED target this suite guards, not the " +
       "population it walks and asserts over",
+  ),
+  // W1-T2643's OWN proof file. Its prose and its own recognizer-exercising tests inevitably
+  // mention "ls-files" and "src/" (the same self-reference test/nothing-tells-you-which-census-
+  // suites-your-change-joins.test.ts already has above), which trips the text-substring
+  // recognizer — proven by the drift-guard test below catching itself before this entry existed.
+  // It never shells `git ls-files` itself (only `git grep`, via censusPopulationDrift), so it
+  // fails clause (a) exactly like its W1-T2523 sibling.
+  refusedForPredicate(
+    "test/the-census-admission-set-is-derived-not-enumerated.test.ts",
+    "a",
+    "this file — meta-tests CENSUS_POPULATION/censusPopulationDrift/FAST_GATE_STEPS themselves; its one real git call is " +
+      "`git grep`, never `git ls-files`, so it is not itself a src-population walk",
   ),
 ];
 
