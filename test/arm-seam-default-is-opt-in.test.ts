@@ -147,8 +147,8 @@ test("withdrawArmIfVerdictRefuses: a REFUSING verdict with no `disarm` seam supp
 // ══════════════════════════════════════════════════════════════════════════════════════════════
 
 test("real tree: the refusal fires before any live gh read and before the ambient config/ledger is ever touched", () => {
-  const binDir = mkdtempSync(join(tmpdir(), "arm-seam-bin-"));
-  const homeDir = mkdtempSync(join(tmpdir(), "arm-seam-home-"));
+  const binDir = mkdtempSync(join(tmpdir(), "rmd-arm-seam-bin-"));
+  const homeDir = mkdtempSync(join(tmpdir(), "rmd-arm-seam-home-"));
   const ghMarker = join(binDir, "gh-was-invoked");
   const oldPath = process.env.PATH;
   const oldHome = process.env.HOME;

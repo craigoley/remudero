@@ -1,14 +1,24 @@
-# W1-T2773/W1-T2786 allowlist — 911 stable pre-existing file/prefix exemptions
-# Retirement: W1-T2775 migrates each callsite to a reapable RMD_TMP_PREFIX form, removing its exemption in the SAME commit.
+# W1-T2773/W1-T2786 allowlist — stable pre-existing file/prefix exemptions, retired in tranches by W1-T2775.
+# NO COUNT IS CARRIED HERE, deliberately: a hand-maintained total is wrong the moment a tranche lands, and a
+# hand-maintained side table is the exact decay class W1-T2786 re-keyed this file to remove. The live count is
+# whatever `node scripts/mkdtemp-callsite-check.mjs` prints (`N allowlisted`), derived from this file itself.
 # Format: <file><TAB><observed-prefix> (with optional whitespace + # reason suffix).
 # <unresolvable> is the explicit sentinel for a refusable expression whose prefix is not statically known.
 # NEW callsites must use RMD_TMP_PREFIX, not this file.
+#
+# THE THREE RULES W1-T2775 PINS FOR WHOEVER PICKS UP THE NEXT TRANCHE. Restored here by the first tranche:
+# W1-T2786's mechanical regeneration of this file rewrote the header and dropped all three, so the shard's own
+# three acceptance proofs — which grep this file for them — had silently read ZERO since that merge.
+#
+# ATOMICITY: an entry is removed only in the SAME commit that rewrites its callsite. A removed entry whose
+# callsite is still bare reds scripts/mkdtemp-callsite-check.mjs, in hooks/pre-commit and in CI.
+# RETIREMENT: this task (W1-T2775) closes only when this file reaches ZERO entries and `retirement: shipped`
+# is written on the shard.
+# TRANCHE SIZE: picked against the live open-PR conflict surface, not committed here in a number. Prefer many
+# small tranches; a tranche touching a file another lane is editing costs both lanes.
 
 scripts/recovery-drill.mjs	<unresolvable> # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
 test/a-mount-comparison-across-unmatched-populations-is-not-a-measurement.test.ts	mount-comparison-unmatched- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/a-permanently-uncreditable-head-is-re-dispatched-forever.test.ts	terminal-head-gh- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/a-permanently-uncreditable-head-is-re-dispatched-forever.test.ts	terminal-head-root- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/a-recovered-headroom-breach-closes-its-own-escalation.test.ts	headroom-recovery- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
 test/a-recycle-refuses-a-state-dir-that-is-not-a-checkout.test.ts	a-recycle-checkout-empty- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
 test/a-recycle-refuses-a-state-dir-that-is-not-a-checkout.test.ts	a-recycle-checkout-firstboot-empty- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
 test/a-recycle-refuses-a-state-dir-that-is-not-a-checkout.test.ts	a-recycle-checkout-firstboot-env- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
@@ -22,61 +32,15 @@ test/a-recycle-refuses-a-state-dir-that-is-not-a-checkout.test.ts	a-recycle-chec
 test/a-recycle-refuses-a-state-dir-that-is-not-a-checkout.test.ts	a-recycle-checkout-rec- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
 test/a-recycle-refuses-a-state-dir-that-is-not-a-checkout.test.ts	a-recycle-checkout-src- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
 test/a-recycle-refuses-a-state-dir-that-is-not-a-checkout.test.ts	a-recycle-checkout-stub- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/a-retired-task-is-not-a-recoverable-blocker.test.ts	retired-only-root- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/a-retired-task-is-not-a-recoverable-blocker.test.ts	retired-plus-one-root- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/a-routing-recommendation-is-a-proposal-never-a-live-mutation.test.ts	mount-recommendation-proposal- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/a-rule-body-loads-only-when-its-headline-is-taken.test.ts	rule-body-on-demand- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/a-starvation-episode-closes-its-own-escalation.test.ts	starvation-cleared-${tag}- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/a-starvation-episode-closes-its-own-escalation.test.ts	starvation-cleared-already- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/a-starvation-episode-closes-its-own-escalation.test.ts	starvation-cleared-close- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/a-starvation-episode-closes-its-own-escalation.test.ts	starvation-cleared-close2- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/a-starvation-episode-closes-its-own-escalation.test.ts	starvation-cleared-countable- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/a-starvation-episode-closes-its-own-escalation.test.ts	starvation-cleared-loop-throw-root- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/a-starvation-episode-closes-its-own-escalation.test.ts	starvation-cleared-never-root- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/a-starvation-episode-closes-its-own-escalation.test.ts	starvation-cleared-nocap- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/a-starvation-episode-closes-its-own-escalation.test.ts	starvation-cleared-other-class- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/a-starvation-episode-closes-its-own-escalation.test.ts	starvation-cleared-reachability-ledger- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/a-starvation-episode-closes-its-own-escalation.test.ts	starvation-cleared-reachability-root- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/a-starvation-episode-closes-its-own-escalation.test.ts	starvation-cleared-repeat-root- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/a-starvation-episode-closes-its-own-escalation.test.ts	starvation-cleared-site1-root- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/a-starvation-episode-closes-its-own-escalation.test.ts	starvation-cleared-site2-root- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/a-starvation-episode-closes-its-own-escalation.test.ts	starvation-cleared-throw- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
 test/a-windowed-union-never-opens-an-archive-outside-it.test.ts	<unresolvable> # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/acceptance-block-diagnostics.test.ts	w1t952-accepted- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/acceptance-block-diagnostics.test.ts	w1t952-refused- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/acceptance-block-diagnostics.test.ts	w1t952-throws- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/account-identity-is-readable.test.ts	account-identity-escape- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/account-identity-is-readable.test.ts	account-identity-mount- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/account-identity-is-readable.test.ts	account-identity-route- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/account-identity-is-readable.test.ts	account-identity-scope- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/account-usage.test.ts	account-usage-guards- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/account-usage.test.ts	account-usage-home- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/account-usage.test.ts	account-usage-home-default- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/account-usage.test.ts	account-usage-route- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
 test/adoption-debt-becomes-a-proposal.test.ts	<unresolvable> # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
 test/adoption-report-has-a-producer.test.ts	<unresolvable> # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
 test/alert-lane.test.ts	<unresolvable> # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
 test/alert-lane.test.ts	alert-policy-badyaml- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/already-satisfied-exit.test.ts	already-satisfied-origin- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/already-satisfied-exit.test.ts	already-satisfied-refused-root- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/already-satisfied-exit.test.ts	already-satisfied-root- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/already-satisfied-exit.test.ts	already-satisfied-seed- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/already-satisfied-exit.test.ts	already-satisfied-teardown-root- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/already-satisfied-exit.test.ts	already-satisfied-unverifiable-root- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
 test/an-onboarded-repo-has-a-learnings-home.test.ts	<unresolvable> # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
 test/an-operator-stop-is-undone-by-the-restart-policy.test.ts	<unresolvable> # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
 test/an-outcome-metric-reports-per-repo.test.ts	<unresolvable> # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/an-unrelated-filing-keeps-a-tasks-recon.test.ts	declared-file-edit- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/an-unrelated-filing-keeps-a-tasks-recon.test.ts	files-digest-unchanged- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/an-unrelated-filing-keeps-a-tasks-recon.test.ts	missing-record- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/an-unrelated-filing-keeps-a-tasks-recon.test.ts	own-record-edit- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/an-unrelated-filing-keeps-a-tasks-recon.test.ts	unrelated-filing- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
 test/analytics-route.test.ts	<unresolvable> # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/api-client-drift-check.test.ts	api-client-bad-ref- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/api-client-drift-check.test.ts	api-client-missing- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/api-client-drift-check.test.ts	api-client-roundtrip- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/api-client-drift-check.test.ts	api-client-stale- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/architect-mount.test.ts	gh-draft- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
 test/arm-at-open.test.ts	arm-nogreen-root- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
 test/arm-at-open.test.ts	arm-open-bin- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
 test/arm-at-open.test.ts	arm-open-capped-bin- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
@@ -88,8 +52,6 @@ test/arm-at-open.test.ts	arm-open-riskjudge-root- # pre-existing at W1-T2786 re-
 test/arm-at-open.test.ts	arm-open-seed- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
 test/arm-at-open.test.ts	arm-verdict-merged-root- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
 test/arm-at-open.test.ts	gh-disarm-stub- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/arm-seam-default-is-opt-in.test.ts	arm-seam-bin- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/arm-seam-default-is-opt-in.test.ts	arm-seam-home- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
 test/auto-triage-daily-cap.test.ts	fo-cap- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
 test/auto-triage-daily-cap.test.ts	fo-int- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
 test/auto-triage-rung.test.ts	<unresolvable> # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending

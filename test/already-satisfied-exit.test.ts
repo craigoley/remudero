@@ -209,9 +209,9 @@ const ALREADY_SATISFIED_PLAN = [
  *  `followupGitFixture`) — `runTask`'s own `git worktree add`/`git worktree remove` all run
  *  for real, entirely offline. */
 function gitFixture(root: string): { repoDir: string } {
-  const originGit = mkdtempSync(join(tmpdir(), "already-satisfied-origin-"));
+  const originGit = mkdtempSync(join(tmpdir(), "rmd-already-satisfied-origin-"));
   execFileSync("git", ["init", "-q", "--bare", "--initial-branch=main", originGit]);
-  const seed = mkdtempSync(join(tmpdir(), "already-satisfied-seed-"));
+  const seed = mkdtempSync(join(tmpdir(), "rmd-already-satisfied-seed-"));
   execFileSync("git", ["clone", "-q", originGit, seed]);
   execFileSync("git", ["-C", seed, "config", "user.email", "already-satisfied-test@example.invalid"]);
   execFileSync("git", ["-C", seed, "config", "user.name", "already-satisfied-test"]);
@@ -250,7 +250,7 @@ const cleanIsolationExec = (): Promise<IsolationProbeExecResult> =>
 const RECON_TEXT = "RECON REPORT\nOBSERVED: nothing notable\nINFERRED: nothing\nCOULDN'T-VERIFY: nothing\n";
 
 test("BEHAVIORAL: a real runTask() run whose worker claims a VERIFIED ALREADY_SATISFIED ends verdict:already_satisfied, merged:true — the drain does not halt", async () => {
-  const root = mkdtempSync(join(tmpdir(), "already-satisfied-root-"));
+  const root = mkdtempSync(join(tmpdir(), "rmd-already-satisfied-root-"));
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, ALREADY_SATISFIED_PLAN);
   const config: Config = { claudeBin: "/bin/true", root };
@@ -296,7 +296,7 @@ test("BEHAVIORAL: a real runTask() run whose worker claims a VERIFIED ALREADY_SA
 });
 
 test("BEHAVIORAL: a real runTask() run whose ALREADY_SATISFIED claim does NOT verify falls straight through to the existing, unchanged no_pr path — merged:false, the drain halts", async () => {
-  const root = mkdtempSync(join(tmpdir(), "already-satisfied-refused-root-"));
+  const root = mkdtempSync(join(tmpdir(), "rmd-already-satisfied-refused-root-"));
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, ALREADY_SATISFIED_PLAN);
   const config: Config = { claudeBin: "/bin/true", root };
@@ -352,7 +352,7 @@ test("BEHAVIORAL: a real runTask() run whose worktree teardown fails on the alre
   // right below it) must never turn a VERIFIED claim into a failed run just because cleanup
   // couldn't run — best-effort teardown, not a gate. Forcing a REAL `git worktree remove`
   // failure (a lock, exactly as git itself refuses without `-f -f`) proves the catch is live.
-  const root = mkdtempSync(join(tmpdir(), "already-satisfied-teardown-root-"));
+  const root = mkdtempSync(join(tmpdir(), "rmd-already-satisfied-teardown-root-"));
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, ALREADY_SATISFIED_PLAN);
   const config: Config = { claudeBin: "/bin/true", root };
@@ -410,7 +410,7 @@ test("BEHAVIORAL: a real runTask() run whose board gateway READ FAILS records al
   // replayed later, three of four resolved correctly (W1-T377→#1386, W1-T378→#1391,
   // W1-T412→#1508). The workers were right and the read could not answer — but the row said the
   // claim was false, and two already-shipped tasks were re-dispatched for it.
-  const root = mkdtempSync(join(tmpdir(), "already-satisfied-unverifiable-root-"));
+  const root = mkdtempSync(join(tmpdir(), "rmd-already-satisfied-unverifiable-root-"));
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, ALREADY_SATISFIED_PLAN);
   const config: Config = { claudeBin: "/bin/true", root };

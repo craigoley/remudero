@@ -42,8 +42,8 @@ interface Harness {
 }
 
 function makeHarness(): Harness {
-  const root = mkdtempSync(join(tmpdir(), "terminal-head-root-"));
-  const bin = mkdtempSync(join(tmpdir(), "terminal-head-gh-"));
+  const root = mkdtempSync(join(tmpdir(), "rmd-terminal-head-root-"));
+  const bin = mkdtempSync(join(tmpdir(), "rmd-terminal-head-gh-"));
   const ledgerPath = join(root, "state", "ledger.ndjson");
   const callsPath = join(root, "gh-calls.ndjson");
   const headPath = join(root, "head.txt");

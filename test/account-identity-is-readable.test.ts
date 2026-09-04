@@ -138,13 +138,13 @@ test("W1-T2434: once RMD_ACCOUNT_FILE_PATH resolves to a mounted, readable file,
   // Simulates exactly what the container now does: the file lands at some container path, and
   // RMD_ACCOUNT_FILE_PATH (set by deploy/serve-container.sh) names that path — never the
   // unreachable `homedir()` default remudero-serve had before this task.
-  const mountDest = join(mkdtempSync(join(tmpdir(), "account-identity-mount-")), "claude.json");
+  const mountDest = join(mkdtempSync(join(tmpdir(), "rmd-account-identity-mount-")), "claude.json");
   writeFileSync(mountDest, readFileSync(FIXTURE, "utf8"));
 
   const resolved = resolveAccountFilePath(undefined, { [ACCOUNT_FILE_PATH_ENV]: mountDest });
   assert.equal(resolved, mountDest, "the env var deploy/serve-container.sh sets is exactly what resolveAccountFilePath honours");
 
-  const routeDir = mkdtempSync(join(tmpdir(), "account-identity-route-"));
+  const routeDir = mkdtempSync(join(tmpdir(), "rmd-account-identity-route-"));
   const route = buildAccountUsageRoute({
     ledgerPath: join(routeDir, "ledger.ndjson"),
     accountFilePath: resolved,
@@ -294,7 +294,7 @@ test("W1-T2434: the reader still projects only identity and usage — no credent
   // ever returned the parsed reference itself instead of building `out` field-by-field, these would
   // ride along into the projection. A comment claiming containment can't make this pass — only the
   // real field-by-field copy can.
-  const escapeDir = mkdtempSync(join(tmpdir(), "account-identity-escape-"));
+  const escapeDir = mkdtempSync(join(tmpdir(), "rmd-account-identity-escape-"));
   const escapePath = join(escapeDir, "claude.json");
   writeFileSync(
     escapePath,
@@ -323,7 +323,7 @@ test("W1-T2434: USAGE_CACHE_MAX_AGE_MS stays 30 minutes, and account-usage.ts ne
 // ── (9) NO WRITE-SCOPED ROUTE AND NO SWITCH AFFORDANCE IS ADDED BY THIS PIECE ────────────────────
 
 test("W1-T2434: the account-usage route stays read-scoped, and this piece adds no switch affordance", () => {
-  const route = buildAccountUsageRoute({ ledgerPath: join(mkdtempSync(join(tmpdir(), "account-identity-scope-")), "ledger.ndjson") });
+  const route = buildAccountUsageRoute({ ledgerPath: join(mkdtempSync(join(tmpdir(), "rmd-account-identity-scope-")), "ledger.ndjson") });
   assert.equal(route.method, "GET");
   assert.equal(route.scope, "read", "read-only, exactly as before this task");
 

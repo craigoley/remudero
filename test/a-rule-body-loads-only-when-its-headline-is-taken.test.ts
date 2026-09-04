@@ -156,7 +156,7 @@ test("a body that cannot be retrieved degrades to injecting the full rule, never
 });
 
 test("retrieveRuleBodyOnDemand's default reader really reads a file from disk (success and failure)", () => {
-  const dir = mkdtempSync(join(tmpdir(), "rule-body-on-demand-"));
+  const dir = mkdtempSync(join(tmpdir(), "rmd-rule-body-on-demand-"));
   const sourcePath = join(dir, "CLAUDE.md");
   writeFileSync(sourcePath, FIXTURE_MD, "utf8");
 

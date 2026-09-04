@@ -30,7 +30,7 @@ import { runEscalationReconcile, type EscalationReconcileCandidate } from "../sr
  */
 
 function ledgerPath(): string {
-  const p = join(mkdtempSync(join(tmpdir(), "headroom-recovery-")), "ledger.ndjson");
+  const p = join(mkdtempSync(join(tmpdir(), "rmd-headroom-recovery-")), "ledger.ndjson");
   writeFileSync(p, "");
   return p;
 }

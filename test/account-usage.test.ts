@@ -357,7 +357,7 @@ test("GET /v1/account-usage answers 200 from its real defaults — the real file
   // pure projection directly, so the route's own default wiring (`?? Date.now`,
   // `?? readLedgerLines`, `?? readAccountUsageFile`) would otherwise be unreachable glue — the
   // exact shape this repo has been bitten by before.
-  const dir = mkdtempSync(join(tmpdir(), "account-usage-route-"));
+  const dir = mkdtempSync(join(tmpdir(), "rmd-account-usage-route-"));
   const ledgerPath = join(dir, "ledger.ndjson");
   writeFileSync(ledgerPath, `${JSON.stringify(ARMED_LINE)}\n`);
   // `now` is injected ONLY so the age assertion below is deterministic — the fixture's capture
@@ -393,7 +393,7 @@ test("GET /v1/account-usage answers 200 from its real defaults — the real file
 // the checks design note (iii) says must not be touched.
 
 test("W1-T997: the account usage route reads the supplied path not the home default", async () => {
-  const homeDir = mkdtempSync(join(tmpdir(), "account-usage-home-"));
+  const homeDir = mkdtempSync(join(tmpdir(), "rmd-account-usage-home-"));
   // A DIFFERENT identity than FIXTURE's `operator@example.com` -- so a route that fell through
   // to the home default, rather than the explicitly supplied path, is trivially distinguishable.
   writeFileSync(
@@ -407,7 +407,7 @@ test("W1-T997: the account usage route reads the supplied path not the home defa
       },
     }),
   );
-  const routeDir = mkdtempSync(join(tmpdir(), "account-usage-route-"));
+  const routeDir = mkdtempSync(join(tmpdir(), "rmd-account-usage-route-"));
 
   await withHome(homeDir, async () => {
     const route = buildAccountUsageRoute({
@@ -449,7 +449,7 @@ test("W1-T997: omitting the supplied path leaves the home default unchanged", as
   // That `undefined` isn't just A value, it is the SAME default `readAccountUsageFile`'s own
   // parameter resolves -- point $HOME at a fixture-carrying temp dir and confirm the resolved
   // (undefined) path reads byte-identically to calling the reader with no argument at all.
-  const homeDir = mkdtempSync(join(tmpdir(), "account-usage-home-default-"));
+  const homeDir = mkdtempSync(join(tmpdir(), "rmd-account-usage-home-default-"));
   writeFileSync(join(homeDir, ".claude.json"), readFileSync(FIXTURE, "utf8"));
   await withHome(homeDir, () => {
     const resolved = resolveAccountFilePath(undefined, {});
@@ -473,7 +473,7 @@ test("W1-T997: omitting the supplied path leaves the home default unchanged", as
 });
 
 test("W1-T997: the too old and account mismatch guards still refuse a bad cache", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "account-usage-guards-"));
+  const dir = mkdtempSync(join(tmpdir(), "rmd-account-usage-guards-"));
 
   // TOO OLD, read through the ROUTE via the newly-wired injectable path — not just the pure
   // projection — so pointing the reader at a readable file is proven not to have loosened this.

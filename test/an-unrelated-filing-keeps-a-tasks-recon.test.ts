@@ -56,7 +56,7 @@ function planFixture(root: string): { planPath: string; shardA: string } {
 // ── Claim 1 + 8: an unrelated filing doesn't move the NEW key, but WOULD move the OLD one ──────
 
 test("filing an UNRELATED task's shard leaves taskRecordSha unchanged, but moves planSha (the rejected whole-plan key)", () => {
-  const root = mkdtempSync(join(tmpdir(), "unrelated-filing-"));
+  const root = mkdtempSync(join(tmpdir(), "rmd-unrelated-filing-"));
   try {
     const { planPath } = planFixture(root);
     const planShaBefore = planSha(root);
@@ -102,7 +102,7 @@ test("filing an UNRELATED task's shard leaves taskRecordSha unchanged, but moves
 // ── Claim 2 + 5: editing THIS task's own record invalidates, named by component ────────────────
 
 test("editing THIS task's own plan record moves taskRecordSha and invalidates, named plan_sha", () => {
-  const root = mkdtempSync(join(tmpdir(), "own-record-edit-"));
+  const root = mkdtempSync(join(tmpdir(), "rmd-own-record-edit-"));
   try {
     const { planPath, shardA } = planFixture(root);
     const before = taskRecordSha(planPath, "TASK-A");
@@ -127,7 +127,7 @@ test("editing THIS task's own plan record moves taskRecordSha and invalidates, n
 // ── Claim 3 + 5: a declared-file change still invalidates, named by component ───────────────────
 
 test("a change to the task's declared files still invalidates, named files_digest — the OTHER component", () => {
-  const root = mkdtempSync(join(tmpdir(), "declared-file-edit-"));
+  const root = mkdtempSync(join(tmpdir(), "rmd-declared-file-edit-"));
   try {
     writeFileSync(join(root, "src.ts"), "export const x = 1;\n");
     const before = filesDigest(root, ["src.ts"]);
@@ -146,7 +146,7 @@ test("a change to the task's declared files still invalidates, named files_diges
 // ── Claim 4: a missing or unreadable plan record always invalidates, never reuses ───────────────
 
 test("a missing or unreadable plan record invalidates rather than reuses — even against a matching prior", () => {
-  const root = mkdtempSync(join(tmpdir(), "missing-record-"));
+  const root = mkdtempSync(join(tmpdir(), "rmd-missing-record-"));
   try {
     const { planPath } = planFixture(root);
 
@@ -188,7 +188,7 @@ test("an artifact with no prior record is treated as a miss, never a hit", () =>
 // ── Claim 7: filesDigest's own semantics are untouched by this task ─────────────────────────────
 
 test("filesDigest's meaning is unchanged: unrelated files never move it, declared files do, absent is a stable sentinel", () => {
-  const root = mkdtempSync(join(tmpdir(), "files-digest-unchanged-"));
+  const root = mkdtempSync(join(tmpdir(), "rmd-files-digest-unchanged-"));
   try {
     writeFileSync(join(root, "declared.ts"), "export const a = 1;\n");
     writeFileSync(join(root, "undeclared.ts"), "export const b = 1;\n");
