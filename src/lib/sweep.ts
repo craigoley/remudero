@@ -1089,6 +1089,13 @@ export interface OpenPrView {
    */
   reviewPendingSince?: string;
   /**
+   * W1-T2844 — positive local-process evidence that the CURRENT head's pending review owner no
+   * longer exists. `undefined` covers live owners as well as legacy, incomplete and foreign-host
+   * identities that cannot be proved dead; those retain {@link reviewPendingIsStale}'s existing
+   * timeout behavior. Only the real gateway sets this, from the durable pending ledger row.
+   */
+  reviewPendingOwnerDead?: boolean;
+  /**
    * W1-T2299 — ISO-8601 timestamp the CURRENT `reviewState` reading was posted at, when readable.
    * For a terminal state (`"success"`/`"failure"`) this is the `remudero-review` commit status's
    * own `created_at` — the SAME REST field {@link RollupCheckEntry.startedAt}'s own doc already
@@ -3712,9 +3719,10 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // only the stated reason differs, so an operator reading the ledger can
     // tell "never reviewed" from "orphaned by a push" apart at a glance.
     //
-    // W1-T913 — THE STUCK-PENDING FALSIFIER: `reviewState === "pending"` also matches here, but
-    // ONLY once {@link reviewPendingIsStale} says the pending has sat past `pendingCeilingMinutes`
-    // (or its age is unreadable). This is design (b)'s load-bearing constraint: a naive pending
+    // W1-T913/W1-T2844 — THE STUCK-PENDING FALSIFIER: `reviewState === "pending"` also matches
+    // here once the durable owner is positively proven dead, OR once {@link reviewPendingIsStale}
+    // says the pending has sat past `pendingCeilingMinutes` (or its age is unreadable). This is
+    // design (b)'s load-bearing constraint: a naive pending
     // post would make `reviewStateFromRollup` return "pending" instead of "none" and this row
     // would never offer the head again, silently disabling the sweep's own re-post/re-drive lane
     // the moment a review's owning run died mid-flight. A FRESH pending (not yet stale) is
@@ -3724,9 +3732,14 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     when: (pr, policy, _ageDays, now) =>
       pr.checksState === "green" &&
       pr.requiredContextsUnreadable !== true &&
-      (pr.reviewState === "none" || (pr.reviewState === "pending" && reviewPendingIsStale(pr, policy, now))),
+      (pr.reviewState === "none" ||
+        (pr.reviewState === "pending" &&
+          (pr.reviewPendingOwnerDead === true || reviewPendingIsStale(pr, policy, now)))),
     reason: (pr, policy, _ageDays, now) => {
       if (pr.reviewState === "pending") {
+        if (pr.reviewPendingOwnerDead === true) {
+          return `checks green, remudero-review owner proven dead — re-running the review lane on #${pr.prNumber}`;
+        }
         const age = reviewPendingAgeMinutes(pr, now);
         return (
           `checks green, remudero-review pending ${age !== undefined ? `${Math.floor(age)}m` : "for an undated interval"} ` +

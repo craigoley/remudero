@@ -1,14 +1,15 @@
 import assert from "node:assert/strict";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { test } from "node:test";
 import { appendLedger } from "../src/lib/ledger.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import { CLAUDE_BIN_ENV_OVERRIDE } from "../src/lib/worker.js";
-import { runReview } from "../src/run-task.js";
+import { buildOpenPrViews, runReview } from "../src/run-task.js";
 import {
+  assessPendingReviewOwner,
   decideAutoMergeArmAtSha,
   lastPendingReviewStatusFromLedger,
   lastPostedReviewStatusFromLedger,
@@ -260,6 +261,9 @@ test("W1-T913 criterion 3: postReviewPending posts state=pending through postRev
   const dir = tmpDir();
   try {
     const ledgerPath = join(dir, "ledger.ndjson");
+    const prUrl = "https://github.com/o/r/pull/913";
+    const inputDigest = reviewInputDigest("abc1234", "acceptance body");
+    const ownerStartedAt = "2026-09-04T20:30:00.000Z";
     const posts: Array<{ owner: string; repo: string; sha: string; state: string; description?: string }> = [];
 
     const result = await postReviewPending({
@@ -269,6 +273,9 @@ test("W1-T913 criterion 3: postReviewPending posts state=pending through postRev
       taskId: "W1-T913",
       runId: "run-913-a",
       ledgerPath,
+      prUrl,
+      reviewInputDigest: inputDigest,
+      ownerIdentity: { pid: 4242, startedAt: ownerStartedAt },
       fetchLifecycle: () => NOT_MERGED,
       post: (o) => {
         posts.push(o);
@@ -286,9 +293,21 @@ test("W1-T913 criterion 3: postReviewPending posts state=pending through postRev
     assert.ok(pendingLine, "a successful pending post must be ledgered");
     assert.equal(pendingLine?.head_sha, "abc1234");
     assert.equal(pendingLine?.run_id, "run-913-a");
+    assert.equal(pendingLine?.host, hostname(), "appendLedger's durable writer host is the owner host");
+    assert.equal(pendingLine?.owner_pid, 4242);
+    assert.equal(pendingLine?.owner_started_at, ownerStartedAt);
+    assert.equal(pendingLine?.pr_url, prUrl);
+    assert.equal(pendingLine?.review_input_digest, inputDigest);
 
     const record = lastPendingReviewStatusFromLedger(lines, "W1-T913");
-    assert.deepEqual(record, { headSha: "abc1234", runId: "run-913-a", postedAt: pendingLine?.ts });
+    assert.deepEqual(record, {
+      headSha: "abc1234",
+      runId: "run-913-a",
+      postedAt: pendingLine?.ts,
+      ownerPid: 4242,
+      ownerHost: hostname(),
+      ownerStartedAt,
+    });
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -622,6 +641,145 @@ test("W1-T913: a FRESH remudero-review pending (well inside the ceiling) is 'wai
   const result = deriveDisposition(pr, DEFAULT_SWEEP_POLICY, now);
   assert.equal(result.disposition, "wait");
   assert.doesNotMatch(result.reason, /escalat/i);
+});
+
+test("W1-T2844: a FRESH pending review with a positively dead owner is re-offered immediately", () => {
+  const now = Date.parse("2026-09-04T20:35:00.000Z");
+  const freshSince = new Date(now - 5 * 60_000).toISOString();
+  const pr = basePr({
+    reviewState: "pending",
+    reviewPendingSince: freshSince,
+    lastActivityAt: freshSince,
+    reviewPendingOwnerDead: true,
+  });
+
+  const result = deriveDisposition(pr, DEFAULT_SWEEP_POLICY, now);
+  assert.equal(result.disposition, "post-review");
+  assert.match(result.reason, /owner proven dead/i);
+});
+
+test("W1-T2844: pending-owner assessment delegates the complete holder identity to isHolderStale", () => {
+  const record = {
+    headSha: "abc1234",
+    runId: "run-owner",
+    postedAt: "2026-09-04T20:30:00.000Z",
+    ownerPid: 41,
+    ownerHost: "current-host",
+    ownerStartedAt: "2026-09-04T20:29:00.000Z",
+  };
+  let observedHolder: unknown;
+  const assessment = assessPendingReviewOwner(record, {
+    isPidAlive: () => true,
+    hostname: () => "current-host",
+    getProcessStartTime: () => null,
+    inContainer: () => false,
+    isStale: (holder) => {
+      observedHolder = holder;
+      return true;
+    },
+  });
+
+  assert.equal(assessment, "dead");
+  assert.deepEqual(observedHolder, {
+    pid: 41,
+    host: "current-host",
+    startedAt: "2026-09-04T20:29:00.000Z",
+  });
+});
+
+test("W1-T2844: live, legacy, incomplete and foreign-indeterminate owners never manufacture a dead fact", () => {
+  const complete = {
+    headSha: "abc1234",
+    runId: "run-owner",
+    postedAt: "2026-09-04T20:30:00.000Z",
+    ownerPid: 41,
+    ownerHost: "current-host",
+    ownerStartedAt: "2026-09-04T20:29:00.000Z",
+  };
+  let staleCalls = 0;
+  const common = {
+    isPidAlive: () => true,
+    hostname: () => "current-host",
+    getProcessStartTime: () => null,
+    inContainer: () => false,
+    isStale: () => {
+      staleCalls++;
+      return false;
+    },
+  };
+
+  assert.equal(assessPendingReviewOwner(complete, common), "active");
+  assert.equal(assessPendingReviewOwner({ ...complete, ownerPid: undefined }, common), "unknown");
+  assert.equal(assessPendingReviewOwner({ ...complete, ownerStartedAt: undefined }, common), "unknown");
+  assert.equal(assessPendingReviewOwner({ ...complete, ownerHost: "foreign-host" }, common), "unknown");
+  assert.equal(staleCalls, 2, "only complete identities reach the shared primitive; a foreign non-stale result remains unknown");
+});
+
+test("W1-T2844: buildOpenPrViews carries a dead-owner fact only for the current pending head", () => {
+  const dir = tmpDir();
+  try {
+    const ledgerPath = join(dir, "ledger.ndjson");
+    const headSha = "cccc3333cccc3333cccc3333cccc3333cccc3333";
+    const taskId = "W1-T2844";
+    const prUrl = "https://github.com/o/r/pull/2844";
+    const body = `Remudero-Task: ${taskId}`;
+    const pendingLine = {
+      ts: "2026-09-04T20:30:00.000Z",
+      host: "deadbeefcafe",
+      run_id: "run-owner",
+      task_id: taskId,
+      step: "review.pending_posted",
+      head_sha: headSha,
+      pr_url: prUrl,
+      review_input_digest: reviewInputDigest(headSha, body),
+      owner_pid: 41,
+      owner_started_at: "2026-09-04T20:29:00.000Z",
+    };
+    writeFileSync(ledgerPath, `${JSON.stringify(pendingLine)}\n`);
+
+    const fetch = (args: string[]): unknown => {
+      const path = args[args.length - 1] ?? "";
+      if (/state=open/.test(path)) {
+        return [{
+          number: 2844,
+          html_url: prUrl,
+          head: { ref: "run-W1-T2844-1", sha: headSha },
+          updated_at: "2026-09-04T20:31:00.000Z",
+          body,
+          auto_merge: null,
+          state: "open",
+        }];
+      }
+      if (/check-runs/.test(path)) {
+        return { check_runs: [{ name: "ci-gate", status: "completed", conclusion: "success", started_at: "2026-09-04T20:25:00.000Z" }] };
+      }
+      if (/commits\/.+\/status/.test(path)) {
+        return { statuses: [{ context: "remudero-review", state: "pending", created_at: "2026-09-04T20:30:00.000Z" }] };
+      }
+      if (/\/pulls\/2844$/.test(path)) return { mergeable: true, mergeable_state: "clean" };
+      return [];
+    };
+    let assessed = 0;
+    const deps = {
+      fetch,
+      requiredContexts: () => ["ci-gate"],
+      assessPendingOwner: () => {
+        assessed++;
+        return "dead" as const;
+      },
+    };
+    const [current] = buildOpenPrViews("o", "r", ledgerPath, deps);
+    assert.equal(assessed, 1);
+    assert.equal(current?.reviewPendingOwnerDead, true);
+
+    writeFileSync(ledgerPath, `${JSON.stringify({ ...pendingLine, head_sha: "old-head" })}\n`);
+    assessed = 0;
+    const [old] = buildOpenPrViews("o", "r", ledgerPath, deps);
+    assert.equal(assessed, 0, "an old-head owner is never assessed as if it owned the current review");
+    assert.equal(old?.reviewPendingOwnerDead, undefined);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("W1-T913: a checksState=green, reviewState=none head (the pre-existing shape) is UNCHANGED — still routes to post-review", () => {
