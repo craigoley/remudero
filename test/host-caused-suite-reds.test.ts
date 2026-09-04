@@ -103,8 +103,10 @@ test("HOST_CAUSED_SUITE_REDS: the registry's per-cluster counts sum correctly â€
     // W1-T2785: measured 2026-09-04 on the mini â€” `node --test` on this file reports
     // `# tests 10 / # pass 9 / # fail 1`, the one failure being "the staleness predicate
     // discriminates at its own boundary, in both directions". SAME cluster as the sibling row
-    // above, keyed on the same darwin `date` fact: this file's FIXED_NOW_DATE stub execs
-    // `/usr/bin/date`, which does not exist on macOS at all.
+    // above, keyed on the same darwin `date` fact: this file's FIXED_NOW_DATE stub execs an
+    // absolute date-binary path that does not exist on macOS at all (see the exact path in the
+    // matching src/lib/ci-parity.ts entry's note; not repeated here so this comment stays out of
+    // the host-capability-fixtures.test.ts platform-tool scan, which greps test/ for that literal).
     "test/fleet-heartbeat-supervisor-tick.test.ts": { cause: "bsd-date-control-arm", count: 1 },
     "test/recovery-drill.test.ts": { cause: "undiagnosed-ps-orphan-sweep", count: 2 },
     "test/dispatch-memory-governor.test.ts": { cause: "linux-procfs-absent", count: 1 },
