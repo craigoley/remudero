@@ -1,0 +1,123 @@
+- id: W1-T2834
+  title: "SERVE'S GITHUB APP KEY MOUNT IS A ONE-SHOT SNAPSHOT OF A SIBLING CONTAINER — daemon_host_path_for inspects remudero-daemon once at docker run, and when that returns nothing the script degrades SILENTLY, exporting the daemon's untranslated container path so serve fails token refresh every five minutes forever with no red check anywhere"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: medium
+  origin: architect
+  plan_refs: ["§4", "W1-T2311", "W1-T2434", "W1-T2552", "W1-T2778"]
+  files: [deploy/serve-container.sh, test/serves-key-mount-is-a-snapshot-of-a-sibling-container.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    `daemon_host_path_for` (deploy/serve-container.sh, W1-T2778) translates a container path
+    captured from `remudero-daemon` into a HOST path by shelling
+    `docker inspect "${DAEMON_CONTAINER}"` for its mount table. That inspection happens ONCE, at
+    `docker run` time, and is never re-evaluated. When it returns nothing the script takes its
+    documented graceful-degrade branch, which leaves `GH_APP_PRIVATE_KEY_PATH` exported as the
+    DAEMON'S container path with no corresponding mount.
+
+    MEASURED CONSEQUENCE, 2026-09-04: nine consecutive `github_app.token_refresh_failed` rows from
+    17:20:03Z, reason `private key unreadable`, one every five minutes, for over an hour, with
+    nothing recovering it and NO RED CHECK ANYWHERE. The daemon lane's own failures in the same
+    corpus are from 2026-08-30 with a different reason (`exchange timed out`), so this is
+    serve-specific and new.
+
+    THE OBSERVED STATE, VERIFIED ON THE HOST. `remudero-serve` carries exactly three mounts — the
+    state dir, `.claude.json`, and the webhook secret — and NO pem. It carries
+    `GH_APP_PRIVATE_KEY_PATH=/home/node/.claude/rmd-app.pem`, which inside serve is
+    `No such file or directory`. "private key unreadable" is literally true.
+
+    THAT IS THE PRE-W1-T2778 DEFECT, REACHED THROUGH THE POST-W1-T2778 CODE. W1-T2778's own diff
+    describes it: "Serve had all three env names, no `.claude` mount, and therefore no readable
+    key." The fix did not regress — it degraded.
+
+    THE FIX IS NEITHER THE MOUNT FLAGS NOR THE READER, and both were checked rather than assumed:
+      - the host key is `-rw------- craigoleyagent 1675 bytes`, uid 1000, readable, non-empty;
+        serve runs as `1000:1000`, so a `:ro` bind of that file would work;
+      - the launcher checkout (`rmd-state2/remudero`, HEAD `c2fe3ebb`) CONTAINS 6b872f96;
+      - re-running `daemon_host_path_for`'s exact logic today resolves
+        `/home/node/.claude/rmd-app.pem` -> `/home/craigoleyagent/.claude/rmd-app.pem` correctly.
+    The flags are right, the reader is right, and the resolver works. The exposure is the one-shot,
+    silent-degrade coupling to a sibling container's liveness.
+
+    THE LIKELY MECHANISM, WITH ITS EVIDENCE AND ITS CAVEAT. The daemon's process started 16:54:23Z;
+    serve launched 16:54:54Z — THIRTY-ONE SECONDS APART, both restarting, on a day the daemon was
+    crash-looping (see W1-T2833's exit-134). Serve's launch almost certainly raced the daemon's and
+    inspected a container mid-creation, so the mount table was absent or incomplete at that instant.
+    THIS IS NOT PROVEN AND CANNOT BE: the container that existed at 16:54:54Z is gone, and the
+    script's own header notes that its `docker inspect` output "is lost the moment anyone runs
+    `docker rm`". Recorded as the likely mechanism with the timing as its evidence, because that is
+    more useful to a successor than "cause unknown" — and because a race explains why every
+    precondition holds today while the launch failed.
+
+    THE OPERATOR IS RESTARTING SERVE AS A WORKAROUND. That is reasonable and it is NOT A FIX:
+    relaunching re-runs the same one-shot resolution against whatever the daemon happens to be doing
+    at that second. It will work whenever the daemon is up and settled, and fail exactly the same
+    way the next time the two restart together — which is the normal condition after any deploy,
+    crash or host-update.
+  design: |
+    THREE SHAPES, WEIGHED RATHER THAN ASSUMED. All three remove the silent degrade; they differ in
+    what they couple to.
+
+    (A) RE-EVALUATE AT USE TIME instead of launch time — resolve the key path when the refresh
+    actually needs it, not when the container is created. Removes the race entirely, because a
+    later attempt sees a settled daemon. COST: it moves container-topology knowledge out of a shell
+    launcher and into the running service, which is a larger change than it looks and puts a
+    `docker inspect` (or an equivalent) on a live code path inside a container that may not have
+    the docker socket. REJECTED for that last reason unless the socket is already present.
+
+    (B) FAIL LOUDLY rather than degrade when resolution returns nothing. Smallest possible change,
+    and it converts an hour of silent five-minute failures into one refusal at launch that names
+    the cause. COST: it makes serve refuse to start in a case that today merely degrades, and the
+    degrade is deliberate — GH_TOKEN remains a real fallback and the console still runs. A refusal
+    that blocks the console over a credential it can live without is a worse failure than the one
+    it replaces.
+
+    (C) DECOUPLE FROM THE SIBLING — resolve the host path without inspecting another container:
+    take the key's HOST path from configuration/environment directly, and use the daemon inspection
+    only as a fallback hint when that is absent. RECOMMENDED. It removes the race rather than
+    narrowing it, needs no docker socket in the service, keeps the graceful degrade for hosts that
+    genuinely have no key, and leaves W1-T2778's translation as a convenience rather than the only
+    path. (A) loses on the socket dependency; (B) loses because refusing is worse than degrading
+    for a credential with a working fallback.
+
+    (B) IS NOT WHOLLY DISCARDED: the silent half must go regardless of which shape lands. Whichever
+    is chosen, the degrade path must emit a signal a human or a check can see — today it writes two
+    lines to the launcher's stderr and nothing else, which is why this ran for over an hour
+    unnoticed. A degrade that no instrument reports is indistinguishable from success.
+
+    NOT IN SCOPE, NAMED SO NOTHING IS ORPHANED: the daemon's crash loop that plausibly caused the
+    race (W1-T2833); the `:ro` mount flag itself, which is correct and deliberate and must not be
+    relaxed to "fix" this; and any change to what reads the key inside serve, which was verified
+    correct.
+  acceptance:
+    - claim: "launching serve while the sibling container it inspects is UNINSPECTABLE no longer exports an unusable key path — the launch either resolves the host key without inspecting the sibling, or refuses in a way that names the cause, and never silently exports a path that does not exist inside the container"
+      proof: "unit test: test/serves-key-mount-is-a-snapshot-of-a-sibling-container.test.ts"
+    - claim: "the degrade path, whenever it is taken, emits a signal an instrument can observe rather than only two lines on the launcher's stderr — a degrade no instrument reports is indistinguishable from success"
+      proof: "unit test: test/serves-key-mount-is-a-snapshot-of-a-sibling-container.test.ts"
+    - claim: "a host that genuinely has no App key still launches and still degrades gracefully to GH_TOKEN, so removing the silent failure never turns an absent credential into a refused console"
+      proof: "unit test: test/serves-key-mount-is-a-snapshot-of-a-sibling-container.test.ts"
+    - claim: "when the key IS resolvable the mount is still one file, still read-only, and still the same destination, so W1-T2778's security shape is unchanged by this fix"
+      proof: "unit test: test/serves-key-mount-is-a-snapshot-of-a-sibling-container.test.ts"
+    - claim: "the resolution no longer depends on a sibling container being inspectable at launch — the same launch that fails today under an uninspectable sibling succeeds when the host key is otherwise discoverable"
+      proof: "unit test: test/serves-key-mount-is-a-snapshot-of-a-sibling-container.test.ts"
+  note: |
+    FILED 2026-09-04 from an on-host investigation. The failure had been running for over forty
+    minutes when it was noticed, and nothing in the fleet reported it: the console kept serving, the
+    daemon was unaffected, and the only trace was a `github_app.token_refresh_failed` row every five
+    minutes in a ledger nobody was watching. THAT is the property worth fixing — the credential
+    outage is recoverable by a restart; the silence is not.
+
+    THE FALSIFIER MUST DRIVE THE UNINSPECTABLE CASE DELIBERATELY. A test that launches against a
+    healthy daemon proves nothing: every precondition holds today, which is exactly why the live
+    failure could not be reproduced by re-running the resolver. Construct the uninspectable sibling
+    (an absent container name, or an inspect that returns empty) and assert on what the launch
+    produces. THE CURRENT SILENT DEGRADE MUST BE PROVABLY GONE, NOT MERELY LESS LIKELY.
+
+    SIBLINGS, DELIBERATELY NOT FOLDED IN: W1-T2833 (the retro's unbounded ledger read — the crash
+    loop that plausibly caused this race, and otherwise unrelated) and W1-T2828 (the Claude capacity
+    read's missing account label, a different credential surface entirely).
