@@ -1,0 +1,86 @@
+- id: W1-T2844
+  title: "A DEAD REVIEW OWNER STAYS TRUSTED UNTIL THE FULL PENDING TIMEOUT — review.pending_posted names a run but carries no lock-grade PID/start identity, and buildOpenPrViews keeps only its timestamp, so a container recycle leaves a green PR waiting for an owner that cannot exist"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: high
+  files:
+    - src/lib/review.ts
+    - src/lib/sweep.ts
+    - src/run-task.ts
+    - test/review-status-pending.test.ts
+  origin: "incident#3960-restart-orphaned-review-2026-09-04"
+  plan_refs: ["W1-T913", "W1-T978", "W1-T2753", "W1-T2721"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON PR #3960. `remudero-review` was posted pending at 19:57:56Z by run
+    W1-T2667-1788549107880 from container host 03df82b030ae. The daemon container was replaced;
+    the recovered daemon was running in host b255a573002c from 20:05:13Z with no review process
+    for that PR. At 20:43Z the sweep still waited because the pending was only 45 minutes old,
+    and it would trust that impossible owner until `pendingCeilingMinutes` reached 60. An operator
+    review finally replaced the orphaned pending with success at 20:45Z. Container health and the
+    review queue had recovered, but this head could not use that evidence.
+
+    W1-T913 deliberately writes ownership in both the pending status description and the
+    `review.pending_posted` ledger row. Its implementation retains only `runId` and `postedAt`;
+    it does not carry the PID/start-time identity needed to prove liveness, and
+    `buildOpenPrViews` reduces the record to `reviewPendingSince`. The sweep therefore has only
+    a clock, even though the repository already has a stronger, tested decision primitive.
+
+    `isHolderStale` is that primitive. It already handles a dead same-host PID, PID reuse,
+    a replaced Docker container whose hostname changes, and a restarted container whose hostname
+    stays stable but whose boot time is newer than the holder. Reusing it avoids a second,
+    weaker definition of process liveness. This task improves recovery only when the owner is
+    positively proven dead; it does not weaken the existing pending timeout or assume that missing
+    telemetry means dead.
+  design: |
+    Extend each new `review.pending_posted` row with the posting process PID and a timestamp usable
+    as the holder start bound. Retain the ledger's existing `host`, `run_id`, head SHA, PR URL and
+    review-input digest. Extend `PendingReviewStatusRecord` so the read path preserves those owner
+    fields instead of discarding them.
+
+    Add one pure, injectable owner assessment that delegates to `isHolderStale`. It returns a
+    three-state result: proven alive/not-stale, proven dead/stale, or unknown when the record is
+    legacy, incomplete, unreadable, or cannot be probed. Do not reimplement Docker-ID, PID-reuse,
+    or boot-time rules in the review path.
+
+    Carry only the positive `owner dead` fact onto `OpenPrView`. Extend the existing stuck-pending
+    post-review admission so a checks-green pending head is re-offered immediately when that fact
+    is true. A live owner remains protected. Unknown or legacy owner identity keeps the exact
+    current `pendingCeilingMinutes` behavior, including the undated fail-open rule already owned by
+    W1-T913. Terminal verdict precedence, exact-input identity, and W1-T2753's thrown-attempt
+    backoff remain unchanged.
+
+    The status description stays bounded and human-readable; no PID is required there because the
+    durable ledger is the decision record. Add disposition text and ledger-visible evidence that
+    distinguish `owner proven dead` from `pending exceeded timeout`.
+  acceptance:
+    - claim: "every newly posted pending review records run id, host, PID, owner-start timestamp, PR URL, head SHA and exact review-input digest in the durable ledger"
+      proof: "unit test: test/review-status-pending.test.ts"
+    - claim: "pending-owner liveness delegates to the repository's existing isHolderStale primitive rather than duplicating PID, container-host or boot-time rules"
+      proof: "unit test: test/review-status-pending.test.ts"
+    - claim: "a checks-green pending review whose owner is positively proven dead is re-offered immediately, before pendingCeilingMinutes"
+      proof: "unit test: test/review-status-pending.test.ts"
+    - claim: "a fresh pending review whose owner is still live is not re-offered, so two reviewers cannot be manufactured by the recovery path"
+      proof: "unit test: test/review-status-pending.test.ts"
+    - claim: "legacy, incomplete or indeterminate owner identity does not manufacture a dead-owner verdict and continues to use the existing pending timeout"
+      proof: "unit test: test/review-status-pending.test.ts"
+    - claim: "a terminal review verdict, an old-head pending record and a changed body retain their existing exact-input and precedence behavior"
+      proof: "unit test: test/review-status-pending.test.ts"
+  falsifier: |
+    Close this task without implementation if the current tree already carries a process-liveness
+    fact from `review.pending_posted` into the pending disposition, or if a live reproduction shows
+    #3960's owner process remained reachable after the container replacement. The observed ledger,
+    process list and `OpenPrView` producer refute both conditions at filing.
+  note: |
+    ID PROVENANCE: `rmd next-task-id --reserve` atomically reserved W1-T2844 at
+    `refs/rmd-id/W1-T2844` in one attempt after observing 2843 as the maximum across plan shards,
+    open PRs and history.
+
+    This task does not restart, stop, replace or deploy either container. It does not shorten the
+    fallback timeout. It adds no GitHub read: owner evidence comes from the ledger row the sweep
+    already scans and the local process/container probes the shared lock primitive already uses.
