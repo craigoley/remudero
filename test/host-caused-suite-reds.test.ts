@@ -100,6 +100,12 @@ test("HOST_CAUSED_SUITE_REDS: the registry's per-cluster counts sum correctly â€
     "test/the-recycle-wait-is-sized-under-the-run-it-waits-on.test.ts": { cause: "bash-3.2-no-associative-arrays", count: 5 },
     "test/worker-credential-preflight.test.ts": { cause: "darwin-keychain-unprovisioned", count: 2 },
     "test/fleet-heartbeat.test.ts": { cause: "bsd-date-control-arm", count: 2 },
+    // W1-T2785: measured 2026-09-04 on the mini â€” `node --test` on this file reports
+    // `# tests 10 / # pass 9 / # fail 1`, the one failure being "the staleness predicate
+    // discriminates at its own boundary, in both directions". SAME cluster as the sibling row
+    // above, keyed on the same darwin `date` fact: this file's FIXED_NOW_DATE stub execs
+    // `/usr/bin/date`, which does not exist on macOS at all.
+    "test/fleet-heartbeat-supervisor-tick.test.ts": { cause: "bsd-date-control-arm", count: 1 },
     "test/recovery-drill.test.ts": { cause: "undiagnosed-ps-orphan-sweep", count: 2 },
     "test/dispatch-memory-governor.test.ts": { cause: "linux-procfs-absent", count: 1 },
     "test/proof-spawner-env-isolation.test.ts": { cause: "macos-corefoundation-env-leak", count: 1 },

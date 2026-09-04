@@ -712,6 +712,18 @@ export const HOST_CAUSED_SUITE_REDS: HostCausedSuiteRedEntry[] = [
     appliesTo: (f) => f.platform === "darwin",
   },
   {
+    file: "test/fleet-heartbeat-supervisor-tick.test.ts",
+    cause: "bsd-date-control-arm",
+    count: 1,
+    // THE PATH, NOT THE FLAG — the step that actually dies. The FIXED_NOW_DATE stub execs
+    // `/usr/bin/date`, and on macOS that path DOES NOT EXIST (date ships at /bin/date), so the
+    // exec fails 127 before `-d` is ever parsed. `-d` being a GNU extension is a real second
+    // darwin fact and the one the sibling entry above is worded around, but it is not what bites
+    // here; naming it would send the next reader to flag compatibility instead of to the path.
+    note: "the FIXED_NOW_DATE stub execs /usr/bin/date, which does not exist on darwin (date is /bin/date), so the exec dies before `-d` is parsed",
+    appliesTo: (f) => f.platform === "darwin",
+  },
+  {
     file: "test/recovery-drill.test.ts",
     cause: "undiagnosed-ps-orphan-sweep",
     count: 2,
