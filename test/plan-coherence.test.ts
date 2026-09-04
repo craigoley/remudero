@@ -271,19 +271,24 @@ test("planCoherenceSectionFor composes the rung and the render into one call, fo
 // `buildGather` is called UNCONDITIONALLY every `rmd retro` cycle (retroCommand, run-task.ts)
 // and its result is fed straight into `renderGather`, which produces the actual retro report
 // text (both --dry-run and the real automated run). `planCoherenceRung(` is called FROM INSIDE
-// `buildGather` — not merely declared in this file, and not only reachable from a standalone
-// wrapper this suite calls directly — so wiring `opts.planCoherence` in is the whole difference
-// between "this rung is read by nothing" and "this rung answers the fourteen-cycle question
-// every cycle the retro already runs".
+// `buildGather` UNCONDITIONALLY TOO — never gated behind whether the caller supplied
+// `opts.planCoherence` — so `RetroGather.planCoherence` is NEVER omitted: absent real plan
+// bytes it reports (and `renderGather` prints) `unexamined` with a stated reason, a genuine
+// every-cycle answer rather than silence. This is the whole difference between "this rung is
+// read by nothing" and "this rung answers the fourteen-cycle question every cycle the retro
+// already runs" — even before `retroCommand` is wired to supply real bytes.
 
 const MINIMAL_LEDGER = "";
 const MINIMAL_LEARNINGS = "# L\n";
 
-test("ACCEPTANCE #6: buildGather omits planCoherence, and renderGather prints no section, when the caller supplies nothing (existing callers unaffected)", () => {
+test("ACCEPTANCE #6: buildGather still COMPUTES planCoherence (never omits it), rendering UNEXAMINED, when the caller supplies nothing", () => {
   const g = buildGather({ ledgerNdjson: MINIMAL_LEDGER, learningsMd: MINIMAL_LEARNINGS });
-  assert.equal(g.planCoherence, undefined);
+  assert.notEqual(g.planCoherence, undefined, "planCoherenceRung must be called even when opts.planCoherence is omitted");
+  assert.equal(g.planCoherence.kind, "unexamined");
   const rendered = renderGather(g);
-  assert.doesNotMatch(rendered, /Plan-coherence rung/);
+  assert.match(rendered, /## Plan-coherence rung/);
+  assert.match(rendered, /UNEXAMINED/);
+  assert.match(rendered, /opts\.planCoherence/);
 });
 
 test("ACCEPTANCE #6: buildGather COMPUTES planCoherenceRung, and renderGather prints the clean section, when the caller wires plan/tasks.yaml + shards in", () => {

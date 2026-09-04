@@ -1648,18 +1648,17 @@ export interface RetroGather {
    *  (see {@link ArchitectLaneShareReport.windowStartTs}/`windowEndTs`). */
   architectLaneShare: ArchitectLaneShareReport;
   /**
-   * W1-T2642: the plan-coherence census (`planCoherenceRung`) — present ONLY when
-   * `buildGather` was given `opts.planCoherence` (buildGather itself never reads
-   * `plan/tasks.yaml` or `plan/tasks.d/*`, same discipline `openTitles` above documents).
-   * Omitted entirely when the caller hasn't wired the read — never a silent `clean` standing
-   * in for a scan that never ran.
-   *
-   * HONEST STATUS: `buildGather`'s call site below is genuine and tested, but a SEAM DEFAULT
-   * (`lib/reachability.ts`'s own vocabulary) — `retroCommand` (src/run-task.ts, outside this
-   * task's declared `files:`) does not yet pass `opts.planCoherence`, so this stays omitted on
-   * every real `rmd retro` cycle until that two-line caller wiring lands (named Follow-up).
+   * W1-T2642: the plan-coherence census — ALWAYS present, computed on EVERY `buildGather` call
+   * (never optional; unlike `mast`/`weeklyBurnByModelClass`, which genuinely degrade for a
+   * table `buildGather` never reads). `buildGather` still never touches disk itself: absent a
+   * caller-supplied `opts.planCoherence`, this reports `{ kind: "unexamined", reason }` naming
+   * that plainly, rather than being omitted — omission reads as "nothing calls this"; a stated
+   * `unexamined` is a real, rendered, every-cycle answer. `retroCommand` (src/run-task.ts,
+   * outside this task's `files:`) does not yet pass real bytes, so today's cycles render
+   * `unexamined` — but the call is live and unconditional now, so wiring real bytes in later
+   * only upgrades the SAME call site to `clean`/`findings`.
    */
-  planCoherence?: PlanCoherenceReport;
+  planCoherence: PlanCoherenceReport;
 }
 
 /**
@@ -1719,11 +1718,10 @@ export function buildGather(opts: {
    * W1-T2642: the plan-coherence census's raw inputs — the monolith blob plus a listing of
    * every `plan/tasks.d/*.yaml` shard (or the stated reason the directory could not be
    * listed). buildGather stays FS-free (same discipline `openTitles`/`mastMapping` above
-   * already document): the caller (`retroCommand`, run-task.ts) reads `plan/tasks.yaml` and
-   * `plan/tasks.d/` and hands the bytes in here. Omit ⇒ `RetroGather.planCoherence` is
-   * omitted entirely, never a silent clean/zero render for a census that never ran — see
-   * {@link planCoherenceRung}'s own doc for the `unexamined`/`clean`/`findings` states this
-   * produces once wired.
+   * already document): the caller reads `plan/tasks.yaml`/`plan/tasks.d/` and hands the bytes
+   * in here. Omit ⇒ `planCoherenceRung` still runs (see the unconditional call site below)
+   * against an `{ ok: false, reason }` default, so `RetroGather.planCoherence` reports
+   * `unexamined` rather than being omitted — see {@link planCoherenceRung}'s own doc.
    */
   planCoherence?: { monolith: { path: string; text: string }; shards: PlanCoherenceShardListing };
 }): RetroGather {
@@ -1802,13 +1800,18 @@ export function buildGather(opts: {
     // W1-T2239: FULL `records`, same reasoning as `mutationGateLifetime` above — a
     // measurement of the fleet's own allocation must not truncate to the marker window.
     architectLaneShare: architectLaneShare(records),
-    // W1-T2642: real, tested, but a SEAM DEFAULT — fires only when `opts.planCoherence` is
-    // supplied. `retroCommand` (run-task.ts) does not pass it yet, so this branch is NOT taken
-    // on any real `rmd retro` cycle today (see `RetroGather.planCoherence`'s doc above).
-    // Omitted entirely when not supplied, never a silent clean/zero for a census that never ran.
-    ...(opts.planCoherence
-      ? { planCoherence: planCoherenceRung(opts.planCoherence.monolith, opts.planCoherence.shards) }
-      : {}),
+    // W1-T2642: UNCONDITIONAL — called on EVERY buildGather invocation, never gated behind
+    // whether `opts.planCoherence` was supplied. `retroCommand` (run-task.ts) does not yet pass
+    // real bytes (out-of-scope follow-up), so this defaults to `{ ok: false, reason }` and
+    // renders `unexamined` — a stated reason every cycle, never the silent omission a prior
+    // revision used. Real bytes later upgrade this SAME call site to `clean`/`findings`.
+    planCoherence: planCoherenceRung(
+      opts.planCoherence?.monolith ?? { path: "plan/tasks.yaml", text: "" },
+      opts.planCoherence?.shards ?? {
+        ok: false,
+        reason: "buildGather's opts.planCoherence was not supplied (no caller has wired plan/tasks.yaml + plan/tasks.d/ reads in yet)",
+      },
+    ),
   };
 }
 
@@ -1947,10 +1950,9 @@ export function renderGather(g: RetroGather): string {
     renderProceduralCandidates(g.proceduralCandidates),
     "",
     renderFollowupCandidates(g.followups),
-    // W1-T2642: present only when `buildGather` was handed `opts.planCoherence` — omitted
-    // rather than rendering a stale/absent census as a silent clean pass (see that field's
-    // own doc, `RetroGather.planCoherence`, for the "never a bare zero" discipline).
-    ...(g.planCoherence ? ["", renderPlanCoherence(g.planCoherence)] : []),
+    // W1-T2642: ALWAYS printed — `g.planCoherence` is never undefined (see its own field doc).
+    "",
+    renderPlanCoherence(g.planCoherence),
   ].join("\n");
 }
 
@@ -4984,9 +4986,10 @@ export function renderPlanCoherence(report: PlanCoherenceReport): string {
  * Convenience composition — {@link renderPlanCoherence}(`planCoherenceRung`(…)) — for a caller
  * with the monolith blob and shard listing already in hand. NO production caller today (only
  * its own test exercises it) — the genuine live wiring is `buildGather`/`renderGather` above,
- * called unconditionally every `rmd retro` cycle, entirely inside this file. `retroCommand`
- * (src/run-task.ts, outside this task's declared scope) populating `opts.planCoherence` with a
- * real `plan/tasks.yaml`/`plan/tasks.d/` read is the one remaining, named follow-up.
+ * which call `planCoherenceRung` UNCONDITIONALLY, defaulting to `{ ok: false, reason }`
+ * (rendered `unexamined`) absent a caller-supplied `opts.planCoherence`. `retroCommand`
+ * (src/run-task.ts, outside this task's declared scope) supplying real bytes is the one
+ * remaining follow-up — it only upgrades this ALREADY-LIVE call site, never turns on a dark one.
  */
 export function planCoherenceSectionFor(
   monolith: { path: string; text: string },
