@@ -241,6 +241,15 @@ export async function claimReviewDecision(opts: {
  *                     stays `executed_fail` (W1-T72's test-theater guard, unchanged): a forward
  *                     reference is a POSITIVE claim from the diff itself, never inferred from
  *                     absence alone.
+ *                     (W1-T2737) ALSO assigned to a HOUSE-dialect `grep:` proof, on the same
+ *                     terms plus one: its target path is declared in the diff's shard `files:`,
+ *                     the executor already reported a failure (so "the symbol is absent" is
+ *                     MEASURED, not predicted), and the diff changes no source
+ *                     ({@link ProofExecContext.planOnlyDiff}). That third condition is not
+ *                     decoration — see its doc for why the `unit test:` arm does not need one.
+ *                     Reason: `callSiteViolations` (task-linter.ts) MANDATES exactly this proof
+ *                     shape for a task creating a `src/` module, and grading the mandated remedy
+ *                     `executed_fail` made the two gates unsatisfiable at once.
  *   stale_self_path — (W1-T1071) a `grep:` proof went `"stale"` (see `executed_stale` above)
  *                     and its target is BOTH a plan-shard path ({@link SHARD_PATH_RE}) AND a path
  *                     this diff's own task declares SOMETHING ELSE beside — the shape a proof
@@ -1360,6 +1369,21 @@ function parseDialectGrep(body: string): WhitelistedProof | null {
 }
 
 /**
+ * W1-T2737 — the TARGET PATH of a HOUSE-dialect `grep:` proof, or `undefined` for any other shape.
+ *
+ * {@link parseDialectGrep} compiles to a fixed `["-arn", "--", pattern, path]` argv, so the path is
+ * the last element and nothing else can occupy it. The LEGACY fenced `` `grep ...` `` form passes
+ * the author's own argv through ({@link WhitelistedProof.authorSelectedArgv}) — its last element is
+ * whatever the author typed, and {@link proofEngineDivergenceViolations} already reports that shape
+ * as engine-ambiguous — so this declines rather than guesses at a path.
+ */
+function dialectGrepTargetPath(w: WhitelistedProof): string | undefined {
+  if (w.kind !== "grep" || w.authorSelectedArgv === true) return undefined;
+  if (w.args.length !== 4 || w.args[0] !== "-arn" || w.args[1] !== "--") return undefined;
+  return w.args[3];
+}
+
+/**
  * Compile a `unit test:` dialect body — either a literal test-file path (reuses
  * the exact-file shape verbatim) or a bare TEST NAME (name-filtered across the
  * whole suite glob).
@@ -2316,6 +2340,20 @@ export interface ProofExecContext {
    *  Absent/empty ⇒ every exact-path `unit test:` proof naming an absent file stays
    *  `executed_fail`, byte-identical to pre-W1-T456 behavior. */
   forwardReferenceFiles?: ReadonlySet<string>;
+  /**
+   * (W1-T2737) True when THIS diff changes only plan/docs — a FILING PR. Supplied from the same
+   * `planOnly` {@link judgeReview} already computes, never re-derived.
+   *
+   * WHY THE GREP CARVE-OUT NEEDS IT AND THE `unit test:` ONE DOES NOT. `forwardReferenceFiles` is
+   * the union of this diff's own shard `files:` AND a resolved task's declared `files:`, so on the
+   * BUILD PR the same paths are declared. The `unit test:` arm is filing-scoped by its
+   * `!existsSync` half — once built, the suite exists and the carve-out stops applying. A
+   * call-site grep has no equivalent tell: the CONSUMER file exists in both worlds and only the
+   * CALL is missing. Without this flag the grep carve-out would excuse a build PR that shipped the
+   * module unwired — the exact class W1-T2732 counted four of. Absent ⇒ treated as false, so every
+   * caller that predates this task keeps today's grading byte for byte.
+   */
+  planOnlyDiff?: boolean;
 }
 
 /**
@@ -2712,6 +2750,17 @@ export function judgeCriterion(
         !whitelisted.nameFiltered &&
         execCtx.forwardReferenceFiles?.has(whitelisted.label) === true &&
         !existsSync(join(execCtx.cwd, whitelisted.label));
+      // W1-T2737: the same forward-reference judgement for the dialect `callSiteViolations`
+      // MANDATES. Computed here beside its `unit test:` sibling so the two conditions read
+      // together, but CONSUMED only in the post-execution failure branch below — see there.
+      // `planOnlyDiff` is the filing-scope half; an UNDECLARED path yields `undefined` and keeps
+      // blocking, verbatim (W1-T456: "NEVER assigned when the named path is simply absent and
+      // UNDECLARED").
+      const grepTarget = dialectGrepTargetPath(whitelisted);
+      const grepForwardReferenceTarget =
+        execCtx.planOnlyDiff === true && grepTarget !== undefined && execCtx.forwardReferenceFiles?.has(grepTarget) === true
+          ? grepTarget
+          : undefined;
       if (forwardReference) {
         proofExec = "not_yet_built";
         proofSkip = "forward-reference";
@@ -2819,6 +2868,25 @@ export function judgeCriterion(
               met = false;
               reason = `proof names a specific test that does not exist on the PR head (0 tests matched '${whitelisted.label}') — test theater, not executed`;
             }
+          } else if (grepForwardReferenceTarget !== undefined) {
+            // W1-T2737: the grep half of W1-T456's carve-out. `callSiteViolations`
+            // (task-linter.ts) REQUIRES a task creating a src/ module to carry
+            // `grep: <symbol>( in <the file that calls it>` — the only dialect that can express
+            // "a DIFFERENT file calls this symbol" — and on the filing that symbol cannot exist,
+            // so the branch above graded the prescribed remedy `executed_fail` and failed the PR
+            // on it. MEASURED on W1-T2716 (merged): that one proof failed the PR alone while its
+            // six `unit test:` siblings read `not_yet_built`, and the author dropped the wiring
+            // criterion to merge.
+            //
+            // REACHED ONLY AFTER EXECUTION, never before it, which is what makes "the symbol is
+            // absent from that path on the head" the EXECUTOR's answer rather than a second
+            // implementation of the match. A grep that can pass is therefore never intercepted.
+            proofExec = "not_yet_built";
+            proofSkip = "forward-reference";
+            reason =
+              `${reason} — NOTE: proof greps ${grepForwardReferenceTarget}, declared in this diff's own ` +
+              `plan shard \`files:\` while this diff changes no source — a forward reference to wiring ` +
+              `not yet built, not a failure; keyword floor applied`;
           } else {
             proofExec = "executed_fail";
             met = false;
@@ -4091,6 +4159,9 @@ export function judgeReview(
         baseCwd: evidence.baseCheckoutDir,
         baseUnreadablePaths: evidence.baseUnreadablePaths,
         forwardReferenceFiles,
+        // W1-T2737: the SAME `planOnly` computed above — one derivation, so the reviewer's
+        // scope judgement and the forward-reference carve-out can never disagree.
+        planOnlyDiff: planOnly,
       }
     : undefined;
   const verdicts = criteria.map((c, i) =>
