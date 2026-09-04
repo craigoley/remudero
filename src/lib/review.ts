@@ -5,7 +5,7 @@ import { homedir, hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { classifyFailure } from "./classify.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
-import { reclaimStaleLock } from "./fs-race-safe.js";
+import { isHolderStale, reclaimStaleLock, type IsHolderStaleOpts } from "./fs-race-safe.js";
 import { appendLedger } from "./ledger.js";
 import { prStateFromRest, singlePrRestArgs, type GhApiFetcher, type RestPullRow } from "./open-prs-rest.js";
 import { isInPlanScope } from "./plan-architect.js";
@@ -8607,6 +8607,26 @@ export interface PendingReviewStatusRecord {
   runId: string;
   /** The ledger's own `ts` on the `review.pending_posted` line — the staleness clock. */
   postedAt: string;
+  /** Process identity captured by new writers. Absent on legacy/incomplete rows. */
+  ownerPid?: number;
+  /** The ledger writer's host stamp, retained as the holder's host identity. */
+  ownerHost?: string;
+  /** When this process claimed ownership of the pending review. */
+  ownerStartedAt?: string;
+}
+
+function pendingReviewStatusRecord(line: Record<string, unknown>): PendingReviewStatusRecord | undefined {
+  if (typeof line.head_sha !== "string") return undefined;
+  return {
+    headSha: line.head_sha,
+    runId: typeof line.run_id === "string" ? line.run_id : "",
+    postedAt: typeof line.ts === "string" ? line.ts : "",
+    ...(typeof line.owner_pid === "number" && Number.isInteger(line.owner_pid) && line.owner_pid > 0
+      ? { ownerPid: line.owner_pid }
+      : {}),
+    ...(typeof line.host === "string" && line.host.length > 0 ? { ownerHost: line.host } : {}),
+    ...(typeof line.owner_started_at === "string" ? { ownerStartedAt: line.owner_started_at } : {}),
+  };
 }
 
 export function lastPendingReviewStatusFromLedger(
@@ -8617,14 +8637,40 @@ export function lastPendingReviewStatusFromLedger(
   let prior: PendingReviewStatusRecord | undefined;
   for (const line of lines) {
     if (line.step !== "review.pending_posted" || line.task_id !== taskId) continue;
-    if (typeof line.head_sha !== "string") continue;
-    prior = {
-      headSha: line.head_sha,
-      runId: typeof line.run_id === "string" ? line.run_id : "",
-      postedAt: typeof line.ts === "string" ? line.ts : "",
-    };
+    prior = pendingReviewStatusRecord(line) ?? prior;
   }
   return prior;
+}
+
+export type PendingReviewOwnerAssessment = "active" | "dead" | "unknown";
+
+export interface AssessPendingReviewOwnerOpts extends IsHolderStaleOpts {
+  /** Test seam proving this path delegates the complete holder identity to the shared primitive. */
+  isStale?: typeof isHolderStale;
+}
+
+/**
+ * Classify a pending review's durable owner identity without inventing certainty. The shared
+ * {@link isHolderStale} predicate owns PID reuse, container replacement and boot-time semantics;
+ * this adapter only rejects incomplete records and distinguishes a same-host non-stale result
+ * from a foreign holder that this process cannot prove active or dead.
+ */
+export function assessPendingReviewOwner(
+  record: PendingReviewStatusRecord,
+  opts: AssessPendingReviewOwnerOpts,
+): PendingReviewOwnerAssessment {
+  if (
+    record.ownerPid === undefined ||
+    record.ownerHost === undefined ||
+    record.ownerStartedAt === undefined ||
+    Number.isNaN(Date.parse(record.ownerStartedAt))
+  ) {
+    return "unknown";
+  }
+  const holder = { pid: record.ownerPid, host: record.ownerHost, startedAt: record.ownerStartedAt };
+  if ((opts.isStale ?? isHolderStale)(holder, opts)) return "dead";
+  const currentHost = (opts.hostname ?? hostname)();
+  return record.ownerHost === currentHost ? "active" : "unknown";
 }
 
 /**
@@ -9179,6 +9225,8 @@ export interface PostReviewPendingOpts {
   /** Injected raw poster (tests) — forwarded to {@link postReviewStatusGuarded} unchanged. */
   post?: PostReviewStatusGuardedOpts["post"];
   lockOpts?: AcquireReviewStatusLockOpts;
+  /** Injectable only so the durable owner record is deterministic in tests. */
+  ownerIdentity?: { pid: number; startedAt: string };
 }
 
 export interface PostReviewPendingResult {
@@ -9243,11 +9291,7 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
       ) {
         continue;
       }
-      priorPending = {
-        headSha: opts.sha,
-        runId: typeof line.run_id === "string" ? line.run_id : "",
-        postedAt: typeof line.ts === "string" ? line.ts : "",
-      };
+      priorPending = pendingReviewStatusRecord(line);
       break;
     }
   }
@@ -9260,6 +9304,7 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
     };
   }
   const description = `remudero-review: review in progress (owned by run ${opts.runId})`.slice(0, 140);
+  const ownerIdentity = opts.ownerIdentity ?? { pid: process.pid, startedAt: new Date().toISOString() };
   const result = await postReviewStatusGuarded({
     owner: opts.owner,
     repo: opts.repo,
@@ -9283,6 +9328,8 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
       task_id: opts.taskId,
       step: "review.pending_posted",
       head_sha: opts.sha,
+      owner_pid: ownerIdentity.pid,
+      owner_started_at: ownerIdentity.startedAt,
       ...(opts.prUrl !== undefined ? { pr_url: opts.prUrl } : {}),
       ...(opts.reviewInputDigest !== undefined ? { review_input_digest: opts.reviewInputDigest } : {}),
     });

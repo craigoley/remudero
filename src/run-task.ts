@@ -638,6 +638,7 @@ import {
   judgeReview,
   judgeRubric,
   lastPendingReviewStatusFromLedger,
+  assessPendingReviewOwner,
   rubricAdvisorySection,
   scopeAdvisorySection,
   inverseScopeAdvisorySection,
@@ -672,6 +673,8 @@ import {
   execWhitelistedProof,
   defaultProofSpawner,
   type ProofSpawner,
+  type PendingReviewOwnerAssessment,
+  type PendingReviewStatusRecord,
   type AutomergeHold,
   type CappedOverride,
   type CriterionVerdict,
@@ -27285,9 +27288,14 @@ export function buildOpenPrViews(
     /** Injectable seams for the checked-in ci-gate contract and its already-fetched red evidence. */
     readCiGateRequired?: (root: string) => string[];
     fetchCiFailureEvidence?: typeof fetchCiFailures;
+    /** Local-only owner probe; never performs a GitHub read. */
+    assessPendingOwner?: (record: PendingReviewStatusRecord) => PendingReviewOwnerAssessment;
   } = {},
 ): OpenPrView[] {
   const fetch = deps.fetch ?? ghJson;
+  const assessPendingOwner =
+    deps.assessPendingOwner ??
+    ((record: PendingReviewStatusRecord) => assessPendingReviewOwner(record, { isPidAlive: defaultIsPidAlive }));
   // W1-T468: waits its turn on the shared pacer (a no-op absent one) before the real list call,
   // and reports back whether it was rate-limited — see lib/open-prs-rest.ts's `GhCallPacer` doc.
   const raw = paceGhEntry(deps.pacer, isGhRateLimitError, () => fetchOpenPrsRest(owner, repo, fetch)) as RawOpenPr[];
@@ -27421,7 +27429,10 @@ export function buildOpenPrViews(
     // `head_sha` still matches the CURRENT head — an older pending record surviving under a
     // superseded head must never be read as dating the head observed right now.
     const pendingRecord = reviewState === "pending" ? lastPendingReviewStatusFromLedger(ledger, unmetKey) : undefined;
-    const reviewPendingSince = pendingRecord && pendingRecord.headSha === pr.headRefOid ? pendingRecord.postedAt : undefined;
+    const currentPendingRecord = pendingRecord?.headSha === pr.headRefOid ? pendingRecord : undefined;
+    const reviewPendingSince = currentPendingRecord?.postedAt;
+    const reviewPendingOwnerDead =
+      currentPendingRecord && assessPendingOwner(currentPendingRecord) === "dead" ? true : undefined;
     // W1-T923 (design note ii): the SAME synthetic `PR-<n>` fallback {@link escalationTaskIdFor}
     // already mints, but WITH NO `isPlanOnlyFilingPr` restriction — that restriction is what
     // confines `filingUnmetKey` above to plan filings, and #1991 (the motivating case) is a
@@ -27434,6 +27445,7 @@ export function buildOpenPrViews(
       taskId,
       reviewState,
       reviewPendingSince,
+      reviewPendingOwnerDead,
       reviewVerdictPostedAt,
       checksState,
       unmetCriteria: reviewState === "failure" ? unmetFromLedger(ledger, unmetKey) : [],
