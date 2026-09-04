@@ -4986,8 +4986,8 @@ export function renderPlanCoherence(report: PlanCoherenceReport): string {
  * otherwise, so it is never mistaken for THE fix.
  *
  * THE actual live call site is elsewhere and does not need this helper: `buildGather` (above,
- * this file) calls `planCoherenceRung(` directly whenever handed `opts.planCoherence`, storing
- * the result on `RetroGather.planCoherence`, and `renderGather` prints it — `buildGather` is
+ * this file) calls the rung directly whenever handed `opts.planCoherence`, storing the result
+ * on `RetroGather.planCoherence`, and `renderGather` prints it — `buildGather` is
  * called UNCONDITIONALLY every `rmd retro` cycle (`retroCommand`, `src/run-task.ts`) and its
  * result feeds straight into the printed report. That wiring lives entirely inside THIS file
  * (`src/lib/retro.ts`, inside this task's declared `files:` list), unlike every sibling rung's
