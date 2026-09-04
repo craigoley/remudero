@@ -1,0 +1,142 @@
+- id: W1-T2833
+  title: "THE RETRO'S FOLLOW-UP LEDGER READ OPENS EVERY ROTATION THAT HAS EVER EXISTED — followupLedgerUnionNdjson omits the since window W1-T2484 built, so the read costs ~7.7 MB of retained heap PER ROTATION and grows by one rotation forever; it reached ~858 MB against Node's 2096 MB default and the daemon died exit 134 on that path today"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: architect
+  plan_refs: ["§8", "W1-T1013", "W1-T2484", "W1-T2803"]
+  files: [src/run-task.ts, src/lib/ledger-grep.ts, test/the-retros-ledger-read-opens-every-rotation-forever.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    `followupLedgerUnionNdjson` (src/run-task.ts) calls
+    `resolveLedgerUnion(stateDir, FOLLOWUP_LEDGER_STEP_PATTERN)` and passes NO `since`. W1-T2484
+    built that window and made it optional; this caller omits it, so every retro re-reads EVERY
+    rotation that has ever existed. The cost therefore grows with the NUMBER OF ROTATIONS — 111 at
+    filing, one more forever — and not with runs in scope.
+
+    MEASURED ON THE AZURE HOST 2026-09-04, against the live corpus:
+      corpus, uncompressed ......................... 448 MB (109 .gz + 2 plain + live)
+      filtered to the three follow-up steps ........ 28.2 MB
+      what resolveLedgerUnion RETURNS .............. 5817 lines / 3.1 M chars ≈ 6 MB flat
+      heap across that ONE call .................... 13 MB -> 865 MB (RSS 978 MB) in 2.5 s
+      retained after gc() with the result live ..... 856 MB
+      retained after the result is dropped ......... 19 MB
+    So it is NOT a leak — everything frees when the caller drops the result — it is one very large
+    LIVE allocation, ~41% of Node's 2096 MB default heap, held while the retro also parses the live
+    ledger, projects the plan and builds the gather. The daemon died `FATAL ERROR: Reached heap
+    limit`, exit 134, on that path today with RETRO-1788542811854 running.
+
+    THE COST IS LINEAR IN ROTATIONS OPENED, WHICH IS WHY THE WINDOW IS THE LEVER. Measured by
+    re-running the identical call against a 20-rotation subset of the same corpus:
+      20 rotations  -> 518 matches  -> 140 MB retained
+      111 rotations -> 5817 matches -> 858 MB retained
+    ≈7.7 MB retained per rotation opened, roughly 2x a rotation's ~4 MB decompressed size, and
+    largely independent of how few lines actually match.
+
+    THE AMPLIFICATION IS MEASURED; ITS MECHANISM IS UNPROVEN, AND THIS SHARD DOES NOT ASSERT ONE.
+    A 6 MB returned payload retains ~858 MB — about 137x. `resolveLedgerUnion` reads each rotation
+    `readFileSync` -> `gunzipSync` -> `.toString("utf8")` and keeps matching lines
+    (ledger-grep.ts). A V8 sliced-string explanation (a kept line retaining its whole decompressed
+    parent) fits the arithmetic — 111 x 4 MB x 2 bytes ≈ 872 MB against 858 MB observed — but a
+    force-flatten of every match did NOT release the memory, and nulling each result field
+    individually did not either, while dropping the whole result did. THE ARITHMETIC IS A STRIKING
+    COINCIDENCE AND STILL NOT EVIDENCE. Record the amplification as measured and the mechanism as
+    unproven; a fix must be validated by rotations opened, not by a theory of V8 internals.
+
+    THE HONEST LIMIT OF THE WINDOW, MEASURED AND STATED UP FRONT BECAUSE IT CHANGES WHAT THIS TASK
+    CAN CLAIM. The window bounds the TREND. It does not relieve TODAY, because the corpus is
+    younger than the correctness floor:
+      required floor (below) ....... 17.2 days
+      corpus span at filing ........ 21 days (2026-08-13 .. 2026-09-04), 111 rotations
+      a 21-day window opens ........ 110 of 111 rotations (99%)
+      a 30-day window opens ........ 111 of 111 (100%)
+    At ~5 rotations/day and ~7.7 MB each, every further day adds ~38 MB to the retro's peak, so
+    the window starts binding only once the archive outgrows it — and from that day the cost stops
+    growing, which is the whole point. A REVIEWER MUST NOT READ THIS TASK AS FIXING THE CRASH
+    OUTRIGHT; see `design` for what else is required and what is deliberately not decided here.
+  design: |
+    THE WINDOW, AND WHY THIS PARTICULAR FLOOR RATHER THAN A NUMBER THAT MAKES A TEST PASS.
+
+    What the harvest actually requires is derivable, not a matter of taste. `mineFollowups`
+    (src/lib/retro.ts) builds `processed` from `followup.harvested`/`followup.deduped` rows keyed
+    on `entry_id`, and mints candidates from `report.followups` rows whose synthesised
+    `entryId` = `${run_id}:${ts}:${i}` is not in that set. The marker is ALWAYS written at or after
+    its source row, so a window can never hide a marker while showing its source — the re-minting
+    direction is structurally impossible. What a too-narrow window DOES do is drop `report.followups`
+    rows that had not yet been harvested, silently losing follow-ups that would still have been
+    picked up.
+
+    So the floor is the longest real lag between a follow-up being REPORTED and being HARVESTED.
+    MEASURED over the live corpus, 19,622 pairs (the source ts is embedded in `entry_id`, so this
+    is directly computable):
+      min 0.0h   p50 4.0h   p90 18.4h   p99 277.4h   MAX 413.3h (17.2 days)
+    A window at or below ~17 days would silently drop follow-ups this fleet demonstrably still
+    harvests. THE WINDOW MUST EXCEED 17.2 DAYS WITH MARGIN — 30 days is the recommendation: ~1.7x
+    the observed maximum, room for the tail to grow, and it bounds the read at roughly 150
+    rotations at the current ~5/day rate instead of an unbounded count.
+
+    THE WINDOW IS NECESSARY AND NOT SUFFICIENT, AND THAT IS THE UNCOMFORTABLE PART OF THIS FILING.
+    At ~7.7 MB per rotation, a 30-day window still admits ~150 rotations ≈ 1.15 GB — WORSE than
+    today's 858 MB, not better, because the corpus has not yet reached 30 days. The correctness
+    floor (17.2 d) and the memory budget (~10 d at current per-rotation cost, to stay under ~400 MB)
+    are in direct conflict AT THE CURRENT PER-ROTATION COST. Therefore this task must ALSO reduce
+    the per-rotation retention, and the falsifier below is written so that BOTH are provable
+    independently: rotations opened is the window's proof; bytes retained per rotation is the
+    amplification's.
+
+    REDUCING THE PER-ROTATION COST WITHOUT A THEORY OF V8. The safe shape is to stop retaining
+    anything derived from the decompressed buffer: copy each matching line into a freshly
+    constructed string whose backing store cannot be a view onto the rotation's text, and let the
+    decompressed buffer and its string go out of scope before the next rotation is opened. Whether
+    that works is an EMPIRICAL question this task must answer with a measurement, not an assertion
+    — if it does not reduce retention, say so and the window plus an operator decision on the heap
+    is what remains.
+
+    NOT IN SCOPE, DELIBERATELY: raising `--max-old-space-size`. It is a real option and it may well
+    be warranted — the daemon has NO container memory limit (`Memory=0`), the kernel did NOT OOM it
+    (`OOMKilled=false`), and the host has 7.9 GB with ~4.9 GB free, so Node is refusing to use
+    memory that exists. But SHIPPING A BOUND RAISE INSIDE THE FIX THAT REMOVES THE NEED FOR IT
+    MAKES THE STOPGAP PERMANENT, and it is the operator's decision, not this task's. Recorded here
+    so the option is not lost, and left undone.
+
+    ALSO NOT IN SCOPE: rotation RETENTION policy (how many rotations are kept at all — `rotateLedger`'s
+    `MAX_RETAINED_LINES_PER_STEP`), which is a different lever on the same number and its own filing;
+    and the retro preflight duration bound (W1-T2803), which shares this crash's blast radius and
+    nothing else.
+  acceptance:
+    - claim: "the follow-up union read passes a since window, so the number of rotation FILES it opens is bounded by that window rather than by the size of the archive — proven by counting files opened through an injected reader, never by a heap measurement"
+      proof: "unit test: test/the-retros-ledger-read-opens-every-rotation-forever.test.ts"
+    - claim: "a corpus holding rotations both inside and outside the window opens exactly the in-window ones and skips the rest by their stamped filename, without decompressing what it skips"
+      proof: "unit test: test/the-retros-ledger-read-opens-every-rotation-forever.test.ts"
+    - claim: "the window exceeds the measured maximum report-to-harvest lag, and a follow-up whose harvest marker lands at the far end of that lag is still deduplicated rather than re-minted as a duplicate candidate"
+      proof: "unit test: test/the-retros-ledger-read-opens-every-rotation-forever.test.ts"
+    - claim: "retained bytes per rotation opened is reduced against the same fixture corpus, measured as a ratio between the returned payload and what stays reachable, so the amplification is proven to move independently of the window"
+      proof: "unit test: test/the-retros-ledger-read-opens-every-rotation-forever.test.ts"
+    - claim: "an omitted window still reads every rotation exactly as it does today, so every OTHER caller of resolveLedgerUnion is byte-identical and this change is scoped to the follow-up read"
+      proof: "unit test: test/the-retros-ledger-read-opens-every-rotation-forever.test.ts"
+  note: |
+    FILED 2026-09-04 from an on-host investigation of the daemon's first CRASH of the day (exit 134,
+    `FATAL ERROR: Reached heap limit`, ~305947 ms in, RETRO-1788542811854 running, 57 runs in
+    scope). Every other restart that day was exit 75 (freshness), which by design does not spend
+    docker's `on-failure:5` budget; a crash does. At the time of filing `RestartCount=0` on a
+    container recreated at 18:07:57Z, so all five remain — but the budget is now reachable in a way
+    it was not before.
+
+    THE ~2050 MB BOUNDARY IS NODE'S DEFAULT, MEASURED: `heap_size_limit` reads 2096 MB on this host
+    (Node v22.23.2) with NO `NODE_OPTIONS`, NO `--max-old-space-size`, and NO container memory
+    limit. `OOMKilled=false` — V8 hit its own ceiling; the kernel was not involved.
+
+    THE CRASH PATH LEAVES LOCKS BEHIND: the daemon held `state/drain.lock` (pid 1185324, startedAt
+    16:54:23Z) when it died. It was reclaimed on the next boot, so no action is required, but a
+    reader tracing a stale lock to this crash should find that written down rather than re-derive it.
+
+    THE FALSIFIER IS DELIBERATELY A FILE-READ COUNT AND NOT A HEAP MEASUREMENT. Heap is the symptom,
+    its mechanism is unproven (see `rationale`), and a heap assertion would rest on V8 internals this
+    task has not established. Rotations opened is exactly what the window changes, is deterministic,
+    and reproduces on any corpus. Heap may be recorded as a secondary observation; no criterion
+    depends on it.
