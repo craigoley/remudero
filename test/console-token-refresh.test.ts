@@ -280,6 +280,7 @@ interface ServeLauncherFixtureOptions {
   // tests above (unchanged from before this option existed) keep exercising the plain paths.
   accountFilePresent?: boolean;
   webhookSecretPresent?: boolean;
+  existingWebhookSecretMount?: boolean;
   captureTokenFromDaemon?: boolean;
   /** False models the App-only production shape: neither shell nor daemon carries a static token. */
   daemonTokenPresent?: boolean;
@@ -300,6 +301,7 @@ function runServeLauncherFixture(
   const directKeyPath = join(root, "direct-app.pem");
   const accountFilePath = join(root, "account-file.json");
   const webhookSecretPath = join(root, "webhook-secret.txt");
+  const existingWebhookSecretPath = join(root, "existing-webhook-secret.txt");
   // A production-shaped absolute path such as /home/node/.claude/rmd-app.pem can exist in the
   // parent test container. In that case the launcher correctly treats it as directly readable
   // and never exercises either translation arm. Give each fixture a container-only mount path so
@@ -326,6 +328,7 @@ function runServeLauncherFixture(
   if (source === "empty") writeFileSync(directKeyPath, "");
   if (options.accountFilePresent) writeFileSync(accountFilePath, '{"account":"fake"}');
   if (options.webhookSecretPresent) writeFileSync(webhookSecretPath, "fake-webhook-secret");
+  if (options.existingWebhookSecretMount) writeFileSync(existingWebhookSecretPath, "old-fake-webhook-secret");
 
   writeFileSync(
     dockerPath,
@@ -353,6 +356,12 @@ if [ "\${1:-}" = "inspect" ] && [[ " $* " == *" remudero-serve "* ]]; then
   case "$*" in
     *State.Running*) printf '%s\\n' true; exit 0 ;;
     *NetworkSettings.Networks*) printf '%s\\n' yes; exit 0 ;;
+    *Mounts*)
+      if [ -n "\${FAKE_EXISTING_WEBHOOK_SECRET_SOURCE:-}" ]; then
+        printf '%s\\n' "\${FAKE_EXISTING_WEBHOOK_SECRET_SOURCE}"
+      fi
+      exit 0
+      ;;
     *)
       # The plain existence check (no --format) this script's own "an existing container is never
       # silently replaced" section runs before ever building RUN_ARGS. FAKE_EXISTING_CONTAINER lets
@@ -360,6 +369,9 @@ if [ "\${1:-}" = "inspect" ] && [[ " $* " == *" remudero-serve "* ]]; then
       if [ "\${FAKE_EXISTING_CONTAINER:-0}" = "1" ]; then exit 0; else exit 1; fi
       ;;
   esac
+fi
+if [ "\${1:-}" = "stop" ] || [ "\${1:-}" = "rm" ]; then
+  exit 0
 fi
 if [ "\${1:-}" = "run" ]; then
   {
@@ -386,7 +398,7 @@ exit 1
     FAKE_DOCKER_CAPTURE: capturePath,
     RMD_SERVE_DOCKERENV_PATH: join(root, "not-a-container-marker"),
     RMD_CLAUDE_JSON_PATH: options.accountFilePresent ? accountFilePath : join(root, "no-account-file"),
-    RMD_GITHUB_WEBHOOK_SECRET_PATH: options.webhookSecretPresent ? webhookSecretPath : join(root, "no-webhook-secret"),
+    RMD_GITHUB_WEBHOOK_SECRET_PATH: options.webhookSecretPresent ? webhookSecretPath : "",
   };
   delete env.GH_APP_ID;
   delete env.GH_APP_INSTALLATION_ID;
@@ -406,6 +418,9 @@ exit 1
   if (options.existingContainer) {
     env.FAKE_EXISTING_CONTAINER = "1";
   }
+  if (options.existingWebhookSecretMount) {
+    env.FAKE_EXISTING_WEBHOOK_SECRET_SOURCE = existingWebhookSecretPath;
+  }
 
   const result = spawnSync(
     "bash",
@@ -413,7 +428,20 @@ exit 1
     { encoding: "utf8", env },
   );
   const capture = readFileSync(capturePath, "utf8");
-  return { result, capture, root, credDir, directKeyPath, daemonKeyPath, keyBody, token, accountFilePath, webhookSecretPath, stateDir };
+  return {
+    result,
+    capture,
+    root,
+    credDir,
+    directKeyPath,
+    daemonKeyPath,
+    keyBody,
+    token,
+    accountFilePath,
+    webhookSecretPath,
+    existingWebhookSecretPath,
+    stateDir,
+  };
 }
 
 test("W1-T2778: a direct readable host App key becomes one read-only file mount and the launched env names that destination", () => {
@@ -528,6 +556,33 @@ test("W1-T2836: no static token plus an unusable App key still refuses before do
   assert.equal(fixture.result.status, 1, fixture.result.stdout);
   assert.match(fixture.result.stderr, /REFUSING — no GH_TOKEN is available, and GitHub App auth is not usable/);
   assert.equal(fixture.capture, "", "the failed credential preflight must not replace or launch anything");
+});
+
+test("W1-T2837: --replace preserves the existing one-file webhook secret mount when no path is repeated", () => {
+  const fixture = runServeLauncherFixture("direct", {
+    existingContainer: true,
+    existingWebhookSecretMount: true,
+    extraArgv: ["--replace"],
+  });
+  assert.equal(fixture.result.status, 0, fixture.result.stderr);
+  assert.match(fixture.result.stdout, /preserving the existing webhook-secret file mount/);
+  assert.ok(
+    fixture.capture.includes(`${fixture.existingWebhookSecretPath}:${SERVE_WEBHOOK_SECRET_DEST}:ro`),
+    `expected the existing secret mount to survive replacement:\n${fixture.capture}`,
+  );
+  assert.ok(fixture.capture.includes(`RMD_GITHUB_WEBHOOK_SECRET_FILE=${SERVE_WEBHOOK_SECRET_DEST}`));
+});
+
+test("W1-T2837: an explicit webhook-secret path overrides the outgoing container mount", () => {
+  const fixture = runServeLauncherFixture("direct", {
+    existingContainer: true,
+    existingWebhookSecretMount: true,
+    webhookSecretPresent: true,
+    extraArgv: ["--replace"],
+  });
+  assert.equal(fixture.result.status, 0, fixture.result.stderr);
+  assert.ok(fixture.capture.includes(`${fixture.webhookSecretPath}:${SERVE_WEBHOOK_SECRET_DEST}:ro`));
+  assert.ok(!fixture.capture.includes(fixture.existingWebhookSecretPath), "the stale outgoing source must not override the explicit path");
 });
 
 // ── (2) A CREDENTIAL THAT CANNOT BE REPLACED IS REPORTED, NOT PRESENTED AS A WORKING BOARD ──────
