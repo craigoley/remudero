@@ -151,7 +151,9 @@ test("W1-T2415: the DispatchFilterReason union gains no CIRCUIT-BREAKER arm (W1-
   const arms = [...body.matchAll(/\|\s*"([a-z-]+)"/g)].map((m) => m[1]);
   assert.deepEqual(
     arms,
-    ["already-merged", "verify-not-auto", "blocked", "retired", "unmet-deps", "continued-this-pass", "credit-indeterminate", "run-branch-already-pushed"],
+    // W1-T988 appends `foreign-repo`, in declaration order. The claim this test defends — that no
+    // CIRCUIT-BREAKER arm was smuggled into the union — is unchanged and still asserted below.
+    ["already-merged", "verify-not-auto", "blocked", "retired", "unmet-deps", "continued-this-pass", "foreign-repo", "credit-indeterminate", "run-branch-already-pushed"],
     "the union gains W1-T2474's 'retired' (blocked's own split) and W1-T2675's 'credit-indeterminate' (a credit read that FAILED, told apart from a credit that was SEEN) — the breaker is still named through its own callback, not an arm here",
   );
   assert.equal(body.includes("circuit"), false, "and no circuit arm was smuggled in");

@@ -2690,6 +2690,10 @@ function renderBlockersBlock(b: BlockersSection): string[] {
   "circuit-broken": (r) => `dispatch circuit breaker tripped — ${r.resetNote ?? `${r.dispatchCount}/${r.maxDispatches} dispatches with no new owned PR`}`,
   "run-branch-already-pushed": () => "run branch already pushed to origin", "already-merged": () => "already merged", "verify-not-auto": () => "verify is not auto",
   blocked: () => "blocked", retired: () => "retired", "unmet-deps": () => "dependencies not yet met", "continued-this-pass": () => "continued this pass",
+  // W1-T988: this table is exhaustive BY CONSTRUCTION, so a new DispatchFilterReason must carry a
+  // wording here or the type-checker refuses — which is what forced this line rather than a choice
+  // to widen scope. Names the daemon's target so the row says WHY, not just that it was refused.
+  "foreign-repo": () => "belongs to another repo than this daemon targets",
   // W1-T2675 — worded as a BLIND SPOT, never a verdict: the fleet could not read this task's merge
   // credit, so it is held rather than rebuilt. An operator seeing it should look at GitHub
   // reachability (rate limit, auth, transport), not at the task. The entry itself follows the

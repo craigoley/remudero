@@ -105,11 +105,15 @@ test("drain.ts: tallyDispatchFilters gives 'run-branch-already-pushed' its OWN b
   // Every bucket a StarvationCensus-shaped reader could ever consult is still present and typed —
   // the new reason is an ADDITIONAL key, never a replacement for any existing one. W1-T2474 adds
   // one more additional key, 'retired' — the blocked bucket's own split, never touching this one.
+  // W1-T988: `foreign-repo` joins the enumeration. This list exists so a NEW arm cannot slip
+  // in unnoticed — noticing it is the point, and the guard this assertion actually protects (no
+  // `circuit-broken` arm) is untouched: the breaker is still not a DispatchFilterReason.
   assert.deepEqual(Object.keys(snapshot).sort(), [
     "already-merged",
     "blocked",
     "continued-this-pass",
     "credit-indeterminate",
+    "foreign-repo",
     "retired",
     "run-branch-already-pushed",
     "unmet-deps",

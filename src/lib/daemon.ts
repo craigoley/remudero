@@ -1019,6 +1019,16 @@ export interface DaemonDeps {
    */
   isCreditIndeterminate?: (taskId: string) => boolean;
   /**
+   * W1-T988 — the repo this daemon targets (`DaemonTarget.repo`, already resolved and already
+   * ledgered as `daemon.target`'s own `repo:` field). Forwarded verbatim into the tick's
+   * `NextRunnableOpts` so `isDispatchEligible` can refuse a task belonging to another repo.
+   *
+   * OPTIONAL: omitted, the repo guard does not fire and every existing caller — including every
+   * test that builds deps by hand — is byte-identical. A guard that defaults to refusing is the
+   * shape that stops the fleet.
+   */
+  targetRepo?: string;
+  /**
    * W1-T2397 — the open-sibling OBSERVATION's two halves, forwarded verbatim into this tick's
    * {@link NextRunnableOpts}; see those fields' own docs in drain.ts for the contract, and
    * run-task.ts's `openSiblingObservation` for the one factory both lanes build them from.
@@ -3750,6 +3760,10 @@ export async function runDaemon(
         : undefined;
       const dispatchOpts: NextRunnableOpts = {
       isOpenPr: deps.isOpenPr,
+      // W1-T988: the daemon's own target, threaded to the gate. The refusal it enables is counted
+      // by `idleReasons.onFiltered` below, which is the row that already carries every other
+      // decline — no new step and no new signal.
+      targetRepo: deps.targetRepo,
       isCreditIndeterminate: deps.isCreditIndeterminate,
       // W1-T2397: forwarded into the tick's own opts, exactly as drain.ts forwards them at both of
       // its `skipOpts` sites. `nextRunnable` consults them AFTER eligibility and BEFORE returning,

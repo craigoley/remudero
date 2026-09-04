@@ -24454,6 +24454,9 @@ export async function daemonCommand(
         refreshMerged,
         isOpenPr,
         isCreditIndeterminate,
+        // W1-T988: the target this daemon already resolved and already ledgers as `daemon.target`'s
+        // `repo:` field — the SAME value, never a second resolution that could drift from it.
+        targetRepo: target.repo,
         // W1-T2397: the second half of the wiring #3125 could only take for `drainCommand`. Same
         // pair, same factory, same contract — and this is the lane that actually dispatches.
         openSiblingBuildFor,
