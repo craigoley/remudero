@@ -1048,6 +1048,22 @@ const HEAD_SHA_LINE_RE = /^\*\*Head:\*\*\s*(\S+)\s*$/m;
 const CAUSE_LINE_RE = /^\*\*Cause:\*\*\s*(\S+)\s*$/m;
 
 /**
+ * W1-T2799: the `**Head:** <sha>` sha an already-open issue's BODY carries, or `undefined` when
+ * it carries no such line at all (every issue predating W1-T195, and #3889 itself). Reads through
+ * the SAME {@link HEAD_SHA_LINE_RE} {@link findDuplicateEscalation} matches on — ONE parser, not
+ * two, so a caller asking "is this issue about the head I am about to strike against?" can never
+ * disagree with `escalate()`'s own dedup about what head an issue names.
+ *
+ * Exported because the fix rung's pre-strike gate needs it to be STRICTER than that matcher:
+ * {@link matchesOptionalDimension} treats an absent dimension as permissive, which fails toward
+ * APPENDING to an open issue (cheap, visible) — the right polarity for dedup and the wrong one
+ * for refusing a fix worker. See `openEscalationStandDownReason` (run-task.ts).
+ */
+export function escalationHeadSha(body: string | undefined): string | undefined {
+  return HEAD_SHA_LINE_RE.exec(body ?? "")?.[1];
+}
+
+/**
  * Does an OPTIONAL composite-key dimension veto a dedup match? A dimension only vetoes
  * when BOTH sides carry a value and they DISAGREE — either side missing means that
  * dimension says nothing (permissive), which is exactly what keeps every un-migrated
@@ -1119,13 +1135,35 @@ function matchesOptionalDimension(wanted: string | undefined, candidate: string 
  * line as `degraded_labels`.
  */
 /**
+ * W1-T2799: the SUBSET of an {@link Escalation} that {@link findDuplicateEscalation} actually
+ * reads — declared so a caller merely ASKING "is there already an open issue about this?" need
+ * not fabricate the `options`/`recommendation` of an escalation it is not filing.
+ *
+ * Every {@link Escalation} satisfies this structurally, so `escalate()`'s own calls are unchanged
+ * and no producer edits. Its value is on the OTHER side: the compiler now proves that the fix
+ * rung's pre-strike probe and the escalation it is predicting are keyed IDENTICALLY, rather than
+ * a second hand-assembled key drifting from the one `escalate()` will use minutes later.
+ *
+ * `summary`/`detail` are here because the PR reference the key is built on is scraped out of
+ * their TEXT (`extractPrRef`), never carried as a field — see that function's own doc.
+ */
+export interface EscalationDedupKey {
+  class: EscalationClass;
+  taskId: string;
+  summary: string;
+  detail: string;
+  headSha?: string;
+  cause?: EscalationCause;
+}
+
+/**
  * Search OPEN `needs-human` issues for a duplicate of `e` — extracted from {@link escalate} so
  * {@link escalateWithJudge} can run the IDENTICAL search once, up front, to decide whether the
  * judge should even be asked (design clause i: "never judging a duplicate"). Returns the matched
  * {@link OpenIssue}, or `undefined` when no gateway `listOpen`, a failed read, or no match — the
  * SAME best-effort, fail-open-to-"no dup found" contract {@link escalate} always had.
  */
-function findDuplicateEscalation(e: Escalation, deps: EscalateDeps): OpenIssue | undefined {
+export function findDuplicateEscalation(e: EscalationDedupKey, deps: Pick<EscalateDeps, "issues">): OpenIssue | undefined {
   if (!deps.issues.listOpen) return undefined;
   let open: OpenIssue[];
   try {
