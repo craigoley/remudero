@@ -9,7 +9,7 @@
   risk: medium  # Rule 19: a two-line narrowing of one blocking predicate plus its falsifiers. The
                 # blast radius is real (it relaxes an anti-gaming gate) but the surface is one
                 # function, and the golden-verdict suite already pins its verdicts.
-  files: [src/lib/review.ts, test/test-theater-modified-lines.test.ts]
+  files: [src/lib/review.ts, test/a-modified-test-line-reads-as-added-test-code.test.ts]
   origin: "oper#w1-t2775-tranche-1-blocked-by-test-theater-2026-09-04"
   plan_refs: ["W1-T2775", "W1-T423", "W1-T2242"]
   status: queued
@@ -62,18 +62,28 @@
     rule for a heuristic that can itself misfire. The operator ruled for the declaration gate
     (2026-09-04), and this shard records the cost so the next reader is not surprised by it.
 
+    THE FALSIFIER IS NAMED AFTER THIS SHARD'S OWN SLUG, AND THAT IS LOAD-BEARING RATHER THAN
+    TIDY-MINDED. `sizingViolation`'s own-falsifier discount (`opts.duplicateSlug` ->
+    `subsystemsOf`, W1-T2525) only discounts a companion whose `moduleIdFromPath` EQUALS the
+    shard's filename slug. MEASURED: with the falsifier named `test-theater-modified-lines`, this
+    task scored `["review","test-theater-modified-lines"]` and lint-plan BLOCKED it; named
+    `a-modified-test-line-reads-as-added-test-code` it scores `["review"]` and passes. Regrading to
+    `risk: high` would have silenced the identical error while encoding a filename mismatch as real
+    span -- exactly the wrong exit W1-T2814 was filed for today (309 of 876 risk:high shards could
+    have their span removed by a rename alone). Renaming this file re-inflates the band.
+
     THE GOLDEN SUITE IS THE REGRESSION ANCHOR. `test/golden-verdicts.test.ts` (W1-T423) pins this
     detector's verdicts over a planted corpus; it must stay green unchanged, which is what proves
     the narrowing did not silently reclassify a real theater case.
   acceptance:
     - claim: "a diff that only REWRITES existing test lines, declaring no new test case, is no longer test theater -- the exact shape #3922 was refused for"
-      proof: "unit test: test/test-theater-modified-lines.test.ts"
+      proof: "unit test: test/a-modified-test-line-reads-as-added-test-code.test.ts"
     - claim: "a diff that ADDS a new test case with no assertion in it is STILL test theater, so the gate is narrowed and not disabled"
-      proof: "unit test: test/test-theater-modified-lines.test.ts"
+      proof: "unit test: test/a-modified-test-line-reads-as-added-test-code.test.ts"
     - claim: "a planted tautology is still refused even when no test case is declared among the added lines -- the NOOP arm stays unconditional"
-      proof: "unit test: test/test-theater-modified-lines.test.ts"
+      proof: "unit test: test/a-modified-test-line-reads-as-added-test-code.test.ts"
     - claim: "the declaration gate reads test/it/describe including their .only/.skip/.each forms, so a modifier does not smuggle an assertion-free case past it"
-      proof: "unit test: test/test-theater-modified-lines.test.ts"
+      proof: "unit test: test/a-modified-test-line-reads-as-added-test-code.test.ts"
   falsifier: |
     Reverting the `TEST_DECLARATION_RE` guard reds acceptance 1 (the refactor is refused again).
     Moving the guard ABOVE the `NOOP_ASSERTION_RE` check reds acceptance 3 (a planted tautology

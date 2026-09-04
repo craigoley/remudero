@@ -1,4 +1,4 @@
-// test/test-theater-modified-lines.test.ts — W1-T2815: `detectTestTheater` read the `+` half of a
+// test/a-modified-test-line-reads-as-added-test-code.test.ts — W1-T2815: `detectTestTheater` read the `+` half of a
 // MODIFIED test line as ADDED test code, so an in-place rewrite that adds no test case at all was
 // refused as `test theater: added tests assert nothing` — a blocking, exemption-free failure.
 //
