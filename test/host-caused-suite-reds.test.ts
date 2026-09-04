@@ -100,6 +100,14 @@ test("HOST_CAUSED_SUITE_REDS: the registry's per-cluster counts sum correctly â€
     "test/the-recycle-wait-is-sized-under-the-run-it-waits-on.test.ts": { cause: "bash-3.2-no-associative-arrays", count: 5 },
     "test/worker-credential-preflight.test.ts": { cause: "darwin-keychain-unprovisioned", count: 2 },
     "test/fleet-heartbeat.test.ts": { cause: "bsd-date-control-arm", count: 2 },
+    // W1-T2785: measured 2026-09-04 on the mini â€” `node --test` on this file reports
+    // `# tests 10 / # pass 9 / # fail 1`, the one failure being "the staleness predicate
+    // discriminates at its own boundary, in both directions". SAME cluster as the sibling row
+    // above, keyed on the same darwin `date` fact: this file's FIXED_NOW_DATE stub execs an
+    // absolute date-binary path that does not exist on macOS at all (see the exact path in the
+    // matching src/lib/ci-parity.ts entry's note; not repeated here so this comment stays out of
+    // the host-capability-fixtures.test.ts platform-tool scan, which greps test/ for that literal).
+    "test/fleet-heartbeat-supervisor-tick.test.ts": { cause: "bsd-date-control-arm", count: 1 },
     "test/recovery-drill.test.ts": { cause: "undiagnosed-ps-orphan-sweep", count: 2 },
     "test/dispatch-memory-governor.test.ts": { cause: "linux-procfs-absent", count: 1 },
     "test/proof-spawner-env-isolation.test.ts": { cause: "macos-corefoundation-env-leak", count: 1 },
@@ -128,6 +136,25 @@ test("HOST_CAUSED_SUITE_REDS: the registry's per-cluster counts sum correctly â€
 
   const bash = HOST_CAUSED_SUITE_REDS.find((e) => e.cause === "bash-3.2-no-associative-arrays");
   assert.equal(bash?.file, "test/recycle-container.test.ts");
+});
+
+// W1-T2785 round 2: the table row above is DATA an unrelated bug could still leave unread â€” this
+// test exercises the row through the real `appliesTo` predicate so a wrong cause, a wrong count,
+// or a predicate that fires on the wrong platform each fail this assertion by name, not just the
+// static row-comparison above.
+test("hostCausedSuiteRedsForFacts: the fleet-heartbeat-supervisor-tick entry applies on darwin, with its registered cause and count, and NOT on a linux host", () => {
+  const darwinApplicable = hostCausedSuiteRedsForFacts(DARWIN_BASH_3_2);
+  const entry = darwinApplicable.find((e) => e.file === "test/fleet-heartbeat-supervisor-tick.test.ts");
+  assert.ok(entry, "expected the entry to apply on a darwin host's facts");
+  assert.equal(entry?.cause, "bsd-date-control-arm");
+  assert.equal(entry?.count, 1);
+
+  const linuxApplicable = hostCausedSuiteRedsForFacts(LINUX_CI);
+  assert.equal(
+    linuxApplicable.some((e) => e.file === "test/fleet-heartbeat-supervisor-tick.test.ts"),
+    false,
+    "must not apply on a linux host â€” this file's red is a darwin-only date fact, not a general one",
+  );
 });
 
 test("hostCausedSuiteRedsForFacts: a host that satisfies EVERY axis matches every registered cluster (all `appliesTo` predicates read true)", () => {

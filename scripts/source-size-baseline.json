@@ -11,7 +11,7 @@
   "src/lib/branch-reaper.ts": 196,
   "src/lib/bundle.ts": 500,
   "src/lib/ci-gate-required.ts": 500,
-  "src/lib/ci-parity.ts": 2000,
+  "src/lib/ci-parity.ts": 2500,
   "src/lib/classify.ts": 500,
   "src/lib/claude-model-health.ts": 500,
   "src/lib/cli-args.ts": 40,
