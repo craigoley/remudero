@@ -63,11 +63,9 @@ forensic detail, so the narrative does not need to live here.
   `acceptance-author-gate`. IT IS SILENT: the body reads correctly to a human and `check-proof`
   never sees a proof to check; #2534/#2535/#2555 each shipped one. Convert every ` — proof: ` to
   ` | `. *(2026-08-23)*
-  **"two-line `claim:`/`proof:` form" READS AS UNBULLETED AND
-  THAT IS THE TRAP** — it is two lines, but the first is still a `-` bullet. The DIFFERENT hazard
-  that phrase warns of is writing `| proof:`: the pipe already delimits, so the label doubles, the
-  proof becomes `proof: grep: …`, and `check-proof` refuses it (`parse: REFUSED`, exit 2) — that
-  capped #1598 at 0/3. After a pipe, write the BARE proof.
+  **AFTER A PIPE, WRITE THE BARE PROOF** — `| proof:` doubles the label, the proof becomes
+  `proof: grep: …`, and `check-proof` refuses it (`parse: REFUSED`, exit 2); that capped #1598 at
+  0/3. (The two-line `claim:`/`proof:` form is still BULLETED — its first line is a `-`.)
   **RUN BOTH VERBS — NEITHER CATCHES THE OTHER'S FAILURE:** that doubled-label body passes
   `check-acceptance` `OK`/exit 0; an unbulleted body fails it while every proof inside is valid.
   `gh api repos/<o>/<r>/pulls/<n> --jq .body > /tmp/b.md && RMD_SELF_SYNC_DONE=1 ./bin/rmd check-acceptance /tmp/b.md`
@@ -109,15 +107,19 @@ forensic detail, so the narrative does not need to live here.
   spanning that concatenation seam resolves to ZERO candidates and is judged unexecutable even
   though the test exists and passes. *(impl-AG, caught pre-commit)*
 - **Verify a `grep:` proof with the executor's REAL invocation — `grep -arn -- '<pattern>' <path>` —
-  never with `grep -F`.** The executor passes the pattern with no `-F`, so it is a BASIC REGEX and a
-  glob-looking pattern is silently wrong: `learnings/*.yaml` reads as *learnings, zero-or-more slashes,
-  any char, yaml* and matches nothing. That is not a soft cap — `executed_fail` OVERRIDES keyword
-  coverage and FAILS the PR. Also require the pattern to MISS the merge-base: one matching both head
-  and base is downgraded to `executed_stale` (W1-T273) because it discriminates nothing — **and
-  W1-T362 extended `executed_stale` to `unit test:` proofs too, so DISCRIMINATION, not mere
-  execution, is the bar for every dialect**: a proof reading 1/1 across head and base substantiates
-  nothing. Run a control pattern that must NOT match: `grep -r` with no file operand searches the
-  cwd, not stdin, and fakes a match for anything. *(#1120 — a `-F`-verified proof failed the review)*
+  never with `grep -F`.** The executor passes no `-F`, so the pattern is a BASIC REGEX and a
+  glob-looking one is silently wrong: `learnings/*.yaml` matches nothing. That is not a soft cap —
+  `executed_fail` OVERRIDES keyword coverage and FAILS the PR. Also require the pattern to MISS the
+  merge-base: one matching both sides degrades to `executed_stale` (W1-T273), discriminating
+  nothing — **and W1-T362 extended that to `unit test:` proofs, so DISCRIMINATION, not execution,
+  is the bar for every dialect.** `classifyBaseProofOutcome` (`src/lib/review.ts`)
+  decides it by RE-RUNNING the proof against the merge-base: passing there IS stale. So a pure-path
+  `unit test:` proof discriminates ONLY where its file is ABSENT or FAILING at base — the
+  forward-referencing TDD case. **A task REPAIRING an existing test can never prove itself that
+  way**: its file passes at base by construction, so every criterion silently degrades to the
+  keyword floor. Prove a repair with a `grep:` on the changed line. Run a control pattern that must
+  NOT match: `grep -r` with no file operand searches the cwd, not stdin, and fakes a match for
+  anything. *(#1120; #3943 — four repair criteria went stale)*
 - **A `grep:` proof must match text on ONE PHYSICAL LINE — a YAML block scalar wraps, and the
   pattern then reads 0 at head with no error.** Distinct from the acceptance-parser wrap hazard
   above: that one truncates a BLOCK, this one silently fails to match at all, so the criterion
