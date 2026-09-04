@@ -1980,3 +1980,104 @@ an approach this ruling does not authorise.
 
 **Rollback:** delete this entry and clear the `retirement:` field on W1-T1260, W1-T2657 and W1-T2658.
 No code was written; nothing else changes.
+
+## 2026-09-04 — RECOMMENDATION (W1-T2790): derive the host-caused registry periodically and commit it; prefer a self-declaring seam over a second enumerative matcher (PREPARED FOR RATIFICATION, NOT YET RULED)
+
+**W1-T2790 chosen shape: (c) DERIVE-PERIODICALLY-AND-COMMIT.** A scheduled job runs the suite on
+each pole, diffs the observed failure set against `HOST_PARITY_BASELINE` via the existing
+`readTapFailures`/`diffHostParity`, and writes `HOST_CAUSED_SUITE_REDS` as a **tracked, generated
+artifact carrying its generation sha and date**. The consumer keeps reading a static list; nobody
+hand-maintains it. This is neither the shard's (a) hand-maintained-but-cross-checking nor its (b)
+derive-at-read-time; it is the third shape the shard did not enumerate, and it is chosen because it
+is the only one that survives the objection filed against (b).
+
+**THE SCOPE THIS ACTUALLY DECIDES — broader than one registry, and saying so is the point.** Four
+instances of one shape are now on record, not one: `HOST_CAUSED_SUITE_REDS` missing seven files
+(W1-T2776); a file in NEITHER registry (W1-T2785); `censusSuiteMembershipFor` structurally blind to
+the dominant enumeration idiom (W1-T2809); and a wall-clock/load-dependent class neither mechanism
+can express at all. So the ruling sought is not "how should this registry be maintained" but:
+
+> **When a list enumerates things that are DISCOVERED BY RUNNING, a hand-written list is a method
+> failure rather than a maintenance lapse.** Prefer, in order: (1) make the population
+> SELF-DECLARING at one seam; (2) DERIVE it by observation and commit the result; (3) hand-written
+> prediction — last resort, and only behind a drift guard that is itself derived.
+
+**THE UNAVAILABILITY OBJECTION, ANSWERED ON ITS MERITS.** The unavailability objection is real, and
+it is fatal — to (b) only. `HostFacts`' own doc says the registry keys on cheap host facts and "never a live
+`ci:test` result, which `stream: true` makes structurally unavailable here": the `ci:test` step
+streams its output, so nothing downstream in that same run can parse it. Any design that reads a
+live failure set AT THE MOMENT OF CONSUMPTION is therefore unavailable exactly where its only
+consumer runs. Committing the artifact dissolves this: a tracked file is a `readFileSync`, available
+in a container with no run output, on a pole that never ran the suite, and offline. The objection
+constrains WHEN the derivation happens, not WHETHER it happens. It is answered, not deferred.
+
+Two subsidiary costs, stated rather than waved past. A committed artifact is **stale between
+regenerations** — but the hand-written list is also stale, and stale in an unbounded, unmeasured
+way; a generated artifact carries its own generation sha, which converts staleness from invisible
+into a diff. And a generated artifact **can be edited by hand**, re-opening the gap — so the
+generator must be the only writer and a drift check must fail when the committed artifact does not
+match a fresh derivation, the same posture `censusPopulationDrift` already takes.
+
+**THE NINE MEASURED GAPS, DISPOSED INDIVIDUALLY.** The nine measured gaps are disposed of one at a
+time here, because settling the general question would otherwise leave them silently open. Seven
+were the unregistered bash-3.2 cluster
+files: FIXED by W1-T2776, merged `f27f0793`; the registry has grown 8 → 15 entries as a result. One
+was `test/fleet-heartbeat-supervisor-tick.test.ts`, absent from both registries: FIXED by W1-T2785
+(PR #3905, open at the time of writing) under the existing `bsd-date-control-arm` cluster. One was a
+count drift — `test/recycle-container.test.ts` records 17 against a measured 18 — which remains OPEN
+and is deliberately not rebased, because that row is the evidence trail for the W1-T2234 census
+figure. Under the chosen shape the count becomes generated output and "count drift" stops being a
+category of defect. **None of the nine was found by reading a registry; every one was found by
+running something** — which is the whole argument compressed into one sentence.
+
+**WHY NOT THE OTHER SHAPES.** (a) keep both hand-maintained and make them consult each other: the
+populations are not merely unsynchronised, they are keyed differently — the predictive list is per
+FILE, the observational one per `file::test name` — so "consult each other" requires a normalisation
+step that is most of the derivation work with none of its benefit. (d) reconciler-only, both lists
+unchanged: this is strictly better than today and is the correct FALLBACK, but it still requires a
+human to act on every report, which is the step that failed nine times in one session. (d) is
+recommended as the first increment of (c), not as an alternative to it.
+
+**WHAT THIS CHANGES FOR W1-T2809, WHICH IS WHY IT IS BEING DECIDED NOW.** W1-T2809 proposes a second
+enumerative recognizer for `readdirSync`/`globSync`, its own shard calling it "the same enumerative
+shape with more surface". Under the ordering above that is shape (3) applied twice: matcher #2 will
+be blind to idiom #3 (a wrapper helper, `fast-glob`, `fs.opendir`, a shelled `find`) exactly as
+matcher #1 was blind to idiom #2, and the blindness is already documented — `censusPopulationDrift`
+calls itself "approximate by construction". The recommendation is therefore that **W1-T2809 should
+not ship matcher #2 as its deliverable.** Census membership should become SELF-DECLARING at one
+seam — census suites reach their population through a single shared helper, and the recognizer keys
+on that import — which makes the recognizer exact rather than approximate and retires matcher #1
+too. If that is judged too invasive to land now, matcher #2 may ship ONLY labelled as a stopgap
+whose successor is the seam, so the third idiom's escape is a known debt rather than a surprise.
+
+**WHAT THIS DOES NOT DECIDE.** It does not solve the wall-clock/load-dependent class, and no shape
+here does: load is not a host fact, so the predictive list cannot key on it, and an observational
+list captures such a failure only when the observing run happened to be loaded. The existing
+`confirm` hook (`host-parity.ts` — re-runs one undeclared failure's own FILE, alone) means such a
+failure is filtered out as unconfirmed rather than written in, so a derived registry degrades to
+SILENCE on that class rather than flapping. That is better than the feared instability and is still
+not expression: the class stays outside both vocabularies and needs its own filing. It also does not
+change what any gate ENFORCES — `hostCausedSuiteRedsStep` is informational today (a shipped test
+pins that it "never returns `ok: false` for ANY combination of host facts") and stays informational.
+
+**MEASURED 2026-09-04 at `3bc15420`, in a throwaway worktree.** Predictive registry: **15** entries.
+Observational baseline: **5** entries spanning **3** files. Files in both: **2**
+(`fleet-heartbeat.test.ts`, `worker-credential-preflight.test.ts`); baseline-only:
+`recon-gaps-relayed.test.ts`; registry-only: 13. **The two lists have diverged FURTHER since this
+shard was filed** (8 vs 3 then, 15 vs 3 now) — independent hand-maintenance moves them apart, which
+is the falsifier the shard asked for, re-run and still holding. Consumers of
+`HOST_CAUSED_SUITE_REDS` outside `src/lib/ci-parity.ts`: **ZERO**. Census enumeration split: **28**
+test files discover via `git ls-files`, **84** via `readdirSync`/`globSync`, overlap **1** (the
+shard's figures were ~77 and zero; corrected here). The `count` field has exactly two consumers, a
+`reduce` sum and a `(~N test(s))` render, both already hedged with a tilde.
+
+**HOW TO FALSIFY THIS RECOMMENDATION.** It is wrong if a consumer of `HOST_CAUSED_SUITE_REDS` exists
+that can read a live run but NOT a tracked file — measured today there are no consumers outside its
+own module at all, so the premise of (b)'s objection does not extend to (c). It is also wrong if the
+observed failure set on a pole proves too unstable to commit: the test is whether two consecutive
+derivations on an idle mini agree after the `confirm` re-run. **Take that measurement before
+building the generator**, not after; if the two derivations disagree on more than the known flake
+set, prefer (d) alone and leave the registry hand-written.
+
+**Rollback:** delete this entry. No code was written and no registry changed; W1-T2790 returns to
+`status: queued` with its question open.
