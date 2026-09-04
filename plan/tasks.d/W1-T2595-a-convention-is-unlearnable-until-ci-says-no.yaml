@@ -5,9 +5,10 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  risk: medium
+  risk: high
+  band_meaning: span
   budget_usd: 8.00
-  files: [src/lib/ci-parity.ts, test/a-convention-is-unlearnable-until-ci-says-no.test.ts]
+  files: [src/lib/ci-parity.ts, test/fast-gate-admits-the-census-class.test.ts, test/a-convention-is-unlearnable-until-ci-says-no.test.ts]
   origin: "operator-brief#census-family-unlearnable-2026-09-01"
   plan_refs: ["W1-T294", "W1-T338", "W1-T1266"]
   status: queued
@@ -51,6 +52,38 @@
     ⚠ AND IT MUST NOT BECOME A SECOND COPY OF THE RULES. The parity entry runs the SUITES; it does
     not re-implement their predicates. A reimplementation drifts from the census and then certifies
     green against a rule CI no longer enforces — the vacuous-pass family, one layer up.
+
+    ── THE COUNT THIS TASK MUST MOVE LIVES OUTSIDE ITS ORIGINAL `files:` (added 2026-09-04) ─────
+
+    MEASURED at origin/main: `FAST_GATE_STEPS` holds 13 entries, 4 of them census (bound-kind,
+    catch-erasure, negative-reachability, no-shallowing) and 9 non-census, while `CENSUS_POPULATION`
+    — the roster W1-T2521's successor introduced so the set is named rather than numbered — carries
+    FIVE members. So a fifth is already recognised and unwired, and admitting any further census
+    suite changes the wired count.
+
+    `test/fast-gate-admits-the-census-class.test.ts` still pins that count BY HAND, twice:
+
+        assert.equal(CENSUS_STEPS.length, 4, "the task admits exactly four of the six measured census suites")
+        assert.equal(NON_CENSUS_STEPS.length, 9, ...)
+
+    Neither is derived, so adding an entry reddens that suite — and it was NOT in this task's
+    `files:`, which named only `src/lib/ci-parity.ts` and this task's own test. A builder would
+    have shipped a green scoped run and a red `ci`, then discovered the wall at review. This is the
+    census-suite blind spot CLAUDE.md records as hazard (j): `git grep -l <symbol>` cannot find a
+    suite that asserts a POPULATION SIZE rather than naming your symbol.
+
+    RULE 19 FOLLOWS FROM THAT, AND DECOMPOSING WOULD RE-CREATE THE WALL. With the second test
+    declared the linter reads "spans 2 distinct subsystems (ci-parity, fast-gate-admits-the-census-
+    class) at risk:medium — raise to risk:high or decompose". Splitting the count away from the
+    entries it counts is precisely the shape that made this invisible, so the band is `high` with
+    `band_meaning: span`, at which the linter reports and does not refuse (W1-T2503). The budget is
+    deliberately left at its filed figure — a spend decision is the operator's to record, not an
+    amendment's.
+
+    The path is added to `files:` so the count can move with the entries it counts. Deriving it
+    from `CENSUS_POPULATION` instead of re-pinning a larger literal is the better fix and is left to
+    the builder's judgement; either satisfies this task, and neither is a change to what any census
+    ACCEPTS.
 
     NOT IN SCOPE: changing what any of the four census suites accepts (W1-T2596 covers their escape
     hatches), and the shard/summary reporting question (W1-T2597).
