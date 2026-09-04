@@ -1653,10 +1653,17 @@ export interface RetroGather {
    * never reads `plan/tasks.yaml` or `plan/tasks.d/*` itself, same discipline `openTitles`
    * above already documents for this exact directory). Omitted entirely when the caller hasn't
    * wired the read yet — never a silent `clean` render standing in for a scan that never ran.
-   * THE LIVE CALL SITE (this field's only producer, `buildGather` below) is what answers the
-   * fourteen-cycle "does plan/tasks.yaml and plan/tasks.d/*.yaml disagree" question by
-   * measurement, every retro cycle `renderGather` runs, rather than leaving this rung a signal
-   * only its own tests import.
+   *
+   * HONEST STATUS (do not overclaim): this field's only producer, `buildGather` below, is a
+   * genuine, tested call site — not a signal only its own tests import — but it is a SEAM
+   * DEFAULT (the same shape `lib/reachability.ts`'s own doc names: an optional injected
+   * dependency, called conditionally). Today's ONE production caller, `retroCommand`
+   * (src/run-task.ts), does not yet pass `opts.planCoherence`, so this field is omitted on
+   * every real `rmd retro` cycle until that caller is wired — a two-line, named follow-up that
+   * sits in `src/run-task.ts`, outside W1-T2642's declared `files:` (`plan-coherence.ts`,
+   * `retro.ts`, `test/plan-coherence.test.ts`). Once wired, THIS is the call site that answers
+   * the fourteen-cycle "does plan/tasks.yaml and plan/tasks.d/*.yaml disagree" question by
+   * measurement every cycle `renderGather` runs.
    */
   planCoherence?: PlanCoherenceReport;
 }
@@ -1801,9 +1808,13 @@ export function buildGather(opts: {
     // W1-T2239: FULL `records`, same reasoning as `mutationGateLifetime` above — a
     // measurement of the fleet's own allocation must not truncate to the marker window.
     architectLaneShare: architectLaneShare(records),
-    // W1-T2642: THE LIVE CALL SITE. Runs every cycle `buildGather` runs (retroCommand's own
-    // unconditional call, run-task.ts) whenever the caller supplied `opts.planCoherence` —
-    // omitted entirely otherwise, never a silent clean/zero for a census that did not run.
+    // W1-T2642: the plan-coherence call site — a real, tested invocation, but a SEAM DEFAULT
+    // (lib/reachability.ts's own vocabulary): it fires only when the caller supplied
+    // `opts.planCoherence`. `retroCommand`'s unconditional call (run-task.ts) does not pass it
+    // yet, so on today's real `rmd retro` cycles this branch is NOT taken — never claim
+    // otherwise; that wiring is a named, out-of-scope follow-up (see `RetroGather.planCoherence`
+    // above). Omitted entirely when not supplied, never a silent clean/zero for a census that
+    // did not run.
     ...(opts.planCoherence
       ? { planCoherence: planCoherenceRung(opts.planCoherence.monolith, opts.planCoherence.shards) }
       : {}),
