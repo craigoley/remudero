@@ -7506,8 +7506,48 @@ function scriptStem(path: string): string {
  * ADDED line naming its stem — an unrelated, pre-existing registration entry that merely mentions
  * the stem in a comment or context line does not count, only an add.
  */
+/** The one workflow {@link CI_PARITY_TABLE} mirrors — see test/preflight-ci-parity.test.ts, which
+ *  asserts that table against THIS file in both directions. */
+const CI_WORKFLOW_PATH = ".github/workflows/ci.yml";
+
+/**
+ * W1-T2738 — a ci.yml JOB introduced by this diff, keyed on the REGISTERED UNIT rather than on the
+ * instrument FILE. `.github/workflows/ci.yml` has existed since the repo did, so
+ * {@link fileIsNewInDiff} is false for it however new the job is — which is the single fact that
+ * put a new ci.yml job outside W1-T2521's carve-out.
+ *
+ * A JOB IS INTRODUCED WHEN TWO ADDS AGREE ON ONE NAME: ci.yml gains a job key, and
+ * `src/lib/ci-parity.ts` gains a line registering THAT name. Requiring the pair is not belt-and-
+ * braces, it is the discrimination — `on:`'s own children (`pull_request:`, `push:`) are indented
+ * exactly like a job key, so the shape alone cannot tell a new trigger from a new job, and nothing
+ * ever registers a trigger in the parity table. Co-presence is not enough either: the registered
+ * name must be the name ci.yml added, or a diff that adds one job while registering a different
+ * one would carve out the wrong unit.
+ *
+ * THE PARITY TABLE IS WHY THIS PAIR IS FORCED RATHER THAN MERELY CONVENTIONAL.
+ * test/preflight-ci-parity.test.ts refuses an entry for a job ci.yml does not define AND a real job
+ * with no entry, and both fail on `main` rather than only on a PR — so the two adds cannot be split
+ * across PRs in either order. With entanglement closing the third ordering, refusing this shape
+ * left a new ci.yml job with no admissible sequence at all.
+ */
+function isIntroducingCiYmlJob(diff: string, diffFiles: string[]): boolean {
+  if (!diffFiles.includes(CENSUS_REGISTRATION_PATH)) return false;
+  const lines = walkDiff(diff);
+  const addedJobs = lines
+    .filter((l) => l.file === CI_WORKFLOW_PATH && l.kind === "add")
+    .map((l) => /^ {2}([A-Za-z0-9_-]+):\s*$/.exec(l.text)?.[1])
+    .filter((name): name is string => name !== undefined);
+  if (addedJobs.length === 0) return false;
+  const parityAdds = lines.filter((l) => l.file === CENSUS_REGISTRATION_PATH && l.kind === "add");
+  return addedJobs.some((job) => parityAdds.some((l) => l.text.includes(`job: "${job}"`)));
+}
+
 function isIntroducingCensusGate(diff: string, diffFiles: string[], scriptFile: string): boolean {
   if (!diffFiles.includes(CENSUS_REGISTRATION_PATH)) return false;
+  // W1-T2738: ci.yml registers JOBS, not files, so its introducing-commit test is a different
+  // question — asked in full by the helper above rather than folded into the file-newness check
+  // below, which it would always fail.
+  if (scriptFile === CI_WORKFLOW_PATH) return isIntroducingCiYmlJob(diff, diffFiles);
   if (!fileIsNewInDiff(diff, scriptFile)) return false;
   const stem = scriptStem(scriptFile);
   return walkDiff(diff).some((l) => l.file === CENSUS_REGISTRATION_PATH && l.kind === "add" && l.text.includes(stem));
