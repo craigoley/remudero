@@ -1048,9 +1048,9 @@ export function detectTestTheater(diff: string): boolean {
   // THE PLANTED-TAUTOLOGY ARM IS UNCONDITIONAL, AND STAYS ABOVE THE GUARD BELOW.
   // `assert(true)` is a deliberate act, not an absence, so it is refused whether or not the diff
   // declares a test case — smuggling one into an EXISTING case is precisely the shape that would
-  // otherwise walk through the new guard (W1-T2815 falsifier 2).
+  // otherwise walk through the new guard.
   if (addedTestLines.some((l) => NOOP_ASSERTION_RE.test(l))) return true;
-  // W1-T2815: A DIFF THAT DECLARES NO NEW TEST CASE HAS ADDED NO TEST TO JUDGE.
+  // A DIFF THAT DECLARES NO NEW TEST CASE HAS ADDED NO TEST TO JUDGE.
   //
   // A unified diff renders a MODIFICATION as a `-`/`+` pair, and the loop above reads only the `+`
   // half, so an in-place rewrite of existing test code was indistinguishable from newly added test
