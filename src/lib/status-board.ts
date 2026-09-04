@@ -3016,6 +3016,38 @@ export function boardMessageFooter(sections: readonly BoardSectionMessage[]): st
   );
 }
 
+/**
+ * {@link projectBoardSection} under the same guard the check already has (W1-T2826).
+ *
+ * checkBoardSectionSafe covers checkOperatorMessage and nothing else, because it receives a message
+ * that is ALREADY projected. The projection ran one frame out, in the argument expression feeding
+ * {@link boardMessageFooter}, inside a renderStatusBoardText that has no try of its own — so a
+ * throw raised while projecting escaped every guard on the path and the operator got no board at
+ * all, which is precisely what checkBoardSectionSafe's doc promises can never happen.
+ *
+ * It is reachable rather than theoretical: seven of the ten block renderers read `nextAction`
+ * before the projection does, but cacheHit, learningsInjection and needsMe do not, so a section
+ * object whose `nextAction` throws reaches sectionNextAction with the render already complete.
+ *
+ * Returns `undefined` for a section it could not project — the same distinction the check itself
+ * draws. An unreadable section is omitted from the footer, never reported as incomplete, because
+ * "could not be read" and "was read and found thin" are different facts.
+ */
+function projectBoardSectionSafe(
+  label: string,
+  renderedLines: readonly string[],
+  section: unknown,
+): BoardSectionMessage | undefined {
+  try {
+    return projectBoardSection(label, renderedLines, sectionNextAction(section));
+  } catch {
+    // Swallowed for the reason the whole guard exists: the board is the deliverable and its own
+    // conformance projection must not be able to withhold it. Dropping the section keeps the
+    // footer's denominator honest — it counts what was actually examined.
+    return undefined;
+  }
+}
+
 /** `nextAction` off a section that may or may not declare one — the board's sections are separate
  *  interfaces and only some carry the slot. */
 function sectionNextAction(section: unknown): string | undefined {
@@ -3052,8 +3084,12 @@ export function renderStatusBoardText(model: StatusBoardModel, opts: { colourEna
   });
   // The footer is the LAST thing appended and the only line this change can add. Every block above
   // is already in `lines` by the time it is computed, so a board is never withheld on a check.
+  // W1-T2826: projection runs INSIDE the guard now. Previously it ran here, in the argument
+  // expression, where nothing caught it — so a throw while projecting took the whole board down.
   const footer = boardMessageFooter(
-    blocks.map((block) => projectBoardSection(block.label, block.rendered, sectionNextAction(block.section))),
+    blocks
+      .map((block) => projectBoardSectionSafe(block.label, block.rendered, block.section))
+      .filter((section): section is BoardSectionMessage => section !== undefined),
   );
   if (footer) lines.push("", footer);
   return lines.join("\n");
