@@ -1,0 +1,105 @@
+- id: W1-T2826
+  title: "THE BOARD'S CONFORMANCE CHECK CANNOT KEEP THE PROMISE ITS OWN COMMENT MAKES — checkBoardSectionSafe guards only the check, while projectBoardSection runs in the argument expression that feeds it, inside a renderStatusBoardText that has no try at all, so a throw during projection takes the whole board down"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 12.00
+  rationale: |
+    **THE WRAPPER PROMISES WHAT THE CALL SITE CANNOT KEEP.** checkBoardSectionSafe's own doc says
+    "a checker failure must never reach the operator as a broken board". It takes an ALREADY
+    PROJECTED OperatorMessage, so its try covers checkOperatorMessage and nothing else. The
+    projection that produces that message runs one frame out, in the argument expression
+    blocks.map(...) that feeds boardMessageFooter.
+
+    **ZERO TRY BLOCKS AGAINST A CONTROL OF ELEVEN.** renderStatusBoardText contains no try
+    statement of any kind; the same file holds 11 elsewhere, so the query is not blind. statusCommand
+    reaches the renderer through a plain dependency default with no guard of its own. A throw raised
+    while projecting any section therefore escapes every guard on the path and the operator gets no
+    board — not a marked board, no board.
+
+    **THIS IS THE OUTAGE SHAPE THE STANDARD EXISTS TO PREVENT.** docs/operator-message-standard.md
+    opens on the console's worst outage costing 3h51m on a message that was already good prose and
+    simply never rendered. W1-T2806 wired the presence check into the board to make structural gaps
+    visible and stated in its own PR that "no row can be hidden by its own conformance check". The
+    footer is indeed appended last and cannot hide a row. The PROJECTION is not, and can.
+
+    **IT IS REACHABLE, NOT THEORETICAL.** The repo's two throw-forcing tests both poison the SOURCE
+    RECORD rather than the message — one installs a throwing getter on an Escalation, the other on a
+    generated-commit narrative — which is exactly the class of fault that would be raised during
+    projection, not during the check.
+  design: |
+    **ONE LINE INSIDE THE TRY, NOT AN ABSTRACTION.** Move the projection inside the guard that
+    already exists: have the safe wrapper receive what it needs to project, or call
+    projectBoardSection within checkBoardSectionSafe's try, so the try covers projection and check
+    together at the only site that has one. status-board.ts carries 440 lines of source-size
+    headroom, so nothing needs a ceiling grant. The falsifier is the shape this repo already uses:
+    a section whose projection throws must leave the board rendered in full.
+
+    **THE EXTRACTION WAS MEASURED AND REFUSED.** This id was reserved to fold the four
+    operator-message safe wrappers into one shared helper. That work was investigated across ten
+    parallel recon and design streams with adversarial verification, and the answer is no. The
+    evidence, recorded here so the question is not re-asked:
+
+    (i) THE CLONE DETECTOR IS BLIND BY FOUR AND A HALF TIMES. jscpd is configured at minTokens 50
+    against a shared body of roughly 11 tokens, and it is a required check reporting these as not
+    duplicated. Extraction would be overriding the repo's own instrument on a body it cannot see.
+
+    (ii) THE POPULATION IS FOUR DAYS OLD AND THREE OF THE FOUR WRAPPERS LANDED WITHIN 49 MINUTES OF
+    EACH OTHER. Zero observed drift is not evidence of stability; it is evidence that no time has
+    passed, which is the same error as reading a truncated run as fewer failures.
+
+    (iii) TWO OF THE FOUR SURFACES ARE DEAD. buildPlanPrBodyChecked and
+    buildPlanPrCommitMessageChecked have no production caller; their only src occurrences are their
+    own definitions. Unifying four surfaces of which two are unreachable is worth less than it looks.
+
+    (iv) THE FOUR PROJECTIONS ARE NOT DUPLICATES. They map four different records, all four are
+    key-set pinned by tests, and projectBoardSection is a structural outlier taking three positional
+    arguments and returning a labelled wrapper rather than a message.
+
+    (v) THE TWO FOOTERS CANNOT BE FOLDED AT ALL. operatorMessageFooter and boardMessageFooter order
+    the same missing parts in opposite directions and BOTH orderings are asserted by shipped tests.
+
+    (vi) NO FIFTH CONSUMER IS COMING. No dispatch-eligible shard would add one.
+
+    **WHAT MUST NOT CHANGE.** (a) The board still renders in full, and the footer stays the last line
+    appended — this task makes the existing guarantee true, it does not add a new one. (b) The
+    rendered board's bytes do not move; the byte-exact expectation captured from main still holds.
+    (c) No readability, length or vocabulary score is introduced, per the standard's own prohibition.
+    (d) The two tests that assert the catch arm through boardMessageFooter keep passing; widening
+    the guard must not weaken what they pin.
+  acceptance:
+    - claim: "a section whose projection throws leaves the board rendered in full, every block present"
+      proof: "unit test: test/board-projection-is-guarded.test.ts"
+    - claim: "the guard covers the projection and the check together, so no throw on that path escapes the renderer"
+      proof: "unit test: test/board-projection-is-guarded.test.ts"
+    - claim: "a section the guard could not project is omitted from the footer rather than reported as incomplete"
+      proof: "unit test: test/board-projection-is-guarded.test.ts"
+    - claim: "the rendered board's bytes do not move for any section that projects normally"
+      proof: "unit test: test/board-projection-is-guarded.test.ts"
+    - claim: "the widened guard introduces no readability, length or vocabulary score"
+      proof: "unit test: test/board-projection-is-guarded.test.ts"
+  files: [src/lib/status-board.ts, test/board-projection-is-guarded.test.ts]
+  status: queued
+  attempts: 0
+  origin: "oper#plain-language-surfaces-2026-09-04"
+  plan_refs: ["W1-T2279", "W1-T2806", "W1-T2807", "W1-T2498"]
+  note: |
+    THE FALSIFIER IS A NEW FILE, NOT AN APPEND. test/status-board-operator-message.test.ts is
+    W1-T2806's falsifier and carries coverage-load-bearing assertions; appending this defect's
+    proofs to it would make one suite answer for two tasks. A purpose-named file also lets the
+    pure-path proof earn judgeCriterion's not_yet_built carve-out at filing time.
+
+    RISK BAND IS RULE 19'S SPAN AND band_meaning SAYS SO. subsystemsOf derives concerns from file
+    STEMS, so src/lib/status-board.ts and test/status-board-operator-message.test.ts read as two
+    even though the change is one concern plus its falsifier. Declared rather than worked around.
+
+    THE DEFECT WAS INTRODUCED BY W1-T2806 AND IS RECORDED AGAINST IT, NOT HIDDEN. The wiring that
+    made the board's structural gaps visible left its own projection outside the guard it added.
+
+    EVERY COUNT HERE IS A QUERY AND NOT A NUMBER TO CARRY. The zero try blocks, the control of 11,
+    the 440 lines of headroom, the 49-minute window and the jscpd threshold all move with the tree.
+    Re-run them; do not quote them forward.
