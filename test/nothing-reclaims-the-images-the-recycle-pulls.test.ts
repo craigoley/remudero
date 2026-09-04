@@ -1,13 +1,15 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = join(REPO_ROOT, "deploy", "recycle-container.sh");
+const BASH_BIN = ["/opt/homebrew/opt/bash/bin/bash", "/usr/local/bin/bash", "/usr/bin/bash", "/bin/bash"].find(existsSync) ?? "bash";
 
 // ── W1-T2585: NOTHING RECLAIMS THE IMAGES THE RECYCLE PULLS ─────────────────────────────────
 //
@@ -103,19 +105,19 @@ function dockerStub(scenario: string): string {
 }
 
 function recycle(scenario: string, extraEnv: Record<string, string> = {}): Outcome {
-  const binDir = mkdtempSync(join(tmpdir(), "reclaim-bin-"));
-  const recDir = mkdtempSync(join(tmpdir(), "reclaim-rec-"));
+  const binDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}reclaim-bin-`));
+  const recDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}reclaim-rec-`));
   writeFileSync(join(binDir, "docker"), dockerStub(scenario), { mode: 0o755 });
   writeFileSync(join(binDir, "az"), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o755 });
 
-  const r = spawnSync("bash", [SCRIPT], {
+  const r = spawnSync(BASH_BIN, [SCRIPT], {
     encoding: "utf8",
     cwd: REPO_ROOT,
     env: {
       ...process.env,
       PATH: `${binDir}:${process.env.PATH ?? ""}`,
       REC: recDir,
-      RMD_STATE_DIR: mkdtempSync(join(tmpdir(), "reclaim-state-")),
+      RMD_STATE_DIR: mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}reclaim-state-`)),
       RMD_RECYCLE_WAIT_S: "1",
       RMD_RECYCLE_POLL_S: "1",
       RMD_RECYCLE_FIRST_BOOT: "1",
