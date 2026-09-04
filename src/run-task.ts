@@ -17479,6 +17479,91 @@ export function overlapAdvisoryLines(
 }
 
 /**
+ * W1-T985 — THE DECLARED `files:` OF THE SHARDS A LANE JUST FILED, as the advisory's candidate
+ * list. The lane names BOTH the plan to read and the ids to read out of it; this never goes looking
+ * for a shard on a lane's behalf (design (iv)), because the three lanes reach their filed shards by
+ * three different routes and a helper that guessed would be wiring against a shape nobody
+ * established.
+ *
+ * FAILS TO AN EMPTY LIST, NEVER THROWS. The lanes SPEND MONEY — the triage lane's own comment puts
+ * a worker at a median of $0.96 — so an advisory input that can throw inside them is strictly worse
+ * than no advisory (design (v)). An empty list is also exactly what
+ * {@link overlapWarningLinesFor}'s first statement already treats as "nothing to compare", so a
+ * failure here is indistinguishable from a filing that declared no files: both print nothing,
+ * neither invents a heading.
+ *
+ * DUPLICATES ARE COLLAPSED. Two shards filed in one run may declare the same path, and the
+ * advisory's rarity comparison is over a SET of candidate paths, not a multiset.
+ */
+export function declaredFilesForFiledIds(planPath: string, ids: readonly string[], deps: OverlapWarningDeps = {}): string[] {
+  if (ids.length === 0) return [];
+  try {
+    const wanted = new Set(ids);
+    const files = new Set<string>();
+    for (const task of (deps.plan ?? loadPlan)(planPath).tasks) {
+      if (!wanted.has(task.id)) continue;
+      for (const f of task.files ?? []) {
+        const trimmed = String(f).trim();
+        if (trimmed.length > 0) files.add(trimmed);
+      }
+    }
+    return [...files];
+  } catch {
+    // NO RECORD AND NO RETHROW, DELIBERATELY (catch-erasure detector (a), route 4). An empty list
+    // is not an erased failure here: it is the SAME input `overlapWarningLinesFor` already treats
+    // as "nothing to compare", so an unreadable plan and a filing that declared no files both
+    // produce silence rather than a bare heading. Recording would put a log line in a lane whose
+    // outcome this must not change, and rethrowing would take down a lane mid-filing.
+    return [];
+  }
+}
+
+/**
+ * W1-T985 — the advisory for an EXPLICIT candidate list, for the three lanes that file without a
+ * human at a terminal. `nextTaskIdCommand` reaches the same advisory through
+ * {@link overlapAdvisoryLines}, which parses `--files` off an argv nobody types in a lane; this is
+ * the same reader with the candidate list handed in instead.
+ *
+ * NO NEW PREDICATE, POLICY OR SIGNAL (design (vi)): this adds READERS for lines
+ * {@link overlapWarningLinesFor} already returns. Nothing is ledgered and no field is introduced —
+ * a "lane advisory fired" row with no consumer would be another built-and-unread mechanism, which
+ * is the class this task exists to close.
+ *
+ * ADVISORY MEANS ADVISORY (design (v)). This cannot refuse a mint, change an id, or alter an exit
+ * code, and the outer `catch` means a lane's outcome is byte-identical whether this warns, stays
+ * silent, or fails outright. `overlapWarningLinesFor` already converts its own failures into a
+ * single {@link scopeReadOutageLine} rather than throwing — W1-T2606's rule that degrading must not
+ * mean going mute — and this arm exists for anything that could still escape it.
+ */
+export function printLaneOverlapAdvisory(
+  candidateFiles: readonly string[],
+  owner: string,
+  repo: string,
+  planPath: string,
+  deps: OverlapWarningDeps = {},
+): void {
+  // NO EMPTY-LIST GUARD AND NO try/catch AROUND THE READ, DELIBERATELY. Both were written here
+  // first and both were DEAD: `overlapWarningLinesFor`'s own first statement returns `[]` on an
+  // empty candidate list without reading open PRs, and its own `catch` converts every failure into
+  // a single `scopeReadOutageLine` rather than throwing. Deleting either changed no test, which is
+  // how they were found — a defensive arm no fixture can reach is an uncovered branch the coverage
+  // gate would (correctly) refuse, and a second guarantee that can silently drift from the first.
+  // The `say` arm below is different: it IS reachable, and its falsifier fails without it.
+  const lines = overlapWarningLinesFor(candidateFiles, owner, repo, planPath, deps);
+  const say = deps.say ?? console.log;
+  for (const line of lines) {
+    try {
+      say(line);
+    } catch {
+      // A broken sink is the ONE failure this function can still meet, and it must not reach the
+      // lane: the advisory cannot alter an exit code (design (v)). Nothing is recorded because the
+      // recorder is exactly what just failed.
+      return;
+    }
+  }
+}
+
+/**
  * W1-T1055 — WHO HOLDS A CONTESTED ID. The two anchor shapes are already distinguishable on the
  * remote but nothing surfaced the difference, so an operator could not tell a reservation HE holds
  * from one the fleet holds. A rejection scrolled past unnoticed twice on 2026-08-20.
@@ -31664,7 +31749,7 @@ export const TRIAGE_MAX_NEW_TASKS = 3;
 
 export async function triageCommand(
   rest: string[],
-  opts: { spawn?: typeof spawnWorker; config?: Config } = {},
+  opts: { spawn?: typeof spawnWorker; config?: Config; overlap?: OverlapWarningDeps } = {},
 ): Promise<number> {
   const cfg = opts.config ?? loadConfig();
   const lockPath = triageLockPath(cfg.root);
@@ -31696,7 +31781,7 @@ export function triageLockRefusalMessage(pid: number, startedAt: string, lockPat
 
 async function triageCommandLocked(
   rest: string[],
-  opts: { spawn?: typeof spawnWorker; config?: Config } = {},
+  opts: { spawn?: typeof spawnWorker; config?: Config; overlap?: OverlapWarningDeps } = {},
 ): Promise<number> {
   const parsed = parseTriageArgs(rest);
   if ("error" in parsed) {
@@ -31954,6 +32039,27 @@ async function triageCommandLocked(
         }),
     });
     const { decision, changedFiles } = loop.decision;
+
+    // W1-T985 — THE RARE-OVERLAP ADVISORY, AT THE POINT THE FILED SHARD IS ON DISK. The advisory
+    // shipped 2026-08-16 (W1-T533) and gained its only reader the same day (W1-T917,
+    // `nextTaskIdCommand`), so until now it printed ONLY for a human typing `rmd next-task-id`.
+    // This lane mints and files without one.
+    //
+    // AFTER FILING, NEVER AT THE MINT (design (iii)): at mint time the shard does not exist, so the
+    // candidate list would be empty and `overlapWarningLinesFor`'s own first statement would return
+    // immediately. Reproducing that at three new call sites would ship the same defect three more
+    // times.
+    //
+    // The candidate list is read HERE and handed in explicitly, rather than the helper going
+    // looking for the shard (design (iv)) — the three lanes reach their filed shards by three
+    // different routes. Nothing below can refuse the filing, change an id, or alter the exit code.
+    printLaneOverlapAdvisory(
+      declaredFilesForFiledIds(join(worktreePath, "plan", "tasks.yaml"), reservedIds, opts.overlap),
+      owner,
+      repo,
+      join(worktreePath, "plan", "tasks.yaml"),
+      opts.overlap,
+    );
 
     // FAIL EARLY, AND SAY WHY. Before this, a violating filing became a PR that opened, burned CI,
     // and reported only "ci failure" — indistinguishable from a flake.
@@ -32278,7 +32384,7 @@ export const PLAN_MAX_NEW_TASKS = 5;
 
 export async function planCommand(
   rest: string[],
-  opts: { spawn?: typeof spawnWorker; config?: Config } = {},
+  opts: { spawn?: typeof spawnWorker; config?: Config; overlap?: OverlapWarningDeps } = {},
 ): Promise<number> {
   const parsed = parsePlanArgs(rest);
   if ("error" in parsed) {
@@ -32430,6 +32536,27 @@ export async function planCommand(
     // directs the worker to add tasks, and PR #1074's monolith-filing rule pushes those into shards —
     // so the created-file case is the NORMAL one here, not an edge.
     const { decision, changedFiles } = loop.decision;
+
+    // W1-T985 — THE RARE-OVERLAP ADVISORY, AT THE POINT THE FILED SHARD IS ON DISK. The advisory
+    // shipped 2026-08-16 (W1-T533) and gained its only reader the same day (W1-T917,
+    // `nextTaskIdCommand`), so until now it printed ONLY for a human typing `rmd next-task-id`.
+    // This lane mints and files without one.
+    //
+    // AFTER FILING, NEVER AT THE MINT (design (iii)): at mint time the shard does not exist, so the
+    // candidate list would be empty and `overlapWarningLinesFor`'s own first statement would return
+    // immediately. Reproducing that at three new call sites would ship the same defect three more
+    // times.
+    //
+    // The candidate list is read HERE and handed in explicitly, rather than the helper going
+    // looking for the shard (design (iv)) — the three lanes reach their filed shards by three
+    // different routes. Nothing below can refuse the filing, change an id, or alter the exit code.
+    printLaneOverlapAdvisory(
+      declaredFilesForFiledIds(join(worktreePath, "plan", "tasks.yaml"), reservedIds, opts.overlap),
+      owner,
+      repo,
+      join(worktreePath, "plan", "tasks.yaml"),
+      opts.overlap,
+    );
 
     // FAIL EARLY, AND SAY WHY — see the triage lane's twin of this block.
     if (loop.violations.length > 0) {
@@ -33234,7 +33361,7 @@ function loadProposalsForRatify(
  */
 export async function approveCommand(
   rest: string[],
-  deps: { config?: Config; gateway?: RatifyGateway; batchGateway?: RatifyBatchGateway } = {},
+  deps: { config?: Config; gateway?: RatifyGateway; batchGateway?: RatifyBatchGateway; overlap?: OverlapWarningDeps } = {},
 ): Promise<number> {
   const proposalId = rest[0];
   const badArg = unknownArgError("approve", rest.slice(1), [], []);
@@ -33435,6 +33562,19 @@ export async function approveCommand(
       // rewrote every placeholder) — same per-line `- id: <id>` regex the pre-W1-T311 code used,
       // just over the rewritten text rather than payload.fragmentYaml verbatim.
       filedTaskIds = [...materialized.fragmentYaml.matchAll(/^- id:\s*(\S+)/gm)].map((m) => m[1]);
+
+      // W1-T985 — the rare-overlap advisory for the shards this ratification just wrote. Same
+      // reader `nextTaskIdCommand` has had since W1-T917, reached here because this lane files
+      // without a human at a terminal; see the triage lane's twin of this block for the full
+      // reasoning. `filedTaskIds` is read one line above from the SAME materialised fragment the
+      // shards were written from, so the ids and the shards on disk cannot disagree.
+      printLaneOverlapAdvisory(
+        declaredFilesForFiledIds(join(worktreePath, "plan", "tasks.yaml"), filedTaskIds, deps.overlap),
+        owner,
+        repo,
+        join(worktreePath, "plan", "tasks.yaml"),
+        deps.overlap,
+      );
 
       execFileSync("git", ["-C", worktreePath, "add", "-A", "--", "plan/", "MASTER-PLAN.md"], { stdio: "inherit" });
       execFileSync("git", ["-C", worktreePath, "commit", "-m", approveCommitMessage(payload)], { stdio: "inherit" });
