@@ -1983,6 +1983,14 @@ No code was written; nothing else changes.
 
 ## 2026-09-04 — RECOMMENDATION (W1-T2790): derive the host-caused registry periodically and commit it; prefer a self-declaring seam over a second enumerative matcher (PREPARED FOR RATIFICATION, NOT YET RULED)
 
+- **Chosen (RECOMMENDED, auto):** shape (c) — derive periodically and commit. Recorded here as what
+  it is and nothing more: the machine's §4 auto-choose resolution of the DECISION_REQUEST this task
+  raised. W1-T2790 is `verify: human`, so the RULING is the operator's and this entry is not it —
+  see the header's own "NOT YET RULED". A ratification, or an override, is recorded beneath this
+  line as an amendment, the same shape every auto-chosen entry above takes when the operator later
+  rules on it. The provenance genre is stated because the floor requires every new entry to name
+  who authored it (W1-T352); it says nothing about whether the entry binds.
+
 **W1-T2790 chosen shape: (c) DERIVE-PERIODICALLY-AND-COMMIT.** A scheduled job runs the suite on
 each pole, diffs the observed failure set against `HOST_PARITY_BASELINE` via the existing
 `readTapFailures`/`diffHostParity`, and writes `HOST_CAUSED_SUITE_REDS` as a **tracked, generated
