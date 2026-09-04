@@ -263,7 +263,7 @@ test("hasRepoRootConstant / namesPlanOrDocsPath: unit-level positive and negativ
   assert.equal(hasRepoRootConstant('readFileSync(join(__dirname, "..", "plan", "tasks.yaml"));'), true);
   assert.equal(hasRepoRootConstant('import { foo } from "../src/lib/foo.ts";'), false);
   assert.equal(namesPlanOrDocsPath('readFileSync(join(REPO_ROOT, "MASTER-PLAN.md"))'), true);
-  assert.equal(namesPlanOrDocsPath("readFileSync(join(REPO_ROOT, \"plan\", \"tasks.yaml\"))"), false); // no quoted "plan/" literal
+  assert.equal(namesPlanOrDocsPath("readFileSync(join(REPO_ROOT, \"plan\", \"tasks.yaml\"))"), true);
   assert.equal(namesPlanOrDocsPath('const p = "plan/tasks.yaml";'), true);
   assert.equal(namesPlanOrDocsPath('const p = "docs/ORIENTATION.md";'), true);
   assert.equal(namesPlanOrDocsPath('const p = "src/lib/foo.ts";'), false);
