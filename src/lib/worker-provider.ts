@@ -702,9 +702,20 @@ function resolveCapabilityLadder(config: Config, deps: CodexCapacityDeps): Capab
 interface CodexRuntimeReading {
   rateLimits: unknown;
   models: CodexModelInfo[];
+  /** Present only when one timed-out exchange was replaced by a fresh successful retry. */
+  retryDetail?: string;
 }
 
-type CodexRuntimeResult = CodexRuntimeReading | ProviderCapacity;
+interface CodexRuntimeFailure extends ProviderCapacity {
+  /** Internal retry classification; stripped before a capacity leaves this module. */
+  failureKind: "timeout" | "terminal";
+}
+
+type CodexRuntimeResult = CodexRuntimeReading | CodexRuntimeFailure;
+
+function codexRuntimeFailure(detail: string, failureKind: CodexRuntimeFailure["failureKind"] = "terminal"): CodexRuntimeFailure {
+  return { provider: "codex", readable: false, windows: [], detail, failureKind };
+}
 
 const codexCapacityCache = new Map<string, { at: number; value: CodexRuntimeReading }>();
 const codexCapacityFailureCache = new Map<string, { at: number; value: ProviderCapacity }>();
@@ -760,7 +771,7 @@ async function readCodexRuntime(
     child = spawn(bin, ["app-server", "--listen", "stdio://"], { env: codexControlEnv(config) });
   } catch (error) {
     // A synchronous spawn failure excludes Codex without erasing its reason.
-    return { provider: "codex", readable: false, windows: [], detail: `app-server spawn failed: ${(error as Error).message}` };
+    return codexRuntimeFailure(`app-server spawn failed: ${(error as Error).message}`);
   }
 
   return new Promise<CodexRuntimeResult>((resolve) => {
@@ -772,6 +783,7 @@ async function readCodexRuntime(
     let initialized = false;
     let rateLimitsReceived = false;
     let modelsReceived = false;
+    let malformedStdoutLines = 0;
     const finish = (result: CodexRuntimeResult) => {
       if (settled) return;
       settled = true;
@@ -786,18 +798,17 @@ async function readCodexRuntime(
       if (!modelsReceived) pending.push("model/list");
       return pending;
     };
-    const timer = setTimeout(
-      () => finish({
-        provider: "codex",
-        readable: false,
-        windows: [],
-        detail: `app-server timed out after ${timeoutMs}ms; unfinished: ${unfinishedPhases().join(", ") || "response validation"}`,
-      }),
-      timeoutMs,
-    );
-    child.on("error", (error) => finish({ provider: "codex", readable: false, windows: [], detail: `app-server error: ${error.message}` }));
+    const timer = setTimeout(() => {
+      const malformed = malformedStdoutLines > 0 ? `; malformed app-server stdout: ${malformedStdoutLines} line(s)` : "";
+      finish(codexRuntimeFailure(
+        `app-server timed out after ${timeoutMs}ms${malformed}; unfinished: ${unfinishedPhases().join(", ") || "response validation"}`,
+        // Protocol noise is not the fleet-observed transient RPC stall and must not be retried.
+        malformedStdoutLines > 0 ? "terminal" : "timeout",
+      ));
+    }, timeoutMs);
+    child.on("error", (error) => finish(codexRuntimeFailure(`app-server error: ${error.message}`)));
     child.on("exit", (code) => {
-      if (!settled) finish({ provider: "codex", readable: false, windows: [], detail: `app-server exited ${code}: ${stderr.slice(-240)}` });
+      if (!settled) finish(codexRuntimeFailure(`app-server exited ${code}: ${stderr.slice(-240)}`));
     });
     child.stderr.on("data", (chunk: Buffer) => {
       stderr = `${stderr}${chunk.toString("utf8")}`.slice(-2_000);
@@ -814,6 +825,7 @@ async function readCodexRuntime(
           message = JSON.parse(raw) as typeof message;
         } catch (error) {
           // Non-protocol stdout is skipped; missing RPC responses still fail closed at the timeout.
+          malformedStdoutLines += 1;
           continue;
         }
         if (message.id === 1) {
@@ -824,7 +836,7 @@ async function readCodexRuntime(
         } else if (message.id === 2) {
           rateLimitsReceived = true;
           if (message.error) {
-            finish({ provider: "codex", readable: false, windows: [], detail: message.error.message ?? "rate-limit RPC error" });
+            finish(codexRuntimeFailure(message.error.message ?? "rate-limit RPC error"));
           } else {
             rateLimits = message.result;
             if (modelsReceived) finish({ rateLimits, models: models ?? [] });
@@ -832,11 +844,11 @@ async function readCodexRuntime(
         } else if (message.id === 3) {
           modelsReceived = true;
           if (message.error) {
-            finish({ provider: "codex", readable: false, windows: [], detail: message.error.message ?? "model-list RPC error" });
+            finish(codexRuntimeFailure(message.error.message ?? "model-list RPC error"));
           } else {
             const result = message.result as CodexModelListResult | undefined;
             if (result?.nextCursor) {
-              finish({ provider: "codex", readable: false, windows: [], detail: "model/list exceeded the supported 100-model page" });
+              finish(codexRuntimeFailure("model/list exceeded the supported 100-model page"));
             } else {
               models = Array.isArray(result?.data) ? result.data : [];
               if (rateLimitsReceived) finish({ rateLimits, models });
@@ -851,17 +863,45 @@ async function readCodexRuntime(
   });
 }
 
+/** Retry only the production-observed transient: a clean protocol exchange that reached its bound. */
+async function readCodexRuntimeWithTimeoutRetry(
+  config: Config,
+  bin: string,
+  deps: Pick<CodexCapacityDeps, "spawn" | "timeoutMs">,
+): Promise<CodexRuntimeResult> {
+  const first = await readCodexRuntime(config, bin, deps);
+  if (!("provider" in first) || first.failureKind !== "timeout") return first;
+
+  const second = await readCodexRuntime(config, bin, deps);
+  if (!("provider" in second)) {
+    return {
+      ...second,
+      retryDetail: `app-server recovered on timeout retry; attempt 1: ${first.detail ?? "timed out"}`,
+    };
+  }
+  return {
+    ...second,
+    detail: `app-server capacity read failed after timeout retry; attempt 1: ${first.detail ?? "timed out"}; attempt 2: ${second.detail ?? "failed"}`,
+  };
+}
+
 function selectCodexRuntime(
   value: CodexRuntimeReading,
   config: Config,
   deps: CodexCapacityDeps,
   capabilities: CapabilityLadder | undefined,
 ): ProviderCapacity {
-  if (deps.selectedModel) return selectCodexAttributionModel(value.models, value.rateLimits, deps.selectedModel);
-  return selectCodexModel(value.models, value.rateLimits, config, deps.requestedModel, deps.requestedEffort, capabilities, {
-    preferredModel: deps.preferredModel,
-    reservePercent: deps.reservePercent,
-  });
+  const selected = deps.selectedModel
+    ? selectCodexAttributionModel(value.models, value.rateLimits, deps.selectedModel)
+    : selectCodexModel(value.models, value.rateLimits, config, deps.requestedModel, deps.requestedEffort, capabilities, {
+      preferredModel: deps.preferredModel,
+      reservePercent: deps.reservePercent,
+    });
+  if (!value.retryDetail) return selected;
+  return {
+    ...selected,
+    detail: selected.detail ? `${value.retryDetail}; ${selected.detail}` : value.retryDetail,
+  };
 }
 
 function backedOffCodexFailure(value: ProviderCapacity, ageMs: number, backoffMs: number): ProviderCapacity {
@@ -904,11 +944,11 @@ export async function readCodexCapacity(config: Config, deps: CodexCapacityDeps 
     if (active) {
       exchange = active;
     } else {
-      exchange = readCodexRuntime(config, bin, deps);
+      exchange = readCodexRuntimeWithTimeoutRetry(config, bin, deps);
       codexCapacityInFlight.set(cacheKey, exchange);
     }
   } else {
-    exchange = readCodexRuntime(config, bin, deps);
+    exchange = readCodexRuntimeWithTimeoutRetry(config, bin, deps);
   }
 
   let value: CodexRuntimeResult;
@@ -920,9 +960,10 @@ export async function readCodexCapacity(config: Config, deps: CodexCapacityDeps 
     }
   }
   if ("provider" in value) {
+    const { failureKind: _failureKind, ...capacity } = value;
     codexCapacityCache.delete(cacheKey);
-    if (!deps.forceRefresh) codexCapacityFailureCache.set(cacheKey, { at: now(), value });
-    return value;
+    if (!deps.forceRefresh) codexCapacityFailureCache.set(cacheKey, { at: now(), value: capacity });
+    return capacity;
   }
   codexCapacityCache.set(cacheKey, { at: now(), value });
   codexCapacityFailureCache.delete(cacheKey);
