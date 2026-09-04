@@ -348,6 +348,21 @@ fi
 # (W1-T2568) — see the header note. `-f`, matching the account-file check above: a regular file,
 # never a directory. Reports PRESENCE only — the content is never echoed by this script, by
 # `rmd serve`'s own boot banner, or by any ledger line `github-event-wake.ts` writes.
+#
+# W1-T2837: `--replace` must preserve the old container's explicit one-file secret mount when the
+# invoking shell does not repeat its host path. Unlike the account file this secret deliberately
+# has no guessed default, so the outgoing container is the only durable launch record available at
+# replacement time. Resolve the source by the exact destination before `docker rm`; never mount a
+# directory and never override an explicit path supplied for this invocation.
+if [ "${REPLACE}" -eq 1 ] && [ -z "${GITHUB_WEBHOOK_SECRET_PATH}" ] && docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
+  EXISTING_WEBHOOK_SECRET_SOURCE="$(docker inspect "${CONTAINER_NAME}" \
+    --format "{{range .Mounts}}{{if eq .Destination \"${GITHUB_WEBHOOK_SECRET_MOUNT_DEST}\"}}{{.Source}}{{end}}{{end}}" 2>/dev/null || true)"
+  if [ -n "${EXISTING_WEBHOOK_SECRET_SOURCE}" ] && [ -f "${EXISTING_WEBHOOK_SECRET_SOURCE}" ]; then
+    GITHUB_WEBHOOK_SECRET_PATH="${EXISTING_WEBHOOK_SECRET_SOURCE}"
+    echo "serve-container: preserving the existing webhook-secret file mount for replacement"
+  fi
+  unset EXISTING_WEBHOOK_SECRET_SOURCE
+fi
 GITHUB_WEBHOOK_SECRET_ARGS=()
 if [ -n "${GITHUB_WEBHOOK_SECRET_PATH}" ] && [ -f "${GITHUB_WEBHOOK_SECRET_PATH}" ]; then
   GITHUB_WEBHOOK_SECRET_ARGS=(-v "${GITHUB_WEBHOOK_SECRET_PATH}:${GITHUB_WEBHOOK_SECRET_MOUNT_DEST}:ro" -e "RMD_GITHUB_WEBHOOK_SECRET_FILE=${GITHUB_WEBHOOK_SECRET_MOUNT_DEST}")
