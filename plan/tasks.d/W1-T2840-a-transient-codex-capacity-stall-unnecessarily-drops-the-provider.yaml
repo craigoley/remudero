@@ -1,0 +1,62 @@
+- id: W1-T2840
+  title: "A transient Codex capacity stall unnecessarily drops a healthy subscription for the whole routing decision"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 12.00
+  files:
+    - src/lib/worker-provider.ts
+    - test/codex-capacity-singleflight.test.ts
+  origin: "operator-session#codex-capacity-transient-retry-2026-09-04"
+  plan_refs: ["W1-T2772", "W1-T2756", "W1-T2711"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON THE AZURE FLEET HOST WITH THE PINNED CODEX CLI 0.152.0. The daemon
+    received one unreadable capacity result today after app-server initialization completed but
+    both `account/rateLimits/read` and `model/list` remained unfinished at the 10-second bound.
+    That result made automatic routing drop Codex for the decision even though the account had
+    headroom. Seventeen forced-fresh controls against the same deployed container all succeeded:
+    the first completed in 5.763 seconds, the next four in 1.096-1.446 seconds, and a subsequent
+    twelve-read sample completed in 0.767-1.722 seconds with a 1.165-second median. Raising every
+    read's timeout is therefore not supported by the normal-latency evidence.
+
+    W1-T2772 already single-flights ordinary cold reads, backs off terminal failures, preserves
+    phase-specific timeout evidence, and keeps unreadable capacity fail-closed. It deliberately
+    excluded retry until production evidence identified the remaining failure class. That evidence
+    now exists: a rare post-initialize transport/RPC stall amid otherwise fast successful reads.
+  design: |
+    Retry the complete app-server exchange exactly once, and only when the first exchange reaches
+    its existing timeout. Keep the same 10-second per-attempt bound. The retry belongs inside the
+    raw exchange promise so all ordinary concurrent callers still share one two-attempt operation
+    and independently apply their model policy afterward. A force-refresh attribution boundary
+    may also retry its own fresh exchange but must never join the ordinary in-flight operation.
+
+    Kill each timed-out child exactly once before starting its retry. If the retry succeeds, use
+    only that fresh raw reading. If it times out or ends with any other failure, return unreadable,
+    cache the ordinary failure under the existing bounded backoff, and preserve diagnostics for
+    both attempts. Do not retry malformed data, RPC errors, process errors, exits, pagination, or
+    toolchain failures. Do not revive stale successful headroom, increase the timeout, add a config
+    field, alter model choice, alter Claude reads, or weaken any fail-closed routing posture.
+  acceptance:
+    - claim: "one timed-out exchange followed by a successful exchange returns fresh readable Codex capacity, kills both children once, and reports no stale first-attempt data"
+      proof: "unit test: test/codex-capacity-singleflight.test.ts"
+    - claim: "three concurrent ordinary cold callers share the same bounded timeout retry and spawn exactly two app-server children rather than one retry per caller"
+      proof: "unit test: test/codex-capacity-singleflight.test.ts"
+    - claim: "two timed-out attempts return unreadable with both attempt diagnostics and enter the existing failure backoff without a third spawn"
+      proof: "unit test: test/codex-capacity-singleflight.test.ts"
+    - claim: "RPC, process, exit, pagination, malformed and toolchain failures are not retried; forceRefresh remains an independent attribution boundary; Claude behavior is unchanged"
+      proof: "unit test: test/codex-capacity-singleflight.test.ts"
+  falsifier: |
+    Do not add retry if a larger current-host sample shows ordinary successful reads routinely
+    approaching or exceeding ten seconds, if the observed failure happened before initialization,
+    or if W1-T2772 does not single-flight the full raw operation. None holds: all 17 fresh controls
+    completed below 5.8 seconds, the production timeout named only the two post-initialize RPCs,
+    and current source stores the raw exchange promise by Codex binary plus Codex home.
+  note: |
+    `rmd next-task-id --reserve` reported `RESERVED W1-T2840 on origin`; the reservation was made
+    before publication. This task is a resilience refinement, not authorization to change the
+    deployed provider list or recycle either service.
