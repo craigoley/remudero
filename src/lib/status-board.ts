@@ -75,6 +75,12 @@ import {
 } from "./digest.js";
 import { deployAutoPath, deployFailedAlertPath, sameCommit } from "./deployer.js";
 import { dispatchClaimRef } from "./dispatch-claim.js";
+import {
+  checkOperatorMessage,
+  type OperatorMessage,
+  type OperatorMessageCheckResult,
+  type OperatorMessagePart,
+} from "./operator-message.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { IDLE_REASON_ID_CAP, runBranchTaskIds, runnableCandidates, type DispatchFilterReason, type MergedSet } from "./drain.js";
 import {
@@ -2910,18 +2916,139 @@ function renderNeedsMeBlock(n: NeedsMeSection): string[] {
  *  default in this suite's own non-TTY `node --test` processes, and always when forced) the
  *  output is BYTE-IDENTICAL to what this function rendered before this task — every `paint`
  *  call returns its input unchanged, and `sectionRule` never emits colour at all. */
+// ── OPERATOR MESSAGE STANDARD — the board's presence projection (W1-T2806) ──────────────────
+//
+// docs/operator-message-standard.md is NORMATIVE and names `renderStatusBoardText` as its FIRST
+// surface, on the reasoning that the board already carries a next-action slot. It did; nothing
+// read it through the standard's own checker. `escalate.ts` was the only module that ever called
+// {@link checkOperatorMessage}, so the surface an operator reads first was the surface the
+// presence check never saw.
+//
+// WHAT THIS IS NOT. It is not a readability score, a length bound or a vocabulary rule — the
+// standard forbids any of those being added in its name, because this repo cannot compute reader
+// comprehension honestly. It checks PRESENCE of four slots and nothing else. It also does not
+// certify that any board message is TRUE: the standard's own opening records a `NextActionRule`
+// whose action slot is filled and whose sentence is false anyway.
+//
+// AND IT NEVER WITHHOLDS. `operator-message.ts` states the fallback is the hazard and fails toward
+// DELIVERY. No row is hidden, reordered or truncated because its projection is incomplete; the
+// board renders in full and one footer line records what was missing.
+
+/** A board section as the presence check sees it: its label, and the slots it fills. */
+export interface BoardSectionMessage {
+  label: string;
+  message: OperatorMessage;
+}
+
+/**
+ * Project one rendered section onto the four presence slots, reading only what the board ALREADY
+ * carries — the same discipline `toOperatorMessage` (escalate.ts) follows, so no section producer
+ * is forced to change what it passes.
+ *
+ *  - `speaker` is the section label, always known.
+ *  - `whatHappened` is the block's own rendered body (its lines after the section rule), which is
+ *    where a section states its observed condition. Absent when the block rendered nothing.
+ *  - `whatIsAsked` is `nextAction`, left UNDEFINED rather than nulled when no rule applied:
+ *    `pickNextAction` returns `undefined` both when a section is healthy and when its table has a
+ *    gap, and the standard's part (iv) is precisely about not reporting those as the same fact.
+ *  - `consequenceOfInaction` has no board slot today, so it is absent by construction. That is the
+ *    gap this projection exists to make visible rather than silently accept.
+ */
+export function projectBoardSection(
+  label: string,
+  renderedLines: readonly string[],
+  nextAction: string | undefined,
+): BoardSectionMessage {
+  const body = renderedLines.slice(1).filter((line) => line.trim().length > 0);
+  return {
+    label,
+    message: {
+      speaker: label,
+      whatHappened: body.length > 0 ? body.join("\n") : undefined,
+      whatIsAsked: nextAction,
+      consequenceOfInaction: undefined,
+    },
+  };
+}
+
+/**
+ * {@link checkOperatorMessage}, best-effort — mirrors `escalate.ts`'s own safe wrapper. A checker
+ * failure must never reach the operator as a broken board, so this returns `undefined` rather than
+ * a fabricated verdict and the caller omits the section from the footer instead of guessing.
+ */
+function checkBoardSectionSafe(message: OperatorMessage): OperatorMessageCheckResult | undefined {
+  try {
+    return checkOperatorMessage(message);
+  } catch {
+    // Best-effort, and deliberately UNDEFINED rather than a synthesised "incomplete": a section the
+    // checker could not read has not been observed to be missing anything, and reporting the two as
+    // the same fact is exactly what part (iv) of the standard forbids. The section drops out of the
+    // footer; the board itself still renders in full.
+    return undefined;
+  }
+}
+
+/**
+ * ONE board-level footer naming which sections are structurally incomplete, or `undefined` when
+ * every section conforms. Deliberately one line for the whole board rather than one per section:
+ * the board is read at a glance, and today no section fills `consequenceOfInaction`, so a
+ * per-section annotation would append a line to every block on every render for a fact that is
+ * constant across them.
+ */
+export function boardMessageFooter(sections: readonly BoardSectionMessage[]): string | undefined {
+  const incomplete: { label: string; missing: OperatorMessagePart[] }[] = [];
+  for (const section of sections) {
+    const result = checkBoardSectionSafe(section.message);
+    if (result && !result.ok) incomplete.push({ label: section.label, missing: result.missing });
+  }
+  if (incomplete.length === 0) return undefined;
+  const parts = [...new Set(incomplete.flatMap((row) => row.missing))].sort();
+  return (
+    `_operator-message: ${incomplete.length} of ${sections.length} section(s) incomplete — ` +
+    `missing ${parts.join(", ")} (${incomplete.map((row) => row.label).join(", ")}). ` +
+    `Rendered in full regardless; see docs/operator-message-standard.md._`
+  );
+}
+
+/** `nextAction` off a section that may or may not declare one — the board's sections are separate
+ *  interfaces and only some carry the slot. */
+function sectionNextAction(section: unknown): string | undefined {
+  if (section === null || typeof section !== "object") return undefined;
+  const value = (section as { nextAction?: unknown }).nextAction;
+  return typeof value === "string" ? value : undefined;
+}
+
 export function renderStatusBoardText(model: StatusBoardModel, opts: { colourEnabled?: boolean } = {}): string {
   const enabled = opts.colourEnabled ?? colourEnabled();
+  // Each block is rendered into its own array so the presence projection can read what the reader
+  // actually sees. The join below reproduces the previous concatenation line for line: the same
+  // blocks in the same order, one blank line between each pair, none after the last.
+  const blocks: { label: string; section: unknown; rendered: string[] }[] = [
+    { label: "liveness", section: model.liveness, rendered: renderLivenessBlock(model.liveness, enabled) },
+    { label: "latches", section: model.latches, rendered: renderLatchesBlock(model.latches) },
+    { label: "last cycle", section: model.lastCycle, rendered: renderLastCycleBlock(model.lastCycle) },
+    { label: "blockers", section: model.blockers, rendered: renderBlockersBlock(model.blockers) },
+    { label: "queue head", section: model.queueHead, rendered: renderQueueHeadBlock(model.queueHead, enabled) },
+    { label: "inbox", section: model.inbox, rendered: renderInboxBlock(model.inbox) },
+    { label: "headroom", section: model.headroom, rendered: renderHeadroomBlock(model.headroom) },
+    { label: "cache hit", section: model.cacheHit, rendered: renderCacheHitBlock(model.cacheHit) },
+    {
+      label: "learnings injection",
+      section: model.learningsInjection,
+      rendered: renderLearningsInjectionBlock(model.learningsInjection),
+    },
+    { label: "needs me", section: model.needsMe, rendered: renderNeedsMeBlock(model.needsMe) },
+  ];
   const lines: string[] = [`### rmd status — ${model.generatedAt}`, ""];
-  lines.push(...renderLivenessBlock(model.liveness, enabled), "");
-  lines.push(...renderLatchesBlock(model.latches), "");
-  lines.push(...renderLastCycleBlock(model.lastCycle), "");
-  lines.push(...renderBlockersBlock(model.blockers), "");
-  lines.push(...renderQueueHeadBlock(model.queueHead, enabled), "");
-  lines.push(...renderInboxBlock(model.inbox), "");
-  lines.push(...renderHeadroomBlock(model.headroom), "");
-  lines.push(...renderCacheHitBlock(model.cacheHit), "");
-  lines.push(...renderLearningsInjectionBlock(model.learningsInjection), "");
-  lines.push(...renderNeedsMeBlock(model.needsMe));
+  blocks.forEach((block, index) => {
+    lines.push(...block.rendered);
+    if (index < blocks.length - 1) lines.push("");
+  });
+  // The footer is the LAST thing appended and the only line this change can add. Every block above
+  // is already in `lines` by the time it is computed, so a board is never withheld on a check.
+  const footer = boardMessageFooter(
+    blocks.map((block) => projectBoardSection(block.label, block.rendered, sectionNextAction(block.section))),
+  );
+  if (footer) lines.push("", footer);
   return lines.join("\n");
 }
