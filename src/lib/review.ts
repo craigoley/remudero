@@ -3703,6 +3703,38 @@ function shipsUnwiredIds(report: string): string[] {
 }
 
 /**
+ * SCOPE-EXEMPT GENERATED ARTIFACTS (W1-T2650): the ONE enumerated set both the push/fix-rung
+ * scope guard ({@link "../run-task.js".scopeGuardOutOfScopeFiles}, via its re-export here) and
+ * this reviewer's own {@link scopeViolationFiles} consult — so a PR admitted by one is never
+ * refused by the other, which is the whole invariant this task exists to restore (rationale
+ * "ATOMIC ACROSS TWO STEMS"). `scripts/source-size-ratchet.mjs` prints the exact edit that clears
+ * a breach — `edit scripts/source-size-baseline.json and set: "<path>": <bucket>,` — and says
+ * doing so in the SAME PR that caused the growth is the ordinary, safe outcome (citing the
+ * W1-T2526 instrument-isolation exemption). Before this set existed, a task that legitimately grew
+ * a source file had no declared-scope path that let it record its own ceiling: the push/fix-rung
+ * guard flagged the edit as out-of-scope and the fix rung stood itself down rather than dispatch
+ * it, so the only outs were a scope amendment or a deferred follow-up — and a deferred baseline
+ * number has a shelf life measured in hours once a sibling task is concurrently rewriting the same
+ * entries (see this task's own rationale, the W1-T2516 follow-up that expired in under a day).
+ *
+ * EXACT PATHS, HAND-ENUMERATED, NEVER A PATTERN — the same discipline this file's instrument-
+ * entanglement exemption set (below, a DIFFERENT gate: instrument isolation, not declared-file
+ * scope) already holds: this is DATA, not a new code branch, and adding an artifact is a one-line
+ * row edit here that both consumers see with no second copy anywhere else (this task's own
+ * acceptance criterion 4). NOT A RELAXATION OF EITHER GUARD'S FAIL-CLOSED
+ * DIRECTION: {@link scopeGuardOutOfScopeFiles}'s "empty/absent declared scope refuses everything"
+ * branch returns before this set is ever consulted (an undeclared task still refuses every
+ * non-empty diff, exempt artifact or not), and every path OUTSIDE this set is refused by both
+ * guards exactly as before.
+ */
+export const SCOPE_EXEMPT_GENERATED_ARTIFACTS: ReadonlySet<string> = new Set([
+  // W1-T2650: the per-file source-size LEDGER `scripts/source-size-ratchet.mjs` itself prints as
+  // the remedy for a breach it caused — see the doc above for why deferring this one to a
+  // follow-up task is unsafe rather than merely inconvenient.
+  "scripts/source-size-baseline.json",
+]);
+
+/**
  * INVERSE-SCOPE (design (ii)(b), the #839 class): the mirror of {@link
  * "../run-task.js".scopeGuardOutOfScopeFiles}, in the OTHER direction. That guard (diff → declared)
  * fires only on the orchestrator's fallback push path and flags a diff touching a file OUTSIDE the
@@ -3734,11 +3766,17 @@ function inverseScopeUntouchedFiles(diffFiles: readonly string[], declaredFiles:
  * or empty declared scope has nothing to compare, so it never fires, matching {@link
  * inverseScopeUntouchedFiles}'s own fail-closed direction. A task declaring nothing is not treated
  * as declaring everything.
+ *
+ * W1-T2650: also subtracts {@link SCOPE_EXEMPT_GENERATED_ARTIFACTS} — the SAME enumerated set
+ * {@link "../run-task.js".scopeGuardOutOfScopeFiles} subtracts, so a PR this reviewer admits
+ * (no `scope_violation` advisory) is never the one the push/fix-rung guard refuses, and vice
+ * versa. Only reached once `declaredFiles` is known non-empty (the branch above already returned
+ * for an undeclared task), so this never widens the guard's fail-closed default.
  */
 function scopeViolationFiles(diffFiles: readonly string[], declaredFiles: readonly string[] | undefined): string[] {
   if (!declaredFiles || declaredFiles.length === 0) return [];
   const declared = new Set(declaredFiles);
-  return diffFiles.filter((f) => !declared.has(f));
+  return diffFiles.filter((f) => !declared.has(f) && !SCOPE_EXEMPT_GENERATED_ARTIFACTS.has(f));
 }
 
 /**

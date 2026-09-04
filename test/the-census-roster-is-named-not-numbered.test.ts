@@ -41,7 +41,7 @@ const CENSUS_STEPS = FAST_GATE_STEPS.filter((s) => s.boundMs !== undefined);
 // ═══════════════ bare count" ══════════════════════════════════════════════════════════════════
 
 test("CENSUS_SUITE_ROSTER: a real, non-empty, greppable array — not a comment, and not a number", () => {
-  assert.match(CI_PARITY_SOURCE, /export const CENSUS_SUITE_ROSTER: readonly CensusPopulationMember\[\] = CENSUS_POPULATION;/);
+  assert.match(CI_PARITY_SOURCE, /export const CENSUS_SUITE_ROSTER: typeof CENSUS_POPULATION = CENSUS_POPULATION;/);
   assert.ok(Array.isArray(CENSUS_SUITE_ROSTER), "CENSUS_SUITE_ROSTER must be an array, not a bare count");
   assert.ok(CENSUS_SUITE_ROSTER.length > 4, "the roster must be strictly larger than the shipped table's four");
 });

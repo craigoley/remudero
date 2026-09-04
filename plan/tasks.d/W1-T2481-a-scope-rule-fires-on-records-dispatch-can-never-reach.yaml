@@ -30,11 +30,14 @@
     AND THE VACUOUS ARM HAS A MEASURED COST, WHICH IS WHY THIS IS WORTH A TASK. A `--base` pass
     lints every task id the diff touches, so adding one field to a blocked record inherits that
     record's pre-existing blocking violation and turns a required check red — the linter itself
-    annotates them "pre-existing on base origin/main". Measured on #3305: applying the retirement
-    ruling to every anchored tombstone reddened lint-plan with 13 failing, all of them this class,
-    and the backfill had to ship 20 of 33 to stay green. Thirteen tombstones are therefore
-    PERMANENTLY UNEDITABLE while the vacuous arm stands, including the records W1-T2474's census
-    most needs marked.
+    annotates them "pre-existing on base origin/main". Measured on #3305 (CITATION RE-ANCHORED to
+    commit 47f0b7a7c82cc9c32cddd4333b7f97928a4c8ef6, MERGED 2026-08-30T13:06:17Z): applying the
+    retirement ruling to every anchored tombstone reddened lint-plan with 13 failing, all of them
+    this class, and the backfill had to ship 20 of 33 to stay green. Thirteen tombstones are
+    therefore PERMANENTLY UNEDITABLE while the vacuous arm stands, including the records
+    W1-T2474's census most needs marked. MEASUREMENT STATUS: SUPERSEDED — re-derived on 2026-09-04
+    against origin/main: the declared-scope check now fails 0 records under a changed-tasks pass,
+    as the exemption (status:blocked) retires all thirteen blocked records from the lint.
 
     THE EXEMPTION KEYS ON status, NOT ON retirement, AND THE REASON IS THAT THE OBVIOUS CHOICE
     DEADLOCKS. Keying on `retirement:` would be tighter, but those thirteen records cannot ACQUIRE

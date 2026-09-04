@@ -1432,6 +1432,9 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
       "source; every git call it makes is through a mocked PreflightSpawn, never a real `git ls-files`, so it is not itself " +
       "a src-population walk",
   ),
+  // W1-T2647's OWN proof file — self-reference shape as its siblings above; only real git call
+  // is `git grep`, never `git ls-files`, so it fails clause (a).
+  refusedForPredicate("test/census-population-is-derived-not-counted.test.ts", "a", "this file — W1-T2647's falsifier; its one real git call is `git grep`, never `git ls-files`"),
 ];
 
 // W1-T2644: THE ROSTER IS THE POPULATION, RE-EXPORTED UNDER THE NAME THIS TASK'S OWN ACCEPTANCE
@@ -1444,7 +1447,7 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
 // shipped by W1-T2643 and out of this task's own file list — read it directly, by that name,
 // today); `CENSUS_SUITE_ROSTER` is the identical array under the label this task's acceptance
 // text specifies, so a reader who greps either name finds the SAME data, never two.
-export const CENSUS_SUITE_ROSTER: readonly CensusPopulationMember[] = CENSUS_POPULATION;
+export const CENSUS_SUITE_ROSTER: typeof CENSUS_POPULATION = CENSUS_POPULATION;
 
 export const CENSUS_ADMITTED_MEMBERS: readonly (CensusPopulationMember & {
   readonly script: string;
