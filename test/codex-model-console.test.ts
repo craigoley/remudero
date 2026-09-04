@@ -205,6 +205,8 @@ test("one authenticated Codex observation explains every model outcome and pins 
   });
   const worker = await spawnCodexWorker(
     {
+      // W1-T2800: the Codex spawn now requires an explicit redirected worker home.
+      workerHome: mkdtempSync(join(tmpdir(), "rmd-codex-home-")),
       cwd: process.cwd(),
       prompt: "prove the broker boundary",
       tools: ["Bash"],

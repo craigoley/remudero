@@ -34,6 +34,8 @@ async function captureSpawn(
   let captured: ContainedSpawnOptions | undefined;
   const resultPromise = spawnCodexWorker(
     {
+      // W1-T2800: the Codex spawn now requires an explicit redirected worker home.
+      workerHome: mkdtempSync(join(tmpdir(), "rmd-codex-home-")),
       cwd,
       prompt: "review this change",
       tools,

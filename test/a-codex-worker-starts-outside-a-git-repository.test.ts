@@ -45,6 +45,8 @@ async function capturedArgs(root: string, cwd: string, resumeSessionId?: string)
   let options: ContainedSpawnOptions | undefined;
   const promise = spawnCodexWorker(
     {
+      // W1-T2800: the Codex spawn now requires an explicit redirected worker home.
+      workerHome: mkdtempSync(join(tmpdir(), "rmd-codex-home-")),
       cwd,
       prompt: "probe",
       // The isolation probe is Bash-only and carries no write tool; `readOnly` in
