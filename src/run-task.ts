@@ -8476,14 +8476,9 @@ export async function runFixRung(opts: {
         currentTreeSnapshot = undefined; // fail open — an unreadable capture never manufactures a stand-down
       }
     }
-    let registeredWorktrees: readonly RegisteredWorktree[] | undefined;
-    if (opts.birthWorktreeSnapshot && deps.readRegisteredWorktrees) {
-      try {
-        registeredWorktrees = await deps.readRegisteredWorktrees();
-      } catch {
-        registeredWorktrees = undefined; // fail open — registry read failure should not stand the rung down
-      }
-    }
+    const registeredWorktrees = opts.birthWorktreeSnapshot && deps.readRegisteredWorktrees
+        ? await Promise.resolve().then(deps.readRegisteredWorktrees).catch((_registryReadError: unknown): undefined => undefined)
+        : undefined;
     const preStrikeStandDown = await fixRungStandDownReason(
       deps.readLiveState,
       opts.prUrl,
