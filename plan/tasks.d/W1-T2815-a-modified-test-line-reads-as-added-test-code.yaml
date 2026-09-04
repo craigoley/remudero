@@ -1,0 +1,111 @@
+- id: W1-T2815
+  title: "`detectTestTheater` reads the `+` half of a MODIFIED test line as ADDED test code, so a pure in-place test-file refactor that adds no test case is refused as `test theater: added tests assert nothing` — a blocking, exemption-free failure that reds every one of W1-T2775's 26 remaining tranches and any rename, import reorder or lint fix that touches a test file without adding an assertion"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: medium  # Rule 19: a two-line narrowing of one blocking predicate plus its falsifiers. The
+                # blast radius is real (it relaxes an anti-gaming gate) but the surface is one
+                # function, and the golden-verdict suite already pins its verdicts.
+  files: [src/lib/review.ts, test/a-modified-test-line-reads-as-added-test-code.test.ts]
+  origin: "oper#w1-t2775-tranche-1-blocked-by-test-theater-2026-09-04"
+  plan_refs: ["W1-T2775", "W1-T423", "W1-T2242"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED ON A REAL PR, NOT HYPOTHESISED. #3922 (W1-T2775 tranche 1) reds `remudero-review` with
+    `FAIL — test theater: added tests assert nothing` while ALL 36 of its check runs are green,
+    including `ci`, `ci-gate`, `coverage-ratchet`, every `ci-shard` and every `coverage-shard`, and
+    while `acceptance-author-gate` passes and the review bot's own comment lists NOTHING under "the
+    following acceptance criteria are unmet". `test theater` is the sole blocker.
+
+    THE PR ADDS NO TESTS AT ALL. Its 52 added test lines are one-token rewrites of EXISTING fixture
+    lines — `mkdtempSync(join(tmpdir(), "terminal-head-root-"))` becoming `"rmd-terminal-head-root-"`.
+    A unified diff renders a modification as a `-`/`+` pair, and `detectTestTheater` reads only the
+    `+` half, so an in-place rewrite is indistinguishable from newly added test code.
+
+    MEASURED against #3922's real diff, using `ASSERTION_RE`/`NOOP_ASSERTION_RE` verbatim:
+      added test lines: 52 | any NOOP tautology: false | any real assertion: false
+      any TEST-CASE declaration: false | current rule -> testTheater = true
+
+    THE DETECTOR'S OWN DOC ALREADY STATES THE NARROWER RULE IT DOES NOT IMPLEMENT: "added test CODE
+    that asserts nothing". A diff that declares zero new test cases has added no test to judge. The
+    migrated property is not untested either — `test/mkdtemp-allowlist-rekey.test.ts` asserts over
+    the LIVE tree that the migrated allowlist leaves the checker clean and that every observed
+    refusable key is represented, and that suite is green on #3922.
+
+    WHY THIS IS STRUCTURAL RATHER THAN ONE PR'S BAD LUCK. Every W1-T2775 tranche rewrites existing
+    test-file callsites and adds no assertions, so all 26 remaining tranches fail identically. The
+    same shape refuses any pure test-file refactor: a rename, an import reorder, a lint fix, a
+    fixture-prefix migration. `testTheater` forces BOTH `state` and `floorState` to `failure` with
+    NO exemption — unlike `criteriaTampered`, which at least carves out `planOnly` — so there is no
+    way to express "this diff adds no test" today.
+
+    NOT THE SAME DEFECT AS W1-T2242's. That task names `isFixtureDataPath`'s `test/fixtures/`
+    exclusion and explicitly defers any change to it as needing its own task. This is the ADDED-vs-
+    MODIFIED reading, in files that are not fixtures at all.
+  design: |
+    GATE THE NO-ASSERTION ARM ON A NEW TEST CASE ACTUALLY BEING DECLARED. A `test(`/`it(`/`describe(`
+    declaration among the added lines is what makes "added tests" a thing there is to judge; absent
+    one, the diff has added no test and the arm must not fire.
+
+    THE PLANTED-TAUTOLOGY ARM STAYS UNCONDITIONAL, ABOVE THE NEW GUARD. `assert(true)` smuggled into
+    an existing test case must still fail whether or not a test case is declared — that arm catches
+    a deliberate act, not an absence, so it is not the arm that misreads a refactor.
+
+    THE COST IS REAL AND IS STATED RATHER THAN BURIED: lines appended INSIDE an existing test case,
+    with no assertion anywhere in the added set, no longer trip the no-assertion arm. The considered
+    alternative — pairing each added line against a removed one so only genuinely new lines are
+    judged — keeps that case covered but a unified diff carries no reliable pairing, trading a crisp
+    rule for a heuristic that can itself misfire. The operator ruled for the declaration gate
+    (2026-09-04), and this shard records the cost so the next reader is not surprised by it.
+
+    THE FALSIFIER IS NAMED AFTER THIS SHARD'S OWN SLUG, AND THAT IS LOAD-BEARING RATHER THAN
+    TIDY-MINDED. `sizingViolation`'s own-falsifier discount (`opts.duplicateSlug` ->
+    `subsystemsOf`, W1-T2525) only discounts a companion whose `moduleIdFromPath` EQUALS the
+    shard's filename slug. MEASURED: with the falsifier named `test-theater-modified-lines`, this
+    task scored `["review","test-theater-modified-lines"]` and lint-plan BLOCKED it; named
+    `a-modified-test-line-reads-as-added-test-code` it scores `["review"]` and passes. Regrading to
+    `risk: high` would have silenced the identical error while encoding a filename mismatch as real
+    span -- exactly the wrong exit W1-T2814 was filed for today (309 of 876 risk:high shards could
+    have their span removed by a rename alone). Renaming this file re-inflates the band.
+
+    THE GOLDEN SUITE IS THE REGRESSION ANCHOR. `test/golden-verdicts.test.ts` (W1-T423) pins this
+    detector's verdicts over a planted corpus; it must stay green unchanged, which is what proves
+    the narrowing did not silently reclassify a real theater case.
+  acceptance:
+    - claim: "a diff that only REWRITES existing test lines, declaring no new test case, is no longer test theater -- the exact shape #3922 was refused for"
+      proof: "unit test: test/a-modified-test-line-reads-as-added-test-code.test.ts"
+    - claim: "a diff that ADDS a new test case with no assertion in it is STILL test theater, so the gate is narrowed and not disabled"
+      proof: "unit test: test/a-modified-test-line-reads-as-added-test-code.test.ts"
+    - claim: "a planted tautology is still refused even when no test case is declared among the added lines -- the NOOP arm stays unconditional"
+      proof: "unit test: test/a-modified-test-line-reads-as-added-test-code.test.ts"
+    - claim: "the declaration gate reads test/it/describe including their .only/.skip/.each forms, so a modifier does not smuggle an assertion-free case past it"
+      proof: "unit test: test/a-modified-test-line-reads-as-added-test-code.test.ts"
+  falsifier: |
+    Reverting the `TEST_DECLARATION_RE` guard reds acceptance 1 (the refactor is refused again).
+    Moving the guard ABOVE the `NOOP_ASSERTION_RE` check reds acceptance 3 (a planted tautology
+    escapes whenever no test case is declared). Widening the guard to match a bare `test` token
+    rather than a call reds acceptance 4.
+  note: |
+    ID PROVENANCE, AND AN HONEST GAP. W1-T2815 is the first id no reservation holds:
+    `refs/rmd-id/` holds up to W1-T2814, `refs/rmd-dispatch/` up to W1-T2814, the shard corpus and
+    `plan/tasks.yaml` up to W1-T2811, and every OPEN PR (#3930, #3929, #3928, #3926, #3925, #3924,
+    #3922, #3921, #3911, #3910, #3890) was enumerated via the GitHub API and claims no id above
+    W1-T2811 -- that last surface is exactly the one `rmd next-task-id` REFUSED to read in this
+    container (`spawnSync gh ENOENT`), so it was covered by hand rather than assumed.
+
+    THE RESERVATION REF COULD NOT BE MINTED. `git push origin <nonce>:refs/rmd-id/W1-T2815` returns
+    HTTP 403 from this container across five attempts, while ordinary `refs/heads/` pushes from the
+    same credential succeed -- the token cannot write that namespace. The mint is therefore ABSENT,
+    not contested: nothing was overwritten and no other host's nonce was displaced. A collision
+    would still be caught by the duplicate-id gate rather than merging silently, and per the
+    standing rule the loser of a race renumbers.
+
+    SCOPE -- DELIBERATELY NOT WIDENED:
+      - `isFixtureDataPath`'s `test/fixtures/` exclusion is untouched (W1-T2242's surface).
+      - `ASSERTION_RE` and `NOOP_ASSERTION_RE` are untouched.
+      - No other blocking predicate in `reviewVerdict` is relaxed.
+      - W1-T423's golden suite is not edited; it is the regression anchor.
