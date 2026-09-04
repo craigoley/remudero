@@ -388,6 +388,7 @@ import {
   reframeProposal,
   renderInbox,
   renderRatifyTelemetry,
+  INBOX_DRAFT_DISALLOWED_TOOLS,
   runDraftRung,
   summarizeInboxPoll,
   updateProposalRegistry,
@@ -32728,6 +32729,12 @@ export async function draftProposalBatch(
             model: arch, // W1-T2559: this rung's own `synthesis.inbox_draft` mount, not the Architect's
             effort: archEffort, // W1-T2559: this rung's own effort, now actually wired to the spawn
             maxTurns: mountsTable.synthesis.inbox_draft.maxTurns, // MOUNT-GOVERNED (W1-T2559) — never a hardcoded literal.
+            // W1-T2591: the ONE worktree above is shared by every lane of `runDraftRung`'s pool
+            // (#3588/W1-T2664), so the prompt's "you have NO Write/Edit/Bash tools" is enforced
+            // here rather than merely asserted — see INBOX_DRAFT_DISALLOWED_TOOLS' own doc for
+            // why this rung needs none of them and why enforcement was chosen over per-lane
+            // worktrees. This is what makes the sharing read-only by construction.
+            disallowedTools: INBOX_DRAFT_DISALLOWED_TOOLS,
             maxBudgetUsd: DEFAULT_BUDGET_USD,
             config,
             prompt,
