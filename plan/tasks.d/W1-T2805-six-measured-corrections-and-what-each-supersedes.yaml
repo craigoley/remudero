@@ -1,5 +1,5 @@
 - id: W1-T2805
-  title: "six corrections measured this week each contradict guidance the repo currently ships — hazard (k) has a third indistinguishable state, verify:human dialect debt DOES stall the linter and the dialect it is said to lack already exists, forwardReference has four conditions rather than the two CLAUDE.md names, and three failure modes (proof-weaker-than-claim, cost as the execution falsifier, the plan-only head's dialect ceiling) have no home at all"
+  title: "eleven corrections measured this week each contradict guidance the repo currently ships — hazard (k) has a third indistinguishable state, verify:human dialect debt DOES stall the linter and the dialect it is said to lack already exists, forwardReference has four conditions rather than the two CLAUDE.md names, and three failure modes (proof-weaker-than-claim, cost as the execution falsifier, the plan-only head's dialect ceiling) have no home at all"
   repo: remudero
   depends_on: []
   type: implement
@@ -96,6 +96,72 @@
     CORRECTIONS to shipped text — filing a correction beside the wrong sentence leaves the wrong
     sentence in the file that every session loads. So (1), (2) and (3)+(6) are in-place edits that
     supersede what they touch, and only (4) and (5) are additions. Six corrections, two new entries.
+
+    AMENDED 2026-09-04, operator-approved, BEFORE ANY OF THIS WAS BUILT. Five further measured
+    items and one PROMOTION arrived from the same week; they are folded in here rather than filed
+    as a second id, and the budget arithmetic below is RECOMPUTED rather than inherited — it had
+    already gone stale.
+
+    (7) BARE `node --test` SILENTLY MODULE-RESOLUTION-FAILS FOR ANY FILE IMPORTING `src/`. It does
+    not error usefully — it reports the file as one failed test with `ERR_MODULE_NOT_FOUND` for a
+    `.js` specifier tsx would have resolved — so a COUNT measured that way reads WRONG rather than
+    refusing. Measured this week: a suite reporting `# tests 1 / # fail 1` under bare `node --test`
+    reports `# tests 16 / # pass 16` under the repo's real runner
+    (`node --test --import tsx --import ./test/setup/tmp-hygiene.ts`). This sits BESIDE the
+    reapability trap — same invocation, second hazard — and it bit while measuring a registry count
+    that a task then declared.
+
+    (8) PROXIMITY IN A TAP FILE IS NOT PROXIMITY IN CAUSATION. Concurrent runners interleave
+    output, so the context lines printed around a failure may belong to a DIFFERENT suite. This is
+    distinct from the killed-run rule already recorded: that one ANNOUNCES itself by a missing
+    summary, while this looks exactly like real context and reads as evidence. A diagnosis was
+    inferred from another suite's stderr this week and would have been carried forward.
+
+    (9) A FRESHLY MINTED ID IS NOT EVIDENCE THE WORK IS UNCLAIMED. The mint reserves an IDENTIFIER
+    and says nothing about whether the WORK exists. THREE instances this week, recorded together
+    because the pattern is that a mint feels like an answer to "is this claimed?" to the person
+    HANDING IT OVER as much as to the person receiving it: a lane re-derived W1-T2811 for an hour
+    after it was already filed; three ids were routed for filing that #3909 had already filed; and
+    the routing brief itself was written off three minted ids without a sweep, in the same session
+    that added this very rule to the queue. The instrument is already documented and is one
+    command: the `ls-remote` sweep over open PR heads, plus `git ls-tree origin/main plan/tasks.d/`.
+
+    (10) A HAND-DERIVED ROSTER'S ERROR IS INVISIBLE WITHOUT A SECOND INDEPENDENT DERIVATION, AND
+    NOTHING SCHEDULES ONE. Two mechanical censuses of the wall-clock-dependent test class, taken on
+    the SAME TREE on the SAME DAY by different lanes, intersected in ONE file of seven. Neither was
+    wrong; they keyed on different spellings of one idea. A single-author roster therefore reads as
+    authoritative indefinitely, because its error is undetectable BY CONSTRUCTION. This is the
+    AFFIRMATIVE argument under W1-T2790's ratified ordering — self-declaring at a seam beats a
+    roster because a declaration has no such degree of freedom — and the rest of this queue is
+    prohibitions.
+
+    (11) `pkill -f` SIBLING-MATCH: THE EXISTING RULE COVERS HALF THE HAZARD. CLAUDE.md warns that a
+    shape-based sweep matches the searching shell's OWN command line. On a shared host it also
+    matches ANOTHER LANE'S processes, and did: a lane's `--ci-parity` runners under `/workspace/`
+    were killed by a sweep filtering on `--test --import tsx` / `test-with-retry` / coverage that
+    excluded only the sweeper's own pid. Excluding self is not enough on a host with peers. The
+    correct discriminator is `/proc/<pid>/cwd` against the repo path — identity, not shape.
+
+    (12) PROMOTION, NOT AN ADDITION: THE REST/GRAPHQL ENTRY IS NO LONGER PROVISIONAL, AND IT IS
+    WRONG IN TWO INDEPENDENT WAYS. CLAUDE.md states that GraphQL is the budget that dies on this
+    account while REST stays healthy.
+      (a) WRONG RESOURCE. A header reading taken AT THE MOMENT of a 403, with the prescribed
+          instrument, reads `X-Ratelimit-Resource: core`, `Limit 5000`, `Remaining 0`, `Used 5422`
+          — REST/core genuinely exhausted, the third occurrence in one day.
+      (b) WRONG POSTURE, AND THIS HALF IS NOT A COROLLARY OF (a). A budget reading does not predict
+          whether the NEXT call will work. Measured on one host in one minute: a POST that CREATED
+          A PR SUCCEEDED while `gh api user -i` read `X-Ratelimit-Remaining: 0`, and the very next
+          GET 403'd. So "read the budget, then act" fails here even once the resource name is
+          corrected. THE POSTURE THE MEASUREMENT SUPPORTS IS ATTEMPT AND HANDLE: make one attempt,
+          handle the 403, do not retry — which remains distinct from polling and is what the
+          no-poller rule already forbids.
+      Both halves are one entry, not two: both say "the documented approach to rate limits on this
+      host does not hold", and splitting them would carry the same context twice against a budget
+      this amendment is already recomputing. GIT PUSH IS UNAFFECTED by any of it, which is worth
+      stating because it is what lets a lane keep working through an exhausted REST budget.
+
+    ELEVEN CORRECTIONS, FIVE NEW ENTRIES. (1), (2), (3)+(6), (11) and (12) are IN-PLACE edits that
+    supersede shipped text; (4), (5), (7), (8), (9) and (10) are additions.
   design: |
     ONE CONCERN: make the repo's shipped guidance agree with what was measured this week, and pay
     for every added byte by folding what it supersedes. DOCUMENTATION ONLY — no `src/`, no `test/`,
@@ -119,13 +185,44 @@
             `plan-only-pr-not-auto-capped` and the entry (2) rewrites.
       (5) → NEW entry in `learnings/failures.yaml` — an incident learning, which is that shard's
             stated remit (a specific run went wrong and the durable fact must be inherited).
+      (7) → NEW entry in `learnings/failures.yaml`, placed BESIDE the reapability trap it shares an
+            invocation with, so a reader meeting one meets the other.
+      (8) → NEW entry in `learnings/failures.yaml`. It must SAY what separates it from the
+            killed-run rule (that one announces itself by a missing summary; this does not), or it
+            reads as a restatement and gets folded away by the next pass.
+      (9) → CLAUDE.md, SHARPENING the existing scope-time-checks bullet under "Plan and task
+            hygiene" IN PLACE. That bullet already carries the two commands; what it lacks is the
+            reason a reader skips them — a minted id feels like the answer. Not a new bullet.
+      (10) → NEW entry in `learnings/architecture.yaml`, `subsystem: proofs`, next to (4). It is
+            the affirmative half of W1-T2790's ordering and should cite that ruling by id.
+      (11) → CLAUDE.md, SHARPENING the existing `pkill -f` bullet under "Operating this host" IN
+            PLACE. The bullet's mechanism sentence is right and stays; what is added is that
+            excluding your own pid is insufficient on a shared host, and that the discriminator is
+            `/proc/<pid>/cwd` rather than a better pattern.
+      (12) → CLAUDE.md, REPLACING the GraphQL-dies-while-REST-survives claim under "CI and merging"
+            IN PLACE. Both halves in one entry. The `gh pr create` REST-bypass advice that bullet
+            carries is still USEFUL and must survive the rewrite — what changes is the claim about
+            which budget dies and the instruction to gate on a reading.
 
     (ii) THE BUDGETS ARE HARD CONSTRAINTS, NOT COURTESIES, AND BOTH ARE REQUIRED CI JOBS.
-    MEASURED AT HEAD 3bc1542, BEFORE ANY WRITING:
+    RECOMPUTED AT HEAD 7a13b300 ON AMENDMENT, NOT INHERITED — the filed figure had already gone
+    stale, which is itself the reason this task must re-measure rather than trust its own note:
       `scripts/learnings-budget-ratchet.mjs` — active corpus 35651 chars against a 42000 cap,
-          68 active / 71 total entries: 6349 chars of headroom.
-      `scripts/claude-md-budget-ratchet.mjs` — CLAUDE.md 43155 bytes against a 44000 cap:
-          845 bytes of headroom.
+          68 active / 71 total entries: 6349 chars of headroom. UNCHANGED.
+      `scripts/claude-md-budget-ratchet.mjs` — CLAUDE.md 43396 bytes against a 44000 cap:
+          604 bytes of headroom, DOWN FROM THE 845 THIS SHARD WAS FILED WITH (#3908 landed between
+          the filing and the amendment).
+
+    DOES THE RESIDUE FIT? YES, BUT ONLY BECAUSE THE CLAUDE.MD HALF MUST FOLD, AND THAT CONSTRAINT
+    IS NOW BINDING RATHER THAN COMFORTABLE. Six entries are destined for `learnings/` — (4), (5),
+    (7), (8), (10) — against 6349 chars of headroom, which is ample. FIVE edits are destined for
+    CLAUDE.md — (1), (3)+(6), (9), (11), (12) — against 604 bytes. Written additively those cannot
+    fit, and that is not a reason to split the task: §8A already requires them to be folds. Three
+    of the five ((9), (11), (12)) are SHARPENINGS of bullets that already exist, and (12) REPLACES
+    a claim that is simply wrong, so the fold has real material to work with. A SPLIT INTO A SECOND
+    ID WAS CONSIDERED AND REFUSED ON THIS ARITHMETIC: the learnings side has room, and splitting
+    the CLAUDE.md side would put two passes in contention for the same 604 bytes, which is worse
+    than one pass that must fold.
     The learnings side has room for (4) and (5) written properly. THE CLAUDE.MD SIDE DOES NOT have
     room for two sharpened bullets written additively: 845 bytes is roughly one paragraph. So the
     CLAUDE.md half must be NET-NEUTRAL OR NET-NEGATIVE, paid for by folding within the bullets being
@@ -170,6 +267,18 @@
       proof: "grep: - id: proof-weaker-than-claim in learnings/architecture.yaml"
     - claim: "cost is recorded as the falsifier for whether a classified verdict was earned, at both the probe and cycle altitudes, without claiming a zero cost is itself a defect"
       proof: "grep: - id: cost-is-the-execution-falsifier in learnings/failures.yaml"
+    - claim: "the scope-time bullet says a minted id is not evidence the work is unclaimed, naming why the documented sweep gets skipped rather than merely repeating the commands"
+      proof: "grep: a minted id is not evidence in CLAUDE.md"
+    - claim: "the pkill bullet says excluding your own pid is insufficient on a shared host and names the cwd of the process as the discriminator rather than a better pattern"
+      proof: "grep: excluding your own pid is not enough in CLAUDE.md"
+    - claim: "the rate-limit guidance names core as the budget measured exhausted and replaces gating on a budget reading with one attempt and a handled refusal"
+      proof: "grep: attempt and handle in CLAUDE.md"
+    - claim: "a hand-derived roster is recorded as having an error undetectable without a second independent derivation, cited as the affirmative half of the ratified ordering"
+      proof: "grep: - id: a-roster-error-needs-a-second-derivation in learnings/architecture.yaml"
+    - claim: "bare node --test is recorded as silently module-resolution-failing on any file importing src, beside the reapability trap it shares an invocation with"
+      proof: "grep: - id: bare-node-test-resolution-failure in learnings/failures.yaml"
+    - claim: "TAP output proximity is recorded as not implying causation, stating what separates it from the no-summary rule it resembles"
+      proof: "grep: - id: tap-proximity-is-not-causation in learnings/failures.yaml"
   falsifier: |
     THE COMPRESSION CLAIM IS THE ONE THAT CAN BE FAKED, SO MEASURE IT RATHER THAN ASSERTING IT. Run
     both ratchets before and after and report all four numbers. The CLAUDE.md delta must be zero or
@@ -199,6 +308,23 @@
     AND THE SCHEMA IS ENFORCED: `scripts/generate-learnings-index.mjs` throws on a missing required
     field and on a duplicate id across shards, so a malformed new entry fails loudly rather than
     landing. Regenerate the index and let `test/learnings-index.test.ts` confirm it is fresh.
+
+    THE AMENDED HALF CARRIES THE SAME OBLIGATIONS, AND ONE MORE. Every anchor added by this
+    amendment must be verified to read ZERO at head with the executor's own invocation before
+    pushing, exactly as the original six were — and the three CLAUDE.md anchors must be verified to
+    sit on ONE PHYSICAL LINE, because CLAUDE.md wraps its bullets at roughly 100 columns and an
+    anchor placed across a wrap reads 0 with no error.
+
+    THE NEGATIVE DIRECTION FOR (12) IS THE ONE THAT CAN BE FAKED. The rate-limit correction must
+    REPLACE the claim that GraphQL is the budget that dies while REST stays healthy, not sit beside
+    it. After the edit, a grep for the surviving old wording must read 0, and the `gh pr create`
+    REST-bypass advice in that same bullet — which is still true and still useful — must read 1. A
+    correction that deletes the useful half while fixing the wrong half is a regression this task
+    would otherwise ship silently.
+
+    AND THE CLAUDE.MD DELTA IS NOW THE BINDING CONSTRAINT, NOT A COURTESY: 604 bytes of headroom
+    against five edits. Report the before and after byte count. A positive delta that still fits
+    under the cap SATISFIES CI AND FAILS THIS TASK.
   note: |
     FILED 2026-09-04 from an operator retro pass. The id was reserved on origin
     (`refs/rmd-id/W1-T2805`, minted 12:36:32Z) before this filing.

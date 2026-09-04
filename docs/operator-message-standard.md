@@ -119,6 +119,37 @@ that a message is true.
   half — making an option in `Escalation.options` terminate in something executable — belongs to
   W1-T2273 and is not re-filed here; this document says nothing about options beyond noting the
   slot already exists.
+- **The narrative half of a generated commit message** (`buildPlanPrCommitMessage`, shaped by
+  `shapeCommitMessage`) — the explanatory paragraphs, not the header. Its reader is whoever finds
+  the commit later doing archaeology, plus the retro. That reader is the one this repo has owed the
+  least structure to: `shapeCommitMessage` guarantees a header length, a subject case and a wrapped
+  body, and every one of those is a commitlint contract about SHAPE. None of them asks whether the
+  reader learns anything.
+- **The narrative half of a generated PR body** (`buildPlanPrBody`'s intro prose) — the sections
+  above the rendered blocks, read by a reviewer deciding whether to merge.
+
+### On the two generated surfaces, the parsed structure is FROZEN
+
+This is the whole difficulty of extending the standard to text a machine also reads. Generated
+commit and PR text is parsed back by this repo in at least four ways: the `Remudero-Task:` trailer
+is matched line-anchored to credit a merge; a `(W1-Tnnn)` subject citation is a second credit path;
+`parseAcceptanceBlock` resolves criteria out of a PR body and fails CLOSED when it resolves none;
+and `bodyContradictsDiff` reads the body against the real changeset. A plain-language pass that
+treated any of that as prose would break credit, review, or both — silently, on a PR whose checks
+are all green.
+
+So on these two surfaces the standard governs the NARRATIVE parts only, and nothing here may move a
+byte a parser reads. In particular the conventional `type(scope)` prefix, every commitlint limit
+`shapeCommitMessage` enforces, the trailer, the subject citation, the changed-files block and the
+acceptance block — its header form, its bullet forms and its proof dialects — all keep their exact
+present shape. **And the mark is never spliced into the text.** A conformance note appended to a PR
+body would sit after the acceptance block, whose bullets must never be interrupted; appended to a
+commit message it would land in the trailer region. On these surfaces the check is therefore
+returned BESIDE the record, not written into it.
+
+Nor may this standard ever block a commit or a pull request. `operator-message.ts` fails toward
+delivery, and a gate that refused to commit because a paragraph was thin would strand real work for
+a prose judgement no machine can make.
 
 ## Out of scope: the daemon's stdout
 

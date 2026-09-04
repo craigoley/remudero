@@ -23,7 +23,7 @@ import { promisify } from "node:util";
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { createServer, type Server } from "node:http";
-import { homedir, hostname, tmpdir } from "node:os";
+import { cpus as osCpus, homedir, hostname, loadavg as osLoadavg, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
@@ -272,9 +272,11 @@ import {
 } from "./lib/feedback.js";
 import { findPendingLandingPr, recordDecision, sweepFeedbackLanding } from "./lib/feedback-landing.js";
 import { ghTraceGateway, renderTraceChain, traceForward, traceReverse } from "./lib/trace.js";
-import { runPreflight, type PreflightDeps } from "./lib/commit-message.js";
+import { defaultPreflightSpawn, runPreflight, type PreflightDeps } from "./lib/commit-message.js";
 import {
   buildPreflightSummary,
+  detectRunContext,
+  runContextLine,
   FAST_GATE_STEPS,
   preflightFailureNotice,
   preflightSummaryPath,
@@ -13073,7 +13075,7 @@ async function runTask(
       // convention `lib/ci-parity.ts` uses at both of its own diff sites.
       let diffFiles: string[] | undefined;
       try {
-        diffFiles = execFileSync("git", ["-C", worktreePath, "diff", "--name-only", "origin/main...HEAD"], {
+        diffFiles = execFileSync("git", ["-C", worktreePath, ...MERGE_BASE_DIFF_ARGS], {
           encoding: "utf8",
         })
           .split("\n")
@@ -15639,6 +15641,15 @@ export function followupLedgerUnionNdjson(stateDir: string): string {
  *  plan file instead. Never a second resolver: this is the SAME function `reviewCommand` calls. */
 export interface CheckAcceptanceDeps {
   planPath?: string;
+  /**
+   * W1-T2669 — the paths this branch changes, defaulting to a self-derived
+   * `git diff --name-only origin/main...HEAD` in this checkout. Injectable so the relatedness
+   * report can be driven without a git history, exactly as `planPath` is injectable rather than
+   * pointing every test at the real plan. THROWING IS A SUPPORTED ANSWER: a body checked outside a
+   * checkout has no diff to compare against, which is no evidence of a mismatch, so the caller
+   * treats a throw as "cannot tell" and stays silent.
+   */
+  changedFiles?: () => string[];
 }
 
 /**
@@ -15664,6 +15675,61 @@ export interface CheckAcceptanceDeps {
  *
  * READ-ONLY: writes no ledger line, no state file, opens nothing.
  */
+/**
+ * The `git diff` argv for "what THIS BRANCH changed relative to where it started" — THREE-DOT,
+ * against the merge base, and that was a real defect once rather than a style preference: two-dot
+ * `origin/main..HEAD` diffs the two TIPS, so every file merged to main after a worktree was cut
+ * reads as something that branch changed (measured on #1533 breaking a running drain's push).
+ *
+ * ONE SPELLING, DELIBERATELY. test/scope-guard-merge-base.test.ts asserts this literal appears
+ * EXACTLY ONCE in this file, so a mutant flipping three-dot to two-dot has a unique substitution
+ * target — and, since both call sites now read it from here, that one mutant reaches both. A second
+ * hand-written copy is how the next one silently gets the range wrong.
+ */
+const MERGE_BASE_DIFF_ARGS = ["diff", "--name-only", "origin/main...HEAD"] as const;
+
+/**
+ * W1-T2669 — the sentence to print when a `Remudero-Task:` trailer names a task with NO path in
+ * common with this diff, or `undefined` when there is nothing to say.
+ *
+ * SILENT IN EVERY UNDECIDABLE CASE, and each is a real one rather than defensive padding: a task
+ * declaring no `files:` cannot be shown unrelated to anything (`overlappingPaths` fail-closes an
+ * empty list to "overlaps everything" for the same reason), and a diff that cannot be read — a body
+ * checked outside a checkout, no origin/main — is absence of evidence, not evidence of a mismatch.
+ * Reporting either would train an operator to ignore the line, which costs more than the silence.
+ *
+ * ONE SHARED PATH IS ENOUGH. A task build's diff intersects its shard's declared files essentially
+ * by construction; the shape worth naming is the total miss, where the trailer names a task the
+ * diff has nothing to do with.
+ */
+function trailerScopeMismatch(taskId: string, declared: string[], deps: CheckAcceptanceDeps): string | undefined {
+  if (declared.length === 0) return undefined;
+  let changed: string[];
+  try {
+    changed = (deps.changedFiles ?? checkAcceptanceChangedFiles)();
+  } catch {
+    return undefined;
+  }
+  if (changed.length === 0) return undefined;
+  const touched = new Set(changed);
+  if (declared.some((f) => touched.has(f))) return undefined;
+  return (
+    `this diff shares no path with ${taskId}'s declared files (${declared.join(", ")}), ` +
+    `so the trailer may name an unrelated task — the gate will still judge this PR on that shard's criteria. ` +
+    `Advisory only: a widened build is legitimate and this changes no verdict.`
+  );
+}
+
+/** {@link CheckAcceptanceDeps.changedFiles}'s default — this branch's own paths against
+ *  origin/main, the same range `rmd preflight --coverage` self-derives rather than trusting a
+ *  caller-supplied diff. */
+function checkAcceptanceChangedFiles(): string[] {
+  return execFileSync("git", [...MERGE_BASE_DIFF_ARGS], { encoding: "utf8", maxBuffer: 1 << 26 })
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+}
+
 export function checkAcceptanceCommand(rest: string[], deps: CheckAcceptanceDeps = {}): number {
   const file = rest.find((a) => !a.startsWith("--"));
   if (!file) {
@@ -15683,11 +15749,14 @@ export function checkAcceptanceCommand(rest: string[], deps: CheckAcceptanceDeps
   const planPath = deps.planPath ?? join(repoRoot, "plan", "tasks.yaml");
   const taskId = reviewTaskIdFromBody(body);
   let criteria: AcceptanceCriterion[] = [];
+  let declaredFilesForTrailer: string[] = [];
   if (taskId) {
     try {
       const plan = loadPlan(planPath);
       const t = plan.byId.get(taskId);
       if (t?.acceptance?.length) criteria = t.acceptance;
+      // W1-T2669: read off the SAME task object, never a second plan load.
+      declaredFilesForTrailer = t?.files ?? [];
     } catch {
       // A bad/absent plan is not this command's concern either — fall through to the body,
       // exactly like reviewCommand's own catch does.
@@ -15706,8 +15775,16 @@ export function checkAcceptanceCommand(rest: string[], deps: CheckAcceptanceDeps
       : "NONE (fail closed — nothing to judge is never a pass)";
   const emptyProofs = criteria.filter((c) => !c.proof).length;
 
+  // W1-T2669: the trailer redirects the gate to ANOTHER task's acceptance, and nothing checked
+  // that the named task relates to this diff — so a PR could be judged on proofs over files it
+  // never touches while its own criteria went unread (#3559's first draft, caught by hand).
+  // ADVISORY ONLY: a legitimate build can widen beyond its declared files, so this names the
+  // mismatch and changes neither the resolved criteria nor the exit code.
+  const unrelated = trailerResolved ? trailerScopeMismatch(taskId!, declaredFilesForTrailer, deps) : undefined;
+
   console.log(`file:            ${file}`);
   console.log(`criteria source: ${source}`);
+  if (unrelated) console.log(`WARNING:         ${unrelated}`);
   console.log(`criteria parsed: ${criteria.length}`);
   console.log(`empty proofs:    ${emptyProofs}`);
   criteria.forEach((c, i) => {
@@ -18756,13 +18833,36 @@ export function renderFastGateScriptList(steps: readonly { readonly script: stri
   return steps.map((step) => step.script).join(", ");
 }
 
-export async function preflightCommand(rest: string[], deps: PreflightDeps = {}): Promise<number> {
+/**
+ * W1-T2810 — `preflightCommand`'s OWN seams, declared here rather than widened onto
+ * {@link PreflightDeps}, which `runPreflight`, `runPreflightFast`, `runCiParity` and
+ * `runPreflightCoverage` all consume and none of which reads a clock or a load average. The run
+ * context is a property of THIS COMMAND's whole invocation — one stamp per run — so its seams
+ * belong to this signature alone. Both are optional and appended by intersection, so every
+ * existing `preflightCommand(rest, { spawn })` call site is byte-identical.
+ *
+ * Injectable for the same reason `computeHostFacts` splits from `detectHostFacts`: a test must
+ * drive the LOADED branch and the load-unavailable branch without an actually busy machine, and
+ * `os.loadavg()` is the one input here that cannot be arranged.
+ */
+export type PreflightCommandDeps = PreflightDeps & {
+  loadavg?: () => readonly number[] | undefined;
+  cpuCount?: number;
+};
+
+export async function preflightCommand(rest: string[], deps: PreflightCommandDeps = {}): Promise<number> {
   const badArg = unknownArgError("preflight", rest, [...PREFLIGHT_VALUE_FLAGS], [...PREFLIGHT_BOOL_FLAGS]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
     return 2;
   }
   const startedAtMs = Date.now();
+  // W1-T2810: the START sample, taken here rather than at the end with everything else, because
+  // one sample cannot answer both questions the stamp exists for. `os.loadavg()[0]` is a
+  // ONE-MINUTE average, so a reading taken after an eight-minute `--ci-parity` run describes that
+  // run and says nothing about what the machine was doing when it began — and a run that started
+  // on a saturated machine is exactly the one whose wall-clock reds need explaining.
+  const loadavgStart = deps.loadavg ? deps.loadavg() : osLoadavg();
   const from = flagValue(rest, "--from");
   const to = flagValue(rest, "--to");
   const range = deps.range ?? (from !== undefined || to !== undefined ? { from: from ?? "origin/main", to: to ?? "HEAD" } : undefined);
@@ -18791,10 +18891,31 @@ export async function preflightCommand(rest: string[], deps: PreflightDeps = {})
     }
   }
   const ok = result.ok && (fast?.ok ?? true) && (ciParity?.ok ?? true) && (coverage?.ok ?? true);
+  // W1-T2810 — THE STAMP, ON BOTH BRANCHES AND ON THE LINE ITSELF.
+  //
+  // ON BOTH: a stale RED gets investigated anyway, because the reader is already suspicious. The
+  // stale GREEN is the dangerous one and is precisely hazard (h)'s measured shape — exit 0, a
+  // confident sentence, and both the measured file and the threshold it was measured against
+  // already moved. So the PASS branch is the one this exists for, not the FAIL branch.
+  //
+  // ON THE LINE, never behind a flag or a `preflight --context` subcommand: a gate that will tell
+  // you its conditions IF YOU ASK has the same defect, because nobody asks. `headSha` is the
+  // proof that adding a surface is not enough on its own — it has been computed on this path all
+  // along and written to the JSON summary, and never reached the sentence a human reads.
+  const headSha = readHeadShaForSummary();
+  const runContext = detectRunContext({
+    repoRoot,
+    headSha,
+    spawn: deps.spawn ?? defaultPreflightSpawn,
+    loadavgStart,
+    loadavgEnd: deps.loadavg ? deps.loadavg() : osLoadavg(),
+    cpuCount: deps.cpuCount ?? osCpus().length,
+  });
   console.log(
-    ok
+    (ok
       ? "\n### rmd preflight: PASS — commitlint, typecheck, and emitter checks are all clean; the push may proceed"
-      : "\n### rmd preflight: FAIL — see the named step(s) above; do not push until every step passes",
+      : "\n### rmd preflight: FAIL — see the named step(s) above; do not push until every step passes") +
+      `\n### ${runContextLine(runContext)}`,
   );
 
   // ── THE RESULT MUST SURVIVE THE CONTAINER THAT PRODUCED IT (see preflightSummaryPath's doc).
@@ -18822,8 +18943,9 @@ export async function preflightCommand(rest: string[], deps: PreflightDeps = {})
     steps: [...result.steps, ...(fast?.steps ?? []), ...(ciParity?.steps ?? []), ...(coverage?.steps ?? [])],
     finishedAt: new Date().toISOString(),
     durationMs: Date.now() - startedAtMs,
-    headSha: readHeadShaForSummary(),
+    headSha,
     args: rest,
+    runContext,
   });
   if (summaryPath === undefined) {
     console.log(
