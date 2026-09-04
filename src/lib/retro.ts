@@ -4980,23 +4980,11 @@ export function renderPlanCoherence(report: PlanCoherenceReport): string {
 
 /**
  * Convenience composition — {@link renderPlanCoherence}(`planCoherenceRung`(…)) — for a caller
- * that already has the monolith blob and shard listing in hand and wants the rendered section
- * in one call, rather than two. THIS FUNCTION ITSELF has no production caller (only its own
- * `planCoherenceSectionFor composes …` test exercises it) — stated here rather than implied
- * otherwise, so it is never mistaken for THE fix.
- *
- * THE actual live call site is elsewhere and does not need this helper: `buildGather` (above,
- * this file) calls the rung directly whenever handed `opts.planCoherence`, storing the result
- * on `RetroGather.planCoherence`, and `renderGather` prints it — `buildGather` is
- * called UNCONDITIONALLY every `rmd retro` cycle (`retroCommand`, `src/run-task.ts`) and its
- * result feeds straight into the printed report. That wiring lives entirely inside THIS file
- * (`src/lib/retro.ts`, inside this task's declared `files:` list), unlike every sibling rung's
- * fs-touching wrapper (`planStateTruthSectionFor`, `planHealthSweepSectionFor`), which must
- * live in `src/run-task.ts` because it reads `repoRoot` off disk itself — `src/run-task.ts` is
- * OUTSIDE this task's declared scope. `retroCommand` populating `opts.planCoherence` with a
- * REAL `plan/tasks.yaml`/`plan/tasks.d/` read (today it passes neither, so the field stays
- * `undefined` and renders nothing) is the one remaining, named follow-up — a `src/run-task.ts`
- * edit this task's own scope does not reach, tracked rather than silently deferred.
+ * with the monolith blob and shard listing already in hand. NO production caller today (only
+ * its own test exercises it) — the genuine live wiring is `buildGather`/`renderGather` above,
+ * called unconditionally every `rmd retro` cycle, entirely inside this file. `retroCommand`
+ * (src/run-task.ts, outside this task's declared scope) populating `opts.planCoherence` with a
+ * real `plan/tasks.yaml`/`plan/tasks.d/` read is the one remaining, named follow-up.
  */
 export function planCoherenceSectionFor(
   monolith: { path: string; text: string },
