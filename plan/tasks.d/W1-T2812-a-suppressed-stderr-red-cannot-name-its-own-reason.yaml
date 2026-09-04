@@ -8,10 +8,7 @@
   risk: high
   band_meaning: span
   budget_usd: 18.00
-  files:
-    - test/helpers/captured-console.ts
-    - test/captured-console-names-the-reason.test.ts
-    - test/the-wipe-test-can-only-ask-about-learnings.test.ts
+  files: [test/helpers/captured-console.ts, test/captured-console-names-the-reason.test.ts, test/the-wipe-test-can-only-ask-about-learnings.test.ts]
   origin: "operator-session#suppressed-stderr-red-2026-09-04"
   plan_refs: ["W1-T2810", "W1-T2811", "W1-T2790"]
   status: queued
