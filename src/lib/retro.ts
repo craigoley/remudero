@@ -24,6 +24,11 @@ import { appendLedger, type LedgerLine } from "./ledger.js";
 import { DEFAULT_PROMOTION_CONFIDENCE_THRESHOLD } from "./learnings.js";
 import type { Lifecycle, LearningEntry, PromotionResult } from "./learnings.js";
 import { resolveMountForClass, type Mounts } from "./mounts.js";
+import {
+  scanPlanCoherence,
+  type PlanCoherenceFinding,
+  type PlanCoherenceShardEntry,
+} from "./plan-coherence.js";
 import type { Task } from "./plan.js";
 import { findExportDefinition, isExportReachable } from "./reachability.js";
 import { REPLAY_RESULT_STEP } from "./replay.js";
@@ -4845,4 +4850,112 @@ export function renderPlanStateTruth(report: PlanStateTruthReport): string {
     "",
     scanned,
   ].join("\n");
+}
+
+/**
+ * {@link planCoherenceRung}'s result — MIRRORS {@link PlanStateTruthReport}'s shape (W1-T410)
+ * rather than inventing a second vocabulary: `clean` carries the counts it examined,
+ * `findings` names EVERY offender, `unexamined` carries a stated reason.
+ *
+ * DELIBERATELY NO `unavailable` STATE, unlike {@link PlanStateTruthReport}: this rung reads no
+ * gateway (it is handed plain text, never a network/GitHub call), so it can never degrade for
+ * a reason {@link planStateTruthRung} must. The one way it can fail to scan is the caller not
+ * being able to LIST `plan/tasks.d/` at all — that is `unexamined`, not `unavailable`.
+ */
+/** What the caller found trying to LIST `plan/tasks.d/` — `ok: true` with every shard entry it
+ *  read, or `ok: false` with a stated reason it could not list the directory at all (see {@link
+ *  planCoherenceRung}'s doc for why this is `unexamined` and not folded into a zero-shard
+ *  `clean` result). A discriminated union rather than `T[] | { reason }` because `Array.isArray`
+ *  does not reliably narrow a `readonly T[] | object` union. */
+export type PlanCoherenceShardListing =
+  | { ok: true; entries: readonly PlanCoherenceShardEntry[] }
+  | { ok: false; reason: string };
+
+export type PlanCoherenceReport =
+  | { kind: "unexamined"; reason: string }
+  | { kind: "clean"; shardsExamined: number; monolithRecordsExamined: number }
+  | {
+      kind: "findings";
+      findings: PlanCoherenceFinding[];
+      shardsExamined: number;
+      monolithRecordsExamined: number;
+    };
+
+/**
+ * THE RUNG (W1-T2642 design, mirroring W1-T410's shape). Re-derives, on every retro cycle, the
+ * question "does plan/tasks.yaml and plan/tasks.d/*.yaml disagree about which tasks EXIST" that
+ * NET STATE has carried as unmeasured prose for fourteen cycles — see this task's rationale for
+ * the full "harvest (a)" history. Calls {@link scanPlanCoherence} (plan-coherence.ts, this
+ * rung's ONLY consumer) with the monolith blob and every shard entry the caller read off disk.
+ *
+ * `shards` carries `{ ok: false, reason }` exactly when the caller could not
+ * LIST `plan/tasks.d/` at all (a permissions error, say — NOT the back-compat "directory does
+ * not exist yet" case {@link "./plan.js".loadPlan}'s own `listShardFiles` tolerates by reading
+ * as an empty listing, which this rung also reads as zero shards examined, not unexamined) —
+ * `unexamined`, never a silent `clean` render over a scan that never actually ran (P48: never a
+ * bare zero indistinguishable from a check that did not run).
+ */
+export function planCoherenceRung(
+  monolith: { path: string; text: string },
+  shards: PlanCoherenceShardListing,
+): PlanCoherenceReport {
+  if (!shards.ok) {
+    return { kind: "unexamined", reason: `plan/tasks.d/ could not be listed: ${shards.reason}` };
+  }
+  const scan = scanPlanCoherence(monolith, shards.entries);
+  const counts = { shardsExamined: scan.shardsExamined, monolithRecordsExamined: scan.monolithRecordsExamined };
+  if (scan.findings.length === 0) return { kind: "clean", ...counts };
+  return { kind: "findings", findings: scan.findings, ...counts };
+}
+
+/** One {@link PlanCoherenceFinding} rendered as a single markdown bullet — one clause per
+ *  finding kind, naming both disagreeing values and the path(s) involved. */
+function renderPlanCoherenceFinding(f: PlanCoherenceFinding): string {
+  switch (f.kind) {
+    case "filename-id-mismatch":
+      return `- ${f.path}: filename id "${f.filenameId}" disagrees with the record id inside it, "${f.recordId}"`;
+    case "filing-count":
+      return `- ${f.path}: holds ${f.recordCount} task record(s) (${f.recordIds.join(", ") || "none"}), expected exactly 1`;
+    case "unparseable-path":
+      return `- ${f.path}: does not match the plan/tasks.d/<id>-<slug>.yaml convention shardSlugFromPath expects — invisible to the duplicate-title corpus and every git log --grep recipe`;
+    case "cross-file-duplicate":
+      return `- ${f.id}: held by BOTH ${f.firstPath} and ${f.secondPath}`;
+  }
+}
+
+/** Render {@link planCoherenceRung}'s report as a retro-report section — see that function's
+ *  doc for the three states this renders distinctly. NEVER A BARE ZERO (P48): a clean corpus
+ *  states the counts it examined, so a check that did not run is distinguishable from one that
+ *  passed. */
+export function renderPlanCoherence(report: PlanCoherenceReport): string {
+  const header = "## Plan-coherence rung — filename id vs. record id, one-task-per-file (W1-T2642)";
+  if (report.kind === "unexamined") {
+    return `${header}\n\nUNEXAMINED — ${report.reason}. Treat as a scan failure, never as a clean result.`;
+  }
+  const scanned = `${report.shardsExamined} shard(s) and ${report.monolithRecordsExamined} monolith record(s) examined`;
+  if (report.kind === "clean") {
+    return `${header}\n\nNo disagreements: ${scanned}, zero filename/record-id or one-task-per-file disagreements.`;
+  }
+  return [
+    header,
+    "",
+    `${report.findings.length} disagreement(s) found (${scanned}):`,
+    "",
+    ...report.findings.map(renderPlanCoherenceFinding),
+  ].join("\n");
+}
+
+/**
+ * Convenience composition — {@link renderPlanCoherence}(`planCoherenceRung`(…)) — for a caller
+ * that only wants the rendered section. A REAL CALL SITE for {@link planCoherenceRung}, not
+ * merely its own declaration: this is what keeps the fourteen-cycle question answered by
+ * measurement EVERY cycle rather than re-asked in prose, and this module a signal something
+ * actually reads rather than one read by nothing (the W1-T2473/W1-T2477 defect class this
+ * task's rationale names).
+ */
+export function planCoherenceSectionFor(
+  monolith: { path: string; text: string },
+  shards: PlanCoherenceShardListing,
+): string {
+  return renderPlanCoherence(planCoherenceRung(monolith, shards));
 }
