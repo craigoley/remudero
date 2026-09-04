@@ -204,6 +204,27 @@ test("reapStaleWorktrees: an UNPARSEABLE `.git` (readable, but no gitdir: pointe
   }
 });
 
+test("reapStaleWorktrees: a failed best-effort parent prune does not turn an already-removed tree into removal-failed", () => {
+  const universe = realpathSync(mkdtempSync(join(tmpdir(), "rmd-reap-prune-failure-")));
+  const root = join(universe, "worktrees");
+  const parent = join(universe, "not-a-git-repo");
+  const name = "run-W1-T9007-unregistered";
+  const entryPath = join(root, name);
+  try {
+    mkdirSync(entryPath, { recursive: true });
+    mkdirSync(parent, { recursive: true });
+    writeFileSync(join(entryPath, ".git"), `gitdir: ${parent}/.git/worktrees/${name}\n`);
+
+    const summary = reapStaleWorktrees(root, { now: () => 4_000_000_000_000, isPidAlive: () => false });
+
+    assert.ok(!existsSync(entryPath), "the unregistered worktree debris was removed before the prune failed");
+    assert.deepEqual(summary.reaped, [name], "a failed cleanup behind a completed removal is still a successful reap");
+    assert.deepEqual(summary.keptReasons, [], "the swallowed prune failure never invents removal-failed");
+  } finally {
+    rmSync(universe, { recursive: true, force: true });
+  }
+});
+
 // ── planWorktreeRemoval directly: the five cases, without a full reaper pass ───────────────
 
 test("planWorktreeRemoval: a registered linked worktree plans `git-remove` against its OWN parent", () => {
