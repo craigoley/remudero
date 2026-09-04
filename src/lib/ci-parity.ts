@@ -1078,6 +1078,15 @@ export function runCiParity(repoRoot: string, deps: CiParityDeps = {}): CiParity
 // time for `same-class`, or a demonstrated PR block for `required-core`, e.g. `claims`, whose
 // assertions shell out per-claim and cost seconds, not the sub-second `boundMs` governs) and nothing
 // here changes how any of the seven runs or is judged.
+//
+// W1-T2643 — THE PREDICATE ABOVE IS NOW ENFORCED, NOT JUST STATED. `CENSUS_POPULATION` below is
+// the enumerated set every test file the recognizer (`discoverSrcFilteredLsFilesCallers`, shared
+// with W1-T2523's `censusSuiteMembershipFor` — one recognizer, never a second) finds census-shaped
+// gets exactly one entry in, carrying a verdict: ADMITTED, REFUSED for cost (a re-measured number),
+// or REFUSED for failing (a)/(b)/(c) outright (named). The four `boundMs` entries below are no
+// longer hand-written here — they are `CENSUS_ADMITTED_MEMBERS`'s own projection, so a hand-added
+// census step with no population member, or an admitted population member missing its step, is
+// impossible rather than merely discouraged.
 
 /** THE PRIMARY CONTROL (W1-T2478): the measured wall-clock ceiling every census entry's own
  *  `npm run --silent <script>` invocation is timed against in {@link runPreflightFast}. 2000ms
@@ -1135,6 +1144,341 @@ export function censusRunawayThresholdMs(durationsMs: readonly number[]): number
   return reference * FAST_GATE_CENSUS_RUNAWAY_MULTIPLE;
 }
 
+// ── W1-T2643: THE CENSUS POPULATION IS AN ENUMERATED SET WITH A VERDICT, NEVER A COMMENT ───────
+//
+// THE GAP THIS CLOSES. Before this task the four `boundMs` entries below were the ONLY artifact
+// recording census-class admission, and the one refusal anyone had actually made —
+// `test/enforcement-data-carveout.test.ts`, named in test/fast-gate-admits-the-census-class.test.ts's
+// own header as "measured ~2.1s alone... deliberately NOT added" — existed ONLY as prose in that
+// comment, never as a structured artifact a later reader (or a test) can check. A refusal stated
+// in prose and evidenced nowhere is indistinguishable from a suite nobody remembered.
+//
+// `CENSUS_POPULATION` is that artifact. Every file `discoverSrcFilteredLsFilesCallers` (below —
+// the SAME recognizer W1-T2523 already shipped as part of `censusSuiteMembershipFor`, reused
+// rather than re-derived: "ONE CENSUS PREDICATE, NEVER TWO") finds — every `test/*.test.ts` file
+// mentioning `ls-files` whose own text also filters on `src/` — gets exactly one entry, carrying
+// a verdict:
+//   ADMITTED         — present in FAST_GATE_STEPS with boundMs, via the projection below (never
+//                       hand-added there directly)
+//   REFUSED, cost     — satisfies (a)-(c) but its own solo `node --test <file>` run measured over
+//                       FAST_GATE_CENSUS_BOUND_MS; the reason is the NUMBER, dated and reproducible
+//   REFUSED, predicate — does not actually satisfy the predicate; names WHICH of (a)/(b)/(c) fails
+//                       and why, so "considered and excluded" is never confused with "never looked at"
+//
+// RE-MEASURED, NOT COPIED (design mandate — distrust the prompt over the installed version,
+// standing rule 7). Every `measuredMs` below was run at this task's own HEAD, 2026-09-04:
+// `node --test --import tsx --import ./test/setup/tmp-hygiene.ts <file>`, alone, three times, the
+// median kept. None of W1-T2478's filing-time numbers, nor this task's OWN filing rationale's
+// numbers, are reused — re-run the same command against the same file to re-derive or refute any
+// entry below.
+//
+// ONLY ONE REFUSED-FOR-COST MEMBER WAS FOUND, AND THAT IS REPORTED RATHER THAN PADDED TO TWO.
+// This task's filing rationale — drafted from W1-T2478's PRE-implementation filing text, by its
+// own admission ("HONEST LIMITS OF THIS FILING") — describes a "sixth" suite at 6371ms distinct
+// from a "fifth" at ~2.1s. W1-T2478's own SHIPPED artifact (the test header above, and PR #3323's
+// own body) names only ONE excluded suite. This task's own re-application of the predicate against
+// every recognizer candidate in the CURRENT tree (all 23, enumerated below) finds no second suite
+// satisfying (a)-(c) — the closest calls, `test/mkdtemp-callsite-check.test.ts` and
+// `test/state-citation-check.test.ts`, each delegate their real per-file walk to an external
+// script and assert only its aggregate "clean" exit from the `.test.ts` file itself, the same
+// shape `claims`/`jscpd` already have as ordinary `same-class` entries, never the census's own
+// in-file per-item loop. Re-measured here, `enforcement-data-carveout.test.ts` alone costs
+// 3686-3769ms across three runs (this sandbox is slower than either prior measurement) —
+// consistent with ONE suite whose cost is a property of the tree AND the machine it runs on, not
+// with two distinct suites. The DRIFT GUARD below (`censusPopulationDrift`) is what makes this
+// claim checkable rather than asserted: if a real second census-shaped suite exists, or one is
+// added later, the recognizer surfaces it and it is UNKNOWN until this population is updated —
+// never silently absorbed into "no change needed".
+
+/** Which clause of the census predicate (WHY ONLY THESE FOUR, above) a candidate fails, for a
+ *  member REFUSED on the predicate itself rather than on cost. */
+export type CensusPredicateClause = "a" | "b" | "c";
+
+export type CensusVerdict =
+  | { readonly status: "ADMITTED"; readonly measuredMs: number }
+  | {
+      readonly status: "REFUSED";
+      readonly reason: { readonly kind: "cost"; readonly measuredMs: number; readonly detail: string };
+    }
+  | {
+      readonly status: "REFUSED";
+      readonly reason: { readonly kind: "predicate"; readonly clause: CensusPredicateClause; readonly detail: string };
+    };
+
+/** One test file the census recognizer finds, carrying its verdict. `job`/`script`/`walks` are
+ *  only meaningful for an ADMITTED member — they are what {@link FAST_GATE_STEPS}'s census
+ *  section, and {@link KNOWN_CENSUS_SUITES}, are DERIVED from, never hand-duplicated onto. */
+export interface CensusPopulationMember {
+  readonly testFile: string;
+  readonly job: string;
+  readonly script?: string;
+  readonly walks?: readonly string[];
+  readonly reason: string;
+  readonly verdict: CensusVerdict;
+}
+
+/** Job-name slug for a REFUSED member — never used for an ADMITTED entry, whose `job` names the
+ *  real FAST_GATE_STEPS step it projects into. */
+function censusJobSlug(testFile: string): string {
+  return `${testFile.replace(/^test\//, "").replace(/\.test\.ts$/, "")}-census`;
+}
+
+/** A population member refused for failing the predicate itself, never for cost — `clause` names
+ *  WHICH of (a)/(b)/(c) it fails first. */
+function refusedForPredicate(testFile: string, clause: CensusPredicateClause, detail: string): CensusPopulationMember {
+  return {
+    testFile,
+    job: censusJobSlug(testFile),
+    reason: `fails predicate clause (${clause}): ${detail}`,
+    verdict: { status: "REFUSED", reason: { kind: "predicate", clause, detail } },
+  };
+}
+
+export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
+  {
+    testFile: "test/bound-kind-declared.test.ts",
+    job: "bound-kind-census",
+    script: "census:bound-kind",
+    walks: ["src/"],
+    reason:
+      "same-class (W1-T2478) — a census suite: walks tracked src/*.ts, asserts every bound-shaped constant declares BACKSTOP or " +
+      "PRIMARY CONTROL against the scripts/bound-kind-baseline.json grandfather list, structurally identical to claims/jscpd/depcruise; " +
+      "measured well under the PRIMARY CONTROL bound below. Blocked #3304 on a single undeclared bound-shaped constant with a clean " +
+      "fast run immediately before it — this is the required-core reason the class exists, restated for this one member (design iv)",
+    verdict: { status: "ADMITTED", measuredMs: 470 },
+  },
+  {
+    testFile: "test/catch-erasure-ratchet.test.ts",
+    job: "catch-erasure-census",
+    script: "census:catch-erasure",
+    walks: ["src/"],
+    reason:
+      "same-class (W1-T2478) — a census suite: walks tracked src/*.ts, asserts every bare-erasing catch site stays within its " +
+      "per-file baseline count, structurally identical to claims/jscpd/depcruise; measured well under the bound below",
+    verdict: { status: "ADMITTED", measuredMs: 803 },
+  },
+  {
+    testFile: "test/negative-reachability-ratchet.test.ts",
+    job: "negative-reachability-census",
+    script: "census:negative-reachability",
+    walks: ["src/", "test/"],
+    reason:
+      "same-class (W1-T2478) — a census suite: walks tracked src/**/*.ts and test/**/*.ts, asserts every _RE/DEFAULT_FIX_CLASSES " +
+      "surface's unhealthy arm is exercised, against its own embedded baseline tables; measured well under the bound below",
+    verdict: { status: "ADMITTED", measuredMs: 1201 },
+  },
+  {
+    testFile: "test/no-shallowing-of-the-canonical-checkout.test.ts",
+    job: "no-shallowing-census",
+    script: "census:no-shallowing",
+    walks: ["src/", "scripts/", "deploy/", ".github/workflows/"],
+    reason:
+      "same-class (W1-T2478) — a census suite: walks tracked src/, scripts/, deploy/ and .github/workflows/, asserts no unexempted " +
+      "depth-limiting git flag against its own EXEMPTIONS table; measured well under the bound below",
+    verdict: { status: "ADMITTED", measuredMs: 526 },
+  },
+  {
+    testFile: "test/enforcement-data-carveout.test.ts",
+    job: "enforcement-data-carveout-census",
+    walks: ["src/", "scripts/"],
+    reason:
+      "satisfies (a)-(c): deriveEnforcementDataCandidates() walks the whole tracked tree via git ls-files, filters to src/ and " +
+      "scripts/ readers to build a text corpus, and the suite's own completeness test asserts findUnexplainedGaps() is empty against " +
+      "ENFORCEMENT_DATA/ENFORCEMENT_DATA_EXCLUSIONS, a real baseline/exemption table — the same suite W1-T2478's own shipped test " +
+      "named as its fifth ('measured ~2.1s alone... deliberately NOT added'); refused by cost, never by mechanism",
+    verdict: {
+      status: "REFUSED",
+      reason: {
+        kind: "cost",
+        measuredMs: 3755,
+        detail:
+          "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/enforcement-data-carveout.test.ts, alone, " +
+          "measured 2026-09-04: 3686/3755/3769ms across three runs (median kept) — over FAST_GATE_CENSUS_BOUND_MS; re-run the " +
+          "same command to re-derive or refute this number",
+      },
+    },
+  },
+  refusedForPredicate(
+    "test/a-count-assertion-names-its-members.test.ts",
+    "a",
+    "walks git ls-files scoped to test/*.test.ts only — never src/ — so it is not a src-population walk; its own header states " +
+      "it carries no baseline/grandfather table either",
+  ),
+  refusedForPredicate(
+    "test/a-landed-feedback-file-remains-in-the-boot-checkout.test.ts",
+    "a",
+    "its sole ls-files call is `--error-unmatch <one file>` against a synthetic fixture repo — a single tracked-path check, not a " +
+      "population walk",
+  ),
+  refusedForPredicate(
+    "test/a-suite-is-not-a-second-concern.test.ts",
+    "b",
+    "walks `git ls-files src/*.ts src/lib/*.ts` for real, but asserts an aggregate percentage threshold (pct > 60) rather than a " +
+      "property of every file walked, and carries no baseline/exemption table",
+  ),
+  refusedForPredicate(
+    "test/acceptance-block-diagnostics.test.ts",
+    "b",
+    "`git ls-files` (whole repo, includes src/) is used only to copy the tracked tree into a mutation-testing shadow checkout — " +
+      "no per-file assertion is made anywhere in the suite",
+  ),
+  refusedForPredicate(
+    "test/checkout-writers.test.ts",
+    "a",
+    "`git ls-files -- ee-open.json` checks exactly one named path is untracked; not a population walk",
+  ),
+  refusedForPredicate(
+    "test/config-fixture-path-parity.test.ts",
+    "a",
+    "`git ls-files test` is scoped to test/ only, never src/",
+  ),
+  refusedForPredicate(
+    "test/coverage-session-blanking.test.ts",
+    "a",
+    "listTrackedTestFiles shells `git ls-files -- test` — test/ only, never src/",
+  ),
+  refusedForPredicate(
+    "test/host-parity-azure-pole.test.ts",
+    "a",
+    "trackedFiles is only ever called with deploy/*.sh and test/*.test.ts patterns — never src/",
+  ),
+  refusedForPredicate(
+    "test/instrument-surface-completeness.test.ts",
+    "b",
+    "`git(['ls-files'])` enumerates the whole tracked tree (includes src/), but isProductOrTestPath explicitly EXCLUDES src/, " +
+      "apps/, packages/ and test/ paths from the derived candidate set the suite asserts about — the walked-and-asserted " +
+      "population is deliberately everything BUT src/",
+  ),
+  refusedForPredicate(
+    "test/ledger-read-intent.test.ts",
+    "a",
+    "`git ls-files src/lib/status.ts` checks exactly one file is tracked, and a dedicated test pins the enforced corpus stays " +
+      "exactly that one file — not a population walk",
+  ),
+  refusedForPredicate(
+    "test/licence-boundary.test.ts",
+    "a",
+    "`git(['ls-files'])` output is filtered to root-only files (`!f.includes('/')`), which excludes src/ entirely by construction",
+  ),
+  refusedForPredicate(
+    "test/mkdtemp-callsite-check.test.ts",
+    "b",
+    "the underlying scripts/mkdtemp-callsite-check.mjs genuinely walks src/scripts/test via git ls-files with its own baseline " +
+      "(hooks/mkdtemp-allowlist.txt), but the .test.ts file's OWN body never loops+asserts over that real population itself — most " +
+      "of its tests exercise the pure classifier against synthetic fixtures, and its one real-repo check asserts a single " +
+      "aggregate subprocess 'clean' match, the same same-class shape claims/jscpd already have, never the census's own in-file " +
+      "per-item loop",
+  ),
+  refusedForPredicate(
+    "test/moving-base-changed-files.test.ts",
+    "a",
+    "\"ls-files\" appears only in a comment; the suite tests git-diff-based changed-file derivation against synthetic fixture " +
+      "repos and never shells ls-files itself",
+  ),
+  refusedForPredicate(
+    "test/no-raw-nul.test.ts",
+    "c",
+    "`git ls-files -z` (whole repo, includes src/) drives a real per-file loop asserting zero raw-NUL bytes, but the suite's own " +
+      "header explicitly rejects an allowlist by design (\"WHY EXTENSION FILTERING, NOT AN ALLOWLIST\") — no baseline/exemption " +
+      "table exists, so a single new violation anywhere reddens it rather than only a NEW one",
+  ),
+  refusedForPredicate(
+    "test/nothing-tells-you-which-census-suites-your-change-joins.test.ts",
+    "a",
+    "a meta-test of censusSuiteMembership(For) itself — its one 'git grep -l ls-files' shape is answered entirely by an injected " +
+      "mock PreflightSpawn in every test; the real command is never shelled from this file",
+  ),
+  refusedForPredicate(
+    "test/operator-gated-default-reachability.test.ts",
+    "a",
+    "`execFileSync('git', ['ls-files', 'test'])` is scoped to test/ only, never src/",
+  ),
+  refusedForPredicate(
+    "test/state-citation-check.test.ts",
+    "b",
+    "the underlying scripts/state-citation-check.mjs walks git ls-files from the repo root (includes src/) with a real baseline " +
+      "(scripts/state-citation-baseline.json), but the .test.ts file's only real-repo assertion is an aggregate subprocess " +
+      "exit-status-0 check, never a per-file loop/assert inside the test file itself",
+  ),
+  refusedForPredicate(
+    "test/tracked-source-write-guard.test.ts",
+    "a",
+    "listTrackedTestFiles shells `git ls-files -- test` — test/ only; src/ is the PROTECTED target this suite guards, not the " +
+      "population it walks and asserts over",
+  ),
+];
+
+export const CENSUS_ADMITTED_MEMBERS: readonly (CensusPopulationMember & {
+  readonly script: string;
+  readonly verdict: { readonly status: "ADMITTED"; readonly measuredMs: number };
+})[] = CENSUS_POPULATION.filter(
+  (m): m is CensusPopulationMember & { script: string; verdict: { status: "ADMITTED"; measuredMs: number } } =>
+    m.verdict.status === "ADMITTED",
+);
+
+/** THE PROJECTION (design: "the step table becomes a projection, not a parallel list"). Every
+ *  {@link FAST_GATE_STEPS} census entry below is computed FROM {@link CENSUS_ADMITTED_MEMBERS},
+ *  never hand-added beside it — a population member marked ADMITTED with no step, or a step with
+ *  no admitted population member, cannot occur because there is only ever this one array to read
+ *  either from. */
+const CENSUS_FAST_GATE_STEPS: { job: string; script: string; reason: string; boundMs: number }[] = CENSUS_ADMITTED_MEMBERS.map(
+  (m) => ({ job: m.job, script: m.script, reason: m.reason, boundMs: FAST_GATE_CENSUS_BOUND_MS }),
+);
+
+/** THE RECOGNIZER (W1-T2523's own `censusSuiteMembershipFor`, extracted so this task's drift
+ *  guard reuses it rather than re-deriving a second copy of the same heuristic — "ONE CENSUS
+ *  PREDICATE, NEVER TWO"). Every `test/*.test.ts` file mentioning `ls-files` whose own text also
+ *  filters on `src/` is a census-shaped candidate; a hit this process cannot read back off disk
+ *  is KEPT rather than ruled out, the same "unknown stays visible" posture the caller above this
+ *  drives takes. */
+function discoverSrcFilteredLsFilesCallers(
+  repoRoot: string,
+  spawn: PreflightSpawn,
+  readFile: (path: string) => string,
+): string[] {
+  const res = spawn("git", ["grep", "-l", "ls-files", "--", "test/*.test.ts"], { cwd: repoRoot });
+  const callers = (res.stdout ?? "").split("\n").map((s) => s.trim()).filter(Boolean);
+  return callers.filter((f) => {
+    try {
+      return /src\//.test(readFile(f));
+    } catch {
+      // unreadable: kept in, not ruled out — see censusSuiteMembershipFor's own doc comment
+      return true;
+    }
+  });
+}
+
+export interface CensusPopulationDriftReport {
+  /** A census-shaped file the recognizer found in the tree with no {@link CENSUS_POPULATION}
+   *  entry — the drift this whole task exists to catch. Never silently dropped: a caller that
+   *  wants a pass/fail reads `unknown.length === 0`. */
+  readonly unknown: readonly string[];
+  /** A {@link CENSUS_POPULATION} entry the recognizer no longer discovers — e.g. renamed,
+   *  deleted, or edited to no longer walk src/. Corrected by editing {@link CENSUS_POPULATION},
+   *  never left silently stale. */
+  readonly stale: readonly string[];
+}
+
+/**
+ * THE DRIFT GUARD — "a census of the census" (design). Re-runs the SAME recognizer
+ * {@link discoverSrcFilteredLsFilesCallers} against the real tree and diffs it against
+ * {@link CENSUS_POPULATION}'s own `testFile` set. Approximate by construction, and says so: a
+ * census-shaped suite reachable by a means this recognizer does not model (no literal `ls-files`
+ * text, or a `src/` filter this recognizer's own text-match cannot see) is invisible to it,
+ * exactly the honesty limit {@link censusSuiteMembershipFor}'s own doc comment already records.
+ */
+export function censusPopulationDrift(
+  repoRoot: string,
+  spawn: PreflightSpawn,
+  readFile: (path: string) => string = (path) => readFileSync(join(repoRoot, path), "utf8"),
+): CensusPopulationDriftReport {
+  const discovered = new Set(discoverSrcFilteredLsFilesCallers(repoRoot, spawn, readFile));
+  const known = new Set(CENSUS_POPULATION.map((m) => m.testFile));
+  const unknown = [...discovered].filter((f) => !known.has(f)).sort();
+  const stale = [...known].filter((f) => !discovered.has(f)).sort();
+  return { unknown, stale };
+}
+
 export const FAST_GATE_STEPS: { job: string; script: string; reason: string; boundMs?: number }[] = [
   {
     job: "cli-reference",
@@ -1180,40 +1524,10 @@ export const FAST_GATE_STEPS: { job: string; script: string; reason: string; bou
       "Positive growth remains PASS because line count is a review-risk signal rather than a correctness verdict; only an " +
       "unreadable base or failed measurement refuses the step. The historical shared baseline is not read or written",
   },
-  {
-    job: "bound-kind-census",
-    script: "census:bound-kind",
-    reason:
-      "same-class (W1-T2478) — a census suite: walks tracked src/*.ts, asserts every bound-shaped constant declares BACKSTOP or " +
-      "PRIMARY CONTROL against the scripts/bound-kind-baseline.json grandfather list, structurally identical to claims/jscpd/depcruise; " +
-      "measured well under the PRIMARY CONTROL bound below. Blocked #3304 on a single undeclared bound-shaped constant with a clean " +
-      "fast run immediately before it — this is the required-core reason the class exists, restated for this one member (design iv)",
-    boundMs: FAST_GATE_CENSUS_BOUND_MS,
-  },
-  {
-    job: "catch-erasure-census",
-    script: "census:catch-erasure",
-    reason:
-      "same-class (W1-T2478) — a census suite: walks tracked src/*.ts, asserts every bare-erasing catch site stays within its " +
-      "per-file baseline count, structurally identical to claims/jscpd/depcruise; measured well under the bound below",
-    boundMs: FAST_GATE_CENSUS_BOUND_MS,
-  },
-  {
-    job: "negative-reachability-census",
-    script: "census:negative-reachability",
-    reason:
-      "same-class (W1-T2478) — a census suite: walks tracked src/**/*.ts and test/**/*.ts, asserts every _RE/DEFAULT_FIX_CLASSES " +
-      "surface's unhealthy arm is exercised, against its own embedded baseline tables; measured well under the bound below",
-    boundMs: FAST_GATE_CENSUS_BOUND_MS,
-  },
-  {
-    job: "no-shallowing-census",
-    script: "census:no-shallowing",
-    reason:
-      "same-class (W1-T2478) — a census suite: walks tracked src/, scripts/, deploy/ and .github/workflows/, asserts no unexempted " +
-      "depth-limiting git flag against its own EXEMPTIONS table; measured well under the bound below",
-    boundMs: FAST_GATE_CENSUS_BOUND_MS,
-  },
+  // W1-T2643: the four census entries are no longer hand-written here — they are
+  // CENSUS_ADMITTED_MEMBERS's own projection (see CENSUS_POPULATION above). Editing a census
+  // suite's admission means editing CENSUS_POPULATION, never this array directly.
+  ...CENSUS_FAST_GATE_STEPS,
   {
     job: "worker-branch-shape",
     script: "worker-branch-shape:check",
@@ -1244,39 +1558,28 @@ export const FAST_GATE_STEPS: { job: string; script: string; reason: string; bou
 // silently dropped, or it rebuilds the very blind spot this task exists to close.
 //
 // THE DERIVATION IS AN APPROXIMATION, STATED AS ONE (same posture W1-T2317's own text-proximity
-// ratchet takes about itself). `KNOWN_CENSUS_SUITES` below hand-carries the four suites
-// `FAST_GATE_STEPS`' own census entries already name, each paired with the tracked-tree path
-// prefixes its own `reason` text above already describes as what it walks — read off that text,
-// not re-derived from source, so nothing here can silently diverge from the census class this
-// file already maintains. Beyond that fixed list, `censusSuiteMembershipFor` RE-DERIVES rather
-// than trusts: it runs the same `git grep -l 'ls-files' -- 'test/*.test.ts'` shape the task
-// record names, intersected with "the hit's own text also filters on `src/`" — an approximation
-// of "walks a src population", not a proof of it — and anything that shape finds beyond the four
-// known suites is named in `unknownCoverage` rather than swallowed.
+// ratchet takes about itself). `KNOWN_CENSUS_SUITES` below is now DERIVED from
+// `CENSUS_ADMITTED_MEMBERS` (W1-T2643) rather than hand-carrying its own copy of the same four
+// suites — the sequencing fence W1-T2643's own design records for this exact file: "whichever
+// lands second reads this population rather than growing a second enumeration". Beyond that
+// derived set, `censusSuiteMembershipFor` RE-DERIVES rather than trusts: it runs
+// `discoverSrcFilteredLsFilesCallers` (shared with `censusPopulationDrift` above — the SAME
+// recognizer, never a second copy of it), and anything that finds beyond the known suites is
+// named in `unknownCoverage` rather than swallowed.
 
 /** One census suite this derivation recognises well enough to say WHICH changed paths enter it.
- *  `walks` is the set of tracked-tree path prefixes its own `git ls-files` sweep is scoped to,
- *  taken verbatim from its `FAST_GATE_STEPS` entry's own `reason` above. */
+ *  `walks` is the set of tracked-tree path prefixes its own `git ls-files` sweep is scoped to. */
 interface KnownCensusSuite {
   readonly job: string;
   readonly testFile: string;
   readonly walks: readonly string[];
 }
 
-export const KNOWN_CENSUS_SUITES: readonly KnownCensusSuite[] = [
-  { job: "bound-kind-census", testFile: "test/bound-kind-declared.test.ts", walks: ["src/"] },
-  { job: "catch-erasure-census", testFile: "test/catch-erasure-ratchet.test.ts", walks: ["src/"] },
-  {
-    job: "negative-reachability-census",
-    testFile: "test/negative-reachability-ratchet.test.ts",
-    walks: ["src/", "test/"],
-  },
-  {
-    job: "no-shallowing-census",
-    testFile: "test/no-shallowing-of-the-canonical-checkout.test.ts",
-    walks: ["src/", "scripts/", "deploy/", ".github/workflows/"],
-  },
-];
+export const KNOWN_CENSUS_SUITES: readonly KnownCensusSuite[] = CENSUS_ADMITTED_MEMBERS.map((m) => ({
+  job: m.job,
+  testFile: m.testFile,
+  walks: m.walks ?? [],
+}));
 
 /** One changed path paired with the {@link KNOWN_CENSUS_SUITES} job names it enters — `suites`
  *  is `[]`, an explicit empty set, when the path joins none; never omitted, never a guess. */
@@ -1332,16 +1635,7 @@ export function censusSuiteMembershipFor(
   spawn: PreflightSpawn,
   readFile: (path: string) => string = (path) => readFileSync(join(repoRoot, path), "utf8"),
 ): CensusMembershipReport {
-  const res = spawn("git", ["grep", "-l", "ls-files", "--", "test/*.test.ts"], { cwd: repoRoot });
-  const callers = (res.stdout ?? "").split("\n").map((s) => s.trim()).filter(Boolean);
-  const srcFilteredCallers = callers.filter((f) => {
-    try {
-      return /src\//.test(readFile(f));
-    } catch {
-      // unreadable: kept in, not ruled out — see this function's own doc comment above
-      return true;
-    }
-  });
+  const srcFilteredCallers = discoverSrcFilteredLsFilesCallers(repoRoot, spawn, readFile);
   return censusSuiteMembership(changedPaths, srcFilteredCallers);
 }
 
